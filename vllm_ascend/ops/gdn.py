@@ -40,7 +40,7 @@ from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.mamba.causal_conv1d import causal_conv1d_fn
-from vllm_ascend.utils import vllm_version_is, weak_ref_tensors
+from vllm_ascend.utils import weak_ref_tensors
 
 
 def to_int64_tuple(tensor: torch.Tensor) -> tuple[int, ...]:
@@ -221,6 +221,13 @@ def update_conv1d_graph_params(
                         q_per_seq=q_per_seq,
                         with_num_accepted=True,
                     )
+                elif branch == "spec" and meta.spec_sequence_masks is None:
+                    # The captured graph may contain a spec conv1d task even
+                    # when this DP rank has no runtime spec sequence. Leaving
+                    # cache_indices empty makes the kernel use default
+                    # batch-indexed state writes, which can corrupt conv_state.
+                    # Mark every input row as -1 so the task is a state no-op.
+                    new_cache_indices = (-1,) * cap_x_dim0
                 elif branch == "non_spec_decode":
                     non_sdq_host, non_sd_cidx_host = get_causal_conv1d_update_host_args(meta)
                     new_query_start_loc, new_cache_indices, _ = _pad_conv1d_host_args_to_capture(
@@ -304,10 +311,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             ba, _ = self.in_proj_ba(hidden_states)
             z, _ = self.in_proj_z(hidden_states)
             z = z.reshape(z.size(0), -1, self.head_v_dim)
-            if vllm_version_is("0.22.1"):
-                b, a = ba.chunk(2, dim=-1)
-            else:
-                b, a = self._split_ba_for_tp(ba)
+            b, a = self._split_ba_for_tp(ba)
             b = b.contiguous()
             a = a.contiguous()
         else:
@@ -319,10 +323,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)
                 z = z.reshape(z.size(0), -1, self.head_v_dim)
                 ba, _ = self.in_proj_ba(hidden_states)
-                if vllm_version_is("0.22.1"):
-                    b, a = ba.chunk(2, dim=-1)
-                else:
-                    b, a = self._split_ba_for_tp(ba)
+                b, a = self._split_ba_for_tp(ba)
 
                 b = b.contiguous()
                 a = a.contiguous()
@@ -351,24 +352,14 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             device=hidden_states.device,
         )
 
-        if vllm_version_is("0.22.1"):
-            torch.ops.vllm.qwen_gdn_attention_core(
-                mixed_qkv,
-                b,
-                a,
-                core_attn_out,
-                False,
-                self.prefix,
-            )
-        else:
-            torch.ops.vllm.qwen_gdn_attention_core(
-                mixed_qkv,
-                b,
-                a,
-                core_attn_out,
-                self.prefix,
-                False,
-            )
+        torch.ops.vllm.qwen_gdn_attention_core(
+            mixed_qkv,
+            b,
+            a,
+            core_attn_out,
+            self.prefix,
+            False,
+        )
 
         # ============================================================
         # Part 3: Output Projection

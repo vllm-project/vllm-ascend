@@ -87,7 +87,7 @@ public:
         if ASCEND_IS_AIV {
           CopyIn(hcBaseGm, hcBase0Local, 1, tilingData->hcMult);
           CopyIn(hcBaseGm[tilingData->hcMult], hcBase1Local, 1, tilingData->hcMult);
-          CopyIn(hcBaseGm[tilingData->hcMult * 2], hcBase2Local, tilingData->hcMult, tilingData->hcMult);
+          CopyIn(hcBaseGm[tilingData->hcMult * 2], hcBase2Local, 1, tilingData->hcMult * tilingData->hcMult);
           event_t eventId = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_V));
           SetFlag<HardEvent::MTE2_V>(eventId);
           WaitFlag<HardEvent::MTE2_V>(eventId);
@@ -153,8 +153,7 @@ public:
                 rmsNormLocal = rmsNormBuf.Get<float>();
                 WaitFlag<HardEvent::MTE3_MTE2>(static_cast<event_t>(0));
                 if (GetBlockIdx() % 2 != 0) {
-                    xSplitOffset = (mL1RealSize / 2) * tilingData->hcMult * tilingData->d;
-                    // sinkhorn阶段计算时，偶数Vector核多处理一行，x的split offset和matmul阶段不同
+                    xSplitOffset = CeilDiv(mL1RealSize, 2) * tilingData->hcMult * tilingData->d;
                     xOutSplitOffset = CeilDiv(mL1RealSize, 2) * tilingData->hcMult * tilingData->d;
                     ySplitOffset = CeilDiv(mL1RealSize, 2) * tilingData->d;
                     postSplitOffset = CeilDiv(mL1RealSize, 2) * tilingData->hcMult;
@@ -190,7 +189,10 @@ public:
                     CrossCoreSetFlag<SYNC_MODE4, PIPE_MTE1>(SYNC_AIC_AIV_FLAG + FLAG_ID_MAX);
                 } else {
                     CrossCoreWaitFlag<SYNC_MODE4, PIPE_MTE3>(SYNC_AIC_AIV_FLAG);
-                    int64_t rowFactor = mL1RealSize / 2;
+                    // Even cores take the first half with CeilDiv, and odd cores take the second half.
+                    // This must match the Sinkhorn/output row split; otherwise odd mL1RealSize shifts the
+                    // second half by one row.
+                    int64_t rowFactor = CeilDiv(mL1RealSize, 2);
                     int64_t tailRowFactor = mL1RealSize - rowFactor;
                     int64_t curRowFactor = rowFactor;
                     int64_t mL1SizeAlign = CeilAlign(mL1RealSize, AscendC::BLOCK_CUBE);
@@ -251,8 +253,8 @@ public:
                 tbufPool1.InitBuffer(
                     yQue, 2, tilingData->rowInnerFactor * RoundUp<T>(tilingData->dFactor) * sizeof(T));
                 tbufPool1.InitBuffer(postQue, 2, tilingData->rowInnerFactor * tilingData->hcMultAlign * sizeof(float));
-                tbufPool1.InitBuffer(
-                    combFragQue, 2, tilingData->rowInnerFactor * tilingData->hcMult * tilingData->hcMultAlign * sizeof(float));
+                tbufPool1.InitBuffer(combFragQue, DOUBLE_BUFFER,
+                    tilingData->rowInnerFactor * tilingData->hcMult * tilingData->hcMult * sizeof(float));
 
                 // TBuf
                 tbufPool1.InitBuffer(mixesBuf, tilingData->rowInnerFactor * RoundUp<float>(tilingData->hcMix) * sizeof(float));
@@ -311,14 +313,14 @@ public:
 
                     // combFrag
                     combFragLocal = combFragQue.AllocTensor<float>();
-                    VFProcessCombFragRLessVLUseFourUnfold(
+                    VFProcessCombFragPacked(
                         combFragLocal, mixesLocal[tilingData->hcMult * 2], hcBase2Local, hcScaleGm.GetValue(2), tilingData->hcEps,
-                        tilingData->iterTimes - 1, currentInnerRowFactor, tilingData->hcMult, tilingData->hcMult, tilingData->hcMix);
+                        tilingData->iterTimes - 1, currentInnerRowFactor, tilingData->hcMult, tilingData->hcMix);
 
                     combFragQue.EnQue(combFragLocal);
                     combFragLocal = combFragQue.DeQue<float>();
                     CopyOut(combFragLocal, combFragGm[combFragGmBaseOffset + combFragSplitOffset + roundIdx * tilingData->mL1Size * tilingData->hcMult * tilingData->hcMult + innerRowIdx * tilingData->hcMult * tilingData->hcMult],
-                            currentInnerRowFactor * tilingData->hcMult, tilingData->hcMult);
+                            currentInnerRowFactor, tilingData->hcMult * tilingData->hcMult);
                     combFragQue.FreeTensor(combFragLocal);
                 }
                 SetFlag<HardEvent::MTE3_MTE2>(static_cast<event_t>(0));

@@ -16,6 +16,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+
 from contextlib import contextmanager
 from copy import copy
 from typing import Any, cast

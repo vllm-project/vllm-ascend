@@ -1411,6 +1411,15 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         self.connector_scheduler.set_xfer_handshake_metadata(metadata)
 
+    def set_xfer_handshake_metadata_pp_aware(
+        self, metadata: dict[tuple[int, int], KVConnectorHandshakeMetadata]
+    ) -> None:
+        tp_size = max(tp_rank for (_, tp_rank) in metadata) + 1
+        flat_metadata: dict[int, KVConnectorHandshakeMetadata] = {
+            pp_rank * tp_size + tp_rank: meta for (pp_rank, tp_rank), meta in metadata.items()
+        }
+        self.set_xfer_handshake_metadata(flat_metadata)
+
 
 class MooncakeConnectorScheduler:
     """Implementation of Scheduler side methods"""
@@ -1782,7 +1791,11 @@ class MooncakeConnectorWorker:
         device_index = (self.pp_rank + self.pcp_rank) * self.tp_size + self.tp_rank
         self.handshake_port = self.side_channel_port + device_index
         self.sockets: dict = {}
-        self.engine = global_te.get_transfer_engine(self.side_channel_host, device_name=None)
+        device_name = str(torch.npu.current_device()) if self.pp_size > 1 else None
+        self.engine = global_te.get_transfer_engine(
+            self.side_channel_host,
+            device_name=device_name,
+        )
         self.te_rpc_port = self.engine.get_rpc_port()
 
         # Background thread for sending or receiving KV caches.
