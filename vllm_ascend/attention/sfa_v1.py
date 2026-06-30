@@ -524,6 +524,11 @@ class AscendSFAImpl(MLAAttentionImpl):
             and kv_transfer_config.is_kv_producer
             and not kv_transfer_config.is_kv_consumer
         )
+        self.is_kv_consumer_only = (
+            kv_transfer_config is not None
+            and kv_transfer_config.is_kv_consumer
+            and not kv_transfer_config.is_kv_producer
+        )
 
         # The MLAPO operator fuses the pre-processing steps on Q/K/V in MLA into a single operator
         # NOTE: it imposes a limit on the number of input tokens and conflicts with FlashComm
@@ -708,7 +713,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                         f"{msg} Disable SFA mla_prolog_v3 and packed KV cache for layer "
                         f"{self.layer_name}; fallback to original sparse attention."
                     )
-            elif self.enable_sfa_prolog_v3:
+            elif self.enable_sfa_prolog_v3 and not self.is_kv_producer_only:
                 self._process_weights_for_fused_prolog_v3()
 
         if not self.enable_sfa_prolog_v3 and self.enable_mlapo:
@@ -813,6 +818,24 @@ class AscendSFAImpl(MLAAttentionImpl):
                     dtype=torch.bfloat16,
                     device=self.weight_dq.device,
                 )
+        if self.is_kv_consumer_only:
+            # Decode-only workers only execute Prolog. Drop the native Linear
+            # weights after their Prolog layouts and scales have been copied.
+            dispose_layer(self.fused_qkv_a_proj)
+            dispose_layer(self.q_proj)
+            torch.npu.empty_cache()
+
+    def _should_use_sfa_prolog_v3(self, attn_state: AscendAttentionState) -> bool:
+        return (
+            self.enable_sfa_prolog_v3
+            and not self.is_kv_producer_only
+            and getattr(self, "pcp_size", 1) <= 1
+            and attn_state
+            in {
+                AscendAttentionState.DecodeOnly,
+                AscendAttentionState.SpecDecoding,
+            }
+        )
 
     # Processing the input parameters for MLAPO by reordering and transposing
     # QKV(and part of Q) weight, applying RoPE-related dimension transformations,
@@ -1588,18 +1611,9 @@ class AscendSFAImpl(MLAAttentionImpl):
             AscendAttentionState.SpecDecoding,
         }
 
-        # Decode/Spec metadata can also be synthesized while capturing graphs on
-        # a CP-configured P instance. Its weights and token layout remain CP-sharded.
-        use_sfa_prolog_v3 = (
-            self.enable_sfa_prolog_v3
-            and not self.enable_dsa_cp
-            and getattr(self, "pcp_size", 1) <= 1
-            and attn_metadata.attn_state
-            in {
-                AscendAttentionState.DecodeOnly,
-                AscendAttentionState.SpecDecoding,
-            }
-        )
+        # DSA-CP only applies to Prefill. Decode and speculative decoding use
+        # Prolog even when DSA-CP is enabled for the same mixed worker.
+        use_sfa_prolog_v3 = self._should_use_sfa_prolog_v3(attn_metadata.attn_state)
 
         if use_sfa_prolog_v3:
             hidden_states = self._maybe_all_gather_hidden_states(hidden_states, need_gather_q_kv)

@@ -89,6 +89,17 @@ class TestAscendSFAPrologV3(TestBase):
         impl.dequant_scale_w_dkv_kr = torch.empty(1)
         return impl
 
+    def test_decode_uses_prolog_when_dsa_cp_is_enabled(self):
+        impl = AscendSFAImpl.__new__(AscendSFAImpl)
+        impl.enable_sfa_prolog_v3 = True
+        impl.enable_dsa_cp = True
+        impl.is_kv_producer_only = False
+        impl.pcp_size = 1
+
+        self.assertTrue(impl._should_use_sfa_prolog_v3(AscendAttentionState.DecodeOnly))
+        self.assertTrue(impl._should_use_sfa_prolog_v3(AscendAttentionState.SpecDecoding))
+        self.assertFalse(impl._should_use_sfa_prolog_v3(AscendAttentionState.PrefillNoCache))
+
     def test_prolog_v3_uses_unquantized_kv_cache(self):
         impl = self._make_prolog_impl(has_indexer=True)
 
