@@ -26,11 +26,19 @@ if [ "${FREE_GB}" -lt "${MIN_FREE_GB}" ]; then
 fi
 
 # Global config
+# API_PREFIX="https://174e1b821a8446f38998a67186ba766e.apic.cn-southwest-2.huaweicloudapis.com/aurogon_service"
+# MR_THIRD_ID=9270
+# NETWORK_ZONE=gitcode
+# PROJECT_PATH=Ascend/vllm-ascend
+# BIND_ID_API2=11
+# PAGE_CURR=1
+# PAGE_SIZE=100
+
 API_PREFIX="https://174e1b821a8446f38998a67186ba766e.apic.cn-southwest-2.huaweicloudapis.com/aurogon_service"
-MR_THIRD_ID=9270
+MR_THIRD_ID=826
 NETWORK_ZONE=gitcode
-PROJECT_PATH=Ascend/vllm-ascend
-BIND_ID_API2=11
+PROJECT_PATH=Ascend/MindIE-LLM
+BIND_ID=16
 PAGE_CURR=1
 PAGE_SIZE=100
 
