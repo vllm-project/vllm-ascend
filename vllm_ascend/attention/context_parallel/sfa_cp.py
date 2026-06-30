@@ -11,6 +11,7 @@ from vllm.triton_utils import HAS_TRITON
 from vllm_ascend.attention.context_parallel.common_cp import AscendPCPMetadata
 from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, AscendSFAMetadata, AscendSFAMetadataBuilder
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, enabling_mlapo, split_decodes_and_prefills
+from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.triton.rope import rope_forward_triton_siso
 
 M = TypeVar("M", bound=AscendSFAMetadata)
@@ -238,7 +239,7 @@ class AscendSFACPImpl(AscendSFAImpl):
         self, ql_nope, q_pe, kv_cache, topk_indices, attn_metadata, actual_seq_lengths_query, actual_seq_lengths_key
     ):
         kv = kv_cache[0]
-        key_rope = kv_cache[1]
+        key_rope = None if self.enable_sfa_kv_quant_sparse_attention else kv_cache[1]
 
         assert attn_metadata.sfa_cp_metadata is not None
         sfa_cp_metadata = attn_metadata.sfa_cp_metadata
@@ -249,7 +250,11 @@ class AscendSFACPImpl(AscendSFAImpl):
         if num_decode_tokens > 0:
             decode_block_table_src = attn_metadata.block_table[:num_decodes]
             decode_kv, decode_block_num = self.gather_kv_cross_cp(kv, decode_block_table_src)
-            decode_key_rope, _ = self.gather_kv_cross_cp(key_rope, decode_block_table_src)
+            decode_key_rope = (
+                None
+                if key_rope is None
+                else self.gather_kv_cross_cp(key_rope, decode_block_table_src)[0]
+            )
             decode_block_table = self.gather_block_table(
                 decode_block_num, decode_block_table_src, sfa_cp_metadata.block_arange
             )
@@ -271,7 +276,11 @@ class AscendSFACPImpl(AscendSFAImpl):
         prefill_block_table = sfa_cp_metadata.block_table_cp
         assert prefill_valid_block_ids is not None and prefill_block_table is not None
         prefill_kv = self.gather_kv_cross_cp_compact(kv, prefill_valid_block_ids)
-        prefill_key_rope = self.gather_kv_cross_cp_compact(key_rope, prefill_valid_block_ids)
+        prefill_key_rope = (
+            None
+            if key_rope is None
+            else self.gather_kv_cross_cp_compact(key_rope, prefill_valid_block_ids)
+        )
         prefill_ql_nope = ql_nope[num_decode_tokens:]
         prefill_q_pe = q_pe[num_decode_tokens:]
         prefill_topk_indices = topk_indices[num_decode_tokens:]
@@ -354,6 +363,17 @@ class AscendSFACPImpl(AscendSFAImpl):
     def _execute_sparse_flash_attention(
         self, ql_nope, q_pe, kv, key_rope, block_table, topk_indices, actual_seq_lengths_query, actual_seq_lengths_key
     ):
+        if self.enable_sfa_kv_quant_sparse_attention:
+            return DeviceOperator.execute_kv_quant_sparse_flash_attention(
+                self,
+                ql_nope,
+                q_pe,
+                kv,
+                block_table,
+                topk_indices,
+                actual_seq_lengths_query,
+                actual_seq_lengths_key,
+            )
         attn_output, _, _ = torch.ops._C_ascend.npu_sparse_flash_attention(
             query=ql_nope,
             key=kv,
@@ -436,7 +456,7 @@ class AscendSFACPImpl(AscendSFAImpl):
 
         q = q_li
 
-        key = kv_cache[2]
+        key = kv_cache[1] if self.enable_sfa_kv_quant_sparse_attention else kv_cache[2]
         assert attn_metadata.sfa_cp_metadata is not None
         sfa_cp_metadata = attn_metadata.sfa_cp_metadata
         num_decodes = attn_metadata.num_decodes
@@ -555,7 +575,6 @@ class AscendSFACPImpl(AscendSFAImpl):
             return super().exec_kv(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
         kv_c, k_pe = kv_no_split.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())  # type: ignore[misc]
-        assert len(kv_cache) > 1, "the number of kv cache should be greater than 1, namely (nope_cache and rope_cache)"
         assert attn_metadata.sfa_cp_metadata is not None
         kv_c_normed = kv_c_normed.view([kv_c_normed.shape[0], self.num_kv_heads, -1])
         k_pe = k_pe.unsqueeze(1)
@@ -565,9 +584,17 @@ class AscendSFACPImpl(AscendSFAImpl):
         kv_c_k_pe = torch.index_select(kv_c_k_pe, 0, attn_metadata.sfa_cp_metadata.pcp_allgather_restore_idx)
         kv_c_normed, k_pe = kv_c_k_pe.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         slot_mapping = attn_metadata.slot_mapping
-        torch_npu._npu_reshape_and_cache(
-            key=kv_c_normed, value=k_pe, key_cache=kv_cache[0], value_cache=kv_cache[1], slot_indices=slot_mapping
-        )
+        if self.enable_sfa_kv_quant_sparse_attention:
+            packed_kv = self._pack_sfa_qsfa_kv(kv_c_normed, k_pe)
+            self._write_sfa_qsfa_cache(packed_kv, kv_cache, slot_mapping)
+        else:
+            torch_npu._npu_reshape_and_cache(
+                key=kv_c_normed,
+                value=k_pe,
+                key_cache=kv_cache[0],
+                value_cache=kv_cache[1],
+                slot_indices=slot_mapping,
+            )
         return None, None
 
     def _get_full_kv(self, k, attn_metadata: M):
