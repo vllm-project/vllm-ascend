@@ -12,7 +12,8 @@ from torch.nn.parameter import Parameter
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
-from vllm.forward_context import get_forward_context
+from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.linear import (
@@ -51,7 +52,6 @@ from vllm_ascend.attention.msa_m3_triton import (
     minimax_m3_sparse_attn,
     minimax_m3_sparse_attn_decode,
 )
-import vllm_ascend.ops.minimax_m3_sparse  # noqa: F401
 from vllm_ascend.ops.linear import AscendColumnParallelLinear
 from vllm_ascend.ops.linear_op import get_parallel_op
 
@@ -1106,3 +1106,46 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         idx_q = self.index_q_norm(idx_q).reshape(idx_q_shape)
         idx_k = self.index_k_norm(idx_k).reshape(idx_k_shape)
         return idx_q, idx_k
+
+
+def minimax_m3_sparse_forward(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    index_query: torch.Tensor,
+    index_key: torch.Tensor,
+    attn_output: torch.Tensor,
+    layer_name: str,
+) -> None:
+    forward_context: ForwardContext = get_forward_context()
+
+    attn_metadata = forward_context.attn_metadata
+    if not isinstance(attn_metadata, dict):
+        attn_output.zero_()
+        return
+
+    layer = forward_context.no_compile_layers[layer_name]
+    layer._run_sparse_attention(
+        query, key, value, index_query, index_key, attn_output
+    )
+
+
+def minimax_m3_sparse_forward_fake(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    index_query: torch.Tensor,
+    index_key: torch.Tensor,
+    attn_output: torch.Tensor,
+    layer_name: str,
+) -> None:
+    return
+
+
+direct_register_custom_op(
+    op_name="minimax_m3_sparse_forward",
+    op_func=minimax_m3_sparse_forward,
+    mutates_args=["attn_output"],
+    fake_impl=minimax_m3_sparse_forward_fake,
+    dispatch_key="PrivateUse1",
+)
