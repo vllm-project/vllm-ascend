@@ -26,11 +26,11 @@ class DSparkConfidenceHead(nn.Module):
     def __init__(self, vllm_config: VllmConfig, prefix: str) -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config
-        rank = int(getattr(config, "dspark_markov_rank", 256))
+        rank = int(getattr(config, "markov_rank", getattr(config, "dspark_markov_rank", 256)))
         self.proj = ReplicatedLinear(
             config.hidden_size + rank,
             1,
-            bias=False,
+            bias=True,  # released dspark_qwen3_*_block7 ckpt has confidence_head.proj.bias
             params_dtype=torch.float32,
             quant_config=None,
             prefix=f"{prefix}.proj",
@@ -42,7 +42,7 @@ class DSparkConfidenceHead(nn.Module):
         markov_embeds: torch.Tensor,
     ) -> torch.Tensor:
         x = torch.cat([hidden_states, markov_embeds], dim=-1)
-        confidence = _linear_output(self.proj(x.float()))
+        confidence, _ = self.proj(x.float())  # ReplicatedLinear returns (output, bias)
         return confidence.squeeze(-1)
 
 
@@ -50,7 +50,7 @@ class DSparkMarkovHead(nn.Module):
     def __init__(self, vllm_config: VllmConfig, prefix: str) -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config
-        rank = int(getattr(config, "dspark_markov_rank", 256))
+        rank = int(getattr(config, "markov_rank", getattr(config, "dspark_markov_rank", 256)))
         self.markov_w1 = VocabParallelEmbedding(
             config.vocab_size,
             rank,
@@ -74,7 +74,7 @@ class DSparkMarkovHead(nn.Module):
         return logits.view(*embeds.shape[:-1], -1), embeds
 
 
-ori_init = DFlashQwen3Model._init
+ori_init = DFlashQwen3Model.__init__
 
 def new_init(
     self,
@@ -98,4 +98,4 @@ def new_init(
         self.markov_head = DSparkMarkovHead(vllm_config, prefix=f"{prefix}.markov_head")
         self.confidence_head = DSparkConfidenceHead(vllm_config, prefix=f"{prefix}.confidence_head")
 
-DFlashQwen3Model._init = new_init
+DFlashQwen3Model.__init__ = new_init
