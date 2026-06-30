@@ -314,15 +314,12 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
                 k_ctx = k
                 v_ctx = v
 
-            rows = []
-            for token_idx in range(pos_long.numel()):
-                scores = _headwise_scores(q[token_idx], k_ctx) * self.scale
-                sink = self.attn_sink[: self.n_local_heads].float().unsqueeze(-1)
-                scores_max = torch.maximum(scores.max(dim=-1, keepdim=True).values, sink)
-                exp_scores = torch.exp(scores - scores_max)
-                probs = exp_scores / (exp_scores.sum(dim=-1, keepdim=True) + torch.exp(sink - scores_max))
-                rows.append(_headwise_weighted_sum(probs, v_ctx, q.dtype))
-            attn_out = torch.stack(rows, dim=0)
+            scores = torch.einsum("qhd,khd->qhk", q.float(), k_ctx.float()) * self.scale
+            sink = self.attn_sink[: self.n_local_heads].float().view(1, -1, 1)
+            scores_max = torch.maximum(scores.max(dim=-1, keepdim=True).values, sink)
+            exp_scores = torch.exp(scores - scores_max)
+            probs = exp_scores / (exp_scores.sum(dim=-1, keepdim=True) + torch.exp(sink - scores_max))
+            attn_out = torch.einsum("qhk,khd->qhd", probs, v_ctx.float()).to(q.dtype)
 
         attn_out = _apply_dsv4_rope_tail(
             self.rotary_emb,
