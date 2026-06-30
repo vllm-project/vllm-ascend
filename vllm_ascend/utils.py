@@ -913,6 +913,34 @@ def is_drafter_moe_model(vllm_config: VllmConfig):
     return _IS_DRAFTER_MOE_MODEL
 
 
+# NOTE: Kept available as a public helper even though the
+# in-tree caller in ``ascend_forward_context.select_moe_comm_method``
+# was inlined into the new CANN MegaMoe gate. Downstream forks and
+# future paths that bring back a ``dispatch_gmm_combine_decode``-style
+# fused op should be able to reuse this draft-quant check verbatim.
+def speculative_enable_dispatch_gmm_combine_decode(vllm_config: VllmConfig) -> bool:
+    """When draft contains MOE Arch and non-w8a8, disable dispatch_gmm_combine_decode."""
+    if vllm_config.speculative_config is None:
+        return True
+    speculative_method = getattr(vllm_config.speculative_config, "method", None)
+    if speculative_method in [None, "ngram", "suffix"]:
+        return True
+    if speculative_method in ["eagle", "eagle3"]:
+        if is_drafter_moe_model(vllm_config):
+            draft_model_config = vllm_config.speculative_config.draft_model_config
+            hf_text_config = draft_model_config.hf_text_config
+            quant_type = getattr(hf_text_config, "moe_quantize", None)
+            if quant_type is None:
+                quant_type = getattr(hf_text_config, "quantize", None)
+            return quant_type == "w8a8_dynamic"
+        else:
+            return True
+    if speculative_method == "mtp":
+        mtp_quant_type = getattr(vllm_config.model_config.hf_text_config, "mtp_quantize", None)
+        return mtp_quant_type == "w8a8_dynamic"
+    return False
+
+
 def _is_contain_expert(config: Any):
     if isinstance(config, dict):
         for k, v in config.items():
