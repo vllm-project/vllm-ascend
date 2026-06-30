@@ -69,6 +69,11 @@ def _cann_megamoe_supported_by_config(vllm_config: VllmConfig, quant_type: Any) 
     if hidden_size is None:
         return False
     hidden_size = int(hidden_size)
+    # Hidden-size bounds come from the CANN 9.1 MegaMoe kernel constraints:
+    # the dispatch / FFN / combine cube tiles require hidden in the closed
+    # range [1024, 8192] and a multiple of 512 (the cube K-step). Models
+    # outside this range (e.g. small Qwen variants with hidden=896, or any
+    # hidden=9216 LLaMA-style head) are silently routed back to MC2.
     if hidden_size < 1024 or hidden_size > 8192 or hidden_size % 512 != 0:
         return False
     if quant_type is None:

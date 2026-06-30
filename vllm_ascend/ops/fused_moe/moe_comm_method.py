@@ -381,10 +381,17 @@ class FusedMC2CommImpl(MoECommMethod):
         super().__init__(moe_config)
         self._cann_mega_moe_ops = None
         self._cann_symm_buffers = {}
-        if get_ascend_config().enable_fused_mc2 == _DISPATCH_FFN_COMBINE_MODE:
+        enable_fused_mc2 = get_ascend_config().enable_fused_mc2
+        if enable_fused_mc2 == _DISPATCH_FFN_COMBINE_MODE:
             self.expert_token_nums = torch.zeros([self.moe_config.num_local_experts], dtype=torch.int32, device="npu")
         else:
             self.expert_token_nums = None
+        # Fail fast at startup if MegaMoe is selected but CANN 9.1 is not
+        # installed. Without this, the first forward — which may not happen
+        # for tens of seconds during model load — raises an opaque
+        # ImportError deep inside the comm method.
+        if enable_fused_mc2 == _CANN_MEGA_MOE_FUSED_MC2_MODE:
+            self._load_cann_mega_moe_ops()
 
     def pad_and_split_input_ids(self, input_ids):
         return self.prepare_finalize.pad_and_split_input_ids(input_ids)  # type: ignore[attr-defined]
@@ -498,7 +505,16 @@ class FusedMC2CommImpl(MoECommMethod):
         activation_clamp = fused_experts_input.swiglu_limit if fused_experts_input.swiglu_limit > 0 else None
         x_active_mask = None
         if self.token_dispatcher.global_bs == 0 and fused_experts_input.routing.mc2_mask is not None:
-            x_active_mask = fused_experts_input.routing.mc2_mask.to(torch.int8).contiguous()
+            # mc2_mask comes from the reserved bool buffer in
+            # ascend_forward_context.set_mc2_mask. MegaMoe wants int8 as
+            # the per-token active mask, so cast only when the dtype does
+            # not already match — saves the kernel launch when an upstream
+            # change ever flips the reserved buffer to int8.
+            raw_mask = fused_experts_input.routing.mc2_mask
+            if raw_mask.dtype == torch.int8:
+                x_active_mask = raw_mask.contiguous()
+            else:
+                x_active_mask = raw_mask.to(torch.int8).contiguous()
         out, expert_tokens = mega_moe(
             fused_experts_input.hidden_states,
             topk_ids.to(torch.int32),
@@ -522,7 +538,11 @@ class FusedMC2CommImpl(MoECommMethod):
             weight1_type=weight_type,
             weight2_type=weight_type,
         )
-        self.expert_token_nums = expert_tokens
+        # NOTE: self.expert_token_nums is only used by the
+        # dispatch_ffn_combine path (enable_fused_mc2 == 1) as a
+        # pre-allocated in/out buffer. The MegaMoe op returns a fresh
+        # expert_tokens tensor that is consumed by the caller via the
+        # return value, so there is nothing to keep on the instance.
         return out, expert_tokens
 
     def fused_experts(
