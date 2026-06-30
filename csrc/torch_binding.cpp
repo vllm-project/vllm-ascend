@@ -52,6 +52,7 @@
 #include "attention/recurrent_gated_delta_rule_v310/recurrent_gated_delta_rule_310_torch_adpt.h"
 #include "attention/store_kv_block/store_kv_block_torch_adpt.h"
 #include "attention/fused_gdn_gating/fused_gdn_gating_torch_adpt.h"
+#include "attention/solve_tri/solve_tri_torch_adpt.h"
 #include <c10/core/Device.h>
 #include <c10/core/Scalar.h>
 #include <c10/util/Exception.h>
@@ -2958,5 +2959,13 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                     float beta=1.0, "
         "                     float threshold=20.0) -> (Tensor g, Tensor beta_output)");
     ops.impl("npu_fused_gdn_gating", torch::kPrivateUse1, &vllm_ascend::npu_fused_gdn_gating);
+
+    // GDN recurrent solve_tri.
+    ops.def(
+        "npu_solve_tri(Tensor x, "
+        "              int[]? cu_seqlens=None, "
+        "              int[]? chunk_indices=None, "
+        "              str layout=\"bhtd\") -> Tensor");
+    ops.impl("npu_solve_tri", torch::kPrivateUse1, &vllm_ascend::npu_solve_tri);
 }
 #endif
