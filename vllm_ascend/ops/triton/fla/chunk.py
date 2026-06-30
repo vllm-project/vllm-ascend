@@ -116,6 +116,18 @@ def chunk_gated_delta_rule_fwd(
     )
 
     if get_pcp_group().world_size > 1:
+        # Derive the non-spec decode count from the HOST cu_seqlens (already on
+        # CPU, no new NPU->CPU sync). The full-batch num_decodes includes
+        # spec-decode requests that are NOT in this h_update (non-spec) group;
+        # using it would mis-zero the first prefill seq's h_update entries in
+        # MTP mixed batches (spec-decode + prefill).
+        if cu_seqlens_host is not None:
+            actual_num_decodes = sum(
+                1 for i in range(len(cu_seqlens_host) - 1)
+                if 0 < cu_seqlens_host[i + 1] - cu_seqlens_host[i] <= 1
+            )
+        else:
+            actual_num_decodes = num_decodes
         h_update = chunk_gated_delta_rule_fwd_hupdate(
             k=k,
             w=w,
@@ -125,7 +137,7 @@ def chunk_gated_delta_rule_fwd(
             chunk_indices=chunk_indices_chunk64,
             chunk_offsets=chunk_offsets_chunk64,
             update_chunk_offsets=update_chunk_offsets_chunk64,
-            num_decodes=num_decodes,
+            num_decodes=actual_num_decodes,
         )
         all_final_state = get_pcp_group().all_gather(final_state.unsqueeze(0), 0)
         final_chunk_indices = final_chunk_indices_chunk64
