@@ -38,42 +38,6 @@ MOE_MODELS = ["Qwen/Qwen3-30B-A3B"]
 DEVICE_NAME = torch_npu.npu.get_device_name(0)[:10]
 REPO_ROOT = Path(__file__).resolve().parents[4]
 EXTERNAL_LAUNCHER_SCRIPT = REPO_ROOT / "examples" / "offline_external_launcher.py"
-EXTERNAL_LAUNCHER_TIMEOUT_S = 720
-
-
-def _decode_output(output):
-    if output is None:
-        return ""
-    if isinstance(output, bytes):
-        return output.decode(errors="ignore")
-    return output
-
-
-def _run_external_launcher(cmd, env):
-    env = env.copy()
-    env["PYTHONUNBUFFERED"] = "1"
-
-    print(f"Running subprocess: {' '.join(cmd)}")
-    try:
-        proc = subprocess.run(
-            cmd,
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            timeout=EXTERNAL_LAUNCHER_TIMEOUT_S,
-        )
-    except subprocess.TimeoutExpired as exc:
-        print(f"Subprocess timed out after {EXTERNAL_LAUNCHER_TIMEOUT_S} seconds.")
-        output = _decode_output(exc.output)
-        if output:
-            print(output)
-        else:
-            print("No subprocess output captured before timeout.")
-        raise
-
-    output = _decode_output(proc.stdout)
-    print(output)
-    return proc, output
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -97,7 +61,17 @@ def test_qwen3_external_launcher(model):
         "--trust-remote-code",
     ]
 
-    proc, output = _run_external_launcher(cmd, env)
+    print(f"Running subprocess: {' '.join(cmd)}")
+    proc = subprocess.run(
+        cmd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=600,
+    )
+    output = proc.stdout.decode(errors="ignore")
+
+    print(output)
 
     assert "TP RANKS: [0]" in output
     assert "TP RANKS: [1]" in output
@@ -127,7 +101,17 @@ def test_qwen3_moe_external_launcher_ep_tp2(model):
         "--enable-expert-parallel",
     ]
 
-    proc, output = _run_external_launcher(cmd, env)
+    print(f"Running subprocess: {' '.join(cmd)}")
+    proc = subprocess.run(
+        cmd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=600,
+    )
+    output = proc.stdout.decode(errors="ignore")
+
+    print(output)
 
     assert "TP RANKS: [0, 1]" in output
     assert "Generated text:" in output
@@ -160,7 +144,17 @@ def test_qwen3_external_launcher_with_sleepmode():
         "16",
     ]
 
-    proc, output = _run_external_launcher(cmd, env)
+    print(f"Running subprocess: {' '.join(cmd)}")
+    proc = subprocess.run(
+        cmd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=600,
+    )
+    output = proc.stdout.decode(errors="ignore")
+
+    print(output)
 
     assert "Generated text:" in output
     assert "Sleep and wake up successfully!!" in output
@@ -199,7 +193,17 @@ def test_qwen3_external_launcher_with_sleepmode_level2():
         "2",
     ]
 
-    proc, output = _run_external_launcher(cmd, env)
+    print(f"Running subprocess: {' '.join(cmd)}")
+    proc = subprocess.run(
+        cmd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=600,
+    )
+    output = proc.stdout.decode(errors="ignore")
+
+    print(output)
 
     assert "Generated text:" in output
     assert "Sleep and wake up successfully!!" in output
@@ -223,7 +227,17 @@ def test_qwen3_external_launcher_with_matmul_allreduce(model):
         "--trust-remote-code",
     ]
 
-    proc, output = _run_external_launcher(cmd, env)
+    print(f"Running subprocess: {' '.join(cmd)}")
+    proc = subprocess.run(
+        cmd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=600,
+    )
+
+    output = proc.stdout.decode(errors="ignore")
+    print(output)
 
     assert "Generated text:" in output
     assert proc.returncode == 0
