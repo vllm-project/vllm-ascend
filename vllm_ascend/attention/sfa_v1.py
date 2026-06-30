@@ -537,14 +537,10 @@ class AscendSFAImpl(MLAAttentionImpl):
         enable_sfa_qsfa = getattr(ascend_config, "enable_sfa_kv_quant_sparse_attention", False)
         enable_sfa_qsfa = enable_sfa_qsfa if isinstance(enable_sfa_qsfa, bool) else False
         self.enable_sfa_kv_quant_sparse_attention = (
-            enable_sfa_qsfa
-            and (self.enable_sfa_prolog_v3 or self.is_kv_producer_only)
-            and get_ascend_device_type() != AscendDeviceType.A5
+            enable_sfa_qsfa and get_ascend_device_type() != AscendDeviceType.A5
         )
         if self.enable_sfa_kv_quant_sparse_attention:
             self.enable_mlapo = False
-        if enable_sfa_qsfa and not self.enable_sfa_prolog_v3 and not self.is_kv_producer_only:
-            logger.warning_once("SFA KV-quant sparse attention requires SFA mla_prolog_v3 and is disabled.")
         if enable_sfa_qsfa and get_ascend_device_type() == AscendDeviceType.A5:
             logger.warning_once("SFA KV-quant sparse attention currently targets int8 KV cache and is disabled on A5.")
         self.sfa_qsfa_tile_size = SFA_QSFA_TILE_SIZE
@@ -701,19 +697,17 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         if self.enable_sfa_prolog_v3 or self.enable_sfa_kv_quant_sparse_attention:
             self.enable_mlapo = False
-            # P-only workers do not execute Prolog, but their cache schema must
-            # use the same per-layer capability gate as the D worker.
+
+        if self.enable_sfa_prolog_v3:
             reasons = self._get_sfa_prolog_v3_unsupported_reasons()
             if reasons:
                 self.enable_sfa_prolog_v3 = False
-                self.enable_sfa_kv_quant_sparse_attention = False
-                self.sfa_qsfa_packed_kv_head_dim = 0
                 for msg in reasons:
                     logger.warning_once(
-                        f"{msg} Disable SFA mla_prolog_v3 and packed KV cache for layer "
-                        f"{self.layer_name}; fallback to original sparse attention."
+                        f"{msg} Disable SFA mla_prolog_v3 for layer {self.layer_name}; "
+                        "fallback to native preprocessing."
                     )
-            elif self.enable_sfa_prolog_v3 and not self.is_kv_producer_only:
+            elif not self.is_kv_producer_only:
                 self._process_weights_for_fused_prolog_v3()
 
         if not self.enable_sfa_prolog_v3 and self.enable_mlapo:
