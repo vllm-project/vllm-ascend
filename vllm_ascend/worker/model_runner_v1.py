@@ -105,6 +105,7 @@ from vllm.v1.worker.utils import AttentionGroup, select_common_block_size
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
 from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder
+from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadataBuilder
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, using_paged_attention
@@ -3381,7 +3382,7 @@ class NPUModelRunner(GPUModelRunner):
 
             # add kvcomp_metadata into common_attn_metadata
             if (for_cudagraph_capture
-                    and not isinstance(builder, (AscendDSAMetadataBuilder, AscendDSACPMetadataBuilder))):
+                    and not isinstance(builder, (AscendDSAMetadataBuilder, AscendDSACPMetadataBuilder, AscendSFADCPMetadataBuilder))):
                 attn_metadata_i = builder.build_for_cudagraph_capture(common_attn_metadata)
             else:
                 attn_metadata_i = builder.build(
