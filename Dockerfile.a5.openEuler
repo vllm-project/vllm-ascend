@@ -39,7 +39,7 @@ RUN pip config set global.index-url ${PIP_INDEX_URL} && \
 # Install vLLM
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
 ARG VLLM_TAG
-ARG VLLM_COMMIT=""
+ARG VLLM_COMMIT
 COPY .github/vllm-release-tag.commit /tmp/vllm-release-tag.commit
 RUN VLLM_REF="${VLLM_COMMIT:-${VLLM_TAG:-$(tr -d '[:space:]' < /tmp/vllm-release-tag.commit)}}" && \
     if ! echo "$VLLM_REF" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._/-]*$'; then \
