@@ -32,8 +32,6 @@ patches inside the child process before any ``EngineCore`` is instantiated.
 from vllm.logger import logger
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
 
-from vllm_ascend.utils import vllm_version_is
-
 _profiling_patches_applied = False
 _original_update_from_output = None
 _original_schedule = None
@@ -169,20 +167,11 @@ def _ensure_schedule_wrapped(scheduler):
     cls = type(scheduler)
     _original_schedule = cls.schedule
 
-    if vllm_version_is("0.23.0"):
-
-        def _wrapped_schedule(self):
-            output = _original_schedule(self)
-            if getattr(self, "_profiling_timing_done", False) and output is not None:
-                output.disable_profiling_timing = True
-            return output
-    else:
-
-        def _wrapped_schedule(self, *args, **kwargs):
-            output = _original_schedule(self, *args, **kwargs)
-            if getattr(self, "_profiling_timing_done", False) and output is not None:
-                output.disable_profiling_timing = True
-            return output
+    def _wrapped_schedule(self, *args, **kwargs):
+        output = _original_schedule(self, *args, **kwargs)
+        if getattr(self, "_profiling_timing_done", False) and output is not None:
+            output.disable_profiling_timing = True
+        return output
 
     cls.schedule = _wrapped_schedule
 

@@ -11,11 +11,11 @@ class AscendNgramProposer(NgramProposer):
             super().__init__(vllm_config)
         else:
             original_propose = AscendNgramProposer.propose
-            AscendNgramProposer.propose = lambda self, *args, **kwargs: [[] for _ in range(1024)]
+            AscendNgramProposer.propose = lambda self, *args, **kwargs: [[] for _ in range(1024)]  # type: ignore[method-assign]
             try:
                 super().__init__(vllm_config)
             finally:
-                AscendNgramProposer.propose = original_propose
+                AscendNgramProposer.propose = original_propose  # type: ignore[method-assign]
 
     def load_model(self, *args, **kwargs):
         # No model to load.
