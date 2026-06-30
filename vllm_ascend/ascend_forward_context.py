@@ -326,9 +326,7 @@ def select_moe_comm_method(
         num_experts_per_device = num_experts // ep_world_size
 
         fused_mc2_eligible = (
-            fused_mc2_enable == 2
-            and fused_decode_guard
-            and _cann_megamoe_supported_by_config(vllm_config, quant_type)
+            fused_mc2_enable == 2 and fused_decode_guard and _cann_megamoe_supported_by_config(vllm_config, quant_type)
         )
         if in_profile_run and fused_mc2_eligible:
             fused_mc2_eligible = False

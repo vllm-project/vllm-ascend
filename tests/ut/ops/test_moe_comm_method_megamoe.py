@@ -47,7 +47,6 @@ from vllm_ascend.ops.fused_moe.moe_comm_method import (
 )
 from vllm_ascend.quantization.quant_type import QuantType
 
-
 # ---------------------------------------------------------------------------
 # _pick_mega_moe_bias
 # ---------------------------------------------------------------------------
@@ -125,7 +124,7 @@ class TestPickMegaMoeBias:
 # ---------------------------------------------------------------------------
 
 
-class TestGetCannMegaMoeQuantSettings:
+class TestGetCANNMegaMoeQuantSettings:
     """The QuantType → (mode, dispatch_dtype, weight_type) mapping table."""
 
     def test_w8a8(self):
@@ -164,7 +163,7 @@ class TestGetCannMegaMoeQuantSettings:
 # ---------------------------------------------------------------------------
 
 
-class TestNormalizeCannActivation:
+class TestNormalizeCANNActivation:
     """Whitelist guard for activations forwarded to CANN MegaMoe."""
 
     @pytest.mark.parametrize("inp", ["silu", "swiglu", "SiLU", "SWIGLU"])
@@ -209,7 +208,7 @@ def _make_vllm_config(hidden_size):
     return SimpleNamespace(model_config=model_config)
 
 
-class TestCannMegamoeSupportedByConfig:
+class TestCANNMegamoeSupportedByConfig:
     """Hidden-size + quant gate used inside select_moe_comm_method."""
 
     @pytest.mark.parametrize("hidden", [1024, 1536, 4096, 7168, 8192])

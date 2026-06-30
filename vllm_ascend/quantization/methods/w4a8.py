@@ -552,8 +552,7 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         topk_weights = topk_weights.to(x.dtype)
 
         cann_mega_moe_flag = (
-            _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2
-            and get_ascend_config().enable_fused_mc2 == 2
+            _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2 and get_ascend_config().enable_fused_mc2 == 2
         )
         if self.dynamic_eplb:
             w1 = [i.view(torch.int32) for i in layer.w13_weight_list]
