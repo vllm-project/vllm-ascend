@@ -138,12 +138,13 @@ class AscendMMEncoderAttention(MMEncoderAttention):
             # Use pre-compute seq_lens before vision blocks.
             if sequence_lengths.device.type != "cpu":
                 sequence_lengths = sequence_lengths.to("cpu")
-            seq_lens_cpu = sequence_lengths
+            seq_lens_cpu = sequence_lengths.cumsum(0).tolist()
         else:
             # Convert cu_seqlens to seq_lens and move it to CPU, since FA requires CPU seq_lens.
             # NOTE: This will considerably hurt performance.
             cu_seqlens = self._maybe_compute_cu_seqlens(bsz, q_len, cu_seqlens)
-            seq_lens_cpu = torch.diff(cu_seqlens).to("cpu")
+            ##  seq_lens_cpu = torch.diff(cu_seqlens).to("cpu")
+            seq_lens_cpu = torch.diff(cu_seqlens).cumsum(0).to("cpu").tolist()
 
         # q, k, v: [b, s, head, head_dim] -> [b * s, head, head_dim]
         q, k, v = self._reshape_qkv_to_3d(query, key, value, bsz, q_len, kv_len)
@@ -156,7 +157,7 @@ class AscendMMEncoderAttention(MMEncoderAttention):
             k = F.pad(k, (0, pad_len), mode="constant", value=0)
             v = F.pad(v, (0, pad_len), mode="constant", value=0)
 
-        seq_lens_cpu = list(seq_lens_cpu.cumsum(0))
+        ##seq_lens_cpu = list(seq_lens_cpu.cumsum(0))
 
         context_layer = torch_npu.npu_fusion_attention(
             query=q,
