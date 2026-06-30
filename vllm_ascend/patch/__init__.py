@@ -237,6 +237,33 @@
 #       Remove this patch once upstream vLLM supports hybrid KV cache + CP for
 #       non-CUDA backends, or exposes a platform hook for this behavior.
 #
+# ** 10b. File: platform/patch_prefix_cache_core.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.core.kv_cache_manager.KVCacheManager.__init__`
+#   2. `vllm.v1.core.sched.scheduler.Scheduler.__init__`
+#   3. `vllm.v1.core.block_pool.BlockPool._maybe_evict_cached_block`
+#   4. `vllm.v1.core.sched.scheduler.Scheduler.schedule`
+#    Why:
+#       The DeepSeek V4 partial (sub-block) compressed prefix-cache feature needs
+#       three things the supported vLLM does not expose: (1) the scheduler block
+#       size threaded down to the KV cache coordinator so cache hits align to it
+#       instead of the raw hash block size, (2) a way to surface the coordinator's
+#       partial-hit copy blocks to the model runner, and (3) cleanup of stale
+#       partial short-key entries when a cached block is evicted.
+#    How:
+#       Monkey-patch the scheduler / KVCacheManager to thread `scheduler_block_size`,
+#       wrap `Scheduler.schedule` to expose `coordinator.take_copy_block_ids()` as
+#       `scheduler_output.new_block_ids_to_copy`, and wrap
+#       `BlockPool._maybe_evict_cached_block` to drop partial cache entries.
+#       Each patch is guarded by capability/source checks so it is skipped once
+#       the underlying vLLM already provides the behavior.
+#    Related PR (if no, explain why):
+#       Builds on the prefix-cache core-reuse primitives from vLLM PR #43447;
+#       only the hooks the DSv4 partial path needs are carried here.
+#    Future Plan:
+#       Remove this patch once the supported vLLM version threads the scheduler
+#       block size and exposes the partial copy / eviction hooks natively.
+#
 # ** 10. File: platform/patch_kv_cache_interface.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.kv_cache_interface.MLAAttentionSpec`
