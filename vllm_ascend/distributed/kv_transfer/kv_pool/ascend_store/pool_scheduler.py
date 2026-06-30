@@ -371,6 +371,7 @@ class KVPoolScheduler:
                 allocated_block_ids_by_group=normalize_block_ids_by_group(request.block_ids),
                 num_saved_tokens=0,
                 token_ids=request.prompt_token_ids[:num_tokens_to_compute].copy(),
+                num_prompt_tokens=len(request.prompt_token_ids),
             )
             self._request_trackers[request.req_id] = request_tracker
             last_chunk_tokens_num = (
@@ -414,6 +415,7 @@ class KVPoolScheduler:
                         allocated_block_ids_by_group=normalize_block_ids_by_group(new_block_ids),
                         num_saved_tokens=0,
                         token_ids=request_real.prompt_token_ids[:num_tokens_to_compute].copy(),
+                        num_prompt_tokens=len(request_real.prompt_token_ids),
                     )
                     self._request_trackers[req_id] = request_tracker
                     last_chunk_tokens_num = (
@@ -487,6 +489,7 @@ class KVPoolScheduler:
                     token_len=num_tokens_to_compute,
                     allocated_block_ids_by_group=block_ids,
                     num_saved_tokens=0,
+                    num_prompt_tokens=len(request.prompt_token_ids),
                 )
 
                 self._request_trackers[request_id] = request_tracker
