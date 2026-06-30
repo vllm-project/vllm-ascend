@@ -36,7 +36,7 @@ PAGE_SIZE=100
 
 # API_PREFIX="https://174e1b821a8446f38998a67186ba766e.apic.cn-southwest-2.huaweicloudapis.com/aurogon_service"
 # MR_THIRD_ID=826
-# NETWORK_ZONE=gitcode
+# NETWORK_ZONE=github
 # PROJECT_PATH=Ascend/MindIE-LLM
 # BIND_ID_API2=16
 # PAGE_CURR=1
