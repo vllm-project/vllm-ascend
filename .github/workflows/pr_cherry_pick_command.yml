@@ -155,16 +155,20 @@ jobs:
           git checkout -b "$CHERRY_BRANCH" "origin/$TARGET_BRANCH"
 
           # Apply the PR's changes as a single commit.
-          # Using git diff (PR base vs PR head) avoids picking up unrelated
-          # merge commits from the base branch, which works for both merged
-          # and unmerged PRs.
+          # Using git diff with three-dot (...) from merge-base to PR head
+          # avoids picking up unrelated commits from the base branch, which
+          # works for both merged and unmerged PRs.
           echo "PR base: $PR_BASE_SHA"
           echo "PR head: $PR_HEAD_SHA"
 
           # Generate the diff to a temp file (avoids shell variable size limits
           # for large PRs) so we can check emptiness and apply it.
+          # Use three-dot (...) to diff from merge-base to PR head, so we
+          # only pick up the PR's unique changes — not unrelated commits
+          # that landed on the base branch between PR_BASE_SHA and the
+          # rebased PR_HEAD_SHA.
           DIFF_FILE=/tmp/cherry_diff.patch
-          git diff "$PR_BASE_SHA".."$PR_HEAD_SHA" > "$DIFF_FILE"
+          git diff "$PR_BASE_SHA"..."$PR_HEAD_SHA" > "$DIFF_FILE"
 
           if [ ! -s "$DIFF_FILE" ]; then
             echo "Diff is empty, changes already included in target branch."
