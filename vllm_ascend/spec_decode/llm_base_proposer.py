@@ -995,7 +995,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             common_attn_metadata.block_table_tensor = common_attn_metadata.block_table_tensor.clone()
 
         if self.pcp_size * self.dcp_size > 1:
-            if self.num_speculative_tokens > 1 and not attn_metadata_i.num_prefills:
+            is_decode_only_batch = num_decode_reqs > 0 and num_prefill_reqs == 0
+            if (
+                self.num_speculative_tokens > 1
+                and is_decode_only_batch
+                and not attn_metadata_i.num_prefills
+            ):
                 # For pcp/dcp, tokens are split across different cp ranks,
                 # so we can not simply update slot_mapping by += 1.
                 # Instead, we pre-allocate mtp slot_mapping in model_runner
