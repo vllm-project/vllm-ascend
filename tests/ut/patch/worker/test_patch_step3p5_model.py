@@ -61,7 +61,7 @@ def test_layer0_residual_is_chunked_when_fc1_enabled():
     # pad_needed = n_local * tp - N = 2 * 2 - 4 = 0, no padding
     # residual = hidden[0:2] (rank 0 slice)
     n_local = 2
-    residual = hidden[0 * n_local:(0 + 1) * n_local].contiguous()
+    residual = hidden[0 * n_local : (0 + 1) * n_local].contiguous()
     expected = mlp_out + attn_out + residual
     assert out.shape == torch.Size([2, 8])
     assert torch.equal(out, expected)

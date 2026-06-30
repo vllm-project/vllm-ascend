@@ -46,11 +46,7 @@ if Step3p5DecoderLayer is not None:
         # Only intervene for layer 0 of VL models running FC1 on the main model.
         # MTP draft layers (is_draft_model=True, flash_comm_v1=False) and
         # non-FC1 runs are unaffected.
-        if (
-            self.layer_idx == 0
-            and _EXTRA_CTX.flash_comm_v1_enabled
-            and not _EXTRA_CTX.is_draft_model
-        ):
+        if self.layer_idx == 0 and _EXTRA_CTX.flash_comm_v1_enabled and not _EXTRA_CTX.is_draft_model:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
             hidden_states = self.self_attn(
@@ -70,7 +66,7 @@ if Step3p5DecoderLayer is not None:
                 pad_needed = n_local * tp - residual.shape[0]
                 if pad_needed > 0:
                     residual = torch.nn.functional.pad(residual, (0, 0, 0, pad_needed))
-                residual = residual[rank * n_local:(rank + 1) * n_local].contiguous()
+                residual = residual[rank * n_local : (rank + 1) * n_local].contiguous()
             hidden_states = hidden_states + residual
 
             residual = hidden_states
