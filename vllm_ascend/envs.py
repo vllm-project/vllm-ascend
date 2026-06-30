@@ -105,6 +105,24 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Platform validation: only PD-mixed mode (`kv_role='kv_both'` or no kv_transfer_config).
     # Not supported in PD-disaggregated mode (`kv_producer` / `kv_consumer` only).
     "VLLM_ASCEND_BALANCE_SCHEDULING": lambda: bool(int(os.getenv("VLLM_ASCEND_BALANCE_SCHEDULING", "0"))),
+    # Whether to enable LAPS-style length-aware prefill scheduling on the
+    # engine side. This currently targets the FCFS waiting queue path.
+    "VLLM_ASCEND_LAPS_SCHEDULING": lambda: bool(int(os.getenv("VLLM_ASCEND_LAPS_SCHEDULING", "0"))),
+    # Prompt-length threshold used by LAPS scheduling. Requests with
+    # num_prompt_tokens <= threshold are treated as short prefills.
+    "VLLM_ASCEND_LAPS_THRESHOLD": lambda: int(os.getenv("VLLM_ASCEND_LAPS_THRESHOLD", "256")),
+    # Optional waiting window for short requests, in milliseconds. When set to
+    # 0, short requests dispatch immediately. When positive, the scheduler may
+    # hold a short batch briefly to accumulate more short prefills while still
+    # allowing long prefills to run.
+    "VLLM_ASCEND_LAPS_WAIT_WINDOW_MS": lambda: float(os.getenv("VLLM_ASCEND_LAPS_WAIT_WINDOW_MS", "0")),
+    # Maximum number of short requests to accumulate before dispatching early,
+    # even if the waiting window has not expired yet.
+    "VLLM_ASCEND_LAPS_WAIT_MAX_BATCH": lambda: int(os.getenv("VLLM_ASCEND_LAPS_WAIT_MAX_BATCH", "4")),
+    # Optional periodic LAPS stats logging interval, in seconds. Set to 0 to
+    # disable aggregate stats logging. This is intended for benchmark
+    # observability without enabling global DEBUG logging.
+    "VLLM_ASCEND_LAPS_STATS_LOG_INTERVAL_S": lambda: float(os.getenv("VLLM_ASCEND_LAPS_STATS_LOG_INTERVAL_S", "0")),
     # use fused op transpose_kv_cache_by_block, default is True
     "VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK": lambda: bool(
         int(os.getenv("VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK", "1"))
