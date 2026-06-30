@@ -920,9 +920,8 @@ class KVPoolWorker:
                     token_len,
                     block_hashes,
                     kv_cache_group_id=group_id,
+                    chunk_mask=self._lookup_chunk_mask(group_id, token_len),
                 ):
-                    if not self._is_lookup_chunk_reachable(group_id, start, end):
-                        continue
                     if use_layerwise:
                         keys_multi_layer = key.split_layers(self.num_layers)
                         for item in keys_multi_layer:
@@ -970,10 +969,20 @@ class KVPoolWorker:
             return 0
         return min(hits) if hits else 0
 
-    def _is_lookup_chunk_reachable(self, group_id: int, _start: int, end: int) -> bool:
-        if group_id < len(self.group_uses_align_state) and self.group_uses_align_state[group_id]:
-            return end % self.cache_transfer_granularity == 0
-        return True
+    def _lookup_chunk_mask(self, group_id: int, token_len: int) -> list[bool] | None:
+        if group_id >= len(self.group_uses_align_state) or not self.group_uses_align_state[group_id]:
+            return None
+        group_block_size = self._get_group_block_size(group_id)
+        cache_family = self._get_group_family(self.kv_cache_group_families, group_id)
+        effective_block_size = get_cache_family_granularity(group_block_size, cache_family)
+        cache_family_ratio = max(effective_block_size // group_block_size, 1)
+        num_chunks = (token_len + effective_block_size - 1) // effective_block_size
+        return [
+            (min((chunk_id + 1) * effective_block_size, token_len) // cache_family_ratio)
+            % self.cache_transfer_granularity
+            == 0
+            for chunk_id in range(num_chunks)
+        ]
 
     def _get_lookup_gate_group_ids(self, kv_cache_group_ids: list[int]) -> list[int]:
         gate_group_ids = [group_id for group_id in kv_cache_group_ids if self._is_lookup_gate_group(group_id)]
@@ -1045,9 +1054,8 @@ class KVPoolWorker:
                     token_len,
                     block_hashes,
                     kv_cache_group_id=group_id,
+                    chunk_mask=self._lookup_chunk_mask(group_id, token_len),
                 ):
-                    if not self._is_lookup_chunk_reachable(group_id, start, end):
-                        continue
                     if use_layerwise:
                         keys_multi_layer = key.split_layers(self.num_layers)
                         for item in keys_multi_layer:

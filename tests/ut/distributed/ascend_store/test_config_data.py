@@ -163,6 +163,14 @@ class TestChunkedTokenDatabase(unittest.TestCase):
         self.assertEqual(result[0][2].chunk_hash, _expected_grouped_hash("a", "b").hex())
         self.assertEqual(len(result[0][2].chunk_hash), 64)
 
+    def test_process_tokens_chunk_mask_skips_grouped_hash_generation(self):
+        db = ChunkedTokenDatabase([self.meta], block_size=[16], partitions=None, hash_block_size=8)
+        result = list(db.process_tokens(48, ["a", "b", "c", "d", "e", "f"], chunk_mask=[False, True, False]))
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0][0], 16)
+        self.assertEqual(result[0][1], 32)
+        self.assertEqual(result[0][2].chunk_hash, _expected_grouped_hash("c", "d").hex())
+
     def test_get_block_hashes_rehashes_grouped_str_hashes(self):
         result = get_block_hashes(["a", "b", "c", "d"], group_block_size=32, hash_block_size=16)
         self.assertEqual(
