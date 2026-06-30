@@ -90,7 +90,6 @@ class TestTokenDispatcherWithMC2(TestBase):
         mock_config = MagicMock()
 
         mock_config.scheduler_config.max_num_seqs = 256
-        mock_config.scheduler_config.decode_max_num_seqs = 256
 
         mock_config.compilation_config.custom_ops = ["all"]
 
