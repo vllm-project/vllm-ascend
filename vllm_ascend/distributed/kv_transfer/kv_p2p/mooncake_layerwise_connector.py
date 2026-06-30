@@ -519,6 +519,18 @@ class KVCacheSendingLayerThread(threading.Thread):
                             else:
                                 self.callback_func(req_id, req_meta, layer_group_idx, trans_flag=True)
 
+        # For ranks that have no transfer data on the last layer (e.g.,
+        # non-attention-selected ranks in hybrid Mamba models), still send
+        # the DONE signal so the D node doesn't wait forever.
+        if send_task.layer_idx == (self.total_layers - 1):
+            handled_req_ids: set[str] = set()
+            for transfer_meta in session_meta.values():
+                if len(transfer_meta.src) > 0:
+                    handled_req_ids.update(transfer_meta.req_ids)
+            for req_id, req_meta in send_task.send_request.items():
+                if req_id not in handled_req_ids and req_meta.chunk_finish:
+                    self.callback_func(req_id, req_meta, layer_group_idx, trans_flag=True)
+
 
 class KVCacheRecvingLayerThread(threading.Thread):
     def __init__(
@@ -1342,6 +1354,9 @@ class MooncakeLayerwiseConnectorWorker:
             self.index_to_name[max(self.index_to_name.keys()) + 1].append(mtp_layer_name)
         if self.total_layers < len(self.layer_metadata.keys()):
             self.total_layers = len(self.layer_metadata.keys())
+        if self.use_attn_mamba_hybrid:
+            logger.info("use_attn_mamba_hybrid=True, total_layers=%d, layer_metadata keys=%d",
+                        self.total_layers, len(self.layer_metadata.keys()))
 
         # After KV Caches registered, start the sending or receiving thread.
         metadata = MooncakeAgentMetadata(
@@ -1480,6 +1495,18 @@ class MooncakeLayerwiseConnectorWorker:
         if cp_ratio == 0:
             selected_p_cp_groups = p_cp_group
             selected_d_cp_groups = d_cp_group
+        elif self.use_attn_mamba_hybrid and cp_ratio > 1:
+            # For hybrid attention+Mamba models, select P cp_groups at stride
+            # equal to tp_ratio so that the selected attention P ranks align
+            # with the Mamba consecutive rank mapping (tp_rank // tp_ratio).
+            # This ensures each P rank sends both attention and Mamba to the
+            # same D rank, avoiding multi-target conflicts.
+            tp_ratio = self.tp_size // remote_tp_size
+            stride = tp_ratio
+            x = req_idx % cp_ratio
+            selected_p_cp_groups = [p_cp_group[x + i * stride] for i in range(len(d_cp_group))
+                                    if (x + i * stride) < len(p_cp_group)]
+            selected_d_cp_groups = d_cp_group[:len(selected_p_cp_groups)]
         else:
             x = req_idx % cp_ratio
             start = x * len(d_cp_group)
@@ -1601,7 +1628,7 @@ class MooncakeLayerwiseConnectorWorker:
                     self.virtual_request.add(req_id)
                     continue
                 external_req_id = get_external_request_id(req_id)
-                assert self.kv_recv_layer_thread is not None
+                assert self.kv_recv_layer_thread is not None, "kv_recv_layer_thread must be initialized before loading KV"
                 self.request_map[external_req_id] = req_id
                 self._recving_metadata[req_id] = meta
         elif self.vllm_config.kv_transfer_config.is_kv_producer:
@@ -1679,6 +1706,48 @@ class MooncakeLayerwiseConnectorWorker:
                     )
                     send_task.group_seq_start_tensor[i] = torch.tensor([0], dtype=torch.int32, device=device)
 
+    def _enqueue_mamba_layers(self, connector_metadata: MooncakeLayerwiseConnectorMetadata):
+        """Enqueue SendTasks for Mamba layers that precede the current full_attention layer.
+
+        In hybrid models, gdn.py's maybe_save_kv_layer_to_connector does not
+        execute under torch.compile/cudagraph, so Mamba layers are never
+        explicitly saved. We handle them here by creating SendTasks that use
+        registered memory addresses directly (no kv_layer tensors needed).
+        """
+        while self.current_layer < self.total_layers:
+            mamba_layer_name = self.index_to_name[self.current_layer][0]
+            mamba_group_idx = self.layer_metadata[mamba_layer_name].tensor_group_idx[0]
+            if not isinstance(self.kv_cache_specs[mamba_group_idx], MambaSpec):
+                break
+            reshape_cache_event = torch.npu.Event()
+            reshape_cache_event.record()
+            send_task = connector_metadata.send_task
+            layer_send_task = SendTask(
+                wait_event=reshape_cache_event,
+                k_cache=None,
+                v_cache=None,
+                k_quant_cache=None,
+                v_quant_cache=None,
+                layer_idx=self.current_layer,
+                layer_name=mamba_layer_name,
+                group_rearrange_block_ids=send_task.group_rearrange_block_ids,
+            )
+            for req_id, req_meta in connector_metadata.requests.items():
+                if len(req_meta.local_block_ids[mamba_group_idx]) == 0:
+                    continue
+                try:
+                    req_meta_update = self.update_decoder_info(req_id, req_meta)
+                except Exception as e:
+                    logger.warning(
+                        "MooncakeLayerwiseConnector transfer fail for req_id %s in mamba layer_idx %s, "
+                        "update_decoder_info with error: %s",
+                        req_id, self.current_layer, e,
+                    )
+                    continue
+                layer_send_task.send_request[req_id] = req_meta_update
+            self.kv_send_layer_thread.send_queue.put(layer_send_task)
+            self.current_layer += 1
+
     def save_kv_layer(
         self,
         layer_name: str,
@@ -1692,6 +1761,11 @@ class MooncakeLayerwiseConnectorWorker:
             if self.current_layer >= self.total_layers:
                 self.current_layer += 1
                 return
+            if self.use_attn_mamba_hybrid:
+                self._enqueue_mamba_layers(connector_metadata)
+                if self.current_layer >= self.total_layers:
+                    self.current_layer += 1
+                    return
             # get reshape and cache event
             if layer_name == "":
                 layer_name = self.index_to_name[self.current_layer][0]
@@ -1805,7 +1879,8 @@ class MooncakeLayerwiseConnectorWorker:
                 group_rearrange_block_ids=send_task.group_rearrange_block_ids,
             )
             for req_id, req_meta in connector_metadata.requests.items():
-                if len(req_meta.local_block_ids[layer_group_idx]) == 0:
+                is_last_layer = (self.current_layer == self.total_layers - 1)
+                if len(req_meta.local_block_ids[layer_group_idx]) == 0 and not is_last_layer:
                     continue
                 try:
                     req_meta_update = self.update_decoder_info(req_id, req_meta)
@@ -1907,6 +1982,7 @@ class MooncakeLayerwiseConnectorWorker:
     def send_done_send_signal(self, req_id, req_meta, group_idx, trans_flag: bool = True):
         external_req_id = get_external_request_id(req_id)
         send_msg_type = DONE_SENDING_MSG if trans_flag else FAILED_SENDING_MSG
+        trans_count = max(req_meta.trans_count)
         logger.info(
             "Sending transmitting signal %s for request %s to %s:%d",
             send_msg_type,
@@ -1919,7 +1995,7 @@ class MooncakeLayerwiseConnectorWorker:
             msg_encoder = msgspec.msgpack.Encoder()
             side_channel_path = f"{self.side_channel_host}:{self.handshake_port}"
             encoded_data = msg_encoder.encode(
-                (send_msg_type, external_req_id, req_meta.trans_count[group_idx], side_channel_path)
+                (send_msg_type, external_req_id, trans_count, side_channel_path)
             )
             max_retries = 3
             for attempt in range(1, max_retries + 1):
