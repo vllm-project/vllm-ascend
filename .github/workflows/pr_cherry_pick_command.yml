@@ -134,10 +134,17 @@ jobs:
           TARGET_BRANCH='${{ steps.parse.outputs.target_branch }}'
           REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
 
+          # Get the PAT_TOKEN owner's username
+          TOKEN_USER=$(gh api user --jq '.login')
+          echo "PAT_TOKEN user: $TOKEN_USER"
+
           # Configure git for push
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          # origin for fetching from the upstream repo
           git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
+          # fork remote for pushing cherry-pick branch
+          git remote add fork "https://x-access-token:${GITHUB_TOKEN}@github.com/${TOKEN_USER}/vllm-ascend.git"
 
           # Fetch target branch and PR's base/head SHAs
           git fetch origin "$TARGET_BRANCH" "$PR_BASE_SHA" "$PR_HEAD_SHA" 2>/dev/null || true
@@ -188,22 +195,37 @@ jobs:
           # Commit the applied changes as a single commit with PR metadata
           git commit -m "$PR_TITLE" -m "Cherry-pick of PR #${PR_NUMBER} by @${PR_AUTHOR}"
 
-          # Push the new branch (force-push in case branch already exists from a previous run)
-          git push -f origin "$CHERRY_BRANCH"
+          # Push the new branch to the PAT_TOKEN user's fork
+          git push -f fork "$CHERRY_BRANCH"
 
-          # Create the new PR
-          NEW_PR_TITLE="[Cherry-pick][${TARGET_BRANCH}]${PR_TITLE} (from #${PR_NUMBER})"
-          NEW_PR_BODY="Cherry-pick of PR #${PR_NUMBER} onto \`${TARGET_BRANCH}\`."$'\n'$'\n'"Original PR: #${PR_NUMBER}"$'\n'"Original author: @${PR_AUTHOR}"$'\n'$'\n'"---"$'\n'"${PR_BODY}"
-
-          NEW_PR_URL=$(gh pr create \
+          # Check if a cherry-pick PR already exists for this target branch
+          EXISTING_PR_URL=$(gh pr list \
             --repo "$REPO" \
-            --title "$NEW_PR_TITLE" \
-            --body "$NEW_PR_BODY" \
+            --head "${TOKEN_USER}:${CHERRY_BRANCH}" \
             --base "$TARGET_BRANCH" \
-            --head "$CHERRY_BRANCH")
+            --state open \
+            --json url --jq '.[0].url // empty')
 
-          echo "new_pr_url=$NEW_PR_URL" >> "$GITHUB_OUTPUT"
-          echo "cherry_status=success" >> "$GITHUB_OUTPUT"
+          if [ -n "$EXISTING_PR_URL" ]; then
+            # PR already exists — branch has been force-pushed, just notify
+            echo "Cherry-pick PR already exists: $EXISTING_PR_URL"
+            echo "cherry_status=refreshed" >> "$GITHUB_OUTPUT"
+            echo "existing_pr_url=$EXISTING_PR_URL" >> "$GITHUB_OUTPUT"
+          else
+            # Create a new PR from the fork branch
+            NEW_PR_TITLE="[Cherry-pick][${TARGET_BRANCH}]${PR_TITLE} (from #${PR_NUMBER})"
+            NEW_PR_BODY="Cherry-pick of PR #${PR_NUMBER} onto \`${TARGET_BRANCH}\`."$'\n'$'\n'"Original PR: #${PR_NUMBER}"$'\n'"Original author: @${PR_AUTHOR}"$'\n'$'\n'"---"$'\n'"${PR_BODY}"
+
+            NEW_PR_URL=$(gh pr create \
+              --repo "$REPO" \
+              --title "$NEW_PR_TITLE" \
+              --body "$NEW_PR_BODY" \
+              --base "$TARGET_BRANCH" \
+              --head "${TOKEN_USER}:${CHERRY_BRANCH}")
+
+            echo "new_pr_url=$NEW_PR_URL" >> "$GITHUB_OUTPUT"
+            echo "cherry_status=success" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Comment success result
         if: steps.cherry.outputs.cherry_status == 'success'
@@ -214,6 +236,17 @@ jobs:
           comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
           body: |
             [Bot]: cherry-pick completed successfully. New PR created: ${{ steps.cherry.outputs.new_pr_url }}
+          reactions: hooray
+
+      - name: Comment refreshed result
+        if: steps.cherry.outputs.cherry_status == 'refreshed'
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
+          comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
+          body: |
+            [Bot]: cherry-pick branch has been refreshed. Existing PR: ${{ steps.cherry.outputs.existing_pr_url }}
           reactions: hooray
 
       - name: Comment already included
@@ -239,7 +272,7 @@ jobs:
           reactions: confused
 
       - name: Comment generic failure
-        if: failure() && steps.cherry.outputs.cherry_status != 'conflict' && steps.cherry.outputs.cherry_status != 'success' && steps.cherry.outputs.cherry_status != 'already_included'
+        if: failure() && steps.cherry.outputs.cherry_status != 'conflict' && steps.cherry.outputs.cherry_status != 'success' && steps.cherry.outputs.cherry_status != 'refreshed' && steps.cherry.outputs.cherry_status != 'already_included'
         uses: peter-evans/create-or-update-comment@v5
         with:
           token: ${{ secrets.PAT_TOKEN }}
