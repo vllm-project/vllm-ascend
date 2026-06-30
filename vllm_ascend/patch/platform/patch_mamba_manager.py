@@ -14,14 +14,11 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     MambaSpec,
 )
 
-from vllm_ascend.utils import vllm_version_is
-
 
 class AscendMambaManager(MambaManager):
     def __init__(self, kv_cache_spec: MambaSpec, block_pool: BlockPool, **kwargs) -> None:
         super().__init__(kv_cache_spec, block_pool, **kwargs)
-        if self.enable_caching:
-            self.block_size = kv_cache_spec.block_size
+        self.block_size = kv_cache_spec.block_size
 
     @classmethod
     def find_longest_cache_hit(
@@ -34,7 +31,6 @@ class AscendMambaManager(MambaManager):
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
-        use_eagle: bool = False,
         drop_eagle_block: bool = False,
     ) -> tuple[list[KVCacheBlock], ...]:
         assert isinstance(kv_cache_spec, MambaSpec), "MambaManager can only be used for mamba groups"
@@ -53,5 +49,3 @@ class AscendMambaManager(MambaManager):
 
 
 single_type_kv_cache_manager.MambaManager = AscendMambaManager
-if vllm_version_is("0.22.1"):
-    single_type_kv_cache_manager.spec_manager_map[MambaSpec] = AscendMambaManager

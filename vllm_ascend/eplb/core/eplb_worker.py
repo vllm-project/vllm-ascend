@@ -19,7 +19,7 @@ from typing import Any
 
 import numpy as np
 import torch
-import torch.distributed as dist
+from vllm.distributed import get_ep_group
 from vllm.logger import logger
 
 from vllm_ascend.eplb.core.eplb_utils import generate_log2phy_map
@@ -27,13 +27,20 @@ from vllm_ascend.eplb.core.policy.policy_factory import PolicyFactory
 
 
 class EplbWorker:
-    def __init__(self, shared_dict, policy_type, enable_d2d: bool = True):
+    def __init__(
+        self,
+        shared_dict,
+        policy_type,
+        enable_d2d: bool = True,
+        tp_size: int | None = None,
+    ):
         self.policy_type = policy_type
         self.policy = PolicyFactory.generate_policy(policy_type)
         self.shared_dict = shared_dict
         self.old_expert_maps = None
         self.enable_d2d = enable_d2d
-        self.rank_id = dist.get_rank()
+        self.tp_size = tp_size
+        self.rank_id = get_ep_group().rank_in_group
         self.multi_stage = policy_type == 3
 
     def do_update(self):
@@ -162,6 +169,7 @@ class EplbWorker:
                     updated_expert_maps_this_layer,
                     layer_id,
                 )
+                continue
 
             # Parse expert_ids each rank needs to receive from other ranks
             dst_rank_indices, experts_to_recv = torch.where(
@@ -280,7 +288,11 @@ class EplbWorker:
 
             maps.append(new_expert_map[self.rank_id].numpy().tolist())
 
-            log2phy_map = generate_log2phy_map(new_expert_map, self.rank_id)
+            log2phy_map = generate_log2phy_map(
+                new_expert_map,
+                self.rank_id,
+                tp_size=self.tp_size,
+            )
             log2phy_all.append(log2phy_map.numpy().tolist())
 
             layer_ids.append(layer_id)
@@ -323,7 +335,13 @@ class EplbWorker:
 
 
 class EplbProcess:
-    def __init__(self, shared_dict, policy_type: int = 0, enable_d2d: bool = True):
+    def __init__(
+        self,
+        shared_dict,
+        policy_type: int = 0,
+        enable_d2d: bool = True,
+        tp_size: int | None = None,
+    ):
         """
         Args:
             shared_dict: Cross-process shared dict returned by Manager().dict()
@@ -337,7 +355,12 @@ class EplbProcess:
         self.block_update_q: Queue[Any] = Queue(maxsize=1)
 
         # Create EplbWorker instance
-        self.worker = EplbWorker(self.shared_dict, self.policy_type, self.enable_d2d)
+        self.worker = EplbWorker(
+            self.shared_dict,
+            self.policy_type,
+            self.enable_d2d,
+            tp_size=tp_size,
+        )
 
     def worker_process(self, planner_q, block_update_q):
         """

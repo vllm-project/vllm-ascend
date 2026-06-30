@@ -19,6 +19,7 @@ import numpy
 import torch
 import torch.distributed as dist
 import vllm.envs as envs
+from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import logger
 from vllm.v1.utils import record_function_or_nullcontext
 
@@ -39,6 +40,7 @@ class EplbUpdator:
         self.comm_group = get_dynamic_eplb_group()
 
     def set_adaptor(self, adaptor: VllmEplbAdaptor):
+        self.pp_rank = get_pp_group().rank_in_group
         self.adaptor = adaptor
         self.num_moe_layers = self.adaptor.num_moe_layers
         local_load = self.adaptor.get_rank_expert_workload()
@@ -83,7 +85,7 @@ class EplbUpdator:
             if self.expert_map_record_path is not None:
                 self.adaptor._export_tensor_to_file(self.shared_dict["expert_maps"], self.expert_map_record_path)
 
-            self.adaptor.model.clear_all_moe_loads()
+            self.adaptor.clear_all_moe_loads()
             self.cur_iterations = 0
 
     def get_update_info_flag(self):
@@ -117,7 +119,7 @@ class EplbUpdator:
                     expert_send_info,
                     expert_recv_info,
                     updated_expert_map_this_rank,
-                    layer_id + self.adaptor.num_dense_layers,
+                    layer_id,
                 )
 
                 # set asynchronous stream for d2d expert weight update
@@ -162,15 +164,17 @@ class EplbUpdator:
         comm_op_list = []
         reqs = []
 
-        for dst_rank in range(self.world_size):
-            if dst_rank == self.rank_id:
+        for dst_rank in range(self.comm_group.world_size):
+            if dst_rank == self.comm_group.rank_in_group:
                 continue
-            comm_op_list.append(dist.P2POp(dist.isend, src_tensor, dst_rank, group=self.comm_group.device_group))
+            global_dst = self.comm_group.ranks[dst_rank]
+            comm_op_list.append(dist.P2POp(dist.isend, src_tensor, global_dst, group=self.comm_group.device_group))
 
-        for src_rank in range(self.world_size):
-            if src_rank == self.rank_id:
+        for src_rank in range(self.comm_group.world_size):
+            if src_rank == self.comm_group.rank_in_group:
                 continue
-            comm_op_list.append(dist.P2POp(dist.irecv, src_tensor, src_rank, group=self.comm_group.device_group))
+            global_src = self.comm_group.ranks[src_rank]
+            comm_op_list.append(dist.P2POp(dist.irecv, src_tensor, global_src, group=self.comm_group.device_group))
         if comm_op_list:
             reqs = dist.batch_isend_irecv(comm_op_list)
 

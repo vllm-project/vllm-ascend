@@ -19,6 +19,7 @@ def test_pd_consumer_first_step_injects_placeholder_spec_tokens():
     scheduler.num_spec_tokens = 1
     scheduler.max_model_len = 1024
     scheduler.log_stats = False
+    scheduler.connector = None
 
     enqueued_requests = []
 
