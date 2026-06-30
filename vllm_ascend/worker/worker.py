@@ -634,7 +634,7 @@ class NPUWorker(WorkerBase):
         if forward_pass and not get_pp_group().is_first_rank:
             # If flashcomm1 is used, this all_gather_group parameter needs to be removed, otherwise
             # it will conflict with the all-gather operation in flashcomm1.
-            if enable_sp():
+            if enable_sp(self.vllm_config):
                 all_gather_group = None
             else:
                 all_gather_group = get_tp_group()
@@ -660,7 +660,7 @@ class NPUWorker(WorkerBase):
         assert parallel_config.distributed_executor_backend != ("external_launcher") and not get_pp_group().is_last_rank
         # If flashcomm1 is used, this all_gather_group parameter needs to be removed, otherwise
         # it will conflict with the all-gather operation in flashcomm1.
-        if enable_sp():
+        if enable_sp(self.vllm_config):
             all_gather_group = None
         else:
             all_gather_group = get_tp_group()
