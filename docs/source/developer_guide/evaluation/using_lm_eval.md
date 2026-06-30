@@ -139,7 +139,7 @@ lm_eval \
 After 30 minutes, the output is as shown below:
 
 ```shell
-The markdown format results is as below:
+The results in Markdown format are as follows:
 
 |Tasks|Version|     Filter     |n-shot|  Metric   |   |Value |   |Stderr|
 |-----|------:|----------------|-----:|-----------|---|-----:|---|-----:|
