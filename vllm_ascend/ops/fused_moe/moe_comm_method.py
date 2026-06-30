@@ -127,7 +127,7 @@ class MoECommMethod(ABC):
         before_dispatch_evt = torch.npu.current_stream().record_event()
         routed_topk_ids = fused_experts_input.topk_ids
         if fused_experts_input.routing.log2phy is not None:
-            routed_topk_ids = fused_experts_input.routing.log2phy[routed_topk_ids]
+            routed_topk_ids = fused_experts_input.routing.log2phy.index_select(0, routed_topk_ids)
 
         token_dispatch_input = build_token_dispatch_input(
             fused_experts_input=fused_experts_input,
