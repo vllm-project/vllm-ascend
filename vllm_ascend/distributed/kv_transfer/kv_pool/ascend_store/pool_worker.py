@@ -967,7 +967,9 @@ class KVPoolWorker:
             return None
 
         exists: set[tuple[int, bytes]] = set()
+        lookup_masks = self.cache_coordinator.lookup_mask(token_len)
         for group_id in kv_cache_group_ids:
+            chunk_mask = lookup_masks[group_id] if group_id < len(lookup_masks) else None
             keys: list[str] = []
             chunk_hashes: list[str] = []
             variant_counts: list[int] = []
@@ -975,6 +977,7 @@ class KVPoolWorker:
                 token_len,
                 block_hashes,
                 kv_cache_group_id=group_id,
+                chunk_mask=chunk_mask,
             ):
                 variants = self._expand_lookup_key_variants(key.to_string(), group_id, include_all_ranks)
                 keys.extend(variants)

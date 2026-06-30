@@ -78,6 +78,7 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         worker = object.__new__(cls)
         worker.num_kv_cache_groups = 1
         worker.cache_coordinator = MagicMock()
+        worker.cache_coordinator.lookup_mask.return_value = ([False, True],)
         worker.cache_coordinator.find_longest_cache_hit.return_value = ((), 128)
         worker.m_store = MagicMock()
         worker.m_store.exists.return_value = [1]
@@ -91,6 +92,13 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         hit = worker._lookup_with_coordinator(128, [b"h0"], [0], use_layerwise=False, include_all_ranks=False)
 
         self.assertEqual(hit, 128)
+        worker.cache_coordinator.lookup_mask.assert_called_once_with(128)
+        worker.token_database.process_tokens.assert_called_once_with(
+            128,
+            [b"h0"],
+            kv_cache_group_id=0,
+            chunk_mask=[False, True],
+        )
         worker.cache_coordinator.find_longest_cache_hit.assert_called_once()
         self.assertFalse(worker.cache_coordinator.find_longest_cache_hit.call_args.kwargs["apply_eagle"])
 

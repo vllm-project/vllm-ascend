@@ -404,6 +404,7 @@ class ChunkedTokenDatabase:
         kv_cache_group_id: int = 0,
         cache_role: str = "kv",
         cache_family: str | None = None,
+        chunk_mask: Sequence[bool] | None = None,
     ) -> Iterable[tuple[int, int, PoolKey]]:
         """Process the tokens and return the corresponding cache engine keys."""
         if not block_hashes:
@@ -413,20 +414,15 @@ class ChunkedTokenDatabase:
             cache_family = self.group_cache_families.get(cache_role, {}).get(kv_cache_group_id, "default")
         cache_family_ratio = max(infer_cache_family_ratio(cache_family), 1)
         group_block_size *= cache_family_ratio
-        block_hashes = get_block_hashes(
+        block_hashes_iter = _iter_block_hashes(
             block_hashes,
             group_block_size,
             self.hash_block_size,
+            chunk_mask,
         )
-        if not block_hashes:
-            return
-        if not isinstance(block_hashes[0], str):
-            block_hashes = [
-                h.hex()  # type: ignore[union-attr]
-                for h in block_hashes
-            ]
-        start_idx = 0
-        for chunk_id, hash_val in enumerate(block_hashes):
+        for chunk_id, hash_val in block_hashes_iter:
+            if not isinstance(hash_val, str):
+                hash_val = hash_val.hex()
             start_idx = chunk_id * group_block_size
             if start_idx >= token_len:
                 break
@@ -544,14 +540,28 @@ def get_block_hashes(
     group_block_size: int,
     hash_block_size: int,
 ) -> BlockHashList | list[str]:
+    return [hash_val for _, hash_val in _iter_block_hashes(block_hashes, group_block_size, hash_block_size)]
+
+
+def _iter_block_hashes(
+    block_hashes: BlockHashList | list[str],
+    group_block_size: int,
+    hash_block_size: int,
+    chunk_mask: Sequence[bool] | None = None,
+) -> Iterable[tuple[int, BlockHash | str]]:
     if group_block_size == hash_block_size:
-        return block_hashes
+        for chunk_id, block_hash in enumerate(block_hashes):
+            if chunk_mask is None or (chunk_id < len(chunk_mask) and chunk_mask[chunk_id]):
+                yield chunk_id, block_hash
+        return
     assert group_block_size % hash_block_size == 0, "block_size must be divisible by hash_block_size"
     scale_factor = group_block_size // hash_block_size
-    return [
-        _rehash_block_hash_group(block_hashes[idx : idx + scale_factor])
-        for idx in range(0, len(block_hashes) // scale_factor * scale_factor, scale_factor)
-    ]
+    num_chunks = len(block_hashes) // scale_factor
+    for chunk_id in range(num_chunks):
+        if chunk_mask is not None and (chunk_id >= len(chunk_mask) or not chunk_mask[chunk_id]):
+            continue
+        idx = chunk_id * scale_factor
+        yield chunk_id, _rehash_block_hash_group(block_hashes[idx : idx + scale_factor])
 
 
 def _rehash_block_hash_group(block_hashes: Sequence[BlockHash | str]) -> BlockHash:

@@ -162,6 +162,29 @@ class AscendStoreCoordinator:
             for group_id, mask in enumerate(masks)
         )
 
+    def lookup_mask(self, token_len: int) -> tuple[list[bool] | None, ...]:
+        masks: list[list[bool] | None] = []
+        for group_id, spec in enumerate(self.group_effective_specs):
+            num_chunks = _num_chunks(token_len, self.group_effective_block_sizes[group_id])
+            if not _uses_reachable_mask(self.group_cache_families[group_id]):
+                masks.append(None)
+                continue
+            manager_cls = _get_manager_class(_unwrap_spec(self.kv_cache_groups[group_id].kv_cache_spec))
+            mask = _reachable_block_mask(
+                manager_cls,
+                start_block=0,
+                end_block=num_chunks,
+                alignment_tokens=self.lcm_block_size,
+                kv_cache_spec=spec,
+                use_eagle=False,
+                retention_interval=None,
+                num_prompt_tokens=None,
+            )
+            if mask is not None:
+                assert len(mask) == num_chunks
+            masks.append(mask)
+        return tuple(masks)
+
     def store_mask(
         self,
         aligned_token_len: int,

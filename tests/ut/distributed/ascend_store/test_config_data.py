@@ -17,7 +17,7 @@
 
 import hashlib
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
@@ -184,6 +184,19 @@ class TestChunkedTokenDatabase(unittest.TestCase):
         self.assertEqual(len(result), 2)
         self.assertEqual(result[0][2].chunk_hash, _expected_grouped_hash("a", "b").hex())
         self.assertEqual(len(result[0][2].chunk_hash), 64)
+
+    def test_process_tokens_chunk_mask_skips_grouped_hash_generation(self):
+        db = ChunkedTokenDatabase(self.meta, block_size=32, partitions=None, hash_block_size=16)
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data._rehash_block_hash_group",
+            side_effect=lambda hashes: b"".join(hash_value.encode() for hash_value in hashes),
+        ) as rehash:
+            result = list(db.process_tokens(64, ["a", "b", "c", "d"], chunk_mask=[False, True]))
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0][0], 32)
+        self.assertEqual(result[0][2].chunk_hash, b"cd".hex())
+        rehash.assert_called_once_with(["c", "d"])
 
     def test_process_tokens_rehashes_raw_bytes_and_hex_strings_consistently(self):
         db = ChunkedTokenDatabase(self.meta, block_size=16, partitions=None, hash_block_size=8)
