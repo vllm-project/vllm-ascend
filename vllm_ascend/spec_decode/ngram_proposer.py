@@ -1,5 +1,6 @@
 import torch
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
+
 from vllm_ascend.utils import vllm_version_is
 
 
