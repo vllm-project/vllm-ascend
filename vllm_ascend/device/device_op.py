@@ -789,6 +789,12 @@ class BaseDeviceAdaptor:
         )
         return results
 
+    @staticmethod
+    def npu_moe_token_unpermute(permuted_tokens, sorted_indices, probs):
+        return torch_npu.npu_moe_token_unpermute(
+            permuted_tokens=permuted_tokens, sorted_indices=torch.abs(sorted_indices), probs=probs
+        )
+
 
 class A5DeviceAdaptor(BaseDeviceAdaptor):
     @classmethod
@@ -1685,6 +1691,12 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             positions=positions,
         )
         return results
+
+    @staticmethod
+    def npu_moe_token_unpermute(permuted_tokens, sorted_indices, probs):
+        return torch_npu.npu_moe_token_unpermute(
+            permuted_tokens=permuted_tokens, sorted_indices=sorted_indices, probs=probs
+        )
 
 
 def get_device_adaptor() -> type["BaseDeviceAdaptor"]:
