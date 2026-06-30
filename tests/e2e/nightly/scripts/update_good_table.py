@@ -23,12 +23,12 @@ CSV columns:
     name, yaml/path, link, status,
     vLLM Git information, vLLM-Ascend Git information, time
 """
+
 import argparse
 import csv
 import os
 import subprocess
-from datetime import datetime, timezone, timedelta
-
+from datetime import datetime, timedelta, timezone
 
 HEADER = [
     "name",
@@ -129,9 +129,7 @@ def main() -> None:
     vllm_hash = args.vllm_version.strip() or git_head(args.vllm_dir)
     vllm_ascend_hash = args.vllm_ascend_version.strip() or git_head(args.vllm_ascend_dir)
     timestamp = current_timestamp()
-    test_path = resolve_test_path(
-        args.test_path, args.config_base_path, args.scene, args.vllm_ascend_dir
-    )
+    test_path = resolve_test_path(args.test_path, args.config_base_path, args.scene, args.vllm_ascend_dir)
 
     new_row = [
         args.test_name,
