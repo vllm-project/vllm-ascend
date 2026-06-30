@@ -333,7 +333,14 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         group_dim = self.n_local_heads * self.head_dim // self.n_local_groups
         attn_out = attn_out.reshape(-1, self.n_local_groups, group_dim)
         attn_out = _fp8_e4m3fn_qdq(attn_out, 128)
-        wo_a = self.wo_a.weight.view(self.n_local_groups, self.o_lora_rank, group_dim)
+        wo_a_weight = self.wo_a.weight
+        if wo_a_weight.ndim == 3:
+            # Ascend's wo_a loader stores weights as [group, group_dim, rank]
+            # for the main DSA path. DSpark's eager projection needs the
+            # original [group, rank, group_dim] layout.
+            wo_a = wo_a_weight.transpose(1, 2).contiguous()
+        else:
+            wo_a = wo_a_weight.view(self.n_local_groups, self.o_lora_rank, group_dim)
         z = _grouped_wo_a_projection(attn_out, wo_a).flatten(1)
         return _linear(self.wo_b, z)
 
