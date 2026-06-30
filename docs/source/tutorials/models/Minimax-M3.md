@@ -243,6 +243,158 @@ The examples below use Ascend A2 servers. Update `WEIGHT_PATH`, `LOG_PATH`, `loc
     --port 11223 > ${LOG_PATH} 2>&1 &
   ```
 
+## Thinking Mode
+
+MiniMax-M3 supports three thinking modes, controlled via `thinking_mode` in `chat_template_kwargs`:
+
+| Mode | Behavior | Use Case |
+|------|----------|----------|
+| `enabled` | The model thinks before every response, including after tool results | Complex reasoning, agents |
+| `disabled` | No thinking; the model answers directly | Latency-sensitive turns |
+| `adaptive` | The model decides whether to think based on the task (default when unset) | General use |
+
+### Request Examples
+
+**With thinking disabled (curl):**
+
+```bash
+curl http://127.0.0.1:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "minimax-m3",
+    "messages": [{"role": "user", "content": "who are you?"}],
+    "max_tokens": 100,
+    "stream": false,
+    "top_p": 0.95,
+    "top_k": 40,
+    "temperature": 1.0,
+    "chat_template_kwargs": {"thinking_mode": "disabled"}
+  }'
+```
+
+Change `"thinking_mode"` to `"enabled"` or `"adaptive"` as needed. The deprecated `enable_thinking` parameter (equivalent to `thinking_mode: "enabled"`) is also supported.
+
+**With thinking enabled (Python SDK):**
+
+```python
+from openai import OpenAI
+
+client = OpenAI(api_key="EMPTY", base_url="http://localhost:8000/v1")
+
+response = client.chat.completions.create(
+    model="minimax-m3",
+    messages=[{"role": "user", "content": "Prove there are infinitely many primes."}],
+    extra_body={"chat_template_kwargs": {"thinking_mode": "enabled"}},
+)
+msg = response.choices[0].message
+print(getattr(msg, "reasoning", None))  # the <mm:think> block
+print(msg.content)                       # the final answer
+```
+
+
+## Reasoning Parser
+
+The MiniMax-M3 reasoning parser (`--reasoning-parser minimax_m3`) extracts the thinking block `<mm:think>...</mm:think>` from model output and exposes it as the `reasoning` field. The remaining text is returned as `content`.
+
+### Server Configuration
+
+The `--reasoning-parser minimax_m3` flag enables the MiniMax-M3 reasoning parser, which splits model output into reasoning and content using `<mm:think>...</mm:think>` delimiters:
+
+```bash
+vllm serve ${WEIGHT_PATH} \
+  --reasoning-parser minimax_m3 \
+  ...
+```
+
+### Output Format
+
+MiniMax-M3 uses explicit thinking delimiters:
+
+```
+<mm:think>reasoning process...</mm:think>final answer
+```
+
+### Parser Behavior
+
+- **`thinking_mode="enabled"`**: The chat template pre-fills `<mm:think>` in the prompt. Generated text starts inside the reasoning block and transitions to content after `</mm:think>`.
+- **`thinking_mode="disabled"` or default**: Model output is treated as plain content. If `<mm:think>` appears, the parser splits on the delimiters.
+- **Streaming**: Reasoning and content are streamed incrementally via `DeltaMessage.reasoning` and `DeltaMessage.content` token-by-token.
+- **Token counting**: Reasoning tokens inside `<mm:think>` blocks are correctly counted.
+
+## Tool Call Parser
+
+MiniMax-M3 uses a namespace-delimited XML format for tool calls. Enable it with `--tool-parser minimax_m3`.
+
+### Server Configuration
+
+When both `--reasoning-parser minimax_m3` and `--tool-call-parser minimax_m3` are specified, the parsers work together automatically to handle responses that contain both reasoning blocks and tool calls:
+
+```bash
+vllm serve ${WEIGHT_PATH} \
+  --reasoning-parser minimax_m3 \
+  --enable-auto-tool-choice \
+  --tool-call-parser minimax_m3 \
+  ...
+```
+
+### Tool Call Format
+
+Each structural tag is preceded by the `]<]minimax[>[` namespace marker:
+
+```xml
+]<]minimax[>[<tool_call>
+]<]minimax[>[<invoke name="create_order">
+]<]minimax[>[<user_id>42]<]minimax[>[</user_id>
+]<]minimax[>[<shipping>
+]<]minimax[>[<city>Singapore]<]minimax[>[</city>
+]<]minimax[>[<zip>018956]<]minimax[>[</zip>
+]<]minimax[>[</shipping>
+]<]minimax[>[</invoke>
+]<]minimax[>[</tool_call>
+```
+
+### Key Features
+
+- **Recursive parameter parsing**: Supports nested objects and arrays (e.g., `shipping` containing `city`/`zip`).
+- **Schema-aware type coercion**: String parameter values are automatically converted to the correct types (integer, boolean, object, array) based on the function's JSON Schema definition.
+- **Multiple invocations**: A single `<tool_call>` block can contain multiple `<invoke>` blocks.
+- **Streaming**: Tool name and argument fragments are streamed incrementally as the `<invoke>` block is received.
+
+### Request Example (curl)
+
+```bash
+curl http://127.0.0.1:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "minimax-m3",
+    "messages": [{"role": "user", "content": "What's the weather like in Shanghai?"}],
+    "max_tokens": 300,
+    "stream": false,
+    "tool_choice": "auto",
+    "tools": [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Get current weather for a city",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "location": {
+                            "type": "string",
+                            "description": "City or country name"
+                        }
+                    },
+                    "required": ["location"],
+                    "additionalProperties": false
+                }
+            }
+        }
+    ],
+    "chat_template_kwargs": {"thinking_mode": "disabled"}
+  }'
+```
+
 ## Functional Verification
 
 - Text
