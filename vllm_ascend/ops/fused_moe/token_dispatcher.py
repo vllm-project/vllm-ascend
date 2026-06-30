@@ -29,7 +29,6 @@ from vllm.config import get_current_vllm_config
 from vllm.distributed.parallel_state import get_ep_group
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.comm_utils import async_all_to_all, gather_from_sequence_parallel_region
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
@@ -399,7 +398,7 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
             first_expert_idx = 0
             last_expert_idx = self.num_experts_local
             global_num_experts = self.num_experts_local
-        sorted_hidden_states, expanded_row_idx, expert_tokens, dynamic_scale = DeviceOperator.npu_moe_init_routing(
+        sorted_hidden_states, expanded_row_idx, expert_tokens, dynamic_scale = torch_npu.npu_moe_init_routing_v2(
             hidden_states,
             topk_ids,
             scale=dynamic_scale,
@@ -426,10 +425,15 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
         )
 
     def token_combine(self, hidden_states, combine_metadata, bias=None):
-        final_hidden_states = torch_npu.npu_moe_token_unpermute(
-            permuted_tokens=hidden_states,
-            sorted_indices=torch.abs(combine_metadata.expanded_row_idx),
-            probs=combine_metadata.topk_weights,
+        final_hidden_states = torch_npu.npu_moe_finalize_routing(
+            skip1=None,
+            skip2=None,
+            bias=None,
+            export_for_source_row=None,
+            expanded_permuted_rows=hidden_states.unsqueeze(0),
+            expanded_src_to_dst_row=combine_metadata.expanded_row_idx,
+            scales=combine_metadata.topk_weights,
+            drop_pad_mode=3,
         )
         if len(combine_metadata.restore_shape) == 3:
             final_hidden_states = final_hidden_states.view(combine_metadata.restore_shape)
@@ -568,10 +572,15 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
         ) = self._preprocess(topk_ids)
         hidden_shape_before_permute = hidden_states.shape
 
-        permutated_local_input_tokens, reversed_local_input_permutation_mapping = torch_npu.npu_moe_token_permute(
-            tokens=hidden_states,
-            indices=topk_ids,
-            num_out_tokens=num_out_tokens,
+        permutated_local_input_tokens, reversed_local_input_permutation_mapping, _, _ = (
+            torch_npu.npu_moe_init_routing_v2(
+                hidden_states,
+                topk_ids,
+                active_num=num_out_tokens,
+                expert_num=self.num_experts,
+                expert_tokens_num_flag=True,
+                active_expert_range=[0, self.num_experts],
+            )
         )
 
         return (
@@ -637,20 +646,20 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
         if self.num_local_experts <= 1:
             return global_input_tokens, dynamic_scale_after_all2all, None
 
-        # Handle quantized case
-        if with_quant:
-            assert global_input_tokens_local_experts_indices is not None, (
-                "global_input_tokens_local_experts_indices must be provided"
-            )
-            dynamic_scale_after_all2all, _ = torch_npu.npu_moe_token_permute(
-                dynamic_scale_after_all2all.unsqueeze(-1), global_input_tokens_local_experts_indices
-            )
-            dynamic_scale_after_all2all = dynamic_scale_after_all2all.squeeze(-1)
-
         # Non-quantized case
-        global_input_tokens, reversed_global_input_permutation_mapping = torch_npu.npu_moe_token_permute(
-            global_input_tokens, global_input_tokens_local_experts_indices
+        global_input_tokens, reversed_global_input_permutation_mapping, _, dynamic_scale_after_all2all = (
+            torch_npu.npu_moe_init_routing_v2(
+                global_input_tokens,
+                global_input_tokens_local_experts_indices.unsqueeze(-1),
+                scale=dynamic_scale_after_all2all,
+                expert_num=self.num_experts,
+                expert_tokens_num_flag=True,
+                active_expert_range=[0, self.num_local_experts],
+            )
         )
+        if not with_quant:
+            dynamic_scale_after_all2all = None
+
         return global_input_tokens, dynamic_scale_after_all2all, reversed_global_input_permutation_mapping
 
     def _combine_preprocess(
@@ -659,7 +668,16 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
         # Unpermutation 2: expert output to AlltoAll input
         rev_global = combine_metadata.reversed_global_input_permutation_mapping
         if hidden_states.shape[0] > 0 and self.num_local_experts > 1 and rev_global is not None:
-            hidden_states = torch_npu.npu_moe_token_unpermute(hidden_states, rev_global)
+            hidden_states = torch_npu.npu_moe_finalize_routing(
+                skip1=None,
+                skip2=None,
+                bias=None,
+                export_for_source_row=None,
+                expanded_permuted_rows=hidden_states,
+                expanded_src_to_dst_row=rev_global,
+                scales=None,
+                drop_pad_mode=2,
+            )
         return hidden_states
 
     def _combine_postprocess(
@@ -668,11 +686,15 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
         combine_metadata: MoEAllToAllCombineMetadata,
     ) -> torch.Tensor:
         # Unpermutation 1: AlltoAll output to output
-        output = torch_npu.npu_moe_token_unpermute(
-            permuted_tokens=permutated_local_input_tokens,
-            sorted_indices=combine_metadata.reversed_local_input_permutation_mapping.to(torch.int32),
-            probs=combine_metadata.topk_weights,
-            restore_shape=combine_metadata.hidden_shape_before_permute,
+        output = torch_npu.npu_moe_finalize_routing(
+            skip1=None,
+            skip2=None,
+            bias=None,
+            export_for_source_row=None,
+            expanded_permuted_rows=permutated_local_input_tokens,
+            expanded_src_to_dst_row=combine_metadata.reversed_local_input_permutation_mapping.to(torch.int32),
+            scales=combine_metadata.topk_weights,
+            drop_pad_mode=2,
         )
         output = output.view(combine_metadata.hidden_shape)
         return output

@@ -86,3 +86,15 @@ class TokenDispatcherWithAllGather310(TokenDispatcherWithAllGather):
                 restore_shape=restore_shape,
             ),
         )
+
+    def token_combine(self, hidden_states, combine_metadata, bias=None):
+        final_hidden_states = torch_npu.npu_moe_token_unpermute(
+            permuted_tokens=hidden_states,
+            sorted_indices=torch.abs(combine_metadata.expanded_row_idx),
+            probs=combine_metadata.topk_weights,
+        )
+        if len(combine_metadata.restore_shape) == 3:
+            final_hidden_states = final_hidden_states.view(combine_metadata.restore_shape)
+
+        # these values are no longer used, so they need to be set to None for memory release.
+        return final_hidden_states
