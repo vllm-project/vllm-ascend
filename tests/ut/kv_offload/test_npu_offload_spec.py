@@ -5,10 +5,10 @@
 
 These guard against the worker-side specs drifting from the upstream
 ``CPUOffloadingSpec`` / ``TieringOffloadingSpec`` / ``SharedOffloadRegion``
-APIs (the multi-tier offloading adaptation previously called
-``SharedOffloadRegion`` with a removed ``kv_bytes_per_block`` kwarg and read
-non-existent ``BLOCK_SIZE_ALIGNMENT`` / ``kv_bytes_per_offloaded_block``
-attributes, which crashed at spec construction time).
+APIs. Upstream reworked ``SharedOffloadRegion.__init__`` to size the mmap from
+``num_blocks * kv_bytes_per_block`` and dropped the old ``total_size_bytes`` /
+``num_workers`` kwargs; the multi-tier offloading adaptation must follow that
+signature or it crashes at worker-side handler construction time.
 """
 
 import inspect
@@ -79,6 +79,7 @@ def test_tiering_create_handlers_matches_shared_region_signature(monkeypatch):
             # __init__ (this is exactly what the original bug violated).
             inspect.signature(SharedOffloadRegion.__init__).bind(self, **kwargs)
             captured.update(kwargs)
+            captured["region"] = self
 
     sentinel_handlers = object()
 
@@ -103,13 +104,21 @@ def test_tiering_create_handlers_matches_shared_region_signature(monkeypatch):
     spec.cpu_page_size_per_worker = 64
     spec.num_blocks = 10
     spec.block_size_factor = 1
+    # Aligned per-block row stride exposed by CPUOffloadingSpec; the mmap region
+    # derives its total size from num_blocks * this value.
+    spec.kv_bytes_per_offloaded_block = 4096
 
     result = spec.create_handlers(kv_caches=object())
 
     assert result is sentinel_handlers
-    assert captured["total_size_bytes"] == 64 * 2 * 10
-    assert captured["num_workers"] == 2
-    assert captured["cpu_page_size"] == 64
+    # New upstream signature: size is derived from num_blocks * kv_bytes_per_block.
+    assert captured["kv_bytes_per_block"] == 4096
     assert captured["num_blocks"] == 10
-    # The removed kwarg must never reappear.
-    assert "kv_bytes_per_block" not in captured
+    assert captured["cpu_page_size"] == 64
+    assert captured["rank"] == 0
+    assert captured["instance_id"] == "inst"
+    # The removed kwargs must never reappear.
+    assert "total_size_bytes" not in captured
+    assert "num_workers" not in captured
+    # The worker handlers must receive the mmap region they will clean up.
+    assert captured["handler_kwargs"]["mmap_region"] is captured["region"]

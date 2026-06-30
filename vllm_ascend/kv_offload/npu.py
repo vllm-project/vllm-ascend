@@ -121,16 +121,17 @@ class NPUTieringOffloadingSpec(_NPUHandlersMixin, _TieringOffloadingSpec):
         # Mirror upstream TieringOffloadingSpec.create_handlers, but route the
         # worker-side transfers through the Ascend handlers and resolve the
         # worker slot via the NPU device index.
-        world_size = self.vllm_config.parallel_config.world_size
+        #
+        # SharedOffloadRegion now sizes the mmap internally from
+        # ``num_blocks * kv_bytes_per_block`` (the aligned per-block row stride
+        # exposed as ``kv_bytes_per_offloaded_block``); the old
+        # ``total_size_bytes`` / ``num_workers`` kwargs were removed upstream.
         rank = torch.npu.current_device()
         worker_mmap = SharedOffloadRegion(
             instance_id=self.vllm_config.instance_id,
-            total_size_bytes=self.cpu_page_size_per_worker
-            * world_size
-            * self.num_blocks,
             num_blocks=self.num_blocks,
             rank=rank,
-            num_workers=world_size,
+            kv_bytes_per_block=self.kv_bytes_per_offloaded_block,
             cpu_page_size=self.cpu_page_size_per_worker,
         )
         return CpuNpuOffloadingHandlers(
