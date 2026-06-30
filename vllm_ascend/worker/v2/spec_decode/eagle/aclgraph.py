@@ -162,6 +162,7 @@ class DecodeEagleAclGraphManager(DecodeEagleCudaGraphManager):
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
         progress_bar_desc: str = "Capturing CUDA graphs",
+        **kwargs,
     ) -> None:
         """Capture ACL graphs for Eagle."""
         with communicator_switch(), model_capture_wrapper(self.speculator, self.is_draft_model_prefill):

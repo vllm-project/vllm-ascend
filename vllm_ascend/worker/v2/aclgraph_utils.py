@@ -113,6 +113,7 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         use_aux_hidden_state_outputs: bool = False,
         lora_capture_hook: Callable[[int, int, int], None] | None = None,
         progress_bar_desc: str = "Capturing CUDA graphs",
+        **kwargs,
     ) -> None:
         """Capture CUDA graphs for model forward pass."""
         model = ModelWithContext(model)
