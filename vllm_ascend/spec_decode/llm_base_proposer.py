@@ -994,12 +994,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         else:
             common_attn_metadata.block_table_tensor = common_attn_metadata.block_table_tensor.clone()
 
+        metadata_has_prefill = bool(getattr(attn_metadata_i, "num_prefills", 0))
+        is_prefill_batch = num_prefill_reqs > 0 or metadata_has_prefill
         if self.pcp_size * self.dcp_size > 1:
-            is_decode_only_batch = num_decode_reqs > 0 and num_prefill_reqs == 0
+            is_decode_only_batch = num_decode_reqs > 0 and not is_prefill_batch
             if (
                 self.num_speculative_tokens > 1
                 and is_decode_only_batch
-                and not attn_metadata_i.num_prefills
             ):
                 # For pcp/dcp, tokens are split across different cp ranks,
                 # so we can not simply update slot_mapping by += 1.
@@ -1112,7 +1113,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 "inputs_embeds": inputs_embeds,
                 "multi_steps_attn_metadata": multi_steps_attn_metadata,
                 "num_tokens": num_tokens,
-                "is_prefill": attn_metadata_i.num_prefills,
+                "is_prefill": is_prefill_batch,
             }
             run_draft = partial(self._runnable, **model_inputs)
 
