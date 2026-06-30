@@ -606,6 +606,11 @@ class AscendSFADCPMetadataBuilder(AscendSFAMetadataBuilder):
         self.dcp_rank = get_decode_context_model_parallel_rank() if self.dcp_size > 1 else 0
         self.cp_kv_cache_interleave_size = vllm_config.parallel_config.cp_kv_cache_interleave_size
         self._dcp_metadata_debug_print_count = 0
+        self.dcp_local_seq_lens_buf = torch.empty(
+            vllm_config.scheduler_config.max_num_seqs,
+            dtype=torch.int32,
+            device=device,
+        )
         assert self.pcp_size == 1, "AscendSFADCPMetadataBuilder only supports DCP without PCP."
         assert self.dcp_size > 1, "AscendSFADCPMetadataBuilder requires DCP world size > 1."
         if self.cp_kv_cache_interleave_size <= 0:
@@ -655,11 +660,13 @@ class AscendSFADCPMetadataBuilder(AscendSFAMetadataBuilder):
         dcp_local_seq_lens = common_attn_metadata.dcp_local_seq_lens
         if dcp_local_seq_lens is None:
             dcp_local_seq_lens = self._get_dcp_local_seq_lens(metadata.seq_lens)
-        local_seq_lens = dcp_local_seq_lens[:num_reqs].to(
+        local_seq_lens_src = dcp_local_seq_lens[:num_reqs].to(
             device=self.device,
             dtype=torch.int32,
             non_blocking=True,
         )
+        self.dcp_local_seq_lens_buf[:num_reqs].copy_(local_seq_lens_src, non_blocking=True)
+        local_seq_lens = self.dcp_local_seq_lens_buf[:num_reqs]
 
         metadata.dcp_context = DCPContext(
             slot_mapping=dcp_slot_mapping[:num_input_tokens],
