@@ -116,15 +116,11 @@ def chunk_gated_delta_rule_fwd(
     )
 
     if get_pcp_group().world_size > 1:
-        # Derive the non-spec decode count from the HOST cu_seqlens (already on
-        # CPU, no new NPU->CPU sync). The full-batch num_decodes includes
-        # spec-decode requests that are NOT in this h_update (non-spec) group;
-        # using it would mis-zero the first prefill seq's h_update entries in
-        # MTP mixed batches (spec-decode + prefill).
+        # When integrating mtp, since `mix_qkv` has been split, `num_decode` 
+        # cannot be directly obtained from the metadata and needs to be recalculated.
         if cu_seqlens_host is not None:
             actual_num_decodes = sum(
-                1 for i in range(len(cu_seqlens_host) - 1)
-                if 0 < cu_seqlens_host[i + 1] - cu_seqlens_host[i] <= 1
+                1 for i in range(len(cu_seqlens_host) - 1) if 0 < cu_seqlens_host[i + 1] - cu_seqlens_host[i] <= 1
             )
         else:
             actual_num_decodes = num_decodes
