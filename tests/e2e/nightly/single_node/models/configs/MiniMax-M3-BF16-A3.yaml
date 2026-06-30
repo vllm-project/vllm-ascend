@@ -4,7 +4,7 @@
 
 test_cases:
   - name: "MiniMax-M3-bf16"
-    model: "Eco-Tech/MiniMax-M3"
+    model: "MiniMax/MiniMax-M3"
     envs:
       HCCL_BUFFSIZE: "512"
       HCCL_OP_EXPANSION_MODE: "AIV"
@@ -51,7 +51,7 @@ test_cases:
         ignore_eos: false
       perf:
         case_type: performance
-        dataset_path: vllm-ascend/GSM8K-in256-bs1
+        dataset_path: vllm-ascend/GSM8K-in256-bs1-Minimax
         request_conf: vllm_api_stream_chat
         dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
         num_prompts: 1
