@@ -75,6 +75,13 @@ READY_SCHEDULER = b"ready_scheduler"
 STAGING_FULL = b"staging_full"
 START_PULL = b"START_PULL"
 
+# 2 MB huge-page granularity.  D2H (device-to-host) transfers on Ascend require
+# the registered host memory size to be 2M-aligned so that UBMem uses 2M huge
+# pages instead of falling back to 4K small pages.  aclrtMallocHost (used by
+# torch pin_memory) already tries to back the allocation with 2M huge pages;
+# pairing that with a 2M-aligned size lets UBMem operate in 2M-page mode.
+HUGEPAGE_SIZE_2M = 2 * 1024 * 1024
+
 StagingBlockKey = tuple[int, int, int]
 LegacyStagingBlockKey = tuple[int, int]
 
@@ -631,6 +638,7 @@ class D2RHCPUCacheManager:
                 local_block_id = self.free_queue.popleft()
                 self.used_set.add(local_block_id)
                 block_map[key] = local_block_id
+            logger.info(f"[===] after_allco{self.used_set=} {self.free_queue =}{block_map=}")
             return block_map
 
     def free_block_map(self, block_map: dict[tuple[int, ...], int]) -> None:
@@ -639,6 +647,7 @@ class D2RHCPUCacheManager:
                 if block_id in self.used_set:
                     self.used_set.remove(block_id)
                     self.free_queue.append(block_id)
+            logger.info(f"[===] free {self.used_set=} {self.free_queue =}{block_map=}")
 
 
 class D2RHThread(threading.Thread):
@@ -778,9 +787,7 @@ class D2RHThread(threading.Thread):
                     except Exception as e:
                         # Release any partially created mapping to prevent CPU
                         # staging leaks on handshake/queueing failures.
-                        remote_request_id = (
-                            params.get("remote_request_id", request_id) if params is not None else request_id
-                        )
+                        remote_request_id = params.get("remote_request_id", request_id) if params is not None else request_id
                         block_map = self.remote_local_block_map.pop(remote_request_id, None)
                         self.remote_local_block_map.pop(request_id, None)
                         if block_map:
@@ -825,6 +832,7 @@ class D2RHThread(threading.Thread):
         group_pulls_by_port: list[list[GroupPull]] = req_meta["group_pulls_by_port"]
         remote_port_send_num = req_meta.get("remote_port_send_num")
         block_map = self.remote_local_block_map[remote_request_id]
+        logger.info("[D2RH Thread] block_map: %s", block_map)
 
         if not any(remote_block_ids):
             return
@@ -917,12 +925,22 @@ class D2RHThread(threading.Thread):
                             block_len=inner_block_len,
                         )
                         for remote_block_id, local_block_id in zip(transfer_remote_block_ids, transfer_local_block_ids):
-                            src_list.append(src_layer_base_addr + local_block_id[0] * block_stride)
+                            src_list.append(
+                                src_layer_base_addr
+                                + local_block_id[0] * block_stride
+                            )
                             dst_list.append(dst_layer_base_addr + remote_block_id[0] * remote_block_stride)
                             length_list.append(inner_block_len * len(local_block_id))
 
             if src_list:
+                # 统计 batch_transfer_sync_read 调用耗时
+                _bt_start = time.perf_counter()
                 ret = self.engine.batch_transfer_sync_read(session_id, src_list, dst_list, length_list)
+                _bt_end = time.perf_counter()
+                logger.info(
+                    "[batch_transfer_sync_read] 耗时: %.6f s, src_list 长度: %d, "
+                    "总传输字节数: %d",
+                    _bt_end - _bt_start, len(src_list), sum(length_list))
                 if ret < 0:
                     raise RuntimeError(f"D2RH hop1 transfer failed, ret: {ret}")
             self._send_done_recv_signal(
@@ -1035,12 +1053,11 @@ class KVCacheRecvingThread(BaseKVCacheRecvingThread):
         block_map = self.remote_local_block_map.get(remote_request_id) or self.remote_local_block_map.get(request_id)
         if block_map is None:
             raise RuntimeError(f"CPU staging block map missing for request {remote_request_id}.")
+        logger.info("[H2D Thread] block_map: %s", block_map)
 
         remote_block_ids: BlockIds = req_meta["remote_block_ids"]
         group_pulls: list[GroupPull] = req_meta.get("group_pulls", [])
-        offset_by_group: dict[int, int] = {
-            group_pull.group_id: group_pull.remote_tp_offset for group_pull in group_pulls
-        }
+        offset_by_group: dict[int, int] = {group_pull.group_id: group_pull.remote_tp_offset for group_pull in group_pulls}
         cpu_remote_block_ids_groups: list[list[int]] = []
         for group_id, group_block_ids in enumerate(remote_block_ids):
             group_remote_tp_offset = offset_by_group.get(group_id, 0)
@@ -1269,7 +1286,7 @@ class MooncakeConnectorScheduler(BaseMooncakeConnectorScheduler):
             with self.listeningthread.ready_lock:
                 if request.request_id not in self.listeningthread.ready_request:
                     return None, False  # type: ignore[return-value]
-                self.all_requests.remove(request.request_id)
+                # self.all_requests.remove(request.request_id)
                 token_ids = request.prompt_token_ids or []
                 actual = self._state_prefill_token_count(len(token_ids))
                 params["num_computed_tokens"] = num_computed_tokens
@@ -1280,27 +1297,66 @@ class MooncakeConnectorScheduler(BaseMooncakeConnectorScheduler):
             self._truncate_request_for_prefill(request)
         return 0, False
 
-
+    def update_state_after_alloc(self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int):
+        if self.kv_role == "kv_consumer":
+            with self.listeningthread.ready_lock:
+                self.all_requests.discard(request.request_id)
+                self.listeningthread.ready_request.discard(request.request_id)
+                self.listeningthread.ready_count.pop(request.request_id, None)
+        super().update_state_after_alloc(request, blocks, num_external_tokens)
+        
 class MooncakeConnectorWorker(BaseMooncakeConnectorWorker):
     def __init__(self, vllm_config: VllmConfig, engine_id: str, kv_cache_config: KVCacheConfig):
         super().__init__(vllm_config, engine_id, kv_cache_config)
         self.remote_local_block_map: dict[str, dict[tuple[int, ...], int]] = {}
 
     def _make_cpu_staging_caches(self, kv_caches: dict[str, torch.Tensor]) -> dict[str, list[torch.Tensor]]:
+        """Allocate CPU staging buffers with 2M-aligned sizes for UBMem 2M-page mode.
+
+        For each KV cache tensor, a flat pinned buffer whose byte size is rounded
+        up to a 2M boundary is allocated via ``torch.empty(..., pin_memory=True)``
+        (which internally calls ``aclrtMallocHost``).  A view with the original
+        shape/dtype is created from the first ``num_blocks`` blocks; the tail
+        padding is never accessed by block addressing.
+
+        The flat buffer (owning the 2M-aligned storage) is kept in
+        ``self.cpu_caches_hold`` for GC; the view is returned in *cpu_caches*
+        for metadata extraction.  Registration info ``(ptr, aligned_size)`` is
+        collected in ``self._cpu_register_ptrs`` / ``self._cpu_register_lengths``
+        so that ``register_buffer`` sees the full 2M-aligned region.
+        """
         cpu_caches: dict[str, list[torch.Tensor]] = {}
         self.cpu_caches_hold: list[torch.Tensor] = []
+        self._cpu_register_ptrs: list[int] = []
+        self._cpu_register_lengths: list[int] = []
         for layer_name, kv_cache_tuple in kv_caches.items():
             cpu_caches[layer_name] = []
             for cache in self._as_kv_cache_tuple(kv_cache_tuple):
-                cpu_cache = torch.empty(cache.shape, dtype=cache.dtype, device="cpu", pin_memory=True)
-                self.cpu_caches_hold.append(cpu_cache)
+                raw_size = cache.numel() * cache.element_size()
+                aligned_size = (
+                    (raw_size + HUGEPAGE_SIZE_2M - 1) // HUGEPAGE_SIZE_2M
+                ) * HUGEPAGE_SIZE_2M
+                # Allocate flat pinned buffer with 2M-aligned byte size.
+                # Use the original dtype so element count = aligned_size / element_size.
+                aligned_num_elements = aligned_size // cache.element_size()
+                flat = torch.empty(
+                    aligned_num_elements, dtype=cache.dtype, device="cpu", pin_memory=True
+                )
+                # Create a view with the original shape (first num_blocks blocks).
+                cpu_cache = flat[: cache.numel()].view(cache.shape)
+                # Keep the flat buffer alive — it owns the 2M-aligned storage.
+                self.cpu_caches_hold.append(flat)
                 cpu_caches[layer_name].append(cpu_cache)
+                # Record 2M-aligned registration info.
+                self._cpu_register_ptrs.append(flat.data_ptr())
+                self._cpu_register_lengths.append(aligned_size)
         return cpu_caches
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
         self.use_mla = self.vllm_config.model_config.is_deepseek_mla
         self.use_sparse = hasattr(self.vllm_config.model_config.hf_text_config, "index_topk")
         self.num_blocks = self.kv_cache_config.num_blocks
+        # Print config info for kvcaches  
         self.kv_caches = kv_caches
         self.kv_group2layeridx = self._build_kv_group2layeridx()
         has_mamba_group = self._has_mamba_group()
@@ -1363,12 +1419,13 @@ class MooncakeConnectorWorker(BaseMooncakeConnectorWorker):
                         single_cpu_cache.stride(0) * single_cpu_cache.element_size()
                     )
                     cpu_block_size_scale[layer_idx].append(tensor_num_blocks // self.num_blocks)
-            # CPU staging caches are freshly allocated independent tensors and do
-            # not inherit KVCacheTensor shared-by storage layout. Always register
-            # real storages to avoid invalid merged ranges.
-            cpu_register_regions = collect_storage_merged_register_regions(cpu_caches)
-            register_regions.ptrs.extend(cpu_register_regions.ptrs)
-            register_regions.lengths.extend(cpu_register_regions.lengths)
+            # CPU staging caches are freshly allocated independent tensors with
+            # 2M-aligned storage.  Register the full 2M-aligned regions directly
+            # (collected in _make_cpu_staging_caches) so that UBMem uses 2M huge
+            # pages instead of falling back to 4K small pages.
+            # cpu_register_regions = collect_storage_merged_register_regions(cpu_caches)
+            register_regions.ptrs.extend(self._cpu_register_ptrs)
+            register_regions.lengths.extend(self._cpu_register_lengths)
 
         validate_register_region_count(register_regions)
         global_te.register_buffer(register_regions.ptrs, register_regions.lengths)
