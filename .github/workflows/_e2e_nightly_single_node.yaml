@@ -353,6 +353,8 @@ jobs:
           steps.classify.outputs.failure_type == 'not_env_failure' &&
           steps.commit-age.outputs.is_old == 'false' }}
         working-directory: /vllm-workspace/vllm-ascend
+        env:
+          GOOD_TABLE: /root/.cache/vllm-ascend/${{ inputs.vllm_ascend_branch }}/nightly/good_table.csv
         run: |
           bash tests/e2e/nightly/scripts/aop_process.sh \
             "${{ steps.classify.outputs.failure_type }}" \
