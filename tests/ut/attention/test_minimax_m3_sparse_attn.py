@@ -14,7 +14,7 @@ import torch
 
 from vllm_ascend.attention.msa_m3_triton import (
     SPARSE_BLOCK_SIZE,
-    _as_triton_main_kv_cache,
+    _split_triton_main_kv_cache,
     minimax_m3_index_decode,
     minimax_m3_index_score,
     minimax_m3_index_topk,
@@ -513,6 +513,20 @@ def _allocate_main_kv_cache_fused(
     )
 
 
+def _main_kv_cache_from_fused(
+    kv_cache_fused: torch.Tensor,
+    kv_format: str,
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    key_cache, value_cache = kv_cache_fused.unbind(1)
+    if kv_format == "fused":
+        return kv_cache_fused
+    if kv_format == "tuple":
+        return key_cache, value_cache
+    if kv_format == "ascend":
+        return torch.stack((key_cache, value_cache), dim=0)
+    raise ValueError(f"Unknown kv_format: {kv_format}")
+
+
 def _reference_sparse_attn(
     q: torch.Tensor,
     kv_cache: torch.Tensor,
@@ -648,7 +662,7 @@ def _build_decode_inputs(
         ((65, 129, 257), (129, 257, 385)),
     ],
 )
-@pytest.mark.parametrize("kv_format", ["fused", "tuple"])
+@pytest.mark.parametrize("kv_format", ["fused", "tuple", "ascend"])
 def test_prefill_sparse_attention_correctness(
     q_lens: tuple[int, ...],
     kv_lens: tuple[int, ...],
@@ -681,11 +695,7 @@ def test_prefill_sparse_attention_correctness(
 
     q = torch.randn(total_q, NUM_Q_HEADS, HEAD_DIM, device=DEVICE, dtype=DTYPE)
     kv_cache_fused = _allocate_main_kv_cache_fused(num_pages)
-    if kv_format == "fused":
-        kv_cache = kv_cache_fused
-    else:
-        key_cache, value_cache = kv_cache_fused.unbind(1)
-        kv_cache = (key_cache, value_cache)
+    kv_cache = _main_kv_cache_from_fused(kv_cache_fused, kv_format)
     topk_idx = _build_prefill_topk_idx(q_lens_t, prefix_lens, total_q)
 
     actual = torch.empty_like(q)
@@ -716,11 +726,19 @@ def test_prefill_sparse_attention_correctness(
     _assert_sparse_close(actual, expected)
 
 
-def test_as_triton_main_kv_cache_tuple_matches_fused() -> None:
+def test_split_triton_main_kv_cache_formats_match() -> None:
     fused = _allocate_main_kv_cache_fused(3)
     key_cache, value_cache = fused.unbind(1)
-    from_tuple = _as_triton_main_kv_cache((key_cache, value_cache))
-    torch.testing.assert_close(fused, from_tuple)
+    ascend = torch.stack((key_cache, value_cache), dim=0)
+
+    k_fused, v_fused = _split_triton_main_kv_cache(fused)
+    k_tuple, v_tuple = _split_triton_main_kv_cache((key_cache, value_cache))
+    k_ascend, v_ascend = _split_triton_main_kv_cache(ascend)
+
+    torch.testing.assert_close(k_fused, k_tuple)
+    torch.testing.assert_close(v_fused, v_tuple)
+    torch.testing.assert_close(k_fused, k_ascend)
+    torch.testing.assert_close(v_fused, v_ascend)
 
 
 @pytest.mark.parametrize(
@@ -729,7 +747,7 @@ def test_as_triton_main_kv_cache_tuple_matches_fused() -> None:
 )
 @pytest.mark.parametrize("decode_query_len", [1, 4])
 @pytest.mark.parametrize("num_padded_reqs", [0, 2])
-@pytest.mark.parametrize("kv_format", ["fused", "tuple"])
+@pytest.mark.parametrize("kv_format", ["fused", "tuple", "ascend"])
 def test_decode_sparse_attention_correctness(
     seq_lens_list: tuple[int, ...],
     decode_query_len: int,
@@ -741,11 +759,7 @@ def test_decode_sparse_attention_correctness(
         seq_lens_list, decode_query_len, num_padded_reqs
     )
     kv_cache_fused = _allocate_main_kv_cache_fused(num_pages)
-    if kv_format == "fused":
-        kv_cache = kv_cache_fused
-    else:
-        key_cache, value_cache = kv_cache_fused.unbind(1)
-        kv_cache = (key_cache, value_cache)
+    kv_cache = _main_kv_cache_from_fused(kv_cache_fused, kv_format)
 
     actual = torch.empty_like(q)
     minimax_m3_sparse_attn_decode(
