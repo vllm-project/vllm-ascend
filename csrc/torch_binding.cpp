@@ -53,6 +53,7 @@
 #include "attention/store_kv_block/store_kv_block_torch_adpt.h"
 #include "attention/fused_gdn_gating/fused_gdn_gating_torch_adpt.h"
 #include "attention/solve_tri/solve_tri_torch_adpt.h"
+#include "attention/recompute_wu_fwd/recompute_wu_fwd_torch_adpt.h"
 #include <c10/core/Device.h>
 #include <c10/core/Scalar.h>
 #include <c10/util/Exception.h>
@@ -2967,5 +2968,17 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "              int[]? chunk_indices=None, "
         "              str layout=\"bhtd\") -> Tensor");
     ops.impl("npu_solve_tri", torch::kPrivateUse1, &vllm_ascend::npu_solve_tri);
+
+    // GDN chunk recompute_wu_fwd.
+    ops.def(
+        "npu_recompute_wu_fwd(Tensor k, "
+        "                     Tensor v, "
+        "                     Tensor beta, "
+        "                     Tensor a, "
+        "                     Tensor g, "
+        "                     int[]? cu_seqlens=None, "
+        "                     int[]? chunk_indices=None, "
+        "                     int chunk_size=64) -> (Tensor w, Tensor u)");
+    ops.impl("npu_recompute_wu_fwd", torch::kPrivateUse1, &vllm_ascend::npu_recompute_wu_fwd);
 }
 #endif

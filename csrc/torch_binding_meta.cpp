@@ -818,6 +818,33 @@ at::Tensor npu_solve_tri_meta(
     return at::empty_symint(x.sym_sizes(), x.options());
 }
 
+std::tuple<at::Tensor, at::Tensor> npu_recompute_wu_fwd_meta(
+    const at::Tensor& k,
+    const at::Tensor& v,
+    const at::Tensor& beta,
+    const at::Tensor& a,
+    const at::Tensor& g,
+    c10::optional<at::IntArrayRef> cu_seqlens,
+    c10::optional<at::IntArrayRef> chunk_indices,
+    int64_t chunk_size)
+{
+    (void)beta;
+    (void)a;
+    (void)g;
+    (void)cu_seqlens;
+    (void)chunk_indices;
+    (void)chunk_size;
+    at::SmallVector<c10::SymInt, 4> w_size = {
+        v.sym_size(0),
+        v.sym_size(1),
+        v.sym_size(2),
+        k.sym_size(3),
+    };
+    at::Tensor w = at::empty_symint(c10::SymIntArrayRef(w_size), k.options());
+    at::Tensor u = at::empty_symint(v.sym_sizes(), v.options());
+    return std::make_tuple(w, u);
+}
+
 std::vector<at::Tensor> moe_grouped_matmul_meta(
     at::Tensor x,
     at::Tensor weight,
@@ -1862,6 +1889,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_fused_gdn_gating", &vllm_ascend::meta::npu_fused_gdn_gating_meta);
     // npu_solve_tri
     ops.impl("npu_solve_tri", &vllm_ascend::meta::npu_solve_tri_meta);
+    // npu_recompute_wu_fwd
+    ops.impl("npu_recompute_wu_fwd", &vllm_ascend::meta::npu_recompute_wu_fwd_meta);
 }
 }
 #endif
