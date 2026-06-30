@@ -6,6 +6,7 @@ from vllm.config import VllmConfig
 from vllm.model_executor.models.deepseek_mtp import DeepSeekMTP, DeepSeekMultiTokenPredictorLayer
 from vllm.model_executor.models.deepseek_v2 import GlmMoeDsaForCausalLM
 from vllm.model_executor.models.utils import AutoWeightsLoader
+from vllm.sequence import IntermediateTensors
 
 MTP_ROT_WEIGHT_NAME = "rot.weight"
 
