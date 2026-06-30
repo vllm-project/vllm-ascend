@@ -1614,15 +1614,26 @@ class AscendSFAImpl(MLAAttentionImpl):
         # DSA-CP only applies to Prefill. Decode and speculative decoding use
         # Prolog even when DSA-CP is enabled for the same mixed worker.
         use_sfa_prolog_v3 = self._should_use_sfa_prolog_v3(attn_metadata.attn_state)
+        cache_write_slot_mapping = slot_mapping
+        if use_sfa_prolog_v3 and self.enable_dsa_cp:
+            # DSA-CP metadata shards hidden states, RoPE and slot mapping by the
+            # same token range. Prolog runs on that local Decode shard, so its
+            # cache index must not use the global Prefill mapping.
+            assert slot_mapping_cp is not None
+            cache_write_slot_mapping = slot_mapping_cp
 
         if use_sfa_prolog_v3:
             hidden_states = self._maybe_all_gather_hidden_states(hidden_states, need_gather_q_kv)
+            assert cache_write_slot_mapping.numel() == hidden_states.shape[0], (
+                "SFA Prolog V3 requires one cache index per input token, "
+                f"got token_x={hidden_states.shape[0]} and cache_index={cache_write_slot_mapping.numel()}."
+            )
             hidden_states, ql_nope, q_pe, q_c, _, _ = self._sfa_preprocess_with_prolog_v3(
                 hidden_states=hidden_states,
                 kv_cache=kv_cache,
                 cos=cos,
                 sin=sin,
-                slot_mapping=slot_mapping,
+                slot_mapping=cache_write_slot_mapping,
                 cache_mode="PA_BSND",
             )
             if self.has_indexer:
@@ -1876,6 +1887,11 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         if kv_cache is not None and self.has_indexer:
             assert k_li is not None
+            use_indexer_reshape_optim = (
+                self.is_kv_producer
+                and get_ascend_config().c8_enable_reshape_optim
+                and not (use_sfa_prolog_v3 and self.enable_dsa_cp)
+            )
             if self.enable_sfa_kv_quant_sparse_attention or (
                 self.use_sparse_c8_indexer and get_ascend_device_type() == AscendDeviceType.A5
             ):
@@ -1885,7 +1901,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 dsa_k_cache_idx = 2
                 dsa_k_scale_cache_idx = 3
 
-            if self.is_kv_producer and get_ascend_config().c8_enable_reshape_optim:
+            if use_indexer_reshape_optim:
                 torch.ops._C_ascend.store_kv_block(
                     k_li,
                     kv_cache[dsa_k_cache_idx],
@@ -1897,7 +1913,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             else:
                 torch_npu.npu_scatter_nd_update_(
                     kv_cache[dsa_k_cache_idx].view(-1, k_li.shape[-1]),
-                    slot_mapping.view(-1, 1),
+                    cache_write_slot_mapping.view(-1, 1),
                     k_li.view(-1, k_li.shape[-1]),
                 )  # b, s, n, d
             if self.use_sparse_c8_indexer:
@@ -1906,7 +1922,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 else:
                     assert len(kv_cache) == 4
                 if k_li_scale is not None:
-                    if self.is_kv_producer and get_ascend_config().c8_enable_reshape_optim:
+                    if use_indexer_reshape_optim:
                         torch.ops._C_ascend.store_kv_block(
                             k_li_scale,
                             kv_cache[dsa_k_scale_cache_idx],
@@ -1918,7 +1934,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                     else:
                         torch_npu.npu_scatter_nd_update_(
                             kv_cache[dsa_k_scale_cache_idx].view(-1, k_li_scale.shape[-1]),
-                            slot_mapping.view(-1, 1),
+                            cache_write_slot_mapping.view(-1, 1),
                             k_li_scale.view(-1, k_li_scale.shape[-1]),
                         )
 
