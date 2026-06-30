@@ -9,6 +9,7 @@ from vllm.forward_context import get_forward_context
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.kv_cache_interface import AttentionSpec
 
+from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.common_cp import (
     AscendPCPMetadata,
     _npu_attention_update,
@@ -633,11 +634,10 @@ class AscendSFADCPMetadataBuilder(AscendSFAMetadataBuilder):
         )
         return base + remainder
 
-    def build(
+    def _build_with_no_cp_metadata(
         self,
-        common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
-        fast_build: bool = False,
+        build_metadata,
         **kwargs,
     ) -> AscendSFAMetadata:
         slot_mapping_no_cp = kwargs.get("slot_mapping_no_cp")
@@ -650,7 +650,7 @@ class AscendSFADCPMetadataBuilder(AscendSFAMetadataBuilder):
         common_attn_metadata.slot_mapping = slot_mapping_no_cp
         common_attn_metadata.block_table_tensor = block_table_no_cp
         try:
-            metadata = super().build(common_prefix_len, common_attn_metadata, fast_build, **kwargs)
+            metadata = build_metadata()
         finally:
             common_attn_metadata.slot_mapping = dcp_slot_mapping
             common_attn_metadata.block_table_tensor = dcp_block_table
@@ -674,6 +674,57 @@ class AscendSFADCPMetadataBuilder(AscendSFAMetadataBuilder):
             seq_lens=local_seq_lens,
         )
         return metadata
+
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        fast_build: bool = False,
+        **kwargs,
+    ) -> AscendSFAMetadata:
+        return self._build_with_no_cp_metadata(
+            common_attn_metadata,
+            lambda: super(AscendSFADCPMetadataBuilder, self).build(
+                common_prefix_len,
+                common_attn_metadata,
+                fast_build,
+                **kwargs,
+            ),
+            **kwargs,
+        )
+
+    def build_for_drafting(
+        self,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        draft_index: int,
+        **kwargs,
+    ) -> AscendSFAMetadata:
+        return self._build_with_no_cp_metadata(
+            common_attn_metadata,
+            lambda: super(AscendSFADCPMetadataBuilder, self).build_for_drafting(
+                common_attn_metadata,
+                draft_index,
+                **kwargs,
+            ),
+            **kwargs,
+        )
+
+    def build_for_graph_capture(
+        self,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        attn_state: AscendAttentionState = AscendAttentionState.DecodeOnly,
+        **kwargs,
+    ):
+        if attn_state not in {AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding}:
+            raise NotImplementedError("Currently we only support building dummy metadata for DecodeOnly state")
+
+        attn_metadata = self.build(
+            common_prefix_len=0,
+            common_attn_metadata=common_attn_metadata,
+            **kwargs,
+        )
+        attn_metadata.attn_state = attn_state
+        return attn_metadata
 
 
 class AscendSFADCPImpl(AscendSFAImpl):
