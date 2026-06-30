@@ -165,7 +165,7 @@ Total num prompt tokens:  1280
 Total num output tokens:  1280
 ```
 
-#### 3.2.4 Multi-Modal Benchmark
+#### 3.2.3 Multi-Modal Benchmark
 
 ```shell
 export VLLM_USE_MODELSCOPE=True
@@ -214,7 +214,7 @@ P99 ITL (ms):                            182.28
 ==================================================
 ```
 
-#### 3.2.5 Embedding Benchmark
+#### 3.2.4 Embedding Benchmark
 
 ```shell
 vllm serve Qwen/Qwen3-Embedding-8B --trust-remote-code
