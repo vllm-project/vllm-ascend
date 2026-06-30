@@ -47,12 +47,14 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         cudagraph_mode: CUDAGraphMode,
         decode_query_len: int,
         model_runner: Any,
+        **kwargs,
     ):
         super().__init__(
             vllm_config,
             device,
             cudagraph_mode,
             decode_query_len,
+            **kwargs,
         )
         # set model runner attribute, so we can access attributes model runner
         # when call `run_fullgraph` method in CudaGraphManager,
@@ -109,6 +111,7 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         has_lora: bool = False,
         use_aux_hidden_state_outputs: bool = False,
         progress_bar_desc: str = "Capturing CUDA graphs",
+        **kwargs,
     ) -> None:
         """Capture CUDA graphs for model forward pass."""
         model = ModelWithContext(model)
@@ -123,7 +126,8 @@ class ModelAclGraphManager(ModelCudaGraphManager):
                 kv_cache_config,
                 has_lora,
                 use_aux_hidden_state_outputs,
-                progress_bar_desc,
+                progress_bar_desc=progress_bar_desc,
+                **kwargs,
             )
 
 
