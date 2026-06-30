@@ -69,7 +69,7 @@ def get_cos_and_sin_dsa(positions: torch.Tensor | dict[str, torch.Tensor], use_c
     for config_key, registered_groups in _ROPE_STATE.registry_summary.items():
         if config_key not in _ROPE_STATE.static_cache:
             continue
-        static_cos, static_sin = _ROPE_STATE.static_cache[config_key]
+        static_cos, static_sin = compute_cos_and_sin(config_key)
 
         batch_result[config_key] = {}
 
@@ -97,6 +97,28 @@ def get_cos_and_sin_dsa(positions: torch.Tensor | dict[str, torch.Tensor], use_c
                 batch_result[config_key][group_name] = (curr_cos, curr_sin)
 
     return RopeDataProxy(batch_result, is_cos=True), RopeDataProxy(batch_result, is_cos=False)
+
+
+_ROPE_CONFIGS = {}
+
+
+# Recompute the values to avoid the cache issue.
+def compute_cos_and_sin(config_key: str):
+    rotary_dim, max_pos, base, scaling_factor, beta_fast, beta_slow = _ROPE_CONFIGS[config_key]
+    inv_freq = ComplexExpRotaryEmbedding.precompute_freqs_cis(
+        rotary_dim, max_pos, max_pos, base, scaling_factor, beta_fast, beta_slow
+    )
+    t = torch.arange(
+        int(max_pos * scaling_factor),
+        device=current_platform.device_type,
+        dtype=torch.float32,
+    )
+    freqs = torch.einsum("i,j -> ij", t, inv_freq)
+    cos = freqs.cos().repeat_interleave(2, dim=-1)
+    sin = freqs.sin().repeat_interleave(2, dim=-1)
+    cos = cos.to(current_platform.device_type).unsqueeze(1).unsqueeze(1)
+    sin = sin.to(current_platform.device_type).unsqueeze(1).unsqueeze(1)
+    return cos, sin
 
 
 class ComplexExpRotaryEmbedding(nn.Module):
@@ -133,6 +155,14 @@ class ComplexExpRotaryEmbedding(nn.Module):
         if config_key not in _ROPE_STATE.static_cache:
             inv_freq = self.precompute_freqs_cis(
                 rotary_dim, max_position_embeddings, max_position_embeddings, base, scaling_factor, beta_fast, beta_slow
+            )
+            _ROPE_CONFIGS[config_key] = (
+                rotary_dim,
+                max_position_embeddings,
+                base,
+                scaling_factor,
+                beta_fast,
+                beta_slow,
             )
             t = torch.arange(
                 max_position_embeddings * scaling_factor,
