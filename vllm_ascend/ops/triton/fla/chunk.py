@@ -116,7 +116,7 @@ def chunk_gated_delta_rule_fwd(
     )
 
     if get_pcp_group().world_size > 1:
-        # When integrating mtp, since `mix_qkv` has been split, `num_decode` 
+        # When integrating mtp, since `mix_qkv` has been split, `num_decode`
         # cannot be directly obtained from the metadata and needs to be recalculated.
         if cu_seqlens_host is not None:
             actual_num_decodes = sum(
