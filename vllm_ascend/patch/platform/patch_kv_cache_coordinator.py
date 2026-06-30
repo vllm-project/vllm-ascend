@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM projectx
 import sys
-from math import lcm
 
 import vllm
 from vllm.v1.core.block_pool import BlockPool
@@ -16,12 +15,61 @@ from vllm.v1.core.kv_cache_utils import (
     BlockHashListWithBlockSize,
     KVCacheBlock,
 )
-from vllm.v1.core.single_type_kv_cache_manager import SingleTypeKVCacheManager
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheSpec
+from vllm.v1.core.single_type_kv_cache_manager import (
+    SingleTypeKVCacheManager,
+    SlidingWindowManager,
+)
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheSpec,
+    SlidingWindowSpec,
+)
+from vllm.v1.request import Request
 
+from vllm_ascend import envs
 from vllm_ascend.core.single_type_kv_cache_manager import get_manager_for_kv_cache_spec
 
+try:
+    from vllm.v1.kv_cache_interface import SlidingWindowMLASpec
+except ImportError:  # pragma: no cover - older vLLM without DSv4 MLA SWA spec
+    SlidingWindowMLASpec = SlidingWindowSpec
+
+# SWA-family specs that honor the prefix-cache retention knob (incl. DSv4
+# SlidingWindowMLASpec), so validation does not wrongly report "no SWA group".
+_SLIDING_WINDOW_SPECS = (SlidingWindowSpec, SlidingWindowMLASpec)
+
 USE_MULTI_GROUPS_KV_CACHE = True
+
+
+def _validate_prefix_cache_retention_interval(
+    retention_interval: int | None,
+    scheduler_block_size: int,
+    kv_cache_config: KVCacheConfig,
+) -> None:
+    """Validate VLLM_ASCEND_PREFIX_CACHE_RETENTION_INTERVAL (vLLM PR #43447 (3)).
+
+    No-op when unset. When set, the model must have at least one sliding-window
+    KV cache group (otherwise retention has no effect), and the value must be a
+    non-negative multiple of ``scheduler_block_size``.
+    """
+    if retention_interval is None:
+        return
+    if not any(
+        isinstance(g.kv_cache_spec, _SLIDING_WINDOW_SPECS)
+        for g in kv_cache_config.kv_cache_groups
+    ):
+        raise ValueError(
+            "VLLM_ASCEND_PREFIX_CACHE_RETENTION_INTERVAL is set but this "
+            "model has no sliding-window KV cache group, so retention has no "
+            "effect."
+        )
+    if retention_interval < 0 or retention_interval % scheduler_block_size != 0:
+        raise ValueError(
+            f"VLLM_ASCEND_PREFIX_CACHE_RETENTION_INTERVAL ({retention_interval}) "
+            f"must be non-negative and a multiple of scheduler_block_size "
+            f"({scheduler_block_size})."
+        )
 
 
 class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
@@ -43,6 +91,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         dcp_world_size: int,
         pcp_world_size: int,
         hash_block_size: int,
+        scheduler_block_size: int | None = None,
         eagle_attn_layer_names: list[str] | None = None,
         metrics_collector: KVCacheMetricsCollector | None = None,
         max_num_batched_tokens: int | None = None,
@@ -56,6 +105,13 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         if max_num_batched_tokens is None:
             max_num_batched_tokens = max_model_len
         self.max_num_batched_tokens = max_num_batched_tokens
+        if scheduler_block_size is None:
+            scheduler_block_size = hash_block_size
+        assert scheduler_block_size % hash_block_size == 0 and all(
+            scheduler_block_size % g.kv_cache_spec.block_size == 0
+            for g in kv_cache_config.kv_cache_groups
+        )
+        self.scheduler_block_size = scheduler_block_size
 
         self.block_pool = BlockPool(
             kv_cache_config.num_blocks,
@@ -84,6 +140,9 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             )
             for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
         )
+        for i, manager in enumerate(self.single_type_managers):
+            manager.use_eagle = i in self.eagle_group_ids
+            manager.scheduler_block_size = self.scheduler_block_size
 
         # hash_block_size: the block size used to compute block hashes.
         # The actual block size usually equals hash_block_size, but in cases where
@@ -91,20 +150,43 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         # can be a multiple of hash_block_size.
         self.hash_block_size = hash_block_size
         if enable_caching:
-            assert all(
-                self._logical_block_size(g.kv_cache_spec) % hash_block_size == 0
-                for g in kv_cache_config.kv_cache_groups
-            ), "block_size must be divisible by hash_block_size"
+            assert all(g.kv_cache_spec.block_size % hash_block_size == 0 for g in kv_cache_config.kv_cache_groups), (
+                "block_size must be divisible by hash_block_size"
+            )
         assert dcp_world_size == 1, "DCP not support hybrid attn now."
         assert pcp_world_size == 1, "PCP not support hybrid attn now."
         self.verify_and_split_kv_cache_groups()
+        for _, group_ids, _ in self.attention_groups:
+            group_uses_eagle = any(group_id in self.eagle_group_ids for group_id in group_ids)
+            for group_id in group_ids:
+                self.single_type_managers[group_id].use_eagle = group_uses_eagle
 
         self.use_eagle = use_eagle
 
-    @staticmethod
-    def _logical_block_size(kv_cache_spec: KVCacheSpec) -> int:
-        compress_ratio = getattr(kv_cache_spec, "compress_ratio", 1) or 1
-        return kv_cache_spec.block_size * max(compress_ratio, 1)
+        # Prefix-cache SWA retention (vLLM PR #43447). None (env unset) keeps the
+        # dense cache-all behavior byte-for-byte.
+        self.retention_interval = envs.VLLM_ASCEND_PREFIX_CACHE_RETENTION_INTERVAL
+        _validate_prefix_cache_retention_interval(
+            self.retention_interval, self.scheduler_block_size, kv_cache_config
+        )
+
+    def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
+        """Cache blocks for the request, forwarding the SWA retention knob.
+
+        SWA managers accept ``retention_interval``; other managers (compress /
+        full-attention) accept it only to keep a uniform signature and ignore
+        it. We dispatch on ``isinstance(..., SlidingWindowManager)`` rather than
+        signature reflection to avoid per-request overhead.
+        """
+        for manager in self.single_type_managers:
+            if isinstance(manager, SlidingWindowManager):
+                manager.cache_blocks(
+                    request,
+                    num_computed_tokens,
+                    retention_interval=self.retention_interval,
+                )
+            else:
+                manager.cache_blocks(request, num_computed_tokens)
 
     def verify_and_split_kv_cache_groups(self) -> None:
         """
@@ -143,14 +225,9 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             if any(gid in self.eagle_group_ids for gid in group_ids)
         }
 
-        # The LCM of the block sizes of all attention types.
-        # The cache hit length must be a multiple of the LCM of the block sizes
-        # to make sure the cache hit length is a multiple of the block size of
-        # each attention type. Requiring this because we don't support partial
-        # block cache hit yet.
-        # NOTE: use 16k as the alignment tokens for model with compress ratio
-        block_sizes = [self._logical_block_size(spec) for spec, _, _ in self.attention_groups]
-        self.lcm_block_size = lcm(*block_sizes)
+        # Prefix-cache hits are aligned to scheduler_block_size, not to
+        # block_size * compress_ratio. The latter forces DSv4 compressed
+        # groups to 16K-aligned hits and makes shorter prompts miss.
 
     def find_longest_cache_hit(
         self,
@@ -176,6 +253,8 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         """
 
         def _get_block_hashes(kv_cache_spec: KVCacheSpec) -> BlockHashList:
+            if getattr(kv_cache_spec, "compress_ratio", 1) > 1:
+                return block_hashes
             if kv_cache_spec.block_size == self.hash_block_size:
                 return block_hashes
             return BlockHashListWithBlockSize(block_hashes, self.hash_block_size, kv_cache_spec.block_size)
@@ -204,8 +283,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                     # Full attention is downward-closed: we only need to look
                     # up cached blocks once; on subsequent iterations just trim
                     # to the (reduced) current hit length.
-                    logical_block_size = self._logical_block_size(spec)
-                    curr_hit_length = curr_hit_length // logical_block_size * logical_block_size
+                    curr_hit_length = curr_hit_length // spec.block_size * spec.block_size
                     continue
 
                 use_eagle = idx in self.eagle_attn_group_indices and idx not in eagle_verified
@@ -213,7 +291,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 _max_length = curr_hit_length
                 if use_eagle:
                     # Eagle needs to match one more block and then pop the last.
-                    _max_length = min(curr_hit_length + self._logical_block_size(spec), max_cache_hit_length)
+                    _max_length = min(curr_hit_length + spec.block_size, max_cache_hit_length)
                 hit_blocks = manager_cls.find_longest_cache_hit(
                     block_hashes=_get_block_hashes(spec),
                     max_length=_max_length,
@@ -221,9 +299,12 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                     block_pool=self.block_pool,
                     kv_cache_spec=spec,
                     use_eagle=use_eagle,
-                    alignment_tokens=self.lcm_block_size,
+                    alignment_tokens=self.scheduler_block_size,
                 )
-                _new_hit_length = len(hit_blocks[0]) * self._logical_block_size(spec)
+                compress_ratio = getattr(spec, "compress_ratio", 1)
+                _new_hit_length = getattr(hit_blocks[0], "logical_hit_length", None)
+                if _new_hit_length is None:
+                    _new_hit_length = len(hit_blocks[0]) * spec.block_size * max(compress_ratio, 1)
                 if use_eagle:
                     eagle_verified.add(idx)
                 elif _new_hit_length < curr_hit_length:
@@ -242,12 +323,20 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         # Truncate full attention blocks to final hit_length (if present)
         spec, group_ids, _ = self.attention_groups[0]
         if isinstance(spec, FullAttentionSpec):
-            num_blocks = hit_length // self._logical_block_size(spec)
+            num_blocks = hit_length // spec.block_size
             for group_id in group_ids:
                 if (blks := hit_blocks_by_group[group_id]) is not None:
                     del blks[num_blocks:]
 
         return tuple(blocks if blocks is not None else [] for blocks in hit_blocks_by_group), hit_length
+
+    def take_copy_block_ids(self) -> list[tuple[int, int, int]]:
+        copy_block_ids: list[tuple[int, int, int]] = []
+        for manager in self.single_type_managers:
+            take_copy_block_ids = getattr(manager, "take_copy_block_ids", None)
+            if take_copy_block_ids is not None:
+                copy_block_ids.extend(take_copy_block_ids())
+        return copy_block_ids
 
 
 def get_kv_cache_coordinator(
@@ -260,6 +349,7 @@ def get_kv_cache_coordinator(
     dcp_world_size: int,
     pcp_world_size: int,
     hash_block_size: int,
+    scheduler_block_size: int | None = None,
     eagle_attn_layer_names: list[str] | None = None,
     metrics_collector: KVCacheMetricsCollector | None = None,
 ) -> KVCacheCoordinator:
@@ -272,6 +362,7 @@ def get_kv_cache_coordinator(
         dcp_world_size=dcp_world_size,
         pcp_world_size=pcp_world_size,
         hash_block_size=hash_block_size,
+        scheduler_block_size=scheduler_block_size,
         eagle_attn_layer_names=eagle_attn_layer_names,
         metrics_collector=metrics_collector,
         max_num_batched_tokens=max_num_batched_tokens,
