@@ -81,7 +81,7 @@ vllm serve Qwen/Qwen3-235B-A22 \
     "expert_heat_collection_interval": 50,
     "algorithm_execution_interval": 5,
     "eplb_policy_type": 2,
-    "num_redundant_experts": {ep_size},
+    "num_redundant_experts": 16
     }}'
 ```
 
