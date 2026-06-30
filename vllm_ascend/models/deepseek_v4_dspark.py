@@ -33,6 +33,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.utils import maybe_prefix
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from vllm_ascend.models.deepseek_v4 import (
@@ -68,6 +69,31 @@ def _draft_quant_config(vllm_config: VllmConfig):
 def _linear(layer: nn.Module, x: torch.Tensor) -> torch.Tensor:
     out = layer(x)
     return out[0] if isinstance(out, tuple) else out
+
+
+def _last_input_ids_buffer_capacity(vllm_config: VllmConfig, block_size: int) -> int:
+    scheduler_config = getattr(vllm_config, "scheduler_config", None)
+    max_num_seqs = int(getattr(scheduler_config, "max_num_seqs", 1) or 1)
+    max_num_batched_tokens = int(getattr(scheduler_config, "max_num_batched_tokens", 0) or 0)
+    return max(block_size, max_num_seqs * block_size, max_num_batched_tokens)
+
+
+def _dspark_cache_capacity(vllm_config: VllmConfig, block_size: int) -> int:
+    model_config = getattr(vllm_config, "model_config", None)
+    max_model_len = int(getattr(model_config, "max_model_len", 0) or 0)
+    return max(block_size, max_model_len + block_size)
+
+
+def _copy_last_input_ids(buffer: torch.Tensor, input_ids: torch.Tensor) -> int:
+    flat_input_ids = input_ids.reshape(-1)
+    num_input_ids = flat_input_ids.numel()
+    if num_input_ids > buffer.numel():
+        raise ValueError(
+            "DSpark draft input_ids exceed preallocated buffer capacity: "
+            f"num_input_ids={num_input_ids}, capacity={buffer.numel()}"
+        )
+    buffer[:num_input_ids].copy_(flat_input_ids)
+    return num_input_ids
 
 
 def _fp8_e4m3fn_quantized_abs(abs_scaled: torch.Tensor) -> torch.Tensor:
@@ -196,33 +222,45 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
     """DSpark sliding-window attention with an internal eager context cache."""
 
     def __init__(self, *args, **kwargs) -> None:
+        vllm_config = kwargs["vllm_config"]
+        config = kwargs["config"]
         super().__init__(*args, **kwargs)
         self.compress_ratio = 0
         self.dsa_attn.compress_ratio = 0
-        self._dspark_k_cache: torch.Tensor | None = None
-        self._dspark_v_cache: torch.Tensor | None = None
-        self._dspark_cache_valid: torch.Tensor | None = None
+        cache_capacity = _dspark_cache_capacity(vllm_config, int(config.dspark_block_size))
+        cache_shape = (cache_capacity, self.n_local_heads, self.head_dim)
+        self.register_buffer(
+            "_dspark_k_cache",
+            torch.empty(
+                cache_shape,
+                dtype=vllm_config.model_config.dtype,
+                device=current_platform.device_type,
+            ),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_dspark_v_cache",
+            torch.empty(
+                cache_shape,
+                dtype=vllm_config.model_config.dtype,
+                device=current_platform.device_type,
+            ),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_dspark_cache_valid",
+            torch.zeros(cache_capacity, dtype=torch.bool, device=current_platform.device_type),
+            persistent=False,
+        )
+        self._dspark_cache_capacity = cache_capacity
 
     def _ensure_dspark_cache(self, length: int, like: torch.Tensor) -> None:
-        current = 0
-        if self._dspark_k_cache is not None:
-            current = self._dspark_k_cache.shape[0]
-        if current >= length:
-            return
-        new_len = max(length, max(16, current * 2))
-        shape = (new_len, self.n_local_heads, self.head_dim)
-        k_cache = torch.empty(shape, dtype=like.dtype, device=like.device)
-        v_cache = torch.empty(shape, dtype=like.dtype, device=like.device)
-        valid = torch.zeros(new_len, dtype=torch.bool, device=like.device)
-        if self._dspark_k_cache is not None:
-            assert self._dspark_v_cache is not None
-            assert self._dspark_cache_valid is not None
-            k_cache[:current].copy_(self._dspark_k_cache)
-            v_cache[:current].copy_(self._dspark_v_cache)
-            valid[:current].copy_(self._dspark_cache_valid)
-        self._dspark_k_cache = k_cache
-        self._dspark_v_cache = v_cache
-        self._dspark_cache_valid = valid
+        del like
+        if length > self._dspark_cache_capacity:
+            raise ValueError(
+                "DSpark attention cache position exceeds preallocated capacity: "
+                f"length={length}, capacity={self._dspark_cache_capacity}"
+            )
 
     def _project_kv(
         self,
@@ -561,7 +599,26 @@ class DeepseekV4DSparkModel(nn.Module):
         last_layer.hc_head_fn = self.hc_head_fn
         last_layer.hc_head_base = self.hc_head_base
         last_layer.hc_head_scale = self.hc_head_scale
-        self._last_input_ids: torch.Tensor | None = None
+        input_ids_capacity = _last_input_ids_buffer_capacity(vllm_config, self.block_size)
+        self.register_buffer(
+            "_last_input_ids_buffer",
+            torch.empty(
+                input_ids_capacity,
+                dtype=torch.int32,
+                device=current_platform.device_type,
+            ),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_markov_prev_ids_buffer",
+            torch.empty(
+                max(1, input_ids_capacity // self.block_size),
+                dtype=torch.int32,
+                device=current_platform.device_type,
+            ),
+            persistent=False,
+        )
+        self._last_input_ids_len = 0
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -587,7 +644,7 @@ class DeepseekV4DSparkModel(nn.Module):
         hidden_states: torch.Tensor | None = None,
     ) -> torch.Tensor:
         del hidden_states
-        self._last_input_ids = input_ids
+        self._last_input_ids_len = _copy_last_input_ids(self._last_input_ids_buffer, input_ids)
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
         hidden_states = inputs_embeds.unsqueeze(-2).repeat(1, self.hc_mult, 1)
@@ -613,19 +670,24 @@ class DeepseekV4DSparkModel(nn.Module):
         )
         base_logits = logits_processor(lm_head, self.norm(dense_hidden))
 
-        if self._last_input_ids is None or hidden_states.shape[0] % self.block_size != 0:
+        if hidden_states.shape[0] % self.block_size != 0:
             return base_logits
 
         batch = hidden_states.shape[0] // self.block_size
+        num_input_ids = batch * self.block_size
+        if self._last_input_ids_len < num_input_ids:
+            return base_logits
+
         base_logits = base_logits.view(batch, self.block_size, -1)
-        input_ids = self._last_input_ids[: batch * self.block_size].view(batch, self.block_size)
-        prev_ids = input_ids[:, 0]
+        input_ids = self._last_input_ids_buffer[:num_input_ids].view(batch, self.block_size)
+        prev_ids = self._markov_prev_ids_buffer[:batch]
+        prev_ids.copy_(input_ids[:, 0])
         logits_out = []
         for idx in range(self.block_size):
             markov_logits, _ = self.markov_head(prev_ids)
             logits_i = base_logits[:, idx, :] + markov_logits
             logits_out.append(logits_i)
-            prev_ids = logits_i.argmax(dim=-1)
+            prev_ids.copy_(logits_i.argmax(dim=-1))
         return torch.stack(logits_out, dim=1).reshape(batch * self.block_size, -1)
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:

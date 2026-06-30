@@ -1,8 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from types import SimpleNamespace
+
+import pytest
 import torch
 
 from vllm_ascend.models.deepseek_v4_dspark import (
+    _copy_last_input_ids,
+    _dspark_cache_capacity,
     _headwise_scores,
     _headwise_weighted_sum,
 )
@@ -83,3 +88,32 @@ def test_dspark_attention_is_noncausal_within_draft_block():
     assert noncausal[0].mean().item() > 9.0
     assert causal_first[0].mean().item() == 0.0
     assert (noncausal[0] - causal_first[0]).abs().max().item() > 9.0
+
+
+def test_dspark_last_input_ids_copy_keeps_buffer_storage():
+    buffer = torch.empty(8, dtype=torch.int32)
+    storage_ptr = buffer.data_ptr()
+
+    copied = _copy_last_input_ids(buffer, torch.tensor([1, 2, 3, 4], dtype=torch.int32))
+    assert copied == 4
+    assert buffer.data_ptr() == storage_ptr
+    torch.testing.assert_close(buffer[:copied], torch.tensor([1, 2, 3, 4], dtype=torch.int32))
+
+    copied = _copy_last_input_ids(buffer, torch.tensor([9, 8], dtype=torch.int64))
+    assert copied == 2
+    assert buffer.data_ptr() == storage_ptr
+    torch.testing.assert_close(buffer[:copied], torch.tensor([9, 8], dtype=torch.int32))
+
+
+def test_dspark_last_input_ids_copy_rejects_oversized_input():
+    buffer = torch.empty(2, dtype=torch.int32)
+
+    with pytest.raises(ValueError, match="preallocated buffer capacity"):
+        _copy_last_input_ids(buffer, torch.tensor([1, 2, 3], dtype=torch.int32))
+
+
+def test_dspark_attention_cache_capacity_includes_draft_block():
+    vllm_config = SimpleNamespace(model_config=SimpleNamespace(max_model_len=4096))
+
+    assert _dspark_cache_capacity(vllm_config, block_size=5) == 4101
+    assert _dspark_cache_capacity(SimpleNamespace(model_config=None), block_size=5) == 5
