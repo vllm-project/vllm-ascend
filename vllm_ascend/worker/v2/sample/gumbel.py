@@ -20,6 +20,16 @@
 import torch
 from vllm.triton_utils import tl, triton
 
+DEFAULT_GUMBEL_BLOCK_SIZE = 1024
+SAMPLED_GUMBEL_BLOCK_SIZE = 256
+SAMPLED_GUMBEL_MIN_NUM_TOKENS = 4
+
+
+def _select_gumbel_block_size(num_tokens: int, has_output_processed_logits: bool) -> int:
+    if not has_output_processed_logits and num_tokens >= SAMPLED_GUMBEL_MIN_NUM_TOKENS:
+        return SAMPLED_GUMBEL_BLOCK_SIZE
+    return DEFAULT_GUMBEL_BLOCK_SIZE
+
 
 @triton.jit(do_not_specialize=["logits_stride", "vocab_size"])
 def _temperature_kernel(
@@ -143,8 +153,9 @@ def _gumbel_sample_kernel(
         r = tl.rand(gumbel_seed, block).to(tl.float32)
         gumbel_noise = -tl.log(-tl.log(r + 1e-20) + 1e-20)
 
-        # Apply gumbel noise.
-        logits = tl.where(mask, logits + gumbel_noise, float("-inf"))
+        # The masked load already makes out-of-vocab lanes -inf, and -inf
+        # plus finite noise remains -inf.
+        logits = logits + gumbel_noise
 
     idx = tl.argmax(logits, axis=0)
     token_id = block_idx * BLOCK_SIZE + idx
@@ -166,8 +177,12 @@ def gumbel_sample(
 ) -> torch.Tensor:
     if use_fp64:
         raise NotImplementedError("FP64 Gumbel sampling is not supported on NPU.")
+
     num_tokens, vocab_size = logits.shape
-    BLOCK_SIZE = 1024
+    BLOCK_SIZE = _select_gumbel_block_size(
+        num_tokens,
+        output_processed_logits is not None,
+    )
     num_blocks = triton.cdiv(vocab_size, BLOCK_SIZE)
     local_argmax = torch.empty(
         num_tokens,
