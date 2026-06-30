@@ -303,11 +303,12 @@ class BlockTable:
         total_cp_world_size = self.pcp_world_size * self.dcp_world_size
         if total_cp_world_size <= 1 or self.is_mamba_group:
             return block_ids
-        expanded_blocks = []
+        expanded_blocks: list[int] = []
         for block_id in block_ids:
-            # CP block ids are treated as 1-based physical block groups here:
-            # block 1 with cp=4 expands to physical blocks [1, 2, 3, 4].
-            start_block = (int(block_id) - 1) * total_cp_world_size + 1
+            # CP block ids are 0-based block-group ids. Each CP block group
+            # maps to a contiguous no-CP physical block range, matching
+            # Mooncake's SFA replicate-K block expansion.
+            start_block = int(block_id) * total_cp_world_size
             expanded_blocks.extend(range(start_block, start_block + total_cp_world_size))
         return np.array(expanded_blocks, dtype=np.int32)
 
