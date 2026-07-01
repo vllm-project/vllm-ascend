@@ -44,7 +44,7 @@ env:
 
 jobs:
     resolve-tag:
-        runs-on: ubuntu-latest
+        runs-on: linux-amd64-cpu-2-hk
         outputs:
             release_tag: ${{ steps.vllm.outputs.release_tag }}
         steps:
