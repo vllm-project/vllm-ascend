@@ -1757,11 +1757,19 @@ class NPUModelRunner(GPUModelRunner):
             common_attn_metadata = spec_decode_common_attn_metadata
             target_hidden_states = [h[:num_scheduled_tokens] for h in aux_hidden_states]
 
-            draft_token_ids = self.drafter.propose(
-                sampled_token_ids=valid_sampled_token_ids,
-                target_hidden_states=target_hidden_states,
-                common_attn_metadata=common_attn_metadata,
-            )
+            if vllm_version_is("0.23.0"):
+                draft_token_ids = self.drafter.propose(
+                    sampled_token_ids=valid_sampled_token_ids,
+                    target_hidden_states=target_hidden_states,
+                    common_attn_metadata=common_attn_metadata,
+                )
+            else:
+                draft_token_ids = self.drafter.propose(
+                    self.speculative_config.num_speculative_tokens,
+                    sampled_token_ids=valid_sampled_token_ids,
+                    target_hidden_states=target_hidden_states,
+                    common_attn_metadata=common_attn_metadata,
+                )
             next_token_ids, valid_sampled_tokens_count = (
                 self.drafter.prepare_next_token_ids_padded(
                     valid_sampled_token_ids,

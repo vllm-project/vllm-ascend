@@ -39,7 +39,9 @@ def _ensure_global_patch():
 
 def register():
     """Register the NPU platform."""
+    import os
 
+    os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "0"
     return "vllm_ascend.platform.NPUPlatform"
 
 
