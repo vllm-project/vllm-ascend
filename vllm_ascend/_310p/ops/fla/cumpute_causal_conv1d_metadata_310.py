@@ -10,7 +10,7 @@ def compute_causal_conv1d_metadata(
 ):
     assert query_start_loc_p_cpu.device.type == "cpu"
     seqlens = query_start_loc_p_cpu.diff()
-    nums_dict = {}
+    nums_dict: dict[int, dict[str, object]] = {}
     batch_ptr = None
     token_chunk_offset_ptr = None
     batch_ptr_cpu = None
@@ -27,10 +27,10 @@ def compute_causal_conv1d_metadata(
         nums_dict[BLOCK_M]["mlist_len"] = mlist_len
         MAX_NUM_PROGRAMS = max(1024, mlist_len) * 2
 
-        offsetlist = []
+        offset_items: list[int] = []
         for idx, num in enumerate(nums):
-            offsetlist.extend(range(num))
-        offsetlist = torch.tensor(offsetlist, dtype=torch.int32)
+            offset_items.extend(range(num))
+        offsetlist = torch.tensor(offset_items, dtype=torch.int32)
 
         if batch_ptr is None or batch_ptr.numel() < MAX_NUM_PROGRAMS:
             batch_ptr_cpu = torch.full((MAX_NUM_PROGRAMS,), PAD_SLOT_ID, dtype=torch.int32)
