@@ -1,5 +1,4 @@
-# SKIL.md
-
+# SKILL.md
 ## Model Validation: deepseek-ai/deepseek-vl2-tiny
 
 ### AI Assistant
