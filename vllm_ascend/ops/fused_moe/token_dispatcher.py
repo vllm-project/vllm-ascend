@@ -653,32 +653,32 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
 
         if scale_type == torch.float8_e8m0fnu:
             dynamic_scale_for_routing = dynamic_scale_after_all2all.view(torch.float8_e8m0fnu)
-        elif with_quant:
-            dynamic_scale_for_routing = dynamic_scale_after_all2all
-        else:
-            dynamic_scale_for_routing = None
-
-        global_input_tokens, reversed_global_input_permutation_mapping, _, routed_scale = (
-            torch_npu.npu_moe_init_routing_v2(
-                global_input_tokens,
-                experts_indices_2d_copy,
-                scale=dynamic_scale_for_routing,
-                active_num=experts_indices_2d_copy.shape[0],
-                expert_num=self.num_local_experts,
-                expert_tokens_num_type=1,
-                expert_tokens_num_flag=True,
-                active_expert_range=[0, self.num_local_experts],
+            global_input_tokens, reversed_global_input_permutation_mapping, _, routed_scale = (
+                torch_npu.npu_moe_init_routing_v2(
+                    global_input_tokens,
+                    experts_indices_2d_copy,
+                    scale=dynamic_scale_for_routing,
+                    active_num=experts_indices_2d_copy.shape[0],
+                    expert_num=self.num_local_experts,
+                    expert_tokens_num_type=1,
+                    expert_tokens_num_flag=True,
+                    active_expert_range=[0, self.num_local_experts],
+                )
             )
-        )
-
-        if scale_type == torch.float8_e8m0fnu:
             dynamic_scale_after_all2all = routed_scale.view(torch.uint8)
-        elif with_quant:
-            dynamic_scale_after_all2all = routed_scale
-        else:
-            dynamic_scale_after_all2all = None
+            experts_indices_2d_copy.untyped_storage().resize_(0)
+            return global_input_tokens, dynamic_scale_after_all2all, reversed_global_input_permutation_mapping
+        
+        if with_quant:
+            dynamic_scale_after_all2all, _ = torch_npu.npu_moe_token_permute(
+                dynamic_scale_after_all2all.unsqueeze(-1), global_input_tokens_local_experts_indices
+            )
+            dynamic_scale_after_all2all = dynamic_scale_after_all2all.squeeze(-1)
 
-        experts_indices_2d_copy.untyped_storage().resize_(0)
+        # Non-quantized case
+        global_input_tokens, reversed_global_input_permutation_mapping = torch_npu.npu_moe_token_permute(
+            global_input_tokens, global_input_tokens_local_experts_indices
+        )
         return global_input_tokens, dynamic_scale_after_all2all, reversed_global_input_permutation_mapping
 
     def _combine_preprocess(
