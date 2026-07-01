@@ -683,14 +683,15 @@ class KVCacheRecvingThread(threading.Thread):
         for group_pull in group_pulls:
             group_idx = group_pull.group_id
             group_spec, layer_indices = self.kv_group2layeridx[group_idx]
+            kv_cache_group_id = group_spec.get("kv_cache_group_id", group_idx)
             layer_indices = pp_layer_indices(layer_indices, group_pull.prefill_pp_rank)
             if not layer_indices:
                 continue
             tp_num_need_pulls = group_pull.num_group_pulls
             inner_offset = group_pull.remote_tp_offset
             is_mamba_group = group_spec["kv_cache_spec_type"] == "MambaSpec"
-            local_group_block_ids = local_block_ids[group_idx]
-            remote_group_block_ids = remote_block_ids[group_idx]
+            local_group_block_ids = local_block_ids[kv_cache_group_id]
+            remote_group_block_ids = remote_block_ids[kv_cache_group_id]
             if not local_group_block_ids:
                 continue
             if not is_mamba_group:
@@ -851,6 +852,17 @@ class KVCacheRecvingThread(threading.Thread):
 
         if self.is_hma_required:
             for group_idx, grouped_local_block_ids, num_group_pulls, layer_indices in gqa_reformat_groups:
+                num_reformat_blocks = sum(len(block_ids) for block_ids in grouped_local_block_ids)
+                logger.debug(
+                    "Reformat hybrid linear KV cache for GQA attention group. "
+                    "group_idx=%s, num_group_pulls=%s, num_block_groups=%s, num_reformat_blocks=%s, "
+                    "layer_indices=%s",
+                    group_idx,
+                    num_group_pulls,
+                    len(grouped_local_block_ids),
+                    num_reformat_blocks,
+                    layer_indices,
+                )
                 group_kv_caches = self._get_group_kv_caches(group_idx, layer_indices)
                 if not group_kv_caches:
                     continue
@@ -1840,7 +1852,12 @@ class MooncakeConnectorWorker:
         self._prefill_pp_layer_partition = prefill_parallel_config.get("pp_layer_partition")
 
     @staticmethod
-    def _serialize_kv_group_spec(group_spec: Any) -> dict[str, Any]:
+    def _serialize_kv_group_spec(
+        group_spec: Any,
+        layer_names: list[str] | None = None,
+        kv_cache_spec: Any | None = None,
+        kv_cache_group_id: int | None = None,
+    ) -> dict[str, Any]:
         def to_msgpackable(value: Any) -> Any:
             if value is None or isinstance(value, (str, int, float, bool)):
                 return value
@@ -1856,15 +1873,28 @@ class MooncakeConnectorWorker:
             except TypeError:
                 return repr(value)
 
-        kv_cache_spec = group_spec.kv_cache_spec
+        if layer_names is None:
+            layer_names = list(group_spec.layer_names)
+        if kv_cache_spec is None:
+            kv_cache_spec = group_spec.kv_cache_spec
         spec = kv_cache_spec
         if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
-            spec = kv_cache_spec.kv_cache_specs
+            spec = {layer_name: kv_cache_spec.kv_cache_specs[layer_name] for layer_name in layer_names}
+        serialized_kv_cache_spec = to_msgpackable(spec)
+        if not isinstance(serialized_kv_cache_spec, dict):
+            serialized_kv_cache_spec = {"repr": serialized_kv_cache_spec}
+        num_key_value_heads = MooncakeConnectorWorker._get_spec_num_key_value_heads(spec)
+        if num_key_value_heads is not None:
+            serialized_kv_cache_spec["num_kv_heads"] = num_key_value_heads
+            serialized_kv_cache_spec["num_key_value_heads"] = num_key_value_heads
+
         serialized = {
-            "layer_names": list(group_spec.layer_names),
+            "layer_names": layer_names,
             "kv_cache_spec_type": type(kv_cache_spec).__name__,
-            "kv_cache_spec": to_msgpackable(spec),
+            "kv_cache_spec": serialized_kv_cache_spec,
         }
+        if kv_cache_group_id is not None:
+            serialized["kv_cache_group_id"] = kv_cache_group_id
         if isinstance(kv_cache_spec, MambaSpec):
             serialized["shapes"] = [list(shape) for shape in kv_cache_spec.shapes]
             serialized["dtype_sizes"] = [
@@ -1873,14 +1903,30 @@ class MooncakeConnectorWorker:
             ]
         return serialized
 
+    @staticmethod
+    def _get_spec_num_key_value_heads(spec: Any) -> int | None:
+        for key in ("num_kv_heads", "num_key_value_heads"):
+            num_key_value_heads = getattr(spec, key, None)
+            if isinstance(num_key_value_heads, int):
+                return num_key_value_heads
+        return None
+
+    @classmethod
+    def _get_kv_transfer_spec_key(cls, spec: Any) -> tuple[str, int | None]:
+        # TODO: Extand this key with KV cache layout fields (for example num_dims)
+        # if a future model has layers with the same number of kv heads but incompatiible
+        # cache shapes.
+        return (type(spec).__name__, cls._get_spec_num_key_value_heads(spec))
+
     def _build_kv_group2layeridx(self) -> dict[int, tuple[dict[str, Any], list[int]]]:
         from vllm.v1.worker.utils import extract_layer_index
 
         kv_group2layeridx: dict[int, tuple[dict[str, Any], list[int]]] = {}
         num_attn_module = 2 if self.vllm_config.model_config.hf_text_config.model_type == "longcat_flash" else 1
         next_mtp_layer_idx = self.total_layers
-        for group_id, group_spec in enumerate(self.kv_cache_config.kv_cache_groups):
-            layer_indices = []
+        transfer_group_id = 0
+        for kv_cache_group_id, group_spec in enumerate(self.kv_cache_config.kv_cache_groups):
+            layer_entries: list[tuple[str, int]] = []
             # For eagle3 method there is no "mtp" in layer names, and upstream model initiation assigns the layer id
             # that is sliced by Pipeline Parallel. So the eagle layer id will confilt with target model layers.
             # Here we determine whether the current layer is an eagle layer based on whether the layer id has been
@@ -1897,8 +1943,50 @@ class MooncakeConnectorWorker:
                         layer_idx = next_mtp_layer_idx
                         next_mtp_layer_idx += 1
                 assigned_indices.add(layer_idx)
-                layer_indices.append(layer_idx)
-            kv_group2layeridx[group_id] = (self._serialize_kv_group_spec(group_spec), layer_indices)
+                layer_entries.append((layer_name, layer_idx))
+
+            if isinstance(group_spec.kv_cache_spec, UniformTypeKVCacheSpecs):
+                spec_groups: OrderedDict[tuple[str, int | None], list[tuple[str, int]]] = OrderedDict()
+                for layer_name, layer_idx in layer_entries:
+                    layer_spec = group_spec.kv_cache_spec.kv_cache_specs[layer_name]
+                    spec_key = self._get_kv_transfer_spec_key(layer_spec)
+                    spec_groups.setdefault(spec_key, []).append((layer_name, layer_idx))
+
+                if len(spec_groups) > 1:
+                    logger.info(
+                        "Split KV cache manager group %d into %d Mooncake transfer groups by KV spec: %s",
+                        kv_cache_group_id,
+                        len(spec_groups),
+                        list(spec_groups),
+                    )
+
+                for entries in spec_groups.values():
+                    layer_names = [layer_name for layer_name, _ in entries]
+                    layer_indices = [layer_idx for _, layer_idx in entries]
+                    kv_cache_spec = group_spec.kv_cache_spec.kv_cache_specs[layer_names[0]]
+                    kv_group2layeridx[transfer_group_id] = (
+                        self._serialize_kv_group_spec(
+                            group_spec,
+                            layer_names=layer_names,
+                            kv_cache_spec=kv_cache_spec,
+                            kv_cache_group_id=kv_cache_group_id,
+                        ),
+                        layer_indices,
+                    )
+                    transfer_group_id += 1
+                continue
+
+            layer_names = [layer_name for layer_name, _ in layer_entries]
+            layer_indices = [layer_idx for _, layer_idx in layer_entries]
+            kv_group2layeridx[transfer_group_id] = (
+                self._serialize_kv_group_spec(
+                    group_spec,
+                    layer_names=layer_names,
+                    kv_cache_group_id=kv_cache_group_id,
+                ),
+                layer_indices,
+            )
+            transfer_group_id += 1
         return kv_group2layeridx
 
     def _has_mamba_group(self) -> bool:
@@ -2317,7 +2405,7 @@ class MooncakeConnectorWorker:
         kv_group_items = list(self.kv_group2layeridx.items())
         sequence_group_idx = next(
             (
-                group_idx
+                group_spec.get("kv_cache_group_id", group_idx)
                 for group_idx, (group_spec, _) in kv_group_items
                 if group_spec["kv_cache_spec_type"] != "MambaSpec"
             ),
@@ -2438,11 +2526,13 @@ class MooncakeConnectorWorker:
         if self._is_hma_required:
             _, rank_group_pulls = self._get_hybrid_remote_rank_group_pulls(req_id, prefill_tp_size)
             num_pp_tp_ranks = prefill_tp_size * self._prefill_pp_size
+
+            def get_group_pulls_for_remote_port(remote_handshake_port: int) -> list[GroupPull]:
+                remote_rank = (remote_handshake_port - remote_base_port) % num_pp_tp_ranks
+                return list(rank_group_pulls.get(remote_rank, []))
+
             return [
-                [
-                    rank_group_pulls[(remote_handshake_port - remote_base_port) % num_pp_tp_ranks]
-                    for remote_handshake_port in remote_ports
-                ]
+                [get_group_pulls_for_remote_port(remote_handshake_port) for remote_handshake_port in remote_ports]
                 for remote_ports in remote_handshake_port_list
             ]
 
@@ -2524,7 +2614,7 @@ class MooncakeConnectorWorker:
                 continue
 
             num_group_pulls = self._get_attention_group_num_need_pulls(group_spec, prefill_tp_size)
-            chosen_rank_list = self._get_remote_rank(req_id, prefill_tp_size)
+            chosen_rank_list = self._get_attention_group_remote_rank(req_id, group_spec, prefill_tp_size)
             assert len(chosen_rank_list) == num_group_pulls * self._prefill_pp_size, (
                 f"chosen_rank_list({chosen_rank_list}) does not match num_group_pulls({num_group_pulls}) "
                 f"and prefill pp size({self._prefill_pp_size})."
@@ -2545,8 +2635,16 @@ class MooncakeConnectorWorker:
         return list(rank_group_pulls), dict(rank_group_pulls)
 
     def _get_attention_group_num_need_pulls(self, group_spec: dict[str, Any], prefill_tp_size: int) -> int:
+        return self._get_attention_group_num_need_pulls_for_decode_tp(group_spec, prefill_tp_size, self.tp_size)
+
+    def _get_attention_group_num_need_pulls_for_decode_tp(
+        self,
+        group_spec: dict[str, Any],
+        prefill_tp_size: int,
+        decode_tp_size: int,
+    ) -> int:
         num_key_value_heads = self._get_attention_group_num_key_value_heads(group_spec)
-        num_d_block_heads = max(1, num_key_value_heads // self.tp_size)
+        num_d_block_heads = max(1, num_key_value_heads // decode_tp_size)
         num_p_block_heads = max(1, num_key_value_heads // prefill_tp_size)
         return num_d_block_heads // num_p_block_heads
 
@@ -2557,7 +2655,30 @@ class MooncakeConnectorWorker:
                 num_key_value_heads = kv_cache_spec.get(key)
                 if isinstance(num_key_value_heads, int):
                     return num_key_value_heads
+            for spec in kv_cache_spec.values():
+                if not isinstance(spec, dict):
+                    continue
+                for key in ("num_kv_heads", "num_key_value_heads"):
+                    num_key_value_heads = spec.get(key)
+                    if isinstance(num_key_value_heads, int):
+                        return num_key_value_heads
         return self.num_key_value_heads
+
+    def _get_attention_group_remote_rank(
+        self,
+        req_id: str,
+        group_spec: dict[str, Any],
+        prefill_tp_size: int,
+    ) -> list[int]:
+        num_key_value_heads = self._get_attention_group_num_key_value_heads(group_spec)
+        num_group_pulls = self._get_attention_group_num_need_pulls(group_spec, prefill_tp_size)
+        return self._get_remote_ranks_for_req(
+            req_id,
+            prefill_tp_size,
+            num_key_value_heads=num_key_value_heads,
+            tp_num_need_pulls=num_group_pulls,
+            use_mla=num_key_value_heads == 1,
+        )[self.tp_rank]
 
     def start_load_kv(self, metadata: MooncakeConnectorMetadata):
         """Start loading KV blocks from remote engine."""
@@ -2666,22 +2787,53 @@ class MooncakeConnectorWorker:
         return info.get("host", remote_host), info.get("engine_id", remote_engine_id)
 
     def _prefill_get_remote_rank(self, req_id: str) -> list[int]:
+        if self._is_hma_required:
+            prefill_ranks: set[int] = set()
+            for group_spec, layer_indices in self.kv_group2layeridx.values():
+                if layer_indices:
+                    prefill_ranks.update(self._get_prefill_ranks_for_group(req_id, group_spec))
+            return sorted(prefill_ranks)
         return sum(self._get_remote_ranks_for_req(req_id), [])
+
+    def _get_prefill_ranks_for_group(self, req_id: str, group_spec: dict[str, Any]) -> set[int]:
+        if group_spec["kv_cache_spec_type"] == "MambaSpec":
+            assert self._prefill_tp_size % self._decode_tp_size == 0, (
+                f"Hybrid Mamba prefill tp size({self._prefill_tp_size}) must be divisible by "
+                f"decode tp size({self._decode_tp_size})."
+            )
+            return set(range(self._prefill_tp_size * self._prefill_pp_size))
+
+        num_key_value_heads = self._get_attention_group_num_key_value_heads(group_spec)
+        num_group_pulls = self._get_attention_group_num_need_pulls_for_decode_tp(
+            group_spec,
+            self._prefill_tp_size,
+            self._decode_tp_size,
+        )
+        remote_ranks_by_decode_rank = self._get_remote_ranks_for_req(
+            req_id,
+            self._prefill_tp_size,
+            num_key_value_heads=num_key_value_heads,
+            tp_num_need_pulls=num_group_pulls,
+            use_mla=num_key_value_heads == 1,
+        )
+        return {rank for remote_ranks in remote_ranks_by_decode_rank for rank in remote_ranks}
 
     def _get_remote_rank(self, req_id: str, prefill_tp_size: int | None = None) -> list[int]:
         return self._get_remote_ranks_for_req(req_id, prefill_tp_size)[self.tp_rank]
 
     def _get_remote_tp_ranks(
-        self, tp_ori_data: np.ndarray, rand_group_index: list[int], num_groups: int, prefill_tp_size: int
+        self,
+        tp_ori_data: np.ndarray,
+        rand_group_index: list[int],
+        num_groups: int,
+        prefill_tp_size: int,
+        num_key_value_heads: int,
+        tp_num_need_pulls: int,
+        use_mla: bool,
     ) -> list[list[int]]:
-        tp_num_need_pulls = self._get_tp_num_need_pulls(prefill_tp_size)
         # random split prefill tp list
         tp_sampled_nums = []
-        if (
-            prefill_tp_size > self.num_key_value_heads
-            or self.vllm_config.model_config.is_deepseek_mla
-            or self.use_sparse
-        ):
+        if prefill_tp_size > num_key_value_heads or use_mla or self.use_sparse:
             tp_ori_data = tp_ori_data.reshape(-1, num_groups)
             chosen_group = tp_ori_data[:, [rand_group_index]]
             flattened = chosen_group.reshape(-1).tolist()
@@ -2696,9 +2848,25 @@ class MooncakeConnectorWorker:
                 tp_sampled_nums.append(slice.tolist())
         return tp_sampled_nums
 
-    def _get_remote_ranks_for_req(self, req_id: str, prefill_tp_size: int | None = None) -> list[list[int]]:
+    def _get_remote_ranks_for_req(
+        self,
+        req_id: str,
+        prefill_tp_size: int | None = None,
+        num_key_value_heads: int | None = None,
+        tp_num_need_pulls: int | None = None,
+        use_mla: bool | None = None,
+    ) -> list[list[int]]:
         if prefill_tp_size is None:
             prefill_tp_size = self._prefill_tp_size
+        if num_key_value_heads is None:
+            if self.vllm_config.model_config.is_deepseek_mla or self.use_sparse:
+                num_key_value_heads = 1
+            else:
+                num_key_value_heads = self.num_key_value_heads
+        if tp_num_need_pulls is None:
+            tp_num_need_pulls = self._get_tp_num_need_pulls(prefill_tp_size)
+        if use_mla is None:
+            use_mla = self.vllm_config.model_config.is_deepseek_mla
 
         # Divide the ports according to the TP within the PP
         sampled_nums = []
@@ -2710,11 +2878,7 @@ class MooncakeConnectorWorker:
                 )
             )
             return sampled_nums
-        # use deepseek mla, num_key_value_heads == 128, but consider as 1
-        if self.vllm_config.model_config.is_deepseek_mla or self.use_sparse:
-            num_kv_head = 1
-        else:
-            num_kv_head = self.num_key_value_heads
+        num_kv_head = num_key_value_heads
         ori_data = np.arange(prefill_tp_size * self._prefill_pp_size)
         seed = string_to_int64_hash(req_id)
         rand = random.Random(seed)
@@ -2727,7 +2891,15 @@ class MooncakeConnectorWorker:
             range(num_groups), (max(self._decode_tp_size // num_kv_head, 1))
         )  # random choose a group
         all_results = [
-            self._get_remote_tp_ranks(ori_data_2d[pp_index], rand_group_index, num_groups, prefill_tp_size)
+            self._get_remote_tp_ranks(
+                ori_data_2d[pp_index],
+                rand_group_index,
+                num_groups,
+                prefill_tp_size,
+                num_key_value_heads,
+                tp_num_need_pulls,
+                use_mla,
+            )
             for pp_index in range(self._prefill_pp_size)
         ]
         for group_index in range(len(all_results[0])):
