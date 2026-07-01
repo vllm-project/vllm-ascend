@@ -2101,7 +2101,6 @@ class NPUModelRunner(GPUModelRunner):
                 scheduled_spec_decode_tokens=spec_decode_tokens_copy,
             )
 
-        self._start_dump_data()
         # self._draft_token_ids is None when `input_fits_in_drafter=False`
         # and there is no draft tokens scheduled. so it need to update the
         # spec_decoding info in scheduler_output with async_scheduling.
@@ -2164,6 +2163,7 @@ class NPUModelRunner(GPUModelRunner):
                 )
 
                 if has_ec_transfer() and get_ec_transfer().is_producer:
+                    self._start_dump_data()
                     with self.maybe_get_ec_connector_output(
                         scheduler_output,
                         encoder_cache=self.encoder_cache,
@@ -2203,6 +2203,7 @@ class NPUModelRunner(GPUModelRunner):
                     if not has_kv_transfer_group():
                         return EMPTY_MODEL_RUNNER_OUTPUT
                     return self.kv_connector_no_forward(scheduler_output, self.vllm_config)
+                self._start_dump_data()
                 num_scheduled_tokens_np = np.array(tokens, dtype=np.int32)
                 max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
                 (
