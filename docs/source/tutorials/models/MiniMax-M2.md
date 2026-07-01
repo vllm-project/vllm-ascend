@@ -357,7 +357,6 @@ export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
 export TASK_QUEUE_ENABLE=1
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 export PYTHONHASHSEED=0
 
@@ -381,7 +380,7 @@ vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
     --quantization ascend \
     --enforce-eager \
     --speculative_config '{"method": "eagle3", "model": "/path/to/weight/Eagle3/", "num_speculative_tokens": 3}' \
-    --additional-config '{"enable_cpu_binding":true}' \
+    --additional-config '{"enable_cpu_binding":true, "enable_flashcomm1": true}' \
     --kv-transfer-config \
         '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_producer",
@@ -419,7 +418,7 @@ export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
 export TASK_QUEUE_ENABLE=1
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=0
+# Omit enable_flashcomm1 from --additional-config to keep FlashComm1 disabled.
 export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 export PYTHONHASHSEED=0
 

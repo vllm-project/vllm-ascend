@@ -157,7 +157,6 @@ sysctl -w kernel.numa_balancing=0
 sysctl -w kernel.sched_migration_cost_ns=50000
 
 export HCCL_BUFFSIZE=800
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export VLLM_ASCEND_BALANCE_SCHEDULING=1
 
 vllm serve Eco-Tech/Kimi-K2.6-W4A8 \
@@ -178,7 +177,8 @@ vllm serve Eco-Tech/Kimi-K2.6-W4A8 \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
     --mm-processor-cache-gb 0 \
     --mm-encoder-tp-mode data \
-    --speculative-config '{"method": "dflash","model": "z-lab/Kimi-K2.6-DFlash", "num_speculative_tokens": 15}'
+    --speculative-config '{"method": "dflash","model": "z-lab/Kimi-K2.6-DFlash", "num_speculative_tokens": 15}' \
+    --additional-config '{"enable_flashcomm1": true}'
 ```
 
 Key Parameter Descriptions:
@@ -327,7 +327,6 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
     export HCCL_BUFFSIZE=800
-    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
     export ASCEND_RT_VISIBLE_DEVICES=$1
 
     vllm serve Eco-Tech/Kimi-K2.6-W4A8 \
@@ -350,7 +349,7 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
       --gpu-memory-utilization 0.95 \
       --enforce-eager \
       --speculative-config '{"method": "eagle3", "model":"lightseekorg/kimi-k2.6-eagle3", "num_speculative_tokens": 3}' \
-      --additional-config '{"recompute_scheduler_enable":true}' \
+      --additional-config '{"recompute_scheduler_enable":true, "enable_flashcomm1": true}' \
       --mm-encoder-tp-mode data \
       --kv-transfer-config \
       '{"kv_connector": "MooncakeConnectorV1",
@@ -405,7 +404,6 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
     export HCCL_BUFFSIZE=800
-    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
     export ASCEND_RT_VISIBLE_DEVICES=$1
 
     vllm serve Eco-Tech/Kimi-K2.6-W4A8 \
@@ -428,7 +426,7 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
       --gpu-memory-utilization 0.95 \
       --enforce-eager \
       --speculative-config '{"method": "eagle3", "model":"lightseekorg/kimi-k2.6-eagle3", "num_speculative_tokens": 3}' \
-      --additional-config '{"recompute_scheduler_enable":true}' \
+      --additional-config '{"recompute_scheduler_enable":true, "enable_flashcomm1": true}' \
       --mm-encoder-tp-mode data \
       --kv-transfer-config \
       '{"kv_connector": "MooncakeConnectorV1",
@@ -604,7 +602,7 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
 
     Key Parameter Descriptions:
 
-    - `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the communication optimization function on the prefill nodes.
+    - `--additional-config '{"enable_flashcomm1": true}'`: enables the communication optimization function on the prefill nodes.
     - `VLLM_ASCEND_ENABLE_MLAPO=1`: enables the fusion operator, which can significantly improve performance but consumes more NPU memory. In the Prefill-Decode (PD) separation scenario, enable MLAPO only on decode nodes.
     - `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the Key-Value Cache (KV Cache) of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, it is recommended to enable this configuration on both prefill and decode nodes simultaneously.
     - `multistream_overlap_shared_expert: true`: When the Tensor Parallelism (TP) size is 1 or `enable_shared_expert_dp: true`, an additional stream is enabled to overlap the computation process of shared experts for improved efficiency.

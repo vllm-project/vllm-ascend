@@ -101,7 +101,7 @@ sysctl -w vm.swappiness=0
 sysctl -w kernel.numa_balancing=0
 sysctl -w kernel.sched_migration_cost_ns=50000
 
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=0
+# Omit enable_flashcomm1 from --additional-config to keep FlashComm1 disabled.
 export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export TASK_QUEUE_ENABLE=1
@@ -150,7 +150,6 @@ sysctl -w vm.swappiness=0
 sysctl -w kernel.numa_balancing=0
 sysctl -w kernel.sched_migration_cost_ns=50000
 
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export TASK_QUEUE_ENABLE=1
@@ -173,7 +172,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/InternVL3_5-241B-A28B-
     --gpu-memory-utilization 0.9 \
     --async-scheduling \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4,32,64,128,192,256,512]}' \
-    --additional-config '{"enable_weight_nz_layout": true, "enable_cpu_binding": true}' \
+    --additional-config '{"enable_weight_nz_layout": true, "enable_cpu_binding": true, "enable_flashcomm1": true}' \
     --mm-processor-cache-gb 0 \
     --enable-chunked-prefill \
     --enable-prefix-caching \
@@ -189,7 +188,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/InternVL3_5-241B-A28B-
 
 Some configurations for optimization are shown below:
 
-- `VLLM_ASCEND_ENABLE_FLASHCOMM1`: Enable FlashComm optimization to reduce communication and computation overhead on prefill node. With FlashComm enabled, layer_sharding list cannot include o_proj as an element.
+- `additional_config.enable_flashcomm1`: Enable FlashComm optimization to reduce communication and computation overhead on prefill node. With FlashComm enabled, layer_sharding list cannot include o_proj as an element.
 - `VLLM_ASCEND_ENABLE_FUSED_MC2`: Enable following fused operators: dispatch_gmm_combine_decode and dispatch_ffn_combine operator.
 
 Please refer to the following python file for further explanation and restrictions of the environment variables above: [envs.py](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/envs.py)

@@ -154,7 +154,6 @@ export OMP_NUM_THREADS=10
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 export HCCL_BUFFSIZE=1024
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export TASK_QUEUE_ENABLE=1
 export HCCL_OP_EXPANSION_MODE="AIV"
 
@@ -181,7 +180,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Flash-w8a8
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --async-scheduling \
     --additional-config '
-    {"ascend_compilation_config":{
+    {"enable_flashcomm1": true, "ascend_compilation_config":{
         "enable_npugraph_ex":true,
         "enable_static_kernel":false
         },
@@ -202,7 +201,6 @@ export OMP_NUM_THREADS=10
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 export HCCL_BUFFSIZE=1024
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export TASK_QUEUE_ENABLE=1
 export HCCL_OP_EXPANSION_MODE="AIV"
 
@@ -229,7 +227,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Flash-w8a8
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --async-scheduling \
     --additional-config '
-    {"ascend_compilation_config":{
+    {"enable_flashcomm1": true, "ascend_compilation_config":{
         "enable_npugraph_ex":true,
         "enable_static_kernel":false
         },
@@ -247,7 +245,7 @@ Key Parameter Descriptions:
 - `--speculative-config` configures the MTP (Multi-Token Prediction) speculative decoding to accelerate inference.
 - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` enables full ACL graph execution in the decode phase to reduce scheduling latency.
 - `--async-scheduling` enables asynchronous scheduling to overlap CPU scheduling with NPU computation.
-- `VLLM_ASCEND_ENABLE_FLASHCOMM1=1` enables the FlashComm communication optimization.
+- `--additional-config '{"enable_flashcomm1": true}'` enables the FlashComm communication optimization.
 
 Common Issues Tip: If you encounter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
 
@@ -427,7 +425,6 @@ Before you start, please:
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export HCCL_BUFFSIZE=2560
         export TASK_QUEUE_ENABLE=1
-        export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
         export HCCL_OP_EXPANSION_MODE="AIV"
         export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
         export ASCEND_RT_VISIBLE_DEVICES=$1
@@ -460,7 +457,7 @@ Before you start, please:
             --gpu-memory-utilization 0.9 \
             --quantization ascend \
             --enforce-eager \
-            --additional-config '{"enable_cpu_binding": true, "enable_shared_expert_dp": true,  "enable_dsa_cp": true}' \
+            --additional-config '{"enable_cpu_binding": true, "enable_shared_expert_dp": true,  "enable_dsa_cp": true, "enable_flashcomm1": true}' \
             --kv-transfer-config \
             '{"kv_connector": "MooncakeHybridConnector",
             "kv_role": "kv_producer",
@@ -848,7 +845,7 @@ Before you start, please:
 
 Key Parameter Descriptions:
 
-- `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the communication optimization function on the prefill nodes.
+- `--additional-config '{"enable_flashcomm1": true}'`: enables the communication optimization function on the prefill nodes.
 - `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the KV Cache of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, it is recommended to enable this configuration on decode nodes.
 - `MooncakeHybridConnector`: the KV transfer connector used for PD separation, transferring KV Cache between prefill and decode nodes.
 - `enable_shared_expert_dp: true`: enables data parallelism for shared experts, applicable to MoE models.

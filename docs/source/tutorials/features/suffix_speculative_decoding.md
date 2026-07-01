@@ -85,8 +85,6 @@ export TASK_QUEUE_ENABLE=1
 # Enable the AIVector core to directly schedule ROCE communication.
 export HCCL_OP_EXPANSION_MODE="AIV"
 # Enable FlashComm_v1 optimization when tensor parallel is enabled.
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-
 vllm serve /data/Qwen3-32B \
   --served-model-name qwen3 \
   --trust-remote-code \
@@ -96,7 +94,7 @@ vllm serve /data/Qwen3-32B \
   --max-num-batched-tokens 40960 \
   --speculative-config '{"method": "suffix", "num_speculative_tokens": 3}' \
   --gpu-memory-utilization 0.9 \
-  --additional-config '{"pa_shape_list":[48,64,72,80], "weight_prefetch_config":{"enable":true}}' \
+  --additional-config '{"pa_shape_list":[48,64,72,80], "weight_prefetch_config":{"enable":true}, "enable_flashcomm1": true}' \
   --port 8011
 ```
 

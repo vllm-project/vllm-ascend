@@ -138,8 +138,6 @@ export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=200
 export VLLM_ASCEND_ENABLE_MLAPO=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-
 vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
 --host 0.0.0.0 \
 --port 8000 \
@@ -156,7 +154,8 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
 --no-enable-prefix-caching \
 --gpu-memory-utilization 0.92 \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
+--speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}' \
+--additional-config '{"enable_flashcomm1": true}'
 
 ```
 
@@ -196,8 +195,6 @@ export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=200
 export VLLM_ASCEND_ENABLE_MLAPO=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-
 vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
 --host 0.0.0.0 \
 --port 8077 \
@@ -217,7 +214,8 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
 --no-enable-prefix-caching \
 --gpu-memory-utilization 0.92 \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
+--speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}' \
+--additional-config '{"enable_flashcomm1": true}'
 ```
 
 **Node1**
@@ -244,8 +242,6 @@ export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=200
 export VLLM_ASCEND_ENABLE_MLAPO=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-
 vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
 --host 0.0.0.0 \
 --port 8077 \
@@ -267,7 +263,8 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
 --no-enable-prefix-caching \
 --gpu-memory-utilization 0.92 \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
+--speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}' \
+--additional-config '{"enable_flashcomm1": true}'
 ```
 
 ::::
@@ -298,7 +295,6 @@ export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=200
 export VLLM_ASCEND_ENABLE_MLAPO=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export HCCL_CONNECT_TIMEOUT=120
 export HCCL_INTRA_PCIE_ENABLE=1
 export HCCL_INTRA_ROCE_ENABLE=0
@@ -322,7 +318,8 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
 --no-enable-prefix-caching \
 --gpu-memory-utilization 0.92 \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[8, 16, 24, 32, 40, 48]}' \
---speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
+--speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}' \
+--additional-config '{"enable_flashcomm1": true}'
 
 ```
 
@@ -350,7 +347,6 @@ export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=200
 export VLLM_ASCEND_ENABLE_MLAPO=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export HCCL_CONNECT_TIMEOUT=120
 export HCCL_INTRA_PCIE_ENABLE=1
 export HCCL_INTRA_ROCE_ENABLE=0
@@ -376,7 +372,8 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
 --no-enable-prefix-caching \
 --gpu-memory-utilization 0.92 \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[8, 16, 24, 32, 40, 48]}' \
---speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
+--speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}' \
+--additional-config '{"enable_flashcomm1": true}'
 
 ```
 
@@ -522,9 +519,6 @@ Before you start, please
 
         export ASCEND_RT_VISIBLE_DEVICES=$1
 
-        export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-
-
         vllm serve /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot \
             --host 0.0.0.0 \
             --port $2 \
@@ -549,7 +543,7 @@ Before you start, please
             --quantization ascend \
             --enforce-eager \
             --no-enable-prefix-caching \
-            --additional-config '{"layer_sharding": ["q_b_proj", "o_proj"], "enable_dsa_cp": true}' \
+            --additional-config '{"layer_sharding": ["q_b_proj", "o_proj"], "enable_dsa_cp": true, "enable_flashcomm1": true}' \
             --kv-transfer-config \
             '{"kv_connector": "MooncakeLayerwiseConnector",
             "kv_role": "kv_producer",
@@ -596,9 +590,6 @@ Before you start, please
 
         export ASCEND_RT_VISIBLE_DEVICES=$1
 
-        export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-
-
         vllm serve /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot \
             --host 0.0.0.0 \
             --port $2 \
@@ -623,7 +614,7 @@ Before you start, please
             --quantization ascend \
             --enforce-eager \
             --no-enable-prefix-caching \
-            --additional-config '{"layer_sharding": ["q_b_proj", "o_proj"], "enable_dsa_cp": true}' \
+            --additional-config '{"layer_sharding": ["q_b_proj", "o_proj"], "enable_dsa_cp": true, "enable_flashcomm1": true}' \
             --kv-transfer-config \
             '{"kv_connector": "MooncakeLayerwiseConnector",
             "kv_role": "kv_producer",

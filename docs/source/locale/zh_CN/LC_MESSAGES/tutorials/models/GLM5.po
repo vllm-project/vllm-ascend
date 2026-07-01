@@ -405,11 +405,11 @@ msgstr "一些优化配置如下所示："
 
 #: ../../source/tutorials/models/GLM5.md:1338
 msgid ""
-"`VLLM_ASCEND_ENABLE_FLASHCOMM1`: Enable FlashComm optimization to reduce "
+"`additional_config.enable_flashcomm1`: Enable FlashComm optimization to reduce "
 "communication and computation overhead on prefill node. With FlashComm "
 "enabled, layer_sharding list cannot include o_proj as an element."
 msgstr ""
-"`VLLM_ASCEND_ENABLE_FLASHCOMM1`：启用 FlashComm 优化以减少预填充节点上的通信和计算开销。启用 "
+"`additional_config.enable_flashcomm1`：启用 FlashComm 优化以减少预填充节点上的通信和计算开销。启用 "
 "FlashComm 后，layer_sharding 列表不能包含 o_proj 作为元素。"
 
 #: ../../source/tutorials/models/GLM5.md:1339

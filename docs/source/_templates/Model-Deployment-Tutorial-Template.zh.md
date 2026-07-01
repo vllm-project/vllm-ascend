@@ -283,7 +283,7 @@ lm_eval \
 
 | 优化技术 | 适用场景 | 启用方式 | 技术原理 | 注意事项 |
 | --------- | --------- | --------- | --------- | --------- |
-| FlashComm_v1 | 大并发、张量并行(TP)场景 | `export VLLM_ASCEND_ENABLE_FLASHCOMM1=1` | 将传统Allreduce分解为Reduce-Scatter和All-Gather，减少RMSNorm计算维度 | 阈值保护：仅当实际token数超过阈值时生效，避免小并发场景性能倒退|
+| FlashComm_v1 | 大并发、张量并行(TP)场景 | `--additional-config '{"enable_flashcomm1": true}'` | 将传统Allreduce分解为Reduce-Scatter和All-Gather，减少RMSNorm计算维度 | 阈值保护：仅当实际token数超过阈值时生效，避免小并发场景性能倒退|
 | Matmul-ReduceScatter融合 | 大型分布式环境 | 启用FlashComm_v1后自动开启 | 将矩阵乘法与Reduce-Scatter操作融合，实现流水线并行处理 | 同FlashComm_v1，有阈值保护 |
 | 权重预取 | MLP密集型场景（Dense模型）| `export VLLM_ASCEND_ENABLE_PREFETCH_MLP=1` | 利用向量计算时间，提前将MLP权重加载到L2 Cache | 需配合预取缓冲区大小调整 |
 | 异步调度 | 大规模模型、高并发场景 | `--async-scheduling` | 非阻塞任务调度，提升并发处理能力 | 与FullGraph优化协同使用 |

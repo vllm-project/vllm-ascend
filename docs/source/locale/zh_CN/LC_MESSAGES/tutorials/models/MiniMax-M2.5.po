@@ -268,8 +268,8 @@ msgstr "**问：在 EP 模式下输出乱码怎么办？**"
 #: ../../source/tutorials/models/MiniMax-M2.5.md:309
 msgid ""
 "A: It is recommended to keep `--enable-expert-parallel` and "
-"`VLLM_ASCEND_ENABLE_FLASHCOMM1=1`."
-msgstr "答：建议保持 `--enable-expert-parallel` 和 `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`。"
+"`--additional-config '{\"enable_flashcomm1\": true}'`."
+msgstr "答：建议保持 `--enable-expert-parallel` 和 `--additional-config '{\"enable_flashcomm1\": true}'`。"
 
 #: ../../source/tutorials/models/MiniMax-M2.5.md:311
 msgid ""

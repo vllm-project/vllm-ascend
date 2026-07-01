@@ -4,11 +4,12 @@ Additional configuration is a mechanism provided by vLLM to allow plugins to con
 
 ## Migration Guide
 
-Starting from [PR #9064](https://github.com/vllm-project/vllm-ascend/pull/9064), vLLM Ascend is migrating **10 environment variables** to `--additional-config`.
+Starting from [PR #9064](https://github.com/vllm-project/vllm-ascend/pull/9064), vLLM Ascend is migrating environment variables to `--additional-config`.
 
 ### Important Notice
 
-- **Current Support**: Both environment variables and `--additional-config` are supported during the transition period
+- **FlashComm1**: `--additional-config '{"enable_flashcomm1": true}'` is preferred. The deprecated `VLLM_ASCEND_ENABLE_FLASHCOMM1` environment variable is still read as a compatibility fallback when `enable_flashcomm1` is not set.
+- **Current Support**: Migrated environment variables and `--additional-config` are supported during the transition period
 - **Recommendation**: Use `--additional-config` for new deployments and migrate existing configurations
 - **Future Plan**: Environment variables will be **removed** in a future release; only `--additional-config` will be supported
 
@@ -29,7 +30,7 @@ Starting from [PR #9064](https://github.com/vllm-project/vllm-ascend/pull/9064),
 
 ### Example Migration
 
-**Before (environment variable):**
+**Before (deprecated environment variable):**
 
 ```bash
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
@@ -91,7 +92,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `enable_mc2_hierarchy_comm`         | bool | `False` | Enable dispatch/combine op inter-node communication by ROCE. |
 | `profiling_chunk_config`            | dict | `{}`    | Configuration options for dynamic chunked pipeline parallel. See [Dynamic Chunked Pipeline Parallel](../feature_guide/dynamic_chunk_pipeline_parallel.md) for details. |
 | `enable_balance_scheduling`         | bool | `False` | Whether to enable balance scheduling. Can also be configured via the `VLLM_ASCEND_BALANCE_SCHEDULING` environment variable during the migration period. |
-| `enable_flashcomm1`                 | bool | `False` | Whether to enable FlashComm1 optimization. Can also be configured via the `VLLM_ASCEND_ENABLE_FLASHCOMM1` environment variable during the migration period. |
+| `enable_flashcomm1`                 | bool | `False` | Whether to enable FlashComm1 optimization. Can also be configured via the deprecated `VLLM_ASCEND_ENABLE_FLASHCOMM1` environment variable during the migration period. |
 | `enable_matmul_allreduce`           | bool | `False` | Whether to enable matmul allreduce optimization. Can also be configured via the `VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE` environment variable during the migration period. |
 | `flashcomm2_parallel_size`          | int  | `0`     | FlashComm2 parallel size. Can also be configured via the `VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE` environment variable during the migration period. |
 | `msmonitor_use_daemon`              | bool | `False` | Whether to use daemon mode for msmonitor. Can also be configured via the `MSMONITOR_USE_DAEMON` environment variable during the migration period. |
