@@ -178,7 +178,7 @@ vllm serve Eco-Tech/Kimi-K2.6-W4A8 \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
     --mm-processor-cache-gb 0 \
     --mm-encoder-tp-mode data \
-    --speculative-config '{"method": "dflash","model": "z-lab/Kimi-K2.6-DFlash", "num_speculative_tokens": 15}'
+    --speculative-config '{"method": "dflash","model": "z-lab/Kimi-K2.5-DFlash", "num_speculative_tokens": 15}'
 ```
 
 Key Parameter Descriptions:
