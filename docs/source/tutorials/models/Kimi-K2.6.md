@@ -127,7 +127,7 @@ If you don't want to use the docker image as above, you can also build all from 
 
 If you want to deploy multi-node environment, you need to set up environment on each node.
 
-To use the tools_call feature, please ensure that your transformers version is 4.57.6 or lower. If vllm-ascend has been upgraded to v0.21 or later, this requirement no longer applies.
+To use the tool_calls feature, please ensure that your transformers version is 4.57.6 or lower. If vllm-ascend has been upgraded to v0.21 or later, this requirement no longer applies.
 
 ## 5 Online Service Deployment
 
@@ -587,8 +587,8 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
       --kv-transfer-config \
       '{"kv_connector": "MooncakeConnectorV1",
       "kv_role": "kv_consumer",
-      "kv_port": "30200",
-      "engine_id": "2",
+      "kv_port": "30300",
+      "engine_id": "3",
       "kv_connector_extra_config": {
                 "prefill": {
                         "dp_size": 4,
@@ -858,6 +858,6 @@ Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matr
 
 For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html); this chapter only covers model-specific issues.
 
-- **Q: What transformer version is required for tools_call feature?**
+- **Q: What transformer version is required for tool_calls feature?**
 
-  A: To use the tools_call feature, please ensure that your transformers version is 4.57.6 or lower. If vllm-ascend has been upgraded to v0.21 or later, this requirement no longer applies.
+  A: To use the tool_calls feature, please ensure that your transformers version is 4.57.6 or lower. If vllm-ascend has been upgraded to v0.21 or later, this requirement no longer applies.
