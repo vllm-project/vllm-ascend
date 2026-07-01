@@ -29,7 +29,25 @@ import pytest
 import torch
 
 from tests.ut.base import TestBase
-from tests.ut.conftest import npu_test
+
+# Lightweight stand-in for the historical @npu_test decorator. Upstream
+# vllm-ascend now routes NPU tests by directory convention (tests/ut/<m>/a2/),
+# so this decorator only marks tests as skipped when no NPU device is visible
+# (matching the previous behaviour for B-class tests in CPU-only envs).
+
+
+def npu_test(num_npus: int = 1):
+    """Skip test when torch.npu is unavailable; otherwise run as-is."""
+
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            if not torch.npu.is_available():
+                pytest.skip(f"{func.__name__} requires NPU device (num_npus={num_npus})")
+            return func(*args, **kwargs)
+
+        return wrapper
+
+    return decorator
 
 
 def _build_wrapper():
