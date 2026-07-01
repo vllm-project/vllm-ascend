@@ -49,3 +49,16 @@ class DSAAttentionImpl(AttentionImpl[T], Generic[T]):
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         raise NotImplementedError
+
+    @staticmethod
+    def update_graph_params(
+        update_stream,
+        forward_context,
+        num_tokens,
+        vllm_config=None,
+        speculative_config=None,
+        num_dcp_pcp_tokens=None,
+        draft_attn_metadatas=None,
+    ):
+        # DSA graph metadata is carried by tensors prepared before replay.
+        pass
