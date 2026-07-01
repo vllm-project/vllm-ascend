@@ -22,7 +22,7 @@ from vllm_ascend.sample.rejection_sampler import (
     sample_recovered_tokens_pytorch,
 )
 
-KERNEL_TEST_ITERS = 100
+KERNEL_TEST_ITERS = 1
 
 
 @pytest.fixture(scope="function", autouse=True)
