@@ -82,7 +82,17 @@ class AscendUnquantizedLinearMethod(UnquantizedLinearMethod):
         super().process_weights_after_loading(layer)
         # must use fp32 to avoid accuracy degradation in dsv4.
         if getattr(layer, "precast_fp32_weight", False):
-            layer.weight_fp32 = maybe_trans_nz(layer.weight.data.to(torch.float32))
+            weight_fp32 = maybe_trans_nz(layer.weight.data.to(torch.float32))
+            # [snapshot] Register as a persistent buffer (not a plain attribute)
+            # so it is serialized by ``dump_model`` and copied back by
+            # ``restore_model`` after a snapshot resume. It is a derived fp32 copy
+            # of the gate weight (FP32 is never NZ-converted, so it round-trips
+            # cleanly); as a plain attribute its device memory is stale/zero after
+            # resume, which zeroes the router logits and corrupts expert routing.
+            if "weight_fp32" in layer._buffers:
+                layer.weight_fp32.data = weight_fp32
+            else:
+                layer.register_buffer("weight_fp32", weight_fp32, persistent=True)
         if "conv1d" not in layer.prefix:
             layer.weight.data = maybe_trans_nz(layer.weight.data)
 
