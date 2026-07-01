@@ -899,7 +899,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         slot_indices_list.append(
                             torch.arange(
                                 slot_idx_base[req_id], slot_idx_base[req_id] + self.pcp_size, device=self.device
-                                )
+                            )
                         )
                     slot_indices = torch.cat(slot_indices_list, dim=0)
 
@@ -1149,7 +1149,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         )
         draft_token_ids_tensor[0] = draft_token_ids
         # If the request contains prefill and PREFILL_SKIP_MULTI_STEP is enabled, skip multi step
-        if envs.PREFILL_SKIP_MULTI_STEP and attn_metadata_i.num_prefills and self.runner.dp_size == 1:
+        if envs.PREFILL_SKIP_MULTI_STEP and is_prefill and self.runner.dp_size == 1:
             return draft_token_ids_tensor.swapaxes(0, 1)
         
         if self.uses_mrope:

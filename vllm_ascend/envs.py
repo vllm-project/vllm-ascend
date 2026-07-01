@@ -113,7 +113,7 @@ env_variables: dict[str, Callable[[], Any]] = {
     # PREFILL_SKIP_MULTI_STEP: Under speculative decoding mode, the prefill phase skips multi-step speculation
     # "1": enable,
     # 0 or not set: disable
-    "PREFILL_SKIP_MULTI_STEP":lambda:bool(int(os.getenv("PREFILL_SKIP_MULTI_STEP", "0"))),
+    "PREFILL_SKIP_MULTI_STEP": lambda: bool(int(os.getenv("PREFILL_SKIP_MULTI_STEP", "0"))),
 }
 
 # end-env-vars-definition
