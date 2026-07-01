@@ -381,7 +381,6 @@ def unquant_apply_mlp(
         w1 = w1.transpose(1, 2)
         w2 = w2.transpose(1, 2)
 
-    mlp_input_hidden = hidden_states
     gate_up_out = torch_npu.npu_grouped_matmul(
         x=[hidden_states],
         weight=[w1],
@@ -411,7 +410,7 @@ def unquant_apply_mlp(
         lora_routing = moe_lora_apply_w13(
             lora_context,
             gate_up_out=gate_up_out,
-            hidden_states=mlp_input_hidden,
+            hidden_states=hidden_states,
             expanded_row_idx=expanded_row_idx,
             topk_ids=topk_ids,
         )
