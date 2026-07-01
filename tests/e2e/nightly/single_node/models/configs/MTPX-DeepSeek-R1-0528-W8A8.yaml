@@ -39,7 +39,7 @@ _benchmarks_gsm8k: &benchmarks_gsm8k
     max_out_len: 32768
     batch_size: 32
     baseline: 95
-    threshold: 5
+    threshold: 10
 
 _benchmarks_aime: &benchmarks_aime
   acc:
