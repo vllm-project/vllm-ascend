@@ -32,7 +32,7 @@ def bgmv_shrink(
     # caller's output is not float32. In production the LoRA shrink buffer is
     # already float32 (see punica_npu.py), so this branch is a no-op there.
     if output_tensor.dtype != torch.float32:
-        out = torch.empty_like(output_tensor, dtype=torch.float32)
+        out = output_tensor.to(torch.float32)
         torch.ops._C_ascend.bgmv_shrink(
             inputs,
             lora_a_weights,
@@ -107,7 +107,7 @@ def sgmv_shrink(
 ):
     # See bgmv_shrink: the kernel writes the output as float32.
     if output_tensor.dtype != torch.float32:
-        out = torch.empty_like(output_tensor, dtype=torch.float32)
+        out = output_tensor.to(torch.float32)
         torch.ops._C_ascend.sgmv_shrink(inputs, lora_a_weights, lora_indices_tensor, seq_len_tensor, out, scaling)
         output_tensor.copy_(out)
         return output_tensor
