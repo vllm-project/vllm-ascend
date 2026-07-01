@@ -796,8 +796,8 @@ class AscendSFADCPImpl(AscendSFAImpl):
             device=topk_indices.device,
         ).expand_as(topk_indices)
         pack_keys = original_order + (~local_owner_mask).to(torch.int32) * topk_count
-        _, pack_order = torch.sort(pack_keys, dim=-1)
-        return torch.gather(remapped_indices, dim=-1, index=pack_order)
+        _, pack_order = torch.sort(pack_keys.to(torch.float32), dim=-1)
+        return torch.gather(remapped_indices, dim=-1, index=pack_order.to(torch.int32))
 
     def _execute_sparse_flash_attention_process(
         self,
