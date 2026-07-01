@@ -407,8 +407,10 @@ aop_pipeline() {
     # Wait for all workers to signal ready
     echo "  Waiting for workers..."
     for i in $(seq 1 30); do
-        local ready_count
-        ready_count=$(ls "${coord}"/worker_ready_* 2>/dev/null | wc -l || echo 0)
+        local ready_count=0
+        for f in "${coord}"/worker_ready_*; do
+            [ -e "$f" ] && ready_count=$((ready_count + 1))
+        done
         echo "    [${i}/30] ready workers: ${ready_count}"
         if [ "$ready_count" -ge 1 ]; then break; fi
         sleep 2
