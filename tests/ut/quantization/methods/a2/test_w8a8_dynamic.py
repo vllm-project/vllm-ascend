@@ -53,6 +53,29 @@ class TestAscendW8A8DynamicLinearMethod(TestBase):
         mock_matmul.assert_called_once()
         self.assertEqual(output.shape, (32, 1, 1, 256))
 
+    @patch("torch_npu.npu_quant_matmul")
+    @patch("torch_npu.npu_dynamic_quant")
+    def test_apply_prequantized_input_skips_dynamic_quant(self, mock_dyn_quant, mock_matmul):
+        quantized_x = torch.randint(-128, 127, (32, 128), dtype=torch.int8)
+        pertoken_scale = torch.randn(32, 1, dtype=torch.float32)
+        mock_matmul.return_value = torch.randn(32, 256, dtype=torch.bfloat16)
+        layer = MagicMock()
+        layer.params_dtype = torch.bfloat16
+        layer.weight = torch.randint(-128, 127, (128, 256), dtype=torch.int8)
+        layer.weight_scale = torch.randn(256, dtype=torch.float32)
+
+        output = self.method.apply(layer, (quantized_x, pertoken_scale))
+
+        mock_dyn_quant.assert_not_called()
+        mock_matmul.assert_called_once()
+        call_args = mock_matmul.call_args.args
+        call_kwargs = mock_matmul.call_args.kwargs
+        self.assertIs(call_args[0], quantized_x)
+        self.assertIs(call_args[1], layer.weight)
+        self.assertEqual(call_kwargs["pertoken_scale"].shape, (32,))
+        self.assertEqual(call_kwargs["output_dtype"], torch.bfloat16)
+        self.assertEqual(output.shape, (32, 256))
+
     def test_process_weights_after_loading(self):
         layer = MagicMock()
         layer.weight.data = torch.randint(-128, 127, (128, 256), dtype=torch.int8)

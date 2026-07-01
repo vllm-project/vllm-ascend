@@ -54,7 +54,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.worker.utils import extract_layer_index
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import GET_META_MSG
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import GET_META_MSG, validate_mla_cache_layout
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
     RegisterRegions,
@@ -293,6 +293,12 @@ class KVCacheSendingLayerThread(threading.Thread):
         remote_layer_metadata = req_meta.remote_layer_metadata[layer_name]
         local_layer_metadata = self.layer_metadata[layer_name]
         local_block_ids = req_meta.local_block_ids[layer_group_idx]
+        if self.use_mla:
+            validate_mla_cache_layout(
+                send_task.layer_idx,
+                local_layer_metadata.block_len,
+                remote_layer_metadata.block_len,
+            )
 
         if isinstance(layer_kv_cache_spec, MambaSpec):
             # only support one block transfer for mamba
@@ -402,6 +408,8 @@ class KVCacheSendingLayerThread(threading.Thread):
                         zip(layer_local_kv_base_addr, layer_remote_kv_base_addr)
                     ):
                         block_len = block_lens[k]
+                        if block_len == 0:
+                            continue
                         for group_remote_block_id, group_local_block_id in zip(
                             grouped_remote_block_ids, grouped_local_block_ids
                         ):
@@ -429,6 +437,8 @@ class KVCacheSendingLayerThread(threading.Thread):
                     zip(layer_local_kv_base_addr, layer_remote_kv_base_addr)
                 ):
                     block_len = block_lens[k]
+                    if block_len == 0:
+                        continue
                     if self.enable_c8_quant:
                         block_len = block_len // 2
                     remote_block_len = remote_block_lens[k]

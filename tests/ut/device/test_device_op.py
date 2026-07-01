@@ -1,9 +1,51 @@
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
 import torch
 
 from vllm_ascend.device.device_op import A5DeviceAdaptor, BaseDeviceAdaptor
+
+
+def test_a5_sfa_uses_shared_kv_quant_sparse_attention():
+    sfa_impl = SimpleNamespace(
+        scale=0.125,
+        sfa_qsfa_tile_size=128,
+        qk_rope_head_dim=16,
+    )
+    ql_nope = torch.randn(3, 2, 32)
+    q_pe = torch.randn(3, 2, 16)
+    kv_cache = (
+        torch.empty(4, 16, 1, 80, dtype=torch.float8_e4m3fn),
+        torch.empty(4, 16, 1, 0),
+    )
+    topk_indices = torch.zeros(3, 1, dtype=torch.int32)
+    attn_metadata = SimpleNamespace(block_table=torch.zeros(1, 4, dtype=torch.int32))
+    actual_seq_lengths_query = torch.tensor([3], dtype=torch.int32)
+    actual_seq_lengths_key = torch.tensor([3], dtype=torch.int32)
+    expected = torch.randn(3, 2, 32)
+
+    with mock.patch(
+        "vllm_ascend.device.device_op.torch_npu.npu_kv_quant_sparse_flash_attention",
+        create=True,
+        return_value=expected,
+    ) as mock_qsfa:
+        result = A5DeviceAdaptor.execute_sparse_flash_attention_process(
+            sfa_impl,
+            ql_nope,
+            q_pe,
+            kv_cache,
+            topk_indices,
+            attn_metadata,
+            actual_seq_lengths_query,
+            actual_seq_lengths_key,
+        )
+
+    assert result is expected
+    call_kwargs = mock_qsfa.call_args.kwargs
+    assert call_kwargs["query"].shape == (3, 2, 48)
+    assert call_kwargs["tile_size"] == 128
+    assert call_kwargs["rope_head_dim"] == 16
 
 
 def test_npu_flash_attention_uses_fusion_attention_for_fp32():

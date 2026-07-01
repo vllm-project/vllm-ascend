@@ -81,6 +81,21 @@ GET_META_MSG = b"get_meta_msg"
 DONE_RECVING_MSG = b"done_recving_msg"
 
 
+def validate_mla_cache_layout(
+    layer_idx: int,
+    local_block_lens: list[int],
+    remote_block_lens: list[int],
+) -> None:
+    if local_block_lens != remote_block_lens:
+        raise RuntimeError(
+            "Incompatible MLA KV cache layouts between P and D workers: "
+            f"layer_idx={layer_idx}, local_block_lens={local_block_lens}, "
+            f"remote_block_lens={remote_block_lens}. Ensure feature flags, "
+            "quantization methods, and per-layer cache capabilities are "
+            "consistent on both P and D nodes."
+        )
+
+
 class RemotePortInfo(TypedDict):
     num: int
     host: str
@@ -449,6 +464,7 @@ class KVCacheRecvingThread(threading.Thread):
             self.group_compress_ratios[group_id] = compress_ratio
         self.remote_te_port: dict[str, dict[int, int]] = SizedDict()
         self.remote_block_size_scale: dict[str, dict[int, list[list[int]]]] = SizedDict()
+        self.remote_block_len_per_addr: dict[str, dict[int, list[list[int]]]] = SizedDict()
         self.remote_block_stride_per_addr: dict[str, dict[int, list[list[int]]]] = SizedDict()
         self.remote_kv_group2layeridx: dict[str, dict[int, dict[int, tuple[dict[str, Any], list[int]]]]] = SizedDict()
 
@@ -662,6 +678,7 @@ class KVCacheRecvingThread(threading.Thread):
         local_kv_caches_base_addrs = self.kv_caches_base_addr[self.local_engine_id][self.local_handshake_port]
         remote_transfer_port = self.remote_te_port[remote_engine_id][remote_handshake_port]
         remote_block_size_scale = self.remote_block_size_scale[remote_engine_id][remote_handshake_port]
+        remote_block_len_per_addr = self.remote_block_len_per_addr[remote_engine_id][remote_handshake_port]
         remote_block_stride_per_addr = self.remote_block_stride_per_addr[remote_engine_id][remote_handshake_port]
         session_id = f"{remote_host}:{remote_transfer_port}"
 
@@ -768,12 +785,22 @@ class KVCacheRecvingThread(threading.Thread):
                 continue
 
             for layer_idx in layer_indices:
+                if self.use_mla:
+                    validate_mla_cache_layout(
+                        layer_idx,
+                        self.block_len_per_addr[layer_idx],
+                        remote_block_len_per_addr[layer_idx],
+                    )
                 for cache_idx in range(len(local_kv_caches_base_addrs[layer_idx])):
                     src_layer_base_addr = local_kv_caches_base_addrs[layer_idx][cache_idx]
                     dst_layer_base_addr = remote_kv_caches_base_addrs[layer_idx][cache_idx]
                     block_len = self.block_len_per_addr[layer_idx][cache_idx]
                     block_stride = self.block_stride_per_addr[layer_idx][cache_idx]
                     remote_block_stride = remote_block_stride_per_addr[layer_idx][cache_idx]
+                    # Packed MLA KV cache keeps a zero-sized rope-cache tensor as
+                    # a tuple placeholder. It has no registered transfer region.
+                    if block_len == 0:
+                        continue
                     inner_block_len = block_len // tp_num_need_pulls
                     transfer_remote_block_ids, transfer_local_block_ids = split_if_not_byte_contiguous(
                         grouped_remote_block_ids,
@@ -1207,6 +1234,7 @@ class KVCacheRecvingThread(threading.Thread):
             self.kv_caches_base_addr[engine_id][remote_handshake_port] = agent_meta.kv_caches_base_addr
             self.remote_te_port[engine_id][remote_handshake_port] = agent_meta.te_rpc_port
             self.remote_block_size_scale[engine_id][remote_handshake_port] = agent_meta.block_size_scale
+            self.remote_block_len_per_addr[engine_id][remote_handshake_port] = agent_meta.block_lens
             self.remote_block_stride_per_addr[engine_id][remote_handshake_port] = agent_meta.block_strides
         finally:
             if sock is not None:
