@@ -519,16 +519,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.vllm_config = get_current_vllm_config()
         kv_transfer_config = self.vllm_config.kv_transfer_config
         self.is_kv_producer = kv_transfer_config is not None and kv_transfer_config.is_kv_producer
-        self.is_kv_producer_only = (
-            kv_transfer_config is not None
-            and kv_transfer_config.is_kv_producer
-            and not kv_transfer_config.is_kv_consumer
-        )
-        self.is_kv_consumer_only = (
-            kv_transfer_config is not None
-            and kv_transfer_config.is_kv_consumer
-            and not kv_transfer_config.is_kv_producer
-        )
+        self.is_kv_consumer = kv_transfer_config is not None and kv_transfer_config.is_kv_consumer
 
         # The MLAPO operator fuses the pre-processing steps on Q/K/V in MLA into a single operator
         # NOTE: it imposes a limit on the number of input tokens and conflicts with FlashComm
@@ -707,7 +698,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                         f"{msg} Disable SFA mla_prolog_v3 for layer {self.layer_name}; "
                         "fallback to native preprocessing."
                     )
-            elif not self.is_kv_producer_only:
+            elif not self.is_kv_producer:
                 self._process_weights_for_fused_prolog_v3()
 
         if not self.enable_sfa_prolog_v3 and self.enable_mlapo:
@@ -783,13 +774,12 @@ class AscendSFAImpl(MLAAttentionImpl):
         assert self.fused_qkv_a_proj is not None
         assert self.q_proj is not None
 
-        fused_weight = torch_npu.npu_format_cast(self.fused_qkv_a_proj.weight.data, ACL_FORMAT_FRACTAL_ND)
+        fused_weight = self.fused_qkv_a_proj.weight.data
         weight_dq = fused_weight[..., : self.q_lora_rank].contiguous()
         weight_dkv_kr = fused_weight[..., self.q_lora_rank :].contiguous()
+        weight_uq_qr = self.q_proj.weight.data.contiguous()
         self.weight_dq = torch_npu.npu_format_cast(weight_dq, ACL_FORMAT_FRACTAL_NZ)
         self.weight_dkv_kr = torch_npu.npu_format_cast(weight_dkv_kr, ACL_FORMAT_FRACTAL_NZ)
-
-        weight_uq_qr = torch_npu.npu_format_cast(self.q_proj.weight.data, ACL_FORMAT_FRACTAL_ND).contiguous()
         self.weight_uq_qr = torch_npu.npu_format_cast(weight_uq_qr, ACL_FORMAT_FRACTAL_NZ)
 
         q_a_proj_deq_scl = self.fused_qkv_a_proj.weight_scale[: self.q_lora_rank].contiguous()
@@ -812,7 +802,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                     dtype=torch.bfloat16,
                     device=self.weight_dq.device,
                 )
-        if self.is_kv_consumer_only:
+        if  self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.is_kv_consumer:
             # Decode-only workers only execute Prolog. Drop the native Linear
             # weights after their Prolog layouts and scales have been copied.
             dispose_layer(self.fused_qkv_a_proj)
@@ -822,7 +812,7 @@ class AscendSFAImpl(MLAAttentionImpl):
     def _should_use_sfa_prolog_v3(self, attn_state: AscendAttentionState) -> bool:
         return (
             self.enable_sfa_prolog_v3
-            and not self.is_kv_producer_only
+            and not self.is_kv_producer
             and getattr(self, "pcp_size", 1) <= 1
             and attn_state
             in {
