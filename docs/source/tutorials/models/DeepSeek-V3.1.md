@@ -1,6 +1,6 @@
 # DeepSeek-V3/3.1
 
-## Introduction
+## 1 Introduction
 
 DeepSeek-V3.1 is a hybrid model that supports both thinking mode and non-thinking mode. Compared to the previous version, this upgrade brings improvements in multiple aspects:
 
@@ -14,15 +14,15 @@ The `DeepSeek-V3.1` model is first supported in `vllm-ascend:v0.9.1rc3`.
 
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, accuracy and performance evaluation.
 
-## Supported Features
+## 2 Supported Features
 
 Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
 Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
-## Environment Preparation
+## 3 Prerequisites
 
-### Model Weight
+### 3.1 Model Weight
 
 - `DeepSeek-V3.1`(BF16 version): [Download model weight](https://www.modelscope.cn/models/deepseek-ai/DeepSeek-V3.1).
 - `DeepSeek-V3.1-w8a8-mtp-QuaRot`(Quantized version with mix mtp): [Download model weight](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V3.1-w8a8-mtp-QuaRot).
@@ -31,11 +31,13 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
-### Verify Multi-node Communication(Optional)
+### 3.2 Verify Multi-node Communication (Optional)
 
 If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../installation.md#verify-multi-node-communication).
 
-### Installation
+## 4 Installation
+
+### 4.1 Docker Image Installation
 
 You can use our official docker image to run `DeepSeek-V3.1` directly.
 
@@ -77,15 +79,23 @@ docker run --rm \
 -it $IMAGE bash
 ```
 
+After a successful docker run, you can verify the running container service by executing the `docker ps` command.
+
+### 4.2 Source Code Installation
+
+If you don't want to use the docker image as above, you can also build all from source:
+
+- Install `vllm-ascend` from source, refer to [installation](../../installation.md).
+
 If you want to deploy multi-node environment, you need to set up environment on each node.
 
-## Deployment
+## 5 Online Service Deployment
 
-### Single-node Deployment
+### 5.1 Single-Node Online Deployment
 
-- Quantized model `DeepSeek-V3.1-w8a8-mtp-QuaRot` can be deployed on 1 Atlas 800 A3 (64G × 16).
+Single-node deployment completes both Prefill and Decode within the same node. The quantized model `DeepSeek-V3.1-w8a8-mtp-QuaRot` can be deployed on 1 Atlas 800 A3 (64G × 16).
 
-Run the following script to execute online inference.
+Startup Command:
 
 ```shell
 #!/bin/sh
@@ -124,11 +134,10 @@ vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
 --no-enable-prefix-caching \
 --gpu-memory-utilization 0.92 \
 --speculative-config '{"num_speculative_tokens": 3, "method": "mtp"}' \
---compilation-config '{"cudagraph_capture_sizes":[4,16,32,48,64], "cudagraph_mode": "FULL_DECODE_ONLY"}'
+--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
 ```
 
-**Notice:**
-The parameters are explained as follows:
+Key Parameter Descriptions:
 
 - Setting the environment variable `VLLM_ASCEND_BALANCE_SCHEDULING=1` enables balance scheduling. This may help increase output throughput and reduce TPOT in v1 scheduler. However, TTFT may degrade in some scenarios. Furthermore, enabling this feature is not recommended in scenarios where PD is separated.
 - For single-node deployment, we recommend using `dp4tp4` instead of `dp2tp8`.
@@ -136,13 +145,65 @@ The parameters are explained as follows:
 - `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.
 - If you use the w4a8 weight, more memory will be allocated to kvcache, and you can try to increase system throughput to achieve greater throughput.
 
-### Multi-node Deployment
+Common Issues Tip: If you encounter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+
+Service Verification:
+
+```shell
+curl http://<node_ip>:8015/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+        "model": "deepseek_v3",
+        "messages": [{
+            "role": "user",
+            "content": [
+            {
+                "type": "text",
+                "text": "The future of AI is"
+            }]
+        }],
+        "max_tokens": 1024,
+        "temperature": 1.0,
+        "top_p": 0.95
+    }'
+```
+
+Expected Result:
+
+The service returns HTTP 200 OK with a JSON response containing the `choices` field. Example output:
+
+```json
+{
+    "id": "chatcmpl-xxxxxxxxxxxxx",
+    "object": "chat.completion",
+    "model": "deepseek_v3",
+    "choices": [
+        {
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": "Of course. The future of AI is not a single..."
+            },
+            "finish_reason": "length"
+        }
+    ],
+    "usage": {
+        "prompt_tokens": 9,
+        "total_tokens": 1033,
+        "completion_tokens": 1024
+    }
+}
+```
+
+### 5.2 Multi-Node Data Parallel Deployment
 
 - `DeepSeek-V3.1-w8a8-mtp-QuaRot`: require at least 2 Atlas 800 A2 (64G × 8).
 
 Run the following scripts on two nodes respectively.
 
 **Node 0**
+
+Startup Command:
 
 ```shell
 #!/bin/sh
@@ -190,10 +251,12 @@ vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
 --no-enable-prefix-caching \
 --gpu-memory-utilization 0.92 \
 --speculative-config '{"num_speculative_tokens": 3, "method": "mtp"}' \
---compilation-config '{"cudagraph_capture_sizes":[4,16,32,48,64], "cudagraph_mode": "FULL_DECODE_ONLY"}'
+--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
 ```
 
 **Node 1**
+
+Startup Command:
 
 ```shell
 #!/bin/sh
@@ -243,12 +306,56 @@ vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
 --no-enable-prefix-caching \
 --gpu-memory-utilization 0.92 \
 --speculative-config '{"num_speculative_tokens": 3, "method": "mtp"}' \
---compilation-config '{"cudagraph_capture_sizes":[4,16,32,48,64], "cudagraph_mode": "FULL_DECODE_ONLY"}'
+--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
 ```
 
-### Prefill-Decode Disaggregation
+Key Parameter Descriptions:
+
+- `--data-parallel-size`: total number of data parallel ranks across all nodes. In this example, `4` means the model is split across 4 DP ranks total (2 per node).
+- `--data-parallel-size-local`: number of data parallel ranks running on the current node. In this example, each node runs 2 DP ranks.
+- `--data-parallel-start-rank`: starting rank offset for data parallel ranks on this node. Node 0 starts at rank 0 (default), Node 1 starts at rank 2. This ensures each node's DP ranks occupy distinct positions in the overall rank space.
+- `--data-parallel-address`: IP address of the data parallel master node (Node 0). This value must be consistent with `local_ip` set on Node 0.
+- `--data-parallel-rpc-port`: RPC port for data parallel master communication. Must be the same across all nodes.
+- `--headless`: indicates that this vLLM instance is not the master service node. Only set on non-master nodes (Node 1). The master node (Node 0) should NOT set this flag.
+- For single-node deployment, we recommend using `dp4 tp4` instead of `dp2 tp8`.
+
+Common Issues Tip: If you encounter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+
+Service Verification:
+
+```shell
+curl http://<node_ip>:8015/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+        "model": "deepseek_v3",
+        "messages": [{
+            "role": "user",
+            "content": [
+            {
+                "type": "text",
+                "text": "The future of AI is"
+            }]
+        }],
+        "max_tokens": 1024,
+        "temperature": 1.0,
+        "top_p": 0.95
+    }'
+```
+
+Expected Result:
+
+The service returns HTTP 200 OK. The JSON response contains the `choices` field with the generated text.
+
+### 5.3 Multi-Node PD Separation Deployment
 
 We recommend using Mooncake for deployment: [Mooncake](../features/pd_disaggregation_mooncake_multi_node.md).
+
+In the standard single-node deployment mode, Prefill (prompt processing) and Decode (token generation) tasks run on the same set of NPUs. PD (Prefill-Decode) separation addresses this by running Prefill and Decode on dedicated node groups, each configured independently:
+
+- **Prefill nodes** focus on high-throughput prompt processing, optimized for compute and communication.
+- **Decode nodes** focus on low-latency token generation, optimized for memory bandwidth.
+
+This architecture is recommended for production deployments with concurrent multi-user workloads, where stable latency and high throughput are both required.
 
 Take Atlas 800 A3 (64G × 16) for example, we recommend to deploy 2P1D (4 nodes) rather than 1P1D (2 nodes), because there is no enough NPU memory to serve high concurrency in 1P1D case.
 
@@ -257,7 +364,19 @@ Take Atlas 800 A3 (64G × 16) for example, we recommend to deploy 2P1D (4 nodes)
 To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to deploy a `launch_online_dp.py` script and a `run_dp_template.sh` script on each node and deploy a `proxy.sh` script on prefill master node to forward requests.
 
 1. `launch_online_dp.py` to launch external dp vllm servers.
-[launch\_online\_dp.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/launch_online_dp.py)
+    [launch_online_dp.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/launch_online_dp.py)
+
+    Parameter descriptions:
+
+    |Parameter|Type|Required|Default|Description|
+    |---------|----|--------|-------|-----------|
+    |`--dp-size`|int|Yes|-|Data parallel size (total number of DP ranks across all nodes).|
+    |`--tp-size`|int|No|1|Tensor parallel size within each DP rank.|
+    |`--dp-size-local`|int|No|(same as `--dp-size`)|Number of DP ranks on the current node. If not set, defaults to `--dp-size`.|
+    |`--dp-rank-start`|int|No|0|Starting rank offset for data parallel ranks on this node.|
+    |`--dp-address`|str|Yes|-|IP address of the data parallel master node (node 0).|
+    |`--dp-rpc-port`|str|No|12345|RPC port for data parallel master communication.|
+    |`--vllm-start-port`|int|No|9000|Starting port for each vLLM engine instance on this node. Each DP rank's engine port = `vllm_start_port` + local rank index.|
 
 2. Prefill Node 0 `run_dp_template.sh` script
 
@@ -466,7 +585,7 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
       --quantization ascend \
       --no-enable-prefix-caching \
       --speculative-config '{"num_speculative_tokens": 1, "method": "mtp"}' \
-      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[2, 4, 8, 16, 24, 32, 48, 56]}' \
+      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
       --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": true,"finegrained_tp_config": {"lmhead_tensor_parallel_size":16}}' \
       --kv-transfer-config \
       '{"kv_connector": "MooncakeConnectorV1",
@@ -540,7 +659,7 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
       --quantization ascend \
       --no-enable-prefix-caching \
       --speculative-config '{"num_speculative_tokens": 1, "method": "mtp"}' \
-      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[2, 4, 8, 16, 24, 32, 48, 56]}' \
+      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
       --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": true,"finegrained_tp_config": {"lmhead_tensor_parallel_size":16}}' \
       --kv-transfer-config \
       '{"kv_connector": "MooncakeConnectorV1",
@@ -559,15 +678,13 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
       }'
     ```
 
-    **Notice:**
-    The parameters are explained as follows:
+Key Parameter Descriptions:
 
-    - `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the communication optimization function on the prefill nodes.
-    - `VLLM_ASCEND_ENABLE_MLAPO=1`: enables the fusion operator, which can significantly improve performance but consumes more NPU memory. In the Prefill-Decode (PD) separation scenario, enable MLAPO only on decode nodes.
-    - `cudagraph_capture_sizes`: The recommended value is `n x (mtp + 1)`. And the min is `n = 1` and the max is `n = max-num-seqs`. For other values, it is recommended to set them to the number of frequently occurring requests on the Decode (D) node.
-    - `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the Key-Value Cache (KV Cache) of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, it is recommended to enable this configuration on both prefill and decode nodes simultaneously.
-    - `multistream_overlap_shared_expert: true`: When the Tensor Parallelism (TP) size is 1 or `enable_shared_expert_dp: true`, an additional stream is enabled to overlap the computation process of shared experts for improved efficiency.
-    - `lmhead_tensor_parallel_size: 16`: When the Tensor Parallelism (TP) size of the decode node is 1, this parameter allows the TP size of the LMHead embedding layer to be greater than 1, which is used to reduce the computational load of each card on the LMHead embedding layer.
+- `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the communication optimization function on the prefill nodes.
+- `VLLM_ASCEND_ENABLE_MLAPO=1`: enables the fusion operator, which can significantly improve performance but consumes more NPU memory. In the Prefill-Decode (PD) separation scenario, enable MLAPO only on decode nodes.
+- `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the Key-Value Cache (KV Cache) of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, it is recommended to enable this configuration on both prefill and decode nodes simultaneously.
+- `multistream_overlap_shared_expert: true`: When the Tensor Parallelism (TP) size is 1 or `enable_shared_expert_dp: true`, an additional stream is enabled to overlap the computation process of shared experts for improved efficiency.
+- `lmhead_tensor_parallel_size: 16`: When the Tensor Parallelism (TP) size of the decode node is 1, this parameter allows the TP size of the LMHead embedding layer to be greater than 1, which is used to reduce the computational load of each card on the LMHead embedding layer.
 
 6. run server for each node:
 
@@ -640,7 +757,59 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
     bash proxy.sh
     ```
 
-## Functional Verification
+Deployment Verification:
+
+After the PD separation service is fully started, send a request through the proxy port on the prefill master node to verify that Prefill and Decode nodes are working correctly together:
+
+```shell
+curl http://141.xx.xx.1:1999/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+        "model": "deepseek_v3",
+        "messages": [{
+            "role": "user",
+            "content": [
+            {
+                "type": "text",
+                "text": "The future of AI is"
+            }]
+        }],
+        "max_tokens": 1024,
+        "temperature": 1.0,
+        "top_p": 0.95
+    }'
+```
+
+Expected Result:
+
+The proxy returns HTTP 200 OK. The JSON response contains the `choices` field with the generated text, confirming that Prefill nodes have successfully processed the prompt and Decode nodes have generated the response:
+
+```json
+{
+    "id": "chatcmpl-xxxxxxxxxxxxx",
+    "object": "chat.completion",
+    "model": "deepseek_v3",
+    "choices": [
+        {
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": "The future of AI is not a destination we are passively approaching...",
+                "finish_reason": "length"
+            }
+        }
+    ],
+    "usage": {
+        "prompt_tokens": 13,
+        "total_tokens": 1037,
+        "completion_tokens": 1024
+    }
+}
+```
+
+Common Issues Tip: If you encounter issues with PD separation deployment, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+
+## 6 Functional Verification
 
 Once your server is started, you can query the model with input prompts:
 
@@ -655,7 +824,7 @@ curl http://<node0_ip>:<port>/v1/completions \
     }'
 ```
 
-## Accuracy Evaluation
+## 7 Accuracy Evaluation
 
 Here are two accuracy evaluation methods.
 
@@ -674,7 +843,7 @@ Here are two accuracy evaluation methods.
 
 Not test yet.
 
-## Performance
+## 8 Performance Evaluation
 
 ### Using AISBench
 

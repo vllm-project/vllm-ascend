@@ -194,7 +194,7 @@ Common Issues Tip: If you encounter issues, please refer to the [Public FAQ](htt
 Service Verification:
 
 ```shell
-curl http://<node0_ip>:8088/v1/chat/completions \
+curl http://<node_ip>:8088/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{
         "model": "kimi_k26",
