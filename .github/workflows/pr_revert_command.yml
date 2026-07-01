@@ -15,11 +15,11 @@
 # This file is a part of the vllm-ascend project.
 #
 
-name: Handle /cherry-pick Command
+name: Handle /revert Command
 
 on:
   repository_dispatch:
-    types: [cherry-pick-command]
+    types: [revert-command]
 
 defaults:
   run:
@@ -32,8 +32,8 @@ permissions:
   issues: write
 
 jobs:
-  cherry-pick:
-    name: Cherry-pick PR to target branch
+  revert:
+    name: Revert merged PR
     runs-on: linux-amd64-cpu-4-hk
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
@@ -73,18 +73,37 @@ jobs:
             esac
           fi
 
-      - name: Parse target branch
-        id: parse
+      - name: Verify PR is merged
+        id: check_merged
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
-          TARGET_BRANCH='${{ github.event.client_payload.slash_command.args.all }}'
-          TARGET_BRANCH=$(echo "$TARGET_BRANCH" | xargs)
+          PR_NUMBER='${{ github.event.client_payload.pull_request.number }}'
+          REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
 
-          if [ -z "$TARGET_BRANCH" ]; then
-            echo "::error::No target branch specified. Usage: /cherry-pick <target_branch_name>"
-            echo "valid_args=false" >> "$GITHUB_OUTPUT"
+          PR_JSON=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json state,mergeCommit,baseRefName,title,body,number,author --jq '.')
+
+          STATE=$(echo "$PR_JSON" | jq -r '.state')
+          MERGE_COMMIT=$(echo "$PR_JSON" | jq -r '.mergeCommit.oid // empty')
+          BASE_BRANCH=$(echo "$PR_JSON" | jq -r '.baseRefName')
+          PR_TITLE=$(echo "$PR_JSON" | jq -r '.title')
+          PR_BODY=$(echo "$PR_JSON" | jq -r '.body')
+          PR_AUTHOR=$(echo "$PR_JSON" | jq -r '.author.login')
+
+          if [ "$STATE" != "MERGED" ] || [ -z "$MERGE_COMMIT" ]; then
+            echo "::error::PR #$PR_NUMBER is not merged (state: $STATE). Only merged PRs can be reverted."
+            echo "is_merged=false" >> "$GITHUB_OUTPUT"
           else
-            echo "target_branch=$TARGET_BRANCH" >> "$GITHUB_OUTPUT"
-            echo "valid_args=true" >> "$GITHUB_OUTPUT"
+            {
+              echo "is_merged=true"
+              echo "merge_commit=$MERGE_COMMIT"
+              echo "base_branch=$BASE_BRANCH"
+              echo "pr_title=$PR_TITLE"
+              echo "pr_body<<PRBODYEOF"
+              echo "$PR_BODY"
+              echo "PRBODYEOF"
+              echo "pr_author=$PR_AUTHOR"
+            } >> "$GITHUB_OUTPUT"
           fi
 
       - name: Post unauthorized comment
@@ -95,22 +114,22 @@ jobs:
           repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
           comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
           body: |
-            [Bot]: cherry-pick command failed: you do not have permission. Only the PR author or users with triage+ permission can trigger /cherry-pick.
+            [Bot]: revert command failed: you do not have permission. Only the PR author or users with triage+ permission can trigger /revert.
           reactions: confused
 
-      - name: Post invalid-args comment
-        if: steps.parse.outputs.valid_args == 'false'
+      - name: Post not-merged comment
+        if: steps.check_merged.outputs.is_merged == 'false'
         uses: peter-evans/create-or-update-comment@v5
         with:
           token: ${{ secrets.PAT_TOKEN }}
           repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
           comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
           body: |
-            [Bot]: cherry-pick command failed: no target branch specified. Usage: /cherry-pick <target_branch_name>
+            [Bot]: revert command failed: PR #${{ github.event.client_payload.pull_request.number }} is not merged. Only merged PRs can be reverted.
           reactions: confused
 
-      - name: Fail if unauthorized or invalid args
-        if: steps.auth.outputs.authorized == 'false' || steps.parse.outputs.valid_args == 'false'
+      - name: Fail if unauthorized or not merged
+        if: steps.auth.outputs.authorized == 'false' || steps.check_merged.outputs.is_merged == 'false'
         run: exit 1
 
       - name: Checkout repo
@@ -119,19 +138,18 @@ jobs:
           token: ${{ secrets.PAT_TOKEN }}
           fetch-depth: 0
 
-      - name: Cherry-pick and create PR
-        id: cherry
+      - name: Revert and create PR
+        id: revert
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           PR_NUMBER='${{ github.event.client_payload.pull_request.number }}'
-          PR_TITLE='${{ github.event.client_payload.pull_request.title }}'
-          PR_BODY='${{ github.event.client_payload.pull_request.body }}'
-          PR_AUTHOR='${{ github.event.client_payload.pull_request.user.login }}'
-          PR_BASE_SHA='${{ github.event.client_payload.pull_request.base.sha }}'
-          PR_HEAD_SHA='${{ github.event.client_payload.pull_request.head.sha }}'
-          TARGET_BRANCH='${{ steps.parse.outputs.target_branch }}'
+          PR_TITLE='${{ steps.check_merged.outputs.pr_title }}'
+          PR_BODY='${{ steps.check_merged.outputs.pr_body }}'
+          PR_AUTHOR='${{ steps.check_merged.outputs.pr_author }}'
+          MERGE_COMMIT='${{ steps.check_merged.outputs.merge_commit }}'
+          BASE_BRANCH='${{ steps.check_merged.outputs.base_branch }}'
           REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
 
           # Get the PAT_TOKEN owner's username
@@ -143,162 +161,174 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           # origin for fetching from the upstream repo
           git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
-          # fork remote for pushing cherry-pick branch
+          # fork remote for pushing revert branch
           git remote add fork "https://x-access-token:${GITHUB_TOKEN}@github.com/${TOKEN_USER}/vllm-ascend.git"
 
-          # Fetch target branch and PR's base/head SHAs
-          git fetch origin "$TARGET_BRANCH" "$PR_BASE_SHA" "$PR_HEAD_SHA" 2>/dev/null || true
+          # Fetch the base branch
+          git fetch origin "$BASE_BRANCH" 2>/dev/null || true
 
-          # Verify target branch exists
-          if ! git rev-parse --verify "origin/$TARGET_BRANCH" >/dev/null 2>&1; then
-            echo "::error::Target branch '$TARGET_BRANCH' does not exist."
-            echo "cherry_status=missing_branch" >> "$GITHUB_OUTPUT"
+          # Verify base branch exists
+          if ! git rev-parse --verify "origin/$BASE_BRANCH" >/dev/null 2>&1; then
+            echo "::error::Base branch '$BASE_BRANCH' does not exist."
+            echo "revert_status=missing_branch" >> "$GITHUB_OUTPUT"
             exit 1
           fi
 
-          # Create a new branch from target
-          SANITIZED_TARGET=$(echo "$TARGET_BRANCH" | tr '/' '-')
-          CHERRY_BRANCH="cherry-pick/pr-${PR_NUMBER}-to-${SANITIZED_TARGET}"
-          git checkout -b "$CHERRY_BRANCH" "origin/$TARGET_BRANCH"
+          # Create revert branch from base
+          SANITIZED_BASE=$(echo "$BASE_BRANCH" | tr '/' '-')
+          REVERT_BRANCH="revert/pr-${PR_NUMBER}-to-${SANITIZED_BASE}"
+          git checkout -b "$REVERT_BRANCH" "origin/$BASE_BRANCH"
 
-          # Apply the PR's changes as a single commit.
-          # Using git diff with three-dot (...) from merge-base to PR head
-          # avoids picking up unrelated commits from the base branch, which
-          # works for both merged and unmerged PRs.
-          echo "PR base: $PR_BASE_SHA"
-          echo "PR head: $PR_HEAD_SHA"
-
-          # Generate the diff to a temp file (avoids shell variable size limits
-          # for large PRs) so we can check emptiness and apply it.
-          # Use three-dot (...) to diff from merge-base to PR head, so we
-          # only pick up the PR's unique changes — not unrelated commits
-          # that landed on the base branch between PR_BASE_SHA and the
-          # rebased PR_HEAD_SHA.
-          DIFF_FILE=/tmp/cherry_diff.patch
-          git diff "$PR_BASE_SHA"..."$PR_HEAD_SHA" > "$DIFF_FILE"
-
-          if [ ! -s "$DIFF_FILE" ]; then
-            echo "Diff is empty, changes already included in target branch."
-            echo "cherry_status=already_included" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          # Apply the diff with 3-way merge for better conflict resolution
-          APPLY_LOG=/tmp/cherry_apply_err
-          if ! git apply --3way "$DIFF_FILE" 2>"$APPLY_LOG"; then
-            echo "::error::git apply failed. See details below:"
-            cat "$APPLY_LOG"
-            echo "cherry_status=conflict" >> "$GITHUB_OUTPUT"
+          # Verify the merge commit exists in history
+          if ! git cat-file -e "$MERGE_COMMIT" 2>/dev/null; then
+            echo "::error::Merge commit $MERGE_COMMIT not found in repository."
+            echo "revert_status=missing_commit" >> "$GITHUB_OUTPUT"
             exit 1
           fi
 
-          # Commit the applied changes as a single commit with PR metadata
-          git commit -m "$PR_TITLE" -m "Cherry-pick of PR #${PR_NUMBER} by @${PR_AUTHOR}"
+          # Perform the revert.
+          # -m 1 means keep the first parent (the base branch), reverting
+          # the changes introduced by the PR branch. For rebase-merged PRs,
+          # the merge commit is not a real merge, so fall back to plain revert.
+          REVERT_OUTPUT=$(git revert -m 1 "$MERGE_COMMIT" --no-edit 2>&1)
+          REVERT_EXIT_CODE=$?
 
-          # Push the new branch to the PAT_TOKEN user's fork
-          git push -f fork "$CHERRY_BRANCH"
+          if [ $REVERT_EXIT_CODE -ne 0 ]; then
+            # Abort the failed revert before trying again, otherwise git will
+            # refuse to start a new revert on top of the conflicted state.
+            git revert --abort 2>/dev/null || true
+            if echo "$REVERT_OUTPUT" | grep -q "is not a merge"; then
+              echo "Merge commit is not a merge (rebase-merge detected), trying plain revert..."
+              if ! git revert "$MERGE_COMMIT" --no-edit; then
+                echo "::error::git revert failed with conflicts."
+                git revert --abort 2>/dev/null || true
+                echo "revert_status=conflict" >> "$GITHUB_OUTPUT"
+                exit 1
+              fi
+            else
+              echo "::error::git revert failed. See details below:"
+              echo "$REVERT_OUTPUT"
+              git revert --abort 2>/dev/null || true
+              echo "revert_status=conflict" >> "$GITHUB_OUTPUT"
+              exit 1
+            fi
+          fi
 
-          # Check if a cherry-pick PR already exists for this target branch.
+          # Push the revert branch to the PAT_TOKEN user's fork
+          git push -f fork "$REVERT_BRANCH"
+
+          # Check if a revert PR already exists for this PR.
           # gh pr list --head requires "owner:branch" format for fork branches,
           # but it can be unreliable. We also add `2>/dev/null || true` to ensure
           # the step doesn't fail even if the query returns nothing.
           EXISTING_PR_URL=$(gh pr list \
             --repo "$REPO" \
-            --head "${TOKEN_USER}:${CHERRY_BRANCH}" \
-            --base "$TARGET_BRANCH" \
+            --head "${TOKEN_USER}:${REVERT_BRANCH}" \
+            --base "$BASE_BRANCH" \
             --state open \
             --json url --jq '.[0].url // empty' 2>/dev/null || true)
 
           if [ -n "$EXISTING_PR_URL" ]; then
             # PR already exists — branch has been force-pushed, just notify
-            echo "Cherry-pick PR already exists: $EXISTING_PR_URL"
-            echo "cherry_status=refreshed" >> "$GITHUB_OUTPUT"
+            echo "Revert PR already exists: $EXISTING_PR_URL"
+            echo "revert_status=refreshed" >> "$GITHUB_OUTPUT"
             echo "existing_pr_url=$EXISTING_PR_URL" >> "$GITHUB_OUTPUT"
           else
             # Create a new PR from the fork branch.
             # If the PR already exists (gh pr list missed it), gh pr create will
             # fail — we parse the error to extract the existing PR URL instead of
             # letting the step crash.
-            NEW_PR_TITLE="[Cherry-pick][${TARGET_BRANCH}]${PR_TITLE} (from #${PR_NUMBER})"
-            NEW_PR_BODY="Cherry-pick of PR #${PR_NUMBER} onto \`${TARGET_BRANCH}\`."$'\n'$'\n'"Original PR: #${PR_NUMBER}"$'\n'"Original author: @${PR_AUTHOR}"$'\n'$'\n'"---"$'\n'"${PR_BODY}"
+            NEW_PR_TITLE="[Revert] Revert \"${PR_TITLE}\" (#${PR_NUMBER})"
+            NEW_PR_BODY="Revert of PR #${PR_NUMBER} (merged onto \`${BASE_BRANCH}\`)."$'\n'$'\n'"Original PR: #${PR_NUMBER}"$'\n'"Original author: @${PR_AUTHOR}"$'\n'"Merge commit: \`${MERGE_COMMIT}\`"$'\n'$'\n'"---"$'\n'"${PR_BODY}"
 
             CREATE_LOG=/tmp/gh_pr_create.log
             if NEW_PR_URL=$(gh pr create \
               --repo "$REPO" \
               --title "$NEW_PR_TITLE" \
               --body "$NEW_PR_BODY" \
-              --base "$TARGET_BRANCH" \
-              --head "${TOKEN_USER}:${CHERRY_BRANCH}" 2>"$CREATE_LOG"); then
+              --base "$BASE_BRANCH" \
+              --head "${TOKEN_USER}:${REVERT_BRANCH}" 2>"$CREATE_LOG"); then
               echo "new_pr_url=$NEW_PR_URL" >> "$GITHUB_OUTPUT"
-              echo "cherry_status=success" >> "$GITHUB_OUTPUT"
+              echo "revert_status=success" >> "$GITHUB_OUTPUT"
             else
               # If PR already exists, gh pr create fails with "already exists"
               # and includes the existing PR URL in the message.
               EXISTING_PR_URL=$(grep -oE 'https://github.com/[^ ]+/pull/[0-9]+' "$CREATE_LOG" | head -1 || true)
               if [ -n "$EXISTING_PR_URL" ]; then
-                echo "Cherry-pick PR already exists: $EXISTING_PR_URL"
-                echo "cherry_status=refreshed" >> "$GITHUB_OUTPUT"
+                echo "Revert PR already exists: $EXISTING_PR_URL"
+                echo "revert_status=refreshed" >> "$GITHUB_OUTPUT"
                 echo "existing_pr_url=$EXISTING_PR_URL" >> "$GITHUB_OUTPUT"
               else
                 echo "::error::Failed to create PR:"
                 cat "$CREATE_LOG"
-                echo "cherry_status=create_failed" >> "$GITHUB_OUTPUT"
+                echo "revert_status=create_failed" >> "$GITHUB_OUTPUT"
                 exit 1
               fi
             fi
           fi
 
       - name: Comment success result
-        if: steps.cherry.outputs.cherry_status == 'success'
+        if: steps.revert.outputs.revert_status == 'success'
         uses: peter-evans/create-or-update-comment@v5
         with:
           token: ${{ secrets.PAT_TOKEN }}
           repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
           comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
           body: |
-            [Bot]: cherry-pick completed successfully. New PR created: ${{ steps.cherry.outputs.new_pr_url }}
+            [Bot]: revert completed successfully. New PR created: ${{ steps.revert.outputs.new_pr_url }}
           reactions: hooray
 
       - name: Comment refreshed result
-        if: steps.cherry.outputs.cherry_status == 'refreshed'
+        if: steps.revert.outputs.revert_status == 'refreshed'
         uses: peter-evans/create-or-update-comment@v5
         with:
           token: ${{ secrets.PAT_TOKEN }}
           repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
           comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
           body: |
-            [Bot]: cherry-pick branch has been refreshed. Existing PR: ${{ steps.cherry.outputs.existing_pr_url }}
+            [Bot]: revert branch has been refreshed. Existing PR: ${{ steps.revert.outputs.existing_pr_url }}
           reactions: hooray
 
-      - name: Comment already included
-        if: steps.cherry.outputs.cherry_status == 'already_included'
-        uses: peter-evans/create-or-update-comment@v5
-        with:
-          token: ${{ secrets.PAT_TOKEN }}
-          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
-          comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
-          body: |
-            [Bot]: cherry-pick skipped: the changes from this PR are already included in the target branch `${{ steps.parse.outputs.target_branch }}`.
-          reactions: eyes
-
       - name: Comment conflict failure
-        if: failure() && steps.cherry.outputs.cherry_status == 'conflict'
+        if: failure() && steps.revert.outputs.revert_status == 'conflict'
         uses: peter-evans/create-or-update-comment@v5
         with:
           token: ${{ secrets.PAT_TOKEN }}
           repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
           comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
           body: |
-            [Bot]: cherry-pick failed due to merge conflicts. Please cherry-pick manually.
+            [Bot]: revert failed due to merge conflicts. Please revert manually.
+          reactions: confused
+
+      - name: Comment missing branch failure
+        if: failure() && steps.revert.outputs.revert_status == 'missing_branch'
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
+          comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
+          body: |
+            [Bot]: revert failed: base branch `${{ steps.check_merged.outputs.base_branch }}` does not exist.
+          reactions: confused
+
+      - name: Comment missing commit failure
+        if: failure() && steps.revert.outputs.revert_status == 'missing_commit'
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
+          comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
+          body: |
+            [Bot]: revert failed: merge commit `${{ steps.check_merged.outputs.merge_commit }}` not found in repository.
           reactions: confused
 
       - name: Comment generic failure
-        if: failure() && steps.cherry.outputs.cherry_status != 'conflict' && steps.cherry.outputs.cherry_status != 'success' && steps.cherry.outputs.cherry_status != 'refreshed' && steps.cherry.outputs.cherry_status != 'already_included'
+        if: failure() && steps.revert.outputs.revert_status != 'conflict' && steps.revert.outputs.revert_status != 'missing_branch' && steps.revert.outputs.revert_status != 'missing_commit' && steps.revert.outputs.revert_status != 'success' && steps.revert.outputs.revert_status != 'refreshed'
         uses: peter-evans/create-or-update-comment@v5
         with:
           token: ${{ secrets.PAT_TOKEN }}
           repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
           comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
           body: |
-            [Bot]: cherry-pick command failed. Please check the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details.
+            [Bot]: revert command failed. Please check the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details.
           reactions: confused
