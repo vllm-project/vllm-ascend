@@ -21,7 +21,7 @@ from vllm.config import KVTransferConfig, VllmConfig
 
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_config import clear_ascend_config, get_ascend_config, init_ascend_config
-from vllm_ascend.utils import clear_enable_sp, enable_sp, get_flashcomm2_config_and_validate, vllm_version_is
+from vllm_ascend.utils import clear_enable_sp, enable_sp, get_flashcomm2_config_and_validate
 
 
 class TestAscendConfig(TestBase):

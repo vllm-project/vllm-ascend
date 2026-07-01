@@ -37,7 +37,6 @@ from vllm_ascend.models.llama_eagle3_vwn import (
     VwnLlamaDecoderLayer,
     VwnLlamaModel,
 )
-from vllm_ascend.utils import vllm_version_is
 
 _HIDDEN = 2048
 _INTERMEDIATE = 6144
