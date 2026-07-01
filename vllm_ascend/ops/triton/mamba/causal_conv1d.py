@@ -7,12 +7,7 @@
 # and https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/mamba/ops/causal_conv1d.py
 # mypy: ignore-errors
 
-from typing import Any
-
 import torch
-import torch.nn.functional as F
-from vllm.distributed import get_pcp_group
-from vllm.forward_context import get_forward_context
 from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID  # type: ignore
 
