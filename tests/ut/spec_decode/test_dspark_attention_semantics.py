@@ -8,9 +8,12 @@ import torch
 from vllm_ascend.models.deepseek_v4_dspark import (
     _copy_last_input_ids,
     _dspark_cache_capacity,
+    _gather_dspark_context_kv,
     _headwise_scores,
     _headwise_weighted_sum,
+    _validate_dspark_query_block_slots,
 )
+from vllm_ascend.ops.dspark_attention import dspark_attention
 
 
 def _dspark_attention_loop(
@@ -90,6 +93,69 @@ def test_dspark_attention_is_noncausal_within_draft_block():
     assert (noncausal[0] - causal_first[0]).abs().max().item() > 9.0
 
 
+def test_dspark_attention_entry_matches_reference_with_request_cache():
+    torch.manual_seed(1)
+    block_size = 2
+    window_size = 3
+    heads = 2
+    dim = 4
+    q = torch.randn(4, heads, dim, dtype=torch.float32)
+    draft_k = torch.randn(4, heads, dim, dtype=torch.float32)
+    draft_v = torch.randn(4, heads, dim, dtype=torch.float32)
+    positions = torch.tensor([5, 6, 9, 10], dtype=torch.int32)
+    request_slots = torch.tensor([0, 0, 1, 1], dtype=torch.int32)
+    attn_sink = torch.tensor([0.25, -0.5], dtype=torch.float32)
+    scale = 0.125
+
+    cache_k = torch.zeros(2, 8, heads, dim, dtype=torch.float32)
+    cache_v = torch.zeros(2, 8, heads, dim, dtype=torch.float32)
+    cache_positions = torch.full((2, 8), -1, dtype=torch.int32)
+    cache_valid = torch.zeros(2, 8, dtype=torch.bool)
+
+    for slot, ctx_positions in [(0, torch.tensor([3, 4, 5])), (1, torch.tensor([7, 8, 9]))]:
+        values = torch.randn(ctx_positions.numel(), heads, dim, dtype=torch.float32)
+        indices = ctx_positions % cache_k.shape[1]
+        cache_k[slot, indices] = values
+        cache_v[slot, indices] = values + (slot + 1)
+        cache_positions[slot, indices] = ctx_positions.to(torch.int32)
+        cache_valid[slot, indices] = True
+
+    actual = dspark_attention(
+        q,
+        cache_k,
+        cache_v,
+        cache_positions,
+        cache_valid,
+        draft_k,
+        draft_v,
+        request_slots,
+        positions,
+        attn_sink,
+        block_size,
+        window_size,
+        scale,
+    )
+
+    expected_blocks = []
+    for block_offset, slot, ctx_start, ctx_end in [(0, 0, 3, 4), (2, 1, 7, 8)]:
+        ctx_positions = torch.arange(ctx_start, ctx_end + 1)
+        ctx_indices = ctx_positions % cache_k.shape[1]
+        k_ctx = torch.cat([cache_k[slot, ctx_indices], draft_k[block_offset : block_offset + block_size]], dim=0)
+        v_ctx = torch.cat([cache_v[slot, ctx_indices], draft_v[block_offset : block_offset + block_size]], dim=0)
+        expected_blocks.append(
+            _dspark_attention_reference(
+                q[block_offset : block_offset + block_size],
+                k_ctx,
+                v_ctx,
+                attn_sink,
+                scale,
+            )
+        )
+    expected = torch.cat(expected_blocks, dim=0)
+
+    torch.testing.assert_close(actual, expected, rtol=1e-6, atol=1e-6)
+
+
 def test_dspark_last_input_ids_copy_keeps_buffer_storage():
     buffer = torch.empty(8, dtype=torch.int32)
     storage_ptr = buffer.data_ptr()
@@ -116,4 +182,43 @@ def test_dspark_attention_cache_capacity_includes_draft_block():
     vllm_config = SimpleNamespace(model_config=SimpleNamespace(max_model_len=4096))
 
     assert _dspark_cache_capacity(vllm_config, block_size=5) == 4101
+    assert _dspark_cache_capacity(vllm_config, block_size=5, window_size=128) == 133
     assert _dspark_cache_capacity(SimpleNamespace(model_config=None), block_size=5) == 5
+
+
+def test_dspark_context_cache_is_request_local_and_rolling():
+    cache_k = torch.zeros(2, 4, 1, 1, dtype=torch.float32)
+    cache_v = torch.zeros(2, 4, 1, 1, dtype=torch.float32)
+    cache_positions = torch.full((2, 4), -1, dtype=torch.int32)
+    cache_valid = torch.zeros(2, 4, dtype=torch.bool)
+
+    # Both requests write the same absolute positions. They alias on rolling
+    # indices, but must stay isolated by request slot.
+    for slot, value in [(0, 10.0), (1, 20.0)]:
+        positions = torch.tensor([4, 5], dtype=torch.long)
+        indices = positions % cache_k.shape[1]
+        cache_k[slot, indices] = value
+        cache_v[slot, indices] = value + 1
+        cache_positions[slot, indices] = positions.to(torch.int32)
+        cache_valid[slot, indices] = True
+
+    k0, v0 = _gather_dspark_context_kv(cache_k, cache_v, cache_positions, cache_valid, 0, 4, 5)
+    k1, v1 = _gather_dspark_context_kv(cache_k, cache_v, cache_positions, cache_valid, 1, 4, 5)
+
+    torch.testing.assert_close(k0.flatten(), torch.tensor([10.0, 10.0]))
+    torch.testing.assert_close(v0.flatten(), torch.tensor([11.0, 11.0]))
+    torch.testing.assert_close(k1.flatten(), torch.tensor([20.0, 20.0]))
+    torch.testing.assert_close(v1.flatten(), torch.tensor([21.0, 21.0]))
+
+    # Position 0 shares rolling index with position 4, but the stored absolute
+    # position prevents stale context from being reused.
+    k_stale, v_stale = _gather_dspark_context_kv(cache_k, cache_v, cache_positions, cache_valid, 0, 0, 1)
+    assert k_stale.numel() == 0
+    assert v_stale.numel() == 0
+
+
+def test_dspark_query_block_slots_must_not_mix_requests():
+    _validate_dspark_query_block_slots(torch.tensor([0, 0, 1, 1], dtype=torch.int32), block_size=2)
+
+    with pytest.raises(ValueError, match="constant within each draft block"):
+        _validate_dspark_query_block_slots(torch.tensor([0, 1, 1, 1], dtype=torch.int32), block_size=2)
