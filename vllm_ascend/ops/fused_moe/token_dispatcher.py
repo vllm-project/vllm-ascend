@@ -474,8 +474,8 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
         self,
         token_dispatch_input: MoETokenDispatchInput,
     ):
-        use_mxfp_quant = token_dispatch_input.quant.is_mxfp
         with_quant = token_dispatch_input.quant.dispatch_with_quant
+        scale_type = token_dispatch_input.quant.get_scale_type()
         hidden_states = token_dispatch_input.hidden_states
         topk_weights = token_dispatch_input.topk_weights
         topk_ids = token_dispatch_input.topk_ids
@@ -493,11 +493,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
 
         dynamic_scale_after_all2all = None
         if with_quant:
-            dst_type = (
-                torch.float8_e4m3fn
-                if token_dispatch_input.quant.is_fp8 or token_dispatch_input.quant.is_mxfp
-                else torch.int8
-            )
+            dst_type = token_dispatch_input.quant.get_dst_type()
             permutated_local_input_tokens, dynamic_scale = DeviceOperator.npu_dynamic_quant(
                 permutated_local_input_tokens, act_quant_type=dst_type, use_mxfp_quant=use_mxfp_quant
             )
@@ -520,7 +516,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
                 dynamic_scale_after_all2all,
                 global_input_tokens_local_experts_indices,
                 with_quant,
-                use_mxfp_quant,
+                scale_type,
             )
         )
 
@@ -641,7 +637,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
         dynamic_scale_after_all2all,
         global_input_tokens_local_experts_indices,
         with_quant,
-        use_mxfp_quant,
+        scale_type,
     ):
         # Early return if no local experts or no tokens
         if self.num_local_experts <= 1:
@@ -655,7 +651,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
             global_input_tokens_local_experts_indices.shape[0], 1
         )
 
-        if use_mxfp_quant:
+        if scale_type == torch.float8_e8m0fnu:
             dynamic_scale_for_routing = dynamic_scale_after_all2all.view(torch.float8_e8m0fnu)
         elif with_quant:
             dynamic_scale_for_routing = dynamic_scale_after_all2all
@@ -675,7 +671,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
             )
         )
 
-        if use_mxfp_quant:
+        if scale_type == torch.float8_e8m0fnu:
             dynamic_scale_after_all2all = routed_scale.view(torch.uint8)
         elif with_quant:
             dynamic_scale_after_all2all = routed_scale
