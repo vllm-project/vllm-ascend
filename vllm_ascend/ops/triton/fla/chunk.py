@@ -118,7 +118,7 @@ def chunk_gated_delta_rule_fwd(
     if get_pcp_group().world_size > 1:
         # When integrating mtp, since `mix_qkv` has been split, `num_decode`
         # cannot be directly obtained from the metadata and needs to be recalculated.
-        actual_num_decodes = getattr(prebuilt_meta, 'num_decodes', None)
+        actual_num_decodes = getattr(prebuilt_meta, "num_decodes", None)
         if actual_num_decodes is None:
             actual_num_decodes = num_decodes
         h_update = chunk_gated_delta_rule_fwd_hupdate(

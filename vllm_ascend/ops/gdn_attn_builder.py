@@ -371,8 +371,7 @@ def _build_chunked_prefill_metadata(
 ) -> GDNChunkedPrefillMetadata:
     cu_seqlens_host = tuple(cu_seqlens_cpu.to(torch.int64).tolist())
     num_decodes = sum(
-        1 for i in range(len(cu_seqlens_host) - 1)
-        if 0 < cu_seqlens_host[i + 1] - cu_seqlens_host[i] <= 1
+        1 for i in range(len(cu_seqlens_host) - 1) if 0 < cu_seqlens_host[i + 1] - cu_seqlens_host[i] <= 1
     )
     return GDNChunkedPrefillMetadata(
         cu_seqlens_cpu=cu_seqlens_cpu,
