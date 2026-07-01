@@ -475,7 +475,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
         token_dispatch_input: MoETokenDispatchInput,
     ):
         use_mxfp_quant = token_dispatch_input.quant.is_mxfp
-        with_quant = token_dispatch_input.quant.is_int_quant or token_dispatch_input.quant.is_fp8 or use_mxfp_quant
+        with_quant = token_dispatch_input.quant.dispatch_with_quant
         hidden_states = token_dispatch_input.hidden_states
         topk_weights = token_dispatch_input.topk_weights
         topk_ids = token_dispatch_input.topk_ids
