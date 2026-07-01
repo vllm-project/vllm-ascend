@@ -26,21 +26,21 @@ if [ "${FREE_GB}" -lt "${MIN_FREE_GB}" ]; then
 fi
 
 # Global config
-# API_PREFIX="https://174e1b821a8446f38998a67186ba766e.apic.cn-southwest-2.huaweicloudapis.com/aurogon_service"
-# MR_THIRD_ID=9270
-# NETWORK_ZONE=github
-# PROJECT_PATH=vllm-project/vllm-ascend
-# BIND_ID_API2=11
-# PAGE_CURR=1
-# PAGE_SIZE=100
-
 API_PREFIX="https://174e1b821a8446f38998a67186ba766e.apic.cn-southwest-2.huaweicloudapis.com/aurogon_service"
-MR_THIRD_ID=826
-NETWORK_ZONE=gitcode
-PROJECT_PATH=Ascend/MindIE-LLM
-BIND_ID_API2=16
+MR_THIRD_ID=9270
+NETWORK_ZONE=github
+PROJECT_PATH=vllm-project/vllm-ascend
+BIND_ID_API2=11
 PAGE_CURR=1
 PAGE_SIZE=100
+
+# API_PREFIX="https://174e1b821a8446f38998a67186ba766e.apic.cn-southwest-2.huaweicloudapis.com/aurogon_service"
+# MR_THIRD_ID=826
+# NETWORK_ZONE=gitcode
+# PROJECT_PATH=Ascend/MindIE-LLM
+# BIND_ID_API2=16
+# PAGE_CURR=1
+# PAGE_SIZE=100
 
 # APIG auth 硬编码，无需外部传入环境变量
 X_APIG_APPCODE="2a934292a6ab4dc08b99d6304794a25443f724c21ab64082a7c168450e4bb883"
