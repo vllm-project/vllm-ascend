@@ -20,8 +20,9 @@
 A-class tests: pure CPU / mock, no NPU device required.
 B-class tests: require NPU device, gated by @npu_test decorator.
 """
+
 import unittest
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -29,7 +30,6 @@ import torch
 
 from tests.ut.base import TestBase
 from tests.ut.conftest import npu_test
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -52,9 +52,7 @@ def _make_vllm_config(num_layers=24, num_experts_per_tok=4, dp_rank=0):
     """Construct a minimal vllm_config mock for init_buffer tests."""
     vllm_config = MagicMock()
     vllm_config.model_config.hf_text_config.num_hidden_layers = num_layers
-    vllm_config.model_config.hf_text_config.num_experts_per_tok = (
-        num_experts_per_tok
-    )
+    vllm_config.model_config.hf_text_config.num_experts_per_tok = num_experts_per_tok
     vllm_config.parallel_config.data_parallel_rank = dp_rank
     vllm_config.instance_id = "test_instance"
     return vllm_config
@@ -85,14 +83,16 @@ class TestPatchRoutedExpertsCapturer(TestBase):
             captured_device["device"] = device
             return MagicMock()
 
-        with patch(
-            "vllm_ascend.patch.worker.patch_routed_experts_capturer.current_platform"
-        ) as mock_platform, patch(
-            "vllm_ascend.patch.worker.patch_routed_experts_capturer.get_tensor_model_parallel_rank",
-            return_value=1,
-        ), patch(
-            "vllm_ascend.patch.worker.patch_routed_experts_capturer.torch.zeros",
-            side_effect=fake_zeros,
+        with (
+            patch("vllm_ascend.patch.worker.patch_routed_experts_capturer.current_platform") as mock_platform,
+            patch(
+                "vllm_ascend.patch.worker.patch_routed_experts_capturer.get_tensor_model_parallel_rank",
+                return_value=1,
+            ),
+            patch(
+                "vllm_ascend.patch.worker.patch_routed_experts_capturer.torch.zeros",
+                side_effect=fake_zeros,
+            ),
         ):
             mock_platform.device_name = "npu"
             init_buffer(
@@ -122,14 +122,16 @@ class TestPatchRoutedExpertsCapturer(TestBase):
             captured_args["dtype"] = dtype
             return MagicMock()
 
-        with patch(
-            "vllm_ascend.patch.worker.patch_routed_experts_capturer.current_platform"
-        ) as mock_platform, patch(
-            "vllm_ascend.patch.worker.patch_routed_experts_capturer.get_tensor_model_parallel_rank",
-            return_value=1,
-        ), patch(
-            "vllm_ascend.patch.worker.patch_routed_experts_capturer.torch.zeros",
-            side_effect=fake_zeros,
+        with (
+            patch("vllm_ascend.patch.worker.patch_routed_experts_capturer.current_platform") as mock_platform,
+            patch(
+                "vllm_ascend.patch.worker.patch_routed_experts_capturer.get_tensor_model_parallel_rank",
+                return_value=1,
+            ),
+            patch(
+                "vllm_ascend.patch.worker.patch_routed_experts_capturer.torch.zeros",
+                side_effect=fake_zeros,
+            ),
         ):
             mock_platform.device_name = "npu"
             init_buffer(
@@ -168,9 +170,7 @@ class TestPatchRoutedExpertsCapturer(TestBase):
 class TestApplyCaptureLogic(TestBase):
     """Test capture call in AscendUnquantizedFusedMoEMethod.apply."""
 
-    @patch(
-        "vllm_ascend.ops.fused_moe.fused_moe.RoutedExpertsCapturer"
-    )
+    @patch("vllm_ascend.ops.fused_moe.fused_moe.RoutedExpertsCapturer")
     @patch("vllm_ascend.ops.fused_moe.fused_moe.select_experts")
     def test_apply_captures_when_enabled(self, mock_select, MockCapturer):
         """enable_return_routed_experts=True should call capturer.capture()."""
@@ -185,19 +185,14 @@ class TestApplyCaptureLogic(TestBase):
 
         # Simulate the capture block directly (same code as lines 149-155)
         topk_ids = mock_select.return_value[1]
-        if layer.vllm_config.model_config is not None and \
-           layer.vllm_config.model_config.enable_return_routed_experts:
+        if layer.vllm_config.model_config is not None and layer.vllm_config.model_config.enable_return_routed_experts:
             capturer = MockCapturer.get_instance()
             if capturer is not None:
                 capturer.capture(layer_id=layer.layer_id, topk_ids=topk_ids)
 
-        mock_instance.capture.assert_called_once_with(
-            layer_id=5, topk_ids=topk_ids
-        )
+        mock_instance.capture.assert_called_once_with(layer_id=5, topk_ids=topk_ids)
 
-    @patch(
-        "vllm_ascend.ops.fused_moe.fused_moe.RoutedExpertsCapturer"
-    )
+    @patch("vllm_ascend.ops.fused_moe.fused_moe.RoutedExpertsCapturer")
     @patch("vllm_ascend.ops.fused_moe.fused_moe.select_experts")
     def test_apply_skips_capture_when_disabled(self, mock_select, MockCapturer):
         """enable_return_routed_experts=False should NOT call capture."""
@@ -211,17 +206,14 @@ class TestApplyCaptureLogic(TestBase):
         layer = _make_mock_layer(layer_id=5, enable_re=False)
 
         topk_ids = mock_select.return_value[1]
-        if layer.vllm_config.model_config is not None and \
-           layer.vllm_config.model_config.enable_return_routed_experts:
+        if layer.vllm_config.model_config is not None and layer.vllm_config.model_config.enable_return_routed_experts:
             capturer = MockCapturer.get_instance()
             if capturer is not None:
                 capturer.capture(layer_id=layer.layer_id, topk_ids=topk_ids)
 
         mock_instance.capture.assert_not_called()
 
-    @patch(
-        "vllm_ascend.ops.fused_moe.fused_moe.RoutedExpertsCapturer"
-    )
+    @patch("vllm_ascend.ops.fused_moe.fused_moe.RoutedExpertsCapturer")
     @patch("vllm_ascend.ops.fused_moe.fused_moe.select_experts")
     def test_apply_skips_capture_when_no_capturer(self, mock_select, MockCapturer):
         """capturer singleton is None should not crash."""
@@ -234,17 +226,14 @@ class TestApplyCaptureLogic(TestBase):
         layer = _make_mock_layer(layer_id=5, enable_re=True)
 
         topk_ids = mock_select.return_value[1]
-        if layer.vllm_config.model_config is not None and \
-           layer.vllm_config.model_config.enable_return_routed_experts:
+        if layer.vllm_config.model_config is not None and layer.vllm_config.model_config.enable_return_routed_experts:
             capturer = MockCapturer.get_instance()
             if capturer is not None:
                 capturer.capture(layer_id=layer.layer_id, topk_ids=topk_ids)
 
         # Should not raise any exception
 
-    @patch(
-        "vllm_ascend.ops.fused_moe.fused_moe.RoutedExpertsCapturer"
-    )
+    @patch("vllm_ascend.ops.fused_moe.fused_moe.RoutedExpertsCapturer")
     @patch("vllm_ascend.ops.fused_moe.fused_moe.select_experts")
     def test_apply_capture_correct_args(self, mock_select, MockCapturer):
         """capture should receive correct layer_id and topk_ids."""
@@ -258,8 +247,7 @@ class TestApplyCaptureLogic(TestBase):
         layer = _make_mock_layer(layer_id=7, enable_re=True)
 
         topk_ids = mock_select.return_value[1]
-        if layer.vllm_config.model_config is not None and \
-           layer.vllm_config.model_config.enable_return_routed_experts:
+        if layer.vllm_config.model_config is not None and layer.vllm_config.model_config.enable_return_routed_experts:
             capturer = MockCapturer.get_instance()
             if capturer is not None:
                 capturer.capture(layer_id=layer.layer_id, topk_ids=topk_ids)
@@ -294,15 +282,15 @@ class TestForwardImplCaptureLogic(TestBase):
 
         topk_ids = torch.tensor([[1, 2, 3, 4]])
 
-        if mock_self.vllm_config.model_config is not None and \
-           mock_self.vllm_config.model_config.enable_return_routed_experts:
+        if (
+            mock_self.vllm_config.model_config is not None
+            and mock_self.vllm_config.model_config.enable_return_routed_experts
+        ):
             capturer = MockCapturer.get_instance()
             if capturer is not None:
                 capturer.capture(layer_id=mock_self.layer_id, topk_ids=topk_ids)
 
-        mock_instance.capture.assert_called_once_with(
-            layer_id=3, topk_ids=topk_ids
-        )
+        mock_instance.capture.assert_called_once_with(layer_id=3, topk_ids=topk_ids)
 
     @patch("vllm_ascend.ops.fused_moe.fused_moe.RoutedExpertsCapturer")
     def test_forward_impl_skips_capture_multistream(self, MockCapturer):
@@ -317,8 +305,10 @@ class TestForwardImplCaptureLogic(TestBase):
 
         topk_ids = torch.tensor([[1, 2, 3, 4]])
 
-        if mock_self.vllm_config.model_config is not None and \
-           mock_self.vllm_config.model_config.enable_return_routed_experts:
+        if (
+            mock_self.vllm_config.model_config is not None
+            and mock_self.vllm_config.model_config.enable_return_routed_experts
+        ):
             capturer = MockCapturer.get_instance()
             if capturer is not None:
                 capturer.capture(layer_id=mock_self.layer_id, topk_ids=topk_ids)
@@ -337,18 +327,17 @@ class TestForwardImplCaptureLogic(TestBase):
         mock_self.layer_id = 2
 
         # Simulate AllGatherCommImpl path
-        topk_ids_before = torch.tensor([[1, 2]])
         topk_ids_after = torch.tensor([[1, 2], [3, 4], [5, 6]])
 
         # Verify the capture uses post-allgather values
-        if mock_self.vllm_config.model_config is not None and \
-           mock_self.vllm_config.model_config.enable_return_routed_experts:
+        if (
+            mock_self.vllm_config.model_config is not None
+            and mock_self.vllm_config.model_config.enable_return_routed_experts
+        ):
             capturer = MockCapturer.get_instance()
             if capturer is not None:
                 # In real code, this happens after AllGather
-                capturer.capture(
-                    layer_id=mock_self.layer_id, topk_ids=topk_ids_after
-                )
+                capturer.capture(layer_id=mock_self.layer_id, topk_ids=topk_ids_after)
 
         call_args = mock_instance.capture.call_args
         assert call_args.kwargs["topk_ids"].shape[0] == 3  # expanded by allgather
@@ -443,9 +432,7 @@ class TestModelRunnerIntegration(TestBase):
             if capturer is not None:
                 capturer.save_captured_experts(indices=cpu_slot_mapping)
 
-        mock_capturer.save_captured_experts.assert_called_once_with(
-            indices=cpu_slot_mapping
-        )
+        mock_capturer.save_captured_experts.assert_called_once_with(indices=cpu_slot_mapping)
 
     def test_save_captured_experts_handles_none(self):
         """Should not crash when capturer is None."""
@@ -504,7 +491,7 @@ class TestDenseModelCompatibility(TestBase):
         # A dense model has no `enable_return_routed_experts` handling in MoE
         # because it has no FusedMoE layers at all
         has_fused_moe = hasattr(mock_model, "layers") and any(
-            hasattr(l, "w13_weight") for l in getattr(mock_model, "layers", [])
+            hasattr(layer, "w13_weight") for layer in getattr(mock_model, "layers", [])
         )
 
         assert not has_fused_moe
@@ -528,6 +515,7 @@ class TestDenseModelCompatibility(TestBase):
 def _reset_capturer_singleton():
     """Reset the global RoutedExpertsCapturer singleton between tests."""
     import vllm.model_executor.layers.fused_moe.routed_experts_capturer as mod
+
     mod._global_experts_capturer = None
 
 
@@ -551,9 +539,7 @@ class TestRoutedExpertsCapturerNPU(unittest.TestCase):
 
         # Initialize device buffer: 10 tokens, 2 layers, 3 experts_per_tok
         device = torch.device("npu:0")
-        capturer._device_buffer = torch.zeros(
-            (10, 2, 3), dtype=torch.int32, device=device
-        )
+        capturer._device_buffer = torch.zeros((10, 2, 3), dtype=torch.int32, device=device)
         capturer.dp_rank = 0
 
         # Simulate single-dp forward context
@@ -588,9 +574,7 @@ class TestRoutedExpertsCapturerNPU(unittest.TestCase):
         capturer = RoutedExpertsCapturer.create()
 
         device = torch.device("npu:0")
-        capturer._device_buffer = torch.ones(
-            (5, 2, 3), dtype=torch.int32, device=device
-        )
+        capturer._device_buffer = torch.ones((5, 2, 3), dtype=torch.int32, device=device)
 
         capturer.clear_buffer()
 
