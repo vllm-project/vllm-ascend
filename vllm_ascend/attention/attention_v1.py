@@ -625,7 +625,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     # original ordering.
                     attn_keys_length = len(graph_params.attn_params[num_tokens])
                     global _ATTN_KEYS_BUFFER
-                    if _ATTN_KEYS_BUFFER is None or not _ATTN_KEYS_BUFFER:
+                    if not _ATTN_KEYS_BUFFER:
                         import regex as re
 
                         def extract_layer_index(key: str) -> int:
