@@ -677,10 +677,10 @@ class NPUPlatform(Platform):
         if ascend_config.recompute_scheduler_enable:
             kv_transfer_config = vllm_config.kv_transfer_config
             kv_role = getattr(kv_transfer_config, "kv_role", None)
-            if kv_transfer_config is None or kv_role == "kv_both":
+            if kv_transfer_config is None or kv_role != "kv_consumer":
                 raise ValueError(
-                    "recompute_scheduler_enable can only be enabled in PD-disaggregated mode "
-                    "(kv_role='kv_producer' or 'kv_consumer'), and is not supported in PD-mixed mode."
+                    "recompute_scheduler_enable can only be enabled on PD-disaggregated D nodes "
+                    f"(kv_role='kv_consumer', but got kv_role={kv_role!r}), and is not supported in PD-mixed mode."
                 )
 
             from vllm_ascend.core.recompute_scheduler import RecomputeSchedulerConfig

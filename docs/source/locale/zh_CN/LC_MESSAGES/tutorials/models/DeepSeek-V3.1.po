@@ -349,11 +349,10 @@ msgid ""
 "`recompute_scheduler_enable: true`: enables the recomputation scheduler. "
 "When the Key-Value Cache (KV Cache) of the decode node is insufficient, "
 "requests will be sent to the prefill node to recompute the KV Cache. In "
-"the PD separation scenario, it is recommended to enable this "
-"configuration on both prefill and decode nodes simultaneously."
+"the PD separation scenario, enable this configuration only on decode nodes."
 msgstr ""
 "`recompute_scheduler_enable: true`：启用重计算调度器。当解码节点的 KV "
-"缓存不足时，请求将被发送到预填充节点以重新计算 KV 缓存。在 PD 分离场景下，建议同时在预填充节点和解码节点上启用此配置。"
+"缓存不足时，请求将被发送到预填充节点以重新计算 KV 缓存。在 PD 分离场景下，仅在解码节点上启用此配置。"
 
 #: ../../source/tutorials/models/DeepSeek-V3.1.md:573
 msgid ""

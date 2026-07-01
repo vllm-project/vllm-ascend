@@ -345,7 +345,7 @@ To run the vllm-ascend Prefill-Decode Disaggregation service, you need to:
       --gpu-memory-utilization 0.95 \
       --enforce-eager \
       --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
-      --additional-config '{"recompute_scheduler_enable":true,"enable_cpu_binding":true}' \
+      --additional-config '{"enable_cpu_binding":true}' \
       --kv-transfer-config \
       '{"kv_connector": "MooncakeConnectorV1",
       "kv_role": "kv_producer",
@@ -432,7 +432,7 @@ To run the vllm-ascend Prefill-Decode Disaggregation service, you need to:
 Key Parameter Descriptions:
 
 - `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the Allreduce communication optimization on prefill nodes, which reduces the communication overhead of long-context prefill.
-- `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the KV Cache of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, it is recommended to enable this configuration on both prefill and decode nodes simultaneously.
+- `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the KV Cache of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, enable this configuration only on decode nodes.
 - `--async-scheduling` (on decode nodes): enables asynchronous scheduling, which can reduce TPOT for high-concurrency decode workloads.
 - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` (on decode nodes): enables the full-decode aclgraph mode, which significantly reduces scheduling latency on the decode side.
 

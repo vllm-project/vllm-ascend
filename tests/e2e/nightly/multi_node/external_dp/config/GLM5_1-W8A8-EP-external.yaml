@@ -100,7 +100,7 @@ templates:
       - --max-model-len
       - "131072"
       - --additional-config
-      - '{"recompute_scheduler_enable": true, "fuse_muls_add": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
+      - '{"fuse_muls_add": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
       - --max-num-batched-tokens
       - "4096"
       - --trust-remote-code
@@ -161,7 +161,7 @@ templates:
       - --max-model-len
       - "131072"
       - --additional-config
-      - '{"recompute_scheduler_enable": true, "fuse_muls_add": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
+      - '{"fuse_muls_add": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
       - --max-num-batched-tokens
       - "4096"
       - --trust-remote-code
