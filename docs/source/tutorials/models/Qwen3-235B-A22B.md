@@ -53,7 +53,7 @@ Successfully installed msmodelslim-{version}
 **Run quantization:**
 
 ```shell
-cd examples/Qwen3-MOE
+cd example/Qwen3-MOE
 # Run the following command to quantize the model.
 python3 quant_qwen_moe_w8a8.py --model_path /path/to/your/Qwen3-235B-A22B \
     --save_path /path/to/your/Qwen3-235B-A22B-W8A8-rot \
@@ -124,7 +124,7 @@ docker run --rm \
     -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
     -v /etc/ascend_install.info:/etc/ascend_install.info \
     -v /root/.cache:/root/.cache \
-    -it $IMAGE bash
+    -it "$IMAGE" bash
 ```
 
 :::{note}
@@ -163,7 +163,7 @@ docker run --rm \
     -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
     -v /etc/ascend_install.info:/etc/ascend_install.info \
     -v /root/.cache:/root/.cache \
-    -it $IMAGE bash
+    -it "$IMAGE" bash
 ```
 
 ::::
@@ -232,7 +232,6 @@ Single-node deployment completes both Prefill and Decode within the same node, s
 Atlas 800I A2/A3:
 
 ```shell
-export VLLM_USE_MODELSCOPE=True
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export HCCL_BUFFSIZE=512
@@ -743,7 +742,6 @@ There are three `vllm bench` subcommands:
 Take `serve` as an example:
 
 ```shell
-export VLLM_USE_MODELSCOPE=True
 vllm bench serve \
     --model your_model_path \
     --dataset-name random \
