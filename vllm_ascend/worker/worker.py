@@ -18,6 +18,7 @@
 #
 
 import copy
+import threading
 import gc
 import logging
 from types import NoneType
@@ -459,7 +460,16 @@ class NPUWorker(WorkerBase):
         num_ubatches = 1
         init_workspace_manager(self.device, num_ubatches)
         # Init ModelRunner here, so that we have access to self.device.
-        if self.use_v2_model_runner:
+        if (
+            self.vllm_config.afd_config
+            and self.vllm_config.afd_config.is_ffn_server
+        ):
+            from vllm_ascend.worker.npu_ffn_model_runner_v1 import (
+                NPUFFNModelRunner,
+            )
+
+            self.model_runner = NPUFFNModelRunner(self.vllm_config, self.device)
+        elif self.use_v2_model_runner:
             logger.warning("npu model runner v2 is in developing, some features doesn't work for now.")
             from vllm_ascend.worker.v2.model_runner import NPUModelRunner as NPUModelRunnerV2
 
@@ -1047,6 +1057,43 @@ class NPUWorker(WorkerBase):
         except Exception as e:
             logger.info("query NPU card %s fail: %s", self.local_rank, e)
         return
+
+    def start_ffn_server_loop(self) -> None:
+        """Start FFN server loop for AFD FFN workers."""
+        if not (
+            self.vllm_config.afd_config
+            and self.vllm_config.afd_config.is_ffn_server
+        ):
+            return
+
+        self.model_runner.capture_model()
+        self.model_runner.initialize_afd_connector()
+
+        self._ffn_shutdown_event = threading.Event()
+
+        def ffn_worker_loop():
+            # Set NPU device for this thread (thread-local context)
+            torch.npu.set_device(self.device)
+            logger.info("FFN worker loop started")
+
+            try:
+                while not self._ffn_shutdown_event.is_set():
+                    # Execute FFN computation
+                    self.model_runner.execute_model(scheduler_output=None)
+            except Exception as e:
+                logger.error("FFN worker loop error: %s", e)
+                raise
+
+        self._ffn_thread = threading.Thread(target=ffn_worker_loop, daemon=True)
+        self._ffn_thread.start()
+        logger.info("FFN server loop started in worker")
+
+    def stop_ffn_server_loop(self) -> None:
+        """Stop FFN server loop."""
+        if hasattr(self, "_ffn_shutdown_event"):
+            self._ffn_shutdown_event.set()
+            if hasattr(self, "_ffn_thread"):
+                self._ffn_thread.join(timeout=5)
 
 
 def parse_text_output(output) -> None:
