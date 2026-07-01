@@ -612,8 +612,8 @@ class KVCacheRecvingThread(threading.Thread):
         finally:
             if all_task_done:
                 self.task_tracker.update_done_task_count(request_id)
-                if request_id in self.proc_not_transfer_request:
-                    del self.proc_not_transfer_request[request_id]
+                if remote_request_id in self.proc_not_transfer_request:
+                    del self.proc_not_transfer_request[remote_request_id]
                 self._clear_failed_recv_request(request_id)
             self.request_queue.task_done()
             self._send_done_signal_to_free_remote_port(remote_request_id, remote_host, remote_port_send_num)
