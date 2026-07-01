@@ -229,10 +229,11 @@ jobs:
       #     provenance: false
       #     cache-from: type=registry,ref=${{ env.CACHE_REPO }}:${{ steps.cache_tag.outputs.value }}
       #     cache-to: type=registry,ref=${{ env.CACHE_REPO }}:${{ steps.cache_tag.outputs.value }},mode=max
-
+      
       - name: Build and push image
         id: build
         run: |
+          sleep 600
           echo "Installing buildctl..." mkdir -p /tmp/buildkit BUILDKIT_VERSION="v0.29.0" ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') wget -q "https://github.com/moby/buildkit/releases/download/${BUILDKIT_VERSION}/buildkit-${BUILDKIT_VERSION}.linux-${ARCH}.tar.gz" -O /tmp/buildkit.tar.gz tar -xzf /tmp/buildkit.tar.gz -C /tmp/buildkit cp /tmp/buildkit/bin/buildctl /usr/local/bin/ chmod +x /usr/local/bin/buildctl echo "buildctl installed successfully" buildctl --version
           set -ex
 
