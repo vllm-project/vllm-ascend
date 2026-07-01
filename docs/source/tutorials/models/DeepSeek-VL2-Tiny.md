@@ -2,11 +2,11 @@
 
 ## Introduction
 
-DeepSeek-VL2-Tiny is a compact vision-language model.
+DeepSeek-VL2-Tiny is a compact vision-language model from DeepSeek.
 
 ## Current Status
 
-Currently unsupported by vLLM.
+Currently unsupported by vLLM due to config parsing issue.
 
 ## Environment
 
