@@ -530,6 +530,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 slot_mapping=self.runner.input_batch.block_table[0].slot_mapping.gpu,
                 slot_mapping_cpu=self.runner.input_batch.block_table[0].slot_mapping.cpu,
                 positions=self.runner.positions,
+                # MTP graph-mode fix: DSA build_decode_metadata indexes positions_cpu;
+                # mirror main model (model_runner_v1.py) so drafter graph capture doesn't hit None.
+                positions_cpu=self.runner._dsa_positions_cpu_buf if self.use_compress else None,
                 attn_state=self.runner.attn_state,
                 decode_token_per_req=self.runner.decode_token_per_req,
                 max_seq_len=0,
@@ -550,9 +553,20 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 if self.pcp_size * self.dcp_size > 1 and draft_step > 0:
                     assert self.block_table_tensor_clone is not None, "block_table_tensor_clone is not init"
                     common_attn_metadata.block_table_tensor = self.block_table_tensor_clone[:num_reqs]
+                # MTP graph-mode fix: DSA build() asserts *_ratio_to_sas_metadata is not None;
+                # mirror _propose() so drafter graph capture passes empty sas_metadata dicts.
+                extra_attn_metadata_args: dict = {}
+                if self.use_compress:
+                    extra_attn_metadata_args = dict(
+                        prefill_ratio_to_sas_metadata=dict(),
+                        decode_ratio_to_sas_metadata=dict(),
+                        common_ratio_to_sas_metadata=dict(),
+                        block_size=self.draft_attn_groups[0].kv_cache_spec.block_size,
+                    )
                 attn_metadata_eagle = builder.build_for_graph_capture(
                     common_attn_metadata,
                     AscendAttentionState.SpecDecoding if self.method == "mtp" else AscendAttentionState.ChunkedPrefill,
+                    **extra_attn_metadata_args,
                 )
                 per_layer_attn_metadata = dict()
                 for layer_name in self.attn_layer_names:
@@ -646,10 +660,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         if token_indices_to_sample is None:
             token_indices_to_sample = common_attn_metadata.query_start_loc[1:] - 1
 
-        if self.method in ("eagle3", "dflash"):
-            assert isinstance(
-                self.get_model(), (Eagle3LlamaForCausalLM, DFlashQwen3ForCausalLM, Eagle3DeepseekV2ForCausalLM)
-            )
+        if self.method in ("eagle3", "dflash", "dspark"):
+            if self.method != "dspark":
+                assert isinstance(
+                    self.get_model(), (Eagle3LlamaForCausalLM, DFlashQwen3ForCausalLM, Eagle3DeepseekV2ForCausalLM)
+                )
             target_hidden_states = self.model.combine_hidden_states(target_hidden_states)
             assert target_hidden_states.shape[-1] == self.hidden_size
 
@@ -719,7 +734,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             common_attn_metadata.block_table_tensor = self._adjust_tensor(
                 common_attn_metadata.block_table_tensor, slicing_length
             )
-            if self.method == "dflash":
+            if self.method in ("dflash", "dspark"):
                 common_attn_metadata.seq_lens = self._adjust_tensor(common_attn_metadata.seq_lens, num_reqs_padded)
             else:
                 common_attn_metadata.seq_lens = self._adjust_tensor(self.runner.seq_lens, num_reqs_padded)
@@ -979,8 +994,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         model_input_ids = self.input_ids[:num_input_tokens]
         model_positions = self._get_positions(num_input_tokens)
 
-        if self.method == "dflash":
+        if self.method in ("dflash", "dspark"):
             model_kwargs = self.build_model_inputs_first_pass(num_input_tokens)
+            if self.method == "dspark" and self.pass_hidden_states_to_model:
+                # DSpark: seed the draft first pass with the projected target hidden
+                # (main_x = combine_hidden_states output, stored in self.hidden_states
+                # by set_inputs_first_pass). The dflash first-pass builder omits it, so
+                # the draft would start blind and collapse to a constant token.
+                model_kwargs["hidden_states"] = self.hidden_states[:num_input_tokens]
         else:
             model_kwargs = {
                 "input_ids": model_input_ids,
@@ -1002,7 +1023,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         else:
             last_hidden_states, hidden_states = ret_hidden_states
 
-        if self.method != "dflash":
+        if self.method not in ("dflash", "dspark"):
             last_hidden_states, model_positions, hidden_states = self.maybe_all_gather_and_unpad(
                 last_hidden_states, model_positions, hidden_states
             )
@@ -1038,6 +1059,27 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             )
 
         sample_hidden_states = last_hidden_states[token_indices_to_sample]
+        import os as _mkv
+        if (self.method == "dspark" and _mkv.environ.get("DSPARK_MARKOV")
+                and hasattr(self.model, "compute_block")):
+            _nq = self.num_speculative_tokens
+            _raw_tidx = token_indices_to_sample[:num_indices]   # strip lmhead_tp padding (Codex)
+            _tidx = _raw_tidx.view(-1, _nq)
+            if _mkv.environ.get("DSPARK_SHIFT"):
+                # DSpark samples the ANCHOR row (q0, input=real bonus token) as the
+                # first prediction (ref forward_head row0), NOT the mask rows q1..qS.
+                _sidx = (_tidx - 1).reshape(-1).long()
+                _anchor = self.input_ids[(_tidx[:, 0] - 1).long()].contiguous()
+                _sh = last_hidden_states.index_select(0, _sidx)
+            else:
+                _anchor = self.input_ids[(_tidx[:, 0] - 1).long()].contiguous()
+                _sh = last_hidden_states.index_select(0, _raw_tidx.long())
+            _mout, _mconf = self.model.compute_block(_sh, _anchor, 0.0)
+            if _mkv.environ.get("DSPARK_DBG"):
+                import sys as _ms
+                _base = self.model.compute_logits(_sh).argmax(-1).view(-1, _nq)
+                print("DSPARK_CMP shift=%s anchor=%s base=%s block=%s" % (bool(_mkv.environ.get("DSPARK_SHIFT")), _anchor[:2].tolist(), _base[0].tolist(), _mout[0, 1:].tolist()), file=_ms.stderr, flush=True)
+            return _mout[:, 1:].contiguous()
 
         if get_ascend_config().enable_reduce_sample and self.method in ("eagle3", "dflash"):
             draft_token_ids = self.compute_draft_token_ids(sample_hidden_states)
@@ -1061,6 +1103,15 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         logits = logits[:num_indices]
                         token_indices_to_sample = token_indices_to_sample[:num_indices]
                     draft_token_ids = logits.argmax(dim=-1)
+            elif self.method == "dspark":
+                # DSpark semi-AR Markov sampling: base U_k + markov_bias(prev token),
+                # sequential, seeded with the per-request anchor (bonus) token. This is
+                # the essential DSpark head; base logits alone are near-unconditional.
+                _bs = sample_hidden_states.shape[0] // self.num_speculative_tokens
+                _nqpr = 1 + self.num_speculative_tokens
+                _anchor = self.input_ids[torch.arange(_bs, device=sample_hidden_states.device, dtype=torch.long) * _nqpr]
+                _out_ids, _conf = self.model.compute_block(sample_hidden_states, _anchor, 0.0)
+                draft_token_ids = _out_ids[:, 1:].reshape(-1)
             else:
                 logits = self.model.compute_logits(sample_hidden_states)
                 if lmhead_tp_enable() and num_indices < logits.shape[0]:
@@ -1442,7 +1493,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             return total_num_output_tokens, token_indices_to_sample, new_cad, None
 
     def model_returns_tuple(self) -> bool:
-        return self.method not in ("mtp", "draft_model", "dflash")
+        return self.method not in ("mtp", "draft_model", "dflash", "dspark")
 
     def attn_update_stack_num_spec_norm(
         self,

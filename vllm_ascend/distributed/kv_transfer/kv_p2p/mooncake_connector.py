@@ -560,7 +560,7 @@ class KVCacheRecvingThread(threading.Thread):
                     continue
                 self._handle_request(request_data)
             except Exception as e:
-                logger.error("Error in KVCacheTransferThread. error=%s. ", e)
+                logger.exception("Error in KVCacheTransferThread (full tb). error=%s. ", e)
 
     def _handle_request(self, req_meta: dict[str, Any]):
         request_id = req_meta["request_id"]

@@ -83,6 +83,11 @@ class AscendDflashProposer(AscendEagleProposer):
 
         self._dflash_num_context = num_context
         self._dflash_hidden_states[:num_context] = target_hidden_states
+        # DSpark residual seed: capture each request's LAST context index BEFORE
+        # cad.query_start_loc is overwritten below. main_x at that index seeds the
+        # draft residual (canonical DFlash channel) -> the broken context-KV path
+        # is bypassed; without this the draft is blind and accept collapses to 0.
+        self._dflash_last_ctx_idx = cad.query_start_loc[1:batch_size + 1].to(torch.long) - 1
 
         token_indices_to_sample = torch.empty(
             batch_size * self.num_speculative_tokens,
@@ -111,7 +116,10 @@ class AscendDflashProposer(AscendEagleProposer):
             num_rejected_tokens_ptr=(num_rejected_tokens_gpu if has_num_rejected else 0),
             # Scalars
             parallel_drafting_token_id=self.parallel_drafting_token_id,
-            block_size=self.kernel_block_size,
+            block_size=self.vllm_config.cache_config.block_size,  # DSpark fix: dflash
+            # slot kernel must use the KV-CACHE block_size (128), not kernel_block_size
+            # (=2 here). With 2, context/query slots address the wrong physical blocks
+            # so the draft never reads the written context KV -> constant output.
             num_query_per_req=num_query_per_req,
             num_speculative_tokens=self.num_speculative_tokens,
             total_input_tokens=num_context,
@@ -119,6 +127,21 @@ class AscendDflashProposer(AscendEagleProposer):
             HAS_NUM_REJECTED=has_num_rejected,
         )
 
+        import os as _o, sys as _s
+        if _o.environ.get("DSPARK_DBG"):
+            try:
+                print("DSPARK_PROBE num_ctx=%d ctx_slots[:10]=%s ctx_pos[:10]=%s mainx_std=%.5f mainx_mean=%.5f" % (
+                    num_context,
+                    self._context_slot_mapping_buffer[:num_context][:10].tolist(),
+                    self._context_positions_buffer[:num_context][:10].tolist(),
+                    float(self._dflash_hidden_states[:num_context].float().std()),
+                    float(self._dflash_hidden_states[:num_context].float().mean()),
+                ), file=_s.stderr, flush=True)
+            except Exception as _e:
+                print("DSPARK_PROBE ERR", _e, file=_s.stderr, flush=True)
+        import os as _ob, sys as _sb
+        if _ob.environ.get("DSPARK_DBG"):
+            print("DSPARK_BS kernel_block_size=%s cache_bs=%s decode_threshold=%s" % (getattr(self,"kernel_block_size",None), self.vllm_config.cache_config.block_size, getattr(self,"decode_threshold",None)), file=_sb.stderr, flush=True)
         query_slot_mapping = self._slot_mapping_buffer[:num_query_total]
         new_query_start_loc = self.arange_dflash[: batch_size + 1] * num_query_per_req
 
@@ -259,8 +282,13 @@ class AscendDflashProposer(AscendEagleProposer):
             self._context_slot_mapping_buffer[:num_context],
         )
 
+        seed = self._dflash_hidden_states[:num_context][self._dflash_last_ctx_idx]      # [batch, H]
+        hidden_states = seed.repeat_interleave(1 + self.num_speculative_tokens, dim=0)  # [batch*(1+S), H]
         return dict(
-            input_ids=self.input_ids[:num_input_tokens], positions=self.positions[:num_input_tokens], inputs_embeds=None
+            input_ids=self.input_ids[:num_input_tokens],
+            positions=self.positions[:num_input_tokens],
+            inputs_embeds=None,
+            hidden_states=hidden_states[:num_input_tokens],
         )
 
     def _raise_if_multimodal(self):

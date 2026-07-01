@@ -167,8 +167,26 @@ def _get_kv_cache_groups_uniform_groups(
         # See `_get_kv_cache_groups_uniform_page_size` for more details.
         num_tuple_groups = cdiv(num_layers_per_size, num_layer_tuples)
         layer_tuples = list(zip(*layers_per_size.values()))
-        for i in range(num_tuple_groups):
-            group_layer_tuples = layer_tuples[i::num_tuple_groups]
+        # DSpark: isolate draft (MTP) SWA layer-tuples into a single dedicated
+        # kv-cache group. The spec-decode proposer requires all drafting layers to
+        # share one kv cache group; the default strided split scatters mtp.0/1/2
+        # across groups. Target layers keep the original split formula.
+        def _is_draft_tuple(_t):
+            return any(((".mtp." in (".%s." % _n)) or _n.startswith("mtp.")) for _n in _t)
+        draft_tuples = [t for t in layer_tuples if _is_draft_tuple(t)]
+        main_tuples = [t for t in layer_tuples if not _is_draft_tuple(t)]
+        group_tuple_lists = []
+        if draft_tuples:
+            main_ntg = cdiv(len(main_tuples), num_layer_tuples) if main_tuples else 0
+            for i in range(main_ntg):
+                group_tuple_lists.append(main_tuples[i::main_ntg])
+            group_tuple_lists.append(draft_tuples)
+        else:
+            for i in range(num_tuple_groups):
+                group_tuple_lists.append(layer_tuples[i::num_tuple_groups])
+        for group_layer_tuples in group_tuple_lists:
+            if not group_layer_tuples:
+                continue
             # Flatten tuples and build dict for from_specs
             group_layer_names = [name for layer_tuple in group_layer_tuples for name in layer_tuple]
             group_layer_specs = {name: sm_spec.kv_cache_specs[name] for name in group_layer_names}

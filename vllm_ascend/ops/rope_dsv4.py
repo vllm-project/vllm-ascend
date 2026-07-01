@@ -12,6 +12,11 @@ class RopeGlobalState:
     def __init__(self):
         self.static_cache: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
         self.runtime_buffer: dict[str, dict[str, tuple[torch.Tensor, torch.Tensor]]] = {}
+        # MTP FullGraph: per-draft-step fixed-address cos/sin buffers, keyed by
+        # cache_slot (>0). draft_step>0 must NOT reuse the shared slot-0 buffer
+        # (would override step0); a fresh tensor (use_cache=False) is stale under
+        # cudagraph. One persistent buffer per (config_key, group, slot).
+        self.draft_runtime_buffer: dict[str, dict[str, dict[int, tuple[torch.Tensor, torch.Tensor]]]] = {}
         self.layer_info: dict[str, tuple[str, list[str]]] = {}
         self.registry_summary: dict[str, set] = {}
 
@@ -58,7 +63,9 @@ class RopeDataProxy:
             return layer_result
 
 
-def get_cos_and_sin_dsa(positions: torch.Tensor | dict[str, torch.Tensor], use_cache: bool = False):
+def get_cos_and_sin_dsa(
+    positions: torch.Tensor | dict[str, torch.Tensor], use_cache: bool = False, cache_slot: int = 0
+):
     if isinstance(positions, torch.Tensor):
         pos_map = {"default": positions}
     else:
@@ -81,7 +88,24 @@ def get_cos_and_sin_dsa(positions: torch.Tensor | dict[str, torch.Tensor], use_c
             curr_sin = static_sin[pos_tensor]
 
             if use_cache:
-                group_buffers = _ROPE_STATE.runtime_buffer.get(config_key, {}).get(group_name)
+                if cache_slot == 0:
+                    group_buffers = _ROPE_STATE.runtime_buffer.get(config_key, {}).get(group_name)
+                else:
+                    # MTP FullGraph: draft_step>0 gets its own persistent fixed-address
+                    # buffer (lazily cloned from the slot-0 buffer's shape) so the captured
+                    # graph reads a stable address that is refreshed in-place each step,
+                    # without overriding the slot-0 (step-0 / main) buffer.
+                    base = _ROPE_STATE.runtime_buffer.get(config_key, {}).get(group_name)
+                    if base is None:
+                        group_buffers = None
+                    else:
+                        slot_map = _ROPE_STATE.draft_runtime_buffer.setdefault(config_key, {}).setdefault(
+                            group_name, {}
+                        )
+                        group_buffers = slot_map.get(cache_slot)
+                        if group_buffers is None:
+                            group_buffers = (torch.empty_like(base[0]), torch.empty_like(base[1]))
+                            slot_map[cache_slot] = group_buffers
 
                 if group_buffers is None:
                     continue

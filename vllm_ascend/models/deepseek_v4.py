@@ -56,7 +56,7 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead, VocabParallelEmbedding
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader, maybe_remap_kv_scale_name
-from vllm.model_executor.models.interfaces import MixtureOfExperts, SupportsEagle, SupportsLoRA, SupportsPP
+from vllm.model_executor.models.interfaces import MixtureOfExperts, SupportsEagle, SupportsEagle3, SupportsLoRA, SupportsPP
 from vllm.model_executor.models.utils import (
     PPMissingLayer,
     is_pp_missing_parameter,
@@ -1032,6 +1032,9 @@ class DeepseekV4Model(nn.Module):
         # this buffer with the MTP draft via attribute replacement.
         self.topk_indices_buffer = topk_indices_buffer
 
+        # EAGLE3 / DSpark aux-hidden-state taps. Empty tuple => fully inert.
+        self.aux_hidden_state_layers: tuple[int, ...] = ()
+
         if get_pp_group().is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
                 config.vocab_size,
@@ -1130,10 +1133,15 @@ class DeepseekV4Model(nn.Module):
         else:
             llama_4_scaling = None
 
+        aux_hidden_states: list[torch.Tensor] = []
         if get_pp_group().is_first_rank:
             hidden_states = hidden_states.unsqueeze(1).repeat(1, self.hc_mult, 1)  # (b, s, h) -> (b, s, c, h)
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states, residual = layer(positions, hidden_states, residual, llama_4_scaling)
+            if self.aux_hidden_state_layers and layer.layer_idx in self.aux_hidden_state_layers:
+                # HC-form [T, hc_mult, hidden], already post-residual -> mean over
+                # hc copies -> [T, hidden] so runner's cat(dim=-1) = [T, hidden*N].
+                aux_hidden_states.append(hidden_states.mean(dim=1))
 
         # Stash pre-hc_head residual for the MTP draft (captured copy_).
         # When FlashComm1 (sequence parallelism) is enabled, tokens are
@@ -1166,6 +1174,8 @@ class DeepseekV4Model(nn.Module):
         hidden_states = self.hc_head(hidden_states, self.hc_head_fn, self.hc_head_scale, self.hc_head_base)
 
         hidden_states = self.norm(hidden_states)
+        if len(aux_hidden_states) > 0:
+            return hidden_states, aux_hidden_states
         return hidden_states
 
 
@@ -1209,7 +1219,7 @@ class DeepseekV2MixtureOfExperts(MixtureOfExperts):
             moe.experts.update_expert_map()
 
 
-class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts, SupportsLoRA, SupportsEagle):
+class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts, SupportsLoRA, SupportsEagle, SupportsEagle3):
     packed_modules_mapping = {
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
@@ -1297,6 +1307,19 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
         hc_mult * hidden_size) for the MTP draft model. Populated by
         forward(); valid after each target step."""
         return getattr(self.model, "_mtp_hidden_buffer", None)
+
+    # ---- EAGLE3 / DSpark auxiliary hidden-state interface ----
+    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        self.model.aux_hidden_state_layers = tuple(layers)
+
+    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
+        return tuple(self.model.aux_hidden_state_layers)
+
+    def get_eagle3_default_aux_hidden_state_layers(self) -> tuple[int, ...]:
+        ids = getattr(self.config, "dspark_target_layer_ids", None)
+        if ids:
+            return tuple(ids)
+        return (40, 41, 42)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         rocm_aiter_moe_shared_expert_enabled = rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
