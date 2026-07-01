@@ -106,6 +106,26 @@ A new PR will be created with the title format `[Cherry-pick] <original_title> (
 
 If the cherry-pick encounters merge conflicts, the command will report the failure and the cherry-pick must be done manually.
 
+### `/revert`
+
+Revert a merged PR by creating a new PR that reverses its changes. The revert targets the same base branch the original PR was merged into.
+
+**Usage:**
+
+| Syntax | Description |
+|---|---|
+| `/revert` | Revert this PR (no arguments needed) |
+
+**Example:**
+
+```text
+/revert
+```
+
+A new PR will be created with the title format `[Revert] Revert "original_title" (#PR_NUMBER)` and a body linking back to the original PR and its merge commit.
+
+Only merged PRs can be reverted. If the revert encounters merge conflicts (e.g., because the base branch has diverged significantly), the command will report the failure and the revert must be done manually.
+
 ### `/rerun`
 
 Re-run all failed workflow runs on the current PR commit. Useful when CI jobs failed due to infrastructure issues.
@@ -130,6 +150,7 @@ Re-run all failed workflow runs on the current PR commit. Useful when CI jobs fa
 | `/e2e` | ✅ | ❌ |
 | `/rerun` | ✅ | ❌ |
 | `/cherry-pick` | ✅ | ❌ |
+| `/revert` | ✅ | ❌ |
 | `/nightly` | ✅ | ❌ |
 
 ## Permission
@@ -139,6 +160,7 @@ Re-run all failed workflow runs on the current PR commit. Useful when CI jobs fa
 | `/e2e` | PR author, or users with triage+ permission on the repository |
 | `/rerun` | PR author, or users with triage+ permission on the repository |
 | `/cherry-pick` | PR author, or users with triage+ permission on the repository |
+| `/revert` | PR author, or users with triage+ permission on the repository |
 | `/nightly` | Users with triage+ permission on the repository only |
 
 Permission is verified via the GitHub API (`repos/{owner}/{repo}/collaborators/{user}/permission`).
