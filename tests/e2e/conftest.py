@@ -1222,10 +1222,10 @@ class ModelCache:
             return self._cache[cache_key]
 
         gpu_memory_utilization = model_config.get("gpu_memory_utilization", 0.9)
-        required_memory_gib = 61.27 * gpu_memory_utilization * 0.9
-
-        free_memory_bytes, _ = torch.npu.mem_get_info()
-        available_memory_gib = free_memory_bytes / (1024**3)
+        free_memory_bytes, total_memory_bytes = torch.npu.mem_get_info()
+        gib = 1024**3
+        available_memory_gib = free_memory_bytes / gib
+        required_memory_gib = (total_memory_bytes / gib) * gpu_memory_utilization
 
         print(
             f"[DEBUG] Creating new model - Available: {available_memory_gib:.2f} GiB, "
