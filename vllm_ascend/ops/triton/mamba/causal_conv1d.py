@@ -21,6 +21,14 @@ else:
     _pytorch_update = None
 
 
+def extract_last_width(x, start_loc, width):
+    end_loc = start_loc[1:]
+    offsets = torch.arange(width, device=x.device)
+    indices = end_loc.unsqueeze(1) - width + offsets.unsqueeze(0)  # (num_seqs, width)
+
+    return x[:, indices].permute(1, 0, 2)
+
+
 @triton.jit(
     do_not_specialize=[
         "batch",
