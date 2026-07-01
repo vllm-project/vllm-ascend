@@ -21,6 +21,10 @@ on:
   repository_dispatch:
     types: [nightly-command]
 
+defaults:
+  run:
+    shell: bash -el {0}
+
 permissions:
   contents: read
   actions: write

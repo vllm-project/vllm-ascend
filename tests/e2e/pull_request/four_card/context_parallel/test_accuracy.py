@@ -56,7 +56,7 @@ DSV2_PROMPTS = [
 
 DSV2_PCP_GOLDEN = [
     "The president of the United States is a man who is not only a liar, but",
-    "The capital of France is Paris.\nThe capital of the United States is",
+    "The capital of France is Paris.\nThe currency of France is the Euro",
 ]
 
 DSV2_DCP_GOLDEN = [
@@ -65,7 +65,7 @@ DSV2_DCP_GOLDEN = [
 ]
 
 QWEN3_GOLDEN = [
-    "The capital of France is Paris. Which of the",
+    "The capital of France is Paris. The capital of",
     "Hello, my name is Tom, I am 12 years old",
     "The president of United States is the head of state and",
 ]

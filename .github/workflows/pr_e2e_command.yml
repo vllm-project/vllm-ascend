@@ -39,6 +39,7 @@ jobs:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
     outputs:
       pr_sha: ${{ steps.resolve.outputs.pr_sha }}
+      pr_base_ref: ${{ steps.resolve.outputs.pr_base_ref }}
       test_groups: ${{ steps.groups.outputs.test_groups }}
       has_tests: ${{ steps.groups.outputs.has_tests }}
       notify_comment_id: ${{ steps.notify.outputs.comment-id }}
@@ -136,6 +137,9 @@ jobs:
           PR_SHA='${{ github.event.client_payload.pull_request.head.sha }}'
           echo "pr_sha=$PR_SHA" >> "$GITHUB_OUTPUT"
 
+          PR_BASE_REF='${{ github.event.client_payload.pull_request.base.ref }}'
+          echo "pr_base_ref=${PR_BASE_REF:-main}" >> "$GITHUB_OUTPUT"
+
           ALL_ARGS="${{ github.event.client_payload.slash_command.args.all }}"
           echo "all_args=$ALL_ARGS" >> "$GITHUB_OUTPUT"
 
@@ -181,16 +185,14 @@ jobs:
       matrix:
         vllm_version:
           - ${{ needs.e2e-test.outputs.main_commit }}
-          # Dropped vLLM v0.22.1 (release-tag) compatibility from main. Uncomment
-          # the line below to re-enable release-tag e2e when maintaining a new
-          # release tag (update .github/vllm-release-tag.commit accordingly).
-          # - ${{ needs.e2e-test.outputs.release_tag }}
+          - ${{ needs.e2e-test.outputs.release_tag }}
     needs: [e2e-test]
     if: ${{ needs.e2e-test.outputs.has_tests == 'true' }}
     uses: ./.github/workflows/_selected_tests.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
       ref: ${{ needs.e2e-test.outputs.pr_sha }}
+      base_ref: ${{ needs.e2e-test.outputs.pr_base_ref }}
       test_groups: ${{ needs.e2e-test.outputs.test_groups }}
 
   report:

@@ -26,7 +26,7 @@ on:
       vllm_ascend_branch:
         description: 'Branch to test'
         required: true
-        default: 'releases/v0.22.1rc'
+        default: 'main'
         type: string
       test_cases:
         description: 'Test cases to run (comma-separated, e.g., "test_custom_op,qwen3-32b,accuracy-group" or "all" for all tests)'
@@ -62,7 +62,7 @@ defaults:
     shell: bash -el {0}
 
 concurrency:
-  group: ascend-nightly-${{ github.ref }}-a3${{ github.event.inputs.request_id && format('-{0}', github.event.inputs.request_id) || '' }}
+  group: ascend-nightly-${{ github.ref }}-a3${{ inputs.request_id && format('-{0}', inputs.request_id) || '' }}
   cancel-in-progress: true
 
 env:
@@ -222,6 +222,9 @@ jobs:
             size: 2
           - name: multi-node-GLM-5.1-w8a8-A3
             config_file_path: GLM5_1-W8A8-A3-dual-nodes.yaml
+            size: 2
+          - name: multi-node-GLM-5.2-w8a8-A3
+            config_file_path: GLM5_2-W8A8-A3-dual-nodes.yaml
             size: 2
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:

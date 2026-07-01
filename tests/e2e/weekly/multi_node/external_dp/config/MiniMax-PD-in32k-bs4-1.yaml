@@ -1,0 +1,223 @@
+test_name: "MiniMax-PD-in32k-bs4-1"
+model: "Eco-Tech/MiniMax-M2.5-w8a8-QuaRot"
+num_nodes: 3
+npu_per_node: 16
+
+routing:
+  type: "disaggregated_prefill"
+  groups:
+    prefiller: [0]
+    decoder: [1, 2]
+
+config:
+  - node_index: 0
+    port_start: 7100
+    dp_rpc_port: 12321
+    dp_size: 4
+    dp_size_local: 4
+    dp_rank_start: 0
+    tp_size: 4
+    dp_address: "${NODE_0_IP}"
+
+  - node_index: 1
+    port_start: 7100
+    dp_rpc_port: 12321
+    dp_size: 4
+    dp_size_local: 4
+    dp_rank_start: 0
+    tp_size: 4
+    dp_address: "${NODE_1_IP}"
+
+  - node_index: 2
+    port_start: 7100
+    dp_rpc_port: 12321
+    dp_size: 4
+    dp_size_local: 4
+    dp_rank_start: 0
+    tp_size: 4
+    dp_address: "${NODE_2_IP}"
+
+env_common: &env_common
+  HCCL_OP_EXPANSION_MODE: "AIV"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  OMP_NUM_THREADS: "1"
+  TASK_QUEUE_ENABLE: "1"
+  VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
+  VLLM_USE_MODELSCOPE: "true"
+  ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
+
+
+templates:
+  - node_index: 0
+    envs:
+      <<: *env_common
+      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+      HCCL_BUFFSIZE: "1200"
+    server_cmd_template:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - ${PORT}
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --enable-expert-parallel
+      - --max-model-len
+      - "40960"
+      - --max-num-batched-tokens
+      - "16384"
+      - --max-num-seqs
+      - "32"
+      - --trust-remote-code
+      - --gpu-memory-utilization
+      - "0.8"
+      - --quantization
+      - "ascend"
+      - --enforce-eager
+      - --no-enable-prefix_caching
+      - --speculative-config
+      - '{"method":"eagle3","model":"vllm-ascend/MiniMax-M2.5-eagle-model-0318","num_speculative_tokens":3}'
+      - --additional-config
+      - '{"recompute_scheduler_enable": true}'
+      - --kv-transfer-config
+      - '{"kv_connector": "MooncakeConnectorV1",
+        "kv_role": "kv_producer",
+        "kv_port": 30000,
+        "kv_connector_extra_config": {
+          "prefill": {
+            "dp_size": 4,
+            "tp_size": 4
+          },
+          "decode": {
+            "dp_size": 4,
+            "tp_size": 4
+          }
+        }}'
+
+  - node_index: 1
+    envs:
+      <<: *env_common
+      VLLM_ASCEND_ENABLE_FLASHCOMM1: "0"
+      HCCL_BUFFSIZE: "512"
+    server_cmd_template:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - ${PORT}
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --enable-expert-parallel
+      - --max-model-len
+      - "40960"
+      - --max-num-batched-tokens
+      - "256"
+      - --max-num-seqs
+      - "16"
+      - --trust-remote-code
+      - --gpu-memory-utilization
+      - "0.9"
+      - --quantization
+      - "ascend"
+      - --no-enable-prefix_caching
+      - --speculative-config
+      - '{"method":"eagle3","model":"vllm-ascend/MiniMax-M2.5-eagle-model-0318","num_speculative_tokens":3}'
+      - --compilation-config
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - --additional-config
+      - '{"recompute_scheduler_enable": true,"multistream_overlap_shared_expert": true}'
+      - --kv-transfer-config
+      - '{"kv_connector": "MooncakeConnectorV1",
+        "kv_role": "kv_consumer",
+        "kv_port": 30100,
+        "kv_connector_extra_config": {
+          "prefill": {
+            "dp_size": 4,
+            "tp_size": 4
+          },
+          "decode": {
+            "dp_size": 4,
+            "tp_size": 4
+          }
+        }}'
+
+  - node_index: 2
+    envs:
+      <<: *env_common
+      VLLM_ASCEND_ENABLE_FLASHCOMM1: "0"
+      HCCL_BUFFSIZE: "512"
+    server_cmd_template:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - ${PORT}
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --enable-expert-parallel
+      - --max-model-len
+      - "40960"
+      - --max-num-batched-tokens
+      - "256"
+      - --max-num-seqs
+      - "16"
+      - --trust-remote-code
+      - --gpu-memory-utilization
+      - "0.9"
+      - --quantization
+      - "ascend"
+      - --no-enable-prefix_caching
+      - --speculative-config
+      - '{"method":"eagle3","model":"vllm-ascend/MiniMax-M2.5-eagle-model-0318","num_speculative_tokens":3}'
+      - --compilation-config
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - --additional-config
+      - '{"recompute_scheduler_enable": true,"multistream_overlap_shared_expert": true}'
+      - --kv-transfer-config
+      - '{"kv_connector": "MooncakeConnectorV1",
+        "kv_role": "kv_consumer",
+        "kv_port": 30200,
+        "kv_connector_extra_config": {
+          "prefill": {
+            "dp_size": 4,
+            "tp_size": 4
+          },
+          "decode": {
+            "dp_size": 4,
+            "tp_size": 4
+          }
+        }}'
+
+benchmarks:
+  perf:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_prefix0_in32768_bs1000_Minimax
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 4
+    max_out_len: 512
+    batch_size: 1
+    request_rate: 1
+    baseline: 28.77
+    threshold: 0.97
