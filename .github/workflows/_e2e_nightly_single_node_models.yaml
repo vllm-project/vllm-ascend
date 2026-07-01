@@ -55,6 +55,10 @@ on:
         required: false
       OBS_SECRET_KEY:
         required: false
+      VLLM_ASCEND_CI_AI_DIAGNOSIS_API_KEY:
+        required: false
+      VLLM_ASCEND_CI_AI_DIAGNOSIS_BASE_URL:
+        required: false
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -115,7 +119,7 @@ jobs:
       - name: Set MAX_JOBS based on runner
         run: |
           CARDS=$(echo "${{ inputs.runner }}" | grep -oE '[0-9]+$')
-          echo "MAX_JOBS=$((CARDS * 23))" >> $GITHUB_ENV
+          echo "MAX_JOBS=$((CARDS * 23))" >> "$GITHUB_ENV"
 
       - name: Install vllm-project/vllm-ascend
         if: ${{ inputs.request_id != '' }}
@@ -139,13 +143,13 @@ jobs:
         working-directory: /vllm-workspace/vllm
         run: |
           VLLM_COMMIT=$(git rev-parse --short=7 HEAD)
-          echo "VLLM_COMMIT=$VLLM_COMMIT" >> $GITHUB_ENV
+          echo "VLLM_COMMIT=$VLLM_COMMIT" >> "$GITHUB_ENV"
 
       - name: Get vLLM-Ascend commit hash and URL
         working-directory: /vllm-workspace/vllm-ascend
         run: |
           VLLM_ASCEND_COMMIT=$(git rev-parse --short=7 HEAD)
-          echo "VLLM_ASCEND_COMMIT=$VLLM_ASCEND_COMMIT" >> $GITHUB_ENV
+          echo "VLLM_ASCEND_COMMIT=$VLLM_ASCEND_COMMIT" >> "$GITHUB_ENV"
 
       - name: Collect version info
         run: |
@@ -241,10 +245,11 @@ jobs:
             fi
             echo "  model_type=${model_type} → ${test_script}"
             pytest -sv "${test_script}" \
-              --config "${config_path}" || {
+              --config "${config_path}" 2>&1 | tee -a /tmp/nightly-models.log
+            if [ "${PIPESTATUS[0]}" -ne 0 ]; then
               echo "Test failed for model: $model"
               any_failure=1
-            }
+            fi
           done
 
           if [ $any_failure -ne 0 ]; then
@@ -259,13 +264,13 @@ jobs:
           for model in $models; do
             echo "Processing model: $model"
             model_base_name=$(basename "$model")
-            cat benchmarks/accuracy/${model_base_name}.md >> $GITHUB_STEP_SUMMARY
+            cat "benchmarks/accuracy/${model_base_name}.md" >> "$GITHUB_STEP_SUMMARY"
           done
 
       - name: Set artifact timestamp
         id: ts
         run: |
-          echo "artifact_ts=$(date -u +%Y%m%dT%H%M%SZ)" >> $GITHUB_OUTPUT
+          echo "artifact_ts=$(date -u +%Y%m%dT%H%M%SZ)" >> "$GITHUB_OUTPUT"
 
       - name: Upload Report
         if: ${{ inputs.upload == true }}
@@ -289,3 +294,54 @@ jobs:
           if-no-files-found: warn
           retention-days: 90
           overwrite: true
+
+      - name: Collect Ascend logs for diagnosis
+        if: always()
+        continue-on-error: true
+        run: |
+          ADIR=/tmp/ci-diagnosis-artifacts/ascend_logs
+          mkdir -p "$ADIR"/{plog,container}
+          for src in /root/ascend/log /var/log/npu /var/log/ascend /root/.cache/ascend-logs; do
+            if [ -d "$src" ]; then
+              cp -r "$src" "$ADIR/plog/" 2>/dev/null || true
+            fi
+          done
+          if command -v docker &>/dev/null; then
+            docker logs "$(docker ps -q | head -1)" > "$ADIR/container/docker.log" 2>/dev/null || true
+          fi
+          echo "Ascend logs collected under $ADIR:"
+          find "$ADIR" -type f 2>/dev/null | sort || true
+
+      - name: Collect CI diagnosis evidence
+        if: failure()
+        continue-on-error: true
+        env:
+          VLLM_ASCEND_CI_AI_DIAGNOSIS_ENABLED: ${{ vars.VLLM_ASCEND_CI_AI_DIAGNOSIS_ENABLED }}
+          VLLM_ASCEND_CI_AI_DIAGNOSIS_API_KEY: ${{ secrets.VLLM_ASCEND_CI_AI_DIAGNOSIS_API_KEY }}
+          VLLM_ASCEND_CI_AI_DIAGNOSIS_BASE_URL: ${{ secrets.VLLM_ASCEND_CI_AI_DIAGNOSIS_BASE_URL }}
+          VLLM_ASCEND_CI_AI_DIAGNOSIS_MODEL: ${{ vars.VLLM_ASCEND_CI_AI_DIAGNOSIS_MODEL }}
+        run: |
+          LOGFILE=/tmp/nightly-models.log
+          if [ ! -f "$LOGFILE" ]; then
+            {
+              echo "## CI AI 失败定位"
+              echo ""
+              echo "**诊断跳过**：日志文件不存在"
+              echo ""
+              echo "| 项目 | 值 |"
+              echo "|---|---|"
+              echo "| 期望路径 | \`$LOGFILE\` |"
+              echo "| 原因 | 日志文件不存在，可能前序步骤未产出日志或 job 提前终止 |"
+            } >> "${GITHUB_STEP_SUMMARY}"
+            exit 0
+          fi
+          SHA=$(git rev-parse HEAD)
+          python3 "$GITHUB_WORKSPACE/.agents/skills/ci-ai-diagnosis-agent/scripts/ci_diagnosis_agent.py" \
+            --log-file "$LOGFILE" \
+            --step-name "${{ inputs.model_list }}" \
+            --artifact-dir /tmp/ci-diagnosis-artifacts \
+            --ref "${{ inputs.vllm_ascend_ref || github.ref_name }}" \
+            --sha "$SHA" \
+            --repo-dir "$GITHUB_WORKSPACE" \
+            --output-json /tmp/ci-diagnosis-evidence.json \
+            --write-summary

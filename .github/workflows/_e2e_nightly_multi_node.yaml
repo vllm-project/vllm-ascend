@@ -75,6 +75,10 @@ on:
         required: false
       OBS_SECRET_KEY:
         required: false
+      VLLM_ASCEND_CI_AI_DIAGNOSIS_API_KEY:
+        required: false
+      VLLM_ASCEND_CI_AI_DIAGNOSIS_BASE_URL:
+        required: false
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -147,12 +151,12 @@ jobs:
             echo "LWS_NAME=${LWS_NAME}"
             echo "LEADER_POD=${LWS_NAME}-0"
             echo "LOG_PREFIX=${{ inputs.ascend_log_prefix }}/${LWS_NAME}"
-          } >> $GITHUB_ENV
+          } >> "$GITHUB_ENV"
 
           {
             echo "artifact_name=${ARTIFACT_NAME}"
             echo "benchmark_job_name=${BENCHMARK_JOB_NAME}"
-          } >> $GITHUB_OUTPUT
+          } >> "$GITHUB_OUTPUT"
 
       - name: Prepare scripts
         run: |
@@ -202,7 +206,7 @@ jobs:
           vllm_ascend_ref="${{ inputs.vllm_ascend_ref }}"
           vllm_ascend_remote_url="${{ inputs.vllm_ascend_remote_url }}"
           runner="${{ inputs.soc_version }}"
-          echo "FAIL_TAG=${fail_tag}" >> $GITHUB_ENV
+          echo "FAIL_TAG=${fail_tag}" >> "$GITHUB_ENV"
 
           if [ "${{ inputs.soc_version }}" = "a3" ]; then
             npu_per_node=16
@@ -232,6 +236,9 @@ jobs:
             -D runner="$runner" \
             --outfile lws.yaml
 
+          # lws.yaml is a config artifact, not a failure evidence; downstream
+          # diagnosis only needs the *observed* K8s state, which is captured
+          # in the Collect K8s diagnostics step. Skip mirroring it here.
           kubectl apply -f ./lws.yaml
 
       - name: Wait for pods ready
@@ -334,6 +341,62 @@ jobs:
             echo "Directory contents (if exists):"
             ls -la "$SRC" 2>/dev/null || echo "Directory does not exist"
           fi
+          # NOTE: benchmark JSON is intentionally NOT mirrored into
+          # /tmp/ci-diagnosis-artifacts. It is uploaded as a separate
+          # GitHub artifact below, and downstream diagnosis can read it via
+          # the artifact's GitHub URL or by combining the manifest name with
+          # the standard ${{ steps.vars.outputs.benchmark_job_name }}-$ts
+          # pattern. Keeping the bundle non-redundant avoids burning ~MBs
+          # of upload quota on duplicate data.
+
+      - name: Collect K8s diagnostics
+        if: always()
+        run: |
+          set -euo pipefail
+          KDIR="/tmp/ci-diagnosis-artifacts/k8s"
+          PDIR="${KDIR}/pods"
+          mkdir -p "${KDIR}" "${PDIR}"
+
+          # Live LWS resource state. lws.yaml (the rendered manifest) is
+          # intentionally NOT mirrored here — it is a config artifact, not
+          # a failure evidence, and it can be reconstructed from the
+          # workflow inputs.
+          kubectl get leaderworkerset "$LWS_NAME" -n "$NAMESPACE" -o yaml \
+            > "${KDIR}/leaderworkerset.yaml" 2> "${KDIR}/leaderworkerset.yaml.err" || true
+          kubectl describe leaderworkerset "$LWS_NAME" -n "$NAMESPACE" \
+            > "${KDIR}/leaderworkerset.describe.txt" 2>> "${KDIR}/leaderworkerset.yaml.err" || true
+
+          # Tabular pod listing filtered to this LWS. The pipeline writes
+          # kubectl's stderr into pods.wide.txt.err so we still capture
+          # network/permission errors when the kubectl call itself fails.
+          { kubectl get pods -n "$NAMESPACE" -o wide 2> "${KDIR}/pods.wide.txt.err"; \
+            grep "^${LWS_NAME}-"; } > "${KDIR}/pods.wide.txt" || true
+
+          # Machine-readable pod state for downstream parsers.
+          kubectl get pods -n "$NAMESPACE" \
+            -l "leaderworkerset.sigs.k8s.io/name=${LWS_NAME}" -o json \
+            > "${KDIR}/pods.json" 2> "${KDIR}/pods.json.err" || true
+
+          # Per-pod describe. Per-pod stdout snapshots are NOT captured
+          # here — they are already streamed into
+          # /tmp/${POD}_logs.txt and end up in the ascend-logs artifact,
+          # so duplicating them here would only inflate upload quota.
+          PODS="$(kubectl get pods -n "$NAMESPACE" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null \
+            | tr ' ' '\n' | grep "^${LWS_NAME}-" || true)"
+          for POD in ${PODS}; do
+            kubectl describe pod "$POD" -n "$NAMESPACE" \
+              > "${PDIR}/${POD}.describe.txt" 2> "${PDIR}/${POD}.describe.err" || true
+          done
+
+          # Cluster events. We save the full namespace events AND a filtered
+          # view so diagnosis can scope to this LWS even when the namespace
+          # is busy.
+          kubectl get events -n "$NAMESPACE" --sort-by=.lastTimestamp \
+            > "${KDIR}/events.all.txt" 2> "${KDIR}/events.all.txt.err" || true
+          grep "${LWS_NAME}" "${KDIR}/events.all.txt" > "${KDIR}/events.filtered.txt" 2>/dev/null || true
+
+          echo "K8s diagnostics collected under ${KDIR}:"
+          find "${KDIR}" -maxdepth 2 -type f | sort
 
       - name: Post process
         if: always()
@@ -398,6 +461,14 @@ jobs:
 
           tar -czf /tmp/ascend-logs.tar.gz -C /tmp collected-logs
 
+          # Unpack ascend logs into the diagnosis artifact tree so the
+          # evidence collector can search plog, worker stdout, and external
+          # DP logs without re-downloading the tar from OBS.
+          mkdir -p /tmp/ci-diagnosis-artifacts/ascend_logs/collected-logs
+          tar -xzf /tmp/ascend-logs.tar.gz -C /tmp/ci-diagnosis-artifacts/ascend_logs/collected-logs/ || true
+          echo "Ascend logs unpacked for diagnosis:"
+          find /tmp/ci-diagnosis-artifacts/ascend_logs -maxdepth 3 -type d | sort
+
       - name: Upload Ascend logs
         if: always()
         continue-on-error: true
@@ -421,7 +492,7 @@ jobs:
       - name: Set benchmark artifact timestamp
         if: always()
         id: bench_ts
-        run: echo "artifact_ts=$(date -u +%Y%m%dT%H%M%SZ)" >> $GITHUB_OUTPUT
+        run: echo "artifact_ts=$(date -u +%Y%m%dT%H%M%SZ)" >> "$GITHUB_OUTPUT"
 
       - name: Upload benchmark results
         if: always()
@@ -445,3 +516,81 @@ jobs:
           if-no-files-found: warn
           retention-days: 90
           compression-level: 0
+
+      - name: Upload diagnosis artifacts
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.vars.outputs.artifact_name }}-diagnosis-artifacts
+          path: /tmp/ci-diagnosis-artifacts/
+          if-no-files-found: warn
+          retention-days: 7
+          compression-level: 0
+
+      - name: Collect CI diagnosis evidence
+        if: failure()
+        continue-on-error: true
+        env:
+          VLLM_ASCEND_CI_AI_DIAGNOSIS_ENABLED: ${{ vars.VLLM_ASCEND_CI_AI_DIAGNOSIS_ENABLED }}
+          VLLM_ASCEND_CI_AI_DIAGNOSIS_API_KEY: ${{ secrets.VLLM_ASCEND_CI_AI_DIAGNOSIS_API_KEY }}
+          VLLM_ASCEND_CI_AI_DIAGNOSIS_BASE_URL: ${{ secrets.VLLM_ASCEND_CI_AI_DIAGNOSIS_BASE_URL }}
+          VLLM_ASCEND_CI_AI_DIAGNOSIS_MODEL: ${{ vars.VLLM_ASCEND_CI_AI_DIAGNOSIS_MODEL }}
+        run: |
+          set -euo pipefail
+          LEADER_POD="${LWS_NAME}-0"
+          LEADER_LOG="/tmp/${LEADER_POD}_logs.txt"
+          if [ ! -f "$LEADER_LOG" ]; then
+            {
+              echo "## CI AI 失败定位"
+              echo ""
+              echo "**诊断跳过**：Learder 日志文件不存在"
+              echo ""
+              echo "| 项目 | 值 |"
+              echo "|---|---|"
+              echo "| 期望路径 | \`$LEADER_LOG\` |"
+              echo "| 原因 | 日志文件不存在，可能前序步骤未产出日志或 job 提前终止 |"
+            } >> "${GITHUB_STEP_SUMMARY}"
+            exit 0
+          fi
+          SHA=$(git rev-parse HEAD)
+          echo "Building CI diagnosis evidence bundle for $LEADER_LOG (ref=${{ inputs.vllm_ascend_ref }} sha=$SHA)"
+          python3 "$GITHUB_WORKSPACE/.agents/skills/ci-ai-diagnosis-agent/scripts/ci_diagnosis_agent.py" \
+            --log-file "$LEADER_LOG" \
+            --step-name "${{ inputs.config_file_path }}" \
+            --artifact-dir /tmp/ci-diagnosis-artifacts \
+            --k8s-dir /tmp/ci-diagnosis-artifacts/k8s \
+            --benchmark-dir /tmp/benchmark_results \
+            --ref "${{ inputs.vllm_ascend_ref }}" \
+            --sha "$SHA" \
+            --repo-dir "$GITHUB_WORKSPACE" \
+            --output-json /tmp/ci-ai-diagnosis-evidence.json \
+            --write-summary
+
+      - name: Upload diagnosis evidence bundle
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.vars.outputs.artifact_name }}-diagnosis-evidence
+          path: /tmp/ci-ai-diagnosis-evidence.json
+          if-no-files-found: warn
+          retention-days: 7
+          compression-level: 0
+
+      - name: Cleanup ephemeral large files
+        if: always()
+        continue-on-error: true
+        run: |
+          # Drop intermediate scratch files from /tmp now that every artifact
+          # has been uploaded and diagnosis (if needed) has run.
+          # We keep /tmp/ci-diagnosis-artifacts/ itself because it is small
+          # (only K8s state and the .err sidecars) and may be useful for
+          # post-mortem inspection from the runner.
+          rm -rf /tmp/collected-logs /tmp/ascend-logs.tar.gz /tmp/benchmark_results /tmp/ci-ai-diagnosis-evidence.json
+          for f in /tmp/*_logs.txt; do
+            [ -e "$f" ] || continue
+            rm -f "$f"
+          done
+          echo "Remaining /tmp entries:"
+          find /tmp -maxdepth 1 -ls | head -40
