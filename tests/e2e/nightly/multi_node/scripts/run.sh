@@ -231,23 +231,35 @@ run_tests_with_log() {
             echo -e "${RED}${FAIL_TAG:-test_failed} ✗ ERROR: Some tests failed${NC}"
             exit 1
         fi
-    elif [ $ret -ne 0 ] && [ "${AOP_MULTI_ENABLED:-}" = "true" ]; then
-        local coord="${COORD_DIR:-/root/.cache/nightly_bisect/coord}"
-        local release="${LOG_PREFIX}/aop_done"
-        mkdir -p "$coord"
-        touch "${coord}/worker_ready_${LWS_WORKER_INDEX}"
-        echo "Worker: signalling ready at ${coord}/worker_ready_${LWS_WORKER_INDEX}"
-        echo "Worker: joining bisect as worker node (index ${LWS_WORKER_INDEX})..."
-        cd "$WORKSPACE/vllm-ascend"
-        python -m tests.e2e.nightly.bisect.auto_bisect \
-            --scene multi_node \
-            --config-yaml "${CONFIG_YAML_PATH}" \
-            --bad-commit HEAD \
-            --coord-dir "${coord}" \
-            --release-file "${release}"
-        while [ ! -f "$release" ]; do sleep 5; done
-        echo "Worker: release signal received, exiting"
-        exit 1
+    elif [ "${AOP_MULTI_ENABLED:-}" = "true" ]; then
+        if [ $ret -eq 0 ]; then
+            echo "Worker: test passed, waiting for leader..."
+            local wait_timeout=30
+            while [ $wait_timeout -gt 0 ] && [ ! -f "${LOG_PREFIX}/aop_done" ]; do
+                sleep 1
+                wait_timeout=$((wait_timeout - 1))
+            done
+        fi
+        if [ ! -f "${LOG_PREFIX}/aop_done" ]; then
+            local coord="${COORD_DIR:-/root/.cache/nightly_bisect/coord}"
+            local release="${LOG_PREFIX}/aop_done"
+            mkdir -p "$coord"
+            touch "${coord}/worker_ready_${LWS_WORKER_INDEX}"
+            echo "Worker: signalling ready at ${coord}/worker_ready_${LWS_WORKER_INDEX}"
+            echo "Worker: joining bisect as worker node (index ${LWS_WORKER_INDEX})..."
+            cd "$WORKSPACE/vllm-ascend"
+            python -m tests.e2e.nightly.bisect.auto_bisect \
+                --scene multi_node \
+                --config-yaml "${CONFIG_YAML_PATH}" \
+                --bad-commit HEAD \
+                --coord-dir "${coord}" \
+                --release-file "${release}"
+            while [ ! -f "$release" ]; do sleep 5; done
+            echo "Worker: release signal received, exiting"
+            exit 1
+        else
+            echo "Worker: leader finished successfully, exiting"
+        fi
     fi
 }
 
