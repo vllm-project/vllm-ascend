@@ -87,7 +87,15 @@ class AscendDflashProposer(AscendEagleProposer):
         # cad.query_start_loc is overwritten below. main_x at that index seeds the
         # draft residual (canonical DFlash channel) -> the broken context-KV path
         # is bypassed; without this the draft is blind and accept collapses to 0.
-        self._dflash_last_ctx_idx = cad.query_start_loc[1:batch_size + 1].to(torch.long) - 1
+        # DSPARK FIX: seed from each request's last ACCEPTED context position, not the last
+        # VERIFIED one. Under greedy decode most draft tokens are rejected, so query_start_loc-1
+        # points at a REJECTED token whose main_x is the target hidden of a WRONG token ->
+        # poisoned seed. Subtract num_rejected to land on the accepted token.
+        _ctx_start = cad.query_start_loc[:batch_size].to(torch.long)
+        _last_ctx = cad.query_start_loc[1:batch_size + 1].to(torch.long) - 1
+        if num_rejected_tokens_gpu is not None:
+            _last_ctx = _last_ctx - num_rejected_tokens_gpu[:batch_size].to(torch.long)
+        self._dflash_last_ctx_idx = torch.maximum(_last_ctx, _ctx_start)  # clamp: never below req start
 
         token_indices_to_sample = torch.empty(
             batch_size * self.num_speculative_tokens,

@@ -321,6 +321,19 @@ class DeepSeekV4DSparkModel(nn.Module):
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
         base = inputs_embeds
+        # DSPARK FIX: fold the proposer-delivered target seed (main_x = combine_hidden_states
+        # output) into the residual. It was received as `hidden_states` but DROPPED, so the
+        # draft ran on the token embedding alone with ZERO target conditioning (pos-0 ~11%).
+        # MTP-1 (pos-0 93.9%) feeds the target hidden into the draft residual; do the same so
+        # each layer's input_layernorm renormalizes embed+main_x together.
+        if hidden_states is not None:
+            _seed = hidden_states.to(base.dtype).view_as(base)
+            def _unit_rms(_t):
+                _sc = torch.rsqrt(_t.float().pow(2).mean(dim=-1, keepdim=True) + self.rms_norm_eps)
+                return (_t.float() * _sc).to(base.dtype)
+            # separately RMS-normalize embed and main_x before adding (MTP-1 enorm+hnorm
+            # analogue) so the target seed is not numerically swamped by the embedding.
+            base = _unit_rms(base) + _unit_rms(_seed)
         import os as _os
         if _os.environ.get("DSPARK_DBG"):
             import sys as _sys
