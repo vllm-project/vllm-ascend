@@ -75,6 +75,25 @@ class NPUModelRunner(GPUModelRunner):
         with torch_cuda_wrapper():
             super().__init__(vllm_config, device)
 
+        # --- DiffusionGemma block-diffusion canvas wiring ---
+        # The decoder denoises a canvas of `canvas_length` tokens per step using
+        # spec-decode draft-token slots. This must happen before req_states and
+        # graph buffers are rebuilt below so draft/logit buffers can hold the
+        # full canvas.
+        self._is_diffusion_gemma = any("DiffusionGemma" in a for a in (vllm_config.model_config.architectures or []))
+        if self._is_diffusion_gemma:
+            hf_cfg = vllm_config.model_config.hf_config
+            canvas_length = getattr(hf_cfg, "canvas_length", None)
+            if canvas_length is None:
+                text_cfg = getattr(hf_cfg, "text_config", None)
+                canvas_length = getattr(text_cfg, "canvas_length", 256) if text_cfg else 256
+            self._canvas_length = int(canvas_length)
+            # The scheduler schedules canvas_length - 1 draft tokens, while the
+            # sampler writes the full canvas into draft_tokens[:, :canvas_length].
+            self.num_speculative_steps = self._canvas_length
+            self.uniform_decode_query_len = self._canvas_length
+            self.decode_query_len = self._canvas_length
+
         # because we will override these attribute, delete these attribute to
         # make sure it's collected by python gc immediately.
         del self.req_states

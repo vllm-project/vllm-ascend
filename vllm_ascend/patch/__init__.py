@@ -83,6 +83,22 @@
 #    Future Plan:
 #       Remove this patch when vLLM merge the PR.
 #
+#   2. DiffusionGemma canvas scheduling
+#    Why:
+#       DiffusionGemma denoises a fixed-size canvas through the spec-decode
+#       draft-token path. Without lookahead tokens derived from canvas_length,
+#       the scheduler does not keep feeding the full denoising canvas.
+#    How:
+#       For DiffusionGemma architectures, set scheduler lookahead/spec token
+#       counts to canvas_length - 1 so each decode step has one sampled token
+#       plus the canvas draft positions.
+#    Related PR (if no, explain why):
+#       No vLLM PR yet; this is Ascend-side wiring for upstream DiffusionGemma
+#       model-state support.
+#    Future Plan:
+#       Remove this branch once vLLM exposes a model-state scheduler hook for
+#       diffusion canvas models.
+#
 # ** 6. File: platform/patch_minimax_m2_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.model.ModelConfig._verify_quantization`
@@ -869,7 +885,10 @@
 ##      vllm's prepare_attn in ModelState is different from vllm,
 #       we need to override init_model_state.
 #    How：
-#       Define AscendModelState and initialize it in init_model_state.
+#       Define AscendModelState and initialize it in init_model_state. For
+#       DiffusionGemma, route the upstream custom diffusion ModelState to the
+#       Ascend-adapted implementation so canvas denoising still uses Ascend
+#       attention metadata.
 #    Future Plan:
 #       remove this when vllm-ascend's attention metadata is align with vllm.
 # ** 25. File: worker/patch_v2/patch_triton.py**
