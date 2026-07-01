@@ -94,11 +94,58 @@ class AscendDSparkProposer(AscendDflashProposer):
             dtype=torch.int32,
             device=device,
         )
+        self._request_slots_buffer = torch.zeros(
+            self.max_query_tokens,
+            dtype=torch.int32,
+            device=device,
+        )
+        self._context_request_slots_buffer = torch.zeros(
+            self.max_num_tokens,
+            dtype=torch.int32,
+            device=device,
+        )
+        scheduler_config = getattr(vllm_config, "scheduler_config", None)
+        self._dspark_max_request_slots = max(
+            1,
+            int(getattr(scheduler_config, "max_num_seqs", self.max_batch_size) or self.max_batch_size),
+        )
+        self._dspark_req_id_to_slot: dict[str, int] = {}
+        self._dspark_free_slots = list(range(self._dspark_max_request_slots))
+        self._dspark_slots_to_reset: list[int] = []
         self.arange_dspark = torch.arange(
             self.max_positions + 1,
             device=device,
             dtype=torch.int32,
         )
+
+    def _assign_request_slots(self, batch_size: int) -> list[int]:
+        if self.runner is None or not hasattr(self.runner, "input_batch"):
+            return list(range(batch_size))
+
+        input_batch = self.runner.input_batch
+        req_ids = list(input_batch.req_ids[:batch_size])
+        active_req_ids = set(input_batch.req_ids[: input_batch.num_reqs])
+        stale_req_ids = [req_id for req_id in self._dspark_req_id_to_slot if req_id not in active_req_ids]
+        for req_id in stale_req_ids:
+            slot = self._dspark_req_id_to_slot.pop(req_id)
+            if slot not in self._dspark_free_slots:
+                self._dspark_free_slots.append(slot)
+        self._dspark_free_slots.sort()
+
+        slots: list[int] = []
+        self._dspark_slots_to_reset = []
+        for req_id in req_ids:
+            if req_id not in self._dspark_req_id_to_slot:
+                if not self._dspark_free_slots:
+                    raise ValueError(
+                        "No free DSpark request cache slots: "
+                        f"batch_size={batch_size}, max_request_slots={self._dspark_max_request_slots}"
+                    )
+                slot = self._dspark_free_slots.pop(0)
+                self._dspark_req_id_to_slot[req_id] = slot
+                self._dspark_slots_to_reset.append(slot)
+            slots.append(self._dspark_req_id_to_slot[req_id])
+        return slots
 
     def initialize_attn_backend(self, kv_cache_config, kernel_block_sizes=None) -> None:
         self._draft_attn_layer_names: set[str] = set()
@@ -149,9 +196,11 @@ class AscendDSparkProposer(AscendDflashProposer):
         block_size = self.num_speculative_tokens
         num_query_total = batch_size * block_size
         has_num_rejected = num_rejected_tokens_gpu is not None
+        request_slots = self._assign_request_slots(batch_size)
 
         context_cursor = 0
         for req_idx in range(batch_size):
+            request_slot = request_slots[req_idx]
             ctx_start = int(cad.query_start_loc[req_idx].item())
             ctx_end = int(cad.query_start_loc[req_idx + 1].item())
             valid_ctx_end = ctx_end
@@ -165,6 +214,7 @@ class AscendDSparkProposer(AscendDflashProposer):
             out_end = context_cursor + valid_ctx_len
             self._dflash_hidden_states[context_cursor:out_end] = target_hidden_states[ctx_start:valid_ctx_end]
             self._context_positions_buffer[context_cursor:out_end] = target_positions[ctx_start:valid_ctx_end]
+            self._context_request_slots_buffer[context_cursor:out_end] = request_slot
             if getattr(cad, "slot_mapping", None) is not None:
                 self._context_slot_mapping_buffer[context_cursor:out_end] = cad.slot_mapping[ctx_start:valid_ctx_end]
             context_cursor = out_end
@@ -177,6 +227,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         )
 
         for req_idx in range(batch_size):
+            request_slot = request_slots[req_idx]
             ctx_start = int(cad.query_start_loc[req_idx].item())
             ctx_end = int(cad.query_start_loc[req_idx + 1].item())
             valid_ctx_end = ctx_end
@@ -190,6 +241,7 @@ class AscendDSparkProposer(AscendDflashProposer):
             self.input_ids[out_start] = next_token_ids[req_idx]
             if block_size > 1:
                 self.input_ids[out_start + 1 : out_end] = self.parallel_drafting_token_id
+            self._request_slots_buffer[out_start:out_end] = request_slot
 
             if getattr(cad, "block_table_tensor", None) is not None:
                 block_nums = self.positions[out_start:out_end] // self.kernel_block_size
@@ -268,12 +320,15 @@ class AscendDSparkProposer(AscendDflashProposer):
             self.model.precompute_and_store_context_kv(
                 self.hidden_states[:num_input_tokens],
                 self._context_positions_buffer[:num_input_tokens],
+                None,
+                self._context_request_slots_buffer[:num_input_tokens],
             )
             if num_query_total:
                 self.model(
                     input_ids=self.input_ids[:num_query_total],
                     positions=self.positions[:num_query_total],
                     inputs_embeds=None,
+                    request_slots=self._request_slots_buffer[:num_query_total],
                 )
             forward_context = get_forward_context()
             if (
@@ -285,15 +340,20 @@ class AscendDSparkProposer(AscendDflashProposer):
 
     def build_model_inputs_first_pass(self, num_input_tokens: int) -> dict[str, Any]:
         num_context = self._dflash_num_context
+        if self._dspark_slots_to_reset:
+            reset_slots = torch.tensor(self._dspark_slots_to_reset, dtype=torch.int32, device=self.device)
+            self.model.reset_request_slots(reset_slots)
         self.model.precompute_and_store_context_kv(
             self._dflash_hidden_states[:num_context],
             self._context_positions_buffer[:num_context],
             self._context_slot_mapping_buffer[:num_context],
+            self._context_request_slots_buffer[:num_context],
         )
         return dict(
             input_ids=self.input_ids[:num_input_tokens],
             positions=self.positions[:num_input_tokens],
             inputs_embeds=None,
+            request_slots=self._request_slots_buffer[:num_input_tokens],
         )
 
     def _propose(
@@ -360,15 +420,20 @@ class AscendDSparkProposer(AscendDflashProposer):
                 forward_context.moe_layer_index = 0
 
             num_context = self._dflash_num_context
+            if self._dspark_slots_to_reset:
+                reset_slots = torch.tensor(self._dspark_slots_to_reset, dtype=torch.int32, device=self.device)
+                self.model.reset_request_slots(reset_slots)
             self.model.precompute_and_store_context_kv(
                 self._dflash_hidden_states[:num_context],
                 self._context_positions_buffer[:num_context],
                 self._context_slot_mapping_buffer[:num_context],
+                self._context_request_slots_buffer[:num_context],
             )
             hidden_states = self.model(
                 input_ids=self.input_ids[:num_tokens],
                 positions=self.positions[:num_tokens],
                 inputs_embeds=None,
+                request_slots=self._request_slots_buffer[:num_tokens],
             )
             sample_hidden_states = hidden_states[token_indices_to_sample]
             logits = self.model.compute_logits(sample_hidden_states)
