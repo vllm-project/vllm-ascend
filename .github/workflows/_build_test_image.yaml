@@ -240,7 +240,7 @@ jobs:
           curl -fsSL "https://github.com/moby/buildkit/releases/download/${BUILDKIT_VERSION}/buildkit-${BUILDKIT_VERSION}.linux-${ARCH}.tar.gz" -o /tmp/buildkit.tar.gz
           tar -xzf /tmp/buildkit.tar.gz -C /tmp/buildkit 
           mkdir -p /usr/local/bin
-          mv /tmp/buildkit/bin/buildctl /usr/local/bin/ 
+          mv /tmp/buildkit /usr/local/bin/ 
           chmod +x /usr/local/bin/buildctl 
           echo "buildctl installed successfully" buildctl --version
           
