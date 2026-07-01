@@ -851,28 +851,28 @@ def enable_sp_by_pass():
 def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
     global _ENABLE_SP
     if vllm_config is None:
-        try:
-            from vllm.config import get_current_vllm_config
+        from vllm.config import get_current_vllm_config_or_none
 
-            vllm_config = get_current_vllm_config()
-        except AssertionError:
-            vllm_config = None
+        vllm_config = get_current_vllm_config_or_none()
 
     additional_config = getattr(vllm_config, "additional_config", None) if vllm_config is not None else None
-    refresh = additional_config.get("refresh", False) if additional_config else False
 
-    if _ENABLE_SP is None or refresh:
-        if additional_config is not None and "enable_flashcomm1" in additional_config:
-            _ENABLE_SP = bool(additional_config["enable_flashcomm1"])
+    if additional_config is not None and "enable_flashcomm1" in additional_config:
+        _ENABLE_SP = bool(additional_config["enable_flashcomm1"])
+    else:
+        try:
+            ascend_config = get_ascend_config()
+        except RuntimeError:
+            _ENABLE_SP = False
         else:
-            try:
-                _ENABLE_SP = get_ascend_config().enable_flashcomm1
-            except RuntimeError:
-                _ENABLE_SP = envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1
+            if vllm_config is None or getattr(ascend_config, "vllm_config", None) is vllm_config:
+                _ENABLE_SP = ascend_config.enable_flashcomm1
+            else:
+                _ENABLE_SP = False
 
-        if not _ENABLE_SP and enable_shared_expert_dp:
-            _ENABLE_SP = True
-            logger.info("shared_expert_dp requires enable_sp=True. enable_sp has been set to True.")
+    if not _ENABLE_SP and enable_shared_expert_dp:
+        _ENABLE_SP = True
+        logger.info("shared_expert_dp requires enable_sp=True. enable_sp has been set to True.")
 
     return bool(_ENABLE_SP)
 
@@ -1434,7 +1434,7 @@ def enable_dsa_cp() -> bool:
 
     if dsa_cp_enable and not enable_sp():
         raise ValueError(
-            "DSA CP requires SP to be enabled. Please enable SP(set VLLM_ASCEND_ENABLE_FLASHCOMM1=1) to use DSA CP."
+            "DSA CP requires SP to be enabled. Please set additional_config.enable_flashcomm1=true to use DSA CP."
         )
     return dsa_cp_enable and enable_sp()
 

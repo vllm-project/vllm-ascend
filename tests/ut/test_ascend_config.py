@@ -203,13 +203,48 @@ class TestAscendConfig(TestBase):
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_enable_sp_falls_back_to_env_without_current_config(self, mock_check_and_update_config):
+    def test_enable_sp_uses_additional_config_without_current_config(self, mock_check_and_update_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {"enable_flashcomm1": True}
+        with patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "0"}):
+            init_ascend_config(test_vllm_config)
         clear_enable_sp()
+
         with (
-            patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"}),
-            patch("vllm.config.get_current_vllm_config", side_effect=AssertionError),
+            patch("vllm.config.get_current_vllm_config", side_effect=AssertionError) as mock_get_current_config,
+            patch("vllm.config.get_current_vllm_config_or_none", return_value=None),
         ):
             self.assertTrue(enable_sp())
+        mock_get_current_config.assert_not_called()
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_enable_sp_uses_env_compat_config_without_current_config(self, mock_check_and_update_config):
+        test_vllm_config = VllmConfig()
+        with patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"}):
+            init_ascend_config(test_vllm_config)
+        clear_enable_sp()
+
+        with (
+            patch("vllm.config.get_current_vllm_config", side_effect=AssertionError) as mock_get_current_config,
+            patch("vllm.config.get_current_vllm_config_or_none", return_value=None),
+        ):
+            self.assertTrue(enable_sp())
+        mock_get_current_config.assert_not_called()
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_enable_sp_does_not_reuse_unrelated_vllm_config(self, mock_check_and_update_config):
+        enabled_config = VllmConfig()
+        enabled_config.additional_config = {"enable_flashcomm1": True}
+        disabled_config = VllmConfig()
+        disabled_config.additional_config = {"enable_flashcomm1": False}
+        default_config = VllmConfig()
+
+        self.assertTrue(enable_sp(enabled_config))
+        self.assertFalse(enable_sp(disabled_config))
+        init_ascend_config(enabled_config)
+        self.assertFalse(enable_sp(default_config))
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.utils.logger.warning_once")
