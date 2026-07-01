@@ -123,8 +123,21 @@ def main(
     os.environ["VLLM_DP_MASTER_IP"] = dp_master_ip
     os.environ["VLLM_DP_MASTER_PORT"] = str(dp_master_port)
 
-    # CUDA_VISIBLE_DEVICES for each DP rank is set automatically inside the
-    # engine processes.
+    # vLLM v0.24.0 (PR #45026) stopped isolating devices per worker process
+    # automatically. For application-level DP (one LLM() per rank), each
+    # child process must see its own slice of ASCEND_RT_VISIBLE_DEVICES,
+    # otherwise HCCL complains that two independent processes on the same
+    # node claim the same physical device.
+    from vllm_ascend.utils import vllm_version_is
+    if not vllm_version_is("0.23.0"):
+        visible = os.environ.get("ASCEND_RT_VISIBLE_DEVICES", "")
+        devs = [d for d in visible.split(",") if d]
+        if len(devs) >= dp_size:
+            chunk = len(devs) // dp_size
+            start = local_dp_rank * chunk
+            os.environ["ASCEND_RT_VISIBLE_DEVICES"] = ",".join(
+                devs[start:start + chunk]
+            )
 
     # Sample prompts.
     prompts = [

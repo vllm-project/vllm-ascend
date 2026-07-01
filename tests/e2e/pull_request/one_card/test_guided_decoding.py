@@ -89,23 +89,37 @@ def test_guided_json_completion(guided_decoding_backend: str, sample_json_schema
         "seed": 0,
         "structured_outputs_config": {"backend": guided_decoding_backend},
     }
-    with VllmRunner(MODEL_NAME, **runner_kwargs) as vllm_model:
-        prompts = [f"Give an example JSON for an employee profile that fits this schema: {sample_json_schema}"] * 2
-        inputs = vllm_model.get_inputs(prompts)
-        outputs = vllm_model.model.generate(inputs, sampling_params=sampling_params)
+    if vllm_version_is("0.23.0"):
+        with VllmRunner(MODEL_NAME, **runner_kwargs) as vllm_model:
+            prompts = [f"Give an example JSON for an employee profile that fits this schema: {sample_json_schema}"] * 2
+            inputs = vllm_model.get_inputs(prompts)
+            outputs = vllm_model.model.generate(inputs, sampling_params=sampling_params)
+    else:
+        # xgrammar and outlines may timeout on complex JSON schemas with default 5s timeout
+        env_overrides = {}
+        if guided_decoding_backend in ("xgrammar", "outlines"):
+            env_overrides["VLLM_REGEX_COMPILATION_TIMEOUT_S"] = "30"
+        with (
+            patch.dict(os.environ, env_overrides, clear=False),
+            VllmRunner(MODEL_NAME, **runner_kwargs) as vllm_model,
+        ):
+            prompts = [f"Give an example JSON for an employee profile that fits this schema: {sample_json_schema}"] * 2
+            inputs = vllm_model.get_inputs(prompts)
+            outputs = vllm_model.model.generate(inputs, sampling_params=sampling_params)
 
-        assert outputs is not None
 
-        for output in outputs:
-            assert output is not None
-            assert isinstance(output, RequestOutput)
-            prompt = output.prompt
+    assert outputs is not None
 
-            generated_text = output.outputs[0].text
-            assert generated_text is not None
-            print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
-            output_json = json.loads(generated_text)
-            jsonschema.validate(instance=output_json, schema=sample_json_schema)
+    for output in outputs:
+        assert output is not None
+        assert isinstance(output, RequestOutput)
+        prompt = output.prompt
+
+        generated_text = output.outputs[0].text
+        assert generated_text is not None
+        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+        output_json = json.loads(generated_text)
+        jsonschema.validate(instance=output_json, schema=sample_json_schema)
 
 
 @pytest.mark.parametrize("guided_decoding_backend", GuidedDecodingBackend)

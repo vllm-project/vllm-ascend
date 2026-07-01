@@ -862,6 +862,23 @@ def _run_vllm_runner_dp_worker(conn, llm_kwargs: dict[str, Any], dp_rank: int, d
         os.environ["VLLM_DP_MASTER_PORT"] = str(master_port)
         os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
+        # vLLM v0.24.0 (PR #45026) stopped isolating devices per worker
+        # process automatically. For application-level DP (one LLM() per
+        # rank), each child process must see its own slice of
+        # ASCEND_RT_VISIBLE_DEVICES, otherwise HCCL complains that two
+        # independent processes on the same node claim the same physical
+        # device.
+        from vllm_ascend.utils import vllm_version_is
+        if not vllm_version_is("0.23.0"):
+            visible = os.environ.get("ASCEND_RT_VISIBLE_DEVICES", "")
+            devs = [d for d in visible.split(",") if d]
+            if len(devs) >= dp_size:
+                chunk = len(devs) // dp_size
+                start = dp_rank * chunk
+                os.environ["ASCEND_RT_VISIBLE_DEVICES"] = ",".join(
+                    devs[start:start + chunk]
+                )
+
         llm = LLM(**llm_kwargs)
         conn.send({"status": "ready", "rank": dp_rank})
 

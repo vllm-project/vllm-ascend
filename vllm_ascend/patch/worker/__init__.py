@@ -70,6 +70,38 @@ import vllm_ascend.patch.worker.patch_gqa_c8  # noqa
 if not vllm_version_is("0.23.0"):
     import vllm_ascend.patch.worker.patch_fused_moe  # noqa
 
+# Ascend NPU does not support DT_UINT64 in aclnnInplaceZero.
+# CpuGpuBuffer with dtype=torch.uint64 (used by MambaCopyBuffers)
+# triggers a runtime error.  Remap uint64 to int64 at the entry
+# point so the GPU buffer allocation succeeds.
+if not vllm_version_is("0.23.0"):
+    import torch
+    from vllm.utils.torch_utils import PIN_MEMORY as _PIN_MEMORY
+    from vllm.v1.utils import CpuGpuBuffer
+
+    _original_cpugpu_init = CpuGpuBuffer.__init__
+
+    def _patched_cpugpu_init(
+        self,
+        *size,
+        dtype: torch.dtype,
+        device: torch.device,
+        pin_memory: bool = _PIN_MEMORY,
+        with_numpy: bool = True,
+    ):
+        if dtype == torch.uint64:
+            dtype = torch.int64
+        _original_cpugpu_init(
+            self,
+            *size,
+            dtype=dtype,
+            device=device,
+            pin_memory=pin_memory,
+            with_numpy=with_numpy,
+        )
+
+    CpuGpuBuffer.__init__ = _patched_cpugpu_init
+
 if _V2_MODEL_RUNNER_SUPPORTED:
     import vllm_ascend.patch.worker.patch_v2.patch_uva  # noqa
     import vllm_ascend.patch.worker.patch_v2.patch_input_batch  # noqa
