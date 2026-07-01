@@ -58,6 +58,7 @@ patch(
 patch("vllm.distributed.parallel_state._DCP", _mock_dcp_group).start()
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import (  # noqa: E402
+    MAX_REQUESTS_PER_PEER_HANDLER,
     GroupPull,
     KVCacheRecvingThread,
     KVCacheSendingThread,
@@ -510,6 +511,99 @@ class TestKVCacheRecvingThreadBasic(unittest.TestCase):
         result = self.thread.get_and_clear_finished_requests()
         self.assertEqual(result, {"req1", "req2"})
 
+    def test_submit_request_serializes_same_peer_fifo(self):
+        release_first_request = threading.Event()
+        first_request_started = threading.Event()
+        other_peer_started = threading.Event()
+        handled_requests: list[str] = []
+        active_by_peer: defaultdict[tuple[str, int], int] = defaultdict(int)
+        max_active_by_peer: defaultdict[tuple[str, int], int] = defaultdict(int)
+        state_lock = threading.Lock()
+
+        def handle_request(req_meta: dict[str, Any]):
+            peer_key = (req_meta["remote_host"], req_meta["remote_handshake_port"])
+            with state_lock:
+                active_by_peer[peer_key] += 1
+                max_active_by_peer[peer_key] = max(max_active_by_peer[peer_key], active_by_peer[peer_key])
+                handled_requests.append(req_meta["request_id"])
+
+            if req_meta["request_id"] == "same-peer-1":
+                first_request_started.set()
+                self.assertTrue(release_first_request.wait(timeout=2.0))
+            elif req_meta["request_id"] == "other-peer-1":
+                other_peer_started.set()
+
+            time.sleep(0.01)
+            with state_lock:
+                active_by_peer[peer_key] -= 1
+
+        self.thread._handle_request = handle_request  # type: ignore[method-assign]
+        same_peer_1 = {
+            "request_id": "same-peer-1",
+            "remote_host": "host-a",
+            "remote_handshake_port": 6000,
+            "all_task_done": False,
+        }
+        same_peer_2 = {
+            "request_id": "same-peer-2",
+            "remote_host": "host-a",
+            "remote_handshake_port": 6000,
+            "all_task_done": True,
+        }
+        other_peer = {
+            "request_id": "other-peer-1",
+            "remote_host": "host-b",
+            "remote_handshake_port": 6001,
+            "all_task_done": True,
+        }
+
+        try:
+            self.thread._submit_request(same_peer_1)
+            self.assertTrue(first_request_started.wait(timeout=1.0))
+            self.thread._submit_request(same_peer_2)
+            self.thread._submit_request(other_peer)
+
+            self.assertTrue(other_peer_started.wait(timeout=1.0))
+            time.sleep(0.05)
+            self.assertNotIn("same-peer-2", handled_requests)
+        finally:
+            release_first_request.set()
+            self.thread.executor.shutdown(wait=True, cancel_futures=True)
+
+        self.assertLess(handled_requests.index("same-peer-1"), handled_requests.index("same-peer-2"))
+        self.assertEqual(max_active_by_peer[("host-a", 6000)], 1)
+        self.assertEqual(max_active_by_peer[("host-b", 6001)], 1)
+
+    def test_peer_handler_yields_after_batch_limit(self):
+        peer_key = ("host-a", 6000)
+        requests = [
+            {
+                "request_id": f"req-{idx}",
+                "remote_host": peer_key[0],
+                "remote_handshake_port": peer_key[1],
+            }
+            for idx in range(MAX_REQUESTS_PER_PEER_HANDLER + 1)
+        ]
+        handled_requests: list[str] = []
+        self.thread.peer_request_queues[peer_key].extend(requests)
+        self.thread.active_peer_request_handlers.add(peer_key)
+        self.thread.executor = MagicMock()
+
+        def handle_request(req_meta: dict[str, Any]):
+            handled_requests.append(req_meta["request_id"])
+
+        self.thread._handle_request = handle_request  # type: ignore[method-assign]
+
+        self.thread._handle_peer_requests(peer_key)
+
+        self.assertEqual(handled_requests, [f"req-{idx}" for idx in range(MAX_REQUESTS_PER_PEER_HANDLER)])
+        self.assertEqual(
+            [req["request_id"] for req in self.thread.peer_request_queues[peer_key]],
+            [f"req-{MAX_REQUESTS_PER_PEER_HANDLER}"],
+        )
+        self.assertIn(peer_key, self.thread.active_peer_request_handlers)
+        self.thread.executor.submit.assert_called_once_with(self.thread._handle_peer_requests, peer_key)
+
 
 class TestSocketManagement(unittest.TestCase):
     def setUp(self):
@@ -534,7 +628,6 @@ class TestSocketManagement(unittest.TestCase):
             prefill_pp_layer_partition=None,
         )
         self.thread.remote_sockets = defaultdict(deque)
-        self.thread.remote_poller = MagicMock()
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.zmq.Context")
     @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.make_zmq_socket")
@@ -552,7 +645,8 @@ class TestSocketManagement(unittest.TestCase):
         self.assertEqual(kwargs.get("path"), "tcp://test_host:12345")
         self.assertEqual(kwargs.get("socket_type"), zmq.REQ)  # type: ignore
         self.assertFalse(kwargs.get("bind", True))
-        self.thread.remote_poller.register.assert_called_with(mock_sock, zmq.POLLIN)  # type: ignore
+        mock_sock.setsockopt.assert_any_call(zmq.SNDTIMEO, int(self.thread.timeout * 1000))  # type: ignore
+        mock_sock.setsockopt.assert_any_call(zmq.RCVTIMEO, int(self.thread.timeout * 1000))  # type: ignore
 
     def test_return_socket_to_pool(self):
         mock_sock = MagicMock()
@@ -564,7 +658,6 @@ class TestSocketManagement(unittest.TestCase):
 
         self.assertEqual(len(self.thread.remote_sockets[test_path]), 1)
         self.assertEqual(self.thread.remote_sockets[test_path][0], mock_sock)
-        self.thread.remote_poller.register.assert_not_called()
 
 
 class TestCoreFunctionality(unittest.TestCase):
@@ -798,7 +891,7 @@ class TestMetadataHandling(unittest.TestCase):
             patch.object(self.thread, "_get_remote_socket") as mock_get_socket,
             patch.object(self.thread, "_return_remote_socket") as mock_return_socket,
         ):
-            mock_socket = MagicMock()
+            mock_socket = MagicMock(spec=zmq.Socket)  # type: ignore[attr-defined]
             mock_get_socket.return_value = mock_socket
 
             self.thread._get_remote_metadata("host1", 5555)
@@ -806,7 +899,7 @@ class TestMetadataHandling(unittest.TestCase):
             mock_get_socket.assert_called_once_with("host1", 5555)
             mock_return_socket.assert_called_once_with(mock_socket, "host1", 5555)
             mock_send.assert_called_once_with(mock_socket, self.thread.encoder.encode((GET_META_MSG, "")), "host1:5555")
-            mock_recv.assert_called_once_with(mock_socket, self.thread.remote_poller, "host1:5555")
+            mock_recv.assert_called_once_with(mock_socket, "host1:5555")
             self.assertEqual(self.thread.kv_caches_base_addr["remote_engine"][5555], [[0x3000], [0x4000]])
             self.assertEqual(self.thread.remote_block_stride_per_addr["remote_engine"][5555], [[1024]])
 
@@ -820,14 +913,15 @@ class TestMetadataHandling(unittest.TestCase):
             patch.object(self.thread, "_get_remote_socket") as mock_get_socket,
             patch.object(self.thread, "_return_remote_socket") as mock_return_socket,
         ):
-            mock_socket = MagicMock()
+            mock_socket = MagicMock(spec=zmq.Socket)  # type: ignore[attr-defined]
             mock_get_socket.return_value = mock_socket
 
             with self.assertRaises(Exception) as context:
                 self.thread._get_remote_metadata("host1", 5555)
 
             self.assertEqual(str(context.exception), "Network error")
-            mock_return_socket.assert_called_once()
+            mock_socket.close.assert_called_once()
+            mock_return_socket.assert_not_called()
 
 
 class TestMainThreadLoop(unittest.TestCase):
@@ -1335,7 +1429,7 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
 
     def test_get_transfer_block_ids_trims_attention_mtp_blocks(self):
         self.scheduler.group_transfer_info = [
-            types.SimpleNamespace(
+            types.SimpleNamespace(  # type: ignore[list-item]
                 tokens_per_block=16,
                 blocks_per_window=0,
                 is_state_group=False,
@@ -1348,7 +1442,7 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
 
     def test_get_transfer_block_ids_keeps_state_group(self):
         self.scheduler.group_transfer_info = [
-            types.SimpleNamespace(
+            types.SimpleNamespace(  # type: ignore[list-item]
                 tokens_per_block=16,
                 blocks_per_window=0,
                 is_state_group=True,
@@ -1361,7 +1455,7 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
 
     def test_get_transfer_block_ids_uses_compressed_prompt_len(self):
         self.scheduler.group_transfer_info = [
-            types.SimpleNamespace(
+            types.SimpleNamespace(  # type: ignore[list-item]
                 tokens_per_block=32,
                 blocks_per_window=0,
                 is_state_group=False,
@@ -1374,7 +1468,7 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
 
     def test_get_transfer_block_ids_trims_sliding_window_mtp_blocks(self):
         self.scheduler.group_transfer_info = [
-            types.SimpleNamespace(
+            types.SimpleNamespace(  # type: ignore[list-item]
                 tokens_per_block=16,
                 blocks_per_window=3,
                 is_state_group=False,
@@ -1387,7 +1481,7 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
 
     def test_get_swa_transfer_block_ids_clips_sliding_window_group(self):
         self.scheduler.group_transfer_info = [
-            types.SimpleNamespace(
+            types.SimpleNamespace(  # type: ignore[list-item]
                 tokens_per_block=16,
                 blocks_per_window=3,
                 is_state_group=False,
@@ -1400,7 +1494,7 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
 
     def test_get_swa_transfer_block_ids_drops_zero_from_sliding_window_tail(self):
         self.scheduler.group_transfer_info = [
-            types.SimpleNamespace(
+            types.SimpleNamespace(  # type: ignore[list-item]
                 tokens_per_block=16,
                 blocks_per_window=2,
                 is_state_group=False,
@@ -1413,7 +1507,7 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
 
     def test_transfer_block_ids_trims_mtp_before_swa_zero_filter(self):
         self.scheduler.group_transfer_info = [
-            types.SimpleNamespace(
+            types.SimpleNamespace(  # type: ignore[list-item]
                 tokens_per_block=16,
                 blocks_per_window=3,
                 is_state_group=False,
@@ -1578,20 +1672,15 @@ class TestUtils(unittest.TestCase):
     def test_ensure_zmq_recv_success(self, mock_logger):
         mock_socket = MagicMock()
         mock_socket.recv.return_value = b"response"
-        mock_poller = MagicMock()
-        mock_poller.poll.return_value = [
-            (mock_socket, zmq.POLLIN)  # type: ignore
-        ]
-        data = ensure_zmq_recv(mock_socket, mock_poller, "tcp://localhost:1234")
+        data = ensure_zmq_recv(mock_socket, "tcp://localhost:1234")
         self.assertEqual(data, b"response")
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.logger")
     def test_ensure_zmq_recv_timeout_and_fail(self, mock_logger):
         mock_socket = MagicMock()
-        mock_poller = MagicMock()
-        mock_poller.poll.return_value = []
+        mock_socket.recv.side_effect = zmq.ZMQError("Receive timeout")  # type: ignore
         with self.assertRaises(RuntimeError):
-            ensure_zmq_recv(mock_socket, mock_poller, "tcp://localhost:1234", timeout=0.01, max_retries=2)
+            ensure_zmq_recv(mock_socket, "tcp://localhost:1234", max_retries=2)
 
 
 class MockMooncakeAgentMetadata:
