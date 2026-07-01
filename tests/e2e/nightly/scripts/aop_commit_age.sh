@@ -53,7 +53,7 @@ fi
 BEST_ROW=""
 BEST_DATE=""
 while IFS= read -r row; do
-  date_str=$(echo "$row" | cut -d',' -f7 | xargs)
+  date_str=$(echo "$row" | awk -F',' '{print $NF}' | xargs)
   [ -z "$date_str" ] && continue
   if [ -z "$BEST_DATE" ] || [[ "$date_str" > "$BEST_DATE" ]]; then
     BEST_ROW="$row"
