@@ -118,6 +118,7 @@ class MoEQuantParams:
         else:
             return None
 
+
 __all__ = [
     "MoERoutingParams",
     "MoEMxfpParams",
