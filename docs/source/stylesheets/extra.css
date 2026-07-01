@@ -1,0 +1,19 @@
+/* vLLM Ascend docs custom styles */
+
+/* Center the logo on the home page */
+.md-typeset .figure {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+/* Make tables more compact */
+.md-typeset table:not([class]) th,
+.md-typeset table:not([class]) td {
+  padding: 0.5rem 0.75rem;
+}
+
+/* GitHub button styling */
+.github-button {
+  margin: 0 4px;
+}

@@ -21,10 +21,10 @@ Built-in supported `converter_tag` values:
 
 ### For authors: add a block
 
-:::{important}
-By default, the generator scans only `.md` files under `docs/source/tutorials/models/` and produces artifacts.
-If you put ``model-code`` blocks in other directories, Sphinx builds will not automatically generate the corresponding scripts.
-:::
+!!! warning
+
+    By default, the generator scans only `.md` files under `docs/source/tutorials/models/` and produces artifacts.
+    If you put ``model-code`` blocks in other directories, Sphinx builds will not automatically generate the corresponding scripts.
 
 All ``model-code`` blocks need:
 
@@ -72,7 +72,7 @@ Both command fields can be either a shell string or a flat token list.
 Write the doc block like this:
 
 ````md
-```{model-code}
+```model-code
 :block_name: qwen3_8b_single_node
 :converter_tag: single_node
 :test_case_path: tests/e2e/nightly/single_node/models/configs/your_model.yaml
@@ -132,7 +132,7 @@ It can be written as a shell string or a flat token list.
 Write the doc block like this:
 
 ````md
-```{model-code}
+```model-code
 :block_name: qwen3_235b_worker_1
 :converter_tag: multi_node
 :test_case_path: tests/e2e/nightly/multi_node/internal_dp/config/your_model.yaml
@@ -211,7 +211,7 @@ are left unchanged.
 Write the doc block like this:
 
 ````md
-```{model-code}
+```model-code
 :block_name: glm_external_dp_template_node0
 :converter_tag: external_dp_template
 :test_case_path: tests/e2e/nightly/multi_node/external_dp/config/your_model.yaml
@@ -280,7 +280,7 @@ routing: ...
 Write the doc block like this:
 
 ````md
-```{model-code}
+```model-code
 :block_name: glm_external_dp_launch
 :converter_tag: external_dp_launch
 :test_case_path: tests/e2e/nightly/multi_node/external_dp/config/your_model.yaml
@@ -338,7 +338,7 @@ The proxy itself is rendered on `${NODE_0_IP}:1999`.
 Write the doc block like this:
 
 ````md
-```{model-code}
+```model-code
 :block_name: glm_external_dp_proxy
 :converter_tag: external_dp_proxy
 :test_case_path: tests/e2e/nightly/multi_node/external_dp/config/your_model.yaml
@@ -392,9 +392,9 @@ python3 tools/docs_codegen/cli.py \
 
 By default, artifacts are written to: `docs/_build/doc_codegen/<doc_stem>/<block_name>.sh`.
 
-:::{note}
-After the script is generated, please make sure to check whether the generated content is runnable, especially key parts such as environment variables and command-line parameters.
-:::
+!!! note
+
+    After the script is generated, please make sure to check whether the generated content is runnable, especially key parts such as environment variables and command-line parameters.
 
 #### Build the site & preview locally
 
