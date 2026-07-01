@@ -123,6 +123,19 @@ class ComplexExpRotaryEmbedding(nn.Module):
             f"rotary_dim{rotary_dim}_max_position_embeddings{max_position_embeddings}_"
             f"base{base}_scaling_factor{scaling_factor}_beta_fast{beta_fast}_beta_slow{beta_slow}"
         )
+        # Persist everything required to rebuild the (device-resident, non
+        # nn.Buffer) cos/sin caches after a snapshot restore. These caches live
+        # in the module-level ``_ROPE_STATE`` global, so they are NOT part of
+        # ``state_dict`` and are never re-materialized by ``restore_model``.
+        self._config_key = config_key
+        self._max_position_embeddings = max_position_embeddings
+        self._base = base
+        self._scaling_factor = scaling_factor
+        self._beta_fast = beta_fast
+        self._beta_slow = beta_slow
+        self._rope_groups = rope_groups
+        self._max_batch_size = vllm_config.scheduler_config.max_num_batched_tokens
+
         _ROPE_STATE.layer_info[layername] = (config_key, rope_groups)
 
         if config_key not in _ROPE_STATE.registry_summary:
@@ -130,33 +143,89 @@ class ComplexExpRotaryEmbedding(nn.Module):
         for grp in rope_groups:
             _ROPE_STATE.registry_summary[config_key].add(grp)
 
-        if config_key not in _ROPE_STATE.static_cache:
+        self._build_cos_sin_cache(force=False)
+
+    @staticmethod
+    def _static_cache_is_valid(config_key: str, device) -> bool:
+        """True iff the cached cos table exists, lives on ``device`` and still
+        holds valid data. ``cos`` at position 0 must be all ones (cos(0)=1); a
+        snapshot restore invalidates the backing device memory (observed as
+        all-zero), so this doubles as a staleness check and lets many layers
+        that share a config skip redundant recomputes."""
+        entry = _ROPE_STATE.static_cache.get(config_key)
+        if entry is None:
+            return False
+        cos = entry[0]
+        if cos.device.type != torch.device(device).type:
+            return False
+        try:
+            return bool(torch.all(cos[0] == 1.0))
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _build_cos_sin_cache(self, force: bool = False) -> None:
+        """(Re)materialize the device-resident cos/sin caches held in the
+        global ``_ROPE_STATE``. When ``force`` is True (snapshot restore) the
+        static cos/sin table is recomputed if the currently cached one is
+        missing or stale (its device memory was invalidated by suspend/resume).
+        The runtime scratch buffers only need to *exist* (they are fully
+        overwritten per-forward before being read), so they are never rebuilt."""
+        config_key = self._config_key
+        rotary_dim = self.rotary_dim
+        device = current_platform.device_type
+
+        need_static = config_key not in _ROPE_STATE.static_cache
+        if force:
+            need_static = not self._static_cache_is_valid(config_key, device)
+
+        if need_static:
+            # ``precompute_freqs_cis`` builds ``inv_freq`` without an explicit
+            # device: at cold start a default device=npu context puts it on the
+            # NPU, but the restore path has no such context, so it lands on CPU
+            # and the einsum below fails with a CPU/NPU device mismatch. Pin it
+            # to ``device`` explicitly to be robust in both paths.
             inv_freq = self.precompute_freqs_cis(
-                rotary_dim, max_position_embeddings, max_position_embeddings, base, scaling_factor, beta_fast, beta_slow
-            )
+                rotary_dim,
+                self._max_position_embeddings,
+                self._max_position_embeddings,
+                self._base,
+                self._scaling_factor,
+                self._beta_fast,
+                self._beta_slow,
+            ).to(device)
             t = torch.arange(
-                max_position_embeddings * scaling_factor,
-                device=current_platform.device_type,
+                self._max_position_embeddings * self._scaling_factor,
+                device=device,
                 dtype=torch.float32,
             )
             freqs = torch.einsum("i,j -> ij", t, inv_freq)
-            cos = freqs.cos().repeat_interleave(2, dim=-1)
-            sin = freqs.sin().repeat_interleave(2, dim=-1)
-            cos = cos.to(current_platform.device_type)
-            sin = sin.to(current_platform.device_type)
-
+            cos = freqs.cos().repeat_interleave(2, dim=-1).to(device)
+            sin = freqs.sin().repeat_interleave(2, dim=-1).to(device)
+            # Assign only after a successful build so a failure never leaves an
+            # empty/half entry (which would surface downstream as ``cos == {}``).
             _ROPE_STATE.static_cache[config_key] = (cos.unsqueeze(1).unsqueeze(1), sin.unsqueeze(1).unsqueeze(1))
 
-        if config_key not in _ROPE_STATE.runtime_buffer:
-            _ROPE_STATE.runtime_buffer[config_key] = {}
+        buffers = _ROPE_STATE.runtime_buffer.setdefault(config_key, {})
+        max_batch_size = self._max_batch_size
+        for grp in self._rope_groups:
+            if grp not in buffers:
+                buf_cos = torch.ones(max_batch_size, 1, 1, rotary_dim, dtype=torch.float32, device=device)
+                buf_sin = torch.zeros(max_batch_size, 1, 1, rotary_dim, dtype=torch.float32, device=device)
+                buffers[grp] = (buf_cos, buf_sin)
 
-        target_device = current_platform.device_type
-        max_batch_size = vllm_config.scheduler_config.max_num_batched_tokens
-        for grp in rope_groups:
-            if grp not in _ROPE_STATE.runtime_buffer[config_key]:
-                buf_cos = torch.ones(max_batch_size, 1, 1, rotary_dim, dtype=torch.float32, device=target_device)
-                buf_sin = torch.zeros(max_batch_size, 1, 1, rotary_dim, dtype=torch.float32, device=target_device)
-                _ROPE_STATE.runtime_buffer[config_key][grp] = (buf_cos, buf_sin)
+    def reload_derived_weights_after_restore(self, act_dtype: torch.dtype) -> None:
+        """[snapshot] Rebuild the non-persistent rope cos/sin caches after a
+        ``state_dict`` restore.
+
+        The cos/sin tables are stored in the module-level ``_ROPE_STATE`` global
+        rather than as ``nn.Module`` buffers, so ``dump_model`` never serializes
+        them and ``restore_model`` never copies them back. After suspend/resume
+        the device memory backing them is stale (observed as all-zero cos/sin),
+        which zeroes rotary position encoding and corrupts attention for every
+        layer. Recomputing them from the static rope parameters repairs the whole
+        decode/prefill path. The ACL graph is re-captured after restore, so
+        reallocating is safe."""
+        self._build_cos_sin_cache(force=True)
 
     @staticmethod
     def precompute_freqs_cis(dim, seqlen, original_seq_len, base, factor, beta_fast, beta_slow):
