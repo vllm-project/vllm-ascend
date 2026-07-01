@@ -23,7 +23,38 @@ import torch.distributed as dist
 from vllm.logger import logger
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.quantization.methods.base import QuantType
+from vllm_ascend.quantization.quant_type import QuantType
+
+EPLB_EXPERT_WEIGHT_NAMES = {
+    (QuantType.NONE, False): ("w13_weight", "w2_weight"),
+    (QuantType.NONE, True): ("w13_weight", "w2_weight"),
+    (QuantType.W8A8, False): (
+        "w13_weight_list",
+        "w2_weight_list",
+        "w13_weight_scale_fp32_list",
+        "w2_weight_scale_list",
+    ),
+    (QuantType.W8A8, True): (
+        "w13_weight_list",
+        "w2_weight_list",
+        "w13_weight_scale_fp32_list",
+        "w2_weight_scale_list",
+        "fused_w1_scale_list",
+        "fused_w2_scale_list",
+    ),
+    (QuantType.W4A8, True): (
+        "w13_weight_list",
+        "w2_weight_list",
+        "w13_weight_scale_list",
+        "w2_weight_scale_list",
+        "w13_scale_bias_list",
+        "w2_scale_bias_list",
+    ),
+    (QuantType.MXFP4, False): ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale"),
+    (QuantType.MXFP4, True): ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale"),
+    (QuantType.MXFP8, False): ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale"),
+    (QuantType.MXFP8, True): ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale"),
+}
 
 
 class VllmEplbAdaptor:
@@ -61,10 +92,11 @@ class VllmEplbAdaptor:
         self.ep_rank = first_layer.ep_rank
 
         self.expert_param_per_layer = dict()
+        self.expert_weight_key_per_layer = dict()
         self.init_expert_param_per_layer()
 
         num_buffer_tensor = self.num_local_experts
-        self.buffer_tensor_list: list[list[Any]] = [[] for _ in range(num_buffer_tensor)]
+        self.buffer_tensor_list: dict[Any, list[list[Any]]] = dict()
         self.init_buffer_tensor(num_buffer_tensor)
 
         self.log2phy_map_per_layer = dict()
@@ -72,62 +104,42 @@ class VllmEplbAdaptor:
             self.log2phy_map_per_layer[local_idx] = layer.get_log2phy_map()
 
     def init_buffer_tensor(self, num_buffer_tensor):
-        for buffer_id in range(num_buffer_tensor):
-            for name in self.expert_weight_names:
-                expert_tensor = self.param_dict[f"0.{name}"][0]
-                buffer_tensor = torch.empty_like(expert_tensor)
-                self.buffer_tensor_list[buffer_id].append(buffer_tensor)
+        buffer_tensor_shapes: dict[Any, list[torch.Size]] = dict()
+        for local_idx, _ in enumerate(self.moe_layers):
+            expert_weight_key = self.expert_weight_key_per_layer[local_idx]
+            expert_weight_names = EPLB_EXPERT_WEIGHT_NAMES[expert_weight_key]
+            expert_tensors = [self.param_dict[f"{local_idx}.{name}"][0] for name in expert_weight_names]
+            expert_tensor_shapes = [tensor.shape for tensor in expert_tensors]
+            if expert_weight_key in self.buffer_tensor_list:
+                assert expert_tensor_shapes == buffer_tensor_shapes[expert_weight_key], (
+                    f"EPLB expert weight shapes mismatch for {expert_weight_key}: "
+                    f"expected {buffer_tensor_shapes[expert_weight_key]}, got {expert_tensor_shapes}"
+                )
+                continue
+            buffer_tensor_shapes[expert_weight_key] = expert_tensor_shapes
+            self.buffer_tensor_list[expert_weight_key] = [[] for _ in range(num_buffer_tensor)]
+            for buffer_id in range(num_buffer_tensor):
+                for expert_tensor in expert_tensors:
+                    buffer_tensor = torch.empty_like(expert_tensor)
+                    self.buffer_tensor_list[expert_weight_key][buffer_id].append(buffer_tensor)
 
     def init_expert_param_per_layer(self):
         self.param_dict = dict()
 
-        first_layer = self.moe_layers[0]
-
-        if self.model.quant_config is not None:
-            quant_type = first_layer.quant_type
-            if quant_type == QuantType.W8A8:
-                self.expert_weight_names = [
-                    "w13_weight_list",
-                    "w2_weight_list",
-                    "w13_weight_scale_fp32_list",
-                    "w2_weight_scale_list",
-                ]
-                if get_ascend_config().enable_fused_mc2 == 1:
-                    self.expert_weight_names.append("fused_w1_scale_list")
-                    self.expert_weight_names.append("fused_w2_scale_list")
-
-            elif quant_type == QuantType.W4A8:
-                if get_ascend_config().enable_fused_mc2 != 1:
-                    raise ValueError("EPLB not support W4A8 with fused MC2 disabled")
-                self.expert_weight_names = [
-                    "w13_weight_list",
-                    "w2_weight_list",
-                    "w13_weight_scale_list",
-                    "w2_weight_scale_list",
-                    "w13_scale_bias_list",
-                    "w2_scale_bias_list",
-                ]
-
-            elif quant_type in (QuantType.MXFP4, QuantType.MXFP8):
-                self.expert_weight_names = [
-                    "w13_weight",
-                    "w2_weight",
-                    "w13_weight_scale",
-                    "w2_weight_scale",
-                ]
-            else:
-                raise ValueError(f"EPLB not support {quant_type}")
-        else:
-            self.expert_weight_names = ["w13_weight", "w2_weight"]
-
         for local_idx, layer in enumerate(self.moe_layers):
+            quant_type = QuantType.NONE if self.model.quant_config is None else layer.quant_type
+            expert_weight_key = (quant_type, get_ascend_config().enable_fused_mc2 == 1)
+            if expert_weight_key not in EPLB_EXPERT_WEIGHT_NAMES:
+                raise ValueError(f"EPLB not support {quant_type} with fused MC2 {expert_weight_key[1]}")
+            expert_weight_names = EPLB_EXPERT_WEIGHT_NAMES[expert_weight_key]
+            self.expert_weight_key_per_layer[local_idx] = expert_weight_key
             self.expert_param_per_layer[local_idx] = list()
-            for name in self.expert_weight_names:
+            for name in expert_weight_names:
                 param_key = f"{local_idx}.{name}"
                 self.param_dict[param_key] = getattr(layer, name)
             for local_expert_id in range(self.num_local_experts):
                 per_expert_param = list()
-                for name in self.expert_weight_names:
+                for name in expert_weight_names:
                     per_expert_param.append(self.param_dict[f"{local_idx}.{name}"][local_expert_id])
                 self.expert_param_per_layer[local_idx].append(per_expert_param)
 
@@ -168,8 +180,10 @@ class VllmEplbAdaptor:
         self.expert_map_per_layer_cpu[layer_id].copy_(updated_expert_map)
 
     def do_update_expert_weight(self, layer_id, local_expert_to_replace, buffer_tensor_id):
+        expert_weight_key = self.expert_weight_key_per_layer[layer_id]
         for expert_tensor, buffer_tensor in zip(
-            self.expert_param_per_layer[layer_id][local_expert_to_replace], self.buffer_tensor_list[buffer_tensor_id]
+            self.expert_param_per_layer[layer_id][local_expert_to_replace],
+            self.buffer_tensor_list[expert_weight_key][buffer_tensor_id],
         ):
             expert_tensor.copy_(buffer_tensor)
             logger.debug("Expert tensor shape is :%s", expert_tensor.shape)
