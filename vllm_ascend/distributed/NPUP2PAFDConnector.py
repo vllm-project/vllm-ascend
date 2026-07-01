@@ -75,6 +75,15 @@ class NPUP2PAFDConnector(AFDConnectorBase):
 
     def init_afd_connector(self) -> None:
         """Initialize the AFD connector."""
+        # Idempotent guard: NPUFFNModelRunner.__init__ already invokes this
+        # once to populate attn_size / ffn_size, and worker.py
+        # start_ffn_server_loop invokes initialize_afd_connector() again.
+        # Without this guard the second call hits
+        # _patched_new_process_group_helper with a duplicate group_name
+        # ("afd" / "p2p") and raises ValueError.
+        if self._initialized:
+            logger.info("NPUP2PAFDConnector already initialized, skipping")
+            return
         assert self.config.afd_config is not None, "AFD config is not set"
         self.backend = torch.distributed.get_backend(get_world_group().device_group)
         if self.backend != "hccl":
