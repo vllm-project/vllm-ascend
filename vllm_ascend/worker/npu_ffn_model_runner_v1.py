@@ -51,7 +51,8 @@ class NPUFFNModelRunner(NPUModelRunner, GPUFFNModelRunner):
         self.device = device
         self.dtype = self.model_config.dtype
         self.load_config = vllm_config.load_config
-        self.first_k_dense_replace = self.model_config.hf_config.first_k_dense_replace
+        self.first_k_dense_replace = getattr(
+            self.model_config.hf_config, "first_k_dense_replace", 0)
         self.num_hidden_layers = self.model_config.hf_config.num_hidden_layers
 
         self.afd_config = vllm_config.afd_config
