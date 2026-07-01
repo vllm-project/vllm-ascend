@@ -54,11 +54,24 @@ from vllm.lora.layers.fused_moe import FusedMoE3DWithLoRA, FusedMoEWithLoRA
 from vllm.lora.layers.utils import _get_lora_device
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE
+from vllm_ascend.utils import vllm_version_is
+
+def _is_ascend_moe_layer(source_layer) -> bool:
+    if vllm_version_is("0.23.0"):
+        from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE
+        return isinstance(source_layer, AscendFusedMoE)
+    else:
+        from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
+        return isinstance(source_layer, AscendMoERunner)
 
 
-def _assert_ascend_moe_lora_supported(base_layer: AscendFusedMoE) -> None:
-    """Centralized v1 capability checks. Asserts up-front for clarity."""
+def _lora_context_host(base_layer):
+    if vllm_version_is("0.23.0"):
+        return base_layer
+    return base_layer.routed_experts
+
+
+def _assert_ascend_moe_lora_supported(base_layer: nn.Module) -> None:
     if getattr(base_layer, "use_ep", False):
         raise AssertionError(
             "Ascend MoE LoRA v1 does not support expert parallelism. "
@@ -168,7 +181,7 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
     monkey-patch of ``comm._apply_mlp``.
     """
 
-    def __init__(self, base_layer: AscendFusedMoE) -> None:
+    def __init__(self, base_layer: nn.Module) -> None:
         # Skip FusedMoEWithLoRA.__init__: it immediately asserts Triton
         # internals and calls _inject_lora_into_fused_moe which is GPU-only.
         BaseLayerWithLoRA.__init__(self)
@@ -178,6 +191,7 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
         self.tp_rank = get_tensor_model_parallel_rank()
         self.device = _get_lora_device(base_layer)
         self._enable_aux_cuda_stream = envs.VLLM_LORA_ENABLE_DUAL_STREAM
+        self.moe_config = base_layer.moe_config
         self._w13_slices = 2 if base_layer.moe_config.is_act_and_mul else 1
 
     # ------------------------------------------------------------------
@@ -189,13 +203,15 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
         # ``_moe_kernel`` is only set by the GPU modular-kernel path that we
         # deliberately skip in __init__. We instead build the per-layer
         # MoELoRAContext (now that punica_wrapper is available) and publish it
-        # on the base layer; AscendUnquantizedFusedMoEMethod.apply reads it via
-        # ``getattr(layer, "_ascend_moe_lora_context", None)`` and threads it
-        # down to unquant_apply_mlp. The context holds stable references (the
-        # in-place-updated LoRA stacks, adapter_enabled and the punica wrapper),
-        # so building it once here is sufficient.
+        # on the module that ``AscendUnquantizedFusedMoEMethod.apply`` reads via
+        # ``getattr(layer, "_ascend_moe_lora_context", None)`` -- the base layer
+        # itself on 0.23.0, but ``base_layer.runner.routed_experts`` on main
+        # (apply is called with ``layer=runner.routed_experts``). The context
+        # holds stable references (the in-place-updated LoRA stacks,
+        # adapter_enabled and the punica wrapper), so building it once here is
+        # sufficient.
         BaseLayerWithLoRA.set_mapping(self, punica_wrapper)
-        self.base_layer._ascend_moe_lora_context = self._build_lora_context()
+        _lora_context_host(self.base_layer)._ascend_moe_lora_context = self._build_lora_context()
 
     # ------------------------------------------------------------------
     # Layer-replacement registration
@@ -209,16 +225,13 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
         model_config: PretrainedConfig | None = None,
     ) -> bool:
         del lora_config, model_config
-        # AscendSharedFusedMoE inherits from AscendFusedMoE so this isinstance
-        # check matches both. _assert_ascend_moe_lora_supported in __init__
-        # rejects layers that actually carry shared experts.
-        return isinstance(source_layer, AscendFusedMoE) and len(packed_modules_list) == 2
+        return _is_ascend_moe_layer(source_layer) and len(packed_modules_list) == 2
 
 
 class AscendFusedMoE3DWithLoRA(AscendFusedMoEWithLoRA, FusedMoE3DWithLoRA):
     """For checkpoints that already fuse w1+w3 into a 3D weight (single slice)."""
 
-    def __init__(self, base_layer: AscendFusedMoE) -> None:
+    def __init__(self, base_layer: nn.Module) -> None:
         AscendFusedMoEWithLoRA.__init__(self, base_layer)
         # Override: 3D MoE LoRA uses a single w13 slice.
         self._w13_slices = 1
@@ -232,7 +245,7 @@ class AscendFusedMoE3DWithLoRA(AscendFusedMoEWithLoRA, FusedMoE3DWithLoRA):
         model_config: PretrainedConfig | None = None,
     ) -> bool:
         del lora_config, model_config
-        return isinstance(source_layer, AscendFusedMoE) and len(packed_modules_list) == 1
+        return _is_ascend_moe_layer(source_layer) and len(packed_modules_list) == 1
 
 
 # ----------------------------------------------------------------------
