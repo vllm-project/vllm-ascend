@@ -168,7 +168,7 @@ class _FakeKVCacheSpec:
         head_size = getattr(self, "head_size", 1)
         dtype = getattr(self, "dtype", None)
         dtype_size = getattr(dtype, "itemsize", None)
-        if dtype_size is None and hasattr(dtype, "element_size"):
+        if dtype_size is None and dtype is not None and hasattr(dtype, "element_size"):
             dtype_size = dtype.element_size()
         return self.block_size * num_kv_heads * head_size * int(dtype_size or 1) * 2
 
