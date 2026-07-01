@@ -94,6 +94,8 @@ def test_split_qkv_rmsnorm_rope(
         kv_hidden_size=kv_hidden_size,
         head_dim=head_size,
         eps=eps,
+        q_bias=None,
+        k_bias=None,
         cos_sin_cache=cos_sin_cache,
         positions=positions,
     )
