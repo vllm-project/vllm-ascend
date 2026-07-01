@@ -1,33 +1,21 @@
-# SKILL.md
+model_name: "deepseek-ai/deepseek-vl2-tiny"
+model_type: "vllm-vlm"
+hardware: "Atlas A2 Series"
 
-AI Assistant Used: DeepSeek AI
+serve:
+  tensor_parallel_size: 1
+  dtype: auto
+  max_model_len: 8192
+  gpu_memory_utilization: 0.8
+  trust_remote_code: true
 
-Conversation Log with the AI:
+tasks:
+- name: "mmmu_val"
+  metrics:
+  - name: "acc,none"
+    value: 0.0
 
-Q1: How to start validating the deepseek-ai/deepseek-vl2-tiny model?
-
-A1: Rent an Ascend machine, confirm NPU availability, load the model with vLLM, and document the process.
-
-Q2: What causes the error "No model architectures are specified"?
-
-A2: The model's config.json has architecture information in language_config.architectures, not at the top level. vLLM only looks at the top level, so it cannot find it.
-
-Q3: How to verify the root cause?
-
-A3: Use cat config.json | grep architectures to view the model configuration and find that there is no architectures field at the top level.
-
-Q4: Why can't a newer version of vLLM be used?
-
-A4: Ascend NPU requires torch-npu, which supports PyTorch up to 2.9.0; vLLM 0.18.0 requires PyTorch 2.10.0. The two are incompatible.
-
-Which AI suggestions were effective:
-
-Clear test steps: environment check → load model → record errors
-Error localization: locate the ModelConfig creation step from the error stack trace
-Root cause verification: confirm architecture location by checking config.json
-Version compatibility analysis: identify the conflict between torch-npu and newer PyTorch versions
-Lessons learned:
-
-Multimodal models may have special configuration formats where architectures are not necessarily at the top level
-When validating a model, first check the format of the model's official configuration file
-In the Ascend NPU environment, vLLM version and torch-npu version need to be compatible
+num_fewshot: 0
+apply_chat_template: false
+fewshot_as_multiturn: false
+batch_size: "auto"
