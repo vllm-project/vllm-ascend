@@ -536,15 +536,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
             # state-space models with their own metadata type and don't invoke the
             # NPU FlashAttention kernel).
             if _EXTRA_CTX.is_draft_model:
-                attn_keys = [
-                    k for k in attn_keys
-                    if isinstance(attn_metadata[0][k], AscendMetadata)
-                ]
+                attn_keys = [k for k in attn_keys if isinstance(attn_metadata[0][k], AscendMetadata)]
             else:
-                attn_keys = [
-                    k for k in attn_keys
-                    if isinstance(attn_metadata[k], AscendMetadata)
-                ]
+                attn_keys = [k for k in attn_keys if isinstance(attn_metadata[k], AscendMetadata)]
             if not attn_keys:
                 return
 
