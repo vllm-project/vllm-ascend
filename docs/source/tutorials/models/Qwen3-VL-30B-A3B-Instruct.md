@@ -98,7 +98,7 @@ It's highly recommended to specify `--limit-mm-per-prompt.video 0` if your infer
 You can set `--max-model-len` to preserve memory. By default the model's context length is 262K, but `--max-model-len 128000` is good for most scenarios.
 :::
 
-If your service start successfully, you can see the info shown below:
+If your service starts successfully, you can see the info shown below:
 
 ```bash
 INFO:     Started server process [746077]
@@ -117,7 +117,7 @@ curl http://localhost:8000/v1/chat/completions \
         {"role": "system", "content": "You are a helpful assistant."},
         {"role": "user", "content": [
             {"type": "image_url", "image_url": {"url": "https://modelscope.oss-cn-beijing.aliyuncs.com/resource/qwen.png"}},
-            {"type": "text", "text": "What is the text in the illustrate?"}
+            {"type": "text", "text": "What is the text in the illustration?"}
         ]}
     ],
     "max_completion_tokens": 100

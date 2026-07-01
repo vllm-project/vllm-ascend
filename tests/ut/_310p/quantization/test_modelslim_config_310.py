@@ -15,7 +15,6 @@
 
 from unittest.mock import MagicMock, patch
 
-from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig, FusedMoEParallelConfig
 from vllm.model_executor.layers.linear import LinearBase
 
@@ -23,6 +22,12 @@ from tests.ut.base import TestBase
 from vllm_ascend._310p.fused_moe.fused_moe import AscendUnquantizedFusedMoEMethod310
 from vllm_ascend._310p.quantization.modelslim_config import AscendModelSlimConfig310
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.23.0"):
+    from vllm.model_executor.layers.fused_moe import FusedMoE
+else:
+    from vllm.model_executor.layers.fused_moe import RoutedExperts
 
 
 class TestAscendModelSlimConfig310(TestBase):
@@ -66,8 +71,36 @@ class TestAscendModelSlimConfig310(TestBase):
             self.assertIs(method, mock_ascend_linear.return_value)
             mock_ascend_linear.assert_called_once_with(mock_scheme)
 
+    def test_get_quant_method_maps_lm_head_prefix_310(self):
+        config = AscendModelSlimConfig310({"language_model.lm_head.weight": "INT8"})
+        linear_layer = MagicMock(spec=LinearBase)
+        mock_config = MagicMock()
+        mock_config.model_config.hf_config.model_type = "qwen3_5_moe"
+        mock_scheme = MagicMock()
+
+        with (
+            patch("vllm_ascend._310p.quantization.modelslim_config.get_current_vllm_config", return_value=mock_config),
+            patch(
+                "vllm_ascend._310p.quantization.modelslim_config.create_scheme_for_layer",
+                return_value=mock_scheme,
+            ) as mock_create_scheme,
+            patch("vllm_ascend._310p.quantization.modelslim_config.AscendLinearMethod", return_value=MagicMock()),
+        ):
+            config.get_quant_method(linear_layer, "lm_head")
+
+        mock_create_scheme.assert_called_once_with(
+            quant_description=config.quant_description,
+            prefix="language_model.lm_head",
+            layer_type="linear",
+            packed_modules_mapping=config.packed_modules_mapping,
+        )
+
     def test_get_quant_method_for_fused_moe_310(self):
-        fused_moe_layer = MagicMock(spec=FusedMoE)
+        if vllm_version_is("0.23.0"):
+            fused_moe_cls = FusedMoE
+        else:
+            fused_moe_cls = RoutedExperts
+        fused_moe_layer = MagicMock(spec=fused_moe_cls)
         fused_moe_layer.moe = MagicMock(spec=FusedMoEConfig)
         fused_moe_layer.moe_config = MagicMock(spec=FusedMoEConfig)
         fused_moe_layer.moe_config.moe_backend = "auto"

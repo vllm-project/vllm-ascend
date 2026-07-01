@@ -239,7 +239,7 @@ test_cases:
       <<: *envs
     server_cmd: *server_cmd
     benchmarks:
-      <<: *benchmarks_acc
+      <<: *benchmarks
 ```
 
 #### EPD / Disaggregated Case

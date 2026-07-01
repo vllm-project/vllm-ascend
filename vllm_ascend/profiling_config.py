@@ -192,7 +192,7 @@ def generate_service_profiling_config() -> Path | None:
     try:
         config_dir.mkdir(parents=True, exist_ok=True)
     except (OSError, PermissionError) as e:
-        logger.error(f"Failed to create configuration directory {config_dir}: {e}", exc_info=True)
+        logger.exception("Failed to create configuration directory %s: %s", config_dir, e)
         return None
 
     # Write the configuration file atomically using a temporary file
@@ -210,7 +210,7 @@ def generate_service_profiling_config() -> Path | None:
         tmp_path.replace(config_file)
         return config_file
     except (OSError, PermissionError) as e:
-        logger.error(f"Failed to write configuration file {config_file}: {e}", exc_info=True)
+        logger.exception("Failed to write configuration file %s: %s", config_file, e)
         return None
     finally:
         # Clean up the temporary file if it wasn't successfully replaced

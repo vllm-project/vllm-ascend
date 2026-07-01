@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-21 02:03+0000\n"
+"POT-Creation-Date: 2026-06-22 05:29+0000\n"
 "PO-Revision-Date: 2026-01-22 16:45+0800\n"
 "Last-Translator: Gemini\n"
 "Language: zh_CN\n"
@@ -28,31 +28,183 @@ msgid ""
 "Additional configuration is a mechanism provided by vLLM to allow plugins"
 " to control internal behavior by themselves. VLLM Ascend uses this "
 "mechanism to make the project more flexible."
-msgstr "附加配置是 vLLM 提供的一种机制，允许插件自行控制内部行为。vLLM Ascend 利用这种机制来增强项目的灵活性。"
+msgstr "附加配置是 vLLM 提供的一种机制，允许插件自行控制内部行为。vLLM Ascend 利用该机制使项目更加灵活。"
 
 #: ../../source/user_guide/configuration/additional_config.md:5
+msgid "Migration Guide"
+msgstr "迁移指南"
+
+#: ../../source/user_guide/configuration/additional_config.md:7
+msgid ""
+"Starting from PR #9064, vLLM Ascend is migrating **10 environment "
+"variables** to `--additional-config`."
+msgstr "从 PR #9064 开始，vLLM Ascend 正在将 **10 个环境变量** 迁移至 `--additional-config`。"
+
+#: ../../source/user_guide/configuration/additional_config.md:9
+msgid "Important Notice"
+msgstr "重要通知"
+
+#: ../../source/user_guide/configuration/additional_config.md:11
+msgid ""
+"**Current Support**: Both environment variables and `--additional-config`"
+" are supported during the transition period"
+msgstr "**当前支持**：过渡期内同时支持环境变量和 `--additional-config`"
+
+#: ../../source/user_guide/configuration/additional_config.md:12
+msgid ""
+"**Recommendation**: Use `--additional-config` for new deployments and "
+"migrate existing configurations"
+msgstr "**建议**：新部署请使用 `--additional-config`，并迁移现有配置"
+
+#: ../../source/user_guide/configuration/additional_config.md:13
+msgid ""
+"**Future Plan**: Environment variables will be **removed** in a future "
+"release; only `--additional-config` will be supported"
+msgstr "**未来计划**：环境变量将在未来版本中**移除**，仅支持 `--additional-config`"
+
+#: ../../source/user_guide/configuration/additional_config.md:15
+msgid "Quick Reference"
+msgstr "快速参考"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "Environment Variable"
+msgstr "环境变量"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "Config Key"
+msgstr "配置键"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "Type Conversion"
+msgstr "类型转换"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`VLLM_ASCEND_BALANCE_SCHEDULING`"
+msgstr "`VLLM_ASCEND_BALANCE_SCHEDULING`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`enable_balance_scheduling`"
+msgstr "`enable_balance_scheduling`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`\"1\"` → `true`, `\"0\"` → `false`"
+msgstr "`\"1\"` → `true`, `\"0\"` → `false`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`VLLM_ASCEND_ENABLE_FLASHCOMM1`"
+msgstr "`VLLM_ASCEND_ENABLE_FLASHCOMM1`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`enable_flashcomm1`"
+msgstr "`enable_flashcomm1`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE`"
+msgstr "`VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`enable_matmul_allreduce`"
+msgstr "`enable_matmul_allreduce`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE`"
+msgstr "`VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`enable_flashcomm2_parallel_size`"
+msgstr "`enable_flashcomm2_parallel_size`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "Integer (unchanged)"
+msgstr "整数（不变）"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`MSMONITOR_USE_DAEMON`"
+msgstr "`MSMONITOR_USE_DAEMON`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`msmonitor_use_daemon`"
+msgstr "`msmonitor_use_daemon`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`VLLM_ASCEND_ENABLE_MLAPO`"
+msgstr "`VLLM_ASCEND_ENABLE_MLAPO`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`enable_mlapo`"
+msgstr "`enable_mlapo`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`VLLM_ASCEND_ENABLE_NZ`"
+msgstr "`VLLM_ASCEND_ENABLE_NZ`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`weight_nz_mode`"
+msgstr "`weight_nz_mode`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "Integer (unchanged, field name changed)"
+msgstr "整数（不变，字段名变更）"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL`"
+msgstr "`VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`enable_context_parallel`"
+msgstr "`enable_context_parallel`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`VLLM_ASCEND_ENABLE_FUSED_MC2`"
+msgstr "`VLLM_ASCEND_ENABLE_FUSED_MC2`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`enable_fused_mc2`"
+msgstr "`enable_fused_mc2`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK`"
+msgstr "`VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`enable_transpose_kv_cache_by_block`"
+msgstr "`enable_transpose_kv_cache_by_block`"
+
+#: ../../source/user_guide/configuration/additional_config.md:30
+msgid "Example Migration"
+msgstr "迁移示例"
+
+#: ../../source/user_guide/configuration/additional_config.md:32
+msgid "**Before (environment variable):**"
+msgstr "**迁移前（环境变量）：**"
+
+#: ../../source/user_guide/configuration/additional_config.md:39
+msgid "**After (additional-config):**"
+msgstr "**迁移后（additional-config）：**"
+
+#: ../../source/user_guide/configuration/additional_config.md:45
 msgid "How to use"
 msgstr "如何使用"
 
-#: ../../source/user_guide/configuration/additional_config.md:7
+#: ../../source/user_guide/configuration/additional_config.md:47
 msgid ""
 "With either online mode or offline mode, users can use additional "
 "configuration. Take Qwen3 as an example:"
 msgstr "无论是在线模式还是离线模式，用户都可以使用附加配置。以 Qwen3 为例："
 
-#: ../../source/user_guide/configuration/additional_config.md:9
+#: ../../source/user_guide/configuration/additional_config.md:49
 msgid "**Online mode**:"
 msgstr "**在线模式**："
 
-#: ../../source/user_guide/configuration/additional_config.md:15
+#: ../../source/user_guide/configuration/additional_config.md:55
 msgid "**Offline mode**:"
 msgstr "**离线模式**："
 
-#: ../../source/user_guide/configuration/additional_config.md:23
+#: ../../source/user_guide/configuration/additional_config.md:63
 msgid "Configuration options"
 msgstr "配置选项"
 
-#: ../../source/user_guide/configuration/additional_config.md:25
+#: ../../source/user_guide/configuration/additional_config.md:65
 msgid ""
 "The following table lists additional configuration options available in "
 "vLLM Ascend:"
@@ -119,6 +271,7 @@ msgstr "昇腾编译选项配置"
 msgid "`eplb_config`"
 msgstr "`eplb_config`"
 
+#: ../../source/user_guide/configuration/additional_config.md
 msgid "Configuration options for eplb"
 msgstr "EPLB 的配置选项"
 
@@ -141,6 +294,20 @@ msgid ""
 msgstr "是否刷新全局昇腾配置内容。通常用于 RLHF 训练或 UT/E2E 测试用例。"
 
 #: ../../source/user_guide/configuration/additional_config.md
+msgid "`dump_config`"
+msgstr "`dump_config`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`None`"
+msgstr "`None`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Inline msprobe dump configuration. vLLM-Ascend will materialize it to a "
+"temporary JSON file and pass that file to the debugger."
+msgstr "内联 msprobe dump 配置。vLLM-Ascend 会将其物化为临时 JSON 文件，并将该文件传递给调试器。"
+
+#: ../../source/user_guide/configuration/additional_config.md
 msgid "`dump_config_path`"
 msgstr "`dump_config_path`"
 
@@ -149,12 +316,8 @@ msgid "str"
 msgstr "str"
 
 #: ../../source/user_guide/configuration/additional_config.md
-msgid "`None`"
-msgstr "`None`"
-
-#: ../../source/user_guide/configuration/additional_config.md
-msgid "Configuration file path for msprobe dump(eager mode)."
-msgstr "msprobe dump 的配置文件路径（仅限 Eager 模式）。"
+msgid "Configuration file path for msprobe dump (compatible legacy option)."
+msgstr "msprobe dump 的配置文件路径（兼容旧版选项）。"
 
 #: ../../source/user_guide/configuration/additional_config.md
 msgid "`enable_async_exponential`"
@@ -211,7 +374,10 @@ msgid ""
 "disaggregated mode** (`kv_role` is `kv_producer` or `kv_consumer`). **Do "
 "not enable in PD-mixed mode** (no `kv_transfer_config`, or `kv_role` is "
 "`kv_both`); startup will fail with a clear error."
-msgstr "是否启用重计算调度器。**仅在 PD 解耦模式下有效**（`kv_role` 为 `kv_producer` 或 `kv_consumer`）。**请勿在 PD 混合模式下启用**（无 `kv_transfer_config`，或 `kv_role` 为 `kv_both`）；启动将失败并显示明确的错误信息。"
+msgstr ""
+"是否启用重计算调度器。**仅在 PD 解耦模式下有效**（`kv_role` 为 `kv_producer` 或 "
+"`kv_consumer`）。**请勿在 PD 混合模式下启用**（无 `kv_transfer_config`，或 `kv_role` 为 "
+"`kv_both`）；启动将失败并显示明确的错误信息。"
 
 #: ../../source/user_guide/configuration/additional_config.md
 msgid "`enable_cpu_binding`"
@@ -223,10 +389,23 @@ msgstr "`True`"
 
 #: ../../source/user_guide/configuration/additional_config.md
 msgid ""
-"Whether to enable CPU binding. Only takes effect on ARM CPUs; A3 uses the"
-" global-slicing CPU allocation strategy and other device types use the "
-"topo-affinity CPU allocation strategy."
-msgstr "是否启用 CPU 绑定。仅在 ARM CPU 上生效；A3 使用全局切片 CPU 分配策略，其他设备类型使用拓扑亲和性 CPU 分配策略。"
+"Enables Ascend-native CPU binding on ARM servers. Set to `False` to "
+"disable. See [CPU Binding](../feature_guide/cpu_binding.md)."
+msgstr ""
+"在 ARM 服务器上启用昇腾原生 CPU 绑定。设置为 `False` 以禁用。参见 [CPU "
+"绑定](../feature_guide/cpu_binding.md)。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`enable_sleep_mode_extra_cleanup`"
+msgstr "`enable_sleep_mode_extra_cleanup`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Enables extra sleep-mode cleanup for RL workloads, including HCCL "
+"process-group release and ACL graph workspace cleanup. Disabled by "
+"default because wakeup may need to restore HCCL and recapture ACL graphs."
+msgstr ""
+"为 RL 工作负载启用额外的睡眠模式清理，包括 HCCL 进程组释放和 ACL 图工作空间清理。默认禁用，因为唤醒可能需要恢复 HCCL 并重新捕获 ACL 图。"
 
 #: ../../source/user_guide/configuration/additional_config.md
 msgid "`SLO_limits_for_dynamic_batch`"
@@ -297,8 +476,20 @@ msgstr "`enable_sparse_c8`"
 #: ../../source/user_guide/configuration/additional_config.md
 msgid ""
 "Whether to enable KV cache C8 in DSA models (e.g., DeepSeekV3.2 and "
-"GLM5). Not supported on A5 devices now"
-msgstr "是否在 DSA 模型中启用 KV 缓存 C8（例如 DeepSeekV3.2 和 GLM5）。目前 A5 设备不支持。"
+"GLM5). Not supported on Ascend 950 devices now"
+msgstr "是否在 DSA 模型中启用 KV 缓存 C8（例如 DeepSeekV3.2 和 GLM5）。目前 Ascend 950 设备不支持。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`c8_enable_reshape_optim`"
+msgstr "`c8_enable_reshape_optim`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Whether to enable StoreKVBlock operator achieves acceleration under the "
+"C8 feature (this means that enable_sparse_c8 needs to be enabled). In the"
+" PD separation scenario, only the P node is enabled."
+msgstr ""
+"是否启用 StoreKVBlock 算子在 C8 特性下实现加速（这意味着需要启用 enable_sparse_c8）。在 PD 分离场景中，仅 P 节点启用。"
 
 #: ../../source/user_guide/configuration/additional_config.md
 msgid "`enable_mc2_hierarchy_comm`"
@@ -308,11 +499,131 @@ msgstr "`enable_mc2_hierarchy_comm`"
 msgid "Enable dispatch/combine op inter-node communication by ROCE."
 msgstr "通过 ROCE 启用分发/组合操作的节点间通信。"
 
-#: ../../source/user_guide/configuration/additional_config.md:50
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`profiling_chunk_config`"
+msgstr "`profiling_chunk_config`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Configuration options for dynamic chunked pipeline parallel. See [Dynamic"
+" Chunked Pipeline "
+"Parallel](../feature_guide/dynamic_chunk_pipeline_parallel.md) for "
+"details."
+msgstr "动态分块流水线并行的配置选项。详情请参见[动态分块流水线并行](../feature_guide/dynamic_chunk_pipeline_parallel.md)。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Whether to enable balance scheduling. Can also be configured via "
+"`VLLM_ASCEND_BALANCE_SCHEDULING` environment variable (deprecated)."
+msgstr "是否启用均衡调度。也可以通过 `VLLM_ASCEND_BALANCE_SCHEDULING` 环境变量配置（已弃用）。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Whether to enable FlashComm1 optimization. Can also be configured via "
+"`VLLM_ASCEND_ENABLE_FLASHCOMM1` environment variable (deprecated)."
+msgstr "是否启用 FlashComm1 优化。也可以通过 `VLLM_ASCEND_ENABLE_FLASHCOMM1` 环境变量配置（已弃用）。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Whether to enable matmul allreduce optimization. Can also be configured "
+"via `VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE` environment variable "
+"(deprecated)."
+msgstr "是否启用矩阵乘法全规约优化。也可以通过 `VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE` 环境变量配置（已弃用）。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`flashcomm2_parallel_size`"
+msgstr "`flashcomm2_parallel_size`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`0`"
+msgstr "`0`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"FlashComm2 parallel size. Can also be configured via "
+"`VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE` environment variable (deprecated)."
+msgstr "FlashComm2 并行大小。也可以通过 `VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE` 环境变量配置（已弃用）。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Whether to use daemon mode for msmonitor. Can also be configured via "
+"`MSMONITOR_USE_DAEMON` environment variable (deprecated)."
+msgstr "是否对 msmonitor 使用守护进程模式。也可以通过 `MSMONITOR_USE_DAEMON` 环境变量配置（已弃用）。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Whether to enable MLAPO (Model Layer-wise Adaptive Parallel "
+"Optimization). Can also be configured via `VLLM_ASCEND_ENABLE_MLAPO` "
+"environment variable (deprecated)."
+msgstr "是否启用 MLAPO（模型逐层自适应并行优化）。也可以通过 `VLLM_ASCEND_ENABLE_MLAPO` 环境变量配置（已弃用）。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`1`"
+msgstr "`1`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Weight NZ mode. Can also be configured via `VLLM_ASCEND_ENABLE_NZ` "
+"environment variable (deprecated)."
+msgstr "权重 NZ 模式。也可以通过 `VLLM_ASCEND_ENABLE_NZ` 环境变量配置（已弃用）。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Whether to enable context parallelism. Can also be configured via "
+"`VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL` environment variable (deprecated)."
+msgstr "是否启用上下文并行。也可以通过 `VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL` 环境变量配置（已弃用）。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Fused MC2 configuration. Can also be configured via "
+"`VLLM_ASCEND_ENABLE_FUSED_MC2` environment variable (deprecated)."
+msgstr "融合 MC2 配置。也可以通过 `VLLM_ASCEND_ENABLE_FUSED_MC2` 环境变量配置（已弃用）。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Whether to enable transpose KV cache by block. Can also be configured via"
+" `VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK` environment variable"
+" (deprecated)."
+msgstr ""
+"是否启用按块转置 KV 缓存。也可以通过 `VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK` "
+"环境变量配置（已弃用）。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`enable_dsa_cp`"
+msgstr "`enable_dsa_cp`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Whether to enable dsa_cp for DeepSeek V3.2, DeepSeek V4, and other models"
+" with the same architecture. This feature depends on FLASHCOMM1. Please "
+"ensure that FLASHCOMM1 is enabled before enabling this feature."
+msgstr ""
+"是否为 DeepSeek V3.2、DeepSeek V4 及其他相同架构的模型启用 dsa_cp。此功能依赖于 "
+"FLASHCOMM1。启用此功能前请确保已启用 FLASHCOMM1。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`rejection_sampler_config`"
+msgstr "`rejection_sampler_config`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Configuration options for rejection sampler (block verify and entropy "
+"verify)."
+msgstr "拒绝采样器（块验证和熵验证）的配置选项。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`multistream_dsv4_dsa_overlap`"
+msgstr "`multistream_dsv4_dsa_overlap`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "Whether to enable dsa multi-stream overlap for DeepSeek V4."
+msgstr "是否为 DeepSeek V4 启用 dsa 多流重叠。"
+
+#: ../../source/user_guide/configuration/additional_config.md:107
 msgid "The details of each configuration option are as follows:"
 msgstr "每个配置选项的详细说明如下："
 
-#: ../../source/user_guide/configuration/additional_config.md:52
+#: ../../source/user_guide/configuration/additional_config.md:109
 msgid "**xlite_graph_config**"
 msgstr "**xlite_graph_config**"
 
@@ -336,7 +647,7 @@ msgid ""
 "default, Xlite is only enabled for the decode stage."
 msgstr "是否在预填充和解码阶段同时启用 Xlite。默认情况下，Xlite 仅在解码阶段启用。"
 
-#: ../../source/user_guide/configuration/additional_config.md:59
+#: ../../source/user_guide/configuration/additional_config.md:116
 msgid "**weight_prefetch_config**"
 msgstr "**weight_prefetch_config**"
 
@@ -361,17 +672,13 @@ msgstr ""
 msgid "Prefetch ratio of each weight."
 msgstr "各项权重的预取比例。"
 
-#: ../../source/user_guide/configuration/additional_config.md:66
+#: ../../source/user_guide/configuration/additional_config.md:123
 msgid "**finegrained_tp_config**"
 msgstr "**finegrained_tp_config**"
 
 #: ../../source/user_guide/configuration/additional_config.md
 msgid "`lmhead_tensor_parallel_size`"
 msgstr "`lmhead_tensor_parallel_size`"
-
-#: ../../source/user_guide/configuration/additional_config.md
-msgid "`0`"
-msgstr "`0`"
 
 #: ../../source/user_guide/configuration/additional_config.md
 msgid "The custom tensor parallel size of lm_head."
@@ -401,7 +708,7 @@ msgstr "`mlp_tensor_parallel_size`"
 msgid "The custom tensor parallel size of mlp."
 msgstr "MLP 层的自定义张量并行大小。"
 
-#: ../../source/user_guide/configuration/additional_config.md:75
+#: ../../source/user_guide/configuration/additional_config.md:132
 msgid "**ascend_compilation_config**"
 msgstr "**ascend_compilation_config**"
 
@@ -456,7 +763,7 @@ msgstr "`fuse_muls_add`"
 msgid "Whether to enable fuse_muls_add pass."
 msgstr "是否启用 fuse_muls_add 优化通道。"
 
-#: ../../source/user_guide/configuration/additional_config.md:86
+#: ../../source/user_guide/configuration/additional_config.md:143
 msgid "**eplb_config**"
 msgstr "**eplb_config**"
 
@@ -520,10 +827,173 @@ msgstr "`num_redundant_experts`"
 msgid "Specify redundant experts during initialization."
 msgstr "在初始化阶段指定冗余专家的数量。"
 
-#: ../../source/user_guide/configuration/additional_config.md:97
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`eplb_policy_type`"
+msgstr "`eplb_policy_type`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"EPLB balancing policy: `0`=Random, `1`=DefaultEplb (open-source "
+"algorithm), `2`=SwiftBalanceEplb (optimized for low-bandwidth), "
+"`3`=FlashLB (statistical method with sliding windows)."
+msgstr ""
+"EPLB 均衡策略：`0`=随机，`1`=DefaultEplb（开源算法），`2`=SwiftBalanceEplb（针对低带宽优化），"
+"`3`=FlashLB（基于滑动窗口的统计方法）。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`eplb_heat_collection_stage`"
+msgstr "`eplb_heat_collection_stage`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`\"all\"`"
+msgstr "`\"all\"`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Stage to collect EPLB heat: `\"prefill\"` collects only during prefill, "
+"`\"decode\"` collects only during decode, `\"all\"` collects during both "
+"stages. In PD colocation scenarios, prefill and decode requests may "
+"produce different expert workloads. Selectively collecting heat on one "
+"stage can reduce expert imbalance more effectively."
+msgstr ""
+"收集 EPLB 热度的阶段：`\"prefill\"` 仅在预填充阶段收集，`\"decode\"` 仅在解码阶段收集，`\"all\"` 在两个阶段均收集。"
+"在 PD 共置场景中，预填充和解码请求可能产生不同的专家工作负载。选择性地在某个阶段收集热度可以更有效地减少专家不均衡。"
+
+#: ../../source/user_guide/configuration/additional_config.md:156
+msgid "**profiling_chunk_config**"
+msgstr "**profiling_chunk_config**"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Whether to enable dynamic chunked pipeline parallel. Requires `pipeline-"
+"parallel-size > 1`."
+msgstr "是否启用动态分块流水线并行。需要 `pipeline-parallel-size > 1`。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`smooth_factor`"
+msgstr "`smooth_factor`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "float"
+msgstr "float"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`1.0`"
+msgstr "`1.0`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Smoothing factor (0 < x ≤ 1.0). Higher values trust the dynamic "
+"prediction more; `0.0` disables dynamic adjustment."
+msgstr "平滑因子 (0 < x ≤ 1.0)。值越大越信任动态预测；`0.0` 表示禁用动态调整。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`min_chunk`"
+msgstr "`min_chunk`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`4096`"
+msgstr "`4096`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Minimum chunk size for dynamic calculation. Should be smaller than `max-"
+"num-batched-tokens`."
+msgstr "动态计算的最小分块大小。应小于 `max-num-batched-tokens`。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`need_timing`"
+msgstr "`need_timing`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "True"
+msgstr "True"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "Enable/disable Online Calibration"
+msgstr "启用/禁用在线校准"
+
+#: ../../source/user_guide/configuration/additional_config.md:165
+msgid "**rejection_sampler_config**"
+msgstr "**rejection_sampler_config**"
+
+#: ../../source/user_guide/configuration/additional_config.md:167
+msgid ""
+"**Note**: Both block verify and entropy verify improve speculative "
+"decoding performance (higher acceptance rate, lower latency) at the cost "
+"of reduced sampling precision. A larger `posterior_alpha` makes the "
+"adjustment more aggressive — it further lowers the acceptance threshold "
+"for high-entropy tokens, improving throughput but degrading output "
+"quality. Users should tune these parameters based on their specific model"
+" weights and application scenario to find the right trade-off between "
+"performance and precision."
+msgstr ""
+"**注意**：块验证和熵验证都能提升推测解码性能（更高的接受率、更低的延迟），但会降低采样精度。`posterior_alpha` "
+"值越大，调整越激进——它会进一步降低高熵 token "
+"的接受阈值，从而提高吞吐量但降低输出质量。用户应根据具体的模型权重和应用场景调整这些参数，以找到性能与精度之间的最佳平衡。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`enable_block_verify`"
+msgstr "`enable_block_verify`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Whether to enable block verify mode. Block verify evaluates all draft "
+"tokens as a block using cumulative probability products, which can "
+"improve acceptance rate."
+msgstr "是否启用块验证模式。块验证使用累积概率乘积将草稿 token 作为一个整体进行评估，可以提高接受率。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`enable_entropy_verify`"
+msgstr "`enable_entropy_verify`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Whether to enable entropy verify mode. Entropy verify adjusts the "
+"acceptance threshold based on the entropy of the target distribution — "
+"higher entropy (uncertain) tokens get a lower threshold (easier to "
+"accept), while lower entropy (confident) tokens get a stricter threshold."
+msgstr ""
+"是否启用熵验证模式。熵验证根据目标分布的熵调整接受阈值——高熵（不确定）token 获得更低的阈值（更容易接受），而低熵（确定）token "
+"获得更严格的阈值。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`posterior_threshold`"
+msgstr "`posterior_threshold`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`0.95`"
+msgstr "`0.95`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Upper bound for the entropy-adjusted acceptance threshold. Must be in (0,"
+" 1]. The effective threshold is `min(exp(-entropy * posterior_alpha), "
+"posterior_threshold)`."
+msgstr ""
+"熵调整后接受阈值的上限。必须在 (0, 1] 范围内。有效阈值为 `min(exp(-entropy * posterior_alpha), "
+"posterior_threshold)`。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`posterior_alpha`"
+msgstr "`posterior_alpha`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`0.4`"
+msgstr "`0.4`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Scaling factor for entropy in the threshold computation. Must be >= 0. "
+"Higher values make the threshold more sensitive to entropy — high-entropy"
+" tokens become much easier to accept, improving performance but reducing "
+"precision."
+msgstr "阈值计算中熵的缩放因子。必须 >= 0。值越大，阈值对熵越敏感——高熵 token 更容易被接受，从而提高性能但降低精度。"
+
+#: ../../source/user_guide/configuration/additional_config.md:176
 msgid "Example"
 msgstr "示例"
 
-#: ../../source/user_guide/configuration/additional_config.md:99
+#: ../../source/user_guide/configuration/additional_config.md:178
 msgid "An example of additional configuration is as follows:"
 msgstr "附加配置的一个示例如下："

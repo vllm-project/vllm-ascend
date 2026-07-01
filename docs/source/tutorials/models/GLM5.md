@@ -1,33 +1,43 @@
-# GLM-5
+# GLM-5/GLM-5.1
 
-## Introduction
+## 1 Introduction
 
-[GLM-5](https://huggingface.co/zai-org/GLM-5) use a Mixture-of-Experts (MoE) architecture and targets complex systems engineering and long-horizon agentic tasks.
+This document applies to both `GLM-5` and `GLM-5.1`. Unless otherwise specified, all descriptions, configurations, and deployment procedures for `GLM-5` in this document also apply to `GLM-5.1`. For brevity, `GLM-5` is used hereafter as a unified reference to both `GLM-5` and `GLM-5.1`.
 
-The `GLM-5` model is first supported in `vllm-ascend:v0.17.0rc1`. In `vllm-ascend:v0.17.0rc1` and `vllm-ascend:v0.18.0rc1` , the version of transformers need to be upgraded to 5.2.0.
+[GLM-5](https://huggingface.co/zai-org/GLM-5) uses a Mixture-of-Experts (MoE) architecture and targets complex systems engineering and long-horizon agentic tasks.
+
+The `GLM-5` model is first supported in `vllm-ascend:v0.17.0rc1`, and all **v0.17.0rc1 and later versions** can run stably. To use the latest features (e.g., PD separation, MTP), it is recommended to use the latest release candidate or official version. The version of transformers need to be upgraded to 5.2.0 or later versions.
 
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, accuracy and performance evaluation.
 
-## Supported Features
+## 2 Supported Features
 
 Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
 Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
-## Environment Preparation
+## 3 Prerequisites
 
-### Model Weight
+### 3.1 Model Weight
 
 - `GLM-5`(BF16 version): [Download model weight](https://www.modelscope.cn/models/ZhipuAI/GLM-5).
-- `GLM-5-w4a8`: [Download model weight](https://modelscope.cn/models/Eco-Tech/GLM-5-w4a8).
-- `GLM-5-w8a8`: [Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5-w8a8).
-- You can use [msmodelslim](https://gitcode.com/Ascend/msmodelslim) to quantify the model naively.
+- `GLM-5-w4a8`(Quantized version): [Download model weight](https://modelscope.cn/models/Eco-Tech/GLM-5-w4a8).
+- `GLM-5-w8a8`(Quantized version): [Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5-w8a8).
+- `GLM-5.1`(BF16 version): [Download model weight](https://huggingface.co/zai-org/GLM-5.1).
+- `GLM-5.1-w4a8`(Quantized version): [Download model weight](https://modelers.cn/models/Eco-Tech/GLM-5.1-w4a8).
+- `GLM-5.1-w8a8`(Quantized version): [Download model weight](https://modelers.cn/models/Eco-Tech/GLM-5.1-w8a8).
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
 
-### Installation
+### 3.2 Verify Multi-node Communication (Optional)
 
-You can use our official docker image to run GLM-5 directly.
+If multi-node deployment is required, please follow the [Verify Multi-node Communication Environment](../../installation.md#verify-multi-node-communication) guide for communication verification.
+
+## 4 Installation
+
+### 4.1 Docker Image Installation
+
+You can use our official docker image to run GLM-5/5.1 directly.
 
 :::::{tab-set}
 :sync-group: install
@@ -116,15 +126,21 @@ docker run --rm \
 ::::
 :::::
 
+If you want to deploy multi-node environment, you need to set up environment on each node.
+
+To verify the successful installation of the environment, please refer to [installation](../../installation.md).
+
+### 4.2 Source Code Installation
+
 In addition, if you don't want to use the docker image as above, you can also build all from source:
 
-- Install `vllm-ascend` from source, refer to [installation](https://docs.vllm.ai/projects/ascend/en/latest/installation.html).
+- Install `vllm-ascend` from source, refer to [installation](../../installation.md).
 
 If you want to deploy multi-node environment, you need to set up environment on each node.
 
-## Deployment
+## 5 Online Service Deployment
 
-### Single-node Deployment
+### 5.1 Single-Node Online Deployment
 
 :::::{tab-set}
 :sync-group: install
@@ -132,18 +148,24 @@ If you want to deploy multi-node environment, you need to set up environment on 
 ::::{tab-item} A3 series
 :sync: A3
 
-- Quantized model `glm-5-w4a8` can be deployed on 1 Atlas 800 A3 (64G × 16) .
+- Quantized model `glm-5-w4a8` and `glm-5.1-w4a8` can be deployed on 1 Atlas 800 A3 (64G × 16) .
 
 Run the following script to execute online inference.
 
+Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
+
 ```{code-block} bash
    :substitutions:
+# The version of transformers needs to be upgraded to 5.2.0.
+# pip install transformers==5.2.0 --upgrade
+
 export HCCL_OP_EXPANSION_MODE="AIV"
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=1
 export HCCL_BUFFSIZE=200
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export VLLM_ASCEND_BALANCE_SCHEDULING=1
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
 vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a8 \
 --host 0.0.0.0 \
@@ -161,13 +183,12 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a8 \
 --quantization ascend \
 --enable-chunked-prefill \
 --enable-prefix-caching \
---async-scheduling \
 --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}' \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}' 
 ```
 
-- Quantized model `glm-5-w8a8` can be deployed on 1 Atlas 800 A3 (64G × 16) .
+- Quantized model `glm-5-w8a8` and `glm-5.1-w8a8` can be deployed on 1 Atlas 800 A3 (64G × 16) .
 
 Run the following script to execute online inference.
 
@@ -180,6 +201,7 @@ export HCCL_BUFFSIZE=200
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export VLLM_ASCEND_BALANCE_SCHEDULING=1
 export VLLM_ASCEND_ENABLE_MLAPO=1
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
 vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
 --host 0.0.0.0 \
@@ -197,7 +219,6 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
 --quantization ascend \
 --enable-chunked-prefill \
 --enable-prefix-caching \
---async-scheduling \
 --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}' \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}' 
@@ -211,6 +232,8 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
 
 Run the following script to execute online inference.
 
+Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
+
 ```{code-block} bash
    :substitutions:
 export HCCL_OP_EXPANSION_MODE="AIV"
@@ -219,8 +242,9 @@ export OMP_NUM_THREADS=1
 export HCCL_BUFFSIZE=200
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export VLLM_ASCEND_BALANCE_SCHEDULING=1
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5-w4a8 \
+vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a8 \
 --host 0.0.0.0 \
 --port 8077 \
 --data-parallel-size 1 \
@@ -236,7 +260,6 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5-w4a8 \
 --quantization ascend \
 --enable-chunked-prefill \
 --enable-prefix-caching \
---async-scheduling \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
 --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}' \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
@@ -249,11 +272,12 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5-w4a8 \
 The parameters are explained as follows:
 
 - For single-node deployment, we recommend using `dp1tp16` and turn off expert parallel in low-latency scenarios.
-- `--async-scheduling` Asynchronous scheduling is a technique used to optimize inference efficiency. It allows non-blocking task scheduling to improve concurrency and throughput, especially when processing large-scale models.
 
-### Multi-node Deployment
+### 5.2 Multi-node Deployment
 
 If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../installation.md#verify-multi-node-communication).
+
+Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
 
 :::::{tab-set}
 :sync-group: install
@@ -261,7 +285,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 ::::{tab-item} A3 series
 :sync: A3
 
-- `glm-5-bf16`: require at least 2 Atlas 800 A3 (64G × 16).
+- `glm-5-bf16` and `glm-5.1-bf16`: require at least 2 Atlas 800 A3 (64G × 16).
 
 Run the following scripts on two nodes respectively.
 
@@ -288,6 +312,7 @@ export OMP_NUM_THREADS=1
 export HCCL_BUFFSIZE=200
 export VLLM_ASCEND_BALANCE_SCHEDULING=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
 vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-bf16 \
 --host 0.0.0.0 \
@@ -332,6 +357,7 @@ export OMP_NUM_THREADS=1
 export HCCL_BUFFSIZE=200
 export VLLM_ASCEND_BALANCE_SCHEDULING=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
 vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-bf16 \
 --host 0.0.0.0 \
@@ -384,8 +410,9 @@ export OMP_NUM_THREADS=1
 export HCCL_BUFFSIZE=200
 export VLLM_ASCEND_BALANCE_SCHEDULING=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5-w4a8 \
+vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a8 \
 --host 0.0.0.0 \
 --port 8077 \
 --data-parallel-size 2 \
@@ -430,8 +457,9 @@ export OMP_NUM_THREADS=1
 export HCCL_BUFFSIZE=200
 export VLLM_ASCEND_BALANCE_SCHEDULING=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5-w4a8 \
+vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a8 \
 --host 0.0.0.0 \
 --port 8077 \
 --headless \
@@ -458,7 +486,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5-w4a8 \
 ::::
 :::::
 
-- For bf16 weight, use this script on each node to enable [Multi Token Prediction (MTP)](../../user_guide/feature_guide/Multi_Token_Prediction.md).
+- For bf16 weight, use this script on each node to enable [Multi Token Prediction (MTP)](../../user_guide/feature_guide/speculative_decoding.md).
 
 ```shell
 python adjust_weight.py "path_of_bf16_weight"
@@ -508,9 +536,9 @@ if __name__ == "__main__":
                new_dict[new_key] = tensor_dict[key]
 
    new_file_name = os.path.join(directory_path, "mtp-others.safetensors")
-   new_key = ["model.layers.78.embed_tokens.weight", "model.layers.78.shared_head.head.weight"]
+   new_keys = ["model.layers.78.embed_tokens.weight", "model.layers.78.shared_head.head.weight"]
    save_file(tensors=new_dict, filename=new_file_name)
-   for key in new_key:
+   for key in new_keys:
          json_data["weight_map"][key] = "mtp-others.safetensors"
    with open(json_path, 'w', encoding='utf-8') as f:
          json.dump(json_data, f, indent=2)
@@ -550,6 +578,7 @@ export HCCL_BUFFSIZE=200
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export VLLM_ASCEND_BALANCE_SCHEDULING=1
 export VLLM_ASCEND_ENABLE_MLAPO=1
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
 vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
 --host 0.0.0.0 \
@@ -570,7 +599,6 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
 --quantization ascend \
 --enable-chunked-prefill \
 --enable-prefix-caching \
---async-scheduling \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
 --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}' \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
@@ -600,6 +628,7 @@ export HCCL_BUFFSIZE=200
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export VLLM_ASCEND_BALANCE_SCHEDULING=1
 export VLLM_ASCEND_ENABLE_MLAPO=1
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
 vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
 --host 0.0.0.0 \
@@ -622,7 +651,6 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
 --quantization ascend \
 --enable-chunked-prefill \
 --enable-prefix-caching \
---async-scheduling \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
 --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}' \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
@@ -631,9 +659,9 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
 ::::
 :::::
 
-### Prefill-Decode Disaggregation
+### 5.3 Prefill-Decode Disaggregation
 
-We'd like to show the deployment guide of `GLM-5` on multi-node environment with 1P1D for better performance.
+We'd like to show the deployment guide of `GLM-5` on multi-node environment with 1P1D for better performance. *Prefill-Decode Disaggregation* refers to the separation of the prefill stage and the decode stage across different nodes to improve throughput and latency.
 
 Before you start, please
 
@@ -742,7 +770,7 @@ Before you start, please
 
 2. prepare the script `run_dp_template.sh` on each node.
 
-    To support a 200k context window on the stage of prefill, the parameter `"layer_sharding": ["q_b_proj"]` needs to be added to `--additional_config` on each prefill node.
+    To support a 200k context window on the stage of prefill, the parameter `"layer_sharding": ["q_b_proj", "o_proj"]` needs to be added to `--additional_config` on each prefill node.
     1. Prefill node 0
 
         ```shell
@@ -765,7 +793,8 @@ Before you start, please
         export ASCEND_TRANSPORT_PRINT=1
         export ACL_OP_INIT_MODE=1
         export ASCEND_A3_ENABLE=1
-        export VLLM_NIXL_ABORT_REQUEST_TIMEOUT=300000
+        # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
+        export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
 
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
@@ -773,7 +802,7 @@ Before you start, please
         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
 
-        vllm serve /root/.cache/glm5-w8a8 \
+        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
             --host 0.0.0.0 \
             --port $2 \
             --data-parallel-size $3 \
@@ -790,11 +819,10 @@ Before you start, please
             --seed 1024 \
             --served-model-name glm-5 \
             --max-model-len 131072 \
-            --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}' \
+            --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true}, "enable_dsa_cp": true}' \
             --max-num-batched-tokens 4096 \
             --trust-remote-code \
             --max-num-seqs 64 \
-            --async-scheduling \
             --enable-chunked-prefill \
             --quantization ascend \
             --gpu-memory-utilization 0.95 \
@@ -806,7 +834,6 @@ Before you start, please
             '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_producer",
             "kv_port": "30000",
-            "engine_id": "0",
             "kv_connector_extra_config": {
                         "use_ascend_direct": true,
                         "prefill": {
@@ -844,7 +871,8 @@ Before you start, please
         export ASCEND_TRANSPORT_PRINT=1
         export ACL_OP_INIT_MODE=1
         export ASCEND_A3_ENABLE=1
-        export VLLM_NIXL_ABORT_REQUEST_TIMEOUT=300000
+        # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
+        export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
 
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
@@ -854,7 +882,7 @@ Before you start, please
         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
 
-        vllm serve /root/.cache/glm5-w8a8 \
+        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
             --host 0.0.0.0 \
             --port $2 \
             --data-parallel-size $3 \
@@ -871,11 +899,10 @@ Before you start, please
             --seed 1024 \
             --served-model-name glm-5 \
             --max-model-len 131072 \
-            --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}' \
+            --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true}, "enable_dsa_cp": true}' \
             --max-num-batched-tokens 4096 \
             --trust-remote-code \
             --max-num-seqs 64 \
-            --async-scheduling \
             --enable-chunked-prefill \
             --gpu-memory-utilization 0.95 \
             --quantization ascend \
@@ -887,7 +914,6 @@ Before you start, please
             '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_producer",
             "kv_port": "30000",
-            "engine_id": "0",
             "kv_connector_extra_config": {
                         "use_ascend_direct": true,
                         "prefill": {
@@ -927,7 +953,8 @@ Before you start, please
         export ASCEND_TRANSPORT_PRINT=1
         export ACL_OP_INIT_MODE=1
         export ASCEND_A3_ENABLE=1
-        export VLLM_NIXL_ABORT_REQUEST_TIMEOUT=300000
+        # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
+        export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
     
         export TASK_QUEUE_ENABLE=1
     
@@ -937,7 +964,7 @@ Before you start, please
         export VLLM_ASCEND_ENABLE_MLAPO=1
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
     
-        vllm serve /root/.cache/glm5-w8a8 \
+        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
             --host 0.0.0.0 \
             --port $2 \
             --data-parallel-size $3 \
@@ -960,7 +987,6 @@ Before you start, please
             --trust-remote-code \
             --max-num-seqs 8 \
             --gpu-memory-utilization 0.92 \
-            --async-scheduling \
             --quantization ascend \
             --enable-auto-tool-choice \
             --tool-call-parser glm47 \
@@ -969,7 +995,6 @@ Before you start, please
             '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_consumer",
             "kv_port": "30100",
-            "engine_id": "1",
             "kv_connector_extra_config": {
                         "use_ascend_direct": true,
                         "prefill": {
@@ -1008,7 +1033,8 @@ Before you start, please
          export ASCEND_TRANSPORT_PRINT=1
          export ACL_OP_INIT_MODE=1
          export ASCEND_A3_ENABLE=1
-         export VLLM_NIXL_ABORT_REQUEST_TIMEOUT=300000
+         # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
+         export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
             
          export TASK_QUEUE_ENABLE=1
             
@@ -1018,7 +1044,7 @@ Before you start, please
          export VLLM_ASCEND_ENABLE_MLAPO=1
          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
             
-         vllm serve /root/.cache/glm5-w8a8 \
+         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
              --host 0.0.0.0 \
              --port $2 \
              --data-parallel-size $3 \
@@ -1041,7 +1067,6 @@ Before you start, please
              --trust-remote-code \
              --max-num-seqs 8 \
              --gpu-memory-utilization 0.92 \
-             --async-scheduling \
              --quantization ascend \
              --enable-auto-tool-choice \
              --tool-call-parser glm47 \
@@ -1050,7 +1075,6 @@ Before you start, please
              '{"kv_connector": "MooncakeConnectorV1",
              "kv_role": "kv_consumer",
              "kv_port": "30100",
-             "engine_id": "1",
              "kv_connector_extra_config": {
                          "use_ascend_direct": true,
                          "prefill": {
@@ -1089,7 +1113,8 @@ Before you start, please
          export ASCEND_TRANSPORT_PRINT=1
          export ACL_OP_INIT_MODE=1
          export ASCEND_A3_ENABLE=1
-         export VLLM_NIXL_ABORT_REQUEST_TIMEOUT=300000
+         # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
+         export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
             
          export TASK_QUEUE_ENABLE=1
             
@@ -1099,7 +1124,7 @@ Before you start, please
          export VLLM_ASCEND_ENABLE_MLAPO=1
          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
             
-         vllm serve /root/.cache/glm5-w8a8 \
+         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
              --host 0.0.0.0 \
              --port $2 \
              --data-parallel-size $3 \
@@ -1122,7 +1147,6 @@ Before you start, please
              --trust-remote-code \
              --max-num-seqs 8 \
              --gpu-memory-utilization 0.92 \
-             --async-scheduling \
              --quantization ascend \
              --enable-auto-tool-choice \
              --tool-call-parser glm47 \
@@ -1131,7 +1155,6 @@ Before you start, please
              '{"kv_connector": "MooncakeConnectorV1",
              "kv_role": "kv_consumer",
              "kv_port": "30100",
-             "engine_id": "1",
              "kv_connector_extra_config": {
                          "use_ascend_direct": true,
                          "prefill": {
@@ -1170,7 +1193,8 @@ Before you start, please
          export ASCEND_TRANSPORT_PRINT=1
          export ACL_OP_INIT_MODE=1
          export ASCEND_A3_ENABLE=1
-         export VLLM_NIXL_ABORT_REQUEST_TIMEOUT=300000
+         # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
+         export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
             
          export TASK_QUEUE_ENABLE=1
             
@@ -1180,7 +1204,7 @@ Before you start, please
          export VLLM_ASCEND_ENABLE_MLAPO=1
          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
             
-         vllm serve /root/.cache/glm5-w8a8 \
+         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
              --host 0.0.0.0 \
              --port $2 \
              --data-parallel-size $3 \
@@ -1203,7 +1227,6 @@ Before you start, please
              --trust-remote-code \
              --max-num-seqs 8 \
              --gpu-memory-utilization 0.92 \
-             --async-scheduling \
              --quantization ascend \
              --enable-auto-tool-choice \
              --tool-call-parser glm47 \
@@ -1212,7 +1235,6 @@ Before you start, please
              '{"kv_connector": "MooncakeConnectorV1",
              "kv_role": "kv_consumer",
              "kv_port": "30100",
-             "engine_id": "1",
              "kv_connector_extra_config": {
                          "use_ascend_direct": true,
                          "prefill": {
@@ -1271,7 +1293,7 @@ Once the preparation is done, you can start the server with the following comman
     python launch_online_dp.py --dp-size 16 --tp-size 4 --dp-size-local 4 --dp-rank-start 12 --dp-address $node_d0_ip --dp-rpc-port 10523 --vllm-start-port 6721
     ```
 
-### Request Forwarding
+### 5.4 Request Forwarding
 
 To set up request forwarding, run the following script on any machine. You can get the proxy program in the repository's examples: [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
 
@@ -1284,8 +1306,6 @@ python load_balance_proxy_server_example.py \
     --host 0.0.0.0 \
     --prefiller-hosts \
        $node_p0_ip \
-       $node_p0_ip \
-       $node_p1_ip \
        $node_p1_ip \
     --prefiller-ports \
        6700 \
@@ -1324,7 +1344,7 @@ Some configurations for optimization are shown below:
 
 Please refer to the following python file for further explanation and restrictions of the environment variables above: [envs.py](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/envs.py)
 
-## Functional Verification
+## 6 Functional Verification
 
 Once your server is started, you can query the model with input prompts:
 
@@ -1334,46 +1354,60 @@ curl http://<node0_ip>:<port>/v1/completions \
     -d '{
         "model": "glm-5",
         "prompt": "The future of AI is",
-        "max_completion_tokens": 50,
+        "max_completion_tokens": 15,
         "temperature": 0
     }'
 ```
 
-## Accuracy Evaluation
+Expected Result:
 
-Here are two accuracy evaluation methods.
+```shell
+{"id": "chatcmlib-bc44ad093dec79a2", "object": "chat.completion", "created": "1770903266", "model": "glm-5", "choices": [{ "index": 0, "message": {"role": "assistant", "content": "The future of AI is not one thing, but a convergence of several powerful trends.", "annotations": "null", "audio": "null", "function_call": "null", "tool_calls": [], "reasoning": "null"}, "logprobs": "null", "finish_reason": "length", "stop_reason": "null", "token_ids": null}], "service_tier": "null", "system fingerprint": "null", "usage": {"prompt_tokens": 5, "total_tokens": 20, "completion_tokens": 15, "prompt_tokens_details": null}, "prompt_logprobs": "null", "prompt_token_ids": "null", "kv_transfer_params": null}
+```
 
-### Using AISBench
+## 7 Accuracy Evaluation
+
+### 7.1 Using AISBench
 
 1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
 
 2. After execution, you can get the result.
 
-### Using Language Model Evaluation Harness
+## 8 Performance Evaluation
 
-Not tested yet.
-
-## Performance
-
-### Using AISBench
+### 8.1 Using AISBench
 
 Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
-### Using vLLM Benchmark
+### 8.2 Using vLLM Benchmark
 
-Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
+Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/) for more details.
 
-## Best Practices
+## 9 Performance Tuning
 
-In this chapter, we recommend best practices in prefill-decode disaggregation scenario with 1P1D architecture using 4 Atlas 800 A3 (64G × 16):
+### 9.1 Recommended Configurations
 
-- Low-latency: We recommend setting `dp4 tp8` on prefill nodes and `dp4 tp8` on decode nodes for low latency situation.
-- High-throughput: `dp4 tp8` on prefill nodes and `dp8 tp4` on decode nodes is recommended for high throughput situation.
+> **Note**: The following configurations are validated in specific test environments and are for reference only. The optimal configuration depends on factors such as maximum input/output length, prefix cache hit rate, precision requirements, and deployment machine ratios. It is recommended to refer to Section 9.2 for tuning based on actual conditions.
 
-**Notice:**
-`max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario. For other settings, please refer to the **[Deployment](#deployment)** chapter.
+#### Table 1: Scenario Overview
 
-## FAQ
+|Scenario|Deployment Mode|*Total NPUs|Weight Version|Key Considerations|
+|--------|---------------|-----------|---------------|-------------------|
+|High Throughput|1P1D deployment|32 (A3)|GLM5-w8a8/GLM5.1-w8a8|dp4 tp8 on P nodes and dp8 dp4 on D nodes to balanced latency and throughput|
+|Low Latency|1P1D deployment|32 (A3)|GLM5-w8a8/GLM5.1-w8a8|dp4 tp8 on both P and D nodes to reduce latency|
+
+> `*Total NPUs` indicates the total number of NPUs used across all nodes.
+
+#### Table 2: Detailed Node Configuration
+
+|Scenario|Configuration|NPUs|TP|DP|Max Num Seqs|Max Num Batched Tokens|Max Model Len|MTP Speculation Num|
+|--------|-------------|-----|--|--|------------|----------------------|--------------|--------------------|
+|High Throughput (A3)|1P1D deployment|32|P:8 D:4|P:4 D:8|P:64 D:128|P:4096 D:32|P:133120 D:150000|3|
+|Low Latency (A3)|1P1D deployment|32|4|8|P:64 D:128|P:4096 D:32|P:133120 D:150000|3|
+
+## 10 FAQ
+
+- Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
 
 - **Q: How to solve ValueError: Tokenizer class TokenizersBackend does not exist or is not currently imported?**
 

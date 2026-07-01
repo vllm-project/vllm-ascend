@@ -2,6 +2,8 @@
 
 During inference or training runs we often encounter accuracy anomalies such as outputs drifting away from the expectation, unstable numerical behavior (NaN/Inf), or predictions that no longer match the labels. To pinpoint the root cause we have to monitor and capture intermediate data produced while the model executes—feature maps, weights, activations, and layer outputs. By capturing key tensors at specific stages, logging I/O pairs for the core layers, and retaining contextual metadata (prompts, tensor dtypes, hardware configuration, etc.), we can systematically trace where the accuracy degradation or numerical error started. This guide describes the end-to-end workflow for diagnosing accuracy issues for AI models (with a focus on vllm-ascend services): preparation, data capture, and analysis & verification.
 
+For more details, see [Ascend/msprobe](https://gitcode.com/Ascend/msprobe).
+
 ## 0. Background Concepts
 
 `msprobe` supports three accuracy levels:
@@ -17,37 +19,46 @@ During inference or training runs we often encounter accuracy anomalies such as 
 Install msprobe with pip:
 
 ```bash
-pip install mindstudio-probe==8.3.0
+pip install mindstudio-probe
 ```
 
-### 1.2 Visualization dependencies (optional)
+### 1.2 Graph mode dump (optional)
 
-Install additional dependencies if you need to visualize the captured data.
+If you need to dump cudagraph graphs, you need to install from source code:
 
-1. Install `tb_graph_ascend`:
+1. Install `aclgraph_dump` from source code:
 
    ```bash
-   pip install tb_graph_ascend
+   git clone https://gitcode.com/Ascend/msprobe.git
+   cd msprobe
+   python3 setup.py bdist_wheel --include-mod=aclgraph_dump --no-check
+   pip install dist/*.whl
    ```
 
 ## 2. Collecting Data with `msprobe`
 
 We generally follow a coarse-to-fine strategy when capturing data. First, identify the token where the issue shows up, and then decide which range needs to be sampled around that token. The typical workflow is described below.
 
-### 2.1 Prepare the dump configuration file
+### 2.1 Prepare the dump configuration content
 
-Create a `config.json` that can be parsed by `PrecisionDebugger` and place it in an accessible path. Common fields are:
+Prepare configuration content that can be parsed by `PrecisionDebugger`. You can use either of the following ways:
 
-| Field | Description | Required |
-|:---:|:----|:---:|
-| `task` | Type of dump task. Common PyTorch values include `"statistics"` and `"tensor"`. A statistics task collects tensor statistics (mean, variance, max, min, etc.) while a tensor task captures arbitrary tensors. | Yes |
-| `dump_path` | Directory where dump results are stored. When omitted, `msprobe` uses its default path. | No |
-| `rank` | Ranks to sample. An empty list collects every rank. For single-card tasks, you must set this field to `[]`. | No |
-| `step` | Token iteration(s) to sample. An empty list means every iteration. | No |
-| `level` | Dump level string (`"L0"`, `"L1"`, or `"mix"`). `L0` targets `nn.Module`, `L1` targets `torch.api`, and `mix` collects both. | Yes |
-| `async_dump` | Whether to enable asynchronous dump (supported for PyTorch `statistics`/`tensor` tasks). Defaults to `false`. | No |
-| `scope` | Module range to sample. An empty list collects every module. | No |
-| `list` | Operator range to sample. An empty list collects every operator. | No |
+- Pass the config object directly through `--additional-config.dump_config`.
+- Pass a config file path through `--additional-config.dump_config_path`.
+
+Common fields are:
+
+| Field       | Description                                                                                                                                                                                                 | Required | Eager Mode | Graph Mode |
+|:-----------:|:-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|:--------:|:-------------:|:-------------:|
+| `task`      | Type of dump task. Common PyTorch values include `"statistics"` and `"tensor"`. A statistics task collects tensor statistics (mean, variance, max, min, etc.) while a tensor task captures arbitrary tensors. |    Yes   |      ✅       |      ✅       |
+| `dump_path` | Directory where dump results are stored. When omitted, `msprobe` uses its default path.                                                                                                                     |    No    |      ✅       |      ✅       |
+| `rank`      | Ranks to sample. An empty list collects every rank. For single-card tasks, you must set this field to `[]`.                                                                                                 |    No    |      ✅       |      ✅       |
+| `step`      | Token iteration(s) to sample. An empty list means every iteration.                                                                                                                                         |    No    |      ✅       |      ❌       |
+| `level`     | Dump level string (`"L0"`, `"L1"`, or `"mix"`). `L0` targets `nn.Module`, `L1` targets `torch.api`, and `mix` collects both.                                                                                 |    Yes   |      ✅       |      ✅       |
+| `async_dump`| Whether to enable asynchronous dump (supported for PyTorch `statistics`/`tensor` tasks). Defaults to `false`.                                                                                              |    No    |      ✅       |      ❌       |
+| `scope`     | Module range to sample. An empty list collects every module.                                                                                                                                                |    No    |      ✅       |      ❌       |
+| `dump_enable` | Dynamic switch for enabling/disabling dump in `PrecisionDebugger` during one running training/inference job. This allows turning dump on or off on demand in the same job.                             |    No    |      ✅       |      ❌       |
+| `list`      | Operator range to sample. An empty list collects every operator.                                                                                                                                            |    No    |      ✅       |      ✅       |
 
 To restrict the operators that are captured, configure the `list` block:
 
@@ -67,6 +78,7 @@ To restrict the operators that are captured, configure the `list` block:
     - Provide a substring such as `"list": ["relu"]` to dump every API whose name contains the substring. When `level=mix`, modules whose names contain the substring are also expanded.
 
 Example configuration:
+eager mode:
 
 ```json
 {
@@ -87,14 +99,45 @@ Example configuration:
 }
 ```
 
+Graph mode:
+
+```json
+{
+  "task": "statistics",
+  "level": "L1",
+  "dump_path": "/home/data_dump",
+  "statistics": {
+    "list": []
+  }
+}
+```
+
 ## 3. Enable `msprobe` in vllm-ascend
 
-1. Start vLLM in eager mode by adding `--enforce-eager` (static-graph scenarios are not supported yet) and pass the config path through `--additional-config`:
+1. Start vLLM and pass the dump config content through `--additional-config`:
 
    ```bash
    vllm serve Qwen/Qwen2.5-0.5B-Instruct \
-     --dtype float16 \
-     --enforce-eager \
+     --dtype bfloat16 \
+     --host 0.0.0.0 \
+     --port 8000 \
+     --additional-config '{
+       "dump_config": {
+         "task": "statistics",
+         "level": "L1",
+         "dump_path": "/data/msprobe_dump",
+         "statistics": {
+           "list": []
+         }
+       }
+     }' &
+   ```
+
+   Compatibility mode (legacy) is still supported:
+
+   ```bash
+   vllm serve Qwen/Qwen2.5-0.5B-Instruct \
+     --dtype bfloat16 \
      --host 0.0.0.0 \
      --port 8000 \
      --additional-config '{"dump_config_path": "/data/msprobe_config.json"}' &
@@ -123,6 +166,7 @@ Example configuration:
    - `construct.json`, which is generated when `level` is `L0` or `mix` (required for visualization).
 
    Example directory layout:
+   eager mode:
 
    ```text
    ├── dump_path
@@ -160,6 +204,32 @@ Example configuration:
    - `stack.json`: Call stacks for APIs/modules.
    - `construct.json`: Hierarchical structure description. Empty when `level=L1`.
 
+   graph mode:
+
+   ```text
+   L0_dump
+   ├── step0
+   │   └── rank0
+   │       └── dump.json
+   ├── step1
+   │   └── rank0
+   │       └── dump.json
+   ├── step2
+   │   └── rank0
+   │       └── dump.json
+   ├── step3
+   │   └── rank0
+   │       └── dump.json
+   ├── step4
+   │   └── rank0
+   │       └── dump.json
+   └── step5
+       └── rank0
+           └── dump.json
+   ```
+
+   - `dump.json`: Statistics for the forward data of each API or module, including names, dtype, shape, max, min, mean, L2 norm (square root of the L2 variance), and CRC-32 when `summary_mode="md5"`. See [dump.json file description](#dumpjson-file-description) for details.
+
 ## 5. Analyze the results
 
 ### 5.1 Prerequisites
@@ -168,69 +238,51 @@ You typically need two dump datasets: one from the "problem side" (the run that 
 
 ### 5.2 Visualization
 
-Use `msprobe -f pytorch graph` to generate results that can be opened inside `tb_graph_ascend`.
+Use `msprobe graph_visualize` to build or compare graphs, then open the generated `*.vis.db` file(s) with TensorBoard (`tb_graph_ascend` plugin).
 
-1. Ensure the dump contains `construct.json` (i.e., `level = L0` or `level = mix`).
-2. Prepare a comparison file such as `compare.json`. Its format and generation flow are described in section 3.1.3 of `msprobe_visualization.md`. Example (minimal runnable snippet):
+1. Ensure dump data is visualization-ready:
+   - Dump level must be `L0` or `mix` so `construct.json` is non-empty.
+   - Each rank directory should contain `dump.json`, `stack.json`, and `construct.json`.
 
-   ```json
-   {
-     "npu_path": "./problem_dump",
-     "bench_path": "./bench_dump",
-     "is_print_compare_log": true
-   }
-   ```
+2. Choose command mode:
+   - Single-graph build:
 
-   Replace the paths with your dump directories before invoking `msprobe -f pytorch graph`. **If you only need to build a single graph**, omit `bench_path` to visualize one dump.  
-   Multi-rank scenarios (single rank, multi-rank, or multi-step multi-rank) are also supported. `npu_path` or `bench_path` must contain folders named `rank+number`, and every rank folder must contain a non-empty `construct.json` together with `dump.json` and `stack.json`. If any `construct.json` is empty, verify that the dump level includes `L0` or `mix`. When comparing graphs, both `npu_path` and `bench_path` must contain the same set of rank folders so they can be paired one-to-one.
+     ```bash
+     msprobe graph_visualize -tp <target_path> -o <output_path>
+     ```
 
-   ```shell
-   ├── npu_path or bench_path
-   |   ├── rank0
-   |   |   ├── dump_tensor_data (only when the `tensor` option is enabled)
-   |   |   |    ├── Tensor.permute.1.forward.pt
-   |   |   |    ├── MyModule.0.forward.input.pt
-   |   |   |    ...
-   |   |   |    └── Functional.linear.5.forward.output.pt
-   |   |   ├── dump.json         # Tensor metadata
-   |   |   ├── stack.json        # Operator call stack information
-   |   |   └── construct.json    # Hierarchical structure; empty when `level=L1`
-   |   ├── rank1
-   |   |   ├── dump_tensor_data
-   |   |   |   └── ...
-   |   |   ├── dump.json
-   |   |   ├── stack.json
-   |   |   └── construct.json
-   |   ├── ...
-   |   |
-   |   └── rankn
-   ```
+   - Graph comparison:
 
-3. Run:
+     ```bash
+     msprobe graph_visualize -tp <target_path> -gp <golden_path> -o <output_path>
+     ```
 
-   ```bash
-   msprobe -f pytorch graph \
-       --input_path ./compare.json \
-       --output_path ./graph_output
-   ```
+   - Common optional flags:
+     - `-oc` / `--overflow_check`: enable overflow marking
+     - `-fm` / `--fuzzy_match`: enable fuzzy matching for node mapping
+     - `-lm` / `--layer_mapping [mapping.yaml]`: cross-framework/layer mapping compare
+     - `-tensor_log`: print per-node compare log (tensor dump scenarios)
+     - `-progress_log`: print detailed progress log
 
-   After the comparison finishes, a `*.vis.db` file is created under `graph_output`.
+3. Path granularity is auto-detected by `graph_visualize`:
+   - Single-rank: `.../step0/rank0`
+   - Multi-rank (batch): `.../step0`
+   - Multi-step (batch): dump root path containing `step*`
 
-   - Graph build: `build_{timestamp}.vis.db`
+4. Output files:
+   - Single-graph build: `build_{timestamp}.vis.db`
    - Graph comparison: `compare_{timestamp}.vis.db`
 
-4. Launch `tensorboard` and load the output directory to inspect structural differences, numerical comparisons, overflow detection results, cross-device communication nodes, and filters/search. Pass the directory containing the `.vis.db` files to `--logdir`:
+5. Launch TensorBoard with the output directory:
 
    ```bash
-   tensorboard --logdir out_path --bind_all --port [optional_port]
+   tensorboard --logdir <output_path> --bind_all --port <optional_port>
    ```
 
-5. Inspect the visualization. The UI usually displays the overall model structure with operators, parameters, and tensor I/O. Click any node to expand its children.
-   - **Difference visualization**: Comparison results highlight divergent nodes with different colors (the larger the difference, the redder the node). Click a node to view its detailed information including tensor inputs/outputs, parameters, and operator type. Analyze the data difference and the surrounding connections to pinpoint the exact divergence.
-   - **Helper features**:
-     - Switch rank/step: Quickly check difference nodes on different ranks and steps.
-     - Search/filter: Use the search box to filter nodes by operator name, etc.
-     - Manual mapping: Automatic mapping cannot cover every case, so the tool lets you manually map nodes between the problem and benchmark graphs before generating comparison results.
+6. In the visualization UI, inspect structure and numeric differences:
+   - Switch rank/step to locate unstable nodes quickly.
+   - Use search/filter to focus on target ops/modules.
+   - For compare mode, prioritize highlighted high-difference nodes and trace surrounding I/O/parameters.
 
 ## 6. Troubleshooting
 

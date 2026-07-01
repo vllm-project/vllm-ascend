@@ -25,6 +25,20 @@ import torch
 from vllm_ascend.quantization.quant_type import QuantType
 
 
+def get_moe_num_logical_experts(
+    layer: torch.nn.Module,
+    num_experts: int,
+    global_redundant_expert_num: int = 0,
+    num_shared_experts: int = 0,
+) -> int:
+    moe_config = getattr(layer, "moe_config", None)
+    num_logical_experts = getattr(moe_config, "num_logical_experts", None)
+    if num_logical_experts is not None:
+        return int(num_logical_experts)
+
+    return int(num_experts - global_redundant_expert_num - num_shared_experts)
+
+
 class AscendLinearScheme(ABC):
     """Base class for all linear quantization schemes.
 
@@ -48,11 +62,12 @@ class AscendLinearScheme(ABC):
         """
         ...
 
-    def get_pertensor_param(self, params_dtype: torch.dtype) -> dict[str, Any]:
+    def get_pertensor_param(self, params_dtype: torch.dtype, **kwargs: Any) -> dict[str, Any]:
         """Return per-tensor parameter specifications (e.g., input_scale).
 
         Args:
             params_dtype: Data type for parameters.
+            **kwargs: Additional keyword arguments for subclass extensions
 
         Returns:
             Dictionary mapping parameter names to empty tensors.
@@ -225,7 +240,7 @@ class AscendMoEScheme(ABC):
         top_k: int,
         renormalize: bool,
         use_grouped_topk: bool = False,
-        global_num_experts: int = -1,
+        num_experts: int = -1,
         expert_map: torch.Tensor | None = None,
         topk_group: int | None = None,
         num_expert_group: int | None = None,
@@ -241,6 +256,7 @@ class AscendMoEScheme(ABC):
         activation: str = "silu",
         apply_router_weight_on_input: bool = False,
         mc2_mask: torch.Tensor | None = None,
+        tid2eid: Any | None = None,
     ) -> torch.Tensor:
         """Forward computation for MoE layer.
 
@@ -251,7 +267,7 @@ class AscendMoEScheme(ABC):
             top_k: Number of experts to select per token.
             renormalize: Whether to renormalize expert weights.
             use_grouped_topk: Whether to use grouped top-k selection.
-            global_num_experts: Total number of experts globally.
+            num_experts: Number of experts.
             expert_map: Mapping from local to global expert indices.
             topk_group: Group size for grouped top-k.
             num_expert_group: Number of expert groups.

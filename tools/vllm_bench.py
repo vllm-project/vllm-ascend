@@ -112,16 +112,16 @@ class VllmbenchRunner:
         stdout, stderr = self.proc.communicate()
 
         if self.proc.returncode != 0:
-            logging.error(f"vllm bench command failed, return code: {self.proc.returncode}")
-            logging.error(f"Standard output: {stdout}")
-            logging.error(f"Standard error: {stderr}")
+            logging.error("vllm bench command failed, return code: %s", self.proc.returncode)
+            logging.error("Standard output: %s", stdout)
+            logging.error("Standard error: %s", stderr)
             raise RuntimeError(f"vllm bench command execution failed: {stderr}")
 
-        logging.info(f"vllm bench command completed, return code: {self.proc.returncode}")
+        logging.info("vllm bench command completed, return code: %s", self.proc.returncode)
         if stdout:
             lines = stdout.split("\n")
             last_lines = lines[-100:] if len(lines) > 100 else lines
-            logging.info(f"Last {len(last_lines)} lines of standard output:")
+            logging.info("Last %s lines of standard output:", len(last_lines))
             for line in last_lines:
                 logging.info(line)
         else:

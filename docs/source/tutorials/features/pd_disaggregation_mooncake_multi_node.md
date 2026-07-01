@@ -10,7 +10,7 @@ Take the Deepseek-r1-w8a8 model as an example, use 4 Atlas 800T A3 servers to de
 
 ### Physical Layer Requirements
 
-- The physical machines must be located on the same WLAN, with network connectivity.
+- The physical machines must be located on the same LAN, with network connectivity.
 - All NPUs must be interconnected. Intra-node connectivity is via HCCS, and inter-node connectivity is via RDMA.
 
 ### Verification Process
@@ -217,7 +217,7 @@ Set environment variables
 - Ensure `/usr/local/lib` and `/usr/local/lib64` are in your `LD_LIBRARY_PATH`
 
 ```shell
-export LD_LIBRARY_PATH=/usr/local/lib64/python3.11/site-packages/mooncake:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=/usr/local/lib64/python3.12/site-packages/mooncake:$LD_LIBRARY_PATH
 ```
 
 ## Prefiller/Decoder Deployment
@@ -295,7 +295,6 @@ vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
   '{"kv_connector": "MooncakeLayerwiseConnector",
   "kv_role": "kv_producer",
   "kv_port": "36000",
-  "engine_id": "0",
   "kv_connector_extra_config": {
             "prefill": {
                     "dp_size": 2,
@@ -354,7 +353,6 @@ vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
   '{"kv_connector": "MooncakeLayerwiseConnector",
   "kv_role": "kv_producer",
   "kv_port": "36100",
-  "engine_id": "1",
   "kv_connector_extra_config": {
             "prefill": {
                     "dp_size": 2,
@@ -413,7 +411,6 @@ vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
   '{"kv_connector": "MooncakeLayerwiseConnector",
   "kv_role": "kv_consumer",
   "kv_port": "36200",
-  "engine_id": "2",
   "kv_connector_extra_config": {
             "prefill": {
                     "dp_size": 2,
@@ -471,7 +468,6 @@ vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
   '{"kv_connector": "MooncakeLayerwiseConnector",
   "kv_role": "kv_consumer",
   "kv_port": "36200",
-  "engine_id": "2",
   "kv_connector_extra_config": {
             
             "prefill": {
@@ -538,7 +534,6 @@ vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
   '{"kv_connector": "MooncakeConnectorV1",
   "kv_role": "kv_producer",
   "kv_port": "36000",
-  "engine_id": "0",
   "kv_connector_extra_config": {
             "prefill": {
                     "dp_size": 2,
@@ -597,7 +592,6 @@ vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
   '{"kv_connector": "MooncakeConnectorV1",
   "kv_role": "kv_producer",
   "kv_port": "36100",
-  "engine_id": "1",
   "kv_connector_extra_config": {
             "prefill": {
                     "dp_size": 2,
@@ -656,7 +650,6 @@ vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
   '{"kv_connector": "MooncakeConnectorV1",
   "kv_role": "kv_consumer",
   "kv_port": "36200",
-  "engine_id": "2",
   "kv_connector_extra_config": {
             "prefill": {
                     "dp_size": 2,
@@ -714,7 +707,6 @@ vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
   '{"kv_connector": "MooncakeConnectorV1",
   "kv_role": "kv_consumer",
   "kv_port": "36200",
-  "engine_id": "2",
   "kv_connector_extra_config": {
             "prefill": {
                     "dp_size": 2,
@@ -878,7 +870,7 @@ You can get the proxy program in the repository's examples, [load\_balance\_prox
 
 ## Benchmark
 
-We recommend use aisbench tool to assess performance. [aisbench](https://gitee.com/aisbench/benchmark) Execute the following commands to install aisbench
+We recommend use aisbench tool to assess performance. [aisbench](https://github.com/AISBench/benchmark) Execute the following commands to install aisbench
 
 ```shell
 git clone https://github.com/AISBench/benchmark.git
@@ -927,7 +919,7 @@ models = [
 ais_bench --models vllm_api_stream_chat --datasets gsm8k_gen_0_shot_cot_str_perf  --debug  --mode perf
 ```
 
-- For more details for commands and parameters for aisbench, refer to  [aisbench](https://gitee.com/aisbench/benchmark)
+- For more details for commands and parameters for aisbench, refer to  [aisbench](https://github.com/AISBench/benchmark)
 
 ## FAQ
 

@@ -209,10 +209,10 @@ class SequenceParallelismPass(VllmInductorPass):
     def __call__(self, graph: torch.fx.Graph):
         self.begin()
         self.noop_cleanup(graph)  # Eliminate redundant view-like operations
-        logger.debug(f"after noop_cleanup {graph.graph}")
+        logger.debug("after noop_cleanup %s", graph.graph)
         self.matched_count = self.patterns.apply(graph)
         logger.debug("Replaced %s patterns", self.matched_count)
-        logger.debug(f"after apply replacement {graph.graph}")
+        logger.debug("after apply replacement %s", graph.graph)
 
         from torch._inductor.pattern_matcher import PatternPrettyPrinter
 
@@ -230,5 +230,5 @@ class SequenceParallelismPass(VllmInductorPass):
         Check if the pass is applicable for the current configuration.
         """
         applicable = compile_range.start >= self.min_tokens
-        logger.debug(f"SequenceParallelismPass {compile_range=} {applicable=}")
+        logger.debug("SequenceParallelismPass compile_range=%r applicable=%r", compile_range, applicable)
         return applicable

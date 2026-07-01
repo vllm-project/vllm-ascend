@@ -34,7 +34,7 @@ class AscendW4A4LaosDynamicLinearMethod(AscendLinearScheme):
     """
 
     def __init__(self):
-        self.transpose_weight = True
+        pass
 
     def get_weight(self, input_size: int, output_size: int, params_dtype: torch.dtype) -> dict[str, Any]:
         params_dict = {"weight": torch.empty(output_size, input_size, dtype=torch.int8)}
@@ -63,8 +63,9 @@ class AscendW4A4LaosDynamicLinearMethod(AscendLinearScheme):
             scale=layer.weight_scale.data.view(-1),
             pertoken_scale=pertoken_scale,
             bias=None,
-            output_dtype=dtype,
+            output_dtype=torch.float16,
         )
+        output = output.to(dtype)
         if bias is not None:
             output = output + bias.to(dtype)
         return output
@@ -72,5 +73,4 @@ class AscendW4A4LaosDynamicLinearMethod(AscendLinearScheme):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.weight_scale.data = layer.weight_scale.data.to(torch.float32)
         layer.weight.data = torch_npu.npu_convert_weight_to_int4pack(layer.weight.data.to(torch.int32))
-        if self.transpose_weight:
-            layer.weight.data = layer.weight.data.transpose(-1, -2)
+        layer.weight.data = layer.weight.data.transpose(-1, -2)

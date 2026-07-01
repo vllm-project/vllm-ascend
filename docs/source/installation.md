@@ -5,17 +5,17 @@ This document describes how to install vllm-ascend manually.
 ## Requirements
 
 - OS: Linux
-- Python: >= 3.10, < 3.12
+- Python: >= 3.10, < 3.13
 - Hardware with Ascend NPUs. It's usually the Atlas 800 A2 series.
 - Software:
 
     | Software      | Supported version                | Note                                      |
     |---------------|----------------------------------|-------------------------------------------|
-    | Ascend HDK    | Refer to the documentation [CANN 8.3.RC1](https://www.hiascend.com/document/detail/zh/canncommercial/83RC1/releasenote/releasenote_0000.html) | Required for CANN |
-    | CANN          | == 8.5.1                        | Required for vllm-ascend and torch-npu    |
-    | torch-npu     | == 2.9.0             | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
-    | torch         | == 2.9.0                          | Required for torch-npu and vllm           |
-    | NNAL          | == 8.5.1                       | Required for libatb.so, enables advanced tensor operations |
+    | Ascend HDK    | Refer to the documentation [CANN 9.0.0](https://www.hiascend.com/document/detail/zh/canncommercial/900/releasenote/releasenote_0000.html) | Required for CANN |
+    | CANN          | == 9.0.0                        | Required for vllm-ascend and torch-npu    |
+    | torch-npu     | == 2.10.0                       | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
+    | torch         | == 2.10.0                       | Required for torch-npu and vllm, No need to install manually, it will be auto installed in below steps |
+    | NNAL          | == 9.0.0                        | Required for libatb.so, enables advanced tensor operations |
 
 There are two installation methods:
 
@@ -24,7 +24,7 @@ There are two installation methods:
 
 ## Configure Ascend CANN environment
 
-Before installation, you need to make sure firmware/driver, and CANN are installed correctly, refer to [Ascend Environment Setup Guide](https://ascend.github.io/docs/sources/ascend/quick_install.html) for more details.
+Before installation, you need to make sure firmware/driver, and CANN are installed correctly, refer to [Ascend Environment Setup Guide](https://www.hiascend.com/cann/download?versionId=735&ids=d806%2Ch0501%2Ch0601%2Ch0702) for more details.
 
 ### Configure hardware environment
 
@@ -87,21 +87,22 @@ python -m venv vllm-ascend-env
 source vllm-ascend-env/bin/activate
 
 # Install required Python packages.
-pip3 install -i https://pypi.tuna.tsinghua.edu.cn/simple attrs 'numpy<2.0.0' decorator sympy cffi pyyaml pathlib2 psutil protobuf scipy requests absl-py wheel typing_extensions
+python -m pip install --upgrade pip
+pip3 install attrs numpy decorator sympy cffi pyyaml pathlib2 psutil protobuf scipy requests absl-py wheel typing_extensions
 
 # Download and install the CANN package.
-wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.5.1/Ascend-cann-toolkit_8.5.1_linux-"$(uname -i)".run
-chmod +x ./Ascend-cann-toolkit_8.5.1_linux-"$(uname -i)".run
-./Ascend-cann-toolkit_8.5.1_linux-"$(uname -i)".run --full
+wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%209.0.0/Ascend-cann-toolkit_9.0.0_linux-"$(uname -i)".run
+chmod +x ./Ascend-cann-toolkit_9.0.0_linux-"$(uname -i)".run
+./Ascend-cann-toolkit_9.0.0_linux-"$(uname -i)".run --full
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
 
-wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.5.1/Ascend-cann-910b-ops_8.5.1_linux-"$(uname -i)".run
-chmod +x ./Ascend-cann-910b-ops_8.5.1_linux-"$(uname -i)".run
-./Ascend-cann-910b-ops_8.5.1_linux-"$(uname -i)".run --install
+wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%209.0.0/Ascend-cann-910b-ops_9.0.0_linux-"$(uname -i)".run
+chmod +x ./Ascend-cann-910b-ops_9.0.0_linux-"$(uname -i)".run
+./Ascend-cann-910b-ops_9.0.0_linux-"$(uname -i)".run --install
 
-wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.5.1/Ascend-cann-nnal_8.5.1_linux-"$(uname -i)".run
-chmod +x ./Ascend-cann-nnal_8.5.1_linux-"$(uname -i)".run
-./Ascend-cann-nnal_8.5.1_linux-"$(uname -i)".run --install
+wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%209.0.0/Ascend-cann-nnal_9.0.0_linux-"$(uname -i)".run
+chmod +x ./Ascend-cann-nnal_9.0.0_linux-"$(uname -i)".run
+./Ascend-cann-nnal_9.0.0_linux-"$(uname -i)".run --install
 
 source /usr/local/Ascend/nnal/atb/set_env.sh
 ```
@@ -155,7 +156,7 @@ pip install vllm==|pip_vllm_version|
 
 # Install vllm-project/vllm-ascend.
 pip install \
---extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi/simple  \
+--extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi/variant https://mirrors.huaweicloud.com/ascend/repos/pypi  \
 vllm-ascend==|pip_vllm_ascend_version|
 
 ```
@@ -180,9 +181,17 @@ source $HOME/.local/bin/env
 pip install vllm==|pip_vllm_version|
 
 # Install vllm-project/vllm-ascend from wheelnext index.
-uv pip install --system -v \
+uv pip install --system \
 --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi/variant   \
+--index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple \
 vllm-ascend==|pip_vllm_ascend_version|
+
+```
+
+```{note}
+If you encounter errors during `uv pip install` (e.g., corrupted cache or stale package data), try clearing the uv cache first and then re-run the install command:
+
+    uv cache clean
 
 ```
 
@@ -192,20 +201,28 @@ vllm-ascend==|pip_vllm_ascend_version|
 :::{dropdown} Click here to see "Build from source code"
 or build from **source code**:
 
+```{note}
+To install `triton-ascend`, run:
+
+pip install triton-ascend==3.2.1 --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
+
+If you are installing via `uv`, make sure to install `triton-ascend` **last**, after all other packages have been installed, to avoid dependency resolution conflicts.
+```
+
 ```{code-block} bash
    :substitutions:
 
 # Install vLLM.
 git clone --depth 1 --branch |vllm_version| https://github.com/vllm-project/vllm
 cd vllm
-VLLM_TARGET_DEVICE=empty pip install -v -e .
+VLLM_TARGET_DEVICE=empty pip install -e .
 cd ..
 
 # Install vLLM Ascend.
 git clone --depth 1 --branch |vllm_ascend_version| https://github.com/vllm-project/vllm-ascend.git
 cd vllm-ascend
 git submodule update --init --recursive
-pip install -v -e .
+pip install -e .
 cd ..
 ```
 
@@ -221,7 +238,12 @@ If you are building in a CPU-only environment where `npu-smi` is unavailable, yo
 - Atlas A2: `export SOC_VERSION=ascend910b1`
 - Atlas A3: `export SOC_VERSION=ascend910_9391`
 - Atlas 300I: `export SOC_VERSION=ascend310p1`
-- Atlas A5: `export SOC_VERSION=<value starting with "ascend950">`
+- Ascend 950 Products: `export SOC_VERSION=<value starting with "ascend950">`
+```
+
+```{note}
+To enable the batch invariance feature, set `VLLM_BATCH_INVARIANT=1` before building vllm-ascend to install the batch invariance custom operator library during the installation process.
+For usage guidance on the batch invariance feature, see <https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/user_guide/feature_guide/batch_invariance.md>
 ```
 
 ## Set up using Docker
@@ -322,33 +344,36 @@ python example.py
 If you encounter a connection error with Hugging Face (e.g., `We couldn't connect to 'https://huggingface.co' to load the files, and couldn't find them in the cached files.`), run the following commands to use ModelScope as an alternative:
 
 ```bash
-export VLLM_USE_MODELSCOPE=true
+export VLLM_USE_MODELSCOPE=True
 pip install modelscope
 python example.py
 ```
 
-The output will be like:
+This section shows ascend platform is successfully detected in vllm:
 
 ```bash
-INFO 02-18 08:49:58 __init__.py:28] Available plugins for group vllm.platform_plugins:
-INFO 02-18 08:49:58 __init__.py:30] name=ascend, value=vllm_ascend:register
-INFO 02-18 08:49:58 __init__.py:32] all available plugins for group vllm.platform_plugins will be loaded.
-INFO 02-18 08:49:58 __init__.py:34] set environment variable VLLM_PLUGINS to control which plugins to load.
-INFO 02-18 08:49:58 __init__.py:42] plugin ascend loaded.
-INFO 02-18 08:49:58 __init__.py:174] Platform plugin ascend is activated
-INFO 02-18 08:50:12 config.py:526] This model supports multiple tasks: {'embed', 'classify', 'generate', 'score', 'reward'}. Defaulting to 'generate'.
-INFO 02-18 08:50:12 llm_engine.py:232] Initializing a V0 LLM engine (v0.7.1) with config: model='./Qwen3-0.6B', speculative_config=None, tokenizer='./Qwen3-0.6B', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, override_neuron_config=None, tokenizer_revision=None, trust_remote_code=False, dtype=torch.bfloat16, max_seq_len=32768, download_dir=None, load_format=auto, tensor_parallel_size=1, pipeline_parallel_size=1, disable_custom_all_reduce=False, quantization=None, enforce_eager=False, kv_cache_dtype=auto,  device_config=npu, decoding_config=DecodingConfig(guided_decoding_backend='xgrammar'), observability_config=ObservabilityConfig(otlp_traces_endpoint=None, collect_model_forward_time=False, collect_model_execute_time=False), seed=0, served_model_name=./Qwen3-0.6B, num_scheduler_steps=1, multi_step_stream_outputs=True, enable_prefix_caching=False, chunked_prefill_enabled=False, use_async_output_proc=True, disable_mm_preprocessor_cache=False, mm_processor_kwargs=None, pooler_config=None, compilation_config={"splitting_ops":[],"compile_sizes":[],"cudagraph_capture_sizes":[256,248,240,232,224,216,208,200,192,184,176,168,160,152,144,136,128,120,112,104,96,88,80,72,64,56,48,40,32,24,16,8,4,2,1],"max_capture_size":256}, use_cached_outputs=False,
-Loading safetensors checkpoint shards:   0% Completed | 0/1 [00:00<?, ?it/s]
-Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:00<00:00,  5.86it/s]
-Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:00<00:00,  5.85it/s]
-INFO 02-18 08:50:24 executor_base.py:108] # CPU blocks: 35064, # CPU blocks: 2730
-INFO 02-18 08:50:24 executor_base.py:113] Maximum concurrency for 32768 tokens per request: 136.97x
-INFO 02-18 08:50:25 llm_engine.py:429] init engine (profile, create kv cache, warmup model) took 3.87 seconds
-Processed prompts: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 4/4 [00:00<00:00,  8.46it/s, est. speed input: 46.55 toks/s, output: 135.41 toks/s]
-Prompt: 'Hello, my name is', Generated text: " Shinji, a teenage boy from New York City. I'm a computer science"
-Prompt: 'The president of the United States is', Generated text: ' a very important person. When he or she is elected, many people think that'
-Prompt: 'The capital of France is', Generated text: ' Paris. The oldest part of the city is Saint-Germain-des-Pr'
-Prompt: 'The future of AI is', Generated text: ' not bright\n\nThere is no doubt that the evolution of AI will have a huge'
+INFO 05-27 11:40:38 [__init__.py:44] Available plugins for group vllm.platform_plugins:
+INFO 05-27 11:40:38 [__init__.py:46] - ascend -> vllm_ascend:register
+INFO 05-27 11:40:38 [__init__.py:49] All plugins in this group will be loaded. Set `VLLM_PLUGINS` to control which plugins to load.
+INFO 05-27 11:40:38 [__init__.py:238] Platform plugin ascend is activated
+```
+
+This section shows the final output:
+
+```bash
+Prompt: 'Hello, my name is', Generated text: ' Lucy and I am an 8 year old who loves to draw and write stories'
+Prompt: 'The president of the United States is', Generated text: " a key leader in the federal government, and the president's role in the executive"
+Prompt: 'The capital of France is', Generated text: ' a city. What is the capital of France? The capital of France is Paris'
+Prompt: 'The future of AI is', Generated text: ' a topic that is being discussed in various contexts. In the business world, AI'
+```
+
+This section shows process exits after offline inference, and does not affect actual inference:
+
+```bash
+(EngineCore pid=970) INFO 05-12 11:36:00 [core.py:1201] Shutdown initiated (timeout=0)
+(EngineCore pid=970) INFO 05-12 11:36:00 [core.py:1224] Shutdown complete
+ERROR 05-12 11:36:01 [core_client.py:704] Engine core proc EngineCore died unexpectedly, shutting down client.
+sys:1: DeprecationWarning: builtin type swigvarlink has no __module__ attribute
 ```
 
 ## Multi-node Deployment

@@ -22,7 +22,7 @@ import numpy as np
 import torch
 import torch_npu
 from vllm.config import get_current_vllm_config
-from vllm.distributed import get_ep_group
+from vllm.distributed import get_tensor_model_parallel_world_size
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
@@ -31,21 +31,70 @@ from vllm_ascend.ops.fused_moe.experts_selector import select_experts
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
 from vllm_ascend.utils import COMPRESSED_TENSORS_METHOD, maybe_trans_nz
 
-from .base import AscendLinearScheme, AscendMoEScheme, QuantType
+from .base import AscendLinearScheme, AscendMoEScheme, QuantType, get_moe_num_logical_experts
 from .registry import register_scheme
 
 
 @register_scheme("W4A8_DYNAMIC", "linear")
 class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
-    """Linear method for Ascend W4A8_DYNAMIC."""
+    """Linear method for Ascend W4A8_DYNAMIC.
+
+    This method supports only weights quantized by msModelSlim. It supports two
+    weight layouts, distinguished by ``quant_version`` which comes from
+    ``quant_description["version"]`` in the vLLM quantization config. Version
+    ``"1.0.0"`` is the newer layout: it reduces the checkpoint weight size and
+    precomputes the ``scale_bias`` offline, reducing weight loading time.
+
+    The names below use ``linear`` as the checkpoint prefix of a linear layer,
+    ``input_size`` as the logical input dimension, ``output_size`` as the
+    logical output dimension, and ``group_size`` as the number of input
+    channels per weight quantization group.
+
+    For ``quant_version != "1.0.0"``, the original linear weights are:
+
+    - ``linear.weight``: ``torch.int8``, ``[output_size, input_size]``.
+      Each int8 element stores one 4-bit weight value.
+    - ``linear.weight_scale``: ``params_dtype``, ``[output_size, 1]``.
+    - ``linear.weight_offset``: ``params_dtype``, ``[output_size, 1]``.
+    - ``linear.weight_scale_second``: ``params_dtype``,
+      ``[output_size, input_size // group_size]``.
+    - ``linear.weight_offset_second``: ``torch.int64``,
+      ``[output_size, input_size // group_size]``.
+
+    For ``quant_version == "1.0.0"``, the original linear weights are:
+
+    - ``linear.weight``: ``torch.int8``, ``[output_size // 2, input_size]``.
+      Each int8 element stores two packed 4-bit weight values along the output
+      dimension.
+    - ``linear.weight_scale``: ``params_dtype``, ``[output_size, 1]``.
+    - ``linear.weight_offset``: ``params_dtype``, ``[output_size, 1]``.
+    - ``linear.weight_scale_second``: ``params_dtype``,
+      ``[output_size, input_size // group_size]``.
+    - ``linear.weight_offset_second``: ``torch.int64``,
+      ``[output_size, input_size // group_size]``.
+    - ``linear.scale_bias``: ``torch.float32``, ``[output_size, 1]`` for
+      column-parallel linear layers and ``[output_size, 16]`` for
+      row-parallel linear layers.
+
+    In :meth:`process_weights_after_loading`, ``linear.weight`` is transposed
+    from ``[output, input]`` to the operator-oriented ``[input, output]``
+    layout. Old-version weights are converted with
+    ``torch_npu.npu_convert_weight_to_int4pack``; new-version weights are
+    already packed as int4 pairs in int8 storage and are reinterpreted as int32
+    by grouping four int8 values.
+
+    After processing, ``torch_npu.npu_weight_quant_batchmatmul`` is called with
+    ``weight`` as ``torch.int32`` in the operator-required packed layout
+    with shape ``[input_size, output_size // 8]`` and
+    ``antiquant_scale`` as ``weight_scale * weight_scale_second`` converted to
+    ``x.dtype`` with shape ``[input_size // group_size, output_size]``.
+    """
 
     def __init__(self):
         vllm_config = get_current_vllm_config()
         self.group_size = vllm_config.quant_config.quant_description.get("group_size", 256)
         quant_version = vllm_config.quant_config.quant_description.get("version", "0")
         self.new_quant_version = quant_version == "1.0.0"
-
-        from vllm.distributed import get_tensor_model_parallel_world_size
 
         self.tp_size = get_tensor_model_parallel_world_size()
 
@@ -133,6 +182,7 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
         bias: torch.Tensor | None = None,
         tp_rank: int | None = None,
     ) -> torch.Tensor:
+        # NOTE: activation `x` is not quantized
         return torch_npu.npu_weight_quant_batchmatmul(
             x,
             layer.weight,
@@ -169,7 +219,7 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
             # weights on disk are already in packed int4 format
             # pack 4 int8(int4*2) to int32
             assert layer.weight.data.shape[-1] % 4 == 0, (
-                f"the last dim of weight needs to be divided by 4, got shape {layer.weight.data.shape}"
+                f"the last dim of weight needs to be divided by 4 but got shape {layer.weight.data.shape}"
             )
             layer.weight.data = layer.weight.data.view(torch.int32).contiguous()
         else:
@@ -180,13 +230,122 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
 
 @register_scheme("W4A8_DYNAMIC", "moe")
 class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
-    """FusedMoE method for Ascend W4A8_DYNAMIC."""
+    """FusedMoE method for Ascend W4A8_DYNAMIC.
+
+    This method supports four MoE weight formats: three generated by
+    msModelSlim and one generated by LLM-Compressor. The LLM-Compressor path
+    is selected when ``ascend_quant_method`` in ``quant_description`` is
+    ``COMPRESSED_TENSORS_METHOD``. Otherwise, the msModelSlim path is used.
+    msModelSlim layouts are first distinguished by
+    ``quant_description["version"] == "1.0.0"``; for version ``"1.0.0"``,
+    ``group_size == 0`` selects per-channel weight quantization and
+    ``group_size > 0`` selects per-group weight quantization.
+
+    The names below use ``L`` for the layer index, ``E`` for the expert index,
+    ``num_experts`` for the routed expert count, ``hidden_sizes`` for the
+    hidden dimension, ``moe_intermediate_size`` for the expert intermediate
+    dimension, ``group_size`` for per-group weight quantization, and
+    ``tp_size`` for tensor parallel size.
+
+    Original MoE layer weights generated by msModelSlim with
+    ``quant_version != "1.0.0"``:
+
+    - ``model.layers.L.mlp.experts.E.gate_proj.weight``:
+      ``torch.int8``, ``[moe_intermediate_size, hidden_sizes]``.
+    - ``model.layers.L.mlp.experts.E.up_proj.weight``:
+      ``torch.int8``, ``[moe_intermediate_size, hidden_sizes]``.
+    - ``model.layers.L.mlp.experts.E.down_proj.weight``:
+      ``torch.int8``, ``[hidden_sizes, moe_intermediate_size]``.
+    - Each linear also has ``weight_scale`` and ``weight_offset``:
+      ``torch.float32``, ``[out_features, 1]``.
+    - Each linear also has ``weight_scale_second`` and
+      ``weight_offset_second``. The ``weight_scale_second`` dtype is
+      ``torch.float32`` and the ``weight_offset_second`` dtype is
+      ``torch.int64``; both use shape
+      ``[out_features, in_features // group_size]``.
+
+    Original MoE layer weights generated by msModelSlim with
+    ``quant_version == "1.0.0"`` and per-group quantization:
+
+    - Compared with the previous msModelSlim layout, ``weight`` stores two
+      packed 4-bit values in each int8 element along the output dimension.
+      Therefore ``gate_proj.weight`` and ``up_proj.weight`` are
+      ``torch.int8`` with shape
+      ``[moe_intermediate_size // 2, hidden_sizes]``, and
+      ``down_proj.weight`` is ``torch.int8`` with shape
+      ``[hidden_sizes // 2, moe_intermediate_size]``.
+    - Each linear additionally has ``scale_bias``: ``torch.float32``,
+      ``[moe_intermediate_size, 1]`` for ``gate_proj`` and ``up_proj``, and
+      ``[hidden_sizes, 16 // tp_size]`` for ``down_proj``.
+
+    Original MoE layer weights generated by msModelSlim with
+    ``quant_version == "1.0.0"`` and per-channel quantization:
+
+    - ``weight`` has the same packed shape as the previous msModelSlim
+      ``1.0.0`` per-group layout.
+    - ``weight_scale`` and ``weight_offset`` are per-channel tensors:
+      ``torch.float32``, ``[out_features, 1]``. There are no
+      ``weight_scale_second`` or ``weight_offset_second`` tensors.
+    - Each linear also has ``scale_bias``: ``torch.float32``,
+      ``[moe_intermediate_size, 1]`` for ``gate_proj`` and ``up_proj``, and
+      ``[hidden_sizes, 16 // tp_size]`` for ``down_proj``.
+
+    Original MoE layer weights generated by LLM-Compressor:
+
+    - ``model.layers.L.mlp.experts.E.gate_proj.weight``:
+      ``torch.int8``, ``[moe_intermediate_size, hidden_sizes]``.
+    - ``model.layers.L.mlp.experts.E.up_proj.weight``:
+      ``torch.int8``, ``[moe_intermediate_size, hidden_sizes]``.
+    - ``model.layers.L.mlp.experts.E.down_proj.weight``:
+      ``torch.int8``, ``[hidden_sizes, moe_intermediate_size]``.
+    - Each linear also has ``weight_scale``: ``torch.bfloat16``,
+      ``[out_features, in_features // group_size]`` for group quantization, or
+      ``[out_features, 1]`` for channel quantization.
+
+    During loading, ``gate_proj`` and ``up_proj`` are fused into ``w13`` and
+    ``down_proj`` is loaded as ``w2``. Before
+    :meth:`process_weights_after_loading`, their logical shapes are:
+
+    - msModelSlim old: ``w13_weight`` ``torch.int8``,
+      ``[num_experts, 2 * moe_intermediate_size, hidden_sizes]``; and
+      ``w2_weight`` ``torch.int8``,
+      ``[num_experts, hidden_sizes, moe_intermediate_size]``.
+    - msModelSlim ``1.0.0`` per-group and per-channel: ``w13_weight`` ``torch.int8``,
+      ``[num_experts, moe_intermediate_size, hidden_sizes]``; and
+      ``w2_weight`` ``torch.int8``,
+      ``[num_experts, hidden_sizes // 2, moe_intermediate_size]``.
+    - LLM-Compressor: ``w13_weight`` ``torch.int8``,
+      ``[num_experts, 2 * moe_intermediate_size, hidden_sizes]``; and
+      ``w2_weight`` ``torch.int8``,
+      ``[num_experts, hidden_sizes, moe_intermediate_size]``.
+
+    After processing, ``apply`` passes these tensors to the fused MoE operator:
+
+    - Shared by all formats:
+      ``w13_weight``: ``torch.int32``,
+      ``[num_experts, hidden_sizes, moe_intermediate_size // 4]``.
+      ``w2_weight``: ``torch.int32``,
+      ``[num_experts, moe_intermediate_size, hidden_sizes // 8]``.
+      ``w13_scale_bias``: ``torch.float32``, ``[num_experts, 2 * moe_intermediate_size]``.
+      ``w2_scale_bias``: ``torch.float32``, ``[num_experts, hidden_sizes]``.
+    - per-group:
+      ``w13_weight_scale``: ``torch.int64``,
+      ``[num_experts, hidden_sizes // group_size,
+      2 * moe_intermediate_size]``.
+      ``w2_weight_scale``: ``torch.int64``,
+      ``[num_experts, moe_intermediate_size // group_size, hidden_sizes]``.
+    - per-channel:
+      ``w13_weight_scale``: ``torch.int64``,
+      ``[num_experts, 2 * moe_intermediate_size]``.
+      ``w2_weight_scale``: ``torch.int64``,
+      ``[num_experts, 1, hidden_sizes]``.
+    """
 
     # Declare the quantization type for this scheme
     quant_type: QuantType = QuantType.W4A8
 
     def __init__(self):
-        self.ep_group = get_ep_group()
+        self.supports_eplb = True
 
         vllm_config = get_current_vllm_config()
         self.group_size = vllm_config.quant_config.quant_description.get("group_size", 256)
@@ -200,7 +359,9 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         if self.quant_method == COMPRESSED_TENSORS_METHOD:
             self.weight_strategy = vllm_config.quant_config.quant_description.get("weight_strategy", "group")
 
-        self.tp_size = 1 if vllm_config.parallel_config.enable_expert_parallel else self.ep_group.world_size
+        self.tp_size = (
+            1 if vllm_config.parallel_config.enable_expert_parallel else get_tensor_model_parallel_world_size()
+        )
         self.dynamic_eplb = get_ascend_config().eplb_config.dynamic_eplb
         if self.new_quant_version and self.tp_size > 16:
             raise ValueError("The current weight does not support moe part tp>16.")
@@ -332,7 +493,7 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         top_k: int,
         renormalize: bool,
         use_grouped_topk: bool = False,
-        global_num_experts: int = -1,
+        num_experts: int = -1,
         expert_map: torch.Tensor | None = None,
         topk_group: int | None = None,
         num_expert_group: int | None = None,
@@ -348,9 +509,20 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         activation: str = "silu",
         apply_router_weight_on_input: bool = False,
         mc2_mask: torch.Tensor | None = None,
+        tid2eid: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        assert router_logits.shape[1] == global_num_experts - global_redundant_expert_num, (
-            "Number of global experts mismatch (excluding redundancy)"
+        num_shared_experts = getattr(layer, "n_shared_experts", 0)
+        if num_shared_experts is None:
+            num_shared_experts = 0
+        num_logical_experts = get_moe_num_logical_experts(
+            layer,
+            num_experts,
+            global_redundant_expert_num=global_redundant_expert_num,
+            num_shared_experts=num_shared_experts,
+        )
+        assert router_logits.shape[1] == num_logical_experts, (
+            "Number of global experts mismatch (excluding redundancy): "
+            f"router_logits.shape[1]={router_logits.shape[1]}, num_logical_experts={num_logical_experts}"
         )
 
         # NOTE: now npu_moe_gating_top_k can only support `group_count=256` pattern
@@ -364,20 +536,35 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
             num_expert_group=num_expert_group,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
+            routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
-            global_num_experts=global_num_experts,
+            num_experts=num_logical_experts,
+            tid2eid=tid2eid,
         )
 
         # this is a naive implementation for experts load balance so as
         # to avoid accumulating too much tokens on a single rank.
         # currently it is only activated when doing profile runs.
         if enable_force_load_balance:
-            random_matrix = torch.rand(
-                topk_ids.size(0), global_num_experts - global_redundant_expert_num, device=topk_ids.device
-            )
+            random_matrix = torch.rand(topk_ids.size(0), num_logical_experts, device=topk_ids.device)
             topk_ids = torch.argsort(random_matrix, dim=1)[:, : topk_ids.size(1)].to(topk_ids.dtype)
 
         topk_weights = topk_weights.to(x.dtype)
+
+        if self.dynamic_eplb:
+            w1 = [i.view(torch.int32) for i in layer.w13_weight_list]
+            w1_scale = layer.w13_weight_scale_list
+            w2 = [i.view(torch.int32) for i in layer.w2_weight_list]
+            w2_scale = layer.w2_weight_scale_list
+            w1_scale_bias = layer.w13_scale_bias_list
+            w2_scale_bias = layer.w2_scale_bias_list
+        else:
+            w1 = [layer.w13_weight]
+            w1_scale = [layer.w13_weight_scale]
+            w2 = [layer.w2_weight]
+            w2_scale = [layer.w2_weight_scale]
+            w1_scale_bias = [layer.w13_scale_bias.detach()] if hasattr(layer, "w13_scale_bias") else None
+            w2_scale_bias = [layer.w2_scale_bias.detach()] if hasattr(layer, "w2_scale_bias") else None
 
         moe_comm_method = _EXTRA_CTX.moe_comm_method
         return moe_comm_method.fused_experts(
@@ -385,8 +572,8 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
                 hidden_states=x,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                w1=[layer.w13_weight],
-                w2=[layer.w2_weight],
+                w1=w1,
+                w2=w2,
                 quant_type=self.quant_type,
                 dynamic_eplb=self.dynamic_eplb,
                 expert_map=expert_map,
@@ -396,10 +583,12 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
                 log2phy=log2phy,
                 pertoken_scale=pertoken_scale,
                 activation=activation,
-                w1_scale=[layer.w13_weight_scale],
-                w2_scale=[layer.w2_weight_scale],
-                w1_scale_bias=layer.w13_scale_bias if hasattr(layer, "w13_scale_bias") else None,
-                w2_scale_bias=layer.w2_scale_bias if hasattr(layer, "w2_scale_bias") else None,
+                w1_scale=w1_scale,
+                w2_scale=w2_scale,
+                w1_scale_bias=w1_scale_bias,
+                w2_scale_bias=w2_scale_bias,
+                is_per_channel_weight=self.is_per_channel_weight,
+                swiglu_limit=layer.swiglu_limit,
             )
         )
 
@@ -447,14 +636,33 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
             layer.register_parameter("w2_scale_bias", w2_scale_bias)
 
     def pack_to_int32(self, weight: torch.Tensor):
-        if self.new_quant_version:
+        if self.new_quant_version or self.quant_method == COMPRESSED_TENSORS_METHOD:
             # pack 4 int8(int4*2) to int32, because in pytorch, we need to use int32 to represent int4
-            assert weight.shape[-1] % 4 == 0, "the last dim of weight needs to be divided by 4"
+            assert weight.shape[-1] % 4 == 0, (
+                f"the last dim of weight needs to be divided by 4 but got shape {weight.shape}"
+            )
             return weight.view(torch.int32).contiguous()
         else:
             return torch_npu.npu_quantize(
                 weight.to(torch.float32), torch.tensor([1.0]).npu(), None, torch.quint4x2, -1, False
             )
+
+    def pack_int4_to_int8(self, weight: torch.Tensor) -> torch.Tensor:
+        shape = weight.shape
+        weight = weight.reshape(-1, 2)
+        weight0 = weight[:, :1]
+        weight1 = weight[:, 1:]
+        weight1_4 = torch.bitwise_left_shift(weight1, 4)
+        weight2_4 = weight0 & 0b00001111
+        weight_add = torch.bitwise_or(weight1_4, weight2_4)
+        # The clone() call is used to break the view chain
+        return weight_add.reshape(shape[:-1] + (shape[-1] // 2,)).clone()
+
+    @staticmethod
+    def maybe_squeeze_per_channel_weight_scale(scale: torch.Tensor) -> torch.Tensor:
+        if scale.dim() > 1 and scale.shape[1] == 1:
+            return scale.squeeze(1)
+        return scale
 
     def process_weights_after_loading(self, layer):
         if self.quant_method == COMPRESSED_TENSORS_METHOD:
@@ -466,11 +674,13 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2).contiguous()
         layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2).contiguous()
 
-        def process_scale_compressed_tensors(scale: torch.Tensor):
+        def process_scale_compressed_tensors(scale: torch.Tensor, squeeze: bool = True):
             scale = scale.transpose(1, 2).to(torch.float32).contiguous()
             scale_np = scale.cpu().numpy()
             scale_np.dtype = np.uint32
             scale_uint64_tensor = torch.from_numpy(scale_np.astype(np.int64)).npu()
+            if self.is_per_channel_weight and squeeze:
+                return self.maybe_squeeze_per_channel_weight_scale(scale_uint64_tensor)
             return scale_uint64_tensor
 
         def update_bias_compressed_tensors(weight: torch.Tensor, scale: torch.Tensor, strategy: str):
@@ -498,16 +708,19 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         w2_bias = update_bias_compressed_tensors(layer.w2_weight.data, layer.w2_weight_scale.data, self.weight_strategy)
 
         layer.w13_weight_scale.data = process_scale_compressed_tensors(layer.w13_weight_scale.data)
-        layer.w2_weight_scale.data = process_scale_compressed_tensors(layer.w2_weight_scale.data)
+        # To use torch_npu.npu_grouped_matmul, keep w2_weigh_scale unsqueezed
+        layer.w2_weight_scale.data = process_scale_compressed_tensors(layer.w2_weight_scale.data, False)
 
         w13_scale_bias = torch.nn.Parameter(w13_bias, requires_grad=False)
         layer.register_parameter("w13_scale_bias", w13_scale_bias)
         w2_scale_bias = torch.nn.Parameter(w2_bias, requires_grad=False)
         layer.register_parameter("w2_scale_bias", w2_scale_bias)
 
-        # Accuracy problem in nz format
-        # layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
-        # layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
+        # Packs 2 int4 into 1 int8 on-the-fly to mirror the modelslim new_quant_version path
+        layer.w13_weight.data = self.pack_int4_to_int8(layer.w13_weight.data)
+        layer.w2_weight.data = self.pack_int4_to_int8(layer.w2_weight.data)
+        layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
+        layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
         layer.w13_weight.data = self.pack_to_int32(layer.w13_weight.data)
         layer.w2_weight.data = self.pack_to_int32(layer.w2_weight.data)
 
@@ -534,7 +747,32 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
 
         self.update_bias(layer, w13_bias, w2_bias)
 
+        if self.is_per_channel_weight:
+            layer.w13_weight_scale.data = self.maybe_squeeze_per_channel_weight_scale(layer.w13_weight_scale.data)
         layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
         layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
-        layer.w13_weight.data = self.pack_to_int32(layer.w13_weight.data)
-        layer.w2_weight.data = self.pack_to_int32(layer.w2_weight.data)
+
+        if self.dynamic_eplb:
+            layer.w13_weight_list = [weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)]
+            layer.w2_weight_list = [weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)]
+            layer.w13_weight_scale_list = [weight.clone() for weight in layer.w13_weight_scale.data.unbind(dim=0)]
+            layer.w2_weight_scale_list = [weight.clone() for weight in layer.w2_weight_scale.data.unbind(dim=0)]
+            layer.w13_scale_bias_list = (
+                [weight.clone() for weight in layer.w13_scale_bias.data.unbind(dim=0)]
+                if hasattr(layer, "w13_scale_bias")
+                else None
+            )
+            layer.w2_scale_bias_list = (
+                [weight.clone() for weight in layer.w2_scale_bias.data.unbind(dim=0)]
+                if hasattr(layer, "w2_scale_bias")
+                else None
+            )
+            del layer.w13_weight
+            del layer.w2_weight
+            del layer.w13_weight_scale
+            del layer.w2_weight_scale
+            del layer.w13_scale_bias
+            del layer.w2_scale_bias
+        else:
+            layer.w13_weight.data = self.pack_to_int32(layer.w13_weight.data)
+            layer.w2_weight.data = self.pack_to_int32(layer.w2_weight.data)

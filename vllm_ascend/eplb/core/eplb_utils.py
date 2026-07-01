@@ -16,13 +16,12 @@
 #
 # Todo: Once https://github.com/vllm-project/vllm/issues/22246 is merged in vllm. Remove eplb utils.
 import json
-import os.path
 from collections import defaultdict
 
 import numpy as np
 import torch
 from vllm.logger import logger
-from vllm.model_executor.layers.fused_moe.layer import determine_expert_map
+from vllm.model_executor.layers.fused_moe.expert_map_manager import determine_expert_map
 
 
 def expert_file_to_tensor(expert_map_path, layer_id):
@@ -33,8 +32,10 @@ def expert_file_to_tensor(expert_map_path, layer_id):
     if layer_id > data["moe_layer_count"]:
         raise ValueError("Invalid EPLB Table")
     if layer_id == data["moe_layer_count"]:
-        logger.warning("Init expert map of mtp/eagle when using sample.")
-        return None, None
+        logger.warning("[eplb/utils] Init expert map of mtp/eagle when using sample.")
+        for device in data["layer_list"][0]["device_list"]:
+            physical_count += len(device["device_expert"])
+        return None, physical_count
     for device in data["layer_list"][layer_id]["device_list"]:
         physical_count += len(device["device_expert"])
         device_data.append(device["device_expert"])
@@ -44,6 +45,8 @@ def expert_file_to_tensor(expert_map_path, layer_id):
 
 def generate_global_placement(n_expert, ep_size, n_redundant, num_shared_experts):
     n_expert -= num_shared_experts
+    if (n_expert + n_redundant) % ep_size != 0:
+        raise ValueError("(n_expert + n_redundant) % ep_size must be 0")
     all_experts = np.arange(n_expert)
     groups = np.array_split(all_experts, ep_size)
     for i in range(n_redundant):
@@ -58,7 +61,7 @@ def generate_global_placement(n_expert, ep_size, n_redundant, num_shared_experts
     return torch.tensor(groups, dtype=torch.int32)
 
 
-def init_eplb_config(eplb_config, layer_id, moe_config, mix_placement=False, num_shared_experts=1):
+def init_eplb_config(eplb_config, layer_id, moe_config, mix_placement=False, num_shared_experts=1, tp_size=None):
     expert_map_path = eplb_config.expert_map_path
     n_experts = moe_config.num_experts
     ep_size = moe_config.ep_size
@@ -72,16 +75,9 @@ def init_eplb_config(eplb_config, layer_id, moe_config, mix_placement=False, num
         return None, None, None, n_redundant
 
     if expert_map_path:
-        if not (os.path.exists(expert_map_path) and os.access(expert_map_path, os.R_OK)):
-            raise ValueError("Invalid EPLB path")
         eplb_enable = True
         global_placement, physical_count = expert_file_to_tensor(expert_map_path, layer_id)
-        if physical_count is not None:
-            n_redundant = physical_count - n_experts
-            if not moe_config.supports_eplb:
-                raise ValueError("Eplb supports only w8a8_dynamic quantization.")
-        else:
-            eplb_enable = False
+        n_redundant = physical_count - n_experts
     elif not eplb_enable:
         _, expert_map, _ = determine_expert_map(ep_size, moe_config.ep_rank, n_experts)
         return None, expert_map, None, 0
@@ -98,12 +94,20 @@ def init_eplb_config(eplb_config, layer_id, moe_config, mix_placement=False, num
         global_expert_map.append(expert_map)
         if rankid == moe_config.ep_rank:
             local_expert_map = expert_map
-    log2phy = generate_log2phy_map(global_expert_map, moe_config.ep_rank).npu() if eplb_enable else None
+    log2phy = (
+        generate_log2phy_map(
+            global_expert_map,
+            moe_config.ep_rank,
+            tp_size=int(tp_size) if tp_size is not None else None,
+        ).npu()
+        if eplb_enable
+        else None
+    )
 
     return torch.stack(global_expert_map), local_expert_map, log2phy, n_redundant
 
 
-def generate_log2phy_map(global_expert_map, ep_rank):
+def generate_log2phy_map(global_expert_map, ep_rank, tp_size: int | None = None):
     log2phy_map = defaultdict(list)
     valid_count = torch.sum(global_expert_map[0] != -1)
     for rankid, map_per_rank in enumerate(global_expert_map):
@@ -114,7 +118,13 @@ def generate_log2phy_map(global_expert_map, ep_rank):
 
     for key in log2phy_map:
         num_of_duplications = len(log2phy_map[key])
-        log2phy_map[key] = log2phy_map[key][ep_rank % num_of_duplications]
+        if tp_size is not None and tp_size > 1:
+            tp_rank = ep_rank % tp_size
+            dp_like_rank = ep_rank // tp_size
+            replica_index = (tp_rank + dp_like_rank + key) % num_of_duplications
+        else:
+            replica_index = ep_rank % num_of_duplications
+        log2phy_map[key] = log2phy_map[key][replica_index]
 
     log2phy_map = torch.scatter(
         torch.zeros(len(log2phy_map), dtype=torch.int32),

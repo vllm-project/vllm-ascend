@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 from __future__ import annotations
 
-import torch
+from typing import Any
 
 from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl
 from vllm_ascend.ops.fused_moe.moe_runtime_args import MoEMlpComputeInput
@@ -39,8 +39,8 @@ class AllGatherCommImpl310(AllGatherCommImpl):
         super().__init__(moe_config)
         self.use_fusion_ops = False
 
-    def _apply_mlp(self, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
-        return unified_apply_mlp(mlp_compute_input=mlp_compute_input)
+    def _apply_mlp(self, mlp_compute_input: MoEMlpComputeInput) -> Any:
+        return unified_apply_mlp(mlp_compute_input=mlp_compute_input), None
 
     def _get_token_dispatcher(self):
         return TokenDispatcherWithAllGather310(

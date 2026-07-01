@@ -9,6 +9,24 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size
 
 
+def _using_kv_store(vllm_config) -> bool:
+    """
+    Check whether AscendStoreConnector is used.
+    In the scenario where only PD separation is used, mamba_cache_mode is not automatically set to align.
+    """
+    if not vllm_config.kv_transfer_config:
+        return False
+    if vllm_config.kv_transfer_config.kv_connector == "AscendStoreConnector":
+        return True
+    if vllm_config.kv_transfer_config.kv_connector == "MultiConnector":
+        kv_connector_extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
+        if not kv_connector_extra_config:
+            return False
+        if connectors := kv_connector_extra_config.get("connectors"):
+            return any(connector.get("kv_connector") == "AscendStoreConnector" for connector in connectors)
+    return False
+
+
 @classmethod
 def verify_and_update_config(cls, vllm_config) -> None:
     """
@@ -21,6 +39,10 @@ def verify_and_update_config(cls, vllm_config) -> None:
     Args:
         vllm_config: vLLM Config
     """
+    using_kv_store_with_hybrid = not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager and _using_kv_store(
+        vllm_config
+    )
+    logger.debug("Using kv store: %s", using_kv_store_with_hybrid)
     # Enable FULL_AND_PIECEWISE by default
     MambaModelConfig.verify_and_update_config(vllm_config)
 
@@ -34,11 +56,6 @@ def verify_and_update_config(cls, vllm_config) -> None:
         kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
 
     kernel_block_size = 128
-    # get attention block size
-    attn_num_kv_heads = model_config.get_num_kv_heads(parallel_config)
-    attn_head_size = model_config.get_head_size()
-    attn_single_token_k_page_size = attn_head_size * attn_num_kv_heads * get_dtype_size(kv_cache_dtype)
-
     model_cls, _ = ModelRegistry.resolve_model_cls(
         model_config.architecture,
         model_config=model_config,
@@ -52,9 +69,28 @@ def verify_and_update_config(cls, vllm_config) -> None:
         mamba_sizes.append(math.prod(shape) * get_dtype_size(dtype))
     ssm_block_page_size, conv_block_page_size = max(mamba_sizes), min(mamba_sizes)
 
+    # Pure linear attention models (e.g. bailing 2.5) have only SSM state,
+    # no conv block. Detected by a single 3-D mamba shape (ssm only, no conv).
+    # Example shape: MambaSpec(shapes=((8, 128, 128),), mamba_type='linear_attention')
+    if len(mamba_shapes) == 1 and len(mamba_shapes[0]) == 3:
+        conv_block_page_size = 0
+
     # NOTE(zxr): because of the limit of Ascend Hardware, we need to keep
     # all cache tensors contiguous, so we align the page size of ssm_block
     # and single attn_block
+    if model_config.use_mla:
+        attn_num_kv_heads = model_config.get_num_kv_heads(parallel_config)
+        kv_lora_rank = model_config.hf_text_config.kv_lora_rank
+        qk_rope_head_dim = model_config.hf_text_config.qk_rope_head_dim
+        attn_single_token_k_page_size = kv_lora_rank * attn_num_kv_heads * get_dtype_size(kv_cache_dtype)
+        attn_rope_token_page_size = qk_rope_head_dim * attn_num_kv_heads * get_dtype_size(kv_cache_dtype)
+        attn_token_page_size = attn_single_token_k_page_size + attn_rope_token_page_size
+    else:
+        attn_num_kv_heads = model_config.get_num_kv_heads(parallel_config)
+        attn_head_size = model_config.get_head_size()
+        attn_single_token_k_page_size = attn_head_size * attn_num_kv_heads * get_dtype_size(kv_cache_dtype)
+        attn_token_page_size = 2 * attn_head_size * attn_num_kv_heads * get_dtype_size(kv_cache_dtype)
+
     attn_block_size = kernel_block_size * cdiv(ssm_block_page_size, kernel_block_size * attn_single_token_k_page_size)
     assert attn_single_token_k_page_size * attn_block_size == ssm_block_page_size, (
         "Cannot align ssm_page_size and attn_page_size."
@@ -71,7 +107,7 @@ def verify_and_update_config(cls, vllm_config) -> None:
         )
 
     # compute new attention page size
-    attn_page_size = cache_config.block_size * 2 * attn_head_size * attn_num_kv_heads * get_dtype_size(kv_cache_dtype)
+    attn_page_size = cache_config.block_size * attn_token_page_size
 
     # pad mamba page size for conv_blocks
     if (
@@ -86,6 +122,24 @@ def verify_and_update_config(cls, vllm_config) -> None:
             "exactly equal.",
             mamba_padding_pct,
         )
+    # The extract_hidden_states connector (ExampleHiddenStatesConnector) only
+    # manages the dedicated hidden-state cache-only layer; it does not migrate
+    # mamba KV blocks across instances, so it does not require the block-aligned
+    # mamba cache mode. Forcing "align" for it would route hybrid models onto
+    # vLLM's fused GPU postprocess Triton kernel (introduced in vLLM #40172),
+    # which the Ascend Triton backend cannot compile. Leave the mode as vLLM
+    # derived it (e.g. "none" when prefix caching is off) for this case.
+    spec_config = vllm_config.speculative_config
+    is_extract_hidden_states = (
+        spec_config is not None and getattr(spec_config, "method", None) == "extract_hidden_states"
+    )
+    if using_kv_store_with_hybrid and not is_extract_hidden_states:
+        if cache_config.mamba_cache_mode == "none":
+            cache_config.mamba_cache_mode = "align"
+        else:
+            assert cache_config.mamba_cache_mode == "align", (
+                "mamba_cache_mode only support 'align' when kv_transfer enabled now!"
+            )
     if cache_config.enable_prefix_caching and cache_config.mamba_cache_mode == "align":
         cache_config.mamba_block_size = cache_config.block_size
     else:

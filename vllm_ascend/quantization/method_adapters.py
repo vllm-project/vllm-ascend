@@ -78,7 +78,11 @@ class AscendLinearMethod(LinearMethodBase):
             layer.register_parameter(weight_name, param)
             set_weight_attrs(param, extra_weight_attrs)
 
-        pertensor_dict = self.quant_method.get_pertensor_param(params_dtype)
+        # NOTE: In flatquant quantization implementation,
+        # the shape of pertensor_param requires introducing layer_type
+        layer_type = "row" if isinstance(layer, RowParallelLinear) else "others"
+
+        pertensor_dict = self.quant_method.get_pertensor_param(params_dtype, layer_type=layer_type)
         for pertensor_name, pertensor_param in pertensor_dict.items():
             param = PerTensorScaleParameter(data=pertensor_param, weight_loader=weight_loader)
             # disable warning
@@ -101,17 +105,20 @@ class AscendLinearMethod(LinearMethodBase):
         pergroup_dict = self.quant_method.get_pergroup_param(
             input_size_per_partition, output_size_per_partition, params_dtype, layer_type=layer_type
         )
+        scale_packed_dim = pergroup_dict.pop("_packed_dim", None)
+        scale_packed_factor = pergroup_dict.pop("_packed_factor", None)
         for pergroup_name, pergroup_param in pergroup_dict.items():
             param = torch.nn.Parameter(pergroup_param, requires_grad=False)
             set_weight_attrs(param, {"output_dim": 0})
             layer.register_parameter(pergroup_name, param)
             set_weight_attrs(param, extra_weight_attrs)
+            if scale_packed_dim is not None and scale_packed_factor is not None:
+                set_weight_attrs(param, {"packed_dim": scale_packed_dim, "packed_factor": scale_packed_factor})
             if (
                 "weight_scale_second" in pergroup_name
                 or "weight_offset_second" in pergroup_name
                 or is_mx_quant_type(self.quant_method)
             ):
-                param.input_dim = 1
                 param.input_dim = 1
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -201,9 +208,10 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
         moe_config: The FusedMoE configuration.
     """
 
-    def __init__(self, scheme: AscendMoEScheme, moe_config: FusedMoEConfig) -> None:
+    def __init__(self, scheme: AscendMoEScheme, moe_config: FusedMoEConfig, tid2eid=None) -> None:
         super().__init__(moe_config)
         self.quant_method = scheme
+        self.tid2eid = tid2eid
 
     def create_weights(
         self,
@@ -246,7 +254,7 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
         top_k: int,
         renormalize: bool,
         use_grouped_topk: bool = False,
-        global_num_experts: int = -1,
+        num_experts: int = -1,
         expert_map: torch.Tensor | None = None,
         topk_group: int | None = None,
         num_expert_group: int | None = None,
@@ -270,7 +278,7 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
             top_k=top_k,
             renormalize=renormalize,
             use_grouped_topk=use_grouped_topk,
-            global_num_experts=global_num_experts,
+            num_experts=num_experts,
             expert_map=expert_map,
             topk_group=topk_group,
             num_expert_group=num_expert_group,
@@ -286,6 +294,7 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
             activation=activation,
             apply_router_weight_on_input=apply_router_weight_on_input,
             mc2_mask=mc2_mask,
+            tid2eid=self.tid2eid,
         )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:

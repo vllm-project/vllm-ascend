@@ -58,6 +58,33 @@ class AscendSFACPMetadataBuilder(AscendSFAMetadataBuilder):
         )
         self.block_arange_buffer = torch.arange(self.pcp_size * self.dcp_size, dtype=torch.int32, device=device)
 
+    def _compact_varlen_decode_slot_mapping(
+        self,
+        decode_slot_mapping: torch.Tensor,
+        decode_query_lens: torch.Tensor,
+    ) -> None:
+        device = decode_slot_mapping.device
+        decode_query_lens_cpu = decode_query_lens.to(device="cpu", dtype=torch.int64, non_blocking=True)
+        total_valid_tokens = int(decode_query_lens_cpu.sum().item())
+        if total_valid_tokens == 0:
+            return
+        decode_query_lens = decode_query_lens_cpu.to(device=device, dtype=torch.int64, non_blocking=True)
+
+        req_spans = decode_query_lens * self.pcp_size
+        req_starts = torch.cumsum(req_spans, dim=0) - req_spans
+
+        token_offsets = torch.arange(total_valid_tokens, device=device, dtype=torch.int64)
+        token_base = torch.cumsum(decode_query_lens, dim=0) - decode_query_lens
+        token_offsets = token_offsets - torch.repeat_interleave(token_base, decode_query_lens)
+
+        expanded_req_starts = torch.repeat_interleave(req_starts, decode_query_lens)
+        valid_in_idx = expanded_req_starts + token_offsets * self.pcp_size
+        valid_out_idx = expanded_req_starts + token_offsets
+
+        valid_slots = decode_slot_mapping[valid_in_idx]
+        decode_slot_mapping.fill_(-1)
+        decode_slot_mapping.index_copy_(0, valid_out_idx, valid_slots)
+
     def build(
         self,
         common_prefix_len: int,
@@ -66,7 +93,9 @@ class AscendSFACPMetadataBuilder(AscendSFAMetadataBuilder):
     ) -> AscendSFAMetadata:
         metadata_cls = super().build(common_prefix_len, common_attn_metadata, fast_build)
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = split_decodes_and_prefills(
-            common_attn_metadata, decode_threshold=self.decode_threshold
+            common_attn_metadata,
+            decode_threshold=self.decode_threshold,
+            treat_short_extends_as_decodes=False,
         )
         num_reqs = common_attn_metadata.num_reqs
         assert num_decodes + num_prefills == num_reqs
@@ -113,15 +142,16 @@ class AscendSFACPMetadataBuilder(AscendSFAMetadataBuilder):
             elif self.speculative_config is not None and num_decodes > 0:
                 # when mtp, pcp_allgather_restore_idx=[696,-1,697,-1,560,-1,561,-1,100,101,102],
                 # slot_mapping should be [696,697,-1,-1,560,561,-1,-1,100,101,102]
-                num_tokens_per_request = num_decode_tokens // num_decodes
-                decode_slot_mapping = self.slot_mapping_buf[: num_decode_tokens * self.pcp_size].reshape(
-                    num_decodes, -1
+                # corner case: decode requests in the same MTP batch can have
+                # different query lengths when some drafts are clipped near
+                # max_model_len, so compact slot_mapping by per-request length
+                # instead of assuming each request has decode_threshold tokens.
+                decode_query_lens = long_seq_metadata.query_lens_pcp_full_cpu[:num_decodes]
+                decode_slot_mapping = self.slot_mapping_buf[: num_decode_tokens * self.pcp_size]
+                self._compact_varlen_decode_slot_mapping(
+                    decode_slot_mapping,
+                    decode_query_lens,
                 )
-                decode_slot_mapping[:, :num_tokens_per_request] = decode_slot_mapping[
-                    :, : num_tokens_per_request * self.pcp_size : self.pcp_size
-                ]
-                decode_slot_mapping[:, num_tokens_per_request : num_tokens_per_request * self.pcp_size].fill_(-1)
-                self.slot_mapping_buf[: num_decode_tokens * self.pcp_size] = decode_slot_mapping.flatten()
             metadata_cls.slot_mapping = self.slot_mapping_buf[:num_actual_tokens_pcp_padded]
         metadata_cls.sfa_cp_metadata = sfa_cp_metadata
         return metadata_cls
@@ -324,7 +354,7 @@ class AscendSFACPImpl(AscendSFAImpl):
     def _execute_sparse_flash_attention(
         self, ql_nope, q_pe, kv, key_rope, block_table, topk_indices, actual_seq_lengths_query, actual_seq_lengths_key
     ):
-        attn_output = torch.ops._C_ascend.npu_sparse_flash_attention(
+        attn_output, _, _ = torch.ops._C_ascend.npu_sparse_flash_attention(
             query=ql_nope,
             key=kv,
             value=kv,
@@ -339,6 +369,7 @@ class AscendSFACPImpl(AscendSFAImpl):
             layout_query="TND",
             layout_kv="PA_BSND",
             sparse_mode=3,
+            attention_mode=2,
         )
         return attn_output
 
@@ -385,8 +416,8 @@ class AscendSFACPImpl(AscendSFAImpl):
         actual_seq_lengths_query: torch.Tensor,
         actual_seq_lengths_key: torch.Tensor,
     ):
-        weights, _ = self.weights_proj(x)
-
+        kw, _ = self.wk_weights_proj(x)
+        weights = kw[:, self.head_dim :]
         q_li, _ = self.wq_b(q_c)  # [b,s,1536] @ [1536,64*128] = [b,s,64*128]
         q_li = q_li.view(-1, self.n_head, self.head_dim)  # [n_toks,64,128]
         if HAS_TRITON:
@@ -497,7 +528,7 @@ class AscendSFACPImpl(AscendSFAImpl):
                 sparse_mode=3,
             )
         else:
-            topk_indices = torch.ops._C_ascend.npu_lightning_indexer(
+            topk_indices, _ = torch.ops._C_ascend.npu_lightning_indexer(
                 query=q,
                 key=key,
                 weights=weights,

@@ -7,17 +7,18 @@ This section provides a detailed usage guide of vLLM Ascend features.
 :maxdepth: 1
 graph_mode
 cpu_binding
+Ai_QoS_introduction_en
 quantization
 sleep_mode
 structured_output
 lora
-eplb_swift_balancer
+expert_parallelism_load_balancer
 netloader
 rfork
-Multi_Token_Prediction
 dynamic_batch
 epd_disaggregation
 kv_pool
+kv_cache_cpu_offload
 external_dp
 large_scale_ep
 ucm_deployment
@@ -29,4 +30,6 @@ weight_prefetch
 sequence_parallelism
 batch_invariance
 lmcache_ascend_deployment
+dynamic_chunk_pipeline_parallel
+flash_attention
 :::

@@ -86,7 +86,7 @@ This feature is flexible and supports various configurations, including setups w
 
 ### 1. Config Parameter Validation
 
-Validate KV transfer config by checking whether the kv_connector type is supported and whether kv_connector_module_path exists and is loadable. On transfer failures, emit clear error logs for diagnostics.
+Validate KV transfer config by checking whether the kv_connector type is supported. On transfer failures, emit clear error logs for diagnostics.
 
 ### 2. Port Conflict Detection
 
@@ -100,6 +100,6 @@ Under non-symmetric PD scenarios, validate the P-to-D tp ratio against expected 
 
 ## Limitations
 
-- Heterogeneous P and D nodes are not supported—for example, running P nodes on A2 and D nodes on A3.
+- Heterogeneous P and D nodes are not supported, for example, running P nodes on A2 and D nodes on A3.
 
 - In non-symmetric TP configurations, only cases where the P nodes have a higher TP degree than the D nodes and the P TP count is an integer multiple of the D TP count are supported (i.e., P_tp > D_tp and P_tp % D_tp = 0).
