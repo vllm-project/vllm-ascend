@@ -2052,41 +2052,47 @@ class AscendDSAImpl(DSAAttentionImpl):
                     _S = _T // _B
                     _q4 = q.view(_B, _S, _N, _H).contiguous()
                     _kv = swa_kv_cache.reshape(swa_kv_cache.shape[0], 1, swa_kv_cache.shape[1], swa_kv_cache.shape[3])
-                    if _ob1.environ.get('DSPARK_DBG'):
-                        print('DSPARK_OPTB1 bsnd q4=%s kv=%s B=%s S=%s H=%s' % (tuple(_q4.shape), tuple(_kv.shape), _B, _S, _H), file=_ob1s.stderr, flush=True)
+                    _win = int(getattr(self, "window_size", 0)) or int(actual_seq_lengths_key.max().item())
+                    import os as _cw
+                    _ctxmode = _cw.environ.get("DSPARK_CTXLEN", "full")
+                    if _ctxmode == "clamp":
+                        _ctx_kv_len = torch.clamp(actual_seq_lengths_key, max=_win).to(actual_seq_lengths_key.dtype)
+                    else:
+                        _ctx_kv_len = actual_seq_lengths_key.to(actual_seq_lengths_key.dtype)  # full: include recent positions
                     _oc, _lc = torch.ops.npu.npu_fused_infer_attention_score(
-                        _q4, _kv, _kv,
-                        num_heads=_N, num_key_value_heads=1, input_layout='BSND',
-                        scale=self.softmax_scale, sparse_mode=0,
-                        atten_mask=None, antiquant_mode=0, antiquant_scale=None,
-                        softmax_lse_flag=True,
-                        block_table=swa_prefill_metadata.block_table,
-                        block_size=swa_kv_cache.shape[1],
-                        actual_seq_lengths_kv=actual_seq_lengths_key,
-                    )
+                        _q4, _kv, _kv, num_heads=_N, num_key_value_heads=1, input_layout='BSND',
+                        scale=self.softmax_scale, sparse_mode=0, atten_mask=None, softmax_lse_flag=True,
+                        block_table=swa_prefill_metadata.block_table, block_size=swa_kv_cache.shape[1],
+                        actual_seq_lengths_kv=_ctx_kv_len)
                     _bk = kv.reshape(_B, _S, 1, _H).contiguous()
                     _ob, _lb = torch.ops.npu.npu_fused_infer_attention_score(
-                        _q4, _bk, _bk,
-                        num_heads=_N, num_key_value_heads=1, input_layout='BSND',
-                        scale=self.softmax_scale, sparse_mode=0,
-                        atten_mask=None, antiquant_mode=0, antiquant_scale=None,
-                        softmax_lse_flag=True,
-                    )
+                        _q4, _bk, _bk, num_heads=_N, num_key_value_heads=1, input_layout='BSND',
+                        scale=self.softmax_scale, sparse_mode=0, atten_mask=None, softmax_lse_flag=True)
                     _lc = _lc.transpose(1, 2).float(); _lb = _lb.transpose(1, 2).float()
+                    _msink = None
+                    try:
+                        _as = getattr(self, "attn_sink", None)
+                        if _as is not None:
+                            _msink = _as.reshape(-1)[:_N].float().view(1, 1, _N, 1)
+                    except Exception:
+                        _msink = None
                     _m = torch.maximum(_lc, _lb)
+                    if _msink is not None:
+                        _m = torch.maximum(_m, _msink)
                     _wc = torch.exp(_lc - _m); _wb = torch.exp(_lb - _m)
-                    _den = _wc + _wb + 1e-9
+                    _ws = torch.exp(_msink - _m) if _msink is not None else torch.zeros_like(_wc)
+                    _den = _wc + _wb + _ws + 1e-9
                     _merged = (_oc.float() * _wc + _ob.float() * _wb) / _den
                     try:
                         _cnt = getattr(_ob1, "_DSPARK_CNT", 0) + 1; _ob1._DSPARK_CNT = _cnt
                         if _cnt % 50 == 1:
-                            _rel = (_merged - _oc.float()).norm() / (_oc.float().norm() + 1e-9)
-                            _ratio = (_wb / (_wc + 1e-9)).mean()
-                            print("DSPARK_DIAG cnt=%d lc=%.3f lb=%.3f wb/wc=%.5f rel=%.5f" % (_cnt, float(_lc.mean()), float(_lb.mean()), float(_ratio), float(_rel)), file=_ob1s.stderr, flush=True)
+                            import sys as _ds
+                            print("DSPARK_DIAG2 cnt=%d win=%d klen=%s ctxlen=%s sink=%s wc=%.4f wb=%.4f ws=%.4f wb_over_wc=%.3f" % (
+                                _cnt, _win, int(actual_seq_lengths_key.reshape(-1)[0]), int(_ctx_kv_len.reshape(-1)[0]),
+                                (_msink is not None), float(_wc.mean()), float(_wb.mean()), float(_ws.mean()), float((_wb/(_wc+1e-9)).mean())), file=_ds.stderr, flush=True)
                     except Exception as _de:
-                        print("DSPARK_DIAG ERR %r"%(_de,), file=_ob1s.stderr, flush=True)
-                    if _ob1.environ.get('DSPARK_DBG'):
-                        print('DSPARK_OPTB2 oc=%s ob=%s lc=%s merged=%s' % (tuple(_oc.shape), tuple(_ob.shape), tuple(_lc.shape), tuple(_merged.shape)), file=_ob1s.stderr, flush=True)
+                        import sys as _ds2
+                        print("DSPARK_DIAG2 ERR %r"%(_de,), file=_ds2.stderr, flush=True)
                     return _merged.to(q.dtype).reshape(_T, _N, _H)
                 except Exception as _obe:
                     print("DSPARK_OPTB1 FIA ERR: %r" % (_obe,), file=_ob1s.stderr, flush=True)

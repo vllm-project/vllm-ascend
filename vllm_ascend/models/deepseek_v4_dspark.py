@@ -321,19 +321,6 @@ class DeepSeekV4DSparkModel(nn.Module):
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
         base = inputs_embeds
-        # DSPARK FIX: fold the proposer-delivered target seed (main_x = combine_hidden_states
-        # output) into the residual. It was received as `hidden_states` but DROPPED, so the
-        # draft ran on the token embedding alone with ZERO target conditioning (pos-0 ~11%).
-        # MTP-1 (pos-0 93.9%) feeds the target hidden into the draft residual; do the same so
-        # each layer's input_layernorm renormalizes embed+main_x together.
-        if hidden_states is not None:
-            _seed = hidden_states.to(base.dtype).view_as(base)
-            def _unit_rms(_t):
-                _sc = torch.rsqrt(_t.float().pow(2).mean(dim=-1, keepdim=True) + self.rms_norm_eps)
-                return (_t.float() * _sc).to(base.dtype)
-            # separately RMS-normalize embed and main_x before adding (MTP-1 enorm+hnorm
-            # analogue) so the target seed is not numerically swamped by the embedding.
-            base = _unit_rms(base) + _unit_rms(_seed)
         import os as _os
         if _os.environ.get("DSPARK_DBG"):
             import sys as _sys
@@ -388,6 +375,16 @@ class DeepSeekV4DSparkModel(nn.Module):
             bias = self.logits_processor(self.markov_head.markov_w2, emb)  # [B, full_vocab] (gathered)
             embeds.append(emb)
             _li = U[:, i].float() if _nobias else (U[:, i].float() + bias.float())
+            if _mb.environ.get("DSPARK_DBG"):
+                try:
+                    _Uf = U[:, i].float()
+                    print("DSPARK_MKV i=%d Uarg=%d Ustd=%.3f Utop2gap=%.3f biasstd=%.3f biasarg=%d finalarg=%d prevtok=%d" % (
+                        i, int(_Uf.argmax(-1)[0]), float(_Uf.std()),
+                        float((_Uf.topk(2,dim=-1).values[0,0]-_Uf.topk(2,dim=-1).values[0,1])),
+                        float(bias.float().std()), int(bias.float().argmax(-1)[0]),
+                        int(_li.argmax(-1)[0]), int(output_ids[:, i][0])), file=_mbs.stderr, flush=True)
+                except Exception as _mke:
+                    print("DSPARK_MKV ERR %r"%(_mke,), file=_mbs.stderr, flush=True)
             output_ids[:, i + 1] = _sample(_li, temperature)
         markov_embed = torch.stack(embeds, dim=1)
         confidence = self.confidence_head(xc, markov_embed)
