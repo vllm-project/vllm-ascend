@@ -629,7 +629,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         mock_stream,
     ):
         """Test behavior when _ATTN_KEYS_BUFFER is [] after dummy_run."""
-        
+
         mock_EXTRA_CTX.sinks = False
         mock_EXTRA_CTX.is_draft_model = False
 
