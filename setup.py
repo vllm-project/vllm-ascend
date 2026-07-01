@@ -545,5 +545,8 @@ setup(
             "ascend_service_profiling = vllm_ascend:register_service_profiling",
             "ascend_model = vllm_ascend:register_model",
         ],
+        "vllm.afd_connectors": [
+            "npup2p = vllm_ascend.distributed.NPUP2PAFDConnector:NPUP2PAFDConnector",
+        ],
     },
 )

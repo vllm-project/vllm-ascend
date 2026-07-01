@@ -41,7 +41,8 @@ from vllm.distributed import get_tensor_model_parallel_world_size, tensor_model_
 from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.distributed.parallel_state import get_dcp_group, get_dp_group, get_pcp_group, get_pp_group, get_tp_group
-from vllm.forward_context import BatchDescriptor, ForwardContext, get_forward_context
+from vllm.forward_context import (AFDMetadata, BatchDescriptor, DPMetadata,
+                                  ForwardContext, get_forward_context)
 from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
@@ -313,6 +314,14 @@ class NPUModelRunner(GPUModelRunner):
 
         self.sampler = AscendSampler()
         self.attn_state: AscendAttentionState | None = None
+
+        # AFD (Attention-FFN Disaggregation) related state.
+        # GPUModelRunner.__init__ already sets self.afd_config and creates
+        # self.afd_connector when afd_role=='attention'. We only add the
+        # NPU communication stream here; do not overwrite afd_connector.
+        self.afd_config = vllm_config.afd_config
+        self.afd_comm_stream = torch.npu.Stream() if (
+            self.afd_config is not None) else None
 
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
@@ -619,6 +628,75 @@ class NPUModelRunner(GPUModelRunner):
                 self.rejection_sampler = AscendRejectionSampler(self.sampler)
         self.discard_request_indices = self._make_buffer(self.max_num_reqs, dtype=torch.int64)
         self.num_discarded_requests = 0
+
+    def initialize_afd_connector(self) -> None:
+        """Create and initialize the AFD connector for the attention side.
+
+        Only activates when ``afd_role=='attention'``; otherwise it is a
+        no-op so that non-AFD runs are unaffected.
+        """
+        if self.afd_config is None or not self.afd_config.is_attention_server:
+            return
+        if self.afd_connector is not None:
+            return
+        from vllm.distributed.afd_transfer.afd_connector import AFDConnectorFactory
+        from vllm.distributed.parallel_state import get_world_group
+        self.afd_connector = AFDConnectorFactory.create_connector(
+            get_world_group().rank,
+            get_world_group().local_rank,
+            self.vllm_config,
+        )
+        self.afd_connector.init_afd_connector()
+
+    def _build_afd_dp_metadata_list(self, ubatch_slices_padded) -> dict:
+        """Build dp_metadata_list to send to the FFN side.
+
+        Args:
+            ubatch_slices_padded: ubatch slices with padding
+
+        Returns:
+            dict: {stage_idx: DPMetadata}
+        """
+        dp_metadata_list = {}
+        if ubatch_slices_padded is not None:
+            for idx, ubatch_slice in enumerate(ubatch_slices_padded):
+                dp_size = self.vllm_config.parallel_config.data_parallel_size
+                ubatch_num_tokens_across_dp = torch.tensor(
+                    [ubatch_slice.num_tokens] * dp_size, device="cpu", dtype=torch.int32
+                )
+                dp_metadata_list[idx] = DPMetadata.make(
+                    self.vllm_config.parallel_config,
+                    ubatch_slice.num_tokens,
+                    ubatch_num_tokens_across_dp,
+                )
+        else:
+            # Single stage: reuse the current dp_metadata from forward context.
+            dp_metadata_list[0] = get_forward_context().dp_metadata
+        return dp_metadata_list
+
+    def _build_afd_metadata(
+        self, ubatch_slices: UBatchSlices | None, num_tokens_unpadded: int
+    ):
+        afd_metadata = None
+        if self.afd_config:
+            if ubatch_slices and len(ubatch_slices) > 1:
+                afd_tokens_start_loc = [ub.token_slice.start for ub in ubatch_slices]
+                afd_reqs_start_loc = [ub.request_slice.start for ub in ubatch_slices]
+                afd_tokens_lens = [ub.num_tokens for ub in ubatch_slices]
+            else:
+                afd_tokens_start_loc = [0]
+                afd_reqs_start_loc = [0]
+                afd_tokens_lens = [num_tokens_unpadded]
+
+            afd_metadata = AFDMetadata(
+                afd_tokens_start_loc=afd_tokens_start_loc,
+                afd_reqs_start_loc=afd_reqs_start_loc,
+                afd_stage_idx=0,
+                afd_connector=self.afd_connector,
+                afd_tokens_lens=afd_tokens_lens,
+                num_of_stages=len(ubatch_slices) if ubatch_slices else 1,
+            )
+        return afd_metadata
 
     def _get_drafter(self):
         return get_spec_decode_method(self.speculative_config.method, self.vllm_config, self.device, self)
@@ -2224,6 +2302,10 @@ class NPUModelRunner(GPUModelRunner):
         num_encoder_reqs = len(scheduler_output.scheduled_encoder_inputs)
         has_encoder_input = self.model_config.is_encoder_decoder and num_encoder_reqs > 0
 
+        # Build AFD metadata (if AFD is enabled) so it can be threaded through
+        # the forward context to model layers.
+        afd_metadata = self._build_afd_metadata(ubatch_slices, num_tokens_unpadded)
+
         # Run forward pass
         clear_kv_metadata = self.speculative_config is None
         with (
@@ -2242,6 +2324,8 @@ class NPUModelRunner(GPUModelRunner):
                 has_sinks=self._has_sinks,
                 input_ids=input_ids,
                 eplb_heat_collection_status=self.eplb_heat_collection_status if self.dynamic_eplb else False,
+                afd_metadata=afd_metadata,
+                afd_comm_stream=self.afd_comm_stream,
             ),
             self.maybe_get_kv_connector_output(
                 scheduler_output,
@@ -2250,6 +2334,23 @@ class NPUModelRunner(GPUModelRunner):
                 ),
             ) as kv_connector_output,
         ):
+            # Send dp_metadata_list to FFN side so that FFN servers can
+            # pre-allocate per-stage token buffers. Only the first
+            # min_size attention ranks actually send (1-to-N mapping).
+            if self.afd_config and self.afd_connector:
+                dp_metadata_list = self._build_afd_dp_metadata_list(ubatch_slices)
+                self.afd_connector.update_state_from_dp_metadata(
+                    dp_metadata_list, False)
+                if self.afd_connector.is_attn_top_min_size_rank(
+                        self.afd_connector.rank):
+                    self.afd_connector.send_dp_metadata_list(
+                        dp_metadata_list,
+                        is_warmup=False)
+                    logger.info(
+                        "afd_connector.rank send_dp_metadata_list is %s, "
+                        "is_warmup: False, ubatch_slices: %s",
+                        dp_metadata_list, ubatch_slices)
+                dist.barrier(group=get_dp_group().cpu_group)
             if self.cache_config.mamba_cache_mode == "align":
                 mamba_utils.do_mamba_copy_block(preprocess_bufs)
             hidden_states = self._model_forward(
@@ -3510,6 +3611,10 @@ class NPUModelRunner(GPUModelRunner):
                 if hasattr(self.drafter, "model") and hasattr(self.drafter.model, "compute_logits"):
                     return self.drafter.model.compute_logits(hidden_states[dummy_indices])
 
+            # Build AFD metadata (if AFD is enabled) so it can be threaded
+            # through the forward context during graph capture / warmup.
+            afd_metadata = self._build_afd_metadata(ubatch_slices, num_tokens_padded)
+
             with set_ascend_forward_context(
                 attn_metadata,
                 self.vllm_config,
@@ -3523,7 +3628,29 @@ class NPUModelRunner(GPUModelRunner):
                 has_sinks = self._has_sinks,
                 input_ids=input_ids,
                 eplb_heat_collection_status=self.eplb_heat_collection_status if self.dynamic_eplb else False,
+                afd_metadata=afd_metadata,
+                afd_comm_stream=self.afd_comm_stream,
             ):
+                # Send dp_metadata_list to FFN side during dummy run so that
+                # FFN servers can capture / warmup their graphs with matching
+                # token distribution. Only the first min_size attention ranks
+                # actually send (1-to-N mapping).
+                if self.afd_config and self.afd_connector:
+                    dp_metadata_list = self._build_afd_dp_metadata_list(
+                        ubatch_slices_padded)
+                    self.afd_connector.update_state_from_dp_metadata(
+                        dp_metadata_list, is_graph_capturing)
+                    if self.afd_connector.is_attn_top_min_size_rank(
+                            self.afd_connector.rank):
+                        self.afd_connector.send_dp_metadata_list(
+                            dp_metadata_list,
+                            is_graph_capturing=is_graph_capturing,
+                            is_warmup=False)
+                        logger.info(
+                            "afd_connector.rank in dummy_run send_dp_metadata_list is %s, "
+                            "is_graph_capturing: %s",
+                            dp_metadata_list, is_graph_capturing)
+                    dist.barrier(group=get_dp_group().cpu_group)
                 outputs = self._model_forward(
                     num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds
                 )

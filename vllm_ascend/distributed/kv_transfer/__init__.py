@@ -79,3 +79,18 @@ def register_connector():
             "vllm_ascend.distributed.kv_transfer.kv_pool.simple_cpu_offload.simple_cpu_offload_connector",  # noqa: E501
             "AscendSimpleCPUOffloadConnector",
         )
+
+
+def register_afd_connector():
+    """Register the NPU P2P AFD connector with the vLLM AFD connector factory.
+
+    This wires up ``npup2pconnector`` as a selectable ``afd_connector`` for
+    AFD (Attention-FFN Disaggregation) runs on Ascend NPUs.
+    """
+    from vllm.distributed.afd_transfer.afd_connector.factory import \
+        AFDConnectorFactory
+
+    AFDConnectorFactory.register_connector(
+        "npup2pconnector",
+        "vllm_ascend.distributed.NPUP2PAFDConnector",
+        "NPUP2PAFDConnector")

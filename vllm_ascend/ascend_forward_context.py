@@ -2,13 +2,14 @@ import math
 from contextlib import contextmanager
 from contextvars import ContextVar
 from enum import Enum
-from typing import Any
+from typing import Any, Optional
 
 import torch
 import vllm.envs as envs_vllm
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import get_dp_group, get_ep_group, get_tensor_model_parallel_world_size
-from vllm.forward_context import BatchDescriptor, get_forward_context, set_forward_context
+from vllm.forward_context import (AFDMetadata, BatchDescriptor,
+                                  get_forward_context, set_forward_context)
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import (
@@ -71,6 +72,8 @@ def set_ascend_forward_context(
     has_sinks=False,
     input_ids=None,
     eplb_heat_collection_status: bool = False,
+    afd_metadata: Optional[AFDMetadata] = None,
+    afd_comm_stream: torch.npu.Stream = None,
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
@@ -84,10 +87,18 @@ def set_ascend_forward_context(
         "cudagraph_runtime_mode": aclgraph_runtime_mode,
         "batch_descriptor": batch_descriptor,
         "skip_compiled": skip_compiled,
+        "afd_metadata": afd_metadata,
     }
     with set_forward_context(**forward_context_kwargs):
         forward_context = get_forward_context()
         forward_context.draft_attn_metadatas = draft_attn_metadatas
+
+        # Populate AFD communication stream / event so that model layers can
+        # reach them via the forward context. Only set when AFD is active to
+        # avoid creating unnecessary event objects for non-AFD runs.
+        if afd_comm_stream is not None or afd_metadata is not None:
+            forward_context.afd_comm_stream = afd_comm_stream
+            forward_context.afd_comm_event = torch.npu.Event()
 
         forward_context.input_ids = input_ids
 
