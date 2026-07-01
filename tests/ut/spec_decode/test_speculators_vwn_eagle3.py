@@ -167,7 +167,10 @@ def _mock_npu_env():
         # Mock it since self_attn is replaced with _PassthroughAttn anyway.
         patch(
             "vllm.v1.attention.selector._cached_get_attn_backend",
-            return_value=MagicMock,
+            return_value=MagicMock(
+                get_name=MagicMock(return_value="NO_ATTENTION"),
+                supports_alibi_sqrt=MagicMock(return_value=False),
+            ),
             create=True,
         ),
         # enable_cp() reads parallel_config.*_context_parallel_size and runs `> 1`.

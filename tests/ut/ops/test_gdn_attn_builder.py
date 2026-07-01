@@ -36,7 +36,6 @@ from vllm_ascend.ops.triton.fla.utils import (
 from vllm_ascend.ops.triton.fla.utils import (
     prepare_update_chunk_offsets as runtime_prepare_update_chunk_offsets,
 )
-from vllm_ascend.utils import vllm_version_is
 
 
 @pytest.fixture(autouse=True)
@@ -52,13 +51,10 @@ def _patch_triton_cdiv(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _no_pin_memory():
-    # v0.23.0+ uses np_to_pinned_tensor (reads PIN_MEMORY global) inside
-    # compute_causal_conv1d_metadata.  Without physical NPU, t.pin_memory()
-    # raises "Please register PrivateUse1HooksInterface first".
-    if vllm_version_is("0.23.0"):
-        with patch("vllm.utils.torch_utils.PIN_MEMORY", False):
-            yield
-    else:
+    # compute_causal_conv1d_metadata uses np_to_pinned_tensor which reads
+    # PIN_MEMORY.  Without physical NPU, t.pin_memory() raises
+    # "Please register PrivateUse1HooksInterface first".
+    with patch("vllm.utils.torch_utils.PIN_MEMORY", False):
         yield
 
 
