@@ -14,9 +14,18 @@ from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 from vllm_ascend.attention.msa_m3 import (
+    AscendMiniMaxM3IndexerLinear,
     AscendMiniMaxM3IndexerMetadataBuilder,
     AscendMiniMaxM3SparseBackend,
+    AscendMiniMaxM3SparseDecodeMetadata,
+    AscendMiniMaxM3SparseImpl,
+    AscendMiniMaxM3SparseMetadata,
     AscendMiniMaxM3SparseMetadataBuilder,
+    AscendMiniMaxM3SparsePrefillMetadata,
+    MiniMaxM3SparseAttention,
+    _register_m3_sparse_packed_modules,
+    _sparse_proj_quant_type,
+    _use_fused_qkv_indexer,
     minimax_m3_sparse_forward,
 )
 
@@ -236,3 +245,226 @@ def test_indexer_metadata_builder(batch_spec: BatchSpec) -> None:
         assert metadata.num_prefills == batch_spec.batch_size
         assert metadata.decode is None
         assert metadata.prefill is not None
+
+
+def test_sparse_proj_quant_type_falls_back_to_language_model_prefix() -> None:
+    quant_config = SimpleNamespace(
+        quant_description={
+            "language_model.model.layers.0.self_attn.q_proj.weight": "w8a8"
+        }
+    )
+
+    assert (
+        _sparse_proj_quant_type(quant_config, "model.layers.0.self_attn", "q_proj")
+        == "w8a8"
+    )
+
+
+def test_use_fused_qkv_indexer_returns_false_for_mixed_qkv_and_indexer_quant() -> None:
+    quant_config = SimpleNamespace(
+        quant_description={
+            "model.layers.0.self_attn.q_proj.weight": "w8a8",
+            "model.layers.0.self_attn.k_proj.weight": "w8a8",
+            "model.layers.0.self_attn.v_proj.weight": "w8a8",
+            "model.layers.0.self_attn.index_q_proj.weight": "int8",
+            "model.layers.0.self_attn.index_k_proj.weight": "int8",
+        }
+    )
+
+    assert _use_fused_qkv_indexer(quant_config, "model.layers.0.self_attn") is False
+
+
+def test_use_fused_qkv_indexer_rejects_mismatched_index_quant_types() -> None:
+    quant_config = SimpleNamespace(
+        quant_description={
+            "model.layers.0.self_attn.q_proj.weight": "w8a8",
+            "model.layers.0.self_attn.k_proj.weight": "w8a8",
+            "model.layers.0.self_attn.v_proj.weight": "w8a8",
+            "model.layers.0.self_attn.index_q_proj.weight": "int8",
+            "model.layers.0.self_attn.index_k_proj.weight": "fp16",
+        }
+    )
+
+    with pytest.raises(ValueError, match="index_q/index_k quantization types differ"):
+        _use_fused_qkv_indexer(quant_config, "model.layers.0.self_attn")
+
+
+def test_register_m3_sparse_packed_modules_adds_split_indexer_mapping() -> None:
+    quant_config = SimpleNamespace(packed_modules_mapping={})
+
+    _register_m3_sparse_packed_modules(quant_config, fused_qkv_indexer=False)
+
+    assert quant_config.packed_modules_mapping == {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "indexer_proj": ["index_q_proj", "index_k_proj"],
+    }
+
+
+@patch("vllm_ascend.attention.msa_m3.logger.warning")
+@patch("vllm_ascend.attention.msa_m3.AscendMiniMaxM3Indexer")
+@patch("vllm_ascend.attention.msa_m3.AscendMiniMaxM3IndexerLinear")
+@patch("vllm_ascend.attention.msa_m3.AscendMiniMaxM3SparseImpl")
+@patch("vllm_ascend.attention.msa_m3.kv_cache_dtype_str_to_dtype")
+@patch("vllm_ascend.attention.msa_m3.get_current_vllm_config")
+@patch("vllm_ascend.attention.msa_m3.GemmaRMSNorm")
+@patch("vllm_ascend.attention.msa_m3.get_rope")
+@patch("vllm_ascend.attention.msa_m3.RowParallelLinear")
+@patch("vllm_ascend.attention.msa_m3.QKVParallelLinear")
+@patch("vllm_ascend.attention.msa_m3.AscendMiniMaxM3QKVParallelLinearWithIndexer")
+@patch("vllm_ascend.attention.msa_m3.get_tensor_model_parallel_world_size", return_value=1)
+def test_sparse_attention_uses_split_indexer_projection_when_quant_types_differ(
+    _mock_tp_size: MagicMock,
+    mock_fused_qkv_linear: MagicMock,
+    mock_qkv_linear: MagicMock,
+    mock_row_linear: MagicMock,
+    mock_get_rope: MagicMock,
+    mock_rms_norm: MagicMock,
+    mock_get_vllm_config: MagicMock,
+    mock_kv_dtype: MagicMock,
+    mock_sparse_impl: MagicMock,
+    mock_indexer_linear: MagicMock,
+    mock_indexer: MagicMock,
+    _mock_logger_warning: MagicMock,
+) -> None:
+    mock_qkv_linear.return_value = SimpleNamespace(name="split_qkv")
+    mock_fused_qkv_linear.return_value = SimpleNamespace(name="fused_qkv")
+    mock_row_linear.return_value = SimpleNamespace(name="o_proj")
+    mock_get_rope.return_value = SimpleNamespace(is_neox_style=True)
+    mock_rms_norm.side_effect = lambda *args, **kwargs: SimpleNamespace(
+        weight_plus_one=torch.ones(1),
+        variance_epsilon=kwargs.get("eps", 1e-6),
+    )
+    mock_get_vllm_config.return_value = SimpleNamespace(
+        model_config=SimpleNamespace(),
+        compilation_config=SimpleNamespace(static_forward_context={}),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=32),
+    )
+    mock_kv_dtype.return_value = torch.bfloat16
+    mock_sparse_impl.return_value = SimpleNamespace(name="impl")
+    split_indexer_proj = SimpleNamespace(name="indexer_proj")
+    runtime_indexer = SimpleNamespace(name="runtime_indexer")
+    mock_indexer_linear.return_value = split_indexer_proj
+    mock_indexer.return_value = runtime_indexer
+    quant_config = SimpleNamespace(
+        quant_description={
+            "model.layers.0.self_attn.q_proj.weight": "w8a8",
+            "model.layers.0.self_attn.k_proj.weight": "w8a8",
+            "model.layers.0.self_attn.v_proj.weight": "w8a8",
+            "model.layers.0.self_attn.index_q_proj.weight": "int8",
+            "model.layers.0.self_attn.index_k_proj.weight": "int8",
+        },
+        packed_modules_mapping={},
+    )
+
+    layer = MiniMaxM3SparseAttention(
+        hidden_size=128,
+        num_heads=8,
+        num_kv_heads=2,
+        rotary_dim=128,
+        head_dim=16,
+        cache_config=SimpleNamespace(cache_dtype="auto"),
+        quant_config=quant_config,
+        prefix="model.layers.0.self_attn",
+        sparse_cfg={
+            "sparse_num_index_heads": 2,
+            "sparse_index_dim": 16,
+            "sparse_topk_blocks": 8,
+            "sparse_block_size": 128,
+        },
+    )
+
+    assert layer._use_fused_qkv_indexer is False
+    assert layer.qkv_proj.name == "split_qkv"
+    assert layer.indexer_proj is split_indexer_proj
+    assert layer.indexer is runtime_indexer
+    assert quant_config.packed_modules_mapping["qkv_proj"] == [
+        "q_proj",
+        "k_proj",
+        "v_proj",
+    ]
+    assert quant_config.packed_modules_mapping["indexer_proj"] == [
+        "index_q_proj",
+        "index_k_proj",
+    ]
+
+
+def test_indexer_linear_weight_loader_uses_first_index_k_shard_for_all_ranks() -> None:
+    layer = object.__new__(AscendMiniMaxM3IndexerLinear)
+    layer.index_q_size = 2
+    layer.index_k_size = 1
+    layer.tp_rank = 3
+    layer.num_index_head_replicas = 2
+
+    param = torch.nn.Parameter(torch.zeros(3, 4))
+    param.output_dim = 0
+    loaded_weight = torch.arange(12, dtype=torch.float32).view(3, 4)
+
+    layer.weight_loader(param, loaded_weight, "index_k")
+
+    assert torch.equal(param.data[2:3], loaded_weight[:1])
+
+
+@patch("vllm_ascend.attention.msa_m3.minimax_m3_sparse_attn")
+@patch("vllm_ascend.attention.msa_m3.minimax_m3_sparse_attn_decode")
+@patch("vllm_ascend.attention.msa_m3.get_forward_context")
+def test_sparse_impl_forward_dispatches_decode_and_prefill_paths(
+    mock_get_forward_context: MagicMock,
+    mock_sparse_attn_decode: MagicMock,
+    mock_sparse_attn_prefill: MagicMock,
+) -> None:
+    impl = AscendMiniMaxM3SparseImpl(
+        num_heads=2,
+        head_size=4,
+        scale=0.5,
+        num_kv_heads=2,
+        topk_blocks=8,
+        sparse_block_size=128,
+    )
+    metadata = AscendMiniMaxM3SparseMetadata(
+        seq_lens=torch.tensor([5, 7], dtype=torch.int32),
+        max_seq_len=7,
+        slot_mapping=torch.arange(3, dtype=torch.int64),
+        num_actual_tokens=3,
+        num_decodes=1,
+        num_decode_tokens=1,
+        num_prefills=1,
+        num_prefill_tokens=2,
+        decode=AscendMiniMaxM3SparseDecodeMetadata(
+            seq_lens=torch.tensor([5], dtype=torch.int32),
+            block_table=torch.tensor([[0, 1]], dtype=torch.int32),
+            max_seq_len=5,
+            decode_query_len=1,
+        ),
+        prefill=AscendMiniMaxM3SparsePrefillMetadata(
+            cu_seqlens_q=torch.tensor([0, 2], dtype=torch.int32),
+            cu_seqlens_k=torch.tensor([0, 7], dtype=torch.int32),
+            seq_lens=torch.tensor([7], dtype=torch.int32),
+            context_lens=torch.tensor([5], dtype=torch.int32),
+            block_table=torch.tensor([[2, 3]], dtype=torch.int32),
+            max_query_len=2,
+            max_seq_len=7,
+        ),
+    )
+    mock_get_forward_context.return_value = SimpleNamespace(
+        attn_metadata={"layer.attn": metadata}
+    )
+    layer = SimpleNamespace(layer_name="layer.attn")
+    query = torch.arange(24, dtype=torch.float32).view(3, 8)
+    kv_cache = torch.zeros(2, 4, 128, 2, 4)
+    output = torch.zeros_like(query)
+    decode_topk = torch.tensor([[0, 1]], dtype=torch.int32)
+    prefill_topk = torch.tensor([[2, 3]], dtype=torch.int32)
+
+    result = impl.forward(
+        layer,
+        query,
+        kv_cache,
+        (decode_topk, prefill_topk),
+        output,
+    )
+
+    assert result is output
+    mock_sparse_attn_decode.assert_called_once()
+    mock_sparse_attn_prefill.assert_called_once()
+    assert mock_sparse_attn_decode.call_args.args[0].shape == (1, 2, 4)
+    assert mock_sparse_attn_prefill.call_args.args[0].shape == (2, 2, 4)
