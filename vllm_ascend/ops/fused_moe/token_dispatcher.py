@@ -364,7 +364,7 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
         #  MXFP4 keeps dispatch unquantized in AllGather path, and quantizes again inside the MLP path.
         with_quant = (
             token_dispatch_input.quant.dispatch_with_quant
-            and token_dispatch_input.quant.quant_type != QuantType.MXFP4
+            # and token_dispatch_input.quant.quant_type != QuantType.MXFP4
             and token_dispatch_input.quant.quant_type != QuantType.W8A8FP8
         )
         is_mxfp = token_dispatch_input.quant.is_mxfp
@@ -377,8 +377,10 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
         restore_shape = hidden_states.shape
         # Fuse the first dynamic quant of moe_mlp into initrouting when
         # dispatch_with_quant is on but got a None dynamic_scale.
-        if with_quant and dynamic_scale is None:
+        if  token_dispatch_input.quant.quant_type == QuantType.MXFP8 and dynamic_scale is None:
             quant_mode = 3 if is_mxfp else 1
+        if  token_dispatch_input.quant.quant_type == QuantType.MXFP4 and dynamic_scale is None:
+            quant_mode = 9 if is_mxfp else 1
         else:
             quant_mode = -1
 

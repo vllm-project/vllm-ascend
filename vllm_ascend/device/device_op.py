@@ -919,6 +919,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             expert_tokens_num_flag=expert_tokens_num_flag,
             active_expert_range=active_expert_range,
             quant_mode=quant_mode,
+            x_dtype=296,
         )
 
     @staticmethod
