@@ -2326,7 +2326,7 @@ class NPUModelRunner(GPUModelRunner):
                     self.kv_connector_output = kv_connector_output
                     self._finalize_dump_data()
                     if self.dynamic_eplb:
-                        self.eplb_updator.forward_end()
+                        self.eplb_updator.forward_end(self.eplb_heat_collection_status)
                     return hidden_states
                 if self.is_pooling_model:
                     # Return the pooling output.

@@ -67,7 +67,8 @@ class D2DExpertWeightLoader:
 
         for buffer_tensor_id, recv_info in enumerate(expert_recv_info):
             recv_rank, global_expert_id_to_recv = recv_info
-            for buffer_tensor in self.eplb_adaptor.buffer_tensor_list[buffer_tensor_id]:
+            expert_weight_key = self.eplb_adaptor.expert_weight_key_per_layer[layer_id]
+            for buffer_tensor in self.eplb_adaptor.buffer_tensor_list[expert_weight_key][buffer_tensor_id]:
                 self.comm_op_list.append(
                     dist.P2POp(
                         dist.irecv, buffer_tensor, self.comm_group.ranks[recv_rank], group=self.comm_group.device_group
