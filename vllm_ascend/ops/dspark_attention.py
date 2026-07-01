@@ -1,7 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Callable
+
 import torch
+
+DSparkAttentionCustomOp = Callable[
+    [
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        int,
+        int,
+        float,
+    ],
+    torch.Tensor,
+]
 
 
 def _validate_query_block_slots(request_slots: torch.Tensor, block_size: int) -> None:
@@ -54,6 +75,50 @@ def _dspark_attention_reference(
     return torch.einsum("qhk,khd->qhd", probs, v_ctx.float()).to(q.dtype)
 
 
+def _get_dspark_attention_custom_op(q: torch.Tensor) -> DSparkAttentionCustomOp | None:
+    if q.device.type == "cpu":
+        return None
+    try:
+        return torch.ops._C_ascend.dspark_attention
+    except (AttributeError, RuntimeError):
+        return None
+
+
+def _maybe_call_dspark_attention_custom_op(
+    q: torch.Tensor,
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+    cache_positions: torch.Tensor,
+    cache_valid: torch.Tensor,
+    draft_k: torch.Tensor,
+    draft_v: torch.Tensor,
+    request_slots: torch.Tensor,
+    positions: torch.Tensor,
+    attn_sink: torch.Tensor,
+    block_size: int,
+    window_size: int,
+    softmax_scale: float,
+) -> torch.Tensor | None:
+    custom_op = _get_dspark_attention_custom_op(q)
+    if custom_op is None:
+        return None
+    return custom_op(
+        q,
+        k_cache,
+        v_cache,
+        cache_positions,
+        cache_valid,
+        draft_k,
+        draft_v,
+        request_slots,
+        positions,
+        attn_sink,
+        block_size,
+        window_size,
+        softmax_scale,
+    )
+
+
 def dspark_attention(
     q: torch.Tensor,
     k_cache: torch.Tensor,
@@ -77,6 +142,23 @@ def dspark_attention(
     """
     if positions.numel() == 0:
         return torch.empty_like(q)
+    custom_out = _maybe_call_dspark_attention_custom_op(
+        q,
+        k_cache,
+        v_cache,
+        cache_positions,
+        cache_valid,
+        draft_k,
+        draft_v,
+        request_slots,
+        positions,
+        attn_sink,
+        block_size,
+        window_size,
+        softmax_scale,
+    )
+    if custom_out is not None:
+        return custom_out
     if request_slots.numel() != positions.numel():
         raise ValueError(
             "DSpark request_slots length must match query positions: "

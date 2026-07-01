@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+import vllm_ascend.ops.dspark_attention as dspark_attention_module
 from vllm_ascend.models.deepseek_v4_dspark import (
     _copy_last_input_ids,
     _dspark_cache_capacity,
@@ -60,6 +61,39 @@ def test_dspark_attention_loop_matches_vectorized_reference():
     expected = _dspark_attention_reference(q, k_ctx, v_ctx, attn_sink, scale=0.125)
 
     torch.testing.assert_close(actual, expected, rtol=1e-6, atol=1e-6)
+
+
+def test_dspark_attention_entry_uses_custom_op_gateway(monkeypatch):
+    q = torch.zeros(2, 1, 4, dtype=torch.float32)
+    expected = torch.full_like(q, 7.0)
+
+    def fake_custom_op(*args):
+        assert args[0] is q
+        assert args[-3:] == (2, 3, 0.125)
+        return expected
+
+    monkeypatch.setattr(
+        dspark_attention_module,
+        "_get_dspark_attention_custom_op",
+        lambda _q: fake_custom_op,
+    )
+    actual = dspark_attention(
+        q,
+        torch.empty(1, 4, 1, 4),
+        torch.empty(1, 4, 1, 4),
+        torch.empty(1, 4, dtype=torch.int32),
+        torch.empty(1, 4, dtype=torch.bool),
+        torch.empty(2, 1, 4),
+        torch.empty(2, 1, 4),
+        torch.tensor([0, 0], dtype=torch.int32),
+        torch.tensor([3, 4], dtype=torch.int32),
+        torch.zeros(1),
+        2,
+        3,
+        0.125,
+    )
+
+    assert actual is expected
 
 
 def test_dspark_attention_is_noncausal_within_draft_block():
