@@ -2,6 +2,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
+
 import vllm_ascend.attention.attention_v1 as attn_module
 
 from tests.ut.base import TestBase
@@ -641,11 +642,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         mock_get_graph_params.return_value.events = {1: [MagicMock()] * 3}
 
         forward_context = MagicMock()
-        forward_context.attn_metadata = {
-            "layer_10": MagicMock(),
-            "layer_2": MagicMock(),
-            "layer_5": MagicMock()
-        }
+        forward_context.attn_metadata = {"layer_10": MagicMock(), "layer_2": MagicMock(), "layer_5": MagicMock()}
 
         self.impl.update_graph_params(self.mock_stream, forward_context, 1, self.mock_vllm_config)
         self.assertEqual(attn_module._ATTN_KEYS_BUFFER, ["layer_2", "layer_5", "layer_10"])
