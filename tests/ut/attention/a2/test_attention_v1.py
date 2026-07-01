@@ -632,7 +632,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         mock_EXTRA_CTX.sinks = False
         mock_EXTRA_CTX.is_draft_model = False
 
-        param = [MagicMock()] * 21
+        param: list[MagicMock | None] = [MagicMock()] * 21
         param[16] = None
         param[20] = None
 
