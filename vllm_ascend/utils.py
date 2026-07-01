@@ -508,7 +508,43 @@ def attention_calculation_stream() -> torch.npu.Stream:
     return _ATNN_CALCULATION_STREAM
 
 
+def _patch_speculative_config_mtp():
+    """Fix vLLM 0.23.0: register gemma4_mtp model type with Transformers.
+
+    vLLM's hf_config_override remaps gemma4_assistant→gemma4_mtp, but
+    the override is tested on a dummy config (model_type="dummy_gemma4_assistant")
+    by HFConfigParser.parse and never fires.  Register gemma4_mtp properly
+    so that draft configs can set model_type="gemma4_mtp" directly.
+    Use gemma4_assistant's config class as the base since it properly
+    handles the nested text_config structure.
+    """
+    from transformers import AutoConfig
+    from transformers.models.auto.configuration_auto import CONFIG_MAPPING
+
+    if "gemma4_mtp" in CONFIG_MAPPING:
+        return  # already registered
+
+    # Prefer gemma4_assistant as base class (handles nested text_config)
+    base_config_cls = None
+    for key in ("gemma4_assistant", "gemma4_text"):
+        if key in CONFIG_MAPPING:
+            base_config_cls = CONFIG_MAPPING[key]
+            break
+
+    if base_config_cls is None:
+        return
+
+    config_cls = type(
+        "Gemma4MTPConfig",
+        (base_config_cls,),
+        {"model_type": "gemma4_mtp"},
+    )
+    AutoConfig.register("gemma4_mtp", config_cls, exist_ok=True)
+
+
 def adapt_patch(is_global_patch: bool = False):
+    _patch_speculative_config_mtp()
+
     if is_global_patch:
         from vllm_ascend.patch import platform  # noqa: F401
     else:
