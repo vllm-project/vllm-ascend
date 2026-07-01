@@ -107,6 +107,14 @@ def _infer_intermediate_hidden(weight1: torch.Tensor, weight2: torch.Tensor, hid
             return int(weight2.shape[-2])
         if weight2.shape[-2] == hidden:
             return int(weight2.shape[-1])
+        # Quantized down-projection weights are stored as
+        # [intermediate, hidden // pack_factor]: int4 packs the contraction
+        # dim (//2 for two-per-int8 storage, //8 for eight-per-int32), so the
+        # last dim no longer equals hidden. The row dim (-2) is the real
+        # intermediate size and is never packed, so prefer it whenever the
+        # last dim evenly divides hidden.
+        if weight2.shape[-1] and hidden % int(weight2.shape[-1]) == 0:
+            return int(weight2.shape[-2])
     if weight1.dim() < 2:
         return hidden
     if weight1.shape[-1] == hidden:
@@ -492,8 +500,25 @@ class FusedMC2CommImpl(MoECommMethod):
         )
         weight1 = _as_tensor_list(fused_experts_input.weights.w1, "w1")
         weight2 = _as_tensor_list(fused_experts_input.weights.w2, "w2")
+        # A8W4-INT MegaMoe expects int4 weights packed two-per-int8 storage:
+        # with weight_type=ACL_INT4 the tiling derives N = weight1.shape[-1] * 2
+        # and checks weight2.shape[0] == N / 2. The W4A8 quant method packs them
+        # eight-per-int32 (pack_to_int32), which makes the op read
+        # N = 2 * (2 * intermediate / 8) and fail CheckWeight2Input. Reinterpret
+        # the int32 storage back to int8 so the op sees N = 2 * moe_intermediate.
+        # W8A8 weights are already int8, so the view is a no-op there.
+        if weight1 and weight1[0].dtype == torch.int32:
+            weight1 = [w.view(torch.int8) for w in weight1]
+        if weight2 and weight2[0].dtype == torch.int32:
+            weight2 = [w.view(torch.int8) for w in weight2]
         weight_scales1 = _as_tensor_list(fused_experts_input.weights.w1_scale, "w1_scale")
         weight_scales2 = _as_tensor_list(fused_experts_input.weights.w2_scale, "w2_scale")
+        # MegaMoe requires per-expert weight scales to be 1-D. The W4A8 method
+        # squeezes w13 scales but leaves w2 scales as [1, hidden]; drop the
+        # leading singleton dim so CheckWeightScaleInput passes. Guarded to the
+        # [1, N] per-channel case to avoid flattening genuine per-group scales.
+        weight_scales1 = [t.squeeze(0) if (t.dim() == 2 and t.shape[0] == 1) else t for t in weight_scales1]
+        weight_scales2 = [t.squeeze(0) if (t.dim() == 2 and t.shape[0] == 1) else t for t in weight_scales2]
         sym_buffer = self._get_cann_symm_buffer(
             fused_experts_input,
             topk_ids,
