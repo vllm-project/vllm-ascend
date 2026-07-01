@@ -1,0 +1,304 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+name: Handle /cherry-pick Command
+
+on:
+  repository_dispatch:
+    types: [cherry-pick-command]
+
+defaults:
+  run:
+    shell: bash -el {0}
+
+permissions:
+  contents: write
+  actions: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  cherry-pick:
+    name: Cherry-pick PR to target branch
+    runs-on: linux-amd64-cpu-4-hk
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
+    steps:
+      - name: Install system dependencies
+        run: |
+          sudo mkdir -p -m 755 /etc/apt/keyrings
+          curl -sL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null
+          sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+          sudo apt-get update -y
+          sudo apt-get install gh -y
+
+      - name: Check user authorization
+        id: auth
+        env:
+          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          ACTOR='${{ github.event.client_payload.github.payload.comment.user.login }}'
+          PR_AUTHOR='${{ github.event.client_payload.pull_request.user.login }}'
+          REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
+
+          if [ "$ACTOR" = "$PR_AUTHOR" ]; then
+            echo "User $ACTOR is the PR author, authorized."
+            echo "authorized=true" >> "$GITHUB_OUTPUT"
+          else
+            ROLE_NAME=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
+              "https://api.github.com/repos/$REPO/collaborators/$ACTOR/permission" | jq -r '.role_name // empty')
+            case "$ROLE_NAME" in
+              triage|write|maintain|admin)
+                echo "authorized=true" >> "$GITHUB_OUTPUT"
+                ;;
+              *)
+                echo "::error::User $ACTOR is not the PR author and does not have triage+ permission."
+                echo "authorized=false" >> "$GITHUB_OUTPUT"
+                ;;
+            esac
+          fi
+
+      - name: Parse target branch
+        id: parse
+        run: |
+          TARGET_BRANCH='${{ github.event.client_payload.slash_command.args.all }}'
+          TARGET_BRANCH=$(echo "$TARGET_BRANCH" | xargs)
+
+          if [ -z "$TARGET_BRANCH" ]; then
+            echo "::error::No target branch specified. Usage: /cherry-pick <target_branch_name>"
+            echo "valid_args=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "target_branch=$TARGET_BRANCH" >> "$GITHUB_OUTPUT"
+            echo "valid_args=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Post unauthorized comment
+        if: steps.auth.outputs.authorized == 'false'
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
+          comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
+          body: |
+            [Bot]: cherry-pick command failed: you do not have permission. Only the PR author or users with triage+ permission can trigger /cherry-pick.
+          reactions: confused
+
+      - name: Post invalid-args comment
+        if: steps.parse.outputs.valid_args == 'false'
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
+          comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
+          body: |
+            [Bot]: cherry-pick command failed: no target branch specified. Usage: /cherry-pick <target_branch_name>
+          reactions: confused
+
+      - name: Fail if unauthorized or invalid args
+        if: steps.auth.outputs.authorized == 'false' || steps.parse.outputs.valid_args == 'false'
+        run: exit 1
+
+      - name: Checkout repo
+        uses: actions/checkout@v7
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          fetch-depth: 0
+
+      - name: Cherry-pick and create PR
+        id: cherry
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          PR_NUMBER='${{ github.event.client_payload.pull_request.number }}'
+          PR_TITLE='${{ github.event.client_payload.pull_request.title }}'
+          PR_BODY='${{ github.event.client_payload.pull_request.body }}'
+          PR_AUTHOR='${{ github.event.client_payload.pull_request.user.login }}'
+          PR_BASE_SHA='${{ github.event.client_payload.pull_request.base.sha }}'
+          PR_HEAD_SHA='${{ github.event.client_payload.pull_request.head.sha }}'
+          TARGET_BRANCH='${{ steps.parse.outputs.target_branch }}'
+          REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
+
+          # Get the PAT_TOKEN owner's username
+          TOKEN_USER=$(gh api user --jq '.login')
+          echo "PAT_TOKEN user: $TOKEN_USER"
+
+          # Configure git for push
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # origin for fetching from the upstream repo
+          git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
+          # fork remote for pushing cherry-pick branch
+          git remote add fork "https://x-access-token:${GITHUB_TOKEN}@github.com/${TOKEN_USER}/vllm-ascend.git"
+
+          # Fetch target branch and PR's base/head SHAs
+          git fetch origin "$TARGET_BRANCH" "$PR_BASE_SHA" "$PR_HEAD_SHA" 2>/dev/null || true
+
+          # Verify target branch exists
+          if ! git rev-parse --verify "origin/$TARGET_BRANCH" >/dev/null 2>&1; then
+            echo "::error::Target branch '$TARGET_BRANCH' does not exist."
+            echo "cherry_status=missing_branch" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          # Create a new branch from target
+          SANITIZED_TARGET=$(echo "$TARGET_BRANCH" | tr '/' '-')
+          CHERRY_BRANCH="cherry-pick/pr-${PR_NUMBER}-to-${SANITIZED_TARGET}"
+          git checkout -b "$CHERRY_BRANCH" "origin/$TARGET_BRANCH"
+
+          # Apply the PR's changes as a single commit.
+          # Using git diff with three-dot (...) from merge-base to PR head
+          # avoids picking up unrelated commits from the base branch, which
+          # works for both merged and unmerged PRs.
+          echo "PR base: $PR_BASE_SHA"
+          echo "PR head: $PR_HEAD_SHA"
+
+          # Generate the diff to a temp file (avoids shell variable size limits
+          # for large PRs) so we can check emptiness and apply it.
+          # Use three-dot (...) to diff from merge-base to PR head, so we
+          # only pick up the PR's unique changes — not unrelated commits
+          # that landed on the base branch between PR_BASE_SHA and the
+          # rebased PR_HEAD_SHA.
+          DIFF_FILE=/tmp/cherry_diff.patch
+          git diff "$PR_BASE_SHA"..."$PR_HEAD_SHA" > "$DIFF_FILE"
+
+          if [ ! -s "$DIFF_FILE" ]; then
+            echo "Diff is empty, changes already included in target branch."
+            echo "cherry_status=already_included" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Apply the diff with 3-way merge for better conflict resolution
+          APPLY_LOG=/tmp/cherry_apply_err
+          if ! git apply --3way "$DIFF_FILE" 2>"$APPLY_LOG"; then
+            echo "::error::git apply failed. See details below:"
+            cat "$APPLY_LOG"
+            echo "cherry_status=conflict" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          # Commit the applied changes as a single commit with PR metadata
+          git commit -m "$PR_TITLE" -m "Cherry-pick of PR #${PR_NUMBER} by @${PR_AUTHOR}"
+
+          # Push the new branch to the PAT_TOKEN user's fork
+          git push -f fork "$CHERRY_BRANCH"
+
+          # Check if a cherry-pick PR already exists for this target branch.
+          # gh pr list --head requires "owner:branch" format for fork branches,
+          # but it can be unreliable. We also add `2>/dev/null || true` to ensure
+          # the step doesn't fail even if the query returns nothing.
+          EXISTING_PR_URL=$(gh pr list \
+            --repo "$REPO" \
+            --head "${TOKEN_USER}:${CHERRY_BRANCH}" \
+            --base "$TARGET_BRANCH" \
+            --state open \
+            --json url --jq '.[0].url // empty' 2>/dev/null || true)
+
+          if [ -n "$EXISTING_PR_URL" ]; then
+            # PR already exists — branch has been force-pushed, just notify
+            echo "Cherry-pick PR already exists: $EXISTING_PR_URL"
+            echo "cherry_status=refreshed" >> "$GITHUB_OUTPUT"
+            echo "existing_pr_url=$EXISTING_PR_URL" >> "$GITHUB_OUTPUT"
+          else
+            # Create a new PR from the fork branch.
+            # If the PR already exists (gh pr list missed it), gh pr create will
+            # fail — we parse the error to extract the existing PR URL instead of
+            # letting the step crash.
+            NEW_PR_TITLE="[Cherry-pick][${TARGET_BRANCH}]${PR_TITLE} (from #${PR_NUMBER})"
+            NEW_PR_BODY="Cherry-pick of PR #${PR_NUMBER} onto \`${TARGET_BRANCH}\`."$'\n'$'\n'"Original PR: #${PR_NUMBER}"$'\n'"Original author: @${PR_AUTHOR}"$'\n'$'\n'"---"$'\n'"${PR_BODY}"
+
+            CREATE_LOG=/tmp/gh_pr_create.log
+            if NEW_PR_URL=$(gh pr create \
+              --repo "$REPO" \
+              --title "$NEW_PR_TITLE" \
+              --body "$NEW_PR_BODY" \
+              --base "$TARGET_BRANCH" \
+              --head "${TOKEN_USER}:${CHERRY_BRANCH}" 2>"$CREATE_LOG"); then
+              echo "new_pr_url=$NEW_PR_URL" >> "$GITHUB_OUTPUT"
+              echo "cherry_status=success" >> "$GITHUB_OUTPUT"
+            else
+              # If PR already exists, gh pr create fails with "already exists"
+              # and includes the existing PR URL in the message.
+              EXISTING_PR_URL=$(grep -oE 'https://github.com/[^ ]+/pull/[0-9]+' "$CREATE_LOG" | head -1 || true)
+              if [ -n "$EXISTING_PR_URL" ]; then
+                echo "Cherry-pick PR already exists: $EXISTING_PR_URL"
+                echo "cherry_status=refreshed" >> "$GITHUB_OUTPUT"
+                echo "existing_pr_url=$EXISTING_PR_URL" >> "$GITHUB_OUTPUT"
+              else
+                echo "::error::Failed to create PR:"
+                cat "$CREATE_LOG"
+                echo "cherry_status=create_failed" >> "$GITHUB_OUTPUT"
+                exit 1
+              fi
+            fi
+          fi
+
+      - name: Comment success result
+        if: steps.cherry.outputs.cherry_status == 'success'
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
+          comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
+          body: |
+            [Bot]: cherry-pick completed successfully. New PR created: ${{ steps.cherry.outputs.new_pr_url }}
+          reactions: hooray
+
+      - name: Comment refreshed result
+        if: steps.cherry.outputs.cherry_status == 'refreshed'
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
+          comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
+          body: |
+            [Bot]: cherry-pick branch has been refreshed. Existing PR: ${{ steps.cherry.outputs.existing_pr_url }}
+          reactions: hooray
+
+      - name: Comment already included
+        if: steps.cherry.outputs.cherry_status == 'already_included'
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
+          comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
+          body: |
+            [Bot]: cherry-pick skipped: the changes from this PR are already included in the target branch `${{ steps.parse.outputs.target_branch }}`.
+          reactions: eyes
+
+      - name: Comment conflict failure
+        if: failure() && steps.cherry.outputs.cherry_status == 'conflict'
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
+          comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
+          body: |
+            [Bot]: cherry-pick failed due to merge conflicts. Please cherry-pick manually.
+          reactions: confused
+
+      - name: Comment generic failure
+        if: failure() && steps.cherry.outputs.cherry_status != 'conflict' && steps.cherry.outputs.cherry_status != 'success' && steps.cherry.outputs.cherry_status != 'refreshed' && steps.cherry.outputs.cherry_status != 'already_included'
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
+          comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
+          body: |
+            [Bot]: cherry-pick command failed. Please check the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details.
+          reactions: confused

@@ -26,7 +26,7 @@ on:
       vllm_ascend_branch:
         description: 'Branch to nightly test'
         required: true
-        default: 'releases/v0.22.1rc'
+        default: 'main'
         type: choice
         options:
           - main

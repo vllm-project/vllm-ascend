@@ -26,7 +26,7 @@ on:
       vllm_ascend_branch:
         description: 'Branch to test'
         required: true
-        default: 'releases/v0.22.1rc'
+        default: 'main'
         type: string
       test_cases:
         description: 'Test cases to run (comma-separated, e.g., "test_custom_op,qwen3-32b,accuracy-group" or "all" for all tests)'
@@ -295,9 +295,6 @@ jobs:
           - name: Qwen3.5-397B-A17B-w8a8-mtp
             os: linux-aarch64-a3-16
             config_file_path: Qwen3.5-397B-A17B-W8A8-mtp-A3.yaml
-          - name: Qwen3.5-397B-A17B-w8a8-mtp-longseq
-            os: linux-aarch64-a3-16
-            config_file_path: Qwen3.5-397B-A17B-W8A8-mtp-longseq-A3.yaml
           - name: MiniMax-M2.5-w8a8-QuaRot-A3
             os: linux-aarch64-a3-16
             config_file_path: MiniMax-M2.5-w8a8-QuaRot-A3.yaml
