@@ -129,7 +129,7 @@ def _patch_scheduler_update_after_schedule() -> None:
     @wraps(original_update_after_schedule)
     def _patched_update_after_schedule(self, scheduler_output):
         original_update_after_schedule(self, scheduler_output)
-        if not _use_pp_mtp_runtime_patch(
+        if not _use_pp_ipc_runtime_patch(
             getattr(self, "vllm_config", None),
             getattr(self, "use_pp", False),
         ):
@@ -199,8 +199,6 @@ def _patch_scheduler_make_cached_request_data() -> None:
                 continue
             if req.num_output_tokens <= 0 or not req.all_token_ids:
                 continue
-            if len(req.all_token_ids) > req.num_computed_tokens:
-                continue
             cached_reqs_data.new_token_ids[req_index] = [req.all_token_ids[-1]]
         return cached_reqs_data
 
@@ -218,9 +216,13 @@ def _patch_scheduler_update_from_output() -> None:
 
     @wraps(original_update_from_output)
     def _patched_update_from_output(self, scheduler_output, model_runner_output):
-        use_pp_mtp_runtime_patch = _use_pp_mtp_runtime_patch(
+        use_pp_ipc_runtime_patch = _use_pp_ipc_runtime_patch(
             getattr(self, "vllm_config", None),
             getattr(self, "use_pp", False),
+        )
+        use_pp_mtp_runtime_patch = (
+            use_pp_ipc_runtime_patch
+            and getattr(getattr(self, "vllm_config", None), "speculative_config", None) is not None
         )
         if use_pp_mtp_runtime_patch and any(
             num_tokens <= 0 for num_tokens in scheduler_output.num_scheduled_tokens.values()
@@ -243,14 +245,15 @@ def _patch_scheduler_update_from_output() -> None:
             scheduler_output,
             model_runner_output,
         )
-        if not use_pp_mtp_runtime_patch:
-            return engine_core_outputs
 
-        if not getattr(self, "use_v2_model_runner", False):
+        if use_pp_ipc_runtime_patch:
             for req_id in scheduler_output.num_scheduled_tokens:
                 request = self.requests.get(req_id)
                 if request is not None:
                     request.next_decode_eligible_step = 0
+
+        if not use_pp_mtp_runtime_patch:
+            return engine_core_outputs
 
         spec_token_ids = getattr(model_runner_output, "spec_token_ids", None)
         if spec_token_ids is None:
