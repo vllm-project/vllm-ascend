@@ -23,7 +23,7 @@ def compute_causal_conv1d_metadata(
         nums_dict[BLOCK_M]["tot"] = nums.sum().item()
         mlist = torch.from_numpy(np.repeat(np.arange(len(nums)), nums.numpy()))
         nums_dict[BLOCK_M]["mlist"] = mlist
-        mlist_len = len(nums_dict[BLOCK_M]["mlist"])
+        mlist_len = len(mlist)
         nums_dict[BLOCK_M]["mlist_len"] = mlist_len
         MAX_NUM_PROGRAMS = max(1024, mlist_len) * 2
 
