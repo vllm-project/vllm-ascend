@@ -77,4 +77,4 @@ def register_model():
     register_model()
 
 
-import vllm_ascend.logger  # noqa: F401
+import vllm_ascend.logger  # noqa: E402, F401
