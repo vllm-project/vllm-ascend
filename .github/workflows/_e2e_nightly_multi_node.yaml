@@ -75,8 +75,8 @@ on:
         description: test case execution timeout period,default:120 minutes
       aop_multi_enabled:
         required: false
-        type: string
-        default: 'false'
+        type: boolean
+        default: false
         description: enable Pod AOP pipeline on failure
     secrets:
       KUBECONFIG_B64:
@@ -230,7 +230,7 @@ jobs:
             -D pvc_name="$pvc_name" \
             -D benchmark_job_name="$benchmark_job_name" \
             -D runner="$runner" \
-            -D aop_multi_enabled="${{ inputs.aop_multi_enabled || 'false' }}" \
+            -D aop_multi_enabled="${{ inputs.aop_multi_enabled }}" \
             -D good_table="/root/.cache/vllm-ascend/${{ inputs.vllm_ascend_branch }}/nightly/good_table.csv" \
             --outfile lws.yaml
 
