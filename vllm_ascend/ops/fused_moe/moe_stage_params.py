@@ -19,6 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import torch
+import torch_npu
 
 from vllm_ascend.quantization.quant_type import QuantType
 
