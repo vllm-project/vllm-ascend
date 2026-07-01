@@ -56,12 +56,15 @@ from vllm.lora.layers.utils import _get_lora_device
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.utils import vllm_version_is
 
+
 def _is_ascend_moe_layer(source_layer) -> bool:
     if vllm_version_is("0.23.0"):
         from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE
+
         return isinstance(source_layer, AscendFusedMoE)
     else:
         from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
+
         return isinstance(source_layer, AscendMoERunner)
 
 
