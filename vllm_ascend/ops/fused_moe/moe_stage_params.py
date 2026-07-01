@@ -101,7 +101,7 @@ class MoEQuantParams:
     @property
     def get_dst_type(self):
         if self.is_w4a4_mxfp:
-            return torch.float4_e2m1fn_x2
+            return torch_npu.float4_e2m1fn_x2
         elif self.is_mxfp or self.is_fp8:
             return torch.float8_e4m3fn
         elif self.dispatch_with_quant:
