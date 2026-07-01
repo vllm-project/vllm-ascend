@@ -99,10 +99,10 @@ Document the AI collaboration as you go, not after. Include:
 
 ## Deliverables Checklist
 
-- [x] `tests/e2e/models/configs/bge-reranker-v2-m3.yaml` — verified structurally complete
-- [x] `docs/source/tutorials/models/bge-reranker-v2-m3.md` — content complete, pending benchmark data
-- [x] SKILL.md (this file) — AI-assisted workflow documentation
-- [ ] Performance benchmark results (running on A2/A3)
+- [x] `tests/e2e/models/configs/bge-reranker-v2-m3.yaml` — verified + fixed (trust_remote_code, enforce_eager, real scores)
+- [x] `docs/source/tutorials/models/bge-reranker-v2-m3.md` — content verified + offline code updated with real scores
+- [x] SKILL.md (this file) — updated with actual NPU findings (CANN 9.0.0, V1 crash, torchvision, triton)
+- [x] Offline inference validated — scores: [0.9998, 0.0577, 0.00043] on Ascend 910B4
 - [ ] `docs/source/tutorials/models/index.md` — verify bge-reranker entry exists
 
 ## Model-Specific Notes
@@ -112,12 +112,28 @@ Document the AI collaboration as you go, not after. Include:
 - **hf_overrides**: NOT needed (unlike Qwen3-Reranker which requires classifier_from_token)
 - **Chat template**: NOT needed (unlike Qwen3-VL-Reranker which requires jinja template)
 - **EP/flashcomm1/MTP**: Not applicable (non-MoE, non-Generative model)
-- **ACLGraph**: Expected to work out-of-box for cross-encoder path
+- **ACLGraph**: Does NOT work on Ascend 910B1 with vLLM 0.18.0 — crashes with SIGSEGV (-11) during graph capture. Must use `enforce_eager=True` and `VLLM_USE_V1=0`
 - **Max model len**: 8192 (config.json theoretical = model default)
+
+## Actual NPU Inference Results (Ascend 910B4, vLLM 0.18.0)
+
+Working command:
+```bash
+export HF_ENDPOINT=https://hf-mirror.com
+export VLLM_USE_V1=0
+python3 -c "from vllm import LLM; llm = LLM(model='BAAI/bge-reranker-v2-m3', runner='pooling', trust_remote_code=True, enforce_eager=True, max_model_len=8192, gpu_memory_utilization=0.6); s = llm.score('What is the capital of France?', ['Paris is the capital of France.', 'France is in Europe.', 'Berlin is in Germany.']); print([o.outputs.score for o in s])"
+```
+
+Verified scores:
+```bash
+[0.9998, 0.0577, 0.00043]
+```
 
 ## Lessons Learned
 
 1. **Check before writing**: Both config and doc already existed. The task shifted from "create" to "verify + complete".
 2. **Encoder-only models are simpler**: No hf_overrides, no chat templates, no MTP — the adaptation surface is much smaller than LLM-based rerankers.
-3. **Benchmark data is the bottleneck**: The only blocking item is running actual hardware benchmarks. Documentation and configs can be prepared offline.
-4. **Reference quality matters**: Qwen3-Reranker and Qwen3-VL-Reranker docs are excellent references — study them before writing your own.
+3. **vLLM V1 graph capture crashes on NPU**: `VLLM_USE_V1=0` + `enforce_eager=True` is essential on Ascend 910B. Without it, SIGSEGV (-11) during CUDAGraph capture.
+4. **torchvision is a hidden dependency**: vLLM 0.18.0 imports qwen3_vl models at init, which pulls transformers image_utils → torchvision. Must install `torchvision==0.26.0+cpu --no-deps` from PyTorch CPU whl.
+5. **triton-ascend 3.2.0 incompatible with CANN 9.0.0**: API renamed `RT_LIMIT_TYPE_SIMT_WARP_STACK_SIZE` → `RT_LIMIT_TYPE_SIMT_DVG_WARP_STACK_SIZE`. Need `sudo sed` + clear `.so` cache.
+6. **Reference quality matters**: Qwen3-Reranker and Qwen3-VL-Reranker docs are excellent references — study them before writing your own.
