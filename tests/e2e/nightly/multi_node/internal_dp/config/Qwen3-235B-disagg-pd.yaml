@@ -9,11 +9,10 @@ env_common: &env_common
   HCCL_OP_EXPANSION_MODE: "AIV"
   OMP_PROC_BIND: false
   OMP_NUM_THREADS: 1
-  VLLM_ASCEND_ENABLE_FLASHCOMM1: 1
   VLLM_ASCEND_ENABLE_FUSED_MC2: 2
   TASK_QUEUE_ENABLE: 1
   SERVER_PORT: 8080
-  
+
 disaggregated_prefill:
   enabled: true
   prefiller_host_index: [0]
@@ -57,6 +56,7 @@ deployment:
             }
         }'
 
+        --additional-config '{"enable_flashcomm1": true}'
   -
     envs:
       <<: *env_common
@@ -95,6 +95,7 @@ deployment:
             }
         }'
 
+        --additional-config '{"enable_flashcomm1": true}'
 benchmarks:
   perf:
     case_type: performance

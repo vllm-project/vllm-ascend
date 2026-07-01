@@ -51,7 +51,6 @@ templates:
   - node_index: 0
     envs:
       <<: *env_common
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
       HCCL_BUFFSIZE: "1200"
     server_cmd_template:
       - --host
@@ -85,7 +84,7 @@ templates:
       - --speculative-config
       - '{"method":"eagle3","model":"vllm-ascend/MiniMax-M2.5-eagle-model-0318","num_speculative_tokens":3}'
       - --additional-config
-      - '{"recompute_scheduler_enable": true}'
+      - '{"recompute_scheduler_enable": true, "enable_flashcomm1": true}'
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_producer",
@@ -104,7 +103,6 @@ templates:
   - node_index: 1
     envs:
       <<: *env_common
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "0"
       HCCL_BUFFSIZE: "512"
     server_cmd_template:
       - --host
@@ -158,7 +156,6 @@ templates:
   - node_index: 2
     envs:
       <<: *env_common
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "0"
       HCCL_BUFFSIZE: "512"
     server_cmd_template:
       - --host

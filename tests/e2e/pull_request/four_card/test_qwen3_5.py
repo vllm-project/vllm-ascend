@@ -65,6 +65,7 @@ def test_qwen3_5_35b_distributed_mp_tp4_full_decode_only_mtp3_flashcomm():
             "method": "qwen3_5_mtp",
             "num_speculative_tokens": 3,
         },
+        additional_config={"enable_flashcomm1": True},
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
         del vllm_model

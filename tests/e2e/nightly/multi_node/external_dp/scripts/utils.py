@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import shlex
@@ -152,6 +153,18 @@ def _extract_dtype(config: ExternalDPConfig, commands: list["ServerCommand"]) ->
     return "w8a8" if has_w8a8 and has_quant_ascend else "bf16"
 
 
+def _parse_json_flag(cmd: list[str], flag: str) -> dict[str, Any]:
+    try:
+        idx = cmd.index(flag)
+        value = cmd[idx + 1]
+    except (ValueError, IndexError):
+        return {}
+    try:
+        return json.loads(value)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return {}
+
+
 def _extract_features(commands: list["ServerCommand"]) -> list[str]:
     if not commands:
         return []
@@ -167,10 +180,11 @@ def _extract_features(commands: list["ServerCommand"]) -> list[str]:
         features.append("speculative")
     if any("cudagraph_mode" in display for display in command_displays):
         features.append("aclgraph")
+    if any(_parse_json_flag(cmd, "--additional-config").get("enable_flashcomm1") for cmd in command_args):
+        features.append("flashcomm1")
 
     feature_envs = {
         "VLLM_ASCEND_ENABLE_FLASHCOMM": "flashcomm",
-        "VLLM_ASCEND_ENABLE_FLASHCOMM1": "flashcomm1",
         "VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE": "topk_optimize",
         "VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE": "matmul_allreduce",
         "VLLM_ASCEND_ENABLE_MLAPO": "mlapo",

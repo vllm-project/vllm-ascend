@@ -161,7 +161,6 @@ test_cases:
     model: "Eco-Tech/Qwen3.5-122B-A10B-w8a8-mtp"
     envs:
       <<: *envs
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
     server_cmd: *server_cmd
     server_cmd_extra:
       - "--enable-expert-parallel"
@@ -173,13 +172,14 @@ test_cases:
       - '{"cudagraph_capture_sizes":[1,4,8,12,16,24,32,48,56,64,72,84,96,108,112,128,160,172,196,200,212,232,256,160,172,196,200,212,232,256,272,288,312,328,344,360,384,400,416,432,448,480,512], "cudagraph_mode":"FULL_DECODE_ONLY"}'
       - "--speculative_config"
       - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
+      - "--additional-config"
+      - '{"enable_flashcomm1": true}'
     benchmarks:
       perf: *_benchmark_TPOT50_3_5k_1_5K
   - name: "Qwen3.5-122B-A10B-W8A8-TPOT50-16k-1k"
     model: "Eco-Tech/Qwen3.5-122B-A10B-w8a8-mtp"
     envs:
       <<: *envs
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
     server_cmd: *server_cmd
     server_cmd_extra:
       - "--enable-expert-parallel"
@@ -191,6 +191,8 @@ test_cases:
       - '{"cudagraph_capture_sizes":[1,4,8,12,16,24,32,48,56,64,72,84,96,108,112,128,160,172,196,200,212,232,256,160,172,196,200,212,232,256,272,288,312,328,344,360,384,400,416,432,448,480,512], "cudagraph_mode":"FULL_DECODE_ONLY"}'
       - "--speculative_config"
       - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
+      - "--additional-config"
+      - '{"enable_flashcomm1": true}'
     benchmarks:
       perf: *_benchmark_TPOT50_16K_1K
   - name: "Qwen3.5-122B-A10B-W8A8-TPOT20-16k-1k"
@@ -213,7 +215,6 @@ test_cases:
     model: "Eco-Tech/Qwen3.5-122B-A10B-w8a8-mtp"
     envs:
       <<: *envs
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
     server_cmd: *server_cmd
     server_cmd_extra:
       - "--enable-expert-parallel"
@@ -225,6 +226,8 @@ test_cases:
       - '{"cudagraph_capture_sizes":[1,4,8,12,16,24,32,48,56,64,72,84,96,108,112,128,160,172,196,200,212,232,256,160,172,196,200,212,232,256,272,288,312,328,344,360,384,400,416,432,448,480,512], "cudagraph_mode":"FULL_DECODE_ONLY"}'
       - "--speculative-config"
       - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
+      - "--additional-config"
+      - '{"enable_flashcomm1": true}'
     benchmarks:
       perf: *_benchmark_TPOT50_32K_0_5K
   - name: "Qwen3.5-122B-A10B-W8A8-TPOT20-32k-0.5k"
@@ -247,7 +250,6 @@ test_cases:
     model: "Eco-Tech/Qwen3.5-122B-A10B-w8a8-mtp"
     envs:
       <<: *envs
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
     server_cmd: *server_cmd
     server_cmd_extra:
       - "--enable-expert-parallel"
@@ -259,6 +261,8 @@ test_cases:
       - '{"cudagraph_capture_sizes":[1,4,8,12,16,24,32,48,56,64,72,84,96,108,112,128,160,172,196,200,212,232,256,160,172,196,200,212,232,256,272,288,312,328,344,360,384,400,416,432,448,480,512], "cudagraph_mode":"FULL_DECODE_ONLY"}'
       - "--speculative-config"
       - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
+      - "--additional-config"
+      - '{"enable_flashcomm1": true}'
     benchmarks:
       perf: *_benchmark_TPOT50_64K_1K
       <<: *_benchmark_acc
@@ -266,7 +270,6 @@ test_cases:
     model: "Eco-Tech/Qwen3.5-122B-A10B-w8a8-mtp"
     envs:
       <<: *envs
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "0"
     server_cmd: *server_cmd
     server_cmd_extra:
       - "--max-model-len"

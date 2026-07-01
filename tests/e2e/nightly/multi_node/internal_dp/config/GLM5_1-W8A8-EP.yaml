@@ -35,7 +35,6 @@ deployment:
   -
     envs:
       <<: *env_common
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: 1
     server_cmd: >
       vllm serve Eco-Tech/GLM-5.1-w8a8
           --host 0.0.0.0
@@ -53,7 +52,7 @@ deployment:
           "torch_profiler_with_stack": false}'
           --seed 1024
           --max-model-len 131072
-          --additional-config '{"recompute_scheduler_enable": true, "fuse_muls_add": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
+          --additional-config '{"recompute_scheduler_enable": true, "fuse_muls_add": true, "ascend_compilation_config": {"enable_npugraph_ex": true}, "enable_flashcomm1": true}'
           --max-num-batched-tokens 4096
           --trust-remote-code
           --max-num-seqs 64
@@ -82,7 +81,6 @@ deployment:
   -
     envs:
       <<: *env_common
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: 1
     server_cmd: >
       vllm serve Eco-Tech/GLM-5.1-w8a8
           --host 0.0.0.0
@@ -152,7 +150,7 @@ deployment:
           --max-model-len 202752
           --max-num-batched-tokens 32
           --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4, 8, 12, 16,20,24,28, 32]}'
-          --additional-config '{"recompute_scheduler_enable": true, "fuse_muls_add": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
+          --additional-config '{"recompute_scheduler_enable": true, "fuse_muls_add": true, "ascend_compilation_config": {"enable_npugraph_ex": true}, "enable_flashcomm1": true}'
           --trust-remote-code
           --max-num-seqs 8
           --gpu-memory-utilization 0.92

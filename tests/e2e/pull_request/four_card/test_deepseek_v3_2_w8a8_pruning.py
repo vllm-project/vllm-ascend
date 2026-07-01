@@ -18,7 +18,6 @@
 
 import json
 import os
-from unittest.mock import patch
 
 import requests
 from vllm.utils.network_utils import get_open_port
@@ -26,7 +25,6 @@ from vllm.utils.network_utils import get_open_port
 from tests.e2e.conftest import DisaggPDProxy, RemotePDServer, VllmRunner, wait_until_npu_memory_free
 
 
-@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
 @wait_until_npu_memory_free()
 def test_moe_w8a8_tp_pp_ep_full_decode_only():
     """Verify W8A8 MoE generation with TP, PP, EP, and full decode only."""
@@ -42,6 +40,7 @@ def test_moe_w8a8_tp_pp_ep_full_decode_only():
         pipeline_parallel_size=2,
         gpu_memory_utilization=0.8,
         compilation_config={"cudagraph_capture_sizes": [2, 4, 6, 8, 10, 12], "cudagraph_mode": "FULL_DECODE_ONLY"},
+        additional_config={"enable_flashcomm1": True},
     ) as vllm_model:
         outputs = vllm_model.generate_greedy(prompts, max_tokens=500)
 

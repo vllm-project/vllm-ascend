@@ -9,7 +9,6 @@ _envs: &envs
   HCCL_OP_EXPANSION_MODE: "AIV"
   HCCL_BUFFSIZE: "1536"
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
-  VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
   VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
   VLLM_ASCEND_ENABLE_NZ: "2"
   VLLM_ASCEND_BALANCE_SCHEDULING: "1"
@@ -66,5 +65,7 @@ test_cases:
     server_cmd_extra:
       - "--compilation_config"
       - '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16,24,32]}'
+      - "--additional-config"
+      - '{"enable_flashcomm1": true}'
     benchmarks:
       <<: *benchmarks

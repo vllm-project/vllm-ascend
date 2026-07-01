@@ -74,7 +74,6 @@ templates:
   - node_index: 0
     envs:
       <<: *env_common
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
     server_cmd_template:
       - --host
       - "0.0.0.0"
@@ -100,7 +99,7 @@ templates:
       - --max-model-len
       - "131072"
       - --additional-config
-      - '{"recompute_scheduler_enable": true, "fuse_muls_add": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
+      - '{"recompute_scheduler_enable": true, "fuse_muls_add": true, "ascend_compilation_config": {"enable_npugraph_ex": true}, "enable_flashcomm1": true}'
       - --max-num-batched-tokens
       - "4096"
       - --trust-remote-code
@@ -135,7 +134,6 @@ templates:
   - node_index: 1
     envs:
       <<: *env_common
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
     server_cmd_template:
       - --host
       - "0.0.0.0"
@@ -161,7 +159,7 @@ templates:
       - --max-model-len
       - "131072"
       - --additional-config
-      - '{"recompute_scheduler_enable": true, "fuse_muls_add": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
+      - '{"recompute_scheduler_enable": true, "fuse_muls_add": true, "ascend_compilation_config": {"enable_npugraph_ex": true}, "enable_flashcomm1": true}'
       - --max-num-batched-tokens
       - "4096"
       - --trust-remote-code

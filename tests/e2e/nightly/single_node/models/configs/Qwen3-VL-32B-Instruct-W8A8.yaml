@@ -8,7 +8,6 @@ _envs: &envs
   OMP_PROC_BIND: "false"
   TASK_QUEUE_ENABLE: "1"
   HCCL_OP_EXPANSION_MODE: "AIV"
-  VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
   VLLM_ASCEND_ENABLE_PREFETCH_MLP: "1"
   SERVER_PORT: "DEFAULT_PORT"
@@ -63,5 +62,7 @@ test_cases:
     server_cmd_extra:
       - "--compilation_config"
       - '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,12,16,20,24,32,48,64,68,72,76,80,128]}'
+      - "--additional-config"
+      - '{"enable_flashcomm1": true}'
     benchmarks:
       <<: *benchmarks

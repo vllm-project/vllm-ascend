@@ -7,7 +7,6 @@ env_common: &env_common
   HCCL_BUFFSIZE: 2048
   SERVER_PORT: 8080
   OMP_PROC_BIND: false
-  VLLM_ASCEND_ENABLE_FLASHCOMM1: 1
   PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
   OMP_NUM_THREADS: 1
   VLLM_ASCEND_ENABLE_MLAPO: 1
@@ -38,8 +37,7 @@ deployment:
       --gpu-memory-utilization 0.95
       --speculative-config '{"num_speculative_tokens": 1, "method":"mtp"}'
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[2, 4, 8, 16, 32]}'
-      --additional_config '{"enable_multistream_moe": true}'
-
+      --additional-config '{"enable_multistream_moe": true, "enable_flashcomm1": true}'
   -
     envs:
       <<: *env_common
@@ -61,7 +59,7 @@ deployment:
       --gpu-memory-utilization 0.95
       --speculative-config '{"num_speculative_tokens": 1, "method":"mtp"}'
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[2, 4, 8, 16, 32]}'
-      --additional_config '{"enable_multistream_moe": true}'
+      --additional-config '{"enable_multistream_moe": true, "enable_flashcomm1": true}'
 benchmarks:
   perf:
     case_type: performance

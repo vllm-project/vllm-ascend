@@ -12,7 +12,6 @@ env_common: &env_common
   ASCEND_AGGREGATE_ENABLE: "1"
   ASCEND_TRANSPORT_PRINT: "1"
   VLLM_NIXL_ABORT_REQUEST_TIMEOUT: "300000"
-  VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
   VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
   VLLM_USE_MODELSCOPE: "true"
   SERVER_PORT: 8080
@@ -26,7 +25,6 @@ deployment:
   -
     envs:
       <<: *env_common
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: 1
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-V3.2-W8A8
           --host 0.0.0.0
@@ -49,7 +47,7 @@ deployment:
           --tokenizer-mode deepseek_v32 
           --reasoning-parser deepseek_v3
           --speculative-config '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}' 
-          --additional-config '{"layer_sharding": ["q_b_proj", "o_proj"]}'
+          --additional-config '{"layer_sharding": ["q_b_proj", "o_proj"], "enable_flashcomm1": true}'
           --kv-transfer-config
           '{"kv_connector": "MooncakeConnectorV1",
           "kv_role": "kv_producer",
@@ -100,7 +98,7 @@ deployment:
           --max-num-batched-tokens 100
           --speculative-config '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}'
           --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[3,6,9,12,15,18,21,24,27,30,33,36,39,42]"}'
-          --additional-config '{"recompute_scheduler_enable": true,"eplb_config": {"dynamic_eplb":true,"expert_heat_collection_interval":2000,"algorithm_execution_interval":50, "eplb_policy_type":3, "num_redundant_experts":0}}'
+          --additional-config '{"recompute_scheduler_enable": true, "eplb_config": {"dynamic_eplb": true, "expert_heat_collection_interval": 2000, "algorithm_execution_interval": 50, "eplb_policy_type": 3, "num_redundant_experts": 0}, "enable_flashcomm1": true}'
           --trust-remote-code
           --max-num-seqs 14
           --gpu-memory-utilization 0.92

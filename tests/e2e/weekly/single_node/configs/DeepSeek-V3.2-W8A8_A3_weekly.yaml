@@ -15,7 +15,6 @@ _envs: &envs
       VLLM_NIXL_ABORT_REQUEST_TIMEOUT: "300000"
       TASK_QUEUE_ENABLE: "1"
       VLLM_ASCEND_ENABLE_MLAPO: "1"
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
       SERVER_PORT: "DEFAULT_PORT"
 
 _server_cmd: &server_cmd
@@ -44,6 +43,8 @@ _server_cmd: &server_cmd
       - "--no-enable-prefix-caching"
       - "--speculative-config"
       - '{"num_speculative_tokens": 3, "method":"deepseek_mtp"}'
+      - "--additional-config"
+      - '{"enable_flashcomm1": true}'
       - "--reasoning-parser"
       - "deepseek_v3"
       - "--tokenizer-mode"

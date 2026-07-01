@@ -17,7 +17,6 @@
 # Adapted from vllm/tests/basic_correctness/test_basic_correctness.py
 #
 import os
-from unittest.mock import patch
 
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 
@@ -25,12 +24,6 @@ os.environ["PYTORCH_NPU_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 
-@patch.dict(
-    os.environ,
-    {
-        "VLLM_ASCEND_ENABLE_FLASHCOMM1": "1",
-    },
-)
 @wait_until_npu_memory_free()
 def test_deepseek_v4_w4a8_tp4_basic_greedy():
     """Verify DeepSeek V4 W4A8 basic greedy generation with TP4 and EP."""
@@ -56,6 +49,7 @@ def test_deepseek_v4_w4a8_tp4_basic_greedy():
             "cudagraph_mode": "FULL_DECODE_ONLY",
         },
         speculative_config={"num_speculative_tokens": 1, "method": "mtp", "enforce_eager": True},
+        additional_config={"enable_flashcomm1": True},
     ) as vllm_model:
         outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
         expected_token_ids = [
@@ -69,12 +63,6 @@ def test_deepseek_v4_w4a8_tp4_basic_greedy():
             assert output_ids == expected_token_ids[i]
 
 
-@patch.dict(
-    os.environ,
-    {
-        "VLLM_ASCEND_ENABLE_FLASHCOMM1": "1",
-    },
-)
 @wait_until_npu_memory_free()
 def test_deepseek_v4_w4a8_tp4_index_cache_freq4():
     """IndexCache freq=4 must produce non-empty greedy outputs identical in
@@ -108,6 +96,7 @@ def test_deepseek_v4_w4a8_tp4_index_cache_freq4():
             "use_index_cache": True,
             "index_topk_freq": 4,
         },
+        additional_config={"enable_flashcomm1": True},
     ) as vllm_model:
         outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
 

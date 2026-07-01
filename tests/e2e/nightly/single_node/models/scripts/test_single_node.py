@@ -186,7 +186,6 @@ _PORT_ENV_KEYS = {"SERVER_PORT", "ENCODE_PORT", "PD_PORT", "PROXY_PORT"}
 
 _FEATURE_ENVS: dict[str, str] = {
     "VLLM_ASCEND_ENABLE_FLASHCOMM": "flashcomm",
-    "VLLM_ASCEND_ENABLE_FLASHCOMM1": "flashcomm1",
     "VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE": "topk_optimize",
     "VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE": "matmul_allreduce",
     "VLLM_ASCEND_ENABLE_MLAPO": "mlapo",
@@ -234,6 +233,8 @@ def _extract_features(server_cmd: list[str] | str, envs: dict[str, Any]) -> list
 
     # Features from --additional-config JSON
     additional = _parse_json_flag(cmd_list, "--additional-config")
+    if additional.get("enable_flashcomm1"):
+        features.append("flashcomm1")
     if additional.get("enable_weight_nz_layout"):
         features.append("weight_nz_layout")
     wp = additional.get("weight_prefetch_config") or {}
