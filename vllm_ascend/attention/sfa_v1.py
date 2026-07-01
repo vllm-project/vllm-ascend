@@ -1612,6 +1612,14 @@ class AscendSFAImpl(MLAAttentionImpl):
                 "SFA Prolog V3 requires one cache index per input token, "
                 f"got token_x={hidden_states.shape[0]} and cache_index={cache_write_slot_mapping.numel()}."
             )
+            if self.has_indexer:
+                k_li, k_li_scale = self.indexer_select_pre_process(x=hidden_states, cos=cos, sin=sin)
+            else:
+                k_li, k_li_scale = None, None
+
+            # Prolog updates the paged KV cache in place. Wait for the prompt
+            # blocks before writing the first Decode token into their tail block.
+            wait_for_kv_layer_from_connector(layer_name)
             hidden_states, ql_nope, q_pe, q_c, _, _ = self._sfa_preprocess_with_prolog_v3(
                 hidden_states=hidden_states,
                 kv_cache=kv_cache,
@@ -1620,11 +1628,6 @@ class AscendSFAImpl(MLAAttentionImpl):
                 slot_mapping=cache_write_slot_mapping,
                 cache_mode="PA_BSND",
             )
-            if self.has_indexer:
-                k_li, k_li_scale = self.indexer_select_pre_process(x=hidden_states, cos=cos, sin=sin)
-            else:
-                k_li, k_li_scale = None, None
-            wait_for_kv_layer_from_connector(layer_name)
             if self.has_indexer:
                 assert k_li is not None
                 k_li = self._get_full_kv(k_li, attn_metadata)
