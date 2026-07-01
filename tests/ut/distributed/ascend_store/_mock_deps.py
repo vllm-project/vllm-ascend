@@ -58,7 +58,7 @@ if "torch_npu" not in sys.modules:
 # ---------------------------------------------------------------------------
 # Mock vllm modules
 # ---------------------------------------------------------------------------
-_MOCK_VLLM_DEPS = importlib.util.find_spec("vllm") is None
+_MOCK_VLLM_DEPS = True
 _vllm_mock_modules = [
     "vllm",
     "vllm.config",
@@ -162,6 +162,16 @@ class _FakeKVCacheSpec:
         kwargs["block_size"] = block_size
         return type(self)(**kwargs)
 
+    @property
+    def page_size_bytes(self):
+        num_kv_heads = getattr(self, "num_kv_heads", 1)
+        head_size = getattr(self, "head_size", 1)
+        dtype = getattr(self, "dtype", None)
+        dtype_size = getattr(dtype, "itemsize", None)
+        if dtype_size is None and hasattr(dtype, "element_size"):
+            dtype_size = dtype.element_size()
+        return self.block_size * num_kv_heads * head_size * int(dtype_size or 1) * 2
+
 
 class _FakeFullAttentionSpec(_FakeKVCacheSpec):
     pass
@@ -173,13 +183,25 @@ class _FakeSlidingWindowSpec(_FakeKVCacheSpec):
 
 
 class _FakeMambaSpec(_FakeKVCacheSpec):
-    pass
+    def __init__(self, block_size=16, **kwargs):
+        super().__init__(block_size=block_size, **kwargs)
+        self.num_speculative_blocks = getattr(self, "num_speculative_blocks", 0)
 
 
 class _FakeUniformTypeKVCacheSpecs(_FakeKVCacheSpec):
     def __init__(self, block_size=16, kv_cache_specs=None, **kwargs):
         super().__init__(block_size=block_size, **kwargs)
         self.kv_cache_specs = kv_cache_specs or {}
+
+    @classmethod
+    def from_specs(cls, kv_cache_specs):
+        if not kv_cache_specs:
+            return None
+        first_spec = next(iter(kv_cache_specs.values()))
+        return cls(
+            block_size=getattr(first_spec, "block_size", 16),
+            kv_cache_specs=kv_cache_specs,
+        )
 
 
 class _FakeKVCacheGroupSpec:
@@ -203,6 +225,14 @@ _kv_cache_utils_mod.BlockHashList = list  # type: ignore[attr-defined]
 class _FakeBlockPool:
     def __init__(self, *args, **kwargs):
         self.null_block = _FakeKVCacheBlock(block_id=0)
+        self._next_block_id = 1
+
+    def get_new_blocks(self, num_blocks):
+        blocks = []
+        for _ in range(num_blocks):
+            blocks.append(_FakeKVCacheBlock(block_id=self._next_block_id))
+            self._next_block_id += 1
+        return blocks
 
 
 if _MOCK_VLLM_DEPS:
@@ -210,6 +240,12 @@ if _MOCK_VLLM_DEPS:
 
 
 class _FakeSingleTypeKVCacheManager:
+    def __init__(self, *args, **kwargs):
+        self._mock = MagicMock()
+
+    def __getattr__(self, name):
+        return getattr(self._mock, name)
+
     @classmethod
     def reachable_block_mask(
         cls,
