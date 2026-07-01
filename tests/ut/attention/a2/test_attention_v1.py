@@ -4,7 +4,6 @@ from unittest.mock import MagicMock, patch
 import torch
 
 import vllm_ascend.attention.attention_v1 as attn_module
-
 from tests.ut.base import TestBase
 from vllm_ascend.attention.attention_v1 import (
     AscendAttentionBackend,
