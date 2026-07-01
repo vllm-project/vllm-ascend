@@ -43,7 +43,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     get_kv_quant_mode,
 )
-
 from vllm_ascend.attention.msa_m3_triton import (
     SPARSE_BLOCK_SIZE,
     minimax_m3_index_decode,
@@ -648,7 +647,7 @@ class AscendMiniMaxM3SparseImpl(AttentionImplBase[AscendMiniMaxM3SparseMetadata]
         return output
 
 
-class AscendMinimaxM3QKVParallelLinearWithIndexer(QKVParallelLinear):
+class AscendMiniMaxM3QKVParallelLinearWithIndexer(QKVParallelLinear):
     """Fused [q | k | v | index_q | index_k] column-parallel GEMM for M3 sparse layers."""
 
     def __init__(
@@ -664,7 +663,7 @@ class AscendMinimaxM3QKVParallelLinearWithIndexer(QKVParallelLinear):
         prefix: str = "",
     ) -> None:
         assert total_num_index_heads == total_num_kv_heads, (
-            "AscendMinimaxM3QKVParallelLinearWithIndexer requires "
+            "AscendMiniMaxM3QKVParallelLinearWithIndexer requires "
             "total_num_index_heads == total_num_kv_heads"
         )
         self.hidden_size = hidden_size
@@ -718,7 +717,7 @@ class AscendMinimaxM3QKVParallelLinearWithIndexer(QKVParallelLinear):
             return
         if loaded_shard_id not in ("q", "k", "v", "index_q", "index_k"):
             raise ValueError(
-                "Shard id for AscendMinimaxM3QKVParallelLinearWithIndexer must be "
+                "Shard id for AscendMiniMaxM3QKVParallelLinearWithIndexer must be "
                 "one of 'q', 'k', 'v', 'index_q', 'index_k'; got "
                 f"{loaded_shard_id}."
             )
@@ -807,6 +806,214 @@ class AscendMinimaxM3QKVParallelLinearWithIndexer(QKVParallelLinear):
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 
+class AscendMiniMaxM3IndexerLinear(AscendColumnParallelLinear):
+    """Merged [index_q | index_k] projection for M3 sparse layers.
+
+    index_q follows KV-head tensor parallel sharding. index_k is always
+    replicated, so every TP rank loads the first index_k shard.
+    """
+
+    def __init__(
+        self,
+        hidden_size: int,
+        total_num_index_heads: int,
+        index_head_size: int,
+        bias: bool = False,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ) -> None:
+        self.hidden_size = hidden_size
+        self.total_num_index_heads = total_num_index_heads
+        self.index_head_size = index_head_size
+
+        tp_size = get_tensor_model_parallel_world_size()
+        if tp_size >= self.total_num_index_heads:
+            self.num_index_heads = 1
+            self.num_index_head_replicas = divide(tp_size, self.total_num_index_heads)
+        else:
+            self.num_index_heads = divide(self.total_num_index_heads, tp_size)
+            self.num_index_head_replicas = 1
+
+        self.index_q_size = self.num_index_heads * self.index_head_size
+        self.index_k_size = self.index_head_size
+        self.output_sizes = [
+            self.index_q_size * tp_size,
+            self.index_k_size * tp_size,
+        ]
+
+        self.custom_op, _, _ = get_parallel_op(False, prefix, self, "column")
+        AscendColumnParallelLinear.__init__(
+            self,
+            input_size=self.hidden_size,
+            output_size=sum(self.output_sizes),
+            bias=bias,
+            gather_output=False,
+            quant_config=quant_config,
+            prefix=prefix,
+        )
+
+    def forward(self, input_):
+        if self.custom_op is not None:
+            return self.custom_op.apply(input_)
+        return super().forward(input_)
+
+    def validate_shard_id(self, loaded_shard_id: str | None) -> None:
+        if loaded_shard_id is None:
+            return
+        if loaded_shard_id not in ("index_q", "index_k"):
+            raise ValueError(
+                "Shard id for AscendMinimaxM3Indexer must be one of "
+                f"'index_q', 'index_k'; got {loaded_shard_id}."
+            )
+
+    def _get_shard_offset_mapping(self, loaded_shard_id: str) -> int | None:
+        return {
+            "index_q": 0,
+            "index_k": self.index_q_size,
+        }.get(loaded_shard_id)
+
+    def _get_shard_size_mapping(self, loaded_shard_id: str) -> int | None:
+        return {
+            "index_q": self.index_q_size,
+            "index_k": self.index_k_size,
+        }.get(loaded_shard_id)
+
+    def weight_loader_v2(
+        self,
+        param: BasevLLMParameter,
+        loaded_weight,
+        loaded_shard_id: str | None = None,
+    ) -> None:
+        self.validate_shard_id(loaded_shard_id)
+        assert loaded_shard_id in ("index_q", "index_k")
+
+        shard_offset = self._get_shard_offset_mapping(loaded_shard_id)
+        shard_size = self._get_shard_size_mapping(loaded_shard_id)
+        assert shard_offset is not None and shard_size is not None
+        if isinstance(param, BlockQuantScaleParameter):
+            weight_block_size = getattr(self, "weight_block_size", None)
+            shard_size, shard_offset = adjust_block_scale_shard(
+                weight_block_size, shard_size, shard_offset
+            )
+
+        num_heads = (
+            self.tp_size
+            if loaded_shard_id == "index_k"
+            else self.num_index_head_replicas
+        )
+        param.load_qkv_weight(
+            loaded_weight=loaded_weight,
+            num_heads=num_heads,
+            shard_id=loaded_shard_id,
+            shard_offset=shard_offset,
+            shard_size=shard_size,
+            tp_rank=self.tp_rank,
+        )
+
+    def weight_loader(
+        self,
+        param: Parameter,
+        loaded_weight,
+        loaded_shard_id: str | None = None,
+    ) -> None:
+        self.validate_shard_id(loaded_shard_id)
+        assert loaded_shard_id in ("index_q", "index_k")
+        output_dim = getattr(param, "output_dim", None)
+        assert output_dim is not None
+
+        shard_offset = self._get_shard_offset_mapping(loaded_shard_id)
+        shard_size = self._get_shard_size_mapping(loaded_shard_id)
+        assert shard_offset is not None and shard_size is not None
+        if isinstance(param, BlockQuantScaleParameter):
+            weight_block_size = getattr(self, "weight_block_size", None)
+            shard_size, shard_offset = adjust_block_scale_shard(
+                weight_block_size, shard_size, shard_offset
+            )
+
+        param_data = param.data.narrow(output_dim, shard_offset, shard_size)
+        if loaded_shard_id == "index_k":
+            shard_rank = 0
+        else:
+            shard_rank = self.tp_rank // self.num_index_head_replicas
+        loaded_weight = loaded_weight.narrow(
+            output_dim, shard_rank * shard_size, shard_size
+        )
+        assert param_data.shape == loaded_weight.shape
+        param_data.copy_(loaded_weight)
+
+
+def _quant_description_value(
+    quant_config: QuantizationConfig | None,
+    key: str,
+) -> Any | None:
+    quant_description = getattr(quant_config, "quant_description", None)
+    if not isinstance(quant_description, dict):
+        return None
+    return quant_description.get(key)
+
+
+def _sparse_proj_quant_type(
+    quant_config: QuantizationConfig | None,
+    prefix: str,
+    proj_name: str,
+) -> Any | None:
+    candidates = [prefix]
+    if not prefix.startswith("language_model."):
+        candidates.append(f"language_model.{prefix}")
+    if prefix.startswith("model."):
+        candidates.append(f"language_model.{prefix}")
+
+    for candidate in dict.fromkeys(candidates):
+        value = _quant_description_value(
+            quant_config,
+            f"{candidate}.{proj_name}.weight",
+        )
+        if value is not None:
+            return value
+    return None
+
+
+def _use_fused_qkv_indexer(
+    quant_config: QuantizationConfig | None,
+    prefix: str,
+) -> bool:
+    if quant_config is None:
+        return True
+
+    qkv_types = [
+        _sparse_proj_quant_type(quant_config, prefix, proj_name)
+        for proj_name in ("q_proj", "k_proj", "v_proj")
+    ]
+    index_q_type = _sparse_proj_quant_type(quant_config, prefix, "index_q_proj")
+    index_k_type = _sparse_proj_quant_type(quant_config, prefix, "index_k_proj")
+
+    if any(value is None for value in (*qkv_types, index_q_type, index_k_type)):
+        return True
+    if len(set(qkv_types)) != 1:
+        raise ValueError(
+            f"MiniMax M3 q/k/v quantization types differ for {prefix}: {qkv_types}"
+        )
+    if index_q_type != index_k_type:
+        raise ValueError(
+            "MiniMax M3 index_q/index_k quantization types differ for "
+            f"{prefix}: {index_q_type} vs {index_k_type}"
+        )
+    return qkv_types[0] == index_q_type
+
+
+def _register_m3_sparse_packed_modules(
+    quant_config: QuantizationConfig | None,
+    fused_qkv_indexer: bool,
+) -> None:
+    if quant_config is None:
+        return
+    packed_modules_mapping = getattr(quant_config, "packed_modules_mapping", None)
+    if not isinstance(packed_modules_mapping, dict):
+        return
+    packed_modules_mapping["qkv_proj"] = ["q_proj", "k_proj", "v_proj"]
+    if not fused_qkv_indexer:
+        packed_modules_mapping["indexer_proj"] = ["index_q_proj", "index_k_proj"]
+
 
 class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
     """Block-sparse attention with lightning indexer on Ascend."""
@@ -858,18 +1065,40 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         )
         self.num_idx_heads = self.num_kv_heads
         self.index_q_size = self.num_idx_heads * self.idx_head_dim
+        self._use_fused_qkv_indexer = _use_fused_qkv_indexer(quant_config, prefix)
+        _register_m3_sparse_packed_modules(quant_config, self._use_fused_qkv_indexer)
 
-        self.qkv_proj = AscendMinimaxM3QKVParallelLinearWithIndexer(
-            hidden_size,
-            self.head_dim,
-            self.total_num_heads,
-            self.total_num_kv_heads,
-            self.total_idx_heads,
-            self.idx_head_dim,
-            bias=qkv_bias,
-            quant_config=quant_config,
-            prefix=f"{prefix}.qkv_proj",
-        )
+        if self._use_fused_qkv_indexer:
+            self.qkv_proj = AscendMiniMaxM3QKVParallelLinearWithIndexer(
+                hidden_size,
+                self.head_dim,
+                self.total_num_heads,
+                self.total_num_kv_heads,
+                self.total_idx_heads,
+                self.idx_head_dim,
+                bias=qkv_bias,
+                quant_config=quant_config,
+                prefix=f"{prefix}.qkv_proj",
+            )
+            self.indexer_proj = None
+        else:
+            self.qkv_proj = QKVParallelLinear(
+                hidden_size,
+                self.head_dim,
+                self.total_num_heads,
+                self.total_num_kv_heads,
+                bias=qkv_bias,
+                quant_config=quant_config,
+                prefix=f"{prefix}.qkv_proj",
+            )
+            self.indexer_proj = AscendMiniMaxM3IndexerLinear(
+                hidden_size,
+                self.total_idx_heads,
+                self.idx_head_dim,
+                bias=qkv_bias,
+                quant_config=quant_config,
+                prefix=f"{prefix}.indexer_proj",
+            )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
@@ -996,9 +1225,21 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         qkv, _ = self.qkv_proj(hidden_states)
         main_qkv_size = self.q_size + 2 * self.kv_size
-        main_qkv = qkv.narrow(-1, 0, main_qkv_size)
-        index_q = qkv.narrow(-1, main_qkv_size, self.index_q_size)
-        index_k = qkv.narrow(-1, main_qkv_size + self.index_q_size, self.idx_head_dim)
+        if self.indexer_proj is None:
+            main_qkv = qkv.narrow(-1, 0, main_qkv_size)
+            index_q = qkv.narrow(-1, main_qkv_size, self.index_q_size)
+            index_k = qkv.narrow(
+                -1,
+                main_qkv_size + self.index_q_size,
+                self.idx_head_dim,
+            )
+        else:
+            main_qkv = qkv
+            index_qk, _ = self.indexer_proj(hidden_states)
+            index_q, index_k = index_qk.split(
+                [self.index_q_size, self.idx_head_dim],
+                dim=-1,
+            )
 
         if (
             main_qkv.device.type != "npu"
@@ -1009,6 +1250,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             q, k, v = main_qkv.split(
                 [self.q_size, self.kv_size, self.kv_size], dim=-1
             )
+            v = v.contiguous()
             q, k = self._qk_norm(q, k)
             q, k = self.rotary_emb(positions, q, k)
         else:
@@ -1042,8 +1284,6 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
     ) -> None:
         """Insert KV, build sparse top-k indices, then run sparse attention."""
         self._insert_kv(key, value, index_key)
-        if not get_forward_context().capturing:
-            torch.npu.current_stream().synchronize()
         topk_idx = self.indexer(index_query)
         self.impl.forward(self, query, self.kv_cache, topk_idx, attn_output)
 
