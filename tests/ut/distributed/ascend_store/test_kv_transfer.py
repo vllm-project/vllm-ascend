@@ -22,6 +22,7 @@ from unittest.mock import MagicMock
 # isort: off
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm.distributed.kv_events import BlockStored
+from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     KeyMetadata,
     LayerMultiBlockReqMeta,
@@ -540,7 +541,7 @@ class TestKVCacheStoreLayerSendingThread(unittest.TestCase):
         t._handle_request(req)
         events = t.get_kv_events()
         self.assertEqual(len(events), 1)
-        self.assertEqual(events[0].block_hashes, [b"h0"])
+        self.assertEqual(events[0].block_hashes, [maybe_convert_block_hash(b"h0")])
         self.assertEqual(events[0].token_ids, list(range(16)))
         self.assertEqual(events[0].block_size, 16)
 
@@ -564,7 +565,7 @@ class TestKVCacheStoreLayerSendingThread(unittest.TestCase):
         t._handle_request(final_layer_req)
         events = t.get_kv_events()
         self.assertEqual(len(events), 1)
-        self.assertEqual(events[0].block_hashes, [b"h0"])
+        self.assertEqual(events[0].block_hashes, [maybe_convert_block_hash(b"h0")])
 
 
 class TestKVCacheStoreLayerRecvingThread(unittest.TestCase):

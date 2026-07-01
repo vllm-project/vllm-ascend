@@ -105,7 +105,11 @@ class TestAscendStoreCoordinator(unittest.TestCase):
             group_cache_families=["c1"],
         )
 
-        masks = coord.store_mask(512)
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator._reachable_block_mask",
+            return_value=[False, False, False, True],
+        ):
+            masks = coord.store_mask(512)
 
         self.assertEqual(masks, ([False, False, False, True],))
 
