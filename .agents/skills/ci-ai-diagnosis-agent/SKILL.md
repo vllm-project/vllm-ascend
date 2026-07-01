@@ -11,7 +11,7 @@ description: >
 
 This skill is the **top-level diagnosis dispatcher** for unknown CI failures
 in vllm-ascend. It is written for an LLM agent with evidence access, not for
-a keyword classifier. The agent uses `.github/workflows/scripts/ci_diagnosis_agent.py`
+a keyword classifier. The agent uses `.agents/skills/ci-ai-diagnosis-agent/scripts/ci_diagnosis_agent.py`
 as its entry point and explores logs via function-calling tools (list_dir,
 read_file, search, diagnose) built directly into the agent loop.
 
@@ -309,5 +309,5 @@ requirements.
 |---|---|---|
 | Skill definition | `.agents/skills/ci-ai-diagnosis-agent/SKILL.md` | This file |
 | Output format | `.agents/skills/ci-ai-diagnosis-agent/references/output-format.md` | Detailed output spec |
-| Agent entry point | `.github/workflows/scripts/ci_diagnosis_agent.py` | CLI entry, agent loop, evidence tools |
-| Log filter | `.github/workflows/scripts/ci_log_filter_llm.py` | Two-phase log pre-filtering for LLM input |
+| Agent entry point | `.agents/skills/ci-ai-diagnosis-agent/scripts/ci_diagnosis_agent.py` | CLI entry, agent loop, evidence tools |
+| Log filter | `.agents/skills/ci-ai-diagnosis-agent/scripts/ci_log_filter_llm.py` | Two-phase log pre-filtering for LLM input |

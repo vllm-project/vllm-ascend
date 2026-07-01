@@ -41,7 +41,7 @@ from typing import Any
 import regex as re
 
 # Ensure sibling scripts are importable when run as a CLI from the
-# workflow scripts directory.
+# skill scripts directory.
 _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))

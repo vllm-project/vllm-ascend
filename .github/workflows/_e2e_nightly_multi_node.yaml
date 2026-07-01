@@ -555,7 +555,7 @@ jobs:
           fi
           SHA=$(git rev-parse HEAD)
           echo "Building CI diagnosis evidence bundle for $LEADER_LOG (ref=${{ inputs.vllm_ascend_ref }} sha=$SHA)"
-          python3 "$GITHUB_WORKSPACE/.github/workflows/scripts/ci_diagnosis_agent.py" \
+          python3 "$GITHUB_WORKSPACE/.agents/skills/ci-ai-diagnosis-agent/scripts/ci_diagnosis_agent.py" \
             --log-file "$LEADER_LOG" \
             --step-name "${{ inputs.config_file_path }}" \
             --artifact-dir /tmp/ci-diagnosis-artifacts \

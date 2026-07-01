@@ -336,7 +336,7 @@ jobs:
             exit 0
           fi
           SHA=$(git rev-parse HEAD)
-          python3 "$GITHUB_WORKSPACE/.github/workflows/scripts/ci_diagnosis_agent.py" \
+          python3 "$GITHUB_WORKSPACE/.agents/skills/ci-ai-diagnosis-agent/scripts/ci_diagnosis_agent.py" \
             --log-file "$LOGFILE" \
             --step-name "${{ inputs.model_list }}" \
             --artifact-dir /tmp/ci-diagnosis-artifacts \
