@@ -371,15 +371,28 @@ class BaseDeviceAdaptor:
     def execute_sfa_mla_prolog_v3(
         sfa_impl,
         *,
-        token_x: torch.Tensor,
+        hidden_states: torch.Tensor,
         rope_sin: torch.Tensor,
         rope_cos: torch.Tensor,
-        kv_cache: torch.Tensor,
-        kr_cache: torch.Tensor,
+        kv_cache: tuple[torch.Tensor, ...],
+        slot_mapping: torch.Tensor,
         cache_mode: str,
-        cache_index: torch.Tensor | None = None,
-        **quant_kwargs: Any,
     ) -> tuple:
+        assert sfa_impl.q_a_layernorm is not None
+        assert sfa_impl.kv_a_layernorm is not None
+
+        token_x, dynamic_scale = torch_npu.npu_dynamic_quant(hidden_states.contiguous())
+        dynamic_scale = dynamic_scale.view(-1, 1)
+        rope_cos = rope_cos.view(rope_cos.shape[0], rope_cos.shape[-1])
+        rope_sin = rope_sin.view(rope_sin.shape[0], rope_sin.shape[-1])
+
+        packed_kv_cache = sfa_impl.enable_sfa_kv_quant_sparse_attention
+        if packed_kv_cache:
+            assert sfa_impl.sfa_qsfa_kr_cache_dummy is not None
+            kr_cache = sfa_impl.sfa_qsfa_kr_cache_dummy
+        else:
+            kr_cache = kv_cache[1]
+
         prolog_kwargs = {
             "token_x": token_x,
             "weight_dq": sfa_impl.weight_dq,
@@ -390,13 +403,34 @@ class BaseDeviceAdaptor:
             "rmsnorm_gamma_ckv": sfa_impl.kv_a_layernorm.weight.data,
             "rope_sin": rope_sin,
             "rope_cos": rope_cos,
-            "kv_cache": kv_cache,
+            "kv_cache": kv_cache[0],
             "kr_cache": kr_cache,
             "cache_mode": cache_mode,
-            **quant_kwargs,
+            "dequant_scale_x": dynamic_scale,
+            "dequant_scale_w_dq": sfa_impl.dequant_scale_w_dq,
+            "dequant_scale_w_uq_qr": sfa_impl.dequant_scale_w_uq_qr,
+            "dequant_scale_w_dkv_kr": sfa_impl.dequant_scale_w_dkv_kr,
+            "query_quant_mode": 0,
+            "weight_quant_mode": 2,
+            "kv_cache_quant_mode": 0,
+            "query_norm_flag": sfa_impl.has_indexer,
+            "rmsnorm_epsilon_cq": sfa_impl.q_a_layernorm.variance_epsilon,
+            "rmsnorm_epsilon_ckv": sfa_impl.kv_a_layernorm.variance_epsilon,
+            "qc_qr_scale": 1.0,
+            "kc_scale": 1.0,
         }
-        if cache_index is not None:
-            prolog_kwargs["cache_index"] = cache_index
+        if cache_mode == "PA_BSND":
+            prolog_kwargs["cache_index"] = slot_mapping.view(-1).to(torch.int64)
+        if packed_kv_cache:
+            prolog_kwargs.update(
+                {
+                    "kv_cache_quant_mode": 3,
+                    "ckvkr_repo_mode": 1,
+                    "quant_scale_repo_mode": 1,
+                    "tile_size": sfa_impl.sfa_qsfa_tile_size,
+                    "k_nope_clip_alpha": sfa_impl.sfa_qsfa_k_nope_clip_alpha,
+                }
+            )
         return torch_npu.npu_mla_prolog_v3(**prolog_kwargs)
 
     @staticmethod

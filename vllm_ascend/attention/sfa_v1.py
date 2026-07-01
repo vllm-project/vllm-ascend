@@ -1275,18 +1275,6 @@ class AscendSFAImpl(MLAAttentionImpl):
             num_input_tokens,
         )
 
-    def _format_prolog_v3_inputs(
-        self,
-        hidden_states: torch.Tensor,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        token_x, dynamic_scale = torch_npu.npu_dynamic_quant(hidden_states.contiguous())
-        dynamic_scale = dynamic_scale.view(-1, 1)
-        rope_cos = cos.view(cos.shape[0], cos.shape[-1])
-        rope_sin = sin.view(sin.shape[0], sin.shape[-1])
-        return token_x, dynamic_scale, rope_cos, rope_sin
-
     def _sfa_preprocess_with_prolog_v3(
         self,
         hidden_states: torch.Tensor,
@@ -1303,50 +1291,14 @@ class AscendSFAImpl(MLAAttentionImpl):
         torch.Tensor | None,
         torch.Tensor | None,
     ]:
-        assert self.q_a_layernorm is not None
-        assert self.kv_a_layernorm is not None
-
-        token_x, dynamic_scale, rope_cos, rope_sin = self._format_prolog_v3_inputs(hidden_states, cos, sin)
-        prolog_kwargs = {
-            "dequant_scale_x": dynamic_scale,
-            "dequant_scale_w_dq": self.dequant_scale_w_dq,
-            "dequant_scale_w_uq_qr": self.dequant_scale_w_uq_qr,
-            "dequant_scale_w_dkv_kr": self.dequant_scale_w_dkv_kr,
-            "query_quant_mode": 0,
-            "weight_quant_mode": 2,
-            "kv_cache_quant_mode": 0,
-            "query_norm_flag": self.has_indexer,
-            "rmsnorm_epsilon_cq": self.q_a_layernorm.variance_epsilon,
-            "rmsnorm_epsilon_ckv": self.kv_a_layernorm.variance_epsilon,
-            "qc_qr_scale": 1.0,
-            "kc_scale": 1.0,
-        }
-        if self.enable_sfa_kv_quant_sparse_attention:
-            prolog_kwargs.update(
-                {
-                    "kv_cache_quant_mode": 3,
-                    "ckvkr_repo_mode": 1,
-                    "quant_scale_repo_mode": 1,
-                    "tile_size": self.sfa_qsfa_tile_size,
-                    "k_nope_clip_alpha": self.sfa_qsfa_k_nope_clip_alpha,
-                }
-            )
-        cache_index = slot_mapping.view(-1).to(torch.int64) if cache_mode == "PA_BSND" else None
-        if self.enable_sfa_kv_quant_sparse_attention:
-            assert self.sfa_qsfa_kr_cache_dummy is not None
-            kr_cache = self.sfa_qsfa_kr_cache_dummy
-        else:
-            kr_cache = kv_cache[1]
         ql_nope, q_pe, _, q_c, q_c_scale = DeviceOperator.execute_sfa_mla_prolog_v3(
             self,
-            token_x=token_x,
-            rope_sin=rope_sin,
-            rope_cos=rope_cos,
-            kv_cache=kv_cache[0],
-            kr_cache=kr_cache,
+            hidden_states=hidden_states,
+            rope_sin=sin,
+            rope_cos=cos,
+            kv_cache=kv_cache,
+            slot_mapping=slot_mapping,
             cache_mode=cache_mode,
-            cache_index=cache_index,
-            **prolog_kwargs,
         )
         ql_nope = ql_nope.view(-1, self.local_num_heads, self.kv_lora_rank)
         q_pe = q_pe.view(-1, self.local_num_heads, self.qk_rope_head_dim)
@@ -1367,17 +1319,6 @@ class AscendSFAImpl(MLAAttentionImpl):
             else None
         )
         return hidden_states, ql_nope, q_pe, q_c, k_nope, k_pe
-
-    def _maybe_all_gather_hidden_states(
-        self,
-        hidden_states: torch.Tensor,
-        need_gather_q_kv: bool,
-    ) -> torch.Tensor:
-        if self.enable_sp and not self.enable_dsa_cp:
-            return torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
-                hidden_states.contiguous(), need_gather_q_kv
-            )
-        return hidden_states
 
     def indexer_select_pre_process(
         self,
@@ -1428,13 +1369,22 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         return k_li, k_li_scale
 
-    def _project_indexer_query(
+    def indexer_select_post_process(
         self,
         x: torch.Tensor,
         q_c: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        kv_cache: tuple[torch.Tensor, ...],
+        attn_metadata: M,
         cos: torch.Tensor,
         sin: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        actual_seq_lengths_query: torch.Tensor,
+        actual_seq_lengths_key: torch.Tensor,
+    ):
+        if not self.has_indexer:
+            raise RuntimeError(
+                f"indexer_select_post_process should not be called when indexer is None. layer_name={self.layer_name}."
+            )
+
         assert self.wk_weights_proj is not None
         assert self.wq_b is not None
 
@@ -1473,26 +1423,6 @@ class AscendSFAImpl(MLAAttentionImpl):
             q_li_pe = torch_npu.npu_rotary_mul(q_li_pe, cos, sin)
             q_li_pe = q_li_pe.squeeze(2)
             q_li = torch.cat([q_li_pe, q_li_nope], dim=-1)
-
-        return q_li, weights
-
-    def indexer_select_post_process(
-        self,
-        x: torch.Tensor,
-        q_c: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
-        kv_cache: tuple[torch.Tensor, ...],
-        attn_metadata: M,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
-        actual_seq_lengths_query: torch.Tensor,
-        actual_seq_lengths_key: torch.Tensor,
-    ):
-        if not self.has_indexer:
-            raise RuntimeError(
-                f"indexer_select_post_process should not be called when indexer is None. layer_name={self.layer_name}."
-            )
-
-        q_li, weights = self._project_indexer_query(x, q_c, cos, sin)
 
         q_li_scale = None
         q_li_shape_ori = None
@@ -1607,7 +1537,10 @@ class AscendSFAImpl(MLAAttentionImpl):
             cache_write_slot_mapping = slot_mapping_cp
 
         if use_sfa_prolog_v3:
-            hidden_states = self._maybe_all_gather_hidden_states(hidden_states, need_gather_q_kv)
+            if self.enable_sp and not self.enable_dsa_cp:
+                hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
+                    hidden_states.contiguous(), need_gather_q_kv
+                )
             assert cache_write_slot_mapping.numel() == hidden_states.shape[0], (
                 "SFA Prolog V3 requires one cache index per input token, "
                 f"got token_x={hidden_states.shape[0]} and cache_index={cache_write_slot_mapping.numel()}."
@@ -1662,7 +1595,10 @@ class AscendSFAImpl(MLAAttentionImpl):
             weight_prefetch_method.maybe_prefetch_mla_or_sla_weight_in_current_stream(
                 inputs=self.fused_qkv_a_proj.weight, dependency=hidden_states
             )
-            hidden_states = self._maybe_all_gather_hidden_states(hidden_states, need_gather_q_kv)
+            if self.enable_sp and not self.enable_dsa_cp:
+                hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
+                    hidden_states.contiguous(), need_gather_q_kv
+                )
             qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
             q_c, kv_no_split = qkv_lora.split(
                 [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
@@ -1696,97 +1632,43 @@ class AscendSFAImpl(MLAAttentionImpl):
                 async_op = self.enable_dsa_cp_with_layer_shard or full_gather_o_proj_enabled
                 # support all_gather kv async for communication calculation overlap
                 if self.enable_sfa_kv_quant_sparse_attention:
-                    fused_kv_no_split, kv_ag_handle = all_gather_async(
-                        k_nope.view(-1, k_nope.shape[-1]),
-                        get_tp_group(),
-                        async_op=async_op,
-                    )
-                    if self.has_indexer:
-                        assert k_li is not None
-                        k_li, kv_ag_handle = all_gather_async(
-                            k_li,
-                            get_tp_group(),
-                            async_op=async_op,
-                        )
-                        if self.use_sparse_c8_indexer:
-                            assert k_li_scale is not None
-                            k_li_scale, kv_ag_handle = all_gather_async(
-                                k_li_scale,
-                                get_tp_group(),
-                                async_op=async_op,
-                            )
-                elif not self.has_indexer:
-                    fused_kv_no_split, kv_ag_handle = all_gather_async(
-                        torch.cat(
-                            [
-                                k_pe.view(-1, k_pe.shape[-1]),
-                                k_nope.view(-1, k_nope.shape[-1]),
-                            ],
-                            dim=1,
-                        ),
-                        get_tp_group(),
-                        async_op=async_op,
-                    )
-                elif not self.use_sparse_c8_indexer:
-                    assert k_li is not None
-                    fused_kv_no_split, kv_ag_handle = all_gather_async(
-                        torch.cat(
-                            [
-                                k_pe.view(-1, k_pe.shape[-1]),
-                                k_nope.view(-1, k_nope.shape[-1]),
-                                k_li.view(-1, k_li.shape[-1]),
-                            ],
-                            dim=1,
-                        ),
-                        get_tp_group(),
-                        async_op=async_op,
-                    )
+                    fused_kv_parts = [k_nope.view(-1, k_nope.shape[-1])]
                 elif self.use_a5_sparse_c8_indexer:
-                    # due to different dtypes, we have to split commu pass
                     assert knope_scale is not None
-                    assert k_li_scale is not None
-                    fused_kv_no_split, _ = all_gather_async(
-                        torch.cat(
-                            [
-                                k_nope.view(-1, k_nope.shape[-1]),
-                                k_pe.view(-1, k_pe.shape[-1]),
-                                knope_scale.view(-1, knope_scale.shape[-1]),
-                            ],
-                            dim=1,
-                        ),
-                        get_tp_group(),
-                        async_op=async_op,
-                    )
-                    k_li, _ = all_gather_async(
-                        k_li,
-                        get_tp_group(),
-                        async_op=async_op,
-                    )
-                    k_li_scale, kv_ag_handle = all_gather_async(
-                        k_li_scale,
-                        get_tp_group(),
-                        async_op=async_op,
-                    )
+                    fused_kv_parts = [
+                        k_nope.view(-1, k_nope.shape[-1]),
+                        k_pe.view(-1, k_pe.shape[-1]),
+                        knope_scale.view(-1, knope_scale.shape[-1]),
+                    ]
                 else:
-                    # due to different dtypes, we have to split commu pass
+                    fused_kv_parts = [
+                        k_pe.view(-1, k_pe.shape[-1]),
+                        k_nope.view(-1, k_nope.shape[-1]),
+                    ]
+                    if self.has_indexer and not self.use_sparse_c8_indexer:
+                        assert k_li is not None
+                        fused_kv_parts.append(k_li.view(-1, k_li.shape[-1]))
+
+                fused_kv_input = (
+                    fused_kv_parts[0] if len(fused_kv_parts) == 1 else torch.cat(fused_kv_parts, dim=1)
+                )
+                fused_kv_no_split, kv_ag_handle = all_gather_async(
+                    fused_kv_input,
+                    get_tp_group(),
+                    async_op=async_op,
+                )
+
+                if self.has_indexer and (
+                    self.enable_sfa_kv_quant_sparse_attention or self.use_sparse_c8_indexer
+                ):
                     assert k_li is not None
-                    assert k_li_scale is not None
-                    fused_kv_no_split, _ = all_gather_async(
-                        torch.cat(
-                            [
-                                k_pe.view(-1, k_pe.shape[-1]),
-                                k_nope.view(-1, k_nope.shape[-1]),
-                            ],
-                            dim=1,
-                        ),
-                        get_tp_group(),
-                        async_op=async_op,
-                    )
-                    k_li, _ = all_gather_async(
+                    k_li, kv_ag_handle = all_gather_async(
                         k_li,
                         get_tp_group(),
                         async_op=async_op,
                     )
+                if self.has_indexer and self.use_sparse_c8_indexer:
+                    assert k_li_scale is not None
                     k_li_scale, kv_ag_handle = all_gather_async(
                         k_li_scale,
                         get_tp_group(),
