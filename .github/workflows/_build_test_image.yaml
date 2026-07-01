@@ -151,12 +151,12 @@ jobs:
           fetch-depth: 1
           submodules: recursive
 
-      - name: Rebase on latest main
-        run: |
-          git config user.name "vllm-ascend-ci"
-          git config user.email "vllm-ascend-ci@users.noreply.github.com"
-          git fetch origin main
-          git rebase origin/main
+      # - name: Rebase on latest main
+      #   run: |
+      #     git config user.name "vllm-ascend-ci"
+      #     git config user.email "vllm-ascend-ci@users.noreply.github.com"
+      #     git fetch origin main
+      #     git rebase origin/main
 
       - name: Get csrc hash
         id: get_csrc_hash
@@ -246,7 +246,6 @@ jobs:
           
           set -ex
           which buildctl
-          sleep 1800
           IMAGE_TAG="vllm-ascend-pr${{ inputs.pr_number }}-${{ matrix.vllm_label }}-${{ matrix.npu_type }}-${{ matrix.arch }}"
           IMAGE_NAME="${{ env.QUAY_TEMP_REPO }}:${IMAGE_TAG}"
 
