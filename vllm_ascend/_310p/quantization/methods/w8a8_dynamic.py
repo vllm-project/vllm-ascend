@@ -34,6 +34,12 @@ from .registry import register_scheme
 from .w8a8_base import AscendW8A8Linear310pScheme
 
 
+def _npu_quant_matmul_dequant(layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None) -> torch.Tensor:
+    return torch_npu.npu_quant_matmul_dequant(
+        x, layer.weight.data, layer.weight_scale, bias=bias, quant_mode="pertoken"
+    )
+
+
 @register_scheme("W8A8_DYNAMIC", "moe")
 class AscendW8A8DynamicFusedMoEMethod310(AscendMoEScheme):
     """310P-only FusedMoE method for Ascend W8A8_DYNAMIC.
@@ -188,31 +194,16 @@ class AscendW8A8DynamicLinearMethod310(AscendW8A8Linear310pScheme):
         bias: torch.Tensor | None = None,
         tp_rank: int | None = 0,
     ) -> torch.Tensor:
-        # NOTE(310P):
-        # - There is an accuracy issue currently, which is expected to be fixed in the next version.
-        quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(x)
-        need_unsqz = False
-        if pertoken_scale.dim() == 2:
-            need_unsqz = True
-            quantized_x = quantized_x.squeeze(dim=1)
-            pertoken_scale = pertoken_scale.squeeze(dim=1)
+        original_shape = x.shape
+        if x.dim() != 2:
+            x = x.reshape(-1, original_shape[-1])
 
-        # NOTE(310P):
-        # - Currently, W8A8 dynamic quantization supports only symmetric quantization.
-        output = torch_npu.npu_quant_matmul(
-            quantized_x,
-            layer.weight.data,
-            layer.weight_scale,
-            pertoken_scale=pertoken_scale,
-            bias=bias,
-            output_dtype=x.dtype,
-        )
-        if need_unsqz:
-            output = output.unsqueeze(dim=1)
+        output = _npu_quant_matmul_dequant(layer, x, bias)
+        if len(original_shape) != 2:
+            output = output.reshape(*original_shape[:-1], output.shape[-1])
         return output
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # cast quantized weight tensors in NZ format for higher inference speed
-        layer.weight.data = maybe_trans_nz(layer.weight.data).transpose(0, 1)
+        layer.weight.data = layer.weight.data.contiguous()
         layer.weight_scale.data = layer.weight_scale.data.flatten()
         layer.weight_offset.data = layer.weight_offset.data.flatten()

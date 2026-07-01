@@ -87,59 +87,102 @@ class TestAscendW8A8DynamicLinearMethod310(TestBase):
         self.assertEqual(params["weight_scale"].shape, (10, 1))
         self.assertEqual(params["weight_offset"].shape, (10, 1))
 
-    @patch("torch_npu.npu_dynamic_quant", create=True)
+    @patch("torch_npu.npu_quant_matmul_dequant")
     @patch("torch_npu.npu_quant_matmul")
-    def test_apply_310(self, mock_npu_quant_matmul, mock_npu_dynamic_quantize):
+    @patch("torch_npu.npu_dynamic_quant")
+    def test_apply_310_uses_dequant_path(
+        self,
+        mock_npu_dynamic_quant,
+        mock_npu_quant_matmul,
+        mock_npu_quant_matmul_dequant,
+    ):
         layer = MagicMock()
-        layer.weight = torch.randn(128, 256, dtype=torch.float16)
-        layer.weight_scale = torch.randn(128, dtype=torch.float32)
-        layer.params_dtype = torch.float16
-
+        layer.weight = torch.randint(-127, 128, (256, 128), dtype=torch.int8)
+        layer.weight_scale = torch.randn(256, dtype=torch.float32)
         x = torch.randn(32, 128, dtype=torch.float16)
-        expect_x_output = torch.randint(-128, 127, x.shape, dtype=torch.int8)
-        expect_pertoken_scale_output = torch.randn(x.shape[0], dtype=torch.float32)
-        mock_npu_dynamic_quantize.return_value = expect_x_output, expect_pertoken_scale_output
-
-        expected_y_output = torch.randn(32, 256)
-        mock_npu_quant_matmul.return_value = expected_y_output
+        expected_output = torch.randn(32, 256)
+        mock_npu_quant_matmul_dequant.return_value = expected_output
 
         output = self.method.apply(layer, x, tp_rank=0)
 
-        mock_npu_dynamic_quantize.assert_called_with(x)
-        mock_npu_quant_matmul.assert_called_once()
-        (args, kwargs) = mock_npu_quant_matmul.call_args
-
-        # positional args
-        self.assertTrue(torch.equal(args[0], expect_x_output))
+        mock_npu_dynamic_quant.assert_not_called()
+        mock_npu_quant_matmul.assert_not_called()
+        mock_npu_quant_matmul_dequant.assert_called_once()
+        args, kwargs = mock_npu_quant_matmul_dequant.call_args
+        self.assertTrue(torch.equal(args[0], x))
         self.assertTrue(torch.equal(args[1], layer.weight.data))
         self.assertTrue(torch.equal(args[2], layer.weight_scale))
+        self.assertIsNone(kwargs["bias"])
+        self.assertEqual(kwargs["quant_mode"], "pertoken")
+        self.assertTrue(torch.equal(output, expected_output))
 
-        # kwargs
-        self.assertTrue(torch.equal(kwargs["pertoken_scale"], expect_pertoken_scale_output))
-        self.assertTrue(kwargs["bias"] is None)
-        self.assertEqual(kwargs["output_dtype"], layer.params_dtype)
-
-        self.assertTrue(torch.equal(output, expected_y_output))
-
-    @patch("vllm_ascend.utils.is_310p", return_value=True)
-    @patch("torch_npu.npu_format_cast")
-    def test_process_weights_after_loading_calls_nz_format_cast_310p(self, mock_npu_format_cast, _mock_is_310p):
-        mock_npu_format_cast.side_effect = lambda x, fmt: x
-
+    @patch("torch_npu.npu_quant_matmul_dequant")
+    @patch("torch_npu.npu_quant_matmul")
+    @patch("torch_npu.npu_dynamic_quant")
+    def test_apply_310_passes_bias_to_dequant(
+        self,
+        mock_npu_dynamic_quant,
+        mock_npu_quant_matmul,
+        mock_npu_quant_matmul_dequant,
+    ):
         layer = MagicMock()
+        layer.weight = torch.randint(-127, 128, (256, 128), dtype=torch.int8)
+        layer.weight_scale = torch.randn(256, dtype=torch.float32)
+        x = torch.randn(32, 128, dtype=torch.float16)
+        bias = torch.randn(256, dtype=torch.float16)
+        expected_output = torch.randn(32, 256)
+        mock_npu_quant_matmul_dequant.return_value = expected_output
 
-        # Attributes used by process_weights_after_loading()
+        output = self.method.apply(layer, x, bias=bias, tp_rank=0)
+
+        mock_npu_dynamic_quant.assert_not_called()
+        mock_npu_quant_matmul.assert_not_called()
+        mock_npu_quant_matmul_dequant.assert_called_once()
+        _args, kwargs = mock_npu_quant_matmul_dequant.call_args
+        self.assertTrue(torch.equal(kwargs["bias"], bias))
+        self.assertEqual(kwargs["quant_mode"], "pertoken")
+        self.assertTrue(torch.equal(output, expected_output))
+
+    @patch("torch_npu.npu_quant_matmul_dequant")
+    @patch("torch_npu.npu_quant_matmul")
+    @patch("torch_npu.npu_dynamic_quant")
+    def test_apply_310_flattens_non_2d_input(
+        self,
+        mock_npu_dynamic_quant,
+        mock_npu_quant_matmul,
+        mock_npu_quant_matmul_dequant,
+    ):
+        layer = MagicMock()
+        layer.weight = torch.randint(-127, 128, (256, 128), dtype=torch.int8)
+        layer.weight_scale = torch.randn(256, dtype=torch.float32)
+        x = torch.randn(2, 16, 128, dtype=torch.float16)
+        expected_output = torch.randn(32, 256)
+        mock_npu_quant_matmul_dequant.return_value = expected_output
+
+        output = self.method.apply(layer, x, tp_rank=0)
+
+        mock_npu_dynamic_quant.assert_not_called()
+        mock_npu_quant_matmul.assert_not_called()
+        mock_npu_quant_matmul_dequant.assert_called_once()
+        args, kwargs = mock_npu_quant_matmul_dequant.call_args
+        self.assertEqual(args[0].shape, (32, 128))
+        self.assertEqual(kwargs["quant_mode"], "pertoken")
+        self.assertEqual(output.shape, (2, 16, 256))
+
+    def test_process_weights_after_loading_keeps_weight_contiguous_310p(self):
+        layer = MagicMock()
         layer.weight = MagicMock()
         layer.weight_scale = MagicMock()
         layer.weight_offset = MagicMock()
 
-        layer.weight.data = torch.randint(-127, 128, (128, 256), dtype=torch.int8)
-
-        layer.weight_scale.data = torch.randn(128, 1, dtype=torch.bfloat16)
-        layer.weight_offset.data = torch.randn(128, 1, dtype=torch.bfloat16)
-        # w2_weight_offset is reshaped to (N, -1); any (N, 1) is fine
-        layer.w2_weight_offset.data = torch.randn(128, 1, dtype=torch.bfloat16)
+        layer.weight.data = torch.randint(-127, 128, (256, 128), dtype=torch.int8)
+        original_weight = layer.weight.data.clone()
+        layer.weight_scale.data = torch.randn(256, 1, dtype=torch.bfloat16)
+        layer.weight_offset.data = torch.randn(256, 1, dtype=torch.bfloat16)
 
         self.method.process_weights_after_loading(layer)
 
-        mock_npu_format_cast.assert_called_once()
+        self.assertTrue(layer.weight.data.is_contiguous())
+        self.assertTrue(torch.equal(layer.weight.data, original_weight))
+        self.assertEqual(layer.weight_scale.data.shape, (256,))
+        self.assertEqual(layer.weight_offset.data.shape, (256,))
