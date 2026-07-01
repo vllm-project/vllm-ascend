@@ -34,11 +34,17 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
 
-**A3 series**
+:::::{tab-set}
+:sync-group: install
+
+::::{tab-item} A3 series
+:sync: A3
 
 Start the docker image on your each node.
 
-```bash
+```{code-block} bash
+   :substitutions:
+
 export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
 docker run --rm \
     --name vllm-ascend \
@@ -73,11 +79,15 @@ docker run --rm \
     -it $IMAGE bash
 ```
 
-**A2 series**
+::::
+::::{tab-item} A2 series
+:sync: A2
 
 Start the docker image on your each node.
 
-```bash
+```{code-block} bash
+   :substitutions:
+
 export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 docker run --rm \
     --name vllm-ascend \
@@ -104,6 +114,9 @@ docker run --rm \
     -it $IMAGE bash
 ```
 
+::::
+:::::
+
 After a successful docker run, you can verify the running container service by executing the `docker ps` command.
 
 ### 4.2 Source Code Installation
@@ -114,7 +127,7 @@ If you don't want to use the docker image as above, you can also build all from 
 
 If you want to deploy multi-node environment, you need to set up environment on each node.
 
-To use the tools_call feature, please ensure that your transformers version is 4.57.6 or lower. If vllm-ascend has been upgraded to v0.21 or later, this requirement no longer applies.
+To use the tool_calls feature, please ensure that your transformers version is 4.57.6 or lower. If vllm-ascend has been upgraded to v0.21 or later, this requirement no longer applies.
 
 ## 5 Online Service Deployment
 
@@ -574,8 +587,8 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
       --kv-transfer-config \
       '{"kv_connector": "MooncakeConnectorV1",
       "kv_role": "kv_consumer",
-      "kv_port": "30200",
-      "engine_id": "2",
+      "kv_port": "30300",
+      "engine_id": "3",
       "kv_connector_extra_config": {
                 "prefill": {
                         "dp_size": 4,
@@ -589,12 +602,12 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
       }'
     ```
 
-Key Parameter Descriptions:
+    Key Parameter Descriptions:
 
-- `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the communication optimization function on the prefill nodes.
-- `VLLM_ASCEND_ENABLE_MLAPO=1`: enables the fusion operator, which can significantly improve performance but consumes more NPU memory. In the Prefill-Decode (PD) separation scenario, enable MLAPO only on decode nodes.
-- `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the Key-Value Cache (KV Cache) of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, it is recommended to enable this configuration on both prefill and decode nodes simultaneously.
-- `multistream_overlap_shared_expert: true`: When the Tensor Parallelism (TP) size is 1 or `enable_shared_expert_dp: true`, an additional stream is enabled to overlap the computation process of shared experts for improved efficiency.
+    - `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the communication optimization function on the prefill nodes.
+    - `VLLM_ASCEND_ENABLE_MLAPO=1`: enables the fusion operator, which can significantly improve performance but consumes more NPU memory. In the Prefill-Decode (PD) separation scenario, enable MLAPO only on decode nodes.
+    - `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the Key-Value Cache (KV Cache) of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, it is recommended to enable this configuration on both prefill and decode nodes simultaneously.
+    - `multistream_overlap_shared_expert: true`: When the Tensor Parallelism (TP) size is 1 or `enable_shared_expert_dp: true`, an additional stream is enabled to overlap the computation process of shared experts for improved efficiency.
 
 6. Run server for each node:
 
@@ -845,6 +858,6 @@ Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matr
 
 For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html); this chapter only covers model-specific issues.
 
-- **Q: What transformer version is required for tools_call feature?**
+- **Q: What transformer version is required for tool_calls feature?**
 
-  A: To use the tools_call feature, please ensure that your transformers version is 4.57.6 or lower. If vllm-ascend has been upgraded to v0.21 or later, this requirement no longer applies.
+  A: To use the tool_calls feature, please ensure that your transformers version is 4.57.6 or lower. If vllm-ascend has been upgraded to v0.21 or later, this requirement no longer applies.

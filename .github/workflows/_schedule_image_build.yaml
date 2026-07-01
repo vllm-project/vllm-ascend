@@ -140,6 +140,7 @@ jobs:
     - uses: actions/checkout@v7
       if: ${{ github.event_name != 'workflow_dispatch' }}
       with:
+        submodules: recursive
         fetch-depth: 0
         persist-credentials: false
         ref: ${{ inputs.branch_ref }}
@@ -147,6 +148,7 @@ jobs:
     - uses: actions/checkout@v7
       if: ${{ github.event_name == 'workflow_dispatch' && inputs.workflow_dispatch_tag != '' }}
       with:
+        submodules: recursive
         fetch-depth: 0
         persist-credentials: false
         ref: ${{ inputs.workflow_dispatch_tag }}
@@ -154,6 +156,7 @@ jobs:
     - uses: actions/checkout@v7
       if: ${{ github.event_name == 'workflow_dispatch' && inputs.workflow_dispatch_tag == '' && inputs.vllm_ascend_commit == '' }}
       with:
+        submodules: recursive
         fetch-depth: 0
         persist-credentials: false
         ref: ${{ inputs.branch_ref }}
@@ -299,12 +302,14 @@ jobs:
         uses: actions/checkout@v7
         if: ${{ github.event_name != 'workflow_dispatch' || (github.event_name == 'workflow_dispatch' && inputs.workflow_dispatch_tag == '') }}
         with:
+          submodules: recursive
           ref: ${{ inputs.branch_ref }}
 
       - name: Checkout tag
         uses: actions/checkout@v7
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.workflow_dispatch_tag != '' }}
         with:
+          submodules: recursive
           ref: ${{ inputs.workflow_dispatch_tag }}
 
       - name: Download arm64 digests
