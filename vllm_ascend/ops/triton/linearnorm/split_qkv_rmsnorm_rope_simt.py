@@ -191,7 +191,7 @@ def split_qkv_rmsnorm_rope_simt_kernel(
             normalized_values_tmp1,
             offsets=(0, 0, 0),
             sizes=(batch_size_per_iter_per_vec, kv_head_num, HALF_ROPE_DIM),
-            strides=(1, 1, 1)
+            strides=(1, 1, 1),
         )
         x2 = extract_slice(
             normalized_values_tmp1,
