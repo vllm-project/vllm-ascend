@@ -2366,6 +2366,7 @@ class NPUModelRunner(GPUModelRunner):
                 skip_compiled=has_encoder_input,
                 has_sinks=self._has_sinks,
                 eplb_heat_collection_status=self.eplb_heat_collection_status if self.dynamic_eplb else False,
+                ubatch_slices=ubatch_slices_padded if 'ubatch_slices_padded' in locals() else None,
             ),
             self.maybe_get_kv_connector_output(
                 scheduler_output,
@@ -3498,8 +3499,23 @@ class NPUModelRunner(GPUModelRunner):
         if self.dynamic_eplb:
             self.update_eplb_heat_collection_status(num_tokens_padded)
 
-        # vllm-ascend does not support ubatch now
-        ubatch_slices, ubatch_slices_padded = None, None
+        # Compute ubatch_slices when DBO is enabled so that _dummy_run warms
+        # up the same dual-stream path used by real execute_model.
+        should_ubatch_dummy = False
+        if self.parallel_config.use_ubatching:
+            from vllm.v1.worker.ubatch_utils import check_ubatch_thresholds
+            should_ubatch_dummy = check_ubatch_thresholds(
+                self.parallel_config,
+                num_tokens_padded,
+                uniform_decode=uniform_decode,
+            )
+        ubatch_slices, ubatch_slices_padded = maybe_create_ubatch_slices(
+            should_ubatch_dummy,
+            num_scheduled_tokens,
+            num_tokens_padded,
+            num_reqs_padded,
+            self.parallel_config.num_ubatches,
+        )
         attn_metadata: PerLayerAttnMetadata | None = None
         # _dummy_run shares pinned CPU buffers (seq_lens, query_start_loc,
         # gdn_query_start_loc, etc.) with execute_model. It must participate in
@@ -3659,6 +3675,7 @@ class NPUModelRunner(GPUModelRunner):
                 model_instance=self.model,
                 has_sinks = self._has_sinks,
                 eplb_heat_collection_status=self.eplb_heat_collection_status if self.dynamic_eplb else False,
+                ubatch_slices=ubatch_slices_padded,
             ):
                 outputs = self._model_forward(
                     num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds
@@ -3856,7 +3873,12 @@ class NPUModelRunner(GPUModelRunner):
                 self.drafter.update_stream = self.update_stream
 
         with _torch_cuda_wrapper():
-            if (
+            if self.parallel_config.use_ubatching:
+                from vllm_ascend.worker.npu_ubatch_wrapper import NPUUBatchWrapper
+                self.model = NPUUBatchWrapper(
+                    self.model, self.vllm_config, self.device
+                )
+            elif (
                 breakable_cudagraph.is_breakable_cudagraph_enabled()
                 and cudagraph_mode != CUDAGraphMode.NONE
             ):
@@ -4908,18 +4930,24 @@ class NPUModelRunner(GPUModelRunner):
             kv_cache_group_id: int,
         ) -> list[AttentionGroup]:
             attn_groups: list[AttentionGroup] = []
+            num_metadata_builders = (
+                self.parallel_config.num_ubatches
+                if self.parallel_config.use_ubatching
+                else 1
+            )
             for group_key, layer_names in attn_backends_map.items():
                 attn_backend = group_key.attn_backend
                 kv_cache_spec = group_key.kv_cache_spec
                 attn_metadata_builders = []
-                attn_metadata_builders.append(
-                    attn_backend.get_builder_cls()(
-                        kv_cache_spec,
-                        layer_names,
-                        self.vllm_config,
-                        self.device,
+                for _ in range(num_metadata_builders):
+                    attn_metadata_builders.append(
+                        attn_backend.get_builder_cls()(
+                            kv_cache_spec,
+                            layer_names,
+                            self.vllm_config,
+                            self.device,
+                        )
                     )
-                )
                 attn_group = AttentionGroup(
                     attn_backend, layer_names, kv_cache_spec, kv_cache_group_id, attn_metadata_builders
                 )
