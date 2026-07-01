@@ -968,7 +968,9 @@ class AscendDSACPImpl(DSAAttentionImpl):
         self.wo_a = kwargs["wo_a"]
         self.wo_b = kwargs["wo_b"]
         
-        self.enable_dsa_cp_with_o_proj_tp = enable_dsa_cp_with_o_proj_tp() and (get_ascend_device_type() == AscendDeviceType.A5)
+        self.enable_dsa_cp_with_o_proj_tp = enable_dsa_cp_with_o_proj_tp() and (
+            get_ascend_device_type() == AscendDeviceType.A5
+        )
         self._wo_a_dynamic_quant = False
         self._wo_b_dynamic_quant = False
 
