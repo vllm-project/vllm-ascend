@@ -23,6 +23,8 @@ test_cases:
       - "1"
       - "--prefill-context-parallel-size"
       - "2"
+      - "--decode-context-parallel-size"
+      - "4"
       - "--enable-expert-parallel"
       - "--port"
       - "$SERVER_PORT"
@@ -56,5 +58,5 @@ test_cases:
         num_prompts: 50
         max_out_len: 32768
         batch_size: 32
-        baseline: 82
+        baseline: 84
         threshold: 8
