@@ -456,7 +456,7 @@ class TestKVCacheStoreLayerSendingThread(unittest.TestCase):
             current_event=None,
             token_ids=list(range(num_keys * 16)),
             original_block_size=16,
-            block_hashes=[f"h{i}" for i in range(num_keys)],
+            block_hashes=[f"h{i}".encode() for i in range(num_keys)],
         )
 
     def test_handle_request_puts_missing(self):
@@ -540,7 +540,7 @@ class TestKVCacheStoreLayerSendingThread(unittest.TestCase):
         t._handle_request(req)
         events = t.get_kv_events()
         self.assertEqual(len(events), 1)
-        self.assertEqual(events[0].block_hashes, ["h0"])
+        self.assertEqual(events[0].block_hashes, [b"h0"])
         self.assertEqual(events[0].token_ids, list(range(16)))
         self.assertEqual(events[0].block_size, 16)
 
@@ -564,7 +564,7 @@ class TestKVCacheStoreLayerSendingThread(unittest.TestCase):
         t._handle_request(final_layer_req)
         events = t.get_kv_events()
         self.assertEqual(len(events), 1)
-        self.assertEqual(events[0].block_hashes, ["h0"])
+        self.assertEqual(events[0].block_hashes, [b"h0"])
 
 
 class TestKVCacheStoreLayerRecvingThread(unittest.TestCase):

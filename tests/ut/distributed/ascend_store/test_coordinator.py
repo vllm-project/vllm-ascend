@@ -20,6 +20,7 @@ from unittest.mock import patch
 
 # isort: off
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
+import torch
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, SlidingWindowSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import get_block_hashes
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import (
@@ -34,12 +35,31 @@ def _hashes(num_blocks: int) -> list[bytes]:
     return [bytes([idx % 251]) * 32 for idx in range(num_blocks)]
 
 
+def _full_spec(block_size: int) -> FullAttentionSpec:
+    return FullAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+    )
+
+
+def _sliding_spec(block_size: int, sliding_window: int) -> SlidingWindowSpec:
+    return SlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=sliding_window,
+    )
+
+
 class TestAscendStoreCoordinator(unittest.TestCase):
     def test_compressed_group_hits_on_effective_granularity(self):
         block_hashes = _hashes(128)
         grouped_hash = get_block_hashes(block_hashes, group_block_size=128 * 128, hash_block_size=128)[0]
         coord = AscendStoreCoordinator(
-            [KVCacheGroupSpec(["layer.0"], FullAttentionSpec(block_size=128))],
+            [KVCacheGroupSpec(["layer.0"], _full_spec(128))],
             scheduler_block_size=128 * 128,
             hash_block_size=128,
             group_block_sizes=[128],
@@ -59,8 +79,8 @@ class TestAscendStoreCoordinator(unittest.TestCase):
         c1_exists = {(0, block_hash) for block_hash in block_hashes}
         coord = AscendStoreCoordinator(
             [
-                KVCacheGroupSpec(["layer.0"], FullAttentionSpec(block_size=128)),
-                KVCacheGroupSpec(["layer.1"], FullAttentionSpec(block_size=128)),
+                KVCacheGroupSpec(["layer.0"], _full_spec(128)),
+                KVCacheGroupSpec(["layer.1"], _full_spec(128)),
             ],
             scheduler_block_size=128 * 128,
             hash_block_size=128,
@@ -78,7 +98,7 @@ class TestAscendStoreCoordinator(unittest.TestCase):
 
     def test_store_mask_uses_manager_reachability(self):
         coord = AscendStoreCoordinator(
-            [KVCacheGroupSpec(["layer.0"], SlidingWindowSpec(block_size=128, sliding_window=256))],
+            [KVCacheGroupSpec(["layer.0"], _sliding_spec(block_size=128, sliding_window=256))],
             scheduler_block_size=512,
             hash_block_size=128,
             group_block_sizes=[128],
@@ -91,7 +111,7 @@ class TestAscendStoreCoordinator(unittest.TestCase):
 
     def test_compressed_masks_stay_unmasked(self):
         coord = AscendStoreCoordinator(
-            [KVCacheGroupSpec(["layer.0"], SlidingWindowSpec(block_size=128, sliding_window=512))],
+            [KVCacheGroupSpec(["layer.0"], _sliding_spec(block_size=128, sliding_window=512))],
             scheduler_block_size=2048,
             hash_block_size=128,
             group_block_sizes=[128],

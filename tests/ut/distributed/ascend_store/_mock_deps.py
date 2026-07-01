@@ -39,6 +39,7 @@ if "torch" not in sys.modules and importlib.util.find_spec("torch") is None:
     _torch.Tensor = MagicMock  # type: ignore[attr-defined]
     _torch.bool = "bool"  # type: ignore[attr-defined]
     _torch.float16 = "float16"  # type: ignore[attr-defined]
+    _torch.float32 = "float32"  # type: ignore[attr-defined]
     _torch.zeros = MagicMock(return_value=MagicMock())  # type: ignore[attr-defined]
     _torch.sum = MagicMock(return_value=0)  # type: ignore[attr-defined]
     _torch.device = MagicMock()  # type: ignore[attr-defined]
@@ -58,7 +59,7 @@ if "torch_npu" not in sys.modules:
 # ---------------------------------------------------------------------------
 # Mock vllm modules
 # ---------------------------------------------------------------------------
-_MOCK_VLLM_DEPS = True
+_MOCK_VLLM_DEPS = importlib.util.find_spec("vllm") is None
 _vllm_mock_modules = [
     "vllm",
     "vllm.config",
