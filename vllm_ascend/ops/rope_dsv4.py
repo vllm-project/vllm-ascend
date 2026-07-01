@@ -179,11 +179,15 @@ class ComplexExpRotaryEmbedding(nn.Module):
             need_static = not self._static_cache_is_valid(config_key, device)
 
         if need_static:
-            # ``precompute_freqs_cis`` builds ``inv_freq`` without an explicit
-            # device: at cold start a default device=npu context puts it on the
-            # NPU, but the restore path has no such context, so it lands on CPU
-            # and the einsum below fails with a CPU/NPU device mismatch. Pin it
-            # to ``device`` explicitly to be robust in both paths.
+            # ``precompute_freqs_cis`` must build every intermediate tensor on
+            # ``device``. At cold start an ambient default device=npu context
+            # silently placed them on the NPU, but the restore path has no such
+            # context, so they landed on CPU. CPU vs NPU float32 pow/transcendental
+            # results differ at ~1e-7, making the rebuilt cos/sin *not* bit-identical
+            # to cold start; that error is amplified by the dynamic-quant scales and
+            # flips MTP draft acceptance downstream. Passing ``device`` explicitly
+            # makes both paths compute identical values (and also avoids the
+            # CPU/NPU device-mismatch in the einsum below).
             inv_freq = self.precompute_freqs_cis(
                 rotary_dim,
                 self._max_position_embeddings,
@@ -192,6 +196,7 @@ class ComplexExpRotaryEmbedding(nn.Module):
                 self._scaling_factor,
                 self._beta_fast,
                 self._beta_slow,
+                device=device,
             ).to(device)
             t = torch.arange(
                 self._max_position_embeddings * self._scaling_factor,
@@ -228,7 +233,7 @@ class ComplexExpRotaryEmbedding(nn.Module):
         self._build_cos_sin_cache(force=True)
 
     @staticmethod
-    def precompute_freqs_cis(dim, seqlen, original_seq_len, base, factor, beta_fast, beta_slow):
+    def precompute_freqs_cis(dim, seqlen, original_seq_len, base, factor, beta_fast, beta_slow, device=None):
         def yarn_find_correction_dim(
             num_rotations: int,
             dim: int,
@@ -257,11 +262,11 @@ class ComplexExpRotaryEmbedding(nn.Module):
             if low == high:
                 high += 0.001  # Prevent singularity
 
-            linear_func = (torch.arange(dim, dtype=dtype) - low) / (high - low)
+            linear_func = (torch.arange(dim, dtype=dtype, device=device) - low) / (high - low)
             ramp_func = torch.clamp(linear_func, 0, 1)
             return ramp_func
 
-        pos_freqs = base ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim)
+        pos_freqs = base ** (torch.arange(0, dim, 2, dtype=torch.float32, device=device) / dim)
         inv_freq_extrapolation = 1.0 / pos_freqs
         inv_freq_interpolation = 1.0 / (factor * pos_freqs)
 
