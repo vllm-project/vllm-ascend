@@ -23,6 +23,7 @@ Usage at the top of each test file:
     import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 """
 
+import importlib.util
 import logging
 import os
 import sys
@@ -32,7 +33,7 @@ from unittest.mock import MagicMock
 # ---------------------------------------------------------------------------
 # Mock torch / torch_npu
 # ---------------------------------------------------------------------------
-if "torch" not in sys.modules:
+if "torch" not in sys.modules and importlib.util.find_spec("torch") is None:
     _torch = types.ModuleType("torch")
     _torch.Tensor = MagicMock  # type: ignore[attr-defined]
     _torch.bool = "bool"  # type: ignore[attr-defined]
@@ -56,6 +57,7 @@ if "torch_npu" not in sys.modules:
 # ---------------------------------------------------------------------------
 # Mock vllm modules
 # ---------------------------------------------------------------------------
+_MOCK_VLLM_DEPS = importlib.util.find_spec("vllm") is None
 _vllm_mock_modules = [
     "vllm",
     "vllm.config",
@@ -95,14 +97,18 @@ _vllm_mock_modules = [
     "vllm.v1.request",
     "vllm.v1.serial_utils",
 ]
-for _mod_name in _vllm_mock_modules:
-    if _mod_name not in sys.modules:
-        sys.modules[_mod_name] = MagicMock()
+if _MOCK_VLLM_DEPS:
+    for _mod_name in _vllm_mock_modules:
+        if _mod_name not in sys.modules:
+            sys.modules[_mod_name] = MagicMock()
 
-sys.modules["vllm.utils.math_utils"].cdiv = lambda a, b: -(-a // b)  # type: ignore[attr-defined]
-sys.modules["vllm.logger"].logger = logging.getLogger("vllm")  # type: ignore[attr-defined]
+if _MOCK_VLLM_DEPS:
+    sys.modules["vllm.utils.math_utils"].cdiv = lambda a, b: -(-a // b)  # type: ignore[attr-defined]
+    sys.modules["vllm.logger"].logger = logging.getLogger("vllm")  # type: ignore[attr-defined]
 
-_base_mod = sys.modules["vllm.distributed.kv_transfer.kv_connector.v1.base"]
+_base_mod = (
+    sys.modules["vllm.distributed.kv_transfer.kv_connector.v1.base"] if _MOCK_VLLM_DEPS else types.SimpleNamespace()
+)
 _base_mod.KVConnectorBase_V1 = type("KVConnectorBase_V1", (), {"__init__": lambda self, **kw: None})  # type: ignore[attr-defined]
 _base_mod.KVConnectorMetadata = type("KVConnectorMetadata", (), {})  # type: ignore[attr-defined]
 _base_mod.KVConnectorWorkerMetadata = type("KVConnectorWorkerMetadata", (), {})  # type: ignore[attr-defined]
@@ -110,7 +116,7 @@ _base_mod.KVConnectorRole = MagicMock()  # type: ignore[attr-defined]
 _base_mod.KVConnectorRole.SCHEDULER = "SCHEDULER"
 _base_mod.KVConnectorRole.WORKER = "WORKER"
 
-_events_mod = sys.modules["vllm.distributed.kv_events"]
+_events_mod = sys.modules["vllm.distributed.kv_events"] if _MOCK_VLLM_DEPS else types.SimpleNamespace()
 _events_mod.KVCacheEvent = type("KVCacheEvent", (), {})  # type: ignore[attr-defined]
 _events_mod.KVConnectorKVEvents = type("KVConnectorKVEvents", (), {})  # type: ignore[attr-defined]
 
@@ -130,7 +136,7 @@ _events_mod.BlockStored = type(  # type: ignore[attr-defined]
     {"__init__": lambda self, **kwargs: self.__dict__.update(kwargs)},
 )
 
-_kv_cache_utils_mod = sys.modules["vllm.v1.core.kv_cache_utils"]
+_kv_cache_utils_mod = sys.modules["vllm.v1.core.kv_cache_utils"] if _MOCK_VLLM_DEPS else types.SimpleNamespace()
 _kv_cache_utils_mod.BlockHash = bytes  # type: ignore[attr-defined]
 _kv_cache_utils_mod.maybe_convert_block_hash = lambda x: x  # type: ignore[attr-defined]
 
@@ -198,7 +204,8 @@ class _FakeBlockPool:
         self.null_block = _FakeKVCacheBlock(block_id=0)
 
 
-sys.modules["vllm.v1.core.block_pool"].BlockPool = _FakeBlockPool  # type: ignore[attr-defined]
+if _MOCK_VLLM_DEPS:
+    sys.modules["vllm.v1.core.block_pool"].BlockPool = _FakeBlockPool  # type: ignore[attr-defined]
 
 
 class _FakeSingleTypeKVCacheManager:
@@ -260,7 +267,9 @@ class _FakeSlidingWindowManager(_FakeSingleTypeKVCacheManager):
         return [(idx + 1) % per_segment == 0 for idx in range(start_block, end_block)]
 
 
-_single_type_mod = sys.modules["vllm.v1.core.single_type_kv_cache_manager"]
+_single_type_mod = (
+    sys.modules["vllm.v1.core.single_type_kv_cache_manager"] if _MOCK_VLLM_DEPS else types.SimpleNamespace()
+)
 _single_type_mod.SingleTypeKVCacheManager = _FakeSingleTypeKVCacheManager  # type: ignore[attr-defined]
 _single_type_mod.FullAttentionManager = _FakeSingleTypeKVCacheManager  # type: ignore[attr-defined]
 _single_type_mod.SlidingWindowManager = _FakeSlidingWindowManager  # type: ignore[attr-defined]
@@ -271,7 +280,7 @@ _single_type_mod.spec_manager_map = {  # type: ignore[attr-defined]
     _FakeMambaSpec: _FakeSingleTypeKVCacheManager,
 }
 
-_kv_interface_mod = sys.modules["vllm.v1.kv_cache_interface"]
+_kv_interface_mod = sys.modules["vllm.v1.kv_cache_interface"] if _MOCK_VLLM_DEPS else types.SimpleNamespace()
 _kv_interface_mod.KVCacheSpec = _FakeKVCacheSpec  # type: ignore[attr-defined]
 _kv_interface_mod.FullAttentionSpec = _FakeFullAttentionSpec  # type: ignore[attr-defined]
 _kv_interface_mod.SlidingWindowSpec = _FakeSlidingWindowSpec  # type: ignore[attr-defined]
@@ -289,12 +298,14 @@ class _FakeKVCacheSpecRegistry:
         return _FakeSingleTypeKVCacheManager
 
 
-sys.modules["vllm.v1.kv_cache_spec_registry"].KVCacheSpecRegistry = _FakeKVCacheSpecRegistry  # type: ignore[attr-defined]
+if _MOCK_VLLM_DEPS:
+    sys.modules["vllm.v1.kv_cache_spec_registry"].KVCacheSpecRegistry = _FakeKVCacheSpecRegistry  # type: ignore[attr-defined]
 
-_sched_output_mod = sys.modules["vllm.v1.core.sched.output"]
+_sched_output_mod = sys.modules["vllm.v1.core.sched.output"] if _MOCK_VLLM_DEPS else types.SimpleNamespace()
 _sched_output_mod.NewRequestData = MagicMock  # type: ignore[attr-defined]
 
-sys.modules["vllm.envs"].VLLM_RPC_BASE_PATH = "/tmp/vllm_rpc"  # type: ignore[attr-defined]
+if _MOCK_VLLM_DEPS:
+    sys.modules["vllm.envs"].VLLM_RPC_BASE_PATH = "/tmp/vllm_rpc"  # type: ignore[attr-defined]
 
 # ---------------------------------------------------------------------------
 # Mock external backends

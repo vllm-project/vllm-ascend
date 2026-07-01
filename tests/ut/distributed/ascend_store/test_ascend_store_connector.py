@@ -18,13 +18,15 @@
 import unittest
 from unittest.mock import MagicMock, patch
 
-from vllm.distributed.kv_events import KVCacheEvent
-
+# isort: off
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
+from vllm.distributed.kv_events import KVCacheEvent
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import (
     AscendStoreConnector,
     AscendStoreKVEvents,
 )
+
+# isort: on
 
 
 class TestAscendStoreKVEvents(unittest.TestCase):
