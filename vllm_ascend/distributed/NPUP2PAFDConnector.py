@@ -557,17 +557,19 @@ class NPUP2PAFDConnector(AFDConnectorBase):
             object_bytes = pickle.dumps(send_data)
             object_tensor_cpu = torch.frombuffer(bytearray(object_bytes), dtype=torch.uint8)
 
-            # NPUP2P uses the p2p process group for metadata communication,
-            # so the metadata tensor stays on the CPU (consistent with
-            # CAMP2PAFDConnector in v0.13).
+            # p2p_pg is created with the hccl backend, which only supports
+            # NPU tensors. Metadata tensors must therefore live on NPU
+            # (same as send_is_ubatch). The v0.13 CAMP2PAFDConnector kept
+            # them on CPU because it used a gloo-backed group; that does
+            # not apply to NPUP2PAFDConnector on Ascend.
             object_tensor_npu = torch.empty(object_tensor_cpu.shape,
                                             dtype=torch.uint8,
-                                            device="cpu")
+                                            device="npu")
             object_tensor_npu.copy_(object_tensor_cpu)
 
             size_tensor = torch.tensor([object_tensor_cpu.numel()],
                                        dtype=torch.long,
-                                       device="cpu")
+                                       device="npu")
 
             logger.debug(
                 "send_dp_metadata_list dst:%s is_graph_capturing:%s is_warmup:%s",
@@ -585,10 +587,10 @@ class NPUP2PAFDConnector(AFDConnectorBase):
         src = self.p2p_rank % self.min_size + self.ffn_size
         logger.debug(f"recv_dp_metadata_list src:{src}")
 
-        size_tensor = torch.empty(1, dtype=torch.long, device="cpu")
+        size_tensor = torch.empty(1, dtype=torch.long, device="npu")
         rank_size = torch.distributed.recv(size_tensor, src=src, group=self.p2p_pg)
 
-        object_tensor_npu = torch.empty(size_tensor.item(), dtype=torch.uint8, device="cpu")
+        object_tensor_npu = torch.empty(size_tensor.item(), dtype=torch.uint8, device="npu")
         rank_object = torch.distributed.recv(object_tensor_npu, src=src, group=self.p2p_pg)
 
         assert rank_object == rank_size, \
