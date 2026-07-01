@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 import copy
-import os
 from collections.abc import Callable
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from functools import partial
@@ -444,31 +443,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 if torch.equal(layer_module.shared_head.head.weight, model.lm_head.weight):
                     layer_module.shared_head.head = model.lm_head
 
+        # MTP draft model always runs in eager mode (FDO is not supported for draft).
+        # Disable cuda graph for the draft proposer to prevent graph dispatch.
         if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs() and self.use_cuda_graph:
-            # VLLM_ASCEND_MTP_MODE: see model_runner_v1.py load_model() for docs
-            mtp_mode = os.environ.get("VLLM_ASCEND_MTP_MODE", "target_eager")
-            self._mtp_draft_fdo = False  # Draft FDO disabled: hangs during replay
-
-            if not self._mtp_draft_fdo:
-                # Draft runs eager — disable graph mode for the proposer so
-                # forward context uses NONE mode and skips graph dispatch.
-                self.use_cuda_graph = False
-
-            self.update_stream = torch.npu.Stream()
-            if self._mtp_draft_fdo:
-                self._runnable = ACLGraphWrapper(
-                    self._run_merged_draft,
-                    self.vllm_config,
-                    runtime_mode=CUDAGraphMode.FULL,
-                    use_eagle=self.use_eagle,
-                    enable_enpu=self.enable_enpu,
-                )
-            else:
-                logger.info(
-                    "[spec_decode/base] Draft ACLGraphWrapper SKIPPED: "
-                    "mtp_mode=%s, _mtp_draft_fdo=%s",
-                    mtp_mode, self._mtp_draft_fdo,
-                )
+            self.use_cuda_graph = False
 
     def _maybe_share_topk_indices(self, target_language_model: nn.Module) -> None:
         if hasattr(target_language_model.model, "topk_indices_buffer"):
