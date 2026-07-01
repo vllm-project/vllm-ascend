@@ -17,100 +17,103 @@
 # Adapted from vllm/tests/basic_correctness/test_basic_correctness.py
 #
 import os
-from unittest.mock import patch
+from unittest import mock
+
+import pytest
 
 from tests.e2e.conftest import VllmRunner
 
+TEST_CASES = [
+    # case 1: mp, tp4, cudagraph
+    {
+        "model": "Qwen/Qwen3-Next-80B-A3B-Instruct",
+        "tp": 4,
+        "gpu_mem": 0.8,
+        "backend": "mp",
+        "extra_args": {"cudagraph_capture_sizes": [1, 2, 4, 8]},
+        "prompt_multiplier": 4,
+        "env": {},
+    },
+    # case 2: FULL_DECODE_ONLY
+    {
+        "model": "Qwen/Qwen3-Next-80B-A3B-Instruct",
+        "tp": 4,
+        "gpu_mem": 0.8,
+        "backend": "mp",
+        "extra_args": {
+            "compilation_config": {
+                "cudagraph_mode": "FULL_DECODE_ONLY",
+                "cudagraph_capture_sizes": [1, 8, 24, 48, 60],
+            }
+        },
+        "prompt_multiplier": 4,
+        "env": {},
+    },
+    # case 3: W8A8 量化 + 专家并行
+    {
+        "model": "vllm-ascend/Qwen3-Next-80B-A3B-Instruct-W8A8",
+        "tp": 4,
+        "gpu_mem": 0.4,
+        "backend": None,
+        "extra_args": {
+            "max_num_seqs": 1,
+            "enable_expert_parallel": True,
+            "cudagraph_capture_sizes": [1, 2, 4, 8],
+            "quantization": "ascend",
+        },
+        "prompt_multiplier": 1,
+        "env": {"HCCL_BUFFSIZE": "1024"},
+    },
+    # case 4: flash_comm + eager
+    {
+        "model": "Qwen/Qwen3-Next-80B-A3B-Instruct",
+        "tp": 4,
+        "gpu_mem": 0.7,
+        "backend": "mp",
+        "extra_args": {
+            "enable_expert_parallel": True,
+            "enforce_eager": True,
+        },
+        "prompt_multiplier": 4,
+        "env": {
+            "VLLM_ASCEND_ENABLE_FLASHCOMM1": "1",
+            "HCCL_BUFFSIZE": "1024",
+        },
+    },
+    # case 5: graph mode (非 eager) + 专家并行
+    {
+        "model": "Qwen/Qwen3-Next-80B-A3B-Instruct",
+        "tp": 4,
+        "gpu_mem": 0.8,
+        "backend": "mp",
+        "extra_args": {
+            "enable_expert_parallel": True,
+            "cudagraph_capture_sizes": [1, 2, 8],
+            "enforce_eager": False,
+        },
+        "prompt_multiplier": 4,
+        "env": {"HCCL_BUFFSIZE": "1024"},
+    },
+]
 
-def test_qwen3_next_distributed_mp_tp4():
-    example_prompts = [
-        "Hello, my name is",
-    ] * 4
+
+@pytest.mark.parametrize("case", TEST_CASES)
+def test_qwen3_next_distributed(case):
+    prompt_text = "Hello, my name is"
+    example_prompts = [prompt_text] * case["prompt_multiplier"]
     max_tokens = 5
-    with VllmRunner(
-        "Qwen/Qwen3-Next-80B-A3B-Instruct",
-        tensor_parallel_size=4,
-        cudagraph_capture_sizes=[1, 2, 4, 8],
-        max_model_len=4096,
-        gpu_memory_utilization=0.8,
-        distributed_executor_backend="mp",
-    ) as vllm_model:
+
+    kwargs = {
+        "model": case["model"],
+        "tensor_parallel_size": case["tp"],
+        "max_model_len": 4096,
+        "gpu_memory_utilization": case["gpu_mem"],
+    }
+    if case["backend"] is not None:
+        kwargs["distributed_executor_backend"] = case["backend"]
+    for k, v in case["extra_args"].items():
+        if v is not None:
+            kwargs[k] = v
+
+    with mock.patch.dict(os.environ, case["env"], clear=False), VllmRunner(**kwargs) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
-        del vllm_model
-
-
-def test_qwen3_next_distributed_mp_full_decode_only_tp4():
-    example_prompts = [
-        "Hello, my name is",
-    ] * 4
-    max_tokens = 5
-    with VllmRunner(
-        "Qwen/Qwen3-Next-80B-A3B-Instruct",
-        tensor_parallel_size=4,
-        max_model_len=4096,
-        gpu_memory_utilization=0.8,
-        distributed_executor_backend="mp",
-        compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1, 8, 24, 48, 60]},
-    ) as vllm_model:
-        vllm_model.generate_greedy(example_prompts, max_tokens)
-        del vllm_model
-
-
-# TODO: will conduct accuracy verification after the subsequent version becomes stable
-@patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024"})
-def test_qwen3_next_w8a8dynamic_distributed_tp4_ep():
-    example_prompts = [
-        "Hello, my name is",
-    ]
-    max_tokens = 5
-    with VllmRunner(
-        "vllm-ascend/Qwen3-Next-80B-A3B-Instruct-W8A8",
-        max_model_len=4096,
-        tensor_parallel_size=4,
-        gpu_memory_utilization=0.4,
-        max_num_seqs=1,
-        enable_expert_parallel=True,
-        cudagraph_capture_sizes=[1, 2, 4, 8],
-        quantization="ascend",
-    ) as vllm_model:
-        vllm_model.generate_greedy(example_prompts, max_tokens)
-
-
-@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
-@patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024"})
-def test_qwen3_next_distributed_mp_flash_comm_tp4():
-    example_prompts = [
-        "Hello, my name is",
-    ] * 4
-    max_tokens = 5
-    with VllmRunner(
-        "Qwen/Qwen3-Next-80B-A3B-Instruct",
-        tensor_parallel_size=4,
-        max_model_len=4096,
-        gpu_memory_utilization=0.7,
-        distributed_executor_backend="mp",
-        enable_expert_parallel=True,
-        enforce_eager=True,
-    ) as vllm_model:
-        vllm_model.generate_greedy(example_prompts, max_tokens)
-        del vllm_model
-
-
-@patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024"})
-def test_qwen3_next_distributed_mp_graph_mode_tp4():
-    example_prompts = [
-        "Hello, my name is",
-    ] * 4
-    max_tokens = 5
-    with VllmRunner(
-        "Qwen/Qwen3-Next-80B-A3B-Instruct",
-        tensor_parallel_size=4,
-        max_model_len=4096,
-        gpu_memory_utilization=0.8,
-        distributed_executor_backend="mp",
-        enable_expert_parallel=True,
-        cudagraph_capture_sizes=[1, 2, 8],
-        enforce_eager=False,
-    ) as vllm_model:
-        vllm_model.generate_greedy(example_prompts, max_tokens)
-        del vllm_model
