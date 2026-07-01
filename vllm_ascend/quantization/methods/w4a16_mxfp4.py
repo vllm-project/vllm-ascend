@@ -39,7 +39,7 @@ from .registry import register_scheme
 
 def unpack_uint8_to_fp4_return_float32(packed: torch.Tensor) -> torch.Tensor:
     low = packed & 0x0F
-    high = packed >> 4
+    high = packed // 16
     unpacked = torch.stack([low, high], dim=-1).reshape(*packed.shape[:-1], -1).to(torch.float32)
     return unpacked
 
