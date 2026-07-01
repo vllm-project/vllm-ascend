@@ -103,7 +103,8 @@ The following table lists additional configuration options available in vLLM Asc
 | `enable_dsa_cp`                     | bool | `False` | Whether to enable dsa_cp for DeepSeek V3.2, DeepSeek V4, and other models with the same architecture. This feature depends on FLASHCOMM1. Please ensure that FLASHCOMM1 is enabled before enabling this feature.|
 | `rejection_sampler_config`          | dict | `{}`    | Configuration options for rejection sampler (block verify and entropy verify). |
 | `multistream_dsv4_dsa_overlap`      | bool | `True`  | Whether to enable dsa multi-stream overlap for DeepSeek V4.  |
-| `short_request_first_config`       | dict | `{}`    | Configuration options for ShortRequestFirst prefill scheduling on the PD prefill (P) node. Used with `recompute_scheduler_enable=true`. |
+| `short_request_first_config`        | dict | `{}`    | Configuration options for ShortRequestFirst prefill scheduling on the PD prefill (P) node. Used with `recompute_scheduler_enable=true`. |
+| `quest_decode_config`               | dict | `{}`    | Configuration options for QUEST sparse decode attention. See [Quest Sparse Decode Attention](../feature_guide/quest_sparse_decode.md) for details. |
 
 The details of each configuration option are as follows:
 
@@ -184,6 +185,15 @@ ShortRequestFirst prefill scheduling for the PD prefill (P) node. It applies whe
 | `enabled`                | bool  | `False` | Whether to enable ShortRequestFirst scheduling. |
 | `threshold`              | int   | `256`   | Prompt-length threshold (tokens). Requests with `num_prompt_tokens <= threshold` are treated as short prefills and prioritized over long prefills. |
 | `long_max_wait_ms`       | float | `0.0`   | Maximum time a long prefill may wait behind short prefills before it can be promoted ahead of them. `0` disables long-request promotion and keeps strict short-request priority. |
+
+**quest_decode_config**
+
+See [Quest Sparse Decode Attention](../feature_guide/quest_sparse_decode.md) for details and limitations.
+
+| Name         | Type | Default | Description |
+| ------------ | ---- | ------- | ----------- |
+| `enable`     | bool | `False` | Whether to enable QUEST sparse decode attention. |
+| `topk_pages` | int  | `None`  | Number of KV pages (128 tokens each) attended per decode step. Must be a positive multiple of 8 (`>= 8`). Required when `enable` is `true`. |
 
 ### Example
 
