@@ -16,6 +16,7 @@ from vllm.v1.core.kv_cache_coordinator import (
     KVCacheCoordinator,
     get_kv_cache_coordinator,
 )
+from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import SlidingWindowSpec, UniformTypeKVCacheSpecs
 from vllm.v1.outputs import KVConnectorOutput
@@ -86,6 +87,7 @@ class RecomputeCPUOffloadScheduler:
         dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
         pcp_world_size = vllm_config.parallel_config.prefill_context_parallel_size
         assert dcp_world_size == 1 and pcp_world_size == 1
+        scheduler_block_size, hash_block_size = resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
         self.cpu_coordinator: KVCacheCoordinator = get_kv_cache_coordinator(
             kv_cache_config=self.cpu_kv_cache_config,
             max_model_len=vllm_config.model_config.max_model_len,
@@ -95,7 +97,8 @@ class RecomputeCPUOffloadScheduler:
             enable_kv_cache_events=self.enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
             pcp_world_size=pcp_world_size,
-            hash_block_size=vllm_config.cache_config.block_size,
+            scheduler_block_size=scheduler_block_size,
+            hash_block_size=hash_block_size,
         )
         self.cpu_block_pool: BlockPool = self.cpu_coordinator.block_pool
         self._gpu_block_pool: BlockPool | None = None
