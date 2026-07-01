@@ -81,7 +81,7 @@ jobs:
             soc: "ascend910b1"
             arch: arm64
             mode: device
-            runner: linux-arm64-cpu-16
+            runner: linux-amd64-cpu-32-hk
             vllm_label: main
             vllm_version: ${{ inputs.vllm_main_commit }}
           - npu_type: a2
@@ -89,7 +89,7 @@ jobs:
             soc: "ascend910b1"
             arch: arm64
             mode: device
-            runner: linux-arm64-cpu-16
+            runner: linux-amd64-cpu-32-hk
             vllm_label: release
             vllm_version: ${{ inputs.vllm_release_tag }}
           # A3 (ARM64, device)
@@ -98,7 +98,7 @@ jobs:
             soc: "ascend910_9391"
             arch: arm64
             mode: device
-            runner: linux-arm64-cpu-16
+            runner: linux-amd64-cpu-32-hk
             vllm_label: main
             vllm_version: ${{ inputs.vllm_main_commit }}
           - npu_type: a3
@@ -106,7 +106,7 @@ jobs:
             soc: "ascend910_9391"
             arch: arm64
             mode: device
-            runner: linux-arm64-cpu-16
+            runner: linux-amd64-cpu-32-hk
             vllm_label: release
             vllm_version: ${{ inputs.vllm_release_tag }}
           # 310P (ARM64, device)
@@ -115,7 +115,7 @@ jobs:
             soc: "ascend310p1"
             arch: arm64
             mode: device
-            runner: linux-arm64-cpu-16
+            runner: linux-amd64-cpu-32-hk
             vllm_label: main
             vllm_version: ${{ inputs.vllm_main_commit }}
           - npu_type: 310p
@@ -123,7 +123,7 @@ jobs:
             soc: "ascend310p1"
             arch: arm64
             mode: device
-            runner: linux-arm64-cpu-16
+            runner: linux-amd64-cpu-32-hk
             vllm_label: release
             vllm_version: ${{ inputs.vllm_release_tag }}
           # CPU (AMD64, nodevice)
@@ -186,46 +186,86 @@ jobs:
             vllm_ascend/include
           key: vllm-ascend-build-v1-${{ steps.get_arch.outputs.arch }}-${{ matrix.cann_tag }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
-      - name: Login to Quay Temp
-        uses: docker/login-action@v4
-        with:
-          registry: quay.io
-          username: ${{ inputs.quay_temp_username }}
-          password: ${{ secrets.QUAY_TEMP_PASSWORD }}
+      # - name: Login to Quay Temp
+      #   uses: docker/login-action@v4
+      #   with:
+      #     registry: quay.io
+      #     username: ${{ inputs.quay_temp_username }}
+      #     password: ${{ secrets.QUAY_TEMP_PASSWORD }}
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-        with:
-          install: true
-          driver: docker-container
-          use: true
+      # - name: Set up Docker Buildx
+      #   uses: docker/setup-buildx-action@v4
+      #   with:
+      #     install: true
+      #     driver: docker-container
+      #     use: true
 
-      - name: Login to GitHub Container Registry (for cache)
-        uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+      # - name: Login to GitHub Container Registry (for cache)
+      #   uses: docker/login-action@v4
+      #   with:
+      #     registry: ghcr.io
+      #     username: ${{ github.actor }}
+      #     password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Compute cache tag
-        id: cache_tag
-        run: |
-          echo "value=buildcache-ci-${{ matrix.npu_type }}-${{ matrix.arch }}" >> $GITHUB_OUTPUT
+      # - name: Compute cache tag
+      #   id: cache_tag
+      #   run: |
+      #     echo "value=buildcache-ci-${{ matrix.npu_type }}-${{ matrix.arch }}" >> $GITHUB_OUTPUT
+
+      # - name: Build and push image
+      #   uses: docker/build-push-action@v7
+      #   id: build
+      #   with:
+      #     context: .
+      #     file: .github/workflows/dockerfiles/Dockerfile.ci_test
+      #     platforms: linux/${{ matrix.arch }}
+      #     push: true
+      #     tags: ${{ env.QUAY_TEMP_REPO }}:vllm-ascend-pr${{ inputs.pr_number }}-${{ matrix.vllm_label }}-${{ matrix.npu_type }}-${{ matrix.arch }}
+      #     build-args: |
+      #       CANN_TAG=${{ matrix.cann_tag }}
+      #       VLLM_COMMIT=${{ matrix.vllm_version }}
+      #       SOC_VERSION=${{ matrix.soc }}
+      #       INSTALL_MODE=${{ matrix.mode }}
+      #     provenance: false
+      #     cache-from: type=registry,ref=${{ env.CACHE_REPO }}:${{ steps.cache_tag.outputs.value }}
+      #     cache-to: type=registry,ref=${{ env.CACHE_REPO }}:${{ steps.cache_tag.outputs.value }},mode=max
 
       - name: Build and push image
-        uses: docker/build-push-action@v7
         id: build
-        with:
-          context: .
-          file: .github/workflows/dockerfiles/Dockerfile.ci_test
-          platforms: linux/${{ matrix.arch }}
-          push: true
-          tags: ${{ env.QUAY_TEMP_REPO }}:vllm-ascend-pr${{ inputs.pr_number }}-${{ matrix.vllm_label }}-${{ matrix.npu_type }}-${{ matrix.arch }}
-          build-args: |
-            CANN_TAG=${{ matrix.cann_tag }}
-            VLLM_COMMIT=${{ matrix.vllm_version }}
-            SOC_VERSION=${{ matrix.soc }}
-            INSTALL_MODE=${{ matrix.mode }}
-          provenance: false
-          cache-from: type=registry,ref=${{ env.CACHE_REPO }}:${{ steps.cache_tag.outputs.value }}
-          cache-to: type=registry,ref=${{ env.CACHE_REPO }}:${{ steps.cache_tag.outputs.value }},mode=max
+        run: |
+          set -ex
+
+          IMAGE_TAG="vllm-ascend-pr${{ inputs.pr_number }}-${{ matrix.vllm_label }}-${{ matrix.npu_type }}-${{ matrix.arch }}"
+          IMAGE_NAME="${{ env.QUAY_TEMP_REPO }}:${IMAGE_TAG}"
+
+          # 构造 buildkit 用的 docker config
+          mkdir -p /tmp/bk
+          QUAY_AUTH=$(printf "%s:%s" "${{ inputs.quay_temp_username }}" "${{ secrets.QUAY_TEMP_PASSWORD }}" | base64 -w0)
+          cat > /tmp/bk/config.json <<EOF
+          {
+            "auths": {
+              "quay.io": { "auth": "${QUAY_AUTH}" }
+            }
+          }
+          EOF
+
+          buildctl \
+            --addr="${BUILDKITD_ADDR}" \
+            --tlscacert="${DOCKER_CONFIG}/ca.pem" \
+            --tlscert="${DOCKER_CONFIG}/cert.pem" \
+            --tlskey="${DOCKER_CONFIG}/key.pem" \
+            build \
+            --frontend dockerfile.v0 \
+            --local context=. \
+            --local dockerfile=.github/workflows/dockerfiles \
+            --opt filename=Dockerfile.ci_test \
+            --opt platform=linux/${{ matrix.arch }} \
+            --opt build-arg:CANN_TAG=${{ matrix.cann_tag }} \
+            --opt build-arg:VLLM_COMMIT=${{ matrix.vllm_version }} \
+            --opt build-arg:SOC_VERSION=${{ matrix.soc }} \
+            --opt build-arg:INSTALL_MODE=${{ matrix.mode }} \
+            --secret id=dockerconfig,src=/tmp/bk/config.json \
+            --output type=image,name="${IMAGE_NAME}",push=true \
+            --progress=plain
+
+          echo "Image pushed: ${IMAGE_NAME}"
