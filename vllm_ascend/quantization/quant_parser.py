@@ -32,7 +32,7 @@ class QuantTypeMapping:
             "act_quant_type": None,
             "weight_quant_type": FLOAT4_E2M1FN_X2_DTYPE,
             "scale_dtype": FLOAT8_E8M0FNU_DTYPE,
-            "per_token_scale_dtype": FLOAT8_E8M0FNU_DTYPE,
+            "per_token_scale_dtype": None,
         },
     }
 
