@@ -15,6 +15,7 @@ import torch
 import zmq
 from vllm.utils.network_utils import make_zmq_path
 from vllm.v1.kv_cache_interface import FullAttentionSpec, UniformTypeKVCacheSpecs
+from vllm.v1.request import RequestStatus
 
 fake_engine = types.ModuleType("mooncake.engine")
 fake_engine.TransferEngine = MagicMock()  # type: ignore[attr-defined]
@@ -1282,6 +1283,14 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
         ):
             self.scheduler = MooncakeConnectorScheduler(self.config, "test_engine", MockKVCacheConfig())
 
+    def _make_remote_decode_request(self, prompt_len: int, request_id: str = "req1"):
+        return MockRequest(
+            request_id,
+            prompt_token_ids=list(range(prompt_len)),
+            kv_transfer_params={"do_remote_decode": True},
+            status=RequestStatus.FINISHED_LENGTH_CAPPED,
+        )
+
     def test_get_num_new_matched_tokens_no_remote_prefill(self):
         request = MockRequest("req1")
         tokens, async_flag = self.scheduler.get_num_new_matched_tokens(request, 0)
@@ -1415,6 +1424,106 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
         block_ids = self.scheduler._get_swa_transfer_block_ids(block_ids)
 
         self.assertEqual(block_ids, ([10],))
+
+    def test_request_finished_trims_mtp_blocks_in_params(self):
+        self.scheduler.group_transfer_info = [
+            types.SimpleNamespace(
+                tokens_per_block=16,
+                blocks_per_window=0,
+                is_state_group=False,
+            )
+        ]
+        request = self._make_remote_decode_request(prompt_len=33, request_id="req_mtp")
+
+        delay_free, params = self.scheduler.request_finished(request, ([10, 11, 12, 13, 14],))
+
+        self.assertTrue(delay_free)
+        self.assertIsNotNone(params)
+        assert params is not None
+        self.assertEqual(params["remote_block_ids"], ([10, 11, 12],))
+        self.assertEqual(params["num_prompt_blocks"], 3)
+        self.assertIn("req_mtp", self.scheduler._reqs_need_send)
+
+    def test_request_finished_clips_sliding_window_blocks_in_params(self):
+        self.scheduler.group_transfer_info = [
+            types.SimpleNamespace(
+                tokens_per_block=16,
+                blocks_per_window=3,
+                is_state_group=False,
+            )
+        ]
+        request = self._make_remote_decode_request(prompt_len=80, request_id="req_swa")
+
+        delay_free, params = self.scheduler.request_finished(request, ([10, 11, 12, 13, 14],))
+
+        self.assertTrue(delay_free)
+        self.assertIsNotNone(params)
+        assert params is not None
+        self.assertEqual(params["remote_block_ids"], ([12, 13, 14],))
+        self.assertEqual(params["num_prompt_blocks"], 5)
+        self.assertIn("req_swa", self.scheduler._reqs_need_send)
+
+    def test_request_finished_trims_mtp_before_swa_tail_clip(self):
+        self.scheduler.group_transfer_info = [
+            types.SimpleNamespace(
+                tokens_per_block=16,
+                blocks_per_window=3,
+                is_state_group=False,
+            )
+        ]
+        request = self._make_remote_decode_request(prompt_len=64, request_id="req_mtp_swa")
+
+        delay_free, params = self.scheduler.request_finished(request, ([0, 10, 11, 12, 13, 14],))
+
+        self.assertTrue(delay_free)
+        self.assertIsNotNone(params)
+        assert params is not None
+        self.assertEqual(params["remote_block_ids"], ([10, 11, 12],))
+        self.assertEqual(params["num_prompt_blocks"], 4)
+        self.assertIn("req_mtp_swa", self.scheduler._reqs_need_send)
+
+    def test_request_finished_handles_mtp_swa_and_state_groups_together(self):
+        self.scheduler.group_transfer_info = [
+            types.SimpleNamespace(
+                tokens_per_block=16,
+                blocks_per_window=0,
+                is_state_group=False,
+            ),
+            types.SimpleNamespace(
+                tokens_per_block=16,
+                blocks_per_window=3,
+                is_state_group=False,
+            ),
+            types.SimpleNamespace(
+                tokens_per_block=16,
+                blocks_per_window=0,
+                is_state_group=True,
+            ),
+        ]
+        request = self._make_remote_decode_request(prompt_len=64, request_id="req_mixed_groups")
+
+        delay_free, params = self.scheduler.request_finished(
+            request,
+            (
+                [100, 101, 102, 103, 104],
+                [0, 200, 201, 202, 203, 204],
+                [300, 301, 302, 303, 304],
+            ),
+        )
+
+        self.assertTrue(delay_free)
+        self.assertIsNotNone(params)
+        assert params is not None
+        self.assertEqual(
+            params["remote_block_ids"],
+            (
+                [100, 101, 102, 103],
+                [200, 201, 202],
+                [300, 301, 302, 303, 304],
+            ),
+        )
+        self.assertEqual(params["num_prompt_blocks"], 4)
+        self.assertIn("req_mixed_groups", self.scheduler._reqs_need_send)
 
 
 class TestUtils(unittest.TestCase):
