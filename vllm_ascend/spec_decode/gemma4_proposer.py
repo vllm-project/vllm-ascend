@@ -6,6 +6,8 @@ Uses multiple inheritance to combine the upstream vLLM Gemma4Proposer
 (NPU initialization, ACL graph, attention metadata).
 """
 
+from dataclasses import replace
+
 import torch
 
 from vllm.config import get_layers_from_vllm_config
@@ -68,6 +70,20 @@ class AscendGemma4Proposer(_VllmGemma4Proposer, AscendSpecDecodeBaseProposer):
         self._centroids_graphs: dict[int, torch.cuda.CUDAGraph] = {}
         self._centroids_inputs: dict[int, torch.Tensor] = {}
         self._centroids_outputs: dict[int, torch.Tensor] = {}
+
+    # ---- _create_draft_vllm_config -------------------------------------------
+    # Override to also replace model_config with the draft model's config.
+    # Without this, vllm_config.model_config remains the target's config,
+    # and the draft model's _patch_config() crashes on None sub_configs
+    # (e.g. target's audio_config=None in Gemma4Config).
+
+    def _create_draft_vllm_config(self):
+        base = super()._create_draft_vllm_config()
+        base = replace(
+            base,
+            model_config=self.speculative_config.draft_model_config,
+        )
+        return base
 
     # ---- _greedy_sample ----------------------------------------------------
     # Override to enable centroids masking in eager mode on Ascend NPU.
