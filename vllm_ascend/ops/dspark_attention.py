@@ -4,6 +4,7 @@
 from collections.abc import Callable
 
 import torch
+from vllm.logger import logger
 
 DSparkAttentionCustomOp = Callable[
     [
@@ -23,6 +24,17 @@ DSparkAttentionCustomOp = Callable[
     ],
     torch.Tensor,
 ]
+
+DSPARK_SAS_MASK_MODE = 4
+DSPARK_SAS_CMP_MASK_MODE = 3
+
+
+def _dspark_sas_window(block_size: int, window_size: int) -> tuple[int, int, int]:
+    return (
+        DSPARK_SAS_MASK_MODE,
+        window_size + block_size - 1,
+        block_size - 1,
+    )
 
 
 def _validate_query_block_slots(request_slots: torch.Tensor, block_size: int) -> None:
@@ -119,6 +131,137 @@ def _maybe_call_dspark_attention_custom_op(
     )
 
 
+def _get_dspark_sas_ops(q: torch.Tensor) -> tuple[Callable, Callable] | None:
+    if q.device.type == "cpu":
+        return None
+    try:
+        return (
+            torch.ops._C_ascend.npu_sparse_attn_sharedkv_metadata,
+            torch.ops._C_ascend.npu_sparse_attn_sharedkv,
+        )
+    except (AttributeError, RuntimeError):
+        return None
+
+
+def _call_dspark_sas_block(
+    q: torch.Tensor,
+    packed_kv: torch.Tensor,
+    attn_sink: torch.Tensor,
+    softmax_scale: float,
+    block_size: int,
+    window_size: int,
+    metadata_op: Callable,
+    attn_op: Callable,
+) -> torch.Tensor:
+    _, ori_win_left, ori_win_right = _dspark_sas_window(block_size, window_size)
+    cu_seqlens_q = torch.tensor([0, q.shape[0]], dtype=torch.int32, device=q.device)
+    cu_seqlens_kv = torch.tensor([0, packed_kv.shape[0]], dtype=torch.int32, device=q.device)
+    sinks = attn_sink[: q.shape[1]].float().contiguous()
+    metadata = metadata_op(
+        num_heads_q=q.shape[1],
+        num_heads_kv=1,
+        head_dim=q.shape[2],
+        cu_seqlens_q=cu_seqlens_q,
+        cu_seqlens_ori_kv=cu_seqlens_kv,
+        cu_seqlens_cmp_kv=None,
+        seqused_q=None,
+        seqused_kv=None,
+        batch_size=1,
+        max_seqlen_q=q.shape[0],
+        max_seqlen_kv=packed_kv.shape[0],
+        cmp_ratio=1,
+        ori_mask_mode=DSPARK_SAS_MASK_MODE,
+        cmp_mask_mode=DSPARK_SAS_CMP_MASK_MODE,
+        ori_win_left=ori_win_left,
+        ori_win_right=ori_win_right,
+        layout_q="TND",
+        layout_kv="TND",
+        has_ori_kv=True,
+        has_cmp_kv=False,
+        device=str(q.device),
+    )
+    return attn_op(
+        q,
+        ori_kv=packed_kv,
+        cu_seqlens_q=cu_seqlens_q,
+        cu_seqlens_ori_kv=cu_seqlens_kv,
+        sinks=sinks,
+        metadata=metadata,
+        softmax_scale=softmax_scale,
+        cmp_ratio=1,
+        ori_mask_mode=DSPARK_SAS_MASK_MODE,
+        cmp_mask_mode=DSPARK_SAS_CMP_MASK_MODE,
+        ori_win_left=ori_win_left,
+        ori_win_right=ori_win_right,
+        layout_q="TND",
+        layout_kv="TND",
+    )[0]
+
+
+def _maybe_call_dspark_sas_attention(
+    q: torch.Tensor,
+    k_cache: torch.Tensor,
+    cache_positions: torch.Tensor,
+    cache_valid: torch.Tensor,
+    draft_k: torch.Tensor,
+    request_slots: torch.Tensor,
+    positions: torch.Tensor,
+    attn_sink: torch.Tensor,
+    block_size: int,
+    window_size: int,
+    softmax_scale: float,
+) -> torch.Tensor | None:
+    ops = _get_dspark_sas_ops(q)
+    if ops is None:
+        return None
+    metadata_op, attn_op = ops
+    out = torch.empty_like(q)
+    pos_long = positions.to(torch.long)
+    request_slots_long = request_slots.to(torch.long)
+    max_request_slots = k_cache.shape[0]
+
+    try:
+        for block_offset in range(0, positions.numel(), block_size):
+            block_end = min(block_offset + block_size, positions.numel())
+            block_pos = pos_long[block_offset:block_end]
+            block_start = int(block_pos.min().item())
+            context_end = block_start - 1
+            context_start = max(0, context_end + 1 - window_size)
+            request_slot = int(request_slots_long[block_offset].item())
+            if request_slot >= max_request_slots:
+                raise ValueError(
+                    "DSpark request slot exceeds preallocated cache slots: "
+                    f"slot={request_slot}, capacity={max_request_slots}"
+                )
+            k_ctx, _ = _gather_context_kv(
+                k_cache,
+                k_cache,
+                cache_positions,
+                cache_valid,
+                request_slot,
+                context_start,
+                context_end,
+            )
+            packed_kv = torch.cat(
+                [k_ctx[:, :1, :], draft_k[block_offset:block_end, :1, :]],
+                dim=0,
+            ).contiguous()
+            out[block_offset:block_end] = _call_dspark_sas_block(
+                q[block_offset:block_end].contiguous(),
+                packed_kv,
+                attn_sink,
+                softmax_scale,
+                block_size,
+                window_size,
+                metadata_op,
+                attn_op,
+            )
+    except RuntimeError as err:
+        logger.warning_once("DSpark SAS attention failed; falling back to torch attention: %s", err)
+        return None
+    return out
+
+
 def dspark_attention(
     q: torch.Tensor,
     k_cache: torch.Tensor,
@@ -133,6 +276,8 @@ def dspark_attention(
     block_size: int,
     window_size: int,
     softmax_scale: float,
+    *,
+    shared_kv: bool = False,
 ) -> torch.Tensor:
     """DSpark block attention semantic entry point.
 
@@ -167,6 +312,23 @@ def dspark_attention(
     if request_slots.device.type == "cpu":
         _validate_query_block_slots(request_slots, block_size)
 
+    if shared_kv:
+        sas_out = _maybe_call_dspark_sas_attention(
+            q,
+            k_cache,
+            cache_positions,
+            cache_valid,
+            draft_k,
+            request_slots,
+            positions,
+            attn_sink,
+            block_size,
+            window_size,
+            softmax_scale,
+        )
+        if sas_out is not None:
+            return sas_out
+
     out = torch.empty_like(q)
     pos_long = positions.to(torch.long)
     request_slots_long = request_slots.to(torch.long)
@@ -194,8 +356,13 @@ def dspark_attention(
             context_start,
             context_end,
         )
+        if shared_kv:
+            v_ctx = k_ctx
+            draft_v_block = draft_k[block_offset:block_end]
+        else:
+            draft_v_block = draft_v[block_offset:block_end]
         k_ctx = torch.cat([k_ctx, draft_k[block_offset:block_end]], dim=0)
-        v_ctx = torch.cat([v_ctx, draft_v[block_offset:block_end]], dim=0)
+        v_ctx = torch.cat([v_ctx, draft_v_block], dim=0)
         out[block_offset:block_end] = _dspark_attention_reference(
             q[block_offset:block_end],
             k_ctx,

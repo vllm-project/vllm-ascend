@@ -10,6 +10,7 @@ from vllm_ascend.models.deepseek_v4_dspark import (
     _dspark_cache_capacity,
 )
 from vllm_ascend.ops.dspark_attention import (
+    _dspark_sas_window,
     _gather_context_kv,
     _validate_query_block_slots,
     dspark_attention,
@@ -49,6 +50,20 @@ def _dspark_attention_reference(
     return torch.einsum("qhk,khd->qhd", probs, v_ctx.float()).to(q.dtype)
 
 
+def _band_visible_indices(
+    query_idx: int,
+    s1_size: int,
+    s2_size: int,
+    ori_win_left: int,
+    ori_win_right: int,
+) -> list[int]:
+    left = max(s2_size - s1_size + query_idx - ori_win_left, 0)
+    right = min(s2_size - s1_size + query_idx + ori_win_right, s2_size - 1)
+    if right < left:
+        return []
+    return list(range(left, right + 1))
+
+
 def test_dspark_attention_loop_matches_vectorized_reference():
     torch.manual_seed(0)
     q = torch.randn(4, 3, 8, dtype=torch.float32)
@@ -60,6 +75,45 @@ def test_dspark_attention_loop_matches_vectorized_reference():
     expected = _dspark_attention_reference(q, k_ctx, v_ctx, attn_sink, scale=0.125)
 
     torch.testing.assert_close(actual, expected, rtol=1e-6, atol=1e-6)
+
+
+def test_dspark_sas_window_covers_context_and_full_draft_block():
+    block_size = 5
+    window_size = 7
+    context_len = window_size
+    s2_size = context_len + block_size
+
+    mask_mode, ori_win_left, ori_win_right = _dspark_sas_window(block_size, window_size)
+
+    assert mask_mode == 4
+    assert ori_win_left == window_size + block_size - 1
+    assert ori_win_right == block_size - 1
+    for query_idx in range(block_size):
+        assert _band_visible_indices(
+            query_idx,
+            block_size,
+            s2_size,
+            ori_win_left,
+            ori_win_right,
+        ) == list(range(s2_size))
+
+
+def test_dspark_sas_window_rejects_plain_sliding_window_formula():
+    block_size = 5
+    window_size = 7
+    context_len = window_size
+    s2_size = context_len + block_size
+
+    bad_left = window_size - 1
+    right = block_size - 1
+
+    assert _band_visible_indices(
+        block_size - 1,
+        block_size,
+        s2_size,
+        bad_left,
+        right,
+    ) != list(range(s2_size))
 
 
 def test_dspark_attention_entry_uses_custom_op_gateway(monkeypatch):
@@ -93,6 +147,203 @@ def test_dspark_attention_entry_uses_custom_op_gateway(monkeypatch):
     )
 
     assert actual is expected
+
+
+def test_dspark_attention_entry_uses_sas_gateway(monkeypatch):
+    q = torch.ones(2, 4, 4, dtype=torch.float32)
+    draft_k = torch.arange(2 * 4 * 4, dtype=torch.float32).view(2, 4, 4)
+    block_size = 2
+    window_size = 3
+    calls = []
+
+    def fake_metadata_op(**kwargs):
+        assert kwargs["num_heads_q"] == 4
+        assert kwargs["num_heads_kv"] == 1
+        assert kwargs["ori_win_left"] == window_size + block_size - 1
+        assert kwargs["ori_win_right"] == block_size - 1
+        assert kwargs["layout_q"] == "TND"
+        assert kwargs["layout_kv"] == "TND"
+        assert kwargs["has_cmp_kv"] is False
+        return torch.empty(1024, dtype=torch.int32)
+
+    def fake_attn_op(q_block, **kwargs):
+        assert kwargs["ori_kv"].shape == (2, 1, 4)
+        assert kwargs["sinks"].dtype == torch.float32
+        assert kwargs["sinks"].shape == (4,)
+        assert kwargs["ori_win_left"] == window_size + block_size - 1
+        assert kwargs["ori_win_right"] == block_size - 1
+        calls.append(kwargs)
+        return q_block + 2, torch.empty(0)
+
+    monkeypatch.setattr(
+        dspark_attention_module,
+        "_get_dspark_attention_custom_op",
+        lambda _q: None,
+    )
+    monkeypatch.setattr(
+        dspark_attention_module,
+        "_get_dspark_sas_ops",
+        lambda _q: (fake_metadata_op, fake_attn_op),
+    )
+
+    actual = dspark_attention(
+        q,
+        torch.empty(1, 4, 4, 4),
+        torch.empty(1, 4, 4, 4),
+        torch.empty(1, 4, dtype=torch.int32),
+        torch.empty(1, 4, dtype=torch.bool),
+        draft_k,
+        draft_k,
+        torch.tensor([0, 0], dtype=torch.int32),
+        torch.tensor([0, 1], dtype=torch.int32),
+        torch.zeros(4, dtype=torch.bfloat16),
+        block_size,
+        window_size,
+        0.125,
+        shared_kv=True,
+    )
+
+    assert len(calls) == 1
+    torch.testing.assert_close(actual, q + 2)
+
+
+def test_dspark_attention_entry_does_not_use_sas_without_shared_kv(monkeypatch):
+    q = torch.ones(2, 1, 4, dtype=torch.float32)
+    draft_k = torch.ones(2, 1, 4, dtype=torch.float32)
+    draft_v = draft_k + 1
+
+    monkeypatch.setattr(
+        dspark_attention_module,
+        "_get_dspark_attention_custom_op",
+        lambda _q: None,
+    )
+
+    def fail_if_sas_is_used(_q):
+        raise AssertionError("SAS gateway must be gated by shared_kv=True")
+
+    monkeypatch.setattr(
+        dspark_attention_module,
+        "_get_dspark_sas_ops",
+        fail_if_sas_is_used,
+    )
+
+    actual = dspark_attention(
+        q,
+        torch.empty(1, 4, 1, 4),
+        torch.empty(1, 4, 1, 4),
+        torch.empty(1, 4, dtype=torch.int32),
+        torch.empty(1, 4, dtype=torch.bool),
+        draft_k,
+        draft_v,
+        torch.tensor([0, 0], dtype=torch.int32),
+        torch.tensor([0, 1], dtype=torch.int32),
+        torch.zeros(1),
+        2,
+        3,
+        0.125,
+    )
+
+    torch.testing.assert_close(
+        actual,
+        _dspark_attention_reference(q, draft_k, draft_v, torch.zeros(1), 0.125),
+    )
+
+
+def test_dspark_attention_warns_when_sas_falls_back(monkeypatch):
+    q = torch.ones(2, 1, 4, dtype=torch.float32)
+    draft_k = torch.ones(2, 1, 4, dtype=torch.float32)
+    warnings = []
+
+    def fake_metadata_op(**kwargs):
+        return torch.empty(1, dtype=torch.int32)
+
+    def fake_attn_op(*args, **kwargs):
+        raise RuntimeError("synthetic sas failure")
+
+    monkeypatch.setattr(
+        dspark_attention_module,
+        "_get_dspark_attention_custom_op",
+        lambda _q: None,
+    )
+    monkeypatch.setattr(
+        dspark_attention_module,
+        "_get_dspark_sas_ops",
+        lambda _q: (fake_metadata_op, fake_attn_op),
+    )
+    monkeypatch.setattr(
+        dspark_attention_module.logger,
+        "warning_once",
+        lambda *args, **kwargs: warnings.append(args),
+    )
+
+    actual = dspark_attention(
+        q,
+        torch.empty(1, 4, 1, 4),
+        torch.empty(1, 4, 1, 4),
+        torch.empty(1, 4, dtype=torch.int32),
+        torch.empty(1, 4, dtype=torch.bool),
+        draft_k,
+        draft_k,
+        torch.tensor([0, 0], dtype=torch.int32),
+        torch.tensor([0, 1], dtype=torch.int32),
+        torch.zeros(1),
+        2,
+        3,
+        0.125,
+        shared_kv=True,
+    )
+
+    assert warnings
+    assert "DSpark SAS attention failed" in warnings[0][0]
+    torch.testing.assert_close(
+        actual,
+        _dspark_attention_reference(q, draft_k, draft_k, torch.zeros(1), 0.125),
+    )
+
+
+def test_dspark_attention_shared_kv_fallback_uses_k_as_v(monkeypatch):
+    q = torch.ones(2, 1, 4, dtype=torch.float32)
+    draft_k = torch.ones(2, 1, 4, dtype=torch.float32)
+    draft_v = torch.full_like(draft_k, 100.0)
+
+    def fake_metadata_op(**kwargs):
+        return torch.empty(1, dtype=torch.int32)
+
+    def fake_attn_op(*args, **kwargs):
+        raise RuntimeError("synthetic sas failure")
+
+    monkeypatch.setattr(
+        dspark_attention_module,
+        "_get_dspark_attention_custom_op",
+        lambda _q: None,
+    )
+    monkeypatch.setattr(
+        dspark_attention_module,
+        "_get_dspark_sas_ops",
+        lambda _q: (fake_metadata_op, fake_attn_op),
+    )
+
+    actual = dspark_attention(
+        q,
+        torch.empty(1, 4, 1, 4),
+        torch.empty(1, 4, 1, 4).fill_(100.0),
+        torch.empty(1, 4, dtype=torch.int32),
+        torch.empty(1, 4, dtype=torch.bool),
+        draft_k,
+        draft_v,
+        torch.tensor([0, 0], dtype=torch.int32),
+        torch.tensor([0, 1], dtype=torch.int32),
+        torch.zeros(1),
+        2,
+        3,
+        0.125,
+        shared_kv=True,
+    )
+
+    torch.testing.assert_close(
+        actual,
+        _dspark_attention_reference(q, draft_k, draft_k, torch.zeros(1), 0.125),
+    )
 
 
 def test_dspark_attention_is_noncausal_within_draft_block():
