@@ -21,22 +21,10 @@ import torch.nn.functional as F
 from vllm.distributed import get_tp_group
 from vllm.forward_context import get_forward_context
 
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.utils import split_tensor_along_first_dim
 from vllm_ascend.utils import get_weight_prefetch_method
-
-
-def _use_torch_moe_gating_hash_fallback() -> bool:
-    try:
-        additional_config = get_ascend_config().vllm_config.additional_config or {}
-    except RuntimeError:
-        return False
-    return bool(
-        additional_config.get("deepseek_v4_use_torch_moe_gating_hash", False)
-        or additional_config.get("use_torch_moe_gating_hash", False)
-    )
 
 
 def select_experts(
@@ -283,28 +271,6 @@ def _select_experts_with_fusion_ops(
         else:
             input_ids = None
             tid2eid_ones = None
-        if _use_torch_moe_gating_hash_fallback():
-            if input_ids is not None and tid2eid_ones is not None:
-                return _select_hash_experts_torch(
-                    router_logits=router_logits,
-                    top_k=top_k,
-                    renormalize=renormalize,
-                    routed_scaling_factor=routed_scaling_factor,
-                    input_ids=input_ids,
-                    tid2eid=tid2eid_ones,
-                )
-            return _native_select_experts(
-                hidden_states=hidden_states,
-                router_logits=router_logits,
-                top_k=top_k,
-                use_grouped_topk=use_grouped_topk,
-                renormalize=renormalize,
-                topk_group=topk_group,
-                num_expert_group=num_expert_group,
-                scoring_func=scoring_func,
-                routed_scaling_factor=routed_scaling_factor,
-                e_score_correction_bias=e_score_correction_bias,
-            )
         topk_weights, topk_ids, _ = torch.ops._C_ascend.moe_gating_top_k_hash(
             x=router_logits,
             k=top_k,
@@ -341,25 +307,6 @@ def _select_experts_with_fusion_ops(
     )
 
     return topk_weights, topk_ids
-
-
-def _select_hash_experts_torch(
-    router_logits: torch.Tensor,
-    top_k: int,
-    renormalize: bool,
-    routed_scaling_factor: float,
-    input_ids: torch.Tensor,
-    tid2eid: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    scores = F.softplus(router_logits.float()).sqrt()
-    topk_ids = tid2eid[input_ids.long()]
-    if topk_ids.shape[-1] != top_k:
-        topk_ids = topk_ids[..., :top_k]
-    topk_weights = scores.gather(1, topk_ids.long())
-    topk_weights = _renormalize_topk_weights(topk_weights, renormalize)
-    if routed_scaling_factor != 1.0:
-        topk_weights = topk_weights * routed_scaling_factor
-    return topk_weights, topk_ids.to(torch.int32)
 
 
 def _native_select_experts(
