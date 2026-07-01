@@ -1,9 +1,9 @@
 # Flash Attention 3
 
-```{note}
-Flash Attention 3 on Ascend is currently in beta. The `flash_attn_npu` package required for FA3 has been open-sourced on GitHub.
-Please refer to the [flash-attention-npu repository](https://github.com/MinghuasLab/flash-attention-npu) for more details.
-```
+!!! note
+
+    Flash Attention 3 on Ascend is currently in beta. The `flash_attn_npu` package required for FA3 has been open-sourced on GitHub.
+    Please refer to the [flash-attention-npu repository](https://github.com/MinghuasLab/flash-attention-npu) for more details.
 
 This document shows how to enable Flash Attention 3 (FA3) in vLLM-Ascend. FA3 provides a training-inference consistent attention implementation for Ascend NPUs.
 
@@ -142,9 +142,9 @@ for output in outputs:
 - **FP8 quantization not supported**: FA3 does not support FP8 quantized attention.
 - **MLA and SFA not supported**: FA3 does not support Multi-head Latent Attention (MLA) or Sparse Flash Attention (SFA).
 
-```{note}
-Enabling FA3 may cause performance degradation compared to the default FIA backend. This trade-off is intentional to guarantee training-inference consistency.
-```
+!!! note
+
+    Enabling FA3 may cause performance degradation compared to the default FIA backend. This trade-off is intentional to guarantee training-inference consistency.
 
 ## Tested Models
 

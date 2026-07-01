@@ -21,21 +21,19 @@ The benchmarking tool used in this tutorial is AISBench, which supports performa
 
 This tutorial uses the official image, version v0.13.0rc1. Use the following command to download:
 
-```{code-block} bash
-:substitutions:
+```bash
 
-docker pull quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+docker pull quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 ```
 
 ## **Run with Docker**
 
 Container startup command:
 
-```{code-block} bash
-:substitutions:
+```bash
 
 # Update the vllm-ascend image
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 export NAME=vllm-ascend
 
 # Run the container using the defined variables

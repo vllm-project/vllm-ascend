@@ -27,19 +27,19 @@ After posting the comment, add the **`nightly-test`** label to your PR.
 Adding the label is what actually **triggers** the workflow — at that point the workflow
 reads the existing comments to find the `/nightly` command.
 
-:::{note}
-Only repository **Contributors** (Triage role) and **Maintainers** (Write role) can add
-labels. If you do not have this permission, ask a maintainer to add the label for you.
-You can find the list of maintainers and contributors in the project's
-[Governance](../../community/governance.md) page or by checking the
-[CODEOWNERS](https://github.com/vllm-project/vllm-ascend/blob/main/.github/CODEOWNERS)
-file.
-:::
+!!! note
 
-:::{important}
-The comment must be posted **before** the label is added. If you add the label first,
-the workflow will find no `/nightly` comment and skip all tests.
-:::
+    Only repository **Contributors** (Triage role) and **Maintainers** (Write role) can add
+    labels. If you do not have this permission, ask a maintainer to add the label for you.
+    You can find the list of maintainers and contributors in the project's
+    [Governance](../../community/governance.md) page or by checking the
+    [CODEOWNERS](https://github.com/vllm-project/vllm-ascend/blob/main/.github/CODEOWNERS)
+    file.
+
+!!! abstract
+
+    The comment must be posted **before** the label is added. If you add the label first,
+    the workflow will find no `/nightly` comment and skip all tests.
 
 ### 3. Wait for results
 
@@ -90,10 +90,10 @@ workflow matrix.
 | `multi-node-deepseek-dp` | DeepSeek-R1-W8A8, 2-node DP |
 | `multi-node-qwen3-235b-dp` | Qwen3-235B-A22B, 2-node DP |
 
-:::{note}
-The `doc-test` job in the A2 workflow only runs on `schedule` or `workflow_dispatch`
-events — it will **not** run on PR-triggered runs even with `/nightly all`.
-:::
+!!! note
+
+    The `doc-test` job in the A2 workflow only runs on `schedule` or `workflow_dispatch`
+    events — it will **not** run on PR-triggered runs even with `/nightly all`.
 
 ### A3 workflow (`.github/workflows/schedule_nightly_test_a3.yaml`)
 
@@ -139,12 +139,12 @@ events — it will **not** run on PR-triggered runs even with `/nightly all`.
 | `deepseek-r1-0528-w8a8-prefix-cache` | DeepSeek-R1-0528-W8A8 prefix cache |
 | `custom-multi-ops` | Custom multi-card operator tests |
 
-:::{warning}
-The A3 resource pool has a maximum concurrency of **5×16 NPUs**. Multi-node tests
-run with `max-parallel: 2` to avoid resource exhaustion. Running `/nightly all` on
-A3 will queue a large number of jobs — prefer targeting specific test names when
-possible.
-:::
+!!! warning
+
+    The A3 resource pool has a maximum concurrency of **5×16 NPUs**. Multi-node tests
+    run with `max-parallel: 2` to avoid resource exhaustion. Running `/nightly all` on
+    A3 will queue a large number of jobs — prefer targeting specific test names when
+    possible.
 
 ## Examples
 

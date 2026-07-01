@@ -57,7 +57,6 @@ from vllm import LLM
 def get_detailed_instruct(task_description: str, query: str) -> str:
     return f'Instruct: {task_description}\nQuery: {query}'
 
-
 if __name__=="__main__":
     # Each query must come with a one-sentence instruction that describes the task
     task = 'Given a web search query, retrieve relevant passages that answer the query'

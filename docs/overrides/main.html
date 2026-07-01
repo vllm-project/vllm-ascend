@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+
+{% block announce %}
+<style>
+  .md-banner {
+    background-color: #fff3cd !important;
+    color: #856404 !important;
+    display: block !important;
+  }
+  .md-banner a {
+    color: #d97706;
+    font-weight: bold;
+  }
+  [data-md-color-scheme="slate"] .md-banner {
+    background-color: #333 !important;
+    color: #ddd !important;
+  }
+  [data-md-color-scheme="slate"] .md-banner a {
+    color: #ffa500;
+  }
+</style>
+{% if not config.extra.is_release %}
+<div class="md-announce">
+  You are viewing the latest developer preview docs.
+  <a href="https://docs.vllm.ai/projects/ascend/en/v0.18.0">Click here</a>
+  to view docs for the latest stable release (v0.18.0).
+</div>
+{% endif %}
+{% endblock %}

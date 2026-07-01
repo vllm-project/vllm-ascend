@@ -76,7 +76,6 @@ def extra_check(match: Match):
     a_shape = x1.meta["val"].shape
     return a_shape[-1] == 7168 
 
-
 # Define some sample inputs to trace search_fn and replace_fn into an FX graph
 fake_mode = FakeTensorMode()
 with fake_mode:

@@ -78,38 +78,38 @@ From the workflow perspective, we can see how the final test script is executed,
 
 Currently, the multi-node test workflow is defined in `.github/workflows/schedule_nightly_test_a3.yaml`.
 
-    ```yaml
-    multi-node-tests:
-      name: multi-node
-      if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
-      strategy:
-        fail-fast: false
-        max-parallel: 1
-        matrix:
-          test_config:
-            - name: multi-node-deepseek-pd
-              config_file_path: DeepSeek-V3.yaml
-              size: 2
-            - name: multi-node-qwen3-dp
-              config_file_path: Qwen3-235B-A22B.yaml
-              size: 2
-            - name: GLM5_1-W8A8-EP-external
-              config_file_path: GLM5_1-W8A8-EP-external.yaml
-              config_base_path: tests/e2e/nightly/multi_node/external_dp/config/
-              size: 4
-      uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
-      with:
-        soc_version: a3
-        runner: linux-aarch64-a3-0
-        image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a3'
-        replicas: 1
-        size: ${{ matrix.test_config.size }}
-        config_file_path: ${{ matrix.test_config.config_file_path }}
-        config_base_path: ${{ matrix.test_config.config_base_path || '' }}
-        name: ${{ matrix.test_config.name }}
-      secrets:
-        KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
-    ```
+```yaml
+multi-node-tests:
+  name: multi-node
+  if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+  strategy:
+    fail-fast: false
+    max-parallel: 1
+    matrix:
+      test_config:
+        - name: multi-node-deepseek-pd
+          config_file_path: DeepSeek-V3.yaml
+          size: 2
+        - name: multi-node-qwen3-dp
+          config_file_path: Qwen3-235B-A22B.yaml
+          size: 2
+        - name: GLM5_1-W8A8-EP-external
+          config_file_path: GLM5_1-W8A8-EP-external.yaml
+          config_base_path: tests/e2e/nightly/multi_node/external_dp/config/
+          size: 4
+  uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
+  with:
+    soc_version: a3
+    runner: linux-aarch64-a3-0
+    image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a3'
+    replicas: 1
+    size: {% raw %}${{ matrix.test_config.size }}{% endraw %}
+    config_file_path: {% raw %}${{ matrix.test_config.config_file_path }}{% endraw %}
+    config_base_path: {% raw %}${{ matrix.test_config.config_base_path || '' }}{% endraw %}
+    name: {% raw %}${{ matrix.test_config.name }}{% endraw %}
+  secrets:
+    KUBECONFIG_B64: {% raw %}${{ secrets.KUBECONFIG_B64 }}{% endraw %}
+```
   
 The matrix above defines all the parameters required to add a multi-machine use
 case. The parameters worth noting are `size`, `config_file_path`, and

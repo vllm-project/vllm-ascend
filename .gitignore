@@ -2,6 +2,12 @@
 # VSCode
 .vscode/
 
+# MkDocs build output
+site/
+
+# Generated Chinese docs (built from .po files)
+docs/source/zh/
+
 # egg-info
 vllm_ascend.egg-info/
 

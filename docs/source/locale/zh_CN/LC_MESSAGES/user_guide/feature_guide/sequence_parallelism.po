@@ -72,12 +72,14 @@ msgid ""
 "Currently, vllm-ascend has implemented Sequence Parallelism for VL-class "
 "models based on the Inductor pass. It can be enabled in the following "
 "way:"
+"
 msgstr "目前，vllm-ascend 已基于 Inductor pass 为 VL 类模型实现了序列并行。可通过以下方式启用："
 
 #: ../../source/user_guide/feature_guide/sequence_parallelism.md:20
 msgid ""
 "`\"enable_sp\"`: This is the switch for SP. Since SP relies on graph "
 "mode, it is not supported in eager mode."
+"
 msgstr "`\"enable_sp\"`：SP 的开关。由于 SP 依赖图模式，因此在 eager 模式下不支持。"
 
 #: ../../source/user_guide/feature_guide/sequence_parallelism.md:21
@@ -107,7 +109,7 @@ msgid ""
 "Without modifying `sp_min_token_num`, the simplest way and recommended "
 "way to enable SP is:"
 msgstr ""
-不修改 `sp_min_token_num` 的情况下，启用 SP 的最简单且推荐的方式是："
+"不修改 `sp_min_token_num` 的情况下，启用 SP 的最简单且推荐的方式是："
 
 #: ../../source/user_guide/feature_guide/sequence_parallelism.md:31
 msgid "Difference Between SP and Flash Comm V1"
@@ -127,12 +129,14 @@ msgstr ""
 msgid ""
 "For models using the MLA structure, Allgather is postponed until after "
 "QKV projection, further reducing communication volume."
+"
 msgstr "对于使用 MLA 结构的模型，Allgather 被推迟到 QKV 投影之后，进一步减少了通信量。"
 
 #: ../../source/user_guide/feature_guide/sequence_parallelism.md:36
 msgid ""
 "For MoE models, Allgather is postponed until after Gating+DynamicQuant, "
 "also aiming to reduce communication volume."
+"
 msgstr "对于 MoE 模型，Allgather 被推迟到 Gating+DynamicQuant 之后，同样旨在减少通信量。"
 
 #: ../../source/user_guide/feature_guide/sequence_parallelism.md:38
@@ -145,7 +149,7 @@ msgid ""
 msgstr ""
 "FC1 是 vllm-ascend 中的特有优化，目前基于 Custom OP 实现，但难以支持 VL 类模型（原因详见 "
 "[[RFC]: support sequence parallelism by pass](https://github.com/vllm-project/vllm-ascend/issues/5712)）。"
-因此，目前 FC1 和 SP 是互补的关系。"
+"因此，目前 FC1 和 SP 是互补的关系。"
 
 #: ../../source/user_guide/feature_guide/sequence_parallelism.md:40
 msgid "Support Matrix"
@@ -203,6 +207,7 @@ msgstr "Pass 设计"
 msgid ""
 "When SP is enabled, the following passes run in order: "
 "`SequenceParallelismPass` then `SequenceParallelismMoePass`."
+"
 msgstr "启用 SP 后，将按顺序运行以下 pass：`SequenceParallelismPass`，然后是 `SequenceParallelismMoePass`。"
 
 #: ../../source/user_guide/feature_guide/sequence_parallelism.md:62
@@ -213,6 +218,7 @@ msgstr "SequenceParallelismPass"
 msgid ""
 "Runs `NoOpEliminationPass` first to eliminate redundant view-like "
 "operations, then applies AllReduce-based patterns:"
+"
 msgstr "首先运行 `NoOpEliminationPass` 以消除冗余的 view-like 操作，然后应用基于 AllReduce 的模式："
 
 #: ../../source/user_guide/feature_guide/sequence_parallelism.md
@@ -263,12 +269,14 @@ msgstr "`all_reduce` + add + `layernorm`"
 msgid ""
 "`reduce_scatter` + chunk(`deepstack_input_embeds`) + add + `layernorm` + "
 "`all_gather`"
+"
 msgstr "`reduce_scatter` + chunk(`deepstack_input_embeds`) + add + `layernorm` + `all_gather`"
 
 #: ../../source/user_guide/feature_guide/sequence_parallelism.md:72
 msgid ""
 "**Why Qwen3 VL needs special handling by "
 "Qwen3VLMiddleAllReduceRMSNormPattern**"
+"
 msgstr "**为什么 Qwen3 VL 需要 Qwen3VLMiddleAllReduceRMSNormPattern 的特殊处理**"
 
 #: ../../source/user_guide/feature_guide/sequence_parallelism.md:74
@@ -300,6 +308,7 @@ msgstr "SequenceParallelismMoePass"
 msgid ""
 "After `SequenceParallelismPass` applies, the MoE model computation graph "
 "looks like:"
+"
 msgstr "应用 `SequenceParallelismPass` 后，MoE 模型的计算图如下所示："
 
 #: ../../source/user_guide/feature_guide/sequence_parallelism.md:81
@@ -402,6 +411,7 @@ msgstr "问1：SP 默认启用吗？"
 msgid ""
 "No, SP is not enabled by default. SP is currently in the experimental "
 "stage and will be enabled by default in the future."
+"
 msgstr "不，SP 默认不启用。SP 目前处于实验阶段，未来将默认启用。"
 
 #: ../../source/user_guide/feature_guide/sequence_parallelism.md:104
@@ -417,17 +427,20 @@ msgid ""
 "`NPUPlatform.apply_config_platform_defaults`: If `enable_sp` is `True` "
 "and `sp_min_token_num` is None, set default `sp_min_token_num` (1000 for "
 "Dense models, 1 for MoE models)"
+"
 msgstr "`NPUPlatform.apply_config_platform_defaults`：如果 `enable_sp` 为 `True` 且 `sp_min_token_num` 为 None，"
-则设置默认的 `sp_min_token_num`（稠密模型为 1000，MoE 模型为 1）"
+"则设置默认的 `sp_min_token_num`（稠密模型为 1000，MoE 模型为 1）"
 
 #: ../../source/user_guide/feature_guide/sequence_parallelism.md:108
 msgid ""
 "`VllmConfig._apply_optimization_level_defaults`: `enable_sp` is set to "
 "`True` for dense models."
+"
 msgstr "`VllmConfig._apply_optimization_level_defaults`：对于稠密模型，`enable_sp` 被设置为 `True`。"
 
 #: ../../source/user_guide/feature_guide/sequence_parallelism.md:109
 msgid ""
 "`VllmConfig.__post_init__`: If `sp_min_token_num` is still `None`, then "
 "`enable_sp` is set to `False`"
+"
 msgstr "`VllmConfig.__post_init__`：如果 `sp_min_token_num` 仍然为 `None`，则将 `enable_sp` 设置为 `False`"
