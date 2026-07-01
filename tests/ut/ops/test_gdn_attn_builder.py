@@ -11,7 +11,10 @@ from vllm.model_executor.layers.fla.ops import index as _fla_index
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import MambaSpec
 
+from unittest.mock import patch
+
 from vllm_ascend.ops import gdn_attn_builder as ascend_gdn_attn_builder
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.ops.gdn import (
     AscendGatedDeltaNetAttention,
     get_non_spec_causal_conv1d_host_args,
@@ -46,6 +49,18 @@ def _patch_triton_cdiv(monkeypatch):
             lambda a, b: (a + b - 1) // b,
             raising=False,
         )
+
+
+@pytest.fixture(autouse=True)
+def _no_pin_memory():
+    # v0.23.0+ uses np_to_pinned_tensor (reads PIN_MEMORY global) inside
+    # compute_causal_conv1d_metadata.  Without physical NPU, t.pin_memory()
+    # raises "Please register PrivateUse1HooksInterface first".
+    if vllm_version_is("0.23.0"):
+        with patch("vllm.utils.torch_utils.PIN_MEMORY", False):
+            yield
+    else:
+        yield
 
 
 @dataclass
