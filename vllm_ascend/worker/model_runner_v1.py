@@ -456,8 +456,12 @@ class NPUModelRunner(GPUModelRunner):
         )
         if self.sfa_dcp_replicate_k:
             assert self.pcp_size == 1 and \
-            self.dcp_size == self.parallel_config.tensor_parallel_size and \
-            self.use_sparse_c8_indexer == False
+            self.dcp_size == self.parallel_config.tensor_parallel_size
+            if self.use_sparse_c8_indexer and get_ascend_device_type() == AscendDeviceType.A5:
+                raise NotImplementedError(
+                    "SFA DCP with sparse C8 LightningIndexer cache is not supported on A5 yet. "
+                    "A5 uses the fused CKV quant sparse attention path, which needs a separate DCP LSE merge."
+                )
             self.sparse_head_dim = (
                 self.model_config.hf_text_config.kv_lora_rank,
                 self.model_config.hf_text_config.qk_rope_head_dim,
@@ -3223,7 +3227,6 @@ class NPUModelRunner(GPUModelRunner):
             kv_cache_spec = kv_cache_groups[kv_cache_gid].kv_cache_spec
             block_table_no_cp = None
             slot_mapping_no_cp = None
-            slot_mapping_no_cp_cpu = None
             if self.pcp_size > 1:
                 total_num_pcp_pads = sum(self.pcp_manager.num_pcp_pads_cpu[:num_reqs])
                 if self.pcp_manager.pcp_use_hybrid_attn:
