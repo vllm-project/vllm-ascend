@@ -184,19 +184,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         hf_config = self.model_config.hf_config
 
         if AscendDSACPMetadataBuilder.hadamard is None:
-            if hf_config.model_type == "deepseek_v4":
-                indexer_head_dim = hf_config.index_head_dim
-                try:
-                    from scipy.linalg import hadamard  # type: ignore[import-untyped]
-                except ImportError as e:
-                    raise ImportError(
-                        "DeepSeek-V4 indexer attention requires SciPy for Hadamard transform. Please install scipy."
-                    ) from e
-                log_dim = math.ceil(math.log2(indexer_head_dim))
-                dim_padded = 2**log_dim
-                AscendDSACPMetadataBuilder.hadamard = torch.tensor(
-                    hadamard(dim_padded, dtype=float), dtype=torch.float, device=self.device
-                ).to(torch.bfloat16)
+            self.build_hadamard(hf_config, self.device)
         self.start_pos_prefill = torch.zeros(scheduler_config.max_num_seqs, dtype=torch.int32, device=self.device)
         self.req_sas_metadata = torch.zeros(1024, dtype=torch.int32, device=self.device)
         self.req_qli_metadata = torch.zeros(1024, dtype=torch.int32, device=self.device)
@@ -240,6 +228,34 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             )
 
         self.reorder_batch_threshold = self.decode_threshold
+
+    @classmethod
+    def build_hadamard(cls, hf_config, device) -> bool:
+        """Build the class-level DSA indexer ``hadamard`` rotation matrix. See
+        ``AscendDSAMetadataBuilder.build_hadamard`` for the snapshot rationale:
+        it is a non-persistent class-level device tensor that is zeroed by
+        suspend/resume and must be rebuilt on restore."""
+        if getattr(hf_config, "model_type", None) != "deepseek_v4":
+            return False
+        try:
+            from scipy.linalg import hadamard  # type: ignore[import-untyped]
+        except ImportError as e:
+            raise ImportError(
+                "DeepSeek-V4 indexer attention requires SciPy for Hadamard transform. Please install scipy."
+            ) from e
+        indexer_head_dim = hf_config.index_head_dim
+        log_dim = math.ceil(math.log2(indexer_head_dim))
+        dim_padded = 2**log_dim
+        cls.hadamard = torch.tensor(
+            hadamard(dim_padded, dtype=float), dtype=torch.float, device=device
+        ).to(torch.bfloat16)
+        return True
+
+    @classmethod
+    def reload_hadamard_after_restore(cls, hf_config, device) -> bool:
+        """[snapshot] Rebuild the stale/zeroed class-level ``hadamard`` in place
+        after a restore (the builder is not re-instantiated on resume)."""
+        return cls.build_hadamard(hf_config, device)
 
     @classmethod
     def get_cudagraph_support(

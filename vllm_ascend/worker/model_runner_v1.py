@@ -3720,6 +3720,39 @@ class NPUModelRunner(GPUModelRunner):
                 os.path.join(model_dir, f"model_ckpt_drafter.{self.dp_rank}tp{rank_in_group}.pth"),
                 "drafter",
             )
+        # Rebuild non-persistent state that lives OUTSIDE any nn.Module (class /
+        # module-level device tensors), which the per-model reload above cannot
+        # reach via ``named_modules()``.
+        self._reload_global_non_persistent_state()
+
+    def _reload_global_non_persistent_state(self) -> None:
+        """[snapshot] Rebuild process/class-level device tensors that are not part
+        of any ``nn.Module`` state and are therefore neither serialized nor
+        repaired by the per-model reload path. Currently the DSA lightning-indexer
+        ``hadamard`` rotation matrix (a class attribute holding a device tensor):
+        after suspend/resume its device memory is zeroed, which zeroes the indexer
+        q/k rotate and collapses the per-layer quant scales to zero. Each rebuild
+        is best-effort so an unused backend never breaks restore."""
+        hf_config = self.model_config.hf_config
+        device = self.device
+        rebuilt: list[str] = []
+        try:
+            from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
+            if AscendDSAMetadataBuilder.reload_hadamard_after_restore(hf_config, device):
+                rebuilt.append("dsa.hadamard")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[restore model] DSA hadamard rebuild skipped: %s", exc)
+        try:
+            from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder
+            reload_cp = getattr(AscendDSACPMetadataBuilder, "reload_hadamard_after_restore", None)
+            if callable(reload_cp) and reload_cp(hf_config, device):
+                rebuilt.append("dsa_cp.hadamard")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[restore model] DSA-CP hadamard rebuild skipped: %s", exc)
+        logger.info(
+            "[restore model] rebuilt global non-persistent state: %s",
+            rebuilt if rebuilt else "none",
+        )
 
     def _reload_non_persistent_derived_weights(self, model=None, label: str = "model") -> None:
         if model is None:

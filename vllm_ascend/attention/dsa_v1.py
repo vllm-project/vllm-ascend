@@ -416,17 +416,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         hf_config = self.model_config.hf_config
 
         if AscendDSAMetadataBuilder.hadamard is None:
-            if hf_config.model_type == "deepseek_v4":
-                indexer_head_dim = hf_config.index_head_dim
-                try:
-                    from scipy.linalg import hadamard  # type: ignore[import-untyped]
-                except ImportError as e:
-                    raise ImportError("Please install scipy") from e
-                log_dim = math.ceil(math.log2(indexer_head_dim))
-                dim_padded = 2**log_dim
-                AscendDSAMetadataBuilder.hadamard = torch.tensor(
-                    hadamard(dim_padded, dtype=float), dtype=torch.float, device=self.device
-                ).to(torch.bfloat16)
+            self.build_hadamard(hf_config, self.device)
         self.start_pos_prefill = torch.zeros(scheduler_config.max_num_seqs, dtype=torch.int32, device=self.device)
         self.start_pos_decode = torch.zeros(scheduler_config.max_num_seqs, dtype=torch.int32, device=self.device)
         self.decode_sas_metadata = torch.zeros(1024, dtype=torch.int32, device=self.device)
@@ -438,6 +428,43 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         # Note(qcs): we use two dimension slot_mapping for kvcache with shape
         # [block_nums, block_size, head_num, head_dim]
         self.slot_mapping = torch.zeros(self.slot_mapping_shape, dtype=torch.int32, device=self.device)
+
+    @classmethod
+    def build_hadamard(cls, hf_config, device) -> bool:
+        """Build the class-level ``hadamard`` rotation matrix used by the DSA
+        lightning indexer (q/k are rotated via ``F.linear(x, hadamard)`` before
+        quantization). Returns True if a tensor was (re)built.
+
+        [snapshot] This is a plain class attribute holding a *device* tensor, not
+        an ``nn.Module`` buffer, so it is neither serialized by ``dump_model`` nor
+        rebuilt by the duck-typed ``reload_derived_weights_after_restore`` scan.
+        Its backing device memory is invalidated (observed as all-zero) by
+        suspend/resume; a zero hadamard makes ``F.linear(x, 0) == 0``, zeroing the
+        indexer q/k and collapsing ``query_dequant_scale`` / ``key_dequant_scale``
+        to zero for every layer. ``reload_hadamard_after_restore`` calls this to
+        recompute it in place after a restore.
+        """
+        if getattr(hf_config, "model_type", None) != "deepseek_v4":
+            return False
+        try:
+            from scipy.linalg import hadamard  # type: ignore[import-untyped]
+        except ImportError as e:
+            raise ImportError("Please install scipy") from e
+        indexer_head_dim = hf_config.index_head_dim
+        log_dim = math.ceil(math.log2(indexer_head_dim))
+        dim_padded = 2**log_dim
+        cls.hadamard = torch.tensor(
+            hadamard(dim_padded, dtype=float), dtype=torch.float, device=device
+        ).to(torch.bfloat16)
+        return True
+
+    @classmethod
+    def reload_hadamard_after_restore(cls, hf_config, device) -> bool:
+        """[snapshot] Unconditionally rebuild the (possibly stale/zeroed) class
+        level ``hadamard`` after a snapshot restore. Recomputes in place because
+        the metadata builder is not re-instantiated on resume, so the ``is None``
+        guard in ``__init__`` would otherwise never re-run."""
+        return cls.build_hadamard(hf_config, device)
 
     @classmethod
     def get_cudagraph_support(
