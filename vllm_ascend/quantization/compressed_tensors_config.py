@@ -22,6 +22,7 @@ from typing import Any, Optional, cast
 import torch
 from compressed_tensors.quantization import QuantizationArgs, QuantizationStrategy, QuantizationType
 from vllm.logger import logger
+from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS, register_quantization_config
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig, QuantizeMethodBase
@@ -32,21 +33,9 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
 )
 from vllm.model_executor.models.utils import WeightsMapper
 
-from vllm_ascend.utils import COMPRESSED_TENSORS_METHOD, vllm_version_is
+from vllm_ascend.utils import COMPRESSED_TENSORS_METHOD
 
 from .methods import AscendLinearScheme, AscendMoEScheme
-
-if vllm_version_is("0.23.0"):
-    from vllm.model_executor.layers.fused_moe import FusedMoE
-else:
-    from vllm.model_executor.layers.fused_moe import MoERunner
-
-
-def _is_fused_moe_layer(layer: torch.nn.Module) -> bool:
-    if vllm_version_is("0.23.0"):
-        return isinstance(layer, FusedMoE)
-    else:
-        return isinstance(layer, MoERunner)
 
 
 # Remove the original compressed_tensors method to replace with our implementation
@@ -160,7 +149,6 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
         self,
         layer: torch.nn.Module,
         prefix: str,
-        tid2eid: dict[int, int] | None = None,
     ) -> Optional["QuantizeMethodBase"]:
         from .method_adapters import AscendFusedMoEMethod, AscendLinearMethod
 
@@ -178,7 +166,7 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
             logger.info_once("Using the vLLM Ascend llmcompressor Quantization now!")
             return AscendLinearMethod(linear_scheme)
 
-        if _is_fused_moe_layer(layer):
+        if isinstance(layer, FusedMoE):
             # Delayed import to avoid circular import
             from vllm_ascend.ops.fused_moe.fused_moe import AscendUnquantizedFusedMoEMethod
 
@@ -194,7 +182,7 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
             # Store scheme on layer for reference (optional, for debugging)
             layer.scheme = moe_scheme
             logger.info_once("Using the vLLM Ascend llmcompressor Quantization now!")
-            return AscendFusedMoEMethod(moe_scheme, layer.moe_config, tid2eid)
+            return AscendFusedMoEMethod(moe_scheme, layer.moe_config)
 
         return None
 
@@ -364,10 +352,7 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
                 return "W8A8"
 
             if self._is_dynamic_token_w8a8(weight_quant, input_quant):
-                if weight_quant.type == QuantizationType.FLOAT and input_quant.type == QuantizationType.FLOAT:
-                    return "W8A8FP8_DYNAMIC"
-                else:
-                    return "W8A8_DYNAMIC"
+                return "W8A8_DYNAMIC"
 
             if self._is_dynamic_token_w4a8(weight_quant, input_quant):
                 return "W4A8_DYNAMIC"

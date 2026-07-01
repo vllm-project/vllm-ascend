@@ -1,0 +1,70 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-07-18 09:01+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../tutorials/single_npu_qwen3_embedding.md:1
+msgid "Single NPU (Qwen3-Embedding-8B)"
+msgstr "单个NPU（Qwen3-Embedding-8B）"
+
+#: ../../tutorials/single_npu_qwen3_embedding.md:3
+msgid ""
+"The Qwen3 Embedding model series is the latest proprietary model of the Qwen"
+" family, specifically designed for text embedding and ranking tasks. "
+"Building upon the dense foundational models of the Qwen3 series, it provides"
+" a comprehensive range of text embeddings and reranking models in various "
+"sizes (0.6B, 4B, and 8B). This guide describes how to run the model with "
+"vLLM Ascend. Note that only 0.9.2rc1 and higher versions of vLLM Ascend "
+"support the model."
+msgstr ""
+"Qwen3 Embedding 模型系列是 Qwen 家族最新的专有模型，专为文本嵌入和排序任务设计。在 Qwen3 "
+"系列的密集基础模型之上，它提供了多种尺寸（0.6B、4B 和 8B）的文本嵌入与重排序模型。本指南介绍如何使用 vLLM Ascend "
+"运行该模型。请注意，只有 vLLM Ascend 0.9.2rc1 及更高版本才支持该模型。"
+
+#: ../../tutorials/single_npu_qwen3_embedding.md:5
+msgid "Run docker container"
+msgstr "运行 docker 容器"
+
+#: ../../tutorials/single_npu_qwen3_embedding.md:7
+msgid ""
+"Take Qwen3-Embedding-8B model as an example, first run the docker container "
+"with the following command:"
+msgstr "以 Qwen3-Embedding-8B 模型为例，首先使用以下命令运行 docker 容器："
+
+#: ../../tutorials/single_npu_qwen3_embedding.md:29
+msgid "Setup environment variables:"
+msgstr "设置环境变量："
+
+#: ../../tutorials/single_npu_qwen3_embedding.md:39
+msgid "Online Inference"
+msgstr "在线推理"
+
+#: ../../tutorials/single_npu_qwen3_embedding.md:45
+msgid ""
+"Once your server is started, you can query the model with input prompts"
+msgstr "一旦服务器启动，就可以通过输入提示词来查询模型。"
+
+#: ../../tutorials/single_npu_qwen3_embedding.md:56
+msgid "Offline Inference"
+msgstr "离线推理"
+
+#: ../../tutorials/single_npu_qwen3_embedding.md:92
+msgid "If you run this script successfully, you can see the info shown below:"
+msgstr "如果你成功运行此脚本，你可以看到如下所示的信息："

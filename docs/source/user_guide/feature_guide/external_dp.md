@@ -4,12 +4,12 @@ For larger-scale deployments especially, it can make sense to handle the orchest
 
 In this case, it's more convenient to treat each DP rank like a separate vLLM deployment, with its own endpoint, and have an external router balance HTTP requests between them, making use of appropriate real-time telemetry from each server for routing decisions.
 
-## Getting Started
+## Getting Start
 
 The functionality of [external DP](https://docs.vllm.ai/en/latest/serving/data_parallel_deployment/?h=external#external-load-balancing) is already natively supported by vLLM. In vllm-ascend we provide two enhanced functionalities:
 
 1. A launch script that helps to launch multiple vLLM instances in one command.
-2. A request-length-aware load-balancing proxy for external DP.
+2. A request-length-aware load-balance proxy for external DP.
 
 This tutorial will introduce the usage of them.
 

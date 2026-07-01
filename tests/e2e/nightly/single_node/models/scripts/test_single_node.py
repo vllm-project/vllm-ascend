@@ -1,16 +1,13 @@
-import asyncio
 import json
 import logging
 import os
 import shlex
-import subprocess
-import sys
 from typing import Any
 
 import openai
-import psutil
 import pytest
-import vllm
+import subprocess
+import sys
 
 from tests.e2e.conftest import DisaggEpdProxy, RemoteEPDServer, RemoteOpenAIServer
 from tests.e2e.nightly.single_node.models.scripts.single_node_config import (
@@ -22,7 +19,6 @@ from tools.aisbench import run_aisbench_cases
 logger = logging.getLogger(__name__)
 
 configs = SingleNodeConfigLoader.from_yaml_cases()
-
 
 async def run_completion_test(config: SingleNodeConfig, server: "RemoteOpenAIServer | DisaggEpdProxy") -> None:
     client = server.get_async_client()
@@ -114,40 +110,11 @@ def run_benchmark_comparisons(config: SingleNodeConfig, results: Any) -> None:
         print(f"✅ Comparison passed: {eval_str} [threshold: {expected_threshold}]")
 
 
-async def run_check_rank0_process_count(
-    config: SingleNodeConfig, server: "RemoteOpenAIServer | DisaggEpdProxy"
-) -> None:
-    proc = await asyncio.create_subprocess_exec(
-        "npu-smi",
-        "info",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout_bytes, stderr_bytes = await proc.communicate()
-    if proc.returncode == 0:
-        logger.info("npu-smi info:\n%s", stdout_bytes.decode(errors="ignore"))
-    else:
-        logger.warning("npu-smi info failed: %s", stderr_bytes.decode(errors="ignore"))
-
-    vllm_serve_procs = [
-        p
-        for p in psutil.process_iter(attrs=["pid", "cmdline"], ad_value=None)
-        if p.info["cmdline"]
-        and any("vllm" in arg for arg in p.info["cmdline"])
-        and any("serve" in arg for arg in p.info["cmdline"])
-    ]
-    count = len(vllm_serve_procs)
-    assert count == 1, (
-        f"rank0 process count check failed: expected exactly 1 vllm serve process on rank0, found {count}"
-    )
-
-
 # Extend this dictionary to add new test capabilities
 TEST_HANDLERS = {
     "completion": run_completion_test,
     "image": run_image_test,
     "chat_completion": run_chat_completion_test,
-    "check_rank0_process_count": run_check_rank0_process_count,
 }
 
 
@@ -190,6 +157,7 @@ _FEATURE_ENVS: dict[str, str] = {
     "VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE": "topk_optimize",
     "VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE": "matmul_allreduce",
     "VLLM_ASCEND_ENABLE_MLAPO": "mlapo",
+    "VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL": "context_parallel",
     "VLLM_ASCEND_ENABLE_FUSED_MC2": "fused_mc2",
 }
 
@@ -257,6 +225,8 @@ def _extract_features(server_cmd: list[str] | str, envs: dict[str, Any]) -> list
         features.append(speculative.get("method", "speculative"))
 
     # Features from direct flags
+    if "--async-scheduling" in cmd_list:
+        features.append("async_scheduling")
     if "--enable-expert-parallel" in cmd_list:
         features.append("expert_parallel")
 
@@ -329,7 +299,9 @@ def _build_task_entry(case_key: str, case_config: dict[str, Any], result: Any) -
                 continue
             total_str = metric_data.get("total", "")
             try:
-                value = float(total_str.replace("token/s", "").replace("ms", "").replace("s", "").strip())
+                value = float(
+                    total_str.replace("token/s", "").replace("ms", "").replace("s", "").strip()
+                )
                 metrics[_PERF_METRIC_RENAME.get(metric_name, metric_name)] = round(value, 4)
             except (ValueError, AttributeError):
                 pass
@@ -361,7 +333,8 @@ def _save_benchmark_results_json(config: SingleNodeConfig, benchmark_keys: list[
     case_configs = [config.benchmarks[k] for k in benchmark_keys]
 
     tasks = [
-        _build_task_entry(key, case_cfg, result) for key, case_cfg, result in zip(benchmark_keys, case_configs, results)
+        _build_task_entry(key, case_cfg, result)
+        for key, case_cfg, result in zip(benchmark_keys, case_configs, results)
     ]
 
     passed = _all_passed(case_configs, results)
@@ -371,7 +344,7 @@ def _save_benchmark_results_json(config: SingleNodeConfig, benchmark_keys: list[
         "hardware": _extract_hardware(runner),
         "dtype": _extract_dtype(config),
         "feature": _extract_features(config.server_cmd, config.envs),
-        "vllm_version": vllm.__version__,
+        "vllm_version": os.environ.get("VLLM_VERSION", ""),
         "vllm_ascend_version": os.environ.get("VLLM_ASCEND_VERSION", ""),
         "tasks": tasks,
         "serve_cmd": _build_serve_cmd(config),
@@ -407,7 +380,6 @@ def _run_benchmarks(config: SingleNodeConfig, port: int) -> None:
     if "benchmark_comparisons" in config.test_content:
         run_benchmark_comparisons(config, result)
 
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("config", configs, ids=[config.name for config in configs])
 async def test_single_node(config: SingleNodeConfig) -> None:
@@ -416,9 +388,7 @@ async def test_single_node(config: SingleNodeConfig) -> None:
         for k, v in config.special_dependencies.items():
             command = [
                 sys.executable,
-                "-m",
-                "pip",
-                "install",
+                "-m", "pip", "install",
                 f"{k}=={v}",
             ]
             subprocess.call(command)

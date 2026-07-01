@@ -11,14 +11,22 @@ import vllm_ascend.eplb.core.eplb_device_transfer_loader as loader
 def mock_adaptor():
     adaptor = MagicMock()
 
-    adaptor.expert_map_per_layer_cpu = {0: {10: torch.tensor(1), 20: torch.tensor(0)}}
-
-    adaptor.expert_param_per_layer = {0: {0: [[torch.tensor([1.0])]], 1: [[torch.tensor([2.0])]]}}
-
-    adaptor.expert_weight_key_per_layer = {0: "weight_key"}
-    adaptor.buffer_tensor_list = {
-        "weight_key": [[torch.tensor([3.0]), torch.tensor([4.0])], [torch.tensor([5.0]), torch.tensor([6.0])]]
+    adaptor.expert_map_per_layer_cpu = {
+        0: {
+            10: torch.tensor(1),
+            20: torch.tensor(0)
+        }
     }
+
+    adaptor.expert_param_per_layer = {
+        0: {
+            0: [[torch.tensor([1.0])]],
+            1: [[torch.tensor([2.0])]]
+        }
+    }
+
+    adaptor.buffer_tensor_list = [[[torch.tensor([3.0])],
+                                   [torch.tensor([4.0])]]]
     return adaptor
 
 
@@ -27,40 +35,21 @@ def test_generate_task_and_state_flow(mock_adaptor):
         loader_obj = loader.D2DExpertWeightLoader()
     loader_obj.set_adator(mock_adaptor)
 
-    with (
-        patch("torch.distributed.P2POp") as mock_p2p,
-        patch("torch.distributed.isend", return_value="isend_op"),
-        patch("torch.distributed.irecv", return_value="irecv_op"),
-    ):
+    with patch("torch.distributed.P2POp") as mock_p2p, \
+         patch("torch.distributed.isend", return_value="isend_op"), \
+         patch("torch.distributed.irecv", return_value="irecv_op"):
+
         mock_p2p.side_effect = lambda op, tensor, rank: (op, tensor, rank)
 
         loader_obj.state = loader.ExpertWeightUpdateState.READY
-        loader_obj.generate_expert_d2d_transfer_task([(1, 10)], [(2, 20)], {20: torch.tensor(0)}, 0)
+        loader_obj.generate_expert_d2d_transfer_task([(1, 10)], [(2, 20)],
+                                                     {20: torch.tensor(0)}, 0)
         assert loader_obj.comm_op_list is None
         loader_obj.state = loader.ExpertWeightUpdateState.WAITING
 
         loader_obj.generate_expert_d2d_transfer_task([], [], {}, 0)
         assert not loader_obj.comm_op_list
         assert loader_obj.state == loader.ExpertWeightUpdateState.READY
-
-
-def test_generate_task_uses_layer_weight_key_buffer(mock_adaptor):
-    comm_group = MagicMock()
-    comm_group.ranks = {2: 20}
-    comm_group.device_group = object()
-    with patch("vllm_ascend.eplb.core.eplb_device_transfer_loader.get_dynamic_eplb_group", return_value=comm_group):
-        loader_obj = loader.D2DExpertWeightLoader()
-    loader_obj.set_adator(mock_adaptor)
-
-    with (
-        patch("torch.distributed.P2POp") as mock_p2p,
-        patch("torch.distributed.irecv", return_value="irecv_op"),
-    ):
-        mock_p2p.side_effect = lambda op, tensor, rank, group=None: (op, tensor, rank, group)
-        loader_obj.generate_expert_d2d_transfer_task([], [(2, 20)], {20: torch.tensor(0)}, 0)
-
-    assert mock_p2p.call_args_list[0].args[1] is mock_adaptor.buffer_tensor_list["weight_key"][0][0]
-    assert mock_p2p.call_args_list[1].args[1] is mock_adaptor.buffer_tensor_list["weight_key"][0][1]
 
 
 def test_asyn_transfer_and_update(mock_adaptor):
@@ -73,7 +62,8 @@ def test_asyn_transfer_and_update(mock_adaptor):
 
     reqs: list[MagicMock] = []
 
-    with patch("torch.distributed.batch_isend_irecv", return_value=[MagicMock(), MagicMock()]):
+    with patch("torch.distributed.batch_isend_irecv",
+               return_value=[MagicMock(), MagicMock()]):
         loader_obj.asyn_expert_weight_transfer(reqs)
 
     assert loader_obj.state == loader.ExpertWeightUpdateState.TRANSFERRING

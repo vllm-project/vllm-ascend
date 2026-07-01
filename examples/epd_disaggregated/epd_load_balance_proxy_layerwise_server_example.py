@@ -384,12 +384,12 @@ async def send_request_to_encode_service(
             response.raise_for_status()
             return response
         except (httpx.RequestError, httpx.HTTPStatusError) as e:
-            logger.warning("Attempt %s failed for %s: %s", attempt, endpoint, e)
+            logger.warning(f"Attempt {attempt} failed for {endpoint}: {str(e)}")
             last_exc = e
             if attempt < max_retries:
                 await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
             else:
-                logger.error("All %s attempts failed for %s.", max_retries, endpoint)
+                logger.error(f"All {max_retries} attempts failed for {endpoint}.")
                 raise last_exc
 
 
@@ -413,21 +413,21 @@ async def stream_service_response_with_retry(
                 return
         except (httpx.RequestError, httpx.HTTPStatusError) as e:
             if attempt < max_retries:
-                logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, e)
+                logger.warning(f"Attempt {attempt} failed for streaming {endpoint}: {str(e)}")
                 await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
             else:
-                logger.error("All %s attempts failed for streaming %s.", max_retries, endpoint)
+                logger.error(f"All {max_retries} attempts failed for streaming {endpoint}.")
                 raise e
         except Exception as e:
             if "first_chunk_sent" in locals() and first_chunk_sent:
-                logger.error("Streaming to client interrupted after response started: %s", e)
+                logger.error(f"Streaming to client interrupted after response started: {str(e)}")
                 return
             else:
                 if attempt < max_retries:
-                    logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, e)
+                    logger.warning(f"Attempt {attempt} failed for streaming {endpoint}: {str(e)}")
                     await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
                 else:
-                    logger.error("All %s attempts failed for streaming %s.", max_retries, endpoint)
+                    logger.error(f"All {max_retries} attempts failed for streaming {endpoint}.")
                     raise e
 
 
@@ -623,7 +623,7 @@ async def _handle_completions(api: str, request: Request):
                     ):
                         yield chunk
                 except Exception as e:
-                    logger.error("Error during streaming from pd %s: %s", pd.url, e)
+                    logger.error(f"Error during streaming from pd {pd.url}: {str(e)}")
                     proxy_state.abort_pd_request(pd_idx, request_id)
                 finally:
                     proxy_state.release_pd(pd_idx, token_score)
@@ -662,11 +662,8 @@ async def _handle_completions(api: str, request: Request):
                         yield chunk
                 except Exception as e:
                     logger.error(
-                        "Error during streaming from decoder %s: %s the aborted request %s "
-                        "will be routing to the target prefiller when new request is ready to dispatch to it",
-                        decoder.url,
-                        e,
-                        request_id,
+                        f"Error during streaming from decoder {decoder.url}: {str(e)} the aborted request {request_id} \
+                            will be routing to the target prefiller when new request is ready to dispatch to it"
                     )
 
                 # After streaming done, release tokens
@@ -735,12 +732,12 @@ async def send_request_to_service(
                 result_future.set_result(response.json()["kv_transfer_params"])
             return
         except (httpx.RequestError, httpx.HTTPStatusError) as e:
-            logger.warning("Attempt %s failed for %s: %s", attempt, endpoint, e)
+            logger.warning(f"Attempt {attempt} failed for {endpoint}: {str(e)}")
             last_exc = e
             if attempt < max_retries:
                 await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
             else:
-                logger.error("All %s attempts failed for %s.", max_retries, endpoint)
+                logger.error(f"All {max_retries} attempts failed for {endpoint}.")
                 raise last_exc
 
 
@@ -755,12 +752,12 @@ async def metaserver(request: Request):
         req_data, token_score, api = proxy_state.req_data_dict[request_id]
         request_id = get_origin_request_id(api, request_id)
         req_data["kv_transfer_params"] = kv_transfer_params
-        logger.debug("Prefiller score: %s", token_score)
+        logger.debug(f"Prefiller score: {token_score}")
 
         # Select prefiller
         prefiller_idx = proxy_state.select_prefiller(token_score)
         prefiller = proxy_state.prefillers[prefiller_idx]
-        logger.debug("Using prefill prefiller.url=%r req_data=%r", prefiller.url, req_data)
+        logger.debug(f"Using prefill {prefiller.url=} {req_data=}")
         # Send request to prefiller
         _ = await send_request_to_service(
             prefiller.client,
@@ -775,7 +772,7 @@ async def metaserver(request: Request):
         proxy_state.release_prefiller_kv(prefiller_idx, token_score)
 
     except Exception as e:
-        logger.error("Post metaserver failed with: %s", e)
+        logger.error(f"Post metaserver failed with: {str(e)}")
         proxy_state.release_prefiller(prefiller_idx, token_score)
         proxy_state.release_prefiller_kv(prefiller_idx, token_score)
 

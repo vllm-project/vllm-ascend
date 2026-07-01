@@ -1,0 +1,77 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-07-18 09:01+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../tutorials/single_npu_audio.md:1
+msgid "Single NPU (Qwen2-Audio 7B)"
+msgstr "单个 NPU（Qwen2-Audio 7B）"
+
+#: ../../tutorials/single_npu_audio.md:3
+msgid "Run vllm-ascend on Single NPU"
+msgstr "在单个 NPU 上运行 vllm-ascend"
+
+#: ../../tutorials/single_npu_audio.md:5
+msgid "Offline Inference on Single NPU"
+msgstr "在单个NPU上进行离线推理"
+
+#: ../../tutorials/single_npu_audio.md:7
+msgid "Run docker container:"
+msgstr "运行 docker 容器："
+
+#: ../../tutorials/single_npu_audio.md:29
+msgid "Setup environment variables:"
+msgstr "设置环境变量："
+
+#: ../../tutorials/single_npu_audio.md:40
+msgid ""
+"`max_split_size_mb` prevents the native allocator from splitting blocks "
+"larger than this size (in MB). This can reduce fragmentation and may allow "
+"some borderline workloads to complete without running out of memory. You can"
+" find more details "
+"[<u>here</u>](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/800alpha003/apiref/envref/envref_07_0061.html)."
+msgstr ""
+"`max_split_size_mb` 防止本地分配器拆分超过此大小（以 MB "
+"为单位）的内存块。这可以减少内存碎片，并且可能让一些边缘情况下的工作负载顺利完成而不会耗尽内存。你可以在[<u>这里</u>](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/800alpha003/apiref/envref/envref_07_0061.html)找到更多详细信息。"
+
+#: ../../tutorials/single_npu_audio.md:43
+msgid "Install packages required for audio processing:"
+msgstr "安装音频处理所需的软件包："
+
+#: ../../tutorials/single_npu_audio.md:50
+msgid "Run the following script to execute offline inference on a single NPU:"
+msgstr "运行以下脚本以在单个 NPU 上执行离线推理："
+
+#: ../../tutorials/single_npu_audio.md:114
+msgid "If you run this script successfully, you can see the info shown below:"
+msgstr "如果你成功运行此脚本，你可以看到如下所示的信息："
+
+#: ../../tutorials/single_npu_audio.md:120
+msgid "Online Serving on Single NPU"
+msgstr "单个 NPU 上的在线服务"
+
+#: ../../tutorials/single_npu_audio.md:122
+msgid ""
+"Currently, vllm's OpenAI-compatible server doesn't support audio inputs, "
+"find more details [<u>here</u>](https://github.com/vllm-"
+"project/vllm/issues/19977)."
+msgstr ""
+"目前，vllm 的兼容 OpenAI 的服务器不支持音频输入，更多详情请查看[<u>这里</u>](https://github.com/vllm-"
+"project/vllm/issues/19977)。"

@@ -68,7 +68,7 @@ class ModelAclGraphManager(ModelCudaGraphManager):
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """Override run_fullgraph to update full graph params in run_fullgraph."""
         num_tokens = desc.num_tokens
-        logger.info_once("run_fullgraph with num_tokens=%s", num_tokens)
+        logger.info_once(f"run_fullgraph with num_tokens={num_tokens}")
         ret = super().run_fullgraph(desc)
 
         positions = self.model_runner.input_buffers.positions[:num_tokens]
@@ -87,7 +87,7 @@ class ModelAclGraphManager(ModelCudaGraphManager):
             forward_context = get_forward_context()
             update_full_graph_params(
                 # FIXME(Ronald1995): support hybrid attn backend
-                self.model_runner.attn_groups[0][0].backend,
+                list(self.model_runner.attn_backends.values())[0],
                 self.model_runner.update_stream,
                 forward_context,
                 num_tokens,
@@ -113,7 +113,7 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         """Capture CUDA graphs for model forward pass."""
         model = ModelWithContext(model)
         with communicator_switch():
-            return super().capture(
+            super().capture(
                 model,
                 model_state,
                 input_buffers,
@@ -132,27 +132,14 @@ class ModelWithContext(nn.Module):
     so we can inherit vllm's CudaGraphManager._capture_full_graph.
     """
 
-    def __init__(self, original_model, is_draft_model=False, is_draft_model_prefill=False):
+    def __init__(self, original_model):
         super().__init__()
         self.original_model = original_model
-        self.is_draft_model = is_draft_model
-        self.is_draft_model_prefill = is_draft_model_prefill
 
     def forward(self, *args, **kwargs):
         # In warmup phase, capturing=False by default.
         # when capturing, we need to set capturing=True in forward context.
         if torch.npu.is_current_stream_capturing():
             _EXTRA_CTX.capturing = True
-        if self.is_draft_model:
-            _EXTRA_CTX.is_draft_model = True
-        if self.is_draft_model_prefill:
-            _EXTRA_CTX.is_draft_model_prefill = True
 
         return self.original_model(*args, **kwargs)
-
-    def get_original_model(self):
-        return self.original_model
-
-    def compute_logits(self, hidden_states: torch.Tensor):
-        # draft model has `compute_logits`, which is not in ModelWithContext
-        return self.original_model.compute_logits(hidden_states)

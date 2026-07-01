@@ -31,7 +31,6 @@ class P2PLoad:
         world_name: str,
         source_ip: str,
         source_port: int,
-        group_name: str = "netloader",
     ):
         """
         Initializes the P2PLoad instance.
@@ -40,12 +39,10 @@ class P2PLoad:
         - world_name: The name of the distributed group.
         - source_ip: The IP address of the source node.
         - source_port: The port number for the source node.
-        - group_name: Name of the HCCL process group.
         """
         self.world_name = world_name
         self.source_ip = source_ip
         self.source_port = source_port
-        self.group_name = group_name
 
     def load(self, model):
         """
@@ -58,9 +55,7 @@ class P2PLoad:
         - The model if loading is successful, otherwise None.
         """
         model_device = next(model.parameters()).device
-        logger.info(
-            "Start init_process_group, name: %s, addr: %s:%s", self.world_name, self.source_ip, self.source_port
-        )
+        logger.info(f"Start init_process_group, name: {self.world_name}, addr: {self.source_ip}:{self.source_port}")
         receiver_pg = None
         loaded_model = None
         try:
@@ -69,14 +64,14 @@ class P2PLoad:
                 port=self.source_port,
                 rank=0,
                 world_size=2,
-                group_name=self.group_name,
+                group_name="netloader",
             )
             logger.info(
-                "Finish init_process_group, name: %s, addr: %s:%s", self.world_name, self.source_ip, self.source_port
+                f"Finish init_process_group, name: {self.world_name}, addr: {self.source_ip}:{self.source_port}"
             )
 
-            logger.info("Start recv, name: %s, addr: %s:%s", self.world_name, self.source_ip, self.source_port)
-            logger.info("Model device: %s", model_device)
+            logger.info(f"Start recv, name: {self.world_name}, addr: {self.source_ip}:{self.source_port}")
+            logger.info(f"Model device: {model_device}")
 
             trans_stream = torch_npu.npu.Stream()
             with torch_npu.npu.stream(trans_stream):
@@ -88,10 +83,10 @@ class P2PLoad:
 
             torch_npu.npu.synchronize(trans_stream)
 
-            logger.info("Finish recv, name: %s, addr: %s:%s", self.world_name, self.source_ip, self.source_port)
+            logger.info(f"Finish recv, name: {self.world_name}, addr: {self.source_ip}:{self.source_port}")
             loaded_model = model
         except Exception as e:
-            logger.error("Failed to recv model: %s", e)
+            logger.error("Failed to recv model: {}".format(e))
         finally:
             if receiver_pg:
                 destroy_stateless_process_group(receiver_pg)
@@ -103,7 +98,7 @@ class P2PSend:
     Class for sending model parameters in a distributed manner using HCCL backend.
     """
 
-    def __init__(self, listen_ip: str, listen_port: int, comm_name: str, group_name: str = "netloader"):
+    def __init__(self, listen_ip: str, listen_port: int, comm_name: str):
         """
         Initializes the P2PSend instance.
 
@@ -111,12 +106,10 @@ class P2PSend:
         - listen_ip: The IP address to listen on.
         - listen_port: The port number to listen on.
         - comm_name: The name of the communication group.
-        - group_name: Name of the HCCL process group.
         """
         self.listen_ip = listen_ip
         self.listen_port = listen_port
         self.comm_name = comm_name
-        self.group_name = group_name
 
     def send(self, model, int8_params: dict):
         """
@@ -128,7 +121,7 @@ class P2PSend:
         """
         model_device = next(model.parameters()).device
         torch.npu.set_device(model_device)
-        logger.info("Start init_process_group, name: %s, addr: %s:%s", self.comm_name, self.listen_ip, self.listen_port)
+        logger.info(f"Start init_process_group, name: {self.comm_name}, addr: {self.listen_ip}:{self.listen_port}")
         sender_pg = None
         try:
             sender_pg = stateless_init_process_group(
@@ -136,13 +129,11 @@ class P2PSend:
                 port=self.listen_port,
                 rank=1,
                 world_size=2,
-                group_name=self.group_name,
+                group_name="netloader",
             )
-            logger.info(
-                "Finish init_process_group, name: %s, addr: %s:%s", self.comm_name, self.listen_ip, self.listen_port
-            )
-            logger.info("Start send, name: %s, addr: %s:%s", self.comm_name, self.listen_ip, self.listen_port)
-            logger.info("Model device: %s", model_device)
+            logger.info(f"Finish init_process_group, name: {self.comm_name}, addr: {self.listen_ip}:{self.listen_port}")
+            logger.info(f"Start send, name: {self.comm_name}, addr: {self.listen_ip}:{self.listen_port}")
+            logger.info(f"Model device: {model_device}")
 
             trans_stream = torch_npu.npu.Stream()
             with torch_npu.npu.stream(trans_stream):
@@ -155,7 +146,7 @@ class P2PSend:
                         sender_pg.send([param.contiguous()], 0, 0).wait()
                 torch.distributed.barrier(group=sender_pg, device_ids=[model_device.index])
             torch_npu.npu.synchronize(trans_stream)
-            logger.info("Finish send, name: %s, addr: %s:%s", self.comm_name, self.listen_ip, self.listen_port)
+            logger.info(f"Finish send, name: {self.comm_name}, addr: {self.listen_ip}:{self.listen_port}")
         finally:
             if sender_pg:
                 destroy_stateless_process_group(sender_pg)

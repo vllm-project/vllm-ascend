@@ -2,11 +2,9 @@
 
 ## Version Specific FAQs
 
-- [[v0.22.1rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/10593)
-- [[v0.21.0rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/9970)
-- [[v0.20.2rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/9586)
-- [[v0.19.1rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/8819)
-- [[v0.18.0] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/8238)
+- [[v0.18.0rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/7633)
+- [[v0.17.0rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/7173)
+- [[v0.13.0] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/6583)
 
 ## General FAQs
 
@@ -109,9 +107,9 @@ If all above steps are not working, feel free to submit a GitHub issue.
 
 `vllm-ascend` is a hardware plugin for vLLM. Stable releases usually align with the same vLLM version, while RC releases may use the corresponding vLLM final release version. For example, `vllm-ascend` `v0.18.0rc1` matches vLLM `v0.18.0`. For the main branch, we ensure that `vllm-ascend` and `vllm` are compatible at every commit.
 
-### 8. Does vllm-ascend support Prefill-Decode (PD) Disaggregation feature?
+### 8. Does vllm-ascend support Prefill Disaggregation feature?
 
-Yes, vllm-ascend supports Prefill-Decode Disaggregation feature with Mooncake backend. See the [official tutorial](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/features/pd_disaggregation_mooncake_multi_node.html) for example.
+Yes, vllm-ascend supports Prefill Disaggregation feature with Mooncake backend. See the [official tutorial](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/features/pd_disaggregation_mooncake_multi_node.html) for example.
 
 ### 9. Does vllm-ascend support quantization method?
 
@@ -139,9 +137,9 @@ The problem is usually caused by the installation of a development or editable v
 
 OOM errors typically occur when the model exceeds the memory capacity of a single NPU. For general guidance, you can refer to [vLLM OOM troubleshooting documentation](https://docs.vllm.ai/en/latest/usage/troubleshooting/#out-of-memory).
 
-In scenarios where NPUs have limited high bandwidth memory (on-chip memory) capacity, dynamic memory allocation/deallocation during inference can exacerbate memory fragmentation, leading to OOM. To address this:
+In scenarios where NPUs have limited high bandwidth memory (HBM) capacity, dynamic memory allocation/deallocation during inference can exacerbate memory fragmentation, leading to OOM. To address this:
 
-- **Limit `--max-model-len`**: It can save the on-chip memory usage for KV cache initialization step.
+- **Limit `--max-model-len`**: It can save the HBM usage for KV cache initialization step.
 
 - **Adjust `--gpu-memory-utilization`**: If unspecified, the default value is `0.9`. You can decrease this value to reserve more memory to reduce fragmentation risks. See details in: [vLLM - Inference and Serving - Engine Arguments](https://docs.vllm.ai/en/latest/cli/serve/#-gpu-memory-utilization).
 
@@ -149,7 +147,7 @@ In scenarios where NPUs have limited high bandwidth memory (on-chip memory) capa
 
 ### 13. Failed to enable NPU graph mode when running DeepSeek
 
-Enabling NPU graph mode for DeepSeek may trigger an error. This is because when both MLA (Multi-Head Latent Attention) and NPU graph mode are active, the number of queries per KV head must be 32, 64, or 128. However, DeepSeek-V2-Lite has only 16 attention heads, which results in 16 queries per KV—a value outside the supported range. Support for NPU graph mode on DeepSeek-V2-Lite will be added in a future update.
+Enabling NPU graph mode for DeepSeek may trigger an error. This is because when both MLA and NPU graph mode are active, the number of queries per KV head must be 32, 64, or 128. However, DeepSeek-V2-Lite has only 16 attention heads, which results in 16 queries per KV—a value outside the supported range. Support for NPU graph mode on DeepSeek-V2-Lite will be added in a future update.
 
 And if you're using DeepSeek-V3 or DeepSeek-R1, please make sure after the tensor parallel split, `num_heads`/`num_kv_heads` is {32, 64, 128}.
 
@@ -181,7 +179,7 @@ There are several factors that affect output determinism:
    # Create a sampling params object.
    sampling_params = SamplingParams(temperature=0)
    # Create an LLM.
-   llm = LLM(model="Qwen/Qwen3-0.6B")
+   llm = LLM(model="Qwen/Qwen2.5-0.5B-Instruct")
 
    # Generate texts from the prompts.
    outputs = llm.generate(prompts, sampling_params)
@@ -200,31 +198,26 @@ There are several factors that affect output determinism:
    export ATB_LLM_LCOC_ENABLE=0
    ```
 
-### 16. How to fix the error "ImportError: Please install vllm[audio] for audio support" for the multi-modal models？
+### 16. How to fix the error "ImportError: Please install vllm[audio] for audio support" for the Qwen2.5-Omni model？
 
-Some multi-modal models requires the `librosa` package to be installed, you need to install the `qwen-omni-utils` package to ensure all dependencies are met, for Qwen-omni, run `pip install qwen-omni-utils`.
+The `Qwen2.5-Omni` model requires the `librosa` package to be installed, you need to install the `qwen-omni-utils` package to ensure all dependencies are met, run `pip install qwen-omni-utils`.
 This package will install `librosa` and its related dependencies, resolving the `ImportError: No module named 'librosa'` issue and ensuring that the audio processing functionality works correctly.
 
 ### 17. How to troubleshoot and resolve size capture failures resulting from stream resource exhaustion, and what are the underlying causes?
 
-```text
-capture_begin:../torch_npu/csrc/core/npu/NPUGraph.cpp:230 NPU function error: c10_npu::acl::AclmdlRICaptureBegin(capture_stream_, capture_mode), error code is 207008
-[Error]: Stream resources are insufficient.
-[PID: ...] Insufficient_Stream_Resources(EL0009): The stream resources are insufficient.
+```shell
+error example in detail: 
+ERROR 09-26 10:48:07 [model_runner_v1.py:3029] ACLgraph sizes capture fail: RuntimeError:
+ERROR 09-26 10:48:07 [model_runner_v1.py:3029] ACLgraph has insufficient available streams to capture the configured number of sizes.Please verify both the availability of adequate streams and the appropriateness of the configured size count.
 ```
-
-When vLLM Ascend recognizes this capture-time stream-resource signature in the error text, it re-raises the error with targeted guidance for ACL graph sizing and mitigation.
 
 Recommended mitigation strategies:
 
-1. Upgrade to a newer HDK/CANN stack if one is available for your environment. Recent releases improve ACL graph capacity, so older workarounds may no longer be necessary.
-2. Manually reduce the configured graph sizes, for example: '{"cudagraph_capture_sizes":[size1, size2, size3, ...]}', or lower `max_cudagraph_capture_size`.
-3. If your workload is mostly uniform decode, try ACLGraph's `FULL` or `FULL_DECODE_ONLY` mode instead of the `PIECEWISE`.
-4. If you use `PIECEWISE` or `FULL_AND_PIECEWISE` and still hit this failure after upgrading, set `cudagraph_capture_sizes` manually according to your real workload and reduce the configured coverage.
-5. If you are debugging a startup failure, temporarily disable graph mode (`cudagraph_mode="NONE"` / `enforce_eager=True`) to confirm the issue is capture-related.
+1. Manually configure the compilation_config parameter with a reduced size set: '{"cudagraph_capture_sizes":[size1, size2, size3, ...]}'.
+2. Employ ACLgraph's full graph mode as an alternative to the piecewise approach.
 
 Root cause analysis:
-ACL graph capture can still fail when the runtime resources required by the selected graph sizes exceed what the current software/hardware stack can provide. This is most visible in `PIECEWISE` scenarios because the number of captured graphs scales with model depth and capture-size coverage. vLLM Ascend no longer auto-shrinks the PIECEWISE capture-size set locally, so the practical mitigations are to upgrade the HDK/CANN stack or reduce the configured graph sizes explicitly. The runtime guidance is intentionally narrow: it is only added when capture fails with the confirmed stream-resource signature above.
+The current stream requirement calculation for size captures only accounts for measurable factors including: data parallel size, tensor parallel size, expert parallel configuration, piece graph count, multistream-overlap shared expert settings, and HCCL communication mode (AIV/AICPU). However, numerous unquantifiable elements, such as operator characteristics and specific hardware features, consume additional streams outside of this calculation framework, resulting in stream resource exhaustion during size capture operations.
 
 ### 18. How to install custom version of torch_npu?
 
@@ -261,7 +254,20 @@ Copy the `vllm_ascend_<tag>.tar` file (where `<tag>` is the image tag you used) 
 
 When using `--shm-size`, you may need to add the `--privileged=true` flag to your `docker run` command to grant the container necessary permissions. Please be aware that using `--privileged=true` grants the container extensive privileges on the host system, which can be a security risk. Only use this option if you understand the implications and trust the container's source.
 
-### 21. How to set `SOC_VERSION` when building from source on a CPU-only machine?
+### 21. How to achieve low latency in a small batch scenario?
+
+The performance of `torch_npu.npu_fused_infer_attention_score` in small batch scenarios is not satisfactory, mainly due to the lack of flash decoding function. We offer an alternative operator in `tools/install_flash_infer_attention_score_ops_a2.sh` and `tools/install_flash_infer_attention_score_ops_a3.sh`, you can install it using the following instruction:
+
+```bash
+bash tools/install_flash_infer_attention_score_ops_a2.sh
+## change to run the following instruction if you're using A3 machine
+# bash tools/install_flash_infer_attention_score_ops_a3.sh
+```
+
+**NOTE**: Don't set `additional_config.pa_shape_list` when using this method; otherwise, it will lead to another attention operator.
+**Important**: Please make sure you're using the **official image** of `vllm-ascend`; otherwise, you **must change** the directory `/vllm-workspace` in `tools/install_flash_infer_attention_score_ops_a2.sh` or `tools/install_flash_infer_attention_score_ops_a3.sh` to your own, or create one. If you're not the root user, you need `sudo` **privileges** to run this script.
+
+### 22. How to set `SOC_VERSION` when building from source on a CPU-only machine?
 
 When building from source (e.g. `pip install -e .`), the build may try to infer the target chip via `npu-smi`. If `npu-smi` is not available (common in CPU-only build environments), you must set `SOC_VERSION` manually before installation.
 
@@ -277,34 +283,6 @@ export SOC_VERSION="ascend910_9391"
 # Atlas 300I
 export SOC_VERSION="ascend310p1"
 
-# Ascend 950 Products
+# Atlas A5 (Ascend 950 series)
 export SOC_VERSION="<value starting with ascend950>"
 ```
-
-### 22. Why TPOT increases drastically as concurrency grows?
-
-When testing a vLLM server, one may find that TPOT increases as concurrency increases (for example, TPOT increases by 0.5 ~ 1ms when concurrency increases by 4). This phenomenon is normal in most cases. However, sometimes TPOT may increase dramatically (10 to 100ms for example) as concurrency grows. This is possibly caused by [**PREEMPTION**](https://docs.vllm.ai/en/latest/configuration/optimization/#preemption) in vLLM.
-Generally, when your server hits KV cache limits, vLLM tries to free KV cache of requests to ensure sufficient space for other requests, which is called preemption in vLLM. When a request is preempted, the default behavior is to recompute the KV cache of this request again in the future, which is why the performance might drop significantly. There are several ways to verify this:
-
-- vLLM usually logs stats on your server. You might see metrics like `GPU KV cache usage: 99.0%,`. When reaching 100%, it triggers preemption.
-- When launching a vLLM server, you will see logs like `GPU KV cache size: 66340 tokens` and `Maximum concurrency for 16,384 tokens per request: 4.05`. These are estimated KV cache capacity for a single DP group. You can adjust the overall request traffic according to this.
-
-Preemption cannot be avoided completely since KV cache usage always has a limit. But there are methods to reduce the chances of preemption. As is suggested in [**PREEMPTION**](https://docs.vllm.ai/en/latest/configuration/optimization/#preemption), the core strategy is to increase available KV cache. For example, one can increase `--gpu-memory-utilization` or decrease `--max-num-seqs` && `--max-num-batched-tokens`.
-
-### 23. How do I choose between single-node and multi-node deployment?
-
-Single-node deployment is recommended when the model fits within the memory of a single node's NPUs. For models like Qwen3-32B (BF16), which requires 4 × 64G cards, multi-NPU within a single node (TP) is sufficient. Multi-node deployment is only needed when the total NPU count exceeds a single node's capacity.
-
-### 24. What quantization method should I use?
-
-- **BF16**: Best accuracy, highest memory footprint. Use for accuracy-critical applications or when memory is sufficient.
-- **W8A8**: Good balance of accuracy and memory reduction. Use for large models (e.g., 32B) on memory-constrained hardware.
-- **W4A8/W4A4**: Maximum memory reduction. Suitable for deploying larger models on smaller hardware configurations, with some accuracy trade-off.
-
-### 25. When should I enable FlashComm_v1?
-
-Enable FlashComm_v1 (`VLLM_ASCEND_ENABLE_FLASHCOMM1=1`) when using Tensor Parallelism (TP ≥ 2) with high concurrency. It is threshold-protected and will not activate in low-concurrency scenarios where it could degrade performance.
-
-### 26. What is the difference between FIA and PA operators for attention?
-
-FIA (Flash Attention) is the default attention operator in vLLM-Ascend. In some batch-size settings (particularly medium concurrency), FIA may exhibit suboptimal performance. The PA (Page Attention) operator can be manually enabled via `pa_shape_list` in `--additional-config`. When the runtime batch size matches a value in `pa_shape_list`, the framework switches to PA. This is a temporary tuning knob — future FIA optimizations will make this parameter obsolete.

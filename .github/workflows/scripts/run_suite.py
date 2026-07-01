@@ -1,193 +1,31 @@
 import argparse
 import json
-import multiprocessing
 import os
-import subprocess
 import sys
-import time
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
 import tabulate
 import yaml
+from ci_utils import TestFile, TestRecord, run_tests
 
-multiprocessing.set_start_method("spawn", force=True)
-
-_CONFIG_UPSTREAM = Path(__file__).parent / "upstream_config.yaml"
-
-# Each entry: (config_path, is_upstream)
-# When is_upstream is True, sanity_check is skipped for tests from that config.
-_DEFAULT_CONFIGS: list[tuple[Path, bool]] = [
-    (_CONFIG_UPSTREAM, True),
-]
+_CONFIG_PATH = Path(__file__).parent / "config.yaml"
 
 
-class _Color:
-    HEADER = "\033[95m"
-    GREEN = "\033[92m"
-    RED = "\033[91m"
-    RESET = "\033[0m"
-
-
-@dataclass
-class TestFile:
-    name: str
-    estimated_time: float = 60
-    is_skipped: bool = False
-
-
-@dataclass
-class TestRecord:
-    name: str
-    passed: bool
-    elapsed: float
-    estimated: float
-
-    def to_dict(self) -> dict:
-        return {
-            "name": self.name,
-            "passed": self.passed,
-            "elapsed": self.elapsed,
-            "estimated": self.estimated,
-        }
-
-
-def _escape_github_actions_value(value: str) -> str:
-    return value.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
-
-
-def _print_github_actions_group_start(title: str) -> None:
-    if os.environ.get("GITHUB_ACTIONS") == "true":
-        print(f"::group::{_escape_github_actions_value(title)}", flush=True)
-
-
-def _print_github_actions_group_end() -> None:
-    if os.environ.get("GITHUB_ACTIONS") == "true":
-        print("::endgroup::", flush=True)
-
-
-def _print_github_actions_annotation(annotation: str, message: str) -> None:
-    if os.environ.get("GITHUB_ACTIONS") == "true":
-        print(f"::{annotation}::{_escape_github_actions_value(message)}", flush=True)
-
-
-def run_tests(
-    files: list[TestFile],
-    continue_on_error: bool = False,
-) -> tuple[int, list[TestRecord]]:
-    """
-    Run each TestFile with pytest and collect timing results.
-
-    NOTE:
-        The emitted START / PASSED / FAILED log lines are parsed by
-        ci_log_summary.py to recover per-test invocation boundaries.
-        Keep this output format stable, or update the corresponding
-        regexes in those CI log summarizers together.
-
-    Args:
-        files: Tests to run (skipped entries should already be filtered out).
-        continue_on_error: If True, keep running after a failure.
-        report_path: If provided, write a Markdown timing report here.
-
-    Returns:
-        (exit_code, records) — exit_code is 0 on full success, 1 otherwise.
-    """
-    records: list[TestRecord] = []
-    all_passed = True
-    total_start = time.perf_counter()
-
-    for i, test in enumerate(files):
-        _print_github_actions_group_start(f"[{i + 1}/{len(files)}] {test.name}")
-        try:
-            print(f"\n{'.' * 60}", flush=True)
-            # NOTE: ci_log_summary.py depend on this
-            # START line format when splitting suite-level logs into test runs.
-            print(
-                f"{_Color.HEADER}[{i + 1}/{len(files)}] START  {test.name}{_Color.RESET}",
-                flush=True,
+def load_suites(config_path: Path = _CONFIG_PATH) -> dict[str, list[TestFile]]:
+    """Load all test suites from config.yaml."""
+    data = yaml.safe_load(config_path.read_text())
+    return {
+        suite_name: [
+            TestFile(
+                name=entry["name"],
+                estimated_time=entry.get("estimated_time", 60),
+                is_skipped=entry.get("is_skipped", False),
             )
-
-            start = time.perf_counter()
-            result = subprocess.run(["pytest", "-sv", "--durations=0", "--color=yes", test.name])
-            elapsed = time.perf_counter() - start
-            passed = result.returncode == 0
-
-            records.append(TestRecord(name=test.name, passed=passed, elapsed=elapsed, estimated=test.estimated_time))
-
-            color = _Color.GREEN if passed else _Color.RED
-            status = "PASSED" if passed else f"FAILED (exit code {result.returncode})"
-            # NOTE: ci_log_summary.py depend on this
-            # PASSED / FAILED (exit code X) line format for suite end detection.
-            print(
-                f"{color}[{i + 1}/{len(files)}] {status}  {test.name}  ({elapsed:.0f}s){_Color.RESET}",
-                flush=True,
-            )
-        finally:
-            _print_github_actions_group_end()
-
-        if not passed:
-            _print_github_actions_annotation(
-                "error",
-                f"[{i + 1}/{len(files)}] FAILED {test.name}. "
-                "Please go to the Summary section to quickly review the error overview, "
-                "or expand the logs to view the error details.",
-            )
-            all_passed = False
-            if not continue_on_error:
-                break
-
-    total_elapsed = time.perf_counter() - total_start
-    passed_count = sum(1 for r in records if r.passed)
-
-    print(f"\n{'=' * 60}")
-    color = _Color.GREEN if all_passed else _Color.RED
-    print(f"{color}Summary: {passed_count}/{len(files)} passed  ({total_elapsed:.2f}s total){_Color.RESET}")
-    print("=" * 60)
-    for r in records:
-        icon = f"{_Color.GREEN}✓{_Color.RESET}" if r.passed else f"{_Color.RED}✗{_Color.RESET}"
-        print(f"  {icon} {r.name}  ({r.elapsed:.0f}s)")
-    print(flush=True)
-
-    return (0 if all_passed else 1), records
-
-
-def load_suites(
-    config_paths: list[tuple[Path, bool]] | None = None,
-) -> tuple[dict[str, list[TestFile]], set[str]]:
-    """Load all test suites from config yaml files.
-
-    Each entry in config_paths is a (path, is_upstream) tuple.
-    Returns (all_suites, upstream_files) where upstream_files is the set of
-    test file names originating from upstream configs (sanity_check is skipped
-    for these).
-    """
-    if config_paths is None:
-        config_paths = _DEFAULT_CONFIGS
-
-    all_suites: dict[str, list[TestFile]] = {}
-    upstream_files: set[str] = set()
-    for config_path, is_upstream in config_paths:
-        if not config_path.exists():
-            continue
-        print(f"Loading suites from {config_path}" + (" (upstream)" if is_upstream else ""))
-        with open(config_path) as f:
-            data = yaml.safe_load(f) or {}
-        for suite_name, tests in data.items():
-            files = []
-            for entry in tests or []:
-                name = entry["name"]
-                files.append(
-                    TestFile(
-                        name=name,
-                        estimated_time=entry.get("estimated_time", 60),
-                        is_skipped=entry.get("is_skipped", False),
-                    )
-                )
-                if is_upstream:
-                    upstream_files.add(name.split("::")[0])
-            all_suites[suite_name] = files
-    return all_suites, upstream_files
+            for entry in entries
+        ]
+        for suite_name, entries in data.items()
+    }
 
 
 def partition(files: list[TestFile], rank: int, size: int) -> list[TestFile]:
@@ -210,8 +48,8 @@ def partition(files: list[TestFile], rank: int, size: int) -> list[TestFile]:
         lightest = sums.index(min(sums))
         buckets[lightest].append(idx)
         sums[lightest] += test.estimated_time
-    # Sort each bucket ascending by estimated_time for better feedback and developer experience
-    return sorted([active[i] for i in buckets[rank]], key=lambda f: f.estimated_time, reverse=True)
+
+    return sorted([active[i] for i in buckets[rank]], key=lambda f: f.estimated_time)
 
 
 def _find_project_root() -> Path:
@@ -241,34 +79,25 @@ def _minimal_covered_dirs(file_paths: set[str], root: Path) -> set[Path]:
     return dirs
 
 
-def sanity_check(suites: dict[str, list[TestFile]], upstream_files: set[str]) -> None:
+def sanity_check(suites: dict[str, list[TestFile]]) -> None:
     """
     Verify that:
-    1. Every local test file in any suite exists on disk.
+    1. Every test file in any suite exists on disk.
     2. No test_*.py files exist on disk (in covered dirs) that are absent from all suites.
-
-    Files from upstream configs are skipped — they live in a separate checkout
-    and we only register a subset of them.
     Raises SystemExit with a descriptive message on failure.
     """
-    if upstream_files:
-        return
     suite_files = {f.name.split("::")[0] for tests in suites.values() for f in tests}
-
-    # Only check files that belong to this repo (not from upstream configs).
-    local_files = suite_files - upstream_files
-    print("local_files>>>", local_files)
     root = _find_project_root()
-    covered = _minimal_covered_dirs(local_files, root)
-    print("covered>>>", covered)
+    covered = _minimal_covered_dirs(suite_files, root)
+
     disk_files = {str(p.relative_to(root)) for d in covered for p in (root / d).rglob("test_*.py")}
 
-    missing_from_suite = sorted(disk_files - local_files)
+    missing_from_suite = sorted(disk_files - suite_files)
     if missing_from_suite:
         entries = "\n".join(f'  TestFile("{f}"),' for f in missing_from_suite)
         raise SystemExit(f"Test files on disk are not in any suite (add them or mark is_skipped=True):\n{entries}")
 
-    missing_from_disk = sorted(local_files - disk_files)
+    missing_from_disk = sorted(suite_files - disk_files)
     if missing_from_disk:
         entries = "\n".join(f'  TestFile("{f}"),' for f in missing_from_disk)
         raise SystemExit(f"Test files listed in suite do not exist on disk:\n{entries}")
@@ -337,7 +166,7 @@ def _save_timing_json(
 
 
 def main() -> None:
-    suites, upstream_files = load_suites()
+    suites = load_suites()
 
     parser = argparse.ArgumentParser(description="Run a named e2e test suite")
     parser.add_argument(
@@ -363,7 +192,7 @@ def main() -> None:
     parser.add_argument(
         "--auto-upgrade-estimated-times",
         action="store_true",
-        help="Automatically write timing data based on actual timings (default: False) \
+        help="Automatically update estimated times in config.yaml based on actual timings (default: False) \
 If enabled, the script always exit with 0, even if some tests fail, since the primary purpose is to gather \
 timing data to improve estimates.",
     )
@@ -380,7 +209,7 @@ timing data to improve estimates.",
     )
     args = parser.parse_args()
 
-    sanity_check(suites, upstream_files)
+    sanity_check(suites)
 
     all_files = suites[args.suite]
     skipped = [f for f in all_files if f.is_skipped]

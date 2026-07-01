@@ -47,15 +47,14 @@ logger = logging.getLogger(__name__)
 def check_or_set_default_env(cmake_args, env_name, env_variable, default_path=""):
     if env_variable is None:
         logging.warning(
-            "No %s found in your environment, please try to set %s if you customize the installation path of this "
-            "library, otherwise default path will be adapted during build this project",
-            env_name,
-            env_name,
+            f"No {env_name} found in your environment, pleause try to set {env_name} "
+            "if you customize the installation path of this library, otherwise default "
+            "path will be adapted during build this project"
         )
-        logging.warning("Set default %s: %s", env_name, default_path)
+        logging.warning(f"Set default {env_name}: {default_path}")
         env_variable = default_path
     else:
-        logging.info("Found existing %s: %s", env_name, env_variable)
+        logging.info(f"Found existing {env_name}: {env_variable}")
     # cann package seems will check this environments in cmake, need write this env variable back.
     if env_name == "ASCEND_HOME_PATH":
         os.environ["ASCEND_HOME_PATH"] = env_variable
@@ -73,31 +72,14 @@ def get_value_from_lines(lines: list[str], key: str) -> str:
 
 def get_chip_type() -> str:
     try:
-        # Get NPU ID
         npu_info_lines = subprocess.check_output(["npu-smi", "info", "-l"]).decode().strip().split("\n")
         npu_id = int(get_value_from_lines(npu_info_lines, "NPU ID"))
-
-        # Stage 1: query board info without -c flag
-        board_info_lines = (
-            subprocess.check_output(["npu-smi", "info", "-t", "board", "-i", str(npu_id)]).decode().strip().split("\n")
+        chip_info_lines = (
+            subprocess.check_output(["npu-smi", "info", "-t", "board", "-i", str(npu_id), "-c", "0"])
+            .decode()
+            .strip()
+            .split("\n")
         )
-
-        # Check if Chip Name exists (Ascend950 includes it directly)
-        chip_name = get_value_from_lines(board_info_lines, "Chip Name")
-
-        # Stage 2: query with -c flag only if Chip Name not found (A2/A3/310P)
-        if not chip_name:
-            chip_info_lines = (
-                subprocess.check_output(["npu-smi", "info", "-t", "board", "-i", str(npu_id), "-c", "0"])
-                .decode()
-                .strip()
-                .split("\n")
-            )
-        else:
-            # Ascend950 already has complete info
-            chip_info_lines = board_info_lines
-
-        # Extract required fields
         chip_name = get_value_from_lines(chip_info_lines, "Chip Name")
         chip_type = get_value_from_lines(chip_info_lines, "Chip Type")
         npu_name = get_value_from_lines(chip_info_lines, "NPU Name")
@@ -131,8 +113,9 @@ def get_chip_type() -> str:
 
 envs = load_module_from_path("envs", os.path.join(ROOT_DIR, "vllm_ascend", "envs.py"))
 
+soc_version = get_chip_type()
+
 if not envs.SOC_VERSION:
-    soc_version = get_chip_type()
     if not soc_version:
         raise RuntimeError(
             "Could not determine chip type automatically via 'npu-smi'. "
@@ -145,6 +128,9 @@ if not envs.SOC_VERSION:
             "You can also refer to the SOC_VERSION defaults in Dockerfile*."
         )
     envs.SOC_VERSION = soc_version
+else:
+    if soc_version and soc_version != envs.SOC_VERSION:
+        logging.warning(f"env SOC_VERSION: {envs.SOC_VERSION} is not equal to soc_version from npu-smi: {soc_version}")
 
 
 def gen_build_info():
@@ -187,7 +173,7 @@ def gen_build_info():
     with open(package_dir, "w+") as f:
         f.write("# Auto-generated file\n")
         f.write(f"__device_type__ = '{device_type}'\n")
-    logging.info("Generated _build_info.py with SOC version: %s", soc_version)
+    logging.info(f"Generated _build_info.py with SOC version: {soc_version}")
 
 
 class CMakeExtension(Extension):
@@ -339,11 +325,6 @@ class cmake_build_ext(build_ext):
         # add TORCH_NPU_PATH
         cmake_args += [f"-DTORCH_NPU_PATH={torch_npu_path}"]
 
-        # Pass VLLM_ASCEND_ENABLE_BATCH_MEMCPY to CMake if explicitly set.
-        # When unset (None), CMake will auto-detect from CANN headers.
-        if envs.VLLM_ASCEND_ENABLE_BATCH_MEMCPY is not None:
-            cmake_args += [f"-DVLLM_ASCEND_ENABLE_BATCH_MEMCPY={envs.VLLM_ASCEND_ENABLE_BATCH_MEMCPY}"]
-
         build_tool = []
         # TODO(ganyi): ninja and ccache support for ascend c auto codegen. now we can only use make build
         # if which('ninja') is not None:
@@ -351,7 +332,7 @@ class cmake_build_ext(build_ext):
         # Default build tool to whatever cmake picks.
 
         cmake_args += [source_dir]
-        logging.info("cmake config command: %s", cmake_args)
+        logging.info(f"cmake config command: {cmake_args}")
         try:
             subprocess.check_call(cmake_args, cwd=self.build_temp)
         except subprocess.CalledProcessError as e:
@@ -520,10 +501,10 @@ setup(
     project_urls={
         "Homepage": "https://github.com/vllm-project/vllm-ascend",
     },
+    # TODO: Add 3.12 back when torch-npu support 3.12
     classifiers=[
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
-        "Programming Language :: Python :: 3.12",
         "License :: OSI Approved :: Apache Software License",
         "Intended Audience :: Developers",
         "Intended Audience :: Information Technology",
@@ -543,7 +524,6 @@ setup(
             "ascend_kv_connector = vllm_ascend:register_connector",
             "ascend_model_loader = vllm_ascend:register_model_loader",
             "ascend_service_profiling = vllm_ascend:register_service_profiling",
-            "ascend_model = vllm_ascend:register_model",
         ],
     },
 )

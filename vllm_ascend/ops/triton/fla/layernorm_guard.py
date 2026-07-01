@@ -128,7 +128,7 @@ def _layer_norm_fwd(
     MAX_FUSED_SIZE = 65536 // x.element_size()
     BLOCK_N = min(MAX_FUSED_SIZE, triton.next_power_of_2(group_size))
     if group_size > BLOCK_N:
-        raise RuntimeError(f"_layer_norm_fwd: This layer norm doesn't support feature dim >= 64KB, got {group_size}.")
+        raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
     # heuristics for number of warps
     num_warps = min(max(BLOCK_N // 256, 1), 8)
     grid = (M if M < MAX_CORES else MAX_CORES, ngroups)
@@ -168,7 +168,6 @@ class LayerNormFn(torch.autograd.Function):
         group_size=None,
         norm_before_gate=True,
         is_rms_norm=False,
-        activation: str = "swish",
     ):
         """If z is not None, we do norm(x) * silu(z) if norm_before_gate, else norm(x * silu(z))"""
 

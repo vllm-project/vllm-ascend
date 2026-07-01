@@ -22,16 +22,14 @@ from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
-from vllm_ascend.ops.triton.triton_utils import extract_slice, get_vectorcore_num, insert_slice
+from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
 
-# TODO: UB size differs across chips; consider whether BLOCK_SIZE can
-# be dynamically computed with a formula instead of autotuning {1,2,4}.
 @triton.autotune(
     configs=[
-        triton.Config({"BLOCK_SIZE": 1}),
-        triton.Config({"BLOCK_SIZE": 2}),
-        triton.Config({"BLOCK_SIZE": 4}),
+        triton.Config({"BLOCK": 64}),
+        triton.Config({"BLOCK": 128}),
+        triton.Config({"BLOCK": 256}),
     ],
     key=["q_cols", "k_cols"],
 )
@@ -45,84 +43,61 @@ def _split_qkv_and_compute_local_qk_var_kernel(
     num_tokens,
     q_cols: tl.constexpr,
     k_cols: tl.constexpr,
-    q_cols_pow2: tl.constexpr,
-    k_cols_pow2: tl.constexpr,
-    qkv_stride: tl.constexpr,
-    q_inv_size: tl.constexpr,
-    k_inv_size: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
+    PAD_Q: tl.constexpr,
+    PAD_K: tl.constexpr,
+    BLOCK: tl.constexpr,
 ):
-    """
-    Grid Stride Loop + batch loading + precomputed reciprocal.
-    (BLOCK_SIZE is limited to 1-4 to prevent UB overflow for large hidden_size)
-    """
-    pid = tl.program_id(0)
-    num_pids = tl.num_programs(0)
-    block_range = tl.arange(0, BLOCK_SIZE)
+    pid = tl.program_id(0).to(tl.int64)
+    num_programs = tl.num_programs(0)
+    input_row_stride = q_cols + 2 * k_cols
 
-    # Grid Stride Loop: each program processes BLOCK_SIZE tokens at a time
-    stride = num_pids * BLOCK_SIZE
-    start_token_idx = pid * BLOCK_SIZE
+    for idx in tl.range(pid, num_tokens, num_programs):
+        input_base = input_ptr + idx * input_row_stride
 
-    for block_start in tl.range(start_token_idx, num_tokens, stride):
-        token_indices = block_start + block_range
-        token_mask = (token_indices < num_tokens)[:, None]
+        q_in_base = input_base
+        q_out_base = q_out_ptr + idx * q_cols
+        q_sum = tl.zeros((), dtype=tl.float32)
+        q_comp = tl.zeros((), dtype=tl.float32)
+        for q_off in tl.static_range(0, PAD_Q, BLOCK):
+            q_offsets = q_off + tl.arange(0, BLOCK)
+            q_mask = q_offsets < q_cols
+            q_vals = tl.load(q_in_base + q_offsets, mask=q_mask, other=0.0)
+            q_vals_f32 = q_vals.to(tl.float32)
+            q_chunk = tl.sum(q_vals_f32 * q_vals_f32, axis=0)
+            y = q_chunk - q_comp
+            t = q_sum + y
+            q_comp = (t - q_sum) - y
+            q_sum = t
+            tl.store(q_out_base + q_offsets, q_vals, mask=q_mask)
+        q_var = q_sum / q_cols
 
-        # === Batch load QKV data ===
-        # Q: [BLOCK_SIZE, q_cols]
-        q_offset = tl.arange(0, q_cols_pow2)[None, :]
-        q_mask = token_mask & (q_offset < q_cols)
-        q_batch = tl.load(
-            input_ptr + token_indices[:, None] * qkv_stride + q_offset,
-            mask=q_mask,
-            other=0.0,
-        )
-        q_batch_f32 = q_batch.to(tl.float32)
+        k_in_base = input_base + q_cols
+        k_out_base = k_out_ptr + idx * k_cols
+        k_sum = tl.zeros((), dtype=tl.float32)
+        k_comp = tl.zeros((), dtype=tl.float32)
+        for k_off in tl.static_range(0, PAD_K, BLOCK):
+            k_offsets = k_off + tl.arange(0, BLOCK)
+            k_mask = k_offsets < k_cols
+            k_vals = tl.load(k_in_base + k_offsets, mask=k_mask, other=0.0)
+            k_vals_f32 = k_vals.to(tl.float32)
+            k_chunk = tl.sum(k_vals_f32 * k_vals_f32, axis=0)
+            y = k_chunk - k_comp
+            t = k_sum + y
+            k_comp = (t - k_sum) - y
+            k_sum = t
+            tl.store(k_out_base + k_offsets, k_vals, mask=k_mask)
+        k_var = k_sum / k_cols
 
-        # K: [BLOCK_SIZE, k_cols], K follows immediately after Q
-        k_offset = tl.arange(0, k_cols_pow2)[None, :]
-        k_mask = token_mask & (k_offset < k_cols)
-        k_batch = tl.load(
-            input_ptr + token_indices[:, None] * qkv_stride + q_cols + k_offset,
-            mask=k_mask,
-            other=0.0,
-        )
-        k_batch_f32 = k_batch.to(tl.float32)
+        v_in_base = input_base + q_cols + k_cols
+        v_out_base = v_out_ptr + idx * k_cols
+        for v_off in tl.static_range(0, PAD_K, BLOCK):
+            v_offsets = v_off + tl.arange(0, BLOCK)
+            v_mask = v_offsets < k_cols
+            v_vals = tl.load(v_in_base + v_offsets, mask=v_mask, other=0.0)
+            tl.store(v_out_base + v_offsets, v_vals, mask=v_mask)
 
-        # V: [BLOCK_SIZE, k_cols], V is at offset Q + 2*K
-        v_offset = tl.arange(0, k_cols_pow2)[None, :]
-        v_mask = token_mask & (v_offset < k_cols)
-        v_batch = tl.load(
-            input_ptr + token_indices[:, None] * qkv_stride + q_cols + k_cols + v_offset,
-            mask=v_mask,
-            other=0.0,
-        )
-
-        # === Batch compute sum of squares ===
-        q_squaresum = tl.sum(q_batch_f32 * q_batch_f32, axis=-1) * q_inv_size
-        k_squaresum = tl.sum(k_batch_f32 * k_batch_f32, axis=-1) * k_inv_size
-
-        # === Batch store QKV output ===
-        # Store Q
-        q_out_offset = token_indices[:, None] * q_cols + q_offset
-        q_out_mask = token_mask & (q_offset < q_cols)
-        tl.store(q_out_ptr + q_out_offset, q_batch, mask=q_out_mask)
-
-        # Store K
-        k_out_offset = token_indices[:, None] * k_cols + k_offset
-        k_out_mask = token_mask & (k_offset < k_cols)
-        tl.store(k_out_ptr + k_out_offset, k_batch, mask=k_out_mask)
-
-        # Store V
-        v_out_offset = token_indices[:, None] * k_cols + v_offset
-        v_out_mask = token_mask & (v_offset < k_cols)
-        tl.store(v_out_ptr + v_out_offset, v_batch, mask=v_out_mask)
-
-        # === Store variance ===
-        var_offset = token_indices * 2
-        var_mask = token_indices < num_tokens
-        tl.store(qk_var_ptr + var_offset, q_squaresum, mask=var_mask)
-        tl.store(qk_var_ptr + var_offset + 1, k_squaresum, mask=var_mask)
+        tl.store(qk_var_ptr + idx * 2, q_var)
+        tl.store(qk_var_ptr + idx * 2 + 1, k_var)
 
 
 @triton.jit
@@ -140,115 +115,79 @@ def _apply_global_rmsnorm_kernel(
     num_tokens,
     q_cols: tl.constexpr,
     k_cols: tl.constexpr,
-    q_num_heads: tl.constexpr,
-    k_num_heads: tl.constexpr,
+    q_num_heads,
+    k_num_heads,
     head_dim: tl.constexpr,
     rotary_dim: tl.constexpr,
-    HALF: tl.constexpr,
+    PAD_Q: tl.constexpr,
+    PAD_K: tl.constexpr,
+    PAD_QH: tl.constexpr,
+    PAD_KH: tl.constexpr,
+    PAD_HALF: tl.constexpr,
 ):
     pid = tl.program_id(0).to(tl.int64)
     num_programs = tl.num_programs(0)
-    tokens_per_program = tl.cdiv(num_tokens, num_programs)
-    iter_num_per_program = tokens_per_program
-    program_token_offset = pid * tokens_per_program
-    program_token_end = min(program_token_offset + tokens_per_program, num_tokens)
 
-    token_tile_offsets = tl.arange(0, 1)
-    q_head_offsets = tl.arange(0, q_num_heads)[:, None]
-    k_head_offsets = tl.arange(0, k_num_heads)[:, None]
-    hd_offsets = tl.arange(0, head_dim)[None, :]
-
-    q_row_offsets = q_head_offsets * head_dim + hd_offsets
-    k_row_offsets = k_head_offsets * head_dim + hd_offsets
-
-    q_weight = tl.load(q_weight_ptr + q_row_offsets).to(tl.float32)
-    k_weight = tl.load(k_weight_ptr + k_row_offsets).to(tl.float32)
-
-    half_offsets = tl.arange(0, HALF)
-    base_token_offsets = program_token_offset + token_tile_offsets
-
-    for iter in tl.range(iter_num_per_program):
-        token_offsets = base_token_offsets + iter
-        token_mask = token_offsets < program_token_end
-
-        q_gv = tl.load(qk_global_var_ptr + token_offsets * 2, mask=token_mask, other=0.0).to(tl.float32)
-        q_gv = q_gv * inv_tp_world
-        k_gv = tl.load(qk_global_var_ptr + token_offsets * 2 + 1, mask=token_mask, other=0.0).to(tl.float32)
-        k_gv = k_gv * inv_tp_world
+    for idx in tl.range(pid, num_tokens, num_programs):
+        q_gv = tl.load(qk_global_var_ptr + idx * 2).to(tl.float32) * inv_tp_world
+        k_gv = tl.load(qk_global_var_ptr + idx * 2 + 1).to(tl.float32) * inv_tp_world
         q_scale = 1.0 / tl.sqrt(q_gv + eps)
         k_scale = 1.0 / tl.sqrt(k_gv + eps)
 
-        q_offsets = token_offsets[:, None, None] * q_cols + q_row_offsets[None, :, :]
-        q_mask = token_mask[:, None, None]
-        q_vals_raw = tl.load(q_ptr + q_offsets, mask=q_mask, other=0.0)
-        q_vals = q_vals_raw.to(tl.float32) * q_scale[:, None, None] * q_weight[None, :, :]
+        q_base = q_ptr + idx * q_cols
+        q_offsets = tl.arange(0, PAD_Q)
+        q_mask = q_offsets < q_cols
+        q_vals = tl.load(q_base + q_offsets, mask=q_mask, other=0.0)
+        q_weight = tl.load(q_weight_ptr + q_offsets, mask=q_mask, other=1.0).to(tl.float32)
+        q_vals = (q_vals.to(tl.float32) * q_scale * q_weight).to(q_vals.dtype)
+        tl.store(q_base + q_offsets, q_vals, mask=q_mask)
 
-        k_offsets = token_offsets[:, None, None] * k_cols + k_row_offsets[None, :, :]
-        k_mask = token_mask[:, None, None]
-        k_vals_raw = tl.load(k_ptr + k_offsets, mask=k_mask, other=0.0)
-        k_vals = k_vals_raw.to(tl.float32) * k_scale[:, None, None] * k_weight[None, :, :]
+        k_base = k_ptr + idx * k_cols
+        k_offsets = tl.arange(0, PAD_K)
+        k_mask = k_offsets < k_cols
+        k_vals = tl.load(k_base + k_offsets, mask=k_mask, other=0.0)
+        k_weight = tl.load(k_weight_ptr + k_offsets, mask=k_mask, other=1.0).to(tl.float32)
+        k_vals = (k_vals.to(tl.float32) * k_scale * k_weight).to(k_vals.dtype)
+        tl.store(k_base + k_offsets, k_vals, mask=k_mask)
 
         # Neox-style RoPE on the first rotary_dim dimensions of each head
-        cs_offsets = token_offsets[:, None] * cs_row_stride + half_offsets[None, :]
-        cs_mask = token_mask[:, None]
-        cos_row = tl.load(cos_ptr + cs_offsets, mask=cs_mask, other=0.0).to(tl.float32)
-        sin_row = tl.load(sin_ptr + cs_offsets, mask=cs_mask, other=0.0).to(tl.float32)
+        half = rotary_dim // 2
+        half_offsets = tl.arange(0, PAD_HALF)
+        half_mask = half_offsets < half
+        cos_row = tl.load(
+            cos_ptr + idx * cs_row_stride + half_offsets,
+            mask=half_mask,
+            other=0.0,
+        ).to(tl.float32)
+        sin_row = tl.load(
+            sin_ptr + idx * cs_row_stride + half_offsets,
+            mask=half_mask,
+            other=0.0,
+        ).to(tl.float32)
 
-        q1 = extract_slice(
-            q_vals,
-            offsets=(0, 0, 0),
-            sizes=(1, q_num_heads, HALF),
-            strides=(1, 1, 1),
-        )
-        q2 = extract_slice(
-            q_vals,
-            offsets=(0, 0, HALF),
-            sizes=(1, q_num_heads, HALF),
-            strides=(1, 1, 1),
-        )
-        q_vals = insert_slice(
-            q_vals,
-            q1 * cos_row[:, None, :] - q2 * sin_row[:, None, :],
-            offsets=(0, 0, 0),
-            sizes=(1, q_num_heads, HALF),
-            strides=(1, 1, 1),
-        )
-        q_vals = insert_slice(
-            q_vals,
-            q2 * cos_row[:, None, :] + q1 * sin_row[:, None, :],
-            offsets=(0, 0, HALF),
-            sizes=(1, q_num_heads, HALF),
-            strides=(1, 1, 1),
-        )
-        tl.store(q_ptr + q_offsets, q_vals.to(q_vals_raw.dtype), mask=q_mask)
+        qh_offsets = tl.arange(0, PAD_QH)[:, None] * head_dim + half_offsets[None, :]
+        qh_mask = (tl.arange(0, PAD_QH)[:, None] < q_num_heads) & half_mask[None, :]
+        qh_offsets_2 = qh_offsets + half
+        q1_raw = tl.load(q_base + qh_offsets, mask=qh_mask, other=0.0)
+        q2_raw = tl.load(q_base + qh_offsets_2, mask=qh_mask, other=0.0)
+        q1 = q1_raw.to(tl.float32)
+        q2 = q2_raw.to(tl.float32)
+        qn1 = q1 * cos_row[None, :] - q2 * sin_row[None, :]
+        qn2 = q2 * cos_row[None, :] + q1 * sin_row[None, :]
+        tl.store(q_base + qh_offsets, qn1.to(q1_raw.dtype), mask=qh_mask)
+        tl.store(q_base + qh_offsets_2, qn2.to(q2_raw.dtype), mask=qh_mask)
 
-        k1 = extract_slice(
-            k_vals,
-            offsets=(0, 0, 0),
-            sizes=(1, k_num_heads, HALF),
-            strides=(1, 1, 1),
-        )
-        k2 = extract_slice(
-            k_vals,
-            offsets=(0, 0, HALF),
-            sizes=(1, k_num_heads, HALF),
-            strides=(1, 1, 1),
-        )
-        k_vals = insert_slice(
-            k_vals,
-            k1 * cos_row[:, None, :] - k2 * sin_row[:, None, :],
-            offsets=(0, 0, 0),
-            sizes=(1, k_num_heads, HALF),
-            strides=(1, 1, 1),
-        )
-        k_vals = insert_slice(
-            k_vals,
-            k2 * cos_row[:, None, :] + k1 * sin_row[:, None, :],
-            offsets=(0, 0, HALF),
-            sizes=(1, k_num_heads, HALF),
-            strides=(1, 1, 1),
-        )
-        tl.store(k_ptr + k_offsets, k_vals.to(k_vals_raw.dtype), mask=k_mask)
+        kh_offsets = tl.arange(0, PAD_KH)[:, None] * head_dim + half_offsets[None, :]
+        kh_mask = (tl.arange(0, PAD_KH)[:, None] < k_num_heads) & half_mask[None, :]
+        kh_offsets_2 = kh_offsets + half
+        k1_raw = tl.load(k_base + kh_offsets, mask=kh_mask, other=0.0)
+        k2_raw = tl.load(k_base + kh_offsets_2, mask=kh_mask, other=0.0)
+        k1 = k1_raw.to(tl.float32)
+        k2 = k2_raw.to(tl.float32)
+        kn1 = k1 * cos_row[None, :] - k2 * sin_row[None, :]
+        kn2 = k2 * cos_row[None, :] + k1 * sin_row[None, :]
+        tl.store(k_base + kh_offsets, kn1.to(k1_raw.dtype), mask=kh_mask)
+        tl.store(k_base + kh_offsets_2, kn2.to(k2_raw.dtype), mask=kh_mask)
 
 
 def split_qkv_tp_rmsnorm_rope_impl(
@@ -269,9 +208,9 @@ def split_qkv_tp_rmsnorm_rope_impl(
     q = torch.empty(num_tokens, q_hidden_size, device=input.device, dtype=input.dtype)
     k = torch.empty(num_tokens, kv_hidden_size, device=input.device, dtype=input.dtype)
     v = torch.empty(num_tokens, kv_hidden_size, device=input.device, dtype=input.dtype)
+
     if num_tokens == 0:
         return q, k, v
-
     num_vectorcore = get_vectorcore_num()
     grid = (min(num_tokens, num_vectorcore),)
     q_cols = q_hidden_size
@@ -280,12 +219,6 @@ def split_qkv_tp_rmsnorm_rope_impl(
     k_num_heads = kv_hidden_size // head_dim
 
     qk_var = torch.empty(num_tokens, 2, dtype=torch.float32, device=q.device)
-    # Precompute reciprocal to avoid division inside kernel
-    q_inv_size = 1.0 / q_cols
-    k_inv_size = 1.0 / k_cols
-    # Pad to power-of-2 for tl.arange (required by Ascend NPU Triton backend)
-    q_cols_pow2 = 1 << (q_cols - 1).bit_length()
-    k_cols_pow2 = 1 << (k_cols - 1).bit_length()
     _split_qkv_and_compute_local_qk_var_kernel[grid](
         input_2d,
         q,
@@ -295,11 +228,8 @@ def split_qkv_tp_rmsnorm_rope_impl(
         num_tokens,
         q_cols,
         k_cols,
-        q_cols_pow2,
-        k_cols_pow2,
-        q_cols + 2 * k_cols,
-        q_inv_size,
-        k_inv_size,
+        triton.next_power_of_2(q_cols),
+        triton.next_power_of_2(k_cols),
     )
     if tp_world > 1:
         qk_var = tensor_model_parallel_all_reduce(qk_var)
@@ -326,7 +256,11 @@ def split_qkv_tp_rmsnorm_rope_impl(
         k_num_heads,
         head_dim,
         rotary_dim,
-        rotary_dim // 2,
+        triton.next_power_of_2(q_cols),
+        triton.next_power_of_2(k_cols),
+        triton.next_power_of_2(q_num_heads),
+        triton.next_power_of_2(k_num_heads),
+        triton.next_power_of_2(rotary_dim // 2),
     )
 
     return q, k, v

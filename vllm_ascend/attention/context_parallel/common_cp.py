@@ -3,9 +3,7 @@ from dataclasses import dataclass
 import torch
 import torch.distributed as dist
 import torch_npu
-from vllm.distributed import get_dcp_group, get_pcp_group
-
-from vllm_ascend.distributed.utils import get_decode_context_model_parallel_world_size
+from vllm.distributed import get_dcp_group, get_decode_context_model_parallel_world_size, get_pcp_group
 
 
 @dataclass
@@ -23,14 +21,9 @@ class AscendPCPMetadata:
     kv_with_q_head_mask_idx: torch.Tensor = None
     kv_with_q_tail_nomask_idx: torch.Tensor = None
     kv_with_q_tail_mask_idx: torch.Tensor = None
-    kv_tail_proj_idx: torch.Tensor = None
-    kv_with_q_head_attn_idx_in_tail: torch.Tensor = None
-    kv_with_q_tail_attn_idx_in_tail: torch.Tensor = None
     attn_mask_seqlens: torch.Tensor = None
     head_attn_nomask_seqlens: torch.Tensor = None
     tail_attn_nomask_seqlens: torch.Tensor = None
-    head_actual_seq_lengths_kv: list[int] | None = None
-    tail_actual_seq_lengths_kv: list[int] | None = None
     q_full_idx: torch.Tensor = None
     pcp_use_hybrid_attn: bool = False
     pcp_unpad_mask: torch.Tensor = None
@@ -104,7 +97,6 @@ class AscendMetadataForDecode:
 
     num_computed_tokens_of_pcp_dcp: list[list[list[int]]] | None = None
     block_tables: torch.Tensor = None
-    dcp_mtp_attn_mask: torch.Tensor = None
 
 
 def _process_attn_out_lse(attn_output: torch.Tensor, softmax_lse: torch.Tensor) -> torch.Tensor:

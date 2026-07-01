@@ -1,3 +1,4 @@
+#
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -20,7 +21,6 @@ from torch import nn
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm, RMSNormGated
 
-from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.triton.layernorm_gated import layer_norm_fwd_npu
 from vllm_ascend.utils import enable_custom_op, get_weight_prefetch_method
 
@@ -106,25 +106,13 @@ class AscendGemmaRMSNorm(GemmaRMSNorm):
                 x, _, residual = torch_npu.npu_add_rms_norm(x, residual, 1.0 + self.weight, self.variance_epsilon)
             return x, residual
 
-        x = DeviceOperator.npu_gemma_rms_norm(x, self.weight, self.variance_epsilon)
-
+        x, _ = torch.ops._C_ascend.npu_gemma_rms_norm(x, self.weight, self.variance_epsilon)
         return x
 
 
 class LayerNormFn(torch.autograd.Function):
     @staticmethod
-    def forward(
-        ctx,
-        x,
-        weight,
-        bias,
-        z=None,
-        eps=1e-6,
-        group_size=None,
-        norm_before_gate=True,
-        is_rms_norm=False,
-        activation: str = "swish",
-    ):
+    def forward(ctx, x, weight, bias, z=None, eps=1e-6, group_size=None, norm_before_gate=True, is_rms_norm=False):
         """If z is not None, we do norm(x) * silu(z) if norm_before_gate, else norm(x * silu(z))"""
 
         x_shape_og = x.shape
@@ -168,24 +156,12 @@ class AscendRMSNormGated(RMSNormGated):
         norm_before_gate: bool = False,
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
-        # `activation` was added in vLLM #40245 (Qwen3-Next/GDN). Accept and
-        # forward it; older vllm versions did not pass this kwarg so the
-        # default keeps existing behavior.
-        activation: str = "swish",
     ):
         """If group_size is not None, we do GroupNorm with each group having group_size elements.
         group_size=None is equivalent to group_size=hidden_size (i.e. there's only 1 group).
         """
         factory_kwargs = {"device": device, "dtype": dtype}
-        super().__init__(
-            hidden_size,
-            eps,
-            group_size,
-            norm_before_gate,
-            device,
-            dtype,
-            activation=activation,
-        )
+        super().__init__(hidden_size, eps, group_size, norm_before_gate, device, dtype)
         self.eps = eps
         self.weight = nn.Parameter(torch.empty(hidden_size, **factory_kwargs))
         self.register_parameter("bias", None)

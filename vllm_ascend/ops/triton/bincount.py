@@ -21,14 +21,12 @@
 # Reference: https://github.com/vllm-project/vllm-ascend/pull/6979
 
 import torch
-from vllm.distributed.parallel_state import get_tp_group
 from vllm.triton_utils import tl, triton
 
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
 
-@triton.jit(do_not_specialize=["batch_size", "seq_len"])
+@triton.jit
 def token_bin_counts_and_mask_kernel(
     tokens_ptr,
     tokens_batch_stride,
@@ -37,46 +35,51 @@ def token_bin_counts_and_mask_kernel(
     seq_len,
     vocab_size,
     bin_counts_ptr,
-    tp_rank,
     counts_batch_stride,
     counts_vocab_stride,
-    total_blocks,
     SEQ_BLOCK: tl.constexpr,
 ):
     """Count token occurrences per batch row.
 
-    1D grid with grid-stride loop: each program processes blocks at
-    stride=num_programs to stay within the Triton-Ascend coreDim
-    limit (65535) while distributing work evenly across cores.
+    2D tiling:
+      - axis=0: core/program group dimension
+      - axis=1: block id dimension
+
+    We linearize (batch_idx, seq_block_id) into a single global block id and
+    distribute blocks across all programs to improve utilization when
+    batch_size is small but seq_len is large (typical prefill).
+
+    Tokens with value >= vocab_size (e.g. padding) are skipped.
     """
-    pid = tl.program_id(axis=0)
-    num_progs = tl.num_programs(axis=0)
+    pid0 = tl.program_id(axis=0)
+    pid1 = tl.program_id(axis=1)
+    progs = tl.num_programs(axis=0)
 
-    vocab_start_idx = tp_rank * vocab_size
     n_seq_blocks = tl.cdiv(seq_len, SEQ_BLOCK)
+    linear_block = pid1 * progs + pid0
+    total_blocks = batch_size * n_seq_blocks
+    if linear_block >= total_blocks:
+        return
 
-    for linear_block in tl.range(pid, total_blocks, num_progs):
-        batch_idx = linear_block // n_seq_blocks
-        seq_block_id = linear_block - batch_idx * n_seq_blocks
-        seq_start = seq_block_id * SEQ_BLOCK
+    batch_idx = linear_block // n_seq_blocks
+    seq_block_id = linear_block - batch_idx * n_seq_blocks
+    seq_start = seq_block_id * SEQ_BLOCK
 
-        batch_tokens_start = tokens_ptr + batch_idx * tokens_batch_stride
-        batch_counts_start = bin_counts_ptr + batch_idx * counts_batch_stride
+    batch_tokens_start = tokens_ptr + batch_idx * tokens_batch_stride
+    batch_counts_start = bin_counts_ptr + batch_idx * counts_batch_stride
 
-        pos_offsets = seq_start + tl.arange(0, SEQ_BLOCK)
-        pos_mask = pos_offsets < seq_len
-        token = tl.load(
-            batch_tokens_start + pos_offsets * tokens_seq_stride,
-            mask=pos_mask,
-            other=vocab_size + vocab_start_idx,
-        )
-
-        local_token = token - vocab_start_idx
-        token_in_range = pos_mask & (token >= vocab_start_idx) & (local_token < vocab_size)
-
-        safe_local_token = tl.where(token_in_range, local_token, 0)
-        count_ptr = batch_counts_start + safe_local_token * counts_vocab_stride
-        tl.atomic_add(count_ptr, 1, mask=token_in_range)
+    pos_offsets = seq_start + tl.arange(0, SEQ_BLOCK)
+    pos_mask = pos_offsets < seq_len
+    token = tl.load(
+        batch_tokens_start + pos_offsets * tokens_seq_stride,
+        mask=pos_mask,
+        other=vocab_size,  # force invalid
+    )
+    # Only count valid token ids in [0, vocab_size). Padding must use id >= vocab_size
+    # (see vLLM apply_penalties contract); those positions are masked out here.
+    token_in_range = (token >= 0) & (token < vocab_size) & pos_mask
+    count_ptr = batch_counts_start + token * counts_vocab_stride
+    tl.atomic_add(count_ptr, 1, mask=token_in_range)
 
 
 def get_token_bin_counts_and_mask_triton(
@@ -101,7 +104,8 @@ def get_token_bin_counts_and_mask_triton(
         assert n_rows == num_seqs, f"tokens rows must match num_seqs: tokens.shape[0]={n_rows}, num_seqs={num_seqs}"
     n_rows = num_seqs if num_seqs is not None else n_rows
 
-    if n_rows == 0 or n_cols == 0:
+    # seq_len == 0 is valid for empty decode history; return directly.
+    if n_cols == 0:
         bin_counts = torch.zeros((n_rows, vocab_size), dtype=torch.int32, device=tokens.device)
         return bin_counts, bin_counts > 0
 
@@ -111,20 +115,16 @@ def get_token_bin_counts_and_mask_triton(
     if not tokens.is_contiguous():
         tokens = tokens.contiguous()
 
-    # 1D grid: distribute all (batch, seq_block) work items across
-    # vector cores via a loop inside the kernel.  This avoids the
-    # Triton-Ascend grid-size limit of 65535.
+    # 2D grid: (progs, blocks_per_prog_group)
+    # Keep axis-0 bounded by vector core count, and distribute (batch, seq_block)
+    # blocks across all programs to increase utilization when n_rows is small.
     SEQ_BLOCK = 256
     n_seq_blocks = triton.cdiv(n_cols, SEQ_BLOCK)
     total_blocks = n_rows * n_seq_blocks
-    grid_size = min(core_num, total_blocks)
+    progs = min(core_num, total_blocks)
+    grid = (progs, triton.cdiv(total_blocks, progs))
 
-    if get_ascend_config().enable_reduce_sample:
-        tp_group = get_tp_group()
-        tp_rank = tp_group.rank_in_group
-    else:
-        tp_rank = 0
-    token_bin_counts_and_mask_kernel[(grid_size,)](
+    token_bin_counts_and_mask_kernel[grid](
         tokens,
         tokens.stride(0),
         tokens.stride(1),
@@ -132,11 +132,8 @@ def get_token_bin_counts_and_mask_triton(
         n_cols,
         vocab_size,
         bin_counts,
-        tp_rank,
         bin_counts.stride(0),
         bin_counts.stride(1),
-        total_blocks,
         SEQ_BLOCK=SEQ_BLOCK,
-        multibuffer=False,
     )
     return bin_counts, bin_counts > 0

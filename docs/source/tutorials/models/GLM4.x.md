@@ -22,9 +22,9 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 - `GLM-4.6`(BF16 version): [Download model weight](https://www.modelscope.cn/models/ZhipuAI/GLM-4.6).
 - `GLM-4.7`(BF16 version): [Download model weight](https://www.modelscope.cn/models/ZhipuAI/GLM-4.7).
 - `GLM-4.5-w8a8-with-float-mtp`(Quantized version with mtp): [Download model weight](https://modelers.cn/models/Modelers_Park/GLM-4.5-w8a8).
-- `GLM-4.6-w8a8`(Quantized version without mtp): [Download model weight](https://modelers.cn/models/Modelers_Park/GLM-4.6-w8a8). Because vllm does not support GLM4.6 mtp in October, we do not provide an mtp version. Last month, it was supported; you can use the following quantization scheme to add mtp weights to the quantized weights.
+- `GLM-4.6-w8a8`(Quantized version without mtp): [Download model weight](https://modelers.cn/models/Modelers_Park/GLM-4.6-w8a8). Because vllm do not support GLM4.6 mtp in October, so we do not provide mtp version. And last month, it supported, you can use the following quantization scheme to add mtp weights to Quantized weights.
 - `GLM-4.7-w8a8-with-float-mtp`(Quantized version without mtp): [Download model weight](https://modelscope.cn/models/Eco-Tech/GLM-4.7-W8A8-floatmtp).
-- `Method of Quantization`: [quantization scheme](https://ai.gitcode.com/Ascend-SACT/GLM-4.5-w8a8). You can use these methods to quantize the model.
+- `Method of Quantify`: [quantization scheme](https://blog.csdn.net/qq_37368095/article/details/156429653?spm=1011.2124.3001.6209). You can use these methods to quantify the model.
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
@@ -38,7 +38,7 @@ You can use our official docker image to run `GLM-4.x` directly.
 ::::{tab-item} A3 series
 :sync: A3
 
-Start the docker image on each node.
+Start the docker image on your each node.
 
 ```{code-block} bash
    :substitutions:
@@ -123,6 +123,12 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 ## Deployment
 
+**Notice:**
+
+We have optimized the FIA operator in CANN 8.5.1. Manual replacement of the files related to the FIA operator is required. Please execute the FIA operator replacement script:
+[A2](../../../../tools/install_flash_infer_attention_score_ops_a2.sh) and [A3](../../../../tools/install_flash_infer_attention_score_ops_a3.sh)
+The optimization of the FIA operator will be enabled by default in CANN 9.x releases, and manual replacement will no longer be required. Please stay tuned for updates to this document.
+
 ### Single-node Deployment
 
 - In low-latency scenarios, we recommend a single-machine deployment.
@@ -139,6 +145,8 @@ export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export HCCL_OP_EXPANSION_MODE=AIV
 export VLLM_ASCEND_BALANCE_SCHEDULING=1
 export VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE=1
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
 vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
   --data-parallel-size 2 \
@@ -149,23 +157,24 @@ vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
   --max-model-len 133000 \
   --max-num-batched-tokens 8192 \
   --max-num-seqs 16 \
+  --async-scheduling \
   --quantization ascend \
   --trust-remote-code \
   --gpu-memory-utilization 0.9 \
-  --speculative-config '{"num_speculative_tokens": 3, "method":"mtp"}' \
+  --speculative-config '{"num_speculative_tokens": 3, "model":"Eco-Tech/GLM-4.7-W8A8-floatmtp", "method":"mtp"}' \
   --compilation-config '{"cudagraph_capture_sizes": [1,2,4,8,16,32,64,128,256,512], "cudagraph_mode": "FULL_DECODE_ONLY"}' \
-  --additional-config '{"enable_shared_expert_dp": true, "ascend_fusion_config": {"fusion_ops_gmmswigluquant": false}}'
+  --additional-config '{"enable_shared_expert_dp": true, "ascend_fusion_config": {"fusion_ops_gmmswigluquant": false}}'\
 ```
 
 **Notice:**
 The parameters are explained as follows:
 
+- `--async-scheduling` Asynchronous scheduling is a technique used to optimize inference efficiency. It allows non-blocking task scheduling to improve concurrency and throughput, especially when processing large-scale models.
 - `fusion_ops_gmmswigluquant` The performance of the GmmSwigluQuant fusion operator tends to degrade when the total number of NPUs is ≤ 16.
-- `VLLM_ASCEND_ENABLE_FLASHCOMM1` Due to the FD feature of the FIA operator being invalidated by padding data introduced by this feature, we recommend disabling the `flashcomm1` feature for long-sequence (≥16k) and low-concurrency (≤8 batch size) scenarios.For long-sequence and high-concurrency scenarios, you may enable this feature to achieve improved Prefill performance.
 
 ### Multi-node Deployment
 
-While the previous documentation advises against multi-node deployment on the Atlas 800 A2 (64G × 8) platform, this configuration can still be implemented for the GLM-4.x model if required. To proceed with a dual-node setup, execute the following scripts on each respective node.
+Although the former tutorial said "Not recommended to deploy multi-node on Atlas 800 A2 (64G × 8)", but if you insist to deploy GLM-4.x model on multi-node like 2 × Atlas 800 A2 (64G × 8), run the following scripts on two nodes respectively.
 
 **Node 0**
 
@@ -188,6 +197,8 @@ export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export HCCL_OP_EXPANSION_MODE=AIV
 export VLLM_ASCEND_BALANCE_SCHEDULING=1
 export VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE=1
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
 vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
   --host 0.0.0.0 \
@@ -203,6 +214,7 @@ vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
   --max-model-len 140000 \
   --max-num-batched-tokens 8192 \
   --max-num-seqs 16 \
+  --async-scheduling \
   --quantization ascend \
   --trust-remote-code \
   --gpu-memory-utilization 0.9 \
@@ -210,7 +222,7 @@ vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
   --reasoning-parser glm45 \
   --tool-call-parser glm47 \
   --served-model-name glm47 \
-  --speculative-config '{"num_speculative_tokens": 3, "method":"mtp"}' \
+  --speculative-config '{"num_speculative_tokens": 3, "model":"Eco-Tech/GLM-4.7-W8A8-floatmtp", "method":"mtp"}' \
   --compilation-config '{"cudagraph_capture_sizes": [1,2,4,8,16,32,64,128,256,512], "cudagraph_mode": "FULL_DECODE_ONLY"}' \
   --additional-config '{"enable_shared_expert_dp": true, "ascend_fusion_config": {"fusion_ops_gmmswigluquant": false}}'
 ```
@@ -237,6 +249,8 @@ export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export HCCL_OP_EXPANSION_MODE=AIV
 export VLLM_ASCEND_BALANCE_SCHEDULING=1
 export VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE=1
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
 vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
   --host 0.0.0.0 \
@@ -253,6 +267,7 @@ vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
   --max-model-len 140000 \
   --max-num-batched-tokens 8192 \
   --max-num-seqs 16 \
+  --async-scheduling \
   --quantization ascend \
   --trust-remote-code \
   --gpu-memory-utilization 0.9 \
@@ -260,14 +275,14 @@ vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
   --reasoning-parser glm45 \
   --tool-call-parser glm47 \
   --served-model-name glm47 \
-  --speculative-config '{"num_speculative_tokens": 3, "method":"mtp"}' \
+  --speculative-config '{"num_speculative_tokens": 3, "model":"Eco-Tech/GLM-4.7-W8A8-floatmtp", "method":"mtp"}' \
   --compilation-config '{"cudagraph_capture_sizes": [1,2,4,8,16,32,64,128,256,512], "cudagraph_mode": "FULL_DECODE_ONLY"}' \
   --additional-config '{"enable_shared_expert_dp": true, "ascend_fusion_config": {"fusion_ops_gmmswigluquant": false}}'
 ```
 
 ### Prefill-Decode Disaggregation
 
-We'd like to show the deployment guide of `GLM-4.7` on multi-node environment with 2P1D for better performance.
+We'd like to show the deployment guide of `GLM4.7` on multi-node environment with 2P1D for better performance.
 
 Before you start, please
 
@@ -395,7 +410,10 @@ Before you start, please
         export ASCEND_TRANSPORT_PRINT=1
         export ACL_OP_INIT_MODE=1
         export ASCEND_A3_ENABLE=1
+        export VLLM_ASCEND_BALANCE_SCHEDULING=1
         export VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE=1
+        export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+        export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
@@ -417,13 +435,14 @@ Before you start, please
             --gpu-memory-utilization 0.9 \
             --quantization ascend \
             --enforce-eager \
-            --speculative-config '{"num_speculative_tokens": 3, "method":"mtp"}' \
+            --speculative-config '{"num_speculative_tokens": 3, "model":"Eco-Tech/GLM-4.7-W8A8-floatmtp", "method":"mtp"}' \
             --profiler-config '{"profiler": "torch", "torch_profiler_dir": "./vllm_profile", "torch_profiler_with_stack": false}' \
             --additional-config '{"recompute_scheduler_enable": true, "enable_shared_expert_dp": true, "ascend_fusion_config": {"fusion_ops_gmmswigluquant": false}}' \
             --kv-transfer-config \
             '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_producer",
             "kv_port": "30000",
+            "engine_id": "0",
             "kv_connector_extra_config": {
                         "prefill": {
                                 "dp_size": 2,
@@ -457,7 +476,10 @@ Before you start, please
         export ASCEND_TRANSPORT_PRINT=1
         export ACL_OP_INIT_MODE=1
         export ASCEND_A3_ENABLE=1
+        export VLLM_ASCEND_BALANCE_SCHEDULING=1
         export VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE=1
+        export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+        export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
@@ -479,13 +501,14 @@ Before you start, please
             --gpu-memory-utilization 0.9 \
             --quantization ascend \
             --enforce-eager \
-            --speculative-config '{"num_speculative_tokens": 3, "method":"mtp"}' \
+            --speculative-config '{"num_speculative_tokens": 3, "model":"Eco-Tech/GLM-4.7-W8A8-floatmtp", "method":"mtp"}' \
             --profiler-config '{"profiler": "torch", "torch_profiler_dir": "./vllm_profile", "torch_profiler_with_stack": false}' \
             --additional-config '{"recompute_scheduler_enable": true, "enable_shared_expert_dp": true, "ascend_fusion_config": {"fusion_ops_gmmswigluquant": false}}' \
             --kv-transfer-config \
             '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_producer",
-            "kv_port": "30100",
+            "kv_port": "30000",
+            "engine_id": "0",
             "kv_connector_extra_config": {
                         "prefill": {
                                 "dp_size": 2,
@@ -518,11 +541,12 @@ Before you start, please
         export ASCEND_TRANSPORT_PRINT=1
         export ACL_OP_INIT_MODE=1
         export ASCEND_A3_ENABLE=1
-        # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
-        export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
+        export VLLM_NIXL_ABORT_REQUEST_TIMEOUT=300000
         export TASK_QUEUE_ENABLE=1
         export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+        export VLLM_ASCEND_BALANCE_SCHEDULING=1
         export VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE=1
+        export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export ASCEND_RT_VISIBLE_DEVICES=$1
 
@@ -541,19 +565,21 @@ Before you start, please
             --max-num-batched-tokens 128 \
             --max-num-seqs 4 \
             --trust-remote-code \
+            --async-scheduling \
             --gpu-memory-utilization 0.9 \
             --quantization ascend \
-            --speculative-config '{"num_speculative_tokens": 3, "method":"mtp"}' \
+            --speculative-config '{"num_speculative_tokens": 3, "model":"Eco-Tech/GLM-4.7-W8A8-floatmtp", "method":"mtp"}' \
             --profiler-config \
             '{"profiler": "torch",
             "torch_profiler_dir": "./vllm_profile",
             "torch_profiler_with_stack": false}' \
-            --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[1,2,4,6,8,10,12,14,16,18,20,24,26,28,30,32,64,128,256,512]}' \
+            --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY",  "cudagraph_capture_sizes":[1,2,4,6,8,10,12,14,16,18,20,24,26,28,30,32,64,128,256,512]}' \
             --additional-config '{"recompute_scheduler_enable": true, "enable_shared_expert_dp": true, "ascend_fusion_config": {"fusion_ops_gmmswigluquant": false}}' \
             --kv-transfer-config \
             '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_consumer",
             "kv_port": "30200",
+            "engine_id": "2",
             "kv_connector_extra_config": {
                         "prefill": {
                                 "dp_size": 2,
@@ -564,7 +590,7 @@ Before you start, please
                                 "tp_size": 4
                         }
                 }
-            }'
+            }' \
         ```
 
     4. Decode node 1
@@ -586,11 +612,12 @@ Before you start, please
         export ASCEND_TRANSPORT_PRINT=1
         export ACL_OP_INIT_MODE=1
         export ASCEND_A3_ENABLE=1
-        # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
-        export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
+        export VLLM_NIXL_ABORT_REQUEST_TIMEOUT=300000
         export TASK_QUEUE_ENABLE=1
         export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+        export VLLM_ASCEND_BALANCE_SCHEDULING=1
         export VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE=1
+        export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export ASCEND_RT_VISIBLE_DEVICES=$1
 
@@ -609,9 +636,10 @@ Before you start, please
             --max-num-batched-tokens 128 \
             --max-num-seqs 4 \
             --trust-remote-code \
+            --async-scheduling \
             --gpu-memory-utilization 0.9 \
             --quantization ascend \
-            --speculative-config '{"num_speculative_tokens": 3, "method":"mtp"}' \
+            --speculative-config '{"num_speculative_tokens": 3, "model":"Eco-Tech/GLM-4.7-W8A8-floatmtp", "method":"mtp"}' \
             --profiler-config \
             '{"profiler": "torch",
             "torch_profiler_dir": "./vllm_profile",
@@ -622,6 +650,7 @@ Before you start, please
             '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_consumer",
             "kv_port": "30200",
+            "engine_id": "2",
             "kv_connector_extra_config": {
                         "prefill": {
                                 "dp_size": 2,
@@ -632,7 +661,7 @@ Before you start, please
                                 "tp_size": 4
                         }
                 }
-            }'
+            }' \
         ```
 
 Once the preparation is done, you can start the server with the following command on each node:
@@ -725,7 +754,7 @@ Here are two accuracy evaluation methods.
 
 1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
 
-2. After execution, you can get the result, here is the result of `GLM-4.7` in `vllm-ascend:main` (after `vllm-ascend:0.14.0rc1`) for reference only.
+2. After execution, you can get the result, here is the result of `GLM4.7` in `vllm-ascend:main` (after `vllm-ascend:0.14.0rc1`) for reference only.
 
 | dataset | version | metric | mode | vllm-api-general-chat | note |
 |----- | ----- | ----- | ----- | -----| ----- |
@@ -790,6 +819,10 @@ In this chapter, we recommend best practices for three scenarios:
 `max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario. For other settings, please refer to the **[Deployment](#deployment)** chapter.
 
 ## FAQ
+
+- **Q: Why is the TPOT performance poor in Long-context test?**
+
+  A: Please ensure that the FIA operator replacement script has been executed successfully to complete the replacement of FIA operators. Here is the script: [A2](../../../../tools/install_flash_infer_attention_score_ops_a2.sh) and [A3](../../../../tools/install_flash_infer_attention_score_ops_a3.sh)
 
 - **Q: Startup fails with HCCL port conflicts (address already bound). What should I do?**
 

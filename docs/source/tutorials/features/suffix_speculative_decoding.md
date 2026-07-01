@@ -21,21 +21,17 @@ The benchmarking tool used in this tutorial is AISBench, which supports performa
 
 This tutorial uses the official image, version v0.13.0rc1. Use the following command to download:
 
-```{code-block} bash
-:substitutions:
-
-docker pull quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+```bash
+docker pull quay.io/ascend/vllm-ascend:v0.13.0rc1
 ```
 
 ## **Run with Docker**
 
 Container startup command:
 
-```{code-block} bash
-:substitutions:
-
+```bash
 # Update the vllm-ascend image
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+export IMAGE=quay.io/ascend/vllm-ascend:v0.13.0rc1
 export NAME=vllm-ascend
 
 # Run the container using the defined variables
@@ -137,7 +133,7 @@ models = [
 
 ```bash
 # Example command to test gsm8k dataset performance using the first 100 prompts. Commands for other datasets are similar.
-ais_bench --models vllm-api-stream-chat \
+ais_bench --models vllm_api_stream_chat \
   --datasets gsm8k_gen_0_shot_cot_str_perf \
   --debug --summarizer default_perf --mode perf --num-prompts 100
 ```

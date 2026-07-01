@@ -45,7 +45,7 @@ def l2norm_fwd(x: torch.Tensor, eps: float = 1e-6, output_dtype: torch.dtype | N
     MAX_FUSED_SIZE = 65536 // x.element_size()
     BD = min(MAX_FUSED_SIZE, triton.next_power_of_2(D))
     if D > BD:
-        raise RuntimeError(f"l2norm_fwd: This layer doesn't support feature dim >= 64KB, got {D}.")
+        raise RuntimeError("This layer doesn't support feature dim >= 64KB.")
 
     MBLOCK = 69
     # M, N = x.shape

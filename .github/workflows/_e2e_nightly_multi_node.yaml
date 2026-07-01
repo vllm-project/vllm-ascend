@@ -15,16 +15,11 @@ on:
         required: false
         type: string
         description: base image for pods
-        default: "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-910b-ubuntu22.04-py3.12"
+        default: "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-910b-ubuntu22.04-py3.11"
       config_file_path:
         required: true
         type: string
         description: the model config for multi_node test
-      config_base_path:
-        required: false
-        type: string
-        default: ''
-        description: override CONFIG_BASE_PATH used by the yaml loader inside the pod (defaults to nightly path)
       replicas:
         required: false
         default: "1"
@@ -35,6 +30,11 @@ on:
         default: "2"
         type: string
         description: how many pods will be pulled up via lws.yaml, indicates number of nodes we need
+      vllm_version:
+        required: false
+        default: "v0.18.0"
+        type: string
+        description: vllm version to use
       vllm_ascend_remote_url:
         required: false
         default: https://github.com/vllm-project/vllm-ascend.git
@@ -58,28 +58,9 @@ on:
         type: string
         default: ''
         description: job name used as benchmark artifact identifier, defaults to config_file_path stem
-      vllm_ascend_branch:
-        required: false
-        type: string
-        default: ''
-        description: branch name used as prefix in artifact names to distinguish dual-branch test runs
-      request_id:
-        required: false
-        type: string
-        default: ''
-        description: non-empty when triggered by PR /nightly command
-      testcase_timeout:
-        required: false
-        default: 120
-        type: string
-        description: test case execution timeout period,default:120 minutes
     secrets:
       KUBECONFIG_B64:
         required: true
-      OBS_ACCESS_KEY_ID:
-        required: false
-      OBS_SECRET_ACCESS_KEY:
-        required: false
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -91,13 +72,13 @@ defaults:
 # only cancel in-progress runs of the same workflow
 # and ignore the lint / 8 cards test type
 concurrency:
-  group: ascend-nightly-${{ github.workflow_ref }}-${{ github.ref }}-${{ inputs.soc_version }}-${{ inputs.config_file_path }}${{ inputs.request_id && format('-{0}', inputs.request_id) || '' }}
+  group: ascend-nightly-${{ github.workflow_ref }}-${{ github.ref }}-${{ inputs.soc_version }}-${{ inputs.config_file_path }}
   cancel-in-progress: true
 
 jobs:
   e2e:
     name: ${{ inputs.config_file_path }}
-    timeout-minutes: ${{ inputs.request_id != '' && 240 || fromJSON(inputs.testcase_timeout) }}
+    timeout-minutes: 120
     # This is the runner with no NPU for k8s controller
     runs-on: ${{ inputs.runner }}
     if: ${{ inputs.should_run }}
@@ -108,46 +89,36 @@ jobs:
         NAMESPACE: vllm-project
     steps:
       - name: Decode kubeconfig
-        run: echo "${{ secrets.KUBECONFIG_B64 }}" | base64 -d > "$KUBECONFIG"
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            if [ "${{ inputs.soc_version }}" = "a3" ]; then
+              # NOTE: This is too hack, we should find a better way to manage kubeconfig for pr tests.
+              cp /root/.cache/.kube/kubeconfig.yaml "$KUBECONFIG"
+            else
+              cp /root/.cache/.kube/hk_001_kb.yaml "$KUBECONFIG"
+            fi
+          else
+            echo "${{ secrets.KUBECONFIG_B64 }}" | base64 -d > "$KUBECONFIG"
+          fi
 
       - name: Checkout code
-        uses: actions/checkout@v7
+        uses: actions/checkout@v6
 
       - name: Set job variables
-        id: vars
         run: |
           # Derive a unique, valid k8s resource name from config_file_path.
           # Append 6-char random suffix to avoid conflicts; total length capped at 63 chars.
 
           config_file="${{ inputs.config_file_path }}"
-          config_stem="${config_file%.yaml}"
-          lws_suffix=$(echo "$config_stem" | tr '[:upper:]' '[:lower:]' | tr '._' '-' | cut -c1-43)
+          lws_suffix=$(echo "$config_file" | sed 's/\.yaml$//' | tr '[:upper:]' '[:lower:]' | tr '._' '-' | cut -c1-43)
           rand_suffix=$(tr -d '-' < /proc/sys/kernel/random/uuid | cut -c1-6)
           LWS_NAME="vllm-${lws_suffix}-${rand_suffix}"
-
-          branch="${{ inputs.vllm_ascend_branch }}"
-          if [ -n "$branch" ]; then
-            ARTIFACT_NAME="${branch}-${config_stem}-ascend-logs"
-          else
-            ARTIFACT_NAME="${config_stem}-ascend-logs"
-          fi
-
-          job_name="${{ inputs.name }}"
-          if [ -z "$job_name" ]; then
-            job_name="$config_stem"
-          fi
-          BENCHMARK_JOB_NAME="${branch}-${job_name}"
 
           {
             echo "LWS_NAME=${LWS_NAME}"
             echo "LEADER_POD=${LWS_NAME}-0"
             echo "LOG_PREFIX=${{ inputs.ascend_log_prefix }}/${LWS_NAME}"
           } >> $GITHUB_ENV
-
-          {
-            echo "artifact_name=${ARTIFACT_NAME}"
-            echo "benchmark_job_name=${BENCHMARK_JOB_NAME}"
-          } >> $GITHUB_OUTPUT
 
       - name: Prepare scripts
         run: |
@@ -191,9 +162,9 @@ jobs:
           replicas="${{ inputs.replicas }}"
           image="${{ inputs.image }}"
           config_file_path="${{ inputs.config_file_path }}"
-          config_base_path="${{ inputs.config_base_path }}"
           fail_tag="FAIL_TAG_${{ inputs.config_file_path }}"
-          is_pr_test="${{ inputs.request_id != '' }}"
+          is_pr_test="${{ github.event_name == 'pull_request' }}"
+          vllm_version="${{ inputs.vllm_version }}"
           vllm_ascend_ref="${{ inputs.vllm_ascend_ref }}"
           vllm_ascend_remote_url="${{ inputs.vllm_ascend_remote_url }}"
           runner="${{ inputs.soc_version }}"
@@ -201,13 +172,16 @@ jobs:
 
           if [ "${{ inputs.soc_version }}" = "a3" ]; then
             npu_per_node=16
-            pvc_name=gy005-az5-vllm-ascend
+            pvc_name=nv-action-vllm-benchmarks-v2
           else
             npu_per_node=8
             pvc_name=vllm-project-hk001
           fi
 
-          benchmark_job_name="${{ steps.vars.outputs.benchmark_job_name }}"
+          benchmark_job_name="${{ inputs.name }}"
+          if [ -z "$benchmark_job_name" ]; then
+            benchmark_job_name="${config_file_path%.yaml}"
+          fi
 
           jinja2 tests/e2e/nightly/multi_node/scripts/lws.yaml.jinja2 \
             -D lws_name="$LWS_NAME" \
@@ -216,10 +190,10 @@ jobs:
             -D replicas="$replicas" \
             -D image="$image" \
             -D config_file_path="$config_file_path" \
-            -D config_base_path="$config_base_path" \
             -D npu_per_node="$npu_per_node" \
             -D fail_tag="$fail_tag" \
             -D is_pr_test="$is_pr_test" \
+            -D vllm_version="$vllm_version" \
             -D vllm_ascend_ref="$vllm_ascend_ref" \
             -D vllm_ascend_remote_url="$vllm_ascend_remote_url" \
             -D pvc_name="$pvc_name" \
@@ -313,9 +287,9 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p /tmp/benchmark_results
-          echo "Fetching benchmark results from PVC at /root/.cache/benchmark_results/${{ steps.vars.outputs.benchmark_job_name }}..."
+          echo "Fetching benchmark results from PVC at /root/.cache/benchmark_results/${{ inputs.name }}..."
           # Copy from PVC mounted directory (persists after pod termination)
-          SRC="/root/.cache/benchmark_results/${{ steps.vars.outputs.benchmark_job_name }}"
+          SRC="/root/.cache/benchmark_results/${{ inputs.name }}"
           if [ -d "$SRC" ] && [ "$(ls -A "$SRC" 2>/dev/null)" ]; then
             cp -r "$SRC"/. /tmp/benchmark_results/
             echo "Benchmark results fetched successfully from PVC:"
@@ -368,7 +342,6 @@ jobs:
           DEST="/tmp/collected-logs"
           PLOG_PATH=/root/ascend/log
           KUBE_LOG_PATH=/var/log
-          EXT_LOG_PATH=/external-dp
           for i in $(seq 0 $((size - 1))); do
             if [ "${i}" -eq 0 ]; then
               POD="${LWS_NAME}-0"
@@ -383,33 +356,15 @@ jobs:
             if [ -d "$SRC" ]; then
               cp -r "$SRC"/. "${DEST}/node${i}/${PLOG_PATH}/" 2>/dev/null || true
             fi
-            # External DP packs per-rank raw logs into a single archive per node.
-            EXT_SRC="${LOG_PREFIX}/node_${i}_external_dp_logs.tar.gz"
-            if [ -f "$EXT_SRC" ]; then
-              mkdir -p "${DEST}/node${i}/${EXT_LOG_PATH}"
-              cp "$EXT_SRC" "${DEST}/node${i}/${EXT_LOG_PATH}/" 2>/dev/null || true
-            fi
           done
 
           tar -czf /tmp/ascend-logs.tar.gz -C /tmp collected-logs
 
       - name: Upload Ascend logs
         if: always()
-        continue-on-error: true
-        uses: ascend-gha-runners/artifact/upload@v0.3
-        with:
-          access_key: ${{ secrets.OBS_ACCESS_KEY_ID }}
-          secret_key: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
-          name: ${{ inputs.config_file_path }}-ascend-logs
-          path: /tmp/ascend-logs.tar.gz
-          retention-days: 7
-
-      - name: Upload Ascend logs (GitHub Artifacts)
-        if: always()
-        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ steps.vars.outputs.artifact_name }}
+          name: ${{ inputs.config_file_path }}-ascend-logs
           path: /tmp/ascend-logs.tar.gz
           retention-days: 7
 
@@ -420,22 +375,9 @@ jobs:
 
       - name: Upload benchmark results
         if: always()
-        continue-on-error: true
-        uses: ascend-gha-runners/artifact/upload@v0.3
+        uses: actions/upload-artifact@v4
         with:
-          access_key: ${{ secrets.OBS_ACCESS_KEY_ID }}
-          secret_key: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
           name: nightly-test-benchmark-results-${{ inputs.name || inputs.config_file_path }}-${{ steps.bench_ts.outputs.artifact_ts }}
-          path: /tmp/benchmark_results/
-          if-no-files-found: warn
-          retention-days: 90
-
-      - name: Upload benchmark results (GitHub Artifacts)
-        if: always()
-        continue-on-error: true
-        uses: actions/upload-artifact@v7
-        with:
-          name: nightly-test-benchmark-results-${{ steps.vars.outputs.benchmark_job_name }}-${{ steps.bench_ts.outputs.artifact_ts }}
           path: /tmp/benchmark_results/
           if-no-files-found: warn
           retention-days: 90

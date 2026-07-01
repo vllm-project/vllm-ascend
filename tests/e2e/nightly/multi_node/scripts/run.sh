@@ -8,23 +8,12 @@ YELLOW="\033[0;33m"
 RED="\033[0;31m"
 NC="\033[0m" # No Color
 
-INTERNAL_DP_TEST_PATH="tests/e2e/nightly/multi_node/internal_dp/scripts/test_multi_node.py"
-EXTERNAL_DP_TEST_PATH="tests/e2e/nightly/multi_node/external_dp/scripts/test_external_dp.py"
-
-if [ -z "${MULTI_NODE_TEST_PATH:-}" ]; then
-    if [[ "${CONFIG_BASE_PATH:-}" == *"external_dp/config"* || "${CONFIG_YAML_PATH:-}" == *"external_dp/config"* ]]; then
-        MULTI_NODE_TEST_PATH="$EXTERNAL_DP_TEST_PATH"
-    else
-        MULTI_NODE_TEST_PATH="$INTERNAL_DP_TEST_PATH"
-    fi
-fi
-
 # Configuration
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
 export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
 # cann and atb environment setup
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
-source /usr/local/Ascend/cann-9.0.0/share/info/ascendnpu-ir/bin/set_env.sh
+source /usr/local/Ascend/cann-8.5.1/share/info/ascendnpu-ir/bin/set_env.sh
 
 set +eu
 source /usr/local/Ascend/nnal/atb/set_env.sh
@@ -117,29 +106,29 @@ check_and_config() {
     echo "====> Configure mirrors and git proxy"
     git config --global url."https://ghfast.top/https://github.com/".insteadOf "https://github.com/"
     pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
-    export PIP_EXTRA_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi"
+    export PIP_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi
 }
 
 install_extra_components() {
     echo "====> Installing extra components for DeepSeek-v3.2-exp-bf16"
-
+    
     if ! wget -q https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/CANN-custom_ops-sfa-linux.aarch64.run; then
         echo "Failed to download CANN-custom_ops-sfa-linux.aarch64.run"
         return 1
     fi
     chmod +x ./CANN-custom_ops-sfa-linux.aarch64.run
     ./CANN-custom_ops-sfa-linux.aarch64.run --quiet
-
+    
     if ! wget -q https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/custom_ops-1.0-cp311-cp311-linux_aarch64.whl; then
         echo "Failed to download custom_ops wheel"
         return 1
     fi
     pip install custom_ops-1.0-cp311-cp311-linux_aarch64.whl
-
+    
     export ASCEND_CUSTOM_OPP_PATH="/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize${ASCEND_CUSTOM_OPP_PATH:+:${ASCEND_CUSTOM_OPP_PATH}}"
     export LD_LIBRARY_PATH="/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize/op_api/lib/${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
     source /usr/local/Ascend/ascend-toolkit/set_env.sh
-
+    
     rm -f CANN-custom_ops-sfa-linux.aarch64.run \
           custom_ops-1.0-cp311-cp311-linux_aarch64.whl
     echo "====> Extra components installation completed"
@@ -149,13 +138,13 @@ checkout_src() {
     echo "====> Checkout source code"
     mkdir -p "$WORKSPACE"
     cd "$WORKSPACE"
-    pip uninstall -y vllm-ascend || true
+    pip uninstall -y vllm vllm-ascend || true
     cp -r "$WORKSPACE/vllm-ascend/benchmark" /tmp/aisbench-backup || true
-    rm -rf "$WORKSPACE/vllm-ascend"
+    rm -rf "$WORKSPACE/vllm" "$WORKSPACE/vllm-ascend"
 
     if [ ! -d "$WORKSPACE/vllm-ascend" ]; then
         echo "Cloning vllm-ascend from $VLLM_ASCEND_REMOTE_URL"
-        git clone --depth 1 --recurse-submodules "$VLLM_ASCEND_REMOTE_URL" "$WORKSPACE/vllm-ascend"
+        git clone --depth 1 "$VLLM_ASCEND_REMOTE_URL" "$WORKSPACE/vllm-ascend"
         cd "$WORKSPACE/vllm-ascend"
         PR_REF=$(git ls-remote origin 'refs/pull/*/head' | grep "^${VLLM_ASCEND_REF}" | awk '{print $2}' | head -1)
         if [ -n "$PR_REF" ]; then
@@ -165,12 +154,17 @@ checkout_src() {
             git fetch origin '+refs/pull/*/head:refs/remotes/pull/*' 2>/dev/null || true
             git checkout "$VLLM_ASCEND_REF"
         fi
-        git submodule update --init --recursive
+    fi
+
+    if [ ! -d "$WORKSPACE/vllm" ]; then
+        echo "Cloning vllm version/ref: $VLLM_VERSION"
+        git clone --depth 1 --branch "$VLLM_VERSION" https://github.com/vllm-project/vllm.git "$WORKSPACE/vllm"
     fi
 }
 
-install_vllm_ascend() {
-    echo "====> Install vllm-ascend"
+install_vllm() {
+    echo "====> Install vllm and vllm-ascend"
+    VLLM_TARGET_DEVICE=empty pip install -e "$WORKSPACE/vllm"
     pip install -r "$WORKSPACE/vllm-ascend/requirements-dev.txt"
     pip install -e "$WORKSPACE/vllm-ascend"
 }
@@ -208,8 +202,7 @@ kill_npu_processes() {
 run_tests_with_log() {
     set +e
     kill_npu_processes
-    echo "====> Run pytest entry: $MULTI_NODE_TEST_PATH"
-    pytest -sv --show-capture=no "$MULTI_NODE_TEST_PATH"
+    pytest -sv --show-capture=no tests/e2e/nightly/multi_node/scripts/test_multi_node.py
     ret=$?
     set -e
     if [ "$LWS_WORKER_INDEX" -eq 0 ]; then
@@ -243,7 +236,7 @@ main() {
     check_and_config
     if [[ "$IS_PR_TEST" == "true" ]]; then
         checkout_src
-        install_vllm_ascend
+        install_vllm
         install_aisbench
     fi
     show_vllm_info

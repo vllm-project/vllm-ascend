@@ -50,8 +50,6 @@ All environment variables must be defined in `vllm_ascend/envs.py` using the cen
 **Example:**
 
 ```python
-import os
-
 env_variables = {
     "VLLM_ASCEND_ENABLE_NZ": lambda: int(os.getenv("VLLM_ASCEND_ENABLE_NZ", 1)),
     # ...
@@ -101,7 +99,7 @@ pytest -sv tests/ut/ops/test_prepare_finalize.py
 pytest -sv tests/ut/ops/test_prepare_finalize.py::test_prepare_inputs
 
 # Run NPU-specific tests (requires NPU hardware)
-pytest -sv tests/e2e/pull_request/one_card/aclgraph/test_aclgraph_accuracy.py::test_default_full_and_piecewise_res_consistency
+pytest -sv tests/e2e/singlecard/test_piecewise_res_consistency
 ```
 
 **Requirement**: Run all tests locally before requesting review. Verify tests pass on NPU hardware for NPU-specific changes.
@@ -165,7 +163,7 @@ pytest -sv tests/e2e/pull_request/one_card/aclgraph/test_aclgraph_accuracy.py::t
 
 **Warning**: `tensor.item()` operations cause synchronization overhead on NPU when the `tensor` is on device.
 
-If the `tensor` is a device tensor, calling `item()` will triggers a synchronous data transfer from NPU to CPU. This can severely degrade performance in hot paths, causing `AsyncScheduler` to block here.
+If the `tensor` is a device tensor, the operator `item()` will trigger a synchronous data transfer from NPU to CPU, which can severely degrade performance in hot paths, cause this will make `AsyncScheduler` block here.
 
 **Review Requirements:**
 
@@ -321,14 +319,14 @@ update code
 
 PR titles should follow the format: `[Type][Module] Description`
 
-- **Type**: The type of change (e.g., `CI`, `Doc`, `BugFix`, `Feat`, `Platform`, `Refactor`)
+- **Type**: The type of change (e.g., `CI`, `Doc`, `Bugfix`, `Feat`, `Platform`, `Refactor`)
 - **Module**: The affected module (optional, e.g., `Misc`, `Model`, `Worker`)
 - **Description**: Brief description of the change
 
 **Examples:**
 
 - `[Doc][Misc] Update contribution guidelines`
-- `[BugFix] Fix CPU binding logic`
+- `[Bugfix] Fix CPU binding logic`
 - `[CI] Update image build workflow`
 
 ### Pull Request Template

@@ -32,9 +32,7 @@ class ElasticClient:
     Class for handling the client-side logic of Netloader of models.
     """
 
-    def __init__(
-        self, sources: list[str], device_id: int, model_path: str, tp: int, pp: int, group_name: str = "netloader"
-    ):
+    def __init__(self, sources: list[str], device_id: int, model_path: str, tp: int, pp: int):
         """
         Initializes the ElasticClient instance.
 
@@ -44,14 +42,12 @@ class ElasticClient:
         - model_path: The path to the model.
         - tp: Tensor parallel size.
         - pp: Pipeline parallel size.
-        - group_name: Name of the HCCL process group.
         """
         self.sources = sources
         self.device_id = device_id
         self.model_path = model_path
         self.tp = tp
         self.pp = pp
-        self.group_name = group_name
 
         self.s: socket.socket | None = None
         self.ack: tuple[str, int] | None = None
@@ -63,7 +59,7 @@ class ElasticClient:
                 ip, port_str = source.split(":")
                 port = int(port_str)
             except Exception as e:
-                logger.info("IP format error: %s, detail: %s", source, e)
+                logger.info(f"IP format error: {source}, detail: {e}")
                 continue
 
             self.server_addr = ip
@@ -71,16 +67,16 @@ class ElasticClient:
 
             try:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                logger.info("Start connection to server: %s:%s", self.server_addr, self.server_port)
+                logger.info(f"Start connection to server: {self.server_addr}:{self.server_port}")
                 sock.connect((self.server_addr, self.server_port))
-                logger.info("Finish connection to server: %s:%s", self.server_addr, self.server_port)
+                logger.info(f"Finish connection to server: {self.server_addr}:{self.server_port}")
                 sock.settimeout(60)
 
                 self.s = sock
                 self.ack = self.register(device_id, model_path, tp, pp)
                 break
             except Exception as e:
-                logger.error("Connect to %s fails, detail: %s", source, e)
+                logger.error(f"Connect to {source} fails, detail: {e}")
                 if sock is not None:
                     with suppress(Exception):
                         sock.close()
@@ -88,17 +84,6 @@ class ElasticClient:
                 self.ack = None
                 self.server_addr = None
                 self.server_port = None
-
-        if self.s is None:
-            sources_str = ", ".join(self.sources[:2])
-            if len(self.sources) > 2:
-                sources_str += f", ... (total {len(self.sources)})"
-            logger.error(
-                "All sources exhausted, no connection established for device_id=%s, model_path=%s, sources=[%s]",
-                device_id,
-                model_path,
-                sources_str,
-            )
 
     def close(self) -> None:
         """
@@ -108,7 +93,7 @@ class ElasticClient:
             try:
                 self.s.close()
             except Exception as e:
-                logger.error("Error closing socket: %s", e)
+                logger.error(f"Error closing socket: {e}")
             finally:
                 self.s = None
 
@@ -173,14 +158,7 @@ class ElasticClient:
         free_port = find_free_port()
         data = {
             "label": "JOIN",
-            "content": {
-                "device_id": device_id,
-                "model_path": model_path,
-                "tp": tp,
-                "pp": pp,
-                "port": free_port,
-                "group_name": self.group_name,
-            },
+            "content": {"device_id": device_id, "model_path": model_path, "tp": tp, "pp": pp, "port": free_port},
         }
 
         try:
@@ -198,7 +176,7 @@ class ElasticClient:
         except Exception as e:
             raise RuntimeError(f"Receive data {ack_str} cannot be converted to JSON format, detail: {e}")
 
-        logger.info("Receive ack: %s", ack)
+        logger.info(f"Receive ack: {ack}")
 
         if (
             "label" in ack
@@ -230,7 +208,6 @@ class ElasticServer:
         pp: int,
         int8_cache: str,
         int8_cache_name: list[str] | None,
-        group_name: str = "netloader",
     ):
         """
         Initializes the ElasticServer instance.
@@ -245,7 +222,6 @@ class ElasticServer:
         - pp: Pipeline parallel size.
         - int8_cache: The type of caching for int8 parameters (HBM, DRAM, or no).
         - int8_cache_name: List of parameter names to be cached.
-        - group_name: Name of the HCCL process group.
         """
         self.addr = addr
         self.port = port
@@ -259,7 +235,6 @@ class ElasticServer:
         self.model_path = model_path
         self.tp = tp
         self.pp = pp
-        self.group_name = group_name
 
         self.original_int8 = {}
         int8_pattern = "|".join(map(re.escape, int8_cache_name)) if int8_cache_name is not None else "(?:)"
@@ -272,7 +247,7 @@ class ElasticServer:
                         try:
                             self.original_int8[name] = param.data.clone().detach()
                         except RuntimeError as e:
-                            logger.error("Failed to cache int8 tensor %s to HBM, change to DRAM, due to %s", name, e)
+                            logger.error(f"Failed to cache int8 tensor {name} to HBM, change to DRAM, due to {e}")
                             self.original_int8[name] = param.data.cpu()
 
                 elif int8_cache == "dram":
@@ -284,19 +259,13 @@ class ElasticServer:
                     pass
                 else:
                     logger.warning(
-                        "int8_cache should be selected in [HBM, DRAM], but got %s, change to no cache", int8_cache
+                        f"int8_cache should be selected in [HBM, DRAM], but got {int8_cache}, change to no cache"
                     )
 
         logger.info(
-            "Server %s:%s starts, device id: %s, model path: %s, tp: %s, pp: %s, int8 params %s are saved to %s",
-            self.addr,
-            self.port,
-            self.device_id,
-            self.model_path,
-            self.tp,
-            self.pp,
-            list(self.original_int8),
-            int8_cache,
+            f"Server {self.addr}:{self.port} starts, device id: {self.device_id}, "
+            f"model path: {self.model_path}, tp: {self.tp}, pp: {self.pp}, "
+            f"int8 params {list(self.original_int8)} are saved to {int8_cache}"
         )
 
     def __del__(self):
@@ -321,7 +290,7 @@ class ElasticServer:
         """
         while True:
             conn, addr = self.s.accept()
-            logger.info("Accept new connection from %s:%s...", *addr)
+            logger.info("Accept new connection from {}:{}...".format(*addr))
             self.register_handler(conn, addr)
 
     def register_handler(self, conn, addr, buffer_size=1024):
@@ -339,7 +308,7 @@ class ElasticServer:
         try:
             data = json.loads(data_str)
         except Exception:
-            logger.error("Failed to load %s as JSON string from %s", data_str, addr)
+            logger.error(f"Failed to load {data_str} as JSON string")
             conn.close()
             return
 
@@ -391,32 +360,27 @@ class ElasticServer:
                     "content": msg,
                 }
         else:
-            logger.warning("Received data does not contain required fields: %s", data)
+            logger.warning(f"Received data does not contain required fields: {data}")
             ack = {"label": "JOIN_NACK", "content": f"Received data does not contain required fields: {data}"}
 
         try:
             ack_str = json.dumps(ack).encode("utf-8")
         except Exception as e:
-            logger.error("Failed to convert %s to JSON format, details: %s", ack, e)
+            logger.error(f"Failed to convert {ack} to JSON format, details: {e}")
             conn.close()
             return
 
         try:
             conn.send(ack_str)
         except Exception as e:
-            logger.error("Failed to send %s to %s, details: %s", ack, addr, e)
+            logger.error(f"Failed to send {ack} to {addr}, details: {e}")
             conn.close()
             return
 
         if ack["content"] and isinstance(ack["content"], dict) and "name" in ack["content"]:
             try:
-                p2psend = P2PSend(
-                    self.addr,
-                    data["content"]["port"],
-                    ack["content"]["name"],
-                    data["content"].get("group_name", "netloader"),
-                )
+                p2psend = P2PSend(self.addr, data["content"]["port"], ack["content"]["name"])
                 p2psend.send(self.model, self.original_int8)
             except Exception as e:
-                logger.error("P2PSend Failed to send model to %s, details: %s", self.addr, e)
+                logger.error(f"P2PSend Failed to send model to {self.addr}, details: {e}")
         conn.close()

@@ -72,7 +72,7 @@ Run the following script to execute online 128k inference.
 ```shell
 #!/bin/sh
 # Load model from ModelScope to speed up download
-export VLLM_USE_MODELSCOPE=True
+export VLLM_USE_MODELSCOPE=true
 # To reduce memory fragmentation and avoid out of memory
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export HCCL_BUFFSIZE=512
@@ -93,13 +93,14 @@ vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
   --quantization ascend \
   --served-model-name qwen3 \
   --max-num-seqs 1 \
-  --max-model-len 131072 \
-  --max-num-batched-tokens 131072 \
+  --max-model-len 133008 \
+  --max-num-batched-tokens 133008 \
   --enable-expert-parallel \
   --trust-remote-code \
   --gpu-memory-utilization 0.95 \
   --hf-overrides '{"rope_parameters": {"rope_type":"yarn","rope_theta":1000000,"factor":4,"original_max_position_embeddings":32768}}' \
   --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[1,2,4,8]}' \
+  --async-scheduling
 ```
 
 **Notice:**
@@ -119,7 +120,7 @@ The parameters are explained as follows:
     - (2) Decode requests are prioritized for scheduling, and prefill requests are scheduled only if there is available capacity.
     - Generally, if `--max-num-batched-tokens` is set to a larger value, the overall latency will be lower, but the pressure on GPU memory (activation value usage) will be greater.
 - `--gpu-memory-utilization` represents the proportion of HBM that vLLM will use for actual inference. Its essential function is to calculate the available kv_cache size. During the warm-up phase (referred to as profile run in vLLM), vLLM records the peak GPU memory usage during an inference process with an input size of `--max-num-batched-tokens`. The available kv_cache size is then calculated as: `--gpu-memory-utilization` * HBM size - peak GPU memory usage. Therefore, the larger the value of `--gpu-memory-utilization`, the more kv_cache can be used. However, since the GPU memory usage during the warm-up phase may differ from that during actual inference (e.g., due to uneven EP load), setting `--gpu-memory-utilization` too high may lead to OOM (Out of Memory) issues during actual inference. The default value is `0.9`.
-- `--enable-expert-parallel` indicates that EP is enabled. Note that vLLM does not support a mixed approach of EP and TP; that is, MoE can either use pure EP or pure TP.
+- `--enable-expert-parallel` indicates that EP is enabled. Note that vLLM does not support a mixed approach of ETP and EP; that is, MoE can either use pure EP or pure TP.
 - `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.
 - `--quantization` "ascend" indicates that quantization is used. To disable quantization, remove this option.
 - `--compilation-config` contains configurations related to the aclgraph graph mode. The most significant configurations are "cudagraph_mode" and "cudagraph_capture_sizes", which have the following meanings:
@@ -133,6 +134,8 @@ The parameters are explained as follows:
 - decode context parallel size must be less than or equal to max_dcp_size, where max_dcp_size = tensor_parallel_size // total_num_kv_heads.
 
 ## Accuracy Evaluation
+
+Here are two accuracy evaluation methods.
 
 ### Using AISBench
 
@@ -165,7 +168,7 @@ There are three `vllm bench` subcommands:
 Take the `serve` as an example. Run the code as follows.
 
 ```shell
-export VLLM_USE_MODELSCOPE=True
+export VLLM_USE_MODELSCOPE=true
 vllm bench serve --model vllm-ascend/Qwen3-235B-A22B-w8a8  --dataset-name random --random-input 131072 --num-prompts 1 --request-rate 1 --save-result --result-dir ./
 ```
 

@@ -1,8 +1,6 @@
 # Copyright Huawei Technologies Co., Ltd. 2023-2024. All rights reserved.
 # Todo: Once https://github.com/vllm-project/vllm/pull/24069 is merged in vllm. Remove this factory.
-from vllm.logger import logger
-
-from .policy_abstract import EplbPolicy
+from .policy_abstract import DynamicConfig, EplbPolicy
 from .policy_default_eplb import DefaultEplb
 from .policy_flashlb import FlashLB, warm_up
 from .policy_random import RandomLoadBalance
@@ -11,8 +9,8 @@ from .policy_swift_balancer import SwiftBalanceEplb
 
 class PolicyFactory:
     @staticmethod
-    def generate_policy(policy_type: int) -> EplbPolicy:
-        policy: dict[int, type[EplbPolicy]] = {
+    def generate_policy(policy_type: int, config: DynamicConfig) -> EplbPolicy:
+        policy = {
             # Constraint applying Dynamic EPLB policy V2:
             # If there exists redundant expert:
             # only one redundant expert can be placed in one NPU and its physical expert index must be 0
@@ -25,17 +23,8 @@ class PolicyFactory:
             # Multi-Shot Enhancement and Incremental Adjustment
             3: FlashLB,
         }
-        policy_class = policy.get(policy_type)
-        if policy_class is None:
-            policy_class = RandomLoadBalance
-            logger.warning(
-                "[eplb/policy] Unrecognized policy_type=%s, falling back to %s",
-                policy_type,
-                policy_class.__name__,
-            )
-        else:
-            logger.info("[eplb/policy] Policy: %s (type=%s)", policy_class.__name__, policy_type)
-        policy_instance = policy_class()
+        policy_class = policy.get(policy_type, RandomLoadBalance)
+        policy_instance = policy_class(config)
         if policy_type == 3:
             warm_up()
         return policy_instance

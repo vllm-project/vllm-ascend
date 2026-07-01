@@ -1,6 +1,6 @@
 # Using AISBench
 
-This document guides you to conduct accuracy testing using [AISBench](https://github.com/AISBench/benchmark/tree/master). AISBench provides accuracy and performance evaluation for many datasets.
+This document guides you to conduct accuracy testing using [AISBench](https://gitee.com/aisbench/benchmark/tree/master). AISBench provides accuracy and performance evaluation for many datasets.
 
 ## Online Server
 
@@ -38,11 +38,11 @@ Run the vLLM server in the docker.
 
 ```{code-block} bash
    :substitutions:
-vllm serve Qwen/Qwen2.5-0.5B-Instruct --max-model-len 35000 &
+vllm serve Qwen/Qwen2.5-0.5B-Instruct --max_model_len 35000 &
 ```
 
 :::{note}
-`--max-model-len` should be greater than `35000`, this will be suitable for most datasets. Otherwise the accuracy evaluation may be affected.
+`--max_model_len` should be greater than `35000`, this will be suitable for most datasets. Otherwise the accuracy evaluation may be affected.
 :::
 
 The vLLM server is started successfully, if you see logs as below:
@@ -57,11 +57,11 @@ INFO:     Application startup complete.
 
 #### Install AISBench
 
-Refer to [AISBench](https://github.com/AISBench/benchmark/tree/master) for details.
+Refer to [AISBench](https://gitee.com/aisbench/benchmark/tree/master) for details.
 Install AISBench from source.
 
 ```shell
-git clone https://github.com/AISBench/benchmark.git
+git clone https://gitee.com/aisbench/benchmark.git
 cd benchmark/
 pip3 install -e ./ --use-pep517
 ```
@@ -81,7 +81,7 @@ You can choose one or multiple datasets to execute accuracy evaluation.
 
 1. `C-Eval` dataset.
 
-    Take `C-Eval` dataset as an example. You can refer to [Datasets](https://github.com/AISBench/benchmark/tree/master/ais_bench/benchmark/configs/datasets) for more datasets. Each dataset has a `README.md` with detailed download and installation instructions.
+    Take `C-Eval` dataset as an example. You can refer to [Datasets](https://gitee.com/aisbench/benchmark/tree/master/ais_bench/benchmark/configs/datasets) for more datasets. Each dataset has a `README.md` with detailed download and installation instructions.
 
     Download dataset and install it to specific path.
 
@@ -161,7 +161,7 @@ There are several arguments that you should update according to your environment
 - `path`: Update to your model weight path.
 - `model`: Update to your model name in vLLM.
 - `host_ip` and `host_port`: Update to your vLLM server ip and port.
-- `max_out_len`: Note `max_out_len` + LLM input length should be less than `max_model_len`(config in your vllm server), `32768` will be suitable for most datasets.
+- `max_out_len`: Note `max_out_len` + LLM input length should be less than `max-model-len`(config in your vllm server), `32768` will be suitable for most datasets.
 - `batch_size`: Update according to your dataset.
 - `temperature`: Update inference argument.
 
@@ -219,9 +219,6 @@ ais_bench --models vllm_api_general_chat --datasets livecodebench_code_generate_
 # run AIME 2024 dataset
 ais_bench --models vllm_api_general_chat --datasets aime2024_gen_0_shot_chat_prompt.py --mode all --dump-eval-details --merge-ds
 
-# run GSM8K dataset
-ais_bench --models vllm_api_general_chat --datasets gsm8k_gen_0_shot_cot_chat_prompt.py --mode all --dump-eval-details --merge-ds
-
 ```
 
 After each dataset execution, you can get the result from saved files such as `outputs/default/20250628_151326`, there is an example as follows:
@@ -271,9 +268,6 @@ ais_bench --models vllm_api_general_chat --datasets livecodebench_code_generate_
 
 # run AIME 2024 dataset
 ais_bench --models vllm_api_general_chat --datasets aime2024_gen_0_shot_chat_prompt.py --summarizer default_perf --mode perf
-
-# run GSM8K dataset
-ais_bench --models vllm_api_general_chat --datasets gsm8k_gen_0_shot_cot_str_perf.py --summarizer default_perf --mode perf
 ```
 
 Multi-modal benchmarks (text + images):

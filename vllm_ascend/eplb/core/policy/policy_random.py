@@ -3,12 +3,15 @@
 import copy
 import random
 
-from .policy_abstract import EplbPolicy
+from .policy_abstract import DynamicConfig, EplbPolicy
 
 random.seed(42)
 
 
 class RandomLoadBalance(EplbPolicy):
+    def __init__(self, config: DynamicConfig):
+        super().__init__(config)
+
     def rebalance_experts(self, current_expert_table, expert_workload):
         new_table = copy.deepcopy(current_expert_table)
         num_layers = len(current_expert_table)

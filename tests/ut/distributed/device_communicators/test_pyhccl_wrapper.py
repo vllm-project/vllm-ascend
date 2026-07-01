@@ -5,21 +5,13 @@ from torch.distributed import ReduceOp
 
 from tests.ut.base import TestBase
 from vllm_ascend.distributed.device_communicators.pyhccl_wrapper import (
-    Function,
-    HCCLLibrary,
-    aclrtStream_t,
-    buffer_type,
-    hcclComm_t,
-    hcclDataType_t,
-    hcclDataTypeEnum,
-    hcclRedOp_t,
-    hcclRedOpTypeEnum,
-    hcclResult_t,
-    hcclUniqueId,
-)
+    Function, HCCLLibrary, aclrtStream_t, buffer_type, hcclComm_t,
+    hcclDataType_t, hcclDataTypeEnum, hcclRedOp_t, hcclRedOpTypeEnum,
+    hcclResult_t, hcclUniqueId)
 
 
 class TestHcclUniqueId(TestBase):
+
     def test_construct(self):
         uid = hcclUniqueId()
         uid.internal[0] = 12
@@ -28,6 +20,7 @@ class TestHcclUniqueId(TestBase):
 
 
 class TestHcclDataTypeEnum(TestBase):
+
     def test_torch_dtype_mapping(self):
         expected = {
             torch.int8: hcclDataTypeEnum.hcclInt8,
@@ -42,7 +35,8 @@ class TestHcclDataTypeEnum(TestBase):
 
         for torch_dtype, expected_enum in expected.items():
             with self.subTest(torch_dtype=torch_dtype):
-                self.assertEqual(hcclDataTypeEnum.from_torch(torch_dtype), expected_enum)
+                self.assertEqual(hcclDataTypeEnum.from_torch(torch_dtype),
+                                 expected_enum)
 
     def test_unsupported_dtype_raises(self):
         with self.assertRaises(ValueError):
@@ -50,6 +44,7 @@ class TestHcclDataTypeEnum(TestBase):
 
 
 class TestHcclRedOpTypeEnum(TestBase):
+
     def test_torch_reduce_op_mapping(self):
         expected = {
             ReduceOp.SUM: hcclRedOpTypeEnum.hcclSum,
@@ -60,7 +55,8 @@ class TestHcclRedOpTypeEnum(TestBase):
 
         for torch_op, expected_enum in expected.items():
             with self.subTest(torch_op=torch_op):
-                self.assertEqual(hcclRedOpTypeEnum.from_torch(torch_op), expected_enum)
+                self.assertEqual(hcclRedOpTypeEnum.from_torch(torch_op),
+                                 expected_enum)
 
     def test_unsupported_op_raises(self):
         unsupported_op = "NOT_EXIST"
@@ -69,6 +65,7 @@ class TestHcclRedOpTypeEnum(TestBase):
 
 
 class TestFunction(TestBase):
+
     def test_construct_with_valid_args(self):
         func = Function(name="foo", restype=int, argtypes=[int, str, float])
         self.assertEqual(func.name, "foo")
@@ -77,6 +74,7 @@ class TestFunction(TestBase):
 
 
 class TestHCLLLibrary(TestBase):
+
     def test_init_with_nonexistent_so(self):
         fake_path = "/definitely/not/exist/libhccl.so"
         with self.assertRaises(OSError):
@@ -129,6 +127,7 @@ class TestHCLLLibrary(TestBase):
 
     @patch.object(HCCLLibrary, "HCCL_CHECK")
     def test_hccl_all_reduce(self, mock_hccl_check):
+
         lib = HCCLLibrary.__new__(HCCLLibrary)
         lib._funcs = {"HcclAllReduce": MagicMock(return_value=0)}
         sendbuff = buffer_type()
@@ -139,13 +138,16 @@ class TestHCLLLibrary(TestBase):
         comm = hcclComm_t()
         stream = aclrtStream_t()
 
-        lib.hcclAllReduce(sendbuff, recvbuff, count, datatype, op, comm, stream)
+        lib.hcclAllReduce(sendbuff, recvbuff, count, datatype, op, comm,
+                          stream)
 
-        lib._funcs["HcclAllReduce"].assert_called_once_with(sendbuff, recvbuff, count, datatype, op, comm, stream)
+        lib._funcs["HcclAllReduce"].assert_called_once_with(
+            sendbuff, recvbuff, count, datatype, op, comm, stream)
         mock_hccl_check.assert_called_once_with(0)
 
     @patch.object(HCCLLibrary, "HCCL_CHECK")
     def test_hccl_broad_cast(self, mock_hccl_check):
+
         lib = HCCLLibrary.__new__(HCCLLibrary)
         lib._funcs = {"HcclBroadcast": MagicMock(return_value=0)}
         buff = buffer_type()
@@ -157,7 +159,8 @@ class TestHCLLLibrary(TestBase):
 
         lib.hcclBroadcast(buff, count, datatype, root, comm, stream)
 
-        lib._funcs["HcclBroadcast"].assert_called_once_with(buff, count, datatype, root, comm, stream)
+        lib._funcs["HcclBroadcast"].assert_called_once_with(
+            buff, count, datatype, root, comm, stream)
         mock_hccl_check.assert_called_once_with(0)
 
     @patch.object(HCCLLibrary, "HCCL_CHECK")

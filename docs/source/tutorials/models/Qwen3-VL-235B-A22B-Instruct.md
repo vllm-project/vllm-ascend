@@ -94,7 +94,7 @@ Node 0
 ```shell
 #!/bin/sh
 # Load model from ModelScope to speed up download
-export VLLM_USE_MODELSCOPE=True
+export VLLM_USE_MODELSCOPE=true
 # To reduce memory fragmentation and avoid out of memory
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 # this obtained through ifconfig
@@ -128,6 +128,7 @@ vllm serve Qwen/Qwen3-VL-235B-A22B-Instruct \
 --max-model-len 262144 \
 --max-num-batched-tokens 4096 \
 --trust-remote-code \
+--async-scheduling \
 --gpu-memory-utilization 0.9 \
 ```
 
@@ -136,7 +137,7 @@ Node1
 ```shell
 #!/bin/sh
 # Load model from ModelScope to speed up download
-export VLLM_USE_MODELSCOPE=True
+export VLLM_USE_MODELSCOPE=true
 # To reduce memory fragmentation and avoid out of memory
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 # this is obtained through ifconfig
@@ -174,6 +175,7 @@ vllm serve Qwen/Qwen3-VL-235B-A22B-Instruct \
 --max-num-batched-tokens 4096 \
 --enable-expert-parallel \
 --trust-remote-code \
+--async-scheduling \
 --gpu-memory-utilization 0.9 \
 ```
 
@@ -226,7 +228,7 @@ curl http://<node0_ip>:<port>/v1/chat/completions \
     {"role": "system", "content": "You are a helpful assistant."},
     {"role": "user", "content": [
         {"type": "image_url", "image_url": {"url": "https://modelscope.oss-cn-beijing.aliyuncs.com/resource/qwen.png"}},
-        {"type": "text", "text": "What is the text in the illustration?"}
+        {"type": "text", "text": "What is the text in the illustrate?"}
     ]}
     ]
     }'
@@ -267,7 +269,7 @@ There are three `vllm bench` subcommands:
 Take the `serve` as an example. Run the code as follows.
 
 ```shell
-export VLLM_USE_MODELSCOPE=True
+export VLLM_USE_MODELSCOPE=true
 vllm bench serve --model Qwen/Qwen3-VL-235B-A22B-Instruct  --dataset-name random --random-input 200 --num-prompts 200 --request-rate 1 --save-result --result-dir ./
 ```
 

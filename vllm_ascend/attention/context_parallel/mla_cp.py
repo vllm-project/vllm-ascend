@@ -6,19 +6,15 @@ import torch_npu
 from vllm.config import VllmConfig
 from vllm.distributed import (
     get_dcp_group,
+    get_decode_context_model_parallel_rank,
+    get_decode_context_model_parallel_world_size,
     get_pcp_group,
 )
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import AttentionCGSupport
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
-from vllm_ascend.device.device_op import DeviceOperator
-from vllm_ascend.distributed.utils import (
-    get_decode_context_model_parallel_rank,
-    get_decode_context_model_parallel_world_size,
-)
 
 # isort: off
 from vllm_ascend.attention.mla_v1 import (
@@ -38,15 +34,12 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     AscendPCPMetadata,
     CPChunkedContextMetadata,
     _npu_attention_update,
+    _npu_attn_out_lse_update,
     _process_attn_out_lse,
+    _update_out_and_lse,
 )
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
-from vllm_ascend.compilation.acl_graph import (
-    get_draft_graph_params,
-    get_draft_graph_prefill_params,
-    get_graph_params,
-    update_graph_params_workspaces,
-)
+from vllm_ascend.compilation.acl_graph import get_draft_graph_params, get_graph_params, update_graph_params_workspaces
 from vllm_ascend.utils import weak_ref_tensors
 
 MAX_O_PROJ_PREFETCH_SIZE = 16 * 1024 * 1024
@@ -62,7 +55,7 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
 
     def __init__(
         self,
-        kv_cache_spec: AscendMLAAttentionSpec,
+        kv_cache_spec: MLAAttentionSpec,
         layer_names: list[str],
         vllm_config: VllmConfig,
         device: torch.device,
@@ -134,14 +127,9 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
             kv_with_q_head_mask_idx=common_long_seq_metadata.kv_with_q_head_mask_idx_tensor,
             kv_with_q_tail_nomask_idx=common_long_seq_metadata.kv_with_q_tail_nomask_idx_tensor,
             kv_with_q_tail_mask_idx=common_long_seq_metadata.kv_with_q_tail_mask_idx_tensor,
-            kv_tail_proj_idx=common_long_seq_metadata.kv_tail_proj_idx_tensor,
-            kv_with_q_head_attn_idx_in_tail=common_long_seq_metadata.kv_with_q_head_attn_idx_in_tail_tensor,
-            kv_with_q_tail_attn_idx_in_tail=common_long_seq_metadata.kv_with_q_tail_attn_idx_in_tail_tensor,
             attn_mask_seqlens=common_long_seq_metadata.attn_mask_seqlens,
             head_attn_nomask_seqlens=common_long_seq_metadata.head_attn_nomask_seqlens,
             tail_attn_nomask_seqlens=common_long_seq_metadata.tail_attn_nomask_seqlens,
-            head_actual_seq_lengths_kv=common_long_seq_metadata.head_actual_seq_lengths_kv,
-            tail_actual_seq_lengths_kv=common_long_seq_metadata.tail_actual_seq_lengths_kv,
             q_full_idx=common_long_seq_metadata.q_full_idx,
             pcp_allgather_restore_idx=common_long_seq_metadata.pcp_allgather_restore_idx,
         )
@@ -159,7 +147,7 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
         assert long_seq_metadata is not None
         num_computed_tokens_of_pcp_dcp = long_seq_metadata.num_computed_tokens_of_pcp_dcp
         assert num_computed_tokens_of_pcp_dcp is not None
-        local_context_lens_allranks = torch.tensor(num_computed_tokens_of_pcp_dcp[self.num_decodes :]).reshape(
+        local_context_lens_allranks = torch.tensor(num_computed_tokens_of_pcp_dcp[self.num_decodes_flatten :]).reshape(
             -1, self.dcp_size * self.pcp_size
         )
         # Note(qcs): The max local context lengths
@@ -219,9 +207,9 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
         if build_metadata_step == BUILD_METADATA_STEP_PREFILL:
             # For pcp + spec decode, we flatten seq_lens and block_table
             # to avoid irregular attn_mask shape
-            return self.num_decodes + self.num_prefills
+            return self.num_decodes_flatten + self.num_prefills
         else:
-            return self.num_decodes
+            return self.num_decodes_flatten
 
     def build_prefill_metadata(
         self,
@@ -230,7 +218,7 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
     ) -> AscendMLAPrefillMetadata:
         prefill_metadata = super().build_prefill_metadata(common_prefix_len, common_attn_metadata)
         prefill_metadata.pcp_metadata = self.build_cp_metadata(common_prefix_len, common_attn_metadata)
-        prefill_metadata.block_table = self.block_table[self.num_decodes :, ...]
+        prefill_metadata.block_table = self.block_table[self.num_decodes_flatten :, ...]
         return prefill_metadata
 
     def build_decode_metadata(
@@ -245,18 +233,15 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
         num_computed_tokens_of_pcp_dcp = long_seq_metadata.num_computed_tokens_of_pcp_dcp
         assert num_computed_tokens_of_pcp_dcp is not None
         # [bs, pcp_size, dcp_size]
-        num_computed_tokens_of_cp_dcp_array = np.array(num_computed_tokens_of_pcp_dcp)[: self.num_decodes]
+        num_computed_tokens_of_cp_dcp_array = np.array(num_computed_tokens_of_pcp_dcp)[: self.num_decodes_flatten]
 
         cp_seq_len = num_computed_tokens_of_cp_dcp_array[:, self.pcp_rank, self.dcp_rank]
         cp_seq_len = torch.tensor(cp_seq_len, dtype=torch.int32)
         decode_metadata.cp_seq_len = cp_seq_len.tolist()
 
-        actual_seq_lengths_q = torch.arange(self.num_decodes) + 1
+        actual_seq_lengths_q = torch.arange(self.num_decodes_flatten) + 1
         decode_metadata.actual_seq_lengths_q = actual_seq_lengths_q
-        if long_seq_metadata.dcp_mtp_attn_mask is not None:
-            decode_metadata.dcp_mtp_attn_mask = long_seq_metadata.dcp_mtp_attn_mask
-        else:
-            decode_metadata.dcp_mtp_attn_mask = None
+
         return decode_metadata
 
 
@@ -313,27 +298,14 @@ class AscendMlaCPImpl(AscendMLAImpl):
         draft_attn_metadatas=None,
     ):
         if _EXTRA_CTX.is_draft_model:
-            if _EXTRA_CTX.is_draft_model_prefill:
-                graph_params = get_draft_graph_prefill_params()
-            else:
-                graph_params = get_draft_graph_params()
-            attn_metadata = draft_attn_metadatas
-            attn_keys = list(attn_metadata[0].keys())
+            graph_params = get_draft_graph_params()
         else:
             graph_params = get_graph_params()
-            attn_metadata = forward_context.attn_metadata
-            attn_keys = list(attn_metadata.keys())
         # FIXME: Behold! We are using a temporary hack here to update the args
         # for each layer's attention op in the graph.
-        num_layers = len(attn_keys)
-        if num_layers == 0:
-            return
-        if _EXTRA_CTX.is_draft_model:
-            attn_keys = attn_keys * (len(graph_params.attn_params[num_tokens]) // num_layers)
-        attn_count = 0
         with torch.npu.stream(update_stream):
             for key, param, handle, event in zip(
-                attn_keys,
+                forward_context.attn_metadata,
                 graph_params.attn_params[num_tokens],
                 graph_params.handles[num_tokens],
                 graph_params.events[num_tokens],
@@ -357,13 +329,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
                     softmax_lse,
                 ) = param
 
-                if _EXTRA_CTX.is_draft_model:
-                    draft_step = attn_count // num_layers
-                    decode_meta = attn_metadata[draft_step][key].decode
-                    attn_count = attn_count + 1
-                else:
-                    decode_meta = attn_metadata[key].decode
-
+                decode_meta = forward_context.attn_metadata[key].decode
                 seq_len = decode_meta.cp_seq_len
                 if isinstance(seq_len, torch.Tensor):
                     seq_len = seq_len.tolist()
@@ -449,25 +415,21 @@ class AscendMlaCPImpl(AscendMLAImpl):
         prefill_kv_c_k_pe = prefill_kv_c_k_pe[num_decode_tokens * self.pcp_size :]
         prefill_k_c_normed, prefill_k_pe = prefill_kv_c_k_pe.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         kv_c_normed, k_pe = prefill_k_c_normed, prefill_k_pe
-        prefill_k_c_normed = prefill_k_c_normed.squeeze(1)
+        prefill_k_c_normed = prefill_k_c_normed.squeeze()
         slot_mapping = attn_metadata.slot_mapping[self.pcp_size * num_decode_tokens :]
         if self.is_kv_producer:
             attn_metadata.reshape_cache_event = torch.npu.Event()
-        DeviceOperator.reshape_and_cache(
-            key=kv_c_normed, value=k_pe, key_cache=kv_cache[0], value_cache=kv_cache[1], slot_mapping=slot_mapping
+        torch_npu._npu_reshape_and_cache(
+            key=kv_c_normed, value=k_pe, key_cache=kv_cache[0], value_cache=kv_cache[1], slot_indices=slot_mapping
         )
         if self.is_kv_producer:
             attn_metadata.reshape_cache_event.record()
-        pcp_metadata = attn_metadata.prefill.pcp_metadata
-        assert pcp_metadata is not None
-        tail_k_c_normed = torch.index_select(prefill_k_c_normed, 0, pcp_metadata.kv_tail_proj_idx)
-        tail_k_pe = torch.index_select(prefill_k_pe, 0, pcp_metadata.kv_tail_proj_idx)
         prefill_k_nope, prefill_value = (
-            self.kv_b_proj(tail_k_c_normed)[0]
+            self.kv_b_proj(prefill_k_c_normed)[0]
             .view(-1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
             .split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
         )
-        prefill_k_pe = tail_k_pe.expand((*prefill_k_nope.shape[:-1], -1))
+        prefill_k_pe = prefill_k_pe.expand((*prefill_k_nope.shape[:-1], -1))
         return PrefillMLAPreprocessResult(prefill_q_nope, prefill_q_pe, prefill_k_nope, prefill_k_pe, prefill_value)
 
     def mla_preprocess_decode(self, q_c, kv_no_split, kv_cache, attn_metadata):
@@ -516,44 +478,46 @@ class AscendMlaCPImpl(AscendMLAImpl):
         assert attn_metadata.prefill.pcp_metadata is not None
         num_tokens = q_nope.size(0)
         prefill_meta = attn_metadata.prefill
-        pcp_metadata = attn_metadata.prefill.pcp_metadata
         # Use precomputed indices from the metadata (already converted to tensors and on device)
-        q_head_idx = pcp_metadata.q_head_idx
-        q_tail_idx = pcp_metadata.q_tail_idx
-        kv_with_q_head_attn_idx = pcp_metadata.kv_with_q_head_attn_idx_in_tail
-        attn_mask_seqlens = pcp_metadata.attn_mask_seqlens
-        head_actual_seq_lengths_kv = pcp_metadata.head_actual_seq_lengths_kv
-        tail_actual_seq_lengths_kv = pcp_metadata.tail_actual_seq_lengths_kv
-        assert head_actual_seq_lengths_kv is not None
-        assert tail_actual_seq_lengths_kv is not None
+        q_head_idx = attn_metadata.prefill.pcp_metadata.q_head_idx
+        q_tail_idx = attn_metadata.prefill.pcp_metadata.q_tail_idx
+        kv_with_q_head_nomask_idx = attn_metadata.prefill.pcp_metadata.kv_with_q_head_nomask_idx
+        kv_with_q_head_mask_idx = attn_metadata.prefill.pcp_metadata.kv_with_q_head_mask_idx
+        kv_with_q_tail_nomask_idx = attn_metadata.prefill.pcp_metadata.kv_with_q_tail_nomask_idx
+        kv_with_q_tail_mask_idx = attn_metadata.prefill.pcp_metadata.kv_with_q_tail_mask_idx
+        attn_mask_seqlens = attn_metadata.prefill.pcp_metadata.attn_mask_seqlens
+        head_attn_nomask_seqlens = attn_metadata.prefill.pcp_metadata.head_attn_nomask_seqlens
+        tail_attn_nomask_seqlens = attn_metadata.prefill.pcp_metadata.tail_attn_nomask_seqlens
 
-        output_head, lse_head = self._attention_with_optional_kv_select(
+        output_head, lse_head = self._attention_with_mask_and_nomask(
             q_nope=torch.index_select(q_nope, 0, q_head_idx),
             q_pe=torch.index_select(q_pe, 0, q_head_idx),
             k_nope=k_nope,
             k_pe=k_pe,
             value=value,
-            kv_attn_idx=kv_with_q_head_attn_idx,
+            kv_mask_idx=kv_with_q_head_mask_idx,
+            kv_nomask_idx=kv_with_q_head_nomask_idx,
             attn_mask_seqlens=attn_mask_seqlens,
-            actual_seq_lengths_kv=head_actual_seq_lengths_kv,
+            attn_nomask_seqlens=head_attn_nomask_seqlens,
             mask=prefill_meta.attn_mask,
             attn_metadata=attn_metadata,
         )
 
-        output_tail, lse_tail = self._attention_with_optional_kv_select(
+        output_tail, lse_tail = self._attention_with_mask_and_nomask(
             q_nope=torch.index_select(q_nope, 0, q_tail_idx),
             q_pe=torch.index_select(q_pe, 0, q_tail_idx),
             k_nope=k_nope,
             k_pe=k_pe,
             value=value,
-            kv_attn_idx=None,
+            kv_mask_idx=kv_with_q_tail_mask_idx,
+            kv_nomask_idx=kv_with_q_tail_nomask_idx,
             attn_mask_seqlens=attn_mask_seqlens,
-            actual_seq_lengths_kv=tail_actual_seq_lengths_kv,
+            attn_nomask_seqlens=tail_attn_nomask_seqlens,
             mask=prefill_meta.attn_mask,
             attn_metadata=attn_metadata,
         )
 
-        q_full_idx = pcp_metadata.q_full_idx
+        q_full_idx = attn_metadata.prefill.pcp_metadata.q_full_idx
         attn_output = torch.index_select(torch.cat([output_head, output_tail], dim=0), 0, q_full_idx)
         attn_lse = None
         if attn_metadata.prefill is not None and attn_metadata.prefill.chunked_context is not None:
@@ -567,34 +531,56 @@ class AscendMlaCPImpl(AscendMLAImpl):
 
         return output
 
-    def _attention_with_optional_kv_select(
+    def _attention_with_mask_and_nomask(
         self,
         q_nope: torch.Tensor,
         q_pe: torch.Tensor,
         k_nope: torch.Tensor,
         k_pe: torch.Tensor,
         value: torch.Tensor,
-        kv_attn_idx: torch.Tensor | None,
+        kv_mask_idx: torch.Tensor,
+        kv_nomask_idx: torch.Tensor,
         attn_mask_seqlens: list[int],
-        actual_seq_lengths_kv: list[int],
+        attn_nomask_seqlens: list[int],
         mask: torch.Tensor,
         attn_metadata,
     ):
-        if kv_attn_idx is None:
-            k_nope_attn = k_nope
-            value_attn = value
-            k_pe_attn = k_pe
-        else:
-            k_nope_attn = torch.index_select(k_nope, 0, kv_attn_idx)
-            value_attn = torch.index_select(value, 0, kv_attn_idx)
-            k_pe_attn = torch.index_select(k_pe, 0, kv_attn_idx)
+        # nomask Attention
+        if kv_nomask_idx is not None and kv_nomask_idx.numel() > 0:
+            k_nope_nomask = torch.index_select(k_nope, 0, kv_nomask_idx)
+            value_nomask = torch.index_select(value, 0, kv_nomask_idx)
+            k_pe_nomask = torch.index_select(k_pe, 0, kv_nomask_idx)
 
-        attn_out, attn_lse = torch.ops.npu.npu_fused_infer_attention_score(
+            attn_out_nomask, attn_lse_nomask = torch.ops.npu.npu_fused_infer_attention_score(
+                q_nope,
+                k_nope_nomask,
+                value_nomask,
+                query_rope=q_pe,
+                key_rope=k_pe_nomask,
+                num_heads=self.num_heads,
+                num_key_value_heads=self.num_heads,
+                input_layout="TND",
+                atten_mask=None,
+                scale=self.scale,
+                sparse_mode=0,
+                antiquant_mode=0,
+                antiquant_scale=None,
+                softmax_lse_flag=True,
+                actual_seq_lengths_kv=attn_nomask_seqlens,
+                actual_seq_lengths=attn_mask_seqlens,
+            )
+
+        # mask Attention
+        k_nope_mask = torch.index_select(k_nope, 0, kv_mask_idx)
+        value_mask = torch.index_select(value, 0, kv_mask_idx)
+        k_pe_mask = torch.index_select(k_pe, 0, kv_mask_idx)
+
+        attn_out_mask, attn_lse_mask = torch.ops.npu.npu_fused_infer_attention_score(
             q_nope,
-            k_nope_attn,
-            value_attn,
+            k_nope_mask,
+            value_mask,
             query_rope=q_pe,
-            key_rope=k_pe_attn,
+            key_rope=k_pe_mask,
             num_heads=self.num_heads,
             num_key_value_heads=self.num_heads,
             input_layout="TND",
@@ -604,14 +590,25 @@ class AscendMlaCPImpl(AscendMLAImpl):
             antiquant_mode=0,
             antiquant_scale=None,
             softmax_lse_flag=True,
-            actual_seq_lengths_kv=actual_seq_lengths_kv,
+            actual_seq_lengths_kv=attn_mask_seqlens,
             actual_seq_lengths=attn_mask_seqlens,
         )
 
-        if attn_metadata.prefill is not None and attn_metadata.prefill.chunked_context is None:
-            attn_lse = None
+        # update
+        output = attn_out_mask
+        attn_lse = attn_lse_mask
 
-        return attn_out, attn_lse
+        if kv_nomask_idx is not None and kv_nomask_idx.numel() > 0:
+            if attn_metadata.prefill is not None and attn_metadata.prefill.chunked_context is None:
+                output = _npu_attn_out_lse_update(attn_lse_mask, attn_lse_nomask, attn_out_mask, attn_out_nomask)
+                attn_lse = None
+            else:
+                output, attn_lse = _update_out_and_lse(
+                    torch.stack([attn_out_nomask, attn_out_mask], dim=0),
+                    torch.stack([attn_lse_nomask, attn_lse_mask], dim=0),
+                )
+
+        return output, attn_lse
 
     def _forward_decode(
         self,
@@ -648,14 +645,13 @@ class AscendMlaCPImpl(AscendMLAImpl):
             ]
             and self.speculative_config is not None
         ):
-            input_layout = "BSND"
-            num_decodes = attn_metadata.num_decodes
+            input_layout = "TND"
             # TODO: If the driver is upgraded later, the contiguous function can be deleted.
-            q_nope = q_nope.view(num_decodes, -1, q_nope.shape[1], q_nope.shape[-1]).contiguous()
-            q_pe = q_pe.view(num_decodes, -1, q_pe.shape[1], q_pe.shape[-1])
-            sparse_mode = 0
-            spec_attn_mask = attn_metadata.decode.dcp_mtp_attn_mask  # type:ignore
-            actual_seq_lengths = attn_metadata.query_lens
+            q_nope = q_nope.view(num_tokens, num_heads, -1).contiguous()
+            q_pe = q_pe.view(num_tokens, num_heads, -1)
+            sparse_mode = 3
+            spec_attn_mask = attn_metadata.decode.attn_mask  # type:ignore
+            actual_seq_lengths = decode_meta.actual_seq_lengths_q
         else:
             q_nope = q_nope.view(num_tokens, num_heads, 1, -1).contiguous()
             q_pe = q_pe.view(num_tokens, num_heads, 1, -1)
@@ -681,10 +677,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
         }
 
         if _EXTRA_CTX.is_draft_model:
-            if _EXTRA_CTX.is_draft_model_prefill:
-                graph_params = get_draft_graph_prefill_params()
-            else:
-                graph_params = get_draft_graph_params()
+            graph_params = get_draft_graph_params()
         else:
             graph_params = get_graph_params()
         if _EXTRA_CTX.capturing:
@@ -703,12 +696,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
                 )
                 update_graph_params_workspaces(num_tokens, workspace)
             attn_output = torch.empty_like(q_nope)
-            if input_layout == "BSND":
-                num_decodes = attn_metadata.num_decodes
-                softmax_lse = torch.empty(
-                    (num_decodes, num_heads, q_nope.shape[1], 1), dtype=torch.float, device=q_nope.device
-                )
-            elif input_layout == "BNSD":
+            if input_layout == "BNSD":
                 softmax_lse = torch.empty((num_tokens, num_heads, 1, 1), dtype=torch.float, device=q_nope.device)
             else:
                 softmax_lse = torch.empty((num_tokens, num_heads, 1), dtype=torch.float, device=q_nope.device)
@@ -746,10 +734,6 @@ class AscendMlaCPImpl(AscendMLAImpl):
                 k_nope,
                 **common_kwargs,
             )
-        if input_layout == "BSND":
-            attn_output = attn_output.view(-1, attn_output.shape[2], attn_output.shape[3])
-            softmax_lse = softmax_lse.transpose(1, 2).reshape(-1, softmax_lse.shape[1], 1)
-
         if input_layout == "BNSD":
             B_attn, N_attn, S, D = attn_output.shape
             B_lse, N_lse, Q_S, _ = softmax_lse.shape

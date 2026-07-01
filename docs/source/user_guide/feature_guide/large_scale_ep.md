@@ -1,6 +1,6 @@
 # Distributed DP Server With Large-Scale Expert Parallelism
 
-## Getting Started
+## Getting Start
 
 vLLM-Ascend now supports prefill-decode (PD) disaggregation in the large-scale **Expert Parallelism (EP)** scenario. To achieve better performance, the distributed DP server is applied in vLLM-Ascend. In the PD separation scenario, different optimization strategies can be implemented based on the distinct characteristics of PD nodes, thereby enabling more flexible model deployment. \
 Taking the DeepSeek model as an example, using 8 Atlas 800T A3 servers to deploy the model. Assume the IP of the servers starts from 192.0.0.1 and ends by 192.0.0.8. Use the first 4 servers as prefiller nodes and the last 4 servers as decoder nodes. And the prefiller nodes are deployed as master nodes independently, while the decoder nodes use the 192.0.0.5 node as the master node.
@@ -9,7 +9,7 @@ Taking the DeepSeek model as an example, using 8 Atlas 800T A3 servers to deploy
 
 ### Physical Layer Requirements
 
-- The physical machines must be located on the same LAN, with network connectivity.
+- The physical machines must be located on the same WLAN, with network connectivity.
 - All NPUs must be interconnected. For the Atlas A2 generation, intra-node connectivity is via HCCS, and inter-node connectivity is via RDMA. For the Atlas A3 generation, both intra-node and inter-node connectivity are via HCCS.
 
 ### Verification Process
@@ -163,6 +163,7 @@ vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
       "kv_role": "kv_producer",
       "kv_parallel_size": "1",
       "kv_port": "20001",
+      "engine_id": "0"
     }' \
     --additional-config '{"enable_weight_nz_layout":true,"enable_prefill_optimizations":true}'
 ```
@@ -228,6 +229,7 @@ vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
         "kv_role": "kv_consumer",
         "kv_parallel_size": "1",
         "kv_port": "20001",
+        "engine_id": "0"
         }' \
     --additional-config '{"enable_weight_nz_layout":true}'
 ```
@@ -363,10 +365,10 @@ You can get the proxy program in the repository's examples, [load\_balance\_prox
 
 ## Benchmark
 
-We recommend using aisbench tool to assess performance. [aisbench](https://github.com/AISBench/benchmark). Execute the following commands to install aisbench
+We recommend using aisbench tool to assess performance. [aisbench](https://gitee.com/aisbench/benchmark). Execute the following commands to install aisbench
 
 ```shell
-git clone https://github.com/AISBench/benchmark.git
+git clone https://gitee.com/aisbench/benchmark.git
 cd benchmark/
 pip3 install -e ./
 ```
@@ -412,7 +414,7 @@ models = [
 ais_bench --models vllm_api_stream_chat --datasets gsm8k_gen_0_shot_cot_str_perf  --debug  --mode perf
 ```
 
-- For more details on commands and parameters for aisbench, refer to [aisbench](https://github.com/AISBench/benchmark)
+- For more details on commands and parameters for aisbench, refer to [aisbench](https://gitee.com/aisbench/benchmark)
 
 ## Prefill & Decode Configuration Details
 
@@ -431,6 +433,7 @@ In the PD separation scenario, we provide an optimized configuration.
           "kv_role": "kv_producer",
           "kv_parallel_size": "1",
           "kv_port": "20001",
+          "engine_id": "0"
         }'
     ```
 
@@ -452,6 +455,7 @@ In the PD separation scenario, we provide an optimized configuration.
           "kv_role": "kv_consumer",
           "kv_parallel_size": "1",
           "kv_port": "20001",
+          "engine_id": "0"
         }'
     ```
 

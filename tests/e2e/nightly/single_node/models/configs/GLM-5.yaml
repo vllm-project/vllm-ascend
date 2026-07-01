@@ -1,0 +1,79 @@
+# ==========================================
+# Shared Configurations
+# ==========================================
+
+_envs: &envs
+  HCCL_BUFFSIZE: "1024"
+  SERVER_PORT: "DEFAULT_PORT"
+  HCCL_OP_EXPANSION_MODE: "AIV"
+  OMP_PROC_BIND: "false"
+  OMP_NUM_THREADS: "1"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+
+_server_cmd: &server_cmd
+  - "--enable-expert-parallel"
+  - "--tensor-parallel-size"
+  - "16"
+  - "--data-parallel-size"
+  - "1"
+  - "--port"
+  - "$SERVER_PORT"
+  - "--max-model-len"
+  - "8192"
+  - "--max-num-batched-tokens"
+  - "4096"
+  - "--trust-remote-code"
+  - "--gpu-memory-utilization"
+  - "0.95"
+  - "--max-num-seqs"
+  - "8"
+  - "--quantization"
+  - "ascend"
+  - "--async-scheduling"
+  - "--additional-config"
+  - '{"enable_npugraph_ex": true,"fuse_muls_add":true,"multistream_overlap_shared_expert":true}'
+  - "--speculative-config"
+  - '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
+
+_special_dependencies: &special_dependencies
+  transformers: "5.2.0"
+
+_benchmarks: &benchmarks
+  acc:
+    case_type: accuracy
+    dataset_path: vllm-ascend/gsm8k-lite
+    request_conf: vllm_api_general_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
+    max_out_len: 4096
+    batch_size: 8
+    baseline: 95
+    threshold: 5
+  perf:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K-in3500-bs400
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 16
+    max_out_len: 1500
+    batch_size: 8
+    request_rate: 0
+    baseline: 1
+    threshold: 0.97
+
+# ==========================================
+# ACTUAL TEST CASES
+# ==========================================
+
+test_cases:
+  - name: "GLM-5-TP16-DP1-decodegraph"
+    model: "Eco-Tech/GLM-5-w4a8"
+    special_dependencies: *special_dependencies
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--compilation-config"
+      - '{"cudagraph_capture_sizes": [4,8,16,32,64,128,256,512], "cudagraph_mode": "FULL_DECODE_ONLY"}'
+    benchmarks:
+      <<: *benchmarks
+

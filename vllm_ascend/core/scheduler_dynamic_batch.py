@@ -41,9 +41,8 @@ class BudgetRefiner:
         if not self.enabled:
             return
         logger.info(
-            "BudgetRefiner: Dynamic batch is enabled with SLO limit=%s. "
-            "Chunked prefill is forced to be activated because dynamic batch relies on it.",
-            slo_limit,
+            "Dynamic batch is enabled with SLO limit: {}, and chunked prefill is "
+            "forced to be activated because dynamic batch relies on it".format(str(slo_limit))
         )
         self.lookup: dict[tuple[int, int], int] = {}
         self.context_keys: set[int] = set()
@@ -95,7 +94,7 @@ class BudgetRefiner:
             return self.default_budget
         budget = self.lookup.get((aligned_ctx, aligned_dnum), None)
         if budget is None:
-            logger.warning("Table miss for ctx=%s, dnum=%s", aligned_ctx, aligned_dnum)
+            logger.warn(f"Table miss for ctx,dnum{aligned_ctx, aligned_dnum}")
             budget = self.default_budget
         # For debug.
         # logger.info(
@@ -138,9 +137,9 @@ class SchedulerDynamicBatch(Scheduler):
             kv_cache_config,
             structured_output_manager,
             block_size,
-            mm_registry=mm_registry,
-            include_finished_set=include_finished_set,
-            log_stats=log_stats,
+            mm_registry,
+            include_finished_set,
+            log_stats,
         )
         self.running: list[Request] = []
         self.budget_refiner = BudgetRefiner(
@@ -169,10 +168,7 @@ class SchedulerDynamicBatch(Scheduler):
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
         num_scheduled_tokens: dict[str, int] = {}
         token_budget = self.max_num_scheduled_tokens
-        refined_budget = self.budget_refiner.refine_budget(self.running, token_budget)
-        if refined_budget != token_budget:
-            logger.debug("Refined token_budget: %s -> %s", token_budget, refined_budget)
-        token_budget = refined_budget
+        token_budget = self.budget_refiner.refine_budget(self.running, token_budget)
 
         # NOTE: We move the prefill requests to the end of the self.running
         # list and keep the relative order unchanged. This rearrangement makes this
@@ -258,13 +254,6 @@ class SchedulerDynamicBatch(Scheduler):
 
                     self.waiting.prepend_request(preempted_req)
                     preempted_reqs.append(preempted_req)
-                    logger.info(
-                        "Preempted request %s (priority=%s). running_count=%s, token_budget=%s",
-                        preempted_req.request_id,
-                        getattr(preempted_req, "priority", "N/A"),
-                        len(self.running),
-                        token_budget,
-                    )
                     if preempted_req == request:
                         # No more request to preempt.
                         can_schedule = False
@@ -310,32 +299,39 @@ class SchedulerDynamicBatch(Scheduler):
             )
             assert len(scheduled_loras) <= self.lora_config.max_loras
 
+        # Use a temporary RequestQueue to collect requests that need to be
+        # skipped and put back at the head of the waiting queue later
+        skipped_waiting_requests = create_request_queue(self.policy)
+
         # Next, schedule the WAITING requests.
         if not preempted_reqs:
-            step_skipped_waiting = create_request_queue(self.policy)
-
-            while (self.waiting or self.skipped_waiting) and token_budget > 0:
+            while self.waiting and token_budget > 0:
                 if len(self.running) == self.max_num_running_reqs:
                     break
 
-                request_queue = self._select_waiting_queue_for_scheduling()
-                if request_queue is None:
-                    break
+                request = self.waiting.peek_request()
 
-                request = request_queue.peek_request()
+                # KVTransfer: skip request if still waiting for remote kvs.
+                if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
+                    is_ready = self._update_waiting_for_remote_kv(request)
+                    if is_ready:
+                        request.status = RequestStatus.WAITING
+                    else:
+                        logger.debug("%s is still in WAITING_FOR_REMOTE_KVS state.", request.request_id)
+                        self.waiting.pop_request()
+                        skipped_waiting_requests.prepend_request(request)
+                        continue
 
-                # try to promote blocked statuses while traversing skipped queue.
-                if self._is_blocked_waiting_status(request.status) and not self._try_promote_blocked_waiting_request(
-                    request
-                ):
-                    if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
-                        logger.debug(
-                            "%s is still in WAITING_FOR_REMOTE_KVS state.",
-                            request.request_id,
-                        )
-                    request_queue.pop_request()
-                    step_skipped_waiting.prepend_request(request)
-                    continue
+                # Skip request if the structured output request is still waiting
+                # for FSM compilation.
+                if request.status == RequestStatus.WAITING_FOR_FSM:
+                    structured_output_req = request.structured_output_request
+                    if structured_output_req and structured_output_req.grammar:
+                        request.status = RequestStatus.WAITING
+                    else:
+                        self.waiting.pop_request()
+                        skipped_waiting_requests.prepend_request(request)
+                        continue
 
                 # Check that adding the request still respects the max_loras
                 # constraint.
@@ -348,8 +344,8 @@ class SchedulerDynamicBatch(Scheduler):
                     )
                 ):
                     # Scheduling would exceed max_loras, skip.
-                    request_queue.pop_request()
-                    step_skipped_waiting.prepend_request(request)
+                    self.waiting.pop_request()
+                    skipped_waiting_requests.prepend_request(request)
                     continue
 
                 num_external_computed_tokens = 0
@@ -372,8 +368,8 @@ class SchedulerDynamicBatch(Scheduler):
                             # The request cannot be scheduled because
                             # the KVConnector couldn't determine
                             # the number of matched tokens.
-                            request_queue.pop_request()
-                            step_skipped_waiting.prepend_request(request)
+                            self.waiting.pop_request()
+                            skipped_waiting_requests.prepend_request(request)
                             continue
 
                     # Total computed tokens (local + external).
@@ -404,8 +400,8 @@ class SchedulerDynamicBatch(Scheduler):
                     # chunked prefill has to be enabled explicitly to allow
                     # pooling requests to be chunked
                     if not self.scheduler_config.enable_chunked_prefill and num_new_tokens > token_budget:
-                        request_queue.pop_request()
-                        step_skipped_waiting.prepend_request(request)
+                        self.waiting.pop_request()
+                        skipped_waiting_requests.prepend_request(request)
                         continue
 
                     num_new_tokens = min(num_new_tokens, token_budget)
@@ -464,13 +460,14 @@ class SchedulerDynamicBatch(Scheduler):
                         num_external_computed_tokens,
                     )
 
-                request = request_queue.pop_request()
+                # Request was already popped from self.waiting
+                # unless it was re-added above due to new_blocks being None.
+                request = self.waiting.pop_request()
                 if load_kv_async:
                     # If loading async, allocate memory and put request
                     # into the WAITING_FOR_REMOTE_KV state.
+                    skipped_waiting_requests.prepend_request(request)
                     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
-                    step_skipped_waiting.prepend_request(request)
-                    request.num_computed_tokens = num_computed_tokens
                     continue
 
                 req_index += 1
@@ -491,6 +488,9 @@ class SchedulerDynamicBatch(Scheduler):
                 token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
+                # Count the number of prefix cached tokens.
+                if request.num_cached_tokens < 0:
+                    request.num_cached_tokens = num_computed_tokens
                 # Encoder-related.
                 if encoder_inputs_to_schedule:
                     scheduled_encoder_inputs[request.request_id] = encoder_inputs_to_schedule
@@ -499,38 +499,19 @@ class SchedulerDynamicBatch(Scheduler):
                         self.encoder_cache_manager.allocate(request, i)
                     encoder_compute_budget = new_encoder_compute_budget
 
-            # re-queue requests skipped in this pass ahead of older skipped items.
-            if step_skipped_waiting:
-                self.skipped_waiting.prepend_requests(step_skipped_waiting)
+        # Put back any skipped requests at the head of the waiting queue
+        if skipped_waiting_requests:
+            self.waiting.prepend_requests(skipped_waiting_requests)
 
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
-        if total_num_scheduled_tokens > self.max_num_scheduled_tokens:
-            logger.error(
-                "Scheduling constraint violated: total_num_scheduled_tokens=%s > max=%s",
-                total_num_scheduled_tokens,
-                self.max_num_scheduled_tokens,
-            )
         assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens
         assert token_budget >= 0
-        if len(self.running) > self.max_num_running_reqs:
-            logger.error(
-                "Scheduling constraint violated: running=%s > max_running=%s",
-                len(self.running),
-                self.max_num_running_reqs,
-            )
         assert len(self.running) <= self.max_num_running_reqs
         # Since some requests in the RUNNING queue may not be scheduled in
         # this step, the total number of scheduled requests can be smaller than
         # len(self.running).
-        scheduled_count = len(scheduled_new_reqs) + len(scheduled_resumed_reqs) + len(scheduled_running_reqs)
-        if scheduled_count > len(self.running):
-            logger.error(
-                "Scheduling constraint violated: scheduled=%s > running=%s",
-                scheduled_count,
-                len(self.running),
-            )
-        assert scheduled_count <= len(self.running)
+        assert len(scheduled_new_reqs) + len(scheduled_resumed_reqs) + len(scheduled_running_reqs) <= len(self.running)
 
         # Get the longest common prefix among all requests in the running queue.
         # This can be potentially used for cascade attention.

@@ -1,134 +1,132 @@
 # CPU Binding
 
-**Starting from vllm-ascend v0.18.0rc1, CPU binding is enabled by default on
-ARM-based Ascend servers.**
+## Overview
 
-**You usually do not need to configure it manually.** Set `enable_cpu_binding`
-only when you want to disable it or make the default explicit.
-
-## Benefits of CPU Binding
-
-CPU Binding improves **host-side scheduling** for multi-socket ARM servers with
-Ascend NPUs. It is designed to solve three common host-side inference performance issues:
-
-- **Lower cross-NUMA traffic.** Worker processes stay closer to the CPU and
-  memory resources selected for their active NPU, reducing remote NUMA access.
-- **Lower context-switch overhead from thread preemption.** Key runtime threads
-  run on stable CPU ranges, reducing scheduler movement and CPU contention on
-  busy hosts.
-- **Better latency stability and multi-worker isolation.** Independent workers
-  avoid sharing the same CPU/NUMA resources, which helps reduce tail-latency
-  jitter and makes throughput more predictable during multi-NPU serving.
-
-This feature is a host-side performance optimization. **It does not change model
-execution logic or numerical outputs.** When memory migration support is
-unavailable, CPU affinity still works, but memory locality may be worse and
-latency or throughput may degrade.
+CPU Binding is a performance optimization feature for vLLM, specifically designed for servers equipped with **ARM architecture and Ascend NPUs**. It pins vLLM processes and threads to specific CPU cores to reduce CPU–NPU cross‑NUMA communication overhead and stabilize inference latency. This feature only adjusts host-side CPU affinity policies and **does not alter model execution logic or impact inference results**.
 
 ## Usage
 
-### Online Serving
-
-Default behavior:
+### Online serving example with CPU binding enabled (by default)
 
 ```bash
-vllm serve Qwen/Qwen2.5-7B-Instruct
+vllm serve Qwen/Qwen2.5-7B-Instruct \
+  --additional-config '{"enable_cpu_binding": true}'
 ```
 
-Disable CPU binding:
+### Online serving example with CPU binding disabled
 
 ```bash
 vllm serve Qwen/Qwen2.5-7B-Instruct \
   --additional-config '{"enable_cpu_binding": false}'
 ```
 
-### Offline Inference
-
-Default behavior:
-
-```python
-from vllm import LLM
-
-llm = LLM(model="Qwen/Qwen2.5-7B-Instruct")
-```
-
-Disable CPU binding:
+### Offline inference example with CPU binding enabled
 
 ```python
 from vllm import LLM
 
 llm = LLM(
     model="Qwen/Qwen2.5-7B-Instruct",
-    additional_config={"enable_cpu_binding": False},
+    additional_config={"enable_cpu_binding": True},
 )
 ```
 
-## Requirements
+### Offline inference example with CPU binding disabled
 
-Official vllm-ascend images have already included `util-linux` and `procps` /
-`procps-ng` in v0.18.0rc1 and earlier releases. **Starting from v0.18.0rc1, the
-official images also include `numactl`.**
+```python
+from vllm import LLM
 
-If you are not using the official image, install the host tools manually:
+llm = LLM(
+  model="Qwen/Qwen2.5-7B-Instruct",
+  additional_config={"enable_cpu_binding": False},
+)
+```
+
+## Dependencies
+
+### Installation
+
+#### Ubuntu/Debian
 
 ```bash
-# Ubuntu/Debian
+sudo apt-get update
 sudo apt-get install -y util-linux numactl procps
+```
 
-# RHEL/CentOS/Alma/Rocky
+#### RHEL/CentOS/Alma/Rocky
+
+```bash
 sudo yum install -y util-linux numactl procps-ng
+```
 
-# openEuler
+#### openEuler
+
+```bash
 sudo dnf install -y util-linux numactl procps-ng
 ```
 
-**Without `numactl` / `migratepages`, vLLM Ascend skips only memory migration.**
-The worker process and runtime threads are still pinned, but pages already
-placed on remote NUMA nodes are not migrated, which **can reduce locality and
-degrade latency or throughput.**
+### IRQ binding's additional considerations
 
-For optimal locality, use a cpuset that is evenly distributed across NUMA
-nodes. Unbalanced cpusets may reduce the locality benefit of CPU binding.
+For best results, if you run inside a docker container, which `systemctl` is likely unavailable, stop `irqbalance` service on the host manually before starting vLLM. Also make sure the container has the necessary permissions to write to `/proc/irq/*/smp_affinity` for IRQ binding:
 
-On Ascend 950, CPU binding uses deterministic global CPU slicing because Ascend 950 does not
-report NPU-to-CPU affinity in `npu-smi info -t topo`. Ascend 950 still pins worker,
-ACL, and release threads and can still migrate memory pages when `migratepages`
-is available. Because Ascend 950 skips IRQ binding, it does not reserve the first two
-CPUs in each NPU pool for IRQ handling. Those CPUs are assigned to the main
-worker instead.
+- **Stop `irqbalance` service**:
 
-For IRQ binding, the process also needs permission to read `/proc/interrupts`
-and write `/proc/irq/*/smp_affinity`. If `irqbalance` is running and the process
-can use `systemctl`, vLLM Ascend stops it before applying IRQ affinity. In
-containers where `systemctl` is unavailable, stop `irqbalance` on the host when
-IRQ affinity matters.
+    For example, on Ubuntu system, you can run the following command to stop irqbalance:
+    ```bash
+    sudo systemctl stop irqbalance
+    ```
 
-Ascend 950 does not apply IRQ binding. When running on Ascend 950, the log contains
-`[irq] IRQ binding skipped on Ascend 950.` and no `/proc/irq/*/smp_affinity` files are
-written by this feature.
+    After you finish the vLLM process, you can restore irqbalance on the host:
 
-On the host, stop `irqbalance` before starting vLLM when you need stable IRQ
-affinity:
+    ```bash
+    sudo systemctl start irqbalance
+    ```
 
-```bash
-sudo systemctl stop irqbalance
-```
+- **Permissions**:
+    - Read access to `/proc/self/status` and `/proc/interrupts`
+    - Write access to `/proc/irq/*/smp_affinity` for IRQ binding
 
-After the vLLM service exits, restart it if the host should return to the
-default IRQ balancing policy:
+## Common Issues & Troubleshooting
 
-```bash
-sudo systemctl start irqbalance
-```
+|Error/Warning Message|Core Cause|Solution|
+|---|---|---|
+|Can not get running npu info.|The npu-smi process table is empty, or the `ASCEND_RT_VISIBLE_DEVICES` environment variable filters out all NPUs.|1. Ensure the process is running on visible NPUs; 2. Verify that the `ASCEND_RT_VISIBLE_DEVICES` value matches the actual logical NPU IDs.|
+|Insufficient CPUs for binding...|The number of CPU cores allocated to each NPU is less than the minimum requirement of 5.|1. Expand the allowed CPU list; 2. Reduce the number of visible NPUs.|
+|NPU topo affinity not found...|npu-smi is unable to retrieve NPU topology affinity information.|Verify the integrity of the npu-smi installation and ensure the user has sufficient execution permissions.|
+|Bind cpus failed in rankX...|The CPU binding process failed (e.g., taskset is unavailable, or the user lacks write permissions for /proc/irq).|1. Confirm that required tools (taskset, lscpu, npu-smi) are installed and available; 2. Verify the Cpus_allowed_list in `/proc/self/status` is valid.|
 
-## Troubleshooting
+## Key Limitations
 
-| Message | Meaning | Action |
-| --- | --- | --- |
-| `CPU binding skipped: non-ARM CPU detected.` | CPU binding only runs on ARM. | No action needed on x86_64. |
-| `Can not get running npu info.` | No running NPU was found, or `ASCEND_RT_VISIBLE_DEVICES` filtered all NPUs. | Check visible NPU IDs and `npu-smi info`. |
-| `Insufficient CPUs for binding...` | Fewer CPUs are available than the role split requires. Devices with IRQ binding need at least 5 CPUs per logical NPU; Ascend 950 needs at least 3. | Expand the cpuset or reduce visible NPUs. |
-| `NPU topo affinity not found...` | Topology affinity is unavailable. | vLLM Ascend falls back to `global_slice`; check `npu-smi info -t topo` only if topology affinity is expected on this device. |
-| `The 'migratepages' command is not available...` | Memory migration is skipped, while CPU thread binding still proceeds. | Install `numactl` if NUMA locality or performance is affected. |
-| `[irq] IRQ binding skipped on Ascend 950.` | Ascend 950 does not use the IRQ binding step. | No action needed. Worker, ACL, release thread binding and memory migration still proceed. |
-| `Bind cpus failed in rank...` | A binding step failed and CPU binding was skipped for that rank. | Check `taskset`, `lscpu`, `npu-smi`, cpuset size, and `/proc/irq` permissions. |
+- ARM architecture only: Binding is automatically skipped on x86_64 systems.
+
+- Symmetric NUMA layout required for optimal performance: CPU numbering should be aligned with NUMA nodes. Non-symmetric layouts may result in cross-NUMA CPU pools, reducing locality.
+
+- IRQ binding requires write permissions for /proc/irq. Memory binding depends on the `migratepages` tool; if unavailable, memory migration is skipped.
+
+## FAQ
+
+**Q1: Does CPU binding work on x86_64?**
+
+No. The binding is skipped on non‑ARM CPUs.
+
+**Q2: Why are only the current rank’s IRQs bound?**
+
+To avoid multiple processes overwriting IRQ affinity settings for the same device.
+
+**Q3: What if my cpuset already limits CPUs?**
+
+The binder uses Cpus_allowed_list from /proc/self/status as the only eligible CPU set. Ensure this list is large enough.
+
+**Q4: Does CPU binding change model outputs?**
+
+No. It only affects host‑side affinity and should not change numerical results.
+
+---
+
+## Summary
+
+1. **Core Objective**: Reduce cross‑NUMA communication by pinning vLLM processes and threads to specific CPU cores, thereby stabilizing inference latency in Ascend NPU deployments (only applicable to ARM architectures).
+
+2. **Usage**: Enable or disable with `enable_cpu_binding` via `additional_config` in both online and offline workflows.
+
+3. **Key Limitations**: ARM‑only; relies on symmetric NUMA layouts; binding fails if the CPU pool has fewer than 5 cores; binding errors trigger a warning log but do not terminate the process.

@@ -14,18 +14,18 @@
 #
 from __future__ import annotations
 
-import sys
-import weakref
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import timedelta
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
+import sys
 from typing import Any
 from unittest.mock import MagicMock, call
 
 import pytest
+
 
 _WORKTREE_ROOT = Path(__file__).resolve().parents[5]
 _PATCH_MODULE_PATH = _WORKTREE_ROOT / "vllm_ascend/patch/worker/patch_distributed.py"
@@ -89,13 +89,14 @@ def _load_patch_distributed_module():
     non_group_member = object()
     new_group_calls: list[dict[str, object]] = []
     destroy_process_group = MagicMock()
-    destroy_distributed_environment = MagicMock(name="destroy_distributed_environment")
+    destroy_distributed_environment = MagicMock(
+        name="destroy_distributed_environment"
+    )
     get_rank = MagicMock(return_value=0)
     current_device = MagicMock(return_value="npu:0")
     communicator_instances: list[object] = []
     unique_name_counter = {"value": 0}
     sequence_counter = {"value": 0}
-    registered_groups = {}
     shared_hccl_options = {"hccl_config": {"hccl_buffer_size": 200}}
 
     torch_module: Any = ModuleType("torch")
@@ -104,13 +105,11 @@ def _load_patch_distributed_module():
 
     def new_group(ranks, backend, pg_options=None):
         backend_name = str(backend)
-        new_group_calls.append(
-            {
-                "ranks": tuple(ranks),
-                "backend": backend_name,
-                "pg_options": pg_options,
-            }
-        )
+        new_group_calls.append({
+            "ranks": tuple(ranks),
+            "backend": backend_name,
+            "pg_options": pg_options,
+        })
         if get_rank() not in ranks:
             return non_group_member
         handle = FakeProcessGroup(
@@ -149,32 +148,40 @@ def _load_patch_distributed_module():
         unique_name_counter["value"] += 1
         return f"{group_name}-{unique_name_counter['value']}"
 
-    def _register_group(group):
-        registered_groups[group.unique_name] = weakref.ref(group)
-
     parallel_state_module.GroupCoordinator = BaseGroupCoordinator
     parallel_state_module._get_unique_name = _get_unique_name
-    parallel_state_module._register_group = MagicMock(side_effect=_register_group)
-    parallel_state_module._groups = registered_groups
-    parallel_state_module.destroy_distributed_environment = destroy_distributed_environment
+    parallel_state_module._register_group = MagicMock()
+    parallel_state_module.destroy_distributed_environment = (
+        destroy_distributed_environment
+    )
 
-    shm_broadcast_module: Any = ModuleType("vllm.distributed.device_communicators.shm_broadcast")
+    shm_broadcast_module: Any = ModuleType(
+        "vllm.distributed.device_communicators.shm_broadcast"
+    )
 
     class MessageQueue:
-        create_from_process_group = MagicMock(side_effect=lambda group, *_: SimpleNamespace(group=group))
+        create_from_process_group = MagicMock(
+            side_effect=lambda group, *_: SimpleNamespace(group=group)
+        )
 
     shm_broadcast_module.MessageQueue = MessageQueue
 
     vllm_distributed.parallel_state = parallel_state_module
-    vllm_distributed.destroy_distributed_environment = destroy_distributed_environment
+    vllm_distributed.destroy_distributed_environment = (
+        destroy_distributed_environment
+    )
     vllm_module.distributed = vllm_distributed
 
     vllm_ascend_module: Any = ModuleType("vllm_ascend")
     vllm_ascend_patch: Any = ModuleType("vllm_ascend.patch")
     vllm_ascend_patch_worker: Any = ModuleType("vllm_ascend.patch.worker")
     vllm_ascend_distributed: Any = ModuleType("vllm_ascend.distributed")
-    vllm_ascend_device_communicators: Any = ModuleType("vllm_ascend.distributed.device_communicators")
-    npu_communicator_module: Any = ModuleType("vllm_ascend.distributed.device_communicators.npu_communicator")
+    vllm_ascend_device_communicators: Any = ModuleType(
+        "vllm_ascend.distributed.device_communicators"
+    )
+    npu_communicator_module: Any = ModuleType(
+        "vllm_ascend.distributed.device_communicators.npu_communicator"
+    )
     utils_module: Any = ModuleType("vllm_ascend.utils")
 
     class FakeNPUCommunicator:
@@ -204,8 +211,12 @@ def _load_patch_distributed_module():
         "vllm_ascend.patch": vllm_ascend_patch,
         "vllm_ascend.patch.worker": vllm_ascend_patch_worker,
         "vllm_ascend.distributed": vllm_ascend_distributed,
-        "vllm_ascend.distributed.device_communicators": (vllm_ascend_device_communicators),
-        "vllm_ascend.distributed.device_communicators.npu_communicator": (npu_communicator_module),
+        "vllm_ascend.distributed.device_communicators": (
+            vllm_ascend_device_communicators
+        ),
+        "vllm_ascend.distributed.device_communicators.npu_communicator": (
+            npu_communicator_module
+        ),
         "vllm_ascend.utils": utils_module,
     }
 
@@ -282,7 +293,10 @@ def _calls_with_backend(module_env, backend: str) -> list[dict[str, object]]:
 
 
 def test_group_coordinator_is_patched(module_env):
-    assert module_env.parallel_state_module.GroupCoordinator is module_env.module.GroupCoordinatorPatch
+    assert (
+        module_env.parallel_state_module.GroupCoordinator
+        is module_env.module.GroupCoordinatorPatch
+    )
 
 
 def test_same_hccl_group_reuses_device_pg_once(module_env):
@@ -302,8 +316,8 @@ def test_same_hccl_group_reuses_device_pg_once(module_env):
 
 
 def test_same_hccl_group_reuses_with_realistic_options_object(module_env):
-    module_env.utils_module.create_hccl_pg_options.return_value = RealisticFakeHcclOptions(
-        hccl_config={"hccl_buffer_size": 200}
+    module_env.utils_module.create_hccl_pg_options.return_value = (
+        RealisticFakeHcclOptions(hccl_config={"hccl_buffer_size": 200})
     )
 
     first = _make_group(module_env, backend="hccl", group_name="tp")
@@ -338,14 +352,18 @@ def test_mc2_stays_isolated_from_ep_even_when_pg_options_match(module_env):
 
 
 def test_dynamic_eplb_stays_separate_from_ep_when_pg_options_differ(module_env):
-    default_hccl_pg_options = module_env.utils_module.create_hccl_pg_options.return_value
+    default_hccl_pg_options = (
+        module_env.utils_module.create_hccl_pg_options.return_value
+    )
 
     def fake_create_hccl_pg_options(group_name: str):
         if group_name == "dynamic_eplb":
             return {"hccl_config": {"hccl_buffer_size": 512}}
         return default_hccl_pg_options
 
-    module_env.utils_module.create_hccl_pg_options.side_effect = fake_create_hccl_pg_options
+    module_env.utils_module.create_hccl_pg_options.side_effect = (
+        fake_create_hccl_pg_options
+    )
 
     first = _make_group(module_env, group_name="ep")
     second = _make_group(module_env, group_name="dynamic_eplb")
@@ -390,20 +408,14 @@ def test_destroy_releases_all_acquired_keys_in_reverse_order(module_env):
 
     cpu_group = group.cpu_group
     shared_device_group = group.device_group
-    communicator = group.device_communicator
     acquired_keys = list(group._acquired_hccl_keys)
-
-    destroy_order = []
-    communicator.destroy.side_effect = lambda: destroy_order.append("communicator")
-    module_env.destroy_process_group.side_effect = lambda group: destroy_order.append(group)
 
     group.destroy()
     group.destroy()
 
     assert len(acquired_keys) == 2
     assert release_mock.call_args_list == [call(acquired_keys[1]), call(acquired_keys[0])]
-    assert module_env.destroy_process_group.call_args_list == [call(shared_device_group), call(cpu_group)]
-    assert destroy_order == ["communicator", shared_device_group, cpu_group]
+    assert module_env.destroy_process_group.call_args_list == [call(cpu_group), call(shared_device_group)]
     assert group.device_communicator is None
     assert group.mq_broadcaster is None
     assert not hasattr(group, "cpu_group")
@@ -445,7 +457,9 @@ def test_failed_device_communicator_init_releases_all_keys_in_reverse_order(
 ):
     release_mock = MagicMock(wraps=module_env.module._HCCL_PG_REGISTRY.release)
     module_env.module._HCCL_PG_REGISTRY.release = release_mock
-    module_env.module.NPUCommunicator = MagicMock(side_effect=RuntimeError("communicator failed"))
+    module_env.module.NPUCommunicator = MagicMock(
+        side_effect=RuntimeError("communicator failed")
+    )
 
     key_a = module_env.registry_module.make_hccl_pg_key(
         [0, 1],
@@ -498,8 +512,8 @@ def test_shared_hccl_group_is_destroyed_only_after_last_coordinator(module_env):
 
     assert module_env.destroy_process_group.call_args_list == [
         call(cpu_group_first),
-        call(shared_device_group),
         call(cpu_group_second),
+        call(shared_device_group),
     ]
 
 
@@ -560,44 +574,12 @@ def test_destroy_cleans_up_fail_closed_hccl_device_group(module_env):
     group.destroy()
 
     assert module_env.destroy_process_group.call_args_list == [
-        call(device_group),
         call(cpu_group),
+        call(device_group),
     ]
     assert group._acquired_hccl_keys == []
     assert not hasattr(group, "cpu_group")
     assert not hasattr(group, "device_group")
-
-
-def test_hccl_sleep_destroy_and_restore_shared_group(module_env):
-    group = _make_group(
-        module_env,
-        group_ranks=[[0, 1]],
-        group_name="tp",
-        use_device_communicator=True,
-    )
-    original_device_group = group.device_group
-    original_communicator = group.device_communicator
-
-    assert len(_calls_with_backend(module_env, "hccl")) == 1
-
-    assert group.destroy_hccl() is True
-
-    original_communicator.destroy.assert_called_once()
-    assert group.device_communicator is None
-    assert group.device_group is None
-    assert group._acquired_hccl_keys == []
-    assert module_env.destroy_process_group.call_args_list == [call(original_device_group)]
-
-    assert group.restore_hccl() is True
-
-    assert len(_calls_with_backend(module_env, "hccl")) == 2
-    assert group.device_group is not None
-    assert group.device_group is not original_device_group
-    assert group.device_communicator is not None
-    assert group.device_communicator is not original_communicator
-    assert group.device == "npu:0"
-
-    assert group.restore_hccl() is False
 
 
 def test_non_hccl_destroy_path_destroys_device_group_directly(module_env):
@@ -614,8 +596,8 @@ def test_non_hccl_destroy_path_destroys_device_group_directly(module_env):
     group.destroy()
 
     assert module_env.destroy_process_group.call_args_list == [
-        call(device_group),
         call(cpu_group),
+        call(device_group),
     ]
     assert not hasattr(group, "cpu_group")
     assert not hasattr(group, "device_group")

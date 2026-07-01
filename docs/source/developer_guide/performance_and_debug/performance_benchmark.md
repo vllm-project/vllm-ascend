@@ -50,7 +50,7 @@ This section introduces how to perform performance testing using the benchmark s
 
 ### 3.1 Dataset
 
-VLLM supports a variety of [datasets](https://github.com/vllm-project/vllm/blob/main/vllm/benchmarks/datasets/datasets.py).
+VLLM supports a variety of [datasets](https://github.com/vllm-project/vllm/blob/main/vllm/benchmarks/datasets.py).
 
 <style>
 th {
@@ -97,8 +97,7 @@ For local `dataset-path`, please set `hf-name` to its Hugging Face ID like
 First start serving your model:
 
 ```bash
-export VLLM_USE_MODELSCOPE=True
-vllm serve Qwen/Qwen3-8B
+VLLM_USE_MODELSCOPE=True vllm serve Qwen/Qwen3-8B
 ```
 
 Then run the benchmarking script:
@@ -148,7 +147,7 @@ P99 ITL (ms):                            28.85
 #### 3.2.2 Offline Throughput Benchmark
 
 ```bash
-export VLLM_USE_MODELSCOPE=True
+VLLM_USE_MODELSCOPE=True
 vllm bench throughput \
   --model Qwen/Qwen3-8B \
   --dataset-name random \
@@ -159,13 +158,13 @@ vllm bench throughput \
 If successful, you will see the following output
 
 ```shell
-Processed prompts: 100%|█| 10/10 [00:03<00:00,  2.74it/s, est. speed input: 351.02 toks/s, output: 351.02 toks/s]
+Processed prompts: 100%|█| 10/10 [00:03<00:00,  2.74it/s, est. speed input: 351.02 toks/s, output: 351.02 t
 Throughput: 2.73 requests/s, 699.93 total tokens/s, 349.97 output tokens/s
 Total num prompt tokens:  1280
 Total num output tokens:  1280
 ```
 
-#### 3.2.3 Multi-Modal Benchmark
+#### 3.2.4 Multi-Modal Benchmark
 
 ```shell
 export VLLM_USE_MODELSCOPE=True
@@ -214,7 +213,7 @@ P99 ITL (ms):                            182.28
 ==================================================
 ```
 
-#### 3.2.4 Embedding Benchmark
+#### 3.2.5 Embedding Benchmark
 
 ```shell
 vllm serve Qwen/Qwen3-Embedding-8B --trust-remote-code
@@ -223,7 +222,7 @@ vllm serve Qwen/Qwen3-Embedding-8B --trust-remote-code
 ```shell
 # download dataset
 # wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
-export VLLM_USE_MODELSCOPE=True
+export VLLM_USE_MODELSCOPE=true
 vllm bench serve \
   --model Qwen/Qwen3-Embedding-8B \
   --backend openai-embeddings \

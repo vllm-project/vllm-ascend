@@ -9,9 +9,9 @@ permissions:
 
 jobs:
   cancel:
-    runs-on: linux-amd64-cpu-2-hk
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/github-script@v9
+      - uses: actions/github-script@v8
         with:
           github-token: ${{ github.token }}
           script: |

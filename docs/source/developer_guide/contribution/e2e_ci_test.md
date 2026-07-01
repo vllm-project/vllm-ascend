@@ -5,8 +5,8 @@ comment command, without running the full E2E test suite.
 
 ## Background
 
-The `E2E-Full` workflow (`pr_test.yaml`) normally runs the complete E2E test suite
-when a PR has `ready` label. This is expensive in CI resources
+The `E2E-Full` workflow (`pr_test_full.yaml`) normally runs the complete E2E test suite
+when a PR has both `ready` and `ready-for-test` labels. This is expensive in CI resources
 and time.
 
 Authorized users can trigger only the specific test files they care about by posting a
@@ -28,10 +28,10 @@ First, post a comment on the PR specifying which test paths to run:
 
 | Comment format | Effect |
 |---|---|
-| `/e2e tests/e2e/pull_request/one_card/test_foo.py` | Run one test file on one_card |
-| `/e2e tests/e2e/pull_request/two_card/test_bar.py` | Run one test file on two_card |
+| `/e2e tests/e2e/singlecard/test_foo.py` | Run one test file on singlecard |
+| `/e2e tests/e2e/multicard/2-cards/test_bar.py` | Run one test file on 2-card |
 | `/e2e path1 path2 path3` | Run multiple files, routed by path pattern |
-| `/e2e tests/e2e/pull_request/one_card/test_foo.py::test_case` | Run a specific test case |
+| `/e2e tests/e2e/singlecard/test_foo.py::test_case` | Run a specific test case |
 
 ### 2. Add the label
 
@@ -70,61 +70,56 @@ on path patterns:
 
 | Path pattern | Hardware | Runner |
 |---|---|---|
-| `two_card` in path | two_card A3 NPU | `linux-aarch64-a3-2` |
-| `four_card` in path | four_card A3 NPU | `linux-aarch64-a3-4` |
-| `_310p` in filename under one/two_card | Ascend 310P x1 | `linux-aarch64-310p-*` |
-| `_310p` in filename under four_card | Ascend 310P x4 | `linux-aarch64-310p-*` |
-| All other paths | one_card A2 NPU | `linux-aarch64-a2b3-1` |
+| `multicard/2-cards` in path | 2-card A3 NPU | `linux-aarch64-a3-2` |
+| `multicard/4-cards` in path | 4-card A3 NPU | `linux-aarch64-a3-4` |
+| `310p` in path | Ascend 310P | `linux-aarch64-310p-*` |
+| All other paths | Singlecard A2 NPU | `linux-aarch64-a2b3-1` |
 
 When paths from multiple categories are listed in a single comment, each category's
 tests run on its respective hardware in parallel.
 
 ## Test Path Reference
 
-The `tests/e2e/pull_request/` directory is organized by hardware category:
+The `tests/e2e/` directory is organized by hardware category:
 
 ```text
-tests/e2e/pull_request/
-├── one_card/          # Single card tests → A2 NPU x1 runner
-├── two_card/          # Two card tests → A3 NPU x2 runner
-├── four_card/         # Four card tests → A3 NPU x4 runner
-```
-
-310P tests use `_310p` subdirectories or `_310p.py` filename suffix under the
-corresponding card directory:
-
-```text
-tests/e2e/pull_request/one_card/_310p/   # 310P single card
-tests/e2e/pull_request/four_card/_310p/  # 310P four card
+tests/e2e/
+├── singlecard/          # Single A2 card tests → singlecard runner
+├── multicard/
+│   ├── 2-cards/         # 2-card tests → 2-card runner
+│   └── 4-cards/         # 4-card tests → 4-card runner
+└── 310p/                # Ascend 310P tests → 310P runner
+    ├── singlecard/
+    └── multicard/
 ```
 
 ## Comparison with Full E2E Suite
 
-| Aspect | Full E2E suite | Per-test comment trigger |
+| | Full E2E suite | Per-test comment trigger |
 |---|---|---|
-| Trigger | `ready` labels | `/e2e` comment + `ready` label |
+| Trigger | `ready` + `ready-for-test` labels | `/e2e` comment + `ready` label |
 | Scope | All E2E tests | Only specified test paths |
 | Who can trigger | Anyone who can add labels | PR author or write/admin collaborator |
 | Use case | Pre-merge validation | Iterative debugging of specific tests |
 
 ## Examples
 
-Run a single one_card test:
+Run a single singlecard test:
 
 ```text
-/e2e tests/e2e/pull_request/one_card/test_offline_inference.py
+/e2e tests/e2e/singlecard/test_offline_inference.py
 ```
 
-Run a two_card test:
+Run a 2-card test:
 
 ```text
-/e2e tests/e2e/pull_request/two_card/test_data_parallel.py
+/e2e tests/e2e/multicard/2-cards/test_quantization.py
 ```
 
 Run tests across multiple hardware categories in one comment:
 
 ```text
-/e2e tests/e2e/pull_request/one_card/test_offline_inference.py tests/e2e/pull_request/two_card/test_data_parallel.py
+/e2e tests/e2e/singlecard/test_offline_inference.py tests/e2e/multicard/2-cards/test_quantization.py
 ```
 
 Re-trigger after fixing an issue: just push a new commit. The `synchronize` event
@@ -144,9 +139,9 @@ to post a new comment.
 
 **Tests ran on the wrong hardware.**
 
-- Check that the path includes the expected directory segment (`one_card`, `two_card`,
-  `four_card`, or `_310p`). Paths that do not match any of these patterns are routed to
-  the one_card runner by default.
+- Check that the path includes the expected directory segment (`2-cards`, `4-cards`,
+  or `310p`). Paths that do not match any of these patterns are routed to the
+  singlecard runner by default.
 
 **The `parse-comment` job skipped with a permission error.**
 

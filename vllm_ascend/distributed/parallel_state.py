@@ -339,36 +339,3 @@ def destroy_ascend_model_parallel():
     if _DYNAMIC_EPLB:
         _DYNAMIC_EPLB.destroy()
     _DYNAMIC_EPLB = None
-
-
-def get_global_rank(parallel_config: ParallelConfig | None = None) -> int:
-    """Return a globally unique rank for the current worker across all parallel
-     dimensions (TP/PP/CP/DP), compatible with both dense and MoE models.
-
-     vLLM does not expose a single ready-to-use cross-DP global rank:
-       - For dense models each DP rank is launched as an independent DP=1 engine,
-         so ``data_parallel_rank`` is reset to 0 and ``get_world_group()`` only
-         spans one replica (``rank_in_group`` is the local rank in the replica).
-       - For MoE DP / external_launcher the world group spans all DP ranks, so
-         ``rank_in_group`` already encodes the DP offset.
-
-     ``data_parallel_index`` always keeps the true DP rank (it is never reset),
-     and ``rank_in_group % replica_size`` yields the local rank within a replica
-     in both cases, so the formula below is correct everywhere. It mirrors vLLM's
-     own ``data_parallel_rank * world_size + rank`` (see
-     vllm/distributed/parallel_state.py).
-
-    Note: DCP (decode context parallel) reuses the TP NPUs and EP overlays
-    TP/DP, so neither adds new ranks and they are intentionally excluded from
-    ``replica_size``.
-    """
-    if parallel_config is None:
-        parallel_config = get_current_vllm_config().parallel_config
-    # Number of NPUs in a single DP replica (TP * PP * prefill-CP).
-    replica_size = (
-        parallel_config.tensor_parallel_size
-        * parallel_config.pipeline_parallel_size
-        * parallel_config.prefill_context_parallel_size
-    )
-    rank_in_replica = get_world_group().rank_in_group % replica_size
-    return parallel_config.data_parallel_index * replica_size + rank_in_replica

@@ -10,7 +10,7 @@ To facilitate reproduction and deployment, vLLM Ascend supports the deployed EP 
 
 ## How to Use EPLB?
 
-Please refer to the EPLB section of the user guide for detailed information: [How to Use EPLB](../../user_guide/feature_guide/expert_parallelism_load_balancer.md)
+Please refer to the EPLB section of the user guide for detailed information: [How to Use EPLB](../../user_guide/feature_guide/eplb_swift_balancer.md)
 
 ## How It Works?
 
@@ -20,26 +20,28 @@ Please refer to the EPLB section of the user guide for detailed information: [Ho
 vllm_ascend
 ├── eplb
 │   ├── adaptor
-│   │   └── vllm_adaptor.py
+│   │   ├── abstract_adaptor.py
+│   │   ├── vllm_adaptor.py
 │   ├── core
 │   │   ├── policy
 │   │   │   ├── policy_abstract.py
 │   │   │   ├── policy_default_eplb.py
+│   │   │   ├── policy_swift_balancer.py
 │   │   │   ├── policy_factory.py
 │   │   │   ├── policy_flashlb.py
-│   │   │   ├── policy_random.py
-│   │   │   └── policy_swift_balancer.py
 │   │   ├── eplb_device_transfer_loader.py
 │   │   ├── eplb_utils.py
-│   │   └── eplb_worker.py
+│   │   ├── eplb_worker.py
 │   ├── eplb_updator.py
-│   └── utils.py
+│   ├── utils.py
 └───────────
 ```
 
 **1. Adaptor Module**  
 *Handles registration and adaptation for different MoE model types*
 
+- `abstract_adaptor.py`  
+  Abstract base class defining unified registration interfaces for EPLB adapters
 - `vllm_adaptor.py`  
   Implementation supporting Qwen3-MoE and DeepSeek models, standardizing parameter handling for policy algorithms
 
@@ -56,8 +58,6 @@ vllm_ascend
     Enhanced version optimizing expert swaps for low-bandwidth devices (e.g., A2)
     - `policy_flashlb.py`  
     Threshold-based adjustment reducing operational costs through layer-wise fluctuation detection
-    - `policy_random.py`  
-    Random policy for basic testing
     - `policy_factory.py`  
     Strategy factory for automatic algorithm instantiation
 
@@ -102,6 +102,10 @@ For example:
 
     ```python
     class RandomLoadBalance(EplbPolicy):
+
+        def __init__(self, config: DynamicConfig):
+            super().__init__(config)
+
         def rebalance_experts(self, current_expert_table, expert_workload):
             new_table = copy.deepcopy(current_expert_table)
             num_layers = len(current_expert_table)
@@ -184,10 +188,10 @@ All integer input parameters must explicitly specify their maximum and minimum v
             raise TypeError(f"The {iterations} is not int.")
         if iterations <= 0:
             raise ValueError(
-                f"The {iterations} can not be less than or equal to 0.")
+                f"The {iterations} can not less than or equal to 0.")
         if iterations > sys.maxsize:
             raise ValueError(
-                f"The {iterations} can not be larger than {sys.maxsize}")
+                f"The {iterations} can not large than {sys.maxsize}")
 ```
 
 #### File Path
@@ -207,7 +211,7 @@ The file path for EPLB must be checked for legality, such as whether the file pa
         if ext.lower() != ".json":
             raise TypeError("The expert_map is not json.")
         if not os.path.exists(expert_map):
-            raise ValueError("The expert_map does not exist.")
+            raise ValueError("The expert_map is not exist.")
         try:
             with open(expert_map, "w", encoding='utf-8') as f:
                 f.read()
@@ -232,7 +236,7 @@ All method arguments must specify parameter types and default values, and functi
 
 #### Expert Map
 
-The expert map must be globally unique during initialization and update. In a multi-node scenario during initialization, distributed communication should be used to verify the consistency of expert maps across each rank. If they are inconsistent, the user should be notified of which ranks have inconsistent maps.
+The expert map must be globally unique during initialization and update. In a multi-node scenario during initialization, distributed communication should be used to verify the consistency of expert maps across each rank. If they are inconsistent, the user should be notified which ranks have inconsistent maps.
 During the update process, if only a few layers or the expert table of a certain rank has been changed, the updated expert table must be synchronized with the EPLB's context to ensure global consistency.
 
 #### Expert Weight

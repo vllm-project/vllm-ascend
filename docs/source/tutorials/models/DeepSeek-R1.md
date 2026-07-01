@@ -107,6 +107,7 @@ vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
   --seed 1024 \
   --served-model-name deepseek_r1 \
   --enable-expert-parallel \
+  --async-scheduling \
   --max-num-seqs 16 \
   --max-model-len 16384 \
   --max-num-batched-tokens 4096 \
@@ -165,6 +166,7 @@ vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
   --seed 1024 \
   --served-model-name deepseek_r1 \
   --enable-expert-parallel \
+  --async-scheduling \
   --max-num-seqs 16 \
   --max-model-len 16384 \
   --max-num-batched-tokens 4096 \
@@ -212,6 +214,7 @@ vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
   --seed 1024 \
   --served-model-name deepseek_r1 \
   --enable-expert-parallel \
+  --async-scheduling \
   --max-num-seqs 16 \
   --max-model-len 16384 \
   --max-num-batched-tokens 4096 \
@@ -299,7 +302,7 @@ There are three `vllm bench` subcommands:
 Take the `serve` as an example. Run the code as follows.
 
 ```shell
-export VLLM_USE_MODELSCOPE=True
+export VLLM_USE_MODELSCOPE=true
 vllm bench serve --model path/DeepSeek-R1-W8A8  --dataset-name random --random-input 200 --num-prompts 200 --request-rate 1 --save-result --result-dir ./
 ```
 
