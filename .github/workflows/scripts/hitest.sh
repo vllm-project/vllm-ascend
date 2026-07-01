@@ -34,6 +34,7 @@ BIND_ID_API2=11
 PAGE_CURR=1
 PAGE_SIZE=100
 
+# Global config
 # API_PREFIX="https://174e1b821a8446f38998a67186ba766e.apic.cn-southwest-2.huaweicloudapis.com/aurogon_service"
 # MR_THIRD_ID=826
 # NETWORK_ZONE=gitcode
