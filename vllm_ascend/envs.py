@@ -110,43 +110,6 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
-    # --- CI AI diagnosis agent (optional; see
-    # `.github/workflows/scripts/ci_diagnosis_agent.py`)
-    # Master switch: 0 = never call the model (the diagnosis step still runs and
-    # writes a skip note to GITHUB_STEP_SUMMARY). 1 = call the model when the
-    # other settings (API key, base URL) are present.
-    "VLLM_ASCEND_CI_AI_DIAGNOSIS_ENABLED": lambda: os.getenv("VLLM_ASCEND_CI_AI_DIAGNOSIS_ENABLED", "0").lower()
-    in ("1", "true", "yes", "on"),
-    # API key for an OpenAI-compatible chat endpoint. Sensitive: store in
-    # GitHub Actions secrets, never commit. If empty, the diagnosis step is
-    # skipped.
-    "VLLM_ASCEND_CI_AI_DIAGNOSIS_API_KEY": lambda: os.getenv("VLLM_ASCEND_CI_AI_DIAGNOSIS_API_KEY", ""),
-    # Base URL including API version prefix, e.g. https://api.openai.com/v1
-    "VLLM_ASCEND_CI_AI_DIAGNOSIS_BASE_URL": lambda: os.getenv("VLLM_ASCEND_CI_AI_DIAGNOSIS_BASE_URL", ""),
-    # Model name for chat/completions (repo variable). No fallback; LLM
-    # analysis is skipped when empty.
-    "VLLM_ASCEND_CI_AI_DIAGNOSIS_MODEL": lambda: os.getenv("VLLM_ASCEND_CI_AI_DIAGNOSIS_MODEL", ""),
-    # Backend implementation. Default: openai_compatible (POST
-    # /chat/completions). Add new backends in ci_diagnosis_agent.py.
-    "VLLM_ASCEND_CI_AI_DIAGNOSIS_BACKEND": lambda: os.getenv(
-        "VLLM_ASCEND_CI_AI_DIAGNOSIS_BACKEND", "openai_compatible"
-    ),
-    # Max characters of the prompt body per request. Keeps the agent loop
-    # bounded against accidental log dumps.
-    "VLLM_ASCEND_CI_AI_DIAGNOSIS_MAX_INPUT_CHARS": lambda: int(
-        os.getenv("VLLM_ASCEND_CI_AI_DIAGNOSIS_MAX_INPUT_CHARS") or "120000"
-    ),
-    # Maximum number of bounded rounds in the agent loop. Round 1 = routing,
-    # round 2 = evidence + hypothesis, round 3 (optional) = final arbitration.
-    "VLLM_ASCEND_CI_AI_DIAGNOSIS_MAX_ROUNDS": lambda: int(os.getenv("VLLM_ASCEND_CI_AI_DIAGNOSIS_MAX_ROUNDS") or "3"),
-    # HTTP request timeout (seconds) for LLM calls. Keep short enough that
-    # a stuck model endpoint surfaces as an error within ~1 minute total.
-    "VLLM_ASCEND_CI_AI_DIAGNOSIS_TIMEOUT_S": lambda: int(os.getenv("VLLM_ASCEND_CI_AI_DIAGNOSIS_TIMEOUT_S") or "30"),
-    # Maximum characters kept from each file (tail mode) in the diagnosis
-    # package. Files larger than this are truncated; only the tail is sent.
-    "VLLM_ASCEND_CI_AI_DIAGNOSIS_TAIL_CHARS": lambda: int(
-        os.getenv("VLLM_ASCEND_CI_AI_DIAGNOSIS_TAIL_CHARS") or "200000"
-    ),
 }
 
 # end-env-vars-definition

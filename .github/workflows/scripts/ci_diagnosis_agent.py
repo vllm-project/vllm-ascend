@@ -86,32 +86,17 @@ class AgentConfig:
 
     @classmethod
     def from_env(cls) -> AgentConfig:
-        try:
-            import vllm_ascend.envs as envs
-
-            return cls(
-                enabled=bool(envs.VLLM_ASCEND_CI_AI_DIAGNOSIS_ENABLED),
-                api_key=str(envs.VLLM_ASCEND_CI_AI_DIAGNOSIS_API_KEY or "").strip(),
-                base_url=str(envs.VLLM_ASCEND_CI_AI_DIAGNOSIS_BASE_URL or "").strip(),
-                model=str(envs.VLLM_ASCEND_CI_AI_DIAGNOSIS_MODEL or "").strip(),
-                backend=str(envs.VLLM_ASCEND_CI_AI_DIAGNOSIS_BACKEND or "openai_compatible").strip(),
-                max_rounds=int(envs.VLLM_ASCEND_CI_AI_DIAGNOSIS_MAX_ROUNDS),
-                timeout_s=int(envs.VLLM_ASCEND_CI_AI_DIAGNOSIS_TIMEOUT_S),
-                max_input_chars=int(envs.VLLM_ASCEND_CI_AI_DIAGNOSIS_MAX_INPUT_CHARS),
-                tail_chars=int(envs.VLLM_ASCEND_CI_AI_DIAGNOSIS_TAIL_CHARS),
-            )
-        except (ImportError, AttributeError):
-            return cls(
-                enabled=bool(int(os.getenv("VLLM_ASCEND_CI_AI_DIAGNOSIS_ENABLED") or "0")),
-                api_key=os.getenv("VLLM_ASCEND_CI_AI_DIAGNOSIS_API_KEY", "").strip(),
-                base_url=os.getenv("VLLM_ASCEND_CI_AI_DIAGNOSIS_BASE_URL", "").strip(),
-                model=os.getenv("VLLM_ASCEND_CI_AI_DIAGNOSIS_MODEL", "").strip(),
-                backend=os.getenv("VLLM_ASCEND_CI_AI_DIAGNOSIS_BACKEND", "openai_compatible").strip(),
-                max_rounds=int(os.getenv("VLLM_ASCEND_CI_AI_DIAGNOSIS_MAX_ROUNDS", "3")),
-                timeout_s=int(os.getenv("VLLM_ASCEND_CI_AI_DIAGNOSIS_TIMEOUT_S", "30")),
-                max_input_chars=int(os.getenv("VLLM_ASCEND_CI_AI_DIAGNOSIS_MAX_INPUT_CHARS", "120000")),
-                tail_chars=int(os.getenv("VLLM_ASCEND_CI_AI_DIAGNOSIS_TAIL_CHARS", "200000")),
-            )
+        return cls(
+            enabled=os.getenv("VLLM_ASCEND_CI_AI_DIAGNOSIS_ENABLED", "0").lower() in ("1", "true", "yes", "on"),
+            api_key=os.getenv("VLLM_ASCEND_CI_AI_DIAGNOSIS_API_KEY", "").strip(),
+            base_url=os.getenv("VLLM_ASCEND_CI_AI_DIAGNOSIS_BASE_URL", "").strip(),
+            model=os.getenv("VLLM_ASCEND_CI_AI_DIAGNOSIS_MODEL", "").strip(),
+            backend=os.getenv("VLLM_ASCEND_CI_AI_DIAGNOSIS_BACKEND", "openai_compatible").strip(),
+            max_rounds=int(os.getenv("VLLM_ASCEND_CI_AI_DIAGNOSIS_MAX_ROUNDS", "3")),
+            timeout_s=int(os.getenv("VLLM_ASCEND_CI_AI_DIAGNOSIS_TIMEOUT_S", "30")),
+            max_input_chars=int(os.getenv("VLLM_ASCEND_CI_AI_DIAGNOSIS_MAX_INPUT_CHARS", "120000")),
+            tail_chars=int(os.getenv("VLLM_ASCEND_CI_AI_DIAGNOSIS_TAIL_CHARS", "200000")),
+        )
 
     def llm_ready(self) -> bool:
         """True when repo configuration is complete enough to call the LLM."""
@@ -158,7 +143,7 @@ AGENT_SYSTEM_PROMPT = (
     "- root_cause must reference specific file names and line numbers from the logs.\n"
     "- If you cannot identify a root cause, set confidence=low and needs_human_review=true.\n"
     "- DO NOT invent root causes when evidence is insufficient.\n"
-    "- Reply in Chinese for human-facing text. JSON keys and tool call arguments must remain English.\n\n"
+    "- Reply in English for all output.\n\n"
     "## Output\n"
     "When calling `diagnose`, provide ALL of these fields:\n"
     "- failure_family: pytest|engine_startup|benchmark|infra|unknown\n"
@@ -561,17 +546,17 @@ def render_evidence_summary(diag: dict[str, Any]) -> str:
     """Markdown for evidence-only mode (no LLM root-cause claim)."""
     missing = diag.get("missing_llm_config") or []
     lines: list[str] = []
-    lines.append("## CI AI 失败定位（未调用 LLM）")
+    lines.append("## CI AI Diagnosis (LLM not called)")
     lines.append("")
     lines.append(f"**Step**: {diag.get('step_name') or ''}")
     lines.append(f"**Log**: `{diag.get('log_file') or ''}`")
     lines.append("")
-    lines.append("### 未进行 AI 分析的原因")
+    lines.append("### Reason for Skipping AI Analysis")
     if missing:
         for item in missing:
-            lines.append(f"- 未配置 `{item}`")
+            lines.append(f"- `{item}` not configured")
     else:
-        lines.append("- LLM 配置不完整")
+        lines.append("- LLM configuration incomplete")
     lines.append("")
     return "\n".join(lines) + "\n"
 
@@ -1394,7 +1379,7 @@ def _agent_result_to_diagnosis(
 def render_markdown(diag: dict[str, Any]) -> str:
     routing = diag.get("routing") or {}
     lines: list[str] = []
-    lines.append("## CI AI 失败定位")
+    lines.append("## CI AI Diagnosis")
     lines.append("")
     lines.append(f"**Step**: {diag.get('step_name') or ''}")
     lines.append(f"**Log**: `{diag.get('log_file') or ''}`")
@@ -1638,9 +1623,9 @@ def main(argv: list[str] | None = None) -> int:
         _log("fatal", f"{safe_type}: {safe_msg}")
         _log("fatal", tb[-2000:])
         md = (
-            "## CI AI 失败定位\n\n"
-            "**Agent 自身异常**：诊断脚本内部出错，未产出诊断结论。\n\n"
-            f"| 异常类型 | 信息 |\n|---|---|\n"
+            "## CI AI Diagnosis\n\n"
+            "**Agent Exception**: The diagnosis script encountered an internal error and did not produce a result.\n\n"
+            f"| Exception Type | Message |\n|---|---|\n"
             f"| `{safe_type}` | `{safe_msg}` |\n\n"
         )
         with contextlib.suppress(Exception):

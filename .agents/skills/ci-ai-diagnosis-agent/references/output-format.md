@@ -35,10 +35,10 @@ agent after the evidence + hypothesis phases complete.
   "classification": "product_bug",
   "confidence": "medium",
   "root_layers": [
-    {"layer": "表象", "cause": "EngineDeadError at CI summary"},
-    {"layer": "直接原因", "cause": "RPC call to D worker timed out after 30s"},
-    {"layer": "加剧因素", "cause": "max_num_batched_tokens too low causing prefill backlog"},
-    {"layer": "诱因", "cause": "Commit aba1234 increased model size without adjusting batch config"}
+    {"layer": "appearance", "cause": "EngineDeadError at CI summary"},
+    {"layer": "direct_cause", "cause": "RPC call to D worker timed out after 30s"},
+    {"layer": "aggravating_factor", "cause": "max_num_batched_tokens too low causing prefill backlog"},
+    {"layer": "trigger", "cause": "Commit aba1234 increased model size without adjusting batch config"}
   ],
   "evidence": [
     {"file": "/tmp/leader_logs.txt", "line": 3200, "snippet": "RPC call to worker timed out after 30s", "interpretation": "D worker did not respond in time"}
@@ -78,7 +78,7 @@ agent after the evidence + hypothesis phases complete.
 | `root_cause` | string | Root cause summary (2-3 sentences) |
 | `classification` | enum | `flake`, `test_bug`, `product_bug`, `infra_issue`, `unknown` |
 | `confidence` | enum | `high`, `medium`, `low` |
-| `root_layers` | array | Layered root cause (表象, 直接原因, 加剧因素, 诱因) |
+| `root_layers` | array | Layered root cause (appearance, direct_cause, aggravating_factor, trigger) |
 | `evidence[]` | array | Supporting evidence with `{file, line, snippet, interpretation}` |
 | `counter_evidence[]` | array | Evidence against the root cause with `{file, line, snippet, interpretation}` |
 | `wrapper_errors[]` | array | Wrapper-level errors detected |
@@ -98,13 +98,13 @@ The Markdown report MUST contain all 11 sections below in order. Section
 numbering is part of the contract — downstream tools match on the headings.
 If a section has no data, include the heading and add a placeholder.
 
-### 2.1 诊断结论 (Direction + Root Cause Summary)
+### 2.1 Diagnosis Conclusion
 
 - Classification and confidence badge
 - One-line failure direction (e.g., "Inference batch timed out — product bug")
 - Root cause summary (2-3 sentences)
 
-### 2.2 环境概要 (Environment Summary)
+### 2.2 Environment Summary
 
 A 2-column table:
 
@@ -119,14 +119,14 @@ A 2-column table:
 
 Also include the diagnosis metadata (generated_at, step_name, log_file).
 
-### 2.3 关键时间线 (Key Timeline)
+### 2.3 Key Timeline
 
 A table with columns: time, component, event. Ordered chronologically.
 Include multi-component offsets when available.
 
 Example:
 
-| 时间 | 组件 | 事件 |
+| Time | Component | Event |
 |---|---|---|
 | 12:00:01 | Coordinator | Starting pod |
 | 12:00:10 | P Server | Registered RPC handler |
@@ -134,33 +134,33 @@ Example:
 | 12:00:45 | P Server | Request timeout |
 | 12:00:46 | CI | EngineDeadError |
 
-### 2.4 证据链 (Evidence Chain)
+### 2.4 Evidence Chain
 
 A table with columns: 来源 | 日志位置 | 日志内容 | 推导结论.
 
-| 来源 | 日志位置 | 日志内容 | 推导结论 |
+| Source | Location | Content | Deduction |
 |---|---|---|---|
 | Main CI log | leader_logs.txt:3200 | `RPC call timed out after 30s` | D worker did not respond |
 | Ascend worker logs | worker_rank3.log:1180 | `RuntimeError: connection closed by peer` | Rank-local failure happened before wrapper |
 | K8s diagnostics | pods.json:1 | `phase=Running restartCount=0` | Pod-level failure is unlikely |
 
-If a source was required but missing, add a row with `来源=missing` and
+If a source was required but missing, add a row with `Source=missing` and
 explain the diagnostic impact.
 
-### 2.5 失败路径对比 (Success vs Failure Comparison)
+### 2.5 Success vs Failure Comparison
 
 A table comparing a successful baseline request path against the failure path.
 
-| Checkpoint | 成功 Baseline | 失败 Request |
+| Checkpoint | Success Baseline | Failure Request |
 |---|---|---|
 | Request received | 12:00:01 | 12:01:30 |
 | Prefill started | 12:00:02 | 12:01:31 |
-| Prefill completed | 12:00:05 | — 无 — |
-| First token sent | 12:00:06 | — 无 — |
+| Prefill completed | 12:00:05 | — N/A — |
+| First token sent | 12:00:06 | — N/A — |
 
-The `— 无 —` marker explicitly shows where the failure diverged.
+The `— N/A —` marker explicitly shows where the failure diverged.
 
-### 2.6 故障链路总览 (Failure Chain Overview)
+### 2.6 Failure Chain Overview
 
 A Mermaid `sequenceDiagram` showing the full causal chain:
 
@@ -180,23 +180,23 @@ sequenceDiagram
     Coordinator-->>Client: 500 Internal Server Error
 ```
 
-### 2.7 根因分析 (Root Cause Analysis)
+### 2.7 Root Cause Analysis
 
 A 2-3 sentence layered analysis covering:
 
-- **表象 (Appearance)**: What CI shows
-- **直接原因 (Direct Cause)**: The immediate trigger
-- **加剧因素 (Aggravating Factor)**: What made it worse
-- **诱因 (Trigger)**: The code/config change that introduced the failure
+- **Appearance**: What CI shows
+- **Direct Cause**: The immediate trigger
+- **Aggravating Factor**: What made it worse
+- **Trigger**: The code/config change that introduced the failure
 
 Presented as a table:
 
-| 层级 | 根因 |
+| Layer | Root Cause |
 |---|---|
-| 表象 | EngineDeadError at CI summary |
-| 直接原因 | RPC call to D worker timed out after 30s |
-| 加剧因素 | max_num_batched_tokens=256 causes prefill queue bloat |
-| 诱因 | Commit aba1234 increased model params without adjusting batch config |
+| appearance | EngineDeadError at CI summary |
+| direct_cause | RPC call to D worker timed out after 30s |
+| aggravating_factor | max_num_batched_tokens=256 causes prefill queue bloat |
+| trigger | Commit aba1234 increased model params without adjusting batch config |
 
 ### 2.8 排除项 (Excluded Items)
 
