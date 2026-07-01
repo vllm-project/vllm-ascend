@@ -46,7 +46,7 @@ def split_qkv_rmsnorm_rope_simt_kernel(
     k_weight_ptr,
     k_bias_ptr,
     cos_sin_precomputed_ptr,
-    batch_size,                 # 运行时动态值
+    batch_size,
     q_hidden_size: tl.constexpr,
     kv_hidden_size: tl.constexpr,
     total_hidden_size: tl.constexpr,
