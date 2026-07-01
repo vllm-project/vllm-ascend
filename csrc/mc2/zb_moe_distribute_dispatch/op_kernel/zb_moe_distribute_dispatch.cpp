@@ -1,9 +1,9 @@
 #include "kernel_operator.h"
-#include "zb_moe_distribute_dispatch_zero_buffer.h"
-#include "zb_moe_distribute_dispatch_zero_buffer_tiling.h"
+#include "zb_moe_distribute_dispatch.h"
+#include "zb_moe_distribute_dispatch_tiling.h"
 
 using namespace AscendC;
-using namespace MoeDistributeDispatchZeroBufferImpl;
+using namespace ZbMoeDistributeDispatchImpl;
 
 /*
  * A3 tilingkey说明
@@ -19,28 +19,28 @@ using namespace MoeDistributeDispatchZeroBufferImpl;
  * 第5位（万位）：无实际意义
  */
 
-extern "C" __global__ __aicore__ void zb_moe_distribute_dispatch_zero_buffer(GM_ADDR x, GM_ADDR expertIds, GM_ADDR scales,
+extern "C" __global__ __aicore__ void zb_moe_distribute_dispatch(GM_ADDR x, GM_ADDR expertIds, GM_ADDR scales,
                                                                  GM_ADDR xActiveMask, GM_ADDR elasticInfo,
                                                                  GM_ADDR expandXOut, GM_ADDR dynamicScalesOut,
                                                                  GM_ADDR assistInfoOut, GM_ADDR expertTokenNumsOut,
                                                                  GM_ADDR epSendCountsOut, GM_ADDR tpSendCountsOut,
                                                                  GM_ADDR workspaceGM, GM_ADDR tilingGM)
 {
-    REGISTER_TILING_DEFAULT(ZbMoeDistributeDispatchZeroBufferTilingData);
+    REGISTER_TILING_DEFAULT(ZbMoeDistributeDispatchTilingData);
     TPipe pipe;
 #if (ORIG_DTYPE_EXPAND_X == DT_BF16 || ORIG_DTYPE_EXPAND_X == DT_FLOAT16)
     // PRINTF("[--------- DISPATCH ---------] GETTING TILING KEY \n");
     if (TILING_KEY_IS(10000)) {
-        GET_TILING_DATA_WITH_STRUCT(ZbMoeDistributeDispatchZeroBufferTilingData, tilingData, tilingGM);
-        ZbMoeDistributeDispatchZeroBuffer<DTYPE_X, DTYPE_EXPAND_X, false, false, false, false> op;
+        GET_TILING_DATA_WITH_STRUCT(ZbMoeDistributeDispatchTilingData, tilingData, tilingGM);
+        ZbMoeDistributeDispatch<DTYPE_X, DTYPE_EXPAND_X, false, false, false, false> op;
         op.Init(x, expertIds, scales, xActiveMask, elasticInfo, expandXOut, dynamicScalesOut, assistInfoOut,
                 expertTokenNumsOut, epSendCountsOut, tpSendCountsOut, workspaceGM, &pipe, &tilingData);
         op.Process();
         return;
     }
     if (TILING_KEY_IS(10100)) {
-        GET_TILING_DATA_WITH_STRUCT(ZbMoeDistributeDispatchZeroBufferTilingData, tilingData, tilingGM);
-        ZbMoeDistributeDispatchZeroBuffer<DTYPE_X, DTYPE_EXPAND_X, false, false, false, true> op;
+        GET_TILING_DATA_WITH_STRUCT(ZbMoeDistributeDispatchTilingData, tilingData, tilingGM);
+        ZbMoeDistributeDispatch<DTYPE_X, DTYPE_EXPAND_X, false, false, false, true> op;
         op.Init(x, expertIds, scales, xActiveMask, elasticInfo, expandXOut, dynamicScalesOut, assistInfoOut,
                 expertTokenNumsOut, epSendCountsOut, tpSendCountsOut, workspaceGM, &pipe, &tilingData);
         op.Process();
@@ -48,48 +48,48 @@ extern "C" __global__ __aicore__ void zb_moe_distribute_dispatch_zero_buffer(GM_
     }
 #elif (ORIG_DTYPE_EXPAND_X == DT_INT8)
     if (TILING_KEY_IS(10011)) {
-        GET_TILING_DATA_WITH_STRUCT(ZbMoeDistributeDispatchZeroBufferTilingData, tilingData, tilingGM);
-        ZbMoeDistributeDispatchZeroBuffer<DTYPE_X, DTYPE_EXPAND_X, true, false, false, false> op;
+        GET_TILING_DATA_WITH_STRUCT(ZbMoeDistributeDispatchTilingData, tilingData, tilingGM);
+        ZbMoeDistributeDispatch<DTYPE_X, DTYPE_EXPAND_X, true, false, false, false> op;
         op.Init(x, expertIds, scales, xActiveMask, elasticInfo, expandXOut, dynamicScalesOut, assistInfoOut,
                 expertTokenNumsOut, epSendCountsOut, tpSendCountsOut, workspaceGM, &pipe, &tilingData);
         op.Process();
         return;
     }
     if (TILING_KEY_IS(10002)) {
-        GET_TILING_DATA_WITH_STRUCT(ZbMoeDistributeDispatchZeroBufferTilingData, tilingData, tilingGM);
-        ZbMoeDistributeDispatchZeroBuffer<DTYPE_X, DTYPE_EXPAND_X, false, true, false, false> op;
+        GET_TILING_DATA_WITH_STRUCT(ZbMoeDistributeDispatchTilingData, tilingData, tilingGM);
+        ZbMoeDistributeDispatch<DTYPE_X, DTYPE_EXPAND_X, false, true, false, false> op;
         op.Init(x, expertIds, scales, xActiveMask, elasticInfo, expandXOut, dynamicScalesOut, assistInfoOut,
                 expertTokenNumsOut, epSendCountsOut, tpSendCountsOut, workspaceGM, &pipe, &tilingData);
         op.Process();
         return;
     }
     if (TILING_KEY_IS(10012)) {
-        GET_TILING_DATA_WITH_STRUCT(ZbMoeDistributeDispatchZeroBufferTilingData, tilingData, tilingGM);
-        ZbMoeDistributeDispatchZeroBuffer<DTYPE_X, DTYPE_EXPAND_X, false, true, true, false> op;
+        GET_TILING_DATA_WITH_STRUCT(ZbMoeDistributeDispatchTilingData, tilingData, tilingGM);
+        ZbMoeDistributeDispatch<DTYPE_X, DTYPE_EXPAND_X, false, true, true, false> op;
         op.Init(x, expertIds, scales, xActiveMask, elasticInfo, expandXOut, dynamicScalesOut, assistInfoOut,
                 expertTokenNumsOut, epSendCountsOut, tpSendCountsOut, workspaceGM, &pipe, &tilingData);
         op.Process();
         return;
     }
     if (TILING_KEY_IS(10111)) {
-        GET_TILING_DATA_WITH_STRUCT(ZbMoeDistributeDispatchZeroBufferTilingData, tilingData, tilingGM);
-        ZbMoeDistributeDispatchZeroBuffer<DTYPE_X, DTYPE_EXPAND_X, true, false, false, true> op;
+        GET_TILING_DATA_WITH_STRUCT(ZbMoeDistributeDispatchTilingData, tilingData, tilingGM);
+        ZbMoeDistributeDispatch<DTYPE_X, DTYPE_EXPAND_X, true, false, false, true> op;
         op.Init(x, expertIds, scales, xActiveMask, elasticInfo, expandXOut, dynamicScalesOut, assistInfoOut,
                 expertTokenNumsOut, epSendCountsOut, tpSendCountsOut, workspaceGM, &pipe, &tilingData);
         op.Process();
         return;
     }
     if (TILING_KEY_IS(10102)) {
-        GET_TILING_DATA_WITH_STRUCT(ZbMoeDistributeDispatchZeroBufferTilingData, tilingData, tilingGM);
-        ZbMoeDistributeDispatchZeroBuffer<DTYPE_X, DTYPE_EXPAND_X, false, true, false, true> op;
+        GET_TILING_DATA_WITH_STRUCT(ZbMoeDistributeDispatchTilingData, tilingData, tilingGM);
+        ZbMoeDistributeDispatch<DTYPE_X, DTYPE_EXPAND_X, false, true, false, true> op;
         op.Init(x, expertIds, scales, xActiveMask, elasticInfo, expandXOut, dynamicScalesOut, assistInfoOut,
                 expertTokenNumsOut, epSendCountsOut, tpSendCountsOut, workspaceGM, &pipe, &tilingData);
         op.Process();
         return;
     }
     if (TILING_KEY_IS(10112)) {
-        GET_TILING_DATA_WITH_STRUCT(ZbMoeDistributeDispatchZeroBufferTilingData, tilingData, tilingGM);
-        ZbMoeDistributeDispatchZeroBuffer<DTYPE_X, DTYPE_EXPAND_X, false, true, true, true> op;
+        GET_TILING_DATA_WITH_STRUCT(ZbMoeDistributeDispatchTilingData, tilingData, tilingGM);
+        ZbMoeDistributeDispatch<DTYPE_X, DTYPE_EXPAND_X, false, true, true, true> op;
         op.Init(x, expertIds, scales, xActiveMask, elasticInfo, expandXOut, dynamicScalesOut, assistInfoOut,
                 expertTokenNumsOut, epSendCountsOut, tpSendCountsOut, workspaceGM, &pipe, &tilingData);
         op.Process();

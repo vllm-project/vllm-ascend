@@ -10,6 +10,7 @@ from dataclasses import dataclass
 
 import torch
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import enable_custom_op
 
 logger = logging.getLogger(__name__)
@@ -35,6 +36,15 @@ DEFAULT_COMM_ALG = "fullmesh_v1"
 
 # Process-wide runtime created by ensure_zb_process_initialized().
 _ZB_PROCESS_RUNTIME: ZbMoERuntime | None = None
+
+# aclshmem conf-store URI reserved at worker startup (one free port per MC2 group).
+_ZB_SHMEM_CONF_STORE_URI: str | None = None
+
+
+def set_zb_shmem_conf_store_uri(uri: str | None) -> None:
+    """Record the aclshmem conf-store URI reserved for this worker/MC2 group."""
+    global _ZB_SHMEM_CONF_STORE_URI
+    _ZB_SHMEM_CONF_STORE_URI = uri
 
 
 def _env_int(name: str, default: int) -> int:
@@ -73,12 +83,14 @@ def compute_low_latency_max_recv_tokens(
     ep_world_size: int,
     num_local_experts: int,
     *,
+    experts_per_token: int,
     max_tokens_per_rank: int | None = None,
     min_recv_tokens: int = 1024,
 ) -> int:
-    """Mirror deepep_standalone's low-latency max_recv_tokens sizing."""
+    """Mirror deepep_standalone's low-latency max_recv_tokens sizing, aligned with MC2 tiling."""
     per_rank = max(num_tokens_per_rank, max_tokens_per_rank or 0)
-    calculated = per_rank * ep_world_size * num_local_experts
+    global_bs = per_rank * ep_world_size
+    calculated = global_bs * min(num_local_experts, experts_per_token)
     return max(calculated, min_recv_tokens)
 
 
@@ -143,6 +155,7 @@ def estimate_zb_early_local_mem_size(
     ep_world_size: int,
     hidden_size: int,
     moe_expert_num: int,
+    experts_per_token: int,
     use_quant: bool = False,
 ) -> tuple[int, int]:
     """Conservative aclshmem pool sizing for early (startup) init.
@@ -158,6 +171,7 @@ def estimate_zb_early_local_mem_size(
         num_tokens_per_rank=max_tokens_per_rank,
         ep_world_size=ep_world_size,
         num_local_experts=num_local_experts,
+        experts_per_token=experts_per_token,
     )
     local_mem_size = estimate_local_mem_size(
         max_recv_tokens,
@@ -171,6 +185,144 @@ def estimate_zb_early_local_mem_size(
 
 def get_zb_process_runtime() -> ZbMoERuntime | None:
     return _ZB_PROCESS_RUNTIME
+
+
+def _format_tcp_uri(host: str, port: int) -> str:
+    if ":" in host and not host.startswith("["):
+        return f"tcp://[{host}]:{port}"
+    return f"tcp://{host}:{port}"
+
+
+def _parse_tcp_host_port(init_method: str) -> tuple[str, int]:
+    normalized = init_method.strip()
+    if "://" not in normalized:
+        normalized = f"tcp://{normalized}"
+    scheme, _, remainder = normalized.partition("://")
+    if scheme != "tcp":
+        raise RuntimeError(f"ZB SHMEM requires a tcp:// HCCL rendezvous, got: {init_method!r}")
+    if remainder.startswith("["):
+        end = remainder.index("]")
+        host = remainder[1:end]
+        _, _, port_str = remainder[end + 1 :].partition(":")
+    else:
+        host, _, port_str = remainder.rpartition(":")
+    if not host or not port_str:
+        raise RuntimeError(f"cannot parse host/port from HCCL rendezvous: {init_method!r}")
+    return host, int(port_str)
+
+
+def reserve_zb_shmem_conf_store_uri(hccl_init_method: str) -> str:
+    """Reserve a free TCP port for aclshmem conf-store (shared within each MC2 group).
+
+    Reuses the HCCL rendezvous host but picks a dedicated port via ``get_open_port()``,
+    broadcast from the MC2 group leader so every rank in the group shares the same URI
+    without colliding with the HCCL TCPStore port.
+    """
+    from vllm.utils.network_utils import get_open_port
+
+    from vllm_ascend.distributed.parallel_state import get_mc2_group
+
+    host, _ = _parse_tcp_host_port(hccl_init_method)
+    mc2 = get_mc2_group()
+    port_tensor = torch.tensor([0], dtype=torch.int64)
+
+    if mc2.rank_in_group == 0:
+        port_tensor[0] = get_open_port()
+
+    torch.distributed.broadcast(
+        port_tensor,
+        src=mc2.ranks[0],
+        group=mc2.cpu_group,
+    )
+    shmem_port = int(port_tensor.item())
+    if shmem_port <= 0 or shmem_port > 65535:
+        raise RuntimeError(f"invalid SHMEM conf-store port broadcast result: {shmem_port}")
+
+    uri = _format_tcp_uri(host, shmem_port)
+    set_zb_shmem_conf_store_uri(uri)
+    logger.info(
+        "Reserved ZB SHMEM conf-store URI %s (HCCL rendezvous %s)",
+        uri,
+        hccl_init_method,
+    )
+    return uri
+
+
+def _iter_zb_hf_configs(vllm_config):
+    model_config = vllm_config.model_config
+    for cfg in (
+        getattr(model_config, "hf_text_config", None),
+        getattr(model_config, "hf_config", None),
+    ):
+        if cfg is not None:
+            yield cfg
+
+
+def resolve_zb_moe_expert_num(vllm_config) -> int:
+    get_num_experts = getattr(vllm_config.model_config, "get_num_experts", None)
+    if callable(get_num_experts):
+        num_experts = int(get_num_experts() or 0)
+        if num_experts > 0:
+            return num_experts
+
+    for cfg in _iter_zb_hf_configs(vllm_config):
+        num_experts = int(getattr(cfg, "num_experts", 0) or 0)
+        if num_experts > 0:
+            return num_experts
+    return 0
+
+
+def resolve_zb_experts_per_token(vllm_config) -> int:
+    for cfg in _iter_zb_hf_configs(vllm_config):
+        for attr in ("num_experts_per_tok", "moe_topk", "top_k"):
+            top_k = int(getattr(cfg, attr, 0) or 0)
+            if top_k > 0:
+                return top_k
+    return 1
+
+
+def resolve_zb_shmem_uri() -> str:
+    """Resolve aclshmem conf-store URI for this worker.
+
+    Serving path (no extra config):
+      1. ``NPUWorker._init_worker_distributed_environment`` calls
+         ``reserve_zb_shmem_conf_store_uri`` after MC2 groups are created.
+      2. ``ensure_zb_process_initialized`` reads the reserved URI here.
+
+    Fallback order: e2e override env → reserved conf-store URI.
+    """
+    override = os.getenv("VLLM_ASCEND_ZB_SHMEM_URI") or os.getenv("VLLM_ASCEND_ZB_URI")
+    if override:
+        return override if "://" in override else f"tcp://{override}"
+
+    if _ZB_SHMEM_CONF_STORE_URI:
+        return _ZB_SHMEM_CONF_STORE_URI
+
+    raise RuntimeError(
+        "additional_config.enable_mc2_zb=true but ZB SHMEM conf-store URI is unavailable. "
+        "Serving workers must call reserve_zb_shmem_conf_store_uri() after MC2 init. "
+        "For standalone e2e tests only, set VLLM_ASCEND_ZB_SHMEM_URI."
+    )
+
+
+def _synchronize_zb_init_peers() -> None:
+    """Barrier EP peers before aclshmem conf-store rendezvous."""
+    try:
+        from vllm_ascend.distributed.parallel_state import get_mc2_group
+
+        mc2 = get_mc2_group()
+        if mc2.world_size > 1:
+            # Use the CPU gloo group: HCCL device barrier here can deadlock with
+            # aclshmem's TCP conf-store rendezvous under DP>1.
+            torch.distributed.barrier(group=mc2.cpu_group)
+    except AssertionError:
+        pass
+
+
+def validate_zb_serving_parallel_config(parallel_config) -> None:
+    """Fail fast when ZB is enabled with unsupported parallel layout."""
+    if not get_ascend_config().enable_mc2_zb:
+        return
 
 
 def ensure_zb_process_initialized(
@@ -187,10 +339,14 @@ def ensure_zb_process_initialized(
         return _ZB_PROCESS_RUNTIME
 
     if not server_ip_port:
-        raise RuntimeError(
-            "VLLM_ASCEND_ENABLE_ZB=1 but VLLM_ASCEND_ZB_SHMEM_URI is unset. "
-            "Set it to e.g. tcp://<host>:<port> (identical across all EP ranks)."
-        )
+        server_ip_port = resolve_zb_shmem_uri()
+    logger.info(
+        "Initializing ZB aclshmem (rank=%s/%s, local_mem_size=%s, uri=%s)",
+        rank,
+        world_size,
+        local_mem_size,
+        server_ip_port,
+    )
 
     runtime = ZbMoERuntime(
         rank=rank,
@@ -198,7 +354,19 @@ def ensure_zb_process_initialized(
         server_ip_port=server_ip_port,
         local_mem_size=local_mem_size,
     )
-    runtime.init()
+    _synchronize_zb_init_peers()
+    try:
+        runtime.init()
+    except RuntimeError as exc:
+        raise RuntimeError(
+            "aclshmem process init failed for additional_config.enable_mc2_zb=true. "
+            f"uri={server_ip_port!r}, rank={rank}, world_size={world_size}, "
+            f"local_mem_size={local_mem_size}. SHMEM conf-store uses a dedicated TCP "
+            "port reserved at worker startup (separate from the HCCL TCPStore port). "
+            "Check that the reserved port is free, all MC2 ranks enter init together, "
+            "and host DRAM can satisfy local_mem_size. "
+            "Set VLLM_ASCEND_ZB_DEBUG=1 for C++ init logs."
+        ) from exc
     _ZB_PROCESS_RUNTIME = runtime
     return runtime
 
@@ -234,7 +402,7 @@ class ZbMoERuntime:
 
     def __post_init__(self) -> None:
         if self.server_ip_port is None:
-            self.server_ip_port = os.getenv("VLLM_ASCEND_ZB_SHMEM_URI", "")
+            self.server_ip_port = resolve_zb_shmem_uri()
 
     def init(self) -> int:
         _ensure_custom_op_loaded()
@@ -343,7 +511,7 @@ class ZbMoERuntime:
         self.finalize()
 
 
-def zb_moe_distribute_dispatch_zero_buffer(
+def zb_moe_distribute_dispatch(
     x: torch.Tensor,
     expert_ids: torch.Tensor,
     expand_x_out: torch.Tensor,
@@ -373,14 +541,14 @@ def zb_moe_distribute_dispatch_zero_buffer(
     copy_expert_num: int = 0,
     const_expert_num: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Thin Python wrapper around torch.ops._C_ascend.zb_moe_distribute_dispatch_zero_buffer.
+    """Thin Python wrapper around torch.ops._C_ascend.zb_moe_distribute_dispatch.
 
     All output tensors must be pre-allocated by the caller. ``ext_info`` is the
     SHMEM global virtual address returned by :py:meth:`ZbMoERuntime.alloc` /
     :py:meth:`ZbMoERuntime.get_ext_info`.
     """
-    _ensure_zb_op_available("zb_moe_distribute_dispatch_zero_buffer")
-    return torch.ops._C_ascend.zb_moe_distribute_dispatch_zero_buffer(
+    _ensure_zb_op_available("zb_moe_distribute_dispatch")
+    return torch.ops._C_ascend.zb_moe_distribute_dispatch(
         x,
         expert_ids,
         scales,
@@ -411,7 +579,7 @@ def zb_moe_distribute_dispatch_zero_buffer(
     )
 
 
-def zb_moe_distribute_combine_zero_buffer(
+def zb_moe_distribute_combine(
     expand_x: torch.Tensor,
     expert_ids: torch.Tensor,
     assist_info_for_combine: torch.Tensor,
@@ -449,19 +617,19 @@ def zb_moe_distribute_combine_zero_buffer(
     copy_expert_num: int = 0,
     const_expert_num: int = 0,
 ) -> torch.Tensor:
-    """Thin Python wrapper around torch.ops._C_ascend.zb_moe_distribute_combine_zero_buffer.
+    """Thin Python wrapper around torch.ops._C_ascend.zb_moe_distribute_combine.
 
     ``combined_x`` must be pre-allocated by the caller. ``ext_info`` is the
     SHMEM global virtual address used as the combine source buffer pointer
-    (typically the same value used by ``zb_moe_distribute_dispatch_zero_buffer``).
+    (typically the same value used by ``zb_moe_distribute_dispatch``).
     """
-    _ensure_zb_op_available("zb_moe_distribute_combine_zero_buffer")
+    _ensure_zb_op_available("zb_moe_distribute_combine")
     if tp_send_count is None:
         # The combine tiling marks tp_send_count optional, but still validates
         # its shape and dtype. deepep_standalone always passes an int32 tensor
         # with one entry per TP rank even when tp_world_size == 1.
         tp_send_count = torch.empty((tp_world_size,), dtype=torch.int32, device=expand_x.device)
-    return torch.ops._C_ascend.zb_moe_distribute_combine_zero_buffer(
+    return torch.ops._C_ascend.zb_moe_distribute_combine(
         expand_x,
         expert_ids,
         assist_info_for_combine,

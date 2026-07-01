@@ -1,18 +1,18 @@
 /*
  * Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
- * Description: ZbMoeDistributeCombineZeroBuffer operator kernel function header file, for a3
+ * Description: ZbMoeDistributeCombine operator kernel function header file, for a3
  * Author: Hu Tianlun
  * Create: 2026-01-22
  * Note:
- * History: 2026-01-22 create ZbMoeDistributeCombineZeroBuffer operator kernel function header file, for a3
+ * History: 2026-01-22 create ZbMoeDistributeCombine operator kernel function header file, for a3
  */
-#ifndef SHMEM_MOE_DISTRIBUTE_COMBINE_ZEROBUFFER_H
-#define SHMEM_MOE_DISTRIBUTE_COMBINE_ZEROBUFFER_H
+#ifndef ZB_MOE_DISTRIBUTE_COMBINE_H
+#define ZB_MOE_DISTRIBUTE_COMBINE_H
 
 #include "kernel_operator.h"
 #include "kernel_tiling/kernel_tiling.h"
 #include "zb_moe_distribute_v2_base.h"
-#include "zb_moe_distribute_combine_zero_buffer_tiling.h"
+#include "zb_moe_distribute_combine_tiling.h"
 #include "shmem_sync_flag.h"
 #include "shmem.h"
 #include <type_traits>
@@ -51,15 +51,15 @@ constexpr uint64_t COMBINE_SYNC_STATE_OFFSET = 32U;
 #define TemplateMC2TypeFunc ExpandXType, XType, ExpandIdxType, IsNeedReduceScatter, IsInt8Quant
 
 template <TemplateMC2TypeClass>
-class ZbMoeDistributeCombineZeroBuffer
+class ZbMoeDistributeCombine
 {
 public:
-    __aicore__ inline ZbMoeDistributeCombineZeroBuffer(){};
+    __aicore__ inline ZbMoeDistributeCombine(){};
     __aicore__ inline void Init(GM_ADDR expandX, GM_ADDR expertIds, GM_ADDR expandIdx, GM_ADDR epSendCount,
                                 GM_ADDR tpSendCount, GM_ADDR expertScales, GM_ADDR xActiveMask, GM_ADDR sharedExpertX,
                                 GM_ADDR elasticInfo, GM_ADDR oriX, GM_ADDR constExpertAlpha1, GM_ADDR constExpertAlpha2,
                                 GM_ADDR constExpertV, GM_ADDR XOut, GM_ADDR workspaceGM, TPipe *pipe,
-                                const ZbMoeDistributeCombineZeroBufferTilingData *tilingData);
+                                const ZbMoeDistributeCombineTilingData *tilingData);
     __aicore__ inline void Process();
 
 private:
@@ -72,8 +72,8 @@ private:
     __aicore__ inline void WaitSyncFlag();
     __aicore__ inline void InitInputAndOutput(GM_ADDR expandX, GM_ADDR expertIds, GM_ADDR expandIdx,
                                               GM_ADDR epSendCount, GM_ADDR expertScales, GM_ADDR XOut);
-    __aicore__ inline void InitAttrs(const ZbMoeDistributeCombineZeroBufferTilingData *tilingData);
-    __aicore__ inline void InitTilingAttrs(const ZbMoeDistributeCombineZeroBufferTilingData *tilingData);
+    __aicore__ inline void InitAttrs(const ZbMoeDistributeCombineTilingData *tilingData);
+    __aicore__ inline void InitTilingAttrs(const ZbMoeDistributeCombineTilingData *tilingData);
 
     TPipe *tpipe_{nullptr};
     GlobalTensor<int32_t> expertIdsGM_;
@@ -128,7 +128,7 @@ private:
 };
 
 template <TemplateMC2TypeClass>
-__aicore__ inline void ZbMoeDistributeCombineZeroBuffer<TemplateMC2TypeFunc>::InitInputAndOutput(
+__aicore__ inline void ZbMoeDistributeCombine<TemplateMC2TypeFunc>::InitInputAndOutput(
     GM_ADDR expandX, GM_ADDR expertIds, GM_ADDR expandIdx, GM_ADDR epSendCount, GM_ADDR expertScales, GM_ADDR XOut)
 {
     expandXGM_ = expandX;
@@ -140,8 +140,8 @@ __aicore__ inline void ZbMoeDistributeCombineZeroBuffer<TemplateMC2TypeFunc>::In
 }
 
 template <TemplateMC2TypeClass>
-__aicore__ inline void ZbMoeDistributeCombineZeroBuffer<TemplateMC2TypeFunc>::InitTilingAttrs(
-    const ZbMoeDistributeCombineZeroBufferTilingData *tilingData)
+__aicore__ inline void ZbMoeDistributeCombine<TemplateMC2TypeFunc>::InitTilingAttrs(
+    const ZbMoeDistributeCombineTilingData *tilingData)
 {
     axisBS_ = tilingData->moeDistributeCombineV2Info.bs;
     axisH_ = tilingData->moeDistributeCombineV2Info.h;
@@ -155,8 +155,8 @@ __aicore__ inline void ZbMoeDistributeCombineZeroBuffer<TemplateMC2TypeFunc>::In
 
 template <TemplateMC2TypeClass>
 __aicore__ inline void
-ZbMoeDistributeCombineZeroBuffer<TemplateMC2TypeFunc>::InitAttrs(
-    const ZbMoeDistributeCombineZeroBufferTilingData *tilingData)
+ZbMoeDistributeCombine<TemplateMC2TypeFunc>::InitAttrs(
+    const ZbMoeDistributeCombineTilingData *tilingData)
 {
     InitTilingAttrs(tilingData);
     uint32_t hFloatSize = axisH_ * static_cast<uint32_t>(sizeof(float));
@@ -167,11 +167,11 @@ ZbMoeDistributeCombineZeroBuffer<TemplateMC2TypeFunc>::InitAttrs(
 }
 
 template <TemplateMC2TypeClass>
-__aicore__ inline void ZbMoeDistributeCombineZeroBuffer<TemplateMC2TypeFunc>::Init(
+__aicore__ inline void ZbMoeDistributeCombine<TemplateMC2TypeFunc>::Init(
     GM_ADDR expandX, GM_ADDR expertIds, GM_ADDR expandIdx, GM_ADDR epSendCount, GM_ADDR tpSendCount,
     GM_ADDR expertScales, GM_ADDR xActiveMask, GM_ADDR sharedExpertX, GM_ADDR elasticInfo, GM_ADDR oriX,
     GM_ADDR constExpertAlpha1, GM_ADDR constExpertAlpha2, GM_ADDR constExpertV, GM_ADDR XOut, GM_ADDR workspaceGM,
-    TPipe *pipe, const ZbMoeDistributeCombineZeroBufferTilingData *tilingData)
+    TPipe *pipe, const ZbMoeDistributeCombineTilingData *tilingData)
 {
     tpipe_ = pipe;
     aivId_ = GetBlockIdx();
@@ -193,7 +193,7 @@ __aicore__ inline void ZbMoeDistributeCombineZeroBuffer<TemplateMC2TypeFunc>::In
 }
 
 template <TemplateMC2TypeClass>
-__aicore__ inline void ZbMoeDistributeCombineZeroBuffer<TemplateMC2TypeFunc>::SplitToCore(uint32_t curSendCnt,
+__aicore__ inline void ZbMoeDistributeCombine<TemplateMC2TypeFunc>::SplitToCore(uint32_t curSendCnt,
                                                                                  uint32_t curUseAivNum,
                                                                                  uint32_t &startTokenId,
                                                                                  uint32_t &endTokenId,
@@ -214,14 +214,14 @@ __aicore__ inline void ZbMoeDistributeCombineZeroBuffer<TemplateMC2TypeFunc>::Sp
 
 template <TemplateMC2TypeClass>
 __aicore__ inline GM_ADDR
-ZbMoeDistributeCombineZeroBuffer<TemplateMC2TypeFunc>::GetSyncFlagAddrByRankId(uint32_t rankId)
+ZbMoeDistributeCombine<TemplateMC2TypeFunc>::GetSyncFlagAddrByRankId(uint32_t rankId)
 {
     auto metaPtr = reinterpret_cast<__gm__ uint8_t *>(aclshmem_ptr(metaDataGvaGM_, rankId));
     return (GM_ADDR)(metaPtr) + COMBINE_SYNC_FLAG_BASE_OFFSET;
 }
 
 template <TemplateMC2TypeClass>
-__aicore__ inline void ZbMoeDistributeCombineZeroBuffer<TemplateMC2TypeFunc>::SetSyncFlag()
+__aicore__ inline void ZbMoeDistributeCombine<TemplateMC2TypeFunc>::SetSyncFlag()
 {
     if (rankNumPerBlock_ == 0U) {
         SyncAll<true>();
@@ -250,7 +250,7 @@ __aicore__ inline void ZbMoeDistributeCombineZeroBuffer<TemplateMC2TypeFunc>::Se
 }
 
 template <TemplateMC2TypeClass>
-__aicore__ inline void ZbMoeDistributeCombineZeroBuffer<TemplateMC2TypeFunc>::WaitSyncFlag()
+__aicore__ inline void ZbMoeDistributeCombine<TemplateMC2TypeFunc>::WaitSyncFlag()
 {
     if (rankNumPerBlock_ == 0U) {
         SyncAll<true>();
@@ -304,7 +304,7 @@ __aicore__ inline void ZbMoeDistributeCombineZeroBuffer<TemplateMC2TypeFunc>::Wa
 }
 
 template <TemplateMC2TypeClass>
-__aicore__ inline void ZbMoeDistributeCombineZeroBuffer<TemplateMC2TypeFunc>::CopyValidExpandXToShmem()
+__aicore__ inline void ZbMoeDistributeCombine<TemplateMC2TypeFunc>::CopyValidExpandXToShmem()
 {
     if (!needCopyExpandX_) {
         return;
@@ -355,7 +355,7 @@ __aicore__ inline void ZbMoeDistributeCombineZeroBuffer<TemplateMC2TypeFunc>::Co
 }
 
 template <TemplateMC2TypeClass>
-__aicore__ inline void ZbMoeDistributeCombineZeroBuffer<TemplateMC2TypeFunc>::InputToDstOutput()
+__aicore__ inline void ZbMoeDistributeCombine<TemplateMC2TypeFunc>::InputToDstOutput()
 {
     if (axisBS_ == 0U) {
         return;
@@ -440,7 +440,7 @@ __aicore__ inline void ZbMoeDistributeCombineZeroBuffer<TemplateMC2TypeFunc>::In
 }
 
 template <TemplateMC2TypeClass>
-__aicore__ inline void ZbMoeDistributeCombineZeroBuffer<TemplateMC2TypeFunc>::Process()
+__aicore__ inline void ZbMoeDistributeCombine<TemplateMC2TypeFunc>::Process()
 {
     if ASCEND_IS_AIV {
         if (needCopyExpandX_) {
@@ -457,5 +457,5 @@ __aicore__ inline void ZbMoeDistributeCombineZeroBuffer<TemplateMC2TypeFunc>::Pr
     }
 }
 
-}  // namespace MoeDistributeCombineZeroBufferImpl
-#endif  // SHMEM_MOE_DISTRIBUTE_COMBINE_ZEROBUFFER_H
+}  // namespace ZbMoeDistributeCombineImpl
+#endif  // ZB_MOE_DISTRIBUTE_COMBINE_H

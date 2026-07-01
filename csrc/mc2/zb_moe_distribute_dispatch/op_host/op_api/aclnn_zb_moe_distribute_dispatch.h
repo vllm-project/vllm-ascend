@@ -1,5 +1,5 @@
-#ifndef ACLNN_SHMEM_MOE_DISTRIBUTE_DISPATCH_ZERO_BUFFER_H_
-#define ACLNN_SHMEM_MOE_DISTRIBUTE_DISPATCH_ZERO_BUFFER_H_
+#ifndef ACLNN_ZB_MOE_DISTRIBUTE_DISPATCH_H_
+#define ACLNN_ZB_MOE_DISTRIBUTE_DISPATCH_H_
 
 #include "aclnn/acl_meta.h"
 
@@ -7,7 +7,7 @@
 extern "C" {
 #endif
 
-/* function: aclnnZbMoeDistributeDispatchZeroBufferGetWorkspaceSize
+/* function: aclnnZbMoeDistributeDispatchGetWorkspaceSize
  * parameters :
  * x : required
  * expertIds : required
@@ -39,7 +39,7 @@ extern "C" {
  * workspaceSize : size of workspace(output).
  * executor : executor context(output).
  */
-__attribute__((visibility("default"))) aclnnStatus aclnnZbMoeDistributeDispatchZeroBufferGetWorkspaceSize(
+__attribute__((visibility("default"))) aclnnStatus aclnnZbMoeDistributeDispatchGetWorkspaceSize(
     const aclTensor *x, const aclTensor *expertIds, const aclTensor *scalesOptional,
     const aclTensor *xActiveMaskOptional, const aclTensor *elasticInfoOptional, int64_t epWorldSize, int64_t epRankId, int64_t moeExpertNum,
     int64_t tpWorldSize, int64_t tpRankId, int64_t expertShardType, int64_t sharedExpertNum,
@@ -49,14 +49,14 @@ __attribute__((visibility("default"))) aclnnStatus aclnnZbMoeDistributeDispatchZ
     const aclTensor *expertTokenNumsOut, const aclTensor *epRecvCountOut, const aclTensor *tpRecvCountOut,
     uint64_t *workspaceSize, aclOpExecutor **executor);
 
-/* function: aclnnZbMoeDistributeDispatchZeroBuffer
+/* function: aclnnZbMoeDistributeDispatch
  * parameters :
  * workspace : workspace memory addr(input).
  * workspaceSize : size of workspace(input).
  * executor : executor context(input).
  * stream : acl stream.
  */
-__attribute__((visibility("default"))) aclnnStatus aclnnZbMoeDistributeDispatchZeroBuffer(void *workspace,
+__attribute__((visibility("default"))) aclnnStatus aclnnZbMoeDistributeDispatch(void *workspace,
                                                                                              uint64_t workspaceSize,
                                                                                              aclOpExecutor *executor,
                                                                                              aclrtStream stream);

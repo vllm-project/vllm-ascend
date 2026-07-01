@@ -13,13 +13,13 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#ifndef SHMEM_MOE_DISTRIBUTE_DISPATCH_ZERO_BUFFER_TORCH_ADPT_H
-#define SHMEM_MOE_DISTRIBUTE_DISPATCH_ZERO_BUFFER_TORCH_ADPT_H
+#ifndef ZB_MOE_DISTRIBUTE_DISPATCH_TORCH_ADPT_H
+#define ZB_MOE_DISTRIBUTE_DISPATCH_TORCH_ADPT_H
 
 namespace vllm_ascend {
 
 std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &>
-zb_moe_distribute_dispatch_zero_buffer(
+zb_moe_distribute_dispatch(
     const at::Tensor &x,
     const at::Tensor &expert_ids,
     const c10::optional<at::Tensor> &scales,
@@ -51,7 +51,7 @@ zb_moe_distribute_dispatch_zero_buffer(
     std::string comm_alg_str(comm_alg.data(), comm_alg.size());
     char *comm_alg_ptr = comm_alg_str.empty() ? nullptr : const_cast<char *>(comm_alg_str.c_str());
 
-    EXEC_NPU_CMD(aclnnZbMoeDistributeDispatchZeroBuffer,
+    EXEC_NPU_CMD(aclnnZbMoeDistributeDispatch,
                  x,
                  expert_ids,
                  scales.has_value() ? scales.value() : at::Tensor(),
@@ -86,4 +86,4 @@ zb_moe_distribute_dispatch_zero_buffer(
 
 }  // namespace vllm_ascend
 
-#endif  // SHMEM_MOE_DISTRIBUTE_DISPATCH_ZERO_BUFFER_TORCH_ADPT_H
+#endif  // ZB_MOE_DISTRIBUTE_DISPATCH_TORCH_ADPT_H

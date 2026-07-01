@@ -1,5 +1,5 @@
-#ifndef ACLNN_SHMEM_MOE_DISTRIBUTE_COMBINE_ZERO_BUFFER_H_
-#define ACLNN_SHMEM_MOE_DISTRIBUTE_COMBINE_ZERO_BUFFER_H_
+#ifndef ACLNN_ZB_MOE_DISTRIBUTE_COMBINE_H_
+#define ACLNN_ZB_MOE_DISTRIBUTE_COMBINE_H_
 
 #include "aclnn/acl_meta.h"
 
@@ -7,7 +7,7 @@
 extern "C" {
 #endif
 
-/* function: aclnnZbMoeDistributeCombineZeroBufferGetWorkspaceSize
+/* function: aclnnZbMoeDistributeCombineGetWorkspaceSize
  * parameters :
  * expandX : required
  * expertIds : required
@@ -47,7 +47,7 @@ extern "C" {
  * workspaceSize : size of workspace(output).
  * executor : executor context(output).
  */
-__attribute__((visibility("default"))) aclnnStatus aclnnZbMoeDistributeCombineZeroBufferGetWorkspaceSize(
+__attribute__((visibility("default"))) aclnnStatus aclnnZbMoeDistributeCombineGetWorkspaceSize(
     const aclTensor *expandX, const aclTensor *expertIds, const aclTensor *assistInfoForCombine, const aclTensor *epSendCount,
     const aclTensor *scales, const aclTensor *tpSendCount, const aclTensor *xActiveMask, const aclTensor *activationScale,
     const aclTensor *weightScale, const aclTensor *groupList, const aclTensor *expandScales, const aclTensor *sharedExpertX,
@@ -57,14 +57,14 @@ __attribute__((visibility("default"))) aclnnStatus aclnnZbMoeDistributeCombineZe
     int64_t outDtype, int64_t commQuantMode, int64_t extInfo, int64_t groupListType, char *commAlg, int64_t zeroExpertNum,
     int64_t copyExpertNum, int64_t constExpertNum, const aclTensor *XOut, uint64_t *workspaceSize, aclOpExecutor **executor);
 
-/* function: aclnnZbMoeDistributeCombineZeroBuffer
+/* function: aclnnZbMoeDistributeCombine
  * parameters :
  * workspace : workspace memory addr(input).
  * workspaceSize : size of workspace(input).
  * executor : executor context(input).
  * stream : acl stream.
  */
-__attribute__((visibility("default"))) aclnnStatus aclnnZbMoeDistributeCombineZeroBuffer(void *workspace,
+__attribute__((visibility("default"))) aclnnStatus aclnnZbMoeDistributeCombine(void *workspace,
                                                                                             uint64_t workspaceSize,
                                                                                             aclOpExecutor *executor,
                                                                                             aclrtStream stream);

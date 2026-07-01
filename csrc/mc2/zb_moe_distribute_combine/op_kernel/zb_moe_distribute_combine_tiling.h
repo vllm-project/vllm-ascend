@@ -5,7 +5,7 @@
 #include "kernel_tiling/kernel_tiling.h"
 
 // a3
-struct ZbMoeDistributeCombineZeroBufferInfo {
+struct ZbMoeDistributeCombineInfo {
     uint32_t epWorldSize;
     uint32_t tpWorldSize;
     uint32_t epRankId;
@@ -33,11 +33,11 @@ struct ZbMoeDistributeCombineZeroBufferInfo {
     float epsilon;
     uint64_t shmemptr;  // shmem ptr
 };
-struct ZbMoeDistributeCombineZeroBufferTilingData {
+struct ZbMoeDistributeCombineTilingData {
     Mc2InitTiling mc2InitTiling;
     Mc2CcTiling mc2CcTiling1;
     Mc2CcTiling mc2CcTiling2;
-    ZbMoeDistributeCombineZeroBufferInfo moeDistributeCombineV2Info;
+    ZbMoeDistributeCombineInfo moeDistributeCombineV2Info;
 };
 
 #endif  //__ASCENDC_SHMEM_COMM_MOE_DISTRIBUTE_COMBINE_V2_TILING_H__

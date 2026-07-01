@@ -243,7 +243,7 @@ std::tuple<at::Tensor&, at::Tensor&> dispatch_ffn_combine_meta(
 
 #ifdef VLLM_ASCEND_ENABLE_ZB_OPS
 std::tuple<at::Tensor&, at::Tensor&, at::Tensor&, at::Tensor&, at::Tensor&, at::Tensor&>
-zb_moe_distribute_dispatch_zero_buffer_meta(
+zb_moe_distribute_dispatch_meta(
     const at::Tensor &x,
     const at::Tensor &expert_ids,
     const c10::optional<at::Tensor> &scales,
@@ -276,7 +276,7 @@ zb_moe_distribute_dispatch_zero_buffer_meta(
             expert_token_nums_out, ep_recv_count_out, tp_recv_count_out};
 }
 
-at::Tensor &zb_moe_distribute_combine_zero_buffer_meta(
+at::Tensor &zb_moe_distribute_combine_meta(
     const at::Tensor &expand_x,
     const at::Tensor &expert_ids,
     const at::Tensor &assist_info_for_combine,
@@ -1792,10 +1792,10 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("dispatch_ffn_combine", &vllm_ascend::meta::dispatch_ffn_combine_meta);
 #ifdef VLLM_ASCEND_ENABLE_ZB_OPS
     // Zero-buffer SHMEM MoE distribute dispatch / combine
-    ops.impl("zb_moe_distribute_dispatch_zero_buffer",
-             &vllm_ascend::meta::zb_moe_distribute_dispatch_zero_buffer_meta);
-    ops.impl("zb_moe_distribute_combine_zero_buffer",
-             &vllm_ascend::meta::zb_moe_distribute_combine_zero_buffer_meta);
+    ops.impl("zb_moe_distribute_dispatch",
+             &vllm_ascend::meta::zb_moe_distribute_dispatch_meta);
+    ops.impl("zb_moe_distribute_combine",
+             &vllm_ascend::meta::zb_moe_distribute_combine_meta);
     ops.impl("zb_moe_grouped_matmul_gmm2_out",
              &vllm_ascend::meta::zb_moe_grouped_matmul_gmm2_out_meta);
 #endif

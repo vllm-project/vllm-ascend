@@ -43,8 +43,8 @@
 #include "attention/lightning_indexer/lightning_indexer_torch_adpt.h"
 #include "mc2/matmul_allreduce_add_rmsnorm/matmul_allreduce_add_rmsnorm_torch_adpt.h"
 #ifdef VLLM_ASCEND_ENABLE_ZB_OPS
-#include "mc2/zb_moe_distribute_dispatch_zero_buffer/zb_moe_distribute_dispatch_zero_buffer_torch_adpt.h"
-#include "mc2/zb_moe_distribute_combine_zero_buffer/zb_moe_distribute_combine_zero_buffer_torch_adpt.h"
+#include "mc2/zb_moe_distribute_dispatch/zb_moe_distribute_dispatch_torch_adpt.h"
+#include "mc2/zb_moe_distribute_combine/zb_moe_distribute_combine_torch_adpt.h"
 #include "mc2/zb_moe_grouped_matmul_gmm2_out/zb_moe_grouped_matmul_gmm2_out_torch_adpt.h"
 #endif
 #include "moe/moe_gating_top_k/moe_gating_top_k_torch_adpt.h"
@@ -2300,7 +2300,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 
 #ifdef VLLM_ASCEND_ENABLE_ZB_OPS
     ops.def(
-        "zb_moe_distribute_dispatch_zero_buffer("
+        "zb_moe_distribute_dispatch("
         "    Tensor x, Tensor expert_ids,"
         "    Tensor? scales, Tensor? x_active_mask, Tensor? elastic_info,"
         "    int ep_world_size, int ep_rank_id, int moe_expert_num,"
@@ -2314,11 +2314,11 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "    Tensor! ep_recv_count_out, Tensor! tp_recv_count_out"
         ") -> (Tensor expand_x, Tensor dynamic_scales, Tensor assist_info_for_combine,"
         "      Tensor expert_token_nums, Tensor ep_recv_count, Tensor tp_recv_count)");
-    ops.impl("zb_moe_distribute_dispatch_zero_buffer", torch::kPrivateUse1,
-             &vllm_ascend::zb_moe_distribute_dispatch_zero_buffer);
+    ops.impl("zb_moe_distribute_dispatch", torch::kPrivateUse1,
+             &vllm_ascend::zb_moe_distribute_dispatch);
 
     ops.def(
-        "zb_moe_distribute_combine_zero_buffer("
+        "zb_moe_distribute_combine("
         "    Tensor expand_x, Tensor expert_ids, Tensor assist_info_for_combine,"
         "    Tensor ep_send_count, Tensor expert_scales,"
         "    Tensor? tp_send_count, Tensor? x_active_mask,"
@@ -2335,8 +2335,8 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "    int zero_expert_num, int copy_expert_num, int const_expert_num,"
         "    Tensor! combined_x"
         ") -> Tensor");
-    ops.impl("zb_moe_distribute_combine_zero_buffer", torch::kPrivateUse1,
-             &vllm_ascend::zb_moe_distribute_combine_zero_buffer);
+    ops.impl("zb_moe_distribute_combine", torch::kPrivateUse1,
+             &vllm_ascend::zb_moe_distribute_combine);
 
     ops.def(
         "zb_moe_grouped_matmul_gmm2_out("

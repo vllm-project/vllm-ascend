@@ -178,8 +178,7 @@ class GroupCoordinatorPatch(GroupCoordinator):
             self.device_group = self_device_group
 
     def _init_device_communicator(self) -> None:
-        self.device = torch.device(f"npu:{self.local_rank}")
-        torch.npu.set_device(self.device)
+        self.device = torch.npu.current_device()
         if self.use_device_communicator and self.world_size > 1:
             self.device_communicator = NPUCommunicator(
                 cpu_group=self.cpu_group,

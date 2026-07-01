@@ -110,15 +110,11 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
-    # Runtime switch for routing TokenDispatcherWithMC2 through the SHMEM
-    # zero-buffer dispatch/combine ops instead of the default
-    # torch_npu.npu_moe_distribute_*_v2 path. Requires Ascend SHMEM at build
-    # time and a reachable SHMEM control endpoint via VLLM_ASCEND_ZB_SHMEM_URI.
+    # Deprecated: use additional_config.enable_mc2_zb instead.
     "VLLM_ASCEND_ENABLE_ZB": lambda: bool(
         int(os.getenv("VLLM_ASCEND_ENABLE_ZB", os.getenv("VLLM_ASCEND_ENABLE_ZB_SHMEM", "0")))
     ),
-    # SHMEM control endpoint URI forwarded to aclshmemx_init_attr (e.g. tcp://host:port).
-    # Must be identical across all MC2/EP ranks.
+    # Optional override for aclshmem conf-store URI (e2e/tests). Serving reserves a free port at worker init.
     "VLLM_ASCEND_ZB_SHMEM_URI": lambda: os.getenv("VLLM_ASCEND_ZB_SHMEM_URI", os.getenv("VLLM_ASCEND_ZB_URI", "")),
 }
 

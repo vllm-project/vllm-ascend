@@ -1,19 +1,19 @@
 /*
  * Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
- * Description: ZbMoeDistributeDispatchZeroBuffer operator kernel function header file, for A3 ZeroBuffer
+ * Description: ZbMoeDistributeDispatch operator kernel function header file, for A3 ZB (zero-buffer)
  * Author: Hu Tianlun
  * Create: 2026-01-03
  * Note:
- * History: 2026-01-03 create ZbMoeDistributeDispatchZeroBuffer operator kernel function header file
+ * History: 2026-01-03 create ZbMoeDistributeDispatch operator kernel function header file
  */
 
-#ifndef SHMEM_MOE_DISTRIBUTE_DISPATCH_ZEROBUFFER_H
-#define SHMEM_MOE_DISTRIBUTE_DISPATCH_ZEROBUFFER_H
+#ifndef ZB_MOE_DISTRIBUTE_DISPATCH_H
+#define ZB_MOE_DISTRIBUTE_DISPATCH_H
 
 #include "shmem.h"
 #include "kernel_operator.h"
 #include "kernel_tiling/kernel_tiling.h"
-#include "zb_moe_distribute_dispatch_zero_buffer_tiling.h"
+#include "zb_moe_distribute_dispatch_tiling.h"
 #include "shmem_sync_flag.h"
 #include <type_traits>
 
@@ -38,7 +38,7 @@ using namespace AscendC;
         }                                                         \
     } while (0)
 
-namespace MoeDistributeDispatchZeroBufferImpl {
+namespace ZbMoeDistributeDispatchImpl {
 constexpr uint8_t BUFFER_NUM = 2;
 constexpr uint8_t BUFFER_SINGLE = 1;
 constexpr int UB_ALIGN_SIZE = 32;
@@ -67,15 +67,15 @@ __aicore__ inline void SyncFunc()
 #define TemplateMC2TypeFunc XType, ExpandXOutType, StaticQuant, DynamicQuant, IsSmoothScaleExist, IsNeedAllgather
 
 template <TemplateMC2TypeClass>
-class ZbMoeDistributeDispatchZeroBuffer
+class ZbMoeDistributeDispatch
 {
 public:
-    __aicore__ inline ZbMoeDistributeDispatchZeroBuffer(){};
+    __aicore__ inline ZbMoeDistributeDispatch(){};
     __aicore__ inline void Init(GM_ADDR x, GM_ADDR expertIds, GM_ADDR scales, GM_ADDR xActiveMask, GM_ADDR elasticInfo,
                                 GM_ADDR expandXOut, GM_ADDR dynamicScalesOut, GM_ADDR expandIdxOut,
                                 GM_ADDR expertTokenNumsOut, GM_ADDR sendCountsOut, GM_ADDR tpSendCountsOut,
                                 GM_ADDR workspaceGM, TPipe *pipe,
-                                const ZbMoeDistributeDispatchZeroBufferTilingData *tilingData);
+                                const ZbMoeDistributeDispatchTilingData *tilingData);
     __aicore__ inline void Process();
 
 private:
@@ -187,29 +187,29 @@ private:
 };
 
 template <TemplateMC2TypeClass>
-__aicore__ inline void ZbMoeDistributeDispatchZeroBuffer<TemplateMC2TypeFunc>::Init(
+__aicore__ inline void ZbMoeDistributeDispatch<TemplateMC2TypeFunc>::Init(
     GM_ADDR x, GM_ADDR expertIds, GM_ADDR scales, GM_ADDR xActiveMask, GM_ADDR elasticInfo, GM_ADDR expandXOut,
     GM_ADDR dynamicScalesOut, GM_ADDR expandIdxOut, GM_ADDR expertTokenNumsOut, GM_ADDR sendCountsOut,
     GM_ADDR tpSendCountsOut, GM_ADDR workspaceGM, TPipe *pipe,
-    const ZbMoeDistributeDispatchZeroBufferTilingData *tilingData)
+    const ZbMoeDistributeDispatchTilingData *tilingData)
 {
     tpipe_ = pipe;
     aivId_ = GetBlockIdx();
     coreNum_ = GetBlockNum();
-    epRankId_ = tilingData->moeDistributeDispatchZeroBufferInfo.epRankId;
+    epRankId_ = tilingData->moeDistributeDispatchInfo.epRankId;
 
-    axisBS_ = tilingData->moeDistributeDispatchZeroBufferInfo.bs;
-    axisH_ = tilingData->moeDistributeDispatchZeroBufferInfo.h;
-    epWorldSize_ = tilingData->moeDistributeDispatchZeroBufferInfo.epWorldSize;
-    sharedExpertRankNum_ = tilingData->moeDistributeDispatchZeroBufferInfo.sharedExpertRankNum;
-    moeExpertNum_ = tilingData->moeDistributeDispatchZeroBufferInfo.moeExpertNum;
-    axisK_ = tilingData->moeDistributeDispatchZeroBufferInfo.k;
-    aivNum_ = tilingData->moeDistributeDispatchZeroBufferInfo.aivNum;
-    expertTokenNumsType_ = tilingData->moeDistributeDispatchZeroBufferInfo.expertTokenNumsType;
+    axisBS_ = tilingData->moeDistributeDispatchInfo.bs;
+    axisH_ = tilingData->moeDistributeDispatchInfo.h;
+    epWorldSize_ = tilingData->moeDistributeDispatchInfo.epWorldSize;
+    sharedExpertRankNum_ = tilingData->moeDistributeDispatchInfo.sharedExpertRankNum;
+    moeExpertNum_ = tilingData->moeDistributeDispatchInfo.moeExpertNum;
+    axisK_ = tilingData->moeDistributeDispatchInfo.k;
+    aivNum_ = tilingData->moeDistributeDispatchInfo.aivNum;
+    expertTokenNumsType_ = tilingData->moeDistributeDispatchInfo.expertTokenNumsType;
 
     // The shared metadata buffer is laid out as:
     // per-core magic value, per-rank layout flags, per-core send-count flags, then send-count data.
-    metaDataGvaGM_ = (GM_ADDR)tilingData->moeDistributeDispatchZeroBufferInfo.shmemptr;
+    metaDataGvaGM_ = (GM_ADDR)tilingData->moeDistributeDispatchInfo.shmemptr;
     GM_ADDR statusDataSpaceGm = (GM_ADDR)(metaDataGvaGM_);
     magicValTensor_.SetGlobalBuffer((__gm__ int32_t *)(statusDataSpaceGm) + aivId_ * FLAG_CNT_ALIGN);
 
@@ -249,7 +249,7 @@ __aicore__ inline void ZbMoeDistributeDispatchZeroBuffer<TemplateMC2TypeFunc>::I
         isShareExpertRankFlag_ = true;
     }
 
-    uint32_t sharedExpertNum = tilingData->moeDistributeDispatchZeroBufferInfo.sharedExpertNum;
+    uint32_t sharedExpertNum = tilingData->moeDistributeDispatchInfo.sharedExpertNum;
     uint32_t moeExpertRankNum = epWorldSize_ - sharedExpertRankNum_;
     moeExpertNumPerRank_ = moeExpertNum_ / moeExpertRankNum;
 
@@ -329,7 +329,7 @@ __aicore__ inline void ZbMoeDistributeDispatchZeroBuffer<TemplateMC2TypeFunc>::I
 }
 
 template <TemplateMC2TypeClass>
-__aicore__ inline void ZbMoeDistributeDispatchZeroBuffer<TemplateMC2TypeFunc>::QuantInit(GM_ADDR scales)
+__aicore__ inline void ZbMoeDistributeDispatch<TemplateMC2TypeFunc>::QuantInit(GM_ADDR scales)
 {
     uint32_t hAlignSize = Ceil(axisH_ * sizeof(XType), UB_ALIGN) * UB_ALIGN;
     tpipe_->InitBuffer(receiveDataCastFloatBuf_, maxSize_);
@@ -346,7 +346,7 @@ __aicore__ inline void ZbMoeDistributeDispatchZeroBuffer<TemplateMC2TypeFunc>::Q
 }
 
 template <TemplateMC2TypeClass>
-__aicore__ inline void ZbMoeDistributeDispatchZeroBuffer<TemplateMC2TypeFunc>::SplitToCore(uint32_t curSendCnt,
+__aicore__ inline void ZbMoeDistributeDispatch<TemplateMC2TypeFunc>::SplitToCore(uint32_t curSendCnt,
                                                                                  uint32_t curUseAivNum,
                                                                                  uint32_t &startTokenId,
                                                                                  uint32_t &endTokenId,
@@ -366,7 +366,7 @@ __aicore__ inline void ZbMoeDistributeDispatchZeroBuffer<TemplateMC2TypeFunc>::S
 }
 
 template <TemplateMC2TypeClass>
-__aicore__ inline void ZbMoeDistributeDispatchZeroBuffer<TemplateMC2TypeFunc>::CalTokenSendExpertCnt(
+__aicore__ inline void ZbMoeDistributeDispatch<TemplateMC2TypeFunc>::CalTokenSendExpertCnt(
     uint32_t dstExpertId, int32_t calCnt, int32_t &curExpertCnt)
 {
     Duplicate<int32_t>(dstExpIdTensor_, dstExpertId, calCnt);
@@ -391,14 +391,14 @@ __aicore__ inline void ZbMoeDistributeDispatchZeroBuffer<TemplateMC2TypeFunc>::C
 
 template <TemplateMC2TypeClass>
 __aicore__ inline GM_ADDR
-ZbMoeDistributeDispatchZeroBuffer<TemplateMC2TypeFunc>::GetSyncFlagAddrByRankId(uint32_t rankId)
+ZbMoeDistributeDispatch<TemplateMC2TypeFunc>::GetSyncFlagAddrByRankId(uint32_t rankId)
 {
     auto metaPtr = reinterpret_cast<__gm__ uint8_t *>(aclshmem_ptr(metaDataGvaGM_, rankId));
     return (GM_ADDR)(metaPtr) + DISPATCH_SYNC_FLAG_BASE_OFFSET;
 }
 
 template <TemplateMC2TypeClass>
-__aicore__ inline void ZbMoeDistributeDispatchZeroBuffer<TemplateMC2TypeFunc>::SetSyncFlag()
+__aicore__ inline void ZbMoeDistributeDispatch<TemplateMC2TypeFunc>::SetSyncFlag()
 {
     if (rankNumPerBlock_ == 0U) {
         return;
@@ -425,7 +425,7 @@ __aicore__ inline void ZbMoeDistributeDispatchZeroBuffer<TemplateMC2TypeFunc>::S
 }
 
 template <TemplateMC2TypeClass>
-__aicore__ inline void ZbMoeDistributeDispatchZeroBuffer<TemplateMC2TypeFunc>::WaitSyncFlag()
+__aicore__ inline void ZbMoeDistributeDispatch<TemplateMC2TypeFunc>::WaitSyncFlag()
 {
     if (rankNumPerBlock_ == 0U) {
         return;
@@ -477,7 +477,7 @@ __aicore__ inline void ZbMoeDistributeDispatchZeroBuffer<TemplateMC2TypeFunc>::W
 }
 
 template <TemplateMC2TypeClass>
-__aicore__ inline void ZbMoeDistributeDispatchZeroBuffer<TemplateMC2TypeFunc>::LocalLayout()
+__aicore__ inline void ZbMoeDistributeDispatch<TemplateMC2TypeFunc>::LocalLayout()
 {
     LocalTensor<int32_t> sendCountLt = sendCountLocalBuf_.Get<int32_t>();
 
@@ -515,7 +515,7 @@ __aicore__ inline void ZbMoeDistributeDispatchZeroBuffer<TemplateMC2TypeFunc>::L
 }
 
 template <TemplateMC2TypeClass>
-__aicore__ inline void ZbMoeDistributeDispatchZeroBuffer<TemplateMC2TypeFunc>::SetLayoutStatus()
+__aicore__ inline void ZbMoeDistributeDispatch<TemplateMC2TypeFunc>::SetLayoutStatus()
 {
     // Notify every rank that this rank has finished writing its local expert counts.
     uint32_t rankNumPerBlock = 0U, startRankId = 0U, endRankId = 0U;
@@ -531,7 +531,7 @@ __aicore__ inline void ZbMoeDistributeDispatchZeroBuffer<TemplateMC2TypeFunc>::S
 }
 
 template <TemplateMC2TypeClass>
-__aicore__ inline void ZbMoeDistributeDispatchZeroBuffer<TemplateMC2TypeFunc>::SendCountNotify()
+__aicore__ inline void ZbMoeDistributeDispatch<TemplateMC2TypeFunc>::SendCountNotify()
 {
     // Split the peer-rank polling work across MoE AIVs. Each AIV waits for a subset of ranks and then fetches
     // their local expert counts into this rank's workspace.
@@ -565,7 +565,7 @@ __aicore__ inline void ZbMoeDistributeDispatchZeroBuffer<TemplateMC2TypeFunc>::S
 }
 
 template <TemplateMC2TypeClass>
-__aicore__ inline void ZbMoeDistributeDispatchZeroBuffer<TemplateMC2TypeFunc>::WaitNotify()
+__aicore__ inline void ZbMoeDistributeDispatch<TemplateMC2TypeFunc>::WaitNotify()
 {
     uint32_t rankNumPerBlock = 0U, startRankId = 0U, endRankId = 0U;
     SplitToCore(epWorldSize_, moeUsedAivNum_, startRankId, endRankId, rankNumPerBlock);
@@ -606,7 +606,7 @@ __aicore__ inline void ZbMoeDistributeDispatchZeroBuffer<TemplateMC2TypeFunc>::W
 }
 
 template <TemplateMC2TypeClass>
-__aicore__ inline void ZbMoeDistributeDispatchZeroBuffer<TemplateMC2TypeFunc>::ReorderRecvDataOutput(
+__aicore__ inline void ZbMoeDistributeDispatch<TemplateMC2TypeFunc>::ReorderRecvDataOutput(
     int32_t rankId, LocalTensor<int32_t> &transLt, bool isCumSum)
 {
     uint32_t moeExpertPerRankNum = moeExpertNum_ / epWorldSize_;
@@ -636,7 +636,7 @@ __aicore__ inline void ZbMoeDistributeDispatchZeroBuffer<TemplateMC2TypeFunc>::R
  * MoE-expert ranks split AIVs between shared-expert sends and MoE expert sends.
  */
 template <TemplateMC2TypeClass>
-__aicore__ inline void ZbMoeDistributeDispatchZeroBuffer<TemplateMC2TypeFunc>::InputToDstOutput()
+__aicore__ inline void ZbMoeDistributeDispatch<TemplateMC2TypeFunc>::InputToDstOutput()
 {
     bool isSendShared = (aivId_ >= moeUsedAivNum_) && (sharedExpertRankNum_ != 0);
     if (isSendShared) {
@@ -651,7 +651,7 @@ __aicore__ inline void ZbMoeDistributeDispatchZeroBuffer<TemplateMC2TypeFunc>::I
 }
 
 template <TemplateMC2TypeClass>
-__aicore__ inline void ZbMoeDistributeDispatchZeroBuffer<TemplateMC2TypeFunc>::SendToMoeExpert()
+__aicore__ inline void ZbMoeDistributeDispatch<TemplateMC2TypeFunc>::SendToMoeExpert()
 {
     uint32_t startTokenId, endTokenId, sendTokenNum;
     SplitToCore(sendToMoeExpTokenCnt_, moeUsedAivNum_, startTokenId, endTokenId, sendTokenNum);
@@ -719,7 +719,7 @@ __aicore__ inline void ZbMoeDistributeDispatchZeroBuffer<TemplateMC2TypeFunc>::S
 }
 
 template <TemplateMC2TypeClass>
-__aicore__ inline void ZbMoeDistributeDispatchZeroBuffer<TemplateMC2TypeFunc>::SendToSharedExpert()
+__aicore__ inline void ZbMoeDistributeDispatch<TemplateMC2TypeFunc>::SendToSharedExpert()
 {
     uint32_t startTokenId, endTokenId, sendTokenNum;
     SplitToCore(axisBS_, sharedUsedAivNum_, startTokenId, endTokenId, sendTokenNum, false);
@@ -778,7 +778,7 @@ __aicore__ inline void ZbMoeDistributeDispatchZeroBuffer<TemplateMC2TypeFunc>::S
 }
 
 template <TemplateMC2TypeClass>
-__aicore__ inline void ZbMoeDistributeDispatchZeroBuffer<TemplateMC2TypeFunc>::ReduceMaxInplace(
+__aicore__ inline void ZbMoeDistributeDispatch<TemplateMC2TypeFunc>::ReduceMaxInplace(
     const LocalTensor<float> &srcLocal, uint32_t count)
 {
     constexpr uint64_t elemPerRepeatFp32 = 64UL;
@@ -798,7 +798,7 @@ __aicore__ inline void ZbMoeDistributeDispatchZeroBuffer<TemplateMC2TypeFunc>::R
 }
 
 template <TemplateMC2TypeClass>
-__aicore__ inline void ZbMoeDistributeDispatchZeroBuffer<TemplateMC2TypeFunc>::QuantProcess()
+__aicore__ inline void ZbMoeDistributeDispatch<TemplateMC2TypeFunc>::QuantProcess()
 {
     float dynamicScale = 0.0;
     LocalTensor<float> floatLocalTemp;
@@ -837,7 +837,7 @@ __aicore__ inline void ZbMoeDistributeDispatchZeroBuffer<TemplateMC2TypeFunc>::Q
 }
 
 template <TemplateMC2TypeClass>
-__aicore__ inline void ZbMoeDistributeDispatchZeroBuffer<TemplateMC2TypeFunc>::CleanUp()
+__aicore__ inline void ZbMoeDistributeDispatch<TemplateMC2TypeFunc>::CleanUp()
 {
     uint32_t clearAlign = Ceil(moeExpertNum_ * sizeof(int32_t), UB_ALIGN) * UB_ALIGN;
     tpipe_->InitBuffer(clearBuf_, clearAlign);
@@ -852,7 +852,7 @@ __aicore__ inline void ZbMoeDistributeDispatchZeroBuffer<TemplateMC2TypeFunc>::C
 }
 
 template <TemplateMC2TypeClass>
-__aicore__ inline void ZbMoeDistributeDispatchZeroBuffer<TemplateMC2TypeFunc>::Process()
+__aicore__ inline void ZbMoeDistributeDispatch<TemplateMC2TypeFunc>::Process()
 {
     if ASCEND_IS_AIV {
         LocalLayout();
@@ -870,5 +870,5 @@ __aicore__ inline void ZbMoeDistributeDispatchZeroBuffer<TemplateMC2TypeFunc>::P
     }
 }
 
-}  // namespace MoeDistributeDispatchZeroBufferImpl
-#endif  // SHMEM_MOE_DISTRIBUTE_DISPATCH_ZEROBUFFER_H
+}  // namespace ZbMoeDistributeDispatchImpl
+#endif  // ZB_MOE_DISTRIBUTE_DISPATCH_H

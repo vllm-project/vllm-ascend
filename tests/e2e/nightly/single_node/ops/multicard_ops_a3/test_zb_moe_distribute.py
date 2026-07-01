@@ -19,8 +19,8 @@ End-to-end ``dispatch -> combine`` round-trip on real NPUs, mirroring
 ``deepep_standalone``'s ``test_fixed_correctness_low_latency`` / ``bench_performance_low_latency``.
 
 Operators under test:
-  - ``torch.ops._C_ascend.zb_moe_distribute_dispatch_zero_buffer``
-  - ``torch.ops._C_ascend.zb_moe_distribute_combine_zero_buffer``
+  - ``torch.ops._C_ascend.zb_moe_distribute_dispatch``
+  - ``torch.ops._C_ascend.zb_moe_distribute_combine``
 
 Optional PTA baseline (for perf comparison):
   - ``torch_npu.npu_moe_distribute_dispatch_v2``
@@ -33,15 +33,15 @@ Modes (``VLLM_ASCEND_ZB_TEST_MODE``):
 
 Examples:
   # correctness (pytest default)
-  pytest tests/e2e/nightly/single_node/ops/multicard_ops_a3/test_zb_moe_distribute_zero_buffer.py
+  pytest tests/e2e/nightly/single_node/ops/multicard_ops_a3/test_zb_moe_distribute.py
 
   # wall-clock + kineto comparison on A3 box
   VLLM_ASCEND_ZB_TEST_MODE=bench \\
-    python tests/e2e/nightly/single_node/ops/multicard_ops_a3/test_zb_moe_distribute_zero_buffer.py
+    python tests/e2e/nightly/single_node/ops/multicard_ops_a3/test_zb_moe_distribute.py
 
   VLLM_ASCEND_ZB_TEST_MODE=profile \\
     VLLM_ASCEND_ZB_TEST_TRACE_DIR=./traces/zb_moe \\
-    python tests/e2e/nightly/single_node/ops/multicard_ops_a3/test_zb_moe_distribute_zero_buffer.py
+    python tests/e2e/nightly/single_node/ops/multicard_ops_a3/test_zb_moe_distribute.py
 
 Requires:
   - package built with ``Ascend SHMEM installed at /usr/local/Ascend/shmem/latest``
@@ -79,8 +79,8 @@ from moe_mc2_e2e_common import (  # type: ignore[import-not-found,import-untyped
     mc2_world_size,
 )
 from zb_moe_prof_utils import (  # type: ignore[import-not-found,import-untyped]
-    SHMEM_MOE_KERNELS,
     V2_MOE_KERNELS,
+    ZB_MOE_KERNELS,
     bench,
     bench_kineto,
     bench_moe_combine,
@@ -96,8 +96,8 @@ from vllm_ascend.ops.fused_moe.zb_runtime import (
     LowLatencyZbTensors,
     ZbMoERuntime,
     estimate_local_mem_size,
-    zb_moe_distribute_combine_zero_buffer,
-    zb_moe_distribute_dispatch_zero_buffer,
+    zb_moe_distribute_combine,
+    zb_moe_distribute_dispatch,
 )
 from vllm_ascend.utils import enable_custom_op
 
@@ -196,7 +196,7 @@ class ZbMoeOpContext:
     pta_expand_scales: torch.Tensor | None = None
 
     def run_zb_dispatch(self) -> None:
-        zb_moe_distribute_dispatch_zero_buffer(
+        zb_moe_distribute_dispatch(
             x=self.x,
             expert_ids=self.topk_idx,
             expand_x_out=self.bundle.expand_x_out,
@@ -213,7 +213,7 @@ class ZbMoeOpContext:
         )
 
     def run_zb_combine(self) -> None:
-        zb_moe_distribute_combine_zero_buffer(
+        zb_moe_distribute_combine(
             expand_x=self.bundle.combine_x,
             expert_ids=self.topk_idx,
             assist_info_for_combine=self.aux["assist_info_for_combine"],
@@ -481,7 +481,7 @@ def _run_bench(ctx: ZbMoeOpContext) -> None:
 
     zb_kernels = bench_kineto(
         partial(ctx.run_zb_dispatch_combine),
-        kernel_names=SHMEM_MOE_KERNELS,
+        kernel_names=ZB_MOE_KERNELS,
         num_warmups=num_warmups,
         num_tests=num_tests,
         suppress_kineto_output=True,
@@ -496,7 +496,7 @@ def _run_bench(ctx: ZbMoeOpContext) -> None:
     print_kernel_table(
         rank=ctx.rank,
         label="ZB SHMEM kernels (same round-trip session as wall-clock)",
-        kernel_names=SHMEM_MOE_KERNELS,
+        kernel_names=ZB_MOE_KERNELS,
         dispatch_t=zb_kernels[0],
         combine_t=zb_kernels[1],
         num_warmups=num_warmups,
@@ -556,7 +556,7 @@ def _run_profile(ctx: ZbMoeOpContext) -> None:
     )
     dist.barrier()
 
-    zb_summary = msprof_kernel_summary(zb_root, SHMEM_MOE_KERNELS)
+    zb_summary = msprof_kernel_summary(zb_root, ZB_MOE_KERNELS)
     pta_summary = msprof_kernel_summary(pta_root, V2_MOE_KERNELS)
 
     print_msprof_trace_info(
@@ -565,7 +565,7 @@ def _run_profile(ctx: ZbMoeOpContext) -> None:
         trace_root=zb_root,
         num_warmups=num_warmups,
         num_tests=profile_iters,
-        kernel_names=SHMEM_MOE_KERNELS,
+        kernel_names=ZB_MOE_KERNELS,
         kernel_durations=zb_summary,
     )
     print_msprof_trace_info(
@@ -587,9 +587,9 @@ def _run_profile(ctx: ZbMoeOpContext) -> None:
 
 
 def _launch_multiprocess(world_size: int | None = None) -> None:
-    if not hasattr(torch.ops._C_ascend, "zb_moe_distribute_dispatch_zero_buffer"):
+    if not hasattr(torch.ops._C_ascend, "zb_moe_distribute_dispatch"):
         raise AssertionError(
-            "zb_moe_distribute_dispatch_zero_buffer not registered; rebuild "
+            "zb_moe_distribute_dispatch not registered; rebuild "
             "vllm_ascend_C with Ascend SHMEM installed at /usr/local/Ascend/shmem/latest"
         )
 
@@ -613,7 +613,7 @@ def _launch_multiprocess(world_size: int | None = None) -> None:
 
 
 @torch.inference_mode()
-def test_zb_moe_distribute_zero_buffer_roundtrip() -> None:
+def test_zb_moe_distribute_roundtrip() -> None:
     if _test_mode() != "correctness":
         pytest.skip(f"skip correctness test when VLLM_ASCEND_ZB_TEST_MODE={_test_mode()}")
     _launch_multiprocess()
@@ -624,7 +624,7 @@ def test_zb_moe_distribute_zero_buffer_roundtrip() -> None:
     _test_mode() != "bench",
     reason="set VLLM_ASCEND_ZB_TEST_MODE=bench to run wall-clock comparison",
 )
-def test_zb_moe_distribute_zero_buffer_bench() -> None:
+def test_zb_moe_distribute_bench() -> None:
     _launch_multiprocess()
 
 
@@ -633,7 +633,7 @@ def test_zb_moe_distribute_zero_buffer_bench() -> None:
     _test_mode() != "profile",
     reason="set VLLM_ASCEND_ZB_TEST_MODE=profile to export kineto traces",
 )
-def test_zb_moe_distribute_zero_buffer_profile() -> None:
+def test_zb_moe_distribute_profile() -> None:
     _launch_multiprocess()
 
 

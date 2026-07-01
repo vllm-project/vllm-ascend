@@ -1,7 +1,7 @@
 /*
  * Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
- * Description: ZbMoeDistributeCombineZeroBuffer tiling function implementation file
- * History: 2025-12-16 create ZbMoeDistributeCombineZeroBuffer tiling function implementation file
+ * Description: ZbMoeDistributeCombine tiling function implementation file
+ * History: 2025-12-16 create ZbMoeDistributeCombine tiling function implementation file
  */
 #include <queue>
 #include <vector>
@@ -23,7 +23,7 @@
 #include "tiling/platform/platform_ascendc.h"
 #include "tiling_base/error_log.h"
 #include "register/op_def_registry.h"
-#include "../op_kernel/zb_moe_distribute_combine_zero_buffer_tiling.h"
+#include "../op_kernel/zb_moe_distribute_combine_tiling.h"
 
 using namespace AscendC;
 using namespace ge;
@@ -83,7 +83,7 @@ constexpr uint64_t TILING_KEY_INT8_COMM_QUANT_A2 = 100UL;
 constexpr uint32_t ARR_LENGTH = 128U;
 constexpr uint32_t OP_TYPE_ALL_TO_ALL = 8U;      // numeric representation of AlltoAll
 constexpr uint32_t OP_TYPE_REDUCE_SCATTER = 7U;  // numeric representation of AlltoAll
-const char *K_INNER_DEBUG = "ZbMoeDistributeCombineZeroBuffer Tiling Debug";
+const char *K_INNER_DEBUG = "ZbMoeDistributeCombine Tiling Debug";
 
 constexpr size_t MAX_GROUP_NAME_LENGTH = 128UL;
 constexpr int64_t MAX_SHARED_EXPERT_NUM = 4;
@@ -117,7 +117,7 @@ constexpr int64_t ELASTIC_METAINFO_OFFSET = 4;
 namespace optiling {
 
 // a3专有
-static void PrintTilingDataInfo(const char *nodeName, ZbMoeDistributeCombineZeroBufferTilingData &tilingData)
+static void PrintTilingDataInfo(const char *nodeName, ZbMoeDistributeCombineTilingData &tilingData)
 {
     OP_LOGD(nodeName, "epWorldSize is %u.", tilingData.moeDistributeCombineV2Info.epWorldSize);
     OP_LOGD(nodeName, "tpWorldSize is %u.", tilingData.moeDistributeCombineV2Info.tpWorldSize);
@@ -139,7 +139,7 @@ static void PrintTilingDataInfo(const char *nodeName, ZbMoeDistributeCombineZero
 }
 
 static ge::graphStatus GetAttrAndSetTilingData(const gert::TilingContext *context,
-                                               ZbMoeDistributeCombineZeroBufferTilingData &tilingData, const char *nodeName,
+                                               ZbMoeDistributeCombineTilingData &tilingData, const char *nodeName,
                                                std::string &groupEp, std::string &groupTp, uint32_t &commQuantMode)
 {
     auto attrs = context->GetAttrs();
@@ -679,7 +679,7 @@ static bool CheckTensorFormat(const gert::TilingContext *context, const char *no
     return true;
 }
 
-static bool CheckTensorShape(const gert::TilingContext *context, ZbMoeDistributeCombineZeroBufferTilingData &tilingData,
+static bool CheckTensorShape(const gert::TilingContext *context, ZbMoeDistributeCombineTilingData &tilingData,
                              const char *nodeName, bool isShared, bool isActiveMask, uint32_t localMoeExpertNum,
                              const bool hasElasticInfo)
 {
@@ -918,7 +918,7 @@ static bool CheckTensorShape(const gert::TilingContext *context, ZbMoeDistribute
     return true;
 }
 
-static bool CheckSharedAttrs(const char *nodeName, const ZbMoeDistributeCombineZeroBufferTilingData &tilingData)
+static bool CheckSharedAttrs(const char *nodeName, const ZbMoeDistributeCombineTilingData &tilingData)
 {
     uint32_t sharedExpertNum = tilingData.moeDistributeCombineV2Info.sharedExpertNum;
     uint32_t sharedExpertRankNum = tilingData.moeDistributeCombineV2Info.sharedExpertRankNum;
@@ -949,7 +949,7 @@ static bool CheckSharedAttrs(const char *nodeName, const ZbMoeDistributeCombineZ
     return true;
 }
 
-static bool CheckAttrs(const gert::TilingContext *context, ZbMoeDistributeCombineZeroBufferTilingData &tilingData,
+static bool CheckAttrs(const gert::TilingContext *context, ZbMoeDistributeCombineTilingData &tilingData,
                        const char *nodeName, uint32_t &localMoeExpertNum, bool isActiveMask)
 {
     uint32_t epWorldSize = tilingData.moeDistributeCombineV2Info.epWorldSize;
@@ -1077,7 +1077,7 @@ static void CalTilingKey(uint64_t &tilingKey, const uint64_t tpWorldSize, uint32
     }
 }
 
-static void SetHCommCfg(const gert::TilingContext *context, ZbMoeDistributeCombineZeroBufferTilingData *tiling,
+static void SetHCommCfg(const gert::TilingContext *context, ZbMoeDistributeCombineTilingData *tiling,
                         const std::string groupEp, const std::string groupTp)
 {
     const char *nodeName = context->GetNodeName();
@@ -1101,7 +1101,7 @@ static ge::graphStatus MoeDistributeCombineA3TilingFuncImpl(gert::TilingContext 
 {
     const char *nodeName = context->GetNodeName();
     OP_LOGD(nodeName, "Enter MoeDistributeCombineV2 Tiling func");
-    ZbMoeDistributeCombineZeroBufferTilingData *tilingData = context->GetTilingData<ZbMoeDistributeCombineZeroBufferTilingData>();
+    ZbMoeDistributeCombineTilingData *tilingData = context->GetTilingData<ZbMoeDistributeCombineTilingData>();
     OP_TILING_CHECK(tilingData == nullptr, OP_LOGE(nodeName, "tilingData is nullptr."), return ge::GRAPH_FAILED);
     std::string groupEp = "";
     std::string groupTp = "";
@@ -1206,7 +1206,7 @@ static ge::graphStatus MoeDistributeCombineA3TilingFuncImpl(gert::TilingContext 
     return ge::GRAPH_SUCCESS;
 }
 
-static ge::graphStatus ZbMoeDistributeCombineZeroBufferTilingFunc(gert::TilingContext *context)
+static ge::graphStatus ZbMoeDistributeCombineTilingFunc(gert::TilingContext *context)
 {
     // 不支持 expandX数据类型为int32 type
     auto expandXDesc = context->GetInputDesc(EXPAND_X_INDEX);
@@ -1225,13 +1225,13 @@ static ge::graphStatus ZbMoeDistributeCombineZeroBufferTilingFunc(gert::TilingCo
 }
 
 struct MoeDistributeCombineCompileInfo {};
-ge::graphStatus TilingParseForZbMoeDistributeCombineZeroBuffer(gert::TilingParseContext *context)
+ge::graphStatus TilingParseForZbMoeDistributeCombine(gert::TilingParseContext *context)
 {
     (void)context;
     return ge::GRAPH_SUCCESS;
 }
 
-IMPL_OP_OPTILING(ZbMoeDistributeCombineZeroBuffer)
-    .Tiling(ZbMoeDistributeCombineZeroBufferTilingFunc)
-    .TilingParse<MoeDistributeCombineCompileInfo>(TilingParseForZbMoeDistributeCombineZeroBuffer);
+IMPL_OP_OPTILING(ZbMoeDistributeCombine)
+    .Tiling(ZbMoeDistributeCombineTilingFunc)
+    .TilingParse<MoeDistributeCombineCompileInfo>(TilingParseForZbMoeDistributeCombine);
 }  // namespace optiling

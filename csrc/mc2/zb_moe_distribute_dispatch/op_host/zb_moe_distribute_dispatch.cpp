@@ -1,10 +1,10 @@
 #include "register/op_def_registry.h"
 
 namespace ops {
-class ZbMoeDistributeDispatchZeroBuffer : public OpDef
+class ZbMoeDistributeDispatch : public OpDef
 {
 public:
-    explicit ZbMoeDistributeDispatchZeroBuffer(const char *name) : OpDef(name)
+    explicit ZbMoeDistributeDispatch(const char *name) : OpDef(name)
     {
         this->Input("x")
             .ParamType(REQUIRED)
@@ -81,6 +81,6 @@ public:
     }
 };
 
-OP_ADD(ZbMoeDistributeDispatchZeroBuffer);
+OP_ADD(ZbMoeDistributeDispatch);
 
 }  // namespace ops

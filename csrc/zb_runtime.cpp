@@ -78,7 +78,8 @@ int32_t fill_init_attr(int32_t rank, int32_t world_size, uint64_t local_mem_size
 
 bool zb_debug_enabled()
 {
-    return false;
+    const char *value = std::getenv("VLLM_ASCEND_ZB_DEBUG");
+    return value != nullptr && value[0] != '\0' && value[0] != '0';
 }
 
 int32_t query_aclrt_device_or_neg1()
@@ -164,18 +165,21 @@ int32_t resolve_user_device_id(int32_t *logical_device_out)
 void ensure_hybm_user_device_id(int64_t rank, int64_t world_size)
 {
     // aclshmem init captures aclrtGetDevice() for hybm_init() P2P user ids.
-    int32_t logical_from_acl = -1;
-    const int32_t user_device_id = resolve_user_device_id(&logical_from_acl);
+    int32_t logical_device = -1;
+    const int32_t physical_device_id = resolve_user_device_id(&logical_device);
     const int32_t aclrt_before = query_aclrt_device_or_neg1();
     const int32_t logic_before = aclrt_before >= 0 ? query_logic_device_id(aclrt_before) : -1;
 
-    log_shmem_device_context("pre_set_user_device", rank, world_size, logical_from_acl, user_device_id,
+    log_shmem_device_context("pre_set_user_device", rank, world_size, logical_device, physical_device_id,
                              aclrt_before, logic_before);
 
-    const aclError status = aclrtSetDevice(user_device_id);
+    // aclrtSetDevice expects the process-local logical id (0..N-1 within the
+    // current ASCEND_RT_VISIBLE_DEVICES slice), not the physical device id.
+    const aclError status = aclrtSetDevice(logical_device);
     TORCH_CHECK(status == ACL_SUCCESS,
-                "aclrtSetDevice(user_device_id=", user_device_id,
+                "aclrtSetDevice(logical_device_id=", logical_device,
                 ") failed before SHMEM init, status=", static_cast<int>(status),
+                ", physical_device_id=", physical_device_id,
                 ", aclrtGetDevice(before)=", aclrt_before,
                 ", ASCEND_RT_VISIBLE_DEVICES=",
                 (std::getenv("ASCEND_RT_VISIBLE_DEVICES") != nullptr
@@ -184,7 +188,7 @@ void ensure_hybm_user_device_id(int64_t rank, int64_t world_size)
 
     const int32_t aclrt_after = query_aclrt_device_or_neg1();
     const int32_t logic_after = aclrt_after >= 0 ? query_logic_device_id(aclrt_after) : -1;
-    log_shmem_device_context("post_set_user_device", rank, world_size, logical_from_acl, user_device_id,
+    log_shmem_device_context("post_set_user_device", rank, world_size, logical_device, physical_device_id,
                              aclrt_after, logic_after);
 }
 #endif

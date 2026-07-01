@@ -395,13 +395,13 @@ class NPUWorker(WorkerBase):
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
     def _init_device(self):
+        if get_ascend_config().enable_mc2_zb:
+            from vllm_ascend.ops.fused_moe.zb_runtime import validate_zb_serving_parallel_config
+
+            validate_zb_serving_parallel_config(self.parallel_config)
+
         device = torch.device(f"npu:{self.local_rank}")
         torch.npu.set_device(device)
-        if int(torch.npu.current_device()) != self.local_rank:
-            raise RuntimeError(
-                f"Failed to bind NPU device: requested npu:{self.local_rank} "
-                f"but current_device={torch.npu.current_device()}"
-            )
 
         # Import _inductor for graph mode execution with triton
         # This lazy import avoids torch_npu re-initialization in patch
@@ -449,14 +449,6 @@ class NPUWorker(WorkerBase):
 
         # Initialize the distributed environment.
         self._init_worker_distributed_environment()
-        # HCCL process-group creation can reset the current NPU device to 0.
-        # Re-bind before model load / profiling so tensors stay on `device`.
-        torch.npu.set_device(device)
-        if int(torch.npu.current_device()) != device.index:
-            raise RuntimeError(
-                f"NPU device drift after distributed init: "
-                f"expected npu:{device.index}, current={torch.npu.current_device()}"
-            )
         # Set random seed.
         set_random_seed(self.model_config.seed)
         # Initialize device properties used by triton kernels.
@@ -494,7 +486,6 @@ class NPUWorker(WorkerBase):
         Then, it calculates the free memory that can be used for KV cache in
         bytes.
         """
-        torch.npu.set_device(self.device)
         GiB = lambda b: b / GiB_bytes
 
         # Fast path: user has explicitly specified KV cache size via
@@ -1028,6 +1019,10 @@ class NPUWorker(WorkerBase):
             self.parallel_config.decode_context_parallel_size,
         )
         init_ascend_model_parallel(self.parallel_config)
+        if get_ascend_config().enable_mc2_zb:
+            from vllm_ascend.ops.fused_moe.zb_runtime import reserve_zb_shmem_conf_store_uri
+
+            reserve_zb_shmem_conf_store_uri(self.distributed_init_method)
         ensure_ec_transfer_initialized(self.vllm_config)
 
     def get_supported_pooling_tasks(self):
