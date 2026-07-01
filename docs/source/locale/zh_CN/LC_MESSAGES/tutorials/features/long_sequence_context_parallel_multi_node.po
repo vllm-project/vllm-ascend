@@ -322,11 +322,11 @@ msgstr ""
 
 #: ../../source/tutorials/features/long_sequence_context_parallel_multi_node.md:317
 msgid ""
-"`export VLLM_ASCEND_ENABLE_FLASHCOMM1=1` indicates that Flashcomm1 "
+"`--additional-config '{\"enable_flashcomm1\": true}'` indicates that Flashcomm1 "
 "optimization is enabled. Currently, this optimization is only supported "
 "for MoE in scenarios where tensor-parallel-size > 1."
 msgstr ""
-"`export VLLM_ASCEND_ENABLE_FLASHCOMM1=1` 表示启用 Flashcomm1 优化。目前，该优化仅支持在 "
+"`--additional-config '{\"enable_flashcomm1\": true}'` 表示启用 Flashcomm1 优化。目前，该优化仅支持在 "
 "tensor-parallel-size > 1 的场景下对 MoE 生效。"
 
 #: ../../source/tutorials/features/long_sequence_context_parallel_multi_node.md:319

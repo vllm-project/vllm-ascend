@@ -197,7 +197,6 @@ export OMP_NUM_THREADS=1
 export HCCL_BUFFSIZE=400
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export VLLM_ASCEND_ENABLE_MLAPO=1
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export ASCEND_LAUNCH_BLOCKING=0
 
 vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
@@ -219,7 +218,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
 --enable-prefix-caching \
 --async-scheduling \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---additional-config '{"enable_npugraph_ex": true,"fuse_muls_add":true,"multistream_overlap_shared_expert":true}' \
+--additional-config '{"enable_npugraph_ex": true,"fuse_muls_add":true,"multistream_overlap_shared_expert":true, "enable_flashcomm1": true}' \
 --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp"}'
 ```
 
@@ -247,7 +246,6 @@ export OMP_NUM_THREADS=1
 export HCCL_BUFFSIZE=400
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export VLLM_ASCEND_ENABLE_MLAPO=1
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export ASCEND_LAUNCH_BLOCKING=0
 
 vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
@@ -271,7 +269,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
 --enable-prefix-caching \
 --async-scheduling \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---additional-config '{"enable_npugraph_ex": true,"fuse_muls_add":true,"multistream_overlap_shared_expert":true}' \
+--additional-config '{"enable_npugraph_ex": true,"fuse_muls_add":true,"multistream_overlap_shared_expert":true, "enable_flashcomm1": true}' \
 --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp"}'
 ```
 
@@ -306,7 +304,6 @@ export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export ACL_OP_INIT_MODE=1
-#export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 #export USE_MULTI_GROUPS_KV_CACHE=1
 #export USE_MULTI_BLOCK_POOL=1
 export TASK_QUEUE_ENABLE=1
@@ -333,7 +330,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
 --safetensors-load-strategy 'prefetch' \
 --block-size 128 \
 --async-scheduling \
---additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}' \
+--additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "ascend_compilation_config": {"enable_npugraph_ex": true}, "enable_flashcomm1": true}' \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
 --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp"}'
 ```
@@ -363,7 +360,6 @@ export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export ACL_OP_INIT_MODE=1
-#export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 #export USE_MULTI_GROUPS_KV_CACHE=1
 #export USE_MULTI_BLOCK_POOL=1
 export TASK_QUEUE_ENABLE=1
@@ -391,7 +387,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
 --safetensors-load-strategy 'prefetch' \
 --block-size 128 \
 --async-scheduling \
---additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}' \
+--additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "ascend_compilation_config": {"enable_npugraph_ex": true}, "enable_flashcomm1": true}' \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
 --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp"}'
 ```
@@ -657,7 +653,6 @@ Before you start, please
         export ASCEND_A3_ENABLE=1
         export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
         export ASCEND_RT_VISIBLE_DEVICES=$1
-        export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
 
@@ -674,7 +669,7 @@ Before you start, please
             --served-model-name glm-52 \
             --max-model-len 135000 \
             --speculative-config '{"num_speculative_tokens": 5, "method":"deepseek_mtp"}' \
-            --additional-config '{"enable_sparse_c8":false,"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true},"enable_dsa_cp": true}' \
+            --additional-config '{"enable_sparse_c8":false,"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true},"enable_dsa_cp": true, "enable_flashcomm1": true}' \
             --max-num-batched-tokens 4096 \
             --trust-remote-code \
             --max-num-seqs 64 \
@@ -727,7 +722,6 @@ Before you start, please
         export ASCEND_A3_ENABLE=1
         export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
         export ASCEND_RT_VISIBLE_DEVICES=$1
-        export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
         
@@ -744,7 +738,7 @@ Before you start, please
             --served-model-name glm-52 \
             --max-model-len 135000 \
             --speculative-config '{"num_speculative_tokens": 5, "method":"deepseek_mtp"}' \
-            --additional-config '{"enable_sparse_c8":false,"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true},"enable_dsa_cp": true}' \
+            --additional-config '{"enable_sparse_c8":false,"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true},"enable_dsa_cp": true, "enable_flashcomm1": true}' \
             --max-num-batched-tokens 4096 \
             --trust-remote-code \
             --max-num-seqs 64 \
@@ -1002,8 +996,6 @@ export VLLM_NIXL_ABORT_REQUEST_TIMEOUT=300000
 export VLLM_VERSION=0.21.0
 
 export ASCEND_RT_VISIBLE_DEVICES=$1
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-
 vllm serve <MODEL_PATH> \
   --host 0.0.0.0 \
   --port $2 \
@@ -1049,6 +1041,7 @@ vllm serve <MODEL_PATH> \
   }' \
   --additional-config \
   '{
+    "enable_flashcomm1": true,
     "enable_sparse_c8": false,
     "fuse_muls_add": true,
     "multistream_overlap_shared_expert": true,
@@ -1204,7 +1197,7 @@ python load_balance_proxy_server_example.py \
 
 Some configurations for optimization are shown below:
 
-- `VLLM_ASCEND_ENABLE_FLASHCOMM1`: Enable FlashComm optimization to reduce communication and computation overhead on prefill node. With FlashComm enabled, layer_sharding list cannot include o_proj as an element.
+- `additional_config.enable_flashcomm1`: Enable FlashComm optimization to reduce communication and computation overhead on prefill node. With FlashComm enabled, layer_sharding list cannot include o_proj as an element.
 - `VLLM_ASCEND_ENABLE_FUSED_MC2`: Enable following fused operators: dispatch_gmm_combine_decode and dispatch_ffn_combine operator.
 
 Please refer to the following python file for further explanation and restrictions of the environment variables above: [envs.py](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/envs.py)

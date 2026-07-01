@@ -11,7 +11,6 @@ _envs: &envs
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
   TASK_QUEUE_ENABLE: "1"
   VLLM_ASCEND_ENABLE_MLAPO: "1"
-  VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
   VLLM_ASCEND_ENABLE_NZ: "1"
   VLLM_ENGINE_READY_TIMEOUT_S: "3000"
 
@@ -163,7 +162,7 @@ test_cases:
       - "--speculative-config"
       - '{"method":"eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens":3}'
       - "--additional-config"
-      - '{"enable_shared_expert_dp":true}'
+      - '{"enable_shared_expert_dp": true, "enable_flashcomm1": true}'
     benchmarks:
       perf: *_benchmark_TPOT50_3_5k_1_5k
   - name: "Kimi-K2.5-W4A8-TOPT50-16k-1k"

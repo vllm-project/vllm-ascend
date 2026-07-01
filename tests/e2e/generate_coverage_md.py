@@ -67,7 +67,7 @@ COLUMNS = [
     "Xlite Graph",
     "CP KV Interleave",
     "Long Sequence",
-    "FlashComm1 env",
+    "FlashComm1 config",
     "Skipped",
     "Conditional skip",
     "Logprobs",
@@ -822,12 +822,7 @@ def _process_test_file(filepath, source_code, root_path=None):
         )
         row["Context Parallel"] = CHECK if is_context_parallel else EMPTY
 
-        has_flashcomm1 = (
-            "VLLM_ASCEND_ENABLE_FLASHCOMM1" in env_vars and env_vars.get("VLLM_ASCEND_ENABLE_FLASHCOMM1") == "1"
-        )
-        if enable_flashcomm1:
-            has_flashcomm1 = True
-        row["FlashComm1 env"] = CHECK if has_flashcomm1 else EMPTY
+        row["FlashComm1 config"] = CHECK if enable_flashcomm1 else EMPTY
 
         row["Skipped"] = CHECK if has_skip else EMPTY
         row["Conditional skip"] = CHECK if has_skipif else EMPTY
@@ -1057,8 +1052,6 @@ def _process_yaml_file(filepath, source_code, root_path):
         runner = features.get("runner")
         sleep_mode = features.get("enable_sleep_mode")
         dist_exec_mp = features.get("dist_exec_mp")
-        env_vars = features.get("envs", {})
-
         cudagraph_mode = "default"
         has_cudagraph_sizes = False
         if compilation_config:
@@ -1208,10 +1201,7 @@ def _process_yaml_file(filepath, source_code, root_path):
         is_context_parallel = max_model_len is not None and max_model_len > 8192
         row["Context Parallel"] = CHECK if is_context_parallel else EMPTY
 
-        has_flashcomm1 = env_vars.get("VLLM_ASCEND_ENABLE_FLASHCOMM1") == "1"
-        if enable_flashcomm1:
-            has_flashcomm1 = True
-        row["FlashComm1 env"] = CHECK if has_flashcomm1 else EMPTY
+        row["FlashComm1 config"] = CHECK if enable_flashcomm1 else EMPTY
 
         row["Skipped"] = EMPTY
         row["Conditional skip"] = EMPTY

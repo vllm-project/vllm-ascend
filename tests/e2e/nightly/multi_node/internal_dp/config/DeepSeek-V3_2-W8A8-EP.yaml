@@ -30,7 +30,6 @@ deployment:
   -
     envs:
       <<: *env_common
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: 1
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-V3.2-W8A8
           --host 0.0.0.0
@@ -52,7 +51,7 @@ deployment:
           --gpu-memory-utilization 0.90
           --enforce-eager
           --no-enable-prefix-caching
-          --additional-config '{"enable_cpu_binding" : false, "enable_sfa_cp":false,"layer_sharding": ["q_b_proj", "o_proj"]}' 
+          --additional-config '{"enable_cpu_binding": false, "enable_sfa_cp": false, "layer_sharding": ["q_b_proj", "o_proj"], "enable_flashcomm1": true}'
           --tokenizer-mode deepseek_v32 
           --reasoning-parser deepseek_v3
           --kv-transfer-config
@@ -75,7 +74,6 @@ deployment:
   -
     envs:
       <<: *env_common
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: 1
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-V3.2-W8A8
           --host 0.0.0.0
@@ -98,7 +96,7 @@ deployment:
           --gpu-memory-utilization 0.90
           --enforce-eager
           --no-enable-prefix-caching
-          --additional-config '{"enable_cpu_binding" : false, "enable_sfa_cp":false,"layer_sharding": ["q_b_proj", "o_proj"]}' 
+          --additional-config '{"enable_cpu_binding": false, "enable_sfa_cp": false, "layer_sharding": ["q_b_proj", "o_proj"], "enable_flashcomm1": true}'
           --tokenizer-mode deepseek_v32 
           --reasoning-parser deepseek_v3
           --kv-transfer-config
@@ -143,7 +141,7 @@ deployment:
           --max-num-seqs 14
           --gpu-memory-utilization 0.90
           --no-enable-prefix-caching
-          --additional-config '{"enable_cpu_binding" : false,"recompute_scheduler_enable" : true}'
+          --additional-config '{"enable_cpu_binding": false, "recompute_scheduler_enable": true}'
           --tokenizer-mode deepseek_v32
           --reasoning-parser deepseek_v3
           --kv-transfer-config

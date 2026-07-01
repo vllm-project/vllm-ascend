@@ -627,8 +627,8 @@ msgstr ""
 #: ../../source/tutorials/models/Qwen3-Dense.md:333
 msgid ""
 "This optimization requires setting the environment variable "
-"`VLLM_ASCEND_ENABLE_FLASHCOMM1 = 1` to be enabled."
-msgstr "此优化需要设置环境变量 `VLLM_ASCEND_ENABLE_FLASHCOMM1 = 1` 才能启用。"
+"`additional_config.enable_flashcomm1=true` to be enabled."
+msgstr "此优化需要设置环境变量 `additional_config.enable_flashcomm1=true` 才能启用。"
 
 #: ../../source/tutorials/models/Qwen3-Dense.md:335
 msgid "4. Matmul and ReduceScatter Fusion"

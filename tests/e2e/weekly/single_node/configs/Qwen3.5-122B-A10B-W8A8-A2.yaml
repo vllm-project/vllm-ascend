@@ -8,7 +8,6 @@
 _envs: &envs
   TASK_QUEUE_ENABLE: "1"
   HCCL_OP_EXPANSION_MODE: "AIV"
-  VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
   SERVER_PORT: "DEFAULT_PORT"
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
   HCCL_BUFFSIZE: "1024"
@@ -70,5 +69,8 @@ test_cases:
     envs:
       <<: *envs
     server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--additional-config"
+      - '{"enable_flashcomm1": true}'
     benchmarks:
       <<: *benchmarks

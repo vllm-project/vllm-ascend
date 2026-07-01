@@ -155,7 +155,6 @@ export TASK_QUEUE_ENABLE=1
 
 export HCCL_BUFFSIZE=800
 export VLLM_ASCEND_ENABLE_MLAPO=1
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export VLLM_ASCEND_BALANCE_SCHEDULING=1
 
 vllm serve Eco-Tech/Kimi-K2.5-W4A8 \
@@ -176,7 +175,8 @@ vllm serve Eco-Tech/Kimi-K2.5-W4A8 \
   --gpu-memory-utilization 0.9 \
   --compilation-config '{"cudagraph_capture_sizes":[4,8,16,32,64,128,256], "cudagraph_mode":"FULL_DECODE_ONLY"}' \
   --speculative-config '{"method":"eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens":3}' \
-  --mm-encoder-tp-mode data
+  --mm-encoder-tp-mode data \
+  --additional-config '{"enable_flashcomm1": true}'
 ```
 
 Key Parameter Descriptions:
@@ -282,7 +282,6 @@ export TASK_QUEUE_ENABLE=1
 
 export HCCL_BUFFSIZE=1024
 export VLLM_ASCEND_ENABLE_MLAPO=1
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export VLLM_ASCEND_BALANCE_SCHEDULING=1
 
 vllm serve Eco-Tech/Kimi-K2.5-W4A8 \
@@ -306,7 +305,8 @@ vllm serve Eco-Tech/Kimi-K2.5-W4A8 \
   --gpu-memory-utilization 0.9 \
   --compilation-config '{"cudagraph_capture_sizes":[4,8,16,32,64], "cudagraph_mode":"FULL_DECODE_ONLY"}' \
   --speculative-config '{"method":"eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens":3}' \
-  --mm-encoder-tp-mode data
+  --mm-encoder-tp-mode data \
+  --additional-config '{"enable_flashcomm1": true}'
 ```
 
 **Node 1**
@@ -347,7 +347,6 @@ export TASK_QUEUE_ENABLE=1
 
 export HCCL_BUFFSIZE=1024
 export VLLM_ASCEND_ENABLE_MLAPO=1
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export VLLM_ASCEND_BALANCE_SCHEDULING=1
 
 vllm serve Eco-Tech/Kimi-K2.5-W4A8 \
@@ -373,7 +372,8 @@ vllm serve Eco-Tech/Kimi-K2.5-W4A8 \
   --gpu-memory-utilization 0.9 \
   --compilation-config '{"cudagraph_capture_sizes":[4,8,16,32,64], "cudagraph_mode":"FULL_DECODE_ONLY"}' \
   --speculative-config '{"method":"eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens":3}' \
-  --mm-encoder-tp-mode data
+  --mm-encoder-tp-mode data \
+  --additional-config '{"enable_flashcomm1": true}'
 ```
 
 Key Parameter Descriptions:
@@ -480,7 +480,6 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
     export HCCL_BUFFSIZE=256
-    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
     export ASCEND_RT_VISIBLE_DEVICES=$1
 
     vllm serve Eco-Tech/Kimi-K2.5-W4A8 \
@@ -503,7 +502,7 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
       --gpu-memory-utilization 0.8 \
       --enforce-eager \
       --speculative-config '{"method": "eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens": 3}' \
-      --additional-config '{"recompute_scheduler_enable":true}' \
+      --additional-config '{"recompute_scheduler_enable":true, "enable_flashcomm1": true}' \
       --mm-encoder-tp-mode data \
       --kv-transfer-config \
       '{"kv_connector": "MooncakeConnectorV1",
@@ -558,7 +557,6 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
     export HCCL_BUFFSIZE=256
-    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
     export ASCEND_RT_VISIBLE_DEVICES=$1
 
     vllm serve Eco-Tech/Kimi-K2.5-W4A8 \
@@ -581,7 +579,7 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
       --gpu-memory-utilization 0.8 \
       --enforce-eager \
       --speculative-config '{"method": "eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens": 3}' \
-      --additional-config '{"recompute_scheduler_enable":true}' \
+      --additional-config '{"recompute_scheduler_enable":true, "enable_flashcomm1": true}' \
       --mm-encoder-tp-mode data \
       --kv-transfer-config \
       '{"kv_connector": "MooncakeConnectorV1",
@@ -757,7 +755,7 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
 
 Key Parameter Descriptions:
 
-- `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the communication optimization function on the prefill nodes.
+- `--additional-config '{"enable_flashcomm1": true}'`: enables the communication optimization function on the prefill nodes.
 - `VLLM_ASCEND_ENABLE_MLAPO=1`: enables the fusion operator, which can significantly improve performance but consumes more NPU memory. In the Prefill-Decode (PD) separation scenario, enable MLAPO only on decode nodes.
 - `cudagraph_capture_sizes`: The recommended value is `n x (mtp + 1)`. And the min is `n = 1` and the max is `n = max-num-seqs`. For other values, it is recommended to set them to the number of frequently occurring requests on the Decode (D) node.
 - `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the Key-Value Cache (KV Cache) of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, it is recommended to enable this configuration on both prefill and decode nodes simultaneously.

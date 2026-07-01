@@ -12,7 +12,6 @@ test_cases:
       VLLM_ASCEND_ENABLE__FUSED_MC2: "1"
       OMP_NUM_THREADS: "1"
       TASK_QUEUE_ENABLE: "1"
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
       VLLM-ASCEND_BALANCE_SCHEDULING: "1"
       VLLM_ASCEND_ENABLE_NZ: "1"
       VLLM_USE_MODELSCOPE: "true"
@@ -40,7 +39,7 @@ test_cases:
       - "--compilation-config"
       - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
       - "--additional-config"
-      - '{"enable_cpu_binding":true}'
+      - '{"enable_cpu_binding": true, "enable_flashcomm1": true}'
       - "--speculative_config"
       - '{"method":"eagle3","model":"vllm-ascend/MiniMax-M2.5-eagle-model-0318","num_speculative_tokens":3}'
     benchmarks:
@@ -65,7 +64,6 @@ test_cases:
       OMP_NUM_THREADS: "1"
       TASK_QUEUE_ENABLE: "1"
       VLLM-ASCEND_ENABLE_NZ: "1"
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
       VLLM-ASCEND_BALANCE_SCHEDULING: "1"
       VLLM_ASCEND_ENABLE_NZ: "1"
       VLLM_USE_MODELSCOPE: "true"
@@ -93,7 +91,7 @@ test_cases:
       - "--compilation-config"
       - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
       - "--additional-config"
-      - '{"enable_cpu_binding":true}'
+      - '{"enable_cpu_binding": true, "enable_flashcomm1": true}'
       - "--speculative_config"
       - '{"method":"eagle3","model":"vllm-ascend/MiniMax-M2.5-eagle-model-0318","num_speculative_tokens":3}'
     benchmarks:
@@ -117,7 +115,6 @@ test_cases:
       VLLM_ASCEND_ENABLE__FUSED_MC2: "1"
       OMP_NUM_THREADS: "1"
       TASK_QUEUE_ENABLE: "1"
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
       VLLM-ASCEND_BALANCE_SCHEDULING: "1"
       VLLM_ASCEND_ENABLE_NZ: "1"
       VLLM_USE_MODELSCOPE: "true"
@@ -145,7 +142,7 @@ test_cases:
       - "--compilation-config"
       - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
       - "--additional-config"
-      - '{"enable_cpu_binding":true}'
+      - '{"enable_cpu_binding": true, "enable_flashcomm1": true}'
       - "--speculative_config"
       - '{"method":"eagle3","model":"vllm-ascend/MiniMax-M2.5-eagle-model-0318","num_speculative_tokens":3}'
     benchmarks:
@@ -169,7 +166,6 @@ test_cases:
       VLLM_ASCEND_ENABLE__FUSED_MC2: "1"
       OMP_NUM_THREADS: "1"
       TASK_QUEUE_ENABLE: "1"
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
       VLLM-ASCEND_BALANCE_SCHEDULING: "1"
       VLLM_ASCEND_ENABLE_NZ: "1"
       VLLM_USE_MODELSCOPE: "true"
@@ -197,7 +193,7 @@ test_cases:
       - "--compilation-config"
       - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
       - "--additional-config"
-      - '{"enable_cpu_binding":true}'
+      - '{"enable_cpu_binding": true, "enable_flashcomm1": true}'
       - "--speculative_config"
       - '{"method":"eagle3","model":"vllm-ascend/MiniMax-M2.5-eagle-model-0318","num_speculative_tokens":3}'
     benchmarks:
@@ -221,7 +217,6 @@ test_cases:
       VLLM_ASCEND_ENABLE__FUSED_MC2: "1"
       OMP_NUM_THREADS: "1"
       TASK_QUEUE_ENABLE: "1"
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
       VLLM-ASCEND_BALANCE_SCHEDULING: "1"
       VLLM_ASCEND_ENABLE_NZ: "1"
       VLLM_USE_MODELSCOPE: "true"
@@ -249,7 +244,7 @@ test_cases:
       - "--compilation-config"
       - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
       - "--additional-config"
-      - '{"enable_cpu_binding":true}'
+      - '{"enable_cpu_binding": true, "enable_flashcomm1": true}'
       - "--speculative_config"
       - '{"method":"eagle3","model":"vllm-ascend/MiniMax-M2.5-eagle-model-0318","num_speculative_tokens":3}'
     benchmarks:
@@ -273,7 +268,6 @@ test_cases:
       VLLM_ASCEND_ENABLE__FUSED_MC2: "1"
       OMP_NUM_THREADS: "1"
       TASK_QUEUE_ENABLE: "1"
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
       VLLM-ASCEND_BALANCE_SCHEDULING: "1"
       VLLM_ASCEND_ENABLE_NZ: "1"
       VLLM_USE_MODELSCOPE: "true"
@@ -301,7 +295,7 @@ test_cases:
       - "--compilation-config"
       - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
       - "--additional-config"
-      - '{"enable_cpu_binding":true}'
+      - '{"enable_cpu_binding": true, "enable_flashcomm1": true}'
       - "--speculative_config"
       - '{"method":"eagle3","model":"vllm-ascend/MiniMax-M2.5-eagle-model-0318","num_speculative_tokens":3}'
     benchmarks:
@@ -325,7 +319,6 @@ test_cases:
       VLLM_ASCEND_ENABLE__FUSED_MC2: "1"
       OMP_NUM_THREADS: "1"
       TASK_QUEUE_ENABLE: "1"
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
       VLLM-ASCEND_BALANCE_SCHEDULING: "1"
       VLLM_ASCEND_ENABLE_NZ: "1"
       VLLM_USE_MODELSCOPE: "true"
@@ -353,7 +346,7 @@ test_cases:
       - "--compilation-config"
       - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
       - "--additional-config"
-      - '{"enable_cpu_binding":true}'
+      - '{"enable_cpu_binding": true, "enable_flashcomm1": true}'
       - "--speculative_config"
       - '{"method":"eagle3","model":"vllm-ascend/MiniMax-M2.5-eagle-model-0318","num_speculative_tokens":3}'
     benchmarks:
@@ -377,7 +370,6 @@ test_cases:
       VLLM_ASCEND_ENABLE__FUSED_MC2: "1"
       OMP_NUM_THREADS: "1"
       TASK_QUEUE_ENABLE: "1"
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
       VLLM-ASCEND_BALANCE_SCHEDULING: "1"
       VLLM_ASCEND_ENABLE_NZ: "1"
       VLLM_USE_MODELSCOPE: "true"
@@ -405,7 +397,7 @@ test_cases:
       - "--compilation-config"
       - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
       - "--additional-config"
-      - '{"enable_cpu_binding":true}'
+      - '{"enable_cpu_binding": true, "enable_flashcomm1": true}'
       - "--speculative_config"
       - '{"method":"eagle3","model":"vllm-ascend/MiniMax-M2.5-eagle-model-0318","num_speculative_tokens":3}'
     benchmarks:
@@ -429,7 +421,6 @@ test_cases:
       VLLM_ASCEND_ENABLE__FUSED_MC2: "1"
       OMP_NUM_THREADS: "1"
       TASK_QUEUE_ENABLE: "1"
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
       VLLM-ASCEND_BALANCE_SCHEDULING: "1"
       VLLM_ASCEND_ENABLE_NZ: "1"
       VLLM_USE_MODELSCOPE: "true"
@@ -461,7 +452,7 @@ test_cases:
       - "--compilation-config"
       - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
       - "--additional-config"
-      - '{"enable_cpu_binding":true}'
+      - '{"enable_cpu_binding": true, "enable_flashcomm1": true}'
       - "--speculative_config"
       - '{"enforce_eager": true, "method": "eagle3", "model": "vllm-ascend/MiniMax-M2.5-eagle-model-0318", "num_speculative_tokens": 1}'
     benchmarks:
@@ -485,7 +476,6 @@ test_cases:
       VLLM_ASCEND_ENABLE__FUSED_MC2: "1"
       OMP_NUM_THREADS: "1"
       TASK_QUEUE_ENABLE: "1"
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
       VLLM-ASCEND_BALANCE_SCHEDULING: "1"
       VLLM_ASCEND_ENABLE_NZ: "1"
       VLLM_USE_MODELSCOPE: "true"
@@ -517,7 +507,7 @@ test_cases:
       - "--compilation-config"
       - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
       - "--additional-config"
-      - '{"enable_cpu_binding":true}'
+      - '{"enable_cpu_binding": true, "enable_flashcomm1": true}'
       - "--speculative_config"
       - '{"enforce_eager": true, "method": "eagle3", "model": "vllm-ascend/MiniMax-M2.5-eagle-model-0318", "num_speculative_tokens": 1}'
     benchmarks:
@@ -541,7 +531,6 @@ test_cases:
       VLLM_ASCEND_ENABLE__FUSED_MC2: "1"
       OMP_NUM_THREADS: "1"
       TASK_QUEUE_ENABLE: "1"
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
       VLLM-ASCEND_BALANCE_SCHEDULING: "1"
       VLLM_USE_MODELSCOPE: "true"
       SERVER_PORT: "DEFAULT_PORT"
@@ -568,7 +557,7 @@ test_cases:
       - "--compilation-config"
       - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
       - "--additional-config"
-      - '{"enable_cpu_binding":true}'
+      - '{"enable_cpu_binding": true, "enable_flashcomm1": true}'
       - "--speculative_config"
       - '{"enforce_eager": true, "method": "eagle3", "model": "vllm-ascend/MiniMax-M2.5-eagle-model-0318", "num_speculative_tokens": 1}'
     benchmarks:

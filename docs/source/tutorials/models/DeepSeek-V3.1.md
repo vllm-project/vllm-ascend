@@ -295,8 +295,6 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
     export ASCEND_BUFFER_POOL=4:8
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
-    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-
     vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
       --host 0.0.0.0 \
       --port $2 \
@@ -317,7 +315,7 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
       --quantization ascend \
       --no-enable-prefix-caching \
       --speculative-config '{"num_speculative_tokens": 1, "method": "mtp"}' \
-      --additional-config '{"recompute_scheduler_enable":true}' \
+      --additional-config '{"recompute_scheduler_enable":true, "enable_flashcomm1": true}' \
       --kv-transfer-config \
       '{"kv_connector": "MooncakeConnectorV1",
       "kv_role": "kv_producer",
@@ -371,8 +369,6 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
     export ASCEND_BUFFER_POOL=4:8
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
-    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-
     vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
       --host 0.0.0.0 \
       --port $2 \
@@ -393,7 +389,7 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
       --quantization ascend \
       --no-enable-prefix-caching \
       --speculative-config '{"num_speculative_tokens": 1, "method": "mtp"}' \
-      --additional-config '{"recompute_scheduler_enable":true}' \
+      --additional-config '{"recompute_scheduler_enable":true, "enable_flashcomm1": true}' \
       --kv-transfer-config \
       '{"kv_connector": "MooncakeConnectorV1",
       "kv_role": "kv_producer",
@@ -562,7 +558,7 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
     **Notice:**
     The parameters are explained as follows:
 
-    - `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the communication optimization function on the prefill nodes.
+    - `--additional-config '{"enable_flashcomm1": true}'`: enables the communication optimization function on the prefill nodes.
     - `VLLM_ASCEND_ENABLE_MLAPO=1`: enables the fusion operator, which can significantly improve performance but consumes more NPU memory. In the Prefill-Decode (PD) separation scenario, enable MLAPO only on decode nodes.
     - `cudagraph_capture_sizes`: The recommended value is `n x (mtp + 1)`. And the min is `n = 1` and the max is `n = max-num-seqs`. For other values, it is recommended to set them to the number of frequently occurring requests on the Decode (D) node.
     - `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the Key-Value Cache (KV Cache) of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, it is recommended to enable this configuration on both prefill and decode nodes simultaneously.

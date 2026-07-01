@@ -9,7 +9,6 @@ test_cases:
       HCCL_BUFFSIZE: "512"
       HCCL_OP_EXPANSION_MODE: "AIV"
       PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
       OMP_NUM_THREADS: "1"
       TASK_QUEUE_ENABLE: "1"
       VLLM-ASCEND_BALANCE_SCHEDULING: "1"
@@ -31,7 +30,7 @@ test_cases:
       - "--quantization"
       - "ascend"
       - "--additional-config"
-      - '{"enable_cpu_binding":true}'
+      - '{"enable_cpu_binding": true, "enable_flashcomm1": true}'
       - "--model-loader-extra-config"
       - '{"enable_multithread_load":true,"num_threads":16}'
       - "--speculative_config"

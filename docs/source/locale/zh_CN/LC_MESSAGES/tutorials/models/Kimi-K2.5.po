@@ -312,9 +312,9 @@ msgstr "解码节点 1 的 `run_dp_template.sh` 脚本"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:645
 msgid ""
-"`VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the communication optimization"
+"`--additional-config '{\"enable_flashcomm1\": true}'`: enables the communication optimization"
 " function on the prefill nodes."
-msgstr "`VLLM_ASCEND_ENABLE_FLASHCOMM1=1`：在预填充节点上启用通信优化功能。"
+msgstr "`--additional-config '{\"enable_flashcomm1\": true}'`：在预填充节点上启用通信优化功能。"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:646
 msgid ""

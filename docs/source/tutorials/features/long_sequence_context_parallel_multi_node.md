@@ -85,7 +85,6 @@ We can run the following scripts to launch a server on the prefiller/decoder nod
     export HCCL_SOCKET_IFNAME=$nic_name
     export HCCL_BUFFSIZE=768
     export OMP_PROC_BIND=false
-    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
     export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
     export OMP_NUM_THREADS=1
     export HCCL_OP_EXPANSION_MODE="AIV"
@@ -132,7 +131,8 @@ We can run the following scripts to launch a server on the prefiller/decoder nod
                         "tp_size": 16
                 }
           }
-      }'
+      }' \
+      --additional-config '{"enable_flashcomm1": true}'
     ```
 
     ::::
@@ -150,7 +150,6 @@ We can run the following scripts to launch a server on the prefiller/decoder nod
     export HCCL_SOCKET_IFNAME=$nic_name
     export HCCL_BUFFSIZE=768
     export OMP_PROC_BIND=false
-    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
     export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
     export OMP_NUM_THREADS=1
     export HCCL_OP_EXPANSION_MODE="AIV"
@@ -198,7 +197,8 @@ We can run the following scripts to launch a server on the prefiller/decoder nod
                         "tp_size": 16
                 }
           }
-      }'
+      }' \
+      --additional-config '{"enable_flashcomm1": true}'
     ```
 
     ::::
@@ -313,7 +313,7 @@ The parameters are explained as follows:
 - `--compilation-config` contains configurations related to the aclgraph graph mode. The most significant configurations are "cudagraph_mode" and "cudagraph_capture_sizes", which have the following meanings:
 "cudagraph_mode": represents the specific graph mode. Currently, "PIECEWISE" and "FULL_DECODE_ONLY" are supported. The graph mode is mainly used to reduce the cost of operator dispatch. Currently, "FULL_DECODE_ONLY" is recommended.
 - "cudagraph_capture_sizes": represents different levels of graph modes. The default value is [1, 2, 4, 8, 16, 24, 32, 40,..., `--max-num-seqs`]. In the graph mode, the input for graphs at different levels is fixed, and inputs between levels are automatically padded to the next level. Currently, the default setting is recommended. Only in some scenarios is it necessary to set this separately to achieve optimal performance.
-- `export VLLM_ASCEND_ENABLE_FLASHCOMM1=1` indicates that Flashcomm1 optimization is enabled. Currently, this optimization is only supported for MoE in scenarios where tensor-parallel-size > 1.
+- `--additional-config '{"enable_flashcomm1": true}'` indicates that Flashcomm1 optimization is enabled. Currently, this optimization is only supported for MoE in scenarios where tensor-parallel-size > 1.
 
 **Notice:**
 

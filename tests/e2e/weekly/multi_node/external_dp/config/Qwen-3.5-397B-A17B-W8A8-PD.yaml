@@ -62,7 +62,6 @@ templates:
   - node_index: 0
     envs:
       <<: *env_common
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
     server_cmd_template:
       - --host
       - "0.0.0.0"
@@ -101,6 +100,8 @@ templates:
       - --no-disable-hybrid-kv-cache-manager
       - --speculative-config
       - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3}'
+      - --additional-config
+      - '{"enable_flashcomm1": true}'
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_producer",

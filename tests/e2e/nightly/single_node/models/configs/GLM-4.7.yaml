@@ -11,7 +11,6 @@ _envs: &envs
   HCCL_OP_EXPANSION_MODE: "AIV"
   VLLM_ASCEND_BALANCE_SCHEDULING: "1"
   VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE: "1"
-  VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
   VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
 
 _server_cmd: &server_cmd
@@ -62,5 +61,7 @@ test_cases:
     server_cmd_extra:
       - "--compilation-config"
       - '{"cudagraph_capture_sizes": [1,2,4,8,16,32,64,128,256,512], "cudagraph_mode": "FULL_DECODE_ONLY"}'
+      - "--additional-config"
+      - '{"enable_flashcomm1": true}'
     benchmarks:
       <<: *benchmarks

@@ -303,7 +303,7 @@ Single-node deployment is recommended when the model fits within the memory of a
 
 ### 25. When should I enable FlashComm_v1?
 
-Enable FlashComm_v1 (`VLLM_ASCEND_ENABLE_FLASHCOMM1=1`) when using Tensor Parallelism (TP ≥ 2) with high concurrency. It is threshold-protected and will not activate in low-concurrency scenarios where it could degrade performance.
+Enable FlashComm_v1 with `--additional-config '{"enable_flashcomm1": true}'` when using Tensor Parallelism (TP ≥ 2) with high concurrency. It is threshold-protected and will not activate in low-concurrency scenarios where it could degrade performance.
 
 ### 26. What is the difference between FIA and PA operators for attention?
 

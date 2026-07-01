@@ -89,8 +89,6 @@ async def test_models(model: str, tp_size: int) -> None:
         "VLLM_ASCEND_ENABLE_NZ": "2",
         "MOONCAKE_CONFIG_PATH": "mooncake.json",
     }
-    if tp_size != 1:
-        env_dict["VLLM_ASCEND_ENABLE_FLASHCOMM1"] = "1"
     kv_transfer_config = {
         "kv_connector": "AscendStoreConnector",
         "kv_role": "kv_both",
@@ -123,6 +121,13 @@ async def test_models(model: str, tp_size: int) -> None:
         "--kv-transfer-config",
         json.dumps(kv_transfer_config),
     ]
+    if tp_size != 1:
+        server_args.extend(
+            [
+                "--additional-config",
+                json.dumps({"enable_flashcomm1": True}),
+            ]
+        )
     request_keyword_args: dict[str, Any] = {
         **api_keyword_args,
     }
