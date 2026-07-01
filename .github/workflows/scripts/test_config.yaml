@@ -119,6 +119,13 @@
   tests:
     - tests/e2e/pull_request/four_card/context_parallel/
 
+- name: attention_quest
+  optional: false
+  base: attention_common
+  source_file_dependencies:
+    - vllm_ascend/attention/quest_decode.py
+    - vllm_ascend/ops/select_attention.py
+
 # Compilation
 - name: compilation_aclgraph
   optional: false
