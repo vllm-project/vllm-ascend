@@ -67,6 +67,7 @@ def test_deepseek_r1_distill_full_decode_only_aclgraph_310p(
         max_num_seqs=max_num_seqs,
         max_num_batched_tokens=4096,
         gpu_memory_utilization=gpu_memory_utilization,
+        additional_config={"ascend_compilation_config": {"fuse_norm_quant": False}},
         compilation_config={
             "cudagraph_mode": "FULL_DECODE_ONLY",
             "cudagraph_capture_sizes": capture_sizes,
