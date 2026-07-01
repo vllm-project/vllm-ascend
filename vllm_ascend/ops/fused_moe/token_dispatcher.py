@@ -476,7 +476,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
     ):
         use_mxfp_quant = token_dispatch_input.quant.is_mxfp
         with_quant = token_dispatch_input.quant.dispatch_with_quant
-        scale_type = token_dispatch_input.quant.get_scale_type()
+        scale_type = token_dispatch_input.quant.get_scale_type
         hidden_states = token_dispatch_input.hidden_states
         topk_weights = token_dispatch_input.topk_weights
         topk_ids = token_dispatch_input.topk_ids
@@ -494,7 +494,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
 
         dynamic_scale_after_all2all = None
         if with_quant:
-            dst_type = token_dispatch_input.quant.get_dst_type()
+            dst_type = token_dispatch_input.quant.get_dst_type
             permutated_local_input_tokens, dynamic_scale = DeviceOperator.npu_dynamic_quant(
                 permutated_local_input_tokens, act_quant_type=dst_type, use_mxfp_quant=use_mxfp_quant
             )
