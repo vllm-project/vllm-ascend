@@ -14,6 +14,7 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
+from vllm_ascend.spec_decode.llm_base_proposer import greedy_sample
 
 
 def _dspark_reject_debug_enabled() -> bool:
@@ -102,6 +103,16 @@ class AscendDSparkProposer(AscendDflashProposer):
         self._context_request_slots_buffer = torch.zeros(
             self.max_num_tokens,
             dtype=torch.int32,
+            device=device,
+        )
+        self._dspark_seed_buffer = torch.zeros(
+            self.max_batch_size,
+            dtype=torch.int64,
+            device=device,
+        )
+        self._dspark_draft_buffer = torch.zeros(
+            (self.max_batch_size, self.num_speculative_tokens),
+            dtype=torch.int64,
             device=device,
         )
         scheduler_config = getattr(vllm_config, "scheduler_config", None)
@@ -197,6 +208,9 @@ class AscendDSparkProposer(AscendDflashProposer):
         num_query_total = batch_size * block_size
         has_num_rejected = num_rejected_tokens_gpu is not None
         request_slots = self._assign_request_slots(batch_size)
+        self._dspark_seed_buffer[:batch_size].copy_(next_token_ids)
+        if batch_size < self._dspark_seed_buffer.shape[0]:
+            self._dspark_seed_buffer[batch_size:].fill_(0)
 
         context_cursor = 0
         for req_idx in range(batch_size):
@@ -356,6 +370,28 @@ class AscendDSparkProposer(AscendDflashProposer):
             request_slots=self._request_slots_buffer[:num_input_tokens],
         )
 
+    def _sample_sequential(
+        self,
+        num_reqs: int,
+        head_hidden: torch.Tensor,
+        token_indices_to_sample: torch.Tensor,
+    ) -> torch.Tensor:
+        block_size = self.num_speculative_tokens
+        num_sample = num_reqs * block_size
+        sample_hidden_states = head_hidden[token_indices_to_sample[:num_sample]]
+        base_logits = self.model.compute_logits(sample_hidden_states)
+        vocab_size = base_logits.shape[-1]
+        base_logits = base_logits.view(num_reqs, block_size, vocab_size)
+
+        prev_ids = self._dspark_seed_buffer[:num_reqs]
+        for idx in range(block_size):
+            markov_embed = self.model.markov_embed(prev_ids)
+            markov_bias = self.model.markov_bias(markov_embed)
+            draft_ids = greedy_sample(base_logits[:, idx, :] + markov_bias)
+            self._dspark_draft_buffer[:num_reqs, idx].copy_(draft_ids)
+            prev_ids = self._dspark_draft_buffer[:num_reqs, idx]
+        return self._dspark_draft_buffer[:num_reqs, :block_size]
+
     def _propose(
         self,
         target_token_ids: torch.Tensor,
@@ -435,9 +471,11 @@ class AscendDSparkProposer(AscendDflashProposer):
                 inputs_embeds=None,
                 request_slots=self._request_slots_buffer[:num_tokens],
             )
-            sample_hidden_states = hidden_states[token_indices_to_sample]
-            logits = self.model.compute_logits(sample_hidden_states)
-            draft_token_ids = logits.argmax(dim=-1)
+            draft_token_ids = self._sample_sequential(
+                common_attn_metadata.num_reqs,
+                hidden_states,
+                token_indices_to_sample,
+            )
             if _dspark_reject_debug_enabled():
                 print(
                     "[dspark-propose-debug] "
@@ -450,4 +488,4 @@ class AscendDSparkProposer(AscendDflashProposer):
                     f"{_debug_tensor_head('draft_token_ids', draft_token_ids)}",
                     flush=True,
                 )
-        return draft_token_ids.view(-1, self.num_speculative_tokens)
+        return draft_token_ids

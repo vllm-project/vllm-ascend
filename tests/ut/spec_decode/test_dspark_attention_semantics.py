@@ -7,14 +7,13 @@ import torch
 
 import vllm_ascend.ops.dspark_attention as dspark_attention_module
 from vllm_ascend.models.deepseek_v4_dspark import (
-    _copy_last_input_ids,
     _dspark_cache_capacity,
-    _gather_dspark_context_kv,
-    _headwise_scores,
-    _headwise_weighted_sum,
-    _validate_dspark_query_block_slots,
 )
-from vllm_ascend.ops.dspark_attention import dspark_attention
+from vllm_ascend.ops.dspark_attention import (
+    _gather_context_kv,
+    _validate_query_block_slots,
+    dspark_attention,
+)
 
 
 def _dspark_attention_loop(
@@ -26,12 +25,12 @@ def _dspark_attention_loop(
 ) -> torch.Tensor:
     rows = []
     for token_idx in range(q.shape[0]):
-        scores = _headwise_scores(q[token_idx], k_ctx) * scale
+        scores = torch.einsum("hd,khd->hk", q[token_idx].float(), k_ctx.float()) * scale
         sink = attn_sink[: q.shape[1]].float().unsqueeze(-1)
         scores_max = torch.maximum(scores.max(dim=-1, keepdim=True).values, sink)
         exp_scores = torch.exp(scores - scores_max)
         probs = exp_scores / (exp_scores.sum(dim=-1, keepdim=True) + torch.exp(sink - scores_max))
-        rows.append(_headwise_weighted_sum(probs, v_ctx, q.dtype))
+        rows.append(torch.einsum("hk,khd->hd", probs, v_ctx.float()).to(q.dtype))
     return torch.stack(rows, dim=0)
 
 
@@ -190,28 +189,6 @@ def test_dspark_attention_entry_matches_reference_with_request_cache():
     torch.testing.assert_close(actual, expected, rtol=1e-6, atol=1e-6)
 
 
-def test_dspark_last_input_ids_copy_keeps_buffer_storage():
-    buffer = torch.empty(8, dtype=torch.int32)
-    storage_ptr = buffer.data_ptr()
-
-    copied = _copy_last_input_ids(buffer, torch.tensor([1, 2, 3, 4], dtype=torch.int32))
-    assert copied == 4
-    assert buffer.data_ptr() == storage_ptr
-    torch.testing.assert_close(buffer[:copied], torch.tensor([1, 2, 3, 4], dtype=torch.int32))
-
-    copied = _copy_last_input_ids(buffer, torch.tensor([9, 8], dtype=torch.int64))
-    assert copied == 2
-    assert buffer.data_ptr() == storage_ptr
-    torch.testing.assert_close(buffer[:copied], torch.tensor([9, 8], dtype=torch.int32))
-
-
-def test_dspark_last_input_ids_copy_rejects_oversized_input():
-    buffer = torch.empty(2, dtype=torch.int32)
-
-    with pytest.raises(ValueError, match="preallocated buffer capacity"):
-        _copy_last_input_ids(buffer, torch.tensor([1, 2, 3], dtype=torch.int32))
-
-
 def test_dspark_attention_cache_capacity_includes_draft_block():
     vllm_config = SimpleNamespace(model_config=SimpleNamespace(max_model_len=4096))
 
@@ -236,8 +213,8 @@ def test_dspark_context_cache_is_request_local_and_rolling():
         cache_positions[slot, indices] = positions.to(torch.int32)
         cache_valid[slot, indices] = True
 
-    k0, v0 = _gather_dspark_context_kv(cache_k, cache_v, cache_positions, cache_valid, 0, 4, 5)
-    k1, v1 = _gather_dspark_context_kv(cache_k, cache_v, cache_positions, cache_valid, 1, 4, 5)
+    k0, v0 = _gather_context_kv(cache_k, cache_v, cache_positions, cache_valid, 0, 4, 5)
+    k1, v1 = _gather_context_kv(cache_k, cache_v, cache_positions, cache_valid, 1, 4, 5)
 
     torch.testing.assert_close(k0.flatten(), torch.tensor([10.0, 10.0]))
     torch.testing.assert_close(v0.flatten(), torch.tensor([11.0, 11.0]))
@@ -246,13 +223,13 @@ def test_dspark_context_cache_is_request_local_and_rolling():
 
     # Position 0 shares rolling index with position 4, but the stored absolute
     # position prevents stale context from being reused.
-    k_stale, v_stale = _gather_dspark_context_kv(cache_k, cache_v, cache_positions, cache_valid, 0, 0, 1)
+    k_stale, v_stale = _gather_context_kv(cache_k, cache_v, cache_positions, cache_valid, 0, 0, 1)
     assert k_stale.numel() == 0
     assert v_stale.numel() == 0
 
 
 def test_dspark_query_block_slots_must_not_mix_requests():
-    _validate_dspark_query_block_slots(torch.tensor([0, 0, 1, 1], dtype=torch.int32), block_size=2)
+    _validate_query_block_slots(torch.tensor([0, 0, 1, 1], dtype=torch.int32), block_size=2)
 
     with pytest.raises(ValueError, match="constant within each draft block"):
-        _validate_dspark_query_block_slots(torch.tensor([0, 1, 1, 1], dtype=torch.int32), block_size=2)
+        _validate_query_block_slots(torch.tensor([0, 1, 1, 1], dtype=torch.int32), block_size=2)
