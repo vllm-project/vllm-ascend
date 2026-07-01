@@ -51,7 +51,6 @@ def _stable_argsort_for_npu(tensor: torch.Tensor) -> torch.Tensor:
 
 @dataclass
 class GDNChunkedPrefillMetadata:
-    cu_seqlens_cpu: torch.Tensor
     cu_seqlens_host: tuple[int, ...]
     chunk_indices_chunk64_host: tuple[int, ...]
     chunk_indices_chunk64: torch.Tensor
@@ -60,15 +59,13 @@ class GDNChunkedPrefillMetadata:
     final_chunk_indices_chunk64: torch.Tensor
     chunk_indices_large_block: torch.Tensor
     block_indices_cumsum: torch.Tensor
-    _buffer_slot: object | None = None
 
 
 @dataclass
 class GDNCausalConv1dHostMetadata:
     query_start_loc_cpu: torch.Tensor
     cache_indices_cpu: torch.Tensor
-    has_initial_state_cpu: torch.Tensor
-    _buffer_slot: object | None = None
+    has_initial_state_cpu: torch.Tensor | None
 
 
 @dataclass
@@ -76,22 +73,21 @@ class GDNSpecCausalConv1dHostMetadata:
     query_start_loc_cpu: torch.Tensor
     cache_indices_cpu: torch.Tensor
     num_accepted_tokens_cpu: torch.Tensor
-    _buffer_slot: object | None = None
 
 
 @dataclass
-class GDNPrefillFallbackMeta:
+class GDNPrefillMetadata:
     causal_conv1d: GDNCausalConv1dHostMetadata
     chunk: GDNChunkedPrefillMetadata
 
 
 @dataclass
-class GDNDecodeFallbackMeta:
+class GDNDecodeHostMetadata:
     causal_conv1d: GDNCausalConv1dHostMetadata
 
 
 @dataclass
-class GDNSpecDecodeFallbackMeta:
+class GDNSpecDecodeHostMetadata:
     spec_causal_conv1d: GDNSpecCausalConv1dHostMetadata
 
 
@@ -366,10 +362,8 @@ def _build_chunked_prefill_metadata(
     tensors: dict[str, torch.Tensor],
     *,
     cu_seqlens_cpu: torch.Tensor,
-    slot: _GDNChunkedPrefillBufferSlot | None = None,
 ) -> GDNChunkedPrefillMetadata:
     return GDNChunkedPrefillMetadata(
-        cu_seqlens_cpu=cu_seqlens_cpu,
         cu_seqlens_host=tuple(cu_seqlens_cpu.to(torch.int64).tolist()),
         chunk_indices_chunk64_host=_build_chunk_indices_host(
             cu_seqlens_cpu,
@@ -381,7 +375,6 @@ def _build_chunked_prefill_metadata(
         final_chunk_indices_chunk64=tensors["final_chunk_indices_chunk64"],
         chunk_indices_large_block=tensors["chunk_indices_large_block"],
         block_indices_cumsum=tensors["block_indices_cumsum"],
-        _buffer_slot=slot,
     )
 
 
@@ -651,7 +644,6 @@ def _build_non_spec_causal_conv1d_host_meta(
         query_start_loc_cpu=non_spec_query_start_loc_cpu,
         cache_indices_cpu=cache_indices_cpu,
         has_initial_state_cpu=has_initial_state_cpu,
-        _buffer_slot=slot,
     )
 
 
@@ -676,7 +668,6 @@ def _build_non_spec_decode_causal_conv1d_host_meta(
         query_start_loc_cpu=non_spec_query_start_loc_cpu,
         cache_indices_cpu=non_spec_cache_indices_cpu,
         has_initial_state_cpu=None,
-        _buffer_slot=slot,
     )
 
 
@@ -708,7 +699,6 @@ def _build_spec_causal_conv1d_host_meta(
         query_start_loc_cpu=spec_query_start_loc_cpu,
         cache_indices_cpu=cache_indices_cpu,
         num_accepted_tokens_cpu=num_accepted_tokens_cpu,
-        _buffer_slot=slot,
     )
 
 
@@ -735,7 +725,7 @@ def _build_non_spec_chunked_prefill_meta(
     slot = builder._ascend_gdn_chunked_prefill_pool[builder._ascend_gdn_chunked_prefill_pool_idx]
     tensors = _slice_chunk_meta_slot_tensors(slot, shape_info)
     _fill_chunk_meta_device_tensors(builder, cu_seqlens, tensors)
-    return _build_chunked_prefill_metadata(builder, tensors, cu_seqlens_cpu=cu_seqlens_cpu, slot=slot)
+    return _build_chunked_prefill_metadata(builder, tensors, cu_seqlens_cpu=cu_seqlens_cpu)
 
 
 class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
@@ -833,13 +823,14 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
 
         return spec_indices, non_spec_indices
 
-    def _attach_non_spec_prefill_fallback_meta(
+    def _attach_non_spec_prefill_metadata(
         self,
         attn_metadata: GDNAttentionMetadata,
         common_attn_metadata: CommonAttentionMetadata,
         non_spec_query_start_loc_cpu: torch.Tensor | None,
+        prefill_query_start_loc_cpu: torch.Tensor | None,
     ) -> GDNAttentionMetadata:
-        attn_metadata.non_spec_prefill_fallback_meta = None
+        attn_metadata.non_spec_prefill_metadata = None
         if attn_metadata.num_prefills <= 0:
             return attn_metadata
 
@@ -852,8 +843,12 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             raise RuntimeError("Expected non_spec_query_start_loc_cpu for Ascend GDN non-spec prefill path.")
         if attn_metadata.non_spec_query_start_loc is None:
             raise RuntimeError("Expected attn_metadata.non_spec_query_start_loc for Ascend GDN non-spec prefill path.")
+        if prefill_query_start_loc_cpu is None:
+            raise RuntimeError("Expected prefill_query_start_loc_cpu for Ascend GDN non-spec prefill path.")
+        if attn_metadata.prefill_query_start_loc is None:
+            raise RuntimeError("Expected attn_metadata.prefill_query_start_loc for Ascend GDN non-spec prefill path.")
 
-        attn_metadata.non_spec_prefill_fallback_meta = GDNPrefillFallbackMeta(
+        attn_metadata.non_spec_prefill_metadata = GDNPrefillMetadata(
             causal_conv1d=_build_non_spec_causal_conv1d_host_meta(
                 self,
                 attn_metadata,
@@ -861,19 +856,19 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             ),
             chunk=_build_non_spec_chunked_prefill_meta(
                 self,
-                non_spec_query_start_loc_cpu,
-                attn_metadata.non_spec_query_start_loc,
+                prefill_query_start_loc_cpu,
+                attn_metadata.prefill_query_start_loc,
             ),
         )
         return attn_metadata
 
-    def _attach_spec_decode_fallback_meta(
+    def _attach_spec_decode_host_meta(
         self,
         attn_metadata: GDNAttentionMetadata,
         common_attn_metadata: CommonAttentionMetadata,
         num_decode_draft_tokens_cpu: torch.Tensor | None,
     ) -> GDNAttentionMetadata:
-        attn_metadata.spec_decode_fallback_meta = None
+        attn_metadata.spec_decode_host_meta = None
         if attn_metadata.spec_sequence_masks is None:
             return attn_metadata
 
@@ -891,7 +886,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         if attn_metadata.spec_query_start_loc is None:
             raise RuntimeError("Expected attn_metadata.spec_query_start_loc for Ascend GDN speculative path.")
 
-        attn_metadata.spec_decode_fallback_meta = GDNSpecDecodeFallbackMeta(
+        attn_metadata.spec_decode_host_meta = GDNSpecDecodeHostMetadata(
             spec_causal_conv1d=_build_spec_causal_conv1d_host_meta(
                 self,
                 attn_metadata,
@@ -900,13 +895,13 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         )
         return attn_metadata
 
-    def _attach_non_spec_decode_fallback_meta(
+    def _attach_non_spec_decode_host_meta(
         self,
         attn_metadata: GDNAttentionMetadata,
         common_attn_metadata: CommonAttentionMetadata,
         num_decode_draft_tokens_cpu: torch.Tensor | None,
     ) -> GDNAttentionMetadata:
-        attn_metadata.non_spec_decode_fallback_meta = None
+        attn_metadata.non_spec_decode_host_meta = None
         if attn_metadata.num_decodes <= 0:
             return attn_metadata
 
@@ -923,7 +918,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         if non_spec_query_start_loc_cpu is None:
             raise RuntimeError("Expected non-spec query_start_loc_cpu for Ascend GDN non-spec decode path.")
 
-        attn_metadata.non_spec_decode_fallback_meta = GDNDecodeFallbackMeta(
+        attn_metadata.non_spec_decode_host_meta = GDNDecodeHostMetadata(
             causal_conv1d=_build_non_spec_decode_causal_conv1d_host_meta(
                 self,
                 attn_metadata,
@@ -1110,6 +1105,10 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
 
         chunk_indices: torch.Tensor | None = None
         chunk_offsets: torch.Tensor | None = None
+        prefill_query_start_loc: torch.Tensor | None = None
+        prefill_query_start_loc_cpu: torch.Tensor | None = None
+        prefill_state_indices: torch.Tensor | None = None
+        prefill_has_initial_state: torch.Tensor | None = None
         if num_prefills > 0:
             from vllm.model_executor.layers.fla.ops.index import (
                 prepare_chunk_indices,
@@ -1117,15 +1116,29 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             )
             from vllm.model_executor.layers.fla.ops.utils import FLA_CHUNK_SIZE
 
-            gpu_device = query_start_loc.device
+            if spec_sequence_masks is None and num_decodes > 0:
+                assert non_spec_query_start_loc is not None
+                assert non_spec_query_start_loc_cpu is not None
+                assert non_spec_state_indices_tensor is not None
+                prefill_query_start_loc = non_spec_query_start_loc[num_decodes:] - num_decode_tokens
+                prefill_query_start_loc_cpu = non_spec_query_start_loc_cpu[num_decodes:] - num_decode_tokens
+                prefill_state_indices = non_spec_state_indices_tensor[num_decodes:]
+            else:
+                prefill_query_start_loc = non_spec_query_start_loc
+                prefill_query_start_loc_cpu = non_spec_query_start_loc_cpu
+                prefill_state_indices = non_spec_state_indices_tensor
+
+            assert prefill_query_start_loc_cpu is not None
+            # Preserve upstream GDNAttentionMetadata fields for callers that
+            # still use the chunk_gated_delta_rule API directly.
             chunk_indices = prepare_chunk_indices(
-                non_spec_query_start_loc_cpu,
+                prefill_query_start_loc_cpu,
                 FLA_CHUNK_SIZE,
-            ).to(device=gpu_device, non_blocking=True)
+            ).to(device=query_start_loc.device, non_blocking=True)
             chunk_offsets = prepare_chunk_offsets(
-                non_spec_query_start_loc_cpu,
+                prefill_query_start_loc_cpu,
                 FLA_CHUNK_SIZE,
-            ).to(device=gpu_device, non_blocking=True)
+            ).to(device=query_start_loc.device, non_blocking=True)
 
         if num_prefills > 0:
             has_initial_state = context_lens_tensor > 0
@@ -1141,6 +1154,10 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                 non_spec_query_start_loc_cpu,
                 device=query_start_loc.device,
             )
+            if spec_sequence_masks is None and num_decodes > 0:
+                prefill_has_initial_state = has_initial_state[num_decodes:]
+            else:
+                prefill_has_initial_state = has_initial_state
         else:
             has_initial_state = None
 
@@ -1234,6 +1251,9 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             has_initial_state=has_initial_state,
             chunk_indices=chunk_indices,
             chunk_offsets=chunk_offsets,
+            prefill_query_start_loc=prefill_query_start_loc,
+            prefill_state_indices=prefill_state_indices,
+            prefill_has_initial_state=prefill_has_initial_state,
             spec_query_start_loc=spec_query_start_loc,
             non_spec_query_start_loc=non_spec_query_start_loc,
             spec_state_indices_tensor=spec_state_indices_tensor,
@@ -1246,17 +1266,18 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             batch_ptr=batch_ptr,
             token_chunk_offset_ptr=token_chunk_offset_ptr,
         )
-        attn_metadata = self._attach_non_spec_prefill_fallback_meta(
+        attn_metadata = self._attach_non_spec_prefill_metadata(
             attn_metadata,
             common_attn_metadata,
             non_spec_query_start_loc_cpu,
+            prefill_query_start_loc_cpu,
         )
-        attn_metadata = self._attach_spec_decode_fallback_meta(
+        attn_metadata = self._attach_spec_decode_host_meta(
             attn_metadata,
             common_attn_metadata,
             num_decode_draft_tokens_cpu,
         )
-        return self._attach_non_spec_decode_fallback_meta(
+        return self._attach_non_spec_decode_host_meta(
             attn_metadata,
             common_attn_metadata,
             num_decode_draft_tokens_cpu,

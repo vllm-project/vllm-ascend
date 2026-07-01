@@ -316,7 +316,7 @@ def _expected_conv1d_host_args(attn_metadata) -> tuple[tuple[int, ...], tuple[in
     ],
     ids=lambda case: case.name if isinstance(case, BatchSpec) else None,
 )
-def test_non_spec_prefill_fallback_meta_matches_original_inputs_and_runtime_helpers(
+def test_non_spec_prefill_metadata_matches_original_inputs_and_runtime_helpers(
     batch_spec: BatchSpec,
     num_speculative_tokens: int,
     num_decode_draft_tokens_cpu: torch.Tensor | None,
@@ -329,21 +329,69 @@ def test_non_spec_prefill_fallback_meta_matches_original_inputs_and_runtime_help
         num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
     )
 
-    fallback_meta = getattr(attn_metadata, "non_spec_prefill_fallback_meta", None)
-    assert fallback_meta is not None
-    assert fallback_meta.causal_conv1d is not None
-    assert fallback_meta.chunk is not None
+    prefill_metadata = getattr(attn_metadata, "non_spec_prefill_metadata", None)
+    assert prefill_metadata is not None
+    assert prefill_metadata.causal_conv1d is not None
+    assert prefill_metadata.chunk is not None
 
     assert get_non_spec_causal_conv1d_host_args(attn_metadata) == _expected_conv1d_host_args(attn_metadata)
 
     _assert_chunk_meta_matches_runtime(
         builder,
-        fallback_meta.chunk,
-        attn_metadata.non_spec_query_start_loc,
+        prefill_metadata.chunk,
+        attn_metadata.prefill_query_start_loc,
     )
 
 
-def test_build_non_spec_causal_conv1d_host_meta_avoids_seq_lens_cpu_fallback():
+def test_non_spec_prefill_metadata_uses_prefill_tail_for_chunk_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _patch_missing_runtime_cdiv(monkeypatch)
+    batch_spec = BatchSpec(
+        seq_lens=[5, 12, 9],
+        query_lens=[1, 8, 4],
+        name="decode_prefill_without_spec",
+    )
+    builder, _, attn_metadata = _build_attn_metadata(
+        batch_spec,
+        num_speculative_tokens=0,
+        num_decode_draft_tokens_cpu=None,
+    )
+
+    assert attn_metadata.num_decodes == 1
+    assert attn_metadata.num_prefills == 2
+    assert torch.equal(
+        attn_metadata.non_spec_query_start_loc,
+        torch.tensor([0, 1, 9, 13], dtype=torch.int32),
+    )
+    assert torch.equal(
+        attn_metadata.prefill_query_start_loc,
+        torch.tensor([0, 8, 12], dtype=torch.int32),
+    )
+    assert torch.equal(
+        attn_metadata.non_spec_state_indices_tensor,
+        torch.tensor([0, 1, 2], dtype=torch.int32),
+    )
+    assert torch.equal(
+        attn_metadata.prefill_state_indices,
+        torch.tensor([1, 2], dtype=torch.int32),
+    )
+
+    prefill_metadata = getattr(attn_metadata, "non_spec_prefill_metadata", None)
+    assert prefill_metadata is not None
+    assert get_non_spec_causal_conv1d_host_args(attn_metadata) == (
+        (0, 1, 9, 13),
+        (0, 1, 2),
+        (1, 1, 1),
+    )
+    _assert_chunk_meta_matches_runtime(
+        builder,
+        prefill_metadata.chunk,
+        attn_metadata.prefill_query_start_loc,
+    )
+
+
+def test_build_non_spec_causal_conv1d_host_meta_avoids_seq_lens_cpu_sync():
     class GuardSeqLens:
         def to(self, *args, **kwargs):
             raise AssertionError("seq_lens.to('cpu') should not be reached")
@@ -383,40 +431,25 @@ def test_build_non_spec_causal_conv1d_host_meta_requires_has_initial_state():
         )
 
 
-def test_get_non_spec_causal_conv1d_host_args_falls_back_to_runtime_metadata():
+def test_get_non_spec_causal_conv1d_host_args_requires_host_metadata():
     attn_metadata = SimpleNamespace(
-        non_spec_prefill_fallback_meta=None,
+        non_spec_prefill_metadata=None,
         non_spec_query_start_loc=torch.tensor([0, 4, 12], dtype=torch.int32),
         non_spec_state_indices_tensor=torch.tensor([3, 9], dtype=torch.int32),
         has_initial_state=torch.tensor([True, False]),
     )
 
-    assert get_non_spec_causal_conv1d_host_args(attn_metadata) == (
-        (0, 4, 12),
-        (3, 9),
-        (1, 0),
-    )
-
-
-def test_get_non_spec_causal_conv1d_host_args_requires_runtime_metadata():
-    attn_metadata = SimpleNamespace(
-        non_spec_prefill_fallback_meta=None,
-        non_spec_query_start_loc=torch.tensor([0, 4, 12], dtype=torch.int32),
-        non_spec_state_indices_tensor=torch.tensor([3, 9], dtype=torch.int32),
-        has_initial_state=None,
-    )
-
-    with pytest.raises(RuntimeError, match="has_initial_state"):
+    with pytest.raises(RuntimeError, match="non_spec_prefill_metadata"):
         get_non_spec_causal_conv1d_host_args(attn_metadata)
 
 
-def test_get_non_spec_chunked_prefill_meta_allows_missing_prefill_fallback_meta():
-    attn_metadata = SimpleNamespace(non_spec_prefill_fallback_meta=None)
+def test_get_non_spec_chunked_prefill_meta_allows_missing_prefill_metadata():
+    attn_metadata = SimpleNamespace(non_spec_prefill_metadata=None)
 
     assert get_non_spec_chunked_prefill_meta(attn_metadata) is None
 
 
-def test_builder_uses_device_chunk_builder_with_non_spec_query_start_loc(monkeypatch):
+def test_builder_uses_device_chunk_builder_with_prefill_query_start_loc(monkeypatch):
     _patch_missing_runtime_cdiv(monkeypatch)
     batch_spec = BatchSpec(
         seq_lens=[8, 4, 0, 12],
@@ -469,19 +502,19 @@ def test_builder_uses_device_chunk_builder_with_non_spec_query_start_loc(monkeyp
     )
 
     expected_chunk_indices = runtime_prepare_chunk_indices(
-        attn_metadata.non_spec_query_start_loc,
+        attn_metadata.prefill_query_start_loc,
         ascend_gdn_attn_builder._GDN_CHUNK_SIZE,
     )
     expected_chunk_offsets = runtime_prepare_chunk_offsets(
-        attn_metadata.non_spec_query_start_loc,
+        attn_metadata.prefill_query_start_loc,
         ascend_gdn_attn_builder._GDN_CHUNK_SIZE,
     )
     expected_update_chunk_offsets = runtime_prepare_update_chunk_offsets(
-        attn_metadata.non_spec_query_start_loc,
+        attn_metadata.prefill_query_start_loc,
         ascend_gdn_attn_builder._GDN_CHUNK_SIZE,
     )
     expected_final_chunk_indices = runtime_prepare_final_chunk_indices(
-        attn_metadata.non_spec_query_start_loc,
+        attn_metadata.prefill_query_start_loc,
         ascend_gdn_attn_builder._GDN_CHUNK_SIZE,
     )
 
@@ -496,8 +529,8 @@ def test_builder_uses_device_chunk_builder_with_non_spec_query_start_loc(monkeyp
         torch.Tensor,
         chunk64_call["out_final_chunk_indices"],
     )
-    fallback_meta = get_non_spec_chunked_prefill_meta(attn_metadata)
-    assert chunk64_call["cu_seqlens"] is attn_metadata.non_spec_query_start_loc
+    host_chunk_meta = get_non_spec_chunked_prefill_meta(attn_metadata)
+    assert chunk64_call["cu_seqlens"] is attn_metadata.prefill_query_start_loc
     assert out_chunk_indices.shape == expected_chunk_indices.shape
     assert out_chunk_indices.dtype == expected_chunk_indices.dtype
     assert out_chunk_offsets.shape == expected_chunk_offsets.shape
@@ -506,8 +539,8 @@ def test_builder_uses_device_chunk_builder_with_non_spec_query_start_loc(monkeyp
     assert out_update_chunk_offsets.dtype == torch.int32
     assert out_final_chunk_indices.shape == expected_final_chunk_indices.shape
     assert out_final_chunk_indices.dtype == torch.int32
-    assert fallback_meta.cu_seqlens_host == tuple(attn_metadata.non_spec_query_start_loc.to(torch.int64).tolist())
-    assert fallback_meta.chunk_indices_chunk64_host == tuple(
+    assert host_chunk_meta.cu_seqlens_host == tuple(attn_metadata.prefill_query_start_loc.to(torch.int64).tolist())
+    assert host_chunk_meta.chunk_indices_chunk64_host == tuple(
         expected_chunk_indices.to(torch.int64).reshape(-1).tolist()
     )
 
@@ -552,4 +585,4 @@ def test_builder_skips_prebuilt_meta_without_non_spec_prefill(batch_spec: BatchS
         num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
     )
 
-    assert getattr(attn_metadata, "non_spec_prefill_fallback_meta", None) is None
+    assert getattr(attn_metadata, "non_spec_prefill_metadata", None) is None
