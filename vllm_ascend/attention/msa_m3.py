@@ -930,11 +930,6 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             raise ValueError(f"Duplicate layer name: {self.layer_name}")
         compilation_config.static_forward_context[self.layer_name] = self
         self.kv_cache = torch.tensor([])
-        self._sparse_attn_out_buf: torch.Tensor | None = None
-        self._max_batched_tokens = (
-            vllm_config.scheduler_config.max_num_batched_tokens
-        )
-
         global _SPARSE_ATTN_LOGGED
         if not _SPARSE_ATTN_LOGGED:
             logger.warning(
@@ -993,20 +988,6 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         flat[index_meta.slot_mapping[:num_tokens]] = index_key[:num_tokens].to(
             flat.dtype
         )
-
-    def _get_sparse_attn_out_buf(self, q: torch.Tensor) -> torch.Tensor:
-        if (
-            self._sparse_attn_out_buf is None
-            or self._sparse_attn_out_buf.shape[0] < self._max_batched_tokens
-            or self._sparse_attn_out_buf.dtype != q.dtype
-            or self._sparse_attn_out_buf.device != q.device
-        ):
-            self._sparse_attn_out_buf = torch.empty(
-                (self._max_batched_tokens, self.q_size),
-                dtype=q.dtype,
-                device=q.device,
-            )
-        return self._sparse_attn_out_buf[: q.shape[0]]
 
     def _sparse_prepare(
         self,
@@ -1072,7 +1053,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         q, k, v, index_q, index_k = self._sparse_prepare(positions, hidden_states)
-        attn_out = self._get_sparse_attn_out_buf(q)
+        attn_out = torch.empty_like(q)
         torch.ops.vllm.minimax_m3_sparse_forward(
             q,
             k,
