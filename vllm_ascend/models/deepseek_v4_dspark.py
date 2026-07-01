@@ -36,7 +36,6 @@ from vllm.model_executor.models.utils import maybe_prefix
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
-from vllm_ascend import envs
 from vllm_ascend.models.deepseek_v4 import (
     DeepseekV2MixtureOfExperts,
     DeepseekV4Attention,
@@ -73,13 +72,6 @@ def _linear(layer: nn.Module, x: torch.Tensor) -> torch.Tensor:
     return out[0] if isinstance(out, tuple) else out
 
 
-def _last_input_ids_buffer_capacity(vllm_config: VllmConfig, block_size: int) -> int:
-    scheduler_config = getattr(vllm_config, "scheduler_config", None)
-    max_num_seqs = int(getattr(scheduler_config, "max_num_seqs", 1) or 1)
-    max_num_batched_tokens = int(getattr(scheduler_config, "max_num_batched_tokens", 0) or 0)
-    return max(block_size, max_num_seqs * block_size, max_num_batched_tokens)
-
-
 def _dspark_cache_capacity(vllm_config: VllmConfig, block_size: int, window_size: int | None = None) -> int:
     if window_size is not None:
         return max(block_size, int(window_size) + block_size)
@@ -91,18 +83,6 @@ def _dspark_cache_capacity(vllm_config: VllmConfig, block_size: int, window_size
 def _dspark_max_request_slots(vllm_config: VllmConfig) -> int:
     scheduler_config = getattr(vllm_config, "scheduler_config", None)
     return max(1, int(getattr(scheduler_config, "max_num_seqs", 1) or 1))
-
-
-def _copy_last_input_ids(buffer: torch.Tensor, input_ids: torch.Tensor) -> int:
-    flat_input_ids = input_ids.reshape(-1)
-    num_input_ids = flat_input_ids.numel()
-    if num_input_ids > buffer.numel():
-        raise ValueError(
-            "DSpark draft input_ids exceed preallocated buffer capacity: "
-            f"num_input_ids={num_input_ids}, capacity={buffer.numel()}"
-        )
-    buffer[:num_input_ids].copy_(flat_input_ids)
-    return num_input_ids
 
 
 def _fp8_e4m3fn_quantized_abs(abs_scaled: torch.Tensor) -> torch.Tensor:
@@ -160,58 +140,11 @@ def _fp8_qdq_nope_dims(
     return torch.cat([kv_nope, kv[..., nope_head_dim:]], dim=-1)
 
 
-def _headwise_scores(q: torch.Tensor, k_ctx: torch.Tensor) -> torch.Tensor:
-    return (q.float().unsqueeze(0) * k_ctx.float()).sum(dim=-1).transpose(0, 1)
-
-
-def _headwise_weighted_sum(
-    probs: torch.Tensor,
-    v_ctx: torch.Tensor,
-    dtype: torch.dtype,
-) -> torch.Tensor:
-    return (probs.transpose(0, 1).unsqueeze(-1) * v_ctx.float()).sum(dim=0).to(dtype)
-
-
 def _grouped_wo_a_projection(
     attn_out: torch.Tensor,
     wo_a: torch.Tensor,
 ) -> torch.Tensor:
     return torch.matmul(attn_out.transpose(0, 1), wo_a.transpose(1, 2)).transpose(0, 1)
-
-
-def _gather_dspark_context_kv(
-    k_cache: torch.Tensor,
-    v_cache: torch.Tensor,
-    cache_positions: torch.Tensor,
-    cache_valid: torch.Tensor,
-    request_slot: int,
-    context_start: int,
-    context_end: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    if context_end < context_start:
-        empty = k_cache.new_empty((0,) + k_cache.shape[2:])
-        return empty, v_cache.new_empty((0,) + v_cache.shape[2:])
-
-    cache_capacity = k_cache.shape[1]
-    ctx_positions = torch.arange(
-        context_start,
-        context_end + 1,
-        dtype=torch.long,
-        device=k_cache.device,
-    )
-    cache_indices = ctx_positions % cache_capacity
-    cached_positions = cache_positions[request_slot, cache_indices].to(torch.long)
-    valid = cache_valid[request_slot, cache_indices] & (cached_positions == ctx_positions)
-    return k_cache[request_slot, cache_indices][valid], v_cache[request_slot, cache_indices][valid]
-
-
-def _validate_dspark_query_block_slots(request_slots: torch.Tensor, block_size: int) -> None:
-    for block_offset in range(0, request_slots.numel(), block_size):
-        block_slots = request_slots[block_offset : block_offset + block_size].to(torch.long)
-        if block_slots.numel() == 0:
-            continue
-        if torch.any(block_slots != block_slots[0]):
-            raise ValueError("DSpark query request_slots must be constant within each draft block")
 
 
 def _apply_dsv4_rope(
@@ -314,7 +247,6 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         )
         self._dspark_cache_capacity = cache_capacity
         self._dspark_max_request_slots = max_request_slots
-        self._use_python_dspark_attention_op = envs.VLLM_ASCEND_DSPARK_USE_PY_ATTENTION_OP
 
     def _ensure_dspark_cache(self, length: int, like: torch.Tensor) -> None:
         del like
@@ -355,6 +287,44 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         ).contiguous()
         v = kv.unsqueeze(1).expand(-1, self.n_local_heads, -1).contiguous()
         return k, v
+
+    def _run_dspark_attention(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        positions: torch.Tensor,
+        request_slots: torch.Tensor | None,
+    ) -> torch.Tensor:
+        if positions.numel() == 0:
+            return torch.empty_like(q)
+        if request_slots is None:
+            request_slots = torch.zeros_like(positions, dtype=torch.int32)
+        if request_slots.numel() != positions.numel():
+            raise ValueError(
+                "DSpark request_slots length must match query positions: "
+                f"request_slots={request_slots.numel()}, positions={positions.numel()}"
+            )
+
+        assert self._dspark_k_cache is not None
+        assert self._dspark_v_cache is not None
+        assert self._dspark_cache_valid is not None
+        assert self._dspark_cache_positions is not None
+        return dspark_attention(
+            q,
+            self._dspark_k_cache,
+            self._dspark_v_cache,
+            self._dspark_cache_positions,
+            self._dspark_cache_valid,
+            k,
+            v,
+            request_slots,
+            positions,
+            self.attn_sink[: self.n_local_heads],
+            self.block_size,
+            int(self.window_size),
+            float(self.scale),
+        )
 
     def precompute_context_kv(
         self,
@@ -421,73 +391,7 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
             dim=-1,
         ).contiguous()
         v = kv.unsqueeze(1).expand(-1, self.n_local_heads, -1).contiguous()
-
-        if positions.numel() == 0:
-            attn_out = torch.empty_like(q)
-        else:
-            if request_slots is None:
-                request_slots = torch.zeros_like(positions, dtype=torch.int32)
-            if request_slots.numel() != positions.numel():
-                raise ValueError(
-                    "DSpark request_slots length must match query positions: "
-                    f"request_slots={request_slots.numel()}, positions={positions.numel()}"
-                )
-
-            assert self._dspark_k_cache is not None
-            assert self._dspark_v_cache is not None
-            assert self._dspark_cache_valid is not None
-            assert self._dspark_cache_positions is not None
-            if self._use_python_dspark_attention_op:
-                attn_out = dspark_attention(
-                    q,
-                    self._dspark_k_cache,
-                    self._dspark_v_cache,
-                    self._dspark_cache_positions,
-                    self._dspark_cache_valid,
-                    k,
-                    v,
-                    request_slots,
-                    positions,
-                    self.attn_sink[: self.n_local_heads],
-                    self.block_size,
-                    int(self.window_size),
-                    float(self.scale),
-                )
-            else:
-                attn_out = torch.empty_like(q)
-                pos_long = positions.to(torch.long)
-                request_slots_long = request_slots.to(torch.long)
-                for block_offset in range(0, positions.numel(), self.block_size):
-                    block_end = min(block_offset + self.block_size, positions.numel())
-                    block_pos = pos_long[block_offset:block_end]
-                    block_start = int(block_pos.min().item())
-                    context_end = block_start - 1
-                    context_start = max(0, context_end + 1 - self.window_size)
-                    request_slot = int(request_slots_long[block_offset].item())
-                    if request_slot >= self._dspark_max_request_slots:
-                        raise ValueError(
-                            "DSpark request slot exceeds preallocated cache slots: "
-                            f"slot={request_slot}, capacity={self._dspark_max_request_slots}"
-                        )
-                    k_ctx, v_ctx = _gather_dspark_context_kv(
-                        self._dspark_k_cache,
-                        self._dspark_v_cache,
-                        self._dspark_cache_positions,
-                        self._dspark_cache_valid,
-                        request_slot,
-                        context_start,
-                        context_end,
-                    )
-                    k_ctx = torch.cat([k_ctx, k[block_offset:block_end]], dim=0)
-                    v_ctx = torch.cat([v_ctx, v[block_offset:block_end]], dim=0)
-
-                    q_block = q[block_offset:block_end]
-                    scores = torch.einsum("qhd,khd->qhk", q_block.float(), k_ctx.float()) * self.scale
-                    sink = self.attn_sink[: self.n_local_heads].float().view(1, -1, 1)
-                    scores_max = torch.maximum(scores.max(dim=-1, keepdim=True).values, sink)
-                    exp_scores = torch.exp(scores - scores_max)
-                    probs = exp_scores / (exp_scores.sum(dim=-1, keepdim=True) + torch.exp(sink - scores_max))
-                    attn_out[block_offset:block_end] = torch.einsum("qhk,khd->qhd", probs, v_ctx.float()).to(q.dtype)
+        attn_out = self._run_dspark_attention(q, k, v, positions, request_slots)
 
         attn_out = _apply_dsv4_rope_tail(
             self.rotary_emb,
@@ -634,10 +538,15 @@ class DSparkMarkovHead(nn.Module):
         )
         self.logits_processor = LogitsProcessor(config.vocab_size)
 
+    def embed(self, token_ids: torch.Tensor) -> torch.Tensor:
+        return self.markov_w1(token_ids)
+
+    def bias(self, markov_embed: torch.Tensor) -> torch.Tensor:
+        return self.logits_processor(self.markov_w2, markov_embed)
+
     def forward(self, token_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        embed = self.markov_w1(token_ids)
-        logits = self.logits_processor(self.markov_w2, embed)
-        return logits, embed
+        embed = self.embed(token_ids)
+        return self.bias(embed), embed
 
 
 class DSparkConfidenceHead(nn.Module):
@@ -730,26 +639,6 @@ class DeepseekV4DSparkModel(nn.Module):
         last_layer.hc_head_fn = self.hc_head_fn
         last_layer.hc_head_base = self.hc_head_base
         last_layer.hc_head_scale = self.hc_head_scale
-        input_ids_capacity = _last_input_ids_buffer_capacity(vllm_config, self.block_size)
-        self.register_buffer(
-            "_last_input_ids_buffer",
-            torch.empty(
-                input_ids_capacity,
-                dtype=torch.int32,
-                device=current_platform.device_type,
-            ),
-            persistent=False,
-        )
-        self.register_buffer(
-            "_markov_prev_ids_buffer",
-            torch.empty(
-                max(1, input_ids_capacity // self.block_size),
-                dtype=torch.int32,
-                device=current_platform.device_type,
-            ),
-            persistent=False,
-        )
-        self._last_input_ids_len = 0
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -781,23 +670,17 @@ class DeepseekV4DSparkModel(nn.Module):
         request_slots: torch.Tensor | None = None,
     ) -> torch.Tensor:
         del hidden_states
-        self._last_input_ids_len = _copy_last_input_ids(self._last_input_ids_buffer, input_ids)
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
         hidden_states = inputs_embeds.unsqueeze(-2).repeat(1, self.hc_mult, 1)
         for layer in self.layers.values():
             hidden_states = layer(hidden_states, positions, input_ids, request_slots=request_slots)
-        return hidden_states
+        return self.compute_head_hidden(hidden_states)
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-        lm_head: ParallelLMHead,
-        logits_processor: LogitsProcessor,
-    ) -> torch.Tensor:
+    def compute_head_hidden(self, hidden_states: torch.Tensor) -> torch.Tensor:
         if hidden_states.dim() == 2:
-            hidden_states = hidden_states.view(-1, self.hc_mult, self.hidden_size)
-        dense_hidden = _hc_head(
+            return hidden_states
+        return _hc_head(
             hidden_states,
             self.hc_head_fn,
             self.hc_head_scale,
@@ -805,27 +688,21 @@ class DeepseekV4DSparkModel(nn.Module):
             self.config.rms_norm_eps,
             self.config.hc_eps,
         )
-        base_logits = logits_processor(lm_head, self.norm(dense_hidden))
 
-        if hidden_states.shape[0] % self.block_size != 0:
-            return base_logits
+    def markov_embed(self, token_ids: torch.Tensor) -> torch.Tensor:
+        return self.markov_head.embed(token_ids)
 
-        batch = hidden_states.shape[0] // self.block_size
-        num_input_ids = batch * self.block_size
-        if self._last_input_ids_len < num_input_ids:
-            return base_logits
+    def markov_bias(self, markov_embed: torch.Tensor) -> torch.Tensor:
+        return self.markov_head.bias(markov_embed)
 
-        base_logits = base_logits.view(batch, self.block_size, -1)
-        input_ids = self._last_input_ids_buffer[:num_input_ids].view(batch, self.block_size)
-        prev_ids = self._markov_prev_ids_buffer[:batch]
-        prev_ids.copy_(input_ids[:, 0])
-        logits_out = []
-        for idx in range(self.block_size):
-            markov_logits, _ = self.markov_head(prev_ids)
-            logits_i = base_logits[:, idx, :] + markov_logits
-            logits_out.append(logits_i)
-            prev_ids.copy_(logits_i.argmax(dim=-1))
-        return torch.stack(logits_out, dim=1).reshape(batch * self.block_size, -1)
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+        lm_head: ParallelLMHead,
+        logits_processor: LogitsProcessor,
+    ) -> torch.Tensor:
+        head_hidden = self.compute_head_hidden(hidden_states)
+        return logits_processor(lm_head, self.norm(head_hidden))
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         if vllm_version_is("0.23.0"):
@@ -917,6 +794,12 @@ class DeepSeekV4DSparkMTP(nn.Module, DeepseekV2MixtureOfExperts):
             self.lm_head,
             self.logits_processor,
         )
+
+    def markov_embed(self, token_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.markov_embed(token_ids)
+
+    def markov_bias(self, markov_embed: torch.Tensor) -> torch.Tensor:
+        return self.model.markov_bias(markov_embed)
 
     def precompute_and_store_context_kv(
         self,
