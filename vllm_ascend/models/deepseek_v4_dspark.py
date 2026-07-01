@@ -261,6 +261,7 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
             self.block_size,
             int(self.window_size),
             float(self.scale),
+            shared_kv=True,
         )
 
     def precompute_context_kv(
