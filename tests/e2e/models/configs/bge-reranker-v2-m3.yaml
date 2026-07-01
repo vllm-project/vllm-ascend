@@ -14,15 +14,10 @@ serve:
 tasks:
 - name: "basic_score_validation"
   metrics:
-  - name: "score_accuracy"
-    value: 1.0
-  - name: "sample_scores"
-    value:
-      query: "What is the capital of France?"
-      doc_positive: "Paris is the capital of France."
-      doc_negative: "Berlin is in Germany."
-      score_positive: 0.9998
-      score_negative: 0.00043
+  - name: "score_positive"
+    value: 0.9998
+  - name: "score_negative"
+    value: 0.00043
 
 num_fewshot: 0
 apply_chat_template: false
