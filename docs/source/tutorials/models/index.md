@@ -34,9 +34,8 @@ Kimi-K2-Thinking.md
 Kimi-K2.5.md
 Kimi-K2.6.md
 PaddleOCR-VL.md
-MiniMax-M2.5.md
-Molmo2-8B.md
 MiniMax-M2.md
+Molmo2-8B.md
 Hunyuan-A13B-Instruct.md
 Hy3-preview.md
 Minitron-8B-Base.md
