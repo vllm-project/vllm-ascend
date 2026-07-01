@@ -22,7 +22,6 @@ from vllm_ascend.sample.rejection_sampler import (
     sample_recovered_tokens_pytorch,
 )
 
-
 KERNEL_TEST_ITERS = 100
 
 
