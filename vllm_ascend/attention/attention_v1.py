@@ -988,91 +988,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
         graph_params.handles[num_tokens].append(handle)
         return output, num_tokens
 
-    def _full_graph_pa_large_head(
-        self,
-        query: torch.Tensor,
-        attn_metadata: AscendMetadata,
-        output: torch.Tensor | None = None,
-    ):
-        """Capture PA op directly without task group wrapping.
-
-        Used as a workaround for models whose head_dim is not supported by
-        FIA TND (e.g. Gemma4 with head_dim=256/512). When all layers use
-        the PA fallback, ``full_graph_pa`` creates a task group per layer
-        (60 task groups for Gemma4 31B), which can exceed the CANN runtime
-        task-group limit and fail with error 107033 during
-        ``rtStreamEndCapture``.
-
-        In FULL_DECODE_ONLY mode the padded attention metadata tensors
-        (block_table, seq_lens) reside at stable addresses.  The graph
-        captures those addresses directly and reads the up-to-date content
-        during replay, so task groups are unnecessary.
-        """
-        if _EXTRA_CTX.is_draft_model:
-            graph_params = get_draft_graph_params()
-        else:
-            graph_params = get_graph_params()
-        num_tokens = query.shape[0]
-        if _EXTRA_CTX.capturing:
-            # Get workspace from cache or calculate it if not present.
-            workspace = graph_params.workspaces.get(num_tokens)
-            if workspace is None:
-                workspace = torch_npu._npu_paged_attention_get_workspace(
-                    query=query,
-                    key_cache=self.key_cache,
-                    value_cache=self.value_cache,
-                    num_kv_heads=self.num_kv_heads,
-                    num_heads=self.num_heads,
-                    scale_value=self.scale,
-                    block_table=attn_metadata.block_tables,
-                    context_lens=attn_metadata.seq_lens,
-                    out=output,
-                )
-                update_graph_params_workspaces(num_tokens, workspace)
-
-            # Direct PA call inside graph context -- no task group,
-            # no event, no handle.  Padded metadata tensors at stable
-            # addresses provide current data on each replay.
-            torch_npu._npu_paged_attention(
-                query=query,
-                key_cache=self.key_cache,
-                value_cache=self.value_cache,
-                num_kv_heads=self.num_kv_heads,
-                num_heads=self.num_heads,
-                scale_value=self.scale,
-                block_table=attn_metadata.block_tables,
-                context_lens=attn_metadata.seq_lens,
-                out=output,
-                workspace=workspace,
-            )
-
-            # Register in attn_params_by_key for diagnostics and to mark
-            # this layer as handled (task-group-free; skip during replay).
-            # Register for diagnostics; skip draft model for same
-            # reason as full_graph_pa (multi-step overwrite).
-            layer_name = self._layer_name
-            if (not _EXTRA_CTX.is_draft_model
-                    and layer_name
-                    and num_tokens in graph_params.attn_params_by_key):
-                graph_params.attn_params_by_key[num_tokens][layer_name] = {
-                    "params": (
-                        weak_ref_tensors(query),
-                        weak_ref_tensors(self.key_cache),
-                        weak_ref_tensors(self.value_cache),
-                        self.num_kv_heads,
-                        self.num_heads,
-                        self.scale,
-                        attn_metadata.block_tables,
-                        attn_metadata.seq_lens,
-                        weak_ref_tensors(output),
-                    ),
-                    "handle": None,
-                    "event": None,
-                    "large_head": True,
-                }
-
-            return output
-
     def full_graph_pa(
         self,
         query: torch.Tensor,
@@ -1440,176 +1355,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
             actual_seq_kvlen=attn_metadata.actual_seq_lengths_q,
         )[0]
 
-    def _fdo_safe_large_head_attention(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        attn_metadata: AscendMetadata,
-        output: torch.Tensor,
-        kv_cache=None,
-    ) -> torch.Tensor:
-        """FDO-capturable attention for large head_dim layers (>192).
-
-        PA and FIA v2 both fail during FULL_DECODE_ONLY capture for
-        head_dim >= 512.  Use PyTorch native SDPA which decomposes into
-        basic ops (matmul, softmax) that are graph-capturable.
-
-        For capture (dummy run), K/V tensors are provided directly
-        (ChunkedPrefill mode) — no paged cache gathering is needed.
-        """
-        import torch.nn.functional as F
-        num_tokens = query.shape[0]
-        num_heads = self.num_heads
-        num_kv_heads = self.num_kv_heads
-        head_size = self.head_size
-
-        q = query[:num_tokens].view(num_tokens, num_heads, head_size)
-        k = key[:num_tokens]
-        v = value[:num_tokens]
-
-        # GQA: repeat KV heads to match Q heads
-        if num_heads != num_kv_heads:
-            n_repeat = num_heads // num_kv_heads
-            k = k.repeat_interleave(n_repeat, dim=1)
-            v = v.repeat_interleave(n_repeat, dim=1)
-
-        # PyTorch native SDPA — uses optimal backend (flash/mem_efficient/math)
-        # and decomposes into capturable ops on Ascend.
-        attn_out = F.scaled_dot_product_attention(
-            q.unsqueeze(0).transpose(1, 2),   # [1, H, T, D]
-            k.unsqueeze(0).transpose(1, 2),   # [1, H, T_kv, D]
-            v.unsqueeze(0).transpose(1, 2),   # [1, H, T_kv, D]
-            is_causal=attn_metadata.causal,
-            scale=self.scale,
-        )
-        attn_out = attn_out.squeeze(0).transpose(0, 1)  # [T, H, D]
-        output[:num_tokens] = attn_out[:num_tokens]
-        return output
-
-    def _forward_large_head_prefill_attention(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        attn_metadata: AscendMetadata,
-        output: torch.Tensor,
-    ) -> torch.Tensor:
-        num_tokens = attn_metadata.actual_seq_lengths_q[-1]
-        query = query[:num_tokens]
-        key, value, actual_seq_lengths_kv = self._get_large_head_prefill_kv(
-            key,
-            value,
-            attn_metadata,
-            num_tokens,
-        )
-
-        # Ascend FIA (npu_fusion_attention) cannot handle cross-attention
-        # where actual_seq_qlen differs from actual_seq_kvlen — it either
-        # crashes or produces zero / garbage output.  When KV was gathered
-        # from the paged cache (ChunkedPrefill / SpecDecoding), the KV
-        # length exceeds the query length.  Use PyTorch native SDPA for
-        # correct cross-attention; otherwise keep FIA for self-attention.
-        if key.shape[0] != num_tokens:
-            # Cross-attention: K/V gathered from cache is longer than Q.
-            # Ascend FIA cannot handle different Q/KV lengths; use PyTorch
-            # SDPA with a correct causal cross-attention mask.
-            import torch.nn.functional as F_sdpa
-            num_heads = self.num_heads
-            num_kv_heads = self.num_kv_heads
-            head_size = self.head_size
-
-            q = query.view(num_tokens, num_heads, head_size)
-            k = key
-            v = value
-
-            # GQA: repeat KV heads to match Q heads
-            if num_heads != num_kv_heads:
-                n_rep = num_heads // num_kv_heads
-                k = k.repeat_interleave(n_rep, dim=1)
-                v = v.repeat_interleave(n_rep, dim=1)
-
-            # PyTorch SDPA in 4D format [B, H, L, D].
-            # When Q/KV lengths differ, is_causal=True is invalid
-            # (PyTorch raises an error).  Build the correct causal
-            # cross-attention mask: query position i can attend to
-            # KV positions [0, kv_len - q_len + i].
-            is_causal = attn_metadata.causal
-            if is_causal and q.shape[0] != k.shape[0]:
-                q_len = q.shape[0]
-                kv_len = k.shape[0]
-                attn_mask = torch.full(
-                    (q_len, kv_len), float('-inf'),
-                    dtype=q.dtype, device=q.device)
-                offset = kv_len - q_len
-                for i_ in range(q_len):
-                    attn_mask[i_, :offset + i_ + 1] = 0
-                is_causal = False
-            else:
-                attn_mask = None
-            attn_out = F_sdpa.scaled_dot_product_attention(
-                q.unsqueeze(0).transpose(1, 2),   # [1, H, T_q, D]
-                k.unsqueeze(0).transpose(1, 2),   # [1, H, T_kv, D]
-                v.unsqueeze(0).transpose(1, 2),   # [1, H, T_kv, D]
-                attn_mask=attn_mask,
-                is_causal=is_causal,
-                scale=self.scale,
-            )
-            attn_out = attn_out.squeeze(0).transpose(0, 1)  # [T_q, H, D]
-            output[:num_tokens] = attn_out[:num_tokens]
-        else:
-            # Self-attention: Q length == KV length.
-            # FIA TND only supports head_dim in {64,128,192,256}.
-            # For unsupported head_dims (e.g. 512), use PyTorch SDPA.
-            if self.head_size in FIA_TND_SUPPORTED_HEAD_SIZES:
-                sparse_mode = 4 if self.sliding_window is not None else 3 if attn_metadata.causal else 0
-                pre_tokens = self.sliding_window if self.sliding_window is not None else SWA_INT_MAX
-                next_tokens = 0 if attn_metadata.causal or self.sliding_window is not None else SWA_INT_MAX
-                attn_mask = attn_metadata.attn_mask
-                if attn_mask is not None and attn_mask.dtype not in (torch.bool, torch.uint8):
-                    attn_mask = attn_mask.bool()
-                attn_output = torch_npu.npu_fusion_attention(
-                    query=query,
-                    key=key,
-                    value=value,
-                    head_num=self.num_heads,
-                    input_layout="TND",
-                    atten_mask=attn_mask,
-                    scale=self.scale,
-                    pre_tockens=pre_tokens,
-                    next_tockens=next_tokens,
-                    actual_seq_qlen=attn_metadata.actual_seq_lengths_q,
-                    actual_seq_kvlen=actual_seq_lengths_kv,
-                    sparse_mode=sparse_mode,
-                )[0]
-            else:
-                # head_dim not supported by FIA TND → use PyTorch SDPA
-                import torch.nn.functional as F_sdpa
-                num_heads = self.num_heads
-                num_kv_heads = self.num_kv_heads
-                head_size = self.head_size
-
-                q = query.view(num_tokens, num_heads, head_size)
-                k = key.view(num_tokens, num_kv_heads, head_size)
-                v = value.view(num_tokens, num_kv_heads, head_size)
-
-                # GQA: repeat KV heads to match Q heads
-                if num_heads != num_kv_heads:
-                    n_rep = num_heads // num_kv_heads
-                    k = k.repeat_interleave(n_rep, dim=1)
-                    v = v.repeat_interleave(n_rep, dim=1)
-
-                attn_out = F_sdpa.scaled_dot_product_attention(
-                    q.unsqueeze(0).transpose(1, 2),   # [1, H, T, D]
-                    k.unsqueeze(0).transpose(1, 2),
-                    v.unsqueeze(0).transpose(1, 2),
-                    is_causal=attn_metadata.causal,
-                    scale=self.scale,
-                )
-                attn_output = attn_out.squeeze(0).transpose(0, 1)
-            output[:num_tokens] = attn_output[:num_tokens]
-        return output
-
     def _forward_shared_kv_prefill_attention(
         self,
         query: torch.Tensor,
@@ -1680,36 +1425,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output[:num_tokens] = attn_output
         return output
 
-    def _get_large_head_prefill_kv(
-        self,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        attn_metadata: AscendMetadata,
-        num_tokens: int,
-    ) -> tuple[torch.Tensor, torch.Tensor, list[int]]:
-        if (
-            attn_metadata.attn_state == AscendAttentionState.PrefillNoCache
-            or self.key_cache is None
-            or self.value_cache is None
-        ):
-            return key[:num_tokens], value[:num_tokens], attn_metadata.actual_seq_lengths_q
-
-        seq_lens = attn_metadata.seq_lens_list
-        if not seq_lens:
-            return key[:num_tokens], value[:num_tokens], attn_metadata.actual_seq_lengths_q
-
-        # Chunked prefill can have historical KV already resident in the paged
-        # cache. The large-head fallback uses dense TND attention, so gather the
-        # paged KV blocks into sequence-major dense tensors first.
-        dense_key, dense_value = self._gather_paged_kv_to_dense(
-            self.key_cache,
-            self.value_cache,
-            attn_metadata.block_tables,
-            seq_lens,
-        )
-        actual_seq_lengths_kv = torch.tensor(seq_lens, dtype=torch.int32).cumsum(0).tolist()
-        return dense_key, dense_value, actual_seq_lengths_kv
-
     def _gather_paged_kv_to_dense(
         self,
         key_cache: torch.Tensor,
@@ -1737,10 +1452,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
         positions = torch.arange(max_tokens_padded, dtype=torch.long, device=key_cache.device)
         valid_mask = positions.unsqueeze(0) < seq_lens_tensor.unsqueeze(1)
         return gathered_key[valid_mask].contiguous(), gathered_value[valid_mask].contiguous()
-
-    def _should_use_large_head_attention_fallback(self) -> bool:
-        unsupported_fia_tnd_head_size = self.head_size not in FIA_TND_SUPPORTED_HEAD_SIZES
-        return self.sinks is None and unsupported_fia_tnd_head_size
 
     def _get_current_token_shared_kv(
         self,
@@ -1925,9 +1636,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         ):
             self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
 
-        # On A5, FIA v2 supports head_dim=512 natively.
-        # The large-head fallback (for A2/A3 TND) should be skipped on A5.
-        use_large_head_fallback = self._should_use_large_head_attention_fallback()
+        # On A5, FIA v2 supports head_dim=512 natively — no large-head fallback needed.
 
         _kv_prefill_eligible = (
             self.kv_sharing_target_layer_name is not None
@@ -1975,48 +1684,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         _pa_usable = using_paged_attention(num_tokens, self.vllm_config)
 
-        # PagedAttention fails during FULL_DECODE_ONLY graph capture even
-        # without task group wrapping (CANN Inner error).  PIECEWISE capture
-        # is NOT affected — PA works correctly there.
-        _is_fdo_capture = (
-            _EXTRA_CTX.capturing
-            and get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.FULL
-        )
-
         _cond_a = (
             attn_metadata.attn_state in (AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding)
             and (self.sliding_window is None or self.kv_sharing_target_layer_name is not None)
-            and (_pa_usable or use_large_head_fallback or self.kv_sharing_target_layer_name is not None)
-        )
-        _cond_b = (
-            not _EXTRA_CTX.capturing
-            and use_large_head_fallback
-            and self.kv_sharing_target_layer_name is None
-            and key is not None
-            and value is not None
-            and query.shape[0] == key.shape[0]
-            and attn_metadata.attn_state in (AscendAttentionState.PrefillNoCache, AscendAttentionState.ChunkedPrefill, AscendAttentionState.SpecDecoding)
+            and (_pa_usable or self.kv_sharing_target_layer_name is not None)
         )
 
         if _cond_a:
-            # PA works for all head_dims on this Ascend device;
-            # the large-head fallback flag just means we skip FIA.
             output = self.forward_paged_attention(query, attn_metadata, output)
-        elif _cond_b:
-            output = self._forward_large_head_prefill_attention(query, key, value, attn_metadata, output)
-        elif use_large_head_fallback:
-            # Large head_dim + non-DecodeOnly, non-prefill edge case.
-            # During FDO capture, PA and FIA v2 both fail for head_dim=512.
-            # Use PyTorch native SDPA (scaled_dot_product_attention) which
-            # decomposes into capturable ops and supports any head_dim.
-            # PIECEWISE capture is not affected (PA works there).
-            if _is_fdo_capture:
-                output = self._fdo_safe_large_head_attention(
-                    query, key, value, attn_metadata, output, kv_cache)
-            else:
-                output = self.forward_paged_attention(query, attn_metadata, output)
         else:
-
             output = self.forward_fused_infer_attention(query, key, value, attn_metadata, output, kv_cache)
 
         return output
