@@ -3583,22 +3583,38 @@ class NPUModelRunner(GPUModelRunner):
             self.eplb_updator.set_adaptor(self.eplb_adaptor)
             self.eplb_updator.warm_up_eplb()
 
-    def dump_model(self, path="/mnt") -> None:
-        tp_size = self.vllm_config.parallel_config.tensor_parallel_size
-        model_name = self.vllm_config.model_config.model.rstrip('/').rsplit('/', 1)[-1]
-        model_dir = os.path.join(path, "snapshot_weight", f"{model_name}_dp{self.dp_size}_tp{tp_size}")
-        model_save_path = os.path.join(model_dir, f"model_ckpt.{self.dp_rank}tp{get_tp_group().rank_in_group}.pth")
-        logger.info("model type is %s", type(self.model))
+    def _get_drafter_model(self):
+        """[snapshot] Return the drafter/spec-decode ``nn.Module`` if the active
+        speculative method carries a torch model (e.g. MTP / EAGLE), else None.
+        n-gram / suffix / medusa-less proposers have no restorable model and are
+        skipped. The drafter is NOT part of ``self.get_model()``, so it must be
+        dumped/restored/reloaded explicitly or its non-persistent derived
+        weights (rope cos/sin, gate ``weight_fp32``, MLA ``W_UV``...) stay stale
+        after resume and quietly destroy draft acceptance."""
+        drafter = getattr(self, "drafter", None)
+        if drafter is None:
+            return None
+        model = None
+        get_model_fn = getattr(drafter, "get_model", None)
+        if callable(get_model_fn):
+            try:
+                model = get_model_fn()
+            except Exception:  # noqa: BLE001
+                model = None
+        if model is None:
+            model = getattr(drafter, "model", None)
+        return model if isinstance(model, nn.Module) else None
+
+    def _dump_one_model(self, model: nn.Module, model_save_path: str) -> None:
         if os.path.exists(model_save_path):
             logger.info("model save path %s exists, skip dump model", model_save_path)
             return
-        os.makedirs(model_dir, exist_ok=True)
-        logger.info("[dump model] start dump model to %s", model_save_path)
+        logger.info("[dump model] start dump model to %s (type=%s)", model_save_path, type(model))
         start = time.time()
         import psutil  # type: ignore[import-untyped]
         process = psutil.Process(os.getpid())
         logger.info("start dump_model() cpu memory use: %.2f MB", process.memory_info().rss / 1024**2)
-        torch.save(self.get_model().state_dict(), model_save_path)
+        torch.save(model.state_dict(), model_save_path)
         gc.collect()
         logger.info("after gc.collect() cpu memory use: %.2f MB", process.memory_info().rss / 1024**2)
         torch.npu.empty_cache()
@@ -3612,10 +3628,73 @@ class NPUModelRunner(GPUModelRunner):
                 print("exec malloc_trim(0) fail")
         except Exception as e:
             print(f"exec malloc_trim(0) with error: {e}")
-        
+
         logger.info("after dump_model() cpu memory use: %.2f MB", process.memory_info().rss / 1024**2)
         elapse = time.time() - start
         logger.info("[dump model] save model ckpt to %s, elapse %.4f s", model_save_path, elapse)
+
+    def dump_model(self, path="/mnt") -> None:
+        tp_size = self.vllm_config.parallel_config.tensor_parallel_size
+        model_name = self.vllm_config.model_config.model.rstrip('/').rsplit('/', 1)[-1]
+        model_dir = os.path.join(path, "snapshot_weight", f"{model_name}_dp{self.dp_size}_tp{tp_size}")
+        os.makedirs(model_dir, exist_ok=True)
+        rank_in_group = get_tp_group().rank_in_group
+        # The drafter (MTP/EAGLE) owns its own copy of the non-persistent derived
+        # weights, so it must be serialized to a file that is DISTINCT from the
+        # target model's ckpt.
+        self._dump_one_model(
+            self.get_model(),
+            os.path.join(model_dir, f"model_ckpt.{self.dp_rank}tp{rank_in_group}.pth"),
+        )
+        drafter_model = self._get_drafter_model()
+        if drafter_model is not None:
+            self._dump_one_model(
+                drafter_model,
+                os.path.join(model_dir, f"model_ckpt_drafter.{self.dp_rank}tp{rank_in_group}.pth"),
+            )
+
+    def _restore_one_model(self, model: nn.Module, model_save_path: str, label: str) -> None:
+        if not os.path.exists(model_save_path):
+            logger.warning("[restore model] [%s] ckpt %s not found, skip", label, model_save_path)
+            return
+        start = time.time()
+        sd = torch.load(model_save_path, map_location="cpu", mmap=True)
+        logger.info(
+            "[restore model] [%s] load model to cpu from %s, elapse %ss, the num of items is %s",
+            label,
+            model_save_path,
+            time.time() - start,
+            len(sd.items()),
+        )
+        cnt = 0
+        param_dict = dict(model.named_parameters())
+        buffer_dict = dict(model.named_buffers())
+        for name, cpu_tensor in sd.items():
+            if name in param_dict:
+                param_dict[name].data.copy_(cpu_tensor)
+                cnt += 1
+            if name in buffer_dict:
+                buffer_dict[name].data.copy_(cpu_tensor)
+                cnt += 1
+        logger.info("[restore model] [%s] replace success %s / %s", label, cnt, len(sd.items()))
+        logger.info(
+            "[restore model] [%s] restore model ckpt from %s, elapse %.4f s",
+            label,
+            model_save_path,
+            time.time() - start,
+        )
+
+        # [snapshot] Re-derive decode-path weights that are NOT part of
+        # ``state_dict`` (e.g. the MLA absorbed weights ``W_UV`` / ``W_UK_T``,
+        # rope cos/sin). These are computed once from persistent parameters
+        # inside ``process_weights_after_loading`` and are plain attributes (not
+        # parameters/buffers), so they are never serialized. After suspend/resume
+        # the device memory backing them is stale, which collapses the MLA
+        # *decode* attention output to zero (prefill still works because it uses
+        # ``kv_b_proj`` directly). Recomputing them from the freshly restored
+        # weights repairs the decode path. The ACL graph is re-captured after
+        # restore, so reallocating these tensors is safe.
+        self._reload_non_persistent_derived_weights(model=model, label=label)
 
     def restore_model(self, path="/mnt") -> None:
         tp_size = self.vllm_config.parallel_config.tensor_parallel_size
@@ -3625,52 +3704,26 @@ class NPUModelRunner(GPUModelRunner):
             "snapshot_weight",
             f"{model_name}_dp{self.dp_size}_tp{tp_size}",
         )
-        model_save_path = os.path.join(
-            model_dir,
-            f"model_ckpt.{self.dp_rank}tp{get_tp_group().rank_in_group}.pth",
+        rank_in_group = get_tp_group().rank_in_group
+        self._restore_one_model(
+            self.get_model(),
+            os.path.join(model_dir, f"model_ckpt.{self.dp_rank}tp{rank_in_group}.pth"),
+            "model",
         )
-        start = time.time()
-        sd = torch.load(model_save_path, map_location="cpu", mmap=True)
-        logger.info(
-            "[restore model] load model to cpu from %s, elapse %ss, the num of items is %s",
-            model_save_path,
-            time.time() - start,
-            len(sd.items()),
-        )
-        cnt = 0
+        # The drafter (MTP/EAGLE) has its own ckpt (see dump_model) and its own
+        # non-persistent derived weights; restore + reload it too, otherwise its
+        # drafts degrade after resume and speculative acceptance collapses.
+        drafter_model = self._get_drafter_model()
+        if drafter_model is not None:
+            self._restore_one_model(
+                drafter_model,
+                os.path.join(model_dir, f"model_ckpt_drafter.{self.dp_rank}tp{rank_in_group}.pth"),
+                "drafter",
+            )
 
-        model = self.get_model()
-        param_dict = dict(model.named_parameters())
-        buffer_dict = dict(model.named_buffers())
-        for name, cpu_tensor in sd.items():
-            if name in param_dict:
-                npu_tensor = param_dict[name]
-                npu_tensor.data.copy_(cpu_tensor)
-                cnt += 1
-
-            if name in buffer_dict:
-                npu_tensor = buffer_dict[name]
-                npu_tensor.data.copy_(cpu_tensor)
-                cnt += 1
-
-        logger.info("replace success %s / %s", cnt, len(sd.items()))
-        elapse = time.time() - start
-        logger.info("[restore model] restore model ckpt from %s, elapse %.4f s", model_save_path, elapse)
-
-        # [snapshot] Re-derive decode-path weights that are NOT part of
-        # ``state_dict`` (e.g. the MLA absorbed weights ``W_UV`` / ``W_UK_T``).
-        # These are computed once from persistent parameters inside
-        # ``process_weights_after_loading`` and are plain attributes (not
-        # parameters/buffers), so ``dump_model`` never serializes them. After
-        # suspend/resume the device memory backing them is stale, which
-        # collapses the MLA *decode* attention output to zero (prefill still
-        # works because it uses ``kv_b_proj`` directly). Recomputing them from
-        # the freshly restored weights repairs the decode path. The ACL graph
-        # is re-captured after restore, so reallocating these tensors is safe.
-        self._reload_non_persistent_derived_weights()
-
-    def _reload_non_persistent_derived_weights(self) -> None:
-        model = self.get_model()
+    def _reload_non_persistent_derived_weights(self, model=None, label: str = "model") -> None:
+        if model is None:
+            model = self.get_model()
         act_dtype = self.model_config.dtype
         reloaded = 0
         failed: list[str] = []
@@ -3722,14 +3775,16 @@ class NPUModelRunner(GPUModelRunner):
                 if norm == 0.0:
                     zero_norm_modules.append(f"{name}.{attr}")
         logger.info(
-            "[restore model] reloaded non-persistent derived weights for %d modules%s",
+            "[restore model] [%s] reloaded non-persistent derived weights for %d modules%s",
+            label,
             reloaded,
             "" if not failed else f", failed={failed[: min(8, len(failed))]}",
         )
         if reloaded == 0:
             logger.warning(
-                "[restore model] no non-persistent derived-weight reload targets found; "
+                "[restore model] [%s] no non-persistent derived-weight reload targets found; "
                 "MLA decode may still use stale absorbed weights",
+                label,
             )
         if reloaded and min_norm != float("inf"):
             if zero_norm_modules:
