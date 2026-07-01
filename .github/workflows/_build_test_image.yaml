@@ -237,7 +237,7 @@ jobs:
           mkdir -p /tmp/buildkit 
           BUILDKIT_VERSION="v0.29.0" 
           ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') 
-          wget -q "https://github.com/moby/buildkit/releases/download/${BUILDKIT_VERSION}/buildkit-${BUILDKIT_VERSION}.linux-${ARCH}.tar.gz" -O /tmp/buildkit.tar.gz 
+          curl -fsSL "https://github.com/moby/buildkit/releases/download/${BUILDKIT_VERSION}/buildkit-${BUILDKIT_VERSION}.linux-${ARCH}.tar.gz" -o /tmp/buildkit.tar.gz
           tar -xzf /tmp/buildkit.tar.gz -C /tmp/buildkit 
           cp /tmp/buildkit/bin/buildctl /usr/bin/ 
           chmod +x /usr/bin/buildctl 
