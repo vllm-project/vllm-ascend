@@ -46,24 +46,26 @@ Qwen3-30B-A3B-W8A8 adopts a hybrid quantization strategy (ordered by model struc
 
 You can use the official all-in-one Docker image for Qwen3 MoE models.
 
-**Docker Pull:**
-
-```bash
-docker pull quay.io/ascend/vllm-ascend:|vllm_ascend_version|
-```
-
-**Docker Run:**
-
 :::::{tab-set}
 :sync-group: hardware
 
 ::::{tab-item} Atlas 800I A3
 :sync: a3
 
+**Docker Pull:**
+
 ```{code-block} bash
    :substitutions:
 
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+docker pull quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
+```
+
+**Docker Run:**
+
+```{code-block} bash
+   :substitutions:
+
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
 
 docker run \
     --name vllm-ascend-env \
@@ -112,6 +114,16 @@ If you are on a shared machine, map only the chips you need (e.g., `/dev/davinci
 
 ::::{tab-item} Atlas 800I A2
 :sync: a2
+
+**Docker Pull:**
+
+```{code-block} bash
+   :substitutions:
+
+docker pull quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+```
+
+**Docker Run:**
 
 ```{code-block} bash
    :substitutions:
