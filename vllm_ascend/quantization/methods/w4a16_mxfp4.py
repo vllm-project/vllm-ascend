@@ -40,8 +40,13 @@ from .registry import register_scheme
 def unpack_uint8_to_fp4_return_float32(packed: torch.Tensor) -> torch.Tensor:
     low = packed & 0x0F
     high = packed // 16
-    unpacked = torch.stack([low, high], dim=-1).reshape(*packed.shape[:-1], -1).to(torch.float32)
-    return unpacked
+    unpacked = torch.stack([low, high], dim=-1).reshape(*packed.shape[:-1], -1)
+    fp4_values = torch.tensor(
+        [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
+        dtype=torch.float32,
+        device=packed.device,
+    )
+    return fp4_values[unpacked.to(torch.long)]
 
 
 @register_scheme("W4A16_MXFP4", "moe")
