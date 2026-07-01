@@ -344,7 +344,7 @@ else:
             self.quant_type = self._get_quant_type()
             # Can be removed after vllm fixes the issue.
             if self._needs_routed_expert_parameter_aliases():
-                self._schedule_routed_expert_parameter_aliases()
+                self._register_routed_expert_parameter_aliases()
 
             self.moe_config.tp_group = get_tp_group()
             self.moe_config.dp_group = get_dp_group()
@@ -496,49 +496,28 @@ else:
 
             return quant_type
 
-        def _schedule_routed_expert_parameter_aliases(self) -> None:
-            alias_names = [name for name, _ in self.routed_experts.named_parameters(recurse=False)]
+        def _register_routed_expert_parameter_aliases(self) -> None:
+            alias_names = []
+            for name, param in self.routed_experts.named_parameters(recurse=False):
+                alias_param = torch.nn.Parameter(param.data, requires_grad=param.requires_grad)
+                alias_param.__dict__.update(param.__dict__)
+                self.register_parameter(name, alias_param)
+                alias_names.append(name)
 
             original_process_weights = self._quant_method.process_weights_after_loading
 
             @wraps(original_process_weights)
             def wrapped_process_weights(layer, *args, **kwargs):
-                result = original_process_weights(layer, *args, **kwargs)
                 for name in alias_names:
-                    param = getattr(self.routed_experts, name)
-                    alias_param = torch.nn.Parameter(param.data, requires_grad=param.requires_grad)
-                    alias_param.__dict__.update(param.__dict__)
-                    self.register_parameter(name, alias_param)
-                return result
+                    self._parameters.pop(name, None)
+                return original_process_weights(layer, *args, **kwargs)
 
             self._quant_method.process_weights_after_loading = wrapped_process_weights  # type: ignore[method-assign]
 
         def _needs_routed_expert_parameter_aliases(self) -> bool:
-            # test_gpt_oss_distributed_tp2
-            # test_qwen3_moe_routing_replay[Qwen/Qwen3.5-35B-A3B]
-            # test_multimodal_reasoning_pp_full_decode_only
             vllm_config = get_current_vllm_config()
             hf_config = getattr(vllm_config.model_config, "hf_config", None)
-            model_type = getattr(hf_config, "model_type", None)
-            architectures = getattr(hf_config, "architectures", ()) or ()
-            if model_type in {"qwen3_5_mtp", "step3p5_mtp"} or set(architectures) & {
-                "Qwen3_5MoeMTP",
-                "Step3p5MTP",
-            }:
-                return False
-            if self.layer_name.startswith("mtp.") or ".mtp." in self.layer_name:
-                return False
-            return model_type in {
-                "aria",
-                "aria_text",
-                "gpt_oss",
-                "qwen3_5_moe",
-                "qwen3_vl_moe",
-                "qwen3_vl_moe_text",
-                "step3_text",
-                "step3_vl",
-                "step3p5",
-            }
+            return getattr(hf_config, "model_type", None) == "gpt_oss"
 
         @property
         def is_internal_router(self) -> bool:
