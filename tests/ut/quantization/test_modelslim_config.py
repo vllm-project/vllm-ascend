@@ -3,7 +3,6 @@ import os
 import tempfile
 from unittest.mock import MagicMock, patch
 
-import pytest
 import torch
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -17,7 +16,7 @@ from vllm_ascend.quantization.modelslim_config import (
     MODELSLIM_CONFIG_FILENAME,
     AscendModelSlimConfig,
 )
-from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, vllm_version_is
+from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD
 
 
 class TestAscendModelSlimConfig(TestBase):
@@ -157,10 +156,6 @@ class TestAscendModelSlimConfig(TestBase):
 
             self.assertIsInstance(args[0], AscendC8KVCacheAttentionMethod)
 
-    @pytest.mark.skipif(
-        not vllm_version_is("0.23.0"),
-        reason="Legacy FusedMoE quant method UT is only for vLLM 0.23.0.",
-    )
     def test_get_quant_method_for_fused_moe(self):
         fused_moe_layer = MagicMock(spec=FusedMoE)
         fused_moe_layer.moe = MagicMock(spec=FusedMoEConfig)
