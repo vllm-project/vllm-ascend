@@ -68,7 +68,7 @@ class TestPatchRoutedExpertsCapturer(TestBase):
 
     def test_init_buffer_uses_platform_device(self):
         """init_buffer should use current_platform.device_name, not 'cuda'."""
-        from vllm_ascend.patch.worker.patch_routed_experts_capturer import (
+        from vllm_ascend.patch.worker.patch_routed_experts_capturer import (  # type: ignore[import-untyped]
             init_buffer,
         )
 
@@ -106,7 +106,7 @@ class TestPatchRoutedExpertsCapturer(TestBase):
 
     def test_init_buffer_creates_correct_shape(self):
         """_device_buffer shape should be (max_tokens, layers, experts_per_tok)."""
-        from vllm_ascend.patch.worker.patch_routed_experts_capturer import (
+        from vllm_ascend.patch.worker.patch_routed_experts_capturer import (  # type: ignore[import-untyped]
             init_buffer,
         )
 
@@ -146,7 +146,7 @@ class TestPatchRoutedExpertsCapturer(TestBase):
 
     def test_init_buffer_idempotent_error(self):
         """Re-initializing should raise RuntimeError."""
-        from vllm_ascend.patch.worker.patch_routed_experts_capturer import (
+        from vllm_ascend.patch.worker.patch_routed_experts_capturer import (  # type: ignore[import-untyped]
             init_buffer,
         )
 
