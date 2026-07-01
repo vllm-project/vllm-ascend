@@ -233,6 +233,7 @@ jobs:
       - name: Build and push image
         id: build
         run: |
+          echo "Installing buildctl..." mkdir -p /tmp/buildkit BUILDKIT_VERSION="v0.29.0" ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') wget -q "https://github.com/moby/buildkit/releases/download/${BUILDKIT_VERSION}/buildkit-${BUILDKIT_VERSION}.linux-${ARCH}.tar.gz" -O /tmp/buildkit.tar.gz tar -xzf /tmp/buildkit.tar.gz -C /tmp/buildkit cp /tmp/buildkit/bin/buildctl /usr/local/bin/ chmod +x /usr/local/bin/buildctl echo "buildctl installed successfully" buildctl --version
           set -ex
 
           IMAGE_TAG="vllm-ascend-pr${{ inputs.pr_number }}-${{ matrix.vllm_label }}-${{ matrix.npu_type }}-${{ matrix.arch }}"
