@@ -14,7 +14,6 @@ from collections.abc import Iterable
 import regex as re
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from transformers import PretrainedConfig
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
@@ -23,7 +22,6 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import logger
-from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -37,19 +35,18 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from vllm_ascend.models.deepseek_v4 import (
+    DeepseekV2DecoderLayer,
     DeepseekV2MixtureOfExperts,
     DeepseekV4Attention,
-    DeepseekV4MoE,
-    _hc_post_torch,
-    _hc_pre_torch,
-    _use_torch_hc_fallback,
+    _apply_dsv4_rope,
+    _apply_dsv4_rope_tail,
+    _grouped_wo_a_projection,
+    _hc_head_torch,
+    _linear_output,
+    _make_deepseek_v4_expert_params_mapping,
+    _wo_a_weight_for_eager_projection,
 )
 from vllm_ascend.ops.dspark_attention import dspark_attention
-from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
-from vllm_ascend.utils import vllm_version_is
-
-if not vllm_version_is("0.23.0"):
-    from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_mapping
 
 _EXPERT_SCALE_RE = re.compile(r"\.experts\.\d+\.(gate_proj|up_proj|down_proj)\.scale$")
 _LAYER_ID_RE = re.compile(r"model\.layers\.(\d+)\.")
@@ -65,11 +62,6 @@ def _draft_quant_config(vllm_config: VllmConfig):
     if getattr(draft_config, "dspark_mtp_dequantized_to_bf16", False):
         return None
     return vllm_config.quant_config
-
-
-def _linear(layer: nn.Module, x: torch.Tensor) -> torch.Tensor:
-    out = layer(x)
-    return out[0] if isinstance(out, tuple) else out
 
 
 def _dspark_cache_capacity(vllm_config: VllmConfig, block_size: int, window_size: int | None = None) -> int:
@@ -138,61 +130,6 @@ def _fp8_qdq_nope_dims(
         return kv
     kv_nope = _fp8_e4m3fn_qdq(kv[..., :nope_head_dim], block_size)
     return torch.cat([kv_nope, kv[..., nope_head_dim:]], dim=-1)
-
-
-def _grouped_wo_a_projection(
-    attn_out: torch.Tensor,
-    wo_a: torch.Tensor,
-) -> torch.Tensor:
-    return torch.matmul(attn_out.transpose(0, 1), wo_a.transpose(1, 2)).transpose(0, 1)
-
-
-def _apply_dsv4_rope(
-    rotary_emb: nn.Module,
-    positions: torch.Tensor,
-    x: torch.Tensor,
-    *,
-    inverse: bool = False,
-) -> torch.Tensor:
-    cos, sin = get_cos_and_sin_dsa(positions)
-    layer_name = rotary_emb.layername
-    cos_t = cos[layer_name]
-    sin_t = sin[layer_name]
-    if inverse:
-        sin_t = -sin_t
-    return rotary_emb(x, cos_t, sin_t)
-
-
-def _apply_dsv4_rope_tail(
-    rotary_emb: nn.Module,
-    positions: torch.Tensor,
-    x: torch.Tensor,
-    *,
-    inverse: bool = False,
-) -> torch.Tensor:
-    rotary_dim = rotary_emb.rotary_dim
-    if x.shape[-1] == rotary_dim:
-        return _apply_dsv4_rope(rotary_emb, positions, x, inverse=inverse)
-    x_pass, x_rot = x[..., :-rotary_dim], x[..., -rotary_dim:]
-    x_rot = _apply_dsv4_rope(rotary_emb, positions, x_rot, inverse=inverse)
-    return torch.cat([x_pass, x_rot], dim=-1)
-
-
-def _hc_head(
-    x: torch.Tensor,
-    hc_fn: torch.Tensor,
-    hc_scale: torch.Tensor,
-    hc_base: torch.Tensor,
-    rms_norm_eps: float,
-    hc_eps: float,
-) -> torch.Tensor:
-    shape, dtype = x.size(), x.dtype
-    x_flat = x.flatten(1).float()
-    rsqrt = torch.rsqrt(x_flat.square().mean(-1, keepdim=True) + rms_norm_eps)
-    mixes = F.linear(x_flat, hc_fn) * rsqrt
-    pre = torch.sigmoid(mixes * hc_scale + hc_base) + hc_eps
-    y = torch.sum(pre.unsqueeze(-1) * x_flat.view(shape), dim=1)
-    return y.to(dtype)
 
 
 class DeepseekV4DSparkAttention(DeepseekV4Attention):
@@ -272,7 +209,7 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        kv = self.kv_norm(_linear(self.wkv, hidden_states))
+        kv = self.kv_norm(_linear_output(self.wkv, hidden_states))
         k_nope, k_pe = kv.split([self.nope_head_dim, self.rope_head_dim], dim=-1)
         k_pe = _apply_dsv4_rope(self.rotary_emb, positions, k_pe.unsqueeze(1)).squeeze(1)
         kv = torch.cat([k_nope, k_pe], dim=-1)
@@ -369,10 +306,10 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         request_slots: torch.Tensor | None = None,
     ) -> torch.Tensor:
         del llama_4_scaling
-        qr = self.q_norm(_linear(self.wq_a, hidden_states))
-        kv = self.kv_norm(_linear(self.wkv, hidden_states))
+        qr = self.q_norm(_linear_output(self.wq_a, hidden_states))
+        kv = self.kv_norm(_linear_output(self.wkv, hidden_states))
 
-        q = _linear(self.wq_b, qr).view(-1, self.n_local_heads, self.head_dim)
+        q = _linear_output(self.wq_b, qr).view(-1, self.n_local_heads, self.head_dim)
         q = self.q_norm_without_weight(q)
         q_nope, q_pe = q.split([self.nope_head_dim, self.rope_head_dim], dim=-1)
         k_nope, k_pe = kv.split([self.nope_head_dim, self.rope_head_dim], dim=-1)
@@ -402,111 +339,41 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         group_dim = self.n_local_heads * self.head_dim // self.n_local_groups
         attn_out = attn_out.reshape(-1, self.n_local_groups, group_dim)
         attn_out = _fp8_e4m3fn_qdq(attn_out, 128)
-        wo_a_weight = self.wo_a.weight
-        if wo_a_weight.ndim == 3:
-            # Ascend's wo_a loader stores weights as [group, group_dim, rank]
-            # for the main DSA path. DSpark's eager projection needs the
-            # original [group, rank, group_dim] layout.
-            wo_a = wo_a_weight.transpose(1, 2).contiguous()
-        else:
-            wo_a = wo_a_weight.view(self.n_local_groups, self.o_lora_rank, group_dim)
+        wo_a = _wo_a_weight_for_eager_projection(
+            self.wo_a.weight,
+            self.n_local_groups,
+            self.o_lora_rank,
+            group_dim,
+        )
         z = _grouped_wo_a_projection(attn_out, wo_a).flatten(1)
-        return _linear(self.wo_b, z)
+        return _linear_output(self.wo_b, z)
 
 
-class DeepseekV4DSparkDecoderLayer(nn.Module):
+class DeepseekV4DSparkDecoderLayer(DeepseekV2DecoderLayer):
     def __init__(self, vllm_config: VllmConfig, prefix: str) -> None:
-        super().__init__()
         assert vllm_config.speculative_config is not None
         config = vllm_config.speculative_config.draft_model_config.hf_config
-        quant_config = _draft_quant_config(vllm_config)
-        parallel_config = vllm_config.parallel_config
-        self.hidden_size = config.hidden_size
-        self.layer_idx = int(prefix.split(sep=".")[-1])
-        self.norm_eps = config.rms_norm_eps
-        self.self_attn = DeepseekV4DSparkAttention(
+        super().__init__(
             vllm_config=vllm_config,
+            prefix=prefix,
             config=config,
-            max_position_embeddings=config.rope_parameters["original_max_position_embeddings"],
-            cache_config=vllm_config.cache_config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.self_attn",
             topk_indices_buffer=None,
-        )
-        self.mlp = DeepseekV4MoE(
-            config=config,
-            parallel_config=parallel_config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.mlp",
             is_draft_layer=True,
+            attn_cls=DeepseekV4DSparkAttention,
+            quant_config_override=_draft_quant_config(vllm_config),
+            use_quant_config_override=True,
         )
-        self.input_layernorm = RMSNorm(config.hidden_size, eps=self.norm_eps)
-        self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=self.norm_eps)
-        self.hc_mult = config.hc_mult
-        self.hc_sinkhorn_iters = config.hc_sinkhorn_iters
-        self.hc_eps = config.hc_eps
-        mix_hc = (2 + self.hc_mult) * self.hc_mult
-        hc_dim = self.hc_mult * config.hidden_size
-        self.hc_attn_fn = nn.Parameter(torch.empty(mix_hc, hc_dim, dtype=torch.float32))
-        self.hc_ffn_fn = nn.Parameter(torch.empty(mix_hc, hc_dim, dtype=torch.float32))
-        self.hc_attn_base = nn.Parameter(torch.empty(mix_hc, dtype=torch.float32))
-        self.hc_ffn_base = nn.Parameter(torch.empty(mix_hc, dtype=torch.float32))
-        self.hc_attn_scale = nn.Parameter(torch.empty(3, dtype=torch.float32))
-        self.hc_ffn_scale = nn.Parameter(torch.empty(3, dtype=torch.float32))
-        self.use_torch_hc = _use_torch_hc_fallback(vllm_config)
-
-    def hc_pre(
-        self,
-        x: torch.Tensor,
-        hc_fn: torch.Tensor,
-        hc_scale: torch.Tensor,
-        hc_base: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        if self.use_torch_hc:
-            return _hc_pre_torch(
-                x,
-                hc_fn,
-                hc_scale,
-                hc_base,
-                self.hc_mult,
-                self.hc_sinkhorn_iters,
-                self.norm_eps,
-                self.hc_eps,
-            )
-        return torch.ops._C_ascend.npu_hc_pre_v2(
-            x,
-            hc_fn,
-            hc_scale,
-            hc_base,
-            self.hc_mult,
-            self.hc_sinkhorn_iters,
-            self.norm_eps,
-            self.hc_eps,
-        )
-
-    def hc_post(
-        self,
-        x: torch.Tensor,
-        residual: torch.Tensor,
-        post: torch.Tensor,
-        comb: torch.Tensor,
-    ) -> torch.Tensor:
-        if self.use_torch_hc:
-            return _hc_post_torch(x, residual, post, comb)
-        return torch.ops._C_ascend.npu_hc_post(
-            x.unsqueeze(dim=0),
-            residual.unsqueeze(dim=0),
-            post.unsqueeze(dim=0),
-            comb.unsqueeze(dim=0),
-        ).squeeze(dim=0)
 
     def forward(
         self,
-        hidden_states: torch.Tensor,
         positions: torch.Tensor,
-        input_ids: torch.Tensor | None,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None = None,
+        llama_4_scaling: torch.Tensor | None = None,
+        input_ids: torch.Tensor | None = None,
         request_slots: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        del residual, llama_4_scaling
         residual = hidden_states.clone()
         hidden_states, post, comb = self.hc_pre(hidden_states, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base)
         hidden_states = self.input_layernorm(hidden_states)
@@ -564,7 +431,7 @@ class DSparkConfidenceHead(nn.Module):
 
     def forward(self, hidden: torch.Tensor, markov_embed: torch.Tensor) -> torch.Tensor:
         hidden = torch.cat([hidden, markov_embed], dim=-1)
-        return _linear(self.proj, hidden.float()).squeeze(-1)
+        return _linear_output(self.proj, hidden.float()).squeeze(-1)
 
 
 class DeepseekV4DSparkModel(nn.Module):
@@ -653,7 +520,7 @@ class DeepseekV4DSparkModel(nn.Module):
         del context_slot_mapping
         if context_states.numel() == 0:
             return
-        main_x = self.main_norm(_linear(self.main_proj, context_states))
+        main_x = self.main_norm(_linear_output(self.main_proj, context_states))
         for layer in self.layers.values():
             layer.self_attn.precompute_context_kv(main_x, context_positions, context_request_slots)
 
@@ -674,13 +541,18 @@ class DeepseekV4DSparkModel(nn.Module):
             inputs_embeds = self.embed_tokens(input_ids)
         hidden_states = inputs_embeds.unsqueeze(-2).repeat(1, self.hc_mult, 1)
         for layer in self.layers.values():
-            hidden_states = layer(hidden_states, positions, input_ids, request_slots=request_slots)
+            hidden_states = layer(
+                positions=positions,
+                hidden_states=hidden_states,
+                input_ids=input_ids,
+                request_slots=request_slots,
+            )
         return self.compute_head_hidden(hidden_states)
 
     def compute_head_hidden(self, hidden_states: torch.Tensor) -> torch.Tensor:
         if hidden_states.dim() == 2:
             return hidden_states
-        return _hc_head(
+        return _hc_head_torch(
             hidden_states,
             self.hc_head_fn,
             self.hc_head_scale,
@@ -705,19 +577,8 @@ class DeepseekV4DSparkModel(nn.Module):
         return logits_processor(lm_head, self.norm(head_hidden))
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-        if vllm_version_is("0.23.0"):
-            return FusedMoE.make_expert_params_mapping(
-                self,
-                ckpt_gate_proj_name="gate_proj",
-                ckpt_down_proj_name="down_proj",
-                ckpt_up_proj_name="up_proj",
-                num_experts=self.config.n_routed_experts,
-            )
-        return fused_moe_make_expert_params_mapping(
+        return _make_deepseek_v4_expert_params_mapping(
             self,
-            ckpt_gate_proj_name="gate_proj",
-            ckpt_down_proj_name="down_proj",
-            ckpt_up_proj_name="up_proj",
             num_experts=self.config.n_routed_experts,
         )
 
@@ -748,17 +609,7 @@ class DeepSeekV4DSparkMTP(nn.Module, DeepseekV2MixtureOfExperts):
         self.set_moe_parameters()
 
     def set_moe_parameters(self) -> None:
-        self.expert_weights: typing.MutableSequence[typing.Sequence[torch.Tensor]] = []
-        self.num_expert_groups = getattr(self.config, "n_group", 1)
-        self.moe_layers: list[nn.Module] = []
-        self.moe_mlp_layers: list[DeepseekV4MoE] = []
-        example_moe = None
-        for layer in self.model.layers.values():
-            if isinstance(layer.mlp, DeepseekV4MoE):
-                example_moe = layer.mlp
-                self.moe_mlp_layers.append(layer.mlp)
-                self.moe_layers.append(layer.mlp.experts)
-        self.extract_moe_parameters(example_moe)
+        self.set_moe_parameters_from_layers(self.config, self.model.layers.values())
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
