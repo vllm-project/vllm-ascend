@@ -141,6 +141,10 @@ class AscendAttentionBackend(AttentionBackend):
     def get_supported_kernel_block_sizes() -> list[int]:
         return [128]
 
+    @classmethod
+    def supports_non_causal(cls) -> bool:
+        return True
+
 
 class AscendAttentionState(Enum):
     PrefillNoCache = 0
@@ -1367,7 +1371,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             value=value,
             key_cache=self.key_cache,
             value_cache=self.value_cache,
-            slot_mapping=slot_mapping,
+            slot_mapping=slot_mapping.to(torch.int32),
         )
 
     def reshape_and_cache(
