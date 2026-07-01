@@ -28,7 +28,6 @@ vllm.model_executor.layers.fla.ops.index.prepare_chunk_offsets = prepare_chunk_o
 attn_backend_utils.compute_causal_conv1d_metadata = compute_causal_conv1d_metadata
 
 
-
 # Qwen3.5 on 310P uses upstream GDNAttentionBackend via MambaBase.get_attn_backend().
 
 GDNAttentionBackend.get_builder_cls = staticmethod(  # type: ignore[method-assign]
