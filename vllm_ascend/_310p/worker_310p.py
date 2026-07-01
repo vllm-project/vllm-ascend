@@ -22,6 +22,8 @@ import torch_npu
 from vllm.logger import logger
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, memory_profiling
+
+from vllm_ascend.utils import vllm_version_is
 from vllm.utils.torch_utils import set_random_seed  # noqa: E402
 
 from vllm_ascend._310p.model_runner_310p import NPUModelRunner310
@@ -137,7 +139,10 @@ class NPUWorker310(NPUWorker):
         torch.npu.empty_cache()
 
         # take current memory snapshot
-        self.init_snapshot = MemorySnapshot()
+        if vllm_version_is("0.23.0"):
+            self.init_snapshot = MemorySnapshot()
+        else:
+            self.init_snapshot = MemorySnapshot(device=device)
         self.requested_memory = self.init_snapshot.total_memory * self.cache_config.gpu_memory_utilization
         if is_rc_device():
             self.init_snapshot.free_memory = psutil.virtual_memory().available
