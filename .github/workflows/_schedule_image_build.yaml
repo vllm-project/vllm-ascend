@@ -84,9 +84,11 @@ jobs:
           - arch: linux/amd64
             runner: ubuntu-latest
             tag: amd64
+
           - arch: linux/arm64
             runner: ubuntu-22.04-arm
             tag: arm64
+
     steps:
 
     - name: Validate inputs (workflow_dispatch only)
@@ -128,30 +130,33 @@ jobs:
           fi
         fi
 
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@v7
       if: ${{ github.event_name == 'workflow_dispatch' && inputs.vllm_ascend_commit != '' }}
       with:
         fetch-depth: 0
         persist-credentials: false
         ref: ${{ inputs.vllm_ascend_commit }}
 
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@v7
       if: ${{ github.event_name != 'workflow_dispatch' }}
       with:
+        submodules: recursive
         fetch-depth: 0
         persist-credentials: false
         ref: ${{ inputs.branch_ref }}
 
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@v7
       if: ${{ github.event_name == 'workflow_dispatch' && inputs.workflow_dispatch_tag != '' }}
       with:
+        submodules: recursive
         fetch-depth: 0
         persist-credentials: false
         ref: ${{ inputs.workflow_dispatch_tag }}
 
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@v7
       if: ${{ github.event_name == 'workflow_dispatch' && inputs.workflow_dispatch_tag == '' && inputs.vllm_ascend_commit == '' }}
       with:
+        submodules: recursive
         fetch-depth: 0
         persist-credentials: false
         ref: ${{ inputs.branch_ref }}
@@ -206,6 +211,16 @@ jobs:
         DOCKERFILE="${{ inputs.dockerfile || 'Dockerfile' }}"
         BASE_IMAGE_TAG=$(grep -m1 '^FROM' "$DOCKERFILE" | awk -F: '{print $NF}')
         echo "BASE_IMAGE_TAG=$BASE_IMAGE_TAG" >> $GITHUB_OUTPUT
+        
+    - name: Get architecture
+      id: get_arch
+      run: |
+        ARCH=$(uname -m)
+        case "$ARCH" in
+          x86_64) echo "arch=X64" >> $GITHUB_OUTPUT ;;
+          aarch64) echo "arch=ARM64" >> $GITHUB_OUTPUT ;;
+          *) echo "arch=$ARCH" >> $GITHUB_OUTPUT ;;
+        esac
 
     - name: Cache vllm-ascend csrc
       id: cache-csrc
@@ -216,7 +231,7 @@ jobs:
             vllm_ascend/*.so
             vllm_ascend/lib
             vllm_ascend/include
-        key: vllm-ascend-build-v1-${{ runner.arch }}-${{ steps.get_base_image_tag.outputs.BASE_IMAGE_TAG }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+        key: vllm-ascend-build-v1-${{ steps.get_arch.outputs.arch }}-${{ steps.get_base_image_tag.outputs.BASE_IMAGE_TAG }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
 
     - name: Build and push
@@ -284,15 +299,17 @@ jobs:
     if: ${{ inputs.should_push && !inputs.temp_only }}
     steps:
       - name: Checkout branch
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         if: ${{ github.event_name != 'workflow_dispatch' || (github.event_name == 'workflow_dispatch' && inputs.workflow_dispatch_tag == '') }}
         with:
+          submodules: recursive
           ref: ${{ inputs.branch_ref }}
 
       - name: Checkout tag
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.workflow_dispatch_tag != '' }}
         with:
+          submodules: recursive
           ref: ${{ inputs.workflow_dispatch_tag }}
 
       - name: Download arm64 digests

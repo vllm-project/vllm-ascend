@@ -50,28 +50,61 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         result = cls.check_all_layers_exists(None, [0, 0, 0], 3)
         self.assertEqual(result, [0])
 
-    def test_find_max_hit_index_found(self):
+    def test_find_all_continuous_hit_positions_found(self):
         cls = self._make_worker_class()
         arr = [[1, 1, 0], [1, 0, 1]]
-        result = cls.find_max_hit_index(None, arr, 3)
-        self.assertEqual(result, 0)
+        result = cls.find_all_continuous_hit_positions(arr, [16, 32, 48], 3, 48, 16)
+        self.assertEqual(result, [16])
 
-    def test_find_max_hit_index_all_one(self):
+    def test_find_all_continuous_hit_positions_all_one(self):
         cls = self._make_worker_class()
         arr = [[1, 1, 1], [1, 1, 1]]
-        result = cls.find_max_hit_index(None, arr, 3)
-        self.assertEqual(result, 2)
+        result = cls.find_all_continuous_hit_positions(arr, [16, 32, 48], 3, 48, 16)
+        self.assertEqual(result, [16, 32, 48])
 
-    def test_find_max_hit_index_first_pos(self):
+    def test_find_all_continuous_hit_positions_first_pos(self):
         cls = self._make_worker_class()
         arr = [[0, 1], [1, 0]]
-        result = cls.find_max_hit_index(None, arr, 3)
-        self.assertEqual(result, -1)
+        result = cls.find_all_continuous_hit_positions(arr, [16, 32], 2, 48, 16)
+        self.assertEqual(result, [])
 
-    def test_find_max_hit_index_empty(self):
+    def test_find_all_continuous_hit_positions_empty(self):
         cls = self._make_worker_class()
-        result = cls.find_max_hit_index(None, [], 0)
-        self.assertEqual(result, -1)
+        result = cls.find_all_continuous_hit_positions([], [], 0, 48, 16)
+        self.assertEqual(result, [])
+
+    def test_find_all_discontinuous_hit_positions_all_tp_hits(self):
+        cls = self._make_worker_class()
+        arr = [[0, 0, 1, 0, 0, 1], [0, 0, 1, 0, 0, 1]]
+        result = cls.find_all_discontinuous_hit_positions(arr, [16, 32, 48, 64, 80, 96], 6, 128, 16)
+        self.assertEqual(result, [48, 96])
+
+    def test_find_all_discontinuous_hit_positions_some_tp_hits(self):
+        cls = self._make_worker_class()
+        arr = [[0, 0, 1, 0, 0, 1], [0, 0, 1, 0, 0, 0]]
+        result = cls.find_all_discontinuous_hit_positions(arr, [16, 32, 48, 64, 80, 96], 6, 128, 16)
+        self.assertEqual(result, [48])
+
+    def test_find_all_discontinuous_hit_positions_all_tp_hits_with_limits(self):
+        cls = self._make_worker_class()
+        arr = [[0, 0, 1, 0, 0, 1], [0, 0, 1, 0, 0, 1]]
+        result = cls.find_all_discontinuous_hit_positions(arr, [16, 32, 48, 64, 80, 96], 6, 64, 16)
+        self.assertEqual(result, [48])
+
+    def test_max_intersection_hit_position_single_group(self):
+        cls = self._make_worker_class()
+        hits = [[16, 32, 48]]
+        self.assertEqual(48, cls._max_intersection_hit_position(hits))
+
+    def test_max_intersection_hit_position_empty_group(self):
+        cls = self._make_worker_class()
+        hits: list[list[int]] = []
+        self.assertEqual(0, cls._max_intersection_hit_position(hits))
+
+    def test_max_intersection_hit_position_multi_group(self):
+        cls = self._make_worker_class()
+        hits = [[16, 32, 48], [32, 48], [16, 32], [32, 48, 64]]
+        self.assertEqual(32, cls._max_intersection_hit_position(hits))
 
 
 class TestKVPoolWorkerInit(unittest.TestCase):
@@ -84,6 +117,7 @@ class TestKVPoolWorkerInit(unittest.TestCase):
         config.model_config.hf_text_config = MagicMock(spec=[])  # no index_topk
         config.model_config.get_num_layers.return_value = 32
         config.model_config.get_total_num_kv_heads.return_value = 8
+        config.model_config.max_model_len = 1024
         config.parallel_config.data_parallel_rank = 0
         config.parallel_config.rank = 0
         config.parallel_config.pipeline_parallel_size = 1
@@ -461,6 +495,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         config.model_config.model = "org/llama-7b"
         config.model_config.use_mla = False
         config.model_config.hf_text_config = MagicMock(spec=[])
+        config.model_config.max_model_len = 1024
         config.model_config.get_num_layers.return_value = 2
         config.model_config.get_total_num_kv_heads.return_value = 1
         config.parallel_config.data_parallel_rank = 0

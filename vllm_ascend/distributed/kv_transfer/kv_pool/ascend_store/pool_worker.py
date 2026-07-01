@@ -78,6 +78,7 @@ class KVPoolWorker:
         hf_config = getattr(model_config, "hf_config", hf_text_config)
         self.hf_config = hf_text_config or hf_config
         self.compress_ratios = getattr(hf_text_config, "compress_ratios", None)
+        self.max_model_len = model_config.max_model_len
         if self.compress_ratios is None:
             self.compress_ratios = getattr(hf_config, "compress_ratios", None)
         self.use_compress = self.compress_ratios is not None
@@ -338,6 +339,25 @@ class KVPoolWorker:
         self.group_block_stride[group_id] = group_block_strides
         self.group_num_layers[group_id] = len(layer_names)
 
+    def _align_kv_ptrs(self, registered_regions: dict[int, tuple[int, int]]):
+        """
+        In hybrid scenario, where a KVCacheTensor is shared by multiple layers,
+        but sometimes, layers cannot be evenly distributed among multiple groups,
+        the layers sharing the KVCacheTensor may not completely occupy all the space of the KVCacheTensor.
+        This results in the calculated start address not being the previously aligned address.
+        Therefore, we down-align the start address to meet the 2MB alignment requirement.
+        """
+        if not self.use_hybrid:
+            return
+        alignment = 2 * 1024 * 1024
+        for storage_key in registered_regions:
+            start, end = registered_regions[storage_key]
+            new_start = start // alignment * alignment
+            # Because the addresses of raw tensors are aligned to 2MB,
+            # all shared sub-tensors, when aligned downwards, should theoretically not exceed the address bounds.
+            assert new_start >= storage_key, "invalid kv cache tensor, raw tensor ptr must be align to 2MB"
+            registered_regions[storage_key] = (new_start, end)
+
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         _, first_kv_cache_tuple = next(iter(kv_caches.items()))
         first_kv_cache_tuple = self._as_cache_tuple(first_kv_cache_tuple)
@@ -380,6 +400,7 @@ class KVPoolWorker:
                 else:
                     registered_regions[storage_key] = (start, end)
 
+        self._align_kv_ptrs(registered_regions)
         ptrs = [start for start, _ in registered_regions.values()]
         lengths = [end - start for start, end in registered_regions.values()]
 
@@ -560,13 +581,31 @@ class KVPoolWorker:
                             block_id_list_c,
                             ret,
                         )
-                        self._invalid_block_ids.update(missing_block_ids)
+                        if len(request.block_ids_by_group) == 1:
+                            self._invalid_block_ids.update(missing_block_ids)
+                        elif missing_block_ids:
+                            logger.error(
+                                "KV load failed for hybrid request %s. "
+                                "Skip invalid-block fallback to avoid scheduler crash. "
+                                "failed_blocks=%s",
+                                request.req_id,
+                                missing_block_ids,
+                            )
                     elif ret is None:
                         missing_block_ids = record_failed_blocks(
                             block_id_list_c,
                             [1] * len(block_id_list_c),
                         )
-                        self._invalid_block_ids.update(missing_block_ids)
+                        if len(request.block_ids_by_group) == 1:
+                            self._invalid_block_ids.update(missing_block_ids)
+                        elif missing_block_ids:
+                            logger.error(
+                                "KV load failed for hybrid request %s. "
+                                "Skip invalid-block fallback to avoid scheduler crash. "
+                                "failed_blocks=%s",
+                                request.req_id,
+                                missing_block_ids,
+                            )
                     logger.debug(
                         "KV pool worker backend get returned request=%s token_len=%d groups=%s keys=%d",
                         request.req_id,
@@ -980,7 +1019,8 @@ class KVPoolWorker:
         :return: An int indicating how many prefix tokens are cached.
         """
         try:
-            hits = []
+            hits: list[list[int]] = []
+            max_hit_position = self.max_model_len
             kv_cache_group_ids = kv_cache_group_ids or [0]
             kv_cache_group_ids = self._get_lookup_gate_group_ids(kv_cache_group_ids)
             for group_id in kv_cache_group_ids:
@@ -1043,32 +1083,22 @@ class KVPoolWorker:
                     multi_tp_keys[:3],
                 )
                 if group_id < len(self.group_uses_align_state) and self.group_uses_align_state[group_id]:
-                    # mamba group with align mode will skip some null block, we must loop it in reverse order
-                    for i in range(num_block - 1, -1, -1):
-                        if (
-                            all(values[i] == 1 for values in multi_tp_values)
-                            and ends[i] % self.cache_transfer_granularity == 0
-                        ):
-                            hits.append(ends[i])
-                            break
-                    else:
-                        return 0
+                    group_hits = self.find_all_discontinuous_hit_positions(
+                        multi_tp_values, ends, num_block, max_hit_position, self.cache_transfer_granularity
+                    )
                 else:
-                    index = self.find_max_hit_index(multi_tp_values, num_block)
-                    if index == -1:
-                        return 0
-                    else:
-                        for hit_index in range(index, -1, -1):
-                            if ends[hit_index] % self.cache_transfer_granularity == 0:
-                                hits.append(ends[hit_index])
-                                break
-                        else:
-                            return 0
+                    group_hits = self.find_all_continuous_hit_positions(
+                        multi_tp_values, ends, num_block, max_hit_position, self.cache_transfer_granularity
+                    )
+                if not group_hits:
+                    return 0
+                max_hit_position = min(max_hit_position, group_hits[-1])
+                hits.append(group_hits)
                 logger.debug(
                     "KV pool scheduler lookup group=%d keys=%d hit=%d token_len=%d",
                     group_id,
                     len(keys),
-                    hits[-1],
+                    max_hit_position,
                     token_len,
                 )
         except Exception as e:
@@ -1078,14 +1108,26 @@ class KVPoolWorker:
                 e,
             )
             return 0
+        final_hits = self._max_intersection_hit_position(hits)
         logger.debug(
-            "KV pool scheduler lookup final token_len=%d groups=%s hits=%s result=%d",
+            "KV pool scheduler lookup final token_len=%d groups=%s hit=%d",
             token_len,
             kv_cache_group_ids,
-            hits,
-            min(hits) if hits else 0,
+            final_hits,
         )
-        return min(hits) if hits else 0
+        return final_hits
+
+    @staticmethod
+    def _max_intersection_hit_position(hits: list[list[int]]) -> int:
+        """
+        For all attention groups, treat the position of the maximum common hit as the final hit position
+        """
+        if not hits:
+            return 0
+        common_elements = set(hits[0]).intersection(*hits[1:])
+        if not common_elements:
+            return 0
+        return max(common_elements)
 
     def check_all_layers_exists(self, res: list[int], num_layers: int) -> list[int]:
         total_chunks = len(res) // num_layers
@@ -1099,13 +1141,37 @@ class KVPoolWorker:
 
         return result
 
-    def find_max_hit_index(self, arr, num_blocks: int):
+    @staticmethod
+    def find_all_discontinuous_hit_positions(
+        arr, ends, num_blocks: int, max_hit_position: int, cache_transfer_granularity: int
+    ) -> list[int]:
+        """
+        For mamba attn, there will be some uncached null blocks, we just collect all hit positions,
+        and use the last position as final hit position
+        """
+        hits: list[int] = []
         for i in range(num_blocks):
-            if any(row[i] != 1 for row in arr):
-                return i - 1
-        else:
-            # if arr is not empty, all hits, else no hits
-            return len(arr[0]) - 1 if arr else -1
+            if ends[i] > max_hit_position:
+                break
+            if all(row[i] == 1 for row in arr):
+                if ends[i] % cache_transfer_granularity == 0:
+                    hits.append(ends[i])
+        return hits
+
+    @staticmethod
+    def find_all_continuous_hit_positions(
+        arr, ends, num_blocks: int, max_hit_position: int, cache_transfer_granularity: int
+    ) -> list[int]:
+        hits: list[int] = []
+        for i in range(num_blocks):
+            if ends[i] > max_hit_position:
+                break
+            if all(row[i] == 1 for row in arr):
+                if ends[i] % cache_transfer_granularity == 0:
+                    hits.append(ends[i])
+            else:
+                break
+        return hits
 
     def get_kv_events(self) -> list[BlockStored]:
         if self.enable_kv_events and self.kv_send_thread is not None:

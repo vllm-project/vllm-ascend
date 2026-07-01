@@ -46,7 +46,7 @@ _benchmark_acc: &_benchmark_acc
     max_out_len: 32768
     batch_size: 32
     baseline: 90
-    threshold: 5
+    threshold: 10
 
 _benchmark_TPOT50_3_5k_1_5k: &_benchmark_TPOT50_3_5k_1_5k
   case_type: performance

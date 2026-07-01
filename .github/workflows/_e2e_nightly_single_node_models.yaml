@@ -50,10 +50,15 @@ on:
         type: string
         default: ''
         description: PR commit SHA for PR-triggered checkout
-    secrets:
-      OBS_ACCESS_KEY:
+      testcase_timeout:
         required: false
-      OBS_SECRET_KEY:
+        default: 120
+        type: string
+        description: test case execution timeout period,default:120 minutes
+    secrets:
+      OBS_ACCESS_KEY_ID:
+        required: false
+      OBS_SECRET_ACCESS_KEY:
         required: false
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
@@ -74,6 +79,7 @@ jobs:
     name: ${{inputs.model_list}} accuracy test
     runs-on: ${{ inputs.runner }}
     if: ${{ inputs.is_run }}
+    timeout-minutes: ${{ inputs.request_id != '' && 240 || fromJSON(inputs.testcase_timeout) }}
     container:
       image: "${{ inputs.image }}"
       env:
@@ -101,11 +107,12 @@ jobs:
 
       - name: Checkout vllm-project/vllm-ascend repo
         if: ${{ inputs.request_id != '' }}
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           ref: ${{ inputs.vllm_ascend_ref }}
           path: ./temp-vllm-ascend
           fetch-depth: 1
+          submodules: recursive
 
       - name: Move vllm-ascend code to /vllm-workspace
         if: ${{ inputs.request_id != '' }}
@@ -272,8 +279,8 @@ jobs:
         continue-on-error: true
         uses: ascend-gha-runners/artifact/upload@v0.3
         with:
-          access_key: ${{ secrets.OBS_ACCESS_KEY }}
-          secret_key: ${{ secrets.OBS_SECRET_KEY }}
+          access_key: ${{ secrets.OBS_ACCESS_KEY_ID }}
+          secret_key: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
           name: report-${{ env.GHA_VLLM_ASCEND_VERSION }}-${{ steps.ts.outputs.artifact_ts }}
           path: ./benchmarks/accuracy/
           if-no-files-found: warn
