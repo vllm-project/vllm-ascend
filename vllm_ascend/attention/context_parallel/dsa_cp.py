@@ -954,6 +954,14 @@ class AscendDSACPImpl(DSAAttentionImpl):
             self.compressor_norm = self.compressor.norm
             self.compressor_norm_eps = self.compressor.norm_eps
 
+    def _refresh_tp_group_runtime(self, force: bool = False) -> None:
+        tp_group = get_tp_group()
+        if not force and tp_group is self.tp_group:
+            return
+        self.tp_group = tp_group
+        self.tp_size = tp_group.world_size
+        self.tp_rank = tp_group.rank_in_group
+
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         if self.attn_sink.numel() != self.num_heads:
             raise RuntimeError(
@@ -970,6 +978,10 @@ class AscendDSACPImpl(DSAAttentionImpl):
         need_gather_q_kv: bool = False,
         output: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        # Snapshot resume rebuilds process groups, so cached coordinator objects
+        # may become stale (their device_group can be destroyed/deleted). Refresh
+        # TP group handle before collective communication.
+        self._refresh_tp_group_runtime()
         assert output is not None, "Output tensor must be provided."
         if attn_metadata is None:
             # Profiling run.
@@ -1242,7 +1254,10 @@ class AscendDSACPImpl(DSAAttentionImpl):
             .view(-1, self.n_local_heads, self.head_dim)
         )
         recv = torch.empty_like(send)
-        dist.all_to_all_single(recv, send, group=self.tp_group.device_group)
+        tp_group = get_tp_group()
+        # Keep runtime copy in sync for future calls and logs.
+        self._refresh_tp_group_runtime(force=True)
+        dist.all_to_all_single(recv, send, group=tp_group.device_group)
         return recv
 
     def _update_indexer_cache(
