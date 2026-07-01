@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
 from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
@@ -18,16 +19,16 @@ from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
     FullAttentionSpec,
     KVCacheSpec,
-    MLAAttentionSpec,
     SlidingWindowSpec,
 )
 from vllm.v1.request import Request
 
-from vllm_ascend.utils import vllm_version_is
+if TYPE_CHECKING:
+    from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 
 
 class CompressAttentionManager(FullAttentionManager):
-    def __init__(self, kv_cache_spec: MLAAttentionSpec, block_pool: BlockPool, **kwargs) -> None:
+    def __init__(self, kv_cache_spec: "AscendMLAAttentionSpec", block_pool: BlockPool, **kwargs) -> None:
         super().__init__(kv_cache_spec, block_pool, **kwargs)
         self.compress_ratio = kv_cache_spec.compress_ratio
         self._null_block = block_pool.null_block
@@ -159,6 +160,8 @@ class CompressAttentionManager(FullAttentionManager):
         request: Request,
         num_tokens: int,
         retention_interval: int | None = None,
+        *,
+        alignment_tokens: int | None = None,
     ) -> None:
         """
         Cache the blocks for the request.
@@ -168,6 +171,9 @@ class CompressAttentionManager(FullAttentionManager):
             num_tokens: The total number of tokens that need to be cached
                 (including tokens that are already cached).
             retention_interval: Prefix-cache retention interval.
+            alignment_tokens: Cache-hit alignment passed by hybrid KV cache
+                coordinators. Compressed attention caches logical blocks, so no
+                extra block mask is needed here.
         """
         num_cached_blocks = self.num_cached_block.get(request.request_id, 0)
         num_full_blocks = num_tokens // (self.block_size * self.compress_ratio)
@@ -196,11 +202,9 @@ class CompressAttentionManager(FullAttentionManager):
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
-        use_eagle: bool = False,
         drop_eagle_block: bool = False,
     ) -> tuple[list[KVCacheBlock], ...]:
-        # vLLM B renamed ``use_eagle`` to ``drop_eagle_block``; accept both.
-        eagle_drop = use_eagle if vllm_version_is("0.21.0") else drop_eagle_block
+        eagle_drop = drop_eagle_block
         # assert isinstance(
         #     kv_cache_spec, Compress4AttentionSpec | Compress128AttentionSpec | C4IndexerSpec
         # ), (
@@ -259,16 +263,13 @@ def get_manager_for_kv_cache_spec(
     this value matches the pool sizer and makes admission consistent with the
     block budget actually held.
     """
-    if vllm_version_is("0.21.0"):
-        from vllm.v1.core.single_type_kv_cache_manager import spec_manager_map  # type: ignore[import-not-found]
+    from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry  # type: ignore[import-not-found]
 
-        manager_class = spec_manager_map[type(kv_cache_spec)]
-    else:
-        from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry  # type: ignore[import-not-found]
+    from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 
-        manager_class = KVCacheSpecRegistry.get_manager_class(kv_cache_spec)
-        assert manager_class is not None, f"No KV cache manager registered for {type(kv_cache_spec).__name__}"
-    if isinstance(kv_cache_spec, MLAAttentionSpec) and kv_cache_spec.compress_ratio > 1:
+    manager_class = KVCacheSpecRegistry.get_manager_class(kv_cache_spec)
+    assert manager_class is not None, f"No KV cache manager registered for {type(kv_cache_spec).__name__}"
+    if isinstance(kv_cache_spec, AscendMLAAttentionSpec) and kv_cache_spec.compress_ratio > 1:
         manager_class = CompressAttentionManager
         if max_model_len is not None:
             # Compressed-MLA peak in blocks: ceil(max_model_len/compress/block).

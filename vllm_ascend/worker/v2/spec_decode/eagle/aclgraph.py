@@ -11,9 +11,18 @@ from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.logger import logger
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
+from vllm.v1.worker.gpu.cudagraph_utils import (  # type: ignore[import-not-found]
+    AttentionStatePair as CapturedAttentionState,
+)
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
+from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (  # type: ignore[import-not-found]
+    DecodeSpeculatorCudaGraphManager as DecodeEagleCudaGraphManager,
+)
+from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (
+    PrefillSpeculatorCudaGraphManager as PrefillEagleCudaGraphManager,
+)
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
@@ -22,26 +31,8 @@ from vllm_ascend.compilation.acl_graph import (
     set_draft_graph_prefill_params,
     update_full_graph_params,
 )
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.aclgraph_utils import ModelWithContext
 from vllm_ascend.worker.v2.utils import communicator_switch
-
-if vllm_version_is("0.21.0"):
-    from vllm.v1.worker.gpu.spec_decode.eagle.cudagraph import (  # type: ignore[import-not-found]
-        CapturedAttentionState,
-        DecodeEagleCudaGraphManager,
-        PrefillEagleCudaGraphManager,
-    )
-else:
-    from vllm.v1.worker.gpu.cudagraph_utils import (  # type: ignore[import-not-found]
-        AttentionStatePair as CapturedAttentionState,
-    )
-    from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (  # type: ignore[import-not-found]
-        DecodeSpeculatorCudaGraphManager as DecodeEagleCudaGraphManager,
-    )
-    from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (  # type: ignore[import-not-found]
-        PrefillSpeculatorCudaGraphManager as PrefillEagleCudaGraphManager,
-    )
 
 
 class PrefillEagleAclGraphManager(PrefillEagleCudaGraphManager):
@@ -91,9 +82,9 @@ class PrefillEagleAclGraphManager(PrefillEagleCudaGraphManager):
         """Override run_fullgraph to update full graph params in run_fullgraph."""
         num_tokens = desc.num_tokens
         if self.is_draft_model_prefill:
-            logger.info_once(f"draft prefill run_fullgraph with num_tokens={num_tokens}")
+            logger.info_once("PrefillEagleAclGraphManager: draft prefill run_fullgraph with num_tokens=%s", num_tokens)
         else:
-            logger.info_once(f"draft run_fullgraph with num_tokens={num_tokens}")
+            logger.info_once("DecodeEagleAclGraphManager: draft run_fullgraph with num_tokens=%s", num_tokens)
 
         draft_attn_metadatas = self.speculator.build_draft_attn_metadatas(desc.num_reqs, self.is_draft_model_prefill)
 
@@ -188,9 +179,9 @@ class DecodeEagleAclGraphManager(DecodeEagleCudaGraphManager):
         """Override run_fullgraph to update full graph params in run_fullgraph."""
         num_tokens = desc.num_tokens
         if self.is_draft_model_prefill:
-            logger.info_once(f"draft prefill run_fullgraph with num_tokens={num_tokens}")
+            logger.info_once("PrefillEagleAclGraphManager: draft prefill run_fullgraph with num_tokens=%s", num_tokens)
         else:
-            logger.info_once(f"draft run_fullgraph with num_tokens={num_tokens}")
+            logger.info_once("DecodeEagleAclGraphManager: draft run_fullgraph with num_tokens=%s", num_tokens)
 
         draft_attn_metadatas = self.speculator.build_draft_attn_metadatas(desc.num_reqs, self.is_draft_model_prefill)
 

@@ -44,7 +44,13 @@ class ChunkSizePredictor:
     This expands to the quadratic equation: a*x^2 + (2aL+b)*x - T = 0
     """
 
-    def __init__(self, smooth_factor: float = 0.8, min_chunk: int = 4096):
+    def __init__(
+        self,
+        smooth_factor: float = 0.8,
+        min_chunk: int = 4096,
+        max_fit_chunk: int = 30,
+    ):
+        self.max_fit_chunk = max_fit_chunk
         self.quadratic_coeff_a: float = 0.0
         self.linear_coeff_b: float = 0.0
         self.constant_coeff_c: float = 0.0
@@ -60,19 +66,6 @@ class ChunkSizePredictor:
         self.min_chunk = min_chunk
         self.history_fitted = False
 
-    def clamp_quadratic_and_linear_if_negative(self, fitted_a: float, fitted_b: float) -> tuple[float, float]:
-        """In theory, for the Transfomur structure of LLM, the fitted quadratic and linear
-        terms should not be negative. Can perform zero clamping for inaccurate fitting
-        """
-        if fitted_a < 0:
-            logger.warning("Fitted a=%.2e is not positive. Setting a=1e-9.", fitted_a)
-            fitted_a = 1e-9
-        if fitted_b < 0:
-            logger.warning("Fitted b=%.2e is not positive. Setting b=0.0.", fitted_b)
-            fitted_b = 1e-9
-
-        return fitted_a, fitted_b
-
     def fit(self, seq_lens: list[int], latencies: list[float]) -> bool:
         """Fit quadratic coefficients f(l) = al^2 + bl + c from data points.
 
@@ -85,7 +78,7 @@ class ChunkSizePredictor:
 
         if len(L) < MIN_FIT_POINTS_NO_CHUNK:
             logger.warning(
-                "Not enough data points for quadratic fitting (%d < 8)",
+                "[ProfilingChunk] Not enough data points for quadratic fitting (%d < 8)",
                 len(L),
             )
             return False
@@ -106,14 +99,12 @@ class ChunkSizePredictor:
                 fitted_b = float(poly[1])
                 fitted_c = float(poly[2])
                 logger.warning(
-                    "Least-squares fitting failed (%s), fallback to polyfit succeeded.",
+                    "[ProfilingChunk] Least-squares fitting failed (%s), fallback to polyfit succeeded.",
                     e,
                 )
             except Exception as fallback_error:
-                logger.warning("Failed to fit quadratic model: %s", fallback_error)
+                logger.warning("[ProfilingChunk] Failed to fit quadratic model: %s", fallback_error)
                 return False
-
-        fitted_a, fitted_b = self.clamp_quadratic_and_linear_if_negative(fitted_a, fitted_b)
 
         self.quadratic_coeff_a = fitted_a
         self.linear_coeff_b = fitted_b
@@ -138,11 +129,12 @@ class ChunkSizePredictor:
         # to be too long, so we have limited the amount of data.
         # 30 data points are already sufficient.
         MIN_FIT_POINTS_CHUNK = 5
-        MAX_FIT_POINTS_CHUNK = 30
+        MAX_FIT_POINTS_CHUNK = self.max_fit_chunk
         if num_points < MIN_FIT_POINTS_CHUNK:
             logger.warning(
-                "Not enough data points for chunked data fitting (%d < 5)",
+                "[ProfilingChunk] Not enough data points for chunked data fitting (%d < %d)",
                 num_points,
+                MIN_FIT_POINTS_CHUNK,
             )
             return False
         if num_points > MAX_FIT_POINTS_CHUNK:
@@ -159,10 +151,8 @@ class ChunkSizePredictor:
             fitted_b = float(params[1])
             fitted_c = float(params[2])
         except np.linalg.LinAlgError as e:
-            logger.warning("Failed to fit chunked model: %s", e)
+            logger.warning("[ProfilingChunk] Failed to fit chunked model: %s", e)
             return False
-
-        fitted_a, fitted_b = self.clamp_quadratic_and_linear_if_negative(fitted_a, fitted_b)
 
         self.quadratic_chunk_a = fitted_a
         self.linear_chunk_b = fitted_b
@@ -190,7 +180,7 @@ class ChunkSizePredictor:
             self.target_latency = 1.0
 
         logger.info(
-            "[ProfilingChunk] Target latency: %.2f ms (base_chunk=%d)",
+            "[ProfilingChunk] Target latency: %.2f ms (base_chunk=%s)",
             self.target_latency,
             base_chunk_size,
         )
@@ -224,17 +214,40 @@ class ChunkSizePredictor:
         num_computed_tokens: int,
         base_chunk_size: int,
         page_size: int,
+        target_time: float = 0,
     ) -> int | None:
-        """Predict next chunk size x such that f(L+x) - f(L) = target_latency."""
+        """Predict next chunk size x such that f(L+x) - f(L) = target_latency.
+
+        Args:
+            num_computed_tokens: Number of tokens already computed (L),
+                representing the current position in the sequence.
+            base_chunk_size: The default/fallback chunk size used as a
+                baseline for smoothing the predicted value.
+            page_size: The memory page size, used together with 64 to
+                determine the alignment granularity of the final chunk size.
+            target_time: Override target latency in seconds. If > 0, this
+                value is used instead of self.target_latency for the
+                prediction equation.
+
+        Returns:
+            The predicted and aligned chunk size as an int, or None if
+            the model is not ready, the discriminant is negative, or the
+            prediction yields an invalid result.
+        """
         if not self.is_ready or self.target_latency is None:
             return None
 
-        if self.quadratic_coeff_a <= 0:
-            return None
-
+        # f(L+x)-f(L) = a*x^2 + (2a*L+b)*x = target_latency
+        # Standard form: A*x^2 + B*x + C = 0
         A = self.quadratic_coeff_a
+        if A == 0:
+            return None
         B = 2 * self.quadratic_coeff_a * num_computed_tokens + self.linear_coeff_b
-        C = -self.target_latency
+
+        if target_time > 0:
+            C = -target_time
+        else:
+            C = -self.target_latency
 
         discriminant = B * B - 4 * A * C
         if discriminant < 0:
@@ -262,22 +275,44 @@ class ChunkSizePredictor:
         num_computed_tokens: int,
         base_chunk_size: int,
         page_size: int,
+        target_time: float = 0,
     ) -> int | None:
         """Predict next chunk size x using the history-aware model
-        f(C,H) = a*C(C+H) + b*C + c*H."""
+        f(C,H) = a*C(C+H) + b*C + c*H.
+
+        Args:
+            num_computed_tokens: Number of tokens already computed (C),
+                representing the current computed position in the sequence.
+            base_chunk_size: The default/fallback chunk size used as a
+                baseline for smoothing the predicted value.
+            page_size: The memory page size, used together with 64 to
+                determine the alignment granularity of the final chunk size.
+            target_time: Override target latency in seconds. If > 0, this
+                value is used instead of self.target_latency for the
+                prediction equation.
+
+        Returns:
+            The predicted and aligned chunk size as an int, or None if
+            the model is not ready, the discriminant is negative, or the
+            prediction yields an invalid result.
+        """
         if not self.is_ready or self.target_latency is None:
             return None
 
         if not self.with_history_ready:
             return None
 
-        if self.quadratic_chunk_a <= 0:
-            return None
-
-        # a*C^2 + (a*H + b)*C + b*H + c - T = 0
+        # f(x,H) = a*x*(x+H) + b*x + c*H, solving f(x,H)=T gives:
+        # a*x^2 + (a*H + b)*x + (b*H + c - T) = 0
+        # Standard form: A*x^2 + B*x + C = 0, where H=num_computed_tokens, T=target_latency
         A = self.quadratic_chunk_a
+        if A == 0:
+            return None
         B = self.quadratic_chunk_a * num_computed_tokens + self.linear_chunk_b
-        C = self.linear_chunk_b * num_computed_tokens + self.constant_chunk_c - self.target_latency
+        if target_time > 0:
+            C = self.linear_chunk_b * num_computed_tokens + self.constant_chunk_c - target_time
+        else:
+            C = self.linear_chunk_b * num_computed_tokens + self.constant_chunk_c - self.target_latency
 
         discriminant = B * B - 4 * A * C
         if discriminant < 0:
@@ -313,12 +348,17 @@ class ProfilingChunkManager:
         page_size: int,
         smooth_factor: float = 0.8,
         min_chunk: int = 4096,
+        max_fit_chunk: int = 30,
     ):
         self.base_chunk_size = base_chunk_size
         self.page_size = page_size
         self.chunked_fit_data: list = []
 
-        self.predictor = ChunkSizePredictor(smooth_factor=smooth_factor, min_chunk=min_chunk)
+        self.predictor = ChunkSizePredictor(
+            smooth_factor=smooth_factor,
+            min_chunk=min_chunk,
+            max_fit_chunk=max_fit_chunk,
+        )
         self._profiling_done = False
         self._set_time_count = 0
         self._set_time_done = False
@@ -336,19 +376,15 @@ class ProfilingChunkManager:
         if not self.is_ready:
             return None
 
-        # NOTE(gjc): We found that the FIA operator has abnormal performance
-        # when processing multiple request groups in a batch, so the target_latency
-        # feature is temporarily fixed. It will be enabled again after the
-        # issues with the FIA operator are resolved. Therefore, in multi-request
-        # concurrent scenarios, there is still room for performance improvement in CPP.
-        # self.predictor.target_latency = target_time
-
         if not self.history_ready:
             predict_func = self.predictor.predict
         else:
             predict_func = self.predictor.predict_with_history
         return predict_func(
-            num_computed_tokens=num_computed_tokens, base_chunk_size=self.base_chunk_size, page_size=self.page_size
+            num_computed_tokens=num_computed_tokens,
+            base_chunk_size=self.base_chunk_size,
+            page_size=self.page_size,
+            target_time=target_time,
         )
 
     def predict_time(self, num_new_tokens: int, num_computed_tokens: int) -> float:
