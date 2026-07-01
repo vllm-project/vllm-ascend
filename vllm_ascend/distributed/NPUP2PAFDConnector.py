@@ -105,9 +105,17 @@ class NPUP2PAFDConnector(AFDConnectorBase):
         logger.info(
             f"world_size = {self.ffn_size + self.attn_size}, "
             f"world_rank = {world_rank}, backend = {self.backend}")
+        # AFD rendezvous endpoints. Use afd_host / afd_port from AFDConfig so
+        # they are user-configurable and never collide with vllm's own
+        # data_parallel_master_port (default 29500), which vllm binds for its
+        # TP/DP process-group rendezvous. afd_pg uses afd_port (default 1239)
+        # and p2p_pg uses afd_port + 1 (default 1240); both must be distinct
+        # because each spawns its own TCPStore server.
+        afd_host = self.config.afd_config.afd_host
+        afd_port = self.config.afd_config.afd_port
         afd_pg = init_afd_process_group(
             backend=self.backend,
-            init_method=f"tcp://127.0.0.1:29500",
+            init_method=f"tcp://{afd_host}:{afd_port}",
             world_size=self.ffn_size + self.attn_size,
             rank=world_rank,
             group_name="afd",
@@ -125,10 +133,7 @@ class NPUP2PAFDConnector(AFDConnectorBase):
         if self.is_vaild_rank_for_inequal_AF(self.rank):
             self.p2p_pg = init_afd_process_group(
                 backend="hccl",
-                init_method=(
-                    f"tcp://{self.config.afd_config.afd_host}"
-                    f":{self.config.afd_config.afd_port}"
-                ),
+                init_method=f"tcp://{afd_host}:{afd_port + 1}",
                 world_size=self.ffn_size + self.min_size,
                 rank=self.p2p_rank,
                 group_name="p2p",
