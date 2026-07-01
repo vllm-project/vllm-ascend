@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 
 import torch
 import zmq
+from vllm.v1.kv_cache_interface import MambaSpec
 
 fake_engine = types.ModuleType("mooncake.engine")
 fake_engine.TransferEngine = MagicMock()  # type: ignore[attr-defined]
@@ -306,6 +307,46 @@ class TestKVCacheSendingLayerThread(unittest.TestCase):
         )
         self.thread._transfer_kv_cache(send_task)
         self.engine.batch_transfer_sync_write.assert_not_called()
+
+    def test_mamba_mtp_transfer_uses_first_non_spec_remote_block(self):
+        mamba_spec = MambaSpec(
+            block_size=1,
+            shapes=((2, 4), (2, 4)),
+            dtypes=(torch.float32, torch.float32),
+            mamba_cache_mode="align",
+            num_speculative_blocks=3,
+        )
+        self.thread.kv_cache_specs = [mamba_spec]
+        self.thread.mamba_cache_mode = "align"
+        self.thread.num_speculative_tokens = 3
+
+        req_meta = self.req_meta_base
+        req_meta.local_block_ids = [[5, 6, 7, 8]]
+        req_meta.remote_block_ids = [[10, 20, 30, 40]]
+        req_meta.remote_tp_size = 1
+        req_meta.remote_layer_metadata = {
+            "layer0": _make_layer_metadata(
+                kv_caches_base_addr=[4000, 8000],
+                block_len=[64, 64],
+                block_size_scale=[1, 1],
+            ),
+        }
+
+        send_task = SendTask(
+            send_request={"req_mtp": req_meta},
+            wait_event=MagicMock(),
+            k_cache=torch.zeros((1, 8)),
+            v_cache=torch.zeros((1, 8)),
+            layer_idx=0,
+            layer_name="layer0",
+            group_rearrange_block_ids=[[]],
+        )
+
+        src_list, dst_list, length_list = self.thread.get_transfer_meta(send_task, "req_mtp", req_meta, 0)
+
+        self.assertEqual(src_list, [1000 + 5 * 1024, 2000 + 5 * 2048])
+        self.assertEqual(dst_list, [4000 + 10 * 1024, 8000 + 10 * 2048])
+        self.assertEqual(length_list, [1024, 2048])
 
     @patch(
         "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.group_concurrent_contiguous",

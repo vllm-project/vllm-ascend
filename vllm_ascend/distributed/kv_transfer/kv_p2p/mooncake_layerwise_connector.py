@@ -300,6 +300,13 @@ class KVCacheSendingLayerThread(threading.Thread):
                 transfer_block_idx = len(local_block_ids) - self.num_speculative_tokens - 1
             else:
                 transfer_block_idx = 0
+            remote_transfer_block_idx = len(remote_block_ids) - self.num_speculative_tokens - 1
+            if transfer_block_idx < 0 or remote_transfer_block_idx < 0:
+                raise RuntimeError(
+                    "Mamba KV transfer does not have enough blocks for speculative decoding. "
+                    f"local blocks: {len(local_block_ids)}, remote blocks: {len(remote_block_ids)}, "
+                    f"num_speculative_tokens: {self.num_speculative_tokens}"
+                )
             local_conv_addr, local_ssm_addr = local_layer_metadata.kv_caches_base_addr
             remote_conv_addr, remote_ssm_addr = remote_layer_metadata.kv_caches_base_addr
             local_conv_len, local_ssm_len = local_layer_metadata.block_len
@@ -313,8 +320,8 @@ class KVCacheSendingLayerThread(threading.Thread):
                 )
                 dst_list.extend(
                     [
-                        remote_conv_addr + remote_block_ids[-1] * local_conv_len,
-                        remote_ssm_addr + remote_block_ids[-1] * local_ssm_len,
+                        remote_conv_addr + remote_block_ids[remote_transfer_block_idx] * local_conv_len,
+                        remote_ssm_addr + remote_block_ids[remote_transfer_block_idx] * local_ssm_len,
                     ]
                 )
                 length_list.extend([local_conv_len, local_ssm_len])
@@ -349,12 +356,20 @@ class KVCacheSendingLayerThread(threading.Thread):
                         src_list.append(
                             local_conv_addr + local_block_ids[transfer_block_idx] * local_conv_len + local_addr_offset
                         )
-                        dst_list.append(remote_conv_addr + remote_block_ids[-1] * remote_conv_len + remote_addr_offset)
+                        dst_list.append(
+                            remote_conv_addr
+                            + remote_block_ids[remote_transfer_block_idx] * remote_conv_len
+                            + remote_addr_offset
+                        )
                         length_list.append(local_conv_size * get_dtype_size(conv_dtype))
                 # ssm
                 remote_addr_offset = (self.tp_rank % tp_ratio) * math.prod(ssm_shape) * get_dtype_size(ssm_dtype)
                 src_list.append(local_ssm_addr + local_block_ids[transfer_block_idx] * local_ssm_len)
-                dst_list.append(remote_ssm_addr + remote_block_ids[-1] * remote_ssm_len + remote_addr_offset)
+                dst_list.append(
+                    remote_ssm_addr
+                    + remote_block_ids[remote_transfer_block_idx] * remote_ssm_len
+                    + remote_addr_offset
+                )
                 length_list.append(local_ssm_len)
         else:
             if self.pd_head_ratio == 1:
