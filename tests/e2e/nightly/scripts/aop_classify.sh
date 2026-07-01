@@ -24,13 +24,13 @@ check_log() {
   fi
 
   local count
-  count=$(grep -v '^[[:space:]]*$' "$RULES" | grep -ciEf - "$log_file" 2>/dev/null || echo 0)
+  count=$(grep -vE '^[[:space:]]*(#|$)' "$RULES" | grep -ciEf - "$log_file" 2>/dev/null || echo 0)
 
   echo "  [$label] env patterns matched: ${count}"
 
   if [ "$count" -gt 0 ]; then
     echo "  [$label] --- matches ---"
-    grep -v '^[[:space:]]*$' "$RULES" | grep -niEf - "$log_file" | head -10
+    grep -vE '^[[:space:]]*(#|$)' "$RULES" | grep -niEf - "$log_file" | head -10
     return 1
   fi
   return 0
