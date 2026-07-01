@@ -45,6 +45,7 @@ The following model variants are available. It is recommended to download the mo
 | Qwen3-8B-W8A8SC | W8A8SC | Atlas 300I Duo (TP1) | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3-8B-w8a8sc-310-vllm) |
 | Qwen3-14B-W8A8SC | W8A8SC | Atlas 300I Duo (TP1) | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3-14B-w8a8sc-310-vllm) |
 | Qwen3-32B-W8A8SC | W8A8SC | Atlas 300I Duo (TP4) | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3-32B-w8a8sc-310-vllm) |
+| Qwen3-32B-W8A8 (LLM-Compressor) | W8A8 compressed-tensors | 4 Atlas 300I (310P) devices (TP4) | [Hugging Face](https://huggingface.co/ramblingpolymath/Qwen3-32B-W8A8) |
 
 These are the recommended numbers of cards, which can be adjusted according to the actual situation.
 
@@ -228,6 +229,30 @@ Single-node deployment completes both Prefill and Decode within the same node, s
         With `VLLM_USE_MODELSCOPE=True`, the `vllm serve` path below is a ModelScope repository plus the
         TP-specific sub-directory, so it does not need to be replaced. If you downloaded the weights locally,
         replace it with your own absolute path (the directory recorded in Section 3.1 Model Weight).
+
+    Qwen3-32B-W8A8 (LLM-Compressor `compressed-tensors`):
+
+    For LLM-Compressor `compressed-tensors` checkpoints such as
+    `ramblingpolymath/Qwen3-32B-W8A8` on Atlas 300I Duo (310P), the quantization
+    method is read directly from `config.json`. Do not add `--quantization ascend`.
+    Use `float16` on 310P.
+
+    ```bash
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
+    export HCCL_OP_EXPANSION_MODE=AIV
+
+    vllm serve ramblingpolymath/Qwen3-32B-W8A8 \
+        --served-model-name qwen3-w8a8 \
+        --trust-remote-code \
+        --dtype float16 \
+        --tensor-parallel-size 4 \
+        --max-model-len 40960 \
+        --max-num-batched-tokens 1536 \
+        --max-num-seqs 8 \
+        --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex": false}}' \
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[8]}' \
+        --port 8000
+    ```
 
     Qwen3-8B-W8A8SC:
 

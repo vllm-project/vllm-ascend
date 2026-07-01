@@ -55,6 +55,8 @@ def build_model_args(eval_config, tp_size):
         "enforce_eager",
         "enable_thinking",
         "quantization",
+        "max_num_batched_tokens",
+        "max_num_seqs",
     ]:
         val = serve_cfg.get(s, None)
         if val is not None:
