@@ -69,7 +69,7 @@ if [ -z "$BEST_ROW" ]; then
   exit 0
 fi
 
-LAST_STATUS=$(echo "$BEST_ROW" | cut -d',' -f4 | xargs)
+LAST_STATUS=$(echo "$BEST_ROW" | awk -F',' '{print $4}' | xargs)
 LAST_DATE="$BEST_DATE"
 
 echo ">>> Matched row: ${BEST_ROW}"
