@@ -18,6 +18,7 @@ CURL_MAX_TRIES=300
 
 function wait_url_ready() {
   local serve_name="$1"
+  # test
   local url="$2"
   i=0
   while true; do
