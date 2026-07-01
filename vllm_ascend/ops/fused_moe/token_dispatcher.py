@@ -652,7 +652,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
             global_input_tokens_local_experts_indices.shape[0], 1
         )
 
-        if scale_type == torch.float8_e8m0fnu:
+        if scale_type == torch.float8_e8m0fn:
             dynamic_scale_for_routing = dynamic_scale_after_all2all.view(torch.float8_e8m0fnu)
             global_input_tokens, reversed_global_input_permutation_mapping, _, routed_scale = (
                 torch_npu.npu_moe_init_routing_v2(
