@@ -278,7 +278,6 @@ def forward_m2n(
     return hidden_states, residual
 
 
-@torch.compiler.disable
 def afd_model_forward(
     self: DeepseekV4Model,
     input_ids: torch.Tensor,
