@@ -3740,7 +3740,10 @@ class NPUModelRunner(GPUModelRunner):
                         "aux_hidden_state_outputs was requested"
                     )
 
-                aux_layers = self._get_eagle3_aux_layers_from_config()
+                if hasattr(self.speculative_config.draft_model_config.hf_config, "markov_head_type"):
+                    aux_layers = self._get_dspark_aux_layers_from_config()
+                else:
+                    aux_layers = self._get_eagle3_aux_layers_from_config()
                 if not aux_layers:
                     aux_layers = self.model.get_eagle3_default_aux_hidden_state_layers()
                 self.model.set_aux_hidden_state_layers(aux_layers)
@@ -3801,6 +3804,23 @@ class NPUModelRunner(GPUModelRunner):
             "Model runner load_model total time: %.2f seconds",
             load_model_total_time,
         )
+    
+    def _get_dspark_aux_layers_from_config(self) -> tuple[int, ...] | None:
+        if not (self.speculative_config and self.speculative_config.draft_model_config):
+            return None
+        
+        hf_config = self.speculative_config.draft_model_config.hf_config
+
+        layer_ids = getattr(hf_config, "eagle_aux_hidden_state_layers", None)
+        if not layer_ids:
+            layer_ids = [
+                i for i in (hf_config.target_layer_ids or [])
+            ]
+        
+        if layer_ids and isinstance(layer_ids, (list, tuple)):
+            return tuple(layer_ids)
+        
+        return None
 
     def _start_dump_data(self) -> None:
         if self.debugger is None or self._debugger_started:

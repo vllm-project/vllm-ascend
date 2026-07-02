@@ -1173,21 +1173,48 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     )
                 draft_token_ids = logits.argmax(dim=-1)
         else:
-            logits = self.model.compute_logits(sample_hidden_states)
-            if lmhead_tp_enable():
-                logits, token_indices_to_sample = self._align_tensor_and_indices(
-                    logits,
-                    num_indices,
-                    token_indices_to_sample,
-                    ori_token_indices_to_sample,
-                    is_logits=True,
-                )
-            draft_token_ids = logits.argmax(dim=-1)
+            if hasattr(self.speculative_config.draft_model_config.hf_config, "markov_head_type"):
+                # [batch_size, self.num_speculative_tokens + 1]
+                # last_hidden_states is the draft block output (batch*(num_spec+1) rows in real
+                # decode). Derive the block count from the tensor itself so cudagraph capture —
+                # which feeds a different dummy batch than batch_size — stays consistent. Keep the
+                # vocab dim explicit so view() only infers the batch dim (the original used
+                # batch_size + view(-1), which mis-inferred the vocab dim during capture).
+                blk = self.num_speculative_tokens
+                raw_logits = self.model.compute_logits(last_hidden_states)
+                logits = raw_logits.view(-1, blk, raw_logits.shape[-1])
+                num_blk = logits.shape[0]
+                # Cudagraph-safe drafting: both the rolling draft buffer and the Markov seed
+                # (position 0) live at FIXED addresses so graph replay reads fresh data. The
+                # original PR used a per-call torch.empty and seeded from self._next_token_ids,
+                # which is reassigned to a new tensor every decode step — the captured graph kept
+                # copying the stale capture-time seed and the Markov chain (accept length)
+                # collapsed. set_inputs_first_pass now copy_()s the seed into _dspark_seed_buffer.
+                draft_token_ids = self._dspark_draft_buffer[:num_blk]
+                draft_token_ids[:, 0] = self._dspark_seed_buffer[:num_blk]
+                for idx in range(self.num_speculative_tokens):
+                    logits_bias, _ = self.model.model.markov_head(draft_token_ids[:, idx])
+                    logits[:, idx] += logits_bias
+                    draft_token_ids[:, idx + 1] = logits[:, idx].argmax(dim=-1)
+            else:
+                logits = self.model.compute_logits(sample_hidden_states)
+                if lmhead_tp_enable():
+                    logits, token_indices_to_sample = self._align_tensor_and_indices(
+                        logits,
+                        num_indices,
+                        token_indices_to_sample,
+                        ori_token_indices_to_sample,
+                        is_logits=True,
+                    )
+                draft_token_ids = logits.argmax(dim=-1)
 
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1 or self.parallel_drafting:
-            # [batch_size, 1]
-            return draft_token_ids.view(-1, self.num_speculative_tokens)
+            if hasattr(self.speculative_config.draft_model_config.hf_config, "markov_head_type"):
+                return draft_token_ids[:, 1:]
+            else:
+                # [batch_size, 1]
+                return draft_token_ids.view(-1, self.num_speculative_tokens)
 
         if self.pcp_size * self.dcp_size > 1 and is_prefill:
             draft_token_ids_list = []
