@@ -134,6 +134,9 @@ a3:
       - name: glm-4.7-w8a8
         os: linux-aarch64-a3-16
         config_file_path: GLM-4.7.yaml
+      - name: glm-5.1-w8a8-prefill-mc2
+        os: linux-aarch64-a3-16
+        config_file_path: GLM-5.1-W8A8-PrefillMC2.yaml
       - name: kimi-k2.5
         os: linux-aarch64-a3-16
         config_file_path: Kimi-K2.5.yaml
