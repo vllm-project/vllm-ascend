@@ -397,6 +397,25 @@ class cmake_build_ext(build_ext):
         ]
         try:
             subprocess.check_call(["cmake", *build_args], cwd=self.build_temp)
+        except subprocess.CalledProcessError as e:
+            if num_jobs <= 1:
+                raise
+            logger.warning(
+                "Parallel CMake build failed with MAX_JOBS=%d, retrying with MAX_JOBS=1.",
+                num_jobs,
+            )
+            serial_build_args = [
+                "--build",
+                ".",
+                "-j=1",
+                *[f"--target={name}" for name in targets],
+            ]
+            try:
+                subprocess.check_call(["cmake", *serial_build_args], cwd=self.build_temp)
+            except subprocess.CalledProcessError as serial_e:
+                raise serial_e from e
+            except OSError as serial_e:
+                raise RuntimeError(f"Build library failed: {serial_e}") from e
         except OSError as e:
             raise RuntimeError(f"Build library failed: {e}")
         # Install the libraries
