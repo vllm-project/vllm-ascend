@@ -39,8 +39,8 @@ from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (  # t
 from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator  # type: ignore[import-not-found]
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
 from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
-from vllm_ascend.worker.v2.spec_decode import build_attn_metadata_wrapper
 from vllm_ascend.worker.v2.spec_decode.eagle.aclgraph import PrefillEagleAclGraphManager
 
 _PREFILL_CUDAGRAPH_MANAGER_CLS = PrefillSpeculatorCudaGraphManager

@@ -12,7 +12,7 @@ from vllm.v1.worker.gpu.spec_decode.dflash.speculator import (
     DFlashSpeculator,
 )
 
-from vllm_ascend.worker.v2.spec_decode import build_attn_metadata_wrapper
+from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
 
 
 class AscendDFlashSpeculator(DFlashSpeculator):
@@ -110,6 +110,7 @@ def _prepare_dflash_inputs_kernel_ascend(
     if nsampled > 0:
         bonus_token = tl.load(last_sampled_ptr + req_state_idx).to(tl.int32)
     else:
+        # Chunked prefilling: splice in the next prefill token.
         bonus_token = tl.load(next_prefill_tokens_ptr + req_state_idx).to(tl.int32)
 
     last_valid_pos = tl.load(target_positions_ptr + valid_ctx_end - 1)
@@ -154,20 +155,29 @@ def _prepare_dflash_inputs_kernel_ascend(
         tl.store(out_sample_idx_mapping_ptr + sample_idx, req_state_idx)
 
     tl.store(out_query_start_loc_ptr + req_idx, query_base)
+    # seq_lens is the absolute sequence length the draft attention
+    # reads up to (context + query), not just the count of accepted
+    # tokens this step.
     tl.store(out_seq_lens_ptr + req_idx, last_valid_pos + 1 + num_query_per_req)
 
     if req_idx == num_reqs - 1:
+        # Pad per-request buffers to max_num_reqs for CUDA graph safety.
         last_query_end = num_reqs * num_query_per_req
         for i in range(num_reqs, max_num_reqs + 1):
             tl.store(out_query_start_loc_ptr + i, last_query_end)
         for i in range(num_reqs, max_num_reqs):
             tl.store(out_seq_lens_ptr + i, 0)
+        # Padded sample slots point at query index 0 (a valid row in
+        # last_hidden_states) so CG replay never reads OOB.
         pad_start = num_reqs * num_speculative_steps
         pad_end = max_num_reqs * num_speculative_steps
         for i in range(pad_start, pad_end):
             tl.store(out_sample_indices_ptr + i, 0)
             tl.store(out_sample_pos_ptr + i, 0)
             tl.store(out_sample_idx_mapping_ptr + i, 0)
+        # Pad query slot mappings past num_query_tokens with PAD so the
+        # captured CG sees PAD slots (no K/V write) for replay sizes
+        # larger than the current request count.
         q_pad_start = num_reqs * num_query_per_req
         for i in range(q_pad_start, max_num_tokens):
             tl.store(out_query_slot_mapping_ptr + i, PAD_SLOT_ID)
