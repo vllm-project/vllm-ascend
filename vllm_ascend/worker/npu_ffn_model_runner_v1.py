@@ -128,9 +128,17 @@ class NPUFFNModelRunner(NPUModelRunner, GPUFFNModelRunner):
             scheduler_output: scheduler output (usually None on FFN side)
             intermediate_tensors: intermediate tensors (usually None on FFN side)
             dp_metadata_list: per-stage token metadata received from the
-                attention side.
+                attention side. If None, the connector will block-recieve
+                it from the attention side via recv_dp_metadata_list().
         """
         try:
+            # Receive dp_metadata_list from attention side if not provided.
+            # The FFN worker loop calls execute_model without dp_metadata_list,
+            # so we must receive it here to stay synchronized with attention.
+            if dp_metadata_list is None and self.connector is not None:
+                dp_metadata_list, _, _ = (
+                    self.connector.recv_dp_metadata_list()
+                )
             is_ubatch = dp_metadata_list is not None and len(dp_metadata_list) > 1
 
             if self.use_aclgraph:

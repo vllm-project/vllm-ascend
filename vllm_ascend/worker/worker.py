@@ -1066,8 +1066,20 @@ class NPUWorker(WorkerBase):
         ):
             return
 
-        self.model_runner.capture_model()
         self.model_runner.initialize_afd_connector()
+
+        # Receive dp_metadata_list from attention side before capturing graphs.
+        # Attention's _dummy_run sends dp_metadata_list and blocks until FFN
+        # receives it; without this recv the two sides deadlock.
+        dp_metadata_list, is_graph_capturing, is_warmup = (
+            self.model_runner.connector.recv_dp_metadata_list()
+        )
+        logger.info(
+            "FFN received dp_metadata_list for capture: "
+            "is_graph_capturing=%s, is_warmup=%s",
+            is_graph_capturing, is_warmup,
+        )
+        self.model_runner.capture_model(dp_metadata_list=dp_metadata_list)
 
         self._ffn_shutdown_event = threading.Event()
 
