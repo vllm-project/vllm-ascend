@@ -201,20 +201,39 @@ class DSparkDeepseekV4Model(nn.Module):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         inputs_embeds: torch.Tensor | None = None,
+        hidden_states: torch.Tensor | None = None,
+        **kwargs,
     ) -> torch.Tensor:
-        # TODO(M-follow-up): wire the actual draft-block forward — for now we
-        # only return the pre-norm head hidden, matching upstream's signature
-        # so the speculator can compute_logits on it.
+        # The DFlash base proposer builds model_kwargs generically for non-dflash
+        # methods (llm_base_proposer.py L985): it always passes input_ids /
+        # positions / inputs_embeds and, when pass_hidden_states_to_model is set
+        # (True for the DFlash family we inherit), also `hidden_states` — the
+        # target aux hidden states. We accept **kwargs so any additional
+        # DFlash/eagle plumbing keys don't raise TypeError.
+        #
+        # TODO(M-follow-up): wire the actual draft-block forward. For now we
+        # fold the target aux hidden (via combine_hidden_states) into the input
+        # embedding and run the draft layers — a placeholder that exercises the
+        # pipeline end-to-end and returns pre-norm head hidden for compute_logits.
         if inputs_embeds is None:
             inputs_embeds = self.embed_input_ids(input_ids)
-        hidden_states = inputs_embeds.unsqueeze(-2).repeat(1, self.hc_mult, 1)
+        if hidden_states is not None:
+            aux = hidden_states
+            # If the base passed the raw per-layer aux stack ([T, H*len(ids)]),
+            # combine it down to [T, H]; if it is already [T, H], use as-is.
+            expected_aux = self.hidden_size * len(self.target_layer_ids)
+            if aux.dim() == 2 and aux.shape[-1] == expected_aux:
+                aux = self.combine_hidden_states(aux)
+            if aux.shape == inputs_embeds.shape:
+                inputs_embeds = inputs_embeds + aux
+        block = inputs_embeds.unsqueeze(-2).repeat(1, self.hc_mult, 1)
         residual = None
         for layer in self.layers:
-            hidden_states, residual = layer(positions=positions, hidden_states=hidden_states, residual=residual)
+            block, residual = layer(positions=positions, hidden_states=block, residual=residual)
         # NPU-side mhc_post + hc_head_fused will be wired in the next sprint.
         # For now, naively reduce the hc copies by summing — placeholder so the
         # rest of the pipeline can be exercised end-to-end.
-        return hidden_states.sum(dim=-2) if hidden_states.dim() == 3 else hidden_states
+        return block.sum(dim=-2) if block.dim() == 3 else block
 
 
 class DSparkDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
@@ -269,8 +288,18 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         inputs_embeds: torch.Tensor | None = None,
+        hidden_states: torch.Tensor | None = None,
+        **kwargs,
     ) -> torch.Tensor:
-        return self.model(input_ids, positions, inputs_embeds)
+        # The base proposer calls self.model(**model_kwargs); forward the DFlash
+        # plumbing (hidden_states + any extra keys) down to the body.
+        return self.model(
+            input_ids,
+            positions,
+            inputs_embeds=inputs_embeds,
+            hidden_states=hidden_states,
+            **kwargs,
+        )
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Base logits U_k = lm_head(norm(head_hidden))."""
