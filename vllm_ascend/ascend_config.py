@@ -332,10 +332,12 @@ class AscendConfig:
         if enable_c8_quant is not True:
             return
 
-        if not cls._uses_gqa_backend(vllm_config):
+        from vllm_ascend.utils import is_gqa_backend, uses_mooncake_connector
+
+        if not is_gqa_backend(vllm_config):
             return
 
-        if not cls._uses_mooncake_connector(kv_transfer_config):
+        if not uses_mooncake_connector(kv_transfer_config):
             return
 
         raise ValueError(
@@ -344,53 +346,6 @@ class AscendConfig:
             "Mooncake transfer would reinterpret bf16 bytes as int8. Please disable C8 KV cache quantization "
             "or use MooncakeLayerwiseConnector, which quantizes KV cache before transfer."
         )
-
-    @classmethod
-    def _uses_gqa_backend(cls, vllm_config: "VllmConfig") -> bool:
-        model_config = getattr(vllm_config, "model_config", None)
-        if model_config is None:
-            return False
-
-        if getattr(model_config, "is_deepseek_mla", False) or getattr(model_config, "use_mla", False):
-            return False
-
-        model_arch_config = getattr(model_config, "model_arch_config", None)
-        total_num_attention_heads = getattr(model_arch_config, "total_num_attention_heads", None)
-        get_total_num_kv_heads = getattr(model_config, "get_total_num_kv_heads", None)
-        if total_num_attention_heads is None or not callable(get_total_num_kv_heads):
-            return False
-
-        total_num_kv_heads = get_total_num_kv_heads()
-        if total_num_kv_heads is None:
-            return False
-
-        return total_num_attention_heads != total_num_kv_heads
-
-    @classmethod
-    def _uses_mooncake_connector(cls, kv_transfer_config: Any) -> bool:
-        mooncake_connector_names = {"MooncakeConnector", "MooncakeConnectorV1"}
-        return bool(cls._collect_kv_connector_names(kv_transfer_config) & mooncake_connector_names)
-
-    @classmethod
-    def _collect_kv_connector_names(cls, value: Any) -> set[str]:
-        connector_names: set[str] = set()
-        if isinstance(value, dict):
-            connector = value.get("kv_connector")
-            if isinstance(connector, str):
-                connector_names.add(connector)
-            for nested_value in value.values():
-                connector_names.update(cls._collect_kv_connector_names(nested_value))
-        elif isinstance(value, (list, tuple)):
-            for nested_value in value:
-                connector_names.update(cls._collect_kv_connector_names(nested_value))
-        else:
-            connector = getattr(value, "kv_connector", None)
-            if isinstance(connector, str):
-                connector_names.add(connector)
-            extra_config = getattr(value, "kv_connector_extra_config", None)
-            if isinstance(extra_config, (dict, list, tuple)):
-                connector_names.update(cls._collect_kv_connector_names(extra_config))
-        return connector_names
 
     def _check_mix_placement(self):
         if self.mix_placement:
