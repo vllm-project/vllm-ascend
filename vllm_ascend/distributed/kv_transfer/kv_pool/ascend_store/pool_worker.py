@@ -436,6 +436,19 @@ class KVPoolWorker:
         else:
             self._infer_cache_group_metadata(0, list(kv_caches.keys()))
 
+        # group_num_layers is computed from the actual kv_caches dict which
+        # includes ALL attention layers (main + MTP), so it is the authoritative
+        # layer count for this worker.
+        original_num_layers = self.num_layers
+        self.num_layers = sum(self.group_num_layers.values())
+        if self.num_layers != original_num_layers:
+            logger.info(
+                "KVPoolWorker: updated num_layers %d -> %d "
+                "(includes MTP/spec-decode draft layers).",
+                original_num_layers,
+                self.num_layers,
+            )
+
         self.m_store.register_buffer(ptrs, lengths)
         self.token_database.set_group_buffers(
             self.group_kv_caches_base_addr,
