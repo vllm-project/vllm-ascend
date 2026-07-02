@@ -107,7 +107,6 @@ def test_guided_json_completion(guided_decoding_backend: str, sample_json_schema
             inputs = vllm_model.get_inputs(prompts)
             outputs = vllm_model.model.generate(inputs, sampling_params=sampling_params)
 
-
     assert outputs is not None
 
     for output in outputs:
