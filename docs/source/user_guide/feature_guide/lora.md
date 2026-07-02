@@ -23,6 +23,8 @@ vllm serve meta-llama/Llama-2-7b \
     --lora-modules '{"name": "sql-lora", "path": "/path/to/lora", "base_model_name": "meta-llama/Llama-2-7b"}'
 ```
 
-## Custom LoRA Operators
+## Note
 
-We have implemented LoRA-related AscendC operators, such as bgmv_shrink, bgmv_expand, sgmv_shrink and sgmv_expand. You can find them under the "csrc/kernels" directory of [vllm-ascend repo](https://github.com/vllm-project/vllm-ascend/tree/main/csrc/kernels).
+- We have implemented LoRA-related AscendC operators, such as bgmv_shrink, bgmv_expand, sgmv_shrink and sgmv_expand. You can find them under the "csrc/kernels" directory of [vllm-ascend repo](https://github.com/vllm-project/vllm-ascend/tree/main/csrc/kernels).
+
+- You can enable LoRA with dense or mixture-of-experts(MoE) models now ([PR #10977](https://github.com/vllm-project/vllm-ascend/pull/10977)). However, we haven't support expert-parallel(EP) or quantification yet when you run MoE models with LoRA.
