@@ -19,7 +19,10 @@ import pytest
 import torch
 
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, split_decodes_and_prefills
-from vllm_ascend.worker.pcp_attention_backend import PCPBackendMetadata
+from vllm_ascend.worker.pcp_attention_backend import (
+    PCPBackendMetadata,
+    PCPMetadataBuildContext,
+)
 from vllm_ascend.worker.pcp_utils import PCPManager
 
 
@@ -83,10 +86,10 @@ def test_generate_pcp_metadata_uses_selected_attention_backend():
     class FakePCPAttentionBackend:
         name = "fake"
 
-        def __init__(self):
-            self.ctx = None
+        def __init__(self) -> None:
+            self.ctx: PCPMetadataBuildContext | None = None
 
-        def build_metadata(self, ctx):
+        def build_metadata(self, ctx: PCPMetadataBuildContext) -> PCPBackendMetadata:
             self.ctx = ctx
             return PCPBackendMetadata(
                 q_head_idx_tensor=torch.tensor([42], dtype=torch.int32),
@@ -96,7 +99,7 @@ def test_generate_pcp_metadata_uses_selected_attention_backend():
                 extra_long_seq_kwargs={"backend": [1]},
             )
 
-        def apply_metadata(self, long_seq_metadata, metadata):
+        def apply_metadata(self, long_seq_metadata, metadata: PCPBackendMetadata) -> None:
             long_seq_metadata.fake_backend_name = self.name
             long_seq_metadata.fake_backend_q_head = metadata.q_head_idx_tensor
 
@@ -133,12 +136,15 @@ def test_generate_pcp_metadata_uses_selected_attention_backend():
             num_reqs=1,
         )
 
+    assert metadata is not None
     assert metadata.fake_backend_name == "fake"
     assert metadata.fake_backend_q_head.tolist() == [42]
-    assert fake_backend.ctx.num_decode_reqs == 0
-    assert fake_backend.ctx.pcp_world_size == 2
-    assert fake_backend.ctx.pcp_world_rank == 1
-    assert fake_backend.ctx.use_mla is False
+    ctx = fake_backend.ctx
+    assert ctx is not None
+    assert ctx.num_decode_reqs == 0
+    assert ctx.pcp_world_size == 2
+    assert ctx.pcp_world_rank == 1
+    assert ctx.use_mla is False
     assert pcp_manager.q_head_idx_tensor.tolist() == [42]
     assert pcp_manager.extra_long_seq_kwargs == {"backend": [1]}
 
