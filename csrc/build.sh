@@ -43,7 +43,7 @@ ENABLE_BUILT_JIT=FALSE
 ENABLE_BUILT_CUSTOM=FALSE
 ENABLE_STATIC=FALSE
 ENABLE_EXPERIMENTAL=FALSE
-ASCEND_SOC_UNITS="ascend910b"
+ASCEND_SOC_UNITS="${SOC_VERSION:-ascend910b}"
 SUPPORT_COMPUTE_UNIT_SHORT=("ascend310p" "ascend910b" "ascend910_93" "ascend950" "kirinx90")
 CMAKE_BUILD_MODE=""
 BUILD_TYPE=""
@@ -680,6 +680,35 @@ function process_soc_input(){
     local input_string="$1"
     local value_part="${input_string#*=}"
     ASCEND_SOC_UNITS="${value_part//,/;}"
+}
+
+function resolve_compute_unit(){
+    local soc
+    soc=$(echo "${1:-}" | tr '[:upper:]' '[:lower:]' | xargs)
+
+    case "${soc}" in
+        310p|ascend310*)
+            echo "ascend310p"
+            ;;
+        910b|ascend910b*)
+            echo "ascend910b"
+            ;;
+        910c|ascend910_93*)
+            echo "ascend910_93"
+            ;;
+        ascend950*)
+            echo "ascend950"
+            ;;
+        kirinx90*)
+            echo "kirinx90"
+            ;;
+        "")
+            return 1
+            ;;
+        *)
+            return 1
+            ;;
+    esac
 }
 
   process_genop() {
@@ -1382,17 +1411,16 @@ fi
 # 非打包命令调用，打包模式会打进同一个包里
 function set_compute_unit_option() {
     IFS=';' read -ra SOC_ARRAY <<< "$ASCEND_SOC_UNITS"  # 分割字符串为数组
-    local COMPUTE_UNIT_SHORT=""
+    local COMPUTE_UNIT=""
+    local resolved_soc=""
     for soc in "${SOC_ARRAY[@]}"; do
-      for support_unit in "${SUPPORT_COMPUTE_UNIT_SHORT[@]}"; do
-        lowercase_word=$(echo "$soc" | tr '[:upper:]' '[:lower:]')
-        if [[ "$lowercase_word" == *"$support_unit"* ]]; then
-          COMPUTE_UNIT_SHORT="$COMPUTE_UNIT_SHORT$support_unit;"
-          break
-        fi
-      done
+      resolved_soc=$(resolve_compute_unit "$soc") || {
+        log "Error: unsupported SoC '${soc}'. Please set --soc or SOC_VERSION to a supported Ascend SoC."
+        exit 1
+      }
+      COMPUTE_UNIT="$COMPUTE_UNIT$resolved_soc;"
     done
-    CUSTOM_OPTION="$CUSTOM_OPTION -DASCEND_COMPUTE_UNIT=$COMPUTE_UNIT_SHORT"
+    CUSTOM_OPTION="$CUSTOM_OPTION -DASCEND_COMPUTE_UNIT=$COMPUTE_UNIT"
 }
 
 CUSTOM_OPTION="${CUSTOM_OPTION} -DCUSTOM_ASCEND_CANN_PACKAGE_PATH=${ASCEND_CANN_PACKAGE_PATH} -DCHECK_COMPATIBLE=${CHECK_COMPATIBLE}"
