@@ -102,10 +102,8 @@ def test_pp_ipc_cached_request_data_carries_confirmed_token_for_sync_and_async(
     assert scheduler.scheduler_config.async_scheduling is async_scheduling
 
 
-@pytest.mark.parametrize("async_scheduling", [False, True])
-def test_pp_ipc_sampled_token_handoff_advances_non_last_rank_state(
+def test_pp_ipc_sampled_token_handoff_advances_async_non_last_rank_state(
     monkeypatch,
-    async_scheduling,
 ):
     monkeypatch.setattr(
         "vllm_ascend.worker.model_runner_v1.get_pp_group",
@@ -115,7 +113,7 @@ def test_pp_ipc_sampled_token_handoff_advances_non_last_rank_state(
     runner = NPUModelRunner.__new__(NPUModelRunner)
     runner.is_kv_producer = False
     runner.is_kv_consumer = False
-    runner.use_async_scheduling = async_scheduling
+    runner.use_async_scheduling = True
     runner.device = torch.device("cpu")
     runner.discard_request_mask = SimpleNamespace(
         np=np.zeros(2, dtype=bool),
@@ -159,6 +157,47 @@ def test_pp_ipc_sampled_token_handoff_advances_non_last_rank_state(
     assert runner.input_batch.is_token_ids[0, 3]
     assert runner.input_batch.is_token_ids[1, 5]
     assert runner.input_batch.num_tokens_no_spec.tolist() == [4, 6]
+
+
+def test_pp_ipc_sampled_token_handoff_keeps_sync_path_on_scheduler_tokens(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "vllm_ascend.worker.model_runner_v1.get_pp_group",
+        lambda: SimpleNamespace(is_last_rank=False),
+    )
+
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.is_kv_producer = False
+    runner.is_kv_consumer = False
+    runner.use_async_scheduling = False
+    runner.device = torch.device("cpu")
+    runner.input_batch = SimpleNamespace(
+        num_reqs=1,
+        req_ids=["req-0"],
+        prev_sampled_token_ids="keep",
+        prev_req_id_to_index={"keep": 0},
+        num_tokens_no_spec=np.array([3], dtype=np.int64),
+        is_token_ids=np.zeros((1, 8), dtype=bool),
+    )
+    runner.requests = {
+        "req-0": SimpleNamespace(output_token_ids=[31]),
+    }
+    scheduler_output = SimpleNamespace(
+        scheduled_cached_reqs=SimpleNamespace(
+            req_ids=["req-0"],
+            new_token_ids=[[101]],
+            num_output_tokens=[1],
+        ),
+    )
+
+    runner._apply_pp_sampled_tokens_from_scheduler_output(scheduler_output)
+
+    assert runner.input_batch.prev_req_id_to_index == {"keep": 0}
+    assert runner.input_batch.prev_sampled_token_ids == "keep"
+    assert runner.requests["req-0"].output_token_ids == [31]
+    assert not runner.input_batch.is_token_ids[0, 3]
+    assert runner.input_batch.num_tokens_no_spec.tolist() == [3]
 
 
 @pytest.mark.parametrize("async_scheduling", [False, True])

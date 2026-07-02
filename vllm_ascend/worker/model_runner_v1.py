@@ -723,7 +723,11 @@ class NPUModelRunner(GPUModelRunner):
         scheduler_output: "SchedulerOutput",
     ) -> None:
         pp = get_pp_group()
-        if pp.is_last_rank or self._is_pd_prefill_worker():
+        if (
+            not self.use_async_scheduling
+            or pp.is_last_rank
+            or self._is_pd_prefill_worker()
+        ):
             return
 
         self.input_batch.prev_sampled_token_ids = None
