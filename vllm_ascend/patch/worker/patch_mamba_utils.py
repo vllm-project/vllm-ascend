@@ -104,6 +104,31 @@ def _do_mamba_copy_block_torch(copy_bufs: mamba_utils.MambaCopyBuffers):
         dst_state.copy_(src_state.clone())
     copy_bufs._tensor_copy_pairs = []
 
+def _postprocess_mamba_align_gpu_cpu_fallback(
+    *,
+    bufs: "mamba_utils.MambaBuffers",
+    num_reqs: int,
+    num_accept_tokens_gpu: torch.Tensor,
+    num_accept_tokens_cpu_tensor: torch.Tensor,
+    input_batch: GPUInputBatch,
+    kv_cache_config: KVCacheConfig,
+    forward_context: dict[str, Any],
+    mamba_state_copy_funcs: tuple[MambaStateCopyFunc, ...],
+) -> None:
+    """CPU fallback path for Mamba postprocess_mamba_align_gpu on 310P.(no Triton)
+
+    On 310P, the Triton fused kernel is not available. This fallback skips
+    the GPU-side state copy(which will be handled by preprocess_mamba at next step).
+    and reset num_accept_tokens_cpu_tensor to 1, matching the Triton's kernel's behavior.
+    when ''src_block_idx == dest_block_idx'',so that the next ''preprocess_mamba'' uses 
+    ''accept_tokens_bias = 0'' 
+    """
+    ## Set num_accept_tokens_cpu_tensor to 1, matching the Triton's kernel's behavior
+    ## behavior.
+    ## when ''src_block_idx == dest_block_idx'',so that the next ''preprocess_mamba'' uses 
+    ## ''accept_tokens_bias = 0'' 
+    ones = torch.ones(num_reqs, dtype=torch.int32, device=num_accept_tokens_gpu.device)
+    num_accept_tokens_cpu_tensor[:num_reqs].copy_(ones, non_blocking=True)
 
 def _batch_memcpy_unavailable(src_ptrs, dst_ptrs, sizes):
     raise RuntimeError(
@@ -120,7 +145,7 @@ else:
     mamba_utils.batch_memcpy = _batch_memcpy_unavailable
     mamba_utils.collect_mamba_copy_meta = _collect_mamba_copy_meta_torch
     mamba_utils.do_mamba_copy_block = _do_mamba_copy_block_torch
-
+    mamba_utils.postprocess_mamba_align_gpu = _postprocess_mamba_align_gpu_cpu_fallback
 
 def preprocess_mamba(
     scheduler_output: SchedulerOutput,
