@@ -70,23 +70,39 @@ def test_rfork_seed_timeout_bool_falls_back_to_default(monkeypatch, config_value
     assert loader.seed_timeout_sec == 5.0
 
 
-def _vllm_config(model_config=None, scheduler_config=None):
+def _parallel_config(
+    *,
+    enable_eplb=False,
+    enable_expert_parallel=False,
+    pipeline_parallel_size=1,
+    is_moe_model=True,
+):
+    return SimpleNamespace(
+        enable_eplb=enable_eplb,
+        enable_expert_parallel=enable_expert_parallel,
+        pipeline_parallel_size=pipeline_parallel_size,
+        is_moe_model=is_moe_model,
+    )
+
+
+def _vllm_config(model_config=None, scheduler_config=None, parallel_config=None):
     return SimpleNamespace(
         additional_config=None,
         device_config=SimpleNamespace(device="cpu"),
         model_config=model_config or SimpleNamespace(),
+        parallel_config=parallel_config or _parallel_config(),
         scheduler_config=scheduler_config or SimpleNamespace(),
     )
 
 
 def _parallel_vllm_config(
-    enable_expert_parallel,
     *,
+    enable_expert_parallel=False,
     pipeline_parallel_size=1,
     is_moe_model=True,
 ):
     return SimpleNamespace(
-        parallel_config=SimpleNamespace(
+        parallel_config=_parallel_config(
             enable_expert_parallel=enable_expert_parallel,
             pipeline_parallel_size=pipeline_parallel_size,
             is_moe_model=is_moe_model,
@@ -103,7 +119,7 @@ def test_rfork_ep_rank_is_not_added_when_expert_parallel_is_disabled(monkeypatch
         fail_if_ep_group_is_accessed,
     )
 
-    assert _get_ep_rank(_parallel_vllm_config(False)) is None
+    assert _get_ep_rank(_parallel_vllm_config()) is None
 
 
 def test_rfork_ep_rank_comes_from_ep_group(monkeypatch):
@@ -112,7 +128,7 @@ def test_rfork_ep_rank_comes_from_ep_group(monkeypatch):
         lambda: SimpleNamespace(rank_in_group=7),
     )
 
-    assert _get_ep_rank(_parallel_vllm_config(True)) == 7
+    assert _get_ep_rank(_parallel_vllm_config(enable_expert_parallel=True)) == 7
 
 
 def test_rfork_ep_rank_is_not_added_for_dense_model(monkeypatch):
@@ -124,7 +140,7 @@ def test_rfork_ep_rank_is_not_added_for_dense_model(monkeypatch):
         fail_if_ep_group_is_accessed,
     )
 
-    assert _get_ep_rank(_parallel_vllm_config(True, is_moe_model=False)) is None
+    assert _get_ep_rank(_parallel_vllm_config(enable_expert_parallel=True, is_moe_model=False)) is None
 
 
 def test_rfork_requires_initialized_ep_group(monkeypatch):
@@ -137,7 +153,7 @@ def test_rfork_requires_initialized_ep_group(monkeypatch):
     )
 
     with pytest.raises(RuntimeError, match="EP group is not initialized"):
-        _get_ep_rank(_parallel_vllm_config(True))
+        _get_ep_rank(_parallel_vllm_config(enable_expert_parallel=True))
 
 
 def test_rfork_pp_rank_is_not_added_when_pipeline_parallelism_is_disabled(monkeypatch):
@@ -149,7 +165,7 @@ def test_rfork_pp_rank_is_not_added_when_pipeline_parallelism_is_disabled(monkey
         fail_if_pp_group_is_accessed,
     )
 
-    assert _get_pp_rank(_parallel_vllm_config(False)) is None
+    assert _get_pp_rank(_parallel_vllm_config()) is None
 
 
 def test_rfork_pp_rank_comes_from_pp_group(monkeypatch):
@@ -158,7 +174,7 @@ def test_rfork_pp_rank_comes_from_pp_group(monkeypatch):
         lambda: SimpleNamespace(rank_in_group=3),
     )
 
-    assert _get_pp_rank(_parallel_vllm_config(False, pipeline_parallel_size=2)) == 3
+    assert _get_pp_rank(_parallel_vllm_config(pipeline_parallel_size=2)) == 3
 
 
 def test_rfork_requires_initialized_pp_group(monkeypatch):
@@ -171,7 +187,7 @@ def test_rfork_requires_initialized_pp_group(monkeypatch):
     )
 
     with pytest.raises(RuntimeError, match="PP group is not initialized"):
-        _get_pp_rank(_parallel_vllm_config(False, pipeline_parallel_size=2))
+        _get_pp_rank(_parallel_vllm_config(pipeline_parallel_size=2))
 
 
 def test_rfork_seed_key_preserves_non_ep_format():
@@ -485,8 +501,10 @@ def test_rfork_native_eplb_uses_default_loader(monkeypatch):
     load_config = DummyLoadConfig({"model_url": "model", "model_deploy_strategy_name": "tp8"})
     loader = RForkModelLoader(load_config)
     model_config = SimpleNamespace(dtype=torch.float32, model="/models/test")
-    vllm_config = _vllm_config(model_config=model_config)
-    vllm_config.parallel_config.enable_eplb = True
+    vllm_config = _vllm_config(
+        model_config=model_config,
+        parallel_config=_parallel_config(enable_eplb=True),
+    )
     vllm_config.additional_config = None
 
     def fail_if_rfork_worker_is_created(*args, **kwargs):
