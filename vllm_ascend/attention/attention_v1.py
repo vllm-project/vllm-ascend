@@ -644,7 +644,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     global _ATTN_KEYS_BUFFER
                     if attn_keys_length == 0:
                         return
-                    if _ATTN_KEYS_BUFFER is None or len(_ATTN_KEYS_BUFFER) != attn_keys_length:
+                    if not _ATTN_KEYS_BUFFER or len(_ATTN_KEYS_BUFFER) != attn_keys_length:
                         import regex as re
 
                         def extract_layer_index(key: str) -> int:
