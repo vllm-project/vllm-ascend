@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-22 02:02+0000\n"
+"POT-Creation-Date: 2026-06-28 04:51+0000\n"
 "PO-Revision-Date: 2026-04-10 18:37+0800\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -184,7 +184,7 @@ msgid "Functional Verification"
 msgstr "功能验证"
 
 #: ../../source/tutorials/models/PaddleOCR-VL.md:131
-msgid "If your service start successfully, you can see the info shown below:"
+msgid "If your service starts successfully, you can see the info shown below:"
 msgstr "如果服务启动成功，您将看到如下所示的信息："
 
 #: ../../source/tutorials/models/PaddleOCR-VL.md:139
@@ -238,13 +238,13 @@ msgstr "使用以下命令启动容器："
 
 #: ../../source/tutorials/models/PaddleOCR-VL.md:235
 msgid ""
-"Install "
+"Install "
 "[PaddlePaddle](https://www.paddlepaddle.org.cn/install/quick?docurl=undefined)"
-" and [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR)"
+" and [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR)"
 msgstr ""
-"安装 "
+"安装 "
 "[PaddlePaddle](https://www.paddlepaddle.org.cn/install/quick?docurl=undefined)"
-" 和 [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR)"
+" 和 [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR)"
 
 #: ../../source/tutorials/models/PaddleOCR-VL.md:246
 msgid "The OpenCV component may be missing:"
