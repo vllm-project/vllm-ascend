@@ -31,6 +31,7 @@ class KVTransferThread(threading.Thread):
         dcp_size: int,
         ready_event: threading.Event,
         name: str,
+        request_queue: queue.Queue[Any] | None = None,
     ):
         super().__init__(daemon=True, name=name)
         self.m_store = m_store
@@ -40,7 +41,7 @@ class KVTransferThread(threading.Thread):
         self.dcp_size = dcp_size
         self.token_database = token_database
         self.done_task_lock = threading.Lock()
-        self.request_queue: queue.Queue[Any] = queue.Queue()
+        self.request_queue: queue.Queue[Any] = request_queue or queue.Queue()
         # TODO(jianzs): make this configurable
         self.executor = ThreadPoolExecutor(max_workers=32)
         self.finished_requests: set[str] = set()
@@ -411,9 +412,17 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         ready_event: threading.Event,
         invalid_block_ids: set[int],
         invalid_block_ids_lock: threading.Lock,
+        request_queue: queue.Queue[Any] | None = None,
     ):
         super().__init__(
-            m_store, token_database, block_size, tp_rank, dcp_size, ready_event, name="KVCacheStoreRecvingThread"
+            m_store,
+            token_database,
+            block_size,
+            tp_rank,
+            dcp_size,
+            ready_event,
+            name="KVCacheStoreRecvingThread",
+            request_queue=request_queue,
         )
         self._invalid_block_ids = invalid_block_ids
         self._invalid_block_ids_lock = invalid_block_ids_lock

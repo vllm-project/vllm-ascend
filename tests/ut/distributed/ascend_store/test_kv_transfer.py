@@ -15,6 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import queue
 import threading
 import unittest
 from unittest.mock import MagicMock
@@ -324,6 +325,24 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
 
 
 class TestKVCacheStoreRecvingThread(unittest.TestCase):
+    def test_shared_request_queue(self):
+        shared_queue: queue.Queue[ReqMeta] = queue.Queue()
+        t = KVCacheStoreRecvingThread(
+            m_store=FakeStore(),
+            token_database=FakeTokenDatabase(),
+            block_size=16,
+            tp_rank=0,
+            dcp_size=1,
+            ready_event=threading.Event(),
+            invalid_block_ids=set(),
+            invalid_block_ids_lock=threading.Lock(),
+            request_queue=shared_queue,
+        )
+        req = MagicMock()
+        t.add_request(req)
+        self.assertIs(t.request_queue, shared_queue)
+        self.assertIs(shared_queue.get_nowait(), req)
+
     def test_handle_request(self):
         store = FakeStore()
         db = FakeTokenDatabase()

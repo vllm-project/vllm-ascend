@@ -156,6 +156,7 @@ class TestKVPoolWorkerInit(unittest.TestCase):
         worker = KVPoolWorker(config, use_layerwize=False)
 
         self.assertEqual(worker.block_size, 16)
+        self.assertEqual(worker.num_recv_threads, 1)
         self.assertEqual(worker.num_layers, 32)
         self.assertFalse(worker.use_layerwise)
         self.assertFalse(worker.use_mla)
@@ -188,6 +189,34 @@ class TestKVPoolWorkerInit(unittest.TestCase):
         worker = KVPoolWorker(config, use_layerwize=False)
         self.assertTrue(worker.use_mla)
         self.assertEqual(worker.num_kv_head, 1)
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.importlib")
+    @patch(
+        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_decode_context_model_parallel_rank"
+    )
+    @patch(
+        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_decode_context_model_parallel_world_size"
+    )
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_pcp_group")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_tensor_model_parallel_world_size")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_tensor_model_parallel_rank")
+    def test_init_load_recv_threads(
+        self, mock_tp_rank, mock_tp_size, mock_pcp_group, mock_dcp_ws, mock_dcp_rank, mock_importlib
+    ):
+        mock_tp_rank.return_value = 0
+        mock_tp_size.return_value = 1
+        pcp_group = MagicMock()
+        pcp_group.world_size = 1
+        mock_pcp_group.return_value = pcp_group
+        mock_dcp_ws.return_value = 1
+        mock_dcp_rank.return_value = 0
+        mock_importlib.import_module.return_value = MagicMock()
+
+        config = self._make_vllm_config(extra_config={"backend": "mooncake", "load_recv_threads": 3})
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+
+        worker = KVPoolWorker(config, use_layerwize=False)
+        self.assertEqual(worker.num_recv_threads, 3)
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.importlib")
     @patch(
@@ -340,6 +369,43 @@ class TestKVPoolWorkerInit(unittest.TestCase):
         worker.m_store.exists.return_value = [1, 0]
         result = worker.lookup(32, ["h0", "h1"], use_layerwise=False)
         self.assertEqual(result, 16)  # first non-exist at index 1 => starts[1]=16
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.importlib")
+    @patch(
+        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_decode_context_model_parallel_rank"
+    )
+    @patch(
+        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_decode_context_model_parallel_world_size"
+    )
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_pcp_group")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_tensor_model_parallel_world_size")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_tensor_model_parallel_rank")
+    def test_lookup_skips_unreachable_align_chunks(
+        self, mock_tp_rank, mock_tp_size, mock_pcp_group, mock_dcp_ws, mock_dcp_rank, mock_importlib
+    ):
+        mock_tp_rank.return_value = 0
+        mock_tp_size.return_value = 1
+        pcp_group = MagicMock()
+        pcp_group.world_size = 1
+        mock_pcp_group.return_value = pcp_group
+        mock_dcp_ws.return_value = 1
+        mock_dcp_rank.return_value = 0
+        mock_importlib.import_module.return_value = MagicMock()
+
+        config = self._make_vllm_config()
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+
+        worker = KVPoolWorker(config, use_layerwize=False)
+        worker.group_uses_align_state = [True]
+        worker.cache_transfer_granularity = 32
+        worker.m_store.exists.return_value = [1]
+
+        result = worker.lookup(32, ["h0", "h1"], use_layerwise=False)
+
+        self.assertEqual(result, 32)
+        keys = worker.m_store.exists.call_args.args[0]
+        self.assertEqual(len(keys), 1)
+        self.assertIn("@h1", keys[0])
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.importlib")
     @patch(

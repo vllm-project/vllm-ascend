@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import importlib
 import math
+import os
+import queue
 import threading
 from collections.abc import Generator
 
@@ -98,14 +100,18 @@ class KVPoolWorker:
         self.dcp_size = get_decode_context_model_parallel_world_size()
         self.dcp_rank = get_decode_context_model_parallel_rank() if self.dcp_size > 1 else 0
 
+        extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
         self.kv_role = vllm_config.kv_transfer_config.kv_role
-        self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get("load_async", False)
+        self.load_async = extra_config.get("load_async", False)
+        self.num_recv_threads = max(
+            1,
+            int(os.getenv("VLLM_MOONCAKE_LOAD_RECV_THREADS", extra_config.get("load_recv_threads", 1))),
+        )
+        self.recv_request_queue: queue.Queue[ReqMeta] = queue.Queue()
         self._invalid_block_ids: set[int] = set()
         self._invalid_block_ids_lock = threading.Lock()
-        self.consumer_is_to_put = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
-            "consumer_is_to_put", False
-        )
-        self.backend = vllm_config.kv_transfer_config.kv_connector_extra_config.get("backend", "mooncake")
+        self.consumer_is_to_put = extra_config.get("consumer_is_to_put", False)
+        self.backend = extra_config.get("backend", "mooncake")
         self.use_hybrid = self._uses_hybrid_kv_cache(vllm_config, kv_cache_config)
         self.use_mamba = self._uses_mamba_kv_cache(self.use_hybrid, kv_cache_config)
         self.original_block_size = self._infer_group_block_sizes(vllm_config, kv_cache_config)
@@ -154,10 +160,8 @@ class KVPoolWorker:
         partitions = None
         if self.kv_role == "kv_consumer" and self.consumer_is_to_put:
             num_hidden_layers = model_config.hf_text_config.num_hidden_layers
-            partition_list_str = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
-                "prefill_pp_layer_partition", None
-            )
-            prefill_pp_size = int(vllm_config.kv_transfer_config.kv_connector_extra_config.get("prefill_pp_size", 1))
+            partition_list_str = extra_config.get("prefill_pp_layer_partition", None)
+            prefill_pp_size = int(extra_config.get("prefill_pp_size", 1))
 
             if partition_list_str is not None:
                 try:
@@ -219,6 +223,7 @@ class KVPoolWorker:
 
         self.kv_send_thread: KVTransferThread | None = None
         self.kv_recv_thread: KVTransferThread | None = None
+        self.kv_recv_threads: list[KVTransferThread] = []
 
         self.finished_store_req: set[str] = set()
 
@@ -467,19 +472,23 @@ class KVPoolWorker:
                 )
                 self.kv_send_thread.start()
             if self.load_async:
-                ready_event = threading.Event()
-                self.kv_recv_thread = KVCacheStoreRecvingThread(
-                    self.m_store,
-                    self.token_database,
-                    self.grouped_block_size,
-                    self.tp_rank,
-                    self.dcp_size,
-                    ready_event,
-                    self._invalid_block_ids,
-                    self._invalid_block_ids_lock,
-                )
-                self.kv_recv_thread.start()
-                ready_event.wait()
+                for _ in range(self.num_recv_threads):
+                    ready_event = threading.Event()
+                    kv_recv_thread = KVCacheStoreRecvingThread(
+                        self.m_store,
+                        self.token_database,
+                        self.grouped_block_size,
+                        self.tp_rank,
+                        self.dcp_size,
+                        ready_event,
+                        self._invalid_block_ids,
+                        self._invalid_block_ids_lock,
+                        self.recv_request_queue,
+                    )
+                    kv_recv_thread.start()
+                    ready_event.wait()
+                    self.kv_recv_threads.append(kv_recv_thread)
+                self.kv_recv_thread = self.kv_recv_threads[0]
 
     def start_load_kv(self, metadata: AscendConnectorMetadata):
         self.current_layer = 0
@@ -521,9 +530,7 @@ class KVPoolWorker:
                 self.layerwise_retrievers.append(layerwise_retriever)
             else:
                 if self.load_async:
-                    self.kv_recv_thread.add_request(  # type: ignore[union-attr]
-                        request,
-                    )
+                    self.recv_request_queue.put(request)
                 else:
                     addr_list = []
                     size_list = []
@@ -837,12 +844,14 @@ class KVPoolWorker:
             else set()
         )
 
-        done_recving = (
-            self.kv_recv_thread.get_and_clear_finished_requests(  # type: ignore[union-attr]
-            )
-            if self.load_async
-            else set()
-        )
+        done_recving = set()
+        if self.load_async:
+            if self.kv_recv_threads:
+                done_recving = set().union(
+                    *(thread.get_and_clear_finished_requests() for thread in self.kv_recv_threads)
+                )
+            elif self.kv_recv_thread is not None:
+                done_recving = self.kv_recv_thread.get_and_clear_finished_requests()
 
         logger.debug(
             "Number of completed KV cache send requests: %d, receive requests: %d, tp_rank:%d",
@@ -912,6 +921,7 @@ class KVPoolWorker:
                     token_len,
                     block_hashes,
                     kv_cache_group_id=group_id,
+                    chunk_mask=self._lookup_chunk_mask(group_id, token_len),
                 ):
                     if use_layerwise:
                         keys_multi_layer = key.split_layers(self.num_layers)
@@ -959,6 +969,21 @@ class KVPoolWorker:
             )
             return 0
         return min(hits) if hits else 0
+
+    def _lookup_chunk_mask(self, group_id: int, token_len: int) -> list[bool] | None:
+        if group_id >= len(self.group_uses_align_state) or not self.group_uses_align_state[group_id]:
+            return None
+        group_block_size = self._get_group_block_size(group_id)
+        cache_family = self._get_group_family(self.kv_cache_group_families, group_id)
+        effective_block_size = get_cache_family_granularity(group_block_size, cache_family)
+        cache_family_ratio = max(effective_block_size // group_block_size, 1)
+        num_chunks = (token_len + effective_block_size - 1) // effective_block_size
+        return [
+            (min((chunk_id + 1) * effective_block_size, token_len) // cache_family_ratio)
+            % self.cache_transfer_granularity
+            == 0
+            for chunk_id in range(num_chunks)
+        ]
 
     def _get_lookup_gate_group_ids(self, kv_cache_group_ids: list[int]) -> list[int]:
         gate_group_ids = [group_id for group_id in kv_cache_group_ids if self._is_lookup_gate_group(group_id)]
@@ -1031,6 +1056,7 @@ class KVPoolWorker:
                     token_len,
                     block_hashes,
                     kv_cache_group_id=group_id,
+                    chunk_mask=self._lookup_chunk_mask(group_id, token_len),
                 ):
                     if use_layerwise:
                         keys_multi_layer = key.split_layers(self.num_layers)
