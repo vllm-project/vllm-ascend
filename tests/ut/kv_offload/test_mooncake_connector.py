@@ -411,30 +411,34 @@ class TestMooncakeTransferGroups(unittest.TestCase):
                 [1],
             ),
         }
+        worker.pcp_size = 1
+        worker.dcp_size = 1
         req_id = "req-1"
         remote_base_port = 30000
-        remote_handshake_port_list = [[remote_base_port + rank] for rank in range(8)]
 
-        _, expected_rank_group_pulls = worker._get_hybrid_remote_rank_group_pulls(req_id, prefill_tp_size=8)
+        chosen_rank_list, expected_rank_group_pulls = worker._get_hybrid_remote_rank_group_pulls(
+            req_id, prefill_tp_size=8
+        )
+        remote_handshake_port_list = [[remote_base_port + rank for rank in chosen_rank_list]]
+
         group_pulls_list = worker._get_group_pulls_metadata(
             req_id,
             remote_handshake_port_list,
             prefill_tp_size=8,
             remote_base_port=remote_base_port,
+            remote_pcp_size=1,
+            remote_dcp_size=1,
         )
-
-        group_ids_by_rank = [
-            [group_pull.group_id for group_pull in group_pulls_list[rank][0]]
-            for rank in range(len(remote_handshake_port_list))
-        ]
-        expected_group_ids_by_rank = [
-            [group_pull.group_id for group_pull in expected_rank_group_pulls.get(rank, [])]
-            for rank in range(len(remote_handshake_port_list))
+        self.assertEqual(len(group_pulls_list), 1)
+        self.assertEqual(len(group_pulls_list[0]), len(chosen_rank_list))
+        group_ids_by_port = [[group_pull.group_id for group_pull in port_pulls] for port_pulls in group_pulls_list[0]]
+        expected_group_ids_by_port = [
+            [group_pull.group_id for group_pull in expected_rank_group_pulls[rank]] for rank in chosen_rank_list
         ]
 
-        self.assertEqual(group_ids_by_rank, expected_group_ids_by_rank)
-        self.assertTrue(any(set(group_ids) != {0, 1} for group_ids in group_ids_by_rank))
-        self.assertFalse(all(set(group_ids) == {0, 1} for group_ids in group_ids_by_rank))
+        self.assertEqual(group_ids_by_port, expected_group_ids_by_port)
+        self.assertTrue(any(set(group_ids) != {0, 1} for group_ids in group_ids_by_port))
+        self.assertFalse(all(set(group_ids) == {0, 1} for group_ids in group_ids_by_port))
 
 
 class TestKVCacheRecvingThreadBasic(unittest.TestCase):
@@ -695,6 +699,7 @@ class TestCoreFunctionality(unittest.TestCase):
             "remote_handshake_port": 6666,
             "remote_port_send_num": {6666: 1},
             "all_task_done": True,
+            "remote_block_size": 16,
         }
         self.thread.kv_group2layeridx = {0: ({"kv_cache_spec_type": "FullAttentionSpec"}, [0])}
         self.thread.group_compress_ratios = {0: 1}
@@ -735,11 +740,12 @@ class TestCoreFunctionality(unittest.TestCase):
         mock_get_meta.assert_not_called()
 
     @patch.object(KVCacheRecvingThread, "_get_remote_metadata")
-    def test_transfer_prefix_cache_uses_computed_token_offset(self, mock_get_meta):
+    def test_transfer_groups_contiguous_kernel_blocks(self, mock_get_meta):
+        # Kernel-level ids now arrive pre-expanded from _get_kv_split_metadata; the
+        # transfer stage only groups contiguous kernels and computes addresses.
         req = dict(self.test_req)
-        req["local_block_ids"] = [[1, 2]]
-        req["remote_block_ids"] = [[3, 4]]
-        req["num_computed_tokens"] = 8
+        req["local_block_ids"] = [[2, 3, 4]]
+        req["remote_block_ids"] = [[7, 8, 9]]
         with patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.get_ascend_config") as mock_config:
             mock_config.return_value.enable_kv_nz = False
             self.thread.kv_caches_base_addr["remote_engine"] = {6666: [[0x3000]]}
@@ -763,12 +769,14 @@ class TestCoreFunctionality(unittest.TestCase):
             0: (
                 {
                     "kv_cache_spec_type": "UniformTypeKVCacheSpecs",
-                    "kv_cache_spec": {"layer_0": {"compress_ratio": 4}},
+                    "kv_cache_spec": {"layer_0": {"compress_ratio": "4"}},
                 },
                 [0],
             )
         }
         self.thread.group_compress_ratios = {0: 4}
+
+        req["remote_block_ids"] = [[6, 7]]
         with patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.get_ascend_config") as mock_config:
             mock_config.return_value.enable_kv_nz = False
             self.thread.kv_caches_base_addr["remote_engine"] = {6666: [[0x3000]]}
@@ -776,14 +784,22 @@ class TestCoreFunctionality(unittest.TestCase):
             self.thread.remote_block_size_scale["remote_engine"] = {6666: [[2]]}
             self.thread._transfer_kv_cache_all_groups(req)
 
+        # compress_ratio / block_size_scale no longer affect the transfer stage:
+        # kernel-block expansion happens upstream in _get_kv_split_metadata, so the
+        # block ids [1, 2] / [6, 7] are consumed directly. The two contiguous kernel
+        # blocks are grouped into a single transfer starting at the first block id.
         call_args, _ = self.engine.batch_transfer_sync_read.call_args
-        self.assertEqual(call_args[1], [0x1000 + 2 * 1024])
-        self.assertEqual(call_args[2], [0x3000 + 7 * 1024])
-        self.assertEqual(call_args[3], [3 * 1024])
+        self.assertEqual(call_args[1], [0x1000 + 1 * 1024])
+        self.assertEqual(call_args[2], [0x3000 + 6 * 1024])
+        self.assertEqual(call_args[3], [2 * 1024])
         mock_get_meta.assert_not_called()
 
     @patch.object(KVCacheRecvingThread, "_get_remote_metadata")
     def test_transfer_prefix_cache_trims_remote_kernel_blocks(self, mock_get_meta):
+        # Kernel-block expansion/trimming now happens upstream in
+        # _get_kv_split_metadata, so the remote block ids arrive pre-expanded and
+        # the transfer stage consumes them directly. remote_block_size_scale is no
+        # longer applied here; the remote address is base + block_id * remote_block_stride.
         req = dict(self.test_req)
         req["local_block_ids"] = [[1, 2]]
         req["remote_block_ids"] = [[3, 4]]
@@ -797,7 +813,7 @@ class TestCoreFunctionality(unittest.TestCase):
 
         call_args, _ = self.engine.batch_transfer_sync_read.call_args
         self.assertEqual(call_args[1], [0x1000 + 1024])
-        self.assertEqual(call_args[2], [0x3000 + 6 * 1024])
+        self.assertEqual(call_args[2], [0x3000 + 3 * 1024])
         self.assertEqual(call_args[3], [2 * 1024])
         mock_get_meta.assert_not_called()
 
@@ -1967,6 +1983,8 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
             local_block_ids,
             remote_engine_id,
             remote_ptp_size=None,
+            remote_block_size=0,
+            dcp_rank=0,
         ):
             worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
 
@@ -1983,6 +2001,8 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
             worker.block_size = 16
             worker.num_key_value_heads = 1
             worker.use_sparse = False
+            # scale 1 => kernel size == block size (kernel ids == logical ids for equal sizes)
+            worker.block_size_scale = [[1]]
             worker.kv_group2layeridx = {
                 0: (
                     {
@@ -2003,14 +2023,17 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
             meta.local_block_ids = (local_block_ids,)
             meta.num_external_tokens = pcp_size * dcp_size * len(local_block_ids) * worker.block_size
             meta.num_prompt_blocks = pcp_size * dcp_size * len(local_block_ids)
+            meta.num_computed_tokens = 0
             meta.remote_engine_id = remote_engine_id
             meta.remote_host = "localhost"
+            meta.remote_block_size = worker.block_size
             meta.remote_multi_nodes_meta_mapping = {}
 
-            remote_handshake_port_list, local_block_ids_list, remote_block_ids_list = worker._get_kv_split_metadata(
-                "0", cast(ReqMeta, meta)
-            )
-
+            (
+                remote_handshake_port_list,
+                local_block_ids_list,
+                remote_block_ids_list,
+            ) = worker._get_kv_split_metadata("0", cast(ReqMeta, meta))
             return (
                 remote_handshake_port_list,
                 [block_ids[0] for block_ids in local_block_ids_list],
@@ -2018,7 +2041,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
             )
 
         self.assertEqual(
-            get_kv_split_metadata(True, 1, 1, 8, 1, 0, 8, 1, 8, 30000, [1], [1], 0),
+            get_kv_split_metadata(True, 1, 1, 8, 1, 0, 8, 1, 8, 30000, [1], [1], 0, remote_block_size=32),
             (
                 [[30001], [30002], [30003], [30004], [30005], [30006], [30007], [30000]],
                 [[], [], [], [], [], [], [], [1]],
@@ -2072,9 +2095,14 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
             ([[30000], [30008]], [[1], []], [[1], []]),
         )
 
+        # D rank0 holds 5 external blocks [1,2,3,4,5]; P stores blocks interleaved
+        # across 4 cp ranks (cp0: global 0,4,8 -> D local idx 0,2,4 = blocks 1,3,5;
+        # cp2: global 2,6 -> D local idx 1,3 = blocks 2,4). Expansion now happens in
+        # _get_kv_split_metadata (scale 1 => kernel == block), so each shard's local
+        # list is the chunk-selected kernels: shard0 -> [1,3,5], shard1 -> [2,4].
         self.assertEqual(
-            get_kv_split_metadata(True, 1, 2, 8, 0, 0, 8, 2, 2, 30000, [1, 2, 3], [1, 2, 3, 4, 5], 0),
-            ([[30000], [30008]], [[1, 2, 3], [4, 5]], [[1, 2, 3], [1, 2]]),
+            get_kv_split_metadata(True, 1, 2, 8, 0, 0, 8, 2, 2, 30000, [1, 2, 3], [1, 2, 3, 4, 5], 0)[:3],
+            ([[30000], [30008]], [[1, 3, 5], [2, 4]], [[1, 2, 3], [1, 2]]),
         )
 
         # check remote ptp size
@@ -2090,6 +2118,204 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
             get_kv_split_metadata(False, 1, 1, 8, 1, 0, 8, 2, 8, 30000, [1], [1], 0, 16),
             get_kv_split_metadata(False, 1, 1, 8, 1, 0, 16, 2, 8, 30000, [1], [1], 0),
         )
+
+    def test_get_kv_split_metadata_unequal_block_size_with_decode_cp(self):
+        """Bd=2*Bp with D-side CP: P cp ranks 0,1 -> D rank0; cp ranks 2,3 -> D rank1."""
+        for dcp_rank in (0, 1):
+            with self.subTest(dcp_rank=dcp_rank):
+                with patch(
+                    "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.get_decode_context_model_parallel_rank",
+                    return_value=dcp_rank,
+                ):
+                    worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
+
+                worker.use_mla = False
+                worker.use_sparse = False
+                worker.pcp_size = 1
+                worker.dcp_size = 2
+                worker.pcp_rank = 0
+                worker.dcp_rank = dcp_rank
+                worker.tp_size = 2
+                worker.tp_rank = dcp_rank
+                worker.block_size = 32
+                worker.num_key_value_heads = 1
+                worker._prefill_tp_size = 4
+                worker.local_remote_block_port_mapping = {}
+                worker.remote_port_send_num = {}
+                worker.side_channel_port = 5000
+                worker.handshake_port = worker.side_channel_port + worker.tp_rank
+                # Bd=32 stored as 2 kernels of 16 (scale 2); Bp=16 == 1 kernel.
+                worker.block_size_scale = [[2]]
+                worker.kv_group2layeridx = {
+                    0: ({"kv_cache_spec_type": "FullAttentionSpec"}, [0]),
+                }
+
+                meta = types.SimpleNamespace(
+                    remote_pcp_size=2,
+                    remote_dcp_size=2,
+                    remote_ptp_size=4,
+                    remote_port=30000,
+                    remote_block_ids=([10, 11, 12, 13],),
+                    local_block_ids=([100],),
+                    num_external_tokens=64,
+                    num_prompt_blocks=4,
+                    num_computed_tokens=0,
+                    remote_block_size=16,
+                    remote_engine_id=f"remote_bs_{dcp_rank}",
+                    remote_host="localhost",
+                    remote_multi_nodes_meta_mapping={},
+                )
+
+                ports, local_ids, remote_ids = worker._get_kv_split_metadata("req_bs", cast(ReqMeta, meta))
+
+                self.assertEqual(len(ports), 2)
+                # local D block 100 (size 32) splits into kernels 200 (first half, start 0)
+                # and 201 (second half, start 16); each remote block 10 is a single kernel.
+                self.assertEqual(local_ids, [([200],), ([201],)])
+                self.assertEqual(remote_ids, [([10],), ([10],)])
+                if dcp_rank == 0:
+                    self.assertEqual(ports, [[30000], [30001]])
+                else:
+                    self.assertEqual(ports, [[30004], [30005]])
+
+    def test_get_kv_split_metadata_cp_with_prefix_cache_skips_prefix(self):
+        """CP + prefix cache hit (P0>0): remote ids must start past the prefix
+        blocks (remote_first), aligned with local_chunk_token_starts."""
+        worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
+
+        worker.use_mla = True
+        worker.use_sparse = False
+        worker.pcp_size = 1
+        worker.dcp_size = 1
+        worker.pcp_rank = 0
+        worker.dcp_rank = 0
+        worker.tp_size = 8
+        worker.tp_rank = 0
+        worker.block_size = 16
+        worker.num_key_value_heads = 1
+        worker._prefill_tp_size = 8
+        worker.local_remote_block_port_mapping = {}
+        worker.remote_port_send_num = {}
+        worker.side_channel_port = 5000
+        worker.handshake_port = worker.side_channel_port + worker.tp_rank
+        worker.block_size_scale = [[1]]
+        worker.kv_group2layeridx = {
+            0: ({"kv_cache_spec_type": "FullAttentionSpec"}, [0]),
+        }
+
+        # 6 prompt blocks, 4 external (P0 = 2 prefix-cached blocks), remote PCP=2.
+        meta = types.SimpleNamespace(
+            remote_pcp_size=2,
+            remote_dcp_size=1,
+            remote_ptp_size=8,
+            remote_port=30000,
+            remote_block_ids=([50, 51, 52],),
+            local_block_ids=([100, 101, 102, 103],),
+            num_external_tokens=4 * worker.block_size,
+            num_prompt_blocks=6,
+            num_computed_tokens=0,
+            remote_block_size=16,
+            remote_engine_id="remote_prefix_cp",
+            remote_host="localhost",
+            remote_multi_nodes_meta_mapping={},
+        )
+
+        ports, local_ids, remote_ids = worker._get_kv_split_metadata("req_prefix_cp", cast(ReqMeta, meta))
+
+        self.assertEqual(len(ports), 2)
+        # remote starts at index remote_first=1 (skips the prefix block 50), NOT [:2].
+        self.assertEqual(remote_ids, [([51, 52],), ([51, 52],)])
+        # Expansion (scale 1) now selects per-shard kernels via the interleaved token
+        # starts [[0,32],[16,48]]: shard0 -> blocks 100,102; shard1 -> blocks 101,103.
+        self.assertEqual(local_ids, [([100, 102],), ([101, 103],)])
+
+    def _build_non_cp_worker(self):
+        worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
+        worker.use_mla = False
+        worker.use_sparse = False
+        worker.pcp_size = 1
+        worker.dcp_size = 1
+        worker.pcp_rank = 0
+        worker.dcp_rank = 0
+        worker.tp_size = 1
+        worker.tp_rank = 0
+        worker.block_size = 16
+        worker.num_key_value_heads = 1
+        worker._prefill_tp_size = 1
+        worker._is_hma_required = False
+        # No CP, so the remote rank choice is irrelevant to the expansion under test.
+        worker._get_remote_rank = lambda *a, **k: [0]
+        return worker
+
+    def test_get_kv_split_metadata_non_cp_prefix_skip_and_trim(self):
+        """No-CP: remote kernels are expanded, prefix-skipped by num_computed_tokens,
+        and trimmed to the local count - all inside _get_kv_split_metadata now."""
+        worker = self._build_non_cp_worker()
+        worker.block_size_scale = [[1]]
+        worker.kv_group2layeridx = {0: ({"kv_cache_spec_type": "FullAttentionSpec"}, [0])}
+
+        meta = types.SimpleNamespace(
+            remote_pcp_size=1,
+            remote_dcp_size=1,
+            remote_ptp_size=1,
+            remote_port=30000,
+            remote_block_ids=([3, 4, 5],),
+            local_block_ids=([1, 2],),
+            num_external_tokens=2 * worker.block_size,
+            num_prompt_blocks=3,
+            num_computed_tokens=worker.block_size,  # 1 prefix block -> skip first remote kernel
+            remote_block_size=worker.block_size,
+            remote_engine_id="e_non_cp",
+            remote_host="localhost",
+            remote_multi_nodes_meta_mapping={},
+        )
+
+        ports, local_ids, remote_ids = worker._get_kv_split_metadata("r", cast(ReqMeta, meta))
+
+        self.assertEqual(ports, [[30000]])
+        # scale 1: remote kernels [3,4,5] -> skip 1 -> [4,5]; local [1,2]; min -> 2.
+        self.assertEqual(local_ids, [([1, 2],)])
+        self.assertEqual(remote_ids, [([4, 5],)])
+
+    def test_get_kv_split_metadata_non_cp_uses_compress_ratio(self):
+        """No-CP: the per-group compress_ratio scales the prefix-skip offset."""
+        worker = self._build_non_cp_worker()
+        # block 16 stored as 2 kernels of 8 (scale 2).
+        worker.block_size_scale = [[2]]
+        worker.kv_group2layeridx = {
+            0: (
+                {
+                    "kv_cache_spec_type": "UniformTypeKVCacheSpecs",
+                    "kv_cache_spec": {"layer_0": {"compress_ratio": 4}},
+                },
+                [0],
+            )
+        }
+
+        meta = types.SimpleNamespace(
+            remote_pcp_size=1,
+            remote_dcp_size=1,
+            remote_ptp_size=1,
+            remote_port=30000,
+            remote_block_ids=([3, 4],),
+            local_block_ids=([1, 2],),
+            num_external_tokens=2 * worker.block_size,
+            num_prompt_blocks=3,
+            # kernel token size = kernel_size(8) * compress_ratio(4) = 32 -> skip 1 kernel.
+            num_computed_tokens=32,
+            remote_block_size=worker.block_size,
+            remote_engine_id="e_compress",
+            remote_host="localhost",
+            remote_multi_nodes_meta_mapping={},
+        )
+
+        ports, local_ids, remote_ids = worker._get_kv_split_metadata("r", cast(ReqMeta, meta))
+
+        self.assertEqual(ports, [[30000]])
+        # local [1,2] -> kernels [2,3,4,5]; remote [3,4] -> kernels [6,7,8,9] -> skip 1 -> [7,8,9];
+        # min -> 3 kernels.
+        self.assertEqual(local_ids, [([2, 3, 4],)])
+        self.assertEqual(remote_ids, [([7, 8, 9],)])
 
     def _build_worker_for_pd_case(self, case, tp_rank, pcp_rank=0, dcp_rank=0):
         with patch.object(
@@ -2125,6 +2351,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         worker.remote_port_send_num = {}
         worker.side_channel_port = 5000
         worker.handshake_port = worker.side_channel_port + (worker.pp_rank + pcp_rank) * worker.tp_size + tp_rank
+        worker.block_size_scale = [[1], [1]]
         worker.kv_group2layeridx = {
             0: ({"kv_cache_spec_type": "FullAttentionSpec"}, [0]),
             1: ({"kv_cache_spec_type": "FullAttentionSpec"}, [1]),
@@ -2240,6 +2467,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                                 local_block_ids=case["local_block_ids"],
                                 num_external_tokens=case["num_external_blocks"] * worker.block_size,
                                 num_prompt_blocks=case["num_prompt_blocks"],
+                                remote_block_size=worker.block_size,
                                 remote_engine_id=f"remote_{case['name']}_{tp_rank}_{pcp_rank}_{dcp_rank}",
                                 remote_host="localhost",
                                 remote_multi_nodes_meta_mapping={},
@@ -2247,15 +2475,25 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
 
                             ports, local_ids, remote_ids = worker._get_kv_split_metadata("req_pd", meta)
                             group_pulls = worker._get_group_pulls_metadata(
-                                "req_pd", ports, case["prefill_tp_size"], 30000
+                                "req_pd",
+                                ports,
+                                case["prefill_tp_size"],
+                                30000,
+                                case["remote_pcp_size"],
+                                case["remote_dcp_size"],
                             )
 
                             self.assertEqual(len(ports), len(local_ids))
                             self.assertEqual(len(local_ids), len(remote_ids))
-                            self.assertEqual(
-                                sum(len(ids[0]) for ids in local_ids),
-                                case["num_external_blocks"] // (case["pcp_size"] * case["dcp_size"]),
+                            # Expansion now happens in _get_kv_split_metadata (scale 1 =>
+                            # kernel == block), so each shard carries only the kernels it
+                            # writes. The rank's external blocks are partitioned across
+                            # shards, so the per-shard local lengths sum to the per-rank
+                            # external block count.
+                            per_rank_external_blocks = case["num_external_blocks"] // (
+                                case["pcp_size"] * case["dcp_size"]
                             )
+                            self.assertEqual(sum(len(ids[0]) for ids in local_ids), per_rank_external_blocks)
                             self._assert_group_pull_finish_flags(ports, group_pulls, {0, 1})
 
     def test_pd_disaggregated_hybrid_prefix_tp_and_pp_unequal(self):
@@ -2285,6 +2523,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                 worker._decode_tp_size = 2
                 worker._prefill_tp_size = 4
                 worker._prefill_pp_size = 2
+                worker.block_size_scale = [[1], [1], [1]]
                 worker.kv_group2layeridx = {
                     0: (
                         {
@@ -2305,16 +2544,23 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                     local_block_ids=([70, 71], [80, 81, 82]),
                     num_external_tokens=3 * worker.block_size,
                     num_prompt_blocks=4,
+                    num_computed_tokens=0,
+                    remote_block_size=worker.block_size,
                     remote_engine_id=f"remote_hybrid_{tp_rank}",
                     remote_host="localhost",
                     remote_multi_nodes_meta_mapping={},
                 )
 
                 ports, local_ids, remote_ids = worker._get_kv_split_metadata("req_hybrid", cast(ReqMeta, meta))
-                group_pulls = worker._get_group_pulls_metadata("req_hybrid", ports, 4, 31000)
+                group_pulls = worker._get_group_pulls_metadata(
+                    "req_hybrid", ports, 4, 31000, meta.remote_pcp_size, meta.remote_dcp_size
+                )
 
-                self.assertEqual(local_ids, [meta.local_block_ids])
-                self.assertEqual(remote_ids, [meta.remote_block_ids])
+                # Attention (group 0) is now expanded + min-trimmed in metadata: D holds 2
+                # external blocks [70,71], so the 3 remote blocks are trimmed to [50,51].
+                # Mamba (group 1) keeps the full logical state.
+                self.assertEqual(local_ids, [([70, 71], [80, 81, 82])])
+                self.assertEqual(remote_ids, [([50, 51], [60, 61, 62])])
                 self.assertGreater(len(ports[0]), 1)
                 self._assert_hybrid_group_pull_finish_flags(
                     ports,
@@ -2356,6 +2602,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                 worker.handshake_port = worker.side_channel_port + tp_rank
                 worker.local_remote_block_port_mapping = {}
                 worker.remote_port_send_num = {}
+                worker.block_size_scale = [[1], [1], [1]]
                 worker.kv_group2layeridx = {
                     0: (
                         {
@@ -2379,12 +2626,16 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                     remote_engine_id=f"remote_hybrid_pcp_{tp_rank}",
                     remote_host="localhost",
                     remote_multi_nodes_meta_mapping={},
+                    remote_block_size=16,
+                )
+                ports, local_ids, remote_ids = worker._get_kv_split_metadata("req_hybrid_pcp", cast(ReqMeta, meta))
+                group_pulls = worker._get_group_pulls_metadata(
+                    "req_hybrid_pcp", ports, 4, 31000, meta.remote_pcp_size, meta.remote_dcp_size
                 )
 
-                ports, local_ids, remote_ids = worker._get_kv_split_metadata("req_hybrid_pcp", cast(ReqMeta, meta))
-                group_pulls = worker._get_group_pulls_metadata("req_hybrid_pcp", ports, 4, 31000)
-
                 self.assertEqual(len(ports), 2)
+                # Attention (group 0) is expanded in metadata (scale 1): the 4 external
+                # blocks are interleaved across the 2 PCP shards, 2 kernels each.
                 self.assertEqual([len(ids[0]) for ids in local_ids], [2, 2])
                 self.assertEqual([ids[1] for ids in local_ids], [[], [80, 81, 82, 83]])
                 self.assertEqual([ids[1] for ids in remote_ids], [[], [60, 61, 62, 63]])
@@ -2393,7 +2644,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                     ports,
                     group_pulls,
                     expected_group_ids={0, 1},
-                    expected_finishes={0: 2, 1: 2},
+                    expected_finishes={0: 2, 1: 1},
                 )
 
     def test_get_tp_num_need_pulls(self):
