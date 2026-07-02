@@ -374,9 +374,7 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
         dynamic_scale = token_dispatch_input.routing.pertoken_scale
         quant_type = token_dispatch_input.quant.quant_type
         act_quant_type = (
-            token_dispatch_input.quant.mxfp.act_quant_type
-            if token_dispatch_input.quant.mxfp is not None
-            else None
+            token_dispatch_input.quant.mxfp.act_quant_type if token_dispatch_input.quant.mxfp is not None else None
         )
         global_redundant_expert_num = token_dispatch_input.routing.global_redundant_expert_num
         restore_shape = hidden_states.shape
