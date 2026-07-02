@@ -72,6 +72,7 @@ def set_ascend_forward_context(
     has_sinks=False,
     input_ids=None,
     eplb_heat_collection_status: bool = False,
+    ubatch_slices=None,
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
@@ -85,6 +86,7 @@ def set_ascend_forward_context(
         "cudagraph_runtime_mode": aclgraph_runtime_mode,
         "batch_descriptor": batch_descriptor,
         "skip_compiled": skip_compiled,
+        "ubatch_slices": ubatch_slices,
     }
     with set_forward_context(**forward_context_kwargs):
         forward_context = get_forward_context()
