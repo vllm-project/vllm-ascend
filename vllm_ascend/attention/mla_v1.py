@@ -57,6 +57,7 @@ from vllm_ascend.ops.rope_cache_ops import (
     has_mla_prolog_v2_by_cache_kernel,
     has_mla_prolog_v3_by_cache_kernel,
     interleave_rope_by_cache,
+    kv_rmsnorm_rope_cache_and_interleave_by_cache,
     kv_rmsnorm_rope_cache_by_cache,
     mla_preprocess_by_cache,
 )
@@ -1423,6 +1424,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             c_kv_scale=c_kv_scale,
             epsilon=self.kv_a_layernorm.variance_epsilon,  # type: ignore[union-attr]
             cache_mode=cache_mode,
+            is_neox_style=False,
         )
         return k_pe, k_nope
 
@@ -1459,6 +1461,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 cache_mode=cache_mode,
                 is_output_kv=True,
                 allow_negative_slots=allow_negative_slots,
+                is_neox_style=False,
             )
             return k_pe, k_nope
         _, _, k_pe, k_nope = kv_rmsnorm_rope_cache_by_cache(
@@ -1473,6 +1476,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             epsilon=self.kv_a_layernorm.variance_epsilon,  # type: ignore[union-attr]
             cache_mode=cache_mode,
             is_output_kv=True,
+            is_neox_style=False,
         )
         return k_pe, k_nope
 
@@ -1484,9 +1488,39 @@ class AscendMLAImpl(MLAAttentionImpl):
         kv_cache: tuple,
         slots: torch.Tensor,
     ):
-        # The fused by-cache q+kv path drifts for DeepSeek MLA. Keep the public
-        # call shape but fall back to the separate legacy ops until it is fixed.
-        return None
+        assert self.kv_a_layernorm is not None
+        if not all(isinstance(tensor, torch.Tensor) for tensor in (q_pe, kv_no_split, positions, slots)):
+            return None
+        if not isinstance(kv_cache, (tuple, list)) or len(kv_cache) <= 1:
+            return None
+
+        B = kv_no_split.shape[0]
+        N = self.num_kv_heads
+        S = 1
+        kv_no_split = kv_no_split.view(B, N, S, self.kv_lora_rank + self.qk_rope_head_dim)
+        cache_mode = "PA_NZ" if self.enable_kv_nz else "PA"
+        c_kv_scale = None
+        if get_ascend_device_type() == AscendDeviceType.A5 and self.fa_quant_layer:
+            c_kv_scale = self.fak_descale_reciprocal
+
+        fused_output = kv_rmsnorm_rope_cache_and_interleave_by_cache(
+            q_pe,
+            kv_no_split,
+            self.kv_a_layernorm.weight,  # type: ignore[union-attr]
+            positions,
+            self.rotary_emb,
+            slots,
+            kv_cache[1],
+            kv_cache[0],
+            c_kv_scale=c_kv_scale,
+            epsilon=self.kv_a_layernorm.variance_epsilon,  # type: ignore[union-attr]
+            cache_mode=cache_mode,
+            is_neox_style=False,
+        )
+        if fused_output is None:
+            return None
+        q_pe, k_pe, k_nope, _, _ = fused_output
+        return q_pe, k_pe, k_nope
 
     def try_exec_q_kv_prefill(
         self,
@@ -1498,9 +1532,42 @@ class AscendMLAImpl(MLAAttentionImpl):
         *,
         allow_negative_slots: bool = False,
     ):
-        # The fused by-cache q+kv path drifts for DeepSeek MLA. Keep the public
-        # call shape but fall back to the separate legacy ops until it is fixed.
-        return None
+        if allow_negative_slots:
+            return None
+        assert self.kv_a_layernorm is not None
+        if not all(isinstance(tensor, torch.Tensor) for tensor in (q_pe, kv_no_split, positions, slots)):
+            return None
+        if not isinstance(kv_cache, (tuple, list)) or len(kv_cache) <= 1:
+            return None
+
+        B = kv_no_split.shape[0]
+        N = self.num_kv_heads
+        S = 1
+        kv_no_split = kv_no_split.view(B, N, S, self.kv_lora_rank + self.qk_rope_head_dim)
+        cache_mode = "PA"
+        c_kv_scale = None
+        if get_ascend_device_type() == AscendDeviceType.A5 and self.fa_quant_layer:
+            c_kv_scale = self.fak_descale_reciprocal
+
+        fused_output = kv_rmsnorm_rope_cache_and_interleave_by_cache(
+            q_pe,
+            kv_no_split,
+            self.kv_a_layernorm.weight,  # type: ignore[union-attr]
+            positions,
+            self.rotary_emb,
+            slots,
+            kv_cache[1],
+            kv_cache[0],
+            c_kv_scale=c_kv_scale,
+            epsilon=self.kv_a_layernorm.variance_epsilon,  # type: ignore[union-attr]
+            cache_mode=cache_mode,
+            is_output_kv=True,
+            is_neox_style=False,
+        )
+        if fused_output is None:
+            return None
+        q_pe, _, _, k_pe, k_c_normed = fused_output
+        return q_pe, k_pe, k_c_normed
 
     def _prefill_mlapo_has_raw_q_backend(self) -> bool:
         if _is_aclgraph_capturing() or self._aclgraph_mode_configured():
@@ -1642,7 +1709,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         B, N, D = x.shape
         S = 1
         x = x.view(B, N, S, D)
-        x = interleave_rope_by_cache(x, positions, self.rotary_emb)
+        x = interleave_rope_by_cache(x, positions, self.rotary_emb, is_neox_style=False)
         return x.view(B, N, D)
 
     def _forward_decode(

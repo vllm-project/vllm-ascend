@@ -1210,6 +1210,7 @@ class TestAscendMLAImpl(TestBase):
 
         self.assertEqual(result.shape, (batch_size, seq_len, dim))
         mock_interleave_rope_by_cache.assert_called_once()
+        self.assertIs(mock_interleave_rope_by_cache.call_args.kwargs["is_neox_style"], False)
 
     @patch("torch_npu.npu_interleave_rope")
     @patch("vllm_ascend.attention.mla_v1.interleave_rope_by_cache")
@@ -1235,6 +1236,7 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(rope_arg.shape, (batch_size, num_heads, 1, dim))
         self.assertIs(positions_arg, positions)
         self.assertIs(rotary_arg, self.impl.rotary_emb)
+        self.assertIs(mock_interleave_rope_by_cache.call_args.kwargs["is_neox_style"], False)
         mock_npu_interleave_rope.assert_not_called()
 
     @patch("vllm_ascend.attention.mla_v1._EXTRA_CTX")
@@ -1260,6 +1262,7 @@ class TestAscendMLAImpl(TestBase):
 
         self.assertEqual(result.shape, (batch_size, num_heads, dim))
         mock_interleave_rope_by_cache.assert_called_once()
+        self.assertIs(mock_interleave_rope_by_cache.call_args.kwargs["is_neox_style"], False)
         mock_npu_interleave_rope.assert_not_called()
 
     def test_forward_mha_not_implemented(self):
@@ -2284,6 +2287,7 @@ class TestAscendMLAImpl(TestBase):
 
         self.assertEqual(k_pe.shape[-1], self.impl.qk_rope_head_dim)
         self.assertEqual(k_nope.shape[-1], self.impl.kv_lora_rank)
+        self.assertIs(mock_kv_rmsnorm_rope_cache.call_args.kwargs["is_neox_style"], False)
 
     @patch("vllm_ascend.attention.mla_v1.kv_rmsnorm_rope_cache_by_cache")
     def test_exec_kv_prefill_with_fa_quant(self, mock_kv_rmsnorm_rope_cache):
@@ -2313,6 +2317,7 @@ class TestAscendMLAImpl(TestBase):
 
         self.assertEqual(k_pe.shape[-1], self.impl.qk_rope_head_dim)
         self.assertEqual(k_nope.shape[-1], self.impl.kv_lora_rank)
+        self.assertIs(mock_kv_rmsnorm_rope_cache.call_args.kwargs["is_neox_style"], False)
 
     @patch("vllm_ascend.attention.mla_v1.kv_rmsnorm_rope_cache_by_cache")
     def test_exec_kv_decode(self, mock_kv_rmsnorm_rope_cache):
@@ -2338,6 +2343,7 @@ class TestAscendMLAImpl(TestBase):
 
         self.assertEqual(k_pe.shape[-1], self.impl.qk_rope_head_dim)
         self.assertEqual(k_nope.shape[-1], self.impl.kv_lora_rank)
+        self.assertIs(mock_kv_rmsnorm_rope_cache.call_args.kwargs["is_neox_style"], False)
 
     @patch("vllm_ascend.attention.mla_v1.kv_rmsnorm_rope_cache_by_cache")
     def test_exec_kv_uses_cache_wrapper_for_deepseek_cp_and_pp(self, mock_cache_wrapper):
@@ -2384,41 +2390,65 @@ class TestAscendMLAImpl(TestBase):
                 self.assertEqual(prefill_k_pe.shape[-1], self.impl.qk_rope_head_dim)
                 self.assertEqual(prefill_k_nope.shape[-1], self.impl.kv_lora_rank)
                 self.assertEqual(mock_cache_wrapper.call_count, 2)
+                for call in mock_cache_wrapper.call_args_list:
+                    self.assertIs(call.kwargs["is_neox_style"], False)
 
-    @patch("vllm_ascend.attention.mla_v1._EXTRA_CTX")
-    def test_try_exec_q_kv_skips_fused_path_during_aclgraph_capture(self, mock_extra_ctx):
-        mock_extra_ctx.capturing = True
+    @patch("vllm_ascend.attention.mla_v1.kv_rmsnorm_rope_cache_and_interleave_by_cache")
+    def test_try_exec_q_kv_prefill_uses_fused_by_cache_non_neox(self, mock_fused):
         B = 2
         N = self.impl.num_kv_heads
         D = self.impl.kv_lora_rank + self.impl.qk_rope_head_dim
-        q_pe = torch.randn(B, N, self.impl.qk_rope_head_dim)
+        q_pe = torch.randn(B, self.impl.num_heads, self.impl.qk_rope_head_dim)
         kv_no_split = torch.randn(B, N, D)
         positions = torch.arange(B)
         slots = torch.arange(B, dtype=torch.int32)
         kv_cache = [MagicMock(), MagicMock()]
+        self.impl.enable_kv_nz = None
+        self.impl.kv_a_layernorm.weight = MagicMock()
+        self.impl.kv_a_layernorm.variance_epsilon = 1e-6
 
-        decode_result = self.impl.try_exec_q_kv_decode(q_pe, kv_no_split, positions, kv_cache, slots)
-        prefill_result = self.impl.try_exec_q_kv_prefill(q_pe, kv_no_split, positions, kv_cache, slots)
+        q_out = torch.randn_like(q_pe)
+        k_pe = torch.randn(B, N, 1, self.impl.qk_rope_head_dim)
+        k_c_normed = torch.randn(B, N, 1, self.impl.kv_lora_rank)
+        mock_fused.return_value = [q_out, None, None, k_pe, k_c_normed]
 
-        self.assertIsNone(decode_result)
-        self.assertIsNone(prefill_result)
+        result = self.impl.try_exec_q_kv_prefill(q_pe, kv_no_split, positions, kv_cache, slots)
 
-    def test_try_exec_q_kv_skips_fused_path_when_aclgraph_mode_configured(self):
-        self.impl.vllm_config.compilation_config.cudagraph_mode = "FULL_AND_PIECEWISE"
+        self.assertIsNotNone(result)
+        self.assertIs(result[0], q_out)
+        self.assertIs(result[1], k_pe)
+        self.assertIs(result[2], k_c_normed)
+        self.assertEqual(mock_fused.call_args.args[1].shape, (B, N, 1, D))
+        self.assertIs(mock_fused.call_args.kwargs["is_output_kv"], True)
+        self.assertIs(mock_fused.call_args.kwargs["is_neox_style"], False)
+
+    @patch("vllm_ascend.attention.mla_v1.kv_rmsnorm_rope_cache_and_interleave_by_cache")
+    def test_try_exec_q_kv_decode_uses_fused_by_cache_non_neox(self, mock_fused):
         B = 2
         N = self.impl.num_kv_heads
         D = self.impl.kv_lora_rank + self.impl.qk_rope_head_dim
-        q_pe = torch.randn(B, N, self.impl.qk_rope_head_dim)
+        q_pe = torch.randn(B, self.impl.num_heads, self.impl.qk_rope_head_dim)
         kv_no_split = torch.randn(B, N, D)
         positions = torch.arange(B)
         slots = torch.arange(B, dtype=torch.int32)
         kv_cache = [MagicMock(), MagicMock()]
+        self.impl.enable_kv_nz = None
+        self.impl.kv_a_layernorm.weight = MagicMock()
+        self.impl.kv_a_layernorm.variance_epsilon = 1e-6
 
-        decode_result = self.impl.try_exec_q_kv_decode(q_pe, kv_no_split, positions, kv_cache, slots)
-        prefill_result = self.impl.try_exec_q_kv_prefill(q_pe, kv_no_split, positions, kv_cache, slots)
+        q_out = torch.randn_like(q_pe)
+        k_pe = torch.randn(B, N, 1, self.impl.qk_rope_head_dim)
+        k_nope = torch.randn(B, N, 1, self.impl.kv_lora_rank)
+        mock_fused.return_value = [q_out, k_pe, k_nope, None, None]
 
-        self.assertIsNone(decode_result)
-        self.assertIsNone(prefill_result)
+        result = self.impl.try_exec_q_kv_decode(q_pe, kv_no_split, positions, kv_cache, slots)
+
+        self.assertIsNotNone(result)
+        self.assertIs(result[0], q_out)
+        self.assertIs(result[1], k_pe)
+        self.assertIs(result[2], k_nope)
+        self.assertEqual(mock_fused.call_args.args[1].shape, (B, N, 1, D))
+        self.assertIs(mock_fused.call_args.kwargs["is_neox_style"], False)
 
     @patch("vllm_ascend.attention.mla_v1._EXTRA_CTX")
     def test_prefill_mlapo_raw_q_backend_skips_aclgraph_capture(self, mock_extra_ctx):

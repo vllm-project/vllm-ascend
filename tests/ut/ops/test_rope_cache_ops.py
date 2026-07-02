@@ -287,6 +287,40 @@ def test_interleave_rope_by_cache_falls_back_to_native_by_cache_for_non_neox(mon
     assert torch.equal(out, (calls["qk"] + 1).reshape(x.shape))
 
 
+def test_interleave_rope_by_cache_honors_is_neox_override(monkeypatch):
+    calls = {}
+
+    def fake_native(qk, positions, cos_sin_cache, rope_dim, is_neox_style):
+        calls["qk"] = qk
+        calls["positions"] = positions
+        calls["cos_sin_cache"] = cos_sin_cache
+        calls["rope_dim"] = rope_dim
+        calls["is_neox_style"] = is_neox_style
+        return qk + 1
+
+    monkeypatch.setattr(rope_cache_ops, "_get_torch_npu_op", lambda name: None)
+    monkeypatch.setattr(rope_cache_ops, "_get_c_ascend_op", lambda name: fake_native)
+    monkeypatch.setattr(
+        rope_cache_ops,
+        "_get_triton_interleave_rope_by_cache",
+        lambda: (_ for _ in ()).throw(AssertionError("Triton should not be used")),
+    )
+    monkeypatch.setattr(rope_cache_ops, "get_rope_cache", lambda rotary_emb, ref_tensor: rotary_emb.cos_sin_cache)
+
+    x = torch.zeros(2, 1, 1, 32)
+    positions = torch.tensor([0, 1], dtype=torch.int64)
+    rotary = SimpleNamespace(cos_sin_cache=torch.zeros(4, 32), rotary_dim=32, is_neox_style=True)
+
+    out = rope_cache_ops.interleave_rope_by_cache(x, positions, rotary, is_neox_style=False)
+
+    assert calls["qk"].shape == (2, 1, 32)
+    assert calls["positions"].dtype == torch.int64
+    assert calls["cos_sin_cache"] is rotary.cos_sin_cache
+    assert calls["rope_dim"] == 32
+    assert calls["is_neox_style"] is False
+    assert torch.equal(out, (calls["qk"] + 1).reshape(x.shape))
+
+
 def test_mla_preprocess_by_cache_normalizes_int32_positions(monkeypatch):
     calls = {}
 
@@ -372,49 +406,7 @@ def test_interleave_rope_by_cache_does_not_fallback_to_materialized_native(monke
     with pytest.raises(RuntimeError, match="true by-cache backend"):
         rope_cache_ops.interleave_rope_by_cache(x, positions, rotary)
 
-    assert queried_ops == ["npu_interleave_rope_by_cache"]
-
-
-def test_interleave_rope_by_cache_prefers_torch_npu_by_cache(monkeypatch):
-    calls = {}
-
-    def fake_torch_npu_op(qk, positions, cos_sin_cache, rope_dim, is_neox_style):
-        calls["qk"] = qk
-        calls["positions"] = positions
-        calls["cos_sin_cache"] = cos_sin_cache
-        calls["rope_dim"] = rope_dim
-        calls["is_neox_style"] = is_neox_style
-        return qk + 1
-
-    def fake_get_torch_npu_op(name):
-        assert name == "npu_interleave_rope_by_cache"
-        return fake_torch_npu_op
-
-    monkeypatch.setattr(rope_cache_ops, "_get_torch_npu_op", fake_get_torch_npu_op)
-    monkeypatch.setattr(
-        rope_cache_ops,
-        "_get_c_ascend_op",
-        lambda name: (_ for _ in ()).throw(AssertionError("C Ascend should not be used before torch_npu")),
-    )
-    monkeypatch.setattr(
-        rope_cache_ops,
-        "_get_triton_interleave_rope_by_cache",
-        lambda: (_ for _ in ()).throw(AssertionError("Triton should not be used before torch_npu")),
-    )
-    monkeypatch.setattr(rope_cache_ops, "get_rope_cache", lambda rotary_emb, ref_tensor: rotary_emb.cos_sin_cache)
-
-    x = torch.zeros(2, 1, 1, 32)
-    positions = torch.tensor([0, 1], dtype=torch.int64)
-    rotary = SimpleNamespace(cos_sin_cache=torch.zeros(4, 32), rotary_dim=32, is_neox_style=True)
-
-    out = rope_cache_ops.interleave_rope_by_cache(x, positions, rotary)
-
-    assert calls["qk"] is x
-    assert torch.equal(calls["positions"], positions)
-    assert calls["cos_sin_cache"] is rotary.cos_sin_cache
-    assert calls["rope_dim"] == 32
-    assert calls["is_neox_style"] is True
-    assert torch.equal(out, x + 1)
+    assert queried_ops == []
 
 
 def test_interleave_rope_by_cache_prefers_c_backend_for_non_neox(monkeypatch):
@@ -493,7 +485,7 @@ def test_kv_rmsnorm_rope_cache_by_cache_does_not_fallback_to_materialized_native
             cache_mode="PA",
         )
 
-    assert queried_ops == ["npu_kv_rmsnorm_rope_cache_by_cache"]
+    assert queried_ops == []
 
 
 def test_kv_rmsnorm_rope_cache_by_cache_triton_accepts_int32_slots(monkeypatch):
@@ -675,67 +667,6 @@ def test_kv_rmsnorm_rope_cache_by_cache_uses_c_ascend_with_negative_slots(monkey
     assert torch.equal(calls["slots"], torch.tensor([-1, 5], dtype=torch.int64))
     assert calls["cos_sin_cache"] is rotary.cos_sin_cache
     assert calls["args"][-5:] == (1e-6, 32, False, True, False)
-
-
-def test_kv_rmsnorm_rope_cache_by_cache_uses_torch_npu_by_cache_as_last_fallback(monkeypatch):
-    calls = {}
-    expected = ("rope_cache", "nope_cache", "out_rope", "out_nope")
-
-    def fake_torch_npu_op(kv, weight, positions, cos_sin_cache, slots, rope_cache, nope_cache, **kwargs):
-        calls["kv"] = kv
-        calls["weight"] = weight
-        calls["positions"] = positions
-        calls["cos_sin_cache"] = cos_sin_cache
-        calls["slots"] = slots
-        calls["rope_cache"] = rope_cache
-        calls["nope_cache"] = nope_cache
-        calls["kwargs"] = kwargs
-        return expected
-
-    def fake_get_torch_npu_op(name):
-        assert name == "npu_kv_rmsnorm_rope_cache_by_cache"
-        return fake_torch_npu_op
-
-    monkeypatch.setattr(rope_cache_ops, "_get_torch_npu_op", fake_get_torch_npu_op)
-    monkeypatch.setattr(rope_cache_ops, "_get_c_ascend_op", lambda name: None)
-    monkeypatch.setattr(rope_cache_ops, "_get_triton_kv_rmsnorm_rope_cache_by_cache", lambda: None)
-    monkeypatch.setattr(rope_cache_ops, "get_rope_cache", lambda rotary_emb, ref_tensor: rotary_emb.cos_sin_cache)
-
-    kv = torch.zeros(2, 1, 1, 48)
-    weight = torch.ones(16)
-    positions = torch.tensor([0, 1], dtype=torch.long)
-    slots = torch.tensor([4, 5], dtype=torch.int32)
-    rotary = SimpleNamespace(cos_sin_cache=torch.zeros(4, 32), rotary_dim=32, is_neox_style=False)
-    rope_cache = torch.zeros(8, 1, 1, 32)
-    nope_cache = torch.zeros(8, 1, 1, 16)
-
-    result = rope_cache_ops.kv_rmsnorm_rope_cache_by_cache(
-        kv,
-        weight,
-        positions,
-        rotary,
-        slots,
-        rope_cache,
-        nope_cache,
-        epsilon=1e-6,
-        cache_mode="PA",
-        is_output_kv=True,
-    )
-
-    assert result == expected
-    assert calls["kv"] is kv
-    assert calls["weight"] is weight
-    assert torch.equal(calls["positions"], positions)
-    assert calls["cos_sin_cache"] is rotary.cos_sin_cache
-    assert calls["slots"].dtype == torch.int64
-    assert torch.equal(calls["slots"], slots.to(torch.int64))
-    assert calls["rope_cache"] is rope_cache
-    assert calls["nope_cache"] is nope_cache
-    assert calls["kwargs"]["epsilon"] == 1e-6
-    assert calls["kwargs"]["cache_mode"] == "PA"
-    assert calls["kwargs"]["is_output_kv"] is True
-    assert calls["kwargs"]["rope_dim"] == 32
-    assert calls["kwargs"]["is_neox_style"] is False
 
 
 def test_kv_rmsnorm_rope_cache_and_interleave_by_cache_uses_c_ascend(monkeypatch):

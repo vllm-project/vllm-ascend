@@ -430,32 +430,17 @@ class AscendMlaCPImpl(AscendMLAImpl):
         prefill_positions = attn_metadata.prefill.input_positions[: num_actual_tokens - num_decode_tokens]
         prefill_q_pe = self.rope_single(prefill_q_pe, prefill_positions)
         prefill_kv_no_split = kv_no_split[:num_actual_tokens]
+        kv_c, k_pe = prefill_kv_no_split.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+        kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())  # type: ignore[misc]
         assert len(kv_cache) > 1, "the number of kv cache should be greater than 1, namely (nope_cache and rope_cache)"
-        if num_decode_tokens > 0:
-            decode_positions = attn_metadata.decode.input_positions[:num_decode_tokens].to(
-                device=prefill_positions.device,
-                dtype=prefill_positions.dtype,
-            )
-            kv_positions = torch.cat([decode_positions, prefill_positions], dim=0)
-        else:
-            kv_positions = prefill_positions
-        # Defer the PCP cache write until after all-gather restore; -1 slots still
-        # let the by-cache kernel produce normalized K and RoPE outputs.
-        no_cache_slots = torch.full(
-            (num_actual_tokens,),
-            -1,
-            dtype=torch.int64,
-            device=attn_metadata.slot_mapping.device,
+        kv_c_normed = kv_c_normed.view([num_actual_tokens, self.num_kv_heads, -1])
+        k_pe = k_pe.unsqueeze(1)
+        prefill_k_pe = k_pe
+        prefill_k_pe[num_decode_tokens:num_actual_tokens] = self.rope_single(
+            prefill_k_pe[num_decode_tokens:num_actual_tokens],
+            prefill_positions,
         )
-        prefill_k_pe, prefill_k_c_normed = self.exec_kv_prefill(
-            prefill_kv_no_split,
-            kv_positions,
-            kv_cache,
-            no_cache_slots,
-            allow_negative_slots=True,
-        )
-        prefill_k_pe = prefill_k_pe.view(num_actual_tokens, self.num_kv_heads, -1)
-        prefill_k_c_normed = prefill_k_c_normed.view(num_actual_tokens, self.num_kv_heads, -1)
+        prefill_k_c_normed = kv_c_normed[:num_actual_tokens]
         prefill_kv_c_k_pe = torch.cat([prefill_k_c_normed, prefill_k_pe], dim=-1)
         prefill_kv_c_k_pe = get_pcp_group().all_gather(prefill_kv_c_k_pe, 0)
         prefill_kv_c_k_pe = torch.index_select(

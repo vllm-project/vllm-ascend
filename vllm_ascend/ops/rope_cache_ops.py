@@ -280,7 +280,7 @@ def _normalize_positions_1d(positions: torch.Tensor, expected_num_tokens: int, o
 def _raise_missing_true_by_cache_backend(op_name: str) -> NoReturn:
     raise RuntimeError(
         f"{op_name} requires a true by-cache backend that reads rope cache by positions inside the kernel. "
-        "No native or Triton by-cache backend is available; refusing to materialize sin/cos tensors."
+        "No C Ascend custom or Triton by-cache backend is available; refusing to materialize sin/cos tensors."
     )
 
 
@@ -361,6 +361,8 @@ def _try_triton_interleave_rope_by_cache(
     x: torch.Tensor,
     positions: torch.Tensor,
     rotary_emb,
+    *,
+    is_neox_style: bool | None = None,
 ) -> torch.Tensor | None:
     interleave_rope = _get_triton_interleave_rope_by_cache()
     if interleave_rope is None or positions.dim() != 1:
@@ -383,7 +385,7 @@ def _try_triton_interleave_rope_by_cache(
         cos_sin_cache=get_rope_cache(rotary_emb, qk),
         positions=positions,
         rope_dim=rope_dim,
-        is_neox_style=_is_neox_style(rotary_emb),
+        is_neox_style=_is_neox_style(rotary_emb) if is_neox_style is None else bool(is_neox_style),
     )
     return output.reshape(x.shape)
 
@@ -392,6 +394,8 @@ def _try_c_ascend_interleave_rope_by_cache(
     x: torch.Tensor,
     positions: torch.Tensor,
     rotary_emb,
+    *,
+    is_neox_style: bool | None = None,
 ) -> torch.Tensor | None:
     native_op = _get_c_ascend_op("interleave_rope_by_cache")
     if native_op is None or x.dim() != 4 or x.shape[2] != 1:
@@ -418,7 +422,7 @@ def _try_c_ascend_interleave_rope_by_cache(
         _normalize_positions_1d(positions, qk.shape[0], "interleave_rope_by_cache"),
         cos_sin_cache,
         rope_dim,
-        _is_neox_style(rotary_emb),
+        _is_neox_style(rotary_emb) if is_neox_style is None else bool(is_neox_style),
     )
     return output.reshape(x.shape)
 
@@ -661,24 +665,17 @@ def interleave_rope_by_cache(
     x: torch.Tensor,
     positions: torch.Tensor,
     rotary_emb,
+    *,
+    is_neox_style: bool | None = None,
 ) -> torch.Tensor:
     positions = _normalize_positions_1d(positions, x.shape[0], "interleave_rope_by_cache")
-    is_neox_style = _is_neox_style(rotary_emb)
-    torch_npu_op = _get_torch_npu_op("npu_interleave_rope_by_cache") if is_neox_style else None
-    if torch_npu_op is not None:
-        cos_sin_cache = get_rope_cache(rotary_emb, x)
-        return torch_npu_op(
-            x,
-            positions,
-            cos_sin_cache,
-            rope_dim=_rope_dim(rotary_emb, x),
-            is_neox_style=is_neox_style,
-        )
+    resolved_is_neox_style = _is_neox_style(rotary_emb) if is_neox_style is None else bool(is_neox_style)
 
     native_output = _try_c_ascend_interleave_rope_by_cache(
         x,
         positions,
         rotary_emb,
+        is_neox_style=resolved_is_neox_style,
     )
     if native_output is not None:
         return native_output
@@ -687,20 +684,10 @@ def interleave_rope_by_cache(
         x,
         positions,
         rotary_emb,
+        is_neox_style=resolved_is_neox_style,
     )
     if triton_output is not None:
         return triton_output
-
-    torch_npu_op = None if is_neox_style else _get_torch_npu_op("npu_interleave_rope_by_cache")
-    if torch_npu_op is not None:
-        cos_sin_cache = get_rope_cache(rotary_emb, x)
-        return torch_npu_op(
-            x,
-            positions,
-            cos_sin_cache,
-            rope_dim=_rope_dim(rotary_emb, x),
-            is_neox_style=is_neox_style,
-        )
 
     _raise_missing_true_by_cache_backend("interleave_rope_by_cache")
 
@@ -904,28 +891,6 @@ def kv_rmsnorm_rope_cache_by_cache(
     )
     if triton_output is not None:
         return triton_output
-
-    torch_npu_op = None if allow_negative_slots else _get_torch_npu_op("npu_kv_rmsnorm_rope_cache_by_cache")
-    if torch_npu_op is not None:
-        cos_sin_cache = get_rope_cache(rotary_emb, kv_no_split)
-        kwargs = {
-            "c_kv_scale": c_kv_scale,
-            "epsilon": epsilon,
-            "cache_mode": cache_mode,
-            "is_output_kv": is_output_kv,
-            "rope_dim": rope_dim if rope_dim is not None else _rope_dim(rotary_emb, kv_no_split),
-            "is_neox_style": is_neox_style if is_neox_style is not None else _is_neox_style(rotary_emb),
-        }
-        return torch_npu_op(
-            kv_no_split,
-            weight,
-            positions,
-            cos_sin_cache,
-            slots.to(torch.int64).contiguous(),
-            kv_cache_rope,
-            kv_cache_nope,
-            **kwargs,
-        )
 
     _raise_missing_true_by_cache_backend("kv_rmsnorm_rope_cache_by_cache")
 
