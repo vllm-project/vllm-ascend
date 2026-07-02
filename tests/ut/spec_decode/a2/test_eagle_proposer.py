@@ -2,6 +2,7 @@
 import inspect
 import unittest
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -21,6 +22,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
+from vllm_ascend.spec_decode.utils import SlidingWindowAdapter
 from vllm_ascend.utils import enable_custom_op
 
 enable_custom_op()
@@ -180,6 +182,45 @@ def test_prepare_inputs_padded_preserves_internal_seq_lens_cpu():
 
     assert spec_common_attn_metadata._seq_lens_cpu is internal_seq_lens_cpu
     assert spec_common_attn_metadata.seq_lens_cpu is None
+
+
+class TestSlidingWindowAdapter:
+    @pytest.fixture(autouse=True)
+    def _setup(self):
+        self.device = torch.device("cpu")
+        yield
+
+    def _sw_adapter(self, window_size, block_size=16, max_num_reqs=8):
+        return SlidingWindowAdapter(window_size, block_size, max_num_reqs, self.device)
+
+    def test_apply_crops_and_clamps(self):
+        K, W, B = 3, 64, 16
+        num_reqs = 4
+        adapter = self._sw_adapter(W, B, num_reqs)
+        clone_ptr = adapter._block_table_clone.data_ptr()
+        seq_lens_group = [torch.zeros(num_reqs, dtype=torch.int32) for _ in range(K)]
+
+        fbt = torch.randint(1, 1000, (num_reqs, 20), dtype=torch.int32)
+        cad = SimpleNamespace(
+            block_table_tensor=fbt,
+            seq_lens=torch.zeros(num_reqs, dtype=torch.int32),
+            seq_lens_cpu=None,
+            _seq_lens_cpu=torch.zeros(num_reqs, dtype=torch.int32),
+            seq_lens_cpu_upper_bound=None,
+        )
+        sl = torch.tensor([10, 60, 200, 64], dtype=torch.int32)
+        adapter.apply(cad, sl, seq_lens_group, K)
+
+        # block_table rebinds to the pre-allocated clone (offset-0 view); full table saved
+        assert cad.block_table_tensor.data_ptr() == clone_ptr
+        assert adapter.full_block_table is fbt
+        # seq_lens + _seq_lens_cpu clamped to W
+        clamped = torch.min(sl, torch.full_like(sl, W))
+        assert torch.equal(cad.seq_lens, clamped)
+        assert torch.equal(cad._seq_lens_cpu, clamped)
+        # seq_lens_group prefilled: min(L + step, W)
+        for step in range(K):
+            assert torch.equal(seq_lens_group[step], torch.min(sl + step, torch.full_like(sl, W)))
 
 
 class TestEagleProposerInitialization(TestBase):
