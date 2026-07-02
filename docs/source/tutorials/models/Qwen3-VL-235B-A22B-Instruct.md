@@ -1,55 +1,58 @@
-# Qwen3-VL-235B-A22B-Instruct
+# Qwen3-VL-235B-A22B-Instruct Deployment Tutorial
 
-## Introduction
+## 1 Introduction
 
-The Qwen-VL(Vision-Language)series from Alibaba Cloud comprises a family of powerful Large Vision-Language Models (LVLMs) designed for comprehensive multimodal understanding. They accept images, text, and bounding boxes as input, and output text and detection boxes, enabling advanced functions like image detection, multi-modal dialogue, and multi-image reasoning.
+Qwen3-VL-235B-A22B-Instruct is a large-scale sparse MoE vision-language model in the Qwen3-VL family. It is designed for multimodal chat, image understanding, multi-image reasoning, OCR-like visual question answering, and long-context generation.
 
-This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, NPU deployment, accuracy and performance evaluation.
+This document describes the main validation steps for the model, including supported features, prerequisites, installation, single-node online deployment, multi-node deployment, Prefill-Decode (PD) disaggregation, functional verification, accuracy and performance evaluation, performance tuning, and FAQs.
 
-This tutorial uses the vLLM-Ascend `v0.11.0rc2` version for demonstration, showcasing the `Qwen3-VL-235B-A22B-Instruct` model as an example for multi-NPU deployment.
+The `Qwen3-VL-235B-A22B-Instruct` tutorial was introduced in the vLLM-Ascend validation cycle around `v0.12.0`. Use the current `vllm-ascend` documentation image placeholder or a later release for the examples below.
 
-## Supported Features
+## 2 Supported Features
 
-Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix, including BF16, chunked prefill, automatic prefix caching, asynchronous scheduling, tensor parallelism, pipeline parallelism, expert parallelism, data parallelism, PD disaggregation, and ACLGraph support.
 
-Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
+Refer to [feature guide](../../user_guide/feature_guide/index.md) to get feature configuration details.
 
-## Environment Preparation
+:::{note}
+The support matrix records the maximum verified capability for this model family. The startup examples in this document use practical validation settings for online serving and performance testing. Adjust `--max-model-len`, `--max-num-seqs`, `--max-num-batched-tokens`, and multimodal limits based on your service workload and available KV cache.
+:::
 
-### Model Weight
+## 3 Prerequisites
 
-- `Qwen3-VL-235B-A22B-Instruct`(BF16 version): require 1 Atlas 800 A3 (64G × 16) node，2 Atlas 800 A2（64G × 8）nodes. [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-235B-A22B-Instruct/)
+### 3.1 Model Weight
 
-It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
+- `Qwen3-VL-235B-A22B-Instruct` (BF16 version): requires 1 Atlas 800 A3 (64G x 16) node or 2 Atlas 800 A2 (64G x 8) nodes. [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-235B-A22B-Instruct/).
+- `Qwen3-VL-235B-A22B-Instruct-w8a8-QuaRot` (quantized version used by single-node validation): requires 1 Atlas 800 A3 (64G x 16) node. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3-VL-235B-A22B-Instruct-w8a8-QuaRot).
 
-### Verify Multi-node Communication(Optional)
+It is recommended to download the model weight to a shared directory across multiple nodes, such as `/root/.cache/`, so that all serving nodes can load the same path.
 
-If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../installation.md#verify-multi-node-communication).
+### 3.2 Verify Multi-node Communication (Optional)
 
-### Installation
+If you want to deploy the model in a multi-node environment, verify the communication environment according to [verify multi-node communication environment](../../installation.md#verify-multi-node-communication).
 
-:::::{tab-set}
-::::{tab-item} Use docker image
+## 4 Installation
 
-For example, using images `quay.io/ascend/vllm-ascend:v0.11.0rc2`(for Atlas 800 A2) and `quay.io/ascend/vllm-ascend:v0.11.0rc2-a3`(for Atlas 800 A3).
+### 4.1 Docker Image Installation
 
-Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
+Select an image based on your machine type. For example, use `quay.io/ascend/vllm-ascend:|vllm_ascend_version|` for Atlas 800 A2 and `quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3` for Atlas 800 A3.
+
+Refer to [using docker](../../installation.md#set-up-using-docker) for the complete installation guide.
 
 ```{code-block} bash
-  :substitutions:
-  # Update --device according to your device (Atlas A2: /dev/davinci[0-7] Atlas A3:/dev/davinci[0-15]).
-  # Update the vllm-ascend image according to your environment.
-  # Note you should download the weight to /root/.cache in advance.
-  # Update the vllm-ascend image
-  export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:|vllm_ascend_version|
-  export NAME=vllm-ascend
+:substitutions:
 
-  # Run the container using the defined variables
-  # Note: If you are running bridge network with docker, please expose available ports for multiple nodes communication in advance
-  docker run --rm \
+# Update --device according to your device.
+# Atlas A2: /dev/davinci[0-7]
+# Atlas A3: /dev/davinci[0-15]
+# Download the model weight to /root/.cache in advance.
+# Mount local media only when local image/video files are used.
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+export NAME=vllm-ascend
+
+docker run --rm \
   --name $NAME \
   --net=host \
-  --privileged=true \
   --shm-size=500g \
   --device /dev/davinci0 \
   --device /dev/davinci1 \
@@ -68,37 +71,105 @@ Select an image based on your machine type and start the docker image on your no
   -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
   -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
   -v /etc/ascend_install.info:/etc/ascend_install.info \
+  -v /root/.cache:/root/.cache \
+  -v /data:/data \
+  -v <path/to/your/media>:/media \
   -it $IMAGE bash
 ```
 
-::::
-::::{tab-item} Build from source
+After entering the container, verify that vLLM and vLLM-Ascend can be imported:
 
-You can build all from source.
+```shell
+python -c "import vllm, vllm_ascend; print('vllm and vllm_ascend are ready')"
+```
 
-- Install `vllm-ascend`, refer to [set up using python](../../installation.md#set-up-using-python).
+If you want to deploy a multi-node service, set up the same environment on each node.
 
-::::
-:::::
+### 4.2 Source Code Installation
 
-If you want to deploy multi-node environment, you need to set up environment on each node.
+You can also build and install `vllm-ascend` from source. Refer to [set up using python](../../installation.md#set-up-using-python).
 
-## Deployment
+If you want to deploy a multi-node service, install the same version of vLLM and vLLM-Ascend on each node.
 
-### Multi-node Deployment with MP (Recommended)
+## 5 Online Service Deployment
 
-Assume you have Atlas 800 A3 (64G*16) nodes (or 2* A2), and want to deploy the `Qwen3-VL-235B-A22B-Instruct` model across multiple nodes.
+### 5.1 Single-Node Online Deployment
 
-Node 0
+Single-node deployment runs both Prefill and Decode on the same node. The following W8A8 example is suitable for functional validation and image-only online serving on 1 Atlas 800 A3 (64G x 16) node. The W8A8 version needs `--quantization ascend`.
+
+Run the following script to start online serving on one A3 node:
 
 ```shell
 #!/bin/sh
-# Load model from ModelScope to speed up download
+
+# Load model from ModelScope to speed up download.
 export VLLM_USE_MODELSCOPE=True
-# To reduce memory fragmentation and avoid out of memory
+
+# Reduce memory fragmentation and avoid out-of-memory errors.
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-# this obtained through ifconfig
-# nic_name is the network interface name corresponding to local_ip of the current node
+
+export HCCL_OP_EXPANSION_MODE="AIV"
+export HCCL_BUFFSIZE=1536
+export OMP_NUM_THREADS=1
+export OMP_PROC_BIND=false
+export TASK_QUEUE_ENABLE=1
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+export VLLM_ASCEND_ENABLE_FUSED_MC2=1
+export VLLM_ASCEND_ENABLE_NZ=2
+export VLLM_ASCEND_BALANCE_SCHEDULING=1
+
+vllm serve Eco-Tech/Qwen3-VL-235B-A22B-Instruct-w8a8-QuaRot \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --served-model-name qwen3-vl-235b \
+  --quantization ascend \
+  --data-parallel-size 4 \
+  --tensor-parallel-size 4 \
+  --enable-expert-parallel \
+  --seed 1024 \
+  --max-num-seqs 32 \
+  --max-model-len 32768 \
+  --max-num-batched-tokens 16384 \
+  --trust-remote-code \
+  --gpu-memory-utilization 0.92 \
+  --no-enable-prefix-caching \
+  --mm-processor-cache-gb 0 \
+  --limit-mm-per-prompt.image 1 \
+  --limit-mm-per-prompt.video 0 \
+  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,2,4,8,16,24,32]}'
+```
+
+Common Issues Tip: If the service fails to start, HBM is insufficient, or requests are not scheduled as expected, refer to [FAQs](../../faqs.md) first, and then check the model-specific FAQ in Section 10.
+
+**Key parameters:**
+
+- `--data-parallel-size 4` and `--tensor-parallel-size 4` map the 16 NPUs on one A3 node into four DP groups, each with TP4.
+- `--enable-expert-parallel` enables expert parallelism for MoE layers. Do not mix MoE tensor parallelism and expert parallelism in the same MoE layer.
+- `--max-model-len` is the maximum input plus output length for a single request. Multimodal inputs consume text tokens and visual tokens, so increase it only when enough KV cache is available.
+- `--max-num-seqs` is the maximum number of active requests scheduled by each DP group. For performance tests, set `--max-num-seqs * --data-parallel-size` greater than or equal to the test concurrency.
+- `--max-num-batched-tokens` is the maximum number of tokens processed in one scheduler step. A larger value can improve prefill efficiency but consumes more activation memory.
+- `--gpu-memory-utilization` controls how much HBM vLLM can use to calculate KV cache capacity. A higher value increases KV cache size but can trigger OOM if runtime memory is higher than the profile run.
+- `--quantization ascend` enables Ascend quantization for the W8A8 model. Remove this option when deploying the BF16 model.
+- `--limit-mm-per-prompt.image 1` and `--limit-mm-per-prompt.video 0` reserve multimodal capacity for one image per request and disable video inputs to save memory.
+- `--mm-processor-cache-gb 0` disables the multimodal processor cache. Increase it only when your workload benefits from reused media preprocessing and you have enough host memory.
+- `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` enables full decode ACLGraph replay to reduce dispatch overhead.
+
+### 5.2 Multi-Node Deployment with MP (Recommended for BF16)
+
+Multi-node MP deployment uses vLLM data parallelism across nodes and tensor parallelism within each node. It is recommended for the BF16 model on 2 Atlas 800 A2 (64G x 8) nodes, or for long-context validation where one node does not provide enough HBM headroom.
+
+Assume you have 2 Atlas 800 A2 nodes and want to deploy `Qwen3-VL-235B-A22B-Instruct` across them. Replace `nic_name`, `local_ip`, and `node0_ip` with the actual network interface and IP addresses in your environment.
+
+Run the following script on node 0.
+
+```shell
+#!/bin/sh
+
+export VLLM_USE_MODELSCOPE=True
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
+# Get these values through ifconfig.
+# nic_name is the network interface name corresponding to local_ip.
 nic_name="xxxx"
 local_ip="xxxx"
 
@@ -113,38 +184,46 @@ export TASK_QUEUE_ENABLE=1
 export HCCL_OP_EXPANSION_MODE="AIV"
 
 vllm serve Qwen/Qwen3-VL-235B-A22B-Instruct \
---host 0.0.0.0 \
---port 8000 \
---data-parallel-size 2 \
---api-server-count 2 \
---data-parallel-size-local 1 \
---data-parallel-address $local_ip \
---data-parallel-rpc-port 13389 \
---seed 1024 \
---served-model-name qwen3 \
---tensor-parallel-size 8 \
---enable-expert-parallel \
---max-num-seqs 16 \
---max-model-len 262144 \
---max-num-batched-tokens 4096 \
---trust-remote-code \
---gpu-memory-utilization 0.9 \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --data-parallel-size 2 \
+  --api-server-count 2 \
+  --data-parallel-size-local 1 \
+  --data-parallel-address $local_ip \
+  --data-parallel-rpc-port 13389 \
+  --seed 1024 \
+  --served-model-name qwen3-vl-235b \
+  --tensor-parallel-size 8 \
+  --enable-expert-parallel \
+  --max-num-seqs 16 \
+  --max-model-len 262144 \
+  --max-num-batched-tokens 4096 \
+  --trust-remote-code \
+  --gpu-memory-utilization 0.9 \
+  --no-enable-prefix-caching \
+  --mm-processor-cache-gb 0 \
+  --limit-mm-per-prompt.image 1 \
+  --limit-mm-per-prompt.video 0 \
+  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+  --additional-config '{"enable_cpu_binding":true,"enable_flashcomm1":true}'
 ```
 
-Node1
+Common Issues Tip: If node 1 cannot join the service or HCCL initialization times out, refer to [verify multi-node communication environment](../../installation.md#verify-multi-node-communication) and [FAQs](../../faqs.md). Make sure the network interface names, IP addresses, and RPC ports are consistent across nodes.
+
+Run the following script on node 1.
 
 ```shell
 #!/bin/sh
-# Load model from ModelScope to speed up download
+
 export VLLM_USE_MODELSCOPE=True
-# To reduce memory fragmentation and avoid out of memory
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-# this is obtained through ifconfig
-# nic_name is the network interface name corresponding to local_ip of the current node
+
+# Get these values through ifconfig.
+# nic_name is the network interface name corresponding to local_ip.
 nic_name="xxxx"
 local_ip="xxxx"
 
-# The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
+# The value of node0_ip must be consistent with local_ip on node 0.
 node0_ip="xxxx"
 
 export HCCL_IF_IP=$local_ip
@@ -158,43 +237,32 @@ export TASK_QUEUE_ENABLE=1
 export HCCL_OP_EXPANSION_MODE="AIV"
 
 vllm serve Qwen/Qwen3-VL-235B-A22B-Instruct \
---host 0.0.0.0 \
---port 8000 \
---headless \
---data-parallel-size 2 \
---data-parallel-size-local 1 \
---data-parallel-start-rank 1 \
---data-parallel-address $node0_ip \
---data-parallel-rpc-port 13389 \
---seed 1024 \
---tensor-parallel-size 8 \
---served-model-name qwen3 \
---max-num-seqs 16 \
---max-model-len 262144 \
---max-num-batched-tokens 4096 \
---enable-expert-parallel \
---trust-remote-code \
---gpu-memory-utilization 0.9 \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --headless \
+  --data-parallel-size 2 \
+  --data-parallel-size-local 1 \
+  --data-parallel-start-rank 1 \
+  --data-parallel-address $node0_ip \
+  --data-parallel-rpc-port 13389 \
+  --seed 1024 \
+  --tensor-parallel-size 8 \
+  --served-model-name qwen3-vl-235b \
+  --max-num-seqs 16 \
+  --max-model-len 262144 \
+  --max-num-batched-tokens 4096 \
+  --enable-expert-parallel \
+  --trust-remote-code \
+  --gpu-memory-utilization 0.9 \
+  --no-enable-prefix-caching \
+  --mm-processor-cache-gb 0 \
+  --limit-mm-per-prompt.image 1 \
+  --limit-mm-per-prompt.video 0 \
+  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+  --additional-config '{"enable_cpu_binding":true,"enable_flashcomm1":true}'
 ```
 
-The parameters are explained as follows:
-
-- `--max-model-len` represents the context length, which is the maximum value of the input plus output for a single request.
-- `--max-num-seqs` indicates the maximum number of requests that each DP group is allowed to process. If the number of requests sent to the service exceeds this limit, the excess requests will remain in a waiting state and will not be scheduled. Note that the time spent in the waiting state is also counted in metrics such as TTFT and TPOT. Therefore, when testing performance, it is generally recommended that `--max-num-seqs` * `--data-parallel-size` >= the actual total concurrency.
-- `--max-num-batched-tokens` represents the maximum number of tokens that the model can process in a single step. Currently, vLLM v1 scheduling enables ChunkPrefill/SplitFuse by default, which means:
-    - (1) If the input length of a request is greater than `--max-num-batched-tokens`, it will be divided into multiple rounds of computation according to `--max-num-batched-tokens`;
-    - (2) Decode requests are prioritized for scheduling, and prefill requests are scheduled only if there is available capacity.
-    - Generally, if `--max-num-batched-tokens` is set to a larger value, the overall latency will be lower, but the pressure on GPU memory (activation value usage) will be greater.
-- `--gpu-memory-utilization` represents the proportion of HBM that vLLM will use for actual inference. Its essential function is to calculate the available kv_cache size. During the warm-up phase (referred to as profile run in vLLM), vLLM records the peak GPU memory usage during an inference process with an input size of `--max-num-batched-tokens`. The available kv_cache size is then calculated as: `--gpu-memory-utilization` * HBM size - peak GPU memory usage. Therefore, the larger the value of `--gpu-memory-utilization`, the more kv_cache can be used. However, since the GPU memory usage during the warm-up phase may differ from that during actual inference (e.g., due to uneven EP load), setting `--gpu-memory-utilization` too high may lead to OOM (Out of Memory) issues during actual inference. The default value is `0.9`.
-- `--enable-expert-parallel` indicates that EP is enabled. Note that vLLM does not support a mixed approach of ETP and EP; that is, MoE can either use pure EP or pure TP.
-- `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.
-- `--quantization` "ascend" indicates that quantization is used. To disable quantization, remove this option.
-- `--compilation-config` contains configurations related to the aclgraph graph mode. The most significant configurations are "cudagraph_mode" and "cudagraph_capture_sizes", which have the following meanings:
-"cudagraph_mode": represents the specific graph mode. Currently, "PIECEWISE" and "FULL_DECODE_ONLY" are supported. The graph mode is mainly used to reduce the cost of operator dispatch. Currently, "FULL_DECODE_ONLY" is recommended.
-- "cudagraph_capture_sizes": represents different levels of graph modes. The default value is [1, 2, 4, 8, 16, 24, 32, 40,..., `--max-num-seqs`]. In the graph mode, the input for graphs at different levels is fixed, and inputs between levels are automatically padded to the next level. Currently, the default setting is recommended. Only in some scenarios is it necessary to set this separately to achieve optimal performance.
-- `export VLLM_ASCEND_ENABLE_FLASHCOMM1=1` indicates that Flashcomm1 optimization is enabled. Currently, this optimization is only supported for MoE in scenarios where tp_size > 1.
-
-If the service starts successfully, the following information will be displayed on node 0:
+If the service starts successfully, the following information is displayed on node 0:
 
 ```shell
 INFO:     Started server process [44610]
@@ -205,70 +273,293 @@ INFO:     Waiting for application startup.
 INFO:     Application startup complete.
 ```
 
-### Multi-node Deployment with Ray
+**Key parameters for MP deployment:**
 
-- refer to [Ray Distributed (Qwen/Qwen3-235B-A22B)](../features/ray.md).
+- `--data-parallel-size` is the global DP size across all nodes. In the example, 2 DP ranks are used.
+- `--data-parallel-size-local` is the number of DP ranks on the current node. In the example, each A2 node has 1 local DP rank.
+- `--data-parallel-start-rank` is the first DP rank on the current node. Node 0 starts from 0 by default, and node 1 starts from 1.
+- `--data-parallel-address` must point to the master DP node. Use node 0 `local_ip` on node 0 and `node0_ip` on other nodes.
+- `--data-parallel-rpc-port` is the DP RPC port. Use the same value on all nodes and ensure the port is available.
+- `--api-server-count` controls how many API server processes are started on the master node.
+- `--headless` starts a worker node without exposing an API server. Use it on non-master nodes.
+- `--tensor-parallel-size 8` maps one TP group to the 8 NPUs on each A2 node.
+- `HCCL_IF_IP`, `GLOO_SOCKET_IFNAME`, `TP_SOCKET_IFNAME`, and `HCCL_SOCKET_IFNAME` bind HCCL, Gloo, and TP communication to the selected network.
 
-### Prefill-Decode Disaggregation
+### 5.3 Multi-Node Deployment with Ray
 
-- refer to [Prefill-Decode Disaggregation Mooncake Verification](../features/pd_disaggregation_mooncake_multi_node.md)
+For Ray-based distributed deployment, refer to [Ray Distributed (Qwen/Qwen3-235B-A22B)](../features/ray.md). The same model weight, communication verification, and parameter tuning principles apply to Qwen3-VL-235B-A22B-Instruct.
 
-## Functional Verification
+Common Issues Tip: If Ray workers cannot discover each other, check Ray cluster status first, then verify the same HCCL and network interface settings used in MP deployment.
 
-Once your server is started, you can query the model with input prompts:
+### 5.4 Prefill-Decode Disaggregation
 
-```shell  
-curl http://<node0_ip>:<port>/v1/chat/completions \
-    -H "Content-Type: application/json" \
-    -d '{
-    "model": "qwen3",
-    "messages": [
-    {"role": "system", "content": "You are a helpful assistant."},
-    {"role": "user", "content": [
-        {"type": "image_url", "image_url": {"url": "https://modelscope.oss-cn-beijing.aliyuncs.com/resource/qwen.png"}},
-        {"type": "text", "text": "What is the text in the illustration?"}
-    ]}
-    ]
-    }'
+PD disaggregation separates Prefill and Decode into different service groups. Prefill nodes process large prompt chunks, Decode nodes serve token generation, and a proxy forwards requests between them. This mode is suitable for production serving scenarios where prefill and decode resource ratios need to be tuned separately.
+
+We recommend using Mooncake for deployment. Refer to [Mooncake](../features/pd_disaggregation_mooncake_multi_node.md) for the general PD disaggregation workflow and request forwarding setup.
+
+The following example matches the validated A3 two-node topology for `Qwen3-VL-235B-A22B-Instruct`:
+
+- 1 Prefill node: 1 Atlas 800 A3 (64G x 16), DP2 + TP8 + EP.
+- 1 Decode node: 1 Atlas 800 A3 (64G x 16), DP4 + TP4 + EP + full decode ACLGraph.
+
+#### 5.4.1 Prefill Node
+
+Create `run_p.sh` on the prefill node.
+
+```shell
+#!/bin/bash
+
+export VLLM_USE_MODELSCOPE=True
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export HCCL_BUFFSIZE=1024
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=1
+export HCCL_OP_EXPANSION_MODE="AIV"
+export TASK_QUEUE_ENABLE=1
+
+vllm serve Qwen/Qwen3-VL-235B-A22B-Instruct \
+  --host 0.0.0.0 \
+  --port 8080 \
+  --data-parallel-size 2 \
+  --data-parallel-size-local 2 \
+  --tensor-parallel-size 8 \
+  --seed 1024 \
+  --served-model-name qwen3-vl-235b \
+  --enable-expert-parallel \
+  --max-num-seqs 32 \
+  --max-model-len 8192 \
+  --max-num-batched-tokens 8192 \
+  --trust-remote-code \
+  --no-enable-prefix-caching \
+  --gpu-memory-utilization 0.9 \
+  --kv-transfer-config \
+  '{"kv_connector":"MooncakeConnectorV1",
+    "kv_role":"kv_producer",
+    "kv_port":"30000",
+    "kv_connector_extra_config":{
+      "prefill":{"dp_size":2,"tp_size":8},
+      "decode":{"dp_size":4,"tp_size":4}
+    }
+  }'
 ```
 
-## Accuracy Evaluation
+Common Issues Tip: If the prefill service is not ready for a long time, check whether the model path is shared, all 16 NPUs are visible, and the Mooncake `kv_port` is available.
+
+#### 5.4.2 Decode Node
+
+Create `run_d.sh` on the decode node.
+
+```shell
+#!/bin/bash
+
+export VLLM_USE_MODELSCOPE=True
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export HCCL_BUFFSIZE=1024
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=1
+export HCCL_OP_EXPANSION_MODE="AIV"
+export TASK_QUEUE_ENABLE=1
+
+vllm serve Qwen/Qwen3-VL-235B-A22B-Instruct \
+  --host 0.0.0.0 \
+  --port 8080 \
+  --data-parallel-size 4 \
+  --data-parallel-size-local 4 \
+  --tensor-parallel-size 4 \
+  --seed 1024 \
+  --served-model-name qwen3-vl-235b \
+  --enable-expert-parallel \
+  --max-num-seqs 32 \
+  --max-model-len 8192 \
+  --max-num-batched-tokens 8192 \
+  --trust-remote-code \
+  --no-enable-prefix-caching \
+  --gpu-memory-utilization 0.9 \
+  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+  --kv-transfer-config \
+  '{"kv_connector":"MooncakeConnectorV1",
+    "kv_role":"kv_consumer",
+    "kv_port":"30200",
+    "kv_connector_extra_config":{
+      "prefill":{"dp_size":2,"tp_size":8},
+      "decode":{"dp_size":4,"tp_size":4}
+    }
+  }'
+```
+
+**Key parameters for PD disaggregation:**
+
+- Prefill uses `--data-parallel-size 2`, `--data-parallel-size-local 2`, and `--tensor-parallel-size 8`.
+- Decode uses `--data-parallel-size 4`, `--data-parallel-size-local 4`, and `--tensor-parallel-size 4`.
+- `--max-num-batched-tokens` is set to 8192 on both sides in this validation topology. Increase the prefill value only if activation memory is sufficient.
+- `--kv-transfer-config` sets the Mooncake connector. `kv_role` is `kv_producer` on prefill and `kv_consumer` on decode.
+- `kv_connector_extra_config.prefill.dp_size/tp_size` and `decode.dp_size/tp_size` must match the actual global DP and TP layout.
+- `--no-enable-prefix-caching` disables prefix caching. For PD disaggregation, first validate the service without prefix caching before enabling additional cache features.
+- `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` is recommended on decode nodes to reduce decode dispatch overhead.
+
+## 6 Functional Verification
+
+After the server is started, send a request to verify basic multimodal functionality. For single-node and MP deployment, use the API endpoint on node 0. For PD disaggregation, use the proxy endpoint from the Mooncake deployment guide.
+
+```shell
+curl http://<server_ip>:<port>/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "qwen3-vl-235b",
+    "messages": [
+      {"role": "system", "content": "You are a helpful assistant."},
+      {"role": "user", "content": [
+        {"type": "image_url", "image_url": {"url": "https://modelscope.oss-cn-beijing.aliyuncs.com/resource/qwen.png"}},
+        {"type": "text", "text": "What is the text in the illustration?"}
+      ]}
+    ],
+    "max_completion_tokens": 100,
+    "temperature": 0
+  }'
+```
+
+Expected result: the HTTP status is 200 and the JSON response contains a `choices` field with generated text, for example text similar to `TONGYI Qwen`.
+
+## 7 Accuracy Evaluation
 
 Here are two accuracy evaluation methods.
 
-### Using AISBench
+### 7.1 Using AISBench
 
 1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
+2. After execution, you can get the result. The following results for `Qwen3-VL-235B-A22B-Instruct` are for reference only.
 
-2. After execution, you can get the result, here is the result of `Qwen3-VL-235B-A22B-Instruct` in `vllm-ascend:0.11.0rc2` for reference only.
+| dataset | version | metric | mode | vllm-api-general-chat |
+| ------- | ------- | ------ | ---- | --------------------- |
+| textvqa-lite | - | accuracy | gen | 83 |
+| aime2024 | - | accuracy | gen | 93 |
 
-| dataset  | version | metric   | mode | vllm-api-general-chat |
-| -------- | ------- | -------- | ---- | --------------------- |
-| aime2024 | -       | accuracy | gen  |             93        |
+### 7.2 Using Language Model Evaluation Harness
 
-## Performance
+Refer to [Using lm_eval](../../developer_guide/evaluation/using_lm_eval.md) for installation and usage details. For multimodal datasets, enable the model chat template so that Qwen3-VL image placeholders are inserted correctly.
 
-### Using AISBench
+When using online serving, set the evaluation endpoint to the server or proxy started in Section 5, and make sure the `model` value matches `--served-model-name`.
 
-Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
+## 8 Performance Evaluation
 
-### Using vLLM Benchmark
+### 8.1 Using AISBench
 
-Run performance evaluation of `Qwen3-VL-235B-A22B-Instruct` as an example.
+Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details. For multimodal performance, use a dataset with image payloads, such as TextVQA-style requests, instead of random text-only prompts.
 
-Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
+### 8.2 Using vLLM Benchmark
+
+Run performance evaluation of `Qwen3-VL-235B-A22B-Instruct` as an example. Refer to [vLLM benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
 There are three `vllm bench` subcommands:
 
-- `latency`: Benchmark the latency of a single batch of requests.
-- `serve`: Benchmark the online serving throughput.
-- `throughput`: Benchmark offline inference throughput.
+- `latency`: benchmark the latency of a single batch of requests.
+- `serve`: benchmark online serving throughput.
+- `throughput`: benchmark offline inference throughput.
 
-Take the `serve` as an example. Run the code as follows.
+Take `serve` as an example:
 
 ```shell
 export VLLM_USE_MODELSCOPE=True
-vllm bench serve --model Qwen/Qwen3-VL-235B-A22B-Instruct  --dataset-name random --random-input 200 --num-prompts 200 --request-rate 1 --save-result --result-dir ./
+
+vllm bench serve \
+  --model Qwen/Qwen3-VL-235B-A22B-Instruct \
+  --served-model-name qwen3-vl-235b \
+  --dataset-name random \
+  --random-input 200 \
+  --num-prompts 200 \
+  --request-rate 1 \
+  --save-result \
+  --result-dir ./
 ```
 
-After about several minutes, you can get the performance evaluation result.
+After several minutes, you can get the performance evaluation result. This random benchmark is useful for serving pipeline validation; use AISBench or a custom multimodal dataset for image-token performance.
+
+## 9 Performance Tuning
+
+### 9.1 Recommended Configurations
+
+The following configurations are validated in specific test environments and are for reference only. The optimal configuration depends on hardware type, maximum input/output length, image resolution, request concurrency, prefix cache hit rate, quantization, and prefill/decode ratio. Tune the parameters in Section 9.2 based on your actual workload.
+
+| Scenario | Deployment Mode | Total NPUs | Weight Version | Key Considerations |
+| -------- | --------------- | ---------- | -------------- | ------------------ |
+| Functional validation | Single-node online serving | 16 A3 NPUs | W8A8 | Use shorter context, disable video, and set `--mm-processor-cache-gb 0` to reduce memory pressure. |
+| Long context | Multi-node MP | 16 A2 NPUs or 16 A3 NPUs | BF16 | Use TP across each node and DP across nodes. Lower image count or context length if OOM occurs. |
+| Low latency | 1P1D PD disaggregation | 32 A3 NPUs | BF16 | Separate prefill and decode resources and enable full decode ACLGraph on decode nodes. |
+
+| Scenario | Node Role | NPUs | TP | DP | Max Num Seqs | Max Model Len | Max Num Batched Tokens | Prefix Cache | Main Optimizations |
+| -------- | --------- | ---- | -- | -- | ------------ | ------------- | ---------------------- | ------------ | ------------------ |
+| Functional validation | Single node | 16 | 4 | 4 | 32 | 32768 | 16384 | Off | W8A8, FullGraph, FlashComm1, Fused MC2 |
+| Long context | MP node | 8 per node | 8 | 1 per node, 2 global | 16 per DP | 262144 | 4096 | Off | FullGraph, FlashComm1, CPU binding |
+| Low latency | Prefill node | 16 | 8 | 2 | 32 | 8192 | 8192 | Off | Mooncake KV producer, EP |
+| Low latency | Decode node | 16 | 4 | 4 | 32 | 8192 | 8192 | Off | Mooncake KV consumer, FullGraph, EP |
+
+### 9.2 Tuning Guidelines
+
+Refer to [public performance tuning documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for general tuning methods, and refer to [feature matrix](../../user_guide/support_matrix/feature_matrix.md) for feature descriptions.
+
+Recommended tuning order:
+
+1. Set the deployment topology first. Use single-node deployment for validation, MP deployment for simple multi-node serving, and PD disaggregation when prefill and decode need different resource ratios.
+2. Choose the maximum context length with `--max-model-len`. Multimodal requests consume KV cache for both text tokens and visual tokens, so reduce image resolution, image count, `--max-num-seqs`, or context length if OOM occurs.
+3. Tune multimodal limits. Use `--limit-mm-per-prompt.image` and `--limit-mm-per-prompt.video` to match your request shape. Disable video with `--limit-mm-per-prompt.video 0` for image-only services.
+4. Tune `--max-num-batched-tokens`. Larger values usually improve prefill throughput but increase activation memory. Decode-heavy workloads usually need smaller values.
+5. Tune `--max-num-seqs` according to service concurrency. Requests above this value wait in the queue and the waiting time is counted in TTFT and TPOT.
+6. Tune `--gpu-memory-utilization`. Increase it to provide more KV cache, but leave headroom for runtime memory fluctuation, image preprocessing, and expert imbalance.
+7. Tune ACLGraph capture. `FULL_DECODE_ONLY` is recommended for decode. If you set `cudagraph_capture_sizes` manually, include common decode batch sizes.
+
+### 9.3 Model-Specific Optimizations
+
+| Optimization | Enablement | Benefit | Notes |
+| ------------ | ---------- | ------- | ----- |
+| Multimodal prompt limits | `--limit-mm-per-prompt.image`, `--limit-mm-per-prompt.video` | Avoids reserving memory for unused media types. | Disable video for image-only serving. |
+| Multimodal processor cache | `--mm-processor-cache-gb` | Caches processed media features when repeated media appears. | Set to 0 for memory-constrained validation. |
+| Full decode ACLGraph | `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` | Reduces operator dispatch overhead and stabilizes decode performance. | Recommended for decode-heavy serving. |
+| FlashComm1 | `VLLM_ASCEND_ENABLE_FLASHCOMM1=1` or `--additional-config '{"enable_flashcomm1":true}'` | Reduces communication overhead in large TP and high-concurrency scenarios. | May not help low-concurrency workloads. |
+| Fused MC2 | `VLLM_ASCEND_ENABLE_FUSED_MC2=1` | Enables MoE fused operators to improve MoE efficiency. | Compare with disabled state if accuracy or performance regresses. |
+| Prefix caching | `--enable-prefix-caching` | Improves repeated-prefix workloads. | Validate HBM usage first. For PD, start with prefix caching disabled. |
+| Asynchronous scheduling | `--async-scheduling` | Can improve high-concurrency throughput. | Disable and compare for latency-sensitive workloads. |
+| PD disaggregation | `--kv-transfer-config` | Separates prefill and decode resources. | Ensure producer/consumer DP and TP sizes match the actual topology. |
+
+## 10 FAQ
+
+For common environment, installation, and general parameter issues, refer to [FAQs](../../faqs.md). This section only covers model-specific issues for Qwen3-VL-235B-A22B-Instruct.
+
+### Q1: Why does the service report OOM during startup or soon after accepting requests?
+
+**Phenomenon:** The service fails during profile run, or it starts successfully but reports OOM when real traffic arrives.
+
+**Cause:** Qwen3-VL-235B-A22B-Instruct has high weight, KV cache, and multimodal preprocessing memory requirements. Large `--max-model-len`, large `--max-num-seqs`, large `--max-num-batched-tokens`, high image resolution, too many images per prompt, or high `--gpu-memory-utilization` can leave insufficient HBM headroom.
+
+**Solution:** Use the W8A8 model with `--quantization ascend` when possible, lower `--max-model-len`, lower `--max-num-seqs`, lower `--max-num-batched-tokens`, lower image/video limits, or reduce `--gpu-memory-utilization`. Keep `PYTORCH_NPU_ALLOC_CONF=expandable_segments:True`.
+
+### Q2: Why does multi-node MP deployment hang during initialization?
+
+**Phenomenon:** One node waits for other ranks, HCCL initialization times out, or the headless node exits.
+
+**Cause:** Network interface names, IP addresses, DP ranks, or RPC ports are inconsistent across nodes.
+
+**Solution:** Verify multi-node communication first. Ensure `HCCL_IF_IP`, `GLOO_SOCKET_IFNAME`, `TP_SOCKET_IFNAME`, and `HCCL_SOCKET_IFNAME` match the selected NIC. Ensure all nodes use the same `--data-parallel-rpc-port`, non-master nodes use `--headless`, and `--data-parallel-start-rank` does not overlap.
+
+### Q3: Why is video disabled in the image-only examples?
+
+**Phenomenon:** The service reserves more memory than expected, or startup OOM occurs even when requests only contain images.
+
+**Cause:** Allowing video inputs can reserve memory for long visual embeddings and preprocessing paths that are not needed by image-only workloads.
+
+**Solution:** Use `--limit-mm-per-prompt.video 0` for image-only serving. Enable video only when your workload needs it, and lower `--max-model-len` or request concurrency if needed.
+
+### Q4: Why does enabling prefix caching not improve performance?
+
+**Phenomenon:** Prefix caching is enabled, but throughput or latency does not improve.
+
+**Cause:** Prefix caching only helps when requests share reusable prefixes. Random prompts, unique images, or low cache hit rates may add memory pressure without visible gains.
+
+**Solution:** Enable prefix caching for repeated-prefix workloads. For random benchmark datasets, memory-constrained long-context workloads, or PD validation, compare with `--no-enable-prefix-caching`.
+
+### Q5: Why does PD disaggregation fail to transfer KV cache?
+
+**Phenomenon:** Requests reach the proxy or prefill service, but decode nodes do not produce output or report KV transfer errors.
+
+**Cause:** The Mooncake connector ports, producer/consumer roles, or `kv_connector_extra_config` DP/TP sizes do not match the actual topology.
+
+**Solution:** Check `kv_role`, `kv_port`, and the prefill/decode DP/TP sizes on all nodes. Start from the validated topology in Section 5.4, then change one dimension at a time.
