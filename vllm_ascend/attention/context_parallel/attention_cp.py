@@ -46,7 +46,6 @@ from vllm_ascend.attention.context_parallel.common_cp import (
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     filter_chunked_req_indices,
-    notify_kv_cache_written,
     split_decodes_and_prefills,
 )
 from vllm_ascend.compilation.acl_graph import (
@@ -60,7 +59,6 @@ from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_rank,
     get_decode_context_model_parallel_world_size,
 )
-from vllm_ascend.memcache_comm_fence import record_attention_compute_start
 from vllm_ascend.utils import cp_chunkedprefill_comm_stream, weak_ref_tensors
 
 
@@ -813,6 +811,8 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         output_padded = output
 
         if len(kv_cache) > 1:
+            if self.is_kv_producer:
+                attn_metadata.reshape_cache_event = torch.npu.Event()
             if self.key_cache is None:
                 self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
 
@@ -858,7 +858,8 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                     value_cache=self.value_cache,
                     slot_mapping=slot_mapping,
                 )
-            notify_kv_cache_written()
+            if self.is_kv_producer:
+                attn_metadata.reshape_cache_event.record()
         return query, key, value, output_padded
 
     def _gather_and_restore_pcp_qkv(
@@ -1000,11 +1001,6 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                 cp_chunkedprefill_comm_stream().wait_stream(torch.npu.current_stream())
                 with torch_npu.npu.stream(cp_chunkedprefill_comm_stream()):
                     prefill_query_all = self._prefill_query_all_gather(attn_metadata, prefill_query.clone())
-
-            # Record the compute-stream gate once before any attention phase
-            # starts, so the layerwise transfer thread can overlap H2D copies
-            # with the prefill computation.
-            record_attention_compute_start()
 
             if self.pcp_size > 1:
                 # Scenario of Enabling PCP or PCP&DCP

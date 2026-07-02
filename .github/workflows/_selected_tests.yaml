@@ -32,6 +32,11 @@ on:
         required: false
         default: ''
         description: 'The vllm-ascend ref to test.'
+      base_ref:
+        type: string
+        required: false
+        default: 'main'
+        description: 'The base branch to rebase onto (e.g. main, v0.8.x).'
       upload_timing:
         type: boolean
         required: false
@@ -112,12 +117,12 @@ jobs:
           fetch-depth: 0
           submodules: recursive
 
-      - name: Rebase on latest main
+      - name: Rebase on latest ${{ inputs.base_ref }}
         run: |
           git config user.name "vllm-ascend-ci"
           git config user.email "vllm-ascend-ci@users.noreply.github.com"
-          git fetch origin main
-          git rebase origin/main
+          git fetch origin ${{ inputs.base_ref }}
+          git rebase origin/${{ inputs.base_ref }}
 
       - name: Get csrc hash
         id: get_csrc_hash
@@ -172,11 +177,11 @@ jobs:
             libcurl4
           ldconfig
 
-          MOONCAKE_WHEEL="mooncake_transfer_engine_ascend-0.3.9-cp312-cp312-manylinux_2_35_aarch64.whl"
           pip install --no-cache-dir --no-deps \
-            "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${MOONCAKE_WHEEL}"
+            -i https://mirrors.aliyun.com/pypi/simple/ \
+            mooncake-transfer-engine-npu==0.3.11.post1
 
-          pip show mooncake-transfer-engine-ascend || true
+          pip show mooncake-transfer-engine-npu || true
 
       - name: Install vllm-project/vllm-ascend with device
         if: ${{ matrix.group.npu_type != 'cpu' }}
