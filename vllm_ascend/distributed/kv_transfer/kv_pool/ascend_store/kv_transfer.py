@@ -89,7 +89,8 @@ class KVTransferThread(threading.Thread):
                 self._handle_request(request_data)
             except Exception as e:
                 logger.error(
-                    "Error in KVCacheTransferThread. type=%s, error=%s. Check thread state and request processing.",
+                    "Error in KVCacheTransferThread(%s). type=%s, error=%s. Check thread state and request processing.",
+                    self.name,
                     type(e).__name__,
                     e,
                 )
