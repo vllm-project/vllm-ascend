@@ -320,6 +320,28 @@
 #       Remove this patch if upstream streaming behavior is updated to satisfy the
 #       same DeepSeek DSML incrementality contract.
 #
+#   2. `vllm.tool_parsers.deepseekv4_tool_parser.DeepSeekV4ToolParser` (streaming content)
+#    Why:
+#       Under speculative decoding (MTP) the DeepSeek V4 draft model can sample
+#       non-DSML special tokens (e.g. `<｜begin▁of▁sentence｜>`,
+#       `<｜end▁of▁sentence｜>`) in place of the DSML start token. The existing
+#       `_partial_tag_overlap` only protects partial prefixes of
+#       `<｜DSML｜tool_calls>`, so arbitrary `<｜…｜>` tokens leak into
+#       visible streaming content downstream.
+#    How:
+#       Add `_strip_complete_special_tokens` (regex strip) and
+#       `_split_trailing_special_token_partial` (chunk-boundary holdback) module
+#       helpers, and wire them into both content-emission paths in
+#       `_process_streaming_buffer`. DSML markers escape the regex because of
+#       its `[^｜<>]+?` character class. On the final (empty) delta any held-back
+#       trailing partial is flushed as visible content — a truncated DSML start
+#       is dropped — so ordinary text is never lost.
+#    Related PR (if no, explain why):
+#       This PR — vllm-ascend issue, no upstream fix required.
+#    Future Plan:
+#       Remove if upstream DeepSeek V4 streaming parser learns to filter
+#       non-DSML special tokens itself.
+#
 # ** 12a. File: platform/patch_minimax_m2_tool_call_parser.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.tool_parsers.minimax_m2_tool_parser.MinimaxM2ToolParser`
