@@ -15,6 +15,7 @@
 
 import json
 import os
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from vllm.config import KVTransferConfig, VllmConfig

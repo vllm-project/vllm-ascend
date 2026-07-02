@@ -395,6 +395,25 @@ class NPUWorker(WorkerBase):
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
     def _init_device(self):
+        if not vllm_version_is("0.23.0"):
+            # vllm v0.24.0 (PR #45026) removed automatic per-process device
+            # isolation for DP workers. Mirror gpu_worker.py::init_device:
+            # shift self.local_rank by dp_local_rank * tp_pp_world_size so
+            # that each DP group binds to a distinct set of NPUs.
+            parallel_config = self.parallel_config
+            if (
+                parallel_config.distributed_executor_backend not in ("ray", "external_launcher")
+                and parallel_config.data_parallel_backend != "ray"
+                and parallel_config.nnodes_within_dp == 1
+            ):
+                tp_pp_world_size = parallel_config.pipeline_parallel_size * parallel_config.tensor_parallel_size
+                visible_device_count = torch.npu.device_count() if torch.npu.is_available() else 0
+                if visible_device_count > tp_pp_world_size:
+                    dp_local_rank = parallel_config.data_parallel_rank_local
+                    if dp_local_rank is None:
+                        dp_local_rank = parallel_config.data_parallel_index
+                    self.local_rank += dp_local_rank * tp_pp_world_size
+
         device = torch.device(f"npu:{self.local_rank}")
         torch.npu.set_device(device)
 
