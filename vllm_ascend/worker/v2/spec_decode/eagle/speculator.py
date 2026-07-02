@@ -16,7 +16,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-
+import logging
 from contextlib import contextmanager
 from copy import copy
 from typing import Any, cast
@@ -26,26 +26,29 @@ import vllm
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.input_batch import InputBatch
+from vllm.v1.worker.gpu.cudagraph_utils import AttentionStatePair, BatchExecutionDescriptor
+from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.spec_decode.autoregressive import (  # type: ignore[import-not-found]
     speculator as vllm_speculator_module,  # type: ignore[import-not-found]
 )
-from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (  # type: ignore[import-not-found]
-    PrefillSpeculatorCudaGraphManager,
-)
-from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator  # type: ignore[import-not-found]
+from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import update_draft_inputs
+from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
-from vllm_ascend.worker.v2.spec_decode.eagle.aclgraph import PrefillEagleAclGraphManager
+from vllm_ascend.worker.v2.spec_decode.eagle.aclgraph import DecodeEagleAclGraphManager, PrefillEagleAclGraphManager
 
+update_eagle_draft_inputs = update_draft_inputs
 _BUILD_ATTN_METADATA_MODULE = vllm.v1.worker.gpu.spec_decode.speculator
-_PREFILL_CUDAGRAPH_MANAGER_CLS = PrefillSpeculatorCudaGraphManager
+
+logger = logging.getLogger(__name__)
 
 
 class AscendEagleSpeculator(EagleSpeculator):
@@ -167,26 +170,46 @@ class AscendEagleSpeculator(EagleSpeculator):
 
         self.attn_backends = attn_backends
 
-    def _generate_draft(
+    def capture(
         self,
-        num_reqs: int,
-        num_tokens_padded: int,
-        attn_metadata: dict[str, Any] | None,
-        slot_mappings: dict[str, torch.Tensor] | None,
-        num_tokens_across_dp: torch.Tensor | None,
-        cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+        attn_states: dict[BatchExecutionDescriptor, AttentionStatePair],
     ) -> None:
-        """Override AutoRegressiveSpeculator._generate_draft for Ascend NPUs."""
-        self._ascend_prepare_decode_draft(attn_metadata, num_reqs)
-        super()._generate_draft(
-            num_reqs,
-            num_tokens_padded,
-            attn_metadata,
-            slot_mappings,
-            num_tokens_across_dp,
-            cudagraph_runtime_mode,
+        logger.info("Capturing model for speculator...")
+        # Reset indices to zeros to prevent stale values from prior
+        # dummy runs to cause out-of-bounds indexing during capture.
+        self.last_token_indices.zero_()
+
+        # Capture the prefill routine (model forward + compute_logits +
+        # sample).
+        # For FULL graphs, the entire routine is recorded as one graph.
+        # For PIECEWISE, only the model's compiled regions are captured
+        # and the rest (compute_logits, gumbel_sample) runs eagerly.
+        assert self.prefill_cudagraph_manager is not None
+        if self.prefill_cudagraph_manager.use_breakable_cg:
+            self.prefill_cudagraph_manager.init_breakable_cg_runner(self.model)
+        self.prefill_cudagraph_manager.capture(
+            self._prefill,
+            attn_states,
+            progress_bar_desc="Capturing prefill CUDA graphs",
         )
-        self._increment_decode_attn_metadata(attn_metadata)
+
+        if self.num_speculative_steps == 1:
+            return
+
+        # Capture the decode draft generation routine (model forward +
+        # sample + update_draft_inputs) for a single
+        # step.
+        assert self.decode_cudagraph_manager is not None
+        with build_attn_metadata_wrapper():
+            self.decode_cudagraph_manager.capture(
+                self._multi_step_decode,
+                self.model_state,
+                self.input_buffers,
+                self.block_tables,
+                self.attn_groups,
+                self.kv_cache_config,
+                progress_bar_desc="Capturing decode CUDA graphs",
+            )
 
     @torch.inference_mode()
     def _run_model(
@@ -209,6 +232,108 @@ class AscendEagleSpeculator(EagleSpeculator):
         )
         self._ascend_update_seq_lens(attn_metadata)
         return last_hidden_states, hidden_states
+
+    def _generate_draft(
+        self,
+        num_reqs: int,
+        num_tokens_padded: int,
+        attn_metadata: dict[str, Any] | None,
+        slot_mappings: dict[str, torch.Tensor] | None,
+        num_tokens_across_dp: torch.Tensor | None,
+        cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+    ) -> None:
+        positions = self.input_buffers.positions[:num_reqs]
+        query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
+        idx_mapping = self.idx_mapping[:num_reqs]
+        for step in range(1, self.num_speculative_steps):
+            self.current_draft_step.fill_(step)
+            # Run the eagle model.
+            last_hidden_states, hidden_states = self._run_model(
+                num_tokens_padded,
+                attn_metadata,
+                slot_mappings,
+                num_tokens_across_dp,
+                cudagraph_runtime_mode,
+            )
+            last_hidden_states = last_hidden_states[:num_reqs]
+            hidden_states = hidden_states[:num_reqs]
+            draft_tokens = self.sample_draft(
+                last_hidden_states,
+                positions,
+                idx_mapping,
+                self.temperature,
+                self.seeds,
+                self.current_draft_step,
+                self.draft_logits,
+            )
+            self.draft_tokens[:num_reqs, step] = draft_tokens
+            if step < self.num_speculative_steps - 1:
+                # Update the inputs for the next step.
+                update_eagle_inputs(
+                    draft_tokens,
+                    hidden_states,
+                    self.input_buffers,
+                    self.hidden_states,
+                    self.max_model_len,
+                )
+                if attn_metadata is not None:
+                    self.block_tables.compute_slot_mappings(idx_mapping, query_start_loc, positions, num_tokens_padded)
+            self._increment_decode_attn_metadata(attn_metadata)
+
+    def _multi_step_decode(
+        self,
+        num_reqs: int,
+        skip_attn: bool,
+        batch_desc: BatchExecutionDescriptor,
+        num_tokens_across_dp: torch.Tensor | None,
+    ) -> None:
+        """
+        Override to replay all N-1 decode steps in a single graph call.
+
+        NOTE: This method should follow the same logical structure as
+        AutoRegressiveSpeculator._multi_step_decode in upstream vLLM.
+        Specifically, the iteration over speculative steps, per-step
+        rebuild of attention metadata / slot mappings, and the FULL /
+        non-FULL code paths should align with that implementation.
+        """
+        positions = self.input_buffers.positions[:num_reqs]
+        query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
+        idx_mapping = self.idx_mapping[:num_reqs]
+
+        attn_metadata = None
+        slot_mappings_by_layer = None
+
+        if not skip_attn and self.advance_draft_positions:
+            # Build attention metadata and slot mappings for the draft
+            # decode steps. It is necessary to rebuild the attention
+            # metadata even when replaying the FULL graph so that any
+            # attention metadata builder state is updated.
+            slot_mappings = self.block_tables.compute_slot_mappings(
+                idx_mapping,
+                query_start_loc,
+                positions,
+                batch_desc.num_tokens,
+            )
+            slot_mappings_by_layer = build_slot_mappings_by_layer(slot_mappings, self.kv_cache_config)
+            attn_metadata = self._build_draft_attn_metadata(
+                num_reqs=num_reqs,
+                num_reqs_padded=batch_desc.num_reqs or num_reqs,
+                num_tokens_padded=batch_desc.num_tokens,
+            )
+        if batch_desc.cg_mode == CUDAGraphMode.FULL:
+            # Replay the full graph for draft generation.
+            assert self.decode_cudagraph_manager is not None
+            self.decode_cudagraph_manager.run_fullgraph(batch_desc)
+        else:
+            self._ascend_prepare_decode_draft(attn_metadata, num_reqs)
+            self._generate_draft(
+                num_reqs,
+                batch_desc.num_tokens,
+                attn_metadata,
+                slot_mappings_by_layer,
+                num_tokens_across_dp=num_tokens_across_dp,
+                cudagraph_runtime_mode=batch_desc.cg_mode,
+            )
 
     def build_draft_attn_metadatas(self, num_reqs_padded, is_draft_model_prefill):
         """Build draft_attn_metadatas for partial-merged draft graph."""
@@ -317,6 +442,75 @@ class AscendEagleSpeculator(EagleSpeculator):
         return seq_lens_cpu
 
 
+def update_eagle_inputs(
+    draft_tokens: torch.Tensor,
+    output_hidden_states: torch.Tensor,
+    input_buffers: InputBuffers,
+    hidden_states: torch.Tensor,
+    max_model_len: int,
+):
+    num_reqs, hidden_size = output_hidden_states.shape
+    _update_eagle_inputs_kernel[(num_reqs,)](
+        input_buffers.input_ids,
+        input_buffers.positions,
+        hidden_states,
+        hidden_states.stride(0),
+        input_buffers.seq_lens,
+        max_model_len,
+        draft_tokens,
+        output_hidden_states,
+        output_hidden_states.stride(0),
+        hidden_size,
+        BLOCK_SIZE=1024,
+    )
+
+
+@triton.jit
+def _update_eagle_inputs_kernel(
+    input_ids_ptr,
+    positions_ptr,
+    input_hidden_states_ptr,
+    input_hidden_states_stride,
+    seq_lens_ptr,
+    max_model_len,
+    draft_tokens_ptr,
+    output_hidden_states_ptr,
+    output_hidden_states_stride,
+    hidden_size,
+    BLOCK_SIZE: tl.constexpr,
+):
+    req_idx = tl.program_id(0)
+
+    # Draft token -> Input ID.
+    draft_token = tl.load(draft_tokens_ptr + req_idx)
+    tl.store(input_ids_ptr + req_idx, draft_token)
+
+    # Output hidden states -> Input hidden states.
+    for i in range(0, hidden_size, BLOCK_SIZE):
+        block = i + tl.arange(0, BLOCK_SIZE)
+        mask = block < hidden_size
+        output_hidden_states = tl.load(
+            output_hidden_states_ptr + req_idx * output_hidden_states_stride + block,
+            mask=mask,
+        )
+        tl.store(
+            input_hidden_states_ptr + req_idx * input_hidden_states_stride + block,
+            output_hidden_states,
+            mask=mask,
+        )
+
+    # Increment position and seq_lens.
+    # NOTE(woosuk): To prevent out-of-range access, we clamp these values
+    # if they reach the max model length.
+    position = tl.load(positions_ptr + req_idx)
+    position = tl.minimum(position + 1, max_model_len - 1)
+    tl.store(positions_ptr + req_idx, position)
+
+    seq_len = tl.load(seq_lens_ptr + req_idx)
+    seq_len = tl.minimum(seq_len + 1, max_model_len)
+    tl.store(seq_lens_ptr + req_idx, seq_len)
+
+
 @contextmanager
 def build_attn_metadata_wrapper():
     """Context manager to override attention metadata building for Ascend NPUs."""
@@ -356,15 +550,29 @@ def torch_gather_wrapper():
 @contextmanager
 def graph_manager_wrapper(speculator):
     """Context manager to override graph manager."""
-    original_graph_manager = _PREFILL_CUDAGRAPH_MANAGER_CLS
 
-    def factory(vllm_config: VllmConfig, device: torch.device, cudagraph_mode: CUDAGraphMode, decode_query_len: int):
+    def prefill_factory(
+        vllm_config: VllmConfig,
+        device: torch.device,
+        cudagraph_mode: CUDAGraphMode,
+        decode_query_len: int,
+    ):
         return PrefillEagleAclGraphManager(vllm_config, device, cudagraph_mode, decode_query_len, speculator)
 
-    manager_attr = "PrefillSpeculatorCudaGraphManager"
+    def decode_factory(
+        vllm_config: VllmConfig,
+        device: torch.device,
+        cudagraph_mode: CUDAGraphMode,
+        decode_query_len: int,
+    ):
+        return DecodeEagleAclGraphManager(vllm_config, device, cudagraph_mode, decode_query_len, speculator)
 
+    original_prefill = vllm_speculator_module.PrefillSpeculatorCudaGraphManager
+    original_decode = vllm_speculator_module.DecodeSpeculatorCudaGraphManager
     try:
-        setattr(vllm_speculator_module, manager_attr, factory)
+        vllm_speculator_module.PrefillSpeculatorCudaGraphManager = prefill_factory
+        vllm_speculator_module.DecodeSpeculatorCudaGraphManager = decode_factory
         yield
     finally:
-        setattr(vllm_speculator_module, manager_attr, original_graph_manager)
+        vllm_speculator_module.PrefillSpeculatorCudaGraphManager = original_prefill
+        vllm_speculator_module.DecodeSpeculatorCudaGraphManager = original_decode
