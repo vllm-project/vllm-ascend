@@ -143,6 +143,8 @@ jobs:
             runner: linux-amd64-cpu-16-hk
             vllm_label: release
             vllm_version: ${{ inputs.vllm_release_tag }}
+    container:
+      image: ubuntu:22.04
     steps:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v7
