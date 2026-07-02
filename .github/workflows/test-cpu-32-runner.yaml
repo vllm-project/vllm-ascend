@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-name: Test CPU-16 Runner (Diagnostic)
+name: Test CPU-8 Runner (Reference)
 
 on:
   pull_request:
@@ -32,8 +32,8 @@ defaults:
     shell: bash -el {0}
 
 jobs:
-  test-cpu-16:
-    runs-on: linux-amd64-cpu-16-hk
+  test-cpu-8:
+    runs-on: linux-amd64-cpu-8-hk
     steps:
       - name: Job started - sleeping for debugging
         run: |
