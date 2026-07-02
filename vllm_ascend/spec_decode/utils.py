@@ -87,53 +87,48 @@ class SlidingWindowAdapter:
         self,
         window_size: int,
         block_size: int,
-        max_num_reqs: int,
-        device: torch.device,
+        block_table_tensor: torch.Tensor
     ) -> None:
         self.window_size: int = window_size
         self.block_size: int = block_size
-        self.full_block_table: torch.Tensor
         self.window_blocks = (window_size + block_size - 1) // block_size
         self.max_window_blocks = self.window_blocks + 1
+        self.full_block_table: torch.Tensor = block_table_tensor
         self._block_table_clone = torch.zeros(
-            (max_num_reqs, self.max_window_blocks),
-            dtype=torch.int32,
-            device=device,
+            (block_table_tensor.shape[0], self.max_window_blocks),
+            dtype=block_table_tensor.dtype,
+            device=block_table_tensor.device,
         )
 
     def compute_sliding_window_block_table(
         self,
-        full_block_table: torch.Tensor,
         full_seq_lens: torch.Tensor,
         num_speculative_tokens: int,
-        window_size: int,
-        block_size: int,
-        max_window_blocks: int,
         out: torch.Tensor,
     ) -> None:
         num_reqs = full_seq_lens.shape[0]
         k = num_speculative_tokens
-        w = window_size
-        b = block_size
+        w = self.window_size
+        b = self.block_size
 
         final_seq_lens = full_seq_lens + k
         start_tokens = (final_seq_lens - w).clamp(min=0)
         start_blocks = (start_tokens // b) * b
-        start_block_indices = (start_blocks // b).to(torch.int64)
+        start_block_indices = start_blocks // b
 
         tokens_to_cover = final_seq_lens - start_blocks
-        needed_blocks_per_req = ((tokens_to_cover + b - 1) // b).to(torch.int64)
+        needed_blocks_per_req = (tokens_to_cover + b - 1) // b
 
-        full_cols = full_block_table.shape[1]
+        full_cols = self.full_block_table.shape[1]
         # column offset grid [1, max_window_blocks]
-        cols = torch.arange(max_window_blocks, device=full_block_table.device).unsqueeze(0)
+        cols = torch.arange(self.max_window_blocks, device=self.full_block_table.device).unsqueeze(0)
         # source column per (row, col): start_block_indices[:, None] + cols
         src_cols = start_block_indices.unsqueeze(1) + cols
         # clamp to the valid full-block-table column range so gather never goes OOB
         src_cols_clamped = src_cols.clamp(max=full_cols - 1)
 
-        gathered = torch.gather(full_block_table, 1, src_cols_clamped)
-        needed = torch.clamp(needed_blocks_per_req, max=max_window_blocks).unsqueeze(1)
+        gathered = torch.gather(self.full_block_table, 1, src_cols_clamped)
+        needed = torch.clamp(needed_blocks_per_req, max=self.max_window_blocks).unsqueeze(1)
         # keep only columns within `needed` and within the full table; zero the rest
         valid_mask = (cols < needed) & (src_cols < full_cols)
         out[:num_reqs].copy_(gathered * valid_mask.to(gathered.dtype))
@@ -141,8 +136,6 @@ class SlidingWindowAdapter:
     def apply(
         self,
         common_attn_metadata,
-        full_seq_lens: torch.Tensor,
-        seq_lens_group,
         num_speculative_tokens: int,
     ) -> None:
         """Crop the draft block table and clamp KV lengths to W (entry point).
@@ -150,7 +143,7 @@ class SlidingWindowAdapter:
         Called from ``dummy_run`` (graph capture) and ``_propose`` (runtime),
         both passing the pre-window ``full_seq_lens``. No-op when disabled.
         """
-        full_block_table = common_attn_metadata.block_table_tensor
+        full_seq_lens = common_attn_metadata.seq_lens
         num_reqs = full_seq_lens.shape[0]
         w = self.window_size
 
@@ -158,33 +151,14 @@ class SlidingWindowAdapter:
         # rebind to an offset-0 slice so block_table data_ptr is identical across
         # ACL graph capture and replay.
         self.compute_sliding_window_block_table(
-            full_block_table,
             full_seq_lens,
             num_speculative_tokens=num_speculative_tokens,
-            window_size=w,
-            block_size=self.block_size,
-            max_window_blocks=self.max_window_blocks,
             out=self._block_table_clone,
         )
         common_attn_metadata.block_table_tensor = self._block_table_clone[:num_reqs]
 
-        # Save the full table for slot-mapping (KV writes use absolute positions).
-        self.full_block_table = full_block_table
-
-        # Cap every KV-length tensor the attention backends can read at W.
-        windowed_seq_lens = torch.min(full_seq_lens, torch.full_like(full_seq_lens, w))
+        windowed_seq_lens = full_seq_lens.clamp(max=w)
         common_attn_metadata.seq_lens = windowed_seq_lens
-        if getattr(common_attn_metadata, "seq_lens_cpu", None) is not None:
-            common_attn_metadata.seq_lens_cpu = windowed_seq_lens.cpu()
-        if getattr(common_attn_metadata, "_seq_lens_cpu", None) is not None:
-            common_attn_metadata._seq_lens_cpu = windowed_seq_lens.cpu().clone()
-        if getattr(common_attn_metadata, "seq_lens_cpu_upper_bound", None) is not None:
-            common_attn_metadata.seq_lens_cpu_upper_bound = windowed_seq_lens.cpu().clone()
-
-        # update the per-step seq_lens buffer so each draft step's windowed
-        # length is ready: min(L + step, W).
-        for step in range(num_speculative_tokens):
-            current_len = full_seq_lens + step
-            windowed_len = torch.min(current_len, torch.full_like(current_len, w))
-            seq_lens_group[step][:num_reqs].copy_(windowed_len)
-            seq_lens_group[step][num_reqs:].fill_(0)
+        common_attn_metadata.seq_lens_cpu = windowed_seq_lens.clone()
+        common_attn_metadata._seq_lens_cpu = windowed_seq_lens.clone()
+        common_attn_metadata.seq_lens_cpu_upper_bound = windowed_seq_lens.clone()

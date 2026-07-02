@@ -331,13 +331,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         # Sliding window attention for draft model (encapsulated in the adapter).
         self.draft_window_size = self.vllm_config.additional_config.get("draft_window_size")
-        if self.draft_window_size is not None:
-            self.sliding_window = SlidingWindowAdapter(
-                self.draft_window_size,
-                self.runner.block_size,
-                self.runner.max_num_reqs,
-                self.device,
-            )
 
     def _get_model(self) -> nn.Module:
         """
@@ -931,14 +924,18 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     common_attn_metadata.block_table_tensor, num_reqs_padded
                 )
 
-        # Save original seq_lens and apply sliding window before any CP adjustments.
-        # Guarded so the clone is skipped when the window is disabled.
         if self.draft_window_size is not None:
-            full_seq_lens = common_attn_metadata.seq_lens.clone()
+            # initialize sliding window adapter
+            self.sliding_window = SlidingWindowAdapter(
+                self.draft_window_size,
+                self.runner.block_size,
+                common_attn_metadata.block_table_tensor
+            )
+
+            # Save original seq_lens and apply sliding window before any CP adjustments.
+            # Guarded so the clone is skipped when the window is disabled.
             self.sliding_window.apply(
                 common_attn_metadata,
-                full_seq_lens,
-                self.seq_lens_group,
                 self.num_speculative_tokens,
             )
 
