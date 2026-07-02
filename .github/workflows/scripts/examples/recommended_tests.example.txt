@@ -6,8 +6,8 @@
 #   tests/e2e/pull_request/one_card/test_foo.py::TestClass::test_method
 #   tests/ut/attention/a2/test_attention_v1.py
 #
-# Copy this file to `.github/workflows/scripts/recommended_tests.txt`
-# to enable the Recommended-Tests PR pipeline.
+# Copy this file to `.github/workflows/scripts/recommended_tests.txt`.
+# The list is consumed by the `select-recommended-tests` job in `pr_test.yaml`.
 
 tests/e2e/pull_request/one_card/test_batch_invariant.py
 tests/ut/attention/test_attention_mask.py
