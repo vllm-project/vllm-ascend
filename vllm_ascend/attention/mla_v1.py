@@ -263,11 +263,13 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         if self.speculative_config:
             spec_token_num = self.speculative_config.num_speculative_tokens
             self.decode_threshold += spec_token_num
-            assert self.decode_threshold <= 16, (
-                f"decode_threshold exceeded \
-                npu_fused_infer_attention_score TND layout's limit of 16, \
-                got {self.decode_threshold}"
-            )
+            if self.decode_threshold > 16:
+                raise ValueError(
+                    f"decode_threshold ({self.decode_threshold}) exceeds "
+                    "npu_fused_infer_attention_score TND layout's limit of 16. "
+                    "Reduce speculative_config.num_speculative_tokens to at most "
+                    "15."
+                )
 
         self.reorder_batch_threshold = self.decode_threshold
         self.rope_dim = self.model_config.hf_text_config.qk_rope_head_dim
