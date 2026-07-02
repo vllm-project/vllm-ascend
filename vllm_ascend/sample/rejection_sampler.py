@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import logging
 from dataclasses import replace
 
 import torch
@@ -175,6 +176,31 @@ class AscendRejectionSampler(RejectionSampler):
                 requested.
         """
         assert metadata.max_spec_len <= MAX_SPEC_LEN
+
+        # rejection sampler entry probe.
+        # Captures the shape/dtype baseline at the rejection-sampling boundary
+        # so that mismatches between the target-model output and the spec
+        # decode metadata can be diagnosed without re-running the workload.
+        # All payload fields are host scalars / tuple shapes -- no device sync.
+        # The whole block is gated by isEnabledFor(DEBUG) so production builds
+        # pay only the cost of one integer compare.
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "[spec/dfx] rejection_sampler entry: "
+                "logits.shape=%s, logits.dtype=%s, max_spec_len=%d, "
+                "num_total_drafts=%d, num_reqs=%d, "
+                "logprobs_mode=%s(processed=%s), top_k=%s",
+                tuple(logits.shape),
+                logits.dtype,
+                metadata.max_spec_len,
+                int(metadata.num_draft_tokens.sum().item())
+                if torch.is_tensor(metadata.num_draft_tokens)
+                else sum(metadata.num_draft_tokens),
+                metadata.cu_num_draft_tokens.shape[0],
+                self.sampler.logprobs_mode,
+                self.is_processed_logprobs_mode,
+                self.top_k,
+            )
         bonus_logits_indices = metadata.bonus_logits_indices
         target_logits_indices = metadata.target_logits_indices
 
@@ -228,6 +254,31 @@ class AscendRejectionSampler(RejectionSampler):
             sampling_metadata,
             ori_target_logits=raw_target_logits,
         )
+
+        # rejection sampler exit probe (acceptance signal).
+        # Reports placeholder fill rate and an approximate acceptance ratio so
+        # operators can tell at a glance whether the draft/target pairing is
+        # healthy. The .ne()/.sum() calls force a host sync and only run when
+        # DEBUG is on; production paths skip the entire block.
+        if logger.isEnabledFor(logging.DEBUG):
+            valid_mask = output_token_ids.ne(PLACEHOLDER_TOKEN_ID)
+            num_accepted = int(valid_mask.sum().item())
+            num_slots = int(output_token_ids.numel())
+            num_total_drafts = (
+                int(metadata.num_draft_tokens.sum().item())
+                if torch.is_tensor(metadata.num_draft_tokens)
+                else sum(metadata.num_draft_tokens)
+            )
+            logger.debug(
+                "[spec/dfx] rejection_sampler done: "
+                "accepted=%d/%d (slot_fill=%.1f%%), drafted=%d, "
+                "approx_accept_rate=%.1f%%",
+                num_accepted,
+                num_slots,
+                100.0 * num_accepted / max(num_slots, 1),
+                num_total_drafts,
+                100.0 * num_accepted / max(num_total_drafts + output_token_ids.shape[0], 1),
+            )
 
         logprobs_tensors = None
         if sampling_metadata.max_num_logprobs is not None:

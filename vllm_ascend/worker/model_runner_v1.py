@@ -1692,6 +1692,36 @@ class NPUModelRunner(GPUModelRunner):
         sample_hidden_states: torch.Tensor = None,
         target_model_batch_desc: BatchDescriptor = None,
     ) -> list[list[int]] | None:
+        # propose_draft_token_ids entry probe.
+        # Records which speculative-decoding sub-path is about to run
+        # (ngram / medusa / eagle / extract_hidden_states / ...). When the
+        # `Unknown speculative decoding method` ValueError fires further
+        # down, or when end-to-end speedup is unexpectedly absent, this
+        # single line tells the operator which drafter object was actually
+        # constructed and whether k (num_speculative_tokens) is non-trivial.
+        # Type lookups and getattr are host-only; the entire block is
+        # gated by isEnabledFor(DEBUG).
+        if logger.isEnabledFor(logging.DEBUG):
+            drafter_type = type(self.drafter).__name__ if self.drafter else None
+            spec_meta_state = (
+                "None" if spec_decode_metadata is None
+                else f"max_spec_len={spec_decode_metadata.max_spec_len}"
+            )
+            logger.debug(
+                "[spec/dfx] propose_draft_token_ids entry: "
+                "drafter=%s, method=%s, k=%d, num_reqs=%d, "
+                "num_scheduled_tokens=%d, spec_decode_metadata=%s, "
+                "use_cp=%s, pcp_size=%d",
+                drafter_type,
+                self.speculative_config.method if self.speculative_config else None,
+                self.num_spec_tokens,
+                self.input_batch.num_reqs,
+                num_scheduled_tokens,
+                spec_meta_state,
+                getattr(self, "use_cp", False),
+                getattr(self, "pcp_size", 1),
+            )
+
         if not self.drafter:
             # Speculative decoding is not enabled.
             draft_token_ids = None
@@ -1904,6 +1934,32 @@ class NPUModelRunner(GPUModelRunner):
                 num_scheduled_tokens=num_scheduled_tokens,
                 num_rejected_tokens_gpu=num_rejected_tokens_gpu,
             )
+
+            # post _propose draft-token shape probe.
+            # Confirms that the eagle/draft-model path returned a tensor
+            # whose first dimension matches batch_size * k and reports the
+            # placeholder (-1) ratio. A high placeholder ratio explains
+            # silent loss of speculative speedup (drafts truncated by EOS
+            # or max_model_len). The .eq(-1).sum() forces a host sync, so
+            # the block is strictly gated by isEnabledFor(DEBUG).
+            if logger.isEnabledFor(logging.DEBUG):
+                if torch.is_tensor(draft_token_ids):
+                    ph = int((draft_token_ids == -1).sum().item())
+                    shape_s = tuple(draft_token_ids.shape)
+                    tot = int(draft_token_ids.numel())
+                else:
+                    ph, shape_s, tot = -1, None, -1
+                logger.debug(
+                    "[spec/dfx] propose_draft post-_propose: "
+                    "draft_token_ids.shape=%s, total=%d, placeholder(-1)=%d, "
+                    "expected~=batch_size(%d) * k(%d)=%d",
+                    shape_s,
+                    tot,
+                    ph,
+                    self.input_batch.num_reqs,
+                    self.num_spec_tokens,
+                    self.input_batch.num_reqs * self.num_spec_tokens,
+                )
         else:
             raise ValueError(f"Unknown speculative decoding method: {self.speculative_config.method}")
 
