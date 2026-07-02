@@ -31,6 +31,7 @@ from vllm_ascend.ops.triton.reject_sample import (
 )
 from vllm_ascend.sample.penalties import apply_all_penalties
 from vllm_ascend.sample.sampler import apply_top_k_top_p
+from vllm_ascend.utils import reduce_sample_enabled
 
 
 class AscendRejectionSampler(RejectionSampler):
@@ -94,7 +95,7 @@ class AscendRejectionSampler(RejectionSampler):
             "reduce_sample=%s",
             self._ascend_optimizations_enabled,
             HAS_TRITON,
-            get_ascend_config().enable_reduce_sample,
+            reduce_sample_enabled(),
         )
 
     def apply_logits_processors(
@@ -324,7 +325,7 @@ def apply_sampling_constraints(
 
     # New flow: top_k -> allgather -> top_p
     # Returns processed logits and indices
-    if get_ascend_config().enable_reduce_sample:
+    if reduce_sample_enabled():
         logger.debug_once(
             "[sample/rejection_sampler] Using reduce-sample path for "
             "apply_sampling_constraints. top-k/top-p with TP all-gather.",
@@ -409,7 +410,7 @@ def rejection_sample(
         using_entropy_verify,
         sampling_metadata.all_greedy,
         sampling_metadata.all_random,
-        get_ascend_config().enable_reduce_sample,
+        reduce_sample_enabled(),
         HAS_TRITON,
     )
 
@@ -450,7 +451,7 @@ def rejection_sample(
 
     # For greedy sampling, we need to do allgather first to get global argmax
     if not sampling_metadata.all_random:
-        if get_ascend_config().enable_reduce_sample:
+        if reduce_sample_enabled():
             target_argmax = greedy_sample(target_logits)
         else:
             target_argmax = target_logits.argmax(dim=-1).view(-1)
@@ -635,7 +636,7 @@ def rejection_sample(
             "[sample/rejection_sampler] Using fallback (non-reduce-sample) path in "
             "rejection_sample. This path should not be used in the new distributed flow. "
             "enable_reduce_sample=%s, has_target_indices=%s",
-            get_ascend_config().enable_reduce_sample,
+            reduce_sample_enabled(),
             target_indices is not None,
         )
         vocab_size = target_logits.shape[-1]
