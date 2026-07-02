@@ -52,7 +52,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.spec_decode.utils import (
     update_num_computed_tokens_for_batch_change,
 )
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, lmhead_tp_enable
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_rc_device, lmhead_tp_enable
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 _NGRAM_GRAPH_UNIFORM_DECODE_QUERY_LEN = 1
@@ -387,6 +387,8 @@ class NPUModelRunner310(NPUModelRunner):
 
         self.query_start_loc.np[0] = 0
         self.query_start_loc.np[1 : num_reqs + 1] = cu_num_tokens
+        if is_rc_device():
+            self.query_start_loc.np[num_reqs + 1 :].fill(-1)
         self.query_start_loc.copy_to_gpu()
 
         if self._has_gdn:
@@ -405,7 +407,8 @@ class NPUModelRunner310(NPUModelRunner):
         prev_req_id_to_index = self.input_batch.prev_req_id_to_index
         self._compute_prev_positions(num_reqs)
 
-        self.query_start_loc.gpu[num_reqs + 1 :].fill_(-1)
+        if not is_rc_device():
+            self.query_start_loc.gpu[num_reqs + 1 :].fill_(-1)
 
         self._prepare_input_ids(scheduler_output, num_reqs, total_num_scheduled_tokens, cu_num_tokens)
         if self.uses_mrope:
@@ -455,8 +458,12 @@ class NPUModelRunner310(NPUModelRunner):
             self.num_accepted_tokens.np[num_reqs:].fill(1)
             self.num_accepted_tokens.copy_to_gpu()
         else:
-            self.num_accepted_tokens.np.fill(1)
-            self.num_accepted_tokens.gpu.fill_(1)
+            if is_rc_device():
+                self.num_accepted_tokens.np[num_reqs:].fill(1)
+                self.num_accepted_tokens.copy_to_gpu()
+            else:
+                self.num_accepted_tokens.np.fill(1)
+                self.num_accepted_tokens.gpu.fill_(1)
 
         need_async_num_computed_update = (
             self.use_async_spec_decode and self.valid_sampled_token_count_gpu is not None and prev_req_id_to_index
@@ -494,12 +501,25 @@ class NPUModelRunner310(NPUModelRunner):
         )
         if need_async_num_computed_update:
             self.seq_lens[:num_reqs] = self.num_computed_tokens[:num_reqs] + num_scheduled_tokens_gpu
+            if is_rc_device():
+                tail_len = self.seq_lens.shape[0] - num_reqs
+                if tail_len > 0:
+                    self.seq_lens[num_reqs:].copy_(
+                        self.optimistic_seq_lens_cpu[num_reqs:].to(self.device, non_blocking=True),
+                    )
         else:
-            self.seq_lens[:num_reqs].copy_(
-                self.optimistic_seq_lens_cpu[:num_reqs],
-                non_blocking=True,
-            )
-        self.seq_lens[num_reqs:].fill_(0)
+            if is_rc_device():
+                self.seq_lens.copy_(
+                    self.optimistic_seq_lens_cpu[: self.seq_lens.shape[0]],
+                    non_blocking=True,
+                )
+            else:
+                self.seq_lens[:num_reqs].copy_(
+                    self.optimistic_seq_lens_cpu[:num_reqs],
+                    non_blocking=True,
+                )
+        if not is_rc_device():
+            self.seq_lens[num_reqs:].fill_(0)
 
         if (
             self._needs_seq_lens_cpu_sync
