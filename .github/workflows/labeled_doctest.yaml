@@ -61,7 +61,7 @@ concurrency:
 jobs:
   setup-matrix:
     name: Setup test matrix
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu-16-hk
     outputs:
       matrix: ${{ steps.set_matrix_pr.outputs.matrix || steps.set_matrix_doc.outputs.matrix }}
     steps:
