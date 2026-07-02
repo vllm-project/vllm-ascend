@@ -26,6 +26,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.backend im
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend import (
     MooncakeStoreConfig,
     _convert_to_bytes,
+    _mooncake_is_exist_supports_prefetch,
     _parse_global_segment_size,
     _ssd_setup_kwargs,
 )
@@ -173,6 +174,34 @@ class TestMooncakeStoreConfig(unittest.TestCase):
             },
         )
 
+    def test_from_file_ssd_prefetch_default_off(self):
+        cfg = _make_mooncake_store_config()
+        self.assertFalse(cfg.enable_ssd_prefetch)
+
+    def test_from_file_ssd_prefetch_enabled(self):
+        ssd_path = TestMooncakeStoreConfig._writable_ssd_path()
+        self.addCleanup(lambda: os.rmdir(ssd_path))
+        cfg = _make_mooncake_store_config(
+            enable_ssd_offload=True,
+            ssd_offload_path=ssd_path,
+            enable_ssd_prefetch=True,
+        )
+        self.assertTrue(cfg.enable_ssd_prefetch)
+
+    def test_from_file_ssd_prefetch_with_null_values(self):
+        ssd_path = TestMooncakeStoreConfig._writable_ssd_path()
+        self.addCleanup(lambda: os.rmdir(ssd_path))
+        cfg = _make_mooncake_store_config(
+            enable_ssd_offload=True,
+            ssd_offload_path=ssd_path,
+            enable_ssd_prefetch=True,
+            ssd_prefetch_cooldown_sec=None,
+            ssd_prefetch_dedup_ttl_sec=None,
+        )
+        self.assertTrue(cfg.enable_ssd_prefetch)
+        self.assertIsNone(cfg.ssd_prefetch_cooldown_sec)
+        self.assertIsNone(cfg.ssd_prefetch_dedup_ttl_sec)
+
     def test_load_from_env_missing(self):
         with patch.dict(os.environ, {}, clear=True):
             os.environ.pop("MOONCAKE_CONFIG_PATH", None)
@@ -195,6 +224,41 @@ class TestMooncakeStoreConfig(unittest.TestCase):
                 self.assertEqual(cfg.metadata_server, "host:1234")
         finally:
             os.unlink(path)
+
+
+class TestMooncakeIsExistSupportsPrefetch(unittest.TestCase):
+    def setUp(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
+            mooncake_backend,
+        )
+
+        mooncake_backend._mooncake_exist_options_class.cache_clear()
+        _mooncake_is_exist_supports_prefetch.cache_clear()
+
+    def tearDown(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
+            mooncake_backend,
+        )
+
+        mooncake_backend._mooncake_exist_options_class.cache_clear()
+        _mooncake_is_exist_supports_prefetch.cache_clear()
+
+    def test_returns_true_when_exist_options_available(self):
+        class ExistOptions:
+            def __init__(self):
+                self.prefetch_to_memory = False
+
+        mock_module = MagicMock()
+        mock_module.ExistOptions = ExistOptions
+        with patch.dict("sys.modules", {"mooncake.store": mock_module}):
+            result = _mooncake_is_exist_supports_prefetch()
+            self.assertTrue(result)
+
+    def test_returns_false_when_exist_options_missing(self):
+        mock_module = MagicMock(spec=[])
+        with patch.dict("sys.modules", {"mooncake.store": mock_module}):
+            result = _mooncake_is_exist_supports_prefetch()
+            self.assertFalse(result)
 
 
 class TestParseGlobalSegmentSize(unittest.TestCase):
@@ -347,6 +411,8 @@ class TestMooncakeBackendMethods(unittest.TestCase):
             backend._use_fabric_mem = False
             backend._store_init_lock = MagicMock()
             backend.local_seg = None
+            backend._ssd_prefetch_enabled = False
+            backend._exist_prefetch_options = None
             return backend
 
     def test_exists(self):
@@ -354,6 +420,61 @@ class TestMooncakeBackendMethods(unittest.TestCase):
         b.store.batch_is_exist.return_value = [1, 0]
         result = b.exists(["k1", "k2"])
         self.assertEqual(result, [1, 0])
+        b.store.batch_is_exist.assert_called_once_with(["k1", "k2"])
+
+    def test_exists_with_ssd_prefetch(self):
+        b = self._make_backend()
+        b._ssd_prefetch_enabled = True
+        prefetch_options = object()
+        b._exist_prefetch_options = prefetch_options
+        b.store.batch_is_exist.return_value = [1, 0, 1]
+        result = b.exists(["k1", "k2", "k3"])
+        self.assertEqual(result, [1, 0, 1])
+        b.store.batch_is_exist.assert_called_once_with(
+            ["k1", "k2", "k3"], prefetch_options
+        )
+
+    def test_exists_without_ssd_prefetch(self):
+        b = self._make_backend()
+        b._ssd_prefetch_enabled = False
+        b.store.batch_is_exist.return_value = [1]
+        result = b.exists(["k1"])
+        self.assertEqual(result, [1])
+        b.store.batch_is_exist.assert_called_once_with(["k1"])
+
+    def test_resolve_ssd_prefetch_disabled_by_config(self):
+        b = self._make_backend()
+        b.config.enable_ssd_prefetch = False
+        b.config.enable_ssd_offload = True
+        self.assertFalse(b._resolve_ssd_prefetch())
+
+    def test_resolve_ssd_prefetch_no_offload(self):
+        b = self._make_backend()
+        b.config.enable_ssd_prefetch = True
+        b.config.enable_ssd_offload = False
+        self.assertFalse(b._resolve_ssd_prefetch())
+
+    @patch(
+        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend."
+        "mooncake_backend._mooncake_is_exist_supports_prefetch",
+        return_value=False,
+    )
+    def test_resolve_ssd_prefetch_unsupported_mooncake(self, _mock):
+        b = self._make_backend()
+        b.config.enable_ssd_prefetch = True
+        b.config.enable_ssd_offload = True
+        self.assertFalse(b._resolve_ssd_prefetch())
+
+    @patch(
+        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend."
+        "mooncake_backend._mooncake_is_exist_supports_prefetch",
+        return_value=True,
+    )
+    def test_resolve_ssd_prefetch_enabled(self, _mock):
+        b = self._make_backend()
+        b.config.enable_ssd_prefetch = True
+        b.config.enable_ssd_offload = True
+        self.assertTrue(b._resolve_ssd_prefetch())
 
     def test_put(self):
         b = self._make_backend()
