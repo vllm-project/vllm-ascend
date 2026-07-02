@@ -1142,7 +1142,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 # which feeds a different dummy batch than batch_size — stays consistent. Keep the
                 # vocab dim explicit so view() only infers the batch dim (the original used
                 # batch_size + view(-1), which mis-inferred the vocab dim during capture).
-                blk = self.num_speculative_tokens + 1
+                blk = self.num_speculative_tokens
                 raw_logits = self.model.compute_logits(last_hidden_states)
                 logits = raw_logits.view(-1, blk, raw_logits.shape[-1])
                 num_blk = logits.shape[0]
