@@ -40,6 +40,10 @@ on:
     paths:
       # If we are changing the doctest we should do a PR test
       - '.github/workflows/labeled_doctest.yaml'
+      # Version variables are sourced from mkdocs.yml 'extra:' and
+      # re-exported via the docs/source/conf.py shim. Trigger the
+      # workflow whenever either file changes.
+      - 'mkdocs.yml'
       - 'docs/source/conf.py'
       - 'tests/e2e/doctests/**'
       - 'tests/e2e/common.sh'
@@ -89,6 +93,8 @@ jobs:
           doc_verbose_name="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME}}"
           documentation_url=""
           repo_dir="${GITHUB_WORKSPACE}/matrix-src"
+
+          pip install regex
 
           vllm_ascend_version="$(python3 "${repo_dir}/docs/source/conf.py" \
             | jq -r '.vllm_ascend_version // empty')"
@@ -178,6 +184,7 @@ jobs:
               https://github.com/vllm-project/vllm-ascend.git "${repo_dir}"
 
             doc_repository="vllm-project/vllm-ascend"
+            pip install regex
             vllm_ascend_version="$(python3 "${repo_dir}/docs/source/conf.py" \
               | jq -r '.vllm_ascend_version // empty')"
             if [ -z "${vllm_ascend_version}" ]; then

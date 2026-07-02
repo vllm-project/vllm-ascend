@@ -65,10 +65,9 @@ You can use the official Docker image to run `Kimi-K2-Thinking` directly.
 
 Select an image based on your machine type and start the Docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
 
-```{code-block} bash
-   :substitutions:
+```bash
    # Update the vllm-ascend image according to your environment.
-   export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
+   export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
 
 # Run the container using the defined variables
 # Note: If you are running bridge network with docker, please expose available ports for multiple nodes communication in advance
@@ -122,7 +121,7 @@ docker run --rm \
 After the container starts, run the following command on the host to verify the container status:
 
 ```bash
-docker ps --filter name=vllm-ascend --format "table {{.Names}}\t{{.Status}}"
+docker ps --filter name=vllm-ascend --format "table {% raw %}{{.Names}}\t{{.Status}}{% endraw %}"
 ```
 
 Expected Status:
@@ -147,16 +146,15 @@ Expected Status:
 
 If you do not want to use the Docker image, you can also build from source:
 
-```{code-block} bash
-   :substitutions:
+```bash
 # Install vLLM.
-git clone --depth 1 --branch |vllm_version| https://github.com/vllm-project/vllm
+git clone --depth 1 --branch {{ vllm_version }} https://github.com/vllm-project/vllm
 cd vllm
 VLLM_TARGET_DEVICE=empty pip install -e .
 cd ..
 
 # Install vLLM Ascend.
-git clone --depth 1 --branch |vllm_ascend_version| https://github.com/vllm-project/vllm-ascend.git
+git clone --depth 1 --branch {{ vllm_ascend_version }} https://github.com/vllm-project/vllm-ascend.git
 cd vllm-ascend
 pip install -e .
 ```

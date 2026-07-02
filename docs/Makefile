@@ -1,25 +1,45 @@
-# Minimal makefile for Sphinx documentation
+# MkDocs documentation build file
 #
+# Usage:
+#   make serve      - Build and serve docs locally (English)
+#   make serve-zh   - Build and serve docs locally (Chinese)
+#   make build      - Build English docs
+#   make build-zh   - Build Chinese docs
+#   make gen-zh     - Generate Chinese docs from .po files
+#   make clean      - Clean build artifacts
+#
+# Both `build*` targets delegate to tools/rtd_build.sh so the
+# Chinese-mode env vars, language detection, and mkdocs flags stay in
+# one place (the same script is also used by .readthedocs.yaml).
 
-# You can set these variables from the command line, and also
-# from the environment for the first two.
 SPHINXOPTS    ?=
-SPHINXBUILD   ?= sphinx-build
-SOURCEDIR     = source
-BUILDDIR      = _build
+BUILDDIR      = site
 
-# Put it first so that "make" without argument is like "make help".
+.PHONY: help serve serve-zh build build-zh gen-zh clean
+
 help:
-	@$(SPHINXBUILD) -M help "$(SOURCEDIR)" "$(BUILDDIR)" $(SPHINXOPTS) $(O)
+	@echo "Available targets:"
+	@echo "  serve      - Build and serve docs locally (English)"
+	@echo "  serve-zh   - Build and serve docs locally (Chinese)"
+	@echo "  build      - Build English docs to $(BUILDDIR)/"
+	@echo "  build-zh   - Build Chinese docs to $(BUILDDIR)/zh/"
+	@echo "  gen-zh     - Generate Chinese docs from .po files"
+	@echo "  clean      - Clean build artifacts"
 
-.PHONY: help Makefile
+serve:
+	mkdocs serve
 
-# Catch-all target: route all unknown targets to Sphinx using the new
-# "make mode" option.  $(O) is meant as a shortcut for $(SPHINXOPTS).
-%: Makefile
-	@$(SPHINXBUILD) -M $@ "$(SOURCEDIR)" "$(BUILDDIR)" $(SPHINXOPTS) $(O)
+serve-zh:
+	DOCS_LANG=zh mkdocs serve
 
-intl:
-	sphinx-intl build
-	@$(SPHINXBUILD) -b html -D language=zh_CN "$(SOURCEDIR)" "$(BUILDDIR)/html/zh-cn" $(SPHINXOPTS) $(O)
+build:
+	SITE_DIR=$(CURDIR)/$(BUILDDIR) bash tools/rtd_build.sh
 
+build-zh:
+	DOCS_LANG=zh SITE_DIR=$(CURDIR)/$(BUILDDIR)/zh bash tools/rtd_build.sh
+
+gen-zh:
+	python tools/generate_zh_docs.py
+
+clean:
+	rm -rf $(BUILDDIR)

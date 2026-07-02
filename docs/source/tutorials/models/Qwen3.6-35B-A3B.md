@@ -27,18 +27,17 @@ It is recommended to download the model weight to `/root/.cache/`.
 
 ### 4.1 Docker Image Installation
 
-Select an image based on your machine type. For example, use `quay.io/ascend/vllm-ascend:|vllm_ascend_version|` for Atlas 800 A2 and `quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3` for Atlas 800 A3.
+Select an image based on your machine type. For example, use `quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}` for Atlas 800 A2 and `quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3` for Atlas 800 A3.
 
 Refer to [using docker](../../installation.md#set-up-using-docker) for the complete installation guide.
 
-```{code-block} bash
-:substitutions:
+```bash
 
 # Update --device according to your device.
 # Atlas A2: /dev/davinci[0-7]
 # Atlas A3: /dev/davinci[0-15]
 # Download the model weight to /root/.cache in advance.
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 export NAME=vllm-ascend
 
 docker run --rm \
