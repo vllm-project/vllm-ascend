@@ -763,6 +763,11 @@ class NPUModelRunner(GPUModelRunner):
                 continue
             prev_req_id_to_index[req_id] = prev_req_index
             prev_sampled_token_ids[prev_req_index] = token_ids[-1]
+            if (req_state := self.requests.get(req_id)) is not None:
+                req_state.output_token_ids.append(PLACEHOLDER_TOKEN_ID)
+            pos = self.input_batch.num_tokens_no_spec[prev_req_index]
+            self.input_batch.is_token_ids[prev_req_index, pos] = True
+            self.input_batch.num_tokens_no_spec[prev_req_index] = pos + 1
 
         if not prev_req_id_to_index:
             return
