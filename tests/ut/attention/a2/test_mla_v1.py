@@ -1949,20 +1949,46 @@ class TestAscendMLAImpl(TestBase):
 
         self.assertTrue(self.impl._decode_fast_path_has_by_cache_backend())
 
+    @patch("vllm_ascend.attention.mla_v1.has_mla_preprocess_by_cache_backend", return_value=True)
     @patch("vllm_ascend.attention.mla_v1._EXTRA_CTX")
-    def test_decode_fast_path_skips_aclgraph_capture(self, mock_extra_ctx):
+    def test_decode_fast_path_allows_aclgraph_capture_with_by_cache_backend(
+        self, mock_extra_ctx, _mock_has_mla_preprocess_by_cache
+    ):
         mock_extra_ctx.capturing = True
         self.impl.enable_mlapo = True
         self.impl.fa_quant_layer = False
 
-        self.assertFalse(self.impl._decode_fast_path_has_by_cache_backend())
+        self.assertTrue(self.impl._decode_fast_path_has_by_cache_backend())
 
-    def test_decode_fast_path_skips_configured_aclgraph_mode(self):
+    @patch("vllm_ascend.attention.mla_v1.has_mla_preprocess_by_cache_backend", return_value=True)
+    def test_decode_fast_path_allows_configured_aclgraph_mode_with_by_cache_backend(
+        self, _mock_has_mla_preprocess_by_cache
+    ):
         self.impl.vllm_config.compilation_config.cudagraph_mode = "FULL_AND_PIECEWISE"
         self.impl.enable_mlapo = True
         self.impl.fa_quant_layer = False
 
+        self.assertTrue(self.impl._decode_fast_path_has_by_cache_backend())
+
+    @patch("vllm_ascend.attention.mla_v1.has_mla_preprocess_by_cache_backend", return_value=True)
+    def test_decode_fast_path_skips_prefill_context_parallel(self, _mock_has_mla_preprocess_by_cache):
+        self.impl.vllm_config.parallel_config.prefill_context_parallel_size = 2
+        self.impl.vllm_config.parallel_config.decode_context_parallel_size = 1
+        self.impl.enable_mlapo = True
+        self.impl.fa_quant_layer = False
+
         self.assertFalse(self.impl._decode_fast_path_has_by_cache_backend())
+
+    @patch("vllm_ascend.attention.mla_v1.has_mla_preprocess_by_cache_backend", return_value=True)
+    def test_decode_fast_path_allows_decode_context_parallel_with_by_cache_backend(
+        self, _mock_has_mla_preprocess_by_cache
+    ):
+        self.impl.vllm_config.parallel_config.prefill_context_parallel_size = 1
+        self.impl.vllm_config.parallel_config.decode_context_parallel_size = 2
+        self.impl.enable_mlapo = True
+        self.impl.fa_quant_layer = False
+
+        self.assertTrue(self.impl._decode_fast_path_has_by_cache_backend())
 
     @patch("vllm_ascend.attention.mla_v1.post_process_after_loading_for_shard_weight_series")
     @patch("vllm_ascend.attention.mla_v1.is_hidden_layer")

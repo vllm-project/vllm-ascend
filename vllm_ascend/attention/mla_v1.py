@@ -990,12 +990,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         return has_mla_preprocess_by_cache_backend()
 
     def _decode_fast_path_has_by_cache_backend(self) -> bool:
-        if (
-            _is_aclgraph_capturing()
-            or self._aclgraph_mode_configured()
-            or self._context_parallel_enabled()
-            or self._pipeline_parallel_enabled()
-        ):
+        if self._prefill_context_parallel_enabled():
             return False
         if self.fa_quant_layer:
             if get_ascend_device_type() == AscendDeviceType.A5:
@@ -1579,18 +1574,10 @@ class AscendMLAImpl(MLAAttentionImpl):
             and has_mla_preprocess_by_cache_kernel()
         )
 
-    def _context_parallel_enabled(self) -> bool:
+    def _prefill_context_parallel_enabled(self) -> bool:
         parallel_config = getattr(self.vllm_config, "parallel_config", None)
-        for attr in ("prefill_context_parallel_size", "decode_context_parallel_size"):
-            size = getattr(parallel_config, attr, 1)
-            if isinstance(size, int) and size > 1:
-                return True
-        return False
-
-    def _pipeline_parallel_enabled(self) -> bool:
-        parallel_config = getattr(self.vllm_config, "parallel_config", None)
-        pp_size = getattr(parallel_config, "pipeline_parallel_size", 1)
-        return isinstance(pp_size, int) and pp_size > 1
+        size = getattr(parallel_config, "prefill_context_parallel_size", 1)
+        return isinstance(size, int) and size > 1
 
     def _aclgraph_mode_configured(self) -> bool:
         compilation_config = getattr(self.vllm_config, "compilation_config", None)
