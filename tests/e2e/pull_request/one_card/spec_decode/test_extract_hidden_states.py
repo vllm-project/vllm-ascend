@@ -138,10 +138,6 @@ def _verify_output(output, expected_shape, *, verify_nonzero, verify_token_ids):
     hidden_states = obj["hidden_states"]
     assert hidden_states.shape == expected_shape
 
-        if verify_token_ids:
-            token_ids = obj["token_ids"]
-            assert torch.equal(token_ids, torch.tensor(output.prompt_token_ids))
-
     if verify_token_ids:
         token_ids = obj["token_ids"]
         assert torch.equal(token_ids, torch.tensor(output.prompt_token_ids))

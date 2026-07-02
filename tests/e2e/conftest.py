@@ -869,15 +869,14 @@ def _run_vllm_runner_dp_worker(conn, llm_kwargs: dict[str, Any], dp_rank: int, d
         # independent processes on the same node claim the same physical
         # device.
         from vllm_ascend.utils import vllm_version_is
+
         if not vllm_version_is("0.23.0"):
             visible = os.environ.get("ASCEND_RT_VISIBLE_DEVICES", "")
             devs = [d for d in visible.split(",") if d]
             if len(devs) >= dp_size:
                 chunk = len(devs) // dp_size
                 start = dp_rank * chunk
-                os.environ["ASCEND_RT_VISIBLE_DEVICES"] = ",".join(
-                    devs[start:start + chunk]
-                )
+                os.environ["ASCEND_RT_VISIBLE_DEVICES"] = ",".join(devs[start : start + chunk])
 
         llm = LLM(**llm_kwargs)
         conn.send({"status": "ready", "rank": dp_rank})

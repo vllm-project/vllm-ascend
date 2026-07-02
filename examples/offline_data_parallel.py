@@ -129,15 +129,14 @@ def main(
     # otherwise HCCL complains that two independent processes on the same
     # node claim the same physical device.
     from vllm_ascend.utils import vllm_version_is
+
     if not vllm_version_is("0.23.0"):
         visible = os.environ.get("ASCEND_RT_VISIBLE_DEVICES", "")
         devs = [d for d in visible.split(",") if d]
         if len(devs) >= dp_size:
             chunk = len(devs) // dp_size
             start = local_dp_rank * chunk
-            os.environ["ASCEND_RT_VISIBLE_DEVICES"] = ",".join(
-                devs[start:start + chunk]
-            )
+            os.environ["ASCEND_RT_VISIBLE_DEVICES"] = ",".join(devs[start : start + chunk])
 
     # Sample prompts.
     prompts = [
