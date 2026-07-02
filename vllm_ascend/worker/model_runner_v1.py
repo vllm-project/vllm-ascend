@@ -648,11 +648,14 @@ class NPUModelRunner(GPUModelRunner):
         )
         self.afd_connector.init_afd_connector()
 
-    def _build_afd_dp_metadata_list(self, ubatch_slices_padded) -> dict:
+    def _build_afd_dp_metadata_list(self, ubatch_slices_padded,
+                                    num_tokens: int = 0) -> dict:
         """Build dp_metadata_list to send to the FFN side.
 
         Args:
             ubatch_slices_padded: ubatch slices with padding
+            num_tokens: number of tokens (used as fallback when
+                forward_context.dp_metadata is not set, e.g. during _dummy_run)
 
         Returns:
             dict: {stage_idx: DPMetadata}
@@ -671,7 +674,20 @@ class NPUModelRunner(GPUModelRunner):
                 )
         else:
             # Single stage: reuse the current dp_metadata from forward context.
-            dp_metadata_list[0] = get_forward_context().dp_metadata
+            dp_metadata = get_forward_context().dp_metadata
+            if dp_metadata is None:
+                # During _dummy_run / graph capture, dp_metadata may not be
+                # set yet. Create a default one so FFN can capture graphs.
+                dp_size = self.vllm_config.parallel_config.data_parallel_size
+                ubatch_num_tokens_across_dp = torch.tensor(
+                    [num_tokens] * dp_size, device="cpu", dtype=torch.int32
+                )
+                dp_metadata = DPMetadata.make(
+                    self.vllm_config.parallel_config,
+                    num_tokens,
+                    ubatch_num_tokens_across_dp,
+                )
+            dp_metadata_list[0] = dp_metadata
         return dp_metadata_list
 
     def _build_afd_metadata(
@@ -3637,7 +3653,7 @@ class NPUModelRunner(GPUModelRunner):
                 # actually send (1-to-N mapping).
                 if self.afd_config and self.afd_connector:
                     dp_metadata_list = self._build_afd_dp_metadata_list(
-                        ubatch_slices_padded)
+                        ubatch_slices_padded, num_tokens=num_tokens_padded)
                     self.afd_connector.update_state_from_dp_metadata(
                         dp_metadata_list, is_graph_capturing)
                     if self.afd_connector.is_attn_top_min_size_rank(
