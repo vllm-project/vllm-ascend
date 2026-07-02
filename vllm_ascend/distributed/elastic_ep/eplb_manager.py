@@ -236,7 +236,7 @@ def compose_expert_update_info_greedy_optimized(
         dst_ranks, recv_experts = torch.where((current == -1) & (updated != -1))
         src_ranks, send_experts = torch.where((current != -1) & (updated == -1))
 
-        recv_map = {}
+        recv_map: dict[int, list[int]] = {}
         for dst, exp in zip(dst_ranks.tolist(), recv_experts.tolist()):
             recv_map.setdefault(exp, []).append(dst)
 

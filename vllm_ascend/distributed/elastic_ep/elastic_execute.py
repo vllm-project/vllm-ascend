@@ -235,11 +235,17 @@ class AscendElasticEPScalingExecutor(ElasticEPScalingExecutor):
         self.dynamic_eplb = get_ascend_config().eplb_config.dynamic_eplb
         if not self.dynamic_eplb and os.environ.get("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH", "0") != "1":
             get_ascend_config().eplb_config.expert_map_path = generate_expert_maps_file()
-        self.eplb_manager = None
+        self._eplb_manager: ElasticEplbManager | None = None
         self.old_ep_size = None
 
     def init_eplb_manager(self):
-        self.eplb_manager = ElasticEplbManager(self.worker)
+        self._eplb_manager = ElasticEplbManager(self.worker)
+
+    @property
+    def eplb_manager(self) -> ElasticEplbManager:
+        if self._eplb_manager is None:
+            raise RuntimeError("eplb_manager has not been initialized")
+        return self._eplb_manager
 
     @contextmanager
     def _use_ascend_transfer_impl(self):
