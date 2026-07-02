@@ -1068,18 +1068,30 @@ class NPUWorker(WorkerBase):
 
         self.model_runner.initialize_afd_connector()
 
-        # Receive dp_metadata_list from attention side before capturing graphs.
-        # Attention's _dummy_run sends dp_metadata_list and blocks until FFN
-        # receives it; without this recv the two sides deadlock.
-        dp_metadata_list, is_graph_capturing, is_warmup = (
-            self.model_runner.connector.recv_dp_metadata_list()
-        )
-        logger.info(
-            "FFN received dp_metadata_list for capture: "
-            "is_graph_capturing=%s, is_warmup=%s",
-            is_graph_capturing, is_warmup,
-        )
-        self.model_runner.capture_model(dp_metadata_list=dp_metadata_list)
+        # Only recv dp_metadata_list and capture ACL graphs when aclgraph is
+        # enabled. In eager mode (use_aclgraph=False), capture_model is a
+        # no-op, and recv_dp_metadata_list here would consume the attention
+        # side's only profile_run send. That leaves the worker loop's
+        # execute_model (which also calls recv_dp_metadata_list) deadlocked
+        # with no corresponding send from the attention side. Skipping it
+        # here lets the worker loop receive the attention side's profile_run
+        # send directly and run a full AFD forward (recv_dp_metadata ->
+        # recv_attn -> compute -> send_ffn) to unblock attention's
+        # _model_forward.
+        if self.model_runner.use_aclgraph:
+            dp_metadata_list, is_graph_capturing, is_warmup = (
+                self.model_runner.connector.recv_dp_metadata_list()
+            )
+            logger.info(
+                "FFN received dp_metadata_list for capture: "
+                "is_graph_capturing=%s, is_warmup=%s",
+                is_graph_capturing, is_warmup,
+            )
+            self.model_runner.capture_model(dp_metadata_list=dp_metadata_list)
+        else:
+            logger.info(
+                "Eager mode (use_aclgraph=False), skip recv_dp_metadata_list "
+                "and capture_model; worker loop will recv in execute_model")
 
         self._ffn_shutdown_event = threading.Event()
 
