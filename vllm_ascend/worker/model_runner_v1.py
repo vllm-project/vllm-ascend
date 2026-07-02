@@ -1044,15 +1044,6 @@ class NPUModelRunner(GPUModelRunner):
         if not hasattr(self, "_sched_num_tokens_cache"):
             self._sched_num_tokens_cache: dict[str, int] = {}
         for new_req_data in scheduler_output.scheduled_new_reqs:
-            logger.info(
-                "RUNNER_NEW_REQ %s: prefill_token_ids_len=%d, num_computed=%d, "
-                "num_tokens=%d",
-                new_req_data.req_id,
-                len(new_req_data.prefill_token_ids)
-                if new_req_data.prefill_token_ids else 0,
-                new_req_data.num_computed_tokens,
-                new_req_data.num_tokens if hasattr(new_req_data, "num_tokens") else -1,
-            )
             if new_req_data.prefill_token_ids:
                 self._sched_num_tokens_cache[new_req_data.req_id] = len(
                     new_req_data.prefill_token_ids
