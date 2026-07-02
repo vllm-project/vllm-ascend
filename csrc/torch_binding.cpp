@@ -1987,6 +1987,14 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_swiglu_group_quant_npu(
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(y, scale, y_origin);
 }
 
+// swiglustep: out = silu(gate).clamp(max=limit) * up.clamp(-limit, limit)
+at::Tensor npu_swiglustep_npu(const at::Tensor& gate, const at::Tensor& up, float limit)
+{
+    at::Tensor out = at::empty_like(gate);
+    EXEC_NPU_CMD(aclnnSwiglustep, gate, up, limit, out);
+    return out;
+}
+
 std::tuple<at::Tensor, at::Tensor> construct_load_index_kv_cache_output_tensor(
     const at::Tensor& kv_cache,
     const at::Tensor& slot_mapping)
@@ -2837,6 +2845,9 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                       float clamp_value=0.0) "
         "-> (Tensor y, Tensor scale, Tensor y_origin)");
     ops.impl("npu_swiglu_group_quant", torch::kPrivateUse1, &vllm_ascend::npu_swiglu_group_quant_npu);
+
+    ops.def("npu_swiglustep(Tensor gate, Tensor up, float limit) -> Tensor");
+    ops.impl("npu_swiglustep", torch::kPrivateUse1, &vllm_ascend::npu_swiglustep_npu);
 
     ops.def(
         "npu_load_index_kv_cache("
