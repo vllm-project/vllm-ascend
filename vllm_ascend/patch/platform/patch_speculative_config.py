@@ -79,12 +79,19 @@ def _patch_dspark_draft_from_target() -> None:
     ``NotImplementedError: Unsupported speculative method: 'dspark'``). The
     ascend fork already wires all of that for ``dflash``.
 
-    Rather than re-derive each branch (fork-version-dependent and fragile), we
-    run ``__post_init__`` with ``self.method`` temporarily masquerading as
-    ``"dflash"`` so the config is set up through the fork's proven dflash path
-    (draft==target, parallel_drafting, no raise), then restore ``"dspark"`` so
-    dispatch (``get_spec_decode_method``) still routes to the DSpark speculator.
-    We also belt-and-suspenders pre-fill ``model`` from the target.
+    We run ``__post_init__`` with ``self.method`` masquerading as
+    ``"draft_model"``, NOT ``"dflash"``. Both survive the method-detection
+    whitelist (``draft_model`` via its own ``elif self.method == "draft_model":
+    pass`` branch), but ``"dflash"`` ALSO triggers the later EAGLEConfig-wrapping
+    + ``update_arch_()`` block (gated on ``method in (eagle, eagle3, dflash)``),
+    which renames the draft architecture to ``DFlashDSparkDeepseekV4ForCausalLM``
+    and wraps the config in EAGLEConfig — breaking DSpark. ``draft_model`` is not
+    in that set, so it passes cleanly and leaves the DSpark draft config intact.
+
+    After ``__post_init__`` we restore ``"dspark"`` (so dispatch routes to the
+    DSpark speculator) and set ``parallel_drafting=True`` (which the dflash path
+    would have set but draft_model does not). ``model`` is pre-filled from the
+    target as belt-and-suspenders.
     """
     original_post_init = SpeculativeConfig.__post_init__
     if getattr(original_post_init, "_vllm_ascend_dspark_patched", False):
@@ -99,17 +106,18 @@ def _patch_dspark_draft_from_target() -> None:
                 self.model = target_cfg.model
                 if not getattr(self, "quantization", None):
                     self.quantization = getattr(target_cfg, "quantization", None)
-            # Masquerade as dflash for the duration of __post_init__ so the
-            # fork's dflash setup (parallel_drafting, method whitelist) applies.
-            self.method = "dflash"
+            # Masquerade as draft_model: survives the method whitelist without
+            # triggering the eagle/dflash EAGLEConfig arch rewrite.
+            self.method = "draft_model"
         try:
             result = original_post_init(self, *args, **kwargs)
         finally:
             if is_dspark:
-                # Restore so dispatch routes to AscendDsparkSpeculator. Any
-                # method-derived *attributes* set during __post_init__ (e.g.
-                # parallel_drafting) persist; only the string flips back.
+                # Restore so dispatch routes to AscendDsparkSpeculator, and set
+                # the one dflash-derived attribute draft_model doesn't: DSpark
+                # uses parallel drafting (N draft slots resolved in one pass).
                 self.method = "dspark"
+                self.parallel_drafting = True
         return result
 
     _patched_post_init._vllm_ascend_dspark_patched = True  # type: ignore[attr-defined]
