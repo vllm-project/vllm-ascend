@@ -1982,6 +1982,9 @@ class MooncakeConnectorWorker:
         if num_key_value_heads is not None:
             serialized_kv_cache_spec["num_kv_heads"] = num_key_value_heads
             serialized_kv_cache_spec["num_key_value_heads"] = num_key_value_heads
+        head_dim = MooncakeConnectorWorker._get_spec_head_dim(spec)
+        if head_dim is not None:
+            serialized_kv_cache_spec["head_dim"] = head_dim
 
         serialized = {
             "layer_names": layer_names,
@@ -2007,11 +2010,20 @@ class MooncakeConnectorWorker:
         return None
 
     @classmethod
-    def _get_kv_transfer_spec_key(cls, spec: Any) -> tuple[str, int | None]:
-        # TODO: Extand this key with KV cache layout fields (for example num_dims)
-        # if a future model has layers with the same number of kv heads but incompatiible
-        # cache shapes.
-        return (type(spec).__name__, cls._get_spec_num_key_value_heads(spec))
+    def _get_spec_head_dim(cls, spec: Any) -> int | None:
+        for key in ("head_dim", "head_size"):
+            head_dim = getattr(spec, key, None)
+            if isinstance(head_dim, int):
+                return head_dim
+        return None
+
+    @classmethod
+    def _get_kv_transfer_spec_key(cls, spec: Any) -> tuple[Any, ...]:
+        return (
+            type(spec).__name__,
+            cls._get_spec_num_key_value_heads(spec),
+            cls._get_spec_head_dim(spec),
+        )
 
     def _build_kv_group2layeridx(self) -> dict[int, tuple[dict[str, Any], list[int]]]:
         from vllm.v1.worker.utils import extract_layer_index
@@ -2041,7 +2053,7 @@ class MooncakeConnectorWorker:
                 layer_entries.append((layer_name, layer_idx))
 
             if isinstance(group_spec.kv_cache_spec, UniformTypeKVCacheSpecs):
-                spec_groups: OrderedDict[tuple[str, int | None], list[tuple[str, int]]] = OrderedDict()
+                spec_groups: OrderedDict[tuple[Any, ...], list[tuple[str, int]]] = OrderedDict()
                 for layer_name, layer_idx in layer_entries:
                     layer_spec = group_spec.kv_cache_spec.kv_cache_specs[layer_name]
                     spec_key = self._get_kv_transfer_spec_key(layer_spec)
@@ -2567,15 +2579,24 @@ class MooncakeConnectorWorker:
             group_local_block_ids: list[list[int]] = []
             is_final_shard = remote_kv_id == len(remote_handshake_port_list) - 1
             for group_idx, (group_spec, _) in kv_group_items:
+                kv_cache_group_id = group_spec.get("kv_cache_group_id", group_idx)
                 if group_spec["kv_cache_spec_type"] == "MambaSpec":
                     # Mamba state is not context-block sharded like attention
                     # KV. Transfer the final state from the final PCP/DCP shard.
-                    group_remote_block_ids.append(list(meta.remote_block_ids[group_idx]) if is_final_shard else [])
-                    group_local_block_ids.append(list(meta.local_block_ids[group_idx]) if is_final_shard else [])
+                    group_remote_block_ids.append(
+                        list(meta.remote_block_ids[kv_cache_group_id]) if is_final_shard else []
+                    )
+                    group_local_block_ids.append(
+                        list(meta.local_block_ids[kv_cache_group_id]) if is_final_shard else []
+                    )
                     continue
-                group_remote_block_ids.append(list(meta.remote_block_ids[group_idx][:num_blocks_to_pull]))
+                group_remote_block_ids.append(list(meta.remote_block_ids[kv_cache_group_id][:num_blocks_to_pull]))
                 group_local_block_ids.append(
-                    list(meta.local_block_ids[group_idx][local_block_offset : local_block_offset + num_blocks_to_pull])
+                    list(
+                        meta.local_block_ids[kv_cache_group_id][
+                            local_block_offset : local_block_offset + num_blocks_to_pull
+                        ]
+                    )
                 )
             remote_block_ids_list.append(tuple(group_remote_block_ids))
             local_block_ids_list.append(tuple(group_local_block_ids))
