@@ -359,9 +359,18 @@ class NPUP2PAFDConnector(AFDConnectorBase):
             process_group=self.a2e_group,
             all_gather_group=None,
         )
-        # Asynchronously receive independent metadata
+        # Asynchronously receive independent metadata. The attention side may
+        # send None (NPUP2P connector does not rely on AFDConnectorMetadata for
+        # routing), so guard the handle assignment to stay symmetric with
+        # send_attn_output's `if metadata is not None` check. When metadata is
+        # None we must wait for the irecv works to complete here, since the
+        # caller (FFN _ffn_forward) consumes hidden_states immediately.
         metadata = self.a2e_group.recv_object(src)
-        metadata.recv_handle_list = work_list
+        if metadata is not None:
+            metadata.recv_handle_list = work_list
+        else:
+            for work in work_list:
+                work.wait()
 
         if self.backend == "hccl":
             return AFDRecvOutput(
