@@ -62,6 +62,7 @@ from vllm_ascend.utils import enable_dsa_cp
 # ---------------------------------------------------------------------------
 # DeepseekV4MoE.afd_forward
 # ---------------------------------------------------------------------------
+@torch.compiler.disable
 def afd_forward(
     self: DeepseekV4MoE,
     hidden_states: torch.Tensor,
@@ -211,6 +212,7 @@ def compute_ffn_output(
 # ---------------------------------------------------------------------------
 # DeepseekV4Model.forward_m2n / forward (AFD dispatch)
 # ---------------------------------------------------------------------------
+@torch.compiler.disable
 def forward_m2n(
     self: DeepseekV4Model,
     hidden_states: torch.Tensor,
@@ -276,6 +278,7 @@ def forward_m2n(
     return hidden_states, residual
 
 
+@torch.compiler.disable
 def afd_model_forward(
     self: DeepseekV4Model,
     input_ids: torch.Tensor,
