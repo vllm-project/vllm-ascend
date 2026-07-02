@@ -29,7 +29,22 @@
 
 from vllm_ascend.utils import is_310p, vllm_version_is
 
-if not vllm_version_is("0.23.0"):
+
+def _uses_legacy_fused_moe_layer() -> bool:
+    if not vllm_version_is("0.23.0"):
+        return False
+    try:
+        from inspect import isclass
+
+        from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+    except ImportError:
+        return True
+    return isclass(FusedMoE)
+
+
+if not _uses_legacy_fused_moe_layer():
+    import sys
+
     import vllm.model_executor.layers.fused_moe as _fused_moe_pkg
     import vllm.model_executor.layers.fused_moe.layer as _fused_moe_layer
 
@@ -55,3 +70,6 @@ if not vllm_version_is("0.23.0"):
 
     _fused_moe_layer.FusedMoE = _ascend_FusedMoE
     _fused_moe_pkg.FusedMoE = _ascend_FusedMoE
+    for module in tuple(sys.modules.values()):
+        if getattr(module, "FusedMoE", None) is _original_FusedMoE:
+            module.FusedMoE = _ascend_FusedMoE  # type: ignore[attr-defined]

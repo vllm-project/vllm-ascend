@@ -133,35 +133,40 @@ def _post_update_kernel(
 
     for row_idx in range(start_row, end_row):
         req_state_idx = tl.load(idx_mapping_ptr + row_idx * idx_mapping_stride)
-        total_len = tl.load(total_len_ptr + req_state_idx)
-        num_sampled = tl.load(num_sampled_ptr + row_idx)
+        if req_state_idx >= 0:
+            total_len = tl.load(total_len_ptr + req_state_idx)
+            num_sampled = tl.load(num_sampled_ptr + row_idx)
 
-        if num_sampled > 0:
-            token_id = tl.load(sampled_tokens_ptr + row_idx * sampled_tokens_stride + num_sampled - 1)
-            tl.store(last_sampled_tokens_ptr + req_state_idx, token_id)
-            tl.store(total_len_ptr + req_state_idx, total_len + num_sampled)
+            if num_sampled > 0:
+                token_id = tl.load(sampled_tokens_ptr + row_idx * sampled_tokens_stride + num_sampled - 1)
+                tl.store(last_sampled_tokens_ptr + req_state_idx, token_id)
+                tl.store(total_len_ptr + req_state_idx, total_len + num_sampled)
 
-        for i in range(num_sampled):
-            token_id = tl.load(sampled_tokens_ptr + row_idx * sampled_tokens_stride + i)
+            for i in range(num_sampled):
+                token_id = tl.load(sampled_tokens_ptr + row_idx * sampled_tokens_stride + i)
 
-            token_ptr = output_bin_counts_ptr + req_state_idx * output_bin_counts_stride + token_id
-            count = tl.load(token_ptr)
-            count += 1
-            tl.store(token_ptr, count)
+                tl.store(
+                    all_token_ids_ptr + req_state_idx * all_token_ids_stride + total_len + i,
+                    token_id,
+                )
 
-            tl.store(
-                all_token_ids_ptr + req_state_idx * all_token_ids_stride + total_len + i,
-                token_id,
-            )
+                if output_bin_counts_ptr is not None:
+                    token_ptr = output_bin_counts_ptr + req_state_idx * output_bin_counts_stride + token_id
+                    count = tl.load(token_ptr)
+                    tl.store(token_ptr, count + 1)
 
-        query_start = tl.load(query_start_loc_ptr + row_idx)
-        query_end = tl.load(query_start_loc_ptr + row_idx + 1)
-        query_len = query_end - query_start
-        num_rejected = tl.load(num_rejected_ptr + row_idx)
+            if query_start_loc_ptr is None:
+                query_len = 0
+            else:
+                query_start = tl.load(query_start_loc_ptr + row_idx)
+                query_end = tl.load(query_start_loc_ptr + row_idx + 1)
+                query_len = query_end - query_start
+            num_rejected = tl.load(num_rejected_ptr + row_idx)
 
-        num_computed = tl.load(num_computed_tokens_ptr + req_state_idx)
-        num_computed += query_len - num_rejected
-        tl.store(num_computed_tokens_ptr + req_state_idx, num_computed)
+            computed_delta = query_len - num_rejected
+            if computed_delta != 0:
+                num_computed = tl.load(num_computed_tokens_ptr + req_state_idx)
+                tl.store(num_computed_tokens_ptr + req_state_idx, num_computed + computed_delta)
 
 
 def post_update(
@@ -197,7 +202,7 @@ def post_update(
         num_computed_tokens,
         last_sampled_tokens,
         output_bin_counts,
-        output_bin_counts.stride(0),
+        output_bin_counts.stride(0) if output_bin_counts is not None else 0,
         sampled_tokens,
         sampled_tokens.stride(0),
         num_rows,

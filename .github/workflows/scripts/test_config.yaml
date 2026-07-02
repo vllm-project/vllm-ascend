@@ -558,6 +558,7 @@
   tests:
     - tests/ut/worker
     - tests/e2e/pull_request/one_card/model_runner_v2
+    - tests/e2e/pull_request/two_card/test_diffusion_gemma_26b_a4b.py
 
 # XLite
 - name: xlite
@@ -718,6 +719,7 @@ estimated_times:
   tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py: 570
   tests/e2e/pull_request/two_card/test_data_parallel.py: 460
   tests/e2e/pull_request/two_card/test_deepseek_multistream_moe.py: 120
+  tests/e2e/pull_request/two_card/test_diffusion_gemma_26b_a4b.py: 900
   tests/e2e/pull_request/two_card/test_disaggregated_encoder.py: 150
   tests/e2e/pull_request/two_card/test_external_launcher.py: 1090
   tests/e2e/pull_request/two_card/test_flashcomm_distributed.py: 20
@@ -818,9 +820,3 @@ partition:
   a3_x2: 3
   a3_x4: 3
   cpu_x0: 1
-
-
-
-
-
-
