@@ -159,6 +159,7 @@ class AscendConfig:
                 "collectives need uniform num_tokens across DP ranks, which is "
                 "only guaranteed when the recompute scheduler is enabled."
             )
+        self.laps_config = LapsConfig(additional_config.get("laps_config", {}))
         self.enable_cpu_binding = additional_config.get("enable_cpu_binding", True)
         self.enable_sleep_mode_extra_cleanup = additional_config.get("enable_sleep_mode_extra_cleanup", False)
         self.multistream_dsv4_dsa_overlap = additional_config.get("multistream_dsv4_dsa_overlap", True)
@@ -838,6 +839,71 @@ class EplbConfig:
 
         logger.info("Dynamic EPLB is %s", self.config["dynamic_eplb"])
         logger.info("The number of redundant experts is %s", self.config["num_redundant_experts"])
+
+
+class LapsConfig:
+    """
+    Configuration Object for laps_config from additional_config.
+
+    LAPS-style length-aware prefill scheduling (triple-queue + token-bucket
+    anti-starvation aging). Configured via ``additional_config["laps_config"]``.
+    """
+
+    _defaults = {
+        "enabled": False,
+        "threshold": 256,
+        "long_max_wait_ms": 0.0,
+        "long_token_reservation": 0.0,
+        "long_burst_steps": 4,
+        "stats_log_interval_s": 0.0,
+    }
+
+    def __init__(self, user_config: dict | None = None):
+        user_config = user_config or {}
+        unknown = set(user_config) - set(self._defaults)
+        if unknown:
+            raise ValueError(f"Unknown laps_config keys: {sorted(unknown)}")
+
+        source = user_config
+
+        self.enabled = bool(source.get("enabled", self._defaults["enabled"]))
+        self.threshold = int(source.get("threshold", self._defaults["threshold"]))
+        self.long_max_wait_ms = float(source.get("long_max_wait_ms", self._defaults["long_max_wait_ms"]))
+        self.long_token_reservation = float(
+            source.get("long_token_reservation", self._defaults["long_token_reservation"])
+        )
+        # Burst window (in scheduling steps) the aged-long admission bucket may
+        # accumulate; bucket capacity = long_token_reservation * token_budget *
+        # long_burst_steps. Advanced knob; the default suits most workloads.
+        self.long_burst_steps = int(source.get("long_burst_steps", self._defaults["long_burst_steps"]))
+        self.stats_log_interval_s = float(source.get("stats_log_interval_s", self._defaults["stats_log_interval_s"]))
+        self._validate_config()
+
+    def _validate_config(self):
+        if self.threshold < 0:
+            raise ValueError(f"laps_config.threshold must be a non-negative int; got {self.threshold}")
+        if self.long_max_wait_ms < 0:
+            raise ValueError(f"laps_config.long_max_wait_ms must be >= 0; got {self.long_max_wait_ms}")
+        if not 0.0 <= self.long_token_reservation <= 1.0:
+            raise ValueError(
+                f"laps_config.long_token_reservation must be in [0.0, 1.0]; got {self.long_token_reservation}"
+            )
+        if self.long_max_wait_ms > 0 and self.long_token_reservation <= 0:
+            # The token-reservation bucket is the only channel for admitting aged
+            # longs ahead of waiting shorts. With reservation == 0 the bucket
+            # never refills, so an enabled aging bound would either be inert or
+            # (under the removed deadline-bypass design) degenerate into long-first
+            # scheduling. Require an explicit positive reservation instead.
+            raise ValueError(
+                "laps_config.long_token_reservation must be > 0 when "
+                f"long_max_wait_ms > 0 (aging enabled); got "
+                f"long_max_wait_ms={self.long_max_wait_ms}, "
+                f"long_token_reservation={self.long_token_reservation}"
+            )
+        if self.long_burst_steps < 1:
+            raise ValueError(f"laps_config.long_burst_steps must be >= 1; got {self.long_burst_steps}")
+        if self.stats_log_interval_s < 0:
+            raise ValueError(f"laps_config.stats_log_interval_s must be >= 0; got {self.stats_log_interval_s}")
 
 
 _ASCEND_CONFIG: AscendConfig | None = None

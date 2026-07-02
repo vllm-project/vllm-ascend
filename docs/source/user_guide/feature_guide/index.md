@@ -17,6 +17,7 @@ netloader
 rfork
 dynamic_batch
 epd_disaggregation
+laps_scheduler
 kv_pool
 kv_cache_cpu_offload
 external_dp

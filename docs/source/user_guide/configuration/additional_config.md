@@ -104,6 +104,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `enable_dsa_cp`                     | bool | `False` | Whether to enable dsa_cp for DeepSeek V3.2, DeepSeek V4, and other models with the same architecture. This feature depends on FLASHCOMM1. Please ensure that FLASHCOMM1 is enabled before enabling this feature.|
 | `rejection_sampler_config`          | dict | `{}`    | Configuration options for rejection sampler (block verify and entropy verify). |
 | `multistream_dsv4_dsa_overlap`      | bool | `True`  | Whether to enable dsa multi-stream overlap for DeepSeek V4.  |
+| `laps_config`                       | dict | `{}`    | Configuration options for LAPS length-aware prefill scheduling. Requires `recompute_scheduler_enable=true`. |
 
 The details of each configuration option are as follows:
 
@@ -174,6 +175,19 @@ The details of each configuration option are as follows:
 | `enable_entropy_verify` | bool  | `False` | Whether to enable entropy verify mode. Entropy verify adjusts the acceptance threshold based on the entropy of the target distribution — higher entropy (uncertain) tokens get a lower threshold (easier to accept), while lower entropy (confident) tokens get a stricter threshold. |
 | `posterior_threshold`   | float | `0.95`  | Upper bound for the entropy-adjusted acceptance threshold. Must be in (0, 1]. The effective threshold is `min(exp(-entropy * posterior_alpha), posterior_threshold)`. |
 | `posterior_alpha`       | float | `0.4`   | Scaling factor for entropy in the threshold computation. Must be >= 0. Higher values make the threshold more sensitive to entropy — high-entropy tokens become much easier to accept, improving performance but reducing precision. |
+
+**laps_config**
+
+LAPS-style length-aware prefill scheduling (triple-queue + token-bucket anti-starvation aging). Only takes effect together with `recompute_scheduler_enable=true` and the FCFS scheduler policy.
+
+| Name | Type | Default | Description |
+| ---- | ---- | ------- | ----------- |
+| `enabled`                | bool  | `False` | Whether to enable LAPS scheduling. |
+| `threshold`              | int   | `256`   | Prompt-length threshold (tokens). Requests with `num_prompt_tokens <= threshold` are treated as short prefills and prioritized over long prefills. |
+| `long_max_wait_ms`       | float | `0.0`   | Anti-starvation aging bound for long prefills, in milliseconds. A long request that has waited longer than this becomes eligible for promotion ahead of short prefills, admitted only through the token-reservation bucket (no unconditional deadline bypass). `0` disables aging (strict short-priority). When `> 0`, requires `long_token_reservation > 0`. |
+| `long_token_reservation` | float | `0.0`   | Average fraction of token throughput reserved for admitting aged-long prefills ahead of waiting shorts (token-bucket smoothing) — the only channel that promotes aged longs. Must be in `[0.0, 1.0]` (out-of-range values are rejected). Must be `> 0` whenever `long_max_wait_ms > 0`. |
+| `long_burst_steps`       | int   | `4`     | Burst window (scheduling steps) the aged-long token bucket may accumulate; bucket capacity = `long_token_reservation * per-step token budget * long_burst_steps`. Advanced knob; must be `>= 1`. |
+| `stats_log_interval_s`   | float | `0.0`   | Periodic LAPS stats logging interval, in seconds. `0` disables it. |
 
 ### Example
 

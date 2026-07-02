@@ -50,6 +50,9 @@ from vllm.v1.sample.rejection_sampler import PLACEHOLDER_TOKEN_ID
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.utils import ConstantList, record_function_or_nullcontext
 
+from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.core.laps_scheduler import LapsSchedulerMixin
+
 
 @dataclass
 class RecomputeSchedulerConfig(SchedulerConfig):
@@ -92,7 +95,7 @@ class RecomputeSchedulerOutput(SchedulerOutput):
     recomputed_reqs: list[RecomputeReqInfo] | None = None
 
 
-class RecomputeScheduler(Scheduler):
+class RecomputeScheduler(LapsSchedulerMixin, Scheduler):
     running: list[Request]
 
     def __init__(self, *args, **kwargs):
@@ -106,6 +109,30 @@ class RecomputeScheduler(Scheduler):
             and self.vllm_config.kv_transfer_config.is_kv_consumer
         )
         self.is_kv_producer = self.vllm_config.kv_transfer_config and self.vllm_config.kv_transfer_config.is_kv_producer
+        if get_ascend_config().laps_config.enabled:
+            self._init_laps_waiting_queue()
+
+    def _pop_waiting_request(
+        self,
+        request_queue,
+        count_with_laps: bool,
+        *,
+        count_as_removal: bool = False,
+        skip_or_requeue_reason: str | None = None,
+        long_charge_tokens: int = 0,
+    ) -> Request:
+        if count_with_laps:
+            laps_waiting = self._laps_waiting_queue()
+            # count_with_laps is only set when the LAPS queue owns request_queue,
+            # so the LAPS waiting queue is guaranteed to be installed here.
+            assert laps_waiting is not None
+            return laps_waiting.pop_request_from_queue(
+                request_queue,
+                count_as_removal=count_as_removal,
+                skip_or_requeue_reason=skip_or_requeue_reason,
+                long_charge_tokens=long_charge_tokens,
+            )
+        return request_queue.pop_request()
 
     def add_request(self, request: Request) -> None:
         existing = self.requests.get(request.request_id)
@@ -198,6 +225,10 @@ class RecomputeScheduler(Scheduler):
 
         # For logging.
         scheduled_timestamp = time.monotonic()
+        laps_waiting = self._laps_waiting_queue()
+        if laps_waiting is not None:
+            # Reset per-step LAPS state and set the token reservation budget.
+            laps_waiting.begin_step(self.max_num_scheduled_tokens)
 
         self.kv_cache_manager.new_step_starts()
 
@@ -444,6 +475,10 @@ class RecomputeScheduler(Scheduler):
                 request_queue = self._select_waiting_queue_for_scheduling()
                 assert request_queue is not None
 
+                # skipped_waiting is not owned by LapsRequestQueue, so only route
+                # pops through LAPS when the selected queue is one of its subqueues.
+                count_with_laps = laps_waiting is not None and laps_waiting.owns_queue(request_queue)
+
                 request = request_queue.peek_request()
                 request_id = request.request_id
 
@@ -456,7 +491,12 @@ class RecomputeScheduler(Scheduler):
                             "[RecomputeScheduler] %s is still in WAITING_FOR_REMOTE_KVS state.",
                             request_id,
                         )
-                    request_queue.pop_request()
+                    self._pop_waiting_request(
+                        request_queue,
+                        count_with_laps,
+                        count_as_removal=True,
+                        skip_or_requeue_reason="blocked_waiting_status",
+                    )
                     step_skipped_waiting.prepend_request(request)
                     continue
 
@@ -471,7 +511,12 @@ class RecomputeScheduler(Scheduler):
                     )
                 ):
                     # Scheduling would exceed max_loras, skip.
-                    request_queue.pop_request()
+                    self._pop_waiting_request(
+                        request_queue,
+                        count_with_laps,
+                        count_as_removal=True,
+                        skip_or_requeue_reason="max_loras",
+                    )
                     step_skipped_waiting.prepend_request(request)
                     continue
 
@@ -519,7 +564,12 @@ class RecomputeScheduler(Scheduler):
                             # The request cannot be scheduled because
                             # the KVConnector couldn't determine
                             # the number of matched tokens.
-                            request_queue.pop_request()
+                            self._pop_waiting_request(
+                                request_queue,
+                                count_with_laps,
+                                count_as_removal=True,
+                                skip_or_requeue_reason="remote_kv_not_ready",
+                            )
                             step_skipped_waiting.prepend_request(request)
                             continue
                         num_external_computed_tokens = ext_tokens
@@ -652,7 +702,14 @@ class RecomputeScheduler(Scheduler):
                             preempted=request.num_preemptions > 0,
                         )
 
-                request = request_queue.pop_request()
+                # Charge the aged-long bucket the long's full remaining prefill
+                # (not just this step's chunk num_new_tokens): a long monopolizes
+                # the token budget for many steps, so a first-chunk-only charge
+                # would be outpaced by the per-step refill and never throttle it.
+                long_charge_tokens = request.num_tokens - num_computed_tokens
+                request = self._pop_waiting_request(
+                    request_queue, count_with_laps, long_charge_tokens=long_charge_tokens
+                )
                 if load_kv_async:
                     # If loading async, allocate memory and put request
                     # into the WAITING_FOR_REMOTE_KV state.

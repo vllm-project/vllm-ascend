@@ -189,6 +189,7 @@
   tests:
     - tests/ut/core
     - tests/ut/test_compressed_prefix_cache.py
+    - tests/e2e/pull_request/one_card/test_laps_scheduling.py
 
 # Device
 - name: device
@@ -700,6 +701,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/test_cpu_offloading.py: 30
   tests/e2e/pull_request/one_card/test_cpu_weight_offload.py: 790
   tests/e2e/pull_request/one_card/test_guided_decoding.py: 840
+  tests/e2e/pull_request/one_card/test_laps_scheduling.py: 150
   tests/e2e/pull_request/one_card/test_minicpm.py: 240
   tests/e2e/pull_request/one_card/test_multi_instance.py: 140
   tests/e2e/pull_request/one_card/test_multistream_overlap_shared_expert.py: 310

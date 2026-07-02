@@ -674,6 +674,16 @@ class NPUPlatform(Platform):
 
         cls._validate_kv_load_failure_policy(vllm_config)
 
+        laps_config = ascend_config.laps_config
+        enable_laps = laps_config.enabled
+        laps_supported_policy = vllm_config.scheduler_config.policy == "fcfs"
+        if enable_laps and not laps_supported_policy:
+            logger.warning_once(
+                "LAPS scheduling currently supports only FCFS scheduler policy; "
+                "current policy=%s. The default waiting queue will be used.",
+                vllm_config.scheduler_config.policy,
+            )
+
         if ascend_config.recompute_scheduler_enable:
             kv_transfer_config = vllm_config.kv_transfer_config
             kv_role = getattr(kv_transfer_config, "kv_role", None)
@@ -687,9 +697,29 @@ class NPUPlatform(Platform):
 
             recompute_scheduler_config = RecomputeSchedulerConfig.initialize_from_config(vllm_config)
             vllm_config.scheduler_config = recompute_scheduler_config
+            if enable_laps:
+                logger.info(
+                    "Ascend LAPS scheduler selected through recompute "
+                    "scheduler: scheduler_cls=%s, policy=%s, threshold=%d, "
+                    "long_max_wait_ms=%.3f, long_token_reservation=%.3f",
+                    vllm_config.scheduler_config.scheduler_cls,
+                    vllm_config.scheduler_config.policy,
+                    laps_config.threshold,
+                    laps_config.long_max_wait_ms,
+                    laps_config.long_token_reservation,
+                )
+        elif enable_laps:
+            logger.warning_once(
+                "LAPS scheduling requires recompute_scheduler_enable=true "
+                "in additional_config. LAPS scheduling will not be activated.",
+            )
 
         # Extend original scheduler_config to use SchedulerDynamicBatch.
         if ascend_config.SLO_limits_for_dynamic_batch != -1:
+            if enable_laps:
+                logger.warning_once(
+                    "LAPS scheduling is ignored because SLO_limits_for_dynamic_batch selects SchedulerDynamicBatch."
+                )
             vllm_config.scheduler_config.scheduler_cls = (
                 "vllm_ascend.core.scheduler_dynamic_batch.SchedulerDynamicBatch"
             )
