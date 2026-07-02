@@ -1,0 +1,35 @@
+model_name: "allenai/Molmo2-8B"
+model_type: "vllm-vlm"
+hardware: "Atlas A2 Series"
+
+serve:
+  tensor_parallel_size: 1
+  dtype: bfloat16
+  max_model_len: 16384
+  gpu_memory_utilization: 0.75
+  trust_remote_code: true
+  enforce_eager: true
+
+tasks:
+- name: "mmmu_val"
+  metrics:
+  - name: "acc,none"
+    value: 0.53
+
+num_fewshot: 0
+apply_chat_template: false
+fewshot_as_multiturn: false
+batch_size: "auto"
+
+# Doc sync only (check_docs_yaml_sync + docs/source/tutorials/models/Molmo2-8B.md). Ignored by lm-eval.
+# Split across model_name + doc_serve_options so the hook matches the standard `cmd` multi-target pattern.
+doc_serve_options:
+  - --trust-remote-code
+  - --dtype
+  - bfloat16
+  - --max-num-batched-tokens
+  - "36864"
+  - --limit-mm-per-prompt.image
+  - "1"
+  - --limit-mm-per-prompt.video
+  - "1"
