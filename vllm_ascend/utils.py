@@ -508,42 +508,55 @@ def attention_calculation_stream() -> torch.npu.Stream:
     return _ATNN_CALCULATION_STREAM
 
 
-def _patch_speculative_config_mtp():
-    """Fix vLLM 0.23.0: register gemma4_mtp model type with Transformers.
+def _patch_get_config_hf_overrides():
+    """Fix vLLM 0.23.0: ensure hf_overrides_fn is always applied to config.
 
-    vLLM's hf_config_override remaps gemma4_assistant→gemma4_mtp, but
-    the override is tested on a dummy config (model_type="dummy_gemma4_assistant")
-    by HFConfigParser.parse and never fires.  Register gemma4_mtp properly
-    so that draft configs can set model_type="gemma4_mtp" directly.
-    Use gemma4_assistant's config class as the base since it properly
-    handles the nested text_config structure.
+    vLLM's get_config() passes hf_overrides_fn to config_parser.parse(),
+    which consumes it (via kwargs.pop) without applying it to the loaded
+    config.  The application block at lines 858-860 of config.py should
+    catch this, but in some code paths it does not execute.
+
+    This patch wraps ModelConfig.__post_init__ to apply the override
+    to the loaded config after get_config() returns.  It is critical for
+    Gemma4 MTP where hf_config_override remaps
+    gemma4_assistant→gemma4_mtp and sets architectures=["Gemma4MTPModel"].
+
+    We also refresh model_arch_config (which depends on hf_config) so that
+    the architecture resolution uses the overridden values.
     """
-    from transformers import AutoConfig
-    from transformers.models.auto.configuration_auto import CONFIG_MAPPING
+    import logging
+    _logger = logging.getLogger(__name__)
 
-    if "gemma4_mtp" in CONFIG_MAPPING:
-        return  # already registered
+    from vllm.config.model import ModelConfig as _ModelConfig
+    from vllm.model_executor.models.registry import _ModelRegistry
+    _orig_post_init = _ModelConfig.__post_init__
 
-    # Prefer gemma4_assistant as base class (handles nested text_config)
-    base_config_cls = None
-    for key in ("gemma4_assistant", "gemma4_text"):
-        if key in CONFIG_MAPPING:
-            base_config_cls = CONFIG_MAPPING[key]
-            break
+    def _patched_post_init(self, *args, **kwargs):
+        result = _orig_post_init(self, *args, **kwargs)
+        # Re-apply hf_overrides_fn if it was provided but not applied.
+        # The original __post_init__ calls get_config() with hf_overrides_fn,
+        # but it is not applied (consumed by config_parser.parse()).
+        if hasattr(self, 'hf_overrides') and callable(self.hf_overrides):
+            self.hf_config = self.hf_overrides(self.hf_config)
+            # Refresh model_arch_config (depends on hf_config)
+            self.model_arch_config = _ModelConfig.get_model_arch_config(self)
+            # Re-resolve architecture with the updated config
+            model_info, arch = self.registry.inspect_model_cls(
+                self.architectures, self,
+            )
+            self._model_info = model_info
+            self._architecture = arch
+        return result
 
-    if base_config_cls is None:
-        return
-
-    config_cls = type(
-        "Gemma4MTPConfig",
-        (base_config_cls,),
-        {"model_type": "gemma4_mtp"},
+    _ModelConfig.__post_init__ = _patched_post_init
+    _logger.info(
+        "vllm_ascend: patched ModelConfig.__post_init__ for "
+        "hf_config_override fix"
     )
-    AutoConfig.register("gemma4_mtp", config_cls, exist_ok=True)
 
 
 def adapt_patch(is_global_patch: bool = False):
-    _patch_speculative_config_mtp()
+    _patch_get_config_hf_overrides()
 
     if is_global_patch:
         from vllm_ascend.patch import platform  # noqa: F401
