@@ -104,6 +104,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `enable_dsa_cp`                     | bool | `False` | Whether to enable dsa_cp for DeepSeek V3.2, DeepSeek V4, and other models with the same architecture. This feature depends on FLASHCOMM1. Please ensure that FLASHCOMM1 is enabled before enabling this feature.|
 | `rejection_sampler_config`          | dict | `{}`    | Configuration options for rejection sampler (block verify and entropy verify). |
 | `multistream_dsv4_dsa_overlap`      | bool | `True`  | Whether to enable dsa multi-stream overlap for DeepSeek V4.  |
+| `quest_decode_config`               | dict | `{}`    | Configuration options for QUEST sparse decode attention. See [Quest Sparse Decode Attention](../feature_guide/quest_sparse_decode.md) for details. |
 
 The details of each configuration option are as follows:
 
@@ -174,6 +175,15 @@ The details of each configuration option are as follows:
 | `enable_entropy_verify` | bool  | `False` | Whether to enable entropy verify mode. Entropy verify adjusts the acceptance threshold based on the entropy of the target distribution — higher entropy (uncertain) tokens get a lower threshold (easier to accept), while lower entropy (confident) tokens get a stricter threshold. |
 | `posterior_threshold`   | float | `0.95`  | Upper bound for the entropy-adjusted acceptance threshold. Must be in (0, 1]. The effective threshold is `min(exp(-entropy * posterior_alpha), posterior_threshold)`. |
 | `posterior_alpha`       | float | `0.4`   | Scaling factor for entropy in the threshold computation. Must be >= 0. Higher values make the threshold more sensitive to entropy — high-entropy tokens become much easier to accept, improving performance but reducing precision. |
+
+**quest_decode_config**
+
+See [Quest Sparse Decode Attention](../feature_guide/quest_sparse_decode.md) for details and limitations.
+
+| Name         | Type | Default | Description |
+| ------------ | ---- | ------- | ----------- |
+| `enable`     | bool | `False` | Whether to enable QUEST sparse decode attention. |
+| `topk_pages` | int  | `None`  | Number of KV pages (128 tokens each) attended per decode step. Must be a positive multiple of 8 (`>= 8`). Required when `enable` is `true`. |
 
 ### Example
 
