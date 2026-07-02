@@ -401,10 +401,6 @@ msgid "DeepSeek-V3.2-W8A8, 2-node"
 msgstr "DeepSeek-V3.2-W8A8，2 节点"
 
 #: ../../source/developer_guide/contribution/nightly_ci_test.md:93
-msgid "`multi-node-qwen3-dp-mooncake-layerwise`"
-msgstr "`multi-node-qwen3-dp-mooncake-layerwise`"
-
-#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
 msgid "Qwen3-235B-A22B with Mooncake layerwise, 2-node"
 msgstr "Qwen3-235B-A22B 带 Mooncake 分层，2 节点"
 
