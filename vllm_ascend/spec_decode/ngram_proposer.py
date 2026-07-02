@@ -54,6 +54,27 @@ class AscendNgramProposer(NgramProposer):
 
             valid_ngram_requests.append(i)
 
+        # vllm PR #44597: when the speculative config sets
+        # ``prompt_lookup_cache_scope='global'``, the upstream
+        # ``NgramProposer.__init__`` (already chained via
+        # ``super().__init__``) populates ``self.global_ngram_cache`` and
+        # exposes ``batch_propose_global``; we dispatch to the upstream
+        # method so the global LRU prompt-lookup cache is reused verbatim.
+        # No NPU-side changes are needed because the optimization is
+        # pure-Python / CPU-only and operates on the same ``input_batch``
+        # arrays the legacy ``batch_propose`` consumes.
+        # ``getattr`` keeps us compatible with older vllm versions that
+        # predate PR #44597 (where neither the field nor the method
+        # exists) — we silently fall back to the legacy ``batch_propose``.
+        if getattr(self, "global_ngram_cache", None) is not None and hasattr(self, "batch_propose_global"):
+            return self.batch_propose_global(
+                len(sampled_token_ids),
+                valid_ngram_requests,
+                self.runner.input_batch.num_tokens_no_spec,
+                self.runner.input_batch.token_ids_cpu,
+                self.runner.input_batch.req_ids,
+            )
+
         draft_token_ids = self.batch_propose(
             len(sampled_token_ids),
             valid_ngram_requests,
