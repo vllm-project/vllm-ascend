@@ -1184,6 +1184,18 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 )
             draft_token_ids = logits.argmax(dim=-1)
 
+        # No draft tokens requested (e.g. Dynamic SD decided K=0 for this
+        # batch size). The drafter forward above already ran to keep its KV
+        # cache in sync, so just return an empty draft. Mirrors vLLM's
+        # SpecDecodeBaseProposer.propose.
+        if self.num_speculative_tokens == 0:
+            return torch.empty(
+                batch_size,
+                0,
+                device=draft_token_ids.device,
+                dtype=draft_token_ids.dtype,
+            )
+
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1 or self.parallel_drafting:
             # [batch_size, 1]

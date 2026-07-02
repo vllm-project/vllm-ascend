@@ -879,7 +879,9 @@ class NPUModelRunner(GPUModelRunner):
                 cu_num_tokens,
                 self._draft_token_ids,  # type: ignore[has-type]
                 scheduler_output,
-                self.num_spec_tokens,
+                # Unpacks the previous step's drafts: under dynamic SD their
+                # width may differ from the current K, so use prev width.
+                self.prev_num_spec_tokens,
             )
 
         if self.pcp_size > 1:
@@ -1237,7 +1239,9 @@ class NPUModelRunner(GPUModelRunner):
                 cu_num_tokens_full,
                 self._draft_token_ids,  # type: ignore[has-type]
                 scheduler_output,
-                self.num_spec_tokens,
+                # Previous step's draft width (see note above); matters when
+                # dynamic SD varies K between steps.
+                self.prev_num_spec_tokens,
                 precomputed_positions_np=positions_full,
             )
 
@@ -1692,11 +1696,24 @@ class NPUModelRunner(GPUModelRunner):
         sample_hidden_states: torch.Tensor = None,
         target_model_batch_desc: BatchDescriptor = None,
     ) -> list[list[int]] | None:
+        # Dynamic speculative decoding: the scheduler chooses how many draft
+        # tokens to propose this step based on the current batch size. When the
+        # feature is disabled this is exactly ``self.num_spec_tokens``, so the
+        # default path is byte-for-byte unchanged.
+        num_spec_tokens_to_schedule = self.num_spec_tokens
+        if (
+            self.speculative_config is not None
+            and self.speculative_config.uses_dynamic_speculative_decoding()
+        ):
+            num_spec_tokens_to_schedule = scheduler_output.num_spec_tokens_to_schedule
+
         if not self.drafter:
             # Speculative decoding is not enabled.
             draft_token_ids = None
         elif isinstance(self.drafter, (AscendNgramProposer, AscendSuffixDecodingProposer)):
-            draft_token_ids = self.drafter.propose(valid_sampled_token_ids)
+            draft_token_ids = self.drafter.propose(
+                num_spec_tokens_to_schedule, valid_sampled_token_ids
+            )
         elif isinstance(self.drafter, AscendNgramProposerNPU):
             batch_size = min(self.input_batch.num_reqs, self.token_ids_gpu_tensor.shape[0])
 
@@ -1744,7 +1761,11 @@ class NPUModelRunner(GPUModelRunner):
             )
         elif isinstance(self.drafter, AscendMedusaProposer):
             draft_token_ids = self.drafter.propose(
-                valid_sampled_token_ids, sampling_metadata, spec_decode_metadata, sample_hidden_states
+                num_spec_tokens_to_schedule,
+                valid_sampled_token_ids,
+                sampling_metadata,
+                spec_decode_metadata,
+                sample_hidden_states,
             )
         elif self.speculative_config.uses_extract_hidden_states():
             # Handle extract_hidden_states method
@@ -1761,6 +1782,7 @@ class NPUModelRunner(GPUModelRunner):
             target_hidden_states = [h[:num_scheduled_tokens] for h in aux_hidden_states]
 
             draft_token_ids = self.drafter.propose(
+                num_speculative_tokens=num_spec_tokens_to_schedule,
                 sampled_token_ids=valid_sampled_token_ids,
                 target_hidden_states=target_hidden_states,
                 common_attn_metadata=common_attn_metadata,
@@ -1778,6 +1800,15 @@ class NPUModelRunner(GPUModelRunner):
         elif self.speculative_config.use_eagle() or self.speculative_config.uses_draft_model():
             common_attn_metadata = spec_decode_common_attn_metadata
             sampled_token_ids = valid_sampled_token_ids
+
+            # Dynamic speculative decoding adjusts the draft length at runtime.
+            # ``_propose`` and the input-prep helpers below all drive their
+            # draft loops off ``num_speculative_tokens``, so set it up front
+            # (mirroring vLLM's base ``propose`` which assigns it first thing).
+            # The value never exceeds the configured maximum, so the drafter's
+            # pre-allocated buffers stay valid; K == 0 is handled in ``_propose``.
+            assert self.drafter is not None
+            self.drafter.num_speculative_tokens = num_spec_tokens_to_schedule
 
             if self.vllm_config.speculative_config.disable_padded_drafter_batch:
                 # When padded-batch is disabled, the sampled_token_ids should be
@@ -1914,6 +1945,12 @@ class NPUModelRunner(GPUModelRunner):
     ) -> None:
         if not self.num_spec_tokens:
             return
+        # Under dynamic speculative decoding the produced draft width can change
+        # from step to step. Record the width of the drafts just produced so the
+        # next step unpacks the previous-step draft tensor with the right stride
+        # (mirrors vLLM's GPUModelRunner.prev_num_spec_tokens bookkeeping).
+        if torch.is_tensor(self._draft_token_ids):  # type: ignore[has-type]
+            self.prev_num_spec_tokens : int = self._draft_token_ids.shape[1]  # type: ignore[has-type]
         if self.use_async_scheduling and not (
             scheduler_output.has_structured_output_requests
             or self.input_batch.sampling_metadata.output_token_ids
@@ -1929,14 +1966,17 @@ class NPUModelRunner(GPUModelRunner):
         assert self.draft_token_ids_cpu is not None
         default_stream = torch.npu.current_stream()
         num_reqs = draft_token_ids.shape[0]
+        # Slice the CPU buffer to the actual draft width so a dynamically
+        # shortened (K < max) draft tensor still copies without a shape mismatch.
+        num_spec_tokens = draft_token_ids.shape[1]
         with torch.npu.stream(self.draft_token_ids_copy_stream):
             if not zeros_only:
                 self.draft_token_ids_copy_stream.wait_stream(default_stream)
-                self.draft_token_ids_cpu[:num_reqs].copy_(
+                self.draft_token_ids_cpu[:num_reqs, :num_spec_tokens].copy_(
                     draft_token_ids, non_blocking=True
                 )
             else:
-                self.draft_token_ids_cpu[:num_reqs] = 0
+                self.draft_token_ids_cpu[:num_reqs, :num_spec_tokens] = 0
             self.draft_token_ids_event.record()
 
     @torch.inference_mode()

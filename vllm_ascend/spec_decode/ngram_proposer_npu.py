@@ -27,9 +27,13 @@ class AscendNgramProposerNPU(NgramProposerGPU):
 
     def propose(
         self,
+        num_speculative_tokens: int,
         num_tokens_no_spec: torch.Tensor,  # [batch_size]
         token_ids_gpu: torch.Tensor,  # [batch_size, max_len]
         valid_sampled_token_ids_gpu: torch.Tensor,  # [batch_size, num_spec_tokens + 1]
         valid_sampled_tokens_count: torch.Tensor,  # [batch_size]
     ):
+        # The NPU n-gram drafting is dispatched inline by the model runner via
+        # the ``npu_ngram_spec_decode`` op (see propose_draft_token_ids); this
+        # method only exists to keep the signature aligned with the base class.
         pass
