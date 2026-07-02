@@ -675,19 +675,23 @@ class XliteWrapper:
         else:
             use_xlite_graph = not with_prefill or self.full_mode
 
-        attn_metadata_router = AttnMetadataRouter(attn_metadata=attn_metadata, device="cpu")
         if not use_xlite_graph:
             # fall back to runnable for prefill in decode-only mode
             # or when the number of tokens exceeds the graph capacity in non-full mode
             return self.runnable(input_ids, positions, intermediate_tensors, inputs_embeds)
 
+        attn_metadata_router = AttnMetadataRouter(attn_metadata=attn_metadata, device="cpu")
         seq_lens = attn_metadata_router.seq_lens
         cum_query_lens = attn_metadata_router.cu_query_lens[-seq_lens.size(0) :].to(device=seq_lens.device)
         query_lens = torch.diff(cum_query_lens, prepend=seq_lens.new_zeros(1))
         cached_lens = torch.clamp(seq_lens - query_lens, min=0)
 
-        num_tokens = forward_context.batch_descriptor.num_tokens
-        num_actual_tokens = attn_metadata.num_actual_tokens
+        num_actual_tokens = attn_metadata_router.num_actual_tokens
+        if self.data_parallel_size > 1 and (dp_metadata := forward_context.dp_metadata) is not None:
+            num_tokens = dp_metadata.num_tokens_across_dp_cpu.max().item()
+        else:
+            num_tokens = forward_context.batch_descriptor.num_tokens
+
         xlite_attn_metadata = AttnMeta()
         xlite_attn_metadata.lens = query_lens.tolist()
         xlite_attn_metadata.cached_lens = cached_lens.tolist()
@@ -698,7 +702,7 @@ class XliteWrapper:
         else:
             xlite_attn_metadata.positions = positions
 
-        # Compatibility between DP and Non-DP scenarios
+        # under DP, `num_tokens` is the max number of tokens across all DP ranks for data alignment
         h = self.hidden_states[:num_tokens]
         stream = torch.npu.current_stream().npu_stream
         if inputs_embeds is None:
