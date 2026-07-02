@@ -1,4 +1,5 @@
 # ChunkGatedDeltaRuleFwdH 算子说明
+
 `ChunkGatedDeltaRuleFwdH` 是一个用于分块门控 delta 规则（Chunk Gated Delta Rule）前向传播过程中的自定义算子。该算子负责计算各分块（chunk）的递推隐藏状态 `h`，即沿序列方向逐块传播状态矩阵，为后续前向输出计算提供跨块（inter-chunk）状态信息；同时输出经 WY 分解修正后的 `v_new`。
 
 ---
@@ -18,6 +19,7 @@ S_{[c+1]} = \exp(g_{[c]}) \cdot S_{[c]} + k_{[c]}^\top \cdot u_{[c]}
 $$
 
 其中：
+
 - $S_{[c]}$ 为第 $c$ 个分块起始处的隐藏状态矩阵
 - $g_{[c]}$ 为第 $c$ 个分块的门控衰减值
 - $k_{[c]}$ 为第 $c$ 个分块的 Key 矩阵
@@ -42,7 +44,7 @@ $$
 对应以下 C++ 接口（见 `op_host/op_api/aclnn_chunk_gated_delta_rule_fwd_h.h`）：
 
 ```cpp
-/* funtion: aclnnChunkGatedDeltaRuleFwdHGetWorkspaceSize
+/* function: aclnnChunkGatedDeltaRuleFwdHGetWorkspaceSize
  * parameters (order aligned with chunk_gated_delta_rule_fwd_h Python API):
  * k : required
  * w : required
@@ -84,7 +86,7 @@ aclnnStatus aclnnChunkGatedDeltaRuleFwdHGetWorkspaceSize(
     uint64_t *workspaceSize,
     aclOpExecutor **executor);
 
-/* funtion: aclnnChunkGatedDeltaRuleFwdH
+/* function: aclnnChunkGatedDeltaRuleFwdH
  * parameters :
  * workspace : workspace memory addr(input).
  * workspaceSize : size of workspace(input).
@@ -161,17 +163,17 @@ aclnnStatus aclnnChunkGatedDeltaRuleFwdH(
 ### 4.1 可选参数约束
 
 - `gOptional`：
-  - 接口层为可选，但当前实现要求传入有效张量（不可为空）
+    - 接口层为可选，但当前实现要求传入有效张量（不可为空）
 - `gkOptional`：
-  - 接口层为可选；**当前实现要求传空指针，否则执行失败**
+    - 接口层为可选；**当前实现要求传空指针，否则执行失败**
 - `initalStateOptional`：
-  - 若不提供（传空指针），则默认初始状态为全零矩阵
-  - 形状必须为 `[B, HV, K, V]`
+    - 若不提供（传空指针），则默认初始状态为全零矩阵
+    - 形状必须为 `[B, HV, K, V]`
 - `cuSeqlensOptional` 和 `chunkIndicesOptional`：
-  - 二者须同时提供或同时省略；同时提供时启用变长模式（varlen）
-  - 变长模式仅支持 `B = 1`
+    - 二者须同时提供或同时省略；同时提供时启用变长模式（varlen）
+    - 变长模式仅支持 `B = 1`
 - `saveNewValue` / `useExp2` / `transposeStateLayout`：
-  - 当前实现下分别只允许 `true` / `false` / `false`
+    - 当前实现下分别只允许 `true` / `false` / `false`
 
 ### 4.2 形状约束（强约束）
 
@@ -210,6 +212,7 @@ S_{[c+1]} = exp(g_{[c]}) * S_{[c]} + k_{[c]}^T @ u_{[c]}
 ```
 
 其中：
+
 - `g_{[c]}` 为第 `c` 个分块的门控衰减值（在 log 空间中累加后取 exp）
 - `k_{[c]}^T @ u_{[c]}` 为当前分块的键值外积累积
 

@@ -14,7 +14,7 @@
 extern "C" {
 #endif
 
-/* funtion: aclnnChunkGatedDeltaRuleFwdHGetWorkspaceSize
+/* function: aclnnChunkGatedDeltaRuleFwdHGetWorkspaceSize
  * parameters (order aligned with chunk_gated_delta_rule_fwd_h Python API):
  * k : required
  * w : required
@@ -56,7 +56,7 @@ aclnnStatus aclnnChunkGatedDeltaRuleFwdHGetWorkspaceSize(
     uint64_t *workspaceSize,
     aclOpExecutor **executor);
 
-/* funtion: aclnnChunkGatedDeltaRuleFwdH
+/* function: aclnnChunkGatedDeltaRuleFwdH
  * parameters :
  * workspace : workspace memory addr(input).
  * workspaceSize : size of workspace(input).

@@ -1,4 +1,5 @@
 # ChunkFwdO 算子说明
+
 `ChunkFwdO` 是一个用于分块门控 delta 规则（Chunk Gated Delta Rule）前向传播过程中的自定义算子。该算子根据 Query、Key、Value、Gate 以及前向隐藏状态，计算并输出前向注意力输出张量 `o`。
 
 ---
@@ -10,6 +11,7 @@
 - **o**：前向注意力输出，结合了块内并行计算（intra-chunk）和块间递推计算（inter-chunk）的结果
 
 具体而言，对于每个分块（chunk），算子执行：
+
 1. **块间贡献**：利用前一分块的隐藏状态 `h`，通过 `q * exp(g) @ h` 计算跨块注意力输出
 2. **块内贡献**：在当前分块内，通过 `(q @ k^T * mask) @ v` 计算块内因果注意力输出
 3. 将两部分贡献相加，得到最终输出 `o`
@@ -31,7 +33,7 @@
 对应以下 C++ 接口（见 `op_host/op_api/aclnn_chunk_fwd_o.h`）：
 
 ```cpp
-/* funtion: aclnnChunkFwdOGetWorkspaceSize
+/* function: aclnnChunkFwdOGetWorkspaceSize
  * parameters :
  * q : required
  * k : required
@@ -61,7 +63,7 @@ aclnnStatus aclnnChunkFwdOGetWorkspaceSize(
     uint64_t *workspaceSize,
     aclOpExecutor **executor);
 
-/* funtion: aclnnChunkFwdO
+/* function: aclnnChunkFwdO
  * parameters :
  * workspace : workspace memory addr(input).
  * workspaceSize : size of workspace(input).
@@ -127,8 +129,8 @@ aclnnStatus aclnnChunkFwdO(
 ### 4.1 可选参数约束
 
 - `cuSeqlensOptional` 和 `chunkOffsetsOptional`：
-  - 二者任意一个出现时进入变长模式，当前实现要求二者同时提供
-  - 变长模式仅支持 `B = 1`
+    - 二者任意一个出现时进入变长模式，当前实现要求二者同时提供
+    - 变长模式仅支持 `B = 1`
 
 ### 4.2 形状约束（强约束）
 
@@ -159,8 +161,8 @@ aclnnStatus aclnnChunkFwdO(
 ### 4.4 数值语义
 
 - `scale`：
-  - 必须显式传入
-  - 推荐设置为：`1 / sqrt(K)`
+    - 必须显式传入
+    - 推荐设置为：`1 / sqrt(K)`
 
 - 当前算子实现配置为：
 

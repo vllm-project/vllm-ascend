@@ -14,7 +14,7 @@
 extern "C" {
 #endif
 
-/* funtion: aclnnRecomputeWUFwdGetWorkspaceSize
+/* function: aclnnRecomputeWUFwdGetWorkspaceSize
  * parameters :
  * k : required
  * v : required
@@ -50,7 +50,7 @@ aclnnStatus aclnnRecomputeWUFwdGetWorkspaceSize(
     uint64_t *workspaceSize,
     aclOpExecutor **executor);
 
-/* funtion: aclnnRecomputeWUFwd
+/* function: aclnnRecomputeWUFwd
  * parameters :
  * workspace : workspace memory addr(input).
  * workspaceSize : size of workspace(input).

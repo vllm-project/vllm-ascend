@@ -14,7 +14,7 @@
 extern "C" {
 #endif
 
-/* funtion: aclnnChunkFwdOGetWorkspaceSize
+/* function: aclnnChunkFwdOGetWorkspaceSize
  * parameters :
  * q : required
  * k : required
@@ -44,7 +44,7 @@ aclnnStatus aclnnChunkFwdOGetWorkspaceSize(
     uint64_t *workspaceSize,
     aclOpExecutor **executor);
 
-/* funtion: aclnnChunkFwdO
+/* function: aclnnChunkFwdO
  * parameters :
  * workspace : workspace memory addr(input).
  * workspaceSize : size of workspace(input).

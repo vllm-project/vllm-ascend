@@ -11,6 +11,7 @@
 $$Y = (I + A)^{-1}$$
 
 该算子支持两种数据布局：
+
 - **BSND**: `[Batch, T, Head, chunkSize]`
 - **TND**: `[num_tokens, Head, chunkSize]`（变长序列模式）
 
@@ -94,7 +95,7 @@ torch.ops.npu.npu_solve_tri(
 
 ## 7. 目录结构
 
-```
+```text
 solve_tri/
 ├── docs/
 │   └── aclnnSolveTri.md

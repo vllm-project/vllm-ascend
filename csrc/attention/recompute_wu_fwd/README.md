@@ -141,19 +141,19 @@ aclnnStatus aclnnRecomputeWUFwd(
 ### 4.1 可选参数约束
 
 - `g`：
-  - 在算子定义中为 optional
-  - 但当前 ACLNN 封装中要求 `g != nullptr`
-  - 实际调用时应按必传处理
+    - 在算子定义中为 optional
+    - 但当前 ACLNN 封装中要求 `g != nullptr`
+    - 实际调用时应按必传处理
 
 - `gk`：
-  - 接口层保留
-  - 当前实现未使用
-  - **必须传入 `nullptr`，否则参数检查失败**
+    - 接口层保留
+    - 当前实现未使用
+    - **必须传入 `nullptr`，否则参数检查失败**
 
 - `cuSeqlensOptional` 和 `chunkIndicesOptional`：
-  - 二者用于变长模式
-  - 当 `cuSeqlensOptional` 非空时，`chunkIndicesOptional` 也必须非空
-  - 变长模式当前仅支持 `B = 1`
+    - 二者用于变长模式
+    - 当 `cuSeqlensOptional` 非空时，`chunkIndicesOptional` 也必须非空
+    - 变长模式当前仅支持 `B = 1`
 
 ---
 
@@ -439,25 +439,25 @@ print(w.shape, u.shape)
 ### 5.3 说明
 
 - 定长场景：
-  - `cu_seqlens=None`
-  - `chunk_indices=None`
+    - `cu_seqlens=None`
+    - `chunk_indices=None`
 
 - 变长场景：
-  - `B` 必须为 `1`
-  - `cu_seqlens` 为一维 `int64` Tensor
-  - `cu_seqlens[0]` 必须为 `0`
-  - `cu_seqlens` 必须严格递增
-  - `chunk_indices` 为一维 `int64` Tensor
-  - `chunk_indices` 必须是 `[seq_id, chunk_id]` 的 flatten 形式
+    - `B` 必须为 `1`
+    - `cu_seqlens` 为一维 `int64` Tensor
+    - `cu_seqlens[0]` 必须为 `0`
+    - `cu_seqlens` 必须严格递增
+    - `chunk_indices` 为一维 `int64` Tensor
+    - `chunk_indices` 必须是 `[seq_id, chunk_id]` 的 flatten 形式
 
 - 当前实现：
-  - `g` 必须传入
-  - `gk` 当前未启用，必须传 `None`
-  - `chunk_size` 仅支持 `64` 或 `128`
+    - `g` 必须传入
+    - `gk` 当前未启用，必须传 `None`
+    - `chunk_size` 仅支持 `64` 或 `128`
 
 - 输出：
-  - `w`: `[B, HV, T, K]`
-  - `u`: `[B, HV, T, V]`
+    - `w`: `[B, HV, T, K]`
+    - `u`: `[B, HV, T, V]`
 
 ---
 
