@@ -22,16 +22,93 @@ import torch
 from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.model_executor.layers.fused_moe import FusedMoEMethodBase, FusedMoeWeightScaleSupported
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
-from vllm.model_executor.layers.linear import LinearMethodBase, RowParallelLinear
+from vllm.model_executor.layers.linear import ColumnParallelLinear, LinearMethodBase, RowParallelLinear
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.parameter import PerTensorScaleParameter
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.utils.math_utils import cdiv
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import get_flashcomm2_otp_group, get_mlp_tp_group, get_otp_group
+from vllm_ascend.ops.group_aligned_linear import group_aligned_partition
 from vllm_ascend.utils import enable_dsa_cp_with_layer_shard, flashcomm2_enable, mlp_tp_enable, oproj_tp_enable
 
-from .methods import AscendAttentionScheme, AscendLinearScheme, AscendMoEScheme, is_mx_quant_type
+from .methods import (
+    AscendAttentionScheme,
+    AscendLinearScheme,
+    AscendMoEScheme,
+    AscendW8A8MXFP8DynamicLinearMethod,
+    is_mx_quant_type,
+)
+
+
+def _make_group_aligned_loader(orig_loader, shard_dim, per_rank_sizes, tp_rank, expected_full, prefix=""):
+    """Build a weight_loader that narrows the checkpoint tensor on group-aligned
+    (possibly uneven) boundaries instead of vLLM's even ``size // tp_size`` split.
+
+    ``per_rank_sizes`` are the per-rank slice lengths along ``shard_dim`` -- element
+    counts for the weight, group counts for the weight_scale. Falls back to
+    ``orig_loader`` when the loaded tensor is not the expected full size (e.g. it was
+    pre-sharded), so non-group-aligned params are never disturbed.
+    """
+    start = sum(per_rank_sizes[:tp_rank])
+    size = per_rank_sizes[tp_rank]
+
+    def loader(param, loaded_weight):
+        if loaded_weight.shape[shard_dim] != expected_full:
+            return orig_loader(param, loaded_weight)
+        narrowed = loaded_weight.narrow(shard_dim, start, size)
+        if narrowed.dim() == 0:
+            narrowed = narrowed.reshape(1)
+        assert param.data.shape == narrowed.shape, (
+            f"{prefix}: group-aligned param {tuple(param.data.shape)} != loaded {tuple(narrowed.shape)}"
+        )
+        param.data.copy_(narrowed)
+
+    return loader
+
+
+def _maybe_group_align(quant_method, layer, input_size, output_size, output_partition_sizes):
+    """Decide whether this MXFP8 layer needs group-aligned TP sharding.
+
+    MX quantization groups every ``group_size`` elements along the input dim and
+    stores one scale per group, so a TP split is only valid on group boundaries.
+    Returns a context dict (dim/elem_sizes/group_sizes/tp_rank/group_size) when the
+    sharded dim is not a multiple of ``group_size * tp_size``, else ``None``. Only
+    single-shard MXFP8 Row/Column linears are eligible; every other case keeps
+    vLLM's native even split (zero behaviour change).
+    """
+    if not isinstance(quant_method, AscendW8A8MXFP8DynamicLinearMethod):
+        return None
+    tp_size = getattr(layer, "tp_size", 1)
+    if tp_size <= 1:
+        return None
+    group_size = getattr(quant_method, "group_size", 32)
+    if isinstance(layer, RowParallelLinear):
+        total, dim = input_size, "row"
+    elif isinstance(layer, ColumnParallelLinear):
+        # Out of scope: merged/QKV column (multi-shard), gathered output, and
+        # bias=True (the bias is built after create_weights with the native even
+        # split, so its loader offset would be wrong under an uneven partition).
+        if (
+            len(output_partition_sizes) != 1
+            or getattr(layer, "gather_output", False)
+            or getattr(layer, "has_bias", False)
+        ):
+            return None
+        total, dim = output_size, "column"
+    else:
+        return None
+    if total % (group_size * tp_size) == 0:
+        return None
+    elem_sizes, group_sizes = group_aligned_partition(total, tp_size, group_size)
+    return {
+        "dim": dim,
+        "elem_sizes": elem_sizes,
+        "group_sizes": group_sizes,
+        "tp_rank": getattr(layer, "tp_rank", 0),
+        "group_size": group_size,
+    }
 
 
 class AscendLinearMethod(LinearMethodBase):
@@ -61,6 +138,43 @@ class AscendLinearMethod(LinearMethodBase):
         output_size_per_partition = sum(output_partition_sizes)
         weight_loader = extra_weight_attrs.get("weight_loader")
 
+        # MXFP8 group-aligned TP sharding: when the sharded dim is not a multiple of
+        # group_size * tp_size, override the per-partition size so every get_* below
+        # builds group-aligned params, and patch the sharded params' weight_loader to
+        # narrow on group boundaries. Inactive (ga is None) for every other case.
+        ga = _maybe_group_align(self.quant_method, layer, input_size, output_size, output_partition_sizes)
+        if ga is not None:
+            if ga["dim"] == "row":
+                input_size_per_partition = ga["elem_sizes"][ga["tp_rank"]]
+                layer.input_size_per_partition = input_size_per_partition
+            else:  # column (single-shard, bias=False -- enforced by _maybe_group_align)
+                output_size_per_partition = ga["elem_sizes"][ga["tp_rank"]]
+                output_partition_sizes = [output_size_per_partition]
+                layer.output_size_per_partition = output_size_per_partition
+                layer.output_partition_sizes = output_partition_sizes
+
+        def _attach_ga_loader(param, kind):
+            # Override a sharded param's weight_loader to narrow on group boundaries.
+            # kind in {"weight", "scale", "perchannel"}; no-op when group-align inactive.
+            if ga is None:
+                return
+            prefix = getattr(layer, "prefix", "")
+            tp_rank = ga["tp_rank"]
+            if ga["dim"] == "row":
+                if kind == "scale":
+                    param.weight_loader = _make_group_aligned_loader(
+                        weight_loader, 1, ga["group_sizes"], tp_rank, cdiv(input_size, ga["group_size"]), prefix
+                    )
+                elif kind == "weight":
+                    param.weight_loader = _make_group_aligned_loader(
+                        weight_loader, 1, ga["elem_sizes"], tp_rank, input_size, prefix
+                    )
+                # row perchannel rows == unsharded output dim -> native loader is correct
+            else:  # column: weight / weight_scale / perchannel all split along output_dim=0
+                param.weight_loader = _make_group_aligned_loader(
+                    weight_loader, 0, ga["elem_sizes"], tp_rank, output_size, prefix
+                )
+
         weight_dict = self.quant_method.get_weight(input_size_per_partition, output_size_per_partition, params_dtype)
 
         # Extract packing information (if present)
@@ -77,6 +191,7 @@ class AscendLinearMethod(LinearMethodBase):
 
             layer.register_parameter(weight_name, param)
             set_weight_attrs(param, extra_weight_attrs)
+            _attach_ga_loader(param, "weight")
 
         # NOTE: In flatquant quantization implementation,
         # the shape of pertensor_param requires introducing layer_type
@@ -96,6 +211,7 @@ class AscendLinearMethod(LinearMethodBase):
             set_weight_attrs(param, {"output_dim": 0})
             layer.register_parameter(perchannel_name, param)
             set_weight_attrs(param, extra_weight_attrs)
+            _attach_ga_loader(param, "perchannel")
 
         # NOTE: In w4a8 quantization implementation,
         # for down_proj and o_proj scale_bias shape is [output_size, 16],
@@ -112,6 +228,7 @@ class AscendLinearMethod(LinearMethodBase):
             set_weight_attrs(param, {"output_dim": 0})
             layer.register_parameter(pergroup_name, param)
             set_weight_attrs(param, extra_weight_attrs)
+            _attach_ga_loader(param, "scale")
             if scale_packed_dim is not None and scale_packed_factor is not None:
                 set_weight_attrs(param, {"packed_dim": scale_packed_dim, "packed_factor": scale_packed_factor})
             if (
