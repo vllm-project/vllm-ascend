@@ -189,6 +189,7 @@
   tests:
     - tests/ut/core
     - tests/ut/test_compressed_prefix_cache.py
+    - tests/e2e/pull_request/one_card/test_short_request_first_scheduling.py
 
 # Device
 - name: device
@@ -709,6 +710,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/test_qwen3_8b_w8a8.py: 320
   tests/e2e/pull_request/one_card/test_qwen3_embedding_0_6b.py: 150
   tests/e2e/pull_request/one_card/test_sampler.py: 240
+  tests/e2e/pull_request/one_card/test_short_request_first_scheduling.py: 150
   tests/e2e/pull_request/one_card/test_simple_cpu_offload.py: 210
   tests/e2e/pull_request/one_card/test_vlm.py: 700
   tests/e2e/pull_request/one_card/test_xlite.py: 160
@@ -818,7 +820,6 @@ partition:
   a3_x2: 3
   a3_x4: 3
   cpu_x0: 1
-
 
 
 
