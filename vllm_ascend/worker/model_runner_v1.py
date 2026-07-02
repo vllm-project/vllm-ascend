@@ -678,15 +678,14 @@ class NPUModelRunner(GPUModelRunner):
             if dp_metadata is None:
                 # During _dummy_run / graph capture, dp_metadata may not be
                 # set yet. Create a default one so FFN can capture graphs.
+                # NOTE: bypass DPMetadata.make() because it asserts
+                # data_parallel_size > 1, which is not required for AFD.
                 dp_size = self.vllm_config.parallel_config.data_parallel_size
                 ubatch_num_tokens_across_dp = torch.tensor(
                     [num_tokens] * dp_size, device="cpu", dtype=torch.int32
                 )
-                dp_metadata = DPMetadata.make(
-                    self.vllm_config.parallel_config,
-                    num_tokens,
-                    ubatch_num_tokens_across_dp,
-                )
+                dp_metadata = DPMetadata(
+                    num_tokens_across_dp_cpu=ubatch_num_tokens_across_dp)
             dp_metadata_list[0] = dp_metadata
         return dp_metadata_list
 
