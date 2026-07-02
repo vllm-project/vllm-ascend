@@ -11,6 +11,7 @@ test_cases:
       HCCL_BUFFSIZE: "1024"
       PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
       SERVER_PORT: "DEFAULT_PORT"
+      VLLM_ENGINE_READY_TIMEOUT_S: "7200"
     server_cmd:
       - "--quantization"
       - "ascend"
