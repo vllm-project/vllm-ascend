@@ -16,11 +16,13 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, split_decodes_and_prefills
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa, get_full_cos_and_sin_dsa
 from vllm_ascend.quantization.methods.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.utils import (
     AscendDeviceType,
+    enable_dsa_cp_with_o_proj_tp,
     get_ascend_device_type,
     olora_tp_enable,
 )
@@ -914,6 +916,11 @@ class AscendDSACPImpl(DSAAttentionImpl):
     understand this class
     """
 
+    wo_a_full_pool: ClassVar[torch.Tensor | None] = None
+    wo_a_full_weight_scale_pool: ClassVar[torch.Tensor | None] = None
+    wo_b_full_pool: ClassVar[torch.Tensor | None] = None
+    wo_b_full_weight_scale_pool: ClassVar[torch.Tensor | None] = None
+
     def __init__(
         self,
         n_heads: int,
@@ -960,6 +967,12 @@ class AscendDSACPImpl(DSAAttentionImpl):
 
         self.wo_a = kwargs["wo_a"]
         self.wo_b = kwargs["wo_b"]
+
+        self.enable_dsa_cp_with_o_proj_tp = enable_dsa_cp_with_o_proj_tp() and (
+            get_ascend_device_type() == AscendDeviceType.A5
+        )
+        self._wo_a_dynamic_quant = False
+        self._wo_b_dynamic_quant = False
 
         self.eps = kwargs["eps"]
 
@@ -1035,6 +1048,132 @@ class AscendDSACPImpl(DSAAttentionImpl):
                 "DSA-CP expects full-head attn_sink loaded on every TP rank, "
                 f"got {self.attn_sink.numel()} heads, expected {self.num_heads}."
             )
+        if self.enable_dsa_cp_with_o_proj_tp:
+            self._maybe_init_o_proj_tp_full_params()
+
+    @staticmethod
+    def _check_dynamic_quant(layer: torch.nn.Module) -> bool:
+        return get_ascend_device_type() in {AscendDeviceType.A5} and hasattr(layer, "weight_scale")
+
+    def _maybe_init_o_proj_tp_full_params(self) -> None:
+        self._wo_a_dynamic_quant = type(self)._check_dynamic_quant(self.wo_a)
+        self._wo_b_dynamic_quant = type(self)._check_dynamic_quant(self.wo_b)
+        if AscendDSACPImpl.wo_a_full_pool is None:
+            sample = self.wo_a.weight
+            AscendDSACPImpl.wo_a_full_pool = torch.empty(
+                (sample.shape[0] * self.tp_size, *sample.shape[1:]),
+                dtype=sample.dtype,
+                device=sample.device,
+            )
+        self.wo_a_tp_weight = self.wo_a.weight.clone().detach().contiguous()
+        self.wo_a.weight.set_(self.wo_a_tp_weight)
+        if AscendDSACPImpl.wo_b_full_pool is None:
+            sample = self.wo_b.weight
+            AscendDSACPImpl.wo_b_full_pool = torch.empty(
+                (sample.shape[0] * self.tp_size, *sample.shape[1:]),
+                dtype=sample.dtype,
+                device=sample.device,
+            )
+        self.wo_b_tp_weight = self.wo_b.weight.clone().detach().contiguous()
+        self.wo_b.weight.set_(self.wo_b_tp_weight)
+
+        if self._wo_a_dynamic_quant:
+            if AscendDSACPImpl.wo_a_full_weight_scale_pool is None:
+                sample = self.wo_a.weight_scale
+                AscendDSACPImpl.wo_a_full_weight_scale_pool = torch.empty(
+                    (sample.shape[0] * self.tp_size, *sample.shape[1:]),
+                    dtype=sample.dtype,
+                    device=sample.device,
+                )
+            self.wo_a_tp_weight_scale = self.wo_a.weight_scale.clone().detach().contiguous()
+            self.wo_a.weight_scale.set_(self.wo_a_tp_weight_scale)
+        if self._wo_b_dynamic_quant:
+            if AscendDSACPImpl.wo_b_full_weight_scale_pool is None:
+                sample = self.wo_b.weight_scale
+                AscendDSACPImpl.wo_b_full_weight_scale_pool = torch.empty(
+                    (sample.shape[0] * self.tp_size, *sample.shape[1:]),
+                    dtype=sample.dtype,
+                    device=sample.device,
+                )
+            self.wo_b_tp_weight_scale = self.wo_b.weight_scale.clone().detach().contiguous()
+            self.wo_b.weight_scale.set_(self.wo_b_tp_weight_scale)
+
+    def _maybe_all_gather_o_proj_full_weight(
+        self,
+        enabled: bool,
+    ) -> list[torch.distributed.Work]:
+        if not enabled:
+            return []
+        handles = []
+        assert AscendDSACPImpl.wo_a_full_pool is not None
+        _, weight_handle = all_gather_async(
+            self.wo_a_tp_weight,
+            self.tp_group,
+            output=AscendDSACPImpl.wo_a_full_pool,
+        )
+        if weight_handle is not None:
+            handles.append(weight_handle)
+        assert AscendDSACPImpl.wo_b_full_pool is not None
+        _, wo_b_weight_handle = all_gather_async(
+            self.wo_b_tp_weight,
+            self.tp_group,
+            output=AscendDSACPImpl.wo_b_full_pool,
+        )
+        if wo_b_weight_handle is not None:
+            handles.append(wo_b_weight_handle)
+        if self._wo_a_dynamic_quant:
+            assert AscendDSACPImpl.wo_a_full_weight_scale_pool is not None
+            _, weight_scale_handle = all_gather_async(
+                self.wo_a_tp_weight_scale,
+                self.tp_group,
+                output=AscendDSACPImpl.wo_a_full_weight_scale_pool,
+            )
+            if weight_scale_handle is not None:
+                handles.append(weight_scale_handle)
+        if self._wo_b_dynamic_quant:
+            assert AscendDSACPImpl.wo_b_full_weight_scale_pool is not None
+            _, wo_b_weight_scale_handle = all_gather_async(
+                self.wo_b_tp_weight_scale,
+                self.tp_group,
+                output=AscendDSACPImpl.wo_b_full_weight_scale_pool,
+            )
+            if wo_b_weight_scale_handle is not None:
+                handles.append(wo_b_weight_scale_handle)
+        return handles
+
+    def _switch_o_proj_to_full_weight(
+        self,
+        handles: list[torch.distributed.Work],
+    ) -> None:
+        for handle in handles:
+            handle.wait()
+        assert AscendDSACPImpl.wo_a_full_pool is not None
+        self.wo_a.weight.set_(AscendDSACPImpl.wo_a_full_pool)
+        if self._wo_a_dynamic_quant:
+            assert AscendDSACPImpl.wo_a_full_weight_scale_pool is not None
+            self.wo_a.weight_scale.set_(AscendDSACPImpl.wo_a_full_weight_scale_pool)
+        assert AscendDSACPImpl.wo_b_full_pool is not None
+        self.wo_b.weight.set_(AscendDSACPImpl.wo_b_full_pool)
+        if self._wo_b_dynamic_quant:
+            assert AscendDSACPImpl.wo_b_full_weight_scale_pool is not None
+            self.wo_b.weight_scale.set_(AscendDSACPImpl.wo_b_full_weight_scale_pool)
+
+    def _switch_o_proj_to_tp_weight(self) -> None:
+        self.wo_a.weight.set_(self.wo_a_tp_weight)
+        if self._wo_a_dynamic_quant:
+            self.wo_a.weight_scale.set_(self.wo_a_tp_weight_scale)
+        self.wo_b.weight.set_(self.wo_b_tp_weight)
+        if self._wo_b_dynamic_quant:
+            self.wo_b.weight_scale.set_(self.wo_b_tp_weight_scale)
+
+    def _apply_wo_b(
+        self,
+        o_proj_input: torch.Tensor,
+        full_weight: bool,
+    ) -> torch.Tensor:
+        if not full_weight:
+            return self.wo_b(o_proj_input)
+        return self.wo_b.quant_method.apply(self.wo_b, o_proj_input, bias=None)
 
     def forward(  # type: ignore[override]
         self,
@@ -1051,47 +1190,75 @@ class AscendDSACPImpl(DSAAttentionImpl):
             return output.fill_(0)
         if not isinstance(attn_metadata, list):
             attn_metadata = [attn_metadata]
-        local_attn_output = self._forward(layer_name, hidden_states, kv_cache, attn_metadata, need_gather_q_kv)
-        o_proj_input = self._restore_tp_head_layout(local_attn_output, layer_name, attn_metadata[0])
+        full_gather_wo_a_enabled = (
+            self.tp_size > 1
+            and self.enable_dsa_cp_with_o_proj_tp
+            and attn_metadata[0].attn_state
+            not in {
+                AscendAttentionState.DecodeOnly,
+                AscendAttentionState.SpecDecoding,
+            }
+        )
+        local_attn_output, o_proj_full_handles = self._forward(
+            layer_name,
+            hidden_states,
+            kv_cache,
+            attn_metadata,
+            need_gather_q_kv,
+            full_gather_wo_a_enabled,
+        )
+        o_proj_input = self._restore_tp_head_layout(
+            local_attn_output,
+            layer_name,
+            attn_metadata[0],
+            skip_all_to_all=full_gather_wo_a_enabled,
+        )
         num_tokens = o_proj_input.shape[0]
 
         # o
-        if get_ascend_device_type() in {AscendDeviceType.A5}:
-            o = o_proj_input.view(num_tokens, self.n_local_groups, -1)
-            o, swiglu_out_scale = torch_npu.npu_dynamic_mx_quant(o, dst_type=torch.float8_e4m3fn)
-            o = torch_npu.npu_transpose_quant_batchmatmul(
-                o,
-                self.wo_a.weight,
-                dtype=torch.bfloat16,
-                bias=None,
-                group_sizes=(0, 0, 32),
-                x1_scale=swiglu_out_scale.view(torch.float8_e8m0fnu),
-                x2_scale=self.wo_a.weight_scale.view(torch.float8_e8m0fnu),
-                perm_x1=(1, 0, 2),
-                perm_x2=(0, 1, 2),
-                perm_y=(1, 0, 2),
-            )
-            o = o.reshape(num_tokens, -1)
-            output[...] = self.wo_b(o)
-        else:
-            o_proj_input = o_proj_input.view(num_tokens, self.n_local_groups, -1)
-            if olora_tp_enable():
-                o_proj_input = self.wo_a(o_proj_input)
-            else:
-                # wo_a = self.wo_a.weight.view(self.n_local_groups, self.o_lora_rank, -1)
-                # o = torch.einsum("tgd,grd->tgr", o, wo_a)
-                o_proj_input = torch_npu.npu_transpose_batchmatmul(
-                    o_proj_input,
+        if full_gather_wo_a_enabled:
+            self._switch_o_proj_to_full_weight(o_proj_full_handles)
+        o_proj_groups = self.n_group if full_gather_wo_a_enabled else self.n_local_groups
+        try:
+            if get_ascend_device_type() in {AscendDeviceType.A5}:
+                o = o_proj_input.view(num_tokens, o_proj_groups, -1)
+                o, swiglu_out_scale = torch_npu.npu_dynamic_mx_quant(o, dst_type=torch.float8_e4m3fn)
+                o = torch_npu.npu_transpose_quant_batchmatmul(
+                    o,
                     self.wo_a.weight,
+                    dtype=torch.bfloat16,
                     bias=None,
-                    scale=None,
+                    group_sizes=(0, 0, 32),
+                    x1_scale=swiglu_out_scale.view(torch.float8_e8m0fnu),
+                    x2_scale=self.wo_a.weight_scale.view(torch.float8_e8m0fnu),
                     perm_x1=(1, 0, 2),
                     perm_x2=(0, 1, 2),
                     perm_y=(1, 0, 2),
-                    batch_split_factor=1,
                 )
-            o_proj_input = o_proj_input.reshape(num_tokens, -1)
-            output[...] = self.wo_b(o_proj_input)
+                o = o.reshape(num_tokens, -1)
+                output[...] = self._apply_wo_b(o, full_gather_wo_a_enabled)
+            else:
+                o_proj_input = o_proj_input.view(num_tokens, o_proj_groups, -1)
+                if olora_tp_enable():
+                    o_proj_input = self.wo_a(o_proj_input)
+                else:
+                    # wo_a = self.wo_a.weight.view(o_proj_groups, self.o_lora_rank, -1)
+                    # o = torch.einsum("tgd,grd->tgr", o, wo_a)
+                    o_proj_input = torch_npu.npu_transpose_batchmatmul(
+                        o_proj_input,
+                        self.wo_a.weight,
+                        bias=None,
+                        scale=None,
+                        perm_x1=(1, 0, 2),
+                        perm_x2=(0, 1, 2),
+                        perm_y=(1, 0, 2),
+                        batch_split_factor=1,
+                    )
+                o_proj_input = o_proj_input.reshape(num_tokens, -1)
+                output[...] = self._apply_wo_b(o_proj_input, full_gather_wo_a_enabled)
+        finally:
+            if full_gather_wo_a_enabled:
+                self._switch_o_proj_to_tp_weight()
 
         return output
 
@@ -1102,6 +1269,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
         kv_cache: tuple,
         attn_metadata: list[M],
         need_gather_q_kv: bool = False,
+        full_gather_wo_a_enabled: bool = False,
     ):
         """Run full-sequence KV cache updates and local-token attention."""
         (compress_kv_cache, swa_kv_cache, state_cache, _, _, _) = DeviceOperator.unpack_dsa_forward_kv_cache(
@@ -1188,6 +1356,8 @@ class AscendDSACPImpl(DSAAttentionImpl):
             rotary_mode="interleave",
             partial_slice=[self.nope_head_dim, self.head_dim],
         )
+
+        o_proj_full_handles = self._maybe_all_gather_o_proj_full_weight(full_gather_wo_a_enabled)
 
         kv = self.wkv(hidden_states_cache)
         kv = self.kv_norm(kv)
@@ -1314,13 +1484,14 @@ class AscendDSACPImpl(DSAAttentionImpl):
                 cmp_mask_mode=3,
                 **common_attn_kwargs,
             )[0]
-        return attn_output
+        return attn_output, o_proj_full_handles
 
     def _restore_tp_head_layout(
         self,
         local_attn_output: torch.Tensor,
         layer_name: str,
         attn_metadata: M,
+        skip_all_to_all: bool = False,
     ) -> torch.Tensor:
         assert attn_metadata.req_metadata is not None
         req_metadata = attn_metadata.req_metadata
@@ -1334,7 +1505,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
             partial_slice=[self.nope_head_dim, self.head_dim],
         )
 
-        if self.tp_size == 1:
+        if self.tp_size == 1 or skip_all_to_all:
             return local_attn_output
 
         send = (
