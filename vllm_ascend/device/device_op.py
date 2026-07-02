@@ -1717,24 +1717,23 @@ class Ascend310PDeviceAdaptor(BaseDeviceAdaptor):
         indices: torch.Tensor,
         value: int,
     ) -> torch.Tensor:
+        # index_fill_ is unavailable on 310P; emulate it with a boolean mask
+        # along `dim` so behavior matches torch.index_fill_ for any dim,
+        # negative indices, empty indices and arbitrary tensor rank.
         if indices.numel() == 0:
             return tensor
-        if dim != 0:
-            return BaseDeviceAdaptor.index_fill(tensor, dim, indices, value)
-        request_indices = torch.arange(
-            tensor.shape[0],
+        dim_size = tensor.size(dim)
+        norm_indices = torch.where(indices < 0, indices + dim_size, indices)
+        pos = torch.arange(
+            dim_size,
             device=tensor.device,
-            dtype=indices.dtype,
+            dtype=norm_indices.dtype,
         )
-        discard_mask = torch.eq(
-            request_indices.unsqueeze(1),
-            indices.unsqueeze(0),
-        ).any(dim=1)
-        return torch.where(
-            discard_mask.unsqueeze(1),
-            torch.full_like(tensor, value),
-            tensor,
-        )
+        mask = torch.eq(pos.unsqueeze(1), norm_indices.unsqueeze(0)).any(dim=1)
+        idx = [slice(None)] * tensor.dim()
+        idx[dim] = mask
+        tensor[tuple(idx)] = value
+        return tensor
 
 
 def get_device_adaptor() -> type["BaseDeviceAdaptor"]:
