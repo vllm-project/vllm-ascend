@@ -32,6 +32,10 @@ GITHUB_PROXY=${GITHUB_PROXY:-"https://github.com"}
 GOVER=1.23.8
 YALANTINGLIBS_VERSION=0.5.6
 
+# Get CPU count (handles container environments correctly)
+SCRIPT_DIR=$(dirname $(readlink -f ${BASH_SOURCE[0]}))
+CPU_NUM=$(${SCRIPT_DIR}/get_cpu_count.sh)
+
 # Function to print section headers
 print_section() {
     echo -e "\n${BLUE}=== $1 ===${NC}"
@@ -179,7 +183,7 @@ elif command -v yum &> /dev/null; then
     rm -rf build
     mkdir -p build && cd build
     cmake ..
-    make -j$(nproc)
+    make -j${CPU_NUM}
     make install
     cd "${REPO_ROOT}"
 else
@@ -239,8 +243,8 @@ echo "Configuring yalantinglibs..."
 cmake .. -DBUILD_EXAMPLES=OFF -DBUILD_BENCHMARK=OFF -DBUILD_UNIT_TESTS=OFF
 check_success "Failed to configure yalantinglibs"
 
-echo "Building yalantinglibs (using $(nproc) cores)..."
-cmake --build . -j$(nproc)
+echo "Building yalantinglibs (using ${CPU_NUM} cores)..."
+cmake --build . -j${CPU_NUM}
 check_success "Failed to build yalantinglibs"
 
 echo "Installing yalantinglibs..."
