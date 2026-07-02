@@ -11,4 +11,7 @@ internlm3-8b-instruct.yaml
 Molmo-7B-D-0924.yaml
 llava-onevision-qwen2-0.5b-ov-hf.yaml
 Llama-3.2-3B-Instruct.yaml
+DeepSeek-R1-Distill-Qwen-1.5B.yaml
+DeepSeek-R1-Distill-Llama-8B.yaml
+DeepSeek-R1-Distill-Qwen-32B.yaml
 Qwen3-ASR-1.7B.yaml

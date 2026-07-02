@@ -40,7 +40,9 @@
         "internlm3-8b-instruct",
         "Qwen3-ASR-1.7B",
         "InternVL3_5-8B-hf",
-        "llava-onevision-qwen2-0.5b-ov-hf"
+        "llava-onevision-qwen2-0.5b-ov-hf",
+        "DeepSeek-R1-Distill-Qwen-1.5B",
+        "DeepSeek-R1-Distill-Llama-8B"
       ]
     },
     {
@@ -48,7 +50,8 @@
       "os": "linux-aarch64-a2b3-4",
       "model_list": [
         "Qwen2.5-Math-RM-72B",
-        "Hunyuan-A13B-Instruct"
+        "Hunyuan-A13B-Instruct",
+        "DeepSeek-R1-Distill-Qwen-32B"
       ]
     }
   ]

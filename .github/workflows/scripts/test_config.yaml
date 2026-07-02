@@ -659,6 +659,7 @@
 estimated_times:
   tests/e2e/pull_request/one_card/_310p/test_classification_310p.py: 190
   tests/e2e/pull_request/one_card/_310p/test_dense_model_310p.py: 1300
+  tests/e2e/pull_request/one_card/_310p/test_deepseek_r1_distill_aclgraph_310p.py: 1200
   tests/e2e/pull_request/one_card/_310p/test_embedding_310p.py: 370
   tests/e2e/pull_request/one_card/_310p/test_scoring_310p.py: 290
   tests/e2e/pull_request/one_card/_310p/test_spec_decode_mtp_310p.py: 250
@@ -729,6 +730,7 @@ estimated_times:
   tests/e2e/pull_request/two_card/test_sp_pass.py: 200
   tests/e2e/pull_request/two_card/test_hccl_weight_transfer.py: 120
   tests/e2e/pull_request/four_card/_310p/test_dense_model_310p.py: 440
+  tests/e2e/pull_request/four_card/_310p/test_deepseek_r1_distill_qwen32b_aclgraph_310p.py: 900
   tests/e2e/pull_request/four_card/_310p/test_moe_model_310p.py: 950
   tests/e2e/pull_request/four_card/_310p/test_vl_model_310p.py: 330
   tests/e2e/pull_request/four_card/context_parallel/test_accuracy.py: 1880
@@ -811,7 +813,6 @@ partition:
   a3_x2: 3
   a3_x4: 3
   cpu_x0: 1
-
 
 
 
