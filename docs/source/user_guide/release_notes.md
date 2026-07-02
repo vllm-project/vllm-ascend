@@ -21,7 +21,7 @@ We're excited to announce the release of v0.22.1rc1 for vLLM Ascend. This is the
 ### Hardware and Operator Support
 
 - Added W8A8/W4A8 dynamic quantization support for Ascend 950. [#10236](https://github.com/vllm-project/vllm-ascend/pull/10236)
-- Added Ascend 950 CPU binding support for A5 server topology and process layout. [#10483](https://github.com/vllm-project/vllm-ascend/pull/10483)
+- Added Ascend 950 CPU binding support for Ascend 950 server topology and process layout. [#10483](https://github.com/vllm-project/vllm-ascend/pull/10483)
 
 ### Performance
 
