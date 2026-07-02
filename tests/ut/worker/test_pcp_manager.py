@@ -11,14 +11,142 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
 import torch
 
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, split_decodes_and_prefills
+from vllm_ascend.worker.pcp_attention_backend import (
+    PCPBackendMetadata,
+    PCPMetadataBuildContext,
+)
 from vllm_ascend.worker.pcp_utils import PCPManager
+
+
+def _make_vllm_config(
+    *,
+    model_type="qwen2",
+    use_mla=False,
+    num_speculative_tokens=0,
+    max_model_len=128,
+    max_num_batched_tokens=10000,
+    max_num_seqs=1000,
+):
+    vllm_config = MagicMock()
+    vllm_config.model_config = MagicMock()
+    vllm_config.model_config.use_mla = use_mla
+    vllm_config.model_config.hf_config.model_type = model_type
+    vllm_config.model_config.max_model_len = max_model_len
+    vllm_config.parallel_config.cp_kv_cache_interleave_size = 64
+    vllm_config.scheduler_config.max_num_batched_tokens = max_num_batched_tokens
+    vllm_config.scheduler_config.max_num_seqs = max_num_seqs
+    vllm_config.speculative_config.num_speculative_tokens = num_speculative_tokens
+    vllm_config.kv_transfer_config = None
+    return vllm_config
+
+
+def _make_pcp_manager(
+    *,
+    pcp_world_size=2,
+    pcp_rank=0,
+    dcp_world_size=1,
+    dcp_rank=0,
+    model_type="qwen2",
+    use_mla=False,
+    num_speculative_tokens=0,
+    max_model_len=128,
+    max_buffer_num_tokens=10000,
+    max_num_reqs=1000,
+):
+    return PCPManager(
+        pcp_world_size=pcp_world_size,
+        pcp_rank=pcp_rank,
+        dcp_world_size=dcp_world_size,
+        dcp_rank=dcp_rank,
+        max_buffer_num_tokens=max_buffer_num_tokens,
+        max_num_reqs=max_num_reqs,
+        device="cpu",
+        vllm_config=_make_vllm_config(
+            model_type=model_type,
+            use_mla=use_mla,
+            num_speculative_tokens=num_speculative_tokens,
+            max_model_len=max_model_len,
+            max_num_batched_tokens=max_buffer_num_tokens,
+            max_num_seqs=max_num_reqs,
+        ),
+        use_async_scheduling=False,
+        pin_memory=False,
+    )
+
+
+def test_generate_pcp_metadata_uses_selected_attention_backend():
+    class FakePCPAttentionBackend:
+        name = "fake"
+
+        def __init__(self) -> None:
+            self.ctx: PCPMetadataBuildContext | None = None
+
+        def build_metadata(self, ctx: PCPMetadataBuildContext) -> PCPBackendMetadata:
+            self.ctx = ctx
+            return PCPBackendMetadata(
+                q_head_idx_tensor=torch.tensor([42], dtype=torch.int32),
+                q_tail_idx_tensor=torch.tensor([43], dtype=torch.int32),
+                q_full_idx=torch.tensor([0, 1], dtype=torch.int32),
+                attn_chunk_seqlens=torch.tensor([4], dtype=torch.int32),
+                extra_long_seq_kwargs={"backend": [1]},
+            )
+
+        def apply_metadata(self, long_seq_metadata, metadata: PCPBackendMetadata) -> None:
+            long_seq_metadata.fake_backend_name = self.name
+            long_seq_metadata.fake_backend_q_head = metadata.q_head_idx_tensor
+
+    pcp_manager = _make_pcp_manager(pcp_world_size=2, pcp_rank=1)
+    num_scheduled_tokens = np.array([8], dtype=np.int32)
+    num_computed_tokens = np.array([0], dtype=np.int32)
+    num_prompt_tokens = np.array([8], dtype=np.int32)
+    pcp_manager.init_batch_info(
+        num_scheduled_tokens,
+        num_reqs=1,
+        num_computed_tokens=num_computed_tokens,
+        num_prompt_tokens=num_prompt_tokens,
+    )
+    pcp_manager.update_tokens_for_pcp(
+        num_scheduled_tokens,
+        np.arange(10000, dtype=np.int32),
+    )
+
+    input_batch = MagicMock()
+    input_batch.num_reqs = 1
+    input_batch.num_computed_tokens_cpu = num_computed_tokens
+    input_batch.num_prompt_tokens = torch.tensor(num_prompt_tokens)
+    input_batch.num_tokens = torch.tensor(num_scheduled_tokens)
+
+    fake_backend = FakePCPAttentionBackend()
+    with patch("vllm_ascend.worker.pcp_utils.select_pcp_attention_backend", return_value=fake_backend):
+        metadata, _ = pcp_manager.generate_pcp_metadata(
+            int(num_scheduled_tokens.sum()),
+            torch.tensor(num_scheduled_tokens, dtype=torch.int32),
+            input_batch,
+            num_scheduled_tokens,
+            torch.zeros((1, 1), dtype=torch.int32),
+            num_reqs_padded=1,
+            num_reqs=1,
+        )
+
+    assert metadata is not None
+    assert metadata.fake_backend_name == "fake"
+    assert metadata.fake_backend_q_head.tolist() == [42]
+    ctx = fake_backend.ctx
+    assert ctx is not None
+    assert ctx.num_decode_reqs == 0
+    assert ctx.pcp_world_size == 2
+    assert ctx.pcp_world_rank == 1
+    assert ctx.use_mla is False
+    assert pcp_manager.q_head_idx_tensor.tolist() == [42]
+    assert pcp_manager.extra_long_seq_kwargs == {"backend": [1]}
 
 
 @pytest.mark.parametrize(
@@ -114,6 +242,60 @@ def test_generate_pcp_metadata_basic(
                 assert hasattr(result, "tail_attn_nomask_seqlens")
                 assert hasattr(result, "head_actual_seq_lengths_kv")
                 assert hasattr(result, "tail_actual_seq_lengths_kv")
+
+
+def test_generate_pcp_metadata_combines_pcp_and_dcp_rank_layout():
+    pcp_manager = _make_pcp_manager(
+        pcp_world_size=2,
+        dcp_world_size=2,
+        max_model_len=512,
+    )
+    pcp_manager.speculative_config = None
+    num_scheduled_tokens = np.array([1, 1, 8, 12], dtype=np.int32)
+    num_computed_tokens = np.array([255, 128, 0, 0], dtype=np.int32)
+    num_prompt_tokens = np.array([255, 128, 8, 12], dtype=np.int32)
+    num_reqs = len(num_scheduled_tokens)
+
+    pcp_manager.init_batch_info(
+        num_scheduled_tokens,
+        num_reqs=num_reqs,
+        num_computed_tokens=num_computed_tokens,
+        num_prompt_tokens=num_prompt_tokens,
+    )
+    pcp_tokens, _ = pcp_manager.update_tokens_for_pcp(
+        num_scheduled_tokens,
+        np.arange(10000, dtype=np.int32),
+    )
+
+    input_batch = MagicMock()
+    input_batch.num_reqs = num_reqs
+    input_batch.num_computed_tokens_cpu = num_computed_tokens
+    input_batch.num_prompt_tokens = torch.tensor(num_prompt_tokens)
+    input_batch.num_tokens = torch.tensor(num_scheduled_tokens)
+
+    metadata, _ = pcp_manager.generate_pcp_metadata(
+        int(num_scheduled_tokens.sum()),
+        torch.tensor(num_scheduled_tokens, dtype=torch.int32),
+        input_batch,
+        num_scheduled_tokens,
+        torch.zeros((num_reqs, 1), dtype=torch.int32),
+        num_reqs_padded=num_reqs,
+        num_reqs=num_reqs,
+    )
+
+    assert pcp_tokens.tolist() == [1, 1, 4, 6]
+    assert metadata is not None
+    assert metadata.pcp_use_hybrid_attn is False
+    assert metadata.num_computed_tokens_of_pcp_dcp.tolist() == [
+        [[64, 64], [64, 64]],
+        [[64, 64], [1, 0]],
+        [[0, 0], [0, 0]],
+        [[0, 0], [0, 0]],
+    ]
+    assert metadata.q_head_idx_tensor is not None
+    assert metadata.q_tail_idx_tensor is not None
+    assert metadata.pcp_allgather_restore_idx is not None
+    assert metadata.dcp_mtp_attn_mask is None
 
 
 @pytest.mark.parametrize(
@@ -571,3 +753,267 @@ def test_adjust_cu_num_scheduled_tokens_for_pcp(
     ), (
         f"Expected {expected_cu_num_scheduled_tokens}, got {result.tolist()}"
     )
+
+
+@pytest.mark.parametrize("model_type", ["qwen3_next", "qwen3_5", "qwen3_5_moe"])
+def test_hybrid_model_types_use_hybrid_pcp_layout(model_type):
+    pcp_manager = _make_pcp_manager(model_type=model_type)
+    num_scheduled_tokens = np.array([3, 5], dtype=np.int32)
+    num_computed_tokens = np.zeros(2, dtype=np.int32)
+    num_prompt_tokens = num_scheduled_tokens.copy()
+
+    assert pcp_manager.pcp_use_hybrid_attn is True
+    pcp_manager.init_batch_info(
+        num_scheduled_tokens,
+        num_reqs=2,
+        num_computed_tokens=num_computed_tokens,
+        num_prompt_tokens=num_prompt_tokens,
+    )
+    pcp_tokens, positions = pcp_manager.update_tokens_for_pcp(
+        num_scheduled_tokens,
+        np.arange(10000, dtype=np.int32),
+    )
+
+    assert pcp_tokens.tolist() == [2, 3]
+    assert positions.tolist() == [0, 1, 0, 1, 2]
+    assert pcp_manager.num_scheduled_tokens_padded.tolist() == [2, 4]
+    assert pcp_manager.max_num_tokens_across_pcp == 5
+    assert pcp_manager.total_pcp_padding_tokens_fla == 2
+
+
+def test_hybrid_update_tokens_records_fa_reorder_indices():
+    pcp_manager = _make_pcp_manager(model_type="qwen3_next")
+    num_scheduled_tokens = np.array([3, 5], dtype=np.int32)
+    num_computed_tokens = np.zeros(2, dtype=np.int32)
+    num_prompt_tokens = num_scheduled_tokens.copy()
+
+    pcp_manager.init_batch_info(
+        num_scheduled_tokens,
+        num_reqs=2,
+        num_computed_tokens=num_computed_tokens,
+        num_prompt_tokens=num_prompt_tokens,
+    )
+    pcp_tokens, positions = pcp_manager.update_tokens_for_pcp(
+        num_scheduled_tokens,
+        np.arange(10000, dtype=np.int32),
+    )
+
+    assert pcp_tokens.tolist() == [2, 3]
+    assert positions.tolist() == [0, 1, 0, 1, 2]
+    assert pcp_manager.num_scheduled_tokens_padded.tolist() == [2, 4]
+    assert pcp_manager.max_num_tokens_across_pcp == 5
+    assert pcp_manager.total_num_scheduled_tokens == 5
+    assert pcp_manager.pcp_padded_tokens_fla == 0
+    assert pcp_manager.total_pcp_padding_tokens_fla == 2
+    assert pcp_manager.pcp_enter_fa_restore_idx[:8].tolist() == [
+        0, 1, 5, 2, 3, 4, 6, 7
+    ]
+    assert pcp_manager.pcp_exit_fa_scatter_idx.gpu[:8].tolist() == [
+        0, 6, 2, 3, 8, 0, 0, 0
+    ]
+    assert pcp_manager.pcp_fa_query_idx[:6].tolist() == [0, 3, 4, 5, 10, 11]
+
+    input_batch = MagicMock()
+    input_batch.num_reqs = 2
+    input_batch.num_computed_tokens_cpu = num_computed_tokens
+    input_batch.num_prompt_tokens = torch.tensor(num_prompt_tokens)
+    input_batch.num_tokens = torch.tensor(num_scheduled_tokens)
+    metadata, _ = pcp_manager.generate_pcp_metadata(
+        int(num_scheduled_tokens.sum()),
+        torch.tensor(num_scheduled_tokens, dtype=torch.int32),
+        input_batch,
+        num_scheduled_tokens,
+        torch.zeros((2, 1), dtype=torch.int32),
+        num_reqs_padded=2,
+        num_reqs=2,
+    )
+
+    assert metadata.num_actual_tokens_pcp_padded == 12
+    assert metadata.pcp_enter_fa_restore_idx.tolist() == [
+        0, 1, 5, 2, 3, 4, 6, 7
+    ]
+    assert metadata.pcp_exit_fa_scatter_idx.tolist() == [
+        0, 6, 2, 3, 8, 0, 0, 0
+    ]
+    assert metadata.pcp_fa_query_idx.tolist() == [0, 3, 4, 5, 10, 11]
+    assert metadata.pcp_allgather_restore_idx.tolist() == [
+        0, 6, 7, 1, 2, 3, 8, 9, 10, 11, 4, 5
+    ]
+
+
+def test_hybrid_logits_indices_include_decode_padding():
+    pcp_manager = _make_pcp_manager(model_type="qwen3_next")
+    num_scheduled_tokens = np.array([1, 1, 3, 5], dtype=np.int32)
+    num_computed_tokens = np.array([16, 17, 0, 0], dtype=np.int32)
+    num_prompt_tokens = np.array([16, 17, 3, 5], dtype=np.int32)
+    pcp_manager.init_batch_info(
+        num_scheduled_tokens,
+        num_reqs=4,
+        num_computed_tokens=num_computed_tokens,
+        num_prompt_tokens=num_prompt_tokens,
+    )
+
+    logits_indices = pcp_manager.get_logits_indices(
+        np.cumsum(num_scheduled_tokens),
+        num_reqs=4,
+        tokens_original=num_scheduled_tokens.tolist(),
+    )
+
+    assert logits_indices.tolist() == [1, 3, 6, 11]
+
+
+def test_hybrid_padded_slot_mapping_uses_independent_kv_group_buffers():
+    pcp_manager = _make_pcp_manager(model_type="qwen3_next")
+    num_scheduled_tokens = np.array([3, 5], dtype=np.int32)
+    num_computed_tokens = np.zeros(2, dtype=np.int32)
+    num_prompt_tokens = num_scheduled_tokens.copy()
+    pcp_manager.init_batch_info(
+        num_scheduled_tokens,
+        num_reqs=2,
+        num_computed_tokens=num_computed_tokens,
+        num_prompt_tokens=num_prompt_tokens,
+    )
+    pcp_manager.update_tokens_for_pcp(
+        num_scheduled_tokens,
+        np.arange(10000, dtype=np.int32),
+    )
+    pcp_manager.initialize_slot_mapping()
+    pcp_manager.initialize_slot_mapping()
+
+    group0 = pcp_manager.get_padded_slot_mapping(
+        num_tokens=5,
+        num_tokens_padded=8,
+        slot_mapping=torch.arange(8, dtype=torch.int32),
+        kv_cache_group_id=0,
+    )
+    expected_group0 = [0, 1, 2, -1, 3, 4, 5, 6, 7, -1, -1, -1]
+    assert group0.tolist() == expected_group0
+
+    group1 = pcp_manager.get_padded_slot_mapping(
+        num_tokens=5,
+        num_tokens_padded=8,
+        slot_mapping=torch.arange(100, 108, dtype=torch.int32),
+        kv_cache_group_id=1,
+    )
+
+    assert group1.tolist() == [
+        100, 101, 102, -1, 103, 104, 105, 106, 107, -1, -1, -1
+    ]
+    assert pcp_manager.pcp_padded_slot_mapping_list[0][:12].tolist() == expected_group0
+
+
+def test_generate_mtp_attention_mask_for_decode_exact_values():
+    pcp_manager = _make_pcp_manager(
+        pcp_world_size=1,
+        dcp_world_size=2,
+        dcp_rank=0,
+        num_speculative_tokens=3,
+        max_model_len=16,
+    )
+    num_scheduled_tokens = np.array([4], dtype=np.int32)
+    num_computed_tokens = np.array([5], dtype=np.int32)
+    num_prompt_tokens = np.array([5], dtype=np.int32)
+    pcp_manager.init_batch_info(
+        num_scheduled_tokens,
+        num_reqs=1,
+        num_computed_tokens=num_computed_tokens,
+        num_prompt_tokens=num_prompt_tokens,
+    )
+
+    mask = pcp_manager.generate_mtp_attention_mask_for_decode(
+        decode_num_computed_tokens=[5],
+        decode_num_scheduled_tokens=num_scheduled_tokens,
+    )
+
+    expected = torch.tensor(
+        [
+            [
+                [False, False, False, True, True],
+                [False, False, False, False, True],
+                [False, False, False, False, True],
+                [False, False, False, False, False],
+            ]
+        ],
+        dtype=torch.bool,
+    )
+    assert torch.equal(mask[:, :4, :5], expected)
+    assert not mask[:, :4, 5:].any()
+
+
+def test_remap_mrope_positions_for_pcp_uses_local_positions():
+    pcp_manager = _make_pcp_manager()
+    input_batch = SimpleNamespace(req_ids=["req0", "req1"])
+    req0_mrope = torch.tensor(
+        [
+            [0, 1, 2, 3, 4],
+            [10, 11, 12, 13, 14],
+            [20, 21, 22, 23, 24],
+        ],
+        dtype=torch.int64,
+    )
+    requests = {
+        "req0": SimpleNamespace(
+            prompt_token_ids=[0, 1, 2, 3, 4],
+            prompt_embeds=None,
+            mrope_positions=req0_mrope,
+            mrope_position_delta=100,
+        ),
+        "req1": SimpleNamespace(
+            prompt_token_ids=[0, 1],
+            prompt_embeds=None,
+            mrope_positions=None,
+            mrope_position_delta=None,
+        ),
+    }
+    mrope_positions = SimpleNamespace(cpu=torch.zeros((3, 5), dtype=torch.int64))
+
+    pcp_manager.remap_mrope_positions_for_pcp(
+        positions_np=np.array([1, 3, 5, 2, 4], dtype=np.int64),
+        num_scheduled_tokens=np.array([3, 2], dtype=np.int32),
+        num_reqs=2,
+        input_batch=input_batch,
+        requests=requests,
+        mrope_positions=mrope_positions,
+    )
+
+    expected = torch.tensor(
+        [
+            [1, 3, 105, 2, 4],
+            [11, 13, 105, 2, 4],
+            [21, 23, 105, 2, 4],
+        ],
+        dtype=torch.int64,
+    )
+    assert torch.equal(mrope_positions.cpu, expected)
+
+
+def test_get_restore_hidden_states_uses_pcp_allgather_restore_idx():
+    pcp_manager = _make_pcp_manager(model_type="qwen2")
+    num_scheduled_tokens = np.array([3, 5], dtype=np.int32)
+    num_computed_tokens = np.zeros(2, dtype=np.int32)
+    num_prompt_tokens = num_scheduled_tokens.copy()
+    pcp_manager.init_batch_info(
+        num_scheduled_tokens,
+        num_reqs=2,
+        num_computed_tokens=num_computed_tokens,
+        num_prompt_tokens=num_prompt_tokens,
+    )
+    pcp_manager.update_tokens_for_pcp(
+        num_scheduled_tokens,
+        np.arange(10000, dtype=np.int32),
+    )
+    pcp_manager.num_actual_tokens_pcp_padded = 12
+    gathered_hidden_states = torch.arange(12, dtype=torch.float32).reshape(12, 1)
+    local_hidden_states = torch.arange(10, dtype=torch.float32).reshape(10, 1)
+    fake_group = MagicMock()
+    fake_group.all_gather.return_value = gathered_hidden_states
+
+    with patch("vllm.distributed.parallel_state.get_pcp_group", return_value=fake_group):
+        restored = pcp_manager.get_restore_hidden_states(local_hidden_states)
+
+    local_arg, dim_arg = fake_group.all_gather.call_args.args
+    assert dim_arg == 0
+    assert local_arg.shape == (6, 1)
+    assert restored.flatten().tolist() == [
+        0, 6, 7, 1, 2, 3, 8, 9, 10, 11, 4, 5
+    ]
