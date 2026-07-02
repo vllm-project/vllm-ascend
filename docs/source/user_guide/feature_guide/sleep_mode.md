@@ -82,15 +82,15 @@ This step is skipped entirely for dense models (which have no expert weights) an
 
 ## Prepare Model Weights
 
-Use the W8A8SC quantized weights from the Eco-Tech official ModelScope repository.
+Use the `Qwen2.5-0.5B-Instruct` model weights. With `VLLM_USE_MODELSCOPE=True`, the model will be downloaded automatically from ModelScope.
 
 ```{list-table}
 :header-rows: 1
 
 * - Model
   - ModelScope Link
-* - Qwen3-8B-W8A8SC-310
-  - [Eco-Tech/Qwen3-8B-w8a8sc-310-vllm](https://www.modelscope.cn/models/Eco-Tech/Qwen3-8B-w8a8sc-310-vllm)
+* - Qwen2.5-0.5B-Instruct
+  - [Qwen/Qwen2.5-0.5B-Instruct](https://www.modelscope.cn/models/Qwen/Qwen2.5-0.5B-Instruct)
 ```
 
 ## Usage
