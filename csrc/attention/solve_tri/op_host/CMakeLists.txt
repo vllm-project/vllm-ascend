@@ -7,6 +7,10 @@ if(BUILD_OPEN_PROJECT)
 endif()
 
 add_modules_sources(OPTYPE solve_tri ACLNNTYPE aclnn_exclude)
+add_ops_tiling_keys(
+    OP_NAME SolveTri
+    TILING_KEYS 1
+)
 
 add_ops_compile_options(OP_NAME SolveTri OPTIONS
     --cce-auto-sync=off
