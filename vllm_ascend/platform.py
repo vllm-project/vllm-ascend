@@ -712,10 +712,19 @@ class NPUPlatform(Platform):
             import vllm_ascend.patch.platform.patch_profiling_chunk  # noqa
 
         cp_size = parallel_config.decode_context_parallel_size * parallel_config.prefill_context_parallel_size
+        use_sparse = (
+            model_config is not None
+            and model_config.hf_text_config is not None
+            and hasattr(model_config.hf_text_config, "index_topk")
+        )
+        sfa_dcp_replicate_k = use_sparse and (vllm_config.additional_config or {}).get(
+            "sfa_dcp_replicate_k", False
+        )
         if (
             vllm_config.kv_transfer_config is not None
             and cache_config.block_size != parallel_config.cp_kv_cache_interleave_size
             and cp_size > 1
+            and not sfa_dcp_replicate_k
         ):
             raise AssertionError(
                 f"cp_kv_cache_interleave_size({parallel_config.cp_kv_cache_interleave_size}) "
@@ -723,19 +732,22 @@ class NPUPlatform(Platform):
                 "needs to be equal if use pcp or dcp > 1 in P/D disaggregate and kv pool scenario."
             )
 
-        use_sparse = (
-            model_config is not None
-            and model_config.hf_text_config is not None
-            and hasattr(model_config.hf_text_config, "index_topk")
-        )
         if use_sparse and cp_size > 1 and parallel_config.cp_kv_cache_interleave_size != cache_config.block_size:
-            logger.warning_once(
-                "The current SFA's PCP&DCP implementation requires"
-                f"cp_kv_cache_interleave_size({parallel_config.cp_kv_cache_interleave_size})"
-                f" == block_size({cache_config.block_size}). "
-                f"Override cp_kv_cache_interleave_size to {cache_config.block_size}."
-            )
-            vllm_config.parallel_config.cp_kv_cache_interleave_size = cache_config.block_size
+            if sfa_dcp_replicate_k:
+                logger.warning_once(
+                    "SFA DCP replicate-k is running with "
+                    f"cp_kv_cache_interleave_size({parallel_config.cp_kv_cache_interleave_size})"
+                    f" != block_size({cache_config.block_size}). "
+                    "Keep the configured cp_kv_cache_interleave_size."
+                )
+            else:
+                logger.warning_once(
+                    "The current SFA's PCP&DCP implementation requires "
+                    f"cp_kv_cache_interleave_size({parallel_config.cp_kv_cache_interleave_size})"
+                    f" == block_size({cache_config.block_size}). "
+                    f"Override cp_kv_cache_interleave_size to {cache_config.block_size}."
+                )
+                vllm_config.parallel_config.cp_kv_cache_interleave_size = cache_config.block_size
 
         if enable_sp(vllm_config):
             assert vllm_config.parallel_config.tensor_parallel_size > 1, (
