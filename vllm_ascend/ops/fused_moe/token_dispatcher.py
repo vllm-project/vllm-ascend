@@ -364,7 +364,6 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
         #  MXFP4 keeps dispatch unquantized in AllGather path, and quantizes again inside the MLP path.
         with_quant = (
             token_dispatch_input.quant.dispatch_with_quant
-            # and token_dispatch_input.quant.quant_type != QuantType.MXFP4
             and token_dispatch_input.quant.quant_type != QuantType.W8A8FP8
         )
         is_mxfp = token_dispatch_input.quant.is_mxfp
@@ -373,16 +372,17 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
         topk_ids = token_dispatch_input.topk_ids
         expert_map = token_dispatch_input.routing.expert_map
         dynamic_scale = token_dispatch_input.routing.pertoken_scale
+        quant_type = token_dispatch_input.quant.quant_type
         global_redundant_expert_num = token_dispatch_input.routing.global_redundant_expert_num
         restore_shape = hidden_states.shape
         # Fuse the first dynamic quant of moe_mlp into initrouting when
         # dispatch_with_quant is on but got a None dynamic_scale.
-        if token_dispatch_input.quant.quant_type == QuantType.MXFP8 and dynamic_scale is None:
+        missing_dynamic_scale = dynamic_scale is None
+        quant_mode = -1
+        if missing_dynamic_scale and quant_type == QuantType.MXFP8:
             quant_mode = 3 if is_mxfp else 1
-        elif token_dispatch_input.quant.quant_type == QuantType.MXFP4 and dynamic_scale is None:
+        elif missing_dynamic_scale and quant_type == QuantType.MXFP4:
             quant_mode = 9 if is_mxfp else 1
-        else:
-            quant_mode = -1
 
         num_tokens = hidden_states.shape[:-1].numel()
         apply_router_weight_on_input = token_dispatch_input.routing.apply_router_weight_on_input
