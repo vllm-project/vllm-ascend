@@ -189,8 +189,6 @@ class TestVllmAdaptor(unittest.TestCase):
             VllmEplbAdaptor(model)
 
     def tearDown(self):
-        self.mock_rank.stop()
-        self.mock_size.stop()
         VllmEplbAdaptor._registered_moe_layers = []
 
 
