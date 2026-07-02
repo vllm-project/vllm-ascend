@@ -270,6 +270,81 @@ class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
         self.assertEqual(runner.input_ids.gpu.tolist(), [11, 0, 0, 0])
         self.assertEqual(runner.input_ids.cpu.tolist(), [11, -1, -1, -1])
 
+    def test_spec_decode_draft_probs_follow_current_request_order(self):
+        runner = self._build_runner()
+        runner.input_batch = SimpleNamespace(
+            req_ids=["req_a", "req_b", "req_c"],
+        )
+        draft_probs = torch.arange(3 * 3 * 4, dtype=torch.float32).view(3, 3, 4)
+        runner._draft_probs = draft_probs
+        runner._draft_probs_req_ids = ["req_c", "req_a", "req_b"]
+        metadata = SimpleNamespace(num_draft_tokens=[2, 0, 1])
+
+        flattened = NPUModelRunner._get_spec_decode_draft_probs(runner, metadata)
+
+        expected = torch.cat(
+            [
+                draft_probs[1, :2],
+                draft_probs[0, :1],
+            ],
+            dim=0,
+        )
+        torch.testing.assert_close(flattened, expected)
+        self.assertTrue(flattened.is_contiguous())
+
+    def test_spec_decode_draft_logits_follow_current_request_order(self):
+        runner = self._build_runner()
+        runner.input_batch = SimpleNamespace(
+            req_ids=["req_a", "req_b", "req_c"],
+        )
+        draft_logits = torch.arange(3 * 3 * 4, dtype=torch.float32).view(3, 3, 4)
+        runner._draft_logits = draft_logits
+        runner._draft_logits_req_ids = ["req_c", "req_a", "req_b"]
+        metadata = SimpleNamespace(num_draft_tokens=[2, 0, 1])
+
+        flattened = NPUModelRunner._get_spec_decode_draft_logits(runner, metadata)
+
+        expected = torch.cat(
+            [
+                draft_logits[1, :2],
+                draft_logits[0, :1],
+            ],
+            dim=0,
+        )
+        torch.testing.assert_close(flattened, expected)
+        self.assertTrue(flattened.is_contiguous())
+
+    @patch("vllm_ascend.worker.model_runner_v1.get_ascend_config")
+    @patch("vllm_ascend.worker.model_runner_v1.lmhead_tp_enable")
+    def test_sample_passes_draft_logits_to_rejection_sampler(self, mock_lmhead_tp_enable, mock_get_ascend_config):
+        mock_lmhead_tp_enable.return_value = False
+        mock_ascend_config = MagicMock()
+        mock_ascend_config.enable_reduce_sample = False
+        mock_get_ascend_config.return_value = mock_ascend_config
+
+        input_batch = MagicMock()
+        input_batch.req_ids = ["req0"]
+        input_batch.sampling_metadata.top_k = None
+        input_batch.update_async_output_token_ids = MagicMock()
+
+        runner = self._build_runner()
+        runner.input_batch = input_batch
+        runner.rejection_sampler = MagicMock(return_value=MagicMock())
+        draft_logits = torch.randn(1, 2, 4)
+        runner._draft_logits = draft_logits
+        runner._draft_logits_req_ids = ["req0"]
+        runner._draft_probs = torch.randn(1, 2, 4)
+        runner._draft_probs_req_ids = ["req0"]
+        metadata = SimpleNamespace(num_draft_tokens=[2])
+
+        logits = torch.randn(3, 4)
+        runner._sample(logits=logits, spec_decode_metadata=metadata)
+
+        runner.rejection_sampler.assert_called_once()
+        args, kwargs = runner.rejection_sampler.call_args
+        self.assertIsNone(args[1])
+        torch.testing.assert_close(kwargs["draft_logits"], draft_logits[0])
+
 
 class TestNPUModelRunnerDebugger(unittest.TestCase):
     def _build_runner(self, debugger=None):

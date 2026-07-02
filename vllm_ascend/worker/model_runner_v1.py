@@ -592,6 +592,10 @@ class NPUModelRunner(GPUModelRunner):
         self.query_lens: torch.Tensor | None = None
         self.cpu_slot_mapping = None
         self.sampling_done_event: torch.npu.Event | None = None
+        self._draft_logits: torch.Tensor | None = None
+        self._draft_logits_req_ids: list[str | None] | None = None
+        self._draft_probs: torch.Tensor | None = None
+        self._draft_probs_req_ids: list[str | None] | None = None
 
         # self.cudagraph_batch_sizes sorts in ascending order.
         if (
@@ -2023,7 +2027,83 @@ class NPUModelRunner(GPUModelRunner):
         else:
             raise ValueError(f"Unknown speculative decoding method: {self.speculative_config.method}")
 
+        self._cache_draft_distributions_from_drafter(draft_token_ids)
         return draft_token_ids
+
+    def _cache_draft_distributions_from_drafter(self, draft_token_ids: torch.Tensor | list[list[int]] | None) -> None:
+        self._draft_logits = None
+        self._draft_logits_req_ids = None
+        self._draft_probs = None
+        self._draft_probs_req_ids = None
+        if draft_token_ids is None or self.drafter is None:
+            return
+
+        req_ids = list(self.input_batch.req_ids[: self.input_batch.num_reqs])
+        take_last_draft_logits = getattr(self.drafter, "take_last_draft_logits", None)
+        if take_last_draft_logits is not None:
+            draft_logits = take_last_draft_logits()
+            if draft_logits is not None:
+                self._draft_logits = draft_logits
+                self._draft_logits_req_ids = req_ids
+
+        take_last_draft_probs = getattr(self.drafter, "take_last_draft_probs", None)
+        if take_last_draft_probs is None:
+            return
+
+        draft_probs = take_last_draft_probs()
+        if draft_probs is None:
+            return
+        self._draft_probs = draft_probs
+        self._draft_probs_req_ids = req_ids
+
+    def _get_spec_decode_draft_distribution(
+        self,
+        metadata: SpecDecodeMetadata,
+        draft_distribution: torch.Tensor | None,
+        draft_distribution_req_ids: list[str | None] | None,
+        distribution_name: str,
+    ) -> torch.Tensor | None:
+        if draft_distribution is None or draft_distribution_req_ids is None:
+            return None
+
+        req_id_to_draft_idx = {req_id: idx for idx, req_id in enumerate(draft_distribution_req_ids)}
+        flattened_distributions: list[torch.Tensor] = []
+        for req_idx, num_draft_tokens in enumerate(metadata.num_draft_tokens):
+            if num_draft_tokens == 0:
+                continue
+            req_id = self.input_batch.req_ids[req_idx]
+            draft_idx = req_id_to_draft_idx.get(req_id)
+            if draft_idx is None:
+                raise ValueError(
+                    f"Missing DSpark {distribution_name} for active request: "
+                    f"req_id={req_id}, cached_req_ids={draft_distribution_req_ids}"
+                )
+            if num_draft_tokens > draft_distribution.shape[1]:
+                raise ValueError(
+                    f"DSpark {distribution_name} length is smaller than spec metadata: "
+                    f"num_draft_tokens={num_draft_tokens}, cached_steps={draft_distribution.shape[1]}"
+                )
+            flattened_distributions.append(draft_distribution[draft_idx, :num_draft_tokens])
+
+        if not flattened_distributions:
+            return None
+        return torch.cat(flattened_distributions, dim=0).contiguous()
+
+    def _get_spec_decode_draft_logits(self, metadata: SpecDecodeMetadata) -> torch.Tensor | None:
+        return self._get_spec_decode_draft_distribution(
+            metadata,
+            self._draft_logits,
+            self._draft_logits_req_ids,
+            "draft logits",
+        )
+
+    def _get_spec_decode_draft_probs(self, metadata: SpecDecodeMetadata) -> torch.Tensor | None:
+        return self._get_spec_decode_draft_distribution(
+            metadata,
+            self._draft_probs,
+            self._draft_probs_req_ids,
+            "draft probabilities",
+        )
 
     def _copy_draft_token_ids_to_cpu(
         self, scheduler_output: "SchedulerOutput", zeros_only: bool = False
@@ -2762,16 +2842,18 @@ class NPUModelRunner(GPUModelRunner):
         if self.input_batch.sampling_metadata.top_k is not None and get_ascend_config().enable_reduce_sample:
             max_topk = self.input_batch.top_k_cpu[self.input_batch.top_k_cpu < logits.shape[1]].max()
             self.rejection_sampler.prepare_sampling(max_topk)
-        draft_probs = (
-            self._get_spec_decode_draft_probs(spec_decode_metadata)
+        draft_logits = (
+            None
             if get_pp_group().world_size > 1
-            else None
+            else self._get_spec_decode_draft_logits(spec_decode_metadata)
         )
+        draft_probs = None if draft_logits is not None else self._get_spec_decode_draft_probs(spec_decode_metadata)
         sampler_output = self.rejection_sampler(
             spec_decode_metadata,
             draft_probs,
             logits,
             sampling_metadata,
+            draft_logits=draft_logits,
         )
         return sampler_output
 

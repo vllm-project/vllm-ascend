@@ -18,7 +18,27 @@
 # This file is a part of the vllm-ascend project.
 
 import torch
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import HAS_TRITON, tl, triton
+
+_TL_RAND_MIN = tl.constexpr(4.6566127342e-10) if HAS_TRITON else 4.6566127342e-10
+
+
+def flipped_gumbel_noise(u: torch.Tensor) -> torch.Tensor:
+    """Match upstream fp32 Gumbel transform while keeping the winning tail precise."""
+    u = u.float().clamp_min(4.6566127342e-10)
+    return -torch.log(-torch.log1p(-u))
+
+
+@triton.jit
+def _tl_log1p_neg(x):
+    # Triton-Ascend does not compile libdevice.log1p today. For the important
+    # winning tail, x is near 0 and log(1 - x) would round to 0 in fp32, so use a
+    # short log1p(-x) series there and ordinary log elsewhere.
+    return tl.where(
+        x < 0.01,
+        -x * (1.0 + x * (0.5 + x * (0.3333333333333333 + x * 0.25))),
+        tl.log(1.0 - x),
+    )
 
 
 @triton.jit(do_not_specialize=["logits_stride", "vocab_size"])
@@ -140,8 +160,8 @@ def _gumbel_sample_kernel(
 
         # NOTE(Ronald1995): r is tl.float64 in vllm, change it to tl.float32,
         # because triton-ascend's compiler does not support float64.
-        r = tl.rand(gumbel_seed, block).to(tl.float32)
-        gumbel_noise = -tl.log(-tl.log(r + 1e-20) + 1e-20)
+        r = tl.maximum(tl.rand(gumbel_seed, block).to(tl.float32), _TL_RAND_MIN)
+        gumbel_noise = -tl.log(-_tl_log1p_neg(r))
 
         # Apply gumbel noise.
         logits = tl.where(mask, logits + gumbel_noise, float("-inf"))

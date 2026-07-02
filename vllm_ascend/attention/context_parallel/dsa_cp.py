@@ -13,6 +13,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.attention.abstract import DSAAttentionImpl
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.dsa_window import get_draft_swa_window
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, split_decodes_and_prefills
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.device_op import DeviceOperator
@@ -98,6 +99,8 @@ class AscendDSAReqMetadata:
     qli_metadata: torch.Tensor = None
     cu_cmp_seqlen_list: torch.Tensor = None
     attn_mask: torch.Tensor | None = None
+    ori_win_left: int | None = None
+    ori_win_right: int | None = None
 
 
 @dataclass
@@ -474,6 +477,10 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op()
         metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
         metadata_kwargs.setdefault("device", str(self.seqused_q.device))
+        ori_win_left, ori_win_right = get_draft_swa_window(
+            self.vllm_config,
+            common_attn_metadata,
+        )
         cu_seqlens_ori_kv = (
             local_query_start_loc
             if has_prefill
@@ -504,8 +511,8 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             batch_size=num_reqs,
             cmp_ratio=1,
             ori_mask_mode=4,
-            ori_win_left=self.model_config.hf_config.sliding_window - 1,
-            ori_win_right=0,
+            ori_win_left=ori_win_left,
+            ori_win_right=ori_win_right,
             layout_q="TND",
             layout_kv="PA_ND",
             has_ori_kv=True,
@@ -537,6 +544,8 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             sas_metadata=sas_metadata,
             qli_metadata=None,
             cu_cmp_seqlen_list=None,
+            ori_win_left=ori_win_left,
+            ori_win_right=ori_win_right,
         )
 
     def _num_compressor_metadata_rows(
@@ -1430,6 +1439,16 @@ class AscendDSACPImpl(DSAAttentionImpl):
             DeviceOperator.add_dsa_sparse_attn_extra_kwargs(
                 extra_attn_kwargs, cu_seqlens_ori_kv=local_seq_lengths_query
             )
+        ori_win_left = (
+            self.window_size - 1
+            if req_metadata.ori_win_left is None
+            else req_metadata.ori_win_left
+        )
+        ori_win_right = (
+            0
+            if req_metadata.ori_win_right is None
+            else req_metadata.ori_win_right
+        )
 
         common_attn_kwargs = dict(
             cu_seqlens_q=local_seq_lengths_query,
@@ -1438,8 +1457,8 @@ class AscendDSACPImpl(DSAAttentionImpl):
             softmax_scale=self.softmax_scale,
             cmp_ratio=max(self.compress_ratio, 1),
             ori_mask_mode=4,
-            ori_win_left=self.window_size - 1,
-            ori_win_right=0,
+            ori_win_left=ori_win_left,
+            ori_win_right=ori_win_right,
             layout_q="TND",
             layout_kv="PA_ND",
             **extra_attn_kwargs,
