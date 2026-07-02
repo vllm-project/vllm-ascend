@@ -3,7 +3,7 @@ from vllm.config import ParallelConfig, get_current_vllm_config
 from vllm.distributed.parallel_state import GroupCoordinator, get_tp_group, get_world_group, init_model_parallel_group
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.utils import enable_dsa_cp_with_layer_shard, flashcomm2_enable
+from vllm_ascend.utils import enable_dsa_cp_with_layer_shard, flashcomm2_enable, get_ascend_device_type, AscendDeviceType
 
 # Currently, mc2 op need their own group coordinator.
 _MC2: GroupCoordinator | None = None
@@ -94,6 +94,11 @@ def init_ascend_model_parallel(
 
     global _MC2
     _MC2 = init_model_parallel_group(group_ranks, get_world_group().local_rank, backend, group_name="mc2")
+
+    global _MEGA_MOE
+    if (get_ascend_device_type() == AscendDeviceType.A5 and get_ascend_config().enable_fused_mc2 == 1):
+        _MEGA_MOE = init_model_parallel_group(group_ranks, get_world_group().local_rank, backend, group_name="mega_moe")
+        torch.distributed.barrier(group=_MEGA_MOE.device_group)
 
     if get_ascend_config().eplb_config.dynamic_eplb:
         global _DYNAMIC_EPLB
@@ -235,6 +240,11 @@ def get_mc2_group() -> GroupCoordinator:
     return _MC2
 
 
+def get_mega_moe_group() -> GroupCoordinator:
+    assert _MEGA_MOE is not None, "mega_moe group is not initialized"
+    return _MEGA_MOE
+
+
 def get_mlp_tp_group() -> GroupCoordinator:
     assert _MLP_TP is not None, "mlp group is not initialized"
     return _MLP_TP
@@ -340,6 +350,10 @@ def destroy_ascend_model_parallel():
         _DYNAMIC_EPLB.destroy()
     _DYNAMIC_EPLB = None
 
+    global _MEGA_MOE
+    if _MEGA_MOE:
+        _MEGA_MOE.destroy()
+    _MEGA_MOE = None
 
 def get_global_rank(parallel_config: ParallelConfig | None = None) -> int:
     """Return a globally unique rank for the current worker across all parallel
