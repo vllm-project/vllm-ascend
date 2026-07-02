@@ -36,6 +36,7 @@ jobs:
             rerun
             nightly
             cherry-pick
+            revert
           permission: none
           issue-type: both
           dispatch-type: repository
@@ -58,6 +59,11 @@ jobs:
               },
               {
                 "command": "cherry-pick",
+                "permission": "none",
+                "issue_type": "pull-request"
+              },
+              {
+                "command": "revert",
                 "permission": "none",
                 "issue_type": "pull-request"
               }

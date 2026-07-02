@@ -951,12 +951,18 @@
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.single_type_kv_cache_manager.MambaManager`
 #    Why:
-#       Upstream hybrid prefix cache lookup does not support PCP/DCP.
+#       1. Upstream hybrid prefix cache lookup does not support PCP/DCP.
+#       2. Upstream MambaManager#get_num_blocks_to_allocate give the
+#          wrong number of blocks when an external cache hit occurred
 #    How:
-#       Replace MambaManager with AscendMambaManager for prefix cache hit lookup
-#       on hybrid Mamba paths (logical mamba block_size when caching is enabled).
+#       1. Replace MambaManager with AscendMambaManager for prefix cache hit lookup
+#          on hybrid Mamba paths (logical mamba block_size when caching is enabled).
+#       2. Override the get_num_blocks_to_allocate method to fix the number of blocks
+#          when hitting the external cache and loading synchronously
 #    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/40996
+#       1. https://github.com/vllm-project/vllm/pull/40996
+#       2. https://github.com/vllm-project/vllm/pull/46892
 #    Future Plan:
-#       Upstream PR #40996 adds hybrid prefix cache lookup for DCP only; PCP is
-#       not supported yet. Remove this patch once upstream supports both PCP and DCP.
+#       1. Upstream PR #40996 adds hybrid prefix cache lookup for DCP only; PCP is
+#          not supported yet. Remove this patch once upstream supports both PCP and DCP.
+#       2. Remove this patch once upstream accept 46892 pr or fixed the bug by other pr.
