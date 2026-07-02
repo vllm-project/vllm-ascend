@@ -189,7 +189,7 @@ def _patch_scheduler_make_cached_request_data() -> None:
         finally:
             self.scheduler_config.async_scheduling = saved_async
 
-        if not use_pp_ipc_runtime_patch or not cached_reqs_data.new_token_ids:
+        if not saved_async or not use_pp_ipc_runtime_patch or not cached_reqs_data.new_token_ids:
             return cached_reqs_data
 
         for req_index, req in enumerate(chain(running_reqs, resumed_reqs)):
