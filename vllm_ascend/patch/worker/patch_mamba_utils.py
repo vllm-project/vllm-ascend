@@ -141,8 +141,26 @@ def _postprocess_mamba_align_gpu_cpu_fallback(
 
         src_block_idx = mamba_state_idx[i]
         dest_block_idx = aligned_new_computed_tokens // block_size - 1
+        accept_token_bias = aligned_new_computed_tokens - num_tokens_running_state
         if src_block_idx == dest_block_idx:
             num_accepted_tokens_cpu_tensor[i] = 1
+            if accept_token_bias == 0:
+                continue
+
+        for mamba_group_id in ctx.mamba_group_ids:
+            block_ids = input_batch.block_table[mamba_group_id].get_numpy()[i]
+            dest_block_id = block_ids[dest_block_idx]
+            layer_names = kv_cache_config.kv_cache_groups[mamba_group_id].layer_names
+            for layer_name in layer_names:
+                attention = forward_context[layer_name]
+                kv_caches: list[torch.Tensor] = attention.kv_cache
+                for state, state_copy_func in zip(kv_caches, mamba_state_copy_funcs):
+                    copy_spec = state_copy_func(state, block_ids, src_block_idx, accept_token_bias + 1)
+                    src_state = _tensor_view_from_data_ptr(state, copy_spec.start_addr, copy_spec.num_elements)
+                    dst_state = _tensor_view_from_data_ptr(
+                        state, state[dest_block_id].data_ptr(), copy_spec.num_elements
+                    )
+                    dst_state.copy_(src_state.clone())
 
 
 def _batch_memcpy_unavailable(src_ptrs, dst_ptrs, sizes):
