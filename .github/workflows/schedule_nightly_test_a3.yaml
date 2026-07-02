@@ -220,6 +220,9 @@ jobs:
           - name: multi-node-deepseek-v3.1
             config_file_path: DeepSeek-V3.1-BF16.yaml
             size: 2
+          - name: multi-node-deepseek-v4-pro-w4a8
+            config_file_path: DeepSeek-V4-Pro-W4A8-A3-dual-nodes.yaml
+            size: 2
           - name: multi-node-GLM-5.1-w8a8-A3
             config_file_path: GLM5_1-W8A8-A3-dual-nodes.yaml
             size: 2
