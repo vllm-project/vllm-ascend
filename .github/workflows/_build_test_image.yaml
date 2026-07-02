@@ -233,19 +233,19 @@ jobs:
       - name: Build and push image
         id: build
         run: |
-          echo "Installing buildctl..." 
-          mkdir -p /tmp/buildkit 
-          BUILDKIT_VERSION="v0.29.0" 
-          ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') 
-          curl -fsSL "https://github.com/moby/buildkit/releases/download/${BUILDKIT_VERSION}/buildkit-${BUILDKIT_VERSION}.linux-${ARCH}.tar.gz" -o /tmp/buildkit.tar.gz
-          tar -xzf /tmp/buildkit.tar.gz -C /tmp/buildkit 
-          export PATH=$PATH:/tmp/buildkit/bin/
+          # echo "Installing buildctl..." 
+          # mkdir -p /tmp/buildkit 
+          # BUILDKIT_VERSION="v0.29.0" 
+          # ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') 
+          # curl -fsSL "https://github.com/moby/buildkit/releases/download/${BUILDKIT_VERSION}/buildkit-${BUILDKIT_VERSION}.linux-${ARCH}.tar.gz" -o /tmp/buildkit.tar.gz
+          # tar -xzf /tmp/buildkit.tar.gz -C /tmp/buildkit 
+          # export PATH=$PATH:/tmp/buildkit/bin/
           
-          chmod +x /tmp/buildkit/bin/buildctl
+          # chmod +x /tmp/buildkit/bin/buildctl
 
-          echo "buildctl installed successfully" buildctl --version
-          set -ex
-          which buildctl
+          # echo "buildctl installed successfully" buildctl --version
+          # set -ex
+          # which buildctl
           IMAGE_TAG="vllm-ascend-pr${{ inputs.pr_number }}-${{ matrix.vllm_label }}-${{ matrix.npu_type }}-${{ matrix.arch }}"
           IMAGE_NAME="${{ env.QUAY_TEMP_REPO }}:${IMAGE_TAG}"
 
