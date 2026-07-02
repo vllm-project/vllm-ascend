@@ -36,10 +36,18 @@ def _register_dspark_speculative_method() -> None:
     if "dspark" in existing:
         return
     new_literal = typing.Literal[existing + ("dspark",)]  # type: ignore[valid-type]
+    new_annotation = Optional[new_literal]
     spec_mod.SpeculativeMethod = new_literal
     # speculative.py does NOT use `from __future__ import annotations`, so the
-    # stored annotation is the real `SpeculativeMethod | None` object.
-    SpeculativeConfig.__annotations__["method"] = Optional[new_literal]
+    # stored annotation is the real `SpeculativeMethod | None` object. pydantic's
+    # rebuild reads the field type from BOTH the class ``__annotations__`` and the
+    # ``dataclasses`` ``Field.type`` — updating only ``__annotations__`` leaves
+    # ``__dataclass_fields__["method"].type`` stale, so rebuild recompiles the
+    # old literal and ``method="dspark"`` is still rejected (confirmed on-device).
+    SpeculativeConfig.__annotations__["method"] = new_annotation
+    dc_fields = getattr(SpeculativeConfig, "__dataclass_fields__", None)
+    if dc_fields is not None and "method" in dc_fields:
+        dc_fields["method"].type = new_annotation
 
     try:
         from pydantic.dataclasses import rebuild_dataclass
@@ -57,6 +65,40 @@ def _register_dspark_speculative_method() -> None:
         rebuild_dataclass(VllmConfig, force=True)  # type: ignore[arg-type]
     except Exception as e:
         logger.debug("rebuild_dataclass(VllmConfig) failed (%s); nested spec validation may be stale.", e)
+
+
+def _patch_dspark_draft_from_target() -> None:
+    """Default the DSpark draft model to the target model.
+
+    DSpark ships its draft weights inside the *target* checkpoint's ``mtp.*``
+    namespace, so the launch config carries no separate speculative ``model``
+    (just ``method="dspark"`` + ``num_speculative_tokens``). vLLM's
+    ``SpeculativeConfig.__post_init__`` only auto-fills ``model`` from the target
+    for ``mtp`` (and, in the ascend fork, ``dflash``); anything else hits
+    ``ValueError: num_speculative_tokens was provided but without speculative
+    model.`` We wrap ``__post_init__`` to mirror the mtp branch for ``dspark``
+    *before* the original runs, so the else-raise is never reached.
+    """
+    original_post_init = SpeculativeConfig.__post_init__
+    if getattr(original_post_init, "_vllm_ascend_dspark_patched", False):
+        return
+
+    def _patched_post_init(self, *args, **kwargs):
+        if (
+            getattr(self, "method", None) == "dspark"
+            and getattr(self, "model", None) is None
+            and getattr(self, "num_speculative_tokens", None) is not None
+        ):
+            target_cfg = getattr(self, "target_model_config", None)
+            if target_cfg is not None:
+                # Mirror the mtp branch: draft == target, align quantization.
+                self.model = target_cfg.model
+                if not getattr(self, "quantization", None):
+                    self.quantization = getattr(target_cfg, "quantization", None)
+        return original_post_init(self, *args, **kwargs)
+
+    _patched_post_init._vllm_ascend_dspark_patched = True  # type: ignore[attr-defined]
+    SpeculativeConfig.__post_init__ = _patched_post_init  # type: ignore[assignment]
 
 
 def _is_dspark_v4_checkpoint(hf_config: PretrainedConfig) -> bool:
@@ -208,6 +250,9 @@ def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
 
 SpeculativeConfig.hf_config_override = hf_config_override
 
-# Extend the pydantic method literal so `method="dspark"` validates. Must run at
-# import (patch application) time, before EngineArgs builds SpeculativeConfig.
+# Extend the pydantic method literal so `method="dspark"` validates, and default
+# the draft model to the target (weights live in the target's mtp.* namespace).
+# Must run at import (patch application) time, before EngineArgs builds
+# SpeculativeConfig.
 _register_dspark_speculative_method()
+_patch_dspark_draft_from_target()
