@@ -17,6 +17,10 @@ endif()
 
 
 add_modules_sources(OPTYPE recompute_wu_fwd ACLNNTYPE aclnn_exclude)
+add_ops_tiling_keys(
+    OP_NAME RecomputeWUFwd
+    TILING_KEYS 1 2
+)
 if (NOT BUILD_OPS_RTY_KERNEL)
     target_include_directories(${OPHOST_NAME}_tiling_obj PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
