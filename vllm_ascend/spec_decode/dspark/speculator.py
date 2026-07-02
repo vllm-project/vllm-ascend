@@ -107,6 +107,18 @@ class AscendDsparkSpeculator(AscendDflashProposer):
         logger.info_once("DSpark draft model loaded and cached for Markov sampling.")
         return model
 
+    # --- Method-string behaviour overrides -------------------------------
+
+    def model_returns_tuple(self) -> bool:
+        """DSpark's draft model returns a single hidden tensor, not a tuple.
+
+        The base predicate (llm_base_proposer.py) excludes mtp/draft_model/dflash
+        but not dspark, so it would try ``last, hidden = ret`` and raise
+        ``ValueError: too many values to unpack``. DSpark is a DFlash variant and
+        returns one tensor, so mirror dflash here.
+        """
+        return False
+
     # --- Sample path (Markov-biased; replaces DFlash's parallel sample) ----
 
     # --- Markov serial sample loop (port of vllm #46995 speculator.py L143) -

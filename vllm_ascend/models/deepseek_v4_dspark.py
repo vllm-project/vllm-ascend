@@ -334,11 +334,12 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
         expert_scale_suffix = (
             ".weight_scale" if getattr(self.config, "expert_dtype", "fp4") == "fp4" else ".weight_scale_inv"
         )
+        # NOTE: no attn fused_wqa_wkv mapping — DeepseekV4Attention keeps wq_a /
+        # wkv as separate ReplicatedLinear modules (mirror deepseek_v4_mtp.py),
+        # so they load via the generic else-branch below.
         stacked_params_mapping = [
             ("gate_up_proj", "w1", 0),
             ("gate_up_proj", "w3", 1),
-            ("attn.fused_wqa_wkv", "attn.wq_a", 0),
-            ("attn.fused_wqa_wkv", "attn.wkv", 1),
         ]
 
         params_dict = dict(self.named_parameters())
@@ -354,6 +355,22 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
             if mapped is None:
                 continue
             name = mapped
+
+            # Convert the checkpoint's raw DSv4 sub-names to the base
+            # DeepseekV2DecoderLayer module names (mirror deepseek_v4_mtp.py).
+            # Decoder-body only — the head stack (model.norm / model.markov_head
+            # / model.confidence_head / model.hc_head_* / model.main_*) keeps its
+            # names. Without this the entire attention + MoE body stays
+            # unloaded (silent NaN drafts).
+            if name.startswith("model.layers."):
+                if ".attn_norm." in name:
+                    name = name.replace(".attn_norm.", ".input_layernorm.")
+                if ".ffn_norm." in name:
+                    name = name.replace(".ffn_norm.", ".post_attention_layernorm.")
+                if ".attn." in name and ".self_attn." not in name:
+                    name = name.replace(".attn.", ".self_attn.")
+                if ".ffn." in name:
+                    name = name.replace(".ffn.", ".mlp.")
 
             if name.endswith(".scale"):
                 suffix = expert_scale_suffix if _EXPERT_SCALE_RE.search(name) else ".weight_scale_inv"
@@ -390,12 +407,13 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
             for param_name, weight_name, stacked_shard_id in stacked_params_mapping:
                 if not is_layer_param or weight_name not in name:
                     continue
-                name = name.replace(weight_name, param_name)
-                if name not in params_dict:
+                # Use a temp so a miss doesn't corrupt `name` for the else-branch.
+                name_mapped = name.replace(weight_name, param_name)
+                if name_mapped not in params_dict:
                     continue
-                param = params_dict[name]
+                param = params_dict[name_mapped]
                 param.weight_loader(param, loaded_weight, stacked_shard_id)
-                loaded.add(name)
+                loaded.add(name_mapped)
                 break
             else:
                 # attention sinks (sharded by head).
@@ -406,8 +424,8 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
                     continue
                 if ".shared_experts.w2" in name:
                     name = name.replace(".shared_experts.w2", ".shared_experts.down_proj")
-                if name.endswith(".ffn.gate.bias"):
-                    name = name.replace(".ffn.gate.bias", ".ffn.gate.e_score_correction_bias")
+                if name.endswith(".mlp.gate.bias"):
+                    name = name.replace(".mlp.gate.bias", ".mlp.gate.e_score_correction_bias")
                 if name not in params_dict:
                     continue
                 param = params_dict[name]

@@ -70,35 +70,71 @@ def _register_dspark_speculative_method() -> None:
 def _patch_dspark_draft_from_target() -> None:
     """Default the DSpark draft model to the target model.
 
-    DSpark ships its draft weights inside the *target* checkpoint's ``mtp.*``
-    namespace, so the launch config carries no separate speculative ``model``
-    (just ``method="dspark"`` + ``num_speculative_tokens``). vLLM's
-    ``SpeculativeConfig.__post_init__`` only auto-fills ``model`` from the target
-    for ``mtp`` (and, in the ascend fork, ``dflash``); anything else hits
-    ``ValueError: num_speculative_tokens was provided but without speculative
-    model.`` We wrap ``__post_init__`` to mirror the mtp branch for ``dspark``
-    *before* the original runs, so the else-raise is never reached.
+    DSpark is a DFlash variant: its draft weights live in the *target*
+    checkpoint's ``mtp.*`` namespace, so the launch config carries no separate
+    speculative ``model`` (just ``method="dspark"`` + ``num_speculative_tokens``).
+    vLLM's ``SpeculativeConfig.__post_init__`` keys many behaviours off the
+    method string — model auto-fill from target, ``parallel_drafting=True``, and
+    the method-detection whitelist (whose else-branch raises
+    ``NotImplementedError: Unsupported speculative method: 'dspark'``). The
+    ascend fork already wires all of that for ``dflash``.
+
+    Rather than re-derive each branch (fork-version-dependent and fragile), we
+    run ``__post_init__`` with ``self.method`` temporarily masquerading as
+    ``"dflash"`` so the config is set up through the fork's proven dflash path
+    (draft==target, parallel_drafting, no raise), then restore ``"dspark"`` so
+    dispatch (``get_spec_decode_method``) still routes to the DSpark speculator.
+    We also belt-and-suspenders pre-fill ``model`` from the target.
     """
     original_post_init = SpeculativeConfig.__post_init__
     if getattr(original_post_init, "_vllm_ascend_dspark_patched", False):
         return
 
     def _patched_post_init(self, *args, **kwargs):
-        if (
-            getattr(self, "method", None) == "dspark"
-            and getattr(self, "model", None) is None
-            and getattr(self, "num_speculative_tokens", None) is not None
-        ):
+        is_dspark = getattr(self, "method", None) == "dspark"
+        if is_dspark:
             target_cfg = getattr(self, "target_model_config", None)
-            if target_cfg is not None:
-                # Mirror the mtp branch: draft == target, align quantization.
+            if getattr(self, "model", None) is None and target_cfg is not None:
+                # Mirror the mtp/dflash branch: draft == target, align quant.
                 self.model = target_cfg.model
                 if not getattr(self, "quantization", None):
                     self.quantization = getattr(target_cfg, "quantization", None)
-        return original_post_init(self, *args, **kwargs)
+            # Masquerade as dflash for the duration of __post_init__ so the
+            # fork's dflash setup (parallel_drafting, method whitelist) applies.
+            self.method = "dflash"
+        try:
+            result = original_post_init(self, *args, **kwargs)
+        finally:
+            if is_dspark:
+                # Restore so dispatch routes to AscendDsparkSpeculator. Any
+                # method-derived *attributes* set during __post_init__ (e.g.
+                # parallel_drafting) persist; only the string flips back.
+                self.method = "dspark"
+        return result
 
     _patched_post_init._vllm_ascend_dspark_patched = True  # type: ignore[attr-defined]
     SpeculativeConfig.__post_init__ = _patched_post_init  # type: ignore[assignment]
+
+
+def _patch_dspark_use_eagle() -> None:
+    """Make ``SpeculativeConfig.use_eagle()`` return True for dspark.
+
+    ``use_eagle()`` (method in eagle/eagle3/mtp/dflash) gates draft attention-
+    backend initialisation and the drafter dispatch in model_runner. dspark is
+    a DFlash variant and needs both, but ``self.method`` is "dspark" at runtime
+    (we only masquerade during __post_init__), so we wrap the predicate.
+    """
+    original_use_eagle = getattr(SpeculativeConfig, "use_eagle", None)
+    if original_use_eagle is None or getattr(original_use_eagle, "_vllm_ascend_dspark_patched", False):
+        return
+
+    def _patched_use_eagle(self) -> bool:
+        if getattr(self, "method", None) == "dspark":
+            return True
+        return original_use_eagle(self)
+
+    _patched_use_eagle._vllm_ascend_dspark_patched = True  # type: ignore[attr-defined]
+    SpeculativeConfig.use_eagle = _patched_use_eagle  # type: ignore[assignment]
 
 
 def _is_dspark_v4_checkpoint(hf_config: PretrainedConfig) -> bool:
@@ -256,3 +292,4 @@ SpeculativeConfig.hf_config_override = hf_config_override
 # SpeculativeConfig.
 _register_dspark_speculative_method()
 _patch_dspark_draft_from_target()
+_patch_dspark_use_eagle()
