@@ -16,8 +16,26 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+from contextlib import contextmanager
+
 import torch
+import vllm
 from vllm.config import VllmConfig
+
+from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
+
+_BUILD_ATTN_METADATA_MODULE = vllm.v1.worker.gpu.spec_decode.speculator
+
+
+@contextmanager
+def build_attn_metadata_wrapper():
+    """Context manager to override attention metadata building for Ascend NPUs."""
+    original_func = _BUILD_ATTN_METADATA_MODULE.build_attn_metadata
+    try:
+        _BUILD_ATTN_METADATA_MODULE.build_attn_metadata = build_attn_metadata
+        yield
+    finally:
+        _BUILD_ATTN_METADATA_MODULE.build_attn_metadata = original_func
 
 
 def init_speculator(
@@ -30,11 +48,11 @@ def init_speculator(
     speculative_config = vllm_config.speculative_config
     assert speculative_config is not None
     if speculative_config.use_dflash():
-        from vllm.v1.worker.gpu.spec_decode.dflash.speculator import (
-            DFlashSpeculator,
+        from vllm_ascend.worker.v2.spec_decode.dflash.speculator import (
+            AscendDFlashSpeculator,
         )
 
-        return DFlashSpeculator(vllm_config, device)
+        return AscendDFlashSpeculator(vllm_config, device)
     if speculative_config.use_eagle():
         from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 
