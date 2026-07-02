@@ -135,8 +135,8 @@ def main(
         devs = [d for d in visible.split(",") if d]
         if len(devs) >= dp_size:
             chunk = len(devs) // dp_size
-            start = local_dp_rank * chunk
-            os.environ["ASCEND_RT_VISIBLE_DEVICES"] = ",".join(devs[start : start + chunk])
+            offset = local_dp_rank * chunk
+            os.environ["ASCEND_RT_VISIBLE_DEVICES"] = ",".join(devs[offset : offset + chunk])
 
     # Sample prompts.
     prompts = [
