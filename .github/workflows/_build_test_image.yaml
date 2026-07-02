@@ -1,270 +1,239 @@
-#
-# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-# This file is a part of the vllm-ascend project.
-#
-
-# Reusable workflow that builds CI test images on CPU runners and pushes them
-# to the Quay temp repo.  Always builds all 4 npu_types x 2 vllm versions = 8
-# images.  Image tag format:
-#   vllm-ascend-pr<pr_number>-<vllm_label>-<npu_type>-<arch>
-#
-# The image contains vllm + vllm-ascend fully installed (source baked in at
-# /vllm-workspace/vllm-ascend) so that _selected_tests.yaml only needs to run
-# the tests — no checkout or install steps.
-
-name: Build Test Image
-
+name: Image_oncall
 on:
   workflow_call:
     inputs:
-      vllm_main_commit:
-        type: string
+      suffix:
+        description: 'The tag subfix to use'
         required: true
-        description: 'vLLM main commit hash (from .github/vllm-main-verified.commit).'
-      vllm_release_tag:
         type: string
-        required: true
-        description: 'vLLM release tag (from .github/vllm-release-tag.commit).'
-      pr_number:
-        type: string
-        required: true
-        description: 'PR number for image tag construction.'
-      ascend_ref:
-        type: string
-        required: true
-        description: 'The vllm-ascend commit hash (PR head sha) to build from.'
-      quay_temp_username:
-        type: string
+      should_push:
+        description: 'Whether to push the image'
         required: false
-        default: ''
-        description: 'Quay username for pushing temp images.'
+        type: boolean
+        default: False
+      dockerfile:
+        description: 'The Dockerfile to use'
+        required: false
+        type: string
+      workflow_dispatch_tag:
+        description: 'The tag to use for workflow dispatch'
+        required: false
+        type: string
+      branch_ref:
+        description: 'Branch/ref to check out for non-workflow_dispatch events'
+        required: false
+        type: string
+        default: 'main'
+      schedule_tag_pattern:
+        description: 'Pattern used for the schedule Docker tag'
+        required: false
+        type: string
+        default: 'main'
     secrets:
-      QUAY_TEMP_PASSWORD:
-        description: 'Quay password for pushing temp images.'
-        required: false
+      CA_PEM:
+        description: 'Buildkitd CA cert'
+        required: true
+      CERT_PEM:
+        description: 'Buildkitd client cert'
+        required: true
+      KEY_PEM:
+        description: 'Buildkitd client key'
+        required: true
 
 env:
-  QUAY_TEMP_REPO: quay.io/atlas-ci/vllm-atlas-temp
-  CACHE_REPO: ghcr.io/vllm-project/vllm-ascend
-
-defaults:
-  run:
-    shell: bash -el {0}
-
-permissions:
-  packages: write
-  contents: read
+  QUAY_REPO: quay.io/atlas-ci/vllm-atlas-temp
 
 jobs:
-  build-push:
-    name: build-${{ matrix.npu_type }}-${{ matrix.vllm_label }}
+  build-push-digest:
+    name: build
     runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+
     strategy:
       fail-fast: false
       matrix:
         include:
-          # A2 (ARM64, device)
-          - npu_type: a2
-            cann_tag: "9.0.0-910b-ubuntu22.04-py3.12"
-            soc: "ascend910b1"
-            arch: arm64
-            mode: device
+          - arch: linux/amd64
             runner: linux-amd64-cpu-32-hk
-            vllm_label: main
-            vllm_version: ${{ inputs.vllm_main_commit }}
-          - npu_type: a2
-            cann_tag: "9.0.0-910b-ubuntu22.04-py3.12"
-            soc: "ascend910b1"
-            arch: arm64
-            mode: device
-            runner: linux-amd64-cpu-32-hk
-            vllm_label: release
-            vllm_version: ${{ inputs.vllm_release_tag }}
-          # A3 (ARM64, device)
-          - npu_type: a3
-            cann_tag: "9.0.0-a3-ubuntu22.04-py3.12"
-            soc: "ascend910_9391"
-            arch: arm64
-            mode: device
-            runner: linux-amd64-cpu-32-hk
-            vllm_label: main
-            vllm_version: ${{ inputs.vllm_main_commit }}
-          - npu_type: a3
-            cann_tag: "9.0.0-a3-ubuntu22.04-py3.12"
-            soc: "ascend910_9391"
-            arch: arm64
-            mode: device
-            runner: linux-amd64-cpu-32-hk
-            vllm_label: release
-            vllm_version: ${{ inputs.vllm_release_tag }}
-          # 310P (ARM64, device)
-          - npu_type: 310p
-            cann_tag: "9.1.0-beta.1-310p-ubuntu22.04-py3.12"
-            soc: "ascend310p1"
-            arch: arm64
-            mode: device
-            runner: linux-amd64-cpu-32-hk
-            vllm_label: main
-            vllm_version: ${{ inputs.vllm_main_commit }}
-          - npu_type: 310p
-            cann_tag: "9.1.0-beta.1-310p-ubuntu22.04-py3.12"
-            soc: "ascend310p1"
-            arch: arm64
-            mode: device
-            runner: linux-amd64-cpu-32-hk
-            vllm_label: release
-            vllm_version: ${{ inputs.vllm_release_tag }}
-          # CPU (AMD64, nodevice)
-          - npu_type: cpu
-            cann_tag: "9.0.0-910b-ubuntu22.04-py3.12"
-            soc: "ascend910b1"
-            arch: amd64
-            mode: nodevice
+            tag: amd64
+          - arch: linux/amd64
             runner: linux-amd64-cpu-16-hk
-            vllm_label: main
-            vllm_version: ${{ inputs.vllm_main_commit }}
-          - npu_type: cpu
-            cann_tag: "9.0.0-910b-ubuntu22.04-py3.12"
-            soc: "ascend910b1"
-            arch: amd64
-            mode: nodevice
-            runner: linux-amd64-cpu-16-hk
-            vllm_label: release
-            vllm_version: ${{ inputs.vllm_release_tag }}
+            tag: amd64
+          - arch: linux/amd64
+            runner: linux-amd64-cpu-8-hk
+            tag: amd64
     steps:
-      - name: Checkout vllm-project/vllm-ascend repo
-        uses: actions/checkout@v7
-        with:
-          ref: ${{ inputs.ascend_ref }}
-          fetch-depth: 1
-          submodules: recursive
 
-      # - name: Rebase on latest main
-      #   run: |
-      #     git config user.name "vllm-ascend-ci"
-      #     git config user.email "vllm-ascend-ci@users.noreply.github.com"
-      #     git fetch origin main
-      #     git rebase origin/main
+    - name: Validate inputs (workflow_dispatch only)
+      if: ${{ github.event_name == 'workflow_dispatch' }}
+      run: |
+        tag="${{ inputs.workflow_dispatch_tag }}"
+        branch="${{ inputs.branch_ref }}"
+        if [[ -n "$tag" && -n "$branch" ]]; then
+          echo "Error: 'tag' and 'branch' are mutually exclusive. Please specify only one."
+          exit 1
+        fi
+        if [[ -z "$tag" && -z "$branch" ]]; then
+          echo "Error: Either 'tag' or 'branch' must be specified."
+          exit 1
+        fi
 
-      - name: Get csrc hash
-        id: get_csrc_hash
-        run: |
-          CSRC_HASH=$(find ./csrc ./setup.py ./CMakeLists.txt ./cmake \
-            -type f -not -path '*/.*' | sort | xargs sha256sum | sha256sum | awk '{print $1}')
-          echo "CSRC_HASH=$CSRC_HASH" >> $GITHUB_OUTPUT
+    - uses: actions/checkout@v6
+      if: ${{ github.event_name != 'workflow_dispatch' }}
+      with:
+        fetch-depth: 0
+        persist-credentials: false
+        ref: ${{ inputs.branch_ref }}
 
-      - name: Get architecture
-        id: get_arch
-        run: |
-          ARCH=$(uname -m)
-          case "$ARCH" in
-            x86_64) echo "arch=X64" >> $GITHUB_OUTPUT ;;
-            aarch64) echo "arch=ARM64" >> $GITHUB_OUTPUT ;;
-            *) echo "arch=$ARCH" >> $GITHUB_OUTPUT ;;
-          esac
+    - uses: actions/checkout@v6
+      if: ${{ github.event_name == 'workflow_dispatch' && inputs.workflow_dispatch_tag != '' }}
+      with:
+        fetch-depth: 0
+        persist-credentials: false
+        ref: ${{ inputs.workflow_dispatch_tag }}
 
-      - name: Restore vllm-ascend csrc cache
-        id: cache-csrc
-        uses: runs-on/cache/restore@v5
-        with:
-          path: |
-            vllm_ascend/_cann_ops_custom
-            vllm_ascend/*.so
-            vllm_ascend/lib
-            vllm_ascend/include
-          key: vllm-ascend-build-v1-${{ steps.get_arch.outputs.arch }}-${{ matrix.cann_tag }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+    - uses: actions/checkout@v6
+      if: ${{ github.event_name == 'workflow_dispatch' && inputs.workflow_dispatch_tag == '' }}
+      with:
+        fetch-depth: 0
+        persist-credentials: false
+        ref: ${{ inputs.branch_ref }}
 
-      # - name: Login to Quay Temp
-      #   uses: docker/login-action@v4
-      #   with:
-      #     registry: quay.io
-      #     username: ${{ inputs.quay_temp_username }}
-      #     password: ${{ secrets.QUAY_TEMP_PASSWORD }}
+    - name: Prepare suffix
+      run: |
+        if [ -n "${{ inputs.suffix }}" ]; then
+          echo "SUFFIX=-${{ inputs.suffix }}-${{ matrix.tag }}" >> $GITHUB_ENV
+        else
+          echo "SUFFIX=-${{ matrix.tag }}" >> $GITHUB_ENV
+        fi
 
-      # - name: Set up Docker Buildx
-      #   uses: docker/setup-buildx-action@v4
-      #   with:
-      #     install: true
-      #     driver: docker-container
-      #     use: true
+    - name: Docker meta
+      id: meta
+      uses: docker/metadata-action@v6
+      with:
+        images: |
+          ${{ env.QUAY_REPO }}
+        tags: |
+          type=pep440,pattern={{raw}},suffix=${{ env.SUFFIX }}
+          type=schedule,pattern=${{ inputs.schedule_tag_pattern }},prefix=nightly-,suffix=${{ env.SUFFIX }}
+          type=raw,value=${{ inputs.workflow_dispatch_tag }},enable=${{ github.event_name == 'workflow_dispatch' && inputs.workflow_dispatch_tag != '' }},suffix=${{ env.SUFFIX }}
+          type=raw,value=${{ inputs.branch_ref }},enable=${{ github.event_name == 'workflow_dispatch' && inputs.workflow_dispatch_tag == '' }},prefix=nightly-,suffix=${{ env.SUFFIX }}
+        flavor:
+          latest=false
 
-      # - name: Login to GitHub Container Registry (for cache)
-      #   uses: docker/login-action@v4
-      #   with:
-      #     registry: ghcr.io
-      #     username: ${{ github.actor }}
-      #     password: ${{ secrets.GITHUB_TOKEN }}
-
-      # - name: Compute cache tag
-      #   id: cache_tag
-      #   run: |
-      #     echo "value=buildcache-ci-${{ matrix.npu_type }}-${{ matrix.arch }}" >> $GITHUB_OUTPUT
-
-      # - name: Build and push image
-      #   uses: docker/build-push-action@v7
-      #   id: build
-      #   with:
-      #     context: .
-      #     file: .github/workflows/dockerfiles/Dockerfile.ci_test
-      #     platforms: linux/${{ matrix.arch }}
-      #     push: true
-      #     tags: ${{ env.QUAY_TEMP_REPO }}:vllm-ascend-pr${{ inputs.pr_number }}-${{ matrix.vllm_label }}-${{ matrix.npu_type }}-${{ matrix.arch }}
-      #     build-args: |
-      #       CANN_TAG=${{ matrix.cann_tag }}
-      #       VLLM_COMMIT=${{ matrix.vllm_version }}
-      #       SOC_VERSION=${{ matrix.soc }}
-      #       INSTALL_MODE=${{ matrix.mode }}
-      #     provenance: false
-      #     cache-from: type=registry,ref=${{ env.CACHE_REPO }}:${{ steps.cache_tag.outputs.value }}
-      #     cache-to: type=registry,ref=${{ env.CACHE_REPO }}:${{ steps.cache_tag.outputs.value }},mode=max
-      
-      - name: Build and push image
-        id: build
-        run: |
-
-          IMAGE_TAG="vllm-ascend-pr${{ inputs.pr_number }}-${{ matrix.vllm_label }}-${{ matrix.npu_type }}-${{ matrix.arch }}"
-          IMAGE_NAME="${{ env.QUAY_TEMP_REPO }}:${IMAGE_TAG}"
-
-          # 构造 buildkit 用的 docker config
-          mkdir -p /tmp/bk
-          QUAY_AUTH=$(printf "%s:%s" "${{ inputs.quay_temp_username }}" "${{ secrets.QUAY_TEMP_PASSWORD }}" | base64 -w0)
-          cat > /tmp/bk/config.json <<EOF
-          {
-            "auths": {
-              "quay.io": { "auth": "${QUAY_AUTH}" }
-            }
+    - name: Prepare docker config
+      if: ${{ inputs.should_push }}
+      run: |
+        mkdir -p /tmp/bk
+        QUAY_AUTH=$(printf "%s:%s" "${QUAY_TEMP_USERNAME}" "${QUAY_TEMP_PASSWORD}" | base64 -w0)
+        cat > /tmp/bk/config.json <<EOF
+        {
+          "auths": {
+            "quay.io": { "auth": "${QUAY_AUTH}" }
           }
-          EOF
+        }
+        EOF
 
-          buildctl \
-            --addr="${BUILDKITD_ADDR}" \
-            --tlscacert="${DOCKER_CONFIG}/ca.pem" \
-            --tlscert="${DOCKER_CONFIG}/cert.pem" \
-            --tlskey="${DOCKER_CONFIG}/key.pem" \
-            build \
-            --frontend dockerfile.v0 \
-            --local context=. \
-            --local dockerfile=.github/workflows/dockerfiles \
-            --opt filename=Dockerfile.ci_test \
-            --opt platform=linux/${{ matrix.arch }} \
-            --opt build-arg:CANN_TAG=${{ matrix.cann_tag }} \
-            --opt build-arg:VLLM_COMMIT=${{ matrix.vllm_version }} \
-            --opt build-arg:SOC_VERSION=${{ matrix.soc }} \
-            --opt build-arg:INSTALL_MODE=${{ matrix.mode }} \
-            --secret id=dockerconfig,src=/tmp/bk/config.json \
-            --output type=image,name="${IMAGE_NAME}",push=true \
-            --progress=plain
+    # - name: Debug env
+    #   run: |
+    #     echo "BUILDKITD_ADDR=${BUILDKITD_ADDR:-<not set>}"
+    #     echo "CA_PEM=${CA_PEM:-<not set>}"
+    #     echo "CERT_PEM=${CERT_PEM:-<not set>}"
+    #     echo "KEY_PEM=${KEY_PEM:-<not set>}"
+    #     echo "DOCKER_CONFIG=${DOCKER_CONFIG:-<not set>}"
+    #     echo "--- relevant env vars ---"
+    #     env | grep -iE 'build|docker|cert|tls|key|quay' || true
+    - name: Prepare TLS certs
+      env:
+        CA_PEM: ${{ secrets.CA_PEM }}
+        CERT_PEM: ${{ secrets.CERT_PEM }}
+        KEY_PEM: ${{ secrets.KEY_PEM }}
+      run: |
+        mkdir -p /tmp/bk/tls
+        umask 077
+        printf '%s\n' "$CA_PEM"   | tr -d '\r' > /tmp/bk/tls/ca.pem
+        printf '%s\n' "$CERT_PEM" | tr -d '\r' > /tmp/bk/tls/cert.pem
+        printf '%s\n' "$KEY_PEM"  | tr -d '\r' > /tmp/bk/tls/key.pem
 
-          echo "Image pushed: ${IMAGE_NAME}"
+        echo "=== File sizes ==="
+        echo "ca.pem:   $(wc -c < /tmp/bk/tls/ca.pem) bytes"
+        echo "cert.pem: $(wc -c < /tmp/bk/tls/cert.pem) bytes"
+        echo "key.pem:  $(wc -c < /tmp/bk/tls/key.pem) bytes"
+
+        echo "=== First line of each file ==="
+        head -1 /tmp/bk/tls/ca.pem   | cut -c1-20
+        head -1 /tmp/bk/tls/cert.pem | cut -c1-20
+        head -1 /tmp/bk/tls/key.pem  | cut -c1-20
+
+        echo "=== Cert info (subject/issuer/dates) ==="
+        openssl x509 -in /tmp/bk/tls/cert.pem -noout -subject -issuer -dates
+
+        echo "=== Cert vs Key modulus match ==="
+        CERT_MOD=$(openssl x509 -in /tmp/bk/tls/cert.pem -noout -modulus | md5sum)
+        KEY_MOD=$(openssl rsa -in /tmp/bk/tls/key.pem -noout -modulus 2>/dev/null | md5sum)
+        echo "cert modulus: $CERT_MOD"
+        echo "key  modulus: $KEY_MOD"
+        if [ "$CERT_MOD" = "$KEY_MOD" ]; then
+          echo "RESULT: MATCH"
+        else
+          echo "RESULT: MISMATCH"
+        fi
+
+        echo "=== Verify cert against CA ==="
+        openssl verify -CAfile /tmp/bk/tls/ca.pem /tmp/bk/tls/cert.pem || true
+
+    - name: Build and push
+      id: build
+      run: |
+        # echo "Installing buildctl..." 
+        # mkdir -p /tmp/buildkit 
+        # BUILDKIT_VERSION="v0.29.0" 
+        # ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') 
+        # curl -fsSL "https://github.com/moby/buildkit/releases/download/${BUILDKIT_VERSION}/buildkit-${BUILDKIT_VERSION}.linux-${ARCH}.tar.gz" -o /tmp/buildkit.tar.gz
+        # tar -xzf /tmp/buildkit.tar.gz -C /tmp/buildkit 
+        # export PATH=$PATH:/tmp/buildkit/bin/
+        
+        # chmod +x /tmp/buildkit/bin/buildctl 
+
+        # echo "buildctl installed successfully" buildctl --version
+        # set -ex
+        which buildctl
+
+        DOCKERFILE="${{ inputs.dockerfile || 'Dockerfile' }}"
+        DOCKERFILE_DIR=$(dirname "$DOCKERFILE")
+        DOCKERFILE_NAME=$(basename "$DOCKERFILE")
+
+        ARGS=(
+          --addr="tcp://buildkitd-service.buildkitd:1234"
+          --tlscacert=/tmp/bk/tls/ca.pem
+          --tlscert=/tmp/bk/tls/cert.pem
+          --tlskey=/tmp/bk/tls/key.pem
+
+          build
+          --frontend dockerfile.v0
+          --local context=.
+          --local dockerfile="$DOCKERFILE_DIR"
+          --opt filename="$DOCKERFILE_NAME"
+          --opt platform=${{ matrix.arch }}
+          --opt build-arg:PIP_INDEX_URL=https://pypi.org/simple
+          --progress=plain
+        )
+
+
+        if [ "${{ inputs.should_push }}" = "true" ]; then
+          ARGS+=(--secret id=dockerconfig,src=/tmp/bk/config.json)
+
+          OUTPUT="type=image,"
+          IFS=$'\n'
+          for tag in $(echo "${{ steps.meta.outputs.tags }}"); do
+            [ -z "$tag" ] && continue
+            OUTPUT="${OUTPUT}name=${tag},"
+          done
+          unset IFS
+          OUTPUT="${OUTPUT%,},push=true"
+          ARGS+=(--output "$OUTPUT")
+        fi
+
+
+        buildctl "${ARGS[@]}"
