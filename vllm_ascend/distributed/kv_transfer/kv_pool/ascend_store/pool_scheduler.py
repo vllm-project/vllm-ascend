@@ -397,6 +397,7 @@ class KVPoolScheduler:
                 allocated_block_ids_by_group=normalize_block_ids_by_group(request.block_ids),
                 num_saved_tokens=0,
                 token_ids=request.prompt_token_ids[:num_tokens_to_compute].copy(),
+                num_prompt_tokens=len(request.prompt_token_ids),
                 mamba_group_ids=self.mamba_group_ids,
                 num_speculative_blocks=self.num_speculative_blocks,
                 block_sizes=self.grouped_block_size,
@@ -444,6 +445,7 @@ class KVPoolScheduler:
                         allocated_block_ids_by_group=normalize_block_ids_by_group(new_block_ids),
                         num_saved_tokens=0,
                         token_ids=request_real.prompt_token_ids[:num_tokens_to_compute].copy(),
+                        num_prompt_tokens=len(request_real.prompt_token_ids),
                         mamba_group_ids=self.mamba_group_ids,
                         num_speculative_blocks=self.num_speculative_blocks,
                         block_sizes=self.grouped_block_size,
@@ -521,6 +523,7 @@ class KVPoolScheduler:
                     token_len=num_tokens_to_compute,
                     allocated_block_ids_by_group=block_ids,
                     num_saved_tokens=0,
+                    num_prompt_tokens=len(request.prompt_token_ids),
                     mamba_group_ids=self.mamba_group_ids,
                     num_speculative_blocks=self.num_speculative_blocks,
                     block_sizes=self.grouped_block_size,
@@ -534,6 +537,7 @@ class KVPoolScheduler:
                     skip_save=None,
                     block_hashes=request.block_hashes,
                     discard_partial_chunks=self._discard_partial_chunks,
+                    original_block_size=self.original_block_size,
                     kv_cache_group_families=self.kv_cache_group_families,
                 )
                 if req_meta is not None:

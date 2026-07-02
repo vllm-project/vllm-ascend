@@ -111,6 +111,7 @@ class ReqMeta:
     num_external_tokens: int
     num_computed_tokens: int
     remote_block_ids: BlockIds
+
     remote_host: str
     remote_port: int
     remote_engine_id: str
@@ -120,6 +121,7 @@ class ReqMeta:
     remote_ptp_size: int | None
     remote_multi_nodes_meta_mapping: dict[str, dict[str, Any]]
     num_prompt_blocks: int
+    remote_block_size: int
 
 
 @dataclass(frozen=True)
@@ -535,6 +537,7 @@ class KVCacheRecvingThread(threading.Thread):
         remote_engine_id: str,
         remote_host: str,
         remote_handshake_port: int,
+        remote_block_size=None,
         remote_port_send_num: dict[int, RemotePortInfo] | None = None,
         num_computed_tokens: int = 0,
         all_task_done: bool = False,
@@ -554,6 +557,7 @@ class KVCacheRecvingThread(threading.Thread):
             "num_computed_tokens": num_computed_tokens,
             "remote_port_send_num": remote_port_send_num,
             "all_task_done": all_task_done,
+            "remote_block_size": remote_block_size,
         }
         logger.debug("Adding request %s to the queue.Trans info:%s", request_id, trans_info)
         self.request_queue.put(trans_info)
@@ -730,7 +734,6 @@ class KVCacheRecvingThread(threading.Thread):
         remote_engine_id = req_meta["remote_engine_id"]
         remote_host = req_meta["remote_host"]
         remote_handshake_port = req_meta["remote_handshake_port"]
-
         # Full prefix cache hit: do not need to read remote blocks, just notify
         # P worker that we have the blocks we need.
         num_local_blocks = sum(len(group_block_ids) for group_block_ids in local_block_ids)
@@ -749,7 +752,6 @@ class KVCacheRecvingThread(threading.Thread):
             remote_kv_caches_base_addrs = self.kv_caches_base_addr[remote_engine_id][remote_handshake_port]
             local_kv_caches_base_addrs = self.kv_caches_base_addr[self.local_engine_id][self.local_handshake_port]
             remote_transfer_port = self.remote_te_port[remote_engine_id][remote_handshake_port]
-            remote_block_size_scale = self.remote_block_size_scale[remote_engine_id][remote_handshake_port]
             remote_block_stride_per_addr = self.remote_block_stride_per_addr[remote_engine_id][remote_handshake_port]
         session_id = f"{remote_host}:{remote_transfer_port}"
 
@@ -758,9 +760,6 @@ class KVCacheRecvingThread(threading.Thread):
         dst_list: list[int] = []
         length_list: list[int] = []
         attention_group_reformat_block_ids: list[tuple[tuple[int, list[list[int]], int, list[int]], bool]] = []
-
-        def expand_block_ids(block_ids, scale):
-            return [bid * scale + offset for bid in block_ids for offset in range(scale)]
 
         def pp_layer_indices(layer_indices: list[int], prefill_pp_rank: int) -> list[int]:
             first_layer_index, end_layer_index = self.pp_layer_indices[prefill_pp_rank]
@@ -784,19 +783,10 @@ class KVCacheRecvingThread(threading.Thread):
                 continue
             if not is_mamba_group:
                 is_group_transfer_end = group_pull.is_group_transfer_end
-                local_scale = self.block_size_scale[layer_indices[0]][0]
-                remote_scale = remote_block_size_scale[layer_indices[0]][0]
-                kernel_local_block_ids = expand_block_ids(local_group_block_ids, local_scale)
-                kernel_remote_block_ids = expand_block_ids(remote_group_block_ids, remote_scale)
-                # For FullAttentionSpec prefix cache with hybrid kernel blocks.
-                num_computed_tokens = req_meta.get("num_computed_tokens", 0)
-                remote_kernel_block_size = self.block_size // remote_scale
-                remote_kernel_token_size = remote_kernel_block_size * self.group_compress_ratios[group_idx]
-                remote_start_idx = num_computed_tokens // remote_kernel_token_size
-                kernel_remote_block_ids = kernel_remote_block_ids[remote_start_idx:]
-                num_kernel_blocks = min(len(kernel_remote_block_ids), len(kernel_local_block_ids))
-                kernel_remote_block_ids = kernel_remote_block_ids[:num_kernel_blocks]
-                kernel_local_block_ids = kernel_local_block_ids[:num_kernel_blocks]
+                # Block ids are already expanded to kernel granularity and truncated in
+                # _get_kv_split_metadata, so consume them directly here.
+                kernel_remote_block_ids = remote_group_block_ids
+                kernel_local_block_ids = local_group_block_ids
 
                 if tp_num_need_pulls == 1:
                     grouped_remote_block_ids, grouped_local_block_ids = group_concurrent_contiguous(
@@ -1406,6 +1396,7 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
             remote_ptp_size=kv_transfer_params.get("remote_ptp_size"),
             remote_multi_nodes_meta_mapping=kv_transfer_params.get("remote_multi_nodes_meta_mapping", {}),
             num_prompt_blocks=kv_transfer_params.get("num_prompt_blocks", 0),
+            remote_block_size=kv_transfer_params.get("remote_block_size", 0),
         )
 
 
@@ -1818,6 +1809,7 @@ class MooncakeConnectorScheduler:
             last_token_id=request.output_token_ids[-1],
             remote_multi_nodes_meta_mapping=self.multi_nodes_meta_mapping,
             num_prompt_blocks=num_prompt_blocks,
+            remote_block_size=self.block_size,
         )
 
     def set_xfer_handshake_metadata(self, metadata: dict[int, KVConnectorHandshakeMetadata]) -> None:
@@ -2328,6 +2320,164 @@ class MooncakeConnectorWorker:
             return self.kv_recv_thread.get_and_clear_invalid_block_ids()
         return set()
 
+    @staticmethod
+    def _expand_block_ids(block_ids, scale):
+        # Expand each logical block into its `scale` contiguous kernel blocks:
+        # logical block b -> [b*scale, b*scale+1, ..., b*scale+scale-1].
+        return [bid * scale + offset for bid in block_ids for offset in range(scale)]
+
+    def _local_kernel_ids_for_shard(
+        self,
+        shard_first_p_block,
+        num_blocks_to_pull,
+        shard_cp_rank,
+        num_prefix_p_blocks,
+        rank_first_d_block,
+        block_size_ratio,
+        local_cp_size,
+        remote_cp_size,
+        remote_block_size,
+        kernel_size,
+        local_block_ids,
+    ):
+        """Map this shard's pulled P-blocks straight to D-side kernel block ids.
+
+        The shard (CP rank ``shard_cp_rank``) pulls ``num_blocks_to_pull`` P-blocks
+        starting at this rank's local index ``shard_first_p_block``. The destination
+        kernel position is derived directly from the CP rank and the block index,
+        replacing the previous two-step pipeline (local_chunk_token_starts + per-token
+        expansion). TP rank does not affect the block id (it only selects ports / the
+        head-dim offset at the transfer stage).
+        """
+        # Number of kernel blocks contained in one D-block (Bd/kernel) and one P-block (Bp/kernel).
+        kernels_per_d_block = self.block_size // kernel_size
+        kernels_per_p_block = remote_block_size // kernel_size
+        # Tokens addressable by this rank's D-blocks; a kernel beyond this has no destination.
+        local_token_limit = len(local_block_ids) * self.block_size
+        kernel_block_ids: list[int] = []
+        for block_idx in range(num_blocks_to_pull):
+            # P-blocks are round-robin interleaved across the remote CP ranks, so this rank's
+            # block_idx-th pulled block maps to global prompt block (in P-units):
+            #   global_p_block = (shard_first_p_block + block_idx) * Rcp + shard_cp_rank
+            global_p_block = (shard_first_p_block + block_idx) * remote_cp_size + shard_cp_rank
+            if remote_block_size > self.block_size:
+                # Bp > Bd (only supported when D-side has no CP): one P-block spans multiple
+                # D-blocks, so walk it kernel by kernel via the absolute token offset within
+                # the external (post-prefix) zone: p_block_token_start = (p - P0) * Bp.
+                p_block_token_start = (global_p_block - num_prefix_p_blocks) * remote_block_size
+                for kernel_idx in range(kernels_per_p_block):
+                    token_offset = p_block_token_start + kernel_idx * kernel_size
+                    if token_offset >= local_token_limit:
+                        # P-side tail block is partial; its trailing kernels have no D token.
+                        break
+                    # Locate the D-block holding this token, then the kernel slot inside it.
+                    d_block = local_block_ids[token_offset // self.block_size]
+                    kernel_in_d_block = (token_offset % self.block_size) // kernel_size
+                    kernel_block_ids.append(d_block * kernels_per_d_block + kernel_in_d_block)
+            else:
+                # Bd >= Bp: the P-block falls entirely inside one D-block.
+                # Global D-block d = p // r (r = Bd/Bp); its index within this rank's local
+                # list is (d - rank_first_d_block) // Lcp. The P-block occupies a contiguous
+                # run of kernels_per_p_block kernels starting at intra-block kernel offset
+                # ((p % r) * Bp) / kernel.
+                d_block_local_idx = (global_p_block // block_size_ratio - rank_first_d_block) // local_cp_size
+                if d_block_local_idx >= len(local_block_ids):
+                    # Pairs with the remote-side truncation when the P-side tail block is partial.
+                    continue
+                d_block = local_block_ids[d_block_local_idx]
+                first_kernel_in_d_block = ((global_p_block % block_size_ratio) * remote_block_size) // kernel_size
+                for kernel_idx in range(kernels_per_p_block):
+                    kernel_block_ids.append(d_block * kernels_per_d_block + first_kernel_in_d_block + kernel_idx)
+        return kernel_block_ids
+
+    @staticmethod
+    def _group_compress_ratio(group_spec):
+        # Tokens per KV slot for this group (>1 for compressed specs); defaults to 1.
+        compress_ratio = 1
+        kv_cache_spec = group_spec.get("kv_cache_spec")
+        if isinstance(kv_cache_spec, dict):
+            for spec in kv_cache_spec.values():
+                if isinstance(spec, dict) and isinstance(spec.get("compress_ratio"), int):
+                    compress_ratio = max(1, spec["compress_ratio"])
+                    break
+        return compress_ratio
+
+    def _get_kernel_block_ids(self, layer_indices, meta, group_idx, group_spec):
+        """No-CP per-group block ids at kernel granularity: (local, remote).
+
+        Mamba state is not block-sharded, so its logical ids pass through unchanged.
+        Attention expands both sides to kernel blocks, skips the prefix-cached remote
+        kernels (already on D, located via num_computed_tokens), and trims both lists
+        to the shorter one so remote/local stay aligned.
+        """
+        if group_spec["kv_cache_spec_type"] == "MambaSpec":
+            return list(meta.local_block_ids[group_idx]), list(meta.remote_block_ids[group_idx])
+
+        remote_block_size = meta.remote_block_size or self.block_size
+
+        # kernel_size is the shared (P==D) granularity; remote_scale is derived from it.
+        local_scale = self.block_size_scale[layer_indices[0]][0]
+        kernel_size = self.block_size // local_scale
+        assert remote_block_size % kernel_size == 0, (
+            f"remote_block_size({remote_block_size}) not divisible by kernel_size({kernel_size})"
+        )
+
+        remote_scale = remote_block_size // kernel_size
+        kernel_local = self._expand_block_ids(list(meta.local_block_ids[group_idx]), local_scale)
+        kernel_remote = self._expand_block_ids(list(meta.remote_block_ids[group_idx]), remote_scale)
+        # Skip prefix-cached remote kernels (D-side already holds them). The token size of one
+        # remote kernel is kernel_size * compress_ratio, so the number to skip is
+        # num_computed_tokens // (kernel_size * compress_ratio).
+        remote_kernel_token_size = kernel_size * self._group_compress_ratio(group_spec)
+        remote_start_idx = meta.num_computed_tokens // remote_kernel_token_size
+        kernel_remote = kernel_remote[remote_start_idx:]
+        num_kernel_blocks = min(len(kernel_remote), len(kernel_local))
+        return kernel_local[:num_kernel_blocks], kernel_remote[:num_kernel_blocks]
+
+    def _get_group_kernel_params(self, remote_block_size):
+        # Per attention group kernel-expansion params: (local_scale, remote_scale, kernel_size).
+        # The kernel size is shared by both sides, so remote_scale is derived locally from it
+        # (no remote handshake scale needed). Mamba groups are not block-sharded and skipped.
+        group_kernel_params: dict[int, tuple[int, int, int]] = {}
+        for group_idx, (group_spec, layer_indices) in self.kv_group2layeridx.items():
+            if group_spec["kv_cache_spec_type"] == "MambaSpec":
+                continue
+            local_scale = self.block_size_scale[layer_indices[0]][0]
+            kernel_size = self.block_size // local_scale
+            assert remote_block_size % kernel_size == 0, (
+                f"remote_block_size({remote_block_size}) not divisible by kernel_size({kernel_size})"
+            )
+            remote_scale = remote_block_size // kernel_size
+            group_kernel_params[group_idx] = (local_scale, remote_scale, kernel_size)
+        return group_kernel_params
+
+    def _get_local_remote_cp_params(self, meta: ReqMeta):
+        """Resolve CP geometry: (remote_block_size, local_cp_rank, local_cp_size,
+        remote_cp_size, r_blk), where r_blk = Bd/Bp (>=1) is the D/P block-size ratio.
+        Also validates that P/D block sizes are compatible under D-side CP.
+        """
+        remote_block_size = meta.remote_block_size or self.block_size
+        local_cp_rank = self.dcp_rank + self.pcp_rank * self.dcp_size
+        local_cp_size = self.dcp_size * self.pcp_size
+        remote_cp_size = meta.remote_pcp_size * meta.remote_dcp_size
+
+        if remote_block_size != self.block_size:
+            assert self.block_size % remote_block_size == 0 or remote_block_size % self.block_size == 0, (
+                f"Block sizes of P ({remote_block_size}) and D ({self.block_size}) must be divisible by each other."
+            )
+            if local_cp_size > 1:
+                assert self.block_size % remote_block_size == 0, (
+                    f"D node DCP not support P node block_size({remote_block_size}) > D block_size({self.block_size})"
+                )
+                # Ensure that the blocks of each P cp rank belong to the same D rank.
+                assert (remote_cp_size // local_cp_size) % (self.block_size // remote_block_size) == 0, (
+                    f"remote_cp_size({remote_cp_size}) must be an integer multiple of"
+                    f"r({self.block_size // remote_block_size}) * local_cp_size({local_cp_size})"
+                )
+
+        r_blk = self.block_size // remote_block_size if self.block_size > remote_block_size else 1
+        return remote_block_size, local_cp_rank, local_cp_size, remote_cp_size, r_blk
+
     def _get_kv_split_metadata(
         self,
         req_id: str,
@@ -2349,9 +2499,9 @@ class MooncakeConnectorWorker:
             * remote_handshake_port_list[i]: remote P worker handshake ports
               to pull from. The inner list length is the number of TP pulls
               needed for that shard.
-            * local_block_ids_list[i]: local block ids, grouped by KV cache
+            * local_block_ids_list[i]: local kernel block ids, grouped by KV cache
               group, where received blocks are written.
-            * remote_block_ids_list[i]: remote block ids, grouped by KV cache
+            * remote_block_ids_list[i]: remote kernel block ids, grouped by KV cache
               group, where blocks are read from.
 
         In PCP/DCP scenarios, prompt blocks can be split across multiple remote
@@ -2365,10 +2515,25 @@ class MooncakeConnectorWorker:
                 chosen_rank_list, _ = self._get_hybrid_remote_rank_group_pulls(req_id, prefill_tp_size)
             else:
                 chosen_rank_list = self._get_remote_rank(req_id, prefill_tp_size)
+
             remote_handshake_port_list = [[x + meta.remote_port for x in chosen_rank_list]]
-            local_block_ids_list = [meta.local_block_ids for _ in remote_handshake_port_list]
-            remote_block_ids_list = [meta.remote_block_ids for _ in remote_handshake_port_list]
-            return remote_handshake_port_list, local_block_ids_list, remote_block_ids_list
+            # No CP: expand logical blocks into kernel blocks here so the transfer
+            # stage consumes kernel-level ids directly (chunk_starts no longer needed).
+            local_block_ids: list = []
+            remote_block_ids: list = []
+            for group_idx, (group_spec, layer_indices) in self.kv_group2layeridx.items():
+                local_kernel_block_ids, remote_kernel_block_ids = self._get_kernel_block_ids(
+                    layer_indices, meta, group_idx, group_spec
+                )
+                local_block_ids.append(local_kernel_block_ids)
+                remote_block_ids.append(remote_kernel_block_ids)
+            local_block_ids_list = [tuple(local_block_ids) for _ in remote_handshake_port_list]
+            remote_block_ids_list = [tuple(remote_block_ids) for _ in remote_handshake_port_list]
+            return (
+                remote_handshake_port_list,
+                local_block_ids_list,
+                remote_block_ids_list,
+            )
 
         def context_parallel_parameters_check():
             assert (meta.remote_pcp_size * meta.remote_dcp_size) % (self.pcp_size * self.dcp_size) == 0
@@ -2449,7 +2614,9 @@ class MooncakeConnectorWorker:
                                 local_remote_block_port_mappings[d_port] = []
                             p_port_remote_list = []
                             for p_idx, p_port in enumerate(p_cp_group):
-                                if p_idx % len(d_cp_group) == d_idx:
+                                # When Bd == Bp, r_blk = 1, which degenerates to the original `p_idx % Lcp` rule.
+                                # When Bd = r * Bp, all blocks of P CP rank q are mapped to D rank `(q // r) % Lcp`.
+                                if (p_idx // r_blk) % len(d_cp_group) == d_idx:
                                     p_port_remote_list.append(p_port)
                             local_remote_block_port_mappings[d_port].append(p_port_remote_list)
 
@@ -2481,6 +2648,56 @@ class MooncakeConnectorWorker:
                         remote_port_send_num[remote_port]["num"] += 1
             return remote_port_send_num
 
+        def _set_hma_shared_port(prefill_tp_size, meta, remote_handshake_port_list, req_id):
+            """Rewrite remote attention ports for HMA load balancing and append Mamba ports.
+
+            Only applies to HMA (hybrid) non-MLA/non-sparse models. It does two things:
+
+            1. Attention replica balancing. A remote attention port offset decomposes as
+               ``kv_head_group_offset + dcp_repeat_offset + dcp_rank``. Within the same head
+               group, only the TP replicas that share the same ``dcp_rank`` but differ in
+               ``dcp_repeat`` hold the exact same attention KV shard. So substitution is
+               restricted to the dcp_repeat (replica) dimension - the head group and dcp_rank
+               parts are preserved - otherwise different DCP shards would fetch duplicated KV.
+               The replica is picked from the request's random rank choice to spread load.
+            2. Mamba port append. The Mamba state lives on a different set of P ranks than the
+               attention shards, so the matching Mamba ports are appended to the final shard
+               (which carries the Mamba transfer); duplicates are skipped.
+            """
+            if self._is_hma_required and not (self.use_mla or self.use_sparse):
+                remote_dcp = max(meta.remote_dcp_size, 1)
+                group_span = prefill_tp_size // len(get_kv_head_groups(prefill_tp_size))
+                n_replica = max(group_span // remote_dcp, 1)
+                chosen_tp_list = self._get_remote_rank(req_id, prefill_tp_size)
+                if n_replica > 1:
+                    for shard_ports in remote_handshake_port_list:
+                        for i in range(len(shard_ports)):
+                            # Decompose the port offset into pcp segment + head-group offset +
+                            # dcp part, keeping all of them and only swapping the replica.
+                            tp_off = (shard_ports[i] - meta.remote_port) % prefill_tp_size
+                            pcp_seg = (shard_ports[i] - meta.remote_port) - tp_off
+                            group_off = tp_off // group_span * group_span
+                            dcp_part = (tp_off - group_off) % remote_dcp
+                            # Determine replica ID using random choice of current request to maintain load balancing.
+                            replica = (chosen_tp_list[i % len(chosen_tp_list)] // remote_dcp) % n_replica
+                            shard_ports[i] = meta.remote_port + pcp_seg + group_off + replica * remote_dcp + dcp_part
+                # Append this D rank's matching Mamba ports to the final shard (the one that
+                # carries the Mamba state); k = prefill_tp / decode_tp ports per D rank.
+                k = prefill_tp_size // self.tp_size
+                final_ports = remote_handshake_port_list[-1]
+                pcp_seg = (final_ports[0] - meta.remote_port) // prefill_tp_size * prefill_tp_size
+                for j in range(k):
+                    p = meta.remote_port + pcp_seg + self.tp_rank * k + j
+                    if p not in final_ports:
+                        final_ports.append(p)
+            return remote_handshake_port_list
+
+        remote_block_size, local_cp_rank, local_cp_size, remote_cp_size, r_blk = self._get_local_remote_cp_params(meta)
+
+        # Per attention group kernel-expansion params. remote_scale is derived locally from
+        # the shared kernel size, so no remote handshake scale is needed here.
+        group_kernel_params = self._get_group_kernel_params(remote_block_size)
+
         if meta.remote_engine_id not in self.local_remote_block_port_mapping:
             self.local_remote_block_port_mapping[meta.remote_engine_id] = None
 
@@ -2496,6 +2713,7 @@ class MooncakeConnectorWorker:
         local_remote_block_port_mapping = copy.deepcopy(self.local_remote_block_port_mapping[meta.remote_engine_id])
 
         num_external_blocks = math.ceil(meta.num_external_tokens / self.block_size)
+        num_external_blocks_p = math.ceil(meta.num_external_tokens / remote_block_size)
 
         kv_group_items = list(self.kv_group2layeridx.items())
         sequence_group_idx = next(
@@ -2512,11 +2730,10 @@ class MooncakeConnectorWorker:
             f"num_external_blocks({num_external_blocks}), cp_size({self.pcp_size * self.dcp_size}), "
             f"local_block_ids_len ({len(meta.local_block_ids[sequence_group_idx])})"
         )
-        assert meta.num_prompt_blocks >= num_external_blocks, (
+        assert meta.num_prompt_blocks >= num_external_blocks_p, (
             f"meta.num_prompt_blocks({meta.num_prompt_blocks}), num_external_blocks({num_external_blocks})"
         )
 
-        remote_cp_size = meta.remote_pcp_size * meta.remote_dcp_size
         remote_block_nums_all = [meta.num_prompt_blocks // remote_cp_size] * remote_cp_size
         num_remain_blocks = meta.num_prompt_blocks % remote_cp_size
         for i in range(num_remain_blocks):
@@ -2524,7 +2741,7 @@ class MooncakeConnectorWorker:
         last_block_location = (num_remain_blocks + remote_cp_size - 1) % remote_cp_size
 
         # Considering prefix cache, the remote_block_nums_all should be revised
-        num_prefix_cached_blocks = meta.num_prompt_blocks - num_external_blocks
+        num_prefix_cached_blocks = meta.num_prompt_blocks - num_external_blocks_p
         remote_block_nums_all = [num - num_prefix_cached_blocks // remote_cp_size for num in remote_block_nums_all]
         num_remain_blocks = num_prefix_cached_blocks % remote_cp_size
         for i in range(num_remain_blocks):
@@ -2532,22 +2749,38 @@ class MooncakeConnectorWorker:
 
         # make sure the last block (which may be unfull) of P nodes is put to the last block of D node
         remote_block_nums: list[int] = []
+        shard_cp_ranks: list[int] = []
         final_block_idx: int | None = None
-        local_cp_rank = self.dcp_rank + self.pcp_rank * self.dcp_size
-        local_cp_size = self.dcp_size * self.pcp_size
+
         for cp_rank, block_num in enumerate(remote_block_nums_all):
-            if cp_rank % local_cp_size == local_cp_rank:
+            # When r_blk = 1, it degrades to the original cp_rank % Lcp rule.
+            if (cp_rank // r_blk) % local_cp_size == local_cp_rank:
                 if last_block_location == cp_rank:
                     final_block_idx = len(remote_block_nums)
                 remote_block_nums.append(block_num)
+                shard_cp_ranks.append(cp_rank)
 
         assert local_remote_block_port_mapping is not None
         if final_block_idx is not None:
             final_block_num = remote_block_nums.pop(final_block_idx)
+            shard_cp_ranks.append(shard_cp_ranks.pop(final_block_idx))
             remote_block_nums.append(final_block_num)
             for mapping in local_remote_block_port_mapping:
                 final_block_port = mapping.pop(final_block_idx)
                 mapping.append(final_block_port)
+
+        # Number of matched P-blocks in the prefix (Note: use P-side unit)
+        num_prefix_p_blocks = num_prefix_cached_blocks
+        if r_blk > 1:
+            # The prefix match granularity for D is Bd = r_blk * Bp, so P0 must be an integer multiple of r_blk.
+            assert num_prefix_p_blocks % r_blk == 0, (
+                f"P0({num_prefix_p_blocks}) should be  r_blk({r_blk}) integer multiple "
+            )
+
+        # The first D-block in the external zone (global block ID in D-units)
+        # and the first external D-block owned by this rank.
+        num_prefix_d_blocks = num_prefix_p_blocks // r_blk
+        first_d = num_prefix_d_blocks + ((local_cp_rank - num_prefix_d_blocks) % local_cp_size)
 
         remote_handshake_port_list, local_block_ids_list, remote_block_ids_list = [], [], []
         for idx in range(len(local_remote_block_port_mapping[0])):
@@ -2556,13 +2789,25 @@ class MooncakeConnectorWorker:
                 mapping_list.append(mapping[idx])
             remote_handshake_port_list.append(mapping_list)
 
+        # Attention port TP offset = kv_head_group_offset + dcp_repeat_offset + dcp_rank
+        # Within the same head group, only the TP replicas that share the same dcp_rank but have
+        # different dcp_repeat hold the exact same attention KV shard. Therefore, substitution is
+        # strictly limited to the dcp_repeat (replica) dimension. The head group and dcp_rank parts
+        # must be preserved as-is; otherwise, different DCP shards will end up fetching duplicated KV caches.
+        remote_handshake_port_list = _set_hma_shared_port(prefill_tp_size, meta, remote_handshake_port_list, req_id)
+
         # the local_block_ids_list and remote_block_ids_list are related with remote_handshake_port_list
         # such as: local_block_ids_list[[1],[2],[5],[6]], remote_block_ids_list[[1],[1],[1],[1]],
         # remote_handshake_port_list[[30000],[30001],[30004],[30005]]
         # D rank will get remote block 1 in port 30004 and save it in local block 5
-        local_block_offset = 0
+
         for remote_kv_id in range(len(remote_handshake_port_list)):
             num_blocks_to_pull = remote_block_nums[remote_kv_id]
+            # rank-local index of this shard's first external block; used both to slice
+            # the remote ids and to derive the matching local kernel positions.
+            shard_cp_rank = shard_cp_ranks[remote_kv_id]
+            remote_first = (num_prefix_p_blocks - shard_cp_rank + remote_cp_size - 1) // remote_cp_size
+
             group_remote_block_ids: list[list[int]] = []
             group_local_block_ids: list[list[int]] = []
             is_final_shard = remote_kv_id == len(remote_handshake_port_list) - 1
@@ -2573,20 +2818,100 @@ class MooncakeConnectorWorker:
                     group_remote_block_ids.append(list(meta.remote_block_ids[group_idx]) if is_final_shard else [])
                     group_local_block_ids.append(list(meta.local_block_ids[group_idx]) if is_final_shard else [])
                     continue
-                group_remote_block_ids.append(list(meta.remote_block_ids[group_idx][:num_blocks_to_pull]))
-                group_local_block_ids.append(
-                    list(meta.local_block_ids[group_idx][local_block_offset : local_block_offset + num_blocks_to_pull])
+                # Attention: expand to kernel blocks here. Remote is sliced from remote_first
+                # (skips this rank's prefix-cached blocks) then expanded; local kernels are
+                # located directly from CP rank + block index. This removes the need to pass
+                # chunk_starts down to the transfer stage. A shard that pulls nothing has
+                # n == 0, so both kernel lists naturally come out empty.
+                _, remote_scale, kernel_size = group_kernel_params[group_idx]
+                remote_logical = list(
+                    meta.remote_block_ids[group_idx][remote_first : remote_first + num_blocks_to_pull]
                 )
+                kernel_remote = self._expand_block_ids(remote_logical, remote_scale)
+                kernel_local = self._local_kernel_ids_for_shard(
+                    remote_first,
+                    num_blocks_to_pull,
+                    shard_cp_rank,
+                    num_prefix_p_blocks,
+                    first_d,
+                    r_blk,
+                    local_cp_size,
+                    remote_cp_size,
+                    remote_block_size,
+                    kernel_size,
+                    list(meta.local_block_ids[group_idx]),
+                )
+                num_kernel_blocks = min(len(kernel_remote), len(kernel_local))
+                group_remote_block_ids.append(kernel_remote[:num_kernel_blocks])
+
+                group_local_block_ids.append(kernel_local[:num_kernel_blocks])
             remote_block_ids_list.append(tuple(group_remote_block_ids))
             local_block_ids_list.append(tuple(group_local_block_ids))
-            local_block_offset += num_blocks_to_pull
 
         tp_num_need_pulls = self._get_tp_num_need_pulls(prefill_tp_size)
-        assert tp_num_need_pulls == len(remote_handshake_port_list[0]), (
-            f"tp_num_need_pulls: {tp_num_need_pulls}, remote_handshake_port_list: {remote_handshake_port_list}"
-        )
+        if self._is_hma_required:
+            # HMA: The final shard might be padded with Mamba ports;
+            # the total port count is permitted to exceed the number required by attention.
+            assert len(remote_handshake_port_list[0]) >= tp_num_need_pulls, (
+                f"tp_num_need_pulls: {tp_num_need_pulls}, remote_handshake_port_list: {remote_handshake_port_list}"
+            )
+        else:
+            assert tp_num_need_pulls == len(remote_handshake_port_list[0]), (
+                f"tp_num_need_pulls: {tp_num_need_pulls}, remote_handshake_port_list: {remote_handshake_port_list}"
+            )
 
         return remote_handshake_port_list, local_block_ids_list, remote_block_ids_list
+
+    def _get_cp_shard_pulls(self, remote_handshake_port_list, prefill_tp_size, remote_base_port, remote_pcp_size):
+        # CP case: `group_pulls` is derived from `port` (which already includes the random selection result),
+        # eliminating the need for a table lookup.
+        mamba_num = prefill_tp_size // self.tp_size
+        attn_num = self._get_tp_num_need_pulls(prefill_tp_size)
+        attn_gids = [
+            g for g, (spec, li) in self.kv_group2layeridx.items() if li and spec["kv_cache_spec_type"] != "MambaSpec"
+        ]
+        mamba_gids = [
+            g for g, (spec, li) in self.kv_group2layeridx.items() if li and spec["kv_cache_spec_type"] == "MambaSpec"
+        ]
+        num_shards = len(remote_handshake_port_list)
+        result = []
+        for shard_idx, ports in enumerate(remote_handshake_port_list):
+            is_final = shard_idx == num_shards - 1
+            shard_pulls = []
+            for port_idx, port in enumerate(ports):
+                pulls = []
+                port_tp = (port - remote_base_port) % prefill_tp_size
+                # PCP and PP are mutually exclusive; when PCP > 1, pp_rank is always 0.
+                pp_rank = 0 if remote_pcp_size > 1 else (port - remote_base_port) // prefill_tp_size
+                # The first attn_num ports of each shard (i.e., the original ports with randomly substituted TPs).
+                if port_idx < attn_num:
+                    pulls += [
+                        GroupPull(
+                            group_id=g,
+                            remote_tp_offset=port_idx,
+                            num_group_pulls=attn_num,
+                            prefill_pp_rank=pp_rank,
+                            is_group_transfer_end=port_idx == attn_num - 1,
+                        )
+                        for g in attn_gids
+                    ]
+                # Mamba: Only applicable to the final shard; the offset is back-calculated from the port's TP ID.
+                if is_final:
+                    m_off = port_tp - self.tp_rank * mamba_num
+                    if 0 <= m_off < mamba_num:
+                        pulls += [
+                            GroupPull(
+                                group_id=g,
+                                remote_tp_offset=m_off,
+                                num_group_pulls=mamba_num,
+                                prefill_pp_rank=pp_rank,
+                                is_group_transfer_end=m_off == mamba_num - 1,
+                            )
+                            for g in mamba_gids
+                        ]
+                shard_pulls.append(pulls)
+            result.append(shard_pulls)
+        return result
 
     def _get_group_pulls_metadata(
         self,
@@ -2594,6 +2919,8 @@ class MooncakeConnectorWorker:
         remote_handshake_port_list: list[list[int]],
         prefill_tp_size: int,
         remote_base_port: int,
+        remote_pcp_size: int = 1,
+        remote_dcp_size: int = 1,
     ) -> list[list[list[GroupPull]]]:
         """Build per-port KV cache group pull descriptors.
 
@@ -2618,18 +2945,19 @@ class MooncakeConnectorWorker:
             this pull is the final pull for the group. The final-pull flag is
             used by the receiver to decide when group reformatting can run.
         """
+        cp_transfer = remote_pcp_size * remote_dcp_size * self.pcp_size * self.dcp_size > 1
         if self._is_hma_required:
-            _, rank_group_pulls = self._get_hybrid_remote_rank_group_pulls(req_id, prefill_tp_size)
-            num_pp_tp_ranks = prefill_tp_size * self._prefill_pp_size
+            if not cp_transfer:
+                # Non-CP case: port = base + chosen_rank, which has a one-to-one correspondence
+                # with the table keys, maintaining the original logic.
+                _, rank_group_pulls = self._get_hybrid_remote_rank_group_pulls(req_id, prefill_tp_size)
+                return [[rank_group_pulls[p - remote_base_port] for p in ports] for ports in remote_handshake_port_list]
 
-            def get_group_pulls_for_remote_port(remote_handshake_port: int) -> list[GroupPull]:
-                remote_rank = (remote_handshake_port - remote_base_port) % num_pp_tp_ranks
-                return list(rank_group_pulls.get(remote_rank, []))
-
-            return [
-                [get_group_pulls_for_remote_port(remote_handshake_port) for remote_handshake_port in remote_ports]
-                for remote_ports in remote_handshake_port_list
-            ]
+            # CP case: `group_pulls` is derived from `port` (which already includes the random selection result),
+            # eliminating the need for a table lookup.
+            return self._get_cp_shard_pulls(
+                remote_handshake_port_list, prefill_tp_size, remote_base_port, remote_pcp_size
+            )
 
         tp_num_need_pulls = self._get_tp_num_need_pulls(prefill_tp_size)
         group_ids = [group_id for group_id, (_, layer_indices) in self.kv_group2layeridx.items() if layer_indices]
@@ -2807,6 +3135,8 @@ class MooncakeConnectorWorker:
                 remote_handshake_port_list,
                 prefill_tp_size,
                 meta.remote_port,
+                meta.remote_pcp_size,
+                meta.remote_dcp_size,
             )
 
             for pcp_dcp_rank, remote_ports in enumerate(remote_handshake_port_list):
@@ -2839,6 +3169,7 @@ class MooncakeConnectorWorker:
                             pcp_dcp_rank == len(remote_handshake_port_list) - 1
                             and remote_tp_offset == len(remote_ports) - 1
                         ),
+                        remote_block_size=meta.remote_block_size,
                     )
 
         if self.kv_send_thread is not None and self.pcp_size * self.dcp_size == 1:

@@ -516,6 +516,13 @@
     - vllm_ascend/spec_decode/medusa_proposer.py
   tests: []
 
+- name: spec_decode_step3p5
+  optional: false
+  base: spec_decode_base
+  source_file_dependencies:
+    - vllm_ascend/spec_decode/step3p5.py
+  tests: []
+
 # Worker
 - name: worker_v1
   optional: false
