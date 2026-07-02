@@ -226,25 +226,43 @@ class KVPoolScheduler:
         if token_len < self.cache_transfer_granularity:
             return 0, False
 
-        num_external_hit_tokens = self.client.lookup(
+        # 6D: HBM 全命中提前返回，不走 external lookup
+        if num_computed_tokens >= token_len:
+            return 0, False
+
+        import time as _kvtrace_time
+        _kvtrace_t0 = _kvtrace_time.perf_counter()
+        num_total_hit_tokens = self.client.lookup(
             token_len,
             request.block_hashes,
             self.kv_cache_group_ids,
+            hbm_hit_tokens=num_computed_tokens,
+        )
+        _kvtrace_elapsed = (_kvtrace_time.perf_counter() - _kvtrace_t0) * 1000
+        logger.info(
+            "KVTRACE req=%s stage=kvpool_lookup_total elapsed_ms=%.3f "
+            "token_len=%d prompt_tokens=%d local_hit_tokens=%d "
+            "external_hit_tokens=%d need_to_allocate=%d "
+            "load_async=%s groups=%s granularity=%d",
+            request.request_id, _kvtrace_elapsed,
+            token_len, len(request.prompt_token_ids), num_computed_tokens,
+            num_total_hit_tokens, max(0, num_total_hit_tokens - num_computed_tokens),
+            self.load_async, self.kv_cache_group_ids, self.cache_transfer_granularity
         )
 
-        if num_external_hit_tokens == request.num_tokens:
-            num_external_hit_tokens -= 1
+        if num_total_hit_tokens == request.num_tokens:
+            num_total_hit_tokens -= 1
 
-        if num_external_hit_tokens < num_computed_tokens:
+        if num_total_hit_tokens < num_computed_tokens:
             need_to_allocate = 0
         else:
-            need_to_allocate = num_external_hit_tokens - num_computed_tokens
+            need_to_allocate = num_total_hit_tokens - num_computed_tokens
 
         logger.debug(
             "Reqid: %s, Total tokens %d, kvpool hit tokens: %d, need to load: %d",
             request.request_id,
             request.num_tokens,
-            num_external_hit_tokens,
+            num_total_hit_tokens,
             need_to_allocate,
         )
 
@@ -253,7 +271,7 @@ class KVPoolScheduler:
 
         self.load_specs[request.request_id] = LoadSpec(
             vllm_cached_tokens=num_computed_tokens,
-            kvpool_cached_tokens=num_external_hit_tokens,
+            kvpool_cached_tokens=num_total_hit_tokens,
             can_load=False,
         )
         logger.info(
@@ -261,7 +279,7 @@ class KVPoolScheduler:
             "need_to_allocate=%d load_async=%s use_layerwise=%s",
             request.request_id,
             num_computed_tokens,
-            num_external_hit_tokens,
+            num_total_hit_tokens,
             need_to_allocate,
             self.load_async,
             self.use_layerwise,
@@ -371,6 +389,7 @@ class KVPoolScheduler:
                 allocated_block_ids_by_group=normalize_block_ids_by_group(request.block_ids),
                 num_saved_tokens=0,
                 token_ids=request.prompt_token_ids[:num_tokens_to_compute].copy(),
+                num_prompt_tokens=len(request.prompt_token_ids),
             )
             self._request_trackers[request.req_id] = request_tracker
             last_chunk_tokens_num = (
@@ -414,6 +433,7 @@ class KVPoolScheduler:
                         allocated_block_ids_by_group=normalize_block_ids_by_group(new_block_ids),
                         num_saved_tokens=0,
                         token_ids=request_real.prompt_token_ids[:num_tokens_to_compute].copy(),
+                        num_prompt_tokens=len(request_real.prompt_token_ids),
                     )
                     self._request_trackers[req_id] = request_tracker
                     last_chunk_tokens_num = (
@@ -487,6 +507,7 @@ class KVPoolScheduler:
                     token_len=num_tokens_to_compute,
                     allocated_block_ids_by_group=block_ids,
                     num_saved_tokens=0,
+                    num_prompt_tokens=len(request.prompt_token_ids),
                 )
 
                 self._request_trackers[request_id] = request_tracker
@@ -563,13 +584,15 @@ class LookupKeyClient:
         token_len: int,
         block_hashes: list[BlockHash],
         kv_cache_group_ids: list[int] | None = None,
+        hbm_hit_tokens: int = 0,
     ) -> int:
         kv_cache_group_ids = kv_cache_group_ids or [0]
         hash_strs = [h.hex() for h in block_hashes]
         hash_frames = self.encoder.encode(hash_strs)
         kv_group_frames = self.encoder.encode(kv_cache_group_ids)
         token_len_bytes = token_len.to_bytes(4, byteorder="big")
-        all_frames = [token_len_bytes] + list(kv_group_frames) + list(hash_frames)
+        hbm_bytes = hbm_hit_tokens.to_bytes(4, byteorder="big")
+        all_frames = [token_len_bytes] + list(kv_group_frames) + [hbm_bytes] + list(hash_frames)
         self.socket.send_multipart(all_frames, copy=False)
         resp = self.socket.recv()
         result = int.from_bytes(resp, "big")
