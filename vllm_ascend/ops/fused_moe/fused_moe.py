@@ -784,6 +784,24 @@ else:
                     # communication.
                     maybe_wait_event(fused_moe_evts.before_combine)
                     shared_out = self._shared_experts.down_proj((quantized_x, swiglu_out_scale))[0]
+                elif has_quantized_shared and self.quant_type == QuantType.MXFP4:
+                    # Execute dynamic quant concurrently with MoE gate.
+                    torch.npu.current_stream().wait_event(fused_moe_evts.before_routed_experts)
+                    quantized_x, dynamic_scale = torch_npu.npu_dynamic_mx_quant(
+                        hidden_states, dst_type=torch_npu.float4_e2m1fn_x2, round_mode="round"
+                    )
+                    # Execute the gate projection concurrently with the dispatch communication.
+                    maybe_wait_event(fused_moe_evts.after_routed_experts)
+                    gate_up_out = self._shared_experts.gate_up_proj((quantized_x, dynamic_scale))[0]
+                    # Execute activation concurrently with gmm2.
+                    maybe_wait_event(fused_moe_evts.before_gmm2)
+                    act_out = self._shared_experts.act_fn(gate_up_out)
+                    quantized_act, act_scale = torch_npu.npu_dynamic_mx_quant(
+                        act_out, dst_type=torch_npu.float4_e2m1fn_x2, round_mode="round"
+                    )
+                    # Execute the down projection concurrently with the combine communication.
+                    maybe_wait_event(fused_moe_evts.before_combine)
+                    shared_out = self._shared_experts.down_proj((quantized_act, act_scale))[0]
                 else:
                     # Ensure the shared experts wait for hidden_states to be ready.
                     torch.npu.current_stream().wait_event(fused_moe_evts.before_routed_experts)
