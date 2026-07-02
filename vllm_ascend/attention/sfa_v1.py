@@ -72,7 +72,6 @@ O_PROJ_ACLNN_INPUT_PARAMS = (
     "aclnn_input_scale_reciprocal",
     "aclnn_input_offset",
 )
-O_PROJ_INPUT_SHARDED_QUANT_PARAMS = ("weight_scale_second", "weight_scale")
 
 
 def _get_indexer_types(configs: tuple[Any, ...]) -> Any | None:
@@ -581,8 +580,12 @@ class AscendSFAImpl(MLAAttentionImpl):
         # Enable layer sharding via DSA-CP on the P node in the PD-disaggregated setup.
         self.enable_dsa_cp_with_layer_shard = enable_dsa_cp_with_layer_shard()
 
-        # use original TP o_proj weight in PD mix stage, and full gather
-        # for o_proj weight for prefill stage.
+        # SFA DSA-CP mixed deployments keep o_proj in the existing TP layout.
+        # Decode can use the TP-sharded o_proj directly after an activation
+        # all-to-all, while prefill/mixed batches temporarily gather the TP
+        # shards into a full-weight buffer because their SFA output is not
+        # TP-sharded. This is part of the DSA-CP mixed-mode data path rather
+        # than an independent user-facing feature switch.
         self.enable_dsa_cp_with_o_proj_tp = enable_dsa_cp_with_o_proj_tp()
 
         if self.enable_dsa_cp:
@@ -657,7 +660,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 for layer in self.layer_sharding_kwargs or []:
                     if is_hidden_layer(layer):
                         post_process_after_loading_for_shard_weight_series(layer)
-            else:
+            elif self.enable_dsa_cp_with_o_proj_tp:
                 self._init_o_proj_tp_full_params()
 
         if self.enable_mlapo:
@@ -861,12 +864,20 @@ class AscendSFAImpl(MLAAttentionImpl):
 
     def _init_o_proj_tp_full_params(self):
         """
-        Initialize TP-mode and Full-mode parameters for o_proj weight,
-        preparing for weight switching in PD mix stage.
+        Initialize TP-mode aliases and Full-mode buffers for DSA-CP o_proj.
 
-        For PD mix stage:
-        - Use original TP o_proj weight for decode phase
-        - Need full-gather o_proj weight from all TP ranks for prefill phase
+        In SFA DSA-CP mixed execution, the same model instance can run both
+        decode-only and prefill/mixed batches:
+        - Decode-only batches all-to-all the SFA output in the TP group, then
+          run the original TP-sharded o_proj.
+        - Prefill/mixed batches produce SFA output that is not directly
+          compatible with TP-sharded o_proj, so each rank all-gathers the TP
+          o_proj shards and input-sharded quant params before running o_proj.
+
+        The original TP parameter storage remains the persistent source of
+        truth. The o_proj_tp_* tensors below alias that storage, while the
+        o_proj_full_* tensors are temporary gather destinations reused across
+        forwards. They are not a second persistent copy of the TP weight.
         """
         sample = self.o_proj.weight
         self.o_proj_full_weight_gather_dim = 1 if self._is_o_proj_unquantized() else 0
@@ -895,11 +906,15 @@ class AscendSFAImpl(MLAAttentionImpl):
         else:
             self.o_proj_full_pool = self.o_proj_full_gather_pool.transpose(0, 1)
 
-        # Save TP-mode parameters (original sharded weights)
-        self.o_proj_tp_weight = self.o_proj.weight.clone().detach()
+        # TP tensors alias the original parameter storage. The TP shard remains
+        # the single source of truth; full-weight tensors below are temporary
+        # gather destinations only.
+        self.o_proj_tp_weight = self.o_proj.weight.detach()
         if self.o_proj_full_weight_gather_dim == 0:
             self.o_proj_tp_weight_gather_input = self.o_proj_tp_weight
         else:
+            # Communication scratch only: all_gather_into_tensor concatenates on
+            # dim0, while unquantized row-parallel o_proj is sharded on dim1.
             self.o_proj_tp_weight_gather_input = self.o_proj_tp_weight.transpose(0, 1).contiguous()
         self.o_proj_tp_aclnn_input_params = {}
         self.o_proj_full_aclnn_input_params = {}
@@ -907,24 +922,25 @@ class AscendSFAImpl(MLAAttentionImpl):
             param = getattr(self.o_proj, param_name, None)
             if param is None:
                 continue
-            self.o_proj_tp_aclnn_input_params[param_name] = param.clone().detach()
+            self.o_proj_tp_aclnn_input_params[param_name] = param.detach()
             self.o_proj_full_aclnn_input_params[param_name] = param.repeat(self.tp_size)
 
         self.o_proj_tp_input_sharded_quant_params = {}
         self.o_proj_full_input_sharded_quant_params = {}
-        for param_name in O_PROJ_INPUT_SHARDED_QUANT_PARAMS:
-            param = getattr(self.o_proj, param_name, None)
-            if param is None or getattr(param, "input_dim", None) != 1:
-                continue
-            self.o_proj_tp_input_sharded_quant_params[param_name] = param.clone().detach()
+        for param_name, param in self._iter_o_proj_input_sharded_quant_params():
+            self.o_proj_tp_input_sharded_quant_params[param_name] = param.detach()
             self.o_proj_full_input_sharded_quant_params[param_name] = torch.empty(
                 (param.shape[0] * self.tp_size, *param.shape[1:]), dtype=param.dtype, device=param.device
             )
 
-        # Initially switch to TP mode for graph capture
-        self.o_proj.weight.set_(self.o_proj_tp_weight)
-        self._switch_o_proj_params(self.o_proj_tp_aclnn_input_params)
-        self._switch_o_proj_params(self.o_proj_tp_input_sharded_quant_params)
+    def _iter_o_proj_input_sharded_quant_params(self):
+        if not isinstance(self.o_proj, nn.Module):
+            return
+        for param_name, param in self.o_proj.named_parameters(recurse=False):
+            if param_name == "weight" or param_name in O_PROJ_ACLNN_INPUT_PARAMS:
+                continue
+            if getattr(param, "input_dim", None) == 1:
+                yield param_name, param
 
     def _switch_o_proj_params(self, params: dict[str, torch.Tensor]):
         for param_name, param in params.items():
@@ -960,15 +976,13 @@ class AscendSFAImpl(MLAAttentionImpl):
                 if handle is not None:
                     handle.wait()
 
-            # Switch o_proj to Full-mode (gathered weight from all TP ranks)
+            # Temporarily switch o_proj to the gathered full-weight view for
+            # prefill/mixed DSA-CP, whose attention output is not TP-sharded.
             self.o_proj.weight.set_(self.o_proj_full_pool)
             self._switch_o_proj_params(self.o_proj_full_aclnn_input_params)
             self._switch_o_proj_params(self.o_proj_full_input_sharded_quant_params)
-
-            # Apply quantization method and execute forward computation
             output[...] = self._apply_o_proj_full_weight(attn_output)
-
-            # Switch o_proj back to TP-mode for subsequent decode operations
+            # Restore TP aliases so later decode batches keep using TP storage.
             self.o_proj.weight.set_(self.o_proj_tp_weight)
             self._switch_o_proj_params(self.o_proj_tp_aclnn_input_params)
             self._switch_o_proj_params(self.o_proj_tp_input_sharded_quant_params)
@@ -1312,8 +1326,8 @@ class AscendSFAImpl(MLAAttentionImpl):
         # all-gather o_proj weight for prefill stage of PD mix node
         o_proj_full_handle = None
         o_proj_full_param_handles = None
-        # if is PD mix stage, using original TP o_proj weight, and also need to full gather for o_proj
-        # weight for prefill stage.
+        # Prefill/mixed DSA-CP computes o_proj with a temporary full weight.
+        # Decode keeps the original TP path and only exchanges activations.
         full_gather_o_proj_enabled = self.enable_dsa_cp_with_o_proj_tp and attn_metadata.attn_state not in {
             AscendAttentionState.DecodeOnly,
             AscendAttentionState.SpecDecoding,
@@ -1621,9 +1635,9 @@ class AscendSFAImpl(MLAAttentionImpl):
         )
 
         if self.enable_dsa_cp_with_o_proj_tp:
-            # When using SFA-CP with pd mixed, o_proj has two cases:
-            # 1. prefill: o_proj is a TP weight, we need to all-gather o_proj weight to switch TP=1.
-            # 2. decode: all-to-all the hidden_state before the o_proj forward.
+            # SFA DSA-CP mixed mode keeps o_proj weight sharded in the TP domain:
+            # 1. prefill/mixed: gather TP shards into a temporary full weight.
+            # 2. decode-only: all-to-all hidden states, then run TP o_proj.
             result, require_o_proj_forward = self._handle_o_proj_weight_switch_and_forward(
                 attn_output=attn_output,
                 output=output,
