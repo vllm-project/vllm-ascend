@@ -362,7 +362,7 @@ Here are two accuracy evaluation methods.
 
 1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
 
-2. After execution, you can get the result, here is the result of `DeepSeek-R1-W8A8` in `vllm-ascend:0.11.0rc2` for reference only.
+2. After execution, you can get the result, here is the result of `DeepSeek-R1-W8A8` in `vllm-ascend:0.13.0` for reference only.
 
     | dataset | version | metric | mode | vllm-api-general-chat |
     |----- | ----- | ----- | ----- | -----|
