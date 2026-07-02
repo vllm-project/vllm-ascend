@@ -258,7 +258,18 @@ class AscendFusedMoE(FusedMoE):
         self.moe_config.num_experts = self.global_num_experts
         self.moe_config.num_local_experts = self.local_num_experts
         self.moe_config.global_redundant_expert_num = self.global_redundant_expert_num
-        self.swiglu_limit = getattr(self.vllm_config.model_config.hf_config, "swiglu_limit", 0)
+        model_config = self.vllm_config.model_config
+        hf_config = getattr(model_config, "hf_config", None)
+        text_config = getattr(model_config, "hf_text_config", None)
+        if text_config is None:
+            text_config = getattr(hf_config, "text_config", hf_config)
+
+        if getattr(self, "swiglu_limit", None) is None:
+            self.swiglu_limit = getattr(text_config, "swiglu_limit", getattr(hf_config, "swiglu_limit", 0))
+        if getattr(self, "swiglu_alpha", None) is None:
+            self.swiglu_alpha = getattr(text_config, "swiglu_alpha", getattr(hf_config, "swiglu_alpha", 1.0))
+        if getattr(self, "swiglu_beta", None) is None:
+            self.swiglu_beta = getattr(text_config, "swiglu_beta", getattr(hf_config, "swiglu_beta", 0.0))
 
         moe_quant_params = {
             "num_experts": self.local_num_experts,
@@ -548,6 +559,8 @@ class AscendFusedMoE(FusedMoE):
                 before_gmm2_evt=fused_experts_results.before_gmm2_evt,
                 before_combine_evt=fused_experts_results.before_combine_evt,
                 swiglu_limit=fused_experts_results.swiglu_limit,
+                swiglu_alpha=fused_experts_results.swiglu_alpha,
+                swiglu_beta=fused_experts_results.swiglu_beta,
             )
         else:
             # The vLLM FusedMoE forward_impl does not return events.
@@ -597,6 +610,8 @@ class AscendFusedMoE(FusedMoE):
                     quant_mode=1,
                     swiglu_mode=1,
                     clamp_limit=fused_moe_evts.swiglu_limit,
+                    glu_alpha=fused_moe_evts.swiglu_alpha,
+                    glu_bias=fused_moe_evts.swiglu_beta,
                 )
                 # Execute the down projection concurrently with the combine
                 # communication.
@@ -706,6 +721,8 @@ class AscendFusedMoE(FusedMoE):
                     before_gmm2=fused_moe_results.before_gmm2_evt,
                     before_combine=fused_moe_results.before_combine_evt,
                     swiglu_limit=fused_moe_results.swiglu_limit,
+                    swiglu_alpha=fused_moe_results.swiglu_alpha,
+                    swiglu_beta=fused_moe_results.swiglu_beta,
                 ),
             )
         return shared_out, routed_out

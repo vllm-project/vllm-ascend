@@ -118,7 +118,8 @@ jobs:
       - name: uninstall vlm vllm-ascend and remove code (if pr test)
         if: ${{ inputs.request_id != '' }}
         run: |
-          pip uninstall -y vllm-ascend || true
+          # pip uninstall -y vllm-ascend || true
+          cp /vllm-workspace/vllm-ascend/vllm_ascend/_build_info.py /tmp/_build_info_backup.py 2>/dev/null || true
           cp -r /vllm-workspace/vllm-ascend/benchmark /tmp/aisbench-backup || true
           rm -rf  /vllm-workspace/vllm-ascend
 
@@ -135,6 +136,7 @@ jobs:
         if: ${{ inputs.request_id != '' }}
         run: |
           mv ./temp-vllm-ascend /vllm-workspace/vllm-ascend
+          cp /tmp/_build_info_backup.py /vllm-workspace/vllm-ascend/vllm_ascend/_build_info.py 2>/dev/null || true
           ls -R /vllm-workspace
 
       - name: Set MAX_JOBS based on runner
@@ -142,17 +144,17 @@ jobs:
           CARDS=$(echo "${{ inputs.runner }}" | grep -oE '[0-9]+$')
           echo "MAX_JOBS=$((CARDS * 23))" >> $GITHUB_ENV
 
-      - name: Install vllm-project/vllm-ascend
-        if: ${{ inputs.request_id != '' }}
-        working-directory: /vllm-workspace/vllm-ascend
-        env:
-          MAX_JOBS: ${{ env.MAX_JOBS }}
-          PIP_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple https://download.pytorch.org/whl/cpu/"
-        run: |
-          git config --global --add safe.directory /vllm-workspace/vllm-ascend
-          pip install uc-manager
-          uv pip install -r requirements-dev.txt
-          uv pip install -e .
+      # - name: Install vllm-project/vllm-ascend
+      #   if: ${{ inputs.request_id != '' }}
+      #   working-directory: /vllm-workspace/vllm-ascend
+      #   env:
+      #     MAX_JOBS: ${{ env.MAX_JOBS }}
+      #     PIP_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple https://download.pytorch.org/whl/cpu/"
+      #   run: |
+      #     git config --global --add safe.directory /vllm-workspace/vllm-ascend
+      #     pip install uc-manager
+      #     uv pip install -r requirements-dev.txt
+      #     uv pip install -e .
 
       - name: Install aisbench
         if: ${{ inputs.request_id != '' }}

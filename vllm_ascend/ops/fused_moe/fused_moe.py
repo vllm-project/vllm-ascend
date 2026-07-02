@@ -74,6 +74,8 @@ class FusedMoEResult:
     before_gmm2_evt: torch.npu.Event | None = None
     before_combine_evt: torch.npu.Event | None = None
     swiglu_limit: float = 0.0
+    swiglu_alpha: float = 1.0
+    swiglu_beta: float = 0.0
 
 
 @dataclass
@@ -84,6 +86,8 @@ class FusedMoEEvents:
     before_gmm2: torch.npu.Event | None = field(default=None)
     before_combine: torch.npu.Event | None = field(default=None)
     swiglu_limit: float = 0.0
+    swiglu_alpha: float = 1.0
+    swiglu_beta: float = 0.0
 
 
 def mock_false():
@@ -206,7 +210,9 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 hidden_states=x,
             )
 
-        topk_weights = topk_weights.to(x.dtype)
+        moe_comm_type = _EXTRA_CTX.moe_comm_type
+        if moe_comm_type not in {MoECommType.MC2, MoECommType.FUSED_MC2}:
+            topk_weights = topk_weights.to(x.dtype)
         # this is a naive implementation for experts load balance so as
         # to avoid accumulating too much tokens on a single rank.
         # currently it is only activated when doing profile runs.
@@ -240,6 +246,9 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             w1_scale_bias = None
             w2_scale_bias = None
 
+        if getattr(layer, "swigluoai_uninterleave", False):
+            activation = "swigluoai_uninterleave"
+
         final_hidden_states = moe_comm_method.fused_experts(
             fused_experts_input=build_fused_experts_input(
                 hidden_states=x,
@@ -263,6 +272,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 w1_scale_bias=w1_scale_bias,
                 w2_scale_bias=w2_scale_bias,
                 swiglu_limit=layer.swiglu_limit,
+                swiglu_alpha=getattr(layer, "swiglu_alpha", 1.0),
+                swiglu_beta=getattr(layer, "swiglu_beta", 0.0),
             )
         )
         if zero_expert_num > 0 and zero_expert_type is not None:
@@ -698,6 +709,8 @@ else:
                     before_gmm2_evt=fused_experts_results.before_gmm2_evt,
                     before_combine_evt=fused_experts_results.before_combine_evt,
                     swiglu_limit=fused_experts_results.swiglu_limit,
+                    swiglu_alpha=fused_experts_results.swiglu_alpha,
+                    swiglu_beta=fused_experts_results.swiglu_beta,
                 )
             else:
                 # The vLLM FusedMoE forward_impl does not return events.
@@ -747,6 +760,8 @@ else:
                         quant_mode=1,
                         swiglu_mode=1,
                         clamp_limit=fused_moe_evts.swiglu_limit,
+                        glu_alpha=fused_moe_evts.swiglu_alpha,
+                        glu_bias=fused_moe_evts.swiglu_beta,
                     )
                     # Execute the down projection concurrently with the combine
                     # communication.
@@ -856,6 +871,8 @@ else:
                         before_gmm2=fused_moe_results.before_gmm2_evt,
                         before_combine=fused_moe_results.before_combine_evt,
                         swiglu_limit=fused_moe_results.swiglu_limit,
+                        swiglu_alpha=fused_moe_results.swiglu_alpha,
+                        swiglu_beta=fused_moe_results.swiglu_beta,
                     ),
                 )
             return shared_out, routed_out

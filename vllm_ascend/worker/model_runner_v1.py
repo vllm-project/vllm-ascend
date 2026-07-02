@@ -108,6 +108,10 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAtt
 from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
+from vllm_ascend.attention.msa_m3 import (
+    AscendMiniMaxM3IndexerCache,
+    MiniMaxM3SparseAttention,
+)
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, using_paged_attention
 
 # yapf conflicts with isort for this block
@@ -4852,7 +4856,10 @@ class NPUModelRunner(GPUModelRunner):
                 # Skip modules that don't need KV cache (eg encoder-only attention)
                 if spec := attn_module.get_kv_cache_spec(self.vllm_config):
                     kv_cache_spec[layer_name] = spec
-            elif isinstance(attn_module, Attention):
+            elif isinstance(
+                attn_module,
+                (Attention, MiniMaxM3SparseAttention, AscendMiniMaxM3IndexerCache),
+            ):
                 if spec := attn_module.get_kv_cache_spec(self.vllm_config):
                     kv_cache_spec[layer_name] = spec
                     attn_layer_names.add(layer_name)
