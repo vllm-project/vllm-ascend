@@ -90,11 +90,15 @@ degrade latency or throughput.**
 For optimal locality, use a cpuset that is evenly distributed across NUMA
 nodes. Unbalanced cpusets may reduce the locality benefit of CPU binding.
 
-On Ascend 950, CPU binding uses deterministic global CPU slicing because Ascend 950 does not
-report NPU-to-CPU affinity in `npu-smi info -t topo`. Ascend 950 still pins worker,
-ACL, and release threads and can still migrate memory pages when `migratepages`
-is available. Because Ascend 950 skips IRQ binding, it does not reserve the first two
-CPUs in each NPU pool for IRQ handling. Those CPUs are assigned to the main
+On Ascend 950 with new HDK versions, CPU binding uses the CPU affinity reported by
+`npu-smi info -t topo` directly. vLLM Ascend splits identical CPU pools across
+all logical NPUs that share the same topology pool without extending the pool to
+adjacent NUMA nodes. This global split also includes NPUs hidden by the current
+process's `ASCEND_RT_VISIBLE_DEVICES`, so different DP groups do not reuse the
+same CPUs when they share a cpuset. Ascend 950 still pins worker, ACL, and
+release threads and can still migrate memory pages when `migratepages` is
+available. Because Ascend 950 skips IRQ binding, it does not reserve the first
+two CPUs in each NPU pool for IRQ handling. Those CPUs are assigned to the main
 worker instead.
 
 For IRQ binding, the process also needs permission to read `/proc/interrupts`
@@ -128,7 +132,7 @@ sudo systemctl start irqbalance
 | `CPU binding skipped: non-ARM CPU detected.` | CPU binding only runs on ARM. | No action needed on x86_64. |
 | `Can not get running npu info.` | No running NPU was found, or `ASCEND_RT_VISIBLE_DEVICES` filtered all NPUs. | Check visible NPU IDs and `npu-smi info`. |
 | `Insufficient CPUs for binding...` | Fewer CPUs are available than the role split requires. Devices with IRQ binding need at least 5 CPUs per logical NPU; Ascend 950 needs at least 3. | Expand the cpuset or reduce visible NPUs. |
-| `NPU topo affinity not found...` | Topology affinity is unavailable. | vLLM Ascend falls back to `global_slice`; check `npu-smi info -t topo` only if topology affinity is expected on this device. |
+| `NPU topo affinity not found...` | Topology affinity is unavailable. | On Ascend 950, install an HDK version that reports CPU affinity in `npu-smi info -t topo`. Other topo-affinity devices fall back to `global_slice`. |
 | `The 'migratepages' command is not available...` | Memory migration is skipped, while CPU thread binding still proceeds. | Install `numactl` if NUMA locality or performance is affected. |
 | `[irq] IRQ binding skipped on Ascend 950.` | Ascend 950 does not use the IRQ binding step. | No action needed. Worker, ACL, release thread binding and memory migration still proceed. |
 | `Bind cpus failed in rank...` | A binding step failed and CPU binding was skipped for that rank. | Check `taskset`, `lscpu`, `npu-smi`, cpuset size, and `/proc/irq` permissions. |

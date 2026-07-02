@@ -45,21 +45,21 @@ The binding strategy is selected by Ascend device type:
 | Device type | Strategy | Reason |
 | --- | --- | --- |
 | A3 | `global_slice` | A3 uses HCCS card-to-card interconnect. Each NPU is nearly equidistant from all NUMA nodes, so there is no strong NPU-to-NUMA affinity signal. Global logical NPU ID based slicing gives deterministic, non-overlapping CPU pools and CPU/NUMA isolation between workers. |
-| Ascend 950 | `global_slice` | Ascend 950 reports NPU-to-NPU/NIC topology but does not report NPU-to-CPU affinity in `npu-smi info -t topo`. It also reports process rows by `NPU ID` instead of `NPU Chip`. Global logical NPU ID based slicing keeps CPU pools deterministic without relying on missing affinity data. |
+| Ascend 950 | `topo_affinity` | New HDK versions report NPU-to-CPU affinity in `npu-smi info -t topo`. Ascend 950 also reports process rows by `NPU ID` instead of `NPU Chip`, skips IRQ binding, does not reserve SQ/CQ IRQ CPUs, and uses the reported topology pool directly. |
 | A2 and Atlas 300 inference products | `topo_affinity` | A2 and Atlas 300 inference products provide NPU-to-CPU affinity information through `npu-smi info -t topo`, so they use this topology signal when available. |
 
-If `topo_affinity` is selected but topo affinity is unavailable, the allocator falls back to `global_slice`.
+If `topo_affinity` is selected but topo affinity is unavailable, the allocator falls back to `global_slice`
+except on Ascend 950, where topology affinity is required.
 
 ### CPU Pool Construction
 
 #### global_slice
 
 `global_slice` is designed for devices without a useful NPU-to-CPU affinity
-signal, including A3 and Ascend 950. Because A3's **HCCS interconnect makes the distance
-from each NPU to each NUMA node nearly the same**, topology affinity is not a
-useful placement signal. Ascend 950 similarly exposes UB/NIC topology but not CPU
-affinity. The allocator therefore partitions the sorted `allowed_cpus` list by
-global logical NPU ID.
+signal, including A3. Because A3's **HCCS interconnect makes the distance from
+each NPU to each NUMA node nearly the same**, topology affinity is not a useful
+placement signal. The allocator therefore partitions the sorted `allowed_cpus`
+list by global logical NPU ID.
 
 1. Determine `total_npus` in this order:
    - `total_logic_npus` from `npu-smi info -m`
@@ -90,24 +90,25 @@ does not share the same CPU or NUMA slice with another worker.
 
 #### topo_affinity
 
-`topo_affinity` is designed for A2, Atlas 300 inference products, and
-other non-A3 device types. A2 and Atlas 300 inference products expose
-**meaningful NPU-to-CPU affinity information**, so the allocator starts from NPU
-topology affinity when it is available and then avoids overlap for shared
-affinity groups.
+`topo_affinity` is designed for A2, Atlas 300 inference products, Ascend 950,
+and other non-A3 device types. These devices expose **meaningful NPU-to-CPU
+affinity information**, so the allocator starts from NPU topology affinity when
+it is available and then avoids overlap for shared affinity groups.
 
 1. Build candidate NPUs from all logical NPUs:
    - always include running NPUs
    - include non-running NPUs only when their affinity overlaps this process's allowed cpuset
 2. For each candidate NPU, intersect topo affinity with `allowed_cpus`.
 3. If the intersection is empty for a candidate, binding fails for this rank.
-4. If the affinity CPUs are all on one NUMA node, extend the pool with CPUs from the next NUMA node, constrained by `allowed_cpus`.
+4. If the device uses strict topology affinity, keep the reported CPU pool as-is. Otherwise, when the affinity CPUs are all on one NUMA node, extend the pool with CPUs from the next NUMA node, constrained by `allowed_cpus`.
 5. Group NPUs with identical extended pools and split each shared pool evenly across that group.
 6. Keep only running NPUs in the final `npu_cpu_pool`.
 
 The non-running candidate step is intentional. It prevents two independent
 single-card workers from selecting the same CPU range when their visible NPUs
-share the same topology affinity.
+share the same topology affinity. Ascend 950 uses this logic with strict topo
+CPU pools, while A2 and Atlas 300 inference products may expand a single-NUMA
+pool to the next NUMA node before the shared-pool split.
 
 ### Role Split
 

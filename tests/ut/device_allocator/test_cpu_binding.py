@@ -332,7 +332,7 @@ class TestCpuAlloc(unittest.TestCase):
         mock_get_device_type.return_value = AscendDeviceType.A3
         self.assertEqual(self.cpu_alloc._binding_mode(), "global_slice")
         mock_get_device_type.return_value = AscendDeviceType.A5
-        self.assertEqual(self.cpu_alloc._binding_mode(), "global_slice")
+        self.assertEqual(self.cpu_alloc._binding_mode(), "topo_affinity")
 
     @patch("vllm_ascend.cpu_binding.get_ascend_device_type")
     def test_build_cpu_pools_fallback_to_global_slice(self, mock_get_device_type):
@@ -345,6 +345,19 @@ class TestCpuAlloc(unittest.TestCase):
             self.cpu_alloc.build_cpu_pools()
         mock_build_cpu_node_map.assert_called_once()
         mock_build_global_slice_cpu_pool.assert_called_once()
+
+    @patch("vllm_ascend.cpu_binding.get_ascend_device_type")
+    def test_build_cpu_pools_raises_when_ascend_950_topo_affinity_missing(self, mock_get_device_type):
+        mock_get_device_type.return_value = AscendDeviceType.A5
+        self.cpu_alloc.device_info.npu_affinity = {}
+        with (
+            patch.object(self.cpu_alloc, "build_cpu_node_map") as mock_build_cpu_node_map,
+            patch.object(self.cpu_alloc, "build_global_slice_cpu_pool") as mock_build_global_slice_cpu_pool,
+            self.assertRaisesRegex(RuntimeError, "NPU topo affinity not found for Ascend 950"),
+        ):
+            self.cpu_alloc.build_cpu_pools()
+        mock_build_cpu_node_map.assert_called_once()
+        mock_build_global_slice_cpu_pool.assert_not_called()
 
     @patch("vllm_ascend.cpu_binding.get_ascend_device_type")
     def test_build_cpu_pools_global_slice_mode(self, mock_get_device_type):
@@ -720,6 +733,76 @@ class TestCpuBindingSupplemental(unittest.TestCase):
         self.assertFalse(set(npu0_process.assign_main[0]) & set(npu2_process.assign_main[2]))
         self.assertFalse(set(npu0_process.assign_acl[0]) & set(npu2_process.assign_acl[2]))
         self.assertFalse(set(npu0_process.assign_rel[0]) & set(npu2_process.assign_rel[2]))
+
+    @patch("vllm_ascend.cpu_binding.get_ascend_device_type", return_value=AscendDeviceType.A5)
+    def test_build_cpu_pools_ascend_950_topo_splits_hidden_dp_groups(self, _mock_get_device_type):
+        def build_dp_process(visible_npus):
+            cpu_alloc = make_cpu_alloc()
+            cpu_alloc.device_info.all_logic_npus = list(range(8))
+            cpu_alloc.device_info.running_npu_list = visible_npus
+            cpu_alloc.device_info.allowed_cpus = list(range(384))
+            cpu_alloc.device_info.npu_affinity = {
+                0: list(range(288, 384)),
+                1: list(range(288, 384)),
+                2: list(range(96, 192)),
+                3: list(range(96, 192)),
+                4: list(range(96, 192)),
+                5: list(range(96, 192)),
+                6: list(range(288, 384)),
+                7: list(range(288, 384)),
+            }
+            cpu_alloc.cpu_node = {cpu: cpu // 96 for cpu in range(384)}
+            cpu_alloc.numa_to_cpu_map = {
+                0: list(range(0, 96)),
+                1: list(range(96, 192)),
+                2: list(range(192, 288)),
+                3: list(range(288, 384)),
+            }
+
+            with patch.object(cpu_alloc, "build_cpu_node_map"):
+                cpu_alloc.build_cpu_pools()
+                cpu_alloc.allocate()
+            return cpu_alloc
+
+        dp0_process = build_dp_process([0, 1, 2, 3])
+        dp1_process = build_dp_process([4, 5, 6, 7])
+
+        self.assertEqual(dp0_process.npu_cpu_pool[0], list(range(288, 312)))
+        self.assertEqual(dp0_process.npu_cpu_pool[1], list(range(312, 336)))
+        self.assertEqual(dp0_process.npu_cpu_pool[2], list(range(96, 120)))
+        self.assertEqual(dp0_process.npu_cpu_pool[3], list(range(120, 144)))
+        self.assertEqual(dp1_process.npu_cpu_pool[4], list(range(144, 168)))
+        self.assertEqual(dp1_process.npu_cpu_pool[5], list(range(168, 192)))
+        self.assertEqual(dp1_process.npu_cpu_pool[6], list(range(336, 360)))
+        self.assertEqual(dp1_process.npu_cpu_pool[7], list(range(360, 384)))
+        dp0_cpus = set().union(*(set(cpus) for cpus in dp0_process.npu_cpu_pool.values()))
+        dp1_cpus = set().union(*(set(cpus) for cpus in dp1_process.npu_cpu_pool.values()))
+        self.assertFalse(dp0_cpus & dp1_cpus)
+        self.assertEqual(dp0_process.assign_main[0], list(range(288, 310)))
+        self.assertEqual(dp1_process.assign_main[4], list(range(144, 166)))
+
+    @patch("vllm_ascend.cpu_binding.get_ascend_device_type", return_value=AscendDeviceType.A5)
+    def test_build_cpu_pools_ascend_950_topo_does_not_extend_numa(self, _mock_get_device_type):
+        cpu_alloc = make_cpu_alloc()
+        cpu_alloc.device_info.all_logic_npus = [0]
+        cpu_alloc.device_info.running_npu_list = [0]
+        cpu_alloc.device_info.allowed_cpus = list(range(384))
+        cpu_alloc.device_info.npu_affinity = {0: list(range(288, 384))}
+        cpu_alloc.cpu_node = {cpu: cpu // 96 for cpu in range(384)}
+        cpu_alloc.numa_to_cpu_map = {
+            0: list(range(0, 96)),
+            1: list(range(96, 192)),
+            2: list(range(192, 288)),
+            3: list(range(288, 384)),
+        }
+
+        with (
+            patch.object(cpu_alloc, "build_cpu_node_map"),
+            patch.object(cpu_alloc, "extend_numa", side_effect=AssertionError("extend_numa should not be used")),
+        ):
+            cpu_alloc.build_cpu_pools()
+
+        self.assertEqual(cpu_alloc.npu_cpu_pool, {0: list(range(288, 384))})
 
     @patch("vllm_ascend.cpu_binding.logger.info")
     def test_print_plan_handles_empty_release_assignment(self, mock_logger_info):

@@ -25,9 +25,11 @@ DEVICE_BINDING_MODE: dict["AscendDeviceType", str] = {
     AscendDeviceType.A2: TOPO_AFFINITY_MODE,
     AscendDeviceType.A3: GLOBAL_SLICE_MODE,
     AscendDeviceType._310P: TOPO_AFFINITY_MODE,
-    AscendDeviceType.A5: GLOBAL_SLICE_MODE,
+    AscendDeviceType.A5: TOPO_AFFINITY_MODE,
 }
 NO_IRQ_BINDING_DEVICE_TYPES = {AscendDeviceType.A5}
+REQUIRED_TOPO_AFFINITY_DEVICE_TYPES = {AscendDeviceType.A5}
+STRICT_TOPO_AFFINITY_DEVICE_TYPES = {AscendDeviceType.A5}
 
 
 def is_arm_cpu() -> bool:
@@ -377,6 +379,14 @@ class CpuAlloc:
         return get_ascend_device_type() not in NO_IRQ_BINDING_DEVICE_TYPES
 
     @staticmethod
+    def _requires_topo_affinity() -> bool:
+        return get_ascend_device_type() in REQUIRED_TOPO_AFFINITY_DEVICE_TYPES
+
+    @staticmethod
+    def _uses_strict_topo_affinity() -> bool:
+        return get_ascend_device_type() in STRICT_TOPO_AFFINITY_DEVICE_TYPES
+
+    @staticmethod
     def _min_cpus_per_npu() -> int:
         if CpuAlloc._reserve_irq_cpus():
             return MIN_CPUS_PER_NPU
@@ -395,6 +405,8 @@ class CpuAlloc:
 
         # topo_affinity mode
         if not self.device_info.npu_affinity:
+            if self._requires_topo_affinity():
+                raise RuntimeError("NPU topo affinity not found for Ascend 950. Please check 'npu-smi info -t topo'.")
             logger.warning("NPU topo affinity not found. action: fallback to global-slice CPU binding.")
             self.build_global_slice_cpu_pool()
             return
@@ -415,7 +427,9 @@ class CpuAlloc:
             ]
             if not base_cpu_list:
                 raise RuntimeError("CPUs available in 'Cpus_allowed_list' conflict with NUMA affinity.")
-            extra_cpu_list = self.extend_numa(base_cpu_list)
+            extra_cpu_list = base_cpu_list
+            if not self._uses_strict_topo_affinity():
+                extra_cpu_list = self.extend_numa(base_cpu_list)
             self.npu_cpu_pool[npu] = extra_cpu_list
 
         groups = defaultdict(list)
