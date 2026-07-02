@@ -173,6 +173,7 @@
       "rhymes-ai/Aria",
       "sentence-transformers/all-MiniLM-L12-v2",
       "tencent/HunyuanOCR",
+      "Kimi-Linear-48B-A3B-Instruct",
       "unsloth/DeepSeek-V3.1-BF16",
       "unsloth/Kimi-K2-Thinking-BF16",
       "unsloth/gpt-oss-20b-BF16",

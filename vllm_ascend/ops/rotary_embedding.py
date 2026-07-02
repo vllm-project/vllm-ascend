@@ -75,6 +75,12 @@ def set_cos_and_sin(vllm_config, max_num_reqs, decode_token_per_req, dtype, devi
         rope_dim = model_config.hf_text_config.qk_rope_head_dim
         _cos_mla = torch.ones(max_num_batched_tokens, 1, 1, rope_dim, dtype=dtype, device=device)
         _sin_mla = torch.zeros(max_num_batched_tokens, 1, 1, rope_dim, dtype=dtype, device=device)
+    elif hasattr(model_config.hf_text_config, "qk_rope_head_dim"):
+        # Hybrid models (e.g. KimiLinear) with MLA layers may not set use_mla.
+        # Lazy-init MLA cos/sin buffers based on qk_rope_head_dim.
+        rope_dim = model_config.hf_text_config.qk_rope_head_dim
+        _cos_mla = torch.ones(max_num_batched_tokens, 1, 1, rope_dim, dtype=dtype, device=device)
+        _sin_mla = torch.zeros(max_num_batched_tokens, 1, 1, rope_dim, dtype=dtype, device=device)
     elif not is_vl_model(vllm_config) and has_rope(vllm_config):
         rope_dim = model_config.get_head_size()
         # For models using partial rope like Qwen3-Next.

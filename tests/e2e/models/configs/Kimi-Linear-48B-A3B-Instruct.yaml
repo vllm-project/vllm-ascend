@@ -1,0 +1,30 @@
+model_name: "moonshotai/Kimi-Linear-48B-A3B-Instruct"
+hardware: "Atlas A2 Series"
+
+serve:
+  tensor_parallel_size: 2
+  dtype: bfloat16
+  max_model_len: 4096
+  gpu_memory_utilization: 0.7
+  trust_remote_code: true
+  enforce_eager: true
+  block_size: 128
+
+envs:
+  HCCL_OP_EXPANSION_MODE: "AIV"
+  OMP_PROC_BIND: "false"
+  OMP_NUM_THREADS: "10"
+  VLLM_USE_V1: "1"
+  HCCL_BUFFSIZE: "200"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+
+tasks:
+  - name: "ceval-valid"
+    metrics:
+      - name: "acc,none"
+        value: 0.30
+
+num_fewshot: 5
+apply_chat_template: true
+fewshot_as_multiturn: false
+batch_size: 32
