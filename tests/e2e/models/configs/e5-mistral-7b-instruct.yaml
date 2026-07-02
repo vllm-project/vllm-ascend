@@ -1,0 +1,42 @@
+model_name: "intfloat/e5-mistral-7b-instruct"
+model_type: "vllm-embedding"
+hardware: "Atlas A2/A3 Series"
+
+serve:
+  runner: "pooling"
+  tensor_parallel_size: 1
+  dtype: "float16"
+  max_model_len: 512
+  gpu_memory_utilization: 0.8
+  enforce_eager: true
+
+# Set this environment variable when validating with a local checkpoint.
+local_model_path_env: "E5_MISTRAL_MODEL_PATH"
+embedding_dimension: 4096
+expected_l2_norm: 1.0
+norm_atol: 0.001
+
+tasks:
+  - name: "e5_mistral_retrieval_smoke"
+    instruction: "Given a web search query, retrieve relevant passages that answer the query"
+    queries:
+      - text: "What is the capital of China?"
+        relevant_doc: 0
+      - text: "Explain gravity"
+        relevant_doc: 1
+    documents:
+      - "The capital of China is Beijing."
+      - "Gravity is a force that attracts two bodies towards each other and gives weight to physical objects."
+    min_score_margin: 0.05
+    metrics:
+      - name: "top1_accuracy"
+        value: 1.0
+      - name: "embedding_dimension"
+        value: 4096
+      - name: "mean_l2_norm"
+        value: 1.0
+      - name: "min_score_margin"
+        value: 0.05
+
+limit: 4
+batch_size: 4
