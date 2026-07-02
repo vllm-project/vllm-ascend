@@ -1404,6 +1404,53 @@ def check_kv_extra_config(vllm_config):
         _check("decode", vllm_config.kv_transfer_config.get_from_extra_config("decode", {}))
 
 
+def is_gqa_backend(vllm_config: VllmConfig) -> bool:
+    model_config = getattr(vllm_config, "model_config", None)
+    if model_config is None:
+        return False
+
+    if getattr(model_config, "is_deepseek_mla", False) or getattr(model_config, "use_mla", False):
+        return False
+
+    model_arch_config = getattr(model_config, "model_arch_config", None)
+    total_num_attention_heads = getattr(model_arch_config, "total_num_attention_heads", None)
+    get_total_num_kv_heads = getattr(model_config, "get_total_num_kv_heads", None)
+    if total_num_attention_heads is None or not callable(get_total_num_kv_heads):
+        return False
+
+    total_num_kv_heads = get_total_num_kv_heads()
+    if total_num_kv_heads is None:
+        return False
+
+    return total_num_attention_heads != total_num_kv_heads
+
+
+def uses_mooncake_connector(kv_transfer_config: Any) -> bool:
+    mooncake_connector_names = {"MooncakeConnector", "MooncakeConnectorV1"}
+    return bool(_collect_kv_connector_names(kv_transfer_config) & mooncake_connector_names)
+
+
+def _collect_kv_connector_names(value: Any) -> set[str]:
+    connector_names: set[str] = set()
+    if isinstance(value, dict):
+        connector = value.get("kv_connector")
+        if isinstance(connector, str):
+            connector_names.add(connector)
+        for nested_value in value.values():
+            connector_names.update(_collect_kv_connector_names(nested_value))
+    elif isinstance(value, (list, tuple)):
+        for nested_value in value:
+            connector_names.update(_collect_kv_connector_names(nested_value))
+    else:
+        connector = getattr(value, "kv_connector", None)
+        if isinstance(connector, str):
+            connector_names.add(connector)
+        extra_config = getattr(value, "kv_connector_extra_config", None)
+        if isinstance(extra_config, (dict, list, tuple)):
+            connector_names.update(_collect_kv_connector_names(extra_config))
+    return connector_names
+
+
 def singleton(cls):
     instances = {}
 
