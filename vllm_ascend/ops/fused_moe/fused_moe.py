@@ -18,6 +18,7 @@
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import wraps
+from inspect import isclass
 
 import torch
 import torch.nn.functional as F
@@ -52,7 +53,9 @@ from vllm_ascend.utils import (
     vllm_version_is,
 )
 
-if vllm_version_is("0.23.0"):
+_USE_LEGACY_FUSED_MOE_LAYER = vllm_version_is("0.23.0") and isclass(FusedMoE)
+
+if _USE_LEGACY_FUSED_MOE_LAYER:
     from vllm.model_executor.layers.fused_moe.layer import UnquantizedFusedMoEMethod
 else:
     from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import UnquantizedFusedMoEMethod
@@ -183,7 +186,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             tid2eid=self.tid2eid,
             input_ids=input_ids,
         )
-        if not vllm_version_is("0.23.0"):
+        if not _USE_LEGACY_FUSED_MOE_LAYER:
             try:
                 _vllm_config = get_current_vllm_config()
             except AssertionError:
@@ -270,7 +273,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         return final_hidden_states
 
 
-if vllm_version_is("0.23.0"):
+if _USE_LEGACY_FUSED_MOE_LAYER:
     from vllm_ascend.ops.fused_moe.fused_moe_0_23_0 import AscendFusedMoE, AscendMoERunner
 
     AscendFusedMoE.__module__ = __name__

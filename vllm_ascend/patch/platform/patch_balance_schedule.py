@@ -76,9 +76,9 @@ class BalanceScheduler(Scheduler):
         # --- DiffusionGemma block-diffusion canvas wiring ---
         # DiffusionGemma denoises a fixed-size canvas (canvas_length tokens) each
         # decode step using the spec-decode draft-token infrastructure: the
-        # scheduler must schedule (canvas_length - 1) "spec"/draft tokens per
-        # decode step so the runner produces canvas_length query positions and
-        # the diffusion sampler can denoise the whole canvas bidirectionally.
+        # scheduler must schedule canvas_length "spec"/draft tokens per decode
+        # step so the runner produces canvas_length query positions and the
+        # diffusion sampler can denoise the whole canvas bidirectionally.
         # The token values come from req_states.draft_tokens, written by the
         # DiffusionGemma sampler; the scheduler only needs the placeholder count.
         try:
@@ -91,8 +91,8 @@ class BalanceScheduler(Scheduler):
             if canvas_length is None:
                 text_cfg = getattr(hf_cfg, "text_config", None)
                 canvas_length = getattr(text_cfg, "canvas_length", 256) if text_cfg else 256
-            self.num_spec_tokens = int(canvas_length) - 1
-            self.num_lookahead_tokens = int(canvas_length) - 1
+            self.num_spec_tokens = int(canvas_length)
+            self.num_lookahead_tokens = int(canvas_length)
             logger.info(
                 "DiffusionGemma: scheduling %d spec/draft tokens per decode step "
                 "(canvas_length=%d) for block-diffusion canvas denoising.",

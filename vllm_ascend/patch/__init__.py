@@ -90,8 +90,8 @@
 #       the scheduler does not keep feeding the full denoising canvas.
 #    How:
 #       For DiffusionGemma architectures, set scheduler lookahead/spec token
-#       counts to canvas_length - 1 so each decode step has one sampled token
-#       plus the canvas draft positions.
+#       counts to canvas_length so each decode step has exactly the canvas
+#       draft positions.
 #    Related PR (if no, explain why):
 #       No vLLM PR yet; this is Ascend-side wiring for upstream DiffusionGemma
 #       model-state support.
