@@ -481,6 +481,8 @@ class NPUModelRunner(GPUModelRunner):
             self.attn_backend, (AscendAttentionBackend, AscendMLABackend)
         )
 
+        self._async_corrected_decode_seq_lens: np.adarray | None = None
+
         # kv role
         self.is_kv_producer = False
         self.is_kv_consumer = False
@@ -807,6 +809,8 @@ class NPUModelRunner(GPUModelRunner):
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
         self.input_batch.block_table.commit_block_table(num_reqs)
+
+        self._async_corrected_decode_seq_lens = None
 
         req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens)
 
@@ -1156,6 +1160,11 @@ class NPUModelRunner(GPUModelRunner):
             base_num_computed_tokens_np[:num_decode_reqs] = (
                 corrected_num_computed_tokens_np[:num_decode_reqs]
             )
+
+            self._async_corrected_decode_seq_lens = (
+                base_num_computed_tokens_np[:num_decode_reqs]
+                + num_scheduled_tokens[:num_decode_reqs]
+            ).astype(np.int32)
 
             position_offsets = (
                 position_pcp
@@ -3060,7 +3069,14 @@ class NPUModelRunner(GPUModelRunner):
 
             fixed_decode_seq_lens_cpu = None
             if self.use_async_spec_decode:
-                fixed_decode_seq_lens_cpu = self.optimistic_seq_lens_cpu[:num_reqs].numpy()
+                if (
+                    self._async_corrected_decode_seq_lens is not None
+                    and not for_cudagraph_capture
+                ):
+                    assert len(self._async_corrected_decode_seq_lens) >= self.pcp_manager.num_decode_reqs
+                    fixed_decode_seq_lens_cpu = self._async_corrected_decode_seq_lens
+                else:
+                    fixed_decode_seq_lens_cpu = self.optimistic_seq_lens_cpu[:num_reqs].numpy()
 
             assert num_reqs_padded is not None
             return self.pcp_manager.generate_pcp_metadata(
