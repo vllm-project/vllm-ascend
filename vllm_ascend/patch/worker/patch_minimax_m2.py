@@ -54,8 +54,17 @@ def _patched_moe_forward(
 
     # router_logits: (num_tokens, n_experts)
     router_logits, _ = self.gate(hidden_states.to(torch.float32))
-    final_hidden_states = self.experts(hidden_states=hidden_states, router_logits=router_logits)
-    if self.tp_size > 1:
+    fused_moe_out = self.experts(hidden_states=hidden_states, router_logits=router_logits)
+    fused_moe_out_is_tuple = isinstance(fused_moe_out, tuple)
+    if fused_moe_out_is_tuple:
+        final_hidden_states = fused_moe_out[1]
+    else:
+        final_hidden_states = fused_moe_out
+
+    # v0.20+ MoERunner applies TP all-reduce for tensor outputs when
+    # _fused_output_is_reduced is False (ALLGATHER without flash_comm).
+    # Only legacy tuple outputs still need reduction here (see deepseek_v4.py).
+    if self.tp_size > 1 and fused_moe_out_is_tuple:
         final_hidden_states = self.experts.maybe_all_reduce_tensor_model_parallel(final_hidden_states)
     return final_hidden_states.view(num_tokens, hidden_dim)
 
