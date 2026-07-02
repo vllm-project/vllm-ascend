@@ -25,6 +25,13 @@ AscendSpecDecodeBaseProposer.prepare_next_token_ids_padded = (  # type: ignore[m
     AscendSpecDecodeBaseProposer310.prepare_next_token_ids_padded
 )
 
+# 310P: protect tail slot during MTP input_ids shift to avoid GatherV2 corruption
+# caused by the NPU slice-assign writing one element past the intended range
+# on the persistent drafter input_ids buffer.
+AscendSpecDecodeBaseProposer.set_inputs_first_pass = (  # type: ignore[method-assign]
+    AscendSpecDecodeBaseProposer310.set_inputs_first_pass
+)
+
 # Patch _warmup_prefill_kernels to no-op on 310P: triton.next_power_of_2 does
 # not exist in the triton version used on 310P CI, and NPU does not use these
 # CUDA warmup kernel anyway.
