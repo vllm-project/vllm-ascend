@@ -229,8 +229,7 @@ jobs:
         run: |
           export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
           echo "Running pytest with tests path: ${{ inputs.tests }}"
-          pytest -sv "${{ inputs.tests }}" \
-          --ignore=tests/e2e/nightly/single_node/ops/singlecard_ops/test_fused_moe.py
+          pytest -sv "${{ inputs.tests }}"
 
       - name: Run Pytest (YAML-driven)
         if: ${{ always() && inputs.config_file_path != '' }}

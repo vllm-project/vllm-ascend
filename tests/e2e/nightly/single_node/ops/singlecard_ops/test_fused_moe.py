@@ -341,7 +341,6 @@ def test_select_experts(
     torch.npu.reset_peak_memory_stats()
 
 
-@pytest.mark.skip("Probabilistic failure, need zengiant after fix")
 @pytest.mark.parametrize("device", DEVICE)
 def test_select_experts_invalid_scoring_func(device: str):
     with (
