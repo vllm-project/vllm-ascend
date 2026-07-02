@@ -23,6 +23,25 @@ def bgmv_shrink(
     lora_indices_tensor: torch.Tensor,
     scaling: float = 1.0,
 ):
+    # The Ascend C++ kernel (csrc/kernels/bgmv_shrink.cpp) always writes the
+    # output in float32 (Y_T = float), regardless of output_tensor's dtype, and
+    # the C++ binding does not check output_tensor.dtype. Feeding a non-float32
+    # output (e.g. bf16, which vllm's torch ops freely accept) makes the kernel
+    # write 4 bytes per element into a 2-byte buffer and silently corrupt memory.
+    # Honor the contract: accumulate into a float32 tensor and cast back when the
+    # caller's output is not float32. In production the LoRA shrink buffer is
+    # already float32 (see punica_npu.py), so this branch is a no-op there.
+    if output_tensor.dtype != torch.float32:
+        out = output_tensor.to(torch.float32)
+        torch.ops._C_ascend.bgmv_shrink(
+            inputs,
+            lora_a_weights,
+            lora_indices_tensor,
+            out,
+            scaling,
+        )
+        output_tensor.copy_(out)
+        return output_tensor
     return torch.ops._C_ascend.bgmv_shrink(
         inputs,
         lora_a_weights,
@@ -39,6 +58,14 @@ def bgmv_expand(
     lora_indices_tensor: torch.Tensor,
     add_inputs: bool = True,
 ):
+    # The Ascend C++ kernel (csrc/kernels/bgmv_expand.cpp) always reads the input
+    # in float32 (X_T = float), regardless of inputs' dtype, and the C++ binding
+    # does not check inputs.dtype. Feeding a non-float32 input (e.g. bf16) makes
+    # the kernel read 4 bytes per element from a 2-byte buffer, producing garbage.
+    # Honor the contract by casting the input to float32. In production the input
+    # is the float32 shrink buffer, so this is a no-op there.
+    if inputs.dtype != torch.float32:
+        inputs = inputs.to(torch.float32)
     return torch.ops._C_ascend.bgmv_expand(
         inputs,
         lora_b_weights,
@@ -58,6 +85,9 @@ def bgmv_expand_slice(
     slice_size: int,
     add_inputs: bool = True,
 ):
+    # See bgmv_expand: the kernel reads the input as float32.
+    if inputs.dtype != torch.float32:
+        inputs = inputs.to(torch.float32)
     return torch.ops._C_ascend.bgmv_expand(
         inputs, lora_b_weights, lora_indices_tensor, output_tensor, slice_offset, slice_size
     )
@@ -75,6 +105,12 @@ def sgmv_shrink(
     token_nums: int,
     scaling: float,
 ):
+    # See bgmv_shrink: the kernel writes the output as float32.
+    if output_tensor.dtype != torch.float32:
+        out = output_tensor.to(torch.float32)
+        torch.ops._C_ascend.sgmv_shrink(inputs, lora_a_weights, lora_indices_tensor, seq_len_tensor, out, scaling)
+        output_tensor.copy_(out)
+        return output_tensor
     return torch.ops._C_ascend.sgmv_shrink(
         inputs, lora_a_weights, lora_indices_tensor, seq_len_tensor, output_tensor, scaling
     )
@@ -92,6 +128,9 @@ def sgmv_expand(
     token_nums: int,
     add_inputs: bool = False,
 ):
+    # See bgmv_expand: the kernel reads the input as float32.
+    if inputs.dtype != torch.float32:
+        inputs = inputs.to(torch.float32)
     return torch.ops._C_ascend.sgmv_expand(
         inputs,
         lora_b_weights,
@@ -117,6 +156,9 @@ def sgmv_expand_slice(
     slice_size: int,
     add_inputs: bool = False,
 ):
+    # See bgmv_expand: the kernel reads the input as float32.
+    if inputs.dtype != torch.float32:
+        inputs = inputs.to(torch.float32)
     return torch.ops._C_ascend.sgmv_expand(
         inputs, lora_b_weights, lora_indices_tensor, seq_len_tensor, output_tensor, slice_offset, slice_size
     )
