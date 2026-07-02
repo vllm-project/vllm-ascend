@@ -710,6 +710,10 @@ class ReqMeta:
 
     event_id: int | None = None
 
+    # PD分离 Mamba状态独立通道 (PD Mamba Routing)
+    # 非空时表示混合模型, Mamba状态走独立传输通道
+    mamba_state_payload: dict | None = None
+
     def __init__(
         self,
         req_id: str,
