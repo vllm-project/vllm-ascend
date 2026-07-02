@@ -827,6 +827,92 @@ class TestCoreFunctionality(unittest.TestCase):
         self.assertEqual(call_args[3], [1024, 1024])
         mock_get_meta.assert_not_called()
 
+    def _configure_mtp_draft_transfer(self):
+        layer_name = "model.layers.0.mtp.self_attn"
+        local_layer_idx = 32
+        remote_layer_idx = 40
+        remote_wrong_layer_idx = local_layer_idx
+
+        self.thread._prefill_pp_size = 2
+        self.thread.pp_layer_indices = {0: (0, 16), 1: (16, 32)}
+        self.thread.num_draft_layers = 1
+        self.thread.vllm_config.speculative_config = types.SimpleNamespace(method="mtp", num_speculative_tokens=1)
+        self.thread.kv_group2layeridx = {
+            0: (
+                {"kv_cache_spec_type": "FullAttentionSpec", "layer_names": [layer_name]},
+                [local_layer_idx],
+            )
+        }
+        self.thread.remote_kv_group2layeridx["remote_engine"][6666] = {
+            0: (
+                {"kv_cache_spec_type": "FullAttentionSpec", "layer_names": [layer_name]},
+                [remote_layer_idx],
+            )
+        }
+        self.thread.group_compress_ratios = {0: 1}
+
+        local_base_addrs = [[0] for _ in range(local_layer_idx + 1)]
+        local_base_addrs[local_layer_idx] = [0x320000]
+        remote_base_addrs = [[0] for _ in range(remote_layer_idx + 1)]
+        remote_base_addrs[remote_wrong_layer_idx] = [0xBAD000]
+        remote_base_addrs[remote_layer_idx] = [0x400000]
+        self.thread.kv_caches_base_addr["local_engine"][5555] = local_base_addrs
+        self.thread.kv_caches_base_addr["remote_engine"] = {6666: remote_base_addrs}
+
+        self.thread.block_len_per_addr = [[1024] for _ in range(local_layer_idx + 1)]
+        self.thread.block_stride_per_addr = [[4096] for _ in range(local_layer_idx + 1)]
+        self.thread.block_size_scale = [[1] for _ in range(local_layer_idx + 1)]
+        self.thread.remote_block_size_scale["remote_engine"] = {6666: [[1] for _ in range(remote_layer_idx + 1)]}
+        self.thread.remote_block_stride_per_addr["remote_engine"][6666] = [
+            [8192] for _ in range(remote_layer_idx + 1)
+        ]
+        return local_layer_idx, remote_layer_idx
+
+    def _make_mtp_draft_transfer_request(self, prefill_pp_rank: int):
+        req = dict(self.test_req)
+        req["local_block_ids"] = [[2]]
+        req["remote_block_ids"] = [[5]]
+        req["group_pulls"] = [
+            GroupPull(
+                group_id=0,
+                remote_tp_offset=0,
+                num_group_pulls=1,
+                prefill_pp_rank=prefill_pp_rank,
+                is_group_transfer_end=True,
+            )
+        ]
+        return req
+
+    @patch.object(KVCacheRecvingThread, "_get_remote_metadata")
+    def test_transfer_mtp_draft_cache_skips_non_last_prefill_pp_rank(self, mock_get_meta):
+        self._configure_mtp_draft_transfer()
+        req = self._make_mtp_draft_transfer_request(prefill_pp_rank=0)
+
+        with patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.get_ascend_config") as mock_config:
+            mock_config.return_value.enable_kv_nz = False
+            self.thread._transfer_kv_cache_all_groups(req)
+
+        self.engine.batch_transfer_sync_read.assert_not_called()
+        mock_get_meta.assert_not_called()
+
+    @patch.object(KVCacheRecvingThread, "_get_remote_metadata")
+    def test_transfer_mtp_draft_cache_uses_remote_layer_index_by_name(self, mock_get_meta):
+        self._configure_mtp_draft_transfer()
+        req = self._make_mtp_draft_transfer_request(prefill_pp_rank=1)
+
+        with patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.get_ascend_config") as mock_config:
+            mock_config.return_value.enable_kv_nz = False
+            self.thread._transfer_kv_cache_all_groups(req)
+
+        self.engine.batch_transfer_sync_read.assert_called_once()
+        call_args, _ = self.engine.batch_transfer_sync_read.call_args
+        self.assertEqual(call_args[0], "localhost:7777")
+        self.assertEqual(call_args[1], [0x320000 + 2 * 4096])
+        self.assertEqual(call_args[2], [0x400000 + 5 * 8192])
+        self.assertEqual(call_args[3], [1024])
+        self.assertNotEqual(call_args[2], [0xBAD000 + 5 * 8192])
+        mock_get_meta.assert_not_called()
+
     def test_append_mamba_transfer_meta_uses_block_stride_for_block_offsets(self):
         src_list: list[int] = []
         dst_list: list[int] = []
