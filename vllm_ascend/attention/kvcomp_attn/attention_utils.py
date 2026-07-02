@@ -147,6 +147,16 @@ def is_enable_hamming_sparse():
     if vllm_config is None:
         return False
     additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
-    enable_hamming_sparse = additional_config.get("enable_hamming_sparse", False)
+    hamming_sparse = additional_config.get("hamming_sparse", {"enabled": False, "sparse_json_location": ""})
+    enable_hamming_sparse = hamming_sparse["enabled"]
     enable_hamming_sparse = enable_hamming_sparse and not vllm_config.speculative_config
+    # Defense-in-depth: AscendConfig already guards this combo at config-parse
+    # time. Mirror the guard here so any code path that reads the hamming flag
+    # directly (e.g. attention __init__) also fails fast instead of silently
+    # running C8 without the hamming hooks.
+    if enable_hamming_sparse:
+        quant_config = getattr(vllm_config, "quant_config", None)
+        assert not getattr(quant_config, "enable_c8_quant", False), (
+            "Hamming sparse attention does not support C8 KV cache quantization."
+        )
     return enable_hamming_sparse

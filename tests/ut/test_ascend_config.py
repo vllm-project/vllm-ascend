@@ -99,6 +99,53 @@ class TestAscendConfig(TestBase):
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_hamming_sparse_with_c8_quant_raises(self, mock_fix_incompatible_config):
+        """hamming_sparse x C8 KV-cache quant is unsupported and must fail fast."""
+        from types import SimpleNamespace
+
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {
+            "hamming_sparse": {"enabled": True, "sparse_json_location": ""},
+        }
+        # Minimal stand-in for a quant_config carrying enable_c8_quant=True.
+        test_vllm_config.quant_config = SimpleNamespace(enable_c8_quant=True)
+        with self.assertRaises(AssertionError) as ctx:
+            init_ascend_config(test_vllm_config)
+        self.assertIn("does not support C8 KV cache quantization", str(ctx.exception))
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_c8_quant_without_hamming_ok(self, mock_fix_incompatible_config):
+        """C8 alone (hamming disabled) must not trigger the guard."""
+        from types import SimpleNamespace
+
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {}
+        test_vllm_config.quant_config = SimpleNamespace(enable_c8_quant=True)
+        ascend_config = init_ascend_config(test_vllm_config)
+        self.assertFalse(ascend_config.enable_hamming_sparse)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_hamming_sparse_without_c8_ok(self, mock_fix_incompatible_config):
+        """Hamming alone (C8 disabled) must not trigger the guard."""
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            f.write("{}")
+            sparse_json_path = f.name
+        try:
+            test_vllm_config = VllmConfig()
+            test_vllm_config.additional_config = {
+                "hamming_sparse": {"enabled": True, "sparse_json_location": sparse_json_path},
+            }
+            ascend_config = init_ascend_config(test_vllm_config)
+            self.assertTrue(ascend_config.enable_hamming_sparse)
+        finally:
+            os.remove(sparse_json_path)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_init_ascend_config_enable_npugraph_ex(self, mock_fix_incompatible_config):
         test_vllm_config = VllmConfig()
         test_vllm_config.additional_config = {

@@ -301,6 +301,14 @@ class AscendConfig:
         self.hamming_sparse = additional_config.get("hamming_sparse", {"enabled": False, "sparse_json_location": ""})
         self.enable_hamming_sparse = self.hamming_sparse["enabled"]
         self.sparse_json = self.hamming_sparse["sparse_json_location"]
+        # Guard the unsupported hamming x C8 combo before the sparse_json file
+        # check so an illegal combination fails fast without needing a real json.
+        # quant_config is resolved above (line ~257); getattr fallback for non
+        # ModelSlim quant configs that don't carry enable_c8_quant.
+        if self.enable_hamming_sparse:
+            assert not getattr(quant_config, "enable_c8_quant", False), (
+                "Hamming sparse attention does not support C8 KV cache quantization."
+            )
         self._check_enable_hamming_sparse()
 
         # Enable Block Verify and Entropy Verify in Rejection Sampler

@@ -591,6 +591,12 @@ class NPUModelRunner(GPUModelRunner):
         self.enable_hamming_sparse = (self.ascend_config.enable_hamming_sparse is True)
         self.enable_hamming_sparse = self.enable_hamming_sparse and not vllm_config.speculative_config
         if self.enable_hamming_sparse is True:
+            # Guard the unsupported hamming x C8 combo before initializing any
+            # kvcomp state that the C8 attention path cannot consume correctly.
+            quant_config = getattr(self.vllm_config, "quant_config", None)
+            assert not getattr(quant_config, "enable_c8_quant", False), (
+                "Hamming sparse attention does not support C8 KV cache quantization."
+            )
             from vllm_ascend.worker.kvcomp_utils import initialize_kvcomp_metadata
             self.kvcomp_meta_data = initialize_kvcomp_metadata(max_num_reqs=self.max_num_reqs,
                 block_size=self.block_size, device=self.device, vllm_config=self.vllm_config,
