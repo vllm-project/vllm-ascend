@@ -23,6 +23,8 @@ vllm_ascend.ops.fused_moe.fused_moe only.
 
 from __future__ import annotations
 
+import os
+
 from vllm_ascend.ops.fused_moe.fused_moe import (
     _EXTRA_CTX,
     AllGatherCommImpl,
@@ -152,7 +154,18 @@ class AscendFusedMoE(FusedMoE):
         tid2eid = kwargs.pop("tid2eid") if "tid2eid" in kwargs else None
 
         self._original_routed_scaling_factor = kwargs.get("routed_scaling_factor", 1.0)
-        super().__init__(*args, **kwargs)
+        """
+        Set `enable_eplb` to False for skipping the assertion requiring total experts to be divisible by EP size in
+        initialization of `FusedMoE` when enable Elastic EP, as the number of redundant expert differs between
+        `AscendFusedMoE and `FusedMoE`.
+        """
+        if get_current_vllm_config().parallel_config.enable_elastic_ep:
+            enable_eplb = kwargs.pop("enable_eplb", False)
+            super().__init__(*args, **kwargs, enable_eplb=False)
+            if enable_eplb:
+                kwargs["enable_eplb"] = enable_eplb
+        else:
+            super().__init__(*args, **kwargs)
         self.use_overlapped = True
         self._routed_input_transform = kwargs.get("routed_input_transform")
         self._shared_experts = kwargs.get("shared_experts")
@@ -274,8 +287,8 @@ class AscendFusedMoE(FusedMoE):
 
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
         self.enable_npugraph_ex_static_kernel = ascend_config.ascend_compilation_config.enable_static_kernel
-
-        setup_moe_comm_method(self.moe_config)
+        if os.environ.get("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH") != "1":
+            setup_moe_comm_method(self.moe_config)
         self.quant_type = self._get_quant_type()
 
         self.runner = AscendMoERunner(

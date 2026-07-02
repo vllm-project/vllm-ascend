@@ -48,7 +48,7 @@ def _is_stream_resource_capture_error(exc: RuntimeError) -> bool:
 
 
 def _raise_stream_resource_capture_error(exc: RuntimeError) -> None:
-    raise RuntimeError(f"{_STREAM_RESOURCE_GUIDANCE}\nOriginal error:\n{exc}") from exc
+    raise RuntimeError(f"{_STREAM_RESOURCE_GUIDANCE}nOriginal error:n{exc}") from exc
 
 
 @dataclasses.dataclass
@@ -88,11 +88,19 @@ class ACLGraphWrapper:
     """
 
     _all_instances: ClassVar[weakref.WeakSet["ACLGraphWrapper"]] = weakref.WeakSet()
+    _graph_pool: ClassVar[tuple[int, int] | None] = None
 
     @classmethod
     def clear_all_graphs(cls) -> None:
+        cls._graph_pool = current_platform.graph_pool_handle()
         for instance in list(cls._all_instances):
             instance.clear_graphs()
+
+    @classmethod
+    def get_graph_pool(cls):
+        if cls._graph_pool is None:
+            cls._graph_pool = current_platform.graph_pool_handle()
+        return cls._graph_pool
 
     def __init__(
         self,
@@ -116,7 +124,7 @@ class ACLGraphWrapper:
         # assert runtime_mode is not NONE(no aclgraph), otherwise, we don't
         # need to initialize a ACLGraphWrapper.
         assert self.runtime_mode != CUDAGraphMode.NONE
-        self.graph_pool = current_platform.get_global_graph_pool()
+        self.graph_pool = ACLGraphWrapper.get_graph_pool()
 
         if cudagraph_options is None:
             cudagraph_options = CUDAGraphOptions()
@@ -150,6 +158,7 @@ class ACLGraphWrapper:
 
     def clear_graphs(self) -> None:
         self.concrete_aclgraph_entries.clear()
+        self.graph_pool = ACLGraphWrapper.get_graph_pool()
 
     def __call__(self, *args, **kwargs):
         forward_context = get_forward_context()

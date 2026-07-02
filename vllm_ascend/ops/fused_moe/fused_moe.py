@@ -15,6 +15,7 @@
 # limitations under the License.
 #
 # ruff: noqa: E501
+import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import wraps
@@ -419,7 +420,8 @@ else:
                 self.num_iter = eplb_config.expert_heat_collection_interval
                 self.moe_load = torch.zeros((self.num_iter, local_num_experts), dtype=torch.int32, device="npu")
 
-            setup_moe_comm_method(self.moe_config)
+            if os.environ.get("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH") != "1":
+                setup_moe_comm_method(self.moe_config)
             if self.multistream_overlap_shared_expert:
                 # Wrap the quant_method's process_weights_after_loading to validate that
                 # splitting shared expert computation (gate_up projection + activation,
