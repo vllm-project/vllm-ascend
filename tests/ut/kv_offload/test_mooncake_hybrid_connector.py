@@ -162,6 +162,8 @@ class TestMooncakeHybridConnectorScheduler(unittest.TestCase):
         scheduler.side_channel_host = "127.0.0.1"
         scheduler.side_channel_port = 12345
         scheduler.tp_size = 1
+        scheduler.dp_size = 1
+        scheduler.pp_size = 1
         scheduler.multi_nodes_meta_mapping = {}
         return scheduler
 

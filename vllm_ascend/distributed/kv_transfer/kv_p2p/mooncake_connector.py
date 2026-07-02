@@ -56,6 +56,10 @@ from vllm.v1.request import RequestStatus
 
 from vllm_ascend import envs as ascend_envs
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
+from vllm_ascend.distributed.kv_transfer.kv_p2p.topology import (
+    resolve_pd_topology,
+    validate_remote_prefill_tp_size,
+)
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
     RegisterRegions,
@@ -118,6 +122,8 @@ class ReqMeta:
     remote_pcp_size: int
     remote_dcp_size: int
     remote_ptp_size: int | None
+    remote_dp_size: int | None
+    remote_pp_size: int | None
     remote_multi_nodes_meta_mapping: dict[str, dict[str, Any]]
     num_prompt_blocks: int
 
@@ -1404,6 +1410,8 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
             remote_pcp_size=kv_transfer_params.get("remote_pcp_size", 1),
             remote_dcp_size=kv_transfer_params.get("remote_dcp_size", 1),
             remote_ptp_size=kv_transfer_params.get("remote_ptp_size"),
+            remote_dp_size=kv_transfer_params.get("remote_dp_size"),
+            remote_pp_size=kv_transfer_params.get("remote_pp_size"),
             remote_multi_nodes_meta_mapping=kv_transfer_params.get("remote_multi_nodes_meta_mapping", {}),
             num_prompt_blocks=kv_transfer_params.get("num_prompt_blocks", 0),
         )
@@ -1545,6 +1553,8 @@ class MooncakeConnectorScheduler:
         self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
         self.dcp_size = vllm_config.parallel_config.decode_context_parallel_size
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
+        self.dp_size = vllm_config.parallel_config.data_parallel_size
+        self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
         self.max_device_id = (
             vllm_config.parallel_config.tensor_parallel_size
             * vllm_config.parallel_config.data_parallel_size
@@ -1815,6 +1825,8 @@ class MooncakeConnectorScheduler:
             remote_pcp_size=self.pcp_size,
             remote_dcp_size=self.dcp_size,
             remote_ptp_size=self.tp_size,
+            remote_dp_size=self.dp_size,
+            remote_pp_size=self.pp_size,
             last_token_id=request.output_token_ids[-1],
             remote_multi_nodes_meta_mapping=self.multi_nodes_meta_mapping,
             num_prompt_blocks=num_prompt_blocks,
@@ -1925,26 +1937,16 @@ class MooncakeConnectorWorker:
         self.remote_port_send_num: dict[str, dict[int, RemotePortInfo]] = {}
 
     def _get_prefill_decode_size(self, vllm_config: VllmConfig):
-        # get prefill tp and dp size from extra config
-        prefill_parallel_config: dict[str, Any] = vllm_config.kv_transfer_config.get_from_extra_config("prefill", {})
-
-        assert "tp_size" in prefill_parallel_config
-        self._prefill_tp_size = prefill_parallel_config["tp_size"]
-
-        assert "dp_size" in prefill_parallel_config
-        self._prefill_dp_size = prefill_parallel_config["dp_size"]
-        # get prefill pp size from extra config
-        self._prefill_pp_size = prefill_parallel_config.get("pp_size", 1)
-        # get decode tp and dp size from extra config
-        decode_parallel_config: dict[str, Any] = vllm_config.kv_transfer_config.get_from_extra_config("decode", {})
-        assert "tp_size" in decode_parallel_config
-        self._decode_tp_size = decode_parallel_config["tp_size"]
-        assert "dp_size" in decode_parallel_config
-        self._decode_dp_size = decode_parallel_config["dp_size"]
-        # get prefill pp size from extra config
-        self._decode_pp_size = decode_parallel_config.get("pp_size", 1)
-        assert self._decode_pp_size == 1, "decode pp size must be 1"
-        self._prefill_pp_layer_partition = prefill_parallel_config.get("pp_layer_partition")
+        topology = resolve_pd_topology(vllm_config)
+        self._prefill_tp_size = topology.prefill_tp_size
+        self._prefill_dp_size = topology.prefill_dp_size
+        self._prefill_pp_size = topology.prefill_pp_size
+        self._decode_tp_size = topology.decode_tp_size
+        self._decode_dp_size = topology.decode_dp_size
+        self._decode_pp_size = topology.decode_pp_size
+        if self._decode_pp_size != 1:
+            raise ValueError("decode pp size must be 1")
+        self._prefill_pp_layer_partition = topology.prefill_pp_layer_partition
 
     @staticmethod
     def _serialize_kv_group_spec(
@@ -2332,7 +2334,7 @@ class MooncakeConnectorWorker:
         self,
         req_id: str,
         meta: ReqMeta,
-    ) -> tuple[list[list[int]], list[BlockIds], list[BlockIds]]:
+    ) -> tuple[list[list[int]], list[BlockIds], list[BlockIds], dict[int, RemotePortInfo]]:
         """Build per-transfer port and block-id metadata for remote KV reads.
 
         Args:
@@ -2344,8 +2346,9 @@ class MooncakeConnectorWorker:
                 token counts.
 
         Returns:
-            A tuple of three aligned lists. Index ``i`` describes one transfer
-            shard for this local D-side rank:
+            A tuple containing three aligned lists plus per-P-rank done
+            counts. Index ``i`` describes one transfer shard for this local
+            D-side rank:
             * remote_handshake_port_list[i]: remote P worker handshake ports
               to pull from. The inner list length is the number of TP pulls
               needed for that shard.
@@ -2353,22 +2356,35 @@ class MooncakeConnectorWorker:
               group, where received blocks are written.
             * remote_block_ids_list[i]: remote block ids, grouped by KV cache
               group, where blocks are read from.
+            * remote_port_send_num: per-P-rank done counts used to release
+              delayed P-side KV blocks, including zero-count ranks that this
+              request will not pull from.
 
         In PCP/DCP scenarios, prompt blocks can be split across multiple remote
         P workers. This method also accounts for unequal P/D prefix-cache hits
         by reducing the number of remote blocks that still need to be pulled.
         """
         prefill_tp_size: int = meta.remote_ptp_size if meta.remote_ptp_size is not None else self._prefill_tp_size
+        prefill_pp_size: int = meta.remote_pp_size if meta.remote_pp_size is not None else self._prefill_pp_size
 
         if meta.remote_pcp_size * meta.remote_dcp_size * self.pcp_size * self.dcp_size == 1:
             if self._is_hma_required:
-                chosen_rank_list, _ = self._get_hybrid_remote_rank_group_pulls(req_id, prefill_tp_size)
+                chosen_rank_list, _ = self._get_hybrid_remote_rank_group_pulls(req_id, prefill_tp_size, prefill_pp_size)
             else:
-                chosen_rank_list = self._get_remote_rank(req_id, prefill_tp_size)
+                chosen_rank_list = self._get_remote_rank(req_id, prefill_tp_size, prefill_pp_size)
             remote_handshake_port_list = [[x + meta.remote_port for x in chosen_rank_list]]
             local_block_ids_list = [meta.local_block_ids for _ in remote_handshake_port_list]
             remote_block_ids_list = [meta.remote_block_ids for _ in remote_handshake_port_list]
-            return remote_handshake_port_list, local_block_ids_list, remote_block_ids_list
+            remote_port_send_num = self._get_remote_port_send_num_for_req(
+                req_id,
+                meta.remote_port,
+                meta.remote_host,
+                meta.remote_multi_nodes_meta_mapping,
+                prefill_tp_size,
+                prefill_pp_size,
+                meta.remote_pcp_size,
+            )
+            return remote_handshake_port_list, local_block_ids_list, remote_block_ids_list, remote_port_send_num
 
         def context_parallel_parameters_check():
             assert (meta.remote_pcp_size * meta.remote_dcp_size) % (self.pcp_size * self.dcp_size) == 0
@@ -2467,7 +2483,8 @@ class MooncakeConnectorWorker:
             local_remote_block_port_mappings: dict[int, list[list[int]]],
         ) -> dict[int, RemotePortInfo]:
             remote_port_send_num: dict[int, RemotePortInfo] = {}
-            for port in range(prefill_tp_size * meta.remote_pcp_size):
+            remote_port_count = prefill_tp_size * prefill_pp_size * meta.remote_pcp_size
+            for port in range(remote_port_count):
                 remote_host_info = meta.remote_multi_nodes_meta_mapping.get(str(port), None)
                 if remote_host_info is None:
                     remote_host = meta.remote_host
@@ -2586,7 +2603,8 @@ class MooncakeConnectorWorker:
             f"tp_num_need_pulls: {tp_num_need_pulls}, remote_handshake_port_list: {remote_handshake_port_list}"
         )
 
-        return remote_handshake_port_list, local_block_ids_list, remote_block_ids_list
+        remote_port_send_num = self.remote_port_send_num[meta.remote_engine_id]
+        return remote_handshake_port_list, local_block_ids_list, remote_block_ids_list, remote_port_send_num
 
     def _get_group_pulls_metadata(
         self,
@@ -2594,6 +2612,7 @@ class MooncakeConnectorWorker:
         remote_handshake_port_list: list[list[int]],
         prefill_tp_size: int,
         remote_base_port: int,
+        prefill_pp_size: int | None = None,
     ) -> list[list[list[GroupPull]]]:
         """Build per-port KV cache group pull descriptors.
 
@@ -2618,9 +2637,12 @@ class MooncakeConnectorWorker:
             this pull is the final pull for the group. The final-pull flag is
             used by the receiver to decide when group reformatting can run.
         """
+        if prefill_pp_size is None:
+            prefill_pp_size = self._prefill_pp_size
+
         if self._is_hma_required:
-            _, rank_group_pulls = self._get_hybrid_remote_rank_group_pulls(req_id, prefill_tp_size)
-            num_pp_tp_ranks = prefill_tp_size * self._prefill_pp_size
+            _, rank_group_pulls = self._get_hybrid_remote_rank_group_pulls(req_id, prefill_tp_size, prefill_pp_size)
+            num_pp_tp_ranks = prefill_tp_size * prefill_pp_size
 
             def get_group_pulls_for_remote_port(remote_handshake_port: int) -> list[GroupPull]:
                 remote_rank = (remote_handshake_port - remote_base_port) % num_pp_tp_ranks
@@ -2651,16 +2673,14 @@ class MooncakeConnectorWorker:
             if len(remote_ports) == 1:
                 remote_tp_offsets = [pcp_dcp_rank % tp_num_need_pulls]
                 prefill_pp_ranks = [
-                    ((remote_ports[0] - remote_base_port) % (prefill_tp_size * self._prefill_pp_size))
-                    // prefill_tp_size
+                    ((remote_ports[0] - remote_base_port) % (prefill_tp_size * prefill_pp_size)) // prefill_tp_size
                 ]
             else:
-                assert len(remote_ports) % tp_num_need_pulls == 0, (
-                    f"tp_num_need_pulls: {tp_num_need_pulls}, remote_ports: {remote_ports}"
-                )
+                if len(remote_ports) % tp_num_need_pulls != 0:
+                    raise ValueError(f"tp_num_need_pulls: {tp_num_need_pulls}, remote_ports: {remote_ports}")
                 remote_tp_offsets = [rank_idx % tp_num_need_pulls for rank_idx in range(len(remote_ports))]
                 prefill_pp_ranks = [
-                    ((remote_port - remote_base_port) % (prefill_tp_size * self._prefill_pp_size)) // prefill_tp_size
+                    ((remote_port - remote_base_port) % (prefill_tp_size * prefill_pp_size)) // prefill_tp_size
                     for remote_port in remote_ports
                 ]
             group_pulls_list.append(
@@ -2675,8 +2695,11 @@ class MooncakeConnectorWorker:
         self,
         req_id: str,
         prefill_tp_size: int,
+        prefill_pp_size: int | None = None,
     ) -> tuple[list[int], dict[int, list[GroupPull]]]:
         rank_group_pulls: OrderedDict[int, list[GroupPull]] = OrderedDict()
+        if prefill_pp_size is None:
+            prefill_pp_size = self._prefill_pp_size
 
         def add_group_pull(remote_rank: int, group_pull: GroupPull) -> None:
             rank_group_pulls.setdefault(remote_rank, []).append(group_pull)
@@ -2691,7 +2714,7 @@ class MooncakeConnectorWorker:
                     f"decode tp size({self.tp_size})."
                 )
                 num_group_pulls = prefill_tp_size // self.tp_size
-                for pp_rank in range(self._prefill_pp_size):
+                for pp_rank in range(prefill_pp_size):
                     pp_rank_offset = pp_rank * prefill_tp_size
                     local_tp_offset = self.tp_rank * num_group_pulls
                     for remote_tp_offset in range(num_group_pulls):
@@ -2709,11 +2732,17 @@ class MooncakeConnectorWorker:
                 continue
 
             num_group_pulls = self._get_attention_group_num_need_pulls(group_spec, prefill_tp_size)
-            chosen_rank_list = self._get_attention_group_remote_rank(req_id, group_spec, prefill_tp_size)
-            assert len(chosen_rank_list) == num_group_pulls * self._prefill_pp_size, (
-                f"chosen_rank_list({chosen_rank_list}) does not match num_group_pulls({num_group_pulls}) "
-                f"and prefill pp size({self._prefill_pp_size})."
+            chosen_rank_list = self._get_attention_group_remote_rank(
+                req_id,
+                group_spec,
+                prefill_tp_size,
+                prefill_pp_size,
             )
+            if len(chosen_rank_list) != num_group_pulls * prefill_pp_size:
+                raise ValueError(
+                    f"chosen_rank_list({chosen_rank_list}) does not match num_group_pulls({num_group_pulls}) "
+                    f"and prefill pp size({prefill_pp_size})."
+                )
             for rank_idx, remote_rank in enumerate(chosen_rank_list):
                 prefill_pp_rank = rank_idx // num_group_pulls
                 add_group_pull(
@@ -2764,12 +2793,14 @@ class MooncakeConnectorWorker:
         req_id: str,
         group_spec: dict[str, Any],
         prefill_tp_size: int,
+        prefill_pp_size: int | None = None,
     ) -> list[int]:
         num_key_value_heads = self._get_attention_group_num_key_value_heads(group_spec)
         num_group_pulls = self._get_attention_group_num_need_pulls(group_spec, prefill_tp_size)
         return self._get_remote_ranks_for_req(
             req_id,
             prefill_tp_size,
+            prefill_pp_size,
             num_key_value_heads=num_key_value_heads,
             tp_num_need_pulls=num_group_pulls,
             use_mla=num_key_value_heads == 1,
@@ -2801,12 +2832,14 @@ class MooncakeConnectorWorker:
                 remote_handshake_port_list,
                 local_block_ids_list,
                 remote_block_ids_list,
+                remote_port_send_num,
             ) = self._get_kv_split_metadata(remote_req_id, meta)
             group_pulls_list = self._get_group_pulls_metadata(
                 remote_req_id,
                 remote_handshake_port_list,
                 prefill_tp_size,
                 meta.remote_port,
+                meta.remote_pp_size,
             )
 
             for pcp_dcp_rank, remote_ports in enumerate(remote_handshake_port_list):
@@ -2818,11 +2851,6 @@ class MooncakeConnectorWorker:
                         meta.remote_host,
                         meta.remote_engine_id,
                         meta.remote_multi_nodes_meta_mapping,
-                    )
-                    remote_port_send_num = (
-                        self.remote_port_send_num[meta.remote_engine_id]
-                        if meta.remote_pcp_size * meta.remote_dcp_size > 1
-                        else None
                     )
                     self.kv_recv_thread.add_request(
                         request_id=req_id,
@@ -2855,6 +2883,7 @@ class MooncakeConnectorWorker:
     def _get_tp_num_need_pulls(self, prefill_tp_size: int | None) -> int:
         if prefill_tp_size is None:
             prefill_tp_size = self._prefill_tp_size
+        validate_remote_prefill_tp_size(prefill_tp_size, self._decode_tp_size)
 
         if prefill_tp_size == self._prefill_tp_size:
             return self.tp_num_need_pulls
@@ -2880,6 +2909,31 @@ class MooncakeConnectorWorker:
             return remote_host, remote_engine_id
         info = remote_multi_nodes_meta_mapping[rank]
         return info.get("host", remote_host), info.get("engine_id", remote_engine_id)
+
+    def _get_remote_port_send_num_for_req(
+        self,
+        req_id: str,
+        remote_base_port: int,
+        remote_host: str,
+        remote_multi_nodes_meta_mapping: dict[str, dict[str, Any]],
+        prefill_tp_size: int,
+        prefill_pp_size: int,
+        remote_pcp_size: int,
+    ) -> dict[int, RemotePortInfo]:
+        remote_port_send_num: dict[int, RemotePortInfo] = {}
+        remote_port_count = prefill_tp_size * prefill_pp_size * remote_pcp_size
+        for rank in range(remote_port_count):
+            remote_host_info = remote_multi_nodes_meta_mapping.get(str(rank), None)
+            host = remote_host if remote_host_info is None else remote_host_info.get("host", remote_host)
+            remote_port_send_num[remote_base_port + rank] = {"num": 0, "host": host}
+
+        if self._is_hma_required:
+            chosen_rank_list, _ = self._get_hybrid_remote_rank_group_pulls(req_id, prefill_tp_size, prefill_pp_size)
+        else:
+            chosen_rank_list = sum(self._get_remote_ranks_for_req(req_id, prefill_tp_size, prefill_pp_size), [])
+        for rank in chosen_rank_list:
+            remote_port_send_num[remote_base_port + rank]["num"] += 1
+        return remote_port_send_num
 
     def _prefill_get_remote_rank(self, req_id: str) -> list[int]:
         if self._is_hma_required:
@@ -2913,8 +2967,13 @@ class MooncakeConnectorWorker:
         )
         return {rank for remote_ranks in remote_ranks_by_decode_rank for rank in remote_ranks}
 
-    def _get_remote_rank(self, req_id: str, prefill_tp_size: int | None = None) -> list[int]:
-        return self._get_remote_ranks_for_req(req_id, prefill_tp_size)[self.tp_rank]
+    def _get_remote_rank(
+        self,
+        req_id: str,
+        prefill_tp_size: int | None = None,
+        prefill_pp_size: int | None = None,
+    ) -> list[int]:
+        return self._get_remote_ranks_for_req(req_id, prefill_tp_size, prefill_pp_size)[self.tp_rank]
 
     def _get_remote_tp_ranks(
         self,
@@ -2947,12 +3006,16 @@ class MooncakeConnectorWorker:
         self,
         req_id: str,
         prefill_tp_size: int | None = None,
+        prefill_pp_size: int | None = None,
         num_key_value_heads: int | None = None,
         tp_num_need_pulls: int | None = None,
         use_mla: bool | None = None,
     ) -> list[list[int]]:
         if prefill_tp_size is None:
             prefill_tp_size = self._prefill_tp_size
+        if prefill_pp_size is None:
+            prefill_pp_size = self._prefill_pp_size
+        validate_remote_prefill_tp_size(prefill_tp_size, self._decode_tp_size)
         if num_key_value_heads is None:
             if self.vllm_config.model_config.is_deepseek_mla or self.use_sparse:
                 num_key_value_heads = 1
@@ -2968,17 +3031,17 @@ class MooncakeConnectorWorker:
         if prefill_tp_size == self._decode_tp_size:
             sampled_nums = list(
                 map(
-                    lambda tp: [tp + pp * prefill_tp_size for pp in range(self._prefill_pp_size)],
+                    lambda tp: [tp + pp * prefill_tp_size for pp in range(prefill_pp_size)],
                     range(prefill_tp_size),
                 )
             )
             return sampled_nums
         num_kv_head = num_key_value_heads
-        ori_data = np.arange(prefill_tp_size * self._prefill_pp_size)
+        ori_data = np.arange(prefill_tp_size * prefill_pp_size)
         seed = string_to_int64_hash(req_id)
         rand = random.Random(seed)
         # random split prefill tp list
-        ori_data_2d = ori_data.reshape(self._prefill_pp_size, -1)
+        ori_data_2d = ori_data.reshape(prefill_pp_size, -1)
         num_groups = max(
             1, len(ori_data_2d[0]) // num_kv_head
         )  # The number of redundant copies for each KV head within the PP stage
@@ -2995,11 +3058,11 @@ class MooncakeConnectorWorker:
                 tp_num_need_pulls,
                 use_mla,
             )
-            for pp_index in range(self._prefill_pp_size)
+            for pp_index in range(prefill_pp_size)
         ]
         for group_index in range(len(all_results[0])):
             group = []
-            for pp_index in range(self._prefill_pp_size):
+            for pp_index in range(prefill_pp_size):
                 group.extend(all_results[pp_index][group_index])
             sampled_nums.append(group)
         return sampled_nums
