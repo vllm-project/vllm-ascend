@@ -666,22 +666,36 @@ class NPUPlatform(Platform):
             kv_transfer_config = vllm_config.kv_transfer_config
             kv_role = getattr(kv_transfer_config, "kv_role", None)
             if kv_transfer_config is not None and kv_role != "kv_both":
-                raise ValueError(
+                msg = (
                     "enable_balance_scheduling only supports PD-mixed mode "
                     "(kv_role='kv_both' or no kv_transfer_config), and is not supported in "
                     "PD-disaggregated mode (kv_role='kv_producer'/'kv_consumer')."
                 )
+                if ascend_config.recompute_scheduler_enable:
+                    msg += (
+                        " Note: recompute_scheduler_enable is also enabled, which requires "
+                        "PD-disaggregated mode — these two schedulers cannot be used together. "
+                        "See https://github.com/vllm-project/vllm-ascend/issues/8975"
+                    )
+                raise ValueError(msg)
 
         cls._validate_kv_load_failure_policy(vllm_config)
 
         if ascend_config.recompute_scheduler_enable:
             kv_transfer_config = vllm_config.kv_transfer_config
             kv_role = getattr(kv_transfer_config, "kv_role", None)
-            if kv_transfer_config is None or kv_role == "kv_both":
-                raise ValueError(
+            if kv_role not in ("kv_producer", "kv_consumer"):
+                msg = (
                     "recompute_scheduler_enable can only be enabled in PD-disaggregated mode "
                     "(kv_role='kv_producer' or 'kv_consumer'), and is not supported in PD-mixed mode."
                 )
+                if ascend_config.enable_balance_scheduling:
+                    msg += (
+                        " Note: enable_balance_scheduling is also enabled, which requires "
+                        "PD-mixed mode — these two schedulers cannot be used together. "
+                        "See https://github.com/vllm-project/vllm-ascend/issues/8975"
+                    )
+                raise ValueError(msg)
 
             from vllm_ascend.core.recompute_scheduler import RecomputeSchedulerConfig
 
