@@ -9,7 +9,7 @@ pybind11
 pyyaml
 regex
 scipy
-pandas
+pandas>=3.0.3
 psutil
 setuptools>=64
 setuptools-scm>=8

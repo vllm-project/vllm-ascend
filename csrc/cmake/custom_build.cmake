@@ -229,17 +229,20 @@ if (BUILD_OPEN_PROJECT)
 
     add_ops_tiling_keys(
             OP_NAME "ALL"
+            COMPUTE_UNIT ${ASCEND_COMPUTE_UNIT}
             TILING_KEYS ${TILING_KEY}
     )
 
     add_opc_config(
             OP_NAME "ALL"
+            COMPUTE_UNIT ${ASCEND_COMPUTE_UNIT}
             CONFIG ${OP_DEBUG_CONFIG}
     )
 
     if(ADD_OPS_COMPILE_OPTION_V2)
         add_ops_compile_options(
                 OP_NAME "ALL"
+                COMPUTE_UNIT ${ASCEND_COMPUTE_UNIT}
                 OPTIONS ${OPS_COMPILE_OPTIONS}
         )
     endif()
