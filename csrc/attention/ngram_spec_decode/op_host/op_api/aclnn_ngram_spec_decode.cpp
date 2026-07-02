@@ -62,7 +62,7 @@ aclnnStatus aclnnNgramSpecDecode(
     aclOpExecutor *executor,
     aclrtStream stream)
 {
-    if (NnopbaseSetHcclServerType) {
+    if (&NnopbaseSetHcclServerType != nullptr) {
         NnopbaseSetHcclServerType(executor, NNOPBASE_HCCL_SERVER_TYPE_MTE);
     }
     return aclnnInnerNgramSpecDecode(workspace, workspaceSize, executor, stream);

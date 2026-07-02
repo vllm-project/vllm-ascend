@@ -91,6 +91,12 @@ public:
         pipe.InitBuffer(draftBuf, br * static_cast<uint32_t>(this->k_align) * ELEM_SIZE);
         pipe.InitBuffer(numValidBuf, br_align * ELEM_SIZE);
         pipe.InitBuffer(suffixBuf, static_cast<uint32_t>(this->max_n_val) * ELEM_SIZE);
+
+        this->evtMte2ToS = static_cast<event_t>(GetTPipePtr()->FetchEventID(AscendC::HardEvent::MTE2_S));
+        this->evtMte2ToV = static_cast<event_t>(GetTPipePtr()->FetchEventID(AscendC::HardEvent::MTE2_V));
+        this->evtSToMte3 = static_cast<event_t>(GetTPipePtr()->FetchEventID(AscendC::HardEvent::S_MTE3));
+        this->evtMte3ToMte2 = static_cast<event_t>(GetTPipePtr()->FetchEventID(AscendC::HardEvent::MTE3_MTE2));
+        this->evtVToS = static_cast<event_t>(GetTPipePtr()->FetchEventID(AscendC::HardEvent::V_S));
     }
 
     __aicore__ inline void Process()
@@ -104,7 +110,13 @@ public:
                 ProcessChunkedRows(this->row_offset + cur_offset, cur_rows);
             } else {
                 CopyIn(this->row_offset + cur_offset, cur_rows);
+                AscendC::SetFlag<AscendC::HardEvent::MTE2_S>(evtMte2ToS);
+                AscendC::WaitFlag<AscendC::HardEvent::MTE2_S>(evtMte2ToS);
+                AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(evtMte2ToV);
+                AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(evtMte2ToV);
                 Compute(cur_rows);
+                AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(evtSToMte3);
+                AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(evtSToMte3);
                 CopyOut(this->row_offset + cur_offset, cur_rows);
             }
             cur_offset += cur_rows;
@@ -147,9 +159,16 @@ private:
                 sampledParams, sampledPad);
         }
 
+        // Ensure all MTE2 DataCopy operations for numTokens, discard, sampled
+        // have completed before S-pipe GetValue reads them in the per-row loop.
+        AscendC::SetFlag<AscendC::HardEvent::MTE2_S>(evtMte2ToS);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE2_S>(evtMte2ToS);
+
         for (uint32_t i = 0; i < rows; ++i) {
             uint64_t gmRow = static_cast<uint64_t>(start_row + i) * msl;
             int32_t seq_len = numTokensLocal.GetValue(i);
+            if (seq_len < 0) { seq_len = 0; }
+            if (seq_len > this->max_seq_len) { seq_len = this->max_seq_len; }
             int32_t discard = discardLocal.GetValue(i);
             int32_t valid_count = 0;
 
@@ -171,6 +190,8 @@ private:
             if (valid_count > avail_space) valid_count = avail_space;
 
             LoadGmElements(gmRow + backup_pos, 1);
+            AscendC::SetFlag<AscendC::HardEvent::MTE2_S>(evtMte2ToS);
+            AscendC::WaitFlag<AscendC::HardEvent::MTE2_S>(evtMte2ToS);
             int32_t backup_token = tokenLocal.GetValue(0);
 
             if (valid_count > 0) {
@@ -184,7 +205,11 @@ private:
                 for (int32_t j = 0; j < valid_count; ++j) {
                     tokenLocal.SetValue(j, sampledLocal.GetValue(i * mnta + j));
                 }
+                AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(evtSToMte3);
+                AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(evtSToMte3);
                 StoreGmElements(gmRow + seq_len, valid_count);
+                AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(evtMte3ToMte2);
+                AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(evtMte3ToMte2);
             }
 
             int32_t best_match_pos = -1;
@@ -194,6 +219,8 @@ private:
                 int32_t suffix_gm_start = nt - this->max_n_val;
                 if (suffix_gm_start < 0) suffix_gm_start = 0;
                 LoadGmElements(gmRow + suffix_gm_start, this->max_n_val);
+                AscendC::SetFlag<AscendC::HardEvent::MTE2_S>(evtMte2ToS);
+                AscendC::WaitFlag<AscendC::HardEvent::MTE2_S>(evtMte2ToS);
                 for (int32_t s = 0; s < this->max_n_val; ++s) {
                     suffixLocal.SetValue(static_cast<uint32_t>(s), tokenLocal.GetValue(static_cast<uint32_t>(s)));
                 }
@@ -211,6 +238,8 @@ private:
                         int32_t load_count = chunk_count + (ngram_len - 1);
                         if (chunk_start + load_count > nt) load_count = nt - chunk_start;
                         LoadGmElements(gmRow + chunk_start, load_count);
+                        AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(evtMte2ToV);
+                        AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(evtMte2ToV);
 
                         uint32_t cmp_count = ((static_cast<uint32_t>(chunk_count) + 63u) / 64u) * 64u;
                         uint32_t max_cmp = SAFE_CHUNK > 8192u ? 8192u : SAFE_CHUNK;
@@ -227,6 +256,8 @@ private:
                             AscendC::CompareScalar<int32_t, uint8_t>(
                                 maskLocal, tokenLocal[cmp_off],
                                 suffix0, AscendC::CMPMODE::EQ, aligned);
+                            AscendC::SetFlag<AscendC::HardEvent::V_S>(evtVToS);
+                            AscendC::WaitFlag<AscendC::HardEvent::V_S>(evtVToS);
 
                             for (uint32_t p = 0; p < elements; ++p) {
                                 uint8_t bv = maskLocal.GetValue(p >> 3);
@@ -262,6 +293,8 @@ private:
                 int32_t draft_load = (tokens_available < this->k_val) ? tokens_available : this->k_val;
                 if (draft_load > 0) {
                     LoadGmElements(gmRow + draft_start, draft_load);
+                    AscendC::SetFlag<AscendC::HardEvent::MTE2_S>(evtMte2ToS);
+                    AscendC::WaitFlag<AscendC::HardEvent::MTE2_S>(evtMte2ToS);
                     for (int32_t j = 0; j < this->k_val; ++j) {
                         if (j < draft_load) {
                             draftLocal.SetValue(i * ka + j, tokenLocal.GetValue(static_cast<uint32_t>(j)));
@@ -290,6 +323,9 @@ private:
             }
             numValidLocal.SetValue(i, valid_draft_count);
         }
+
+        AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(evtSToMte3);
+        AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(evtSToMte3);
 
         uint32_t metaBytes32 = static_cast<uint32_t>(rows) * ELEM_SIZE;
         AscendC::DataCopyExtParams nextParams{1, metaBytes32, 0, 0, 0};
@@ -412,6 +448,8 @@ private:
         uint32_t ka = this->k_align;
 
         int32_t seq_len = numTokensLocal.GetValue(idx);
+        if (seq_len < 0) { seq_len = 0; }
+        if (seq_len > this->max_seq_len) { seq_len = this->max_seq_len; }
         int32_t discard = discardLocal.GetValue(idx);
         int32_t valid_count = 0;
 
@@ -489,6 +527,8 @@ private:
                             AscendC::CompareScalar<int32_t, uint8_t>(
                                 maskLocal, tokenLocal[static_cast<uint32_t>(cmp_off)],
                                 suffix0, AscendC::CMPMODE::EQ, count_aligned);
+                            AscendC::SetFlag<AscendC::HardEvent::V_S>(evtVToS);
+                            AscendC::WaitFlag<AscendC::HardEvent::V_S>(evtVToS);
 
                             for (int32_t p = 0; p < static_cast<int32_t>(elements); ++p) {
                                 uint8_t byte_val = maskLocal.GetValue(static_cast<uint32_t>(p) >> 3);
@@ -641,6 +681,12 @@ private:
     uint32_t my_rows;
     uint32_t row_offset;
     bool is_large_row;
+
+    event_t evtMte2ToS;
+    event_t evtMte2ToV;
+    event_t evtSToMte3;
+    event_t evtMte3ToMte2;
+    event_t evtVToS;
 };
 
 extern "C" __global__ __aicore__ void ngram_spec_decode(
