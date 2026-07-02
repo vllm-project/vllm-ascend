@@ -50,12 +50,21 @@ class AscendDsparkSpeculator(AscendDflashProposer):
     ):
         super().__init__(vllm_config, device, runner=runner)
 
-        # Anchor-as-first-prediction: each request emits N query tokens, NOT 1 + N.
-        # Matches upstream PR #46995 speculator.py L48.
-        self.num_query_per_req = self.num_speculative_tokens
+        # NOTE on query layout: the DFlash base hardcodes
+        # ``num_query_per_req = 1 + num_speculative_tokens`` locally inside its
+        # prepare-inputs helpers (dflash_proposer.py L81/L172); it does NOT read
+        # any instance attribute. So DSpark rides on the same ``1 + N`` layout —
+        # the extra leading position is the verified anchor and the N trailing
+        # positions are the draft slots. Only those N positions are gathered for
+        # sampling (llm_base_proposer.py token_indices_to_sample), which is why
+        # ``compute_logits`` receives exactly ``num_reqs * N`` rows and the
+        # Markov wire in ``_propose`` lines up. We intentionally do NOT set
+        # ``self.num_query_per_req`` here — it would be dead, misleading state.
 
-        # Cached reference to the loaded DSpark draft model — resolved lazily
-        # so the speculator can be instantiated before the model loads.
+        # Target model handle, captured in load_model so _get_model can route
+        # draft creation through load_dspark_model (embed_tokens / lm_head alias).
+        self._target_model: torch.nn.Module | None = None
+        # Cached reference to the loaded DSpark draft model. Set by _get_model.
         self._dspark_model: DSparkDeepseekV4ForCausalLM | None = None
 
         # Per-block Markov sample state. Reset on every `propose()` call.
@@ -63,22 +72,39 @@ class AscendDsparkSpeculator(AscendDflashProposer):
         self.last_confidence: torch.Tensor | None = None
 
         logger.info_once(
-            "AscendDsparkSpeculator initialised (num_query_per_req=%d). "
+            "AscendDsparkSpeculator initialised (num_speculative_tokens=%d). "
             "Non-causal sparse SWA + full CUDA/ACLGraph capture are follow-up work; "
             "current path runs dense attention in eager mode.",
-            self.num_query_per_req,
+            self.num_speculative_tokens,
         )
 
     # --- Model loading ----------------------------------------------------
 
-    def load_draft_model(
-        self,
-        target_model: torch.nn.Module,
-        target_attn_layer_names: set[str] | None = None,
-    ) -> torch.nn.Module:
-        """Use the dspark loader so embed_tokens / lm_head get aliased to target."""
-        model = load_dspark_model(target_model, self.vllm_config)
+    def load_model(self, target_model: torch.nn.Module) -> None:
+        """Capture the target model so _get_model can alias its embeddings.
+
+        The base ``load_model`` calls ``self._get_model()`` (which we override
+        below) and then finishes draft attention-layer discovery. We only need
+        to stash the target reference before delegating.
+        """
+        self._target_model = target_model
+        super().load_model(target_model)
+
+    def _get_model(self) -> torch.nn.Module:
+        """Create the DSpark draft model via load_dspark_model.
+
+        This is the real framework hook (base ``load_model`` does
+        ``self.model = self._get_model()``). Routing through
+        ``load_dspark_model`` both aliases the target's embed_tokens / lm_head
+        into the draft (checkpoint stores draft weights in the target's
+        ``mtp.*`` namespace with no private copies) and caches the concrete
+        DSpark model so ``_propose`` / ``_sample_sequential`` can reach the
+        Markov + confidence heads.
+        """
+        assert self._target_model is not None, "_get_model called before load_model captured target."
+        model = load_dspark_model(self._target_model, self.vllm_config)
         self._dspark_model = model
+        logger.info_once("DSpark draft model loaded and cached for Markov sampling.")
         return model
 
     # --- Sample path (Markov-biased; replaces DFlash's parallel sample) ----
@@ -194,6 +220,35 @@ class AscendDsparkSpeculator(AscendDflashProposer):
             self.last_confidence = None
         return draft_tokens
 
+    # --- One-hot logits trick (wire helper) ------------------------------
+
+    @staticmethod
+    def _onehot_logits(
+        flat: torch.Tensor,
+        num_sample: int,
+        vocab_size: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """Build a ``[num_sample, vocab]`` logits tensor whose per-row argmax
+        recovers ``flat``.
+
+        ``flat`` has ``real = flat.numel()`` entries (the Markov-sampled token
+        ids in row order). When ``num_sample > real`` (lmhead_tp padding), the
+        trailing ``num_sample - real`` rows are left uniformly ``-1e30`` — the
+        base proposer slices ``logits[:num_indices]`` so those rows are dropped,
+        and their argmax (index 0) is never consumed.
+        """
+        real = flat.numel()
+        assert num_sample >= real, f"num_sample {num_sample} < real {real}"
+        fake = torch.full(
+            (num_sample, vocab_size),
+            -1.0e30,
+            dtype=torch.float32,
+            device=device,
+        )
+        fake[:real].scatter_(1, flat.unsqueeze(1), 1.0)
+        return fake
+
     # --- Public propose entry (model_runner calls _propose, not propose) -
 
     @torch.inference_mode()
@@ -260,26 +315,29 @@ class AscendDsparkSpeculator(AscendDflashProposer):
                 num_sample = sample_hidden_states.shape[0]
                 num_reqs = markov_state["anchor"].shape[0]
                 n_spec = self.num_speculative_tokens
-                if num_sample != num_reqs * n_spec:
-                    # Padded / mismatched call (e.g. profiling) — fall back
-                    # to the raw logits so argmax still works.
+                real = num_reqs * n_spec
+                if num_sample < real:
+                    # Genuinely mismatched call (e.g. profiling / a single
+                    # anchor position) — fall back to raw logits so argmax
+                    # still works. num_sample >= real is the normal / padded
+                    # case handled below.
                     return original_compute_logits(sample_hidden_states, *cl_args, **cl_kwargs)
+                # num_sample may exceed `real` when lmhead_tp pads the sample
+                # buffer to max_num_reqs (llm_base_proposer.py L1036); the base
+                # then slices logits[:num_indices], so only the first `real`
+                # rows matter. Markov-sample exactly those.
                 draft_tokens = self._sample_sequential(
                     num_reqs=num_reqs,
-                    head_hidden=sample_hidden_states,
+                    head_hidden=sample_hidden_states[:real],
                     anchor_tokens=markov_state["anchor"],
                 )  # [num_reqs, N] int64
                 flat = draft_tokens.reshape(-1)
                 # Build a fake logits where argmax returns flat[i] for row i.
-                vocab_size = original_compute_logits(sample_hidden_states[:1], *cl_args, **cl_kwargs).shape[-1]
-                fake = torch.full(
-                    (num_sample, vocab_size),
-                    -1.0e30,
-                    dtype=torch.float32,
-                    device=sample_hidden_states.device,
+                # vocab_size comes from the config — no extra compute_logits call.
+                vocab_size = self._dspark_model.config.vocab_size
+                return self._onehot_logits(
+                    flat, num_sample, vocab_size, sample_hidden_states.device
                 )
-                fake.scatter_(1, flat.unsqueeze(1), 1.0)
-                return fake
             finally:
                 # Restore the patched compute_logits so any nested DFlash
                 # iterations later in _propose still go through it.

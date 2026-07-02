@@ -213,5 +213,92 @@ class TestDSparkSequentialSample(unittest.TestCase):
         self.assertEqual(spec.last_confidence.shape, (num_reqs, n_spec))
 
 
+class TestDSparkModelWiring(unittest.TestCase):
+    """Regression guard for the load hook.
+
+    The framework loads draft models via ``_get_model`` (base ``load_model``
+    does ``self.model = self._get_model()``); there is NO ``load_draft_model``
+    hook. A previous version defined ``load_draft_model`` — which nobody calls —
+    so ``self._dspark_model`` stayed ``None`` and ``_propose`` silently fell
+    back to plain DFlash, making the DSpark algorithm inert. These tests lock
+    the correct wiring so that regression cannot come back.
+    """
+
+    def setUp(self):
+        import vllm_ascend.spec_decode.dspark.speculator as spec_mod
+
+        self._mod = spec_mod
+        self._cls = spec_mod.AscendDsparkSpeculator
+
+    def test_no_dead_load_draft_model_hook(self):
+        # There must be no ``load_draft_model`` (dead hook); the real hooks are
+        # ``load_model`` + ``_get_model``.
+        self.assertFalse(
+            hasattr(self._cls, "load_draft_model"),
+            "load_draft_model is a dead hook nobody calls; use _get_model.",
+        )
+        self.assertTrue(hasattr(self._cls, "_get_model"))
+        self.assertTrue(hasattr(self._cls, "load_model"))
+
+    def test_get_model_caches_dspark_model(self):
+        spec = self._cls.__new__(self._cls)
+        sentinel_target = object()
+        sentinel_draft = object()
+        spec._target_model = sentinel_target
+        spec.vllm_config = object()
+        spec._dspark_model = None
+
+        calls = {}
+
+        def fake_load_dspark_model(target, vllm_config):
+            calls["target"] = target
+            calls["vllm_config"] = vllm_config
+            return sentinel_draft
+
+        orig = self._mod.load_dspark_model
+        self._mod.load_dspark_model = fake_load_dspark_model
+        try:
+            returned = self._cls._get_model(spec)
+        finally:
+            self._mod.load_dspark_model = orig
+
+        # _get_model must (a) route through load_dspark_model with the target,
+        # (b) cache the concrete draft model, (c) return it for base load_model.
+        self.assertIs(calls["target"], sentinel_target)
+        self.assertIs(spec._dspark_model, sentinel_draft)
+        self.assertIs(returned, sentinel_draft)
+
+
+class TestDSparkOnehotLogits(unittest.TestCase):
+    """``_onehot_logits`` — argmax must recover sampled tokens; padding dropped."""
+
+    def setUp(self):
+        from vllm_ascend.spec_decode.dspark.speculator import AscendDsparkSpeculator
+
+        self._fn = AscendDsparkSpeculator._onehot_logits
+
+    def test_argmax_recovers_tokens_exact(self):
+        vocab = 16
+        flat = torch.tensor([3, 15, 0, 7], dtype=torch.int64)
+        fake = self._fn(flat, num_sample=4, vocab_size=vocab, device=torch.device("cpu"))
+        self.assertEqual(fake.shape, (4, vocab))
+        self.assertTrue(torch.equal(fake.argmax(dim=-1), flat))
+
+    def test_padded_rows_are_ignored_but_present(self):
+        # lmhead_tp path: num_sample (6) > real (4). First 4 rows must recover
+        # the tokens; the base slices logits[:num_indices] so the 2 pad rows
+        # only need to exist (their content is irrelevant).
+        vocab = 16
+        flat = torch.tensor([3, 15, 0, 7], dtype=torch.int64)
+        fake = self._fn(flat, num_sample=6, vocab_size=vocab, device=torch.device("cpu"))
+        self.assertEqual(fake.shape, (6, vocab))
+        self.assertTrue(torch.equal(fake[:4].argmax(dim=-1), flat))
+
+    def test_num_sample_smaller_than_real_asserts(self):
+        flat = torch.tensor([1, 2, 3, 4], dtype=torch.int64)
+        with self.assertRaises(AssertionError):
+            self._fn(flat, num_sample=2, vocab_size=8, device=torch.device("cpu"))
+
+
 if __name__ == "__main__":
     unittest.main()
