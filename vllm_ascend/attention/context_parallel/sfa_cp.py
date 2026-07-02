@@ -12,7 +12,6 @@ from vllm_ascend.attention.context_parallel.common_cp import AscendPCPMetadata
 from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, AscendSFAMetadata, AscendSFAMetadataBuilder
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, enabling_mlapo, split_decodes_and_prefills
 from vllm_ascend.ops.triton.rope import rope_forward_triton_siso
-from vllm_ascend.utils import vllm_version_is
 
 M = TypeVar("M", bound=AscendSFAMetadata)
 
@@ -94,7 +93,9 @@ class AscendSFACPMetadataBuilder(AscendSFAMetadataBuilder):
     ) -> AscendSFAMetadata:
         metadata_cls = super().build(common_prefix_len, common_attn_metadata, fast_build)
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = split_decodes_and_prefills(
-            common_attn_metadata, decode_threshold=self.decode_threshold
+            common_attn_metadata,
+            decode_threshold=self.decode_threshold,
+            treat_short_extends_as_decodes=False,
         )
         num_reqs = common_attn_metadata.num_reqs
         assert num_decodes + num_prefills == num_reqs
@@ -353,7 +354,7 @@ class AscendSFACPImpl(AscendSFAImpl):
     def _execute_sparse_flash_attention(
         self, ql_nope, q_pe, kv, key_rope, block_table, topk_indices, actual_seq_lengths_query, actual_seq_lengths_key
     ):
-        attn_output = torch.ops._C_ascend.npu_sparse_flash_attention(
+        attn_output, _, _ = torch.ops._C_ascend.npu_sparse_flash_attention(
             query=ql_nope,
             key=kv,
             value=kv,
@@ -368,6 +369,7 @@ class AscendSFACPImpl(AscendSFAImpl):
             layout_query="TND",
             layout_kv="PA_BSND",
             sparse_mode=3,
+            attention_mode=2,
         )
         return attn_output
 
@@ -414,12 +416,8 @@ class AscendSFACPImpl(AscendSFAImpl):
         actual_seq_lengths_query: torch.Tensor,
         actual_seq_lengths_key: torch.Tensor,
     ):
-        if vllm_version_is("0.19.1"):
-            weights, _ = self.weights_proj(x)
-        else:
-            kw, _ = self.wk_weights_proj(x)
-            weights = kw[:, self.head_dim :]
-
+        kw, _ = self.wk_weights_proj(x)
+        weights = kw[:, self.head_dim :]
         q_li, _ = self.wq_b(q_c)  # [b,s,1536] @ [1536,64*128] = [b,s,64*128]
         q_li = q_li.view(-1, self.n_head, self.head_dim)  # [n_toks,64,128]
         if HAS_TRITON:
@@ -530,7 +528,7 @@ class AscendSFACPImpl(AscendSFAImpl):
                 sparse_mode=3,
             )
         else:
-            topk_indices = torch.ops._C_ascend.npu_lightning_indexer(
+            topk_indices, _ = torch.ops._C_ascend.npu_lightning_indexer(
                 query=q,
                 key=key,
                 weights=weights,

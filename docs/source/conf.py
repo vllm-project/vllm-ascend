@@ -25,12 +25,10 @@
 #
 import json
 import os
+import sys
+from pathlib import Path
 
-from docutils.parsers.rst import directives
-from sphinx.directives.code import CodeBlock
-
-# import sys
-# sys.path.insert(0, os.path.abspath('.'))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 # -- Project information -----------------------------------------------------
 
@@ -39,7 +37,7 @@ copyright = "2025, vllm-ascend team"
 author = "the vllm-ascend team"
 
 # The full version, including alpha/beta/rc tags
-release = ""
+release = "0.22.1rc1"
 
 # -- General configuration ---------------------------------------------------
 
@@ -60,38 +58,45 @@ extensions = [
     "sphinx_design",
     "sphinx_togglebutton",
     "sphinx_substitution_extensions",
+    "tools.docs_codegen.sphinx_extension",
 ]
 
 myst_enable_extensions = ["colon_fence", "amsmath", "dollarmath", "substitution"]
 
 # Change this when cut down release
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_VLLM_MAIN_VERIFIED_COMMIT_PATH = _REPO_ROOT / ".github" / "vllm-main-verified.commit"
+_VLLM_RELEASE_TAG_PATH = _REPO_ROOT / ".github" / "vllm-release-tag.commit"
+_VLLM_MAIN_VERIFIED_COMMIT = _VLLM_MAIN_VERIFIED_COMMIT_PATH.read_text(encoding="utf-8").strip()
+_VLLM_RELEASE_TAG = _VLLM_RELEASE_TAG_PATH.read_text(encoding="utf-8").strip()
+
 myst_substitutions = {
     # the branch of vllm, used in vllm clone
     # - main branch: 'main'
     # - vX.Y.Z branch: 'vX.Y.Z'
-    "vllm_version": "v0.19.1",
+    "vllm_version": "v0.22.1",
     # the branch of vllm-ascend, used in vllm-ascend clone and image tag
     # - main branch: 'main'
     # - vX.Y.Z branch: latest vllm-ascend release tag
-    "vllm_ascend_version": "v0.19.1rc1",
+    "vllm_ascend_version": "v0.22.1rc1",
     # the newest release version of vllm-ascend and matched vLLM, used in pip install.
     # This value should be updated when cut down release.
-    "pip_vllm_ascend_version": "0.19.1rc1",
-    "pip_vllm_version": "0.19.1",
-    # CANN image tag
-    "cann_image_tag": "8.5.1-910b-ubuntu22.04-py3.11",
+    "pip_vllm_ascend_version": "0.22.1rc1",
+    "pip_vllm_version": "0.22.1",
+    # CANN image tag paired with the vllm_ascend_version above
+    "cann_image_tag": "9.0.0-910b-ubuntu22.04-py3.12",
     # vLLM commit hash for main branch
-    "main_vllm_commit": "d886c26d4d4fef7d079696beb4ece1cfb4b008a8",
+    "main_vllm_commit": _VLLM_MAIN_VERIFIED_COMMIT,
     # vLLM tag for main branch
-    "main_vllm_tag": "v0.19.1",
+    "main_vllm_tag": _VLLM_RELEASE_TAG,
     # Python version for main branch
-    "main_python_version": ">= 3.10, < 3.12",
+    "main_python_version": ">= 3.10, < 3.13",
     # CANN version for main branch
-    "main_cann_version": "8.5.0",
+    "main_cann_version": "9.0.0",
     # PyTorch/torch_npu version for main branch
-    "main_pytorch_torch_npu_version": "2.9.0 / 2.9.0",
+    "main_pytorch_torch_npu_version": "2.10.0 / 2.10.0",
     # Triton Ascend version for main branch
-    "main_triton_ascend_version": "3.2.0",
+    "main_triton_ascend_version": "3.2.1",
 }
 
 # For cross-file header anchors
@@ -147,7 +152,7 @@ html_extra_path = ["llms.txt"]
 # Check external links without validating remote anchors. Many third-party
 # sites render anchors dynamically, which makes anchor checks flaky in CI.
 linkcheck_anchors = False
-linkcheck_retries = 2
+linkcheck_retries = 3
 linkcheck_timeout = 15
 linkcheck_workers = 10
 
@@ -160,6 +165,7 @@ linkcheck_ignore = [
     r"https?://<[^>]+>.*",
     r"https://github\.com/vllm-project/vllm-ascend/issues/new/choose",
     r"https://github\.com/[^/?#]+/?$",
+    r"https?://.*\$%7B.*%7D.*",
 ]
 
 READTHEDOCS_VERSION_TYPE = os.environ.get("READTHEDOCS_VERSION_TYPE")
@@ -170,21 +176,6 @@ if READTHEDOCS_VERSION_TYPE == "tag":
     # (readthedocs build both HTML and PDF versions separately)
     if os.path.exists(header_file):
         os.remove(header_file)
-
-
-class SyncMetadataCodeBlock(CodeBlock):
-    """Code block supporting docs-to-YAML sync metadata."""
-
-    option_spec = CodeBlock.option_spec | {
-        "sync-yaml": directives.unchanged_required,
-        "sync-target": directives.unchanged_required,
-        "sync-class": directives.unchanged_required,
-    }
-
-
-def setup(app):
-    app.add_directive("test", SyncMetadataCodeBlock)
-
 
 if __name__ == "__main__":
     print(json.dumps(myst_substitutions))

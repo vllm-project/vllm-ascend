@@ -91,8 +91,7 @@ msgid ""
 "We introduce a dynamic KVConnector via LMCacheAscendConnectorV1Dynamic, "
 "therefore LMCache-Ascend Connector can be used via the kv transfer config"
 " in the two following setting."
-msgstr ""
-我们通过 LMCacheAscendConnectorV1Dynamic 引入了一个动态 KVConnector，因此 LMCache-Ascend Connector 可以通过以下两种设置中的 kv transfer 配置来使用。"
+msgstr "我们通过 LMCacheAscendConnectorV1Dynamic 引入了一个动态 KVConnector，因此 LMCache-Ascend Connector 可以通过以下两种设置中的 kv transfer 配置来使用。"
 
 #: ../../source/user_guide/feature_guide/lmcache_ascend_deployment.md:74
 msgid "Online serving"

@@ -3,7 +3,9 @@ from dataclasses import dataclass
 import torch
 import torch.distributed as dist
 import torch_npu
-from vllm.distributed import get_dcp_group, get_decode_context_model_parallel_world_size, get_pcp_group
+from vllm.distributed import get_dcp_group, get_pcp_group
+
+from vllm_ascend.distributed.utils import get_decode_context_model_parallel_world_size
 
 
 @dataclass
@@ -102,6 +104,7 @@ class AscendMetadataForDecode:
 
     num_computed_tokens_of_pcp_dcp: list[list[list[int]]] | None = None
     block_tables: torch.Tensor = None
+    dcp_mtp_attn_mask: torch.Tensor = None
 
 
 def _process_attn_out_lse(attn_output: torch.Tensor, softmax_lse: torch.Tensor) -> torch.Tensor:

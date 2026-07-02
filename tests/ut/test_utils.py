@@ -19,7 +19,6 @@ from unittest import mock
 
 import pytest
 import torch
-from vllm.config import CompilationConfig, ModelConfig, ParallelConfig, VllmConfig
 
 from tests.ut.base import TestBase
 from vllm_ascend import utils
@@ -275,22 +274,33 @@ class TestUtils(TestBase):
             utils.get_max_hidden_layers(NoLayerConfig())
         self.assertIn("num_hidden_layers", str(context.exception))
 
-    def test_update_aclgraph_sizes(self):
-        test_compilation_config = CompilationConfig(cudagraph_capture_sizes=[i for i in range(150)])
-        model_path = os.path.join(os.path.dirname(__file__), "fake_weight")
-        test_model_config = ModelConfig(model=model_path, enforce_eager=True)
-        test_parallel_config = ParallelConfig()
-        test_vllm_config = VllmConfig(
-            model_config=test_model_config,
-            compilation_config=test_compilation_config,
-            parallel_config=test_parallel_config,
-        )
-        utils.update_aclgraph_sizes(test_vllm_config)
-        os.environ["HCCL_OP_EXPANSION_MODE"] = "AIV"
-        utils.update_aclgraph_sizes(test_vllm_config)
-        del os.environ["HCCL_OP_EXPANSION_MODE"]
+    def test_is_drafter_moe_model_extract_hidden_states_is_never_moe(self):
+        """The extract_hidden_states drafter is a cache-only attention layer
+        with no MoE layers, but its hf_config copies the (possibly MoE) target
+        hf_config. The expert-key scan must not misclassify it as MoE,
+        otherwise _sync_metadata_across_dp(is_draft_model=True) performs a DP
+        all_reduce that idle DP ranks never match (DP deadlock)."""
+        vllm_config = mock.MagicMock()
+        vllm_config.speculative_config.method = "extract_hidden_states"
+        # Inherited MoE keys from the target model (e.g. MiniMax-M2)
+        vllm_config.speculative_config.draft_model_config.hf_text_config.to_dict.return_value = {
+            "num_local_experts": 256,
+            "num_experts_per_tok": 8,
+        }
 
-        self.assertEqual(0, len(test_vllm_config.compilation_config.cudagraph_capture_sizes))
+        with mock.patch("vllm_ascend.utils._IS_DRAFTER_MOE_MODEL", None):
+            self.assertFalse(utils.is_drafter_moe_model(vllm_config))
+
+    def test_is_drafter_moe_model_eagle_moe_drafter_detected(self):
+        """Non-extract_hidden_states drafters keep the expert-key detection."""
+        vllm_config = mock.MagicMock()
+        vllm_config.speculative_config.method = "eagle3"
+        vllm_config.speculative_config.draft_model_config.hf_text_config.to_dict.return_value = {
+            "num_experts_per_tok": 8,
+        }
+
+        with mock.patch("vllm_ascend.utils._IS_DRAFTER_MOE_MODEL", None):
+            self.assertTrue(utils.is_drafter_moe_model(vllm_config))
 
     @mock.patch("vllm.model_executor.custom_op.CustomOp")
     @mock.patch("vllm_ascend.ops.activation.AscendQuickGELU")
@@ -324,8 +334,10 @@ class TestUtils(TestBase):
             self.assertEqual(kwargs, {})
 
         # Test case 1: non-310P, NZ is disabled
+        mock_config = mock.MagicMock()
+        mock_config.weight_nz_mode = 0
         with (
-            mock.patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "0"}),
+            mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
             mock.patch("vllm_ascend.utils.is_310p", return_value=False),
         ):
             weight = torch.randn(32, 64, dtype=torch.float16)
@@ -335,8 +347,9 @@ class TestUtils(TestBase):
 
         # Test case 2: 310P always converts non-fp32 weights, even when NZ=0
         mock_npu_format_cast.reset_mock()
+        mock_config.weight_nz_mode = 0
         with (
-            mock.patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "0"}),
+            mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
             mock.patch("vllm_ascend.utils.is_310p", return_value=True),
         ):
             weight = torch.randn(32, 64, dtype=torch.float16)
@@ -346,8 +359,9 @@ class TestUtils(TestBase):
 
         # Test case 3: fp32 never converts, including on 310P
         mock_npu_format_cast.reset_mock()
+        mock_config.weight_nz_mode = 1
         with (
-            mock.patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "1"}),
+            mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
             mock.patch("vllm_ascend.utils.is_310p", return_value=True),
         ):
             weight = torch.randn(32, 64, dtype=torch.float32)
@@ -357,8 +371,9 @@ class TestUtils(TestBase):
 
         # Test case 4: non-310P fp16 converts only when NZ=2
         mock_npu_format_cast.reset_mock()
+        mock_config.weight_nz_mode = 1
         with (
-            mock.patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "1"}),
+            mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
             mock.patch("vllm_ascend.utils.is_310p", return_value=False),
         ):
             weight = torch.randn(32, 64, dtype=torch.float16)
@@ -368,8 +383,9 @@ class TestUtils(TestBase):
 
         # Test case 5: non-310P fp16 converts when NZ=2
         mock_npu_format_cast.reset_mock()
+        mock_config.weight_nz_mode = 2
         with (
-            mock.patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "2"}),
+            mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
             mock.patch("vllm_ascend.utils.is_310p", return_value=False),
         ):
             weight = torch.randn(32, 64, dtype=torch.float16)
@@ -379,8 +395,9 @@ class TestUtils(TestBase):
 
         # Test case 6: non-310P bf16 converts when NZ=2
         mock_npu_format_cast.reset_mock()
+        mock_config.weight_nz_mode = 2
         with (
-            mock.patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "2"}),
+            mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
             mock.patch("vllm_ascend.utils.is_310p", return_value=False),
         ):
             weight = torch.randn(32, 64, dtype=torch.bfloat16)
@@ -390,11 +407,46 @@ class TestUtils(TestBase):
 
         # Test case 7: non-310P quantized weights still convert by default
         mock_npu_format_cast.reset_mock()
+        mock_config.weight_nz_mode = 1
         with (
-            mock.patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "1"}),
+            mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
             mock.patch("vllm_ascend.utils.is_310p", return_value=False),
         ):
             weight = torch.zeros(32, 64, dtype=torch.int8)
             result = utils.maybe_trans_nz(weight)
             self.assertIs(result, weight)
             assert_nz_cast(weight)
+
+
+def test_is_pd_decode_recompute_scheduler_enabled_without_config():
+    assert utils.is_pd_decode_recompute_scheduler_enabled() is False
+
+
+def test_is_pd_decode_recompute_scheduler_enabled_kv_producer():
+    vllm_config = mock.MagicMock()
+    vllm_config.kv_transfer_config = mock.MagicMock()
+    vllm_config.kv_transfer_config.is_kv_consumer = False
+    vllm_config.kv_transfer_config.is_kv_producer = True
+    assert utils.is_pd_decode_recompute_scheduler_enabled(vllm_config) is False
+
+
+def test_is_pd_decode_recompute_scheduler_enabled_decode_consumer():
+    vllm_config = mock.MagicMock()
+    vllm_config.kv_transfer_config = mock.MagicMock()
+    vllm_config.kv_transfer_config.is_kv_consumer = True
+    vllm_config.kv_transfer_config.is_kv_producer = False
+    ascend_config = mock.MagicMock()
+    ascend_config.recompute_scheduler_enable = True
+    with mock.patch("vllm_ascend.utils.get_ascend_config", return_value=ascend_config):
+        assert utils.is_pd_decode_recompute_scheduler_enabled(vllm_config) is True
+
+
+def test_is_pd_decode_recompute_scheduler_enabled_decode_consumer_disabled():
+    vllm_config = mock.MagicMock()
+    vllm_config.kv_transfer_config = mock.MagicMock()
+    vllm_config.kv_transfer_config.is_kv_consumer = True
+    vllm_config.kv_transfer_config.is_kv_producer = False
+    ascend_config = mock.MagicMock()
+    ascend_config.recompute_scheduler_enable = False
+    with mock.patch("vllm_ascend.utils.get_ascend_config", return_value=ascend_config):
+        assert utils.is_pd_decode_recompute_scheduler_enabled(vllm_config) is False

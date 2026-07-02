@@ -1,0 +1,212 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+name: Handle /e2e Command
+
+on:
+  repository_dispatch:
+    types: [e2e-command]
+
+defaults:
+  run:
+    shell: bash -el {0}
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  actions: read
+
+jobs:
+  e2e-test:
+    name: Run /e2e tests
+    runs-on: linux-amd64-cpu-4-hk
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
+    outputs:
+      pr_sha: ${{ steps.resolve.outputs.pr_sha }}
+      pr_base_ref: ${{ steps.resolve.outputs.pr_base_ref }}
+      test_groups: ${{ steps.groups.outputs.test_groups }}
+      has_tests: ${{ steps.groups.outputs.has_tests }}
+      notify_comment_id: ${{ steps.notify.outputs.comment-id }}
+      main_commit: ${{ steps.vllm.outputs.main_commit }}
+      release_tag: ${{ steps.vllm.outputs.release_tag }}
+    steps:
+      - name: Install system dependencies
+        run: |
+          sudo mkdir -p -m 755 /etc/apt/keyrings
+          curl -sL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null
+          sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+          sudo apt-get update -y
+          sudo apt-get install gh -y
+
+      - name: Check user authorization
+        id: auth
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          ACTOR='${{ github.event.client_payload.github.payload.comment.user.login }}'
+          PR_AUTHOR='${{ github.event.client_payload.pull_request.user.login }}'
+          REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
+
+          if [ "$ACTOR" = "$PR_AUTHOR" ]; then
+            echo "User $ACTOR is the PR author, authorized."
+            echo "authorized=true" >> "$GITHUB_OUTPUT"
+          else
+            ROLE_NAME=$(gh api "repos/$REPO/collaborators/$ACTOR/permission" --jq '.role_name' 2>/dev/null || true)
+            case "$ROLE_NAME" in
+              triage|write|maintain|admin)
+                echo "User $ACTOR has $ROLE_NAME role, authorized."
+                echo "authorized=true" >> "$GITHUB_OUTPUT"
+                ;;
+              *)
+                echo "::error::User $ACTOR is not the PR author and does not have triage+ permission."
+                echo "authorized=false" >> "$GITHUB_OUTPUT"
+                ;;
+            esac
+          fi
+
+      - name: Post workflow URL
+        id: notify
+        if: steps.auth.outputs.authorized == 'true'
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
+          comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
+          body: |
+            [Bot]: e2e command triggered. See [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details.
+          reactions: rocket
+
+      - name: Post unauthorized comment
+        if: steps.auth.outputs.authorized == 'false'
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
+          comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
+          body: |
+            [Bot]: e2e command failed: you do not have permission. Only the PR author or users with triage+ permission can trigger /e2e.
+          reactions: confused
+
+      - name: Fail if unauthorized
+        if: steps.auth.outputs.authorized == 'false'
+        run: exit 1
+
+      - name: Checkout repo
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - name: Read verified vLLM refs
+        id: vllm
+        run: |
+          main_commit="$(tr -d '[:space:]' < .github/vllm-main-verified.commit)"
+          release_tag="$(tr -d '[:space:]' < .github/vllm-release-tag.commit)"
+          [[ "${main_commit}" =~ ^[0-9a-f]{7,40}$ ]] || {
+            echo "::error file=.github/vllm-main-verified.commit::invalid vLLM main commit: ${main_commit}"
+            exit 1
+          }
+          [[ "${release_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-].*)?$ ]] || {
+            echo "::error file=.github/vllm-release-tag.commit::invalid vLLM release tag: ${release_tag}"
+            exit 1
+          }
+          {
+            echo "main_commit=${main_commit}"
+            echo "release_tag=${release_tag}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Resolve PR info and test names
+        id: resolve
+        run: |
+          PR_SHA='${{ github.event.client_payload.pull_request.head.sha }}'
+          echo "pr_sha=$PR_SHA" >> "$GITHUB_OUTPUT"
+
+          PR_BASE_REF='${{ github.event.client_payload.pull_request.base.ref }}'
+          echo "pr_base_ref=${PR_BASE_REF:-main}" >> "$GITHUB_OUTPUT"
+
+          ALL_ARGS="${{ github.event.client_payload.slash_command.args.all }}"
+          echo "all_args=$ALL_ARGS" >> "$GITHUB_OUTPUT"
+
+      - name: Validate test paths
+        id: validate
+        env:
+          ALL_ARGS: ${{ steps.resolve.outputs.all_args }}
+        run: |
+          TESTS=$(echo "$ALL_ARGS" | tr '\n' ' ')
+          if [ -z "$TESTS" ]; then
+            echo "::error::No test paths provided. Usage: /e2e <test-path-1> [test-path-2] ..."
+            exit 1
+          fi
+          for TEST in $TESTS; do
+            if [[ ! "$TEST" =~ ^tests/e2e/pull_request/[^/]+/ ]]; then
+              echo "::error::Unsupported test path: $TEST"
+              echo "Only tests under tests/e2e/pull_request/<subdir>/ are supported."
+              exit 1
+            fi
+          done
+          echo "All test paths are valid."
+          echo "tests=$TESTS" >> "$GITHUB_OUTPUT"
+
+      - name: Categorize tests by runner
+        id: groups
+        run: |
+          pip install regex pyyaml
+          TESTS=$(echo "${{ steps.validate.outputs.tests }}" | tr '\n' ' ')
+          read -ra TEST_ARRAY <<< "$TESTS"
+          python3 .github/workflows/scripts/select_tests.py \
+            --explicit-e2e-tests "${TEST_ARRAY[@]}"
+
+      - name: Fail if no valid tests
+        if: steps.groups.outputs.has_tests != 'true'
+        run: |
+          echo "::error::No valid test paths matched. Please verify the paths exist and try again."
+          exit 1
+
+  trigger-selected-tests:
+    name: e2e-comment (${{ matrix.vllm_version }})
+    strategy:
+      fail-fast: false
+      matrix:
+        vllm_version:
+          - ${{ needs.e2e-test.outputs.main_commit }}
+          - ${{ needs.e2e-test.outputs.release_tag }}
+    needs: [e2e-test]
+    if: ${{ needs.e2e-test.outputs.has_tests == 'true' }}
+    uses: ./.github/workflows/_selected_tests.yaml
+    with:
+      vllm: ${{ matrix.vllm_version }}
+      ref: ${{ needs.e2e-test.outputs.pr_sha }}
+      base_ref: ${{ needs.e2e-test.outputs.pr_base_ref }}
+      test_groups: ${{ needs.e2e-test.outputs.test_groups }}
+
+  report:
+    name: Report result
+    needs: [e2e-test, trigger-selected-tests]
+    if: always() && needs.e2e-test.result == 'success' && needs.e2e-test.outputs.notify_comment_id != ''
+    runs-on: linux-amd64-cpu-2-hk
+    steps:
+      - name: Update comment with result
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
+          comment-id: ${{ needs.e2e-test.outputs.notify_comment_id }}
+          body: |
+            [Bot]: e2e command ${{ (needs.trigger-selected-tests.result == 'success' || needs.trigger-selected-tests.result == 'skipped') && 'completed successfully' || 'failed' }}.
+          reactions: ${{ (needs.trigger-selected-tests.result == 'success' || needs.trigger-selected-tests.result == 'skipped') && 'hooray' || 'confused' }}
