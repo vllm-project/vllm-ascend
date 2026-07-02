@@ -2,11 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer."""
 
+import traceback
 from typing import cast
 
 import torch
 import torch.nn as nn
 import vllm.envs as envs
+from vllm.logger import logger
 from vllm.config import CacheConfig, get_current_vllm_config
 from vllm.config.vllm import VllmConfig
 from vllm.model_executor.layers.attention.attention import _init_kv_cache_quant
@@ -22,6 +24,56 @@ from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
 
 from vllm_ascend.attention.abstract import DSAAttentionImpl
 from vllm_ascend.attention.dsa_v1 import AscendDSABackend
+from vllm_ascend.utils import (
+    AscendDeviceType,
+    get_ascend_device_type,
+    get_dsv4_configured_block_size,
+)
+
+
+def get_dsv4_block_sizes():
+    _DSV4_BLOCK_SIZES = {
+        128: [[128, 128, 8, 32], [16640, 131072]],
+        64: [[64, 64, 4, 16], [8320, 65536]],
+        32: [[32, 32, 2, 8], [4160, 32768]],
+    }
+    _DSV4_BLOCK_SIZES_A5 = {
+        128: [[128, 128, 8, 16], [16896, 81920]],
+        64: [[64, 64, 4, 8], [8448, 40960]],
+        32: [[32, 32, 2, 4], [4224, 20480]],
+    }
+    if get_ascend_device_type() in {AscendDeviceType.A5}:
+        return _DSV4_BLOCK_SIZES_A5
+    return _DSV4_BLOCK_SIZES
+
+
+DSV4_BLOCK_SIZES = get_dsv4_block_sizes()
+
+
+def get_dsv4_cache_sizes(block_size: int | None):
+    original_block_size = block_size
+    block_size = 32 if block_size is None else block_size
+    fallback = block_size not in DSV4_BLOCK_SIZES
+    cache_sizes = DSV4_BLOCK_SIZES.get(block_size, DSV4_BLOCK_SIZES[32])
+    logger.warning(
+        "DeepSeek V4 cache size lookup: input=%r (type=%s), key=%r, "
+        "fallback_to_32=%r, cache_sizes=%s.",
+        original_block_size,
+        type(original_block_size).__name__,
+        block_size,
+        fallback,
+        cache_sizes,
+    )
+    if fallback:
+        logger.warning(
+            "DeepSeek V4 cache size lookup fallback stack:\n%s",
+            "".join(traceback.format_stack(limit=10)),
+        )
+    return cache_sizes
+
+
+def get_dsv4_cache_sizes_for_config(cache_config: CacheConfig | None):
+    return get_dsv4_cache_sizes(get_dsv4_configured_block_size(cache_config))
 
 
 class DSAAttention(nn.Module, AttentionLayerBase):
@@ -150,10 +202,15 @@ class DSAAttention(nn.Module, AttentionLayerBase):
         if self.compress_ratio <= 1:  # SWA part. Allocated separately as DeepseekV4SWACache.
             return None
         kv_cache_dtype = kv_cache_dtype_str_to_dtype(self.kv_cache_dtype, vllm_config.model_config)
+        is_a5 = get_ascend_device_type() in {AscendDeviceType.A5}
+        if is_a5:
+            kv_cache_dtype = torch.float8_e4m3fn
+            vllm_config.cache_config.cache_dtype = "float8_e4m3fn"
+        cached_head_size = self.head_size + 128 if is_a5 else self.head_size
         return MLAAttentionSpec(
-            block_size=128,
+            block_size=get_dsv4_cache_sizes_for_config(vllm_config.cache_config)[0][0],
             num_kv_heads=1,
-            head_size=self.head_size,
+            head_size=cached_head_size,
             dtype=kv_cache_dtype,
             model_version="deepseek_v4",
             compress_ratio=self.compress_ratio,

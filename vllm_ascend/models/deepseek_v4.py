@@ -91,6 +91,12 @@ else:
     from vllm.models.deepseek_v4.compressor import CompressorStateCache
 
 
+def _dsv4_cache_sizes(cache_config: CacheConfig | None):
+    from vllm_ascend.models.layer.attention.layer import get_dsv4_cache_sizes_for_config
+
+    return get_dsv4_cache_sizes_for_config(cache_config)
+
+
 def hadamard_transform_ref(x: torch.Tensor, scale=1.0):
     from scipy.linalg import hadamard  # type: ignore[import-untyped]
 
@@ -513,14 +519,13 @@ class Compressor(nn.Module):
         self.norm = RMSNorm(self.head_dim, config.rms_norm_eps)
 
         state_dtype = torch.float32
-        # TODO(zyj): change following codes if block_size is configurable & refactor the magic numbers
         if compress_ratio == 4:
             self.state_cache = CompressorStateCache(
                 state_dim=2 * self.coff * self.head_dim,  # kv_state + score_state
                 dtype=state_dtype,
                 compress_ratio=compress_ratio,
                 prefix=f"{prefix}.state_cache",
-                block_size=8,
+                block_size=_dsv4_cache_sizes(cache_config)[0][2],
             )
         elif compress_ratio == 128:
             self.state_cache = CompressorStateCache(
@@ -528,7 +533,7 @@ class Compressor(nn.Module):
                 dtype=state_dtype,
                 compress_ratio=compress_ratio,
                 prefix=f"{prefix}.state_cache",
-                block_size=32,
+                block_size=_dsv4_cache_sizes(cache_config)[0][3],
             )
         else:
             raise ValueError(
