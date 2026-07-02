@@ -124,6 +124,7 @@ def _make_vllm_config(
     max_num_batched_tokens: int = 8192,
     num_heads: int = 32,
     num_speculative_tokens: int = 0,
+    max_cudagraph_capture_size: int | None = None,
 ):
     speculative_config = None
     if num_speculative_tokens > 0:
@@ -139,7 +140,7 @@ def _make_vllm_config(
         cache_config=SimpleNamespace(mamba_cache_mode="none"),
         compilation_config=SimpleNamespace(
             cudagraph_mode=CUDAGraphMode.NONE,
-            max_cudagraph_capture_size=None,
+            max_cudagraph_capture_size=max_cudagraph_capture_size,
         ),
         speculative_config=speculative_config,
         scheduler_config=SimpleNamespace(
@@ -155,10 +156,19 @@ def _make_vllm_config(
     )
 
 
-def _make_builder(*, device: torch.device, num_heads: int, num_speculative_tokens: int):
+def _make_builder(
+    *,
+    device: torch.device,
+    num_heads: int,
+    num_speculative_tokens: int,
+    max_cudagraph_capture_size: int | None = None,
+    max_num_seqs: int = 16,
+):
     vllm_config = _make_vllm_config(
         num_heads=num_heads,
         num_speculative_tokens=num_speculative_tokens,
+        max_cudagraph_capture_size=max_cudagraph_capture_size,
+        max_num_seqs=max_num_seqs,
     )
     spec = MambaSpec(
         block_size=16,
@@ -273,6 +283,32 @@ def test_sequence_index_buffers_cover_spec_decode_when_cudagraph_disabled():
 
     assert torch.equal(spec_indices.cpu(), torch.tensor([0]))
     assert non_spec_indices.numel() == 0
+
+
+def test_spec_sequence_masks_size_aligns_with_spec_sequence_masks_cpu():
+    max_num_seqs = 256
+    max_cudagraph_capture_size = 128
+    num_speculative_tokens = 3
+
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        max_num_seqs=max_num_seqs,
+        num_speculative_tokens=num_speculative_tokens,
+        max_cudagraph_capture_size=max_cudagraph_capture_size,
+    )
+    expected = max_num_seqs  # sequence_index_capacity = max(256, 128) = 256
+
+    # spec_sequence_masks device tensor must be at least as large as CPU counterpart.
+    assert builder.spec_sequence_masks.size(0) >= builder.spec_sequence_masks_cpu.size(0)
+    assert builder.spec_sequence_masks.size(0) == expected
+    assert builder.spec_sequence_masks_cpu.size(0) == expected
+
+    # Sibling tensors (sequence indices) must also have matching CPU/device sizes.
+    assert builder.spec_sequence_indices.size(0) == expected
+    assert builder.spec_sequence_indices_cpu.size(0) == expected
+    assert builder.non_spec_sequence_indices.size(0) == expected
+    assert builder.non_spec_sequence_indices_cpu.size(0) == expected
 
 
 def _expected_conv1d_host_args(attn_metadata) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
