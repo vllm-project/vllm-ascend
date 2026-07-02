@@ -1336,12 +1336,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if self.sliding_window is not None:
             causal_allow = (kp <= qp) & ((qp - kp) < self.sliding_window)
             bidir_allow = (qp - kp).abs() < self.sliding_window
-            # broadcast to full [B,QL,Smax] before the per-request select
-            causal_allow = causal_allow | torch.zeros(B, QL, Smax, dtype=torch.bool, device=query.device)
-            bidir_allow = bidir_allow | torch.zeros(B, QL, Smax, dtype=torch.bool, device=query.device)
         else:
-            causal_allow = (kp <= qp) | torch.zeros(B, QL, Smax, dtype=torch.bool, device=query.device)
-            bidir_allow = torch.ones(B, QL, Smax, dtype=torch.bool, device=query.device)
+            causal_allow = kp <= qp
+            bidir_allow = ~causal_b
         allow = torch.where(causal_b, causal_allow, bidir_allow)  # [B,QL,Smax]
         allow = allow & valid.unsqueeze(1)  # [B,QL,Smax]
         atten_mask = (~allow).unsqueeze(1).contiguous()  # [B,1,QL,Smax], True == masked
@@ -1455,16 +1452,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 offset = kv_len - q_len
                 qpos = torch.arange(q_len, device=q_i.device).unsqueeze(1) + offset
                 kpos = torch.arange(kv_len, device=q_i.device).unsqueeze(0)
-                m = torch.zeros(q_len, kv_len, device=q_i.device, dtype=torch.bool)
                 if causal_i:
                     # future tokens masked (causal)
-                    m = m | (kpos > qpos)
+                    m = kpos > qpos
                     if self.sliding_window is not None:
                         # left sliding window
                         m = m | (qpos - kpos >= self.sliding_window)
                 elif self.sliding_window is not None:
                     # bidirectional + sliding: symmetric window, no causal mask
-                    m = m | ((qpos - kpos).abs() >= self.sliding_window)
+                    m = (qpos - kpos).abs() >= self.sliding_window
                 if m.any():
                     atten_mask = m
             # bidirectional full attention (decoder denoise, non-sliding): None.

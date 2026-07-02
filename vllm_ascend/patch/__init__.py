@@ -891,7 +891,20 @@
 #       attention metadata.
 #    Future Plan:
 #       remove this when vllm-ascend's attention metadata is align with vllm.
-# ** 25. File: worker/patch_v2/patch_triton.py**
+# ** 25. File: worker/patch_gemma4_router.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.gemma4.Gemma4Router.forward`
+#    Why:
+#       Gemma4Router casts its scalar root-size and learned scale to the
+#       activation dtype on every forward. DiffusionGemma runs this router on
+#       every MoE layer, so the repeated dtype casts show up as small NPU ops
+#       before grouped matmul.
+#    How:
+#       Cache the dtype/device-converted tensors per router instance while
+#       preserving the upstream multiplication order.
+#    Future Plan:
+#       remove this patch when upstream folds or caches the router scale.
+# ** 26. File: worker/patch_v2/patch_triton.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.sample.logprob`, `vllm.v1.worker.gpu.sample.penalties.apply_penalties`,
 #      `vllm.v1.worker.gpu.sample.gumbel.gumbel_sample`
@@ -904,7 +917,7 @@
 #    Future Plan:
 #       Remove this patch when vLLM support the dispatch function.
 #
-# ** 26. File: worker/patch_gqa_c8.py**
+# ** 27. File: worker/patch_gqa_c8.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.qwen3.Qwen3ForCausalLM.load_weights`
 #    Why:
