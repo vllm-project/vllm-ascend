@@ -38,6 +38,21 @@ on:
         required: false
         default: 'all'
         type: string
+      request_id:
+        description: 'Unique request ID from the triggering workflow for run identification'
+        required: false
+        default: ''
+        type: string
+      skip_build_image:
+        description: 'Skip build-image job (used when triggered by /nightly command)'
+        required: false
+        default: 'false'
+        type: string
+      vllm_ascend_ref:
+        description: 'PR commit SHA for PR-triggered tests'
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: read
@@ -52,7 +67,7 @@ defaults:
     shell: bash -el {0}
 
 concurrency:
-  group: ascend-weekly-${{ github.ref }}-a3
+  group: ascend-weekly-${{ github.ref }}-a3${{ inputs.request_id && format('-{0}', inputs.request_id) || '' }}
   cancel-in-progress: true
 
 env:
@@ -62,40 +77,88 @@ env:
   ASCEND_LOG_PREFIX: '/root/.cache/ascend-logs'
 
 jobs:
+  parse-trigger:
+    name: Parse trigger and determine test scope
+    if: >-
+      github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.parse.outputs.run }}
+      filter: ${{ steps.parse.outputs.filter }}
+      ref: ${{ steps.parse.outputs.ref }}
+    steps:
+      - name: Parse trigger
+        id: parse
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const eventName = context.eventName;
+            const testCases = '${{ inputs.test_cases }}'.trim();
+
+            core.setOutput('ref', context.sha || 'unknown');
+
+            if (testCases) {
+              core.setOutput('run', 'true');
+              if (testCases === 'all') {
+                core.setOutput('filter', 'all');
+              } else {
+                core.setOutput('filter', ',' + testCases.split(',').map(s => s.trim()).join(',') + ',');
+              }
+              return;
+            }
+
+            core.setOutput('run', 'false');
+            core.setOutput('filter', '');
+
   setup-vars:
     name: Export global env vars as job outputs
+    needs: parse-trigger
     runs-on: ubuntu-latest
     outputs:
       ascend_log_prefix: ${{ steps.export.outputs.ascend_log_prefix }}
       vllm_ascend_branches: ${{ steps.export.outputs.vllm_ascend_branches }}
-      filter: ${{ steps.export.outputs.filter }}
+      multi_node: ${{ steps.set-matrix.outputs.multi_node }}
+      double_node: ${{ steps.set-matrix.outputs.double_node }}
+      single_node: ${{ steps.set-matrix.outputs.single_node }}
     steps:
       - id: export
-        env:
-          TEST_CASES_INPUT: ${{ inputs.test_cases }}
         run: |
           {
             echo "ascend_log_prefix=${{ env.ASCEND_LOG_PREFIX }}"
-            if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-              input_branch="${{ inputs.vllm_ascend_branch }}"
-              # Normalize branch name for image tag (replace '/' with '-')
-              normalized=$(echo "$input_branch" | tr '/' '-')
-              echo "vllm_ascend_branches=[\"${normalized}\"]"
-              if [ -z "$TEST_CASES_INPUT" ] || [ "$TEST_CASES_INPUT" = "all" ]; then
-                echo "filter=all"
-              else
-                # Comma-wrap for exact-name matching: ",name1,name2,"
-                cleaned=$(echo "$TEST_CASES_INPUT" | tr -d '[:space:]')
-                echo "filter=,${cleaned},"
-              fi
-            else
-              echo 'vllm_ascend_branches=["main"]'
-              echo "filter=all"
-            fi
+            input_branch="${{ inputs.vllm_ascend_branch }}"
+            normalized=$(echo "$input_branch" | tr '/' '-')
+            echo "vllm_ascend_branches=[\"${normalized}\"]"
           } >> $GITHUB_OUTPUT
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Checkout PR code
+        if: github.event_name == 'workflow_dispatch' && inputs.vllm_ascend_ref != ''
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.vllm_ascend_ref }}
+          sparse-checkout: .github/workflows/configs/
+          path: ./pr
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Read A3 weekly test matrix config
+        id: set-matrix
+        env:
+          MATRIX_FILE: ${{ github.event_name == 'workflow_dispatch' && inputs.vllm_ascend_ref != '' && './pr/.github/workflows/configs/weekly_config.yaml' || '.github/workflows/configs/weekly_config.yaml' }}
+          MATRIX_OUTPUTS: '{"multi_node":"a3.multi_node.test_config","double_node":"a3.double_node.test_config","single_node":"a3.single_node.test_config"}'
+        run: |
+          python3 -m pip install pyyaml -q
+          python3 .github/workflows/scripts/resolve_nightly_tests.py --mode=matrix
 
   build-image:
     name: Build weekly-a3 image
+    if: >-
+      (github.event_name == 'workflow_dispatch' && inputs.skip_build_image != 'true')
     strategy:
       matrix:
         vllm_ascend_branch: >-
@@ -113,31 +176,17 @@ jobs:
 
   multi-node-tests:
     name: multi-node
-    needs: [setup-vars, build-image]
+    needs: [setup-vars, parse-trigger, build-image]
     if: >-
       always() &&
+      needs.parse-trigger.outputs.run == 'true' &&
       (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
     strategy:
       fail-fast: false
       max-parallel: 3
       matrix:
         vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
-        test_config:
-          - name: MiniMax-PD-in32k-bs4-1
-            config_file_path: MiniMax-PD-in32k-bs4-1.yaml
-            size: 3
-          - name: Qwen3.5-397B-w8a8-PD
-            config_file_path: Qwen-3.5-397B-A17B-W8A8-PD.yaml
-            size: 3
-          - name: GLM_5_1_PD_in32k_bs16-0
-            config_file_path: GLM_5_1_PD_in32k_bs16-0.yaml
-            size: 4
-          - name: GLM_5_1_PD_in32k_bs20-90
-            config_file_path: GLM_5_1_PD_in32k_bs20-90.yaml
-            size: 4
-          - name: GLM_5_1_PD_in64k_bs16-90
-            config_file_path: GLM_5_1_PD_in64k_bs16-90.yaml
-            size: 4
+        test_config: ${{ fromJson(needs.setup-vars.outputs.multi_node) }}
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version: a3
@@ -150,12 +199,14 @@ jobs:
       config_file_path: ${{ matrix.test_config.config_file_path }}
       config_base_path: tests/e2e/weekly/multi_node/external_dp/config
       name: ${{ matrix.test_config.name }}
-      vllm_ascend_ref: ${{ github.sha }}
+      vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref }}
       testcase_timeout: 600
       should_run: >-
         ${{
-          needs.setup-vars.outputs.filter == 'all' ||
-          contains(needs.setup-vars.outputs.filter, format(',{0},', matrix.test_config.name))
+          needs.parse-trigger.outputs.run == 'true' && (
+            needs.parse-trigger.outputs.filter == 'all' ||
+            contains(needs.parse-trigger.outputs.filter, format(',{0},', matrix.test_config.name))
+          )
         }}
     secrets:
       KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
@@ -164,25 +215,17 @@ jobs:
 
   double-node-tests:
     name: double-node
-    needs: [setup-vars, build-image, multi-node-tests]
+    needs: [setup-vars, parse-trigger, build-image, multi-node-tests]
     if: >-
       always() &&
+      needs.parse-trigger.outputs.run == 'true' &&
       (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
     strategy:
       fail-fast: false
       max-parallel: 3
       matrix:
         vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
-        test_config:
-          - name: DeepSeek-V3_2-W8A8-EP_weekly
-            config_file_path: DeepSeek-V3_2-W8A8-EP_weekly.yaml
-            size: 2
-          - name: DeepSeek-V3-W8A8_weekly
-            config_file_path: DeepSeek-V3.yaml
-            size: 2
-          - name: multi-node-glm4.7-w8a8c8-layerwise
-            config_file_path: GLM-4.7-W8A8C8-Mooncake-Layerwise.yaml
-            size: 2
+        test_config: ${{ fromJson(needs.setup-vars.outputs.double_node) }}
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version: a3
@@ -195,12 +238,14 @@ jobs:
       config_file_path: ${{ matrix.test_config.config_file_path }}
       config_base_path: tests/e2e/weekly/multi_node/internal_dp/config
       name: ${{ matrix.test_config.name }}
-      vllm_ascend_ref: ${{ github.sha }}
+      vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref }}
       testcase_timeout: 600
       should_run: >-
         ${{
-          needs.setup-vars.outputs.filter == 'all' ||
-          contains(needs.setup-vars.outputs.filter, format(',{0},', matrix.test_config.name))
+          needs.parse-trigger.outputs.run == 'true' && (
+            needs.parse-trigger.outputs.filter == 'all' ||
+            contains(needs.parse-trigger.outputs.filter, format(',{0},', matrix.test_config.name))
+          )
         }}
     secrets:
       KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
@@ -209,54 +254,17 @@ jobs:
 
   single-node-tests:
     name: single-node
-    needs: [setup-vars, build-image, double-node-tests]
+    needs: [setup-vars, parse-trigger, build-image, double-node-tests]
     if: >-
       always() &&
+      needs.parse-trigger.outputs.run == 'true' &&
       (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
     strategy:
       fail-fast: false
       max-parallel: 7
       matrix:
         vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
-        test_config:
-          # pytest-driven tests
-          - name: engine-func-tests
-            os: linux-aarch64-a3-4
-            tests: tests/e2e/weekly/single_node/engine_func_test_robot
-          # YAML-driven tests
-          - name: deepseek-v3-2-w8a8
-            os: linux-aarch64-a3-16
-            config_file_path: DeepSeek-V3.2-W8A8_A3_weekly.yaml
-          - name: kimi-k2.5
-            os: linux-aarch64-a3-16
-            config_file_path: Kimi-K2.5.yaml
-          - name: kimi-k2.5-32k-512
-            os: linux-aarch64-a3-16
-            config_file_path: Kimi-K2.5-32k-512.yaml
-          - name: Qwen3.5-397B-A17B-w8a8-mtp
-            os: linux-aarch64-a3-16
-            config_file_path: Qwen3.5-397B-A17B-W8A8-mtp-A3_weekly.yaml
-          - name: MiniMax-M2.5-w8a8-QuaRot-A3
-            os: linux-aarch64-a3-16
-            config_file_path: MiniMax-M2.5-w8a8-QuaRot-A3.yaml
-          - name: Qwen3.5-27B-w8a8-A3
-            os: linux-aarch64-a3-2
-            config_file_path: Qwen3.5-27B-w8a8-A3.yaml
-          - name: Qwen3.5-122B-A10B-W8A8-A3
-            os: linux-aarch64-a3-16
-            config_file_path: Qwen3.5-122B-A10B-W8A8-A3.yaml
-          - name: GLM-5_1-W8A8_A3_weekly
-            os: linux-aarch64-a3-16
-            config_file_path: GLM-5_1-W8A8_A3_weekly.yaml
-          - name: glm-5-w4a8
-            os: linux-aarch64-a3-16
-            config_file_path: GLM-5.yaml
-          - name: qwen2-5-vl-7b-epd
-            os: linux-aarch64-a3-4
-            config_file_path: Qwen2.5-VL-7B-Instruct-EPD.yaml
-          - name: MiniMax-M2.5-w8a8
-            os: linux-aarch64-a3-16
-            config_file_path: MiniMax-M2.5-W8A8-A3.yaml
+        test_config: ${{ fromJson(needs.setup-vars.outputs.single_node) }}
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
       runner: ${{ matrix.test_config.os }}
@@ -268,9 +276,13 @@ jobs:
       testcase_timeout: 600
       should_run: >-
         ${{
-          needs.setup-vars.outputs.filter == 'all' ||
-          contains(needs.setup-vars.outputs.filter, format(',{0},', matrix.test_config.name))
+          needs.parse-trigger.outputs.run == 'true' && (
+            needs.parse-trigger.outputs.filter == 'all' ||
+            contains(needs.parse-trigger.outputs.filter, format(',{0},', matrix.test_config.name))
+          )
         }}
+      request_id: ${{ inputs.request_id || '' }}
+      vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
 
   clear-pre-logs:
     runs-on: linux-aarch64-a3-0
@@ -284,8 +296,11 @@ jobs:
 
   merge-benchmark-artifacts:
     name: Merge benchmark artifacts into weekly-a3.zip
-    needs: [single-node-tests, double-node-tests]
-    if: always()
+    needs: [parse-trigger, single-node-tests, double-node-tests, multi-node-tests]
+    if: >-
+      always() &&
+      github.event_name == 'workflow_dispatch' &&
+      needs.parse-trigger.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - name: Merge all benchmark result artifacts
