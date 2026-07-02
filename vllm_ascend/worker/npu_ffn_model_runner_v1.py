@@ -324,6 +324,21 @@ class NPUFFNModelRunner(NPUModelRunner, GPUFFNModelRunner):
             dp_metadata_list: per-stage token metadata
             dp_metadata_key: dp_metadata key (replaces num_tokens as the key)
         """
+        # During profile_run the attention side calls send_dp_metadata_list
+        # in its _dummy_run and blocks waiting for FFN to receive. If FFN's
+        # _dummy_run is invoked without dp_metadata_list (the profile_run
+        # path), we must recv it here first to unblock the attention side;
+        # otherwise both sides deadlock (attention waits on send, FFN waits
+        # on recv_attn_output inside _ffn_forward). This mirrors the pattern
+        # used by execute_model above.
+        if dp_metadata_list is None and self.connector is not None:
+            dp_metadata_list, _, _ = self.connector.recv_dp_metadata_list()
+            logger.info(
+                "FFN _dummy_run received dp_metadata_list=%s via "
+                "recv_dp_metadata_list (profile_run path)",
+                dp_metadata_list)
+            dp_metadata_key = self._get_dp_metadata_key(dp_metadata_list)
+
         is_ubatch = dp_metadata_list is not None and len(dp_metadata_list) > 1
         logger.debug("is_ubatch in _dummy_run is %s", is_ubatch)
 
