@@ -386,6 +386,34 @@ function clean_third_party()
     fi
 }
 
+function refresh_cmake_cache()
+{
+    local current_cann_path
+    local cached_cann_path
+    local cached_generator
+    local current_generator
+    current_cann_path=$(realpath -m "${ASCEND_CANN_PACKAGE_PATH}")
+    current_generator="${CMAKE_GENERATOR:-Unix Makefiles}"
+    if [ "${#CMAKE_GENERATOR_ARGS[@]}" -ge 2 ]; then
+        current_generator="${CMAKE_GENERATOR_ARGS[1]}"
+    fi
+
+    if [[ -f "${BUILD_DIR}/CMakeCache.txt" ]]; then
+        cached_cann_path=$(sed -n 's/^CUSTOM_ASCEND_CANN_PACKAGE_PATH:.*=//p' "${BUILD_DIR}/CMakeCache.txt")
+        if [[ -n "${cached_cann_path}" && "$(realpath -m "${cached_cann_path}")" != "${current_cann_path}" ]]; then
+            log "Info: CANN package path changed, refresh CMake cache."
+            rm -rf "${BUILD_DIR}"
+            return
+        fi
+
+        cached_generator=$(sed -n 's/^CMAKE_GENERATOR:INTERNAL=//p' "${BUILD_DIR}/CMakeCache.txt")
+        if [[ -n "${cached_generator}" && "${cached_generator}" != "${current_generator}" ]]; then
+            log "Info: CMake generator changed, refresh CMake cache."
+            rm -rf "${BUILD_DIR}"
+        fi
+    fi
+}
+
 function cmake_config()
 {
     local extra_option="$1"
@@ -1416,6 +1444,7 @@ else
     log "Info: ninja is not found; use default CMake generator"
 fi
 
+refresh_cmake_cache
 clean_build_out
 clean_output
 
