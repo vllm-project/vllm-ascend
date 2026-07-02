@@ -36,7 +36,6 @@ QWEN_DENSE_MODELS = [
 
 
 @pytest.mark.skip(reason="test is broken, fix me")
-@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
 @patch.dict(os.environ, {"VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE": "1"})
 def test_qwen3_moe_fc2_oshard_tp2() -> None:
     example_prompts = [
@@ -51,13 +50,12 @@ def test_qwen3_moe_fc2_oshard_tp2() -> None:
         distributed_executor_backend="mp",
         enable_expert_parallel=True,
         enforce_eager=True,
-        additional_config={"layer_sharding": ["o_proj"]},
+        additional_config={"enable_flashcomm1": True, "layer_sharding": ["o_proj"]},
         kv_transfer_config=KVTransferConfig(kv_role="kv_producer"),
     ) as vllm_model:
         vllm_model.generate(example_prompts, sampling_params)
 
 
-@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
 def test_deepseek_v2_lite_fc1_tp2() -> None:
     example_prompts = [
         "test" * 1001,
@@ -71,12 +69,12 @@ def test_deepseek_v2_lite_fc1_tp2() -> None:
         enable_expert_parallel=True,
         enforce_eager=True,
         quantization="ascend",
+        additional_config={"enable_flashcomm1": True},
     ) as vllm_model:
         vllm_model.generate(example_prompts, sampling_params)
 
 
 @pytest.mark.parametrize("model", QWEN_DENSE_MODELS)
-@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
 def test_qwen3_dense_fc1_tp2(model):
     example_prompts = [
         "Hello, my name is",
@@ -90,12 +88,12 @@ def test_qwen3_dense_fc1_tp2(model):
         tensor_parallel_size=2,
         cudagraph_capture_sizes=[1, 2, 4, 8],
         quantization="ascend",
+        additional_config={"enable_flashcomm1": True},
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
 
 @pytest.mark.parametrize("model", QWEN_DENSE_MODELS)
-@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
 def test_qwen3_dense_prefetch_mlp_weight_tp2(model):
     example_prompts = [
         "Hello, my name is",
@@ -109,6 +107,6 @@ def test_qwen3_dense_prefetch_mlp_weight_tp2(model):
         tensor_parallel_size=2,
         cudagraph_capture_sizes=[1, 2, 4, 8],
         quantization="ascend",
-        additional_config={"weight_prefetch_config": {"enabled": True}},
+        additional_config={"enable_flashcomm1": True, "weight_prefetch_config": {"enabled": True}},
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)

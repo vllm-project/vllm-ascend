@@ -11,6 +11,8 @@ Starting from [PR #9064](https://github.com/vllm-project/vllm-ascend/pull/9064),
 - **Current Support**: Both environment variables and `--additional-config` are supported during the transition period
 - **Recommendation**: Use `--additional-config` for new deployments and migrate existing configurations
 - **Future Plan**: Environment variables will be **removed** in a future release; only `--additional-config` will be supported
+- **FlashComm1**: Use `--additional-config '{"enable_flashcomm1": true}'` to enable FlashComm1/SP. The
+  `VLLM_ASCEND_ENABLE_FLASHCOMM1` environment variable is only kept as a compatibility fallback during migration.
 
 ### Quick Reference
 
@@ -92,7 +94,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `enable_prefill_mc2`                | bool | `False` | Whether to reserve mc2_token_capacity for prefill batches. When enabled, `max_num_batched_tokens` is used to calculate the mc2_token_capacity instead of the decode-only capacity. In this scenario, the recommended maximum value of `max_num_batched_tokens` is `tp_size * 512`. This is a temporary switch; once MC2 operators are complete for all scenarios, this switch will be removed and MC2 will be enabled by default. |
 | `profiling_chunk_config`            | dict | `{}`    | Configuration options for dynamic chunked pipeline parallel. See [Dynamic Chunked Pipeline Parallel](../feature_guide/dynamic_chunk_pipeline_parallel.md) for details. |
 | `enable_balance_scheduling`         | bool | `False` | Whether to enable balance scheduling. Can also be configured via the `VLLM_ASCEND_BALANCE_SCHEDULING` environment variable during the migration period. |
-| `enable_flashcomm1`                 | bool | `False` | Whether to enable FlashComm1 optimization. Can also be configured via the `VLLM_ASCEND_ENABLE_FLASHCOMM1` environment variable during the migration period. |
+| `enable_flashcomm1`                 | bool | `False` | Whether to enable FlashComm1/SP optimization. Prefer this option for new deployments. The `VLLM_ASCEND_ENABLE_FLASHCOMM1` environment variable is only a migration-period fallback. |
 | `enable_matmul_allreduce`           | bool | `False` | Whether to enable matmul allreduce optimization. Can also be configured via the `VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE` environment variable during the migration period. |
 | `flashcomm2_parallel_size`          | int  | `0`     | FlashComm2 parallel size. Can also be configured via the `VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE` environment variable during the migration period. |
 | `msmonitor_use_daemon`              | bool | `False` | Whether to use daemon mode for msmonitor. Can also be configured via the `MSMONITOR_USE_DAEMON` environment variable during the migration period. |
@@ -101,7 +103,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `enable_context_parallel`           | bool | `False` | Whether to enable context parallelism. Can also be configured via the `VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL` environment variable during the migration period. |
 | `enable_fused_mc2`                  | int  | `0`     | Fused MC2 configuration. Can also be configured via the `VLLM_ASCEND_ENABLE_FUSED_MC2` environment variable during the migration period. |
 | `enable_transpose_kv_cache_by_block`| bool | `True`  | Whether to enable transpose KV cache by block. Can also be configured via the `VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK` environment variable during the migration period. |
-| `enable_dsa_cp`                     | bool | `False` | Whether to enable dsa_cp for DeepSeek V3.2, DeepSeek V4, and other models with the same architecture. This feature depends on FLASHCOMM1. Please ensure that FLASHCOMM1 is enabled before enabling this feature.|
+| `enable_dsa_cp`                     | bool | `False` | Whether to enable dsa_cp for DeepSeek V3.2, DeepSeek V4, and other models with the same architecture. This feature depends on FlashComm1. Please set `enable_flashcomm1` to `true` before enabling this feature.|
 | `rejection_sampler_config`          | dict | `{}`    | Configuration options for rejection sampler (block verify and entropy verify). |
 | `multistream_dsv4_dsa_overlap`      | bool | `True`  | Whether to enable dsa multi-stream overlap for DeepSeek V4.  |
 

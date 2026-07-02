@@ -2204,7 +2204,7 @@ class NPUModelRunner(GPUModelRunner):
 
                 if (
                     cudagraph_mode == CUDAGraphMode.FULL
-                    or (enable_sp() and not self.model_config.use_mla)
+                    or (enable_sp(self.vllm_config) and not self.model_config.use_mla)
                     and self.pcp_size * self.dcp_size == 1
                 ):
                     # Currently, Graph Mode and SP will both pad num_tokens,
@@ -2885,7 +2885,7 @@ class NPUModelRunner(GPUModelRunner):
         if sync_self:
             assert intermediate_tensors is not None
             for k, v in intermediate_tensors.items():
-                copy_len = (num_tokens + tp - 1) // tp if enable_sp() else num_tokens
+                copy_len = (num_tokens + tp - 1) // tp if enable_sp(self.vllm_config) else num_tokens
                 if k not in self.intermediate_tensors.tensors:
                     base_tensor = self.intermediate_tensors["hidden_states"]
                     self.intermediate_tensors[k] = v.new_empty(
@@ -2898,7 +2898,7 @@ class NPUModelRunner(GPUModelRunner):
         return IntermediateTensors(
             {
                 k: v[: (num_tokens + tp - 1) // tp]
-                if enable_sp()
+                if enable_sp(self.vllm_config)
                 else v[:num_tokens]
                 for k, v in self.intermediate_tensors.items()
             }
@@ -3565,12 +3565,12 @@ class NPUModelRunner(GPUModelRunner):
                 # tp_size; otherwise, on non-first PP ranks it would effectively perform an extra all-gather, leading
                 # to incorrect memory estimation and potentially causing OOM.
                 intermediate_tokens = num_tokens_padded
-                if enable_sp():
+                if enable_sp(self.vllm_config):
                     tp_size = get_tensor_model_parallel_world_size()
                     intermediate_tokens = (num_tokens_padded + tp_size - 1) // tp_size
                 if self.intermediate_tensors is None:
                     max_actual_tokens = self.max_num_tokens
-                    if enable_sp():
+                    if enable_sp(self.vllm_config):
                         max_actual_tokens = (self.max_num_tokens + tp_size - 1) // tp_size
                     self.intermediate_tensors = self.model.make_empty_intermediate_tensors(
                         batch_size=max_actual_tokens, dtype=self.dtype, device=self.device

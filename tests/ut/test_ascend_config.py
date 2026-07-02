@@ -324,6 +324,38 @@ class TestAscendConfig(TestBase):
             self.assertTrue(enable_sp())
 
     @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_enable_sp_refreshes_after_early_env_fallback(self, mock_check_and_update_config):
+        clear_enable_sp()
+        with (
+            patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "0"}, clear=True),
+            patch("vllm.config.get_current_vllm_config", side_effect=AssertionError),
+        ):
+            self.assertFalse(enable_sp())
+
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {"enable_flashcomm1": True}
+        with patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "0"}, clear=True):
+            init_ascend_config(test_vllm_config)
+
+        self.assertTrue(enable_sp(test_vllm_config))
+        with patch("vllm.config.get_current_vllm_config", side_effect=AssertionError):
+            self.assertTrue(enable_sp())
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_enable_sp_does_not_reuse_unrelated_ascend_config(self, mock_check_and_update_config):
+        first_vllm_config = VllmConfig()
+        first_vllm_config.additional_config = {"enable_flashcomm1": True}
+        init_ascend_config(first_vllm_config)
+        self.assertTrue(enable_sp(first_vllm_config))
+
+        second_vllm_config = VllmConfig()
+        second_vllm_config.additional_config = {}
+        with patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "0"}, clear=True):
+            self.assertFalse(enable_sp(second_vllm_config))
+
+    @_clean_up_ascend_config
     @patch("vllm_ascend.utils.logger.warning_once")
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_flashcomm2_warning_uses_enable_flashcomm1_config(self, mock_check_and_update_config, mock_warning_once):
