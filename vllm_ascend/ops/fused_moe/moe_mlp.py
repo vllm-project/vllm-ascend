@@ -123,6 +123,9 @@ def quant_apply_mlp(
     if w1_offset is not None:
         unquantized_hidden_states = hidden_states
         quantized_hidden_states = None
+    elif mxfp_quant_dtype == QuantType.W4A16MXFP4:
+        quantized_hidden_states = None
+        pertoken_scale = None
     elif dynamic_scale is None:
         unquantized_hidden_states = hidden_states
         hidden_states, pertoken_scale = DeviceOperator.npu_dynamic_quant(
@@ -131,8 +134,7 @@ def quant_apply_mlp(
             act_quant_type=act_quant_type,
             use_mxfp_quant=use_mxfp_quant,
         )
-        if hidden_states is not unquantized_hidden_states:
-            dispose_tensor(unquantized_hidden_states)
+        dispose_tensor(unquantized_hidden_states)
         quantized_hidden_states = None
     else:
         unquantized_hidden_states = None

@@ -968,7 +968,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                 group_list=group_list,
                 split_item=3,
                 group_type=0,
-                output_dtype=torch.bfloat16,
+                output_dtype=x.dtype,
             )[0]
             out = torch_npu.npu_swiglu(hidden_states)
             out_scale = None
@@ -1096,7 +1096,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                 group_type=0,
                 group_list_type=group_list_type,
                 group_list=group_list,
-                output_dtype=torch.bfloat16,
+                output_dtype=output_dtype,
             )[0]
 
         if mxfp_quant_dtype == QuantType.W4A8MXFP:
