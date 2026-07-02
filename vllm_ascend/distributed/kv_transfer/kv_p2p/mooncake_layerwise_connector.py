@@ -37,6 +37,7 @@ from vllm.distributed.parallel_state import (
     get_tp_group,
     get_world_group,
 )
+from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.utils.math_utils import round_down
 from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
@@ -698,6 +699,7 @@ class MooncakeLayerwiseConnector(KVConnectorBase_V1, SupportsHMA):
     def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole, kv_cache_config: KVCacheConfig | None = None):
         super().__init__(vllm_config, role, kv_cache_config)
         assert vllm_config.kv_transfer_config is not None
+        self._is_kv_producer = vllm_config.kv_transfer_config.is_kv_producer
         self.engine_id = vllm_config.kv_transfer_config.engine_id
         self._connector_metadata = MooncakeLayerwiseConnectorMetadata()
 
@@ -780,6 +782,31 @@ class MooncakeLayerwiseConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_worker is not None
         assert isinstance(self._connector_metadata, MooncakeLayerwiseConnectorMetadata)
         self.connector_worker.save_kv_layer(layer_name, kv_layer, attn_metadata, self._connector_metadata)
+
+    def on_kv_cache_written(self, layer_name: str) -> None:
+        """Record a compute-stream event once the paged KV cache is written.
+
+        ``save_kv_layer`` later waits on this event from the resharding stream so
+        the outgoing KV copy never reads stale cache. Only producers transfer KV
+        out, so consumers skip it. The attention layer reaches this through
+        ``notify_kv_cache_written`` and stays free of any role/sync knowledge.
+        """
+        if not self._is_kv_producer:
+            return
+        forward_context = get_forward_context()
+        attn_metadata = forward_context.attn_metadata
+        if attn_metadata is None:
+            return
+        if isinstance(attn_metadata, dict) and layer_name == "":
+            return
+        reshape_cache_event = torch.npu.Event()
+        reshape_cache_event.record()
+        if isinstance(attn_metadata, dict):
+            per_layer_metadata = attn_metadata.get(layer_name)
+            if per_layer_metadata is not None:
+                per_layer_metadata.reshape_cache_event = reshape_cache_event
+        else:
+            attn_metadata.reshape_cache_event = reshape_cache_event
 
     def wait_for_save(self):
         """MooncakeLayerwiseConnector does not save explicitly."""
@@ -1702,16 +1729,21 @@ class MooncakeLayerwiseConnectorWorker:
             # get reshape and cache event
             if layer_name == "":
                 layer_name = self.index_to_name[self.current_layer][0]
-            if (self.use_mla and not hasattr(attn_metadata[layer_name], "reshape_cache_event")) or (
-                not self.use_mla and not hasattr(attn_metadata, "reshape_cache_event")
+            if (
+                isinstance(attn_metadata, dict)
+                and hasattr(attn_metadata[layer_name], "reshape_cache_event")
+                and attn_metadata[layer_name].reshape_cache_event is not None
             ):
+                reshape_cache_event = attn_metadata[layer_name].reshape_cache_event
+            elif (
+                attn_metadata
+                and hasattr(attn_metadata, "reshape_cache_event")
+                and attn_metadata.reshape_cache_event is not None
+            ):
+                reshape_cache_event = attn_metadata.reshape_cache_event
+            else:
                 reshape_cache_event = torch.npu.Event()
                 reshape_cache_event.record()
-            elif self.use_mla:
-                reshape_cache_event = attn_metadata[layer_name].reshape_cache_event
-            else:
-                reshape_cache_event = attn_metadata.reshape_cache_event
-
             send_task = connector_metadata.send_task
             layer_group_idx = self.layer_metadata[layer_name].tensor_group_idx[0]
             keys = None
