@@ -611,21 +611,7 @@
 #    Future Plan:
 #       Remove this patch when vLLM aligns with the latest main.
 #
-# ** 14. File: worker/patch_draft_quarot.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.models.llama_eagle3.Eagle3LlamaForCausalLM.load_weights`
-#    Why:
-#       vllm-ascend reused the loading logic of drafter model from vllm,
-#       but vllm doesn't need to apply to Ascend quantization.
-#    How：
-#       Dynamically replace the `load_weights` function at runtime,
-#       and fix `target_config` into the new implementation with a closure.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/36225
-#    Future Plan:
-#       Remove this patch when vLLM merges the PR.
-#
-# ** 15. File: worker/patch_minimax_m2.py**
+# ** 14. File: worker/patch_minimax_m2.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.minimax_m2.MiniMaxM2MoE.forward`
 #    Why:
@@ -664,7 +650,7 @@
 #    Future Plan:
 #       Remove this patch when upstream supports MiniMax-M2 fp8 loading on NPU.
 #
-# ** 16. File: worker/patch_minimax_m2_linear_attn.py**
+# ** 15. File: worker/patch_minimax_m2_linear_attn.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.layers.mamba.linear_attn.MiniMaxText01RMSNormTP.__init__`
 #      `vllm.model_executor.layers.mamba.linear_attn.MiniMaxText01RMSNormTP.weight_loader`
@@ -692,7 +678,7 @@
 #    Future Plan:
 #       Remove this patch when upstream adds a backend dispatch path for q/k norm.
 #
-# ** 17. File: worker/patch_qwen3_5.py**
+# ** 16. File: worker/patch_qwen3_5.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.qwen3_5.Qwen3_5GatedDeltaNet._forward_core`
 #    Why:
@@ -703,7 +689,7 @@
 #    Future Plan:
 #       Remove this patch when all ops in _forward_core support both Qwen3_5 and Qwen3Next.
 #
-# ** 18. File: worker/patch_cudagraph.py**
+# ** 17. File: worker/patch_cudagraph.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.cudagraph_dispatcher.CudagraphDispatcher._create_padded_batch_descriptor`
 #    Why:
@@ -717,48 +703,7 @@
 #    Future Plan:
 #       Remove this patch when vLLM merges the PR.
 #
-# ** 19. File: worker/patch_deepseek_mtp.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.models.deepseek_v2.get_spec_layer_idx_from_weight_name` and
-#      `vllm.model_executor.models.deepseek_mtp.get_spec_layer_idx_from_weight_name`
-#    Why:
-#       When GLM5 uses rotary quant in vllm-ascend, the MTP layer needs to load an extra weight
-#       named `rot.weight`.
-#    How：
-#       If weight name starts with `rot`, return `layer_id + i` like other tensors in MTP layer.
-#    Related PR (if no, explain why):
-#       Rotary quant is a unique feature of vllm-ascend.
-#    Future Plan:
-#       Remove this patch when vllm supports rotary quant or pluggable `MultiTokenPredictorLayer`.
-#   2. `vllm.model_executor.models.deepseek_mtp.DeepSeekMultiTokenPredictorLayer`
-#    Why:
-#       When GLM5 uses rotary quant in vllm-ascend, the `previous_hidden_states` does not .
-#    How：
-#       If the target model uses rotary quant, a new linear operation is added before `ehnorm`.
-#    Related PR (if no, explain why):
-#       Rotary quant is a unique feature of vllm-ascend.
-#    Future Plan:
-#       Remove this patch when vllm supports rotary quant or pluggable `MultiTokenPredictorLayer`.
-#   3. `vllm.model_executor.models.deepseek_mtp.DeepSeekMTP._rewrite_spec_layer_name`
-#    Why:
-#       Rename `rot.weight` to match the format of weights in `DeepSeekMTP`.
-#    How：
-#       If the weight name is `rot`, rename it to `model.layers.{spec_layer}.rot.weight`.
-#    Related PR (if no, explain why):
-#       Rotary quant is a unique feature of vllm-ascend.
-#    Future Plan:
-#       Remove this patch when vllm supports rotary quant or pluggable `MultiTokenPredictorLayer`.
-#   4. `vllm.model_executor.models.deepseek_v2.GlmMoeDsaForCausalLM.load_weights`
-#    Why:
-#       After vllm PR #41706, GlmMoeDsaForCausalLM.load_weights uses `AutoWeightsLoader` which
-#       does not skip `rot.weight`, and will cause ValueError while loading weights.
-#    How：
-#       Use the `skip_prefixes` parameter to skip certain weight tensors.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/41706
-#    Future Plan:
-#       Remove this patch when vllm supports rotary quant or pluggable `MultiTokenPredictorLayer`.
-# ** 19a. File: worker/patch_deepseek_v2.py**
+# ** 18. File: worker/patch_deepseek_v2.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.deepseek_v2.DeepseekV2Attention.__init__`
 #    Why:
@@ -774,7 +719,7 @@
 #       Remove this patch when vLLM Ascend depends on a vLLM version that includes
 #       PR #45895.
 #
-# ** 19b. File: worker/model_runner_v1.py**
+# ** 19. File: worker/model_runner_v1.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `NPUModelRunner._check_and_update_cudagraph_mode`
 #    Why:
