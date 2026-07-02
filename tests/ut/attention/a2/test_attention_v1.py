@@ -640,9 +640,20 @@ class TestAscendAttentionBackendImpl(TestBase):
         mock_get_graph_params.return_value.handles = {1: [MagicMock()] * 3}
         mock_get_graph_params.return_value.events = {1: [MagicMock()] * 3}
 
+        attn_metadata_keys = [
+            "model.layers.10.self_attn.attn",
+            "model.layers.2.self_attn.attn",
+            "model.layers.5.self_attn.attn",
+        ]
         forward_context = MagicMock()
-        forward_context.attn_metadata = {"layer_10": MagicMock(), "layer_2": MagicMock(), "layer_5": MagicMock()}
-
+        forward_context.attn_metadata = {key: MagicMock() for key in attn_metadata_keys}
+        # breakpoint()
         self.impl.update_graph_params(self.mock_stream, forward_context, 1, self.mock_vllm_config)
-        self.assertEqual(attn_module._ATTN_KEYS_BUFFER, ["layer_2", "layer_5", "layer_10"])
+
+        expected = [
+            "model.layers.2.self_attn.attn",
+            "model.layers.5.self_attn.attn",
+            "model.layers.10.self_attn.attn",
+        ]
+        self.assertEqual(attn_module._ATTN_KEYS_BUFFER, expected)
         self.assertEqual(mock_fia.out.call_count, 3)
