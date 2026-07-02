@@ -628,6 +628,16 @@ msgstr "`multistream_dsv4_dsa_overlap`"
 msgid "Whether to enable dsa multi-stream overlap for DeepSeek V4."
 msgstr "是否为 DeepSeek V4 启用 dsa 多流重叠。"
 
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`short_request_first_config`"
+msgstr "`short_request_first_config`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Configuration options for ShortRequestFirst prefill scheduling on the PD "
+"prefill (P) node. Used with `recompute_scheduler_enable=true`."
+msgstr "PD Prefill（P）节点上的 ShortRequestFirst 预填充调度配置选项。需配合 `recompute_scheduler_enable=true` 使用。"
+
 #: ../../source/user_guide/configuration/additional_config.md:107
 msgid "The details of each configuration option are as follows:"
 msgstr "每个配置选项的详细说明如下："
@@ -1012,6 +1022,54 @@ msgid ""
 msgstr "阈值计算中熵的缩放因子。必须 >= 0。值越大，阈值对熵越敏感——高熵 token 更容易被接受，从而提高性能但降低精度。"
 
 #: ../../source/user_guide/configuration/additional_config.md:177
+msgid "**short_request_first_config**"
+msgstr "**short_request_first_config**"
+
+#: ../../source/user_guide/configuration/additional_config.md:179
+msgid ""
+"ShortRequestFirst prefill scheduling for the PD prefill (P) node. It "
+"applies when the recompute scheduler is enabled and the scheduler policy"
+" is FCFS."
+msgstr ""
+"PD Prefill（P）节点上的 ShortRequestFirst 预填充调度。它在启用重计算调度器且调度策略为 FCFS 时生效。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "Whether to enable ShortRequestFirst scheduling."
+msgstr "是否启用 ShortRequestFirst 调度。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`threshold`"
+msgstr "`threshold`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`256`"
+msgstr "`256`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Prompt-length threshold (tokens). Requests with `num_prompt_tokens <= "
+"threshold` are treated as short prefills and prioritized over long "
+"prefills."
+msgstr ""
+"prompt 长度阈值（token）。`num_prompt_tokens <= threshold` 的请求会被视为短预填充请求，并优先于长预填充请求。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`long_max_wait_ms`"
+msgstr "`long_max_wait_ms`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`0.0`"
+msgstr "`0.0`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Maximum time a long prefill may wait behind short prefills before it can "
+"be promoted ahead of them. `0` disables long-request promotion and keeps "
+"strict short-request priority."
+msgstr ""
+"长预填充请求在短预填充请求之后最多可等待的时间；超过该时间后，它可以被提升到短请求之前。`0` 表示禁用长请求提升，并保持严格的短请求优先级。"
+
+#: ../../source/user_guide/configuration/additional_config.md:176
 msgid "Example"
 msgstr "示例"
 

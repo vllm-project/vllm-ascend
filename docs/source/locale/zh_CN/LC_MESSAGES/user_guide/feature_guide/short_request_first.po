@@ -1,0 +1,355 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-02 00:00+0000\n"
+"PO-Revision-Date: 2026-07-02 00:00+0000\n"
+"Last-Translator: immengzi <immengzi@outlook.com>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/user_guide/feature_guide/short_request_first.md:1
+msgid "ShortRequestFirst Prefill Scheduling"
+msgstr "ShortRequestFirst 预填充调度"
+
+#: ../../source/user_guide/feature_guide/short_request_first.md:3
+msgid ""
+"ShortRequestFirst reduces head-of-line blocking during prefill by letting"
+" short prompts run before long prompts. It is designed for mixed prompt-"
+"length traffic where a few long requests can otherwise delay many short "
+"ones."
+msgstr ""
+"ShortRequestFirst 通过让短 prompt 优先于长 prompt 执行，减少预填充阶段的队首阻塞。它适用于 prompt "
+"长度混合的流量场景；在这类场景中，少量长请求可能会延迟大量短请求。"
+
+#: ../../source/user_guide/feature_guide/short_request_first.md:5
+msgid "When to use it"
+msgstr "适用场景"
+
+#: ../../source/user_guide/feature_guide/short_request_first.md:7
+msgid "Enable ShortRequestFirst when:"
+msgstr "以下场景适合启用 ShortRequestFirst："
+
+#: ../../source/user_guide/feature_guide/short_request_first.md:9
+msgid "request lengths are highly skewed"
+msgstr "请求长度高度倾斜"
+
+#: ../../source/user_guide/feature_guide/short_request_first.md:10
+msgid "short-request TTFT matters more than strict FCFS ordering"
+msgstr "短请求 TTFT 比严格 FCFS 顺序更重要"
+
+#: ../../source/user_guide/feature_guide/short_request_first.md:11
+msgid "the prefill node already runs with the recompute scheduler enabled"
+msgstr "Prefill 节点已经启用重计算调度器"
+
+#: ../../source/user_guide/feature_guide/short_request_first.md:13
+msgid ""
+"Keep it disabled if the workload is mostly uniform, or if FCFS ordering "
+"is more important than short-request latency."
+msgstr "如果工作负载基本均匀，或者 FCFS 顺序比短请求延迟更重要，请保持禁用。"
+
+#: ../../source/user_guide/feature_guide/short_request_first.md:15
+msgid "Configuration"
+msgstr "配置"
+
+#: ../../source/user_guide/feature_guide/short_request_first.md:17
+msgid ""
+"Add `short_request_first_config` to the prefill (P) node's "
+"`additional_config` in a PD-disaggregated deployment. Because "
+"ShortRequestFirst is wired through the recompute scheduler, keep "
+"`recompute_scheduler_enable=true` in the same P-node config:"
+msgstr ""
+"在 PD 分离部署中，将 `short_request_first_config` 加入 Prefill（P）节点的 "
+"`additional_config`。由于 ShortRequestFirst 通过重计算调度器接入，请在同一份 P 节点配置中保留 "
+"`recompute_scheduler_enable=true`："
+
+#: ../../source/user_guide/feature_guide/short_request_first.md:34
+msgid "Fields"
+msgstr "字段"
+
+#: ../../source/user_guide/feature_guide/short_request_first.md:36
+msgid "`enabled` (bool, default `false`)"
+msgstr "`enabled`（bool，默认 `false`）"
+
+#: ../../source/user_guide/feature_guide/short_request_first.md:37
+msgid "Turns ShortRequestFirst on or off."
+msgstr "开启或关闭 ShortRequestFirst。"
+
+#: ../../source/user_guide/feature_guide/short_request_first.md:38
+msgid "`threshold` (int, default `256`)"
+msgstr "`threshold`（int，默认 `256`）"
+
+#: ../../source/user_guide/feature_guide/short_request_first.md:39
+msgid ""
+"Requests with `num_prompt_tokens <= threshold` are treated as short "
+"requests."
+msgstr "`num_prompt_tokens <= threshold` 的请求会被视为短请求。"
+
+#: ../../source/user_guide/feature_guide/short_request_first.md:40
+msgid "`long_max_wait_ms` (float, default `0`)"
+msgstr "`long_max_wait_ms`（float，默认 `0`）"
+
+#: ../../source/user_guide/feature_guide/short_request_first.md:41
+msgid ""
+"Maximum time a long request may wait behind short requests before it can "
+"be promoted ahead of them."
+msgstr "长请求在短请求之后最多可等待的时间；超过该时间后，它可以被提升到短请求之前。"
+
+#: ../../source/user_guide/feature_guide/short_request_first.md:42
+msgid ""
+"`0` disables long-request promotion and keeps strict short-request "
+"priority."
+msgstr "`0` 表示禁用长请求提升，并保持严格的短请求优先级。"
+
+#: ../../source/user_guide/feature_guide/short_request_first.md:44
+msgid "Threshold tuning"
+msgstr "threshold 调优"
+
+#: ../../source/user_guide/feature_guide/short_request_first.md:46
+msgid ""
+"If `threshold` is too low, most requests fall into the `long` lane and "
+"the split largely stops helping. If it is too high, most requests fall "
+"into the `short` lane and the split also stops helping."
+msgstr ""
+"如果 `threshold` 过低，大多数请求会落入 `long` 队列，拆分基本无法发挥作用。如果它过高，大多数请求会落入 `short` "
+"队列，拆分同样无法发挥作用。"
+
+#: ../../source/user_guide/feature_guide/short_request_first.md:48
+msgid ""
+"In practice, `threshold` should sit near the boundary between the short-"
+"request main cluster and the long-request tail. The goal is not to pick a"
+" fixed midpoint of all request lengths, and not to move the threshold "
+"close to the longest requests."
+msgstr ""
+"实践中，`threshold` 应位于短请求主簇和长请求尾部之间的边界附近。目标不是选择所有请求长度的固定中点，也不是把阈值推到接近最长请求的位置。"
+
+#: ../../source/user_guide/feature_guide/short_request_first.md:50
+msgid ""
+"If you do not yet have a refined traffic model, start with `P70-P85` of "
+"prompt length as an engineering baseline and then refine it using the "
+"real request-length histogram. For a clear bimodal workload, the "
+"threshold usually belongs near the upper edge of the short-request "
+"cluster rather than near the longest prompts."
+msgstr ""
+"如果还没有精细化的流量模型，可以先以 prompt 长度的 `P70-P85` 作为工程基线，再基于真实请求长度直方图继续调优。对于明显的双峰工作负载，"
+"阈值通常应靠近短请求簇的上边界，而不是靠近最长 prompt。"
+
+#: ../../source/user_guide/feature_guide/short_request_first.md:52
+msgid ""
+"In short: the right threshold is usually the valley between short-request"
+" and long-request populations. When detailed distribution modeling is "
+"unavailable, `P70-P85` is a practical starting range."
+msgstr ""
+"简而言之：合适的阈值通常是短请求群体和长请求群体之间的低谷。如果没有详细的分布建模，`P70-P85` 是一个实用的起始范围。"
+
+#: ../../source/user_guide/feature_guide/short_request_first.md:54
+msgid "long_max_wait_ms tuning"
+msgstr "long_max_wait_ms 调优"
+
+#: ../../source/user_guide/feature_guide/short_request_first.md:56
+msgid ""
+"`long_max_wait_ms` is a fairness gate, not a throughput-optimization "
+"knob. It controls when a long request stops waiting under normal short-"
+"first behavior and becomes eligible for anti-starvation promotion."
+msgstr ""
+"`long_max_wait_ms` 是公平性门控，而不是吞吐优化旋钮。它控制长请求在正常短请求优先行为下等待多久后，可以进入防饥饿提升。"
+
+#: ../../source/user_guide/feature_guide/short_request_first.md:58
+msgid ""
+"Tune `threshold` first. If degradation warnings appear frequently, first "
+"suspect that `threshold` is too small for the current traffic mix, then "
+"consider increasing `long_max_wait_ms`."
+msgstr ""
+"请先调优 `threshold`。如果频繁出现退化告警，应先怀疑 `threshold` 对当前流量混合来说过小，然后再考虑增大 "
+"`long_max_wait_ms`。"
+
+#: ../../source/user_guide/feature_guide/short_request_first.md:60
+msgid "A practical tuning flow is:"
+msgstr "一个实用的调优流程如下："
+
+#: ../../source/user_guide/feature_guide/short_request_first.md:62
+msgid ""
+"start with `long_max_wait_ms = 0` to establish a strict short-first "
+"baseline"
+msgstr "先从 `long_max_wait_ms = 0` 开始，建立严格短请求优先的基线"
+
+#: ../../source/user_guide/feature_guide/short_request_first.md:63
+msgid ""
+"measure the waiting-time distribution of long requests under that "
+"baseline"
+msgstr "测量该基线下长请求的等待时间分布"
+
+#: ../../source/user_guide/feature_guide/short_request_first.md:64
+msgid ""
+"define `W_normal` as the normal upper tail of long-request waiting, "
+"typically `P90` or `P95`"
+msgstr "将 `W_normal` 定义为长请求等待时间的正常上尾，通常取 `P90` 或 `P95`"
+
+#: ../../source/user_guide/feature_guide/short_request_first.md:65
+msgid ""
+"define `W_slo` as the maximum additional queueing delay that your service"
+" can tolerate for long requests"
+msgstr "将 `W_slo` 定义为服务对长请求可接受的最大额外排队延迟"
+
+#: ../../source/user_guide/feature_guide/short_request_first.md:66
+msgid "set `long_max_wait_ms` somewhere inside `[W_normal, W_slo]`"
+msgstr "将 `long_max_wait_ms` 设置在 `[W_normal, W_slo]` 区间内"
+
+#: ../../source/user_guide/feature_guide/short_request_first.md:68
+msgid ""
+"Within that interval, bias the value toward `W_slo` if short-request TTFT"
+" matters more, or toward `W_normal` if long-request fairness matters "
+"more. If `W_normal` is already close to `W_slo`, the main issue is more "
+"likely the threshold choice or overall system capacity than the wait "
+"parameter itself."
+msgstr ""
+"在该区间内，如果短请求 TTFT 更重要，可将取值偏向 `W_slo`；如果长请求公平性更重要，可偏向 `W_normal`。如果 "
+"`W_normal` 已经接近 `W_slo`，主要问题更可能是阈值选择或整体系统容量，而不是等待参数本身。"
+
+#: ../../source/user_guide/feature_guide/short_request_first.md:70
+msgid ""
+"Do not size `long_max_wait_ms` from average short-request TTFT. It is "
+"usually better anchored to the tail of long-request waiting under strict "
+"short-first behavior."
+msgstr ""
+"不要基于短请求的平均 TTFT 来设定 `long_max_wait_ms`。它通常更适合锚定在严格短请求优先行为下长请求等待时间的尾部。"
+
+#: ../../source/user_guide/feature_guide/short_request_first.md:72
+msgid ""
+"In short: `long_max_wait_ms` should be derived from the long-request "
+"waiting tail under strict short-first scheduling and bounded by the long-"
+"request queueing delay your service can accept. If aged-long promotions "
+"happen repeatedly, increase `threshold` first and only then increase "
+"`long_max_wait_ms`."
+msgstr ""
+"简而言之：`long_max_wait_ms` 应从严格短请求优先调度下长请求等待时间的尾部分布推导，并受服务可接受的长请求排队延迟约束。如果老化长请求"
+"反复被提升，请先增大 `threshold`，然后再增大 `long_max_wait_ms`。"
+
+#: ../../source/user_guide/feature_guide/short_request_first.md:74
+msgid "Scheduling behavior"
+msgstr "调度行为"
+
+#: ../../source/user_guide/feature_guide/short_request_first.md:76
+msgid "The waiting queue is split into three lanes:"
+msgstr "等待队列会被拆分为三条队列："
+
+#: ../../source/user_guide/feature_guide/short_request_first.md:78
+msgid "`immediate`"
+msgstr "`immediate`"
+
+#: ../../source/user_guide/feature_guide/short_request_first.md:79
+msgid ""
+"Recovery-style requests such as preempted requests or requests with "
+"already computed tokens."
+msgstr "恢复类请求，例如被抢占的请求，或者已经有已计算 token 的请求。"
+
+#: ../../source/user_guide/feature_guide/short_request_first.md:80
+msgid "`short`"
+msgstr "`short`"
+
+#: ../../source/user_guide/feature_guide/short_request_first.md:81
+msgid "Requests whose prompt length is at or below `threshold`."
+msgstr "prompt 长度小于等于 `threshold` 的请求。"
+
+#: ../../source/user_guide/feature_guide/short_request_first.md:82
+msgid "`long`"
+msgstr "`long`"
+
+#: ../../source/user_guide/feature_guide/short_request_first.md:83
+msgid "Requests whose prompt length is above `threshold`."
+msgstr "prompt 长度大于 `threshold` 的请求。"
+
+#: ../../source/user_guide/feature_guide/short_request_first.md:85
+msgid "Dispatch priority is:"
+msgstr "调度优先级为："
+
+#: ../../source/user_guide/feature_guide/short_request_first.md:87
+msgid "`immediate > aged-long > short > long`"
+msgstr "`immediate > aged-long > short > long`"
+
+#: ../../source/user_guide/feature_guide/short_request_first.md:89
+msgid "That means:"
+msgstr "这意味着："
+
+#: ../../source/user_guide/feature_guide/short_request_first.md:91
+msgid "immediate requests always win"
+msgstr "immediate 请求总是优先"
+
+#: ../../source/user_guide/feature_guide/short_request_first.md:92
+msgid "short requests run before ordinary long requests"
+msgstr "短请求会先于普通长请求运行"
+
+#: ../../source/user_guide/feature_guide/short_request_first.md:93
+msgid ""
+"if the oldest long request waits past `long_max_wait_ms`, it can jump "
+"ahead of waiting short requests"
+msgstr "如果最老的长请求等待时间超过 `long_max_wait_ms`，它可以越过等待中的短请求"
+
+#: ../../source/user_guide/feature_guide/short_request_first.md:95
+msgid "Degradation warning"
+msgstr "退化告警"
+
+#: ../../source/user_guide/feature_guide/short_request_first.md:97
+msgid ""
+"If long requests are promoted ahead of waiting short requests for three "
+"consecutive dispatches, vLLM Ascend emits a warning. This indicates the "
+"feature is drifting toward long-request priority, usually because the "
+"threshold is too small for the current traffic mix."
+msgstr ""
+"如果连续三次调度中长请求都被提升到等待中的短请求之前，vLLM Ascend 会发出告警。这表示该特性正在向长请求优先退化，通常是因为阈值对于当前流量"
+"混合来说过小。"
+
+#: ../../source/user_guide/feature_guide/short_request_first.md:99
+msgid "When this warning appears:"
+msgstr "出现该告警时："
+
+#: ../../source/user_guide/feature_guide/short_request_first.md:101
+msgid "increase `short_request_first_config.threshold`"
+msgstr "增大 `short_request_first_config.threshold`"
+
+#: ../../source/user_guide/feature_guide/short_request_first.md:102
+msgid "or disable `short_request_first_config.enabled`"
+msgstr "或者禁用 `short_request_first_config.enabled`"
+
+#: ../../source/user_guide/feature_guide/short_request_first.md:104
+msgid ""
+"ShortRequestFirst also emits an aggregate stats log every 5 seconds so "
+"queue behavior is visible without adding extra configuration."
+msgstr "ShortRequestFirst 还会每 5 秒输出一次聚合统计日志，因此无需额外配置即可观察队列行为。"
+
+#: ../../source/user_guide/feature_guide/short_request_first.md:106
+msgid "Relationship with recompute scheduler"
+msgstr "与重计算调度器的关系"
+
+#: ../../source/user_guide/feature_guide/short_request_first.md:108
+msgid ""
+"ShortRequestFirst only changes the waiting-queue policy and is wired "
+"into the recompute scheduler. With `recompute_scheduler_enable=false`, "
+"the normal scheduler path is used and ShortRequestFirst is not "
+"activated."
+msgstr ""
+"ShortRequestFirst 只改变等待队列策略，并通过重计算调度器接入。"
+"当 `recompute_scheduler_enable=false` 时，会使用普通调度路径，ShortRequestFirst 不会被激活。"
+
+#: ../../source/user_guide/feature_guide/short_request_first.md:112
+msgid "Minimal examples"
+msgstr "最小示例"
+
+#: ../../source/user_guide/feature_guide/short_request_first.md:114
+msgid "P-node `additional_config` example:"
+msgstr "P 节点 `additional_config` 示例："
+
+#: ../../source/user_guide/feature_guide/short_request_first.md:129
+msgid "Disable it explicitly:"
+msgstr "显式禁用："

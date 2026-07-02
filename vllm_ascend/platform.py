@@ -674,6 +674,16 @@ class NPUPlatform(Platform):
 
         cls._validate_kv_load_failure_policy(vllm_config)
 
+        short_request_first_config = ascend_config.short_request_first_config
+        enable_short_request_first = short_request_first_config.enabled
+        short_request_first_supported_policy = vllm_config.scheduler_config.policy == "fcfs"
+        if enable_short_request_first and not short_request_first_supported_policy:
+            logger.warning_once(
+                "ShortRequestFirst scheduling currently supports only FCFS scheduler policy; "
+                "current policy=%s. The default waiting queue will be used.",
+                vllm_config.scheduler_config.policy,
+            )
+
         if ascend_config.recompute_scheduler_enable:
             kv_transfer_config = vllm_config.kv_transfer_config
             kv_role = getattr(kv_transfer_config, "kv_role", None)
@@ -687,9 +697,28 @@ class NPUPlatform(Platform):
 
             recompute_scheduler_config = RecomputeSchedulerConfig.initialize_from_config(vllm_config)
             vllm_config.scheduler_config = recompute_scheduler_config
+            if enable_short_request_first:
+                logger.info(
+                    "Ascend ShortRequestFirst scheduler selected through recompute "
+                    "scheduler: scheduler_cls=%s, policy=%s, threshold=%d, long_max_wait_ms=%.3f",
+                    vllm_config.scheduler_config.scheduler_cls,
+                    vllm_config.scheduler_config.policy,
+                    short_request_first_config.threshold,
+                    short_request_first_config.long_max_wait_ms,
+                )
+        elif enable_short_request_first:
+            logger.warning_once(
+                "ShortRequestFirst scheduling requires recompute_scheduler_enable=true "
+                "in additional_config. ShortRequestFirst scheduling will not be activated.",
+            )
 
         # Extend original scheduler_config to use SchedulerDynamicBatch.
         if ascend_config.SLO_limits_for_dynamic_batch != -1:
+            if enable_short_request_first:
+                logger.warning_once(
+                    "ShortRequestFirst scheduling is ignored because "
+                    "SLO_limits_for_dynamic_batch selects SchedulerDynamicBatch."
+                )
             vllm_config.scheduler_config.scheduler_cls = (
                 "vllm_ascend.core.scheduler_dynamic_batch.SchedulerDynamicBatch"
             )
