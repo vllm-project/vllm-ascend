@@ -238,8 +238,6 @@ jobs:
             vllm-ascend/vllm_ascend/lib
             vllm-ascend/vllm_ascend/include
           key: vllm-ascend-build-v1-${{ steps.get_arch.outputs.arch }}-${{ env.MAIN2MAIN_IMAGE_TAG }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
-          restore-keys: |
-            vllm-ascend-build-v1-${{ steps.get_arch.outputs.arch }}-${{ env.MAIN2MAIN_IMAGE_TAG }}-
 
       - name: Create working branch
         id: branch
