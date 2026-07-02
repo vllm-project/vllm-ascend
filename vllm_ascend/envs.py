@@ -110,6 +110,29 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Experimental DeepSeek V4 sparse-attention top-k trace switch.
+    # Default: disabled. Valid values: 0/1. Not sensitive.
+    # This is for feasibility experiments only because it copies top-k indices
+    # from NPU to CPU and writes JSONL records.
+    "VLLM_ASCEND_DSV4_TOPK_TRACE_ENABLE": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_DSV4_TOPK_TRACE_ENABLE", "0"))
+    ),
+    # Experimental DeepSeek V4 top-k trace output path.
+    # Default: /tmp/vllm_ascend_dsv4_topk_trace.jsonl. Not sensitive.
+    "VLLM_ASCEND_DSV4_TOPK_TRACE_PATH": lambda: os.getenv(
+        "VLLM_ASCEND_DSV4_TOPK_TRACE_PATH",
+        "/tmp/vllm_ascend_dsv4_topk_trace.jsonl",
+    ),
+    # Maximum JSONL rows written by each process for DeepSeek V4 top-k trace.
+    # Default: 20000. Set 0 for unlimited. Not sensitive.
+    "VLLM_ASCEND_DSV4_TOPK_TRACE_MAX_ROWS": lambda: int(
+        os.getenv("VLLM_ASCEND_DSV4_TOPK_TRACE_MAX_ROWS", "20000")
+    ),
+    # Maximum query rows copied per layer forward for DeepSeek V4 top-k trace.
+    # Default: 4. Set 0 to trace all rows. Not sensitive.
+    "VLLM_ASCEND_DSV4_TOPK_TRACE_SAMPLE_ROWS": lambda: int(
+        os.getenv("VLLM_ASCEND_DSV4_TOPK_TRACE_SAMPLE_ROWS", "4")
+    ),
 }
 
 # end-env-vars-definition

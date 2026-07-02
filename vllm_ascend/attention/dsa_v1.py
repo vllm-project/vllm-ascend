@@ -1,4 +1,8 @@
+import json
 import math
+import os
+import threading
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar, TypeAlias
 
@@ -13,6 +17,7 @@ from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backend import AttentionBackend, AttentionCGSupport, AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
 
+from vllm_ascend import envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.abstract import DSAAttentionImpl
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
@@ -45,6 +50,9 @@ BUILD_METADATA_STEP_PREFILL = 0
 BUILD_METADATA_STEP_DECODE = 1
 
 _DSV4_DSA_OVERLAP_STREAM = None
+_DSV4_TOPK_TRACE_ROWS = 0
+_DSV4_TOPK_TRACE_LOCK = threading.Lock()
+_DSV4_TOPK_TRACE_ERROR_REPORTED = False
 
 
 def dsv4_dsa_overlap_stream() -> torch.npu.Stream:
@@ -52,6 +60,95 @@ def dsv4_dsa_overlap_stream() -> torch.npu.Stream:
     if _DSV4_DSA_OVERLAP_STREAM is None:
         _DSV4_DSA_OVERLAP_STREAM = torch_npu.npu.Stream()
     return _DSV4_DSA_OVERLAP_STREAM
+
+
+def _trace_seq_lens(seq_lens: torch.Tensor | None):
+    if seq_lens is None:
+        return None
+    try:
+        return seq_lens.detach().to("cpu").reshape(-1).tolist()
+    except Exception as exc:  # pragma: no cover - best-effort experiment trace
+        return f"<unavailable: {exc}>"
+
+
+def _maybe_trace_dsv4_topk(
+    layer_name: str,
+    phase: str,
+    topk_indices: torch.Tensor | None,
+    actual_seq_lengths_key: torch.Tensor | None,
+    compress_ratio: int,
+    skip_topk: bool,
+) -> None:
+    global _DSV4_TOPK_TRACE_ERROR_REPORTED
+    global _DSV4_TOPK_TRACE_ROWS
+
+    if not envs_ascend.VLLM_ASCEND_DSV4_TOPK_TRACE_ENABLE or topk_indices is None:
+        return
+
+    try:
+        if topk_indices.numel() == 0:
+            return
+
+        topk_view = topk_indices.detach()
+        if topk_view.dim() == 1:
+            topk_view = topk_view.reshape(1, -1)
+        elif topk_view.dim() == 3 and topk_view.shape[1] == 1:
+            topk_view = topk_view[:, 0, :]
+        else:
+            topk_view = topk_view.reshape(-1, topk_view.shape[-1])
+
+        sample_rows = envs_ascend.VLLM_ASCEND_DSV4_TOPK_TRACE_SAMPLE_ROWS
+        row_limit = topk_view.shape[0] if sample_rows == 0 else min(topk_view.shape[0], max(sample_rows, 0))
+        if row_limit <= 0:
+            return
+
+        max_rows = envs_ascend.VLLM_ASCEND_DSV4_TOPK_TRACE_MAX_ROWS
+        with _DSV4_TOPK_TRACE_LOCK:
+            if max_rows > 0:
+                remaining_rows = max_rows - _DSV4_TOPK_TRACE_ROWS
+                if remaining_rows <= 0:
+                    return
+                row_limit = min(row_limit, remaining_rows)
+            trace_start = _DSV4_TOPK_TRACE_ROWS
+            _DSV4_TOPK_TRACE_ROWS += row_limit
+
+        sampled_topk = topk_view[:row_limit].to("cpu")
+        trace_path = envs_ascend.VLLM_ASCEND_DSV4_TOPK_TRACE_PATH
+        trace_dir = os.path.dirname(trace_path)
+        if trace_dir:
+            os.makedirs(trace_dir, exist_ok=True)
+
+        seq_lens = _trace_seq_lens(actual_seq_lengths_key)
+        tensor_shape = list(topk_indices.shape)
+        now = time.time()
+        pid = os.getpid()
+        with open(trace_path, "a", encoding="utf-8") as trace_file:
+            for row_offset, row in enumerate(sampled_topk):
+                topk = [int(value) for value in row.reshape(-1).tolist()]
+                trace_file.write(
+                    json.dumps(
+                        {
+                            "time": now,
+                            "pid": pid,
+                            "layer_name": layer_name,
+                            "phase": phase,
+                            "trace_index": trace_start + row_offset,
+                            "row_idx": row_offset,
+                            "topk": topk,
+                            "topk_count": len(topk),
+                            "tensor_shape": tensor_shape,
+                            "seq_lens": seq_lens,
+                            "compress_ratio": compress_ratio,
+                            "skip_topk": skip_topk,
+                        },
+                        separators=(",", ":"),
+                    )
+                    + "\n"
+                )
+    except Exception as exc:  # pragma: no cover - best-effort experiment trace
+        if not _DSV4_TOPK_TRACE_ERROR_REPORTED:
+            _DSV4_TOPK_TRACE_ERROR_REPORTED = True
+            print(f"[vllm-ascend][dsv4-topk-trace] failed to write trace: {exc}", flush=True)
 
 
 # mypy: disable-error-code="has-type"
@@ -1974,6 +2071,16 @@ class AscendDSAImpl(DSAAttentionImpl):
                     return_value=False,
                 )
 
+            if self.compress_ratio == 4:
+                _maybe_trace_dsv4_topk(
+                    layer_name,
+                    "prefill",
+                    compress_topk_idxs,
+                    actual_seq_lengths_key,
+                    self.compress_ratio,
+                    self.skip_topk,
+                )
+
             if self.compress_ratio == 4 and self.use_index_cache:
                 self._update_indexcache_topk_indices(compress_topk_idxs, offset=prefill_offset)
 
@@ -2265,6 +2372,16 @@ class AscendDSAImpl(DSAAttentionImpl):
                     next_tokens=(1 << 63) - 1,
                     cmp_ratio=4,
                     return_value=False,
+                )
+
+            if self.compress_ratio == 4:
+                _maybe_trace_dsv4_topk(
+                    layer_name,
+                    "decode",
+                    compress_topk_idxs,
+                    actual_seq_lengths_key,
+                    self.compress_ratio,
+                    self.skip_topk,
                 )
 
             if self.compress_ratio == 4 and self.use_index_cache:
