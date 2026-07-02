@@ -1102,10 +1102,6 @@ msgid "421"
 msgstr "421"
 
 #: ../../source/community/contributors.md
-msgid "[@internel-error](https://github.com/internel-error)"
-msgstr ""
-
-#: ../../source/community/contributors.md
 msgid "2026/05/27"
 msgstr "2026/05/27"
 
@@ -2059,12 +2055,6 @@ msgstr "[@yangsonglin13](https://github.com/yangsonglin13)"
 #: ../../source/community/contributors.md
 msgid "2026/03/27"
 msgstr "2026/03/27"
-
-#: ../../source/community/contributors.md
-msgid ""
-"[5ae3ded](https://github.com/vllm-project/vllm-"
-"ascend/commit/5ae3ded92f8fca335bad1c269a43d2c5f8fb5ae8)"
-msgstr ""
 
 #: ../../source/community/contributors.md
 msgid "368"
