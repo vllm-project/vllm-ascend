@@ -47,6 +47,27 @@ def _should_skip_indexer_init(
     return isinstance(indexer_type, str) and indexer_type.lower() == "shared"
 
 
+def _should_skip_indexer_init(
+    config: DeepseekV2Config | DeepseekV3Config,
+    prefix: str,
+    skip_topk: bool,
+) -> bool:
+    if not skip_topk:
+        return False
+
+    layer_id = extract_layer_index(prefix)
+    num_hidden_layers = getattr(config, "num_hidden_layers", None)
+    if num_hidden_layers is not None and layer_id >= num_hidden_layers:
+        return False
+
+    # GLM-5.2 describes checkpoint-level shared indexers explicitly. Runtime
+    # IndexCache overrides on GLM-5.1 only skip top-k computation; its
+    # checkpoint still contains an Indexer for every layer.
+    indexer_types = getattr(config, "indexer_types", None)
+    indexer_type = indexer_types[layer_id] if indexer_types is not None and layer_id < len(indexer_types) else None
+    return isinstance(indexer_type, str) and indexer_type.lower() == "shared"
+
+
 def _deepseek_v2_mla_attention_init(
     self,
     vllm_config: VllmConfig,
