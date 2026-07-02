@@ -297,11 +297,17 @@ class TestYuanrongHelper(unittest.TestCase):
         # Should have hash suffix
         self.assertIn("__", result[0])
 
-    def test_normalize_keys_long_key(self):
-        long_key = "a" * 300
+    def test_normalize_keys_at_max_length(self):
+        max_length_key = "a" * 1024
+        result = self.helper.normalize_keys([max_length_key])
+        self.assertEqual(result, [max_length_key])
+
+    def test_normalize_keys_over_max_length(self):
+        long_key = "a" * 1025
         result = self.helper.normalize_keys([long_key])
         self.assertEqual(len(result), 1)
-        self.assertLessEqual(len(result[0]), 255)
+        self.assertEqual(len(result[0]), 1024)
+        self.assertIn("__", result[0])
 
     def test_make_blob_lists(self):
         self.helper._device_id = 0
@@ -436,24 +442,34 @@ class TestYuanrongBackendMethods(unittest.TestCase):
 
     def test_get_empty(self):
         b = self._make_backend()
-        b.get([], [], [])
+        result = b.get([], [], [])
+        self.assertEqual(result, [])
         b._hetero_client.mget_h2d.assert_not_called()
 
     def test_get(self):
         b = self._make_backend()
         b._hetero_client.mget_h2d.return_value = []
-        b.get(["k1"], [[100]], [[10]])
+        result = b.get(["k1"], [[100]], [[10]])
+        self.assertEqual(result, [0])
         b._hetero_client.mget_h2d.assert_called_once()
+
+    def test_get_partial_failure(self):
+        b = self._make_backend()
+        b._hetero_client.mget_h2d.return_value = ["k2"]
+        result = b.get(["k1", "k2", "k3"], [[100], [200], [300]], [[10], [20], [30]])
+        self.assertEqual(result, [0, 1, 0])
 
     def test_get_failed_keys(self):
         b = self._make_backend()
         b._hetero_client.mget_h2d.return_value = ["k1"]
-        b.get(["k1"], [[100]], [[10]])  # Should log error
+        result = b.get(["k1"], [[100]], [[10]])  # Should log error
+        self.assertEqual(result, [1])
 
     def test_get_exception(self):
         b = self._make_backend()
         b._hetero_client.mget_h2d.side_effect = Exception("fail")
-        b.get(["k1"], [[100]], [[10]])
+        result = b.get(["k1"], [[100]], [[10]])
+        self.assertIsNone(result)
 
     def test_put_empty(self):
         b = self._make_backend()
