@@ -66,6 +66,7 @@ class AscendDflashProposer(AscendEagleProposer):
         # PR allocated a fresh torch.empty and read a per-step-reassigned next_token_ids, so the
         # graph kept reading stale capture-time memory and accept length collapsed.
         hf_config = vllm_config.speculative_config.draft_model_config.hf_config
+        self._is_dspark = hasattr(hf_config, "markov_head_type")
         if hasattr(hf_config, "markov_head_type"):
             blk = 1 + self.num_speculative_tokens
             self._dspark_seed_buffer = torch.zeros(self.max_batch_size, dtype=torch.int64, device=device)
@@ -73,6 +74,11 @@ class AscendDflashProposer(AscendEagleProposer):
         else:
             self._dspark_seed_buffer = None
             self._dspark_draft_buffer = None
+
+    def _num_query_per_req(self) -> int:
+        # DFlash: anchor + K masks, samples mask positions.
+        # DSpark: anchor + K-1 masks, samples anchor plus mask positions.
+        return self.num_speculative_tokens if self._is_dspark else 1 + self.num_speculative_tokens
 
     def set_inputs_first_pass(
         self,
@@ -92,7 +98,8 @@ class AscendDflashProposer(AscendEagleProposer):
         # Q from query embeddings (bonus + mask tokens).
         batch_size = cad.num_reqs
         num_context = target_token_ids.shape[0]
-        num_query_per_req = 1 + self.num_speculative_tokens
+        num_query_per_req = self._num_query_per_req()
+        # num_query_per_req = 1 + self.num_speculative_tokens
         num_query_total = batch_size * num_query_per_req
 
         self._dflash_num_context = num_context
@@ -142,6 +149,7 @@ class AscendDflashProposer(AscendEagleProposer):
             total_input_tokens=num_context,
             batch_size=batch_size,
             HAS_NUM_REJECTED=has_num_rejected,
+            IS_DSPARK=self._is_dspark,
         )
 
         query_slot_mapping = self._slot_mapping_buffer[:num_query_total]
@@ -184,7 +192,12 @@ class AscendDflashProposer(AscendEagleProposer):
         is_profile=False,
         **kwargs,
     ) -> None:
-        num_query_tokens = min(num_tokens, self.max_query_tokens)
+        # num_query_tokens = min(num_tokens, self.max_query_tokens)
+        num_query_per_req = self._num_query_per_req()
+        num_query_total = num_reqs * num_query_per_req
+        num_query_tokens = min(
+            num_query_total if num_reqs > 0 else num_tokens,
+            self.max_query_tokens)
 
         (
             num_input_tokens,
@@ -194,8 +207,8 @@ class AscendDflashProposer(AscendEagleProposer):
 
         if not self.use_cuda_graph:
             aclgraph_runtime_mode = CUDAGraphMode.NONE
-        num_query_per_req = 1 + self.num_speculative_tokens
-        num_query_total = num_reqs * num_query_per_req
+        # num_query_per_req = 1 + self.num_speculative_tokens
+        # num_query_total = num_reqs * num_query_per_req
 
         context_positions = self._context_positions_buffer[:num_input_tokens]
         context_states = self.hidden_states[:num_input_tokens]
