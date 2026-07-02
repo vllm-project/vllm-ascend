@@ -197,7 +197,6 @@ export OMP_NUM_THREADS=1
 export HCCL_BUFFSIZE=400
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export VLLM_ASCEND_ENABLE_MLAPO=1
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export ASCEND_LAUNCH_BLOCKING=0
 
 vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
@@ -247,7 +246,6 @@ export OMP_NUM_THREADS=1
 export HCCL_BUFFSIZE=400
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export VLLM_ASCEND_ENABLE_MLAPO=1
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export ASCEND_LAUNCH_BLOCKING=0
 
 vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
@@ -657,7 +655,6 @@ Before you start, please
         export ASCEND_A3_ENABLE=1
         export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
         export ASCEND_RT_VISIBLE_DEVICES=$1
-        export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
 
@@ -727,7 +724,6 @@ Before you start, please
         export ASCEND_A3_ENABLE=1
         export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
         export ASCEND_RT_VISIBLE_DEVICES=$1
-        export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
         
