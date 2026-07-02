@@ -20,6 +20,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 import torch
+from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -435,19 +436,31 @@ class FusedMC2CommImpl(MoECommMethod):
         group = get_mc2_group().device_group
         hidden = int(fused_experts_input.hidden_states.shape[-1])
         intermediate_hidden = _infer_intermediate_hidden(weight1[0], weight2[0], hidden)
+        # The sym buffer is allocated by get_symm_buffer_for_mega_moe, a
+        # collective handshake over the EP (mc2) group. Its shape params —
+        # especially num_max_tokens_per_rank — MUST be identical on every EP
+        # rank, otherwise ranks allocate mismatched buffers / at different
+        # times and HCCL aborts (SUSPECT REMOTE ERROR 507057). So this value
+        # must be derived ONLY from rank-invariant, compile-time config,
+        # NEVER from the current forward's per-rank token count.
         if self.token_dispatcher.global_bs > 0:
+            # global_bs = num_tokens_per_tp_rank * ep_world_size (compile-time).
             num_max_tokens_per_rank = max(
                 1,
                 int(self.token_dispatcher.global_bs // self.token_dispatcher.ep_world_size),
             )
         else:
-            num_max_tokens_per_rank = max(
-                1,
-                int(
-                    getattr(self.token_dispatcher, "max_num_tokens_per_rank", 0)
-                    or fused_experts_input.hidden_states.shape[0]
-                ),
+            # num_tokens_per_tp_rank, set once in TokenDispatcherWithMC2.__init__
+            # from scheduler/graph config — rank-invariant.
+            rank_invariant_cap = getattr(self.token_dispatcher, "max_num_tokens_per_rank", 0)
+            assert rank_invariant_cap and int(rank_invariant_cap) > 0, (
+                "CANN MegaMoe sym buffer needs a rank-invariant token cap "
+                "(token_dispatcher.max_num_tokens_per_rank). Falling back to a "
+                "per-forward token count would desync the EP-group collective "
+                "(HCCL 507057). Got: "
+                f"{rank_invariant_cap!r}"
             )
+            num_max_tokens_per_rank = max(1, int(rank_invariant_cap))
         num_topk = int(topk_ids.shape[-1])
         redundant_experts = int(fused_experts_input.routing.global_redundant_expert_num)
         if fused_experts_input.routing.expert_map is not None:
@@ -471,6 +484,18 @@ class FusedMC2CommImpl(MoECommMethod):
             dispatch_quant_out_dtype,
         )
         if key not in self._cann_symm_buffers:
+            # Diagnostic: every EP rank must print an identical key here and
+            # reach this collective together. If a PD / dummy-batch run ever
+            # desyncs (HCCL 507057), compare these lines across ranks to see
+            # which field diverged or which rank never reached the collective.
+            logger.info(
+                "CANN MegaMoe sym-buffer alloc (must match across all EP ranks): "
+                "ep_rank=%s ep_world=%s global_bs=%s key=%s",
+                getattr(self.token_dispatcher, "ep_rank_id", "?"),
+                getattr(self.token_dispatcher, "ep_world_size", "?"),
+                self.token_dispatcher.global_bs,
+                key[1:],  # drop id(group) (rank-local python id, not comparable)
+            )
             self._cann_symm_buffers[key] = get_symm_buffer_for_mega_moe(
                 group,
                 num_experts,
