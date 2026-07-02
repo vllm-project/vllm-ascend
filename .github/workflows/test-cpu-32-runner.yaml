@@ -60,145 +60,24 @@ jobs:
           echo "Sleep will start now (900 seconds = 15 minutes)"
           echo "=========================================="
 
-      - name: Checkout
+      - name: Checkout and basic info
         run: |
-          echo "Checking out repository..."
-          pwd
-          ls -la | head -20
-
-      - name: Print environment info
-        run: |
+          echo "=== 🎯 Job Pod Created Successfully! ==="
           echo ""
-          echo "=== 📊 System Information ==="
+          echo "Current directory:"
+          pwd
+          echo ""
+          echo "System info:"
           uname -a
           echo ""
-          echo "=== 💻 CPU Information ==="
-          nproc
-          lscpu | head -15
+          echo "CPU cores: $(nproc)"
+          echo "Memory: $(free -h | grep Mem | awk '{print $2}')"
           echo ""
-          echo "=== 💾 Memory Information ==="
-          free -h
-          echo ""
-          echo "=== 👤 User and Groups ==="
+          echo "Current user:"
           whoami
-          id
           echo ""
-          echo "=== 🔧 Available tools ==="
-          which buildctl || echo "❌ buildctl not found"
-          buildctl --version 2>/dev/null || echo "❌ buildctl not available"
-          echo ""
-          echo "=== 🌍 Environment Variables (BUILDKIT/DOCKER) ==="
-          env | grep -E "BUILDKIT|DOCKER_CONFIG" || echo "❌ No BUILDKIT/DOCKER_CONFIG env vars found"
-          echo ""
-          echo "=== 📁 Home directory ==="
-          ls -la ~/ | head -20
-
-      - name: Check Vault certificate injection
-        run: |
-          echo ""
-          echo "=== 🔐 Checking Vault Certificate Injection ==="
-          echo "Looking for Vault-injected certificates..."
-          echo ""
-
-          if [ -d "$HOME/.docker" ]; then
-            echo "✅ $HOME/.docker exists"
-            echo "Files:"
-            ls -la "$HOME/.docker/"
-            echo ""
-            echo "File contents (first 50 chars):"
-            for f in "$HOME/.docker"/*; do
-              if [ -f "$f" ]; then
-                echo "--- $(basename $f) ---"
-                head -c 50 "$f" 2>/dev/null && echo " ..."
-              fi
-            done
-          else
-            echo "❌ $HOME/.docker does NOT exist"
-            echo "This indicates Vault injection failed!"
-          fi
-
-      - name: Check buildctl availability
-        continue-on-error: true
-        run: |
-          echo ""
-          echo "=== 🚀 Checking buildctl at job start ==="
-
-          # Check global buildctl
-          which buildctl && echo "✅ buildctl found in PATH" || echo "❌ buildctl NOT found in PATH"
-
-          # Check /tmp/buildkit/bin/buildctl (the download location)
-          if [ -f "/tmp/buildkit/bin/buildctl" ]; then
-            echo "✅ /tmp/buildkit/bin/buildctl exists"
-            /tmp/buildkit/bin/buildctl --version
-          else
-            echo "❌ /tmp/buildkit/bin/buildctl NOT found"
-          fi
-
-          buildctl --version 2>/dev/null || echo "⏳ buildctl --version failed (may still be installing)"
-
-          # Wait for buildctl if not available
-          echo ""
-          echo "Waiting for /tmp/buildkit/bin/buildctl to appear..."
-          for i in {1..300}; do
-            if [ -f "/tmp/buildkit/bin/buildctl" ]; then
-              echo "✅ /tmp/buildkit/bin/buildctl appeared after $i seconds"
-              /tmp/buildkit/bin/buildctl --version
-              break
-            fi
-            if command -v buildctl &> /dev/null; then
-              echo "✅ buildctl appeared in PATH after $i seconds"
-              buildctl --version
-              break
-            fi
-            [ $((i % 30)) -eq 0 ] && echo "Waiting... ($i/300 sec)"
-            sleep 1
-          done
-
-          # Final check
-          echo ""
-          echo "=== Final Status ==="
-          if [ -f "/tmp/buildkit/bin/buildctl" ]; then
-            echo "✅ /tmp/buildkit/bin/buildctl is available"
-            /tmp/buildkit/bin/buildctl --version
-          elif command -v buildctl &> /dev/null; then
-            echo "✅ buildctl is available in PATH"
-            buildctl --version
-          else
-            echo "⚠️  buildctl still not available after 5 minutes"
-            echo ""
-            echo "Diagnostics:"
-            echo "  - /tmp/buildkit/ contents:"
-            ls -la /tmp/buildkit/ 2>/dev/null || echo "    /tmp/buildkit/ does not exist"
-            echo "  - /tmp/buildkit/bin/ contents:"
-            ls -la /tmp/buildkit/bin/ 2>/dev/null || echo "    /tmp/buildkit/bin/ does not exist"
-            echo "  - /tmp/buildkit.tar.gz:"
-            ls -la /tmp/buildkit.tar.gz 2>/dev/null || echo "    /tmp/buildkit.tar.gz not found"
-            echo ""
-            echo "This may indicate:"
-            echo "  - postStart hook is taking too long"
-            echo "  - Network issue downloading buildkit binary"
-            echo "  - Vault certificate injection failed"
-            echo "  - Permission issue copying to /usr/local/bin"
-          fi
-
-      - name: Test buildkitd connection
-        continue-on-error: true
-        run: |
-          echo ""
-          echo "=== 🔌 Testing buildkitd connection ==="
-          echo "BUILDKITD_ADDR: ${BUILDKITD_ADDR:-not set}"
-          echo "DOCKER_CONFIG: ${DOCKER_CONFIG:-not set}"
-
-          if [ -n "$BUILDKITD_ADDR" ]; then
-            echo "Attempting to connect to buildkitd..."
-            if command -v buildctl &> /dev/null; then
-              buildctl du 2>&1 || echo "buildctl du failed (may need certificates)"
-            else
-              echo "buildctl not available yet"
-            fi
-          else
-            echo "⚠️  BUILDKITD_ADDR not set"
-          fi
+          echo "Listing files in current directory:"
+          ls -la | head -20
 
       - name: Keep pod running for manual debugging (60 minutes)
         run: |
