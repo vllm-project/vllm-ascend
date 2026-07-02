@@ -258,5 +258,7 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
         # transpose stride to interpret packed FP4 weights as logical K.
         layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2)
         layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2)
+        layer.weight.data = maybe_trans_nz(layer.w13_weight.data, customize_dtype=torch.float8_e4m3fn, input_dtype=torch_npu.float4_e2m1fn_x2)
+        layer.weight.data = maybe_trans_nz(layer.w2_weight.data, customize_dtype=torch.float8_e4m3fn, input_dtype=torch_npu.float4_e2m1fn_x2)
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.transpose(1, 2)
         layer.w2_weight_scale.data = layer.w2_weight_scale.data.transpose(1, 2)
