@@ -18,7 +18,7 @@
 FROM quay.io/ascend/cann:9.0.0-910b-ubuntu22.04-py3.12
 
 ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
-ARG MOONCAKE_TAG="v0.3.9"
+ARG MOONCAKE_TAG="v0.3.11.post1"
 
 WORKDIR /workspace
 
