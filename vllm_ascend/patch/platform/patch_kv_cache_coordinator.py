@@ -5,11 +5,6 @@ import sys
 from collections.abc import Mapping
 from math import lcm
 
-# Feature flag: PD分离下Mamba状态走独立通道路由
-# 设置 VLLM_ASCEND_PD_MAMBA_ROUTING=1 启用
-# 启用后Mamba状态不参与KV块LCM对齐, 走独立传输通道
-_PD_MAMBA_ROUTING_ENABLED = os.environ.get("VLLM_ASCEND_PD_MAMBA_ROUTING", "0") == "1"
-
 import vllm
 import vllm.envs as envs_vllm
 import vllm.v1.core.kv_cache_coordinator as vllm_kv_cache_coordinator
@@ -36,6 +31,10 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.core.single_type_kv_cache_manager import get_manager_for_kv_cache_spec
+
+# Feature flag: PD分离下Mamba状态走独立通道路由
+# 设置 VLLM_ASCEND_PD_MAMBA_ROUTING=1 启用
+_PD_MAMBA_ROUTING_ENABLED = os.environ.get("VLLM_ASCEND_PD_MAMBA_ROUTING", "0") == "1"
 
 USE_MULTI_GROUPS_KV_CACHE = True
 

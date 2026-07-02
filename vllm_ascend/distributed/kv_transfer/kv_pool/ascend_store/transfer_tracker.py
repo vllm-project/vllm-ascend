@@ -14,7 +14,7 @@ dicts, which creates race conditions under async transfer.
 """
 
 import threading
-from typing import Callable
+from collections.abc import Callable
 
 
 class HybridTransferTracker:

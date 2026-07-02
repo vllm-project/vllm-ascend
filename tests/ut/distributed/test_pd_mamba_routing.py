@@ -12,9 +12,8 @@ skipping Mamba from LCM block alignment.
 import os
 import threading
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
-import numpy as np
 import torch
 
 # Simulate Ascend dependencies for local testing
