@@ -57,23 +57,6 @@ import vllm_ascend.envs as envs_ascend
 from vllm_ascend.utils import vllm_version_is
 
 
-def _is_ascend_moe_layer(source_layer) -> bool:
-    if vllm_version_is("0.23.0"):
-        from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE
-
-        return isinstance(source_layer, AscendFusedMoE)
-    else:
-        from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
-
-        return isinstance(source_layer, AscendMoERunner)
-
-
-def _lora_context_host(base_layer):
-    if vllm_version_is("0.23.0"):
-        return base_layer
-    return base_layer.routed_experts
-
-
 def _assert_ascend_moe_lora_supported(base_layer: nn.Module) -> None:
     if getattr(base_layer, "use_ep", False):
         raise AssertionError(
@@ -208,27 +191,16 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
         # MoELoRAContext (now that punica_wrapper is available) and publish it
         # on the module that ``AscendUnquantizedFusedMoEMethod.apply`` reads via
         # ``getattr(layer, "_ascend_moe_lora_context", None)`` -- the base layer
-        # itself on 0.23.0, but ``base_layer.runner.routed_experts`` on main
-        # (apply is called with ``layer=runner.routed_experts``). The context
-        # holds stable references (the in-place-updated LoRA stacks,
+        # itself on 0.23.0, but ``base_layer.routed_experts`` on main (there the
+        # runner *is* the layer and it calls apply with ``layer=routed_experts``).
+        # The context holds stable references (the in-place-updated LoRA stacks,
         # adapter_enabled and the punica wrapper), so building it once here is
         # sufficient.
         BaseLayerWithLoRA.set_mapping(self, punica_wrapper)
-        _lora_context_host(self.base_layer)._ascend_moe_lora_context = self._build_lora_context()
-
-    # ------------------------------------------------------------------
-    # Layer-replacement registration
-    # ------------------------------------------------------------------
-    @classmethod
-    def can_replace_layer(
-        cls,
-        source_layer: nn.Module,
-        lora_config: LoRAConfig,
-        packed_modules_list: list,
-        model_config: PretrainedConfig | None = None,
-    ) -> bool:
-        del lora_config, model_config
-        return _is_ascend_moe_layer(source_layer) and len(packed_modules_list) == 2
+        lora_context_host = self.base_layer
+        if not vllm_version_is("0.23.0"):
+            lora_context_host = self.base_layer.routed_experts
+        lora_context_host._ascend_moe_lora_context = self._build_lora_context()
 
 
 class AscendFusedMoE3DWithLoRA(AscendFusedMoEWithLoRA, FusedMoE3DWithLoRA):
@@ -238,17 +210,6 @@ class AscendFusedMoE3DWithLoRA(AscendFusedMoEWithLoRA, FusedMoE3DWithLoRA):
         AscendFusedMoEWithLoRA.__init__(self, base_layer)
         # Override: 3D MoE LoRA uses a single w13 slice.
         self._w13_slices = 1
-
-    @classmethod
-    def can_replace_layer(
-        cls,
-        source_layer: nn.Module,
-        lora_config: LoRAConfig,
-        packed_modules_list: list,
-        model_config: PretrainedConfig | None = None,
-    ) -> bool:
-        del lora_config, model_config
-        return _is_ascend_moe_layer(source_layer) and len(packed_modules_list) == 1
 
 
 # ----------------------------------------------------------------------
