@@ -307,8 +307,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 self.model.config.image_token_index = model.config.vision_config.image_token_id
             elif self.get_model_name(model) == "KimiK25ForConditionalGeneration":
                 self.model.config.image_token_index = model.config.media_placeholder_token_id
-            else:
+            elif hasattr(model.config, "image_token_index"):
                 self.model.config.image_token_index = model.config.image_token_index
+            else:
+                # Draft models like Gemma4 MTP don't handle multimodal inputs
+                # directly — they receive hidden states from the target model.
+                pass
             target_language_model = model.get_language_model()
         else:
             target_language_model = model
