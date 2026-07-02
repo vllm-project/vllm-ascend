@@ -67,12 +67,56 @@ Save this file to a location of your choice (e.g., `./qwen3_vl_reranker.jinja`).
 
 Start the server with the following command:
 
-```bash
+:::::{tab-set}
+:sync-group: install
+
+::::{tab-item} 910B4
+:sync: 910B4
+
+Run the following script to start the vLLM server on single 910B4:
+
+```shell
 vllm serve Qwen/Qwen3-VL-Reranker-8B \
     --runner pooling \
     --max-model-len 4096 \
     --hf_overrides '{"architectures": ["Qwen3VLForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": true}' \
-    --chat-template ./qwen3_vl_reranker.jinja
+    --chat-template ./qwen3_vl_reranker.jinja \
+    --port 8000
+```
+
+::::
+::::{tab-item} Atlas 300 inference products
+:sync: Atlas 300 inference products
+
+Run the following script to start the vLLM server on single Atlas 300 inference products:
+
+```shell
+#!/bin/sh
+vllm serve Qwen/Qwen3-VL-Reranker-8B \
+    --runner pooling \
+    --max-model-len 4096 \
+    --hf_overrides '{"architectures": ["Qwen3VLForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": true}' \
+    --chat-template ./qwen3_vl_reranker.jinja \
+    --dtype float16 \
+    --port 8000
+```
+
+:::{note}
+The `--max_model_len` option is added to prevent errors when generating the attention operator mask on the Atlas 300 inference products.
+:::
+
+::::
+:::::
+
+Once your server is started, you can query the model with input prompts.
+
+```bash
+curl -X POST http://localhost:8000/v1/embeddings -H "Content-Type: application/json" -d '{
+  "input": [
+        "The capital of China is Beijing.",
+        "Gravity is a force that attracts two bodies towards each other. It gives weight to physical objects and is responsible for the movement of planets around the sun."
+    ]
+}'
 ```
 
 Once your server is started, you can send request with follow examples.
