@@ -22,6 +22,7 @@ import torch.nn.functional as F
 import torch_npu
 from vllm.triton_utils import HAS_TRITON
 
+from vllm_ascend.device import utils as device_utils
 from vllm_ascend.device.mxfp_compat import (
     FLOAT8_E8M0FNU_DTYPE,
     QUANT_DTYPES,
@@ -47,6 +48,66 @@ class BaseDeviceAdaptor:
     def reshape_and_cache(cls, key, value, key_cache, value_cache, slot_mapping):
         torch_npu._npu_reshape_and_cache(
             key=key, value=value, key_cache=key_cache, value_cache=value_cache, slot_indices=slot_mapping
+        )
+
+    @classmethod
+    def npu_fused_infer_attention_score(
+        cls,
+        query: torch.Tensor,
+        key: torch.Tensor | None,
+        value: torch.Tensor | None,
+        attn_metadata: Any,
+        *,
+        key_cache: torch.Tensor | None,
+        value_cache: torch.Tensor | None,
+        current_query: torch.Tensor | None,
+        current_key: torch.Tensor | None,
+        current_value: torch.Tensor | None,
+        num_heads: int,
+        num_key_value_heads: int,
+        head_size: int,
+        scale: float,
+        is_kv_sharing_target_layer: bool,
+        is_prefill_no_cache: bool,
+        prefill_states,
+        **kwargs,
+    ):
+        # The FIA path slices/replaces query/key/value before this wrapper. Use
+        # the original current-token tensors to decide whether prefill fallback
+        # can safely run.
+        fallback_query = current_query if current_query is not None else query
+        fallback_key = current_key if current_key is not None else key
+        fallback_value = current_value if current_value is not None else value
+        if (
+            head_size == 512
+            and not is_kv_sharing_target_layer
+            and fallback_key is not None
+            and fallback_value is not None
+            and fallback_query.shape[0] == fallback_key.shape[0]
+            and attn_metadata.attn_state in prefill_states
+        ):
+            return device_utils.npu_large_head_prefill_attention(
+                query,
+                fallback_key,
+                fallback_value,
+                attn_metadata,
+                key_cache=key_cache,
+                value_cache=value_cache,
+                num_heads=num_heads,
+                num_kv_heads=num_key_value_heads,
+                head_size=head_size,
+                scale=scale,
+                is_prefill_no_cache=is_prefill_no_cache,
+            )
+
+        return torch_npu.npu_fused_infer_attention_score(
+            query=query,
+            key=key,
+            value=value,
+            num_key_value_heads=num_key_value_heads,
+            num_heads=num_heads,
+            scale=scale,
+            **kwargs,
         )
 
     @staticmethod
@@ -806,6 +867,38 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             value_cache=value_cache,
             slot_mapping=slot_mapping.contiguous(),
             cache_mode="Norm",
+        )
+
+    @classmethod
+    def npu_fused_infer_attention_score(
+        cls,
+        query: torch.Tensor,
+        key: torch.Tensor | None,
+        value: torch.Tensor | None,
+        attn_metadata: Any,
+        *,
+        key_cache: torch.Tensor | None,
+        value_cache: torch.Tensor | None,
+        current_query: torch.Tensor | None,
+        current_key: torch.Tensor | None,
+        current_value: torch.Tensor | None,
+        num_heads: int,
+        num_key_value_heads: int,
+        head_size: int,
+        scale: float,
+        is_kv_sharing_target_layer: bool,
+        is_prefill_no_cache: bool,
+        prefill_states,
+        **kwargs,
+    ):
+        return torch_npu.npu_fused_infer_attention_score(
+            query=query,
+            key=key,
+            value=value,
+            num_key_value_heads=num_key_value_heads,
+            num_heads=num_heads,
+            scale=scale,
+            **kwargs,
         )
 
     @staticmethod
