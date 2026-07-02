@@ -764,6 +764,13 @@ class NPUPlatform(Platform):
                 "Please disable VLLM_ASCEND_ENABLE_FUSED_MC2 by setting it to 0."
             )
 
+        if ascend_config.enable_fused_mc2 == 1 and ascend_config.multistream_overlap_shared_expert:
+            ascend_config.multistream_overlap_shared_expert = False
+            logger.warning_once(
+                "VLLM_ASCEND_ENABLE_FUSED_MC2 (fused mc2) and multistream_overlap_shared_expert "
+                "cannot be enabled at the same time. Setting multistream_overlap_shared_expert to False."
+            )
+
     @classmethod
     def import_kernels(cls) -> None:
         # Directly importing vllm_ascend_C prevents ASCEND_RT_VISIBLE_DEVICES
