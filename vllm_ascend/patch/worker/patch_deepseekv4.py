@@ -30,7 +30,7 @@ from typing import Any, Optional
 import torch
 import torch.nn.functional as F
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.config import get_current_vllm_config
+from vllm.config import get_current_vllm_config  # noqa: F401  # kept for downstream patches
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,
@@ -230,8 +230,10 @@ def forward_m2n(
     After the loop, the final FFN output is received.
     """
     afd_connector = afd_metadata.afd_connector
-    vllm_config = get_current_vllm_config()
-    afd_config = getattr(vllm_config, "afd_config", None)
+    # NOTE: avoid calling get_current_vllm_config() here because torch dynamo
+    # compilation runs outside set_current_vllm_config() context. The connector
+    # already caches afd_config at init time.
+    afd_config = getattr(afd_connector, "afd_config", None)
 
     for layer in islice(self.layers, self.start_layer, self.end_layer):
         if layer.layer_idx > 0:
