@@ -21,27 +21,28 @@ from __future__ import annotations
 
 from vllm.tool_parsers.glm47_moe_tool_parser import Glm47MoeModelToolParser
 
-if not hasattr(Glm47MoeModelToolParser, "_ascend_original_extract_tool_call_regions"):
-    Glm47MoeModelToolParser._ascend_original_extract_tool_call_regions = (
-        Glm47MoeModelToolParser._extract_tool_call_regions
-    )
+from vllm_ascend.utils import vllm_version_is
 
+if vllm_version_is("0.23.0"):
+    if not hasattr(Glm47MoeModelToolParser, "_ascend_original_extract_tool_call_regions"):
+        Glm47MoeModelToolParser._ascend_original_extract_tool_call_regions = (
+            Glm47MoeModelToolParser._extract_tool_call_regions
+        )
 
-def _patched_extract_tool_call_regions(
-    self: Glm47MoeModelToolParser,
-    text: str,
-) -> list[tuple[str, bool]]:
-    original_extract_tool_call_regions = self._ascend_original_extract_tool_call_regions
-    regions = original_extract_tool_call_regions(text)
-    normalized_regions: list[tuple[str, bool]] = []
+    def _patched_extract_tool_call_regions(
+        self: Glm47MoeModelToolParser,
+        text: str,
+    ) -> list[tuple[str, bool]]:
+        original_extract_tool_call_regions = self._ascend_original_extract_tool_call_regions
+        regions = original_extract_tool_call_regions(text)
+        normalized_regions: list[tuple[str, bool]] = []
 
-    for inner_text, is_complete in regions:
-        if is_complete and self.arg_key_start not in inner_text and "\n" not in inner_text:
-            tool_name = inner_text.strip()
-            inner_text = f"{tool_name}\n" if tool_name else inner_text
-        normalized_regions.append((inner_text, is_complete))
+        for inner_text, is_complete in regions:
+            if is_complete and self.arg_key_start not in inner_text and "\n" not in inner_text:
+                tool_name = inner_text.strip()
+                inner_text = f"{tool_name}\n" if tool_name else inner_text
+            normalized_regions.append((inner_text, is_complete))
 
-    return normalized_regions
+        return normalized_regions
 
-
-Glm47MoeModelToolParser._extract_tool_call_regions = _patched_extract_tool_call_regions
+    Glm47MoeModelToolParser._extract_tool_call_regions = _patched_extract_tool_call_regions

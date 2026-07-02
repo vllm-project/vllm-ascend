@@ -414,7 +414,10 @@ class NPUWorker(WorkerBase):
             setup_ascend_local_comm_res(self.local_rank, self.vllm_config.kv_transfer_config)
 
         # take current memory snapshot
-        self.init_snapshot = MemorySnapshot()
+        if vllm_version_is("0.23.0"):
+            self.init_snapshot = MemorySnapshot()
+        else:
+            self.init_snapshot = MemorySnapshot(device=device)
         self.requested_memory = self.init_snapshot.total_memory * self.cache_config.gpu_memory_utilization
         if self.init_snapshot.free_memory < self.requested_memory:
             GiB = lambda b: round(b / GiB_bytes, 2)

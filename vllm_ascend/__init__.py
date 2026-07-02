@@ -15,8 +15,6 @@
 # This file is a part of the vllm-ascend project.
 #
 
-import vllm_ascend.logger  # noqa: F401
-
 _GLOBAL_PATCH_APPLIED = False
 
 
@@ -39,7 +37,9 @@ def _ensure_global_patch():
 
 def register():
     """Register the NPU platform."""
+    import os
 
+    os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "0"
     return "vllm_ascend.platform.NPUPlatform"
 
 
@@ -75,3 +75,6 @@ def register_model():
     from .models import register_model
 
     register_model()
+
+
+import vllm_ascend.logger  # noqa: E402, F401

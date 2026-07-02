@@ -162,6 +162,17 @@ def _mock_npu_env():
             create=True,
         ),
         patch("vllm_ascend.ops.layernorm.get_weight_prefetch_method", return_value=_prefetch_mock),
+        # v0.23.0+: _cached_get_attn_backend raises "Invalid attention backend
+        # for None" when current_platform is UnspecifiedPlatform (no NPU hw).
+        # Mock it since self_attn is replaced with _PassthroughAttn anyway.
+        patch(
+            "vllm.v1.attention.selector._cached_get_attn_backend",
+            return_value=MagicMock(
+                get_name=MagicMock(return_value="NO_ATTENTION"),
+                supports_alibi_sqrt=MagicMock(return_value=False),
+            ),
+            create=True,
+        ),
         # enable_cp() reads parallel_config.*_context_parallel_size and runs `> 1`.
         # On MagicMock these fields yield TypeError on Python 3.12, so short-circuit
         # the check everywhere it's imported.

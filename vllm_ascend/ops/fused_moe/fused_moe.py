@@ -183,19 +183,18 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             tid2eid=self.tid2eid,
             input_ids=input_ids,
         )
-        if not vllm_version_is("0.23.0"):
+        if vllm_version_is("0.23.0"):
+            model_config = layer.vllm_config.model_config
+        else:
             try:
                 _vllm_config = get_current_vllm_config()
             except AssertionError:
                 _vllm_config = None
-            if (
-                _vllm_config is not None
-                and _vllm_config.model_config is not None
-                and _vllm_config.model_config.enable_return_routed_experts
-            ):
-                capturer = getattr(layer, "_ascend_routed_experts_capturer", None)
-                if capturer is not None:
-                    capturer.capture(layer_id=layer.layer_id, topk_ids=topk_ids)
+            model_config = None if _vllm_config is None else _vllm_config.model_config
+        if model_config is not None and model_config.enable_return_routed_experts:
+            capturer = getattr(layer, "_ascend_routed_experts_capturer", None)
+            if capturer is not None:
+                capturer.capture(layer_id=layer.layer_id, topk_ids=topk_ids)
 
         if zero_expert_num > 0 and zero_expert_type is not None:
             topk_ids, topk_weights, zero_expert_result = zero_experts_compute(
@@ -344,7 +343,7 @@ else:
             self.quant_type = self._get_quant_type()
             # Can be removed after vllm fixes the issue.
             if self._needs_routed_expert_parameter_aliases():
-                self._register_routed_expert_parameter_aliases()
+                self._schedule_routed_expert_parameter_aliases()
 
             self.moe_config.tp_group = get_tp_group()
             self.moe_config.dp_group = get_dp_group()
@@ -496,21 +495,20 @@ else:
 
             return quant_type
 
-        def _register_routed_expert_parameter_aliases(self) -> None:
-            alias_names = []
-            for name, param in self.routed_experts.named_parameters(recurse=False):
-                alias_param = torch.nn.Parameter(param.data, requires_grad=param.requires_grad)
-                alias_param.__dict__.update(param.__dict__)
-                self.register_parameter(name, alias_param)
-                alias_names.append(name)
+        def _schedule_routed_expert_parameter_aliases(self) -> None:
+            alias_names = [name for name, _ in self.routed_experts.named_parameters(recurse=False)]
 
             original_process_weights = self._quant_method.process_weights_after_loading
 
             @wraps(original_process_weights)
             def wrapped_process_weights(layer, *args, **kwargs):
+                result = original_process_weights(layer, *args, **kwargs)
                 for name in alias_names:
-                    self._parameters.pop(name, None)
-                return original_process_weights(layer, *args, **kwargs)
+                    param = getattr(self.routed_experts, name)
+                    alias_param = torch.nn.Parameter(param.data, requires_grad=param.requires_grad)
+                    alias_param.__dict__.update(param.__dict__)
+                    self.register_parameter(name, alias_param)
+                return result
 
             self._quant_method.process_weights_after_loading = wrapped_process_weights  # type: ignore[method-assign]
 

@@ -16,7 +16,7 @@
 import json
 import os
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from vllm.config import KVTransferConfig, VllmConfig
 
@@ -26,6 +26,25 @@ from vllm_ascend.utils import clear_enable_sp, enable_sp, get_flashcomm2_config_
 
 
 class TestAscendConfig(TestBase):
+    _device_patcher = None
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        # v0.23.0+ DeviceConfig.__post_init__ raises RuntimeError when
+        # current_platform.device_type is empty (no physical NPU).
+        cls._device_patcher = patch(
+            "vllm.config.device.DeviceConfig.__post_init__",
+            MagicMock(),
+        )
+        cls._device_patcher.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls._device_patcher:
+            cls._device_patcher.stop()
+        super().tearDownClass()
+
     @staticmethod
     def _clean_up_ascend_config(func):
         def wrapper(*args, **kwargs):

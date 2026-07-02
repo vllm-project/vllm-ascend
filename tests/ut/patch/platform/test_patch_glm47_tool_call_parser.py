@@ -3,19 +3,28 @@
 import json
 from unittest.mock import MagicMock
 
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
+import pytest
+
+from vllm_ascend.utils import vllm_version_is
+
+pytestmark = pytest.mark.skipif(
+    not vllm_version_is("0.23.0"),
+    reason="upstream vLLM renamed _extract_tool_call_regions",
+)
+
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest  # noqa: E402
+from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat  # noqa: E402
 
 # vLLM main removed the ``_WrappedParser`` helper; the base ``Parser``
 # already instantiates from ``reasoning_parser_cls`` / ``tool_parser_cls``
 # class attributes, so a thin ``DelegatingParser`` subclass is equivalent.
-from vllm.parser.abstract_parser import DelegatingParser  # type: ignore[import-not-found]
-from vllm.reasoning.deepseek_v3_reasoning_parser import (
+from vllm.parser.abstract_parser import DelegatingParser  # type: ignore[import-not-found]  # noqa: E402
+from vllm.reasoning.deepseek_v3_reasoning_parser import (  # noqa: E402
     DeepSeekV3ReasoningWithThinkingParser,
 )
-from vllm.tool_parsers.glm47_moe_tool_parser import Glm47MoeModelToolParser
+from vllm.tool_parsers.glm47_moe_tool_parser import Glm47MoeModelToolParser  # noqa: E402
 
-from vllm_ascend.patch.platform import patch_glm47_tool_call_parser  # noqa: F401
+from vllm_ascend.patch.platform import patch_glm47_tool_call_parser  # noqa: F401, E402
 
 
 class _WrappedParser(DelegatingParser):

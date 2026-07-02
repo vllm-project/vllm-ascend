@@ -34,14 +34,11 @@ from dataclasses import dataclass
 import pytest
 import torch
 from vllm import LLM, SamplingParams
+from vllm.distributed.kv_transfer.kv_connector.v1 import (
+    example_hidden_states_connector,
+)
 
 from vllm_ascend.utils import vllm_version_is
-
-if vllm_version_is("0.23.0"):
-    from safetensors import safe_open
-else:
-    from vllm.distributed.kv_transfer.kv_connector.v1 import example_hidden_states_connector
-
 
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
@@ -133,30 +130,20 @@ def _verify_output(output, expected_shape, *, verify_nonzero, verify_token_ids):
 
     if vllm_version_is("0.23.0"):
         assert os.path.exists(hidden_states_path)
-        with safe_open(hidden_states_path, "pt") as f:
-            tensor_names = f.keys()
-            assert "hidden_states" in tensor_names
-            hidden_states = f.get_tensor("hidden_states")
-            assert hidden_states.shape == expected_shape
-
-            if verify_token_ids:
-                token_ids = f.get_tensor("token_ids")
-                assert torch.equal(token_ids, torch.tensor(output.prompt_token_ids))
-
-            if verify_nonzero:
-                assert not torch.allclose(hidden_states, torch.zeros_like(hidden_states))
+        obj = example_hidden_states_connector.load_hidden_states(hidden_states_path)
     else:
         obj = example_hidden_states_connector.load_hidden_states(hidden_states_path)
         example_hidden_states_connector.cleanup_hidden_states(hidden_states_path)
-        hidden_states = obj["hidden_states"]
-        assert hidden_states.shape == expected_shape
 
-        if verify_token_ids:
-            token_ids = obj["token_ids"]
-            assert torch.equal(token_ids, torch.tensor(output.prompt_token_ids))
+    hidden_states = obj["hidden_states"]
+    assert hidden_states.shape == expected_shape
 
-        if verify_nonzero:
-            assert not torch.allclose(hidden_states, torch.zeros_like(hidden_states))
+    if verify_token_ids:
+        token_ids = obj["token_ids"]
+        assert torch.equal(token_ids, torch.tensor(output.prompt_token_ids))
+
+    if verify_nonzero:
+        assert not torch.allclose(hidden_states, torch.zeros_like(hidden_states))
 
 
 @pytest.mark.parametrize("case", CASES)
