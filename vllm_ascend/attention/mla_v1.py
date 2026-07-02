@@ -290,6 +290,20 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         self.seq_lens: torch.Tensor = None
         self.attn_mask_builder = AttentionMaskBuilder(self.device)
 
+    def reset_runtime_cache(self) -> None:
+        # [snapshot] Clear per-iteration runtime metadata so post-resume build
+        # cannot accidentally reuse stale host/device buffers.
+        self.chunk_seq_lens = None
+        self.cu_seq_lens_cpu = None
+        self.num_chunks = None
+        self.max_context_chunk = 0
+        self.context_lens_cpu = None
+        self.num_actual_tokens = None
+        self.block_table = None
+        self.slot_mapping = None
+        self.query_lens = None
+        self.seq_lens = None
+
     @staticmethod
     def determine_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
         return ascend_chunked_prefill_workspace_size(vllm_config)
@@ -513,19 +527,33 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             * self.max_context_chunk
         )
         chunk_ends = torch.min(self.context_lens_cpu.unsqueeze(0), chunk_starts + self.max_context_chunk)
-        self.chunk_seq_lens = (chunk_ends - chunk_starts).clamp(min=0)
+        self.chunk_seq_lens = (chunk_ends - chunk_starts).clamp(min=0).to(torch.int32)
         self.cu_seq_lens_cpu = torch.zeros(self.num_chunks, self.num_prefills + 1, dtype=torch.int32, pin_memory=True)
         torch.cumsum(self.chunk_seq_lens, dim=1, out=self.cu_seq_lens_cpu[:, 1:], dtype=torch.int32)
+        # Blocking host->device copy. A ``.pin_memory().to(non_blocking=True)``
+        # here copies from a TEMPORARY pinned tensor (``self.chunk_seq_lens`` is
+        # not pinned, so ``.pin_memory()`` allocates a throw-away buffer with no
+        # surviving reference). With an async copy that temporary can be freed
+        # before the DMA finishes, so the device tensor ends up with garbage seq
+        # lens -> chunked-prefill reads the KV cache out of range -> MTE "DDR
+        # address out of range". The corruption only reproduces WITHOUT
+        # ASCEND_LAUNCH_BLOCKING (a real async use-after-free race). ``.npu()``
+        # blocks until the copy completes, so the source stays valid.
+        chunk_seq_lens_npu = self.chunk_seq_lens.npu()
         chunk_actual_seq_lengths_kv_list = [
             torch.cumsum(self.chunk_seq_lens[i], dim=0).tolist() for i in range(self.num_chunks)
         ]
         return ChunkedContextMetadata(
             cu_seq_lens=self.cu_seq_lens_cpu.pin_memory().to(self.device, non_blocking=True),
-            starts=chunk_starts.pin_memory().to(self.device, non_blocking=True),
+            # ``chunk_starts`` is a local temporary; ``.pin_memory()`` makes an
+            # unreferenced throw-away buffer, so an async copy risks the same
+            # use-after-free race as ``chunk_seq_lens`` above. Use a blocking
+            # copy so the source stays alive until the DMA completes.
+            starts=chunk_starts.npu(),
             seq_tot=self.chunk_seq_lens.sum(dim=1).tolist(),
             max_seq_lens=self.chunk_seq_lens.max(dim=1).values.tolist(),
             chunk_seq_lens=self.chunk_seq_lens,
-            chunk_seq_lens_npu=self.chunk_seq_lens.npu(),
+            chunk_seq_lens_npu=chunk_seq_lens_npu,
             workspace=self.chunked_prefill_workspace,
             chunk_actual_seq_lengths_kv_list=chunk_actual_seq_lengths_kv_list,
         )
@@ -1369,6 +1397,25 @@ class AscendMLAImpl(MLAAttentionImpl):
         c_kv_scale = None
         if get_ascend_device_type() == AscendDeviceType.A5 and self.fa_quant_layer:
             c_kv_scale = self.fak_descale_reciprocal
+        # [snapshot] Sync-free safety net for the MTP drafter KV-cache scatter.
+        # After a snapshot restore the block-table device rows that are never
+        # re-copied from CPU (row >= num_reqs) hold restored garbage instead of
+        # the cold-start zeros; the drafter's look-ahead slot computation can
+        # read them and emit an out-of-range slot, which makes
+        # ``npu_kv_rmsnorm_rope_cache`` crash with an MTE "DDR address out of
+        # range". Map any slot outside [0, cap) to the pad id so the kernel
+        # skips it. Scoped to the draft path only: the main model never reads
+        # those rows (its decode reads only committed rows at real positions),
+        # so it pays ZERO overhead. ``cap`` is a Python int from the cache
+        # shape, so this is a pure device op with NO host sync.
+        if _EXTRA_CTX.is_draft_model:
+            _k0 = kv_cache[0]
+            _cap = (_k0.shape[0] * _k0.shape[1]) if _k0.dim() >= 2 else _k0.numel()
+            slots = torch.where(
+                (slots >= 0) & (slots < _cap),
+                slots,
+                torch.full_like(slots, PAD_SLOT_ID),
+            )
         k_pe, k_nope, _, _ = torch_npu.npu_kv_rmsnorm_rope_cache(
             kv_no_split,
             self.kv_a_layernorm.weight,  # type: ignore[union-attr]

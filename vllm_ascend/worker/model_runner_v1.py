@@ -3724,6 +3724,225 @@ class NPUModelRunner(GPUModelRunner):
         # module-level device tensors), which the per-model reload above cannot
         # reach via ``named_modules()``.
         self._reload_global_non_persistent_state()
+        # Snapshot restore invalidates low-level NPU event handles created before
+        # suspend. MTP/spec-decode paths synchronize these events on the first
+        # post-resume request; stale handles cause aclrtSynchronizeEvent failures.
+        self._reset_resume_npu_event_handles()
+        # Clear per-builder runtime metadata cache (MLA/DSA/etc.) so the first
+        # post-resume forward cannot read stale host/device tensors.
+        self._reset_resume_attention_builder_runtime_states()
+        # Re-zero block-table device rows that are never re-copied from CPU
+        # (row >= num_reqs). After restore they hold garbage which the MTP
+        # drafter's look-ahead slot computation can read, producing an
+        # out-of-range KV slot that crashes npu_kv_rmsnorm_rope_cache.
+        self._reset_resume_block_table_device_buffers()
+
+    def _reset_resume_npu_event_handles(self) -> None:
+        # Async seq-lens copy event used by MTP/spec decode metadata path.
+        self._seq_lens_cpu_event = None
+        self._seq_lens_cpu_event_pending = False
+
+        # ``sampling_done_event`` is recreated lazily every sampling step
+        # (see ``self.sampling_done_event = torch.npu.Event()`` in the sample
+        # path), so clearing it here is safe.
+        self.sampling_done_event = None
+
+        # ``valid_sampled_token_count_event`` and ``num_accepted_tokens_event``
+        # are created EXACTLY ONCE at init (base gpu_model_runner: guarded by
+        # ``num_spec_tokens`` / ``use_async_scheduling``) and are NEVER
+        # recreated afterwards. They must therefore be REPLACED with a fresh
+        # handle here, not set to None.
+        #
+        # Root cause of the post-resume "MTP acceptance == 0%" (and garbled
+        # output) regression: a previous version of this reset set these to
+        # None. But ``_copy_valid_sampled_token_count`` early-returns when
+        # ``valid_sampled_token_count_event is None`` -- and the assignment
+        # ``self.input_batch.prev_sampled_token_ids = next_token_ids...`` lives
+        # AFTER that guard. So a None event silently skips setting
+        # ``prev_sampled_token_ids`` on every post-resume step. With it None,
+        # ``_prepare_input_ids`` takes the non-async early return and NEVER
+        # scatters the sampled seed token or the draft tokens into
+        # ``input_ids.gpu``; those positions keep their -1/0 placeholders.
+        # The rejection sampler then verifies against -1 drafts every step ->
+        # acceptance collapses to 0%, and the (also unscattered) seed corrupts
+        # the main-model input. Recreating a live event restores the
+        # cold-start invariant so ``prev_sampled_token_ids`` is set again.
+        if getattr(self, "valid_sampled_token_count_event", None) is not None:
+            self.valid_sampled_token_count_event = torch.npu.Event()
+        if getattr(self, "num_accepted_tokens_event", None) is not None:
+            self.num_accepted_tokens_event = torch.npu.Event()
+
+        # Draft/spec events may be asserted as non-None in async scheduling
+        # paths; recreate fresh handles when attributes exist.
+        if hasattr(self, "draft_token_ids_event"):
+            self.draft_token_ids_event = torch.npu.Event()
+        if hasattr(self, "_num_valid_draft_tokens_event"):
+            self._num_valid_draft_tokens_event = torch.npu.Event()
+
+        # [snapshot] Recreate the async-scheduling copy STREAMS.
+        #
+        # Root cause of the post-resume "MTP acceptance == 0%" regression:
+        # ``aclrtSnapShotProcessRestore`` invalidates low-level NPU stream
+        # handles exactly like it does event handles. With async scheduling +
+        # spec decode, the drafter's proposed tokens are copied GPU->CPU on
+        # ``draft_token_ids_copy_stream`` (ordered by ``draft_token_ids_event``)
+        # and read back next step via ``take_draft_token_ids``. If the stream
+        # handle is stale, the first post-resume copy is enqueued on a dead
+        # stream and never lands, so ``draft_token_ids_cpu`` keeps its stale /
+        # placeholder (-1) content. The scheduler then verifies against -1
+        # drafts every step -> the rejection sampler rejects everything ->
+        # acceptance collapses to 0% (msProbe dumps show the drafter FORWARD is
+        # bit-identical pre/post, but the draft tokens reaching the rejection
+        # sampler are all -1 after resume). Recreating the streams restores the
+        # cold-start invariant so the async draft copy lands correctly.
+        for stream_attr in (
+            "draft_token_ids_copy_stream",
+            "valid_sampled_token_count_copy_stream",
+        ):
+            if getattr(self, stream_attr, None) is not None:
+                try:
+                    setattr(self, stream_attr, torch.npu.Stream())
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "[restore model] failed to recreate %s: %s: %s",
+                        stream_attr, type(exc).__name__, exc,
+                    )
+
+        # ``transfer_event`` orders the sampled-token GPU->CPU copy; a stale
+        # handle here can also stall/mis-order the async post-sample path.
+        if getattr(self, "transfer_event", None) is not None:
+            self.transfer_event = torch.npu.Event()
+
+        # Re-allocate the pinned draft-token host buffer. After restore its
+        # page-locked (device-registered) mapping can be stale, so a
+        # ``non_blocking`` copy into it may silently not land, leaving stale /
+        # placeholder drafts. A fresh allocation restores a clean registration.
+        if getattr(self, "draft_token_ids_cpu", None) is not None:
+            try:
+                self.draft_token_ids_cpu = torch.empty(
+                    (self.max_num_reqs, self.num_spec_tokens),
+                    dtype=torch.int64,
+                    device="cpu",
+                    pin_memory=self.pin_memory,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[restore model] failed to re-alloc draft_token_ids_cpu: %s: %s",
+                    type(exc).__name__, exc,
+                )
+
+        # Drop any cross-step spec-decode carry-over captured at snapshot time.
+        # The snapshot is taken while idle, but resetting defensively guarantees
+        # the first post-resume step cannot inject stale (pre-snapshot) drafts
+        # via ``take_draft_token_ids`` / ``update_async_spec_token_ids``.
+        if hasattr(self, "_draft_token_req_ids"):
+            self._draft_token_req_ids = None
+        if hasattr(self, "_draft_token_ids"):
+            self._draft_token_ids = None
+        input_batch = getattr(self, "input_batch", None)
+        if input_batch is not None and hasattr(input_batch, "prev_req_id_to_index"):
+            input_batch.prev_req_id_to_index = None
+
+    def _reset_resume_attention_builder_runtime_states(self) -> None:
+        """Best-effort reset for attention metadata builders.
+
+        Some builders keep runtime tensors (e.g. chunked prefill metadata) as
+        object fields and reuse them across iterations. After snapshot restore
+        these buffers may hold stale device context and trigger ACL sync errors.
+        """
+        total = 0
+        reset = 0
+        failed: list[str] = []
+        seen_ids: set[int] = set()
+
+        attn_groups = getattr(self, "attn_groups", None)
+        if not attn_groups:
+            logger.info("[restore model] attention builder runtime reset skipped: no attn_groups")
+            return
+
+        for kv_groups in attn_groups:
+            for attn_group in kv_groups:
+                builders: list[object] = []
+                explicit_builders = getattr(attn_group, "attn_metadata_builders", None)
+                if isinstance(explicit_builders, list):
+                    builders.extend(explicit_builders)
+                get_builder = getattr(attn_group, "get_metadata_builder", None)
+                if callable(get_builder):
+                    try:
+                        builder0 = get_builder(0)
+                        builders.append(builder0)
+                    except Exception as exc:  # noqa: BLE001
+                        failed.append(f"get_builder:{type(exc).__name__}:{exc}")
+
+                for builder in builders:
+                    if builder is None:
+                        continue
+                    bid = id(builder)
+                    if bid in seen_ids:
+                        continue
+                    seen_ids.add(bid)
+                    total += 1
+                    reset_fn = getattr(builder, "reset_runtime_cache", None)
+                    if not callable(reset_fn):
+                        continue
+                    try:
+                        reset_fn()
+                        reset += 1
+                    except Exception as exc:  # noqa: BLE001
+                        failed.append(
+                            f"{type(builder).__name__}:{type(exc).__name__}:{exc}"
+                        )
+
+        logger.info(
+            "[restore model] attention builder runtime reset: total=%d reset=%d%s",
+            total,
+            reset,
+            "" if not failed else f", failed={failed[: min(8, len(failed))]}",
+        )
+
+    def _reset_resume_block_table_device_buffers(self) -> None:
+        """[snapshot] Re-establish the cold-start zero invariant for block-table
+        device tensors after snapshot restore.
+
+        ``BlockTable.commit_block_table`` only copies the first ``num_reqs``
+        rows from CPU to the GPU tensor each step; rows ``>= num_reqs`` are never
+        touched after allocation. On a cold start they stay ``torch.zeros`` (a
+        read there yields block 0, harmless), but after
+        ``aclrtSnapShotProcessRestore`` they hold restored device garbage. The
+        MTP drafter's look-ahead slot computation
+        (``compute_new_slot_mapping``: ``block_table_tensor.view(-1)`` indexed by
+        position) can read those stale rows and produce a garbage block id ->
+        out-of-range slot -> ``npu_kv_rmsnorm_rope_cache`` crashes with an MTE
+        "DDR address out of range". The main model never hits this because its
+        decode only reads already-committed rows.
+
+        Zeroing the GPU tensor is safe: every active row is re-committed from the
+        CPU source of truth (which only ever holds valid block ids) before the
+        next forward, so this restores exactly the cold-start device state.
+        """
+        input_batch = getattr(self, "input_batch", None)
+        mgbt = getattr(input_batch, "block_table", None) if input_batch is not None else None
+        tables = getattr(mgbt, "block_tables", None)
+        if not tables:
+            logger.info("[restore model] block-table device reset skipped: no block tables")
+            return
+        zeroed = 0
+        failed: list[str] = []
+        for idx, bt in enumerate(tables):
+            buf = getattr(bt, "block_table", None)
+            gpu = getattr(buf, "gpu", None)
+            if gpu is None:
+                continue
+            try:
+                gpu.zero_()
+                zeroed += 1
+            except Exception as exc:  # noqa: BLE001
+                failed.append(f"group{idx}:{type(exc).__name__}:{exc}")
+        logger.info(
+            "[restore model] zeroed %d block-table device tensor(s) to restore cold-start invariant%s",
+            zeroed,
+            "" if not failed else f", failed={failed[: min(8, len(failed))]}",
+        )
 
     def _reload_global_non_persistent_state(self) -> None:
         """[snapshot] Rebuild process/class-level device tensors that are not part
