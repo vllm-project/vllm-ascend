@@ -1070,14 +1070,28 @@ class AscendAttentionBackendImpl(AttentionImpl):
         else:
             graph_params = get_graph_params()
         num_tokens = query.shape[0]
+        # KV sharing: in FDO graph mode draft layers must read K/V from the
+        # target layer's paged cache, not the draft's own (empty) cache.
+        # forward_paged_attention does this swap for eager; full_graph_pa
+        # (FDO decode path) needs it too or draft gathers all-zero KV.
+        _target_impl = getattr(self, '_kv_share_target_impl', None)
+        if (
+            _target_impl is not None
+            and getattr(_target_impl, 'key_cache', None) is not None
+        ):
+            _kc = _target_impl.key_cache
+            _vc = _target_impl.value_cache
+        else:
+            _kc = self.key_cache
+            _vc = self.value_cache
         if _EXTRA_CTX.capturing:
             # Get workspace from cache or calculate it if not present.
             workspace = graph_params.workspaces.get(num_tokens)
             if workspace is None:
                 workspace = torch_npu._npu_paged_attention_get_workspace(
                     query=query,
-                    key_cache=self.key_cache,
-                    value_cache=self.value_cache,
+                    key_cache=_kc,
+                    value_cache=_vc,
                     num_kv_heads=self.num_kv_heads,
                     num_heads=self.num_heads,
                     scale_value=self.scale,
@@ -1099,8 +1113,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     "paged_attention",
                     (
                         weak_ref_tensors(query),
-                        weak_ref_tensors(self.key_cache),
-                        weak_ref_tensors(self.value_cache),
+                        weak_ref_tensors(_kc),
+                        weak_ref_tensors(_vc),
                         self.num_kv_heads,
                         self.num_heads,
                         self.scale,
@@ -1123,7 +1137,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             if _is_fdo:
                 import torch.nn.functional as F
                 # Gather KV from paged cache → dense [num_tokens, heads, dim]
-                _block_size = self.key_cache.shape[1]
+                _block_size = _kc.shape[1]
                 _num_kv_heads = self.num_kv_heads
                 _num_heads = self.num_heads
                 _head_dim = self.head_size
@@ -1132,13 +1146,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 _num_reqs = _bt.shape[0]
                 _max_blocks = _bt.shape[1]
                 _flat_ids = _bt.reshape(-1)
-                _k = self.key_cache.index_select(0, _flat_ids)
+                _k = _kc.index_select(0, _flat_ids)
                 _k = _k.view(_num_reqs, _max_blocks, _block_size, _num_kv_heads, _head_dim)
                 _k = _k.permute(0, 3, 1, 2, 4).reshape(_num_reqs, _num_kv_heads, _max_blocks * _block_size, _head_dim)
                 # Slice to actual seq lens
                 _max_len = int(_bt.shape[1] * _block_size)
                 _k = _k[:, :, :_max_len, :].reshape(_num_reqs * _max_len, _num_kv_heads, _head_dim)[:num_tokens]
-                _v = self.value_cache.index_select(0, _flat_ids)
+                _v = _vc.index_select(0, _flat_ids)
                 _v = _v.view(_num_reqs, _max_blocks, _block_size, _num_kv_heads, _head_dim)
                 _v = _v.permute(0, 3, 1, 2, 4).reshape(_num_reqs, _num_kv_heads, _max_blocks * _block_size, _head_dim)
                 _v = _v[:, :, :_max_len, :].reshape(_num_reqs * _max_len, _num_kv_heads, _head_dim)[:num_tokens]
@@ -1162,8 +1176,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 torch.npu.graph_task_group_begin(stream)
                 torch_npu._npu_paged_attention(
                     query=query,
-                    key_cache=self.key_cache,
-                    value_cache=self.value_cache,
+                    key_cache=_kc,
+                    value_cache=_vc,
                     num_kv_heads=self.num_kv_heads,
                     num_heads=self.num_heads,
                     scale_value=self.scale,
