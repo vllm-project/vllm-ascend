@@ -2968,7 +2968,11 @@ class NPUModelRunner(GPUModelRunner):
                 num_active_loras=num_active_loras,
             )
 
-        cudagraph_mode, batch_descriptor = dispatch_cudagraph(num_tokens_padded, use_cascade_attn or has_encoder_output)
+        disable_full_for_lora_base_runtime = (
+            force_has_lora is None and self.lora_config is not None and not has_lora
+        )
+        disable_full = use_cascade_attn or has_encoder_output or disable_full_for_lora_base_runtime
+        cudagraph_mode, batch_descriptor = dispatch_cudagraph(num_tokens_padded, disable_full)
         num_tokens_padded = batch_descriptor.num_tokens
         if enable_sp(self.vllm_config):
             assert batch_descriptor.num_tokens % self.vllm_config.parallel_config.tensor_parallel_size == 0, (
@@ -3529,6 +3533,13 @@ class NPUModelRunner(GPUModelRunner):
                 num_scheduled_tokens_np=num_scheduled_tokens,
             )
 
+        if num_active_loras == 0:
+            dummy_num_active_loras = 0
+        elif self.lora_config is not None:
+            dummy_num_active_loras = self.lora_config.max_loras
+        else:
+            dummy_num_active_loras = num_active_loras
+
         with self.maybe_dummy_run_with_lora(
             self.lora_config,
             num_scheduled_tokens,
@@ -3537,7 +3548,7 @@ class NPUModelRunner(GPUModelRunner):
             # TODO: The next line is a temporary workaround
             # to fix the accuracy issue of test_llama32_lora.py,
             # which is introduced by vllm-project/vllm#32005
-            num_active_loras=(self.lora_config.max_loras if self.lora_config is not None else num_active_loras),
+            num_active_loras=dummy_num_active_loras,
         ):
             # Make sure padding doesn't exceed max_num_tokens
             assert num_tokens_padded <= self.max_num_tokens
