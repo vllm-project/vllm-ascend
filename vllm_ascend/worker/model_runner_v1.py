@@ -2448,6 +2448,11 @@ class NPUModelRunner(GPUModelRunner):
         with record_function_or_nullcontext("sample_token"):
             sampler_output = self._sample(logits, spec_decode_metadata)
 
+        if self.pcp_size > 1 and self.use_async_spec_decode:
+            _sampled = sampler_output.sampled_token_ids
+            _all_sampled = get_pcp_group().all_gather(_sampled,dim=0)
+            sampler_output.sampled_token_ids = _all_sampled[:_sampled.shape[0]]
+            
         if self.need_accepted_tokens:
             if self.sampling_done_event is None:
                 self.sampling_done_event = torch.npu.Event()
