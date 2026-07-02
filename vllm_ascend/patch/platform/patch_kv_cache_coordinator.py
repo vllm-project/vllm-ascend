@@ -285,15 +285,23 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         eagle_verified: set[int] = set()
 
         while True:
+            if hit_length == 0:
+                break
+
             # Progressive per-group alignment: try largest block size first,
             # progressively back off to smaller ones when groups disagree.
             # This replaces the single global LCM alignment that causes
-            # MTP block drops to cascade into 50% prefix cache loss (#9247).
+            # MTP block drops to cascade into 50% prefix cache loss (#9247 ref).
+            aligned = False
             for align_step in self._progressive_align_steps:
                 candidate = (hit_length // align_step) * align_step
                 if candidate == 0:
                     continue
                 hit_length = candidate
+                aligned = True
+                break
+            if not aligned:
+                hit_length = 0
                 break
 
             curr_hit_length = hit_length

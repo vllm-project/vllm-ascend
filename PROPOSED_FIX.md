@@ -20,7 +20,7 @@ groups have matching cached blocks.
 
 ### Algorithm
 
-```
+```text
 1. Start with hit_length = max_cache_hit_length
 2. Collect effective_block_sizes for all attention groups (sorted descending)
 3. For each alignment step from largest to smallest:
