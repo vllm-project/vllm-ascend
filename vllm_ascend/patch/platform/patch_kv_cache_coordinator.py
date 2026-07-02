@@ -228,6 +228,16 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         block_sizes = [self._get_effective_block_size(spec) for spec, _, _ in self.attention_groups]
         self.lcm_block_size = lcm(*block_sizes)
 
+        # Progressive per-group alignment: sorted descending by effective block size.
+        # During find_longest_cache_hit(), try largest alignment first,
+        # progressively back off to smaller ones when groups disagree.
+        # This prevents the coarse global LCM from over-truncating
+        # (e.g. 32K hit dropped to 16K by MTP block removal + LCM rounding).
+        self._progressive_align_steps = sorted(
+            set(self._get_effective_block_size(spec) for spec, _, _ in self.attention_groups),
+            reverse=True,
+        )
+
     def find_longest_cache_hit(
         self,
         block_hashes: list[BlockHash],
@@ -275,6 +285,17 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         eagle_verified: set[int] = set()
 
         while True:
+            # Progressive per-group alignment: try largest block size first,
+            # progressively back off to smaller ones when groups disagree.
+            # This replaces the single global LCM alignment that causes
+            # MTP block drops to cascade into 50% prefix cache loss (#9247).
+            for align_step in self._progressive_align_steps:
+                candidate = (hit_length // align_step) * align_step
+                if candidate == 0:
+                    continue
+                hit_length = candidate
+                break
+
             curr_hit_length = hit_length
             for idx, (spec, group_ids, manager_cls) in enumerate(self.attention_groups):
                 effective_block_size = self._get_effective_block_size(spec)
@@ -301,7 +322,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                     block_pool=self.block_pool,
                     kv_cache_spec=spec,
                     **eagle_kwarg,
-                    alignment_tokens=self.lcm_block_size,
+                    alignment_tokens=spec.block_size,  # per-group, not global LCM (#9247)
                     dcp_world_size=self.dcp_world_size,
                     pcp_world_size=self.pcp_world_size,
                 )
