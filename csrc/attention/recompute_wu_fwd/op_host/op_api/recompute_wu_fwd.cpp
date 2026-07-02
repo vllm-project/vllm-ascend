@@ -23,6 +23,7 @@ const std::array<const aclTensor *, 2> RecomputeWUFwd(
     const aclTensor *beta,
     const aclTensor *a,
     const aclTensor *g,
+    const aclTensor *gk,
     const aclIntArray *cuSeqlensOptional,
     const aclIntArray *chunkIndicesOptional,
     int64_t chunkSize,
@@ -53,7 +54,7 @@ const std::array<const aclTensor *, 2> RecomputeWUFwd(
     }
 
     auto ret = ADD_TO_LAUNCHER_LIST_AICORE(RecomputeWUFwd,
-        OP_INPUT(k, v, beta, a, g, actualCuSeqQLen, actualChunkIndices),
+        OP_INPUT(k, v, beta, a, g, gk, actualCuSeqQLen, actualChunkIndices),
         OP_OUTPUT(wOut, uOut),
         OP_ATTR(chunkSize));
     if (ret != ACLNN_SUCCESS) {

@@ -18,6 +18,7 @@ const std::array<const aclTensor *, 2> RecomputeWUFwd(
     const aclTensor *beta,
     const aclTensor *a,
     const aclTensor *g,
+    const aclTensor *gk,
     const aclIntArray *cuSeqlensOptional,
     const aclIntArray *chunkIndicesOptional,
     int64_t chunkSize,

@@ -137,7 +137,9 @@ aclnnStatus aclnnRecomputeWUFwdGetWorkspaceSize(
     CHECK_RET(ret == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID);
     CHECK_COND(ParamsDataContiguous(params, executorPtr) == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID,
                "ParamsDataContiguous failed.");
-    auto result = l0op::RecomputeWUFwd(params.k, params.v, params.beta, params.a, params.g, params.cuSeqlensOptional, params.chunkIndicesOptional, params.chunkSize, params.wOut, params.uOut, executorPtr);
+    auto result = l0op::RecomputeWUFwd(params.k, params.v, params.beta, params.a, params.g, params.gk,
+                                       params.cuSeqlensOptional, params.chunkIndicesOptional, params.chunkSize,
+                                       params.wOut, params.uOut, executorPtr);
     CHECK_RET(result[0] != nullptr, ACLNN_ERR_PARAM_NULLPTR);
     CHECK_RET(result[1] != nullptr, ACLNN_ERR_PARAM_NULLPTR);
 
