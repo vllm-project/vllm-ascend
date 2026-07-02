@@ -233,10 +233,10 @@ jobs:
         uses: runs-on/cache/restore@v5
         with:
           path: |
-            ${{ env.WORK_REPO_DIR }}/vllm_ascend/_cann_ops_custom
-            ${{ env.WORK_REPO_DIR }}/vllm_ascend/*.so
-            ${{ env.WORK_REPO_DIR }}/vllm_ascend/lib
-            ${{ env.WORK_REPO_DIR }}/vllm_ascend/include
+            vllm-ascend/vllm_ascend/_cann_ops_custom
+            vllm-ascend/vllm_ascend/*.so
+            vllm-ascend/vllm_ascend/lib
+            vllm-ascend/vllm_ascend/include
           key: vllm-ascend-build-v1-${{ steps.get_arch.outputs.arch }}-${{ env.MAIN2MAIN_IMAGE_TAG }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
           restore-keys: |
             vllm-ascend-build-v1-${{ steps.get_arch.outputs.arch }}-${{ env.MAIN2MAIN_IMAGE_TAG }}-
@@ -281,7 +281,7 @@ jobs:
           pip install uc-manager
           uv pip install -r requirements-dev.txt
           uv pip install --force-reinstall --no-deps triton-ascend==3.2.1
-          if find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
+          if find "${{ env.WORK_REPO_DIR }}/vllm_ascend" -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
             echo "CSRC cache hit: .so files found, skip kernel compilation"
             COMPILE_CUSTOM_KERNELS=0 uv pip install -e .
           else
@@ -294,10 +294,10 @@ jobs:
         uses: runs-on/cache/save@v5
         with:
           path: |
-            ${{ env.WORK_REPO_DIR }}/vllm_ascend/_cann_ops_custom
-            ${{ env.WORK_REPO_DIR }}/vllm_ascend/*.so
-            ${{ env.WORK_REPO_DIR }}/vllm_ascend/lib
-            ${{ env.WORK_REPO_DIR }}/vllm_ascend/include
+            vllm-ascend/vllm_ascend/_cann_ops_custom
+            vllm-ascend/vllm_ascend/*.so
+            vllm-ascend/vllm_ascend/lib
+            vllm-ascend/vllm_ascend/include
           key: vllm-ascend-build-v1-${{ steps.get_arch.outputs.arch }}-${{ env.MAIN2MAIN_IMAGE_TAG }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
       - name: Run main2main flow
