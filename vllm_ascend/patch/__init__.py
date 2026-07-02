@@ -760,14 +760,16 @@
 #       Remove this patch when vllm supports rotary quant or pluggable `MultiTokenPredictorLayer`.
 # ** 19a. File: worker/patch_deepseek_v2.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.models.deepseek_v2.DeepseekV2Attention.__init__`
+#   1. `vllm.model_executor.models.deepseek_v2.DeepseekV2MLAAttention.__init__`
 #    Why:
-#       GLM/DeepSeek DSA models can skip topk on selected layers. Those layers
-#       should not initialize `Indexer`, while MTP layers still need full indexer
-#       initialization.
+#       GLM-5.2 checkpoints omit `Indexer` weights on shared-indexer layers,
+#       while GLM-5.1 IndexCache overrides only skip top-k computation and keep
+#       per-layer `Indexer` weights. Treating both layouts alike breaks GLM-5.1
+#       weight loading.
 #    How:
-#       Wrap `DeepseekV2Attention.__init__` and skip `Indexer` construction on
-#       backbone layers whose config marks topk as skipped.
+#       Skip `Indexer` construction only when the layer both skips top-k and is
+#       explicitly marked `shared` in `indexer_types`. MTP layers always retain
+#       a complete `Indexer`.
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/pull/45895
 #    Future Plan:
