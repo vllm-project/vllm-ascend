@@ -141,10 +141,6 @@ class AscendAttentionBackend(AttentionBackend):
     def get_supported_kernel_block_sizes() -> list[int]:
         return [128]
 
-    @classmethod
-    def supports_non_causal(cls) -> bool:
-        return True
-
 
 class AscendAttentionState(Enum):
     PrefillNoCache = 0
@@ -1395,9 +1391,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 value=value[: attn_metadata.num_actual_tokens] if not encoder_decoder else value,
                 key_cache=self.key_cache,
                 value_cache=self.value_cache,
-                slot_mapping=slots[: attn_metadata.num_actual_tokens].to(torch.int32)
-                if not encoder_decoder
-                else slots.to(torch.int32),
+                slot_mapping=slots[: attn_metadata.num_actual_tokens] if not encoder_decoder else slots.to(torch.int32),
             )
             if self.is_kv_producer:
                 attn_metadata.reshape_cache_event.record()
