@@ -239,7 +239,7 @@ class AscendEagleSpeculator(EagleSpeculator):
         num_tokens_across_dp: torch.Tensor | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
     ) -> None:
-        pos = self.input_buffers.positions[:num_reqs]
+        positions = self.input_buffers.positions[:num_reqs]
         query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
         idx_mapping = self.idx_mapping[:num_reqs]
         for step in range(1, self.num_speculative_steps):
@@ -256,7 +256,7 @@ class AscendEagleSpeculator(EagleSpeculator):
             hidden_states = hidden_states[:num_reqs]
             draft_tokens = self.sample_draft(
                 last_hidden_states,
-                pos,
+                positions,
                 idx_mapping,
                 self.temperature,
                 self.seeds,
@@ -274,7 +274,7 @@ class AscendEagleSpeculator(EagleSpeculator):
                     self.max_model_len,
                 )
                 if attn_metadata is not None:
-                    self.block_tables.compute_slot_mappings(idx_mapping, query_start_loc, pos, num_tokens_padded)
+                    self.block_tables.compute_slot_mappings(idx_mapping, query_start_loc, positions, num_tokens_padded)
             self._increment_decode_attn_metadata(attn_metadata)
 
     def _multi_step_decode(
@@ -287,21 +287,26 @@ class AscendEagleSpeculator(EagleSpeculator):
         """
         Override to replay all N-1 decode steps in a single graph call.
         """
-        attn_metadata_updated = None
-        slot_mappings_updated = None
-        if not skip_attn:
+        positions = self.input_buffers.positions[:num_reqs]
+        query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
+        idx_mapping = self.idx_mapping[:num_reqs]
+
+        attn_metadata = None
+        slot_mappings_by_layer = None
+
+        if not skip_attn and self.advance_draft_positions:
             # Build attention metadata and slot mappings for the draft
             # decode steps. It is necessary to rebuild the attention
             # metadata even when replaying the FULL graph so that any
             # attention metadata builder state is updated.
             slot_mappings = self.block_tables.compute_slot_mappings(
-                self.idx_mapping[:num_reqs],
-                self.input_buffers.query_start_loc[: num_reqs + 1],
-                self.input_buffers.positions[:num_reqs],
+                idx_mapping,
+                query_start_loc,
+                positions,
                 batch_desc.num_tokens,
             )
-            slot_mappings_updated = build_slot_mappings_by_layer(slot_mappings, self.kv_cache_config)
-            attn_metadata_updated = self._build_draft_attn_metadata(
+            slot_mappings_by_layer = build_slot_mappings_by_layer(slot_mappings, self.kv_cache_config)
+            attn_metadata = self._build_draft_attn_metadata(
                 num_reqs=num_reqs,
                 num_reqs_padded=batch_desc.num_reqs or num_reqs,
                 num_tokens_padded=batch_desc.num_tokens,
@@ -311,12 +316,12 @@ class AscendEagleSpeculator(EagleSpeculator):
             assert self.decode_cudagraph_manager is not None
             self.decode_cudagraph_manager.run_fullgraph(batch_desc)
         else:
-            self._ascend_prepare_decode_draft(attn_metadata_updated, num_reqs)
+            self._ascend_prepare_decode_draft(attn_metadata, num_reqs)
             self._generate_draft(
                 num_reqs,
                 batch_desc.num_tokens,
-                attn_metadata_updated,
-                slot_mappings_updated,
+                attn_metadata,
+                slot_mappings_by_layer,
                 num_tokens_across_dp=num_tokens_across_dp,
                 cudagraph_runtime_mode=batch_desc.cg_mode,
             )
