@@ -110,6 +110,10 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # PREFILL_SKIP_MULTI_STEP: Under speculative decoding mode, the prefill phase skips multi-step speculation
+    # "1": enable,
+    # 0 or not set: disable
+    "PREFILL_SKIP_MULTI_STEP": lambda: bool(int(os.getenv("PREFILL_SKIP_MULTI_STEP", "0"))),
 }
 
 # end-env-vars-definition
