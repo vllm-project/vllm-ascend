@@ -41,6 +41,8 @@
 #include "gmm/grouped_matmul_swiglu_quant_v2/grouped_matmul_swiglu_quant_v2_torch_adpt.h"
 #include "attention/lightning_indexer/lightning_indexer_torch_adpt.h"
 #include "mc2/matmul_allreduce_add_rmsnorm/matmul_allreduce_add_rmsnorm_torch_adpt.h"
+#include "mc2/mega_moe/mega_moe_torch_adpt.h"
+#include "mc2/mega_moe/comm_context.h"
 #include "moe/moe_gating_top_k/moe_gating_top_k_torch_adpt.h"
 #include "moe/moe_init_routing_custom/moe_init_routing_custom_torch_adpt.h"
 #include "attention/sparse_flash_attention/sparse_flash_attention_torch_adpt.h"
@@ -2425,6 +2427,21 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     );
     ops.impl("dispatch_ffn_combine", torch::kPrivateUse1, &vllm_ascend::dispatch_ffn_combine);
 
+    ops.def(
+        "npu_mega_moe(Tensor context, Tensor x, Tensor topk_ids, Tensor topk_weights,"
+        "             Tensor[] weight1, Tensor[] weight2,"
+        "             int moe_expert_num, int ep_world_size, int ccl_buffer_size, *,"
+        "             Tensor[]? weight_scales1=None, Tensor[]? weight_scales2=None,"
+        "             Tensor[]? bias1=None, Tensor[]? bias2=None,"
+        "             Tensor? x_active_mask=None,"
+        "             int max_recv_token_num=0, int dispatch_quant_mode=0, int combine_quant_mode=0,"
+        "             str comm_alg=\"\", int num_max_tokens_per_rank=0, str activation=\"swiglu\","
+        "             float? activation_clamp=None, int? dispatch_quant_out_dtype=None,"
+        "             int? weight1_type=None, int? weight2_type=None)"
+        "             -> (Tensor y, Tensor expert_token_nums)"
+    );
+    ops.impl("npu_mega_moe", torch::kPrivateUse1, &vllm_ascend::npu_mega_moe);
+
     ops.def("matmul_allreduce_add_rmsnorm(Tensor x1, Tensor x2, Tensor residual, Tensor gamma, \
         str groupTp, int tpRankSize, int tpRankId, float epsilon, bool isTransB, bool isGatherAddOut) -> (Tensor output, Tensor add_out)");
     ops.impl("matmul_allreduce_add_rmsnorm", torch::kPrivateUse1, &vllm_ascend::matmul_allreduce_add_rmsnorm);
@@ -2933,5 +2950,12 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                     float beta=1.0, "
         "                     float threshold=20.0) -> (Tensor g, Tensor beta_output)");
     ops.impl("npu_fused_gdn_gating", torch::kPrivateUse1, &vllm_ascend::npu_fused_gdn_gating);
+    /// Register CommContextManager as a torch custom class for mega_moe.
+    /// Provides HCCL communication context tensor creation.
+    ops.class_<vllm_ascend::CommContextManager>("CommContextManager")
+        .def(torch::init<const std::string&, int64_t, const std::string&>())
+        .def("create_context", &vllm_ascend::CommContextManager::create_context)
+        .def("update_group", &vllm_ascend::CommContextManager::update_group)
+        .def_property("ccl_buffer_size", &vllm_ascend::CommContextManager::ccl_buffer_size);
 }
 #endif
