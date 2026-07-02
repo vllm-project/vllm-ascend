@@ -411,6 +411,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-m
   --tool-call-parser deepseek_v4 \
   --enable-auto-tool-choice \
   --reasoning-parser deepseek_v4 \
+  --headless \
   --speculative-config '{"num_speculative_tokens": 1,"method": "mtp","enforce_eager": true}' \
   --additional-config '
     {"ascend_compilation_config":{
