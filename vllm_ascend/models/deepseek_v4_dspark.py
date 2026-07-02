@@ -8,6 +8,7 @@ module. The target model provides selected layer hidden states; this model
 projects them into the draft attention context and emits a full draft block.
 """
 
+import os
 import typing
 from collections.abc import Iterable
 
@@ -75,6 +76,17 @@ def _dspark_cache_capacity(vllm_config: VllmConfig, block_size: int, window_size
 def _dspark_max_request_slots(vllm_config: VllmConfig) -> int:
     scheduler_config = getattr(vllm_config, "scheduler_config", None)
     return max(1, int(getattr(scheduler_config, "max_num_seqs", 1) or 1))
+
+
+def _get_dspark_num_mtp_layers(config: PretrainedConfig) -> int:
+    num_layers = getattr(config, "n_mtp_layers", None)
+    if num_layers is None:
+        num_layers = getattr(config, "dspark_num_mtp_layers", 3)
+    return int(num_layers or 3)
+
+
+def _dspark_standard_dsa_enabled() -> bool:
+    return os.getenv("VLLM_ASCEND_DSPARK_USE_STANDARD_DSA", "0") == "1"
 
 
 def _fp8_e4m3fn_quantized_abs(abs_scaled: torch.Tensor) -> torch.Tensor:
@@ -209,10 +221,20 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        return self._expand_private_kv(self._project_shared_kv(hidden_states, positions))
+
+    def _project_shared_kv(
+        self,
+        hidden_states: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> torch.Tensor:
         kv = self.kv_norm(_linear_output(self.wkv, hidden_states))
         k_nope, k_pe = kv.split([self.nope_head_dim, self.rope_head_dim], dim=-1)
         k_pe = _apply_dsv4_rope(self.rotary_emb, positions, k_pe.unsqueeze(1)).squeeze(1)
-        kv = torch.cat([k_nope, k_pe], dim=-1)
+        return torch.cat([k_nope, k_pe], dim=-1).view(-1, 1, self.head_dim).contiguous()
+
+    def _expand_private_kv(self, shared_kv: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        kv = shared_kv.squeeze(1)
         kv = _fp8_qdq_nope_dims(kv, self.nope_head_dim)
         k_nope, k_pe = kv.split([self.nope_head_dim, self.rope_head_dim], dim=-1)
         k = torch.cat(
@@ -224,6 +246,32 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         ).contiguous()
         v = kv.unsqueeze(1).expand(-1, self.n_local_heads, -1).contiguous()
         return k, v
+
+    def _store_standard_swa_kv(
+        self,
+        shared_kv: torch.Tensor,
+        slot_mapping: torch.Tensor | None,
+    ) -> None:
+        if not _dspark_standard_dsa_enabled():
+            return
+        if slot_mapping is None or slot_mapping.numel() == 0:
+            return
+
+        swa_cache_layer = self.dsa_attn.swa_cache_layer
+        swa_kv_cache = getattr(swa_cache_layer, "kv_cache", None)
+        if swa_kv_cache is None:
+            return
+        while isinstance(swa_kv_cache, (list, tuple)) and len(swa_kv_cache) == 1:
+            swa_kv_cache = swa_kv_cache[0]
+
+        from vllm_ascend.device.device_op import DeviceOperator
+
+        slot_mapping = slot_mapping.to(device=shared_kv.device, dtype=torch.int32)
+        if slot_mapping.ndim == 1:
+            slot_mapping = DeviceOperator.format_dsa_slot_mapping(slot_mapping, swa_cache_layer.block_size)
+        DeviceOperator.dsa_kv_compress_scatter(swa_kv_cache, shared_kv, slot_mapping)
+
+    _store_standard_swa_context_kv = _store_standard_swa_kv
 
     def _run_dspark_attention(
         self,
@@ -269,10 +317,12 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         main_x: torch.Tensor,
         positions: torch.Tensor,
         request_slots: torch.Tensor | None = None,
+        context_slot_mapping: torch.Tensor | None = None,
     ) -> None:
         if positions.numel() == 0:
             return
-        k, v = self._project_kv(main_x, positions)
+        shared_kv = self._project_shared_kv(main_x, positions)
+        k, v = self._expand_private_kv(shared_kv)
         max_pos = int(positions.max().item())
         self._ensure_dspark_cache(min(max_pos + 1, self._dspark_cache_capacity), k)
         assert self._dspark_k_cache is not None
@@ -298,6 +348,7 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         self._dspark_v_cache[slots_long, cache_indices] = v
         self._dspark_cache_positions[slots_long, cache_indices] = positions.to(torch.int32)
         self._dspark_cache_valid[slots_long, cache_indices] = True
+        self._store_standard_swa_kv(shared_kv, context_slot_mapping)
 
     def forward(
         self,
@@ -305,7 +356,11 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         hidden_states: torch.Tensor,
         llama_4_scaling: torch.Tensor | None = None,
         request_slots: torch.Tensor | None = None,
+        slot_mapping: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if _dspark_standard_dsa_enabled():
+            return self.dsa_attn(positions, hidden_states, llama_4_scaling)
+
         del llama_4_scaling
         qr = self.q_norm(_linear_output(self.wq_a, hidden_states))
         kv = self.kv_norm(_linear_output(self.wkv, hidden_states))
@@ -316,8 +371,8 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         k_nope, k_pe = kv.split([self.nope_head_dim, self.rope_head_dim], dim=-1)
         q_pe = _apply_dsv4_rope(self.rotary_emb, positions, q_pe)
         k_pe = _apply_dsv4_rope(self.rotary_emb, positions, k_pe.unsqueeze(1)).squeeze(1)
-        kv = torch.cat([k_nope, k_pe], dim=-1)
-        kv = _fp8_qdq_nope_dims(kv, self.nope_head_dim)
+        shared_kv = torch.cat([k_nope, k_pe], dim=-1).view(-1, 1, self.head_dim).contiguous()
+        kv = _fp8_qdq_nope_dims(shared_kv.squeeze(1), self.nope_head_dim)
         k_nope, k_pe = kv.split([self.nope_head_dim, self.rope_head_dim], dim=-1)
 
         q = torch.cat([q_nope, q_pe], dim=-1)
@@ -329,6 +384,7 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
             dim=-1,
         ).contiguous()
         v = kv.unsqueeze(1).expand(-1, self.n_local_heads, -1).contiguous()
+        self._store_standard_swa_kv(shared_kv, slot_mapping)
         attn_out = self._run_dspark_attention(q, k, v, positions, request_slots)
 
         attn_out = _apply_dsv4_rope_tail(
@@ -373,12 +429,19 @@ class DeepseekV4DSparkDecoderLayer(DeepseekV2DecoderLayer):
         llama_4_scaling: torch.Tensor | None = None,
         input_ids: torch.Tensor | None = None,
         request_slots: torch.Tensor | None = None,
+        slot_mapping: torch.Tensor | None = None,
     ) -> torch.Tensor:
         del residual, llama_4_scaling
         residual = hidden_states.clone()
         hidden_states, post, comb = self.hc_pre(hidden_states, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base)
         hidden_states = self.input_layernorm(hidden_states)
-        hidden_states = self.self_attn(positions, hidden_states, None, request_slots=request_slots)
+        hidden_states = self.self_attn(
+            positions,
+            hidden_states,
+            None,
+            request_slots=request_slots,
+            slot_mapping=slot_mapping,
+        )
         hidden_states = self.hc_post(hidden_states, residual, post, comb)
 
         residual = hidden_states.clone()
@@ -417,24 +480,6 @@ class DSparkMarkovHead(nn.Module):
         return self.bias(embed), embed
 
 
-class DSparkConfidenceHead(nn.Module):
-    def __init__(self, input_dim: int, prefix: str) -> None:
-        super().__init__()
-        self.proj = ReplicatedLinear(
-            input_dim,
-            1,
-            bias=False,
-            params_dtype=torch.float32,
-            quant_config=None,
-            return_bias=False,
-            prefix=f"{prefix}.proj",
-        )
-
-    def forward(self, hidden: torch.Tensor, markov_embed: torch.Tensor) -> torch.Tensor:
-        hidden = torch.cat([hidden, markov_embed], dim=-1)
-        return _linear_output(self.proj, hidden.float()).squeeze(-1)
-
-
 class DeepseekV4DSparkModel(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
@@ -445,7 +490,7 @@ class DeepseekV4DSparkModel(nn.Module):
         self.hidden_size = config.hidden_size
         self.block_size = int(config.dspark_block_size)
         self.target_layer_ids = list(config.dspark_target_layer_ids)
-        self.num_dspark_layers = int(getattr(config, "dspark_num_mtp_layers", 3))
+        self.num_dspark_layers = _get_dspark_num_mtp_layers(config)
         self.mtp_start_layer_idx = config.num_hidden_layers
 
         self.embed_tokens = VocabParallelEmbedding(
@@ -483,10 +528,6 @@ class DeepseekV4DSparkModel(nn.Module):
             config,
             maybe_prefix(prefix, f"layers.{last_layer_idx}.markov_head"),
         )
-        self.confidence_head = DSparkConfidenceHead(
-            config.hidden_size + config.dspark_markov_rank,
-            maybe_prefix(prefix, f"layers.{last_layer_idx}.confidence_head"),
-        )
         hc_dim = self.hc_mult * config.hidden_size
         self.hc_head_fn = nn.Parameter(
             torch.empty(self.hc_mult, hc_dim, dtype=torch.float32),
@@ -503,7 +544,6 @@ class DeepseekV4DSparkModel(nn.Module):
         last_layer = self.layers[str(last_layer_idx)]
         last_layer.norm = self.norm
         last_layer.markov_head = self.markov_head
-        last_layer.confidence_head = self.confidence_head
         last_layer.hc_head_fn = self.hc_head_fn
         last_layer.hc_head_base = self.hc_head_base
         last_layer.hc_head_scale = self.hc_head_scale
@@ -511,19 +551,29 @@ class DeepseekV4DSparkModel(nn.Module):
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
+    def get_draft_kv_cache_layer_names(self) -> list[str]:
+        return [layer.self_attn.dsa_attn.swa_cache_layer.prefix for layer in self.layers.values()]
+
     def precompute_and_store_context_kv(
         self,
         context_states: torch.Tensor,
         context_positions: torch.Tensor,
-        context_slot_mapping: torch.Tensor | None = None,
+        context_slot_mapping: torch.Tensor | list[torch.Tensor | None] | tuple[torch.Tensor | None, ...] | None = None,
         context_request_slots: torch.Tensor | None = None,
     ) -> None:
-        del context_slot_mapping
         if context_states.numel() == 0:
             return
         main_x = self.main_norm(_linear_output(self.main_proj, context_states))
-        for layer in self.layers.values():
-            layer.self_attn.precompute_context_kv(main_x, context_positions, context_request_slots)
+        for layer_idx, layer in enumerate(self.layers.values()):
+            layer_context_slot_mapping = context_slot_mapping
+            if isinstance(context_slot_mapping, (list, tuple)):
+                layer_context_slot_mapping = context_slot_mapping[layer_idx]
+            layer.self_attn.precompute_context_kv(
+                main_x,
+                context_positions,
+                request_slots=context_request_slots,
+                context_slot_mapping=layer_context_slot_mapping,
+            )
 
     def reset_request_slots(self, request_slots: torch.Tensor | None) -> None:
         for layer in self.layers.values():
@@ -536,6 +586,7 @@ class DeepseekV4DSparkModel(nn.Module):
         inputs_embeds: torch.Tensor | None = None,
         hidden_states: torch.Tensor | None = None,
         request_slots: torch.Tensor | None = None,
+        slot_mapping: torch.Tensor | None = None,
     ) -> torch.Tensor:
         del hidden_states
         if inputs_embeds is None:
@@ -547,6 +598,7 @@ class DeepseekV4DSparkModel(nn.Module):
                 hidden_states=hidden_states,
                 input_ids=input_ids,
                 request_slots=request_slots,
+                slot_mapping=slot_mapping,
             )
         return self.compute_head_hidden(hidden_states)
 
@@ -624,6 +676,7 @@ class DeepSeekV4DSparkMTP(nn.Module, DeepseekV2MixtureOfExperts):
         inputs_embeds: torch.Tensor | None = None,
         spec_step_idx: int = 0,
         request_slots: torch.Tensor | None = None,
+        slot_mapping: torch.Tensor | None = None,
     ) -> torch.Tensor:
         del intermediate_tensors, spec_step_idx
         assert input_ids is not None
@@ -633,6 +686,7 @@ class DeepSeekV4DSparkMTP(nn.Module, DeepseekV2MixtureOfExperts):
             inputs_embeds=inputs_embeds,
             hidden_states=hidden_states,
             request_slots=request_slots,
+            slot_mapping=slot_mapping,
         )
 
     def compute_logits(
@@ -653,11 +707,14 @@ class DeepSeekV4DSparkMTP(nn.Module, DeepseekV2MixtureOfExperts):
     def markov_bias(self, markov_embed: torch.Tensor) -> torch.Tensor:
         return self.model.markov_bias(markov_embed)
 
+    def get_draft_kv_cache_layer_names(self) -> list[str]:
+        return self.model.get_draft_kv_cache_layer_names()
+
     def precompute_and_store_context_kv(
         self,
         context_states: torch.Tensor,
         context_positions: torch.Tensor,
-        context_slot_mapping: torch.Tensor | None = None,
+        context_slot_mapping: torch.Tensor | list[torch.Tensor | None] | tuple[torch.Tensor | None, ...] | None = None,
         context_request_slots: torch.Tensor | None = None,
     ) -> None:
         self.model.precompute_and_store_context_kv(
@@ -784,7 +841,6 @@ class DeepSeekV4DSparkMTP(nn.Module, DeepseekV2MixtureOfExperts):
             "model.hc_head_scale",
             f"model.layers.{last_layer_idx}.markov_head.markov_w1.weight",
             f"model.layers.{last_layer_idx}.markov_head.markov_w2.weight",
-            f"model.layers.{last_layer_idx}.confidence_head.proj.weight",
         }
         missing_required = sorted(required_params - loaded_params)
         if missing_required:
@@ -802,6 +858,8 @@ class DeepSeekV4DSparkMTP(nn.Module, DeepseekV2MixtureOfExperts):
         stage_idx = int(match.group(1))
         layer_idx = self.config.num_hidden_layers + stage_idx
         rest = match.group(2)
+        if rest.startswith("confidence_head."):
+            return None
         name = f"model.layers.{layer_idx}.{rest}"
         name = name.replace(".attn.", ".self_attn.")
         name = name.replace(".ffn_norm.", ".post_attention_layernorm.")

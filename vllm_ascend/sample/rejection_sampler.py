@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import json
+import os
+import time
 from dataclasses import replace
 
 import torch
@@ -31,6 +34,185 @@ from vllm_ascend.ops.triton.reject_sample import (
 )
 from vllm_ascend.sample.penalties import apply_all_penalties
 from vllm_ascend.sample.sampler import apply_top_k_top_p
+
+
+def _dspark_accept_debug_path() -> str | None:
+    return os.getenv("VLLM_ASCEND_DSPARK_ACCEPT_DEBUG_PATH") or None
+
+
+def _dspark_accept_debug_int(name: str, default: int) -> int:
+    try:
+        return max(0, int(os.getenv(name, str(default))))
+    except ValueError:
+        return default
+
+
+def _tensor_list(tensor: torch.Tensor | None) -> list:
+    if tensor is None:
+        return []
+    return tensor.detach().cpu().tolist()
+
+
+def _topk_records(
+    row: torch.Tensor | None,
+    k: int,
+    indices: torch.Tensor | None = None,
+) -> list[dict[str, float | int]]:
+    if row is None or row.numel() == 0 or k <= 0:
+        return []
+    k = min(k, row.numel())
+    values, local_indices = torch.topk(row.detach().float().cpu(), k)
+    if indices is None:
+        token_ids = local_indices
+    else:
+        token_ids = indices.detach().cpu().gather(0, local_indices)
+    return [
+        {"token_id": int(token_id), "value": float(value)}
+        for token_id, value in zip(token_ids.tolist(), values.tolist())
+    ]
+
+
+def _token_rank(row: torch.Tensor | None, token_id: int, indices: torch.Tensor | None = None) -> int | None:
+    if row is None or token_id < 0:
+        return None
+    row_cpu = row.detach().float().cpu()
+    if indices is not None:
+        indices_cpu = indices.detach().cpu()
+        matches = (indices_cpu == token_id).nonzero(as_tuple=True)[0]
+        if matches.numel() == 0:
+            return None
+        local_id = int(matches[0])
+    elif token_id >= row_cpu.numel():
+        return None
+    else:
+        local_id = token_id
+    return int((row_cpu > row_cpu[local_id]).sum().item() + 1)
+
+
+def _token_logprob(row: torch.Tensor | None, token_id: int, indices: torch.Tensor | None = None) -> float | None:
+    if row is None or token_id < 0:
+        return None
+    row_cpu = row.detach().float().cpu()
+    if indices is not None:
+        indices_cpu = indices.detach().cpu()
+        matches = (indices_cpu == token_id).nonzero(as_tuple=True)[0]
+        if matches.numel() == 0:
+            return None
+        local_id = int(matches[0])
+    elif token_id >= row_cpu.numel():
+        return None
+    else:
+        local_id = token_id
+    logprobs = row_cpu - row_cpu.logsumexp(dim=-1)
+    return float(logprobs[local_id])
+
+
+def _dump_dspark_accept_debug(
+    *,
+    path_name: str,
+    draft_token_ids: torch.Tensor,
+    num_draft_tokens: list[int],
+    cu_num_draft_tokens: torch.Tensor,
+    target_logits: torch.Tensor,
+    target_indices: torch.Tensor | None,
+    output_token_ids: torch.Tensor,
+    sampling_metadata: SamplingMetadata,
+    target_argmax: torch.Tensor | None = None,
+    draft_logits: torch.Tensor | None = None,
+    draft_probs: torch.Tensor | None = None,
+) -> None:
+    debug_path = _dspark_accept_debug_path()
+    if debug_path is None:
+        return
+
+    max_reqs = _dspark_accept_debug_int("VLLM_ASCEND_DSPARK_ACCEPT_DEBUG_MAX_REQS", 4)
+    max_positions = _dspark_accept_debug_int("VLLM_ASCEND_DSPARK_ACCEPT_DEBUG_MAX_POSITIONS", 8)
+    top_k = _dspark_accept_debug_int("VLLM_ASCEND_DSPARK_ACCEPT_DEBUG_TOPK", 5)
+
+    try:
+        os.makedirs(os.path.dirname(debug_path) or ".", exist_ok=True)
+        draft_tokens_cpu = draft_token_ids.detach().cpu()
+        output_tokens_cpu = output_token_ids.detach().cpu()
+        cu_cpu = cu_num_draft_tokens.detach().cpu()
+        target_argmax_cpu = target_argmax.detach().cpu() if target_argmax is not None else None
+
+        record: dict[str, object] = {
+            "pid": os.getpid(),
+            "time_ns": time.time_ns(),
+            "path": path_name,
+            "batch_size": len(num_draft_tokens),
+            "max_spec_len": int(output_token_ids.shape[1] - 1),
+            "num_draft_tokens": [int(v) for v in num_draft_tokens],
+            "cu_num_draft_tokens": _tensor_list(cu_num_draft_tokens),
+            "all_greedy": bool(sampling_metadata.all_greedy),
+            "all_random": bool(sampling_metadata.all_random),
+            "has_target_indices": target_indices is not None,
+            "has_draft_logits": draft_logits is not None,
+            "has_draft_probs": draft_probs is not None,
+            "requests": [],
+        }
+
+        requests = []
+        start = 0
+        for req_idx, num_draft in enumerate(num_draft_tokens[:max_reqs]):
+            end = int(cu_cpu[req_idx].item()) if req_idx < cu_cpu.numel() else start + int(num_draft)
+            positions = []
+            accepted_prefix = 0
+            for prefix_pos in range(min(int(num_draft), output_tokens_cpu.shape[1])):
+                flat_idx = start + prefix_pos
+                if flat_idx >= draft_tokens_cpu.numel():
+                    break
+                if int(output_tokens_cpu[req_idx, prefix_pos].item()) != int(draft_tokens_cpu[flat_idx].item()):
+                    break
+                accepted_prefix += 1
+            for pos in range(min(int(num_draft), max_positions)):
+                flat_idx = start + pos
+                draft_token = int(draft_tokens_cpu[flat_idx].item())
+                output_token = int(output_tokens_cpu[req_idx, pos].item())
+                output_matches_draft = output_token == draft_token
+
+                target_row = target_logits[flat_idx] if flat_idx < target_logits.shape[0] else None
+                target_index_row = target_indices[flat_idx] if target_indices is not None else None
+                draft_row = draft_logits[flat_idx] if draft_logits is not None and flat_idx < draft_logits.shape[0] else None
+                if draft_row is None and draft_probs is not None and flat_idx < draft_probs.shape[0]:
+                    draft_row = draft_probs[flat_idx].clamp_min(torch.finfo(torch.float32).tiny).log()
+
+                positions.append(
+                    {
+                        "pos": pos,
+                        "flat_index": flat_idx,
+                        "draft_token": draft_token,
+                        "output_token": output_token,
+                        "output_matches_draft": output_matches_draft,
+                        "target_argmax": (
+                            int(target_argmax_cpu[flat_idx].item())
+                            if target_argmax_cpu is not None and flat_idx < target_argmax_cpu.numel()
+                            else None
+                        ),
+                        "target_rank_of_draft": _token_rank(target_row, draft_token, target_index_row),
+                        "target_logprob_draft": _token_logprob(target_row, draft_token, target_index_row),
+                        "draft_logprob_draft": _token_logprob(draft_row, draft_token),
+                        "target_topk": _topk_records(target_row, top_k, target_index_row),
+                        "draft_topk": _topk_records(draft_row, top_k),
+                    }
+                )
+
+            requests.append(
+                {
+                    "req_index": req_idx,
+                    "draft_tokens": _tensor_list(draft_tokens_cpu[start:end]),
+                    "output_tokens": _tensor_list(output_tokens_cpu[req_idx]),
+                    "output_matches_draft_prefix_len": accepted_prefix,
+                    "positions": positions,
+                }
+            )
+            start = end
+        record["requests"] = requests
+
+        with open(debug_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception:
+        logger.exception("[sample/rejection_sampler] Failed to write DSpark acceptance debug artifact.")
 
 
 class AscendRejectionSampler(RejectionSampler):
@@ -151,6 +333,7 @@ class AscendRejectionSampler(RejectionSampler):
         # [num_tokens + batch_size, vocab_size]
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
+        draft_logits: torch.Tensor | None = None,
     ) -> SamplerOutput:
         """
         Args:
@@ -169,6 +352,10 @@ class AscendRejectionSampler(RejectionSampler):
             sampling_metadata (vllm.v1.sample.metadata.SamplingMetadata):
                 Additional metadata needed for sampling, such as temperature,
                 top-k/top-p parameters, or other relevant information.
+            draft_logits (Optional[torch.Tensor]):
+                Temperature-processed draft logits. When provided, the standard
+                probabilistic path uses logits/logsumexp-space rejection
+                sampling instead of materializing draft probabilities.
         Returns:
             SamplerOutput:
                 Contains the final output token IDs and their logprobs if
@@ -227,6 +414,7 @@ class AscendRejectionSampler(RejectionSampler):
             bonus_token_ids,
             sampling_metadata,
             ori_target_logits=raw_target_logits,
+            draft_logits=draft_logits,
         )
 
         logprobs_tensors = None
@@ -354,6 +542,7 @@ def rejection_sample(
     synthetic_mode: bool = False,
     synthetic_conditional_rates: torch.Tensor | None = None,
     ori_target_logits: torch.Tensor | None = None,
+    draft_logits: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """
     Rejection sampling for speculative decoding in distributed setting.
@@ -384,6 +573,7 @@ def rejection_sample(
 
     assert draft_token_ids.ndim == 1
     assert draft_probs is None or draft_probs.ndim == 2
+    assert draft_logits is None or draft_logits.ndim == 2
     assert cu_num_draft_tokens.ndim == 1
     assert target_logits.ndim == 2
 
@@ -392,6 +582,7 @@ def rejection_sample(
     device = target_logits.device
     assert draft_token_ids.is_contiguous()
     assert draft_probs is None or draft_probs.is_contiguous()
+    assert draft_logits is None or draft_logits.is_contiguous()
     assert target_logits.is_contiguous()
     assert bonus_token_ids.is_contiguous()
     assert target_logits.shape[0] == num_tokens
@@ -432,6 +623,7 @@ def rejection_sample(
         is_greedy = sampling_metadata.temperature == GREEDY_TEMPERATURE
     if HAS_TRITON:
         grid, block_size = cal_grid_and_block_size(batch_size)
+    target_argmax_for_debug = None
 
     if using_block_verify or using_entropy_verify:
         logger.info_once(
@@ -454,6 +646,7 @@ def rejection_sample(
             target_argmax = greedy_sample(target_logits)
         else:
             target_argmax = target_logits.argmax(dim=-1).view(-1)
+        target_argmax_for_debug = target_argmax
 
         if HAS_TRITON:
             rejection_greedy_sample_with_triton(
@@ -488,7 +681,75 @@ def rejection_sample(
                     is_greedy,
                 )
         if sampling_metadata.all_greedy:
+            _dump_dspark_accept_debug(
+                path_name="greedy",
+                draft_token_ids=draft_token_ids,
+                num_draft_tokens=num_draft_tokens,
+                cu_num_draft_tokens=cu_num_draft_tokens,
+                target_logits=target_logits,
+                target_indices=target_indices,
+                output_token_ids=output_token_ids,
+                sampling_metadata=sampling_metadata,
+                target_argmax=target_argmax_for_debug,
+                draft_logits=draft_logits,
+                draft_probs=draft_probs,
+            )
             return output_token_ids
+
+    if (
+        draft_logits is not None
+        and target_indices is None
+        and not using_block_verify
+        and not using_entropy_verify
+        and not synthetic_mode
+    ):
+        assert target_logits.shape == draft_logits.shape
+        uniform_probs = generate_uniform_probs(
+            num_tokens,
+            num_draft_tokens,
+            sampling_metadata.generators,
+            device,
+        )
+        rejection_random_sample_logits_pytorch(
+            output_token_ids,
+            cu_num_draft_tokens,
+            draft_token_ids,
+            draft_logits,
+            target_logits,
+            bonus_token_ids,
+            uniform_probs,
+            is_greedy,
+            max_spec_len,
+            num_draft_tokens,
+            sampling_metadata.generators,
+        )
+        _dump_dspark_accept_debug(
+            path_name="logits_native",
+            draft_token_ids=draft_token_ids,
+            num_draft_tokens=num_draft_tokens,
+            cu_num_draft_tokens=cu_num_draft_tokens,
+            target_logits=target_logits,
+            target_indices=target_indices,
+            output_token_ids=output_token_ids,
+            sampling_metadata=sampling_metadata,
+            target_argmax=target_argmax_for_debug,
+            draft_logits=draft_logits,
+            draft_probs=draft_probs,
+        )
+        return output_token_ids
+
+    if draft_probs is None and draft_logits is not None:
+        logger.warning_once(
+            "[sample/rejection_sampler] Falling back to probability-space "
+            "rejection for draft logits because logits-native rejection does "
+            "not cover this configuration. reduce_sample=%s, block_verify=%s, "
+            "entropy_verify=%s, synthetic_mode=%s",
+            target_indices is not None,
+            using_block_verify,
+            using_entropy_verify,
+            synthetic_mode,
+        )
+        draft_probs = draft_logits.softmax(dim=-1, dtype=torch.float32).contiguous()
 
     # For random sampling with selected logits
     # target_logits is [num_tokens, top_k*tp_size] with indices [num_tokens, top_k*tp_size]
@@ -769,7 +1030,158 @@ def rejection_sample(
                     ori_target_probs=ori_target_probs,
                 )
 
+    _dump_dspark_accept_debug(
+        path_name="probability_space",
+        draft_token_ids=draft_token_ids,
+        num_draft_tokens=num_draft_tokens,
+        cu_num_draft_tokens=cu_num_draft_tokens,
+        target_logits=target_logits,
+        target_indices=target_indices,
+        output_token_ids=output_token_ids,
+        sampling_metadata=sampling_metadata,
+        target_argmax=target_argmax_for_debug,
+        draft_logits=draft_logits,
+        draft_probs=draft_probs,
+    )
     return output_token_ids
+
+
+def sample_recovered_tokens_from_logits_pytorch(
+    draft_token_ids: torch.Tensor,
+    cu_num_draft_tokens: torch.Tensor,
+    num_draft_tokens: list[int],
+    draft_logits: torch.Tensor,
+    target_logits: torch.Tensor,
+    generators: dict[int, torch.Generator],
+) -> torch.Tensor:
+    """Sample rejected tokens from max(target - draft, 0) in logit space."""
+    num_tokens, vocab_size = target_logits.shape
+    device = target_logits.device
+    if num_tokens == 0:
+        return torch.empty_like(draft_token_ids)
+
+    target_logits = target_logits.float()
+    draft_logits = draft_logits.float()
+    target_logprobs = target_logits - target_logits.logsumexp(dim=-1, keepdim=True)
+    draft_logprobs = draft_logits - draft_logits.logsumexp(dim=-1, keepdim=True)
+
+    ratio_log = draft_logprobs - target_logprobs
+    residual_logits = torch.where(
+        ratio_log < 0,
+        target_logprobs + torch.log1p(-torch.exp(ratio_log).clamp(max=1.0)),
+        torch.full_like(target_logprobs, float("-inf")),
+    )
+
+    valid_draft_mask = draft_token_ids != PLACEHOLDER_TOKEN_ID
+    residual_logits = torch.where(valid_draft_mask[:, None], residual_logits, target_logprobs)
+
+    q = torch.empty((num_tokens, vocab_size), dtype=torch.float32, device=device)
+    q.exponential_()
+    start_idx = 0
+    for req_idx, n in enumerate(num_draft_tokens):
+        if n == 0:
+            continue
+        end_idx = start_idx + n
+        generator = generators.get(req_idx)
+        if generator is not None:
+            q[start_idx:end_idx].exponential_(generator=generator)
+        start_idx = end_idx
+
+    q_log = q.clamp_min(torch.finfo(q.dtype).tiny).log()
+    scores = residual_logits - q_log
+    has_finite = torch.isfinite(scores).any(dim=-1)
+    fallback_scores = target_logprobs - q_log
+    scores = torch.where(has_finite[:, None], scores, fallback_scores)
+    return scores.argmax(dim=-1).to(draft_token_ids.dtype)
+
+
+def rejection_random_sample_logits_pytorch(
+    output_token_ids: torch.Tensor,
+    cu_num_draft_tokens: torch.Tensor,
+    draft_token_ids: torch.Tensor,
+    draft_logits: torch.Tensor,
+    target_logits: torch.Tensor,
+    bonus_token_ids: torch.Tensor,
+    uniform_probs: torch.Tensor,
+    is_greedy: torch.Tensor,
+    max_spec_len: int,
+    num_draft_tokens: list[int],
+    generators: dict[int, torch.Generator],
+) -> None:
+    """Standard speculative rejection sampling using processed logits."""
+    batch_size = output_token_ids.shape[0]
+    device = output_token_ids.device
+    num_tokens = draft_token_ids.shape[0]
+    if num_tokens == 0:
+        return
+
+    cu_start = torch.cat([cu_num_draft_tokens.new_zeros(1), cu_num_draft_tokens[:-1]])
+    cu_end = cu_num_draft_tokens
+    num_draft_per_batch = cu_end - cu_start
+    pos_indices = torch.arange(max_spec_len, device=device, dtype=cu_num_draft_tokens.dtype)[None, :]
+    valid_mask = pos_indices < num_draft_per_batch[:, None]
+    global_token_indices = (cu_start[:, None] + pos_indices).clamp(0, num_tokens - 1).long()
+
+    draft_tokens = draft_token_ids[global_token_indices]
+    placeholder_mask = draft_tokens == PLACEHOLDER_TOKEN_ID
+    safe_draft_tokens = draft_tokens.masked_fill(placeholder_mask, 0).long()
+
+    target_logits = target_logits.float()
+    draft_logits = draft_logits.float()
+    target_logprobs = target_logits - target_logits.logsumexp(dim=-1, keepdim=True)
+    draft_logprobs = draft_logits - draft_logits.logsumexp(dim=-1, keepdim=True)
+
+    flat_indices = global_token_indices.flatten()
+    flat_draft_tokens = safe_draft_tokens.flatten()
+    target_token_logprobs = target_logprobs[flat_indices, flat_draft_tokens].view(batch_size, max_spec_len)
+    draft_token_logprobs = draft_logprobs[flat_indices, flat_draft_tokens].view(batch_size, max_spec_len)
+
+    uniform_token_probs = uniform_probs[global_token_indices].clamp_min(torch.finfo(uniform_probs.dtype).tiny)
+    acceptance_condition = (
+        target_token_logprobs > uniform_token_probs.log() + draft_token_logprobs
+    ) & valid_mask & (~placeholder_mask)
+
+    first_rejection = (~acceptance_condition) & valid_mask
+    default_pos = torch.full((batch_size, 1), max_spec_len, dtype=pos_indices.dtype, device=device)
+    first_reject_pos = torch.where(
+        first_rejection.any(dim=1, keepdim=True),
+        first_rejection.float().argmax(dim=1, keepdim=True).to(pos_indices.dtype),
+        default_pos,
+    )
+    should_skip = (pos_indices >= first_reject_pos) & valid_mask
+    final_acceptance = acceptance_condition & (~should_skip)
+
+    recovered_token_ids = sample_recovered_tokens_from_logits_pytorch(
+        draft_token_ids,
+        cu_num_draft_tokens,
+        num_draft_tokens,
+        draft_logits,
+        target_logits,
+        generators,
+    )
+    recovered_tokens = recovered_token_ids[global_token_indices]
+
+    non_greedy_mask = ~is_greedy
+    accepted_update_mask = non_greedy_mask[:, None] & final_acceptance
+    first_reject_mask = (pos_indices == first_reject_pos) & valid_mask & non_greedy_mask[:, None]
+    output_token_ids[:, :max_spec_len] = torch.where(
+        accepted_update_mask,
+        draft_tokens.to(output_token_ids.dtype),
+        output_token_ids[:, :max_spec_len],
+    )
+    output_token_ids[:, :max_spec_len] = torch.where(
+        first_reject_mask,
+        recovered_tokens.to(output_token_ids.dtype),
+        output_token_ids[:, :max_spec_len],
+    )
+
+    no_rejection = first_reject_pos.squeeze(1) >= num_draft_per_batch
+    should_add_bonus = non_greedy_mask & no_rejection
+    all_positions = torch.arange(max_spec_len + 1, device=device, dtype=cu_num_draft_tokens.dtype)[None, :]
+    bonus_pos_match = all_positions == num_draft_per_batch[:, None]
+    bonus_mask = bonus_pos_match & should_add_bonus[:, None]
+    bonus_values = bonus_token_ids.view(-1, 1).expand(-1, max_spec_len + 1)
+    output_token_ids[:] = torch.where(bonus_mask, bonus_values.to(output_token_ids.dtype), output_token_ids)
 
 
 def expand_batch_to_tokens(
