@@ -732,6 +732,12 @@ class NPUModelRunner(GPUModelRunner):
 
         result = super()._update_states(scheduler_output)
 
+        # For preempted-then-resumed requests, attach the prefill token
+        # count to the CachedRequestState so that its (patched) num_tokens
+        # property returns the full token history instead of just the
+        # original prompt length. The request only appears in
+        # scheduled_new_reqs once (first chunk), but the attribute
+        # persists on the state instance for subsequent steps.
         for new_req_data in scheduler_output.scheduled_new_reqs:
             if new_req_data.prefill_token_ids:
                 req_state = self.requests.get(new_req_data.req_id)

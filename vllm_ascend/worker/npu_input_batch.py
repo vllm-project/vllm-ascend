@@ -29,17 +29,21 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
 from vllm_ascend.worker.block_table import MultiGroupBlockTable
 
-# Monkey-patch CachedRequestState.num_tokens to handle
-# preempted-then-resumed requests correctly.
-# For preempted requests, the scheduler sends prefill_token_ids
-# (prompt + old output tokens). We store its length as
-# _prefill_token_count. The patched num_tokens uses that as
-# the base instead of num_prompt_tokens (which only has the
-# original prompt length).
+# Patch CachedRequestState.num_tokens for preempted-then-resumed
+# requests. The scheduler's NewRequestData.prefill_token_ids carries
+# the full _all_token_ids (prompt + old output tokens). Store that
+# length on the request state so num_tokens reflects the total token
+# count, not just the original prompt length. This keeps the discard
+# decision (discard_requests_mask) aligned with the scheduler's
+# is_prefill_chunk without needing a global cache on the model runner.
 _original_num_tokens_prop = CachedRequestState.num_tokens
 
 
 def _patched_num_tokens(self) -> int:
+    # - Normal requests: base = num_prompt_tokens (e.g. 63)
+    # - Preempted requests: base = _prefill_token_count (e.g. 3685,
+    #   includes old output tokens).  output_token_ids grows naturally
+    #   as new tokens are appended during resumption/decode.
     prefill_count = getattr(self, "_prefill_token_count", 0)
     if prefill_count:
         return prefill_count + len(self.output_token_ids)
