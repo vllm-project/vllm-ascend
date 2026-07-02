@@ -14,13 +14,17 @@ class TestChunkGatedDeltaRule(PytestBase):
         mock_forward_context = MagicMock()
         mock_forward_context.attn_metadata = mock_attn_metadata
 
+        # Use self-consistent inputs:
+        # - 3 sequences with lengths [6, 6, 5] summing to T=17
+        # - cu_seqlens[-1] == 17 matches the tensor seqlen
+        # - initial_state has batch=3 matching 3 sequences
         q = torch.randn(1, 17, 4, 128, dtype=torch.bfloat16).npu()
         k = torch.randn(1, 17, 4, 128, dtype=torch.bfloat16).npu()
         v = torch.randn(1, 17, 8, 128, dtype=torch.bfloat16).npu()
         g = torch.randn(1, 17, 8, dtype=torch.float32).npu()
         beta = torch.randn(1, 17, 8, dtype=torch.bfloat16).npu()
         initial_state = torch.randn(3, 8, 128, 128, dtype=torch.bfloat16).npu()
-        q_start_loc = torch.range(0, 3, dtype=torch.int).npu()
+        cu_seqlens = torch.tensor([0, 6, 12, 17], dtype=torch.int).npu()
 
         mock_pcp_group = MagicMock()
         mock_pcp_group.world_size = 1
@@ -39,13 +43,40 @@ class TestChunkGatedDeltaRule(PytestBase):
                 beta=beta,
                 initial_state=initial_state,
                 output_final_state=True,
-                cu_seqlens=q_start_loc,
+                cu_seqlens=cu_seqlens,
                 head_first=False,
                 use_qk_l2norm_in_kernel=True,
             )
 
+        # Assert shapes
         assert core_attn_out_non_spec.shape == (1, 17, 8, 128)
         assert last_recurrent_state.shape == (3, 8, 128, 128)
+
+        # Assert numerical correctness against pytorch reference
+        ref_out, ref_state = chunk_gated_delta_rule_pytorch(
+            q=q.cpu().to(torch.float32),
+            k=k.cpu().to(torch.float32),
+            v=v.cpu().to(torch.float32),
+            g=g.cpu().to(torch.float32),
+            beta=beta.cpu().to(torch.float32),
+            initial_state=initial_state.cpu().to(torch.float32),
+            output_final_state=True,
+            cu_seqlens=cu_seqlens.cpu(),
+            head_first=False,
+            use_qk_l2norm_in_kernel=True,
+        )
+        torch.testing.assert_close(
+            core_attn_out_non_spec.cpu().to(torch.float32),
+            ref_out,
+            atol=0.05,
+            rtol=0.05,
+        )
+        torch.testing.assert_close(
+            last_recurrent_state.cpu().to(torch.float32),
+            ref_state,
+            atol=0.05,
+            rtol=0.05,
+        )
 
 
 def test_chunk_gated_delta_rule_310_state_layout_matches_vllm():
