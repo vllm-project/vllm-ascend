@@ -48,9 +48,16 @@ class AscendNgramProposer(NgramProposer):
                 # Skip requests that have already reached the max model length.
                 continue
 
-            start_idx = self.runner.input_batch.num_tokens_no_spec[i]
-            end_idx = start_idx + num_sampled_ids
-            self.runner.input_batch.token_ids_cpu[i, start_idx:end_idx] = sampled_ids
+            # NOTE: The sampled tokens are already written into
+            # ``token_ids_cpu`` (and ``num_tokens_no_spec`` is already
+            # advanced) by ``_bookkeeping_sync`` in the model runner, which
+            # runs *before* this proposer. Mirroring upstream vLLM's
+            # ``NgramProposer.propose``, we must NOT write them again here:
+            # doing so would write at an incorrect offset
+            # ``num_tokens_no_spec + num_sampled_ids`` (since
+            # ``num_tokens_no_spec`` already reflects the just-sampled
+            # tokens) and could overflow ``token_ids_cpu`` when a request
+            # is close to ``max_model_len``.
 
             valid_ngram_requests.append(i)
 
