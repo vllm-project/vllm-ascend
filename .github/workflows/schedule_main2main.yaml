@@ -41,13 +41,7 @@ env:
   WORK_REPO_DIR: ${{ github.workspace }}/vllm-ascend
   VLLM_DIR: ${{ github.workspace }}/vllm
   MAIN2MAIN_MODEL: deepseek/deepseek-v4-pro
-  UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-  UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu/"
-  UV_INDEX_STRATEGY: unsafe-best-match
-  UV_INSECURE_HOST: cache-service.nginx-pypi-cache.svc.cluster.local
-  UV_HTTP_TIMEOUT: 120
-  UV_NO_CACHE: 1
-  UV_SYSTEM_PYTHON: 1
+  
 
 jobs:
   main2main:
@@ -63,6 +57,13 @@ jobs:
         VLLM_USE_MODELSCOPE: True
         HCCL_BUFFSIZE: 1024
         HF_HUB_OFFLINE: 1
+        UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+        UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu/"
+        UV_INDEX_STRATEGY: unsafe-best-match
+        UV_INSECURE_HOST: cache-service.nginx-pypi-cache.svc.cluster.local
+        UV_HTTP_TIMEOUT: 120
+        UV_NO_CACHE: 1
+        UV_SYSTEM_PYTHON: 1
     defaults:
       run:
         shell: bash -el {0}
@@ -76,7 +77,7 @@ jobs:
       HEAD_FORK: vllm-ascend-ci/vllm-ascend
       MAIN2MAIN_KEEP_BRANCH: 'true'
       MAIN2MAIN_WORKSPACE: /tmp/main2main_flow/workspace
-      MAIN2MAIN_CASES_FILE: ${{ env.WORK_REPO_DIR }}/.github/workflows/scripts/main2main_tests.json
+      MAIN2MAIN_CASES_FILE: ${{ github.workspace }}/vllm-ascend/.github/workflows/scripts/main2main_tests.json
       MAIN2MAIN_LOG_HELPERS: |
         print_group() {
           local title="$1"
