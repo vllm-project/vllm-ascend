@@ -220,9 +220,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # the target model's graph-mode setting untouched.
         # TODO(lilinsiman): Remove this code segment after future versions of the GLM
         # series models support graph input for speculative inference.
-        if _is_glm_model(
-            self.vllm_config.model_config
-        ):
+        if _is_glm_model(self.vllm_config.model_config):
             if self.use_cuda_graph:
                 logger.warning(
                     "GLM series models with speculative decoding currently do "
