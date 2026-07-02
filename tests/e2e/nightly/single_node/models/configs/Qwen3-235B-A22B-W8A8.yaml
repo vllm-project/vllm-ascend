@@ -58,6 +58,7 @@ test_cases:
     benchmarks:
       <<: *benchmarks
 
+# test
   - name: "Qwen3-235B-A22B-W8A8-piecewise"
     model: "vllm-ascend/Qwen3-235B-A22B-W8A8"
     envs:
