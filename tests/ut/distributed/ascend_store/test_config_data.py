@@ -206,6 +206,47 @@ class TestChunkedTokenDatabase(unittest.TestCase):
         self.assertEqual(addr[0], 1000 + 5 * 160)
         self.assertEqual(addr[1], 1000 + 5 * 320)
 
+    def test_prepare_value_layer_uses_second_layer_base_addr(self):
+        self.db.set_group_buffers({0: [1000, 2000, 3000, 4000]}, {0: [160, 320]})
+        addr, size, block_id = self.db.prepare_value_layer(0, 16, [5, 6], layer_id=1)
+
+        self.assertEqual(block_id, 5)
+        self.assertEqual(addr, [3000 + 5 * 160, 3000 + 5 * 320])
+        self.assertEqual(size, [160, 320])
+
+    def test_prepare_value_layer_uses_explicit_stride(self):
+        self.db.set_group_buffers(
+            {0: [100, 200, 300, 400]},
+            {0: [160, 320]},
+            {0: [1000, 2000]},
+        )
+        addr, size, block_id = self.db.prepare_value_layer(0, 16, [2], layer_id=0)
+
+        self.assertEqual(block_id, 2)
+        self.assertEqual(addr, [100 + 2 * 1000, 100 + 2 * 2000])
+        self.assertEqual(size, [160, 320])
+
+    def test_prepare_value_layer_without_stride_uses_block_len(self):
+        addr, size, block_id = self.db.prepare_value_layer(0, 16, [2], layer_id=0)
+
+        self.assertEqual(block_id, 2)
+        self.assertEqual(addr, [1000 + 2 * 160, 1000 + 2 * 320])
+        self.assertEqual(size, [160, 320])
+
+    def test_prepare_value_layer_selects_non_first_block_id(self):
+        addr, size, block_id = self.db.prepare_value_layer(32, 48, [3, 4, 5], layer_id=0)
+
+        self.assertEqual(block_id, 5)
+        self.assertEqual(addr, [1000 + 5 * 160, 1000 + 5 * 320])
+        self.assertEqual(size, [160, 320])
+
+    def test_prepare_value_layer_partial_token_size_for_each_cache(self):
+        addr, size, block_id = self.db.prepare_value_layer(16, 24, [5, 6], layer_id=0)
+
+        self.assertEqual(block_id, 6)
+        self.assertEqual(addr, [1000 + 6 * 160, 1000 + 6 * 320])
+        self.assertEqual(size, [80, 160])
+
     def test_decode_adaptor_prefill_pp_no_partitions(self):
         key, addr, size = self.db.decode_adaptor_prefill_pp(["k1"], [[1, 2]], [[10, 20]])
         self.assertEqual(key, ["k1"])
@@ -225,6 +266,85 @@ class TestChunkedTokenDatabase(unittest.TestCase):
         self.assertEqual(len(new_keys), 2)
         self.assertIn("@pp_rank:0", new_keys[0])
         self.assertIn("@pp_rank:1", new_keys[1])
+
+    def test_decode_adaptor_prefill_pp_uses_group_num_layers(self):
+        db = ChunkedTokenDatabase([self.meta], [16], partitions=[1, 1, 2])
+        db.set_group_buffers(
+            {0: [1000, 2000]},
+            {0: [160, 320]},
+            group_num_layers={0: 4},
+        )
+        keys = ["k1@pp_rank:0"]
+        addrs = [[1, 2, 3, 4, 5, 6, 7, 8]]
+        sizes = [[10, 20, 30, 40, 50, 60, 70, 80]]
+
+        new_keys, new_addrs, new_sizes = db.decode_adaptor_prefill_pp(keys, addrs, sizes)
+
+        self.assertEqual(new_keys, ["k1@pp_rank:0", "k1@pp_rank:1", "k1@pp_rank:2"])
+        self.assertEqual(new_addrs, [[1, 2], [3, 4], [5, 6, 7, 8]])
+        self.assertEqual(new_sizes, [[10, 20], [30, 40], [50, 60, 70, 80]])
+
+    def test_decode_adaptor_prefill_pp_fallback_caches_per_layer_when_no_group_num_layers(self):
+        db = ChunkedTokenDatabase([self.meta], [16], partitions=[1, 2])
+        keys = ["k1@pp_rank:0"]
+        addrs = [[1, 2, 3, 4, 5, 6]]
+        sizes = [[10, 20, 30, 40, 50, 60]]
+
+        new_keys, new_addrs, new_sizes = db.decode_adaptor_prefill_pp(keys, addrs, sizes)
+
+        self.assertEqual(new_keys, ["k1@pp_rank:0", "k1@pp_rank:1"])
+        self.assertEqual(new_addrs, [[1, 2], [3, 4, 5, 6]])
+        self.assertEqual(new_sizes, [[10, 20], [30, 40, 50, 60]])
+
+    def test_decode_adaptor_prefill_pp_last_partition_takes_remainder(self):
+        db = ChunkedTokenDatabase([self.meta], [16], partitions=[1, 1, 1])
+        db.set_group_buffers(
+            {0: [1000, 2000]},
+            {0: [160, 320]},
+            group_num_layers={0: 3},
+        )
+        keys = ["k1@pp_rank:0"]
+        addrs = [[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]]
+        sizes = [[10, 20, 30, 40, 50, 60, 70, 80, 90, 100]]
+
+        new_keys, new_addrs, new_sizes = db.decode_adaptor_prefill_pp(keys, addrs, sizes)
+
+        self.assertEqual(new_keys, ["k1@pp_rank:0", "k1@pp_rank:1", "k1@pp_rank:2"])
+        self.assertEqual(new_addrs, [[1, 2, 3], [4, 5, 6], [7, 8, 9, 10]])
+        self.assertEqual(new_sizes, [[10, 20, 30], [40, 50, 60], [70, 80, 90, 100]])
+
+    def test_decode_adaptor_prefill_pp_replaces_only_first_pp_rank(self):
+        db = ChunkedTokenDatabase([self.meta], [16], partitions=[1, 1])
+        keys = ["k1@pp_rank:0@nested@pp_rank:0"]
+        addrs = [[1, 2, 3, 4]]
+        sizes = [[10, 20, 30, 40]]
+
+        new_keys, _, _ = db.decode_adaptor_prefill_pp(keys, addrs, sizes)
+
+        self.assertEqual(
+            new_keys,
+            [
+                "k1@pp_rank:0@nested@pp_rank:0",
+                "k1@pp_rank:1@nested@pp_rank:0",
+            ],
+        )
+
+    def test_decode_adaptor_prefill_pp_multiple_keys_each_partitioned(self):
+        db = ChunkedTokenDatabase([self.meta], [16], partitions=[1, 1])
+        db.set_group_buffers(
+            {0: [1000, 2000]},
+            {0: [160, 320]},
+            group_num_layers={0: 2},
+        )
+        keys = ["k1@pp_rank:0", "k2@pp_rank:0"]
+        addrs = [[1, 2, 3, 4], [5, 6, 7, 8]]
+        sizes = [[10, 20, 30, 40], [50, 60, 70, 80]]
+
+        new_keys, new_addrs, new_sizes = db.decode_adaptor_prefill_pp(keys, addrs, sizes)
+
+        self.assertEqual(new_keys, ["k1@pp_rank:0", "k1@pp_rank:1", "k2@pp_rank:0", "k2@pp_rank:1"])
+        self.assertEqual(new_addrs, [[1, 2], [3, 4], [5, 6], [7, 8]])
+        self.assertEqual(new_sizes, [[10, 20], [30, 40], [50, 60], [70, 80]])
 
 
 class TestLoadSpec(unittest.TestCase):
@@ -450,6 +570,106 @@ class TestReqMeta(unittest.TestCase):
         meta = ReqMeta.from_request_tracker(tracker, cache_transfer_granularity=16, original_block_size=8)
         self.assertIsNotNone(meta)
         self.assertEqual(meta.original_block_size, 8)
+
+    def test_from_request_tracker_preserves_is_last_chunk_true(self):
+        tracker = RequestTracker(
+            req_id="r1",
+            token_len=32,
+            allocated_block_ids=[0, 1],
+            num_saved_tokens=0,
+        )
+
+        meta = ReqMeta.from_request_tracker(tracker, cache_transfer_granularity=16, is_last_chunk=True)
+
+        self.assertIsNotNone(meta)
+        self.assertTrue(meta.is_last_chunk)
+
+    def test_from_request_tracker_preserves_is_last_chunk_false(self):
+        tracker = RequestTracker(
+            req_id="r1",
+            token_len=32,
+            allocated_block_ids=[0, 1],
+            num_saved_tokens=0,
+        )
+
+        meta = ReqMeta.from_request_tracker(tracker, cache_transfer_granularity=16, is_last_chunk=False)
+
+        self.assertIsNotNone(meta)
+        self.assertFalse(meta.is_last_chunk)
+
+    def test_from_request_tracker_bytes_hashes_no_discard_partial(self):
+        tracker = RequestTracker(
+            req_id="r1",
+            token_len=20,
+            allocated_block_ids=[0, 1],
+            num_saved_tokens=0,
+        )
+        block_hashes = [b"h1", b"h2"]
+
+        meta = ReqMeta.from_request_tracker(
+            tracker,
+            cache_transfer_granularity=16,
+            block_hashes=block_hashes,
+            discard_partial_chunks=False,
+        )
+
+        self.assertIsNotNone(meta)
+        self.assertEqual(meta.token_len_chunk, 20)
+        self.assertEqual(meta.block_hashes, block_hashes)
+
+    def test_from_request_tracker_skip_save_with_load_spec_keeps_load(self):
+        tracker = RequestTracker(
+            req_id="r1",
+            token_len=32,
+            allocated_block_ids=[0, 1],
+            num_saved_tokens=0,
+        )
+        load_spec = LoadSpec(vllm_cached_tokens=16, kvpool_cached_tokens=32, can_load=True)
+
+        meta = ReqMeta.from_request_tracker(
+            tracker,
+            cache_transfer_granularity=16,
+            load_spec=load_spec,
+            skip_save=True,
+        )
+
+        self.assertIsNotNone(meta)
+        self.assertFalse(meta.can_save)
+        self.assertIs(meta.load_spec, load_spec)
+
+    def test_from_request_tracker_kv_cache_group_families_combination(self):
+        tracker = RequestTracker(
+            req_id="r1",
+            token_len=32,
+            allocated_block_ids_by_group=[[0, 1], [10, 11]],
+            num_saved_tokens=0,
+        )
+
+        meta = ReqMeta.from_request_tracker(
+            tracker,
+            cache_transfer_granularity=16,
+            kv_cache_group_families=["default", "c4"],
+        )
+
+        self.assertIsNotNone(meta)
+        self.assertEqual(meta.block_ids_by_group, [[0, 1], [10, 11]])
+        self.assertEqual(meta.kv_cache_group_ids, [0, 1])
+        self.assertEqual(meta.kv_cache_families_by_group, ["default", "c4"])
+
+    def test_from_request_tracker_token_ids_are_preserved(self):
+        token_ids = list(range(32))
+        tracker = RequestTracker(
+            req_id="r1",
+            token_len=32,
+            allocated_block_ids=[0, 1],
+            num_saved_tokens=0,
+            token_ids=token_ids,
+        )
+
+        meta = ReqMeta.from_request_tracker(tracker, cache_transfer_granularity=16)
+
+        self.assertIsNotNone(meta)
+        self.assertIs(meta.token_ids, token_ids)
 
 
 class TestAscendConnectorMetadata(unittest.TestCase):
