@@ -152,9 +152,9 @@ class YuanrongBackend(Backend):
             )
             return [0] * len(keys)
 
-    def get(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
+    def get(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]) -> list[int] | None:
         if len(keys) == 0:
-            return
+            return []
         failed_keys_for_log = keys
         try:
             self._ensure_device_ready()
@@ -181,6 +181,8 @@ class YuanrongBackend(Backend):
                     len(keys),
                 )
                 logger.debug("Failed to get key details. failed_keys=%s", failed_keys)
+            failed_set = set(failed_keys)
+            return [1 if k in failed_set else 0 for k in keys]
         except Exception as exc:
             logger.error(
                 "Failed to get %d keys out of %d. Check network and yuanrong service.",
@@ -193,6 +195,7 @@ class YuanrongBackend(Backend):
                 type(exc).__name__,
                 exc,
             )
+            return None
 
     def put(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
         if len(keys) == 0:
