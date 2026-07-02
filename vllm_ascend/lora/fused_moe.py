@@ -42,9 +42,7 @@ from __future__ import annotations
 
 import torch
 from torch import nn
-from transformers import PretrainedConfig
 from vllm import envs
-from vllm.config.lora import LoRAConfig
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
