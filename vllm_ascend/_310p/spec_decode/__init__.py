@@ -14,9 +14,3 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-
-from vllm_ascend._310p.spec_decode.llm_base_proposer_310 import AscendSpecDecodeBaseProposer310
-
-__all__ = [
-    "AscendSpecDecodeBaseProposer310",
-]
