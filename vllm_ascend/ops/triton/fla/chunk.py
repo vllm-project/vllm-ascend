@@ -16,15 +16,146 @@ from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fla.ops.utils import SUPPRESS_LEVEL
 
-from .chunk_delta_h import chunk_gated_delta_rule_fwd_h  # noqa: F401
 from .chunk_delta_hupdate import chunk_gated_delta_rule_fwd_hupdate
-from .chunk_o import chunk_fwd_o  # noqa: F401
 from .chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd
 from .cumsum import chunk_local_cumsum
 from .l2norm import l2norm_fwd
-from .solve_tril import solve_tril
-from .utils import input_guard, prepare_final_chunk_indices
-from .wy_fast import recompute_w_u_fwd
+from .utils import input_guard, prepare_chunk_indices, prepare_final_chunk_indices
+
+
+def _as_host_tuple(values):
+    if values is None:
+        return None
+    if isinstance(values, tuple):
+        return values
+    if isinstance(values, list):
+        return tuple(int(v) for v in values)
+    if isinstance(values, torch.Tensor):
+        return tuple(int(v) for v in values.detach().cpu().reshape(-1).tolist())
+    return tuple(int(v) for v in values)
+
+
+def _prepare_chunk_indices_if_needed(cu_seqlens, chunk_indices, chunk_size: int):
+    if cu_seqlens is None or chunk_indices is not None:
+        return chunk_indices
+    if isinstance(cu_seqlens, torch.Tensor):
+        return prepare_chunk_indices(cu_seqlens, chunk_size)
+    return None
+
+
+def solve_tril(
+    A: torch.Tensor,
+    cu_seqlens=None,
+    chunk_indices_large_block=None,
+    chunk_indices_bt=None,
+    output_dtype: torch.dtype = torch.float,
+) -> torch.Tensor:
+    del chunk_indices_large_block
+    output_dtype = A.dtype if output_dtype is None else output_dtype
+    A_for_kernel = A.to(output_dtype).contiguous()
+    if cu_seqlens is None:
+        return torch.ops._C_ascend.npu_solve_tri(A_for_kernel, layout="bsnd")
+
+    chunk_indices_bt = _prepare_chunk_indices_if_needed(cu_seqlens, chunk_indices_bt, A_for_kernel.shape[-1])
+    cu_seqlens_host = _as_host_tuple(cu_seqlens)
+    chunk_indices_host = _as_host_tuple(chunk_indices_bt)
+    A_tnd = A_for_kernel.reshape(-1, A_for_kernel.shape[-2], A_for_kernel.shape[-1])
+    out = torch.ops._C_ascend.npu_solve_tri(
+        A_tnd,
+        cu_seqlens=cu_seqlens_host,
+        chunk_indices=chunk_indices_host,
+        layout="tnd",
+    )
+    return out.reshape_as(A_for_kernel)
+
+
+def recompute_w_u_fwd(
+    k: torch.Tensor,
+    v: torch.Tensor,
+    beta: torch.Tensor,
+    g_cumsum: torch.Tensor,
+    A: torch.Tensor,
+    cu_seqlens=None,
+    chunk_indices=None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    chunk_size = A.shape[-1]
+    chunk_indices = _prepare_chunk_indices_if_needed(cu_seqlens, chunk_indices, chunk_size)
+    w, u = torch.ops._C_ascend.npu_recompute_wu_fwd(
+        k.transpose(1, 2).contiguous(),
+        v.transpose(1, 2).contiguous(),
+        beta.to(g_cumsum.dtype).transpose(1, 2).contiguous(),
+        A.transpose(1, 2).contiguous(),
+        g_cumsum.transpose(1, 2).contiguous(),
+        cu_seqlens=_as_host_tuple(cu_seqlens),
+        chunk_indices=_as_host_tuple(chunk_indices),
+        chunk_size=chunk_size,
+    )
+    return w.transpose(1, 2).contiguous(), u.transpose(1, 2).contiguous()
+
+
+def chunk_gated_delta_rule_fwd_h(
+    k: torch.Tensor,
+    w: torch.Tensor,
+    u: torch.Tensor,
+    g: torch.Tensor | None = None,
+    initial_state: torch.Tensor | None = None,
+    output_final_state: bool = False,
+    chunk_size: int = 64,
+    save_new_value: bool = True,
+    cu_seqlens=None,
+    chunk_indices=None,
+    chunk_offsets: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    del chunk_offsets
+    chunk_indices = _prepare_chunk_indices_if_needed(cu_seqlens, chunk_indices, chunk_size)
+    h, v_new, final_state = torch.ops._C_ascend.chunk_gated_delta_rule_fwd_h(
+        k.to(torch.bfloat16).transpose(1, 2).contiguous(),
+        w.to(torch.bfloat16).transpose(1, 2).contiguous(),
+        u.to(torch.bfloat16).transpose(1, 2).contiguous(),
+        g=None if g is None else g.transpose(1, 2).contiguous(),
+        gk=None,
+        initial_state=initial_state,
+        output_final_state=output_final_state,
+        chunk_size=chunk_size,
+        save_new_value=save_new_value,
+        cu_seqlens=_as_host_tuple(cu_seqlens),
+        chunk_indices=_as_host_tuple(chunk_indices),
+        use_exp2=False,
+        transpose_state_layout=False,
+    )
+    return h.transpose(1, 2).contiguous(), v_new.transpose(1, 2).contiguous(), final_state
+
+
+def chunk_fwd_o(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    h: torch.Tensor,
+    g: torch.Tensor | None = None,
+    scale: float | None = None,
+    cu_seqlens=None,
+    chunk_size: int = 64,
+    chunk_offsets: torch.Tensor | None = None,
+) -> torch.Tensor:
+    del chunk_offsets
+    if scale is None:
+        scale = k.shape[-1] ** -0.5
+    chunk_indices = _prepare_chunk_indices_if_needed(cu_seqlens, None, chunk_size)
+    h_for_kernel = h.transpose(1, 2).contiguous() if h.dim() == 5 else h
+    out = torch.ops._C_ascend.chunk_fwd_o(
+        q.to(torch.bfloat16).transpose(1, 2).contiguous(),
+        k.to(torch.bfloat16).transpose(1, 2).contiguous(),
+        v.transpose(1, 2).contiguous(),
+        h_for_kernel,
+        scale,
+        g=None if g is None else g.transpose(1, 2).contiguous(),
+        g_gamma=None,
+        cu_seqlens=_as_host_tuple(cu_seqlens),
+        chunk_indices=_as_host_tuple(chunk_indices),
+        chunk_size=chunk_size,
+        transpose_state_layout=False,
+    )
+    return out.transpose(1, 2).contiguous()
 
 
 def chunk_gated_delta_rule_fwd(
@@ -55,6 +186,15 @@ def chunk_gated_delta_rule_fwd(
     update_chunk_offsets_chunk64 = None if prebuilt_meta is None else prebuilt_meta.update_chunk_offsets_chunk64
     final_chunk_indices_chunk64 = None if prebuilt_meta is None else prebuilt_meta.final_chunk_indices_chunk64
     chunk_indices_large_block = None if prebuilt_meta is None else prebuilt_meta.chunk_indices_large_block
+
+    cu_seqlens = None if cu_seqlens is None else cu_seqlens.to(torch.int64)
+    if cu_seqlens is not None and chunk_indices_chunk64 is None and chunk_indices_chunk64_host is None:
+        chunk_indices_chunk64 = prepare_chunk_indices(cu_seqlens, chunk_size)
+    chunk_indices = None if chunk_indices_chunk64 is None else chunk_indices_chunk64.to(torch.int64)
+    if cu_seqlens_host is None and cu_seqlens is not None:
+        cu_seqlens_host = _as_host_tuple(cu_seqlens)
+    if chunk_indices_chunk64_host is None and chunk_indices is not None:
+        chunk_indices_chunk64_host = _as_host_tuple(chunk_indices)
     g = chunk_local_cumsum(
         g,
         chunk_size=chunk_size,
@@ -67,14 +207,14 @@ def chunk_gated_delta_rule_fwd(
         beta=beta,
         g_cumsum=g,
         cu_seqlens=cu_seqlens,
-        chunk_indices=chunk_indices_chunk64,
+        chunk_indices=chunk_indices,
         output_dtype=torch.float32,
     )
     A = solve_tril(
         A=A,
-        cu_seqlens=cu_seqlens,
+        cu_seqlens=cu_seqlens_host,
         chunk_indices_large_block=chunk_indices_large_block,
-        chunk_indices_bt=chunk_indices_chunk64,
+        chunk_indices_bt=chunk_indices_chunk64_host,
         output_dtype=k.dtype,
     )
     w, u = recompute_w_u_fwd(
@@ -83,8 +223,8 @@ def chunk_gated_delta_rule_fwd(
         beta=beta,
         A=A,
         g_cumsum=g,
-        cu_seqlens=cu_seqlens,
-        chunk_indices=chunk_indices_chunk64,
+        cu_seqlens=cu_seqlens_host,
+        chunk_indices=chunk_indices_chunk64_host,
     )
 
     k_ascendc = k.to(torch.bfloat16).transpose(1, 2).contiguous()
@@ -93,12 +233,6 @@ def chunk_gated_delta_rule_fwd(
     g_ascendc = g.transpose(1, 2).contiguous()
     q_ascendc = q.to(torch.bfloat16).transpose(1, 2).contiguous()
 
-    cu_seqlens = None if cu_seqlens is None else cu_seqlens.to(torch.int64)
-    chunk_indices = None if chunk_indices_chunk64 is None else chunk_indices_chunk64.to(torch.int64)
-    if cu_seqlens_host is None and cu_seqlens is not None:
-        cu_seqlens_host = tuple(cu_seqlens.tolist())
-    if chunk_indices_chunk64_host is None and chunk_indices is not None:
-        chunk_indices_chunk64_host = tuple(chunk_indices.flatten().tolist())
     h, v_new, final_state = torch.ops._C_ascend.chunk_gated_delta_rule_fwd_h(
         k_ascendc,
         w_ascendc,
