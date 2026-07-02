@@ -165,7 +165,7 @@ class PCPManager:
         self.num_scheduled_tokens_padded: np.ndarray | None = None
         self.max_num_tokens_across_pcp = 0
         self.total_pcp_padding_tokens_fla = 0
-        self.pcp_tokens_padded = None
+        self.pcp_tokens_padded: np.ndarray | None = None
         self.total_num_scheduled_tokens = 0
         self._local_num_scheduled_tokens: np.ndarray | None = None
         self._local_total_num_scheduled_tokens: int | None = None
