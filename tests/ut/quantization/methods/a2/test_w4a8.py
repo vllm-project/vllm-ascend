@@ -107,6 +107,23 @@ class TestAscendW4A8DynamicLinearMethod(TestBase):
         self.method.apply(layer, x)
         mock_matmul.assert_called_once()
 
+    @patch("torch_npu.npu_weight_quant_batchmatmul")
+    def test_apply_passes_bias(self, mock_matmul):
+        layer = MagicMock()
+        layer.weight = torch.randint(-8, 8, (256, 512), dtype=torch.int8)
+        layer.weight_scale_second = torch.randn(1, 512, dtype=torch.float32)
+        mock_matmul.return_value = torch.randn(32, 512)
+        x = torch.randn(32, 256, dtype=torch.bfloat16)
+        bias = torch.randn(512, dtype=torch.bfloat16)
+
+        self.method.apply(layer, x, bias=bias)
+
+        passed_bias = mock_matmul.call_args.kwargs["bias"]
+        self.assertIsNotNone(passed_bias)
+        self.assertEqual(passed_bias.dtype, torch.float32)
+        self.assertTrue(passed_bias.is_contiguous())
+        torch.testing.assert_close(passed_bias, bias.to(torch.float32))
+
     @patch("vllm_ascend.quantization.methods.w4a8.maybe_trans_nz")
     def test_process_weights_after_loading_asserts_new_quant_packed_dim(self, mock_maybe_trans_nz):
         self.method.new_quant_version = True
