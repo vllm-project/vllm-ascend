@@ -161,9 +161,37 @@ class InstanceInfo:
     decoder_score: float
     decoder_host: str
     decoder_port: int
+    prefiller_cached_tokens: int | None = None
 
 
 TAINT_PRIORITY = 1e15
+
+
+def extract_cached_tokens(response_json: dict) -> int | None:
+    usage = response_json.get("usage") or {}
+    prompt_tokens_details = usage.get("prompt_tokens_details") or {}
+    cached_tokens = prompt_tokens_details.get("cached_tokens")
+    return cached_tokens if isinstance(cached_tokens, int) else None
+
+
+def update_cached_tokens_in_chunk(chunk_json: dict, cached_tokens: int | None) -> bool:
+    if cached_tokens is None:
+        return False
+    usage = chunk_json.get("usage")
+    if not isinstance(usage, dict):
+        return False
+    prompt_tokens_details = usage.get("prompt_tokens_details")
+    if not isinstance(prompt_tokens_details, dict):
+        prompt_tokens_details = {}
+        usage["prompt_tokens_details"] = prompt_tokens_details
+    prompt_tokens_details["cached_tokens"] = cached_tokens
+    return True
+
+
+def encode_response_chunk(chunk_json: dict, is_sse: bool) -> bytes:
+    chunk = json.dumps(chunk_json, ensure_ascii=False).encode("utf-8")
+    return b"data: " + chunk + b"\n\n" if is_sse else chunk
+
 
 global_args: argparse.Namespace | None = None
 shared_scheduler: "SharedProxyScheduler | None" = None
@@ -922,9 +950,11 @@ async def assign_instances(
         await _abort_prefill_selection(runtime, prefiller_key, prefiller_score, is_initial_request=is_initial_request)
         raise
 
-    kv_transfer_params = response.json().get("kv_transfer_params", {})
+    response_json = response.json()
+    kv_transfer_params = response_json.get("kv_transfer_params", {})
     if kv_transfer_params:
         req_data["kv_transfer_params"] = kv_transfer_params
+    prefiller_cached_tokens = extract_cached_tokens(response_json)
 
     try:
         decoder = await runtime.schedule("pick_decoder", decoder_score)
@@ -943,6 +973,7 @@ async def assign_instances(
         decoder_score=decoder_score,
         decoder_host=decoder["host"],
         decoder_port=decoder["port"],
+        prefiller_cached_tokens=prefiller_cached_tokens,
     )
 
 
@@ -987,6 +1018,7 @@ async def handle_completions_impl(api: str, request: Request):
             retry_count = 0
             retry = True
             completion_tokens = 0
+            reported_prefiller_cached_tokens = instance_info.prefiller_cached_tokens
 
             async def release_prefill_kv_once() -> None:
                 nonlocal released_kv
@@ -1018,7 +1050,8 @@ async def handle_completions_impl(api: str, request: Request):
                             continue
                         if not chunk_str:
                             continue
-                        if chunk_str.startswith("data: "):
+                        is_sse = chunk_str.startswith("data: ")
+                        if is_sse:
                             chunk_str = chunk_str[len("data: ") :]
                         try:
                             chunk_json = json.loads(chunk_str)
@@ -1028,6 +1061,8 @@ async def handle_completions_impl(api: str, request: Request):
                             continue
                         choices = chunk_json.get("choices", [])
                         if not choices:
+                            if update_cached_tokens_in_chunk(chunk_json, reported_prefiller_cached_tokens):
+                                chunk = encode_response_chunk(chunk_json, is_sse)
                             yield chunk
                             continue
 
@@ -1056,12 +1091,17 @@ async def handle_completions_impl(api: str, request: Request):
                             instance_info = await reassign_instances(api, req_data, tmp_request_length, instance_info)
                             released_kv = False
                             break
+                        chunk_updated = False
                         if retry_count > 0 and not stream_flag:
                             if chat_flag:
                                 choice["message"]["content"] = generated_token
                             else:
                                 choice["text"] = generated_token
-                            chunk = json.dumps(chunk_json).encode("utf-8")
+                            chunk_updated = True
+                        if update_cached_tokens_in_chunk(chunk_json, reported_prefiller_cached_tokens):
+                            chunk_updated = True
+                        if chunk_updated:
+                            chunk = encode_response_chunk(chunk_json, is_sse)
                         yield chunk
             except asyncio.CancelledError:
                 logger.warning(
