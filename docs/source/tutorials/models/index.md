@@ -44,4 +44,5 @@ Mixtral-8x7B-Instruct-v0.1.md
 Qwen3-ASR-1.7B.md
 Qwen2.5-Math-RM-72B.md
 InternVL3.5
+Qwen3-TTS-12Hz-1.7B-VoiceDesign.md
 :::

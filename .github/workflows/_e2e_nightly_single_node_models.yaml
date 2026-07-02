@@ -142,6 +142,17 @@ jobs:
         run: |
           pip install tensorflow==2.19.1 --no-cache-dir
 
+      - name: Install qwen-tts (for Qwen3-TTS-12Hz-1.7B-VoiceDesign)
+        if: ${{ contains(inputs.model_list, 'Qwen3-TTS-12Hz-1.7B-VoiceDesign') }}
+        run: |
+          # qwen-tts pins transformers==4.57.3; install runtime deps only.
+          pip install qwen-tts==0.1.1 --no-deps --no-cache-dir
+          pip install accelerate==1.12.0 sox onnxruntime --no-cache-dir
+          if command -v apt-get >/dev/null 2>&1; then
+            apt-get update -y
+            apt-get install -y --no-install-recommends sox libsox-fmt-all
+          fi
+
       - name: Get vLLM commit hash and URL
         working-directory: /vllm-workspace/vllm
         run: |
@@ -241,6 +252,10 @@ jobs:
             model_type=$(python3 -c "import yaml,sys; c=yaml.safe_load(open('${config_path}')); print(c.get('model_type','vllm'))" 2>/dev/null || echo "vllm")
             if [[ "$model_type" == "vllm-asr" ]]; then
               test_script="./tests/e2e/models/test_asr_eval_correctness.py"
+            elif [[ "$model_type" == "vllm-tts" ]]; then
+              test_script="./tests/e2e/models/test_tts_eval_correctness.py"
+              pip install qwen-tts==0.1.1 --no-deps --no-cache-dir
+              pip install accelerate==1.12.0 sox onnxruntime --no-cache-dir
             elif [[ "$model_type" == "vllm-rm" ]]; then
               test_script="./tests/e2e/models/test_rm_eval_correctness.py"
             else
