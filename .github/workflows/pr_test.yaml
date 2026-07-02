@@ -200,6 +200,61 @@ jobs:
             echo "matched_modules="
           } >> "$GITHUB_OUTPUT"
 
+  select-recommended-tests:
+    name: Parse recommended test list
+    # Debug: restore before merge — require the `ready` label to run.
+    # if: ${{ github.event.action != 'labeled' || github.event.label.name == 'ready' }}
+    runs-on: linux-amd64-cpu-8-hk
+    container:
+      image: quay.io/ascend-ci/vllm-ascend:lint
+    outputs:
+      has_tests: ${{ steps.scope.outputs.has_tests }}
+      test_groups: ${{ steps.scope.outputs.test_groups }}
+      main_commit: ${{ steps.vllm.outputs.main_commit }}
+      release_tag: ${{ steps.vllm.outputs.release_tag }}
+    env:
+      TEST_LIST_FILE: .github/workflows/scripts/recommended_tests.txt
+    steps:
+      - name: Checkout vllm-project/vllm-ascend repo
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Read verified vLLM refs
+        id: vllm
+        run: |
+          main_commit="$(tr -d '[:space:]' < .github/vllm-main-verified.commit)"
+          release_tag="$(tr -d '[:space:]' < .github/vllm-release-tag.commit)"
+          [[ "${main_commit}" =~ ^[0-9a-f]{7,40}$ ]] || {
+            echo "::error file=.github/vllm-main-verified.commit::invalid vLLM main commit: ${main_commit}"
+            exit 1
+          }
+          [[ "${release_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-].*)?$ ]] || {
+            echo "::error file=.github/vllm-release-tag.commit::invalid vLLM release tag: ${release_tag}"
+            exit 1
+          }
+          {
+            echo "main_commit=${main_commit}"
+            echo "release_tag=${release_tag}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Select tests from file
+        id: scope
+        run: |
+          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
+          pip install regex pyyaml -q
+          if [ ! -f "$TEST_LIST_FILE" ]; then
+            echo "::warning::Recommended test list not found: $TEST_LIST_FILE"
+            {
+              echo "has_tests=false"
+              echo "test_groups=[]"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          python3 .github/workflows/scripts/select_tests.py \
+            --test-list-file "$TEST_LIST_FILE"
+
   run-selected-tests:
     needs: lint-and-select-tests
     if: ${{ needs.lint-and-select-tests.outputs.has_tests == 'true' && contains(github.event.pull_request.labels.*.name, 'ready') }}
@@ -214,3 +269,20 @@ jobs:
       ref: ${{ github.event.pull_request.head.sha }}
       base_ref: ${{ github.base_ref }}
       test_groups: ${{ needs.lint-and-select-tests.outputs.test_groups }}
+
+  run-recommended-tests:
+    name: Run recommended tests (${{ matrix.vllm_version }})
+    needs: select-recommended-tests
+    if: ${{ needs.select-recommended-tests.outputs.has_tests == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        vllm_version:
+          - ${{ needs.select-recommended-tests.outputs.main_commit }}
+          - ${{ needs.select-recommended-tests.outputs.release_tag }}
+    uses: ./.github/workflows/_selected_tests.yaml
+    with:
+      vllm: ${{ matrix.vllm_version }}
+      ref: ${{ github.event.pull_request.head.sha }}
+      base_ref: ${{ github.base_ref }}
+      test_groups: ${{ needs.select-recommended-tests.outputs.test_groups }}
