@@ -1,3 +1,7 @@
+import json
+import os
+import tempfile
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
@@ -7,8 +11,10 @@ from vllm_ascend.sample.rejection_sampler import (
     expand_batch_to_tokens,
     expand_pytorch,
     rejection_greedy_sample_pytorch,
+    rejection_random_sample_logits_pytorch,
     rejection_random_sample_block_verify_pytorch,
     rejection_random_sample_pytorch,
+    rejection_sample,
     sample_recovered_tokens_blockwise_pytorch,
     sample_recovered_tokens_pytorch,
 )
@@ -29,6 +35,195 @@ def mock_pin_memory(original_func):
 
 
 class TestAscendRejectionSampler(TestBase):
+    def test_rejection_random_sample_logits_pytorch_uses_nonzero_uniform(self):
+        output_token_ids = torch.full((1, 2), PLACEHOLDER_TOKEN_ID, dtype=torch.int32)
+        cu_num_draft_tokens = torch.tensor([1], dtype=torch.int32)
+        draft_token_ids = torch.tensor([0], dtype=torch.int32)
+        draft_logits = torch.tensor([[0.8, 0.1, 0.1]], dtype=torch.float32).log()
+        target_logits = torch.tensor([[0.2, 0.1, 0.7]], dtype=torch.float32).log()
+        bonus_token_ids = torch.tensor([[99]], dtype=torch.int32)
+        uniform_probs = torch.tensor([0.5], dtype=torch.float64)
+        is_greedy = torch.tensor([False])
+
+        rejection_random_sample_logits_pytorch(
+            output_token_ids,
+            cu_num_draft_tokens,
+            draft_token_ids,
+            draft_logits,
+            target_logits,
+            bonus_token_ids,
+            uniform_probs,
+            is_greedy,
+            max_spec_len=1,
+            num_draft_tokens=[1],
+            generators={},
+        )
+
+        assert output_token_ids.tolist() == [[2, PLACEHOLDER_TOKEN_ID]]
+
+    def test_rejection_random_sample_logits_pytorch_adds_bonus_after_accepting_all(self):
+        output_token_ids = torch.full((1, 3), PLACEHOLDER_TOKEN_ID, dtype=torch.int32)
+        cu_num_draft_tokens = torch.tensor([2], dtype=torch.int32)
+        draft_token_ids = torch.tensor([0, 1], dtype=torch.int32)
+        draft_logits = torch.tensor(
+            [
+                [0.5, 0.5],
+                [0.5, 0.5],
+            ],
+            dtype=torch.float32,
+        ).log()
+        target_logits = torch.tensor(
+            [
+                [0.7, 0.3],
+                [0.2, 0.8],
+            ],
+            dtype=torch.float32,
+        ).log()
+        bonus_token_ids = torch.tensor([[99]], dtype=torch.int32)
+        uniform_probs = torch.tensor([0.8, 0.8], dtype=torch.float64)
+        is_greedy = torch.tensor([False])
+
+        rejection_random_sample_logits_pytorch(
+            output_token_ids,
+            cu_num_draft_tokens,
+            draft_token_ids,
+            draft_logits,
+            target_logits,
+            bonus_token_ids,
+            uniform_probs,
+            is_greedy,
+            max_spec_len=2,
+            num_draft_tokens=[2],
+            generators={},
+        )
+
+        assert output_token_ids.tolist() == [[0, 1, 99]]
+
+    @patch("vllm_ascend.sample.rejection_sampler.get_ascend_config")
+    @patch("vllm_ascend.sample.rejection_sampler.generate_uniform_probs")
+    @patch("vllm_ascend.sample.rejection_sampler.HAS_TRITON", False)
+    def test_rejection_sample_uses_draft_logits_without_draft_probs(self, mock_uniform, mock_ascend_config):
+        mock_uniform.return_value = torch.tensor([0.5], dtype=torch.float64)
+        mock_ascend_config.return_value = SimpleNamespace(
+            enable_reduce_sample=False,
+            rejection_sampler_config=SimpleNamespace(
+                enable_block_verify=False,
+                enable_entropy_verify=False,
+                posterior_threshold=0.95,
+                posterior_alpha=0.4,
+            ),
+        )
+        draft_token_ids = torch.tensor([0], dtype=torch.int32)
+        cu_num_draft_tokens = torch.tensor([1], dtype=torch.int32)
+        draft_logits = torch.tensor([[0.8, 0.1, 0.1]], dtype=torch.float32).log().contiguous()
+        target_logits = torch.tensor([[0.2, 0.1, 0.7]], dtype=torch.float32).log().contiguous()
+        bonus_token_ids = torch.tensor([[99]], dtype=torch.int32)
+        sampling_metadata = SimpleNamespace(
+            all_greedy=False,
+            all_random=True,
+            temperature=torch.tensor([1.0]),
+            generators={},
+        )
+
+        output = rejection_sample(
+            draft_token_ids,
+            [1],
+            1,
+            cu_num_draft_tokens,
+            None,
+            target_logits,
+            bonus_token_ids,
+            sampling_metadata,
+            draft_logits=draft_logits,
+        )
+
+        assert output.tolist() == [[2, PLACEHOLDER_TOKEN_ID]]
+
+    @patch("vllm_ascend.sample.rejection_sampler.get_ascend_config")
+    @patch("vllm_ascend.sample.rejection_sampler.HAS_TRITON", False)
+    def test_rejection_sample_writes_dspark_accept_debug_jsonl(self, mock_ascend_config):
+        mock_ascend_config.return_value = SimpleNamespace(
+            enable_reduce_sample=False,
+            rejection_sampler_config=SimpleNamespace(
+                enable_block_verify=False,
+                enable_entropy_verify=False,
+                posterior_threshold=0.95,
+                posterior_alpha=0.4,
+            ),
+        )
+        draft_token_ids = torch.tensor([1, 2, 2], dtype=torch.int32)
+        cu_num_draft_tokens = torch.tensor([2, 3], dtype=torch.int32)
+        target_logits = torch.tensor(
+            [
+                [0.1, 3.0, 0.2],
+                [0.1, 0.2, 3.0],
+                [2.0, 0.1, 0.5],
+            ],
+            dtype=torch.float32,
+        ).contiguous()
+        draft_logits = torch.tensor(
+            [
+                [0.2, 2.5, 0.1],
+                [0.1, 0.2, 2.5],
+                [0.1, 0.2, 2.1],
+            ],
+            dtype=torch.float32,
+        ).contiguous()
+        sampling_metadata = SimpleNamespace(
+            all_greedy=True,
+            all_random=False,
+            temperature=None,
+            generators={},
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            debug_path = os.path.join(tmp_dir, "accept_debug.jsonl")
+            with patch.dict(
+                os.environ,
+                {
+                    "VLLM_ASCEND_DSPARK_ACCEPT_DEBUG_PATH": debug_path,
+                    "VLLM_ASCEND_DSPARK_ACCEPT_DEBUG_MAX_REQS": "2",
+                    "VLLM_ASCEND_DSPARK_ACCEPT_DEBUG_MAX_POSITIONS": "1",
+                    "VLLM_ASCEND_DSPARK_ACCEPT_DEBUG_TOPK": "2",
+                },
+            ):
+                output = rejection_sample(
+                    draft_token_ids,
+                    [2, 1],
+                    2,
+                    cu_num_draft_tokens,
+                    None,
+                    target_logits,
+                    torch.tensor([[7], [8]], dtype=torch.int32),
+                    sampling_metadata,
+                    draft_logits=draft_logits,
+                )
+
+            assert output.tolist() == [[1, 2, 7], [0, PLACEHOLDER_TOKEN_ID, PLACEHOLDER_TOKEN_ID]]
+            with open(debug_path, encoding="utf-8") as f:
+                record = json.loads(f.readline())
+
+        assert record["path"] == "greedy"
+        assert record["batch_size"] == 2
+        assert record["has_draft_logits"] is True
+        assert record["num_draft_tokens"] == [2, 1]
+        assert len(record["requests"]) == 2
+        assert record["requests"][0]["output_matches_draft_prefix_len"] == 2
+        assert len(record["requests"][0]["positions"]) == 1
+        first_pos = record["requests"][0]["positions"][0]
+        assert first_pos["draft_token"] == 1
+        assert first_pos["output_matches_draft"] is True
+        assert first_pos["target_argmax"] == 1
+        assert first_pos["target_rank_of_draft"] == 1
+        assert first_pos["target_topk"][0]["token_id"] == 1
+        assert first_pos["draft_topk"][0]["token_id"] == 1
+        assert record["requests"][1]["output_matches_draft_prefix_len"] == 0
+        second_pos = record["requests"][1]["positions"][0]
+        assert second_pos["draft_token"] == 2
+        assert second_pos["output_token"] == 0
+        assert second_pos["output_matches_draft"] is False
+        assert second_pos["target_rank_of_draft"] == 2
+
     @patch("torch.arange", new=mock_pin_memory(torch.arange))
     @patch("torch.ones", new=mock_pin_memory(torch.ones))
     @patch("torch.full", new=mock_pin_memory(torch.full))

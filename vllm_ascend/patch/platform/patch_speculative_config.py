@@ -14,6 +14,17 @@ else:
 
 def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
     initial_architecture = hf_config.architectures[0]
+    if hf_config.model_type == "deepseek_v4" and getattr(hf_config, "dspark_block_size", 0):
+        hf_config.model_type = "deepseek_mtp"
+        hf_config.update(
+            {
+                "n_predict": getattr(hf_config, "dspark_block_size", None),
+                "ptd_token_id": getattr(hf_config, "dspark_noise_token_id", None),
+                "dspark_num_mtp_layers": getattr(hf_config, "dspark_num_mtp_layers", 3),
+                "architectures": ["DeepSeekV4DSparkMTPModel"],
+            }
+        )
+        return hf_config
     if hf_config.model_type in ("deepseek_v3", "deepseek_v32", "deepseek_v4", "glm_moe_dsa"):
         target_model_type = hf_config.model_type
         hf_config.model_type = "deepseek_mtp"
@@ -135,3 +146,22 @@ def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
 
 
 SpeculativeConfig.hf_config_override = hf_config_override
+
+_orig_post_init = SpeculativeConfig.__post_init__
+
+
+def _dspark_post_init(self):
+    _orig_post_init(self)
+    draft_model_config = getattr(self, "draft_model_config", None)
+    draft_hf_config = getattr(draft_model_config, "hf_config", None)
+    if draft_model_config is None or draft_hf_config is None or not getattr(draft_hf_config, "dspark_block_size", 0):
+        return
+    self.method = "mtp"
+    self.parallel_drafting = True
+    if getattr(self, "enforce_eager", None) is not None:
+        draft_model_config.enforce_eager = bool(self.enforce_eager)
+    if getattr(draft_hf_config, "ptd_token_id", None) is None:
+        draft_hf_config.ptd_token_id = getattr(draft_hf_config, "dspark_noise_token_id", None)
+
+
+SpeculativeConfig.__post_init__ = _dspark_post_init

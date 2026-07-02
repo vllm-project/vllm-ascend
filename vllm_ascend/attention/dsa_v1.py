@@ -18,6 +18,7 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.abstract import DSAAttentionImpl
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.dsa_window import get_draft_swa_window
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, split_decodes_and_prefills
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.device_op import DeviceOperator
@@ -251,6 +252,8 @@ class AscendDSAPrefillMetadata:
     qli_metadata: torch.Tensor = None
     cu_c4_cmp_seqlen_list: torch.Tensor = None
     cu_c128_cmp_seqlen_list: torch.Tensor = None
+    ori_win_left: int | None = None
+    ori_win_right: int | None = None
 
 
 @dataclass
@@ -281,6 +284,8 @@ class AscendDSADecodeMetadata:
     num_reqs_actual: int | None = None
     sas_metadata: torch.Tensor = None
     qli_metadata: torch.Tensor = None
+    ori_win_left: int | None = None
+    ori_win_right: int | None = None
 
 
 @dataclass
@@ -1117,8 +1122,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             cos, sin = get_cos_and_sin_dsa(input_positions, use_cache=True, draft_index=draft_index)
 
         slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
-        self.spec_slot_mapping[draft_index - 1][:num_input_tokens] = DeviceOperator.format_dsa_slot_mapping(  # type: ignore[index]
-            slot_mapping, self.block_size
+        self.spec_slot_mapping[draft_index - 1][:num_input_tokens] = (  # type: ignore[index]
+            DeviceOperator.format_dsa_slot_mapping(slot_mapping, self.block_size)
         )
 
         prefill_metadata = None
@@ -1183,11 +1188,17 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         prefill_input_positions = input_positions[tokens_start:]
         cos, sin = get_cos_and_sin_dsa(prefill_input_positions)
 
-        prefill_slot_mapping = self.spec_slot_mapping[draft_index - 1][tokens_start:num_prefill_tokens]  # type: ignore[index]
+        prefill_slot_mapping = self.spec_slot_mapping[draft_index - 1][  # type: ignore[index]
+            tokens_start : tokens_start + num_prefill_tokens
+        ]
         block_table = common_attn_metadata.block_table_tensor[: common_attn_metadata.num_reqs]
 
         metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op()
         metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
+        ori_win_left, ori_win_right = get_draft_swa_window(
+            self.vllm_config,
+            common_attn_metadata,
+        )
         sas_metadata = metadata_op(
             **metadata_kwargs,
             num_heads_q=n_local_heads,
@@ -1203,8 +1214,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             batch_size=len(seq_lens),
             cmp_ratio=1,
             ori_mask_mode=4,
-            ori_win_left=self.model_config.hf_config.sliding_window - 1,
-            ori_win_right=0,
+            ori_win_left=ori_win_left,
+            ori_win_right=ori_win_right,
             layout_q="TND",
             layout_kv="PA_ND",
             has_ori_kv=True,
@@ -1230,6 +1241,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             qli_metadata=None,
             cu_c4_cmp_seqlen_list=None,
             cu_c128_cmp_seqlen_list=None,
+            ori_win_left=ori_win_left,
+            ori_win_right=ori_win_right,
         )
 
     def build_decode_metadata_for_drafting(
@@ -1268,6 +1281,19 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
         metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op()
         metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
+        ori_win_left, ori_win_right = get_draft_swa_window(
+            self.vllm_config,
+            common_attn_metadata,
+        )
+        cu_seqlens_ori_kv = DeviceOperator.get_dsa_decode_cu_seqlens_ori_kv(
+            None,
+            "draft_cu_seqlens_ori_kv",
+            seq_lens,
+            num_decodes_typed,
+            self._zero_i32,
+            self.cu_seqlens_ori_kv,
+        )
+        cu_seqlens_cmp_kv = DeviceOperator.get_dsa_decode_cu_seqlens_cmp_kv(self.cu_seqlens_cmp_kv)
 
         decode_sas_metadata = metadata_op(
             **metadata_kwargs,
@@ -1275,8 +1301,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             num_heads_kv=1,
             head_dim=self.model_config.get_head_size(),
             cu_seqlens_q=query_start_loc,
-            cu_seqlens_ori_kv=self.cu_seqlens_ori_kv,
-            cu_seqlens_cmp_kv=self.cu_seqlens_cmp_kv,
+            cu_seqlens_ori_kv=cu_seqlens_ori_kv,
+            cu_seqlens_cmp_kv=cu_seqlens_cmp_kv,
             seqused_q=self.seqused_q,
             seqused_kv=seq_lens[:num_decodes],
             max_seqlen_q=max_seqlen_q,
@@ -1285,8 +1311,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             cmp_ratio=1,
             ori_mask_mode=4,
             cmp_mask_mode=3,
-            ori_win_left=self.model_config.hf_config.sliding_window - 1,
-            ori_win_right=0,
+            ori_win_left=ori_win_left,
+            ori_win_right=ori_win_right,
             layout_q="TND",
             layout_kv="PA_ND",
             has_ori_kv=True,
@@ -1315,6 +1341,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             start_pos=None,
             sas_metadata=decode_sas_metadata,
             qli_metadata=None,
+            ori_win_left=ori_win_left,
+            ori_win_right=ori_win_right,
         )
         return decode_metadata
 
@@ -1857,6 +1885,16 @@ class AscendDSAImpl(DSAAttentionImpl):
         sin = common_prefill_metadata.sin[layer_name]
         actual_seq_lengths_query = common_prefill_metadata.query_start_loc
         actual_seq_lengths_key = common_prefill_metadata.seq_lens
+        ori_win_left = (
+            self.window_size - 1
+            if swa_prefill_metadata.ori_win_left is None
+            else swa_prefill_metadata.ori_win_left
+        )
+        ori_win_right = (
+            0
+            if swa_prefill_metadata.ori_win_right is None
+            else swa_prefill_metadata.ori_win_right
+        )
 
         if self.multistream_dsv4_dsa_overlap:
             # mla prolog: q + kv dual-stream parallel
@@ -1948,8 +1986,8 @@ class AscendDSAImpl(DSAAttentionImpl):
                 softmax_scale=self.softmax_scale,
                 cmp_ratio=max(self.compress_ratio, 1),
                 ori_mask_mode=4,
-                ori_win_left=self.window_size - 1,
-                ori_win_right=0,
+                ori_win_left=ori_win_left,
+                ori_win_right=ori_win_right,
                 layout_q="TND",
                 layout_kv="PA_ND",
                 **extra_attn_kwargs,
@@ -2093,8 +2131,8 @@ class AscendDSAImpl(DSAAttentionImpl):
                     cmp_ratio=self.compress_ratio,
                     ori_mask_mode=4,
                     cmp_mask_mode=3,
-                    ori_win_left=self.window_size - 1,
-                    ori_win_right=0,
+                    ori_win_left=ori_win_left,
+                    ori_win_right=ori_win_right,
                     layout_q="TND",
                     layout_kv="PA_ND",
                     **extra_attn_kwargs,
@@ -2117,8 +2155,8 @@ class AscendDSAImpl(DSAAttentionImpl):
                     cmp_ratio=self.compress_ratio,
                     ori_mask_mode=4,
                     cmp_mask_mode=3,
-                    ori_win_left=self.window_size - 1,
-                    ori_win_right=0,
+                    ori_win_left=ori_win_left,
+                    ori_win_right=ori_win_right,
                     layout_q="TND",
                     layout_kv="PA_ND",
                     **extra_attn_kwargs,
@@ -2159,6 +2197,16 @@ class AscendDSAImpl(DSAAttentionImpl):
         sin = common_decode_metadata.sin[layer_name]
         actual_seq_lengths_query = common_decode_metadata.query_start_loc
         actual_seq_lengths_key = common_decode_metadata.seq_lens
+        ori_win_left = (
+            self.window_size - 1
+            if swa_decode_metadata.ori_win_left is None
+            else swa_decode_metadata.ori_win_left
+        )
+        ori_win_right = (
+            0
+            if swa_decode_metadata.ori_win_right is None
+            else swa_decode_metadata.ori_win_right
+        )
 
         if self.multistream_dsv4_dsa_overlap:
             # mla prolog: q + kv dual-stream parallel
@@ -2380,8 +2428,8 @@ class AscendDSAImpl(DSAAttentionImpl):
                 softmax_scale=self.softmax_scale,
                 cmp_ratio=max(self.compress_ratio, 1),
                 ori_mask_mode=4,
-                ori_win_left=self.window_size - 1,
-                ori_win_right=0,
+                ori_win_left=ori_win_left,
+                ori_win_right=ori_win_right,
                 layout_q="TND",
                 layout_kv="PA_ND",
                 **extra_attn_kwargs,
@@ -2402,8 +2450,8 @@ class AscendDSAImpl(DSAAttentionImpl):
                 cmp_ratio=self.compress_ratio,
                 ori_mask_mode=4,
                 cmp_mask_mode=3,
-                ori_win_left=self.window_size - 1,
-                ori_win_right=0,
+                ori_win_left=ori_win_left,
+                ori_win_right=ori_win_right,
                 layout_q="TND",
                 layout_kv="PA_ND",
                 **extra_attn_kwargs,
@@ -2423,8 +2471,8 @@ class AscendDSAImpl(DSAAttentionImpl):
                 cmp_ratio=self.compress_ratio,
                 ori_mask_mode=4,
                 cmp_mask_mode=3,
-                ori_win_left=self.window_size - 1,
-                ori_win_right=0,
+                ori_win_left=ori_win_left,
+                ori_win_right=ori_win_right,
                 layout_q="TND",
                 layout_kv="PA_ND",
                 **extra_attn_kwargs,

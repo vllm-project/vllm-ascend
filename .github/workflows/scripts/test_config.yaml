@@ -501,6 +501,16 @@
   tests:
     - tests/e2e/pull_request/one_card/spec_decode/test_dflash.py
 
+- name: spec_decode_dspark
+  optional: false
+  base: spec_decode_base
+  source_file_dependencies:
+    - vllm_ascend/ops/dspark_attention.py
+    - vllm_ascend/spec_decode/dspark_proposer.py
+  tests:
+    - tests/ut/spec_decode/test_dspark_attention_semantics.py
+    - tests/ut/spec_decode/test_dspark_config.py
+
 - name: spec_decode_extract_hidden_states
   optional: false
   base: spec_decode_base
@@ -818,8 +828,6 @@ partition:
   a3_x2: 3
   a3_x4: 3
   cpu_x0: 1
-
-
 
 
 

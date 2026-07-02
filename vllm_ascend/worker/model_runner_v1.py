@@ -359,6 +359,10 @@ class NPUModelRunner(GPUModelRunner):
             vllm_config.model_config.hf_text_config, "compress_ratios"
         )
         if self.use_sparse:
+            hf_text_config = self.model_config.hf_text_config
+            kv_lora_rank = getattr(hf_text_config, "kv_lora_rank", None)
+            if kv_lora_rank is None:
+                kv_lora_rank = hf_text_config.head_dim
             if get_ascend_device_type() == AscendDeviceType.A5 and self.ascend_config.enable_sparse_c8:
                 # A5 sparse C8: kv_lora and k_rope are merged into a single CKV FP8 tensor.
                 # qk_rope_head_dim = 0 signals the merged layout.
@@ -368,19 +372,19 @@ class NPUModelRunner(GPUModelRunner):
                 #                                              4 = kv_lora_rank / tile_size(128),
                 #                                              4 = float32→fp8: 4/1 bytes)
                 A5_CKV_SCALE_METADATA_BYTES = 4 * 4
-                ckv = self.model_config.hf_text_config.kv_lora_rank
-                rope = self.model_config.hf_text_config.qk_rope_head_dim
+                ckv = kv_lora_rank
+                rope = hf_text_config.qk_rope_head_dim
                 a5_ckv_dim = ckv + rope * 2 + A5_CKV_SCALE_METADATA_BYTES
                 self.sparse_head_dim = (
                     a5_ckv_dim,
                     0,
-                    self.model_config.hf_text_config.index_head_dim,
+                    hf_text_config.index_head_dim,
                 )
             else:
                 self.sparse_head_dim = (
-                    self.model_config.hf_text_config.kv_lora_rank,
-                    self.model_config.hf_text_config.qk_rope_head_dim,
-                    self.model_config.hf_text_config.index_head_dim,
+                    kv_lora_rank,
+                    hf_text_config.qk_rope_head_dim,
+                    hf_text_config.index_head_dim,
                 )
         # dsa c8
         self.use_sparse_c8_indexer = self.ascend_config.enable_sparse_c8
@@ -576,6 +580,10 @@ class NPUModelRunner(GPUModelRunner):
         self.query_lens: torch.Tensor | None = None
         self.cpu_slot_mapping = None
         self.sampling_done_event: torch.npu.Event | None = None
+        self._draft_logits: torch.Tensor | None = None
+        self._draft_logits_req_ids: list[str | None] | None = None
+        self._draft_probs: torch.Tensor | None = None
+        self._draft_probs_req_ids: list[str | None] | None = None
 
         # self.cudagraph_batch_sizes sorts in ascending order.
         if (
@@ -1907,7 +1915,83 @@ class NPUModelRunner(GPUModelRunner):
         else:
             raise ValueError(f"Unknown speculative decoding method: {self.speculative_config.method}")
 
+        self._cache_draft_distributions_from_drafter(draft_token_ids)
         return draft_token_ids
+
+    def _cache_draft_distributions_from_drafter(self, draft_token_ids: torch.Tensor | list[list[int]] | None) -> None:
+        self._draft_logits = None
+        self._draft_logits_req_ids = None
+        self._draft_probs = None
+        self._draft_probs_req_ids = None
+        if draft_token_ids is None or self.drafter is None:
+            return
+
+        req_ids = list(self.input_batch.req_ids[: self.input_batch.num_reqs])
+        take_last_draft_logits = getattr(self.drafter, "take_last_draft_logits", None)
+        if take_last_draft_logits is not None:
+            draft_logits = take_last_draft_logits()
+            if draft_logits is not None:
+                self._draft_logits = draft_logits
+                self._draft_logits_req_ids = req_ids
+
+        take_last_draft_probs = getattr(self.drafter, "take_last_draft_probs", None)
+        if take_last_draft_probs is None:
+            return
+
+        draft_probs = take_last_draft_probs()
+        if draft_probs is None:
+            return
+        self._draft_probs = draft_probs
+        self._draft_probs_req_ids = req_ids
+
+    def _get_spec_decode_draft_distribution(
+        self,
+        metadata: SpecDecodeMetadata,
+        draft_distribution: torch.Tensor | None,
+        draft_distribution_req_ids: list[str | None] | None,
+        distribution_name: str,
+    ) -> torch.Tensor | None:
+        if draft_distribution is None or draft_distribution_req_ids is None:
+            return None
+
+        req_id_to_draft_idx = {req_id: idx for idx, req_id in enumerate(draft_distribution_req_ids)}
+        flattened_distributions: list[torch.Tensor] = []
+        for req_idx, num_draft_tokens in enumerate(metadata.num_draft_tokens):
+            if num_draft_tokens == 0:
+                continue
+            req_id = self.input_batch.req_ids[req_idx]
+            draft_idx = req_id_to_draft_idx.get(req_id)
+            if draft_idx is None:
+                raise ValueError(
+                    f"Missing DSpark {distribution_name} for active request: "
+                    f"req_id={req_id}, cached_req_ids={draft_distribution_req_ids}"
+                )
+            if num_draft_tokens > draft_distribution.shape[1]:
+                raise ValueError(
+                    f"DSpark {distribution_name} length is smaller than spec metadata: "
+                    f"num_draft_tokens={num_draft_tokens}, cached_steps={draft_distribution.shape[1]}"
+                )
+            flattened_distributions.append(draft_distribution[draft_idx, :num_draft_tokens])
+
+        if not flattened_distributions:
+            return None
+        return torch.cat(flattened_distributions, dim=0).contiguous()
+
+    def _get_spec_decode_draft_logits(self, metadata: SpecDecodeMetadata) -> torch.Tensor | None:
+        return self._get_spec_decode_draft_distribution(
+            metadata,
+            self._draft_logits,
+            self._draft_logits_req_ids,
+            "draft logits",
+        )
+
+    def _get_spec_decode_draft_probs(self, metadata: SpecDecodeMetadata) -> torch.Tensor | None:
+        return self._get_spec_decode_draft_distribution(
+            metadata,
+            self._draft_probs,
+            self._draft_probs_req_ids,
+            "draft probabilities",
+        )
 
     def _copy_draft_token_ids_to_cpu(
         self, scheduler_output: "SchedulerOutput", zeros_only: bool = False
@@ -2624,11 +2708,14 @@ class NPUModelRunner(GPUModelRunner):
         if self.input_batch.sampling_metadata.top_k is not None and get_ascend_config().enable_reduce_sample:
             max_topk = self.input_batch.top_k_cpu[self.input_batch.top_k_cpu < logits.shape[1]].max()
             self.rejection_sampler.prepare_sampling(max_topk)
+        draft_logits = self._get_spec_decode_draft_logits(spec_decode_metadata)
+        draft_probs = None if draft_logits is not None else self._get_spec_decode_draft_probs(spec_decode_metadata)
         sampler_output = self.rejection_sampler(
             spec_decode_metadata,
-            None,  # draft_probs
+            draft_probs,
             logits,
             sampling_metadata,
+            draft_logits=draft_logits,
         )
         return sampler_output
 
@@ -3034,11 +3121,59 @@ class NPUModelRunner(GPUModelRunner):
         """
         :return: tuple[attn_metadata, spec_decode_common_attn_metadata]
         """
-        # Attention metadata is not needed for attention free models
-        if len(self.kv_cache_config.kv_cache_groups) == 0:
-            return {}, None
         num_tokens_padded = num_tokens_padded or num_tokens
         num_reqs_padded = num_reqs_padded or num_reqs
+        # Attention metadata is not needed for attention free models. DSpark is
+        # an exception: the draft proposer reuses common metadata for request
+        # boundaries even though its draft attention keeps K/V internally.
+        if len(self.kv_cache_config.kv_cache_groups) == 0:
+            draft_hf_config = (
+                self.speculative_config.draft_model_config.hf_config
+                if self.speculative_config is not None
+                else None
+            )
+            if getattr(draft_hf_config, "dspark_block_size", 0):
+                num_computed_tokens_cpu = self.input_batch.num_computed_tokens_cpu_tensor[
+                    :num_reqs_padded
+                ]
+                num_prompt_tokens_cpu = self.input_batch.num_prompt_tokens_cpu_tensor[
+                    :num_reqs_padded
+                ]
+                is_prefilling = num_computed_tokens_cpu < num_prompt_tokens_cpu
+                is_prefilling[num_reqs:] = False
+                seq_lens_cpu = self.optimistic_seq_lens_cpu[:num_reqs_padded]
+                if self.use_async_spec_decode:
+                    seq_lens_cpu = None
+                    num_computed_tokens_cpu = None
+                cm = AscendCommonAttentionMetadata(
+                    query_start_loc=self.query_start_loc.gpu[: num_reqs_padded + 1],
+                    query_start_loc_cpu=self.query_start_loc.cpu[: num_reqs_padded + 1],
+                    seq_lens=self.seq_lens[:num_reqs_padded],
+                    _seq_lens_cpu=self.optimistic_seq_lens_cpu[:num_reqs_padded],
+                    seq_lens_cpu_upper_bound=self.optimistic_seq_lens_cpu[:num_reqs_padded],
+                    seq_lens_cpu=seq_lens_cpu,
+                    num_computed_tokens_cpu=num_computed_tokens_cpu,
+                    num_reqs=num_reqs_padded,
+                    num_actual_tokens=num_tokens,
+                    max_query_len=max_query_len,
+                    max_seq_len=(
+                        self.optimistic_seq_lens_cpu.numpy()[:num_reqs].max().item()
+                        if num_reqs
+                        else 0
+                    ),
+                    block_table_tensor=None,
+                    slot_mapping=self.positions[:num_tokens_padded],
+                    causal=True,
+                    is_prefilling=is_prefilling,
+                    num_input_tokens=num_tokens_padded,
+                    actual_seq_lengths_q=self.actual_seq_lengths_q,
+                    positions=self.positions,
+                    attn_state=self.attn_state,
+                    decode_token_per_req=self.decode_token_per_req,
+                    prefill_context_parallel_metadata=self.long_seq_metadata,
+                )
+                return {}, cm
+            return {}, None
         attn_metadata: PerLayerAttnMetadata = {}
         if ubatch_slices is not None:
             attn_metadata = [dict() for _ in range(len(ubatch_slices))]
@@ -3287,7 +3422,8 @@ class NPUModelRunner(GPUModelRunner):
                     kv_cache_gid, cm.block_table_tensor, cm.slot_mapping)
             if self.speculative_config and spec_decode_common_attn_metadata is None:
                 if isinstance(self.drafter, AscendEagleProposer | AscendDraftModelProposer | AscendDflashProposer):
-                    if self.drafter.attn_layer_names[0] in kv_cache_group.layer_names:
+                    drafter_attn_layer_names = getattr(self.drafter, "attn_layer_names", [])
+                    if not drafter_attn_layer_names or drafter_attn_layer_names[0] in kv_cache_group.layer_names:
                         spec_decode_common_attn_metadata = cm
                 else:
                     spec_decode_common_attn_metadata = cm
@@ -3857,9 +3993,13 @@ class NPUModelRunner(GPUModelRunner):
                 self.drafter,
                 AscendEagleProposer | AscendDflashProposer | AscendDraftModelProposer,
             )
-            block_size = (self.kernel_block_sizes[0] if isinstance(
-                self.kernel_block_sizes, list) else self.kernel_block_sizes)
-            self.drafter.initialize_attn_backend(kv_cache_config, block_size)
+            if isinstance(self.kernel_block_sizes, list) and self.kernel_block_sizes:
+                draft_kernel_block_sizes = self.kernel_block_sizes
+            elif self.kernel_block_sizes:
+                draft_kernel_block_sizes = [self.kernel_block_sizes]
+            else:
+                draft_kernel_block_sizes = [self.cache_config.block_size]
+            self.drafter.initialize_attn_backend(kv_cache_config, draft_kernel_block_sizes)
 
         if has_kv_transfer_group() and not is_profiling:
             get_kv_transfer_group().register_kv_caches(kv_caches)

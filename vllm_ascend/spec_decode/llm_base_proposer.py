@@ -254,6 +254,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         from vllm.compilation.backends import set_model_tag
 
         draft_vllm_config = self._create_draft_vllm_config()
+        if self.speculative_config.enforce_eager:
+            draft_vllm_config.model_config.enforce_eager = True
+            draft_vllm_config.compilation_config.mode = CompilationMode.NONE
         draft_load_config = self.speculative_config.draft_load_config
         logger.info(
             "[spec_decode/base] Loading draft model: method=%s, load_format=%s, model=%s",

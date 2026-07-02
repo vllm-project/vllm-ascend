@@ -384,7 +384,8 @@ __aicore__ inline void SparseAttnSharedkvSwa<SAST>::GetSparseActualSeqLen()
 template <typename SAST>
 __aicore__ inline void SparseAttnSharedkvSwa<SAST>::UpdateInnerLoopCond()
 {
-    if ((tempLoopInfo.actCmpS2Size == 0 && tempLoopInfo.actOriS2Size == 0) || (tempLoopInfo.actS1Size == 0)) {
+    bool hasOriWindow = tempLoopInfo.oriMaskRight >= tempLoopInfo.oriMaskLeft;
+    if ((tempLoopInfo.actCmpS2Size == 0 && !hasOriWindow) || (tempLoopInfo.actS1Size == 0)) {
         tempLoopInfo.curActSeqLenIsZero = true;
         return;
     }
@@ -688,6 +689,7 @@ __aicore__ inline void SparseAttnSharedkvSwa<SAST>::ProcessBalance()
             // 此处均为闭区间
             tempLoopInfo.oriMaskRight = tempLoopInfo.actOriS2Size - tempLoopInfo.actS1Size +
                                         static_cast<int32_t>(tempLoopInfo.s1EndIdx) + constInfo.oriWinRight;
+            tempLoopInfo.oriMaskRight = Min(tempLoopInfo.oriMaskRight, tempLoopInfo.actOriS2Size - 1);
             tempLoopInfo.oriMaskLeft = Max(tempLoopInfo.actOriS2Size - tempLoopInfo.actS1Size +
                                                static_cast<int32_t>(tempLoopInfo.s1EndIdx) - constInfo.oriWinLeft,
                                            0);
@@ -707,7 +709,9 @@ __aicore__ inline void SparseAttnSharedkvSwa<SAST>::ProcessBalance()
                     continue;
                 }
             } else {
-                oriSplitNum = CeilDiv(tempLoopInfo.oriMaskRight - tempLoopInfo.oriMaskLeft + 1, constInfo.s2BaseSize);
+                uint32_t oriS2Size = (tempLoopInfo.oriMaskRight >= tempLoopInfo.oriMaskLeft) ?
+                    static_cast<uint32_t>(tempLoopInfo.oriMaskRight - tempLoopInfo.oriMaskLeft + 1) : 0U;
+                oriSplitNum = CeilDiv(oriS2Size, constInfo.s2BaseSize);
                 s2SplitNum = oriSplitNum;
                 if (constInfo.templateMode == CFA_TEMPLATE) {
                     uint32_t cmpSplitNum = CeilDiv(tempLoopInfo.actCmpS2Size, constInfo.s2BaseSize);

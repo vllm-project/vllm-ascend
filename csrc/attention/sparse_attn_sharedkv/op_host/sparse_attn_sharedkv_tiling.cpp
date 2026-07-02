@@ -1362,11 +1362,11 @@ ge::graphStatus SASTilingCheck::CheckFeatureShape() const
     OP_CHECK_IF(*opParamInfo_.cmpMaskMode != 3,
                 OP_LOGE(opName_, "cmp_mask_mode should be 3, but got %d", *opParamInfo_.cmpMaskMode),
                 return ge::GRAPH_FAILED);
-    OP_CHECK_IF(oriWinLeft_ != 127,
-                OP_LOGE(opName_, "ori_win_left should be 127, but got %d", oriWinLeft_),
+    OP_CHECK_IF(oriWinLeft_ < 0,
+                OP_LOGE(opName_, "ori_win_left should be non-negative, but got %ld", oriWinLeft_),
                 return ge::GRAPH_FAILED);
-    OP_CHECK_IF(oriWinRight_ != 0,
-                OP_LOGE(opName_, "ori_win_right should be 0, but got %d", oriWinRight_),
+    OP_CHECK_IF(oriWinRight_ < 0,
+                OP_LOGE(opName_, "ori_win_right should be non-negative, but got %ld", oriWinRight_),
                 return ge::GRAPH_FAILED);
     return ge::GRAPH_SUCCESS;
 }

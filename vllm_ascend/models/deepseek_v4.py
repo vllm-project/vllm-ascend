@@ -75,7 +75,7 @@ from vllm.v1.kv_cache_interface import KVCacheSpec
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec
 from vllm_ascend.ops.dsa import AscendDeepseekSparseAttention, DSAModules
-from vllm_ascend.ops.rope_dsv4 import ComplexExpRotaryEmbedding
+from vllm_ascend.ops.rope_dsv4 import ComplexExpRotaryEmbedding, get_cos_and_sin_dsa
 from vllm_ascend.ops.triton.mul_add import muls_add_triton
 from vllm_ascend.utils import (
     AscendDeviceType,
@@ -88,6 +88,104 @@ from vllm_ascend.utils import (
 
 if not vllm_version_is("0.23.0"):
     from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_mapping
+
+
+def _make_deepseek_v4_expert_params_mapping(
+    model: nn.Module,
+    num_experts: int,
+    num_redundant_experts: int = 0,
+) -> list[tuple[str, str, int, str]]:
+    if vllm_version_is("0.23.0"):
+        return FusedMoE.make_expert_params_mapping(
+            model,
+            ckpt_gate_proj_name="gate_proj",
+            ckpt_down_proj_name="down_proj",
+            ckpt_up_proj_name="up_proj",
+            num_experts=num_experts,
+            num_redundant_experts=num_redundant_experts,
+        )
+    return fused_moe_make_expert_params_mapping(
+        model,
+        ckpt_gate_proj_name="gate_proj",
+        ckpt_down_proj_name="down_proj",
+        ckpt_up_proj_name="up_proj",
+        num_experts=num_experts,
+        num_redundant_experts=num_redundant_experts,
+    )
+
+
+def _hc_head_torch(
+    x: torch.Tensor,
+    hc_fn: torch.Tensor,
+    hc_scale: torch.Tensor,
+    hc_base: torch.Tensor,
+    norm_eps: float,
+    hc_eps: float,
+) -> torch.Tensor:
+    shape, dtype = x.size(), x.dtype
+    x_flat = x.flatten(1).float()
+    rsqrt = torch.rsqrt(x_flat.square().mean(-1, keepdim=True) + norm_eps)
+    mixes = F.linear(x_flat, hc_fn) * rsqrt
+    pre = torch.sigmoid(mixes * hc_scale + hc_base) + hc_eps
+    y = torch.sum(pre.unsqueeze(-1) * x_flat.view(shape), dim=1)
+    return y.to(dtype)
+
+
+def _linear_output(layer: nn.Module, x: torch.Tensor) -> torch.Tensor:
+    out = layer(x)
+    return out[0] if isinstance(out, tuple) else out
+
+
+def _apply_dsv4_rope(
+    rotary_emb: nn.Module,
+    positions: torch.Tensor,
+    x: torch.Tensor,
+    *,
+    inverse: bool = False,
+) -> torch.Tensor:
+    cos, sin = get_cos_and_sin_dsa(positions)
+    layer_name = rotary_emb.layername
+    cos_t = cos[layer_name]
+    sin_t = sin[layer_name]
+    if inverse:
+        sin_t = -sin_t
+    return rotary_emb(x, cos_t, sin_t)
+
+
+def _apply_dsv4_rope_tail(
+    rotary_emb: nn.Module,
+    positions: torch.Tensor,
+    x: torch.Tensor,
+    *,
+    inverse: bool = False,
+) -> torch.Tensor:
+    rotary_dim = rotary_emb.rotary_dim
+    if x.shape[-1] == rotary_dim:
+        return _apply_dsv4_rope(rotary_emb, positions, x, inverse=inverse)
+    x_pass, x_rot = x[..., :-rotary_dim], x[..., -rotary_dim:]
+    x_rot = _apply_dsv4_rope(rotary_emb, positions, x_rot, inverse=inverse)
+    return torch.cat([x_pass, x_rot], dim=-1)
+
+
+def _wo_a_weight_for_eager_projection(
+    wo_a_weight: torch.Tensor,
+    n_local_groups: int,
+    o_lora_rank: int,
+    group_dim: int,
+) -> torch.Tensor:
+    if wo_a_weight.ndim == 3:
+        # Ascend's wo_a loader stores weights as [group, group_dim, rank]
+        # for the main DSA path. Eager projection needs the original
+        # [group, rank, group_dim] layout.
+        return wo_a_weight.transpose(1, 2).contiguous()
+    return wo_a_weight.view(n_local_groups, o_lora_rank, group_dim)
+
+
+def _grouped_wo_a_projection(
+    attn_out: torch.Tensor,
+    wo_a: torch.Tensor,
+) -> torch.Tensor:
+    return torch.matmul(attn_out.transpose(0, 1), wo_a.transpose(1, 2)).transpose(0, 1)
 
 
 def _get_ascend_dsa_backend():
@@ -916,13 +1014,16 @@ class DeepseekV2DecoderLayer(nn.Module):
         config: DeepseekV2Config | None = None,
         topk_indices_buffer: torch.Tensor | None = None,
         is_draft_layer: bool = False,
+        attn_cls: type[nn.Module] | None = None,
+        quant_config_override: QuantizationConfig | None = None,
+        use_quant_config_override: bool = False,
     ) -> None:
         super().__init__()
 
         if config is None:
             config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
-        quant_config = vllm_config.quant_config
+        quant_config = quant_config_override if use_quant_config_override else vllm_config.quant_config
         parallel_config = vllm_config.parallel_config
 
         self.hidden_size = config.hidden_size
@@ -933,7 +1034,8 @@ class DeepseekV2DecoderLayer(nn.Module):
         self.layer_idx = layer_idx
         self.norm_eps = config.rms_norm_eps
 
-        attn_cls = DeepseekV4Attention
+        if attn_cls is None:
+            attn_cls = DeepseekV4Attention
 
         self.self_attn = attn_cls(
             vllm_config=vllm_config,
@@ -1085,18 +1187,20 @@ class DeepseekV4Model(nn.Module):
             dtype=vllm_config.model_config.dtype,
             device=self.device,
         )
+        self._dspark_target_layer_ids = list(getattr(config, "dspark_target_layer_ids", []) or [])
+        if self._dspark_target_layer_ids:
+            self._dspark_hidden_buffer = torch.empty(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                len(self._dspark_target_layer_ids) * config.hidden_size,
+                dtype=vllm_config.model_config.dtype,
+                device=self.device,
+            )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
     def hc_head(self, x: torch.Tensor, hc_fn: torch.Tensor, hc_scale: torch.Tensor, hc_base: torch.Tensor):
-        shape, dtype = x.size(), x.dtype
-        x = x.flatten(1).float()
-        rsqrt = torch.rsqrt(x.square().mean(-1, keepdim=True) + self.norm_eps)
-        mixes = torch.nn.functional.linear(x, hc_fn) * rsqrt
-        pre = torch.sigmoid(mixes * hc_scale + hc_base) + self.hc_eps
-        y = torch.sum(pre.unsqueeze(-1) * x.view(shape), dim=1)
-        return y.to(dtype)
+        return _hc_head_torch(x, hc_fn, hc_scale, hc_base, self.norm_eps, self.hc_eps)
 
     def forward(
         self,
@@ -1130,8 +1234,12 @@ class DeepseekV4Model(nn.Module):
 
         if get_pp_group().is_first_rank:
             hidden_states = hidden_states.unsqueeze(1).repeat(1, self.hc_mult, 1)  # (b, s, h) -> (b, s, c, h)
+        dspark_hiddens: list[torch.Tensor] = []
+        dspark_target_ids = set(self._dspark_target_layer_ids)
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states, residual = layer(positions, hidden_states, residual, llama_4_scaling)
+            if layer.layer_idx in dspark_target_ids:
+                dspark_hiddens.append(hidden_states.mean(dim=1))
 
         # Stash pre-hc_head residual for the MTP draft (captured copy_).
         # When FlashComm1 (sequence parallelism) is enabled, tokens are
@@ -1153,6 +1261,14 @@ class DeepseekV4Model(nn.Module):
         else:
             num_tokens = hidden_states.shape[0]
             self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1))
+        if self._dspark_target_layer_ids and dspark_hiddens:
+            dspark_states = torch.cat(dspark_hiddens, dim=-1)
+            if forward_ctx is not None and forward_ctx.flash_comm_v1_enabled:
+                dspark_states = tensor_model_parallel_all_gather(dspark_states, dim=0)
+                pad_size = forward_ctx.pad_size
+                if pad_size > 0:
+                    dspark_states = dspark_states[:-pad_size]
+            self._dspark_hidden_buffer[: dspark_states.shape[0]].copy_(dspark_states)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
@@ -1172,6 +1288,29 @@ class DeepseekV2MixtureOfExperts(MixtureOfExperts):
     """
     List of MoE MLP layers in the model.
     """
+
+    def set_moe_parameters_from_layers(
+        self,
+        config: DeepseekV2Config | DeepseekV3Config | DeepseekV4Config,
+        layers: Iterable[nn.Module],
+    ) -> None:
+        self.expert_weights: typing.MutableSequence[typing.Sequence[torch.Tensor]] = []
+        self.num_expert_groups = getattr(config, "n_group", 1)
+        self.moe_layers: list[nn.Module] = []
+        self.moe_mlp_layers: list[DeepseekV4MoE] = []
+        example_moe = None
+        for layer in layers:
+            if isinstance(layer, PPMissingLayer):
+                continue
+
+            assert isinstance(layer, DeepseekV2DecoderLayer)
+            if isinstance(layer.mlp, DeepseekV4MoE):
+                # Pick last one layer since the first ones may be dense layers.
+                example_moe = layer.mlp
+                self.moe_mlp_layers.append(layer.mlp)
+                self.moe_layers.append(layer.mlp.experts)
+
+        self.extract_moe_parameters(example_moe)
 
     def extract_moe_parameters(self, example_moe: DeepseekV4MoE | None):
         if example_moe is None:
@@ -1237,25 +1376,7 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
         self.set_moe_parameters()
 
     def set_moe_parameters(self):
-        self.expert_weights = []
-
-        self.num_expert_groups = getattr(self.config, "n_group", 1)
-
-        self.moe_layers = []
-        self.moe_mlp_layers = []
-        example_moe = None
-        for layer in self.model.layers:
-            if isinstance(layer, PPMissingLayer):
-                continue
-
-            assert isinstance(layer, DeepseekV2DecoderLayer)
-            if isinstance(layer.mlp, DeepseekV4MoE):
-                # Pick last one layer since the first ones may be dense layers.
-                example_moe = layer.mlp
-                self.moe_mlp_layers.append(layer.mlp)
-                self.moe_layers.append(layer.mlp.experts)
-
-        self.extract_moe_parameters(example_moe)
+        self.set_moe_parameters_from_layers(self.config, self.model.layers)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
@@ -1280,31 +1401,17 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
-        if vllm_version_is("0.23.0"):
-            return FusedMoE.make_expert_params_mapping(
-                self.model,
-                ckpt_gate_proj_name="gate_proj",
-                ckpt_down_proj_name="down_proj",
-                ckpt_up_proj_name="up_proj",
-                num_experts=self.config.n_routed_experts
-                + (self.config.n_shared_experts if getattr(get_ascend_config(), "mix_placement", False) else 0),
-                num_redundant_experts=0,
-            )
-        else:
-            return fused_moe_make_expert_params_mapping(
-                self.model,
-                ckpt_gate_proj_name="gate_proj",
-                ckpt_down_proj_name="down_proj",
-                ckpt_up_proj_name="up_proj",
-                num_experts=self.config.n_routed_experts
-                + (self.config.n_shared_experts if getattr(get_ascend_config(), "mix_placement", False) else 0),
-                num_redundant_experts=0,
-            )
+        num_experts = self.config.n_routed_experts + (
+            self.config.n_shared_experts if getattr(get_ascend_config(), "mix_placement", False) else 0
+        )
+        return _make_deepseek_v4_expert_params_mapping(self.model, num_experts=num_experts)
 
     def get_mtp_target_hidden_states(self) -> torch.Tensor | None:
         """Pre-hc_head residual stream buffer (max_num_batched_tokens,
         hc_mult * hidden_size) for the MTP draft model. Populated by
         forward(); valid after each target step."""
+        if getattr(self.model, "_dspark_target_layer_ids", None):
+            return getattr(self.model, "_dspark_hidden_buffer", None)
         return getattr(self.model, "_mtp_hidden_buffer", None)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -1317,26 +1424,14 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
 
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
-        if vllm_version_is("0.23.0"):
-            expert_params_mapping = FusedMoE.make_expert_params_mapping(
-                self.model,
-                ckpt_gate_proj_name="gate_proj",
-                ckpt_down_proj_name="down_proj",
-                ckpt_up_proj_name="up_proj",
-                num_experts=self.config.n_routed_experts
-                + (self.config.n_shared_experts if rocm_aiter_moe_shared_expert_enabled else 0),
-                num_redundant_experts=self.num_redundant_experts,
-            )
-        else:
-            expert_params_mapping = fused_moe_make_expert_params_mapping(
-                self.model,
-                ckpt_gate_proj_name="gate_proj",
-                ckpt_down_proj_name="down_proj",
-                ckpt_up_proj_name="up_proj",
-                num_experts=self.config.n_routed_experts
-                + (self.config.n_shared_experts if rocm_aiter_moe_shared_expert_enabled else 0),
-                num_redundant_experts=self.num_redundant_experts,
-            )
+        num_experts = self.config.n_routed_experts + (
+            self.config.n_shared_experts if rocm_aiter_moe_shared_expert_enabled else 0
+        )
+        expert_params_mapping = _make_deepseek_v4_expert_params_mapping(
+            self.model,
+            num_experts=num_experts,
+            num_redundant_experts=self.num_redundant_experts,
+        )
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
@@ -1479,7 +1574,7 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
                     # param and delegate to its expert-aware weight_loader
                     # with expert_id.
                     for mapping in expert_params_mapping:
-                        param_name, weight_name, expert_id, shard_id = mapping
+                        param_name, weight_name, expert_id, expert_shard_id = mapping
                         if weight_name not in chunk_name:
                             continue
 
@@ -1503,7 +1598,7 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
                             param,
                             weight_to_load,
                             name_mapped,
-                            shard_id=shard_id,
+                            shard_id=expert_shard_id,
                             expert_id=expert_id,
                             return_success=True,
                         )

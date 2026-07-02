@@ -264,9 +264,33 @@ def _prepend_env_path(env_name: str, path: str) -> None:
         os.environ[env_name] = ":".join(path_entries)
 
 
+def _get_custom_op_vendor_path() -> str | None:
+    base_dirs = [_CUSTOM_OP_BASE_DIR]
+
+    # PYTHONPATH source overlays may import the extension from the installed package.
+    try:
+        import importlib.util
+
+        spec = importlib.util.find_spec("vllm_ascend.vllm_ascend_C")
+    except (ImportError, ValueError):
+        spec = None
+    if spec is not None and spec.origin:
+        base_dirs.append(os.path.dirname(spec.origin))
+
+    seen: set[str] = set()
+    for base_dir in base_dirs:
+        if not base_dir or base_dir in seen:
+            continue
+        seen.add(base_dir)
+        vendor_path = os.path.join(base_dir, "_cann_ops_custom", "vendors", _CUSTOM_OP_VENDOR_DIR)
+        if os.path.exists(vendor_path):
+            return vendor_path
+    return None
+
+
 def bootstrap_custom_op_env(*, include_vendor_lib: bool = False) -> None:
-    vendor_path = os.path.join(_CUSTOM_OP_BASE_DIR, "_cann_ops_custom", "vendors", _CUSTOM_OP_VENDOR_DIR)
-    if not os.path.exists(vendor_path):
+    vendor_path = _get_custom_op_vendor_path()
+    if vendor_path is None:
         return
     _prepend_env_path("ASCEND_CUSTOM_OPP_PATH", vendor_path)
 
