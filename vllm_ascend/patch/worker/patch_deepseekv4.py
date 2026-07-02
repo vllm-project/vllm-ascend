@@ -55,6 +55,7 @@ from vllm_ascend.models.deepseek_v4 import (
     DeepseekV4MoE,
     get_spec_layer_idx_from_weight_name,
 )
+from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE
 from vllm_ascend.ops.triton.mul_add import muls_add_triton
 from vllm_ascend.utils import enable_dsa_cp
 
@@ -140,6 +141,110 @@ def afd_forward(
         )
 
     return final_hidden_states.view(num_tokens, hidden_dim)
+
+
+# ---------------------------------------------------------------------------
+# AscendFusedMoE.afd_ffn_compute
+# ---------------------------------------------------------------------------
+@torch.compiler.disable
+def afd_ffn_compute(
+    self: AscendFusedMoE,
+    layer: AscendFusedMoE,
+    hidden_states: torch.Tensor,
+    router_logits: Optional[torch.Tensor] = None,
+    group_list: Optional[torch.Tensor] = None,
+    topk_weights: Optional[torch.Tensor] = None,
+    topk_ids: Optional[torch.Tensor] = None,
+    row_idx: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """FFN-side MoE expert computation for AFD.
+
+    Mirrors ``AscendFusedMoE.forward_impl`` but skips the routing step
+    (``select_experts``) because ``topk_weights`` / ``topk_ids`` are already
+    computed on the attention side and received via P2P. Only the expert
+    GEMM (``fused_experts``) and the all-reduce (``finalize``) run here.
+    """
+    from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
+    from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl
+    from vllm_ascend.ops.fused_moe.moe_runtime_args import (
+        build_fused_experts_input)
+
+    moe_comm_method = _EXTRA_CTX.moe_comm_method
+
+    # 1. prepare — handles dispatch / padding (same as forward_impl).
+    prepare_output = moe_comm_method.prepare(
+        hidden_states=hidden_states,
+        router_logits=router_logits,
+        replace_allreduce=_EXTRA_CTX.flash_comm_v1_enabled,
+        enable_shared_expert_dp=self.enable_shared_expert_dp,
+        quant_type=self.quant_type,
+    )
+    hidden_states = prepare_output.hidden_states
+    mc2_mask = prepare_output.mc2_mask
+    padded_hidden_states_shape = prepare_output.padded_hidden_states_shape
+    pertoken_scale = prepare_output.pertoken_scale
+
+    # 2. Build weight params (mirrors AscendW8A8DynamicFusedMoEMethod.apply
+    #    weight access in w8a8_dynamic.py). DeepSeek V4 uses W8A8 dynamic
+    #    quantization; other quant methods would need a different block here.
+    fused_scale_flag = (
+        _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2
+        and get_ascend_config().enable_fused_mc2 == 1
+    )
+    if self.dynamic_eplb:
+        w1 = layer.w13_weight_list
+        w1_scale = (layer.fused_w1_scale_list if fused_scale_flag
+                    else layer.w13_weight_scale_fp32_list)
+        w2 = layer.w2_weight_list
+        w2_scale = (layer.fused_w2_scale_list if fused_scale_flag
+                    else layer.w2_weight_scale_list)
+    else:
+        w1 = [layer.w13_weight]
+        w1_scale = ([layer.fused_w1_scale] if fused_scale_flag
+                    else [layer.w13_weight_scale_fp32])
+        w2 = [layer.w2_weight]
+        w2_scale = ([layer.fused_w2_scale] if fused_scale_flag
+                    else [layer.w2_weight_scale])
+    w1_scale_bias = ([torch.tensor([], dtype=torch.float32)]
+                     if fused_scale_flag else None)
+    w2_scale_bias = ([torch.tensor([], dtype=torch.float32)]
+                     if fused_scale_flag else None)
+
+    # 3. Build MoEFusedExpertsInput with pre-computed topk (skip select_experts).
+    fused_experts_input = build_fused_experts_input(
+        hidden_states=hidden_states,
+        topk_weights=topk_weights,
+        topk_ids=topk_ids,
+        w1=w1,
+        w2=w2,
+        quant_type=self.quant_type,
+        dynamic_eplb=self.dynamic_eplb,
+        expert_map=self._expert_map,
+        global_redundant_expert_num=self.global_redundant_expert_num,
+        mc2_mask=mc2_mask,
+        apply_router_weight_on_input=self.apply_router_weight_on_input,
+        log2phy=self.log2phy,
+        pertoken_scale=pertoken_scale,
+        activation=self.activation,
+        w1_scale=w1_scale,
+        w2_scale=w2_scale,
+        w1_scale_bias=w1_scale_bias,
+        w2_scale_bias=w2_scale_bias,
+        swiglu_limit=self.swiglu_limit,
+    )
+
+    # 4. fused_experts — run expert GEMM with pre-computed routing tensors.
+    fused_experts_results = moe_comm_method.fused_experts(
+        fused_experts_input=fused_experts_input)
+
+    # 5. finalize — all-reduce / unpad.
+    routed_out = moe_comm_method.finalize(
+        hidden_states=fused_experts_results.routed_out,
+        reduce_results=isinstance(moe_comm_method, AllGatherCommImpl),
+        padded_hidden_states_shape=padded_hidden_states_shape,
+    )
+
+    return routed_out
 
 
 # ---------------------------------------------------------------------------
@@ -661,6 +766,10 @@ def afd_load_weights(
 # ---------------------------------------------------------------------------
 # DeepseekV4MoE gains an afd_forward entry point for the FFN worker.
 DeepseekV4MoE.afd_forward = afd_forward  # type: ignore[assignment]
+
+# AscendFusedMoE gains an afd_ffn_compute entry point that runs expert GEMM
+# with pre-computed routing tensors received from the attention side.
+AscendFusedMoE.afd_ffn_compute = afd_ffn_compute  # type: ignore[assignment]
 
 # Decoder layer split into attention / FFN halves.
 DeepseekV2DecoderLayer.compute_attn_output = compute_attn_output  # type: ignore[assignment]
