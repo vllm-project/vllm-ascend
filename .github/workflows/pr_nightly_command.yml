@@ -100,6 +100,10 @@ jobs:
         if: steps.auth.outputs.is_authorized == 'false'
         run: exit 1
 
+      - name: Install Python dependencies
+        if: steps.auth.outputs.is_authorized == 'true'
+        run: pip3 install pyyaml -q
+
       - name: Resolve test cases and branch
         id: resolve
         if: steps.auth.outputs.is_authorized == 'true'
