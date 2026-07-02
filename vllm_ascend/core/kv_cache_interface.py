@@ -24,6 +24,24 @@ def _get_c8_k_scale_cache_dtype() -> torch.dtype:
     return torch.float32 if get_ascend_device_type() == AscendDeviceType.A5 else torch.float16
 
 
+SFA_QSFA_TILE_SIZE = 128
+SFA_QSFA_KV_CACHE_DTYPE = torch.int8
+
+
+def get_sfa_qsfa_packed_head_dim(
+    kv_lora_rank: int,
+    qk_rope_head_dim: int,
+    tile_size: int = SFA_QSFA_TILE_SIZE,
+) -> int:
+    if kv_lora_rank % tile_size != 0:
+        raise ValueError(
+            f"kv_lora_rank must be divisible by tile_size for SFA QSFA packed cache, "
+            f"got {kv_lora_rank=} and {tile_size=}."
+        )
+    scale_metadata_bytes = (kv_lora_rank // tile_size) * get_dtype_size(torch.float32)
+    return kv_lora_rank + qk_rope_head_dim * get_dtype_size(torch.bfloat16) + scale_metadata_bytes
+
+
 @dataclass(frozen=True, kw_only=True)
 class AscendMLAAttentionSpec(MLAAttentionSpec):
     """MLAAttentionSpec extended to support DSA models, with optional Sparse C8 support.
@@ -54,11 +72,33 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     scale_dtype: torch.dtype = torch.int8
     sparse_head_dim: tuple[int, ...] | None = None
     cache_sparse_c8: bool = False
+    cache_sfa_kv_quant_sparse_attention: bool = False
     c8_k_cache_dtype: torch.dtype = field(default_factory=_get_c8_k_cache_dtype)
     c8_k_scale_cache_dtype: torch.dtype = field(default_factory=_get_c8_k_scale_cache_dtype)
+    sfa_qsfa_kv_cache_dtype: torch.dtype = SFA_QSFA_KV_CACHE_DTYPE
 
     @property
     def page_size_bytes(self) -> int:
+        if self.cache_sfa_kv_quant_sparse_attention:
+            assert self.sparse_head_dim is not None
+            assert len(self.sparse_head_dim) == 3
+            num_heads_per_page = self.block_size * self.num_kv_heads
+            packed_kv_head_dim, qk_rope_head_dim, index_head_dim = self.sparse_head_dim
+            assert qk_rope_head_dim == 0
+
+            kv_bytes = (
+                num_heads_per_page
+                * packed_kv_head_dim
+                * get_dtype_size(self.sfa_qsfa_kv_cache_dtype)
+            )
+            index_dtype = self.c8_k_cache_dtype if self.cache_sparse_c8 else self.dtype
+            qli_bytes = num_heads_per_page * index_head_dim * get_dtype_size(index_dtype)
+            if not self.cache_sparse_c8:
+                return kv_bytes + qli_bytes
+
+            qli_scale_bytes = num_heads_per_page * get_dtype_size(self.c8_k_scale_cache_dtype)
+            return kv_bytes + qli_bytes + qli_scale_bytes
+
         if self.cache_sparse_c8:
             assert self.sparse_head_dim is not None
             assert len(self.sparse_head_dim) == 3
@@ -87,7 +127,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
         )
 
     @property
-    def sparse_kv_cache_ratio(self) -> tuple[float, float, float, float | None]:
+    def sparse_kv_cache_ratio(self) -> tuple[float, float | None, float, float | None]:
         """
         Compute the relative byte share of each KV cache entry.
 
@@ -100,6 +140,30 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
         """
 
         assert self.sparse_head_dim is not None
+
+        if self.cache_sfa_kv_quant_sparse_attention:
+            packed_kv_head_dim, qk_rope_head_dim, index_k_head_dim = self.sparse_head_dim
+            assert qk_rope_head_dim == 0
+
+            packed_kv_virtual = packed_kv_head_dim * get_dtype_size(self.sfa_qsfa_kv_cache_dtype)
+            index_dtype = self.c8_k_cache_dtype if self.cache_sparse_c8 else self.dtype
+            index_k_virtual = index_k_head_dim * get_dtype_size(index_dtype)
+            scale_virtual = (
+                get_dtype_size(self.c8_k_scale_cache_dtype)
+                if self.cache_sparse_c8
+                else 0
+            )
+            total_virtual_head_dim = packed_kv_virtual + index_k_virtual + scale_virtual
+            return (
+                total_virtual_head_dim / packed_kv_virtual,  # kv_cache[0]: packed int8 MLA cache
+                None,  # kv_cache[1]: empty kr_cache placeholder
+                total_virtual_head_dim / index_k_virtual,  # kv_cache[2]: DSA indexer key
+                (
+                    total_virtual_head_dim / scale_virtual
+                    if self.cache_sparse_c8
+                    else None
+                ),
+            )
 
         def get_sparse_head_dim_virtual() -> tuple[int, int, int, int]:
             assert self.sparse_head_dim is not None
@@ -170,6 +234,10 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
         assert len(cache_sparse_c8_set) == 1, (
             "All attention layers in the same KV cache group must use the same sparse C8 setting."
         )
+        cache_sfa_qsfa_set = set(spec.cache_sfa_kv_quant_sparse_attention for spec in specs)
+        assert len(cache_sfa_qsfa_set) == 1, (
+            "All attention layers in the same KV cache group must use the same SFA KV-quant sparse attention setting."
+        )
         return cls(
             block_size=specs[0].block_size,
             num_kv_heads=specs[0].num_kv_heads,
@@ -180,6 +248,8 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             dtype=specs[0].dtype,
             cache_dtype_str=cache_dtype_str_set.pop(),
             cache_sparse_c8=specs[0].cache_sparse_c8,
+            cache_sfa_kv_quant_sparse_attention=specs[0].cache_sfa_kv_quant_sparse_attention,
+            sfa_qsfa_kv_cache_dtype=specs[0].sfa_qsfa_kv_cache_dtype,
         )
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:

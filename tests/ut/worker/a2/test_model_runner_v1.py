@@ -6,6 +6,7 @@ import numpy as np
 import torch
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec, KVCacheTensor
 
+from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, get_sfa_qsfa_packed_head_dim
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 
@@ -84,6 +85,125 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
 
         self.assertEqual(k_cache.shape, (2, 16, 8, 64))
         self.assertEqual(v_cache.shape, (2, 16, 8, 64))
+
+    def test_sparse_qsfa_int8_cache_allocates_packed_cache(self):
+        runner = self._build_runner()
+        runner.use_sparse = True
+        runner.model_config.hf_text_config.index_head_dim = 128
+        runner.attn_backend.get_kv_cache_shape.side_effect = (
+            lambda num_blocks, block_size, num_kv_heads, head_size: (
+                num_blocks,
+                block_size,
+                num_kv_heads,
+                head_size,
+            )
+        )
+        runner._get_attention_kv_cache_dims = lambda layer_name, spec: (512, 64)
+
+        packed_head_dim = get_sfa_qsfa_packed_head_dim(512, 64)
+        kv_cache_spec = AscendMLAAttentionSpec(
+            block_size=16,
+            num_kv_heads=1,
+            head_size=packed_head_dim + 128,
+            sparse_head_dim=(packed_head_dim, 0, 128),
+            dtype=torch.bfloat16,
+            cache_dtype_str="auto",
+            cache_sfa_kv_quant_sparse_attention=True,
+        )
+        layer_name = "model.layers.0.self_attn"
+        kv_cache_config = KVCacheConfig(
+            num_blocks=2,
+            kv_cache_tensors=[KVCacheTensor(size=kv_cache_spec.page_size_bytes * 2, shared_by=[layer_name])],
+            kv_cache_groups=[KVCacheGroupSpec(layer_names=[layer_name], kv_cache_spec=kv_cache_spec)],
+        )
+
+        kv_cache_raw_tensors = runner._allocate_kv_cache_tensors(kv_cache_config)
+        k_cache_raw, kr_cache_raw, dsa_k_cache_raw = kv_cache_raw_tensors[layer_name]
+
+        self.assertEqual(k_cache_raw.numel(), 2 * 16 * packed_head_dim)
+        self.assertEqual(kr_cache_raw.numel(), 0)
+        self.assertEqual(dsa_k_cache_raw.numel(), 2 * 16 * 128 * torch.empty((), dtype=torch.bfloat16).element_size())
+
+        runner._kv_cache_spec_attn_group_iterator = lambda: [
+            SimpleNamespace(
+                kv_cache_spec=kv_cache_spec,
+                backend=runner.attn_backend,
+                layer_names=[layer_name],
+            )
+        ]
+        kv_caches = runner._reshape_kv_cache_tensors(kv_cache_config, kv_cache_raw_tensors)
+        packed_cache, kr_cache, dsa_k_cache = kv_caches[layer_name]
+
+        self.assertEqual(packed_cache.dtype, torch.int8)
+        self.assertEqual(packed_cache.shape, (2, 16, 1, packed_head_dim))
+        self.assertEqual(kr_cache.shape, (2, 16, 1, 0))
+        self.assertEqual(dsa_k_cache.dtype, torch.bfloat16)
+        self.assertEqual(dsa_k_cache.shape, (2, 16, 1, 128))
+
+    def test_sparse_qsfa_int8_cache_uses_exact_segment_sizes(self):
+        runner = self._build_runner()
+        runner.use_sparse = True
+        runner.model_config.hf_text_config.index_head_dim = 36
+        runner.attn_backend.get_kv_cache_shape.side_effect = (
+            lambda num_blocks, block_size, num_kv_heads, head_size: (
+                num_blocks,
+                block_size,
+                num_kv_heads,
+                head_size,
+            )
+        )
+        runner._get_attention_kv_cache_dims = lambda layer_name, spec: (512, 64)
+
+        packed_head_dim = get_sfa_qsfa_packed_head_dim(512, 64)
+        kv_cache_spec = AscendMLAAttentionSpec(
+            block_size=16,
+            num_kv_heads=1,
+            head_size=packed_head_dim + 36,
+            sparse_head_dim=(packed_head_dim, 0, 36),
+            dtype=torch.bfloat16,
+            cache_dtype_str="auto",
+            cache_sfa_kv_quant_sparse_attention=True,
+        )
+        layer_name = "model.layers.0.self_attn"
+        kv_cache_config = KVCacheConfig(
+            num_blocks=1,
+            kv_cache_tensors=[
+                KVCacheTensor(
+                    size=kv_cache_spec.page_size_bytes,
+                    shared_by=[layer_name],
+                )
+            ],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    layer_names=[layer_name],
+                    kv_cache_spec=kv_cache_spec,
+                )
+            ],
+        )
+
+        kv_cache_raw_tensors = runner._allocate_kv_cache_tensors(kv_cache_config)
+        k_cache_raw, kr_cache_raw, dsa_k_cache_raw = kv_cache_raw_tensors[layer_name]
+
+        self.assertEqual(k_cache_raw.numel(), 16 * packed_head_dim)
+        self.assertEqual(kr_cache_raw.numel(), 0)
+        self.assertEqual(
+            dsa_k_cache_raw.numel(),
+            16 * 36 * torch.empty((), dtype=torch.bfloat16).element_size(),
+        )
+
+        runner._kv_cache_spec_attn_group_iterator = lambda: [
+            SimpleNamespace(
+                kv_cache_spec=kv_cache_spec,
+                backend=runner.attn_backend,
+                layer_names=[layer_name],
+            )
+        ]
+        kv_caches = runner._reshape_kv_cache_tensors(kv_cache_config, kv_cache_raw_tensors)
+        packed_cache, kr_cache, dsa_k_cache = kv_caches[layer_name]
+
+        self.assertEqual(packed_cache.shape, (1, 16, 1, packed_head_dim))
+        self.assertEqual(kr_cache.shape, (1, 16, 1, 0))
+        self.assertEqual(dsa_k_cache.shape, (1, 16, 1, 36))
 
 
 class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
