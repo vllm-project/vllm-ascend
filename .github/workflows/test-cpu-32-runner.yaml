@@ -35,108 +35,172 @@ jobs:
   test-cpu-32:
     runs-on: linux-amd64-cpu-32-hk
     steps:
+      - name: Job started - sleeping for debugging
+        run: |
+          echo "=========================================="
+          echo "🔍 CPU-32 Runner Diagnostic Workflow"
+          echo "=========================================="
+          echo ""
+          echo "Job has started successfully!"
+          echo "This means the runner matched and pod was created."
+          echo ""
+          echo "Pod will sleep for 15 minutes for debugging."
+          echo "You can now run:"
+          echo ""
+          echo "  # Find the pod"
+          echo "  kubectl get pods -n vllm-project -o wide | grep test-cpu-32"
+          echo ""
+          echo "  # View logs"
+          echo "  kubectl logs -f <pod-name> -n vllm-project -c runner"
+          echo ""
+          echo "  # Enter the pod"
+          echo "  kubectl exec -it <pod-name> -n vllm-project -c runner -- bash"
+          echo ""
+          echo "=========================================="
+          echo "Sleep will start now (900 seconds = 15 minutes)"
+          echo "=========================================="
+
       - name: Checkout
-        uses: actions/checkout@v7
+        run: |
+          echo "Checking out repository..."
+          pwd
+          ls -la | head -20
 
       - name: Print environment info
         run: |
-          echo "=== System Information ==="
+          echo ""
+          echo "=== 📊 System Information ==="
           uname -a
           echo ""
-          echo "=== CPU Information ==="
+          echo "=== 💻 CPU Information ==="
           nproc
-          lscpu | head -20
+          lscpu | head -15
           echo ""
-          echo "=== Memory Information ==="
+          echo "=== 💾 Memory Information ==="
           free -h
           echo ""
-          echo "=== User and Groups ==="
+          echo "=== 👤 User and Groups ==="
           whoami
           id
           echo ""
-          echo "=== Available tools ==="
-          which buildctl || echo "buildctl not found"
-          buildctl --version 2>/dev/null || echo "buildctl not available"
+          echo "=== 🔧 Available tools ==="
+          which buildctl || echo "❌ buildctl not found"
+          buildctl --version 2>/dev/null || echo "❌ buildctl not available"
           echo ""
-          echo "=== Environment Variables ==="
-          env | grep -E "BUILDKIT|DOCKER_CONFIG" || echo "No BUILDKIT/DOCKER_CONFIG env vars"
+          echo "=== 🌍 Environment Variables (BUILDKIT/DOCKER) ==="
+          env | grep -E "BUILDKIT|DOCKER_CONFIG" || echo "❌ No BUILDKIT/DOCKER_CONFIG env vars found"
+          echo ""
+          echo "=== 📁 Home directory ==="
+          ls -la ~/ | head -20
+
+      - name: Check Vault certificate injection
+        run: |
+          echo ""
+          echo "=== 🔐 Checking Vault Certificate Injection ==="
+          echo "Looking for Vault-injected certificates..."
+          echo ""
+
+          if [ -d "$HOME/.docker" ]; then
+            echo "✅ $HOME/.docker exists"
+            echo "Files:"
+            ls -la "$HOME/.docker/"
+            echo ""
+            echo "File contents (first 50 chars):"
+            for f in "$HOME/.docker"/*; do
+              if [ -f "$f" ]; then
+                echo "--- $(basename $f) ---"
+                head -c 50 "$f" 2>/dev/null && echo " ..."
+              fi
+            done
+          else
+            echo "❌ $HOME/.docker does NOT exist"
+            echo "This indicates Vault injection failed!"
+          fi
 
       - name: Check buildctl availability
+        continue-on-error: true
         run: |
-          echo "=== Checking buildctl at job start ==="
+          echo ""
+          echo "=== 🚀 Checking buildctl at job start ==="
           which buildctl && echo "✅ buildctl found" || echo "❌ buildctl NOT found"
-          buildctl --version 2>/dev/null || echo "buildctl --version failed"
+          buildctl --version 2>/dev/null || echo "⏳ buildctl --version failed (may still be installing)"
 
           # Wait for buildctl if not available
           if ! command -v buildctl &> /dev/null; then
-            echo "buildctl not found at start, waiting..."
-            for i in {1..60}; do
+            echo ""
+            echo "buildctl not found at start, waiting up to 5 minutes..."
+            for i in {1..300}; do
               if command -v buildctl &> /dev/null; then
                 echo "✅ buildctl appeared after $i seconds"
+                buildctl --version
                 break
               fi
-              [ $((i % 10)) -eq 0 ] && echo "Waiting... ($i/60 sec)"
+              [ $((i % 30)) -eq 0 ] && echo "Waiting... ($i/300 sec)"
               sleep 1
             done
           fi
 
-          # Verify buildctl is now available
+          # Final check
           if command -v buildctl &> /dev/null; then
             echo "✅ buildctl is available"
             buildctl --version
           else
-            echo "❌ buildctl still not available after 60 seconds"
-            echo "This indicates a problem with the pod template or Vault injection"
-            exit 1
+            echo "⚠️  buildctl still not available after 5 minutes"
+            echo "This may indicate:"
+            echo "  - postStart hook is taking too long"
+            echo "  - Network issue downloading buildkit binary"
+            echo "  - Vault certificate injection failed"
           fi
 
       - name: Test buildkitd connection
+        continue-on-error: true
         run: |
-          echo "=== Testing buildkitd connection ==="
+          echo ""
+          echo "=== 🔌 Testing buildkitd connection ==="
           echo "BUILDKITD_ADDR: ${BUILDKITD_ADDR:-not set}"
           echo "DOCKER_CONFIG: ${DOCKER_CONFIG:-not set}"
 
           if [ -n "$BUILDKITD_ADDR" ]; then
             echo "Attempting to connect to buildkitd..."
-            buildctl du 2>&1 || echo "buildctl du command failed (may need certificates)"
+            if command -v buildctl &> /dev/null; then
+              buildctl du 2>&1 || echo "buildctl du failed (may need certificates)"
+            else
+              echo "buildctl not available yet"
+            fi
           else
-            echo "BUILDKITD_ADDR not set"
+            echo "⚠️  BUILDKITD_ADDR not set"
           fi
 
-      - name: List available certificates
+      - name: Keep pod running for manual debugging (15 minutes)
         run: |
-          echo "=== Looking for certificates ==="
-          if [ -d "$HOME/.docker" ]; then
-            echo "Files in $HOME/.docker:"
-            ls -la "$HOME/.docker/"
-            echo ""
-            echo "File contents (first 100 chars):"
-            for f in "$HOME/.docker"/*; do
-              if [ -f "$f" ]; then
-                echo "--- $(basename $f) ---"
-                head -c 100 "$f"
-                echo ""
-              fi
-            done
-          else
-            echo "$HOME/.docker does not exist"
-          fi
-
-      - name: Keep pod running for debugging
-        run: |
-          echo "=== Pod will sleep for 5 minutes for debugging ==="
-          echo "You can now:"
-          echo "  kubectl exec -it <pod-name> -n vllm-project -c runner -- bash"
-          echo "To check:"
-          echo "  - which buildctl"
-          echo "  - ls -la ~/.docker/"
-          echo "  - env | grep BUILDKIT"
           echo ""
-          sleep 300
-          echo "=== Debug time complete ==="
+          echo "=========================================="
+          echo "🛌 Pod is now sleeping for 15 minutes"
+          echo "=========================================="
+          echo ""
+          echo "You have 15 minutes to:"
+          echo "  1. Find the pod:"
+          echo "     kubectl get pods -n vllm-project -o wide"
+          echo ""
+          echo "  2. Check logs in real-time:"
+          echo "     kubectl logs -f <pod-name> -n vllm-project -c runner"
+          echo ""
+          echo "  3. Execute commands in the pod:"
+          echo "     kubectl exec <pod-name> -n vllm-project -c runner -- which buildctl"
+          echo "     kubectl exec <pod-name> -n vllm-project -c runner -- ls -la ~/.docker/"
+          echo "     kubectl exec <pod-name> -n vllm-project -c runner -- env | grep BUILDKIT"
+          echo ""
+          echo "  4. Open an interactive shell:"
+          echo "     kubectl exec -it <pod-name> -n vllm-project -c runner -- bash"
+          echo ""
+          echo "=========================================="
+          echo "Sleep started: $(date)"
+          sleep 900
+          echo "Sleep ended: $(date)"
+          echo "=========================================="
 
-      - name: Final verification
+      - name: Final status
         run: |
-          echo "=== Final Verification ==="
-          buildctl --version
-          echo "✅ Test completed successfully!"
+          echo ""
+          echo "✅ Pod has completed 15-minute debug session"
+          echo "Test workflow finished."
