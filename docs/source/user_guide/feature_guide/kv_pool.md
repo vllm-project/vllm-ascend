@@ -115,7 +115,6 @@ export PYTHONHASHSEED=0
 | Hardware | Dependencies | Export Command | Description |
 | :--- | :--- | :--- | :--- |
 | 800 I/T A3 series | HDK >= 26.0<br>or HDK >= 25.5 with mooncake >= v0.3.11.post1<br>CANN >= 9.0.0<br>LingQu Computing Network >= 1.5 | `export ASCEND_ENABLE_USE_FABRIC_MEM=1` | **Recommended**. Enables unified memory address direct transmission scheme. With SSD offload, see [Fabric memory size alignment](#122-fabric-memory-size-alignment-a3--ascend_enable_use_fabric_mem1) — memory sizes must be aligned to 1GB. |
-| 800 I/T A3 series | CANN >= 9.1.0<br>Mooncake with `ASCEND_GLOBAL_RESOURCE_CONFIG` store forwarding support | `export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["hccs:device"],"store":{"comm_resource_config.protocol_desc":["roce:device"]}}'` | Enables HIXL resource configuration for Store/PD traffic separation. The top-level `comm_resource_config` controls PD transfer traffic, while the `store` section controls Mooncake Store traffic. |
 | 800 I/T A3 series | If any dependency above is not met | `export ASCEND_BUFFER_POOL=4:8` | Configures the number and size of buffers on the NPU Device for aggregation and KV transfer (e.g., `4:8` means 4 buffers of 8MB). |
 | 800 I/T A2 series | HDK >= 25.5 is recommended | `export HCCL_INTRA_ROCE_ENABLE=1` | Required by direct transmission scheme on 800 I/T A2 series|
 
