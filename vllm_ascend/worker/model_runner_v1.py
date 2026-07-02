@@ -1044,7 +1044,7 @@ class NPUModelRunner(GPUModelRunner):
             )
 
         # Record the index of requests that should not be sampled,
-        # so that we could clear the sampled tokens before returning.
+        # so that we could clear the sampled tokens before returning
         num_tokens = [self.requests[r].num_tokens for r in self.input_batch.req_ids]
         num_tokens_np = np.array(num_tokens, dtype=np.int32)
         base_num_reqs = self.input_batch.num_reqs
