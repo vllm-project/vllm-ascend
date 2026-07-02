@@ -384,7 +384,7 @@ First, check physical layer connectivity, then verify each node, and finally ver
 
 #### Physical Layer Requirements
 
-- The physical machines must be located on the same WLAN, with network connectivity.
+- The physical machines must be located on the same LAN, with network connectivity.
 - All NPUs are connected with optical modules, and the connection status must be normal.
 
 #### Each Node Verification
