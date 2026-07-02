@@ -32,6 +32,15 @@ pytest_log_dir="${RUNNER_TEMP:-/tmp}/selected-tests-${npu_type}-${num_npus}card"
 
 mkdir -p "${pytest_log_dir}"
 
+setup_vllm_cache_root() {
+  if [ "${CI:-}" != "true" ]; then
+    return
+  fi
+  export VLLM_CACHE_ROOT
+  VLLM_CACHE_ROOT="$(mktemp -d "${RUNNER_TEMP:-/tmp}/vllm-cache-${npu_type}-${num_npus}card.XXXXXX")"
+  echo "Using vLLM cache root: ${VLLM_CACHE_ROOT}"
+}
+
 print_test_info() {
   echo -e "\033[1;34m=== TEST INFO ===\033[0m"
   echo -e "  \033[33mDevice:\033[0m ${npu_type}"
@@ -153,6 +162,7 @@ print_timing_json() {
 }
 
 print_test_info
+setup_vllm_cache_root
 
 if [ "${npu_type}" = "cpu" ]; then
   run_pytest_batch "cpu-ut (${#targets[@]} targets)" "${targets[@]}"
