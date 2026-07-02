@@ -234,7 +234,6 @@ jobs:
         id: build
         run: |
           set -ex
-          which buildctl
           IMAGE_TAG="vllm-ascend-pr${{ inputs.pr_number }}-${{ matrix.vllm_label }}-${{ matrix.npu_type }}-${{ matrix.arch }}"
           IMAGE_NAME="${{ env.QUAY_TEMP_REPO }}:${IMAGE_TAG}"
 
