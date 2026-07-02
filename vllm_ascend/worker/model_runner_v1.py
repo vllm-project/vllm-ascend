@@ -1696,7 +1696,15 @@ class NPUModelRunner(GPUModelRunner):
             # Speculative decoding is not enabled.
             draft_token_ids = None
         elif isinstance(self.drafter, AscendNgramProposer):
-            draft_token_ids = self.drafter.propose(valid_sampled_token_ids)
+            if vllm_version_is("0.23.0"):
+                draft_token_ids = self.drafter.propose(valid_sampled_token_ids)
+            else:
+                draft_token_ids = self.drafter.propose(
+                    scheduler_output.num_spec_tokens_to_schedule,
+                    valid_sampled_token_ids,
+                    self.input_batch.num_tokens_no_spec,
+                    self.input_batch.token_ids_cpu,
+                )
         elif isinstance(self.drafter, AscendSuffixDecodingProposer):
             if vllm_version_is("0.23.0"):
                 draft_token_ids = self.drafter.propose(valid_sampled_token_ids)

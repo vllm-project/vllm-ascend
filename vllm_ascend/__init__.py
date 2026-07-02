@@ -41,7 +41,10 @@ def register():
     """Register the NPU platform."""
     import os
 
-    os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "0"
+    from vllm_ascend.utils import vllm_version_is
+
+    if not vllm_version_is("0.23.0"):
+        os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "0"
     return "vllm_ascend.platform.NPUPlatform"
 
 
