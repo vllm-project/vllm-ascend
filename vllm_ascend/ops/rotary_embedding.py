@@ -160,6 +160,54 @@ def rope_forward_oot(
     is_neox_style: bool,
     offsets: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    # Gemma4 MTP attention is Q-only — K/V come from the target model's
+    # KV cache, so key may be None.  Apply RoPE to query only.
+    if key is None:
+        if offsets is not None:
+            raise NotImplementedError(
+                "Batched rotary embedding is currently not supported on NPU."
+            )
+        num_tokens = query.shape[0]
+        if HAS_TRITON:
+            query, _ = rope_forward_triton(
+                query.view(num_tokens, -1, head_size),
+                # Create a dummy key to satisfy the API
+                torch.empty(num_tokens, 0, head_size, dtype=query.dtype, device=query.device),
+                cos_sin_cache=cos_sin_cache,
+                positions=positions,
+                rope_dim=rotary_dim,
+                is_neox_style=is_neox_style,
+            )
+        else:
+            if rotary_dim < head_size:
+                query = query.view(num_tokens, -1, head_size)
+                q_rot = query[..., :rotary_dim]
+                q_pass = query[..., rotary_dim:]
+                q_rot = q_rot.contiguous().view(num_tokens, -1)
+                cos, sin = cos_sin_cache.chunk(2, dim=-1)
+                cos = cos.index_select(0, positions).view(num_tokens, -1)[:, :rotary_dim]
+                sin = sin.index_select(0, positions).view(num_tokens, -1)[:, :rotary_dim]
+                if is_neox_style:
+                    q1, q2 = q_rot.chunk(2, dim=-1)
+                    q_rot = torch.cat([q1 * cos - q2 * sin, q2 * cos + q1 * sin], dim=-1)
+                else:
+                    q_rot = q_rot * cos + q_rot * sin
+                query = torch.cat([q_rot, q_pass], dim=-1).flatten(-2, -1)
+            else:
+                query = query.view(num_tokens, -1, head_size)
+                cos, sin = cos_sin_cache.chunk(2, dim=-1)
+                cos = cos.index_select(0, positions).view(num_tokens, 1, -1)
+                sin = sin.index_select(0, positions).view(num_tokens, 1, -1)
+                if is_neox_style:
+                    q1, q2 = query.chunk(2, dim=-1)
+                    query = torch.cat(
+                        [q1 * cos - q2 * sin, q2 * cos + q1 * sin], dim=-1
+                    )
+                else:
+                    query = query * cos + query * sin
+                query = query.flatten(-2, -1)
+        return query, None
+
     query_shape, key_shape = query.shape, key.shape
     if offsets is not None:
         raise NotImplementedError("Batched rotary embedding is currently not supported on NPU.")
