@@ -25,6 +25,8 @@ MODEL = "Qwen/Qwen3-0.6B"
 # -------------------- Prefetch backend tests --------------------
 
 
+@pytest.mark.e2e_features("dense", "eager_mode", "logprobs", "weight_prefetch")
+@pytest.mark.e2e_model("Qwen/Qwen3-0.6B")
 @wait_until_npu_memory_free()
 def test_prefetch_offload_eager():
     """Test prefetch CPU offloading in eager mode.
@@ -45,6 +47,8 @@ def test_prefetch_offload_eager():
     compare_logprobs(runner_kwargs=runner_kwargs, prompts=PROMPTS_SHORT)
 
 
+@pytest.mark.e2e_features("dense", "full_decode_only", "logprobs", "weight_prefetch")
+@pytest.mark.e2e_model("Qwen/Qwen3-0.6B")
 @wait_until_npu_memory_free()
 def test_prefetch_offload_aclgraph():
     """Test prefetch CPU offloading with ACL graph capture.
@@ -65,6 +69,8 @@ def test_prefetch_offload_aclgraph():
     compare_logprobs(runner_kwargs=runner_kwargs, prompts=PROMPTS_SHORT)
 
 
+@pytest.mark.e2e_features("dense", "eager_mode", "logprobs", "weight_prefetch")
+@pytest.mark.e2e_model("Qwen/Qwen3-0.6B")
 @wait_until_npu_memory_free()
 def test_prefetch_offload_selective_params():
     """Test selective parameter offloading (MLP weights only).
@@ -94,6 +100,8 @@ def test_prefetch_offload_selective_params():
 # UVA zero-copy.
 
 
+@pytest.mark.e2e_features("multimodal", "eager_mode", "logprobs", "cpu_offloading")
+@pytest.mark.e2e_model("Qwen/Qwen3-0.6B")
 @pytest.mark.parametrize("disable_pin_memory", [False, True])
 @wait_until_npu_memory_free()
 def test_uva_offload_functional_call(disable_pin_memory):

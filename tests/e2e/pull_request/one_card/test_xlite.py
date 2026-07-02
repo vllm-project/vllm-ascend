@@ -42,6 +42,8 @@ CASE_FULL = LLMTestCase(
 )
 
 
+@pytest.mark.e2e_features("dense", "eager_mode", "xlite_graph", "logprobs")
+@pytest.mark.e2e_model("Qwen/Qwen3-0.6B")
 @pytest.mark.skip(reason="TODO: Re-enable xlite_decode_only e2e test when stable.")
 @pytest.mark.parametrize("cur_case", [CASE_DECODE_ONLY])
 def test_models_with_xlite_decode_only(cur_case: LLMTestCase):
@@ -54,6 +56,8 @@ def test_models_with_xlite_decode_only(cur_case: LLMTestCase):
     compare_logprobs(runner_kwargs=runner_kwargs, prompts=cur_case.prompts)
 
 
+@pytest.mark.e2e_features("dense", "eager_mode", "xlite_graph", "logprobs")
+@pytest.mark.e2e_model("Qwen/Qwen3-0.6B")
 @pytest.mark.parametrize("cur_case", [CASE_FULL])
 def test_models_with_xlite_full_mode(cur_case: LLMTestCase):
     runner_kwargs = {

@@ -91,6 +91,8 @@ def _has_lifecycle_endpoints(server: RemoteOpenAIServer) -> bool:
     return True
 
 
+@pytest.mark.e2e_features("multimodal", "eager_mode")
+@pytest.mark.e2e_model("Qwen/Qwen3-0.6B")
 @pytest.mark.skipif(
     torch.npu.device_count() < 1,
     reason="NPU IPC weight transfer e2e test requires at least 1 NPU.",

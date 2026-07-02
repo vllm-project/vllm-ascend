@@ -20,12 +20,15 @@ import json
 import os
 from unittest.mock import patch
 
+import pytest
 import requests
 from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.conftest import DisaggPDProxy, RemotePDServer, VllmRunner, wait_until_npu_memory_free
 
 
+@pytest.mark.e2e_features("multimodal", "full_decode_only", "w8a8")
+@pytest.mark.e2e_model("vllm-ascend/DeepSeek-V3.2-W8A8-Pruning")
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
 @wait_until_npu_memory_free()
 def test_moe_w8a8_tp_pp_ep_full_decode_only():
@@ -49,6 +52,8 @@ def test_moe_w8a8_tp_pp_ep_full_decode_only():
         assert len(outputs[0][1]) > len(prompts[0])
 
 
+@pytest.mark.e2e_features("multimodal", "full_decode_only", "pd_disaggregation", "w8a8", "sfa", "dsa")
+@pytest.mark.e2e_model("vllm-ascend/DeepSeek-V3.2-W8A8-Pruning")
 @wait_until_npu_memory_free()
 def test_pd_disaggregation_w8a8_sfa_dsa_full_decode_only():
     """Verify W8A8 1P1D PD disaggregation with full decode only."""

@@ -160,6 +160,8 @@ def assert_qknorm_rope_fusion(after_gm, expect_fused=True, use_bias=False):
             assert not found, f"Not expected operator '{torch_op}' but find"
 
 
+@pytest.mark.e2e_features("eager_mode")
+@pytest.mark.e2e_model("N/A")
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("hidden_size", [64])
 @pytest.mark.parametrize("num_tokens", [257])

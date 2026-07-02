@@ -32,6 +32,8 @@ MODELS = [
 ]
 
 
+@pytest.mark.e2e_features("multimodal", "full_decode_only", "multistream_moe")
+@pytest.mark.e2e_model("vllm-ascend/DeepSeek-V2-Lite-W8A8")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
 def test_models_with_multistream_overlap_shared_expert(

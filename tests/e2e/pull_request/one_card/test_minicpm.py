@@ -31,6 +31,8 @@ MINICPM_MODELS = [
 ]
 
 
+@pytest.mark.e2e_features("multimodal", "eager_mode")
+@pytest.mark.e2e_model("OpenBMB/MiniCPM4-0.5B")
 @pytest.mark.parametrize("model", MINICPM_MODELS)
 def test_minicpm(model) -> None:
     example_prompts = [

@@ -20,6 +20,7 @@
 import os
 from unittest.mock import patch
 
+import pytest
 import torch
 from vllm import SamplingParams
 from vllm.utils.mem_constants import GiB_bytes
@@ -28,6 +29,8 @@ from tests.e2e.conftest import VllmRunner
 from tests.e2e.utils import fork_new_process_for_each_test
 
 
+@pytest.mark.e2e_features("multimodal", "full_decode_only", "sleep_wake_up")
+@pytest.mark.e2e_model("Qwen/Qwen3-0.6B")
 @fork_new_process_for_each_test
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "0"})
 def test_end_to_end():

@@ -19,12 +19,16 @@
 import os
 from unittest.mock import patch
 
+import pytest
+
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 
+@pytest.mark.e2e_features("multimodal", "eager_mode", "w4a8", "mtp")
+@pytest.mark.e2e_model("gdydems/DeepSeek-V4-Flash-w4a8-mtp")
 @patch.dict(
     os.environ,
     {
@@ -69,6 +73,8 @@ def test_deepseek_v4_w4a8_tp4_basic_greedy():
             assert output_ids == expected_token_ids[i]
 
 
+@pytest.mark.e2e_features("multimodal", "full_decode_only", "w4a8", "mtp", "dsa")
+@pytest.mark.e2e_model("gdydems/DeepSeek-V4-Flash-w4a8-mtp")
 @patch.dict(
     os.environ,
     {

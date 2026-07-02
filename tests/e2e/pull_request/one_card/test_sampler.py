@@ -16,11 +16,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+import pytest
 from vllm import SamplingParams
 
 from tests.e2e.conftest import VllmRunner
 
 
+@pytest.mark.e2e_features("multimodal", "full_decode_only")
+@pytest.mark.e2e_model("Qwen/Qwen3-0.6B")
 def test_qwen3_topk() -> None:
     example_prompts = [
         "Hello, my name is",
@@ -33,6 +36,8 @@ def test_qwen3_topk() -> None:
         runner.generate(example_prompts, sampling_params)
 
 
+@pytest.mark.e2e_features("multimodal", "full_decode_only", "logprobs")
+@pytest.mark.e2e_model("Qwen/Qwen3-0.6B")
 def test_qwen3_prompt_logprobs() -> None:
     example_prompts = [
         "Hello, my name is",
@@ -44,6 +49,8 @@ def test_qwen3_prompt_logprobs() -> None:
         runner.generate_greedy_logprobs(example_prompts, max_tokens=5, num_logprobs=1)
 
 
+@pytest.mark.e2e_features("multimodal", "full_decode_only", "multistream_moe", "async_scheduling")
+@pytest.mark.e2e_model("Qwen/Qwen3-0.6B")
 def test_qwen3_exponential_overlap() -> None:
     example_prompts = [
         "Hello, my name is",

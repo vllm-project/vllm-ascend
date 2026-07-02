@@ -13,6 +13,8 @@ from tests.e2e.conftest import VllmRunner
 from tests.e2e.pull_request.one_card.spec_decode.utils import MODELS, calculate_acceptance_per_pos
 
 
+@pytest.mark.e2e_features("multimodal", "gqa", "full_decode_only", "eagle_3")
+@pytest.mark.e2e_model("Qwen/Qwen3-VL-8B-Instruct")
 def test_qwen3_vl_eagle(
     test_prompts: list[list[dict[str, Any]]],
     sampling_config: SamplingParams,
@@ -26,6 +28,8 @@ def test_qwen3_vl_eagle(
         ref_llm.model.chat(test_prompts, sampling_config)
 
 
+@pytest.mark.e2e_features("dense", "gqa", "full_decode_only", "eagle_3", "async_scheduling")
+@pytest.mark.e2e_model("Qwen/Qwen3-8B", "RedHatAI/Qwen3-8B-speculator.eagle3")
 @pytest.mark.parametrize("method", MODELS.keys())
 @pytest.mark.parametrize("num_speculative_tokens", [3])
 @pytest.mark.parametrize("draft_tensor_parallel_size", [1])

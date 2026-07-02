@@ -229,6 +229,8 @@ def register_pattern_safe(pattern_class, vllm_config, eps, pattern_key):
     return pattern
 
 
+@pytest.mark.e2e_features("eager_mode")
+@pytest.mark.e2e_model("N/A")
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("hidden_size", [64])
 @pytest.mark.parametrize("num_tokens", [257])
@@ -301,9 +303,11 @@ def test_rmsnorm_quant_fusion(
             compiled_out, compiled_res = compiled_model(x)
 
             # Verify output shapes are correct
-            assert compiled_out.shape == (num_tokens, hidden_size), (
-                f"Expected shape {(num_tokens, hidden_size)}, got {compiled_out.shape}"
-            )
-            assert compiled_res.shape == (num_tokens, hidden_size), (
-                f"Expected shape {(num_tokens, hidden_size)}, got {compiled_res.shape}"
-            )
+            assert compiled_out.shape == (
+                num_tokens,
+                hidden_size,
+            ), f"Expected shape {(num_tokens, hidden_size)}, got {compiled_out.shape}"
+            assert compiled_res.shape == (
+                num_tokens,
+                hidden_size,
+            ), f"Expected shape {(num_tokens, hidden_size)}, got {compiled_res.shape}"

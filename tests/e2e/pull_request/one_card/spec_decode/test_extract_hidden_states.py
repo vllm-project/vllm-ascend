@@ -159,6 +159,8 @@ def _verify_output(output, expected_shape, *, verify_nonzero, verify_token_ids):
             assert not torch.allclose(hidden_states, torch.zeros_like(hidden_states))
 
 
+@pytest.mark.e2e_features("dense", "eager_mode", "pd_disaggregation", "eagle_3", "extract_hidden_states")
+@pytest.mark.e2e_model("Qwen/Qwen3-8B", "Qwen/Qwen3.5-0.8B")
 @pytest.mark.parametrize("case", CASES)
 def test_extract_hidden_states(case: ExtractHiddenStatesCase, sampling_config):
     """Extract hidden states from the target model and validate the dump."""

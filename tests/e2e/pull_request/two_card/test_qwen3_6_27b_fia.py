@@ -16,6 +16,7 @@
 import os
 from unittest.mock import patch
 
+import pytest
 from vllm.assets.image import ImageAsset
 
 from tests.e2e.conftest import VllmRunner, qwen_prompt, wait_until_npu_memory_free
@@ -23,6 +24,8 @@ from tests.e2e.conftest import VllmRunner, qwen_prompt, wait_until_npu_memory_fr
 MODEL = "Qwen/Qwen3.6-27B"
 
 
+@pytest.mark.e2e_features("multimodal", "eager_mode", "fia", "multi_instance")
+@pytest.mark.e2e_model("Qwen/Qwen3.6-27B")
 @patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024"})
 @wait_until_npu_memory_free()
 def test_qwen3_6_27b_multimodel_fia_eager():
@@ -61,10 +64,12 @@ def test_qwen3_6_27b_multimodel_fia_eager():
     assert outputs[0][1]
 
 
+@pytest.mark.e2e_features("multimodal", "piecewise_graph", "fia", "multi_instance")
+@pytest.mark.e2e_model("Qwen/Qwen3.6-27B")
 @patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024"})
 @wait_until_npu_memory_free()
 def test_qwen3_6_27b_multimodel_fia_acl_graph():
-    """Verify multimodal generation with FIA op and FULL_AND_PIECEWISE graph mode."""
+    """Verify multimodal generation with FIA op and FULL_AND_piecewise_graph mode."""
     image = ImageAsset("cherry_blossom").pil_image.convert("RGB")
     questions = [
         "What is the content of this image?",

@@ -62,6 +62,14 @@ BASELINES_SP = {
 }
 
 
+@pytest.mark.e2e_features("multimodal", "eager_mode", "eagle_3", "async_scheduling")
+@pytest.mark.e2e_model(
+    "Qwen/Qwen3-30B-A3B",
+    "Qwen/Qwen3-8B",
+    "Qwen/Qwen3-Coder-30B-A3B-Instruct",
+    "RedHatAI/Qwen3-8B-speculator.eagle3",
+    "vllm-ascend/Qwen3-30B-A3B-vwn-eagle-model",
+)
 @pytest.mark.skip(reason="skip test_eagle3_sp_acceptance")
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
 @pytest.mark.parametrize("method", ["eagle3"])
@@ -168,6 +176,14 @@ def test_eagle3_sp_acceptance(
     assert match
 
 
+@pytest.mark.e2e_features("multimodal", "eager_mode", "eagle_3")
+@pytest.mark.e2e_model(
+    "Qwen/Qwen3-30B-A3B",
+    "Qwen/Qwen3-8B",
+    "Qwen/Qwen3-Coder-30B-A3B-Instruct",
+    "RedHatAI/Qwen3-8B-speculator.eagle3",
+    "vllm-ascend/Qwen3-30B-A3B-vwn-eagle-model",
+)
 def test_qwen3_eagle3_pcp2_tp1():
     """
     Test Qwen3-8B with Eagle3 speculative decoding under PCP + TP1 configuration.
@@ -241,6 +257,14 @@ def test_qwen3_eagle3_pcp2_tp1():
         llm.generate(prompts, sampling_params)
 
 
+@pytest.mark.e2e_features("multimodal", "full_decode_only", "eagle_3")
+@pytest.mark.e2e_model(
+    "Qwen/Qwen3-30B-A3B",
+    "Qwen/Qwen3-8B",
+    "Qwen/Qwen3-Coder-30B-A3B-Instruct",
+    "RedHatAI/Qwen3-8B-speculator.eagle3",
+    "vllm-ascend/Qwen3-30B-A3B-vwn-eagle-model",
+)
 @pytest.mark.parametrize("method", P_EAGLE_MODELS.keys())
 @pytest.mark.parametrize("num_speculative_tokens", [8])
 @pytest.mark.parametrize("draft_tensor_parallel_size", [None, 2])
@@ -337,6 +361,14 @@ def test_p_eagle_acceptance(
     assert match
 
 
+@pytest.mark.e2e_features("multimodal", "eager_mode", "eagle_3")
+@pytest.mark.e2e_model(
+    "Qwen/Qwen3-30B-A3B",
+    "Qwen/Qwen3-8B",
+    "Qwen/Qwen3-Coder-30B-A3B-Instruct",
+    "RedHatAI/Qwen3-8B-speculator.eagle3",
+    "vllm-ascend/Qwen3-30B-A3B-vwn-eagle-model",
+)
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
 def test_qwen3_vwn_eagle3_tp2():
     """

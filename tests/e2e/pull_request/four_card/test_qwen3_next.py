@@ -19,9 +19,13 @@
 import os
 from unittest.mock import patch
 
+import pytest
+
 from tests.e2e.conftest import VllmRunner
 
 
+@pytest.mark.e2e_features("multimodal", "full_decode_only")
+@pytest.mark.e2e_model("Qwen/Qwen3-Next-80B-A3B-Instruct", "vllm-ascend/Qwen3-Next-80B-A3B-Instruct-W8A8")
 def test_qwen3_next_distributed_mp_full_decode_only_tp4():
     example_prompts = [
         "Hello, my name is",
@@ -39,6 +43,8 @@ def test_qwen3_next_distributed_mp_full_decode_only_tp4():
         del vllm_model
 
 
+@pytest.mark.e2e_features("multimodal", "eager_mode")
+@pytest.mark.e2e_model("Qwen/Qwen3-Next-80B-A3B-Instruct", "vllm-ascend/Qwen3-Next-80B-A3B-Instruct-W8A8")
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
 @patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024"})
 def test_qwen3_next_w8a8dynamic_distributed_mp_flash_comm_tp4():
@@ -60,6 +66,8 @@ def test_qwen3_next_w8a8dynamic_distributed_mp_flash_comm_tp4():
         del vllm_model
 
 
+@pytest.mark.e2e_features("multimodal", "full_decode_only")
+@pytest.mark.e2e_model("Qwen/Qwen3-Next-80B-A3B-Instruct", "vllm-ascend/Qwen3-Next-80B-A3B-Instruct-W8A8")
 @patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024"})
 def test_qwen3_next_distributed_mp_graph_mode_tp4():
     example_prompts = [

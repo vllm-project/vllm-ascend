@@ -60,6 +60,8 @@ INPUT_PROMPTS = [
 ]
 
 
+@pytest.mark.e2e_features("multimodal", "full_decode_only", "prefix_caching")
+@pytest.mark.e2e_model("Qwen/Qwen3-8B", "deepseek-ai/DeepSeek-V2-Lite-Chat")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [50])
 def test_models_prefix_cache_tp2(model: str, max_tokens: int) -> None:

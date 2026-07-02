@@ -1,4 +1,5 @@
 import huggingface_hub
+import pytest
 import torch
 from modelscope import snapshot_download  # type: ignore[import-untyped]
 from transformers import AutoModelForSequenceClassification
@@ -11,6 +12,8 @@ from tests.e2e.conftest import (
 )
 
 
+@pytest.mark.e2e_features("multimodal", "full_decode_only")
+@pytest.mark.e2e_model("Howeee/Qwen2.5-1.5B-apeach")
 @wait_until_npu_memory_free(target_free_percentage=0.7)
 def test_qwen_pooling_classify_correctness() -> None:
     model_name = snapshot_download(

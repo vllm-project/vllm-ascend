@@ -92,6 +92,8 @@ GOLDEN = [
 ]
 
 
+@pytest.mark.e2e_features("multimodal", "piecewise_graph")
+@pytest.mark.e2e_model("deepseek-ai/DeepSeek-V2-Lite-Chat")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("tp_size", TENSOR_PARALLELS)
 @pytest.mark.parametrize("pp_size", PIPELINE_PARALLELS)
@@ -119,6 +121,8 @@ def test_models_pp2_tp2(model: str, tp_size: int, pp_size: int, distributed_exec
         )
 
 
+@pytest.mark.e2e_features("multimodal", "piecewise_graph")
+@pytest.mark.e2e_model("deepseek-ai/DeepSeek-V2-Lite-Chat")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dp_size", DATA_PARALLELS)
 @pytest.mark.parametrize("pp_size", PIPELINE_PARALLELS)

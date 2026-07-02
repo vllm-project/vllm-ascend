@@ -16,11 +16,14 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import pytest
 from vllm.assets.image import ImageAsset
 
 from tests.e2e.conftest import VllmRunner, qwen_prompt, wait_until_npu_memory_free
 
 
+@pytest.mark.e2e_features("multimodal", "full_decode_only")
+@pytest.mark.e2e_model("Qwen/Qwen3-VL-30B-A3B-Instruct")
 @wait_until_npu_memory_free()
 def test_multimodal_reasoning_pp_full_decode_only():
     """Verify multimodal generation with PP and full decode only."""

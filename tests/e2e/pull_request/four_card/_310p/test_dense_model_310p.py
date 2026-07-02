@@ -15,9 +15,13 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
+import pytest
+
 from tests.e2e.conftest import VllmRunner
 
 
+@pytest.mark.e2e_features("310P", "multimodal", "eager_mode")
+@pytest.mark.e2e_model("Qwen/Qwen3-8B", "vllm-ascend/Qwen3-32B-W8A8")
 def test_qwen3_dense_tp2_fp16():
     example_prompts = [
         "Hello, my name is",
@@ -33,6 +37,8 @@ def test_qwen3_dense_tp2_fp16():
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
 
+@pytest.mark.e2e_features("310P", "multimodal", "eager_mode", "w8a8")
+@pytest.mark.e2e_model("Qwen/Qwen3-8B", "vllm-ascend/Qwen3-32B-W8A8")
 def test_qwen3_dense_tp4_w8a8():
     example_prompts = [
         "Hello, my name is",

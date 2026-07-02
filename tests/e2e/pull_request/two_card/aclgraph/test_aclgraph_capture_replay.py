@@ -129,6 +129,8 @@ def _run_worker_process(
         torch.npu.reset_peak_memory_stats()
 
 
+@pytest.mark.e2e_features("multimodal", "eager_mode")
+@pytest.mark.e2e_model("Qwen/Qwen3-0.6B", "vllm-ascend/DeepSeek-V2-Lite-W8A8")
 @pytest.mark.skip(reason="fix me")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [4, 36])

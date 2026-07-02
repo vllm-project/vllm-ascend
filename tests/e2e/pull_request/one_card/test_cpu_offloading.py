@@ -128,6 +128,8 @@ def _accuracy_test(llm: LLM, subscriber: MockSubscriber):
     assert success_count >= 0.5 * test_count
 
 
+@pytest.mark.e2e_features("multimodal", "eager_mode", "pd_disaggregation", "cpu_offloading")
+@pytest.mark.e2e_model("Qwen/Qwen3-0.6B")
 @pytest.mark.skip(reason="cpu offload connector is deprecated.")
 def test_cpu_offloading() -> None:
     """

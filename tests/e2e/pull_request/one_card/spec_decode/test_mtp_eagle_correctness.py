@@ -33,6 +33,8 @@ os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 MODELS = ["wemaster/deepseek_mtp_main_random_bf16"]
 
 
+@pytest.mark.e2e_features("multimodal", "full_decode_only", "mtp")
+@pytest.mark.e2e_model("wemaster/deepseek_mtp_main_random_bf16")
 @pytest.mark.parametrize("model_name", MODELS)
 @pytest.mark.parametrize("num_speculative_tokens", [3])
 @pytest.mark.parametrize("cudagraph_mode", ["FULL_DECODE_ONLY"])

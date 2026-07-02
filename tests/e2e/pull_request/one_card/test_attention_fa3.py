@@ -76,6 +76,8 @@ def _assert_outputs_match(fia_outputs, fa3_outputs, label=""):
         )
 
 
+@pytest.mark.e2e_features("dense", "eager_mode", "fia")
+@pytest.mark.e2e_model("Qwen/Qwen3-0.6B")
 @pytest.mark.skipif(not _fa3_available(), reason="flash_attn_npu_v3 is not installed")
 def test_fa3_vs_fia_single_prompt():
     """Compare FA3 and FIA with a single prompt (minimal batch size).
@@ -90,6 +92,8 @@ def test_fa3_vs_fia_single_prompt():
     _assert_outputs_match(fia_outputs, fa3_outputs, label="[SinglePrompt] ")
 
 
+@pytest.mark.e2e_features("dense", "eager_mode", "fia")
+@pytest.mark.e2e_model("Qwen/Qwen3-0.6B")
 @pytest.mark.skipif(not _fa3_available(), reason="flash_attn_npu_v3 is not installed")
 def test_fa3_vs_fia_mixed_lengths():
     """Compare FA3 and FIA with mixed prompt lengths in the same batch.
@@ -109,6 +113,8 @@ def test_fa3_vs_fia_mixed_lengths():
     _assert_outputs_match(fia_outputs, fa3_outputs, label="[MixedLen] ")
 
 
+@pytest.mark.e2e_features("dense", "eager_mode", "fia")
+@pytest.mark.e2e_model("Qwen/Qwen3-0.6B")
 @pytest.mark.skipif(not _fa3_available(), reason="flash_attn_npu_v3 is not installed")
 def test_fa3_vs_fia_with_chunkprefill():
     """Compare FA3 and FIA with single token generation where chunkprefill is used."""
@@ -119,6 +125,8 @@ def test_fa3_vs_fia_with_chunkprefill():
     _assert_outputs_match(fia_outputs, fa3_outputs, label="[Chunkprefill] ")
 
 
+@pytest.mark.e2e_features("dense", "eager_mode", "fia", "logprobs")
+@pytest.mark.e2e_model("Qwen/Qwen3-0.6B")
 @pytest.mark.skipif(not _fa3_available(), reason="flash_attn_npu_v3 is not installed")
 def test_fa3_vs_fia_logprobs():
     """Compare FA3 and FIA logprobs for fine-grained numerical verification."""

@@ -19,9 +19,13 @@
 import os
 from unittest.mock import patch
 
+import pytest
+
 from tests.e2e.conftest import DPVllmRunner, VllmRunner
 
 
+@pytest.mark.e2e_features("multimodal", "full_decode_only", "mamba_ssm")
+@pytest.mark.e2e_model("Qwen/Qwen3.5-27B", "Qwen/Qwen3.5-35B-A3B")
 def test_qwen3_5_27b_distributed_mp_tp4():
     example_prompts = [
         "Hello, my name is",
@@ -39,6 +43,8 @@ def test_qwen3_5_27b_distributed_mp_tp4():
         del vllm_model
 
 
+@pytest.mark.e2e_features("multimodal", "full_decode_only", "mtp", "mamba_ssm")
+@pytest.mark.e2e_model("Qwen/Qwen3.5-27B", "Qwen/Qwen3.5-35B-A3B")
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
 def test_qwen3_5_35b_distributed_mp_tp4_full_decode_only_mtp3_flashcomm():
     example_prompts = [

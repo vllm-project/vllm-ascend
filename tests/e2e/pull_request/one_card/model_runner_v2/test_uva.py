@@ -35,6 +35,13 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+@pytest.mark.e2e_features("multimodal", "eager_mode", "logprobs", "async_scheduling")
+@pytest.mark.e2e_model(
+    "LLM-Research/Meta-Llama-3.1-8B-Instruct",
+    "Qwen/Qwen3-0.6B",
+    "vllm-ascend/DeepSeek-V2-Lite-W8A8",
+    "vllm-ascend/EAGLE-LLaMA3.1-Instruct-8B",
+)
 @pytest.mark.skipif(True, reason="Fix me, it's broken after CANN and trition-ascend are upgraded.")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
@@ -70,6 +77,13 @@ def test_qwen3_dense_eager_mode(
         runner.model.generate(prompts, sampling_params)
 
 
+@pytest.mark.e2e_features("multimodal", "eager_mode", "eagle_3", "async_scheduling")
+@pytest.mark.e2e_model(
+    "LLM-Research/Meta-Llama-3.1-8B-Instruct",
+    "Qwen/Qwen3-0.6B",
+    "vllm-ascend/DeepSeek-V2-Lite-W8A8",
+    "vllm-ascend/EAGLE-LLaMA3.1-Instruct-8B",
+)
 @pytest.mark.parametrize("model", MAIN_MODELS)
 @pytest.mark.parametrize("eagle_model", EGALE_MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
@@ -115,6 +129,13 @@ def test_egale_spec_decoding(
         runner.model.generate(prompts, sampling_params)
 
 
+@pytest.mark.e2e_features("multimodal", "eager_mode")
+@pytest.mark.e2e_model(
+    "LLM-Research/Meta-Llama-3.1-8B-Instruct",
+    "Qwen/Qwen3-0.6B",
+    "vllm-ascend/DeepSeek-V2-Lite-W8A8",
+    "vllm-ascend/EAGLE-LLaMA3.1-Instruct-8B",
+)
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("enforce_eager", [False])

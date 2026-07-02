@@ -23,6 +23,8 @@ Run `pytest tests/e2e/pull_request/four_card/context_parallel/test_prefix_cachin
 import os
 from unittest.mock import patch
 
+import pytest
+
 from tests.e2e.conftest import VllmRunner
 
 # TODO(qcs): We should use Qwen3.5 for this test when it's fixed and available,
@@ -52,6 +54,8 @@ INPUT_PROMPTS = [
 ]
 
 
+@pytest.mark.e2e_features("multimodal", "eager_mode", "prefix_caching")
+@pytest.mark.e2e_model("vllm-ascend/DeepSeek-V2-Lite-W8A8")
 @patch.dict(os.environ, THREAD_ENV)
 def test_dsv2_lite_prefix_cache_with_pcp() -> None:
     with VllmRunner(

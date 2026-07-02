@@ -32,35 +32,24 @@ pre-fix negative-KV-cache condition.
 
 import os
 
-from tests.e2e.conftest import VllmRunner
+import pytest
+
+from tests.e2e.conftest import VllmRunner, get_e2e_model
 
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
-MODEL = "Qwen/Qwen3-0.6B"
 _PROMPTS = ["Hello, my name is"]
 _MAX_TOKENS = 5
-# Use a low utilization so two instances fit side-by-side on one card:
-#   2 × 0.4 × card_total ≤ card_total  (holds for any card ≥ 1 GiB)
 _GPU_MEM_UTIL = 0.4
 _MAX_MODEL_LEN = 512
 
 
-def test_two_instances_on_single_card() -> None:
-    """
-    Regression test for PR #7427 (multi-instance OOM on single card).
-
-    Start a first vllm-ascend instance; while it is still running and holding
-    NPU memory, start a second instance with identical settings.  Both must
-    initialize correctly and produce non-empty outputs.
-
-    Failure signature (pre-fix):
-        RuntimeError / ValueError during the second instance's init, or
-        "Available KV cache memory: -X.XX GiB" in the logs followed by
-        zero KV blocks being allocated.
-    """
-    # ── First instance ──────────────────────────────────────────────────
+@pytest.mark.e2e_features("dense", "gqa", "multi_instance")
+@pytest.mark.e2e_model("Qwen/Qwen3-0.6B")
+def test_two_instances_on_single_card(request) -> None:
+    model = get_e2e_model(request)
     with VllmRunner(
-        MODEL,
+        model,
         max_model_len=_MAX_MODEL_LEN,
         gpu_memory_utilization=_GPU_MEM_UTIL,
         enforce_eager=True,
@@ -70,7 +59,7 @@ def test_two_instances_on_single_card() -> None:
         # sees a reduced init_snapshot.free_memory because the first instance's
         # worker is still holding NPU memory.
         with VllmRunner(
-            MODEL,
+            model,
             max_model_len=_MAX_MODEL_LEN,
             gpu_memory_utilization=_GPU_MEM_UTIL,
             enforce_eager=True,

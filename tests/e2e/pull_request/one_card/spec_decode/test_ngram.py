@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
 from vllm import SamplingParams
 
 from tests.e2e.conftest import VllmRunner
 
 
+@pytest.mark.e2e_features("eager_mode", "ngram")
+@pytest.mark.e2e_model("LLM-Research/Meta-Llama-3.1-8B-Instruct")
 def test_ngram(
     test_prompts: list[list[dict[str, Any]]],
     sampling_config: SamplingParams,

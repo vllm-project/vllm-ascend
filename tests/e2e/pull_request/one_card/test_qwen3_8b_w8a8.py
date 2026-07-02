@@ -16,6 +16,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import pytest
 from vllm import SamplingParams
 from vllm.config import CompilationConfig
 
@@ -23,6 +24,8 @@ from tests.e2e.conftest import VllmRunner, cleanup_dist_env_and_memory, wait_unt
 from tests.e2e.pull_request.utils import PROMPTS_SHORT
 
 
+@pytest.mark.e2e_features("multimodal", "full_decode_only", "w8a8", "eagle_3", "async_scheduling")
+@pytest.mark.e2e_model("RedHatAI/Qwen3-8B-speculator.eagle3", "vllm-ascend/Qwen3-8B-W8A8")
 @wait_until_npu_memory_free()
 def test_dense_w8a8_eagle3_full_graph():
     """Verify dense W8A8 inference with Eagle-3 speculative decoding."""

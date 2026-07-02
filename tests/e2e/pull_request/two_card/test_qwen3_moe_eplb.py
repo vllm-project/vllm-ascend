@@ -31,6 +31,8 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+@pytest.mark.e2e_features("multimodal", "full_decode_only", "eplb", "w8a8")
+@pytest.mark.e2e_model("vllm-ascend/Qwen3-30B-A3B-W8A8")
 @pytest.mark.asyncio
 async def test_qwen3_moe_w8a8_distributed_tp2_ep_dynamic_eplb():
     model = "vllm-ascend/Qwen3-30B-A3B-W8A8"

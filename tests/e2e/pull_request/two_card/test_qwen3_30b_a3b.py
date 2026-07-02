@@ -31,6 +31,8 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+@pytest.mark.e2e_features("moe", "full_decode_only", "eplb")
+@pytest.mark.e2e_model("Qwen/Qwen3-30B-A3B")
 @wait_until_npu_memory_free()
 def test_moe_tp_ep_eplb_full_decode_only():
     """Verify MoE serving with TP, EP, EPLB, and full decode only."""

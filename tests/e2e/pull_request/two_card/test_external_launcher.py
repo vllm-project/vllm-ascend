@@ -76,6 +76,8 @@ def _run_external_launcher(cmd, env):
     return proc, output
 
 
+@pytest.mark.e2e_features("dense", "eager_mode", "external_launcher")
+@pytest.mark.e2e_model("Qwen/Qwen3-0.6B", "Qwen/Qwen3-30B-A3B", "Qwen/Qwen3-8B")
 @pytest.mark.parametrize("model", MODELS)
 @patch.dict(os.environ, {"HCCL_BUFFSIZE": "500"})
 def test_qwen3_external_launcher(model):
@@ -105,6 +107,8 @@ def test_qwen3_external_launcher(model):
     assert proc.returncode == 0
 
 
+@pytest.mark.e2e_features("moe", "eager_mode", "external_launcher")
+@pytest.mark.e2e_model("Qwen/Qwen3-0.6B", "Qwen/Qwen3-30B-A3B", "Qwen/Qwen3-8B")
 @pytest.mark.parametrize("model", MOE_MODELS)
 @wait_until_npu_memory_free(target_free_percentage=0.7)
 def test_qwen3_moe_external_launcher_ep_tp2(model):
@@ -134,6 +138,8 @@ def test_qwen3_moe_external_launcher_ep_tp2(model):
     assert proc.returncode == 0
 
 
+@pytest.mark.e2e_features("dense", "eager_mode", "sleep_wake_up", "external_launcher")
+@pytest.mark.e2e_model("Qwen/Qwen3-0.6B", "Qwen/Qwen3-30B-A3B", "Qwen/Qwen3-8B")
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "0"})
 @wait_until_npu_memory_free(target_free_percentage=0.7)
 def test_qwen3_external_launcher_with_sleepmode():
@@ -167,6 +173,8 @@ def test_qwen3_external_launcher_with_sleepmode():
     assert proc.returncode == 0
 
 
+@pytest.mark.e2e_features("moe", "eager_mode", "sleep_wake_up", "external_launcher")
+@pytest.mark.e2e_model("Qwen/Qwen3-0.6B", "Qwen/Qwen3-30B-A3B", "Qwen/Qwen3-8B")
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "0"})
 @wait_until_npu_memory_free(target_free_percentage=0.7)
 def test_qwen3_external_launcher_with_sleepmode_level2():
@@ -206,6 +214,8 @@ def test_qwen3_external_launcher_with_sleepmode_level2():
     assert proc.returncode == 0
 
 
+@pytest.mark.e2e_features("dense", "eager_mode", "external_launcher")
+@pytest.mark.e2e_model("Qwen/Qwen3-0.6B", "Qwen/Qwen3-30B-A3B", "Qwen/Qwen3-8B")
 @pytest.mark.skipif(
     DEVICE_NAME != "Ascend910B",
     reason="This test is only for Ascend910B devices.",

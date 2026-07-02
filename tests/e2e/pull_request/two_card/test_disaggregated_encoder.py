@@ -28,6 +28,8 @@ SHARED_STORAGE_PATH = "/dev/shm/epd/storage"
 TENSOR_PARALLELS = [1]
 
 
+@pytest.mark.e2e_features("multimodal", "eager_mode")
+@pytest.mark.e2e_model("Qwen/Qwen2.5-VL-7B-Instruct")
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("tp_size", TENSOR_PARALLELS)
