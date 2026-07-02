@@ -121,12 +121,57 @@ void enqueue_device_print(std::unique_ptr<DevicePrintPayload> payload,
     TORCH_CHECK(ret == ACL_SUCCESS, "aclrtLaunchHostFunc failed, error code: ", ret);
 }
 
+aclrtMemcpyKind infer_memcpy_kind(const void* src, const void* dst)
+{
+    TORCH_CHECK(src != nullptr, "src pointer must not be null");
+    TORCH_CHECK(dst != nullptr, "dst pointer must not be null");
+
+    aclrtPtrAttributes src_attrs = {};
+    aclrtPtrAttributes dst_attrs = {};
+    const aclError src_ret =
+        aclrtPointerGetAttributes(const_cast<void*>(src), &src_attrs);
+    const aclError dst_ret =
+        aclrtPointerGetAttributes(const_cast<void*>(dst), &dst_attrs);
+
+    const bool src_is_device =
+        src_ret == ACL_SUCCESS &&
+        src_attrs.location.type == ACL_MEM_LOCATION_TYPE_DEVICE;
+    const bool dst_is_device =
+        dst_ret == ACL_SUCCESS &&
+        dst_attrs.location.type == ACL_MEM_LOCATION_TYPE_DEVICE;
+    const bool src_is_host =
+        src_ret == ACL_SUCCESS &&
+        src_attrs.location.type == ACL_MEM_LOCATION_TYPE_HOST;
+    const bool dst_is_host =
+        dst_ret == ACL_SUCCESS &&
+        dst_attrs.location.type == ACL_MEM_LOCATION_TYPE_HOST;
+
+    if (src_is_device && dst_is_device) {
+        return ACL_MEMCPY_DEVICE_TO_DEVICE;
+    }
+    if (src_is_device && dst_is_host) {
+        return ACL_MEMCPY_DEVICE_TO_HOST;
+    }
+    if (src_is_host && dst_is_device) {
+        return ACL_MEMCPY_HOST_TO_DEVICE;
+    }
+    if (src_is_host && dst_is_host) {
+        return ACL_MEMCPY_HOST_TO_HOST;
+    }
+    return ACL_MEMCPY_DEFAULT;
+}
+
+bool is_batch_memcpy_kind(aclrtMemcpyKind memcpy_kind)
+{
+    return memcpy_kind == ACL_MEMCPY_HOST_TO_DEVICE ||
+           memcpy_kind == ACL_MEMCPY_DEVICE_TO_HOST;
+}
+
 }
 
 void swap_blocks_batch(const torch::Tensor& src_ptrs,
                        const torch::Tensor& dst_ptrs,
-                       const torch::Tensor& sizes,
-                       int64_t direction) {
+                       const torch::Tensor& sizes) {
 
     TORCH_CHECK(src_ptrs.device().is_cpu(), "src_ptrs must be on CPU");
     TORCH_CHECK(dst_ptrs.device().is_cpu(), "dst_ptrs must be on CPU");
@@ -147,28 +192,30 @@ void swap_blocks_batch(const torch::Tensor& src_ptrs,
 
     aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
 
-    aclrtMemcpyKind memcpy_kind;
-    switch (direction) {
-        case 0:
-            memcpy_kind = ACL_MEMCPY_HOST_TO_DEVICE;
-            break;
-        case 1:
-            memcpy_kind = ACL_MEMCPY_DEVICE_TO_HOST;
-            break;
-        case 2:
-            memcpy_kind = ACL_MEMCPY_DEVICE_TO_DEVICE;
-            break;
-        default:
-            TORCH_CHECK(false,
-                        "swap_blocks_batch: invalid direction ", direction,
-                        " (expected 0=H2D, 1=D2H, 2=D2D)");
+    const aclrtMemcpyKind memcpy_kind = infer_memcpy_kind(
+        reinterpret_cast<const void*>(src_data[0]),
+        reinterpret_cast<const void*>(dst_data[0]));
+
+    bool use_batch_memcpy = is_batch_memcpy_kind(memcpy_kind);
+    for (int64_t i = 0; i < n; i++) {
+        TORCH_CHECK(size_data[i] >= 0,
+                    "sizes must be non-negative, got ", size_data[i],
+                    " at index ", i);
+        if (use_batch_memcpy) {
+            const aclrtMemcpyKind current_kind = infer_memcpy_kind(
+                reinterpret_cast<const void*>(src_data[i]),
+                reinterpret_cast<const void*>(dst_data[i]));
+            if (current_kind != memcpy_kind) {
+                use_batch_memcpy = false;
+            }
+        }
     }
 
     // =========================================================================
     // path 1: aclrtMemcpyBatchAsync (CANN 8.5+)
     // =========================================================================
 #if defined(CANN_MEMCPY_BATCH_ASYNC)
-    if (memcpy_kind != ACL_MEMCPY_DEVICE_TO_DEVICE) {
+    if (use_batch_memcpy) {
         static_assert(sizeof(void*) == sizeof(int64_t),
                       "void* and int64_t must be the same size");
         static_assert(sizeof(size_t) == sizeof(int64_t),
@@ -227,13 +274,14 @@ void swap_blocks_batch(const torch::Tensor& src_ptrs,
         void* dst = reinterpret_cast<void*>(dst_data[i]);
         const void* src = reinterpret_cast<const void*>(src_data[i]);
         size_t copy_size = static_cast<size_t>(size_data[i]);
+        const aclrtMemcpyKind current_kind = infer_memcpy_kind(src, dst);
 
         aclError ret = aclrtMemcpyAsync(
             dst,
             copy_size,
             src,
             copy_size,
-            memcpy_kind,
+            current_kind,
             stream);
 
         TORCH_CHECK(ret == ACL_SUCCESS,
@@ -249,7 +297,9 @@ void swap_blocks_batch(const torch::Tensor& src_ptrs,
 // Direct kernel wrappers depend on vllm_ascend_kernels, which is skipped on
 // 310P and A5 builds.
 void swap_blocks_impl(torch::Tensor& src, torch::Tensor& dst,
-                 const torch::Tensor& block_mapping, aclrtStream stream)
+                      int64_t block_size_in_bytes,
+                      const torch::Tensor& block_mapping,
+                      aclrtStream stream)
 {
     torch::Device src_device = src.device();
     torch::Device dst_device = dst.device();
@@ -268,15 +318,33 @@ void swap_blocks_impl(torch::Tensor& src, torch::Tensor& dst,
     }
 
     TORCH_CHECK(block_mapping.device().is_cpu(), "block_mapping must be on CPU");
+    TORCH_CHECK(block_mapping.dtype() == torch::kInt64,
+                "block_mapping must be int64");
+    TORCH_CHECK(block_size_in_bytes > 0,
+                "block_size_in_bytes must be positive, got ",
+                block_size_in_bytes);
 
     char* src_ptr = static_cast<char*>(src.data_ptr());
     char* dst_ptr = static_cast<char*>(dst.data_ptr());
 
-    const int64_t block_size_in_bytes = src.element_size() * src.stride(0);
-
     const int64_t num_blocks = block_mapping.size(0);
-    const int64_t max_src_block = src.size(0);
-    const int64_t max_dst_block = dst.size(0);
+    if (num_blocks == 0) {
+        return;
+    }
+
+    const int64_t src_num_bytes = src.numel() * src.element_size();
+    const int64_t dst_num_bytes = dst.numel() * dst.element_size();
+    TORCH_CHECK(block_size_in_bytes <= src_num_bytes,
+                "block_size_in_bytes ", block_size_in_bytes,
+                " exceeds src tensor size in bytes ", src_num_bytes);
+    TORCH_CHECK(block_size_in_bytes <= dst_num_bytes,
+                "block_size_in_bytes ", block_size_in_bytes,
+                " exceeds dst tensor size in bytes ", dst_num_bytes);
+    const int64_t max_src_block =
+        (src_num_bytes - block_size_in_bytes) / block_size_in_bytes;
+    const int64_t max_dst_block =
+        (dst_num_bytes - block_size_in_bytes) / block_size_in_bytes;
+
     for (size_t i = 0; i < num_blocks; i++) {
         int64_t src_block_number = block_mapping[i][0].item<int64_t>();
         int64_t dst_block_number = block_mapping[i][1].item<int64_t>();
@@ -294,14 +362,16 @@ void swap_blocks_impl(torch::Tensor& src, torch::Tensor& dst,
     }
 }
 
-void swap_blocks(torch::Tensor &x, torch::Tensor &y, const torch::Tensor &z)
+void swap_blocks(torch::Tensor& src, torch::Tensor& dst,
+                 int64_t block_size_in_bytes,
+                 const torch::Tensor& block_mapping)
 {
 
     const c10_npu::OptionalNPUGuard npuGuard(
-        (!x.device().is_cpu()) ? x.device() : y.device()
+        (!src.device().is_cpu()) ? src.device() : dst.device()
     );
     aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
-    swap_blocks_impl(x, y, z, stream);
+    swap_blocks_impl(src, dst, block_size_in_bytes, block_mapping, stream);
     return;
 }
 
@@ -2324,14 +2394,18 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
             "batch_matmul_transpose(Tensor tensor_a, Tensor tensor_b, Tensor tensor_c, str? format_mode=None, str? quant_mode=None) -> ()");
     ops.impl("batch_matmul_transpose", torch::kPrivateUse1, &vllm_ascend::batch_matmul_transpose);
 
-    ops.def("swap_blocks(Tensor! x, Tensor! y, Tensor z) -> ()");
+    ops.def(
+        "swap_blocks(Tensor src, Tensor! dst,"
+        "            int block_size_in_bytes, Tensor block_mapping) -> ()");
     ops.impl("swap_blocks", torch::kPrivateUse1, &vllm_ascend::swap_blocks);
 #endif
 
     // swap_blocks_batch takes CPU tensors (int64 pointer/size arrays), not NPU
     // tensors, so dispatch must be registered on the CPU backend. The function
     // internally submits async memcpy on the current NPU stream.
-    ops.def("swap_blocks_batch(Tensor x, Tensor y, Tensor z, int direction) -> ()");
+    ops.def(
+        "swap_blocks_batch(Tensor src_ptrs, Tensor dst_ptrs,"
+        "                  Tensor sizes) -> ()");
     ops.impl("swap_blocks_batch", torch::kCPU, &vllm_ascend::swap_blocks_batch);
     ops.def("device_print(str msg) -> ()");
     ops.impl("device_print", c10::DispatchKey::CompositeExplicitAutograd,
