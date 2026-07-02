@@ -21,6 +21,7 @@ add_ops_compile_options(
         -Wno-deprecated-declarations
         -Wno-macro-redefined
         -Werror
+        -DASCENDC_DUMP=0
         ${_SHMEM_INC_OPTS}
 )
 
