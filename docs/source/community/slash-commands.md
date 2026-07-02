@@ -8,6 +8,14 @@ vLLM Ascend supports slash commands in pull request comments to trigger CI workf
 
 Run specific E2E tests under `tests/e2e/pull_request/`. Tests are automatically routed to the appropriate NPU runner based on the test path.
 
+**Usage:**
+
+```text
+/e2e <test-path> [test-path-2 ...] [--vllm <version1,version2>]
+```
+
+Use `--vllm <versions>` to specify which vLLM versions to test against (comma-separated). Without `--vllm`, tests run against both the pinned main commit and the latest release tag by default.
+
 **Examples:**
 
 ```text
@@ -19,6 +27,12 @@ Run specific E2E tests under `tests/e2e/pull_request/`. Tests are automatically 
 
 # Run tests on 310P
 /e2e tests/e2e/pull_request/one_card/_310p/test_310p_ops.py
+
+# Run tests against a specific vLLM release only
+/e2e tests/e2e/pull_request/one_card/test_attention.py --vllm <release-tag>
+
+# Run tests against multiple specific vLLM versions
+/e2e tests/e2e/pull_request/one_card/test_attention.py --vllm <release-tag>,<commit-sha>
 ```
 
 **Routing rules** (matched in order):
@@ -33,7 +47,7 @@ Run specific E2E tests under `tests/e2e/pull_request/`. Tests are automatically 
 
 > Only test paths under `tests/e2e/pull_request/` are supported. Tests in `tests/e2e/nightly/`, `tests/e2e/models/`, or `tests/e2e/doctests/` are not accepted by `/e2e`. Use `/nightly` for nightly tests.
 
-Tests are run against both the community vLLM version and the latest release.
+By default, tests are run against both the pinned community vLLM main commit and the latest release tag. Use `--vllm` to override which versions are tested.
 
 ### `/nightly`
 
@@ -141,7 +155,11 @@ Re-run all failed workflow runs on the current PR commit. Useful when CI jobs fa
 
 1. When you comment a slash command, a 👀 reaction is added to your comment to indicate it has been received
 2. The corresponding CI workflow is triggered asynchronously
-3. Upon completion, a 🎉 reaction and a summary comment are added
+3. Upon completion, a summary comment is added with one of the following outcomes:
+   - **completed successfully** (🎉) — all tests passed
+   - **found no tests to run** — no tests matched the provided paths; check the test paths
+   - **was cancelled** — the workflow was cancelled
+   - **failed** — one or more tests failed
 
 ## Scope
 
