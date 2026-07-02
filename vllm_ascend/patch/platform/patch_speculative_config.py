@@ -1,6 +1,8 @@
-from typing import TYPE_CHECKING, Any
+import typing
+from typing import TYPE_CHECKING, Any, Optional
 
 from vllm.config.speculative import SpeculativeConfig
+from vllm.logger import logger
 from vllm.utils.import_utils import LazyLoader
 
 if TYPE_CHECKING:
@@ -10,6 +12,51 @@ else:
     PretrainedConfig = Any
 
     me_quant = LazyLoader("model_executor", globals(), "vllm.model_executor.layers.quantization")
+
+
+def _register_dspark_speculative_method() -> None:
+    """Teach ``SpeculativeConfig`` that ``method="dspark"`` is legal.
+
+    ``SpeculativeConfig`` is a pydantic dataclass whose ``method`` field is a
+    ``Literal[...]`` (``SpeculativeMethod``). pydantic validates ``method``
+    against that literal set at construction time — BEFORE any of our dispatch /
+    hf_config_override runs — so ``SpeculativeConfig(method="dspark")`` fails
+    with a pydantic ``literal_error`` unless we extend the literal.
+
+    We read the runtime literal (it differs between vLLM forks — the A3 image's
+    fork already carries ``dflash``), append ``"dspark"``, re-point the module's
+    ``SpeculativeMethod`` and the field annotation, then ``rebuild_dataclass`` so
+    pydantic recompiles the schema. ``VllmConfig`` is rebuilt too because its
+    cached nested schema for ``speculative_config`` may embed the pre-patch
+    validator.
+    """
+    from vllm.config import speculative as spec_mod
+
+    existing = typing.get_args(spec_mod.SpeculativeMethod)  # flat tuple of str
+    if "dspark" in existing:
+        return
+    new_literal = typing.Literal[existing + ("dspark",)]  # type: ignore[valid-type]
+    spec_mod.SpeculativeMethod = new_literal
+    # speculative.py does NOT use `from __future__ import annotations`, so the
+    # stored annotation is the real `SpeculativeMethod | None` object.
+    SpeculativeConfig.__annotations__["method"] = Optional[new_literal]
+
+    try:
+        from pydantic.dataclasses import rebuild_dataclass
+    except Exception as e:  # pragma: no cover — pydantic always present in vLLM
+        logger.warning("Cannot import rebuild_dataclass (%s); dspark method may not validate.", e)
+        return
+    try:
+        rebuild_dataclass(SpeculativeConfig, force=True)  # type: ignore[arg-type]
+    except Exception as e:
+        logger.warning("rebuild_dataclass(SpeculativeConfig) failed (%s); dspark method may not validate.", e)
+        return
+    try:
+        from vllm.config.vllm import VllmConfig
+
+        rebuild_dataclass(VllmConfig, force=True)  # type: ignore[arg-type]
+    except Exception as e:
+        logger.debug("rebuild_dataclass(VllmConfig) failed (%s); nested spec validation may be stale.", e)
 
 
 def _is_dspark_v4_checkpoint(hf_config: PretrainedConfig) -> bool:
@@ -160,3 +207,7 @@ def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
 
 
 SpeculativeConfig.hf_config_override = hf_config_override
+
+# Extend the pydantic method literal so `method="dspark"` validates. Must run at
+# import (patch application) time, before EngineArgs builds SpeculativeConfig.
+_register_dspark_speculative_method()
