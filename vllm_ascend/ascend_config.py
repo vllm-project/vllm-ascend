@@ -341,7 +341,7 @@ class AscendConfig:
             return
 
         raise ValueError(
-            "MooncakeConnector does not support C8 KV cache quantization on GQA KV consumer nodes. "
+            "MooncakeConnector does not support C8 KV cache quantization on GQA models. "
             "The producer keeps KV cache in bf16 while the consumer allocates int8 KV cache, so raw "
             "Mooncake transfer would reinterpret bf16 bytes as int8. Please disable C8 KV cache quantization "
             "or use MooncakeLayerwiseConnector, which quantizes KV cache before transfer."
