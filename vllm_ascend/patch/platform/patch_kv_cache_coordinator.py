@@ -19,7 +19,9 @@ from vllm.v1.core.kv_cache_utils import (
     BlockHashListWithBlockSize,
     KVCacheBlock,
 )
-from vllm.v1.core.single_type_kv_cache_manager import SingleTypeKVCacheManager
+from vllm.v1.core.single_type_kv_cache_manager import (
+    SingleTypeKVCacheManager,
+)
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -102,13 +104,12 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 self.scheduler_block_size,
                 kv_cache_config,
             )
-
         self.block_pool = BlockPool(
-            kv_cache_config.num_blocks,
-            enable_caching,
-            hash_block_size,
-            enable_kv_cache_events,
-            metrics_collector,
+            num_gpu_blocks=kv_cache_config.num_blocks,
+            enable_caching=enable_caching,
+            hash_block_size=hash_block_size,
+            enable_kv_cache_events=enable_kv_cache_events,
+            metrics_collector=metrics_collector,
         )
 
         # KV cache group indices that get the EAGLE last-block drop.
@@ -195,6 +196,28 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             for i, (_, group_ids, _) in enumerate(self.attention_groups)
             if any(gid in self.eagle_group_ids for gid in group_ids)
         }
+
+        # Propagate the eagle bit to every manager in an eagle-containing
+        # attention group, mirroring upstream
+        # HybridKVCacheCoordinator.verify_and_split_kv_cache_groups. Managers
+        # default to ``use_eagle=False`` ("initialized lazily by the
+        # coordinator", see SingleTypeKVCacheManager.__init__).
+        #
+        # Required for prefix-cache correctness on DeepSeek-V4 + MTP/EAGLE: the
+        # SWA write path (``cache_blocks`` -> ``reachable_block_mask``) keys the
+        # retained checkpoint tail on ``manager.use_eagle``, while the read path
+        # (``find_longest_cache_hit``) applies ``drop_eagle_block`` to every gid
+        # merged into the eagle attention group (and ``get_cached_block``
+        # requires the block cached for *all* of them). If any such manager
+        # keeps the default False, its retained tail ends one block short of the
+        # eagle "peek" boundary the read looks at, the SWA group never hits, and
+        # the min-over-groups hybrid hit collapses to 0%. Note the upstream
+        # ``_annotate_eagle_groups_deepseek_v4`` flags only the single group
+        # holding the MTP layer, so iterating ``eagle_group_ids`` alone would
+        # miss its same-spec siblings.
+        for idx in self.eagle_attn_group_indices:
+            for gid in self.attention_groups[idx][1]:
+                self.single_type_managers[gid].use_eagle = True
 
         # The LCM of the block sizes of all attention types.
         # The cache hit length must be a multiple of the LCM of the block sizes

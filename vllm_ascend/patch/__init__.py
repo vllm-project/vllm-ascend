@@ -144,39 +144,26 @@
 #       Drop the alias once upstream registry includes it or the checkpoint
 #       standardizes architecture strings.
 #
-# ** 7. File: platform/patch_chat_usage_accounting.py**
+# ** 7. File: platform/patch_minimax_usage_accounting.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.entrypoints.openai.chat_completion.serving.OpenAIServingChat`
+#      `vllm.reasoning.minimax_m2_reasoning_parser`
 #    Why:
-#       Chat usage accounting needs to report
+#       MiniMax-M2 chat usage accounting needs to report
 #       `completion_tokens_details.reasoning_tokens` for both streaming and
-#       non-streaming chat completions.
+#       non-streaming chat completions without slowing other reasoning models.
 #    How：
-#       Extend `UsageInfo` and update chat usage construction to count reasoning
-#       tokens from raw output token ids when the active reasoning parser
-#       supports token counting.
+#       Monkey-patch MiniMax reasoning token counters and bind usage-accounting
+#       wrappers only on MiniMax chat-serving instances.
 #    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/37955
+#       https://github.com/vllm-project/vllm/pull/45701
+#       https://github.com/vllm-project/vllm/pull/45802
 #    Future Plan:
-#       Remove this patch once the runtime vLLM version contains the upstream
-#       reasoning usage-accounting support.
+#       Remove this patch after both upstream vLLM PRs are merged and the
+#       supported vLLM revision used by vLLM Ascend includes them through the
+#       regular main-to-main sync.
 #
-# ** 7a. File: platform/patch_minimax_usage_accounting.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.reasoning.minimax_m2_reasoning_parser`
-#    Why:
-#       MiniMax-M2 reasoning parsers need token-count support for the generic
-#       chat usage-accounting wrapper.
-#    How：
-#       Monkey-patch MiniMax reasoning token counters so usage accounting can
-#       derive reasoning-token counts from raw output token ids.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/37955
-#    Future Plan:
-#       Remove this patch once the runtime vLLM version contains the upstream
-#       MiniMax reasoning-token counting fix.
-#
-# ** 7b. File: platform/patch_glm_tool_call_streaming.py**
+# ** 7a. File: platform/patch_glm_tool_call_streaming.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.entrypoints.openai.chat_completion.serving.OpenAIServingChat`
 #    Why:
@@ -196,7 +183,7 @@
 #       Remove this patch once the supported vLLM version contains the upstream
 #       GLM tool-call final chunk fixes.
 #
-# ** 7c. File: platform/patch_glm47_tool_call_parser.py**
+# ** 7b. File: platform/patch_glm47_tool_call_parser.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.tool_parsers.glm47_moe_tool_parser.Glm47MoeModelToolParser`
 #    Why:
@@ -213,24 +200,6 @@
 #    Future Plan:
 #       Remove this patch once the supported vLLM version contains the upstream
 #       GLM47 inline zero-argument streaming parser fix.
-#
-# ** 7d. File: platform/patch_anthropic_system_message.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.entrypoints.anthropic.protocol.AnthropicMessage`
-#      `vllm.entrypoints.anthropic.serving.AnthropicServingMessages`
-#    Why:
-#       Recent Claude Code clients can send `role: system` entries inside the
-#       Anthropic Messages API `messages` array. The pinned vLLM rejects those
-#       requests before inference starts.
-#    How：
-#       Monkey-patch Anthropic message role validation to accept `system`, merge
-#       inline system messages with the top-level system prompt, and skip inline
-#       system entries when converting the remaining chat history.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/issues/44000
-#       https://github.com/vllm-project/vllm/pull/44283
-#    Future Plan:
-#       Remove this patch once the supported vLLM version contains PR #44283.
 #
 # ** 10a. File: platform/patch_kv_cache_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -251,27 +220,24 @@
 #       Remove this patch once upstream vLLM supports hybrid KV cache + CP for
 #       non-CUDA backends, or exposes a platform hook for this behavior.
 #
-# ** 10. File: platform/patch_kv_cache_interface.py**
+# ** 10ab. File: worker/patch_v2/patch_attn_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.kv_cache_interface.MLAAttentionSpec`
+#   1. `vllm.v1.worker.gpu.attn_utils.get_kv_cache_spec`
 #    Why:
-#       The default `MLAAttentionSpec` is mainly built around `kv_lora_rank`
-#       and `qk_rope_head_dim`. On NPU, we also use this class to describe DSA
-#       models. Unlike the GPU path, where cache management is handled by an
-#       additional indexer module, extending this class directly simplifies the
-#       corresponding `model_runner` implementation on NPU.
-#
-#       This patch also adds Sparse C8 support for DSA models on NPU. As part
-#       of that support, members such as `page_size_bytes` need to be adapted,
-#       so they are overridden here as well to preserve overall readability.
-#    How:
-#       This patch subclasses the original implementation, overrides selected
-#       methods, and adds DSA-specific attributes and helpers with default
-#       values where needed.
+#       The current v2 worker still goes through the shared upstream v1 helper
+#       to build KV cache specs. For Ascend MLA layers that helper returns the
+#       generic `MLAAttentionSpec`, but NPU-side cache allocation and reshape
+#       logic expects `AscendMLAAttentionSpec`.
+#    How：
+#       Monkey-patch `get_kv_cache_spec` so regular attention layers keep the
+#       upstream behavior while MLA layers are rewritten to
+#       `AscendMLAAttentionSpec`, including the FA-quant head-size adjustment.
 #    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/25896
+#       No. This is a plugin-side compatibility patch for the current upstream
+#       helper path.
 #    Future Plan:
-#       Remove this patch after the upcoming KV cache spec refactor.
+#       Remove this patch once upstream adds a backend hook for KV cache spec
+#       construction or v2 worker no longer depends on the shared v1 helper.
 #
 # ** 10. File: platform/patch_profiling_chunk.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -324,23 +290,19 @@
 #
 # ** 11. File: platform/patch_tool_choice_none_content.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.entrypoints.openai.engine.serving.OpenAIServing._parse_tool_calls_from_content`
-#      `vllm.parser.abstract_parser.DelegatingParser._parse_tool_calls`
+#   1. `vllm.entrypoints.openai.chat_completion.protocol.ChatCompletionResponse`
+#      `vllm.entrypoints.openai.chat_completion.protocol.ChatCompletionStreamResponse`
 #    Why:
-#       Forced tool choice can receive `content=None` when reasoning extraction
-#       consumes the whole generated text, for example when generation stops at
-#       `max_tokens`. Upstream vLLM 0.19.1 asserts in that case.
+#       vLLM v0.23.0 can serialize empty `tool_calls: []` fields for content-only
+#       OpenAI chat responses / streaming deltas, while OpenAI-compatible SDKs
+#       expect those empty fields to be omitted so clients see `tool_calls=None`.
 #    How：
-#       Return an empty tool-call list for forced tool choice with `content=None`
-#       and mark the current named chat tool-choice result so the downstream
-#       chat response path does not assert. Preserve normal forced tool-call
-#       behavior when content is present.
+#       Wrap `model_dump` / `model_dump_json` for chat response payloads and drop
+#       empty `tool_calls` lists from `message` / `delta` objects.
 #    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/40148
-#       https://github.com/vllm-project/vllm-ascend/pull/8400
+#       https://github.com/vllm-project/vllm/pull/44105
 #    Future Plan:
-#       Remove this patch once the vLLM fix is included in the supported vLLM
-#       version.
+#       Remove this patch once the supported vLLM version contains PR #44105.
 #
 # ** 12. File: platform/patch_deepseek_v4_tool_call_parser.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -395,17 +357,6 @@
 #       Remove this patch if upstream exposes a platform allocator capability hook
 #       for sleep mode validation.
 #
-# ** 14. File: platform/patch_scheduler.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.core.sched.scheduler.Scheduler._mamba_block_aligned_split`
-#    Why:
-#       Upstream vLLM has an assert logic, cause it fails when external KV connector hit
-#    How:
-#      remove the assert
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/43935
-#    Future Plan:
-#       Remove this patch if upstream streaming behavior is updated to support mamba external KV connector
 # ** 15. File: platform/patch_weight_transfer_engine.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.distributed.weight_transfer.factory.WeightTransferEngineFactory._registry["nccl"]`
@@ -688,17 +639,18 @@
 #    Future Plan:
 #       Move this behavior upstream once a generic MoE reduce hook exists.
 #
-#   2. `vllm.model_executor.models.minimax_m2.MiniMaxM2Attention.__init__`
+#   2. `vllm.model_executor.models.minimax_m2.MiniMaxM2Attention.forward`
 #    Why:
-#       When total kv heads < TP world size, kv head replication happens and k_norm
-#       weights should be sharded to match the replication layout.
+#       MiniMax-M2 attention benefits from the NPU fused split-qkv + RMSNorm + rope
+#       kernel path.
 #    How：
-#       Add `num_kv_head_replicas` and create sharded `k_norm` via
-#       `MiniMaxText01RMSNormTP(..., weight_shard_world_size=total_num_kv_heads, ...)`.
+#       Replace `forward` to call `torch.ops.vllm.split_qkv_tp_rmsnorm_rope` before
+#       the upstream attention and output projection steps.
 #    Related PR (if no, explain why):
-#       No, depends on Ascend kernel behavior and TP layout.
+#       No, backend-specific fused kernel path.
 #    Future Plan:
-#       Remove this patch if upstream implements kv-head-aware norm sharding.
+#       Remove this patch when upstream exposes a backend dispatch path for this
+#       fused attention preparation.
 #
 #   3. `vllm.model_executor.models.minimax_m2.MiniMaxM2Model.load_weights`
 #    Why:
@@ -711,31 +663,6 @@
 #       No, fp8 load format and backend constraints are model/backend specific.
 #    Future Plan:
 #       Remove this patch when upstream supports MiniMax-M2 fp8 loading on NPU.
-#
-#   4. `vllm.model_executor.models.minimax_m2.MiniMaxM2Model.forward`
-#    Why:
-#       Eagle3 speculative decoding needs auxiliary hidden states from specific
-#       transformer layers of the target model.
-#    How：
-#       Extend `MiniMaxM2Model.forward` to optionally collect and return
-#       `(final_hidden_states, aux_hidden_states)` when `aux_hidden_state_layers`
-#       is set by the runtime.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/37512
-#    Future Plan:
-#       Remove this patch once upstream MiniMax-M2 integrates Eagle3 support.
-#
-#   5. `vllm.model_executor.models.minimax_m2.MiniMaxM2ForCausalLM`
-#    Why:
-#       vLLM core uses SupportsEagle3-style methods to configure which layers
-#       should emit auxiliary hidden states.
-#    How：
-#       Inject `set_aux_hidden_state_layers` and default-layer getters onto
-#       `MiniMaxM2ForCausalLM` so vLLM can configure the target model.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/37512
-#    Future Plan:
-#       Remove this patch once upstream provides these methods on the model.
 #
 # ** 16. File: worker/patch_minimax_m2_linear_attn.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -831,6 +758,22 @@
 #       https://github.com/vllm-project/vllm/pull/41706
 #    Future Plan:
 #       Remove this patch when vllm supports rotary quant or pluggable `MultiTokenPredictorLayer`.
+# ** 19a. File: worker/patch_deepseek_v2.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.deepseek_v2.DeepseekV2Attention.__init__`
+#    Why:
+#       GLM/DeepSeek DSA models can skip topk on selected layers. Those layers
+#       should not initialize `Indexer`, while MTP layers still need full indexer
+#       initialization.
+#    How:
+#       Wrap `DeepseekV2Attention.__init__` and skip `Indexer` construction on
+#       backbone layers whose config marks topk as skipped.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/45895
+#    Future Plan:
+#       Remove this patch when vLLM Ascend depends on a vLLM version that includes
+#       PR #45895.
+#
 # ** 19b. File: worker/model_runner_v1.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `NPUModelRunner._check_and_update_cudagraph_mode`
@@ -1008,12 +951,18 @@
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.single_type_kv_cache_manager.MambaManager`
 #    Why:
-#       Upstream hybrid prefix cache lookup does not support PCP/DCP.
+#       1. Upstream hybrid prefix cache lookup does not support PCP/DCP.
+#       2. Upstream MambaManager#get_num_blocks_to_allocate give the
+#          wrong number of blocks when an external cache hit occurred
 #    How:
-#       Replace MambaManager with AscendMambaManager for prefix cache hit lookup
-#       on hybrid Mamba paths (logical mamba block_size when caching is enabled).
+#       1. Replace MambaManager with AscendMambaManager for prefix cache hit lookup
+#          on hybrid Mamba paths (logical mamba block_size when caching is enabled).
+#       2. Override the get_num_blocks_to_allocate method to fix the number of blocks
+#          when hitting the external cache and loading synchronously
 #    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/40996
+#       1. https://github.com/vllm-project/vllm/pull/40996
+#       2. https://github.com/vllm-project/vllm/pull/46892
 #    Future Plan:
-#       Upstream PR #40996 adds hybrid prefix cache lookup for DCP only; PCP is
-#       not supported yet. Remove this patch once upstream supports both PCP and DCP.
+#       1. Upstream PR #40996 adds hybrid prefix cache lookup for DCP only; PCP is
+#          not supported yet. Remove this patch once upstream supports both PCP and DCP.
+#       2. Remove this patch once upstream accept 46892 pr or fixed the bug by other pr.

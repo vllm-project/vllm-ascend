@@ -32,7 +32,6 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import MLAAttentionSpec
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
@@ -49,6 +48,7 @@ from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper, update_full_graph_params
+from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.distributed.parallel_state import get_lmhead_tp_group
 from vllm_ascend.models.llama_eagle3_vwn import Eagle3VwnLlamaForCausalLM
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
@@ -170,6 +170,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         )
 
         self.use_sparse = hasattr(vllm_config.model_config.hf_text_config, "index_topk")
+
+        self._share_mtp_indices = False
+        spec_config = self.vllm_config.speculative_config
+        draft_model_config = getattr(spec_config, "draft_model_config", None)
+        draft_hf_config = draft_model_config.hf_config if draft_model_config is not None else None
+        self._share_mtp_indices = getattr(draft_hf_config, "index_share_for_mtp_iteration", False)
+
         # NOTE:
         # `draft_tensor_parallel_size` does not take effect for Eagle:
         # the draft model uses the same TP size as the target model in practice.
@@ -468,6 +475,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 "[spec_decode/base] Detected MTP model with topk_indices_buffer."
                 " Sharing target model topk_indices_buffer with the draft model."
             )
+            target_buffer = target_language_model.model.topk_indices_buffer
+            draft_model = getattr(self.model, "model", None)
+            if target_buffer is not None and draft_model is not None:
+                for _, module in draft_model.named_modules():
+                    if hasattr(module, "topk_indices_buffer"):
+                        module.topk_indices_buffer = target_buffer
 
     def get_model(self) -> nn.Module:
         # get raw model out of the aclgraph wrapper.
@@ -538,6 +551,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 query_start_loc=self.query_start_loc.gpu[: num_reqs + 1],
                 query_start_loc_cpu=self.query_start_loc.cpu[: num_reqs + 1],
                 seq_lens_cpu=self.runner.optimistic_seq_lens_cpu,
+                _seq_lens_cpu=self.runner.optimistic_seq_lens_cpu,
                 seq_lens_cpu_upper_bound=self.runner.optimistic_seq_lens_cpu,
                 seq_lens=self.runner.seq_lens[:num_reqs],
                 num_reqs=num_reqs,
@@ -546,11 +560,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 max_query_len=self.num_speculative_tokens + 1,
                 num_computed_tokens_cpu=num_computed_tokens_cpu,
                 actual_seq_lengths_q=self.runner.actual_seq_lengths_q,
-                block_table_tensor=self.runner.input_batch.block_table[0].get_device_tensor()[:num_reqs],
+                block_table_tensor=self.runner.input_batch.block_table[self.kv_cache_gid].get_device_tensor()[
+                    :num_reqs
+                ],
                 # This is used to hold a position.
-                slot_mapping=self.runner.input_batch.block_table[0].slot_mapping.gpu,
-                slot_mapping_cpu=self.runner.input_batch.block_table[0].slot_mapping.cpu,
+                slot_mapping=self.runner.input_batch.block_table[self.kv_cache_gid].slot_mapping.gpu,
+                slot_mapping_cpu=self.runner.input_batch.block_table[self.kv_cache_gid].slot_mapping.cpu,
                 positions=self.runner.positions,
+                positions_cpu=self.runner._dsa_positions_cpu_buf if self.use_compress else None,
                 attn_state=self.runner.attn_state,
                 decode_token_per_req=self.runner.decode_token_per_req,
                 is_prefilling=torch.zeros(num_reqs, dtype=torch.bool),
@@ -562,20 +579,46 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
             assert len(self.draft_attn_groups) > 0
             builder = self.draft_attn_groups[0].get_metadata_builder()
+            kv_cache_spec = self.draft_attn_groups[0].kv_cache_spec
             # update the tensor's address for each step.
             for draft_index in range(self.num_speculative_tokens):
                 common_attn_metadata = self.shallow_copy_metadata(common_attn_metadata)
+                extra_attn_metadata_args: dict = {}
+                if self.use_compress:
+                    extra_attn_metadata_args = dict(
+                        prefill_ratio_to_sas_metadata=dict(),
+                        decode_ratio_to_sas_metadata=dict(),
+                        common_ratio_to_sas_metadata=dict(),
+                        block_size=kv_cache_spec.block_size,
+                    )
                 # Set the real slot_mapping.
+                slot_mapping_lens = common_attn_metadata.slot_mapping.shape[0]
+                self.slot_mapping_group[draft_index][:slot_mapping_lens].copy_(common_attn_metadata.slot_mapping)
+                self.slot_mapping_group[draft_index][slot_mapping_lens:].fill_(PADDING_SLOT_ID)
                 common_attn_metadata.slot_mapping = self.slot_mapping_group[draft_index]
+                self.seq_lens_group[draft_index][:num_reqs].copy_(common_attn_metadata.seq_lens)
+                self.seq_lens_group[draft_index][num_reqs:].fill_(0)
                 common_attn_metadata.seq_lens = self.seq_lens_group[draft_index][:num_reqs]
+                self.query_start_loc_group[draft_index][: num_reqs + 1].copy_(common_attn_metadata.query_start_loc)
+                self.query_start_loc_group[draft_index][num_reqs + 1 :].fill_(0)
                 common_attn_metadata.query_start_loc = self.query_start_loc_group[draft_index][: num_reqs + 1]
                 if self.pcp_size * self.dcp_size > 1 and draft_index > 0:
                     assert self.block_table_tensor_clone is not None, "block_table_tensor_clone is not init"
                     common_attn_metadata.block_table_tensor = self.block_table_tensor_clone[:num_reqs]
-                attn_metadata_eagle = builder.build_for_graph_capture(
-                    common_attn_metadata,
-                    AscendAttentionState.SpecDecoding if self.method == "mtp" else AscendAttentionState.ChunkedPrefill,
-                )
+                if not self.use_compress or draft_index == 0:
+                    attn_metadata_eagle = builder.build_for_graph_capture(
+                        common_attn_metadata,
+                        AscendAttentionState.SpecDecoding
+                        if self.method == "mtp"
+                        else AscendAttentionState.ChunkedPrefill,
+                        **extra_attn_metadata_args,
+                    )
+                else:
+                    attn_metadata_eagle = builder.build_for_drafting(
+                        common_attn_metadata,
+                        draft_index,
+                        **extra_attn_metadata_args,
+                    )
                 per_layer_attn_metadata = dict()
                 for layer_name in self.attn_layer_names:
                     per_layer_attn_metadata[layer_name] = attn_metadata_eagle
@@ -731,7 +774,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             # is run in eager mode currently, which means `_pad_query_start_loc_for_fia` is not called,
             # while draft model is run in graph model, which means we should pad the `query_start_loc`.
             # Need to be fixed in the future.
+            num_reqs = common_attn_metadata.query_start_loc.shape[0]
+            self.query_start_loc.gpu[:num_reqs].copy_(common_attn_metadata.query_start_loc)
+            self.query_start_loc.cpu[:num_reqs].copy_(common_attn_metadata.query_start_loc_cpu)
             num_reqs_padded = self.runner._pad_query_start_loc_for_fia(
+                self.query_start_loc,
                 num_input_tokens,
                 batch_descriptor.num_reqs if batch_descriptor.num_reqs is not None else common_attn_metadata.num_reqs,
                 common_attn_metadata.num_reqs,
@@ -739,8 +786,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 batch_descriptor.num_reqs,
             )
             common_attn_metadata.num_reqs = num_reqs_padded
-            common_attn_metadata.query_start_loc = self.runner.query_start_loc.gpu[: num_reqs_padded + 1]
-            common_attn_metadata.query_start_loc_cpu = self.runner.query_start_loc.cpu[: num_reqs_padded + 1]
+            common_attn_metadata.query_start_loc = self.query_start_loc.gpu[: num_reqs_padded + 1]
+            common_attn_metadata.query_start_loc_cpu = self.query_start_loc.cpu[: num_reqs_padded + 1]
             slicing_length = (
                 num_reqs_padded * self.decode_threshold if self.pcp_size * self.dcp_size > 1 else num_reqs_padded
             )
@@ -953,6 +1000,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             aclgraph_runtime_mode=aclgraph_runtime_mode,
             is_draft_model=True,
             draft_attn_metadatas=multi_steps_attn_metadata,
+            eplb_heat_collection_status=(
+                self.runner.eplb_heat_collection_status if self.runner.dynamic_eplb else False
+            ),
         ):
             # Reset MOE layer index for forward pass
             forward_context = get_forward_context()
@@ -1027,12 +1077,22 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 if self.method == "mtp":
                     model_kwargs["positions"] = model_positions
 
+        # step 0
+        draft_model = getattr(self.model, "model", None)
+        if self._share_mtp_indices and draft_model is not None and hasattr(draft_model, "set_skip_topk"):
+            draft_model.set_skip_topk(False)
+
         ret_hidden_states = self.model(**model_kwargs)
         if not self.model_returns_tuple():
             last_hidden_states = ret_hidden_states
             hidden_states = last_hidden_states
         else:
             last_hidden_states, hidden_states = ret_hidden_states
+
+        # step 1+ skip indexer
+        draft_model = getattr(self.model, "model", None)
+        if self._share_mtp_indices and draft_model is not None and hasattr(draft_model, "set_skip_topk"):
+            draft_model.set_skip_topk(True)
 
         if self.method != "dflash":
             last_hidden_states, model_positions, hidden_states = self.maybe_all_gather_and_unpad(
@@ -1054,23 +1114,29 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         if self.pcp_size > 1:
             # remove graph padding before all_gather
             hidden_states = hidden_states[:num_input_tokens]
-            hidden_states = get_pcp_group().all_gather(hidden_states, 0)
-            hidden_states = torch.index_select(
-                hidden_states,
-                0,
-                self.runner.pcp_manager.pcp_allgather_restore_idx.gpu[: num_input_tokens * self.pcp_size],
-            )
+            if self.runner.pcp_manager.pcp_use_hybrid_attn:
+                hidden_states = self.runner.pcp_manager.get_restore_hidden_states(hidden_states)
+            else:
+                hidden_states = get_pcp_group().all_gather(hidden_states, 0)
+                hidden_states = torch.index_select(
+                    hidden_states,
+                    0,
+                    self.runner.pcp_manager.pcp_allgather_restore_idx.gpu[: num_input_tokens * self.pcp_size],
+                )
             if self.method == "mtp":
                 last_hidden_states = hidden_states
             else:
                 # eagle and eagle3 need allgather last_hidden_states.
                 last_hidden_states = last_hidden_states[:num_input_tokens]
-                last_hidden_states = get_pcp_group().all_gather(last_hidden_states, 0)
-                last_hidden_states = torch.index_select(
-                    last_hidden_states,
-                    0,
-                    self.runner.pcp_manager.pcp_allgather_restore_idx.gpu[: num_input_tokens * self.pcp_size],
-                )
+                if self.runner.pcp_manager.pcp_use_hybrid_attn:
+                    last_hidden_states = self.runner.pcp_manager.get_restore_hidden_states(last_hidden_states)
+                else:
+                    last_hidden_states = get_pcp_group().all_gather(last_hidden_states, 0)
+                    last_hidden_states = torch.index_select(
+                        last_hidden_states,
+                        0,
+                        self.runner.pcp_manager.pcp_allgather_restore_idx.gpu[: num_input_tokens * self.pcp_size],
+                    )
 
         if lmhead_tp_enable():
             token_indices_to_sample = nn.functional.pad(
@@ -1323,19 +1389,24 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 input_ids_p = self.input_ids[num_tokens_d:num_tokens]
                 target_hidden_states_d_padded = target_hidden_states[:num_tokens_d_padded]
                 if num_tokens_d:
-                    # remove padding (from pcp all-gather) in decode part
-                    mask_start_loc = torch.cat(
-                        [
-                            torch.tensor([0], dtype=torch.int32, device=query_lens_d.device),
-                            torch.cumsum(query_lens_d * self.pcp_size, dim=0)[:-1],
-                        ]
-                    )
-                    mask_len = query_lens_d
-                    mask = []
-                    for req_id in range(num_decode_reqs):
-                        assert None not in (mask_start_loc, mask_len)
-                        mask += list(range(mask_start_loc[req_id], mask_start_loc[req_id] + mask_len[req_id]))
-                    target_hidden_states_d = target_hidden_states_d_padded[mask]
+                    if self.runner.pcp_manager.pcp_use_hybrid_attn:
+                        # Hybrid PCP restores decode hidden states rank-major:
+                        # [rank0 all decode tokens, rank1 all decode tokens, ...].
+                        target_hidden_states_d = target_hidden_states_d_padded[:num_tokens_d]
+                    else:
+                        # remove padding (from pcp all-gather) in decode part
+                        mask_start_loc = torch.cat(
+                            [
+                                torch.tensor([0], dtype=torch.int32, device=query_lens_d.device),
+                                torch.cumsum(query_lens_d * self.pcp_size, dim=0)[:-1],
+                            ]
+                        )
+                        mask_len = query_lens_d
+                        mask = []
+                        for req_id in range(num_decode_reqs):
+                            assert None not in (mask_start_loc, mask_len)
+                            mask += list(range(mask_start_loc[req_id], mask_start_loc[req_id] + mask_len[req_id]))
+                        target_hidden_states_d = target_hidden_states_d_padded[mask]
                 else:
                     target_hidden_states_d = target_hidden_states_d_padded
                 target_hidden_states_p = target_hidden_states[num_tokens_d_padded:]
@@ -1671,11 +1742,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         if self.pcp_size * self.dcp_size > 1:
             kv_cache_spec = self.draft_attn_groups[0].kv_cache_spec
-            if isinstance(kv_cache_spec, MLAAttentionSpec):
+            if isinstance(kv_cache_spec, AscendMLAAttentionSpec):
                 attn_metadata.decode.cp_seq_len = cp_seq_len
             else:
                 attn_metadata.decode_meta.num_computed_tokens_of_pcp_dcp = num_computed_tokens_of_pcp_dcp.numpy()
-                attn_metadata.decode_meta.dcp_mtp_attn_mask = None
 
         return common_attn_metadata, attn_metadata
 
