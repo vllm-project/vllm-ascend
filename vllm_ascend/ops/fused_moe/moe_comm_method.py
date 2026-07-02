@@ -102,6 +102,18 @@ def _pick_mega_moe_bias(
     return _as_optional_tensor_list(fallback_bias)
 
 
+def _to_float32_bias_list(bias: list[torch.Tensor] | None) -> list[torch.Tensor] | None:
+    """Coerce l1_bias/l2_bias entries to FLOAT32 as required by CANN mega_moe.
+
+    The A8W4-INT precision-compensation biases (B1/B2) must be float32 per the
+    op interface doc. Skip the cast when a tensor is already float32 so no extra
+    kernel is launched in the common case.
+    """
+    if bias is None:
+        return None
+    return [t if t.dtype == torch.float32 else t.to(torch.float32) for t in bias]
+
+
 def _infer_intermediate_hidden(weight1: torch.Tensor, weight2: torch.Tensor, hidden: int) -> int:
     if weight2.dim() >= 2:
         if weight2.shape[-1] == hidden:
@@ -520,7 +532,17 @@ class FusedMC2CommImpl(MoECommMethod):
         assert fused_experts_input.weights.w2_scale is not None
 
         _, mega_moe = self._load_cann_mega_moe_ops()
-        dispatch_quant_mode, dispatch_quant_out_dtype, weight_type = _get_cann_mega_moe_quant_settings(
+        # ``_weight_type`` (ACL INT4/INT8 enum) is intentionally left UNUSED:
+        # the CANN mega_moe interface doc marks ``weight1_type`` /
+        # ``weight2_type`` as reserved params (keep the default None). The op
+        # infers the real weight precision from the tensor dtype + FRACTAL_NZ
+        # layout (INT4 weights arrive as int32-reinterpreted "INT4(INT32)",
+        # int8 weights as plain INT8), like the validated dispatch_ffn_combine
+        # path, whose C++ signature carries no weight_type at all. Passing a
+        # non-default weight1_type/weight2_type made the op tiling derive a
+        # wrong N (A3 W4A8: it read l1's packed last dim 512 as N/2 instead of
+        # unpacking to the real intermediate 2048), tripping the weight2 check.
+        dispatch_quant_mode, dispatch_quant_out_dtype, _weight_type = _get_cann_mega_moe_quant_settings(
             fused_experts_input.quant.quant_type
         )
         weight1 = _as_tensor_list(fused_experts_input.weights.w1, "w1")
@@ -565,6 +587,24 @@ class FusedMC2CommImpl(MoECommMethod):
                 x_active_mask = raw_mask.contiguous()
             else:
                 x_active_mask = raw_mask.to(torch.int8).contiguous()
+        # A8W4-INT precision-compensation biases B1/B2 (l1_bias/l2_bias). The doc
+        # requires FLOAT32, ND, per-expert shapes (2*intermediate_hidden,) for B1
+        # and (hidden,) for B2 — which is exactly the ``8 * sum`` correction term
+        # the W4A8 quant method emits as w13_scale_bias / w2_scale_bias. Cast to
+        # float32 defensively so a non-fp32 scale_bias (e.g. from the modelslim
+        # new_quant_version transpose+sum path) still satisfies the op contract.
+        l1_bias = _to_float32_bias_list(
+            _pick_mega_moe_bias(
+                fused_experts_input.weights.w1_scale_bias,
+                fused_experts_input.weights.w1_bias,
+            )
+        )
+        l2_bias = _to_float32_bias_list(
+            _pick_mega_moe_bias(
+                fused_experts_input.weights.w2_scale_bias,
+                fused_experts_input.weights.w2_bias,
+            )
+        )
         out, expert_tokens = mega_moe(
             fused_experts_input.hidden_states,
             topk_ids.to(torch.int32),
@@ -574,19 +614,13 @@ class FusedMC2CommImpl(MoECommMethod):
             sym_buffer,
             l1_weights_sf=weight_scales1,
             l2_weights_sf=weight_scales2,
-            l1_bias=_pick_mega_moe_bias(
-                fused_experts_input.weights.w1_scale_bias,
-                fused_experts_input.weights.w1_bias,
-            ),
-            l2_bias=_pick_mega_moe_bias(
-                fused_experts_input.weights.w2_scale_bias,
-                fused_experts_input.weights.w2_bias,
-            ),
+            l1_bias=l1_bias,
+            l2_bias=l2_bias,
             x_active_mask=x_active_mask,
             activation=_normalize_cann_activation(fused_experts_input.activation),
             activation_clamp=activation_clamp,
-            weight1_type=weight_type,
-            weight2_type=weight_type,
+            # weight1_type / weight2_type deliberately omitted — reserved params,
+            # the op auto-detects INT4(INT32) vs INT8 from the tensor dtype.
         )
         # NOTE: self.expert_token_nums is only used by the
         # dispatch_ffn_combine path (enable_fused_mc2 == 1) as a
