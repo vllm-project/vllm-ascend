@@ -1,37 +1,52 @@
 # mypy: ignore-errors
-import os
-import signal
+"""Balance scheduling patch.
+
+Keeps running-request counts even across DP ranks: every step the scheduler
+all-gathers each rank's ``len(running)``; if any rank was at the running cap,
+every rank stops admitting new WAITING requests (``leader-at-cap => global
+freeze``). See ``docs/.../balance_schedule_refactor.md`` for the design.
+
+``schedule()`` is reproduced from the pinned vLLM release: its body is a
+verbatim copy plus the balance delta -- ``self.balance_gather()`` at the top
+to refresh the cross-rank running-count snapshot, and the ``balance_flag``
+break inside the WAITING loop. The signature stays ``schedule(self)`` to
+match the pinned vLLM.
+
+The engine-core side is NOT copied: ``balance_gather`` lives in the
+scheduler, and ``BalanceDPEngineCoreProc`` only injects the DP group before
+delegating to upstream's ``run_busy_loop``. The engine core class is swapped
+via the module-level ``DPEngineCoreProc`` reference that upstream's
+``run_engine_core`` resolves at call time.
+"""
+
 import time
 
 import torch
 import torch.distributed as dist
-import vllm
-from vllm.config import ParallelConfig
+import vllm.v1.core.sched.scheduler as _sched_mod
+import vllm.v1.engine.core as _engine_core_mod
 from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.logger import logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
-from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
-from vllm.utils.system_utils import decorate_logs, set_process_title
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
 from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_queue
 from vllm.v1.core.sched.scheduler import Scheduler
-from vllm.v1.engine import EngineCoreEventType, EngineCoreOutputs
-from vllm.v1.engine.core import DPEngineCoreProc, EngineCoreProc
+from vllm.v1.engine import EngineCoreEventType
+from vllm.v1.engine.core import DPEngineCoreProc
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
-_ORIGINAL_RUN_ENGINE_CORE = EngineCoreProc.run_engine_core
-_ORIGINAL_SCHEDULER = Scheduler
-
 
 def _balance_scheduling_enabled(vllm_config) -> bool:
-    # TODO: Unify this path with AscendConfig once AscendConfig initialization
-    # is moved earlier in the startup flow.
+    # Primary source of truth is AscendConfig. The additional_config / env-var
+    # fallbacks cover the startup window where AscendConfig may not yet be
+    # initialized (see the TODO that used to live here); once AscendConfig init
+    # is moved earlier these can go away.
     try:
         from vllm_ascend.ascend_config import get_ascend_config
 
@@ -41,7 +56,9 @@ def _balance_scheduling_enabled(vllm_config) -> bool:
     additional_config = getattr(vllm_config, "additional_config", None) or {}
     if "enable_balance_scheduling" in additional_config:
         return bool(additional_config["enable_balance_scheduling"])
-    return bool(int(os.getenv("VLLM_ASCEND_BALANCE_SCHEDULING", "0")))
+    from vllm_ascend import envs as ascend_envs
+
+    return bool(ascend_envs.VLLM_ASCEND_BALANCE_SCHEDULING)
 
 
 class BalanceScheduler(Scheduler):
@@ -67,21 +84,34 @@ class BalanceScheduler(Scheduler):
             log_stats,
         )
         self._balance_enabled = _balance_scheduling_enabled(vllm_config)
+        # Injected by BalanceDPEngineCoreProc.run_busy_loop before the first
+        # step. Only used on the enabled path (balance requires DP > 1).
+        self.dp_group = None
         if self._balance_enabled:
             self.balance_queue = [
                 torch.tensor([0], dtype=torch.int, device="cpu")
                 for _ in range(self.vllm_config.parallel_config.data_parallel_size)
             ]
 
-    def balance_gather(self, dp_group):
-        if not self._balance_enabled:
+    def balance_gather(self):
+        """All-gather per-rank running counts into ``self.balance_queue``.
+
+        Called once at the top of ``schedule()``. This consumes the running
+        snapshot at the start of the current step, which is identical to the
+        previous step's end-of-step snapshot that the original engine-core
+        driven gather observed (between two steps ``self.running`` only
+        changes inside ``schedule()`` / ``update_from_output()``).
+        """
+        if not self._balance_enabled or self.dp_group is None:
             return
         running_tensor = torch.tensor([len(self.running)], dtype=torch.int, device="cpu")
-        dist.all_gather(self.balance_queue, running_tensor, group=dp_group)
+        dist.all_gather(self.balance_queue, running_tensor, group=self.dp_group)
 
     def schedule(self) -> SchedulerOutput:
         if not self._balance_enabled:
             return super().schedule()
+        # Refresh the cross-rank running snapshot for this step's gate.
+        self.balance_gather()
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
         # Each request just has the num_computed_tokens and
@@ -290,9 +320,15 @@ class BalanceScheduler(Scheduler):
                 if len(self.running) == self.max_num_running_reqs:
                     break
 
+                # >>> balance-scheduling delta (the whole point of this patch) <<<
+                # If any DP rank was at the running cap at the end of the
+                # previous step, stop admitting new WAITING requests on this
+                # rank too, so load stays even across ranks
+                # (leader-at-cap => global freeze).
                 balance_flag = max(t.item() for t in self.balance_queue) == self.max_num_running_reqs
                 if balance_flag:
                     break
+                # <<< balance-scheduling delta >>>
 
                 request_queue = self._select_waiting_queue_for_scheduling()
                 if request_queue is None:
@@ -433,8 +469,8 @@ class BalanceScheduler(Scheduler):
                 # Handles an edge case when P/D Disaggregation
                 # is used with Spec Decoding where an
                 # extra block gets allocated which
-                # creates a mismatch between the number
-                # of local and remote blocks.
+                # creates a mismatch between the number of
+                # local and remote blocks.
                 effective_lookahead_tokens = 0 if request.num_computed_tokens == 0 else self.num_lookahead_tokens
 
                 # Determine if we need to allocate cross-attention blocks.
@@ -585,7 +621,7 @@ class BalanceScheduler(Scheduler):
             # finished_req_ids is an existing state in the scheduler,
             # instead of being newly scheduled in this step.
             # It contains the request IDs that are finished in between
-            # the previous and the current steps.
+            # the previous and current steps.
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
         )
@@ -609,106 +645,26 @@ class BalanceScheduler(Scheduler):
 
 
 class BalanceDPEngineCoreProc(DPEngineCoreProc):
+    """Minimal DP engine core hook for balance scheduling.
+
+    The only thing balance scheduling needs from the engine core is the DP
+    process group, which the scheduler uses for its per-step all-gather. The
+    group is created in ``_init_data_parallel`` (during ``__init__``, before
+    the scheduler exists) and the scheduler is created in ``EngineCore.__init__``,
+    so both are present by the time ``run_busy_loop`` runs. We inject the group
+    here and then delegate to upstream's ``run_busy_loop`` verbatim -- no copy.
+    """
+
     def run_busy_loop(self):
-        """Core busy loop of the EngineCore for data parallel case."""
-
-        # Loop until process is sent a SIGINT or SIGTERM
-        while True:
-            # 1) Poll the input queue until there is work to do.
-            self._process_input_queue()
-
-            # 2) Step the engine core.
-            executed = self._process_engine_step()
-            self._maybe_publish_request_counts()
-
-            local_unfinished_reqs = self.scheduler.has_unfinished_requests()
-            if not executed:
-                if not local_unfinished_reqs and not self.engines_running:
-                    # All engines are idle.
-                    continue
-
-                # We are in a running state and so must execute a dummy pass
-                # if the model didn't execute any ready requests.
-                self.execute_dummy_batch()
-
-            # 3) All-reduce operation to determine global unfinished reqs.
-            self.engines_running = self._has_global_unfinished_reqs(local_unfinished_reqs)
-            self.scheduler.balance_gather(self.dp_group)
-
-            if not self.engines_running:
-                if self.dp_rank == 0 or not self.has_coordinator:
-                    # Notify client that we are pausing the loop.
-                    logger.debug("Wave %d finished, pausing engine loop.", self.current_wave)
-                    # In the coordinator case, dp rank 0 sends updates to the
-                    # coordinator. Otherwise (offline spmd case), each rank
-                    # sends the update to its colocated front-end process.
-                    client_index = -1 if self.has_coordinator else 0
-                    self.output_queue.put_nowait(
-                        (
-                            client_index,
-                            EngineCoreOutputs(wave_complete=self.current_wave),
-                        )
-                    )
-                # Increment wave count and reset step counter.
-                self.current_wave += 1
-                self.step_counter = 0
+        self.scheduler.dp_group = self.dp_group
+        super().run_busy_loop()
 
 
-def run_engine_core(*args, dp_rank: int = 0, local_dp_rank: int = 0, **kwargs):
-    """Launch EngineCore busy loop in background process."""
-    vllm_config = kwargs.get("vllm_config")
-    if not _balance_scheduling_enabled(vllm_config):
-        return _ORIGINAL_RUN_ENGINE_CORE(*args, dp_rank=dp_rank, local_dp_rank=local_dp_rank, **kwargs)
-
-    # Signal handler used for graceful termination.
-    # SystemExit exception is only raised once to allow this and worker
-    # processes to terminate without error
-    shutdown_requested = False
-
-    # Ensure we can serialize transformer config after spawning
-    maybe_register_config_serialize_by_value()
-
-    def signal_handler(signum, frame):
-        nonlocal shutdown_requested
-        if not shutdown_requested:
-            shutdown_requested = True
-            raise SystemExit()
-
-    # Either SIGTERM or SIGINT will terminate the engine_core
-    signal.signal(signal.SIGTERM, signal_handler)
-    signal.signal(signal.SIGINT, signal_handler)
-
-    engine_core: EngineCoreProc | None = None
-    try:
-        parallel_config: ParallelConfig = kwargs["vllm_config"].parallel_config
-        if parallel_config.data_parallel_size > 1 or dp_rank > 0:
-            set_process_title("EngineCore", f"DP{dp_rank}")
-            decorate_logs()
-            # Set data parallel rank for this engine process.
-            parallel_config.data_parallel_rank = dp_rank
-            parallel_config.data_parallel_rank_local = local_dp_rank
-            engine_core = BalanceDPEngineCoreProc(*args, **kwargs)
-        else:
-            set_process_title("EngineCore")
-            decorate_logs()
-            engine_core = EngineCoreProc(*args, **kwargs)
-
-        engine_core.run_busy_loop()
-
-    except SystemExit:
-        logger.debug("EngineCore exiting.")
-        raise
-    except Exception as e:
-        if engine_core is None:
-            logger.exception("EngineCore failed to start.")
-        else:
-            logger.exception("EngineCore encountered a fatal error.")
-            engine_core._send_engine_dead()
-        raise e
-    finally:
-        if engine_core is not None:
-            engine_core.shutdown()
-
-
-EngineCoreProc.run_engine_core = run_engine_core
-vllm.v1.core.sched.scheduler.Scheduler = BalanceScheduler
+# Swap the classes upstream resolves at call time:
+#   * EngineCoreProc.run_engine_core instantiates ``DPEngineCoreProc`` from the
+#     ``vllm.v1.engine.core`` module namespace, so patching that module-level
+#     name is enough -- no need to copy run_engine_core.
+#   * The scheduler is constructed as ``Scheduler(...)`` from
+#     ``vllm.v1.core.sched.scheduler``.
+_sched_mod.Scheduler = BalanceScheduler
+_engine_core_mod.DPEngineCoreProc = BalanceDPEngineCoreProc
