@@ -113,7 +113,7 @@ jobs:
           PR_URL: ${{ github.event.client_payload.github.payload.issue.pull_request.url }}
         run: |
           # Derive command type from repository_dispatch action (e.g. nightly-command -> nightly)
-          COMMAND='${{ github.event.repository_dispatch.action }}'
+          COMMAND='${{ github.event.action }}'
           COMMAND="${COMMAND%-command}"
           echo "command=$COMMAND" >> "$GITHUB_OUTPUT"
 
