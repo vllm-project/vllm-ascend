@@ -18,6 +18,7 @@
 import torch
 import torch_npu
 from torch.nn.functional import pad
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
@@ -25,7 +26,7 @@ from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.mxfp_compat import (
     ensure_mxfp8_moe_available,
 )
-from vllm_ascend.ops.activation import AscendSwigluOAIAndMul, swiglustep_and_mul
+from vllm_ascend.ops.activation import AscendSwigluOAIAndMul, AscendSwigluStepAndMul
 from vllm_ascend.ops.fused_moe.moe_runtime_args import MoEMlpComputeInput
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import (
@@ -112,8 +113,9 @@ def quant_apply_mlp(
     swiglu_beta: float = 0.0,
     use_w4a8_per_channel_gmm_swiglu: bool = False,
 ) -> torch.Tensor:
-    is_swigluoai_uninterleave = activation == "swigluoai_uninterleave"
-
+    act_name = getattr(activation, "value", activation)
+    is_swiglustep = activation == MoEActivation.SWIGLUSTEP or act_name == "swiglustep"
+    is_swigluoai_uninterleave = act_name == "swigluoai_uninterleave"
     input_hidden_dtype = hidden_states.dtype
     use_gmm_swiglu_quant_fusion = use_mxfp_quant or (fusion and not dynamic_eplb)
 
@@ -270,6 +272,8 @@ def quant_apply_mlp(
                 bias=swiglu_beta,
                 interleaved=False,
             )
+        elif is_swiglustep:
+            hidden_states = AscendSwigluStepAndMul.swiglustep_forward(hidden_states, limit=swiglu_limit or 7.0)
         else:
             hidden_states = torch_npu.npu_swiglu(hidden_states)
         before_gmm2_evt = torch.npu.current_stream().record_event()
@@ -295,7 +299,12 @@ def quant_apply_mlp(
             # TODO w4a8 scene: dynamic acquisition of dtype in the future
             _output_dtype = torch.bfloat16
 
-        if use_w4a8_per_channel_gmm_swiglu and enable_custom_op() and not is_swigluoai_uninterleave:
+        if (
+            use_w4a8_per_channel_gmm_swiglu
+            and enable_custom_op()
+            and not is_swiglustep
+            and not is_swigluoai_uninterleave
+        ):
             hidden_states, swiglu_out_scale = torch.ops._C_ascend.grouped_matmul_swiglu_quant_v2(
                 x=hidden_states,
                 weight=w1,
@@ -318,7 +327,7 @@ def quant_apply_mlp(
                 bias=bias1,
                 swiglu_limit=swiglu_limit,
             )
-        elif use_gmm_swiglu_quant_fusion and not is_swigluoai_uninterleave:
+        elif use_gmm_swiglu_quant_fusion and not is_swiglustep and not is_swigluoai_uninterleave:
             hidden_states, swiglu_out_scale, _ = DeviceOperator.npu_grouped_matmul_swiglu_quant(
                 x=hidden_states,
                 weight=_require_single_tensor_for_swiglu_quant(w1, name="w1"),
@@ -360,6 +369,9 @@ def quant_apply_mlp(
                     bias=swiglu_beta,
                     interleaved=False,
                 )
+                hidden_states, swiglu_out_scale = torch_npu.npu_dynamic_quant(hidden_states)
+            elif is_swiglustep:
+                hidden_states = AscendSwigluStepAndMul.swiglustep_forward(hidden_states, limit=swiglu_limit or 7.0)
                 hidden_states, swiglu_out_scale = torch_npu.npu_dynamic_quant(hidden_states)
             elif HAS_TRITON:
                 from vllm_ascend.ops.triton.activation.swiglu_quant import swiglu_quant
@@ -424,7 +436,7 @@ def unquant_apply_mlp(
 
     act_name = getattr(activation, "value", activation)
 
-    if act_name == "swigluoai":
+    if activation == MoEActivation.SWIGLUOAI or act_name == "swigluoai":
         num_experts, _, hidden_size = w1.shape
         gate_up_out = AscendSwigluOAIAndMul.swiglu_oai_forward(gate_up_out.view(-1, hidden_size))
     elif act_name == "swigluoai_uninterleave":
@@ -435,16 +447,19 @@ def unquant_apply_mlp(
             bias=swiglu_beta,
             interleaved=False,
         )
-    elif act_name == "swiglustep":
-        limit = swiglu_limit if swiglu_limit > 0 else 7.0
-        gate_up_out = swiglustep_and_mul(gate_up_out, limit=limit)
-    elif act_name == "gelu":
+    elif activation == MoEActivation.SWIGLUSTEP or act_name == "swiglustep":
+        gate_up_out = AscendSwigluStepAndMul.swiglustep_forward(gate_up_out, limit=swiglu_limit or 7.0)
+    elif activation == MoEActivation.GELU or act_name == "gelu":
         gate, up = gate_up_out.chunk(2, dim=-1)
         gate_up_out = torch.nn.functional.gelu(gate) * up
-    elif act_name == "gelu_tanh":
+    elif activation == MoEActivation.GELU_TANH or act_name == "gelu_tanh":
         gate, up = gate_up_out.chunk(2, dim=-1)
         gate_up_out = torch.nn.functional.gelu(gate, approximate="tanh") * up
     else:
+        if swiglu_limit > 0:
+            gate, up = gate_up_out.chunk(2, dim=-1)
+            gate.clamp_(max=swiglu_limit)
+            up.clamp_(min=-swiglu_limit, max=swiglu_limit)
         gate_up_out = torch_npu.npu_swiglu(gate_up_out)
 
     if topk_scales is not None:

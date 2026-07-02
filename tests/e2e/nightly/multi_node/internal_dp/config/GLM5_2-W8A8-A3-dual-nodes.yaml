@@ -9,7 +9,6 @@ env_common: &env_common
   OMP_NUM_THREADS: 1
   HCCL_BUFFSIZE: 200
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
-  VLLM_ASCEND_BALANCE_SCHEDULING: 0
   VLLM_ASCEND_ENABLE_MLAPO: 1
   VLLM_ENGINE_READY_TIMEOUT_S: "3000"
   VLLM_RPC_TIMEOUT: "600"
@@ -40,14 +39,14 @@ deployment:
       --trust-remote-code
       --gpu-memory-utilization 0.95
       --quantization ascend
-      --additional-config '{"fuse_muls_add":true,"multistream_overlap_shared_expert":true,"enable_dsa_cp": true}'
+      --additional-config '{"fuse_muls_add":true,"multistream_overlap_shared_expert":true}'
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
-      --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
+      --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager":true}'
   -
     envs:
       <<: *env_common
     server_cmd: >
-      vllm serve Eco-Tech/GLM-5.1-w8a8
+      vllm serve Eco-Tech/GLM-5.2-w8a8
       --host 0.0.0.0
       --port $SERVER_PORT
       --data-parallel-size 2
@@ -65,9 +64,9 @@ deployment:
       --trust-remote-code
       --gpu-memory-utilization 0.95
       --quantization ascend
-      --additional-config '{"fuse_muls_add":true,"multistream_overlap_shared_expert":true,"enable_dsa_cp": true}'
+      --additional-config '{"fuse_muls_add":true,"multistream_overlap_shared_expert":true}'
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
-      --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
+      --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager":true}'
 benchmarks:
   acc_aime2025:
     case_type: accuracy
