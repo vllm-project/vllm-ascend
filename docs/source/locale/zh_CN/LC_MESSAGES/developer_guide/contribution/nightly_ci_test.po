@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-22 02:02+0000\n"
+"POT-Creation-Date: 2026-07-01 04:54+0000\n"
 "PO-Revision-Date: 2026-04-09 22:15+0800\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -468,7 +468,15 @@ msgstr "`multi-node-deepseek-v3.2-W8A8-EP`"
 msgid "DeepSeek-V3.2-W8A8 with EP, 4-node"
 msgstr "DeepSeek-V3.2-W8A8 带 EP，4 节点"
 
-#: ../../source/developer_guide/contribution/nightly_ci_test.md:119
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "`multi-node-glm-5.2`"
+msgstr "`multi-node-glm-5.2`"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "GLM-5.1-W8A8, 2-node"
+msgstr "GLM-5.1-W8A8，2 节点"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:120
 msgid "**Single-node tests** (run after multi-node tests complete):"
 msgstr "**单节点测试**（在多节点测试完成后运行）："
 
@@ -604,7 +612,7 @@ msgstr "`custom-multi-ops`"
 msgid "Custom multi-card operator tests"
 msgstr "自定义多卡算子测试"
 
-#: ../../source/developer_guide/contribution/nightly_ci_test.md:142
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:143
 msgid ""
 "The A3 resource pool has a maximum concurrency of **5×16 NPUs**. Multi-"
 "node tests run with `max-parallel: 2` to avoid resource exhaustion. "
@@ -614,23 +622,23 @@ msgstr ""
 "A3 资源池的最大并发度为 **5×16 NPU**。多节点测试以 `max-parallel: 2` 运行，以避免资源耗尽。在 A3 上运行 "
 "`/nightly all` 会使大量任务排队——请尽可能优先指定具体的测试名称。"
 
-#: ../../source/developer_guide/contribution/nightly_ci_test.md:148
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:149
 msgid "Examples"
 msgstr "示例"
 
-#: ../../source/developer_guide/contribution/nightly_ci_test.md:150
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:151
 msgid "Run all available nightly tests against your PR:"
 msgstr "针对您的 PR 运行所有可用的 nightly 测试："
 
-#: ../../source/developer_guide/contribution/nightly_ci_test.md:156
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:157
 msgid "Run only the custom operator single-card test:"
 msgstr "仅运行自定义算子单卡测试："
 
-#: ../../source/developer_guide/contribution/nightly_ci_test.md:162
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:163
 msgid "Run two specific tests at once:"
 msgstr "同时运行两个指定的测试："
 
-#: ../../source/developer_guide/contribution/nightly_ci_test.md:168
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:169
 msgid ""
 "Re-trigger after fixing an issue: just push a new commit. The "
 "`synchronize` event re-runs the workflow and picks up the existing "
@@ -639,76 +647,76 @@ msgstr ""
 "修复问题后重新触发：只需推送一个新的提交。`synchronize` 事件会重新运行工作流并自动获取现有的 `/nightly` "
 "评论——无需发布新评论。"
 
-#: ../../source/developer_guide/contribution/nightly_ci_test.md:172
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:173
 msgid "Troubleshooting"
 msgstr "故障排查"
 
-#: ../../source/developer_guide/contribution/nightly_ci_test.md:174
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:175
 msgid "**The workflow didn't start after I added the label.**"
 msgstr "**添加标签后工作流未启动。**"
 
-#: ../../source/developer_guide/contribution/nightly_ci_test.md:176
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:177
 msgid ""
 "Make sure the `/nightly` comment was posted **before** the label was "
 "added. If the label was added first, remove it and re-add it after "
 "posting the comment."
 msgstr "确保 `/nightly` 评论是在添加标签**之前**发布的。如果先添加了标签，请移除它，然后在发布评论后重新添加。"
 
-#: ../../source/developer_guide/contribution/nightly_ci_test.md:178
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:179
 msgid ""
 "Check that the comment starts exactly with `/nightly` with no leading "
 "spaces or extra characters before the slash."
 msgstr "检查评论是否以 `/nightly` 精确开头，斜杠前没有前导空格或多余字符。"
 
-#: ../../source/developer_guide/contribution/nightly_ci_test.md:180
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:181
 msgid ""
 "To re-trigger after fixing an issue, simply push a new commit — the "
 "workflow will reuse the existing `/nightly` comment automatically."
 msgstr "修复问题后重新触发，只需推送一个新的提交——工作流会自动重用现有的 `/nightly` 评论。"
 
-#: ../../source/developer_guide/contribution/nightly_ci_test.md:183
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:184
 msgid "**Only some tests ran, not the ones I expected.**"
 msgstr "**只运行了部分测试，不是预期的那些。**"
 
-#: ../../source/developer_guide/contribution/nightly_ci_test.md:185
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:186
 msgid ""
 "Test names are case-sensitive and must match the `name` field in the "
 "workflow matrix exactly (see the table above)."
 msgstr "测试名称区分大小写，并且必须与工作流矩阵中的 `name` 字段完全一致（参见上表）。"
 
-#: ../../source/developer_guide/contribution/nightly_ci_test.md:187
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:188
 msgid ""
 "Check the `parse-trigger` job output in GitHub Actions for the resolved "
 "`test_filter` value."
 msgstr "在 GitHub Actions 中检查 `parse-trigger` 任务的输出，查看解析后的 `test_filter` 值。"
 
-#: ../../source/developer_guide/contribution/nightly_ci_test.md:190
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:191
 msgid "**The workflow ran with the scheduled image, not my PR code.**"
 msgstr "**工作流使用的是定时镜像，而不是我的 PR 代码。**"
 
-#: ../../source/developer_guide/contribution/nightly_ci_test.md:192
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:193
 msgid ""
 "Confirm the workflow was triggered by a `pull_request` event (label or "
 "push), not `workflow_dispatch`."
 msgstr "确认工作流是由 `pull_request` 事件（标签或推送）触发的，而不是 `workflow_dispatch`。"
 
-#: ../../source/developer_guide/contribution/nightly_ci_test.md:194
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:195
 msgid "The `parse-trigger` job logs show `is_pr_event` — check its value."
 msgstr "`parse-trigger` 任务的日志中会显示 `is_pr_event`——请检查其值。"
 
-#: ../../source/developer_guide/contribution/nightly_ci_test.md:196
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:197
 msgid ""
 "**How to obtain more detailed logs to pinpoint problems for multi-node "
 "tests**"
 msgstr "**如何获取更详细的日志以定位多节点测试的问题**"
 
-#: ../../source/developer_guide/contribution/nightly_ci_test.md:198
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:199
 msgid ""
 "For most issues, the stdout pop-up logs from GitHub actions are "
 "sufficient (this log always represents the logs from the first node)."
 msgstr "对于大多数问题，GitHub Actions 的标准输出弹出日志就足够了（该日志始终代表第一个节点的日志）。"
 
-#: ../../source/developer_guide/contribution/nightly_ci_test.md:199
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:200
 msgid ""
 "If the logs from a first node are no longer sufficient to provide "
 "effective logging information, see the summary of your jobs to download "
