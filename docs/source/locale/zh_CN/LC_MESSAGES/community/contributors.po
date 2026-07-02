@@ -1103,7 +1103,7 @@ msgstr "421"
 
 #: ../../source/community/contributors.md
 msgid "[@internel-error](https://github.com/internel-error)"
-msgstr "[@internel-error](https://github.com/internel-error)"
+msgstr ""
 
 #: ../../source/community/contributors.md
 msgid "2026/05/27"
@@ -2065,8 +2065,6 @@ msgid ""
 "[5ae3ded](https://github.com/vllm-project/vllm-"
 "ascend/commit/5ae3ded92f8fca335bad1c269a43d2c5f8fb5ae8)"
 msgstr ""
-"[5ae3ded](https://github.com/vllm-project/vllm-"
-"ascend/commit/5ae3ded92f8fca335bad1c269a43d2c5f8fb5ae8)"
 
 #: ../../source/community/contributors.md
 msgid "368"
