@@ -6,6 +6,7 @@ from typing import Any
 
 import torch
 import vllm.v1.worker.gpu.spec_decode.dflash.speculator as dflash_speculator
+from vllm.config import VllmConfig
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import (
@@ -16,6 +17,10 @@ from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
 
 
 class AscendDFlashSpeculator(DFlashSpeculator):
+    def __init__(self, vllm_config: VllmConfig, device: torch.device):
+        super().__init__(vllm_config, device)
+        self.context_slot_mapping = torch.zeros(self.max_num_tokens, dtype=torch.int32, device=device)
+
     def propose(
         self,
         input_batch: InputBatch,

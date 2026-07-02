@@ -1367,7 +1367,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             value=value,
             key_cache=self.key_cache,
             value_cache=self.value_cache,
-            slot_mapping=slot_mapping.to(torch.int32),
+            slot_mapping=slot_mapping,
         )
 
     def reshape_and_cache(
