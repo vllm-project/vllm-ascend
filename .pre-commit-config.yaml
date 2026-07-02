@@ -119,6 +119,11 @@ repos:
     entry: python tools/check_long_functions.py
     language: system
     types: [python]
+  - id: check-symbolic-meta
+    name: Check symbolic shapes in meta kernels
+    entry: python tools/check_symbolic_meta.py
+    language: system
+    pass_filenames: false
   # Keep `suggestion` last
   - id: suggestion
     name: Suggestion
