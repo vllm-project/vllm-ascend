@@ -677,7 +677,9 @@ class NPUModelRunner(GPUModelRunner):
         if self.dp_size == 1:
             return num_tokens, None, cudagraph_mode
 
-        if should_skip_allreduce_across_dp_group(self.vllm_config, is_draft_model):
+        needs_dp_sync_for_finegrained_tp = embedding_tp_enable()
+        if should_skip_allreduce_across_dp_group(self.vllm_config, is_draft_model) \
+            and not needs_dp_sync_for_finegrained_tp:
             num_tokens_after_padding = torch.tensor([num_tokens] * self.dp_size, device="cpu", dtype=torch.int32)
             return num_tokens, num_tokens_after_padding, cudagraph_mode
 
@@ -1429,11 +1431,32 @@ class NPUModelRunner(GPUModelRunner):
                 encoder_cache=self.encoder_cache,
             )
 
+        # When embedding TP is enabled with mm models, the parent's mm branch
+        # calls embed_input_ids with num_scheduled_tokens (varies per DP rank),
+        # which would deadlock the embedding TP all_gather. Override
+        # total_num_scheduled_tokens to num_input_tokens (uniform via DP padding)
+        # so that embed_input_ids produces uniform tensor sizes for the
+        # all_gather/reduce_scatter collectives.
+        need_mm_embed_override = (
+            embedding_tp_enable()
+            and self.supports_mm_inputs
+            and get_pp_group().is_first_rank
+            and not self.model_config.is_encoder_decoder
+        )
+        saved_num_scheduled = None
+        if need_mm_embed_override:
+            saved_num_scheduled = scheduler_output.total_num_scheduled_tokens
+            scheduler_output.total_num_scheduled_tokens = num_input_tokens
+
         try:
-            return super()._preprocess(
+            result = super()._preprocess(
                 scheduler_output, num_input_tokens, intermediate_tensors
             )
         finally:
+            if saved_num_scheduled is not None:
+                scheduler_output.total_num_scheduled_tokens = saved_num_scheduled
+                if num_input_tokens > saved_num_scheduled:
+                    self.positions[saved_num_scheduled:num_input_tokens].zero_()
             if (
                 self.pcp_size > 1
                 and self.supports_mm_inputs
@@ -1443,6 +1466,8 @@ class NPUModelRunner(GPUModelRunner):
                 self.pcp_manager.restore_scheduler_output_after_mm_preprocess(
                     scheduler_output, restore_state
                 )
+
+        return result
 
     def _gather_mm_embeddings(
         self,
@@ -3542,6 +3567,11 @@ class NPUModelRunner(GPUModelRunner):
             # Make sure padding doesn't exceed max_num_tokens
             assert num_tokens_padded <= self.max_num_tokens
             if self.supports_mm_inputs and not self.model_config.is_encoder_decoder or self.enable_prompt_embeds:
+                if embedding_tp_enable():
+                    self.model.embed_input_ids(
+                        torch.zeros(num_tokens_padded,
+                                    dtype=torch.int32,
+                                    device=self.device))
                 input_ids = None
                 inputs_embeds = self.inputs_embeds.gpu[:num_tokens_padded]
             else:
