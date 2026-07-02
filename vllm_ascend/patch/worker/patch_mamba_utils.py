@@ -104,31 +104,46 @@ def _do_mamba_copy_block_torch(copy_bufs: mamba_utils.MambaCopyBuffers):
         dst_state.copy_(src_state.clone())
     copy_bufs._tensor_copy_pairs = []
 
+
 def _postprocess_mamba_align_gpu_cpu_fallback(
     *,
     bufs: "mamba_utils.MambaBuffers",
     num_reqs: int,
-    num_accept_tokens_gpu: torch.Tensor,
-    num_accept_tokens_cpu_tensor: torch.Tensor,
+    num_accepted_tokens_gpu: torch.Tensor,
+    num_accepted_tokens_cpu_tensor: torch.Tensor,
     input_batch: GPUInputBatch,
     kv_cache_config: KVCacheConfig,
     forward_context: dict[str, Any],
     mamba_state_copy_funcs: tuple[MambaStateCopyFunc, ...],
 ) -> None:
-    """CPU fallback path for Mamba postprocess_mamba_align_gpu on 310P.(no Triton)
+    """CPU fallback for 310P where the Triton fused postprocess is unavailable."""
+    ctx = bufs.postprocess_align
+    assert ctx is not None
+    assert ctx.mamba_state_idx_buf is not None
+    assert ctx.num_scheduled_tokens_buf is not None
+    assert ctx.num_computed_tokens_buf is not None
+    assert ctx.num_draft_tokens_buf is not None
 
-    On 310P, the Triton fused kernel is not available. This fallback skips
-    the GPU-side state copy(which will be handled by preprocess_mamba at next step).
-    and reset num_accept_tokens_cpu_tensor to 1, matching the Triton's kernel's behavior.
-    when ''src_block_idx == dest_block_idx'',so that the next ''preprocess_mamba'' uses 
-    ''accept_tokens_bias = 0'' 
-    """
-    ## Set num_accept_tokens_cpu_tensor to 1, matching the Triton's kernel's behavior
-    ## behavior.
-    ## when ''src_block_idx == dest_block_idx'',so that the next ''preprocess_mamba'' uses 
-    ## ''accept_tokens_bias = 0'' 
-    ones = torch.ones(num_reqs, dtype=torch.int32, device=num_accept_tokens_gpu.device)
-    num_accept_tokens_cpu_tensor[:num_reqs].copy_(ones, non_blocking=True)
+    mamba_state_idx = ctx.mamba_state_idx_buf.np
+    num_scheduled_tokens = ctx.num_scheduled_tokens_buf.np
+    num_computed_tokens = ctx.num_computed_tokens_buf.np
+    num_draft_tokens = ctx.num_draft_tokens_buf.np
+    block_size = ctx.block_size
+
+    num_accepted_tokens_cpu_tensor[:num_reqs].copy_(num_accepted_tokens_gpu[:num_reqs])
+    num_accepted_tokens = input_batch.num_accepted_tokens_cpu
+    for i in range(num_reqs):
+        num_tokens_running_state = num_computed_tokens[i] + num_scheduled_tokens[i] - num_draft_tokens[i]
+        new_num_computed_tokens = num_tokens_running_state + num_accepted_tokens[i] - 1
+        aligned_new_computed_tokens = new_num_computed_tokens // block_size * block_size
+        if aligned_new_computed_tokens < num_tokens_running_state:
+            continue
+
+        src_block_idx = mamba_state_idx[i]
+        dest_block_idx = aligned_new_computed_tokens // block_size - 1
+        if src_block_idx == dest_block_idx:
+            num_accepted_tokens_cpu_tensor[i] = 1
+
 
 def _batch_memcpy_unavailable(src_ptrs, dst_ptrs, sizes):
     raise RuntimeError(
