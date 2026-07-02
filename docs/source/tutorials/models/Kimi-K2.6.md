@@ -350,7 +350,6 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
       --gpu-memory-utilization 0.95 \
       --enforce-eager \
       --speculative-config '{"method": "eagle3", "model":"lightseekorg/kimi-k2.6-eagle3", "num_speculative_tokens": 3}' \
-      --additional-config '{"recompute_scheduler_enable":true}' \
       --mm-encoder-tp-mode data \
       --kv-transfer-config \
       '{"kv_connector": "MooncakeConnectorV1",
@@ -428,7 +427,6 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
       --gpu-memory-utilization 0.95 \
       --enforce-eager \
       --speculative-config '{"method": "eagle3", "model":"lightseekorg/kimi-k2.6-eagle3", "num_speculative_tokens": 3}' \
-      --additional-config '{"recompute_scheduler_enable":true}' \
       --mm-encoder-tp-mode data \
       --kv-transfer-config \
       '{"kv_connector": "MooncakeConnectorV1",
@@ -606,7 +604,7 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
 
     - `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the communication optimization function on the prefill nodes.
     - `VLLM_ASCEND_ENABLE_MLAPO=1`: enables the fusion operator, which can significantly improve performance but consumes more NPU memory. In the Prefill-Decode (PD) separation scenario, enable MLAPO only on decode nodes.
-    - `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the Key-Value Cache (KV Cache) of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, it is recommended to enable this configuration on both prefill and decode nodes simultaneously.
+    - `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the Key-Value Cache (KV Cache) of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, enable this configuration only on decode nodes.
     - `multistream_overlap_shared_expert: true`: When the Tensor Parallelism (TP) size is 1 or `enable_shared_expert_dp: true`, an additional stream is enabled to overlap the computation process of shared experts for improved efficiency.
 
 6. Run server for each node:
