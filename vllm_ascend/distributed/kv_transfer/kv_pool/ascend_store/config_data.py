@@ -224,6 +224,40 @@ class ChunkedTokenDatabase:
         self.partitions = partitions
         self.use_hybrid = use_hybrid
         self.hash_block_size = self.block_size[0] if hash_block_size is None else hash_block_size
+        self.cache_coordinator: Any | None = None
+
+    def set_cache_coordinator(self, cache_coordinator: Any | None) -> None:
+        self.cache_coordinator = cache_coordinator
+
+    def store_mask(
+        self,
+        aligned_token_len: int,
+        num_prompt_tokens: int | None = None,
+    ) -> tuple[list[bool], ...] | None:
+        if self.cache_coordinator is None:
+            return None
+        return self.cache_coordinator.store_mask(aligned_token_len, num_prompt_tokens)
+
+    def load_mask(
+        self,
+        block_hashes: list[BlockHash],
+        token_len: int,
+    ) -> tuple[list[bool], ...] | None:
+        if self.cache_coordinator is None:
+            return None
+        return self.cache_coordinator.load_mask(block_hashes, token_len)
+
+    def mask_allows_chunk(
+        self,
+        masks: tuple[list[bool], ...] | None,
+        kv_cache_group_id: int,
+        start: int,
+    ) -> bool:
+        if masks is None or kv_cache_group_id >= len(masks):
+            return True
+        group_mask = masks[kv_cache_group_id]
+        block_idx = start // self.get_block_size(kv_cache_group_id)
+        return block_idx < len(group_mask) and group_mask[block_idx]
 
     def _make_key_by_hash(
         self,
@@ -296,11 +330,13 @@ class ChunkedTokenDatabase:
         block_ids: list[int],
         kv_cache_group_id: int = 0,
         cache_role: str = "kv",
+        block_id: int | None = None,
     ):
         addr_list: list[int] = []
         size_list: list[int] = []
         group_block_size = self.get_block_size(kv_cache_group_id)
-        block_id = block_ids[start // group_block_size]
+        if block_id is None:
+            block_id = block_ids[start // group_block_size]
         group_addrs, group_block_len, group_block_stride = self._get_group_buffers(kv_cache_group_id, cache_role)
         length = len(group_block_len)
         if length == 0:
@@ -393,16 +429,40 @@ class ChunkedTokenDatabase:
         cache_role: str = "kv",
         cache_family: str | None = None,
     ) -> Iterable[tuple[int, int, PoolKey, int]]:
-        for start_idx, end_idx, key in self.process_tokens(
-            token_len,
-            block_hashes,
-            mask_num,
-            kv_cache_group_id=kv_cache_group_id,
-            cache_role=cache_role,
-            cache_family=cache_family,
-        ):
-            block_idx = start_idx // self.get_block_size(kv_cache_group_id)
-            if block_idx >= len(block_ids):
+        all_chunks = list(
+            self.process_tokens(
+                token_len,
+                block_hashes,
+                0,
+                kv_cache_group_id=kv_cache_group_id,
+                cache_role=cache_role,
+                cache_family=cache_family,
+            )
+        )
+        if not all_chunks:
+            return
+
+        group_block_size = self.get_block_size(kv_cache_group_id)
+        # Sliding-window groups can expose only live tail block ids while keys
+        # still use logical chunk positions from the full prefix.
+        num_logical_blocks = all_chunks[-1][0] // group_block_size + 1
+        block_id_offset = max(num_logical_blocks - len(block_ids), 0)
+        chunks = all_chunks
+        if mask_num:
+            chunks = list(
+                self.process_tokens(
+                    token_len,
+                    block_hashes,
+                    mask_num,
+                    kv_cache_group_id=kv_cache_group_id,
+                    cache_role=cache_role,
+                    cache_family=cache_family,
+                )
+            )
+
+        for start_idx, end_idx, key in chunks:
+            block_idx = start_idx // group_block_size - block_id_offset
+            if block_idx < 0 or block_idx >= len(block_ids):
                 continue
             block_id = block_ids[block_idx]
             if skip_null_blocks and block_id <= 0:
@@ -516,6 +576,9 @@ class RequestTracker:
     # NOTE: This field will only be used when you enable kv-event
     token_ids: list[int] | None = None
 
+    # Full prompt length before chunk truncation, used by sparse retention masks.
+    num_prompt_tokens: int | None = None
+
     mamba_group_ids: list[int] | None = None
 
     # spec blocks for mamba cache group
@@ -531,6 +594,7 @@ class RequestTracker:
         allocated_block_ids: list[int] | list[list[int]] | None = None,
         num_saved_tokens: int = 0,
         token_ids: list[int] | None = None,
+        num_prompt_tokens: int | None = None,
         mamba_group_ids: list[int] | None = None,
         num_speculative_blocks: int = 0,
         block_sizes: list[int] | None = None,
@@ -545,6 +609,7 @@ class RequestTracker:
         self.allocated_block_ids_by_group = block_ids
         self.num_saved_tokens = num_saved_tokens
         self.token_ids = token_ids
+        self.num_prompt_tokens = num_prompt_tokens
         self.block_sizes = block_sizes
 
     @property
@@ -567,6 +632,7 @@ class RequestTracker:
             token_len=num_tokens_to_compute,
             allocated_block_ids_by_group=normalize_block_ids_by_group(new_request.block_ids),
             num_saved_tokens=0,
+            num_prompt_tokens=len(new_request.prompt_token_ids),
         )
 
     def update(
@@ -635,6 +701,7 @@ class ReqMeta:
     kv_cache_families_by_group: list[str] | None = None
     skip_null_blocks_by_group: list[bool] | None = None
     disable_tp_key_sharding: bool = False
+    num_prompt_tokens: int | None = None
 
     # The following parameters are only used for kv event generation
     # TODO: add lora_request which used for gen lora_id/lora_name in kv event
@@ -657,6 +724,7 @@ class ReqMeta:
         kv_cache_families_by_group: list[str] | None = None,
         skip_null_blocks_by_group: list[bool] | None = None,
         disable_tp_key_sharding: bool = False,
+        num_prompt_tokens: int | None = None,
         token_ids: list[int] | None = None,
         original_block_size: list[int] | int | None = None,
         block_ids: list[int] | list[list[int]] | None = None,
@@ -676,6 +744,7 @@ class ReqMeta:
         self.kv_cache_families_by_group = kv_cache_families_by_group
         self.skip_null_blocks_by_group = skip_null_blocks_by_group
         self.disable_tp_key_sharding = disable_tp_key_sharding
+        self.num_prompt_tokens = num_prompt_tokens
         self.token_ids = token_ids
         self.original_block_size = original_block_size
         self.event_id = event_id
@@ -748,6 +817,7 @@ class ReqMeta:
             block_hashes=block_hashes,
             is_last_chunk=is_last_chunk,
             token_ids=token_ids,
+            num_prompt_tokens=tracker.num_prompt_tokens or input_token_len,
             original_block_size=original_block_size,
             kv_cache_group_ids=list(range(len(tracker.allocated_block_ids_by_group))),
             kv_cache_families_by_group=kv_cache_group_families,

@@ -551,6 +551,28 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         worker.start_load_kv(meta)
         worker.m_store.get.assert_called_once()
 
+    def test_start_load_kv_sync_uses_tail_block_id(self):
+        worker = self._make_worker()
+        worker.m_store.get = MagicMock()
+        worker.token_database.set_group_buffers({0: [1000]}, {0: [160]})
+
+        load_spec = LoadSpec(vllm_cached_tokens=0, kvpool_cached_tokens=64, can_load=True, token_len=64)
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=64,
+            block_ids=[99],
+            block_hashes=["h0", "h1", "h2", "h3"],
+            load_spec=load_spec,
+        )
+        meta = AscendConnectorMetadata(set(), set())
+        meta.add_request(req)
+
+        worker.start_load_kv(meta)
+
+        _, addrs, sizes = worker.m_store.get.call_args.args
+        self.assertEqual(addrs, [[1000 + 99 * 160]])
+        self.assertEqual(sizes, [[160]])
+
     def test_start_load_kv_no_load(self):
         worker = self._make_worker()
         req = ReqMeta(

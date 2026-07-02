@@ -19,9 +19,10 @@ import threading
 import unittest
 from unittest.mock import MagicMock
 
-from vllm.distributed.kv_events import BlockStored
-
+# isort: off
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
+from vllm.distributed.kv_events import BlockStored
+from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     KeyMetadata,
     LayerMultiBlockReqMeta,
@@ -30,6 +31,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     PoolKey,
     ReqMeta,
 )
+
+# isort: on
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
     KVCacheStoreLayerRecvingThread,
     KVCacheStoreLayerSendingThread,
@@ -91,6 +94,24 @@ class FakeTokenDatabase:
 
     def decode_adaptor_prefill_pp(self, keys, addrs, sizes):
         return keys, addrs, sizes
+
+
+class MaskedFakeTokenDatabase(FakeTokenDatabase):
+    def __init__(self, block_size=16, masks=([True],)):
+        super().__init__(block_size)
+        self.masks = masks
+
+    def store_mask(self, token_len, num_prompt_tokens=None):
+        return self.masks
+
+    def load_mask(self, block_hashes, token_len):
+        return self.masks
+
+    def mask_allows_chunk(self, masks, kv_cache_group_id, start):
+        if masks is None:
+            return True
+        block_idx = start // self.block_size
+        return block_idx < len(masks[kv_cache_group_id]) and masks[kv_cache_group_id][block_idx]
 
 
 class TestKVTransferThread(unittest.TestCase):
@@ -322,6 +343,33 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         # dcp_size > 1 means no slicing
         self.assertEqual(len(store.put_calls), 1)
 
+    def test_handle_request_applies_store_mask(self):
+        store = FakeStore([0, 0])
+        db = MaskedFakeTokenDatabase(masks=([True, False],))
+        t = KVCacheStoreSendingThread(
+            m_store=store,
+            token_database=db,
+            block_size=16,
+            tp_rank=0,
+            dcp_size=1,
+            put_step=1,
+            kv_role="kv_producer",
+            ready_event=threading.Event(),
+            group_uses_align_state=[False],
+        )
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=32,
+            block_ids=[0, 1],
+            block_hashes=[b"h0", b"h1"],  # type: ignore[arg-type]
+            current_event=None,
+        )
+        t.add_stored_request("r1")
+        t.request_queue.put(req)
+        t._handle_request(req)
+        keys, _, _ = store.put_calls[0]
+        self.assertEqual(len(keys), 1)
+
 
 class TestKVCacheStoreRecvingThread(unittest.TestCase):
     def test_handle_request(self):
@@ -350,6 +398,32 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
         self.assertEqual(len(store.get_calls), 1)
         finished = t.get_and_clear_finished_requests()
         self.assertIn("r1", finished)
+
+    def test_handle_request_applies_load_mask(self):
+        store = FakeStore()
+        db = MaskedFakeTokenDatabase(masks=([True, False],))
+        t = KVCacheStoreRecvingThread(
+            m_store=store,
+            token_database=db,
+            block_size=16,
+            tp_rank=0,
+            dcp_size=1,
+            ready_event=threading.Event(),
+            invalid_block_ids=set(),
+            invalid_block_ids_lock=threading.Lock(),
+        )
+        load_spec = LoadSpec(vllm_cached_tokens=0, kvpool_cached_tokens=32, can_load=True, token_len=32)
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=32,
+            block_ids=[0, 1],
+            block_hashes=[b"h0", b"h1"],  # type: ignore[arg-type]
+            load_spec=load_spec,
+        )
+        t.request_queue.put(req)
+        t._handle_request(req)
+        keys, _, _ = store.get_calls[0]
+        self.assertEqual(len(keys), 1)
 
 
 class TestKVCacheStoreLayerSendingThread(unittest.TestCase):
@@ -383,7 +457,7 @@ class TestKVCacheStoreLayerSendingThread(unittest.TestCase):
             current_event=None,
             token_ids=list(range(num_keys * 16)),
             original_block_size=16,
-            block_hashes=[f"h{i}" for i in range(num_keys)],
+            block_hashes=[f"h{i}".encode() for i in range(num_keys)],
         )
 
     def test_handle_request_puts_missing(self):
@@ -467,7 +541,7 @@ class TestKVCacheStoreLayerSendingThread(unittest.TestCase):
         t._handle_request(req)
         events = t.get_kv_events()
         self.assertEqual(len(events), 1)
-        self.assertEqual(events[0].block_hashes, ["h0"])
+        self.assertEqual(events[0].block_hashes, [maybe_convert_block_hash(b"h0")])
         self.assertEqual(events[0].token_ids, list(range(16)))
         self.assertEqual(events[0].block_size, 16)
 
@@ -491,7 +565,7 @@ class TestKVCacheStoreLayerSendingThread(unittest.TestCase):
         t._handle_request(final_layer_req)
         events = t.get_kv_events()
         self.assertEqual(len(events), 1)
-        self.assertEqual(events[0].block_hashes, ["h0"])
+        self.assertEqual(events[0].block_hashes, [maybe_convert_block_hash(b"h0")])
 
 
 class TestKVCacheStoreLayerRecvingThread(unittest.TestCase):
