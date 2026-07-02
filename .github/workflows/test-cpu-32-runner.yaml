@@ -122,34 +122,63 @@ jobs:
         run: |
           echo ""
           echo "=== 🚀 Checking buildctl at job start ==="
-          which buildctl && echo "✅ buildctl found" || echo "❌ buildctl NOT found"
+
+          # Check global buildctl
+          which buildctl && echo "✅ buildctl found in PATH" || echo "❌ buildctl NOT found in PATH"
+
+          # Check /tmp/buildkit/bin/buildctl (the download location)
+          if [ -f "/tmp/buildkit/bin/buildctl" ]; then
+            echo "✅ /tmp/buildkit/bin/buildctl exists"
+            /tmp/buildkit/bin/buildctl --version
+          else
+            echo "❌ /tmp/buildkit/bin/buildctl NOT found"
+          fi
+
           buildctl --version 2>/dev/null || echo "⏳ buildctl --version failed (may still be installing)"
 
           # Wait for buildctl if not available
-          if ! command -v buildctl &> /dev/null; then
-            echo ""
-            echo "buildctl not found at start, waiting up to 5 minutes..."
-            for i in {1..300}; do
-              if command -v buildctl &> /dev/null; then
-                echo "✅ buildctl appeared after $i seconds"
-                buildctl --version
-                break
-              fi
-              [ $((i % 30)) -eq 0 ] && echo "Waiting... ($i/300 sec)"
-              sleep 1
-            done
-          fi
+          echo ""
+          echo "Waiting for /tmp/buildkit/bin/buildctl to appear..."
+          for i in {1..300}; do
+            if [ -f "/tmp/buildkit/bin/buildctl" ]; then
+              echo "✅ /tmp/buildkit/bin/buildctl appeared after $i seconds"
+              /tmp/buildkit/bin/buildctl --version
+              break
+            fi
+            if command -v buildctl &> /dev/null; then
+              echo "✅ buildctl appeared in PATH after $i seconds"
+              buildctl --version
+              break
+            fi
+            [ $((i % 30)) -eq 0 ] && echo "Waiting... ($i/300 sec)"
+            sleep 1
+          done
 
           # Final check
-          if command -v buildctl &> /dev/null; then
-            echo "✅ buildctl is available"
+          echo ""
+          echo "=== Final Status ==="
+          if [ -f "/tmp/buildkit/bin/buildctl" ]; then
+            echo "✅ /tmp/buildkit/bin/buildctl is available"
+            /tmp/buildkit/bin/buildctl --version
+          elif command -v buildctl &> /dev/null; then
+            echo "✅ buildctl is available in PATH"
             buildctl --version
           else
             echo "⚠️  buildctl still not available after 5 minutes"
+            echo ""
+            echo "Diagnostics:"
+            echo "  - /tmp/buildkit/ contents:"
+            ls -la /tmp/buildkit/ 2>/dev/null || echo "    /tmp/buildkit/ does not exist"
+            echo "  - /tmp/buildkit/bin/ contents:"
+            ls -la /tmp/buildkit/bin/ 2>/dev/null || echo "    /tmp/buildkit/bin/ does not exist"
+            echo "  - /tmp/buildkit.tar.gz:"
+            ls -la /tmp/buildkit.tar.gz 2>/dev/null || echo "    /tmp/buildkit.tar.gz not found"
+            echo ""
             echo "This may indicate:"
             echo "  - postStart hook is taking too long"
             echo "  - Network issue downloading buildkit binary"
             echo "  - Vault certificate injection failed"
+            echo "  - Permission issue copying to /usr/local/bin"
           fi
 
       - name: Test buildkitd connection
