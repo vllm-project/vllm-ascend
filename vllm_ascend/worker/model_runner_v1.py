@@ -69,6 +69,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
+    KVCacheTensor,
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
@@ -118,6 +119,10 @@ from vllm_ascend.compilation.acl_graph import (
     set_draft_graph_params,
     set_graph_params,
     update_full_graph_params,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_config import (
+    get_layerwise_kv_cache_reuse_layers,
+    get_layerwise_storage_indices,
 )
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoader
@@ -3809,6 +3814,59 @@ class NPUModelRunner(GPUModelRunner):
 
         self.debugger.step(**kwargs)
 
+    def _merge_kv_cache_tensors_for_layer_reuse(self, kv_cache_config: KVCacheConfig) -> None:
+        """Merge KV cache tensor entries so that reused layers share one buffer.
+
+        ``determine_available_memory`` already inflated ``num_blocks`` to account
+        for the reduced tensor count.  Here we merge the per-layer
+        ``KVCacheTensor`` entries into fewer shared entries (each with multiple
+        layer names in ``shared_by``).  vLLM's native
+        ``_allocate_kv_cache_tensors`` then allocates one buffer per merged
+        entry and maps every layer in ``shared_by`` to it.
+        """
+        kv_transfer_config = self.vllm_config.kv_transfer_config
+        if kv_transfer_config is None:
+            return
+        extra_config = kv_transfer_config.kv_connector_extra_config
+        total_layers = self.model_config.get_num_layers(self.parallel_config)
+        if get_layerwise_kv_cache_reuse_layers(total_layers, extra_config) is None:
+            return
+
+        old_tensors = kv_cache_config.kv_cache_tensors
+        if len(old_tensors) <= 1:
+            return
+
+        # Ordered layer names (flattened from shared_by).
+        layer_names: list[str] = []
+        for t in old_tensors:
+            layer_names.extend(t.shared_by)
+        if len(layer_names) != total_layers:
+            logger.warning(
+                "Layer reuse: expected %d layers, got %d; skipping tensor merge.",
+                total_layers,
+                len(old_tensors),
+            )
+            return
+
+        storage_indices = get_layerwise_storage_indices(total_layers, extra_config)
+
+        # Build merged tensors: each slot's layers share ONE buffer.
+        # Each buffer's size stays the same as a single layer's (time-multiplexed).
+        new_tensors: list[KVCacheTensor] = []
+        for slot in storage_indices:
+            slot_names = [layer_names[idx] for idx in slot]
+            # All layers in a slot share one buffer; size = first member's size.
+            slot_size = old_tensors[slot[0]].size
+            new_tensors.append(KVCacheTensor(shared_by=slot_names, size=slot_size))
+
+        kv_cache_config.kv_cache_tensors = new_tensors
+        logger.info(
+            "Layerwise KV cache reuse: merged %d tensors → %d (num_blocks=%d unchanged)",
+            len(old_tensors),
+            len(new_tensors),
+            kv_cache_config.num_blocks,
+        )
+
     def initialize_kv_cache(
         self,
         kv_cache_config: KVCacheConfig,
@@ -3825,6 +3883,7 @@ class NPUModelRunner(GPUModelRunner):
         self._mamba_bufs = None
         self._mamba_copy_bufs = None
         self.may_add_encoder_only_layers_to_kv_cache_config()
+        self._merge_kv_cache_tensors_for_layer_reuse(kv_cache_config)
         self.maybe_add_kv_sharing_layers_to_kv_cache_groups(kv_cache_config)
         # NOTE(cmq): initialize_attn_backend must before using self.attn_groups
         self.initialize_attn_backend(kv_cache_config, is_profiling=is_profiling)
@@ -4077,6 +4136,16 @@ class NPUModelRunner(GPUModelRunner):
         # the same tensor format must be maintained even if some layers
         # have only linear or attention layers, for example, the mtp layer.
         self.hybrid_with_attn_and_mamba = False
+        kv_transfer_config = self.vllm_config.kv_transfer_config
+        extra_config = (
+            kv_transfer_config.kv_connector_extra_config
+            if kv_transfer_config is not None
+            else None
+        )
+        reuse_layers = get_layerwise_kv_cache_reuse_layers(
+            self.model_config.get_num_layers(self.parallel_config),
+            extra_config,
+        )
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
             use_mamba, use_attn = False, False
             for layer_name in kv_cache_tensor.shared_by:
@@ -4084,6 +4153,11 @@ class NPUModelRunner(GPUModelRunner):
                     use_mamba = True
                 if isinstance(layer_kv_cache_spec[layer_name], AttentionSpec):
                     use_attn = True
+            if use_mamba and use_attn and reuse_layers is not None:
+                raise ValueError(
+                    "Layerwise KV cache reuse is not supported for "
+                    "hybrid attention+mamba KV cache tensors."
+                )
             self.hybrid_with_attn_and_mamba = self.hybrid_with_attn_and_mamba or (use_mamba and use_attn)
             for idx in range(len(kv_cache_tensor.shared_by)):
                 layer_name = kv_cache_tensor.shared_by[idx]

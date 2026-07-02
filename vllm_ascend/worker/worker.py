@@ -60,6 +60,9 @@ from vllm_ascend.batch_invariant import init_batch_invariance
 from vllm_ascend.cpu_binding import bind_cpus
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.device_allocator.sleep_mem_optimized import SleepWakeupManager
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_config import (
+    get_layerwise_kv_cache_num_tensors,
+)
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
@@ -602,7 +605,29 @@ class NPUWorker(WorkerBase):
                     suggested_util,
                 )
 
-        return int(self.available_kv_cache_memory_bytes)
+        available = int(self.available_kv_cache_memory_bytes)
+
+        # Layerwise KV cache reuse: inflate the reported available memory so
+        # that vLLM's get_kv_cache_configs() naturally calculates more
+        # num_blocks.  The actual tensor allocation (in the model runner) will
+        # create fewer shared buffers, so total memory usage stays the same.
+        kv_transfer_config = self.vllm_config.kv_transfer_config
+        if kv_transfer_config is None:
+            return available
+        extra_config = kv_transfer_config.kv_connector_extra_config
+        total_layers = self.model_config.get_num_layers(self.parallel_config)
+        num_tensors = get_layerwise_kv_cache_num_tensors(total_layers, extra_config)
+        if num_tensors is not None and num_tensors < total_layers:
+            factor = total_layers / num_tensors
+            available = int(available * factor)
+            logger.info(
+                "Layerwise KV cache reuse: inflating available memory by %.2fx (%d layers -> %d buffers)",
+                factor,
+                total_layers,
+                num_tensors,
+            )
+
+        return available
 
     def profile_memory(self) -> None:
         """Profiles the torch reserved memory, torch allocated memory in execute_model()."""
