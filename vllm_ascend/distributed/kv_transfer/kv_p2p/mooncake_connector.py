@@ -890,7 +890,14 @@ class KVCacheRecvingThread(threading.Thread):
             dst_list,
             length_list,
         )
+        # 统计 batch_transfer_sync_read 调用耗时
+        _bt_start = time.perf_counter()
         ret = self.engine.batch_transfer_sync_read(session_id, src_list, dst_list, length_list)
+        _bt_end = time.perf_counter()
+        logger.info(
+            "H2D [batch_transfer_sync_read] 耗时: %.6f s, src_list 长度: %d, "
+            "总传输字节数: %d",
+            _bt_end - _bt_start, len(src_list), sum(length_list))
         if ret < 0:
             logger.error(
                 "Mooncake transfer failed for request. remote_request_id=%s, ret=%d. ",
@@ -1509,15 +1516,6 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         self.connector_scheduler.set_xfer_handshake_metadata(metadata)
 
-    def set_xfer_handshake_metadata_pp_aware(
-        self, metadata: dict[tuple[int, int], KVConnectorHandshakeMetadata]
-    ) -> None:
-        tp_size = max(tp_rank for (_, tp_rank) in metadata) + 1
-        flat_metadata: dict[int, KVConnectorHandshakeMetadata] = {
-            pp_rank * tp_size + tp_rank: meta for (pp_rank, tp_rank), meta in metadata.items()
-        }
-        self.set_xfer_handshake_metadata(flat_metadata)
-
 
 class MooncakeConnectorScheduler:
     """Implementation of Scheduler side methods"""
@@ -1729,6 +1727,15 @@ class MooncakeConnectorScheduler:
                     local_block_ids = blocks.get_unhashed_block_ids_all_groups() if num_external_tokens > 0 else []
                     # Get unhashed blocks to pull from remote.
                     self._reqs_need_recv[request.request_id] = (request, local_block_ids, num_external_tokens)
+                    logger.info(
+                        "[KV-Diag] update_state_after_alloc add _reqs_need_recv "
+                        "request_id=%s num_external_tokens=%d "
+                        "local_block_groups=%d _reqs_need_recv_size=%d",
+                        request.request_id,
+                        num_external_tokens,
+                        len(local_block_ids),
+                        len(self._reqs_need_recv),
+                    )
                 else:
                     logger.warning("Got invalid KVTransferParams. params=%s. ", params)
             else:
@@ -1890,11 +1897,7 @@ class MooncakeConnectorWorker:
         device_index = (self.pp_rank + self.pcp_rank) * self.tp_size + self.tp_rank
         self.handshake_port = self.side_channel_port + device_index
         self.sockets: dict = {}
-        device_name = str(torch.npu.current_device()) if self.pp_size > 1 else None
-        self.engine = global_te.get_transfer_engine(
-            self.side_channel_host,
-            device_name=device_name,
-        )
+        self.engine = global_te.get_transfer_engine(self.side_channel_host, device_name=None)
         self.te_rpc_port = self.engine.get_rpc_port()
 
         # Background thread for sending or receiving KV caches.
