@@ -961,9 +961,6 @@ class AscendMLAImpl(MLAAttentionImpl):
             self.W_UV.copy_(W_UV.transpose(0, 1).contiguous())
             self.W_UK_T.copy_(W_UK.permute(1, 2, 0).contiguous())
 
-        # TODO(zzzzwwjj): Currently, torch.ops._C_ascend.batch_matmul_transpose cannot support weight nz
-        # self.W_UV = maybe_trans_nz(self.W_UV)
-
         if self.enable_mlapo:
             # Currently mlapo only supports W8A8 and W8A8MXFP8 quantization in MLA scenario
             # TODO(whx): modify this limitation when mlapo supports floating point
