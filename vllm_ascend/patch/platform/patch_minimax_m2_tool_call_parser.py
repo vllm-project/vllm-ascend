@@ -481,7 +481,7 @@ def _patched_extract_tool_calls_streaming(
             self._reset_streaming_state(tool_call_started=False)
 
     if not self.is_tool_call_started:
-        return DeltaMessage(content=delta_text) if delta_text else None
+        return DeltaMessage(content=delta_text, tool_calls=[]) if delta_text else None
 
     content_before = None
     if start_in_text:
@@ -493,7 +493,7 @@ def _patched_extract_tool_calls_streaming(
     if delta_tool_call or content_before:
         return DeltaMessage(
             content=content_before,
-            tool_calls=[delta_tool_call] if delta_tool_call else None,
+            tool_calls=[delta_tool_call] if delta_tool_call else [],
         )
 
     if (
@@ -502,7 +502,7 @@ def _patched_extract_tool_calls_streaming(
         and self.prev_tool_call_arr
         and self.tool_call_end_token_id not in delta_token_ids
     ):
-        return DeltaMessage(content="")
+        return DeltaMessage(content="", tool_calls=[])
 
     return None
 
