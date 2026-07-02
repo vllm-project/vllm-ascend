@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-06-22 05:29+0000\n"
+"POT-Creation-Date: 2026-06-25 04:27+0000\n"
 "PO-Revision-Date: 2026-01-22 16:55+0800\n"
 "Last-Translator: Gemini\n"
 "Language: zh_CN\n"
@@ -35,13 +35,17 @@ msgstr "[环境依赖](#environmental-dependencies)"
 msgid ""
 "[Example of using Mooncake as a KV Pool backend](#example-of-using-"
 "mooncake-as-a-kv-pool-backend)"
-msgstr "[使用 Mooncake 作为 KV 池后端的示例](#example-of-using-mooncake-as-a-kv-pool-backend)"
+msgstr ""
+"[使用 Mooncake 作为 KV 池后端的示例](#example-of-using-mooncake-as-a-kv-pool-"
+"backend)"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:7
 msgid ""
 "[Example of using Memcache as a KV Pool backend](#example-of-using-"
 "memcache-as-a-kv-pool-backend)"
-msgstr "[使用 Memcache 作为 KV 池后端的示例](#example-of-using-memcache-as-a-kv-pool-backend)"
+msgstr ""
+"[使用 Memcache 作为 KV 池后端的示例](#example-of-using-memcache-as-a-kv-pool-"
+"backend)"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:8
 msgid ""
@@ -59,7 +63,7 @@ msgstr "环境依赖"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:13
 #: ../../source/user_guide/feature_guide/kv_pool.md:54
-#: ../../source/user_guide/feature_guide/kv_pool.md:741
+#: ../../source/user_guide/feature_guide/kv_pool.md:745
 msgid "Software:"
 msgstr "软件要求："
 
@@ -97,7 +101,9 @@ msgid ""
 "last valid prefix and reschedules it to recompute the failed KV blocks. "
 "Hybrid attention models (e.g. DeepSeekV4, Qwen 3.5) are not supported "
 "yet."
-msgstr "`recompute`：当 KV 加载失败时，vLLM 将请求回滚到最后一个有效前缀，并重新调度以重新计算失败的 KV 块。混合注意力模型（例如 DeepSeekV4、Qwen 3.5）尚不支持。"
+msgstr ""
+"`recompute`：当 KV 加载失败时，vLLM 将请求回滚到最后一个有效前缀，并重新调度以重新计算失败的 KV 块。混合注意力模型（例如 "
+"DeepSeekV4、Qwen 3.5）尚不支持。"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:26
 msgid ""
@@ -197,7 +203,7 @@ msgid "Prefill PP layer partition, needs to be set when Prefill node enables PP.
 msgstr "Prefill PP 层划分，当 Prefill 节点启用 PP 时需要设置。"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:44
-#: ../../source/user_guide/feature_guide/kv_pool.md:814
+#: ../../source/user_guide/feature_guide/kv_pool.md:818
 msgid "Environment Variable Configuration"
 msgstr "环境变量配置"
 
@@ -296,7 +302,9 @@ msgstr "800 I/T A3 系列"
 msgid ""
 "HDK >= 26.0<br>or HDK >= 25.5 with mooncake >= v0.3.11<br>CANN >= "
 "9.0.0<br>LingQu Computing Network >= 1.5"
-msgstr "HDK >= 26.0<br>或 HDK >= 25.5 且 mooncake >= v0.3.11<br>CANN >= 9.0.0<br>LingQu 计算网络 >= 1.5"
+msgstr ""
+"HDK >= 26.0<br>或 HDK >= 25.5 且 mooncake >= v0.3.11<br>CANN >= "
+"9.0.0<br>LingQu 计算网络 >= 1.5"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md
 msgid "`export ASCEND_ENABLE_USE_FABRIC_MEM=1`"
@@ -450,6 +458,7 @@ msgstr ""
 "`prefill_pp_layer_partition`。示例如下："
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:329
+#: ../../source/user_guide/feature_guide/kv_pool.md:651
 msgid "2. Start proxy_server"
 msgstr "2.启动代理服务器"
 
@@ -482,7 +491,7 @@ msgid "PD-Mixed Inference"
 msgstr "PD 混部推理"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:360
-#: ../../source/user_guide/feature_guide/kv_pool.md:657
+#: ../../source/user_guide/feature_guide/kv_pool.md:661
 msgid "1. Run Mixed Deployment Script"
 msgstr "1.运行混部脚本"
 
@@ -546,7 +555,9 @@ msgid ""
 "Start Mooncake master as described in [Run Mooncake Master](#run-"
 "mooncake-master). To enable SSD offload, add `--enable_offload=true` to "
 "the same master startup command. For example:"
-msgstr "按照[运行 Mooncake Master](#run-mooncake-master) 中的描述启动 Mooncake master。要启用 SSD 卸载，请在相同的 master 启动命令中添加 `--enable_offload=true`。例如："
+msgstr ""
+"按照[运行 Mooncake Master](#run-mooncake-master) 中的描述启动 Mooncake master。要启用 "
+"SSD 卸载，请在相同的 master 启动命令中添加 `--enable_offload=true`。例如："
 
 #: ../../source/user_guide/feature_guide/kv_pool.md
 msgid "Field"
@@ -560,7 +571,9 @@ msgstr "`enable_offload`"
 msgid ""
 "Set to `true` to enable SSD offload in Mooncake master. Keep the master "
 "port aligned with `master_server_address` in `mooncake.json`."
-msgstr "设置为 `true` 以在 Mooncake master 中启用 SSD 卸载。保持 master 端口与 `mooncake.json` 中的 `master_server_address` 一致。"
+msgstr ""
+"设置为 `true` 以在 Mooncake master 中启用 SSD 卸载。保持 master 端口与 `mooncake.json` 中的"
+" `master_server_address` 一致。"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:444
 msgid "Configuration"
@@ -570,7 +583,9 @@ msgstr "配置"
 msgid ""
 "Starting from the `mooncake.json` configured in [Run Mooncake Master"
 "](#run-mooncake-master), add the following SSD offload fields:"
-msgstr "从[运行 Mooncake Master](#run-mooncake-master) 中配置的 `mooncake.json` 开始，添加以下 SSD 卸载字段："
+msgstr ""
+"从[运行 Mooncake Master](#run-mooncake-master) 中配置的 `mooncake.json` 开始，添加以下 "
+"SSD 卸载字段："
 
 #: ../../source/user_guide/feature_guide/kv_pool.md
 msgid "`enable_ssd_offload`"
@@ -791,7 +806,7 @@ msgstr ""
 "`AscendStoreConnector` 启用 KV 缓存池。"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:540
-#: ../../source/user_guide/feature_guide/kv_pool.md:659
+#: ../../source/user_guide/feature_guide/kv_pool.md:663
 msgid "800I A2/800T A2/800I A3/800T A3 Series"
 msgstr "800I A2/800T A2/800I A3/800T A3 系列"
 
@@ -799,42 +814,50 @@ msgstr "800I A2/800T A2/800I A3/800T A3 系列"
 msgid "**run_prefill.sh/run_decode.sh:**"
 msgstr "**run_prefill.sh/run_decode.sh：**"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:651
-msgid "[2、Start proxy_server](#2start-proxy_server)"
-msgstr "[2、启动代理服务器](#2start-proxy_server)"
-
 #: ../../source/user_guide/feature_guide/kv_pool.md:653
-msgid "[3、run-inference](#3run-inference)"
-msgstr "[3、运行推理](#3run-inference)"
+msgid ""
+"Refer to [Start proxy_server](#2-start-proxy_server) in the MooncakeStore"
+" deployment section."
+msgstr "请参考 MooncakeStore 部署章节中的[启动代理服务器](#2-start-proxy_server)。"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:655
+msgid "3. Run Inference"
+msgstr "3.运行推理"
+
+#: ../../source/user_guide/feature_guide/kv_pool.md:657
+msgid ""
+"Refer to [Run Inference](#3run-inference) in the MooncakeStore deployment"
+" section."
+msgstr "请参考 MooncakeStore 部署章节中的[运行推理](#3run-inference)。"
+
+#: ../../source/user_guide/feature_guide/kv_pool.md:659
 msgid "PD-Mixed Scenario"
 msgstr "PD 混部场景"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:661
+#: ../../source/user_guide/feature_guide/kv_pool.md:665
 msgid "**Run_pd_mix.sh:**"
 msgstr "**Run_pd_mix.sh：**"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:737
-#: ../../source/user_guide/feature_guide/kv_pool.md:931
+#: ../../source/user_guide/feature_guide/kv_pool.md:741
+#: ../../source/user_guide/feature_guide/kv_pool.md:935
 msgid "[2. Run Inference](#2-run-inference)"
-msgstr "[2、运行推理](#2-run-inference)"
+msgstr "[2.运行推理](#2-run-inference)"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:739
+#: ../../source/user_guide/feature_guide/kv_pool.md:743
 msgid "Example of using Yuanrong as a KV Pool backend"
 msgstr "使用元戎作为 KV 池后端的示例"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:742
+#: ../../source/user_guide/feature_guide/kv_pool.md:746
 msgid ""
 "Install `openyuanrong-datasystem` on all nodes (`yr.datasystem` must be "
 "importable)."
 msgstr "在所有节点上安装 `openyuanrong-datasystem`（必须能够导入 `yr.datasystem`）。"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:744
+#: ../../source/user_guide/feature_guide/kv_pool.md:748
 msgid "Install Yuanrong Datasystem"
 msgstr "安装元戎数据系统"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:750
+#: ../../source/user_guide/feature_guide/kv_pool.md:754
 msgid ""
 "If the prebuilt package does not match the CANN or Ascend driver version "
 "in your environment, build Yuanrong Datasystem from source in the vLLM "
@@ -842,40 +865,40 @@ msgid ""
 " <https://atomgit.com/openeuler/yuanrong-datasystem>"
 msgstr ""
 "如果预构建包与您环境中的 CANN 或 Ascend 驱动版本不匹配，请在 vLLM Ascend "
-"镜像中从源码构建元戎数据系统。请遵循官方元戎数据系统构建说明： <https://atomgit.com/openeuler/yuanrong-"
+"镜像中从源码构建元戎数据系统。请遵循官方元戎数据系统构建说明：<https://atomgit.com/openeuler/yuanrong-"
 "datasystem>"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:755
+#: ../../source/user_guide/feature_guide/kv_pool.md:759
 msgid "Start etcd"
 msgstr "启动 etcd"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:757
+#: ../../source/user_guide/feature_guide/kv_pool.md:761
 msgid ""
 "Yuanrong Datasystem uses etcd for service discovery. The following "
 "example starts a single-node etcd cluster:"
 msgstr "元戎数据系统使用 etcd 进行服务发现。以下示例启动一个单节点 etcd 集群："
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:786
+#: ../../source/user_guide/feature_guide/kv_pool.md:790
 msgid ""
 "For production environments, refer to the official etcd clustering "
 "documentation: <https://etcd.io/docs/v3.7/op-guide/clustering/>"
 msgstr "对于生产环境，请参考官方 etcd 集群文档：<https://etcd.io/docs/v3.7/op-guide/clustering/>"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:789
+#: ../../source/user_guide/feature_guide/kv_pool.md:793
 msgid "Start Datasystem Worker"
 msgstr "启动数据系统工作节点"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:791
+#: ../../source/user_guide/feature_guide/kv_pool.md:795
 msgid "Start a Datasystem worker on each node by using `dscli`:"
 msgstr "使用 `dscli` 在每个节点上启动一个数据系统工作节点："
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:801
+#: ../../source/user_guide/feature_guide/kv_pool.md:805
 msgid ""
 "The `--worker_address` value is consumed later by `DS_WORKER_ADDR`, so "
 "keep the host and port identical on the same node."
 msgstr "`--worker_address` 的值稍后会被 `DS_WORKER_ADDR` 使用，因此请确保同一节点上的主机和端口保持一致。"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:804
+#: ../../source/user_guide/feature_guide/kv_pool.md:808
 msgid ""
 "For more parameters, refer to the `dscli` usage documentation on the "
 "Yuanrong Datasystem official site: <https://atomgit.com/openeuler"
@@ -884,11 +907,11 @@ msgstr ""
 "有关更多参数，请参考元戎数据系统官方网站上的 `dscli` 使用文档：<https://atomgit.com/openeuler"
 "/yuanrong-datasystem>"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:808
+#: ../../source/user_guide/feature_guide/kv_pool.md:812
 msgid "To stop the worker:"
 msgstr "要停止工作节点："
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:816
+#: ../../source/user_guide/feature_guide/kv_pool.md:820
 msgid "Set the following environment variables on each node before starting vLLM:"
 msgstr "在启动 vLLM 之前，在每个节点上设置以下环境变量："
 
@@ -952,23 +975,23 @@ msgid ""
 "the Remote H2D requirements below are met."
 msgstr "传递给元戎 `HeteroClient.enable_remote_h2d`。仅当满足以下远程 H2D 要求后才使用 `1`。"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:832
+#: ../../source/user_guide/feature_guide/kv_pool.md:836
 msgid "Remote H2D Requirements"
 msgstr "远程 H2D 要求"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:834
+#: ../../source/user_guide/feature_guide/kv_pool.md:838
 msgid ""
 "Set `DS_ENABLE_REMOTE_H2D=1` only when Remote Host-to-Device transfer is "
 "enabled and verified in the Yuanrong Datasystem deployment:"
 msgstr "仅在元戎数据系统部署中启用并验证了远程主机到设备传输时，才设置 `DS_ENABLE_REMOTE_H2D=1`："
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:837
+#: ../../source/user_guide/feature_guide/kv_pool.md:841
 msgid ""
 "Reserve enough 2 MiB HugeTLB pages before starting the worker. For 40 GiB"
 " shared memory, reserve at least 20480 2 MiB huge pages."
 msgstr "在启动工作节点前预留足够的 2 MiB HugeTLB 页面。对于 40 GiB 共享内存，至少预留 20480 个 2 MiB 巨页。"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:839
+#: ../../source/user_guide/feature_guide/kv_pool.md:843
 msgid ""
 "Start each Datasystem worker with Remote H2D enabled. The worker start "
 "command must include `--remote_h2d_device_ids`, `--enable_huge_tlb true`,"
@@ -981,7 +1004,7 @@ msgstr ""
 " 和 `--enable_fallocate false`。建议使用多个可用的 NPU 设备 ID，例如在 8-NPU 节点上使用 "
 "`\"0,1,2,3,4,5,6,7\"`。"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:857
+#: ../../source/user_guide/feature_guide/kv_pool.md:861
 msgid ""
 "Make sure the NPU driver, firmware, and CANN toolkit required by Yuanrong"
 " Remote H2D are installed and visible to the worker process. In "
@@ -993,36 +1016,36 @@ msgstr ""
 "smi`、`hccn_tool`、`/etc/hccn.conf`、`/etc/ascend_install.info` 以及所需的 "
 "`/dev/davinci*` 设备。"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:861
+#: ../../source/user_guide/feature_guide/kv_pool.md:865
 msgid "Verify the NPU and RoCE environment before enabling the client flag:"
 msgstr "在启用客户端标志前验证 NPU 和 RoCE 环境："
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:889
+#: ../../source/user_guide/feature_guide/kv_pool.md:893
 msgid ""
 "If these checks fail, keep `DS_ENABLE_REMOTE_H2D=0` and use the default "
 "Datasystem transfer path."
 msgstr "如果这些检查失败，请保持 `DS_ENABLE_REMOTE_H2D=0` 并使用默认的数据系统传输路径。"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:892
+#: ../../source/user_guide/feature_guide/kv_pool.md:896
 msgid "Run AscendStoreConnector with Yuanrong backend"
 msgstr "使用元戎后端运行 AscendStoreConnector"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:894
+#: ../../source/user_guide/feature_guide/kv_pool.md:898
 msgid "Use `AscendStoreConnector` with `backend: \"yuanrong\"`:"
 msgstr "使用 `AscendStoreConnector` 并设置 `backend: \"yuanrong\"`："
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:920
+#: ../../source/user_guide/feature_guide/kv_pool.md:924
 msgid ""
 "`lookup_rpc_port` is the RPC port used between the pooling scheduler "
 "process and the worker process. Each instance must use a unique port "
 "value."
 msgstr "`lookup_rpc_port` 是池化调度进程与工作进程之间使用的 RPC 端口。每个实例必须使用唯一的端口值。"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:923
+#: ../../source/user_guide/feature_guide/kv_pool.md:927
 msgid "Notes"
 msgstr "注意事项"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:925
+#: ../../source/user_guide/feature_guide/kv_pool.md:929
 msgid ""
 "The Yuanrong backend normalizes KV keys before calling Datasystem. Keys "
 "longer than 255 characters or containing unsupported characters are "
@@ -1032,31 +1055,31 @@ msgstr ""
 "元戎后端在调用数据系统之前会对 KV 键进行规范化处理。长度超过 255 "
 "个字符或包含不支持字符的键会被重写，因此在调试后端存储时，请勿依赖原始的键字符串。"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:928
+#: ../../source/user_guide/feature_guide/kv_pool.md:932
 msgid ""
 "No extra buffer pre-registration step is required for Yuanrong. The "
 "backend uses device pointers directly when building blob lists."
 msgstr "元戎不需要额外的缓冲区预注册步骤。该后端在构建 blob 列表时直接使用设备指针。"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:933
+#: ../../source/user_guide/feature_guide/kv_pool.md:937
 msgid "FAQ"
 msgstr "常见问题"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:935
+#: ../../source/user_guide/feature_guide/kv_pool.md:939
 msgid "1. Mooncake failed to put/get key"
 msgstr "1.Mooncake 的 put/get 操作失败"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:937
+#: ../../source/user_guide/feature_guide/kv_pool.md:941
 msgid ""
 "When vLLM reports failed `put` or `get` operations, first check whether "
 "the error is reported by Mooncake itself."
 msgstr "当 vLLM 报告 `put` 或 `get` 操作失败时，首先检查错误是否由 Mooncake 自身报告。"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:939
+#: ../../source/user_guide/feature_guide/kv_pool.md:943
 msgid "If the error is reported by Mooncake:"
 msgstr "如果错误由 Mooncake 报告："
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:940
+#: ../../source/user_guide/feature_guide/kv_pool.md:944
 msgid ""
 "For `put` failures, check whether the Mooncake log contains "
 "`NO_AVAILABLE_HANDLE` or `BatchPut failed ... due to insufficient space`."
@@ -1066,12 +1089,12 @@ msgid ""
 "batch put, or consider increasing the available capacity, increasing "
 "eviction headroom, or reducing the batch size."
 msgstr ""
-"对于 `put` 失败，检查 Mooncake 日志是否包含 "
-"`NO_AVAILABLE_HANDLE` 或 `BatchPut failed ... due to insufficient space`。"
-"这通常意味着逐出后的剩余空间不足以容纳一个 `BatchPut` 请求。确保逐出策略留下的空间（例如，`1 - eviction_ratio`"
-" 所隐含的容量）可以容纳一次批量 put，或者考虑增加可用容量、增加逐出余量或减小批量大小。"
+"对于 `put` 失败，检查 Mooncake 日志是否包含 `NO_AVAILABLE_HANDLE` 或 `BatchPut failed "
+"... due to insufficient space`。这通常意味着逐出后的剩余空间不足以容纳一个 `BatchPut` "
+"请求。确保逐出策略留下的空间（例如，`1 - eviction_ratio` 所隐含的容量）可以容纳一次批量 "
+"put，或者考虑增加可用容量、增加逐出余量或减小批量大小。"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:941
+#: ../../source/user_guide/feature_guide/kv_pool.md:945
 msgid ""
 "For `get` failures, check whether the Mooncake log contains "
 "`lease_expired_before_data_transfer_completed key=...` or returns "
@@ -1082,22 +1105,21 @@ msgid ""
 msgstr ""
 "对于 `get` 失败，检查 Mooncake 日志是否包含 "
 "`lease_expired_before_data_transfer_completed key=...` 或返回 "
-"`LEASE_EXPIRED`。这意味着 KV 对象租约在数据传输完成前已过期。根据需要增加 "
-"`mooncake_master` 的 `--default_kv_lease_ttl`，并使其大于 "
-"`ASCEND_CONNECT_TIMEOUT` 和 `ASCEND_TRANSFER_TIMEOUT`。"
+"`LEASE_EXPIRED`。这意味着 KV 对象租约在数据传输完成前已过期。根据需要增加 `mooncake_master` 的 "
+"`--default_kv_lease_ttl`，并使其大于 `ASCEND_CONNECT_TIMEOUT` 和 "
+"`ASCEND_TRANSFER_TIMEOUT`。"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:942
+#: ../../source/user_guide/feature_guide/kv_pool.md:946
 msgid ""
 "If the error is not reported by Mooncake, it is likely an HIXL "
 "(ascend_direct) transfer-layer issue. Collect plog files under "
 "`/root/ascend/log/debug/plog` and check whether the issue matches a known"
 " HIXL problem."
 msgstr ""
-"如果错误不是由 Mooncake 报告的，则很可能是 HIXL "
-"(ascend_direct) 传输层问题。收集 `/root/ascend/log/debug/plog` 下的 plog "
-"文件，并检查该问题是否与已知的 HIXL 问题匹配。"
+"如果错误不是由 Mooncake 报告的，则很可能是 HIXL (ascend_direct) 传输层问题。收集 "
+"`/root/ascend/log/debug/plog` 下的 plog 文件，并检查该问题是否与已知的 HIXL 问题匹配。"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:944
+#: ../../source/user_guide/feature_guide/kv_pool.md:948
 #, python-format
 msgid ""
 "For common troubleshooting and issue localization guidance for HIXL "
@@ -1107,29 +1129,27 @@ msgstr ""
 "关于 HIXL (ascend_direct) "
 "的常见故障排除和问题定位指南，请参阅：<https://gitcode.com/cann/hixl/wiki/HIXL%E5%B8%B8%E8%A7%81%E9%97%AE%E9%A2%98%E5%AE%9A%E4%BD%8D%E6%89%8B%E5%86%8C.md>"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:947
+#: ../../source/user_guide/feature_guide/kv_pool.md:951
 msgid "2. Memcache FAQ"
 msgstr "2.Memcache 常见问题解答"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:949
+#: ../../source/user_guide/feature_guide/kv_pool.md:953
 msgid ""
 "For Memcache troubleshooting, see: "
 "<https://gitcode.com/Ascend/memcache/wiki/FAQ.md>"
-msgstr ""
-"关于 Memcache 故障排除，请参阅："
-"<https://gitcode.com/Ascend/memcache/wiki/FAQ.md>"
+msgstr "关于 Memcache 故障排除，请参阅：<https://gitcode.com/Ascend/memcache/wiki/FAQ.md>"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:952
+#: ../../source/user_guide/feature_guide/kv_pool.md:956
 msgid "3. DSv4 known issue (temporary)"
 msgstr "3.DSv4 已知问题（临时）"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:954
+#: ../../source/user_guide/feature_guide/kv_pool.md:958
 msgid ""
 "For the temporary DSv4 known issue, see: <https://github.com/vllm-project"
 "/vllm-ascend/issues/9975>"
 msgstr ""
-"关于临时 DSv4 已知问题，请参阅：<https://github.com/vllm-project"
-"/vllm-ascend/issues/9975>"
+"关于临时 DSv4 已知问题，请参阅：<https://github.com/vllm-project/vllm-"
+"ascend/issues/9975>"
 
 #~ msgid "Python >= 3.10, < 3.12"
 #~ msgstr "Python >= 3.10, < 3.12"
@@ -1283,3 +1303,6 @@ msgstr ""
 
 #~ msgid "FAQ for HIXL (ascend_direct) backend"
 #~ msgstr "HIXL (ascend_direct) 后端常见问题解答"
+
+#~ msgid "[3、run-inference](#3run-inference)"
+#~ msgstr "[3、运行推理](#3run-inference)"
