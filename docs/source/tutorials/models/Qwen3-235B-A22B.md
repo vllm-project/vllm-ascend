@@ -124,7 +124,7 @@ docker run --rm \
     -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
     -v /etc/ascend_install.info:/etc/ascend_install.info \
     -v /root/.cache:/root/.cache \
-    -it "$IMAGE" bash
+    -it $IMAGE bash
 ```
 
 :::{note}
@@ -163,7 +163,7 @@ docker run --rm \
     -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
     -v /etc/ascend_install.info:/etc/ascend_install.info \
     -v /root/.cache:/root/.cache \
-    -it "$IMAGE" bash
+    -it $IMAGE bash
 ```
 
 ::::
