@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 import torch
 
-from vllm_ascend.ops.fused_moe.moe_mlp import cumsum_group_list, unified_apply_mlp
+from vllm_ascend.ops.fused_moe.moe_mlp import cumsum_group_list, unified_apply_mlp, unquant_apply_mlp
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoEMlpComputeInput,
     MoEQuantParams,
@@ -63,6 +63,35 @@ class TestW4A8RuntimeFlags(unittest.TestCase):
 
 
 class TestUnifiedApplyMlpRequest(unittest.TestCase):
+    def test_unquant_apply_mlp_accepts_weight_lists(self):
+        hidden_states = torch.randn(2, 8)
+        gate_up_out = torch.randn(2, 16)
+        expected = torch.randn(2, 8)
+        w1 = [torch.randn(8, 16), torch.randn(8, 16)]
+        w2 = [torch.randn(8, 8), torch.randn(8, 8)]
+
+        with (
+            patch(
+                "vllm_ascend.ops.fused_moe.moe_mlp.torch_npu.npu_grouped_matmul",
+                side_effect=[[gate_up_out], [expected]],
+            ) as mock_grouped_matmul,
+            patch("vllm_ascend.ops.fused_moe.moe_mlp.torch_npu.npu_swiglu", return_value=gate_up_out),
+        ):
+            output, _ = unquant_apply_mlp(
+                hidden_states=hidden_states,
+                w1=w1,
+                w2=w2,
+                group_list=torch.tensor([1, 1]),
+                need_trans=True,
+            )
+
+        self.assertTrue(output is expected)
+        first_call, second_call = mock_grouped_matmul.call_args_list
+        self.assertEqual(first_call.kwargs["weight"][0].shape, torch.Size([16, 8]))
+        self.assertEqual(first_call.kwargs["weight"][1].shape, torch.Size([16, 8]))
+        self.assertEqual(second_call.kwargs["weight"][0].shape, torch.Size([8, 8]))
+        self.assertEqual(len(first_call.kwargs["weight"]), 2)
+
     def test_request_unquant_path(self):
         hidden_states = torch.randn(2, 8)
         expected = torch.randn(2, 8)
