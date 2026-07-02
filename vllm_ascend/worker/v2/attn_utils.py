@@ -115,6 +115,7 @@ def build_attn_metadata(
     prefill_context_parallel_metadata: AscendPrefillContextParallelMetadata | None = None,
     model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
     for_cudagraph_capture: bool = False,
+    causal: bool = True,
 ) -> dict[str, Any]:
     """Build attention metadata for Ascend NPUs."""
     # TODO(Ronald1995): optimize AscendCommonAttentionMetadata.
@@ -154,6 +155,7 @@ def build_attn_metadata(
             num_input_tokens=num_input_tokens,
             prefill_context_parallel_metadata=prefill_context_parallel_metadata,
             max_seq_len=max_seq_len,
+            causal=causal,
             **common_attn_metadata_extra_kwargs,
         )
 
