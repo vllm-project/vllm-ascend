@@ -33,7 +33,7 @@ class TestPDMambaStateRouting(unittest.TestCase):
             "block_size": 128,
         }
         self.p_mamba_state = {
-            "layer_0": torch.randn(4, 512),   # 模拟连续隐状态
+            "layer_0": torch.randn(4, 512),  # 模拟连续隐状态
             "layer_1": torch.randn(4, 512),
         }
 
@@ -104,14 +104,14 @@ class TestMambaStateLengthValidation(unittest.TestCase):
         """P端1024 token → D端请求1024: 通过"""
         p_state_len = 1024
         d_request_len = 1024
-        valid = (p_state_len == d_request_len)
+        valid = p_state_len == d_request_len
         self.assertTrue(valid)
 
     def test_mismatch_triggers_fallback(self):
         """P端1024 token → D端请求1000: 不匹配, 触发fallback"""
         p_state_len = 1024
         d_request_len = 1000
-        valid = (p_state_len == d_request_len)
+        valid = p_state_len == d_request_len
         self.assertFalse(valid, "长度不匹配应触发fallback")
 
 
