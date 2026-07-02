@@ -24,6 +24,4 @@ add_ops_compile_options(
             -mllvm -cce-aicore-hoist-movemask=false
 )
 
-if (NOT BUILD_OPS_RTY_KERNEL)
-    add_modules_sources(OPTYPE sparse_attn_sharedkv ACLNNTYPE aclnn)
-endif()
+add_modules_sources(OPTYPE sparse_attn_sharedkv ACLNNTYPE aclnn)

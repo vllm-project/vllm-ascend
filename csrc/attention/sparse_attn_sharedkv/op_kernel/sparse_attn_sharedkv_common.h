@@ -102,7 +102,6 @@ struct Position {
     uint32_t n2Idx;
     uint32_t s2Idx;
     uint32_t dIdx;
-    uint32_t s1Idx;
 };
 
 // 场景：query、key、value GM to L1
@@ -134,9 +133,9 @@ __aicore__ inline void DataCopyGmNDToL1(LocalTensor<T> &l1Tensor, GlobalTensor<T
     BSH\BSND\TND 为BBH
     shape.copyRowNumAlign 需要16字节对齐，如拷贝k矩阵，一次拷贝128*512，遇到尾块 10*512 需对齐到16*512
 */
-template <typename T>
-__aicore__ inline void DataCopyPA(LocalTensor<T> &dstTensor,  //l1
-                                  GlobalTensor<T> &srcTensor, //gm
+template <typename T, SAS_LAYOUT SRC_LAYOUT = SAS_LAYOUT::PA_ND>
+__aicore__ inline void DataCopyPA(LocalTensor<T> &dstTensor,  // l1
+                                  GlobalTensor<T> &srcTensor, // gm
                                   GlobalTensor<int32_t> &blockTableGm,
                                   const PAShape &shape,     // blockSize, headNum, headDim
                                   const Position &startPos) // bacthIdx nIdx curSeqIdx
@@ -157,13 +156,20 @@ __aicore__ inline void DataCopyPA(LocalTensor<T> &dstTensor,  //l1
         // uint64_t offset = idInBlockTable * shape.blockSize * shape.headNum * shape.headDim; // PA的偏移
         uint64_t offset = idInBlockTable * shape.kvStride; // PA的偏移
         uint64_t dStride = shape.headDim;
-        offset += (uint64_t)(startPos.n2Idx * shape.headDim * shape.blockSize) +
-                    reaminRowCnt * shape.headDim + startPos.dIdx;
+        if constexpr (SRC_LAYOUT == SAS_LAYOUT::BSND || SRC_LAYOUT == SAS_LAYOUT::TND) {
+            offset += (uint64_t)(startPos.n2Idx * shape.headDim) + reaminRowCnt * shape.headDim * shape.headNum +
+                      startPos.dIdx;
+            dStride = shape.headDim * shape.headNum;
+        } else {
+            offset += (uint64_t)(startPos.n2Idx * shape.headDim * shape.blockSize) + reaminRowCnt * shape.headDim +
+                      startPos.dIdx;
+        }
 
         uint32_t dValue = shape.actHeadDim;
         uint32_t srcDValue = dStride;
         LocalTensor<T> tmpDstTensor = dstTensor[copyFinishRowCnt * blockElementCnt];
         GlobalTensor<T> tmpSrcTensor = srcTensor[offset];
+
         DataCopyGmNDToL1<T>(tmpDstTensor, tmpSrcTensor, copyRowCnt, shape.copyRowNumAlign, dValue, srcDValue);
         copyFinishRowCnt += copyRowCnt;
         curS2Idx += copyRowCnt;
@@ -191,7 +197,10 @@ struct RunInfo {
     uint64_t topKBaseOffset = 0;
     uint32_t actualSingleProcessSInnerSize = 0;
     uint32_t actualSingleProcessSInnerSizeAlign = 0;
-    bool isFirstSInnerLoop = false;
+    uint32_t actualSingleProcessSInnerOriSize = 0;
+    uint32_t actualSingleProcessSInnerOriAlignSize = 0;
+    uint32_t actualSingleProcessSInnerCmpSize = 0;
+    uint32_t actualSingleProcessSInnerCmpAlignSize = 0;
     uint32_t s2BatchOffset = 0;
     uint32_t gSize = 0;
     uint32_t s1Size = 0;
@@ -201,26 +210,33 @@ struct RunInfo {
     uint32_t mSizeVStart = 0;
     uint32_t tndIsS2SplitCore = 0;
     uint32_t tndCoreStartKVSplitPos = 0;
+    bool isFirstSInnerLoop = false;
     bool isBmm2Output = false;
     bool isValid = false;
+    bool isLastS2Loop = 0;
+    int64_t inValidRowCount = 0;
 
-    static constexpr uint32_t n2Idx = 0;
     uint64_t actS1Size = 1;
     uint64_t actS2SizeOri = 0ULL;
+    static constexpr uint32_t n2Idx = 0;
     uint32_t gS1Idx = 0;
     uint64_t actS2Size = 1;
     uint64_t actOriS2Size = 1;
     uint32_t actMBaseSize = 0;
-    bool isLastS2Loop = 0;
     int32_t nextTokensPerBatch = 0;
     int64_t threshold = 0;
-    uint32_t curTopKIdx = 0;
     uint64_t curOffsetInSparseBlock = 0;
-    bool isOri = true; // 判断当前块是在Ori部分还是Cmp部分
+    uint32_t curTopKIdx = 0;
+    bool isOriOnly = true; // 判断当前块是在Ori部分还是Cmp部分
+    bool isOriCmpMix = false;
+    uint8_t resv[2];
     uint64_t s2StartPoint = 0;
+    int64_t cmpS2IdStart = 0;
     int64_t cmpS2IdLimit = 0;
     int32_t v0S2DealSize = 0;
     int32_t v0S2Start = 0;
+    uint32_t oriDealSize = 0;
+    int32_t cmpMaskRight = 0;
 };
 
 struct ConstInfo {
@@ -271,8 +287,8 @@ struct ConstInfo {
     SAS_LAYOUT outputLayout;  // 输出的Transpose格式
     uint32_t oriMaskMode = 0;
     uint32_t cmpMaskMode = 0;
-    uint32_t oriKvStride = 0;
-    uint32_t cmpKvStride = 0;
+    uint64_t oriKvStride0 = 0;
+    uint64_t cmpKvStride0 = 0;
     bool needInit = false;
     uint32_t templateMode = 0;
 
@@ -310,7 +326,6 @@ struct ConstInfo {
     int32_t oriWinRight = 0;
     int32_t oriWinLeft = 128;
 
-    // 是否返回SoftmaxLse
     bool returnSoftmaxLse = false;
 };
 

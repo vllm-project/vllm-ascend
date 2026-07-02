@@ -6,7 +6,7 @@
 | ------------------------------------------------------------ | :------: |
 |<term>Ascend 950PR/Ascend 950DT</term>                        | ×  |
 |<term>Atlas A3 训练系列产品/Atlas A3 推理系列产品</term>        | √  |
-|<term>Atlas A2 训练系列产品/Atlas A2 推理系列产品</term>        | √  |
+|<term>Atlas A2 训练系列产品/Atlas A2 推理系列产品</term>        | ×  |
 |<term>Atlas 200I/500 A2 推理系列产品</term>                    | ×  |
 |<term>Atlas 推理系列产品</term>                                | ×  |
 |<term>Atlas 训练系列产品</term>                                | ×  |
@@ -74,7 +74,9 @@
     - `ori_kv`和`cmp_kv`的shape分别为[ori\_block\_num, ori\_block\_size, KV\_N, D]和[cmp\_block\_num, cmp\_block\_size, KV\_N, D]，其中ori\_block\_num和cmp\_block\_num为PageAttention时block总数，ori\_block\_size和cmp\_block\_size为一个block的token数，ori\_block\_size和cmp\_block\_size取值为16的倍数，最大支持1024，KV_N仅支持1。
     - `ori_block_table`和`cmp_block_table`的shape为2维，其中第一维长度为B，第二维长度不小于所有batch中最大的S2和S3对应的block数量，即S2\_max / block\_size和S3\_max / block\_size向上取整。
 - `metadata`为算子实际需要使用的分核结果，目前该参数必传，shape大小固定为[1024]。
-- `layout_kv`仅支持输入PA_ND，故设置`cu_seqlens_ori_kv`和`cu_seqlens_cmp_kv`无效。
+- `layout_kv`仅支持输入"PA_ND"和"BSND"。
+    - 当输入为PA_ND时，设置`cu_seqlens_ori_kv`和`cu_seqlens_cmp_kv`无效。
+    - 当输入为BSND时，`ori_kv`和`cmp_kv`的layout都必须为BSND，ori_kv的shape为[B, S2, N2,D]，cmp_kv的shape为[B, S3, N2,D]。
 - 目前暂不支持返回`softmax_lse`，`return_softmax_lse`仅支持输入False，返回值`softmax_lse`为无效值。
 - ori_mask_mode及cmp_mask_mode所表示的mask模式的详细介绍见[sparse_mode参数说明](../../../docs/zh/context/sparse_mode参数说明.md)。
 - 目前暂不支持指定`q`中参与运算的token数，因此设置`seqused_q`无效。
@@ -82,9 +84,6 @@
 - 目前所有输入不支持传入空tensor。
 - `q`、`ori_kv`、`cmp_kv`数据排布格式支持从多种维度解读，B（Batch）表示输入样本批量大小、S（Seq-Length）表示输入样本序列长度、H（Hidden-Size）表示隐藏层的大小、N（Head-Num）表示多头数、D（Head-Dim）表示hidden层最小的单元尺寸，且满足D=H/N、T表示所有Batch输入样本序列长度的累加和。
 - Q\_S和S1表示q shape中的S，S2表示ori_kv shape中的S，S3表示cmp_kv shape中的S；Q\_N和N1表示num\_q\_heads，KV\_N和N2表示num\_ori_kv\_heads和num\_cmp_kv\_heads；Q\_T和T1表示q shape中的输入样本序列长度的累加和。
-
-- 当`layout_kv`为BSND时，功能使用限制如下：
-    - `ori_kv`和`cmp_kv`的layout都必须为BSND，ori_kv的shape为[B, S2, N2,D]，cmp_kv的shape为[B, S3, N2,D]。
 
 ## Atlas A3 推理系列产品 调用说明
 
@@ -190,7 +189,7 @@
     import numpy as np
     import random
     import math
-    import npugraph_ex as nge
+    import torchair
     import custom_ops
 
     data_type = torch.bfloat16
@@ -232,9 +231,10 @@
     cmp_kv = torch.tensor(np.random.uniform(-5, 10, (block_num2, cmp_block_size, n2, dn))).to(data_type).npu()
     sinks = torch.rand(n1).to(torch.float32).npu()
 
-    from npugraph_ex.configs.compiler_config import CompilerConfig
+    from torchair.configs.compiler_config import CompilerConfig
     config = CompilerConfig()
-    npu_backend = nge.get_npu_backend(compiler_config=config)
+    config.mode = "reduce-overhead"
+    npu_backend = torchair.get_npu_backend(compiler_config=config)
 
     class Network(torch.nn.Module):
         def __init__(self):

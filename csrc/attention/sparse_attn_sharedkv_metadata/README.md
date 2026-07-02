@@ -4,8 +4,12 @@
 
 | 产品                                                         | 是否支持 |
 | ------------------------------------------------------------ | :------: |
-|<term>Atlas A2 推理系列产品</term>   | √  |
-|<term>Atlas A3 推理系列产品</term>   | √  |
+|<term>Ascend 950PR/Ascend 950DT</term>                        | ×  |
+|<term>Atlas A3 训练系列产品/Atlas A3 推理系列产品</term>        | √  |
+|<term>Atlas A2 训练系列产品/Atlas A2 推理系列产品</term>        | ×  |
+|<term>Atlas 200I/500 A2 推理系列产品</term>                    | ×  |
+|<term>Atlas 推理系列产品</term>                                | ×  |
+|<term>Atlas 训练系列产品</term>                                | ×  |
 
 ## 功能说明
 
@@ -48,7 +52,7 @@
     <tr>
       <td>head_dim</td>
       <td>属性</td>
-      <td>注意力头的维度，目前仅支持512。</td>
+      <td>注意力头的维度。</td>
       <td>INT32</td>
       <td>-</td>
     </tr>
@@ -90,7 +94,7 @@
     <tr>
       <td>batch_size</td>
       <td>可选属性</td>
-      <td>输入样本批量大小。</td>
+      <td>输入样本批量大小，默认值为None。</td>
       <td>INT32</td>
       <td>-</td>
     </tr>
@@ -111,21 +115,21 @@
     <tr>
       <td>ori_topk</td>
       <td>可选属性</td>
-      <td>表示通过QLI算法从`ori_kv`中筛选出的关键稀疏token的个数。目前暂不支持指定该参数。</td>
+      <td>表示通过QLI算法从`ori_kv`中筛选出的关键稀疏token的个数。目前暂不支持指定该参数，默认值为None。</td>
       <td>INT32</td>
       <td>-</td>
     </tr>
     <tr>
       <td>cmp_topk</td>
       <td>可选属性</td>
-      <td>表示通过QLI算法从`cmp_kv`中筛选出的关键稀疏token的个数，目前仅支持512。</td>
+      <td>表示通过QLI算法从`cmp_kv`中筛选出的关键稀疏token的个数，目前仅支持512，默认值为None。</td>
       <td>INT32</td>
       <td>-</td>
     </tr>
     <tr>
       <td>cmp_ratio</td>
       <td>可选属性</td>
-      <td>表示对`ori_kv`的压缩率，数据范围支持4/128，</td>
+      <td>表示对`ori_kv`的压缩率，数据范围支持4/128，默认值为None。</td>
       <td>INT32</td>
       <td>-</td>
     </tr>
@@ -160,7 +164,7 @@
     <tr>
       <td>layout_q</td>
       <td>可选属性</td>
-      <td>用于标识输入q的数据排布格式,默认值为BSND，目前支持传入BSND和TND。</td>
+      <td>用于标识输入q的数据排布格式，默认值为BSND，目前支持传入BSND和TND。</td>
       <td>STRING</td>
     </tr>
     <tr>
@@ -173,21 +177,21 @@
     <tr>
       <td>has_ori_kv</td>
       <td>可选属性</td>
-      <td>是否传入ori_kv。</td>
+      <td>是否传入ori_kv，默认值为true。</td>
       <td>BOOL</td>
       <td>-</td>
     </tr>
     <tr>
       <td>has_cmp_kv</td>
       <td>可选属性</td>
-      <td>是否传入cmp_kv。</td>
+      <td>是否传入cmp_kv，默认值为true。</td>
       <td>BOOL</td>
       <td>-</td>
     </tr>
     <tr>
       <td>device</td>
       <td>可选属性</td>
-      <td>用于获取设备信息。</td>
+      <td>用于获取设备信息，默认值为None。</td>
       <td>STRING</td>
       <td>-</td>
     </tr>
@@ -205,4 +209,7 @@
 
 - 该接口支持推理场景下使用。
 - 该接口支持aclgraph模式。
-- Tensor不能全传None。
+
+## Atlas A3 推理系列产品 调用说明
+
+- 支持单算子模式调用和aclgraph模式调用，作为SparseAttnSharedkv算子的前序算子，调用示例见[SparseAttnSharedkv调用示例](../sparse_attn_sharedkv/README.md)。

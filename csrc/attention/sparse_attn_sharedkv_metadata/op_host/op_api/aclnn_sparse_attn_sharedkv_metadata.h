@@ -19,37 +19,15 @@ extern "C" {
 
 __attribute__((visibility("default"))) aclnnStatus
 aclnnSparseAttnSharedkvMetadataGetWorkspaceSize(
-    const aclTensor* cuSeqLensQOptional,
-    const aclTensor* cuSeqLensOriKvOptional,
-    const aclTensor* cuSeqLensCmpKvOptional,
-    const aclTensor* sequsedQOptional,
-    const aclTensor* sequsedKvOptional,
-    int64_t numHeadsQ,
-    int64_t numHeadsKv,
-    int64_t headDim,
-    int64_t batchSizeOptional,
-    int64_t maxSeqlenQOptional,
-    int64_t maxSeqlenKvOptional,
-    int64_t oriTopKOptional,
-    int64_t cmpTopKOptional,
-    int64_t cmpRatioOptional,
-    int64_t oriMaskModeOptional,
-    int64_t cmpMaskModeOptional,
-    int64_t oriWinLeftOptional,
-    int64_t oriWinRightOptional,
-    char *layoutQOptional,
-    char *layoutKvOptional,
-    bool hasOriKvOptional,
-    bool hasCmpKvOptional,
-    const aclTensor* metaData,
-    uint64_t* workspaceSize,
-    aclOpExecutor** executor);
+    const aclTensor* cuSeqLensQOptional, const aclTensor* cuSeqLensOriKvOptional,
+    const aclTensor* cuSeqLensCmpKvOptional, const aclTensor* sequsedQOptional, const aclTensor* sequsedKvOptional,
+    int64_t numHeadsQ, int64_t numHeadsKv, int64_t headDim, int64_t batchSize, int64_t maxSeqlenQ, int64_t maxSeqlenKv,
+    int64_t oriTopK, int64_t cmpTopK, int64_t cmpRatio, int64_t oriMaskMode, int64_t cmpMaskMode, int64_t oriWinLeft,
+    int64_t oriWinRight, char *layoutQOptional, char *layoutKvOptional, bool hasOriKv, bool hasCmpKv,
+    const aclTensor* metadata, uint64_t* workspaceSize, aclOpExecutor** executor);
 
 __attribute__((visibility("default"))) aclnnStatus
-aclnnSparseAttnSharedkvMetadata(void* workspace,
-                                uint64_t workspaceSize,
-                                aclOpExecutor* executor,
-                                aclrtStream stream);
+aclnnSparseAttnSharedkvMetadata(void* workspace, uint64_t workspaceSize, aclOpExecutor* executor, aclrtStream stream);
 
 #ifdef __cplusplus
 }
