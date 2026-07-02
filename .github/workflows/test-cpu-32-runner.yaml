@@ -200,14 +200,14 @@ jobs:
             echo "⚠️  BUILDKITD_ADDR not set"
           fi
 
-      - name: Keep pod running for manual debugging (15 minutes)
+      - name: Keep pod running for manual debugging (60 minutes)
         run: |
           echo ""
           echo "=========================================="
-          echo "🛌 Pod is now sleeping for 15 minutes"
+          echo "🛌 Pod is now sleeping for 60 minutes"
           echo "=========================================="
           echo ""
-          echo "You have 15 minutes to:"
+          echo "You have 60 minutes to:"
           echo "  1. Find the pod:"
           echo "     kubectl get pods -n vllm-project -o wide"
           echo ""
@@ -218,13 +218,16 @@ jobs:
           echo "     kubectl exec <pod-name> -n vllm-project -c runner -- which buildctl"
           echo "     kubectl exec <pod-name> -n vllm-project -c runner -- ls -la ~/.docker/"
           echo "     kubectl exec <pod-name> -n vllm-project -c runner -- env | grep BUILDKIT"
+          echo "     kubectl exec <pod-name> -n vllm-project -c runner -- ls -la /tmp/buildkit/"
           echo ""
           echo "  4. Open an interactive shell:"
           echo "     kubectl exec -it <pod-name> -n vllm-project -c runner -- bash"
           echo ""
           echo "=========================================="
           echo "Sleep started: $(date)"
-          sleep 900
+          echo "Will sleep for 3600 seconds (60 minutes)"
+          echo "=========================================="
+          sleep 3600
           echo "Sleep ended: $(date)"
           echo "=========================================="
 
