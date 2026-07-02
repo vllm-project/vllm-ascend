@@ -536,6 +536,17 @@ class AscendAttentionBackendImpl(AttentionImpl):
             # TODO: We use a new variable `attn_keys` to ensure the loop count is
             # correct after get by `zip` because of the new structure of the attn_metadata
             # when running with the merged full eagle-graph. Should check it with Qwen3-next.
+
+            # Filter out non-FIA attention layers (e.g., GDN/Mamba layers that use
+            # state-space models with their own metadata type and don't invoke the
+            # NPU FlashAttention kernel).
+            if _EXTRA_CTX.is_draft_model:
+                attn_keys = [k for k in attn_keys if isinstance(attn_metadata[0][k], AscendMetadata)]
+            else:
+                attn_keys = [k for k in attn_keys if isinstance(attn_metadata[k], AscendMetadata)]
+            if not attn_keys:
+                return
+
             num_layers = len(attn_keys)
             if num_layers == 0:
                 return
