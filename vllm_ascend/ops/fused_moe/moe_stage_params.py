@@ -113,7 +113,7 @@ class MoEQuantParams:
     @property
     def get_scale_type(self):
         if self.is_mxfp:
-            return torch.float8_e8m0fn
+            return torch.float8_e8m0fnu
         elif self.dispatch_with_quant:
             return torch.float32
         else:
