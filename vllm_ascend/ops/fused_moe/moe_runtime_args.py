@@ -234,6 +234,7 @@ def build_mlp_compute_input(
         need_trans=fused_experts_input.need_trans,
         dynamic_eplb=fused_experts_input.dynamic_eplb,
         swiglu_limit=fused_experts_input.swiglu_limit,
+        gmm2_out=token_dispatch_output.gmm2_out,
     )
 
 

@@ -32,6 +32,10 @@ setup_catlass_dependency() {
     log "catlass include=${absolute_catlass_path}"
 }
 
+shmem_available() {
+    [[ -f /usr/local/Ascend/shmem/latest/shmem/include/shmem.h ]]
+}
+
 resolve_op_dir() {
     local op_name=$1
     local candidate_dir
@@ -187,6 +191,13 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "chunk_gated_delta_rule_fwd_h"
         "store_kv_block"
     )
+    if shmem_available; then
+        log "Ascend SHMEM detected: enabling zero-buffer shmem MoE ops"
+        CUSTOM_OPS_ARRAY+=(
+            "zb_moe_distribute_dispatch"
+            "zb_moe_distribute_combine"
+        )
+    fi
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
     SOC_ARG="ascend910_93"
 elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then

@@ -7,6 +7,8 @@ from vllm_ascend.utils import enable_dsa_cp_with_layer_shard, flashcomm2_enable
 
 # Currently, mc2 op need their own group coordinator.
 _MC2: GroupCoordinator | None = None
+# Set when ZB MoE skips the dedicated mc2 HCCL group (see init_ascend_model_parallel).
+_MC2_INIT_SKIPPED: bool = False
 
 # Module specific tensor parallel groups
 _MLP_TP: GroupCoordinator | None = None
@@ -92,8 +94,17 @@ def init_ascend_model_parallel(
     )
     group_ranks = [x.tolist() for x in group_ranks]
 
-    global _MC2
-    _MC2 = init_model_parallel_group(group_ranks, get_world_group().local_rank, backend, group_name="mc2")
+    global _MC2, _MC2_INIT_SKIPPED
+    ascend_config = get_ascend_config()
+    if ascend_config.enable_mc2_zb:
+        if ascend_config.enable_fused_mc2:
+            raise RuntimeError(
+                "additional_config.enable_mc2_zb=true is incompatible with enable_fused_mc2; "
+                "disable fused MC2 or use the PTA MC2 dispatcher."
+            )
+        _MC2_INIT_SKIPPED = True
+    else:
+        _MC2 = init_model_parallel_group(group_ranks, get_world_group().local_rank, backend, group_name="mc2")
 
     if get_ascend_config().eplb_config.dynamic_eplb:
         global _DYNAMIC_EPLB
@@ -227,12 +238,17 @@ def init_ascend_model_parallel(
 
 
 def model_parallel_initialized():
-    return _MC2 is not None
+    return _MC2 is not None or _MC2_INIT_SKIPPED
 
 
 def get_mc2_group() -> GroupCoordinator:
-    assert _MC2 is not None, "mc2 group is not initialized"
-    return _MC2
+    if _MC2 is not None:
+        return _MC2
+    if get_ascend_config().enable_mc2_zb:
+        from vllm.distributed.parallel_state import get_ep_group
+
+        return get_ep_group()
+    raise RuntimeError("mc2 group is not initialized")
 
 
 def get_mlp_tp_group() -> GroupCoordinator:
@@ -285,7 +301,9 @@ def get_dynamic_eplb_group() -> GroupCoordinator:
 
 
 def destroy_ascend_model_parallel():
-    global _MC2
+    global _MC2, _MC2_INIT_SKIPPED
+    _MC2_INIT_SKIPPED = False
+
     if _MC2:
         _MC2.destroy()
     _MC2 = None

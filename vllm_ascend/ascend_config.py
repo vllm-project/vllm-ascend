@@ -175,6 +175,14 @@ class AscendConfig:
             "VLLM_ASCEND_ENABLE_FUSED_MC2",
             ascend_envs.VLLM_ASCEND_ENABLE_FUSED_MC2,
         )
+        self.enable_mc2_zb = bool(
+            self._get_config_value(
+                additional_config,
+                "enable_mc2_zb",
+                "VLLM_ASCEND_ENABLE_ZB",
+                int(os.getenv("VLLM_ASCEND_ENABLE_ZB", os.getenv("VLLM_ASCEND_ENABLE_ZB_SHMEM", "0"))),
+            )
+        )
         self.enable_mlapo = self._get_config_value(
             additional_config,
             "enable_mlapo",

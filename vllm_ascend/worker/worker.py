@@ -20,6 +20,7 @@
 import copy
 import gc
 import logging
+import os
 from types import NoneType
 
 import torch
@@ -185,7 +186,6 @@ class NPUWorker(WorkerBase):
 
     def uninstall_static_kernel(self):
         import fcntl
-        import os
         import subprocess
 
         ascend_home_path = os.environ["ASCEND_HOME_PATH"]
@@ -395,6 +395,11 @@ class NPUWorker(WorkerBase):
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
     def _init_device(self):
+        if get_ascend_config().enable_mc2_zb:
+            from vllm_ascend.ops.fused_moe.zb_runtime import validate_zb_serving_parallel_config
+
+            validate_zb_serving_parallel_config(self.parallel_config)
+
         device = torch.device(f"npu:{self.local_rank}")
         torch.npu.set_device(device)
 
@@ -1014,6 +1019,10 @@ class NPUWorker(WorkerBase):
             self.parallel_config.decode_context_parallel_size,
         )
         init_ascend_model_parallel(self.parallel_config)
+        if get_ascend_config().enable_mc2_zb:
+            from vllm_ascend.ops.fused_moe.zb_runtime import reserve_zb_shmem_conf_store_uri
+
+            reserve_zb_shmem_conf_store_uri(self.distributed_init_method)
         ensure_ec_transfer_initialized(self.vllm_config)
 
     def get_supported_pooling_tasks(self):

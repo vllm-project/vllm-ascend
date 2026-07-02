@@ -110,6 +110,12 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Deprecated: use additional_config.enable_mc2_zb instead.
+    "VLLM_ASCEND_ENABLE_ZB": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_ENABLE_ZB", os.getenv("VLLM_ASCEND_ENABLE_ZB_SHMEM", "0")))
+    ),
+    # Optional override for aclshmem conf-store URI (e2e/tests). Serving reserves a free port at worker init.
+    "VLLM_ASCEND_ZB_SHMEM_URI": lambda: os.getenv("VLLM_ASCEND_ZB_SHMEM_URI", os.getenv("VLLM_ASCEND_ZB_URI", "")),
 }
 
 # end-env-vars-definition

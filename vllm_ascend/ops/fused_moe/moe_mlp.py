@@ -110,6 +110,7 @@ def quant_apply_mlp(
     activation: str | None = None,
     swiglu_limit: float = 0.0,
     use_w4a8_per_channel_gmm_swiglu: bool = False,
+    gmm2_out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     input_hidden_dtype = hidden_states.dtype
     use_gmm_swiglu_quant_fusion = use_mxfp_quant or (fusion and not dynamic_eplb)
@@ -206,24 +207,40 @@ def quant_apply_mlp(
             )
         before_gmm2_evt = torch.npu.current_stream().record_event()
         # gmm2: down_proj
-        hidden_states = DeviceOperator.npu_grouped_matmul_gmm2(
-            hidden_states=hidden_states,
-            weight=w2,
-            weight_scale=w2_scale,
-            per_token_scale=swiglu_out_scale,
-            group_list=group_list,
-            group_list_type=group_list_type,
-            input_dtype=input_hidden_dtype,
-            act_quant_type=act_quant_type,
-            weight_quant_type=weight_quant_type,
-            scale_type=scale_type,
-            per_token_scale_type=per_token_scale_type,
-            use_bf16=use_bf16,
-            use_mxfp_quant=use_mxfp_quant,
-            bias=None,
-            fallback_output_dtype=w2_scale[0].dtype if isinstance(w2_scale, list) else w2_scale.dtype,
-            mxfp_quant_dtype=mxfp_quant_dtype,
-        )
+        if gmm2_out is not None:
+            from vllm_ascend.ops.fused_moe.zb_runtime import zb_moe_grouped_matmul_gmm2_out
+
+            hidden_states = zb_moe_grouped_matmul_gmm2_out(
+                hidden_states,
+                w2 if isinstance(w2, list) else [w2],
+                group_list,
+                gmm2_out,
+                scale=w2_scale if isinstance(w2_scale, list) else [w2_scale],
+                per_token_scale=[swiglu_out_scale],
+                split_item=2,
+                group_type=0,
+                group_list_type=group_list_type,
+                act_type=0,
+            )
+        else:
+            hidden_states = DeviceOperator.npu_grouped_matmul_gmm2(
+                hidden_states=hidden_states,
+                weight=w2,
+                weight_scale=w2_scale,
+                per_token_scale=swiglu_out_scale,
+                group_list=group_list,
+                group_list_type=group_list_type,
+                input_dtype=input_hidden_dtype,
+                act_quant_type=act_quant_type,
+                weight_quant_type=weight_quant_type,
+                scale_type=scale_type,
+                per_token_scale_type=per_token_scale_type,
+                use_bf16=use_bf16,
+                use_mxfp_quant=use_mxfp_quant,
+                bias=None,
+                fallback_output_dtype=w2_scale[0].dtype if isinstance(w2_scale, list) else w2_scale.dtype,
+                mxfp_quant_dtype=mxfp_quant_dtype,
+            )
     elif w1_offset is not None:
         # gmm1: gate_up_proj
         hidden_states = torch_npu.npu_grouped_matmul(
@@ -245,6 +262,8 @@ def quant_apply_mlp(
             hidden_states = torch_npu.npu_swiglu(hidden_states)
         before_gmm2_evt = torch.npu.current_stream().record_event()
         # gmm2: down_proj
+        if gmm2_out is not None:
+            raise RuntimeError("ZB gmm2 direct-to-combine_x does not support antiquant offset gmm2.")
         hidden_states = torch_npu.npu_grouped_matmul(
             x=[hidden_states],
             weight=[w2],
@@ -337,24 +356,41 @@ def quant_apply_mlp(
                 hidden_states, swiglu_out_scale = torch_npu.npu_dynamic_quant(hidden_states)
         before_gmm2_evt = torch.npu.current_stream().record_event()
         # gmm2: down_proj
-        hidden_states = DeviceOperator.npu_grouped_matmul_gmm2(
-            hidden_states=hidden_states,
-            weight=w2,
-            weight_scale=w2_scale,
-            per_token_scale=swiglu_out_scale,
-            group_list=group_list,
-            group_list_type=group_list_type,
-            input_dtype=input_hidden_dtype,
-            act_quant_type=act_quant_type,
-            weight_quant_type=weight_quant_type,
-            scale_type=scale_type,
-            per_token_scale_type=per_token_scale_type,
-            use_bf16=use_bf16,
-            use_mxfp_quant=use_mxfp_quant,
-            bias=bias2,
-            fallback_output_dtype=_output_dtype,
-            mxfp_quant_dtype=mxfp_quant_dtype,
-        )
+        if gmm2_out is not None:
+            from vllm_ascend.ops.fused_moe.zb_runtime import zb_moe_grouped_matmul_gmm2_out
+
+            hidden_states = zb_moe_grouped_matmul_gmm2_out(
+                hidden_states,
+                w2 if isinstance(w2, list) else [w2],
+                group_list,
+                gmm2_out,
+                scale=w2_scale if isinstance(w2_scale, list) else [w2_scale],
+                per_token_scale=[swiglu_out_scale],
+                bias=[bias2] if bias2 is not None else None,
+                split_item=2,
+                group_type=0,
+                group_list_type=group_list_type,
+                act_type=0,
+            )
+        else:
+            hidden_states = DeviceOperator.npu_grouped_matmul_gmm2(
+                hidden_states=hidden_states,
+                weight=w2,
+                weight_scale=w2_scale,
+                per_token_scale=swiglu_out_scale,
+                group_list=group_list,
+                group_list_type=group_list_type,
+                input_dtype=input_hidden_dtype,
+                act_quant_type=act_quant_type,
+                weight_quant_type=weight_quant_type,
+                scale_type=scale_type,
+                per_token_scale_type=per_token_scale_type,
+                use_bf16=use_bf16,
+                use_mxfp_quant=use_mxfp_quant,
+                bias=bias2,
+                fallback_output_dtype=_output_dtype,
+                mxfp_quant_dtype=mxfp_quant_dtype,
+            )
     return hidden_states, before_gmm2_evt
 
 
@@ -370,6 +406,7 @@ def unquant_apply_mlp(
     topk_scales: torch.Tensor | None = None,
     need_trans: bool = True,
     swiglu_limit: float = 0.0,
+    gmm2_out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     if need_trans:
         w1 = w1.transpose(1, 2)
@@ -406,23 +443,37 @@ def unquant_apply_mlp(
     if topk_scales is not None:
         gate_up_out *= topk_scales
 
-    hidden_states = torch_npu.npu_grouped_matmul(
-        x=[gate_up_out],
-        weight=[w2],
-        bias=[w2_bias.to(dtype=torch.float32)] if w2_bias is not None else None,
-        split_item=2,
-        group_list_type=group_list_type,
-        group_type=0,
-        group_list=group_list,
-    )[0]
+    if gmm2_out is not None:
+        from vllm_ascend.ops.fused_moe.zb_runtime import zb_moe_grouped_matmul_gmm2_out
+
+        hidden_states = zb_moe_grouped_matmul_gmm2_out(
+            gate_up_out,
+            [w2],
+            group_list,
+            gmm2_out,
+            bias=[w2_bias.to(dtype=torch.float32)] if w2_bias is not None else None,
+            split_item=2,
+            group_type=0,
+            group_list_type=group_list_type,
+        )
+    else:
+        hidden_states = torch_npu.npu_grouped_matmul(
+            x=[gate_up_out],
+            weight=[w2],
+            bias=[w2_bias.to(dtype=torch.float32)] if w2_bias is not None else None,
+            split_item=2,
+            group_list_type=group_list_type,
+            group_type=0,
+            group_list=group_list,
+        )[0]
     return hidden_states, None
 
 
-def unified_apply_mlp(*, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
-    """
-    Unified MoE MLP entry.
-    Quant path is dispatched by DeviceOperator with explicit typed kernel flags.
-    """
+def _apply_mlp_from_input(
+    mlp_compute_input: MoEMlpComputeInput,
+    *,
+    gmm2_out: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.npu.Event | None]:
     hidden_states = mlp_compute_input.hidden_states
     group_list = mlp_compute_input.group_list
     group_list_type = mlp_compute_input.group_list_type
@@ -457,6 +508,7 @@ def unified_apply_mlp(*, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
             topk_scales=topk_scales,
             need_trans=need_trans,
             swiglu_limit=swiglu_limit,
+            gmm2_out=gmm2_out,
         )
 
     assert w1_scale is not None and w2_scale is not None
@@ -504,4 +556,20 @@ def unified_apply_mlp(*, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
         activation=activation,
         swiglu_limit=swiglu_limit,
         use_w4a8_per_channel_gmm_swiglu=mlp_compute_input.quant.use_w4a8_per_channel_gmm_swiglu,
+        gmm2_out=gmm2_out,
     )
+
+
+def unified_apply_mlp(*, mlp_compute_input: MoEMlpComputeInput) -> tuple[torch.Tensor, torch.npu.Event | None]:
+    """Unified MoE MLP entry (standard gmm2)."""
+    return _apply_mlp_from_input(mlp_compute_input, gmm2_out=None)
+
+
+def zb_apply_mlp(*, mlp_compute_input: MoEMlpComputeInput) -> tuple[torch.Tensor, torch.npu.Event | None]:
+    """ZB MoE MLP entry: gmm2 writes into SHMEM ``combine_x``."""
+    gmm2_out = mlp_compute_input.gmm2_out
+    if gmm2_out is None:
+        raise ValueError("zb_apply_mlp requires mlp_compute_input.gmm2_out to be set.")
+    if mlp_compute_input.quant.is_mxfp:
+        raise RuntimeError("ZB gmm2 direct-to-combine_x does not support MXFP yet.")
+    return _apply_mlp_from_input(mlp_compute_input, gmm2_out=gmm2_out)

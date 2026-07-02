@@ -23,7 +23,7 @@ from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
-from vllm_ascend.ops.fused_moe.moe_mlp import unified_apply_mlp
+from vllm_ascend.ops.fused_moe.moe_mlp import unified_apply_mlp, zb_apply_mlp
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoEFusedExpertsInput,
     MoEMlpComputeInput,
@@ -42,10 +42,17 @@ from vllm_ascend.ops.fused_moe.token_dispatcher import (
     TokenDispatcherWithAll2AllV,
     TokenDispatcherWithAllGather,
     TokenDispatcherWithMC2,
+    TokenDispatcherWithZB,
 )
 from vllm_ascend.quantization.quant_type import QuantType
 
 _MoECommMethods: dict[MoECommType | None, MoECommMethod] = {}
+
+
+def _create_mc2_token_dispatcher(moe_config):
+    if get_ascend_config().enable_mc2_zb:
+        return TokenDispatcherWithZB(moe_config=moe_config)
+    return TokenDispatcherWithMC2(moe_config=moe_config)
 
 
 def get_moe_comm_method(moe_comm_type: MoECommType | None) -> MoECommMethod | None:
@@ -171,6 +178,8 @@ class MoECommMethod(ABC):
         )
 
     def _apply_mlp(self, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
+        if mlp_compute_input.gmm2_out is not None:
+            return zb_apply_mlp(mlp_compute_input=mlp_compute_input)
         return unified_apply_mlp(mlp_compute_input=mlp_compute_input)
 
     @abstractmethod
@@ -226,7 +235,7 @@ class MC2CommImpl(MoECommMethod):
         return self.prepare_finalize.pad_and_split_input_ids(input_ids)  # type: ignore[attr-defined]
 
     def _get_token_dispatcher(self):
-        return TokenDispatcherWithMC2()
+        return _create_mc2_token_dispatcher(self.moe_config)
 
     def _get_prepare_finalize(self):
         return PrepareAndFinalizeWithMC2(self.moe_config)
@@ -277,7 +286,7 @@ class FusedMC2CommImpl(MoECommMethod):
         return self.prepare_finalize.pad_and_split_input_ids(input_ids)  # type: ignore[attr-defined]
 
     def _get_token_dispatcher(self):
-        return TokenDispatcherWithMC2()
+        return _create_mc2_token_dispatcher(self.moe_config)
 
     def _get_prepare_finalize(self):
         return PrepareAndFinalizeWithMC2(self.moe_config)

@@ -122,6 +122,7 @@ class MoETokenDispatchOutput(Generic[TMoECombineMetadata]):
     combine_metadata: TMoECombineMetadata
     dynamic_scale: torch.Tensor | None = None
     topk_scales: torch.Tensor | None = None
+    gmm2_out: torch.Tensor | None = None
 
 
 # dispatch -> mlp -> combine
@@ -141,6 +142,7 @@ class MoEMlpComputeInput:
     need_trans: bool = False
     dynamic_eplb: bool = False
     swiglu_limit: float = 0.0
+    gmm2_out: torch.Tensor | None = None
 
 
 __all__ = [

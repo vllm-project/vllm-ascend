@@ -243,6 +243,108 @@ std::tuple<at::Tensor&, at::Tensor&> dispatch_ffn_combine_meta(
     return {out, expert_token_nums};
 }
 
+#ifdef VLLM_ASCEND_ENABLE_ZB_OPS
+std::tuple<at::Tensor&, at::Tensor&, at::Tensor&, at::Tensor&, at::Tensor&, at::Tensor&>
+zb_moe_distribute_dispatch_meta(
+    const at::Tensor &x,
+    const at::Tensor &expert_ids,
+    const c10::optional<at::Tensor> &scales,
+    const c10::optional<at::Tensor> &x_active_mask,
+    const c10::optional<at::Tensor> &elastic_info,
+    int64_t ep_world_size,
+    int64_t ep_rank_id,
+    int64_t moe_expert_num,
+    int64_t tp_world_size,
+    int64_t tp_rank_id,
+    int64_t expert_shard_type,
+    int64_t shared_expert_num,
+    int64_t shared_expert_rank_num,
+    int64_t quant_mode,
+    int64_t global_bs,
+    int64_t expert_token_nums_type,
+    int64_t ext_info,
+    c10::string_view comm_alg,
+    int64_t zero_expert_num,
+    int64_t copy_expert_num,
+    int64_t const_expert_num,
+    at::Tensor &expand_x_out,
+    at::Tensor &dynamic_scales_out,
+    at::Tensor &assist_info_for_combine_out,
+    at::Tensor &expert_token_nums_out,
+    at::Tensor &ep_recv_count_out,
+    at::Tensor &tp_recv_count_out)
+{
+    return {expand_x_out, dynamic_scales_out, assist_info_for_combine_out,
+            expert_token_nums_out, ep_recv_count_out, tp_recv_count_out};
+}
+
+at::Tensor &zb_moe_distribute_combine_meta(
+    const at::Tensor &expand_x,
+    const at::Tensor &expert_ids,
+    const at::Tensor &assist_info_for_combine,
+    const at::Tensor &ep_send_count,
+    const at::Tensor &expert_scales,
+    const c10::optional<at::Tensor> &tp_send_count,
+    const c10::optional<at::Tensor> &x_active_mask,
+    const c10::optional<at::Tensor> &activation_scale,
+    const c10::optional<at::Tensor> &weight_scale,
+    const c10::optional<at::Tensor> &group_list,
+    const c10::optional<at::Tensor> &expand_scales,
+    const c10::optional<at::Tensor> &shared_expert_x,
+    const c10::optional<at::Tensor> &elastic_info,
+    const c10::optional<at::Tensor> &ori_x,
+    const c10::optional<at::Tensor> &const_expert_alpha1,
+    const c10::optional<at::Tensor> &const_expert_alpha2,
+    const c10::optional<at::Tensor> &const_expert_v,
+    int64_t ep_world_size,
+    int64_t ep_rank_id,
+    int64_t moe_expert_num,
+    int64_t tp_world_size,
+    int64_t tp_rank_id,
+    int64_t expert_shard_type,
+    int64_t shared_expert_num,
+    int64_t shared_expert_rank_num,
+    int64_t global_bs,
+    int64_t out_dtype,
+    int64_t comm_quant_mode,
+    int64_t ext_info,
+    int64_t group_list_type,
+    c10::string_view comm_alg,
+    int64_t zero_expert_num,
+    int64_t copy_expert_num,
+    int64_t const_expert_num,
+    at::Tensor &combined_x)
+{
+    return combined_x;
+}
+
+at::Tensor &zb_moe_grouped_matmul_gmm2_out_meta(
+    const at::Tensor &x,
+    const at::TensorList &weight,
+    const c10::optional<at::TensorList> &scale,
+    const c10::optional<at::TensorList> &per_token_scale,
+    const c10::optional<at::TensorList> &bias,
+    const at::Tensor &group_list,
+    at::Tensor &out,
+    int64_t split_item,
+    int64_t group_type,
+    int64_t group_list_type,
+    int64_t act_type)
+{
+    (void)x;
+    (void)weight;
+    (void)scale;
+    (void)per_token_scale;
+    (void)bias;
+    (void)group_list;
+    (void)split_item;
+    (void)group_type;
+    (void)group_list_type;
+    (void)act_type;
+    return out;
+}
+#endif
+
 std::tuple<at::Tensor, at::Tensor> npu_lightning_indexer_meta(
     const at::Tensor &query, const at::Tensor &key, const at::Tensor &weights,
     const c10::optional<at::Tensor> &actual_seq_lengths_query,
@@ -1731,6 +1833,15 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_sparse_flash_attention", &vllm_ascend::meta::npu_sparse_flash_attention_meta);
     // MoE dispatch-ffn-combine
     ops.impl("dispatch_ffn_combine", &vllm_ascend::meta::dispatch_ffn_combine_meta);
+#ifdef VLLM_ASCEND_ENABLE_ZB_OPS
+    // Zero-buffer SHMEM MoE distribute dispatch / combine
+    ops.impl("zb_moe_distribute_dispatch",
+             &vllm_ascend::meta::zb_moe_distribute_dispatch_meta);
+    ops.impl("zb_moe_distribute_combine",
+             &vllm_ascend::meta::zb_moe_distribute_combine_meta);
+    ops.impl("zb_moe_grouped_matmul_gmm2_out",
+             &vllm_ascend::meta::zb_moe_grouped_matmul_gmm2_out_meta);
+#endif
     // matmul allreduce add rmsnorm
     ops.impl("matmul_allreduce_add_rmsnorm", &vllm_ascend::meta::matmul_allreduce_add_rmsnorm_meta);
     // moe_init_routing_custom
