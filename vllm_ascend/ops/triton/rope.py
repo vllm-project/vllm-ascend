@@ -270,18 +270,54 @@ def rope_forward_triton(
 
     num_tokens, n_q_head, head_dim = q.shape
     n_kv_head = k.shape[1]
-    # TODO: use a more robust method to get BLOCK_SIZE_HEAD
-    if is_neox_style:
-        BLOCK_SIZE_HEAD = 64
+    use_cos_sin_cache = cos_sin_cache is not None and positions is not None
+    use_cos_sin = cos is not None and sin is not None
+    if use_cos_sin_cache:
+        assert positions.shape[0] == num_tokens
+        if rope_dim == -1:
+            rope_dim = cos_sin_cache.shape[-1]
+    elif use_cos_sin:
+        assert cos.shape[0] == num_tokens and sin.shape[0] == num_tokens
+        cos = cos.view(num_tokens, -1)
+        sin = sin.view(num_tokens, -1)
+        if rope_dim == -1:
+            rope_dim = cos.shape[-1] * 2
     else:
-        BLOCK_SIZE_HEAD = 32
+        raise ValueError(
+            "Currently, rope_forward_triton supports passing:\n"
+            "1. positions and original cos_sin_cache.\n"
+            "2. cos and sin which are already selected by positions\n"
+            "Please check whether you call rope_forward_triton correctly."
+        )
+    assert rope_dim <= head_dim
+    pad_rope_dim = triton.next_power_of_2(rope_dim)
+    elements_per_head = max(1, pad_rope_dim // 2 if is_neox_style else pad_rope_dim)
+    # legacy tiling
+    legacy_layout_cap = 64 if is_neox_style else 32
+
+    # tiling by ub budget
+    ub_size_bytes = 192 * 1024
+    ub_reserve_bytes = 8 * 1024
+    # Empirical UB budget factor for one logical RoPE tile element. If a
+    # larger-rope model still hits UB overflow here, increase this factor to
+    # make ub_cap and BLOCK_SIZE_HEAD more conservative.
+    ub_bytes_per_tile_element = 32
+    ub_tile_elements = (ub_size_bytes - ub_reserve_bytes) // ub_bytes_per_tile_element
+    raw_ub_cap = ub_tile_elements // elements_per_head
+    if raw_ub_cap < 1:
+        raise ValueError(f"rope_dim={rope_dim} is too large for the Triton RoPE kernel UB budget.")
+
+    # Round UB cap down to a power-of-two tile; e.g. 48 falls back to 32.
+    ub_cap = 1 << (raw_ub_cap.bit_length() - 1)
+
+    BLOCK_SIZE_HEAD = min(
+        legacy_layout_cap,
+        ub_cap,
+    )
     num_vectorcore = get_vectorcore_num()
     n_row = min(num_tokens, num_vectorcore)
 
-    if cos_sin_cache is not None and positions is not None:
-        assert positions.shape[0] == num_tokens
-        assert rope_dim <= head_dim
-        pad_rope_dim = triton.next_power_of_2(rope_dim)
+    if use_cos_sin_cache:
         _triton_rope[(n_row,)](
             q,
             q.stride(0),
@@ -304,16 +340,7 @@ def rope_forward_triton(
             IS_NEOX_STYLE=is_neox_style,
             USE_COS_SIN=True,
         )
-    elif cos is not None and sin is not None:
-        assert cos.shape[0] == num_tokens and sin.shape[0] == num_tokens
-        cos = cos.view(num_tokens, -1)
-        sin = sin.view(num_tokens, -1)
-        if rope_dim == -1:
-            # If rope_dim is not specified, we assume that input cos/sin is not
-            # duplicated to rope_dim, which means rope_dim == cos.shape[-1] * 2
-            rope_dim = cos.shape[-1] * 2
-        assert rope_dim <= head_dim
-        pad_rope_dim = triton.next_power_of_2(rope_dim)
+    else:
         _triton_rope[(n_row,)](
             q,
             q.stride(0),
@@ -335,13 +362,6 @@ def rope_forward_triton(
             BLOCK_SIZE_HEAD=BLOCK_SIZE_HEAD,
             IS_NEOX_STYLE=is_neox_style,
             USE_COS_SIN=False,
-        )
-    else:
-        raise ValueError(
-            "Currently, rope_forward_triton supports passing:\n"
-            "1. positions and original cos_sin_cache.\n"
-            "2. cos and sin which are already selected by positions\n"
-            "Please check whether you call rope_forward_triton correctly."
         )
     return q, k
 
