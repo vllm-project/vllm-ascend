@@ -208,18 +208,226 @@ kill_npu_processes() {
 run_tests_with_log() {
     set +e
     kill_npu_processes
+    mkdir -p "${LOG_PREFIX}"
     echo "====> Run pytest entry: $MULTI_NODE_TEST_PATH"
-    pytest -sv --show-capture=no "$MULTI_NODE_TEST_PATH"
+    local log_file="${LOG_PREFIX}/node_${LWS_WORKER_INDEX:-?}_pytest.log"
+    pytest -sv --show-capture=no "$MULTI_NODE_TEST_PATH" 2>&1 | tee "$log_file"
     ret=$?
+    echo "pytest exit code: ret=${ret}"
     set -e
-    if [ "$LWS_WORKER_INDEX" -eq 0 ]; then
+    if [ "${LWS_WORKER_INDEX:-}" = "0" ]; then
         if [ $ret -eq 0 ]; then
             print_success "All tests passed!"
+            touch "${LOG_PREFIX}/aop_done" 2>/dev/null
         else
-            print_failure "Some tests failed, please check the error stack above for details. \
-If this is insufficient to pinpoint the error, please download and review the logs of all other nodes from the job's summary."
+            echo "Leader: waiting 10s for worker logs..."
+            sleep 10
+            if [ "${AOP_MULTI_ENABLED:-}" = "true" ]; then
+                set +e; aop_pipeline; set -e
+            fi
+            local done_file="${LOG_PREFIX}/aop_done"
+            touch "$done_file"
+            echo "Leader: notifying workers (${done_file})"
+            echo -e "${RED}${FAIL_TAG:-test_failed} ✗ ERROR: Some tests failed${NC}"
+            exit 1
+        fi
+    elif [ "${AOP_MULTI_ENABLED:-}" = "true" ]; then
+        if [ $ret -eq 0 ]; then
+            echo "Worker: test passed, waiting for leader..."
+            local wait_timeout=30
+            while [ $wait_timeout -gt 0 ] && [ ! -f "${LOG_PREFIX}/aop_done" ]; do
+                sleep 1
+                wait_timeout=$((wait_timeout - 1))
+            done
+        fi
+        if [ ! -f "${LOG_PREFIX}/aop_done" ]; then
+            local coord="${COORD_DIR:-/root/.cache/nightly_bisect/coord}"
+            local release="${LOG_PREFIX}/aop_done"
+            mkdir -p "$coord"
+            touch "${coord}/worker_ready_${LWS_WORKER_INDEX}"
+            echo "Worker: signalling ready at ${coord}/worker_ready_${LWS_WORKER_INDEX}"
+            echo "Worker: joining bisect as worker node (index ${LWS_WORKER_INDEX})..."
+            cd "$WORKSPACE/vllm-ascend"
+            python -m tests.e2e.nightly.bisect.auto_bisect \
+                --scene multi_node \
+                --config-yaml "${CONFIG_YAML_PATH}" \
+                --bad-commit HEAD \
+                --coord-dir "${coord}" \
+                --release-file "${release}"
+            while [ ! -f "$release" ]; do sleep 5; done
+            echo "Worker: release signal received, exiting"
+            exit 1
+        else
+            echo "Worker: leader finished successfully, exiting"
         fi
     fi
+}
+
+# Run AOP decision pipeline on failure: classify → check age → bisect-or-exit
+# Same logic as _e2e_nightly_multi_node.yaml AOP hooks.
+aop_pipeline() {
+    local rules="$WORKSPACE/vllm-ascend/tests/e2e/nightly/scripts/rules-env.txt"
+    local table="${GOOD_TABLE:-}"
+    # Strip branch prefix from BENCHMARK_JOB_NAME (e.g. "main-Qwen3.5-27B-w8a8-A2" → "Qwen3.5-27B-w8a8-A2")
+    local case_name="${BENCHMARK_JOB_NAME#*-}"
+    if [ -z "$case_name" ] || [ "$case_name" = "$BENCHMARK_JOB_NAME" ]; then
+        case_name="${CONFIG_YAML_PATH%.yaml}"
+    fi
+
+    echo "============================================"
+    echo "  AOP Pipeline (Pod) - START"
+    echo "  Config      : ${CONFIG_YAML_PATH}"
+    echo "  Case name   : ${case_name}"
+    echo "  Rules file  : ${rules}"
+    echo "  Table file  : ${table}"
+    echo "  Log prefix  : ${LOG_PREFIX}"
+    echo "  BENCHMARK_JOB_NAME: ${BENCHMARK_JOB_NAME:-}"
+    echo "============================================"
+
+    # ---- Step 1: Classify ----
+    echo ""
+    echo "--- [1/3] Classify: scanning pod logs for env patterns ---"
+    echo "  Rules content:"
+    if [ -f "$rules" ]; then
+        grep -vE '^[[:space:]]*(#|$)' "$rules" | sed 's/^/    > /'
+    else
+        echo "    (rules file not found)"
+    fi
+
+    echo ""
+    echo "  Pod logs found:"
+    local found_any=0
+    for f in "${LOG_PREFIX}/node_"*"_pytest.log"; do
+        if [ -f "$f" ]; then
+            echo "    - ${f} ($(wc -l < "$f") lines)"
+            found_any=1
+        fi
+    done
+    [ "$found_any" -eq 0 ] && echo "    (no pod logs found)"
+
+    local env_count=0
+    if [ -f "$rules" ]; then
+        for f in "${LOG_PREFIX}/node_"*"_pytest.log"; do
+            if [ -f "$f" ]; then
+                local n
+                n=$(grep -vE '^[[:space:]]*(#|$)' "$rules" | grep -ciEf - "$f" 2>/dev/null || echo 0)
+                n=${n%%[!0-9]*}
+                echo "    Scan ${f}: ${n} matches"
+                env_count=$((env_count + n))
+                if [ "$n" -gt 0 ]; then
+                    echo "    Matched lines:"
+                    grep -vE '^[[:space:]]*(#|$)' "$rules" | grep -niEf - "$f" | head -5 | sed 's/^/      /'
+                fi
+            fi
+        done
+    fi
+    echo "  Classify result: env_count=${env_count}"
+
+    if [ "$found_any" -eq 0 ]; then
+        echo "  Decision: no pod logs → SKIP"
+        echo "=== AOP Pipeline (Pod) - END (no logs) ==="
+        return 1
+    fi
+
+    if [ "$env_count" -gt 0 ]; then
+        echo "  Decision: env_failure → SKIP"
+        echo "=== AOP Pipeline (Pod) - END (env skip) ==="
+        return 1
+    fi
+
+    # ---- Step 2: Check age ----
+    echo ""
+    echo "--- [2/3] Check commit age ---"
+    echo "  Looking up: ${case_name}"
+    local skip_age=0
+    if [ ! -f "$table" ]; then
+        echo "  Table file not found: ${table}"
+        echo "  Decision: no table → SKIP"
+        echo "=== AOP Pipeline (Pod) - END (age skip) ==="
+        return 1
+    fi
+
+    # Only consider success rows
+    local success_rows
+    success_rows=$(grep "^${case_name}," "$table" | grep -F ',success,' || true)
+    if [ -z "$success_rows" ]; then
+        echo "  No success row found for '${case_name}'"
+        echo "  Decision: no success entry → SKIP"
+        echo "=== AOP Pipeline (Pod) - END (age skip) ==="
+        return 1
+    fi
+
+    # Pick most recent success row
+    local best_date=""
+    while IFS= read -r row; do
+        local d
+        d=$(echo "$row" | awk -F',' '{print $NF}' | xargs)
+        [ -z "$d" ] && continue
+        if [ -z "$best_date" ] || [[ "$d" > "$best_date" ]]; then
+            best_date="$d"
+        fi
+    done <<< "$success_rows"
+
+    if [ -z "$best_date" ]; then
+        echo "  No valid date in success rows"
+        echo "  Decision: no date → SKIP"
+        echo "=== AOP Pipeline (Pod) - END (age skip) ==="
+        return 1
+    fi
+
+    echo "  Matched row: $(grep -m1 "$best_date" <<< "$success_rows")"
+    local last_ts now_ts age_days
+    last_ts=$(date -d "$best_date" +%s 2>/dev/null || echo 0)
+    if [ "$last_ts" = "0" ] || [ -z "$last_ts" ]; then
+        echo "  Date parse failed: ${best_date}"
+        echo "  Decision: invalid date → SKIP"
+        echo "=== AOP Pipeline (Pod) - END (age skip) ==="
+        return 1
+    fi
+    now_ts=$(date +%s)
+    age_days=$(( (now_ts - last_ts) / 86400 ))
+    echo "  Last success: ${best_date} (${age_days} days ago, threshold: 3 days)"
+
+    if [ "$age_days" -gt 3 ]; then
+        echo "  Decision: old commit (> 3 days) → SKIP"
+        echo "=== AOP Pipeline (Pod) - END (age skip) ==="
+        return 1
+    fi
+
+    # ---- Step 3: Bisect ----
+    echo ""
+    echo "--- [3/3] Run bisect ---"
+    echo "  Scene       : multi_node"
+    echo "  Config      : ${CONFIG_YAML_PATH}"
+    echo "  Bad commit  : HEAD"
+    echo "  Name        : ${case_name}"
+    local coord="${COORD_DIR:-/root/.cache/nightly_bisect/coord}"
+    echo "  Coord dir   : ${coord}"
+
+    # Wait for all workers to signal ready
+    echo "  Waiting for workers..."
+    for i in $(seq 1 30); do
+        local ready_count=0
+        for f in "${coord}"/worker_ready_*; do
+            [ -e "$f" ] && ready_count=$((ready_count + 1))
+        done
+        echo "    [${i}/30] ready workers: ${ready_count}"
+        if [ "$ready_count" -ge 1 ]; then break; fi
+        sleep 2
+    done
+
+    cd "$WORKSPACE/vllm-ascend"
+    local bisect_rc=0
+    python -m tests.e2e.nightly.bisect.auto_bisect \
+        --scene multi_node \
+        --config-yaml "${CONFIG_YAML_PATH}" \
+        --bad-commit HEAD \
+        --good-table "${table}" \
+        --name "${case_name}" \
+        --coord-dir "${coord}" || bisect_rc=$?
+    echo "  bisect completed (exit code: ${bisect_rc})"
+    echo "=== AOP Pipeline (Pod) - END ==="
+    return 1
 }
 
 clear_logs() {

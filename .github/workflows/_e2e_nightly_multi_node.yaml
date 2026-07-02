@@ -73,6 +73,11 @@ on:
         default: 120
         type: string
         description: test case execution timeout period,default:120 minutes
+      aop_multi_enabled:
+        required: false
+        type: boolean
+        default: false
+        description: enable Pod AOP pipeline on failure
     secrets:
       KUBECONFIG_B64:
         required: true
@@ -225,6 +230,8 @@ jobs:
             -D pvc_name="$pvc_name" \
             -D benchmark_job_name="$benchmark_job_name" \
             -D runner="$runner" \
+            -D aop_multi_enabled="${{ inputs.aop_multi_enabled }}" \
+            -D good_table="/root/.cache/vllm-ascend/${{ inputs.vllm_ascend_branch }}/nightly/good_table.csv" \
             --outfile lws.yaml
 
           kubectl apply -f ./lws.yaml
@@ -301,12 +308,45 @@ jobs:
             pids+=($!)
           done
 
-          kubectl logs -f "$LEADER_POD" -n "$NAMESPACE" | while IFS= read -r line; do
+          LEADER_TMP=$(mktemp)
+          kubectl logs -f "$LEADER_POD" -n "$NAMESPACE" | tee "$LEADER_TMP" | while IFS= read -r line; do
             echo "$line"
             if echo "$line" | grep -q "$FAIL_TAG"; then
               exit 1
             fi
           done
+
+          eval "$(awk '
+            /^vLLM Git information$/        { sec="vllm"; next }
+            /^vLLM-Ascend Git information$/ { sec="vllm_ascend"; next }
+            sec && /^Commit hash: / {
+              print "HASH_" sec "=" $NF
+              sec=""
+            }
+          ' "$LEADER_TMP")"
+          echo "vllm_hash=${HASH_vllm:-N/A}" >> "$GITHUB_OUTPUT"
+          echo "vllm_ascend_hash=${HASH_vllm_ascend:-N/A}" >> "$GITHUB_OUTPUT"
+          rm -f "$LEADER_TMP"
+
+      - name: Update good_table.csv on success
+        # if: ${{ steps.stream_logs.outcome == 'success' && inputs.request_id == '' }}
+        if: ${{ steps.stream_logs.outcome == 'success'}}
+        env:
+          TEST_NAME: ${{ inputs.name || inputs.config_file_path }}
+          TEST_PATH: ${{ inputs.config_file_path }}
+          CONFIG_BASE_PATH: ${{ inputs.config_base_path }}
+          RUN_LINK: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python3 tests/e2e/nightly/scripts/update_good_table.py \
+            --cache-csv "/root/.cache/vllm-ascend/${{ inputs.vllm_ascend_branch || 'main' }}/nightly/good_table.csv" \
+            --test-name "$TEST_NAME" \
+            --test-path "$TEST_PATH" \
+            --config-base-path "$CONFIG_BASE_PATH" \
+            --scene "multi_node" \
+            --run-link  "$RUN_LINK" \
+            --vllm-ascend-dir "." \
+            --vllm-ascend-version "${{ steps.stream_logs.outputs.vllm_ascend_hash }}" \
+            --vllm-version "${{ steps.stream_logs.outputs.vllm_hash }}"
 
       - name: Fetch benchmark results from PVC
         if: always()
