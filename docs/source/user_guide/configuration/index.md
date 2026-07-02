@@ -6,5 +6,6 @@ This section provides a detailed configuration guide of vLLM Ascend.
 :caption: Configuration Guide
 :maxdepth: 1
 env_vars
+api_support
 additional_config
 :::
