@@ -16,7 +16,7 @@ vLLM Ascend Plugin
 </div>
 
 <p align="center">
-| <a href="https://www.hiascend.com/en/"><b>About Ascend</b></a> | <a href="https://docs.vllm.ai/projects/ascend/en/latest/"><b>Documentation</b></a> | <a href="https://slack.vllm.ai"><b>#SIG-Ascend</b></a> | <a href="https://discuss.vllm.ai/c/hardware-support/vllm-ascend-support"><b>Users Forum</b></a> | <a href="https://tinyurl.com/vllm-ascend-meeting"><b>Weekly Meeting</b></a> |
+| <a href="https://www.hiascend.com/en/"><b>About Ascend</b></a> | <a href="https://docs.vllm.ai/projects/ascend/en/latest/"><b>Documentation</b></a> | <a href="https://docs.vllm.ai/projects/ascend/en/latest/user_guide/support_matrix/"><b>Support Matrix</b></a> | <a href="https://slack.vllm.ai"><b>#SIG-Ascend</b></a> | <a href="https://discuss.vllm.ai/c/hardware-support/vllm-ascend-support"><b>Users Forum</b></a> | <a href="https://tinyurl.com/vllm-ascend-meeting"><b>Weekly Meeting</b></a> |
 </p>
 
 <p align="center">
@@ -54,7 +54,7 @@ It is the recommended approach for supporting the Ascend backend within the vLLM
 
 By using vLLM Ascend plugin, popular open-source models, including Transformer-like, Mixture-of-Experts (MoE), Embedding, Multi-modal LLMs can run seamlessly on the Ascend NPU.
 
-For detailed information on supported models, please refer to [supported models](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/support_matrix/supported_models.html).
+For detailed information on supported models and features, please refer to the [support matrix](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/support_matrix/).
 
 ## Prerequisites
 
