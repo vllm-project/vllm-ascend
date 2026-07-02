@@ -279,7 +279,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
 ::::{tab-item} A2 series
 :sync: A2
 
-- `glm-5.2-w8a8`: can be deployed on 2 Atlas 800 A2 (64G × 32).
+- `glm-5.2-w8a8`: can be deployed on 2 Atlas 800 A2 (64G × 16).
 
 **node 0**
 
@@ -998,7 +998,7 @@ export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export ASCEND_AGGREGATE_ENABLE=1
 export ASCEND_TRANSPORT_PRINT=1
 export ACL_OP_INIT_MODE=1
-export VLLM_NIXL_ABORT_REQUEST_TIMEOUT=300000
+export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
 export VLLM_VERSION=0.21.0
 
 export ASCEND_RT_VISIBLE_DEVICES=$1
@@ -1054,7 +1054,7 @@ vllm serve <MODEL_PATH> \
     "multistream_overlap_shared_expert": true,
     "recompute_scheduler_enable": true,
     "ascend_compilation_config": {
-      "enable_npugraph_ex": true
+      "enable_npugraph_ex": false
     },
     "enable_dsa_cp": true
   }' \
@@ -1141,7 +1141,7 @@ vllm serve <MODEL_PATH> \
     "multistream_overlap_shared_expert": true,
     "recompute_scheduler_enable": true,
     "ascend_compilation_config": {
-      "enable_npugraph_ex": true
+      "enable_npugraph_ex": false
     }
   }' \
   --speculative-config '{"num_speculative_tokens": 3, "method":"deepseek_mtp"}'
