@@ -1053,6 +1053,9 @@ class NPUModelRunner(GPUModelRunner):
         else:
             discard_requests_mask = self.optimistic_seq_lens_cpu[:num_reqs].numpy() < num_tokens_np
 
+        self.discard_request_mask.np[:num_reqs] = discard_requests_mask
+        self.discard_request_mask.copy_to_gpu(num_reqs)
+ 
         discard_request_indices = np.nonzero(discard_requests_mask)[0]
         self.num_discarded_requests = len(discard_request_indices)
         self.discard_request_indices.np[: self.num_discarded_requests] = discard_request_indices
@@ -1715,21 +1718,31 @@ class NPUModelRunner(GPUModelRunner):
             else:
                 sampled_token_ids_tensor = sampled_token_ids
 
+            # Compute valid_sampled_tokens_count for async scheduling.
+            # This mirrors the GPU path in NgramProposerGPU.update_token_ids_ngram().
+            vocab_size = self.model_config.get_vocab_size()
+            valid_for_count = sampled_token_ids_tensor[:batch_size].clone()
+            discard_expanded = self.discard_request_mask.gpu[:batch_size].unsqueeze(1)
+            valid_for_count.masked_fill_(discard_expanded, -1)
+            valid_mask = (valid_for_count != -1) & (valid_for_count < vocab_size)
+            valid_sampled_tokens_count = valid_mask.sum(dim=1).to(torch.int32)
+ 
             (_token_ids, next_token_ids, draft_token_ids,
              num_valid_draft_tokens) = torch.ops._C_ascend.npu_ngram_spec_decode(
                 self.token_ids_gpu_tensor[:batch_size],       # [B, max_seq_len], in-place
                 self.num_tokens_no_spec_gpu[:batch_size],      # [B]
                 sampled_token_ids_tensor[:batch_size],         # [B, max_new_tokens]
                 self.discard_request_mask.gpu[:batch_size],    # [B]
-                vocab_size=self.model_config.get_vocab_size(),
+                vocab_size=vocab_size,
                 min_n=self.drafter.min_n,
                 max_n=self.drafter.max_n,
                 k=self.drafter.k,
             )
 
-            # only async scheduling, set prev_sampled_token_ids，
-            if self.use_async_scheduling:
-                self.input_batch.prev_sampled_token_ids = next_token_ids.unsqueeze(1)
+            # Communicate verified token count to scheduler for async scheduling.
+            self._copy_valid_sampled_token_count(
+                next_token_ids, valid_sampled_tokens_count
+            )
 
             # save num_valid_draft_tokens for scheduler trim
             self._num_valid_draft_tokens = num_valid_draft_tokens
