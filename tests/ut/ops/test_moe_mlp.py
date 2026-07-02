@@ -3,6 +3,7 @@ from typing import ClassVar
 from unittest.mock import patch
 
 import torch
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
 from vllm_ascend.ops.fused_moe.moe_mlp import cumsum_group_list, unified_apply_mlp
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
@@ -179,6 +180,38 @@ class TestUnifiedApplyMlpRequest(unittest.TestCase):
         self.assertTrue(output is expected)
         quant_kwargs = mock_quant.call_args.kwargs
         self.assertTrue(quant_kwargs["use_w4a8_per_channel_gmm_swiglu"])
+        mock_unquant.assert_not_called()
+
+    def test_request_quant_path_passes_swiglustep_activation(self):
+        expected = torch.randn(1, 2)
+        mlp_compute_input = MoEMlpComputeInput(
+            hidden_states=torch.ones((1, 2), dtype=torch.float32),
+            group_list=torch.tensor([1], dtype=torch.int64),
+            group_list_type=1,
+            dynamic_scale=None,
+            topk_scales=None,
+            weights=MoEWeights(
+                w1=[torch.ones((1, 2, 4), dtype=torch.float32)],
+                w2=[torch.ones((1, 2, 2), dtype=torch.float32)],
+                w1_scale=[torch.ones((1,), dtype=torch.float32)],
+                w2_scale=[torch.ones((1,), dtype=torch.float32)],
+            ),
+            quant=MoEQuantParams(quant_type=QuantType.W8A8),
+            fusion=True,
+            activation=MoEActivation.SWIGLUSTEP,
+            swiglu_limit=5.0,
+        )
+
+        with (
+            patch("vllm_ascend.ops.fused_moe.moe_mlp.quant_apply_mlp", return_value=expected) as mock_quant,
+            patch("vllm_ascend.ops.fused_moe.moe_mlp.unquant_apply_mlp") as mock_unquant,
+        ):
+            output = unified_apply_mlp(mlp_compute_input=mlp_compute_input)
+
+        self.assertTrue(output is expected)
+        quant_kwargs = mock_quant.call_args.kwargs
+        self.assertEqual(quant_kwargs["activation"], MoEActivation.SWIGLUSTEP)
+        self.assertEqual(quant_kwargs["swiglu_limit"], 5.0)
         mock_unquant.assert_not_called()
 
 

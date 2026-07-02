@@ -274,6 +274,32 @@ packed_modules_model_mapping: dict[str, dict[str, list[str]]] = {
         "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
         "o_proj": ["dense"],
     },
+    "step3p5": {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+        "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+    },
+    # The step3.5 MTP draft (speculative.py sets model_type="step3p5_mtp")
+    # reuses the same fused module layout as the verifier.
+    "step3p5_mtp": {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+        "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+    },
 }
 
 
@@ -295,6 +321,13 @@ QUANT_MODEL_SUBSTR_MAPPINGS = {
         ".ffn.": ".mlp.",
         ".ffn_norm.": ".post_attention_layernorm.",
         ".attn_norm.": ".input_layernorm.",
+    },
+    # The step3.5 MTP draft nests its decoder block under ".mtp_block.", but the
+    # checkpoint's quant_model_description.json keys it without that infix
+    # (e.g. "model.layers.45.self_attn.q_proj.weight"). Strip it so the quant
+    # lookup matches the on-disk naming.
+    "step3p5_mtp": {
+        ".mtp_block.": ".",
     },
 }
 
@@ -513,6 +546,15 @@ class AscendModelSlimConfig(QuantizationConfig):
                 return name[: -len(src_suffix)] + dst_suffix
         return None
 
+    def _has_quant_weight(self, prefix: str, packed_modules_mapping: Mapping[str, list[str]]) -> bool:
+        proj_name = prefix.split(".")[-1]
+        if proj_name in packed_modules_mapping:
+            return all(
+                f"{prefix.replace(proj_name, shard_proj_name)}.weight" in self.quant_description
+                for shard_proj_name in packed_modules_mapping[proj_name]
+            )
+        return f"{prefix}.weight" in self.quant_description
+
     def quant_prefix_mapper(self, model_type: str, prefix: str) -> str:
         self.model_type = model_type
         # Some model paths, e.g. qwen3-vl and qwen3_5_moe MTP drafter,
@@ -526,9 +568,26 @@ class AscendModelSlimConfig(QuantizationConfig):
             prefix = "language_model.lm_head"
         prefix_mapping = QUANT_MODEL_PREFIX_MAPPINGS.get(model_type)
         substr_mapping = QUANT_MODEL_SUBSTR_MAPPINGS.get(model_type)
-        if prefix_mapping:
-            hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix=prefix_mapping, orig_to_new_substr=substr_mapping)
-            return hf_to_vllm_mapper._map_name(prefix)
+        if prefix_mapping or substr_mapping:
+            hf_to_vllm_mapper = WeightsMapper(
+                orig_to_new_prefix=prefix_mapping or {},
+                orig_to_new_substr=substr_mapping or {},
+            )
+            prefix = hf_to_vllm_mapper._map_name(prefix)
+
+        if model_type == "step3p5_mtp" and prefix.startswith("model.layers."):
+            # Step3P5 MTP and newly generated Step3P7 W8A8 MTP checkpoints use
+            # ``model.layers.*``.  The Step3P7 vLLM wrapper mapper rewrites
+            # current ``model.layers.*`` quant descriptions to
+            # ``language_model.model.layers.*``.  The MTP draft module itself
+            # is still Step3P5-shaped and queries ``model.layers.*``, so try
+            # the Step3P7 wrapper alias only when the direct Step3P5/new-key
+            # lookup misses.
+            packed_modules_mapping = get_packed_modules_mapping(model_type)
+            if not self._has_quant_weight(prefix, packed_modules_mapping):
+                for candidate in (prefix.replace("model.layers.", "language_model.model.layers.", 1),):
+                    if self._has_quant_weight(candidate, packed_modules_mapping):
+                        return candidate
         return prefix
 
     def get_quant_method(self, layer: torch.nn.Module, prefix: str, tid2eid=None) -> Optional["QuantizeMethodBase"]:
@@ -834,6 +893,21 @@ class AscendModelSlimConfig(QuantizationConfig):
         for k in self.quant_description:
             if "shared_head" in k:
                 new_k = k.replace(".shared_head.", ".")
+                extra_quant_dict[new_k] = self.quant_description[k]
+            if "transformer.shared_head.output." in k:
+                # Step3.5 MTP checkpoints describe per-layer draft logits heads
+                # as ``transformer.shared_head.output``. The vLLM model module
+                # exposes the same parameter as ``shared_head.head``.
+                new_k = k.replace(
+                    "transformer.shared_head.output.",
+                    "shared_head.head.",
+                )
+                extra_quant_dict[new_k] = self.quant_description[k]
+            if "transformer.shared_head.norm." in k:
+                new_k = k.replace(
+                    "transformer.shared_head.norm.",
+                    "shared_head.norm.",
+                )
                 extra_quant_dict[new_k] = self.quant_description[k]
             if "weight_packed" in k:
                 new_k = k.replace("weight_packed", "weight")

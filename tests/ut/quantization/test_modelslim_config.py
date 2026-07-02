@@ -273,10 +273,14 @@ class TestAscendModelSlimConfig(TestBase):
         config = AscendModelSlimConfig()
         config.quant_description = {
             "model.layers.0.shared_head.weight": "INT8",
+            "transformer.shared_head.output.weight": "INT8",
+            "transformer.shared_head.norm.weight": "INT8",
         }
         config._apply_extra_quant_adaptations()
         self.assertIn("model.layers.0.weight", config.quant_description)
         self.assertEqual(config.quant_description["model.layers.0.weight"], "INT8")
+        self.assertIn("shared_head.head.weight", config.quant_description)
+        self.assertIn("shared_head.norm.weight", config.quant_description)
 
     def test_apply_extra_quant_adaptations_weight_packed(self):
         config = AscendModelSlimConfig()
@@ -319,6 +323,34 @@ class TestQuantPrefixMapper(TestBase):
         prefix = config.quant_prefix_mapper("qwen3_5_moe", "lm_head")
 
         self.assertEqual(prefix, "lm_head")
+
+    def test_step3p5_mtp_maps_direct_and_step3p7_wrapped_quant_keys(self):
+        cases = [
+            (
+                "model.layers.45.self_attn",
+                "model.layers.45.self_attn.qkv_proj",
+            ),
+            (
+                "language_model.model.layers.45.self_attn",
+                "language_model.model.layers.45.self_attn.qkv_proj",
+            ),
+        ]
+        for quant_prefix, expected in cases:
+            with self.subTest(quant_prefix=quant_prefix):
+                config = AscendModelSlimConfig(
+                    {
+                        f"{quant_prefix}.q_proj.weight": "FLOAT",
+                        f"{quant_prefix}.k_proj.weight": "FLOAT",
+                        f"{quant_prefix}.v_proj.weight": "FLOAT",
+                    }
+                )
+
+                prefix = config.quant_prefix_mapper(
+                    "step3p5_mtp",
+                    "model.layers.45.mtp_block.self_attn.qkv_proj",
+                )
+
+                self.assertEqual(prefix, expected)
 
 
 class TestGetCacheScale(TestBase):
