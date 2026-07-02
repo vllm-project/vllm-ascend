@@ -182,6 +182,12 @@ class AscendConfig:
             "VLLM_ASCEND_ENABLE_MLAPO",
             ascend_envs.VLLM_ASCEND_ENABLE_MLAPO,
         )
+        self.enable_sfa_prolog_v3 = self._get_config_value(
+            additional_config,
+            "enable_sfa_prolog_v3",
+            "VLLM_ASCEND_ENABLE_SFA_PROLOG_V3",
+            ascend_envs.VLLM_ASCEND_ENABLE_SFA_PROLOG_V3,
+        )
         self.enable_flashcomm2_parallel_size = self._get_config_value(
             additional_config,
             "enable_flashcomm2_parallel_size",

@@ -371,6 +371,38 @@ class BaseDeviceAdaptor:
         return hidden_states, ql_nope, q_pe, q_c
 
     @staticmethod
+    def execute_sfa_mla_prolog_v3(
+        sfa_impl,
+        *,
+        token_x: torch.Tensor,
+        rope_sin: torch.Tensor,
+        rope_cos: torch.Tensor,
+        kv_cache: torch.Tensor,
+        kr_cache: torch.Tensor,
+        cache_mode: str,
+        cache_index: torch.Tensor | None = None,
+        **quant_kwargs: Any,
+    ) -> tuple:
+        prolog_kwargs = {
+            "token_x": token_x,
+            "weight_dq": sfa_impl.weight_dq,
+            "weight_uq_qr": sfa_impl.weight_uq_qr,
+            "weight_uk": sfa_impl.W_UK_T,
+            "weight_dkv_kr": sfa_impl.weight_dkv_kr,
+            "rmsnorm_gamma_cq": sfa_impl.q_a_layernorm.weight.data,
+            "rmsnorm_gamma_ckv": sfa_impl.kv_a_layernorm.weight.data,
+            "rope_sin": rope_sin,
+            "rope_cos": rope_cos,
+            "kv_cache": kv_cache,
+            "kr_cache": kr_cache,
+            "cache_mode": cache_mode,
+            **quant_kwargs,
+        }
+        if cache_index is not None:
+            prolog_kwargs["cache_index"] = cache_index
+        return torch_npu.npu_mla_prolog_v3(**prolog_kwargs)
+
+    @staticmethod
     def indexer_select_post_process(
         sfa_impl,
         q_li: torch.Tensor,

@@ -75,16 +75,27 @@ class AscendW8A8DynamicLinearMethod(AscendLinearScheme):
     def apply(
         self,
         layer: torch.nn.Module,
-        x: torch.Tensor,
+        x: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
         bias: torch.Tensor | None = None,
         tp_rank: int | None = 0,
     ) -> torch.Tensor:
-        quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(x, dst_type=self.act_quant_type)
-        need_unsqz = False
-        if pertoken_scale.dim() == 2:
-            need_unsqz = True
-            quantized_x = quantized_x.squeeze(dim=1)
-            pertoken_scale = pertoken_scale.squeeze(dim=1)
+        if isinstance(x, tuple):
+            quantized_x, pertoken_scale = x
+            output_dtype = layer.params_dtype
+            need_unsqz = quantized_x.dim() > 2 and quantized_x.shape[-2] == 1
+            if need_unsqz:
+                quantized_x = quantized_x.squeeze(dim=-2)
+                pertoken_scale = pertoken_scale.squeeze(dim=-1)
+            elif pertoken_scale.dim() > 1 and pertoken_scale.shape[-1] == 1:
+                pertoken_scale = pertoken_scale.squeeze(dim=-1)
+        else:
+            quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(x, dst_type=self.act_quant_type)
+            output_dtype = x.dtype
+            need_unsqz = False
+            if pertoken_scale.dim() == 2:
+                need_unsqz = True
+                quantized_x = quantized_x.squeeze(dim=1)
+                pertoken_scale = pertoken_scale.squeeze(dim=1)
 
         chunk_size = getattr(layer, "_chunk_size", 0)
         if isinstance(chunk_size, int) and chunk_size > 0:
@@ -98,7 +109,7 @@ class AscendW8A8DynamicLinearMethod(AscendLinearScheme):
                         layer.weight_1_scale,
                         pertoken_scale=pertoken_scale,
                         bias=bias_1,
-                        output_dtype=x.dtype,
+                        output_dtype=output_dtype,
                     ),
                     torch_npu.npu_quant_matmul(
                         quantized_x,
@@ -106,7 +117,7 @@ class AscendW8A8DynamicLinearMethod(AscendLinearScheme):
                         layer.weight_2_scale,
                         pertoken_scale=pertoken_scale,
                         bias=bias_2,
-                        output_dtype=x.dtype,
+                        output_dtype=output_dtype,
                     ),
                 ],
                 dim=-1,
@@ -118,7 +129,7 @@ class AscendW8A8DynamicLinearMethod(AscendLinearScheme):
                 layer.weight_scale,
                 pertoken_scale=pertoken_scale,
                 bias=bias if self.act_quant_type == torch.int8 else None,
-                output_dtype=x.dtype,
+                output_dtype=output_dtype,
             )
         if need_unsqz:
             output = output.unsqueeze(dim=1)
