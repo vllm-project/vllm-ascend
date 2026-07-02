@@ -21,6 +21,7 @@ import contextlib
 import copy
 import functools
 import gc
+import hashlib
 import json
 import logging
 import multiprocessing
@@ -184,6 +185,15 @@ def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
     if hasattr(torch, "npu") and torch.npu.is_initialized():
         torch.npu.empty_cache()
         torch.npu.reset_peak_memory_stats()
+
+
+class ModelName:
+    """Global model name enumeration class."""
+
+    QWEN3_06B = "Qwen/Qwen3-0.6B"
+    QWEN3_8B = "Qwen/Qwen3-8B"
+    QWEN3_30B_A3B = "Qwen/Qwen3-30B-A3B"
+    DEEPSEEK = "vllm-ascend/DeepSeek-V2-Lite-W8A8"
 
 
 class MooncakeLauncher:
@@ -1134,6 +1144,215 @@ class VllmRunner:
         del self.model
         clear_ascend_config()
         cleanup_dist_env_and_memory()
+
+
+class ModelCache:
+    """Model cache management class"""
+
+    def __init__(self):
+        self._cache: dict[str, VllmRunner] = {}
+
+    def close(self):
+        """Properly closing all resources (including terminating child processes)"""
+        if hasattr(self, "model") and self.model is not None:
+            try:
+                if hasattr(self.model, "llm_engine"):
+                    self.model.llm_engine.shutdown()
+
+                del self.model
+
+                import torch
+
+                torch.npu.empty_cache()
+
+                print("[INFO] VllmRunner closed successfully")
+            except Exception as e:
+                print(f"[WARNING] Error closing VllmRunner: {e}")
+
+    def _get_available_npu_memory(self) -> float:
+        """Obtain NPU Available Memory (GiB)"""
+        import torch
+
+        free, _ = torch.npu.mem_get_info()
+        return free / (1024**3)
+
+    def _wait_for_memory(self, required_gib: float, timeout_seconds: int = 30) -> bool:
+        """Wait until there is sufficient available memory."""
+        import time
+
+        start_time = time.time()
+        while time.time() - start_time < timeout_seconds:
+            available = self._get_available_npu_memory()
+            if available >= required_gib:
+                return True
+
+            print(f"[INFO] Waiting for NPU memory... Available: {available:.2f} GiB, Required: {required_gib:.2f} GiB")
+            time.sleep(2)
+
+        return False
+
+    def get_cache_key(self, model_config: dict[str, Any]) -> str:
+        """Generating a unique cache key.
+
+        Args:
+            model_config: Model Configuration Dictionary
+
+        Returns:
+            str: The only cache key
+        """
+        sorted_config = {k: v for k, v in sorted(model_config.items())}
+        config_str = json.dumps(sorted_config, sort_keys=True)
+        return hashlib.md5(config_str.encode()).hexdigest()
+
+    def get_or_create(self, model_config: dict[str, Any]) -> "VllmRunner":
+        """Obtain or create a model instance
+
+        Args:
+            model_config: Model Configuration
+
+        Returns:
+            VllmRunner: Model Instance
+        """
+        """Obtain or create a model instance (with full memory management)"""
+
+        cache_key = self.get_cache_key(model_config)
+
+        if cache_key in self._cache:
+            print(f"[INFO] Reusing cached model instance for: {model_config['model_name']}")
+            return self._cache[cache_key]
+
+        gpu_memory_utilization = model_config.get("gpu_memory_utilization", 0.9)
+        free_memory_bytes, total_memory_bytes = torch.npu.mem_get_info()
+        gib = 1024**3
+        available_memory_gib = free_memory_bytes / gib
+        required_memory_gib = (total_memory_bytes / gib) * gpu_memory_utilization
+
+        print(
+            f"[DEBUG] Creating new model - Available: {available_memory_gib:.2f} GiB, "
+            f"Required: {required_memory_gib:.2f} GiB"
+        )
+
+        if available_memory_gib < required_memory_gib:
+            print("[WARNING] Insufficient memory! Cleaning oldest cache entries...")
+
+            self.clear()
+
+            wait_count = 0
+            max_wait = 10
+
+            while available_memory_gib < required_memory_gib and wait_count < max_wait:
+                time.sleep(3)
+                free_memory_bytes, _ = torch.npu.mem_get_info()
+                available_memory_gib = free_memory_bytes / (1024**3)
+                print(f"[INFO] Waiting for memory... Available: {available_memory_gib:.2f} GiB")
+                wait_count += 1
+
+            if available_memory_gib < required_memory_gib:
+                raise RuntimeError(
+                    f"Failed to get enough NPU memory! "
+                    f"Available: {available_memory_gib:.2f} GiB, "
+                    f"Required: {required_memory_gib:.2f} GiB."
+                )
+        if cache_key not in self._cache:
+            runner = VllmRunner(
+                model_name=model_config["model_name"],
+                quantization=model_config.get("quantization"),
+                max_model_len=model_config.get("max_model_len", 1024),
+                dtype=model_config.get("dtype", "bfloat16"),
+                gpu_memory_utilization=model_config.get("gpu_memory_utilization", 0.9),
+                enable_prefix_caching=model_config.get("enable_prefix_caching", False),
+                max_num_seqs=model_config.get("max_num_seqs", 64),
+                tensor_parallel_size=model_config.get("tensor_parallel_size", 1),
+                distributed_executor_backend=model_config.get("distributed_executor_backend", "mp"),
+                compilation_config=model_config.get(
+                    "compilation_config",
+                    {"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1, 32, 64]},
+                ),
+                **model_config.get("extra_kwargs", {}),
+            )
+            self._cache[cache_key] = runner
+            print(f"Created new model instance for: {model_config['model_name']}")
+        else:
+            print(f"Reusing existing model instance for: {model_config['model_name']}")
+        return self._cache[cache_key]
+
+    def clear(self):
+        """Clearing All Cached Model Instances"""
+        import gc
+
+        for cache_key in list(self._cache.keys()):
+            runner = self._cache[cache_key]
+
+            try:
+                if hasattr(runner, "model"):
+                    del runner.model
+                del self._cache[cache_key]
+                del runner
+
+            except Exception as e:
+                print(f"[WARNING] Error clearing runner {cache_key}: {e}")
+
+        gc.collect()
+        torch.npu.empty_cache()
+        time.sleep(3)
+
+        self._cache.clear()
+        print("[INFO] Model cache cleared")
+
+
+model_cache = ModelCache()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def cleanup_model_cache():
+    """Clearing the Model Cache After the Test Session Ends"""
+    yield
+    model_cache.clear()
+
+
+@pytest.fixture(scope="function")
+def vllm_runner(request):
+    """Obtain or create a model instance based on the model configuration.
+
+    Args:
+        request: pytest request object
+
+    Yields:
+        VllmRunner: Model Instance
+    """
+
+    print(f"[DEBUG] Test name: {request.node.name}")
+    print(f"[DEBUG] All markers on test: {list(request.node.iter_markers())}")
+
+    model_marker = request.node.get_closest_marker("model")
+
+    if model_marker is None:
+        raise ValueError("Test must have @pytest.mark.model decorator")
+
+    model_config = model_marker.kwargs
+    print(f"[DEBUG] Final model_config: {model_config}")
+
+    if model_marker:
+        model_config = model_marker.kwargs
+    else:
+        model_config = {
+            "model_name": "Qwen/Qwen3-0.6B",
+            "quantization": None,
+            "max_model_len": 1024,
+            "dtype": "auto",
+            "gpu_memory_utilization": 0.9,
+            "enable_prefix_caching": False,
+        }
+
+    print(f"[DEBUG] vllm_runner fixture - model_config: {model_config}")
+
+    try:
+        runner = model_cache.get_or_create(model_config)
+    except Exception as e:
+        print(f"[ERROR] Failed to create model instance with config: {model_config}")
+        print(f"[ERROR] Exception: {type(e).__name__}: {e}")
+        raise
+    yield runner
 
 
 class DPVllmRunner(VllmRunner):
