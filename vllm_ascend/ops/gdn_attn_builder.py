@@ -913,7 +913,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         num_decode_draft_tokens_cpu: torch.Tensor | None,
     ) -> GDNAttentionMetadata:
         attn_metadata.non_spec_decode_fallback_meta = None
-        if attn_metadata.num_decodes <= 0:
+        if attn_metadata.num_decodes <= 0 and attn_metadata.num_prefills <= 0:
             return attn_metadata
 
         _ensure_causal_conv1d_host_meta_state(
