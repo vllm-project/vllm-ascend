@@ -30,6 +30,7 @@ DeepSeekOCR2.md
 GLM4.x.md
 GLM5.md
 GLM5.2.md
+Gemma4.md
 Kimi-K2-Thinking.md
 Kimi-K2.5.md
 Kimi-K2.6.md
