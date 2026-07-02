@@ -118,6 +118,31 @@ class DeepSeekV4DSparkModel(nn.Module):
         self.n_stages = config.n_mtp_layers                 # 3
         self.base_layer_id = config.num_hidden_layers       # 43
 
+        # QUAROT_PATCH_V1: QuaRot anti-rotation for the DSpark context path.
+        # path-A ckpt is QuaRot-rotated (target hidden rotated; draft attn incl.
+        # cv_wkv rotated) but main_proj is stored UNROTATED, and vllm-ascend applies
+        # quarot anti-rotation ONLY to Eagle3LlamaForCausalLM -> this custom class
+        # gets nothing. Load global_rotation Q so combine_hidden_states can un-rotate
+        # incoming rotated target hidden (per-4096-block @ Q^T) into main_proj basis,
+        # then rotate main_x (@ Q) into the draft rotated basis cv_wkv expects.
+        # Offline-validated: context-KV reconstruction cos 0.98 (broken=-0.02).
+        self.register_buffer('_quarot_Q', None, persistent=False)
+        try:
+            import os as _qos
+            from safetensors.torch import load_file as _qload
+            _mp = vllm_config.speculative_config.draft_model_config.model
+            _qp = _qos.path.join(str(_mp), 'optional', 'quarot.safetensors')
+            if _qos.path.exists(_qp):
+                self._quarot_Q = _qload(_qp)['global_rotation'].to(torch.bfloat16)
+                import sys as _qsys
+                print('DSPARK QUAROT_PATCH_V1 loaded Q %s' % (tuple(self._quarot_Q.shape),), file=_qsys.stderr, flush=True)
+            else:
+                import sys as _qsys
+                print('DSPARK QUAROT_PATCH_V1 no quarot file at %s (no-op)' % _qp, file=_qsys.stderr, flush=True)
+        except Exception as _qe:
+            import sys as _qsys
+            print('DSPARK QUAROT_PATCH_V1 load skipped: %r' % (_qe,), file=_qsys.stderr, flush=True)
+
         # per-stage sparse-attn topk index buffer (only if the arch is v3.2-style)
         if hasattr(config, "index_topk"):
             self.topk_indices_buffer = torch.empty(
@@ -170,8 +195,28 @@ class DeepSeekV4DSparkModel(nn.Module):
         return self.embed_tokens(input_ids)
 
     def combine_hidden_states(self, aux_hidden_states: torch.Tensor) -> torch.Tensor:
-        """dflash contract; DSpark folds main_norm in -> returns main_x [T, hidden]."""
+        """dflash contract; DSpark folds main_norm in -> returns main_x [T, hidden].
+        QUAROT_PATCH_V1: un-rotate rotated target hidden per 4096-block (@Q^T) into
+        main_proj basis, then rotate main_x (@Q) into the draft rotated basis."""
+        if self._quarot_Q is not None:
+            _q = self._quarot_Q.to(device=aux_hidden_states.device, dtype=aux_hidden_states.dtype)  # QUAROT_DEVFIX_V1
+            _h = self.hidden_size
+            aux_hidden_states = torch.cat(
+                [aux_hidden_states[:, k*_h:(k+1)*_h] @ _q.t()
+                 for k in range(len(self.target_layer_ids))], dim=-1)
         _mx = self.main_norm(self.main_proj(aux_hidden_states))
+        import os as _qao  # QUAROT_AUXONLY_V1: bf16 draft skips re-rotation
+        if self._quarot_Q is not None and not _qao.environ.get("DSPARK_QUAROT_AUXONLY"):
+            _mx = _mx @ self._quarot_Q.to(device=_mx.device, dtype=_mx.dtype)
+        import os as _capc
+        if _capc.environ.get("DSPARK_CAPTURE"):
+            try:
+                self._cap_aux = aux_hidden_states.detach().cpu().float()
+                self._cap_mainproj_out = self.main_proj(aux_hidden_states).detach().cpu().float()
+                self._cap_mainx = _mx.detach().cpu().float()
+            except Exception:
+                pass
+
         import os as _oa, sys as _sa
         if _oa.environ.get("DSPARK_DBG"):
             try:
@@ -265,6 +310,19 @@ class DeepSeekV4DSparkModel(nn.Module):
                 impl._dspark_write_cache_ptr = int(swa_kv_cache.data_ptr())
             except Exception:
                 pass
+        import os as _rg
+        if _rg.environ.get("DSPARK_RING"):
+            try:
+                _bs = int(swa_kv_cache.shape[1])
+                _orig = slot_mapping.flatten().to(torch.int64)
+                _cp = context_positions.flatten().to(torch.int64)
+                # ring within the sequence base block(s): keep each token base block from the
+                # proposer slot for positions < bs, but force positions >= bs to wrap into the
+                # SAME base block as position 0 of that contiguous run (single-seq ring).
+                _base_block = (_orig[0] // _bs)
+                slot_mapping = (_base_block * _bs + (_cp % _bs)).to(slot_mapping.dtype)
+            except Exception as _re:
+                import sys as _rs; print("DSPARK_RING ERR %r"%(_re,), file=_rs.stderr, flush=True)
         if slot_mapping.dim() == 1:
             slot_mapping = DeviceOperator.format_dsa_slot_mapping(
                 slot_mapping.to(torch.int64), block_size)
@@ -335,12 +393,16 @@ class DeepSeekV4DSparkModel(nn.Module):
         # by the mask embedding). For pos0 this is exactly MTP-1's hnorm(last_hidden).
         x = base.unsqueeze(-2).repeat(1, self.hc_mult, 1)   # [T, hc_mult, hidden]
         residual = None
+        if _os.environ.get("DSPARK_CAPTURE"):
+            self._cap_stageinit = x.detach().cpu().float(); self._cap_inputids = input_ids.detach().cpu()
         if _os.environ.get("DSPARK_DBG"):
             import sys as _sst
             try: print("DSPARK_STAGE init x.std=%.4f x.norm=%.2f emb.std=%.4f" % (float(x.float().std()), float(x.float().norm()), float(base.float().std())), file=_sst.stderr, flush=True)
             except Exception as _e0: print("DSPARK_STAGE init ERR", _e0, file=_sst.stderr, flush=True)
         for _li, layer in enumerate(self.layers):
             x, residual = layer(positions=positions, hidden_states=x, residual=residual)
+            if _os.environ.get("DSPARK_CAPTURE"):
+                setattr(self, "_cap_stage%d" % _li, x.detach().cpu().float())
             if _os.environ.get("DSPARK_DBG"):
                 import sys as _sst2
                 try:
@@ -357,6 +419,39 @@ class DeepSeekV4DSparkModel(nn.Module):
         xc = _hc_head(x, self.hc_head_fn, self.hc_head_scale, self.hc_head_base,
                       self.rms_norm_eps, self.hc_eps)          # [.., hidden]
         U = self.logits_processor(self.shared_head.head, self.shared_head(xc))
+        import os as _capb
+        if _capb.environ.get("DSPARK_CAPTURE") and not _capb.path.exists("/data1/dspark_capture.pt"):
+            try:
+                import torch as _tc
+                _snap = {
+                    "backbone_x": x.detach().cpu().float(),
+                    "stage_init": getattr(self, "_cap_stageinit", None),
+                    "input_ids_blk": getattr(self, "_cap_inputids", None),
+                    "stage0": getattr(self, "_cap_stage0", None),
+                    "stage1": getattr(self, "_cap_stage1", None),
+                    "postattn": (__import__("vllm_ascend.models.deepseek_v4", fromlist=["_DSPARK_PA"])._DSPARK_PA[:]),
+                    "xc_hchead": xc.detach().cpu().float(),
+                    "base_U": U.detach().cpu().float(),
+                    "anchor": anchor_ids.detach().cpu(),
+                    "aux": getattr(self, "_cap_aux", None),
+                    "mainproj_out": getattr(self, "_cap_mainproj_out", None),
+                    "main_x": getattr(self, "_cap_mainx", None),
+                    "main_norm_w": self.main_norm.weight.detach().cpu().float() if hasattr(self,"main_norm") else None,
+                    "hc_head_fn": self.hc_head_fn.detach().cpu().float(),
+                    "hc_head_scale": self.hc_head_scale.detach().cpu().float(),
+                    "hc_head_base": self.hc_head_base.detach().cpu().float(),
+                    "shared_norm_w": self.shared_head.norm.weight.detach().cpu().float() if hasattr(self.shared_head,"norm") else None,
+                    "markov_w1": self.markov_head.markov_w1.weight.detach().cpu().float(),
+                    "markov_w2": self.markov_head.markov_w2.weight.detach().cpu().float(),
+                    "rms_norm_eps": float(self.rms_norm_eps),
+                    "hc_eps": float(self.hc_eps),
+                    "block_size": int(self.block_size),
+                    "hc_mult": int(self.hc_mult),
+                }
+                _tc.save(_snap, "/data1/dspark_capture.pt")
+                import sys as _sc; print("DSPARK_CAPTURE saved snapshot keys=%s" % list(_snap.keys()), file=_sc.stderr, flush=True)
+            except Exception as _ce:
+                import sys as _sc; print("DSPARK_CAPTURE ERR %r"%(_ce,), file=_sc.stderr, flush=True)
         B = anchor_ids.shape[0]
         U = U.view(B, self.block_size, -1)
         xc = xc.view(B, self.block_size, -1)

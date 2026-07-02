@@ -108,6 +108,28 @@ def greedy_sample(logits: torch.Tensor) -> torch.Tensor:
     return target_argmax
 
 
+def schedule_prefix_lengths(conf_logits, tau=0.5, sps_budget=None):
+    """DSPARK_SCHED_V1: Algorithm-1 confidence scheduler (phase-1 per-request).
+    conf_logits [B, gamma] RAW confidence logits (Eq.7, pre-sigmoid). Returns
+    ell [B] = admitted speculative prefix length per request. a_{r,j}=prod(sigmoid c)
+    is monotonically non-increasing => admit = (a>=theta) is a leading-True prefix =>
+    ell = count of leading Trues (causal barrier, lossless early-stop). SPS(B) global
+    budget reallocation is phase-3 (sps_budget hook)."""
+    import torch as _t
+    c = _t.sigmoid(conf_logits.float())
+    a = _t.cumprod(c, dim=1)
+    theta = tau
+    ell = (a >= theta).int().sum(dim=1)
+    if sps_budget is not None:
+        # phase-3: greedily cap total admitted tokens to the batch compute budget,
+        # dropping lowest-a tail positions first. (stub: honor per-req ell for now.)
+        while int(ell.sum()) > sps_budget and int(ell.max()) > 0:
+            _j = a.gather(1, (ell.clamp_min(1) - 1).unsqueeze(1)).squeeze(1)
+            _j = _j.masked_fill(ell == 0, float('inf'))
+            ell[int(_j.argmin())] -= 1
+    return ell
+
+
 class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     _runnable: ACLGraphWrapper | Callable
 
@@ -1075,6 +1097,17 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 _anchor = self.input_ids[(_tidx[:, 0] - 1).long()].contiguous()
                 _sh = last_hidden_states.index_select(0, _raw_tidx.long())
             _mout, _mconf = self.model.compute_block(_sh, _anchor, 0.0)
+            import os as _sch, sys as _schs
+            if _sch.environ.get("DSPARK_SCHED") and _mconf is not None:
+                try:
+                    _tau = float(_sch.environ.get("DSPARK_SCHED_TAU", "0.5"))
+                    _ell = schedule_prefix_lengths(_mconf.view(_mout.shape[0], -1), tau=_tau)
+                    _cprob = __import__("torch").sigmoid(_mconf.float()).view(_mout.shape[0], -1)
+                    print("DSPARK_SCHED tau=%.2f B=%d ell=%s meanEll=%.2f conf0=%s" % (
+                        _tau, _mout.shape[0], _ell[:8].tolist(), float(_ell.float().mean()),
+                        [round(float(x),3) for x in _cprob[0].tolist()]), file=_schs.stderr, flush=True)
+                except Exception as _sce:
+                    print("DSPARK_SCHED ERR %r" % (_sce,), file=_schs.stderr, flush=True)
             if _mkv.environ.get("DSPARK_DBG"):
                 import sys as _ms
                 _base = self.model.compute_logits(_sh).argmax(-1).view(-1, _nq)

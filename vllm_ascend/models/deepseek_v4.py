@@ -29,6 +29,7 @@ from collections.abc import Callable, Iterable
 from itertools import islice
 
 import torch
+_DSPARK_PA = []  # DSpark stage post-attention capture
 import torch.nn.functional as F
 import torch_npu
 from torch import nn
@@ -994,6 +995,13 @@ class DeepseekV2DecoderLayer(nn.Module):
         attn_kwargs = {"positions": positions, "hidden_states": hidden_states, "llama_4_scaling": llama_4_scaling}
         hidden_states = self.self_attn(**attn_kwargs)
         hidden_states = self.hc_post(hidden_states, residual, post, comb)
+        import os as _paos
+        if _paos.environ.get("DSPARK_CAPTURE") and hidden_states.shape[0] in (5, 6):
+            try:
+                _DSPARK_PA.append(hidden_states.detach().cpu().float())
+                del _DSPARK_PA[:-3]
+            except Exception:
+                pass
         residual = hidden_states.clone()
         hidden_states, post, comb = self.hc_pre(hidden_states, self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base)
         hidden_states = self.post_attention_layernorm(hidden_states)
