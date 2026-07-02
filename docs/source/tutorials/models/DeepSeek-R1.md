@@ -7,6 +7,8 @@ This article takes the `DeepSeek-R1-W8A8` version as an example to introduce the
 
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, accuracy and performance evaluation.
 
+This document is validated and written based on **vLLM-Ascend v0.13.0**. The current model (DeepSeek-R1) is first supported in this version.
+
 ## 2 Supported Features
 
 Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
@@ -187,11 +189,17 @@ The service returns HTTP 200 OK with a JSON response containing the `choices` fi
 
 Run the following scripts on two nodes respectively.
 
-**Node 0**
+:::::{tab-set}
+:sync-group: Deployment
+
+::::{tab-item} Node 0
+:sync: Node 0
 
 Startup Command:
 
-```shell
+```{code-block} bash
+   :substitutions:
+
 #!/bin/sh
 
 # this obtained through ifconfig
@@ -233,11 +241,14 @@ vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
 ```
 
-**Node 1**
+::::
+::::{tab-item} Node 1
+:sync: Node 1
 
 Startup Command:
 
-```shell
+```{code-block} bash
+   :substitutions:
 #!/bin/sh
 
 # this is obtained through ifconfig
@@ -281,6 +292,9 @@ vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
   --speculative-config '{"num_speculative_tokens":3,"method":"mtp"}' \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
 ```
+
+::::
+:::::
 
 Key Parameter Descriptions:
 
@@ -399,3 +413,13 @@ vllm bench serve --model path/DeepSeek-R1-W8A8  --dataset-name random --random-i
 ```
 
 After about several minutes, you can get the performance evaluation result.
+
+## 9 Performance Tuning
+
+We recommend using DeepSeek-V3.1 for deployment: [DeepSeek-V3.1](./DeepSeek-V3.1.md).
+
+This solution has been tested and demonstrates excellent performance.
+
+## 10 FAQ
+
+For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).
