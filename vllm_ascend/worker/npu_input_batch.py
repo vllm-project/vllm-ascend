@@ -25,9 +25,28 @@ from vllm.v1.kv_cache_interface import KVCacheGroupSpec
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.pool.metadata import PoolingStates
 from vllm.v1.sample.logits_processor import BatchUpdateBuilder, LogitsProcessors
-from vllm.v1.worker.gpu_input_batch import InputBatch
+from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
 from vllm_ascend.worker.block_table import MultiGroupBlockTable
+
+# Monkey-patch CachedRequestState.num_tokens to handle
+# preempted-then-resumed requests correctly.
+# For preempted requests, the scheduler sends prefill_token_ids
+# (prompt + old output tokens). We store its length as
+# _prefill_token_count. The patched num_tokens uses that as
+# the base instead of num_prompt_tokens (which only has the
+# original prompt length).
+_original_num_tokens_prop = CachedRequestState.num_tokens
+
+
+def _patched_num_tokens(self) -> int:
+    prefill_count = getattr(self, "_prefill_token_count", 0)
+    if prefill_count:
+        return prefill_count + len(self.output_token_ids)
+    return self.num_prompt_tokens + len(self.output_token_ids)
+
+
+CachedRequestState.num_tokens = property(_patched_num_tokens)
 
 
 class NPUInputBatch(InputBatch):
