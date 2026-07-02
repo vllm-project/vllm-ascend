@@ -38,8 +38,6 @@ defaults:
 
 env:
   UPSTREAM_REPO: vllm-project/vllm-ascend
-  WORK_REPO_DIR: ${{ github.workspace }}/vllm-ascend
-  VLLM_DIR: ${{ github.workspace }}/vllm
   MAIN2MAIN_MODEL: deepseek/deepseek-v4-pro
   
 
@@ -67,7 +65,6 @@ jobs:
     defaults:
       run:
         shell: bash -el {0}
-        working-directory: ${{ env.WORK_REPO_DIR }}
     env:
       GH_TOKEN: ${{ secrets.PAT_TOKEN }}
       MAIN2MAIN_IMAGE_TAG: 9.0.0-910b-ubuntu22.04-py3.12
@@ -77,7 +74,7 @@ jobs:
       HEAD_FORK: vllm-ascend-ci/vllm-ascend
       MAIN2MAIN_KEEP_BRANCH: 'true'
       MAIN2MAIN_WORKSPACE: /tmp/main2main_flow/workspace
-      MAIN2MAIN_CASES_FILE: ${{ github.workspace }}/vllm-ascend/.github/workflows/scripts/main2main_tests.json
+      MAIN2MAIN_CASES_FILE: .github/workflows/scripts/main2main_tests.json
       MAIN2MAIN_LOG_HELPERS: |
         print_group() {
           local title="$1"
@@ -98,7 +95,9 @@ jobs:
         with:
           fetch-depth: 0
           submodules: recursive
-          path: vllm-ascend
+
+      - name: Exclude vllm dir from ascend git
+        run: echo "vllm-upstream/" >> .git/info/exclude
 
       - name: Load main2main test cases
         run: |
@@ -121,7 +120,7 @@ jobs:
         with:
           repository: vllm-project/vllm
           ref: ${{ env.TARGET_COMMIT != '' && env.TARGET_COMMIT || 'main' }}
-          path: vllm
+          path: vllm-upstream
           fetch-depth: 0
 
       - name: Validate target commit
@@ -140,19 +139,19 @@ jobs:
           pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
           pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           apt-get update -y
-          if [ -s "${WORK_REPO_DIR}/packages.txt" ]; then
-            xargs -r apt-get -y install < "${WORK_REPO_DIR}/packages.txt"
+          if [ -s "$GITHUB_WORKSPACE/packages.txt" ]; then
+            xargs -r apt-get -y install < "$GITHUB_WORKSPACE/packages.txt"
           fi
           apt-get -y install git curl ca-certificates gcc g++ cmake libnuma-dev clang-15 jq gh
           update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
           update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
-          git config --global --add safe.directory "${WORK_REPO_DIR}"
-          git config --global --add safe.directory "${VLLM_DIR}"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE/vllm-upstream"
           pip install uv pytest
 
       - name: Configure git identity
         if: always()
-        working-directory: ${{ env.WORK_REPO_DIR }}
+        working-directory: ${{ github.workspace }}
         run: |
           set -eu
           git config user.name "main2main-bot"
@@ -233,15 +232,15 @@ jobs:
         uses: runs-on/cache/restore@v5
         with:
           path: |
-            vllm-ascend/vllm_ascend/_cann_ops_custom
-            vllm-ascend/vllm_ascend/*.so
-            vllm-ascend/vllm_ascend/lib
-            vllm-ascend/vllm_ascend/include
+            vllm_ascend/_cann_ops_custom
+            vllm_ascend/*.so
+            vllm_ascend/lib
+            vllm_ascend/include
           key: vllm-ascend-build-v1-${{ steps.get_arch.outputs.arch }}-${{ env.MAIN2MAIN_IMAGE_TAG }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
       - name: Create working branch
         id: branch
-        working-directory: ${{ env.WORK_REPO_DIR }}
+        working-directory: ${{ github.workspace }}
         run: |
           set -eu
           BRANCH="main2main_auto_$(date +%Y-%m-%d_%H-%M)"
@@ -268,18 +267,18 @@ jobs:
             "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${MOONCAKE_WHEEL}"
 
       - name: Install vllm-project/vllm from source
-        working-directory: ${{ env.VLLM_DIR }}
+        working-directory: vllm-upstream
         run: |
           VLLM_TARGET_DEVICE=empty uv pip install .
           pip uninstall -y triton
 
       - name: Install vllm-ascend
-        working-directory: ${{ env.WORK_REPO_DIR }}
+        working-directory: ${{ github.workspace }}
         run: |
           pip install uc-manager
           uv pip install -r requirements-dev.txt
           uv pip install --force-reinstall --no-deps triton-ascend==3.2.1
-          if find "${{ env.WORK_REPO_DIR }}/vllm_ascend" -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
+          if find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
             echo "CSRC cache hit: .so files found, skip kernel compilation"
             COMPILE_CUSTOM_KERNELS=0 uv pip install -e .
           else
@@ -292,10 +291,10 @@ jobs:
         uses: runs-on/cache/save@v5
         with:
           path: |
-            vllm-ascend/vllm_ascend/_cann_ops_custom
-            vllm-ascend/vllm_ascend/*.so
-            vllm-ascend/vllm_ascend/lib
-            vllm-ascend/vllm_ascend/include
+            vllm_ascend/_cann_ops_custom
+            vllm_ascend/*.so
+            vllm_ascend/lib
+            vllm_ascend/include
           key: vllm-ascend-build-v1-${{ steps.get_arch.outputs.arch }}-${{ env.MAIN2MAIN_IMAGE_TAG }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
       - name: Run main2main flow
@@ -330,8 +329,8 @@ jobs:
 
           set +e
           kickoff \
-            --vllm-path "${VLLM_DIR}" \
-            --vllm-ascend-path "${WORK_REPO_DIR}" \
+            --vllm-path "$GITHUB_WORKSPACE/vllm-upstream" \
+            --vllm-ascend-path "$GITHUB_WORKSPACE" \
             --target-commit "${TARGET_COMMIT}" \
             2> /tmp/main2main/kickoff.err \
             | tee /tmp/main2main/kickoff.log
@@ -378,7 +377,7 @@ jobs:
 
       - name: Summarize final status
         id: final-status
-        working-directory: ${{ env.WORK_REPO_DIR }}
+        working-directory: ${{ github.workspace }}
         if: always()
         run: |
           set -eu
@@ -433,7 +432,7 @@ jobs:
 
       - name: Create manual review issue
         if: steps.final-status.outputs.manual_review_required == 'true'
-        working-directory: ${{ env.WORK_REPO_DIR }}
+        working-directory: ${{ github.workspace }}
         run: |
           eval "${MAIN2MAIN_LOG_HELPERS}"
 
