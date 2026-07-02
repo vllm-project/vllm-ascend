@@ -132,7 +132,7 @@ def set_ascend_forward_context(
             flash_comm_v1_enabled = False
         else:
             flash_comm_v1_enabled = enable_sp(vllm_config) and num_tokens is not None and num_tokens > 1000
-        forward_context.mmrs_fusion = mmrs_fusion
+        forward_context.mmrs_fusion = True # lbt debug
         forward_context.num_tokens = num_tokens
         forward_context.flash_comm_v1_enabled = flash_comm_v1_enabled
         # TODO(Levi-JQ): another PR to normalize the enabling logic for sp/fc2

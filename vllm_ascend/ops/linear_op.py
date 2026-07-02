@@ -67,13 +67,16 @@ from vllm_ascend.distributed.parallel_state import (
     get_flashcomm2_otp_group,
     get_mlp_tp_group,
     get_otp_group,
+    get_ccu_sched_group,
 )
 from vllm_ascend.ops.flashcomm2_oshard_manager import flashcomm2_oshard_manager
 from vllm_ascend.utils import (
+    AscendDeviceType,
     enable_dsa_cp,
     enable_dsa_cp_with_layer_shard,
     enable_sp,
     flashcomm2_enable,
+    get_ascend_device_type,
     get_flashcomm2_reorgnized_batch_ids,
     get_weight_prefetch_method,
     is_vl_model,
@@ -556,8 +559,15 @@ class SequenceRowParallelOp(CustomRowParallelOp):
             x = F.pad(x, (0, 0, 0, pad_size))
 
         world_size = self.layer.tp_size
-        comm_mode = "aiv"
-        hcom_name = get_tp_group().device_group._get_backend(torch.device("npu")).get_hccl_comm_name(self.layer.tp_rank)
+
+        soc_version = get_ascend_device_type()
+        if soc_version == AscendDeviceType.A5:
+            comm_mode = None
+            ccu_sched_group = get_ccu_sched_group()
+            hcom_name = ccu_sched_group.device_group._get_backend(torch.device("npu")).get_hccl_comm_name(ccu_sched_group.rank_in_group)
+        else:
+            comm_mode = "aiv"
+            hcom_name = get_tp_group().device_group._get_backend(torch.device("npu")).get_hccl_comm_name(self.layer.tp_rank)
 
         from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 
@@ -595,18 +605,32 @@ class SequenceRowParallelOp(CustomRowParallelOp):
             quant_bias = self.layer.quant_bias
             deq_scale = self.layer.deq_scale
             output_dtype = torch.bfloat16
-            output = torch_npu.npu_mm_reduce_scatter_base(
-                x_quant,
-                self.layer.weight,
-                hcom_name,
-                world_size,
-                reduce_op="sum",
-                bias=None,
-                comm_turn=0,
-                x2_scale=deq_scale,
-                output_dtype=output_dtype,
-                comm_mode=comm_mode,
-            )
+            if soc_version == AscendDeviceType.A5:
+                output, _ = torch_npu.npu_quant_mm_reduce_scatter(
+                    x_quant,
+                    self.layer.weight,
+                    hcom_name,
+                    world_size,
+                    reduce_op="sum",
+                    bias=None,
+                    comm_turn=0,
+                    x2_scale=deq_scale,
+                    y_dtype=output_dtype,
+                    comm_mode=None,
+                )
+            else:
+                output = torch_npu.npu_mm_reduce_scatter_base(
+                    x_quant,
+                    self.layer.weight,
+                    hcom_name,
+                    world_size,
+                    reduce_op="sum",
+                    bias=None,
+                    comm_turn=0,
+                    x2_scale=deq_scale,
+                    output_dtype=output_dtype,
+                    comm_mode=comm_mode,
+                )
             output = torch.add(output, torch.mul(quant_bias, deq_scale).to(self.layer.params_dtype))
         else:
             output_parallel = self.layer.quant_method.apply(self.layer, x, bias=bias_)
