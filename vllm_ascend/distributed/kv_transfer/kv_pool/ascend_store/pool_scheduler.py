@@ -624,6 +624,10 @@ class KVPoolScheduler:
         """HMA path for hybrid KV cache groups."""
         if self.kv_role == "kv_consumer" and not self.consumer_is_to_put:
             return False, None
+        if self.use_layerwise:
+            # Free now: layerwise records no sending event, so delay-free would leak.
+            self._delayed_free_req_ids.discard(request.request_id)
+            return False, None
         tracker = self._request_trackers.get(request.request_id)
         if tracker is not None and tracker.num_saved_tokens <= 0:
             return False, None
