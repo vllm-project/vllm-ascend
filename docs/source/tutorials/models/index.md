@@ -42,6 +42,7 @@ LLaVA-OneVision-Qwen2-0.5B-OV.md
 gpt-oss-120b.md
 Mixtral-8x7B-Instruct-v0.1.md
 Qwen3-ASR-1.7B.md
+Qwen2.5-1.5B-apeach.md
 Qwen2.5-Math-RM-72B.md
 InternVL3.5
 :::
