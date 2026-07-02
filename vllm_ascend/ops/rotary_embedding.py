@@ -150,6 +150,59 @@ def get_cos_and_sin_slice():
     return _cos_slice, _sin_slice
 
 
+def _rope_forward_native(
+    positions: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    head_size: int,
+    rotary_dim: int,
+    is_neox_style: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Native PyTorch implementation for rope forward.
+
+    This is used as a fallback when NPU operators don't support the configuration,
+    such as GLM models where rotary_dim = head_size // 2.
+    """
+    query_shape, key_shape = query.shape, key.shape
+    num_tokens = query.shape[0]
+
+    query = query.view(num_tokens, -1, head_size)
+    key = key.view(num_tokens, -1, head_size)
+
+    q_rot = query[..., :rotary_dim]
+    q_pass = query[..., rotary_dim:]
+    k_rot = key[..., :rotary_dim]
+    k_pass = key[..., rotary_dim:]
+
+    # cos_sin_cache shape: [max_seq_len, rotary_dim]
+    # First half is cos, second half is sin
+    half_dim = rotary_dim // 2
+    cos = cos_sin_cache[positions, :half_dim]
+    sin = cos_sin_cache[positions, half_dim:]
+
+    cos = cos.unsqueeze(1)
+    sin = sin.unsqueeze(1)
+
+    if is_neox_style:
+        q1, q2 = q_rot.chunk(2, dim=-1)
+        k1, k2 = k_rot.chunk(2, dim=-1)
+        q_rot_new = torch.cat([q1 * cos - q2 * sin, q2 * cos + q1 * sin], dim=-1)
+        k_rot_new = torch.cat([k1 * cos - k2 * sin, k2 * cos + k1 * sin], dim=-1)
+    else:
+        q1 = q_rot[..., ::2]
+        q2 = q_rot[..., 1::2]
+        k1 = k_rot[..., ::2]
+        k2 = k_rot[..., 1::2]
+        q_rot_new = torch.stack([q1 * cos - q2 * sin, q2 * cos + q1 * sin], dim=-1).flatten(-2)
+        k_rot_new = torch.stack([k1 * cos - k2 * sin, k2 * cos + k1 * sin], dim=-1).flatten(-2)
+
+    query = torch.cat([q_rot_new, q_pass], dim=-1)
+    key = torch.cat([k_rot_new, k_pass], dim=-1)
+
+    return query.view(query_shape), key.view(key_shape)
+
+
 def rope_forward_oot(
     positions: torch.Tensor,
     query: torch.Tensor,
@@ -175,6 +228,21 @@ def rope_forward_oot(
         )
     else:
         if rotary_dim < head_size:
+            # Check if NPU operator supports this configuration.
+            # GLM models use rotary_dim = head_size // 2, which NPU RopeOperation
+            # doesn't support (error: "Wrong rotaryCoeff"). Fall back to native
+            # PyTorch implementation in this case.
+            # See: https://github.com/vllm-project/vllm-ascend/issues/2258
+            if rotary_dim * 2 == head_size:
+                return _rope_forward_native(
+                    positions,
+                    query,
+                    key,
+                    cos_sin_cache,
+                    head_size,
+                    rotary_dim,
+                    is_neox_style,
+                )
             num_tokens = query.shape[0]
             query = query.view(num_tokens, -1, head_size)
             key = key.view(num_tokens, -1, head_size)
