@@ -1557,6 +1557,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             return total_num_output_tokens, token_indices_to_sample, new_cad, None
 
     def model_returns_tuple(self) -> bool:
+        if self.method == "mtp":
+            # DeepSeek-family MTP (deepseek_mtp.py) recycles the post-final-
+            # norm hidden, so its forward returns (logit_hidden,
+            # recycle_hidden). Other MTP families return a single tensor.
+            draft_model_config = getattr(self, "draft_model_config", None)
+            hf_config = getattr(draft_model_config, "hf_config", None)
+            architectures = getattr(hf_config, "architectures", []) or []
+            return "DeepSeekMTPModel" in architectures
         return self.method not in ("mtp", "draft_model", "dflash")
 
     def attn_update_stack_num_spec_norm(
