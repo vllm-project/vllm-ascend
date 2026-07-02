@@ -35,7 +35,7 @@ msgstr "DeepSeek-V4在DeepSeek-V3基础上引入了多项关键升级："
 msgid ""
 "The Manifold-Constrained Hyper-Connections (mHC) to strengthen "
 "conventional residual connections."
-msgstr "流形约束超连接(mHC)增强传统残差连接；"
+msgstr "流形约束超连接(mHC)增强传统残差连接。"
 
 #: ../../source/tutorials/models/DeepSeek-V4-Flash.md:8
 msgid ""
