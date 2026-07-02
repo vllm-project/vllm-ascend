@@ -19,7 +19,7 @@ name: Handle /nightly Command
 
 on:
   repository_dispatch:
-    types: [nightly-command]
+    types: [nightly-command, weekly-command]
 
 defaults:
   run:
@@ -44,6 +44,7 @@ jobs:
       dispatch_a2: ${{ steps.resolve.outputs.dispatch_a2 }}
       dispatch_a3: ${{ steps.resolve.outputs.dispatch_a3 }}
       vllm_ascend_ref: ${{ steps.resolve.outputs.vllm_ascend_ref }}
+      command: ${{ steps.resolve.outputs.command }}
     steps:
       - name: Install system dependencies
         run: |
@@ -60,6 +61,8 @@ jobs:
           token: ${{ secrets.PAT_TOKEN }}
           sparse-checkout: |
             .github/workflows/scripts/resolve_nightly_tests.py
+            .github/workflows/configs/nightly_config.yaml
+            .github/workflows/configs/weekly_config.yaml
           sparse-checkout-cone-mode: false
 
       - name: Check user authorization
@@ -105,10 +108,15 @@ jobs:
           ALL_ARGS: ${{ github.event.client_payload.slash_command.args.all }}
           PR_URL: ${{ github.event.client_payload.github.payload.issue.pull_request.url }}
         run: |
+          # Derive command type from repository_dispatch action (e.g. nightly-command -> nightly)
+          COMMAND='${{ github.event.repository_dispatch.action }}'
+          COMMAND="${COMMAND%-command}"
+          echo "command=$COMMAND" >> "$GITHUB_OUTPUT"
+
           ALL_ARGS=$(echo "$ALL_ARGS" | xargs)
           if [ -z "$ALL_ARGS" ]; then
             gh api "repos/${{ github.event.client_payload.github.payload.repository.full_name }}/issues/${{ github.event.client_payload.github.payload.issue.number }}/comments" \
-              -f body="[Bot]: \`/nightly\` without test names will not dispatch. Please specify test names, e.g. \`/nightly all\` or \`/nightly test_custom_op\`." \
+              -f body="[Bot]: \`/$COMMAND\` without test names will not dispatch. Please specify test names, e.g. \`/$COMMAND all\` or \`/$COMMAND test_custom_op\`." \
               --silent
             exit 1
           fi
@@ -133,7 +141,7 @@ jobs:
 
           if [ -z "$TEST_CASES" ]; then
             gh api "repos/${{ github.event.client_payload.github.payload.repository.full_name }}/issues/${{ github.event.client_payload.github.payload.issue.number }}/comments" \
-              -f body="[Bot]: \`/nightly\` without test names will not dispatch. Please specify test names, e.g. \`/nightly all\` or \`/nightly test_custom_op\`." \
+              -f body="[Bot]: \`/$COMMAND\` without test names will not dispatch. Please specify test names, e.g. \`/$COMMAND all\` or \`/$COMMAND test_custom_op\`." \
               --silent
             exit 1
           fi
@@ -142,7 +150,6 @@ jobs:
           echo "test_cases=$TEST_CASES" >> "$GITHUB_OUTPUT"
           echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
 
-          PR_BRANCH=$(gh api "$PR_URL" --jq '.head.ref')
           HEAD_REPO=$(gh api "$PR_URL" --jq '.head.repo.full_name')
           PR_SHA=$(gh api "$PR_URL" --jq '.head.sha')
           echo "vllm_ascend_ref=$PR_SHA" >> "$GITHUB_OUTPUT"
@@ -153,23 +160,26 @@ jobs:
             exit 0
           fi
 
-          # Parse test matrices from the PR branch's workflow YAML files
-          pip install pyyaml -q 2>/dev/null
+          # Fetch the matching test matrix from the exact PR commit (not branch HEAD,
+          # to match vllm_ascend_ref). Nightly reads nightly_config.yaml; weekly reads
+          # weekly_config.yaml. resolve_nightly_tests.py picks the non-empty one.
+          case "$COMMAND" in
+            nightly)
+              NIGHTLY_MATRIX=$(gh api "repos/$HEAD_REPO/contents/.github/workflows/configs/nightly_config.yaml?ref=$PR_SHA" --jq '.content' 2>/dev/null || echo "")
+              ;;
+            weekly)
+              WEEKLY_MATRIX=$(gh api "repos/$HEAD_REPO/contents/.github/workflows/configs/weekly_config.yaml?ref=$PR_SHA" --jq '.content' 2>/dev/null || echo "")
+              ;;
+          esac
+          export NIGHTLY_MATRIX
+          export WEEKLY_MATRIX
 
-          A2_RAW=$(gh api "repos/$HEAD_REPO/contents/.github/workflows/schedule_nightly_test_a2.yaml?ref=$PR_BRANCH" --jq '.content' 2>/dev/null || echo "")
-          export A2_RAW
-          A3_RAW=$(gh api "repos/$HEAD_REPO/contents/.github/workflows/schedule_nightly_test_a3.yaml?ref=$PR_BRANCH" --jq '.content' 2>/dev/null || echo "")
-          export A3_RAW
-          A2_ACC_GROUPS=$(gh api "repos/$HEAD_REPO/contents/tests/e2e/models/configs/accuracy_groups_a2.json?ref=$PR_BRANCH" --jq '.content' 2>/dev/null || echo "")
-          export A2_ACC_GROUPS
-          export TEST_CASES
-
-          python3 .github/workflows/scripts/resolve_nightly_tests.py
+          python3 .github/workflows/scripts/resolve_nightly_tests.py --mode=dispatch
 
   dispatch-a2:
     name: Trigger Nightly-A2
     needs: [authorize]
-    if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.dispatch_a2 == 'true'
+    if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.command == 'nightly' && needs.authorize.outputs.dispatch_a2 == 'true'
     runs-on: linux-amd64-cpu-4-hk
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
@@ -209,7 +219,7 @@ jobs:
   dispatch-a3:
     name: Trigger Nightly-A3
     needs: [authorize]
-    if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.dispatch_a3 == 'true'
+    if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.command == 'nightly' && needs.authorize.outputs.dispatch_a3 == 'true'
     runs-on: linux-amd64-cpu-4-hk
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
@@ -246,16 +256,96 @@ jobs:
           echo "a3_run_id=$A3_RUN_ID" >> "$GITHUB_OUTPUT"
           echo "Dispatched Nightly-A3 with test_cases='${{ needs.authorize.outputs.test_cases }}', branch='${{ needs.authorize.outputs.branch }}'"
 
+  dispatch-weekly-a2:
+    name: Trigger Weekly-A2
+    needs: [authorize]
+    if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.command == 'weekly' && needs.authorize.outputs.dispatch_a2 == 'true'
+    runs-on: linux-amd64-cpu-4-hk
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
+    outputs:
+      weekly_a2_run_id: ${{ steps.dispatch_weekly_a2.outputs.weekly_a2_run_id }}
+    steps:
+      - name: Install system dependencies
+        run: |
+          sudo mkdir -p -m 755 /etc/apt/keyrings
+          curl -sL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null
+          sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+          sudo apt-get update -y
+          sudo apt-get install gh -y
+
+      - name: Dispatch weekly-a2 workflow
+        id: dispatch_weekly_a2
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
+          REQUEST_ID='${{ github.run_id }}'
+          gh workflow run schedule_weekly_test_a2.yaml \
+            --repo "$REPO" \
+            --ref main \
+            -f test_cases='${{ needs.authorize.outputs.test_cases }}' \
+            -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
+            -f request_id="$REQUEST_ID" \
+            -f skip_build_image=true \
+            -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}'
+          sleep 8
+          A2_RUN_ID=$(gh api "repos/$REPO/actions/workflows/schedule_weekly_test_a2.yaml/runs?per_page=1" \
+            --jq '.workflow_runs[0].id')
+          echo "weekly_a2_run_id=$A2_RUN_ID" >> "$GITHUB_OUTPUT"
+          echo "Dispatched Weekly-A2 with test_cases='${{ needs.authorize.outputs.test_cases }}', branch='${{ needs.authorize.outputs.branch }}'"
+
+  dispatch-weekly-a3:
+    name: Trigger Weekly-A3
+    needs: [authorize]
+    if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.command == 'weekly' && needs.authorize.outputs.dispatch_a3 == 'true'
+    runs-on: linux-amd64-cpu-4-hk
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
+    outputs:
+      weekly_a3_run_id: ${{ steps.dispatch_weekly_a3.outputs.weekly_a3_run_id }}
+    steps:
+      - name: Install system dependencies
+        run: |
+          sudo mkdir -p -m 755 /etc/apt/keyrings
+          curl -sL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null
+          sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+          sudo apt-get update -y
+          sudo apt-get install gh -y
+
+      - name: Dispatch weekly-a3 workflow
+        id: dispatch_weekly_a3
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
+          REQUEST_ID='${{ github.run_id }}'
+          gh workflow run schedule_weekly_test_a3.yaml \
+            --repo "$REPO" \
+            --ref main \
+            -f test_cases='${{ needs.authorize.outputs.test_cases }}' \
+            -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
+            -f request_id="$REQUEST_ID" \
+            -f skip_build_image=true \
+            -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}'
+          sleep 8
+          A3_RUN_ID=$(gh api "repos/$REPO/actions/workflows/schedule_weekly_test_a3.yaml/runs?per_page=1" \
+            --jq '.workflow_runs[0].id')
+          echo "weekly_a3_run_id=$A3_RUN_ID" >> "$GITHUB_OUTPUT"
+          echo "Dispatched Weekly-A3 with test_cases='${{ needs.authorize.outputs.test_cases }}', branch='${{ needs.authorize.outputs.branch }}'"
+
   post-links:
-    name: Post nightly workflow links
-    needs: [authorize, dispatch-a2, dispatch-a3]
+    name: Post workflow links
+    needs: [authorize, dispatch-a2, dispatch-a3, dispatch-weekly-a2, dispatch-weekly-a3]
     if: always() && needs.authorize.outputs.is_authorized == 'true'
     runs-on: linux-amd64-cpu-2-hk
     steps:
       - name: Build comment body
         id: body
         run: |
-          BODY="nightly command triggered."
+          BODY="${{ needs.authorize.outputs.command }} command triggered."
           if [[ "${{ needs.dispatch-a2.result }}" == "success" ]]; then
             BODY="$BODY
           - Nightly-A2: [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ needs.dispatch-a2.outputs.a2_run_id }})"
@@ -263,6 +353,14 @@ jobs:
           if [[ "${{ needs.dispatch-a3.result }}" == "success" ]]; then
             BODY="$BODY
           - Nightly-A3: [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ needs.dispatch-a3.outputs.a3_run_id }})"
+          fi
+          if [[ "${{ needs.dispatch-weekly-a2.result }}" == "success" ]]; then
+            BODY="$BODY
+          - Weekly-A2: [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ needs.dispatch-weekly-a2.outputs.weekly_a2_run_id }})"
+          fi
+          if [[ "${{ needs.dispatch-weekly-a3.result }}" == "success" ]]; then
+            BODY="$BODY
+          - Weekly-A3: [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ needs.dispatch-weekly-a3.outputs.weekly_a3_run_id }})"
           fi
           {
             echo "body<<EOF"

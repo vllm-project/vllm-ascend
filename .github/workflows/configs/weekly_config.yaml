@@ -1,0 +1,85 @@
+# Single source of truth for the Weekly-A2 / Weekly-A3 test matrix.
+# Mirrors nightly_config.yaml's layout but only contains the sections
+# exercised by schedule_weekly_test_a2.yaml and schedule_weekly_test_a3.yaml.
+# Adding a new weekly test case is just appending a `- name: ...` entry
+# under the matching section.
+
+a2:
+  accuracy:
+    # Content migrated from
+    nightly:
+      - name: accuracy-group-2
+        os: linux-aarch64-a2b3-1
+        model_list:
+          - ERNIE-4.5-21B-A3B-PT
+          - Molmo-7B-D-0924
+          - Llama-3.2-3B-Instruct
+
+a3:
+  multi_node:
+    test_config:
+      - name: MiniMax-PD-in32k-bs4-1
+        config_file_path: MiniMax-PD-in32k-bs4-1.yaml
+        size: 3
+      - name: Qwen3.5-397B-w8a8-PD
+        config_file_path: Qwen-3.5-397B-A17B-W8A8-PD.yaml
+        size: 3
+      - name: GLM_5_1_PD_in32k_bs16-0
+        config_file_path: GLM_5_1_PD_in32k_bs16-0.yaml
+        size: 4
+      - name: GLM_5_1_PD_in32k_bs20-90
+        config_file_path: GLM_5_1_PD_in32k_bs20-90.yaml
+        size: 4
+      - name: GLM_5_1_PD_in64k_bs16-90
+        config_file_path: GLM_5_1_PD_in64k_bs16-90.yaml
+        size: 4
+  double_node:
+    test_config:
+      - name: DeepSeek-V3_2-W8A8-EP_weekly
+        config_file_path: DeepSeek-V3_2-W8A8-EP_weekly.yaml
+        size: 2
+      - name: DeepSeek-V3-W8A8_weekly
+        config_file_path: DeepSeek-V3.yaml
+        size: 2
+      - name: multi-node-glm4.7-w8a8c8-layerwise
+        config_file_path: GLM-4.7-W8A8C8-Mooncake-Layerwise.yaml
+        size: 2
+  single_node:
+    test_config:
+      # pytest-driven tests
+      - name: engine-func-tests
+        os: linux-aarch64-a3-4
+        tests: tests/e2e/weekly/single_node/engine_func_test_robot
+      - name: deepseek-v3-2-w8a8
+        os: linux-aarch64-a3-16
+        config_file_path: DeepSeek-V3.2-W8A8_A3_weekly.yaml
+      - name: kimi-k2.5
+        os: linux-aarch64-a3-16
+        config_file_path: Kimi-K2.5.yaml
+      - name: kimi-k2.5-32k-512
+        os: linux-aarch64-a3-16
+        config_file_path: Kimi-K2.5-32k-512.yaml
+      - name: Qwen3.5-397B-A17B-w8a8-mtp
+        os: linux-aarch64-a3-16
+        config_file_path: Qwen3.5-397B-A17B-W8A8-mtp-A3_weekly.yaml
+      - name: MiniMax-M2.5-w8a8-QuaRot-A3
+        os: linux-aarch64-a3-16
+        config_file_path: MiniMax-M2.5-w8a8-QuaRot-A3.yaml
+      - name: Qwen3.5-27B-w8a8-A3
+        os: linux-aarch64-a3-2
+        config_file_path: Qwen3.5-27B-w8a8-A3.yaml
+      - name: Qwen3.5-122B-A10B-W8A8-A3
+        os: linux-aarch64-a3-16
+        config_file_path: Qwen3.5-122B-A10B-W8A8-A3.yaml
+      - name: GLM-5_1-W8A8_A3_weekly
+        os: linux-aarch64-a3-16
+        config_file_path: GLM-5_1-W8A8_A3_weekly.yaml
+      - name: glm-5-w4a8
+        os: linux-aarch64-a3-16
+        config_file_path: GLM-5.yaml
+      - name: qwen2-5-vl-7b-epd
+        os: linux-aarch64-a3-4
+        config_file_path: Qwen2.5-VL-7B-Instruct-EPD.yaml
+      - name: MiniMax-M2.5-w8a8
+        os: linux-aarch64-a3-16
+        config_file_path: MiniMax-M2.5-W8A8-A3.yaml

@@ -56,7 +56,7 @@ repos:
   rev: v1.7.7
   hooks:
   - id: actionlint
-    exclude: '.*\.github/workflows/scripts/.*\.ya?ml$'
+    exclude: '.*\.github/workflows/(scripts|configs)/.*\.ya?ml$'
 
 - repo: local
   hooks:
