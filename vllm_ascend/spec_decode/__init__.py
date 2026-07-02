@@ -20,7 +20,10 @@
 
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
 from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
-from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
+from vllm_ascend.spec_decode.eagle_proposer import (
+    AscendEagleProposer,
+    AscendMultiLayerEagleProposer,
+)
 from vllm_ascend.spec_decode.extract_hidden_states_proposer import (
     AscendExtractHiddenStatesProposer,
 )
@@ -45,6 +48,8 @@ def get_spec_decode_method(method, vllm_config, device, runner):
         if speculative_config is not None and speculative_config.use_step3p5_mtp():
             return AscendStep3p5MTPProposer(vllm_config, device, runner)
         return AscendEagleProposer(vllm_config, device, runner)
+    elif method == "mtp3":
+        return AscendMultiLayerEagleProposer(vllm_config, device, runner)
     elif method == "dflash":
         return AscendDflashProposer(vllm_config, device, runner)
     elif method == "draft_model":
