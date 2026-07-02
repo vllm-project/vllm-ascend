@@ -54,5 +54,18 @@
   </style>
   
   <div class="notification-bar">
-    <p>You are viewing the latest developer preview docs. <a href="https://docs.vllm.ai/projects/ascend/en/v0.18.0">Click here</a> to view docs for the latest stable release(v0.18.0).</p>
+    <p id="version-notification-text"></p>
   </div>
+
+  <script>
+    (function () {
+      var text = document.getElementById("version-notification-text");
+      if (text) {
+        if (window.location.pathname.indexOf("/en/v0.18.0") !== -1) {
+          text.innerHTML = 'You are viewing the stable release (v0.18.0) docs. <a href="https://docs.vllm.ai/projects/ascend/en/latest">Click here</a> to view the latest developer preview docs.';
+        } else {
+          text.innerHTML = 'You are viewing the latest developer preview docs. <a href="https://docs.vllm.ai/projects/ascend/en/v0.18.0">Click here</a> to view docs for the latest stable release(v0.18.0).';
+        }
+      }
+    })();
+  </script>
