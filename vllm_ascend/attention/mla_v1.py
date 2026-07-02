@@ -844,8 +844,11 @@ class AscendMLAImpl(MLAAttentionImpl):
                     fak_descale_float,
                 ) = param
                 if _EXTRA_CTX.is_draft_model:
-                    draft_step = attn_count // num_layers
-                    attn_metadata_current = attn_metadata[draft_step]
+                    if len(attn_metadata) == 1:
+                        attn_metadata_current = attn_metadata[0]
+                    else:
+                        draft_step = attn_count // num_layers
+                        attn_metadata_current = attn_metadata[draft_step]
                     attn_count = attn_count + 1
                 else:
                     attn_metadata_current = attn_metadata
