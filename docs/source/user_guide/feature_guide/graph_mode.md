@@ -15,7 +15,7 @@ This document focuses on the Ascend-specific view: how graph mode works on Ascen
 
 - Graph mode is currently available only on the **V1 Engine**.
 - **ACLGraph** (capture/replay via `torch.npu.NPUGraph`) is the runtime graph execution mechanism used by the default graph path on Ascend.
-- **Npugraph_ex** is a compile-time FX graph optimization layer, enabled by default in FULL/FULL_DECODE_ONLY modes. It optimizes the graph before ACLGraph captures it.
+- **Npugraph_ex** is a compile-time FX graph optimization layer, enabled by default in all graph modes except NONE. It optimizes the graph before ACLGraph captures it.
 - **XliteGraph** is an optional graph path for selected model families and environments.
 - In context parallel scenarios, `cudagraph_mode="FULL"` is not sufficiently supported yet.
 
@@ -32,16 +32,16 @@ vLLM Ascend provides two graph paths:
 
 The default graph path on Ascend involves two stages: **compile-time optimization** and **runtime capture/replay**. ACLGraph handles the runtime capture/replay. The compile-time stage differs by `cudagraph_mode`:
 
-- **FULL_AND_PIECEWISE**: Default mode, same as the upstream vLLM strategy. The compile-time path follows PIECEWISE compilation, while the runtime may still use full-graph behavior for uniform decode batches.
+- **FULL_AND_PIECEWISE**: Default mode, same as the upstream vLLM strategy. The compile-time path follows PIECEWISE compilation with Npugraph_ex FX optimization. The runtime may still use full-graph behavior for uniform decode batches.
 - **FULL / FULL_DECODE_ONLY**: Npugraph_ex optimizes the FX graph via npugraph_ex (`force_eager=True`, compile-time only, no capture). The optimized callable is then captured and replayed by ACLGraph at runtime.
-- **PIECEWISE**: Npugraph_ex is disabled. Only basic FX fusion passes are applied at compile-time. ACLGraph captures and replays the resulting callable at runtime.
+- **PIECEWISE**: Npugraph_ex optimizes each FX subgraph at compile-time. ACLGraph captures and replays the resulting callable at runtime.
 - **NONE**: No compilation or graph capture. The model runs in eager mode.
 
 | `cudagraph_mode` | Compile-time | Runtime | Npugraph_ex |
 |---|---|---|---|
-| FULL_AND_PIECEWISE | Piecewise compilation path | Mixed: PIECEWISE for mixed batches, FULL-capable for uniform decode batches | Disabled |
+| FULL_AND_PIECEWISE | Piecewise compilation with Npugraph_ex FX optimization | Mixed: PIECEWISE for mixed batches, FULL-capable for uniform decode batches | Enabled |
 | FULL / FULL_DECODE_ONLY | Npugraph_ex FX optimization | ACLGraph capture/replay | Enabled |
-| PIECEWISE | Fusion pass only | ACLGraph capture/replay | Disabled |
+| PIECEWISE | Npugraph_ex FX optimization per subgraph | ACLGraph capture/replay | Enabled |
 | NONE | None | Eager execution | Disabled |
 
 Additionally, **XliteGraph** is available as an optional alternative graph path for selected model families (see [Using XliteGraph](#using-xlitegraph)).
@@ -125,14 +125,14 @@ As introduced in the [RFC](https://github.com/vllm-project/vllm-ascend/issues/47
 
 ### Default behavior
 
-Npugraph_ex is **enabled by default** when `cudagraph_mode` is `FULL` or `FULL_DECODE_ONLY`. It is automatically disabled in `PIECEWISE` or `NONE` modes.
+Npugraph_ex is **enabled by default** when `cudagraph_mode` is `FULL`, `FULL_DECODE_ONLY`, `FULL_AND_PIECEWISE`, or `PIECEWISE`. It is automatically disabled only in `NONE` mode.
 
 This means for most users, Npugraph_ex is active without any explicit configuration:
 
 ```python
 from vllm import LLM
 
-# Npugraph_ex is enabled by default in FULL/FULL_DECODE_ONLY mode
+# Npugraph_ex is enabled by default in all graph modes except NONE
 llm = LLM(model="path/to/Qwen2-7B-Instruct")
 outputs = llm.generate("Hello, how are you?")
 ```
