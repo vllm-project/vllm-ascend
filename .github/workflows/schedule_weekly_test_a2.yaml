@@ -114,6 +114,8 @@ jobs:
       cann_image: ${{ steps.export.outputs.cann_image }}
       ascend_log_prefix: ${{ steps.export.outputs.ascend_log_prefix }}
       vllm_ascend_branches: ${{ steps.export.outputs.vllm_ascend_branches }}
+      nightly_matrix: ${{ steps.set-matrix.outputs.nightly_matrix }}
+      pr_only_matrix: ${{ steps.set-matrix.outputs.pr_only_matrix }}
     steps:
       - id: export
         run: |
@@ -125,8 +127,33 @@ jobs:
             echo "vllm_ascend_branches=[\"${normalized}\"]"
           } >> $GITHUB_OUTPUT
 
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Checkout PR code
+        if: github.event_name == 'workflow_dispatch' && inputs.vllm_ascend_ref != ''
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.vllm_ascend_ref }}
+          sparse-checkout: .github/workflows/configs/
+          path: ./pr
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Read A2 weekly test matrix config
+        id: set-matrix
+        env:
+          MATRIX_FILE: ${{ github.event_name == 'workflow_dispatch' && inputs.vllm_ascend_ref != '' && './pr/.github/workflows/configs/weekly_config.yaml' || '.github/workflows/configs/weekly_config.yaml' }}
+          MATRIX_OUTPUTS: '{"nightly_matrix":"a2.accuracy.nightly","pr_only_matrix":"a2.accuracy.pr_only"}'
+        run: |
+          python3 -m pip install pyyaml -q
+          python3 .github/workflows/scripts/resolve_nightly_tests.py --mode=matrix
+
   build-image:
-    name: Build nightly-a2 image
+    name: Build weekly-a2 image
     if: >-
       (github.event_name == 'workflow_dispatch' && inputs.skip_build_image != 'true')
     strategy:
@@ -142,44 +169,18 @@ jobs:
       HW_TOKEN: ${{ secrets.HW_TOKEN }}
       GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
 
-  generate-accuracy-matrix:
-    name: Generate accuracy test matrix
-    needs: [parse-trigger]
-    if: >-
-      always() &&
-      needs.parse-trigger.outputs.run == 'true' && (
-        needs.parse-trigger.outputs.filter == 'all' ||
-        contains(needs.parse-trigger.outputs.filter, 'accuracy-group')
-      )
-    runs-on: linux-aarch64-a2b3-0
-    outputs:
-      nightly_matrix: ${{ steps.set-matrix.outputs.nightly_matrix }}
-      pr_only_matrix: ${{ steps.set-matrix.outputs.pr_only_matrix }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
-
-      - name: Read accuracy group config
-        id: set-matrix
-        run: |
-          CONFIG_FILE="tests/e2e/weekly/single_node/configs/accuracy_groups_a2.json"
-          NIGHTLY=$(jq -c '.nightly' "$CONFIG_FILE")
-          PR_ONLY=$(jq -c '.pr_only' "$CONFIG_FILE")
-          echo "nightly_matrix=${NIGHTLY}" >> "$GITHUB_OUTPUT"
-          echo "pr_only_matrix=${PR_ONLY}" >> "$GITHUB_OUTPUT"
-
   single-node-accuracy-tests:
-    needs: [setup-vars, parse-trigger, build-image, generate-accuracy-matrix]
+    needs: [setup-vars, parse-trigger, build-image]
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&
-      needs.generate-accuracy-matrix.result != 'skipped' &&
+      needs.setup-vars.outputs.nightly_matrix != '[]' &&
       (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
     strategy:
       fail-fast: false
       matrix:
         vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
-        test_config: ${{ fromJson(needs.generate-accuracy-matrix.outputs.nightly_matrix) }}
+        test_config: ${{ fromJson(needs.setup-vars.outputs.nightly_matrix) }}
     uses: ./.github/workflows/_e2e_nightly_single_node_models.yaml
     with:
       runner: ${{ matrix.test_config.os }}
@@ -198,18 +199,18 @@ jobs:
       upload: false
 
   single-node-accuracy-tests-pr-only:
-    needs: [setup-vars, parse-trigger, build-image, generate-accuracy-matrix]
+    needs: [setup-vars, parse-trigger, build-image]
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&
       needs.parse-trigger.outputs.filter != 'all' &&
-      needs.generate-accuracy-matrix.result != 'skipped' &&
+      needs.setup-vars.outputs.pr_only_matrix != '[]' &&
       (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
     strategy:
       fail-fast: false
       matrix:
         vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
-        test_config: ${{ fromJson(needs.generate-accuracy-matrix.outputs.pr_only_matrix) }}
+        test_config: ${{ fromJson(needs.setup-vars.outputs.pr_only_matrix) }}
     uses: ./.github/workflows/_e2e_nightly_single_node_models.yaml
     with:
       runner: ${{ matrix.test_config.os }}
@@ -236,7 +237,7 @@ jobs:
           rm -rf "${ASCEND_LOG_PREFIX:?}"/* || true
 
   merge-benchmark-artifacts:
-    name: Merge benchmark artifacts into nightly-a2.zip
+    name: Merge benchmark artifacts into weekly-a2.zip
     needs: [parse-trigger]
     if: >-
       always() &&

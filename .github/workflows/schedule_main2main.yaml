@@ -1,0 +1,467 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
+name: Main2Main
+
+on:
+  schedule:
+    - cron: '0 14 * * *'
+  workflow_dispatch:
+    inputs:
+      target_commit:
+        description: 'Target vLLM commit hash (default: latest vLLM main HEAD)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  actions: write
+
+defaults:
+  run:
+    shell: bash -el {0}
+
+env:
+  UPSTREAM_REPO: vllm-project/vllm-ascend
+  WORK_REPO_DIR: ${{ github.workspace }}/vllm-ascend
+  VLLM_DIR: ${{ github.workspace }}/vllm
+  MAIN2MAIN_MODEL: deepseek/deepseek-v4-pro
+  
+
+jobs:
+  main2main:
+    runs-on: linux-aarch64-a2b3-8
+    timeout-minutes: 2880
+    concurrency:
+      group: main2main
+      cancel-in-progress: false
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-910b-ubuntu22.04-py3.12
+      env:
+        VLLM_LOGGING_LEVEL: ERROR
+        VLLM_USE_MODELSCOPE: True
+        HCCL_BUFFSIZE: 1024
+        HF_HUB_OFFLINE: 1
+        UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+        UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu/"
+        UV_INDEX_STRATEGY: unsafe-best-match
+        UV_INSECURE_HOST: cache-service.nginx-pypi-cache.svc.cluster.local
+        UV_HTTP_TIMEOUT: 120
+        UV_NO_CACHE: 1
+        UV_SYSTEM_PYTHON: 1
+    defaults:
+      run:
+        shell: bash -el {0}
+        working-directory: ${{ env.WORK_REPO_DIR }}
+    env:
+      GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+      MAIN2MAIN_IMAGE_TAG: 9.0.0-910b-ubuntu22.04-py3.12
+      TARGET_COMMIT: ${{ github.event_name == 'workflow_dispatch' && inputs.target_commit || '' }}
+      PUSH_TO_GITHUB: 'true'
+      GITHUB_REPO: vllm-project/vllm-ascend
+      HEAD_FORK: vllm-ascend-ci/vllm-ascend
+      MAIN2MAIN_KEEP_BRANCH: 'true'
+      MAIN2MAIN_WORKSPACE: /tmp/main2main_flow/workspace
+      MAIN2MAIN_CASES_FILE: ${{ github.workspace }}/vllm-ascend/.github/workflows/scripts/main2main_tests.json
+      MAIN2MAIN_LOG_HELPERS: |
+        print_group() {
+          local title="$1"
+          local path="$2"
+          echo "::group::${title}"
+          cat "${path}" || true
+          echo "::endgroup::"
+        }
+        print_group_if_nonempty() {
+          local title="$1"
+          local path="$2"
+          [ -s "${path}" ] || return 0
+          print_group "${title}" "${path}"
+        }
+    steps:
+      - name: Checkout vllm-project/vllm-ascend repo
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          submodules: recursive
+          path: vllm-ascend
+
+      - name: Load main2main test cases
+        run: |
+          set -eu
+          if [ ! -f "${MAIN2MAIN_CASES_FILE}" ]; then
+            echo "::error::main2main test cases file not found: ${MAIN2MAIN_CASES_FILE}"
+            exit 1
+          fi
+          CASES=$(jq -r '.cases | join(" ")' "${MAIN2MAIN_CASES_FILE}")
+          if [ -z "${CASES}" ]; then
+            echo "::error::no test cases loaded from ${MAIN2MAIN_CASES_FILE}"
+            exit 1
+          fi
+          echo "Loaded $(jq '.cases | length' "${MAIN2MAIN_CASES_FILE}") test cases:"
+          printf '%s\n' "${CASES}"
+          echo "MAIN2MAIN_TEST_CASES=${CASES}" >> "$GITHUB_ENV"
+
+      - name: Checkout vllm-project/vllm repo
+        uses: actions/checkout@v6
+        with:
+          repository: vllm-project/vllm
+          ref: ${{ env.TARGET_COMMIT != '' && env.TARGET_COMMIT || 'main' }}
+          path: vllm
+          fetch-depth: 0
+
+      - name: Validate target commit
+        run: |
+          TARGET="${TARGET_COMMIT}"
+          if [ -n "${TARGET}" ]; then
+            if ! echo "${TARGET}" | grep -Eq '^[0-9a-f]{40}$'; then
+              echo "::error::Invalid target_commit format: ${TARGET}"
+              exit 1
+            fi
+          fi
+
+      - name: Install dependencies
+        run: |
+          sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
+          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
+          apt-get update -y
+          if [ -s "${WORK_REPO_DIR}/packages.txt" ]; then
+            xargs -r apt-get -y install < "${WORK_REPO_DIR}/packages.txt"
+          fi
+          apt-get -y install git curl ca-certificates gcc g++ cmake libnuma-dev clang-15 jq gh
+          update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
+          update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
+          git config --global --add safe.directory "${WORK_REPO_DIR}"
+          git config --global --add safe.directory "${VLLM_DIR}"
+          pip install uv pytest
+
+      - name: Configure git identity
+        if: always()
+        working-directory: ${{ env.WORK_REPO_DIR }}
+        run: |
+          set -eu
+          git config user.name "main2main-bot"
+          git config user.email "main2main-bot@users.noreply.github.com"
+          gh --version
+
+      - name: Check npu and CANN info
+        if: always()
+        run: |
+          npu-smi info || true
+          if [ -d /usr/local/Ascend/ascend-toolkit/latest ]; then
+            cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info || true
+          fi
+
+      - name: Install opencode + main2main-flow
+        run: |
+          set -eu
+          set -o pipefail
+
+          # install opencode (curl --retry handles transient SSL drops)
+          curl -fsSL --retry 3 --retry-delay 5 --retry-all-errors https://opencode.ai/install | bash
+          # configure opencode auth
+          mkdir -p ~/.local/share/opencode
+          cat > ~/.local/share/opencode/auth.json <<EOF
+          {
+            "deepseek": {
+              "type": "api",
+              "key": "${{ secrets.MAIN2MAIN_API_KEY }}"
+            }
+          }
+          EOF
+
+          # ensure opencode is on PATH within this step
+          export PATH="/root/.opencode/bin:$PATH"
+
+          # verify opencode works
+          echo "Verifying opencode..."
+          set +e
+          opencode run --model "${MAIN2MAIN_MODEL}" "say hello and nothing else" > /tmp/opencode_verify.log 2>&1
+          OCODE_EXIT=$?
+          set -e
+          cat /tmp/opencode_verify.log
+          if [ "${OCODE_EXIT}" -ne 0 ]; then
+            echo "::error::opencode verification failed (exit ${OCODE_EXIT})"
+            exit 1
+          fi
+          echo "opencode verification passed"
+
+          # ensure git push uses gh token
+          git config --global credential.helper "!gh auth git-credential"
+
+          # install main2main_flow
+          M2M_FLOW_DIR="/tmp/main2main_flow"
+          if [ ! -d "${M2M_FLOW_DIR}/.git" ]; then
+            git clone https://github.com/vllm-ascend/main2main_flow.git "${M2M_FLOW_DIR}"
+          fi
+          pip install -e "${M2M_FLOW_DIR}"
+
+      - name: Get csrc hash
+        id: get_csrc_hash
+        run: |
+          CSRC_HASH=$(find ./csrc ./setup.py ./CMakeLists.txt ./cmake \
+            -type f -not -path '*/.*' | sort | xargs sha256sum | sha256sum | awk '{print $1}')
+          echo "CSRC_HASH=$CSRC_HASH" >> $GITHUB_OUTPUT
+
+      - name: Get architecture
+        id: get_arch
+        run: |
+          ARCH=$(uname -m)
+          case "$ARCH" in
+            x86_64) echo "arch=X64" >> $GITHUB_OUTPUT ;;
+            aarch64) echo "arch=ARM64" >> $GITHUB_OUTPUT ;;
+            *) echo "arch=$ARCH" >> $GITHUB_OUTPUT ;;
+          esac
+
+      - name: Restore vllm-ascend csrc cache
+        id: cache-csrc
+        uses: runs-on/cache/restore@v5
+        with:
+          path: |
+            ${{ env.WORK_REPO_DIR }}/vllm_ascend/_cann_ops_custom
+            ${{ env.WORK_REPO_DIR }}/vllm_ascend/*.so
+            ${{ env.WORK_REPO_DIR }}/vllm_ascend/lib
+            ${{ env.WORK_REPO_DIR }}/vllm_ascend/include
+          key: vllm-ascend-build-v1-${{ steps.get_arch.outputs.arch }}-${{ env.MAIN2MAIN_IMAGE_TAG }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+          restore-keys: |
+            vllm-ascend-build-v1-${{ steps.get_arch.outputs.arch }}-${{ env.MAIN2MAIN_IMAGE_TAG }}-
+
+      - name: Create working branch
+        id: branch
+        working-directory: ${{ env.WORK_REPO_DIR }}
+        run: |
+          set -eu
+          BRANCH="main2main_auto_$(date +%Y-%m-%d_%H-%M)"
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git" || \
+            git remote set-url upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch upstream main
+          git checkout -B "${BRANCH}" upstream/main
+          BASE_SHA=$(git rev-parse HEAD)
+          echo "name=${BRANCH}" >> "$GITHUB_OUTPUT"
+          echo "base_sha=${BASE_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Install Mooncake wheel
+        run: |
+          set -euxo pipefail
+          apt-get install -y --no-install-recommends \
+            libibverbs1 \
+            ibverbs-providers \
+            librdmacm1 \
+            libnuma1 \
+            libcurl4
+          ldconfig
+          MOONCAKE_WHEEL="mooncake_transfer_engine_ascend-0.3.9-cp312-cp312-manylinux_2_35_aarch64.whl"
+          pip install --no-cache-dir --no-deps \
+            "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${MOONCAKE_WHEEL}"
+
+      - name: Install vllm-project/vllm from source
+        working-directory: ${{ env.VLLM_DIR }}
+        run: |
+          VLLM_TARGET_DEVICE=empty uv pip install .
+          pip uninstall -y triton
+
+      - name: Install vllm-ascend
+        working-directory: ${{ env.WORK_REPO_DIR }}
+        run: |
+          pip install uc-manager
+          uv pip install -r requirements-dev.txt
+          uv pip install --force-reinstall --no-deps triton-ascend==3.2.1
+          if find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
+            echo "CSRC cache hit: .so files found, skip kernel compilation"
+            COMPILE_CUSTOM_KERNELS=0 uv pip install -e .
+          else
+            echo "CSRC cache miss: no .so files found, compile kernels"
+            uv pip install -e . --no-build-isolation
+          fi
+
+      - name: Save vllm-ascend csrc cache
+        if: steps.cache-csrc.outputs.cache-hit != 'true'
+        uses: runs-on/cache/save@v5
+        with:
+          path: |
+            ${{ env.WORK_REPO_DIR }}/vllm_ascend/_cann_ops_custom
+            ${{ env.WORK_REPO_DIR }}/vllm_ascend/*.so
+            ${{ env.WORK_REPO_DIR }}/vllm_ascend/lib
+            ${{ env.WORK_REPO_DIR }}/vllm_ascend/include
+          key: vllm-ascend-build-v1-${{ steps.get_arch.outputs.arch }}-${{ env.MAIN2MAIN_IMAGE_TAG }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+
+      - name: Run main2main flow
+        id: run-main2main
+        working-directory: ${{ github.workspace }}
+        env:
+          RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES: True
+        run: |
+          set -euo pipefail
+          export PATH="/root/.opencode/bin:$PATH"
+          eval "${MAIN2MAIN_LOG_HELPERS}"
+
+          rm -rf /tmp/main2main
+          mkdir -p /tmp/main2main
+
+          cat > /tmp/main2main/heartbeat.sh <<'HEARTBEAT'
+          trap "exit 0" TERM INT
+          printf '\n::notice::main2main heartbeat %s\n' "$(date -Is)"
+          while sleep 300; do
+            printf '\n::notice::main2main heartbeat %s\n' "$(date -Is)"
+          done
+          HEARTBEAT
+          setsid bash /tmp/main2main/heartbeat.sh &
+          HEARTBEAT_PID="$!"
+          cleanup_heartbeat() {
+            if [ -n "${HEARTBEAT_PID:-}" ]; then
+              kill -TERM -- "-${HEARTBEAT_PID}" 2>/dev/null || true
+              wait "${HEARTBEAT_PID}" 2>/dev/null || true
+            fi
+          }
+          trap cleanup_heartbeat EXIT
+
+          set +e
+          kickoff \
+            --vllm-path "${VLLM_DIR}" \
+            --vllm-ascend-path "${WORK_REPO_DIR}" \
+            --target-commit "${TARGET_COMMIT}" \
+            2> /tmp/main2main/kickoff.err \
+            | tee /tmp/main2main/kickoff.log
+          KICKOFF_STATUS="${PIPESTATUS[0]}"
+          set -e
+          cleanup_heartbeat
+          trap - EXIT
+
+          echo "::notice::after kickoff: $(date -Is)"
+          echo "KICKOFF_STATUS=${KICKOFF_STATUS}"
+          ls -la /tmp/main2main || true
+          find /tmp/main2main -maxdepth 3 -type f -print || true
+
+          print_group "main2main kickoff output" /tmp/main2main/kickoff.log
+          print_group_if_nonempty "main2main kickoff stderr" /tmp/main2main/kickoff.err
+
+          if [ "${KICKOFF_STATUS}" -ne 0 ]; then
+            echo "::error::kickoff exited with status ${KICKOFF_STATUS}"
+            exit "${KICKOFF_STATUS}"
+          fi
+
+          # Copy final summary from workspace
+          FINAL_SUMMARY="${MAIN2MAIN_WORKSPACE}/final_summary.md"
+          if [ -f "${FINAL_SUMMARY}" ]; then
+            cp "${FINAL_SUMMARY}" /tmp/main2main/final-summary.md
+          fi
+
+          if [ -s /tmp/main2main/final-summary.md ]; then
+            print_group "main2main final summary" /tmp/main2main/final-summary.md
+          else
+            echo "::warning::final-summary.md not found, generating stub"
+            echo "Status: completed" > /tmp/main2main/final-summary.md
+            echo "Steps: 0/0" >> /tmp/main2main/final-summary.md
+          fi
+
+      - name: Upload workspace
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: main2main-workspace
+          path: /tmp/main2main_flow/workspace/
+          retention-days: 7
+
+      - name: Summarize final status
+        id: final-status
+        working-directory: ${{ env.WORK_REPO_DIR }}
+        if: always()
+        run: |
+          set -eu
+          eval "${MAIN2MAIN_LOG_HELPERS}"
+
+          STATUS_JSON="${MAIN2MAIN_WORKSPACE}/final_status.json"
+          BASE_SHA="${{ steps.branch.outputs.base_sha }}"
+
+          # kickoff may exit 0 without writing final_status.json (e.g. flow short-circuits
+          # on no new commits). Degrade gracefully instead of crashing on FileNotFoundError.
+          if [ ! -f "${STATUS_JSON}" ]; then
+            echo "::warning::final_status.json not found at ${STATUS_JSON}; kickoff produced no structured status"
+            FINAL_STATUS="missing"
+            OLD_COMMIT=""
+            NEW_COMMIT=""
+            REACHED_COMMIT=""
+            STEPS_COMPLETED="0"
+            STEPS_TOTAL="0"
+          else
+            OLD_COMMIT=$(python3 -c "import json; print(json.load(open('${STATUS_JSON}'))['old_commit'])")
+            NEW_COMMIT=$(python3 -c "import json; print(json.load(open('${STATUS_JSON}'))['new_commit'])")
+            FINAL_STATUS=$(python3 -c "import json; print(json.load(open('${STATUS_JSON}'))['status'])")
+            REACHED_COMMIT=$(python3 -c "import json; print(json.load(open('${STATUS_JSON}'))['reached_commit'])")
+            STEPS_COMPLETED=$(python3 -c "import json; print(json.load(open('${STATUS_JSON}'))['steps_completed'])")
+            STEPS_TOTAL=$(python3 -c "import json; print(json.load(open('${STATUS_JSON}'))['steps_total'])")
+          fi
+
+          MANUAL_REVIEW_REQUIRED=false
+          if [ "${FINAL_STATUS}" != "completed" ]; then
+            MANUAL_REVIEW_REQUIRED=true
+          fi
+
+          # created-commits.md requires base_sha and a valid repo; guard earlier-step failures.
+          if [ -n "${BASE_SHA}" ] && git rev-parse --verify HEAD >/dev/null 2>&1; then
+            git log --reverse --format="- \`%H\` %s" "${BASE_SHA}..HEAD" \
+              > /tmp/main2main/created-commits.md || echo "(git log failed)" > /tmp/main2main/created-commits.md
+            COMMIT_COUNT=$(git rev-list --count "${BASE_SHA}..HEAD" 2>/dev/null || echo 0)
+          else
+            echo "(base_sha unavailable or not a git repo)" > /tmp/main2main/created-commits.md
+            COMMIT_COUNT=0
+          fi
+
+          {
+            echo "status=${FINAL_STATUS}"
+            echo "commit_count=${COMMIT_COUNT}"
+            echo "manual_review_required=${MANUAL_REVIEW_REQUIRED}"
+            echo "old_commit=${OLD_COMMIT}"
+            echo "new_commit=${NEW_COMMIT}"
+          } >> "$GITHUB_OUTPUT"
+          echo "::notice::final_status=${FINAL_STATUS}, reached_commit=${REACHED_COMMIT}, steps=${STEPS_COMPLETED}/${STEPS_TOTAL}, commit_count=${COMMIT_COUNT}"
+          print_group_if_nonempty "main2main created commits" /tmp/main2main/created-commits.md
+
+      - name: Create manual review issue
+        if: steps.final-status.outputs.manual_review_required == 'true'
+        working-directory: ${{ env.WORK_REPO_DIR }}
+        run: |
+          eval "${MAIN2MAIN_LOG_HELPERS}"
+
+          PR_URL=$(cat /tmp/main2main/pr_url.txt 2>/dev/null || echo "")
+          OLD="${{ steps.final-status.outputs.old_commit }}"
+          NEW="${{ steps.final-status.outputs.new_commit }}"
+          SHORT_NEW=$(printf '%.8s' "${NEW}")
+
+          cat > /tmp/main2main-manual-review.md <<EOF
+          ## Summary
+
+          main2main automation stopped before completing all planned steps.
+
+          ## Context
+
+          - Draft PR: ${PR_URL}
+          - Commit range: \`${OLD}\`...\`${NEW}\`
+          - Status: \`${{ steps.final-status.outputs.status }}\`
+
+          ## Final Summary
+
+          $(cat /tmp/main2main/final-summary.md 2>/dev/null || echo "(final summary unavailable)")
+          EOF
+
+          print_group "Manual review issue" /tmp/main2main-manual-review.md
+          gh issue create \
+            --repo "${UPSTREAM_REPO}" \
+            --title "main2main manual review required (${SHORT_NEW})" \
+            --body-file /tmp/main2main-manual-review.md
