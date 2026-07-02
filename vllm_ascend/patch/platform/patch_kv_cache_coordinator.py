@@ -1,8 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM projectx
+import os
 import sys
 from collections.abc import Mapping
 from math import lcm
+
+# Feature flag: PD分离下Mamba状态走独立通道路由
+# 设置 VLLM_ASCEND_PD_MAMBA_ROUTING=1 启用
+# 启用后Mamba状态不参与KV块LCM对齐, 走独立传输通道
+_PD_MAMBA_ROUTING_ENABLED = os.environ.get("VLLM_ASCEND_PD_MAMBA_ROUTING", "0") == "1"
 
 import vllm
 import vllm.envs as envs_vllm
@@ -306,6 +312,14 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
 
             curr_hit_length = hit_length
             for idx, (spec, group_ids, manager_cls) in enumerate(self.attention_groups):
+                # PD Mamba Routing: Mamba状态的连续隐状态不需要块对齐,
+                # 走独立传输通道。在此跳过LCM, 只做长度一致性校验。
+                if _PD_MAMBA_ROUTING_ENABLED and isinstance(spec, MambaSpec):
+                    if hit_blocks_by_group[group_ids[0]] is None:
+                        for gid in group_ids:
+                            hit_blocks_by_group[gid] = []
+                    continue  # Mamba group不参与LCM块对齐
+
                 effective_block_size = self._get_effective_block_size(spec)
                 cached_blocks = hit_blocks_by_group[group_ids[0]]
                 if isinstance(spec, FullAttentionSpec) and cached_blocks is not None:
