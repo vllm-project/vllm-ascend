@@ -23,6 +23,7 @@ from unittest.mock import MagicMock, patch
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.backend import Backend
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import MmcDirect
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend import (
     MooncakeStoreConfig,
     _convert_to_bytes,
@@ -55,6 +56,21 @@ def _make_mooncake_store_config(**overrides) -> MooncakeStoreConfig:
         return MooncakeStoreConfig.from_file(path)
     finally:
         os.unlink(path)
+
+
+def _make_mooncake_runtime_config(**overrides) -> MooncakeStoreConfig:
+    config = {
+        "metadata_server": "127.0.0.1:2379",
+        "global_segment_size": 4096,
+        "local_buffer_size": 2048,
+        "protocol": "ascend",
+        "device_name": "npu0",
+        "master_server_address": "127.0.0.1:8080",
+        "preferred_segment": False,
+        "prefer_alloc_in_same_node": True,
+    }
+    config.update(overrides)
+    return MooncakeStoreConfig(**config)
 
 
 # =========================================================================
@@ -398,6 +414,105 @@ class TestMooncakeBackendMethods(unittest.TestCase):
             b.register_buffer([100], [200])
             mock_te.register_buffer.assert_called_once()
 
+    def test_init_fabric_memory_sets_local_buffer_zero(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend import MooncakeBackend
+
+        cfg = _make_mooncake_runtime_config()
+        with (
+            patch.dict(os.environ, {"ASCEND_ENABLE_USE_FABRIC_MEM": "1"}),
+            patch.object(MooncakeStoreConfig, "load_from_env", return_value=cfg),
+            patch("mooncake.store.MooncakeDistributedStore", create=True) as mock_store_cls,
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend.get_ip",
+                return_value="10.0.0.1",
+            ),
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend.global_te"
+            ) as mock_te,
+        ):
+            mock_store_cls.return_value.setup.return_value = 0
+            backend = MooncakeBackend(MagicMock())
+
+        setup_kwargs = mock_store_cls.return_value.setup.call_args.kwargs
+        self.assertTrue(backend._use_fabric_mem)
+        self.assertEqual(setup_kwargs["local_hostname"], "10.0.0.1")
+        self.assertEqual(setup_kwargs["local_buffer_size"], 0)
+        self.assertNotIn("engine", setup_kwargs)
+        mock_te.get_transfer_engine.assert_not_called()
+
+    def test_register_buffer_skips_transfer_engine_for_fabric_memory(self):
+        b = self._make_backend()
+        b._use_fabric_mem = True
+
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend.global_te"
+        ) as mock_te:
+            b.register_buffer([100], [200])
+
+        mock_te.get_transfer_engine.assert_not_called()
+        mock_te.register_buffer.assert_not_called()
+
+    def test_lazy_init_fabric_memory_put_initializes_store(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend import MooncakeBackend
+
+        cfg = _make_mooncake_runtime_config()
+        store = MagicMock()
+        store.batch_put_from_multi_buffers.return_value = [0]
+        with (
+            patch.dict(os.environ, {"ASCEND_ENABLE_USE_FABRIC_MEM": "1"}),
+            patch.object(MooncakeStoreConfig, "load_from_env", return_value=cfg),
+            patch.object(MooncakeBackend, "_setup_store", return_value=store) as mock_setup,
+        ):
+            backend = MooncakeBackend(MagicMock(), lazy_init=True)
+            self.assertFalse(backend._store_initialized)
+            mock_setup.assert_not_called()
+
+            backend.put(["k1"], [[100]], [[10]])
+
+        mock_setup.assert_called_once_with()
+        store.batch_put_from_multi_buffers.assert_called_once()
+        self.assertTrue(backend._store_initialized)
+
+    def test_init_non_fabric_uses_transfer_engine(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend import MooncakeBackend
+
+        cfg = _make_mooncake_runtime_config()
+        transfer_engine = MagicMock()
+        transfer_engine.get_rpc_port.return_value = 12345
+        transfer_engine.get_engine.return_value = "engine"
+        with (
+            patch.dict(os.environ, {"ASCEND_ENABLE_USE_FABRIC_MEM": "0"}),
+            patch.object(MooncakeStoreConfig, "load_from_env", return_value=cfg),
+            patch("mooncake.store.MooncakeDistributedStore", create=True) as mock_store_cls,
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend.get_ip",
+                return_value="10.0.0.2",
+            ),
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend.global_te"
+            ) as mock_te,
+        ):
+            mock_store_cls.return_value.setup.return_value = 0
+            mock_te.get_transfer_engine.return_value = transfer_engine
+            backend = MooncakeBackend(MagicMock())
+
+        setup_kwargs = mock_store_cls.return_value.setup.call_args.kwargs
+        mock_te.get_transfer_engine.assert_called_once_with("10.0.0.2", device_name=None)
+        self.assertEqual(backend.local_seg, "10.0.0.2:12345")
+        self.assertEqual(setup_kwargs["local_hostname"], "10.0.0.2:12345")
+        self.assertEqual(setup_kwargs["local_buffer_size"], cfg.local_buffer_size)
+        self.assertEqual(setup_kwargs["engine"], "engine")
+
+    def test_exists_lazy_uninitialized_returns_missing(self):
+        b = self._make_backend()
+        b._lazy_init = True
+        b._store_initialized = False
+        b.store = None
+
+        result = b.exists(["k1", "k2"])
+
+        self.assertEqual(result, [0, 0])
+
 
 # =========================================================================
 # YuanrongBackend (mocked store)
@@ -491,6 +606,71 @@ class TestYuanrongBackendMethods(unittest.TestCase):
         b._ensure_device_ready()
         b.set_device.assert_not_called()
 
+    def test_init_creates_hetero_client_and_calls_init(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.yuanrong_backend import YuanrongBackend
+
+        blob_cls = MagicMock()
+        blob_list_cls = MagicMock()
+        hetero_client_cls = MagicMock()
+        set_param = MagicMock()
+        set_param_cls = MagicMock(return_value=set_param)
+        write_mode = MagicMock()
+        write_mode.NONE_L2_CACHE_EVICT = "none_l2_cache_evict"
+        config = YuanrongConfig(
+            worker_addr="127.0.0.1:8765",
+            enable_exclusive_connection=True,
+            enable_remote_h2d=False,
+        )
+
+        with (
+            patch("yr.datasystem.hetero_client.Blob", new=blob_cls, create=True),
+            patch("yr.datasystem.hetero_client.DeviceBlobList", new=blob_list_cls, create=True),
+            patch("yr.datasystem.hetero_client.HeteroClient", new=hetero_client_cls, create=True),
+            patch("yr.datasystem.kv_client.SetParam", new=set_param_cls, create=True),
+            patch("yr.datasystem.object_client.WriteMode", new=write_mode, create=True),
+            patch.object(YuanrongConfig, "load_from_env", return_value=config),
+        ):
+            backend = YuanrongBackend(MagicMock())
+
+        hetero_client_cls.assert_called_once_with(
+            "127.0.0.1",
+            8765,
+            enable_exclusive_connection=True,
+            enable_remote_h2d=False,
+        )
+        hetero_client_cls.return_value.init.assert_called_once_with()
+        self.assertIs(backend._helper._blob_cls, blob_cls)
+        self.assertIs(backend._helper._blob_list_cls, blob_list_cls)
+        self.assertEqual(backend._ds_set_param.write_mode, "none_l2_cache_evict")
+
+    def test_set_device_sets_helper_device_id(self):
+        b = self._make_backend()
+        device = MagicMock()
+        world_group = MagicMock(local_rank=3)
+
+        with (
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.yuanrong_backend.get_world_group",
+                return_value=world_group,
+            ),
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.yuanrong_backend.torch.device",
+                return_value=device,
+            ) as mock_device,
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.yuanrong_backend.torch.npu.set_device"
+            ) as mock_set_device,
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.yuanrong_backend.torch.npu.current_device",
+                return_value=3,
+            ),
+        ):
+            b.set_device()
+
+        mock_device.assert_called_once_with("npu:3")
+        mock_set_device.assert_called_once_with(device)
+        self.assertEqual(b._helper._device_id, 3)
+
 
 # =========================================================================
 # MemcacheBackend (mocked store)
@@ -516,6 +696,31 @@ class TestMemcacheBackendMethods(unittest.TestCase):
         b.store.batch_is_exist.return_value = [1]
         self.assertEqual(b.exists(["k1"]), [1])
 
+    def test_set_device_uses_local_rank(self):
+        b = self._make_backend()
+        b.local_rank = 2
+        device = MagicMock()
+
+        with (
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend.torch.device",
+                return_value=device,
+            ) as mock_device,
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend.torch.npu.set_device"
+            ) as mock_set_device,
+        ):
+            b.set_device()
+
+        mock_device.assert_called_once_with("npu:2")
+        mock_set_device.assert_called_once_with(device)
+
+    def test_mmc_direct_enum_values(self):
+        self.assertEqual(MmcDirect.COPY_L2G.value, 0)
+        self.assertEqual(MmcDirect.COPY_G2L.value, 1)
+        self.assertEqual(MmcDirect.COPY_G2H.value, 2)
+        self.assertEqual(MmcDirect.COPY_H2G.value, 3)
+
     def test_register_buffer(self):
         b = self._make_backend()
         b._is_a2 = True
@@ -527,6 +732,14 @@ class TestMemcacheBackendMethods(unittest.TestCase):
         b.store.batch_get_into_layers.return_value = [0]
         b.get(["k1"], [[100]], [[10]])
         b.store.batch_get_into_layers.assert_called_once()
+
+    def test_get_uses_copy_g2l_enum(self):
+        b = self._make_backend()
+        b.store.batch_get_into_layers.return_value = [0]
+
+        b.get(["k1"], [[100]], [[10]])
+
+        b.store.batch_get_into_layers.assert_called_once_with(["k1"], [[100]], [[10]], MmcDirect.COPY_G2L.value)
 
     def test_get_error(self):
         b = self._make_backend()
@@ -544,6 +757,14 @@ class TestMemcacheBackendMethods(unittest.TestCase):
         b.put(["k1"], [[100]], [[10]])
         b.store.batch_put_from_layers.assert_called_once()
 
+    def test_put_uses_copy_l2g_enum(self):
+        b = self._make_backend()
+        b.store.batch_put_from_layers.return_value = [0]
+
+        b.put(["k1"], [[100]], [[10]])
+
+        b.store.batch_put_from_layers.assert_called_once_with(["k1"], [[100]], [[10]], MmcDirect.COPY_L2G.value)
+
     def test_put_error(self):
         b = self._make_backend()
         b.store.batch_put_from_layers.return_value = [1]
@@ -553,6 +774,68 @@ class TestMemcacheBackendMethods(unittest.TestCase):
         b = self._make_backend()
         b.store.batch_put_from_layers.side_effect = Exception("fail")
         b.put(["k1"], [[100]], [[10]])
+
+    def test_init_non_a2_lazy_init_defers_store_setup(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import MemcacheBackend
+
+        with (
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend.get_world_group",
+                return_value=MagicMock(local_rank=4),
+            ),
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend.get_ascend_device_type",
+                return_value=None,
+            ),
+            patch.object(MemcacheBackend, "_setup_store", return_value=MagicMock()) as mock_setup,
+        ):
+            backend = MemcacheBackend(MagicMock(), lazy_init=True)
+
+        self.assertTrue(backend._lazy_init)
+        self.assertFalse(backend._store_initialized)
+        self.assertIsNone(backend.store)
+        mock_setup.assert_not_called()
+
+    def test_init_a2_ignores_lazy_init_and_initializes_store(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import MemcacheBackend
+
+        store = MagicMock()
+        with (
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend.get_world_group",
+                return_value=MagicMock(local_rank=1),
+            ),
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend.get_ascend_device_type",
+                return_value="A2",
+            ),
+            patch.object(MemcacheBackend, "_setup_store", return_value=store) as mock_setup,
+        ):
+            backend = MemcacheBackend(MagicMock(), lazy_init=True)
+
+        self.assertFalse(backend._lazy_init)
+        self.assertTrue(backend._store_initialized)
+        self.assertIs(backend.store, store)
+        mock_setup.assert_called_once_with()
+
+    def test_register_buffer_waits_for_a2_lazy_store_initialization(self):
+        b = self._make_backend()
+        b._is_a2 = True
+        b._store_initialized = False
+        b.store = MagicMock()
+
+        b.register_buffer([100, 200], [10, 20])
+
+        b.store.register_buffer.assert_not_called()
+        self.assertEqual(b._registered_buffers, ([100, 200], [10, 20]))
+
+        b._store_initialized = True
+        b._register_buffers_if_needed()
+
+        self.assertEqual(b.store.register_buffer.call_count, 2)
+        self.assertEqual(b.store.register_buffer.call_args_list[0].args, (100, 10))
+        self.assertEqual(b.store.register_buffer.call_args_list[1].args, (200, 20))
+        self.assertTrue(b._buffers_registered)
 
 
 if __name__ == "__main__":

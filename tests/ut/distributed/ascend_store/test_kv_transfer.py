@@ -39,14 +39,45 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import
 )
 
 
+class FakeRunQueue:
+    class StopRun(BaseException):
+        pass
+
+    def __init__(self, *items):
+        self.items = list(items)
+        self.task_done_calls = 0
+
+    def get(self):
+        if not self.items:
+            raise self.StopRun()
+        item = self.items.pop(0)
+        if isinstance(item, BaseException):
+            raise item
+        return item
+
+    def task_done(self):
+        self.task_done_calls += 1
+
+
+class CountingQueue:
+    def __init__(self):
+        self.task_done_calls = 0
+
+    def task_done(self):
+        self.task_done_calls += 1
+
+
 class FakeStore:
-    def __init__(self, exists_result=None):
-        self.exists_result = exists_result or []
+    def __init__(self, exists_result=None, get_result=None, get_side_effect=None):
+        self.exists_result = [] if exists_result is None else exists_result
+        self.get_result = get_result
+        self.get_side_effect = get_side_effect
         self.put_calls = []
         self.get_calls = []
+        self.set_device_calls = 0
 
     def set_device(self):
-        pass
+        self.set_device_calls += 1
 
     def exists(self, keys):
         return self.exists_result[: len(keys)]
@@ -56,6 +87,9 @@ class FakeStore:
 
     def get(self, keys, addrs, sizes):
         self.get_calls.append((list(keys), list(addrs), list(sizes)))
+        if self.get_side_effect is not None:
+            raise self.get_side_effect
+        return self.get_result
 
 
 class FakeKey:
@@ -168,6 +202,60 @@ class TestKVTransferThread(unittest.TestCase):
         t, _ = self._make_thread()
         # Base class _handle_request does nothing
         t._handle_request(MagicMock())
+
+    def test_run_sets_ready_event_and_handles_request(self):
+        t, store = self._make_thread()
+        req = MagicMock()
+        t.request_queue = FakeRunQueue(req, FakeRunQueue.StopRun())
+
+        def handle_request(_req):
+            t.request_queue.task_done()
+
+        t._handle_request = MagicMock(side_effect=handle_request)
+
+        with self.assertRaises(FakeRunQueue.StopRun):
+            t.run()
+
+        self.assertEqual(store.set_device_calls, 1)
+        self.assertTrue(t.ready_event.is_set())
+        t._handle_request.assert_called_once_with(req)
+        self.assertEqual(t.request_queue.task_done_calls, 1)
+
+    def test_run_ignores_none_request_and_continues(self):
+        t, _ = self._make_thread()
+        req = MagicMock()
+        t.request_queue = FakeRunQueue(None, req, FakeRunQueue.StopRun())
+
+        def handle_request(_req):
+            t.request_queue.task_done()
+
+        t._handle_request = MagicMock(side_effect=handle_request)
+
+        with self.assertRaises(FakeRunQueue.StopRun):
+            t.run()
+
+        t._handle_request.assert_called_once_with(req)
+        self.assertEqual(t.request_queue.task_done_calls, 2)
+
+    def test_run_continues_after_handle_request_exception(self):
+        t, _ = self._make_thread()
+        first_req = MagicMock()
+        second_req = MagicMock()
+        t.request_queue = FakeRunQueue(first_req, second_req, FakeRunQueue.StopRun())
+
+        def handle_request(req):
+            if req is first_req:
+                raise RuntimeError("boom")
+            t.request_queue.task_done()
+
+        t._handle_request = MagicMock(side_effect=handle_request)
+
+        with self.assertRaises(FakeRunQueue.StopRun):
+            t.run()
+
+        self.assertEqual(t._handle_request.call_args_list[0].args[0], first_req)
+        self.assertEqual(t._handle_request.call_args_list[1].args[0], second_req)
+        self.assertEqual(t.request_queue.task_done_calls, 1)
 
 
 class TestKVCacheStoreSendingThread(unittest.TestCase):
@@ -324,6 +412,48 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
 
 
 class TestKVCacheStoreRecvingThread(unittest.TestCase):
+    def _make_thread(self, tp_rank=0, block_size=16, get_result=None, invalid_block_ids=None):
+        store = FakeStore(get_result=get_result)
+        db = FakeTokenDatabase()
+        invalid_block_ids = set() if invalid_block_ids is None else invalid_block_ids
+        t = KVCacheStoreRecvingThread(
+            m_store=store,
+            token_database=db,
+            block_size=block_size,
+            tp_rank=tp_rank,
+            dcp_size=1,
+            ready_event=threading.Event(),
+            invalid_block_ids=invalid_block_ids,
+            invalid_block_ids_lock=threading.Lock(),
+        )
+        return t, store, invalid_block_ids
+
+    def _make_req(
+        self,
+        token_len=32,
+        vllm_cached_tokens=0,
+        block_ids=None,
+        block_ids_by_group=None,
+        kv_cache_group_ids=None,
+    ):
+        block_count = (token_len + 15) // 16
+        block_hashes = [f"h{i}".encode() for i in range(block_count)]
+        load_spec = LoadSpec(
+            vllm_cached_tokens=vllm_cached_tokens,
+            kvpool_cached_tokens=token_len,
+            can_load=True,
+            token_len=token_len,
+        )
+        return ReqMeta(
+            req_id="r1",
+            token_len_chunk=token_len,
+            block_ids=block_ids or list(range(block_count)),
+            block_ids_by_group=block_ids_by_group,
+            block_hashes=block_hashes,  # type: ignore[arg-type]
+            load_spec=load_spec,
+            kv_cache_group_ids=kv_cache_group_ids,
+        )
+
     def test_handle_request(self):
         store = FakeStore()
         db = FakeTokenDatabase()
@@ -350,6 +480,69 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
         self.assertEqual(len(store.get_calls), 1)
         finished = t.get_and_clear_finished_requests()
         self.assertIn("r1", finished)
+
+    def test_handle_request_rotates_keys_for_nonzero_tp_rank(self):
+        t, store, _ = self._make_thread(tp_rank=1, get_result=[0, 0, 0])
+        req = self._make_req(token_len=48, block_ids=[0, 1, 2])
+        t.request_queue.put(req)
+
+        t._handle_request(req)
+
+        keys, addrs, sizes = store.get_calls[0]
+        self.assertEqual([key.rsplit("@", 1)[-1] for key in keys], ["k1", "k2", "k0"])
+        self.assertEqual(addrs, [[1001], [1002], [1000]])
+        self.assertEqual(sizes, [[16], [16], [16]])
+
+    def test_handle_request_records_partial_failed_blocks(self):
+        t, _, invalid_block_ids = self._make_thread(get_result=[0, 1, 0])
+        req = self._make_req(token_len=48, block_ids=[0, 1, 2])
+        t.request_queue.put(req)
+
+        t._handle_request(req)
+
+        self.assertEqual(invalid_block_ids, {1})
+
+    def test_handle_request_records_failed_blocks_after_tp_rotation(self):
+        t, _, invalid_block_ids = self._make_thread(tp_rank=1, get_result=[0, 1, 0])
+        req = self._make_req(token_len=48, block_ids=[10, 11, 12])
+        t.request_queue.put(req)
+
+        t._handle_request(req)
+
+        self.assertEqual(invalid_block_ids, {12})
+
+    def test_handle_request_records_all_blocks_when_get_returns_none(self):
+        t, _, invalid_block_ids = self._make_thread()
+        req = self._make_req(token_len=48, block_ids=[0, 1, 2])
+        t.request_queue.put(req)
+
+        t._handle_request(req)
+
+        self.assertEqual(invalid_block_ids, {0, 1, 2})
+
+    def test_handle_request_hybrid_failure_does_not_update_invalid_blocks(self):
+        t, _, invalid_block_ids = self._make_thread(block_size=[16, 16], get_result=[1, 1, 1, 1])
+        req = self._make_req(
+            token_len=32,
+            block_ids_by_group=[[0, 1], [10, 11]],
+            kv_cache_group_ids=[0, 1],
+        )
+        t.request_queue.put(req)
+
+        t._handle_request(req)
+
+        self.assertEqual(invalid_block_ids, set())
+
+    def test_handle_request_no_keys_marks_finished(self):
+        t, store, _ = self._make_thread(get_result=[0])
+        t.request_queue = CountingQueue()
+        req = self._make_req(token_len=32, vllm_cached_tokens=32, block_ids=[0, 1])
+
+        t._handle_request(req)
+
+        self.assertEqual(store.get_calls, [])
+        self.assertIn("r1", t.get_and_clear_finished_requests())
+        self.assertEqual(t.request_queue.task_done_calls, 1)
 
 
 class TestKVCacheStoreLayerSendingThread(unittest.TestCase):
@@ -495,6 +688,35 @@ class TestKVCacheStoreLayerSendingThread(unittest.TestCase):
 
 
 class TestKVCacheStoreLayerRecvingThread(unittest.TestCase):
+    def _make_thread(self, tp_rank=0, get_result=None, invalid_block_ids=None):
+        store = FakeStore(get_result=get_result)
+        db = FakeTokenDatabase()
+        get_event = threading.Event()
+        invalid_block_ids = set() if invalid_block_ids is None else invalid_block_ids
+        t = KVCacheStoreLayerRecvingThread(
+            m_store=store,
+            token_database=db,
+            block_size=16,
+            tp_rank=tp_rank,
+            dcp_size=1,
+            ready_event=threading.Event(),
+            get_event=get_event,
+            invalid_block_ids=invalid_block_ids,
+            invalid_block_ids_lock=threading.Lock(),
+        )
+        return t, store, get_event, invalid_block_ids
+
+    def _make_layer_req(self, num_keys=2, layer_id=0, block_ids=None):
+        meta = KeyMetadata("m", 0, 0, 0, 0)
+        return LayerMultiBlockReqMeta(
+            req_id="r1",
+            keys=[LayerPoolKey(meta, f"h{i}", layer_id) for i in range(num_keys)],
+            starts=[i * 16 for i in range(num_keys)],
+            ends=[(i + 1) * 16 for i in range(num_keys)],
+            block_ids=block_ids or list(range(num_keys)),
+            layer_id=layer_id,
+        )
+
     def test_handle_request(self):
         store = FakeStore()
         db = FakeTokenDatabase()
@@ -523,6 +745,47 @@ class TestKVCacheStoreLayerRecvingThread(unittest.TestCase):
         t._handle_request(req)
         self.assertEqual(len(store.get_calls), 1)
         self.assertTrue(get_event.is_set())
+
+    def test_layer_recv_rotates_keys_for_nonzero_tp_rank(self):
+        t, store, _, _ = self._make_thread(tp_rank=1, get_result=[0, 0, 0])
+        req = self._make_layer_req(num_keys=3, block_ids=[0, 1, 2])
+        t.request_queue.put(req)
+
+        t._handle_request(req)
+
+        keys, addrs, sizes = store.get_calls[0]
+        self.assertEqual([key.rsplit("@", 1)[-1] for key in keys], ["h1", "h2", "h0"])
+        self.assertEqual(addrs, [[2001], [2002], [2000]])
+        self.assertEqual(sizes, [[16], [16], [16]])
+
+    def test_layer_recv_records_partial_failed_blocks(self):
+        t, _, _, invalid_block_ids = self._make_thread(get_result=[1, 0])
+        req = self._make_layer_req(num_keys=2, block_ids=[0, 1])
+        t.request_queue.put(req)
+
+        t._handle_request(req)
+
+        self.assertEqual(invalid_block_ids, {0})
+
+    def test_layer_recv_records_all_blocks_when_get_returns_none(self):
+        t, _, _, invalid_block_ids = self._make_thread()
+        req = self._make_layer_req(num_keys=3, block_ids=[0, 1, 2])
+        t.request_queue.put(req)
+
+        t._handle_request(req)
+
+        self.assertEqual(invalid_block_ids, {0, 1, 2})
+
+    def test_layer_recv_task_done_and_sets_get_event_after_failure(self):
+        t, _, get_event, invalid_block_ids = self._make_thread(get_result=[1])
+        t.request_queue = CountingQueue()
+        req = self._make_layer_req(num_keys=1, block_ids=[0])
+
+        t._handle_request(req)
+
+        self.assertEqual(invalid_block_ids, {0})
+        self.assertTrue(get_event.is_set())
+        self.assertEqual(t.request_queue.task_done_calls, 1)
 
 
 if __name__ == "__main__":
