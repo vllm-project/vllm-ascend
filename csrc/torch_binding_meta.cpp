@@ -1689,6 +1689,10 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("chunk_gated_delta_rule_fwd_h", &vllm_ascend::meta::chunk_gated_delta_rule_fwd_h_meta);
     // chunk_fwd_o
     ops.impl("chunk_fwd_o", &vllm_ascend::meta::chunk_fwd_o_meta);
+    // Launch host print from device
+    ops.impl("device_print", &vllm_ascend::meta::device_print_meta);
+    // launch host print from device for tensors
+    ops.impl("device_print_tensor", &vllm_ascend::meta::device_print_tensor_meta);
 }
 }
 #else
