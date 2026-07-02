@@ -312,12 +312,18 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
 
             curr_hit_length = hit_length
             for idx, (spec, group_ids, manager_cls) in enumerate(self.attention_groups):
-                # PD Mamba Routing: Mamba状态的连续隐状态不需要块对齐,
-                # 走独立传输通道。在此跳过LCM, 只做长度一致性校验。
+                # PD Mamba Routing: Mamba状态的连续隐状态走独立传输通道,
+                # 不参与KV块LCM对齐。对齐时取木桶最短板(Attention∩Mamba),
+                # 而非Mamba失败就直接归零浪费Attention的KV Cache。
                 if _PD_MAMBA_ROUTING_ENABLED and isinstance(spec, MambaSpec):
                     if hit_blocks_by_group[group_ids[0]] is None:
                         for gid in group_ids:
                             hit_blocks_by_group[gid] = []
+                    # 优雅降级: Mamba只能支撑mamba_valid_length,
+                    # Attention的hit_length取min, 不掀桌子
+                    mamba_valid = self._get_effective_block_size(spec)
+                    if mamba_valid > 0:
+                        curr_hit_length = min(curr_hit_length, mamba_valid)
                     continue  # Mamba group不参与LCM块对齐
 
                 effective_block_size = self._get_effective_block_size(spec)
