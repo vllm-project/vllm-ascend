@@ -286,6 +286,12 @@ class AscendEagleSpeculator(EagleSpeculator):
     ) -> None:
         """
         Override to replay all N-1 decode steps in a single graph call.
+
+        NOTE: This method should follow the same logical structure as
+        AutoRegressiveSpeculator._multi_step_decode in upstream vLLM.
+        Specifically, the iteration over speculative steps, per-step
+        rebuild of attention metadata / slot mappings, and the FULL /
+        non-FULL code paths should align with that implementation.
         """
         positions = self.input_buffers.positions[:num_reqs]
         query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
