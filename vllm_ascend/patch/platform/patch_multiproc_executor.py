@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 import weakref
 from collections import deque
-from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from multiprocessing.synchronize import Lock as LockType
 
 import vllm.v1.executor.multiproc_executor
 from vllm import envs
 from vllm.config import VllmConfig
 from vllm.distributed.device_communicators.shm_broadcast import Handle, MessageQueue
+from vllm.logger import logger
+from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_distributed_init_method, get_loopback_ip, get_open_port
 from vllm.utils.system_utils import get_mp_context
 from vllm.v1.executor.abstract import FailureCallback
@@ -70,25 +73,62 @@ class AscendMultiprocExecutor(MultiprocExecutor):
             # When using fork, keep track of socket file descriptors that are
             # inherited by the worker, so that we can close them in subsequent
             # workers
-            inherited_fds: list[int] | None = [] if context.get_start_method() == "fork" else None
+            is_fork = context.get_start_method() == "fork"
+            inherited_fds: list[int] | None = [] if is_fork else None
 
-            for local_rank in range(self.local_world_size):
-                global_rank = global_start_rank + local_rank
-                is_driver_worker = self._is_driver_worker(global_rank)
-                unready_worker_handle = AscendWorkerProc.make_worker_process(
-                    vllm_config=self.vllm_config,
-                    local_rank=local_rank,
-                    rank=global_rank,
-                    distributed_init_method=distributed_init_method,
-                    input_shm_handle=scheduler_output_handle,
-                    shared_worker_lock=shared_worker_lock,
-                    is_driver_worker=is_driver_worker,
-                    inherited_fds=inherited_fds,
+            # Match upstream MultiprocExecutor: parallel proc.start under spawn +
+            # multiple local workers; fork keeps serial fd bookkeeping.
+            # CPU uses omp manager and is incompatible with asyncio.to_thread path.
+            use_async_startup = not is_fork and not current_platform.is_cpu() and self.local_world_size > 1
+            if use_async_startup:
+                logger.info(
+                    "Using async parallel startup for %d worker processes (Ascend).",
+                    self.local_world_size,
                 )
-                unready_workers.append(unready_worker_handle)
-                if inherited_fds is not None:
-                    inherited_fds.append(unready_worker_handle.death_writer.fileno())
-                    inherited_fds.append(unready_worker_handle.ready_pipe.fileno())
+                self._run_async_workers_startup(
+                    global_start_rank,
+                    distributed_init_method,
+                    scheduler_output_handle,
+                    shared_worker_lock,
+                    unready_workers,
+                )
+                logger.info(
+                    "All %d worker processes started successfully.",
+                    self.local_world_size,
+                )
+            else:
+                for local_rank in range(self.local_world_size):
+                    global_rank = global_start_rank + local_rank
+                    is_driver_worker = self._is_driver_worker(global_rank)
+                    if current_platform.is_cpu():
+                        om = current_platform.get_omp_manager()
+                        logger.info("Configured OMP PLACES %s", str(om.omp_places))
+                        unready_worker_handle = om.run(
+                            AscendWorkerProc.make_worker_process,
+                            vllm_config=self.vllm_config,
+                            local_rank=local_rank,
+                            rank=global_rank,
+                            distributed_init_method=distributed_init_method,
+                            input_shm_handle=scheduler_output_handle,
+                            shared_worker_lock=shared_worker_lock,
+                            is_driver_worker=is_driver_worker,
+                            inherited_fds=inherited_fds,
+                        )
+                    else:
+                        unready_worker_handle = AscendWorkerProc.make_worker_process(
+                            vllm_config=self.vllm_config,
+                            local_rank=local_rank,
+                            rank=global_rank,
+                            distributed_init_method=distributed_init_method,
+                            input_shm_handle=scheduler_output_handle,
+                            shared_worker_lock=shared_worker_lock,
+                            is_driver_worker=is_driver_worker,
+                            inherited_fds=inherited_fds,
+                        )
+                    unready_workers.append(unready_worker_handle)
+                    if inherited_fds is not None:
+                        inherited_fds.append(unready_worker_handle.death_writer.fileno())
+                        inherited_fds.append(unready_worker_handle.ready_pipe.fileno())
 
             # Workers must be created before wait_for_ready to avoid
             # deadlock, since worker.init_device() does a device sync.
@@ -122,7 +162,7 @@ class AscendMultiprocExecutor(MultiprocExecutor):
             # Wait for all remote response mqs to be ready.
             for response_mq in self.response_mqs:
                 response_mq.wait_until_ready()
-            self.futures_queue = deque[tuple[FutureWrapper, Callable]]()
+            self.futures_queue = deque[FutureWrapper]()
             self._post_init_executor()
 
             success = True
@@ -137,6 +177,69 @@ class AscendMultiprocExecutor(MultiprocExecutor):
                 self._ensure_worker_termination([uw.proc for uw in unready_workers])
 
         self.output_rank = self._get_output_rank()
+
+    def _run_async_workers_startup(
+        self,
+        global_start_rank: int,
+        distributed_init_method: str,
+        scheduler_output_handle,
+        shared_worker_lock,
+        unready_workers: list[UnreadyWorkerProcHandle],
+    ) -> None:
+        """Run _start_workers_async() in an event loop (same pattern as upstream)."""
+
+        try:
+            asyncio.get_running_loop()
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(
+                    asyncio.run,
+                    self._start_workers_async(
+                        global_start_rank,
+                        distributed_init_method,
+                        scheduler_output_handle,
+                        shared_worker_lock,
+                        unready_workers,
+                    ),
+                )
+                future.result()
+        except RuntimeError:
+            asyncio.run(
+                self._start_workers_async(
+                    global_start_rank,
+                    distributed_init_method,
+                    scheduler_output_handle,
+                    shared_worker_lock,
+                    unready_workers,
+                )
+            )
+
+    async def _start_workers_async(
+        self,
+        global_start_rank: int,
+        distributed_init_method: str,
+        scheduler_output_handle,
+        shared_worker_lock,
+        unready_workers: list[UnreadyWorkerProcHandle],
+    ) -> None:
+        """Concurrent proc.start via thread pool; spawn-only (inherited_fds is None)."""
+
+        async def _start_one(local_rank: int, global_rank: int) -> None:
+            is_driver_worker = self._is_driver_worker(global_rank)
+            worker = await asyncio.to_thread(
+                AscendWorkerProc.make_worker_process,
+                vllm_config=self.vllm_config,
+                local_rank=local_rank,
+                rank=global_rank,
+                distributed_init_method=distributed_init_method,
+                input_shm_handle=scheduler_output_handle,
+                shared_worker_lock=shared_worker_lock,
+                is_driver_worker=is_driver_worker,
+                inherited_fds=None,
+            )
+            unready_workers.append(worker)
+
+        tasks = [_start_one(local_rank, global_start_rank + local_rank) for local_rank in range(self.local_world_size)]
+        await asyncio.gather(*tasks)
 
     def _get_parallel_sizes(self) -> tuple[int, int, int]:
         self.world_size = self.parallel_config.world_size
