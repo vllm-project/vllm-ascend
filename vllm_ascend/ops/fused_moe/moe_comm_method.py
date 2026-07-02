@@ -525,17 +525,17 @@ class FusedMC2CommImpl(MoECommMethod):
         )
         weight1 = _as_tensor_list(fused_experts_input.weights.w1, "w1")
         weight2 = _as_tensor_list(fused_experts_input.weights.w2, "w2")
-        # A8W4-INT MegaMoe expects int4 weights packed two-per-int8 storage:
-        # with weight_type=ACL_INT4 the tiling derives N = weight1.shape[-1] * 2
-        # and checks weight2.shape[0] == N / 2. The W4A8 quant method packs them
-        # eight-per-int32 (pack_to_int32), which makes the op read
-        # N = 2 * (2 * intermediate / 8) and fail CheckWeight2Input. Reinterpret
-        # the int32 storage back to int8 so the op sees N = 2 * moe_intermediate.
-        # W8A8 weights are already int8, so the view is a no-op there.
-        if weight1 and weight1[0].dtype == torch.int32:
-            weight1 = [w.view(torch.int8) for w in weight1]
-        if weight2 and weight2[0].dtype == torch.int32:
-            weight2 = [w.view(torch.int8) for w in weight2]
+        # Per the CANN mega_moe interface doc (torch_extension/.../mega_moe.md),
+        # the A8W4-INT weight spec is dtype ``INT4(INT32)`` + format ``FRACTAL_NZ``,
+        # where "INT4(INT32)" means the real INT4 data is reinterpreted to INT32
+        # before being passed (8 int4 packed per int32), with l1 shape
+        # (hidden, 2*intermediate_hidden // 8). That is EXACTLY what the W4A8
+        # quant method already produces: pack_int4_to_int8 -> maybe_trans_nz
+        # (FRACTAL_NZ) -> pack_to_int32 (view int8->int32). So the weights must
+        # be passed through UNCHANGED — do NOT reinterpret them back to int8.
+        # (A previous ``view(torch.int8)`` here was wrong: it both changed the
+        # required dtype and misread the NZ layout, corrupting W4A8 results.)
+        # W8A8 weights are already int8 + FRACTAL_NZ, also passed as-is.
         weight_scales1 = _as_tensor_list(fused_experts_input.weights.w1_scale, "w1_scale")
         weight_scales2 = _as_tensor_list(fused_experts_input.weights.w2_scale, "w2_scale")
         # MegaMoe requires per-expert weight scales to be 1-D. The W4A8 method
