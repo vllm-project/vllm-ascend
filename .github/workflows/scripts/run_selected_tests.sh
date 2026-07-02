@@ -60,6 +60,14 @@ setup_coverage() {
   mkdir -p "${covdata_dir}"
   export COVERAGE_FILE="${covdata_dir}/coverage"
   echo -e "  \033[33mCOVERAGE_FILE:\033[0m ${COVERAGE_FILE}"
+
+setup_vllm_cache_root() {
+  if [ "${CI:-}" != "true" ]; then
+    return
+  fi
+  export VLLM_CACHE_ROOT
+  VLLM_CACHE_ROOT="$(mktemp -d "${RUNNER_TEMP:-/tmp}/vllm-cache-${npu_type}-${num_npus}card.XXXXXX")"
+  echo "Using vLLM cache root: ${VLLM_CACHE_ROOT}"
 }
 
 print_test_info() {
@@ -197,6 +205,7 @@ print_timing_json() {
 }
 
 print_test_info
+setup_vllm_cache_root
 
 if [ "${npu_type}" = "cpu" ]; then
   run_pytest_batch "cpu-ut (${#targets[@]} targets)" "${targets[@]}"
