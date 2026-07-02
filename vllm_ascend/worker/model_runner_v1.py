@@ -1058,6 +1058,14 @@ class NPUModelRunner(GPUModelRunner):
             + len(self.requests[r].output_token_ids)
             for r in self.input_batch.req_ids
         ]
+        # Prune cache to only keep active requests, preventing unbounded
+        # memory growth from completed/aborted requests.
+        active_req_ids = set(self.input_batch.req_ids)
+        self._sched_num_tokens_cache = {
+            req_id: val
+            for req_id, val in self._sched_num_tokens_cache.items()
+            if req_id in active_req_ids
+        }
         num_tokens_np = np.array(num_tokens, dtype=np.int32)
         base_num_reqs = self.input_batch.num_reqs
         num_reqs = base_num_reqs
