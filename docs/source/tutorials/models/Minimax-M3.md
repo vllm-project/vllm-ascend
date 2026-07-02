@@ -126,7 +126,7 @@ For text-only deployment, `--limit-mm-per-prompt` can be omitted. For multimodal
 
 ### A2 Deployment Examples
 
-The examples below use Ascend A2 servers. Update `WEIGHT_PATH`, `LOG_PATH`, `local_ip`, `node0_ip`, and `IFNAME` based on the actual environment.
+The examples below use Ascend A2 servers. Update `WEIGHT_PATH`, `EAGLE3_WEIGHT_PATH`, `LOG_PATH`, `local_ip`, `node0_ip`, and `IFNAME` based on the actual environment.
 
 - For BF16 version on 2 A2 nodes
 
@@ -217,10 +217,26 @@ The examples below use Ascend A2 servers. Update `WEIGHT_PATH`, `LOG_PATH`, `loc
     --port 11223 > ${LOG_PATH} 2>&1 &
   ```
 
-- For W8A8 version on 1 A2 node
+- For W8A8 version on 2 A2 nodes
+
+  Run the following command on node 0:
 
   ```
+  local_ip="${NODE0_IP}"
+  node0_ip="${NODE0_IP}"
+
+  export HCCL_IF_IP=$local_ip
+  export IFNAME="${NETWORK_INTERFACE}"
+  export GLOO_SOCKET_IFNAME="$IFNAME"
+  export TP_SOCKET_IFNAME="$IFNAME"
+  export HCCL_SOCKET_IFNAME="$IFNAME"
   export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+  export VLLM_ENGINE_READY_TIMEOUT_S=3600
+  export HCCL_CONNECT_TIMEOUT=7200
+  export ASCEND_CONNECT_TIMEOUT=10000
+  export ASCEND_TRANSFER_TIMEOUT=10000
+  export VLLM_RPC_TIMEOUT=1800000
+  export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
   export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
   export HCCL_OP_EXPANSION_MODE="AIV"
   export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
@@ -229,17 +245,66 @@ The examples below use Ascend A2 servers. Update `WEIGHT_PATH`, `LOG_PATH`, `loc
     --host 0.0.0.0 \
     --served-model-name minimax-m3 \
     --trust-remote-code \
-    --max-model-len 65536 \
+    --max-model-len 131072 \
     --tensor-parallel-size 8 \
     --enable-expert-parallel \
     --max-num-seqs 8 \
+    --data-parallel-size 2 \
+    --data-parallel-size-local 1 \
+    --data-parallel-start-rank 0 \
+    --data-parallel-address $node0_ip \
     --distributed_executor_backend "mp" \
     --gpu-memory-utilization 0.92 \
-    --no-enable-prefix-caching \
     --reasoning-parser minimax_m3 \
     --limit-mm-per-prompt '{"image":1}' \
-    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "dynamic_shapes_config":{"type":"backed_size_oblivious"}}' \
-    --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"enable_static_kernel": false, "fuse_norm_quant":false}, "multistream_overlap_shared_expert": false, "weight_nz_mode": 2}' \
+    --speculative-config '{"model":"${EAGLE3_WEIGHT_PATH}", "method":"eagle3", "num_speculative_tokens":3}' \
+    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+    --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"enable_static_kernel": true, "fuse_norm_quant":false}, "multistream_overlap_shared_expert": false, "weight_nz_mode": 2}' \
+    --port 11223 > ${LOG_PATH} 2>&1 &
+  ```
+
+  Run the following command on node 1:
+
+  ```
+  local_ip="${NODE1_IP}"
+  node0_ip="${NODE0_IP}"
+
+  export HCCL_IF_IP=$local_ip
+  export IFNAME="${NETWORK_INTERFACE}"
+  export GLOO_SOCKET_IFNAME="$IFNAME"
+  export TP_SOCKET_IFNAME="$IFNAME"
+  export HCCL_SOCKET_IFNAME="$IFNAME"
+  export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+  export VLLM_ENGINE_READY_TIMEOUT_S=3600
+  export HCCL_CONNECT_TIMEOUT=7200
+  export ASCEND_CONNECT_TIMEOUT=10000
+  export ASCEND_TRANSFER_TIMEOUT=10000
+  export VLLM_RPC_TIMEOUT=1800000
+  export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
+  export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
+  export HCCL_OP_EXPANSION_MODE="AIV"
+  export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+
+  vllm serve ${WEIGHT_PATH} \
+    --host 0.0.0.0 \
+    --served-model-name minimax-m3 \
+    --trust-remote-code \
+    --headless \
+    --max-model-len 131072 \
+    --tensor-parallel-size 8 \
+    --enable-expert-parallel \
+    --max-num-seqs 8 \
+    --data-parallel-size 2 \
+    --data-parallel-size-local 1 \
+    --data-parallel-start-rank 1 \
+    --data-parallel-address $node0_ip \
+    --distributed_executor_backend "mp" \
+    --gpu-memory-utilization 0.92 \
+    --reasoning-parser minimax_m3 \
+    --limit-mm-per-prompt '{"image":1}' \
+    --speculative-config '{"model":"${EAGLE3_WEIGHT_PATH}", "method":"eagle3", "num_speculative_tokens":3}' \
+    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+    --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"enable_static_kernel": true, "fuse_norm_quant":false}, "multistream_overlap_shared_expert": false, "weight_nz_mode": 2}' \
     --port 11223 > ${LOG_PATH} 2>&1 &
   ```
 
