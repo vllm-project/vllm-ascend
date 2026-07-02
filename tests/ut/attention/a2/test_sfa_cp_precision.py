@@ -31,6 +31,7 @@ from vllm.config import VllmConfig  # noqa: E402
 from vllm.forward_context import set_forward_context  # noqa: E402
 
 from tests.ut.attention.utils import (  # noqa: E402
+    DEEPSEEK_V3_TEST_HF_CONFIG,
     BatchSpec,
     create_common_attn_metadata,
     create_vllm_config,
@@ -90,6 +91,7 @@ def _get_vllm_config(
         max_num_batched_tokens=max(8192, max_model_len * 2),
         enable_chunked_prefill=True,
         hf_overrides={"quantization_config": None},
+        base_hf_config=DEEPSEEK_V3_TEST_HF_CONFIG,
         hf_config_override={
             "num_attention_heads": sim_num_heads,
             "num_key_value_heads": 1,

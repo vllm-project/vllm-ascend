@@ -33,13 +33,18 @@ public:
     __aicore__ inline void RopeInit(GM_ADDR qGm, AscendC::GlobalTensor<CosDtype> &cosGm,
                                     AscendC::GlobalTensor<CosDtype> &sinGm,
                                     AscendC::GlobalTensor<QOutDtype> &outRopeConcatGm,
-                                    AscendC::GlobalTensor<QkDtype> &outRopeConcatGm2, MlaTilingData &ropeConcatParams)
+                                    AscendC::GlobalTensor<QkDtype> &outRopeConcatGm2, MlaTilingData &ropeConcatParams,
+                                    GM_ADDR positionsGm, GM_ADDR cosSinCacheGm, GM_ADDR rawQOutGm)
     {
         qGm_.SetGlobalBuffer(reinterpret_cast<__gm__ QkDtype *>(qGm));
+        rawQOutGm_.SetGlobalBuffer(reinterpret_cast<__gm__ QkDtype *>(rawQOutGm));
         this->cosGm_ = cosGm;
         this->sinGm_ = sinGm;
         this->outRopeConcatGm_ = outRopeConcatGm;
         this->outRopeConcatGm2_ = outRopeConcatGm2;
+        this->positionsGmInt64_.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t *>(positionsGm));
+        this->positionsGmInt32_.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(positionsGm));
+        this->cosSinCacheGm_.SetGlobalBuffer(reinterpret_cast<__gm__ CosDtype *>(cosSinCacheGm));
 
         headDim = ropeConcatParams.headDim;
         headNumQ = ropeConcatParams.headNumQ;
@@ -56,6 +61,11 @@ public:
         concatSize = ropeConcatParams.concatSize;
         hiddenStrideRope_ = ropeConcatParams.hiddenStrideRope;
         qkNopeHeadDim_ = ropeConcatParams.qkNopeHeadDim;
+        ropeByCache_ = ropeConcatParams.ropeByCache;
+        positionsDtype_ = ropeConcatParams.positionsDtype;
+        cosSinCacheStride0_ = ropeConcatParams.cosSinCacheStride0;
+        cosSinCacheHalfDim_ = ropeConcatParams.cosSinCacheHalfDim;
+        enableRawQOut_ = ropeConcatParams.enableRawQOut;
         blockIdx_ = (blockIdx_ / 2) * 2 + static_cast<uint64_t>(GetSubBlockidx());
         loopTime = (blockIdx_ == realCore - 1) ? lastCoreLoopTime : preCoreLoopTime;
         lastLoopN = (blockIdx_ == realCore - 1) ? lastCoreLoopNLast : preCoreLoopNLast;
@@ -91,6 +101,7 @@ public:
 
             // move in Q
             AscendC::LocalTensor<QkDtype> inputQ = buf.GetBuffer<BufferType::ASCEND_UB, QkDtype>(0);
+            CopyRawQNope(inputQ, startHead, loopN);
             AscendC::LocalTensor<float> inputQCastFP32 = buf.GetBuffer<BufferType::ASCEND_UB, float>(dataSizeFp16);
             AscendC::LocalTensor<float> reverseQ =
                 buf.GetBuffer<BufferType::ASCEND_UB, float>(dataSizeFp32 + dataSizeFp16);
@@ -108,7 +119,7 @@ public:
             if (headRemain != 0) {
                 uint64_t preProcessHeadNum = this->headNumQ - headRemain;
                 uint64_t needToProcesHead = preProcessHeadNum > loopN ? loopN : preProcessHeadNum;
-                CopyCosSin(inputCos, inputSin, localStartAddr, (startSinCosHeadIndex / this->headNumQ) * this->headDim,
+                CopyCosSin(inputCos, inputSin, localStartAddr, startSinCosHeadIndex / this->headNumQ,
                            needToProcesHead);
                 startSinCosHeadIndex += needToProcesHead;
                 localStartAddr += needToProcesHead * this->headDim;
@@ -120,7 +131,7 @@ public:
                 for (uint32_t index = startSinCosIndex; index < endSinCosIndex; ++index) {
                     uint32_t repeatNum =
                         index == endSinCosIndex - 1 ? endHead - index * this->headNumQ : this->headNumQ;
-                    CopyCosSin(inputCos, inputSin, localStartAddr, index * this->headDim, repeatNum);
+                    CopyCosSin(inputCos, inputSin, localStartAddr, index, repeatNum);
                     localStartAddr += this->headDim * this->headNumQ;
                 }
             }
@@ -160,6 +171,34 @@ public:
     }
     // tensor -1 -1 -1 1 1 1
     template <typename BUF_TYPE>
+    __aicore__ inline void CopyRawQNope(const AscendC::LocalTensor<BUF_TYPE> &tempBufQ, uint64_t startHead,
+                                        uint16_t loopN)
+    {
+        if (enableRawQOut_ == 0) {
+            return;
+        }
+
+        uint32_t copiedDim = 0;
+        while (copiedDim < qkNopeHeadDim_) {
+            uint32_t copyDim = qkNopeHeadDim_ - copiedDim;
+            copyDim = copyDim > headDim ? headDim : copyDim;
+            uint16_t copyBlockLen = static_cast<uint16_t>(copyDim / ELE_NUM_FP16);
+            uint16_t srcStride = static_cast<uint16_t>((hiddenStrideRope_ - copyDim) / ELE_NUM_FP16);
+            uint16_t dstStride = static_cast<uint16_t>((qkNopeHeadDim_ - copyDim) / ELE_NUM_FP16);
+            uint64_t srcOffset = startHead * hiddenStrideRope_ + copiedDim;
+            uint64_t dstOffset = startHead * qkNopeHeadDim_ + copiedDim;
+
+            WAIT_FLAG(MTE3, MTE2, EVENT_ID1);
+            AscendC::DataCopy(tempBufQ, this->qGm_[srcOffset], {loopN, copyBlockLen, srcStride, 0});
+            SET_FLAG(MTE2, MTE3, EVENT_ID1);
+            WAIT_FLAG(MTE2, MTE3, EVENT_ID1);
+            AscendC::DataCopy(this->rawQOutGm_[dstOffset], tempBufQ, {loopN, copyBlockLen, 0, dstStride});
+            SET_FLAG(MTE3, MTE2, EVENT_ID1);
+            copiedDim += copyDim;
+        }
+    }
+
+    template <typename BUF_TYPE>
     __aicore__ inline void ExpandNeg(const AscendC::LocalTensor<BUF_TYPE> &tempBuf, uint32_t headNumTemp)
     {
         for (uint32_t i = 0; i < this->rotateStride_; ++i) {
@@ -195,10 +234,23 @@ public:
     template <typename BUF_TYPE>
     __aicore__ inline void CopyCosSin(const AscendC::LocalTensor<BUF_TYPE> &tempBufCos,
                                       const AscendC::LocalTensor<BUF_TYPE> &tempBufSin, uint64_t localStartAddr,
-                                      uint64_t gmStartAddr, uint64_t repeatNum)
+                                      uint64_t tokenIndex, uint64_t repeatNum)
     {
-        AscendC::DataCopy(tempBufCos[localStartAddr], this->cosGm_[gmStartAddr], {1, headBlockLen, 0, 0});
-        AscendC::DataCopy(tempBufSin[localStartAddr], this->sinGm_[gmStartAddr], {1, headBlockLen, 0, 0});
+        if (ropeByCache_ != 0) {
+            int64_t position = LoadPosition(tempBufCos, localStartAddr, tokenIndex);
+            uint64_t cacheStart = static_cast<uint64_t>(position) * static_cast<uint64_t>(cosSinCacheStride0_);
+            AscendC::DataCopy(tempBufCos[localStartAddr], this->cosSinCacheGm_[cacheStart], cosSinCacheHalfDim_);
+            AscendC::DataCopy(tempBufCos[localStartAddr + cosSinCacheHalfDim_], this->cosSinCacheGm_[cacheStart],
+                              cosSinCacheHalfDim_);
+            AscendC::DataCopy(tempBufSin[localStartAddr], this->cosSinCacheGm_[cacheStart + cosSinCacheHalfDim_],
+                              cosSinCacheHalfDim_);
+            AscendC::DataCopy(tempBufSin[localStartAddr + cosSinCacheHalfDim_],
+                              this->cosSinCacheGm_[cacheStart + cosSinCacheHalfDim_], cosSinCacheHalfDim_);
+        } else {
+            uint64_t gmStartAddr = tokenIndex * this->headDim;
+            AscendC::DataCopy(tempBufCos[localStartAddr], this->cosGm_[gmStartAddr], {1, headBlockLen, 0, 0});
+            AscendC::DataCopy(tempBufSin[localStartAddr], this->sinGm_[gmStartAddr], {1, headBlockLen, 0, 0});
+        }
         SET_FLAG(MTE2, V, EVENT_ID1);
         WAIT_FLAG(MTE2, V, EVENT_ID1);
         AscendC::Copy(tempBufCos[localStartAddr + this->headDim], tempBufCos[localStartAddr], this->headDim,
@@ -208,12 +260,28 @@ public:
         AscendC::PipeBarrier<PIPE_V>();
     }
 
+    template <typename BUF_TYPE>
+    __aicore__ inline int64_t LoadPosition(const AscendC::LocalTensor<BUF_TYPE> &scratch, uint64_t localStartAddr,
+                                           uint64_t tokenIndex)
+    {
+        (void)scratch;
+        (void)localStartAddr;
+        if (positionsDtype_ == 0) {
+            return static_cast<int64_t>(this->positionsGmInt32_.GetValue(tokenIndex));
+        }
+        return this->positionsGmInt64_.GetValue(tokenIndex);
+    }
+
 private:
     AsdopsBuffer<ArchType::ASCEND_V220> buf;
 
     AscendC::GlobalTensor<QkDtype> qGm_;
+    AscendC::GlobalTensor<QkDtype> rawQOutGm_;
     AscendC::GlobalTensor<CosDtype> cosGm_;
     AscendC::GlobalTensor<CosDtype> sinGm_;
+    AscendC::GlobalTensor<int64_t> positionsGmInt64_;
+    AscendC::GlobalTensor<int32_t> positionsGmInt32_;
+    AscendC::GlobalTensor<CosDtype> cosSinCacheGm_;
     AscendC::GlobalTensor<QOutDtype> outRopeConcatGm_;
     AscendC::GlobalTensor<QkDtype> outRopeConcatGm2_;
 
@@ -234,6 +302,11 @@ private:
     uint32_t concatSize;
     uint32_t hiddenStrideRope_;
     uint32_t qkNopeHeadDim_;
+    uint32_t ropeByCache_{0};
+    uint32_t positionsDtype_{1};
+    uint32_t cosSinCacheStride0_{0};
+    uint32_t cosSinCacheHalfDim_{0};
+    uint32_t enableRawQOut_{0};
     uint32_t blockIdx_;
     uint32_t loopTime{0};
     uint32_t lastLoopN{0};
@@ -2432,13 +2505,17 @@ public:
                                 GM_ADDR sin1Gm, GM_ADDR cos1Gm, GM_ADDR sin2Gm, GM_ADDR cos2Gm, GM_ADDR keycacheGm,
                                 GM_ADDR slotMappingGm, GM_ADDR wuqGm, GM_ADDR bias2Gm, GM_ADDR wukGm,
                                 GM_ADDR descale1Gm, GM_ADDR descale2Gm, GM_ADDR gmCtkvScale, GM_ADDR gmQnopeScale,
-                                GM_ADDR qGm, GM_ADDR keycacheOutGm, GM_ADDR qGm2, GM_ADDR keycacheOutGm2, GM_ADDR s1Gm,
-                                GM_ADDR s2Gm, GM_ADDR s3Gm, GM_ADDR s4Gm, GM_ADDR s5Gm, GM_ADDR innerGm)
+                                GM_ADDR qGm, GM_ADDR keycacheOutGm, GM_ADDR qGm2, GM_ADDR keycacheOutGm2,
+                                GM_ADDR rawQOutGm, GM_ADDR s1Gm, GM_ADDR s2Gm, GM_ADDR s3Gm, GM_ADDR s4Gm,
+                                GM_ADDR s5Gm, GM_ADDR innerGm)
     {
         quantScale3GmTensor.SetGlobalBuffer(reinterpret_cast<__gm__ InDtype *>(gmCtkvScale));
         gamma3GmTensor.SetGlobalBuffer(reinterpret_cast<__gm__ InDtype *>(gamma3Gm));
         sin1GmTensor.SetGlobalBuffer(reinterpret_cast<__gm__ InDtype *>(sin1Gm));
         cos1GmTensor.SetGlobalBuffer(reinterpret_cast<__gm__ InDtype *>(cos1Gm));
+        positionsGmTensor.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t *>(sin1Gm));
+        positionsGmTensorInt32.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(sin1Gm));
+        cosSinCacheGmTensor.SetGlobalBuffer(reinterpret_cast<__gm__ InDtype *>(cos1Gm));
         keycacheGmTensor1.SetGlobalBuffer(reinterpret_cast<__gm__ K_NOPE_DTYPE *>(keycacheOutGm));
         keycacheGmTensor2.SetGlobalBuffer(reinterpret_cast<__gm__ InDtype *>(keycacheOutGm2));
         slotMappingGmTensor.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(slotMappingGm));
@@ -2519,7 +2596,8 @@ public:
                                num_col_2, mlaParams.avgFactor, vectorBlockIdx * static_cast<uint64_t>(row_work) * num_col_2,
                                vectorBlockIdx * static_cast<uint64_t>(row_work) * splitSizeTwo_, row_work_, mlaParams, innerGmTensor);
         }
-        ropeFp16.RopeInit(s4Gm, cos2GmTensor, sin2GmTensor, qGmTensor, qGmTensor2, mlaParams);
+        ropeFp16.RopeInit(s4Gm, cos2GmTensor, sin2GmTensor, qGmTensor, qGmTensor2, mlaParams, sin2Gm, cos2Gm,
+                          rawQOutGm);
         einSumQuant.Init(s1Gm, gmQnopeScale, qGm, mlaParams);
 #endif
     }
@@ -2542,6 +2620,36 @@ private:
 
     constexpr static uint32_t C0_SIZE = 16;
     constexpr static uint32_t I8_C0_SIZE = 32;
+
+    template <class T1>
+    __aicore__ inline void CopyCosSinForToken(const AscendC::LocalTensor<T1> &sinTensor,
+                                              const AscendC::LocalTensor<T1> &cosTensor, uint64_t tokenIndex)
+    {
+        if (mlaParams.ropeByCache == 0) {
+            AscendC::DataCopy(sinTensor, sin1GmTensor[tokenIndex * splitRmsNormSizeTwo_], splitRmsNormSizeTwo_);
+            AscendC::DataCopy(cosTensor, cos1GmTensor[tokenIndex * splitRmsNormSizeTwo_], splitRmsNormSizeTwo_);
+            return;
+        }
+
+        int64_t position = LoadPosition(cosTensor, tokenIndex);
+
+        uint64_t cacheStart = static_cast<uint64_t>(position) * static_cast<uint64_t>(mlaParams.cosSinCacheStride0);
+        uint32_t halfDim = mlaParams.cosSinCacheHalfDim;
+        AscendC::DataCopy(cosTensor, cosSinCacheGmTensor[cacheStart], halfDim);
+        AscendC::DataCopy(cosTensor[halfDim], cosSinCacheGmTensor[cacheStart], halfDim);
+        AscendC::DataCopy(sinTensor, cosSinCacheGmTensor[cacheStart + halfDim], halfDim);
+        AscendC::DataCopy(sinTensor[halfDim], cosSinCacheGmTensor[cacheStart + halfDim], halfDim);
+    }
+
+    template <class T1>
+    __aicore__ inline int64_t LoadPosition(const AscendC::LocalTensor<T1> &scratch, uint64_t tokenIndex)
+    {
+        (void)scratch;
+        if (mlaParams.positionsDtype == 0) {
+            return static_cast<int64_t>(positionsGmTensorInt32.GetValue(tokenIndex));
+        }
+        return positionsGmTensor.GetValue(tokenIndex);
+    }
 
     template <class T1>
     __aicore__ inline void RmsNormAndRopeConvergence1(
@@ -2583,10 +2691,7 @@ private:
                 // quantMode == QuantMode::PER_TOKEN_SYMM_QUANT
                 AscendC::DataCopy(mmTensor, s2GmTensor[offset], AscendC::DataCopyParams(1, splitSizeOne_ / 8, 0, 0));
             }
-            AscendC::DataCopy(sinTensor, sin1GmTensor[(row_work * vectorBlockIdx + loop) * splitRmsNormSizeTwo_],
-                              splitRmsNormSizeTwo_);
-            AscendC::DataCopy(cosTensor, cos1GmTensor[(row_work * vectorBlockIdx + loop) * splitRmsNormSizeTwo_],
-                              splitRmsNormSizeTwo_);
+            CopyCosSinForToken<T1>(sinTensor, cosTensor, row_work * vectorBlockIdx + loop);
             SET_FLAG(MTE2, V, EVENT_ID0);
             // ND
             uint64_t cacheStart = static_cast<uint64_t>(slotValue) * static_cast<uint64_t>(splitSizeOne_);
@@ -2771,6 +2876,9 @@ private:
     AscendC::GlobalTensor<InDtype> gamma3GmTensor;
     AscendC::GlobalTensor<InDtype> sin1GmTensor;
     AscendC::GlobalTensor<InDtype> cos1GmTensor;
+    AscendC::GlobalTensor<int64_t> positionsGmTensor;
+    AscendC::GlobalTensor<int32_t> positionsGmTensorInt32;
+    AscendC::GlobalTensor<InDtype> cosSinCacheGmTensor;
     AscendC::GlobalTensor<InDtype> sin2GmTensor;
     AscendC::GlobalTensor<InDtype> cos2GmTensor;
     AscendC::GlobalTensor<K_NOPE_DTYPE> keycacheGmTensor1;

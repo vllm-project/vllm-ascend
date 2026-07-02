@@ -55,6 +55,7 @@
 #include <c10/core/Scalar.h>
 #include <c10/util/Exception.h>
 #include <c10/util/Logging.h>
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <iostream>
@@ -80,6 +81,31 @@ std::mutex& get_device_print_mutex()
 {
     static std::mutex device_print_mutex;
     return device_print_mutex;
+}
+
+int64_t get_cached_vector_core_num()
+{
+    int device_id = 0;
+    TORCH_CHECK(aclrtGetDevice(&device_id) == ACL_SUCCESS);
+
+    static std::mutex cache_mutex;
+    static std::unordered_map<int, int64_t> cache;
+    {
+        std::lock_guard<std::mutex> lock(cache_mutex);
+        auto it = cache.find(device_id);
+        if (it != cache.end()) {
+            return it->second;
+        }
+    }
+
+    int64_t aiv_num = 0;
+    TORCH_CHECK(aclGetDeviceCapability(device_id, ACL_DEVICE_INFO_VECTOR_CORE_NUM, &aiv_num) == ACL_SUCCESS);
+    TORCH_CHECK(aiv_num > 0, "invalid vector core count: ", aiv_num);
+    {
+        std::lock_guard<std::mutex> lock(cache_mutex);
+        cache.emplace(device_id, aiv_num);
+    }
+    return aiv_num;
 }
 
 void device_print_callback(void* args)
@@ -418,6 +444,421 @@ std::tuple<at::Tensor, at::Tensor> get_masked_input_and_mask(
     });
     cmd.Run();
     return {masked_input, mask};
+}
+
+at::Tensor interleave_rope_by_cache(
+    const at::Tensor &qk,
+    const at::Tensor &positions,
+    const at::Tensor &cos_sin_cache,
+    int64_t rope_dim,
+    bool is_neox_style)
+{
+    TORCH_CHECK(qk.device().type() == c10::DeviceType::PrivateUse1,
+                "interleave_rope_by_cache expects qk on NPU");
+    TORCH_CHECK(positions.device() == qk.device(),
+                "interleave_rope_by_cache expects positions on the same device as qk");
+    TORCH_CHECK(cos_sin_cache.device() == qk.device(),
+                "interleave_rope_by_cache expects cos_sin_cache on the same device as qk");
+    TORCH_CHECK(qk.scalar_type() == at::kHalf || qk.scalar_type() == at::kBFloat16,
+                "interleave_rope_by_cache supports only fp16/bf16 qk, got ", qk.scalar_type());
+    TORCH_CHECK(cos_sin_cache.scalar_type() == qk.scalar_type(),
+                "interleave_rope_by_cache expects cos_sin_cache dtype to match qk, got ",
+                cos_sin_cache.scalar_type(), " vs ", qk.scalar_type());
+    TORCH_CHECK(positions.scalar_type() == at::kInt || positions.scalar_type() == at::kLong,
+                "interleave_rope_by_cache expects int32/int64 positions, got ", positions.scalar_type());
+    TORCH_CHECK(qk.dim() == 3, "interleave_rope_by_cache expects qk shape [tokens, heads, dim], got dim ",
+                qk.dim());
+    TORCH_CHECK(positions.dim() == 1, "interleave_rope_by_cache expects 1-D positions, got dim ",
+                positions.dim());
+    TORCH_CHECK(cos_sin_cache.dim() == 2,
+                "interleave_rope_by_cache expects cos_sin_cache shape [max_position, dim], got dim ",
+                cos_sin_cache.dim());
+    TORCH_CHECK(positions.size(0) == qk.size(0),
+                "interleave_rope_by_cache positions length must match token count, got ", positions.size(0),
+                ", expected ", qk.size(0));
+    TORCH_CHECK(rope_dim == qk.size(2),
+                "interleave_rope_by_cache native kernel requires rope_dim == head_dim, got ", rope_dim,
+                " vs ", qk.size(2));
+    TORCH_CHECK(rope_dim > 0 && rope_dim % 2 == 0,
+                "interleave_rope_by_cache expects a positive even rope_dim, got ", rope_dim);
+    TORCH_CHECK(qk.stride(2) == 1,
+                "interleave_rope_by_cache native kernel expects contiguous head dimension, got stride ",
+                qk.stride(2));
+    TORCH_CHECK(positions.is_contiguous(), "interleave_rope_by_cache expects contiguous positions");
+    TORCH_CHECK(cos_sin_cache.stride(1) == 1,
+                "interleave_rope_by_cache expects cos_sin_cache last-dim stride 1, got ",
+                cos_sin_cache.stride(1));
+    TORCH_CHECK(cos_sin_cache.size(1) >= rope_dim,
+                "interleave_rope_by_cache expects cos_sin_cache last dim >= rope_dim, got ",
+                cos_sin_cache.size(1), " vs ", rope_dim);
+    TORCH_CHECK(rope_dim % 32 == 0,
+                "interleave_rope_by_cache native kernel requires rope_dim multiple of 32, got ", rope_dim);
+
+    at::Tensor output = at::empty({qk.size(0), qk.size(1), qk.size(2)}, qk.options());
+    if (qk.size(0) == 0 || qk.size(1) == 0) {
+        return output;
+    }
+
+    const c10_npu::OptionalNPUGuard npu_guard(qk.device());
+    aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
+    const at::ScalarType scalar_type = qk.scalar_type();
+    void *qk_ptr = qk.data_ptr();
+    void *positions_ptr = positions.data_ptr();
+    void *cos_sin_cache_ptr = cos_sin_cache.data_ptr();
+    void *output_ptr = output.data_ptr();
+    const int64_t num_tokens = qk.size(0);
+    const int64_t num_heads = qk.size(1);
+    const int64_t head_dim = qk.size(2);
+    const int64_t qk_row_stride = qk.stride(0);
+    const int64_t qk_head_stride = qk.stride(1);
+    const int64_t cos_sin_row_stride = cos_sin_cache.stride(0);
+    const bool positions_is_int32 = positions.scalar_type() == at::kInt;
+
+    at_npu::native::OpCommand cmd;
+    cmd.Name("interleave_rope_by_cache");
+    cmd.SetCustomHandler([scalar_type, positions_is_int32, is_neox_style, stream, qk_ptr, positions_ptr, cos_sin_cache_ptr,
+                          output_ptr, num_tokens, num_heads, head_dim, qk_row_stride, qk_head_stride,
+                          cos_sin_row_stride]() -> int {
+        const int64_t aiv_num = get_cached_vector_core_num();
+        uint32_t block_dim = static_cast<uint32_t>(
+            std::max<int64_t>(1, std::min<int64_t>(num_tokens * num_heads, aiv_num)));
+        interleave_rope_by_cache_impl(
+            get_dtype_from_torch(scalar_type),
+            positions_is_int32,
+            stream,
+            qk_ptr,
+            positions_ptr,
+            cos_sin_cache_ptr,
+            output_ptr,
+            num_tokens,
+            num_heads,
+            head_dim,
+            qk_row_stride,
+            qk_head_stride,
+            cos_sin_row_stride,
+            is_neox_style,
+            block_dim);
+        return 0;
+    });
+    cmd.Run();
+    return output;
+}
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> kv_rmsnorm_rope_cache_by_cache(
+    const at::Tensor &kv,
+    const at::Tensor &weight,
+    const at::Tensor &positions,
+    const at::Tensor &cos_sin_cache,
+    const at::Tensor &slots,
+    at::Tensor &kv_cache_rope,
+    at::Tensor &kv_cache_nope,
+    double epsilon,
+    int64_t rope_dim,
+    bool is_neox_style,
+    bool is_output_kv,
+    bool cache_mode_is_nz)
+{
+    TORCH_CHECK(kv.device().type() == c10::DeviceType::PrivateUse1,
+                "kv_rmsnorm_rope_cache_by_cache expects kv on NPU");
+    TORCH_CHECK(weight.device() == kv.device(),
+                "kv_rmsnorm_rope_cache_by_cache expects weight on the same device as kv");
+    TORCH_CHECK(positions.device() == kv.device(),
+                "kv_rmsnorm_rope_cache_by_cache expects positions on the same device as kv");
+    TORCH_CHECK(cos_sin_cache.device() == kv.device(),
+                "kv_rmsnorm_rope_cache_by_cache expects cos_sin_cache on the same device as kv");
+    TORCH_CHECK(slots.device() == kv.device(),
+                "kv_rmsnorm_rope_cache_by_cache expects slots on the same device as kv");
+    TORCH_CHECK(kv_cache_rope.device() == kv.device() && kv_cache_nope.device() == kv.device(),
+                "kv_rmsnorm_rope_cache_by_cache expects caches on the same device as kv");
+    TORCH_CHECK(kv.scalar_type() == at::kHalf || kv.scalar_type() == at::kBFloat16,
+                "kv_rmsnorm_rope_cache_by_cache supports only fp16/bf16 kv, got ", kv.scalar_type());
+    TORCH_CHECK(weight.scalar_type() == kv.scalar_type(),
+                "kv_rmsnorm_rope_cache_by_cache expects weight dtype to match kv, got ",
+                weight.scalar_type(), " vs ", kv.scalar_type());
+    TORCH_CHECK(cos_sin_cache.scalar_type() == kv.scalar_type(),
+                "kv_rmsnorm_rope_cache_by_cache expects cos_sin_cache dtype to match kv, got ",
+                cos_sin_cache.scalar_type(), " vs ", kv.scalar_type());
+    TORCH_CHECK(kv_cache_rope.scalar_type() == kv.scalar_type() && kv_cache_nope.scalar_type() == kv.scalar_type(),
+                "kv_rmsnorm_rope_cache_by_cache expects cache dtype to match kv");
+    TORCH_CHECK(positions.scalar_type() == at::kInt || positions.scalar_type() == at::kLong,
+                "kv_rmsnorm_rope_cache_by_cache expects int32/int64 positions, got ", positions.scalar_type());
+    TORCH_CHECK(slots.scalar_type() == at::kInt || slots.scalar_type() == at::kLong,
+                "kv_rmsnorm_rope_cache_by_cache expects int32/int64 slots, got ", slots.scalar_type());
+    TORCH_CHECK(kv.dim() == 4 && kv.size(1) == 1 && kv.size(2) == 1,
+                "kv_rmsnorm_rope_cache_by_cache expects kv shape [tokens, 1, 1, dim], got ", kv.sizes());
+    TORCH_CHECK(weight.dim() == 1,
+                "kv_rmsnorm_rope_cache_by_cache expects 1-D weight, got dim ", weight.dim());
+    TORCH_CHECK(positions.dim() == 1 && slots.dim() == 1,
+                "kv_rmsnorm_rope_cache_by_cache expects 1-D positions and slots");
+    TORCH_CHECK(positions.size(0) == kv.size(0) && slots.size(0) == kv.size(0),
+                "kv_rmsnorm_rope_cache_by_cache positions/slots length must match token count");
+    TORCH_CHECK(cos_sin_cache.dim() == 2,
+                "kv_rmsnorm_rope_cache_by_cache expects cos_sin_cache shape [max_position, dim]");
+    TORCH_CHECK(kv_cache_rope.dim() == 4 && kv_cache_nope.dim() == 4,
+                "kv_rmsnorm_rope_cache_by_cache expects 4-D caches");
+    TORCH_CHECK(kv_cache_rope.size(0) == kv_cache_nope.size(0) &&
+                kv_cache_rope.size(1) == kv_cache_nope.size(1) &&
+                kv_cache_rope.size(2) == kv_cache_nope.size(2),
+                "kv_rmsnorm_rope_cache_by_cache expects rope/nope cache prefixes to match");
+    TORCH_CHECK(kv_cache_rope.size(1) > 0,
+                "kv_rmsnorm_rope_cache_by_cache expects positive cache block size");
+
+    const int64_t num_tokens = kv.size(0);
+    const int64_t nope_dim = weight.size(0);
+    TORCH_CHECK(rope_dim > 0 && rope_dim % 32 == 0,
+                "kv_rmsnorm_rope_cache_by_cache native kernel requires rope_dim positive and multiple of 32, got ",
+                rope_dim);
+    TORCH_CHECK(nope_dim > 0 && nope_dim % 16 == 0,
+                "kv_rmsnorm_rope_cache_by_cache native kernel requires nope_dim positive and multiple of 16, got ",
+                nope_dim);
+    TORCH_CHECK(kv.size(3) == nope_dim + rope_dim,
+                "kv_rmsnorm_rope_cache_by_cache expects kv last dim == nope_dim + rope_dim, got ",
+                kv.size(3), " vs ", nope_dim + rope_dim);
+    TORCH_CHECK(kv_cache_rope.size(3) == rope_dim && kv_cache_nope.size(3) == nope_dim,
+                "kv_rmsnorm_rope_cache_by_cache expects cache last dims to match rope/nope dims");
+    TORCH_CHECK(cos_sin_cache.size(1) >= rope_dim,
+                "kv_rmsnorm_rope_cache_by_cache expects cos_sin_cache last dim >= rope_dim");
+    TORCH_CHECK(kv.stride(3) == 1 && weight.is_contiguous() && positions.is_contiguous() &&
+                slots.is_contiguous() && cos_sin_cache.stride(1) == 1,
+                "kv_rmsnorm_rope_cache_by_cache expects contiguous last-dim inputs and contiguous weight/positions/slots");
+    TORCH_CHECK(kv_cache_rope.is_contiguous() && kv_cache_nope.is_contiguous(),
+                "kv_rmsnorm_rope_cache_by_cache expects contiguous caches");
+
+    at::Tensor out_rope = is_output_kv
+        ? at::empty({num_tokens, 1, 1, rope_dim}, kv.options())
+        : at::empty({0}, kv.options());
+    at::Tensor out_nope = is_output_kv
+        ? at::empty({num_tokens, 1, 1, nope_dim}, kv.options())
+        : at::empty({0}, kv.options());
+    if (num_tokens == 0) {
+        return {kv_cache_rope, kv_cache_nope, out_rope, out_nope};
+    }
+
+    const c10_npu::OptionalNPUGuard npu_guard(kv.device());
+    aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
+    const at::ScalarType scalar_type = kv.scalar_type();
+    void *kv_ptr = kv.data_ptr();
+    void *weight_ptr = weight.data_ptr();
+    void *positions_ptr = positions.data_ptr();
+    void *cos_sin_cache_ptr = cos_sin_cache.data_ptr();
+    void *slots_ptr = slots.data_ptr();
+    void *kv_cache_rope_ptr = kv_cache_rope.data_ptr();
+    void *kv_cache_nope_ptr = kv_cache_nope.data_ptr();
+    void *out_rope_ptr = out_rope.data_ptr();
+    void *out_nope_ptr = out_nope.data_ptr();
+    const int64_t kv_row_stride = kv.stride(0);
+    const int64_t cos_sin_row_stride = cos_sin_cache.stride(0);
+    const int64_t cache_block_size = kv_cache_rope.size(1);
+    const bool positions_is_int32 = positions.scalar_type() == at::kInt;
+    const bool slots_is_int32 = slots.scalar_type() == at::kInt;
+    const float epsilon_f = static_cast<float>(epsilon);
+
+    at_npu::native::OpCommand cmd;
+    cmd.Name("kv_rmsnorm_rope_cache_by_cache");
+    cmd.SetCustomHandler([scalar_type, positions_is_int32, slots_is_int32, stream, kv_ptr, weight_ptr, positions_ptr,
+                          cos_sin_cache_ptr, slots_ptr, kv_cache_rope_ptr, kv_cache_nope_ptr, out_rope_ptr,
+                          out_nope_ptr, num_tokens, kv_row_stride, cos_sin_row_stride, cache_block_size, nope_dim,
+                          rope_dim, epsilon_f, is_neox_style, is_output_kv, cache_mode_is_nz]() -> int {
+        const int64_t aiv_num = get_cached_vector_core_num();
+        uint32_t block_dim = static_cast<uint32_t>(
+            std::max<int64_t>(1, std::min<int64_t>(num_tokens, aiv_num)));
+        kv_rmsnorm_rope_cache_by_cache_impl(
+            get_dtype_from_torch(scalar_type),
+            positions_is_int32,
+            slots_is_int32,
+            stream,
+            kv_ptr,
+            weight_ptr,
+            positions_ptr,
+            cos_sin_cache_ptr,
+            slots_ptr,
+            kv_cache_rope_ptr,
+            kv_cache_nope_ptr,
+            out_rope_ptr,
+            out_nope_ptr,
+            num_tokens,
+            kv_row_stride,
+            cos_sin_row_stride,
+            cache_block_size,
+            nope_dim,
+            rope_dim,
+            epsilon_f,
+            is_neox_style,
+            is_output_kv,
+            cache_mode_is_nz,
+            block_dim);
+        return 0;
+    });
+    cmd.Run();
+    return {kv_cache_rope, kv_cache_nope, out_rope, out_nope};
+}
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor>
+kv_rmsnorm_rope_cache_and_interleave_by_cache(
+    const at::Tensor &kv,
+    const at::Tensor &weight,
+    const at::Tensor &q,
+    const at::Tensor &positions,
+    const at::Tensor &cos_sin_cache,
+    const at::Tensor &slots,
+    at::Tensor &kv_cache_rope,
+    at::Tensor &kv_cache_nope,
+    double epsilon,
+    int64_t rope_dim,
+    bool is_neox_style,
+    bool is_output_kv,
+    bool cache_mode_is_nz)
+{
+    TORCH_CHECK(kv.device().type() == c10::DeviceType::PrivateUse1,
+                "kv_rmsnorm_rope_cache_and_interleave_by_cache expects kv on NPU");
+    TORCH_CHECK(weight.device() == kv.device() && q.device() == kv.device() &&
+                positions.device() == kv.device() && cos_sin_cache.device() == kv.device() &&
+                slots.device() == kv.device(),
+                "kv_rmsnorm_rope_cache_and_interleave_by_cache expects inputs on the same NPU device");
+    TORCH_CHECK(kv_cache_rope.device() == kv.device() && kv_cache_nope.device() == kv.device(),
+                "kv_rmsnorm_rope_cache_and_interleave_by_cache expects caches on the same device as kv");
+    TORCH_CHECK(kv.scalar_type() == at::kHalf || kv.scalar_type() == at::kBFloat16,
+                "kv_rmsnorm_rope_cache_and_interleave_by_cache supports only fp16/bf16 kv, got ",
+                kv.scalar_type());
+    TORCH_CHECK(weight.scalar_type() == kv.scalar_type() && q.scalar_type() == kv.scalar_type() &&
+                cos_sin_cache.scalar_type() == kv.scalar_type() &&
+                kv_cache_rope.scalar_type() == kv.scalar_type() && kv_cache_nope.scalar_type() == kv.scalar_type(),
+                "kv_rmsnorm_rope_cache_and_interleave_by_cache expects all floating inputs/caches to match kv dtype");
+    TORCH_CHECK(positions.scalar_type() == at::kInt || positions.scalar_type() == at::kLong,
+                "kv_rmsnorm_rope_cache_and_interleave_by_cache expects int32/int64 positions, got ",
+                positions.scalar_type());
+    TORCH_CHECK(slots.scalar_type() == at::kInt || slots.scalar_type() == at::kLong,
+                "kv_rmsnorm_rope_cache_and_interleave_by_cache expects int32/int64 slots, got ",
+                slots.scalar_type());
+    TORCH_CHECK(kv.dim() == 4 && kv.size(1) == 1 && kv.size(2) == 1,
+                "kv_rmsnorm_rope_cache_and_interleave_by_cache expects kv shape [tokens, 1, 1, dim], got ",
+                kv.sizes());
+    TORCH_CHECK(q.dim() == 3,
+                "kv_rmsnorm_rope_cache_and_interleave_by_cache expects q shape [tokens, heads, dim], got dim ",
+                q.dim());
+    TORCH_CHECK(weight.dim() == 1,
+                "kv_rmsnorm_rope_cache_and_interleave_by_cache expects 1-D weight, got dim ", weight.dim());
+    TORCH_CHECK(positions.dim() == 1 && slots.dim() == 1,
+                "kv_rmsnorm_rope_cache_and_interleave_by_cache expects 1-D positions and slots");
+    TORCH_CHECK(positions.size(0) == kv.size(0) && slots.size(0) == kv.size(0) && q.size(0) == kv.size(0),
+                "kv_rmsnorm_rope_cache_and_interleave_by_cache positions/slots/q token count must match kv");
+    TORCH_CHECK(cos_sin_cache.dim() == 2,
+                "kv_rmsnorm_rope_cache_and_interleave_by_cache expects cos_sin_cache shape [max_position, dim]");
+    TORCH_CHECK(kv_cache_rope.dim() == 4 && kv_cache_nope.dim() == 4,
+                "kv_rmsnorm_rope_cache_and_interleave_by_cache expects 4-D caches");
+    TORCH_CHECK(kv_cache_rope.size(0) == kv_cache_nope.size(0) &&
+                kv_cache_rope.size(1) == kv_cache_nope.size(1) &&
+                kv_cache_rope.size(2) == kv_cache_nope.size(2),
+                "kv_rmsnorm_rope_cache_and_interleave_by_cache expects rope/nope cache prefixes to match");
+    TORCH_CHECK(kv_cache_rope.size(1) > 0,
+                "kv_rmsnorm_rope_cache_and_interleave_by_cache expects positive cache block size");
+
+    const int64_t num_tokens = kv.size(0);
+    const int64_t nope_dim = weight.size(0);
+    const int64_t q_num_heads = q.size(1);
+    TORCH_CHECK(q_num_heads > 0,
+                "kv_rmsnorm_rope_cache_and_interleave_by_cache expects positive q head count");
+    TORCH_CHECK(rope_dim > 0 && rope_dim % 32 == 0,
+                "kv_rmsnorm_rope_cache_and_interleave_by_cache native kernel requires rope_dim positive and multiple of 32, got ",
+                rope_dim);
+    TORCH_CHECK(nope_dim > 0 && nope_dim % 16 == 0,
+                "kv_rmsnorm_rope_cache_and_interleave_by_cache native kernel requires nope_dim positive and multiple of 16, got ",
+                nope_dim);
+    TORCH_CHECK(kv.size(3) == nope_dim + rope_dim,
+                "kv_rmsnorm_rope_cache_and_interleave_by_cache expects kv last dim == nope_dim + rope_dim, got ",
+                kv.size(3), " vs ", nope_dim + rope_dim);
+    TORCH_CHECK(q.size(2) == rope_dim,
+                "kv_rmsnorm_rope_cache_and_interleave_by_cache expects q last dim == rope_dim, got ",
+                q.size(2), " vs ", rope_dim);
+    TORCH_CHECK(kv_cache_rope.size(3) == rope_dim && kv_cache_nope.size(3) == nope_dim,
+                "kv_rmsnorm_rope_cache_and_interleave_by_cache expects cache last dims to match rope/nope dims");
+    TORCH_CHECK(cos_sin_cache.size(1) >= rope_dim,
+                "kv_rmsnorm_rope_cache_and_interleave_by_cache expects cos_sin_cache last dim >= rope_dim");
+    TORCH_CHECK(kv.stride(3) == 1 && q.stride(2) == 1 && weight.is_contiguous() &&
+                positions.is_contiguous() && slots.is_contiguous() && cos_sin_cache.stride(1) == 1,
+                "kv_rmsnorm_rope_cache_and_interleave_by_cache expects contiguous last-dim inputs and contiguous weight/positions/slots");
+    TORCH_CHECK(kv_cache_rope.is_contiguous() && kv_cache_nope.is_contiguous(),
+                "kv_rmsnorm_rope_cache_and_interleave_by_cache expects contiguous caches");
+
+    at::Tensor q_out = at::empty({num_tokens, q_num_heads, rope_dim}, q.options());
+    at::Tensor out_rope = is_output_kv
+        ? at::empty({num_tokens, 1, 1, rope_dim}, kv.options())
+        : at::empty({0}, kv.options());
+    at::Tensor out_nope = is_output_kv
+        ? at::empty({num_tokens, 1, 1, nope_dim}, kv.options())
+        : at::empty({0}, kv.options());
+    if (num_tokens == 0) {
+        return {q_out, kv_cache_rope, kv_cache_nope, out_rope, out_nope};
+    }
+
+    const c10_npu::OptionalNPUGuard npu_guard(kv.device());
+    aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
+    const at::ScalarType scalar_type = kv.scalar_type();
+    void *kv_ptr = kv.data_ptr();
+    void *weight_ptr = weight.data_ptr();
+    void *q_ptr = q.data_ptr();
+    void *positions_ptr = positions.data_ptr();
+    void *cos_sin_cache_ptr = cos_sin_cache.data_ptr();
+    void *slots_ptr = slots.data_ptr();
+    void *kv_cache_rope_ptr = kv_cache_rope.data_ptr();
+    void *kv_cache_nope_ptr = kv_cache_nope.data_ptr();
+    void *out_rope_ptr = out_rope.data_ptr();
+    void *out_nope_ptr = out_nope.data_ptr();
+    void *q_out_ptr = q_out.data_ptr();
+    const int64_t kv_row_stride = kv.stride(0);
+    const int64_t q_row_stride = q.stride(0);
+    const int64_t q_head_stride = q.stride(1);
+    const int64_t cos_sin_row_stride = cos_sin_cache.stride(0);
+    const int64_t cache_block_size = kv_cache_rope.size(1);
+    const bool positions_is_int32 = positions.scalar_type() == at::kInt;
+    const bool slots_is_int32 = slots.scalar_type() == at::kInt;
+    const float epsilon_f = static_cast<float>(epsilon);
+
+    at_npu::native::OpCommand cmd;
+    cmd.Name("kv_rmsnorm_rope_cache_and_interleave_by_cache");
+    cmd.SetCustomHandler([scalar_type, positions_is_int32, slots_is_int32, stream, kv_ptr, weight_ptr, q_ptr,
+                          positions_ptr, cos_sin_cache_ptr, slots_ptr, kv_cache_rope_ptr, kv_cache_nope_ptr,
+                          out_rope_ptr, out_nope_ptr, q_out_ptr, num_tokens, kv_row_stride, q_row_stride,
+                          q_head_stride, q_num_heads, cos_sin_row_stride, cache_block_size, nope_dim, rope_dim,
+                          epsilon_f, is_neox_style, is_output_kv, cache_mode_is_nz]() -> int {
+        const int64_t aiv_num = get_cached_vector_core_num();
+        const int64_t total_tasks = num_tokens * (q_num_heads + 1);
+        uint32_t block_dim = static_cast<uint32_t>(
+            std::max<int64_t>(1, std::min<int64_t>(total_tasks, aiv_num)));
+        kv_rmsnorm_rope_cache_and_interleave_by_cache_impl(
+            get_dtype_from_torch(scalar_type),
+            positions_is_int32,
+            slots_is_int32,
+            stream,
+            kv_ptr,
+            weight_ptr,
+            q_ptr,
+            positions_ptr,
+            cos_sin_cache_ptr,
+            slots_ptr,
+            kv_cache_rope_ptr,
+            kv_cache_nope_ptr,
+            out_rope_ptr,
+            out_nope_ptr,
+            q_out_ptr,
+            num_tokens,
+            kv_row_stride,
+            q_row_stride,
+            q_head_stride,
+            q_num_heads,
+            cos_sin_row_stride,
+            cache_block_size,
+            nope_dim,
+            rope_dim,
+            epsilon_f,
+            is_neox_style,
+            is_output_kv,
+            cache_mode_is_nz,
+            block_dim);
+        return 0;
+    });
+    cmd.Run();
+    return {q_out, kv_cache_rope, kv_cache_nope, out_rope, out_nope};
 }
 
 void bgmv_shrink(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, at::Tensor &y, double scale)
@@ -2290,6 +2731,34 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                         int added_vocab_end_index) -> (Tensor masked_input, Tensor mask)");
     ops.impl("get_masked_input_and_mask", torch::kPrivateUse1, &vllm_ascend::get_masked_input_and_mask);
 
+    ops.def(
+        "interleave_rope_by_cache(Tensor qk, Tensor positions, Tensor cos_sin_cache,"
+        "                         int rope_dim, bool is_neox_style) -> Tensor"
+    );
+    ops.impl("interleave_rope_by_cache", torch::kPrivateUse1, &vllm_ascend::interleave_rope_by_cache);
+
+    ops.def(
+        "kv_rmsnorm_rope_cache_by_cache(Tensor kv, Tensor weight, Tensor positions, Tensor cos_sin_cache,"
+        "                              Tensor slots, Tensor(a!) kv_cache_rope, Tensor(b!) kv_cache_nope,"
+        "                              float epsilon, int rope_dim, bool is_neox_style, bool is_output_kv,"
+        "                              bool cache_mode_is_nz) -> (Tensor(a!), Tensor(b!), Tensor, Tensor)"
+    );
+    ops.impl("kv_rmsnorm_rope_cache_by_cache",
+             torch::kPrivateUse1,
+             &vllm_ascend::kv_rmsnorm_rope_cache_by_cache);
+
+    ops.def(
+        "kv_rmsnorm_rope_cache_and_interleave_by_cache(Tensor kv, Tensor weight, Tensor q, Tensor positions,"
+        "                                            Tensor cos_sin_cache, Tensor slots,"
+        "                                            Tensor(a!) kv_cache_rope, Tensor(b!) kv_cache_nope,"
+        "                                            float epsilon, int rope_dim, bool is_neox_style,"
+        "                                            bool is_output_kv, bool cache_mode_is_nz)"
+        " -> (Tensor, Tensor(a!), Tensor(b!), Tensor, Tensor)"
+    );
+    ops.impl("kv_rmsnorm_rope_cache_and_interleave_by_cache",
+             torch::kPrivateUse1,
+             &vllm_ascend::kv_rmsnorm_rope_cache_and_interleave_by_cache);
+
     ops.def("bgmv_shrink(Tensor! x, Tensor! weight, Tensor! indices, Tensor! y, float scale) -> ()");
     ops.impl("bgmv_shrink", torch::kPrivateUse1, &vllm_ascend::bgmv_shrink);
 
@@ -2307,17 +2776,20 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.impl("sgmv_expand", torch::kPrivateUse1, &vllm_ascend::sgmv_expand);
 
     ops.def(
-        "mla_preprocess(Tensor hiddenState, Tensor wdqkv,"
-        "               Tensor? descale0, Tensor gamma1, Tensor? beta1, Tensor wuq, Tensor? descale1,"
-        "               Tensor gamma2, Tensor cos, Tensor sin, Tensor wuk, Tensor kv_cache,"
-        "               Tensor kv_cache_rope, Tensor slotmapping, Tensor? quant_scale0,"
-        "               Tensor? quant_offset0, Tensor? bias0, Tensor? quant_scale1, Tensor? quant_offset1,"
-        "               Tensor? bias1, Tensor? ctkv_scale, Tensor? q_nope_scale, str? cache_mode,"
-        "               str? quant_mode, bool? enable_inner_out, Tensor! q_out0, Tensor! kv_cache_out0, Tensor! q_out1,"
-        "               Tensor! kv_cache_out1, Tensor! inner_out) -> (Tensor q_out0, Tensor kv_cache_out0,"
-        "                                          Tensor q_out1, Tensor kv_cache_out1, Tensor inner_out)"
+        "mla_preprocess_by_cache(Tensor hiddenState, Tensor wdqkv,"
+        "                        Tensor? descale0, Tensor gamma1, Tensor? beta1, Tensor wuq, Tensor? descale1,"
+        "                        Tensor gamma2, Tensor positions, Tensor cos_sin_cache, Tensor wuk, Tensor kv_cache,"
+        "                        Tensor kv_cache_rope, Tensor slotmapping, Tensor? quant_scale0,"
+        "                        Tensor? quant_offset0, Tensor? bias0, Tensor? quant_scale1, Tensor? quant_offset1,"
+        "                        Tensor? bias1, Tensor? ctkv_scale, Tensor? q_nope_scale, str? cache_mode,"
+        "                        str? quant_mode, bool? enable_inner_out, bool is_neox_style,"
+        "                        Tensor! q_out0, Tensor! kv_cache_out0, Tensor! q_out1,"
+        "                        Tensor! kv_cache_out1, Tensor! inner_out, bool? enable_raw_q_out,"
+        "                        Tensor! raw_q_out) -> (Tensor q_out0, Tensor kv_cache_out0,"
+        "                                                   Tensor q_out1, Tensor kv_cache_out1, Tensor inner_out,"
+        "                                                   Tensor raw_q_out)"
     );
-    ops.impl("mla_preprocess", torch::kPrivateUse1, &vllm_ascend::mla_preprocess);
+    ops.impl("mla_preprocess_by_cache", torch::kPrivateUse1, &vllm_ascend::mla_preprocess_by_cache);
 
     //batch_matmul ops refer to sgl-kernel-npu
     ops.def(

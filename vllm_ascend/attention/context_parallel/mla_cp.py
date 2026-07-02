@@ -427,9 +427,8 @@ class AscendMlaCPImpl(AscendMLAImpl):
         prefill_q = self.q_proj(prefill_q_c)[0].view(-1, self.num_heads, self.qk_head_dim)
         prefill_q_pe = prefill_q[..., self.qk_nope_head_dim :]
         prefill_q_nope = prefill_q[..., : self.qk_nope_head_dim]
-        cos = attn_metadata.prefill.cos[: num_actual_tokens - num_decode_tokens]
-        sin = attn_metadata.prefill.sin[: num_actual_tokens - num_decode_tokens]
-        prefill_q_pe = self.rope_single(prefill_q_pe, cos, sin)
+        prefill_positions = attn_metadata.prefill.input_positions[: num_actual_tokens - num_decode_tokens]
+        prefill_q_pe = self.rope_single(prefill_q_pe, prefill_positions)
         prefill_kv_no_split = kv_no_split[:num_actual_tokens]
         kv_c, k_pe = prefill_kv_no_split.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())  # type: ignore[misc]
@@ -438,7 +437,8 @@ class AscendMlaCPImpl(AscendMLAImpl):
         k_pe = k_pe.unsqueeze(1)
         prefill_k_pe = k_pe
         prefill_k_pe[num_decode_tokens:num_actual_tokens] = self.rope_single(
-            prefill_k_pe[num_decode_tokens:num_actual_tokens], cos, sin
+            prefill_k_pe[num_decode_tokens:num_actual_tokens],
+            prefill_positions,
         )
         prefill_k_c_normed = kv_c_normed[:num_actual_tokens]
         prefill_kv_c_k_pe = torch.cat([prefill_k_c_normed, prefill_k_pe], dim=-1)
@@ -470,17 +470,77 @@ class AscendMlaCPImpl(AscendMLAImpl):
         prefill_k_pe = tail_k_pe.expand((*prefill_k_nope.shape[:-1], -1))
         return PrefillMLAPreprocessResult(prefill_q_nope, prefill_q_pe, prefill_k_nope, prefill_k_pe, prefill_value)
 
+    def mla_preprocess_prefill_with_mlapo(self, hidden_states, kv_cache, attn_metadata):
+        if not self.pcp_size > 1:
+            return super().mla_preprocess_prefill_with_mlapo(hidden_states, kv_cache, attn_metadata)
+
+        num_decode_tokens = attn_metadata.num_decode_tokens
+        num_actual_tokens = (
+            attn_metadata.num_actual_tokens_pcp_padded - self.pcp_size * num_decode_tokens
+        ) // self.pcp_size + num_decode_tokens
+        prefill_positions = attn_metadata.prefill.input_positions[: num_actual_tokens - num_decode_tokens]
+        if num_decode_tokens > 0:
+            decode_positions = attn_metadata.decode.input_positions[:num_decode_tokens].to(
+                device=prefill_positions.device,
+                dtype=prefill_positions.dtype,
+            )
+            kv_positions = torch.cat([decode_positions, prefill_positions], dim=0)
+        else:
+            kv_positions = prefill_positions
+
+        q_nope, q_pe, k_c_normed, k_pe = self._run_mla_preprocess_by_cache_prefill(
+            hidden_states[:num_actual_tokens],
+            kv_positions,
+        )
+        prefill_q_nope = q_nope[num_decode_tokens:num_actual_tokens]
+        prefill_q_pe = q_pe[num_decode_tokens:num_actual_tokens]
+
+        k_c_normed = k_c_normed.view(num_actual_tokens, self.num_kv_heads, -1)
+        k_pe = k_pe.view(num_actual_tokens, self.num_kv_heads, -1)
+        prefill_kv_c_k_pe = torch.cat([k_c_normed, k_pe], dim=-1)
+        prefill_kv_c_k_pe = get_pcp_group().all_gather(prefill_kv_c_k_pe, 0)
+        prefill_kv_c_k_pe = torch.index_select(
+            prefill_kv_c_k_pe, 0, attn_metadata.prefill.pcp_metadata.pcp_allgather_restore_idx
+        )
+        prefill_kv_c_k_pe = prefill_kv_c_k_pe[num_decode_tokens * self.pcp_size :]
+        prefill_k_c_normed, prefill_k_pe = prefill_kv_c_k_pe.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+        kv_c_normed, cache_k_pe = prefill_k_c_normed, prefill_k_pe
+        prefill_k_c_normed = prefill_k_c_normed.squeeze(1)
+        slot_mapping = attn_metadata.slot_mapping[self.pcp_size * num_decode_tokens :]
+        if self.is_kv_producer:
+            attn_metadata.reshape_cache_event = torch.npu.Event()
+        DeviceOperator.reshape_and_cache(
+            key=kv_c_normed,
+            value=cache_k_pe,
+            key_cache=kv_cache[0],
+            value_cache=kv_cache[1],
+            slot_mapping=slot_mapping,
+        )
+        if self.is_kv_producer:
+            attn_metadata.reshape_cache_event.record()
+
+        pcp_metadata = attn_metadata.prefill.pcp_metadata
+        assert pcp_metadata is not None
+        tail_k_c_normed = torch.index_select(prefill_k_c_normed, 0, pcp_metadata.kv_tail_proj_idx)
+        tail_k_pe = torch.index_select(prefill_k_pe, 0, pcp_metadata.kv_tail_proj_idx)
+        prefill_k_nope, prefill_value = (
+            self.kv_b_proj(tail_k_c_normed)[0]
+            .view(-1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
+            .split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+        )
+        prefill_k_pe = tail_k_pe.expand((*prefill_k_nope.shape[:-1], -1))
+        return PrefillMLAPreprocessResult(prefill_q_nope, prefill_q_pe, prefill_k_nope, prefill_k_pe, prefill_value)
+
     def mla_preprocess_decode(self, q_c, kv_no_split, kv_cache, attn_metadata):
         num_decode_tokens = attn_metadata.num_decode_tokens
         decode_q_c = q_c[:num_decode_tokens]
-        cos = attn_metadata.decode.cos
-        sin = attn_metadata.decode.sin
         decode_ql_nope, decode_q_pe = self._q_proj_and_k_up_proj(decode_q_c)
         decode_ql_nope, decode_q_pe = self.reorg_decode_q(decode_ql_nope, decode_q_pe)
-        decode_q_pe = self.rope_single(decode_q_pe, cos, sin)
+        decode_positions = attn_metadata.decode.input_positions[:num_decode_tokens]
+        decode_q_pe = self.rope_single(decode_q_pe, decode_positions)
         decode_slots = attn_metadata.slot_mapping[:num_decode_tokens]
         decode_kv_no_split = kv_no_split[:num_decode_tokens]
-        decode_k_pe, decode_k_nope = self.exec_kv_decode(decode_kv_no_split, cos, sin, kv_cache, decode_slots)
+        decode_k_pe, decode_k_nope = self.exec_kv_decode(decode_kv_no_split, decode_positions, kv_cache, decode_slots)
         return DecodeMLAPreprocessResult(decode_ql_nope, decode_q_pe, decode_k_nope, decode_k_pe)
 
     def get_context_seq_len_npu(self, index: int, attn_metadata: AscendMLAMetadata):

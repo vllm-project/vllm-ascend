@@ -102,7 +102,7 @@ namespace vllm_ascend {
         uint32_t slice_offset,
         uint32_t output_full_dim);
 
-    extern void mla_preprocess_impl(
+    extern void mla_preprocess_by_cache_impl(
         void* stream,
         void* hidden_state,
         void* quant_scale1,
@@ -114,10 +114,8 @@ namespace vllm_ascend {
         void* quant_scale2,
         void* quant_offset2,
         void* gamma3,
-        void* sin1,
-        void* cos1,
-        void* sin2,
-        void* cos2,
+        void* positions,
+        void* cos_sin_cache,
         void* keycache,
         void* slot_mapping,
         void* wuq,
@@ -132,9 +130,87 @@ namespace vllm_ascend {
         void* q2,
         void* keycache_out2,
         void* inner_out,
+        void* raw_q_out,
         void* workspace,
         void* tiling,
         const uint32_t block_dim
+    );
+
+    extern void interleave_rope_by_cache_impl(
+        AscendType type,
+        bool positions_is_int32,
+        void* stream,
+        void* qk,
+        void* positions,
+        void* cos_sin_cache,
+        void* output,
+        int64_t num_tokens,
+        int64_t num_heads,
+        int64_t head_dim,
+        int64_t qk_row_stride,
+        int64_t qk_head_stride,
+        int64_t cos_sin_row_stride,
+        bool is_neox_style,
+        uint32_t block_dim
+    );
+
+    extern void kv_rmsnorm_rope_cache_by_cache_impl(
+        AscendType type,
+        bool positions_is_int32,
+        bool slots_is_int32,
+        void* stream,
+        void* kv,
+        void* weight,
+        void* positions,
+        void* cos_sin_cache,
+        void* slots,
+        void* kv_cache_rope,
+        void* kv_cache_nope,
+        void* out_rope,
+        void* out_nope,
+        int64_t num_tokens,
+        int64_t kv_row_stride,
+        int64_t cos_sin_row_stride,
+        int64_t cache_block_size,
+        int64_t nope_dim,
+        int64_t rope_dim,
+        float epsilon,
+        bool is_neox_style,
+        bool is_output_kv,
+        bool cache_mode_is_nz,
+        uint32_t block_dim
+    );
+
+    extern void kv_rmsnorm_rope_cache_and_interleave_by_cache_impl(
+        AscendType type,
+        bool positions_is_int32,
+        bool slots_is_int32,
+        void* stream,
+        void* kv,
+        void* weight,
+        void* q,
+        void* positions,
+        void* cos_sin_cache,
+        void* slots,
+        void* kv_cache_rope,
+        void* kv_cache_nope,
+        void* out_rope,
+        void* out_nope,
+        void* q_out,
+        int64_t num_tokens,
+        int64_t kv_row_stride,
+        int64_t q_row_stride,
+        int64_t q_head_stride,
+        int64_t q_num_heads,
+        int64_t cos_sin_row_stride,
+        int64_t cache_block_size,
+        int64_t nope_dim,
+        int64_t rope_dim,
+        float epsilon,
+        bool is_neox_style,
+        bool is_output_kv,
+        bool cache_mode_is_nz,
+        uint32_t block_dim
     );
 
     extern void batch_matmul_transpose_impl(

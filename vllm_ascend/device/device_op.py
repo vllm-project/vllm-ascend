@@ -15,6 +15,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+from functools import lru_cache
 from typing import Any
 
 import torch
@@ -27,19 +28,21 @@ from vllm_ascend.device.mxfp_compat import (
     QUANT_DTYPES,
     SCALE_DTYPES,
 )
-from vllm_ascend.ops.triton.fla.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd_kernel
-from vllm_ascend.ops.triton.fla.solve_tril import solve_tril_16x16_kernel
-from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 DSA_COMPRESSOR_SLOT_MAPPING_FLAT = 1
 DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET = 2
 
-if HAS_TRITON:
-    from vllm_ascend.ops.triton.rms_norm import triton_q_rms  # noqa: F811
-else:
-    triton_q_rms = None  # type: ignore
+
+@lru_cache(maxsize=1)
+def _get_triton_q_rms():
+    if not HAS_TRITON:
+        return None
+
+    from vllm_ascend.ops.triton.rms_norm import triton_q_rms
+
+    return triton_q_rms
 
 
 class BaseDeviceAdaptor:
@@ -223,18 +226,17 @@ class BaseDeviceAdaptor:
 
     @staticmethod
     def mla_preprocess_only_decode(atten_obj, hidden_states, kv_cache, attn_metadata):
+        from vllm_ascend.ops.rope_cache_ops import mla_preprocess_by_cache, mla_prolog_v2_by_cache
+
         bsz = attn_metadata.num_decode_tokens
         hidden_states = hidden_states[:bsz]
-
-        cos_shape = attn_metadata.decode.cos.shape
-        cos = attn_metadata.decode.cos.view(cos_shape[0], cos_shape[-1])
-        sin = attn_metadata.decode.sin.view(cos_shape[0], cos_shape[-1])
+        positions = attn_metadata.decode.input_positions[:bsz]
 
         decode_k_nope, decode_k_pe = kv_cache[0], kv_cache[1]
         dequant_scale_q_nope = None
         if atten_obj.fa_quant_layer:
             quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
-            decode_q_nope, decode_q_pe, decode_k_nope, decode_k_pe, dequant_scale_q_nope = torch_npu.npu_mla_prolog_v2(
+            decode_q_nope, decode_q_pe, decode_k_nope, decode_k_pe, dequant_scale_q_nope = mla_prolog_v2_by_cache(
                 quantized_x,
                 atten_obj.wd_q,
                 atten_obj.wu_q,
@@ -242,11 +244,12 @@ class BaseDeviceAdaptor:
                 atten_obj.wd_kv,
                 atten_obj.gamma1,
                 atten_obj.gamma2,
-                sin,
-                cos,
+                positions,
+                atten_obj.rotary_emb,
                 attn_metadata.slot_mapping[:bsz].to(torch.int64),
                 decode_k_nope,
                 decode_k_pe,
+                ref_tensor=hidden_states,
                 dequant_scale_x=pertoken_scale.view(-1, 1),
                 dequant_scale_w_dq=atten_obj.dequant_scale_w_dq,
                 dequant_scale_w_uq_qr=atten_obj.dequant_scale_w_uq_qr,
@@ -266,7 +269,7 @@ class BaseDeviceAdaptor:
                 device=hidden_states.device,
             )
 
-            torch.ops._C_ascend.mla_preprocess(
+            mla_preprocess_by_cache(
                 hidden_states,
                 atten_obj.wd_qkv,
                 atten_obj.deq_scale_qkv,
@@ -275,12 +278,13 @@ class BaseDeviceAdaptor:
                 atten_obj.wu_q,
                 atten_obj.qb_deq_scl,
                 atten_obj.gamma2,
-                cos,
-                sin,
+                positions,
+                atten_obj.rotary_emb,
                 atten_obj.W_UK_T,
                 decode_k_nope,
                 decode_k_pe,
                 attn_metadata.slot_mapping[:bsz],
+                layout="TD",
                 quant_scale0=atten_obj.quant_scale0,
                 quant_offset0=atten_obj.quant_offset0,
                 bias0=atten_obj.quant_bias_qkv,
@@ -309,66 +313,6 @@ class BaseDeviceAdaptor:
             decode_q_nope, decode_q_pe, decode_k_nope, decode_k_pe, dequant_scale_q_nope=dequant_scale_q_nope
         )
         return decode_preprocess_res, None
-
-    @staticmethod
-    def sfa_preprocess_with_mlapo(
-        sfa_impl,
-        hidden_states: torch.Tensor,
-        kv_cache: tuple,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
-        slot_mapping: torch.Tensor,
-        num_input_tokens: int,
-    ) -> tuple:
-        k_nope, k_pe = kv_cache[0], kv_cache[1]
-        ql_nope = torch.empty(
-            (num_input_tokens, sfa_impl.W_UK_T.shape[0], k_nope.shape[-1]),
-            dtype=hidden_states.dtype,
-            device=hidden_states.device,
-        )
-        q_pe = torch.empty(
-            (num_input_tokens, sfa_impl.W_UK_T.shape[0], k_pe.shape[-1]),
-            dtype=hidden_states.dtype,
-            device=hidden_states.device,
-        )
-        q_c = torch.empty(
-            (num_input_tokens, sfa_impl.q_lora_rank),
-            dtype=hidden_states.dtype,
-            device=hidden_states.device,
-        )
-        torch.ops._C_ascend.mla_preprocess(
-            hidden_states,
-            sfa_impl.wd_qkv,
-            sfa_impl.deq_scale_qkv,
-            sfa_impl.gamma1,
-            sfa_impl.beta1,
-            sfa_impl.wu_q,
-            sfa_impl.qb_deq_scl,
-            sfa_impl.gamma2,
-            cos,
-            sin,
-            sfa_impl.W_UK_T,
-            k_nope,
-            k_pe,
-            slot_mapping,
-            quant_scale0=sfa_impl.quant_scale0,
-            quant_offset0=sfa_impl.quant_offset0,
-            bias0=sfa_impl.quant_bias_qkv,
-            quant_scale1=sfa_impl.quant_scale1,
-            quant_offset1=sfa_impl.quant_offset1,
-            bias1=sfa_impl.qb_qt_bias,
-            ctkv_scale=sfa_impl.ctkv_scale,
-            q_nope_scale=sfa_impl.q_nope_scale,
-            cache_mode="krope_ctkv",
-            quant_mode="per_tensor_quant_asymm",
-            enable_inner_out=True,
-            q_out0=ql_nope,
-            kv_cache_out0=k_nope,
-            q_out1=q_pe,
-            kv_cache_out1=k_pe,
-            inner_out=q_c,
-        )
-        return hidden_states, ql_nope, q_pe, q_c
 
     @staticmethod
     def indexer_select_post_process(
@@ -622,6 +566,7 @@ class BaseDeviceAdaptor:
     def apply_dsa_q_rms(q, eps, q_norm_without_weight=None):
         """Apply Q RMS norm. Non-A5: triton_q_rms.
         A5: uses q_norm_without_weight callable when provided."""
+        triton_q_rms = _get_triton_q_rms()
         if triton_q_rms is not None:
             return triton_q_rms(q, eps)
         else:
@@ -697,6 +642,8 @@ class BaseDeviceAdaptor:
     def chunk_scaled_dot_kkt_fwd(
         num_core, bh_step, task_num, k, beta, g_cumsum, A, cu_seqlens, chunk_indices, T, B, H, Hg, K, BT, BK
     ):
+        from vllm_ascend.ops.triton.fla.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd_kernel
+
         chunk_scaled_dot_kkt_fwd_kernel[(num_core,)](
             k=k,
             beta=beta,
@@ -734,6 +681,8 @@ class BaseDeviceAdaptor:
         NT,
         B,
     ):
+        from vllm_ascend.ops.triton.fla.solve_tril import solve_tril_16x16_kernel
+
         extract_slice_stride_1 = LARGE_BLOCK_T // 32
         solve_tril_16x16_kernel[NT, B * H](
             A=A,
@@ -1109,15 +1058,17 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
 
     @staticmethod
     def mla_preprocess_only_decode(atten_obj, hidden_states, kv_cache, attn_metadata):
+        from vllm_ascend.ops.rope_cache_ops import mla_prolog_v3_by_cache
+
         bsz = attn_metadata.num_decode_tokens
-        hidden_states = hidden_states[:bsz].unsqueeze(1)
+        hidden_states = hidden_states[:bsz]
+        positions = attn_metadata.decode.input_positions[:bsz]
+        rope_ref = hidden_states
+        hidden_states = hidden_states.unsqueeze(1)
         hidden_states, dynamic_scale = torch_npu.npu_dynamic_mx_quant(hidden_states, dst_type=torch.float8_e4m3fn)
         dynamic_scale = dynamic_scale.reshape(hidden_states.shape[0] * hidden_states.shape[1], -1)
-        cos_shape = attn_metadata.decode.cos.shape
-        cos = attn_metadata.decode.cos.view(cos_shape[0], 1, cos_shape[-1])
-        sin = attn_metadata.decode.sin.view(cos_shape[0], 1, cos_shape[-1])
         decode_k_nope, decode_k_pe = kv_cache[0], kv_cache[1]
-        decode_q_nope, decode_q_pe, dequant_scale_q_nope, _, _ = torch_npu.npu_mla_prolog_v3(
+        decode_q_nope, decode_q_pe, dequant_scale_q_nope, _, _ = mla_prolog_v3_by_cache(
             token_x=hidden_states,
             weight_dq=atten_obj.weight_dq,
             weight_uq_qr=atten_obj.weight_uq_qr,
@@ -1125,8 +1076,9 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             weight_dkv_kr=atten_obj.weight_dkv_kr,
             rmsnorm_gamma_cq=atten_obj.q_a_layernorm.weight.data,
             rmsnorm_gamma_ckv=atten_obj.kv_a_layernorm.weight.data,
-            rope_sin=sin,
-            rope_cos=cos,
+            positions=positions,
+            rotary_emb=atten_obj.rotary_emb,
+            ref_tensor=rope_ref,
             kv_cache=decode_k_nope,
             kr_cache=decode_k_pe,
             cache_index=attn_metadata.slot_mapping[:bsz].view(bsz, -1).to(torch.int64),
@@ -1278,6 +1230,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         if q_norm_without_weight is not None:
             return q_norm_without_weight(q)
 
+        triton_q_rms = _get_triton_q_rms()
         if triton_q_rms is not None:
             return triton_q_rms(q, eps)
         else:
@@ -1360,101 +1313,6 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
     def get_dsa_kernel_block_sizes():
         """A5: return supported kernel block sizes."""
         return [8, 16, 128]
-
-    @staticmethod
-    def sfa_preprocess_with_mlapo(
-        sfa_impl,
-        hidden_states: torch.Tensor,
-        kv_cache: tuple,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
-        slot_mapping: torch.Tensor,
-        num_input_tokens: int,
-    ) -> tuple:
-        bsz = num_input_tokens
-        slot_mapping = slot_mapping[:bsz]
-        hidden_states_temp = hidden_states[:bsz].unsqueeze(1)
-        cos = cos[:bsz, ...]
-        sin = sin[:bsz, ...]
-
-        is_quantized = getattr(sfa_impl, "mlapo_is_quantized", True)
-
-        cos_shape = cos.shape
-        cos = cos.view(cos_shape[0], 1, cos_shape[-1])
-        sin = sin.view(cos_shape[0], 1, cos_shape[-1])
-
-        decode_k_nope = kv_cache[0]
-        use_c8 = getattr(sfa_impl, "use_sparse_c8_indexer", False)
-        kr_cache = (
-            torch.zeros(0, 0, decode_k_nope.shape[-2], cos_shape[-1], dtype=torch.bfloat16, device=decode_k_nope.device)
-            if use_c8
-            else kv_cache[1]
-        )
-
-        if is_quantized:
-            hidden_states_temp, dynamic_scale = torch_npu.npu_dynamic_mx_quant(
-                hidden_states_temp, dst_type=torch.float8_e4m3fn
-            )
-            dynamic_scale = dynamic_scale.reshape(hidden_states_temp.shape[0] * hidden_states_temp.shape[1], -1)
-
-            decode_q_nope, q_pe, _, q_c, q_c_scale = torch_npu.npu_mla_prolog_v3(
-                token_x=hidden_states_temp,
-                weight_dq=sfa_impl.weight_dq,
-                weight_uq_qr=sfa_impl.weight_uq_qr,
-                weight_uk=sfa_impl.W_UK_T,
-                weight_dkv_kr=sfa_impl.weight_dkv_kr,
-                rmsnorm_gamma_cq=sfa_impl.q_a_layernorm.weight.data,
-                rmsnorm_gamma_ckv=sfa_impl.kv_a_layernorm.weight.data,
-                rope_sin=sin,
-                rope_cos=cos,
-                kv_cache=decode_k_nope,
-                kr_cache=kr_cache,
-                cache_index=slot_mapping[:bsz].view(bsz, -1).to(torch.int64),
-                dequant_scale_x=dynamic_scale.view(torch.float8_e8m0fnu),
-                dequant_scale_w_dq=sfa_impl.weight_dq_scale.view(torch.float8_e8m0fnu),
-                dequant_scale_w_uq_qr=sfa_impl.weight_uq_qr_scale.view(torch.float8_e8m0fnu),
-                dequant_scale_w_dkv_kr=sfa_impl.weight_dkv_kr_scale.view(torch.float8_e8m0fnu),
-                cache_mode="PA_BSND",
-                weight_quant_mode=3,
-                kv_cache_quant_mode=3 if use_c8 else 0,
-                query_quant_mode=0,
-                ckvkr_repo_mode=1 if use_c8 else 0,
-                quant_scale_repo_mode=1 if use_c8 else 0,
-                query_norm_flag=True,
-            )
-
-            decode_q_nope = decode_q_nope.view(bsz, sfa_impl.num_heads, sfa_impl.kv_lora_rank)
-            q_pe = q_pe.view(bsz, sfa_impl.num_heads, -1)
-            q_c = q_c.view(-1, q_c.shape[-1])
-            q_c_scale = q_c_scale.view(-1, q_c_scale.shape[-1])
-            return hidden_states, decode_q_nope, q_pe, (q_c, q_c_scale)
-        else:
-            decode_q_nope, q_pe, _, q_c, _ = torch_npu.npu_mla_prolog_v3(
-                token_x=hidden_states_temp,
-                weight_dq=sfa_impl.weight_dq,
-                weight_uq_qr=sfa_impl.weight_uq_qr,
-                weight_uk=sfa_impl.W_UK_T,
-                weight_dkv_kr=sfa_impl.weight_dkv_kr,
-                rmsnorm_gamma_cq=sfa_impl.q_a_layernorm.weight.data,
-                rmsnorm_gamma_ckv=sfa_impl.kv_a_layernorm.weight.data,
-                rope_sin=sin,
-                rope_cos=cos,
-                kv_cache=decode_k_nope,
-                kr_cache=kr_cache,
-                cache_index=slot_mapping[:bsz].view(bsz, -1).to(torch.int64),
-                cache_mode="PA_BSND",
-                weight_quant_mode=0,
-                kv_cache_quant_mode=0,
-                query_quant_mode=0,
-                ckvkr_repo_mode=0,
-                quant_scale_repo_mode=0,
-                query_norm_flag=True,
-            )
-
-            decode_q_nope = decode_q_nope.view(bsz, sfa_impl.num_heads, sfa_impl.kv_lora_rank)
-            q_pe = q_pe.view(bsz, sfa_impl.num_heads, -1)
-            q_c = q_c.view(-1, q_c.shape[-1])
-            return hidden_states, decode_q_nope, q_pe, q_c
 
     @staticmethod
     def indexer_select_post_process(
@@ -1601,6 +1459,8 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
     def chunk_scaled_dot_kkt_fwd(
         num_core, bh_step, task_num, k, beta, g_cumsum, A, cu_seqlens, chunk_indices, T, B, H, Hg, K, BT, BK
     ):
+        from vllm_ascend.ops.triton.fla.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd_kernel
+
         chunk_scaled_dot_kkt_fwd_kernel[(num_core,)](
             k=k,
             beta=beta,
@@ -1638,6 +1498,8 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         NT,
         B,
     ):
+        from vllm_ascend.ops.triton.fla.solve_tril import solve_tril_16x16_kernel
+
         solve_tril_16x16_kernel[NT, B * H](
             A=A,
             Ad=Ad,
@@ -1661,6 +1523,8 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
 
     @staticmethod
     def fused_gdn_gating(A_log: torch.Tensor, a: torch.Tensor, b: torch.Tensor, dt_bias: torch.Tensor):
+        from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
+
         return fused_gdn_gating_patch(A_log, a, b, dt_bias)
 
     @staticmethod

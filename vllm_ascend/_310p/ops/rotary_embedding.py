@@ -17,19 +17,13 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 import torch
 import torch_npu
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 from vllm.model_executor.layers.rotary_embedding.mrope import apply_interleaved_rope
 
-from vllm_ascend.ops.rotary_embedding import AscendRotaryEmbedding, get_cos_and_sin_slice
-
-# Filled once per model forward in NPUModelRunner310._model_forward; read by every MRoPE layer.
-_mrope_cos_slice: torch.Tensor | None = None
-_mrope_sin_slice: torch.Tensor | None = None
+from vllm_ascend.ops.rotary_embedding import AscendRotaryEmbedding, get_rope_cache, select_cos_sin_cache
 
 
 def _apply_rotary_mrope_torch(
@@ -65,29 +59,27 @@ def merge_mrope_cos_sin_for_apply(
     )
 
 
-def set_mrope_apply_rotary_slices(
-    cos_sin_cache: torch.Tensor,
+def _select_mrope_apply_rotary_slices(
+    rotary_emb: MRotaryEmbedding,
     positions: torch.Tensor,
-    *,
-    mrope_section: list[int] | None = None,
-    mrope_interleaved: bool = False,
-    capacity_tokens: int = 0,
-) -> None:
-    """Build cos/sin views for `npu_apply_rotary_pos_emb` from positions; must run once per forward before layers."""
-    global _mrope_cos_slice
-    global _mrope_sin_slice
-
+    ref_tensor: torch.Tensor,
+    cos_sin_cache: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Resolve MRoPE cos/sin for `npu_apply_rotary_pos_emb` inside the layer."""
     assert positions.ndim in (1, 2), "M-RoPE positions must be [num_tokens] or [3, num_tokens]."
-    cos_sin = cos_sin_cache[positions]
+    if cos_sin_cache is None:
+        cos_sin = select_cos_sin_cache(rotary_emb, positions, ref_tensor)
+    else:
+        cos_sin = cos_sin_cache[positions]
     cos, sin = cos_sin.chunk(2, dim=-1)
     if positions.ndim == 2:
         assert positions.shape[0] == 3, "MRoPE expects positions [3, num_tokens] (T/H/W)."
-        assert mrope_section is not None
+        assert rotary_emb.mrope_section is not None
         cos, sin = merge_mrope_cos_sin_for_apply(
             cos,
             sin,
-            list(mrope_section),
-            mrope_interleaved,
+            list(rotary_emb.mrope_section),
+            rotary_emb.mrope_interleaved,
         )
     # `npu_apply_rotary_pos_emb` follows ApplyRotaryPosEmbV2 semantics:
     # q_embed = q * cos + rotate(q) * sin, where cos/sin have full rotary dim.
@@ -99,23 +91,60 @@ def set_mrope_apply_rotary_slices(
     sin_view = sin.contiguous().view(1, num_tokens, 1, -1)
 
     # Keep stable storage across forwards for graph replay.
-    if _mrope_cos_slice is None or _mrope_sin_slice is None:
-        capacity = capacity_tokens if capacity_tokens is not None else num_tokens
-        if capacity < num_tokens:
-            capacity = num_tokens
-        _mrope_cos_slice = torch.empty(
-            (1, capacity, 1, cos_view.shape[-1]),
+    cos_buffer = getattr(rotary_emb, "_mrope_apply_cos_buffer", None)
+    sin_buffer = getattr(rotary_emb, "_mrope_apply_sin_buffer", None)
+    needs_buffer = (
+        cos_buffer is None
+        or sin_buffer is None
+        or cos_buffer.shape[1] < num_tokens
+        or cos_buffer.shape[-1] != cos_view.shape[-1]
+        or cos_buffer.dtype != cos_view.dtype
+        or cos_buffer.device != cos_view.device
+    )
+    if needs_buffer:
+        cos_buffer = torch.empty(
+            (1, num_tokens, 1, cos_view.shape[-1]),
             dtype=cos_view.dtype,
             device=cos_view.device,
         )
-        _mrope_sin_slice = torch.empty(
-            (1, capacity, 1, sin_view.shape[-1]),
+        sin_buffer = torch.empty(
+            (1, num_tokens, 1, sin_view.shape[-1]),
             dtype=sin_view.dtype,
             device=sin_view.device,
         )
+        rotary_emb._mrope_apply_cos_buffer = cos_buffer
+        rotary_emb._mrope_apply_sin_buffer = sin_buffer
 
-    _mrope_cos_slice[:, :num_tokens].copy_(cos_view)
-    _mrope_sin_slice[:, :num_tokens].copy_(sin_view)
+    assert cos_buffer is not None
+    assert sin_buffer is not None
+    cos_buffer[:, :num_tokens].copy_(cos_view)
+    sin_buffer[:, :num_tokens].copy_(sin_view)
+    return cos_buffer[:, :num_tokens], sin_buffer[:, :num_tokens]
+
+
+def _select_apply_rotary_pos_emb_slices(
+    rotary_emb: AscendRotaryEmbedding,
+    positions: torch.Tensor,
+    ref_tensor: torch.Tensor,
+    cos_sin_cache: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Resolve cos/sin only for the legacy 310P apply-rotary op path."""
+    if cos_sin_cache is None:
+        cos_sin = select_cos_sin_cache(rotary_emb, positions, ref_tensor)
+    else:
+        cos_sin = cos_sin_cache[positions]
+    cos, sin = cos_sin.chunk(2, dim=-1)
+    if rotary_emb.is_neox_style:
+        cos = torch.cat((cos, cos), dim=-1)
+        sin = torch.cat((sin, sin), dim=-1)
+    else:
+        cos = cos.repeat_interleave(2, dim=-1)
+        sin = sin.repeat_interleave(2, dim=-1)
+    num_tokens = positions.shape[-1]
+    return (
+        cos.contiguous().view(1, num_tokens, 1, -1),
+        sin.contiguous().view(1, num_tokens, 1, -1),
+    )
 
 
 def _rope_forward_oot(
@@ -127,15 +156,12 @@ def _rope_forward_oot(
     offsets: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     query_shape, key_shape = query.shape, key.shape
-    if self.cos_sin_cache.device != query.device:
-        self.cos_sin_cache = self.cos_sin_cache.to(query.device)
-    if self.cos_sin_cache.dtype != query.dtype:
-        self.cos_sin_cache = self.cos_sin_cache.to(query.dtype)
-    cos, sin = get_cos_and_sin_slice()
+    cos_sin_cache = get_rope_cache(self, query)
     if offsets is not None:
         raise NotImplementedError("Batched rotary embedding is currently not supported on NPU.")
     rotary_mode = "half" if is_neox_style else "interleave"
-    if self.head_size == 128 and self.cos_sin_cache.shape[-1] == 128:
+    if self.head_size == 128 and cos_sin_cache.shape[-1] == 128:
+        cos, sin = _select_apply_rotary_pos_emb_slices(self, positions, query, cos_sin_cache)
         query = query.contiguous().view(1, query.shape[0], -1, self.head_size)
         key = key.contiguous().view(1, key.shape[0], -1, self.head_size)
         query, key = torch_npu.npu_apply_rotary_pos_emb(query, key, cos, sin, rotary_mode=rotary_mode)
@@ -148,6 +174,7 @@ def _rope_forward_oot(
         k_rot = key[..., : self.rotary_dim]
         k_pass = key[..., self.rotary_dim :]
         if self.rotary_dim == 64:
+            cos, sin = _select_apply_rotary_pos_emb_slices(self, positions, query, cos_sin_cache)
             q_rot = q_rot.contiguous().view(1, num_tokens, -1, self.rotary_dim)
             k_rot = k_rot.contiguous().view(1, num_tokens, -1, self.rotary_dim)
             q_rot, k_rot = torch_npu.npu_apply_rotary_pos_emb(q_rot, k_rot, cos, sin, rotary_mode=rotary_mode)
@@ -159,7 +186,7 @@ def _rope_forward_oot(
                 q_rot,
                 k_rot,
                 self.rotary_dim,
-                self.cos_sin_cache,
+                cos_sin_cache,
                 is_neox_style,
             )
         q_rot = q_rot.view(num_tokens, -1, self.rotary_dim)
@@ -174,7 +201,7 @@ def _rope_forward_oot(
             query,
             key,
             self.head_size,
-            self.cos_sin_cache,
+            cos_sin_cache,
             is_neox_style,
         )
     return query.view(query_shape), key.view(key_shape)
@@ -193,11 +220,7 @@ class AscendMRotaryEmbedding310(MRotaryEmbedding):
         # Here `rotary_mode` matches vLLM ApplyRotaryEmb: half = neox chunk, interleave = GPT-J pairs.
         rotary_mode = "half" if self.is_neox_style else "interleave"
         num_tokens = query.shape[0]
-        if _mrope_cos_slice is None or _mrope_sin_slice is None:
-            raise RuntimeError(
-                "MRoPE cos/sin slices are not initialized. Call set_mrope_apply_rotary_slices before forward."
-            )
-        cos, sin = _mrope_cos_slice[:, :num_tokens], _mrope_sin_slice[:, :num_tokens]
+        cos, sin = _select_mrope_apply_rotary_slices(self, positions, query)
 
         is_partial_rope = self.rotary_dim < self.head_size
         if is_partial_rope:
@@ -231,31 +254,17 @@ class AscendMRotaryEmbedding310(MRotaryEmbedding):
         return query, key
 
 
-def prepare_mrope_cos_sin_slices_from_runner(runner: Any, positions: torch.Tensor) -> None:
-    """Resolve MRoPE embedding from the runner and populate `_mrope_cos_slice` / `_mrope_sin_slice`."""
-    emb = getattr(runner, "_mrope_embedding", None)
-    if emb is None:
-        emb = next(module for module in runner.model.modules() if isinstance(module, AscendMRotaryEmbedding310))
-        runner._mrope_embedding = emb
-    assert isinstance(emb, AscendMRotaryEmbedding310)
-    set_mrope_apply_rotary_slices(
-        emb.cos_sin_cache,
-        positions,
-        mrope_section=emb.mrope_section,
-        mrope_interleaved=emb.mrope_interleaved,
-        capacity_tokens=runner.max_num_tokens,
-    )
-
-
 class AscendRotaryEmbedding310(AscendRotaryEmbedding):
     def forward_oot(
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
-        key: torch.Tensor,
+        key: torch.Tensor | None = None,
         offsets: torch.Tensor | None = None,
         is_neox_style_override: bool | None = None,
     ):
+        if key is None:
+            raise ValueError("AscendRotaryEmbedding310.forward_oot requires key.")
         is_neox_style = self.is_neox_style
         if is_neox_style_override is not None:
             is_neox_style = is_neox_style_override

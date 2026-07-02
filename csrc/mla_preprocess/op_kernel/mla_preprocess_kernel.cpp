@@ -25,7 +25,8 @@ extern "C" __global__ __aicore__ void mla_preprocess(
     GM_ADDR bias1, GM_ADDR gamma2, GM_ADDR beta2, GM_ADDR quantScale2, GM_ADDR quantOffset2, GM_ADDR gamma3,
     GM_ADDR sin1, GM_ADDR cos1, GM_ADDR sin2, GM_ADDR cos2, GM_ADDR keycache, GM_ADDR slotMapping, GM_ADDR wuq,
     GM_ADDR bias2, GM_ADDR wuk, GM_ADDR descale1, GM_ADDR descale2, GM_ADDR ctkvScale, GM_ADDR qnopeScale, GM_ADDR q,
-    GM_ADDR keycacheOut, GM_ADDR q2, GM_ADDR keycacheOut2, GM_ADDR innerOut, GM_ADDR workspace, GM_ADDR tiling)
+    GM_ADDR keycacheOut, GM_ADDR q2, GM_ADDR keycacheOut2, GM_ADDR innerOut, GM_ADDR rawQOut, GM_ADDR workspace,
+    GM_ADDR tiling)
 {
 #if defined(__CCE_KT_TEST__) || (__CCE_AICORE__ == 220)
     PRELOAD(2);
@@ -147,6 +148,12 @@ extern "C" __global__ __aicore__ void mla_preprocess(
     mlaTilingData.hiddenStrideRope = tilingData->hiddenStrideRope;
     mlaTilingData.qkNopeHeadDim = tilingData->qkNopeHeadDim;
     mlaTilingData.avgFactor = tilingData->avgFactor;
+    mlaTilingData.ropeByCache = tilingData->ropeByCache;
+    mlaTilingData.positionsDtype = tilingData->positionsDtype;
+    mlaTilingData.cosSinCacheStride0 = tilingData->cosSinCacheStride0;
+    mlaTilingData.cosSinCacheHalfDim = tilingData->cosSinCacheHalfDim;
+    mlaTilingData.isNeoxStyle = tilingData->isNeoxStyle;
+    mlaTilingData.enableRawQOut = tilingData->enableRawQOut;
 
     GM_ADDR s1 = workspace + static_cast<uint64_t>(mlaTilingData.s1Offset);
     GM_ADDR s2 = workspace + static_cast<uint64_t>(mlaTilingData.s2Offset);
@@ -161,7 +168,7 @@ extern "C" __global__ __aicore__ void mla_preprocess(
             opFp16Cm0Qm0.Init(hiddenState, quantScale1, quantOffset1, wdqkv, bias1, gamma2, beta2,
                               quantScale2, quantOffset2, gamma3, sin1, cos1, sin2, cos2, keycache, slotMapping, wuq,
                               bias2, wuk, descale1, descale2, ctkvScale, qnopeScale, q, keycacheOut, q2, keycacheOut2,
-                              s1, s2, s3);
+                              rawQOut, s1, s2, s3);
             if ASCEND_IS_AIC {
                 opFp16Cm0Qm0.ProcessCube();
             }
@@ -176,7 +183,7 @@ extern "C" __global__ __aicore__ void mla_preprocess(
             opFp16Cm1Qm0.Init(hiddenState, quantScale1, quantOffset1, wdqkv, bias1, gamma2, beta2,
                               quantScale2, quantOffset2, gamma3, sin1, cos1, sin2, cos2, keycache, slotMapping, wuq,
                               bias2, wuk, descale1, descale2, ctkvScale, qnopeScale, q, keycacheOut, q2, keycacheOut2,
-                              s1, s2, s3);
+                              rawQOut, s1, s2, s3);
             if ASCEND_IS_AIC {
                 opFp16Cm1Qm0.ProcessCube();
             }
@@ -192,7 +199,7 @@ extern "C" __global__ __aicore__ void mla_preprocess(
             opBf16Cm0Qm0.Init(hiddenState, quantScale1, quantOffset1, wdqkv, bias1, gamma2, beta2,
                             quantScale2, quantOffset2, gamma3, sin1, cos1, sin2, cos2, keycache, slotMapping, wuq,
                             bias2, wuk, descale1, descale2, ctkvScale, qnopeScale, q, keycacheOut, q2, keycacheOut2,
-                            s1, s2, s3, s4, s5);
+                            rawQOut, s1, s2, s3, s4, s5);
             if ASCEND_IS_AIC {
                 opBf16Cm0Qm0.ProcessCube();
             }
@@ -208,7 +215,7 @@ extern "C" __global__ __aicore__ void mla_preprocess(
             opBf16Cm1Qm0.Init(hiddenState, quantScale1, quantOffset1, wdqkv, bias1, gamma2, beta2,
                             quantScale2, quantOffset2, gamma3, sin1, cos1, sin2, cos2, keycache, slotMapping, wuq,
                             bias2, wuk, descale1, descale2, ctkvScale, qnopeScale, q, keycacheOut, q2, keycacheOut2,
-                            s1, s2, s3, s4, s5);
+                            rawQOut, s1, s2, s3, s4, s5);
             if ASCEND_IS_AIC {
                 opBf16Cm1Qm0.ProcessCube();
             }
@@ -224,7 +231,7 @@ extern "C" __global__ __aicore__ void mla_preprocess(
             opBf16Cm3Qm0.Init(hiddenState, quantScale1, quantOffset1, wdqkv, bias1, gamma2, beta2,
                               quantScale2, quantOffset2, gamma3, sin1, cos1, sin2, cos2, keycache, slotMapping, wuq,
                               bias2, wuk, descale1, descale2, ctkvScale, qnopeScale, q, keycacheOut, q2, keycacheOut2,
-                              s1, s2, s3, s4, s5);
+                              rawQOut, s1, s2, s3, s4, s5);
             if ASCEND_IS_AIC {
                 opBf16Cm3Qm0.ProcessCube();
             }
@@ -239,7 +246,7 @@ extern "C" __global__ __aicore__ void mla_preprocess(
             opBf16Cm1Qm0.Init(hiddenState, wdqkv, gamma2, beta2,
                             gamma3, sin1, cos1, sin2, cos2, keycache, slotMapping, wuq,
                             wuk, q, keycacheOut, q2, keycacheOut2,
-                            s1, s2, s3);
+                            rawQOut, s1, s2, s3);
             if ASCEND_IS_AIC {
                 opBf16Cm1Qm0.ProcessCube();
             }
@@ -255,7 +262,7 @@ extern "C" __global__ __aicore__ void mla_preprocess(
             opBf16Cm0Qm0Inner.Init(hiddenState, quantScale1, quantOffset1, wdqkv, bias1, gamma2, beta2,
                               quantScale2, quantOffset2, gamma3, sin1, cos1, sin2, cos2, keycache, slotMapping, wuq,
                               bias2, wuk, descale1, descale2, ctkvScale, qnopeScale, q, keycacheOut, q2, keycacheOut2,
-                              s1, s2, s3, s4, s5, innerOut);
+                              rawQOut, s1, s2, s3, s4, s5, innerOut);
             if ASCEND_IS_AIC {
                 opBf16Cm0Qm0Inner.ProcessCube();
             }
@@ -271,7 +278,7 @@ extern "C" __global__ __aicore__ void mla_preprocess(
             opBf16Cm1Qm0Inner.Init(hiddenState, quantScale1, quantOffset1, wdqkv, bias1, gamma2, beta2,
                               quantScale2, quantOffset2, gamma3, sin1, cos1, sin2, cos2, keycache, slotMapping, wuq,
                               bias2, wuk, descale1, descale2, ctkvScale, qnopeScale, q, keycacheOut, q2, keycacheOut2,
-                              s1, s2, s3, s4, s5, innerOut);
+                              rawQOut, s1, s2, s3, s4, s5, innerOut);
             if ASCEND_IS_AIC {
                 opBf16Cm1Qm0Inner.ProcessCube();
             }
@@ -287,7 +294,7 @@ extern "C" __global__ __aicore__ void mla_preprocess(
             opBf16Cm3Qm0Inner.Init(hiddenState, quantScale1, quantOffset1, wdqkv, bias1, gamma2, beta2,
                               quantScale2, quantOffset2, gamma3, sin1, cos1, sin2, cos2, keycache, slotMapping, wuq,
                               bias2, wuk, descale1, descale2, ctkvScale, qnopeScale, q, keycacheOut, q2, keycacheOut2,
-                              s1, s2, s3, s4, s5, innerOut);
+                              rawQOut, s1, s2, s3, s4, s5, innerOut);
             if ASCEND_IS_AIC {
                 opBf16Cm3Qm0Inner.ProcessCube();
             }
@@ -305,7 +312,7 @@ extern "C" __global__ __aicore__ void mla_preprocess(
 
 namespace vllm_ascend {
 
-extern void mla_preprocess_impl(
+extern void mla_preprocess_by_cache_impl(
     void* stream,
     void* hidden_state,
     void* quant_scale1,
@@ -317,10 +324,8 @@ extern void mla_preprocess_impl(
     void* quant_scale2,
     void* quant_offset2,
     void* gamma3,
-    void* sin1,
-    void* cos1,
-    void* sin2,
-    void* cos2,
+    void* positions,
+    void* cos_sin_cache,
     void* keycache,
     void* slot_mapping,
     void* wuq,
@@ -335,6 +340,7 @@ extern void mla_preprocess_impl(
     void* q2,
     void* keycache_out2,
     void* inner_out,
+    void* raw_q_out,
     void* workspace,
     void* tiling,
     const uint32_t block_dim)
@@ -350,10 +356,10 @@ extern void mla_preprocess_impl(
         quant_scale2,
         quant_offset2,
         gamma3,
-        sin1,
-        cos1,
-        sin2,
-        cos2,
+        positions,
+        cos_sin_cache,
+        positions,
+        cos_sin_cache,
         keycache,
         slot_mapping,
         wuq,
@@ -368,6 +374,7 @@ extern void mla_preprocess_impl(
         q2,
         keycache_out2,
         inner_out,
+        raw_q_out,
         workspace,
         tiling);
 }

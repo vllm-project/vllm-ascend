@@ -1,5 +1,9 @@
+import copy
+import json
+import tempfile
 from dataclasses import dataclass
 from functools import wraps
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -19,6 +23,84 @@ from vllm.utils.math_utils import cdiv
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+
+DEEPSEEK_V3_TEST_HF_CONFIG = {
+    "architectures": ["DeepseekV3ForCausalLM"],
+    "attention_bias": False,
+    "attention_dropout": 0.0,
+    "bos_token_id": 0,
+    "eos_token_id": 1,
+    "hidden_act": "silu",
+    "hidden_size": 7168,
+    "intermediate_size": 18432,
+    "kv_lora_rank": 512,
+    "max_position_embeddings": 163840,
+    "model_type": "deepseek_v3",
+    "moe_intermediate_size": 2048,
+    "moe_layer_freq": 1,
+    "n_group": 8,
+    "n_routed_experts": 256,
+    "n_shared_experts": 1,
+    "norm_topk_prob": True,
+    "num_attention_heads": 128,
+    "num_experts_per_tok": 8,
+    "num_hidden_layers": 5,
+    "num_key_value_heads": 128,
+    "num_nextn_predict_layers": 0,
+    "q_lora_rank": 1536,
+    "qk_nope_head_dim": 128,
+    "qk_rope_head_dim": 64,
+    "rms_norm_eps": 1e-6,
+    "rope_scaling": {
+        "beta_fast": 32.0,
+        "beta_slow": 1.0,
+        "factor": 40.0,
+        "mscale": 1.0,
+        "mscale_all_dim": 1.0,
+        "original_max_position_embeddings": 4096,
+        "type": "yarn",
+    },
+    "rope_theta": 10000,
+    "routed_scaling_factor": 2.5,
+    "scoring_func": "sigmoid",
+    "tie_word_embeddings": False,
+    "topk_group": 4,
+    "topk_method": "noaux_tc",
+    "torch_dtype": "bfloat16",
+    "use_cache": True,
+    "v_head_dim": 128,
+    "vocab_size": 129280,
+}
+
+_LOCAL_HF_CONFIG_CACHE: dict[str, str] = {}
+
+
+def _materialize_local_hf_config(config: dict) -> str:
+    key = json.dumps(config, sort_keys=True, separators=(",", ":"))
+    cached = _LOCAL_HF_CONFIG_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    config_dir = Path(tempfile.mkdtemp(prefix="vllm_ascend_test_hf_config_"))
+    (config_dir / "config.json").write_text(
+        json.dumps(config, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    _LOCAL_HF_CONFIG_CACHE[key] = str(config_dir)
+    return str(config_dir)
+
+
+def _merge_local_hf_config(
+    base_hf_config: dict,
+    hf_config_override: dict | None,
+    hf_overrides: dict | None,
+) -> dict:
+    config = copy.deepcopy(base_hf_config)
+    if isinstance(hf_overrides, dict):
+        config.update(hf_overrides)
+    if hf_config_override:
+        config.update(hf_config_override)
+    return config
 
 
 def patch_distributed_groups(dcp_size=1, dcp_rank=0, pcp_size=1, pcp_rank=0, needs_mocks=True):
@@ -161,6 +243,7 @@ def create_vllm_config(
     add_mock_model_methods: bool = True,
     hf_config_override: dict | None = None,
     hf_overrides: dict | None = None,
+    base_hf_config: dict | None = None,
 ) -> VllmConfig:
     """Create a VllmConfig for testing with reasonable defaults.
 
@@ -168,11 +251,19 @@ def create_vllm_config(
     mechanism); this is required for fp8-quantized DSA models such as
     ``deepseek-ai/DeepSeek-V3.2-Exp`` whose ``quantization_config`` would
     otherwise be rejected by Ascend's ``ModelConfig`` validator.
+    ``base_hf_config`` materializes a local ``config.json`` before
+    ``ModelConfig`` is constructed, keeping synthetic model tests offline.
     """
 
+    model_path = model_name
+    if base_hf_config is not None:
+        model_path = _materialize_local_hf_config(
+            _merge_local_hf_config(base_hf_config, hf_config_override, hf_overrides)
+        )
+
     model_config = ModelConfig(
-        model=model_name,
-        tokenizer=model_name,
+        model=model_path,
+        tokenizer=model_path,
         trust_remote_code=False,
         dtype=dtype,
         seed=0,

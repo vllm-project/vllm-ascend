@@ -11,7 +11,6 @@ from vllm.distributed import get_tensor_model_parallel_world_size, get_tp_group
 from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadataBuilder
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
-from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backend import (
     AttentionBackend,  # type: ignore
     AttentionCGSupport,
@@ -43,8 +42,12 @@ from vllm_ascend.ops.layer_shard_linear import (
     reach_layer_for_shard_weight_series,
     register_all_layers_to_shard_weight_series,
 )
-from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
-from vllm_ascend.ops.triton.rope import rope_forward_triton_siso
+from vllm_ascend.ops.rope_cache_ops import (
+    interleave_rope_by_cache,
+    kv_rmsnorm_rope_cache_by_cache,
+    mla_preprocess_by_cache,
+    rotary_siso_by_cache,
+)
 from vllm_ascend.quantization.methods import AscendW8A8LinearMethod, AscendW8A8MXFP8DynamicLinearMethod
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_ND,
@@ -96,6 +99,12 @@ def _get_config_bool(configs: tuple[Any, ...], attr: str) -> bool:
         if config is not None and hasattr(config, attr):
             return bool(getattr(config, attr))
     return False
+
+
+def _sfa_mlapo_rope_unsupported_reason(rotary_emb) -> str | None:
+    if not bool(getattr(rotary_emb, "is_neox_style", True)):
+        return "Currently mlapo by-cache supports only Neox-style RoPE in SFA scenario."
+    return None
 
 
 class AscendSFABackend(AttentionBackend):
@@ -172,8 +181,7 @@ class AscendSFAMetadata:
     seq_lens_cpu: torch.Tensor
     cum_query_lens: torch.Tensor
     block_table: torch.Tensor
-    sin: torch.Tensor
-    cos: torch.Tensor
+    input_positions: torch.Tensor
 
     # For logging.
     num_input_tokens: int = 0  # Number of tokens including padding.
@@ -317,7 +325,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         else:
             seq_lens_cpu = common_attn_metadata.seq_lens[:num_reqs].to("cpu")
 
-        cos, sin = get_cos_and_sin_mla(input_positions, use_cache=(draft_index is None))
+        rope_positions = input_positions
 
         dsa_cp_context = None
         if self.enable_dsa_cp:
@@ -329,12 +337,9 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             local_end_with_pad = local_start + num_tokens_per_device
             local_end = min(local_end_with_pad, num_actual_tokens)
 
-            pad_size = num_tokens_pad - cos.shape[0]
-            assert cos.shape == sin.shape, f"cos.shape must be equal to sin.shape, got {cos.shape} and {sin.shape}"
-
+            pad_size = num_tokens_pad - rope_positions.shape[0]
             if pad_size > 0:
-                cos = nn.functional.pad(cos, (0, 0, 0, 0, 0, 0, 0, pad_size))
-                sin = nn.functional.pad(sin, (0, 0, 0, 0, 0, 0, 0, pad_size))
+                rope_positions = nn.functional.pad(rope_positions, (0, pad_size), value=0)
 
             pad_size_slot = num_tokens_pad - slot_mapping.shape[0]
             if pad_size_slot > 0:
@@ -343,12 +348,11 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
                 slot_mapping = slot_mapping[:num_tokens_pad]
             slot_mapping_cp = slot_mapping[local_start:local_end_with_pad]
 
-            cos = cos[local_start:local_end_with_pad]
-            sin = sin[local_start:local_end_with_pad]
+            rope_positions = rope_positions[local_start:local_end_with_pad]
 
-            assert cos.shape[0] == num_tokens_per_device, (
-                f"cos.shape[0] must be equal to num_tokens_per_device, \
-                    got {cos.shape[0]} and {num_tokens_per_device}"
+            assert rope_positions.shape[0] == num_tokens_per_device, (
+                f"rope_positions.shape[0] must be equal to num_tokens_per_device, \
+                    got {rope_positions.shape[0]} and {num_tokens_per_device}"
             )
             assert slot_mapping_cp.shape[0] == num_tokens_per_device, (
                 f"slot_mapping_cp.shape[0] must be equal to num_tokens_per_device, \
@@ -425,8 +429,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             attn_mask=self.attn_mask_builder.get_attention_mask(common_attn_metadata.causal, self.model_config),
             attn_state=common_attn_metadata.attn_state,
             block_table=block_table,
-            sin=sin[:num_input_tokens],
-            cos=cos[:num_input_tokens],
+            input_positions=rope_positions[:num_input_tokens],
             dsa_cp_context=dsa_cp_context,
             block_size=block_size,
             group_len=group_len,
@@ -615,6 +618,18 @@ class AscendSFAImpl(MLAAttentionImpl):
         # sfa does not need to update graph params
         pass
 
+    def _apply_indexer_rope(self, x: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+        rotary_mode = "half" if self.is_rope_neox_style else "interleave"
+        rotary_siso_by_cache(
+            x,
+            positions,
+            self.rotary_emb,
+            rotary_mode=rotary_mode,
+            rope_dim=self.qk_rope_head_dim,
+            inplace=True,
+        )
+        return x
+
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         # NOTE: We currently do not support quant kv_b_proj.
         assert isinstance(self.kv_b_proj.quant_method, UnquantizedLinearMethod)
@@ -681,6 +696,9 @@ class AscendSFAImpl(MLAAttentionImpl):
                 )
             if self.enable_dsa_cp:
                 reasons.append("Currently mlapo does not support SFA with CP,thus mlapo is disabled for these layers.")
+            rope_reason = _sfa_mlapo_rope_unsupported_reason(self.rotary_emb)
+            if rope_reason is not None:
+                reasons.append(rope_reason)
             if reasons:
                 self.enable_mlapo = False
                 for msg in reasons:
@@ -853,13 +871,12 @@ class AscendSFAImpl(MLAAttentionImpl):
     def rope_single(
         self,
         x: torch.Tensor,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
+        positions: torch.Tensor,
     ) -> torch.Tensor:
         B, N, D = x.shape
         S = 1
         x = x.view(B, N, S, D)
-        x = torch_npu.npu_interleave_rope(x, cos, sin)
+        x = interleave_rope_by_cache(x, positions, self.rotary_emb)
         return x.view(B, N, D)
 
     def _init_o_proj_tp_full_params(self):
@@ -1008,8 +1025,7 @@ class AscendSFAImpl(MLAAttentionImpl):
     def exec_kv(
         self,
         kv_no_split: torch.Tensor,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
+        positions: torch.Tensor,
         kv_cache: tuple,
         slots: torch.Tensor,
         attn_metadata: M,
@@ -1017,18 +1033,18 @@ class AscendSFAImpl(MLAAttentionImpl):
         B = kv_no_split.shape[0]
         N = self.num_kv_heads
         S = 1
-        # npu_kv_rmsnorm_rope_cache needs [B, N, S, D]
+        # KV rmsnorm RoPE cache fused op needs [B, N, S, D].
         kv_no_split = kv_no_split.view(B, N, S, self.kv_lora_rank + self.qk_rope_head_dim)
         cache_mode = "PA"
 
         if self.enable_dsa_cp:
             if self.use_a5_sparse_c8_indexer:
-                k_pe, k_nope, knope_scale = custom_kv_rmsnorm_rope(
+                k_pe, k_nope, knope_scale = custom_kv_rmsnorm_rope_by_cache(
                     kv_no_split,
                     self.kv_a_layernorm.weight,  # type: ignore[union-attr]
-                    cos,
-                    sin,
-                    slots.to(torch.int64),
+                    positions,
+                    self.rotary_emb,
+                    slots,
                     kv_cache[1],
                     kv_cache[0],
                     epsilon=self.kv_a_layernorm.variance_epsilon,  # type: ignore[union-attr]
@@ -1037,12 +1053,12 @@ class AscendSFAImpl(MLAAttentionImpl):
                 )
                 return k_pe, k_nope, knope_scale
 
-            _, _, k_pe, k_nope = torch_npu.npu_kv_rmsnorm_rope_cache(
+            _, _, k_pe, k_nope = kv_rmsnorm_rope_cache_by_cache(
                 kv_no_split,
                 self.kv_a_layernorm.weight,  # type: ignore[union-attr]
-                cos,
-                sin,
-                slots.to(torch.int64),
+                positions,
+                self.rotary_emb,
+                slots,
                 kv_cache[1],
                 kv_cache[0],
                 epsilon=self.kv_a_layernorm.variance_epsilon,  # type: ignore[union-attr]
@@ -1052,12 +1068,12 @@ class AscendSFAImpl(MLAAttentionImpl):
             knope_scale = None
             return k_pe, k_nope, knope_scale
         else:
-            torch_npu.npu_kv_rmsnorm_rope_cache(
+            kv_rmsnorm_rope_cache_by_cache(
                 kv_no_split,
                 self.kv_a_layernorm.weight,  # type: ignore[union-attr]
-                cos,
-                sin,
-                slots.to(torch.int64),
+                positions,
+                self.rotary_emb,
+                slots,
                 kv_cache[1],
                 kv_cache[0],
                 epsilon=self.kv_a_layernorm.variance_epsilon,  # type: ignore[union-attr]
@@ -1111,26 +1127,64 @@ class AscendSFAImpl(MLAAttentionImpl):
         self,
         hidden_states: torch.Tensor,
         kv_cache: tuple[torch.Tensor, ...],
-        cos: torch.Tensor,
-        sin: torch.Tensor,
+        positions: torch.Tensor,
         slot_mapping: torch.Tensor,
         num_input_tokens: int,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        return DeviceOperator.sfa_preprocess_with_mlapo(
-            self,
-            hidden_states,
-            kv_cache,
-            cos,
-            sin,
-            slot_mapping,
-            num_input_tokens,
+        k_nope, k_pe = kv_cache[0], kv_cache[1]
+        ql_nope = torch.empty(
+            (num_input_tokens, self.W_UK_T.shape[0], k_nope.shape[-1]),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
         )
+        q_pe = torch.empty(
+            (num_input_tokens, self.W_UK_T.shape[0], k_pe.shape[-1]),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        )
+        q_c = torch.empty(
+            (num_input_tokens, self.q_lora_rank),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        )
+        mla_preprocess_by_cache(
+            hidden_states,
+            self.wd_qkv,
+            self.deq_scale_qkv,
+            self.gamma1,
+            self.beta1,
+            self.wu_q,
+            self.qb_deq_scl,
+            self.gamma2,
+            positions,
+            self.rotary_emb,
+            self.W_UK_T,
+            k_nope,
+            k_pe,
+            slot_mapping,
+            quant_scale0=self.quant_scale0,
+            quant_offset0=self.quant_offset0,
+            bias0=self.quant_bias_qkv,
+            quant_scale1=self.quant_scale1,
+            quant_offset1=self.quant_offset1,
+            bias1=self.qb_qt_bias,
+            ctkv_scale=self.ctkv_scale,
+            q_nope_scale=self.q_nope_scale,
+            cache_mode="krope_ctkv",
+            quant_mode="per_tensor_quant_asymm",
+            enable_inner_out=True,
+            q_out0=ql_nope,
+            kv_cache_out0=k_nope,
+            q_out1=q_pe,
+            kv_cache_out1=k_pe,
+            inner_out=q_c,
+        )
+        return hidden_states, ql_nope, q_pe, q_c
 
     def indexer_select_pre_process(
         self,
         x: torch.Tensor,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
+        positions: torch.Tensor,
     ):
         if not self.has_indexer:
             raise RuntimeError(
@@ -1144,26 +1198,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         k_li = kw[:, : self.head_dim]
         k_li = self.k_norm(k_li).unsqueeze(1)
         k_li = k_li.view(-1, 1, self.head_dim)
-
-        if HAS_TRITON:
-            cos = cos.view(-1, self.qk_rope_head_dim)
-            sin = sin.view(-1, self.qk_rope_head_dim)
-            k_li = rope_forward_triton_siso(
-                k_li, cos, sin, rope_dim=self.qk_rope_head_dim, is_neox_style=self.is_rope_neox_style
-            )
-        else:
-            k_li_pe, k_li_nope = torch.split(
-                k_li, [self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim], dim=-1
-            )
-
-            cos = cos.view(-1, 1, 1, self.qk_rope_head_dim)
-            sin = sin.view(-1, 1, 1, self.qk_rope_head_dim)
-
-            k_li_pe = k_li_pe.unsqueeze(2)
-            k_li_pe = torch_npu.npu_rotary_mul(k_li_pe, cos, sin)
-            k_li_pe = k_li_pe.squeeze(2)
-
-            k_li = torch.cat([k_li_pe, k_li_nope], dim=-1)  # [b*s,128]
+        k_li = self._apply_indexer_rope(k_li, positions)
 
         if self.use_sparse_c8_indexer:
             k_li = k_li @ AscendSFAImpl.k_hadamard
@@ -1181,8 +1216,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         q_c: torch.Tensor,
         kv_cache: tuple[torch.Tensor, ...],
         attn_metadata: M,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
+        positions: torch.Tensor,
         actual_seq_lengths_query: torch.Tensor,
         actual_seq_lengths_key: torch.Tensor,
     ):
@@ -1218,19 +1252,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         else:
             q_li, _ = self.wq_b(q_c)
         q_li = q_li.view(-1, self.n_head, self.head_dim)  # [n_toks,64,128]
-        if HAS_TRITON:
-            q_li = rope_forward_triton_siso(
-                q_li, cos, sin, rope_dim=self.qk_rope_head_dim, is_neox_style=self.is_rope_neox_style
-            )
-        else:
-            q_li_pe, q_li_nope = torch.split(
-                q_li, [self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim], dim=-1
-            )  # [b,s,64,64+64]
-
-            q_li_pe = q_li_pe.unsqueeze(2)
-            q_li_pe = torch_npu.npu_rotary_mul(q_li_pe, cos, sin)
-            q_li_pe = q_li_pe.squeeze(2)
-            q_li = torch.cat([q_li_pe, q_li_nope], dim=-1)  # [b*s,64,128]
+        q_li = self._apply_indexer_rope(q_li, positions)
 
         q_li_scale = None
         q_li_shape_ori = None
@@ -1306,8 +1328,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                         reach_layer_for_shard_weight_series(layer)
             return output.fill_(0)
 
-        cos = attn_metadata.cos
-        sin = attn_metadata.sin
+        positions = attn_metadata.input_positions
         slot_mapping = attn_metadata.slot_mapping
         slot_mapping_cp = None
         if self.enable_dsa_cp:
@@ -1343,16 +1364,14 @@ class AscendSFAImpl(MLAAttentionImpl):
             hidden_states, ql_nope, q_pe, q_c = self._sfa_preprocess_with_mlapo(
                 hidden_states=hidden_states,
                 kv_cache=kv_cache,
-                cos=cos,
-                sin=sin,
+                positions=positions,
                 slot_mapping=slot_mapping,
                 num_input_tokens=num_input_tokens,
             )
             if self.has_indexer:
                 k_li, k_li_scale = self.indexer_select_pre_process(
                     x=hidden_states,
-                    cos=cos,
-                    sin=sin,
+                    positions=positions,
                 )
             else:
                 k_li, k_li_scale = None, None
@@ -1379,8 +1398,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             if self.has_indexer:
                 k_li, k_li_scale = self.indexer_select_pre_process(
                     x=hidden_states,
-                    cos=cos,
-                    sin=sin,
+                    positions=positions,
                 )
             else:
                 k_li, k_li_scale = None, None
@@ -1390,10 +1408,10 @@ class AscendSFAImpl(MLAAttentionImpl):
             if self.enable_dsa_cp:
                 assert slot_mapping_cp is not None
                 k_pe, k_nope, knope_scale = self.exec_kv(
-                    kv_no_split, cos, sin, kv_cache, slot_mapping_cp, attn_metadata
+                    kv_no_split, positions, kv_cache, slot_mapping_cp, attn_metadata
                 )
             else:
-                k_pe, k_nope = self.exec_kv(kv_no_split, cos, sin, kv_cache, slot_mapping, attn_metadata)
+                k_pe, k_nope = self.exec_kv(kv_no_split, positions, kv_cache, slot_mapping, attn_metadata)
 
             if self.enable_dsa_cp:
                 assert k_pe is not None
@@ -1480,7 +1498,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                     )
 
             ql_nope, q_pe = self._q_proj_and_k_up_proj(q_c)
-            q_pe = self.rope_single(q_pe, cos, sin)
+            q_pe = self.rope_single(q_pe, positions)
 
             if self.enable_dsa_cp:
                 if kv_ag_handle is not None:
@@ -1613,8 +1631,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 q_c=q_c,
                 kv_cache=kv_cache,
                 attn_metadata=attn_metadata,
-                cos=cos,
-                sin=sin,
+                positions=positions,
                 actual_seq_lengths_query=actual_seq_lengths_query,
                 actual_seq_lengths_key=actual_seq_lengths_key,
             )
@@ -1656,11 +1673,11 @@ class AscendSFAImpl(MLAAttentionImpl):
         return output_padded
 
 
-def custom_kv_rmsnorm_rope(
+def custom_kv_rmsnorm_rope_by_cache(
     kv,
     gamma,
-    cos,
-    sin,
+    positions,
+    rotary_emb,
     index,
     k_cache,
     ckv_cache,
@@ -1676,7 +1693,7 @@ def custom_kv_rmsnorm_rope(
     # Split KV into RMSNorm and RoPE parts for sparse C8 cache preparation.
     rms_in, rope_in = kv.split([512, 64], dim=-1)
     k_nope, _ = torch_npu.npu_rms_norm(rms_in, gamma, epsilon=epsilon)
-    k_rope = torch_npu.npu_interleave_rope(rope_in, cos, sin)
+    k_rope = interleave_rope_by_cache(rope_in, positions, rotary_emb)
 
     # Store k_nope with block FP8 scales for the sparse C8 cache layout.
     k_nope, knope_scale = torch_npu.npu_dynamic_block_quant(

@@ -187,16 +187,19 @@ def _triton_rope_siso(
     sin_row_stride,
     cos_sin_ptr,
     cos_sin_row_stride,
+    cos_sin_cache_half_dim: tl.constexpr,
     pos_ptr,
     num_tokens,
     n_h: tl.constexpr,
     hd: tl.constexpr,
     rope_dim: tl.constexpr,
+    rope_dim_offset_half: tl.constexpr,
     pad_n_h: tl.constexpr,
     pad_rope_dim: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     IS_NEOX_STYLE: tl.constexpr,
     USE_COS_SIN: tl.constexpr,
+    INVERSE: tl.constexpr,
 ):
     pid = tl.program_id(0).to(tl.int64)
     row_block_size = tl.num_programs(0)
@@ -209,18 +212,22 @@ def _triton_rope_siso(
         # m of this program instance
         # ####################################################################
         cos_offsets = tl.arange(0, pad_rope_dim // 2)
-        sin_offsets = tl.arange(pad_rope_dim // 2, pad_rope_dim)
         cos_mask = cos_offsets < (rope_dim // 2)
         if USE_COS_SIN:
             pos_idx = tl.load(pos_ptr + row_idx).to(tl.int64)
             cos_start_ptr = cos_sin_ptr + pos_idx * cos_sin_row_stride
-            cos_row = tl.load(cos_start_ptr + cos_offsets, mask=cos_mask, other=0).to(tl.float32)
-            sin_row = tl.load(cos_start_ptr + sin_offsets, mask=cos_mask, other=0).to(tl.float32)
+            cache_offsets = rope_dim_offset_half + cos_offsets
+            cos_row = tl.load(cos_start_ptr + cache_offsets, mask=cos_mask, other=0).to(tl.float32)
+            sin_row = tl.load(cos_start_ptr + cos_sin_cache_half_dim + cache_offsets, mask=cos_mask, other=0).to(
+                tl.float32
+            )
         else:
             cos_start_ptr = cos_ptr + row_idx * cos_row_stride
             sin_start_ptr = sin_ptr + row_idx * sin_row_stride
             cos_row = tl.load(cos_start_ptr + cos_offsets, mask=cos_mask, other=0).to(tl.float32)
             sin_row = tl.load(sin_start_ptr + cos_offsets, mask=cos_mask, other=0).to(tl.float32)
+        if INVERSE:
+            sin_row = -sin_row
 
         # ####################################################################
         # Load the left and right half of q and k for the current
@@ -251,6 +258,65 @@ def _triton_rope_siso(
 
         new_qk_tile_2 = qk_tile_2 * cos_row + qk_tile_1 * sin_row
         tl.store(qk_start_ptr + second_half_offsets, new_qk_tile_2, mask=second_mask)
+
+
+@triton.jit
+def _triton_interleave_rope_by_cache(
+    qk_ptr,
+    qk_row_stride,
+    qk_head_stride,
+    qk_dim_stride,
+    out_ptr,
+    out_row_stride,
+    out_head_stride,
+    out_dim_stride,
+    cos_sin_ptr,
+    cos_sin_row_stride,
+    pos_ptr,
+    num_tokens,
+    n_h: tl.constexpr,
+    hd: tl.constexpr,
+    rope_dim: tl.constexpr,
+    pad_n_h: tl.constexpr,
+    pad_rope_dim: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    IS_NEOX_STYLE: tl.constexpr,
+):
+    pid = tl.program_id(0).to(tl.int64)
+    row_block_size = tl.num_programs(0)
+    half_dim = rope_dim // 2
+
+    for row_idx in tl.range(pid, num_tokens, row_block_size):
+        qk_start_ptr = qk_ptr + row_idx * qk_row_stride
+        out_start_ptr = out_ptr + row_idx * out_row_stride
+        pos_idx = tl.load(pos_ptr + row_idx).to(tl.int64)
+        cos_sin_start_ptr = cos_sin_ptr + pos_idx * cos_sin_row_stride
+
+        heads = tl.arange(0, pad_n_h)
+        dims = tl.arange(0, pad_rope_dim // 2)
+        mask = (heads[:, None] < n_h) & (dims[None, :] < half_dim)
+
+        if IS_NEOX_STYLE:
+            first_offsets = heads[:, None] * qk_head_stride + dims[None, :] * qk_dim_stride
+            second_offsets = first_offsets + half_dim * qk_dim_stride
+        else:
+            first_offsets = heads[:, None] * qk_head_stride + (2 * dims[None, :]) * qk_dim_stride
+            second_offsets = first_offsets + qk_dim_stride
+        out_first_offsets = heads[:, None] * out_head_stride + dims[None, :] * out_dim_stride
+        out_second_offsets = out_first_offsets + half_dim * out_dim_stride
+
+        cache_mask = dims < half_dim
+
+        cos_row = tl.load(cos_sin_start_ptr + dims, mask=cache_mask, other=0).to(tl.float32)
+        sin_row = tl.load(cos_sin_start_ptr + half_dim + dims, mask=cache_mask, other=0).to(tl.float32)
+
+        qk_first = tl.load(qk_start_ptr + first_offsets, mask=mask, other=0).to(tl.float32)
+        qk_second = tl.load(qk_start_ptr + second_offsets, mask=mask, other=0).to(tl.float32)
+
+        out_first = qk_first * cos_row[None, :] - qk_second * sin_row[None, :]
+        out_second = qk_second * cos_row[None, :] + qk_first * sin_row[None, :]
+        tl.store(out_start_ptr + out_first_offsets, out_first, mask=mask)
+        tl.store(out_start_ptr + out_second_offsets, out_second, mask=mask)
 
 
 def rope_forward_triton(
@@ -353,12 +419,16 @@ def rope_forward_triton_siso(
     cos_sin_cache: torch.Tensor = None,
     positions: torch.Tensor = None,
     rope_dim: int = -1,
+    rope_dim_offset: int = 0,
     is_neox_style: bool = True,
+    inverse: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if not qk.is_contiguous():
         qk = qk.contiguous()
 
     num_tokens, n_head, head_dim = qk.shape
+    if rope_dim == -1:
+        rope_dim = head_dim
     assert rope_dim <= head_dim
     pad_rope_dim = triton.next_power_of_2(rope_dim)
     pad_n_head = triton.next_power_of_2(n_head)
@@ -368,6 +438,9 @@ def rope_forward_triton_siso(
 
     if cos_sin_cache is not None and positions is not None:
         assert positions.shape[0] == num_tokens
+        assert rope_dim_offset >= 0 and rope_dim_offset % 2 == 0
+        cache_half_dim = cos_sin_cache.shape[-1] // 2
+        assert rope_dim_offset // 2 + rope_dim // 2 <= cache_half_dim
         _triton_rope_siso[(n_row,)](
             qk,
             qk.stride(0),
@@ -377,16 +450,19 @@ def rope_forward_triton_siso(
             None,
             cos_sin_cache,
             cos_sin_cache.stride(0),
+            cache_half_dim,
             positions,
             num_tokens,
             n_head,
             head_dim,
             rope_dim,
+            rope_dim_offset // 2,
             pad_n_head,
             pad_rope_dim,
             BLOCK_SIZE=BLOCK_SIZE,
             IS_NEOX_STYLE=is_neox_style,
             USE_COS_SIN=True,
+            INVERSE=inverse,
         )
     elif cos is not None and sin is not None:
         assert cos.shape[0] == num_tokens and sin.shape[0] == num_tokens
@@ -406,15 +482,18 @@ def rope_forward_triton_siso(
             None,
             None,
             None,
+            0,
             num_tokens,
             n_head,
             head_dim,
             rope_dim,
+            0,
             pad_n_head,
             pad_rope_dim,
             BLOCK_SIZE=BLOCK_SIZE,
             IS_NEOX_STYLE=is_neox_style,
             USE_COS_SIN=False,
+            INVERSE=inverse,
         )
     else:
         raise ValueError(
@@ -424,3 +503,185 @@ def rope_forward_triton_siso(
             "Please check whether you call rope_forward_triton correctly."
         )
     return qk
+
+
+def interleave_rope_by_cache_triton(
+    qk: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    positions: torch.Tensor,
+    rope_dim: int = -1,
+    is_neox_style: bool = True,
+) -> torch.Tensor:
+    num_tokens, n_head, head_dim = qk.shape
+    if rope_dim == -1:
+        rope_dim = head_dim
+    assert rope_dim <= head_dim
+    assert rope_dim % 2 == 0
+    assert positions.shape[0] == num_tokens
+
+    pad_rope_dim = triton.next_power_of_2(rope_dim)
+    pad_n_head = triton.next_power_of_2(n_head)
+    BLOCK_SIZE = pad_n_head
+    num_vectorcore = get_vectorcore_num()
+    n_row = min(num_tokens, num_vectorcore)
+    if rope_dim == head_dim:
+        output = torch.empty((num_tokens, n_head, head_dim), device=qk.device, dtype=qk.dtype)
+    else:
+        output = qk.contiguous()
+        if output is qk:
+            output = qk.clone()
+    if num_tokens == 0:
+        return output
+
+    _triton_interleave_rope_by_cache[(n_row,)](
+        qk,
+        qk.stride(0),
+        qk.stride(1),
+        qk.stride(2),
+        output,
+        output.stride(0),
+        output.stride(1),
+        output.stride(2),
+        cos_sin_cache,
+        cos_sin_cache.stride(0),
+        positions,
+        num_tokens,
+        n_head,
+        head_dim,
+        rope_dim,
+        pad_n_head,
+        pad_rope_dim,
+        BLOCK_SIZE=BLOCK_SIZE,
+        IS_NEOX_STYLE=is_neox_style,
+    )
+    return output
+
+
+@triton.jit
+def _triton_mrope_by_cache_forward(
+    q_ptr,
+    k_ptr,
+    cos_sin_cache_ptr,
+    cos_sin_row_stride,
+    positions_ptr,
+    num_tokens,
+    n_qh: tl.constexpr,
+    n_kh: tl.constexpr,
+    hd: tl.constexpr,
+    rd: tl.constexpr,
+    pad_n_qh: tl.constexpr,
+    pad_n_kh: tl.constexpr,
+    pad_hd: tl.constexpr,
+    mrope_section_t: tl.constexpr,
+    mrope_section_h: tl.constexpr,
+    mrope_section_w: tl.constexpr,
+    is_interleaved: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    q_ptr = q_ptr + pid * (n_qh * hd)
+    k_ptr = k_ptr + pid * (n_kh * hd)
+
+    half_rd = rd // 2
+    cos_offsets = tl.arange(0, pad_hd // 2)
+    sin_offsets = cos_offsets + half_rd
+    cos_mask = cos_offsets < half_rd
+
+    if is_interleaved:
+        cos_offsets_mod3 = cos_offsets - (cos_offsets // 3) * 3
+        h_mask = (cos_offsets_mod3 == 1) & (cos_offsets <= 3 * mrope_section_h)
+        w_mask = (cos_offsets_mod3 == 2) & (cos_offsets <= 3 * mrope_section_w)
+        t_mask = ~(h_mask | w_mask)
+    else:
+        t_end = mrope_section_t
+        h_end = t_end + mrope_section_h
+        t_mask = cos_offsets < mrope_section_t
+        h_mask = (t_end <= cos_offsets) & (cos_offsets < h_end)
+        w_mask = (h_end <= cos_offsets) & (cos_offsets < half_rd)
+
+    t_pos = tl.load(positions_ptr + pid).to(tl.int64)
+    h_pos = tl.load(positions_ptr + num_tokens + pid).to(tl.int64)
+    w_pos = tl.load(positions_ptr + 2 * num_tokens + pid).to(tl.int64)
+
+    t_cache = cos_sin_cache_ptr + t_pos * cos_sin_row_stride
+    h_cache = cos_sin_cache_ptr + h_pos * cos_sin_row_stride
+    w_cache = cos_sin_cache_ptr + w_pos * cos_sin_row_stride
+
+    t_cos_row = tl.load(t_cache + cos_offsets, mask=t_mask & cos_mask, other=0)
+    h_cos_row = tl.load(h_cache + cos_offsets, mask=h_mask & cos_mask, other=0)
+    w_cos_row = tl.load(w_cache + cos_offsets, mask=w_mask & cos_mask, other=0)
+    t_sin_row = tl.load(t_cache + sin_offsets, mask=t_mask & cos_mask, other=0)
+    h_sin_row = tl.load(h_cache + sin_offsets, mask=h_mask & cos_mask, other=0)
+    w_sin_row = tl.load(w_cache + sin_offsets, mask=w_mask & cos_mask, other=0)
+
+    cos_row = t_cos_row + h_cos_row + w_cos_row
+    sin_row = t_sin_row + h_sin_row + w_sin_row
+
+    first_half_q_offsets = tl.arange(0, pad_n_qh)[:, None] * hd + tl.arange(0, pad_hd // 2)[None, :]
+    first_half_k_offsets = tl.arange(0, pad_n_kh)[:, None] * hd + tl.arange(0, pad_hd // 2)[None, :]
+    first_q_mask = (tl.arange(0, pad_n_qh)[:, None] < n_qh) & (tl.arange(0, pad_hd // 2)[None, :] < half_rd)
+    first_k_mask = (tl.arange(0, pad_n_kh)[:, None] < n_kh) & (tl.arange(0, pad_hd // 2)[None, :] < half_rd)
+
+    q_tile_1 = tl.load(q_ptr + first_half_q_offsets, mask=first_q_mask, other=0).to(sin_row.dtype)
+    k_tile_1 = tl.load(k_ptr + first_half_k_offsets, mask=first_k_mask, other=0).to(sin_row.dtype)
+
+    second_half_q_offsets = first_half_q_offsets + half_rd
+    second_half_k_offsets = first_half_k_offsets + half_rd
+    second_q_mask = first_q_mask
+    second_k_mask = first_k_mask
+
+    q_tile_2 = tl.load(q_ptr + second_half_q_offsets, mask=second_q_mask, other=0).to(sin_row.dtype)
+    k_tile_2 = tl.load(k_ptr + second_half_k_offsets, mask=second_k_mask, other=0).to(sin_row.dtype)
+
+    new_q_tile_1 = q_tile_1 * cos_row - q_tile_2 * sin_row
+    tl.store(q_ptr + first_half_q_offsets, new_q_tile_1, mask=first_q_mask)
+    new_q_tile_2 = q_tile_2 * cos_row + q_tile_1 * sin_row
+    tl.store(q_ptr + second_half_q_offsets, new_q_tile_2, mask=second_q_mask)
+
+    new_k_tile_1 = k_tile_1 * cos_row - k_tile_2 * sin_row
+    tl.store(k_ptr + first_half_k_offsets, new_k_tile_1, mask=first_k_mask)
+    new_k_tile_2 = k_tile_2 * cos_row + k_tile_1 * sin_row
+    tl.store(k_ptr + second_half_k_offsets, new_k_tile_2, mask=second_k_mask)
+
+
+def mrope_forward_triton_by_cache(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    positions: torch.Tensor,
+    mrope_section: list[int],
+    head_size: int,
+    rotary_dim: int,
+    mrope_interleaved: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    n_row, n_q_head_head_dim = q.shape
+    n_q_head = n_q_head_head_dim // head_size
+    n_kv_head = k.shape[1] // head_size
+    pad_hd = triton.next_power_of_2(head_size)
+    pad_n_q_head = triton.next_power_of_2(n_q_head)
+    pad_n_kv_head = triton.next_power_of_2(n_kv_head)
+
+    q = q.contiguous()
+    k = k.contiguous()
+    cos_sin_cache = cos_sin_cache.contiguous()
+    positions = positions.contiguous()
+
+    _triton_mrope_by_cache_forward[(n_row,)](
+        q,
+        k,
+        cos_sin_cache,
+        cos_sin_cache.stride(0),
+        positions,
+        n_row,
+        n_q_head,
+        n_kv_head,
+        head_size,
+        rotary_dim,
+        pad_n_q_head,
+        pad_n_kv_head,
+        pad_hd,
+        mrope_section[0],
+        mrope_section[1],
+        mrope_section[2],
+        mrope_interleaved,
+    )
+    return q, k

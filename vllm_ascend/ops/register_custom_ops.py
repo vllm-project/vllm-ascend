@@ -14,7 +14,7 @@ from vllm.forward_context import get_forward_context
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
-from vllm_ascend.ops.rotary_embedding import rope_forward_oot
+from vllm_ascend.ops.rotary_embedding import rope_forward_oot_op
 from vllm_ascend.ops.triton.muls_add import muls_add_triton
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.utils import enable_sp_by_pass, is_vl_model, npu_stream_switch, prefetch_stream
@@ -283,7 +283,7 @@ direct_register_custom_op(
 
 direct_register_custom_op(
     op_name="npu_rotary_embedding",
-    op_func=rope_forward_oot,
+    op_func=rope_forward_oot_op,
     fake_impl=_rope_forward_oot_impl_fake,
     mutates_args=[],
     dispatch_key="PrivateUse1",
