@@ -127,9 +127,7 @@ When batch invariance is enabled, vLLM:
 
 ```{note}
 The batch invariance attention operators currently do not support
-`FULL_DECODE_ONLY` cudagraph mode.  When batch invariance is enabled,
-use `PIECEWISE` cudagraph mode instead (e.g.
-`--compilation-config '{"cudagraph_mode": "PIECEWISE"}'`).
+`FULL'、'FULL_DECODE_ONLY` cudagraph mode.
 ```
 
 ```{note}
@@ -141,7 +139,7 @@ Enabling batch invariance may impact performance compared to the default non-det
 The batch invariance feature is under active development. Planned improvements include:
 
 - Support for additional NPUs series
-- Support `FULL_DECODE_ONLY` cudagraph mode with batch invariance attention operators
+- Support `FULL'、'FULL_DECODE_ONLY` cudagraph mode with batch invariance attention operators
 - Expanded model coverage
 - Performance optimizations
 - Additional testing and validation
