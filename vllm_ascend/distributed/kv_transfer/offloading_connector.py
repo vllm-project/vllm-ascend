@@ -175,7 +175,7 @@ class NPUOffloadingConnectorWorker(OffloadingConnectorWorker):
 class NPUOffloadingConnector(OffloadingConnector):
     # ``OffloadingConnector`` already sets this, but it comes from an unfollowed
     # vLLM import (mypy runs with ``--follow-imports skip``), so its inherited
-    # type is undeterminable; re-declare it here so mypy can resolve reads and
+    # type is undeterminable; redeclare it here so mypy can resolve reads and
     # writes of ``self.connector_worker`` ("Cannot determine type of ...").
     connector_worker: OffloadingConnectorWorker | None
 
