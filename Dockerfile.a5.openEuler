@@ -18,26 +18,17 @@
 FROM quay.io/ascend/cann:9.0.0-950-openeuler24.03-py3.12
 
 ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
-ARG MOONCAKE_TAG="v0.3.9"
 
 WORKDIR /workspace
-
-COPY ./tools/mooncake_installer.sh /vllm-workspace/
 
 SHELL ["/bin/bash", "-c"]
 
 # Install clang (for triton-ascend) and Mooncake
+ARG MOONCAKE_TAG=0.3.11.post1
 RUN yum update -y && \
-    yum install -y git vim wget net-tools gcc gcc-c++ make cmake numactl numactl-devel jemalloc clang patch && \
-    git clone --depth 1 --branch ${MOONCAKE_TAG} https://github.com/kvcache-ai/Mooncake /vllm-workspace/Mooncake && \
-    mv /vllm-workspace/mooncake_installer.sh /vllm-workspace/Mooncake/ && \
-    ARCH=$(uname -m) && \
+    yum install -y git vim wget net-tools gcc gcc-c++ make cmake numactl numactl-devel libibverbs-devel jemalloc hiredis-devel clang patch && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
-    cd /vllm-workspace/Mooncake && \
-    bash mooncake_installer.sh -y && \
-    mkdir -p build && cd build && cmake .. -DUSE_ASCEND_DIRECT=ON && \
-    make -j$(nproc) && make install && \
-    rm -fr /vllm-workspace/Mooncake/build && \
+    python3 -m pip install mooncake-transfer-engine-npu==${MOONCAKE_TAG} --extra-index-url https://mirrors.aliyun.com/pypi/web/simple && \
     rm -rf /var/cache/yum/*
 
 # Install modelscope (for fast download) and ray (for multinode)
