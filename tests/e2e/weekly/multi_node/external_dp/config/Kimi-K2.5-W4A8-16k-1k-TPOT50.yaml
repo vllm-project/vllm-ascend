@@ -1,4 +1,4 @@
-test_name: "multi-node-kimi-k2.5-w4a8-ep-external-dp-16k-1k-TPOT50"
+test_name: "multi-node-kimi-k2.5-w4a8-ep-16k-1k-TPOT50"
 model: "Eco-Tech/Kimi-K2.5-W4A8"
 num_nodes: 4
 npu_per_node: 16
