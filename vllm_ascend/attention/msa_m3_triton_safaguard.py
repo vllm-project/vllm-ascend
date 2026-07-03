@@ -1,0 +1,1795 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Triton kernels for MiniMax M3 block-sparse GQA attention on Ascend.
+
+Migrated from reference/vllm_cp/vllm/models/minimax_m3/common/ops/index_topk.py
+and sparse_attn.py. The kernels accept K/V cache tensors directly so Ascend's
+split cache layout does not need to be materialized into the GPU
+``[num_blocks, 2, ...]`` layout.
+"""
+
+from __future__ import annotations
+
+import torch
+
+from vllm.platforms import current_platform
+from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import round_up
+
+# One sparse block == one KV page.
+SPARSE_BLOCK_SIZE = 128
+
+TOPK_SELECTION_TILE = 128
+TOPK_COMPUTE_MIN_TILE = 16
+TOPK_NUM_WARPS = 4
+TOPK_NUM_STAGES = 2
+
+
+_FP8_DTYPES = (torch.float8_e4m3fn, torch.float8_e5m2)
+
+
+def _split_triton_main_kv_cache(
+    kv_cache: torch.Tensor | tuple[torch.Tensor, ...] | list[torch.Tensor],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if isinstance(kv_cache, (tuple, list)):
+        if len(kv_cache) < 2:
+            raise ValueError("Main kv cache tuple must contain K and V tensors")
+        k_cache, v_cache = kv_cache[0], kv_cache[1]
+    else:
+        if kv_cache.ndim != 5:
+            raise ValueError(f"Unexpected main kv cache ndim: {kv_cache.ndim}")
+        if kv_cache.shape[0] == 2:
+            k_cache, v_cache = kv_cache[0], kv_cache[1]
+        elif kv_cache.shape[1] == 2:
+            k_cache, v_cache = kv_cache[:, 0], kv_cache[:, 1]
+        else:
+            raise ValueError(f"Unexpected main kv cache shape: {tuple(kv_cache.shape)}")
+    if k_cache.ndim != 4 or v_cache.ndim != 4:
+        raise ValueError(
+            "Unexpected split main kv cache shapes: "
+            f"{tuple(k_cache.shape)}, {tuple(v_cache.shape)}"
+        )
+    return k_cache, v_cache
+
+
+def _is_arch_support_pdl() -> bool:
+    if current_platform.device_name == "npu":
+        return False
+    is_supported = getattr(current_platform, "is_arch_support_pdl", None)
+    return bool(is_supported()) if callable(is_supported) else False
+
+
+def _as_triton_index_kv_cache(
+    index_kv_cache: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+) -> torch.Tensor:
+    """Normalize Ascend indexer cache to ``[num_blocks, 128, head_dim]``."""
+    if isinstance(index_kv_cache, (tuple, list)):
+        index_kv_cache = index_kv_cache[0]
+    if index_kv_cache.ndim == 5 and index_kv_cache.shape[0] == 2:
+        index_kv_cache = index_kv_cache[0]
+    if index_kv_cache.ndim == 4:
+        if index_kv_cache.shape[2] != 1:
+            raise ValueError(
+                f"Unexpected index cache head dim: {tuple(index_kv_cache.shape)}"
+            )
+        index_kv_cache = index_kv_cache.squeeze(2)
+    if index_kv_cache.ndim != 3:
+        raise ValueError(f"Unexpected index cache ndim: {index_kv_cache.ndim}")
+    return index_kv_cache
+
+
+_SPARSE_ATTN_NUM_STAGES_KWARG: dict | None = None
+
+
+def _sparse_attn_num_stages_kwarg() -> dict:
+    """Triton ``num_stages`` override for the sparse-attn GEMM kernels.
+
+    Forced only where required: CDNA3 (gfx942) caps LDS at
+    64 KB, and the default 2-stage pipeline double-buffers the 128x128 K/V tiles
+    to ~66 KB ("out of resource: shared memory"), so pin gfx942 to a single
+    stage (~32 KB, which fits). Everywhere else (NVIDIA, CDNA4 gfx950) return an
+    empty kwarg and let Triton keep its own default -- don't second-guess it.
+    Cached: the arch is fixed per process.
+    """
+    global _SPARSE_ATTN_NUM_STAGES_KWARG
+    if _SPARSE_ATTN_NUM_STAGES_KWARG is None:
+        kwarg: dict = {}
+        if current_platform.is_rocm():
+            from vllm.platforms.rocm import on_gfx942
+
+            if on_gfx942():
+                kwarg = {"num_stages": 1}
+        _SPARSE_ATTN_NUM_STAGES_KWARG = kwarg
+    return _SPARSE_ATTN_NUM_STAGES_KWARG
+
+
+@triton.jit
+def _select_topk_pairs(
+    scores,
+    indices,
+    valid_mask,
+    topk_size: tl.constexpr,
+    block_size: tl.constexpr,
+):
+    off_k = tl.arange(0, block_size)
+    off_t = tl.arange(0, topk_size)
+
+    valid_i32 = valid_mask.to(tl.int32)
+    work_valid_i32 = valid_i32
+    work_scores = tl.where(work_valid_i32 != 0, scores, float("-inf"))
+    selected_scores = tl.full((topk_size,), -1e30, dtype=tl.float32)
+    selected_indices = tl.full((topk_size,), 0, dtype=tl.int32)
+
+    for rank in tl.static_range(0, topk_size):
+        best_score = tl.max(work_scores, axis=0)
+        best_offset = tl.argmax(work_scores, axis=0).to(tl.int32)
+
+        selected_i32 = (
+            (off_k == best_offset).to(tl.int32) * work_valid_i32
+        )
+        best_index = tl.sum(
+            tl.where(selected_i32 != 0, indices, 0),
+            axis=0,
+        ).to(tl.int32)
+        has_best_i32 = (best_index > 0).to(tl.int32)
+
+        selected_scores = tl.where(
+            off_t == rank,
+            tl.where(has_best_i32 != 0, best_score, -1e30),
+            selected_scores,
+        )
+        selected_indices = tl.where(
+            off_t == rank,
+            tl.where(has_best_i32 != 0, best_index, 0),
+            selected_indices,
+        )
+
+        selected_lane_i32 = (off_k == best_offset).to(tl.int32)
+        work_valid_i32 = work_valid_i32 * (1 - selected_lane_i32)
+        work_scores = tl.where(
+            selected_lane_i32 != 0,
+            float("-inf"),
+            work_scores,
+        )
+
+    return selected_scores, selected_indices
+
+
+@triton.jit
+def _merge_topk_pairs(
+    left_scores,
+    left_indices,
+    right_scores,
+    right_indices,
+    topk_size: tl.constexpr,
+):
+    off_t = tl.arange(0, topk_size)
+
+    left_valid_i32 = (left_indices > 0).to(tl.int32)
+    right_valid_i32 = (right_indices > 0).to(tl.int32)
+    left_work = tl.where(left_valid_i32 != 0, left_scores, float("-inf"))
+    right_work = tl.where(right_valid_i32 != 0, right_scores, float("-inf"))
+
+    out_scores = tl.full((topk_size,), -1e30, dtype=tl.float32)
+    out_indices = tl.full((topk_size,), 0, dtype=tl.int32)
+
+    for rank in tl.static_range(0, topk_size):
+        left_best = tl.max(left_work, axis=0)
+        left_offset = tl.argmax(left_work, axis=0).to(tl.int32)
+        right_best = tl.max(right_work, axis=0)
+        right_offset = tl.argmax(right_work, axis=0).to(tl.int32)
+
+        take_left_i32 = (left_best >= right_best).to(tl.int32)
+
+        left_selected_i32 = (
+            (off_t == left_offset).to(tl.int32) * left_valid_i32
+        )
+        right_selected_i32 = (
+            (off_t == right_offset).to(tl.int32) * right_valid_i32
+        )
+        left_index = tl.sum(
+            tl.where(left_selected_i32 != 0, left_indices, 0),
+            axis=0,
+        ).to(tl.int32)
+        right_index = tl.sum(
+            tl.where(right_selected_i32 != 0, right_indices, 0),
+            axis=0,
+        ).to(tl.int32)
+
+        best_score = tl.where(take_left_i32 != 0, left_best, right_best)
+        best_index = tl.where(take_left_i32 != 0, left_index, right_index)
+        has_best_i32 = (best_index > 0).to(tl.int32)
+
+        out_scores = tl.where(
+            off_t == rank,
+            tl.where(has_best_i32 != 0, best_score, -1e30),
+            out_scores,
+        )
+        out_indices = tl.where(
+            off_t == rank,
+            tl.where(has_best_i32 != 0, best_index, 0),
+            out_indices,
+        )
+
+        left_remove_i32 = left_selected_i32 * take_left_i32
+        right_remove_i32 = right_selected_i32 * (1 - take_left_i32)
+        left_valid_i32 = left_valid_i32 * (1 - left_remove_i32)
+        right_valid_i32 = right_valid_i32 * (1 - right_remove_i32)
+        left_work = tl.where(left_remove_i32 != 0, float("-inf"), left_work)
+        right_work = tl.where(right_remove_i32 != 0, float("-inf"), right_work)
+
+    return out_scores, out_indices
+
+
+# ---------------------------------------------------------------------------
+# Index block-score kernel (paged). score[h, token, block] = max over the
+# 128-token block of (idx_q . index_k), causal-masked. BLOCK_SIZE_K == 128 so
+# each K-tile is exactly one page (BLOCKS_PER_K_BLOCK == 1).
+# ---------------------------------------------------------------------------
+# since prefill metadata is sliced from mixed batch metadata, seq_lens and prefix_lens
+# might lose pointer alignment, which trigger Triton recompiles. we don't actually
+# need pointer alignment for those tensors anyway because we do scalar load.
+@triton.jit(do_not_specialize_on_alignment=["seq_lens", "prefix_lens"])
+def _index_block_score_kernel(
+    q_ptr,  # idx_q: [total_q, num_idx_heads, head_dim]
+    ik_cache_ptr,  # index-K cache: [num_blocks, 128, head_dim]
+    score_ptr,  # [num_idx_heads, total_q, max_block]
+    block_table_ptr,  # [num_reqs, max_blocks]
+    cu_seqlens,  # [batch+1] query start offsets
+    seq_lens,  # [batch] total K length
+    prefix_lens,  # [batch] context length before this chunk's queries
+    num_idx_heads,
+    head_dim: tl.constexpr,
+    sm_scale,
+    stride_q_n,
+    stride_q_h,
+    stride_q_d,
+    stride_ik_blk,
+    stride_ik_pos,
+    stride_ik_d,
+    stride_s_h,
+    stride_s_n,
+    stride_s_k,
+    stride_bt_b,
+    BLOCK_SIZE_Q: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,  # == SPARSE_BLOCK_SIZE (128)
+):
+    sm_scale_log2e = sm_scale * 1.4426950409
+    pid_q = tl.program_id(0)
+    pid_bh = tl.program_id(1)
+    pid_b = pid_bh // num_idx_heads
+    pid_h = pid_bh % num_idx_heads
+
+    seq_start = tl.load(cu_seqlens + pid_b)
+    q_len = tl.load(cu_seqlens + pid_b + 1) - seq_start
+    seq_len = tl.load(seq_lens + pid_b)
+    prefix_len = tl.load(prefix_lens + pid_b)
+    if BLOCK_SIZE_Q * pid_q >= q_len:
+        return
+
+    q_ptrs = tl.make_block_ptr(
+        base=q_ptr + seq_start * stride_q_n + pid_h * stride_q_h,
+        shape=(q_len, head_dim),
+        strides=(stride_q_n, stride_q_d),
+        offsets=(pid_q * BLOCK_SIZE_Q, 0),
+        block_shape=(BLOCK_SIZE_Q, head_dim),
+        order=(1, 0),
+    )
+    q = tl.load(q_ptrs, boundary_check=(0,), padding_option="zero")
+    q_start = prefix_len + pid_q * BLOCK_SIZE_Q
+
+    off_q = tl.arange(0, BLOCK_SIZE_Q) + pid_q * BLOCK_SIZE_Q + prefix_len
+    off_k = tl.arange(0, BLOCK_SIZE_K)
+    off_d = tl.arange(0, head_dim)
+    # Block table row for this request.
+    bt_row = block_table_ptr + pid_b * stride_bt_b
+    # Causal window: only blocks up to the last query token's position.
+    hi = min(seq_len, prefix_len + (pid_q + 1) * BLOCK_SIZE_Q)
+    for i in tl.range(0, hi, BLOCK_SIZE_K):
+        blk = i // BLOCK_SIZE_K
+        page = tl.load(bt_row + blk).to(tl.int64)
+        pos = i + off_k
+        # index-K for this page: [BLOCK_SIZE_D, BLOCK_SIZE_K] (transposed)
+        # we don't need masked load for K, because KV cache ensures
+        # allocation is multiple of BLOCK_SIZE_K.
+        # for tokens beyond seqlen, they will be masked in qk later.
+        k = tl.load(
+            ik_cache_ptr
+            + page * stride_ik_blk
+            + off_k[None, :] * stride_ik_pos
+            + off_d[:, None] * stride_ik_d,
+        )
+        qk = tl.dot(q, k) * sm_scale_log2e
+        # apply causal mask as needed
+        if q_start < i + BLOCK_SIZE_K:
+            qk = tl.where(off_q[:, None] >= pos[None, :], qk, float("-inf"))
+        # one sparse block per K-tile -> max over the 128 positions
+        score = tl.max(qk, axis=1)  # [BLOCK_SIZE_Q]
+        s_ptrs = (
+            score_ptr
+            + pid_h * stride_s_h
+            + (seq_start + pid_q * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q))
+            * stride_s_n
+            + blk * stride_s_k
+        )
+        q_store_mask = (pid_q * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q)) < q_len
+        tl.store(s_ptrs, score, mask=q_store_mask)
+
+
+# ---------------------------------------------------------------------------
+# Prefill and decode top-k kernels.
+# ---------------------------------------------------------------------------
+@triton.jit(do_not_specialize_on_alignment=["prefix_lens"])
+def _prefill_topk_partial_kernel(
+    s_ptr,
+    scores_partial_ptr,
+    indices_partial_ptr,
+    cu_seqlens,
+    prefix_lens,
+    init_blocks: tl.constexpr,
+    local_blocks: tl.constexpr,
+    chunk_blocks,
+    num_chunks,
+    stride_s_h,
+    stride_s_n,
+    stride_s_k,
+    stride_ps_c,
+    stride_ps_h,
+    stride_ps_n,
+    stride_ps_t,
+    stride_pi_c,
+    stride_pi_h,
+    stride_pi_n,
+    stride_pi_t,
+    BLOCK_SIZE_K: tl.constexpr,
+    BLOCK_SIZE_T: tl.constexpr,
+    BLOCK_SIZE_BLOCK: tl.constexpr,
+    MASK_INIT: tl.constexpr,
+    MASK_LOCAL: tl.constexpr,
+):
+    pid_q = tl.program_id(0)
+    pid_b = tl.program_id(1)
+    pid_hc = tl.program_id(2)
+    pid_h = pid_hc // num_chunks
+    pid_chunk = pid_hc - pid_h * num_chunks
+
+    seq_start = tl.load(cu_seqlens + pid_b)
+    q_len = tl.load(cu_seqlens + pid_b + 1) - seq_start
+    prefix_len = tl.load(prefix_lens + pid_b)
+    if pid_q >= q_len:
+        return
+
+    off_k = tl.arange(0, BLOCK_SIZE_K)
+    off_t = tl.arange(0, BLOCK_SIZE_T)
+    query_idx = seq_start + pid_q
+    valid_blocks = (prefix_len + pid_q + BLOCK_SIZE_BLOCK) // BLOCK_SIZE_BLOCK
+    chunk_start = pid_chunk * chunk_blocks
+    block_ids = chunk_start + off_k
+    valid_i32 = (
+        ((block_ids < valid_blocks) & (off_k < chunk_blocks)).to(tl.int32)
+    )
+
+    score = tl.load(
+        s_ptr
+        + pid_h * stride_s_h
+        + query_idx * stride_s_n
+        + block_ids * stride_s_k,
+        mask=valid_i32 != 0,
+        other=-1e30,
+    ).to(tl.float32)
+    score = tl.where(score != score, -1e30, score)
+
+    init_i32 = (block_ids < init_blocks).to(tl.int32)
+    local_i32 = (
+        block_ids >= tl.maximum(0, valid_blocks - local_blocks)
+    ).to(tl.int32)
+    if MASK_INIT:
+        score = tl.where(
+            (valid_i32 * init_i32) != 0,
+            score - 1e29,
+            score,
+        )
+    else:
+        score = tl.where(
+            (valid_i32 * init_i32) != 0,
+            1e30,
+            score,
+        )
+    if MASK_LOCAL:
+        score = tl.where(
+            (valid_i32 * local_i32) != 0,
+            score - 1e28,
+            score,
+        )
+    else:
+        score = tl.where(
+            (valid_i32 * local_i32) != 0,
+            1e29,
+            score,
+        )
+
+    indices = tl.where(valid_i32 != 0, block_ids + 1, 0).to(tl.int32)
+    selected_scores, selected_indices = _select_topk_pairs(
+        score,
+        indices,
+        valid_i32 != 0,
+        BLOCK_SIZE_T,
+        BLOCK_SIZE_K,
+    )
+
+    tl.store(
+        scores_partial_ptr
+        + pid_chunk * stride_ps_c
+        + pid_h * stride_ps_h
+        + query_idx * stride_ps_n
+        + off_t * stride_ps_t,
+        selected_scores,
+    )
+    tl.store(
+        indices_partial_ptr
+        + pid_chunk * stride_pi_c
+        + pid_h * stride_pi_h
+        + query_idx * stride_pi_n
+        + off_t * stride_pi_t,
+        selected_indices,
+    )
+
+
+@triton.jit(do_not_specialize=["num_input_chunks"])
+def _topk_pair_merge_kernel(
+    in_scores_ptr,
+    in_indices_ptr,
+    out_scores_ptr,
+    out_indices_ptr,
+    num_input_chunks,
+    stride_is_c,
+    stride_is_h,
+    stride_is_n,
+    stride_is_t,
+    stride_ii_c,
+    stride_ii_h,
+    stride_ii_n,
+    stride_ii_t,
+    stride_os_c,
+    stride_os_h,
+    stride_os_n,
+    stride_os_t,
+    stride_oi_c,
+    stride_oi_h,
+    stride_oi_n,
+    stride_oi_t,
+    BLOCK_SIZE_T: tl.constexpr,
+):
+    pid_n = tl.program_id(0)
+    pid_h = tl.program_id(1)
+    pid_out_chunk = tl.program_id(2)
+
+    off_t = tl.arange(0, BLOCK_SIZE_T)
+    left_chunk = 2 * pid_out_chunk
+    right_chunk = left_chunk + 1
+    right_exists_i32 = (right_chunk < num_input_chunks).to(tl.int32)
+
+    left_scores = tl.load(
+        in_scores_ptr
+        + left_chunk * stride_is_c
+        + pid_h * stride_is_h
+        + pid_n * stride_is_n
+        + off_t * stride_is_t,
+    ).to(tl.float32)
+    left_indices = tl.load(
+        in_indices_ptr
+        + left_chunk * stride_ii_c
+        + pid_h * stride_ii_h
+        + pid_n * stride_ii_n
+        + off_t * stride_ii_t,
+    ).to(tl.int32)
+    right_scores = tl.load(
+        in_scores_ptr
+        + right_chunk * stride_is_c
+        + pid_h * stride_is_h
+        + pid_n * stride_is_n
+        + off_t * stride_is_t,
+        mask=right_exists_i32 != 0,
+        other=-1e30,
+    ).to(tl.float32)
+    right_indices = tl.load(
+        in_indices_ptr
+        + right_chunk * stride_ii_c
+        + pid_h * stride_ii_h
+        + pid_n * stride_ii_n
+        + off_t * stride_ii_t,
+        mask=right_exists_i32 != 0,
+        other=0,
+    ).to(tl.int32)
+
+    merged_scores, merged_indices = _merge_topk_pairs(
+        left_scores,
+        left_indices,
+        right_scores,
+        right_indices,
+        BLOCK_SIZE_T,
+    )
+
+    tl.store(
+        out_scores_ptr
+        + pid_out_chunk * stride_os_c
+        + pid_h * stride_os_h
+        + pid_n * stride_os_n
+        + off_t * stride_os_t,
+        merged_scores,
+    )
+    tl.store(
+        out_indices_ptr
+        + pid_out_chunk * stride_oi_c
+        + pid_h * stride_oi_h
+        + pid_n * stride_oi_n
+        + off_t * stride_oi_t,
+        merged_indices,
+    )
+
+
+@triton.jit
+def _topk_finalize_kernel(
+    indices_partial_ptr,
+    indices_final_ptr,
+    topk,
+    stride_pi_c,
+    stride_pi_h,
+    stride_pi_n,
+    stride_pi_t,
+    stride_f_h,
+    stride_f_n,
+    stride_f_t,
+    BLOCK_SIZE_T: tl.constexpr,
+):
+    pid_n = tl.program_id(0)
+    pid_h = tl.program_id(1)
+    off_t = tl.arange(0, BLOCK_SIZE_T)
+
+    indices = tl.load(
+        indices_partial_ptr
+        + pid_h * stride_pi_h
+        + pid_n * stride_pi_n
+        + off_t * stride_pi_t,
+    ).to(tl.int32)
+    output = tl.where(
+        (off_t < topk) & (indices > 0),
+        indices - 1,
+        -1,
+    )
+    tl.store(
+        indices_final_ptr
+        + pid_h * stride_f_h
+        + pid_n * stride_f_n
+        + off_t * stride_f_t,
+        output.to(indices_final_ptr.dtype.element_ty),
+        mask=off_t < topk,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Decode index-score kernel (split-K over seq blocks). Decode batches are
+# flattened request-major, with a runtime query length used to map each query
+# token back to its request metadata. The score stage uses a fixed split-K
+# grid, while the top-k stage is NPU-oriented. Base-2 score scaling matches
+# prefill.
+# ---------------------------------------------------------------------------
+@triton.jit(do_not_specialize=["num_kv_chunks", "decode_query_len"])
+def _decode_index_score_kernel(
+    q_ptr,  # idx_q: [total_q, num_idx_heads, head_dim]
+    ik_cache_ptr,  # index-K cache: [num_blocks, 128, head_dim]
+    score_ptr,  # [num_idx_heads, total_q, max_block]
+    block_table_ptr,  # [num_reqs, max_blocks]
+    seq_lens,  # [num_reqs]
+    num_idx_heads: tl.constexpr,
+    head_dim: tl.constexpr,
+    init_blocks,
+    local_blocks,
+    sm_scale,
+    decode_query_len,
+    stride_q_n,
+    stride_q_h,
+    stride_q_d,
+    stride_ik_blk,
+    stride_ik_pos,
+    stride_ik_d,
+    stride_s_h,
+    stride_s_n,
+    stride_s_k,
+    stride_bt_b,
+    BLOCK_SIZE_K: tl.constexpr,  # == SPARSE_BLOCK_SIZE (128)
+    num_kv_chunks,
+):
+    sm_scale_log2e = sm_scale * 1.4426950409
+    pid_b = tl.program_id(0)  # flattened query-token id
+    pid_c = tl.program_id(1)
+    req_id = pid_b // decode_query_len
+    q_offset = pid_b - req_id * decode_query_len
+
+    seq_len = tl.load(seq_lens + req_id)
+    query_pos = seq_len - decode_query_len + q_offset
+    # Full-shape padding uses zero-length request rows. Clamp to an empty
+    # attention range instead of letting padded rows produce negative lengths.
+    kv_len = tl.maximum(query_pos + 1, 0)
+    num_blocks = (kv_len + BLOCK_SIZE_K - 1) // BLOCK_SIZE_K
+
+    # Block-aligned fixed-count split.  The grid depends only on the launch
+    # shape, while each program masks to its request's actual valid block range.
+    chunk_size_blocks = (num_blocks + num_kv_chunks - 1) // num_kv_chunks
+    chunk_start_block = pid_c * chunk_size_blocks
+    chunk_end_block = tl.minimum(chunk_start_block + chunk_size_blocks, num_blocks)
+    if chunk_start_block >= chunk_end_block:
+        return
+
+    off_k = tl.arange(0, BLOCK_SIZE_K)
+    off_d = tl.arange(0, head_dim)
+    bt_row = block_table_ptr + req_id * stride_bt_b
+    local_start = tl.maximum(0, num_blocks - local_blocks)
+
+    q = tl.load(
+        q_ptr
+        + pid_b * stride_q_n
+        + tl.arange(0, num_idx_heads) * stride_q_h
+        + off_d[:, None] * stride_q_d,
+    )  # [D, H]
+
+    for blk in tl.range(chunk_start_block, chunk_end_block):
+        page = tl.load(bt_row + blk).to(tl.int64)
+        pos = blk * BLOCK_SIZE_K + off_k
+        pos_mask = pos < (kv_len)
+        k = tl.load(
+            ik_cache_ptr
+            + page * stride_ik_blk
+            + off_k[:, None] * stride_ik_pos
+            + off_d * stride_ik_d,
+        )  # [N, D]
+
+        kq = tl.dot(k, q) * sm_scale_log2e  # [N, H]
+        kq = tl.where(pos_mask[:, None], kq, float("-inf"))
+        score = tl.max(kq, axis=0)  # [H]
+
+        is_init = blk < init_blocks
+        is_local = (blk >= local_start) & (blk < num_blocks)
+        score = tl.where(is_local, 1e29, tl.where(is_init, 1e30, score))
+        tl.store(
+            score_ptr
+            + tl.arange(0, num_idx_heads) * stride_s_h
+            + pid_b * stride_s_n
+            + blk * stride_s_k,
+            score,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Decode local top-k.
+# ---------------------------------------------------------------------------
+@triton.jit(do_not_specialize=["chunk_blocks", "decode_query_len"])
+def _decode_topk_partial_kernel(
+    s_ptr,
+    scores_partial_ptr,
+    indices_partial_ptr,
+    seq_lens,
+    chunk_blocks,
+    decode_query_len,
+    stride_s_h,
+    stride_s_n,
+    stride_s_k,
+    stride_ps_c,
+    stride_ps_h,
+    stride_ps_n,
+    stride_ps_t,
+    stride_pi_c,
+    stride_pi_h,
+    stride_pi_n,
+    stride_pi_t,
+    BLOCK_SIZE_K: tl.constexpr,
+    BLOCK_SIZE_T: tl.constexpr,
+    BLOCK_SIZE_BLOCK: tl.constexpr,
+):
+    pid_n = tl.program_id(0)
+    pid_h = tl.program_id(1)
+    pid_chunk = tl.program_id(2)
+
+    req_id = pid_n // decode_query_len
+    q_offset = pid_n - req_id * decode_query_len
+    seq_len = tl.load(seq_lens + req_id)
+    query_pos = seq_len - decode_query_len + q_offset
+    kv_len = tl.maximum(query_pos + 1, 0)
+    num_blocks = (kv_len + BLOCK_SIZE_BLOCK - 1) // BLOCK_SIZE_BLOCK
+
+    off_k = tl.arange(0, BLOCK_SIZE_K)
+    off_t = tl.arange(0, BLOCK_SIZE_T)
+    chunk_start = pid_chunk * chunk_blocks
+    block_ids = chunk_start + off_k
+    valid_i32 = (
+        ((block_ids < num_blocks) & (off_k < chunk_blocks)).to(tl.int32)
+    )
+
+    scores = tl.load(
+        s_ptr
+        + pid_h * stride_s_h
+        + pid_n * stride_s_n
+        + block_ids * stride_s_k,
+        mask=valid_i32 != 0,
+        other=-1e30,
+    ).to(tl.float32)
+    scores = tl.where(scores != scores, -1e30, scores)
+    indices = tl.where(valid_i32 != 0, block_ids + 1, 0).to(tl.int32)
+
+    selected_scores, selected_indices = _select_topk_pairs(
+        scores,
+        indices,
+        valid_i32 != 0,
+        BLOCK_SIZE_T,
+        BLOCK_SIZE_K,
+    )
+
+    tl.store(
+        scores_partial_ptr
+        + pid_chunk * stride_ps_c
+        + pid_h * stride_ps_h
+        + pid_n * stride_ps_n
+        + off_t * stride_ps_t,
+        selected_scores,
+    )
+    tl.store(
+        indices_partial_ptr
+        + pid_chunk * stride_pi_c
+        + pid_h * stride_pi_h
+        + pid_n * stride_pi_n
+        + off_t * stride_pi_t,
+        selected_indices,
+    )
+
+
+# ---------------------------------------------------------------------------
+# GQA block-sparse attention (paged). Main heads attend only to the selected
+# blocks. BLOCK_SIZE_K == 128 so each selected block is one page.
+# ---------------------------------------------------------------------------
+# since prefill metadata is sliced from mixed batch metadata, seq_lens and prefix_lens
+# might lose pointer alignment, which trigger Triton recompiles. we don't actually
+# need pointer alignment for those tensors anyway because we do scalar load.
+@triton.heuristics(
+    {
+        "BLOCK_SIZE_D": lambda args: triton.next_power_of_2(args["head_dim"]),
+        "BLOCK_SIZE_H": lambda args: triton.next_power_of_2(args["gqa_group_size"]),
+        "BLOCK_SIZE_T": lambda args: triton.next_power_of_2(args["max_topk"]),
+        "BLOCK_SIZE_QH": lambda args: args["BLOCK_SIZE_Q"]
+        * triton.next_power_of_2(args["gqa_group_size"]),
+    }
+)
+@triton.jit(do_not_specialize_on_alignment=["seq_lens", "prefix_lens"])
+def _gqa_sparse_fwd_kernel(
+    q_ptr,  # [total_q, num_heads, head_dim]
+    k_cache_ptr,  # [num_blocks, 128, num_kv_heads, head_dim]
+    v_cache_ptr,  # [num_blocks, 128, num_kv_heads, head_dim]
+    t_ptr,  # topk_idx: [num_kv_heads, total_q, topk]
+    o_ptr,  # [total_q, num_heads, head_dim]
+    block_table_ptr,  # [num_reqs, max_blocks]
+    cu_seqlens_q,
+    cu_seqblocks_q,
+    seq_lens,
+    prefix_lens,
+    num_kv_heads,
+    gqa_group_size,
+    head_dim,
+    max_topk,
+    num_q_loop,
+    sm_scale,
+    stride_qn,
+    stride_qh,
+    stride_qd,
+    stride_k_blk,
+    stride_k_pos,
+    stride_k_h,
+    stride_k_d,
+    stride_v_blk,
+    stride_v_pos,
+    stride_v_h,
+    stride_v_d,
+    stride_th,
+    stride_tn,
+    stride_tk,
+    stride_on,
+    stride_oh,
+    stride_od,
+    stride_bt_b,
+    BLOCK_SIZE_Q: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,  # == SPARSE_BLOCK_SIZE (128)
+    BLOCK_SIZE_D: tl.constexpr,
+    BLOCK_SIZE_H: tl.constexpr,
+    BLOCK_SIZE_T: tl.constexpr,
+    BLOCK_SIZE_QH: tl.constexpr,
+    USE_FP8: tl.constexpr,  # fp8 KV cache: dequantize K/V to q.dtype on load
+):
+    sm_scale_log2e = sm_scale * 1.4426950409
+    pid_q = tl.program_id(0)
+    pid_kh = tl.program_id(1)
+    pid_b = tl.program_id(2)
+    pid_h = pid_kh * gqa_group_size
+    q_start = tl.load(cu_seqlens_q + pid_b)
+    q_len = tl.load(cu_seqlens_q + pid_b + 1) - q_start
+    q_block_start = tl.load(cu_seqblocks_q + pid_b)
+    q_block_len = tl.load(cu_seqblocks_q + pid_b + 1) - q_block_start
+    seq_len = tl.load(seq_lens + pid_b)
+    prefix_len = tl.load(prefix_lens + pid_b)
+    if pid_q * num_q_loop >= q_block_len:
+        return
+    real_q_loop = min(num_q_loop, q_block_len - pid_q * num_q_loop)
+    bt_row = block_table_ptr + pid_b * stride_bt_b
+    off_n = tl.arange(0, BLOCK_SIZE_K)
+    off_d = tl.arange(0, BLOCK_SIZE_D)
+    d_mask = off_d < head_dim
+    for j in range(real_q_loop):
+        pid_q_j = pid_q * num_q_loop + j
+        t_ptr_j = t_ptr + (q_block_start + pid_q_j) * stride_tn + pid_kh * stride_th
+        off_t = tl.arange(0, BLOCK_SIZE_T)
+        topk_idx = tl.load(t_ptr_j + off_t * stride_tk, mask=off_t < max_topk, other=-1)
+        real_topk = tl.sum((topk_idx >= 0).to(tl.int32), axis=0)
+        q_ptrs = tl.make_block_ptr(
+            base=q_ptr + q_start * stride_qn + pid_h * stride_qh,
+            shape=(q_len, gqa_group_size, head_dim),
+            strides=(stride_qn, stride_qh, stride_qd),
+            offsets=(pid_q_j * BLOCK_SIZE_Q, 0, 0),
+            block_shape=(BLOCK_SIZE_Q, BLOCK_SIZE_H, BLOCK_SIZE_D),
+            order=(2, 1, 0),
+        )
+        q = tl.load(q_ptrs, boundary_check=(0, 1, 2), padding_option="zero")
+        off_q = (
+            tl.arange(0, BLOCK_SIZE_Q)[:, None]
+            + pid_q_j * BLOCK_SIZE_Q
+            + prefix_len
+            - tl.arange(0, BLOCK_SIZE_K)[None, :]
+        )
+        m_i = tl.full((BLOCK_SIZE_QH,), float("-inf"), dtype=tl.float32)
+        lse_i = tl.full((BLOCK_SIZE_QH,), float("-inf"), dtype=tl.float32)
+        acc_o = tl.zeros((BLOCK_SIZE_QH, BLOCK_SIZE_D), dtype=tl.float32)
+        # One vector lane per (query token, GQA head).  It is intentionally
+        # tracked per row rather than per block: a block may be present in the
+        # cache but be entirely causal-future for an early query row.
+        seen_visible_i32 = tl.zeros((BLOCK_SIZE_QH,), dtype=tl.int32)
+        q = tl.reshape(q, BLOCK_SIZE_QH, BLOCK_SIZE_D)
+        for _ in range(real_topk):
+            blk = tl.load(t_ptr_j).to(tl.int32)
+            t_ptr_j = t_ptr_j + stride_tk
+            c = blk * BLOCK_SIZE_K
+
+            # A nonnegative selected block is not necessarily readable.  In a
+            # transient metadata skew it can lie wholly beyond seq_len; avoid
+            # dereferencing its block-table entry and make it a numerical no-op.
+            block_has_seq_visible_i32 = ((blk >= 0) & (c < seq_len)).to(tl.int32)
+            page = tl.load(
+                bt_row + blk,
+                mask=block_has_seq_visible_i32 != 0,
+                other=0,
+            ).to(tl.int64)
+            pos = c + off_n
+            pos_mask = (pos < seq_len)
+            k = tl.load(
+                k_cache_ptr
+                + page * stride_k_blk
+                + off_n[None, :] * stride_k_pos
+                + pid_kh * stride_k_h
+                + off_d[:, None] * stride_k_d,
+                mask=d_mask[:, None] & pos_mask[None, :],
+                other=0.0,
+            )
+            if USE_FP8:
+                k = k.to(q.dtype)
+
+            # The valid domain is the intersection of the allocated/visible KV
+            # range and the causal range of *each* query row.  A row with an
+            # empty intersection must not execute the online-softmax update:
+            # exp2(-inf - -inf) is NaN, and 0 * NaN would not repair it.
+            causal_mask = off_q >= c
+            # Materialize the GQA-head dimension before flattening
+            # (BLOCK_SIZE_Q, BLOCK_SIZE_H) into BLOCK_SIZE_QH.
+            attn_mask_3d = tl.zeros(
+                (BLOCK_SIZE_Q, BLOCK_SIZE_H, BLOCK_SIZE_K),
+                dtype=tl.int32,
+            )
+            attn_mask_3d += tl.where(
+                causal_mask[:, None, :] & pos_mask[None, None, :],
+                1,
+                0,
+            )
+            attn_mask = tl.reshape(
+                attn_mask_3d != 0,
+                BLOCK_SIZE_QH,
+                BLOCK_SIZE_K,
+            )
+            row_has_visible_i32 = tl.sum(attn_mask.to(tl.int32), axis=1)
+            seen_visible_i32 = tl.maximum(
+                seen_visible_i32,
+                row_has_visible_i32,
+            )
+
+            qk = tl.dot(q, k) * sm_scale_log2e
+            qk = tl.where(attn_mask, qk, float("-inf"))
+            m_ij = tl.maximum(m_i, tl.max(qk, axis=1))
+
+            # Substitute finite operands before arithmetic, then select a zero
+            # contribution for inactive rows.  Do not try to erase NaN later
+            # with multiplication by a mask: IEEE 0 * NaN is still NaN.
+            safe_qk = tl.where(row_has_visible_i32[:, None] != 0, qk, 0.0)
+            safe_m_ij = tl.where(row_has_visible_i32 != 0, m_ij, 0.0)
+            p = tl.exp2(safe_qk - safe_m_ij[:, None])
+            p = tl.where(row_has_visible_i32[:, None] != 0, p, 0.0)
+            l_ij = tl.sum(p, axis=1)
+
+            safe_m_i = tl.where(row_has_visible_i32 != 0, m_i, 0.0)
+            acc_o_candidate = acc_o * tl.exp2(safe_m_i - safe_m_ij)[:, None]
+            v = tl.load(
+                v_cache_ptr
+                + page * stride_v_blk
+                + off_n[:, None] * stride_v_pos
+                + pid_kh * stride_v_h
+                + off_d[None, :] * stride_v_d,
+                mask=pos_mask[:, None] & d_mask[None, :],
+                other=0.0,
+            )
+            if USE_FP8:
+                v = v.to(q.dtype)
+            acc_o_candidate += tl.dot(p.to(v.dtype), v)
+
+            safe_lse_i = tl.where(row_has_visible_i32 != 0, lse_i, 0.0)
+            lse_candidate = safe_m_ij + tl.log2(
+                tl.exp2(safe_lse_i - safe_m_ij) + l_ij
+            )
+            acc_o = tl.where(
+                row_has_visible_i32[:, None] != 0,
+                acc_o_candidate,
+                acc_o,
+            )
+            m_i = tl.where(row_has_visible_i32 != 0, m_ij, m_i)
+            lse_i = tl.where(row_has_visible_i32 != 0, lse_candidate, lse_i)
+
+        # Empty top-k rows and completely causal-future selections define a
+        # zero attention result.  Select a finite accumulator before the final
+        # multiplication so an inactive lane cannot rely on 0 * NaN.
+        safe_acc_o = tl.where(
+            seen_visible_i32[:, None] != 0,
+            acc_o,
+            0.0,
+        )
+        safe_m_i = tl.where(seen_visible_i32 != 0, m_i, 0.0)
+        safe_lse_i = tl.where(seen_visible_i32 != 0, lse_i, 0.0)
+        final_scale = tl.where(
+            seen_visible_i32 != 0,
+            tl.exp2(safe_m_i - safe_lse_i),
+            0.0,
+        )
+        acc_o = safe_acc_o * final_scale[:, None]
+        acc_o = tl.reshape(acc_o, BLOCK_SIZE_Q, BLOCK_SIZE_H, BLOCK_SIZE_D)
+        o_ptrs = tl.make_block_ptr(
+            base=o_ptr + q_start * stride_on + pid_h * stride_oh,
+            shape=(q_len, gqa_group_size, head_dim),
+            strides=(stride_on, stride_oh, stride_od),
+            offsets=(pid_q_j * BLOCK_SIZE_Q, 0, 0),
+            block_shape=(BLOCK_SIZE_Q, BLOCK_SIZE_H, BLOCK_SIZE_D),
+            order=(2, 1, 0),
+        )
+        tl.store(o_ptrs, acc_o.to(o_ptr.dtype.element_ty), boundary_check=(0, 1, 2))
+
+
+# ---------------------------------------------------------------------------
+# Decode kernels (split-K). Decode batches are flattened request-major, with a
+# runtime query length used to map each query token back to its request metadata.
+# This parallelizes over the selected top-k blocks, producing partials that the
+# merge kernel combines (flash-decoding). All chunk counts depend only on shape
+# constants so the grid is fixed within a cuda graph. Base-2 (exp2/log2)
+# softmax matches the prefill kernel.
+# ---------------------------------------------------------------------------
+@triton.heuristics(
+    {
+        "BLOCK_SIZE_H": lambda args: max(
+            16, triton.next_power_of_2(args["gqa_group_size"])
+        ),
+        "BLOCK_SIZE_D": lambda args: triton.next_power_of_2(args["head_dim"]),
+        "BLOCK_SIZE_T": lambda args: triton.next_power_of_2(args["max_topk"]),
+    }
+)
+@triton.jit(do_not_specialize=["decode_query_len"])
+def _gqa_sparse_decode_kernel(
+    q_ptr,  # [total_q, num_heads, head_dim]
+    k_cache_ptr,  # [num_blocks, 128, num_kv_heads, head_dim]
+    v_cache_ptr,  # [num_blocks, 128, num_kv_heads, head_dim]
+    t_ptr,  # topk_idx: [num_kv_heads, total_q, topk]
+    o_ptr,  # partial out: [NUM_TOPK_CHUNKS, total_q, num_heads, head_dim]
+    lse_ptr,  # partial lse (log2): [NUM_TOPK_CHUNKS, total_q, num_heads]
+    block_table_ptr,  # [num_reqs, max_blocks]
+    seq_lens,  # [num_reqs]
+    total_q,
+    gqa_group_size,
+    head_dim,
+    max_topk,
+    sm_scale,
+    decode_query_len,
+    stride_qn,
+    stride_qh,
+    stride_qd,
+    stride_k_blk,
+    stride_k_pos,
+    stride_k_h,
+    stride_k_d,
+    stride_v_blk,
+    stride_v_pos,
+    stride_v_h,
+    stride_v_d,
+    stride_th,
+    stride_tn,
+    stride_tk,
+    stride_o_c,
+    stride_o_b,
+    stride_o_h,
+    stride_o_d,
+    stride_l_c,
+    stride_l_b,
+    stride_l_h,
+    stride_bt_b,
+    BLOCK_SIZE_K: tl.constexpr,  # == SPARSE_BLOCK_SIZE (128)
+    NUM_TOPK_CHUNKS: tl.constexpr,
+    BLOCK_SIZE_H: tl.constexpr,
+    BLOCK_SIZE_D: tl.constexpr,
+    BLOCK_SIZE_T: tl.constexpr,
+    USE_FP8: tl.constexpr,  # fp8 KV cache: dequantize K/V to q.dtype on load
+    USE_PDL: tl.constexpr,
+):
+    sm_scale_log2e = sm_scale * 1.4426950409
+    # split-K over the topk dimension: pid(0) folds (query-token, chunk).
+    pid_bc, pid_kh = tl.program_id(0), tl.program_id(1)
+    pid_b = pid_bc % total_q
+    pid_c = pid_bc // total_q
+    req_id = pid_b // decode_query_len
+    q_offset = pid_b - req_id * decode_query_len
+    pid_h = pid_kh * gqa_group_size
+    chunk_size_topk = (max_topk + NUM_TOPK_CHUNKS - 1) // NUM_TOPK_CHUNKS
+    chunk_start_topk = pid_c * chunk_size_topk
+    chunk_end_compiletime = chunk_start_topk + chunk_size_topk
+
+    if USE_PDL:
+        tl.extra.cuda.gdc_wait()
+
+    seq_len = tl.load(seq_lens + req_id)
+    query_pos = seq_len - decode_query_len + q_offset
+    # Full-CG padding uses zero-length request rows. Clamp to an empty
+    # attention range instead of letting padded rows produce negative lengths.
+    kv_len = tl.maximum(query_pos + 1, 0)
+
+    # number of valid (non-padded) selected blocks for this query token
+    off_t = tl.arange(0, BLOCK_SIZE_T)
+    idx_base = t_ptr + pid_kh * stride_th + pid_b * stride_tn
+    topk_idx = tl.load(idx_base + off_t * stride_tk, mask=off_t < max_topk, other=-1)
+    real_topk = tl.sum((topk_idx >= 0).to(tl.int32), axis=0)
+    chunk_end_topk = tl.minimum(chunk_end_compiletime, real_topk)
+
+    off_n = tl.arange(0, BLOCK_SIZE_K)
+    off_d = tl.arange(0, BLOCK_SIZE_D)
+    d_mask = off_d < head_dim
+    bt_row = block_table_ptr + req_id * stride_bt_b
+
+    m_i = tl.full((BLOCK_SIZE_H,), float("-inf"), dtype=tl.float32)
+    lse_i = tl.full((BLOCK_SIZE_H,), float("-inf"), dtype=tl.float32)
+    acc_o = tl.zeros((BLOCK_SIZE_H, BLOCK_SIZE_D), dtype=tl.float32)
+    q_ptrs = tl.make_block_ptr(
+        base=q_ptr + pid_b * stride_qn + pid_h * stride_qh,
+        shape=(gqa_group_size, head_dim),
+        strides=(stride_qh, stride_qd),
+        offsets=(0, 0),
+        block_shape=(BLOCK_SIZE_H, BLOCK_SIZE_D),
+        order=(1, 0),
+    )
+    q = tl.load(q_ptrs, boundary_check=(0, 1), padding_option="zero")
+
+    # A nonnegative top-k id is not sufficient to make a block usable:
+    # metadata may transiently lag top-k production during serving, e.g.
+    # topk=[1, 0, ...] while seq_len is still 128.  Block 1 is then fully
+    # outside kv_len.  Do not send such a fully masked block into online
+    # softmax, otherwise exp2(-inf - -inf) produces NaN.
+    #
+    # `real_topk * 0` is a device scalar with int32 dtype.  It tracks whether
+    # this split-K chunk processed at least one block with a visible token.
+    chunk_has_visible_i32 = real_topk * 0
+
+    cur_idx_ptr = idx_base + chunk_start_topk * stride_tk
+    for _ in tl.range(chunk_start_topk, chunk_end_topk):
+        blk = tl.load(cur_idx_ptr).to(tl.int32)
+        cur_idx_ptr = cur_idx_ptr + stride_tk
+        c = blk * BLOCK_SIZE_K
+
+        # This also makes an accidental interior -1 top-k hole harmless:
+        # masked page/K/V loads use page 0 but do not dereference it.
+        block_has_visible_i32 = (
+            (blk >= 0) & (c < kv_len)
+        ).to(tl.int32)
+        chunk_has_visible_i32 = tl.maximum(
+            chunk_has_visible_i32,
+            block_has_visible_i32,
+        )
+
+        page = tl.load(
+            bt_row + blk,
+            mask=block_has_visible_i32 != 0,
+            other=0,
+        ).to(tl.int64)
+        pos = c + off_n
+        pos_mask = (pos < kv_len)
+
+        k = tl.load(
+            k_cache_ptr
+            + page * stride_k_blk
+            + off_n[None, :] * stride_k_pos
+            + pid_kh * stride_k_h
+            + off_d[:, None] * stride_k_d,
+            mask=d_mask[:, None] & pos_mask[None, :],
+            other=0.0,
+        )
+        if USE_FP8:
+            k = k.to(q.dtype)
+
+        qk = tl.zeros((BLOCK_SIZE_H, BLOCK_SIZE_K), dtype=tl.float32)
+        qk += tl.where(pos_mask[None, :], 0, float("-inf"))
+        qk += tl.dot(q, k) * sm_scale_log2e
+        m_ij = tl.maximum(m_i, tl.max(qk, axis=1))
+
+        # Keep both operands finite before the subtraction.  `tl.where` is
+        # not assumed to protect an invalid inactive branch on Ascend.
+        safe_qk = tl.where(block_has_visible_i32 != 0, qk, 0.0)
+        safe_m_ij = tl.where(block_has_visible_i32 != 0, m_ij, 0.0)
+        p = tl.exp2(safe_qk - safe_m_ij[:, None])
+        p = tl.where(block_has_visible_i32 != 0, p, 0.0)
+        l_ij = tl.sum(p, axis=1)
+
+        safe_m_i = tl.where(block_has_visible_i32 != 0, m_i, 0.0)
+        acc_o_candidate = acc_o * tl.exp2(safe_m_i - safe_m_ij)[:, None]
+
+        v = tl.load(
+            v_cache_ptr
+            + page * stride_v_blk
+            + off_n[:, None] * stride_v_pos
+            + pid_kh * stride_v_h
+            + off_d[None, :] * stride_v_d,
+            mask=pos_mask[:, None] & d_mask[None, :],
+            other=0.0,
+        )
+        if USE_FP8:
+            v = v.to(q.dtype)
+        acc_o_candidate += tl.dot(p.to(v.dtype), v)
+
+        safe_lse_i = tl.where(block_has_visible_i32 != 0, lse_i, 0.0)
+        lse_candidate = safe_m_ij + tl.log2(
+            tl.exp2(safe_lse_i - safe_m_ij) + l_ij
+        )
+
+        # A fully invisible selected block must be a no-op for the online
+        # state; a later visible block in the same split-K chunk remains valid.
+        acc_o = tl.where(
+            block_has_visible_i32 != 0,
+            acc_o_candidate,
+            acc_o,
+        )
+        m_i = tl.where(block_has_visible_i32 != 0, m_ij, m_i)
+        lse_i = tl.where(block_has_visible_i32 != 0, lse_candidate, lse_i)
+
+    if USE_PDL:
+        tl.extra.cuda.gdc_launch_dependents()
+
+    # Empty chunks include both padded top-k slots and nonnegative selected
+    # blocks that are wholly beyond kv_len.  Store finite LSE sentinels so the
+    # merge is also safe when *every* split-K chunk is empty.
+    safe_m_i = tl.where(chunk_has_visible_i32 != 0, m_i, 0.0)
+    safe_lse_i = tl.where(chunk_has_visible_i32 != 0, lse_i, 0.0)
+    scale = tl.where(
+        chunk_has_visible_i32 != 0,
+        tl.exp2(safe_m_i - safe_lse_i),
+        tl.zeros_like(safe_lse_i),
+    )
+    # Select the zero accumulator before multiplying by the empty-chunk scale.
+    # This keeps the safety invariant local even if a future edit accidentally
+    # computes a non-finite inactive accumulator: never depend on 0 * NaN.
+    safe_acc_o = tl.where(
+        chunk_has_visible_i32 != 0,
+        acc_o,
+        0.0,
+    )
+    acc_o = safe_acc_o * scale[:, None]
+    lse_to_store = tl.where(
+        chunk_has_visible_i32 != 0,
+        lse_i,
+        -1.0e30,
+    )
+    o_ptrs = tl.make_block_ptr(
+        base=o_ptr + pid_c * stride_o_c + pid_b * stride_o_b + pid_h * stride_o_h,
+        shape=(gqa_group_size, head_dim),
+        strides=(stride_o_h, stride_o_d),
+        offsets=(0, 0),
+        block_shape=(BLOCK_SIZE_H, BLOCK_SIZE_D),
+        order=(1, 0),
+    )
+    tl.store(o_ptrs, acc_o.to(o_ptr.dtype.element_ty), boundary_check=(0, 1))
+    lse_ptrs = tl.make_block_ptr(
+        base=lse_ptr + pid_c * stride_l_c + pid_b * stride_l_b + pid_h * stride_l_h,
+        shape=(gqa_group_size,),
+        strides=(stride_l_h,),
+        offsets=(0,),
+        block_shape=(BLOCK_SIZE_H,),
+        order=(0,),
+    )
+    tl.store(lse_ptrs, lse_to_store.to(lse_ptr.dtype.element_ty), boundary_check=(0,))
+
+
+@triton.heuristics(
+    {"BLOCK_SIZE_D": lambda args: triton.next_power_of_2(args["head_dim"])}
+)
+@triton.jit
+def _merge_topk_attn_out_kernel(
+    o_ptr,  # partials: [NUM_TOPK_CHUNKS, total_q, num_heads, head_dim]
+    lse_ptr,  # partials (log2): [NUM_TOPK_CHUNKS, total_q, num_heads]
+    out_ptr,  # merged out: [total_q, num_heads, head_dim]
+    head_dim,
+    stride_o_c,
+    stride_o_b,
+    stride_o_h,
+    stride_o_d,
+    stride_l_c,
+    stride_l_b,
+    stride_l_h,
+    stride_out_n,
+    stride_out_h,
+    stride_out_d,
+    NUM_TOPK_CHUNKS: tl.constexpr,
+    BLOCK_SIZE_D: tl.constexpr,
+    USE_PDL: tl.constexpr,
+):
+    pid_b, pid_h = tl.program_id(0), tl.program_id(1)
+
+    # NOTE: assume seq_lens is safe to load before gdc_wait()
+    if USE_PDL:
+        tl.extra.cuda.gdc_wait()
+        tl.extra.cuda.gdc_launch_dependents()
+
+    off_c = tl.arange(0, NUM_TOPK_CHUNKS)
+    off_d = tl.arange(0, BLOCK_SIZE_D)
+    o_ptrs = tl.make_block_ptr(
+        base=o_ptr + pid_b * stride_o_b + pid_h * stride_o_h,
+        shape=(NUM_TOPK_CHUNKS, head_dim),
+        strides=(stride_o_c, stride_o_d),
+        offsets=(0, 0),
+        block_shape=(NUM_TOPK_CHUNKS, BLOCK_SIZE_D),
+        order=(1, 0),
+    )
+    lse_ptrs = lse_ptr + pid_b * stride_l_b + pid_h * stride_l_h + off_c * stride_l_c
+    o = tl.load(o_ptrs, boundary_check=(0, 1), padding_option="zero")
+    lse = tl.load(lse_ptrs)
+
+    # Decode stores -1e30 for an empty split-K chunk.  Mask it before both
+    # normalization and value accumulation.  This covers two cases safely:
+    # (1) mixed live/empty chunks, where an empty value must never reach
+    #     `0 * value`; and (2) every chunk empty, where there is no finite
+    #     max/LSE and the defined output is zero.
+    # Match the exact sentinel written by decode.  Do not classify arbitrary
+    # NaN/-inf partial LSE values as empty: those must remain visible as an
+    # upstream kernel failure instead of being silently discarded by merge.
+    nonempty_i32 = (lse != -1.0e30).to(tl.int32)
+    safe_lse = tl.where(nonempty_i32 != 0, lse, -1.0e30)
+    lse_max = tl.max(safe_lse, axis=0)
+    raw_weights = tl.where(
+        nonempty_i32 != 0,
+        tl.exp2(safe_lse - lse_max),
+        0.0,
+    )
+    weight_sum = tl.sum(raw_weights, axis=0)
+    safe_weight_sum = tl.where(weight_sum > 0.0, weight_sum, 1.0)
+    weights = raw_weights / safe_weight_sum
+    safe_o = tl.where(nonempty_i32[:, None] != 0, o, 0.0)
+    o_merged = tl.sum(safe_o * weights[:, None], axis=0)
+    out_ptrs = (
+        out_ptr + pid_b * stride_out_n + pid_h * stride_out_h + off_d * stride_out_d
+    )
+    tl.store(out_ptrs, o_merged.to(out_ptr.dtype.element_ty), mask=off_d < head_dim)
+
+
+def _topk_compute_width(topk: int) -> int:
+    return max(TOPK_COMPUTE_MIN_TILE, triton.next_power_of_2(topk))
+
+
+def _topk_select_width(topk: int) -> int:
+    return max(TOPK_SELECTION_TILE, _topk_compute_width(topk))
+
+
+def _merge_topk_levels(
+    scores: torch.Tensor,
+    indices: torch.Tensor,
+    num_heads: int,
+    total_q: int,
+    topk_width: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    current_scores = scores
+    current_indices = indices
+    current_chunks = scores.shape[0]
+    while current_chunks > 1:
+        next_chunks = triton.cdiv(current_chunks, 2)
+        next_scores = torch.empty(
+            (next_chunks, num_heads, total_q, topk_width),
+            dtype=torch.float32,
+            device=scores.device,
+        )
+        next_indices = torch.empty(
+            (next_chunks, num_heads, total_q, topk_width),
+            dtype=torch.int32,
+            device=indices.device,
+        )
+        _topk_pair_merge_kernel[(total_q, num_heads, next_chunks)](
+            current_scores,
+            current_indices,
+            next_scores,
+            next_indices,
+            current_chunks,
+            current_scores.stride(0),
+            current_scores.stride(1),
+            current_scores.stride(2),
+            current_scores.stride(3),
+            current_indices.stride(0),
+            current_indices.stride(1),
+            current_indices.stride(2),
+            current_indices.stride(3),
+            next_scores.stride(0),
+            next_scores.stride(1),
+            next_scores.stride(2),
+            next_scores.stride(3),
+            next_indices.stride(0),
+            next_indices.stride(1),
+            next_indices.stride(2),
+            next_indices.stride(3),
+            BLOCK_SIZE_T=topk_width,
+            num_warps=TOPK_NUM_WARPS,
+            num_stages=TOPK_NUM_STAGES,
+        )
+        current_scores = next_scores
+        current_indices = next_indices
+        current_chunks = next_chunks
+    return current_scores, current_indices
+
+
+@torch.no_grad()
+def minimax_m3_index_score(
+    idx_q: torch.Tensor,
+    index_kv_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    seq_lens: torch.Tensor,
+    prefix_lens: torch.Tensor,
+    max_query_len: int,
+    max_seq_len: int,
+    num_kv_heads: int,
+    sm_scale: float,
+) -> torch.Tensor:
+    index_kv_cache = _as_triton_index_kv_cache(index_kv_cache)
+    total_q, num_idx_heads, head_dim = idx_q.shape
+    assert num_idx_heads == num_kv_heads
+    batch = cu_seqlens_q.shape[0] - 1
+    max_block = triton.cdiv(max_seq_len, SPARSE_BLOCK_SIZE)
+    score_block_stride = round_up(max_block, 16)
+    score = torch.empty(
+        (num_idx_heads, total_q, score_block_stride),
+        dtype=torch.float32,
+        device=idx_q.device,
+    )
+    block_size_q = 64
+    _index_block_score_kernel[
+        (triton.cdiv(max_query_len, block_size_q), batch * num_idx_heads)
+    ](
+        idx_q,
+        index_kv_cache,
+        score,
+        block_table,
+        cu_seqlens_q,
+        seq_lens,
+        prefix_lens,
+        num_idx_heads,
+        head_dim,
+        sm_scale,
+        idx_q.stride(0),
+        idx_q.stride(1),
+        idx_q.stride(2),
+        index_kv_cache.stride(0),
+        index_kv_cache.stride(1),
+        index_kv_cache.stride(2),
+        score.stride(0),
+        score.stride(1),
+        score.stride(2),
+        block_table.stride(0),
+        BLOCK_SIZE_Q=block_size_q,
+        BLOCK_SIZE_K=SPARSE_BLOCK_SIZE,
+    )
+    return score
+
+
+@torch.no_grad()
+def minimax_m3_index_topk(
+    score: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    prefix_lens: torch.Tensor,
+    max_query_len: int,
+    topk: int,
+    init_blocks: int,
+    local_blocks: int,
+) -> torch.Tensor:
+    assert topk > 0
+
+    num_heads, total_q, score_block_stride = score.shape
+    batch = cu_seqlens_q.shape[0] - 1
+    topk_width = _topk_compute_width(topk)
+    select_width = _topk_select_width(topk)
+    num_chunks = max(1, triton.cdiv(score_block_stride, select_width))
+    chunk_blocks = triton.cdiv(score_block_stride, num_chunks)
+
+    partial_scores = torch.empty(
+        (num_chunks, num_heads, total_q, topk_width),
+        dtype=torch.float32,
+        device=score.device,
+    )
+    partial_indices = torch.empty(
+        (num_chunks, num_heads, total_q, topk_width),
+        dtype=torch.int32,
+        device=score.device,
+    )
+
+    _prefill_topk_partial_kernel[
+        (max_query_len, batch, num_heads * num_chunks)
+    ](
+        score,
+        partial_scores,
+        partial_indices,
+        cu_seqlens_q,
+        prefix_lens,
+        init_blocks,
+        local_blocks,
+        chunk_blocks,
+        num_chunks,
+        score.stride(0),
+        score.stride(1),
+        score.stride(2),
+        partial_scores.stride(0),
+        partial_scores.stride(1),
+        partial_scores.stride(2),
+        partial_scores.stride(3),
+        partial_indices.stride(0),
+        partial_indices.stride(1),
+        partial_indices.stride(2),
+        partial_indices.stride(3),
+        BLOCK_SIZE_K=select_width,
+        BLOCK_SIZE_T=topk_width,
+        BLOCK_SIZE_BLOCK=SPARSE_BLOCK_SIZE,
+        MASK_INIT=False,
+        MASK_LOCAL=False,
+        num_warps=TOPK_NUM_WARPS,
+        num_stages=TOPK_NUM_STAGES,
+    )
+
+    _, final_indices = _merge_topk_levels(
+        partial_scores,
+        partial_indices,
+        num_heads,
+        total_q,
+        topk_width,
+    )
+    topk_idx = torch.empty(
+        (num_heads, total_q, topk),
+        dtype=torch.int32,
+        device=score.device,
+    )
+    _topk_finalize_kernel[(total_q, num_heads)](
+        final_indices,
+        topk_idx,
+        topk,
+        final_indices.stride(0),
+        final_indices.stride(1),
+        final_indices.stride(2),
+        final_indices.stride(3),
+        topk_idx.stride(0),
+        topk_idx.stride(1),
+        topk_idx.stride(2),
+        BLOCK_SIZE_T=topk_width,
+        num_warps=TOPK_NUM_WARPS,
+        num_stages=TOPK_NUM_STAGES,
+    )
+    return topk_idx
+
+
+@torch.no_grad()
+def minimax_m3_index_decode(
+    idx_q: torch.Tensor,
+    index_kv_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    seq_lens: torch.Tensor,
+    max_seq_len: int,
+    topk: int,
+    init_blocks: int,
+    local_blocks: int,
+    num_kv_heads: int,
+    sm_scale: float,
+    decode_query_len: int,
+) -> torch.Tensor:
+    index_kv_cache = _as_triton_index_kv_cache(index_kv_cache)
+    total_q, num_idx_heads, head_dim = idx_q.shape
+    assert num_idx_heads == num_kv_heads
+    assert total_q == seq_lens.shape[0] * decode_query_len
+    assert topk > 0
+
+    max_block = triton.cdiv(max_seq_len, SPARSE_BLOCK_SIZE)
+    score_block_stride = round_up(max_block, 16)
+    score = torch.empty(
+        (num_idx_heads, total_q, score_block_stride),
+        dtype=torch.float32,
+        device=idx_q.device,
+    )
+
+    target_grid = 4096
+    max_num_kv_chunks = 256
+    target = max(
+        1,
+        min(
+            max_num_kv_chunks,
+            target_grid // max(1, total_q * num_idx_heads),
+        ),
+    )
+    num_kv_chunks = 1 << (target.bit_length() - 1)
+    _decode_index_score_kernel[(total_q, num_kv_chunks)](
+        idx_q,
+        index_kv_cache,
+        score,
+        block_table,
+        seq_lens,
+        num_idx_heads,
+        head_dim,
+        init_blocks,
+        local_blocks,
+        sm_scale,
+        decode_query_len,
+        idx_q.stride(0),
+        idx_q.stride(1),
+        idx_q.stride(2),
+        index_kv_cache.stride(0),
+        index_kv_cache.stride(1),
+        index_kv_cache.stride(2),
+        score.stride(0),
+        score.stride(1),
+        score.stride(2),
+        block_table.stride(0),
+        BLOCK_SIZE_K=SPARSE_BLOCK_SIZE,
+        num_kv_chunks=num_kv_chunks,
+    )
+
+    topk_width = _topk_compute_width(topk)
+    select_width = _topk_select_width(topk)
+    num_chunks = max(1, triton.cdiv(score_block_stride, select_width))
+    chunk_blocks = triton.cdiv(score_block_stride, num_chunks)
+
+    partial_scores = torch.empty(
+        (num_chunks, num_idx_heads, total_q, topk_width),
+        dtype=torch.float32,
+        device=idx_q.device,
+    )
+    partial_indices = torch.empty(
+        (num_chunks, num_idx_heads, total_q, topk_width),
+        dtype=torch.int32,
+        device=idx_q.device,
+    )
+    _decode_topk_partial_kernel[(total_q, num_idx_heads, num_chunks)](
+        score,
+        partial_scores,
+        partial_indices,
+        seq_lens,
+        chunk_blocks,
+        decode_query_len,
+        score.stride(0),
+        score.stride(1),
+        score.stride(2),
+        partial_scores.stride(0),
+        partial_scores.stride(1),
+        partial_scores.stride(2),
+        partial_scores.stride(3),
+        partial_indices.stride(0),
+        partial_indices.stride(1),
+        partial_indices.stride(2),
+        partial_indices.stride(3),
+        BLOCK_SIZE_K=select_width,
+        BLOCK_SIZE_T=topk_width,
+        BLOCK_SIZE_BLOCK=SPARSE_BLOCK_SIZE,
+        num_warps=TOPK_NUM_WARPS,
+        num_stages=TOPK_NUM_STAGES,
+    )
+
+    _, final_indices = _merge_topk_levels(
+        partial_scores,
+        partial_indices,
+        num_idx_heads,
+        total_q,
+        topk_width,
+    )
+    topk_idx = torch.empty(
+        (num_idx_heads, total_q, topk),
+        dtype=torch.int32,
+        device=idx_q.device,
+    )
+    _topk_finalize_kernel[(total_q, num_idx_heads)](
+        final_indices,
+        topk_idx,
+        topk,
+        final_indices.stride(0),
+        final_indices.stride(1),
+        final_indices.stride(2),
+        final_indices.stride(3),
+        topk_idx.stride(0),
+        topk_idx.stride(1),
+        topk_idx.stride(2),
+        BLOCK_SIZE_T=topk_width,
+        num_warps=TOPK_NUM_WARPS,
+        num_stages=TOPK_NUM_STAGES,
+    )
+    return topk_idx
+@torch.no_grad()
+def minimax_m3_sparse_attn(
+    q: torch.Tensor,  # [total_q, num_heads, head_dim]
+    kv_cache: torch.Tensor | tuple[torch.Tensor, ...] | list[torch.Tensor],
+    topk_idx: torch.Tensor,  # [num_kv_heads, total_q, topk]
+    block_table: torch.Tensor,  # [batch, max_blocks]
+    cu_seqlens_q: torch.Tensor,  # [batch+1] int32
+    seq_lens: torch.Tensor,  # [batch] int32
+    prefix_lens: torch.Tensor,  # [batch] int32
+    max_query_len: int,
+    num_kv_heads: int,
+    sm_scale: float,
+    output: torch.Tensor,  # [total_q, num_heads, head_dim]
+) -> None:
+    """GQA block-sparse attention over the selected blocks. block_size_q == 1."""
+    k_cache, v_cache = _split_triton_main_kv_cache(kv_cache)
+    total_q, num_heads, head_dim = q.shape
+    batch = cu_seqlens_q.shape[0] - 1
+    topk = topk_idx.shape[-1]
+    gqa_group_size = num_heads // num_kv_heads
+    use_fp8 = k_cache.dtype in _FP8_DTYPES or v_cache.dtype in _FP8_DTYPES
+    grid = (max_query_len, num_kv_heads, batch)
+    _gqa_sparse_fwd_kernel[grid](
+        q,
+        k_cache,
+        v_cache,
+        topk_idx,
+        output,
+        block_table,
+        cu_seqlens_q,
+        cu_seqlens_q,  # cu_seqblocks_q == cu_seqlens_q when block_size_q == 1
+        seq_lens,
+        prefix_lens,
+        num_kv_heads,
+        gqa_group_size,
+        head_dim,
+        topk,
+        1,  # num_q_loop
+        sm_scale,
+        q.stride(0),
+        q.stride(1),
+        q.stride(2),
+        k_cache.stride(0),
+        k_cache.stride(1),
+        k_cache.stride(2),
+        k_cache.stride(3),
+        v_cache.stride(0),
+        v_cache.stride(1),
+        v_cache.stride(2),
+        v_cache.stride(3),
+        topk_idx.stride(0),
+        topk_idx.stride(1),
+        topk_idx.stride(2),
+        output.stride(0),
+        output.stride(1),
+        output.stride(2),
+        block_table.stride(0),
+        BLOCK_SIZE_Q=1,
+        BLOCK_SIZE_K=SPARSE_BLOCK_SIZE,
+        USE_FP8=use_fp8,
+        **_sparse_attn_num_stages_kwarg(),
+    )
+
+
+@torch.no_grad()
+def minimax_m3_sparse_attn_decode(
+    q: torch.Tensor,  # [total_q, num_heads, head_dim]
+    kv_cache: torch.Tensor | tuple[torch.Tensor, ...] | list[torch.Tensor],
+    topk_idx: torch.Tensor,  # [num_kv_heads, total_q, topk]
+    block_table: torch.Tensor,  # [num_reqs, max_blocks]
+    seq_lens: torch.Tensor,  # [num_reqs] int32
+    num_kv_heads: int,
+    sm_scale: float,
+    output: torch.Tensor,  # [total_q, num_heads, head_dim]
+    decode_query_len: int,
+) -> None:
+    """GQA block-sparse attention for decode (split-K over the top-k blocks)."""
+    k_cache, v_cache = _split_triton_main_kv_cache(kv_cache)
+    total_q, num_heads, head_dim = q.shape
+    assert total_q == seq_lens.shape[0] * decode_query_len
+    max_topk = topk_idx.shape[-1]
+    gqa_group_size = num_heads // num_kv_heads
+    use_fp8 = k_cache.dtype in _FP8_DTYPES or v_cache.dtype in _FP8_DTYPES
+    use_pdl = _is_arch_support_pdl()
+    # `launch_pdl` is a Triton runtime kwarg only some backends accept (CUDA
+    # SM9+); this ROCm Triton rejects it even when False ("Keyword argument
+    # launch_pdl was specified but unrecognised"). Only pass it when PDL is
+    # actually supported -- on ROCm use_pdl is always False, so it's omitted.
+    pdl_launch = {"launch_pdl": True} if use_pdl else {}
+    # split-K over the selected blocks; chunk count is shape-constant (cuda graph).
+    TARGET_GRID = 256
+    target = max(1, min(max_topk, TARGET_GRID // max(1, total_q * num_kv_heads)))
+    num_topk_chunks = 1 << (target.bit_length() - 1)
+    o_partial = torch.empty(
+        num_topk_chunks, total_q, num_heads, head_dim, dtype=q.dtype, device=q.device
+    )
+    lse_partial = torch.empty(
+        num_topk_chunks, total_q, num_heads, dtype=torch.float32, device=q.device
+    )
+    grid = (total_q * num_topk_chunks, num_kv_heads)
+    _gqa_sparse_decode_kernel[grid](
+        q,
+        k_cache,
+        v_cache,
+        topk_idx,
+        o_partial,
+        lse_partial,
+        block_table,
+        seq_lens,
+        total_q,
+        gqa_group_size,
+        head_dim,
+        max_topk,
+        sm_scale,
+        decode_query_len,
+        q.stride(0),
+        q.stride(1),
+        q.stride(2),
+        k_cache.stride(0),
+        k_cache.stride(1),
+        k_cache.stride(2),
+        k_cache.stride(3),
+        v_cache.stride(0),
+        v_cache.stride(1),
+        v_cache.stride(2),
+        v_cache.stride(3),
+        topk_idx.stride(0),
+        topk_idx.stride(1),
+        topk_idx.stride(2),
+        o_partial.stride(0),
+        o_partial.stride(1),
+        o_partial.stride(2),
+        o_partial.stride(3),
+        lse_partial.stride(0),
+        lse_partial.stride(1),
+        lse_partial.stride(2),
+        block_table.stride(0),
+        BLOCK_SIZE_K=SPARSE_BLOCK_SIZE,
+        NUM_TOPK_CHUNKS=num_topk_chunks,
+        USE_FP8=use_fp8,
+        USE_PDL=use_pdl,
+        **_sparse_attn_num_stages_kwarg(),
+        **pdl_launch,
+    )
+    merge_grid = (total_q, num_heads)
+    _merge_topk_attn_out_kernel[merge_grid](
+        o_partial,
+        lse_partial,
+        output,
+        head_dim,
+        o_partial.stride(0),
+        o_partial.stride(1),
+        o_partial.stride(2),
+        o_partial.stride(3),
+        lse_partial.stride(0),
+        lse_partial.stride(1),
+        lse_partial.stride(2),
+        output.stride(0),
+        output.stride(1),
+        output.stride(2),
+        NUM_TOPK_CHUNKS=num_topk_chunks,
+        USE_PDL=use_pdl,
+        **pdl_launch,
+    )
