@@ -3445,7 +3445,11 @@ class NPUModelRunner(GPUModelRunner):
                 self.drafter.set_per_group_attn_metadata(
                     kv_cache_gid, cm.block_table_tensor, cm.slot_mapping)
             if self.speculative_config and spec_decode_common_attn_metadata is None:
-                if isinstance(self.drafter, AscendEagleProposer | AscendGemma4Proposer | AscendDraftModelProposer | AscendDflashProposer):
+                if isinstance(
+                    self.drafter,
+                    AscendEagleProposer | AscendGemma4Proposer
+                    | AscendDraftModelProposer | AscendDflashProposer,
+                ):
                     if self.drafter.attn_layer_names[0] in kv_cache_group.layer_names:
                         spec_decode_common_attn_metadata = cm
                 else:
