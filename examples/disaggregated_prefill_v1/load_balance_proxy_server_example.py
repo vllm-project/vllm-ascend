@@ -134,7 +134,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import httpx
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 logger = logging.getLogger(__name__)
@@ -824,7 +824,8 @@ async def _handle_retry(
 ) -> None:
     retryable = force_retry or _should_retry(exc)
     if not retryable:
-        logger.error("Client error %s %s%s, not retrying.", exc.response.status_code, context, endpoint)
+        status_code = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else "unknown"
+        logger.error("Client error %s %s%s, not retrying.", status_code, context, endpoint)
         raise exc
     if attempt < max_retries:
         logger.warning("Attempt %s failed %s%s: %s", attempt, context, endpoint, exc)
@@ -1098,12 +1099,20 @@ async def handle_completions_impl(api: str, request: Request):
         media_type = "text/event-stream; charset=utf-8" if stream_flag else "application/json"
         return StreamingResponse(generate_stream(), media_type=media_type)
     except httpx.HTTPStatusError as exc:
-        # Convert HTTPStatusError to HTTPException to preserve original status code
-        # FastAPI will properly handle HTTPException and return the correct status code
-        raise HTTPException(
-            status_code=exc.response.status_code,
-            detail=exc.response.text,
-        )
+        # Preserve the original upstream status code and response body
+        # to maintain OpenAI API compatibility. Using HTTPException would
+        # wrap the response in {"detail": ...} and double-serialize JSON.
+        try:
+            return JSONResponse(
+                status_code=exc.response.status_code,
+                content=exc.response.json(),
+            )
+        except Exception:
+            return Response(
+                status_code=exc.response.status_code,
+                content=exc.response.content,
+                media_type=exc.response.headers.get("content-type"),
+            )
     except Exception:
         import traceback
 
