@@ -104,7 +104,7 @@ templates:
       - "0.8"
       - --enforce-eager
       - --speculative-config
-      - '{"method": "eagle3", "model":"/mnt/share/weight/lightseekorg_kimi-k2.5-eagle3", "num_speculative_tokens": 3}'
+      - '{"method": "eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens": 3}'
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_producer", "kv_port": "30000", "engine_id": "0", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 8}, "decode": {"dp_size": 32, "tp_size": 1}}}'
 
@@ -143,7 +143,7 @@ templates:
       - "0.8"
       - --enforce-eager
       - --speculative-config
-      - '{"method": "eagle3", "model":"/mnt/share/weight/lightseekorg_kimi-k2.5-eagle3", "num_speculative_tokens": 3}'
+      - '{"method": "eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens": 3}'
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_producer", "kv_port": "30100", "engine_id": "1", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 8}, "decode": {"dp_size": 32, "tp_size": 1}}}'
 
@@ -185,7 +185,7 @@ templates:
       - --additional-config
       - '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": false}'
       - --speculative-config
-      - '{"method": "eagle3", "model":"/mnt/share/weight/lightseekorg_kimi-k2.5-eagle3", "num_speculative_tokens": 3}'
+      - '{"method": "eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens": 3}'
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_consumer", "kv_port": "30200", "engine_id": "2", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 8}, "decode": {"dp_size": 32, "tp_size": 1}}}'
 
@@ -227,7 +227,7 @@ templates:
       - --additional-config
       - '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": false}'
       - --speculative-config
-      - '{"method": "eagle3", "model":"/mnt/share/weight/lightseekorg_kimi-k2.5-eagle3", "num_speculative_tokens": 3}'
+      - '{"method": "eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens": 3}'
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_consumer", "kv_port": "30200", "engine_id": "2", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 8}, "decode": {"dp_size": 32, "tp_size": 1}}}'
 
