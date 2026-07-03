@@ -185,16 +185,13 @@ class MemcacheBackend(Backend):
             return res
         except Exception as e:
             logger.error(
-                "Failed to get %d keys out of %d. Check store state and network.",
+                "Failed to get %d keys out of %d. type=%s, error=%s. Check store state and network.",
                 len(key),
                 len(key),
-            )
-            logger.debug(
-                "Failed to get key details. keys=%s, type=%s, error=%s",
-                key,
                 type(e).__name__,
                 e,
             )
+            logger.debug("Failed to get key details. keys=%s", key)
             return None
 
     def put(self, key: list[str], addr: list[list[int]], size: list[list[int]]):
@@ -217,15 +214,12 @@ class MemcacheBackend(Backend):
                     logger.warning("First DSV4(compress) request failure is expected. This is normal behavior.")
         except Exception as e:
             logger.error(
-                "Failed to put %d keys out of %d. Check store state and memory.",
+                "Failed to put %d keys out of %d. type=%s, error=%s. Check store state and memory.",
                 len(key),
                 len(key),
-            )
-            logger.debug(
-                "Failed to put key details. keys=%s, type=%s, error=%s",
-                key,
                 type(e).__name__,
                 e,
             )
+            logger.debug("Failed to put key details. keys=%s", key)
             if self._lazy_init:
                 logger.warning("First DSV4(compress) request failure is expected. This is normal behavior.")
