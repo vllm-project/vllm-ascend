@@ -152,6 +152,20 @@ class DSACPContext:
 
 
 @dataclass
+class AscendSFADecodeMetadata:
+    """Decode-specific metadata for Ascend SFA attention.
+
+    SFA's decode path drives DCP via ``sfa_cp_metadata`` (AscendPCPMetadata)
+    and sparse selection via ``topk_indices``; it does not read these fields.
+    They exist only so that callers (e.g. llm_base_proposer for MTP drafter)
+    that write ``attn_metadata.decode.cp_seq_len`` do not hit AttributeError.
+    """
+
+    cp_seq_len: torch.Tensor | None = None
+    dcp_mtp_attn_mask: torch.Tensor | None = None
+
+
+@dataclass
 class AscendSFAMetadata:
     """Metadata for MLACommon.
 
@@ -185,6 +199,7 @@ class AscendSFAMetadata:
     dsa_cp_context: DSACPContext | None = None
     reshape_cache_event: torch.npu.Event = None
     sfa_cp_metadata: AscendPCPMetadata | None = None
+    decode: AscendSFADecodeMetadata | None = None
     num_decodes: int = 0
     num_decode_tokens: int = 0
     num_prefills: int = 0
@@ -428,6 +443,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             sin=sin[:num_input_tokens],
             cos=cos[:num_input_tokens],
             dsa_cp_context=dsa_cp_context,
+            decode=AscendSFADecodeMetadata(),
             block_size=block_size,
             group_len=group_len,
             group_key_idx=group_key_idx,
