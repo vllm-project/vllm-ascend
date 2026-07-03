@@ -107,7 +107,6 @@ export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
 export VLLM_ASCEND_BALANCE_SCHEDULING=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_USE_MODELSCOPE=True
 
 vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
   --host 0.0.0.0 \
@@ -218,7 +217,6 @@ export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export VLLM_ASCEND_BALANCE_SCHEDULING=1
 export HCCL_INTRA_PCIE_ENABLE=1
 export HCCL_INTRA_ROCE_ENABLE=0
-export VLLM_USE_MODELSCOPE=True
 
 vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
   --host 0.0.0.0 \
@@ -268,7 +266,6 @@ export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export VLLM_ASCEND_BALANCE_SCHEDULING=1
 export HCCL_INTRA_PCIE_ENABLE=1
 export HCCL_INTRA_ROCE_ENABLE=0
-export VLLM_USE_MODELSCOPE=True
 
 vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
   --host 0.0.0.0 \
@@ -408,7 +405,6 @@ There are three `vllm bench` subcommands:
 Take the `serve` as an example. Run the code as follows.
 
 ```shell
-export VLLM_USE_MODELSCOPE=True
 vllm bench serve --model path/DeepSeek-R1-W8A8  --dataset-name random --random-input 200 --num-prompts 200 --request-rate 1 --save-result --result-dir ./
 ```
 
