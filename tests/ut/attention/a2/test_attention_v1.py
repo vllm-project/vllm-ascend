@@ -11,7 +11,11 @@ from vllm_ascend.attention.attention_v1 import (
     AscendAttentionMetadataBuilder,
     AscendAttentionState,
 )
-from vllm_ascend.attention.kvcomp_attn.attention_utils import get_kvcomp_decode_params, reshape_and_cache_kvcomp
+from vllm_ascend.attention.kvcomp_attn.attention_utils import (
+    get_kvcomp_decode_params,
+    is_enable_hamming_sparse,
+    reshape_and_cache_kvcomp,
+)
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     cache_graph_workspace,
@@ -49,6 +53,45 @@ class TestAttentionGraphHelpers(TestBase):
         vllm_config.speculative_config = None
         with patch("vllm_ascend.attention.utils.get_ascend_device_type", return_value=AscendDeviceType.A2):
             self.assertTrue(using_paged_attention(1, vllm_config, head_size=FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE))
+
+
+class TestHammingSparseConfig(TestBase):
+    @staticmethod
+    def _make_vllm_config(enable_hamming_sparse: bool):
+        return SimpleNamespace(
+            additional_config={"enable_hamming_sparse": enable_hamming_sparse},
+            speculative_config=None,
+        )
+
+    def test_hamming_sparse_with_c8_quant_raises(self):
+        vllm_config = self._make_vllm_config(enable_hamming_sparse=True)
+
+        with (
+            patch(
+                "vllm_ascend.attention.kvcomp_attn.attention_utils.get_current_vllm_config_or_none",
+                return_value=vllm_config,
+            ),
+            self.assertRaisesRegex(AssertionError, "does not support C8 KV cache quantization"),
+        ):
+            is_enable_hamming_sparse(enable_c8_quant=True)
+
+    def test_c8_quant_without_hamming_sparse_is_disabled(self):
+        vllm_config = self._make_vllm_config(enable_hamming_sparse=False)
+
+        with patch(
+            "vllm_ascend.attention.kvcomp_attn.attention_utils.get_current_vllm_config_or_none",
+            return_value=vllm_config,
+        ):
+            self.assertFalse(is_enable_hamming_sparse(enable_c8_quant=True))
+
+    def test_hamming_sparse_without_c8_quant_is_enabled(self):
+        vllm_config = self._make_vllm_config(enable_hamming_sparse=True)
+
+        with patch(
+            "vllm_ascend.attention.kvcomp_attn.attention_utils.get_current_vllm_config_or_none",
+            return_value=vllm_config,
+        ):
+            self.assertTrue(is_enable_hamming_sparse(enable_c8_quant=False))
 
 
 class TestAscendAttentionBackend(TestBase):

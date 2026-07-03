@@ -436,7 +436,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self._use_max_workspace_for_fia_graph = self._use_layer_aware_fia_graph_replay
         self.sinks = sinks
         self.layerIndex = 0
-        self.enable_hamming_sparse = is_enable_hamming_sparse()
+        self.enable_hamming_sparse = is_enable_hamming_sparse(self.enable_c8_quant)
         # Some mixed-attention models cannot rely on the iteration order of
         # attn_metadata during graph replay. Record the captured layer name only
         # for that path.
@@ -703,6 +703,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 # window layers from accidentally sharing the same metadata.
                 attn_keys = [attn_keys[index % num_layers] for index in range(graph_param_count)]
             attn_count = 0
+            layer_count = 0
             with torch.npu.stream(update_stream):
                 for key, param, handle, event in zip(
                     attn_keys,
@@ -755,8 +756,16 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         # Keep the captured block_tables tensor on this affected path.
                         # Non-SWA models preserve the original behavior and continue to refresh
                         # block_tables from attn_metadata.
-                        if not hasattr(vllm_config.model_config.hf_text_config, "sliding_window"):
+                        obj = attn_metadata[key]
+                        if (
+                            hasattr(obj, "kvcomp_metadata")
+                            and hasattr(obj.kvcomp_metadata, "seq_lens_from_hamming")
+                            and obj.kvcomp_metadata.hashk_caches[layer_count] is not None
+                        ):
+                            seq_lens = obj.kvcomp_metadata.seq_lens_from_hamming
+                        elif not hasattr(vllm_config.model_config.hf_text_config, "sliding_window"):
                             block_tables = attn_metadata[metadata_key].block_tables
+                    layer_count += 1
 
                     torch.npu.graph_task_update_begin(update_stream, handle)
                     input_layout = "TND"
