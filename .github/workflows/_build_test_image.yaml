@@ -249,7 +249,7 @@ jobs:
             }
           }
           EOF
-          sleep 600
+          sleep 18000
           buildctl \
             --addr="${BUILDKITD_ADDR}" \
             --tlscacert="/home/user/.docker/ca.pem" \
