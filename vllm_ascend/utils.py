@@ -560,7 +560,56 @@ def attention_calculation_stream() -> torch.npu.Stream:
     return _ATNN_CALCULATION_STREAM
 
 
+def _patch_get_config_hf_overrides():
+    """Fix vLLM 0.23.0: ensure hf_overrides_fn is always applied to config.
+
+    vLLM's get_config() passes hf_overrides_fn to config_parser.parse(),
+    which consumes it (via kwargs.pop) without applying it to the loaded
+    config.  The application block at lines 858-860 of config.py should
+    catch this, but in some code paths it does not execute.
+
+    This patch wraps ModelConfig.__post_init__ to apply the override
+    to the loaded config after get_config() returns.  It is critical for
+    Gemma4 MTP where hf_config_override remaps
+    gemma4_assistant→gemma4_mtp and sets architectures=["Gemma4MTPModel"].
+
+    We also refresh model_arch_config (which depends on hf_config) so that
+    the architecture resolution uses the overridden values.
+    """
+    import logging
+    _logger = logging.getLogger(__name__)
+
+    from vllm.config.model import ModelConfig as _ModelConfig
+    from vllm.model_executor.models.registry import _ModelRegistry
+    _orig_post_init = _ModelConfig.__post_init__
+
+    def _patched_post_init(self, *args, **kwargs):
+        result = _orig_post_init(self, *args, **kwargs)
+        # Re-apply hf_overrides_fn if it was provided but not applied.
+        # The original __post_init__ calls get_config() with hf_overrides_fn,
+        # but it is not applied (consumed by config_parser.parse()).
+        if hasattr(self, 'hf_overrides') and callable(self.hf_overrides):
+            self.hf_config = self.hf_overrides(self.hf_config)
+            # Refresh model_arch_config (depends on hf_config)
+            self.model_arch_config = _ModelConfig.get_model_arch_config(self)
+            # Re-resolve architecture with the updated config
+            model_info, arch = self.registry.inspect_model_cls(
+                self.architectures, self,
+            )
+            self._model_info = model_info
+            self._architecture = arch
+        return result
+
+    _ModelConfig.__post_init__ = _patched_post_init
+    _logger.info(
+        "vllm_ascend: patched ModelConfig.__post_init__ for "
+        "hf_config_override fix"
+    )
+
+
 def adapt_patch(is_global_patch: bool = False):
+    _patch_get_config_hf_overrides()
+
     if is_global_patch:
         from vllm_ascend.patch import platform  # noqa: F401
     else:
@@ -1747,3 +1796,109 @@ def get_c_env(name: str, encoding: str = "utf-8") -> str | None:
     if raw is None:
         return None
     return raw.decode(encoding)
+
+
+def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
+    """Update ACL graph capture sizes based on hardware limitations"""
+    # NOTE: Currently, we can only capture 1800 graphs at most,
+    # due to the limitation of ACL graph. This number is bounded by
+    # the number of streams, which is 2048, we save 248 streams
+    # as a buffer.
+    # Maximum number of graphs that can be captured by ACL Graph
+    MAX_CAPTURE_SIZE = 1800
+
+    # enable pcp or dcp will add new communication and consume additional
+    # approximately less than 100 streams
+    CP_ADDITIONAL_STREAM_NUM = 100
+
+    # Store original configuration and temporarily clear it
+    compilation_config = vllm_config.compilation_config
+    original_sizes, compilation_config.cudagraph_capture_sizes = (
+        compilation_config.cudagraph_capture_sizes, None
+    )
+
+    # Calculate parallel configuration factor
+    if not vllm_config.model_config:
+        logger.warning(
+            "Got empty model config. This typically occurs when an empty "
+            "vllm_config is initialized (e.g., in unit tests), where config "
+            "updates are intentionally skipped."
+        )
+        return
+    hf_config = vllm_config.model_config.hf_text_config
+    if hasattr(hf_config, "num_hidden_layers"):
+        num_hidden_layers = hf_config.num_hidden_layers
+    else:
+        num_hidden_layers = get_max_hidden_layers(hf_config)
+    parallel_config = vllm_config.parallel_config
+
+    # Calculate maximum supported batch sizes considering model architecture
+    resources_per_graph = num_hidden_layers + 1
+    # For suffix decoding, use the suffix path when no draft_model_config
+    if (spec := vllm_config.speculative_config) and \
+            (draft := spec.draft_model_config):
+        resources_per_graph += draft.get_total_num_hidden_layers() + 1
+
+    num_comm_groups = sum(
+        size > 1
+        for size in [
+            parallel_config.data_parallel_size,
+            parallel_config.tensor_parallel_size,
+        ]
+    )
+
+    if os.getenv("HCCL_OP_EXPANSION_MODE") == "AIV":
+        parallel_factor = (
+            1
+            + num_comm_groups
+            + int(parallel_config.enable_expert_parallel)
+            + int(vllm_config.additional_config.get(
+                "multistream_overlap_shared_expert", False))
+        )
+        if is_moe_model(vllm_config):
+            parallel_factor += parallel_config.data_parallel_size > 1
+        else:
+            MAX_CAPTURE_SIZE = (
+                MAX_CAPTURE_SIZE - parallel_factor * resources_per_graph
+            )
+
+        max_num_batch_sizes = math.floor(
+            MAX_CAPTURE_SIZE / resources_per_graph / parallel_factor
+        )
+        logger.info(
+            "Calculated maximum supported batch sizes for ACL graph: %s",
+            max_num_batch_sizes,
+        )
+    else:
+        if parallel_config.prefill_context_parallel_size > 1:
+            MAX_CAPTURE_SIZE = MAX_CAPTURE_SIZE - CP_ADDITIONAL_STREAM_NUM
+        if parallel_config.decode_context_parallel_size > 1:
+            MAX_CAPTURE_SIZE = MAX_CAPTURE_SIZE - CP_ADDITIONAL_STREAM_NUM
+
+        max_num_batch_sizes = math.floor(
+            (MAX_CAPTURE_SIZE - num_comm_groups * 40)
+            / resources_per_graph
+            / (1 + num_comm_groups * 2)
+        )
+        logger.info(
+            "Calculated maximum supported batch sizes for ACL graph: %s",
+            max_num_batch_sizes,
+        )
+        logger.warning(
+            "Currently, communication is performed using FFTS+ method, "
+            "which reduces the number of available streams and, as a result, "
+            "limits the range of runtime shapes that can be handled. To both "
+            "improve communication performance and increase the number of "
+            "supported shapes, set HCCL_OP_EXPANSION_MODE=AIV."
+        )
+
+    # If original sizes exceed maximum, sample a representative subset
+    if max_num_batch_sizes < len(original_sizes):
+        step = (len(original_sizes) - 1) / (max_num_batch_sizes - 1)
+        indices = [round(i * step) for i in range(max_num_batch_sizes)]
+
+        # Ensure first and last elements are preserved
+        indices[0], indices[-1] = 0, len(original_sizes) - 1
+
+        sampled_sizes = [original_sizes[i] for i in indices]
+        update_cudagraph_capture_sizes(vllm_config, sampled_sizes)

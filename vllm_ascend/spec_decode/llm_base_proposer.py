@@ -361,8 +361,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 self.model.config.image_token_index = model.config.vision_config.image_token_id
             elif self.get_model_name(model) == "KimiK25ForConditionalGeneration":
                 self.model.config.image_token_index = model.config.media_placeholder_token_id
-            else:
+            elif hasattr(model.config, "image_token_index"):
                 self.model.config.image_token_index = model.config.image_token_index
+            else:
+                # Draft models like Gemma4 MTP don't handle multimodal inputs
+                # directly — they receive hidden states from the target model.
+                pass
             target_language_model = model.get_language_model()
         else:
             target_language_model = model
@@ -497,21 +501,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 if torch.equal(layer_module.shared_head.head.weight, model.lm_head.weight):
                     layer_module.shared_head.head = model.lm_head
 
+        # MTP draft model always runs in eager mode (FDO is not supported for draft).
+        # Disable cuda graph for the draft proposer to prevent graph dispatch.
         if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs() and self.use_cuda_graph:
-            logger.info(
-                "[spec_decode/base] Wrapping draft model with ACLGraphWrapper:"
-                " runtime_mode=FULL, use_eagle=%s, enable_enpu=%s",
-                self.use_eagle,
-                self.enable_enpu,
-            )
-            self.update_stream = torch.npu.Stream()
-            self._runnable = ACLGraphWrapper(
-                self._run_merged_draft,
-                self.vllm_config,
-                runtime_mode=CUDAGraphMode.FULL,
-                use_eagle=self.use_eagle,
-                enable_enpu=self.enable_enpu,
-            )
+            self.use_cuda_graph = False
 
     def _maybe_share_topk_indices(self, target_language_model: nn.Module) -> None:
         if hasattr(target_language_model.model, "topk_indices_buffer"):
@@ -707,6 +700,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             if forward_context is not None:
                 forward_context.moe_layer_index = 0
 
+            self._sync_wait_target_events()
             self._runnable(
                 num_input_tokens=num_tokens,
                 batch_size=batch_size,
@@ -729,6 +723,18 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     ) -> None:
         if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
             self._update_full_graph_params(forward_context, num_input_tokens, multi_steps_attn_metadata)
+
+    def _sync_wait_target_events(self) -> None:
+        """Wait for NPU events recorded after target forward completes.
+
+        In draft_eager/both_fdo mode, the target model's FDO graph replay
+        writes KV cache asynchronously on the NPU stream.  We must wait for
+        those writes to complete before the draft model reads the KV cache.
+        """
+        _ev = getattr(self, '_target_done_event', None)
+        if _ev is not None:
+            _ev.wait()
+            self._target_done_event = None
 
     def _propose(
         self,
@@ -1070,6 +1076,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 "is_prefill": is_prefill_batch,
             }
             run_draft = partial(self._runnable, **model_inputs)
+            self._sync_wait_target_events()
 
             if self.enable_enpu:
                 self._update_full_graph_params_if_needed(forward_context, num_input_tokens, multi_steps_attn_metadata)

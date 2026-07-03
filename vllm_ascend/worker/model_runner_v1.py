@@ -19,6 +19,7 @@
 
 import logging
 import math
+import os
 import sys
 import time
 from collections import defaultdict
@@ -136,6 +137,7 @@ from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
 from vllm_ascend.spec_decode.extract_hidden_states_proposer import (
     AscendExtractHiddenStatesProposer,
 )
+from vllm_ascend.spec_decode.gemma4_proposer import AscendGemma4Proposer
 from vllm_ascend.spec_decode.medusa_proposer import AscendMedusaProposer
 from vllm_ascend.spec_decode.ngram_proposer import AscendNgramProposer
 from vllm_ascend.spec_decode.ngram_proposer_npu import AscendNgramProposerNPU
@@ -627,6 +629,7 @@ class NPUModelRunner(GPUModelRunner):
             | AscendStep3p5MTPProposer
             | AscendDraftModelProposer
             | AscendDflashProposer
+            | AscendGemma4Proposer
             | AscendSuffixDecodingProposer
             | AscendMedusaProposer
             | AscendExtractHiddenStatesProposer
@@ -2426,6 +2429,16 @@ class NPUModelRunner(GPUModelRunner):
             hidden_states = self._model_forward(
                 num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
             )
+        # MTP: Record NPU event after target forward completes, so the draft
+        # model can wait on it before reading the KV cache. Required when
+        # the target model runs in FDO graph mode because reshape_and_cache
+        # KV writes are async on the NPU stream.
+        _target_is_fdo = self.compilation_config.cudagraph_mode.has_full_cudagraphs()
+        if ((_target_is_fdo or os.path.exists("/tmp/vllm_sync_target_kv"))
+                and hasattr(self, 'drafter') and self.drafter is not None):
+            _target_done = torch.npu.Event()
+            _target_done.record()
+            self.drafter._target_done_event = _target_done
         with record_function_or_nullcontext("post process"):
             aux_hidden_states = None
             if self.use_aux_hidden_state_outputs:
@@ -3429,11 +3442,16 @@ class NPUModelRunner(GPUModelRunner):
                 self.drafter.set_per_group_attn_metadata(
                     kv_cache_gid, cm.block_table_tensor, cm.slot_mapping)
             if self.speculative_config and spec_decode_common_attn_metadata is None:
-                if isinstance(self.drafter, AscendEagleProposer | AscendDraftModelProposer | AscendDflashProposer):
+                if isinstance(self.drafter, AscendEagleProposer | AscendGemma4Proposer | AscendDraftModelProposer | AscendDflashProposer):
                     if self.drafter.attn_layer_names[0] in kv_cache_group.layer_names:
                         spec_decode_common_attn_metadata = cm
                 else:
                     spec_decode_common_attn_metadata = cm
+            # MTP: Capture per-group block tables for multi-group proposers
+            # (Gemma4 MTP). Each KV cache group has its own block_table;
+            # the draft model needs all of them to read the correct KV cache.
+            if self.speculative_config and isinstance(self.drafter, AscendGemma4Proposer):
+                self.drafter.set_per_group_block_table(kv_cache_gid, cm.block_table_tensor)
             if self.enable_hamming_sparse is True:
                 from vllm_ascend.attention.kvcomp_attn.attention_utils import build_kvcomp_metadata
                 build_kvcomp_metadata(self.kvcomp_meta_data, cm)
@@ -3994,11 +4012,21 @@ class NPUModelRunner(GPUModelRunner):
         ):
             assert isinstance(
                 self.drafter,
-                AscendEagleProposer | AscendDflashProposer | AscendDraftModelProposer,
+                AscendEagleProposer | AscendGemma4Proposer | AscendDflashProposer | AscendDraftModelProposer,
             )
-            block_size = (self.kernel_block_sizes[0] if isinstance(
-                self.kernel_block_sizes, list) else self.kernel_block_sizes)
-            self.drafter.initialize_attn_backend(kv_cache_config, block_size)
+            if isinstance(self.drafter, AscendGemma4Proposer):
+                # Gemma4 MTP needs per-group kernel_block_sizes (list of ints),
+                # not a single block_size.  Pass the list directly.
+                kernel_block_sizes = (
+                    self.kernel_block_sizes
+                    if isinstance(self.kernel_block_sizes, list)
+                    else [self.kernel_block_sizes]
+                )
+                self.drafter.initialize_attn_backend(kv_cache_config, kernel_block_sizes)
+            else:
+                block_size = (self.kernel_block_sizes[0] if isinstance(
+                    self.kernel_block_sizes, list) else self.kernel_block_sizes)
+                self.drafter.initialize_attn_backend(kv_cache_config, block_size)
 
         if has_kv_transfer_group():
             get_kv_transfer_group().register_kv_caches(kv_caches)
@@ -5121,7 +5149,7 @@ class NPUModelRunner(GPUModelRunner):
         ):
             assert isinstance(
                 self.drafter,
-                AscendEagleProposer | AscendDflashProposer | AscendExtractHiddenStatesProposer,
+                AscendEagleProposer | AscendDflashProposer | AscendExtractHiddenStatesProposer | AscendGemma4Proposer,
             )
             self.drafter.initialize_cudagraph_keys(cudagraph_mode)
 
