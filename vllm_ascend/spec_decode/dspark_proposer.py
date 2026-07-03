@@ -87,6 +87,74 @@ class AscendDSparkProposer(AscendDflashProposer):
         self.draft_attn_groups = []
         self.kv_cache_gid = 0
 
+    @torch.inference_mode()
+    def dummy_run(
+        self,
+        num_tokens: int,
+        num_reqs: int = 0,
+        num_tokens_across_dp: torch.Tensor | None = None,
+        aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+        batch_descriptor=None,
+        dummy_compute_logits=lambda hidden_states: None,
+        is_profile=False,
+        **kwargs,
+    ) -> None:
+        del dummy_compute_logits, kwargs
+        if not self.use_cuda_graph:
+            aclgraph_runtime_mode = CUDAGraphMode.NONE
+        block_size = self.num_speculative_tokens
+        if num_reqs <= 0:
+            num_reqs = max(1, min(self.max_batch_size, (num_tokens + block_size - 1) // block_size))
+        num_query_total = min(num_reqs * block_size, self.max_query_tokens)
+        num_context = min(num_tokens, self.max_num_tokens)
+
+        num_input_tokens, num_tokens_across_dp, _ = self.runner._sync_metadata_across_dp(
+            num_query_total, is_draft_model=True
+        )
+        num_input_tokens = min(num_input_tokens, num_query_total)
+        self.input_ids[:num_input_tokens].fill_(self.parallel_drafting_token_id)
+        self.positions[:num_input_tokens].copy_(self.arange_dspark[:num_input_tokens])
+        self._request_slots_buffer[:num_input_tokens].zero_()
+        self._slot_mapping_buffer[:num_input_tokens].copy_(self.arange_dspark[:num_input_tokens])
+
+        context_positions = self._context_positions_buffer[:num_context]
+        context_positions.copy_(self.arange_dspark[:num_context])
+        context_request_slots = self._context_request_slots_buffer[:num_context]
+        context_request_slots.zero_()
+
+        with set_ascend_forward_context(
+            None,
+            self.vllm_config,
+            num_tokens=num_input_tokens,
+            num_tokens_across_dp=num_tokens_across_dp,
+            num_actual_tokens=num_input_tokens,
+            in_profile_run=is_profile,
+            batch_descriptor=batch_descriptor,
+            aclgraph_runtime_mode=aclgraph_runtime_mode,
+            is_draft_model=True,
+            draft_attn_metadatas=[],
+        ):
+            if is_profile:
+                self.model.precompute_and_store_context_kv(
+                    self.hidden_states[:num_context],
+                    context_positions,
+                    self._context_slot_mapping_buffer[:num_context],
+                    context_request_slots,
+                )
+            forward_context = get_forward_context()
+            if forward_context is not None:
+                forward_context.moe_layer_index = 0
+            self.model(
+                input_ids=self.input_ids[:num_input_tokens],
+                positions=self.positions[:num_input_tokens],
+                inputs_embeds=None,
+                request_slots=self._request_slots_buffer[:num_input_tokens],
+                slot_mapping=self._slot_mapping_buffer[:num_input_tokens],
+            )
+            forward_context = get_forward_context()
+            if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and not _EXTRA_CTX.capturing:
+                self._update_full_graph_params(forward_context, num_input_tokens, [])
+
     def _assign_request_slots(self, batch_size: int) -> list[int]:
         if self.runner is None or not hasattr(self.runner, "input_batch"):
             return list(range(batch_size))

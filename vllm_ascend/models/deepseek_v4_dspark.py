@@ -536,16 +536,7 @@ class DeepSeekV4DSparkMTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
         self.set_moe_parameters()
 
     def set_moe_parameters(self) -> None:
-        self.expert_weights = []
-        self.num_expert_groups = getattr(self.config, "n_group", 1)
-        self.moe_layers = []
-        self.moe_mlp_layers = []
-        example_moe = None
-        for layer in self.model.layers.values():
-            example_moe = layer.mlp
-            self.moe_mlp_layers.append(layer.mlp)
-            self.moe_layers.append(layer.mlp.experts)
-        self.extract_moe_parameters(example_moe)
+        self.set_moe_parameters_from_layers(iter(self.model.layers.values()))
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
