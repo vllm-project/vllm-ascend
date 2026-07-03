@@ -502,17 +502,32 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 if torch.equal(layer_module.shared_head.head.weight, model.lm_head.weight):
                     layer_module.shared_head.head = model.lm_head
 
-        # On Ascend, Gemma4 MTP draft model runs in eager mode (FDO is not
-        # supported for the draft). Disable cuda graph only for Gemma4 MTP so
-        # other MTP models that can run their draft under full cudagraph are
-        # unaffected.
-        if (
+        _has_full = self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs()
+        _is_gemma4_mtp = (
             self.speculative_config is not None
             and self.speculative_config.use_gemma4_mtp()
-            and self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs()
-            and self.use_cuda_graph
-        ):
+        )
+        # On Ascend, Gemma4 MTP draft runs in eager mode (FDO is not supported
+        # for the draft). Disable cuda graph only for Gemma4 MTP so other MTP
+        # models keep the upstream FULL-cudagraph draft wrapping below.
+        if _has_full and _is_gemma4_mtp and self.use_cuda_graph:
             self.use_cuda_graph = False
+        # Other MTP drafts: keep the upstream ACLGraphWrapper(FULL) wrapping.
+        elif _has_full and self.use_cuda_graph:
+            logger.info(
+                "[spec_decode/base] Wrapping draft model with ACLGraphWrapper:"
+                " runtime_mode=FULL, use_eagle=%s, enable_enpu=%s",
+                self.use_eagle,
+                self.enable_enpu,
+            )
+            self.update_stream = torch.npu.Stream()
+            self._runnable = ACLGraphWrapper(
+                self._run_merged_draft,
+                self.vllm_config,
+                runtime_mode=CUDAGraphMode.FULL,
+                use_eagle=self.use_eagle,
+                enable_enpu=self.enable_enpu,
+            )
 
     def _maybe_share_topk_indices(self, target_language_model: nn.Module) -> None:
         if hasattr(target_language_model.model, "topk_indices_buffer"):
