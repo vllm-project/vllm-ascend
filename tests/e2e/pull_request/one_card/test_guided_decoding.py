@@ -34,15 +34,51 @@ os.environ["VLLM_BATCH_INVARIANT"] = "1"
 MODEL_NAME = ModelName.QWEN3_06B
 
 GuidedDecodingBackend = ["xgrammar", "guidance", "outlines"]
+GUIDED_JSON_TIMEOUT_BACKENDS = {"xgrammar", "outlines"}
+REGEX_COMPILATION_TIMEOUT_ENV = {"VLLM_REGEX_COMPILATION_TIMEOUT_S": "30"}
 
 
-@pytest.fixture(params=[False, True], ids=["v1", "v2"])
+@pytest.fixture(autouse=True)
+def regex_compilation_timeout_env(request):
+    model_marker = request.node.get_closest_marker("model")
+    if model_marker is None:
+        yield
+        return
+
+    extra_kwargs = model_marker.kwargs.get("extra_kwargs", {})
+    structured_outputs_config = extra_kwargs.get("structured_outputs_config", {})
+    guided_decoding_backend = structured_outputs_config.get("backend")
+    needs_timeout = (
+        request.node.name.startswith("test_guided_json_completion_")
+        and guided_decoding_backend in GUIDED_JSON_TIMEOUT_BACKENDS
+        and not vllm_version_is("0.23.0")
+    )
+
+    if not needs_timeout:
+        yield
+        return
+
+    env_vars = dict(model_marker.kwargs.get("env_vars", {}))
+    env_vars.update(REGEX_COMPILATION_TIMEOUT_ENV)
+    model_marker.kwargs["env_vars"] = env_vars
+    with patch.dict(os.environ, REGEX_COMPILATION_TIMEOUT_ENV, clear=False):
+        yield
+
+
+@pytest.fixture(params=[False, True], ids=["v1", "v2"], autouse=True)
 def model_runner_env(request):
     use_v2_model_runner = request.param
     if use_v2_model_runner and vllm_version_is("0.23.0"):
         pytest.skip("No need to support v2 model runner for vLLM tag version.")
 
-    with patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1" if use_v2_model_runner else "0"}):
+    env = {"VLLM_USE_V2_MODEL_RUNNER": "1" if use_v2_model_runner else "0"}
+    model_marker = request.node.get_closest_marker("model")
+    if model_marker is not None:
+        env_vars = dict(model_marker.kwargs.get("env_vars", {}))
+        env_vars.update(env)
+        model_marker.kwargs["env_vars"] = env_vars
+
+    with patch.dict(os.environ, env):
         yield
 
 
