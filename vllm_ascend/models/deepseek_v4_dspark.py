@@ -7,6 +7,7 @@ from collections.abc import Iterable
 import regex as re
 import torch
 import torch.nn as nn
+import torch_npu
 from transformers import PretrainedConfig
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
@@ -330,9 +331,24 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         out = _apply_dsv4_rope_tail(self.rotary_emb, positions, out, inverse=True)
         group_dim = self.n_local_heads * self.head_dim // self.n_local_groups
         out = out.reshape(-1, self.n_local_groups, group_dim)
-        out = _fp8_e4m3fn_qdq(out, 128)
-        wo_a = _wo_a_weight_for_eager_projection(self.wo_a.weight, self.n_local_groups, self.o_lora_rank, group_dim)
-        z = _grouped_wo_a_projection(out, wo_a).flatten(1)
+        if hasattr(self.wo_a, "weight_scale") and self.wo_a.weight.dtype == torch.float8_e4m3fn:
+            out, out_scale = torch_npu.npu_dynamic_mx_quant(out, dst_type=torch.float8_e4m3fn)
+            z = torch_npu.npu_transpose_quant_batchmatmul(
+                out,
+                self.wo_a.weight,
+                dtype=torch.bfloat16,
+                bias=None,
+                group_sizes=(0, 0, 32),
+                x1_scale=out_scale.view(torch.float8_e8m0fnu),
+                x2_scale=self.wo_a.weight_scale.view(torch.float8_e8m0fnu),
+                perm_x1=(1, 0, 2),
+                perm_x2=(0, 1, 2),
+                perm_y=(1, 0, 2),
+            ).flatten(1)
+        else:
+            out = _fp8_e4m3fn_qdq(out, 128)
+            wo_a = _wo_a_weight_for_eager_projection(self.wo_a.weight, self.n_local_groups, self.o_lora_rank, group_dim)
+            z = _grouped_wo_a_projection(out, wo_a).flatten(1)
         return _linear_output(self.wo_b, z)
 
 
