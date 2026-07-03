@@ -566,7 +566,8 @@ msgid ""
 " the deployment examples in [Section 5.1](#51-single-node-online-"
 "deployment)."
 msgstr ""
-"有关完整的启动命令和参数说明，请参阅[第 5.1 节](#51-单节点在线部署)中的部署示例。"
+
+"有关完整的启动命令和参数说明，请参阅[第 5.1 节](#51-single-node-online-deployment)中的部署示例。"
 
 #: ../../source/tutorials/models/PaddleOCR-VL.md:389
 msgid "9.2 Tuning Guidelines"

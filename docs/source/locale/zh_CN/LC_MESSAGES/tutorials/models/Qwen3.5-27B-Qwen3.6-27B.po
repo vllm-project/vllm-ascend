@@ -449,7 +449,7 @@ msgid ""
 "-functional-verification)."
 msgstr ""
 "对于功能测试（例如，带有预期响应的 `completions` 和 `chat.completions` curl 示例），"
-"请参考[第6节](#6-功能验证)。"
+"请参考[第6节](#6-functional-verification)。"
 
 #: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:262
 msgid "5.2 Multi-Node PD Separation Deployment"
@@ -1257,7 +1257,7 @@ msgid ""
 "For complete startup commands and parameter descriptions, please refer to"
 " the deployment examples in [Chapter 5](#5-online-service-deployment)."
 msgstr ""
-"完整的启动命令和参数说明请参考[第5章](#5-在线服务部署)中的部署示例。"
+"完整的启动命令和参数说明请参考[第5章](#5-online-service-deployment)中的部署示例。"
 
 #: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:669
 msgid "9.2 Tuning Guidelines"

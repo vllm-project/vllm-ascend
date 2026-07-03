@@ -525,14 +525,14 @@ msgstr "多模态（1080P）"
 msgid ""
 "For complete startup commands and parameter descriptions, please refer to"
 " the deployment examples in [Chapter 5](#5-online-service-deployment)."
-msgstr "完整的启动命令和参数描述，请参考[第 5 章](#5-在线服务部署)中的部署示例。"
+msgstr "完整的启动命令和参数描述，请参考[第 5 章](#5-online-service-deployment)中的部署示例。"
 
 #: ../../source/tutorials/models/Qwen-VL-Dense.md:249
 msgid ""
 "**Notice:** `max-model-len` and `max-num-seqs` need to be set according "
 "to the actual usage scenario. For other settings, please refer to the "
 "**[Deployment](#5-online-service-deployment)** chapter."
-msgstr "**注意：** `max-model-len` 和 `max-num-seqs` 需要根据实际使用场景设置。其他设置请参考**[部署](#5-在线服务部署)**章节。"
+msgstr "**注意：** `max-model-len` 和 `max-num-seqs` 需要根据实际使用场景设置。其他设置请参考**[部署](#5-online-service-deployment)**章节。"
 
 #: ../../source/tutorials/models/Qwen-VL-Dense.md:252
 msgid "9.2 Tuning Guidelines"
