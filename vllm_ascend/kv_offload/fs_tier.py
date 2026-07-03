@@ -163,18 +163,11 @@ def load_block(
 class AscendFileSystemTierManager(FileSystemTierManager):
     """``fs_python`` secondary tier without the ``O_DIRECT`` requirement.
 
-    Accepts every upstream ``FileSystemTierManager`` argument plus two Ascend
-    knobs:
+    Accepts every upstream ``FileSystemTierManager`` argument plus one Ascend
+    knob:
 
     * ``use_direct_io`` (default ``False``) -- when ``True`` and the platform
       supports it, ``O_DIRECT`` is used exactly like upstream.
-    * ``use_usrbio`` (default ``False``) -- when ``True`` and ``root_dir`` is on
-      a 3FS mount with the ``hf3fs`` USRBIO binding installed, KV blocks are
-      transferred over RDMA via 3FS USRBIO, bypassing the FUSE/page-cache path.
-      If USRBIO is unavailable for any reason the tier transparently falls back
-      to the buffered path, so correctness is never affected. ``use_usrbio`` and
-      ``use_direct_io`` are mutually independent; USRBIO takes precedence when
-      both are set since it manages its own data path.
     """
 
     def __init__(
@@ -186,7 +179,6 @@ class AscendFileSystemTierManager(FileSystemTierManager):
         n_read_threads: int = 16,
         n_write_threads: int = 16,
         use_direct_io: bool = False,
-        use_usrbio: bool = False,
     ):
         direct = getattr(os, "O_DIRECT", 0) if use_direct_io else 0
         if use_direct_io and direct == 0:
@@ -208,82 +200,30 @@ class AscendFileSystemTierManager(FileSystemTierManager):
             n_write_threads=n_write_threads,
         )
 
-        # Opt-in RDMA path. probe() returns None (and the buffered path is used)
-        # whenever USRBIO cannot be initialised, so this never breaks startup.
-        self._usrbio = None
-        if use_usrbio:
-            if direct:
-                logger.warning(
-                    "use_usrbio=True overrides use_direct_io=True; USRBIO "
-                    "manages its own data path and ignores O_DIRECT."
-                )
-            from vllm_ascend.kv_offload import usrbio
-            self._usrbio = usrbio.probe(root_dir, self._block_size)
-
     def submit_store(self, job_metadata: JobMetadata) -> None:
-        if self._usrbio is not None:
-            from vllm_ascend.kv_offload import usrbio
-            tasks = (
-                functools.partial(
-                    usrbio.store_block,
-                    self._usrbio,
-                    self.file_mapper.get_file_name(key),
-                    self._primary_kv_view,
-                    int(bid) * self._block_size,
-                    self._block_size,
-                )
-                for key, bid in zip(job_metadata.keys, job_metadata.block_ids)
+        tasks = (
+            functools.partial(
+                store_block,
+                self.file_mapper.get_file_name(key),
+                self._primary_kv_view,
+                int(bid) * self._block_size,
+                self._block_size,
+                self._store_flags,
             )
-        else:
-            tasks = (
-                functools.partial(
-                    store_block,
-                    self.file_mapper.get_file_name(key),
-                    self._primary_kv_view,
-                    int(bid) * self._block_size,
-                    self._block_size,
-                    self._store_flags,
-                )
-                for key, bid in zip(job_metadata.keys, job_metadata.block_ids)
-            )
+            for key, bid in zip(job_metadata.keys, job_metadata.block_ids)
+        )
         self._pool.enqueue_store(job_metadata.job_id, len(job_metadata.keys), tasks)
 
     def submit_load(self, job_metadata: JobMetadata) -> None:
-        if self._usrbio is not None:
-            from vllm_ascend.kv_offload import usrbio
-            tasks = (
-                functools.partial(
-                    usrbio.load_block,
-                    self._usrbio,
-                    self.file_mapper.get_file_name(key),
-                    self._primary_kv_view,
-                    int(bid) * self._block_size,
-                    self._block_size,
-                )
-                for key, bid in zip(job_metadata.keys, job_metadata.block_ids)
+        tasks = (
+            functools.partial(
+                load_block,
+                self.file_mapper.get_file_name(key),
+                self._primary_kv_view,
+                int(bid) * self._block_size,
+                self._block_size,
+                self._load_flags,
             )
-        else:
-            tasks = (
-                functools.partial(
-                    load_block,
-                    self.file_mapper.get_file_name(key),
-                    self._primary_kv_view,
-                    int(bid) * self._block_size,
-                    self._block_size,
-                    self._load_flags,
-                )
-                for key, bid in zip(job_metadata.keys, job_metadata.block_ids)
-            )
+            for key, bid in zip(job_metadata.keys, job_metadata.block_ids)
+        )
         self._pool.enqueue_load(job_metadata.job_id, len(job_metadata.keys), tasks)
-
-    def shutdown(self, *args, **kwargs):
-        # Forward to the upstream teardown if it exists, then release the
-        # opt-in USRBIO resources. Kept signature-flexible so it never breaks
-        # the base lifecycle contract; USRBIO objects also free themselves on
-        # GC, so this is a best-effort prompt cleanup.
-        super_shutdown = getattr(super(), "shutdown", None)
-        result = super_shutdown(*args, **kwargs) if super_shutdown else None
-        if self._usrbio is not None:
-            self._usrbio.close()
-            self._usrbio = None
-        return result
