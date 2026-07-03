@@ -113,6 +113,34 @@ class TestAscendStoreCoordinator(unittest.TestCase):
 
         self.assertEqual(masks, ([False, False, False, True],))
 
+    def test_store_mask_propagates_eagle_to_same_spec_siblings(self):
+        calls = []
+
+        def fake_reachable_block_mask(*args, **kwargs):
+            calls.append(kwargs["use_eagle"])
+            return [True, False, True, False]
+
+        shared_spec = _sliding_spec(block_size=128, sliding_window=256)
+        coord = AscendStoreCoordinator(
+            [
+                KVCacheGroupSpec(["layer.0"], shared_spec),
+                KVCacheGroupSpec(["layer.mtp"], shared_spec, is_eagle_group=True),
+            ],
+            scheduler_block_size=512,
+            hash_block_size=128,
+            group_block_sizes=[128, 128],
+            group_cache_families=["c1", "c1"],
+        )
+
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator._reachable_block_mask",
+            side_effect=fake_reachable_block_mask,
+        ):
+            masks = coord.store_mask(512)
+
+        self.assertEqual(calls, [True, True])
+        self.assertEqual(masks, ([True, False, True, False], [True, False, True, False]))
+
     def test_compressed_masks_stay_unmasked(self):
         coord = AscendStoreCoordinator(
             [KVCacheGroupSpec(["layer.0"], _sliding_spec(block_size=128, sliding_window=512))],
