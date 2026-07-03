@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version:  vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-06-22 05:29+0000\n"
+"POT-Creation-Date: 2026-07-02 07:02+0000\n"
 "PO-Revision-Date: 2026-01-22 16:15+0800\n"
 "Last-Translator: Gemini\n"
 "Language: zh_CN\n"
@@ -168,8 +168,8 @@ msgid ""
 "refreshes MoE dispatcher HCCL metadata, restores sleep-mode allocator "
 "memory, and recaptures ACL graphs when needed."
 msgstr ""
-"在 `wake_up()` 期间，vLLM Ascend 会恢复 HCCL 进程组，刷新 MoE 调度器 HCCL 元数据，恢复睡眠模式分配器内存，并在需要时重新捕获 "
-"ACL graphs。"
+"在 `wake_up()` 期间，vLLM Ascend 会恢复 HCCL 进程组，刷新 MoE 调度器 HCCL "
+"元数据，恢复睡眠模式分配器内存，并在需要时重新捕获 ACL graphs。"
 
 #: ../../source/user_guide/feature_guide/sleep_mode.md:57
 msgid ""
@@ -193,26 +193,97 @@ msgid ""
 " `None` or contains `\"kv_cache\"`. This avoids recapturing graphs before"
 " externally reloaded weights and KV-cache state are ready."
 msgstr ""
-"启用额外清理后，仅当 `tags` 为 `None` 或包含 `\"kv_cache\"` 时才会重新捕获 ACL graphs。这避免了在外部重新加载的权重和 "
-"KV-cache 状态准备就绪之前重新捕获 graphs。"
+"启用额外清理后，仅当 `tags` 为 `None` 或包含 `\"kv_cache\"` 时才会重新捕获 ACL "
+"graphs。这避免了在外部重新加载的权重和 KV-cache 状态准备就绪之前重新捕获 graphs。"
 
 #: ../../source/user_guide/feature_guide/sleep_mode.md:70
+msgid "Expert weight layout restoration"
+msgstr "专家权重布局恢复"
+
+#: ../../source/user_guide/feature_guide/sleep_mode.md:72
+msgid ""
+"For dense models, `wake_up()` simply restores the model weights to NPU "
+"memory; the tensor layout is unchanged."
+msgstr "对于稠密模型，`wake_up()` 仅将模型权重恢复到 NPU 内存；张量布局保持不变。"
+
+#: ../../source/user_guide/feature_guide/sleep_mode.md:74
+msgid ""
+"For **unquantized MoE models** (`quant_config is None`), the fused expert"
+" weights are stored in a transposed layout for NPU matmul efficiency. "
+"This layout is produced once at model load time by "
+"`process_weights_after_loading()`: after the weights are loaded, the "
+"method transposes the second and third dimensions (`transpose(1, 2)`) of "
+"`w13_weight` and `w2_weight` to convert the standard checkpoint layout "
+"into the format required by the `torch_npu.npu_grouped_matmul` operator."
+msgstr ""
+"对于**未量化的 MoE 模型**（`quant_config is None`），融合的专家权重以转置布局存储以提高 NPU matmul "
+"效率。该布局在模型加载时由 `process_weights_after_loading()` 生成一次：加载权重后，该方法对 "
+"`w13_weight` 和 `w2_weight` 的第二个和第三个维度进行转置（`transpose(1, 2)`），将标准检查点布局转换为 "
+"`torch_npu.npu_grouped_matmul` 算子所需的格式。"
+
+#: ../../source/user_guide/feature_guide/sleep_mode.md:76
+msgid ""
+"After the sleep-mode allocator restores the original (untransposed) "
+"memory, `wake_up()` re-applies the same transpose to the affected expert "
+"weights when the `\"weights\"` tag is being restored:"
+msgstr ""
+"在睡眠模式分配器恢复原始（未转置）内存后，`wake_up()` 在恢复 `\"weights\"` 标签时对受影响的专家权重重新应用相同的转置："
+
+#: ../../source/user_guide/feature_guide/sleep_mode.md:78
+msgid ""
+"`w13_weight` (gate/up projection): transposed back to the runtime layout "
+"when its second dimension matches `hidden_size`;"
+msgstr ""
+"`w13_weight`（gate/up projection）：当其第二个维度匹配 `hidden_size` 时，转置回运行时布局；"
+
+#: ../../source/user_guide/feature_guide/sleep_mode.md:79
+msgid ""
+"`w2_weight` (down projection): transposed back to the runtime layout when"
+" its third dimension matches `hidden_size`."
+msgstr ""
+"`w2_weight`（down projection）：当其第三个维度匹配 `hidden_size` 时，转置回运行时布局。"
+
+#: ../../source/user_guide/feature_guide/sleep_mode.md:81
+msgid ""
+"This step is skipped entirely for dense models (which have no expert "
+"weights) and for quantized models (whose weights are handled by the "
+"quantization method)."
+msgstr ""
+"对于稠密模型（没有专家权重）和量化模型（其权重由量化方法处理），此步骤完全跳过。"
+
+#: ../../source/user_guide/feature_guide/sleep_mode.md:82
+msgid "Prepare Model Weights"
+msgstr "准备模型权重"
+
+#: ../../source/user_guide/feature_guide/sleep_mode.md:83
+msgid "Use the `Qwen2.5-0.5B-Instruct` model weights. With `VLLM_USE_MODELSCOPE=True`, the model will be downloaded automatically from ModelScope."
+msgstr "使用 `Qwen2.5-0.5B-Instruct` 模型的权重。若设置 `VLLM_USE_MODELSCOPE=True`，模型将自动从 ModelScope 下载。"
+
+#: ../../source/user_guide/feature_guide/sleep_mode.md:84
+msgid "Model"
+msgstr "模型"
+
+#: ../../source/user_guide/feature_guide/sleep_mode.md:85
+msgid "ModelScope Link"
+msgstr "ModelScope链接"
+
+#: ../../source/user_guide/feature_guide/sleep_mode.md:86
 msgid "Usage"
 msgstr "使用方法"
 
-#: ../../source/user_guide/feature_guide/sleep_mode.md:72
+#: ../../source/user_guide/feature_guide/sleep_mode.md:87
 msgid "The following is a simple example of how to use sleep mode."
 msgstr "以下是如何使用睡眠模式的一个简单示例。"
 
-#: ../../source/user_guide/feature_guide/sleep_mode.md:74
+#: ../../source/user_guide/feature_guide/sleep_mode.md:88
 msgid "Offline inference:"
 msgstr "离线推理："
 
-#: ../../source/user_guide/feature_guide/sleep_mode.md:114
+#: ../../source/user_guide/feature_guide/sleep_mode.md:127
 msgid "Online serving:"
 msgstr "在线服务："
 
-#: ../../source/user_guide/feature_guide/sleep_mode.md:116
+#: ../../source/user_guide/feature_guide/sleep_mode.md:129
 msgid ""
 "Considering there may be a risk of malicious access, please make sure you"
 " are under a dev-mode, and explicitly specify the dev environment "

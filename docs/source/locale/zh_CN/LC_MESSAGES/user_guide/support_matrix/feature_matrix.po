@@ -1,14 +1,8 @@
-# SOME DESCRIPTIVE TITLE.
-# Copyright (C) 2025, vllm-ascend team
-# This file is distributed under the same license as the vllm-ascend
-# package.
-# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
-#
 msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-06-04 05:04+0000\n"
+"POT-Creation-Date: 2026-07-02 07:02+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -25,8 +19,8 @@ msgstr "特性×特性"
 
 #: ../../source/user_guide/support_matrix/feature_matrix.md:3
 msgid ""
-"The tables below show mutually exclusive features and the support on "
-"Ascend hardware, extended from [vLLM "
+"The table below shows mutually exclusive features and the support on "
+"Ascend hardware, extended from the [vLLM "
 "table](https://docs.vllm.ai/en/latest/features/#feature-x-feature)."
 msgstr ""
 "下表展示了互斥特性及其在Ascend硬件上的支持情况，扩展自[vLLM "
@@ -124,8 +118,8 @@ msgid "[Eagle3](https://docs.vllm.ai/en/latest/features/speculative_decoding/eag
 msgstr "[Eagle3](https://docs.vllm.ai/en/latest/features/speculative_decoding/eagle/)"
 
 #: ../../source/user_guide/support_matrix/feature_matrix.md
-msgid "[Eplb](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/eplb_swift_balancer.html)"
-msgstr "[EPLB](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/eplb_swift_balancer.html)"
+msgid "[Eplb](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/Design_Documents/eplb_swift_balancer.html)"
+msgstr "[EPLB](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/Design_Documents/eplb_swift_balancer.html)"
 
 #: ../../source/user_guide/support_matrix/feature_matrix.md
 msgid ""
@@ -240,7 +234,7 @@ msgid "<sup>1</sup> Only dcp supports dp while pcp does not support dp."
 msgstr "<sup>1</sup>仅dcp支持数据并行，pcp不支持数据并行。"
 
 #: ../../source/user_guide/support_matrix/feature_matrix.md:41
-msgid "<sup>2</sup> Falshcomm is only enabled on the prefill stage."
+msgid "<sup>2</sup> Flashcomm is only enabled on the prefill stage."
 msgstr "<sup>2</sup>Flashcomm仅在预填充阶段启用。"
 
 #: ../../source/user_guide/support_matrix/feature_matrix.md:42
@@ -254,9 +248,3 @@ msgstr "<sup>4</sup>Lmhead TP仅在纯数据并行场景中启用。"
 #: ../../source/user_guide/support_matrix/feature_matrix.md:44
 msgid "<sup>5</sup> MLAPO is only supported on the decode stage."
 msgstr "<sup>5</sup>MLAPO仅在解码阶段支持。"
-
-#~ msgid ""
-#~ "<sup>5</sup> LoRA applies only to the"
-#~ " language backbone of multimodal models "
-#~ "(upstream)."
-#~ msgstr "<sup>5</sup>LoRA仅适用于多模态模型的语言主干（上游）。"

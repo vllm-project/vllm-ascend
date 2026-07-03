@@ -1,0 +1,441 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-02 07:02+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md:1
+msgid "Expert Parallelism Load Balancer (EPLB)"
+msgstr "专家并行负载均衡器 (EPLB)"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md:3
+msgid "Overview"
+msgstr "概述"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md:5
+msgid ""
+"Expert balancing for MoE (Mixture of Experts) models in LLM (Large "
+"Language) serving is essential for optimal performance. Dynamically "
+"changing experts during inference can negatively impact TTFT (Time To "
+"First Token) and TPOT (Time Per Output Token) due to stop-the-world "
+"operations. Our solution aims to minimize the negative impacts caused by "
+"the operation."
+msgstr ""
+"在LLM（大语言模型）服务中，对MoE（混合专家）模型进行专家均衡对于实现最佳性能至关重要。"
+"由于stop-the-world操作，推理过程中动态变更专家会对TTFT（首Token时间）和TPOT（每输出Token时间）产生负面影响。"
+"我们的解决方案旨在最小化该操作带来的负面影响。"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md:7
+msgid "EPLB Effects"
+msgstr "EPLB效果"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md:9
+msgid ""
+"Reduced Latency: Dynamically balances expert loads to minimize TTFT and "
+"TPOT by distributing workloads evenly across experts."
+msgstr ""
+"降低延迟：通过将工作负载均匀分布到各专家，动态均衡专家负载以最小化TTFT和TPOT。"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md:10
+msgid ""
+"Adaptive Scaling: Automatically adjusts to workload fluctuations while "
+"maintaining stable performance."
+msgstr ""
+"自适应扩展：自动适应工作负载波动，同时保持稳定的性能。"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md:12
+msgid "Support Scenarios"
+msgstr "支持场景"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md:14
+msgid "Models"
+msgstr "模型"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md:16
+msgid ""
+"All MOE models supported by vLLM-Ascend. But we have only verified the "
+"performance on deepseek-v3.1/r1 models."
+msgstr ""
+"vLLM-Ascend支持的所有MOE模型。但我们仅在deepseek-v3.1/r1模型上验证了性能。"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md:19
+msgid "MOE QuantType"
+msgstr "MOE量化类型"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md
+msgid "QuantType"
+msgstr "量化类型"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md
+msgid "Supported Hardware"
+msgstr "支持硬件"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md
+msgid "W8A8 / W8A8-Dynamic"
+msgstr "W8A8 / W8A8-Dynamic"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md
+msgid "A2, A3"
+msgstr "A2, A3"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md
+msgid "W4A8 (with fused MC2 enabled)"
+msgstr "W4A8（启用融合MC2）"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md
+msgid "MXFP4"
+msgstr "MXFP4"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md
+msgid "Ascend 950 Products"
+msgstr "昇腾950系列产品"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md
+msgid "MXFP8"
+msgstr "MXFP8"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md:28
+msgid "How to Use EPLB"
+msgstr "如何使用EPLB"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md:30
+msgid "EPLB has three usage modes:"
+msgstr "EPLB有三种使用模式："
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md
+msgid "Mode"
+msgstr "模式"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md
+msgid "Config in `eplb_config`"
+msgstr "`eplb_config`配置"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md
+msgid "Env Variable"
+msgstr "环境变量"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md
+msgid "**Dynamic EPLB**"
+msgstr "**动态EPLB**"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md
+msgid "`dynamic_eplb: true`"
+msgstr "`dynamic_eplb: true`"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md
+msgid "`DYNAMIC_EPLB=true`"
+msgstr "`DYNAMIC_EPLB=true`"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md
+msgid "**Recording** (generate expert map)"
+msgstr "**记录模式**（生成专家映射）"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md
+msgid "`expert_map_record_path`"
+msgstr "`expert_map_record_path`"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md
+msgid "`DYNAMIC_EPLB=true` or `EXPERT_MAP_RECORD=true`"
+msgstr "`DYNAMIC_EPLB=true` 或 `EXPERT_MAP_RECORD=true`"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md
+msgid "**Static EPLB** (load pre-recorded map)"
+msgstr "**静态EPLB**（加载预记录映射）"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md
+msgid "`expert_map_path`"
+msgstr "`expert_map_path`"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md
+msgid "none required"
+msgstr "无需设置"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md:38
+msgid ""
+"[!IMPORTANT] For Dynamic EPLB and Recording modes, the env variable acts "
+"as a safety guard: setting `dynamic_eplb: true` in config alone is not "
+"enough — the assertion requires `DYNAMIC_EPLB=true` or "
+"`EXPERT_MAP_RECORD=true`. Static EPLB (loading a pre-recorded map via "
+"`expert_map_path`) does **not** require an env variable."
+msgstr ""
+"[!重要] 对于动态EPLB和记录模式，环境变量充当安全防护：仅在配置中设置`dynamic_eplb: true`是不够的——断言要求同时设置`DYNAMIC_EPLB=true`或`EXPERT_MAP_RECORD=true`。静态EPLB（通过`expert_map_path`加载预记录映射）**不**需要环境变量。"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md:41
+msgid "Dynamic EPLB"
+msgstr "动态EPLB"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md:43
+msgid ""
+"We need to add environment variable `export DYNAMIC_EPLB=\"true\"` to "
+"enable vLLM-Ascend EPLB. Enable dynamic balancing with auto-tuned "
+"parameters. Adjust expert_heat_collection_interval and "
+"algorithm_execution_interval based on workload patterns. In the current "
+"version, we recommend using the following: policy of swift balancer(2)."
+msgstr ""
+"需要添加环境变量`export DYNAMIC_EPLB=\"true\"`以启用vLLM-Ascend EPLB。使用自动调优参数启用动态均衡。根据工作负载模式调整expert_heat_collection_interval和algorithm_execution_interval。在当前版本中，建议使用以下策略：swift balancer(2)。"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md
+msgid "Parameter"
+msgstr "参数"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md
+msgid "Description"
+msgstr "描述"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md
+msgid "Default"
+msgstr "默认值"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md
+msgid "dynamic_eplb"
+msgstr "dynamic_eplb"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md
+msgid "Enable dynamic EPLB."
+msgstr "启用动态EPLB。"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md
+msgid "False"
+msgstr "False"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md
+msgid "expert_heat_collection_interval"
+msgstr "expert_heat_collection_interval"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md
+msgid "Interval for collecting expert heat."
+msgstr "收集专家热度的间隔。"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md
+msgid "600"
+msgstr "600"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md
+msgid "algorithm_execution_interval"
+msgstr "algorithm_execution_interval"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md
+msgid "Interval for executing the balancing algorithm."
+msgstr "执行均衡算法的间隔。"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md
+msgid "50"
+msgstr "50"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md
+msgid "eplb_policy_type"
+msgstr "eplb_policy_type"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md
+msgid "EPLB policy type."
+msgstr "EPLB策略类型。"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md
+msgid "2"
+msgstr "2"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md
+msgid "num_redundant_experts"
+msgstr "num_redundant_experts"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md
+msgid "Number of redundant experts."
+msgstr "冗余专家数量。"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md
+msgid "0"
+msgstr "0"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md:88
+msgid "EPLB Policy Types"
+msgstr "EPLB策略类型"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md:90
+msgid ""
+"The `eplb_policy_type` parameter selects the balancing algorithm used "
+"during dynamic expert redistribution:"
+msgstr ""
+"`eplb_policy_type`参数选择动态专家重分配期间使用的均衡算法："
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md
+msgid "Value"
+msgstr "值"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md
+msgid "Policy"
+msgstr "策略"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md
+msgid "`0`"
+msgstr "`0`"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md
+msgid "Random"
+msgstr "随机"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md
+msgid "Randomly swaps experts between ranks. Suitable for basic testing only."
+msgstr "在rank之间随机交换专家。仅适用于基础测试。"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md
+msgid "`1`"
+msgstr "`1`"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md
+msgid "DefaultEplb"
+msgstr "DefaultEplb"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md
+msgid ""
+"Open-source EPLB algorithm. Adds redundant experts to the hottest, packs "
+"via balanced assignment with local constraint exchange."
+msgstr ""
+"开源EPLB算法。向最热的专家添加冗余，通过带局部约束交换的均衡分配进行打包。"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md
+msgid "`2`"
+msgstr "`2`"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md
+msgid "SwiftBalanceEplb"
+msgstr "SwiftBalanceEplb"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md
+msgid ""
+"Optimized for low-bandwidth environments. Supports intra-node and inter-"
+"node expert redundancy, joint optimization of expert placement. "
+"**(Recommended)**"
+msgstr ""
+"针对低带宽环境优化。支持节点内和节点间专家冗余，联合优化专家放置。"
+"**（推荐）**"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md
+msgid "`3`"
+msgstr "`3`"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md
+msgid "FlashLB"
+msgstr "FlashLB"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md
+msgid ""
+"Statistical method using sliding-window mean/variance/covariance of "
+"expert loads. Uses FlashTree layered search for optimal replica "
+"allocation and `minimize_redeploy` for incremental adjustment. Best for "
+"high-frequency load fluctuations."
+msgstr ""
+"统计方法，使用专家负载的滑动窗口均值/方差/协方差。使用FlashTree分层搜索进行最优副本分配，"
+"使用`minimize_redeploy`进行增量调整。最适合高频负载波动场景。"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md:99
+msgid "Static EPLB"
+msgstr "静态EPLB"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md:101
+msgid "Initial Setup (Record Expert Map)"
+msgstr "初始设置（记录专家映射）"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md:103
+msgid ""
+"We need to add environment variable `export EXPERT_MAP_RECORD=\"true\"` "
+"to record expert map. Generate the initial expert distribution map using "
+"expert_map_record_path. This creates a baseline configuration for future "
+"deployments."
+msgstr ""
+"需要添加环境变量`export EXPERT_MAP_RECORD=\"true\"`以记录专家映射。"
+"使用expert_map_record_path生成初始专家分布映射。这将为未来部署创建基线配置。"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md:117
+msgid "Subsequent Deployments (Use Recorded Map)"
+msgstr "后续部署（使用已记录映射）"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md:119
+msgid ""
+"Load the pre-recorded expert map for consistent performance. This avoids "
+"recalculating distributions at runtime."
+msgstr ""
+"加载预记录的专家映射以获得一致的性能。这避免了在运行时重新计算分布。"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md:130
+msgid "Critical Considerations"
+msgstr "关键注意事项"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md:132
+msgid "Parameter Tuning:"
+msgstr "参数调优："
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md:133
+msgid ""
+"expert_heat_collection_interval: Higher values (e.g., 600+) for stable "
+"workloads; lower values (e.g., 50-100) for fluctuating traffic."
+msgstr ""
+"expert_heat_collection_interval：稳定工作负载使用较大值（如600+）；波动流量使用较小值（如50-100）。"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md:134
+msgid ""
+"algorithm_execution_interval: Should be ≥ 50 to avoid premature balancing"
+" during startup."
+msgstr ""
+"algorithm_execution_interval：应≥50，以避免启动期间过早均衡。"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md:135
+msgid ""
+"num_redundant_experts: Must match (num_experts + num_redundant_experts) "
+"is divisible by expert-parallel size."
+msgstr ""
+"num_redundant_experts：必须满足(num_experts + num_redundant_experts)能被专家并行度整除。"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md:137
+msgid "Hardware Requirements:"
+msgstr "硬件要求："
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md:138
+msgid ""
+"Ensure that all NPUs have identical memory capacity and compute "
+"capabilities."
+msgstr "确保所有NPU具有相同的内存容量和计算能力。"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md:139
+msgid ""
+"Network bandwidth must support expert redistribution traffic (≥ 10 Gbps "
+"recommended)."
+msgstr "网络带宽必须支持专家重分配流量（建议≥10 Gbps）。"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md:141
+msgid "Monitoring & Validation:"
+msgstr "监控与验证："
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md:142
+msgid ""
+"Track metrics: Search for [Expert Hotness] in log, we will calculate the "
+"peak-to-average ratio of the load for each layer at different ranks, and "
+"then find their mean and maximum values. Current means actual peak-to-"
+"average ratio, update means estimated peak-to-average ratio after "
+"algorithm adjustment."
+msgstr ""
+"跟踪指标：在日志中搜索[Expert Hotness]，我们将计算不同rank上每层负载的峰值均值比，然后找出其平均值和最大值。Current表示实际峰值均值比，update表示算法调整后的预估峰值均值比。"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md:143
+msgid "Use vLLM monitor to detect imbalances during runtime."
+msgstr "使用vLLM监控器在运行时检测负载不均衡。"
+
+#: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md:144
+msgid ""
+"Always verify expert map JSON structure before loading (validate with jq "
+"or similar tools)."
+msgstr "加载前务必验证专家映射JSON结构（使用jq或类似工具进行验证）。"

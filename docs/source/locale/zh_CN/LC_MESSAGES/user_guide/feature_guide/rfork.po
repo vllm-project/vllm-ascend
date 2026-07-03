@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-09 18:37+0800\n"
+"POT-Creation-Date: 2026-07-02 07:02+0000\n"
 "PO-Revision-Date: 2026-04-10 18:37+0800\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -40,8 +40,9 @@ msgid ""
 "compatible **seed** instance from an external planner, then pull weights "
 "directly from that seed through `YuanRong TransferEngine`."
 msgstr ""
-"RFork 是 vLLM Ascend 的一种热启动权重加载路径。新实例无需总是从存储中读取模型权重，"
-"而是可以向外部规划器请求一个兼容的**种子**实例，然后通过 `YuanRong TransferEngine` 直接从该种子实例拉取权重。"
+"RFork 是 vLLM Ascend "
+"的一种热启动权重加载路径。新实例无需总是从存储中读取模型权重，而是可以向外部规划器请求一个兼容的**种子**实例，然后通过 `YuanRong "
+"TransferEngine` 直接从该种子实例拉取权重。"
 
 #: ../../source/user_guide/feature_guide/rfork.md:11
 msgid "The RFork loading flow in the current implementation is:"
@@ -67,9 +68,7 @@ msgid ""
 "on its local NPU, registers local weight memory, fetches the remote "
 "transfer-engine metadata from the seed, and performs batch weight "
 "transfer into local parameter buffers."
-msgstr ""
-"如果返回了一个种子，新实例在其本地 NPU 上初始化模型结构，注册本地权重内存，从种子获取远程传输引擎元数据，"
-"并执行批量权重传输到本地参数缓冲区。"
+msgstr "如果返回了一个种子，新实例在其本地 NPU 上初始化模型结构，注册本地权重内存，从种子获取远程传输引擎元数据，并执行批量权重传输到本地参数缓冲区。"
 
 #: ../../source/user_guide/feature_guide/rfork.md:17
 msgid ""
@@ -105,25 +104,21 @@ msgid ""
 "**Scale-out after a first successful load**: The first instance may still"
 " load from storage, but later instances with the same deployment identity"
 " can reuse it as a seed and shorten startup time."
-msgstr ""
-"**首次成功加载后的扩容**：第一个实例可能仍从存储加载，但后续具有相同部署标识的实例可以将其作为种子复用，缩短启动时间。"
+msgstr "**首次成功加载后的扩容**：第一个实例可能仍从存储加载，但后续具有相同部署标识的实例可以将其作为种子复用，缩短启动时间。"
 
 #: ../../source/user_guide/feature_guide/rfork.md:27
 msgid ""
 "**Elastic serving clusters**: Because RFork asks a planner for available "
 "seeds, it fits clusters where instances are created and reclaimed "
 "dynamically."
-msgstr ""
-"**弹性服务集群**：由于 RFork 向规划器请求可用种子，它适用于实例动态创建和回收的集群。"
+msgstr "**弹性服务集群**：由于 RFork 向规划器请求可用种子，它适用于实例动态创建和回收的集群。"
 
 #: ../../source/user_guide/feature_guide/rfork.md:28
 msgid ""
 "**Topology-sensitive deployments**: RFork encodes `kv_role`, `node_rank`,"
 " `tp_rank`, and optional `draft` role into the seed key, so only "
 "topology-compatible instances are matched together."
-msgstr ""
-"**拓扑感知部署**：RFork 将 `kv_role`、`node_rank`、`tp_rank` 和可选的 `draft` 角色编码到种子键中，"
-因此只有拓扑兼容的实例才会被匹配在一起。"
+msgstr "**拓扑感知部署**：RFork 将 `kv_role`、`node_rank`、`tp_rank` 和可选的 `draft` 角色编码到种子键中，因此只有拓扑兼容的实例才会被匹配在一起。"
 
 #: ../../source/user_guide/feature_guide/rfork.md:32
 msgid "Usage"
@@ -133,7 +128,9 @@ msgstr "使用方法"
 msgid ""
 "To enable RFork, pass `--load-format rfork` and provide RFork settings "
 "through `--model-loader-extra-config` as a JSON string."
-msgstr "要启用 RFork，请传递 `--load-format rfork`，并通过 JSON 字符串形式的 `--model-loader-extra-config` 提供 RFork 设置。"
+msgstr ""
+"要启用 RFork，请传递 `--load-format rfork`，并通过 JSON 字符串形式的 `--model-loader-"
+"extra-config` 提供 RFork 设置。"
 
 #: ../../source/user_guide/feature_guide/rfork.md:36
 msgid "RFork Prerequisites"
@@ -150,9 +147,7 @@ msgid ""
 "Run a planner service that implements the RFork seed protocol. A simple "
 "mock planner script is provided at "
 "[`rfork_planner.py`](../../../../examples/rfork/rfork_planner.py)."
-msgstr ""
-运行一个实现 RFork 种子协议的规划器服务。一个简单的模拟规划器脚本位于 "
-"[`rfork_planner.py`](../../../../examples/rfork/rfork_planner.py)。"
+msgstr "运行一个实现 RFork 种子协议的规划器服务。在 [`rfork_planner.py`](../../../../examples/rfork/rfork_planner.py) 提供了一个简单的模拟规划器脚本。"
 
 #: ../../source/user_guide/feature_guide/rfork.md:41
 msgid "Configuration Fields"
@@ -231,8 +226,10 @@ msgid ""
 msgstr "启动后等待本地种子 HTTP 服务变为健康状态的超时时间。"
 
 #: ../../source/user_guide/feature_guide/rfork.md
-msgid "Optional. Default: `30`. Must be greater than `0`."
-msgstr "可选。默认值：`30`。必须大于 `0`。"
+msgid ""
+"Optional. Default: `5.0`. Must be greater than `0`. Invalid values fall "
+"back to the default."
+msgstr "可选。默认值：`5.0`。必须大于 `0`。无效值回退到默认值。"
 
 #: ../../source/user_guide/feature_guide/rfork.md
 msgid "**rfork_seed_key_separator**"
@@ -286,114 +283,251 @@ msgid ""
 " topology before the planner will treat them as interchangeable seeds."
 msgstr "这意味着两个实例必须在模型标识和部署拓扑上都达成一致，规划器才会将它们视为可互换的种子。"
 
+#: ../../source/user_guide/feature_guide/rfork.md:64
+msgid "Quantized Models"
+msgstr "量化模型"
+
 #: ../../source/user_guide/feature_guide/rfork.md:66
+msgid ""
+"For quantized models, RFork transfers tensors after Ascend weight post-"
+"processing instead of raw checkpoint parameters. The receiver first "
+"builds the same post-load tensor layout as the seed, then RFork copies "
+"the live NPU tensors used by inference."
+msgstr "对于量化模型，RFork 在 Ascend 权重后处理后传输张量，而不是原始检查点参数。接收方首先构建与种子相同的加载后张量布局，然后 RFork 复制推理使用的活跃 NPU 张量。"
+
+#: ../../source/user_guide/feature_guide/rfork.md:68
+msgid ""
+"This path handles Ascend quantization changes such as weight "
+"transposition, NZ format conversion, packed weights, derived scale "
+"tensors, and MLA/SFA runtime tensors such as `W_UV` and `W_UK_T`. Empty "
+"tensors that were released during post-processing are not included in the"
+" transfer manifest."
+msgstr "该路径处理 Ascend 量化变化，例如权重转置、NZ 格式转换、打包权重、派生缩放张量，以及 MLA/SFA 运行时张量如 `W_UV` 和 `W_UK_T`。后处理期间释放的空张量不包含在传输清单中。"
+
+#: ../../source/user_guide/feature_guide/rfork.md:70
+msgid "When validating RFork for a quantized model:"
+msgstr "验证量化模型的 RFork 时："
+
+#: ../../source/user_guide/feature_guide/rfork.md:72
+msgid ""
+"Apply the same vLLM Ascend code to both the seed instance and the "
+"receiver instance."
+msgstr "对种子实例和接收实例应用相同的 vLLM Ascend 代码。"
+
+#: ../../source/user_guide/feature_guide/rfork.md:73
+msgid ""
+"Restart the planner and all vLLM instances after changing RFork code, "
+"because existing seeds keep their old transfer metadata."
+msgstr "更改 RFork 代码后重启规划器和所有 vLLM 实例，因为现有种子保留其旧的传输元数据。"
+
+#: ../../source/user_guide/feature_guide/rfork.md:74
+msgid ""
+"Use a new `model_deploy_strategy_name` after changing model arguments or "
+"RFork code, so the planner does not match a receiver with an incompatible"
+" old seed."
+msgstr "更改模型参数或 RFork 代码后使用新的 `model_deploy_strategy_name`，以便规划器不会将接收方与不兼容的旧种子匹配。"
+
+#: ../../source/user_guide/feature_guide/rfork.md:75
+msgid ""
+"A successful RFork transfer logs `transfer weights starts` and `transfer "
+"weights time`. The fallback path logs `RFork transfer failed`."
+msgstr "成功的 RFork 传输会记录 `transfer weights starts` 和 `transfer weights time`。回退路径会记录 `RFork transfer failed`。"
+
+#: ../../source/user_guide/feature_guide/rfork.md:77
+msgid "Tested Models"
+msgstr "已测试模型"
+
+#: ../../source/user_guide/feature_guide/rfork.md:79
+msgid ""
+"The following table records models that have been explicitly tested with "
+"RFork weight transfer. A model should be added here only after RFork "
+"transfer succeeds and the loaded instance passes basic inference "
+"validation."
+msgstr "下表记录了已明确使用 RFork 权重传输测试过的模型。只有在 RFork 传输成功且加载的实例通过基本推理验证后，才应将模型添加到此表中。"
+
+#: ../../source/user_guide/feature_guide/rfork.md
+msgid "Model"
+msgstr "模型"
+
+#: ../../source/user_guide/feature_guide/rfork.md
+msgid "Precision / Quantization"
+msgstr "精度 / 量化"
+
+#: ../../source/user_guide/feature_guide/rfork.md
+msgid "Hardware"
+msgstr "硬件"
+
+#: ../../source/user_guide/feature_guide/rfork.md
+msgid "Validation Status"
+msgstr "验证状态"
+
+#: ../../source/user_guide/feature_guide/rfork.md
+msgid "Notes"
+msgstr "备注"
+
+#: ../../source/user_guide/feature_guide/rfork.md
+msgid "Qwen2.5-7B"
+msgstr "Qwen2.5-7B"
+
+#: ../../source/user_guide/feature_guide/rfork.md
+msgid "BF16"
+msgstr "BF16"
+
+#: ../../source/user_guide/feature_guide/rfork.md
+msgid "A2"
+msgstr "A2"
+
+#: ../../source/user_guide/feature_guide/rfork.md
+msgid "Tested"
+msgstr "已验证"
+
+#: ../../source/user_guide/feature_guide/rfork.md
+msgid "RFork transfer has been validated."
+msgstr "RFork 传输已验证通过。"
+
+#: ../../source/user_guide/feature_guide/rfork.md
+msgid "Qwen3-32B"
+msgstr "Qwen3-32B"
+
+#: ../../source/user_guide/feature_guide/rfork.md
+msgid "Qwen3-235B-A22B"
+msgstr "Qwen3-235B-A22B"
+
+#: ../../source/user_guide/feature_guide/rfork.md
+msgid "DeepSeek-V4-Flash-W8A8-MTP"
+msgstr "DeepSeek-V4-Flash-W8A8-MTP"
+
+#: ../../source/user_guide/feature_guide/rfork.md
+msgid "W8A8"
+msgstr "W8A8"
+
+#: ../../source/user_guide/feature_guide/rfork.md
+msgid "RFork transfer with MTP draft model has been validated."
+msgstr "带 MTP 草稿模型的 RFork 传输已验证通过。"
+
+#: ../../source/user_guide/feature_guide/rfork.md
+msgid "GLM5-W4A8"
+msgstr "GLM5-W4A8"
+
+#: ../../source/user_guide/feature_guide/rfork.md
+msgid "W4A8"
+msgstr "W4A8"
+
+#: ../../source/user_guide/feature_guide/rfork.md
+msgid "Kimi2.5-W4A8"
+msgstr "Kimi2.5-W4A8"
+
+#: ../../source/user_guide/feature_guide/rfork.md:92
 msgid "Example Commands & Placeholders"
 msgstr "示例命令与占位符"
 
-#: ../../source/user_guide/feature_guide/rfork.md:68
-msgid "Replace parts in `` `<...>` `` before running."
-msgstr "运行前请替换 `` `<...>` `` 中的内容。"
+#: ../../source/user_guide/feature_guide/rfork.md:94
+msgid "Replace parts in `<...>` before running."
+msgstr "运行前请替换 `<...>` 中的内容。"
 
-#: ../../source/user_guide/feature_guide/rfork.md:70
+#: ../../source/user_guide/feature_guide/rfork.md:96
 msgid "1. Install YuanRong TransferEngine"
 msgstr "1.安装 YuanRong TransferEngine"
 
-#: ../../source/user_guide/feature_guide/rfork.md:76
+#: ../../source/user_guide/feature_guide/rfork.md:102
 msgid "2. Start the Planner"
 msgstr "2.启动规划器"
 
-#: ../../source/user_guide/feature_guide/rfork.md:78
+#: ../../source/user_guide/feature_guide/rfork.md:104
 msgid ""
 "A simple planner implementation is provided at "
 "[`rfork_planner.py`](../../../../examples/rfork/rfork_planner.py)."
-msgstr ""
-一个简单的规划器实现位于 [`rfork_planner.py`](../../../../examples/rfork/rfork_planner.py)。"
+msgstr "一个简单的规划器实现位于 [`rfork_planner.py`](../../../../examples/rfork/rfork_planner.py)。"
 
-#: ../../source/user_guide/feature_guide/rfork.md:86
+#: ../../source/user_guide/feature_guide/rfork.md:112
 msgid "3. Start vLLM Instances"
 msgstr "3.启动 vLLM 实例"
 
-#: ../../source/user_guide/feature_guide/rfork.md:88
+#: ../../source/user_guide/feature_guide/rfork.md:114
 msgid ""
 "Use the same RFork startup command for both the first instance and later "
 "instances in the same deployment."
 msgstr "在同一部署中，对第一个实例和后续实例使用相同的 RFork 启动命令。"
 
-#: ../../source/user_guide/feature_guide/rfork.md:90
+#: ../../source/user_guide/feature_guide/rfork.md:116
 msgid ""
 "For the first instance, the planner usually has no compatible seed yet, "
 "so RFork falls back to the default loader. After loading finishes, that "
 "instance starts its local seed service and reports itself to the planner."
-msgstr ""
-对于第一个实例，规划器通常还没有兼容的种子，因此 RFork 会回退到默认加载器。加载完成后，该实例会启动其本地种子服务，并向规划器上报自身。"
+msgstr "对于第一个实例，规划器通常还没有兼容的种子，因此 RFork 回退到默认加载器。加载完成后，该实例启动其本地种子服务并向规划器报告。"
 
-#: ../../source/user_guide/feature_guide/rfork.md:92
+#: ../../source/user_guide/feature_guide/rfork.md:118
 msgid ""
 "For later instances, if the planner can allocate a compatible seed, RFork"
 " will try to transfer weights from the existing seed instance before "
 "falling back to the default loader."
-msgstr ""
-对于后续实例，如果规划器能分配到一个兼容的种子，RFork 会在回退到默认加载器之前尝试从现有种子实例传输权重。"
+msgstr "对于后续实例，如果规划器能分配兼容的种子，RFork 将尝试从现有种子实例传输权重，否则回退到默认加载器。"
 
-#: ../../source/user_guide/feature_guide/rfork.md:109
+#: ../../source/user_guide/feature_guide/rfork.md:135
 msgid "Placeholder Descriptions"
 msgstr "占位符说明"
 
-#: ../../source/user_guide/feature_guide/rfork.md:111
+#: ../../source/user_guide/feature_guide/rfork.md:137
 msgid "`<model_path>`: Model path or model identifier passed to `vllm serve`."
 msgstr "`<model_path>`：传递给 `vllm serve` 的模型路径或模型标识符。"
 
-#: ../../source/user_guide/feature_guide/rfork.md:112
+#: ../../source/user_guide/feature_guide/rfork.md:138
 msgid "`<served_model_name>`: Service name exposed by vLLM."
 msgstr "`<served_model_name>`：vLLM 暴露的服务名称。"
 
-#: ../../source/user_guide/feature_guide/rfork.md:113
+#: ../../source/user_guide/feature_guide/rfork.md:139
 msgid "`<planner_ip>`: IP address or hostname of the RFork planner."
 msgstr "`<planner_ip>`：RFork 规划器的 IP 地址或主机名。"
 
-#: ../../source/user_guide/feature_guide/rfork.md:114
+#: ../../source/user_guide/feature_guide/rfork.md:140
 msgid "`<planner_port>`: Listening port of the RFork planner."
 msgstr "`<planner_port>`：RFork 规划器的监听端口。"
 
-#: ../../source/user_guide/feature_guide/rfork.md:115
+#: ../../source/user_guide/feature_guide/rfork.md:141
 msgid ""
 "`<model_url>`: Stable model identity string used to build the RFork seed "
 "key."
 msgstr "`<model_url>`：用于构建 RFork 种子键的稳定模型标识字符串。"
 
-#: ../../source/user_guide/feature_guide/rfork.md:116
+#: ../../source/user_guide/feature_guide/rfork.md:142
 msgid ""
 "`<deploy_strategy>`: Stable deployment-strategy name used to build the "
 "RFork seed key."
 msgstr "`<deploy_strategy>`：用于构建 RFork 种子键的稳定部署策略名称。"
 
-#: ../../source/user_guide/feature_guide/rfork.md:117
+#: ../../source/user_guide/feature_guide/rfork.md:143
 msgid "`<port>`: Serving port of the vLLM instance being started."
 msgstr "`<port>`：正在启动的 vLLM 实例的服务端口。"
 
-#: ../../source/user_guide/feature_guide/rfork.md:121
+#: ../../source/user_guide/feature_guide/rfork.md:147
 msgid "Note & Caveats"
 msgstr "注意事项"
 
-#: ../../source/user_guide/feature_guide/rfork.md:123
+#: ../../source/user_guide/feature_guide/rfork.md:149
 msgid ""
 "RFork requires `YuanRong TransferEngine` at runtime. If the package is "
 "missing, RFork cannot initialize the transfer backend."
 msgstr "RFork 在运行时需要 `YuanRong TransferEngine`。如果缺少该包，RFork 无法初始化传输后端。"
 
-#: ../../source/user_guide/feature_guide/rfork.md:124
+#: ../../source/user_guide/feature_guide/rfork.md:150
 msgid ""
 "If RFORK is used, **each worker process** must bind a listening port. "
 "That port is assigned randomly."
 msgstr "如果使用 RFORK，**每个工作进程**必须绑定一个监听端口。该端口是随机分配的。"
 
-#: ../../source/user_guide/feature_guide/rfork.md:125
+#: ../../source/user_guide/feature_guide/rfork.md:151
+msgid ""
+"RFork weight transfer does not support "
+"`additional_config.layer_sharding`. If `--load-format rfork` is used "
+"together with `layer_sharding`, RFork transfer is bypassed and the model "
+"is loaded through the default model loader."
+msgstr "RFork 权重传输不支持 `additional_config.layer_sharding`。如果 `--load-format rfork` 与 `layer_sharding` 同时使用，RFork 传输将被绕过，模型通过默认模型加载器加载。"
+
+#: ../../source/user_guide/feature_guide/rfork.md:152
 msgid ""
 "The example "
 "[`rfork_planner.py`](../../../../examples/rfork/rfork_planner.py) is only"
 " a simple mock implementation. If you need stronger scheduling, capacity "
 "management, or production-grade availability behavior, implement your own"
 " planner based on the RFork seed protocol."
-msgstr ""
-示例 [`rfork_planner.py`](../../../../examples/rfork/rfork_planner.py) 只是一个简单的模拟实现。"
-如果您需要更强的调度、容量管理或生产级可用性行为，请基于 RFork 种子协议实现您自己的规划器。"
+msgstr "示例 [`rfork_planner.py`](../../../../examples/rfork/rfork_planner.py) 仅是一个简单的模拟实现。如果您需要更强的调度、容量管理或生产级可用性行为，请基于 RFork 种子协议实现您自己的规划器。"

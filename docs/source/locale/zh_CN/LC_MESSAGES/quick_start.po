@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version:  vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-06-07 05:04+0000\n"
+"POT-Creation-Date: 2026-07-02 07:02+0000\n"
 "PO-Revision-Date: 2025-07-18 10:09+0800\n"
 "Last-Translator: \n"
 "Language: zh_CN\n"
@@ -161,8 +161,7 @@ msgstr "== 2.10.0"
 msgid ""
 "Required for vllm-ascend, No need to install manually, it will be auto "
 "installed in below steps"
-msgstr ""
-"vllm-ascend 所需，无需手动安装，将在以下步骤中自动安装"
+msgstr "vllm-ascend 所需，无需手动安装，将在以下步骤中自动安装"
 
 #: ../../source/quick_start.md
 msgid "torch"
@@ -172,8 +171,7 @@ msgstr "torch"
 msgid ""
 "Required for torch-npu and vllm, No need to install manually, it will be "
 "auto installed in below steps"
-msgstr ""
-"torch-npu 和 vllm 所需，无需手动安装，将在以下步骤中自动安装"
+msgstr "torch-npu 和 vllm 所需，无需手动安装，将在以下步骤中自动安装"
 
 #: ../../source/quick_start.md
 msgid "NNAL"
@@ -254,7 +252,9 @@ msgid ""
 " them in the cached files.`), run the following commands to use "
 "ModelScope as an alternative:"
 msgstr ""
-"如果遇到 Hugging Face 连接错误（例如 `We couldn't connect to 'https://huggingface.co' to load the files, and couldn't find them in the cached files.`），请运行以下命令使用 ModelScope 作为替代："
+"如果遇到 Hugging Face 连接错误（例如 `We couldn't connect to "
+"'https://huggingface.co' to load the files, and couldn't find them in the"
+" cached files.`），请运行以下命令使用 ModelScope 作为替代："
 
 #: ../../source/quick_start.md:166
 msgid "This section shows ascend platform is successfully detected in vllm:"
@@ -266,8 +266,8 @@ msgstr "以下部分显示最终输出："
 
 #: ../../source/quick_start.md:184
 msgid ""
-"This section shows process exits after offline inference, and is does not"
-" affect actual inference:"
+"This section shows process exits after offline inference, and does not "
+"affect actual inference:"
 msgstr "以下部分显示离线推理后进程退出，不影响实际推理："
 
 #: ../../source/quick_start.md
