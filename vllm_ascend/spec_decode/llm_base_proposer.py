@@ -501,9 +501,16 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 if torch.equal(layer_module.shared_head.head.weight, model.lm_head.weight):
                     layer_module.shared_head.head = model.lm_head
 
-        # MTP draft model always runs in eager mode (FDO is not supported for draft).
-        # Disable cuda graph for the draft proposer to prevent graph dispatch.
-        if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs() and self.use_cuda_graph:
+        # On Ascend, Gemma4 MTP draft model runs in eager mode (FDO is not
+        # supported for the draft). Disable cuda graph only for Gemma4 MTP so
+        # other MTP models that can run their draft under full cudagraph are
+        # unaffected.
+        if (
+            self.speculative_config is not None
+            and self.speculative_config.use_gemma4_mtp()
+            and self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs()
+            and self.use_cuda_graph
+        ):
             self.use_cuda_graph = False
 
     def _maybe_share_topk_indices(self, target_language_model: nn.Module) -> None:
