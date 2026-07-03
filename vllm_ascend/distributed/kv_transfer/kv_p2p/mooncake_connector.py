@@ -769,8 +769,10 @@ class KVCacheRecvingThread(threading.Thread):
 
             try:
                 return extract_layer_index(layer_name, num_attn_module)
-            except Exception:
-                return layer_idx
+            except (AssertionError, IndexError) as e:
+                raise RuntimeError(
+                    f"Failed to extract PP layer index from layer_name={layer_name}, layer_idx={layer_idx}."
+                ) from e
 
         def pp_layer_pairs(group_idx: int, prefill_pp_rank: int) -> list[tuple[int, int]]:
             local_group_spec, local_layer_indices = self.kv_group2layeridx[group_idx]

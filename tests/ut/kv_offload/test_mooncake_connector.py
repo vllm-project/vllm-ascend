@@ -89,7 +89,9 @@ def make_agent_metadata(**overrides: Any) -> MooncakeAgentMetadata:
     metadata: dict[str, Any] = {
         "engine_id": "engine1",
         "te_rpc_port": 9090,
-        "kv_group2layeridx": {0: ({"kv_cache_spec_type": "FullAttentionSpec", "layer_names": ["layer_0"]}, [0])},
+        "kv_group2layeridx": {
+            0: ({"kv_cache_spec_type": "FullAttentionSpec", "layer_names": ["model.layers.0.self_attn"]}, [0])
+        },
         "block_size": 16,
         "kv_caches_base_addr": [[12345678]],
         "block_size_scale": [[1]],
@@ -670,7 +672,7 @@ class TestCoreFunctionality(unittest.TestCase):
         self.ready_event = threading.Event()
         self.mock_queue = MagicMock()
         self.vllm_config = MockVllmConfig()
-        self.kv_caches: dict[str, Any] = {"layer_0": (MagicMock(), MagicMock())}
+        self.kv_caches: dict[str, Any] = {"model.layers.0.self_attn": (MagicMock(), MagicMock())}
         self.thread = KVCacheRecvingThread(
             tp_rank=0,
             tp_size=4,
@@ -702,7 +704,7 @@ class TestCoreFunctionality(unittest.TestCase):
             "remote_block_size": 16,
         }
         self.thread.kv_group2layeridx = {
-            0: ({"kv_cache_spec_type": "FullAttentionSpec", "layer_names": ["layer_0"]}, [0])
+            0: ({"kv_cache_spec_type": "FullAttentionSpec", "layer_names": ["model.layers.0.self_attn"]}, [0])
         }
         self.thread.remote_kv_group2layeridx["remote_engine"][6666] = self.thread.kv_group2layeridx
         self.thread.group_compress_ratios = {0: 1}
@@ -772,8 +774,8 @@ class TestCoreFunctionality(unittest.TestCase):
             0: (
                 {
                     "kv_cache_spec_type": "UniformTypeKVCacheSpecs",
-                    "layer_names": ["layer_0"],
-                    "kv_cache_spec": {"layer_0": {"compress_ratio": "4"}},
+                    "layer_names": ["model.layers.0.self_attn"],
+                    "kv_cache_spec": {"model.layers.0.self_attn": {"compress_ratio": "4"}},
                 },
                 [0],
             )
@@ -2411,7 +2413,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
             0: (
                 {
                     "kv_cache_spec_type": "UniformTypeKVCacheSpecs",
-                    "kv_cache_spec": {"layer_0": {"compress_ratio": 4}},
+                    "kv_cache_spec": {"model.layers.0.self_attn": {"compress_ratio": 4}},
                 },
                 [0],
             )
