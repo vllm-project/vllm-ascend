@@ -2540,9 +2540,7 @@ class NPUModelRunner(GPUModelRunner):
 
         output_spec_token_ids = None
         use_padded_batch = False
-        if use_pp_spec_decode:
-            self._draft_token_ids = None
-            self._draft_token_req_ids = None
+        early_pp_padded_drafter = False
         if self.speculative_config:
             use_padded_batch = (
                 self.speculative_config.use_eagle()
@@ -2550,11 +2548,14 @@ class NPUModelRunner(GPUModelRunner):
                 or self.speculative_config.uses_extract_hidden_states()
                 or self.speculative_config.use_ngram_gpu()
             ) and not self.speculative_config.disable_padded_drafter_batch
-            if (
+            early_pp_padded_drafter = (
                 use_pp_spec_decode
                 and not self.use_async_scheduling
                 and use_padded_batch
-            ):
+            )
+            if early_pp_padded_drafter:
+                self._draft_token_ids = None
+                self._draft_token_req_ids = None
                 with record_function_or_nullcontext("draft_token"):
                     propose_draft_token_ids(sampler_output.sampled_token_ids)
 
@@ -2576,9 +2577,10 @@ class NPUModelRunner(GPUModelRunner):
 
         with record_function_or_nullcontext("draft_token"):
             if self.speculative_config:
-                if use_padded_batch and (
-                    not use_pp_spec_decode or self.use_async_scheduling
-                ):
+                if not early_pp_padded_drafter:
+                    self._draft_token_ids = None
+                    self._draft_token_req_ids = None
+                if use_padded_batch and not early_pp_padded_drafter:
                     # EAGLE speculative decoding can use the GPU sampled tokens
                     # as inputs, and does not need to wait for bookkeeping to finish.
                     propose_draft_token_ids(sampler_output.sampled_token_ids)
