@@ -138,6 +138,9 @@ jobs:
           - name: GLM_5_1_PD_in64k_bs16-90
             config_file_path: GLM_5_1_PD_in64k_bs16-90.yaml
             size: 4
+          - name: kimi-k2_5-w4a8-ep-16k-1k-TPOT50
+            config_file_path: Kimi-K2.5-W4A8-16k-1k-TPOT50.yaml
+            size: 4
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version: a3
