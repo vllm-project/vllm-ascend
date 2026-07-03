@@ -187,6 +187,32 @@ def afd_ffn_compute(
     padded_hidden_states_shape = prepare_output.padded_hidden_states_shape
     pertoken_scale = prepare_output.pertoken_scale
 
+    # 1b. 对 topk_ids/topk_weights 做与 hidden_states 相同的 pad 和 TP split。
+    # 正常 forward_impl 中 select_experts 在 prepare 之后(quant_method.apply 内)
+    # 调用,因此 topk_ids 自然与 prepared 后的 hidden_states 形状一致。AFD 路径下,
+    # topk_ids/topk_weights 在 Attention 侧、FFN 的 prepare 之前计算,并通过 P2P
+    # 传输到 FFN 侧,仍保持原始 num_tokens 行数,未经过 pad/split。
+    # prepare 对 hidden_states 的处理分两步(条件独立):
+    #   ① Pad: 当 not flash_comm_v1_enabled 且 not enable_shared_expert_dp 且 pad_size>0
+    #   ② Split: 当 not flash_comm_v1_enabled 且 not enable_shared_expert_dp 且 tp_size>1
+    # topk_ids/topk_weights 必须同步这两步,否则 npu_moe_distribute_dispatch_v2
+    # 会因 x 与 expert_ids 行数不一致而报 "The x and expert_ids should be 2D" 错误。
+    # 注意:TP=1 时 pad 仍会执行(跨 DP rank 对齐),所以 pad 条件不能依赖 tp_size>1。
+    prepare_finalize = moe_comm_method.prepare_finalize
+    if (topk_ids is not None
+            and not _EXTRA_CTX.flash_comm_v1_enabled
+            and not self.enable_shared_expert_dp):
+        target_pad_length = _EXTRA_CTX.padded_num_tokens
+        pad_size = target_pad_length - prepare_finalize.num_tokens
+        if pad_size > 0:
+            topk_ids = F.pad(topk_ids, (0, 0, 0, pad_size))
+            topk_weights = F.pad(topk_weights, (0, 0, 0, pad_size))
+        if prepare_finalize.tp_size > 1:
+            topk_ids = torch.tensor_split(
+                topk_ids, prepare_finalize.tp_size, dim=0)[prepare_finalize.tp_rank]
+            topk_weights = torch.tensor_split(
+                topk_weights, prepare_finalize.tp_size, dim=0)[prepare_finalize.tp_rank]
+
     fused_scale_flag = (
         _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2
         and get_ascend_config().enable_fused_mc2 == 1
