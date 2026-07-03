@@ -58,6 +58,7 @@ def build_token_dispatch_input_fixture(
     comm_quant_mode: int | None = None,
     act_quant_type: torch.dtype | None = None,
     is_per_channel_weight: bool = False,
+    mc2_mask: torch.Tensor | None = None,
 ) -> MoETokenDispatchInput:
     mxfp_spec = None
     if quant_type in (QuantType.MXFP8, QuantType.MXFP4):
@@ -69,7 +70,7 @@ def build_token_dispatch_input_fixture(
         routing=MoERoutingParams(
             expert_map=expert_map,
             global_redundant_expert_num=global_redundant_expert_num,
-            mc2_mask=None,
+            mc2_mask=mc2_mask,
             apply_router_weight_on_input=apply_router_weight_on_input,
             pertoken_scale=pertoken_scale,
         ),
@@ -90,7 +91,6 @@ class TestTokenDispatcherWithMC2(TestBase):
         mock_config = MagicMock()
 
         mock_config.scheduler_config.max_num_seqs = 256
-        mock_config.scheduler_config.decode_max_num_seqs = 256
 
         mock_config.compilation_config.custom_ops = ["all"]
 
@@ -99,6 +99,13 @@ class TestTokenDispatcherWithMC2(TestBase):
         mock_config.parallel_config.tensor_parallel_size = 1
 
         self.mock_get_config.return_value = mock_config
+        self.mc2_tokens_capacity = 128
+        self.mc2_capacity_patch = patch(
+            "vllm_ascend.ops.fused_moe.token_dispatcher.get_mc2_tokens_capacity",
+            return_value=self.mc2_tokens_capacity,
+        )
+        self.mock_get_mc2_tokens_capacity = self.mc2_capacity_patch.start()
+
         self.mc2_group = MagicMock()
         self.mc2_group.device_group.return_value._get_backend.return_value.get_hccl_comm_name.return_value = "hccl_123"
         self.mc2_group.rank_in_group = 0
@@ -143,13 +150,16 @@ class TestTokenDispatcherWithMC2(TestBase):
         self.skip_allreduce_patch = patch(
             "vllm_ascend.ops.fused_moe.token_dispatcher.should_skip_allreduce_across_dp_group", return_value=False
         )
-        self.skip_allreduce_patch.start()
+        self.mock_skip_allreduce = self.skip_allreduce_patch.start()
 
         kwargs = {"with_quant": False, "top_k": 8, "num_experts": 128}
         self.dispatcher = TokenDispatcherWithMC2(**kwargs)
 
     def tearDown(self):
+        self.config_patcher.stop()
+        self.mc2_capacity_patch.stop()
         self.mc2_group_patch.stop()
+        self.rank_group_patch.stop()
         self.forward_context_patch.stop()
         self.ascend_soc_version_patch.stop()
         self.ascend_config_patch.stop()
@@ -162,6 +172,57 @@ class TestTokenDispatcherWithMC2(TestBase):
         self.assertEqual(self.dispatcher.ep_world_size, 8)
         self.assertTrue(self.dispatcher.enable_dispatch_v2)
         self.assertTrue(self.dispatcher.need_extra_args)
+        self.assertEqual(self.dispatcher.global_bs, 0)
+
+    def test_init_uses_mc2_capacity_for_non_uniform_global_bs(self):
+        self.mock_get_config.return_value.parallel_config.tensor_parallel_size = 4
+        self.mock_skip_allreduce.return_value = True
+
+        dispatcher = TokenDispatcherWithMC2(with_quant=False, top_k=8, num_experts=128)
+
+        self.assertEqual(dispatcher.global_bs, 256)
+
+    def test_get_dispatch_mc2_kwargs_with_skip_allreduce_omits_mc2_mask(self):
+        self.mock_get_config.return_value.parallel_config.tensor_parallel_size = 4
+        self.mock_skip_allreduce.return_value = True
+        dispatcher = TokenDispatcherWithMC2(with_quant=False, top_k=8, num_experts=128)
+
+        hidden_states = torch.randn(10, 128)
+        topk_ids = torch.randint(0, 8, (10, 1))
+        topk_weights = torch.randn(10, 1)
+        expert_map = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
+        mc2_mask = torch.tensor([True, False, True, False])
+        token_dispatch_input = build_token_dispatch_input_fixture(
+            hidden_states=hidden_states,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            expert_map=expert_map,
+            mc2_mask=mc2_mask,
+        )
+
+        kwargs = dispatcher.get_dispatch_mc2_kwargs(token_dispatch_input)
+
+        self.assertEqual(kwargs["global_bs"], 256)
+        self.assertNotIn("x_active_mask", kwargs)
+
+    def test_get_dispatch_mc2_kwargs_without_skip_allreduce_keeps_mc2_mask(self):
+        hidden_states = torch.randn(10, 128)
+        topk_ids = torch.randint(0, 8, (10, 1))
+        topk_weights = torch.randn(10, 1)
+        expert_map = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
+        mc2_mask = torch.tensor([True, False, True, False])
+        token_dispatch_input = build_token_dispatch_input_fixture(
+            hidden_states=hidden_states,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            expert_map=expert_map,
+            mc2_mask=mc2_mask,
+        )
+
+        kwargs = self.dispatcher.get_dispatch_mc2_kwargs(token_dispatch_input)
+
+        self.assertEqual(kwargs["global_bs"], 0)
+        self.assertIs(kwargs["x_active_mask"], mc2_mask)
 
     def test_get_dispatch_mc2_kwargs_without_quant(self):
         hidden_states = torch.randn(10, 128)
