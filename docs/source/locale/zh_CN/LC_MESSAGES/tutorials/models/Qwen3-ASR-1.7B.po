@@ -1,15 +1,8 @@
-# SOME DESCRIPTIVE TITLE.
-# Copyright (C) 2025, vllm-ascend team
-# This file is distributed under the same license as the vllm-ascend
-# package.
-# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
-#
-#, fuzzy
 msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-05-22 04:30+0000\n"
+"POT-Creation-Date: 2026-07-02 07:02+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -37,15 +30,15 @@ msgid ""
 "native support for long audio and streaming inference, and deep "
 "optimization for Ascend NPU hardware."
 msgstr ""
-"发布的Qwen3-ASR-1.7B是Qwen团队开发的轻量级高性能自动语音识别(ASR)模型。它在中英文多场景语音、中文方言、多语言及歌唱场景中提供行业领先的识别精度，原生支持长音频和流式推理，并针对Ascend NPU硬件进行了深度优化。"
+"发布的Qwen3-ASR-1.7B是Qwen团队开发的轻量级高性能自动语音识别(ASR)模型。它在中英文多场景语音、中文方言、多语言及歌唱场景中提供行业领先的识别精度，原生支持长音频和流式推理，并针对Ascend"
+" NPU硬件进行了深度优化。"
 
 #: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:7
 msgid ""
 "This document will show the main verification steps of the model, "
 "including supported features, feature configuration, environment "
 "preparation, single-node deployment, accuracy and performance evaluation."
-msgstr ""
-"本文档将展示该模型的主要验证步骤，包括支持特性、特性配置、环境准备、单节点部署、精度和性能评估。"
+msgstr "本文档将展示该模型的主要验证步骤，包括支持特性、特性配置、环境准备、单节点部署、精度和性能评估。"
 
 #: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:9
 msgid "Environment Preparation"
@@ -58,188 +51,102 @@ msgstr "模型权重"
 #: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:13
 msgid ""
 "`Qwen3-ASR-1.7B`(BF16 version): requires 1 Ascend 910B (with 1 x 64G "
-"NPUs). [Download model "
-"weight](https://modelscope.cn/models/Qwen/Qwen3-ASR-1.7B)"
+"NPUs)."
 msgstr ""
-"`Qwen3-ASR-1.7B`(BF16版本)：需要1个Ascend 910B（1 x 64G NPU）。[下载模型权重](https://modelscope.cn/models/Qwen/Qwen3-ASR-1.7B)"
+"`Qwen3-ASR-1.7B`(BF16版本)：需要1个Ascend 910B（1 x 64G "
+"NPU）。[下载模型权重](https://modelscope.cn/models/Qwen/Qwen3-ASR-1.7B)"
 
 #: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:15
 msgid ""
-"It is recommended to download the model weight to the shared directory of"
-" multiple nodes, such as `/root/.cache/`"
+"`Qwen3-ASR-1.7B`(BF16 version): requires 1 Ascend 310P (with 1 x 48G "
+"NPUs). [Download model "
+"weight](https://modelscope.cn/models/Qwen/Qwen3-ASR-1.7B)."
 msgstr ""
-"建议将模型权重下载到多节点共享目录，例如`/root/.cache/`"
+"`Qwen3-ASR-1.7B`(BF16版本)：需要1个Ascend 310P（1 x 48G "
+"NPU）。[下载模型权重](https://modelscope.cn/models/Qwen/Qwen3-ASR-1.7B)。"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:17
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:18
+msgid ""
+"It is recommended to download the model weight to the shared directory of"
+" multiple nodes, such as `/root/.cache/`."
+msgstr "建议将模型权重下载到多节点共享目录，例如`/root/.cache/`。"
+
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:20
 msgid "Installation"
 msgstr "安装"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:19
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:22
 msgid "`Qwen3-ASR-1.7B` is supported in `vllm-ascend`."
 msgstr "`Qwen3-ASR-1.7B`在`vllm-ascend`中得到支持。"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:21
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:24
 msgid "You can use our official docker image to run `Qwen3-ASR-1.7B` directly."
 msgstr "您可以直接使用我们的官方docker镜像运行`Qwen3-ASR-1.7B`。"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:44
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:47
 msgid ""
 "In addition, if you don't want to use the docker image as above, you can "
 "also build all from source:"
-msgstr ""
-"此外，如果您不想像上面那样使用docker镜像，也可以从源码构建所有内容："
+msgstr "此外，如果您不想像上面那样使用docker镜像，也可以从源码构建所有内容："
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:46
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:49
 msgid ""
 "Install `vllm-ascend` from source, refer to "
 "[installation](../../installation.md)."
-msgstr ""
-"从源码安装`vllm-ascend`，请参考[安装](../../installation.md)。"
+msgstr "从源码安装`vllm-ascend`，请参考[安装](../../installation.md)。"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:48
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:51
 msgid "Deployment"
 msgstr "部署"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:63
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:53
+msgid "Atlas 300I A2 2UP"
+msgstr "Atlas 300I A2 2UP"
+
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:64
+msgid "Atlas 300I DUO"
+msgstr "Atlas 300I DUO"
+
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:77
 msgid "Functional Verification"
 msgstr "功能验证"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:65
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:79
 msgid "Once your server is started, you can query the model with input prompts:"
 msgstr "服务器启动后，您可以使用输入提示词查询模型："
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:81
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:95
 msgid "Accuracy Evaluation"
 msgstr "精度评估"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:83
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:97
 msgid ""
 "After all samples were processed, transcription quality was measured "
 "using:"
-msgstr ""
-"处理完所有样本后，使用以下指标衡量转录质量："
+msgstr "处理完所有样本后，使用以下指标衡量转录质量："
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:85
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:99
 msgid "WER (Word Error Rate) for word-level recognition accuracy"
 msgstr "WER（词错误率）用于词级识别精度"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:86
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:100
 msgid "CER (Character Error Rate) for character-level recognition accuracy"
 msgstr "CER（字符错误率）用于字符级识别精度"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:88
-msgid "The current evaluation results are:"
-msgstr "当前评估结果为："
-
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:50
-msgid "Category"
-msgstr "类别"
-
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:50
-msgid "Dataset"
-msgstr "数据集"
-
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:50
-msgid "Metric"
-msgstr "指标"
-
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:50
-msgid "Result"
-msgstr "结果"
-
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:50
-msgid "Accuracy"
-msgstr "精度"
-
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:50
-msgid "librispeech_asr / clean / test"
-msgstr "librispeech_asr / clean / test"
-
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:50
-msgid "Total Samples"
-msgstr "总样本数"
-
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:50
-msgid "500"
-msgstr "500"
-
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:50
-msgid "Success"
-msgstr "成功"
-
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:50
-msgid "Failure"
-msgstr "失败"
-
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:50
-msgid "0"
-msgstr "0"
-
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:50
-msgid "WER"
-msgstr "WER"
-
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:50
-msgid "0.035"
-msgstr "0.035"
-
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:50
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:97
-msgid "Performance"
-msgstr "性能"
-
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:99
-msgid "Baseline Result"
-msgstr "基线结果"
-
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:101
-msgid ""
-"In the current evaluation, **Qwen3-ASR-1.7B** processed **100 samples** "
-"in approximately **57 seconds**, achieving an average throughput of "
-"**1.73 samples/s** under the current online serving setup."
-msgstr ""
-"在当前评估中，**Qwen3-ASR-1.7B**在约**57秒**内处理了**100个样本**，在当前在线服务配置下实现了**1.73 samples/s**的平均吞吐量。"
-
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:50
-msgid "LibriSpeech test/clean (100 samples)"
-msgstr "LibriSpeech test/clean (100个样本)"
-
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:50
-msgid "100"
-msgstr "100"
-
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:50
-msgid "Total Runtime"
-msgstr "总运行时间"
-
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:50
-msgid "57 s"
-msgstr "57秒"
-
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:50
-msgid "Average Throughput"
-msgstr "平均吞吐量"
-
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:50
-msgid "1.73 samples/s"
-msgstr "1.73 samples/s"
-
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:109
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:102
 msgid "Remarks"
 msgstr "备注"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:111
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:104
 msgid ""
 "This result reflects end-to-end serving performance, including audio "
 "preprocessing, request construction, API communication, inference, and "
 "response parsing. Actual performance may vary depending on hardware, "
 "concurrency, audio length, and deployment configuration."
-msgstr ""
-"该结果反映了端到端服务性能，包括音频预处理、请求构建、API通信、推理和响应解析。实际性能可能因硬件、并发数、音频长度和部署配置而异。"
+msgstr "该结果反映了端到端服务性能，包括音频预处理、请求构建、API通信、推理和响应解析。实际性能可能因硬件、并发数、音频长度和部署配置而异。"
 
-#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:113
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:106
 msgid ""
 "Further benchmarking is recommended for latency distribution, concurrent "
 "throughput, long-audio scenarios, and system resource utilization."
-msgstr ""
-"建议进一步对延迟分布、并发吞吐量、长音频场景和系统资源利用率进行基准测试。"
+msgstr "建议进一步对延迟分布、并发吞吐量、长音频场景和系统资源利用率进行基准测试。"
