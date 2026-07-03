@@ -313,8 +313,8 @@ jobs:
 
   merge-image:
     runs-on: linux-amd64-cpu-32-hk
-    container:
-      image: ${{ inputs.image }}
+    # container:
+    #   image: ${{ inputs.image }}
     needs: build-push-digest
     if: ${{ inputs.should_push && !inputs.temp_only }}
     permissions:
@@ -416,8 +416,8 @@ jobs:
   merge-image-temp:
     name: merge-image-temp
     runs-on: linux-amd64-cpu-32-hk
-    container:
-      image: ${{ inputs.image }}
+    # container:
+    #   image: ${{ inputs.image }}
     needs: build-push-digest
     if: ${{ inputs.should_push && inputs.temp_only }}
     permissions:
