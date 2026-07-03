@@ -236,22 +236,6 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         token_dispatch_input: MoETokenDispatchInput,
     ):
         kwargs_mc2 = self.get_dispatch_mc2_kwargs(token_dispatch_input)
-        _x = kwargs_mc2.get("x")
-        _expert_ids = kwargs_mc2.get("expert_ids")
-        logger.info(
-            "AFD token_dispatch [before dispatch_v2]: "
-            "x.shape=%s, dim=%s, dtype=%s | "
-            "expert_ids.shape=%s, dim=%s, dtype=%s | "
-            "enable_dispatch_v2=%s, global_bs=%s",
-            tuple(_x.shape) if _x is not None else None,
-            _x.dim() if _x is not None else None,
-            _x.dtype if _x is not None else None,
-            tuple(_expert_ids.shape) if _expert_ids is not None else None,
-            _expert_ids.dim() if _expert_ids is not None else None,
-            _expert_ids.dtype if _expert_ids is not None else None,
-            self.enable_dispatch_v2,
-            self.global_bs,
-        )
         output = (
             torch_npu.npu_moe_distribute_dispatch_v2(**kwargs_mc2)
             if self.enable_dispatch_v2

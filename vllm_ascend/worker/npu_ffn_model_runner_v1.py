@@ -464,7 +464,7 @@ class NPUFFNModelRunner(NPUModelRunner, GPUFFNModelRunner):
                     model_instance=self.model,
                     afd_metadata=afd_metadata,
                     afd_comm_stream=self.ffn_comm_stream,
-                    num_tokens=num_tokens_across_dp[0] if num_tokens_across_dp is not None else 0,
+                    num_tokens=num_tokens_across_dp[self.parallel_config.data_parallel_rank].item() if num_tokens_across_dp is not None else 0,
                     num_tokens_across_dp=num_tokens_across_dp):
             for layer_idx in range(0, self.num_layers):
                 layer_multistream = ffn_multistream_enable and (layer_idx > 0)
