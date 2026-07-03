@@ -552,17 +552,12 @@ class FusedMC2CommImpl(MoECommMethod):
         )
         weight1 = _as_tensor_list(fused_experts_input.weights.w1, "w1")
         weight2 = _as_tensor_list(fused_experts_input.weights.w2, "w2")
-        # Per the CANN mega_moe interface doc (torch_extension/.../mega_moe.md),
-        # the A8W4-INT weight spec is dtype ``INT4(INT32)`` + format ``FRACTAL_NZ``,
-        # where "INT4(INT32)" means the real INT4 data is reinterpreted to INT32
-        # before being passed (8 int4 packed per int32), with l1 shape
-        # (hidden, 2*intermediate_hidden // 8). That is EXACTLY what the W4A8
-        # quant method already produces: pack_int4_to_int8 -> maybe_trans_nz
-        # (FRACTAL_NZ) -> pack_to_int32 (view int8->int32). So the weights must
-        # be passed through UNCHANGED — do NOT reinterpret them back to int8.
-        # (A previous ``view(torch.int8)`` here was wrong: it both changed the
-        # required dtype and misread the NZ layout, corrupting W4A8 results.)
-        # W8A8 weights are already int8 + FRACTAL_NZ, also passed as-is.
+        # A8W4-INT MegaMoe reads N from weight1.storageShape.lastDim treated as int8 (N = lastDim*2)
+        # and checks weight2.dim0 == N/2, so the weights MUST be int8-shaped (two int4 per byte), NOT
+        # the eight-int4-per-int32 packing (that makes the op read N four times too small and fail
+        # CheckWeight2Input). The op prototype also REQUIRES FRACTAL_NZ per expert. The W4A8 quant
+        # method therefore builds per-expert int8 + FRACTAL_NZ lists (cann_mega_moe_*_weight_list) and
+        # they are passed through as-is here. W8A8 weights are already int8 + FRACTAL_NZ, also as-is.
         weight_scales1 = _as_tensor_list(fused_experts_input.weights.w1_scale, "w1_scale")
         weight_scales2 = _as_tensor_list(fused_experts_input.weights.w2_scale, "w2_scale")
         # MegaMoe requires per-expert weight scales to be 1-D. The W4A8 method
@@ -638,6 +633,13 @@ class FusedMC2CommImpl(MoECommMethod):
         self,
         fused_experts_input: MoEFusedExpertsInput,
     ):
+        # FIX(mega all-route): the shared expert (and any unquantized MoE) is QuantType.NONE and
+        # cannot go through MegaMoe (which handles W8A8/W4A8/MXFP only). All-route now sends every
+        # MoE layer here, so delegate unquantized layers to the generic base path
+        # (dispatch -> unified_apply_mlp -> combine), which uses their intact weights. Quantized
+        # routed experts (whose standard weights are freed for MegaMoe) still take the path below.
+        if fused_experts_input.quant.quant_type == QuantType.NONE:
+            return MoECommMethod.fused_experts(self, fused_experts_input)
         assert not (fused_experts_input.weights.w1_scale is None or fused_experts_input.weights.w2_scale is None), (
             "w1_scale and w2_scale cannot be None for FusedMC2CommImpl."
         )

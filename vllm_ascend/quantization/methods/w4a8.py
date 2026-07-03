@@ -735,14 +735,19 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         # Packs 2 int4 into 1 int8 on-the-fly to mirror the modelslim new_quant_version path
         layer.w13_weight.data = self.pack_int4_to_int8(layer.w13_weight.data)
         layer.w2_weight.data = self.pack_int4_to_int8(layer.w2_weight.data)
-        layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
-        layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
-        layer.w13_weight.data = self.pack_to_int32(layer.w13_weight.data)
-        layer.w2_weight.data = self.pack_to_int32(layer.w2_weight.data)
+        # FIX(mega W4A8 all-route): with MegaMoe on, keep ND int8 (skip trans_nz + pack_to_int32);
+        # _maybe_build_cann_mega_moe_lists casts each expert slice to FRACTAL_NZ individually. See
+        # the modelslim path below for the full rationale. Non-mega keeps the standard NZ-int32 form.
+        _mega_nd = get_ascend_config().enable_fused_mc2 == 2 and not self.dynamic_eplb
+        if _mega_nd:
+            self._maybe_build_cann_mega_moe_lists(layer, layer.w13_weight.data, layer.w2_weight.data)
+        else:
+            layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
+            layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
+            layer.w13_weight.data = self.pack_to_int32(layer.w13_weight.data)
+            layer.w2_weight.data = self.pack_to_int32(layer.w2_weight.data)
 
-        self._maybe_build_cann_mega_moe_lists(layer)
-
-    def _maybe_build_cann_mega_moe_lists(self, layer):
+    def _maybe_build_cann_mega_moe_lists(self, layer, mega_w13=None, mega_w2=None):
         """Build per-expert tensor lists for the CANN MegaMoe path.
 
         Activated when ``enable_fused_mc2 == 2`` and dynamic EPLB is disabled.
@@ -754,14 +759,45 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         """
         if get_ascend_config().enable_fused_mc2 != 2 or self.dynamic_eplb:
             return
-        layer.cann_mega_moe_w13_weight_list = list(layer.w13_weight.data.unbind(dim=0))
-        layer.cann_mega_moe_w2_weight_list = list(layer.w2_weight.data.unbind(dim=0))
-        layer.cann_mega_moe_w13_weight_scale_list = list(layer.w13_weight_scale.data.unbind(dim=0))
-        layer.cann_mega_moe_w2_weight_scale_list = list(layer.w2_weight_scale.data.unbind(dim=0))
+        if mega_w13 is None:
+            mega_w13 = layer.w13_weight.data
+        if mega_w2 is None:
+            mega_w2 = layer.w2_weight.data
+        # FIX(mega W4A8 per-expert NZ): the op prototype REQUIRES FRACTAL_NZ for the weights (bare
+        # ND int8 => EZ1009 dtype/format mismatch). W4A8 also needs per-expert bias, so listLen must
+        # == E (bias listLen must match weight listLen, each bias 1-D). But casting the whole 3D
+        # tensor to NZ then unbind(dim=0) DROPS the NZ format tag on the 2D slices => op reads NZ
+        # bytes as ND => garbage. Resolution: unbind the ND int8 FIRST (contiguous, correct bytes),
+        # then cast EACH 2D slice to NZ individually so each carries its own NZ tag.
+        import torch as _torch
+
+        def _to_nz_list(nd_w, weight_param):
+            # Per-expert NZ cast, then free the ND backing IMMEDIATELY (drop param ref) and return
+            # the memory to the allocator, so peak stays ~1 layer over base instead of 2x whole layer.
+            # NOTE: s is a contiguous VIEW into the full (E,H,W) storage, so .contiguous() is a
+            # no-op and npu_format_cast would allocate output sized to the whole base tensor
+            # (~1 layer) per expert => OOM. .clone() detaches each slice into its own small
+            # storage so the NZ cast allocates only one expert's worth.
+            lst = [maybe_trans_nz(s.clone()) for s in nd_w.unbind(dim=0)]
+            weight_param.data = _torch.empty(0, dtype=nd_w.dtype, device=nd_w.device)
+            try:
+                _torch.npu.empty_cache()
+            except Exception:
+                pass
+            return lst
+
+        # All-route means the standard NZ-int32 GMM path is unused: keep only the per-expert NZ
+        # copies (net == one weight copy, same as base). Free w13 before building w2 to cap peak.
+        layer.cann_mega_moe_w13_weight_list = _to_nz_list(mega_w13, layer.w13_weight)
+        del mega_w13
+        layer.cann_mega_moe_w2_weight_list = _to_nz_list(mega_w2, layer.w2_weight)
+        del mega_w2
+        layer.cann_mega_moe_w13_weight_scale_list = [t.reshape(-1) for t in layer.w13_weight_scale.data.unbind(dim=0)]
+        layer.cann_mega_moe_w2_weight_scale_list = [t.reshape(-1) for t in layer.w2_weight_scale.data.unbind(dim=0)]
         if hasattr(layer, "w13_scale_bias"):
-            layer.cann_mega_moe_w13_scale_bias_list = list(layer.w13_scale_bias.data.unbind(dim=0))
+            layer.cann_mega_moe_w13_scale_bias_list = [t.reshape(-1) for t in layer.w13_scale_bias.data.unbind(dim=0)]
         if hasattr(layer, "w2_scale_bias"):
-            layer.cann_mega_moe_w2_scale_bias_list = list(layer.w2_scale_bias.data.unbind(dim=0))
+            layer.cann_mega_moe_w2_scale_bias_list = [t.reshape(-1) for t in layer.w2_scale_bias.data.unbind(dim=0)]
 
     def process_weights_after_loading_modelslim(self, layer):
         layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2).contiguous()
@@ -788,8 +824,11 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
 
         if self.is_per_channel_weight:
             layer.w13_weight_scale.data = self.maybe_squeeze_per_channel_weight_scale(layer.w13_weight_scale.data)
-        layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
-        layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
+        # FIX(mega W4A8 ND all-route): keep weights as ND int8 when MegaMoe is on (skip trans_nz).
+        _mega_nd = get_ascend_config().enable_fused_mc2 == 2 and not self.dynamic_eplb
+        if not _mega_nd:
+            layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
+            layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
 
         if self.dynamic_eplb:
             layer.w13_weight_list = [weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)]
@@ -813,6 +852,13 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
             del layer.w13_scale_bias
             del layer.w2_scale_bias
         else:
-            layer.w13_weight.data = self.pack_to_int32(layer.w13_weight.data)
-            layer.w2_weight.data = self.pack_to_int32(layer.w2_weight.data)
-            self._maybe_build_cann_mega_moe_lists(layer)
+            # FIX(mega W4A8 ND all-route): with MegaMoe on, keep ND int8 (NO trans_nz, NO int32).
+            # ND is contiguous -> per-expert unbind is safe and carries no format tag to lose, so
+            # the op reads bytes correctly. Every forward (profile/prefill/decode/drafter) routes
+            # to MegaMoe (see select_moe_comm_method); the standard NZ-int32 GMM path is unused, so
+            # no dual weight copy is needed.
+            if _mega_nd:
+                self._maybe_build_cann_mega_moe_lists(layer, layer.w13_weight.data, layer.w2_weight.data)
+            else:
+                layer.w13_weight.data = self.pack_to_int32(layer.w13_weight.data)
+                layer.w2_weight.data = self.pack_to_int32(layer.w2_weight.data)

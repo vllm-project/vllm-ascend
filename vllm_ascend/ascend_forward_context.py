@@ -242,6 +242,14 @@ def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len)
         # NOTE: To save memory, we cap the max number of tokens to 512.
         max_num_tokens = min(max_num_reqs * uniform_decode_query_len, 512)
     tp_size = vllm_config.parallel_config.tensor_parallel_size
+    # FIX(mega all-route): raise routing capacity so prefill also selects FUSED_MC2 (mega),
+    # capped at 512 (MegaMoe BS<=512). Serve sets max_num_batched_tokens<=512.
+    try:
+        from vllm_ascend.ascend_config import get_ascend_config as _gac
+        if _gac().enable_fused_mc2 == 2:
+            max_num_tokens = min(max(max_num_tokens, int(vllm_config.scheduler_config.max_num_batched_tokens)), 512)
+    except Exception:
+        pass
     # Use integer arithmetic for ceiling division.
     num_tokens_per_tp_rank = (max_num_tokens + tp_size - 1) // tp_size
     _mc2_tokens_capacity = num_tokens_per_tp_rank * tp_size
@@ -318,6 +326,10 @@ def select_moe_comm_method(
         # so opt-in here for the decode-shaped batch only. Prefill on A2 keeps
         # the existing ALLGATHER path until MegaMoe is validated for large M.
         fused_mc2_enable = get_ascend_config().enable_fused_mc2
+        # FIX(mega): profile+prefill+decode of the MAIN model route to MegaMoe (its W4A8 routed-expert
+        # standard weights are freed). The MTP drafter, however, runs a piecewise-compiled graph where
+        # the MegaMoe custom op fails on-device, so keep the drafter on the standard path (its weights
+        # are preserved by process_weights_after_loading via the is_draft/mtp guard).
         fused_decode_guard = get_ep_group().world_size <= 32 and (not is_draft_model)
         num_experts = vllm_config.model_config.get_num_experts()
         ep_world_size = (
@@ -328,8 +340,10 @@ def select_moe_comm_method(
         fused_mc2_eligible = (
             fused_mc2_enable == 2 and fused_decode_guard and _cann_megamoe_supported_by_config(vllm_config, quant_type)
         )
-        if in_profile_run and fused_mc2_eligible:
-            fused_mc2_eligible = False
+        # FIX(mega all-route): do NOT disable MegaMoe during profile_run. Weights are ND int8
+        # only (no standard NZ-int32 path), so profiling must also exercise MegaMoe. Shapes match
+        # because max_num_batched_tokens is capped to the MC2 capacity (<=512).
+        _ = in_profile_run
 
         if fused_mc2_eligible and num_tokens <= mc2_tokens_capacity:
             moe_comm_type = MoECommType.FUSED_MC2
