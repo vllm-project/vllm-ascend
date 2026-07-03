@@ -57,6 +57,7 @@ from vllm_ascend.models.deepseek_v4 import (
     get_spec_layer_idx_from_weight_name,
 )
 from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE
+from vllm_ascend.ops.fused_moe.experts_selector import select_experts
 from vllm_ascend.ops.triton.mul_add import muls_add_triton
 from vllm_ascend.utils import enable_dsa_cp
 
@@ -161,10 +162,11 @@ def afd_ffn_compute(
 ) -> torch.Tensor:
     """FFN-side MoE expert computation for AFD.
 
-    Mirrors ``AscendFusedMoE.forward_impl`` but skips the routing step
-    (``select_experts``) because ``topk_weights`` / ``topk_ids`` are already
-    computed on the attention side and received via P2P. Only the expert
-    GEMM (``fused_experts``) and the all-reduce (``finalize``) run here.
+    Mirrors ``AscendFusedMoE.forward_impl``. When ``compute_gate_on_attention``
+    is enabled, ``topk_weights`` / ``topk_ids`` are pre-computed on the
+    attention side and received via P2P, so ``select_experts`` is skipped.
+    When disabled (``topk_ids is None``), the FFN side computes routing
+    locally using the gate weight, exactly like ``forward_impl``.
     """
     from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
     from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl
@@ -173,19 +175,24 @@ def afd_ffn_compute(
 
     moe_comm_method = _EXTRA_CTX.moe_comm_method
 
-    logger.info(
-        "AFD afd_ffn_compute [before prepare]: "
-        "hidden_states.shape=%s, dim=%s, dtype=%s | "
-        "topk_ids.shape=%s, dim=%s, dtype=%s | "
-        "topk_weights.shape=%s, dim=%s, dtype=%s",
-        tuple(hidden_states.shape), hidden_states.dim(), hidden_states.dtype,
-        tuple(topk_ids.shape) if topk_ids is not None else None,
-        topk_ids.dim() if topk_ids is not None else None,
-        topk_ids.dtype if topk_ids is not None else None,
-        tuple(topk_weights.shape) if topk_weights is not None else None,
-        topk_weights.dim() if topk_weights is not None else None,
-        topk_weights.dtype if topk_weights is not None else None,
+    # 与 attention 侧 (forward_m2n) 保持一致：通过 compute_gate_on_attention 配置判断
+    # attention 侧: afd_config.compute_gate_on_attention=True → 计算 routing
+    # FFN 侧:      compute_gate_on_attention=False → 在此计算 routing
+    _fwd_ctx = get_forward_context()
+    _afd_connector = getattr(getattr(_fwd_ctx, "afd_metadata", None),
+                             "afd_connector", None)
+    _afd_config = getattr(_afd_connector, "afd_config", None)
+    ffn_side_gating = (
+        _afd_config is None
+        or not getattr(_afd_config, "compute_gate_on_attention", False)
     )
+    if ffn_side_gating:
+        assert router_logits is None and topk_ids is None, \
+            "FFN-side gating expects router_logits/topk_ids to be None"
+        router_logits = F.linear(hidden_states.float(), self.gate.weight)
+    else:
+        assert topk_ids is not None, \
+            "Attention-side gating expects topk_ids to be pre-computed"
 
     # 1. prepare — handles dispatch / padding (same as forward_impl).
     prepare_output = moe_comm_method.prepare(
@@ -196,23 +203,43 @@ def afd_ffn_compute(
         quant_type=self.quant_type,
     )
     hidden_states = prepare_output.hidden_states
+    router_logits = prepare_output.router_logits
     mc2_mask = prepare_output.mc2_mask
     padded_hidden_states_shape = prepare_output.padded_hidden_states_shape
     pertoken_scale = prepare_output.pertoken_scale
 
-    # 1b. 对 topk_ids/topk_weights 做与 hidden_states 相同的 pad 和 TP split。
-    # 正常 forward_impl 中 select_experts 在 prepare 之后(quant_method.apply 内)
-    # 调用,因此 topk_ids 自然与 prepared 后的 hidden_states 形状一致。AFD 路径下,
-    # topk_ids/topk_weights 在 Attention 侧、FFN 的 prepare 之前计算,并通过 P2P
-    # 传输到 FFN 侧,仍保持原始 num_tokens 行数,未经过 pad/split。
-    # prepare 对 hidden_states 的处理分两步(条件独立):
-    #   ① Pad: 当 not flash_comm_v1_enabled 且 not enable_shared_expert_dp 且 pad_size>0
-    #   ② Split: 当 not flash_comm_v1_enabled 且 not enable_shared_expert_dp 且 tp_size>1
-    # topk_ids/topk_weights 必须同步这两步,否则 npu_moe_distribute_dispatch_v2
-    # 会因 x 与 expert_ids 行数不一致而报 "The x and expert_ids should be 2D" 错误。
-    # 注意:TP=1 时 pad 仍会执行(跨 DP rank 对齐),所以 pad 条件不能依赖 tp_size>1。
+    # 1b. FFN-side gating: call select_experts with prepared tensors.
+    #     This mirrors forward_impl where select_experts runs inside
+    #     quant_method.apply AFTER prepare. The resulting topk_ids
+    #     naturally matches prepared hidden_states — no pad/split needed.
+    if ffn_side_gating:
+        input_ids = getattr(get_forward_context(), "input_ids", None)
+        topk_weights, topk_ids = select_experts(
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+            top_k=self.top_k,
+            use_grouped_topk=self.use_grouped_topk,
+            renormalize=self.renormalize,
+            topk_group=self.topk_group,
+            num_expert_group=self.num_expert_group,
+            custom_routing_function=self.custom_routing_function,
+            scoring_func=self.scoring_func,
+            routed_scaling_factor=self._original_routed_scaling_factor,
+            e_score_correction_bias=self.e_score_correction_bias,
+            num_experts=self.moe_config.num_experts,
+            input_ids=input_ids,
+            tid2eid=self.tid2eid,
+        )
+        topk_weights = topk_weights.to(torch.float)
+
+    # 1c. Attention 侧预计算的 topk_ids 需要 pad/split 对齐。
+    # FFN 侧 gating (ffn_side_gating=True) 时,select_experts 在 prepare 之后
+    # 调用,topk_ids 已与 prepared hidden_states 形状一致,跳过此块。
+    # 仅当 compute_gate_on_attention=True (attention 侧算好 topk_ids) 时执行:
+    #   topk_ids 在 Attention 侧、FFN 的 prepare 之前计算,通过 P2P 传输,
+    #   仍保持原始 num_tokens 行数,需同步 prepare 的 pad/split。
     prepare_finalize = moe_comm_method.prepare_finalize
-    if (topk_ids is not None
+    if (not ffn_side_gating
             and not _EXTRA_CTX.flash_comm_v1_enabled
             and not self.enable_shared_expert_dp):
         target_pad_length = _EXTRA_CTX.padded_num_tokens
@@ -225,22 +252,6 @@ def afd_ffn_compute(
                 topk_ids, prepare_finalize.tp_size, dim=0)[prepare_finalize.tp_rank]
             topk_weights = torch.tensor_split(
                 topk_weights, prepare_finalize.tp_size, dim=0)[prepare_finalize.tp_rank]
-
-    logger.info(
-        "AFD afd_ffn_compute [after pad/split]: "
-        "hidden_states.shape=%s, dim=%s | "
-        "topk_ids.shape=%s, dim=%s | "
-        "padded_num_tokens=%s, num_tokens=%s, tp_size=%s, "
-        "flash_comm_v1_enabled=%s, enable_shared_expert_dp=%s",
-        tuple(hidden_states.shape), hidden_states.dim(),
-        tuple(topk_ids.shape) if topk_ids is not None else None,
-        topk_ids.dim() if topk_ids is not None else None,
-        _EXTRA_CTX.padded_num_tokens,
-        prepare_finalize.num_tokens,
-        prepare_finalize.tp_size,
-        _EXTRA_CTX.flash_comm_v1_enabled,
-        self.enable_shared_expert_dp,
-    )
 
     fused_scale_flag = (
         _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2
