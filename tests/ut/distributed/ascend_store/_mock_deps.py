@@ -27,6 +27,7 @@ import logging
 import os
 import sys
 import types
+from dataclasses import dataclass
 from unittest.mock import MagicMock
 
 # ---------------------------------------------------------------------------
@@ -161,7 +162,11 @@ class _KVCacheBlock:
 _kv_cache_utils_mod.KVCacheBlock = _KVCacheBlock  # type: ignore[attr-defined]
 
 
+@dataclass(init=False)
 class _FakeKVCacheSpec:
+    block_size: int = 16
+    compress_ratio: int = 1
+
     def __init__(self, block_size=16, **kwargs):
         self.block_size = block_size
         for key, value in kwargs.items():

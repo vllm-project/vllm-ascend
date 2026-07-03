@@ -126,6 +126,9 @@ class AscendStoreCoordinator:
                 for index, (_, group_ids, _) in enumerate(self.attention_groups)
                 if any(_uses_reachable_mask(self.group_cache_families[group_id]) for group_id in group_ids)
             }
+        self.eagle_reachable_group_ids: set[int] = {
+            group_id for index in self.eagle_attn_group_indices for group_id in self.attention_groups[index][1]
+        }
 
     def find_longest_cache_hit(
         self,
@@ -183,7 +186,7 @@ class AscendStoreCoordinator:
                 end_block=num_chunks,
                 alignment_tokens=self.lcm_block_size,
                 kv_cache_spec=spec,
-                use_eagle=group_id in self.eagle_group_ids,
+                use_eagle=group_id in self.eagle_reachable_group_ids,
                 retention_interval=self.retention_interval,
                 num_prompt_tokens=num_prompt_tokens,
             )
