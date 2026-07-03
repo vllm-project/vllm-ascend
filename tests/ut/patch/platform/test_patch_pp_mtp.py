@@ -9,7 +9,10 @@ from vllm.config.model import ModelConfig
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.sample.rejection_sampler import PLACEHOLDER_TOKEN_ID
 
-from vllm_ascend.patch.platform.patch_pp_mtp import _update_pp_mtp_spec_token_ids
+from vllm_ascend.patch.platform.patch_pp_mtp import (
+    _update_pp_mtp_spec_token_ids,
+    _use_pp_ipc_runtime_patch,
+)
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 
@@ -62,6 +65,53 @@ def test_model_config_keeps_target_model_pp_validation(monkeypatch):
 
     with pytest.raises(NotImplementedError):
         ModelConfig.verify_with_parallel_config(model_config, parallel_config)
+
+
+@pytest.mark.parametrize(
+    (
+        "use_pp",
+        "speculative_config",
+        "async_scheduling",
+        "use_v2_model_runner",
+        "expected",
+    ),
+    [
+        (True, object(), False, False, True),
+        (True, None, True, False, True),
+        (True, None, False, False, True),
+        (False, object(), True, False, False),
+        (True, object(), True, True, False),
+    ],
+)
+def test_pp_ipc_runtime_patch_enabled_for_all_v1_pp(
+    use_pp,
+    speculative_config,
+    async_scheduling,
+    use_v2_model_runner,
+    expected,
+):
+    vllm_config = SimpleNamespace(
+        kv_transfer_config=None,
+        scheduler_config=SimpleNamespace(async_scheduling=async_scheduling),
+        speculative_config=speculative_config,
+        use_v2_model_runner=use_v2_model_runner,
+    )
+
+    assert _use_pp_ipc_runtime_patch(vllm_config, use_pp) is expected
+
+
+def test_pp_ipc_runtime_patch_skips_pd_prefill_node():
+    vllm_config = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(
+            is_kv_producer=True,
+            is_kv_consumer=False,
+        ),
+        scheduler_config=SimpleNamespace(async_scheduling=True),
+        speculative_config=object(),
+        use_v2_model_runner=False,
+    )
+
+    assert _use_pp_ipc_runtime_patch(vllm_config, use_pp=True) is False
 
 
 @pytest.mark.parametrize("async_scheduling", [False, True])
