@@ -22,6 +22,14 @@
 set -euo pipefail
 
 scversion="stable"
+shellcheck_args=(-S error -s bash)
+
+if [ -n "${SHELLCHECK_OPTS:-}" ]; then
+    # Split caller-provided options the same way shell would.
+    # shellcheck disable=SC2206
+    extra_shellcheck_args=(${SHELLCHECK_OPTS})
+    shellcheck_args+=("${extra_shellcheck_args[@]}")
+fi
 
 if [ -d "shellcheck-${scversion}" ]; then
     export PATH="$PATH:$(pwd)/shellcheck-${scversion}"
@@ -37,5 +45,6 @@ if ! [ -x "$(command -v shellcheck)" ]; then
     export PATH="$PATH:$(pwd)/shellcheck-${scversion}"
 fi
 
-find . -path ./.git -prune -o -name "*.sh" -print0 | \
-  xargs -0 sh -c "for f in \"\$@\"; do git check-ignore -q \"\$f\" || shellcheck -s bash \"\$f\"; done" --
+while IFS= read -r -d '' file; do
+    git check-ignore -q "$file" || shellcheck "${shellcheck_args[@]}" "$file"
+done < <(find . -path ./.git -prune -o -name "*.sh" -print0)
