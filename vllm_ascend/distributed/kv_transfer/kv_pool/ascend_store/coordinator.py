@@ -189,6 +189,7 @@ class AscendStoreCoordinator:
                 use_eagle=group_id in self.eagle_reachable_group_ids,
                 retention_interval=self.retention_interval,
                 num_prompt_tokens=num_prompt_tokens,
+                include_previous_alignment_boundary=True,
             )
             masks.append([True] * num_chunks if mask is None else mask)
         return tuple(masks)
@@ -385,7 +386,11 @@ def _reachable_block_mask(
     try:
         return reachable_block_mask(**kwargs)
     except TypeError as exc:
-        if "retention_interval" not in str(exc) and "num_prompt_tokens" not in str(exc):
+        if (
+            "retention_interval" not in str(exc)
+            and "num_prompt_tokens" not in str(exc)
+            and "include_previous_alignment_boundary" not in str(exc)
+        ):
             logger.debug("KV cache manager does not support reachable_block_mask kwargs: %s", exc)
             return reachable_block_mask(
                 start_block=kwargs["start_block"],
@@ -396,6 +401,7 @@ def _reachable_block_mask(
             )
         kwargs.pop("retention_interval", None)
         kwargs.pop("num_prompt_tokens", None)
+        kwargs.pop("include_previous_alignment_boundary", None)
         return reachable_block_mask(**kwargs)
 
 
