@@ -52,6 +52,9 @@ class NPUP2PAFDConnector(AFDConnectorBase):
         self.local_rank = local_rank
         self._initialized = False
         self.config = config
+        # Cache afd_config so forward_m2n can read compute_gate_on_attention
+        # without calling get_current_vllm_config() (which breaks under dynamo).
+        self.afd_config = config.afd_config
         self.backend = "hccl"
         self.attn_size = 0
         self.ffn_size = 0
