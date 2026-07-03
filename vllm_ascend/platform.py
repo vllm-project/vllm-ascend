@@ -74,6 +74,32 @@ _CUSTOM_OP_REGISTERED = False
 MAX_CAPTURE_SIZES_FOR_950 = 4
 
 
+def _get_npu_memory_info(
+    device: int | str | torch.device | None = None,
+) -> tuple[int, int]:
+    if device is None:
+        device = torch.npu.current_device()
+    elif isinstance(device, torch.device):
+        if device.type != "npu":
+            raise RuntimeError(f"Expected 'npu' device, got '{device.type}'")
+        device = device.index if device.index is not None else torch.npu.current_device()
+    elif isinstance(device, str):
+        if not device.startswith("npu"):
+            raise RuntimeError(f"Expected 'npu' device string, got '{device}'")
+        parts = device.split(":")
+        if len(parts) == 1:
+            device = torch.npu.current_device()
+        elif len(parts) == 2:
+            device = int(parts[1])
+        else:
+            raise RuntimeError(f"Invalid device string format: '{device}'")
+
+    return torch.npu.mem_get_info(device)
+
+
+torch.accelerator.get_memory_info = _get_npu_memory_info  # type: ignore[attr-defined]
+
+
 def config_deprecated_logging():
     """Configure deprecated logging format, when used deprecated codes
     in vllm-ascend.

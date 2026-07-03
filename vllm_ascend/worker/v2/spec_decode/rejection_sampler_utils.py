@@ -19,11 +19,18 @@
 
 import torch
 from vllm.triton_utils import tl, triton
-from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
-    _compute_block_stats_kernel,
-    _compute_global_lse,
-    _insert_resampled_kernel,
-)
+try:
+    from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
+        _compute_global_logsumexp as _compute_global_lse,
+        _compute_local_logits_stats_kernel as _compute_block_stats_kernel,
+        _insert_resampled_kernel,
+    )
+except ImportError:
+    from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
+        _compute_block_stats_kernel,
+        _compute_global_lse,
+        _insert_resampled_kernel,
+    )
 
 
 @triton.jit

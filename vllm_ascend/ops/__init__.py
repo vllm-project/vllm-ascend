@@ -15,12 +15,18 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import sys
+
 import torch
 from vllm.triton_utils import HAS_TRITON
 
-import vllm_ascend.ops.fused_moe.fused_moe  # noqa
-import vllm_ascend.ops.layernorm  # noqa
-import vllm_ascend.ops.register_custom_ops  # noqa
+_device_op_module = sys.modules.get("vllm_ascend.device.device_op")
+_device_op_initializing = _device_op_module is not None and not hasattr(_device_op_module, "DeviceOperator")
+
+if not _device_op_initializing:
+    import vllm_ascend.ops.fused_moe.fused_moe  # noqa
+    import vllm_ascend.ops.layernorm  # noqa
+    import vllm_ascend.ops.register_custom_ops  # noqa
 
 if HAS_TRITON:
     import vllm_ascend.ops.triton.linearnorm.split_qkv_rmsnorm_rope  # noqa
@@ -28,7 +34,8 @@ if HAS_TRITON:
     import vllm_ascend.ops.triton.linearnorm.split_qkv_tp_rmsnorm_rope
     import vllm_ascend.ops.triton.linearnorm.split_qkv_rmsnorm_rope_simt
 
-import vllm_ascend.ops.vocab_parallel_embedding  # noqa
+if not _device_op_initializing:
+    import vllm_ascend.ops.vocab_parallel_embedding  # noqa
 from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
 from vllm_ascend.ops.rotary_embedding import AscendDeepseekScalingRotaryEmbedding, AscendRotaryEmbedding
 
