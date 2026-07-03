@@ -82,9 +82,7 @@ class NPUOffloadingConnectorWorker(OffloadingConnectorWorker):
         return CanonicalKVCacheRef(
             tensor_idx=tensor_idx,
             page_size_bytes=(
-                ref_page_size_bytes
-                if ref_page_size_bytes is not None
-                else self._tensor_page_size_bytes(tensor)
+                ref_page_size_bytes if ref_page_size_bytes is not None else self._tensor_page_size_bytes(tensor)
             ),
         )
 
@@ -96,15 +94,11 @@ class NPUOffloadingConnectorWorker(OffloadingConnectorWorker):
         for kv_cache_group in self.spec.kv_cache_config.kv_cache_groups:
             group_kv_cache_spec = kv_cache_group.kv_cache_spec
             per_layer_specs = (
-                group_kv_cache_spec.kv_cache_specs
-                if isinstance(group_kv_cache_spec, UniformTypeKVCacheSpecs)
-                else {}
+                group_kv_cache_spec.kv_cache_specs if isinstance(group_kv_cache_spec, UniformTypeKVCacheSpecs) else {}
             )
 
             for layer_name in kv_cache_group.layer_names:
-                layer_kv_cache_spec = per_layer_specs.get(
-                    layer_name, group_kv_cache_spec
-                )
+                layer_kv_cache_spec = per_layer_specs.get(layer_name, group_kv_cache_spec)
                 layer_kv_cache = kv_caches[layer_name]
 
                 if isinstance(layer_kv_cache_spec, AttentionSpec):
@@ -114,9 +108,7 @@ class NPUOffloadingConnectorWorker(OffloadingConnectorWorker):
                                 layer_kv_cache,
                                 block_tensors,
                                 tensor_to_idx,
-                                ref_page_size_bytes=(
-                                    layer_kv_cache_spec.real_page_size_bytes
-                                ),
+                                ref_page_size_bytes=(layer_kv_cache_spec.real_page_size_bytes),
                             )
                         )
                     else:
@@ -158,9 +150,7 @@ class NPUOffloadingConnectorWorker(OffloadingConnectorWorker):
                     block_data_refs[layer_name].append(
                         CanonicalKVCacheRef(
                             tensor_idx=tensor_idx,
-                            page_size_bytes=replace(
-                                layer_kv_cache_spec, page_size_padded=None
-                            ).page_size_bytes,
+                            page_size_bytes=replace(layer_kv_cache_spec, page_size_padded=None).page_size_bytes,
                         )
                     )
                 else:
@@ -186,6 +176,4 @@ class NPUOffloadingConnector(OffloadingConnector):
         super().__init__(vllm_config, role, kv_cache_config)
         if role == KVConnectorRole.WORKER:
             assert self.connector_worker is not None
-            self.connector_worker = NPUOffloadingConnectorWorker(
-                self.connector_worker.spec
-            )
+            self.connector_worker = NPUOffloadingConnectorWorker(self.connector_worker.spec)

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 from typing_extensions import override
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.kv_offload.base import (
@@ -20,8 +20,6 @@ from vllm.v1.kv_offload.worker.worker import (
     TransferResult,
     TransferSpec,
 )
-
-logger = init_logger(__name__)
 
 DIRECTION_H2D = 0
 DIRECTION_D2H = 1
@@ -75,9 +73,7 @@ def compute_sub_block_ptrs(
     assert tensor.shape[1] % block_size_factor == 0
     sub_block_size = tensor.shape[1] // block_size_factor
     sub_offsets = np.arange(block_size_factor, dtype=np.uint64) * sub_block_size
-    all_ptrs = (
-        base_ptr + block_ids.astype(np.uint64)[:, np.newaxis] * row_stride
-    ) + sub_offsets[np.newaxis, :]
+    all_ptrs = (base_ptr + block_ids.astype(np.uint64)[:, np.newaxis] * row_stride) + sub_offsets[np.newaxis, :]
     flat = all_ptrs.ravel()
     output[:] = flat[skip_count : skip_count + num_sub_blocks]
 
@@ -144,19 +140,13 @@ class SingleDirectionNPUOffloadingHandler(OffloadingHandler):
 
         num_copy_ops = sum(
             group_size * len(group_data_refs)
-            for group_size, group_data_refs in zip(
-                group_sizes, self.kv_cache_groups_data_refs
-            )
+            for group_size, group_data_refs in zip(group_sizes, self.kv_cache_groups_data_refs)
         )
         batch_src, batch_dst, batch_sizes = (
-            self._buffer_pool.pop()
-            if self._buffer_pool
-            else _new_descriptor_buffers(num_copy_ops)
+            self._buffer_pool.pop() if self._buffer_pool else _new_descriptor_buffers(num_copy_ops)
         )
         if batch_src.numel() < num_copy_ops:
-            batch_src, batch_dst, batch_sizes = _new_descriptor_buffers(
-                num_copy_ops
-            )
+            batch_src, batch_dst, batch_sizes = _new_descriptor_buffers(num_copy_ops)
 
         src = batch_src[:num_copy_ops]
         dst = batch_dst[:num_copy_ops]
@@ -169,9 +159,7 @@ class SingleDirectionNPUOffloadingHandler(OffloadingHandler):
         dst_offset = 0
         op_idx = 0
         num_transfer_bytes = 0
-        for group_size, block_idx, group_data_refs in zip(
-            group_sizes, block_indices, self.kv_cache_groups_data_refs
-        ):
+        for group_size, block_idx, group_data_refs in zip(group_sizes, block_indices, self.kv_cache_groups_data_refs):
             if group_size == 0:
                 continue
 
@@ -180,12 +168,8 @@ class SingleDirectionNPUOffloadingHandler(OffloadingHandler):
             src_logical_blocks_count = group_size + src_logical_blocks_to_skip
             dst_logical_blocks_count = group_size + dst_logical_blocks_to_skip
 
-            src_blocks_count = cdiv(
-                src_logical_blocks_count, self.src_block_size_factor
-            )
-            dst_blocks_count = cdiv(
-                dst_logical_blocks_count, self.dst_block_size_factor
-            )
+            src_blocks_count = cdiv(src_logical_blocks_count, self.src_block_size_factor)
+            dst_blocks_count = cdiv(dst_logical_blocks_count, self.dst_block_size_factor)
             src_end_offset = src_offset + src_blocks_count
             dst_end_offset = dst_offset + dst_blocks_count
             assert src_end_offset <= len(src_blocks)
@@ -222,16 +206,8 @@ class SingleDirectionNPUOffloadingHandler(OffloadingHandler):
         assert op_idx == num_copy_ops
 
         stream = self._stream_pool.pop() if self._stream_pool else torch.npu.Stream()
-        start_event = (
-            self._event_pool.pop()
-            if self._event_pool
-            else torch.npu.Event(enable_timing=True)
-        )
-        end_event = (
-            self._event_pool.pop()
-            if self._event_pool
-            else torch.npu.Event(enable_timing=True)
-        )
+        start_event = self._event_pool.pop() if self._event_pool else torch.npu.Event(enable_timing=True)
+        end_event = self._event_pool.pop() if self._event_pool else torch.npu.Event(enable_timing=True)
 
         if self.npu_to_cpu:
             stream.wait_stream(torch.npu.current_stream())
@@ -241,9 +217,7 @@ class SingleDirectionNPUOffloadingHandler(OffloadingHandler):
         with torch.npu.stream(stream):
             start_event.record(stream)
             if num_copy_ops > 0:
-                torch.ops._C_ascend.swap_blocks_batch(
-                    src, dst, sizes, self.direction
-                )
+                torch.ops._C_ascend.swap_blocks_batch(src, dst, sizes, self.direction)
             end_event.record(stream)
 
         self._transfer_events[job_id] = end_event
@@ -266,9 +240,7 @@ class SingleDirectionNPUOffloadingHandler(OffloadingHandler):
         results: list[TransferResult] = []
         while self._transfers and self._transfers[0].end_event.query():
             transfer = self._transfers.popleft()
-            transfer_time = (
-                transfer.start_event.elapsed_time(transfer.end_event) * 1e-3
-            )
+            transfer_time = transfer.start_event.elapsed_time(transfer.end_event) * 1e-3
             results.append(
                 TransferResult(
                     job_id=transfer.job_id,
@@ -281,9 +253,7 @@ class SingleDirectionNPUOffloadingHandler(OffloadingHandler):
             self._stream_pool.append(transfer.stream)
             self._event_pool.append(transfer.end_event)
             self._event_pool.append(transfer.start_event)
-            self._buffer_pool.append(
-                (transfer.batch_src, transfer.batch_dst, transfer.batch_sizes)
-            )
+            self._buffer_pool.append((transfer.batch_src, transfer.batch_dst, transfer.batch_sizes))
             del self._transfer_events[transfer.job_id]
         return results
 
@@ -325,9 +295,7 @@ class CpuNpuOffloadingHandlers:
         cpu_tensors: list[torch.Tensor] = []
         for kv_cache_tensor in kv_caches.tensors:
             npu_page_size_bytes = kv_cache_tensor.page_size_bytes
-            npu_tensor = kv_cache_tensor.tensor.view(torch.int8).view(
-                (-1, npu_page_size_bytes)
-            )
+            npu_tensor = kv_cache_tensor.tensor.view(torch.int8).view((-1, npu_page_size_bytes))
             cpu_page_size_bytes = npu_page_size_bytes * block_size_factor
 
             if mmap_region is not None:

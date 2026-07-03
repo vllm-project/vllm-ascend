@@ -35,9 +35,7 @@ def _build_configs(num_cpu_blocks=1000, world_size=1, block_size=128, block_fact
         num_blocks=10,
         # 2 tensors * 1280 bytes = 2560 total -> 256 bytes / gpu block
         kv_cache_tensors=[SimpleNamespace(size=1280), SimpleNamespace(size=1280)],
-        kv_cache_groups=[
-            SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=block_size))
-        ],
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=block_size))],
     )
     return vllm_config, kv_cache_config, extra
 
@@ -54,9 +52,7 @@ def test_legacy_num_blocks_recovers_num_blocks():
 
 
 def test_legacy_num_blocks_honors_block_size_factor():
-    vllm_config, kv_cache_config, extra = _build_configs(
-        num_cpu_blocks=500, block_size=128, block_factor=4
-    )
+    vllm_config, kv_cache_config, extra = _build_configs(num_cpu_blocks=500, block_size=128, block_factor=4)
     npu_mod._set_cpu_bytes_from_legacy_num_blocks(vllm_config, kv_cache_config)
     kv_bytes_per_offloaded_block = (2560 // 10) * 1 * 4
     assert extra["cpu_bytes_to_use"] == 500 * kv_bytes_per_offloaded_block

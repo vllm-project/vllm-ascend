@@ -32,9 +32,7 @@ def _set_cpu_bytes_from_legacy_num_blocks(
     using the exact same per-block sizing the upstream spec uses, so that
     ``CPUOffloadingSpec`` recovers ``num_blocks == num_cpu_blocks``.
     """
-    extra_config: dict[str, Any] = (
-        vllm_config.kv_transfer_config.kv_connector_extra_config  # type: ignore[union-attr]
-    )
+    extra_config: dict[str, Any] = vllm_config.kv_transfer_config.kv_connector_extra_config  # type: ignore[union-attr]
     if extra_config.get("cpu_bytes_to_use") is not None:
         return
 
@@ -47,8 +45,7 @@ def _set_cpu_bytes_from_legacy_num_blocks(
 
     parallel_config = vllm_config.parallel_config
     context_parallel_factor = (
-        parallel_config.decode_context_parallel_size
-        * parallel_config.prefill_context_parallel_size
+        parallel_config.decode_context_parallel_size * parallel_config.prefill_context_parallel_size
     )
     gpu_block_sizes = {
         kv_cache_group.kv_cache_spec.block_size * context_parallel_factor
@@ -68,9 +65,7 @@ def _set_cpu_bytes_from_legacy_num_blocks(
 
     world_size = vllm_config.parallel_config.world_size
     total_gpu_kv_bytes = sum(t.size for t in kv_cache_config.kv_cache_tensors)
-    kv_bytes_per_block = (
-        total_gpu_kv_bytes // kv_cache_config.num_blocks
-    ) * world_size
+    kv_bytes_per_block = (total_gpu_kv_bytes // kv_cache_config.num_blocks) * world_size
     kv_bytes_per_offloaded_block = kv_bytes_per_block * block_size_factor
     extra_config["cpu_bytes_to_use"] = int(num_cpu_blocks) * kv_bytes_per_offloaded_block
 

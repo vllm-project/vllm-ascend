@@ -107,9 +107,7 @@ def store_block(
             while written < total:
                 n = os.write(fd, view_slice[written:])
                 if n <= 0:
-                    raise OSError(
-                        f"Short write: expected {total} bytes, wrote {written}"
-                    )
+                    raise OSError(f"Short write: expected {total} bytes, wrote {written}")
                 written += n
         finally:
             os.close(fd)
@@ -144,16 +142,12 @@ def load_block(
                 break  # EOF
             read_total += n
         if read_total < block_size:
-            raise OSError(
-                f"Short read: expected {block_size} bytes, read {read_total}"
-            )
+            raise OSError(f"Short read: expected {block_size} bytes, read {read_total}")
     except Exception:
         try:
             os.remove(source_path)
         except OSError as cleanup_exc:
-            logger.warning(
-                "Failed to remove unreadable file %s: %s", source_path, cleanup_exc
-            )
+            logger.warning("Failed to remove unreadable file %s: %s", source_path, cleanup_exc)
         raise
     finally:
         if fd is not None:
@@ -183,12 +177,9 @@ class AscendFileSystemTierManager(FileSystemTierManager):
         direct = getattr(os, "O_DIRECT", 0) if use_direct_io else 0
         if use_direct_io and direct == 0:
             logger.warning(
-                "use_direct_io=True but O_DIRECT is unavailable on this "
-                "platform; falling back to buffered I/O."
+                "use_direct_io=True but O_DIRECT is unavailable on this platform; falling back to buffered I/O."
             )
-        self._store_flags = (
-            os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_TRUNC | direct
-        )
+        self._store_flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_TRUNC | direct
         self._load_flags = os.O_RDONLY | direct
 
         super().__init__(

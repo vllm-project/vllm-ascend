@@ -93,10 +93,10 @@ kv_transfer_config = KVTransferConfig(
 - `spec_name`: Use `"NPUOffloadingSpec"` for CPU-only offload or `"NPUTieringOffloadingSpec"` for multi-tier offload. When the Ascend connector registry is initialized, upstream names `"CPUOffloadingSpec"` and `"TieringOffloadingSpec"` are also mapped to the NPU implementations.
 - `spec_module_path`: Must be `"vllm_ascend.kv_offload.npu"`.
 - `secondary_tiers`: Optional list of vLLM tiering backends used by `NPUTieringOffloadingSpec`. Each entry is a dict; common keys:
-  - `type`: Backend type. `"fs_python"` (the Ascend filesystem tier) is the default for disk-backed tiers (SSD/NFS/3FS).
-  - `root_dir`: Directory the tier writes block files into.
-  - `n_read_threads` / `n_write_threads`: Thread-pool sizes for the tier's I/O. For high-bandwidth backends (e.g. 3FS over RDMA) increasing these helps saturate parallel bandwidth.
-  - `use_direct_io` (default `false`): Re-enable `O_DIRECT`. Only for local filesystems/SSDs that support it with aligned buffers; leave `false` on 3FS/FUSE (where it raises `EINVAL`).
+    - `type`: Backend type. `"fs_python"` (the Ascend filesystem tier) is the default for disk-backed tiers (SSD/NFS/3FS).
+    - `root_dir`: Directory the tier writes block files into.
+    - `n_read_threads` / `n_write_threads`: Thread-pool sizes for the tier's I/O. For high-bandwidth backends (e.g. 3FS over RDMA) increasing these helps saturate parallel bandwidth.
+    - `use_direct_io` (default `false`): Re-enable `O_DIRECT`. Only for local filesystems/SSDs that support it with aligned buffers; leave `false` on 3FS/FUSE (where it raises `EINVAL`).
 
 ### Tuning the filesystem (SSD / 3FS) secondary tier
 
