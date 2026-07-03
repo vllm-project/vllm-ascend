@@ -16,6 +16,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+import gc
 import os
 import random
 
@@ -23,9 +24,11 @@ import pytest
 import torch
 from vllm import LLM, SamplingParams
 
-from tests.e2e.conftest import cleanup_dist_env_and_memory
+from tests.e2e.conftest import ModelName, cleanup_dist_env_and_memory, model_cache
 
-DEFAULT_MODEL = "Qwen/Qwen3-0.6B"
+os.environ["VLLM_BATCH_INVARIANT"] = "1"
+
+DEFAULT_MODEL = ModelName.QWEN3_06B
 
 
 @pytest.fixture(autouse=True)
@@ -90,7 +93,21 @@ def _extract_step_logprobs(request_output):
 
 
 @pytest.mark.timeout(1000)
-def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(monkeypatch: pytest.MonkeyPatch):
+@pytest.mark.model(
+    model_name=DEFAULT_MODEL,
+    max_num_seqs=int(os.getenv("VLLM_NEEDLE_BATCH_SIZE", "144")),
+    gpu_memory_utilization=float(os.getenv("VLLM_GPU_MEMORY_UTILIZATION", "0.95")),
+    max_model_len=int(os.getenv("VLLM_MAX_MODEL_LEN", "8192")),
+    dtype="bfloat16",
+    tensor_parallel_size=int(os.getenv("VLLM_TP_SIZE", "1")),
+    enable_prefix_caching=False,
+    distributed_executor_backend="mp",
+    extra_kwargs={"enforce_eager": True},
+)
+def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
+    vllm_runner,
+    monkeypatch: pytest.MonkeyPatch,
+):
     """
     Ensures that the same request (the 'needle' prompt) yields identical output
     whether run alone (bs=1) or mixed into a larger batch (e.g., bs=64),
@@ -116,17 +133,11 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(monkeypat
     random.seed(seed)
 
     # Allow overrides from environment (useful for CI tuning)
-    model = DEFAULT_MODEL
-
     num_trials = int(os.getenv("VLLM_NEEDLE_TRIALS", "5"))
     max_batch_size = int(os.getenv("VLLM_NEEDLE_BATCH_SIZE", "144"))
     min_random_prompt = int(os.getenv("VLLM_MIN_PROMPT", "1024"))
     max_random_prompt = int(os.getenv("VLLM_MAX_PROMPT", "2048"))
     assert max_batch_size >= 2, "Batch size should be >= 2 to mix needle."
-
-    # Keep GPU memory usage low to avoid startup allocation failures.
-    gpu_mem_util = float(os.getenv("VLLM_GPU_MEMORY_UTILIZATION", "0.95"))
-    max_model_len = int(os.getenv("VLLM_MAX_MODEL_LEN", "5120"))
 
     # Sampling parameters: longer outputs with a more random-sounding
     # continuation,but still deterministic due to fixed seed.
@@ -143,76 +154,63 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(monkeypat
 
     needle_prompt = "There once was a "
 
-    llm = None
-    try:
-        # Engine with bs=1 behavior
-        llm = LLM(
-            model=model,
-            max_num_seqs=max_batch_size,
-            gpu_memory_utilization=gpu_mem_util,
-            max_model_len=max_model_len,
-            dtype="bfloat16",
-            tensor_parallel_size=int(os.getenv("VLLM_TP_SIZE", "1")),
-            enable_prefix_caching=False,
-            enforce_eager=True,
-            distributed_executor_backend="mp",
-            # Enable for MOE models
-            # enable_expert_parallel=True,
+    # Baseline generation for the needle prompt alone.
+    baseline_out = vllm_runner.model.generate([needle_prompt], sampling)
+    assert len(baseline_out) == 1
+    assert len(baseline_out[0].outputs) >= 1
+    baseline_text = baseline_out[0].outputs[0].text
+
+    mismatches = 0
+
+    for trial in range(num_trials):
+        # Create a batch of size `max_batch_size` and insert the needle at
+        # a random index
+        prompts: list[str] = []
+        batch_size = random.randint(max_batch_size // 2, max_batch_size)
+        needle_pos = random.randint(0, batch_size - 1)
+        for i in range(batch_size):
+            if i == needle_pos:
+                prompts.append(needle_prompt)
+            else:
+                prompts.append(_random_prompt(min_random_prompt, max_random_prompt))
+
+        # Generate with the larger-batch engine
+        outputs = vllm_runner.model.generate(prompts, sampling)
+        # Find the needle output by position
+        needle_output = outputs[needle_pos]
+        assert needle_output.prompt == needle_prompt
+        assert len(needle_output.outputs) >= 1
+        text = needle_output.outputs[0].text
+
+        if text != baseline_text:
+            print(f"{text}\n\n== Not the same as ==\n\n{baseline_text}\n\n")
+            mismatches += 1
+
+    passes = num_trials - mismatches
+    # Dump how many passed vs failed
+    print(f"[determinism] total={num_trials}, passed={passes}, failed={mismatches}, max_batch_size={max_batch_size}")
+
+    if mismatches > 0:
+        pytest.fail(
+            f"Nondeterministic outputs detected: {mismatches} failed out "
+            f"of {num_trials} trials (max_batch_size={max_batch_size})."
         )
 
-        # Baseline generation for the needle prompt alone.
-        baseline_out = llm.generate([needle_prompt], sampling)
-        assert len(baseline_out) == 1
-        assert len(baseline_out[0].outputs) >= 1
-        baseline_text = baseline_out[0].outputs[0].text
 
-        mismatches = 0
-
-        for trial in range(num_trials):
-            # Create a batch of size `max_batch_size` and insert the needle at
-            # a random index
-            prompts: list[str] = []
-            batch_size = random.randint(max_batch_size // 2, max_batch_size)
-            needle_pos = random.randint(0, batch_size - 1)
-            for i in range(batch_size):
-                if i == needle_pos:
-                    prompts.append(needle_prompt)
-                else:
-                    prompts.append(_random_prompt(min_random_prompt, max_random_prompt))
-
-            # Generate with the larger-batch engine
-            outputs = llm.generate(prompts, sampling)
-            # Find the needle output by position
-            needle_output = outputs[needle_pos]
-            assert needle_output.prompt == needle_prompt
-            assert len(needle_output.outputs) >= 1
-            text = needle_output.outputs[0].text
-
-            if text != baseline_text:
-                print(f"{text}\n\n== Not the same as ==\n\n{baseline_text}\n\n")
-                mismatches += 1
-
-        passes = num_trials - mismatches
-        # Dump how many passed vs failed
-        print(
-            f"[determinism] total={num_trials}, passed={passes}, failed={mismatches}, max_batch_size={max_batch_size}"
-        )
-
-        if mismatches > 0:
-            pytest.fail(
-                f"Nondeterministic outputs detected: {mismatches} failed out "
-                f"of {num_trials} trials (max_batch_size={max_batch_size})."
-            )
-
-    finally:
-        del llm
-        cleanup_dist_env_and_memory()
-
-
-def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(monkeypatch: pytest.MonkeyPatch):
+@pytest.mark.model(
+    model_name=DEFAULT_MODEL,
+    max_num_seqs=144,
+    gpu_memory_utilization=float(os.getenv("VLLM_GPU_MEMORY_UTILIZATION", "0.95")),
+    max_model_len=8192,
+    dtype="bfloat16",
+    tensor_parallel_size=int(os.getenv("VLLM_TEST_TP_SIZE", "1")),
+    enable_prefix_caching=False,
+    distributed_executor_backend="mp",
+    extra_kwargs={"enforce_eager": True},
+)
+def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(vllm_runner, monkeypatch: pytest.MonkeyPatch):
     seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
     random.seed(seed)
-    model_name = DEFAULT_MODEL
     tp_size = int(os.getenv("VLLM_TEST_TP_SIZE", "1"))
 
     # For batch invariance, disable custom all-reduce to ensure deterministic
@@ -225,18 +223,6 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(monkeypatch: pytest.Monkey
         print(f"\n{'=' * 80}")
         print(f"BATCH INVARIANCE MODE: Disabling custom all-reduce (TP={tp_size})")
         print(f"{'=' * 80}\n")
-
-    llm = LLM(
-        model=model_name,
-        tensor_parallel_size=tp_size,
-        enable_prefix_caching=False,
-        max_num_seqs=32,
-        max_model_len=8192,
-        dtype="bfloat16",
-        gpu_memory_utilization=0.9,
-        enforce_eager=True,
-        distributed_executor_backend="mp",
-    )
 
     # Use more realistic prompts for better token generation
     prompts = [_random_prompt(10, 50) for i in range(32)]
@@ -258,7 +244,7 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(monkeypatch: pytest.Monkey
     bs1_tokens_per_prompt = []
     for idx, p in enumerate(prompts):
         print(f"\n[BS=1] Running prompt {idx}/{len(prompts)} - Preview: {p[:80]}...")
-        outs = llm.generate([p], sp, use_tqdm=False)
+        outs = vllm_runner.model.generate([p], sp, use_tqdm=False)
         assert len(outs) == 1
         step_logprobs, token_ids = _extract_step_logprobs(outs[0])
         if step_logprobs is None:
@@ -273,7 +259,7 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(monkeypatch: pytest.Monkey
     print(f"STARTING BS={len(prompts)} RUN (all prompts batched)")
     print("=" * 80 + "\n")
 
-    outs_batched = llm.generate(prompts, sp, use_tqdm=False)
+    outs_batched = vllm_runner.model.generate(prompts, sp, use_tqdm=False)
     assert len(outs_batched) == len(prompts)
     bsN_logprobs_per_prompt = []
     bsN_tokens_per_prompt = []
@@ -364,8 +350,7 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(monkeypatch: pytest.Monkey
                     }
                 )
                 break
-    del llm
-    cleanup_dist_env_and_memory()
+
     # Print summary of all failures
     if failed_prompts:
         print(f"\n{'=' * 80}")
@@ -399,25 +384,22 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(monkeypatch: pytest.Monkey
         pytest.fail(msg)
 
 
-def test_simple_generation(monkeypatch: pytest.MonkeyPatch):
+@pytest.mark.model(
+    model_name=DEFAULT_MODEL,
+    max_num_seqs=144,
+    gpu_memory_utilization=0.95,
+    max_model_len=8192,
+    dtype="float16",
+    tensor_parallel_size=int(os.getenv("VLLM_TP_SIZE", "1")),
+    enable_prefix_caching=False,
+    distributed_executor_backend="mp",
+    extra_kwargs={"enforce_eager": True},
+)
+def test_simple_generation(vllm_runner, monkeypatch: pytest.MonkeyPatch):
     """
     Simple test that runs the model with a basic prompt and prints the output.
     Useful for quick smoke testing and debugging.
     """
-    model = DEFAULT_MODEL
-
-    llm = LLM(
-        model=model,
-        max_num_seqs=1,
-        tensor_parallel_size=int(os.getenv("VLLM_TP_SIZE", "1")),
-        gpu_memory_utilization=0.9,
-        max_model_len=2048,
-        dtype="float16",
-        enable_prefix_caching=False,
-        enforce_eager=True,
-        distributed_executor_backend="mp",
-    )
-
     prompt = "The capital of France is"
     sampling_params = SamplingParams(
         temperature=0.0,
@@ -429,20 +411,15 @@ def test_simple_generation(monkeypatch: pytest.MonkeyPatch):
     print(f"Prompt: '{prompt}'")
     print(f"{'=' * 80}\n")
 
-    try:
-        outputs = llm.generate([prompt], sampling_params)
+    outputs = vllm_runner.model.generate([prompt], sampling_params)
 
-        assert len(outputs) == 1
-        output_text = outputs[0].outputs[0].text
+    assert len(outputs) == 1
+    output_text = outputs[0].outputs[0].text
 
-        print(f"Output: '{output_text}'")
-        print(f"\n{'=' * 80}")
-        print(f"Full completion: '{prompt}{output_text}'")
-        print(f"{'=' * 80}\n")
-
-    finally:
-        del llm
-        cleanup_dist_env_and_memory()
+    print(f"Output: '{output_text}'")
+    print(f"\n{'=' * 80}")
+    print(f"Full completion: '{prompt}{output_text}'")
+    print(f"{'=' * 80}\n")
 
 
 def test_logprobs_without_batch_invariance_should_fail(monkeypatch: pytest.MonkeyPatch):
@@ -455,6 +432,13 @@ def test_logprobs_without_batch_invariance_should_fail(monkeypatch: pytest.Monke
     The test will PASS if we detect differences (proving batch invariance matters).
     The test will FAIL if everything matches (suggesting batch invariance isn't needed).
     """
+    # CRITICAL: Clear model cache to free up memory before creating a new LLM instance
+    # This test uses different configuration (batch invariance disabled) so it cannot reuse cached models
+    model_cache.clear()
+
+    gc.collect()
+    torch.npu.empty_cache()
+
     # CRITICAL: Disable batch invariance for this test
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "0")
     seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
