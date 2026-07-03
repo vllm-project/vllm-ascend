@@ -76,7 +76,10 @@ class _NPUHandlersMixin:
     def create_handlers(self, kv_caches: CanonicalKVCaches) -> CpuNpuOffloadingHandlers:
         raise NotImplementedError
 
-    @override
+    # NOTE: no ``@override`` here -- this mixin has no base class, so the
+    # decorator would fail mypy (``--follow-imports skip`` hides the real base
+    # ``OffloadingSpec.get_handlers`` that the concrete specs override at
+    # runtime).
     def get_handlers(
         self, kv_caches: CanonicalKVCaches
     ) -> Iterator[tuple[type[LoadStoreSpec], type[LoadStoreSpec], OffloadingHandler]]:

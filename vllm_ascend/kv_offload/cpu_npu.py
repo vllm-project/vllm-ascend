@@ -4,7 +4,6 @@ from dataclasses import dataclass
 
 import numpy as np
 import torch
-from typing_extensions import override
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import is_pin_memory_available
@@ -120,7 +119,6 @@ class SingleDirectionNPUOffloadingHandler(OffloadingHandler):
         self._event_pool: list[torch.npu.Event] = []
         self._buffer_pool: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
 
-    @override
     def transfer_async(self, job_id: int, transfer_spec: TransferSpec) -> bool:
         src_spec, dst_spec = transfer_spec
         assert isinstance(src_spec, BlockIDsLoadStoreSpec)
@@ -235,7 +233,6 @@ class SingleDirectionNPUOffloadingHandler(OffloadingHandler):
         )
         return True
 
-    @override
     def get_finished(self) -> list[TransferResult]:
         results: list[TransferResult] = []
         while self._transfers and self._transfers[0].end_event.query():
@@ -257,14 +254,12 @@ class SingleDirectionNPUOffloadingHandler(OffloadingHandler):
             del self._transfer_events[transfer.job_id]
         return results
 
-    @override
     def wait(self, job_ids: set[int]) -> None:
         for job_id in job_ids:
             event = self._transfer_events.get(job_id)
             if event is not None:
                 event.synchronize()
 
-    @override
     def shutdown(self) -> None:
         while self._transfers:
             transfer = self._transfers.popleft()

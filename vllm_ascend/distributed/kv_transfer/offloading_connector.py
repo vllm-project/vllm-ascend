@@ -2,6 +2,7 @@ from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import replace
 from math import prod
+from typing import TypeAlias
 
 import torch
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
@@ -22,7 +23,7 @@ from vllm.v1.kv_offload.base import (
     CanonicalKVCacheTensor,
 )
 
-KVCacheValue = torch.Tensor | Sequence[torch.Tensor]
+KVCacheValue: TypeAlias = torch.Tensor | Sequence[torch.Tensor]
 
 
 class NPUOffloadingConnectorWorker(OffloadingConnectorWorker):
@@ -172,8 +173,15 @@ class NPUOffloadingConnectorWorker(OffloadingConnectorWorker):
 
 
 class NPUOffloadingConnector(OffloadingConnector):
+    # ``OffloadingConnector`` already sets this, but it comes from an unfollowed
+    # vLLM import (mypy runs with ``--follow-imports skip``), so its inherited
+    # type is undeterminable; re-declare it here so mypy can resolve reads and
+    # writes of ``self.connector_worker`` ("Cannot determine type of ...").
+    connector_worker: OffloadingConnectorWorker | None
+
     def __init__(self, vllm_config, role: KVConnectorRole, kv_cache_config):
         super().__init__(vllm_config, role, kv_cache_config)
         if role == KVConnectorRole.WORKER:
-            assert self.connector_worker is not None
-            self.connector_worker = NPUOffloadingConnectorWorker(self.connector_worker.spec)
+            base_worker = self.connector_worker
+            assert base_worker is not None
+            self.connector_worker = NPUOffloadingConnectorWorker(base_worker.spec)
