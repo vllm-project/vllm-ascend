@@ -431,7 +431,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         # dcp_size > 1 means no slicing
         self.assertEqual(len(store.put_calls), 1)
 
-    def test_handle_request_applies_store(self):
+    def test_handle_request_applies_store_mask(self):
         store = FakeStore([0, 0])
         db = MaskedFakeTokenDatabase(masks=([True, False],))
         t = KVCacheStoreSendingThread(
@@ -591,6 +591,33 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
         self.assertEqual(store.get_calls, [])
         self.assertIn("r1", t.get_and_clear_finished_requests())
         self.assertEqual(t.request_queue.task_done_calls, 1)
+
+    def test_handle_request_applies_load_mask(self):
+        store = FakeStore()
+        db = MaskedFakeTokenDatabase(masks=([True, False],))
+        t = KVCacheStoreRecvingThread(
+            m_store=store,
+            token_database=db,
+            block_size=16,
+            tp_rank=0,
+            dcp_size=1,
+            ready_event=threading.Event(),
+            invalid_block_ids=set(),
+            invalid_block_ids_lock=threading.Lock(),
+        )
+        load_spec = LoadSpec(vllm_cached_tokens=0, kvpool_cached_tokens=32, can_load=True, token_len=32)
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=32,
+            block_ids=[0, 1],
+            block_hashes=[b"h0", b"h1"],  # type: ignore[arg-type]
+            load_spec=load_spec,
+        )
+        t.request_queue.put(req)
+        t._handle_request(req)
+        keys, _, _ = store.get_calls[0]
+        self.assertEqual(len(keys), 1)
+
 
 class TestKVCacheStoreLayerSendingThread(unittest.TestCase):
     def _make_thread(self, exists_result=None, num_layers=2, enable_kv_event=False):
