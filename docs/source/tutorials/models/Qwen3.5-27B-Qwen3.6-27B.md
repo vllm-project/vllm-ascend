@@ -609,7 +609,7 @@ models = [
     dict(
         attr="service",
         type=VLLMCustomAPIChat,
-        abbr='vllm-api-general-chat',
+        abbr="vllm-api-general-chat",
         path="your_model_path",
         model="qwen3.5",
         request_rate=0,
