@@ -831,7 +831,11 @@ class AscendSFADCPImpl(AscendSFAImpl):
             key_rope=key_rope,
             layout_query="TND",
             layout_kv="PA_BSND",
-            sparse_mode=3,
+            # The no-CP indexer already applies the causal visibility rule.
+            # After DCP remaps topk indices to local KV positions, local KV
+            # length no longer shares the same coordinate system as global
+            # query length, so SFA must not apply its right-down causal crop.
+            sparse_mode=0,
             attention_mode=2,
             return_softmax_lse=True,
         )
