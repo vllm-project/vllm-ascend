@@ -27,6 +27,7 @@ import torch
 import torch_npu
 from vllm.config import get_current_vllm_config
 from vllm.distributed.parallel_state import get_ep_group
+from vllm.logger import init_logger
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.device.device_op import DeviceOperator
@@ -58,6 +59,9 @@ def _get_expert_token_nums_type(token_dispatch_input: MoETokenDispatchInput) -> 
     if token_dispatch_input.quant.use_w4a8_per_channel_gmm_swiglu:
         return EXPERT_TOKEN_NUMS_TYPE_COUNT
     return EXPERT_TOKEN_NUMS_TYPE_CUMSUM
+
+
+logger = init_logger(__name__)
 
 
 class MoETokenDispatcher(ABC, Generic[TMoECombineMetadata]):
@@ -235,6 +239,22 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         token_dispatch_input: MoETokenDispatchInput,
     ):
         kwargs_mc2 = self.get_dispatch_mc2_kwargs(token_dispatch_input)
+        _x = kwargs_mc2.get("x")
+        _expert_ids = kwargs_mc2.get("expert_ids")
+        logger.info(
+            "AFD token_dispatch [before dispatch_v2]: "
+            "x.shape=%s, dim=%s, dtype=%s | "
+            "expert_ids.shape=%s, dim=%s, dtype=%s | "
+            "enable_dispatch_v2=%s, global_bs=%s",
+            tuple(_x.shape) if _x is not None else None,
+            _x.dim() if _x is not None else None,
+            _x.dtype if _x is not None else None,
+            tuple(_expert_ids.shape) if _expert_ids is not None else None,
+            _expert_ids.dim() if _expert_ids is not None else None,
+            _expert_ids.dtype if _expert_ids is not None else None,
+            self.enable_dispatch_v2,
+            self.global_bs,
+        )
         output = (
             torch_npu.npu_moe_distribute_dispatch_v2(**kwargs_mc2)
             if self.enable_dispatch_v2
