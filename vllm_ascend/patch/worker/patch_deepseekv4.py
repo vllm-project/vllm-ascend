@@ -39,6 +39,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
 )
 from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
@@ -58,6 +59,8 @@ from vllm_ascend.models.deepseek_v4 import (
 from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE
 from vllm_ascend.ops.triton.mul_add import muls_add_triton
 from vllm_ascend.utils import enable_dsa_cp
+
+logger = init_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -171,6 +174,16 @@ def afd_ffn_compute(
 
     moe_comm_method = _EXTRA_CTX.moe_comm_method
 
+    # 形状日志: prepare 之前的原始输入(来自 Attention 侧 P2P 接收)
+    logger.info(
+        "AFD afd_ffn_compute [before prepare]: "
+        "hidden_states=%s, topk_ids=%s, topk_weights=%s, router_logits=%s",
+        tuple(hidden_states.shape),
+        tuple(topk_ids.shape) if topk_ids is not None else None,
+        tuple(topk_weights.shape) if topk_weights is not None else None,
+        tuple(router_logits.shape) if router_logits is not None else None,
+    )
+
     # 1. prepare — handles dispatch / padding (same as forward_impl).
     prepare_output = moe_comm_method.prepare(
         hidden_states=hidden_states,
@@ -183,6 +196,45 @@ def afd_ffn_compute(
     mc2_mask = prepare_output.mc2_mask
     padded_hidden_states_shape = prepare_output.padded_hidden_states_shape
     pertoken_scale = prepare_output.pertoken_scale
+
+    # 1b. 对 topk_ids/topk_weights 做与 hidden_states 相同的 padding 和 TP 切分。
+    # 正常 forward_impl 中 select_experts 在 prepare 之后(quant_method.apply 内)
+    # 调用,因此 topk_ids 自然与 prepared 后的 hidden_states 形状一致。AFD 路径下,
+    # topk_ids/topk_weights 在 Attention 侧、FFN 的 prepare 之前计算,并通过 P2P
+    # 传输到 FFN 侧,仍保持原始 num_tokens 行数,未经过 padding/split。若不在此处
+    # 复制 prepare 对 hidden_states 的 padding/split,npu_moe_distribute_dispatch_v2
+    # 会因 x 与 expert_ids 行数不一致而报 "The x and expert_ids should be 2D" 错误。
+    prepare_finalize = moe_comm_method.prepare_finalize
+    if (topk_ids is not None
+            and not _EXTRA_CTX.flash_comm_v1_enabled
+            and not self.enable_shared_expert_dp
+            and prepare_finalize.tp_size > 1):
+        target_pad_length = _EXTRA_CTX.padded_num_tokens
+        pad_size = target_pad_length - prepare_finalize.num_tokens
+        if pad_size > 0:
+            topk_ids = F.pad(topk_ids, (0, 0, 0, pad_size))
+            topk_weights = F.pad(topk_weights, (0, 0, 0, pad_size))
+        topk_ids = torch.tensor_split(
+            topk_ids, prepare_finalize.tp_size, dim=0)[prepare_finalize.tp_rank]
+        topk_weights = torch.tensor_split(
+            topk_weights, prepare_finalize.tp_size, dim=0)[prepare_finalize.tp_rank]
+
+    # 形状日志: prepare + padding/split 之后,确认 hidden_states 与 topk_ids 行数匹配
+    logger.info(
+        "AFD afd_ffn_compute [after prepare]: "
+        "hidden_states=%s, topk_ids=%s, topk_weights=%s, "
+        "padded_num_tokens=%s, tp_size=%s, tp_rank=%s, num_tokens=%s, "
+        "flash_comm_v1_enabled=%s, enable_shared_expert_dp=%s",
+        tuple(hidden_states.shape),
+        tuple(topk_ids.shape) if topk_ids is not None else None,
+        tuple(topk_weights.shape) if topk_weights is not None else None,
+        _EXTRA_CTX.padded_num_tokens,
+        prepare_finalize.tp_size,
+        prepare_finalize.tp_rank,
+        prepare_finalize.num_tokens,
+        _EXTRA_CTX.flash_comm_v1_enabled,
+        self.enable_shared_expert_dp,
+    )
 
     # 2. Build weight params (mirrors AscendW8A8DynamicFusedMoEMethod.apply
     #    weight access in w8a8_dynamic.py). DeepSeek V4 uses W8A8 dynamic
