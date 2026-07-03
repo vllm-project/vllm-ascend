@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-06-22 05:29+0000\n"
+"POT-Creation-Date: 2026-07-02 07:02+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -71,8 +71,8 @@ msgid "Optimizations"
 msgstr "优化措施"
 
 #: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:69
-msgid "1. OS Optimization"
-msgstr "1.操作系统优化"
+msgid "1. Memory Allocator Optimization"
+msgstr "1.内存分配器优化"
 
 #: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:71
 msgid "1.1. jemalloc"
@@ -191,8 +191,8 @@ msgstr ""
 "之间共享数据的缓存大小。更多详细信息请参见[此处](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0047.html)。"
 
 #: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:159
-msgid "4. OS Optimization"
-msgstr "4.操作系统优化"
+msgid "4. Kernel Optimization"
+msgstr "4.内核优化"
 
 #: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:161
 msgid ""
@@ -369,3 +369,6 @@ msgstr "较高的值有助于线程保持在同一个 CPU 核心上运行"
 
 #~ msgid "2. OS Optimization"
 #~ msgstr "2.操作系统优化"
+
+#~ msgid "1. OS Optimization"
+#~ msgstr "1.操作系统优化"

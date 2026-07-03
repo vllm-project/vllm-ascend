@@ -173,15 +173,14 @@ jobs:
             libibverbs1 \
             ibverbs-providers \
             librdmacm1 \
-            libnuma1 \
-            libcurl4
+            libnuma1
           ldconfig
 
-          MOONCAKE_WHEEL="mooncake_transfer_engine_ascend-0.3.9-cp312-cp312-manylinux_2_35_aarch64.whl"
+          MOONCAKE_WHEEL="mooncake_transfer_engine_npu-0.3.11.post1-cp312-cp312-manylinux_2_35_aarch64.whl"
           pip install --no-cache-dir --no-deps \
             "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${MOONCAKE_WHEEL}"
 
-          pip show mooncake-transfer-engine-ascend || true
+          pip show mooncake-transfer-engine-npu || true
 
       - name: Install vllm-project/vllm-ascend with device
         if: ${{ matrix.group.npu_type != 'cpu' }}
