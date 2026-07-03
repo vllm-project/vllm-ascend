@@ -3,6 +3,7 @@ from unittest.mock import MagicMock, patch
 
 import torch
 
+import vllm_ascend.attention.attention_v1 as attn_module
 from tests.ut.base import TestBase
 from vllm_ascend.attention.attention_v1 import (
     AscendAttentionBackend,
@@ -605,3 +606,54 @@ class TestAscendAttentionBackendImpl(TestBase):
         # Verify the result is recorded in hamming_output_records
         self.assertTrue(torch.equal(kvcomp_metadata.hamming_output, torch.ones(2, 5)))
         self.assertIsNotNone(kvcomp_metadata.seq_lens_for_hamming)
+
+    @patch("torch.npu.stream")
+    @patch("torch.npu.graph_task_update_begin")
+    @patch("torch.npu.graph_task_update_end")
+    @patch("torch_npu.npu_fused_infer_attention_score")
+    @patch("vllm_ascend.attention.attention_v1.get_graph_params")
+    @patch("vllm_ascend.attention.attention_v1._EXTRA_CTX")
+    @patch("vllm_ascend.attention.attention_v1.using_paged_attention", return_value=False)
+    @patch("vllm_ascend.attention.attention_v1.needs_layer_aware_fia_graph_replay", return_value=False)
+    @patch("vllm_ascend.attention.attention_v1._ATTN_KEYS_BUFFER", new=[])
+    def test_update_graph_params(
+        self,
+        mock_needs_layer_aware_fia_graph_replay,
+        mock_using_paged_attention,
+        mock_EXTRA_CTX,
+        mock_get_graph_params,
+        mock_fia,
+        mock_graph_task_update_end,
+        mock_graph_task_update_begin,
+        mock_stream,
+    ):
+        """Test behavior when _ATTN_KEYS_BUFFER is [] after dummy_run."""
+
+        mock_EXTRA_CTX.sinks = False
+        mock_EXTRA_CTX.is_draft_model = False
+
+        param: list[MagicMock | None] = [MagicMock()] * 21
+        param[16] = None
+        param[20] = None
+
+        mock_get_graph_params.return_value.attn_params = {1: [tuple(param)] * 3}
+        mock_get_graph_params.return_value.handles = {1: [MagicMock()] * 3}
+        mock_get_graph_params.return_value.events = {1: [MagicMock()] * 3}
+
+        attn_metadata_keys = [
+            "model.layers.10.self_attn.attn",
+            "model.layers.2.self_attn.attn",
+            "model.layers.5.self_attn.attn",
+        ]
+        forward_context = MagicMock()
+        forward_context.attn_metadata = {key: MagicMock() for key in attn_metadata_keys}
+        # breakpoint()
+        self.impl.update_graph_params(self.mock_stream, forward_context, 1, self.mock_vllm_config)
+
+        expected = [
+            "model.layers.2.self_attn.attn",
+            "model.layers.5.self_attn.attn",
+            "model.layers.10.self_attn.attn",
+        ]
+        self.assertEqual(attn_module._ATTN_KEYS_BUFFER, expected)
+        self.assertEqual(mock_fia.out.call_count, 3)

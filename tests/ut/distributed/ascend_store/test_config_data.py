@@ -150,6 +150,27 @@ class TestChunkedTokenDatabase(unittest.TestCase):
         self.assertEqual(len(result), 2)
         self.assertEqual(result[0][0], 16)
 
+    def test_process_tokens_with_tail_clipped_block_ids_maps_tail_chunks(self):
+        db = ChunkedTokenDatabase([self.meta], block_size=[128], partitions=None)
+        hashes = [bytes([idx % 251]) * 32 for idx in range(128)]
+
+        result = list(
+            db.process_tokens_with_block_ids(
+                128 * 128,
+                hashes,
+                [1000, 1001, 1002, 1003],
+            )
+        )
+
+        self.assertEqual(
+            [start for start, _, _, _ in result],
+            [124 * 128, 125 * 128, 126 * 128, 127 * 128],
+        )
+        self.assertEqual(
+            [block_id for _, _, _, block_id in result],
+            [1000, 1001, 1002, 1003],
+        )
+
     def test_process_tokens_token_len_shorter_than_all_blocks(self):
         hashes = ["a", "b", "c", "d"]
         # token_len=32 means only first 2 blocks valid
@@ -197,6 +218,14 @@ class TestChunkedTokenDatabase(unittest.TestCase):
         addr, size, block_id = self.db.prepare_value(0, 8, [5])
         self.assertEqual(size[0], 80)  # 160/16*8
         self.assertEqual(size[1], 160)  # 320/16*8
+
+    def test_prepare_value_uses_block_id_override(self):
+        addr, size, block_id = self.db.prepare_value(64, 80, [5], block_id=99)
+        self.assertEqual(block_id, 99)
+        self.assertEqual(addr[0], 1000 + 99 * 160)
+        self.assertEqual(addr[1], 2000 + 99 * 320)
+        self.assertEqual(size[0], 160)
+        self.assertEqual(size[1], 320)
 
     def test_prepare_value_layer(self):
         addr, size, block_id = self.db.prepare_value_layer(0, 16, [5, 6], layer_id=0)
