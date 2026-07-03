@@ -48,6 +48,7 @@ def test_310p_postprocess_fallback_mirrors_state_copy_without_triton() -> None:
     assert "if accept_token_bias == 0:" in src
     assert "continue" in src
     assert "for mamba_group_id in ctx.mamba_group_ids:" in src
+    assert "get_numpy_array()" in src
     assert "copy_spec = state_copy_func(state, block_ids, src_block_idx, accept_token_bias + 1)" in src
     assert "_tensor_view_from_data_ptr(state, copy_spec.start_addr, copy_spec.num_elements)" in src
     assert "dst_state.copy_(src_state.clone())" in src

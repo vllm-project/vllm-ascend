@@ -160,7 +160,7 @@ def _postprocess_mamba_align_gpu_cpu_fallback(
         # step. Do the same with tensor views so 310P avoids Triton without
         # changing where conv/temporal state lands before the next iteration.
         for mamba_group_id in ctx.mamba_group_ids:
-            block_ids = input_batch.block_table[mamba_group_id].get_numpy()[i]
+            block_ids = input_batch.block_table[mamba_group_id].get_numpy_array()[i]
             dest_block_id = block_ids[dest_block_idx]
             layer_names = kv_cache_config.kv_cache_groups[mamba_group_id].layer_names
             for layer_name in layer_names:
