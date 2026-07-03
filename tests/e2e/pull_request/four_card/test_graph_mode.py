@@ -366,6 +366,11 @@ CASE_DS_ACLGRAPH = {
     "capture_mem_tolerance": 1.5,
 }
 
+CASE_DS_ACLGRAPH_ENPU = {
+    **CASE_DS_ACLGRAPH,
+    "env_vars": {"ENPU_ENABLE": "true"},
+}
+
 # inherit from tests/e2e/pull_request/utils.py::compare_logprobs
 ATOL = 0.0689
 
@@ -493,6 +498,9 @@ def _run_worker_process(
         }
     )
 
+    for key, value in cur_case.get("env_vars", {}).items():
+        os.environ[key] = str(value)
+
     # Apply hooks and run inference
     with _install_spies(metrics):
         short_prompts = cur_case["prompts"]["short"]
@@ -595,7 +603,7 @@ def check_capture_mem(capture_mem, baseline_capture_mem=0.2, capture_mem_toleran
 
 
 @wait_until_npu_memory_free(0.7)
-@pytest.mark.parametrize("cur_case", [CASE_QWEN_ACLGRAPH, CASE_DS_ACLGRAPH])
+@pytest.mark.parametrize("cur_case", [CASE_QWEN_ACLGRAPH, CASE_DS_ACLGRAPH, CASE_DS_ACLGRAPH_ENPU])
 def test_aclgraph(cur_case: dict, monkeypatch: pytest.MonkeyPatch):
     # Counter doesn't work in default "spawn" mode
     metrics = None
