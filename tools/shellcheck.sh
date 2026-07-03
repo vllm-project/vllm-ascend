@@ -53,5 +53,16 @@ if [ "$#" -eq 0 ]; then
 fi
 
 for file in "$@"; do
-    git check-ignore -q "$file" || shellcheck "${shellcheck_args[@]}" "$file"
+    if git check-ignore -q "$file"; then
+        continue
+    fi
+
+    case "$file" in
+        *.csh|*.tcsh)
+            # shellcheck does not support C shell syntax.
+            continue
+            ;;
+    esac
+
+    shellcheck "${shellcheck_args[@]}" "$file"
 done
