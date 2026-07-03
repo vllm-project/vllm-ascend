@@ -452,6 +452,10 @@ class FusedMC2CommImpl(MoECommMethod):
         dispatch_quant_out_dtype: int | None,
     ):
         get_symm_buffer_for_mega_moe, _ = self._load_cann_mega_moe_ops()
+        # FusedMC2CommImpl always builds a TokenDispatcherWithMC2 (see
+        # setup_moe_comm_method), which is where global_bs / ep_world_size live.
+        # Assert it so mypy resolves those attributes off the base dispatcher.
+        assert isinstance(self.token_dispatcher, TokenDispatcherWithMC2)
         group = get_mc2_group().device_group
         hidden = int(fused_experts_input.hidden_states.shape[-1])
         intermediate_hidden = _infer_intermediate_hidden(weight1[0], weight2[0], hidden)
@@ -486,16 +490,10 @@ class FusedMC2CommImpl(MoECommMethod):
             num_experts = int(fused_experts_input.routing.expert_map.numel()) + redundant_experts
         else:
             num_experts = int(self.moe_config.num_experts) + redundant_experts
-        expert_per_rank = max(1, num_experts // int(self.token_dispatcher.ep_world_size))
-        max_recv_token_num = max(
-            1,
-            num_max_tokens_per_rank * int(self.token_dispatcher.ep_world_size) * min(num_topk, expert_per_rank),
-        )
         key = (
             id(group),
             num_experts,
             num_max_tokens_per_rank,
-            max_recv_token_num,
             num_topk,
             hidden,
             intermediate_hidden,
@@ -522,11 +520,13 @@ class FusedMC2CommImpl(MoECommMethod):
                 num_topk,
                 hidden,
                 intermediate_hidden,
-                max_recv_token_num=max_recv_token_num,
+                # max_recv_token_num / combine_quant_mode / comm_alg are omitted
+                # so the op uses its documented defaults: max_recv_token_num=0
+                # means "auto-size the recv buffer to the comm-domain capacity"
+                # (more reliable than us hand-computing the range maximum), and
+                # combine_quant_mode / comm_alg are reserved params.
                 dispatch_quant_mode=dispatch_quant_mode,
                 dispatch_quant_out_dtype=dispatch_quant_out_dtype,
-                combine_quant_mode=0,
-                comm_alg="",
             )
         return self._cann_symm_buffers[key]
 
@@ -537,6 +537,9 @@ class FusedMC2CommImpl(MoECommMethod):
     ):
         assert fused_experts_input.weights.w1_scale is not None
         assert fused_experts_input.weights.w2_scale is not None
+        # TokenDispatcherWithMC2 carries global_bs (used below for the mc2_mask
+        # branch); assert the subtype so mypy resolves it off the base class.
+        assert isinstance(self.token_dispatcher, TokenDispatcherWithMC2)
 
         _, mega_moe = self._load_cann_mega_moe_ops()
         # weight1_type/weight2_type are NOT passed: the doc marks them reserved
