@@ -59,7 +59,7 @@ for file in "$@"; do
 
     case "$file" in
         *.csh|*.tcsh)
-            # shellcheck does not support C shell syntax.
+            # Skip C shell scripts because this checker only supports sh-like shells.
             continue
             ;;
     esac
