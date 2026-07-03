@@ -66,6 +66,7 @@ import vllm_ascend.patch.worker.patch_cudagraph  # noqa
 import vllm_ascend.patch.worker.patch_deepseek_mtp  # noqa
 import vllm_ascend.patch.worker.patch_deepseek_v2  # noqa
 import vllm_ascend.patch.worker.patch_gqa_c8  # noqa
+import vllm_ascend.patch.worker.patch_v2.patch_use_v2_model_runner  # noqa
 
 if not vllm_version_is("0.23.0"):
     import vllm_ascend.patch.worker.patch_fused_moe  # noqa
