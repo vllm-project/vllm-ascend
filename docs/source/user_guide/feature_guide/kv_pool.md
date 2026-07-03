@@ -14,7 +14,7 @@
     * CANN >= 8.5.0
     * vLLM：main branch
     * vLLM-Ascend：main branch
-    * mooncake：>= 0.3.11.post1
+    * mooncake：>= 0.3.9
 
 ### KV Pool Parameter Description
 
@@ -67,7 +67,7 @@ export PYTHONHASHSEED=0
         First, we need to obtain the Mooncake project. Refer to the following command:
 
         ```shell
-        git clone -b v0.3.11.post1 --depth 1 https://github.com/kvcache-ai/Mooncake.git
+        git clone -b v0.3.9 --depth 1 https://github.com/kvcache-ai/Mooncake.git
         ```
 
         (Optional) Replace go install url if the network is poor
@@ -114,7 +114,7 @@ export PYTHONHASHSEED=0
 
 | Hardware | Dependencies | Export Command | Description |
 | :--- | :--- | :--- | :--- |
-| 800 I/T A3 series | HDK >= 26.0<br>or HDK >= 25.5 with mooncake >= v0.3.11.post1<br>CANN >= 9.0.0<br>LingQu Computing Network >= 1.5 | `export ASCEND_ENABLE_USE_FABRIC_MEM=1` | **Recommended**. Enables unified memory address direct transmission scheme. With SSD offload, see [Fabric memory size alignment](#122-fabric-memory-size-alignment-a3--ascend_enable_use_fabric_mem1) — memory sizes must be aligned to 1GB. |
+| 800 I/T A3 series | HDK >= 26.0<br>or HDK >= 25.5 with mooncake >= v0.3.11<br>CANN >= 9.0.0<br>LingQu Computing Network >= 1.5 | `export ASCEND_ENABLE_USE_FABRIC_MEM=1` | **Recommended**. Enables unified memory address direct transmission scheme. With SSD offload, see [Fabric memory size alignment](#122-fabric-memory-size-alignment-a3--ascend_enable_use_fabric_mem1) — memory sizes must be aligned to 1GB. |
 | 800 I/T A3 series | If any dependency above is not met | `export ASCEND_BUFFER_POOL=4:8` | Configures the number and size of buffers on the NPU Device for aggregation and KV transfer (e.g., `4:8` means 4 buffers of 8MB). |
 | 800 I/T A2 series | HDK >= 25.5 is recommended | `export HCCL_INTRA_ROCE_ENABLE=1` | Required by direct transmission scheme on 800 I/T A2 series|
 
@@ -432,7 +432,7 @@ This is because HCCL one-sided communication connections are created lazily afte
 
 ### Enable MooncakeStore SSD Offload with Embedded Real Client Mode
 
-* Requires mooncake >= v0.3.11.post1.
+* Requires mooncake >= v0.3.11.
 
 #### Start the master
 
