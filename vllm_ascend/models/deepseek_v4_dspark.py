@@ -66,55 +66,11 @@ def _recipe_sparse_sharedkv_attention(
     softmax_scale: float,
     block_size: int,
     window_size: int,
+    sparse_attn_ops,
 ) -> torch.Tensor | None:
-    if q.device.type == "cpu":
+    if q.device.type == "cpu" or sparse_attn_ops is None:
         return None
-    try:
-        metadata_op = torch.ops.custom.npu_sparse_attn_sharedkv_metadata
-        attn_op = torch.ops.custom.npu_sparse_attn_sharedkv
-    except (AttributeError, RuntimeError):
-        try:
-            from cann_ops_transformer.ops.sparse_flash_mla import sparse_flash_mla, sparse_flash_mla_metadata
-        except Exception:
-            return None
-        cu_seqlens_q = torch.tensor([0, q.shape[0]], dtype=torch.int32, device=q.device)
-        cu_seqlens_kv = torch.tensor([0, packed_kv.shape[0]], dtype=torch.int32, device=q.device)
-        sparse_indices = torch.arange(packed_kv.shape[0], dtype=torch.int32, device=q.device).view(1, 1, -1)
-        metadata = sparse_flash_mla_metadata(
-            int(q.shape[1]),
-            1,
-            int(q.shape[2]),
-            batch_size=1,
-            max_seqlen_q=int(q.shape[0]),
-            max_seqlen_ori_kv=int(packed_kv.shape[0]),
-            ori_topk=int(packed_kv.shape[0]),
-            cmp_topk=0,
-            cmp_ratio=1,
-            ori_mask_mode=4,
-            cmp_mask_mode=0,
-            ori_win_left=int(window_size + block_size - 1),
-            ori_win_right=int(block_size - 1),
-            layout_q="TND",
-            layout_kv="TND",
-            has_ori_kv=True,
-            has_cmp_kv=False,
-        )
-        return sparse_flash_mla(
-            q,
-            ori_kv=packed_kv,
-            ori_sparse_indices=sparse_indices,
-            sinks=attn_sink[: q.shape[1]].float().contiguous(),
-            metadata=metadata,
-            softmax_scale=float(softmax_scale),
-            cmp_ratio=1,
-            ori_mask_mode=4,
-            cmp_mask_mode=0,
-            ori_win_left=int(window_size + block_size - 1),
-            ori_win_right=int(block_size - 1),
-            layout_q="TND",
-            layout_kv="TND",
-            return_softmax_lse=False,
-        )[0]
+    attn_op, metadata_op = sparse_attn_ops
 
     cu_seqlens_q = torch.tensor([0, q.shape[0]], dtype=torch.int32, device=q.device)
     cu_seqlens_kv = torch.tensor([0, packed_kv.shape[0]], dtype=torch.int32, device=q.device)
@@ -199,6 +155,22 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         self.register_buffer("_dspark_cache_positions", torch.full((max_request_slots, cache_capacity), -1, dtype=torch.int32, device=self.attn_sink.device), persistent=False)
         self._dspark_cache_capacity = cache_capacity
         self._dspark_max_request_slots = max_request_slots
+        self._dspark_sparse_attn_ops = None
+        self._dspark_sparse_attn_unavailable_warned = False
+
+    def _get_dspark_sparse_attn_ops(self):
+        if self._dspark_sparse_attn_ops is not None:
+            return self._dspark_sparse_attn_ops
+        try:
+            attn_op = torch.ops.custom.npu_sparse_attn_sharedkv
+            metadata_op = torch.ops.custom.npu_sparse_attn_sharedkv_metadata
+        except (AttributeError, RuntimeError) as exc:
+            if not self._dspark_sparse_attn_unavailable_warned:
+                logger.warning("Failed to get custom DSpark sparse sharedkv ops: %s", exc)
+                self._dspark_sparse_attn_unavailable_warned = True
+            return None
+        self._dspark_sparse_attn_ops = attn_op, metadata_op
+        return self._dspark_sparse_attn_ops
 
     def reset_request_slots(self, request_slots: torch.Tensor | None) -> None:
         if request_slots is None or request_slots.numel() == 0:
@@ -274,6 +246,7 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
                 float(self.scale),
                 self.block_size,
                 self.window_size,
+                self._get_dspark_sparse_attn_ops(),
             )
             if op_out is None:
                 op_out = _torch_sharedkv_attention(q[block_offset:block_end], packed_kv, self.attn_sink, float(self.scale))
@@ -386,7 +359,7 @@ class DeepseekV4DSparkModel(nn.Module):
         self.target_layer_ids = list(getattr(config, "dspark_target_layer_ids", []) or [])
         self.num_dspark_layers = _get_dspark_num_layers(config)
         self.mtp_start_layer_idx = config.num_hidden_layers
-        self.embed_tokens = VocabParallelEmbedding(config.vocab_size, config.hidden_size, quant_config=_draft_quant_config(vllm_config), prefix=maybe_prefix(prefix, "embed_tokens"))
+        self.embed_tokens = None
         self.layers = nn.ModuleDict(
             {
                 str(self.mtp_start_layer_idx + idx): DeepseekV4DSparkDecoderLayer(
@@ -428,6 +401,8 @@ class DeepseekV4DSparkModel(nn.Module):
         last_layer.hc_head_scale = self.hc_head_scale
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        if self.embed_tokens is None:
+            raise AttributeError("DSpark draft model requires shared target embed_tokens.")
         return self.embed_tokens(input_ids)
 
     def precompute_and_store_context_kv(
@@ -459,6 +434,8 @@ class DeepseekV4DSparkModel(nn.Module):
     ) -> torch.Tensor:
         del hidden_states
         if inputs_embeds is None:
+            if self.embed_tokens is None:
+                raise AttributeError("DSpark draft model requires shared target embed_tokens.")
             inputs_embeds = self.embed_tokens(input_ids)
         hidden_states = inputs_embeds.unsqueeze(-2).repeat(1, self.hc_mult, 1)
         for layer in self.layers.values():
@@ -499,8 +476,9 @@ class DeepSeekV4DSparkMTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
         assert vllm_config.speculative_config is not None
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
         self.quant_config = _draft_quant_config(vllm_config)
+        self.has_own_embed_tokens = False
         self.model = DeepseekV4DSparkModel(vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model"))
-        self.lm_head = ParallelLMHead(self.config.vocab_size, self.config.hidden_size, prefix=maybe_prefix(prefix, "lm_head"))
+        self.lm_head = None
         self.logits_processor = LogitsProcessor(self.config.vocab_size)
         self.set_moe_parameters()
 
@@ -527,6 +505,8 @@ class DeepSeekV4DSparkMTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
 
     def compute_logits(self, hidden_states: torch.Tensor, spec_step_idx: int = 0) -> torch.Tensor | None:
         del spec_step_idx
+        if self.lm_head is None:
+            raise AttributeError("DSpark draft model requires shared target lm_head.")
         return self.model.compute_logits(hidden_states, self.lm_head, self.logits_processor)
 
     def markov_embed(self, token_ids: torch.Tensor) -> torch.Tensor:
@@ -545,7 +525,7 @@ class DeepSeekV4DSparkMTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
         self.model.reset_request_slots(request_slots)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [("mlp.gate_up_proj", "mlp.gate_proj", 0), ("mlp.gate_up_proj", "mlp.up_proj", 1)]
+        stacked_params_mapping = [("gate_up_proj", "gate_proj", 0), ("gate_up_proj", "up_proj", 1)]
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         skipped_params: set[str] = set()
@@ -559,15 +539,12 @@ class DeepSeekV4DSparkMTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
         last_layer_idx = start_layer_idx + self.model.num_dspark_layers - 1
 
         for name, loaded_weight in weights:
-            if name == "embed.weight":
-                name = "model.embed_tokens.weight"
-            elif name == "head.weight":
-                name = "lm_head.weight"
-            else:
-                mapped_name = self._map_dspark_weight_name(name)
-                if mapped_name is None:
-                    continue
-                name = mapped_name
+            if name in ("embed.weight", "head.weight"):
+                continue
+            mapped_name = self._map_dspark_weight_name(name)
+            if mapped_name is None:
+                continue
+            name = mapped_name
 
             if name.startswith(f"model.layers.{last_layer_idx}.hc_head_"):
                 canonical_name = name.replace(f"model.layers.{last_layer_idx}.", "model.", 1)
@@ -575,9 +552,6 @@ class DeepSeekV4DSparkMTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
                     name = canonical_name
             if name.endswith(".scale"):
                 name = name.replace(".scale", ".weight_scale")
-                if name not in params_dict:
-                    skipped_params.add(name)
-                    continue
 
             for param_name, weight_name, stacked_shard_id in stacked_params_mapping:
                 if ".experts." in name or f".{weight_name}." not in name:
