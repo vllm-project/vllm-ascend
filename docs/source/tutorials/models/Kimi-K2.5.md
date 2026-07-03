@@ -49,6 +49,7 @@ docker run --rm \
     --name vllm-ascend \
     --shm-size=1g \
     --net=host \
+    --privileged=true \
     --device /dev/davinci0 \
     --device /dev/davinci1 \
     --device /dev/davinci2 \
@@ -92,6 +93,7 @@ docker run --rm \
     --name vllm-ascend \
     --shm-size=1g \
     --net=host \
+    --privileged=true \
     --device /dev/davinci0 \
     --device /dev/davinci1 \
     --device /dev/davinci2 \
