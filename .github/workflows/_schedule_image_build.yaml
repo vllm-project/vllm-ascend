@@ -276,13 +276,13 @@ jobs:
           --opt build-arg:PIP_INDEX_URL=https://pypi.org/simple
           --opt build-arg:COMPILE_CUSTOM_KERNELS=${{ steps.cache-csrc.outputs.cache-hit == 'true' && '0' || '1' }}
           --opt build-arg:VLLM_COMMIT=${{ inputs.vllm_commit }}
-          --import-cache type=registry,ref="${CACHE_REF}"
+          --import-cache "type=registry,ref=${CACHE_REF}"
           --progress=plain
         )
 
         if [ "${{ inputs.should_push }}" = "true" ]; then
           ARGS+=(--secret id=dockerconfig,src=/tmp/bk/config.json)
-          ARGS+=(--export-cache type=registry,ref="${CACHE_REF}",mode=max)
+          ARGS+=(--export-cache "type=registry,ref=${CACHE_REF}",mode=max)
           ARGS+=(--output "type=image,name=${{ env.QUAY_TEMP_REPO }}:${TEMP_TAG},push=true")
         fi
 
