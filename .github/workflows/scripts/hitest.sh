@@ -132,3 +132,59 @@ if [[ "${BUS_SUCCESS2}" != "true" ]];then
     echo "WARN: case recommend api business fail, code:${BUS_CODE2}, skip ut"
     exit 0
 fi
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PYTEST_LIST_FILE="${SCRIPT_DIR}/recommended_pytest_paths.txt"
+
+# Api2 成功后：提取 name 并直接转换
+echo "${CASE_RET}" | python3 - <<'PY' > "${PYTEST_LIST_FILE}"
+import json
+import sys
+
+def name_to_pytest_target(name: str) -> str:
+    name = name.strip()
+    if not name:
+        return ""
+
+    # 情况2: file--testcase → file.py::testcase
+    if "--" in name:
+        file_part, test_func = name.split("--", 1)
+        file_path = file_part.replace("__", "/")
+        if not file_path.endswith(".py"):
+            file_path += ".py"
+        return f"{file_path}::{test_func}"
+
+    # 情况1: 纯文件 → file.py
+    file_path = name.replace("__", "/")
+    if not file_path.endswith(".py"):
+        file_path += ".py"
+    return file_path
+
+resp = json.load(sys.stdin)
+items = resp.get("data") or []
+
+seen = set()
+targets = []
+for item in items:
+    if not isinstance(item, dict):
+        continue
+    target = name_to_pytest_target(item.get("name", ""))
+    if target and target not in seen:
+        seen.add(target)
+        targets.append(target)
+
+if not targets:
+    print("ERROR: no pytest targets found", file=sys.stderr)
+    sys.exit(1)
+
+print("\n".join(targets))
+PY
+
+if [ $? -ne 0 ]; then
+    echo "ERROR: failed to parse case recommend response"
+    exit 14
+fi
+
+echo "===== Recommended pytest paths ====="
+cat "${PYTEST_LIST_FILE}"
+echo "Total: $(wc -l < "${PYTEST_LIST_FILE}")"
