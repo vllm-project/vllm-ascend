@@ -174,16 +174,6 @@ def afd_ffn_compute(
 
     moe_comm_method = _EXTRA_CTX.moe_comm_method
 
-    # 形状日志: prepare 之前的原始输入(来自 Attention 侧 P2P 接收)
-    logger.info(
-        "AFD afd_ffn_compute [before prepare]: "
-        "hidden_states=%s, topk_ids=%s, topk_weights=%s, router_logits=%s",
-        tuple(hidden_states.shape),
-        tuple(topk_ids.shape) if topk_ids is not None else None,
-        tuple(topk_weights.shape) if topk_weights is not None else None,
-        tuple(router_logits.shape) if router_logits is not None else None,
-    )
-
     # 1. prepare — handles dispatch / padding (same as forward_impl).
     prepare_output = moe_comm_method.prepare(
         hidden_states=hidden_states,
@@ -197,27 +187,6 @@ def afd_ffn_compute(
     padded_hidden_states_shape = prepare_output.padded_hidden_states_shape
     pertoken_scale = prepare_output.pertoken_scale
 
-
-    # 形状日志: prepare + padding/split 之后,确认 hidden_states 与 topk_ids 行数匹配
-    logger.info(
-        "AFD afd_ffn_compute [after prepare]: "
-        "hidden_states=%s, topk_ids=%s, topk_weights=%s, "
-        "padded_num_tokens=%s, tp_size=%s, tp_rank=%s, num_tokens=%s, "
-        "flash_comm_v1_enabled=%s, enable_shared_expert_dp=%s",
-        tuple(hidden_states.shape),
-        tuple(topk_ids.shape) if topk_ids is not None else None,
-        tuple(topk_weights.shape) if topk_weights is not None else None,
-        _EXTRA_CTX.padded_num_tokens,
-        prepare_finalize.tp_size,
-        prepare_finalize.tp_rank,
-        prepare_finalize.num_tokens,
-        _EXTRA_CTX.flash_comm_v1_enabled,
-        self.enable_shared_expert_dp,
-    )
-
-    # 2. Build weight params (mirrors AscendW8A8DynamicFusedMoEMethod.apply
-    #    weight access in w8a8_dynamic.py). DeepSeek V4 uses W8A8 dynamic
-    #    quantization; other quant methods would need a different block here.
     fused_scale_flag = (
         _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2
         and get_ascend_config().enable_fused_mc2 == 1
