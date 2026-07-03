@@ -51,7 +51,6 @@ from vllm_ascend.quantization.quant_type import QuantType
 _MoECommMethods: dict[MoECommType | None, MoECommMethod] = {}
 
 _CANN_ACL_INT8 = 258
-_CANN_ACL_INT4 = 285
 _CANN_TORCH_FLOAT8_E4M3FN = 24
 
 _CANN_MEGA_MOE_QUANT_MODE_INT8 = 2
@@ -161,18 +160,26 @@ def _normalize_cann_activation(activation) -> str:
     )
 
 
-def _get_cann_mega_moe_quant_settings(quant_type: QuantType) -> tuple[int, int | None, int | None]:
-    # CANN 9.1 docs name this argument dispatch_quant_out_dtype and show
-    # torch.int8, while the installed Python wrapper still accepts ACL dtype
-    # enum ints. Keep the enum values until the wrapper schema changes.
+def _get_cann_mega_moe_quant_settings(quant_type: QuantType) -> tuple[int, int | None]:
+    # Returns only (dispatch_quant_mode, dispatch_quant_out_dtype).
+    # weight1_type/weight2_type are reserved params in the mega_moe doc
+    # ("use default") and are NOT passed; the op infers weight precision from
+    # the tensor dtype + FRACTAL_NZ layout.
+    #
+    # dispatch_quant_out_dtype: the doc types this as torch.dtype (torch.int8 /
+    # torch.float8_e4m3fn). We pass the ACL enum ints (258 / 24) because W8A8
+    # was validated end-to-end this way in PD; switching W4A8 to torch.int8 did
+    # NOT fix the W4A8 accuracy issue and slowed graph capture (see bug_a3.md),
+    # so keep the working values until the W4A8 accuracy root cause is found on
+    # the operator side.
     if quant_type == QuantType.W8A8:
-        return (_CANN_MEGA_MOE_QUANT_MODE_INT8, _CANN_ACL_INT8, _CANN_ACL_INT8)
+        return (_CANN_MEGA_MOE_QUANT_MODE_INT8, _CANN_ACL_INT8)
     if quant_type == QuantType.W4A8:
-        return (_CANN_MEGA_MOE_QUANT_MODE_INT8, _CANN_ACL_INT8, _CANN_ACL_INT4)
+        return (_CANN_MEGA_MOE_QUANT_MODE_INT8, _CANN_ACL_INT8)
     if quant_type == QuantType.MXFP8:
-        return (_CANN_MEGA_MOE_QUANT_MODE_MX, _CANN_TORCH_FLOAT8_E4M3FN, None)
+        return (_CANN_MEGA_MOE_QUANT_MODE_MX, _CANN_TORCH_FLOAT8_E4M3FN)
     if quant_type == QuantType.W4A8MXFP:
-        return (_CANN_MEGA_MOE_QUANT_MODE_MX, _CANN_TORCH_FLOAT8_E4M3FN, None)
+        return (_CANN_MEGA_MOE_QUANT_MODE_MX, _CANN_TORCH_FLOAT8_E4M3FN)
     raise RuntimeError(
         "CANN 9.1 MegaMoe integration supports W8A8/W4A8 INT on A2/A3 and MXFP on FP8-capable "
         "MegaMoe platforms. "
@@ -532,17 +539,12 @@ class FusedMC2CommImpl(MoECommMethod):
         assert fused_experts_input.weights.w2_scale is not None
 
         _, mega_moe = self._load_cann_mega_moe_ops()
-        # ``_weight_type`` (ACL INT4/INT8 enum) is intentionally left UNUSED:
-        # the CANN mega_moe interface doc marks ``weight1_type`` /
-        # ``weight2_type`` as reserved params (keep the default None). The op
-        # infers the real weight precision from the tensor dtype + FRACTAL_NZ
-        # layout (INT4 weights arrive as int32-reinterpreted "INT4(INT32)",
-        # int8 weights as plain INT8), like the validated dispatch_ffn_combine
-        # path, whose C++ signature carries no weight_type at all. Passing a
-        # non-default weight1_type/weight2_type made the op tiling derive a
-        # wrong N (A3 W4A8: it read l1's packed last dim 512 as N/2 instead of
-        # unpacking to the real intermediate 2048), tripping the weight2 check.
-        dispatch_quant_mode, dispatch_quant_out_dtype, _weight_type = _get_cann_mega_moe_quant_settings(
+        # weight1_type/weight2_type are NOT passed: the doc marks them reserved
+        # ("use default") and the op infers weight precision from the tensor
+        # dtype + FRACTAL_NZ layout. Passing a non-default weight_type once made
+        # the tiling derive a wrong N (A3 W4A8 read l1's packed last dim 512 as
+        # N/2 instead of the real intermediate 2048), tripping the weight2 check.
+        dispatch_quant_mode, dispatch_quant_out_dtype = _get_cann_mega_moe_quant_settings(
             fused_experts_input.quant.quant_type
         )
         weight1 = _as_tensor_list(fused_experts_input.weights.w1, "w1")
