@@ -64,7 +64,7 @@ env:
 jobs:
   setup-vars:
     name: Export global env vars as job outputs
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu-16-hk
     outputs:
       ascend_log_prefix: ${{ steps.export.outputs.ascend_log_prefix }}
       vllm_ascend_branches: ${{ steps.export.outputs.vllm_ascend_branches }}
@@ -286,7 +286,7 @@ jobs:
     name: Merge benchmark artifacts into weekly-a3.zip
     needs: [single-node-tests, double-node-tests]
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu-16-hk
     steps:
       - name: Merge all benchmark result artifacts
         continue-on-error: true
