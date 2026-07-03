@@ -771,7 +771,6 @@ class AscendSFADCPImpl(AscendSFAImpl):
                 "Invalid cp_kv_cache_interleave_size: "
                 f"{self.cp_kv_cache_interleave_size}"
             )
-
     def _remap_sparse_indices_for_dcp(self, topk_indices: torch.Tensor) -> torch.Tensor:
         if self.dcp_size <= 1:
             return topk_indices
@@ -799,6 +798,38 @@ class AscendSFADCPImpl(AscendSFAImpl):
         _, pack_order = torch.sort(pack_keys.to(torch.float32), dim=-1)
         return torch.gather(remapped_indices, dim=-1, index=pack_order.to(torch.int32))
 
+    def _merge_dsa_cp_dcp_outputs(
+        self,
+        sfa_output: torch.Tensor,
+        softmax_lse: torch.Tensor,
+    ) -> torch.Tensor:
+        # DSA-CP keeps the head dimension replicated/full.  Only DCP shards KV,
+        # so merge the per-DCP partial outputs explicitly instead of using the
+        # common CP helper, which assumes DCP also shards heads.
+        num_tokens, num_heads, _ = sfa_output.shape
+        attn_out_lse = torch.cat(
+            [sfa_output.to(torch.float32), softmax_lse.to(torch.float32)],
+            dim=-1,
+        ).contiguous()
+        assert self.dcp_group is not None
+        attn_out_lse = self.dcp_group.all_gather(attn_out_lse, dim=0)
+        attn_out_lse = attn_out_lse.view(
+            self.dcp_size,
+            num_tokens,
+            num_heads,
+            self.kv_lora_rank + 1,
+        )
+        out_flat, lse_flat = torch.split(attn_out_lse, [self.kv_lora_rank, 1], dim=-1)
+        out_flat = out_flat.flatten(1, 2)
+        lse_flat = lse_flat.flatten(1, -1)
+        output, _ = torch_npu.npu_attention_update(lse_flat.unbind(0), out_flat.unbind(0), 0)
+        return output.view(num_tokens, num_heads, self.kv_lora_rank)
+
+    def _select_dsa_cp_local_tokens(self, output: torch.Tensor, attn_metadata: M) -> torch.Tensor:
+        assert attn_metadata.dsa_cp_context is not None
+        dsa_cp_context = attn_metadata.dsa_cp_context
+        return output[dsa_cp_context.local_start : dsa_cp_context.local_end_with_pad]
+
     def _execute_sparse_flash_attention_process(
         self,
         ql_nope,
@@ -810,8 +841,15 @@ class AscendSFADCPImpl(AscendSFAImpl):
         actual_seq_lengths_key,
     ):
         assert attn_metadata.dcp_context is not None
-        if self.dcp_size > 1:
-            assert self.dcp_group is not None
+        assert self.dcp_group is not None
+        if self.enable_dsa_cp:
+            # DSA-CP shards the token sequence. Restore the flat token order for
+            # SFA, and use the original full query lengths for varlen metadata.
+            actual_seq_lengths_query = attn_metadata.cum_query_lens
+            ql_nope = self.dcp_group.all_gather(ql_nope.contiguous(), dim=0)
+            q_pe = self.dcp_group.all_gather(q_pe.contiguous(), dim=0)
+            topk_indices = self.dcp_group.all_gather(self._remap_sparse_indices_for_dcp(topk_indices), dim=0)
+        else:
             ql_nope = self.dcp_group.all_gather(ql_nope.contiguous(), dim=1)
             q_pe = self.dcp_group.all_gather(q_pe.contiguous(), dim=1)
             topk_indices = self._remap_sparse_indices_for_dcp(topk_indices)
@@ -844,6 +882,10 @@ class AscendSFADCPImpl(AscendSFAImpl):
         # existing CP merge helper can combine local-KV partial outputs.
         softmax_lse = softmax_max.to(torch.float32) + torch.log(softmax_sum.to(torch.float32))
         softmax_lse = softmax_lse.permute(1, 0, 2).reshape(softmax_lse.shape[1], -1, 1)
+        if self.enable_dsa_cp:
+            output = self._merge_dsa_cp_dcp_outputs(sfa_output, softmax_lse)
+            output = self._select_dsa_cp_local_tokens(output, attn_metadata)
+            return output.to(output_dtype)
         attn_out_lse = _process_attn_out_lse(sfa_output.to(torch.float32), softmax_lse)
         output = _npu_attention_update(self.kv_lora_rank, attn_out_lse)
         return output.to(output_dtype)
