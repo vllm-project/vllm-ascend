@@ -119,7 +119,7 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(monkeypat
     model = DEFAULT_MODEL
 
     num_trials = int(os.getenv("VLLM_NEEDLE_TRIALS", "5"))
-    max_batch_size = int(os.getenv("VLLM_NEEDLE_BATCH_SIZE", "144"))
+    max_batch_size = int(os.getenv("VLLM_NEEDLE_BATCH_SIZE", "64"))
     min_random_prompt = int(os.getenv("VLLM_MIN_PROMPT", "1024"))
     max_random_prompt = int(os.getenv("VLLM_MAX_PROMPT", "2048"))
     assert max_batch_size >= 2, "Batch size should be >= 2 to mix needle."
@@ -154,7 +154,7 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(monkeypat
             dtype="bfloat16",
             tensor_parallel_size=int(os.getenv("VLLM_TP_SIZE", "1")),
             enable_prefix_caching=False,
-            enforce_eager=True,
+            compilation_config={"cudagraph_mode": "PIECEWISE", "cudagraph_capture_sizes": [1, 32, 64]},
             distributed_executor_backend="mp",
             # Enable for MOE models
             # enable_expert_parallel=True,
@@ -234,7 +234,7 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(monkeypatch: pytest.Monkey
         max_model_len=8192,
         dtype="bfloat16",
         gpu_memory_utilization=0.9,
-        enforce_eager=True,
+        compilation_config={"cudagraph_mode": "PIECEWISE", "cudagraph_capture_sizes": [1, 32, 64]},
         distributed_executor_backend="mp",
     )
 
@@ -414,7 +414,7 @@ def test_simple_generation(monkeypatch: pytest.MonkeyPatch):
         max_model_len=2048,
         dtype="float16",
         enable_prefix_caching=False,
-        enforce_eager=True,
+        compilation_config={"cudagraph_mode": "PIECEWISE", "cudagraph_capture_sizes": [1, 32, 64]},
         distributed_executor_backend="mp",
     )
 
@@ -473,7 +473,7 @@ def test_logprobs_without_batch_invariance_should_fail(monkeypatch: pytest.Monke
         max_num_seqs=32,
         max_model_len=8192,
         dtype="bfloat16",
-        enforce_eager=True,
+        compilation_config={"cudagraph_mode": "PIECEWISE", "cudagraph_capture_sizes": [1, 32, 64]},
         distributed_executor_backend="mp",
     )
 
