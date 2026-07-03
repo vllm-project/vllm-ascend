@@ -116,3 +116,9 @@ jobs:
             --progress=plain
 
           echo "Image built (not pushed): ${IMAGE_TAG}"
+
+      - name: Keep pod alive for debugging on failure
+        if: failure()
+        run: |
+          echo "A previous step failed — sleeping 1h to allow 'kubectl exec' debugging into this pod."
+          sleep 3600
