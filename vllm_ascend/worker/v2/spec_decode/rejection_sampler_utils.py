@@ -337,6 +337,7 @@ def rejection_sample(
     # [num_speculative_steps]
     synthetic_conditional_rates: torch.Tensor | None = None,
     use_fp64: bool = False,
+    use_block_verification: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if use_fp64:
         raise NotImplementedError("FP64 rejection sampling is not supported on NPU.")

@@ -7,15 +7,7 @@ from vllm_ascend.utils import vllm_version_is
 class AscendNgramProposer(NgramProposer):
     def __init__(self, vllm_config, runner):
         self.runner = runner
-        if vllm_version_is("0.23.0"):
-            super().__init__(vllm_config)
-        else:
-            original_propose = AscendNgramProposer.propose
-            AscendNgramProposer.propose = lambda self, *args, **kwargs: [[] for _ in range(1024)]  # type: ignore[method-assign]
-            try:
-                super().__init__(vllm_config)
-            finally:
-                AscendNgramProposer.propose = original_propose  # type: ignore[method-assign]
+        super().__init__(vllm_config)
 
     def load_model(self, *args, **kwargs):
         # No model to load.
