@@ -43,7 +43,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, AscendPrefillContextParallelMetadata
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.quantization.utils import enable_fa_quant
-from vllm_ascend.utils import calc_split_factor
+from vllm_ascend.utils import calc_split_factor, vllm_version_is
 
 _ATTENTION_MASK_BUILDER = None
 
@@ -434,7 +434,13 @@ def _reshape_kv_cache_v2(
     cache_dtype: str,
     kernel_block_sizes: list[int],
     shared_kv_cache_layers: dict[str, str],
+    kv_cache_config: "KVCacheConfig | None" = None,
 ) -> dict[str, tuple[torch.Tensor, torch.Tensor]]:
+    # kv_cache_config is passed by upstream init_kv_cache (vllm#44577,
+    # v0.24.0+).  Not needed for v2's K/V layout.
+    if vllm_version_is("0.23.0"):
+        assert kv_cache_config is None
+
     vllm_config = get_current_vllm_config()
     is_kv_consumer = (
         vllm_config.kv_transfer_config.is_kv_consumer if vllm_config.kv_transfer_config is not None else False

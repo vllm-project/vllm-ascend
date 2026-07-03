@@ -887,6 +887,14 @@ def _run_vllm_runner_dp_worker(conn, llm_kwargs: dict[str, Any], dp_rank: int, d
                 chunk = len(devs) // dp_size
                 start = dp_rank * chunk
                 os.environ["ASCEND_RT_VISIBLE_DEVICES"] = ",".join(devs[start : start + chunk])
+            else:
+                import torch
+
+                device_count = torch.npu.device_count()
+                chunk = max(device_count // dp_size, 1)
+                start = dp_rank * chunk
+                end = min(start + chunk, device_count)
+                os.environ["ASCEND_RT_VISIBLE_DEVICES"] = ",".join(str(i) for i in range(start, end))
 
         llm = LLM(**llm_kwargs)
         conn.send({"status": "ready", "rank": dp_rank})

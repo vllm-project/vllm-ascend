@@ -7,10 +7,11 @@ import pytest
 
 from vllm_ascend.utils import vllm_version_is
 
-pytestmark = pytest.mark.skipif(
-    not vllm_version_is("0.23.0"),
-    reason="upstream vLLM renamed _extract_tool_call_regions",
-)
+if not vllm_version_is("0.23.0"):
+    pytest.skip(
+        "upstream vLLM renamed _extract_tool_call_regions",
+        allow_module_level=True,
+    )
 
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest  # noqa: E402
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat  # noqa: E402
