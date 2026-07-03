@@ -67,6 +67,12 @@ import vllm_ascend.patch.worker.patch_deepseek_mtp  # noqa
 import vllm_ascend.patch.worker.patch_deepseek_v2  # noqa
 import vllm_ascend.patch.worker.patch_gqa_c8  # noqa
 
+# vLLM's use_v2_model_runner may enable the v2 runner without the
+# VLLM_USE_V2_MODEL_RUNNER env var (e.g. based on model architecture).
+# We always patch it so that on Ascend the v2 runner is enabled only
+# when the env var is explicitly set.
+import vllm_ascend.patch.worker.patch_v2.patch_use_v2_model_runner  # noqa
+
 if not vllm_version_is("0.23.0"):
     import vllm_ascend.patch.worker.patch_fused_moe  # noqa
 
