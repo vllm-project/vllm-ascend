@@ -415,7 +415,7 @@ def forward_m2n(
             # DeepseekV4MoE.forward / afd_forward which view(-1, hidden_dim)
             # first. Without this, profile_run passes a 3D tensor and
             # moe_gating_top_k raises "The x should be 2D".
-            num_tokens, hidden_dim = hidden_states.shape
+            hidden_dim = hidden_states.shape[-1]
             hidden_states = hidden_states.view(-1, hidden_dim)
             router_logits = F.linear(hidden_states.float(), layer.mlp.gate.weight)
             topk_weights, topk_ids = afd_connector.select_experts(
