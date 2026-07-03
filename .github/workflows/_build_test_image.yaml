@@ -252,9 +252,9 @@ jobs:
 
           buildctl \
             --addr="${BUILDKITD_ADDR}" \
-            --tlscacert="${DOCKER_CONFIG}/ca.pem" \
-            --tlscert="${DOCKER_CONFIG}/cert.pem" \
-            --tlskey="${DOCKER_CONFIG}/key.pem" \
+            --tlscacert="/home/user/.docker/ca.pem" \
+            --tlscert="/home/user/.docker/cert.pem" \
+            --tlskey="/home/user/.docker/key.pem" \
             build \
             --frontend dockerfile.v0 \
             --local context=. \
