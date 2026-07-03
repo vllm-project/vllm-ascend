@@ -137,7 +137,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYTEST_LIST_FILE="${SCRIPT_DIR}/recommended_pytest_paths.txt"
 
 # Api2 成功后：提取 name 并直接转换
-python3 <<'PY' > "${PYTEST_LIST_FILE}"
+CASE_RET="${CASE_RET}" python3 <<'PY' > "${PYTEST_LIST_FILE}"
 import json
 import os
 import sys
