@@ -410,13 +410,26 @@ def forward_m2n(
         router_logits = None
         topk_weights = None
         topk_ids = None
+        hidden_states_2d = None
         if afd_config is not None and afd_config.compute_gate_on_attention:
             # moe_gating_top_k requires 2D router_logits. Use a local 2D view
             # for gate projection only — do NOT reshape hidden_states itself,
             # because the original shape is sent to FFN where hc_pre expects
             # 3D/4D input.
+            #
+            # compute_attn_output returns 3D (bs, hc, d) after hc_post. On the
+            # FFN side, hc_pre folds hc → 1 producing (bs, d). Routing must be
+            # computed from the same token count (bs, not bs*hc), otherwise
+            # topk_ids has hc times more rows than post-hc_pre hidden_states,
+            # causing "xShape's dim0 not equal to expertIdShape's dim0" in
+            # npu_moe_distribute_dispatch_v2. Average over hc (dim=-2) to
+            # approximate the post-hc_pre representation.
             hidden_dim = hidden_states.shape[-1]
-            hidden_states_2d = hidden_states.view(-1, hidden_dim)
+            if hidden_states.dim() >= 3:
+                hidden_states_2d = hidden_states.mean(dim=-2).reshape(
+                    -1, hidden_dim)
+            else:
+                hidden_states_2d = hidden_states.view(-1, hidden_dim)
             router_logits = F.linear(hidden_states_2d.float(),
                                      layer.mlp.gate.weight)
             topk_weights, topk_ids = afd_connector.select_experts(
@@ -434,10 +447,13 @@ def forward_m2n(
         logger.info(
             "AFD forward_m2n [attn side]: "
             "afd_config=%s, compute_gate_on_attention=%s, layer_idx=%s, "
+            "hidden_states=%s, hidden_states_2d=%s, "
             "router_logits=%s, topk_weights=%s, topk_ids=%s",
             afd_config is not None,
             afd_config.compute_gate_on_attention if afd_config else None,
             layer.layer_idx,
+            tuple(hidden_states.shape), hidden_states.dim(),
+            tuple(hidden_states_2d.shape) if hidden_states_2d is not None else None,
             router_logits.shape if router_logits is not None else None,
             topk_weights.shape if topk_weights is not None else None,
             topk_ids.shape if topk_ids is not None else None,
