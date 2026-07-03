@@ -215,8 +215,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         # GLM series models: speculative decoding does not yet support running
         # the draft model in graph mode. Force the draft model to always use
-        # single-operator (eager) mode. This is equivalent to the user adding
-        # `"enforce_eager": true` to the `--speculative-config` JSON, and keeps
+        # eager mode. This is equivalent to the user adding
+        # `"enforce_eager": true` to the `--speculative-config`, and keeps
         # the target model's graph-mode setting untouched.
         # TODO(lilinsiman): Remove this code segment after future versions of the GLM
         # series models support graph input for speculative inference.
