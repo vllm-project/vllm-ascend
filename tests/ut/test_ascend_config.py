@@ -15,9 +15,10 @@
 
 import json
 import os
+from types import SimpleNamespace
 from unittest.mock import patch
 
-from vllm.config import VllmConfig
+from vllm.config import KVTransferConfig, VllmConfig
 
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_config import clear_ascend_config, get_ascend_config, init_ascend_config
@@ -37,6 +38,20 @@ class TestAscendConfig(TestBase):
                 clear_enable_sp()
 
         return wrapper
+
+    @staticmethod
+    def _make_model_config(
+        total_num_attention_heads: int = 32,
+        total_num_kv_heads: int = 8,
+        is_deepseek_mla: bool = False,
+    ):
+        return SimpleNamespace(
+            is_deepseek_mla=is_deepseek_mla,
+            use_mla=is_deepseek_mla,
+            enforce_eager=True,
+            model_arch_config=SimpleNamespace(total_num_attention_heads=total_num_attention_heads),
+            get_total_num_kv_heads=lambda: total_num_kv_heads,
+        )
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
@@ -93,6 +108,103 @@ class TestAscendConfig(TestBase):
         ascend_compilation_config = init_ascend_config(test_vllm_config).ascend_compilation_config
         self.assertTrue(ascend_compilation_config.enable_npugraph_ex)
         self.assertTrue(ascend_compilation_config.enable_static_kernel)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_init_ascend_config_rejects_mooncake_c8_kv_cache_consumer(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.kv_transfer_config = KVTransferConfig(
+            kv_connector="MooncakeConnectorV1",
+            kv_role="kv_consumer",
+        )
+        test_vllm_config.quant_config = SimpleNamespace(enable_c8_quant=True)
+        test_vllm_config.model_config = self._make_model_config()
+
+        with self.assertRaisesRegex(ValueError, "does not support C8 KV cache quantization"):
+            init_ascend_config(test_vllm_config)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_init_ascend_config_rejects_multi_connector_mooncake_c8_consumer(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.kv_transfer_config = KVTransferConfig(
+            kv_connector="MultiConnector",
+            kv_role="kv_consumer",
+            kv_connector_extra_config={
+                "connectors": [
+                    {
+                        "kv_connector": "MooncakeConnectorV1",
+                        "kv_role": "kv_consumer",
+                    }
+                ]
+            },
+        )
+        test_vllm_config.quant_config = SimpleNamespace(enable_c8_quant=True)
+        test_vllm_config.model_config = self._make_model_config()
+
+        with self.assertRaisesRegex(ValueError, "does not support C8 KV cache quantization"):
+            init_ascend_config(test_vllm_config)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_init_ascend_config_allows_layerwise_c8_kv_cache_consumer(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.kv_transfer_config = KVTransferConfig(
+            kv_connector="MooncakeLayerwiseConnector",
+            kv_role="kv_consumer",
+        )
+        test_vllm_config.quant_config = SimpleNamespace(enable_c8_quant=True)
+        test_vllm_config.model_config = self._make_model_config()
+
+        ascend_config = init_ascend_config(test_vllm_config)
+
+        self.assertIsNotNone(ascend_config)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_init_ascend_config_allows_mha_mooncake_c8_kv_cache_consumer(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.kv_transfer_config = KVTransferConfig(
+            kv_connector="MooncakeConnectorV1",
+            kv_role="kv_consumer",
+        )
+        test_vllm_config.quant_config = SimpleNamespace(enable_c8_quant=True)
+        test_vllm_config.model_config = self._make_model_config(
+            total_num_attention_heads=8,
+            total_num_kv_heads=8,
+        )
+
+        ascend_config = init_ascend_config(test_vllm_config)
+
+        self.assertIsNotNone(ascend_config)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_init_ascend_config_rejects_mooncake_c8_kv_cache_producer(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.kv_transfer_config = KVTransferConfig(
+            kv_connector="MooncakeConnectorV1",
+            kv_role="kv_producer",
+        )
+        test_vllm_config.quant_config = SimpleNamespace(enable_c8_quant=True)
+        test_vllm_config.model_config = self._make_model_config()
+
+        with self.assertRaisesRegex(ValueError, "does not support C8 KV cache quantization"):
+            init_ascend_config(test_vllm_config)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_init_ascend_config_rejects_mooncake_c8_kv_cache_both_role(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.kv_transfer_config = KVTransferConfig(
+            kv_connector="MooncakeConnectorV1",
+            kv_role="kv_both",
+        )
+        test_vllm_config.quant_config = SimpleNamespace(enable_c8_quant=True)
+        test_vllm_config.model_config = self._make_model_config()
+
+        with self.assertRaisesRegex(ValueError, "does not support C8 KV cache quantization"):
+            init_ascend_config(test_vllm_config)
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.ascend_config.logger.info_once")
