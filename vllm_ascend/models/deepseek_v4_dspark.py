@@ -36,6 +36,16 @@ from .deepseek_v4 import (
     _wo_a_weight_for_eager_projection,
 )
 
+FP8_E4M3_EXP_MIN = -6
+FP8_E4M3_EXP_MAX = 8
+FP8_E4M3_MANTISSA_STEPS = 8
+FP8_E4M3_MANTISSA_MAX = 7
+FP8_E4M3_MAX_EXP_MANTISSA_MAX = 6
+FP8_E4M3_SUBNORMAL_EXP = -9
+FP8_E4M3_MAX_VALUE = 448.0
+DSPARK_FP8_AMAX_EPS = 1e-4
+DSPARK_NOPE_QDQ_BLOCK_SIZE = 64
+
 def _draft_quant_config(vllm_config: VllmConfig):
     return vllm_config.quant_config
 
@@ -59,83 +69,59 @@ def _dspark_max_request_slots(vllm_config: VllmConfig) -> int:
     return max(1, int(getattr(scheduler_config, "max_num_seqs", 1) or 1))
 
 
-def _recipe_sparse_sharedkv_attention(
+def _fp8_e4m3fn_quantized_abs(abs_scaled: torch.Tensor) -> torch.Tensor:
+    subnormal_step = 2.0 ** FP8_E4M3_SUBNORMAL_EXP
+    min_normal = 2.0 ** FP8_E4M3_EXP_MIN
+    subnormal_normal_midpoint = (FP8_E4M3_MANTISSA_MAX * subnormal_step + min_normal) * 0.5
+    subnormal = torch.floor(abs_scaled / subnormal_step + 0.5).clamp(0, FP8_E4M3_MANTISSA_MAX) * subnormal_step
+    normal_exp = torch.floor(torch.log2(abs_scaled.clamp_min(min_normal))).clamp(FP8_E4M3_EXP_MIN, FP8_E4M3_EXP_MAX)
+    normal_base = torch.exp2(normal_exp)
+    mantissa = torch.floor((abs_scaled / normal_base - 1.0) * FP8_E4M3_MANTISSA_STEPS + 0.5)
+    carry = mantissa >= FP8_E4M3_MANTISSA_STEPS
+    normal_exp = torch.where(carry, normal_exp + 1.0, normal_exp).clamp(FP8_E4M3_EXP_MIN, FP8_E4M3_EXP_MAX)
+    mantissa = torch.where(carry, torch.zeros_like(mantissa), mantissa)
+    mantissa = torch.where(normal_exp >= FP8_E4M3_EXP_MAX, mantissa.clamp(0, FP8_E4M3_MAX_EXP_MANTISSA_MAX), mantissa.clamp(0, FP8_E4M3_MANTISSA_MAX))
+    normal = (1.0 + mantissa / FP8_E4M3_MANTISSA_STEPS) * torch.exp2(normal_exp)
+    return torch.where(abs_scaled < subnormal_normal_midpoint, subnormal, normal)
+
+
+def _fp8_e4m3fn_qdq(x: torch.Tensor, block_size: int) -> torch.Tensor:
+    if x.numel() == 0:
+        return x
+    orig_shape = x.shape
+    last_dim = orig_shape[-1]
+    if last_dim % block_size != 0:
+        return x
+    x_view = x.float().reshape(-1, last_dim)
+    blocks = x_view.reshape(-1, last_dim // block_size, block_size)
+    amax = blocks.abs().amax(dim=-1, keepdim=True).clamp_min(DSPARK_FP8_AMAX_EPS)
+    scale = torch.pow(torch.full((), 2.0, dtype=torch.float32, device=x.device), torch.ceil(torch.log2(amax / FP8_E4M3_MAX_VALUE)))
+    scaled = (blocks / scale).clamp(-FP8_E4M3_MAX_VALUE, FP8_E4M3_MAX_VALUE)
+    quantized_abs = _fp8_e4m3fn_quantized_abs(scaled.abs())
+    qdq = torch.where(scaled < 0, -quantized_abs, quantized_abs) * scale
+    return qdq.reshape(orig_shape).to(x.dtype)
+
+
+def _dspark_qdq_nope_dims(kv: torch.Tensor, nope_head_dim: int) -> torch.Tensor:
+    if nope_head_dim <= 0:
+        return kv
+    kv_nope = _fp8_e4m3fn_qdq(kv[..., :nope_head_dim], DSPARK_NOPE_QDQ_BLOCK_SIZE)
+    return torch.cat([kv_nope, kv[..., nope_head_dim:]], dim=-1)
+
+
+def _dspark_small_ops_attention(
     q: torch.Tensor,
     packed_kv: torch.Tensor,
     attn_sink: torch.Tensor,
     softmax_scale: float,
-    block_size: int,
-    window_size: int,
-    sparse_attn_ops,
-) -> torch.Tensor | None:
-    if q.device.type == "cpu" or sparse_attn_ops is None:
-        return None
-    attn_op, metadata_op = sparse_attn_ops
-
-    cu_seqlens_q = torch.tensor([0, q.shape[0]], dtype=torch.int32, device=q.device)
-    cu_seqlens_kv = torch.tensor([0, packed_kv.shape[0]], dtype=torch.int32, device=q.device)
-    metadata = metadata_op(
-        num_heads_q=int(q.shape[1]),
-        num_heads_kv=1,
-        head_dim=int(q.shape[2]),
-        cu_seqlens_q=cu_seqlens_q,
-        seqused_q=None,
-        seqused_kv=None,
-        batch_size=1,
-        max_seqlen_q=int(q.shape[0]),
-        max_seqlen_kv=int(packed_kv.shape[0]),
-        ori_topk=0,
-        cmp_topk=0,
-        cmp_ratio=1,
-        ori_mask_mode=4,
-        cmp_mask_mode=3,
-        ori_win_left=int(window_size + block_size - 1),
-        ori_win_right=int(block_size - 1),
-        layout_q="TND",
-        layout_kv="TND",
-        has_ori_kv=True,
-        has_cmp_kv=False,
-        device=str(q.device),
-    )
-    return attn_op(
-        q,
-        ori_kv=packed_kv,
-        cmp_kv=None,
-        ori_sparse_indices=None,
-        cmp_sparse_indices=None,
-        ori_block_table=None,
-        cmp_block_table=None,
-        cu_seqlens_q=cu_seqlens_q,
-        cu_seqlens_ori_kv=cu_seqlens_kv,
-        cu_seqlens_cmp_kv=None,
-        seqused_q=None,
-        seqused_kv=None,
-        sinks=attn_sink[: q.shape[1]].float().contiguous(),
-        metadata=metadata,
-        softmax_scale=float(softmax_scale),
-        cmp_ratio=1,
-        ori_mask_mode=4,
-        cmp_mask_mode=3,
-        ori_win_left=int(window_size + block_size - 1),
-        ori_win_right=int(block_size - 1),
-        layout_q="TND",
-        layout_kv="TND",
-        return_softmax_lse=False,
-    )[0]
-
-
-def _torch_sharedkv_attention(
-    q: torch.Tensor,
-    kv: torch.Tensor,
-    attn_sink: torch.Tensor,
-    softmax_scale: float,
 ) -> torch.Tensor:
-    scores = torch.einsum("qhd,kd->qhk", q.float(), kv.float()) * softmax_scale
-    sink = attn_sink[: q.shape[1]].float().view(1, q.shape[1], 1)
-    scores_max = torch.maximum(scores.max(dim=-1, keepdim=True).values, sink)
+    scores = torch.einsum("qhd,kd->qhk", q.float(), packed_kv.float()) * softmax_scale
+    sink_scores = attn_sink[: q.shape[1]].to(scores.dtype).view(1, q.shape[1], 1)
+    scores_max = torch.maximum(scores.max(dim=-1, keepdim=True).values, sink_scores)
     exp_scores = torch.exp(scores - scores_max)
-    probs = exp_scores / (exp_scores.sum(dim=-1, keepdim=True) + torch.exp(sink - scores_max))
-    return torch.einsum("qhk,kd->qhd", probs, kv.float()).to(q.dtype)
+    denom = exp_scores.sum(dim=-1, keepdim=True) + torch.exp(sink_scores - scores_max)
+    weights = exp_scores / denom
+    return torch.einsum("qhk,kd->qhd", weights.to(packed_kv.dtype), packed_kv).to(q.dtype)
 
 
 class DeepseekV4DSparkAttention(DeepseekV4Attention):
@@ -155,22 +141,6 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         self.register_buffer("_dspark_cache_positions", torch.full((max_request_slots, cache_capacity), -1, dtype=torch.int32, device=self.attn_sink.device), persistent=False)
         self._dspark_cache_capacity = cache_capacity
         self._dspark_max_request_slots = max_request_slots
-        self._dspark_sparse_attn_ops = None
-        self._dspark_sparse_attn_unavailable_warned = False
-
-    def _get_dspark_sparse_attn_ops(self):
-        if self._dspark_sparse_attn_ops is not None:
-            return self._dspark_sparse_attn_ops
-        try:
-            attn_op = torch.ops.custom.npu_sparse_attn_sharedkv
-            metadata_op = torch.ops.custom.npu_sparse_attn_sharedkv_metadata
-        except (AttributeError, RuntimeError) as exc:
-            if not self._dspark_sparse_attn_unavailable_warned:
-                logger.warning("Failed to get custom DSpark sparse sharedkv ops: %s", exc)
-                self._dspark_sparse_attn_unavailable_warned = True
-            return None
-        self._dspark_sparse_attn_ops = attn_op, metadata_op
-        return self._dspark_sparse_attn_ops
 
     def reset_request_slots(self, request_slots: torch.Tensor | None) -> None:
         if request_slots is None or request_slots.numel() == 0:
@@ -183,7 +153,7 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         kv = self.kv_norm(_linear_output(self.wkv, hidden_states))
         k_nope, k_pe = kv.split([self.nope_head_dim, self.rope_head_dim], dim=-1)
         k_pe = _apply_dsv4_rope(self.rotary_emb, positions, k_pe.unsqueeze(1)).squeeze(1)
-        return torch.cat([k_nope, k_pe], dim=-1).contiguous()
+        return _dspark_qdq_nope_dims(torch.cat([k_nope, k_pe], dim=-1), self.nope_head_dim).contiguous()
 
     def precompute_context_kv(self, main_x: torch.Tensor, positions: torch.Tensor, request_slots: torch.Tensor | None) -> None:
         if positions.numel() == 0:
@@ -215,7 +185,7 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         k_nope, k_pe = kv.split([self.nope_head_dim, self.rope_head_dim], dim=-1)
         q_pe = _apply_dsv4_rope(self.rotary_emb, positions, q_pe)
         k_pe = _apply_dsv4_rope(self.rotary_emb, positions, k_pe.unsqueeze(1)).squeeze(1)
-        shared_kv = torch.cat([k_nope, k_pe], dim=-1).contiguous()
+        shared_kv = _dspark_qdq_nope_dims(torch.cat([k_nope, k_pe], dim=-1), self.nope_head_dim).contiguous()
         q = torch.cat([q_nope, q_pe], dim=-1)
         if request_slots is None:
             request_slots = torch.zeros_like(positions, dtype=torch.int32)
@@ -239,17 +209,12 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
             else:
                 ctx_kv = shared_kv.new_empty((0, shared_kv.shape[-1]))
             packed_kv = torch.cat([ctx_kv, shared_kv[block_offset:block_end]], dim=0).contiguous()
-            op_out = _recipe_sparse_sharedkv_attention(
+            op_out = _dspark_small_ops_attention(
                 q[block_offset:block_end].contiguous(),
-                packed_kv[:, None, :].contiguous(),
+                packed_kv,
                 self.attn_sink,
                 float(self.scale),
-                self.block_size,
-                self.window_size,
-                self._get_dspark_sparse_attn_ops(),
             )
-            if op_out is None:
-                op_out = _torch_sharedkv_attention(q[block_offset:block_end], packed_kv, self.attn_sink, float(self.scale))
             out[block_offset:block_end] = op_out
 
         out = _apply_dsv4_rope_tail(self.rotary_emb, positions, out, inverse=True)
