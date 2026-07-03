@@ -106,8 +106,7 @@ msgstr ""
 msgid ""
 "Without modifying `sp_min_token_num`, the simplest way and recommended "
 "way to enable SP is:"
-msgstr ""
-不修改 `sp_min_token_num` 的情况下，启用 SP 的最简单且推荐的方式是："
+msgstr "不修改 `sp_min_token_num` 的情况下，启用 SP 的最简单且推荐的方式是："
 
 #: ../../source/user_guide/feature_guide/sequence_parallelism.md:31
 msgid "Difference Between SP and Flash Comm V1"

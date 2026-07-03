@@ -251,15 +251,31 @@ msgid ""
 msgstr ""
 "对于稠密模型（没有专家权重）和量化模型（其权重由量化方法处理），此步骤完全跳过。"
 
+#: ../../source/user_guide/feature_guide/sleep_mode.md:82
+msgid "Prepare Model Weights"
+msgstr "准备模型权重"
+
 #: ../../source/user_guide/feature_guide/sleep_mode.md:83
+msgid "Use the `Qwen2.5-0.5B-Instruct` model weights. With `VLLM_USE_MODELSCOPE=True`, the model will be downloaded automatically from ModelScope."
+msgstr "使用 `Qwen2.5-0.5B-Instruct` 模型的权重。若设置 `VLLM_USE_MODELSCOPE=True`，模型将自动从 ModelScope 下载。"
+
+#: ../../source/user_guide/feature_guide/sleep_mode.md:84
+msgid "Model"
+msgstr "模型"
+
+#: ../../source/user_guide/feature_guide/sleep_mode.md:85
+msgid "ModelScope Link"
+msgstr "ModelScope链接"
+
+#: ../../source/user_guide/feature_guide/sleep_mode.md:86
 msgid "Usage"
 msgstr "使用方法"
 
-#: ../../source/user_guide/feature_guide/sleep_mode.md:85
+#: ../../source/user_guide/feature_guide/sleep_mode.md:87
 msgid "The following is a simple example of how to use sleep mode."
 msgstr "以下是如何使用睡眠模式的一个简单示例。"
 
-#: ../../source/user_guide/feature_guide/sleep_mode.md:87
+#: ../../source/user_guide/feature_guide/sleep_mode.md:88
 msgid "Offline inference:"
 msgstr "离线推理："
 
