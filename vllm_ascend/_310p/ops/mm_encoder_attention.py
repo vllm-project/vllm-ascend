@@ -124,6 +124,9 @@ class AscendMMEncoderAttention310(MMEncoderAttention):
             v = F.pad(v, (0, pad_len), mode="constant", value=0)
 
         context_layer = torch.empty_like(q)
+        # TODO: The current torch_npu version does not support
+        # _npu_flash_attention_unpad_v2. Once it is supported, drop the
+        # else branch below and always use the v2 op.
         if self.support_approximate_calculation:
             torch_npu._npu_flash_attention_unpad_v2(
                 query=q,
