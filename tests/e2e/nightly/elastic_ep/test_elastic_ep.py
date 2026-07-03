@@ -176,10 +176,7 @@ class ElasticEPTestConfig:
 
 
 # Define common additional_config
-COMMON_ADDITIONAL_CONFIG = (
-    '{"eplb_config": {"dynamic_eplb": false,'
-    ' "num_redundant_experts": 128}}'
-)
+COMMON_ADDITIONAL_CONFIG = '{"eplb_config": {"dynamic_eplb": false, "num_redundant_experts": 128}}'
 
 # Define test configurations — indexed by name for stable lookup
 CONFIG_QWEN3_30B_DEFAULT = ElasticEPTestConfig(
@@ -277,9 +274,7 @@ CONFIG_QWEN3_235B_TP2 = ElasticEPTestConfig(
     data_parallel_size_local=8,
     tensor_parallel_size=2,
     additional_config=(
-        '{"eplb_config": {"dynamic_eplb": false,'
-        ' "num_redundant_experts": 32},'
-        ' "enable_flashcomm1": true}'
+        '{"eplb_config": {"dynamic_eplb": false, "num_redundant_experts": 32}, "enable_flashcomm1": true}'
     ),
     scale_sequence=ScaleSequence(
         name="tp2_scaling",
@@ -330,9 +325,7 @@ def _build_vllm_args(config: ElasticEPTestConfig) -> list[str]:
     return args
 
 
-def _run_elastic_ep_test(
-    config: ElasticEPTestConfig, model_name: str
-) -> None:
+def _run_elastic_ep_test(config: ElasticEPTestConfig, model_name: str) -> None:
     """Run a complete Elastic EP test with the given configuration."""
     vllm_serve_args = _build_vllm_args(config)
     env_dict = _make_env_dict()
@@ -357,40 +350,28 @@ def _run_elastic_ep_test(
 
         # Run initial baseline evaluation
         initial_stage = f"Initial (dp={config.data_parallel_size})"
-        accuracies[initial_stage] = _run_gsm8k_eval(
-            server, model_name, initial_stage
-        )
+        accuracies[initial_stage] = _run_gsm8k_eval(server, model_name, initial_stage)
         print(f"  Initial accuracy: {accuracies[initial_stage]:.2f}")
 
         # Run scaling steps
         for new_dp_size, stage_description in config.scale_sequence.steps:
-            assert _send_scale_command(
-                server, new_dp_size
-            ), f"{stage_description} failed"
+            assert _send_scale_command(server, new_dp_size), f"{stage_description} failed"
             time.sleep(_SCALE_DELAY_SECONDS)
-            accuracies[stage_description] = _run_gsm8k_eval(
-                server, model_name, stage_description
-            )
-            print(
-                f"  {stage_description} accuracy: "
-                f"{accuracies[stage_description]:.2f}"
-            )
+            accuracies[stage_description] = _run_gsm8k_eval(server, model_name, stage_description)
+            print(f"  {stage_description} accuracy: {accuracies[stage_description]:.2f}")
 
         # Print summary
         print(f"nElastic EP Accuracy Summary ({config.name}):")
         for stage, acc in accuracies.items():
             print(f"  {stage}: {acc:.2f}")
-        print(
-            f"  Baseline: {GSM8K_BASELINE:.2f} +/- {GSM8K_THRESHOLD:.2f}"
-        )
+        print(f"  Baseline: {GSM8K_BASELINE:.2f} +/- {GSM8K_THRESHOLD:.2f}")
 
         # Assert all accuracies are within range
         for stage, acc in accuracies.items():
             lower_bound = GSM8K_BASELINE - GSM8K_THRESHOLD
             upper_bound = GSM8K_BASELINE + GSM8K_THRESHOLD
             assert lower_bound <= acc <= upper_bound, (
-                f"{stage} GSM8K accuracy {acc:.2f} is outside "
-                f"expected range [{lower_bound}, {upper_bound}]"
+                f"{stage} GSM8K accuracy {acc:.2f} is outside expected range [{lower_bound}, {upper_bound}]"
             )
 
 
