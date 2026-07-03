@@ -183,16 +183,13 @@ class YuanrongBackend(Backend):
                 logger.debug("Failed to get key details. failed_keys=%s", failed_keys)
         except Exception as exc:
             logger.error(
-                "Failed to get %d keys out of %d. Check network and yuanrong service.",
+                "Failed to get %d keys out of %d. type=%s, error=%s. Check network and yuanrong service.",
                 len(failed_keys_for_log),
                 len(keys),
-            )
-            logger.debug(
-                "Failed to get key details. keys=%s, type=%s, error=%s",
-                failed_keys_for_log,
                 type(exc).__name__,
                 exc,
             )
+            logger.debug("Failed to get key details. keys=%s", failed_keys_for_log)
 
     def put(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
         if len(keys) == 0:
@@ -215,13 +212,10 @@ class YuanrongBackend(Backend):
                     )
         except Exception as exc:
             logger.error(
-                "Failed to put %d keys out of %d. Check network and yuanrong service.",
+                "Failed to put %d keys out of %d. type=%s, error=%s. Check network and yuanrong service.",
                 len(failed_keys_for_log),
                 len(keys),
-            )
-            logger.debug(
-                "Failed to put key details. keys=%s, type=%s, error=%s",
-                failed_keys_for_log,
                 type(exc).__name__,
                 exc,
             )
+            logger.debug("Failed to put key details. keys=%s", failed_keys_for_log)
