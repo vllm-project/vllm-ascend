@@ -2436,9 +2436,12 @@ class NPUModelRunner(GPUModelRunner):
         _target_is_fdo = self.compilation_config.cudagraph_mode.has_full_cudagraphs()
         if ((_target_is_fdo or os.path.exists("/tmp/vllm_sync_target_kv"))
                 and hasattr(self, 'drafter') and self.drafter is not None):
-            _target_done = torch.npu.Event()
-            _target_done.record()
-            self.drafter._target_done_event = _target_done
+            # Reuse a single event across steps instead of allocating one per
+            # forward on the hot path, to avoid NPU event resource pressure.
+            if not hasattr(self, "_target_done_event"):
+                self._target_done_event = torch.npu.Event()
+            self._target_done_event.record()
+            self.drafter._target_done_event = self._target_done_event
         with record_function_or_nullcontext("post process"):
             aux_hidden_states = None
             if self.use_aux_hidden_state_outputs:
