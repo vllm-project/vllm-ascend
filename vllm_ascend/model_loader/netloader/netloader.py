@@ -35,6 +35,12 @@ from .utils import find_free_port, is_valid_path_prefix
 
 DRAFT_PORT_OFFSET = 10000
 
+try:
+    # Older vLLM versions may not expose the current-config accessor.
+    from vllm.config import get_current_vllm_config
+except ImportError:
+    get_current_vllm_config = None
+
 
 @register_model_loader("netloader")
 class ModelNetLoaderElastic(BaseModelLoader):
@@ -135,6 +141,46 @@ class ModelNetLoaderElastic(BaseModelLoader):
     def _is_draft_model(model_config: ModelConfig) -> bool:
         """Check whether the model_config corresponds to a draft model for speculative decoding."""
         return getattr(model_config, "runner_type", None) == "draft"
+
+    @staticmethod
+    def _get_static_forward_context(vllm_config: VllmConfig):
+        compilation_config = getattr(vllm_config, "compilation_config", None)
+        static_forward_context = getattr(compilation_config, "static_forward_context", None)
+        if static_forward_context is None or not hasattr(static_forward_context, "clear"):
+            return None
+        return static_forward_context
+
+    @staticmethod
+    def _clear_static_forward_context(vllm_config: VllmConfig) -> None:
+        """Clear static layer registrations before rebuilding the model on fallback."""
+        candidates = [("vllm_config", vllm_config)]
+        if get_current_vllm_config is not None:
+            try:
+                candidates.append(("current_vllm_config", get_current_vllm_config()))
+            except Exception as e:
+                logger.debug("Failed to get current vLLM config while clearing static context: %s", e)
+
+        cleared_contexts = []
+        seen_context_ids = set()
+        for source, config in candidates:
+            static_forward_context = ModelNetLoaderElastic._get_static_forward_context(config)
+            if static_forward_context is None:
+                continue
+
+            context_id = id(static_forward_context)
+            if context_id in seen_context_ids:
+                continue
+            seen_context_ids.add(context_id)
+
+            try:
+                context_size = len(static_forward_context)
+            except TypeError:
+                context_size = "unknown"
+            static_forward_context.clear()
+            cleared_contexts.append(f"{source}:{context_size}")
+
+        if cleared_contexts:
+            logger.info("Cleared static_forward_context before fallback: %s", cleared_contexts)
 
     def load_model(self, vllm_config: VllmConfig, model_config: ModelConfig, prefix: str = "") -> nn.Module:
         """
@@ -239,6 +285,9 @@ class ModelNetLoaderElastic(BaseModelLoader):
                     elif device_config.device_type == "cuda":
                         logger.info("Empty CUDA cache")
                         torch.cuda.empty_cache()
+
+                    # Clear registrations from the failed initialize_model
+                    self._clear_static_forward_context(vllm_config)
 
                     model, need_process_weights_after_loading = self.revert_to_default(
                         model_config, vllm_config, device_config, prefix

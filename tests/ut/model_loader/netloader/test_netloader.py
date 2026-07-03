@@ -133,6 +133,30 @@ def test_init_with_invalid_config(monkeypatch):
     assert loader.output_prefix is None
 
 
+def test_clear_static_forward_context_clears_current_vllm_config(monkeypatch):
+    class DummyCompilationConfig:
+        def __init__(self):
+            self.static_forward_context = {}
+
+    class ConfigWithCompilation:
+        def __init__(self):
+            self.compilation_config = DummyCompilationConfig()
+
+    passed_config = ConfigWithCompilation()
+    current_config = ConfigWithCompilation()
+    passed_config.compilation_config.static_forward_context["passed.layer"] = object()
+    current_config.compilation_config.static_forward_context["current.layer"] = object()
+    monkeypatch.setattr(
+        "vllm_ascend.model_loader.netloader.netloader.get_current_vllm_config",
+        lambda: current_config,
+    )
+
+    ModelNetLoaderElastic._clear_static_forward_context(passed_config)
+
+    assert passed_config.compilation_config.static_forward_context == {}
+    assert current_config.compilation_config.static_forward_context == {}
+
+
 @patch("vllm_ascend.model_loader.netloader.netloader.logger")
 def test_load_model_elastic_success(mock_logger, monkeypatch, tmp_path):
     monkeypatch.setattr("torch.distributed.get_rank", lambda: 0)
