@@ -2055,15 +2055,37 @@ class AscendDSAImpl(DSAAttentionImpl):
                     _win = int(getattr(self, "window_size", 0)) or int(actual_seq_lengths_key.max().item())
                     import os as _cw
                     _ctxmode = _cw.environ.get("DSPARK_CTXLEN", "full")
-                    if _ctxmode == "clamp":
-                        _ctx_kv_len = torch.clamp(actual_seq_lengths_key, max=_win).to(actual_seq_lengths_key.dtype)
+                    if _ctxmode == "ring":
+                        # DSPARK_RING_V1: reference-faithful context = LAST min(win,klen)
+                        # positions (inference_model.py ring cache), not first-N (clamp)
+                        # nor full-length (full). Gather via block table into contiguous KV.
+                        _bs_c = int(swa_kv_cache.shape[1])
+                        _kvflat = swa_kv_cache.reshape(-1, swa_kv_cache.shape[-1])
+                        _kl64 = actual_seq_lengths_key.reshape(-1).to(torch.int64)
+                        _ctxn = torch.clamp(_kl64, max=_win)
+                        _pos0 = _kl64 - _ctxn
+                        _ar = torch.arange(_win, device=_q4.device).view(1, -1)
+                        _pos = _pos0.view(-1, 1) + _ar
+                        _bt64 = swa_prefill_metadata.block_table.to(torch.int64)
+                        _pgi = torch.div(_pos, _bs_c, rounding_mode="floor").clamp(min=0, max=_bt64.shape[1]-1)
+                        _pg = torch.gather(_bt64[: _pos.shape[0]], 1, _pgi)
+                        _slot = (_pg * _bs_c + (_pos % _bs_c)).reshape(-1).clamp(min=0, max=_kvflat.shape[0]-1)
+                        _ctxkv = _kvflat.index_select(0, _slot).view(_B, _win, 1, _H)
+                        _oc, _lc = torch.ops.npu.npu_fused_infer_attention_score(
+                            _q4, _ctxkv, _ctxkv, num_heads=_N, num_key_value_heads=1, input_layout='BSND',
+                            scale=self.softmax_scale, sparse_mode=0, atten_mask=None, softmax_lse_flag=True,
+                            actual_seq_lengths_kv=_ctxn.to(actual_seq_lengths_key.dtype))
+                        _ctx_kv_len = _ctxn  # DIAG2 compat
                     else:
-                        _ctx_kv_len = actual_seq_lengths_key.to(actual_seq_lengths_key.dtype)  # full: include recent positions
-                    _oc, _lc = torch.ops.npu.npu_fused_infer_attention_score(
-                        _q4, _kv, _kv, num_heads=_N, num_key_value_heads=1, input_layout='BSND',
-                        scale=self.softmax_scale, sparse_mode=0, atten_mask=None, softmax_lse_flag=True,
-                        block_table=swa_prefill_metadata.block_table, block_size=swa_kv_cache.shape[1],
-                        actual_seq_lengths_kv=_ctx_kv_len)
+                        if _ctxmode == "clamp":
+                            _ctx_kv_len = torch.clamp(actual_seq_lengths_key, max=_win).to(actual_seq_lengths_key.dtype)
+                        else:
+                            _ctx_kv_len = actual_seq_lengths_key.to(actual_seq_lengths_key.dtype)  # full: include recent positions
+                        _oc, _lc = torch.ops.npu.npu_fused_infer_attention_score(
+                            _q4, _kv, _kv, num_heads=_N, num_key_value_heads=1, input_layout='BSND',
+                            scale=self.softmax_scale, sparse_mode=0, atten_mask=None, softmax_lse_flag=True,
+                            block_table=swa_prefill_metadata.block_table, block_size=swa_kv_cache.shape[1],
+                            actual_seq_lengths_kv=_ctx_kv_len)
                     _bk = kv.reshape(_B, _S, 1, _H).contiguous()
                     _ob, _lb = torch.ops.npu.npu_fused_infer_attention_score(
                         _q4, _bk, _bk, num_heads=_N, num_key_value_heads=1, input_layout='BSND',
