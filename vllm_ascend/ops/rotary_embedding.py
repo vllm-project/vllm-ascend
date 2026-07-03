@@ -180,33 +180,32 @@ def rope_forward_oot(
                 is_neox_style=is_neox_style,
             )
         else:
+            # Non-Triton fallback: reuse the NPU rotary op with a throwaway
+            # key buffer so only the query is rotated. This mirrors the
+            # normal (key is not None) path and avoids hand-rolling cos/sin
+            # pairs, which is easy to get wrong for both neox and interleaved
+            # styles (see PR review: the previous manual implementation had
+            # shape mismatches and an incorrect interleaved formula).
             if rotary_dim < head_size:
                 query = query.view(num_tokens, -1, head_size)
                 q_rot = query[..., :rotary_dim]
                 q_pass = query[..., rotary_dim:]
                 q_rot = q_rot.contiguous().view(num_tokens, -1)
-                cos, sin = cos_sin_cache.chunk(2, dim=-1)
-                cos = cos.index_select(0, positions).view(num_tokens, -1)[:, :rotary_dim]
-                sin = sin.index_select(0, positions).view(num_tokens, -1)[:, :rotary_dim]
-                if is_neox_style:
-                    q1, q2 = q_rot.chunk(2, dim=-1)
-                    q_rot = torch.cat([q1 * cos - q2 * sin, q2 * cos + q1 * sin], dim=-1)
-                else:
-                    q_rot = q_rot * cos + q_rot * sin
-                query = torch.cat([q_rot, q_pass], dim=-1).flatten(-2, -1)
+                k_dummy = torch.empty_like(q_rot)
+                torch_npu._npu_rotary_embedding(
+                    positions, q_rot, k_dummy, rotary_dim,
+                    cos_sin_cache, is_neox_style,
+                )
+                q_rot = q_rot.view(num_tokens, -1, rotary_dim)
+                query = torch.cat((q_rot, q_pass), dim=-1).flatten(-2, -1)
             else:
-                query = query.view(num_tokens, -1, head_size)
-                cos, sin = cos_sin_cache.chunk(2, dim=-1)
-                cos = cos.index_select(0, positions).view(num_tokens, 1, -1)
-                sin = sin.index_select(0, positions).view(num_tokens, 1, -1)
-                if is_neox_style:
-                    q1, q2 = query.chunk(2, dim=-1)
-                    query = torch.cat(
-                        [q1 * cos - q2 * sin, q2 * cos + q1 * sin], dim=-1
-                    )
-                else:
-                    query = query * cos + query * sin
-                query = query.flatten(-2, -1)
+                query = query.contiguous().view(num_tokens, -1)
+                k_dummy = torch.empty_like(query)
+                torch_npu._npu_rotary_embedding(
+                    positions, query, k_dummy, head_size,
+                    cos_sin_cache, is_neox_style,
+                )
+                query = query.view(num_tokens, -1, head_size).flatten(-2, -1)
         return query, None
 
     query_shape, key_shape = query.shape, key.shape
