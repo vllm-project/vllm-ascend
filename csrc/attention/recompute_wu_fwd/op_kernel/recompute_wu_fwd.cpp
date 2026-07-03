@@ -78,10 +78,11 @@ __aicore__ inline void RecomputeWUFwdKernelImpl(
 #ifndef TORCH_MODE
 using namespace AscendC;
 
-__global__ __aicore__ void recompute_wu_fwd(GM_ADDR k, GM_ADDR v, GM_ADDR beta, GM_ADDR A, GM_ADDR g,
+__global__ __aicore__ void recompute_wu_fwd(GM_ADDR k, GM_ADDR v, GM_ADDR beta, GM_ADDR A, GM_ADDR g, GM_ADDR gk,
                                             GM_ADDR cu_seqlens, GM_ADDR chunk_indices, GM_ADDR w, GM_ADDR u,
                                             GM_ADDR workspace, GM_ADDR tiling)
 {
+    (void)gk;
     AscendC::AscendCUtils::SetOverflow(1);
     GM_ADDR userWS = AscendC::GetUserWorkspace(workspace);
     if (userWS == nullptr) {
