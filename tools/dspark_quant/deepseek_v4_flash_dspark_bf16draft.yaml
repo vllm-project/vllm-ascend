@@ -1,0 +1,71 @@
+apiversion: modelslim_v1
+metadata:
+  config_id: deepseek_v4_flash_dspark_w8a8
+  score: 90
+  verified_model_types:
+    - DeepSeek-V4-Flash-DSpark
+  verified_tags:
+    DeepSeek-V4-Flash-DSpark:
+      - - vLLM-Ascend
+        - Atlas_A2_Inference
+  label:
+    w_bit: 8
+    a_bit: 8
+    is_sparse: False
+    kv_cache: False
+
+default_w8a8_dynamic: &default_w8a8_dynamic
+  act:
+    scope: "per_token"
+    dtype: "int8"
+    symmetric: True
+    method: "minmax"
+  weight:
+    scope: "per_channel"
+    dtype: "int8"
+    symmetric: True
+    method: "minmax"
+
+spec:
+  process:
+    - type: "quarot"
+      block_size: 32
+    - type: "flex_smooth_quant"
+      enable_subgraph_type:
+        - 'norm-linear'
+      include:
+        - "*"
+    # target + DSpark draft attn (DSparkBlock has same wq_a/wkv/wo_a/wo_b/attn_norm)
+    - type: "linear_quant"
+      qconfig: *default_w8a8_dynamic
+      include:
+        - "*attn*"
+      exclude:
+        - "*mtp.*"
+        - "*wo_a"
+        - "*wo_b"
+        - "*compressor.wgate"
+        - "*compressor.wkv"
+        - "*indexer.weights_proj"
+        - "*indexer.compressor.wgate"
+        - "*indexer.compressor.wkv"
+    # target + DSpark draft ffn (MoE)
+    - type: "linear_quant"
+      qconfig: *default_w8a8_dynamic
+      include:
+        - "*ffn*"
+      exclude:
+        - "*mtp.*"
+        - "*gate"
+    # DSpark-specific: main_proj (mtp.0) is a big linear -> w8a8. markov_head /
+    # confidence_head / main_norm / hc_* / norm are NOT matched here -> stay bf16.
+    - type: "linear_quant"
+      qconfig: *default_w8a8_dynamic
+      include:
+        - "*main_proj*"
+      exclude:
+        - "*mtp.*"
+  dataset: mix_calib.jsonl
+  save:
+    - type: "ascendv1_saver"
+      part_file_size: 4
