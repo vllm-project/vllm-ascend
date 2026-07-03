@@ -57,4 +57,4 @@ def get_dspark_sparse_sas_window(
     block_size = get_dspark_query_block_size(vllm_config)
     if block_size <= 0:
         return window_size - 1, 0
-    return window_size + block_size - 1, 0
+    return window_size + block_size - 1, block_size - 1

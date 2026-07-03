@@ -113,8 +113,8 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Force DeepSeek V4 DSpark draft attention to use the private
     # request-local cache instead of the standard vLLM SWA KV cache.
     "VLLM_ASCEND_DSPARK_USE_PRIVATE_CACHE": lambda: bool(int(os.getenv("VLLM_ASCEND_DSPARK_USE_PRIVATE_CACHE", "0"))),
-    # Force DSpark standard-cache attention to use the PTA reference path
-    # instead of SparseAttnSharedkv PA_ND.
+    # Force DSpark attention to use PTA reference paths instead of custom/SAS
+    # fast paths.
     "VLLM_ASCEND_DSPARK_USE_PTA_REF": lambda: bool(int(os.getenv("VLLM_ASCEND_DSPARK_USE_PTA_REF", "0"))),
     # Whether to print DSpark rejection debug information.
     "VLLM_ASCEND_DSPARK_REJECT_DEBUG": lambda: bool(int(os.getenv("VLLM_ASCEND_DSPARK_REJECT_DEBUG", "0"))),

@@ -1109,6 +1109,9 @@ ge::graphStatus SASTilingCheck::CheckSingleParaOriSparseIndices() const
     if (!hasOriSparseIndices_) {
         return ge::GRAPH_SUCCESS;
     }
+    OP_CHECK_IF(sasInfo_.perfMode != SASTemplateMode::SWA_TEMPLATE_MODE,
+                OP_LOGE(opName_, "ori_sparse_indices is only supported with SWA template mode."),
+                return ge::GRAPH_FAILED);
     OP_CHECK_IF(kvLayout_ != SASLayout::PA_ND,
                 OP_LOGE(opName_, "ori_sparse_indices is only supported with PA_ND kv layout."),
                 return ge::GRAPH_FAILED);

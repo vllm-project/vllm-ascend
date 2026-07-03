@@ -111,8 +111,8 @@ def test_dspark_sparse_sas_window_is_fixed_upper_bound_only():
 
     assert mask_mode == 4
     assert ori_win_left == window_size + block_size - 1
-    assert ori_win_right == 0
-    assert _band_visible_indices(0, block_size, s2_size, ori_win_left, ori_win_right) != list(range(s2_size))
+    assert ori_win_right == block_size - 1
+    assert _band_visible_indices(0, block_size, s2_size, ori_win_left, ori_win_right) == list(range(s2_size))
 
 
 def test_dspark_sas_window_rejects_plain_sliding_window_formula():
@@ -274,6 +274,48 @@ def test_dspark_sas_lens_guard_accepts_partial_block_padding():
     )
 
 
+def test_dspark_sas_lens_guard_ignores_trailing_dp_padding():
+    block_size = 5
+    window_size = 7
+    positions = torch.tensor([5, 6, 7, 8, 9, 0], dtype=torch.int32)
+    slot_mapping = torch.tensor([5, 6, 7, 8, 9, -1], dtype=torch.int32)
+    query_start_loc = torch.tensor([0, 5], dtype=torch.int32)
+    seq_lens = torch.tensor([10], dtype=torch.int32)
+    token_to_req_indices = torch.tensor([0, 0, 0, 0, 0, -1], dtype=torch.int32)
+    block_table = torch.arange(8, dtype=torch.int32).view(1, 8)
+
+    _, lens = build_dspark_swa_indices(
+        block_table,
+        positions,
+        slot_mapping,
+        block_size,
+        window_size,
+        cache_block_size=4,
+        query_start_loc=query_start_loc,
+        seq_lens=seq_lens,
+        token_to_req_indices=token_to_req_indices,
+    )
+
+    assert _dspark_sas_lens_match_scheduling(
+        lens,
+        query_start_loc,
+        seq_lens,
+        token_to_req_indices=token_to_req_indices,
+        block_size=block_size,
+        window_size=window_size,
+        num_query_tokens=int(query_start_loc[-1].item()),
+    )
+    assert not _dspark_sas_lens_match_scheduling(
+        lens,
+        query_start_loc,
+        seq_lens,
+        token_to_req_indices=token_to_req_indices,
+        block_size=block_size,
+        window_size=window_size,
+        num_query_tokens=positions.numel(),
+    )
+
+
 def test_dspark_sas_lens_guard_rejects_interleaved_token_to_req():
     block_size = 2
     window_size = 4
@@ -421,6 +463,13 @@ def test_dspark_attention_entry_uses_custom_op_gateway(monkeypatch):
     )
 
     assert actual is expected
+
+
+def test_dspark_attention_custom_op_disabled_by_pta_ref(monkeypatch):
+    monkeypatch.setenv("VLLM_ASCEND_DSPARK_USE_PTA_REF", "1")
+    q = SimpleNamespace(device=SimpleNamespace(type="npu"))
+
+    assert dspark_attention_module._get_dspark_attention_custom_op(q) is None
 
 
 def test_dspark_attention_entry_uses_sas_gateway(monkeypatch):

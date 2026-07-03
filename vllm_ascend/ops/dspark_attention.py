@@ -6,6 +6,8 @@ from collections.abc import Callable
 import torch
 from vllm.logger import logger
 
+from vllm_ascend import envs
+
 DSparkAttentionCustomOp = Callable[
     [
         torch.Tensor,
@@ -43,7 +45,7 @@ def _dspark_sparse_sas_window(block_size: int, window_size: int) -> tuple[int, i
     return (
         DSPARK_SAS_MASK_MODE,
         window_size + block_size - 1,
-        0,
+        block_size - 1,
     )
 
 
@@ -495,7 +497,7 @@ def dspark_attention_from_standard_cache(
 
 
 def _get_dspark_attention_custom_op(q: torch.Tensor) -> DSparkAttentionCustomOp | None:
-    if q.device.type == "cpu":
+    if q.device.type == "cpu" or envs.VLLM_ASCEND_DSPARK_USE_PTA_REF:
         return None
     try:
         return torch.ops._C_ascend.dspark_attention
@@ -539,7 +541,7 @@ def _maybe_call_dspark_attention_custom_op(
 
 
 def _get_dspark_sas_ops(q: torch.Tensor) -> tuple[Callable, Callable] | None:
-    if q.device.type == "cpu":
+    if q.device.type == "cpu" or envs.VLLM_ASCEND_DSPARK_USE_PTA_REF:
         return None
     try:
         return (
@@ -582,6 +584,10 @@ def dspark_attention_from_standard_cache_sas(
 
     metadata_op, attn_op = ops
     try:
+        num_query_tokens = int(query_start_loc[-1].item()) if query_start_loc.numel() > 0 else 0
+        if num_query_tokens <= 0 or num_query_tokens > q.shape[0]:
+            return None
+
         standard_cache = _unwrap_single_kv_cache(standard_kv_cache)
         if (dspark_swa_indices is None) != (dspark_swa_lens is None):
             raise ValueError("DSpark SWA indices and lens must be provided together")
@@ -605,21 +611,22 @@ def dspark_attention_from_standard_cache_sas(
             token_to_req_indices,
             block_size,
             window_size,
-            q.shape[0],
+            num_query_tokens,
         ):
             return None
 
+        q_active = q[:num_query_tokens]
         cu_seqlens_q = query_start_loc.to(device=q.device, dtype=torch.int32).contiguous()
         seqused_kv = seq_lens.to(device=q.device, dtype=torch.int32).contiguous()
-        ori_sparse_indices = dspark_swa_indices.to(device=q.device, dtype=torch.int32).contiguous()
+        ori_sparse_indices = dspark_swa_indices[:num_query_tokens].to(device=q.device, dtype=torch.int32).contiguous()
         ori_block_table = block_table.to(device=q.device, dtype=torch.int32).contiguous()
-        sinks = attn_sink[: q.shape[1]].float().contiguous()
+        sinks = attn_sink[: q_active.shape[1]].float().contiguous()
         _, ori_win_left, ori_win_right = _dspark_sparse_sas_window(block_size, window_size)
 
         metadata = metadata_op(
-            num_heads_q=q.shape[1],
+            num_heads_q=q_active.shape[1],
             num_heads_kv=standard_cache.shape[2],
-            head_dim=q.shape[2],
+            head_dim=q_active.shape[2],
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_ori_kv=None,
             cu_seqlens_cmp_kv=None,
@@ -639,8 +646,8 @@ def dspark_attention_from_standard_cache_sas(
             has_cmp_kv=False,
             device=str(q.device),
         )
-        return attn_op(
-            q.contiguous(),
+        out_active = attn_op(
+            q_active.contiguous(),
             ori_kv=standard_cache,
             ori_sparse_indices=ori_sparse_indices,
             ori_block_table=ori_block_table,
@@ -657,6 +664,12 @@ def dspark_attention_from_standard_cache_sas(
             layout_q="TND",
             layout_kv="PA_ND",
         )[0]
+        if num_query_tokens == q.shape[0]:
+            out = out_active
+        else:
+            out = torch.zeros_like(q)
+            out[:num_query_tokens] = out_active
+        return out
     except (RuntimeError, ValueError) as err:
         logger.warning_once("DSpark standard-cache SAS attention failed; falling back to PTA: %s", err)
         return None

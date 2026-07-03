@@ -125,11 +125,11 @@ def test_dspark_dsa_decode_metadata_uses_noncausal_window(monkeypatch):
     )
 
     assert captured["ori_win_left"] == 11
-    assert captured["ori_win_right"] == 0
+    assert captured["ori_win_right"] == 4
     assert captured["cu_seqlens_ori_kv"] is ori_cu_seqlens
     assert captured["cu_seqlens_cmp_kv"] is cmp_cu_seqlens
     assert metadata.ori_win_left == 11
-    assert metadata.ori_win_right == 0
+    assert metadata.ori_win_right == 4
     assert metadata.dspark_swa_indices.shape == (5, 1, 128)
     torch.testing.assert_close(metadata.dspark_swa_lens, torch.full((5,), 12, dtype=torch.int32))
     expected_slots = _expected_slot_ids(
@@ -262,7 +262,7 @@ def test_dspark_dsa_prefill_metadata_slices_slot_mapping_from_token_start(monkey
 
     torch.testing.assert_close(metadata.slot_mapping, torch.tensor([2, 3, 4], dtype=torch.int32))
     assert captured["ori_win_left"] == 11
-    assert captured["ori_win_right"] == 0
+    assert captured["ori_win_right"] == 4
     assert metadata.dspark_swa_indices.shape == (3, 1, 128)
     torch.testing.assert_close(metadata.dspark_swa_lens, torch.full((3,), 10, dtype=torch.int32))
     expected_slots = _expected_slot_ids(
@@ -357,9 +357,9 @@ def test_dspark_dsa_cp_req_metadata_uses_noncausal_window(monkeypatch):
     )
 
     assert captured["ori_win_left"] == 11
-    assert captured["ori_win_right"] == 0
+    assert captured["ori_win_right"] == 4
     assert metadata.ori_win_left == 11
-    assert metadata.ori_win_right == 0
+    assert metadata.ori_win_right == 4
     assert metadata.dspark_swa_indices.shape == (5, 1, 128)
     torch.testing.assert_close(metadata.dspark_swa_lens, torch.full((5,), 12, dtype=torch.int32))
     expected_slots = _expected_slot_ids(
