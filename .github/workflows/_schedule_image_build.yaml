@@ -57,6 +57,10 @@ on:
         required: false
         type: boolean
         default: false
+      image:
+        description: 'Container image to run the job in (from Dockerfile FROM)'
+        required: true
+        type: string
     secrets:
         QUAY_PASSWORD:
             description: 'Quay password for pushing images'
@@ -79,16 +83,18 @@ jobs:
       contents: read
 
     strategy:
+      fail-fast: false
       matrix:
         include:
           - arch: linux/amd64
-            runner: ubuntu-latest
+            runner: linux-amd64-cpu-32-hk
             tag: amd64
 
           - arch: linux/arm64
-            runner: ubuntu-22.04-arm
+            runner: linux-arm64-cpu-32-hk
             tag: arm64
-
+    container:
+      image: ${{ inputs.image }}
     steps:
 
     - name: Validate inputs (workflow_dispatch only)
@@ -161,34 +167,6 @@ jobs:
         persist-credentials: false
         ref: ${{ inputs.branch_ref }}
 
-    - name: Free up disk space
-      uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
-      with:
-        tool-cache: true
-        docker-images: false
-
-    - name: Publish - Login to Quay Temp (for pushing temp tag digest)
-      if: ${{ inputs.should_push }}
-      uses: docker/login-action@v4
-      with:
-        registry: quay.io
-        username: ${{ inputs.quay_temp_username }}
-        password: ${{ secrets.QUAY_TEMP_PASSWORD }}
-
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v4
-      with:
-        install: true
-        driver: docker-container
-        use: true
-
-    - name: Login to GitHub Container Registry (for cache)
-      uses: docker/login-action@v4
-      with:
-        registry: ghcr.io
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-
     - name: Compute cache tag
       id: cache-tag
       run: |
@@ -211,7 +189,7 @@ jobs:
         DOCKERFILE="${{ inputs.dockerfile || 'Dockerfile' }}"
         BASE_IMAGE_TAG=$(grep -m1 '^FROM' "$DOCKERFILE" | awk -F: '{print $NF}')
         echo "BASE_IMAGE_TAG=$BASE_IMAGE_TAG" >> $GITHUB_OUTPUT
-        
+
     - name: Get architecture
       id: get_arch
       run: |
@@ -233,34 +211,40 @@ jobs:
             vllm_ascend/include
         key: vllm-ascend-build-v1-${{ steps.get_arch.outputs.arch }}-${{ steps.get_base_image_tag.outputs.BASE_IMAGE_TAG }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
+    - name: Prepare docker config
+      if: ${{ inputs.should_push }}
+      env:
+        QUAY_TEMP_USERNAME: ${{ inputs.quay_temp_username }}
+        QUAY_TEMP_PASSWORD: ${{ secrets.QUAY_TEMP_PASSWORD }}
+      run: |
+        mkdir -p /tmp/bk
+        QUAY_AUTH=$(printf "%s:%s" "$QUAY_TEMP_USERNAME" "$QUAY_TEMP_PASSWORD" | base64 -w0)
+        GHCR_AUTH=$(printf "%s:%s" "${{ github.actor }}" "${{ secrets.GITHUB_TOKEN }}" | base64 -w0)
+        cat > /tmp/bk/config.json <<EOF
+        {
+          "auths": {
+            "quay.io": { "auth": "${QUAY_AUTH}" },
+            "ghcr.io": { "auth": "${GHCR_AUTH}" }
+          }
+        }
+        EOF
+
+    - name: Install crane
+      run: |
+        ARCH=$(uname -m | sed 's/aarch64/arm64/')
+        CRANE_VERSION="v0.20.2"
+        wget -q "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_${CRANE_VERSION#v}_Linux_${ARCH}.tar.gz" -O /tmp/crane.tar.gz
+        tar -xzf /tmp/crane.tar.gz -C /tmp crane
+        chmod +x /tmp/crane
 
     - name: Build and push
-      uses: docker/build-push-action@v7
       id: build
-      with:
-        platforms: ${{ matrix.arch }}
-        # use the current repo path as the build context, ensure .git is contained
-        context: .
-        file: ${{ inputs.dockerfile || 'Dockerfile' }}
-        # only trigger when tag, branch/main push
-        push: ${{ inputs.should_push }}
-        outputs: type=image,name=${{ env.QUAY_TEMP_REPO }},push-by-digest=true,name-canonical=true,push=${{ inputs.should_push }}
-        build-args: |
-          PIP_INDEX_URL=https://pypi.org/simple
-          COMPILE_CUSTOM_KERNELS=${{ steps.cache-csrc.outputs.cache-hit == 'true' && '0' || '1' }}
-          VLLM_COMMIT=${{ inputs.vllm_commit }}
-        provenance: false
-        # To speed up the build, we use registry cache. The cache tag is determined by the suffix and architecture, and shared across different workflow runs.
-        # For example, the cache tag for arm64 image with suffix "openeuler" will be "buildcache-openeuler-arm64".
-        # When a new image is built and pushed, the cache will also be updated in the registry, so that next build can benefit from it.
-        cache-from: type=registry,ref=${{ env.CACHE_REPO }}:${{ steps.cache-tag.outputs.value }}
-        cache-to: ${{ inputs.should_push && format('type=registry,ref={0}:{1},mode=max', env.CACHE_REPO, steps.cache-tag.outputs.value) || '' }}
-
-    # Quay.io automatically cleans up untagged digests on a regular basis, with a cycle of approximately one hour. 
-    # Add temporary tags to digests to prevent them from being removed.
-    - name: Tag digest to prevent GC
-      if: ${{ inputs.should_push }}
+      env:
+        QUAY_TEMP_USERNAME: ${{ inputs.quay_temp_username }}
+        QUAY_TEMP_PASSWORD: ${{ secrets.QUAY_TEMP_PASSWORD }}
       run: |
+        set -e
+
         SUFFIX=""
         if [ -n "${{ inputs.suffix }}" ]; then
           SUFFIX="-${{ inputs.suffix }}"
@@ -268,17 +252,51 @@ jobs:
         if [ "${{ inputs.temp_only }}" = "true" ]; then
           VLLM_SHORT=$(echo "${{ inputs.vllm_commit }}" | cut -c1-7)
           ASCEND_SHORT=$(echo "${{ inputs.vllm_ascend_commit }}" | cut -c1-7)
-          TAG="vllm-ascend-${VLLM_SHORT}-${ASCEND_SHORT}${SUFFIX}-${{ matrix.tag }}-temp"
+          TEMP_TAG="vllm-ascend-${VLLM_SHORT}-${ASCEND_SHORT}${SUFFIX}-${{ matrix.tag }}-temp"
         else
-          TAG="nightly-${{ inputs.schedule_tag_pattern }}${SUFFIX}-${{ matrix.tag }}-temp"
+          TEMP_TAG="nightly-${{ inputs.schedule_tag_pattern }}${SUFFIX}-${{ matrix.tag }}-temp"
         fi
-        echo "Creating temp tag: ${{ env.QUAY_TEMP_REPO }}:$TAG"
-        docker buildx imagetools create \
-          -t "${{ env.QUAY_TEMP_REPO }}:$TAG" \
-          "${{ env.QUAY_TEMP_REPO }}@${{ steps.build.outputs.digest }}"
 
+        DOCKERFILE="${{ inputs.dockerfile || 'Dockerfile' }}"
+        DOCKERFILE_DIR=$(dirname "$DOCKERFILE")
+        DOCKERFILE_NAME=$(basename "$DOCKERFILE")
+        CACHE_REF="${{ env.CACHE_REPO }}:${{ steps.cache-tag.outputs.value }}"
+
+        ARGS=(
+          --addr="${BUILDKITD_ADDR}"
+          --tlscacert="${DOCKER_CONFIG}/ca.pem"
+          --tlscert="${DOCKER_CONFIG}/cert.pem"
+          --tlskey="${DOCKER_CONFIG}/key.pem"
+          build
+          --frontend dockerfile.v0
+          --local context=.
+          --local dockerfile="$DOCKERFILE_DIR"
+          --opt filename="$DOCKERFILE_NAME"
+          --opt platform=${{ matrix.arch }}
+          --opt build-arg:PIP_INDEX_URL=https://pypi.org/simple
+          --opt build-arg:COMPILE_CUSTOM_KERNELS=${{ steps.cache-csrc.outputs.cache-hit == 'true' && '0' || '1' }}
+          --opt build-arg:VLLM_COMMIT=${{ inputs.vllm_commit }}
+          --import-cache type=registry,ref="${CACHE_REF}"
+          --progress=plain
+        )
+
+        if [ "${{ inputs.should_push }}" = "true" ]; then
+          ARGS+=(--secret id=dockerconfig,src=/tmp/bk/config.json)
+          ARGS+=(--export-cache type=registry,ref="${CACHE_REF}",mode=max)
+          ARGS+=(--output "type=image,name=${{ env.QUAY_TEMP_REPO }}:${TEMP_TAG},push=true")
+        fi
+
+        buildctl "${ARGS[@]}"
+
+        if [ "${{ inputs.should_push }}" = "true" ]; then
+          /tmp/crane auth login quay.io -u "$QUAY_TEMP_USERNAME" -p "$QUAY_TEMP_PASSWORD"
+          DIGEST=$(/tmp/crane digest "${{ env.QUAY_TEMP_REPO }}:${TEMP_TAG}")
+          echo "digest=${DIGEST}" >> $GITHUB_OUTPUT
+          echo "Image pushed: ${{ env.QUAY_TEMP_REPO }}:${TEMP_TAG} (${DIGEST})"
+        fi
 
     - name: Export digest
+      if: ${{ inputs.should_push }}
       run: |
         mkdir -p ${{ runner.temp }}/digests
         digest="${{ steps.build.outputs.digest }}"
@@ -294,9 +312,13 @@ jobs:
 
 
   merge-image:
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu-32-hk
+    container:
+      image: ${{ inputs.image }}
     needs: build-push-digest
     if: ${{ inputs.should_push && !inputs.temp_only }}
+    permissions:
+      contents: read
     steps:
       - name: Checkout branch
         uses: actions/checkout@v7
@@ -329,10 +351,6 @@ jobs:
       - name: Prepare suffix
         id: suffix
         run: |
-          # Prepend '-' to suffix so Docker metadata action can append it directly
-          # to the tag (e.g. suffix=310p-openeuler → SUFFIX=-310p-openeuler,
-          # resulting in tags like main-310p-openeuler).
-          # Leave SUFFIX empty when no suffix is provided (plain tags like main).
           if [ -n "${{ inputs.suffix }}" ]; then
             echo "SUFFIX=-${{ inputs.suffix }}" >> $GITHUB_ENV
           else
@@ -343,25 +361,8 @@ jobs:
         id: meta
         uses: docker/metadata-action@v6
         with:
-          # TODO(yikun): add more hub image and a note on release policy for container image
           images: |
             ${{ env.QUAY_REPO }}
-          # Three trigger scenarios and resulting image tags:
-          # https://github.com/marketplace/actions/docker-metadata-action#typeref
-          #
-          # 1. Push tag (on: push tags: v*) → type=pep440
-          #    Only pep440-compliant tags are published:
-          #    - v0.16.0rc1       --> vllm-ascend:v0.16.0rc1[-suffix]
-          #    Non-pep440 tags are ignored.
-          #
-          # 2. Schedule (on: schedule) → type=schedule,pattern=main
-          #    Triggered by cron, always produces a fixed tag:
-          #    - (any schedule run) --> vllm-ascend:main[-suffix]
-          #
-          # 3. Manual (on: workflow_dispatch) → type=raw,value=inputs.workflow_dispatch_tag
-          #    Tag is determined by the user-selected input at dispatch time:
-          #    - inputs.tag=main       --> vllm-ascend:main[-suffix]
-          #    - inputs.tag=v0.16.0rc1 --> vllm-ascend:v0.16.0rc1[-suffix]
           tags: |
             type=pep440,pattern={{raw}},suffix=${{ env.SUFFIX }}
             type=schedule,pattern=${{ inputs.schedule_tag_pattern }},prefix=nightly-,suffix=${{ env.SUFFIX }}
@@ -370,22 +371,37 @@ jobs:
           flavor:
             latest=false
 
-      - name: Login to Quay
-        uses: docker/login-action@v4
-        with:
-          registry: quay.io
-          username: ${{ inputs.quay_username }}
-          password: ${{ secrets.QUAY_PASSWORD }}
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+      - name: Install crane and login
+        env:
+          QUAY_USERNAME: ${{ inputs.quay_username }}
+          QUAY_PASSWORD: ${{ secrets.QUAY_PASSWORD }}
+        run: |
+          ARCH=$(uname -m | sed 's/aarch64/arm64/')
+          CRANE_VERSION="v0.20.2"
+          wget -q "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_${CRANE_VERSION#v}_Linux_${ARCH}.tar.gz" -O /tmp/crane.tar.gz
+          tar -xzf /tmp/crane.tar.gz -C /tmp crane
+          chmod +x /tmp/crane
+          /tmp/crane auth login quay.io -u "$QUAY_USERNAME" -p "$QUAY_PASSWORD"
 
       - name: Merge and push multi-arch image
         env:
-          IMAGE: ${{ env.QUAY_TEMP_REPO }}
+          SRC_IMAGE: ${{ env.QUAY_TEMP_REPO }}
+          DST_IMAGE: ${{ env.QUAY_REPO }}
           TAGS: ${{ steps.meta.outputs.tags }}
         run: |
-          DIGESTS=$(printf "$IMAGE@sha256:%s " $(ls ${{ runner.temp }}/digests))
+          set -e
+
+          for f in ${{ runner.temp }}/digests/*; do
+            hash=$(basename "$f")
+            echo "Copying ${SRC_IMAGE}@sha256:${hash} -> ${DST_IMAGE}"
+            /tmp/crane copy "${SRC_IMAGE}@sha256:${hash}" "${DST_IMAGE}:temp-${hash}"
+          done
+
+          DIGESTS=""
+          for f in ${{ runner.temp }}/digests/*; do
+            hash=$(basename "$f")
+            DIGESTS="$DIGESTS ${DST_IMAGE}@sha256:${hash}"
+          done
 
           echo "Digests: $DIGESTS"
           echo "Current tags:"
@@ -393,16 +409,19 @@ jobs:
 
           for tag in $TAGS; do
             echo "Creating tag $tag"
-            docker buildx imagetools create \
-              -t "$tag" \
-              $DIGESTS
+            /tmp/crane index append -t "$tag" $DIGESTS
           done
+
 
   merge-image-temp:
     name: merge-image-temp
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu-32-hk
+    container:
+      image: ${{ inputs.image }}
     needs: build-push-digest
     if: ${{ inputs.should_push && inputs.temp_only }}
+    permissions:
+      contents: read
     steps:
       - name: Download arm64 digests
         uses: actions/download-artifact@v8
@@ -418,21 +437,23 @@ jobs:
           pattern: ${{ inputs.artifact_prefix }}-${{ inputs.suffix }}-amd64
           merge-multiple: true
 
-      - name: Login to Quay Temp
-        uses: docker/login-action@v4
-        with:
-          registry: quay.io
-          username: ${{ inputs.quay_temp_username }}
-          password: ${{ secrets.QUAY_TEMP_PASSWORD }}
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+      - name: Install crane and login
+        env:
+          QUAY_TEMP_USERNAME: ${{ inputs.quay_temp_username }}
+          QUAY_TEMP_PASSWORD: ${{ secrets.QUAY_TEMP_PASSWORD }}
+        run: |
+          ARCH=$(uname -m | sed 's/aarch64/arm64/')
+          CRANE_VERSION="v0.20.2"
+          wget -q "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_${CRANE_VERSION#v}_Linux_${ARCH}.tar.gz" -O /tmp/crane.tar.gz
+          tar -xzf /tmp/crane.tar.gz -C /tmp crane
+          chmod +x /tmp/crane
+          /tmp/crane auth login quay.io -u "$QUAY_TEMP_USERNAME" -p "$QUAY_TEMP_PASSWORD"
 
       - name: Merge and push multi-arch manifest to QUAY_TEMP_REPO
         env:
           IMAGE: ${{ env.QUAY_TEMP_REPO }}
         run: |
-          set -euo pipefail
+          set -e
           SUFFIX=""
           if [ -n "${{ inputs.suffix }}" ]; then
             SUFFIX="-${{ inputs.suffix }}"
@@ -440,9 +461,13 @@ jobs:
           VLLM_SHORT=$(echo "${{ inputs.vllm_commit }}" | cut -c1-7)
           ASCEND_SHORT=$(echo "${{ inputs.vllm_ascend_commit }}" | cut -c1-7)
           TAG="${IMAGE}:vllm-ascend-${VLLM_SHORT}-${ASCEND_SHORT}${SUFFIX}"
-          DIGESTS=$(printf "$IMAGE@sha256:%s " $(ls ${{ runner.temp }}/digests))
+
+          DIGESTS=""
+          for f in ${{ runner.temp }}/digests/*; do
+            hash=$(basename "$f")
+            DIGESTS="$DIGESTS ${IMAGE}@sha256:${hash}"
+          done
+
           echo "Digests: $DIGESTS"
           echo "Creating multi-arch manifest tag: $TAG"
-          docker buildx imagetools create \
-            -t "$TAG" \
-            $DIGESTS
+          /tmp/crane index append -t "$TAG" $DIGESTS
