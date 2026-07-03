@@ -45,6 +45,7 @@ from vllm_ascend.utils import (
     AscendDeviceType,
     enable_sp,
     get_ascend_device_type,
+    is_deepseek_ocr2_310p_model,
     maybe_trans_nz,
 )
 
@@ -80,6 +81,11 @@ class AscendUnquantizedLinearMethod(UnquantizedLinearMethod):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
+        if is_deepseek_ocr2_310p_model():
+            layer.deepseek_ocr2_310p_nd_linear = True
+            if layer.weight.dtype == torch.bfloat16:
+                layer.weight.data = layer.weight.data.to(torch.float16)
+            return
         # must use fp32 to avoid accuracy degradation in dsv4.
         if getattr(layer, "precast_fp32_weight", False):
             layer.weight_fp32 = maybe_trans_nz(layer.weight.data.to(torch.float32))
@@ -92,6 +98,13 @@ class AscendUnquantizedLinearMethod(UnquantizedLinearMethod):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if getattr(layer, "deepseek_ocr2_310p_nd_linear", False):
+            output_dtype = x.dtype
+            matmul_input = x if x.dtype == layer.weight.dtype else x.to(layer.weight.dtype)
+            output = torch.matmul(matmul_input, layer.weight.t())
+            if bias is not None:
+                output = output + bias.to(output.dtype)
+            return output.to(output_dtype)
         return torch.ops.vllm.unquantized_gemm(x, layer.weight, bias)
 
 

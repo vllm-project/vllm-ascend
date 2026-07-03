@@ -24,12 +24,25 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 
 from vllm_ascend.ops.vocab_parallel_embedding import AscendParallelLMHead, AscendVocabParallelEmbedding
-from vllm_ascend.utils import maybe_trans_nz
+from vllm_ascend.utils import is_deepseek_ocr2_310p_model, maybe_trans_nz
 
 
 class AscendUnquantizedEmbeddingMethod310(UnquantizedEmbeddingMethod):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if is_deepseek_ocr2_310p_model():
+            layer._deepseek_ocr2_310p_nd_lm_head = True
+            if layer.weight.dtype == torch.bfloat16:
+                layer.weight.data = layer.weight.data.to(torch.float16)
+                layer._deepseek_ocr2_embedding_output_dtype = torch.bfloat16
+            return
         layer.weight_nz = maybe_trans_nz(layer.weight)
+
+    def embedding(self, layer: torch.nn.Module, x: torch.Tensor) -> torch.Tensor:
+        output = F.embedding(x, layer.weight)
+        output_dtype = getattr(layer, "_deepseek_ocr2_embedding_output_dtype", None)
+        if output_dtype is not None:
+            return output.to(output_dtype)
+        return output
 
     def apply(
         self,
@@ -37,6 +50,13 @@ class AscendUnquantizedEmbeddingMethod310(UnquantizedEmbeddingMethod):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if getattr(layer, "_deepseek_ocr2_310p_nd_lm_head", False):
+            output_dtype = x.dtype
+            matmul_input = x if x.dtype == layer.weight.dtype else x.to(layer.weight.dtype)
+            logits = torch.matmul(matmul_input, layer.weight.t())
+            if bias is not None:
+                logits = logits + bias.to(logits.dtype)
+            return logits.to(output_dtype)
         return F.linear(x, layer.weight_nz, bias)
 
 

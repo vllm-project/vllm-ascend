@@ -1,0 +1,21 @@
+model_name: "deepseek-ai/DeepSeek-OCR-2"
+model_type: "vllm-vlm"
+hardware: "Atlas 300I DUO (310P)"
+
+serve:
+  tensor_parallel_size: 1
+  dtype: float16
+  max_model_len: 8192
+  trust_remote_code: true
+  max_images: 1
+
+tasks:
+- name: "textvqa"
+  metrics:
+  - name: "accuracy,gen"
+    value: 0.4982
+
+num_fewshot: 0
+apply_chat_template: false
+fewshot_as_multiturn: false
+batch_size: "auto"
