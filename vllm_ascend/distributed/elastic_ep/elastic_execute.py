@@ -217,7 +217,6 @@ def setup_moe_comm_and_quant_method(module: nn.Module) -> None:
         quant_method := getattr(module.quant_method, "quant_method", None),
         (AscendW8A8DynamicFusedMoEMethod, AscendW4A8DynamicFusedMoEMethod),
     ):
-        quant_method.ep_group = get_ep_group()
         try:
             device_group = get_mc2_group().device_group
             # TODO: Try local_rank = ep_group.rank_in_group
