@@ -411,15 +411,16 @@ def forward_m2n(
         topk_weights = None
         topk_ids = None
         if afd_config is not None and afd_config.compute_gate_on_attention:
-            # Ensure hidden_states is 2D before gate projection — matches
-            # DeepseekV4MoE.forward / afd_forward which view(-1, hidden_dim)
-            # first. Without this, profile_run passes a 3D tensor and
-            # moe_gating_top_k raises "The x should be 2D".
+            # moe_gating_top_k requires 2D router_logits. Use a local 2D view
+            # for gate projection only — do NOT reshape hidden_states itself,
+            # because the original shape is sent to FFN where hc_pre expects
+            # 3D/4D input.
             hidden_dim = hidden_states.shape[-1]
-            hidden_states = hidden_states.view(-1, hidden_dim)
-            router_logits = F.linear(hidden_states.float(), layer.mlp.gate.weight)
+            hidden_states_2d = hidden_states.view(-1, hidden_dim)
+            router_logits = F.linear(hidden_states_2d.float(),
+                                     layer.mlp.gate.weight)
             topk_weights, topk_ids = afd_connector.select_experts(
-                hidden_states=hidden_states,
+                hidden_states=hidden_states_2d,
                 router_logits=router_logits,
                 top_k=layer.mlp.experts.top_k,
                 use_grouped_topk=True,
