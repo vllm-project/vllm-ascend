@@ -22,7 +22,7 @@
 set -euo pipefail
 
 scversion="stable"
-shellcheck_args=(-s bash)
+shellcheck_args=(-S error -s bash)
 
 if [ -d "shellcheck-${scversion}" ]; then
     export PATH="$PATH:$(pwd)/shellcheck-${scversion}"
