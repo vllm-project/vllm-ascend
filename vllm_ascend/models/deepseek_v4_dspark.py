@@ -105,6 +105,18 @@ class DeepSeekV4DSparkModel(nn.Module):
         config = vllm_config.speculative_config.draft_model_config.hf_config
         self.config = config
         quant_config = vllm_config.quant_config
+        # DSPARK_DRAFT_NOQUANT: build the DRAFT stack unquantized (bf16 draft with
+        # w8a8 target; vllm#43304-class inheritance). Scoped: restored after layers.
+        _dqos = __import__("os")
+        self._noquant = bool(_dqos.environ.get("DSPARK_DRAFT_NOQUANT"))
+        self._saved_qc = vllm_config.quant_config
+        if self._noquant:
+            try:
+                vllm_config.quant_config = None
+                quant_config = None
+                print("DSPARK_DRAFT_NOQUANT ACTIVE: draft built unquantized", file=__import__("sys").stderr, flush=True)
+            except Exception as _qe:
+                print("DSPARK_DRAFT_NOQUANT failed to override: %r" % (_qe,), file=__import__("sys").stderr, flush=True)
         self.device = current_platform.device_type
 
         self.hidden_size = config.hidden_size
@@ -181,6 +193,11 @@ class DeepSeekV4DSparkModel(nn.Module):
                 is_draft_layer=True)
             for i in range(self.n_stages)
         ])
+        if getattr(self, "_noquant", False):
+            try:
+                vllm_config.quant_config = self._saved_qc  # restore for anything after
+            except Exception:
+                pass
 
         # last stage: hc_head params + DSpark heads (final norm is shared_head.norm).
         hc_dim = self.hc_mult * config.hidden_size
