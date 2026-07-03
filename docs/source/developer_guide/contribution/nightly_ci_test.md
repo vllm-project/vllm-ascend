@@ -145,7 +145,6 @@ The `pr-accuracy-group-*` entries only run on `/nightly` (PR-triggered) runs;
 | `multi-node-qwen3-dp` | Qwen3-235B-A22B, 2-node DP |
 | `multi-node-qwenw8a8-2node-eplb` | Qwen3-235B-W8A8 with EPLB, 2-node |
 | `multi-node-dpsk3.2-2node` | DeepSeek-V3.2-W8A8, 2-node |
-| `multi-node-qwen3-dp-mooncake-layerwise` | Qwen3-235B-A22B with Mooncake layerwise, 2-node |
 | `multi-node-qwenw8a8-2node-longseq` | Qwen3-235B-W8A8 long sequence, 2-node |
 | `multi-node-qwen-disagg-pd` | Qwen3-235B disaggregated PD, 2-node |
 | `multi-node-qwen-vl-disagg-pd` | Qwen3-VL-235B disaggregated PD, 2-node |
