@@ -197,27 +197,6 @@ def afd_ffn_compute(
     padded_hidden_states_shape = prepare_output.padded_hidden_states_shape
     pertoken_scale = prepare_output.pertoken_scale
 
-    # 1b. 对 topk_ids/topk_weights 做与 hidden_states 相同的 padding 和 TP 切分。
-    # 正常 forward_impl 中 select_experts 在 prepare 之后(quant_method.apply 内)
-    # 调用,因此 topk_ids 自然与 prepared 后的 hidden_states 形状一致。AFD 路径下,
-    # topk_ids/topk_weights 在 Attention 侧、FFN 的 prepare 之前计算,并通过 P2P
-    # 传输到 FFN 侧,仍保持原始 num_tokens 行数,未经过 padding/split。若不在此处
-    # 复制 prepare 对 hidden_states 的 padding/split,npu_moe_distribute_dispatch_v2
-    # 会因 x 与 expert_ids 行数不一致而报 "The x and expert_ids should be 2D" 错误。
-    prepare_finalize = moe_comm_method.prepare_finalize
-    if (topk_ids is not None
-            and not _EXTRA_CTX.flash_comm_v1_enabled
-            and not self.enable_shared_expert_dp
-            and prepare_finalize.tp_size > 1):
-        target_pad_length = _EXTRA_CTX.padded_num_tokens
-        pad_size = target_pad_length - prepare_finalize.num_tokens
-        if pad_size > 0:
-            topk_ids = F.pad(topk_ids, (0, 0, 0, pad_size))
-            topk_weights = F.pad(topk_weights, (0, 0, 0, pad_size))
-        topk_ids = torch.tensor_split(
-            topk_ids, prepare_finalize.tp_size, dim=0)[prepare_finalize.tp_rank]
-        topk_weights = torch.tensor_split(
-            topk_weights, prepare_finalize.tp_size, dim=0)[prepare_finalize.tp_rank]
 
     # 形状日志: prepare + padding/split 之后,确认 hidden_states 与 topk_ids 行数匹配
     logger.info(
