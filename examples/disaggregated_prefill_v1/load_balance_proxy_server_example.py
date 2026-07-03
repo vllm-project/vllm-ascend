@@ -134,7 +134,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import httpx
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 logger = logging.getLogger(__name__)
@@ -752,6 +752,33 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 
+@app.exception_handler(HTTPException)
+async def custom_http_exception_handler(request: Request, exc: HTTPException):
+    # When the proxy catches an upstream httpx.HTTPStatusError, it raises
+    # HTTPException with detail={"response_body": ..., "content_type": ...}
+    # so that the exception still flows through FastAPI's pipeline (triggering
+    # middleware, logging, etc.) and the outer except handlers can do resource
+    # cleanup. This handler unwraps the original upstream response and returns
+    # it directly, preserving OpenAI API compatibility.
+    if isinstance(exc.detail, dict) and "response_body" in exc.detail:
+        try:
+            return JSONResponse(
+                status_code=exc.status_code,
+                content=json.loads(exc.detail["response_body"]),
+            )
+        except (json.JSONDecodeError, TypeError):
+            return Response(
+                status_code=exc.status_code,
+                content=exc.detail["response_body"],
+                media_type=exc.detail.get("content_type", "application/json"),
+            )
+    # Fallback: normal HTTPException without upstream response body
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail},
+    )
+
+
 def create_app():
     setup_logging(get_global_args().log_level)
     return app
@@ -1100,19 +1127,21 @@ async def handle_completions_impl(api: str, request: Request):
         return StreamingResponse(generate_stream(), media_type=media_type)
     except httpx.HTTPStatusError as exc:
         # Preserve the original upstream status code and response body
-        # to maintain OpenAI API compatibility. Using HTTPException would
-        # wrap the response in {"detail": ...} and double-serialize JSON.
-        try:
-            return JSONResponse(
-                status_code=exc.response.status_code,
-                content=exc.response.json(),
-            )
-        except Exception:
-            return Response(
-                status_code=exc.response.status_code,
-                content=exc.response.content,
-                media_type=exc.response.headers.get("content-type"),
-            )
+        # to maintain OpenAI API compatibility. We raise HTTPException so
+        # the FastAPI framework and downstream except handlers still see it
+        # as an exception (e.g. for resource cleanup in the outer handler).
+        # A custom exception handler is registered to override FastAPI's
+        # default {"detail": ...} wrapping and return the raw upstream body.
+        if not request_released and "instance_info" in locals():
+            await _finish_instance(runtime, instance_info, release_prefill_kv=True)
+            request_released = True
+        raise HTTPException(
+            status_code=exc.response.status_code,
+            detail={
+                "response_body": exc.response.text,
+                "content_type": exc.response.headers.get("content-type", "application/json"),
+            },
+        )
     except Exception:
         import traceback
 
