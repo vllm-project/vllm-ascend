@@ -3215,7 +3215,7 @@ class MooncakeConnectorWorker:
         Returns:
             The correct handshake port for this rank.
         """
-        mapping = getattr(meta, 'remote_multi_nodes_meta_mapping', None)
+        mapping = getattr(meta, "remote_multi_nodes_meta_mapping", None)
         if mapping is not None:
             rank_info = mapping.get(str(rank))
             if rank_info is not None:
@@ -3246,7 +3246,7 @@ class MooncakeConnectorWorker:
         Tries to find the rank whose side_channel_port produces the given port.
         Falls back to (port - meta.remote_port) if no match found.
         """
-        mapping = getattr(meta, 'remote_multi_nodes_meta_mapping', None)
+        mapping = getattr(meta, "remote_multi_nodes_meta_mapping", None)
         if mapping is not None:
             for rank_str, rank_info in mapping.items():
                 node_base_port = rank_info.get("side_channel_port", 0)

@@ -1861,7 +1861,7 @@ class MooncakeConnectorWorker:
         This method uses the per-rank side_channel_port from multi_nodes_meta_mapping
         instead of assuming all ranks share the same base port (meta.remote_port).
         """
-        mapping = getattr(meta, 'remote_multi_nodes_meta_mapping', None)
+        mapping = getattr(meta, "remote_multi_nodes_meta_mapping", None)
         if mapping is not None:
             rank_info = mapping.get(str(rank))
             if rank_info is not None:
