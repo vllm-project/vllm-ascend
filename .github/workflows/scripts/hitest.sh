@@ -137,8 +137,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYTEST_LIST_FILE="${SCRIPT_DIR}/recommended_pytest_paths.txt"
 
 # Api2 成功后：提取 name 并直接转换
-echo "${CASE_RET}" | python3 - <<'PY' > "${PYTEST_LIST_FILE}"
+python3 <<'PY' > "${PYTEST_LIST_FILE}"
 import json
+import os
 import sys
 
 def name_to_pytest_target(name: str) -> str:
@@ -160,7 +161,12 @@ def name_to_pytest_target(name: str) -> str:
         file_path += ".py"
     return file_path
 
-resp = json.load(sys.stdin)
+case_ret = os.environ.get("CASE_RET", "")
+if not case_ret:
+    print("ERROR: CASE_RET is empty", file=sys.stderr)
+    sys.exit(1)
+
+resp = json.loads(case_ret)
 items = resp.get("data") or []
 
 seen = set()
