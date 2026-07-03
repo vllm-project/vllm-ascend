@@ -4,7 +4,6 @@
 import typing
 from collections.abc import Iterable
 
-import regex as re
 import torch
 import torch.nn as nn
 import torch_npu
@@ -17,7 +16,7 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead, VocabParallelEmbedding
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader, maybe_remap_kv_scale_name
 from vllm.model_executor.models.interfaces import SupportsPP
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.sequence import IntermediateTensors
@@ -37,18 +36,7 @@ from .deepseek_v4 import (
     _wo_a_weight_for_eager_projection,
 )
 
-_EXPERT_SCALE_RE = re.compile(r"\.experts\.\d+\.(gate_proj|up_proj|down_proj)\.scale$")
-_LAYER_ID_RE = re.compile(r"model\.layers\.(\d+)\.")
-_FP8_E4M3FN_SUBNORMAL_STEP = 2.0**-9
-_FP8_E4M3FN_MIN_NORMAL = 2.0**-6
-_FP8_E4M3FN_SUBNORMAL_NORMAL_MIDPOINT = (7 * _FP8_E4M3FN_SUBNORMAL_STEP + _FP8_E4M3FN_MIN_NORMAL) * 0.5
-
-
 def _draft_quant_config(vllm_config: VllmConfig):
-    assert vllm_config.speculative_config is not None
-    draft_config = vllm_config.speculative_config.draft_model_config.hf_config
-    if getattr(draft_config, "dspark_mtp_dequantized_to_bf16", False):
-        return None
     return vllm_config.quant_config
 
 
@@ -69,42 +57,6 @@ def _dspark_cache_capacity(vllm_config: VllmConfig, block_size: int, window_size
 def _dspark_max_request_slots(vllm_config: VllmConfig) -> int:
     scheduler_config = getattr(vllm_config, "scheduler_config", None)
     return max(1, int(getattr(scheduler_config, "max_num_seqs", 1) or 1))
-
-
-def _fp8_e4m3fn_quantized_abs(abs_scaled: torch.Tensor) -> torch.Tensor:
-    subnormal = torch.floor(abs_scaled / _FP8_E4M3FN_SUBNORMAL_STEP + 0.5).clamp(0, 7) * _FP8_E4M3FN_SUBNORMAL_STEP
-    normal_exp = torch.floor(torch.log2(abs_scaled.clamp_min(_FP8_E4M3FN_MIN_NORMAL))).clamp(-6, 8)
-    normal_base = torch.exp2(normal_exp)
-    mantissa = torch.floor((abs_scaled / normal_base - 1.0) * 8.0 + 0.5)
-    carry = mantissa >= 8
-    normal_exp = torch.where(carry, normal_exp + 1.0, normal_exp).clamp(-6, 8)
-    mantissa = torch.where(carry, torch.zeros_like(mantissa), mantissa)
-    mantissa = torch.where(normal_exp >= 8, mantissa.clamp(0, 6), mantissa.clamp(0, 7))
-    normal = (1.0 + mantissa / 8.0) * torch.exp2(normal_exp)
-    return torch.where(abs_scaled < _FP8_E4M3FN_SUBNORMAL_NORMAL_MIDPOINT, subnormal, normal)
-
-
-def _fp8_e4m3fn_qdq(x: torch.Tensor, block_size: int) -> torch.Tensor:
-    if x.numel() == 0:
-        return x
-    orig_shape = x.shape
-    last_dim = orig_shape[-1]
-    if last_dim % block_size != 0:
-        return x
-    x_view = x.float().reshape(-1, last_dim)
-    blocks = x_view.reshape(-1, last_dim // block_size, block_size)
-    amax = blocks.abs().amax(dim=-1, keepdim=True).clamp_min(1e-4)
-    scale = torch.pow(torch.full((), 2.0, dtype=torch.float32, device=x.device), torch.ceil(torch.log2(amax / 448.0)))
-    scaled = (blocks / scale).clamp(-448.0, 448.0)
-    quantized_abs = _fp8_e4m3fn_quantized_abs(scaled.abs())
-    qdq = torch.where(scaled < 0, -quantized_abs, quantized_abs) * scale
-    return qdq.reshape(orig_shape).to(x.dtype)
-
-
-def _fp8_qdq_nope_dims(kv: torch.Tensor, nope_head_dim: int, block_size: int = 64) -> torch.Tensor:
-    if nope_head_dim <= 0:
-        return kv
-    return torch.cat([_fp8_e4m3fn_qdq(kv[..., :nope_head_dim], block_size), kv[..., nope_head_dim:]], dim=-1)
 
 
 def _recipe_sparse_sharedkv_attention(
@@ -265,7 +217,6 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         if positions.numel() == 0:
             return
         shared_kv = self._project_shared_kv(main_x, positions)
-        shared_kv = _fp8_qdq_nope_dims(shared_kv, self.nope_head_dim)
         if request_slots is None:
             request_slots = torch.zeros_like(positions, dtype=torch.int32)
         slots_long = request_slots.to(device=shared_kv.device, dtype=torch.long)
@@ -292,7 +243,7 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         k_nope, k_pe = kv.split([self.nope_head_dim, self.rope_head_dim], dim=-1)
         q_pe = _apply_dsv4_rope(self.rotary_emb, positions, q_pe)
         k_pe = _apply_dsv4_rope(self.rotary_emb, positions, k_pe.unsqueeze(1)).squeeze(1)
-        shared_kv = _fp8_qdq_nope_dims(torch.cat([k_nope, k_pe], dim=-1), self.nope_head_dim)
+        shared_kv = torch.cat([k_nope, k_pe], dim=-1).contiguous()
         q = torch.cat([q_nope, q_pe], dim=-1)
         if request_slots is None:
             request_slots = torch.zeros_like(positions, dtype=torch.int32)
@@ -333,6 +284,9 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         out = out.reshape(-1, self.n_local_groups, group_dim)
         if hasattr(self.wo_a, "weight_scale") and self.wo_a.weight.dtype == torch.float8_e4m3fn:
             out, out_scale = torch_npu.npu_dynamic_mx_quant(out, dst_type=torch.float8_e4m3fn)
+            # Recipe A5 MXFP8 o-proj path: 32 is the MX scale group size on
+            # the innermost dimension; the permutations compute grouped
+            # [groups, tokens, dim] x [groups, dim, rank] -> [tokens, groups, rank].
             z = torch_npu.npu_transpose_quant_batchmatmul(
                 out,
                 self.wo_a.weight,
@@ -346,7 +300,6 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
                 perm_y=(1, 0, 2),
             ).flatten(1)
         else:
-            out = _fp8_e4m3fn_qdq(out, 128)
             wo_a = _wo_a_weight_for_eager_projection(self.wo_a.weight, self.n_local_groups, self.o_lora_rank, group_dim)
             z = _grouped_wo_a_projection(out, wo_a).flatten(1)
         return _linear_output(self.wo_b, z)
@@ -595,13 +548,13 @@ class DeepSeekV4DSparkMTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
         stacked_params_mapping = [("mlp.gate_up_proj", "mlp.gate_proj", 0), ("mlp.gate_up_proj", "mlp.up_proj", 1)]
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
+        skipped_params: set[str] = set()
         tp_size = get_tensor_model_parallel_world_size()
         tp_rank = get_tensor_model_parallel_rank()
         heads_per_rank = self.config.num_attention_heads // tp_size
         head_start = tp_rank * heads_per_rank
         head_end = head_start + heads_per_rank
         expert_mapping = self.model.get_expert_mapping()
-        expert_scale_suffix = ".weight_scale" if getattr(self.config, "expert_dtype", "fp4") == "fp4" else ".weight_scale_inv"
         start_layer_idx = self.config.num_hidden_layers
         last_layer_idx = start_layer_idx + self.model.num_dspark_layers - 1
 
@@ -611,7 +564,7 @@ class DeepSeekV4DSparkMTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
             elif name == "head.weight":
                 name = "lm_head.weight"
             else:
-                mapped_name = self._remap_dspark_name(name)
+                mapped_name = self._map_dspark_weight_name(name)
                 if mapped_name is None:
                     continue
                 name = mapped_name
@@ -621,9 +574,9 @@ class DeepSeekV4DSparkMTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
                 if canonical_name in params_dict:
                     name = canonical_name
             if name.endswith(".scale"):
-                suffix = expert_scale_suffix if _EXPERT_SCALE_RE.search(name) else ".weight_scale"
-                name = name.removesuffix(".scale") + suffix
+                name = name.replace(".scale", ".weight_scale")
                 if name not in params_dict:
+                    skipped_params.add(name)
                     continue
 
             for param_name, weight_name, stacked_shard_id in stacked_params_mapping:
@@ -655,27 +608,24 @@ class DeepSeekV4DSparkMTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
                     continue
                 if "attn_sink" in name:
                     if name not in params_dict:
+                        skipped_params.add(name)
                         continue
                     narrow = loaded_weight[head_start:head_end] if not enable_dsa_cp() else loaded_weight
                     with torch.no_grad():
                         params_dict[name][: narrow.shape[0]].copy_(narrow)
                     loaded_params.add(name)
                     continue
+                name = maybe_remap_kv_scale_name(name, params_dict)
+                if name is None:
+                    continue
                 if name not in params_dict:
+                    skipped_params.add(name)
                     continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
                 loaded_params.add(name)
 
-        loaded_layer_ids: set[int] = set()
-        for param_name in loaded_params:
-            match = _LAYER_ID_RE.search(param_name)
-            if match:
-                loaded_layer_ids.add(int(match.group(1)))
-        for layer_idx in range(start_layer_idx, start_layer_idx + self.model.num_dspark_layers):
-            if layer_idx not in loaded_layer_ids:
-                raise ValueError(f"DSpark speculative decoding layer {layer_idx} weights missing from checkpoint.")
         required_params = {
             f"model.layers.{start_layer_idx}.main_proj.weight",
             f"model.layers.{start_layer_idx}.main_norm.weight",
@@ -690,18 +640,36 @@ class DeepSeekV4DSparkMTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
         missing_required = sorted(required_params - loaded_params)
         if missing_required:
             raise ValueError(f"DSpark speculative decoding required weights missing from checkpoint load: {missing_required}")
+        missing_params = set(params_dict) - loaded_params
+        optional_keys = (
+            "q_norm_without_weight.",
+            "rotary_emb.inv_freq",
+        )
+        missing_params = {name for name in missing_params if not any(key in name for key in optional_keys)}
+        if missing_params:
+            logger.warning("DSpark weights not initialized from checkpoint: %s", sorted(missing_params))
+        if skipped_params:
+            logger.warning("DSpark checkpoint weights skipped by name mapping: %s", sorted(skipped_params))
         self.model.finalize_mega_moe_weights()
         logger.info_once("DSpark draft model loaded: %d params", len(loaded_params))
         return loaded_params
 
-    def _remap_dspark_name(self, name: str) -> str | None:
-        match = re.match(r"mtp\.(\d+)\.(.*)", name)
-        if match is None:
+    def _map_dspark_weight_name(self, name: str) -> str | None:
+        if "rotary_emb.inv_freq" in name:
             return None
-        stage_idx = int(match.group(1))
+        if not name.startswith("mtp."):
+            return None
+
+        parts = name.split(".", 2)
+        if len(parts) != 3 or not parts[1].isdigit():
+            return None
+        stage_idx = int(parts[1])
+        if stage_idx >= self.model.num_dspark_layers:
+            return None
         layer_idx = self.config.num_hidden_layers + stage_idx
-        rest = match.group(2)
-        name = f"model.layers.{layer_idx}.{rest}"
+        suffix = parts[2]
+
+        name = f"model.layers.{layer_idx}.{suffix}"
         name = name.replace(".attn.", ".self_attn.")
         name = name.replace(".ffn_norm.", ".post_attention_layernorm.")
         name = name.replace(".attn_norm.", ".input_layernorm.")
@@ -709,6 +677,10 @@ class DeepSeekV4DSparkMTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
         name = name.replace(".w1.", ".gate_proj.")
         name = name.replace(".w2.", ".down_proj.")
         name = name.replace(".w3.", ".up_proj.")
+        if name.endswith(".scale"):
+            name = name.replace(".scale", ".weight_scale")
+        if ".gate.bias" in name:
+            name = name.replace(".gate.bias", ".gate.e_score_correction_bias")
         return name
 
 
