@@ -94,6 +94,7 @@ class TestAscendAttentionMetadataBuilder(TestBase):
         self.mock_vllm_config.cache_config.block_size = 64
         self.mock_vllm_config.compilation_config.cudagraph_mode = None
         self.mock_vllm_config.scheduler_config.max_num_seqs = 10
+        self.mock_vllm_config.scheduler_config.decode_max_num_seqs = 10
         self.mock_vllm_config.scheduler_config.chunked_prefill_enabled = False
         self.mock_device = "cpu:0"
         torch.Tensor.pin_memory = lambda x: x  # noqa

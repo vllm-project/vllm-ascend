@@ -141,14 +141,14 @@ upgrade()
                     elif [ "$orn" = o ]; then
                         break;
                     elif [ "$orn" = r ]; then
-                        [ -n "${targetdir}/$vendordir/$1/" ] && rm -rf "${targetdir}/$vendordir/$1"/*
+                        [ -d "${targetdir}/$vendordir/$1/" ] && rm -rf "${targetdir}/$vendordir/$1"/*
                         break;
                     else
                         log "[ERROR] input error, please input again!"
                     fi
                 done
             else
-                [ -n "${targetdir}/$vendordir/$1/" ] && rm -rf "${targetdir}/$vendordir/$1"/*
+                [ -d "${targetdir}/$vendordir/$1/" ] && rm -rf "${targetdir}/$vendordir/$1"/*
             fi
         fi
         log "[INFO] replace or merge old ops $1 files ......"

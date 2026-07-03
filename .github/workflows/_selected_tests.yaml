@@ -176,9 +176,9 @@ jobs:
             libnuma1
           ldconfig
 
-          MOONCAKE_WHEEL="mooncake_transfer_engine_npu-0.3.11.post1-cp312-cp312-manylinux_2_35_aarch64.whl"
           pip install --no-cache-dir --no-deps \
-            "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${MOONCAKE_WHEEL}"
+            -i https://mirrors.aliyun.com/pypi/simple/ \
+            mooncake-transfer-engine-npu==0.3.11.post1
 
           pip show mooncake-transfer-engine-npu || true
 
