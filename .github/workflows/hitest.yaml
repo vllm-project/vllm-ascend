@@ -65,3 +65,12 @@ jobs:
           echo "APP_SECRET length: ${#APP_SECRET}"
           echo "====DEBUG ENV END===="
           python3 .github/workflows/scripts/run_hitest.py
+
+      - name: Upload recommended pytest paths artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: recommended-pytest-paths
+          path: .github/workflows/scripts/recommended_pytest_paths.txt
+          if-no-files-found: warn
+          retention-days: 14
