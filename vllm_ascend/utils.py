@@ -1894,11 +1894,17 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
 
     # If original sizes exceed maximum, sample a representative subset
     if max_num_batch_sizes < len(original_sizes):
-        step = (len(original_sizes) - 1) / (max_num_batch_sizes - 1)
-        indices = [round(i * step) for i in range(max_num_batch_sizes)]
+        if max_num_batch_sizes <= 1:
+            # Guard against ZeroDivisionError when max_num_batch_sizes == 1
+            # (extremely deep models / high parallelism). Keep only the
+            # largest capture size.
+            sampled_sizes = [original_sizes[-1]] if original_sizes else []
+        else:
+            step = (len(original_sizes) - 1) / (max_num_batch_sizes - 1)
+            indices = [round(i * step) for i in range(max_num_batch_sizes)]
 
-        # Ensure first and last elements are preserved
-        indices[0], indices[-1] = 0, len(original_sizes) - 1
+            # Ensure first and last elements are preserved
+            indices[0], indices[-1] = 0, len(original_sizes) - 1
 
-        sampled_sizes = [original_sizes[i] for i in indices]
+            sampled_sizes = [original_sizes[i] for i in indices]
         update_cudagraph_capture_sizes(vllm_config, sampled_sizes)
