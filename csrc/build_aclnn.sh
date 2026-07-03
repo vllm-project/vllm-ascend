@@ -247,6 +247,8 @@ elif [[ "$SOC_FAMILY" == "ascend950" ]]; then
         "indexer_compress_epilog_v2"
         "causal_conv1d"
         "recurrent_gated_delta_rule"
+        "solve_tri"
+        "recompute_wu_fwd"
         "chunk_fwd_o"
         "chunk_gated_delta_rule_fwd_h"
         "store_kv_block"
