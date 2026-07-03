@@ -410,6 +410,12 @@ def forward_m2n(
         router_logits = None
         topk_weights = None
         topk_ids = None
+        logger.info(
+            "AFD forward_m2n 1111 [attn side]: "
+            "afd_config=%s, compute_gate_on_attention=%s",
+            afd_config is not None,
+            afd_config.compute_gate_on_attention if afd_config else None,
+        )
         if afd_config is not None and afd_config.compute_gate_on_attention:
             router_logits = F.linear(hidden_states.float(), layer.mlp.gate.weight)
             topk_weights, topk_ids = afd_connector.select_experts(
