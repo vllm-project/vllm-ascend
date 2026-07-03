@@ -86,9 +86,14 @@ def _random_sample_310p(
     then returns argmax(probs / q) (Gumbel-max trick).
 
     Replaces the previous q.cpu() -> _fill_cpu_exponential_310p -> q.npu() path,
-    which forced two device-host round trips per decode step (~36 ms/step measured
-    on 4×248320 vocab). Note: uses the NPU global RNG stream and does not honor
-    per-sequence generators passed in `generators`.
+    which forced two device-host round trips per decode step. Uses the NPU
+    global RNG stream and does not honor per-sequence generators passed in
+    `generators`.
+
+    Runs RNG on the auxiliary NPU stream (`global_stream()`) so it overlaps with
+    the model forward on the main compute stream in ACL-graph mode. Without this
+    the extra kernels serialize on the main stream after the captured model
+    replay, adding ~8 ms/step in graph mode.
 
     Noise generation and division are done in float32. In fp16 the u.clamp_min
     guard collapses (1e-38 rounds to 0 in fp16, and torch.rand can underflow to
@@ -97,8 +102,10 @@ def _random_sample_310p(
     tail-underflow bias.
     """
     probs_f32 = probs.to(torch.float32) if probs.dtype != torch.float32 else probs
-    u = torch.rand_like(probs_f32)
-    q = -torch.log(u.clamp_min(1e-38))
+    with npu_stream_switch(global_stream()):
+        u = torch.rand_like(probs_f32)
+        q = -torch.log(u.clamp_min(1e-38))
+    torch.npu.current_stream().wait_stream(global_stream())
     return probs_f32.div_(q).argmax(dim=-1).view(-1)
 
 
