@@ -174,19 +174,15 @@ def afd_ffn_compute(
 
     moe_comm_method = _EXTRA_CTX.moe_comm_method
 
-    logger.info(
-        "AFD afd_ffn_compute [before prepare]: "
-        "hidden_states.shape=%s, dim=%s, dtype=%s | "
-        "topk_ids.shape=%s, dim=%s, dtype=%s | "
-        "topk_weights.shape=%s, dim=%s, dtype=%s",
-        tuple(hidden_states.shape), hidden_states.dim(), hidden_states.dtype,
-        tuple(topk_ids.shape) if topk_ids is not None else None,
-        topk_ids.dim() if topk_ids is not None else None,
-        topk_ids.dtype if topk_ids is not None else None,
-        tuple(topk_weights.shape) if topk_weights is not None else None,
-        topk_weights.dim() if topk_weights is not None else None,
-        topk_weights.dtype if topk_weights is not None else None,
-    )
+    print(f"AFD afd_ffn_compute [before prepare]: "
+          f"hidden_states.shape={tuple(hidden_states.shape)}, dim={hidden_states.dim()}, dtype={hidden_states.dtype} | "
+          f"topk_ids.shape={tuple(topk_ids.shape) if topk_ids is not None else None}, "
+          f"dim={topk_ids.dim() if topk_ids is not None else None}, "
+          f"dtype={topk_ids.dtype if topk_ids is not None else None} | "
+          f"topk_weights.shape={tuple(topk_weights.shape) if topk_weights is not None else None}, "
+          f"dim={topk_weights.dim() if topk_weights is not None else None}, "
+          f"dtype={topk_weights.dtype if topk_weights is not None else None}",
+          flush=True)
 
     # 1. prepare — handles dispatch / padding (same as forward_impl).
     prepare_output = moe_comm_method.prepare(
@@ -227,21 +223,16 @@ def afd_ffn_compute(
             topk_weights = torch.tensor_split(
                 topk_weights, prepare_finalize.tp_size, dim=0)[prepare_finalize.tp_rank]
 
-    logger.info(
-        "AFD afd_ffn_compute [after pad/split]: "
-        "hidden_states.shape=%s, dim=%s | "
-        "topk_ids.shape=%s, dim=%s | "
-        "padded_num_tokens=%s, num_tokens=%s, tp_size=%s, "
-        "flash_comm_v1_enabled=%s, enable_shared_expert_dp=%s",
-        tuple(hidden_states.shape), hidden_states.dim(),
-        tuple(topk_ids.shape) if topk_ids is not None else None,
-        topk_ids.dim() if topk_ids is not None else None,
-        _EXTRA_CTX.padded_num_tokens,
-        prepare_finalize.num_tokens,
-        prepare_finalize.tp_size,
-        _EXTRA_CTX.flash_comm_v1_enabled,
-        self.enable_shared_expert_dp,
-    )
+    print(f"AFD afd_ffn_compute [after pad/split]: "
+          f"hidden_states.shape={tuple(hidden_states.shape)}, dim={hidden_states.dim()} | "
+          f"topk_ids.shape={tuple(topk_ids.shape) if topk_ids is not None else None}, "
+          f"dim={topk_ids.dim() if topk_ids is not None else None} | "
+          f"padded_num_tokens={_EXTRA_CTX.padded_num_tokens}, "
+          f"num_tokens={prepare_finalize.num_tokens}, "
+          f"tp_size={prepare_finalize.tp_size}, "
+          f"flash_comm_v1_enabled={_EXTRA_CTX.flash_comm_v1_enabled}, "
+          f"enable_shared_expert_dp={self.enable_shared_expert_dp}",
+          flush=True)
 
     fused_scale_flag = (
         _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2
