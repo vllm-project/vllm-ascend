@@ -975,7 +975,6 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
             vllm_config = get_current_vllm_config()
         except AssertionError:
             vllm_config = None
-
     # Override selected ops when the compatibility implementations are required.
     if get_current_hardware_profile().supports(HardwareCapability.COMPATIBILITY_OP_IMPLEMENTATIONS):
         from vllm_ascend._310p.attention.gdn_310 import AscendGatedDeltaNetAttention310
@@ -988,6 +987,8 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
             AscendRMSNormGated310,
         )
         from vllm_ascend._310p.ops.mm_encoder_attention import AscendMMEncoderAttention310
+        from vllm_ascend._310p.ops.qwen2_decoder import AscendCustomQwen2Decoder310
+        from vllm_ascend._310p.ops.rel_pos_attention import AscendRelPosAttention310
         from vllm_ascend._310p.ops.rotary_embedding import AscendMRotaryEmbedding310, AscendRotaryEmbedding310
         from vllm_ascend._310p.ops.vocab_parallel_embedding import (
             AscendParallelLMHead310,
@@ -1004,6 +1005,8 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
                 "ParallelLMHead": AscendParallelLMHead310,
                 "VocabParallelEmbedding": AscendVocabParallelEmbedding310,
                 "MMEncoderAttention": AscendMMEncoderAttention310,
+                "RelPosAttention": AscendRelPosAttention310,
+                "CustomQwen2Decoder": AscendCustomQwen2Decoder310,
                 "Conv3dLayer": AscendConv3dLayer310,
                 "GatedDeltaNetAttention": AscendGatedDeltaNetAttention310,
                 "MRotaryEmbedding": AscendMRotaryEmbedding310,

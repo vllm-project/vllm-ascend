@@ -1,0 +1,6 @@
+pr: 11424
+entries:
+  - category: feature
+    text: Added single-card Atlas 300I DUO (310P) FP16 support for DeepSeek-OCR-2 with ACLGraph enabled by default, including 310P relative-position attention and grouped-BMM Qwen2 vision encoder optimizations.
+    model: DeepSeek-OCR-2
+    hardware: [310P]
