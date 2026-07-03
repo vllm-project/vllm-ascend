@@ -2,6 +2,7 @@ import torch
 from modelscope import snapshot_download  # type: ignore[import-untyped]
 from transformers import AutoModelForSequenceClassification
 
+import pytest
 from tests.e2e.conftest import HfRunner, VllmRunner
 
 
