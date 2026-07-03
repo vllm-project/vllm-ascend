@@ -225,7 +225,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 logger.warning(
                     "GLM series models with speculative decoding currently do "
                     "not support graph mode. The draft model has been "
-                    "automatically switched to single-operator (eager) mode "
+                    "automatically switched to eager mode "
                     "(enforce_eager=true). Graph mode support for GLM "
                     "speculative decoding will be added in a future release. "
                 )
