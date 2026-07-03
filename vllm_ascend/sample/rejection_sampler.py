@@ -107,6 +107,70 @@ def _token_logprob(row: torch.Tensor | None, token_id: int, indices: torch.Tenso
     return float(logprobs[local_id])
 
 
+def _component_scalar(
+    components: dict[str, torch.Tensor] | None,
+    name: str,
+    flat_idx: int,
+) -> int | float | None:
+    if components is None:
+        return None
+    tensor = components.get(name)
+    if tensor is None or flat_idx >= tensor.shape[0]:
+        return None
+    value = tensor[flat_idx].detach().cpu()
+    if not value.numel():
+        return None
+    scalar = value.item()
+    if isinstance(scalar, float):
+        return float(scalar)
+    return int(scalar)
+
+
+def _component_topk_records(
+    components: dict[str, torch.Tensor] | None,
+    prefix: str,
+    flat_idx: int,
+) -> list[dict[str, float | int]]:
+    if components is None:
+        return []
+    ids = components.get(f"{prefix}_top_ids")
+    values = components.get(f"{prefix}_top_values")
+    if ids is None or values is None or flat_idx >= ids.shape[0] or flat_idx >= values.shape[0]:
+        return []
+    ids_cpu = ids[flat_idx].detach().cpu().flatten()
+    values_cpu = values[flat_idx].detach().float().cpu().flatten()
+    return [
+        {"token_id": int(token_id), "value": float(value)}
+        for token_id, value in zip(ids_cpu.tolist(), values_cpu.tolist())
+    ]
+
+
+def _draft_component_record(
+    components: dict[str, torch.Tensor] | None,
+    flat_idx: int,
+) -> dict[str, object] | None:
+    if components is None:
+        return None
+    record: dict[str, object] = {}
+    for name in (
+        "prev_token_ids",
+        "base_logit_at_draft",
+        "markov_bias_at_draft",
+        "final_logit_at_draft",
+        "base_rank_of_draft",
+        "markov_bias_rank_of_draft",
+        "final_rank_of_draft",
+    ):
+        value = _component_scalar(components, name, flat_idx)
+        if value is not None:
+            record[name] = value
+    for prefix in ("base", "markov_bias", "final"):
+        topk = _component_topk_records(components, prefix, flat_idx)
+        if topk:
+            record[f"{prefix}_topk"] = topk
+    return record or None
+
+
 def _dump_dspark_accept_debug(
     *,
     path_name: str,
@@ -120,6 +184,7 @@ def _dump_dspark_accept_debug(
     target_argmax: torch.Tensor | None = None,
     draft_logits: torch.Tensor | None = None,
     draft_probs: torch.Tensor | None = None,
+    draft_logit_components: dict[str, torch.Tensor] | None = None,
 ) -> None:
     debug_path = _dspark_accept_debug_path()
     if debug_path is None:
@@ -173,7 +238,9 @@ def _dump_dspark_accept_debug(
 
                 target_row = target_logits[flat_idx] if flat_idx < target_logits.shape[0] else None
                 target_index_row = target_indices[flat_idx] if target_indices is not None else None
-                draft_row = draft_logits[flat_idx] if draft_logits is not None and flat_idx < draft_logits.shape[0] else None
+                draft_row = (
+                    draft_logits[flat_idx] if draft_logits is not None and flat_idx < draft_logits.shape[0] else None
+                )
                 if draft_row is None and draft_probs is not None and flat_idx < draft_probs.shape[0]:
                     draft_row = draft_probs[flat_idx].clamp_min(torch.finfo(torch.float32).tiny).log()
 
@@ -194,6 +261,7 @@ def _dump_dspark_accept_debug(
                         "draft_logprob_draft": _token_logprob(draft_row, draft_token),
                         "target_topk": _topk_records(target_row, top_k, target_index_row),
                         "draft_topk": _topk_records(draft_row, top_k),
+                        "draft_components": _draft_component_record(draft_logit_components, flat_idx),
                     }
                 )
 
@@ -334,6 +402,7 @@ class AscendRejectionSampler(RejectionSampler):
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
         draft_logits: torch.Tensor | None = None,
+        draft_logit_components: dict[str, torch.Tensor] | None = None,
     ) -> SamplerOutput:
         """
         Args:
@@ -415,6 +484,7 @@ class AscendRejectionSampler(RejectionSampler):
             sampling_metadata,
             ori_target_logits=raw_target_logits,
             draft_logits=draft_logits,
+            draft_logit_components=draft_logit_components,
         )
 
         logprobs_tensors = None
@@ -543,6 +613,7 @@ def rejection_sample(
     synthetic_conditional_rates: torch.Tensor | None = None,
     ori_target_logits: torch.Tensor | None = None,
     draft_logits: torch.Tensor | None = None,
+    draft_logit_components: dict[str, torch.Tensor] | None = None,
 ) -> torch.Tensor:
     """
     Rejection sampling for speculative decoding in distributed setting.
@@ -693,6 +764,7 @@ def rejection_sample(
                 target_argmax=target_argmax_for_debug,
                 draft_logits=draft_logits,
                 draft_probs=draft_probs,
+                draft_logit_components=draft_logit_components,
             )
             return output_token_ids
 
@@ -735,6 +807,7 @@ def rejection_sample(
             target_argmax=target_argmax_for_debug,
             draft_logits=draft_logits,
             draft_probs=draft_probs,
+            draft_logit_components=draft_logit_components,
         )
         return output_token_ids
 
@@ -1042,6 +1115,7 @@ def rejection_sample(
         target_argmax=target_argmax_for_debug,
         draft_logits=draft_logits,
         draft_probs=draft_probs,
+        draft_logit_components=draft_logit_components,
     )
     return output_token_ids
 
@@ -1138,8 +1212,8 @@ def rejection_random_sample_logits_pytorch(
 
     uniform_token_probs = uniform_probs[global_token_indices].clamp_min(torch.finfo(uniform_probs.dtype).tiny)
     acceptance_condition = (
-        target_token_logprobs > uniform_token_probs.log() + draft_token_logprobs
-    ) & valid_mask & (~placeholder_mask)
+        (target_token_logprobs > uniform_token_probs.log() + draft_token_logprobs) & valid_mask & (~placeholder_mask)
+    )
 
     first_rejection = (~acceptance_condition) & valid_mask
     default_pos = torch.full((batch_size, 1), max_spec_len, dtype=pos_indices.dtype, device=device)

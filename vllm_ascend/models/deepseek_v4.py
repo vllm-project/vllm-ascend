@@ -90,6 +90,12 @@ if not vllm_version_is("0.23.0"):
     from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_mapping
 
 
+def _is_dspark_target_layer(layer_idx: int, target_layer_ids: set[int]) -> bool:
+    # DSpark configs follow upstream vLLM and store target layer numbers as
+    # 1-based decoder layer ids, while local layer_idx is 0-based.
+    return layer_idx + 1 in target_layer_ids
+
+
 def _make_deepseek_v4_expert_params_mapping(
     model: nn.Module,
     num_experts: int,
@@ -1238,7 +1244,7 @@ class DeepseekV4Model(nn.Module):
         dspark_target_ids = set(self._dspark_target_layer_ids)
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states, residual = layer(positions, hidden_states, residual, llama_4_scaling)
-            if layer.layer_idx in dspark_target_ids:
+            if _is_dspark_target_layer(layer.layer_idx, dspark_target_ids):
                 dspark_hiddens.append(hidden_states.mean(dim=1))
 
         # Stash pre-hc_head residual for the MTP draft (captured copy_).

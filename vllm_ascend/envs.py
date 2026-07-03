@@ -110,6 +110,32 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Whether to route DeepSeek V4 DSpark draft attention through the standard
+    # vLLM SWA KV cache metadata. Keep this env as a fallback kill switch.
+    "VLLM_ASCEND_DSPARK_USE_STANDARD_DSA": lambda: bool(int(os.getenv("VLLM_ASCEND_DSPARK_USE_STANDARD_DSA", "1"))),
+    # Whether to use SparseAttnSharedkv PA_ND for DSpark standard-cache
+    # attention. Keep this env as a fallback to the PTA reference path.
+    "VLLM_ASCEND_DSPARK_ENABLE_STANDARD_DSA_SAS": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_DSPARK_ENABLE_STANDARD_DSA_SAS", "1"))
+    ),
+    # Whether to print DSpark rejection debug information.
+    "VLLM_ASCEND_DSPARK_REJECT_DEBUG": lambda: bool(int(os.getenv("VLLM_ASCEND_DSPARK_REJECT_DEBUG", "0"))),
+    # Optional JSONL path for DSpark standard-cache attention diff diagnostics.
+    "VLLM_ASCEND_DSPARK_ATTENTION_DIFF_PATH": lambda: os.getenv("VLLM_ASCEND_DSPARK_ATTENTION_DIFF_PATH", None),
+    # Maximum attention diff records written per DSpark attention layer.
+    "VLLM_ASCEND_DSPARK_ATTENTION_DIFF_MAX_RECORDS": lambda: int(
+        os.getenv("VLLM_ASCEND_DSPARK_ATTENTION_DIFF_MAX_RECORDS", "16")
+    ),
+    # Optional JSONL path for DSpark standard-cache KV diff diagnostics.
+    "VLLM_ASCEND_DSPARK_KV_DIFF_PATH": lambda: os.getenv("VLLM_ASCEND_DSPARK_KV_DIFF_PATH", None),
+    # Maximum KV diff records written per DSpark attention layer.
+    "VLLM_ASCEND_DSPARK_KV_DIFF_MAX_RECORDS": lambda: int(os.getenv("VLLM_ASCEND_DSPARK_KV_DIFF_MAX_RECORDS", "16")),
+    # Optional JSONL path for DSpark standard-cache KV write tracing.
+    "VLLM_ASCEND_DSPARK_KV_WRITE_TRACE_PATH": lambda: os.getenv("VLLM_ASCEND_DSPARK_KV_WRITE_TRACE_PATH", None),
+    # Maximum KV write trace records written per DSpark attention layer.
+    "VLLM_ASCEND_DSPARK_KV_WRITE_TRACE_MAX_RECORDS": lambda: int(
+        os.getenv("VLLM_ASCEND_DSPARK_KV_WRITE_TRACE_MAX_RECORDS", "16")
+    ),
 }
 
 # end-env-vars-definition

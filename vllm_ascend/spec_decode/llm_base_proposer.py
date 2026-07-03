@@ -464,7 +464,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     def _maybe_share_lm_head(self, model: nn.Module) -> None:
         # some model definition do not define lm_head explicitly
         # and reuse embed_tokens for lm_head, e.g., CohereForCausalLM
-        if self.method in ("eagle", "dflash"):
+        share_target_lm_head = (
+            self.method in ("eagle", "dflash") or getattr(self.model, "has_own_lm_head", True) is False
+        )
+        if share_target_lm_head:
             # For DFlash drafters trained with a reduced draft vocabulary, the
             # draft model ships its own lm_head of shape [draft_vocab_size,
             # hidden] whose rows map to a trained subset of the target vocab via

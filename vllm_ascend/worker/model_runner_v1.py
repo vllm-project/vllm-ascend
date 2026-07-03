@@ -596,6 +596,8 @@ class NPUModelRunner(GPUModelRunner):
         self._draft_logits_req_ids: list[str | None] | None = None
         self._draft_probs: torch.Tensor | None = None
         self._draft_probs_req_ids: list[str | None] | None = None
+        self._draft_logit_components: dict[str, torch.Tensor] | None = None
+        self._draft_logit_components_req_ids: list[str | None] | None = None
 
         # self.cudagraph_batch_sizes sorts in ascending order.
         if (
@@ -2035,10 +2037,19 @@ class NPUModelRunner(GPUModelRunner):
         self._draft_logits_req_ids = None
         self._draft_probs = None
         self._draft_probs_req_ids = None
+        self._draft_logit_components = None
+        self._draft_logit_components_req_ids = None
         if draft_token_ids is None or self.drafter is None:
             return
 
         req_ids = list(self.input_batch.req_ids[: self.input_batch.num_reqs])
+        take_last_draft_logit_components = getattr(self.drafter, "take_last_draft_logit_components", None)
+        if take_last_draft_logit_components is not None:
+            draft_logit_components = take_last_draft_logit_components()
+            if draft_logit_components is not None:
+                self._draft_logit_components = draft_logit_components
+                self._draft_logit_components_req_ids = req_ids
+
         take_last_draft_logits = getattr(self.drafter, "take_last_draft_logits", None)
         if take_last_draft_logits is not None:
             draft_logits = take_last_draft_logits()
@@ -2104,6 +2115,24 @@ class NPUModelRunner(GPUModelRunner):
             self._draft_probs_req_ids,
             "draft probabilities",
         )
+
+    def _get_spec_decode_draft_logit_components(
+        self,
+        metadata: SpecDecodeMetadata,
+    ) -> dict[str, torch.Tensor] | None:
+        if self._draft_logit_components is None:
+            return None
+        components: dict[str, torch.Tensor] = {}
+        for name, value in self._draft_logit_components.items():
+            flattened = self._get_spec_decode_draft_distribution(
+                metadata,
+                value,
+                self._draft_logit_components_req_ids,
+                f"draft logit component {name}",
+            )
+            if flattened is not None:
+                components[name] = flattened
+        return components or None
 
     def _copy_draft_token_ids_to_cpu(
         self, scheduler_output: "SchedulerOutput", zeros_only: bool = False
@@ -2848,12 +2877,14 @@ class NPUModelRunner(GPUModelRunner):
             else self._get_spec_decode_draft_logits(spec_decode_metadata)
         )
         draft_probs = None if draft_logits is not None else self._get_spec_decode_draft_probs(spec_decode_metadata)
+        draft_logit_components = self._get_spec_decode_draft_logit_components(spec_decode_metadata)
         sampler_output = self.rejection_sampler(
             spec_decode_metadata,
             draft_probs,
             logits,
             sampling_metadata,
             draft_logits=draft_logits,
+            draft_logit_components=draft_logit_components,
         )
         return sampler_output
 
@@ -3556,12 +3587,8 @@ class NPUModelRunner(GPUModelRunner):
                 cm.block_table_tensor, cm.slot_mapping = _get_block_table_and_slot_mapping(
                     kv_cache_gid
                 )
-            if self.speculative_config and isinstance(self.drafter, AscendStep3p5MTPProposer):
-                # step3p5 MTP draft layers span multiple KV cache groups; capture
-                # each group's block table / slot mapping so the proposer can
-                # build per-step attention metadata for the active MTP layer.
-                self.drafter.set_per_group_attn_metadata(
-                    kv_cache_gid, cm.block_table_tensor, cm.slot_mapping)
+            if self.speculative_config and hasattr(self.drafter, "set_per_group_attn_metadata"):
+                self.drafter.set_per_group_attn_metadata(kv_cache_gid, cm.block_table_tensor, cm.slot_mapping)
             if self.speculative_config and spec_decode_common_attn_metadata is None:
                 if isinstance(self.drafter, AscendEagleProposer | AscendDraftModelProposer | AscendDflashProposer):
                     drafter_attn_layer_names = getattr(self.drafter, "attn_layer_names", [])

@@ -8,6 +8,7 @@ module. The target model provides selected layer hidden states; this model
 projects them into the draft attention context and emits a full draft block.
 """
 
+import json
 import os
 import typing
 from collections.abc import Iterable
@@ -15,6 +16,7 @@ from collections.abc import Iterable
 import regex as re
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from transformers import PretrainedConfig
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
@@ -35,6 +37,7 @@ from vllm.model_executor.models.utils import maybe_prefix
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
+from vllm_ascend import envs
 from vllm_ascend.models.deepseek_v4 import (
     DeepseekV2DecoderLayer,
     DeepseekV2MixtureOfExperts,
@@ -47,7 +50,13 @@ from vllm_ascend.models.deepseek_v4 import (
     _make_deepseek_v4_expert_params_mapping,
     _wo_a_weight_for_eager_projection,
 )
-from vllm_ascend.ops.dspark_attention import dspark_attention
+from vllm_ascend.ops.dspark_attention import (
+    _gather_context_kv,
+    _gather_paged_swa_kv_positions,
+    dspark_attention,
+    dspark_attention_from_standard_cache,
+    dspark_attention_from_standard_cache_sas,
+)
 
 _EXPERT_SCALE_RE = re.compile(r"\.experts\.\d+\.(gate_proj|up_proj|down_proj)\.scale$")
 _LAYER_ID_RE = re.compile(r"model\.layers\.(\d+)\.")
@@ -63,6 +72,102 @@ def _draft_quant_config(vllm_config: VllmConfig):
     if getattr(draft_config, "dspark_mtp_dequantized_to_bf16", False):
         return None
     return vllm_config.quant_config
+
+
+def _should_apply_dspark_fp8_qdq(config: PretrainedConfig) -> bool:
+    return not (
+        getattr(config, "dspark_mtp_dequantized_to_bf16", False)
+        or getattr(config, "dspark_full_dequantized_to_bf16", False)
+    )
+
+
+def _dspark_mhc_pre_torch(
+    residual: torch.Tensor,
+    hc_fn: torch.Tensor,
+    hc_scale: torch.Tensor,
+    hc_base: torch.Tensor,
+    rms_eps: float,
+    hc_pre_eps: float,
+    hc_sinkhorn_eps: float,
+    hc_post_alpha: float,
+    sinkhorn_repeat: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    dtype = residual.dtype
+    hc_mult = residual.shape[-2]
+    hidden_size = residual.shape[-1]
+    outer_shape = residual.shape[:-2]
+    residual_flat = residual.reshape(-1, hc_mult, hidden_size)
+    residual_hc = residual_flat.reshape(-1, hc_mult * hidden_size).float()
+    mixes = F.linear(residual_hc, hc_fn.float())
+    mixes = mixes * torch.rsqrt(residual_hc.square().mean(dim=-1, keepdim=True) + rms_eps)
+
+    pre_logits = mixes[:, :hc_mult] * hc_scale[0] + hc_base[:hc_mult]
+    pre_mix = torch.sigmoid(pre_logits) + hc_pre_eps
+
+    post_start = hc_mult
+    post_end = 2 * hc_mult
+    post_logits = mixes[:, post_start:post_end] * hc_scale[1] + hc_base[post_start:post_end]
+    post_mix = torch.sigmoid(post_logits) * hc_post_alpha
+
+    comb_logits = mixes[:, post_end:].reshape(-1, hc_mult, hc_mult) * hc_scale[2] + hc_base[post_end:].reshape(
+        1, hc_mult, hc_mult
+    )
+    comb_mix = torch.softmax(comb_logits, dim=-1) + hc_sinkhorn_eps
+    comb_mix = comb_mix / (comb_mix.sum(dim=-2, keepdim=True) + hc_sinkhorn_eps)
+    for _ in range(max(int(sinkhorn_repeat) - 1, 0)):
+        comb_mix = comb_mix / (comb_mix.sum(dim=-1, keepdim=True) + hc_sinkhorn_eps)
+        comb_mix = comb_mix / (comb_mix.sum(dim=-2, keepdim=True) + hc_sinkhorn_eps)
+
+    layer_input = torch.sum(pre_mix.unsqueeze(-1) * residual_flat.float(), dim=1).to(dtype)
+    return (
+        layer_input.reshape(*outer_shape, hidden_size),
+        post_mix.reshape(*outer_shape, hc_mult, 1),
+        comb_mix.reshape(*outer_shape, hc_mult, hc_mult),
+    )
+
+
+def _dspark_mhc_post_torch(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    post_mix: torch.Tensor,
+    res_mix: torch.Tensor,
+) -> torch.Tensor:
+    mixed_residual = torch.einsum(
+        "...ij,...ih->...jh",
+        res_mix.float(),
+        residual.float(),
+    )
+    post_term = post_mix.float() * x.unsqueeze(-2).float()
+    return (mixed_residual + post_term).to(residual.dtype)
+
+
+def _dspark_mhc_fused_post_pre_torch(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    post_mix: torch.Tensor,
+    res_mix: torch.Tensor,
+    hc_fn: torch.Tensor,
+    hc_scale: torch.Tensor,
+    hc_base: torch.Tensor,
+    rms_eps: float,
+    hc_pre_eps: float,
+    hc_sinkhorn_eps: float,
+    hc_post_alpha: float,
+    sinkhorn_repeat: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    residual_cur = _dspark_mhc_post_torch(x, residual, post_mix, res_mix)
+    layer_input, post_mix_cur, res_mix_cur = _dspark_mhc_pre_torch(
+        residual_cur,
+        hc_fn,
+        hc_scale,
+        hc_base,
+        rms_eps,
+        hc_pre_eps,
+        hc_sinkhorn_eps,
+        hc_post_alpha,
+        sinkhorn_repeat,
+    )
+    return residual_cur, post_mix_cur, res_mix_cur, layer_input
 
 
 def _dspark_cache_capacity(vllm_config: VllmConfig, block_size: int, window_size: int | None = None) -> int:
@@ -86,7 +191,67 @@ def _get_dspark_num_mtp_layers(config: PretrainedConfig) -> int:
 
 
 def _dspark_standard_dsa_enabled() -> bool:
-    return os.getenv("VLLM_ASCEND_DSPARK_USE_STANDARD_DSA", "0") == "1"
+    return envs.VLLM_ASCEND_DSPARK_USE_STANDARD_DSA
+
+
+def _dspark_standard_dsa_sas_enabled() -> bool:
+    return envs.VLLM_ASCEND_DSPARK_ENABLE_STANDARD_DSA_SAS
+
+
+def _dspark_attention_diff_path() -> str | None:
+    return envs.VLLM_ASCEND_DSPARK_ATTENTION_DIFF_PATH
+
+
+def _dspark_attention_diff_max_records() -> int:
+    return envs.VLLM_ASCEND_DSPARK_ATTENTION_DIFF_MAX_RECORDS
+
+
+def _dspark_kv_diff_path() -> str | None:
+    return envs.VLLM_ASCEND_DSPARK_KV_DIFF_PATH
+
+
+def _dspark_kv_diff_max_records() -> int:
+    return envs.VLLM_ASCEND_DSPARK_KV_DIFF_MAX_RECORDS
+
+
+def _dspark_kv_write_trace_path() -> str | None:
+    return envs.VLLM_ASCEND_DSPARK_KV_WRITE_TRACE_PATH
+
+
+def _dspark_kv_write_trace_max_records() -> int:
+    return envs.VLLM_ASCEND_DSPARK_KV_WRITE_TRACE_MAX_RECORDS
+
+
+def _sync_npu_device_for_standard_pta(tensor: torch.Tensor) -> None:
+    if tensor.device.type == "npu" and hasattr(torch, "npu"):
+        torch.npu.synchronize()
+
+
+def _select_layer_value(
+    value: typing.Any,
+    layer_idx: int,
+    layer_key: str,
+    layer_prefix: str,
+):
+    if isinstance(value, dict):
+        if layer_prefix in value:
+            return value[layer_prefix]
+        if layer_key in value:
+            return value[layer_key]
+        if layer_idx in value:
+            return value[layer_idx]
+        return None
+    if isinstance(value, (list, tuple)):
+        return value[layer_idx]
+    return value
+
+
+def _get_layer_prefix(layer: nn.Module, layer_key: str) -> str:
+    return getattr(
+        getattr(getattr(getattr(layer, "self_attn", None), "dsa_attn", None), "swa_cache_layer", None),
+        "prefix",
+        layer_key,
+    )
 
 
 def _fp8_e4m3fn_quantized_abs(abs_scaled: torch.Tensor) -> torch.Tensor:
@@ -144,6 +309,27 @@ def _fp8_qdq_nope_dims(
     return torch.cat([kv_nope, kv[..., nope_head_dim:]], dim=-1)
 
 
+def _maybe_fp8_qdq_nope_dims(
+    kv: torch.Tensor,
+    nope_head_dim: int,
+    apply_fp8_qdq: bool,
+    block_size: int = 64,
+) -> torch.Tensor:
+    if not apply_fp8_qdq:
+        return kv
+    return _fp8_qdq_nope_dims(kv, nope_head_dim, block_size)
+
+
+def _maybe_fp8_e4m3fn_qdq(
+    x: torch.Tensor,
+    apply_fp8_qdq: bool,
+    block_size: int,
+) -> torch.Tensor:
+    if not apply_fp8_qdq:
+        return x
+    return _fp8_e4m3fn_qdq(x, block_size)
+
+
 class DeepseekV4DSparkAttention(DeepseekV4Attention):
     """DSpark sliding-window attention with an internal eager context cache."""
 
@@ -151,9 +337,10 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         vllm_config = kwargs["vllm_config"]
         config = kwargs["config"]
         super().__init__(*args, **kwargs)
-        self.compress_ratio = 0
-        self.dsa_attn.compress_ratio = 0
+        self.compress_ratio = 1
+        self.dsa_attn.compress_ratio = 1
         self.block_size = int(config.dspark_block_size)
+        self._dspark_apply_fp8_qdq = _should_apply_dspark_fp8_qdq(config)
         cache_capacity = _dspark_cache_capacity(
             vllm_config,
             self.block_size,
@@ -196,6 +383,9 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         )
         self._dspark_cache_capacity = cache_capacity
         self._dspark_max_request_slots = max_request_slots
+        self._dspark_attention_diff_records = 0
+        self._dspark_kv_diff_records = 0
+        self._dspark_kv_write_trace_records = 0
 
     def _ensure_dspark_cache(self, length: int, like: torch.Tensor) -> None:
         del like
@@ -235,7 +425,7 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
 
     def _expand_private_kv(self, shared_kv: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         kv = shared_kv.squeeze(1)
-        kv = _fp8_qdq_nope_dims(kv, self.nope_head_dim)
+        kv = _maybe_fp8_qdq_nope_dims(kv, self.nope_head_dim, self._dspark_apply_fp8_qdq)
         k_nope, k_pe = kv.split([self.nope_head_dim, self.rope_head_dim], dim=-1)
         k = torch.cat(
             [
@@ -267,11 +457,340 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         from vllm_ascend.device.device_op import DeviceOperator
 
         slot_mapping = slot_mapping.to(device=shared_kv.device, dtype=torch.int32)
+        valid = slot_mapping >= 0 if slot_mapping.ndim == 1 else torch.all(slot_mapping >= 0, dim=-1)
+        if not bool(torch.any(valid).item()):
+            return
+        if not bool(torch.all(valid).item()):
+            shared_kv = shared_kv[valid]
+            slot_mapping = slot_mapping[valid]
         if slot_mapping.ndim == 1:
             slot_mapping = DeviceOperator.format_dsa_slot_mapping(slot_mapping, swa_cache_layer.block_size)
         DeviceOperator.dsa_kv_compress_scatter(swa_kv_cache, shared_kv, slot_mapping)
+        # The PTA reference reads the raw SWA cache immediately after scatter,
+        # outside the normal DSA attention op stream choreography.
+        _sync_npu_device_for_standard_pta(shared_kv)
 
     _store_standard_swa_context_kv = _store_standard_swa_kv
+
+    def _maybe_dump_standard_kv_write_trace(
+        self,
+        phase: str,
+        positions: torch.Tensor,
+        slot_mapping: torch.Tensor | None,
+        request_slots: torch.Tensor | None,
+    ) -> None:
+        path = _dspark_kv_write_trace_path()
+        if not path or slot_mapping is None:
+            return
+        if self._dspark_kv_write_trace_records >= _dspark_kv_write_trace_max_records():
+            return
+        valid = slot_mapping >= 0 if slot_mapping.ndim == 1 else torch.all(slot_mapping >= 0, dim=-1)
+        valid_positions = positions[valid] if valid.numel() == positions.numel() else positions
+        valid_slots = slot_mapping[valid] if valid.numel() == slot_mapping.shape[0] else slot_mapping
+        record = {
+            "pid": os.getpid(),
+            "rank": os.getenv("RANK"),
+            "local_rank": os.getenv("LOCAL_RANK"),
+            "prefix": getattr(self.dsa_attn, "prefix", None),
+            "phase": phase,
+            "num_tokens": int(positions.numel()),
+            "num_valid_tokens": int(valid.sum().item()) if valid.numel() else 0,
+            "positions_head": valid_positions.detach().cpu()[:16].tolist(),
+            "positions_tail": valid_positions.detach().cpu()[-16:].tolist(),
+            "slot_mapping_head": valid_slots.detach().cpu()[:16].tolist(),
+            "slot_mapping_tail": valid_slots.detach().cpu()[-16:].tolist(),
+            "request_slots_head": None if request_slots is None else request_slots.detach().cpu()[:16].tolist(),
+            "request_slots_tail": None if request_slots is None else request_slots.detach().cpu()[-16:].tolist(),
+        }
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=True) + "\n")
+        self._dspark_kv_write_trace_records += 1
+
+    def _standard_query_slot_mapping_from_block_table(
+        self,
+        positions: torch.Tensor,
+        slot_mapping: torch.Tensor | None,
+        block_table: torch.Tensor | None,
+        token_to_req_indices: torch.Tensor | None = None,
+    ) -> torch.Tensor | None:
+        if not _dspark_standard_dsa_enabled() or block_table is None:
+            return slot_mapping
+
+        swa_cache_layer = self.dsa_attn.swa_cache_layer
+        cache_block_size = int(swa_cache_layer.block_size)
+        out = torch.full_like(positions, -1, dtype=torch.int32)
+        valid = torch.ones(positions.shape[0], dtype=torch.bool, device=positions.device)
+        if slot_mapping is not None:
+            slot_mapping = slot_mapping.to(device=positions.device)
+            valid = slot_mapping >= 0 if slot_mapping.ndim == 1 else torch.all(slot_mapping >= 0, dim=-1)
+
+        pos_long = positions.to(torch.long)
+        if token_to_req_indices is not None:
+            if token_to_req_indices.numel() < positions.numel():
+                raise ValueError(
+                    "DSpark token_to_req_indices must cover query tokens: "
+                    f"token_to_req_indices={token_to_req_indices.numel()}, positions={positions.numel()}"
+                )
+            token_to_req = token_to_req_indices[: positions.numel()].to(
+                device=positions.device,
+                dtype=torch.long,
+            )
+            for req_idx in range(block_table.shape[0]):
+                row_indices = torch.nonzero(token_to_req == req_idx, as_tuple=False).flatten()
+                row_indices = row_indices[row_indices < positions.numel()]
+                if row_indices.numel() == 0:
+                    continue
+                block_pos = pos_long.index_select(0, row_indices)
+                block_nums = block_pos // cache_block_size
+                block_offsets = block_pos % cache_block_size
+                block_ids = (
+                    block_table[req_idx]
+                    .to(device=positions.device, dtype=torch.long)
+                    .index_select(
+                        0,
+                        block_nums,
+                    )
+                )
+                out[row_indices] = (block_ids * cache_block_size + block_offsets).to(torch.int32)
+        else:
+            for block_offset in range(0, positions.numel(), self.block_size):
+                block_end = min(block_offset + self.block_size, positions.numel())
+                req_idx = block_offset // self.block_size
+                if req_idx >= block_table.shape[0]:
+                    continue
+                block_pos = pos_long[block_offset:block_end]
+                block_nums = block_pos // cache_block_size
+                block_offsets = block_pos % cache_block_size
+                block_ids = (
+                    block_table[req_idx].to(device=positions.device, dtype=torch.long).index_select(0, block_nums)
+                )
+                out[block_offset:block_end] = (block_ids * cache_block_size + block_offsets).to(torch.int32)
+        out.masked_fill_(~valid, -1)
+        return out
+
+    def _run_standard_dspark_attention(
+        self,
+        q: torch.Tensor,
+        positions: torch.Tensor,
+        slot_mapping: torch.Tensor | None,
+        block_table: torch.Tensor | None,
+        draft_kv: torch.Tensor | None = None,
+        request_slots: torch.Tensor | None = None,
+        dspark_query_start_loc: torch.Tensor | None = None,
+        dspark_seq_lens: torch.Tensor | None = None,
+        dspark_token_to_req_indices: torch.Tensor | None = None,
+    ) -> torch.Tensor | None:
+        if not _dspark_standard_dsa_enabled():
+            return None
+        if block_table is None:
+            logger.warning_once("DSpark standard SWA cache PTA path has no block_table; falling back to private cache")
+            return None
+
+        swa_cache_layer = self.dsa_attn.swa_cache_layer
+        swa_kv_cache = getattr(swa_cache_layer, "kv_cache", None)
+        if swa_kv_cache is None:
+            logger.warning_once("DSpark standard SWA cache PTA path has no kv_cache; falling back to private cache")
+            return None
+
+        if _dspark_standard_dsa_sas_enabled():
+            sas_out = dspark_attention_from_standard_cache_sas(
+                q,
+                swa_kv_cache,
+                block_table,
+                positions,
+                slot_mapping,
+                self.attn_sink[: self.n_local_heads],
+                self.block_size,
+                int(self.window_size),
+                int(swa_cache_layer.block_size),
+                float(self.scale),
+                query_start_loc=dspark_query_start_loc,
+                seq_lens=dspark_seq_lens,
+                token_to_req_indices=dspark_token_to_req_indices,
+            )
+            if sas_out is not None:
+                return sas_out
+
+        return dspark_attention_from_standard_cache(
+            q,
+            swa_kv_cache,
+            block_table,
+            positions,
+            slot_mapping,
+            draft_kv,
+            self.attn_sink[: self.n_local_heads],
+            self.block_size,
+            int(self.window_size),
+            int(swa_cache_layer.block_size),
+            float(self.scale),
+            request_slots=request_slots,
+            cache_positions=getattr(self, "_dspark_cache_positions", None),
+            cache_valid=getattr(self, "_dspark_cache_valid", None),
+            query_start_loc=dspark_query_start_loc,
+            seq_lens=dspark_seq_lens,
+            token_to_req_indices=dspark_token_to_req_indices,
+        )
+
+    def _maybe_dump_standard_attention_diff(
+        self,
+        standard_attn_out: torch.Tensor | None,
+        private_attn_out: torch.Tensor,
+        positions: torch.Tensor,
+        slot_mapping: torch.Tensor | None,
+        block_table: torch.Tensor | None,
+    ) -> None:
+        path = _dspark_attention_diff_path()
+        if not path or standard_attn_out is None:
+            return
+        if self._dspark_attention_diff_records >= _dspark_attention_diff_max_records():
+            return
+
+        diff = (standard_attn_out.float() - private_attn_out.float()).abs()
+        standard_flat = standard_attn_out.float().reshape(standard_attn_out.shape[0], -1)
+        private_flat = private_attn_out.float().reshape(private_attn_out.shape[0], -1)
+        denom = standard_flat.norm(dim=-1) * private_flat.norm(dim=-1)
+        cosine = (standard_flat * private_flat).sum(dim=-1) / denom.clamp_min(1e-20)
+        record = {
+            "pid": os.getpid(),
+            "rank": os.getenv("RANK"),
+            "local_rank": os.getenv("LOCAL_RANK"),
+            "prefix": getattr(self.dsa_attn, "prefix", None),
+            "num_tokens": int(positions.numel()),
+            "positions": positions.detach().cpu().tolist(),
+            "slot_mapping": None if slot_mapping is None else slot_mapping.detach().cpu().tolist(),
+            "block_table_head": None
+            if block_table is None
+            else block_table[: min(int(block_table.shape[0]), 4), : min(int(block_table.shape[1]), 8)]
+            .detach()
+            .cpu()
+            .tolist(),
+            "max_abs": float(diff.max().item()) if diff.numel() else 0.0,
+            "mean_abs": float(diff.mean().item()) if diff.numel() else 0.0,
+            "per_token_max_abs": diff.reshape(diff.shape[0], -1).max(dim=-1).values.detach().cpu().tolist()
+            if diff.numel()
+            else [],
+            "per_token_cosine": cosine.detach().cpu().tolist(),
+        }
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=True) + "\n")
+        self._dspark_attention_diff_records += 1
+
+    def _maybe_dump_standard_kv_diff(
+        self,
+        positions: torch.Tensor,
+        slot_mapping: torch.Tensor | None,
+        block_table: torch.Tensor | None,
+        request_slots: torch.Tensor | None,
+    ) -> None:
+        path = _dspark_kv_diff_path()
+        if not path or block_table is None:
+            return
+        if self._dspark_kv_diff_records >= _dspark_kv_diff_max_records():
+            return
+        if request_slots is None or request_slots.numel() != positions.numel():
+            return
+
+        swa_cache_layer = self.dsa_attn.swa_cache_layer
+        swa_kv_cache = getattr(swa_cache_layer, "kv_cache", None)
+        if swa_kv_cache is None:
+            return
+
+        pos_long = positions.to(device=positions.device, dtype=torch.long)
+        for block_offset in range(0, positions.numel(), self.block_size):
+            if self._dspark_kv_diff_records >= _dspark_kv_diff_max_records():
+                break
+            block_end = min(block_offset + self.block_size, positions.numel())
+            valid_mask = torch.ones(block_end - block_offset, dtype=torch.bool, device=positions.device)
+            if slot_mapping is not None:
+                block_slots = slot_mapping[block_offset:block_end].to(device=positions.device)
+                valid_mask = block_slots >= 0 if block_slots.ndim == 1 else torch.all(block_slots >= 0, dim=-1)
+                if block_slots.numel() == 0 or torch.all(~valid_mask):
+                    continue
+
+            req_idx = block_offset // self.block_size
+            if req_idx >= block_table.shape[0]:
+                continue
+
+            valid_pos = pos_long[block_offset:block_end][valid_mask]
+            if valid_pos.numel() == 0:
+                continue
+
+            end_pos = int(valid_pos.min().item())
+            start_pos = max(end_pos - int(self.window_size), 0)
+            context_positions = torch.arange(start_pos, end_pos, dtype=torch.long, device=positions.device)
+            request_slot = int(request_slots[block_offset].item())
+            if context_positions.numel() == 0:
+                continue
+
+            cache_indices = context_positions % self._dspark_cache_positions.shape[1]
+            cached_positions = self._dspark_cache_positions[request_slot, cache_indices].to(
+                device=positions.device,
+                dtype=torch.long,
+            )
+            valid_context = self._dspark_cache_valid[request_slot, cache_indices].to(device=positions.device) & (
+                cached_positions == context_positions
+            )
+            context_positions = context_positions[valid_context]
+            if context_positions.numel() == 0:
+                continue
+
+            standard_kv = _gather_paged_swa_kv_positions(
+                swa_kv_cache,
+                block_table,
+                req_idx,
+                context_positions,
+                int(swa_cache_layer.block_size),
+            )
+            private_k, _ = _gather_context_kv(
+                self._dspark_k_cache,
+                self._dspark_v_cache,
+                self._dspark_cache_positions,
+                self._dspark_cache_valid,
+                request_slot,
+                int(context_positions.min().item()),
+                int(context_positions.max().item()),
+            )
+
+            private_cmp = private_k[:, :1, :] if private_k.ndim == 3 and private_k.shape[1] != 1 else private_k
+            count = min(int(standard_kv.shape[0]), int(private_cmp.shape[0]))
+            if count == 0:
+                continue
+            standard_flat = standard_kv[:count].float().reshape(count, -1)
+            private_flat = private_cmp[:count].float().reshape(count, -1)
+            denom = standard_flat.norm(dim=-1) * private_flat.norm(dim=-1)
+            cosine = (standard_flat * private_flat).sum(dim=-1) / denom.clamp_min(1e-20)
+            l2 = (standard_flat - private_flat).norm(dim=-1)
+
+            ctx_cpu = context_positions.detach().cpu()
+            cache_block_size = int(swa_cache_layer.block_size)
+            block_nums = context_positions // cache_block_size
+            block_offsets = context_positions % cache_block_size
+            req_block_table = block_table[req_idx].to(device=positions.device, dtype=torch.long)
+            slot_ids = req_block_table.index_select(0, block_nums) * cache_block_size + block_offsets
+            record = {
+                "pid": os.getpid(),
+                "rank": os.getenv("RANK"),
+                "local_rank": os.getenv("LOCAL_RANK"),
+                "prefix": getattr(self.dsa_attn, "prefix", None),
+                "req_idx": req_idx,
+                "request_slot": request_slot,
+                "query_positions": positions[block_offset:block_end].detach().cpu().tolist(),
+                "context_len": int(context_positions.numel()),
+                "context_positions_head": ctx_cpu[:16].tolist(),
+                "context_positions_tail": ctx_cpu[-16:].tolist(),
+                "standard_slots_head": slot_ids.detach().cpu()[:16].tolist(),
+                "standard_slots_tail": slot_ids.detach().cpu()[-16:].tolist(),
+                "standard_len": int(standard_kv.shape[0]),
+                "private_len": int(private_cmp.shape[0]),
+                "kv_cosine_min": float(cosine.min().item()),
+                "kv_cosine_mean": float(cosine.mean().item()),
+                "kv_l2_max": float(l2.max().item()),
+                "kv_l2_mean": float(l2.mean().item()),
+                "first_bad_context_idx": int(torch.argmin(cosine).item()),
+            }
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=True) + "\n")
+            self._dspark_kv_diff_records += 1
 
     def _run_dspark_attention(
         self,
@@ -349,6 +868,12 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         self._dspark_cache_positions[slots_long, cache_indices] = positions.to(torch.int32)
         self._dspark_cache_valid[slots_long, cache_indices] = True
         self._store_standard_swa_kv(shared_kv, context_slot_mapping)
+        self._maybe_dump_standard_kv_write_trace(
+            "context",
+            positions,
+            context_slot_mapping,
+            request_slots,
+        )
 
     def forward(
         self,
@@ -357,10 +882,11 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         llama_4_scaling: torch.Tensor | None = None,
         request_slots: torch.Tensor | None = None,
         slot_mapping: torch.Tensor | None = None,
+        block_table: torch.Tensor | None = None,
+        dspark_query_start_loc: torch.Tensor | None = None,
+        dspark_seq_lens: torch.Tensor | None = None,
+        dspark_token_to_req_indices: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if _dspark_standard_dsa_enabled():
-            return self.dsa_attn(positions, hidden_states, llama_4_scaling)
-
         del llama_4_scaling
         qr = self.q_norm(_linear_output(self.wq_a, hidden_states))
         kv = self.kv_norm(_linear_output(self.wkv, hidden_states))
@@ -372,7 +898,11 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         q_pe = _apply_dsv4_rope(self.rotary_emb, positions, q_pe)
         k_pe = _apply_dsv4_rope(self.rotary_emb, positions, k_pe.unsqueeze(1)).squeeze(1)
         shared_kv = torch.cat([k_nope, k_pe], dim=-1).view(-1, 1, self.head_dim).contiguous()
-        kv = _fp8_qdq_nope_dims(shared_kv.squeeze(1), self.nope_head_dim)
+        kv = _maybe_fp8_qdq_nope_dims(
+            shared_kv.squeeze(1),
+            self.nope_head_dim,
+            self._dspark_apply_fp8_qdq,
+        )
         k_nope, k_pe = kv.split([self.nope_head_dim, self.rope_head_dim], dim=-1)
 
         q = torch.cat([q_nope, q_pe], dim=-1)
@@ -384,8 +914,52 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
             dim=-1,
         ).contiguous()
         v = kv.unsqueeze(1).expand(-1, self.n_local_heads, -1).contiguous()
-        self._store_standard_swa_kv(shared_kv, slot_mapping)
-        attn_out = self._run_dspark_attention(q, k, v, positions, request_slots)
+        standard_slot_mapping = self._standard_query_slot_mapping_from_block_table(
+            positions,
+            slot_mapping,
+            block_table,
+            dspark_token_to_req_indices,
+        )
+        self._store_standard_swa_kv(shared_kv, standard_slot_mapping)
+        self._maybe_dump_standard_kv_write_trace(
+            "query",
+            positions,
+            standard_slot_mapping,
+            request_slots,
+        )
+        self._maybe_dump_standard_kv_diff(
+            positions,
+            standard_slot_mapping,
+            block_table,
+            request_slots,
+        )
+        standard_attn_out = self._run_standard_dspark_attention(
+            q,
+            positions,
+            standard_slot_mapping,
+            block_table,
+            shared_kv,
+            request_slots,
+            dspark_query_start_loc,
+            dspark_seq_lens,
+            dspark_token_to_req_indices,
+        )
+        private_attn_out = None
+        if standard_attn_out is not None and _dspark_attention_diff_path():
+            private_attn_out = self._run_dspark_attention(q, k, v, positions, request_slots)
+        if _dspark_attention_diff_path() and standard_attn_out is not None and private_attn_out is not None:
+            self._maybe_dump_standard_attention_diff(
+                standard_attn_out,
+                private_attn_out,
+                positions,
+                standard_slot_mapping,
+                block_table,
+            )
+        attn_out = (
+            standard_attn_out
+            if standard_attn_out is not None
+            else self._run_dspark_attention(q, k, v, positions, request_slots)
+        )
 
         attn_out = _apply_dsv4_rope_tail(
             self.rotary_emb,
@@ -395,7 +969,7 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         )
         group_dim = self.n_local_heads * self.head_dim // self.n_local_groups
         attn_out = attn_out.reshape(-1, self.n_local_groups, group_dim)
-        attn_out = _fp8_e4m3fn_qdq(attn_out, 128)
+        attn_out = _maybe_fp8_e4m3fn_qdq(attn_out, self._dspark_apply_fp8_qdq, 128)
         wo_a = _wo_a_weight_for_eager_projection(
             self.wo_a.weight,
             self.n_local_groups,
@@ -403,7 +977,8 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
             group_dim,
         )
         z = _grouped_wo_a_projection(attn_out, wo_a).flatten(1)
-        return _linear_output(self.wo_b, z)
+        projected = _linear_output(self.wo_b, z)
+        return projected
 
 
 class DeepseekV4DSparkDecoderLayer(DeepseekV2DecoderLayer):
@@ -420,36 +995,128 @@ class DeepseekV4DSparkDecoderLayer(DeepseekV2DecoderLayer):
             quant_config_override=_draft_quant_config(vllm_config),
             use_quant_config_override=True,
         )
+        self.hc_post_alpha = 2.0
+
+    def _mhc_pre(
+        self,
+        hidden_states: torch.Tensor,
+        hc_fn: torch.Tensor,
+        hc_scale: torch.Tensor,
+        hc_base: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        return _dspark_mhc_pre_torch(
+            hidden_states,
+            hc_fn,
+            hc_scale,
+            hc_base,
+            self.norm_eps,
+            self.hc_eps,
+            self.hc_eps,
+            self.hc_post_alpha,
+            self.hc_sinkhorn_iters,
+        )
+
+    def _mhc_post(
+        self,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor,
+        post_mix: torch.Tensor,
+        res_mix: torch.Tensor,
+    ) -> torch.Tensor:
+        return _dspark_mhc_post_torch(hidden_states, residual, post_mix, res_mix)
+
+    def _mhc_fused_post_pre(
+        self,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor,
+        post_mix: torch.Tensor,
+        res_mix: torch.Tensor,
+        hc_fn: torch.Tensor,
+        hc_scale: torch.Tensor,
+        hc_base: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        return _dspark_mhc_fused_post_pre_torch(
+            hidden_states,
+            residual,
+            post_mix,
+            res_mix,
+            hc_fn,
+            hc_scale,
+            hc_base,
+            self.norm_eps,
+            self.hc_eps,
+            self.hc_eps,
+            self.hc_post_alpha,
+            self.hc_sinkhorn_iters,
+        )
 
     def forward(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None = None,
+        post_mix: torch.Tensor | None = None,
+        res_mix: torch.Tensor | None = None,
         llama_4_scaling: torch.Tensor | None = None,
         input_ids: torch.Tensor | None = None,
         request_slots: torch.Tensor | None = None,
         slot_mapping: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        del residual, llama_4_scaling
-        residual = hidden_states.clone()
-        hidden_states, post, comb = self.hc_pre(hidden_states, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base)
+        block_table: torch.Tensor | None = None,
+        dspark_query_start_loc: torch.Tensor | None = None,
+        dspark_seq_lens: torch.Tensor | None = None,
+        dspark_token_to_req_indices: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        del llama_4_scaling
+        if residual is None:
+            residual = hidden_states
+            hidden_states, post_mix, res_mix = self._mhc_pre(
+                hidden_states,
+                self.hc_attn_fn,
+                self.hc_attn_scale,
+                self.hc_attn_base,
+            )
+        else:
+            assert post_mix is not None and res_mix is not None
+            residual, post_mix, res_mix, hidden_states = self._mhc_fused_post_pre(
+                hidden_states,
+                residual,
+                post_mix,
+                res_mix,
+                self.hc_attn_fn,
+                self.hc_attn_scale,
+                self.hc_attn_base,
+            )
         hidden_states = self.input_layernorm(hidden_states)
+        attn_kwargs = {
+            "request_slots": request_slots,
+            "slot_mapping": slot_mapping,
+            "block_table": block_table,
+        }
+        if dspark_query_start_loc is not None or dspark_seq_lens is not None or dspark_token_to_req_indices is not None:
+            attn_kwargs.update(
+                dspark_query_start_loc=dspark_query_start_loc,
+                dspark_seq_lens=dspark_seq_lens,
+                dspark_token_to_req_indices=dspark_token_to_req_indices,
+            )
         hidden_states = self.self_attn(
             positions,
             hidden_states,
             None,
-            request_slots=request_slots,
-            slot_mapping=slot_mapping,
+            **attn_kwargs,
         )
-        hidden_states = self.hc_post(hidden_states, residual, post, comb)
 
-        residual = hidden_states.clone()
-        hidden_states, post, comb = self.hc_pre(hidden_states, self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base)
+        residual, post_mix, res_mix, hidden_states = self._mhc_fused_post_pre(
+            hidden_states,
+            residual,
+            post_mix,
+            res_mix,
+            self.hc_ffn_fn,
+            self.hc_ffn_scale,
+            self.hc_ffn_base,
+        )
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states, input_ids)
-        hidden_states = self.hc_post(hidden_states, residual, post, comb)
-        return hidden_states
+        return hidden_states, residual, post_mix, res_mix
 
 
 class DSparkMarkovHead(nn.Module):
@@ -463,7 +1130,6 @@ class DSparkMarkovHead(nn.Module):
         self.markov_w2 = ParallelLMHead(
             config.vocab_size,
             config.dspark_markov_rank,
-            params_dtype=torch.float32,
             org_num_embeddings=config.vocab_size,
             prefix=f"{prefix}.markov_w2",
         )
@@ -558,16 +1224,25 @@ class DeepseekV4DSparkModel(nn.Module):
         self,
         context_states: torch.Tensor,
         context_positions: torch.Tensor,
-        context_slot_mapping: torch.Tensor | list[torch.Tensor | None] | tuple[torch.Tensor | None, ...] | None = None,
+        context_slot_mapping: torch.Tensor
+        | list[torch.Tensor | None]
+        | tuple[torch.Tensor | None, ...]
+        | dict[str, torch.Tensor | None]
+        | dict[int, torch.Tensor | None]
+        | None = None,
         context_request_slots: torch.Tensor | None = None,
     ) -> None:
         if context_states.numel() == 0:
             return
         main_x = self.main_norm(_linear_output(self.main_proj, context_states))
-        for layer_idx, layer in enumerate(self.layers.values()):
-            layer_context_slot_mapping = context_slot_mapping
-            if isinstance(context_slot_mapping, (list, tuple)):
-                layer_context_slot_mapping = context_slot_mapping[layer_idx]
+        for layer_idx, (layer_key, layer) in enumerate(self.layers.items()):
+            layer_prefix = _get_layer_prefix(layer, layer_key)
+            layer_context_slot_mapping = _select_layer_value(
+                context_slot_mapping,
+                layer_idx,
+                layer_key,
+                layer_prefix,
+            )
             layer.self_attn.precompute_context_kv(
                 main_x,
                 context_positions,
@@ -586,23 +1261,57 @@ class DeepseekV4DSparkModel(nn.Module):
         inputs_embeds: torch.Tensor | None = None,
         hidden_states: torch.Tensor | None = None,
         request_slots: torch.Tensor | None = None,
-        slot_mapping: torch.Tensor | None = None,
+        slot_mapping: torch.Tensor | dict[str, torch.Tensor] | dict[int, torch.Tensor] | None = None,
+        block_table: torch.Tensor | dict[str, torch.Tensor] | dict[int, torch.Tensor] | None = None,
+        dspark_query_start_loc: torch.Tensor | None = None,
+        dspark_seq_lens: torch.Tensor | None = None,
+        dspark_token_to_req_indices: torch.Tensor | None = None,
     ) -> torch.Tensor:
         del hidden_states
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
         hidden_states = inputs_embeds.unsqueeze(-2).repeat(1, self.hc_mult, 1)
-        for layer in self.layers.values():
-            hidden_states = layer(
-                positions=positions,
-                hidden_states=hidden_states,
-                input_ids=input_ids,
-                request_slots=request_slots,
-                slot_mapping=slot_mapping,
-            )
-        return self.compute_head_hidden(hidden_states)
+        residual = post_mix = res_mix = None
+        for layer_idx, (layer_key, layer) in enumerate(self.layers.items()):
+            layer_prefix = _get_layer_prefix(layer, layer_key)
+            layer_kwargs = {
+                "positions": positions,
+                "hidden_states": hidden_states,
+                "residual": residual,
+                "post_mix": post_mix,
+                "res_mix": res_mix,
+                "input_ids": input_ids,
+                "request_slots": request_slots,
+                "slot_mapping": _select_layer_value(slot_mapping, layer_idx, layer_key, layer_prefix),
+                "block_table": _select_layer_value(block_table, layer_idx, layer_key, layer_prefix),
+            }
+            if (
+                dspark_query_start_loc is not None
+                or dspark_seq_lens is not None
+                or dspark_token_to_req_indices is not None
+            ):
+                layer_kwargs.update(
+                    dspark_query_start_loc=dspark_query_start_loc,
+                    dspark_seq_lens=dspark_seq_lens,
+                    dspark_token_to_req_indices=dspark_token_to_req_indices,
+                )
+            layer_output = layer(**layer_kwargs)
+            if isinstance(layer_output, tuple) and len(layer_output) == 4:
+                hidden_states, residual, post_mix, res_mix = layer_output
+            else:
+                hidden_states = layer_output
+        head_hidden = self.compute_head_hidden(hidden_states, residual, post_mix, res_mix)
+        return head_hidden
 
-    def compute_head_hidden(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def compute_head_hidden(
+        self,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None = None,
+        post_mix: torch.Tensor | None = None,
+        res_mix: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if residual is not None and post_mix is not None and res_mix is not None:
+            hidden_states = _dspark_mhc_post_torch(hidden_states, residual, post_mix, res_mix)
         if hidden_states.dim() == 2:
             return hidden_states
         return _hc_head_torch(
@@ -644,6 +1353,11 @@ class DeepseekV4DSparkModel(nn.Module):
 
 @support_torch_compile
 class DeepSeekV4DSparkMTP(nn.Module, DeepseekV2MixtureOfExperts):
+    # DSpark draft embed/head are aliases of the target model, matching
+    # upstream vLLM's DSparkDeepseekV4ForCausalLM contract.
+    has_own_embed_tokens = False
+    has_own_lm_head = False
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         assert vllm_config.speculative_config is not None
@@ -677,6 +1391,10 @@ class DeepSeekV4DSparkMTP(nn.Module, DeepseekV2MixtureOfExperts):
         spec_step_idx: int = 0,
         request_slots: torch.Tensor | None = None,
         slot_mapping: torch.Tensor | None = None,
+        block_table: torch.Tensor | None = None,
+        dspark_query_start_loc: torch.Tensor | None = None,
+        dspark_seq_lens: torch.Tensor | None = None,
+        dspark_token_to_req_indices: torch.Tensor | None = None,
     ) -> torch.Tensor:
         del intermediate_tensors, spec_step_idx
         assert input_ids is not None
@@ -687,6 +1405,10 @@ class DeepSeekV4DSparkMTP(nn.Module, DeepseekV2MixtureOfExperts):
             hidden_states=hidden_states,
             request_slots=request_slots,
             slot_mapping=slot_mapping,
+            block_table=block_table,
+            dspark_query_start_loc=dspark_query_start_loc,
+            dspark_seq_lens=dspark_seq_lens,
+            dspark_token_to_req_indices=dspark_token_to_req_indices,
         )
 
     def compute_logits(
@@ -714,7 +1436,12 @@ class DeepSeekV4DSparkMTP(nn.Module, DeepseekV2MixtureOfExperts):
         self,
         context_states: torch.Tensor,
         context_positions: torch.Tensor,
-        context_slot_mapping: torch.Tensor | list[torch.Tensor | None] | tuple[torch.Tensor | None, ...] | None = None,
+        context_slot_mapping: torch.Tensor
+        | list[torch.Tensor | None]
+        | tuple[torch.Tensor | None, ...]
+        | dict[str, torch.Tensor | None]
+        | dict[int, torch.Tensor | None]
+        | None = None,
         context_request_slots: torch.Tensor | None = None,
     ) -> None:
         self.model.precompute_and_store_context_kv(
@@ -731,9 +1458,12 @@ class DeepSeekV4DSparkMTP(nn.Module, DeepseekV2MixtureOfExperts):
         stacked_params_mapping = [
             ("mlp.gate_up_proj", "mlp.gate_proj", 0),
             ("mlp.gate_up_proj", "mlp.up_proj", 1),
+            ("shared_experts.gate_up_proj", "shared_experts.gate_proj", 0),
+            ("shared_experts.gate_up_proj", "shared_experts.up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
+        missing_mtp_params: set[str] = set()
 
         tp_size = get_tensor_model_parallel_world_size()
         tp_rank = get_tensor_model_parallel_rank()
@@ -780,18 +1510,21 @@ class DeepSeekV4DSparkMTP(nn.Module, DeepseekV2MixtureOfExperts):
                     continue
                 mapped = name.replace(weight_name, param_name)
                 if mapped not in params_dict:
-                    continue
+                    missing_mtp_params.add(mapped)
+                    break
                 param = params_dict[mapped]
                 param.weight_loader(param, loaded_weight, stacked_shard_id)
                 loaded_params.add(mapped)
                 break
             else:
                 if ".experts." in name:
+                    matched_expert_mapping = False
                     if "weight_scale" in name and loaded_weight.dtype == torch.float8_e8m0fnu:
                         loaded_weight = loaded_weight.view(torch.uint8)
                     for param_name, weight_name, expert_id, expert_shard_id in expert_mapping:
                         if weight_name not in name:
                             continue
+                        matched_expert_mapping = True
                         mapped = name.replace(weight_name, param_name)
                         if mapped not in params_dict:
                             continue
@@ -808,9 +1541,12 @@ class DeepSeekV4DSparkMTP(nn.Module, DeepseekV2MixtureOfExperts):
                         if success:
                             loaded_params.add(mapped)
                             break
+                    if not matched_expert_mapping:
+                        missing_mtp_params.add(name)
                     continue
                 if "attn_sink" in name:
                     if name not in params_dict:
+                        missing_mtp_params.add(name)
                         continue
                     narrow = loaded_weight[head_start:head_end]
                     with torch.no_grad():
@@ -818,11 +1554,18 @@ class DeepSeekV4DSparkMTP(nn.Module, DeepseekV2MixtureOfExperts):
                     loaded_params.add(name)
                     continue
                 if name not in params_dict:
+                    missing_mtp_params.add(name)
                     continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
                 loaded_params.add(name)
+
+        if missing_mtp_params:
+            raise ValueError(
+                "DSpark speculative decoding checkpoint weights did not match model parameters: "
+                f"{sorted(missing_mtp_params)}"
+            )
 
         loaded_layer_ids: set[int] = set()
         for param_name in loaded_params:
@@ -868,6 +1611,7 @@ class DeepSeekV4DSparkMTP(nn.Module, DeepseekV2MixtureOfExperts):
         name = name.replace(".w1.", ".gate_proj.")
         name = name.replace(".w2.", ".down_proj.")
         name = name.replace(".w3.", ".up_proj.")
+        name = name.replace(".mlp.gate.bias", ".mlp.gate.e_score_correction_bias")
         return name
 
 
