@@ -538,9 +538,18 @@ class NPUPlatform(Platform):
                 compilation_config.cudagraph_capture_sizes = sp_aclgraph_sizes
                 update_cudagraph_capture_sizes(vllm_config, sp_aclgraph_sizes)
 
-        # MTP: FULL_AND_PIECEWISE is not yet fully supported; downgrade to
-        # PIECEWISE. FULL_DECODE_ONLY is allowed through for FDO graph mode.
-        if compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE:
+        # Gemma4 MTP: FULL_AND_PIECEWISE is not yet fully supported for our
+        # MTP path; downgrade to PIECEWISE. FULL_DECODE_ONLY is allowed
+        # through for FDO graph mode. Scoped to gemma4 MTP so other models
+        # keep the upstream FULL_AND_PIECEWISE behavior.
+        _spec = getattr(vllm_config, "speculative_config", None)
+        _is_gemma4_mtp = (
+            _spec is not None
+            and hasattr(_spec, "use_gemma4_mtp")
+            and _spec.use_gemma4_mtp()
+        )
+        if (_is_gemma4_mtp
+                and compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE):
             compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
         # Encoder-decoder models currently only support PIECEWISE mode
