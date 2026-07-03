@@ -331,6 +331,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
         mock_vllm_config.model_config.hf_text_config.qk_rope_head_dim = 64
         mock_vllm_config.cache_config.block_size = 16
         mock_vllm_config.scheduler_config.max_num_seqs = 4
+        mock_vllm_config.scheduler_config.decode_max_num_seqs = 4
         mock_vllm_config.scheduler_config.enable_chunked_prefill = False
         mock_device = "cpu"
 
@@ -351,6 +352,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
         mock_vllm_config.model_config.hf_text_config.qk_rope_head_dim = 64
         mock_vllm_config.cache_config.block_size = 16
         mock_vllm_config.scheduler_config.max_num_seqs = 4
+        mock_vllm_config.scheduler_config.decode_max_num_seqs = 4
         mock_vllm_config.scheduler_config.enable_chunked_prefill = False
         mock_device = "cpu"
 
@@ -382,6 +384,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
         mock_vllm_config.model_config.hf_text_config.qk_rope_head_dim = 64
         mock_vllm_config.cache_config.block_size = 16
         mock_vllm_config.scheduler_config.max_num_seqs = 4
+        mock_vllm_config.scheduler_config.decode_max_num_seqs = 4
         mock_vllm_config.scheduler_config.chunked_prefill_enabled = False
         mock_vllm_config.scheduler_config.enable_chunked_prefill = False
         mock_device = "cpu"
@@ -421,6 +424,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
         mock_vllm_config.model_config.hf_text_config.qk_rope_head_dim = 64
         mock_vllm_config.cache_config.block_size = 16
         mock_vllm_config.scheduler_config.max_num_seqs = 4
+        mock_vllm_config.scheduler_config.decode_max_num_seqs = 4
         mock_vllm_config.scheduler_config.enable_chunked_prefill = False
         mock_device = "cpu"
 
@@ -473,6 +477,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
         mock_vllm_config.model_config.hf_text_config.qk_rope_head_dim = 64
         mock_vllm_config.cache_config.block_size = 16
         mock_vllm_config.scheduler_config.max_num_seqs = 4
+        mock_vllm_config.scheduler_config.decode_max_num_seqs = 4
         mock_vllm_config.scheduler_config.enable_chunked_prefill = False
         mock_device = "cpu"
 
@@ -493,6 +498,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
         mock_vllm_config.model_config.hf_text_config.qk_rope_head_dim = 64
         mock_vllm_config.cache_config.block_size = 16
         mock_vllm_config.scheduler_config.max_num_seqs = 4
+        mock_vllm_config.scheduler_config.decode_max_num_seqs = 4
         mock_vllm_config.scheduler_config.chunked_prefill_enabled = False
         mock_vllm_config.scheduler_config.enable_chunked_prefill = False
         mock_device = "cpu"
@@ -514,6 +520,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
         mock_vllm_config.model_config.hf_text_config.qk_rope_head_dim = 64
         mock_vllm_config.cache_config.block_size = 16
         mock_vllm_config.scheduler_config.max_num_seqs = 4
+        mock_vllm_config.scheduler_config.decode_max_num_seqs = 4
         mock_vllm_config.scheduler_config.chunked_prefill_enabled = False
         mock_vllm_config.scheduler_config.enable_chunked_prefill = False
         mock_device = "cpu"
@@ -540,6 +547,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
         mock_vllm_config.model_config.hf_text_config.qk_rope_head_dim = 64
         mock_vllm_config.cache_config.block_size = 16
         mock_vllm_config.scheduler_config.max_num_seqs = 4
+        mock_vllm_config.scheduler_config.decode_max_num_seqs = 4
         mock_vllm_config.scheduler_config.chunked_prefill_enabled = False
         mock_vllm_config.scheduler_config.enable_chunked_prefill = False
         mock_device = "cpu"

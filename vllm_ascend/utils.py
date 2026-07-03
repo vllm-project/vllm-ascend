@@ -1129,6 +1129,8 @@ def _compute_potential_max_tokens(vllm_config) -> int:
     scheduler_config = vllm_config.scheduler_config
     speculative_config = vllm_config.speculative_config
     uniform_decode_query_len = 1 if not speculative_config else 1 + speculative_config.num_speculative_tokens
+    decode_max_num_seqs = getattr(scheduler_config, "decode_max_num_seqs", 0)
+    max_num_reqs = max(scheduler_config.max_num_seqs, decode_max_num_seqs)
 
     # Use max cudagraph capture size if available, otherwise the maximal uniform
     # decode token count.
@@ -1151,13 +1153,14 @@ def _compute_potential_max_tokens(vllm_config) -> int:
                 potential_max_tokens,
             )
     else:
-        potential_max_tokens = min(scheduler_config.max_num_seqs * uniform_decode_query_len, 512)
+        potential_max_tokens = min(max_num_reqs * uniform_decode_query_len, 512)
     return potential_max_tokens
 
 
 # potential_max_tokens is computed once in the model runner __init__ and reused by
 # both the skip-allreduce decision and the o_proj static-exchange buffer sizing, so
-# neither path recomputes it.
+# neither path recomputes it. Mirrors the _mc2_tokens_capacity set/get pattern in
+# ascend_forward_context.py.
 _potential_max_tokens: int | None = None
 
 
