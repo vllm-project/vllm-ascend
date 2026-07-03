@@ -359,7 +359,7 @@ def test_dspark_draft_idx_mapping_uses_runner_input_batch_mapping():
 
 
 def test_dspark_set_inputs_first_pass_uses_anchor_first_block(monkeypatch):
-    monkeypatch.setenv("VLLM_ASCEND_DSPARK_USE_STANDARD_DSA", "0")
+    monkeypatch.setenv("VLLM_ASCEND_DSPARK_USE_PRIVATE_CACHE", "1")
     device = torch.device("cpu")
     block_size = 3
     batch_size = 2
@@ -470,7 +470,7 @@ def test_dspark_set_inputs_first_pass_uses_anchor_first_block(monkeypatch):
 
 
 def test_dspark_standard_dsa_uses_draft_group_block_table(monkeypatch):
-    monkeypatch.setenv("VLLM_ASCEND_DSPARK_USE_STANDARD_DSA", "1")
+    monkeypatch.delenv("VLLM_ASCEND_DSPARK_USE_PRIVATE_CACHE", raising=False)
 
     class FakeBlockTable:
         def __init__(self, table):
@@ -586,7 +586,7 @@ def test_dspark_standard_dsa_uses_draft_group_block_table(monkeypatch):
 
 
 def test_dspark_standard_dsa_keeps_compact_block_table_order(monkeypatch):
-    monkeypatch.setenv("VLLM_ASCEND_DSPARK_USE_STANDARD_DSA", "1")
+    monkeypatch.delenv("VLLM_ASCEND_DSPARK_USE_PRIVATE_CACHE", raising=False)
 
     class FakeBlockTable:
         def __init__(self, table):
@@ -700,7 +700,7 @@ def test_dspark_standard_dsa_keeps_compact_block_table_order(monkeypatch):
 
 
 def test_dspark_standard_dsa_prefers_runner_per_group_metadata(monkeypatch):
-    monkeypatch.setenv("VLLM_ASCEND_DSPARK_USE_STANDARD_DSA", "1")
+    monkeypatch.delenv("VLLM_ASCEND_DSPARK_USE_PRIVATE_CACHE", raising=False)
 
     class FakeBlockTable:
         def __init__(self, table):
@@ -811,7 +811,7 @@ def test_dspark_standard_dsa_prefers_runner_per_group_metadata(monkeypatch):
 
 
 def test_dspark_standard_dsa_keeps_per_layer_block_tables(monkeypatch):
-    monkeypatch.setenv("VLLM_ASCEND_DSPARK_USE_STANDARD_DSA", "1")
+    monkeypatch.delenv("VLLM_ASCEND_DSPARK_USE_PRIVATE_CACHE", raising=False)
 
     class FakeBlockTable:
         def __init__(self, table):
@@ -935,7 +935,7 @@ def test_dspark_standard_dsa_keeps_per_layer_block_tables(monkeypatch):
 
 
 def test_dspark_set_inputs_first_pass_stores_rejected_context_tokens(monkeypatch):
-    monkeypatch.setenv("VLLM_ASCEND_DSPARK_USE_STANDARD_DSA", "0")
+    monkeypatch.setenv("VLLM_ASCEND_DSPARK_USE_PRIVATE_CACHE", "1")
     device = torch.device("cpu")
     block_size = 3
     batch_size = 2
@@ -1137,7 +1137,7 @@ class _FakeLayer:
 
 
 def test_dspark_initialize_attn_backend_standard_dsa(monkeypatch):
-    monkeypatch.setenv("VLLM_ASCEND_DSPARK_USE_STANDARD_DSA", "1")
+    monkeypatch.delenv("VLLM_ASCEND_DSPARK_USE_PRIVATE_CACHE", raising=False)
     monkeypatch.setattr(
         dspark_proposer_module,
         "get_layers_from_vllm_config",
@@ -1233,7 +1233,7 @@ def test_dspark_build_standard_dsa_metadata_sets_query_buffers():
 
 
 def test_dspark_standard_dsa_propose_pads_model_inputs(monkeypatch):
-    monkeypatch.setenv("VLLM_ASCEND_DSPARK_USE_STANDARD_DSA", "1")
+    monkeypatch.delenv("VLLM_ASCEND_DSPARK_USE_PRIVATE_CACHE", raising=False)
 
     context_calls = []
 
@@ -1458,7 +1458,7 @@ def test_dspark_standard_dsa_propose_pads_model_inputs(monkeypatch):
 
 
 def test_dspark_dummy_run_keeps_drafter_eager_when_graph_disabled(monkeypatch):
-    monkeypatch.setenv("VLLM_ASCEND_DSPARK_USE_STANDARD_DSA", "1")
+    monkeypatch.delenv("VLLM_ASCEND_DSPARK_USE_PRIVATE_CACHE", raising=False)
 
     context_calls = []
 
@@ -1557,7 +1557,7 @@ def test_dspark_attention_uses_standard_cache_pta_when_enabled(monkeypatch):
         calls.append((args, kwargs))
         return torch.full_like(args[0], 3.0)
 
-    monkeypatch.setenv("VLLM_ASCEND_DSPARK_USE_STANDARD_DSA", "1")
+    monkeypatch.delenv("VLLM_ASCEND_DSPARK_USE_PRIVATE_CACHE", raising=False)
     monkeypatch.setattr(
         dspark_model_module,
         "dspark_attention_from_standard_cache",
@@ -1599,7 +1599,7 @@ def test_dspark_attention_uses_standard_cache_pta_when_enabled(monkeypatch):
 
 
 def test_dspark_standard_swa_store_can_be_disabled(monkeypatch):
-    monkeypatch.setenv("VLLM_ASCEND_DSPARK_USE_STANDARD_DSA", "0")
+    monkeypatch.setenv("VLLM_ASCEND_DSPARK_USE_PRIVATE_CACHE", "1")
 
     class FailIfTouched:
         @property
@@ -1618,7 +1618,7 @@ def test_dspark_standard_swa_store_can_be_disabled(monkeypatch):
 def test_dspark_standard_swa_store_unwraps_singleton_cache(monkeypatch):
     from vllm_ascend.device import device_op as device_op_module
 
-    monkeypatch.setenv("VLLM_ASCEND_DSPARK_USE_STANDARD_DSA", "1")
+    monkeypatch.delenv("VLLM_ASCEND_DSPARK_USE_PRIVATE_CACHE", raising=False)
     calls = []
 
     def fake_scatter(cache, shared_kv, slot_mapping):

@@ -191,11 +191,11 @@ def _get_dspark_num_mtp_layers(config: PretrainedConfig) -> int:
 
 
 def _dspark_standard_dsa_enabled() -> bool:
-    return envs.VLLM_ASCEND_DSPARK_USE_STANDARD_DSA
+    return not envs.VLLM_ASCEND_DSPARK_USE_PRIVATE_CACHE
 
 
 def _dspark_standard_dsa_sas_enabled() -> bool:
-    return envs.VLLM_ASCEND_DSPARK_ENABLE_STANDARD_DSA_SAS
+    return not envs.VLLM_ASCEND_DSPARK_USE_PTA_REF
 
 
 def _dspark_attention_diff_path() -> str | None:

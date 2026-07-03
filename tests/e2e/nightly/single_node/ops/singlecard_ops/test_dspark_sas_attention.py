@@ -19,7 +19,7 @@ def _has_npu() -> bool:
 
 @pytest.mark.skipif(not _has_npu(), reason="requires Ascend NPU")
 @pytest.mark.skipif(
-    os.getenv("VLLM_ASCEND_DSPARK_ENABLE_STANDARD_DSA_SAS", "1") == "0",
+    os.getenv("VLLM_ASCEND_DSPARK_USE_PTA_REF", "0") == "1",
     reason="DSpark SAS fast path is disabled by env",
 )
 def test_dspark_standard_cache_sas_matches_pta_reference():

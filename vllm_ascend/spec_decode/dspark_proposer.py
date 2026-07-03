@@ -30,7 +30,7 @@ def _dspark_reject_debug_enabled() -> bool:
 
 
 def _dspark_standard_dsa_enabled() -> bool:
-    return envs.VLLM_ASCEND_DSPARK_USE_STANDARD_DSA
+    return not envs.VLLM_ASCEND_DSPARK_USE_PRIVATE_CACHE
 
 
 def _dspark_accept_debug_enabled() -> bool:
@@ -387,8 +387,9 @@ class AscendDSparkProposer(AscendDflashProposer):
                 self.kernel_block_size = int(self.draft_attn_groups[0].kv_cache_spec.block_size)
                 return
             raise RuntimeError(
-                "VLLM_ASCEND_DSPARK_USE_STANDARD_DSA=1 but no DSpark draft "
-                f"attention groups were found for layers: {sorted(draft_attn_layer_names)}"
+                "DSpark standard-cache path requires registered draft attention "
+                "groups; set VLLM_ASCEND_DSPARK_USE_PRIVATE_CACHE=1 to use "
+                f"the private cache fallback. Missing layers: {sorted(draft_attn_layer_names)}"
             )
 
         kernel_block_size = kernel_block_sizes

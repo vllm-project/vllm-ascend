@@ -110,14 +110,12 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
-    # Whether to route DeepSeek V4 DSpark draft attention through the standard
-    # vLLM SWA KV cache metadata. Keep this env as a fallback kill switch.
-    "VLLM_ASCEND_DSPARK_USE_STANDARD_DSA": lambda: bool(int(os.getenv("VLLM_ASCEND_DSPARK_USE_STANDARD_DSA", "1"))),
-    # Whether to use SparseAttnSharedkv PA_ND for DSpark standard-cache
-    # attention. Keep this env as a fallback to the PTA reference path.
-    "VLLM_ASCEND_DSPARK_ENABLE_STANDARD_DSA_SAS": lambda: bool(
-        int(os.getenv("VLLM_ASCEND_DSPARK_ENABLE_STANDARD_DSA_SAS", "1"))
-    ),
+    # Force DeepSeek V4 DSpark draft attention to use the private
+    # request-local cache instead of the standard vLLM SWA KV cache.
+    "VLLM_ASCEND_DSPARK_USE_PRIVATE_CACHE": lambda: bool(int(os.getenv("VLLM_ASCEND_DSPARK_USE_PRIVATE_CACHE", "0"))),
+    # Force DSpark standard-cache attention to use the PTA reference path
+    # instead of SparseAttnSharedkv PA_ND.
+    "VLLM_ASCEND_DSPARK_USE_PTA_REF": lambda: bool(int(os.getenv("VLLM_ASCEND_DSPARK_USE_PTA_REF", "0"))),
     # Whether to print DSpark rejection debug information.
     "VLLM_ASCEND_DSPARK_REJECT_DEBUG": lambda: bool(int(os.getenv("VLLM_ASCEND_DSPARK_REJECT_DEBUG", "0"))),
     # Optional JSONL path for DSpark standard-cache attention diff diagnostics.

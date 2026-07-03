@@ -597,7 +597,7 @@ def test_dspark_decoder_layer_uses_upstream_style_mhc_state_flow():
 
 
 def test_dspark_attention_rebuilds_standard_query_slot_mapping(monkeypatch):
-    monkeypatch.setenv("VLLM_ASCEND_DSPARK_USE_STANDARD_DSA", "1")
+    monkeypatch.delenv("VLLM_ASCEND_DSPARK_USE_PRIVATE_CACHE", raising=False)
 
     attn = object.__new__(DeepseekV4DSparkAttention)
     attn.block_size = 5
@@ -622,7 +622,7 @@ def test_dspark_attention_rebuilds_standard_query_slot_mapping(monkeypatch):
 
 
 def test_dspark_attention_rebuilds_standard_query_slot_mapping_with_token_to_req(monkeypatch):
-    monkeypatch.setenv("VLLM_ASCEND_DSPARK_USE_STANDARD_DSA", "1")
+    monkeypatch.delenv("VLLM_ASCEND_DSPARK_USE_PRIVATE_CACHE", raising=False)
 
     attn = object.__new__(DeepseekV4DSparkAttention)
     attn.block_size = 2
@@ -727,7 +727,7 @@ def test_dspark_forward_selects_prefix_mapped_slot_mapping_and_block_table():
 def test_dspark_store_standard_swa_kv_uses_dsa_slot_mapping(monkeypatch):
     from vllm_ascend.device import device_op as device_op_module
 
-    monkeypatch.setenv("VLLM_ASCEND_DSPARK_USE_STANDARD_DSA", "1")
+    monkeypatch.delenv("VLLM_ASCEND_DSPARK_USE_PRIVATE_CACHE", raising=False)
     calls = []
 
     def fake_format(slot_mapping, block_size):
@@ -763,8 +763,8 @@ def test_dspark_store_standard_swa_kv_uses_dsa_slot_mapping(monkeypatch):
 
 
 def test_dspark_standard_attention_can_fallback_to_pta(monkeypatch):
-    monkeypatch.setenv("VLLM_ASCEND_DSPARK_USE_STANDARD_DSA", "1")
-    monkeypatch.setenv("VLLM_ASCEND_DSPARK_ENABLE_STANDARD_DSA_SAS", "0")
+    monkeypatch.delenv("VLLM_ASCEND_DSPARK_USE_PRIVATE_CACHE", raising=False)
+    monkeypatch.setenv("VLLM_ASCEND_DSPARK_USE_PTA_REF", "1")
 
     expected = torch.ones(2, 4, 8)
     calls = []
@@ -807,8 +807,8 @@ def test_dspark_standard_attention_can_fallback_to_pta(monkeypatch):
 
 
 def test_dspark_standard_attention_uses_sas_by_default(monkeypatch):
-    monkeypatch.delenv("VLLM_ASCEND_DSPARK_USE_STANDARD_DSA", raising=False)
-    monkeypatch.delenv("VLLM_ASCEND_DSPARK_ENABLE_STANDARD_DSA_SAS", raising=False)
+    monkeypatch.delenv("VLLM_ASCEND_DSPARK_USE_PRIVATE_CACHE", raising=False)
+    monkeypatch.delenv("VLLM_ASCEND_DSPARK_USE_PTA_REF", raising=False)
 
     expected = torch.ones(2, 4, 8)
     calls = []
