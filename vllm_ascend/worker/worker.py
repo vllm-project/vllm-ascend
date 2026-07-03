@@ -159,7 +159,7 @@ class NPUWorker(WorkerBase):
         if "UnquantizedLinearMethod" in WEIGHT_LOADER_V2_SUPPORTED:
             WEIGHT_LOADER_V2_SUPPORTED.remove("UnquantizedLinearMethod")
 
-        self.use_v2_model_runner = envs_vllm.VLLM_USE_V2_MODEL_RUNNER
+        self.use_v2_model_runner = self.vllm_config.use_v2_model_runner
         if self.use_v2_model_runner and vllm_version_is("0.23.0"):
             logger.warning("VLLM_USE_V2_MODEL_RUNNER is not supported on vllm 0.23.0; falling back to v1 model runner.")
             self.use_v2_model_runner = False
