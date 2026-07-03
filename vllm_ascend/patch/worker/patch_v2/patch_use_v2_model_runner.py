@@ -1,4 +1,4 @@
-from vllm.config import envs
+import vllm.envs as envs
 from vllm.config.vllm import VllmConfig
 
 
