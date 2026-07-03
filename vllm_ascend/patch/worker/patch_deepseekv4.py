@@ -214,6 +214,11 @@ def afd_ffn_compute(
     #     naturally matches prepared hidden_states — no pad/split needed.
     if ffn_side_gating:
         input_ids = getattr(get_forward_context(), "input_ids", None)
+        # FFN 侧通过 P2P 接收 hidden_states，forward_context.input_ids 为 None。
+        # tid2eid 依赖 input_ids 做 token→expert 映射，input_ids 不可用时传
+        # None 以跳过该路径（_select_experts_with_fusion_ops 在 tid2eid is not
+        # None 时会强制访问 forward_context.input_ids）。
+        tid2eid = self.tid2eid if input_ids is not None else None
         topk_weights, topk_ids = select_experts(
             hidden_states=hidden_states,
             router_logits=router_logits,
@@ -228,7 +233,7 @@ def afd_ffn_compute(
             e_score_correction_bias=self.e_score_correction_bias,
             num_experts=self.moe_config.num_experts,
             input_ids=input_ids,
-            tid2eid=self.tid2eid,
+            tid2eid=tid2eid,
         )
         topk_weights = topk_weights.to(torch.float)
 
