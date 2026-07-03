@@ -18,7 +18,6 @@
 #
 import json
 import os
-from typing import Any
 from unittest.mock import patch
 
 import jsonschema
@@ -27,10 +26,12 @@ import regex as re
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 
-from tests.e2e.conftest import VllmRunner
+from tests.e2e.conftest import ModelName
 from vllm_ascend.utils import vllm_version_is
 
-MODEL_NAME = "Qwen/Qwen3-0.6B"
+os.environ["VLLM_BATCH_INVARIANT"] = "1"
+
+MODEL_NAME = ModelName.QWEN3_06B
 
 GuidedDecodingBackend = ["xgrammar", "guidance", "outlines"]
 
@@ -78,61 +79,130 @@ def sample_json_schema():
     }
 
 
-@pytest.mark.parametrize("guided_decoding_backend", GuidedDecodingBackend)
-def test_guided_json_completion(guided_decoding_backend: str, sample_json_schema, model_runner_env):
-    runner_kwargs: dict[str, Any] = {}
+@pytest.mark.timeout(1000)
+@pytest.mark.model(
+    model_name=MODEL_NAME,
+    compilation_config={"cudagraph_capture_sizes": [1, 2, 4, 8]},
+    extra_kwargs={"seed": 0, "structured_outputs_config": {"backend": "xgrammar"}},
+)
+def test_guided_json_completion_xgrammar(sample_json_schema, vllm_runner):
     sampling_params = SamplingParams(
         temperature=1.0, max_tokens=500, structured_outputs=StructuredOutputsParams(json=sample_json_schema)
     )
-    runner_kwargs = {
-        "cudagraph_capture_sizes": [1, 2, 4, 8],
-        "seed": 0,
-        "structured_outputs_config": {"backend": guided_decoding_backend},
-    }
-    with VllmRunner(MODEL_NAME, **runner_kwargs) as vllm_model:
-        prompts = [f"Give an example JSON for an employee profile that fits this schema: {sample_json_schema}"] * 2
-        inputs = vllm_model.get_inputs(prompts)
-        outputs = vllm_model.model.generate(inputs, sampling_params=sampling_params)
 
-        assert outputs is not None
+    prompts = [f"Give an example JSON for an employee profile that fits this schema: {sample_json_schema}"] * 2
+    inputs = vllm_runner.get_inputs(prompts)
+    outputs = vllm_runner.model.generate(inputs, sampling_params=sampling_params)
 
-        for output in outputs:
-            assert output is not None
-            assert isinstance(output, RequestOutput)
-            prompt = output.prompt
-
-            generated_text = output.outputs[0].text
-            assert generated_text is not None
-            print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
-            output_json = json.loads(generated_text)
-            jsonschema.validate(instance=output_json, schema=sample_json_schema)
+    assert outputs is not None
+    for output in outputs:
+        assert output is not None
+        assert isinstance(output, RequestOutput)
+        prompt = output.prompt
+        generated_text = output.outputs[0].text
+        assert generated_text is not None
+        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+        output_json = json.loads(generated_text)
+        jsonschema.validate(instance=output_json, schema=sample_json_schema)
 
 
-@pytest.mark.parametrize("guided_decoding_backend", GuidedDecodingBackend)
-def test_guided_regex(guided_decoding_backend: str, sample_regex, model_runner_env):
-    if guided_decoding_backend == "outlines":
-        pytest.skip("Outlines doesn't support regex-based guided decoding.")
-    runner_kwargs: dict[str, Any] = {}
+@pytest.mark.timeout(1000)
+@pytest.mark.model(
+    model_name=MODEL_NAME,
+    compilation_config={"cudagraph_capture_sizes": [1, 2, 4, 8]},
+    extra_kwargs={"seed": 0, "structured_outputs_config": {"backend": "xgrammar"}},
+)
+def test_guided_regex_xgrammar(sample_regex, vllm_runner):
     sampling_params = SamplingParams(
         temperature=0.8, top_p=0.95, structured_outputs=StructuredOutputsParams(regex=sample_regex)
     )
-    runner_kwargs = {
-        "cudagraph_capture_sizes": [1, 2, 4, 8],
-        "seed": 0,
-        "structured_outputs_config": {"backend": guided_decoding_backend},
-    }
+    prompts = [f"Give an example IPv4 address with this regex: {sample_regex}"] * 2
+    inputs = vllm_runner.get_inputs(prompts)
+    outputs = vllm_runner.model.generate(inputs, sampling_params=sampling_params)
+    assert outputs is not None
+    for output in outputs:
+        assert output is not None
+        assert isinstance(output, RequestOutput)
+        prompt = output.prompt
+        generated_text = output.outputs[0].text
+        print(generated_text)
+        assert generated_text is not None
+        assert re.fullmatch(".*", generated_text) is not None
+        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 
-    with VllmRunner(MODEL_NAME, **runner_kwargs) as vllm_model:
-        prompts = [f"Give an example IPv4 address with this regex: {sample_regex}"] * 2
-        inputs = vllm_model.get_inputs(prompts)
-        outputs = vllm_model.model.generate(inputs, sampling_params=sampling_params)
-        assert outputs is not None
-        for output in outputs:
-            assert output is not None
-            assert isinstance(output, RequestOutput)
-            prompt = output.prompt
-            generated_text = output.outputs[0].text
-            print(generated_text)
-            assert generated_text is not None
-            assert re.fullmatch(".*", generated_text) is not None
-            print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+
+@pytest.mark.timeout(1000)
+@pytest.mark.model(
+    model_name=MODEL_NAME,
+    compilation_config={"cudagraph_capture_sizes": [1, 2, 4, 8]},
+    extra_kwargs={"seed": 0, "structured_outputs_config": {"backend": "guidance"}},
+)
+def test_guided_json_completion_guidance(sample_json_schema, vllm_runner):
+    sampling_params = SamplingParams(
+        temperature=1.0, max_tokens=500, structured_outputs=StructuredOutputsParams(json=sample_json_schema)
+    )
+    prompts = [f"Give an example JSON for an employee profile that fits this schema: {sample_json_schema}"] * 2
+    inputs = vllm_runner.get_inputs(prompts)
+    outputs = vllm_runner.model.generate(inputs, sampling_params=sampling_params)
+
+    assert outputs is not None
+    for output in outputs:
+        assert output is not None
+        assert isinstance(output, RequestOutput)
+        prompt = output.prompt
+        generated_text = output.outputs[0].text
+        assert generated_text is not None
+        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+        output_json = json.loads(generated_text)
+        jsonschema.validate(instance=output_json, schema=sample_json_schema)
+
+
+@pytest.mark.timeout(1000)
+@pytest.mark.model(
+    model_name=MODEL_NAME,
+    compilation_config={"cudagraph_capture_sizes": [1, 2, 4, 8]},
+    extra_kwargs={"seed": 0, "structured_outputs_config": {"backend": "guidance"}},
+)
+def test_guided_regex_guidance(sample_regex, vllm_runner):
+    sampling_params = SamplingParams(
+        temperature=0.8, top_p=0.95, structured_outputs=StructuredOutputsParams(regex=sample_regex)
+    )
+    prompts = [f"Give an example IPv4 address with this regex: {sample_regex}"] * 2
+    inputs = vllm_runner.get_inputs(prompts)
+    outputs = vllm_runner.model.generate(inputs, sampling_params=sampling_params)
+    assert outputs is not None
+    for output in outputs:
+        assert output is not None
+        assert isinstance(output, RequestOutput)
+        prompt = output.prompt
+        generated_text = output.outputs[0].text
+        print(generated_text)
+        assert generated_text is not None
+        assert re.fullmatch(".*", generated_text) is not None
+        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+
+
+@pytest.mark.timeout(1000)
+@pytest.mark.model(
+    model_name=MODEL_NAME,
+    compilation_config={"cudagraph_capture_sizes": [1, 2, 4, 8]},
+    extra_kwargs={"seed": 0, "structured_outputs_config": {"backend": "outlines"}},
+)
+def test_guided_json_completion_outlines(sample_json_schema, vllm_runner):
+    sampling_params = SamplingParams(
+        temperature=1.0, max_tokens=500, structured_outputs=StructuredOutputsParams(json=sample_json_schema)
+    )
+    prompts = [f"Give an example JSON for an employee profile that fits this schema: {sample_json_schema}"] * 2
+    inputs = vllm_runner.get_inputs(prompts)
+    outputs = vllm_runner.model.generate(inputs, sampling_params=sampling_params)
+
+    assert outputs is not None
+    for output in outputs:
+        assert output is not None
+        assert isinstance(output, RequestOutput)
+        prompt = output.prompt
+        generated_text = output.outputs[0].text
+        assert generated_text is not None
+        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+        output_json = json.loads(generated_text)
+        jsonschema.validate(instance=output_json, schema=sample_json_schema)
