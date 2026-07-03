@@ -983,9 +983,7 @@
 #       Monkey-patch VllmConfig.use_v2_model_runner to return
 #       envs.VLLM_USE_V2_MODEL_RUNNER (defaulting to False when unset).
 #    Related PR (if no, explain why):
-#       No upstream PR yet. This is an Ascend-specific control-gate:
-#       we want the env var to be the sole toggle for the v2 runner
-#       until the NPU v2 path reaches feature parity with v1.
+#       1. https://github.com/vllm-project/vllm-ascend/pull/11389
 #    Future Plan:
 #       Remove this patch once vllm-ascend fully supports the v2 model
 #       runner and can rely on upstream's default enablement heuristics
