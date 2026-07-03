@@ -85,6 +85,28 @@ def _configure_backend(
     vllm_config: VllmConfig,
     process_kwargs_options: Callable | None = None,
 ) -> None:
+    if ascend_compilation_config.enable_static_kernel:
+        # npugraph_ex's static_kernel requires LOCAL_WORLD_SIZE to determine the
+        # physical node topology for creating per-node Gloo groups, which
+        # coordinate static kernel compilation and .run package installation.
+        # vLLM does not set this env var by default (unlike torchrun), so we
+        # compute it from parallel config:
+        #   local_world_size: processes per node for one DP replica
+        #   data_parallel_size_local: number of DP replicas on this node
+        #   actual_local_world_size: total processes on this physical machine
+        if "LOCAL_WORLD_SIZE" not in os.environ:
+            actual_local_world_size = (
+                vllm_config.parallel_config.local_world_size * vllm_config.parallel_config.data_parallel_size_local
+            )
+            os.environ["LOCAL_WORLD_SIZE"] = str(actual_local_world_size)
+            logger.info_once(
+                "Setting LOCAL_WORLD_SIZE=%d for static kernel (local_world_size=%d * data_parallel_size_local=%d).",
+                actual_local_world_size,
+                vllm_config.parallel_config.local_world_size,
+                vllm_config.parallel_config.data_parallel_size_local,
+                scope="global",
+            )
+
     if process_kwargs_options is not None:
         # npugraph_ex (both old and new): build options dict and use _process_kwargs_options.
         # It maps flat option names to nested config paths for old versions,
@@ -94,6 +116,8 @@ def _configure_backend(
         options: dict[str, Any] = {
             "force_eager": True,
             "inplace_pass": False,
+            "clone_input": False,
+            "clone_output": False,
         }
         if ascend_compilation_config.enable_static_kernel:
             logger.info_once(

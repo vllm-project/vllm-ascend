@@ -93,7 +93,9 @@ class AscendSFACPMetadataBuilder(AscendSFAMetadataBuilder):
     ) -> AscendSFAMetadata:
         metadata_cls = super().build(common_prefix_len, common_attn_metadata, fast_build)
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = split_decodes_and_prefills(
-            common_attn_metadata, decode_threshold=self.decode_threshold
+            common_attn_metadata,
+            decode_threshold=self.decode_threshold,
+            treat_short_extends_as_decodes=False,
         )
         num_reqs = common_attn_metadata.num_reqs
         assert num_decodes + num_prefills == num_reqs

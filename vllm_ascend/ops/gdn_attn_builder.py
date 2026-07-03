@@ -60,6 +60,7 @@ class GDNChunkedPrefillMetadata:
     final_chunk_indices_chunk64: torch.Tensor
     chunk_indices_large_block: torch.Tensor
     block_indices_cumsum: torch.Tensor
+    num_decodes: int = 0
     _buffer_slot: object | None = None
 
 
@@ -368,9 +369,13 @@ def _build_chunked_prefill_metadata(
     cu_seqlens_cpu: torch.Tensor,
     slot: _GDNChunkedPrefillBufferSlot | None = None,
 ) -> GDNChunkedPrefillMetadata:
+    cu_seqlens_host = tuple(cu_seqlens_cpu.to(torch.int64).tolist())
+    num_decodes = sum(
+        1 for i in range(len(cu_seqlens_host) - 1) if 0 < cu_seqlens_host[i + 1] - cu_seqlens_host[i] <= 1
+    )
     return GDNChunkedPrefillMetadata(
         cu_seqlens_cpu=cu_seqlens_cpu,
-        cu_seqlens_host=tuple(cu_seqlens_cpu.to(torch.int64).tolist()),
+        cu_seqlens_host=cu_seqlens_host,
         chunk_indices_chunk64_host=_build_chunk_indices_host(
             cu_seqlens_cpu,
             builder._ascend_gdn_chunk_size,
@@ -381,6 +386,7 @@ def _build_chunked_prefill_metadata(
         final_chunk_indices_chunk64=tensors["final_chunk_indices_chunk64"],
         chunk_indices_large_block=tensors["chunk_indices_large_block"],
         block_indices_cumsum=tensors["block_indices_cumsum"],
+        num_decodes=num_decodes,
         _buffer_slot=slot,
     )
 
@@ -753,12 +759,18 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             self.vllm_config.scheduler_config.max_num_seqs,
             self.decode_cudagraph_max_bs,
         )
+
+        self.spec_sequence_masks: torch.Tensor = torch.empty(
+            (sequence_index_capacity,), dtype=torch.bool, device=device
+        )
+
         self.spec_sequence_masks_cpu: torch.Tensor = torch.empty(
             (sequence_index_capacity,),
             dtype=torch.bool,
             device="cpu",
             pin_memory=device.type != "cpu",
         )
+
         self.spec_sequence_indices_cpu: torch.Tensor = torch.empty(
             (sequence_index_capacity,),
             dtype=torch.int64,
@@ -791,7 +803,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         super()._init_reorder_batch_threshold(
             reorder_batch_threshold,
             supports_spec_as_decode,
-            supports_dcp_with_varlen,
+            True,
         )
         if self.reorder_batch_threshold != 1:  # type: ignore
             speculative_config = self.vllm_config.speculative_config
@@ -977,6 +989,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = split_decodes_and_prefills(
                 m,
                 decode_threshold=1,
+                treat_short_extends_as_decodes=False,
             )
             num_spec_decode_tokens = 0
             spec_token_indx = None
@@ -1151,6 +1164,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             and num_spec_decode_tokens <= self.decode_cudagraph_max_bs
         ):
             assert spec_sequence_masks is not None
+            self.spec_state_indices_tensor[batch_size:].fill_(NULL_BLOCK_ID)
             self.spec_state_indices_tensor[:num_spec_decodes].copy_(
                 spec_state_indices_tensor,
                 non_blocking=True,
@@ -1199,6 +1213,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             and num_spec_decodes == 0
             and num_decodes <= self.decode_cudagraph_max_bs
         ):
+            self.non_spec_state_indices_tensor[batch_size:].fill_(NULL_BLOCK_ID)
             self.non_spec_state_indices_tensor[:num_decodes].copy_(
                 non_spec_state_indices_tensor,
                 non_blocking=True,
