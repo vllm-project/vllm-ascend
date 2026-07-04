@@ -1,6 +1,7 @@
 from typing import TYPE_CHECKING, Any, cast
 
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorHandshakeMetadata,
     KVConnectorRole,
     SupportsHMA,
     supports_hma,
@@ -28,6 +29,24 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
         assert vllm_config.scheduler_config.disable_hybrid_kv_cache_manager or self._all_support_hma, (
             "HMA should not be enabled unless all sub-connectors support it"
         )
+
+    def set_xfer_handshake_metadata_pp_aware(
+        self, metadata: dict[int | tuple[int, int], KVConnectorHandshakeMetadata]
+    ) -> None:
+        if not metadata:
+            return super().set_xfer_handshake_metadata_pp_aware(metadata)
+
+        has_logical_rank_keys = any(isinstance(key, int) for key in metadata)
+        has_pp_tp_keys = any(isinstance(key, tuple) for key in metadata)
+        if has_logical_rank_keys and has_pp_tp_keys:
+            raise ValueError("Mixed int logical-rank and (pp_rank, tp_rank) handshake metadata keys are not supported.")
+
+        if has_logical_rank_keys:
+            for connector in self._connectors:
+                connector.set_xfer_handshake_metadata(metadata)
+            return
+
+        return super().set_xfer_handshake_metadata_pp_aware(metadata)
 
     def update_state_after_alloc(self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int):
         chosen_connector = self._requests_to_connector.get(request.request_id, -1)

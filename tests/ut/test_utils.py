@@ -210,6 +210,56 @@ class TestUtils(TestBase):
         with mock.patch("vllm_ascend.utils.enable_dsa_cp", return_value=False):
             self.assertFalse(utils.enable_dsa_cp_with_o_proj_tp())
 
+    def test_check_kv_extra_config_accepts_per_dp_engine_global_dp_size(self):
+        mock_vllm_config = mock.MagicMock()
+        mock_vllm_config.parallel_config.tensor_parallel_size = 2
+        mock_vllm_config.parallel_config.data_parallel_size = 1
+        mock_vllm_config.kv_transfer_config = mock.MagicMock(
+            engine_id="prefill-uuid_dp0",
+            is_kv_producer=True,
+            is_kv_consumer=False,
+        )
+        mock_vllm_config.kv_transfer_config.get_from_extra_config.return_value = {
+            "dp_size": 2,
+            "tp_size": 2,
+        }
+
+        utils.check_kv_extra_config(mock_vllm_config)
+
+    def test_check_kv_extra_config_rejects_non_dp_engine_dp_size_mismatch(self):
+        mock_vllm_config = mock.MagicMock()
+        mock_vllm_config.parallel_config.tensor_parallel_size = 2
+        mock_vllm_config.parallel_config.data_parallel_size = 1
+        mock_vllm_config.kv_transfer_config = mock.MagicMock(
+            engine_id="prefill-uuid",
+            is_kv_producer=True,
+            is_kv_consumer=False,
+        )
+        mock_vllm_config.kv_transfer_config.get_from_extra_config.return_value = {
+            "dp_size": 2,
+            "tp_size": 2,
+        }
+
+        with self.assertRaisesRegex(ValueError, "conflicting data parallel size"):
+            utils.check_kv_extra_config(mock_vllm_config)
+
+    def test_check_kv_extra_config_rejects_non_dp_suffix_engine_dp_size_mismatch(self):
+        mock_vllm_config = mock.MagicMock()
+        mock_vllm_config.parallel_config.tensor_parallel_size = 2
+        mock_vllm_config.parallel_config.data_parallel_size = 1
+        mock_vllm_config.kv_transfer_config = mock.MagicMock(
+            engine_id="prefill-uuid_dp_shadow",
+            is_kv_producer=True,
+            is_kv_consumer=False,
+        )
+        mock_vllm_config.kv_transfer_config.get_from_extra_config.return_value = {
+            "dp_size": 2,
+            "tp_size": 2,
+        }
+
+        with self.assertRaisesRegex(ValueError, "conflicting data parallel size"):
+            utils.check_kv_extra_config(mock_vllm_config)
+
     def test_vllm_version_is(self):
         with mock.patch.dict(os.environ, {"VLLM_VERSION": "1.0.0"}):
             with mock.patch("vllm.__version__", "1.0.0"):
