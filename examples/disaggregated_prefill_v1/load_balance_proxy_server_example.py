@@ -879,8 +879,13 @@ async def stream_service_response_with_retry(
                 logger.error("Streaming to client interrupted after response started: %s", exc)
                 return
             await _handle_retry(
-                exc, attempt, max_retries, base_delay, endpoint,
-                context="for streaming ", force_retry=True,
+                exc,
+                attempt,
+                max_retries,
+                base_delay,
+                endpoint,
+                context="for streaming ",
+                force_retry=True,
             )
 
 
