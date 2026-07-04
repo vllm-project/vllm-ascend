@@ -1972,6 +1972,23 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         for p in self.patches:
             p.stop()  # type: ignore
 
+    def _make_remote_multi_nodes_meta_mapping(
+        self,
+        remote_port: int,
+        remote_tp_size: int,
+        remote_pcp_size: int = 1,
+        remote_engine_id: Any = "remote_engine",
+        remote_host: str = "localhost",
+    ) -> dict[str, dict[str, Any]]:
+        return {
+            str(rank): {
+                "host": remote_host,
+                "engine_id": remote_engine_id,
+                "handshake_port": remote_port + 10000 + rank,
+            }
+            for rank in range(remote_tp_size * remote_pcp_size)
+        }
+
     def test_register_kv_caches_producer(self):
         worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
         worker.register_kv_caches(self.kv_caches)
@@ -2265,7 +2282,13 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
             meta.remote_engine_id = remote_engine_id
             meta.remote_host = "localhost"
             meta.remote_block_size = worker.block_size
-            meta.remote_multi_nodes_meta_mapping = {}
+            prefill_tp_size = remote_ptp_size if remote_ptp_size is not None else _prefill_tp_size
+            meta.remote_multi_nodes_meta_mapping = self._make_remote_multi_nodes_meta_mapping(
+                remote_port,
+                prefill_tp_size,
+                remote_pcp_size,
+                remote_engine_id,
+            )
 
             (
                 remote_handshake_port_list,
@@ -2402,7 +2425,12 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                     remote_block_size=16,
                     remote_engine_id=f"remote_bs_{dcp_rank}",
                     remote_host="localhost",
-                    remote_multi_nodes_meta_mapping={},
+                    remote_multi_nodes_meta_mapping=self._make_remote_multi_nodes_meta_mapping(
+                        30000,
+                        4,
+                        2,
+                        f"remote_bs_{dcp_rank}",
+                    ),
                 )
 
                 ports, local_ids, remote_ids = worker._get_kv_split_metadata("req_bs", cast(ReqMeta, meta))
@@ -2457,7 +2485,12 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
             remote_block_size=16,
             remote_engine_id="remote_prefix_cp",
             remote_host="localhost",
-            remote_multi_nodes_meta_mapping={},
+            remote_multi_nodes_meta_mapping=self._make_remote_multi_nodes_meta_mapping(
+                30000,
+                8,
+                2,
+                "remote_prefix_cp",
+            ),
         )
 
         ports, local_ids, remote_ids = worker._get_kv_split_metadata("req_prefix_cp", cast(ReqMeta, meta))
@@ -2699,6 +2732,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                             dcp_rank=dcp_rank,
                         ):
                             worker = self._build_worker_for_pd_case(case, tp_rank, pcp_rank, dcp_rank)
+                            remote_engine_id = f"remote_{case['name']}_{tp_rank}_{pcp_rank}_{dcp_rank}"
                             meta = types.SimpleNamespace(
                                 remote_pcp_size=case["remote_pcp_size"],
                                 remote_dcp_size=case["remote_dcp_size"],
@@ -2709,9 +2743,14 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                                 num_external_tokens=case["num_external_blocks"] * worker.block_size,
                                 num_prompt_blocks=case["num_prompt_blocks"],
                                 remote_block_size=worker.block_size,
-                                remote_engine_id=f"remote_{case['name']}_{tp_rank}_{pcp_rank}_{dcp_rank}",
+                                remote_engine_id=remote_engine_id,
                                 remote_host="localhost",
-                                remote_multi_nodes_meta_mapping={},
+                                remote_multi_nodes_meta_mapping=self._make_remote_multi_nodes_meta_mapping(
+                                    30000,
+                                    case["prefill_tp_size"],
+                                    case["remote_pcp_size"],
+                                    remote_engine_id,
+                                ),
                             )
 
                             ports, local_ids, remote_ids = worker._get_kv_split_metadata("req_pd", meta)
@@ -2867,7 +2906,12 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                     num_prompt_blocks=4,
                     remote_engine_id=f"remote_hybrid_pcp_{tp_rank}",
                     remote_host="localhost",
-                    remote_multi_nodes_meta_mapping={},
+                    remote_multi_nodes_meta_mapping=self._make_remote_multi_nodes_meta_mapping(
+                        31000,
+                        4,
+                        2,
+                        f"remote_hybrid_pcp_{tp_rank}",
+                    ),
                     remote_block_size=16,
                 )
                 ports, local_ids, remote_ids = worker._get_kv_split_metadata("req_hybrid_pcp", cast(ReqMeta, meta))

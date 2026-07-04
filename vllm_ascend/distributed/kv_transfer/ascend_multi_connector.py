@@ -50,7 +50,7 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
             handled = False
             for connector in self._connectors:
                 if isinstance(connector, MooncakeConnector):
-                    connector.set_xfer_handshake_metadata(metadata)
+                    connector.set_xfer_handshake_metadata(cast(dict[int, KVConnectorHandshakeMetadata], metadata))
                     handled = True
             if not handled:
                 raise ValueError("Logical-rank handshake metadata requires a MooncakeConnector child.")
