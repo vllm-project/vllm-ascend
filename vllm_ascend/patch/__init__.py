@@ -969,7 +969,7 @@
 #          not supported yet. Remove this patch once upstream supports both PCP and DCP.
 #       2. Remove this patch once upstream accept 46892 pr or fixed the bug by other pr.
 #
-# ** 30. File: worker/patch_v2/patch_use_v2_model_runner.py**
+# ** 30. File: platform/patch_use_v2_model_runner.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.vllm.VllmConfig.use_v2_model_runner`
 #    Why:
@@ -984,6 +984,8 @@
 #    How:
 #       Monkey-patch VllmConfig.use_v2_model_runner to return
 #       envs.VLLM_USE_V2_MODEL_RUNNER (defaulting to False when unset).
+#       worker/patch_v2/patch_use_v2_model_runner.py reuses this platform
+#       patch so EngineCore and worker processes share the same behavior.
 #    Related PR (if no, explain why):
 #       1. https://github.com/vllm-project/vllm-ascend/pull/11389
 #    Future Plan:
