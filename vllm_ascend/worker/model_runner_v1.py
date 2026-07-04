@@ -4013,7 +4013,11 @@ class NPUModelRunner(GPUModelRunner):
             except Exception as exc:  # noqa: BLE001
                 failed.append(f"{name}:{type(exc).__name__}:{exc}")
                 continue
-            for attr in ("W_UV", "W_UK_T"):
+            # W_UV / W_UK_T are rebuilt from kv_b_proj; deq_scale_qkv / qb_deq_scl
+            # are the fused-MLAPO w8a8 dequant scales that (on KV consumers) are
+            # restored from the snapshot buffers -- a zero here means the decode
+            # MLA query collapses to 0 and output diverges, so guard both.
+            for attr in ("W_UV", "W_UK_T", "deq_scale_qkv", "qb_deq_scl"):
                 tensor = getattr(target, attr, None)
                 if tensor is None:
                     continue
