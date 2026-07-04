@@ -460,21 +460,6 @@ def forward_m2n(
             )
             topk_weights = topk_weights.to(torch.float)
 
-        logger.info(
-            "AFD forward_m2n [attn side]: "
-            "afd_config=%s, compute_gate_on_attention=%s, layer_idx=%s, "
-            "hidden_states=%s, hidden_states_2d=%s, "
-            "router_logits=%s, topk_weights=%s, topk_ids=%s",
-            afd_config is not None,
-            afd_config.compute_gate_on_attention if afd_config else None,
-            layer.layer_idx,
-            tuple(hidden_states.shape), hidden_states.dim(),
-            tuple(hidden_states_2d.shape) if hidden_states_2d is not None else None,
-            router_logits.shape if router_logits is not None else None,
-            topk_weights.shape if topk_weights is not None else None,
-            topk_ids.shape if topk_ids is not None else None,
-        )
-
         afd_connector.send_attn_output(
             hidden_states=hidden_states,
             metadata=None,
