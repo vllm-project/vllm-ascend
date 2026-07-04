@@ -244,7 +244,18 @@ def afd_ffn_compute(
     if ffn_side_gating:
         # input_ids 已由 recv_attn_output 从 attention 侧通过 P2P 接收并
         # 设置到 forward_context 中, 供 tid2eid (logical→physical expert 映射) 使用。
-        input_ids = getattr(get_forward_context(), "input_ids", None)
+        # 注意: prepare 对 hidden_states/router_logits 做了 DP all-gather
+        # (EP 模式下走 _prepare_with_ep_group → maybe_all_gather_and_maybe_unpad),
+        # 但 input_ids 未被同步 all-gather。select_experts 内部会重新从
+        # forward_context.input_ids 读取 (experts_selector.py:256), 若不
+        # all-gather, 则 N 个 token 共用 1 个 input_id, 导致 tid2eid 映射
+        # 对所有 token 相同 → 路由坍缩 → 输出乱码。
+        fwd_ctx = get_forward_context()
+        input_ids = getattr(fwd_ctx, "input_ids", None)
+        if input_ids is not None and input_ids.shape[0] != hidden_states.shape[0]:
+            input_ids = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
+                input_ids, True, True)
+            fwd_ctx.input_ids = input_ids
         # 与 quant_method.apply 保持一致：使用 num_logical_experts 而非
         # moe_config.num_experts, 避免 tid2eid 映射越界导致乱码。
         num_shared_experts = getattr(self, "n_shared_experts", 0)
