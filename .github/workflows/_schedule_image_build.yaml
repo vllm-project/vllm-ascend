@@ -308,7 +308,7 @@ jobs:
           fi
 
       - name: Export digest
-        if: ${{ inputs.should_push }}
+        # if: ${{ inputs.should_push }}
         run: |
           mkdir -p ${{ runner.temp }}/digests
           digest="${{ steps.build.outputs.digest }}"
