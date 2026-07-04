@@ -300,7 +300,7 @@ jobs:
 
           buildctl "${ARGS[@]}"
 
-          if [ "${{ inputs.should_push }}" = "true" ]; then
+          if [ "true" = "true" ]; then
             /tmp/crane auth login quay.io -u "$QUAY_TEMP_USERNAME" -p "$QUAY_TEMP_PASSWORD"
             DIGEST=$(/tmp/crane digest "${{ env.QUAY_TEMP_REPO }}:${TEMP_TAG}")
             echo "digest=${DIGEST}" >> $GITHUB_OUTPUT
