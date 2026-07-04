@@ -191,7 +191,7 @@ def afd_ffn_compute(
         assert router_logits is None and topk_ids is None, \
             "FFN-side gating expects router_logits/topk_ids to be None"
         # 精度诊断: hidden_states 维度 (正常路径期望 2D, P2P 接收可能是 3D)
-        logger.debug(
+        logger.info(
             "[FFN_GATING_ENTRY] hs dim=%d shape=%s dtype=%s "
             "mean=%.6f std=%.6f",
             hidden_states.dim(), tuple(hidden_states.shape),
@@ -203,7 +203,7 @@ def afd_ffn_compute(
         # (weight_fp32) 时使用它计算 router_logits, 避免精度损失导致乱码。
         gate = self.gate
         has_fp32 = gate is not None and hasattr(gate, "weight_fp32")
-        logger.debug(
+        logger.info(
             "[FFN_GATE] gate is_none=%s has_weight_fp32=%s "
             "weight dtype=%s",
             gate is None, has_fp32,
@@ -213,7 +213,7 @@ def afd_ffn_compute(
             router_logits = F.linear(hidden_states.float(), gate.weight_fp32)
         else:
             router_logits = F.linear(hidden_states.float(), gate.weight)
-        logger.debug(
+        logger.info(
             "[FFN_ROUTER_LOGITS] shape=%s dtype=%s mean=%.6f std=%.6f",
             tuple(router_logits.shape), router_logits.dtype,
             router_logits.float().mean().item(),
@@ -256,7 +256,7 @@ def afd_ffn_compute(
             global_redundant_expert_num=self.global_redundant_expert_num,
             num_shared_experts=num_shared_experts,
         )
-        logger.debug(
+        logger.info(
             "[FFN_SELECT_INPUT] hs shape=%s router_logits shape=%s "
             "input_ids is_none=%s shape=%s tid2eid is_none=%s shape=%s "
             "num_logical=%d moe_num_experts=%d "
@@ -286,7 +286,7 @@ def afd_ffn_compute(
             tid2eid=self.tid2eid,
         )
         topk_weights = topk_weights.to(torch.float)
-        logger.debug(
+        logger.info(
             "[FFN_SELECT_OUTPUT] topk_ids shape=%s first16=%s "
             "topk_weights shape=%s mean=%.6f",
             tuple(topk_ids.shape),
@@ -526,7 +526,7 @@ def forward_m2n(
             p2p_input_ids = getattr(get_forward_context(), "input_ids", None)
 
         # P2P 传输完整性诊断: 记录发送前的张量状态, 与 FFN 侧 recv 后对比
-        logger.debug(
+        logger.info(
             "[ATTN_SEND_PRE] layer=%d hs dim=%d shape=%s dtype=%s "
             "mean=%.6f std=%.6f",
             layer.layer_idx,
@@ -536,15 +536,15 @@ def forward_m2n(
             hidden_states.float().std().item(),
         )
         if p2p_input_ids is not None:
-            logger.debug(
+            logger.info(
                 "[ATTN_SEND_INPUT_IDS] shape=%s dtype=%s first8=%s",
                 tuple(p2p_input_ids.shape), p2p_input_ids.dtype,
                 p2p_input_ids.flatten().tolist()[:8],
             )
         else:
-            logger.debug("[ATTN_SEND_INPUT_IDS] is_none=True")
+            logger.info("[ATTN_SEND_INPUT_IDS] is_none=True")
         if router_logits is not None:
-            logger.debug(
+            logger.info(
                 "[ATTN_SEND_ROUTER] router_logits shape=%s dtype=%s "
                 "mean=%.6f std=%.6f",
                 tuple(router_logits.shape), router_logits.dtype,
@@ -552,7 +552,7 @@ def forward_m2n(
                 router_logits.float().std().item(),
             )
         if topk_ids is not None:
-            logger.debug(
+            logger.info(
                 "[ATTN_SEND_TOPK] topk_ids shape=%s first16=%s "
                 "topk_weights shape=%s mean=%.6f",
                 tuple(topk_ids.shape), topk_ids.flatten().tolist()[:16],
@@ -567,7 +567,7 @@ def forward_m2n(
             topk_ids=topk_ids,
             input_ids=p2p_input_ids,
         )
-        logger.debug("[ATTN_SEND_DONE] layer=%d send_attn_output completed",
+        logger.info("[ATTN_SEND_DONE] layer=%d send_attn_output completed",
                      layer.layer_idx)
 
     hidden_states = afd_connector.recv_ffn_output(
