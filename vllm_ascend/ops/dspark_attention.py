@@ -569,6 +569,9 @@ def dspark_attention_from_standard_cache_sas(
     token_to_req_indices: torch.Tensor | None = None,
     dspark_swa_indices: torch.Tensor | None = None,
     dspark_swa_lens: torch.Tensor | None = None,
+    sas_metadata: torch.Tensor | None = None,
+    skip_scheduling_guard: bool = False,
+    raise_on_error: bool = False,
 ) -> torch.Tensor | None:
     """SAS fast path over standard paged SWA cache.
 
@@ -584,13 +587,11 @@ def dspark_attention_from_standard_cache_sas(
 
     metadata_op, attn_op = ops
     try:
-        num_query_tokens = int(query_start_loc[-1].item()) if query_start_loc.numel() > 0 else 0
-        if num_query_tokens <= 0 or num_query_tokens > q.shape[0]:
-            return None
-
         standard_cache = _unwrap_single_kv_cache(standard_kv_cache)
         if (dspark_swa_indices is None) != (dspark_swa_lens is None):
             raise ValueError("DSpark SWA indices and lens must be provided together")
+        if skip_scheduling_guard and (dspark_swa_indices is None or dspark_swa_lens is None or sas_metadata is None):
+            return None
         if dspark_swa_indices is None:
             dspark_swa_indices, dspark_swa_lens = build_dspark_swa_indices(
                 block_table,
@@ -604,7 +605,14 @@ def dspark_attention_from_standard_cache_sas(
                 token_to_req_indices=token_to_req_indices,
             )
         assert dspark_swa_lens is not None
-        if not _dspark_sas_lens_match_scheduling(
+        if skip_scheduling_guard:
+            num_query_tokens = min(q.shape[0], dspark_swa_lens.shape[0])
+        else:
+            num_query_tokens = int(query_start_loc[-1].item()) if query_start_loc.numel() > 0 else 0
+        if num_query_tokens <= 0 or num_query_tokens > q.shape[0]:
+            return None
+
+        if not skip_scheduling_guard and not _dspark_sas_lens_match_scheduling(
             dspark_swa_lens,
             query_start_loc,
             seq_lens,
@@ -623,29 +631,31 @@ def dspark_attention_from_standard_cache_sas(
         sinks = attn_sink[: q_active.shape[1]].float().contiguous()
         _, ori_win_left, ori_win_right = _dspark_sparse_sas_window(block_size, window_size)
 
-        metadata = metadata_op(
-            num_heads_q=q_active.shape[1],
-            num_heads_kv=standard_cache.shape[2],
-            head_dim=q_active.shape[2],
-            cu_seqlens_q=cu_seqlens_q,
-            cu_seqlens_ori_kv=None,
-            cu_seqlens_cmp_kv=None,
-            seqused_q=None,
-            seqused_kv=seqused_kv,
-            batch_size=seq_lens.numel(),
-            max_seqlen_q=block_size,
-            max_seqlen_kv=int(seq_lens.max().item()) if seq_lens.numel() > 0 else 0,
-            cmp_ratio=1,
-            ori_mask_mode=DSPARK_SAS_MASK_MODE,
-            cmp_mask_mode=DSPARK_SAS_CMP_MASK_MODE,
-            ori_win_left=ori_win_left,
-            ori_win_right=ori_win_right,
-            layout_q="TND",
-            layout_kv="PA_ND",
-            has_ori_kv=True,
-            has_cmp_kv=False,
-            device=str(q.device),
-        )
+        metadata = sas_metadata
+        if metadata is None:
+            metadata = metadata_op(
+                num_heads_q=q_active.shape[1],
+                num_heads_kv=standard_cache.shape[2],
+                head_dim=q_active.shape[2],
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_ori_kv=None,
+                cu_seqlens_cmp_kv=None,
+                seqused_q=None,
+                seqused_kv=seqused_kv,
+                batch_size=seq_lens.numel(),
+                max_seqlen_q=block_size,
+                max_seqlen_kv=int(seq_lens.max().item()) if seq_lens.numel() > 0 else 0,
+                cmp_ratio=1,
+                ori_mask_mode=DSPARK_SAS_MASK_MODE,
+                cmp_mask_mode=DSPARK_SAS_CMP_MASK_MODE,
+                ori_win_left=ori_win_left,
+                ori_win_right=ori_win_right,
+                layout_q="TND",
+                layout_kv="PA_ND",
+                has_ori_kv=True,
+                has_cmp_kv=False,
+                device=str(q.device),
+            )
         out_active = attn_op(
             q_active.contiguous(),
             ori_kv=standard_cache,
@@ -671,6 +681,8 @@ def dspark_attention_from_standard_cache_sas(
             out[:num_query_tokens] = out_active
         return out
     except (RuntimeError, ValueError) as err:
+        if raise_on_error:
+            raise
         logger.warning_once("DSpark standard-cache SAS attention failed; falling back to PTA: %s", err)
         return None
 

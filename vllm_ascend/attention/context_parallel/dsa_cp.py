@@ -988,6 +988,19 @@ class AscendDSACPImpl(DSAAttentionImpl):
     wo_b_full_pool: ClassVar[torch.Tensor | None] = None
     wo_b_full_weight_scale_pool: ClassVar[torch.Tensor | None] = None
 
+    @staticmethod
+    def update_graph_params(
+        update_stream,
+        forward_context,
+        num_tokens,
+        vllm_config=None,
+        speculative_config=None,
+        num_dcp_pcp_tokens=None,
+        draft_attn_metadatas=None,
+    ):
+        # DSA-CP replay does not register per-attention graph params.
+        pass
+
     def __init__(
         self,
         n_heads: int,

@@ -19,11 +19,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import PretrainedConfig
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import VllmConfig
+from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
+from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
@@ -64,6 +65,13 @@ _LAYER_ID_RE = re.compile(r"model\.layers\.(\d+)\.")
 _FP8_E4M3FN_SUBNORMAL_STEP = 2.0**-9
 _FP8_E4M3FN_MIN_NORMAL = 2.0**-6
 _FP8_E4M3FN_SUBNORMAL_NORMAL_MIDPOINT = (7 * _FP8_E4M3FN_SUBNORMAL_STEP + _FP8_E4M3FN_MIN_NORMAL) * 0.5
+
+
+def _maybe_get_forward_context():
+    try:
+        return get_forward_context()
+    except AssertionError:
+        return None
 
 
 def _draft_quant_config(vllm_config: VllmConfig):
@@ -457,6 +465,22 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         from vllm_ascend.device.device_op import DeviceOperator
 
         slot_mapping = slot_mapping.to(device=shared_kv.device, dtype=torch.int32)
+        forward_context = _maybe_get_forward_context()
+        num_actual_tokens = getattr(forward_context, "num_actual_tokens", None)
+        if num_actual_tokens is not None and num_actual_tokens < slot_mapping.shape[0]:
+            shared_kv = shared_kv[:num_actual_tokens]
+            slot_mapping = slot_mapping[:num_actual_tokens]
+        capture_mode = (
+            getattr(forward_context, "cudagraph_runtime_mode", CUDAGraphMode.NONE)
+            == CUDAGraphMode.FULL
+            or torch.compiler.is_compiling()
+        )
+        if capture_mode:
+            if slot_mapping.ndim == 1:
+                slot_mapping = DeviceOperator.format_dsa_slot_mapping(slot_mapping, swa_cache_layer.block_size)
+            DeviceOperator.dsa_kv_compress_scatter(swa_kv_cache, shared_kv, slot_mapping)
+            return
+
         valid = slot_mapping >= 0 if slot_mapping.ndim == 1 else torch.all(slot_mapping >= 0, dim=-1)
         if not bool(torch.any(valid).item()):
             return
@@ -535,23 +559,16 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
                 device=positions.device,
                 dtype=torch.long,
             )
-            for req_idx in range(block_table.shape[0]):
-                row_indices = torch.nonzero(token_to_req == req_idx, as_tuple=False).flatten()
-                row_indices = row_indices[row_indices < positions.numel()]
-                if row_indices.numel() == 0:
-                    continue
-                block_pos = pos_long.index_select(0, row_indices)
-                block_nums = block_pos // cache_block_size
-                block_offsets = block_pos % cache_block_size
-                block_ids = (
-                    block_table[req_idx]
-                    .to(device=positions.device, dtype=torch.long)
-                    .index_select(
-                        0,
-                        block_nums,
-                    )
-                )
-                out[row_indices] = (block_ids * cache_block_size + block_offsets).to(torch.int32)
+            valid_req = (token_to_req >= 0) & (token_to_req < block_table.shape[0])
+            req_indices = token_to_req.clamp(0, block_table.shape[0] - 1)
+            block_nums = pos_long // cache_block_size
+            block_offsets = pos_long % cache_block_size
+            block_nums = block_nums.clamp(0, block_table.shape[1] - 1)
+            flat_block_table = block_table.to(device=positions.device, dtype=torch.long).reshape(-1)
+            flat_indices = req_indices * block_table.shape[1] + block_nums
+            block_ids = flat_block_table.index_select(0, flat_indices)
+            out = (block_ids * cache_block_size + block_offsets).to(torch.int32)
+            valid &= valid_req
         else:
             for block_offset in range(0, positions.numel(), self.block_size):
                 block_end = min(block_offset + self.block_size, positions.numel())
@@ -582,16 +599,34 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
     ) -> torch.Tensor | None:
         if not _dspark_standard_dsa_enabled():
             return None
+        forward_context = _maybe_get_forward_context()
+        capture_mode = (
+            getattr(forward_context, "cudagraph_runtime_mode", CUDAGraphMode.NONE)
+            == CUDAGraphMode.FULL
+            or torch.compiler.is_compiling()
+        )
         if block_table is None:
-            logger.warning_once("DSpark standard SWA cache PTA path has no block_table; falling back to private cache")
+            if capture_mode:
+                raise RuntimeError("DSpark standard-cache attention requires block_table during graph capture")
+            if not capture_mode:
+                logger.warning_once("DSpark standard SWA cache PTA path has no block_table; falling back to private cache")
             return None
 
         swa_cache_layer = self.dsa_attn.swa_cache_layer
         swa_kv_cache = getattr(swa_cache_layer, "kv_cache", None)
         if swa_kv_cache is None:
-            logger.warning_once("DSpark standard SWA cache PTA path has no kv_cache; falling back to private cache")
+            if capture_mode:
+                raise RuntimeError("DSpark standard-cache attention requires SWA kv_cache during graph capture")
+            if not capture_mode:
+                logger.warning_once("DSpark standard SWA cache PTA path has no kv_cache; falling back to private cache")
             return None
 
+        dspark_swa_indices = dspark_swa_lens = sas_metadata = None
+        if capture_mode:
+            dspark_swa_indices, dspark_swa_lens, sas_metadata = DeepseekV4DSparkAttention._standard_dspark_swa_metadata(
+                self,
+                forward_context,
+            )
         if _dspark_standard_dsa_sas_enabled():
             sas_out = dspark_attention_from_standard_cache_sas(
                 q,
@@ -607,9 +642,16 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
                 query_start_loc=dspark_query_start_loc,
                 seq_lens=dspark_seq_lens,
                 token_to_req_indices=dspark_token_to_req_indices,
+                dspark_swa_indices=dspark_swa_indices,
+                dspark_swa_lens=dspark_swa_lens,
+                sas_metadata=sas_metadata,
+                skip_scheduling_guard=capture_mode and sas_metadata is not None,
+                raise_on_error=capture_mode,
             )
             if sas_out is not None:
                 return sas_out
+            if capture_mode:
+                raise RuntimeError("DSpark standard-cache SAS attention did not produce output during graph capture")
 
         return dspark_attention_from_standard_cache(
             q,
@@ -626,10 +668,48 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
             request_slots=request_slots,
             cache_positions=getattr(self, "_dspark_cache_positions", None),
             cache_valid=getattr(self, "_dspark_cache_valid", None),
+            dspark_swa_indices=dspark_swa_indices,
+            dspark_swa_lens=dspark_swa_lens,
             query_start_loc=dspark_query_start_loc,
             seq_lens=dspark_seq_lens,
             token_to_req_indices=dspark_token_to_req_indices,
         )
+
+    def _standard_dspark_swa_metadata(
+        self,
+        forward_context: typing.Any,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
+        draft_attn_metadatas = getattr(forward_context, "draft_attn_metadatas", None)
+        if not draft_attn_metadatas:
+            return None, None, None
+
+        swa_cache_layer = getattr(self.dsa_attn, "swa_cache_layer", None)
+        layer_names = (
+            getattr(swa_cache_layer, "prefix", None),
+            getattr(self.dsa_attn, "prefix", None),
+        )
+        for metadata_map in draft_attn_metadatas:
+            if not isinstance(metadata_map, dict):
+                continue
+            metadata = None
+            for layer_name in layer_names:
+                if layer_name is not None and layer_name in metadata_map:
+                    metadata = metadata_map[layer_name]
+                    break
+            if metadata is None:
+                continue
+            for sub_metadata in (
+                getattr(metadata, "decode", None),
+                getattr(metadata, "prefill", None),
+                metadata,
+            ):
+                if sub_metadata is None:
+                    continue
+                dspark_swa_indices = getattr(sub_metadata, "dspark_swa_indices", None)
+                dspark_swa_lens = getattr(sub_metadata, "dspark_swa_lens", None)
+                if dspark_swa_indices is not None and dspark_swa_lens is not None:
+                    return dspark_swa_indices, dspark_swa_lens, getattr(sub_metadata, "sas_metadata", None)
+        return None, None, None
 
     def _maybe_dump_standard_attention_diff(
         self,
@@ -842,8 +922,15 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
             return
         shared_kv = self._project_shared_kv(main_x, positions)
         k, v = self._expand_private_kv(shared_kv)
-        max_pos = int(positions.max().item())
-        self._ensure_dspark_cache(min(max_pos + 1, self._dspark_cache_capacity), k)
+        forward_context = _maybe_get_forward_context()
+        capture_mode = (
+            getattr(forward_context, "cudagraph_runtime_mode", CUDAGraphMode.NONE)
+            == CUDAGraphMode.FULL
+            or torch.compiler.is_compiling()
+        )
+        if not capture_mode:
+            max_pos = int(positions.max().item())
+            self._ensure_dspark_cache(min(max_pos + 1, self._dspark_cache_capacity), k)
         assert self._dspark_k_cache is not None
         assert self._dspark_v_cache is not None
         assert self._dspark_cache_valid is not None
@@ -856,7 +943,7 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
                 "DSpark request_slots length must match context positions: "
                 f"request_slots={slots_long.numel()}, positions={positions.numel()}"
             )
-        if int(slots_long.max().item()) >= self._dspark_max_request_slots:
+        if not capture_mode and int(slots_long.max().item()) >= self._dspark_max_request_slots:
             raise ValueError(
                 "DSpark request slot exceeds preallocated cache slots: "
                 f"slot={int(slots_long.max().item())}, capacity={self._dspark_max_request_slots}"

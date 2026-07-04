@@ -181,6 +181,7 @@ def set_ascend_forward_context(
         if num_tokens is not None:
             if num_actual_tokens is None:
                 num_actual_tokens = num_tokens
+            forward_context.num_actual_tokens = num_actual_tokens
             # NOTE: token num which need to pad to when mc2
             forward_context.padded_num_tokens = math.ceil(max_tokens_across_dp / tp_world_size) * tp_world_size
             reserved_mc2_mask = get_mc2_mask()

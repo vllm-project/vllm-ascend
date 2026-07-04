@@ -640,13 +640,18 @@ def test_dspark_attention_rebuilds_standard_query_slot_mapping_with_token_to_req
         dtype=torch.int32,
     )
 
-    rebuilt = DeepseekV4DSparkAttention._standard_query_slot_mapping_from_block_table(
-        attn,
-        positions,
-        slot_mapping,
-        block_table,
-        token_to_req_indices,
-    )
+    def fail_nonzero(*args, **kwargs):
+        raise AssertionError("torch.nonzero is not ACLGraph-capture safe")
+
+    with monkeypatch.context() as m:
+        m.setattr(torch, "nonzero", fail_nonzero)
+        rebuilt = DeepseekV4DSparkAttention._standard_query_slot_mapping_from_block_table(
+            attn,
+            positions,
+            slot_mapping,
+            block_table,
+            token_to_req_indices,
+        )
 
     torch.testing.assert_close(
         rebuilt,
@@ -762,6 +767,56 @@ def test_dspark_store_standard_swa_kv_uses_dsa_slot_mapping(monkeypatch):
     torch.testing.assert_close(calls[1][3], torch.tensor([[1, 1], [2, 2]], dtype=torch.int32))
 
 
+def test_dspark_store_standard_swa_kv_capture_slices_padding(monkeypatch):
+    from vllm_ascend.device import device_op as device_op_module
+
+    monkeypatch.delenv("VLLM_ASCEND_DSPARK_USE_PRIVATE_CACHE", raising=False)
+    monkeypatch.setattr(dspark_model_module.torch.compiler, "is_compiling", lambda: True)
+    monkeypatch.setattr(
+        dspark_model_module,
+        "_maybe_get_forward_context",
+        lambda: SimpleNamespace(
+            cudagraph_runtime_mode=dspark_model_module.CUDAGraphMode.NONE,
+            num_actual_tokens=2,
+        ),
+    )
+    monkeypatch.setattr(
+        dspark_model_module,
+        "_sync_npu_device_for_standard_pta",
+        lambda tensor: (_ for _ in ()).throw(AssertionError("capture path must not synchronize")),
+    )
+    calls = []
+
+    def fake_format(slot_mapping, block_size):
+        calls.append(("format", slot_mapping.clone(), block_size))
+        return torch.stack([slot_mapping // block_size, slot_mapping % block_size], dim=-1)
+
+    def fake_scatter(cache, shared_kv, slot_mapping):
+        calls.append(("scatter", cache, shared_kv.clone(), slot_mapping.clone()))
+
+    monkeypatch.setattr(device_op_module.DeviceOperator, "format_dsa_slot_mapping", staticmethod(fake_format))
+    monkeypatch.setattr(device_op_module.DeviceOperator, "dsa_kv_compress_scatter", staticmethod(fake_scatter))
+    cache = torch.zeros(4, 8, 1, 3)
+    attn = SimpleNamespace(
+        dsa_attn=SimpleNamespace(
+            swa_cache_layer=SimpleNamespace(
+                kv_cache=cache,
+                block_size=8,
+            )
+        )
+    )
+    shared_kv = torch.arange(12, dtype=torch.float32).view(4, 1, 3)
+    slot_mapping = torch.tensor([9, 18, -1, -1], dtype=torch.int32)
+
+    DeepseekV4DSparkAttention._store_standard_swa_kv(attn, shared_kv, slot_mapping)
+
+    assert calls[0][0] == "format"
+    torch.testing.assert_close(calls[0][1], torch.tensor([9, 18], dtype=torch.int32))
+    assert calls[1][0] == "scatter"
+    torch.testing.assert_close(calls[1][2], shared_kv[:2])
+    torch.testing.assert_close(calls[1][3], torch.tensor([[1, 1], [2, 2]], dtype=torch.int32))
+
+
 def test_dspark_standard_attention_can_fallback_to_pta(monkeypatch):
     monkeypatch.delenv("VLLM_ASCEND_DSPARK_USE_PRIVATE_CACHE", raising=False)
     monkeypatch.setenv("VLLM_ASCEND_DSPARK_USE_PTA_REF", "1")
@@ -811,6 +866,9 @@ def test_dspark_standard_attention_uses_sas_by_default(monkeypatch):
     monkeypatch.delenv("VLLM_ASCEND_DSPARK_USE_PTA_REF", raising=False)
 
     expected = torch.ones(2, 4, 8)
+    dspark_swa_indices = torch.full((2, 1, 8), -1, dtype=torch.int32)
+    dspark_swa_lens = torch.tensor([2, 2], dtype=torch.int32)
+    sas_metadata = torch.tensor([123], dtype=torch.int32)
     calls = []
 
     def fake_sas(*args, **kwargs):
@@ -822,12 +880,31 @@ def test_dspark_standard_attention_uses_sas_by_default(monkeypatch):
 
     monkeypatch.setattr(dspark_model_module, "dspark_attention_from_standard_cache_sas", fake_sas)
     monkeypatch.setattr(dspark_model_module, "dspark_attention_from_standard_cache", fake_pta)
+    monkeypatch.setattr(
+        dspark_model_module,
+        "_maybe_get_forward_context",
+        lambda: SimpleNamespace(
+            cudagraph_runtime_mode=dspark_model_module.CUDAGraphMode.FULL,
+            draft_attn_metadatas=[
+                {
+                    "layers.0.self_attn": SimpleNamespace(
+                        decode=SimpleNamespace(
+                            dspark_swa_indices=dspark_swa_indices,
+                            dspark_swa_lens=dspark_swa_lens,
+                            sas_metadata=sas_metadata,
+                        )
+                    )
+                }
+            ],
+        ),
+    )
 
     attn = object.__new__(DeepseekV4DSparkAttention)
     attn.dsa_attn = SimpleNamespace(
         swa_cache_layer=SimpleNamespace(
             kv_cache=torch.zeros(4, 16, 1, 8),
             block_size=16,
+            prefix="layers.0.self_attn",
         )
     )
     attn.attn_sink = torch.zeros(4)
@@ -848,3 +925,87 @@ def test_dspark_standard_attention_uses_sas_by_default(monkeypatch):
 
     assert out is expected
     assert calls[0][0] == "sas"
+    assert calls[0][2]["dspark_swa_indices"] is dspark_swa_indices
+    assert calls[0][2]["dspark_swa_lens"] is dspark_swa_lens
+    assert calls[0][2]["sas_metadata"] is sas_metadata
+    assert calls[0][2]["skip_scheduling_guard"] is True
+    assert calls[0][2]["raise_on_error"] is True
+
+
+def test_dspark_standard_attention_does_not_fallback_to_pta_during_capture(monkeypatch):
+    monkeypatch.delenv("VLLM_ASCEND_DSPARK_USE_PRIVATE_CACHE", raising=False)
+    monkeypatch.delenv("VLLM_ASCEND_DSPARK_USE_PTA_REF", raising=False)
+
+    def fake_sas(*args, **kwargs):
+        return None
+
+    def fake_pta(*args, **kwargs):
+        raise AssertionError("PTA fallback must not run during graph capture")
+
+    monkeypatch.setattr(dspark_model_module, "dspark_attention_from_standard_cache_sas", fake_sas)
+    monkeypatch.setattr(dspark_model_module, "dspark_attention_from_standard_cache", fake_pta)
+    monkeypatch.setattr(
+        dspark_model_module,
+        "_maybe_get_forward_context",
+        lambda: SimpleNamespace(cudagraph_runtime_mode=dspark_model_module.CUDAGraphMode.FULL),
+    )
+
+    attn = object.__new__(DeepseekV4DSparkAttention)
+    attn.dsa_attn = SimpleNamespace(
+        swa_cache_layer=SimpleNamespace(
+            kv_cache=torch.zeros(4, 16, 1, 8),
+            block_size=16,
+        )
+    )
+    attn.attn_sink = torch.zeros(4)
+    attn.n_local_heads = 4
+    attn.block_size = 2
+    attn.window_size = 6
+    attn.scale = 0.5
+
+    with pytest.raises(RuntimeError, match="did not produce output"):
+        DeepseekV4DSparkAttention._run_standard_dspark_attention(
+            attn,
+            q=torch.zeros(2, 4, 8),
+            positions=torch.tensor([6, 7], dtype=torch.int32),
+            slot_mapping=torch.tensor([6, 7], dtype=torch.int32),
+            block_table=torch.tensor([[0]], dtype=torch.int32),
+            dspark_query_start_loc=torch.tensor([0, 2], dtype=torch.int32),
+            dspark_seq_lens=torch.tensor([8], dtype=torch.int32),
+        )
+
+
+def test_dspark_standard_attention_requires_standard_cache_metadata_during_capture(monkeypatch):
+    monkeypatch.delenv("VLLM_ASCEND_DSPARK_USE_PRIVATE_CACHE", raising=False)
+    monkeypatch.setattr(
+        dspark_model_module,
+        "_maybe_get_forward_context",
+        lambda: SimpleNamespace(cudagraph_runtime_mode=dspark_model_module.CUDAGraphMode.FULL),
+    )
+
+    attn = object.__new__(DeepseekV4DSparkAttention)
+    attn.dsa_attn = SimpleNamespace(swa_cache_layer=SimpleNamespace(kv_cache=None, block_size=16))
+    attn.block_size = 2
+    attn.window_size = 6
+
+    with pytest.raises(RuntimeError, match="requires block_table"):
+        DeepseekV4DSparkAttention._run_standard_dspark_attention(
+            attn,
+            q=torch.zeros(2, 4, 8),
+            positions=torch.tensor([6, 7], dtype=torch.int32),
+            slot_mapping=torch.tensor([6, 7], dtype=torch.int32),
+            block_table=None,
+            dspark_query_start_loc=torch.tensor([0, 2], dtype=torch.int32),
+            dspark_seq_lens=torch.tensor([8], dtype=torch.int32),
+        )
+
+    with pytest.raises(RuntimeError, match="requires SWA kv_cache"):
+        DeepseekV4DSparkAttention._run_standard_dspark_attention(
+            attn,
+            q=torch.zeros(2, 4, 8),
+            positions=torch.tensor([6, 7], dtype=torch.int32),
+            slot_mapping=torch.tensor([6, 7], dtype=torch.int32),
+            block_table=torch.tensor([[0]], dtype=torch.int32),
+            dspark_query_start_loc=torch.tensor([0, 2], dtype=torch.int32),
+            dspark_seq_lens=torch.tensor([8], dtype=torch.int32),
+        )

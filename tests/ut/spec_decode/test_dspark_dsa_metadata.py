@@ -68,27 +68,9 @@ def test_dspark_dsa_window_does_not_encode_dspark_full_block():
 
 def test_dspark_dsa_decode_metadata_uses_noncausal_window(monkeypatch):
     captured = {}
-    ori_cu_seqlens = torch.tensor([0, 15], dtype=torch.int32)
-    cmp_cu_seqlens = torch.tensor([0], dtype=torch.int32)
-    fallback_ori_cu_seqlens = torch.tensor([-1], dtype=torch.int32)
-    fallback_cmp_cu_seqlens = torch.tensor([-2], dtype=torch.int32)
-
     def fake_metadata_op(**kwargs):
         captured.update(kwargs)
         return torch.tensor([123], dtype=torch.int32)
-
-    def fake_cu_seqlens_ori_kv(cache, cache_key, seq_lens, num_decodes, zero_i32, fallback):
-        assert cache is None
-        assert cache_key == "draft_cu_seqlens_ori_kv"
-        torch.testing.assert_close(seq_lens, torch.tensor([15], dtype=torch.int32))
-        assert num_decodes == 1
-        torch.testing.assert_close(zero_i32, torch.tensor([0], dtype=torch.int32))
-        assert fallback is fallback_ori_cu_seqlens
-        return ori_cu_seqlens
-
-    def fake_cu_seqlens_cmp_kv(fallback):
-        assert fallback is fallback_cmp_cu_seqlens
-        return cmp_cu_seqlens
 
     monkeypatch.setattr(dsa_v1, "get_tensor_model_parallel_world_size", lambda: 1)
     monkeypatch.setattr(
@@ -101,8 +83,6 @@ def test_dspark_dsa_decode_metadata_uses_noncausal_window(monkeypatch):
     )
     monkeypatch.setattr(dsa_v1.DeviceOperator, "get_dsa_sparse_attn_metadata_op", lambda: fake_metadata_op)
     monkeypatch.setattr(dsa_v1.DeviceOperator, "get_dsa_sparse_attn_metadata_kwargs", lambda _device: {})
-    monkeypatch.setattr(dsa_v1.DeviceOperator, "get_dsa_decode_cu_seqlens_ori_kv", fake_cu_seqlens_ori_kv)
-    monkeypatch.setattr(dsa_v1.DeviceOperator, "get_dsa_decode_cu_seqlens_cmp_kv", fake_cu_seqlens_cmp_kv)
 
     vllm_config = _fake_vllm_config()
     builder = SimpleNamespace(
@@ -110,8 +90,6 @@ def test_dspark_dsa_decode_metadata_uses_noncausal_window(monkeypatch):
         vllm_config=vllm_config,
         spec_slot_mapping=[torch.arange(5, dtype=torch.int32)],
         block_size=64,
-        cu_seqlens_ori_kv=fallback_ori_cu_seqlens,
-        cu_seqlens_cmp_kv=fallback_cmp_cu_seqlens,
         seqused_q=torch.empty(0, dtype=torch.int32),
         _zero_i32=torch.tensor([0], dtype=torch.int32),
     )
@@ -126,8 +104,10 @@ def test_dspark_dsa_decode_metadata_uses_noncausal_window(monkeypatch):
 
     assert captured["ori_win_left"] == 11
     assert captured["ori_win_right"] == 4
-    assert captured["cu_seqlens_ori_kv"] is ori_cu_seqlens
-    assert captured["cu_seqlens_cmp_kv"] is cmp_cu_seqlens
+    assert captured["cu_seqlens_ori_kv"] is None
+    assert captured["cu_seqlens_cmp_kv"] is None
+    assert captured["seqused_q"] is None
+    torch.testing.assert_close(captured["seqused_kv"], torch.tensor([15], dtype=torch.int32))
     assert metadata.ori_win_left == 11
     assert metadata.ori_win_right == 4
     assert metadata.dspark_swa_indices.shape == (5, 1, 128)

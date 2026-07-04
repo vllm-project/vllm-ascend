@@ -4,12 +4,14 @@
 import os
 from collections import defaultdict
 from copy import copy
+from dataclasses import replace
 from typing import Any
 
 import torch
-from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
+from vllm.config import CUDAGraphMode, CompilationMode, VllmConfig, get_layers_from_vllm_config
 from vllm.forward_context import BatchDescriptor, get_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.logger import logger
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
@@ -20,6 +22,8 @@ from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.compilation.acl_graph import ACLGraphWrapper
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
 from vllm_ascend.spec_decode.llm_base_proposer import greedy_sample
 from vllm_ascend.worker.v2.sample.gumbel import gumbel_sample
@@ -123,21 +127,22 @@ class AscendDSparkProposer(AscendDflashProposer):
             "ptd_token_id",
             getattr(draft_hf_config, "dspark_noise_token_id", 0),
         )
-        self.use_cuda_graph = False
+        self._runnable = self._run_dspark_model
         self.max_query_tokens = self.max_batch_size * self.num_speculative_tokens
+        self._dspark_query_buffer_size = max(self.max_query_tokens, self.max_num_tokens)
         self.max_positions = self.max_num_tokens + self.max_query_tokens
         self.positions = torch.zeros(
-            self.max_query_tokens,
+            self._dspark_query_buffer_size,
             dtype=torch.int32,
             device=device,
         )
         self._slot_mapping_buffer = torch.zeros(
-            self.max_query_tokens,
+            self._dspark_query_buffer_size,
             dtype=torch.int32,
             device=device,
         )
         self._request_slots_buffer = torch.zeros(
-            self.max_query_tokens,
+            self._dspark_query_buffer_size,
             dtype=torch.int32,
             device=device,
         )
@@ -162,12 +167,13 @@ class AscendDSparkProposer(AscendDflashProposer):
             device=device,
         )
         self._dspark_token_to_req_indices_buffer = torch.zeros(
-            self.max_query_tokens,
+            self._dspark_query_buffer_size,
             dtype=torch.int32,
             device=device,
         )
         self._dspark_token_to_req_indices: torch.Tensor | None = None
         self._dspark_query_start_loc: torch.Tensor | None = None
+        self._dspark_query_start_loc_cpu: torch.Tensor | None = None
         self._dspark_seq_lens: torch.Tensor | None = None
         self._dspark_draft_buffer = torch.zeros(
             (self.max_batch_size, self.num_speculative_tokens),
@@ -185,6 +191,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         self._dspark_block_table: torch.Tensor | None = None
         self._dspark_block_tables_by_gid: dict[int, torch.Tensor] = {}
         self._dspark_block_tables_by_layer: dict[str, torch.Tensor] = {}
+        self._dspark_block_table_buffers_by_gid: dict[int, torch.Tensor] = {}
         self._dspark_per_group_block_tables: dict[int, torch.Tensor] = {}
         self._dspark_per_group_slot_mappings: dict[int, torch.Tensor] = {}
         self._dspark_query_slot_mapping_buffers: dict[int, torch.Tensor] = {}
@@ -193,10 +200,69 @@ class AscendDSparkProposer(AscendDflashProposer):
         self._dspark_context_slot_mappings_by_gid: dict[int, torch.Tensor] = {}
         self._dspark_query_slot_mappings_by_layer: dict[str, torch.Tensor] = {}
         self._dspark_context_slot_mappings_by_layer: dict[str, torch.Tensor] = {}
+        self._dspark_standard_dsa_graph_buffers: dict[tuple[str, tuple[int, ...], torch.dtype, str], torch.Tensor] = {}
         self.arange_dspark = torch.arange(
             self.max_positions + 1,
             device=device,
             dtype=torch.int32,
+        )
+        self._dspark_query_start_loc_buffer = torch.zeros(
+            self._dspark_max_request_slots + 1,
+            dtype=torch.int32,
+            device=device,
+        )
+        self._dspark_query_start_loc_cpu_buffer = torch.zeros(
+            self._dspark_max_request_slots + 1,
+            dtype=torch.int32,
+        )
+        self._dspark_seq_lens_buffer = torch.zeros(
+            self._dspark_max_request_slots,
+            dtype=torch.int32,
+            device=device,
+        )
+        self._dspark_seq_lens_cpu_buffer = torch.zeros(
+            self._dspark_max_request_slots,
+            dtype=torch.int32,
+        )
+
+    def load_model(self, model: torch.nn.Module) -> None:
+        use_cuda_graph = self.use_cuda_graph
+        if use_cuda_graph:
+            # The base loader only knows how to wrap the generic merged-draft
+            # runnable. DSpark has a different draft shape, so install its
+            # wrapper below after shared model-loading logic has completed.
+            self.use_cuda_graph = False
+        try:
+            super().load_model(model)
+        finally:
+            self.use_cuda_graph = use_cuda_graph
+
+        self._runnable = self._run_dspark_model
+        if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs() and self.use_cuda_graph:
+            logger.info(
+                "[spec_decode/dspark] Wrapping DSpark draft model forward with ACLGraphWrapper:"
+                " runtime_mode=FULL, enable_enpu=%s",
+                self.enable_enpu,
+            )
+            self.update_stream = torch.npu.Stream()
+            self._runnable = ACLGraphWrapper(
+                self._run_dspark_model,
+                self.vllm_config,
+                runtime_mode=CUDAGraphMode.FULL,
+                use_eagle=self.use_eagle,
+                enable_enpu=self.enable_enpu,
+            )
+
+    def _create_draft_vllm_config(self) -> VllmConfig:
+        draft_vllm_config = super()._create_draft_vllm_config()
+        draft_model_config = copy(draft_vllm_config.model_config)
+        draft_model_config.enforce_eager = True
+        draft_compilation_config = copy(draft_vllm_config.compilation_config)
+        draft_compilation_config.mode = CompilationMode.NONE
+        return replace(
+            draft_vllm_config,
+            model_config=draft_model_config,
+            compilation_config=draft_compilation_config,
         )
 
     def take_last_draft_logits(self) -> torch.Tensor | None:
@@ -422,7 +488,15 @@ class AscendDSparkProposer(AscendDflashProposer):
         buffers = self._dspark_context_slot_mapping_buffers if context else self._dspark_query_slot_mapping_buffers
         buf = buffers.get(gid)
         if buf is None:
-            size = self.max_num_tokens if context else self.max_query_tokens
+            size = (
+                self.max_num_tokens
+                if context
+                else getattr(
+                    self,
+                    "_dspark_query_buffer_size",
+                    max(self.max_query_tokens, self.max_num_tokens),
+                )
+            )
             buf = torch.zeros(size, dtype=torch.int32, device=self.device)
             buffers[gid] = buf
         return buf
@@ -441,12 +515,228 @@ class AscendDSparkProposer(AscendDflashProposer):
     def _slice_tensor_map(tensors: dict[str, torch.Tensor], num_tokens: int) -> dict[str, torch.Tensor]:
         return {name: tensor[:num_tokens] for name, tensor in tensors.items()}
 
+    def _stable_standard_dsa_graph_tensor(self, key: str, tensor: torch.Tensor) -> torch.Tensor:
+        buffers = getattr(self, "_dspark_standard_dsa_graph_buffers", None)
+        if buffers is None:
+            buffers = {}
+            self._dspark_standard_dsa_graph_buffers = buffers
+        buffer_key = (
+            key,
+            tuple(int(dim) for dim in tensor.shape),
+            tensor.dtype,
+            str(tensor.device),
+        )
+        buffer = buffers.get(buffer_key)
+        if buffer is None:
+            buffer = torch.empty_like(tensor)
+            buffers[buffer_key] = buffer
+        buffer.copy_(tensor)
+        return buffer
+
+    def _stabilize_standard_dsa_graph_metadata(
+        self,
+        per_layer_attn_metadata: dict[str, Any],
+    ) -> None:
+        seen: set[int] = set()
+
+        def stabilize_obj(obj: Any, key_prefix: str) -> None:
+            if obj is None:
+                return
+            obj_id = id(obj)
+            if obj_id in seen:
+                return
+            seen.add(obj_id)
+
+            graph_tensor_attrs = (
+                "block_table",
+                "cos",
+                "cp_seq_len",
+                "cu_c128_cmp_seqlen_list",
+                "cu_c4_cmp_seqlen_list",
+                "dspark_swa_indices",
+                "dspark_swa_lens",
+                "full_compress_cos",
+                "full_compress_sin",
+                "input_positions",
+                "local_cos",
+                "local_query_start_loc",
+                "local_seq_lens",
+                "local_sin",
+                "qli_metadata",
+                "query_start_loc",
+                "query_start_loc_cpu",
+                "sas_metadata",
+                "seq_lens",
+                "sin",
+                "slot_mapping",
+                "start_pos",
+            )
+            for attr in graph_tensor_attrs:
+                value = getattr(obj, attr, None)
+                if isinstance(value, torch.Tensor):
+                    setattr(
+                        obj,
+                        attr,
+                        AscendDSparkProposer._stable_standard_dsa_graph_tensor(
+                            self,
+                            f"{key_prefix}.{attr}",
+                            value,
+                        ),
+                    )
+
+            for nested_attr in ("cp_metadata", "decode", "prefill", "req_metadata"):
+                stabilize_obj(getattr(obj, nested_attr, None), f"{key_prefix}.{nested_attr}")
+
+        for layer_name, attn_metadata in per_layer_attn_metadata.items():
+            stabilize_obj(attn_metadata, layer_name)
+
     @staticmethod
     def _get_block_table_device_tensor(block_table, batch_size: int) -> torch.Tensor:
         try:
             return block_table.get_device_tensor(batch_size)
         except TypeError:
             return block_table.get_device_tensor()
+
+    def _ensure_dspark_query_metadata_capacity(self, num_reqs: int) -> None:
+        required_reqs = max(int(num_reqs), 1)
+        required_locs = required_reqs + 1
+        device = getattr(self, "device", None)
+        if device is None:
+            device = self.positions.device
+        query_start_loc = getattr(self, "_dspark_query_start_loc_buffer", None)
+        if not isinstance(query_start_loc, torch.Tensor) or query_start_loc.numel() < required_locs:
+            self._dspark_query_start_loc_buffer = torch.zeros(
+                required_locs,
+                dtype=torch.int32,
+                device=device,
+            )
+        query_start_loc_cpu = getattr(self, "_dspark_query_start_loc_cpu_buffer", None)
+        if not isinstance(query_start_loc_cpu, torch.Tensor) or query_start_loc_cpu.numel() < required_locs:
+            self._dspark_query_start_loc_cpu_buffer = torch.zeros(
+                required_locs,
+                dtype=torch.int32,
+            )
+        seq_lens = getattr(self, "_dspark_seq_lens_buffer", None)
+        if not isinstance(seq_lens, torch.Tensor) or seq_lens.numel() < required_reqs:
+            self._dspark_seq_lens_buffer = torch.zeros(
+                required_reqs,
+                dtype=torch.int32,
+                device=device,
+            )
+        seq_lens_cpu = getattr(self, "_dspark_seq_lens_cpu_buffer", None)
+        if not isinstance(seq_lens_cpu, torch.Tensor) or seq_lens_cpu.numel() < required_reqs:
+            self._dspark_seq_lens_cpu_buffer = torch.zeros(
+                required_reqs,
+                dtype=torch.int32,
+            )
+
+    def _copy_dspark_query_metadata(
+        self,
+        query_start_loc: torch.Tensor,
+        query_start_loc_cpu: torch.Tensor | None,
+        seq_lens: torch.Tensor,
+        num_reqs: int,
+        actual_num_reqs: int | None = None,
+    ) -> None:
+        AscendDSparkProposer._ensure_dspark_query_metadata_capacity(self, num_reqs)
+        actual_num_reqs = num_reqs if actual_num_reqs is None else min(actual_num_reqs, num_reqs)
+        loc_count = min(actual_num_reqs + 1, query_start_loc.numel(), num_reqs + 1)
+
+        loc_buffer = self._dspark_query_start_loc_buffer
+        loc_cpu_buffer = self._dspark_query_start_loc_cpu_buffer
+        seq_buffer = self._dspark_seq_lens_buffer
+        seq_cpu_buffer = self._dspark_seq_lens_cpu_buffer
+
+        if loc_count > 0:
+            loc_buffer[:loc_count].copy_(query_start_loc[:loc_count].to(device=loc_buffer.device, dtype=torch.int32))
+            if query_start_loc_cpu is None:
+                loc_cpu_buffer[:loc_count].copy_(query_start_loc[:loc_count].to(device="cpu", dtype=torch.int32))
+            else:
+                loc_cpu_buffer[:loc_count].copy_(query_start_loc_cpu[:loc_count].to(dtype=torch.int32))
+            terminal_device = loc_buffer[loc_count - 1]
+            terminal_cpu = loc_cpu_buffer[loc_count - 1]
+        else:
+            terminal_device = loc_buffer.new_tensor(0)
+            terminal_cpu = loc_cpu_buffer.new_tensor(0)
+        if loc_count < num_reqs + 1:
+            tail_len = num_reqs + 1 - loc_count
+            loc_buffer[loc_count : num_reqs + 1].copy_(terminal_device.expand(tail_len))
+            loc_cpu_buffer[loc_count : num_reqs + 1].copy_(terminal_cpu.expand(tail_len))
+
+        seq_count = min(actual_num_reqs, seq_lens.numel(), num_reqs)
+        if seq_count > 0:
+            seq_lens_device = seq_lens[:seq_count].to(device=seq_buffer.device, dtype=torch.int32).clone()
+            seq_lens_cpu = seq_lens[:seq_count].to(device="cpu", dtype=torch.int32).clone()
+        seq_buffer[:num_reqs].fill_(0)
+        seq_cpu_buffer[:num_reqs].fill_(0)
+        if seq_count > 0:
+            seq_buffer[:seq_count].copy_(seq_lens_device)
+            seq_cpu_buffer[:seq_count].copy_(seq_lens_cpu)
+
+        self._dspark_query_start_loc = loc_buffer[: num_reqs + 1]
+        self._dspark_query_start_loc_cpu = loc_cpu_buffer[: num_reqs + 1]
+        self._dspark_seq_lens = seq_buffer[:num_reqs]
+        self._dspark_seq_lens_cpu = seq_cpu_buffer[:num_reqs]
+
+    def _max_block_table_columns_for_gid(self, gid: int, min_columns: int = 1) -> int:
+        max_model_len = int(
+            getattr(
+                self,
+                "max_model_len",
+                getattr(getattr(getattr(self, "vllm_config", None), "model_config", None), "max_model_len", 0),
+            )
+            or 0
+        )
+        if max_model_len <= 0:
+            return max(int(min_columns), 1)
+
+        block_size = int(getattr(self, "kernel_block_size", 1) or 1)
+        for attn_group in getattr(self, "draft_attn_groups", []):
+            if attn_group.kv_cache_group_id == gid:
+                block_size = int(attn_group.kv_cache_spec.block_size)
+                break
+        block_size = max(block_size, 1)
+        return max(int(min_columns), (max_model_len + block_size - 1) // block_size, 1)
+
+    def _copy_dspark_block_table_for_gid(
+        self,
+        gid: int,
+        block_table: torch.Tensor,
+        num_reqs: int,
+    ) -> torch.Tensor:
+        source = block_table[: min(block_table.shape[0], num_reqs)]
+        buffers = getattr(self, "_dspark_block_table_buffers_by_gid", None)
+        if buffers is None:
+            buffers = {}
+            self._dspark_block_table_buffers_by_gid = buffers
+        row_capacity = max(
+            int(num_reqs),
+            int(getattr(self, "_dspark_max_request_slots", 1) or 1),
+        )
+        tail_shape = list(source.shape[1:])
+        if tail_shape:
+            tail_shape[0] = AscendDSparkProposer._max_block_table_columns_for_gid(
+                self,
+                gid,
+                tail_shape[0],
+            )
+        required_shape = (row_capacity, *tail_shape)
+        buffer = buffers.get(gid)
+        if (
+            not isinstance(buffer, torch.Tensor)
+            or buffer.device != source.device
+            or buffer.dtype != source.dtype
+            or buffer.dim() != source.dim()
+            or any(buffer.shape[idx] < required_shape[idx] for idx in range(len(required_shape)))
+        ):
+            buffer = torch.zeros(required_shape, dtype=source.dtype, device=source.device)
+            buffers[gid] = buffer
+        view = buffer[:num_reqs]
+        view.zero_()
+        if source.numel() > 0:
+            copy_slices = (slice(0, source.shape[0]),) + tuple(slice(0, dim) for dim in source.shape[1:])
+            view[copy_slices].copy_(source)
+        return view
 
     def _build_standard_dsa_attn_metadata(
         self,
@@ -489,6 +779,7 @@ class AscendDSparkProposer(AscendDflashProposer):
             )
             for layer_name in attn_group.layer_names:
                 per_layer_attn_metadata[layer_name] = attn_metadata
+        AscendDSparkProposer._stabilize_standard_dsa_graph_metadata(self, per_layer_attn_metadata)
         return [per_layer_attn_metadata]
 
     def _pad_draft_query_buffers(
@@ -535,12 +826,9 @@ class AscendDSparkProposer(AscendDflashProposer):
             block_table = getattr(cad, "block_table_tensor", None)
         if block_table is None:
             return None
-        block_table = block_table[:batch_size]
         if _dspark_standard_dsa_enabled():
-            # Ascend block-table tensors are reused by the runner; DSpark consumes
-            # them after query slot mappings have been built.
-            block_table = block_table.clone()
-        return block_table
+            return AscendDSparkProposer._copy_dspark_block_table_for_gid(self, gid, block_table, batch_size)
+        return block_table[:batch_size]
 
     def _get_draft_block_table(
         self,
@@ -690,6 +978,22 @@ class AscendDSparkProposer(AscendDflashProposer):
             device=self.device,
         )
 
+        effective_seq_lens = cad.seq_lens
+        if has_num_rejected:
+            effective_seq_lens = effective_seq_lens - num_rejected_tokens_gpu
+
+        max_model_len = int(
+            getattr(
+                self,
+                "max_model_len",
+                getattr(getattr(getattr(self, "vllm_config", None), "model_config", None), "max_model_len", 0),
+            )
+            or 0
+        )
+        next_seq_lens = effective_seq_lens + block_size
+        if max_model_len > 0:
+            next_seq_lens = next_seq_lens.clamp(max=max_model_len)
+
         for req_idx in range(batch_size):
             request_slot = request_slots[req_idx]
             ctx_start = int(cad.query_start_loc[req_idx].item())
@@ -701,7 +1005,21 @@ class AscendDSparkProposer(AscendDflashProposer):
             last_pos = target_positions[valid_ctx_end - 1]
             out_start = req_idx * block_size
             out_end = out_start + block_size
-            self.positions[out_start:out_end] = last_pos + 1 + self.arange_dspark[:block_size]
+            draft_positions = last_pos + 1 + self.arange_dspark[:block_size]
+            if max_model_len > 0:
+                exceeds_max_model_len = draft_positions >= max_model_len
+                draft_positions = torch.where(
+                    exceeds_max_model_len,
+                    torch.zeros_like(draft_positions),
+                    draft_positions,
+                )
+            else:
+                exceeds_max_model_len = torch.zeros(
+                    block_size,
+                    dtype=torch.bool,
+                    device=draft_positions.device,
+                )
+            self.positions[out_start:out_end] = draft_positions
             self.input_ids[out_start] = next_token_ids[req_idx]
             if block_size > 1:
                 self.input_ids[out_start + 1 : out_end] = self.parallel_drafting_token_id
@@ -715,29 +1033,29 @@ class AscendDSparkProposer(AscendDflashProposer):
                     gid_block_table = block_tables_by_gid.get(gid)
                     if gid_block_table is None:
                         continue
-                    self._slot_mapping_buffer_for_gid(gid, context=False)[out_start:out_end] = (
-                        self._slot_mapping_from_block_table(
-                            self.positions[out_start:out_end],
-                            req_idx,
-                            gid_block_table,
-                            int(attn_group.kv_cache_spec.block_size),
-                        )
+                    slot_mapping = self._slot_mapping_from_block_table(
+                        draft_positions,
+                        req_idx,
+                        gid_block_table,
+                        int(attn_group.kv_cache_spec.block_size),
                     )
+                    slot_mapping.masked_fill_(exceeds_max_model_len, -1)
+                    self._slot_mapping_buffer_for_gid(gid, context=False)[out_start:out_end] = slot_mapping
             elif block_table is not None:
-                self._slot_mapping_buffer[out_start:out_end] = self._slot_mapping_from_block_table(
-                    self.positions[out_start:out_end],
+                slot_mapping = self._slot_mapping_from_block_table(
+                    draft_positions,
                     req_idx,
                     block_table,
                 )
+                slot_mapping.masked_fill_(exceeds_max_model_len, -1)
+                self._slot_mapping_buffer[out_start:out_end] = slot_mapping
             else:
-                self._slot_mapping_buffer[out_start:out_end] = self.positions[out_start:out_end]
-
-        effective_seq_lens = cad.seq_lens
-        if has_num_rejected:
-            effective_seq_lens = effective_seq_lens - num_rejected_tokens_gpu
+                slot_mapping = draft_positions.to(dtype=torch.int32)
+                slot_mapping.masked_fill_(exceeds_max_model_len, -1)
+                self._slot_mapping_buffer[out_start:out_end] = slot_mapping
 
         cad.query_start_loc = self.arange_dspark[: batch_size + 1] * block_size
-        cad.seq_lens = effective_seq_lens + block_size
+        cad.seq_lens = next_seq_lens
         cad.query_start_loc_cpu = (torch.from_numpy(self.token_arange_np[: batch_size + 1]).clone() * block_size).to(
             torch.int32
         )
@@ -751,6 +1069,8 @@ class AscendDSparkProposer(AscendDflashProposer):
         cad.num_input_tokens = num_query_total
         cad.max_query_len = block_size
         cad.max_seq_len = cad.max_seq_len + block_size
+        if max_model_len > 0:
+            cad.max_seq_len = min(cad.max_seq_len, max_model_len)
         cad.slot_mapping = self._slot_mapping_buffer[:num_query_total]
         if _dspark_standard_dsa_enabled() and block_tables_by_gid:
             self._dspark_query_slot_mappings_by_gid = {
@@ -765,8 +1085,17 @@ class AscendDSparkProposer(AscendDflashProposer):
         cad.causal = False
         cad.attn_mask = None
         cad.attn_state = AscendAttentionState.ChunkedPrefill
-        self._dspark_query_start_loc = cad.query_start_loc_cpu[: batch_size + 1]
-        self._dspark_seq_lens = cad.seq_lens[:batch_size]
+        AscendDSparkProposer._copy_dspark_query_metadata(
+            self,
+            cad.query_start_loc,
+            cad.query_start_loc_cpu,
+            cad.seq_lens,
+            batch_size,
+        )
+        cad.query_start_loc = self._dspark_query_start_loc
+        cad.query_start_loc_cpu = self._dspark_query_start_loc_cpu
+        cad.seq_lens = self._dspark_seq_lens
+        cad._seq_lens_cpu = self._dspark_seq_lens_cpu
         self._dspark_token_to_req_indices = token_to_req_indices[:num_query_total]
 
         return num_query_total, token_indices_to_sample, cad, None
@@ -798,41 +1127,118 @@ class AscendDSparkProposer(AscendDflashProposer):
         if not self.use_cuda_graph:
             aclgraph_runtime_mode = CUDAGraphMode.NONE
         num_query_total = min(num_reqs * block_size, num_query_tokens)
-        model_num_query_tokens = num_query_total
+        sample_token_count = num_reqs * block_size
+        device = getattr(self, "device", self.input_ids.device)
+        arange_dspark = getattr(
+            self,
+            "arange_dspark",
+            torch.arange(max(num_reqs + 1, num_input_tokens + 1), dtype=torch.int32, device=device),
+        )
+        query_start_loc = arange_dspark[: num_reqs + 1] * block_size
+        token_arange_np = getattr(self, "token_arange_np", None)
+        if token_arange_np is None:
+            query_start_loc_cpu = torch.arange(num_reqs + 1, dtype=torch.int32) * block_size
+        else:
+            query_start_loc_cpu = torch.from_numpy(token_arange_np[: num_reqs + 1]).to(torch.int32) * block_size
+        seq_lens = getattr(self.runner, "seq_lens", None)
+        if isinstance(seq_lens, torch.Tensor):
+            seq_lens = seq_lens[:num_reqs]
+        else:
+            seq_lens = torch.full((num_reqs,), block_size, dtype=torch.int32, device=device)
+        AscendDSparkProposer._copy_dspark_query_metadata(
+            self,
+            query_start_loc,
+            query_start_loc_cpu,
+            seq_lens,
+            num_reqs,
+        )
+        token_to_req_indices = getattr(self, "_dspark_token_to_req_indices_buffer", None)
+        if isinstance(token_to_req_indices, torch.Tensor):
+            token_to_req_indices[:num_input_tokens].fill_(-1)
+            if sample_token_count:
+                repeated_req_indices = torch.arange(num_reqs, dtype=torch.int32, device=device).repeat_interleave(
+                    block_size
+                )
+                copy_len = min(num_input_tokens, repeated_req_indices.numel())
+                token_to_req_indices[:copy_len].copy_(repeated_req_indices[:copy_len])
+            self._dspark_token_to_req_indices = token_to_req_indices[:num_input_tokens]
+        multi_steps_attn_metadata = []
         if _dspark_standard_dsa_enabled():
             self._pad_draft_query_buffers(num_query_total, num_input_tokens)
-            model_num_query_tokens = num_input_tokens
+        if (
+            _dspark_standard_dsa_enabled()
+            and aclgraph_runtime_mode == CUDAGraphMode.FULL
+            and getattr(self, "draft_attn_groups", [])
+        ):
+            block_table_tensor = None
+            input_batch = getattr(getattr(self, "runner", None), "input_batch", None)
+            block_tables = getattr(input_batch, "block_table", None)
+            if block_tables is not None:
+                try:
+                    block_table_tensor = AscendDSparkProposer._get_block_table_device_tensor(
+                        block_tables[getattr(self, "kv_cache_gid", 0)],
+                        num_reqs,
+                    )
+                except (IndexError, KeyError, TypeError):
+                    block_table_tensor = None
+            if block_table_tensor is None:
+                block_table_cols = AscendDSparkProposer._max_block_table_columns_for_gid(
+                    self,
+                    getattr(self, "kv_cache_gid", 0),
+                )
+                block_table_tensor = torch.zeros((max(num_reqs, 1), block_table_cols), dtype=torch.int32, device=device)
+            common_attn_metadata = AscendCommonAttentionMetadata(
+                query_start_loc=self._dspark_query_start_loc,
+                query_start_loc_cpu=self._dspark_query_start_loc_cpu,
+                seq_lens=self._dspark_seq_lens,
+                _seq_lens_cpu=self._dspark_seq_lens_cpu,
+                seq_lens_cpu=None,
+                num_computed_tokens_cpu=None,
+                num_reqs=num_reqs,
+                num_actual_tokens=num_query_total,
+                num_input_tokens=num_input_tokens,
+                max_query_len=block_size,
+                actual_seq_lengths_q=[block_size] * num_reqs,
+                block_table_tensor=block_table_tensor[:num_reqs],
+                slot_mapping=self._slot_mapping_buffer[:num_input_tokens],
+                positions=self.positions[:num_input_tokens],
+                attn_state=AscendAttentionState.ChunkedPrefill,
+                decode_token_per_req=block_size,
+                max_seq_len=block_size,
+            )
+            self._dspark_block_tables_by_gid, self._dspark_block_tables_by_layer = self._get_draft_block_tables(
+                common_attn_metadata,
+                num_reqs,
+            )
+            multi_steps_attn_metadata = self._build_standard_dsa_attn_metadata(
+                common_attn_metadata,
+                num_input_tokens,
+                num_query_total,
+            )
 
         with set_ascend_forward_context(
-            None,
+            multi_steps_attn_metadata[0] if multi_steps_attn_metadata else None,
             self.vllm_config,
             num_tokens=num_input_tokens,
             num_tokens_across_dp=num_tokens_across_dp,
-            num_actual_tokens=num_input_tokens,
+            num_actual_tokens=num_query_total,
             in_profile_run=is_profile,
             batch_descriptor=batch_descriptor,
             aclgraph_runtime_mode=aclgraph_runtime_mode,
             is_draft_model=True,
-            draft_attn_metadatas=[],
+            draft_attn_metadatas=multi_steps_attn_metadata,
         ):
             self._dflash_num_context = num_input_tokens
-            self.model.precompute_and_store_context_kv(
-                self.hidden_states[:num_input_tokens],
-                self._context_positions_buffer[:num_input_tokens],
-                None,
-                self._context_request_slots_buffer[:num_input_tokens],
-            )
-            if model_num_query_tokens:
-                self.model(
-                    input_ids=self.input_ids[:model_num_query_tokens],
-                    positions=self.positions[:model_num_query_tokens],
-                    inputs_embeds=None,
-                    request_slots=self._request_slots_buffer[:model_num_query_tokens],
-                    slot_mapping=self._slot_mapping_buffer[:model_num_query_tokens],
-                    block_table=(
-                        getattr(self, "_dspark_block_tables_by_layer", None)
-                        or getattr(self, "_dspark_block_table", None)
-                    ),
+            if not hasattr(self, "_dflash_hidden_states"):
+                self._dflash_hidden_states = self.hidden_states
+            else:
+                self._dflash_hidden_states[:num_input_tokens].copy_(self.hidden_states[:num_input_tokens])
+            if sample_token_count:
+                run_model = getattr(self, "_runnable", None)
+                if run_model is None:
+                    run_model = AscendDSparkProposer._run_dspark_model.__get__(self)
+                run_model(
+                    num_input_tokens=num_input_tokens,
                 )
             forward_context = get_forward_context()
             if (
@@ -840,22 +1246,29 @@ class AscendDSparkProposer(AscendDflashProposer):
                 and not _EXTRA_CTX.capturing
                 and self.draft_attn_groups
             ):
-                self._update_full_graph_params(forward_context, num_tokens, [])
+                self._update_full_graph_params(forward_context, num_input_tokens, multi_steps_attn_metadata)
 
-    def build_model_inputs_first_pass(self, num_input_tokens: int) -> dict[str, Any]:
+    def _precompute_context_kv_first_pass(self) -> None:
         num_context = self._dflash_num_context
-        if self._dspark_slots_to_reset:
-            reset_slots = torch.tensor(self._dspark_slots_to_reset, dtype=torch.int32, device=self.device)
+        slots_to_reset = getattr(self, "_dspark_slots_to_reset", [])
+        if slots_to_reset:
+            reset_slots = torch.tensor(slots_to_reset, dtype=torch.int32, device=self.device)
             self.model.reset_request_slots(reset_slots)
+        context_slot_mapping = (
+            getattr(self, "_dspark_context_slot_mappings_by_layer", {})
+            if _dspark_standard_dsa_enabled() and getattr(self, "_dspark_context_slot_mappings_by_layer", {})
+            else getattr(self, "_context_slot_mapping_buffer", self._slot_mapping_buffer)[:num_context]
+        )
         self.model.precompute_and_store_context_kv(
             self._dflash_hidden_states[:num_context],
             self._context_positions_buffer[:num_context],
-            getattr(self, "_dspark_context_slot_mappings_by_layer", {})
-            if _dspark_standard_dsa_enabled() and getattr(self, "_dspark_context_slot_mappings_by_layer", {})
-            else self._context_slot_mapping_buffer[:num_context],
+            context_slot_mapping,
             self._context_request_slots_buffer[:num_context],
         )
-        return dict(
+
+    def build_model_inputs_first_pass(self, num_input_tokens: int) -> dict[str, Any]:
+        AscendDSparkProposer._precompute_context_kv_first_pass(self)
+        model_inputs = dict(
             input_ids=self.input_ids[:num_input_tokens],
             positions=self.positions[:num_input_tokens],
             inputs_embeds=None,
@@ -875,6 +1288,13 @@ class AscendDSparkProposer(AscendDflashProposer):
             if isinstance(getattr(self, "_dspark_token_to_req_indices_buffer", None), torch.Tensor)
             else None,
         )
+        return model_inputs
+
+    def _run_dspark_model(
+        self,
+        num_input_tokens: int,
+    ) -> torch.Tensor:
+        return self.model(**AscendDSparkProposer.build_model_inputs_first_pass(self, num_input_tokens))
 
     def _sample_sequential(
         self,
@@ -1045,23 +1465,125 @@ class AscendDSparkProposer(AscendDflashProposer):
             num_decode_reqs=num_decode_reqs,
         )
         assert self.runner is not None
+        actual_num_reqs = common_attn_metadata.num_reqs
+
+        input_batch = getattr(self.runner, "input_batch", None)
+        lora_requests = getattr(input_batch, "lora_id_to_lora_request", {})
+        num_active_loras = len(lora_requests)
+        has_lora = num_active_loras > 0
+        # DSpark always drafts one fixed-size block per request. The target
+        # batch can be mixed/non-uniform, but the draft graph keys are the
+        # speculative uniform-decode keys padded to the runner's decode length.
+        uniform_decode = True
+        use_cuda_graph = getattr(self, "use_cuda_graph", False)
+        if use_cuda_graph:
+            aclgraph_runtime_mode, batch_descriptor = self.runner.cudagraph_dispatcher.dispatch(
+                num_tokens=num_tokens,
+                uniform_decode=uniform_decode,
+                has_lora=has_lora,
+            )
+            num_input_tokens = batch_descriptor.num_tokens
+        else:
+            num_input_tokens = num_tokens
+            aclgraph_runtime_mode = CUDAGraphMode.NONE
+            batch_descriptor = None
 
         (
             num_input_tokens,
             num_tokens_across_dp,
-            _,
-        ) = self.runner._sync_metadata_across_dp(num_tokens, is_draft_model=True)
-        multi_steps_attn_metadata = (
-            self._build_standard_dsa_attn_metadata(common_attn_metadata, num_input_tokens, num_tokens)
-            if _dspark_standard_dsa_enabled()
-            else []
+            synced_cudagraph_mode,
+        ) = self.runner._sync_metadata_across_dp(
+            num_input_tokens,
+            is_draft_model=True,
+            cudagraph_mode=aclgraph_runtime_mode,
+            allow_dp_padding=use_cuda_graph,
         )
+
+        if use_cuda_graph and num_tokens_across_dp is not None:
+            dp_rank = getattr(self, "dp_rank", getattr(self.runner, "dp_rank", 0))
+            num_input_tokens = int(num_tokens_across_dp[dp_rank].item())
+            aclgraph_runtime_mode, batch_descriptor = self.runner.cudagraph_dispatcher.dispatch(
+                num_tokens=num_input_tokens,
+                uniform_decode=uniform_decode,
+                has_lora=has_lora,
+                valid_modes={synced_cudagraph_mode},
+            )
+            num_input_tokens = batch_descriptor.num_tokens
+            num_tokens_across_dp[dp_rank] = num_input_tokens
+
+        block_size = self.num_speculative_tokens
+        model_num_reqs = actual_num_reqs
+        descriptor_num_reqs = getattr(batch_descriptor, "num_reqs", None)
+        if descriptor_num_reqs is not None:
+            model_num_reqs = max(actual_num_reqs, int(descriptor_num_reqs))
+        AscendDSparkProposer._copy_dspark_query_metadata(
+            self,
+            common_attn_metadata.query_start_loc,
+            common_attn_metadata.query_start_loc_cpu,
+            common_attn_metadata.seq_lens,
+            model_num_reqs,
+            actual_num_reqs,
+        )
+        common_attn_metadata.query_start_loc = self._dspark_query_start_loc
+        common_attn_metadata.query_start_loc_cpu = self._dspark_query_start_loc_cpu
+        common_attn_metadata.seq_lens = self._dspark_seq_lens
+        common_attn_metadata._seq_lens_cpu = self._dspark_seq_lens_cpu
+        common_attn_metadata.num_reqs = model_num_reqs
+        if hasattr(common_attn_metadata, "actual_seq_lengths_q"):
+            common_attn_metadata.actual_seq_lengths_q = [block_size] * actual_num_reqs + [0] * (
+                model_num_reqs - actual_num_reqs
+            )
+        if _dspark_standard_dsa_enabled() and getattr(self, "draft_attn_groups", []):
+            self._dspark_block_tables_by_gid, self._dspark_block_tables_by_layer = self._get_draft_block_tables(
+                common_attn_metadata,
+                model_num_reqs,
+            )
+
         model_num_tokens = num_tokens
         if _dspark_standard_dsa_enabled():
             self._pad_draft_query_buffers(num_tokens, num_input_tokens)
             model_num_tokens = num_input_tokens
             if isinstance(getattr(self, "_dspark_token_to_req_indices_buffer", None), torch.Tensor):
                 self._dspark_token_to_req_indices = self._dspark_token_to_req_indices_buffer[:model_num_tokens]
+        multi_steps_attn_metadata = (
+            self._build_standard_dsa_attn_metadata(common_attn_metadata, num_input_tokens, num_tokens)
+            if _dspark_standard_dsa_enabled()
+            else []
+        )
+        token_indices_to_sample_len = model_num_reqs * block_size
+        token_indices_buffer = getattr(self, "token_indices_to_sample", None)
+        if isinstance(token_indices_buffer, torch.Tensor) and token_indices_buffer.numel() >= token_indices_to_sample_len:
+            actual_sample_count = min(token_indices_to_sample.shape[0], token_indices_to_sample_len)
+            token_indices_buffer[:actual_sample_count].copy_(token_indices_to_sample[:actual_sample_count])
+            if token_indices_to_sample_len > actual_sample_count:
+                pad_indices = torch.arange(
+                    actual_sample_count,
+                    token_indices_to_sample_len,
+                    dtype=torch.int32,
+                    device=token_indices_buffer.device,
+                )
+                if num_input_tokens > 0:
+                    pad_indices.clamp_(max=num_input_tokens - 1)
+                token_indices_buffer[actual_sample_count:token_indices_to_sample_len].copy_(pad_indices)
+            token_indices_buffer[token_indices_to_sample_len:].fill_(0)
+            runnable_token_indices = token_indices_buffer[:token_indices_to_sample_len]
+        else:
+            actual_sample_count = min(token_indices_to_sample.shape[0], token_indices_to_sample_len)
+            if token_indices_to_sample_len == actual_sample_count:
+                runnable_token_indices = token_indices_to_sample[:actual_sample_count]
+            else:
+                pad_indices = torch.arange(
+                    actual_sample_count,
+                    token_indices_to_sample_len,
+                    dtype=torch.int32,
+                    device=token_indices_to_sample.device,
+                )
+                if num_input_tokens > 0:
+                    pad_indices.clamp_(max=num_input_tokens - 1)
+                runnable_token_indices = torch.cat(
+                    (token_indices_to_sample[:actual_sample_count], pad_indices),
+                    dim=0,
+                )
 
         with set_ascend_forward_context(
             multi_steps_attn_metadata[0] if multi_steps_attn_metadata else None,
@@ -1069,8 +1591,8 @@ class AscendDSparkProposer(AscendDflashProposer):
             num_tokens=num_input_tokens,
             num_tokens_across_dp=num_tokens_across_dp,
             num_actual_tokens=num_tokens,
-            batch_descriptor=None,
-            aclgraph_runtime_mode=CUDAGraphMode.NONE,
+            batch_descriptor=batch_descriptor,
+            aclgraph_runtime_mode=aclgraph_runtime_mode,
             is_draft_model=True,
             draft_attn_metadatas=multi_steps_attn_metadata,
         ):
@@ -1078,42 +1600,37 @@ class AscendDSparkProposer(AscendDflashProposer):
             if forward_context is not None:
                 forward_context.moe_layer_index = 0
 
-            num_context = self._dflash_num_context
-            if self._dspark_slots_to_reset:
-                reset_slots = torch.tensor(self._dspark_slots_to_reset, dtype=torch.int32, device=self.device)
-                self.model.reset_request_slots(reset_slots)
-            self.model.precompute_and_store_context_kv(
-                self._dflash_hidden_states[:num_context],
-                self._context_positions_buffer[:num_context],
-                getattr(self, "_dspark_context_slot_mappings_by_layer", {})
-                if _dspark_standard_dsa_enabled() and getattr(self, "_dspark_context_slot_mappings_by_layer", {})
-                else self._context_slot_mapping_buffer[:num_context],
-                self._context_request_slots_buffer[:num_context],
-            )
-            hidden_states = self.model(
-                input_ids=self.input_ids[:model_num_tokens],
-                positions=self.positions[:model_num_tokens],
-                inputs_embeds=None,
-                request_slots=self._request_slots_buffer[:model_num_tokens],
-                slot_mapping=AscendDSparkProposer._slice_tensor_map(
-                    getattr(self, "_dspark_query_slot_mappings_by_layer", {}),
-                    model_num_tokens,
-                )
-                if _dspark_standard_dsa_enabled() and getattr(self, "_dspark_query_slot_mappings_by_layer", {})
-                else self._slot_mapping_buffer[:model_num_tokens],
-                block_table=getattr(self, "_dspark_block_tables_by_layer", {})
-                if _dspark_standard_dsa_enabled() and getattr(self, "_dspark_block_tables_by_layer", {})
-                else getattr(self, "_dspark_block_table", None),
-                dspark_query_start_loc=common_attn_metadata.query_start_loc_cpu[: common_attn_metadata.num_reqs + 1],
-                dspark_seq_lens=common_attn_metadata.seq_lens[: common_attn_metadata.num_reqs],
-                dspark_token_to_req_indices=getattr(self, "_dspark_token_to_req_indices", None),
+            num_context = getattr(self, "_dflash_num_context", 0)
+            run_model = getattr(self, "_runnable", None)
+            if run_model is None:
+                run_model = AscendDSparkProposer._run_dspark_model.__get__(self)
+            forward_context = get_forward_context()
+            if (
+                getattr(forward_context, "cudagraph_runtime_mode", CUDAGraphMode.NONE) == CUDAGraphMode.FULL
+                and not _EXTRA_CTX.capturing
+                and getattr(self, "draft_attn_groups", [])
+            ):
+                self._update_full_graph_params(forward_context, num_input_tokens, multi_steps_attn_metadata)
+            hidden_states = run_model(
+                num_input_tokens=model_num_tokens,
             )
             draft_token_ids = self._sample_sequential(
-                common_attn_metadata.num_reqs,
+                model_num_reqs,
                 hidden_states,
-                token_indices_to_sample,
+                runnable_token_indices,
                 sampling_metadata,
             )
+            if model_num_reqs != actual_num_reqs:
+                draft_token_ids = draft_token_ids[:actual_num_reqs]
+                if isinstance(getattr(self, "_dspark_last_draft_logits", None), torch.Tensor):
+                    self._dspark_last_draft_logits = self._dspark_last_draft_logits[:actual_num_reqs].contiguous()
+                if isinstance(getattr(self, "_dspark_last_draft_probs", None), torch.Tensor):
+                    self._dspark_last_draft_probs = self._dspark_last_draft_probs[:actual_num_reqs].contiguous()
+                if isinstance(getattr(self, "_dspark_last_draft_logit_components", None), dict):
+                    self._dspark_last_draft_logit_components = {
+                        name: value[:actual_num_reqs].contiguous()
+                        for name, value in self._dspark_last_draft_logit_components.items()
+                    }
             if _dspark_reject_debug_enabled():
                 print(
                     "[dspark-propose-debug] "
