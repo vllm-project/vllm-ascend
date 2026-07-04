@@ -251,6 +251,7 @@ class TestKVCacheSendingThread(unittest.TestCase):
 
         context = zmq.Context()  # type: ignore
         sock = context.socket(zmq.DEALER)  # type: ignore
+        sock.setsockopt(zmq.RCVTIMEO, 1000)  # type: ignore
         sock.connect(f"tcp://{host}:{actual_port}")
         encoder = msgspec.msgpack.Encoder()
         decoder = msgspec.msgpack.Decoder(type=MooncakeAgentMetadata)
@@ -292,8 +293,8 @@ class TestKVCacheSendingThread(unittest.TestCase):
         sock.send_multipart([b"", encoder.encode((DONE_RECVING_MSG, missing_mapping_req_id, missing_mapping))])
         frames = sock.recv_multipart()
         self.assertEqual(frames[0], b"")
-        self.assertEqual(frames[1], b"ACK")
-        self.assertIn(missing_mapping_req_id, thread.task_tracker.finished_requests)
+        self.assertIn(b"ERROR: RuntimeError", frames[1])
+        self.assertNotIn(missing_mapping_req_id, thread.task_tracker.finished_requests)
 
         sock.close(linger=0)
         context.term()
@@ -1268,6 +1269,17 @@ class TestMooncakeConnectorSchedulerMatchedTokens(unittest.TestCase):
             },
         )
 
+    def test_set_xfer_handshake_metadata_rejects_missing_actual_port(self):
+        metadata = make_agent_metadata(
+            engine_id="remote_engine",
+            local_ip="10.0.0.8",
+            handshake_port=0,
+            logical_rank=3,
+        )
+
+        with self.assertRaisesRegex(ValueError, "Missing actual Mooncake handshake port"):
+            self.scheduler.set_xfer_handshake_metadata({0: metadata})
+
     def test_connector_pp_aware_metadata_accepts_logical_rank_keys(self):
         connector = MooncakeConnector.__new__(MooncakeConnector)
         connector.connector_scheduler = self.scheduler
@@ -2003,20 +2015,17 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
 
         self.assertEqual(worker._get_local_logical_handshake_port(), 30007)
 
-    def test_resolve_remote_endpoint_falls_back_when_mapping_empty(self):
+    def test_resolve_remote_endpoint_fails_when_mapping_empty(self):
         worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
 
-        host, engine_id, handshake_port = worker._get_remote_endpoint_info_by_port(
-            base_port=30000,
-            remote_logical_port=30002,
-            remote_host="fallback-host",
-            remote_engine_id="fallback-engine",
-            remote_multi_nodes_meta_mapping={},
-        )
-
-        self.assertEqual(host, "fallback-host")
-        self.assertEqual(engine_id, "fallback-engine")
-        self.assertEqual(handshake_port, 30002)
+        with self.assertRaisesRegex(RuntimeError, "Missing Mooncake handshake metadata mapping"):
+            worker._get_remote_endpoint_info_by_port(
+                base_port=30000,
+                remote_logical_port=30002,
+                remote_host="fallback-host",
+                remote_engine_id="fallback-engine",
+                remote_multi_nodes_meta_mapping={},
+            )
 
     def test_resolve_remote_endpoint_fails_when_mapping_is_partial(self):
         worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)

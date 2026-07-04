@@ -8,6 +8,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
 
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import MooncakeConnector
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector import MooncakeLayerwiseConnector
 
 if TYPE_CHECKING:
@@ -42,8 +43,17 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
             raise ValueError("Mixed int logical-rank and (pp_rank, tp_rank) handshake metadata keys are not supported.")
 
         if has_logical_rank_keys:
+            # Logical-rank metadata is Mooncake-specific. MultiConnector still
+            # cannot carry multiple heterogeneous handshake payload types in a
+            # single exchange, so do not broadcast MooncakeAgentMetadata to
+            # strongly typed connectors such as NIXL.
+            handled = False
             for connector in self._connectors:
-                connector.set_xfer_handshake_metadata(metadata)
+                if isinstance(connector, MooncakeConnector):
+                    connector.set_xfer_handshake_metadata(metadata)
+                    handled = True
+            if not handled:
+                raise ValueError("Logical-rank handshake metadata requires a MooncakeConnector child.")
             return
 
         return super().set_xfer_handshake_metadata_pp_aware(metadata)

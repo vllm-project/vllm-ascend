@@ -350,6 +350,7 @@ class KVCacheSendingThread(threading.Thread):
 
         decoder = msgspec.msgpack.Decoder(type=tuple)
         while True:
+            identity: bytes | None = None
             try:
                 frames = sock.recv_multipart()
                 if len(frames) < 2:
@@ -386,21 +387,23 @@ class KVCacheSendingThread(threading.Thread):
                     request_id = msg[1]
                     remote_port_send_num = msg[2]
                     if remote_port_send_num:
+                        local_port_info = remote_port_send_num.get(self.logical_handshake_port)
+                        if local_port_info is None:
+                            raise RuntimeError(
+                                "DONE_RECVING_MSG missing local logical port. "
+                                f"request_id={request_id}, logical_port={self.logical_handshake_port}, "
+                                f"remote_port_send_num={remote_port_send_num}"
+                            )
+                        expected_done_num = local_port_info.get("num", 0)
+                        if not isinstance(expected_done_num, int) or expected_done_num < 0:
+                            raise RuntimeError(
+                                "DONE_RECVING_MSG has invalid done count. "
+                                f"request_id={request_id}, logical_port={self.logical_handshake_port}, "
+                                f"local_port_info={local_port_info}"
+                            )
                         if request_id not in self.port_send_num:
                             self.port_send_num[request_id] = 0
                         self.port_send_num[request_id] += 1
-                        local_port_info = remote_port_send_num.get(self.logical_handshake_port)
-                        if local_port_info is None:
-                            logger.warning(
-                                "DONE_RECVING_MSG missing local logical port. "
-                                "request_id=%s, logical_port=%s, remote_port_send_num=%s",
-                                request_id,
-                                self.logical_handshake_port,
-                                remote_port_send_num,
-                            )
-                            expected_done_num = 1
-                        else:
-                            expected_done_num = local_port_info.get("num", 0)
                         if self.port_send_num[request_id] >= expected_done_num:
                             self.task_tracker.update_done_task_count(request_id)
                             del self.port_send_num[request_id]
@@ -436,6 +439,12 @@ class KVCacheSendingThread(threading.Thread):
                     type(e).__name__,
                     e,
                 )
+                if identity is not None:
+                    try:
+                        err = f"ERROR: {type(e).__name__}: {e}".encode()
+                        sock.send_multipart((identity, b"", err), flags=zmq.NOBLOCK)  # type: ignore
+                    except Exception:
+                        logger.debug("Failed to send Mooncake handshake error response.", exc_info=True)
 
 
 class KVCacheRecvingThread(threading.Thread):
@@ -3338,12 +3347,10 @@ class MooncakeConnectorWorker:
     ) -> tuple[str, str, int]:
         rank = str(remote_logical_port - base_port)
         if not remote_multi_nodes_meta_mapping:
-            logger.warning(
-                "Missing Mooncake handshake metadata mapping for logical port %s; "
-                "falling back to fixed handshake port.",
-                remote_logical_port,
+            raise RuntimeError(
+                "Missing Mooncake handshake metadata mapping for logical rank "
+                f"{rank}; dynamic handshake ports require actual endpoint metadata."
             )
-            return remote_host, remote_engine_id, remote_logical_port
 
         info = remote_multi_nodes_meta_mapping.get(rank)
         if info is None:

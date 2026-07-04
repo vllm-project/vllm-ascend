@@ -216,6 +216,8 @@ class TestUtils(TestBase):
         mock_vllm_config.parallel_config.data_parallel_size = 1
         mock_vllm_config.kv_transfer_config = mock.MagicMock(
             engine_id="prefill-uuid_dp0",
+            kv_connector="MooncakeConnectorV1",
+            kv_role="kv_producer",
             is_kv_producer=True,
             is_kv_consumer=False,
         )
@@ -226,12 +228,70 @@ class TestUtils(TestBase):
 
         utils.check_kv_extra_config(mock_vllm_config)
 
+    def test_check_kv_extra_config_accepts_per_dp_consumer_global_dp_size(self):
+        mock_vllm_config = mock.MagicMock()
+        mock_vllm_config.parallel_config.tensor_parallel_size = 2
+        mock_vllm_config.parallel_config.data_parallel_size = 1
+        mock_vllm_config.kv_transfer_config = mock.MagicMock(
+            engine_id="decode-uuid_dp1",
+            kv_connector="MooncakeConnectorV1",
+            kv_role="kv_consumer",
+            is_kv_producer=False,
+            is_kv_consumer=True,
+        )
+        mock_vllm_config.kv_transfer_config.get_from_extra_config.return_value = {
+            "dp_size": 2,
+            "tp_size": 2,
+        }
+
+        utils.check_kv_extra_config(mock_vllm_config)
+
+    def test_check_kv_extra_config_rejects_non_mooncake_per_dp_engine_mismatch(self):
+        mock_vllm_config = mock.MagicMock()
+        mock_vllm_config.parallel_config.tensor_parallel_size = 2
+        mock_vllm_config.parallel_config.data_parallel_size = 1
+        mock_vllm_config.kv_transfer_config = mock.MagicMock(
+            engine_id="prefill-uuid_dp0",
+            kv_connector="NixlConnector",
+            kv_role="kv_producer",
+            is_kv_producer=True,
+            is_kv_consumer=False,
+        )
+        mock_vllm_config.kv_transfer_config.get_from_extra_config.return_value = {
+            "dp_size": 2,
+            "tp_size": 2,
+        }
+
+        with self.assertRaisesRegex(ValueError, "conflicting data parallel size"):
+            utils.check_kv_extra_config(mock_vllm_config)
+
+    def test_check_kv_extra_config_rejects_kv_both_per_dp_engine_mismatch(self):
+        mock_vllm_config = mock.MagicMock()
+        mock_vllm_config.parallel_config.tensor_parallel_size = 2
+        mock_vllm_config.parallel_config.data_parallel_size = 1
+        mock_vllm_config.kv_transfer_config = mock.MagicMock(
+            engine_id="mixed-uuid_dp0",
+            kv_connector="MooncakeConnectorV1",
+            kv_role="kv_both",
+            is_kv_producer=True,
+            is_kv_consumer=True,
+        )
+        mock_vllm_config.kv_transfer_config.get_from_extra_config.return_value = {
+            "dp_size": 2,
+            "tp_size": 2,
+        }
+
+        with self.assertRaisesRegex(ValueError, "conflicting data parallel size"):
+            utils.check_kv_extra_config(mock_vllm_config)
+
     def test_check_kv_extra_config_rejects_non_dp_engine_dp_size_mismatch(self):
         mock_vllm_config = mock.MagicMock()
         mock_vllm_config.parallel_config.tensor_parallel_size = 2
         mock_vllm_config.parallel_config.data_parallel_size = 1
         mock_vllm_config.kv_transfer_config = mock.MagicMock(
             engine_id="prefill-uuid",
+            kv_connector="MooncakeConnectorV1",
+            kv_role="kv_producer",
             is_kv_producer=True,
             is_kv_consumer=False,
         )
@@ -249,6 +309,8 @@ class TestUtils(TestBase):
         mock_vllm_config.parallel_config.data_parallel_size = 1
         mock_vllm_config.kv_transfer_config = mock.MagicMock(
             engine_id="prefill-uuid_dp_shadow",
+            kv_connector="MooncakeConnectorV1",
+            kv_role="kv_producer",
             is_kv_producer=True,
             is_kv_consumer=False,
         )

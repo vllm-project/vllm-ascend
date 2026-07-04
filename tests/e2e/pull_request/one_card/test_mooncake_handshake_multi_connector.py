@@ -73,5 +73,5 @@ def test_multi_connector_preserves_logical_rank_handshake_metadata_for_mooncake(
             "handshake_port": 45104,
         },
     }
-    non_mooncake_connector.set_xfer_handshake_metadata.assert_called_once_with(metadata)
+    non_mooncake_connector.set_xfer_handshake_metadata.assert_not_called()
     non_mooncake_connector.set_xfer_handshake_metadata_pp_aware.assert_not_called()
