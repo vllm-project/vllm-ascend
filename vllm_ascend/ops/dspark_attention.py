@@ -273,6 +273,55 @@ def build_dspark_swa_indices(
                 device=positions.device,
                 dtype=torch.long,
             )
+            req_count = min(req_count, block_table.shape[0], seq_lens.numel())
+            if req_count <= 0:
+                return indices, lens
+
+            valid_rows = (token_to_req >= 0) & (token_to_req < req_count)
+            if slot_mapping is not None:
+                valid_rows &= _valid_slot_rows(slot_mapping[: positions.numel()].to(device=positions.device))
+            if not bool(torch.any(valid_rows).item()):
+                return indices, lens
+
+            req_query_start = query_start_loc[: req_count + 1].to(device=positions.device, dtype=torch.long)
+            query_lens = req_query_start[1:] - req_query_start[:-1]
+            req_seq_lens = seq_lens[:req_count].to(device=positions.device, dtype=torch.long)
+            start_pos = torch.clamp(req_seq_lens - query_lens - int(window_size), min=0)
+            visible_lens = req_seq_lens - start_pos
+            max_visible_len = int(visible_lens.max().item()) if visible_lens.numel() else 0
+            if max_visible_len > index_width:
+                raise ValueError(
+                    "DSpark SWA visible length exceeds index_width: "
+                    f"visible_len={max_visible_len}, index_width={index_width}"
+                )
+            if max_visible_len <= 0 or block_table.shape[1] <= 0:
+                return indices, lens
+
+            offsets = torch.arange(index_width, dtype=torch.long, device=positions.device)
+            visible_positions = start_pos.unsqueeze(1) + offsets.unsqueeze(0)
+            visible_mask = offsets.unsqueeze(0) < visible_lens.unsqueeze(1)
+            block_nums = visible_positions // int(cache_block_size)
+            if bool(torch.any(visible_mask).item()):
+                max_block_num = int(block_nums[visible_mask].max().item())
+                if max_block_num >= block_table.shape[1]:
+                    raise ValueError(
+                        "DSpark SWA block index exceeds block table width: "
+                        f"block_num={max_block_num}, width={block_table.shape[1]}"
+                    )
+
+            req_block_table = block_table[:req_count].to(device=positions.device, dtype=torch.long)
+            block_nums = block_nums.clamp(0, block_table.shape[1] - 1)
+            block_ids = req_block_table.gather(1, block_nums)
+            block_offsets = visible_positions % int(cache_block_size)
+            slot_ids = (block_ids * int(cache_block_size) + block_offsets).to(torch.int32)
+            slot_ids.masked_fill_(~visible_mask, -1)
+
+            row_req = token_to_req.clamp(0, req_count - 1)
+            indices[:, 0, :] = slot_ids.index_select(0, row_req)
+            lens.copy_(visible_lens.index_select(0, row_req).to(torch.int32))
+            indices[~valid_rows] = -1
+            lens[~valid_rows] = 0
+            return indices, lens
 
         for req_idx in range(req_count):
             if req_idx >= block_table.shape[0] or req_idx >= seq_lens.numel():
