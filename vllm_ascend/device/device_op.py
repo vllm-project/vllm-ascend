@@ -795,6 +795,16 @@ class BaseDeviceAdaptor:
             permuted_tokens=permuted_tokens, sorted_indices=torch.abs(sorted_indices), probs=probs
         )
 
+    @staticmethod
+    def index_fill(
+        tensor: torch.Tensor,
+        dim: int,
+        indices: torch.Tensor,
+        value: int,
+    ) -> torch.Tensor:
+        tensor.index_fill_(dim, indices, value)
+        return tensor
+
 
 class A5DeviceAdaptor(BaseDeviceAdaptor):
     @classmethod
@@ -1720,10 +1730,39 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         )
 
 
+class Ascend310PDeviceAdaptor(BaseDeviceAdaptor):
+    @staticmethod
+    def index_fill(
+        tensor: torch.Tensor,
+        dim: int,
+        indices: torch.Tensor,
+        value: int,
+    ) -> torch.Tensor:
+        # index_fill_ is unavailable on 310P; emulate it with a boolean mask
+        # along `dim` so behavior matches torch.index_fill_ for any dim,
+        # negative indices, empty indices and arbitrary tensor rank.
+        if indices.numel() == 0:
+            return tensor
+        dim_size = tensor.size(dim)
+        norm_indices = torch.where(indices < 0, indices + dim_size, indices)
+        pos = torch.arange(
+            dim_size,
+            device=tensor.device,
+            dtype=norm_indices.dtype,
+        )
+        mask = torch.eq(pos.unsqueeze(1), norm_indices.unsqueeze(0)).any(dim=1)
+        idx = [slice(None)] * tensor.dim()
+        idx[dim] = mask
+        tensor[tuple(idx)] = value
+        return tensor
+
+
 def get_device_adaptor() -> type["BaseDeviceAdaptor"]:
     ascend_device_type = get_ascend_device_type()
     if ascend_device_type == AscendDeviceType.A5:
         return A5DeviceAdaptor
+    if ascend_device_type == AscendDeviceType._310P:
+        return Ascend310PDeviceAdaptor
     return BaseDeviceAdaptor
 
 
