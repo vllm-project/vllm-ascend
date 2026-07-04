@@ -48,17 +48,25 @@ class GDNAttentionMetadataBuilder310(AscendGDNAttentionMetadataBuilder):
         torch.Tensor | None,
         torch.Tensor | None,
     ]:
-        del context_lens_tensor, non_spec_sequence_indices, num_prefills
+        del non_spec_sequence_indices, num_prefills
         assert non_spec_query_start_loc_cpu is not None
 
         m = common_attn_metadata
         # 310P RC: compute has_initial_state on CPU, single H2D upload.
-        if m._seq_lens_cpu is not None:
-            context_lens_cpu = m._seq_lens_cpu
-        elif m.seq_lens_cpu is not None:
-            context_lens_cpu = m.seq_lens_cpu
+        # NOTE: This must mirror the mainline device path
+        # ``has_initial_state = context_lens_tensor > 0`` where
+        # ``context_lens_tensor = m.compute_num_computed_tokens()`` is the
+        # number of *already computed* tokens (context length), NOT the total
+        # ``seq_lens``. Using ``seq_lens`` would flag fresh prefills (0
+        # computed tokens) as having an initial recurrent state and read
+        # uninitialized SSM state -> garbage output.
+        num_computed_tokens_cpu = getattr(m, "_num_computed_tokens_cpu", None)
+        if num_computed_tokens_cpu is None:
+            num_computed_tokens_cpu = getattr(m, "num_computed_tokens_cpu", None)
+        if num_computed_tokens_cpu is not None:
+            context_lens_cpu = num_computed_tokens_cpu
         else:
-            context_lens_cpu = m.compute_num_computed_tokens().detach().cpu()
+            context_lens_cpu = context_lens_tensor.detach().cpu()
 
         has_initial_state_cpu = context_lens_cpu > 0
         if spec_sequence_masks_cpu is not None:
