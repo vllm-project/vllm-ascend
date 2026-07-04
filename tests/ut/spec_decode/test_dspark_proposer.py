@@ -1842,62 +1842,31 @@ def test_dspark_dummy_run_keeps_drafter_eager_when_graph_disabled(monkeypatch):
     assert context_calls[0][2]["aclgraph_runtime_mode"] == dspark_proposer_module.CUDAGraphMode.NONE
 
 
-def test_dspark_load_model_wraps_dspark_runnable_for_graph(monkeypatch):
+def test_dspark_load_model_disables_dspark_drafter_graph(monkeypatch):
     base_seen_use_cuda_graph = []
-    wrapper_calls = []
+    warnings = []
 
     def fake_base_load_model(self, model):
         del model
         base_seen_use_cuda_graph.append(self.use_cuda_graph)
 
-    class FakeACLGraphWrapper:
-        def __init__(
-            self,
-            runnable,
-            vllm_config,
-            runtime_mode,
-            cudagraph_options=None,
-            *,
-            use_eagle=False,
-            enable_enpu=False,
-        ):
-            wrapper_calls.append(
-                {
-                    "runnable": runnable,
-                        "vllm_config": vllm_config,
-                        "runtime_mode": runtime_mode,
-                        "cudagraph_options": cudagraph_options,
-                        "use_eagle": use_eagle,
-                        "enable_enpu": enable_enpu,
-                    }
-                )
-
     monkeypatch.setattr(dspark_proposer_module.AscendDflashProposer, "load_model", fake_base_load_model)
-    monkeypatch.setattr(dspark_proposer_module, "ACLGraphWrapper", FakeACLGraphWrapper)
-    monkeypatch.setattr(dspark_proposer_module.torch.npu, "Stream", lambda: "stream")
+    monkeypatch.setattr(
+        dspark_proposer_module.logger,
+        "warning_once",
+        lambda *args, **kwargs: warnings.append(args),
+    )
 
     proposer = object.__new__(AscendDSparkProposer)
     proposer.use_cuda_graph = True
-    proposer.use_eagle = True
-    proposer.enable_enpu = False
-    proposer.vllm_config = SimpleNamespace(
-        compilation_config=SimpleNamespace(
-            cudagraph_mode=SimpleNamespace(has_full_cudagraphs=lambda: True),
-        )
-    )
 
     AscendDSparkProposer.load_model(proposer, model=object())
 
     assert base_seen_use_cuda_graph == [False]
-    assert proposer.use_cuda_graph is True
-    assert proposer.update_stream == "stream"
-    assert len(wrapper_calls) == 1
-    assert wrapper_calls[0]["runnable"].__func__ is AscendDSparkProposer._run_dspark_model
-    assert wrapper_calls[0]["runtime_mode"] == dspark_proposer_module.CUDAGraphMode.FULL
-    assert wrapper_calls[0]["cudagraph_options"] is None
-    assert wrapper_calls[0]["use_eagle"] is True
-    assert wrapper_calls[0]["enable_enpu"] is False
-    assert isinstance(proposer._runnable, FakeACLGraphWrapper)
+    assert proposer.use_cuda_graph is False
+    assert proposer._runnable.__func__ is AscendDSparkProposer._run_dspark_model
+    assert len(warnings) == 1
+    assert "DSpark drafter ACLGraph is disabled" in warnings[0][0]
 
 
 def test_dspark_draft_vllm_config_disables_inner_compile(monkeypatch):

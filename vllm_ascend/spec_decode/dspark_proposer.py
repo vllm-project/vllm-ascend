@@ -25,7 +25,6 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
-from vllm_ascend.compilation.acl_graph import ACLGraphWrapper
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
 from vllm_ascend.spec_decode.llm_base_proposer import greedy_sample
 from vllm_ascend.worker.v2.sample.gumbel import gumbel_sample
@@ -287,29 +286,21 @@ class AscendDSparkProposer(AscendDflashProposer):
         use_cuda_graph = self.use_cuda_graph
         if use_cuda_graph:
             # The base loader only knows how to wrap the generic merged-draft
-            # runnable. DSpark has a different draft shape, so install its
-            # wrapper below after shared model-loading logic has completed.
+            # runnable. DSpark has a different draft shape, and its FULL graph
+            # replay is disabled until the DSpark-specific graph buffers are
+            # proven correct under concurrent requests.
             self.use_cuda_graph = False
         try:
             super().load_model(model)
         finally:
-            self.use_cuda_graph = use_cuda_graph
+            self.use_cuda_graph = False
 
+        if use_cuda_graph:
+            logger.warning_once(
+                "[spec_decode/dspark] DSpark drafter ACLGraph is disabled; "
+                "running the drafter eager while the target model graph remains enabled."
+            )
         self._runnable = self._run_dspark_model
-        if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs() and self.use_cuda_graph:
-            logger.info(
-                "[spec_decode/dspark] Wrapping DSpark draft model forward with ACLGraphWrapper:"
-                " runtime_mode=FULL, enable_enpu=%s",
-                self.enable_enpu,
-            )
-            self.update_stream = torch.npu.Stream()
-            self._runnable = ACLGraphWrapper(
-                self._run_dspark_model,
-                self.vllm_config,
-                runtime_mode=CUDAGraphMode.FULL,
-                use_eagle=self.use_eagle,
-                enable_enpu=self.enable_enpu,
-            )
 
     def _create_draft_vllm_config(self) -> VllmConfig:
         draft_vllm_config = super()._create_draft_vllm_config()
