@@ -34,7 +34,7 @@ def _compact_empty_segments(cu_seqlens_host, initial_state):
     (see gdn_attn_builder._fill_chunk_indices_cpu), but the kernels index
     ``gmSeqlen`` (= cu_seqlens) and ``initial_state`` by that same rank. An empty
     segment left in cu_seqlens -- which PCP rank>0 produces for requests whose
-    context does not reach this rank -- therefore mis-indexes: chunk_fwd_o reads
+    context does not reach this rank -- therefore miss-indexes: chunk_fwd_o reads
     ``batchTokens == 0`` and, on that segment's last chunk, ``blockTokens`` underflows
     (uint32) -> MTE write OOB -> runtime 507015. This is the root cause of the
     "concurrent mixed-batch only, rank>0 only" PCP crash: a single request never
