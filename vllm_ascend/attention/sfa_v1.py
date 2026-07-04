@@ -1345,6 +1345,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         # Inputs and outputs may be padded for CUDA graphs
         num_input_tokens = attn_metadata.num_input_tokens
         output_padded = output
+        dcp_query_gather_context = None
 
         # all-gather o_proj weight for prefill stage of PD mix node
         o_proj_full_handle = None
@@ -1504,6 +1505,9 @@ class AscendSFAImpl(MLAAttentionImpl):
 
             ql_nope, q_pe = self._q_proj_and_k_up_proj(q_c)
             q_pe = self.rope_single(q_pe, cos, sin)
+            start_dcp_query_gather = getattr(self, "_start_dcp_query_gather", None)
+            if start_dcp_query_gather is not None and attn_metadata.dcp_context is not None:
+                dcp_query_gather_context = start_dcp_query_gather(ql_nope, q_pe, attn_metadata)
 
             if self.enable_dsa_cp:
                 if kv_ag_handle is not None:
@@ -1644,9 +1648,27 @@ class AscendSFAImpl(MLAAttentionImpl):
             if self.use_index_cache:
                 self._update_indexcache_topk_indices(topk_indices)
 
-        attn_output = self._execute_sparse_flash_attention_process(
-            ql_nope, q_pe, kv_cache, topk_indices, attn_metadata, actual_seq_lengths_query, actual_seq_lengths_key
-        )
+        if dcp_query_gather_context is None:
+            attn_output = self._execute_sparse_flash_attention_process(
+                ql_nope,
+                q_pe,
+                kv_cache,
+                topk_indices,
+                attn_metadata,
+                actual_seq_lengths_query,
+                actual_seq_lengths_key,
+            )
+        else:
+            attn_output = self._execute_sparse_flash_attention_process(
+                ql_nope,
+                q_pe,
+                kv_cache,
+                topk_indices,
+                attn_metadata,
+                actual_seq_lengths_query,
+                actual_seq_lengths_key,
+                query_gather_context=dcp_query_gather_context,
+            )
 
         attn_output = self._v_up_proj(attn_output)
         weight_prefetch_method = get_weight_prefetch_method()
