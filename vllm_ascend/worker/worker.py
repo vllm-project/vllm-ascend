@@ -41,6 +41,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorHandsha
 from vllm.distributed.parallel_state import Handle, get_pp_group, get_tp_group
 from vllm.logger import logger
 from vllm.lora.request import LoRARequest
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.mem_constants import GiB_bytes
@@ -396,7 +397,7 @@ class NPUWorker(WorkerBase):
 
     def _init_device(self):
         if not vllm_version_is("0.23.0"):
-            # vllm v0.24.0 (PR #45026) removed automatic per-process device
+            # vLLM v0.24.0 (PR #45026) removed automatic per-process device
             # isolation for DP workers. Mirror gpu_worker.py::init_device:
             # shift self.local_rank by dp_local_rank * tp_pp_world_size so
             # that each DP group binds to a distinct set of NPUs.
@@ -406,15 +407,39 @@ class NPUWorker(WorkerBase):
                 and parallel_config.data_parallel_backend != "ray"
                 and parallel_config.nnodes_within_dp == 1
             ):
+                dp_local_rank = parallel_config.data_parallel_rank_local
+                if dp_local_rank is None:
+                    dp_local_rank = parallel_config.data_parallel_index
                 tp_pp_world_size = parallel_config.pipeline_parallel_size * parallel_config.tensor_parallel_size
-                visible_device_count = torch.npu.device_count() if torch.npu.is_available() else 0
-                if visible_device_count > tp_pp_world_size:
-                    dp_local_rank = parallel_config.data_parallel_rank_local
-                    if dp_local_rank is None:
-                        dp_local_rank = parallel_config.data_parallel_index
-                    self.local_rank += dp_local_rank * tp_pp_world_size
+                self.local_rank += dp_local_rank * tp_pp_world_size
 
-        device = torch.device(f"npu:{self.local_rank}")
+            # Publish the logical-to-physical mapping for topology queries.
+            assigned_physical_gpu_ids = parallel_config.assigned_physical_gpu_ids
+            if assigned_physical_gpu_ids is not None:
+                from vllm.platforms.interface import set_assigned_physical_gpu_ids
+
+                set_assigned_physical_gpu_ids(assigned_physical_gpu_ids)
+                assert self.local_rank < len(assigned_physical_gpu_ids), (
+                    f"local_rank {self.local_rank} is out of bounds for "
+                    f"assigned_physical_gpu_ids {assigned_physical_gpu_ids}"
+                )
+                if parallel_config.distributed_executor_backend not in ("ray", "external_launcher"):
+                    assert parallel_config.local_world_size <= len(assigned_physical_gpu_ids), (
+                        f"local_world_size ({parallel_config.local_world_size}) "
+                        f"exceeds assigned_physical_gpu_ids count "
+                        f"({len(assigned_physical_gpu_ids)})"
+                    )
+            else:
+                visible_device_count = torch.npu.device_count() if torch.npu.is_available() else 0
+                assert self.local_rank < visible_device_count, (
+                    f"DP adjusted local rank {self.local_rank} is out of bounds for {visible_device_count} devices."
+                )
+
+            visible_device_index = current_platform.logical_device_id_to_visible_device_id(self.local_rank)
+            device = torch.device(f"{current_platform.device_type}:{visible_device_index}")
+        else:
+            device = torch.device(f"npu:{self.local_rank}")
+
         torch.npu.set_device(device)
 
         # Import _inductor for graph mode execution with triton

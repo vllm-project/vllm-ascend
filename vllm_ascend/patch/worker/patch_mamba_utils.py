@@ -204,7 +204,7 @@ def _patched_create(cls, max_num_reqs, kv_cache_config, copy_funcs, make_buffer)
         max_num_reqs,
         kv_cache_config,
         copy_funcs,
-        lambda n, dtype: make_buffer(n, torch.int64 if dtype == torch.uint64 else dtype),
+        lambda n, dtype: make_buffer(n, dtype=torch.int64 if dtype == torch.uint64 else dtype),
     )
 
 

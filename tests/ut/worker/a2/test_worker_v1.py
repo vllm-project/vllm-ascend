@@ -288,6 +288,7 @@ class TestNPUWorker(TestBase):
             worker.parallel_config = MagicMock()
             worker.parallel_config.local_world_size = 0
             worker.parallel_config.data_parallel_size = 1
+            worker.parallel_config.assigned_physical_gpu_ids = None
             worker.vllm_config = MagicMock()
             worker.vllm_config.kv_transfer_config = None
             worker.cache_config = MagicMock()

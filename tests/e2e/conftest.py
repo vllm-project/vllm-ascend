@@ -881,6 +881,7 @@ def _run_vllm_runner_dp_worker(conn, llm_kwargs: dict[str, Any], dp_rank: int, d
 
         if not vllm_version_is("0.23.0"):
             from argparse import Namespace
+
             from vllm.entrypoints.openai.dp_supervisor import _build_device_ids
 
             _dp_device_ids = _build_device_ids(

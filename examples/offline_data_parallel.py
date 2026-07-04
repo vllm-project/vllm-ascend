@@ -133,6 +133,7 @@ def main(
     _dp_device_ids = None
     if not vllm_version_is("0.23.0"):
         from argparse import Namespace
+
         from vllm.entrypoints.openai.dp_supervisor import _build_device_ids
 
         _dp_device_ids = _build_device_ids(
