@@ -24,7 +24,7 @@ This document will demonstrate the primary validation steps for the model, inclu
 
 **Example 3: Version Information**
 
-This document is validated and written based on **vLLM-Ascend v0.13.0**. The current model (XXX) is fully supported in this version, and all **v0.13.0 and later versions** can run stably. To use the latest features (e.g., PD separation, MTP), it is recommended to use v0.13.0 or a later version.
+This document is validated and written based on **vLLM-Ascend v0.13.0**. The current model (XXX) is fully supported in this version, and all **v0.13.0 and later versions** can run stably. To use the latest features (e.g., PD separation, MTP), it is recommended to use the latest release candidate or official version.
 
 ## 2 Supported Features
 
@@ -247,7 +247,7 @@ Provide recommended configurations for three typical scenarios (long context, lo
 
 > For complete startup commands and parameter descriptions, please refer to the deployment examples in Chapter 5.
 
-### 9.2 Tuning Guidelines (Optional)
+### 9.2 Tuning Guidelines
 
 #### 9.2.1 General Tuning Reference
 
@@ -260,7 +260,7 @@ If no special tuning is involved, directly provide a feature combination table a
 Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
 Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
 
-#### 9.2.2 Model-Specific Optimizations
+#### 9.2.2 Model-Specific Optimizations (Optional)
 
 **Documentation Requirements:**
 
@@ -291,5 +291,5 @@ The following optimizations are enabled by default and require no additional con
 
 **Content Writing Requirements:**
 
-- Add a note at the beginning of the section: For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html); this chapter only covers model-specific issues.
+- Add a note at the beginning of the section: For common environment, installation, and general parameter issues, please refer to the [Public FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html); this chapter only covers model-specific issues.
 - For **model-specific issues**, provide the following elements: problem phenomenon description, cause analysis, and solution measures.

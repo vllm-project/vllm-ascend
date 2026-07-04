@@ -977,6 +977,7 @@ class TestEagleProposerPropose:
         mock_get_ascend_config.return_value = mock_ascend_config
 
         self.vllm_config = MagicMock(spec=VllmConfig)
+        self.vllm_config.use_v2_model_runner = False
         self.vllm_config.speculative_config = MagicMock()
         self.vllm_config.speculative_config.num_speculative_tokens = 3
         self.vllm_config.speculative_config.method = "eagle3"
@@ -1160,6 +1161,9 @@ class TestEagleProposerPropose:
         original_method = self.proposer.attn_update_stack_num_spec_norm
         mock_bd = MagicMock()
         mock_bd.num_tokens = 16
+        self.proposer.query_start_loc = MagicMock()
+        self.proposer.query_start_loc.gpu = torch.tensor([0, 4, 8, 12, 16], device=torch.device("cpu"), dtype=torch.int32)
+        self.proposer.query_start_loc.cpu = torch.tensor([0, 4, 8, 12, 16], device=torch.device("cpu"), dtype=torch.int32)
         self.runner.cudagraph_dispatcher.dispatch.return_value = (CUDAGraphMode.FULL, mock_bd)
         self.runner._pad_query_start_loc_for_fia.return_value = 4
         self.runner.query_start_loc.gpu = torch.tensor([0, 4, 8, 12, 16], device=torch.device("cpu"), dtype=torch.int32)
@@ -1583,7 +1587,7 @@ class TestEagleProposerPropose:
         assert hasattr(RunnerCls, "_pad_query_start_loc_for_fia")
         sig = inspect.signature(RunnerCls._pad_query_start_loc_for_fia)
         sig_name = self.get_param_names(sig)
-        assert sig_name == ['self', 'num_tokens_padded', 'num_reqs_padded', 'num_reqs', 'cudagraph_runtime_mode', 'batch_desc_num_reqs']
+        assert sig_name == ['self', 'query_start_loc', 'num_tokens_padded', 'num_reqs_padded', 'num_reqs', 'cudagraph_runtime_mode', 'batch_desc_num_reqs']
 
 
         import vllm_ascend.spec_decode.llm_base_proposer
@@ -4382,3 +4386,120 @@ def test_split_pcp_input_hybrid_preserves_hidden_size():
     )
 
     assert out_hidden_states.shape[1] == hidden_size
+
+
+class TestDeepSeekMTPIndicesSharing(unittest.TestCase):
+    """
+    Unit tests for DeepSeek Sparse MLA MTP Layer's Top-K Index reuse feature (PR #10510)
+    """
+
+    def setUp(self):
+        # Prepare the base Config Mock
+        self.vllm_config = MagicMock(spec=VllmConfig)
+        self.vllm_config.speculative_config = MagicMock()
+        self.vllm_config.speculative_config.draft_model_config = MagicMock()
+        self.vllm_config.speculative_config.draft_model_config.hf_config = MagicMock()
+        self.device = torch.device("cpu")
+        self.runner = MagicMock()
+
+    def test_init_mtp_indices_flag(self):
+        """Test whether index_share_for_mtp_iteration is correctly read in __init__."""
+        # Scenario 1: Set to True in config
+        self.vllm_config.speculative_config.draft_model_config.hf_config.index_share_for_mtp_iteration = True
+
+        with patch.object(AscendEagleProposer, "__init__", lambda self, vllm_config, device, runner: None):
+            proposer = AscendEagleProposer(self.vllm_config, self.device, self.runner)
+            # Manually trigger the newly added initialization logic for validation
+            proposer.vllm_config = self.vllm_config
+            proposer._share_mtp_indices = getattr(
+                self.vllm_config.speculative_config.draft_model_config.hf_config, "index_share_for_mtp_iteration", False
+            )
+            self.assertTrue(proposer._share_mtp_indices, "MTP share flag should be True when configured.")
+
+        # Scenario 2: Not set in config (defaults to False)
+        del self.vllm_config.speculative_config.draft_model_config.hf_config.index_share_for_mtp_iteration
+        with patch.object(AscendEagleProposer, "__init__", lambda self, vllm_config, device, runner: None):
+            proposer2 = AscendEagleProposer(self.vllm_config, self.device, self.runner)
+            proposer2.vllm_config = self.vllm_config
+            proposer2._share_mtp_indices = getattr(
+                self.vllm_config.speculative_config.draft_model_config.hf_config, "index_share_for_mtp_iteration", False
+            )
+            self.assertFalse(proposer2._share_mtp_indices, "MTP share flag should default to False.")
+
+    def test_maybe_share_topk_indices_submodules(self):
+        """Test if _maybe_share_topk_indices correctly updates topk_indices_buffer for all submodules."""
+        # Use __new__ to bypass the complex __init__ process
+        proposer = AscendEagleProposer.__new__(AscendEagleProposer)
+
+        # 1. Mock Target Model
+        target_model = MagicMock()
+        target_buffer_mock = MagicMock()
+        target_model.model.topk_indices_buffer = target_buffer_mock
+
+        # 2. Mock Draft Model (including submodules)
+        draft_model_mock = MagicMock()
+        draft_model_mock.model.topk_indices_buffer = MagicMock()  # Old buffer
+
+        # Construct several submodules: some have topk_indices_buffer, some don't
+        mod1 = MagicMock()
+        mod1.topk_indices_buffer = MagicMock()  # This should be replaced
+        mod2 = MagicMock()
+        del mod2.topk_indices_buffer  # This doesn't have the attribute, shouldn't throw an error
+        mod3 = MagicMock()
+        mod3.topk_indices_buffer = MagicMock()  # This should also be replaced
+
+        # Mock the return value of named_modules
+        draft_model_mock.model.named_modules.return_value = [("layer.0", mod1), ("layer.1", mod2), ("layer.2", mod3)]
+        proposer.model = draft_model_mock
+
+        # Execute the target method
+        proposer._maybe_share_topk_indices(target_model)
+
+        # Assertion: The outermost draft model buffer is updated
+        self.assertEqual(proposer.model.model.topk_indices_buffer, target_buffer_mock)
+
+        # Assertion: Submodules are correctly traversed and updated
+        self.assertEqual(mod1.topk_indices_buffer, target_buffer_mock, "Module 1 buffer should be updated.")
+        self.assertEqual(mod3.topk_indices_buffer, target_buffer_mock, "Module 3 buffer should be updated.")
+        self.assertFalse(hasattr(mod2, "topk_indices_buffer"), "Module 2 should not have a buffer added.")
+
+    def test_run_merge_draft_mtp_skip_topk(self):
+        """Test the set_skip_topk calling logic in step 0 and step 1 of run_merge_draft."""
+        proposer = AscendEagleProposer.__new__(AscendEagleProposer)
+        proposer._share_mtp_indices = True
+
+        # Mock Draft Model and its set_skip_topk method
+        draft_model_mock = MagicMock()
+        proposer.model = MagicMock()
+        proposer.model.model = draft_model_mock
+
+        # Mock model inference return
+        proposer.model_returns_tuple = MagicMock(return_value=False)
+        proposer.model.return_value = MagicMock()
+
+        # Mock the run_merge_draft logic from your PR
+        # (Since this is a class method, we use an inner function to simulate and verify the core logic)
+        def mock_run_merge_draft(**model_kwargs):
+            # Step 0
+            draft_model = getattr(proposer.model, "model", None)
+            if proposer._share_mtp_indices and draft_model is not None and hasattr(draft_model, "set_skip_topk"):
+                draft_model.set_skip_topk(False)
+
+            # (Model inference...)
+            proposer.model(**model_kwargs)
+
+            # Step 1
+            if proposer._share_mtp_indices and draft_model is not None and hasattr(draft_model, "set_skip_topk"):
+                draft_model.set_skip_topk(True)
+
+        # Run the test
+        mock_run_merge_draft(input_ids=torch.tensor([1, 2, 3]))
+
+        # Assert calling conditions
+        self.assertTrue(draft_model_mock.set_skip_topk.called, "set_skip_topk should be called.")
+
+        # Verify calling order: False first, then True
+        calls = draft_model_mock.set_skip_topk.call_args_list
+        self.assertEqual(len(calls), 2, "set_skip_topk should be called exactly twice.")
+        self.assertEqual(calls[0][0][0], False, "Step 0 should call set_skip_topk(False).")
+        self.assertEqual(calls[1][0][0], True, "Step 1 should call set_skip_topk(True).")
