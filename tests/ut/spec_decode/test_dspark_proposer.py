@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 from dataclasses import dataclass
 from types import SimpleNamespace
 
@@ -13,6 +14,36 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.spec_decode.dspark_proposer import AscendDSparkProposer
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+
+
+def test_dspark_perf_record_writes_jsonl(monkeypatch, tmp_path):
+    path = tmp_path / "dspark_perf.jsonl"
+    monkeypatch.setenv("VLLM_ASCEND_DSPARK_PERF_TRACE_PATH", str(path))
+    monkeypatch.setenv("VLLM_ASCEND_DSPARK_PERF_TRACE_MAX_RECORDS", "1")
+    monkeypatch.setenv("VLLM_ASCEND_DSPARK_PERF_TRACE_SYNC", "0")
+
+    proposer = SimpleNamespace(device=torch.device("cpu"), _dspark_perf_trace_records=0)
+    start_ns = dspark_proposer_module.time.perf_counter_ns()
+    AscendDSparkProposer._write_dspark_perf_record(
+        proposer,
+        "stage_a",
+        start_ns,
+        num_tokens=2,
+    )
+    AscendDSparkProposer._write_dspark_perf_record(
+        proposer,
+        "stage_b",
+        start_ns,
+        num_tokens=3,
+    )
+
+    lines = path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    record = json.loads(lines[0])
+    assert record["stage"] == "stage_a"
+    assert record["num_tokens"] == 2
+    assert record["elapsed_ms"] >= 0
+    assert proposer._dspark_perf_trace_records == 1
 
 
 class _FakeDSparkModel:

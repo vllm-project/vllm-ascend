@@ -134,6 +134,17 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_DSPARK_KV_WRITE_TRACE_MAX_RECORDS": lambda: int(
         os.getenv("VLLM_ASCEND_DSPARK_KV_WRITE_TRACE_MAX_RECORDS", "16")
     ),
+    # Optional JSONL path for DSpark proposer stage timing diagnostics.
+    "VLLM_ASCEND_DSPARK_PERF_TRACE_PATH": lambda: os.getenv("VLLM_ASCEND_DSPARK_PERF_TRACE_PATH", None),
+    # Maximum proposer timing records written per worker process.
+    "VLLM_ASCEND_DSPARK_PERF_TRACE_MAX_RECORDS": lambda: int(
+        os.getenv("VLLM_ASCEND_DSPARK_PERF_TRACE_MAX_RECORDS", "256")
+    ),
+    # Synchronize NPU before/after each timed DSpark stage. This is intrusive
+    # but gives more meaningful timings for diagnosis runs.
+    "VLLM_ASCEND_DSPARK_PERF_TRACE_SYNC": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_DSPARK_PERF_TRACE_SYNC", "1"))
+    ),
 }
 
 # end-env-vars-definition

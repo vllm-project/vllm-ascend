@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 import os
+import time
 from collections import defaultdict
 from copy import copy
 from dataclasses import replace
@@ -46,6 +48,34 @@ def _dspark_accept_debug_topk() -> int:
         return max(0, int(os.getenv("VLLM_ASCEND_DSPARK_ACCEPT_DEBUG_TOPK", "5")))
     except ValueError:
         return 5
+
+
+def _dspark_perf_trace_path() -> str | None:
+    return envs.VLLM_ASCEND_DSPARK_PERF_TRACE_PATH
+
+
+def _dspark_perf_trace_max_records() -> int:
+    return envs.VLLM_ASCEND_DSPARK_PERF_TRACE_MAX_RECORDS
+
+
+def _dspark_perf_trace_sync_enabled() -> bool:
+    return envs.VLLM_ASCEND_DSPARK_PERF_TRACE_SYNC
+
+
+def _dspark_perf_sync(device: torch.device | str | None = None) -> None:
+    if not _dspark_perf_trace_sync_enabled() or not hasattr(torch, "npu"):
+        return
+    if device is not None and torch.device(device).type != "npu":
+        return
+    try:
+        torch.npu.synchronize()
+    except RuntimeError:
+        return
+
+
+def _dspark_perf_start(device: torch.device | str | None = None) -> int:
+    _dspark_perf_sync(device)
+    return time.perf_counter_ns()
 
 
 def _debug_tensor_head(name: str, tensor: torch.Tensor, limit: int = 16) -> str:
@@ -224,6 +254,34 @@ class AscendDSparkProposer(AscendDflashProposer):
             self._dspark_max_request_slots,
             dtype=torch.int32,
         )
+        self._dspark_perf_trace_records = 0
+
+    def _write_dspark_perf_record(
+        self,
+        stage: str,
+        start_ns: int,
+        **kwargs: Any,
+    ) -> None:
+        path = _dspark_perf_trace_path()
+        if not path:
+            return
+        records = int(getattr(self, "_dspark_perf_trace_records", 0))
+        if records >= _dspark_perf_trace_max_records():
+            return
+
+        _dspark_perf_sync(getattr(self, "device", None))
+        elapsed_ms = (time.perf_counter_ns() - start_ns) / 1_000_000.0
+        record = {
+            "pid": os.getpid(),
+            "rank": os.getenv("RANK"),
+            "local_rank": os.getenv("LOCAL_RANK"),
+            "stage": stage,
+            "elapsed_ms": elapsed_ms,
+        }
+        record.update(kwargs)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=True) + "\n")
+        self._dspark_perf_trace_records = records + 1
 
     def load_model(self, model: torch.nn.Module) -> None:
         use_cuda_graph = self.use_cuda_graph
@@ -1451,6 +1509,9 @@ class AscendDSparkProposer(AscendDflashProposer):
             num_scheduled_tokens,
         )
 
+        perf_enabled = bool(_dspark_perf_trace_path())
+        total_start_ns = _dspark_perf_start(getattr(self, "device", None)) if perf_enabled else 0
+        stage_start_ns = total_start_ns
         num_tokens, token_indices_to_sample, _, _ = self.set_inputs_first_pass(
             target_token_ids=target_token_ids,
             next_token_ids=next_token_ids,
@@ -1466,6 +1527,13 @@ class AscendDSparkProposer(AscendDflashProposer):
         )
         assert self.runner is not None
         actual_num_reqs = common_attn_metadata.num_reqs
+        if perf_enabled:
+            self._write_dspark_perf_record(
+                "set_inputs_first_pass",
+                stage_start_ns,
+                num_tokens=int(num_tokens),
+                actual_num_reqs=int(actual_num_reqs),
+            )
 
         input_batch = getattr(self.runner, "input_batch", None)
         lora_requests = getattr(input_batch, "lora_id_to_lora_request", {})
@@ -1476,6 +1544,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         # speculative uniform-decode keys padded to the runner's decode length.
         uniform_decode = True
         use_cuda_graph = getattr(self, "use_cuda_graph", False)
+        stage_start_ns = _dspark_perf_start(getattr(self, "device", None)) if perf_enabled else 0
         if use_cuda_graph:
             aclgraph_runtime_mode, batch_descriptor = self.runner.cudagraph_dispatcher.dispatch(
                 num_tokens=num_tokens,
@@ -1516,6 +1585,19 @@ class AscendDSparkProposer(AscendDflashProposer):
         descriptor_num_reqs = getattr(batch_descriptor, "num_reqs", None)
         if descriptor_num_reqs is not None:
             model_num_reqs = max(actual_num_reqs, int(descriptor_num_reqs))
+        if perf_enabled:
+            self._write_dspark_perf_record(
+                "graph_dispatch_sync",
+                stage_start_ns,
+                num_tokens=int(num_tokens),
+                num_input_tokens=int(num_input_tokens),
+                actual_num_reqs=int(actual_num_reqs),
+                model_num_reqs=int(model_num_reqs),
+                use_cuda_graph=bool(use_cuda_graph),
+                aclgraph_runtime_mode=str(aclgraph_runtime_mode),
+            )
+
+        stage_start_ns = _dspark_perf_start(getattr(self, "device", None)) if perf_enabled else 0
         AscendDSparkProposer._copy_dspark_query_metadata(
             self,
             common_attn_metadata.query_start_loc,
@@ -1545,11 +1627,35 @@ class AscendDSparkProposer(AscendDflashProposer):
             model_num_tokens = num_input_tokens
             if isinstance(getattr(self, "_dspark_token_to_req_indices_buffer", None), torch.Tensor):
                 self._dspark_token_to_req_indices = self._dspark_token_to_req_indices_buffer[:model_num_tokens]
+        if perf_enabled:
+            self._write_dspark_perf_record(
+                "prepare_query_metadata",
+                stage_start_ns,
+                num_tokens=int(num_tokens),
+                num_input_tokens=int(num_input_tokens),
+                actual_num_reqs=int(actual_num_reqs),
+                model_num_reqs=int(model_num_reqs),
+                standard_dsa=bool(_dspark_standard_dsa_enabled()),
+            )
+
+        stage_start_ns = _dspark_perf_start(getattr(self, "device", None)) if perf_enabled else 0
         multi_steps_attn_metadata = (
             self._build_standard_dsa_attn_metadata(common_attn_metadata, num_input_tokens, num_tokens)
             if _dspark_standard_dsa_enabled()
             else []
         )
+        if perf_enabled:
+            self._write_dspark_perf_record(
+                "build_standard_dsa_metadata",
+                stage_start_ns,
+                num_tokens=int(num_tokens),
+                num_input_tokens=int(num_input_tokens),
+                actual_num_reqs=int(actual_num_reqs),
+                model_num_reqs=int(model_num_reqs),
+                metadata_maps=len(multi_steps_attn_metadata),
+            )
+
+        stage_start_ns = _dspark_perf_start(getattr(self, "device", None)) if perf_enabled else 0
         token_indices_to_sample_len = model_num_reqs * block_size
         token_indices_buffer = getattr(self, "token_indices_to_sample", None)
         if isinstance(token_indices_buffer, torch.Tensor) and token_indices_buffer.numel() >= token_indices_to_sample_len:
@@ -1584,6 +1690,14 @@ class AscendDSparkProposer(AscendDflashProposer):
                     (token_indices_to_sample[:actual_sample_count], pad_indices),
                     dim=0,
                 )
+        if perf_enabled:
+            self._write_dspark_perf_record(
+                "prepare_sample_indices",
+                stage_start_ns,
+                num_tokens=int(num_tokens),
+                num_input_tokens=int(num_input_tokens),
+                token_indices_to_sample_len=int(token_indices_to_sample_len),
+            )
 
         with set_ascend_forward_context(
             multi_steps_attn_metadata[0] if multi_steps_attn_metadata else None,
@@ -1610,16 +1724,48 @@ class AscendDSparkProposer(AscendDflashProposer):
                 and not _EXTRA_CTX.capturing
                 and getattr(self, "draft_attn_groups", [])
             ):
+                stage_start_ns = _dspark_perf_start(getattr(self, "device", None)) if perf_enabled else 0
                 self._update_full_graph_params(forward_context, num_input_tokens, multi_steps_attn_metadata)
+                if perf_enabled:
+                    self._write_dspark_perf_record(
+                        "update_full_graph_params",
+                        stage_start_ns,
+                        num_tokens=int(num_tokens),
+                        num_input_tokens=int(num_input_tokens),
+                        actual_num_reqs=int(actual_num_reqs),
+                        model_num_reqs=int(model_num_reqs),
+                    )
+            stage_start_ns = _dspark_perf_start(getattr(self, "device", None)) if perf_enabled else 0
             hidden_states = run_model(
                 num_input_tokens=model_num_tokens,
             )
+            if perf_enabled:
+                self._write_dspark_perf_record(
+                    "draft_model_forward",
+                    stage_start_ns,
+                    num_tokens=int(num_tokens),
+                    num_input_tokens=int(num_input_tokens),
+                    actual_num_reqs=int(actual_num_reqs),
+                    model_num_reqs=int(model_num_reqs),
+                    model_num_tokens=int(model_num_tokens),
+                    aclgraph_runtime_mode=str(getattr(forward_context, "cudagraph_runtime_mode", CUDAGraphMode.NONE)),
+                )
+            stage_start_ns = _dspark_perf_start(getattr(self, "device", None)) if perf_enabled else 0
             draft_token_ids = self._sample_sequential(
                 model_num_reqs,
                 hidden_states,
                 runnable_token_indices,
                 sampling_metadata,
             )
+            if perf_enabled:
+                self._write_dspark_perf_record(
+                    "sample_sequential",
+                    stage_start_ns,
+                    num_tokens=int(num_tokens),
+                    num_input_tokens=int(num_input_tokens),
+                    actual_num_reqs=int(actual_num_reqs),
+                    model_num_reqs=int(model_num_reqs),
+                )
             if model_num_reqs != actual_num_reqs:
                 draft_token_ids = draft_token_ids[:actual_num_reqs]
                 if isinstance(getattr(self, "_dspark_last_draft_logits", None), torch.Tensor):
@@ -1643,4 +1789,13 @@ class AscendDSparkProposer(AscendDflashProposer):
                     f"{_debug_tensor_head('draft_token_ids', draft_token_ids)}",
                     flush=True,
                 )
+        if perf_enabled:
+            self._write_dspark_perf_record(
+                "propose_total",
+                total_start_ns,
+                num_tokens=int(num_tokens),
+                num_input_tokens=int(num_input_tokens),
+                actual_num_reqs=int(actual_num_reqs),
+                model_num_reqs=int(model_num_reqs),
+            )
         return draft_token_ids
