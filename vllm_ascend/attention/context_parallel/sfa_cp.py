@@ -2,6 +2,7 @@ from typing import TypeVar
 
 import numpy as np
 import torch
+import torch.distributed as dist
 import torch_npu
 from vllm.config import VllmConfig
 from vllm.distributed import get_dcp_group, get_pcp_group
@@ -13,11 +14,11 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.common_cp import (
     AscendPCPMetadata,
     _npu_attention_update,
-    _process_attn_out_lse,
 )
 from vllm_ascend.attention.sfa_v1 import DCPContext, AscendSFAImpl, AscendSFAMetadata, AscendSFAMetadataBuilder
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, enabling_mlapo, split_decodes_and_prefills
 from vllm_ascend.distributed.utils import (
+    all_gather_async,
     get_decode_context_model_parallel_rank,
     get_decode_context_model_parallel_world_size,
 )
@@ -795,6 +796,34 @@ class AscendSFADCPImpl(AscendSFAImpl):
                 "Invalid cp_kv_cache_interleave_size: "
                 f"{self.cp_kv_cache_interleave_size}"
             )
+
+    def _all_gather_dim_async(
+        self,
+        x: torch.Tensor,
+        dim: int,
+    ) -> tuple[torch.Tensor, torch.distributed.Work | None, tuple[int, ...] | None]:
+        assert self.dcp_group is not None
+        if dim == 0:
+            gathered, handle = all_gather_async(x.contiguous(), self.dcp_group)
+            return gathered, handle, None
+
+        perm = (dim, *[i for i in range(x.dim()) if i != dim])
+        restore_perm = tuple(perm.index(i) for i in range(x.dim()))
+        gathered, handle = all_gather_async(x.permute(perm).contiguous(), self.dcp_group)
+        return gathered, handle, restore_perm
+
+    @staticmethod
+    def _finish_all_gather_dim(
+        gathered: torch.Tensor,
+        handle: torch.distributed.Work | None,
+        restore_perm: tuple[int, ...] | None,
+    ) -> torch.Tensor:
+        if handle is not None:
+            handle.wait()
+        if restore_perm is not None:
+            gathered = gathered.permute(restore_perm).contiguous()
+        return gathered
+
     def _remap_sparse_indices_for_dcp(self, topk_indices: torch.Tensor) -> torch.Tensor:
         if self.dcp_size <= 1:
             return topk_indices
@@ -831,35 +860,65 @@ class AscendSFADCPImpl(AscendSFAImpl):
         # so merge the per-DCP partial outputs explicitly instead of using the
         # common CP helper, which assumes DCP also shards heads.
         num_tokens, num_heads, _ = sfa_output.shape
-        attn_out_lse = torch.cat(
-            [sfa_output.to(torch.float32), softmax_lse.to(torch.float32)],
-            dim=-1,
-        ).contiguous()
         assert self.dcp_group is not None
-        attn_out_lse = self.dcp_group.all_gather(attn_out_lse, dim=0)
-        attn_out_lse = attn_out_lse.view(
+        out_flat = self.dcp_group.all_gather(sfa_output.contiguous(), dim=0)
+        lse_flat = self.dcp_group.all_gather(softmax_lse.contiguous(), dim=0)
+        out_flat = out_flat.view(
             self.dcp_size,
             num_tokens,
             num_heads,
-            self.kv_lora_rank + 1,
+            self.kv_lora_rank,
         )
-        out_flat, lse_flat = torch.split(attn_out_lse, [self.kv_lora_rank, 1], dim=-1)
-        out_flat = out_flat.flatten(1, 2)
-        lse_flat = lse_flat.flatten(1, -1)
+        lse_flat = lse_flat.view(
+            self.dcp_size,
+            num_tokens,
+            num_heads,
+            1,
+        )
+        out_flat = out_flat.to(torch.float32).flatten(1, 2)
+        lse_flat = lse_flat.to(torch.float32).flatten(1, -1)
         output, _ = torch_npu.npu_attention_update(lse_flat.unbind(0), out_flat.unbind(0), 0)
         return output.view(num_tokens, num_heads, self.kv_lora_rank)
+
+    def _merge_dcp_outputs(
+        self,
+        sfa_output: torch.Tensor,
+        softmax_lse: torch.Tensor,
+    ) -> torch.Tensor:
+        assert self.dcp_group is not None
+
+        output_send = sfa_output.permute(1, 2, 0).contiguous()
+        output_recv = torch.empty_like(output_send)
+        dist.all_to_all_single(
+            output_recv,
+            output_send,
+            group=self.dcp_group.device_group,
+        )
+        output_recv = output_recv.permute(2, 0, 1).contiguous()
+
+        lse_send = softmax_lse.to(torch.float32).permute(1, 2, 0).contiguous()
+        lse_recv = torch.empty_like(lse_send)
+        dist.all_to_all_single(
+            lse_recv,
+            lse_send,
+            group=self.dcp_group.device_group,
+        )
+        lse_recv = lse_recv.permute(2, 0, 1).contiguous()
+
+        attn_out_lse = torch.cat([output_recv.to(torch.float32), lse_recv], dim=-1)
+        return _npu_attention_update(self.kv_lora_rank, attn_out_lse)
 
     def _select_dsa_cp_local_tokens(self, output: torch.Tensor, attn_metadata: M) -> torch.Tensor:
         assert attn_metadata.dsa_cp_context is not None
         dsa_cp_context = attn_metadata.dsa_cp_context
         return output[dsa_cp_context.local_start : dsa_cp_context.local_end_with_pad]
 
-    def _all_gather_query_for_dcp(
+    def _all_gather_query_for_dcp_async(
         self,
         ql_nope: torch.Tensor,
         q_pe: torch.Tensor,
         dim: int,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.distributed.Work | None, tuple[int, ...] | None, int, int]:
         assert self.dcp_group is not None
         if ql_nope.shape[:-1] != q_pe.shape[:-1] or ql_nope.dtype != q_pe.dtype:
             raise RuntimeError(
@@ -875,7 +934,32 @@ class AscendSFADCPImpl(AscendSFAImpl):
         # incomplete stream dependency on the first prefill. DSA-CP restores
         # token shards on dim 0; native DCP restores query shards on dim 1.
         fused_q = torch.cat([ql_nope, q_pe], dim=-1).contiguous()
-        fused_q = self.dcp_group.all_gather(fused_q, dim=dim)
+        gathered, handle, restore_perm = self._all_gather_dim_async(fused_q, dim)
+        return gathered, handle, restore_perm, ql_nope_dim, q_pe_dim
+
+    def _start_dcp_query_gather(
+        self,
+        ql_nope: torch.Tensor,
+        q_pe: torch.Tensor,
+        attn_metadata: M,
+    ) -> tuple[torch.Tensor, torch.distributed.Work | None, tuple[int, ...] | None, int, int]:
+        assert attn_metadata.dcp_context is not None
+        query_gather_dim = 0 if self.enable_dsa_cp else 1
+        return self._all_gather_query_for_dcp_async(
+            ql_nope.contiguous(),
+            q_pe.contiguous(),
+            dim=query_gather_dim,
+        )
+
+    def _finish_all_gather_query_for_dcp(
+        self,
+        gathered: torch.Tensor,
+        handle: torch.distributed.Work | None,
+        restore_perm: tuple[int, ...] | None,
+        ql_nope_dim: int,
+        q_pe_dim: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        fused_q = self._finish_all_gather_dim(gathered, handle, restore_perm)
         ql_nope, q_pe = torch.split(fused_q, [ql_nope_dim, q_pe_dim], dim=-1)
         return ql_nope, q_pe
 
@@ -888,10 +972,13 @@ class AscendSFADCPImpl(AscendSFAImpl):
         attn_metadata,
         actual_seq_lengths_query,
         actual_seq_lengths_key,
+        query_gather_context=None,
     ):
         assert attn_metadata.dcp_context is not None
         assert self.dcp_group is not None
-        query_gather_dim = 0 if self.enable_dsa_cp else 1
+        if query_gather_context is None:
+            query_gather_context = self._start_dcp_query_gather(ql_nope, q_pe, attn_metadata)
+        q_gathered, q_handle, q_restore_perm, ql_nope_dim, q_pe_dim = query_gather_context
         if self.enable_dsa_cp:
             # DSA-CP shards the token sequence. Restore the flat token order for
             # SFA, and use the original full query lengths for varlen metadata.
@@ -900,12 +987,14 @@ class AscendSFADCPImpl(AscendSFAImpl):
             # the DSA token shards first, then remap for this receiver rank's
             # DCP-local KV shard.
             topk_indices = self.dcp_group.all_gather(topk_indices.contiguous(), dim=0)
-        ql_nope, q_pe = self._all_gather_query_for_dcp(
-            ql_nope.contiguous(),
-            q_pe.contiguous(),
-            dim=query_gather_dim,
-        )
         topk_indices = self._remap_sparse_indices_for_dcp(topk_indices)
+        ql_nope, q_pe = self._finish_all_gather_query_for_dcp(
+            q_gathered,
+            q_handle,
+            q_restore_perm,
+            ql_nope_dim,
+            q_pe_dim,
+        )
         kv = kv_cache[0]
         key_rope = kv_cache[1]
         sfa_output, softmax_max, softmax_sum = torch.ops._C_ascend.npu_sparse_flash_attention(
@@ -939,6 +1028,5 @@ class AscendSFADCPImpl(AscendSFAImpl):
             output = self._merge_dsa_cp_dcp_outputs(sfa_output, softmax_lse)
             output = self._select_dsa_cp_local_tokens(output, attn_metadata)
             return output.to(output_dtype)
-        attn_out_lse = _process_attn_out_lse(sfa_output.to(torch.float32), softmax_lse)
-        output = _npu_attention_update(self.kv_lora_rank, attn_out_lse)
+        output = self._merge_dcp_outputs(sfa_output, softmax_lse)
         return output.to(output_dtype)
