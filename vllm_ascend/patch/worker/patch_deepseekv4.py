@@ -244,18 +244,12 @@ def afd_ffn_compute(
     if ffn_side_gating:
         # input_ids 已由 recv_attn_output 从 attention 侧通过 P2P 接收并
         # 设置到 forward_context 中, 供 tid2eid (logical→physical expert 映射) 使用。
-        # 注意: prepare 对 hidden_states/router_logits 做了 DP all-gather
-        # (EP 模式下走 _prepare_with_ep_group → maybe_all_gather_and_maybe_unpad),
-        # 但 input_ids 未被同步 all-gather。select_experts 内部会重新从
-        # forward_context.input_ids 读取 (experts_selector.py:256), 若不
-        # all-gather, 则 N 个 token 共用 1 个 input_id, 导致 tid2eid 映射
-        # 对所有 token 相同 → 路由坍缩 → 输出乱码。
+        # select_experts 内部会从 forward_context.input_ids 读取并自行调用
+        # pad_and_split_input_ids / all_gather_input_id_with_dp_group 处理 pad,
+        # 因此这里无需再调用 maybe_all_gather_and_maybe_unpad (该 op 在
+        # flash_comm_v1_enabled=False 时为 no-op, 调用无效)。
         fwd_ctx = get_forward_context()
         input_ids = getattr(fwd_ctx, "input_ids", None)
-        if input_ids is not None and input_ids.shape[0] != hidden_states.shape[0]:
-            input_ids = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
-                input_ids, True, True)
-            fwd_ctx.input_ids = input_ids
         # 与 quant_method.apply 保持一致：使用 num_logical_experts 而非
         # moe_config.num_experts, 避免 tid2eid 映射越界导致乱码。
         num_shared_experts = getattr(self, "n_shared_experts", 0)
@@ -377,11 +371,38 @@ def afd_ffn_compute(
     fused_experts_results = moe_comm_method.fused_experts(
         fused_experts_input=fused_experts_input)
 
+    # 诊断: MoE 专家计算输出 (dispatch+MLP+combine 之后, finalize 之前)
+    _moe_out = fused_experts_results.routed_out
+    logger.info(
+        "[FFN_MOE_OUT] routed_out shape=%s dtype=%s mean=%.6f std=%.6f "
+        "min=%.6f max=%.6f has_nan=%s has_inf=%s",
+        tuple(_moe_out.shape), _moe_out.dtype,
+        _moe_out.float().mean().item(),
+        _moe_out.float().std().item(),
+        _moe_out.float().min().item(),
+        _moe_out.float().max().item(),
+        torch.isnan(_moe_out).any().item(),
+        torch.isinf(_moe_out).any().item(),
+    )
+
     # 5. finalize — all-reduce / unpad.
     routed_out = moe_comm_method.finalize(
         hidden_states=fused_experts_results.routed_out,
         reduce_results=isinstance(moe_comm_method, AllGatherCommImpl),
         padded_hidden_states_shape=padded_hidden_states_shape,
+    )
+
+    # 诊断: finalize 输出 (all-reduce / unpad 之后, 返回给 afd_forward 之前)
+    logger.info(
+        "[FFN_FINALIZE_OUT] routed_out shape=%s dtype=%s mean=%.6f std=%.6f "
+        "min=%.6f max=%.6f has_nan=%s has_inf=%s",
+        tuple(routed_out.shape), routed_out.dtype,
+        routed_out.float().mean().item(),
+        routed_out.float().std().item(),
+        routed_out.float().min().item(),
+        routed_out.float().max().item(),
+        torch.isnan(routed_out).any().item(),
+        torch.isinf(routed_out).any().item(),
     )
 
     return routed_out
