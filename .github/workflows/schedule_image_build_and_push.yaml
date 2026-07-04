@@ -18,13 +18,13 @@ on:
         description: "Docker tag for build results (mutually exclusive with branch)"
         default: "none"
         required: false
-        type: choice
+        type: string
 
       branch:
         description: "Docker branch for build results (mutually exclusive with tag)"
         default: "main"
         required: false
-        type: choice
+        type: string
 
       vllm_commit:
         description: "vLLM commit hash (must be paired with vllm_ascend_commit; mutually exclusive with tag/branch). Image will be pushed only to QUAY_TEMP_USERNAME."
