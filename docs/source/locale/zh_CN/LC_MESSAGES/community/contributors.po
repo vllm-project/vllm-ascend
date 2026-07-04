@@ -1,14 +1,8 @@
-# SOME DESCRIPTIVE TITLE.
-# Copyright (C) 2025, vllm-ascend team
-# This file is distributed under the same license as the vllm-ascend
-# package.
-# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
-#
 msgid ""
 msgstr ""
-"Project-Id-Version: vllm-ascend \n"
+"Project-Id-Version:  vllm-ascend-docs\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-02 07:02+0000\n"
+"POT-Creation-Date: 2026-07-04 04:01+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -385,6 +379,19 @@ msgstr "462"
 msgid "[@x1314aq](https://github.com/x1314aq)"
 msgstr "[@x1314aq](https://github.com/x1314aq)"
 
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend documentation\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-06-16 00:00+0000\n"
+"PO-Revision-Date: 2026-06-16 00:00+0000\n"
+"Last-Translator: \n"
+"Language-Team: Chinese\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
 #: ../../source/community/contributors.md
 msgid "2026/06/16"
 msgstr "2026/06/16"
@@ -757,6 +764,19 @@ msgstr "441"
 msgid "[@cfq0](https://github.com/cfq0)"
 msgstr "[@cfq0](https://github.com/cfq0)"
 
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend documentation\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-06-04 00:00+0000\n"
+"PO-Revision-Date: 2026-06-04 00:00+0000\n"
+"Last-Translator: \n"
+"Language-Team: Chinese\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
 #: ../../source/community/contributors.md
 msgid "2026/06/04"
 msgstr "2026/06/04"
@@ -1102,6 +1122,10 @@ msgid "421"
 msgstr "421"
 
 #: ../../source/community/contributors.md
+msgid "[@internel-error](https://github.com/internel-error)"
+msgstr "[@internel-error](https://github.com/internel-error)"
+
+#: ../../source/community/contributors.md
 msgid "2026/05/27"
 msgstr "2026/05/27"
 
@@ -1120,6 +1144,19 @@ msgstr "420"
 #: ../../source/community/contributors.md
 msgid "[@zhao-stack](https://github.com/zhao-stack)"
 msgstr "[@zhao-stack](https://github.com/zhao-stack)"
+
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend documentation\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-25 00:00+0800\n"
+"PO-Revision-Date: 2026-05-25 00:00+0800\n"
+"Last-Translator: \n"
+"Language-Team: Chinese\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
 
 #: ../../source/community/contributors.md
 msgid "2026/05/25"
@@ -1541,14 +1578,6 @@ msgstr ""
 msgid "397"
 msgstr "397"
 
-msgid ""
-msgstr ""
-"Project-Id-Version: vllm-ascend-docs\n"
-"Language: zh_CN\n"
-"MIME-Version: 1.0\n"
-"Content-Type: text/plain; charset=UTF-8\n"
-"Content-Transfer-Encoding: 8bit\n"
-
 #: ../../source/community/contributors.md
 msgid "[@Lin-Qingyang-Alec](https://github.com/Lin-Qingyang-Alec)"
 msgstr "[@Lin-Qingyang-Alec](https://github.com/Lin-Qingyang-Alec)"
@@ -1849,9 +1878,6 @@ msgstr "380"
 msgid "[@yangjiuhua](https://github.com/yangjiuhua)"
 msgstr "[@yangjiuhua](https://github.com/yangjiuhua)"
 
-msgid ""
-msgstr ""
-
 #: ../../source/community/contributors.md
 msgid "2026/04/15"
 msgstr "2026/04/15"
@@ -2057,6 +2083,14 @@ msgid "2026/03/27"
 msgstr "2026/03/27"
 
 #: ../../source/community/contributors.md
+msgid ""
+"[5ae3ded](https://github.com/vllm-project/vllm-"
+"ascend/commit/5ae3ded92f8fca335bad1c269a43d2c5f8fb5ae8)"
+msgstr ""
+"[5ae3ded](https://github.com/vllm-project/vllm-"
+"ascend/commit/5ae3ded92f8fca335bad1c269a43d2c5f8fb5ae8)"
+
+#: ../../source/community/contributors.md
 msgid "368"
 msgstr "368"
 
@@ -2144,6 +2178,7 @@ msgstr "363"
 msgid "[@cvSoldier](https://github.com/cvSoldier)"
 msgstr "[@cvSoldier](https://github.com/cvSoldier)"
 
+#: ../../source/community/contributors.md
 msgid ""
 "[71ac6d4](https://github.com/vllm-project/vllm-"
 "ascend/commit/71ac6d4f7de55866355351359f4bdb7ead935159)"
@@ -2975,6 +3010,19 @@ msgstr ""
 msgid "316"
 msgstr "316"
 
+msgid ""
+msgstr ""
+"Project-Id-Version: PACKAGE VERSION\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2024-01-01 00:00+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
 #: ../../source/community/contributors.md
 msgid "[@luomin2005](https://github.com/luomin2005)"
 msgstr "[@luomin2005](https://github.com/luomin2005)"
@@ -3718,6 +3766,19 @@ msgid ""
 msgstr ""
 "[ec35633](https://github.com/vllm-project/vllm-"
 "ascend/commit/ec3563334b7f95925131ab758378341d23895863)"
+
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend Documentation\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-02-18 17:00+0800\n"
+"PO-Revision-Date: 2025-02-18 17:00+0800\n"
+"Last-Translator: \n"
+"Language-Team: \n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
 
 #: ../../source/community/contributors.md
 msgid "275"
@@ -5195,7 +5256,6 @@ msgstr "[@Meihan-chen](https://github.com/Meihan-chen)"
 msgid "2025/10/29"
 msgstr "2025/10/29"
 
-#: ../../source/community/contributors.md
 msgid ""
 "[cba69e1](https://github.com/vllm-project/vllm-"
 "ascend/commit/cba69e117eaa8c5d31fca64b01aecb22d3162860)"
@@ -5566,6 +5626,19 @@ msgstr ""
 #: ../../source/community/contributors.md
 msgid "173"
 msgstr "173"
+
+msgid ""
+msgstr ""
+"Project-Id-Version: PACKAGE VERSION\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-02-19 18:00+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
 
 #: ../../source/community/contributors.md
 msgid "[@yuzhup](https://github.com/yuzhup)"
@@ -8077,7 +8150,7 @@ msgstr "[@heartStrive1998](https://github.com/heartStrive1998)"
 
 #: ../../source/community/contributors.md
 msgid "2025/04/16"
-msgstr "2025/04/16"
+msgstr "2025年04月16日"
 
 #: ../../source/community/contributors.md
 msgid ""
@@ -8097,7 +8170,7 @@ msgstr "[@eeethenQ](https://github.com/eeethenQ)"
 
 #: ../../source/community/contributors.md
 msgid "2025/04/15"
-msgstr "2025/04/15"
+msgstr "2025年04月15日"
 
 #: ../../source/community/contributors.md
 msgid ""
@@ -8117,7 +8190,7 @@ msgstr "[@wxsIcey](https://github.com/wxsIcey)"
 
 #: ../../source/community/contributors.md
 msgid "2025/04/10"
-msgstr "2025/04/10"
+msgstr "2025年04月10日"
 
 #: ../../source/community/contributors.md
 msgid ""
@@ -8137,7 +8210,7 @@ msgstr "[@yx0716](https://github.com/yx0716)"
 
 #: ../../source/community/contributors.md
 msgid "2025/04/08"
-msgstr "2025/04/08"
+msgstr "2025年04月08日"
 
 #: ../../source/community/contributors.md
 msgid ""
@@ -8157,7 +8230,7 @@ msgstr "[@antonlisq](https://github.com/antonlisq)"
 
 #: ../../source/community/contributors.md
 msgid "2025/04/07"
-msgstr "2025/04/07"
+msgstr "2025年04月07日"
 
 #: ../../source/community/contributors.md
 msgid ""
@@ -8530,6 +8603,19 @@ msgstr "11"
 #: ../../source/community/contributors.md
 msgid "[@ji-huazhong](https://github.com/ji-huazhong)"
 msgstr "[@ji-huazhong](https://github.com/ji-huazhong)"
+
+msgid ""
+msgstr ""
+"Project-Id-Version: PACKAGE VERSION\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-02-12 00:00+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
 
 #: ../../source/community/contributors.md
 msgid "2025/02/12"

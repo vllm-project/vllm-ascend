@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-02 07:02+0000\n"
+"POT-Creation-Date: 2026-07-04 04:01+0000\n"
 "PO-Revision-Date: 2026-04-10 18:37+0800\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -36,9 +36,8 @@ msgid ""
 "and agent capabilities while maintaining lower computational cost "
 "compared to dense models of similar capability."
 msgstr ""
-"Qwen3-30B-A3B 是 Qwen3 系列中的混合专家（MoE）模型，总参数量为 30.5B，每个 token 激活 3.3B 参数。"
-"稀疏 MoE 架构支持高效的训练和推理，在推理、指令遵循和智能体能力方面表现出色，"
-"同时与同等能力的稠密模型相比，计算成本更低。"
+"Qwen3-30B-A3B 是 Qwen3 系列中的混合专家（MoE）模型，总参数量为 30.5B，每个 token 激活 3.3B 参数。稀疏 "
+"MoE 架构支持高效的训练和推理，在推理、指令遵循和智能体能力方面表现出色，同时与同等能力的稠密模型相比，计算成本更低。"
 
 #: ../../source/tutorials/models/Qwen3-30B-A3B.md:7
 msgid ""
@@ -47,8 +46,8 @@ msgid ""
 "environment preparation, single-node deployment, as well as accuracy and "
 "performance evaluation."
 msgstr ""
-"本文档将演示在 vLLM-Ascend 环境中对 Qwen3-30B-A3B 的主要验证步骤，"
-"包括支持的特性、环境准备、单节点部署以及精度和性能评估。"
+"本文档将演示在 vLLM-Ascend 环境中对 Qwen3-30B-A3B "
+"的主要验证步骤，包括支持的特性、环境准备、单节点部署以及精度和性能评估。"
 
 #: ../../source/tutorials/models/Qwen3-30B-A3B.md:9
 msgid ""
@@ -58,8 +57,8 @@ msgid ""
 "features, it is recommended to use the latest release candidate or "
 "official version."
 msgstr ""
-"Qwen3-30B-A3B 模型首次在 v0.8.4rc2 版本中得到支持。本文档基于 **vLLM-Ascend v0.22.1rc** 进行验证和编写。"
-"所有 **v0.22.1rc 及更高版本** 均可稳定运行。要使用最新特性，建议使用最新的候选发布版或正式版。"
+"Qwen3-30B-A3B 模型首次在 v0.8.4rc2 版本中得到支持。本文档基于 **vLLM-Ascend v0.22.1rc** "
+"进行验证和编写。所有 **v0.22.1rc 及更高版本** 均可稳定运行。要使用最新特性，建议使用最新的候选发布版或正式版。"
 
 #: ../../source/tutorials/models/Qwen3-30B-A3B.md:11
 msgid "2 Supported Features"
@@ -70,16 +69,14 @@ msgid ""
 "Please refer to the [Supported Features "
 "List](../../user_guide/support_matrix/supported_models.md) for the model "
 "support matrix."
-msgstr ""
-"请参考[支持的特性列表](../../user_guide/support_matrix/supported_models.md)了解模型支持矩阵。"
+msgstr "请参考[支持的特性列表](../../user_guide/support_matrix/supported_models.md)了解模型支持矩阵。"
 
 #: ../../source/tutorials/models/Qwen3-30B-A3B.md:15
 msgid ""
 "Please refer to the [Feature "
 "Guide](../../user_guide/feature_guide/index.md) for feature configuration"
 " information."
-msgstr ""
-"请参考[特性指南](../../user_guide/feature_guide/index.md)了解特性配置信息。"
+msgstr "请参考[特性指南](../../user_guide/feature_guide/index.md)了解特性配置信息。"
 
 #: ../../source/tutorials/models/Qwen3-30B-A3B.md:17
 msgid "3 Prerequisites"
@@ -93,8 +90,7 @@ msgstr "3.1 模型权重"
 msgid ""
 "The following model variants are available. It is recommended to download"
 " the model weight to a shared directory accessible to all nodes."
-msgstr ""
-"以下模型变体可用。建议将模型权重下载到所有节点均可访问的共享目录中。"
+msgstr "以下模型变体可用。建议将模型权重下载到所有节点均可访问的共享目录中。"
 
 #: ../../source/tutorials/models/Qwen3-30B-A3B.md
 msgid "Model"
@@ -144,8 +140,7 @@ msgstr "[下载](https://huggingface.co/AngelSlim/Qwen3-a3B_eagle3)"
 msgid ""
 "These are the recommended numbers of cards, which can be adjusted "
 "according to the actual situation."
-msgstr ""
-"这些是推荐的卡数，可根据实际情况进行调整。"
+msgstr "这些是推荐的卡数，可根据实际情况进行调整。"
 
 #: ../../source/tutorials/models/Qwen3-30B-A3B.md:31
 msgid ""
@@ -156,16 +151,14 @@ msgid ""
 "model paths in this document should be adjusted to your actual local "
 "paths."
 msgstr ""
-"如果 W8A8 量化权重无法直接下载，您可以使用 **msmodelslim** 对 BF16 模型进行量化来获取。"
-"详情请参考[量化指南](../../user_guide/feature_guide/quantization.md)。"
-"本文档中的所有模型路径都应调整为您的实际本地路径。"
+"如果 W8A8 量化权重无法直接下载，您可以使用 **msmodelslim** 对 BF16 "
+"模型进行量化来获取。详情请参考[量化指南](../../user_guide/feature_guide/quantization.md)。本文档中的所有模型路径都应调整为您的实际本地路径。"
 
 #: ../../source/tutorials/models/Qwen3-30B-A3B.md:34
 msgid ""
 "Qwen3-30B-A3B-W8A8 adopts a hybrid quantization strategy (ordered by "
 "model structure):"
-msgstr ""
-"Qwen3-30B-A3B-W8A8 采用混合量化策略（按模型结构排序）："
+msgstr "Qwen3-30B-A3B-W8A8 采用混合量化策略（按模型结构排序）："
 
 #: ../../source/tutorials/models/Qwen3-30B-A3B.md:36
 msgid "**Embedding layer**: BF16 (no quantization)"
@@ -179,8 +172,7 @@ msgstr "**Q/K 归一化**（q_norm, k_norm）：BF16"
 msgid ""
 "**Attention projections** (q/k/v/o_proj): Static W8A8 with pre-computed "
 "per-tensor scales"
-msgstr ""
-"**注意力投影**（q/k/v/o_proj）：静态 W8A8，使用预计算的逐张量缩放因子"
+msgstr "**注意力投影**（q/k/v/o_proj）：静态 W8A8，使用预计算的逐张量缩放因子"
 
 #: ../../source/tutorials/models/Qwen3-30B-A3B.md:39
 msgid "**MoE routing gate** (mlp.gate): BF16"
@@ -190,8 +182,7 @@ msgstr "**MoE 路由门控**（mlp.gate）：BF16"
 msgid ""
 "**MoE expert projections** (gate/up/down_proj): Dynamic W8A8 where input "
 "scales are computed on-the-fly during inference"
-msgstr ""
-"**MoE 专家投影**（gate/up/down_proj）：动态 W8A8，推理过程中实时计算输入缩放因子"
+msgstr "**MoE 专家投影**（gate/up/down_proj）：动态 W8A8，推理过程中实时计算输入缩放因子"
 
 #: ../../source/tutorials/models/Qwen3-30B-A3B.md:43
 msgid "4 Installation"
@@ -225,8 +216,9 @@ msgid ""
 "`/dev/davinci[0-15]`). If you are on a shared machine, map only the chips"
 " you need (e.g., `/dev/davinci[0-7]` for NPU 0-3)."
 msgstr ""
-"A3 有 8 个 NPU，采用双芯片设计（共 16 个芯片：`/dev/davinci[0-15]`）。"
-"如果您在共享机器上，只需映射您需要的芯片（例如，NPU 0-3 使用 `/dev/davinci[0-7]`）。"
+"A3 有 8 个 NPU，采用双芯片设计（共 16 "
+"个芯片：`/dev/davinci[0-15]`）。如果您在共享机器上，只需映射您需要的芯片（例如，NPU 0-3 使用 "
+"`/dev/davinci[0-7]`）。"
 
 #: ../../source/tutorials/models/Qwen3-30B-A3B.md
 msgid "Atlas 800I A2"
@@ -236,8 +228,7 @@ msgstr "Atlas 800I A2"
 msgid ""
 "The default workdir is `/workspace`. vLLM and vLLM-Ascend are installed "
 "as Python packages in site-packages."
-msgstr ""
-"默认工作目录是 `/workspace`。vLLM 和 vLLM-Ascend 作为 Python 包安装在 site-packages 中。"
+msgstr "默认工作目录是 `/workspace`。vLLM 和 vLLM-Ascend 作为 Python 包安装在 site-packages 中。"
 
 #: ../../source/tutorials/models/Qwen3-30B-A3B.md:169
 #: ../../source/tutorials/models/Qwen3-30B-A3B.md:205
@@ -248,22 +239,19 @@ msgstr "**安装验证：**"
 msgid ""
 "After starting the container, run the following command to verify the "
 "installation:"
-msgstr ""
-"启动容器后，运行以下命令验证安装："
+msgstr "启动容器后，运行以下命令验证安装："
 
 #: ../../source/tutorials/models/Qwen3-30B-A3B.md:177
 msgid ""
 "Expected result: The container is listed with status `Up`. You can also "
 "verify the vllm-ascend version inside the container:"
-msgstr ""
-"预期结果：容器列出，状态为 `Up`。您还可以在容器内验证 vllm-ascend 版本："
+msgstr "预期结果：容器列出，状态为 `Up`。您还可以在容器内验证 vllm-ascend 版本："
 
 #: ../../source/tutorials/models/Qwen3-30B-A3B.md:183
 msgid ""
 "Expected result: The version information is displayed, matching the "
 "pulled image version."
-msgstr ""
-"预期结果：显示版本信息，与拉取的镜像版本匹配。"
+msgstr "预期结果：显示版本信息，与拉取的镜像版本匹配。"
 
 #: ../../source/tutorials/models/Qwen3-30B-A3B.md:185
 msgid "4.2 Source Code Installation"
@@ -273,8 +261,7 @@ msgstr "4.2 源码安装"
 msgid ""
 "If you prefer not to use the Docker image, you can build from source. "
 "Install vLLM from source first:"
-msgstr ""
-"如果您不想使用 Docker 镜像，可以从源码构建。首先从源码安装 vLLM："
+msgstr "如果您不想使用 Docker 镜像，可以从源码构建。首先从源码安装 vLLM："
 
 #: ../../source/tutorials/models/Qwen3-30B-A3B.md:189
 msgid "Clone and install vLLM:"
@@ -288,22 +275,19 @@ msgstr "克隆并安装 vLLM-Ascend 仓库："
 msgid ""
 "Expected result: The version information for both packages is displayed, "
 "confirming a successful installation."
-msgstr ""
-"预期结果：显示两个包的版本信息，确认安装成功。"
+msgstr "预期结果：显示两个包的版本信息，确认安装成功。"
 
 #: ../../source/tutorials/models/Qwen3-30B-A3B.md:214
 msgid ""
 "If deploying a multi-node environment, set up the environment on each "
 "node."
-msgstr ""
-"如果部署多节点环境，请在每个节点上设置环境。"
+msgstr "如果部署多节点环境，请在每个节点上设置环境。"
 
 #: ../../source/tutorials/models/Qwen3-30B-A3B.md:217
 msgid ""
 "For more details, please refer to the [Installation "
 "Guide](../../installation.md)."
-msgstr ""
-"更多详情，请参考[安装指南](../../installation.md)。"
+msgstr "更多详情，请参考[安装指南](../../installation.md)。"
 
 #: ../../source/tutorials/models/Qwen3-30B-A3B.md:219
 msgid "5 Online Service Deployment"
@@ -320,15 +304,14 @@ msgid ""
 "inference scenarios. For the Qwen3-30B-A3B MoE model, Expert Parallelism "
 "(EP) is required to distribute experts across NPUs."
 msgstr ""
-"单节点部署在同一节点内完成 Prefill 和 Decode，适用于开发、测试以及中小规模推理场景。"
-"对于 Qwen3-30B-A3B MoE 模型，需要使用专家并行（EP）将专家分布到多个 NPU 上。"
+"单节点部署在同一节点内完成 Prefill 和 Decode，适用于开发、测试以及中小规模推理场景。对于 Qwen3-30B-A3B MoE "
+"模型，需要使用专家并行（EP）将专家分布到多个 NPU 上。"
 
 #: ../../source/tutorials/models/Qwen3-30B-A3B.md:225
 msgid ""
 "The following command is an example configuration. Adjust the parameters "
 "based on your actual scenario."
-msgstr ""
-"以下命令是示例配置。请根据您的实际场景调整参数。"
+msgstr "以下命令是示例配置。请根据您的实际场景调整参数。"
 
 #: ../../source/tutorials/models/Qwen3-30B-A3B.md:227
 msgid "**Atlas 800I A2/A3:**"
@@ -338,15 +321,13 @@ msgstr "**Atlas 800I A2/A3：**"
 msgid ""
 "`ASCEND_RT_VISIBLE_DEVICES`: must be set to the NPU chip IDs allocated to"
 " your environment (e.g., `0,1,2,3` for 4 chips)."
-msgstr ""
-"`ASCEND_RT_VISIBLE_DEVICES`：必须设置为分配给您的环境的 NPU 芯片 ID（例如，4 个芯片使用 `0,1,2,3`）。"
+msgstr "`ASCEND_RT_VISIBLE_DEVICES`：必须设置为分配给您的环境的 NPU 芯片 ID（例如，4 个芯片使用 `0,1,2,3`）。"
 
 #: ../../source/tutorials/models/Qwen3-30B-A3B.md:259
 msgid ""
 "`--port`: adjust to avoid conflicts with other services running on the "
 "same machine."
-msgstr ""
-"`--port`：调整以避免与同一台机器上运行的其他服务冲突。"
+msgstr "`--port`：调整以避免与同一台机器上运行的其他服务冲突。"
 
 #: ../../source/tutorials/models/Qwen3-30B-A3B.md:260
 msgid ""
@@ -355,15 +336,14 @@ msgid ""
 "characterized. You can try enabling it to evaluate the cache hit rate for"
 " your workload."
 msgstr ""
-"`--no-enable-prefix-caching`：默认禁用，因为该模型在 Ascend NPU 上的前缀缓存效果尚未完全评估。"
-"您可以尝试启用它以评估工作负载的缓存命中率。"
+"`--no-enable-prefix-caching`：默认禁用，因为该模型在 Ascend NPU "
+"上的前缀缓存效果尚未完全评估。您可以尝试启用它以评估工作负载的缓存命中率。"
 
 #: ../../source/tutorials/models/Qwen3-30B-A3B.md:261
 msgid ""
 "`--quantization ascend`: required for W8A8 quantized models. Remove this "
 "parameter when using BF16 weights."
-msgstr ""
-"`--quantization ascend`：W8A8 量化模型必需。使用 BF16 权重时请移除该参数。"
+msgstr "`--quantization ascend`：W8A8 量化模型必需。使用 BF16 权重时请移除该参数。"
 
 #: ../../source/tutorials/models/Qwen3-30B-A3B.md:266
 msgid "For parameter details, refer to:"
@@ -374,14 +354,16 @@ msgid ""
 "[vLLM CLI documentation](https://docs.vllm.ai/en/stable/cli/) — standard "
 "serve parameters (`--host`, `--port`, `--max-model-len`, etc.)"
 msgstr ""
-"[vLLM CLI 文档](https://docs.vllm.ai/en/stable/cli/) — 标准服务参数（`--host`、`--port`、`--max-model-len` 等）"
+"[vLLM CLI 文档](https://docs.vllm.ai/en/stable/cli/) — "
+"标准服务参数（`--host`、`--port`、`--max-model-len` 等）"
 
 #: ../../source/tutorials/models/Qwen3-30B-A3B.md:269
 msgid ""
 "[Environment Variables](../../user_guide/configuration/env_vars.md) — "
 "Ascend-specific environment variables (`HCCL_*`, etc.)"
 msgstr ""
-"[环境变量](../../user_guide/configuration/env_vars.md) — Ascend 特定环境变量（`HCCL_*` 等）"
+"[环境变量](../../user_guide/configuration/env_vars.md) — Ascend "
+"特定环境变量（`HCCL_*` 等）"
 
 #: ../../source/tutorials/models/Qwen3-30B-A3B.md:270
 msgid ""
@@ -389,253 +371,418 @@ msgid ""
 "Configuration](../../user_guide/configuration/additional_config.md) — "
 "`--additional-config` format and options"
 msgstr ""
-"[附加配置](../../user_guide/configuration/additional_config.md) — `--additional-config` 格式和选项"
+"[附加配置](../../user_guide/configuration/additional_config.md) — "
+"`--additional-config` 格式和选项"
 
 #: ../../source/tutorials/models/Qwen3-30B-A3B.md:273
 msgid "**Service Verification:**"
 msgstr "**服务验证：**"
 
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:275
+msgid ""
+"After the service is started, verify it is running by sending a prompt. "
+"Refer to [Section 6](#6-functional-verification) for a usage example."
 msgstr ""
-"服务启动后，通过发送提示词验证其是否正常运行。使用示例请参考[第6节](#6-功能验证)。"
+"服务启动后，通过发送提示词验证其是否正常运行。使用示例请参考[第 6 节](#6-functional-verification)。"
 
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:277
+msgid "6 Functional Verification"
+msgstr "6 功能验证"
+
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:279
+msgid ""
+"After the service is started, the model can be invoked by sending a "
+"prompt."
+msgstr "服务启动后，可通过发送提示词来调用模型。"
+
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:281
+msgid "**Chat Completions API:**"
+msgstr "**聊天补全 API：**"
+
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:299
+msgid "Adjust the following fields based on your deployment:"
+msgstr "根据您的部署情况调整以下字段："
+
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:301
+msgid ""
+"**URL** (`http://localhost:8000`): Replace `localhost` and `8000` with "
+"your server IP and the `--port` value from the `vllm serve` command."
 msgstr ""
-"6 功能验证"
+"**URL** (`http://localhost:8000`): 将 `localhost` 和 `8000` 替换为您的服务器 IP 和 `vllm serve` 命令中的 `--port` 值。"
 
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:302
+msgid ""
+"**`model`**: Must match the `--served-model-name` value from the `vllm "
+"serve` command (e.g., `qwen3`)."
 msgstr ""
-"服务启动后，可通过发送提示词调用模型。"
+"**`model`**: 必须与 `vllm serve` 命令中的 `--served-model-name` 值一致（例如 `qwen3`）。"
 
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:305
+msgid ""
+"Expected result: HTTP 200 with a JSON response containing the `choices` "
+"field with generated text."
+msgstr "预期结果：HTTP 200，返回包含 `choices` 字段（含生成文本）的 JSON 响应。"
+
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:307
+msgid "7 Accuracy Evaluation"
+msgstr "7 精度评估"
+
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:309
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:380
+msgid "Using AISBench"
+msgstr "使用 AISBench"
+
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:311
+msgid ""
+"For setup details, including installation, dataset download, and "
+"configuration, please refer to [Using "
+"AISBench](../../developer_guide/evaluation/using_ais_bench.md)."
 msgstr ""
-"**聊天补全API：**"
+"有关安装、数据集下载和配置等设置详情，请参考[使用 AISBench](../../developer_guide/evaluation/using_ais_bench.md)。"
 
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:313
+msgid ""
+"The following is an example configuration for the accuracy evaluation "
+"config file, demonstrated using the GSM8K dataset:"
+msgstr "以下是以 GSM8K 数据集为例的精度评估配置文件示例："
+
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:342
+msgid "Run the accuracy evaluation using the `gsm8k` dataset as an example:"
+msgstr "以 `gsm8k` 数据集为例运行精度评估："
+
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:348
+msgid ""
+"The following table lists the `--datasets` parameter for each evaluation "
+"dataset:"
+msgstr "下表列出了每个评估数据集的 `--datasets` 参数："
+
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:298
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:361
+msgid "Dataset"
+msgstr "数据集"
+
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:298
+msgid "`--datasets` Parameter"
+msgstr "`--datasets` 参数"
+
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:298
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:361
+msgid "GSM8K"
+msgstr "GSM8K"
+
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:298
+msgid "`gsm8k_gen_4_shot_cot_str`"
+msgstr "`gsm8k_gen_4_shot_cot_str`"
+
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:298
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:361
+msgid "GPQA-Diamond"
+msgstr "GPQA-Diamond"
+
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:298
+msgid "`gpqa_gen_0_shot_cot_chat_prompt`"
+msgstr "`gpqa_gen_0_shot_cot_chat_prompt`"
+
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:298
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:361
+msgid "AIME 2024"
+msgstr "AIME 2024"
+
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:298
+msgid "`aime2024_gen_0_shot_str`"
+msgstr "`aime2024_gen_0_shot_str`"
+
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:298
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:361
+msgid "LiveCodeBench"
+msgstr "LiveCodeBench"
+
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:298
+msgid "`livecodebench_0_shot_chat_v4_v5_v6`"
+msgstr "`livecodebench_0_shot_chat_v4_v5_v6`"
+
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:357
+msgid ""
+"The `--models` parameter value corresponds to the configuration file name"
+" (e.g., `vllm_api_general_chat` for `vllm_api_general_chat.py`). Adjust "
+"`max_out_len`, `batch_size`, and dataset tasks based on your scenario."
 msgstr ""
-"根据您的部署情况调整以下字段："
+"`--models` 参数值对应配置文件名称（例如 `vllm_api_general_chat.py` 对应 `vllm_api_general_chat`）。根据您的场景调整 `max_out_len`、`batch_size` 和数据集任务。"
 
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:359
+msgid ""
+"For dataset preparation, please refer to the [AISBench Datasets "
+"Guide](https://github.com/AISBench/benchmark/blob/master/docs/source_zh_cn/get_started/datasets.md)."
 msgstr ""
-"**URL**（`http://localhost:8000`）：将`localhost`和`8000`替换为您的服务器IP和`vllm serve`命令中的`--port`值。"
+"数据集准备请参考 [AISBench 数据集指南](https://github.com/AISBench/benchmark/blob/master/docs/source_zh_cn/get_started/datasets.md)。"
 
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:362
+msgid "vLLM-Ascend also supports the following evaluation tools:"
+msgstr "vLLM-Ascend 还支持以下评估工具："
+
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:364
+msgid "[lm_eval](../../developer_guide/evaluation/using_lm_eval.md)"
+msgstr "[lm_eval](../../developer_guide/evaluation/using_lm_eval.md)"
+
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:365
+msgid "[OpenCompass](../../developer_guide/evaluation/using_opencompass.md)"
+msgstr "[OpenCompass](../../developer_guide/evaluation/using_opencompass.md)"
+
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:366
+msgid "[EvalScope](../../developer_guide/evaluation/using_evalscope.md)"
+msgstr "[EvalScope](../../developer_guide/evaluation/using_evalscope.md)"
+
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:369
+msgid "**Accuracy Results (Atlas 800I A3, vLLM-Ascend v0.22.1rc, W8A8):**"
+msgstr "**精度结果（Atlas 800I A3，vLLM-Ascend v0.22.1rc，W8A8）：**"
+
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:361
+msgid "Metric"
+msgstr "指标"
+
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:361
+msgid "Score"
+msgstr "分数"
+
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:361
+msgid "accuracy (4-shot CoT)"
+msgstr "accuracy (4-shot CoT)"
+
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:361
+msgid "92.87%"
+msgstr "92.87%"
+
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:361
+msgid "accuracy (0-shot CoT)"
+msgstr "accuracy (0-shot CoT)"
+
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:361
+msgid "60.10%"
+msgstr "60.10%"
+
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:361
+msgid "pass@1 (0-shot)"
+msgstr "pass@1 (0-shot)"
+
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:361
+msgid "60.05%"
+msgstr "60.05%"
+
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:361
+msgid "accuracy (0-shot)"
+msgstr "accuracy (0-shot)"
+
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:361
+msgid "76.67%"
+msgstr "76.67%"
+
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:378
+msgid "8 Performance Evaluation"
+msgstr "8 性能评估"
+
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:382
+msgid ""
+"For setup details, please refer to [Using AISBench for performance "
+"evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-"
+"performance-evaluation)."
 msgstr ""
-"**`model`**：必须与`vllm serve`命令中的`--served-model-name`值一致（例如`qwen3`）。"
+"设置详情请参考[使用 AISBench 进行性能评估](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation)。"
 
-msgstr ""
-"预期结果：HTTP 200，返回包含`choices`字段的JSON响应，其中包含生成的文本。"
-
-msgstr ""
-"7 精度评估"
-
-msgstr ""
-"使用AISBench"
-
-msgstr ""
-"有关安装、数据集下载和配置的详细信息，请参考[使用AISBench](../../developer_guide/evaluation/using_ais_bench.md)。"
-
-msgstr ""
-"以下是精度评估配置文件的示例配置，以GSM8K数据集为例："
-
-msgstr ""
-"以`gsm8k`数据集为例运行精度评估："
-
-msgstr ""
-"下表列出了每个评估数据集的`--datasets`参数："
-
-msgstr ""
-"数据集"
-
-msgstr ""
-"`--datasets`参数"
-
-msgstr ""
-"GSM8K"
-
-msgstr ""
-"`gsm8k_gen_4_shot_cot_str`"
-
-msgstr ""
-"GPQA-Diamond"
-
-msgstr ""
-"`gpqa_gen_0_shot_cot_chat_prompt`"
-
-msgstr ""
-"AIME 2024"
-
-msgstr ""
-"`aime2024_gen_0_shot_str`"
-
-msgstr ""
-"LiveCodeBench"
-
-msgstr ""
-"`livecodebench_0_shot_chat_v4_v5_v6`"
-
-msgstr ""
-"`--models`参数值对应配置文件名称（例如`vllm_api_general_chat`对应`vllm_api_general_chat.py`）。根据您的场景调整`max_out_len`、`batch_size`和数据集任务。"
-
-msgstr ""
-"数据集准备请参考[AISBench数据集指南](https://github.com/AISBench/benchmark/blob/master/docs/source_zh_cn/get_started/datasets.md)。"
-
-msgstr ""
-"vLLM-Ascend还支持以下评估工具："
-
-msgstr ""
-"[lm_eval](../../developer_guide/evaluation/using_lm_eval.md)"
-
-msgstr ""
-"[OpenCompass](../../developer_guide/evaluation/using_opencompass.md)"
-
-msgstr ""
-"[EvalScope](../../developer_guide/evaluation/using_evalscope.md)"
-
-msgstr ""
-"**精度结果（Atlas 800I A3，vLLM-Ascend v0.22.1rc，W8A8）：**"
-
-msgstr ""
-"指标"
-
-msgstr ""
-"得分"
-
-msgstr ""
-"精度（4-shot CoT）"
-
-msgstr ""
-"92.87%"
-
-msgstr ""
-"精度（0-shot CoT）"
-
-msgstr ""
-"60.10%"
-
-msgstr ""
-"pass@1（0-shot）"
-
-msgstr ""
-"60.05%"
-
-msgstr ""
-"精度（0-shot）"
-
-msgstr ""
-"76.67%"
-
-msgstr ""
-"8 性能评估"
-
-msgstr ""
-"有关设置详情，请参考[使用AISBench进行性能评估](../../developer_guide/evaluation/using_ais_bench.md#执行性能评估)。"
-
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:384
+msgid ""
+"First, configure the model for streaming performance testing "
+"(`ais_bench/benchmark/configs/models/vllm_api/vllm_api_stream_chat.py`):"
 msgstr ""
 "首先，配置模型以进行流式性能测试（`ais_bench/benchmark/configs/models/vllm_api/vllm_api_stream_chat.py`）："
 
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:414
+msgid ""
+"Key differences from the accuracy config: `stream=True`, "
+"`ignore_eos=True` (ensures output reaches `max_out_len` for consistent "
+"TPOT measurement), and `batch_size` controls concurrency."
 msgstr ""
-"与精度配置的主要区别：`stream=True`、`ignore_eos=True`（确保输出达到`max_out_len`以实现一致的TPOT测量），以及`batch_size`控制并发数。"
+"与精度配置的主要区别：`stream=True`、`ignore_eos=True`（确保输出达到 `max_out_len` 以获得一致的 TPOT 测量），以及 `batch_size` 控制并发数。"
 
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:416
+msgid ""
+"Then, configure the synthetic dataset distribution "
+"(`ais_bench/datasets/synthetic/synthetic_config.py`). Adjust the "
+"configuration based on your actual scenario. Note that random synthetic "
+"data is not suitable for benchmarking scenarios where prefix caching is "
+"enabled, as random inputs produce zero cache hit rate."
 msgstr ""
 "然后，配置合成数据集分布（`ais_bench/datasets/synthetic/synthetic_config.py`）。根据实际场景调整配置。注意，随机合成数据不适用于启用前缀缓存的基准测试场景，因为随机输入会产生零缓存命中率。"
 
-msgstr ""
-"然后运行性能评估："
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:435
+msgid "Then run the performance evaluation:"
+msgstr "然后运行性能评估："
 
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:441
+msgid ""
+"The `--models` value should match the `abbr` in your model config file. "
+"Use `--num-prompts` to limit the number of test requests."
 msgstr ""
-"`--models`值应与模型配置文件中的`abbr`匹配。使用`--num-prompts`限制测试请求数量。"
+"`--models` 值应与模型配置文件中的 `abbr` 匹配。使用 `--num-prompts` 限制测试请求数量。"
 
-msgstr ""
-"使用vLLM基准测试"
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:443
+msgid "Using vLLM Benchmark"
+msgstr "使用 vLLM 基准测试"
 
-msgstr ""
-"更多详情请参考[vLLM基准测试](https://docs.vllm.ai/en/latest/benchmarking/)。"
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:445
+msgid ""
+"Refer to [vLLM benchmark](https://docs.vllm.ai/en/latest/benchmarking/) "
+"for more details."
+msgstr "更多详情请参考 [vLLM 基准测试](https://docs.vllm.ai/en/latest/benchmarking/)。"
 
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:447
+msgid ""
+"Take the `serve` subcommand as an example. The `--random-output-len` "
+"parameter controls the number of output tokens per request; adjust it "
+"based on your target scenario (e.g., 2048 for short outputs, 32768 for "
+"long outputs)."
 msgstr ""
-"以`serve`子命令为例。`--random-output-len`参数控制每个请求的输出token数量；根据目标场景调整（例如短输出为2048，长输出为32768）。"
+"以 `serve` 子命令为例。`--random-output-len` 参数控制每个请求的输出 token 数量；根据目标场景进行调整（例如，短输出用 2048，长输出用 32768）。"
 
-msgstr ""
-"9 性能调优"
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:463
+msgid "9 Performance Tuning"
+msgstr "9 性能调优"
 
-msgstr ""
-"9.1 推荐配置"
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:465
+msgid "9.1 Recommended Configurations"
+msgstr "9.1 推荐配置"
 
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:467
+msgid ""
+"**Note**: The following configurations are validated in specific test "
+"environments and are for reference only. The optimal configuration "
+"depends on factors such as maximum input/output length, prefix cache hit "
+"rate, precision requirements, and deployment machine ratios. It is "
+"recommended to refer to Section 9.2 for tuning based on actual "
+"conditions."
 msgstr ""
-"**注意**：以下配置在特定测试环境中验证，仅供参考。最佳配置取决于最大输入/输出长度、前缀缓存命中率、精度要求和部署机器比例等因素。建议根据实际情况参考第9.2节进行调优。"
+"**注意**：以下配置在特定测试环境中验证，仅供参考。最佳配置取决于最大输入/输出长度、前缀缓存命中率、精度要求和部署机器比例等因素。建议参考第 9.2 节根据实际情况进行调优。"
 
-msgstr ""
-"表1：场景概览"
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:469
+msgid "Table 1: Scenario Overview"
+msgstr "表 1：场景概览"
 
-msgstr ""
-"场景"
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:361
+msgid "Scenario"
+msgstr "场景"
 
-msgstr ""
-"部署模式"
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:361
+msgid "Deployment Mode"
+msgstr "部署模式"
 
-msgstr ""
-"*总NPU数"
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:361
+msgid "*Total NPUs"
+msgstr "*NPU 总数"
 
-msgstr ""
-"权重版本"
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:361
+msgid "Weight Version"
+msgstr "权重版本"
 
-msgstr ""
-"关键考量"
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:361
+msgid "Key Considerations"
+msgstr "关键考量"
 
-msgstr ""
-"高吞吐"
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:361
+msgid "High Throughput"
+msgstr "高吞吐量"
 
-msgstr ""
-"单节点（TP1）"
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:361
+msgid "Single-Node (TP1)"
+msgstr "单节点 (TP1)"
 
-msgstr ""
-"1（A3）<br>2（A2）"
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:361
+msgid "1 (A3)<br>2 (A2)"
+msgstr "1 (A3)<br>2 (A2)"
 
-msgstr ""
-"W8A8"
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:361
+msgid "W8A8"
+msgstr "W8A8"
 
-msgstr ""
-"单卡部署最大化并发请求处理"
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:361
+msgid "Single-card deployment maximizes concurrent request processing"
+msgstr "单卡部署最大化并发请求处理"
 
-msgstr ""
-"低延迟"
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:361
+msgid "Low Latency"
+msgstr "低延迟"
 
-msgstr ""
-"单节点（TP4）"
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:361
+msgid "Single-Node (TP4)"
+msgstr "单节点 (TP4)"
 
-msgstr ""
-"2（A3）<br>4（A2）"
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:361
+msgid "2 (A3)<br>4 (A2)"
+msgstr "2 (A3)<br>4 (A2)"
 
-msgstr ""
-"多卡TP通过专家并行降低每token延迟"
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:361
+msgid "Multi-card TP reduces per-token latency with expert parallelism"
+msgstr "多卡 TP 通过专家并行降低每个 token 的延迟"
 
-msgstr ""
-"长上下文"
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:361
+msgid "Long Context"
+msgstr "长上下文"
 
-msgstr ""
-"减少并发序列以适应更长的max-model-len"
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:361
+msgid "Reduces concurrent sequences to accommodate longer max-model-len"
+msgstr "减少并发序列以容纳更长的 max-model-len"
 
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:477
+msgid ""
+"`*Total NPUs` indicates the total number of NPUs used across all nodes. "
+"On Atlas 800I A3, each NPU contains two dies (chips), so TP4 requires 4 "
+"chips = 2 NPUs."
 msgstr ""
-"`*总NPU数`表示所有节点使用的NPU总数。在Atlas 800I A3上，每个NPU包含两个die（芯片），因此TP4需要4个芯片=2个NPU。"
+"`*NPU 总数` 表示所有节点使用的 NPU 总数。在 Atlas 800I A3 上，每个 NPU 包含两个 die（芯片），因此 TP4 需要 4 个芯片 = 2 个 NPU。"
 
-msgstr ""
-"表2：详细节点配置"
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:479
+msgid "Table 2: Detailed Node Configuration"
+msgstr "表 2：详细节点配置"
 
+msgid ""
 msgstr ""
-"NPU数"
+"Project-Id-Version: vllm-ascend-docs\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2024-01-01 00:00+0000\n"
+"PO-Revision-Date: 2024-01-01 00:00+0000\n"
+"Last-Translator: \n"
+"Language-Team: Chinese\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
 
-msgstr ""
-"TP"
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:361
+msgid "NPUs"
+msgstr "NPU"
 
-msgstr ""
-"max-model-len"
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:361
+msgid "TP"
+msgstr "TP"
 
-msgstr ""
-"max-num-seqs"
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:361
+msgid "max-model-len"
+msgstr "max-model-len"
 
-msgstr ""
-"FUSED_MC2"
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:361
+msgid "max-num-seqs"
+msgstr "max-num-seqs"
 
-msgstr ""
-"EP"
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:361
+msgid "FUSED_MC2"
+msgstr "FUSED_MC2"
 
-msgstr ""
-"hf-overrides"
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:361
+msgid "EP"
+msgstr "EP"
 
-msgstr ""
+#: ../../source/tutorials/models/Qwen3-30B-A3B.md:361
+msgid "hf-overrides"
+msgstr "hf-overrides"
 
 #: ../../source/tutorials/models/Qwen3-30B-A3B.md:361
 msgid "1 (A3)"

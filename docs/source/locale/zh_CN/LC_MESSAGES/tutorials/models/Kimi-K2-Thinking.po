@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-02 07:02+0000\n"
+"POT-Creation-Date: 2026-07-04 04:01+0000\n"
 "PO-Revision-Date: 2026-04-10 18:37+0800\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -160,7 +160,9 @@ msgstr "`--device /dev/davinci[0-15]`：向容器暴露 16 个 Ascend NPU 设备
 msgid ""
 "`--device /dev/davinci_manager`, `--device /dev/devmm_svm`, and `--device"
 " /dev/hisi_hdc`: expose required Ascend runtime device files."
-msgstr "`--device /dev/davinci_manager`、`--device /dev/devmm_svm` 和 `--device /dev/hisi_hdc`：暴露所需的 Ascend 运行时设备文件。"
+msgstr ""
+"`--device /dev/davinci_manager`、`--device /dev/devmm_svm` 和 `--device "
+"/dev/hisi_hdc`：暴露所需的 Ascend 运行时设备文件。"
 
 #: ../../source/tutorials/models/Kimi-K2-Thinking.md:116
 msgid ""
@@ -346,7 +348,9 @@ msgstr "`--gpu-memory-utilization 0.9`：控制 vLLM 使用的内存比例。"
 msgid "`--trust-remote-code`: allows loading model-specific remote code."
 msgstr "`--trust-remote-code`：允许加载模型特定的远程代码。"
 
-msgstr "`--enable-expert-parallel`：为MoE层启用专家并行。"
+#: ../../source/tutorials/models/Kimi-K2-Thinking.md:207
+msgid "`--enable-expert-parallel`: enables expert parallelism for MoE layers."
+msgstr "`--enable-expert-parallel`：为 MoE 层启用专家并行。"
 
 #: ../../source/tutorials/models/Kimi-K2-Thinking.md:208
 msgid ""
@@ -415,7 +419,9 @@ msgid ""
 "You can use [lm-eval](https://github.com/EleutherAI/lm-evaluation-"
 "harness) to evaluate the model accuracy through the OpenAI-compatible "
 "API."
-msgstr "您可以使用[lm-eval](https://github.com/EleutherAI/lm-evaluation-harness)通过OpenAI兼容API评估模型精度。"
+msgstr ""
+"您可以使用[lm-eval](https://github.com/EleutherAI/lm-evaluation-"
+"harness)通过OpenAI兼容API评估模型精度。"
 
 #: ../../source/tutorials/models/Kimi-K2-Thinking.md:255
 msgid ""
@@ -438,7 +444,9 @@ msgstr "参考配置：`gsm8k`（5-shot）、`--apply_chat_template`、`--fewsho
 msgid ""
 "Below are reference `gsm8k` results for `Kimi-K2-Thinking` powered by "
 "`vllm-ascend:v0.20.2rc1`, evaluated on one Atlas 800 A3 node (64G × 16)."
-msgstr "以下为基于`vllm-ascend:v0.20.2rc1`的`Kimi-K2-Thinking`在单个Atlas 800 A3节点（64G × 16）上评估的参考`gsm8k`结果。"
+msgstr ""
+"以下为基于`vllm-ascend:v0.20.2rc1`的`Kimi-K2-Thinking`在单个Atlas 800 A3节点（64G × "
+"16）上评估的参考`gsm8k`结果。"
 
 #: ../../source/tutorials/models/Kimi-K2-Thinking.md:187
 msgid "task"
@@ -535,7 +543,9 @@ msgid ""
 "ascend:v0.20.2rc1` on one Atlas 800 A3 node (64G × 16), using OpenAI chat"
 " serving, random input/output lengths, 10 prompts, and `--request-rate "
 "1`:"
-msgstr "以下参考结果基于`vllm-ascend:v0.20.2rc1`在单个Atlas 800 A3节点（64G × 16）上获得，使用OpenAI聊天服务、随机输入/输出长度、10个提示词和`--request-rate 1`："
+msgstr ""
+"以下参考结果基于`vllm-ascend:v0.20.2rc1`在单个Atlas 800 A3节点（64G × "
+"16）上获得，使用OpenAI聊天服务、随机输入/输出长度、10个提示词和`--request-rate 1`："
 
 #: ../../source/tutorials/models/Kimi-K2-Thinking.md:187
 msgid "random input len"
@@ -891,7 +901,9 @@ msgid ""
 "requirements or increase `--max-num-seqs` and `--max-num-batched-tokens` "
 "if NPU memory allows."
 msgstr ""
-"**注意：** 在并发级别为16时，平均TTFT显著增加（76.7秒），表明存在严重的排队延迟。对于生产部署，建议根据延迟需求限制并发，或在NPU内存允许的情况下增加`--max-num-seqs`和`--max-num-batched-tokens`。"
+"**注意：** "
+"在并发级别为16时，平均TTFT显著增加（76.7秒），表明存在严重的排队延迟。对于生产部署，建议根据延迟需求限制并发，或在NPU内存允许的情况下增加"
+"`--max-num-seqs`和`--max-num-batched-tokens`。"
 
 #: ../../source/tutorials/models/Kimi-K2-Thinking.md:338
 msgid "9 Performance Tuning"
@@ -910,7 +922,8 @@ msgid ""
 "recommended to refer to Section 9.2 for tuning based on actual "
 "conditions."
 msgstr ""
-"**注意：** 以下配置在特定测试环境中验证，仅供参考。最佳配置取决于最大输入/输出长度、前缀缓存命中率、精度要求和部署机器比例等因素。建议参考第9.2节根据实际情况进行调优。"
+"**注意：** "
+"以下配置在特定测试环境中验证，仅供参考。最佳配置取决于最大输入/输出长度、前缀缓存命中率、精度要求和部署机器比例等因素。建议参考第9.2节根据实际情况进行调优。"
 
 #: ../../source/tutorials/models/Kimi-K2-Thinking.md:344
 msgid "Table 1: Scenario Overview"
@@ -956,8 +969,7 @@ msgstr "bfloat16"
 msgid ""
 "Keep `--max-model-len` close to the real maximum input and output length;"
 " reduce `--max-num-seqs` first when memory pressure is high."
-msgstr ""
-"保持`--max-model-len`接近实际最大输入和输出长度；内存压力高时优先减少`--max-num-seqs`。"
+msgstr "保持`--max-model-len`接近实际最大输入和输出长度；内存压力高时优先减少`--max-num-seqs`。"
 
 #: ../../source/tutorials/models/Kimi-K2-Thinking.md:187
 msgid "Low Latency"
@@ -989,7 +1001,8 @@ msgid ""
 "maximum input and output length, and reduce `--max-num-seqs` first when "
 "memory pressure is high."
 msgstr ""
-"**长上下文：** 使用`tp16`，保持`--max-model-len`接近实际最大输入和输出长度，内存压力高时优先减少`--max-num-seqs`。"
+"**长上下文：** 使用`tp16`，保持`--max-model-len`接近实际最大输入和输出长度，内存压力高时优先减少`--max-num-"
+"seqs`。"
 
 #: ../../source/tutorials/models/Kimi-K2-Thinking.md:355
 msgid ""
@@ -1004,7 +1017,8 @@ msgid ""
 "throughput tests, evaluate `--decode-context-parallel-size` as an "
 "optional tuning knob."
 msgstr ""
-"**高吞吐：** 逐步增加`--max-num-seqs`，并使用接近实际工作负载的请求速率进行基准测试。对于长上下文吞吐测试，评估`--decode-context-parallel-size`作为可选调优参数。"
+"**高吞吐：** 逐步增加`--max-num-seqs`，并使用接近实际工作负载的请求速率进行基准测试。对于长上下文吞吐测试，评估"
+"`--decode-context-parallel-size`作为可选调优参数。"
 
 #: ../../source/tutorials/models/Kimi-K2-Thinking.md:357
 msgid ""
@@ -1013,7 +1027,8 @@ msgid ""
 "concurrency increased TTFT significantly, so validate tail latency before"
 " using it in production."
 msgstr ""
-"对于参考并发扫描中的1024输入token和1024输出token，`--max-concurrency 8`具有最佳输出吞吐。更高的并发会显著增加TTFT，因此在生产环境中使用前请验证尾延迟。"
+"对于参考并发扫描中的1024输入token和1024输出token，`--max-concurrency "
+"8`具有最佳输出吞吐。更高的并发会显著增加TTFT，因此在生产环境中使用前请验证尾延迟。"
 
 #: ../../source/tutorials/models/Kimi-K2-Thinking.md:359
 msgid "**Note:**"
@@ -1066,11 +1081,13 @@ msgid ""
 msgstr "常见环境、安装和通用参数问题请参考[公共FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)；本章仅涵盖模型特定问题。"
 
 #: ../../source/tutorials/models/Kimi-K2-Thinking.md:376
+#, python-brace-format
 msgid ""
 "**Q: API returns `{\"error\":\"Model not found\"}` or `404` when "
 "requesting with `model: \"Kimi-K2-Thinking\"`?**"
 msgstr ""
-"**问：使用`model: \"Kimi-K2-Thinking\"`请求时，API返回`{\"error\":\"Model not found\"}`或`404`？**"
+"**问：使用`model: \"Kimi-K2-Thinking\"`请求时，API返回`{\"error\":\"Model not "
+"found\"}`或`404`？**"
 
 #: ../../source/tutorials/models/Kimi-K2-Thinking.md:378
 msgid ""
@@ -1081,4 +1098,7 @@ msgid ""
 "\"moonshotai/Kimi-K2-Thinking\"` in requests, or start the server with "
 "`--served-model-name Kimi-K2-Thinking` to enable the short name."
 msgstr ""
-"答：服务器默认使用完整路径`moonshotai/Kimi-K2-Thinking`注册模型。当请求使用短名称`Kimi-K2-Thinking`且未覆盖`--served-model-name`时，服务器无法解析模型ID。请在请求中使用`\"model\": \"moonshotai/Kimi-K2-Thinking\"`，或使用`--served-model-name Kimi-K2-Thinking`启动服务器以启用短名称。"
+"答：服务器默认使用完整路径`moonshotai/Kimi-K2-Thinking`注册模型。当请求使用短名称`Kimi-K2-Thinking`且未覆盖"
+"`--served-model-name`时，服务器无法解析模型ID。请在请求中使用`\"model\": "
+"\"moonshotai/Kimi-K2-Thinking\"`，或使用`--served-model-name "
+"Kimi-K2-Thinking`启动服务器以启用短名称。"

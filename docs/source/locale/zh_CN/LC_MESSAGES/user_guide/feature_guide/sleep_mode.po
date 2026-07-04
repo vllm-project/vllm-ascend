@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version:  vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-02 07:02+0000\n"
+"POT-Creation-Date: 2026-07-04 04:01+0000\n"
 "PO-Revision-Date: 2026-01-22 16:15+0800\n"
 "Last-Translator: Gemini\n"
 "Language: zh_CN\n"
@@ -226,64 +226,76 @@ msgid ""
 "After the sleep-mode allocator restores the original (untransposed) "
 "memory, `wake_up()` re-applies the same transpose to the affected expert "
 "weights when the `\"weights\"` tag is being restored:"
-msgstr ""
-"在睡眠模式分配器恢复原始（未转置）内存后，`wake_up()` 在恢复 `\"weights\"` 标签时对受影响的专家权重重新应用相同的转置："
+msgstr "在睡眠模式分配器恢复原始（未转置）内存后，`wake_up()` 在恢复 `\"weights\"` 标签时对受影响的专家权重重新应用相同的转置："
 
 #: ../../source/user_guide/feature_guide/sleep_mode.md:78
 msgid ""
 "`w13_weight` (gate/up projection): transposed back to the runtime layout "
 "when its second dimension matches `hidden_size`;"
-msgstr ""
-"`w13_weight`（gate/up projection）：当其第二个维度匹配 `hidden_size` 时，转置回运行时布局；"
+msgstr "`w13_weight`（gate/up projection）：当其第二个维度匹配 `hidden_size` 时，转置回运行时布局；"
 
 #: ../../source/user_guide/feature_guide/sleep_mode.md:79
 msgid ""
 "`w2_weight` (down projection): transposed back to the runtime layout when"
 " its third dimension matches `hidden_size`."
-msgstr ""
-"`w2_weight`（down projection）：当其第三个维度匹配 `hidden_size` 时，转置回运行时布局。"
+msgstr "`w2_weight`（down projection）：当其第三个维度匹配 `hidden_size` 时，转置回运行时布局。"
 
 #: ../../source/user_guide/feature_guide/sleep_mode.md:81
 msgid ""
 "This step is skipped entirely for dense models (which have no expert "
 "weights) and for quantized models (whose weights are handled by the "
 "quantization method)."
-msgstr ""
-"对于稠密模型（没有专家权重）和量化模型（其权重由量化方法处理），此步骤完全跳过。"
+msgstr "对于稠密模型（没有专家权重）和量化模型（其权重由量化方法处理），此步骤完全跳过。"
 
-#: ../../source/user_guide/feature_guide/sleep_mode.md:82
+#: ../../source/user_guide/feature_guide/sleep_mode.md:83
 msgid "Prepare Model Weights"
 msgstr "准备模型权重"
 
-#: ../../source/user_guide/feature_guide/sleep_mode.md:83
-msgid "Use the `Qwen2.5-0.5B-Instruct` model weights. With `VLLM_USE_MODELSCOPE=True`, the model will be downloaded automatically from ModelScope."
-msgstr "使用 `Qwen2.5-0.5B-Instruct` 模型的权重。若设置 `VLLM_USE_MODELSCOPE=True`，模型将自动从 ModelScope 下载。"
+#: ../../source/user_guide/feature_guide/sleep_mode.md:85
+msgid ""
+"Use the `Qwen2.5-0.5B-Instruct` model weights. With "
+"`VLLM_USE_MODELSCOPE=True`, the model will be downloaded automatically "
+"from ModelScope."
+msgstr ""
+"使用 `Qwen2.5-0.5B-Instruct` 模型的权重。若设置 `VLLM_USE_MODELSCOPE=True`，模型将自动从 "
+"ModelScope 下载。"
 
-#: ../../source/user_guide/feature_guide/sleep_mode.md:84
+#: ../../source/user_guide/feature_guide/sleep_mode.md:90
 msgid "Model"
 msgstr "模型"
 
-#: ../../source/user_guide/feature_guide/sleep_mode.md:85
+#: ../../source/user_guide/feature_guide/sleep_mode.md:91
 msgid "ModelScope Link"
 msgstr "ModelScope链接"
 
-#: ../../source/user_guide/feature_guide/sleep_mode.md:86
+#: ../../source/user_guide/feature_guide/sleep_mode.md:92
+msgid "Qwen2.5-0.5B-Instruct"
+msgstr "Qwen2.5-0.5B-Instruct"
+
+#: ../../source/user_guide/feature_guide/sleep_mode.md:93
+msgid ""
+"[Qwen/Qwen2.5-0.5B-"
+"Instruct](https://www.modelscope.cn/models/Qwen/Qwen2.5-0.5B-Instruct)"
+msgstr ""
+"[Qwen/Qwen2.5-0.5B-Instruct](https://www.modelscope.cn/models/Qwen/Qwen2.5-0.5B-Instruct)"
+
+#: ../../source/user_guide/feature_guide/sleep_mode.md:96
 msgid "Usage"
 msgstr "使用方法"
 
-#: ../../source/user_guide/feature_guide/sleep_mode.md:87
+#: ../../source/user_guide/feature_guide/sleep_mode.md:98
 msgid "The following is a simple example of how to use sleep mode."
 msgstr "以下是如何使用睡眠模式的一个简单示例。"
 
-#: ../../source/user_guide/feature_guide/sleep_mode.md:88
+#: ../../source/user_guide/feature_guide/sleep_mode.md:100
 msgid "Offline inference:"
 msgstr "离线推理："
 
-#: ../../source/user_guide/feature_guide/sleep_mode.md:127
+#: ../../source/user_guide/feature_guide/sleep_mode.md:140
 msgid "Online serving:"
 msgstr "在线服务："
 
-#: ../../source/user_guide/feature_guide/sleep_mode.md:129
+#: ../../source/user_guide/feature_guide/sleep_mode.md:142
 msgid ""
 "Considering there may be a risk of malicious access, please make sure you"
 " are under a dev-mode, and explicitly specify the dev environment "

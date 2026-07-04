@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-02 07:02+0000\n"
+"POT-Creation-Date: 2026-07-04 04:01+0000\n"
 "PO-Revision-Date: 2026-04-09 22:15+0800\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -102,8 +102,8 @@ msgid ""
 "[CODEOWNERS](https://github.com/vllm-project/vllm-"
 "ascend/blob/main/.github/CODEOWNERS) file."
 msgstr ""
-"只有仓库的**贡献者**（Triage 角色）和**维护者**（Write "
-"角色）可以触发 `/nightly` 命令。如果您没有此权限，请让维护者为您发布评论。您可以在项目的[治理](../../community/governance.md)页面或通过查看"
+"只有仓库的**贡献者**（Triage 角色）和**维护者**（Write 角色）可以触发 `/nightly` "
+"命令。如果您没有此权限，请让维护者为您发布评论。您可以在项目的[治理](../../community/governance.md)页面或通过查看"
 " [CODEOWNERS](https://github.com/vllm-project/vllm-"
 "ascend/blob/main/.github/CODEOWNERS) 文件找到维护者和贡献者列表。"
 
@@ -233,8 +233,10 @@ msgid ""
 "carry a `name` plus the fields consumed by the downstream reusable "
 "workflows (`os`, `tests`, `config_file_path`, `size`, etc.)."
 msgstr ""
-"该文件以 `a2:` 和 `a3:` 作为顶级键组织（每个 SoC 一个）。在每个 SoC 下，测试按执行形态分组（单节点、多节点、双节点、多卡、精度），每个组包含一个 "
-"`test_config`（或精度组的 `nightly` / `pr_only`）列表，其条目包含 `name` 以及下游可复用工作流所需的字段（`os`、`tests`、`config_file_path`、`size` 等）。"
+"该文件以 `a2:` 和 `a3:` 作为顶级键组织（每个 SoC 一个）。在每个 SoC "
+"下，测试按执行形态分组（单节点、多节点、双节点、多卡、精度），每个组包含一个 `test_config`（或精度组的 `nightly` / "
+"`pr_only`）列表，其条目包含 `name` "
+"以及下游可复用工作流所需的字段（`os`、`tests`、`config_file_path`、`size` 等）。"
 
 #: ../../source/developer_guide/contribution/nightly_ci_test.md:71
 msgid ""
@@ -244,7 +246,9 @@ msgid ""
 "same file from the PR branch, so newly added entries can be exercised on "
 "a PR before they land on main."
 msgstr ""
-"`Nightly-A2` 和 `Nightly-A3` 工作流均在运行时动态读取此文件——工作流 YAML 中没有硬编码的测试矩阵。`/nightly <name>` 斜杠命令通过遍历 PR 分支上的同一文件来解析名称，因此新添加的条目可以在合并到主分支之前在 PR 上进行验证。"
+"`Nightly-A2` 和 `Nightly-A3` 工作流均在运行时动态读取此文件——工作流 YAML "
+"中没有硬编码的测试矩阵。`/nightly <name>` 斜杠命令通过遍历 PR "
+"分支上的同一文件来解析名称，因此新添加的条目可以在合并到主分支之前在 PR 上进行验证。"
 
 #: ../../source/developer_guide/contribution/nightly_ci_test.md:77
 msgid "Adding a New Nightly Test Case"
@@ -285,7 +289,9 @@ msgstr "`size`（仅多节点/双节点）"
 msgid ""
 "Add the actual test files (pytest modules under `tests/e2e/nightly/...` "
 "or YAML model configs in `tests/e2e/nightly/.../configs/`)."
-msgstr "添加实际的测试文件（`tests/e2e/nightly/...` 下的 pytest 模块或 `tests/e2e/nightly/.../configs/` 中的 YAML 模型配置）。"
+msgstr ""
+"添加实际的测试文件（`tests/e2e/nightly/...` 下的 pytest 模块或 "
+"`tests/e2e/nightly/.../configs/` 中的 YAML 模型配置）。"
 
 #: ../../source/developer_guide/contribution/nightly_ci_test.md:89
 msgid ""
@@ -303,7 +309,10 @@ msgid ""
 " under the matching section in "
 "`.github/workflows/configs/nightly_config.yaml`. The tables below mirror "
 "the current contents of that file."
-msgstr "您可以传递给 `/nightly` 的测试名称对应于 `.github/workflows/configs/nightly_config.yaml` 中匹配部分下的 `name` 字段。下表反映了该文件的当前内容。"
+msgstr ""
+"您可以传递给 `/nightly` 的测试名称对应于 "
+"`.github/workflows/configs/nightly_config.yaml` 中匹配部分下的 `name` "
+"字段。下表反映了该文件的当前内容。"
 
 #: ../../source/developer_guide/contribution/nightly_ci_test.md:98
 msgid "A2 workflow (`.github/workflows/schedule_nightly_test_a2.yaml`)"
@@ -458,7 +467,8 @@ msgid ""
 "The `pr-accuracy-group-*` entries only run on `/nightly` (PR-triggered) "
 "runs; `/nightly all` on the schedule skips them."
 msgstr ""
-"`pr-accuracy-group-*` 条目仅在 `/nightly`（PR 触发）运行中执行；计划任务中的 `/nightly all` 会跳过它们。"
+"`pr-accuracy-group-*` 条目仅在 `/nightly`（PR 触发）运行中执行；计划任务中的 `/nightly all` "
+"会跳过它们。"
 
 #: ../../source/developer_guide/contribution/nightly_ci_test.md:132
 msgid "A3 workflow (`.github/workflows/schedule_nightly_test_a3.yaml`)"
@@ -480,8 +490,7 @@ msgstr "DeepSeek-V3.2-W8A8 带 EP，4 节点"
 msgid ""
 "**Double-node tests** (`a3.double_node.test_config`, 2-node, run after "
 "multi-node):"
-msgstr ""
-"**双节点测试**（`a3.double_node.test_config`，2 节点，在多节点测试之后运行）："
+msgstr "**双节点测试**（`a3.double_node.test_config`，2 节点，在多节点测试之后运行）："
 
 #: ../../source/developer_guide/contribution/nightly_ci_test.md:25
 msgid "`multi-node-deepseek-r1-w8a8-longseq`"
@@ -510,10 +519,6 @@ msgstr "`multi-node-dpsk3.2-2node`"
 #: ../../source/developer_guide/contribution/nightly_ci_test.md:25
 msgid "DeepSeek-V3.2-W8A8, 2-node"
 msgstr "DeepSeek-V3.2-W8A8，2 节点"
-
-#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
-msgid "Qwen3-235B-A22B with Mooncake layerwise, 2-node"
-msgstr "Qwen3-235B-A22B 带 Mooncake 分层，2 节点"
 
 #: ../../source/developer_guide/contribution/nightly_ci_test.md:25
 msgid "`multi-node-qwenw8a8-2node-longseq`"
@@ -555,7 +560,7 @@ msgstr "`multi-node-glm-5.2`"
 msgid "GLM-5.1-W8A8, 2-node"
 msgstr "GLM-5.1-W8A8，2 节点"
 
-#: ../../source/developer_guide/contribution/nightly_ci_test.md:156
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:155
 msgid "**Single-node tests** (`a3.single_node.test_config`):"
 msgstr "**单节点测试**（`a3.single_node.test_config`）："
 
@@ -667,7 +672,7 @@ msgstr "`DeepSeek-V4-Flash-W8A8-A3`"
 msgid "DeepSeek-V4-Flash W8A8"
 msgstr "DeepSeek-V4-Flash W8A8"
 
-#: ../../source/developer_guide/contribution/nightly_ci_test.md:175
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:174
 msgid "**Multi-card tests** (`a3.multi_card.test_config`):"
 msgstr "**多卡测试**（`a3.multi_card.test_config`）："
 
@@ -723,7 +728,7 @@ msgstr "`Qwen3-32B-QuaRot`"
 msgid "Qwen3-32B QuaRot + eagle3"
 msgstr "Qwen3-32B QuaRot + eagle3 模型测试"
 
-#: ../../source/developer_guide/contribution/nightly_ci_test.md:188
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:187
 msgid ""
 "The A3 resource pool has a maximum concurrency of **5×16 NPUs**. Multi-"
 "node tests run with `max-parallel: 2` to avoid resource exhaustion. "
@@ -733,31 +738,31 @@ msgstr ""
 "A3 资源池的最大并发度为 **5×16 NPU**。多节点测试以 `max-parallel: 2` 运行，以避免资源耗尽。在 A3 上运行 "
 "`/nightly all` 会使大量任务排队——请尽可能优先指定具体的测试名称。"
 
-#: ../../source/developer_guide/contribution/nightly_ci_test.md:194
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:193
 msgid "Examples"
 msgstr "示例"
 
-#: ../../source/developer_guide/contribution/nightly_ci_test.md:196
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:195
 msgid "Run all available nightly tests against your PR:"
 msgstr "针对您的 PR 运行所有可用的 nightly 测试："
 
-#: ../../source/developer_guide/contribution/nightly_ci_test.md:202
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:201
 msgid "Run only the custom operator multi-card test:"
 msgstr "仅运行自定义算子多卡测试："
 
-#: ../../source/developer_guide/contribution/nightly_ci_test.md:208
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:207
 msgid "Run two specific tests at once (one per SoC):"
 msgstr "同时运行两个指定的测试（每个 SoC 一个）："
 
-#: ../../source/developer_guide/contribution/nightly_ci_test.md:214
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:213
 msgid "Run a single accuracy group (with all of its models):"
 msgstr "运行单个精度组（包含其所有模型）："
 
-#: ../../source/developer_guide/contribution/nightly_ci_test.md:220
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:219
 msgid "Run a single accuracy model (only that model from a group):"
 msgstr "运行单个精度模型（仅运行组中的该模型）："
 
-#: ../../source/developer_guide/contribution/nightly_ci_test.md:226
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:225
 msgid ""
 "Re-trigger after fixing an issue: just push a new commit. The "
 "`synchronize` event re-runs the workflow and picks up the existing "
@@ -766,15 +771,15 @@ msgstr ""
 "修复问题后重新触发：只需推送一个新的提交。`synchronize` 事件会重新运行工作流并自动获取现有的 `/nightly` "
 "评论——无需发布新评论。"
 
-#: ../../source/developer_guide/contribution/nightly_ci_test.md:230
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:229
 msgid "Adding a New Test Case — Worked Example"
 msgstr "添加新测试用例——操作示例"
 
-#: ../../source/developer_guide/contribution/nightly_ci_test.md:232
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:231
 msgid "To add `my-new-test` to the A2 single-node section:"
 msgstr "要将 `my-new-test` 添加到 A2 单节点部分："
 
-#: ../../source/developer_guide/contribution/nightly_ci_test.md:234
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:233
 msgid ""
 "Edit `.github/workflows/configs/nightly_config.yaml`, append under "
 "`a2.single_node.test_config`:"
@@ -782,33 +787,33 @@ msgstr ""
 "编辑 `.github/workflows/configs/nightly_config.yaml`，在 "
 "`a2.single_node.test_config` 下追加："
 
-#: ../../source/developer_guide/contribution/nightly_ci_test.md:243
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:242
 msgid "Commit the new pytest file (`test_my_new.py`) in the same PR."
 msgstr "在同一个 PR 中提交新的 pytest 文件（`test_my_new.py`）。"
 
-#: ../../source/developer_guide/contribution/nightly_ci_test.md:245
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:244
 msgid "Trigger from the PR:"
 msgstr "从 PR 触发："
 
-#: ../../source/developer_guide/contribution/nightly_ci_test.md:251
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:250
 msgid "The workflow will:"
 msgstr "工作流将："
 
-#: ../../source/developer_guide/contribution/nightly_ci_test.md:253
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:252
 msgid ""
 "`pr_nightly_command.yml` reads your PR's `nightly_config.yaml` and "
 "resolves `my-new-test` → dispatch A2 only."
 msgstr ""
-"`pr_nightly_command.yml` 读取您的 PR 的 `nightly_config.yaml`，并将 `my-new-test` 解析为仅调度 A2。"
+"`pr_nightly_command.yml` 读取您的 PR 的 `nightly_config.yaml`，并将 `my-new-test`"
+" 解析为仅调度 A2。"
 
-#: ../../source/developer_guide/contribution/nightly_ci_test.md:255
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:254
 msgid ""
 "`Nightly-A2` is dispatched at `main`, but `generate-a2-matrix` checks out"
 " your PR commit and reads the new entry from the matrix."
-msgstr ""
-"`Nightly-A2` 在 `main` 分支上被调度，但 `generate-a2-matrix` 会检出您的 PR 提交并从矩阵中读取新条目。"
+msgstr "`Nightly-A2` 在 `main` 分支上被调度，但 `generate-a2-matrix` 会检出您的 PR 提交并从矩阵中读取新条目。"
 
-#: ../../source/developer_guide/contribution/nightly_ci_test.md:257
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:256
 msgid ""
 "`single-node-tests` runs one matrix job for `my-new-test`, with "
 "`should_run=true`. The reusable workflow checks out your PR code (via "
@@ -817,106 +822,114 @@ msgstr ""
 "`single-node-tests` 为 `my-new-test` 运行一个矩阵任务，`should_run=true`。可复用工作流（通过 "
 "`vllm_ascend_ref`）检出您的 PR 代码并运行您的 pytest。"
 
-#: ../../source/developer_guide/contribution/nightly_ci_test.md:261
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:260
 msgid "Troubleshooting"
 msgstr "故障排查"
 
-#: ../../source/developer_guide/contribution/nightly_ci_test.md:263
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:262
 msgid "**The workflow didn't start after I posted the comment.**"
 msgstr "**发布评论后工作流未启动。**"
 
-#: ../../source/developer_guide/contribution/nightly_ci_test.md:265
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:264
 msgid ""
 "Check that the comment starts exactly with `/nightly` with no leading "
 "spaces or extra characters before the slash."
 msgstr "检查评论是否以 `/nightly` 精确开头，斜杠前没有前导空格或多余字符。"
 
-#: ../../source/developer_guide/contribution/nightly_ci_test.md:267
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:266
 msgid ""
 "Confirm you have at least Triage permission on the repository; "
 "unauthorized users' comments are ignored."
 msgstr "确认您至少拥有仓库的 Triage 权限；未授权用户的评论将被忽略。"
 
-#: ../../source/developer_guide/contribution/nightly_ci_test.md:269
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:268
 msgid ""
 "To re-trigger after fixing an issue, simply push a new commit — the "
 "workflow will reuse the existing `/nightly` comment automatically."
 msgstr "修复问题后重新触发，只需推送一个新的提交——工作流会自动重用现有的 `/nightly` 评论。"
 
-#: ../../source/developer_guide/contribution/nightly_ci_test.md:272
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:271
 msgid "**Only some tests ran, not the ones I expected.**"
 msgstr "**只运行了部分测试，不是预期的那些。**"
 
-#: ../../source/developer_guide/contribution/nightly_ci_test.md:274
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:273
 msgid ""
 "Test names are case-sensitive and must match the `name` field in "
 "`.github/workflows/configs/nightly_config.yaml` exactly (see the tables "
 "above)."
-msgstr "测试名称区分大小写，并且必须与 `.github/workflows/configs/nightly_config.yaml` 中的 `name` 字段完全一致（参见上表）。"
+msgstr ""
+"测试名称区分大小写，并且必须与 `.github/workflows/configs/nightly_config.yaml` 中的 `name`"
+" 字段完全一致（参见上表）。"
 
-#: ../../source/developer_guide/contribution/nightly_ci_test.md:276
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:275
 msgid ""
 "For a PR-triggered run, the matrix is loaded from your PR's  "
 "`nightly_config.yaml`, not main. If a name isn't in your PR's file, it "
 "won't be recognized and the dispatch will be skipped."
 msgstr ""
-"对于 PR 触发的运行，矩阵从您的 PR 的 `nightly_config.yaml` 加载，而不是 main 分支。如果名称不在您的 PR 文件中，它将不会被识别，调度将被跳过。"
+"对于 PR 触发的运行，矩阵从您的 PR 的 `nightly_config.yaml` 加载，而不是 main 分支。如果名称不在您的 PR "
+"文件中，它将不会被识别，调度将被跳过。"
 
-#: ../../source/developer_guide/contribution/nightly_ci_test.md:279
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:278
 msgid ""
 "Check the `parse-trigger` job output in GitHub Actions for the resolved "
 "`test_filter` value."
 msgstr "在 GitHub Actions 中检查 `parse-trigger` 任务的输出，查看解析后的 `test_filter` 值。"
 
-#: ../../source/developer_guide/contribution/nightly_ci_test.md:282
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:281
 msgid "**The workflow ran with the scheduled image, not my PR code.**"
 msgstr "**工作流使用的是定时镜像，而不是我的 PR 代码。**"
 
-#: ../../source/developer_guide/contribution/nightly_ci_test.md:284
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:283
 msgid ""
 "Confirm the workflow was triggered by `repository_dispatch` (slash "
 "command), not bare `workflow_dispatch`. The `pr_nightly_command.yml` "
 "workflow is what actually dispatches `schedule_nightly_test_a2.yaml` / "
 "`_a3.yaml` with `vllm_ascend_ref` pointing at your PR SHA."
 msgstr ""
-"确认工作流是由 `repository_dispatch`（斜杠命令）触发的，而不是裸 `workflow_dispatch`。`pr_nightly_command.yml` "
-"工作流才是实际调度 `schedule_nightly_test_a2.yaml` / `_a3.yaml` 的，其中 `vllm_ascend_ref` 指向您的 PR SHA。"
+"确认工作流是由 `repository_dispatch`（斜杠命令）触发的，而不是裸 "
+"`workflow_dispatch`。`pr_nightly_command.yml` 工作流才是实际调度 "
+"`schedule_nightly_test_a2.yaml` / `_a3.yaml` 的，其中 `vllm_ascend_ref` 指向您的 "
+"PR SHA。"
 
-#: ../../source/developer_guide/contribution/nightly_ci_test.md:289
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:288
 msgid "**A new test I added isn't being recognized.**"
 msgstr "**我添加的新测试未被识别。**"
 
-#: ../../source/developer_guide/contribution/nightly_ci_test.md:291
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:290
 msgid ""
 "Confirm the entry is well-formed YAML under "
 "`.github/workflows/configs/nightly_config.yaml`. The `name` field is "
 "required and must be unique within the SoC's section."
 msgstr ""
-"确认条目是格式良好的 YAML，位于 `.github/workflows/configs/nightly_config.yaml` 下。`name` 字段是必需的，并且在 SoC 部分内必须唯一。"
+"确认条目是格式良好的 YAML，位于 `.github/workflows/configs/nightly_config.yaml` "
+"下。`name` 字段是必需的，并且在 SoC 部分内必须唯一。"
 
-#: ../../source/developer_guide/contribution/nightly_ci_test.md:294
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:293
 msgid ""
 "The matrix is loaded from your PR branch, so make sure the file is "
 "committed to the same branch the `/nightly` comment was posted on."
-msgstr ""
-"矩阵从您的 PR 分支加载，因此请确保文件已提交到发布 `/nightly` 评论的同一分支。"
+msgstr "矩阵从您的 PR 分支加载，因此请确保文件已提交到发布 `/nightly` 评论的同一分支。"
 
-#: ../../source/developer_guide/contribution/nightly_ci_test.md:297
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:296
 msgid ""
 "**How to obtain more detailed logs to pinpoint problems for multi-node "
 "tests**"
 msgstr "**如何获取更详细的日志以定位多节点测试的问题**"
 
-#: ../../source/developer_guide/contribution/nightly_ci_test.md:299
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:298
 msgid ""
 "For most issues, the stdout pop-up logs from GitHub actions are "
 "sufficient (this log always represents the logs from the first node)."
 msgstr "对于大多数问题，GitHub Actions 的标准输出弹出日志就足够了（该日志始终代表第一个节点的日志）。"
 
-#: ../../source/developer_guide/contribution/nightly_ci_test.md:300
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:299
 msgid ""
 "If the logs from a first node are no longer sufficient to provide "
 "effective logging information, see the summary of your jobs to download "
 "log archive for the corresponding test, which includes the framework-side"
 " logs and plog information for each node, structured as follows:"
 msgstr "如果第一个节点的日志不再足以提供有效的日志信息，请查看任务摘要以下载对应测试的日志归档，其中包含框架侧日志和每个节点的 plog 信息，结构如下："
+
+#~ msgid "Qwen3-235B-A22B with Mooncake layerwise, 2-node"
+#~ msgstr "Qwen3-235B-A22B 带 Mooncake 分层，2 节点"

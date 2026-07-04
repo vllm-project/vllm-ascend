@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-02 07:02+0000\n"
+"POT-Creation-Date: 2026-07-04 04:01+0000\n"
 "PO-Revision-Date: 2026-01-22 16:45+0800\n"
 "Last-Translator: Gemini\n"
 "Language: zh_CN\n"
@@ -39,7 +39,9 @@ msgid ""
 "Starting from [PR #9064](https://github.com/vllm-project/vllm-"
 "ascend/pull/9064), vLLM Ascend is migrating **10 environment variables** "
 "to `--additional-config`."
-msgstr "从 [PR #9064](https://github.com/vllm-project/vllm-ascend/pull/9064) 开始，vLLM Ascend 正在将 **10 个环境变量** 迁移至 `--additional-config`。"
+msgstr ""
+"从 [PR #9064](https://github.com/vllm-project/vllm-ascend/pull/9064) "
+"开始，vLLM Ascend 正在将 **10 个环境变量** 迁移至 `--additional-config`。"
 
 #: ../../source/user_guide/configuration/additional_config.md:9
 msgid "Important Notice"
@@ -369,6 +371,25 @@ msgstr "是否启用多流门控重叠。此选项仅对包含共享专家的 Mo
 msgid "`recompute_scheduler_enable`"
 msgstr "`recompute_scheduler_enable`"
 
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, vLLM-Ascend Contributors
+# This file is distributed under the same license as the vLLM-Ascend package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2024.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: vLLM-Ascend \\n"
+"Report-Msgid-Bugs-To: \\n"
+"POT-Creation-Date: 2024-12-20 17:00+0800\\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\\n"
+"Language-Team: Chinese <team@example.com>\\n"
+"Language: zh_CN\\n"
+"MIME-Version: 1.0\\n"
+"Content-Type: text/plain; charset=UTF-8\\n"
+"Content-Transfer-Encoding: 8bit\\n"
+
 #: ../../source/user_guide/configuration/additional_config.md
 msgid ""
 "Whether to enable the recompute scheduler. **Only valid in PD-"
@@ -503,6 +524,23 @@ msgid "Enable dispatch/combine op inter-node communication by ROCE."
 msgstr "通过 ROCE 启用分发/组合操作的节点间通信。"
 
 #: ../../source/user_guide/configuration/additional_config.md
+msgid "`enable_prefill_mc2`"
+msgstr "`enable_prefill_mc2`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Whether to reserve mc2_token_capacity for prefill batches. When enabled, "
+"`max_num_batched_tokens` is used to calculate the mc2_token_capacity "
+"instead of the decode-only capacity. In this scenario, the recommended "
+"maximum value of `max_num_batched_tokens` is `tp_size * 512`. This is a "
+"temporary switch; once MC2 operators are complete for all scenarios, this"
+" switch will be removed and MC2 will be enabled by default."
+msgstr ""
+"是否为预填充批次预留 mc2_token_capacity。启用后，将使用 `max_num_batched_tokens` 而非仅解码容量来计算 "
+"mc2_token_capacity。在此场景下，`max_num_batched_tokens` 的推荐最大值为 `tp_size * 512`。"
+"这是一个临时开关；一旦 MC2 算子在所有场景下完备，此开关将被移除，MC2 将默认启用。"
+
+#: ../../source/user_guide/configuration/additional_config.md
 msgid "`profiling_chunk_config`"
 msgstr "`profiling_chunk_config`"
 
@@ -627,11 +665,11 @@ msgstr "`multistream_dsv4_dsa_overlap`"
 msgid "Whether to enable dsa multi-stream overlap for DeepSeek V4."
 msgstr "是否为 DeepSeek V4 启用 dsa 多流重叠。"
 
-#: ../../source/user_guide/configuration/additional_config.md:107
+#: ../../source/user_guide/configuration/additional_config.md:108
 msgid "The details of each configuration option are as follows:"
 msgstr "每个配置选项的详细说明如下："
 
-#: ../../source/user_guide/configuration/additional_config.md:109
+#: ../../source/user_guide/configuration/additional_config.md:110
 msgid "**xlite_graph_config**"
 msgstr "**xlite_graph_config**"
 
@@ -655,7 +693,7 @@ msgid ""
 "default, Xlite is only enabled for the decode stage."
 msgstr "是否在预填充和解码阶段同时启用 Xlite。默认情况下，Xlite 仅在解码阶段启用。"
 
-#: ../../source/user_guide/configuration/additional_config.md:116
+#: ../../source/user_guide/configuration/additional_config.md:117
 msgid "**weight_prefetch_config**"
 msgstr "**weight_prefetch_config**"
 
@@ -680,7 +718,7 @@ msgstr ""
 msgid "Prefetch ratio of each weight."
 msgstr "各项权重的预取比例。"
 
-#: ../../source/user_guide/configuration/additional_config.md:123
+#: ../../source/user_guide/configuration/additional_config.md:124
 msgid "**finegrained_tp_config**"
 msgstr "**finegrained_tp_config**"
 
@@ -716,7 +754,7 @@ msgstr "`mlp_tensor_parallel_size`"
 msgid "The custom tensor parallel size of mlp."
 msgstr "MLP 层的自定义张量并行大小。"
 
-#: ../../source/user_guide/configuration/additional_config.md:132
+#: ../../source/user_guide/configuration/additional_config.md:133
 msgid "**ascend_compilation_config**"
 msgstr "**ascend_compilation_config**"
 
@@ -771,7 +809,7 @@ msgstr "`fuse_muls_add`"
 msgid "Whether to enable fuse_muls_add pass."
 msgstr "是否启用 fuse_muls_add 优化通道。"
 
-#: ../../source/user_guide/configuration/additional_config.md:143
+#: ../../source/user_guide/configuration/additional_config.md:144
 msgid "**eplb_config**"
 msgstr "**eplb_config**"
 
@@ -867,7 +905,7 @@ msgstr ""
 "收集 EPLB 热度的阶段：`\"prefill\"` 仅在预填充阶段收集，`\"decode\"` 仅在解码阶段收集，`\"all\"` "
 "在两个阶段均收集。在 PD 共置场景中，预填充和解码请求可能产生不同的专家工作负载。选择性地在某个阶段收集热度可以更有效地减少专家不均衡。"
 
-#: ../../source/user_guide/configuration/additional_config.md:156
+#: ../../source/user_guide/configuration/additional_config.md:157
 msgid "**profiling_chunk_config**"
 msgstr "**profiling_chunk_config**"
 
@@ -933,11 +971,11 @@ msgstr "30"
 msgid "Number of chunk-time data for Online Calibration"
 msgstr "在线校准的分块时间数据数量"
 
-#: ../../source/user_guide/configuration/additional_config.md:166
+#: ../../source/user_guide/configuration/additional_config.md:167
 msgid "**rejection_sampler_config**"
 msgstr "**rejection_sampler_config**"
 
-#: ../../source/user_guide/configuration/additional_config.md:168
+#: ../../source/user_guide/configuration/additional_config.md:169
 msgid ""
 "**Note**: Both block verify and entropy verify improve speculative "
 "decoding performance (higher acceptance rate, lower latency) at the cost "
@@ -1010,10 +1048,10 @@ msgid ""
 "precision."
 msgstr "阈值计算中熵的缩放因子。必须 >= 0。值越大，阈值对熵越敏感——高熵 token 更容易被接受，从而提高性能但降低精度。"
 
-#: ../../source/user_guide/configuration/additional_config.md:177
+#: ../../source/user_guide/configuration/additional_config.md:178
 msgid "Example"
 msgstr "示例"
 
-#: ../../source/user_guide/configuration/additional_config.md:179
+#: ../../source/user_guide/configuration/additional_config.md:180
 msgid "An example of additional configuration is as follows:"
 msgstr "附加配置的一个示例如下："
