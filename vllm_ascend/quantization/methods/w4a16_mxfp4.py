@@ -80,10 +80,16 @@ class AscendW4A16MXFP4FusedMoEMethod(AscendMoEScheme):
     ) -> dict[str, Any]:
         param_dict = {}
         param_dict["w13_weight"] = torch.empty(
-            num_experts, 2 * intermediate_size_per_partition, hidden_sizes // 2, dtype=torch.uint8,
+            num_experts,
+            2 * intermediate_size_per_partition,
+            hidden_sizes // 2,
+            dtype=torch.uint8,
         )
         param_dict["w2_weight"] = torch.empty(
-            num_experts, hidden_sizes, intermediate_size_per_partition // 2, dtype=torch.uint8,
+            num_experts,
+            hidden_sizes,
+            intermediate_size_per_partition // 2,
+            dtype=torch.uint8,
         )
         return param_dict
 
@@ -197,16 +203,12 @@ class AscendW4A16MXFP4FusedMoEMethod(AscendMoEScheme):
     def process_weights_after_loading(self, layer):
         layer.w13_weight.data = unpack_uint8_to_fp4_return_float32(layer.w13_weight.data)
         layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2)
-        layer.w13_weight.data = torch_npu.npu_format_cast(
-            layer.w13_weight.data, 29, customize_dtype=torch.bfloat16
-        )
+        layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, 29, customize_dtype=torch.bfloat16)
         layer.w13_weight.data = torch_npu.npu_convert_weight_to_int4pack(layer.w13_weight.data).contiguous()
 
         layer.w2_weight.data = unpack_uint8_to_fp4_return_float32(layer.w2_weight.data)
         layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2)
-        layer.w2_weight.data = torch_npu.npu_format_cast(
-            layer.w2_weight.data, 29, customize_dtype=torch.bfloat16
-        )
+        layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight.data, 29, customize_dtype=torch.bfloat16)
         layer.w2_weight.data = torch_npu.npu_convert_weight_to_int4pack(layer.w2_weight.data).contiguous()
 
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.transpose(1, 2).contiguous()
