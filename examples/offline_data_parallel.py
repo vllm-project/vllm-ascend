@@ -125,18 +125,24 @@ def main(
 
     # vLLM v0.24.0 (PR #45026) stopped isolating devices per worker process
     # automatically. For application-level DP (one LLM() per rank), each
-    # child process must see its own slice of ASCEND_RT_VISIBLE_DEVICES,
-    # otherwise HCCL complains that two independent processes on the same
-    # node claim the same physical device.
+    # child process must specify its own device assignment. Use the upstream
+    # dp_supervisor's _build_device_ids to compute per-rank device IDs and
+    # pass them via the device_ids argument to LLM().
     from vllm_ascend.utils import vllm_version_is
 
+    _dp_device_ids = None
     if not vllm_version_is("0.23.0"):
-        visible = os.environ.get("ASCEND_RT_VISIBLE_DEVICES", "")
-        devs = [d for d in visible.split(",") if d]
-        if len(devs) >= dp_size:
-            chunk = len(devs) // dp_size
-            offset = local_dp_rank * chunk
-            os.environ["ASCEND_RT_VISIBLE_DEVICES"] = ",".join(devs[offset : offset + chunk])
+        from argparse import Namespace
+        from vllm.entrypoints.openai.dp_supervisor import _build_device_ids
+
+        _dp_device_ids = _build_device_ids(
+            Namespace(
+                tensor_parallel_size=GPUs_per_dp_rank,
+                pipeline_parallel_size=1,
+                device_ids=None,
+            ),
+            local_dp_rank,
+        )
 
     # Sample prompts.
     prompts = [
@@ -177,6 +183,7 @@ def main(
         enable_expert_parallel=enable_expert_parallel,
         trust_remote_code=trust_remote_code,
         quantization=quantization,
+        **({} if _dp_device_ids is None else {"device_ids": _dp_device_ids}),
     )
     outputs = llm.generate(prompts, sampling_params)
     # Print the outputs.
