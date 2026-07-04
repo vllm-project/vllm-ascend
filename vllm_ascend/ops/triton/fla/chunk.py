@@ -26,6 +26,7 @@ from .solve_tril import solve_tril
 from .utils import input_guard, prepare_final_chunk_indices
 from .wy_fast import recompute_w_u_fwd
 
+
 def _compact_empty_segments(cu_seqlens_host, initial_state):
     """Drop zero-length segments so AscendC fwd_h/fwd_o indexing lines up.
 
@@ -132,8 +133,7 @@ def chunk_gated_delta_rule_fwd(
     # Compact zero-length segments for the AscendC kernels (see
     # _compact_empty_segments). chunk_indices_chunk64 is already compact-ranked and
     # is reused as-is; only cu_seqlens / initial_state need compacting.
-    cu_seqlens_kern, initial_state_kern, keep_meta = _compact_empty_segments(
-        cu_seqlens_host, initial_state)
+    cu_seqlens_kern, initial_state_kern, keep_meta = _compact_empty_segments(cu_seqlens_host, initial_state)
     h, v_new, final_state = torch.ops._C_ascend.chunk_gated_delta_rule_fwd_h(
         k_ascendc,
         w_ascendc,
