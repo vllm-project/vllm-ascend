@@ -81,12 +81,12 @@ def _patch_select_moe_comm_method_deps(
     )
 
 
-def test_set_mc2_tokens_capacity_without_cudagraph_caps_at_512_and_aligns():
+def test_set_mc2_tokens_capacity_without_cudagraph_aligns_per_tp_rank():
     vllm_config = _make_vllm_config(tensor_parallel_size=6)
 
     afc.set_mc2_tokens_capacity(vllm_config, max_num_reqs=200, uniform_decode_query_len=3)
 
-    assert afc.get_mc2_tokens_capacity() == 516
+    assert afc.get_mc2_tokens_capacity() == 600
 
 
 def test_set_mc2_tokens_capacity_with_cudagraph_uses_capture_size_and_aligns():
