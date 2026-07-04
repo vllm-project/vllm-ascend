@@ -249,6 +249,7 @@ jobs:
           wget -S "$DOWNLOAD_URL" -O /tmp/crane.tar.gz
 
       - name: Build and push
+        shell: bash -e {0}
         id: build
         env:
           QUAY_TEMP_USERNAME: ${{ inputs.quay_temp_username }}
