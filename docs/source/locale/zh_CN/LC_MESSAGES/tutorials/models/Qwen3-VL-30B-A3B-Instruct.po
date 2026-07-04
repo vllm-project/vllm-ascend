@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-09 18:37+0800\n"
+"POT-Creation-Date: 2026-07-02 07:02+0000\n"
 "PO-Revision-Date: 2026-04-10 18:37+0800\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -36,8 +36,8 @@ msgid ""
 "advanced functions like image detection, multi-modal dialogue, and multi-"
 "image reasoning."
 msgstr ""
-"阿里云的通义千问视觉语言（Qwen-VL）系列包含一系列强大的大型视觉语言模型（LVLM），专为全面的多模态理解而设计。"
-"它们接受图像、文本和边界框作为输入，输出文本和检测框，支持图像检测、多模态对话和多图像推理等高级功能。"
+"阿里云的通义千问视觉语言（Qwen-"
+"VL）系列包含一系列强大的大型视觉语言模型（LVLM），专为全面的多模态理解而设计。它们接受图像、文本和边界框作为输入，输出文本和检测框，支持图像检测、多模态对话和多图像推理等高级功能。"
 
 #: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:7
 msgid ""
@@ -54,15 +54,13 @@ msgid ""
 "Refer to [supported "
 "features](../../user_guide/support_matrix/supported_models.md) to get the"
 " model's supported feature matrix."
-msgstr ""
-"请参阅[支持的特性矩阵](../../user_guide/support_matrix/supported_models.md)获取模型支持的特性列表。"
+msgstr "请参阅[支持的特性矩阵](../../user_guide/support_matrix/supported_models.md)获取模型支持的特性列表。"
 
 #: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:12
 msgid ""
 "Refer to [feature guide](../../user_guide/feature_guide/index.md) to get "
 "the feature's configuration."
-msgstr ""
-"请参阅[特性指南](../../user_guide/feature_guide/index.md)获取特性的配置方法。"
+msgstr "请参阅[特性指南](../../user_guide/feature_guide/index.md)获取特性的配置方法。"
 
 #: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:14
 msgid "Environment Preparation"
@@ -84,8 +82,8 @@ msgid ""
 "Website](https://modelscope.cn/models/Qwen/Qwen3-VL-30B-A3B-Instruct) or "
 "download by below command:"
 msgstr ""
-"在 [ModelScope 网站](https://modelscope.cn/models/Qwen/Qwen3-VL-30B-A3B-Instruct) 下载模型权重，"
-"或使用以下命令下载："
+"在 [ModelScope 网站](https://modelscope.cn/models/Qwen/Qwen3-VL-30B-A3B-"
+"Instruct) 下载模型权重，或使用以下命令下载："
 
 #: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:27
 msgid ""
@@ -113,9 +111,8 @@ msgid ""
 "memory. You can find more details "
 "[<u>here</u>](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/800alpha003/apiref/envref/envref_07_0061.html)."
 msgstr ""
-"`max_split_size_mb` 可防止原生分配器拆分大于此大小（以 MB 为单位）的块。"
-"这可以减少碎片，并可能使一些边缘工作负载在不耗尽内存的情况下完成。"
-"更多详情请参见[此处](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/800alpha003/apiref/envref/envref_07_0061.html)。"
+"`max_split_size_mb` 可防止原生分配器拆分大于此大小（以 MB "
+"为单位）的块。这可以减少碎片，并可能使一些边缘工作负载在不耗尽内存的情况下完成。更多详情请参见[此处](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/800alpha003/apiref/envref/envref_07_0061.html)。"
 
 #: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:72
 msgid "Deployment"
@@ -143,7 +140,8 @@ msgid ""
 "parallel`, which allows experts in MoE models to be deployed on separate "
 "GPUs for better throughput."
 msgstr ""
-"vllm-ascend 通过 `--enable-expert-parallel` 支持专家并行（EP），允许将 MoE 模型中的专家部署到不同的 GPU 上以提高吞吐量。"
+"vllm-ascend 通过 `--enable-expert-parallel` 支持专家并行（EP），允许将 MoE 模型中的专家部署到不同的"
+" GPU 上以提高吞吐量。"
 
 #: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:97
 msgid ""
@@ -151,7 +149,8 @@ msgid ""
 "your inference server will only process image inputs since enabling video"
 " inputs consumes more memory reserved for long video embeddings."
 msgstr ""
-"如果推理服务器仅处理图像输入，强烈建议指定 `--limit-mm-per-prompt.video 0`，因为启用视频输入会消耗更多预留用于长视频嵌入的内存。"
+"如果推理服务器仅处理图像输入，强烈建议指定 `--limit-mm-per-prompt.video "
+"0`，因为启用视频输入会消耗更多预留用于长视频嵌入的内存。"
 
 #: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:99
 #: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:159
@@ -160,11 +159,11 @@ msgid ""
 "context length is 262K, but `--max-model-len 128000` is good for most "
 "scenarios."
 msgstr ""
-"可以设置 `--max-model-len` 来节省内存。默认情况下模型的上下文长度为 262K，但 `--max-model-len 128000` 适用于大多数场景。"
+"可以设置 `--max-model-len` 来节省内存。默认情况下模型的上下文长度为 262K，但 `--max-model-len "
+"128000` 适用于大多数场景。"
 
 #: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:102
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:164
-msgid "If your service start successfully, you can see the info shown below:"
+msgid "If your service starts successfully, you can see the info shown below:"
 msgstr "如果服务启动成功，您将看到如下所示的信息："
 
 #: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:110
@@ -194,7 +193,12 @@ msgid ""
 "located at `/media`, since directly download the video during serving can"
 " be extremely slow due to network issues."
 msgstr ""
-"设置 `--allowed-local-media-path /media` 以使用位于 `/media` 的本地视频，因为由于网络问题，在服务期间直接下载视频可能极其缓慢。"
+"设置 `--allowed-local-media-path /media` 以使用位于 `/media` "
+"的本地视频，因为由于网络问题，在服务期间直接下载视频可能极其缓慢。"
+
+#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:164
+msgid "If your service start successfully, you can see the info shown below:"
+msgstr "如果服务启动成功，您将看到如下所示的信息："
 
 #: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:205
 msgid "Offline Inference"
@@ -209,5 +213,6 @@ msgid ""
 "/Qwen-VL-Dense.html#offline-inference)."
 msgstr ""
 "`Qwen3-VL-30B-A3B-Instruct` 的离线推理用法与 `Qwen3-VL-8B-Instruct` 完全相同，更多详情请参见 "
-"[Qwen3-VL-8B-Instruct](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models"
+"[Qwen3-VL-8B-"
+"Instruct](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models"
 "/Qwen-VL-Dense.html#offline-inference)。"
