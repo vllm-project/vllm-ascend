@@ -3,14 +3,23 @@
 import json
 from typing import Any
 
-from openai.types.responses.function_tool import FunctionTool
-from vllm.entrypoints.openai.chat_completion.protocol import (
+import pytest
+
+from vllm_ascend.utils import vllm_version_is
+
+pytestmark = pytest.mark.skipif(
+    not vllm_version_is("0.23.0"),
+    reason="upstream vLLM removed tool_call_start_token attribute",
+)
+
+from openai.types.responses.function_tool import FunctionTool  # noqa: E402
+from vllm.entrypoints.openai.chat_completion.protocol import (  # noqa: E402
     ChatCompletionToolsParam,
     FunctionDefinition,
 )
-from vllm.tool_parsers.minimax_m2_tool_parser import MinimaxM2ToolParser
+from vllm.tool_parsers.minimax_m2_tool_parser import MinimaxM2ToolParser  # noqa: E402
 
-from vllm_ascend.patch.platform import (
+from vllm_ascend.patch.platform import (  # noqa: E402
     patch_minimax_m2_tool_call_parser as minimax_m2_patch,
 )
 

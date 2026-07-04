@@ -27,7 +27,7 @@ from vllm.logger import logger
 from vllm.platforms import current_platform
 from vllm.v1.worker.encoder_cudagraph import BudgetGraphMetadata, EncoderCudaGraphManager
 
-from vllm_ascend.utils import weak_ref_tensors
+from vllm_ascend.utils import vllm_version_is, weak_ref_tensors
 
 # ---------------------------------------------------------------------------
 # Per–encoder-budget ACL graph bookkeeping (ViT FIA tasks)
@@ -38,6 +38,9 @@ from vllm_ascend.utils import weak_ref_tensors
 class EncoderGraphParams:
     """Mirrors :class:`vllm_ascend.compilation.acl_graph.GraphParams` but keyed by encoder token budget."""
 
+    # TODO: Fully support upstream dual-path encoder graph on Ascend. The
+    # current FIA bookkeeping is keyed only by token_budget; dual-path models
+    # need graph params separated by (path, token_budget).
     events: dict[int, list[torch.npu.ExternalEvent]] = field(default_factory=dict)
     workspaces: dict[int, torch.Tensor | None] = field(default_factory=dict)
     handles: dict[int, list[Any]] = field(default_factory=dict)
@@ -280,7 +283,7 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
 
         weak_ref_workspaces()
 
-    def _capture_budget_graph(self, token_budget: int):
+    def _capture_budget_graph(self, token_budget: int, path: str = "default"):
         logger.debug(
             "Capturing encoder aclgraph for budget=%d, max_batch_size=%d, max_frames_per_batch=%d",
             token_budget,
@@ -288,17 +291,30 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
             self.max_frames_per_batch,
         )
 
-        capture_inputs = self.model.prepare_encoder_cudagraph_capture_inputs(
-            token_budget,
-            self.max_batch_size,
-            self.max_frames_per_batch,
-            self.device,
-            self.dtype,
-        )
+        if vllm_version_is("0.23.0"):
+            capture_inputs = self.model.prepare_encoder_cudagraph_capture_inputs(
+                token_budget,
+                self.max_batch_size,
+                self.max_frames_per_batch,
+                self.device,
+                self.dtype,
+            )
+        else:
+            capture_inputs = self.model.prepare_encoder_cudagraph_capture_inputs(
+                token_budget,
+                self.max_batch_size,
+                self.max_frames_per_batch,
+                self.device,
+                self.dtype,
+                path,
+            )
 
         values = capture_inputs.values
         with torch.inference_mode():
-            output = self.model.encoder_cudagraph_forward(dict(values))
+            if vllm_version_is("0.23.0"):
+                output = self.model.encoder_cudagraph_forward(dict(values))
+            else:
+                output = self.model.encoder_cudagraph_forward(dict(values), path=path)
             output_buffer = torch.empty_like(output)
 
         graph = torch.npu.NPUGraph()
@@ -307,10 +323,13 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
             torch.inference_mode(),
             torch.npu.graph(graph, self.graph_pool),
         ):
-            output = self.model.encoder_cudagraph_forward(dict(values))
+            if vllm_version_is("0.23.0"):
+                output = self.model.encoder_cudagraph_forward(dict(values))
+            else:
+                output = self.model.encoder_cudagraph_forward(dict(values), path=path)
             output_buffer.copy_(output)
 
-        self.budget_graphs[token_budget] = BudgetGraphMetadata(
+        graph_meta = BudgetGraphMetadata(
             token_budget=token_budget,
             max_batch_size=self.max_batch_size,
             max_frames_per_batch=self.max_frames_per_batch,
@@ -318,30 +337,51 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
             input_buffers=values,
             output_buffer=weak_ref_tensors(output_buffer),
         )
+        if vllm_version_is("0.23.0"):
+            self.budget_graphs[token_budget] = graph_meta
+        else:
+            graph_set = self._get_graph_set(path)
+            graph_set[token_budget] = graph_meta
 
     def _run_budget_graph(
         self,
         mm_kwargs: dict[str, Any],
         token_budget: int,
+        path: str = "default",
     ) -> torch.Tensor | None:
         num_items = len(self._get_item_specs(mm_kwargs))
-        if token_budget not in self.budget_graphs:
-            self.graph_misses += num_items
-            return None
+        if vllm_version_is("0.23.0"):
+            if token_budget not in self.budget_graphs:
+                self.graph_misses += num_items
+                return None
+            graph_meta = self.budget_graphs[token_budget]
+        else:
+            graph_set = self._get_graph_set(path)
+            if token_budget not in graph_set:
+                self.graph_misses += num_items
+                return None
+            graph_meta = graph_set[token_budget]
 
-        graph_meta = self.budget_graphs[token_budget]
+        if vllm_version_is("0.23.0"):
+            replay = self.model.prepare_encoder_cudagraph_replay_buffers(
+                mm_kwargs,
+                self.max_batch_size,
+                self.max_frames_per_batch,
+            )
+            buffer_items = ((key, graph_meta.input_buffers[key]) for key in self.config.buffer_keys)
+        else:
+            replay = self.model.prepare_encoder_cudagraph_replay_buffers(
+                mm_kwargs,
+                self.max_batch_size,
+                self.max_frames_per_batch,
+                path,
+            )
+            buffer_items = graph_meta.input_buffers.items()
 
-        replay = self.model.prepare_encoder_cudagraph_replay_buffers(
-            mm_kwargs,
-            self.max_batch_size,
-            self.max_frames_per_batch,
-        )
-
-        for key in self.config.buffer_keys:
+        for key, buf in buffer_items:
             src = replay.values.get(key)
             if src is None:
                 continue
-            buf = graph_meta.input_buffers[key]
             if src.ndim == 0:
                 buf.copy_(src)
             else:
