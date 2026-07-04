@@ -33,6 +33,9 @@ a3:
       - name: GLM_5_1_PD_in64k_bs16-90
         config_file_path: GLM_5_1_PD_in64k_bs16-90.yaml
         size: 4
+      - name: kimi-k2_5-w4a8-ep-16k-1k-TPOT50
+        config_file_path: Kimi-K2.5-W4A8-16k-1k-TPOT50.yaml
+        size: 4
   double_node:
     test_config:
       - name: DeepSeek-V3_2-W8A8-EP_weekly
