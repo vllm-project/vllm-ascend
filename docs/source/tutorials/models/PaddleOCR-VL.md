@@ -305,7 +305,7 @@ TASKS = {
     "ocr": "OCR:",
     "table": "Table Recognition:",
     "formula": "Formula Recognition:",
-    "chart": "Chart Recognition:",
+    "chart": "Chart Recognition:"
 }
 
 messages = [
