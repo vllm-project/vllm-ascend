@@ -375,7 +375,7 @@ jobs:
         run: |
           ARCH=$(uname -m | sed 's/aarch64/arm64/')
           CRANE_VERSION="v0.20.2"
-          wget -q "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_${CRANE_VERSION#v}_Linux_${ARCH}.tar.gz" -O /tmp/crane.tar.gz
+          wget -S "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_${CRANE_VERSION#v}_Linux_${ARCH}.tar.gz" -O /tmp/crane.tar.gz
           tar -xzf /tmp/crane.tar.gz -C /tmp crane
           chmod +x /tmp/crane
           /tmp/crane auth login quay.io -u "$QUAY_USERNAME" -p "$QUAY_PASSWORD"
