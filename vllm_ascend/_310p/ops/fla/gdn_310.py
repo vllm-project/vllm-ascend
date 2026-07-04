@@ -416,9 +416,9 @@ class AscendGatedDeltaNetAttention310(GatedDeltaNetAttention):
                 # 310P. If that asynchronous kernel fails, the next stream sync
                 # reports 507018 and leaves EngineCore unable to shut down. Apply
                 # the same zeroing semantics with a broadcast multiply instead.
-                state_mask = has_initial_state.to(
-                    device=initial_state.device, dtype=initial_state.dtype
-                ).reshape(-1, *([1] * (initial_state.ndim - 1)))
+                state_mask = has_initial_state.to(device=initial_state.device, dtype=initial_state.dtype).reshape(
+                    -1, *([1] * (initial_state.ndim - 1))
+                )
                 initial_state.mul_(state_mask)
                 (
                     core_attn_out_non_spec,
@@ -437,9 +437,7 @@ class AscendGatedDeltaNetAttention310(GatedDeltaNetAttention):
                 )
 
                 # Init cache
-                ssm_state.index_copy_(
-                    0, state_indices, last_recurrent_state.to(ssm_state.dtype)
-                )
+                ssm_state.index_copy_(0, state_indices, last_recurrent_state.to(ssm_state.dtype))
             elif attn_metadata.num_decodes > 0:
                 core_attn_out_non_spec = npu_recurrent_gated_delta_rule_310(
                     q=query_non_spec,
