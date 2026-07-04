@@ -9,6 +9,11 @@ from vllm_ascend.ascend_forward_context import MoECommType
 @pytest.fixture(autouse=True)
 def reset_mc2_tokens_capacity(monkeypatch):
     monkeypatch.setattr(afc, "_mc2_tokens_capacity", None)
+    monkeypatch.setattr(
+        afc,
+        "get_ascend_config",
+        lambda: SimpleNamespace(enable_prefill_mc2=False, enable_fused_mc2=0),
+    )
 
 
 def _make_vllm_config(
@@ -23,6 +28,7 @@ def _make_vllm_config(
     num_experts_per_tok: int | None = None,
     cudagraph_capture_sizes: list[int] | None = None,
     max_cudagraph_capture_size: int = 0,
+    max_num_batched_tokens: int = 0,
 ):
     hf_text_config_attrs: dict[str, object] = {"top_k_experts": top_k_experts}
     if quant_type is not None:
@@ -44,10 +50,12 @@ def _make_vllm_config(
         cudagraph_capture_sizes=cudagraph_capture_sizes or [],
         max_cudagraph_capture_size=max_cudagraph_capture_size,
     )
+    scheduler_config = SimpleNamespace(max_num_batched_tokens=max_num_batched_tokens)
     return SimpleNamespace(
         model_config=model_config,
         parallel_config=parallel_config,
         compilation_config=compilation_config,
+        scheduler_config=scheduler_config,
     )
 
 
@@ -91,6 +99,19 @@ def test_set_mc2_tokens_capacity_with_cudagraph_uses_capture_size_and_aligns():
     afc.set_mc2_tokens_capacity(vllm_config, max_num_reqs=16, uniform_decode_query_len=1)
 
     assert afc.get_mc2_tokens_capacity() == 264
+
+
+def test_set_mc2_tokens_capacity_prefill_mc2_uses_max_num_batched_tokens(monkeypatch):
+    monkeypatch.setattr(
+        afc,
+        "get_ascend_config",
+        lambda: SimpleNamespace(enable_prefill_mc2=True, enable_fused_mc2=0),
+    )
+    vllm_config = _make_vllm_config(tensor_parallel_size=8, max_num_batched_tokens=513)
+
+    afc.set_mc2_tokens_capacity(vllm_config, max_num_reqs=16, uniform_decode_query_len=1)
+
+    assert afc.get_mc2_tokens_capacity() == 520
 
 
 def test_select_moe_comm_method_returns_none_for_non_moe(monkeypatch):
