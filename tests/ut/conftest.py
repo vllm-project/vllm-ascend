@@ -133,3 +133,23 @@ for _m in _stale_modules:
 def _clear_enable_sp_before_test():
     clear_enable_sp()
     yield
+
+
+@pytest.fixture(autouse=True)
+def _mock_ascend_store_deps(request):
+    # ascend_store code imports vllm_ascend helpers (AttentionComputeStartGate,
+    # get/reset_attention_compute_start_gate, ...) which _mock_deps.py no longer
+    # mocks globally (mutating the real modules leaked into other UTs). Mock them
+    # per-test, scoped to the ascend_store tests only.
+    if "distributed/ascend_store/" not in request.node.nodeid:
+        yield
+        return
+    from unittest.mock import patch
+
+    _pfx = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store"
+    with (
+        patch(f"{_pfx}.pool_worker.get_attention_compute_start_gate"),
+        patch(f"{_pfx}.pool_worker.reset_attention_compute_start_gate"),
+        patch(f"{_pfx}.config_data.AttentionComputeStartGate", type("AttentionComputeStartGate", (), {})),
+    ):
+        yield
