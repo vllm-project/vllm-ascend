@@ -1,14 +1,8 @@
-# SOME DESCRIPTIVE TITLE.
-# Copyright (C) 2025, vllm-ascend team
-# This file is distributed under the same license as the vllm-ascend
-# package.
-# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
-#
 msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-06-22 05:29+0000\n"
+"POT-Creation-Date: 2026-07-02 07:02+0000\n"
 "PO-Revision-Date: 2026-04-09 18:37+0800\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -72,10 +66,10 @@ msgstr "如何使用 EPLB？"
 msgid ""
 "Please refer to the EPLB section of the user guide for detailed "
 "information: [How to Use "
-"EPLB](../../user_guide/feature_guide/eplb_swift_balancer.md)"
+"EPLB](../../user_guide/feature_guide/expert_parallelism_load_balancer.md)"
 msgstr ""
 "详细信息请参阅用户指南中的 EPLB 部分：[如何使用 "
-"EPLB](../../user_guide/feature_guide/eplb_swift_balancer.md)"
+"EPLB](../../user_guide/feature_guide/expert_parallelism_load_balancer.md)"
 
 #: ../../source/developer_guide/Design_Documents/eplb_swift_balancer.md:15
 msgid "How It Works?"

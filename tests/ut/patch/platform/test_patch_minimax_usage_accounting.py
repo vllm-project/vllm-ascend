@@ -4,14 +4,21 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
-from vllm.parser.parser_manager import ParserManager
-from vllm.reasoning.minimax_m2_reasoning_parser import (
+
+from vllm_ascend.utils import vllm_version_is
+
+pytestmark = pytest.mark.skipif(
+    not vllm_version_is("0.23.0"),
+    reason="upstream vLLM removed end_token_id attribute",
+)
+from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat  # noqa: E402
+from vllm.parser.parser_manager import ParserManager  # noqa: E402
+from vllm.reasoning.minimax_m2_reasoning_parser import (  # noqa: E402
     MiniMaxM2AppendThinkReasoningParser,
     MiniMaxM2ReasoningParser,
 )
 
-from vllm_ascend.patch.platform import patch_minimax_usage_accounting as usage_patch
+from vllm_ascend.patch.platform import patch_minimax_usage_accounting as usage_patch  # noqa: E402
 
 
 class FakeTokenizer:
