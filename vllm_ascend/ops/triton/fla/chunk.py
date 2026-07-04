@@ -26,6 +26,36 @@ from .solve_tril import solve_tril
 from .utils import input_guard, prepare_final_chunk_indices
 from .wy_fast import recompute_w_u_fwd
 
+def _compact_empty_segments(cu_seqlens_host, initial_state):
+    """Drop zero-length segments so AscendC fwd_h/fwd_o indexing lines up.
+
+    ``chunk_indices_chunk64`` already carries COMPACT (non-empty) segment ranks
+    (see gdn_attn_builder._fill_chunk_indices_cpu), but the kernels index
+    ``gmSeqlen`` (= cu_seqlens) and ``initial_state`` by that same rank. An empty
+    segment left in cu_seqlens -- which PCP rank>0 produces for requests whose
+    context does not reach this rank -- therefore mis-indexes: chunk_fwd_o reads
+    ``batchTokens == 0`` and, on that segment's last chunk, ``blockTokens`` underflows
+    (uint32) -> MTE write OOB -> runtime 507015. This is the root cause of the
+    "concurrent mixed-batch only, rank>0 only" PCP crash: a single request never
+    yields an empty segment in the middle, but a mixed-length batch on rank>0 does.
+
+    Returns ``(cu_seqlens_kern, initial_state_kern, keep_meta)``: cu_seqlens /
+    initial_state with empty segments removed, plus the bool keep-mask (None when
+    nothing was removed). ``chunk_indices_chunk64`` is unchanged (already compact);
+    the compacted ``final_state`` must be scattered back to the full layout via
+    ``keep_meta`` (empty segments keep their initial state). No-op when there are no
+    empty segments (rank0 / non-PCP / uniform batch never have them).
+    """
+    if cu_seqlens_host is None:
+        return None, initial_state, None
+    cu = torch.tensor(cu_seqlens_host, dtype=torch.int64)
+    keep = (cu[1:] - cu[:-1]) > 0
+    if bool(keep.all()):
+        return cu_seqlens_host, initial_state, None
+    cu_kern = torch.cat([cu[:1], cu[1:][keep]]).tolist()
+    st_kern = initial_state[keep] if initial_state is not None else None
+    return cu_kern, st_kern, keep
+
 
 def chunk_gated_delta_rule_fwd(
     q: torch.Tensor,
@@ -99,21 +129,32 @@ def chunk_gated_delta_rule_fwd(
         cu_seqlens_host = tuple(cu_seqlens.tolist())
     if chunk_indices_chunk64_host is None and chunk_indices is not None:
         chunk_indices_chunk64_host = tuple(chunk_indices.flatten().tolist())
+    # Compact zero-length segments for the AscendC kernels (see
+    # _compact_empty_segments). chunk_indices_chunk64 is already compact-ranked and
+    # is reused as-is; only cu_seqlens / initial_state need compacting.
+    cu_seqlens_kern, initial_state_kern, keep_meta = _compact_empty_segments(
+        cu_seqlens_host, initial_state)
     h, v_new, final_state = torch.ops._C_ascend.chunk_gated_delta_rule_fwd_h(
         k_ascendc,
         w_ascendc,
         u_ascendc,
         g=g_ascendc,
         gk=None,
-        initial_state=initial_state,
+        initial_state=initial_state_kern,
         output_final_state=True,
         chunk_size=64,
         save_new_value=True,
-        cu_seqlens=cu_seqlens_host,
+        cu_seqlens=cu_seqlens_kern,
         chunk_indices=chunk_indices_chunk64_host,
         use_exp2=False,
         transpose_state_layout=False,
     )
+    if keep_meta is not None:
+        # Scatter the compacted final_state back to the original [N, H, K, V] layout
+        # the PCP state recursion expects; empty segments keep their initial state.
+        _fs_full = initial_state.clone()
+        _fs_full[keep_meta] = final_state
+        final_state = _fs_full
 
     if get_pcp_group().world_size > 1:
         # When integrating mtp, since `mix_qkv` has been split, `num_decode`
@@ -186,7 +227,7 @@ def chunk_gated_delta_rule_fwd(
         scale,
         g=g_ascendc,
         g_gamma=None,
-        cu_seqlens=cu_seqlens_host,
+        cu_seqlens=cu_seqlens_kern,
         chunk_indices=chunk_indices_chunk64_host,
         chunk_size=64,
         transpose_state_layout=False,
