@@ -410,8 +410,16 @@ class AscendGatedDeltaNetAttention310(GatedDeltaNetAttention):
 
             # 2.2: Process the remaining part
             if attn_metadata.num_prefills > 0:
-                initial_state = ssm_state[non_spec_state_indices_tensor].contiguous()
-                initial_state[~has_initial_state, ...] = 0
+                state_indices = non_spec_state_indices_tensor.to(torch.int64)
+                initial_state = torch.index_select(ssm_state, 0, state_indices).contiguous()
+                # Boolean advanced-index assignment lowers to AICPU IndexPut on
+                # 310P. If that asynchronous kernel fails, the next stream sync
+                # reports 507018 and leaves EngineCore unable to shut down. Apply
+                # the same zeroing semantics with a broadcast multiply instead.
+                state_mask = has_initial_state.to(
+                    device=initial_state.device, dtype=initial_state.dtype
+                ).reshape(-1, *([1] * (initial_state.ndim - 1)))
+                initial_state.mul_(state_mask)
                 (
                     core_attn_out_non_spec,
                     last_recurrent_state,
@@ -429,7 +437,9 @@ class AscendGatedDeltaNetAttention310(GatedDeltaNetAttention):
                 )
 
                 # Init cache
-                ssm_state[non_spec_state_indices_tensor] = last_recurrent_state.to(ssm_state.dtype)
+                ssm_state.index_copy_(
+                    0, state_indices, last_recurrent_state.to(ssm_state.dtype)
+                )
             elif attn_metadata.num_decodes > 0:
                 core_attn_out_non_spec = npu_recurrent_gated_delta_rule_310(
                     q=query_non_spec,
