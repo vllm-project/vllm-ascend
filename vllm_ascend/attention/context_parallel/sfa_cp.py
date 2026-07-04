@@ -854,6 +854,31 @@ class AscendSFADCPImpl(AscendSFAImpl):
         dsa_cp_context = attn_metadata.dsa_cp_context
         return output[dsa_cp_context.local_start : dsa_cp_context.local_end_with_pad]
 
+    def _all_gather_query_for_dcp(
+        self,
+        ql_nope: torch.Tensor,
+        q_pe: torch.Tensor,
+        dim: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        assert self.dcp_group is not None
+        if ql_nope.shape[:-1] != q_pe.shape[:-1] or ql_nope.dtype != q_pe.dtype:
+            raise RuntimeError(
+                "Cannot fuse DCP query gather for ql_nope/q_pe with "
+                f"shapes {tuple(ql_nope.shape)} / {tuple(q_pe.shape)} "
+                f"and dtypes {ql_nope.dtype} / {q_pe.dtype}."
+            )
+
+        ql_nope_dim = ql_nope.shape[-1]
+        q_pe_dim = q_pe.shape[-1]
+        # Avoid back-to-back DCP all_gather calls for the two SFA query
+        # fragments. On Ascend the separate gathers can leave SFA with an
+        # incomplete stream dependency on the first prefill. DSA-CP restores
+        # token shards on dim 0; native DCP restores query shards on dim 1.
+        fused_q = torch.cat([ql_nope, q_pe], dim=-1).contiguous()
+        fused_q = self.dcp_group.all_gather(fused_q, dim=dim)
+        ql_nope, q_pe = torch.split(fused_q, [ql_nope_dim, q_pe_dim], dim=-1)
+        return ql_nope, q_pe
+
     def _execute_sparse_flash_attention_process(
         self,
         ql_nope,
@@ -866,21 +891,21 @@ class AscendSFADCPImpl(AscendSFAImpl):
     ):
         assert attn_metadata.dcp_context is not None
         assert self.dcp_group is not None
+        query_gather_dim = 0 if self.enable_dsa_cp else 1
         if self.enable_dsa_cp:
             # DSA-CP shards the token sequence. Restore the flat token order for
             # SFA, and use the original full query lengths for varlen metadata.
             actual_seq_lengths_query = attn_metadata.cum_query_lens
-            ql_nope = self.dcp_group.all_gather(ql_nope.contiguous(), dim=0)
-            q_pe = self.dcp_group.all_gather(q_pe.contiguous(), dim=0)
             # topk_indices are in per-request global token coordinates. Gather
             # the DSA token shards first, then remap for this receiver rank's
             # DCP-local KV shard.
             topk_indices = self.dcp_group.all_gather(topk_indices.contiguous(), dim=0)
-            topk_indices = self._remap_sparse_indices_for_dcp(topk_indices)
-        else:
-            ql_nope = self.dcp_group.all_gather(ql_nope.contiguous(), dim=1)
-            q_pe = self.dcp_group.all_gather(q_pe.contiguous(), dim=1)
-            topk_indices = self._remap_sparse_indices_for_dcp(topk_indices)
+        ql_nope, q_pe = self._all_gather_query_for_dcp(
+            ql_nope.contiguous(),
+            q_pe.contiguous(),
+            dim=query_gather_dim,
+        )
+        topk_indices = self._remap_sparse_indices_for_dcp(topk_indices)
         kv = kv_cache[0]
         key_rope = kv_cache[1]
         sfa_output, softmax_max, softmax_sum = torch.ops._C_ascend.npu_sparse_flash_attention(
