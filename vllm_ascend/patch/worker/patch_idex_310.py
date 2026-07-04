@@ -12,6 +12,7 @@ from vllm_ascend._310p.ops.fla.idex import (
 )
 from vllm_ascend._310p.spec_decode.llm_base_proposer_310 import AscendSpecDecodeBaseProposer310
 from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
+from vllm_ascend.utils import is_rc_device
 
 vllm.model_executor.layers.fla.ops.index.prepare_chunk_indices = prepare_chunk_indices_310
 
@@ -31,3 +32,13 @@ AscendSpecDecodeBaseProposer.prepare_next_token_ids_padded = (  # type: ignore[m
 QwenGatedDeltaNetAttention._warmup_prefill_kernels = lambda self, qkv_or_qkvz, v_dim: None  # type: ignore[method-assign]
 QwenGatedDeltaNetAttention._forward_core = AscendGatedDeltaNetAttention310._forward_core
 QwenGatedDeltaNetAttention.get_state_dtype = AscendGatedDeltaNetAttention310.get_state_dtype
+
+if is_rc_device():
+    from vllm.v1.attention.backends.gdn_attn import GDNAttentionBackend
+
+    from vllm_ascend._310p.ops.gdn_attn_builder_310 import GDNAttentionMetadataBuilder310
+
+    # Qwen3.5 on 310P RC uses upstream GDNAttentionBackend via MambaBase.get_attn_backend().
+    GDNAttentionBackend.get_builder_cls = staticmethod(  # type: ignore[method-assign]
+        lambda: GDNAttentionMetadataBuilder310
+    )
