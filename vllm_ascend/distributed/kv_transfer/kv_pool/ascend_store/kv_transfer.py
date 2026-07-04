@@ -182,6 +182,7 @@ class KVTransferThread(threading.Thread):
         block_ids: list[int],
         kv_cache_group_id: int = 0,
         cache_role: str = "kv",
+        block_id: int | None = None,
     ):
         try:
             return self.token_database.prepare_value(
@@ -190,6 +191,7 @@ class KVTransferThread(threading.Thread):
                 block_ids,
                 kv_cache_group_id=kv_cache_group_id,
                 cache_role=cache_role,
+                block_id=block_id,
             )
         except TypeError:
             return self.token_database.prepare_value(start, end, block_ids)
@@ -212,6 +214,33 @@ class KVTransferThread(threading.Thread):
             )
         except TypeError:
             return self.token_database.decode_adaptor_prefill_pp(keys, addrs, sizes)
+
+    def _store_mask(self, req_meta: ReqMeta) -> tuple[list[bool], ...] | None:
+        store_mask = getattr(self.token_database, "store_mask", None)
+        if store_mask is None:
+            return None
+        try:
+            return store_mask(req_meta.token_len_chunk, req_meta.num_prompt_tokens)
+        except AssertionError as exc:
+            logger.debug("Skip AscendStore store mask for unaligned request %s: %s", req_meta.req_id, exc)
+            return None
+
+    def _load_mask(self, req_meta: ReqMeta, token_len: int) -> tuple[list[bool], ...] | None:
+        load_mask = getattr(self.token_database, "load_mask", None)
+        if load_mask is None:
+            return None
+        return load_mask(req_meta.block_hashes, token_len)
+
+    def _mask_allows_chunk(
+        self,
+        masks: tuple[list[bool], ...] | None,
+        group_id: int,
+        start: int,
+    ) -> bool:
+        mask_allows_chunk = getattr(self.token_database, "mask_allows_chunk", None)
+        if mask_allows_chunk is None:
+            return True
+        return mask_allows_chunk(masks, group_id, start)
 
 
 class KVCacheStoreSendingThread(KVTransferThread):
@@ -275,11 +304,13 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 self.request_queue.task_done()
                 return
 
+            store_masks = self._store_mask(req_meta)
             for group_id in req_meta.kv_cache_group_ids or [0]:
                 starts = []
                 ends = []
                 keys = []
                 block_hashes = []
+                key_block_ids = []
                 block_ids = req_meta.block_ids_by_group[group_id]
                 group_block_size = self._get_block_size(group_id)
                 group_block_hashes = get_block_hashes(
@@ -288,17 +319,20 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     getattr(self.token_database, "hash_block_size", group_block_size),
                 )
 
-                for start, end, key, _ in self._process_tokens_with_block_ids(
+                for start, end, key, block_id in self._process_tokens_with_block_ids(
                     token_len,
                     req_meta.block_hashes,
                     block_ids,
                     kv_cache_group_id=group_id,
                     skip_null_blocks=self._skip_null_blocks(req_meta, group_id),
                 ):
+                    if not self._mask_allows_chunk(store_masks, group_id, start):
+                        continue
                     starts.append(start)
                     ends.append(end)
                     keys.append(key.to_string())
                     block_hashes.append(group_block_hashes[start // group_block_size])
+                    key_block_ids.append(block_id)
 
                 if (
                     not self.dcp_size > 1
@@ -309,6 +343,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     ends = ends[self.tp_rank % self.put_step :: self.put_step]
                     keys = keys[self.tp_rank % self.put_step :: self.put_step]
                     block_hashes = block_hashes[self.tp_rank % self.put_step :: self.put_step]
+                    key_block_ids = key_block_ids[self.tp_rank % self.put_step :: self.put_step]
 
                 if not keys:
                     continue
@@ -323,6 +358,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 ends = [ends[index] for index in missing_indices]
                 keys = [keys[index] for index in missing_indices]
                 block_hashes = [block_hashes[index] for index in missing_indices]
+                key_block_ids = [key_block_ids[index] for index in missing_indices]
 
                 logger.info(
                     "Storing KV cache for %d out of %d blocks (missing_count=%d) for request %s in group %d",
@@ -352,6 +388,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                         ends[index],
                         block_ids,
                         kv_cache_group_id=group_id,
+                        block_id=key_block_ids[index],
                     )
                     addrs.append(addr)
                     sizes.append(size)
@@ -426,6 +463,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         key_list = []
         block_id_list: list[int] = []
         group_ids = req_meta.kv_cache_group_ids or [0]
+        load_masks = self._load_mask(req_meta, token_len)
         for group_id in group_ids:
             block_ids = req_meta.block_ids_by_group[group_id]
             group_block_size = self._get_block_size(group_id)
@@ -434,7 +472,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 // group_block_size
                 * group_block_size
             )
-            for start, end, key, _ in self._process_tokens_with_block_ids(
+            for start, end, key, block_id in self._process_tokens_with_block_ids(
                 token_len,
                 req_meta.block_hashes,
                 block_ids,
@@ -442,11 +480,14 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 kv_cache_group_id=group_id,
                 skip_null_blocks=self._skip_null_blocks(req_meta, group_id),
             ):
+                if not self._mask_allows_chunk(load_masks, group_id, start):
+                    continue
                 addr, size, block_id = self._prepare_value(
                     start,
                     end,
                     block_ids,
                     kv_cache_group_id=group_id,
+                    block_id=block_id,
                 )
                 key_list.append(key.to_string())
                 addr_list.append(addr)

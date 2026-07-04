@@ -795,6 +795,16 @@ class BaseDeviceAdaptor:
             permuted_tokens=permuted_tokens, sorted_indices=torch.abs(sorted_indices), probs=probs
         )
 
+    @staticmethod
+    def index_fill(
+        tensor: torch.Tensor,
+        dim: int,
+        indices: torch.Tensor,
+        value: int,
+    ) -> torch.Tensor:
+        tensor.index_fill_(dim, indices, value)
+        return tensor
+
 
 class A5DeviceAdaptor(BaseDeviceAdaptor):
     @classmethod
@@ -959,6 +969,18 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                 quant_mode=2,
                 clamp_value=swiglu_limit,
             )
+        elif mxfp_quant_dtype == QuantType.W4A16MXFP4:
+            hidden_states = torch_npu.npu_grouped_matmul(
+                x=[x],
+                weight=[weight],
+                antiquant_scale=[weight_scale],
+                group_list=group_list,
+                split_item=3,
+                group_type=0,
+                output_dtype=x.dtype,
+            )[0]
+            out = torch_npu.npu_swiglu(hidden_states)
+            out_scale = None
         else:
             out, out_scale = torch_npu.npu_grouped_matmul_swiglu_quant_v2(
                 x=x,
@@ -1073,9 +1095,18 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         gmm2_weight = weight if isinstance(weight, list) else [weight]
         gmm2_scale = weight_scale if isinstance(weight_scale, list) else [weight_scale]
 
-        if mxfp_quant_dtype == QuantType.W4A8MXFP:
-            gmm2_scale = None  # type: ignore[assignment]
-            gmm2_kwargs.update({"antiquant_scale": [weight_scale]})
+        if mxfp_quant_dtype == QuantType.W4A16MXFP4:
+            return torch_npu.npu_grouped_matmul(
+                x=[hidden_states],
+                weight=gmm2_weight,
+                antiquant_scale=gmm2_scale,
+                bias=bias,
+                split_item=3,
+                group_type=0,
+                group_list_type=group_list_type,
+                group_list=group_list,
+                output_dtype=output_dtype,
+            )[0]
 
         if mxfp_quant_dtype == QuantType.W4A8MXFP:
             gmm2_scale = None  # type: ignore[assignment]
@@ -1699,10 +1730,39 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         )
 
 
+class Ascend310PDeviceAdaptor(BaseDeviceAdaptor):
+    @staticmethod
+    def index_fill(
+        tensor: torch.Tensor,
+        dim: int,
+        indices: torch.Tensor,
+        value: int,
+    ) -> torch.Tensor:
+        # index_fill_ is unavailable on 310P; emulate it with a boolean mask
+        # along `dim` so behavior matches torch.index_fill_ for any dim,
+        # negative indices, empty indices and arbitrary tensor rank.
+        if indices.numel() == 0:
+            return tensor
+        dim_size = tensor.size(dim)
+        norm_indices = torch.where(indices < 0, indices + dim_size, indices)
+        pos = torch.arange(
+            dim_size,
+            device=tensor.device,
+            dtype=norm_indices.dtype,
+        )
+        mask = torch.eq(pos.unsqueeze(1), norm_indices.unsqueeze(0)).any(dim=1)
+        idx = [slice(None)] * tensor.dim()
+        idx[dim] = mask
+        tensor[tuple(idx)] = value
+        return tensor
+
+
 def get_device_adaptor() -> type["BaseDeviceAdaptor"]:
     ascend_device_type = get_ascend_device_type()
     if ascend_device_type == AscendDeviceType.A5:
         return A5DeviceAdaptor
+    if ascend_device_type == AscendDeviceType._310P:
+        return Ascend310PDeviceAdaptor
     return BaseDeviceAdaptor
 
 

@@ -173,8 +173,7 @@ jobs:
             libibverbs1 \
             ibverbs-providers \
             librdmacm1 \
-            libnuma1 \
-            libcurl4
+            libnuma1
           ldconfig
 
           pip install --no-cache-dir --no-deps \

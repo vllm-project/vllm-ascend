@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version:  vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-06-22 05:29+0000\n"
+"POT-Creation-Date: 2026-07-02 07:02+0000\n"
 "PO-Revision-Date: 2025-07-18 10:09+0800\n"
 "Last-Translator: \n"
 "Language: zh_CN\n"
@@ -141,11 +141,11 @@ msgstr "配置昇腾 CANN 环境"
 msgid ""
 "Before installation, you need to make sure firmware/driver, and CANN are "
 "installed correctly, refer to [Ascend Environment Setup "
-"Guide](https://ascend.github.io/docs/sources/ascend/quick_install.html) "
-"for more details."
+"Guide](https://www.hiascend.com/cann/download?versionId=735&ids=d806%2Ch0501%2Ch0601%2Ch0702)"
+" for more details."
 msgstr ""
 "在安装之前，请确保固件/驱动和 CANN 已正确安装，更多详情请参考 "
-"[昇腾环境搭建指南](https://ascend.github.io/docs/sources/ascend/quick_install.html)。"
+"[昇腾环境搭建指南](https://www.hiascend.com/cann/download?versionId=735&ids=d806%2Ch0501%2Ch0601%2Ch0702)。"
 
 #: ../../source/installation.md:29
 msgid "Configure hardware environment"
@@ -256,8 +256,7 @@ msgid ""
 "If you encounter errors during `uv pip install` (e.g., corrupted cache or"
 " stale package data), try clearing the uv cache first and then re-run the"
 " install command:"
-msgstr ""
-"如果在 `uv pip install` 过程中遇到错误（例如缓存损坏或包数据过期），请先清除 uv 缓存，然后重新运行安装命令："
+msgstr "如果在 `uv pip install` 过程中遇到错误（例如缓存损坏或包数据过期），请先清除 uv 缓存，然后重新运行安装命令："
 
 #: ../../source/installation.md
 msgid "Click here to see \"Build from source code\""
@@ -346,7 +345,10 @@ msgid ""
 "the batch invariance feature, see <https://github.com/vllm-project/vllm-"
 "ascend/blob/main/docs/source/user_guide/feature_guide/batch_invariance.md>"
 msgstr ""
-"要启用批量不变性特性，请在构建 vllm-ascend 之前设置 `VLLM_BATCH_INVARIANT=1`，以便在安装过程中安装批量不变性自定义算子库。有关批量不变性特性的使用指南，请参见 <https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/user_guide/feature_guide/batch_invariance.md>"
+"要启用批量不变性特性，请在构建 vllm-ascend 之前设置 "
+"`VLLM_BATCH_INVARIANT=1`，以便在安装过程中安装批量不变性自定义算子库。有关批量不变性特性的使用指南，请参见 "
+"<https://github.com/vllm-project/vllm-"
+"ascend/blob/main/docs/source/user_guide/feature_guide/batch_invariance.md>"
 
 #: ../../source/installation.md:249
 msgid "Set up using Docker"
@@ -480,8 +482,8 @@ msgstr "此部分显示最终输出："
 
 #: ../../source/installation.md:370
 msgid ""
-"This section shows process exits after offline inference, and is does not"
-" affect actual inference:"
+"This section shows process exits after offline inference, and does not "
+"affect actual inference:"
 msgstr "此部分显示离线推理后进程退出，不影响实际推理："
 
 #: ../../source/installation.md:379
@@ -559,36 +561,3 @@ msgid ""
 "Run the following command to start the container in each node (You should"
 " download the weight to /root/.cache in advance):"
 msgstr "在每个节点运行以下命令以启动容器（您应提前将权重下载到 /root/.cache）："
-
-#~ msgid "image-tag"
-#~ msgstr "镜像标签"
-
-#~ msgid "image-tag-openeuler"
-#~ msgstr "镜像标签-openeuler"
-
-#~ msgid "image-tag-a3"
-#~ msgstr "镜像标签-a3"
-
-#~ msgid "image-tag-a3-openeuler"
-#~ msgstr "镜像标签-a3-openeuler"
-
-#~ msgid "image-tag-310p"
-#~ msgstr "镜像标签-310p"
-
-#~ msgid "image-tag-310p-openeuler"
-#~ msgstr "镜像标签-310p-openeuler"
-
-#~ msgid "== 8.5.1"
-#~ msgstr "== 8.5.1"
-
-#~ msgid "== 2.9.0"
-#~ msgstr "== 2.9.0"
-
-#~ msgid "The output will be like:"
-#~ msgstr "输出结果将类似于："
-
-#~ msgid "Required for torch-npu and vllm"
-#~ msgstr "torch-npu 和 vllm 运行必需"
-
-#~ msgid "The output is shown below, and it may change with version updates:"
-#~ msgstr "输出如下所示，可能随版本更新而变化："
