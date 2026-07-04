@@ -230,11 +230,23 @@ jobs:
 
       - name: Install crane
         run: |
-          ARCH=$(uname -m | sed 's/aarch64/arm64/')
+          # ARCH=$(uname -m | sed 's/aarch64/arm64/')
+          # CRANE_VERSION="v0.20.2"
+          # wget -S "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_${CRANE_VERSION#v}_Linux_${ARCH}.tar.gz" -O /tmp/crane.tar.gz
+          # tar -xzf /tmp/crane.tar.gz -C /tmp crane
+          # chmod +x /tmp/crane
           CRANE_VERSION="v0.20.2"
-          wget -S "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_${CRANE_VERSION#v}_Linux_${ARCH}.tar.gz" -O /tmp/crane.tar.gz
-          tar -xzf /tmp/crane.tar.gz -C /tmp crane
-          chmod +x /tmp/crane
+          ARCH=$(uname -m | sed 's/aarch64/arm64/')
+          OS="Linux"
+          DOWNLOAD_URL=$(curl -s https://api.github.com/repos/google/go-containerregistry/releases/tags/${CRANE_VERSION} \
+            | grep -oP '"browser_download_url": "\K[^"]+' \
+            | grep "${OS}_${ARCH}")
+
+          if [ -z "$DOWNLOAD_URL" ]; then
+            echo "No asset found for ${OS}_${ARCH}"
+            exit 1
+          fi
+          wget -S "$DOWNLOAD_URL" -O /tmp/crane.tar.gz
 
       - name: Build and push
         id: build
