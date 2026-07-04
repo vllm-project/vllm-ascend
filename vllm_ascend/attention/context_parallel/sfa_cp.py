@@ -872,7 +872,11 @@ class AscendSFADCPImpl(AscendSFAImpl):
             actual_seq_lengths_query = attn_metadata.cum_query_lens
             ql_nope = self.dcp_group.all_gather(ql_nope.contiguous(), dim=0)
             q_pe = self.dcp_group.all_gather(q_pe.contiguous(), dim=0)
-            topk_indices = self.dcp_group.all_gather(self._remap_sparse_indices_for_dcp(topk_indices), dim=0)
+            # topk_indices are in per-request global token coordinates. Gather
+            # the DSA token shards first, then remap for this receiver rank's
+            # DCP-local KV shard.
+            topk_indices = self.dcp_group.all_gather(topk_indices.contiguous(), dim=0)
+            topk_indices = self._remap_sparse_indices_for_dcp(topk_indices)
         else:
             ql_nope = self.dcp_group.all_gather(ql_nope.contiguous(), dim=1)
             q_pe = self.dcp_group.all_gather(q_pe.contiguous(), dim=1)
