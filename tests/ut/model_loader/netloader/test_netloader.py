@@ -244,6 +244,70 @@ def _patch_loader_common(monkeypatch):
 
 
 @patch("vllm_ascend.model_loader.netloader.netloader.logger")
+def test_target_model_waits_for_all_netloader_ranks_before_draft(mock_logger, monkeypatch):
+    dummy_model = _patch_loader_common(monkeypatch)
+    monkeypatch.setattr("vllm_ascend.model_loader.netloader.netloader.elastic_load", lambda **kwargs: dummy_model)
+
+    class DummyElasticServer:
+        def __init__(*a, **k):
+            pass
+
+        def start(self):
+            pass
+
+    barrier_calls = []
+    monkeypatch.setattr("vllm_ascend.model_loader.netloader.netloader.ElasticServer", DummyElasticServer)
+    monkeypatch.setattr("torch.distributed.is_available", lambda: True)
+    monkeypatch.setattr("torch.distributed.is_initialized", lambda: True)
+    monkeypatch.setattr("torch.distributed.barrier", lambda: barrier_calls.append("barrier"))
+
+    extra = {
+        "SOURCE": [{"device_id": 0, "sources": ["127.0.0.1:5000"]}],
+        "MODEL": "dummy-model",
+        "LISTEN_PORT": 5555,
+        "INT8_CACHE": "dram",
+    }
+    loader = make_loader_with_config(extra)
+    vllm_config = DummyVllmConfig()
+    vllm_config.speculative_config = object()
+    loader.load_model(vllm_config, DummyModelConfig())
+
+    assert barrier_calls == ["barrier"]
+
+
+@patch("vllm_ascend.model_loader.netloader.netloader.logger")
+def test_draft_model_does_not_wait_for_target_netloader_barrier(mock_logger, monkeypatch):
+    dummy_model = _patch_loader_common(monkeypatch)
+    monkeypatch.setattr("vllm_ascend.model_loader.netloader.netloader.elastic_load", lambda **kwargs: dummy_model)
+
+    class DummyElasticServer:
+        def __init__(*a, **k):
+            pass
+
+        def start(self):
+            pass
+
+    barrier_calls = []
+    monkeypatch.setattr("vllm_ascend.model_loader.netloader.netloader.ElasticServer", DummyElasticServer)
+    monkeypatch.setattr("torch.distributed.is_available", lambda: True)
+    monkeypatch.setattr("torch.distributed.is_initialized", lambda: True)
+    monkeypatch.setattr("torch.distributed.barrier", lambda: barrier_calls.append("barrier"))
+
+    extra = {
+        "SOURCE": [{"device_id": 0, "sources": ["127.0.0.1:5000"]}],
+        "MODEL": "draft-model",
+        "LISTEN_PORT": 5555,
+        "INT8_CACHE": "dram",
+    }
+    loader = make_loader_with_config(extra)
+    vllm_config = DummyVllmConfig()
+    vllm_config.speculative_config = object()
+    loader.load_model(vllm_config, DummyDraftModelConfig())
+
+    assert barrier_calls == []
+
+
+@patch("vllm_ascend.model_loader.netloader.netloader.logger")
 def test_load_draft_model_elastic_success(mock_logger, monkeypatch, tmp_path):
     dummy_model = _patch_loader_common(monkeypatch)
     monkeypatch.setattr("vllm_ascend.model_loader.netloader.netloader.elastic_load", lambda **kwargs: dummy_model)
@@ -253,6 +317,7 @@ def test_load_draft_model_elastic_success(mock_logger, monkeypatch, tmp_path):
     class DummyElasticServer:
         def __init__(self, *args, **kwargs):
             elastic_server_instances.append(self)
+            self.int8_cache = args[7]
             self.group_name = kwargs.get("group_name")
 
         def start(self):
@@ -272,8 +337,39 @@ def test_load_draft_model_elastic_success(mock_logger, monkeypatch, tmp_path):
 
     assert isinstance(result, nn.Module)
     assert loader._draft_elastic_server is elastic_server_instances[0]
+    assert loader._draft_elastic_server.int8_cache == "no"
     assert loader._draft_elastic_server.group_name == "netloader_draft"
     assert not (tmp_path / "output_0.txt").exists()
+
+
+@patch("vllm_ascend.model_loader.netloader.netloader.logger")
+def test_load_draft_model_uses_hbm_when_int8_cache_is_dram(mock_logger, monkeypatch):
+    dummy_model = _patch_loader_common(monkeypatch)
+    monkeypatch.setattr("vllm_ascend.model_loader.netloader.netloader.elastic_load", lambda **kwargs: dummy_model)
+
+    captured = {}
+
+    class DummyElasticServer:
+        def __init__(self, *args, **kwargs):
+            captured["int8_cache"] = args[7]
+            captured["group_name"] = kwargs.get("group_name")
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr("vllm_ascend.model_loader.netloader.netloader.ElasticServer", DummyElasticServer)
+
+    extra = {
+        "SOURCE": [{"device_id": 0, "sources": ["127.0.0.1:5000"]}],
+        "MODEL": "draft-model",
+        "LISTEN_PORT": 5555,
+        "INT8_CACHE": "dram",
+    }
+    loader = make_loader_with_config(extra)
+    loader.load_model(DummyVllmConfig(), DummyDraftModelConfig())
+
+    assert captured["int8_cache"] == "hbm"
+    assert captured["group_name"] == "netloader_draft"
 
 
 @patch("vllm_ascend.model_loader.netloader.netloader.logger")

@@ -143,6 +143,21 @@ class ModelNetLoaderElastic(BaseModelLoader):
         return getattr(model_config, "runner_type", None) == "draft"
 
     @staticmethod
+    def _sync_target_netloader_before_draft(vllm_config: VllmConfig) -> None:
+        if getattr(vllm_config, "speculative_config", None) is None:
+            return
+        if not torch.distributed.is_available() or not torch.distributed.is_initialized():
+            return
+
+        logger.info("Waiting for all target netloader ranks before loading draft model")
+        barrier_start = time.perf_counter()
+        torch.distributed.barrier()
+        logger.info(
+            "Target netloader barrier before draft model time: %s",
+            time.perf_counter() - barrier_start,
+        )
+
+    @staticmethod
     def _get_static_forward_context(vllm_config: VllmConfig):
         compilation_config = getattr(vllm_config, "compilation_config", None)
         static_forward_context = getattr(compilation_config, "static_forward_context", None)
@@ -342,6 +357,7 @@ class ModelNetLoaderElastic(BaseModelLoader):
                         logger.error("Unknown error: %s", e)
 
                 try:
+                    server_int8_cache = "hbm" if is_draft and self.int8_cache != "no" else self.int8_cache
                     elastic_server = ElasticServer(
                         driver_ip,
                         listen_port,
@@ -350,7 +366,7 @@ class ModelNetLoaderElastic(BaseModelLoader):
                         model_config.model,
                         parallel_config.tensor_parallel_size,
                         parallel_config.pipeline_parallel_size,
-                        self.int8_cache,
+                        server_int8_cache,
                         self.int8_cache_name,
                         group_name=group_name,
                     )
@@ -373,6 +389,9 @@ class ModelNetLoaderElastic(BaseModelLoader):
         if model is None:
             logger.error("NetLoader elastic loads model fails")
             return None
+
+        if not is_draft:
+            self._sync_target_netloader_before_draft(vllm_config)
 
         return model.eval()
 
