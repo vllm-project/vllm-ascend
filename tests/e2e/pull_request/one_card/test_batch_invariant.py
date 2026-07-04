@@ -102,11 +102,9 @@ def _extract_step_logprobs(request_output):
     tensor_parallel_size=int(os.getenv("VLLM_TP_SIZE", "1")),
     enable_prefix_caching=False,
     distributed_executor_backend="mp",
-    extra_kwargs={
-        "compilation_config": {
-            "cudagraph_mode": "PIECEWISE",
-            "cudagraph_capture_sizes": [1, 32, 64],
-        }
+    compilation_config={
+        "cudagraph_mode": "PIECEWISE",
+        "cudagraph_capture_sizes": [1, 32, 64],
     },
 )
 def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
@@ -211,11 +209,9 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
     tensor_parallel_size=int(os.getenv("VLLM_TEST_TP_SIZE", "1")),
     enable_prefix_caching=False,
     distributed_executor_backend="mp",
-    extra_kwargs={
-        "compilation_config": {
-            "cudagraph_mode": "PIECEWISE",
-            "cudagraph_capture_sizes": [1, 32, 64],
-        }
+    compilation_config={
+        "cudagraph_mode": "PIECEWISE",
+        "cudagraph_capture_sizes": [1, 32, 64],
     },
 )
 def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(vllm_runner, monkeypatch: pytest.MonkeyPatch):
@@ -403,11 +399,9 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(vllm_runner, monkeypatch: 
     tensor_parallel_size=int(os.getenv("VLLM_TP_SIZE", "1")),
     enable_prefix_caching=False,
     distributed_executor_backend="mp",
-    extra_kwargs={
-        "compilation_config": {
-            "cudagraph_mode": "PIECEWISE",
-            "cudagraph_capture_sizes": [1, 32, 64],
-        }
+    compilation_config={
+        "cudagraph_mode": "PIECEWISE",
+        "cudagraph_capture_sizes": [1, 32, 64],
     },
 )
 def test_simple_generation(vllm_runner, monkeypatch: pytest.MonkeyPatch):
