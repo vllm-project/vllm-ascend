@@ -18,6 +18,7 @@ from vllm.distributed.parallel_state import (
 from vllm.config import VllmConfig, CUDAGraphMode, CompilationMode
 from vllm.sequence import IntermediateTensors
 from vllm.logger import init_logger
+from vllm.forward_context import get_forward_context
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
 from vllm_ascend.distributed.metadata import NPUP2PAFDConnectorMetadata
 
@@ -376,6 +377,12 @@ class NPUP2PAFDConnector(AFDConnectorBase):
                 work.wait()
 
         if self.backend == "hccl":
+            # FFN 侧需要 input_ids 用于 tid2eid (logical→physical expert 映射)。
+            # 当 compute_gate_on_attention=False 时, attention 侧通过 P2P 发送
+            # input_ids; 在此设置到 forward_context 供 select_experts 使用。
+            recv_input_ids = intermediate_tensors["input_ids"]
+            if recv_input_ids is not None:
+                get_forward_context().input_ids = recv_input_ids
             return AFDRecvOutput(
                 hidden_states=intermediate_tensors["hidden_states"],
                 metadata=metadata,
@@ -471,6 +478,7 @@ class NPUP2PAFDConnector(AFDConnectorBase):
                 "topk_weights": kwargs.get('topk_weights'),
                 "topk_ids": kwargs.get('topk_ids'),
                 "row_idx": kwargs.get('row_idx'),
+                "input_ids": kwargs.get('input_ids'),
             }
             base_tensors.update(hccl_tensors)
 
