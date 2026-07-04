@@ -59,6 +59,7 @@ from vllm_ascend.models.deepseek_v4 import (
 from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
 from vllm_ascend.ops.triton.mul_add import muls_add_triton
+from vllm_ascend.quantization.methods.base import get_moe_num_logical_experts
 from vllm_ascend.utils import enable_dsa_cp
 
 
@@ -189,7 +190,13 @@ def afd_ffn_compute(
     if ffn_side_gating:
         assert router_logits is None and topk_ids is None, \
             "FFN-side gating expects router_logits/topk_ids to be None"
-        router_logits = F.linear(hidden_states.float(), self.gate.weight)
+        # 与 shared_forward_impl 保持一致：当 gate 存在预转换的 float32 权重
+        # (weight_fp32) 时使用它计算 router_logits, 避免精度损失导致乱码。
+        gate = self.gate
+        if gate is not None and hasattr(gate, "weight_fp32"):
+            router_logits = F.linear(hidden_states.float(), gate.weight_fp32)
+        else:
+            router_logits = F.linear(hidden_states.float(), gate.weight)
     else:
         assert topk_ids is not None, \
             "Attention-side gating expects topk_ids to be pre-computed"
@@ -216,6 +223,17 @@ def afd_ffn_compute(
         # input_ids 已由 recv_attn_output 从 attention 侧通过 P2P 接收并
         # 设置到 forward_context 中, 供 tid2eid (logical→physical expert 映射) 使用。
         input_ids = getattr(get_forward_context(), "input_ids", None)
+        # 与 quant_method.apply 保持一致：使用 num_logical_experts 而非
+        # moe_config.num_experts, 避免 tid2eid 映射越界导致乱码。
+        num_shared_experts = getattr(self, "n_shared_experts", 0)
+        if num_shared_experts is None:
+            num_shared_experts = 0
+        num_logical_experts = get_moe_num_logical_experts(
+            self,
+            self.moe_config.num_experts,
+            global_redundant_expert_num=self.global_redundant_expert_num,
+            num_shared_experts=num_shared_experts,
+        )
         topk_weights, topk_ids = select_experts(
             hidden_states=hidden_states,
             router_logits=router_logits,
@@ -228,7 +246,7 @@ def afd_ffn_compute(
             scoring_func=self.scoring_func,
             routed_scaling_factor=self._original_routed_scaling_factor,
             e_score_correction_bias=self.e_score_correction_bias,
-            num_experts=self.moe_config.num_experts,
+            num_experts=num_logical_experts,
             input_ids=input_ids,
             tid2eid=self.tid2eid,
         )
