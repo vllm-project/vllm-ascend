@@ -634,6 +634,29 @@ class AscendSFADCPMetadataBuilder(AscendSFAMetadataBuilder):
         )
         return base + remainder
 
+    def _update_dsa_cp_slot_mapping_for_dcp(
+        self,
+        metadata: AscendSFAMetadata,
+        dcp_slot_mapping: torch.Tensor,
+        num_input_tokens: int,
+    ) -> None:
+        if metadata.dsa_cp_context is None:
+            return
+
+        dsa_cp_context = metadata.dsa_cp_context
+        slot_mapping = dcp_slot_mapping[:num_input_tokens]
+        if dsa_cp_context.num_tokens_pad > slot_mapping.shape[0]:
+            slot_mapping = torch.nn.functional.pad(
+                slot_mapping,
+                (0, dsa_cp_context.num_tokens_pad - slot_mapping.shape[0]),
+                value=-1,
+            )
+        else:
+            slot_mapping = slot_mapping[: dsa_cp_context.num_tokens_pad]
+        dsa_cp_context.slot_mapping_cp = slot_mapping[
+            dsa_cp_context.local_start : dsa_cp_context.local_end_with_pad
+        ]
+
     def _build_with_no_cp_metadata(
         self,
         common_attn_metadata: AscendCommonAttentionMetadata,
@@ -673,6 +696,7 @@ class AscendSFADCPMetadataBuilder(AscendSFAMetadataBuilder):
             block_table=dcp_block_table[:num_reqs],
             seq_lens=local_seq_lens,
         )
+        self._update_dsa_cp_slot_mapping_for_dcp(metadata, dcp_slot_mapping, num_input_tokens)
         return metadata
 
     def build(
