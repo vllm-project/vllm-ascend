@@ -25,9 +25,9 @@ on:
       - reopened
       - labeled
     branches:
-      - 'main'
-      - '*-dev'
-      - 'releases/v*'
+      - "main"
+      - "*-dev"
+      - "releases/v*"
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -41,6 +41,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  test_build_image:
+    uses: ./.github/workflows/schedule_image_build_and_push.yaml
   lint-and-select-tests:
     if: ${{ github.event.action != 'labeled' || github.event.label.name == 'ready' }}
     runs-on: linux-amd64-cpu-8-hk

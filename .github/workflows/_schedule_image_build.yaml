@@ -360,7 +360,7 @@ jobs:
         uses: docker/metadata-action@v6
         with:
           images: |
-            ${{ env.QUAY_REPO }}
+            ${{ env.QUAY_TEMP_REPO }}
           tags: |
             type=pep440,pattern={{raw}},suffix=${{ env.SUFFIX }}
             type=schedule,pattern=${{ inputs.schedule_tag_pattern }},prefix=nightly-,suffix=${{ env.SUFFIX }}
