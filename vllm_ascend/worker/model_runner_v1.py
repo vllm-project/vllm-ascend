@@ -1695,8 +1695,24 @@ class NPUModelRunner(GPUModelRunner):
         if not self.drafter:
             # Speculative decoding is not enabled.
             draft_token_ids = None
-        elif isinstance(self.drafter, (AscendNgramProposer, AscendSuffixDecodingProposer)):
-            draft_token_ids = self.drafter.propose(valid_sampled_token_ids)
+        elif isinstance(self.drafter, AscendNgramProposer):
+            if vllm_version_is("0.23.0"):
+                draft_token_ids = self.drafter.propose(valid_sampled_token_ids)
+            else:
+                draft_token_ids = self.drafter.propose(
+                    scheduler_output.num_spec_tokens_to_schedule,
+                    valid_sampled_token_ids,
+                    self.input_batch.num_tokens_no_spec,
+                    self.input_batch.token_ids_cpu,
+                )
+        elif isinstance(self.drafter, AscendSuffixDecodingProposer):
+            if vllm_version_is("0.23.0"):
+                draft_token_ids = self.drafter.propose(valid_sampled_token_ids)
+            else:
+                draft_token_ids = self.drafter.propose(
+                    valid_sampled_token_ids,
+                    num_speculative_tokens=scheduler_output.num_spec_tokens_to_schedule,
+                )
         elif isinstance(self.drafter, AscendNgramProposerNPU):
             batch_size = min(self.input_batch.num_reqs, self.token_ids_gpu_tensor.shape[0])
 
@@ -1760,11 +1776,19 @@ class NPUModelRunner(GPUModelRunner):
             common_attn_metadata = spec_decode_common_attn_metadata
             target_hidden_states = [h[:num_scheduled_tokens] for h in aux_hidden_states]
 
-            draft_token_ids = self.drafter.propose(
-                sampled_token_ids=valid_sampled_token_ids,
-                target_hidden_states=target_hidden_states,
-                common_attn_metadata=common_attn_metadata,
-            )
+            if vllm_version_is("0.23.0"):
+                draft_token_ids = self.drafter.propose(
+                    sampled_token_ids=valid_sampled_token_ids,
+                    target_hidden_states=target_hidden_states,
+                    common_attn_metadata=common_attn_metadata,
+                )
+            else:
+                draft_token_ids = self.drafter.propose(
+                    self.speculative_config.num_speculative_tokens,
+                    sampled_token_ids=valid_sampled_token_ids,
+                    target_hidden_states=target_hidden_states,
+                    common_attn_metadata=common_attn_metadata,
+                )
             next_token_ids, valid_sampled_tokens_count = (
                 self.drafter.prepare_next_token_ids_padded(
                     valid_sampled_token_ids,
