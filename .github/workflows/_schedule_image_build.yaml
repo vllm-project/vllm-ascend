@@ -210,22 +210,22 @@ jobs:
             vllm_ascend/include
           key: vllm-ascend-build-v1-${{ steps.get_arch.outputs.arch }}-${{ steps.get_base_image_tag.outputs.BASE_IMAGE_TAG }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
-      - name: Prepare docker config
-        # if: ${{ inputs.should_push }}
-        env:
-          QUAY_TEMP_USERNAME: "atlas-ci+atlas_test_bot"
-          QUAY_TEMP_PASSWORD: "KUMHSMHBH165QQSBBJYRUD6P9M2ESMR7XH01LPKX4OA4NXLLX06JO9XVVKZ766Q2"
-        run: |
-          QUAY_AUTH=$(printf "%s:%s" "$QUAY_TEMP_USERNAME" "$QUAY_TEMP_PASSWORD" | base64 -w0)
-          GHCR_AUTH=$(printf "%s:%s" "${{ github.actor }}" "${{ secrets.GITHUB_TOKEN }}" | base64 -w0)
-          cat > "${DOCKER_CONFIG}/config.json <<EOF
-          {
-            "auths": {
-              "quay.io": { "auth": "${QUAY_AUTH}" },
-              "ghcr.io": { "auth": "${GHCR_AUTH}" }
-            }
-          }
-          EOF
+      # - name: Prepare docker config
+      #   # if: ${{ inputs.should_push }}
+      #   env:
+      #     QUAY_TEMP_USERNAME: "atlas-ci+atlas_test_bot"
+      #     QUAY_TEMP_PASSWORD: "KUMHSMHBH165QQSBBJYRUD6P9M2ESMR7XH01LPKX4OA4NXLLX06JO9XVVKZ766Q2"
+      #   run: |
+      #     QUAY_AUTH=$(printf "%s:%s" "$QUAY_TEMP_USERNAME" "$QUAY_TEMP_PASSWORD" | base64 -w0)
+      #     GHCR_AUTH=$(printf "%s:%s" "${{ github.actor }}" "${{ secrets.GITHUB_TOKEN }}" | base64 -w0)
+      #     cat > "${DOCKER_CONFIG}/config.json <<EOF
+      #     {
+      #       "auths": {
+      #         "quay.io": { "auth": "${QUAY_AUTH}" },
+      #         "ghcr.io": { "auth": "${GHCR_AUTH}" }
+      #       }
+      #     }
+      #     EOF
 
       - name: Install crane
         run: |
