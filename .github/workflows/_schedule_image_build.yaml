@@ -213,8 +213,8 @@ jobs:
       - name: Prepare docker config
         # if: ${{ inputs.should_push }}
         env:
-          QUAY_TEMP_USERNAME: atlas-ci+atlas_test_bot
-          QUAY_TEMP_PASSWORD: KUMHSMHBH165QQSBBJYRUD6P9M2ESMR7XH01LPKX4OA4NXLLX06JO9XVVKZ766Q2
+          QUAY_TEMP_USERNAME: "atlas-ci+atlas_test_bot"
+          QUAY_TEMP_PASSWORD: "KUMHSMHBH165QQSBBJYRUD6P9M2ESMR7XH01LPKX4OA4NXLLX06JO9XVVKZ766Q2"
         run: |
           mkdir -p /tmp/bk
           QUAY_AUTH=$(printf "%s:%s" "$QUAY_TEMP_USERNAME" "$QUAY_TEMP_PASSWORD" | base64 -w0)
@@ -285,7 +285,7 @@ jobs:
             --frontend dockerfile.v0
             --local context=.
             --local dockerfile="$DOCKERFILE_DIR"
-            --opt filename="$DOCKERFILE_NAME"
+            --opt filename="Docker_copy.openEuler"
             --opt platform=${{ matrix.arch }}
             --opt build-arg:PIP_INDEX_URL=https://pypi.org/simple
             --opt build-arg:COMPILE_CUSTOM_KERNELS=${{ steps.cache-csrc.outputs.cache-hit == 'true' && '0' || '1' }}

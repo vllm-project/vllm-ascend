@@ -1,0 +1,7 @@
+
+
+FROM quay.io/ascend/cann:9.0.0-910b-openeuler24.03-py3.12
+
+RUN echo "hello world"
+
+CMD ["/bin/bash"]
