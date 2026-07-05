@@ -183,6 +183,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             self.runner.max_num_tokens * self.pcp_size * self.dcp_size
             + self.pcp_size * self.dcp_size * self.runner.max_num_reqs
         )
+        self.cp_slot_offsets = torch.arange(self.pcp_size, dtype=torch.int64, device=device)
 
         self.use_sparse = hasattr(vllm_config.model_config.hf_text_config, "index_topk")
 
@@ -1007,36 +1008,31 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 # Instead, we pre-allocate mtp slot_mapping in model_runner
                 # (_generate_pcp_mtp_input), and use updated slot_indices
                 # to get corresponding slot_mapping in each step.
-                num_reject_tokens = (
-                    torch.tensor(self.runner.pcp_manager.cu_num_tokens_pcp_full, dtype=torch.int32).to(self.device)
-                    - ori_token_indices_to_sample
-                    - 1
+                query_start_loc_pcp_full = self.runner.pcp_manager.query_start_loc_pcp_full.gpu
+                cu_num_tokens_pcp_full = query_start_loc_pcp_full[1 : num_decode_reqs + 1]
+                query_lens_d_device = (
+                    query_start_loc_pcp_full[1 : num_decode_reqs + 1]
+                    - query_start_loc_pcp_full[:num_decode_reqs]
                 )
-                num_accept_tokens = query_lens_d.to(self.device) - num_reject_tokens
-                ori_seq_len = attn_metadata_i.seq_lens_cpu[:batch_size].clone()
-                mtp_slot_mapping = self.runner.pcp_manager.mtp_slot_pad
-                mtp_slot_mapping_no_cp = getattr(self.runner.pcp_manager, "mtp_slot_no_cp_pad", None)
-
-                # slot_mapping index base offset:
-                # scheduled tokens + pre-allocated mtp tokens + accepted tokens
+                num_reject_tokens = cu_num_tokens_pcp_full - ori_token_indices_to_sample - 1
+                num_accept_tokens = query_lens_d_device - num_reject_tokens
+                ori_seq_len = getattr(attn_metadata_i, "seq_lens", None)
+                if ori_seq_len is None:
+                    ori_seq_len = attn_metadata_i.seq_lens_cpu
+                ori_seq_len = ori_seq_len[:batch_size].clone()
                 slot_idx_base = (
-                    torch.cat(
-                        [
-                            torch.tensor([0], dtype=torch.int32, device=self.device),
-                            (torch.cumsum(query_lens_d, dim=0)[:-1] * self.pcp_size).to(self.device),
-                        ]
-                    )
-                    + torch.arange(num_decode_reqs, device=self.device)
+                    query_start_loc_pcp_full[:num_decode_reqs].to(torch.int64) * self.pcp_size
+                    + torch.arange(num_decode_reqs, device=self.device, dtype=torch.int64)
                     * (self.num_speculative_tokens - 1)
                     * self.pcp_size
-                    + (num_accept_tokens - 1) * self.pcp_size
+                    + (num_accept_tokens.to(torch.int64) - 1) * self.pcp_size
                 )
-                slot_indices_list = []
-                for req_id in range(num_decode_reqs):
-                    slot_indices_list.append(
-                        torch.arange(slot_idx_base[req_id], slot_idx_base[req_id] + self.pcp_size, device=self.device)
-                    )
-                slot_indices = torch.cat(slot_indices_list, dim=0)
+                slot_indices = (
+                    slot_idx_base[:, None]
+                    + self.cp_slot_offsets[: self.pcp_size].to(slot_idx_base.device)
+                ).reshape(-1)
+                mtp_slot_mapping = self.runner.pcp_manager.mtp_slot_pad
+                mtp_slot_mapping_no_cp = getattr(self.runner.pcp_manager, "mtp_slot_no_cp_pad", None)
 
                 common_attn_metadata.block_table_tensor = common_attn_metadata.block_table_tensor[:batch_size]
 
