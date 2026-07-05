@@ -247,6 +247,8 @@ jobs:
             exit 1
           fi
           wget -S "$DOWNLOAD_URL" -O /tmp/crane.tar.gz
+          tar -xzf /tmp/crane.tar.gz -C /tmp crane
+          chmod +x /tmp/crane
 
       - name: Build and push
         shell: bash -e {0}
