@@ -13,6 +13,7 @@ sleep_mode
 structured_output
 lora
 expert_parallelism_load_balancer
+zb_moe
 netloader
 rfork
 dynamic_batch

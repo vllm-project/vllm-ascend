@@ -27,6 +27,7 @@
 #include "torch_npu/csrc/core/npu/NPUGuard.h"
 #include <torch_npu/csrc/npu/Module.h>
 #include "ops.h"
+#include "zb_runtime.h"
 #include "utils.h"
 #include "aclnn_torch_adapter/op_api_common.h"
 #include "moe/add_rms_norm_bias/add_rms_norm_bias_torch_adpt.h"
@@ -41,6 +42,11 @@
 #include "gmm/grouped_matmul_swiglu_quant_v2/grouped_matmul_swiglu_quant_v2_torch_adpt.h"
 #include "attention/lightning_indexer/lightning_indexer_torch_adpt.h"
 #include "mc2/matmul_allreduce_add_rmsnorm/matmul_allreduce_add_rmsnorm_torch_adpt.h"
+#ifdef VLLM_ASCEND_ENABLE_ZB_OPS
+#include "mc2/zb_moe_distribute_dispatch/zb_moe_distribute_dispatch_torch_adpt.h"
+#include "mc2/zb_moe_distribute_combine/zb_moe_distribute_combine_torch_adpt.h"
+#include "mc2/zb_moe_grouped_matmul_gmm2_out/zb_moe_grouped_matmul_gmm2_out_torch_adpt.h"
+#endif
 #include "moe/moe_gating_top_k/moe_gating_top_k_torch_adpt.h"
 #include "moe/moe_init_routing_custom/moe_init_routing_custom_torch_adpt.h"
 #include "attention/sparse_flash_attention/sparse_flash_attention_torch_adpt.h"
@@ -2344,6 +2350,90 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.def("get_npu_storage_shape(Tensor tensor) -> int[]");
     ops.impl("get_npu_storage_shape", c10::DispatchKey::CompositeExplicitAutograd,
              &vllm_ascend::get_npu_storage_shape);
+
+    ops.def(
+        "zb_init(int rank, int world_size, int local_mem_size, str server_ip_port) -> int");
+    ops.impl("zb_init", c10::DispatchKey::CompositeExplicitAutograd,
+             &vllm_ascend::zb_init);
+
+    ops.def("zb_alloc(int element_count, int element_size) -> int");
+    ops.impl("zb_alloc", c10::DispatchKey::CompositeExplicitAutograd,
+             &vllm_ascend::zb_alloc);
+
+    ops.def("zb_alloc_tensor(int[] shape, ScalarType dtype, str device) -> Tensor");
+    ops.impl("zb_alloc_tensor", c10::DispatchKey::CompositeExplicitAutograd,
+             &vllm_ascend::zb_alloc_tensor);
+
+    ops.def("zb_alias_tensor(Tensor base, int[] shape, ScalarType dtype) -> Tensor");
+    ops.impl("zb_alias_tensor", c10::DispatchKey::CompositeExplicitAutograd,
+             &vllm_ascend::zb_alias_tensor);
+
+    ops.def("zb_free(int ptr) -> ()");
+    ops.impl("zb_free", c10::DispatchKey::CompositeExplicitAutograd,
+             &vllm_ascend::zb_free);
+
+    ops.def("zb_finalize() -> ()");
+    ops.impl("zb_finalize", c10::DispatchKey::CompositeExplicitAutograd,
+             &vllm_ascend::zb_finalize);
+
+    ops.def("zb_get_ext_info() -> int");
+    ops.impl("zb_get_ext_info", c10::DispatchKey::CompositeExplicitAutograd,
+             &vllm_ascend::zb_get_ext_info);
+
+    ops.def("zb_is_initialized() -> bool");
+    ops.impl("zb_is_initialized", c10::DispatchKey::CompositeExplicitAutograd,
+             &vllm_ascend::zb_is_initialized);
+
+#ifdef VLLM_ASCEND_ENABLE_ZB_OPS
+    ops.def(
+        "zb_moe_distribute_dispatch("
+        "    Tensor x, Tensor expert_ids,"
+        "    Tensor? scales, Tensor? x_active_mask, Tensor? elastic_info,"
+        "    int ep_world_size, int ep_rank_id, int moe_expert_num,"
+        "    int tp_world_size, int tp_rank_id, int expert_shard_type,"
+        "    int shared_expert_num, int shared_expert_rank_num,"
+        "    int quant_mode, int global_bs, int expert_token_nums_type,"
+        "    int ext_info, str comm_alg,"
+        "    int zero_expert_num, int copy_expert_num, int const_expert_num,"
+        "    Tensor! expand_x_out, Tensor! dynamic_scales_out,"
+        "    Tensor! assist_info_for_combine_out, Tensor! expert_token_nums_out,"
+        "    Tensor! ep_recv_count_out, Tensor! tp_recv_count_out"
+        ") -> (Tensor expand_x, Tensor dynamic_scales, Tensor assist_info_for_combine,"
+        "      Tensor expert_token_nums, Tensor ep_recv_count, Tensor tp_recv_count)");
+    ops.impl("zb_moe_distribute_dispatch", torch::kPrivateUse1,
+             &vllm_ascend::zb_moe_distribute_dispatch);
+
+    ops.def(
+        "zb_moe_distribute_combine("
+        "    Tensor expand_x, Tensor expert_ids, Tensor assist_info_for_combine,"
+        "    Tensor ep_send_count, Tensor expert_scales,"
+        "    Tensor? tp_send_count, Tensor? x_active_mask,"
+        "    Tensor? activation_scale, Tensor? weight_scale,"
+        "    Tensor? group_list, Tensor? expand_scales,"
+        "    Tensor? shared_expert_x, Tensor? elastic_info,"
+        "    Tensor? ori_x, Tensor? const_expert_alpha1,"
+        "    Tensor? const_expert_alpha2, Tensor? const_expert_v,"
+        "    int ep_world_size, int ep_rank_id, int moe_expert_num,"
+        "    int tp_world_size, int tp_rank_id, int expert_shard_type,"
+        "    int shared_expert_num, int shared_expert_rank_num,"
+        "    int global_bs, int out_dtype, int comm_quant_mode,"
+        "    int ext_info, int group_list_type, str comm_alg,"
+        "    int zero_expert_num, int copy_expert_num, int const_expert_num,"
+        "    Tensor! combined_x"
+        ") -> Tensor");
+    ops.impl("zb_moe_distribute_combine", torch::kPrivateUse1,
+             &vllm_ascend::zb_moe_distribute_combine);
+
+    ops.def(
+        "zb_moe_grouped_matmul_gmm2_out("
+        "    Tensor x, Tensor[] weight,"
+        "    Tensor[]? scale, Tensor[]? per_token_scale, Tensor[]? bias,"
+        "    Tensor group_list, Tensor(a!) out,"
+        "    int split_item, int group_type, int group_list_type, int act_type"
+        ") -> Tensor");
+    ops.impl("zb_moe_grouped_matmul_gmm2_out", torch::kPrivateUse1,
+             &vllm_ascend::zb_moe_grouped_matmul_gmm2_out);
+#endif
 
     ops.def(
         "grouped_matmul_swiglu_quant(Tensor x, Tensor weight, Tensor weight_scale, Tensor x_scale,"
