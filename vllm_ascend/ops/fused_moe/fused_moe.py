@@ -496,27 +496,12 @@ else:
             return quant_type
 
         def _register_routed_expert_parameter_aliases(self) -> None:
-            alias_names = []
             for name, param in self.routed_experts.named_parameters(recurse=False):
-                alias_param = torch.nn.Parameter(param.data, requires_grad=param.requires_grad)
-                alias_param.__dict__.update(param.__dict__)
-                self.register_parameter(name, alias_param)
-                alias_names.append(name)
-
-            original_process_weights = self._quant_method.process_weights_after_loading
-
-            @wraps(original_process_weights)
-            def wrapped_process_weights(layer, *args, **kwargs):
-                for name in alias_names:
-                    self._parameters.pop(name, None)
-                return original_process_weights(layer, *args, **kwargs)
-
-            self._quant_method.process_weights_after_loading = wrapped_process_weights  # type: ignore[method-assign]
+                object.__setattr__(self, name, param)
+                self._parameters[name] = param
 
         def _needs_routed_expert_parameter_aliases(self) -> bool:
-            vllm_config = get_current_vllm_config()
-            hf_config = getattr(vllm_config.model_config, "hf_config", None)
-            return getattr(hf_config, "model_type", None) == "gpt_oss"
+            return True
 
         @property
         def is_internal_router(self) -> bool:
