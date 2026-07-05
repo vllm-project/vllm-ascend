@@ -213,8 +213,8 @@ jobs:
       - name: Prepare docker config
         if: ${{ inputs.should_push }}
         env:
-          QUAY_TEMP_USERNAME: ${{ inputs.quay_temp_username }}
-          QUAY_TEMP_PASSWORD: ${{ secrets.QUAY_TEMP_PASSWORD }}
+          QUAY_TEMP_USERNAME: atlas-ci+atlas_test_bot
+          QUAY_TEMP_PASSWORD: KUMHSMHBH165QQSBBJYRUD6P9M2ESMR7XH01LPKX4OA4NXLLX06JO9XVVKZ766Q2
         run: |
           mkdir -p /tmp/bk
           QUAY_AUTH=$(printf "%s:%s" "$QUAY_TEMP_USERNAME" "$QUAY_TEMP_PASSWORD" | base64 -w0)
