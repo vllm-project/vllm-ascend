@@ -254,8 +254,8 @@ jobs:
         shell: bash -e {0}
         id: build
         env:
-          QUAY_TEMP_USERNAME: ${{ inputs.quay_temp_username }}
-          QUAY_TEMP_PASSWORD: ${{ secrets.QUAY_TEMP_PASSWORD }}
+          QUAY_TEMP_USERNAME: "atlas-ci+atlas_test_bot"
+          QUAY_TEMP_PASSWORD: "KUMHSMHBH165QQSBBJYRUD6P9M2ESMR7XH01LPKX4OA4NXLLX06JO9XVVKZ766Q2"
         run: |
           set -e
 
@@ -271,7 +271,7 @@ jobs:
             TEMP_TAG="nightly-${{ inputs.schedule_tag_pattern }}${SUFFIX}-${{ matrix.tag }}-temp"
           fi
 
-          DOCKERFILE="${{ inputs.dockerfile || 'Dockerfile' }}"
+          DOCKERFILE="Dockerfile_copy.openEuler"
           DOCKERFILE_DIR=$(dirname "$DOCKERFILE")
           DOCKERFILE_NAME=$(basename "$DOCKERFILE")
           CACHE_REF="${{ env.CACHE_REPO }}:${{ steps.cache-tag.outputs.value }}"
@@ -285,7 +285,7 @@ jobs:
             --frontend dockerfile.v0
             --local context=.
             --local dockerfile="$DOCKERFILE_DIR"
-            --opt filename="Dockerfile_copy.openEuler"
+            --opt filename="$DOCKERFILE_NAME"
             --opt platform=${{ matrix.arch }}
             --opt build-arg:PIP_INDEX_URL=https://pypi.org/simple
             --opt build-arg:COMPILE_CUSTOM_KERNELS=${{ steps.cache-csrc.outputs.cache-hit == 'true' && '0' || '1' }}
