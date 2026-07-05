@@ -420,6 +420,14 @@ class TestYuanrongBackendMethods(unittest.TestCase):
             backend._helper.make_blob_lists = lambda a, s: [MagicMock() for _ in a]
             backend._hetero_client = MagicMock()
             backend._ds_set_param = MagicMock()
+            backend._is_a2 = False
+            backend._registered_buffers = None
+            backend._buffers_registered = False
+            backend.config = YuanrongConfig(
+                worker_addr="127.0.0.1:0",
+                enable_exclusive_connection=False,
+                enable_remote_h2d=False,
+            )
             backend.rank = 0
             return backend
 
@@ -486,12 +494,53 @@ class TestYuanrongBackendMethods(unittest.TestCase):
         b._hetero_client.mset_d2h.side_effect = Exception("fail")
         b.put(["k1"], [[100]], [[10]])
 
-    def test_register_buffer(self):
+    def test_register_buffer_noop_when_remote_h2d_disabled(self):
         b = self._make_backend()
-        b._helper._device_id = None
-        b._ensure_device_ready = MagicMock()
         b.register_buffer([100], [200])
-        b._ensure_device_ready.assert_called_once()
+        b._hetero_client.pre_register_device_memory.assert_not_called()
+
+    def test_register_buffer_when_remote_h2d_enabled(self):
+        b = self._make_backend()
+        b.config.enable_remote_h2d = True
+        b.register_buffer([100], [200])
+        b._hetero_client.pre_register_device_memory.assert_called_once_with([100], [200])
+
+    def test_register_buffer_noop_on_a2(self):
+        # A2 must not register (opposite of memcache_backend's _is_a2 gating).
+        b = self._make_backend()
+        b._is_a2 = True
+        b.config.enable_remote_h2d = True
+        b.register_buffer([100], [200])
+        b._hetero_client.pre_register_device_memory.assert_not_called()
+
+    def test_register_buffer_idempotent(self):
+        b = self._make_backend()
+        b.config.enable_remote_h2d = True
+        b.register_buffer([100], [200])
+        b.register_buffer([300], [400])
+        b._hetero_client.pre_register_device_memory.assert_called_once_with([100], [200])
+
+    def test_register_buffers_if_needed_no_buffers(self):
+        b = self._make_backend()
+        b.config.enable_remote_h2d = True
+        b._registered_buffers = None
+        b._register_buffers_if_needed()
+        b._hetero_client.pre_register_device_memory.assert_not_called()
+
+    def test_register_buffers_if_needed_already_registered(self):
+        b = self._make_backend()
+        b.config.enable_remote_h2d = True
+        b._registered_buffers = ([100], [200])
+        b._buffers_registered = True
+        b._register_buffers_if_needed()
+        b._hetero_client.pre_register_device_memory.assert_not_called()
+
+    def test_register_buffers_if_needed_disabled(self):
+        b = self._make_backend()
+        b.config.enable_remote_h2d = False
+        b._registered_buffers = ([100], [200])
+        b._register_buffers_if_needed()
+        b._hetero_client.pre_register_device_memory.assert_not_called()
 
     def test_ensure_device_ready(self):
         b = self._make_backend()
