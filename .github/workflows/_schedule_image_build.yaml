@@ -257,6 +257,8 @@ jobs:
           QUAY_TEMP_USERNAME: "atlas-ci+atlas_test_bot"
           QUAY_TEMP_PASSWORD: "KUMHSMHBH165QQSBBJYRUD6P9M2ESMR7XH01LPKX4OA4NXLLX06JO9XVVKZ766Q2"
         run: |
+          AUTH_BASE64=$(echo -n "$QUAY_TEMP_USERNAME:$QUAY_TEMP_PASSWORD" | base64)
+          export DOCKER_AUTH_CONFIG="{\"auths\":{\"quay.io\":{\"auth\":\"$AUTH_BASE64\"}}}"
           set -e
 
           SUFFIX=""
@@ -295,7 +297,8 @@ jobs:
           )
 
           if [ "true" = "true" ]; then
-            ARGS+=(--secret "id=dockerconfig,src=/tmp/bk/config.json")
+            # ARGS+=(--secret "id=dockerconfig,src=/tmp/bk/config.json")
+            ARGS+=(--registry-auth /tmp/bk/config.json)
             ARGS+=(--export-cache "type=registry,ref=${CACHE_REF},mode=max")
             ARGS+=(--output "type=image,name=${{ env.QUAY_TEMP_REPO }}:${TEMP_TAG},push=true")
           fi
