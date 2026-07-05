@@ -1133,7 +1133,11 @@ class PCPManager:
         total_world_size = pcp_world_size * dcp_world_size
         seq_lens_tiled = seq_lens.unsqueeze(-1).repeat(1, total_world_size)
         rank_offsets = (
-            torch.arange(total_world_size, dtype=seq_lens.dtype, device=seq_lens.device)
+            torch.arange(
+                total_world_size,
+                dtype=seq_lens.dtype,
+                device=seq_lens.device,
+            )
             .unsqueeze(0)
             .repeat(num_requests, 1)
         )
