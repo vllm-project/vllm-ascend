@@ -19,6 +19,7 @@ import json
 import os
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
@@ -345,6 +346,7 @@ class TestMooncakeBackendMethods(unittest.TestCase):
             backend._lazy_init = False
             backend._store_initialized = True
             backend._use_fabric_mem = False
+            backend._use_store_independent_te = False
             backend._store_init_lock = MagicMock()
             backend.local_seg = None
             return backend
@@ -397,6 +399,57 @@ class TestMooncakeBackendMethods(unittest.TestCase):
         ):
             b.register_buffer([100], [200])
             mock_te.register_buffer.assert_called_once()
+
+    def test_register_buffer_with_store_independent_te(self):
+        b = self._make_backend()
+        b._use_store_independent_te = True
+        b.store.register_buffer.return_value = 0
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend.global_te"
+        ) as mock_te:
+            b.register_buffer([100, 101], [200, 201])
+            b.store.register_buffer.assert_any_call(100, 200)
+            b.store.register_buffer.assert_any_call(101, 201)
+            self.assertEqual(b.store.register_buffer.call_count, 2)
+            mock_te.register_buffer.assert_not_called()
+
+    def test_register_buffer_skips_fabric_mem(self):
+        b = self._make_backend()
+        b._use_fabric_mem = True
+        b.register_buffer([100], [200])
+        b.store.register_buffer.assert_not_called()
+
+    def test_setup_store_with_store_independent_te(self):
+        b = self._make_backend()
+        b._use_store_independent_te = True
+        b.config = SimpleNamespace(
+            metadata_server="P2PHANDSHAKE",
+            global_segment_size=1024,
+            local_buffer_size=2048,
+            protocol="ascend",
+            device_name="",
+            master_server_address="127.0.0.1:50088",
+            enable_ssd_offload=False,
+        )
+        with (
+            patch("mooncake.store.MooncakeDistributedStore") as mock_store_cls,
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend.global_te"
+            ) as mock_te,
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend.get_ip",
+                return_value="127.0.0.1",
+            ),
+        ):
+            mock_store = mock_store_cls.return_value
+            mock_store.setup.return_value = 0
+            self.assertIs(b._setup_store(), mock_store)
+            mock_te.get_transfer_engine.assert_not_called()
+            mock_store.setup.assert_called_once()
+            setup_kwargs = mock_store.setup.call_args.kwargs
+            self.assertEqual(setup_kwargs["local_hostname"], "127.0.0.1")
+            self.assertEqual(setup_kwargs["local_buffer_size"], 0)
+            self.assertNotIn("engine", setup_kwargs)
 
 
 # =========================================================================

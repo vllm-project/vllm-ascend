@@ -118,6 +118,17 @@ export PYTHONHASHSEED=0
 | 800 I/T A3 series | If any dependency above is not met | `export ASCEND_BUFFER_POOL=4:8` | Configures the number and size of buffers on the NPU Device for aggregation and KV transfer (e.g., `4:8` means 4 buffers of 8MB). |
 | 800 I/T A2 series | HDK >= 25.5 is recommended | `export HCCL_INTRA_ROCE_ENABLE=1` | Required by direct transmission scheme on 800 I/T A2 series|
 
+`ASCEND_GLOBAL_RESOURCE_CONFIG` is a JSON string passed to HIXL. Common fields are:
+
+| Field | Description |
+| :--- | :--- |
+| `comm_resource_config.protocol_desc` | Protocol descriptor for the top-level Mooncake transfer engine. In PD disaggregation, this controls the `MooncakeConnectorV1` PD transfer path. Example values include `["hccs:device"]` and `["roce:device"]`. |
+| `store.comm_resource_config.protocol_desc` | Protocol descriptor for Mooncake Store traffic used by `AscendStoreConnector`. On A3, this can be set to `["roce:device"]` while PD transfer uses HCCS. |
+| `comm_resource_config.listen_port` | One-sided communication listen port. The HIXL default is `16666`; use a different port for standalone `mooncake_client` processes to avoid conflicts with embedded clients. |
+| `fabric_memory.max_capacity` | Fabric memory quota in GB per process. Use it only when the fabric memory budget is too small; see [Fabric memory size alignment](#122-fabric-memory-size-alignment-a3--ascend_enable_use_fabric_mem1). |
+
+Store/PD traffic separation requires **CANN >= 9.1.0**. It is intended for A3 deployments where PD transfer traffic can use HCCS and Mooncake Store traffic can use ROCE, so the two traffic classes do not compete on the same physical link. For more HIXL deployment patterns, see the [Mooncake + HIXL pooling overview](https://gitcode.com/cann/hixl/wiki/Mooncake%20+%20HIXL%20%E6%B1%A0%E5%8C%96%E6%96%B9%E6%A1%88%E6%80%BB%E8%A7%88%EF%BC%88A2%20-%20A3%EF%BC%89.md).
+
 ### Run Mooncake Master
 
 **Note:** Before proceeding, review the following Mooncake guides:
@@ -165,6 +176,8 @@ mooncake_master --port 50088 --eviction_high_watermark_ratio 0.9 --eviction_rati
 #### 1. Run `prefill` Node and `decode` Node
 
 Using `MultiConnector` to simultaneously utilize both `MooncakeConnectorV1` and `AscendStoreConnector`. `MooncakeConnectorV1` performs kv_transfer, while `AscendStoreConnector` serves as the prefix-cache node.
+
+For A3 Store/PD traffic separation, set `ASCEND_GLOBAL_RESOURCE_CONFIG` on both the prefill and decode nodes and use **CANN >= 9.1.0**. The top-level resource configuration controls `MooncakeConnectorV1` PD traffic, and the `store` section controls `AscendStoreConnector` Mooncake Store traffic.
 
 `prefill` Node:
 
