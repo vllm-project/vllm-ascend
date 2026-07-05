@@ -19,12 +19,13 @@
 
 namespace optiling {
 BEGIN_TILING_DATA_DEF(SwiglustepTilingData)
-    TILING_DATA_FIELD_DEF(int64_t, totalLength);   // = M*N (total elements of gate/up/y)
+    TILING_DATA_FIELD_DEF(int64_t, totalLength);   // = M (rows of x[M,2N] / out[M,N])
+    TILING_DATA_FIELD_DEF(int64_t, N);             // gate/up width (x last dim / 2)
     TILING_DATA_FIELD_DEF(int64_t, formerNum);      // number of former cores
-    TILING_DATA_FIELD_DEF(int64_t, formerLength);   // former core length (elements)
+    TILING_DATA_FIELD_DEF(int64_t, formerLength);   // former core rows
     TILING_DATA_FIELD_DEF(int64_t, tailNum);        // number of tail cores (=1)
-    TILING_DATA_FIELD_DEF(int64_t, tailLength);     // tail core length (elements)
-    TILING_DATA_FIELD_DEF(int64_t, tileLength);     // UB tile length (elements)
+    TILING_DATA_FIELD_DEF(int64_t, tailLength);     // tail core rows
+    TILING_DATA_FIELD_DEF(int64_t, tileLength);     // UB tile rows (tileM)
     TILING_DATA_FIELD_DEF(float, limit);            // clamp limit (Step-3.7=7.0)
 END_TILING_DATA_DEF;
 

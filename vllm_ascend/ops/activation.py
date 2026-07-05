@@ -73,8 +73,10 @@ class AscendSwigluStepAndMul:
             raise ValueError("SwigluStepAndMul requires limit to be set.")
 
         if enable_custom_op():
-            gate, up = x.chunk(2, dim=-1)
-            return torch.ops._C_ascend.npu_swiglustep(gate.contiguous(), up.contiguous(), limit)
+            # Fused kernel takes the single row-major x[M, 2N] directly and splits
+            # gate/up in UB, avoiding the host-side x.chunk(2, -1).contiguous()
+            # GM->GM copies that the previous two-input form required.
+            return torch.ops._C_ascend.npu_swiglustep(x, limit)
 
         # Fallback when custom ops are disabled (e.g. Ascend 950 / A5, where enable_custom_op()
         # returns False): vllm's SwigluStepAndMul.forward_native — same pattern as

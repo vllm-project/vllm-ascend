@@ -1987,11 +1987,16 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_swiglu_group_quant_npu(
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(y, scale, y_origin);
 }
 
-// swiglustep: out = silu(gate).clamp(max=limit) * up.clamp(-limit, limit)
-at::Tensor npu_swiglustep_npu(const at::Tensor& gate, const at::Tensor& up, double limit)
+// swiglustep: out = silu(gate).clamp(max=limit) * up.clamp(-limit, limit),
+// where gate = x[..., :N], up = x[..., N:] are split inside the kernel from a single
+// row-major x[M, 2N] input (so the host side avoids x.chunk(2,-1).contiguous()).
+at::Tensor npu_swiglustep_npu(const at::Tensor& x, double limit)
 {
-    at::Tensor out = at::empty_like(gate);
-    EXEC_NPU_CMD(aclnnSwiglustep, gate, up, limit, out);
+    // out shape = x with last dim halved ([M, 2N] -> [M, N]); mirrors InferShape4Swiglustep
+    auto out_shape = x.sizes().vec();
+    out_shape.back() /= 2;
+    at::Tensor out = at::empty(out_shape, x.options());
+    EXEC_NPU_CMD(aclnnSwiglustep, x, limit, out);
     return out;
 }
 
@@ -2846,7 +2851,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "-> (Tensor y, Tensor scale, Tensor y_origin)");
     ops.impl("npu_swiglu_group_quant", torch::kPrivateUse1, &vllm_ascend::npu_swiglu_group_quant_npu);
 
-    ops.def("npu_swiglustep(Tensor gate, Tensor up, float limit) -> Tensor");
+    ops.def("npu_swiglustep(Tensor x, float limit) -> Tensor");
     ops.impl("npu_swiglustep", torch::kPrivateUse1, &vllm_ascend::npu_swiglustep_npu);
 
     ops.def(

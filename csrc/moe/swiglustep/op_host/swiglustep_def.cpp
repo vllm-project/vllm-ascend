@@ -19,12 +19,8 @@ class Swiglustep : public OpDef {
 public:
     explicit Swiglustep(const char* name) : OpDef(name)
     {
-        // gate / up: same dtype and shape, bf16 / fp16 supported
-        this->Input("gate")
-            .ParamType(REQUIRED)
-            .DataType({ge::DT_BF16, ge::DT_FLOAT16})
-            .Format({ge::FORMAT_ND, ge::FORMAT_ND});
-        this->Input("up")
+        // x: row-major [M, 2N], gate = first N cols, up = last N cols (bf16 / fp16)
+        this->Input("x")
             .ParamType(REQUIRED)
             .DataType({ge::DT_BF16, ge::DT_FLOAT16})
             .Format({ge::FORMAT_ND, ge::FORMAT_ND});

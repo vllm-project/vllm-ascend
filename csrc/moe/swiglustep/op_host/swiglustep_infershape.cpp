@@ -10,16 +10,19 @@
 
 /*!
  * \file swiglustep_infershape.cpp
- * \brief SwigluStep shape/dtype infer: y shape = gate shape, y dtype = gate dtype
+ * \brief SwigluStep shape/dtype infer: x[M,2N] -> y[M,N], y dtype = x dtype
  */
 #include "register/op_impl_registry.h"
 
 namespace ops {
 static ge::graphStatus InferShape4Swiglustep(gert::InferShapeContext* context)
 {
-    const gert::Shape* gateShape = context->GetInputShape(0);
+    // x: [M, 2N] -> y: [M, N] (halve the last dim)
+    const gert::Shape* xShape = context->GetInputShape(0);
     gert::Shape* yShape = context->GetOutputShape(0);
-    *yShape = *gateShape;
+    *yShape = *xShape;
+    int64_t lastDim = xShape->GetDim(xShape->GetDimNum() - 1);
+    yShape->SetDim(yShape->GetDimNum() - 1, lastDim / 2);
     return ge::GRAPH_SUCCESS;
 }
 
