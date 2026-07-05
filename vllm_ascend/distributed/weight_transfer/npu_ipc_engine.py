@@ -130,7 +130,7 @@ class NPUIPCWeightTransferEngine(WeightTransferEngine[NPUIPCWeightTransferInitIn
 
     else:
 
-        def __init__(
+        def __init__(  # type: ignore[misc]
             self,
             config: WeightTransferConfig,
             vllm_config: VllmConfig,

@@ -129,7 +129,7 @@ class HCCLWeightTransferEngine(WeightTransferEngine[HCCLWeightTransferInitInfo, 
 
     else:
 
-        def __init__(
+        def __init__(  # type: ignore[misc]
             self,
             config: WeightTransferConfig,
             vllm_config: VllmConfig,
@@ -137,7 +137,7 @@ class HCCLWeightTransferEngine(WeightTransferEngine[HCCLWeightTransferInitInfo, 
             model: torch.nn.Module,
         ) -> None:
             super().__init__(config, vllm_config, device, model)
-            self.model_update_group: PyHcclCommunicator | None = None
+            self.model_update_group: PyHcclCommunicator | None = None  # type: ignore[no-redef]
 
     if not vllm_version_is("0.23.0"):
 
