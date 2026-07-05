@@ -294,7 +294,7 @@ jobs:
             --progress=plain
           )
 
-          if [ "${{ inputs.should_push }}" = "true" ]; then
+          if [ "true" = "true" ]; then
             ARGS+=(--secret "id=dockerconfig,src=/tmp/bk/config.json")
             ARGS+=(--export-cache "type=registry,ref=${CACHE_REF},mode=max")
             ARGS+=(--output "type=image,name=${{ env.QUAY_TEMP_REPO }}:${TEMP_TAG},push=true")
