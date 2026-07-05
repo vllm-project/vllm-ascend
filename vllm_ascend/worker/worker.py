@@ -406,6 +406,13 @@ class NPUWorker(WorkerBase):
                 parallel_config.distributed_executor_backend not in ("ray", "external_launcher")
                 and parallel_config.data_parallel_backend != "ray"
                 and parallel_config.nnodes_within_dp == 1
+                # vllm-ascend: when the user pre-shards devices via
+                # --device-ids (which becomes assigned_physical_gpu_ids),
+                # each child process already binds to its own NPU(s); the
+                # DP local_rank shift below would push local_rank past the
+                # length of the per-rank device list and trip the assert
+                # in this same method. Skip the shift in that case.
+                and parallel_config.assigned_physical_gpu_ids is None
             ):
                 dp_local_rank = parallel_config.data_parallel_rank_local
                 if dp_local_rank is None:

@@ -123,27 +123,13 @@ def main(
     os.environ["VLLM_DP_MASTER_IP"] = dp_master_ip
     os.environ["VLLM_DP_MASTER_PORT"] = str(dp_master_port)
 
-    # vLLM v0.24.0 (PR #45026) stopped isolating devices per worker process
-    # automatically. For application-level DP (one LLM() per rank), each
-    # child process must specify its own device assignment. Use the upstream
-    # dp_supervisor's _build_device_ids to compute per-rank device IDs and
-    # pass them via the device_ids argument to LLM().
     from vllm_ascend.utils import vllm_version_is
 
     _dp_device_ids = None
     if not vllm_version_is("0.23.0"):
-        from argparse import Namespace
+        import torch
 
-        from vllm.entrypoints.openai.dp_supervisor import _build_device_ids
-
-        _dp_device_ids = _build_device_ids(
-            Namespace(
-                tensor_parallel_size=GPUs_per_dp_rank,
-                pipeline_parallel_size=1,
-                device_ids=None,
-            ),
-            local_dp_rank,
-        )
+        _dp_device_ids = [str(i) for i in range(torch.npu.device_count())]
 
     # Sample prompts.
     prompts = [
