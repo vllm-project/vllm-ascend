@@ -831,6 +831,7 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
                 dspark_swa_indices=dspark_swa_indices,
                 dspark_swa_lens=dspark_swa_lens,
                 sas_metadata=sas_metadata,
+                num_query_tokens=getattr(forward_context, "num_actual_tokens", None),
                 skip_scheduling_guard=capture_mode and sas_metadata is not None,
                 raise_on_error=capture_mode,
             )

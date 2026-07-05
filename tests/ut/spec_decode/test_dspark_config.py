@@ -932,6 +932,59 @@ def test_dspark_standard_attention_uses_sas_by_default(monkeypatch):
     assert calls[0][2]["raise_on_error"] is True
 
 
+def test_dspark_standard_attention_passes_actual_query_tokens_to_sas(monkeypatch):
+    monkeypatch.delenv("VLLM_ASCEND_DSPARK_USE_PRIVATE_CACHE", raising=False)
+    monkeypatch.delenv("VLLM_ASCEND_DSPARK_USE_PTA_REF", raising=False)
+
+    expected = torch.ones(8, 4, 8)
+    calls = []
+
+    def fake_sas(*args, **kwargs):
+        calls.append(("sas", args, kwargs))
+        return expected
+
+    def fake_pta(*args, **kwargs):
+        raise AssertionError("PTA should not run when SAS returns an output")
+
+    monkeypatch.setattr(dspark_model_module, "dspark_attention_from_standard_cache_sas", fake_sas)
+    monkeypatch.setattr(dspark_model_module, "dspark_attention_from_standard_cache", fake_pta)
+    monkeypatch.setattr(
+        dspark_model_module,
+        "_maybe_get_forward_context",
+        lambda: SimpleNamespace(
+            cudagraph_runtime_mode=dspark_model_module.CUDAGraphMode.NONE,
+            num_actual_tokens=5,
+        ),
+    )
+
+    attn = object.__new__(DeepseekV4DSparkAttention)
+    attn.dsa_attn = SimpleNamespace(
+        swa_cache_layer=SimpleNamespace(
+            kv_cache=torch.zeros(4, 16, 1, 8),
+            block_size=16,
+        )
+    )
+    attn.attn_sink = torch.zeros(4)
+    attn.n_local_heads = 4
+    attn.block_size = 5
+    attn.window_size = 6
+    attn.scale = 0.5
+
+    out = DeepseekV4DSparkAttention._run_standard_dspark_attention(
+        attn,
+        q=torch.zeros(8, 4, 8),
+        positions=torch.arange(8, dtype=torch.int32),
+        slot_mapping=torch.arange(8, dtype=torch.int32),
+        block_table=torch.tensor([[0]], dtype=torch.int32),
+        dspark_query_start_loc=torch.tensor([0, 5], dtype=torch.int32),
+        dspark_seq_lens=torch.tensor([8], dtype=torch.int32),
+    )
+
+    assert out is expected
+    assert calls[0][2]["num_query_tokens"] == 5
+    assert calls[0][2]["skip_scheduling_guard"] is False
+
+
 def test_dspark_standard_attention_does_not_fallback_to_pta_during_capture(monkeypatch):
     monkeypatch.delenv("VLLM_ASCEND_DSPARK_USE_PRIVATE_CACHE", raising=False)
     monkeypatch.delenv("VLLM_ASCEND_DSPARK_USE_PTA_REF", raising=False)

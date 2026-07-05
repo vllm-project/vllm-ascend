@@ -619,6 +619,7 @@ def dspark_attention_from_standard_cache_sas(
     dspark_swa_indices: torch.Tensor | None = None,
     dspark_swa_lens: torch.Tensor | None = None,
     sas_metadata: torch.Tensor | None = None,
+    num_query_tokens: int | None = None,
     skip_scheduling_guard: bool = False,
     raise_on_error: bool = False,
 ) -> torch.Tensor | None:
@@ -655,10 +656,12 @@ def dspark_attention_from_standard_cache_sas(
             )
         assert dspark_swa_lens is not None
         if skip_scheduling_guard:
-            num_query_tokens = min(q.shape[0], dspark_swa_lens.shape[0])
+            active_query_tokens = min(q.shape[0], dspark_swa_lens.shape[0])
+        elif num_query_tokens is not None:
+            active_query_tokens = min(max(int(num_query_tokens), 0), q.shape[0])
         else:
-            num_query_tokens = int(query_start_loc[-1].item()) if query_start_loc.numel() > 0 else 0
-        if num_query_tokens <= 0 or num_query_tokens > q.shape[0]:
+            active_query_tokens = int(query_start_loc[-1].item()) if query_start_loc.numel() > 0 else 0
+        if active_query_tokens <= 0 or active_query_tokens > q.shape[0]:
             return None
 
         if not skip_scheduling_guard and not _dspark_sas_lens_match_scheduling(
@@ -668,14 +671,16 @@ def dspark_attention_from_standard_cache_sas(
             token_to_req_indices,
             block_size,
             window_size,
-            num_query_tokens,
+            active_query_tokens,
         ):
             return None
 
-        q_active = q[:num_query_tokens]
+        q_active = q[:active_query_tokens]
         cu_seqlens_q = query_start_loc.to(device=q.device, dtype=torch.int32).contiguous()
         seqused_kv = seq_lens.to(device=q.device, dtype=torch.int32).contiguous()
-        ori_sparse_indices = dspark_swa_indices[:num_query_tokens].to(device=q.device, dtype=torch.int32).contiguous()
+        ori_sparse_indices = (
+            dspark_swa_indices[:active_query_tokens].to(device=q.device, dtype=torch.int32).contiguous()
+        )
         ori_block_table = block_table.to(device=q.device, dtype=torch.int32).contiguous()
         sinks = attn_sink[: q_active.shape[1]].float().contiguous()
         _, ori_win_left, ori_win_right = _dspark_sparse_sas_window(block_size, window_size)
@@ -723,11 +728,11 @@ def dspark_attention_from_standard_cache_sas(
             layout_q="TND",
             layout_kv="PA_ND",
         )[0]
-        if num_query_tokens == q.shape[0]:
+        if active_query_tokens == q.shape[0]:
             out = out_active
         else:
             out = torch.zeros_like(q)
-            out[:num_query_tokens] = out_active
+            out[:active_query_tokens] = out_active
         return out
     except (RuntimeError, ValueError) as err:
         if raise_on_error:
