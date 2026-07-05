@@ -951,6 +951,19 @@ class AscendDSparkProposer(AscendDflashProposer):
         block_size = self.num_speculative_tokens
         num_query_total = batch_size * block_size
         has_num_rejected = num_rejected_tokens_gpu is not None
+        query_start_loc_cpu = getattr(cad, "query_start_loc_cpu", None)
+        if not (
+            isinstance(query_start_loc_cpu, torch.Tensor)
+            and query_start_loc_cpu.device.type == "cpu"
+            and query_start_loc_cpu.numel() >= batch_size + 1
+        ):
+            query_start_loc_cpu = None
+        rejected_tokens_cpu = None
+        if has_num_rejected:
+            assert num_rejected_tokens_gpu is not None
+            rejected_tokens_cpu = num_rejected_tokens_gpu[:batch_size]
+            if rejected_tokens_cpu.device.type != "cpu":
+                rejected_tokens_cpu = rejected_tokens_cpu.to(device="cpu", dtype=torch.int32)
         request_slots = self._assign_request_slots(batch_size)
         token_to_req_capacity = max(int(self.positions.numel()), num_query_total)
         token_to_req_indices = getattr(self, "_dspark_token_to_req_indices_buffer", None)
@@ -984,8 +997,12 @@ class AscendDSparkProposer(AscendDflashProposer):
         context_cursor = 0
         for req_idx in range(batch_size):
             request_slot = request_slots[req_idx]
-            ctx_start = int(cad.query_start_loc[req_idx].item())
-            ctx_end = int(cad.query_start_loc[req_idx + 1].item())
+            if query_start_loc_cpu is None:
+                ctx_start = int(cad.query_start_loc[req_idx].item())
+                ctx_end = int(cad.query_start_loc[req_idx + 1].item())
+            else:
+                ctx_start = int(query_start_loc_cpu[req_idx])
+                ctx_end = int(query_start_loc_cpu[req_idx + 1])
             ctx_len = ctx_end - ctx_start
             if ctx_len == 0:
                 continue
@@ -1045,12 +1062,16 @@ class AscendDSparkProposer(AscendDflashProposer):
 
         for req_idx in range(batch_size):
             request_slot = request_slots[req_idx]
-            ctx_start = int(cad.query_start_loc[req_idx].item())
-            ctx_end = int(cad.query_start_loc[req_idx + 1].item())
+            if query_start_loc_cpu is None:
+                ctx_start = int(cad.query_start_loc[req_idx].item())
+                ctx_end = int(cad.query_start_loc[req_idx + 1].item())
+            else:
+                ctx_start = int(query_start_loc_cpu[req_idx])
+                ctx_end = int(query_start_loc_cpu[req_idx + 1])
             valid_ctx_end = ctx_end
             if has_num_rejected:
-                assert num_rejected_tokens_gpu is not None
-                valid_ctx_end -= int(num_rejected_tokens_gpu[req_idx].item())
+                assert rejected_tokens_cpu is not None
+                valid_ctx_end -= int(rejected_tokens_cpu[req_idx])
             last_pos = target_positions[valid_ctx_end - 1]
             out_start = req_idx * block_size
             out_end = out_start + block_size

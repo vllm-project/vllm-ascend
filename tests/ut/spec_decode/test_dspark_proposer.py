@@ -419,8 +419,10 @@ def test_dspark_set_inputs_first_pass_uses_anchor_first_block(monkeypatch):
     target_positions = torch.tensor([5, 6, 7, 15, 16, 17], dtype=torch.int32)
     target_hidden_states = torch.arange(12, dtype=torch.float32).view(6, 2)
     next_token_ids = torch.tensor([101, 202], dtype=torch.int64)
+    # The CPU mirror is the authoritative host-side range source for DSpark
+    # input preparation; the device mirror is intentionally stale here.
     cad = AscendCommonAttentionMetadata(
-        query_start_loc=torch.tensor([0, 3, 6], dtype=torch.int32),
+        query_start_loc=torch.tensor([0, 2, 6], dtype=torch.int32),
         query_start_loc_cpu=torch.tensor([0, 3, 6], dtype=torch.int32),
         seq_lens=torch.tensor([8, 18], dtype=torch.int32),
         _seq_lens_cpu=torch.tensor([8, 18], dtype=torch.int32),
@@ -1163,7 +1165,7 @@ def test_dspark_set_inputs_first_pass_stores_rejected_context_tokens(monkeypatch
     next_token_ids = torch.tensor([101, 202], dtype=torch.int64)
     num_rejected_tokens = torch.tensor([1, 2], dtype=torch.int32)
     cad = AscendCommonAttentionMetadata(
-        query_start_loc=torch.tensor([0, 4, 8], dtype=torch.int32),
+        query_start_loc=torch.tensor([0, 3, 8], dtype=torch.int32),
         query_start_loc_cpu=torch.tensor([0, 4, 8], dtype=torch.int32),
         seq_lens=torch.tensor([14, 34], dtype=torch.int32),
         _seq_lens_cpu=torch.tensor([14, 34], dtype=torch.int32),
