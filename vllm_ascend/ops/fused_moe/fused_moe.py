@@ -348,9 +348,6 @@ else:
                 )
 
             self.quant_type = self._get_quant_type()
-            # Can be removed after vllm fixes the issue.
-            if self._needs_routed_expert_parameter_aliases():
-                self._register_routed_expert_parameter_aliases()
 
             self.moe_config.tp_group = get_tp_group()
             self.moe_config.dp_group = get_dp_group()
@@ -501,13 +498,6 @@ else:
                 quant_type = getattr(method, "quant_type", QuantType.NONE)
 
             return quant_type
-
-        def _register_routed_expert_parameter_aliases(self) -> None:
-            for name, param in self.routed_experts.named_parameters(recurse=False):
-                object.__setattr__(self, name, param)
-
-        def _needs_routed_expert_parameter_aliases(self) -> bool:
-            return True
 
         @property
         def is_internal_router(self) -> bool:
