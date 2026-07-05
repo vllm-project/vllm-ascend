@@ -1134,18 +1134,16 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             ).to(device=gpu_device, non_blocking=True)
 
         if num_prefills > 0:
-            has_initial_state = context_lens_tensor > 0
-            if spec_sequence_masks_cpu is not None:
-                assert non_spec_sequence_indices is not None
-                has_initial_state = torch.index_select(
-                    has_initial_state,
-                    0,
-                    non_spec_sequence_indices,
+            has_initial_state, nums_dict, batch_ptr, token_chunk_offset_ptr = (
+                self._build_prefill_has_initial_state_and_causal_conv1d_meta(
+                    common_attn_metadata=m,
+                    context_lens_tensor=context_lens_tensor,
+                    num_prefills=num_prefills,
+                    spec_sequence_masks_cpu=spec_sequence_masks_cpu,
+                    non_spec_sequence_indices=non_spec_sequence_indices,
+                    non_spec_query_start_loc_cpu=non_spec_query_start_loc_cpu,
+                    query_start_loc=query_start_loc,
                 )
-                assert non_spec_query_start_loc_cpu is not None
-            nums_dict, batch_ptr, token_chunk_offset_ptr = compute_causal_conv1d_metadata(
-                non_spec_query_start_loc_cpu,
-                device=query_start_loc.device,
             )
         else:
             has_initial_state = None
@@ -1267,6 +1265,38 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             common_attn_metadata,
             num_decode_draft_tokens_cpu,
         )
+
+    def _build_prefill_has_initial_state_and_causal_conv1d_meta(
+        self,
+        *,
+        common_attn_metadata: CommonAttentionMetadata,
+        context_lens_tensor: torch.Tensor,
+        num_prefills: int,
+        spec_sequence_masks_cpu: torch.Tensor | None,
+        non_spec_sequence_indices: torch.Tensor | None,
+        non_spec_query_start_loc_cpu: torch.Tensor | None,
+        query_start_loc: torch.Tensor,
+    ) -> tuple[
+        torch.Tensor | None,
+        dict[int, dict[str, object]] | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+    ]:
+        del common_attn_metadata, num_prefills
+        has_initial_state = context_lens_tensor > 0
+        if spec_sequence_masks_cpu is not None:
+            assert non_spec_sequence_indices is not None
+            has_initial_state = torch.index_select(
+                has_initial_state,
+                0,
+                non_spec_sequence_indices,
+            )
+            assert non_spec_query_start_loc_cpu is not None
+        nums_dict, batch_ptr, token_chunk_offset_ptr = compute_causal_conv1d_metadata(
+            non_spec_query_start_loc_cpu,
+            device=query_start_loc.device,
+        )
+        return has_initial_state, nums_dict, batch_ptr, token_chunk_offset_ptr
 
 
 class AscendGDNAttentionBackend(GDNAttentionBackend):

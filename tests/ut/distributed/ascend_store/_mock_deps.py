@@ -379,6 +379,15 @@ for _pkg in ["vllm_ascend", "vllm_ascend.distributed"]:
     if _pkg not in sys.modules:
         sys.modules[_pkg] = _make_pkg(_pkg)
 
+_distributed_utils = types.ModuleType("vllm_ascend.distributed.utils")
+_distributed_utils.get_decode_context_model_parallel_rank = MagicMock(  # type: ignore[attr-defined]
+    return_value=0
+)
+_distributed_utils.get_decode_context_model_parallel_world_size = MagicMock(  # type: ignore[attr-defined]
+    return_value=1
+)
+sys.modules["vllm_ascend.distributed.utils"] = _distributed_utils
+
 _kv_transfer_init = _make_pkg("vllm_ascend.distributed.kv_transfer")
 _kv_transfer_init.register_connector = MagicMock()  # type: ignore[attr-defined]
 sys.modules["vllm_ascend.distributed.kv_transfer"] = _kv_transfer_init
