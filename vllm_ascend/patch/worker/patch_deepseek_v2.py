@@ -62,6 +62,7 @@ def _deepseek_v2_mla_attention_init(
     prefix: str = "",
     topk_indices_buffer: torch.Tensor | None = None,
     input_size: int | None = None,
+    reduce_results: bool = True,
 ) -> None:
     # 这里不能使用 super().__init__()，因为当前函数定义在原类之外，
     # 最后通过赋值的方式替换 DeepseekV2MLAAttention.__init__。
@@ -145,6 +146,7 @@ def _deepseek_v2_mla_attention_init(
         self.num_heads * self.v_head_dim,
         self.hidden_size,
         bias=False,
+        reduce_results=reduce_results,
         quant_config=quant_config,
         prefix=f"{prefix}.o_proj",
     )
