@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import math
 from contextlib import contextmanager, nullcontext
+from functools import partial
 from typing import Any, cast
 
 import numpy as np
@@ -27,7 +28,9 @@ import torch.nn as nn
 import torch_npu
 from vllm.config import CUDAGraphMode
 from vllm.distributed.parallel_state import get_pp_group
+from vllm.forward_context import get_forward_context
 from vllm.logger import logger
+from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -652,21 +655,56 @@ class NPUModelRunner310(NPUModelRunner):
         num_tokens_padded: int,
         input_ids: torch.Tensor | None = None,
         positions: torch.Tensor | None = None,
-        intermediate_tensors=None,
+        intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
-        **model_kwargs,
+        **model_kwargs: dict[str, Any],
     ):
         if self.uses_mrope:
             assert positions is not None
             prepare_mrope_cos_sin_slices_from_runner(self, positions)
-        return super()._model_forward(
-            num_tokens_padded,
-            input_ids=input_ids,
-            positions=positions,
-            intermediate_tensors=intermediate_tensors,
-            inputs_embeds=inputs_embeds,
+
+        assert self.model is not None
+        forward_context = get_forward_context()
+        assert forward_context is not None
+        model_inputs: dict[str, Any] = {
+            "input_ids": input_ids,
+            "positions": positions,
+            "intermediate_tensors": intermediate_tensors,
+            "inputs_embeds": inputs_embeds,
             **model_kwargs,
+        }
+        run_model = partial(self.model, **model_inputs)
+        update_before_replay = (
+            self.speculative_config is not None
+            and self.speculative_config.method == "mtp"
+            and not self.enable_enpu
+            and forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL
+            and not forward_context.capturing
+            and hasattr(self, "update_stream")
         )
+
+        if self.enable_enpu or update_before_replay:
+            if update_before_replay:
+                torch.npu.current_stream().synchronize()
+            self._update_full_graph_params_if_needed(
+                forward_context,
+                num_tokens_padded,
+                positions,
+            )
+            if update_before_replay:
+                torch.npu.current_stream().wait_stream(self.update_stream)
+            hidden_states = run_model()
+        else:
+            hidden_states = run_model()
+            self._update_full_graph_params_if_needed(
+                forward_context,
+                num_tokens_padded,
+                positions,
+            )
+
+        if forward_context.flash_comm_v1_enabled and not isinstance(hidden_states, IntermediateTensors):
+            hidden_states = self._all_gather_hidden_states_and_aux(hidden_states)
+        return hidden_states
 
     def _check_and_update_cudagraph_mode(
         self,
