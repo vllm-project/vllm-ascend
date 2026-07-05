@@ -15,6 +15,7 @@ import requests
 import torch
 from torch.multiprocessing.reductions import reduce_tensor
 from vllm import envs
+from vllm.config import VllmConfig
 from vllm.config.parallel import ParallelConfig
 from vllm.config.weight_transfer import WeightTransferConfig
 from vllm.distributed.weight_transfer.base import (
@@ -117,13 +118,26 @@ class NPUIPCWeightTransferEngine(WeightTransferEngine[NPUIPCWeightTransferInitIn
     init_info_cls = NPUIPCWeightTransferInitInfo
     update_info_cls = NPUIPCWeightTransferUpdateInfo
 
-    def __init__(
-        self,
-        config: WeightTransferConfig,
-        parallel_config: ParallelConfig,
-        model: torch.nn.Module | None = None,
-    ) -> None:
-        super().__init__(config, parallel_config, model)
+    if vllm_version_is("0.23.0"):
+
+        def __init__(
+            self,
+            config: WeightTransferConfig,
+            parallel_config: ParallelConfig,
+            model: torch.nn.Module | None = None,
+        ) -> None:
+            super().__init__(config, parallel_config, model)
+
+    else:
+
+        def __init__(
+            self,
+            config: WeightTransferConfig,
+            vllm_config: VllmConfig,
+            device: torch.device,
+            model: torch.nn.Module,
+        ) -> None:
+            super().__init__(config, vllm_config, device, model)
 
     def parse_update_info(self, update_dict: dict[str, Any]) -> NPUIPCWeightTransferUpdateInfo:
         """Parse update dict, deserializing pickled IPC handles if present.
