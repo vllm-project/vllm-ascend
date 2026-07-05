@@ -5,6 +5,11 @@ Batch invariance is currently in beta. Some features are still under active deve
 Track progress and planned improvements at <https://github.com/vllm-project/vllm-ascend/issues/5487>
 ```
 
+```{note}
+To install the batch invariance custom operator library, set `VLLM_BATCH_INVARIANT=1` before building vllm-ascend.
+For installation instructions, see <https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/installation.md#set-up-using-python>
+```
+
 This document shows how to enable batch invariance in vLLM-Ascend. Batch invariance ensures that the output of a model is deterministic and independent of the batch size or the order of requests in a batch.
 
 ## Motivation
@@ -18,13 +23,12 @@ Batch invariance is crucial for several use cases:
 
 ## Hardware Requirements
 
-Batch invariance currently requires Ascend Atlas A2 inference products NPUs, because only the Atlas A2 inference products supports batch invariance with HCCL communication for now.
-We will support other NPUs in the future.
+Batch invariance currently requires Ascend Atlas A2 and A3 inference products NPUs.
+We will support Ascend 950 Products and other NPUs in the future.
 
 ## Software Requirements
 
-Batch invariance requires a custom operator library for Atlas A2 inference products.
-We will release the customized operator library in future versions.
+Batch invariance requires a custom operator library for Atlas A2 and A3 inference products, and users need to set `VLLM_BATCH_INVARIANT=1` before building vllm-ascend to install the batch invariance custom operator library during the installation process.
 
 ## Enabling Batch Invariance
 
@@ -39,7 +43,8 @@ export VLLM_BATCH_INVARIANT=1
 To start a vLLM server with batch invariance enabled:
 
 ```bash
-VLLM_BATCH_INVARIANT=1 vllm serve Qwen/Qwen3-8B
+VLLM_BATCH_INVARIANT=1 vllm serve Qwen/Qwen3-8B \
+  --compilation-config '{"cudagraph_mode": "PIECEWISE"}'
 ```
 
 Then use the OpenAI-compatible client:
@@ -90,6 +95,7 @@ sampling_params = SamplingParams(
 llm = LLM(
     model="Qwen/Qwen3-8B",
     tensor_parallel_size=1,
+    compilation_config={"cudagraph_mode": "PIECEWISE"},
 )
 
 # Outputs will be deterministic regardless of batch size
@@ -107,7 +113,7 @@ for output in outputs:
 Batch invariance has been tested and verified on the following models:
 
 - **Qwen3 (Dense)**: `Qwen/Qwen3-1.7B`, `Qwen/Qwen3-8B`
-- **Qwen3 (MoE)**: `Qwen/Qwen3-30B-A3B`
+- **Qwen3 (MoE)**: `Qwen/Qwen3-30B-A3B`, `Qwen/Qwen3-235B-A22B`
 
 Other models may also work, but these have been explicitly validated. If you encounter issues with a specific model, please report them on the [GitHub issue tracker](https://github.com/vllm-project/vllm-ascend/issues/new/choose).
 

@@ -29,7 +29,6 @@ from vllm.model_executor.layers.mla import MultiHeadLatentAttentionWrapper
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata
-from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
 
 from vllm_ascend.models.layer.attention.layer import DSAAttention
 from vllm_ascend.utils import (
@@ -53,6 +52,7 @@ class DSAModules:
     attn_sink: torch.nn.Module
     indexer: torch.nn.Module | None
     compressor: torch.nn.Module | None
+    swa_cache_layer: torch.nn.Module
     topk_indices_buffer: torch.Tensor | None
     indexer_rotary_emb: torch.nn.Module | None = None
     skip_topk: bool = False
@@ -112,15 +112,7 @@ class AscendDeepseekSparseAttention(MultiHeadLatentAttentionWrapper):
         self.skip_topk = dsa_modules.skip_topk
         self.prefix = prefix
 
-        ascend_device_type = get_ascend_device_type()
-        k_dtype = torch.float8_e4m3fn if ascend_device_type == AscendDeviceType.A5 else torch.bfloat16
-        self.swa_cache_layer = DeepseekV4SWACache(
-            head_dim=self.head_dim,
-            window_size=self.window_size,
-            dtype=k_dtype,
-            prefix=f"{prefix}.swa_cache",
-            cache_config=cache_config,
-        )
+        self.swa_cache_layer = dsa_modules.swa_cache_layer
 
         self.dsa_attn = DSAAttention(
             dim=self.dim,
@@ -174,9 +166,9 @@ class AscendDeepseekSparseAttention(MultiHeadLatentAttentionWrapper):
 
         output = torch.empty(output_shape, dtype=hidden_states.dtype, device=hidden_states.device)
 
-        # All DSA forward paths run inside dsa_forward custom op boundary,
-        # which is required for ACL graph capture (registered with
-        # dispatch_key="PrivateUse1").
+        # All DSA forward paths (attention + o_proj, including OTP HCCL
+        # collectives) run inside the dsa_forward custom op, which is required
+        # for ACL graph capture (registered with dispatch_key="PrivateUse1").
         torch.ops.vllm.dsa_forward(hidden_states, need_gather_q_kv, output, self.prefix)
 
         output = output.view(-1, output_shape[-1])
@@ -197,8 +189,9 @@ def dsa_forward(
         attn_metadata = forward_context.attn_metadata
 
     if attn_metadata is None:
-        self.dsa_attn.impl.dsa_warmup_with_multistream(hidden_states)
-        output.fill_(0)
+        # Profiling run: forward() handles OTP by running _forward_o_proj on a
+        # zero input so HCCL collectives are captured by the ACL graph.
+        self.dsa_attn.impl.forward(self.dsa_attn.layer_name, hidden_states, None, None, need_gather_q_kv, output)
         return
 
     kv_cache = _build_kv_cache(self, forward_context)

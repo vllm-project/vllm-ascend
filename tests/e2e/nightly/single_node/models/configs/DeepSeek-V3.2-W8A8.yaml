@@ -5,8 +5,6 @@
 test_cases:
   - name: "DeepSeek-V3.2-W8A8-TP8-DP2"
     model: "vllm-ascend/DeepSeek-V3.2-W8A8"
-    special_dependencies:
-      transformers: "5.9.0"
     envs:
       OMP_PROC_BIND: "false"
       OMP_NUM_THREADS: "1"
@@ -63,7 +61,10 @@ test_cases:
         max_out_len: 32768
         batch_size: 32
         baseline: 86.67
-        threshold: 5
+        temperature: 1.0
+        top_p: 0.95
+        thinking: true
+        threshold: 10
 
       perf_2:
         case_type: performance

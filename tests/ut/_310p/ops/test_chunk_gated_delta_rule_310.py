@@ -1,6 +1,27 @@
+from unittest.mock import patch
+
+import pytest
 import torch
+import torch_npu
 
 from vllm_ascend._310p.ops.fla.chunk_gated_delta_rule import chunk_gated_delta_rule_pytorch
+
+
+def _cpu_rms_norm(x, weight, eps):
+    """CPU fallback for torch_npu.npu_rms_norm used by l2norm_310p on CPU runners."""
+    orig_dtype = x.dtype
+    x32 = x.float()
+    var = x32.pow(2).mean(-1, keepdim=True)
+    x32 = x32 * torch.rsqrt(var + eps)
+    out = (x32 * weight.float()).to(orig_dtype)
+    return out, None
+
+
+@pytest.fixture(autouse=True)
+def _mock_npu_rms_norm():
+    # conftest stubs npu_rms_norm with a bare MagicMock(); override with a CPU impl.
+    with patch.object(torch_npu, "npu_rms_norm", side_effect=_cpu_rms_norm, create=True):
+        yield
 
 
 def test_chunk_gated_delta_rule_310_output_shape_and_dtype():

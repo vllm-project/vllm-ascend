@@ -9,6 +9,7 @@ import vllm.envs as envs_vllm
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import get_dp_group, get_ep_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import BatchDescriptor, get_forward_context, set_forward_context
+from vllm.logger import logger
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import (
@@ -70,6 +71,7 @@ def set_ascend_forward_context(
     draft_attn_metadatas=None,
     has_sinks=False,
     input_ids=None,
+    eplb_heat_collection_status: bool = False,
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
@@ -174,6 +176,8 @@ def set_ascend_forward_context(
         forward_context.max_tokens_across_dp = max_tokens_across_dp
         forward_context.max_tokens_across_pcp = max_tokens_across_pcp
 
+        forward_context.eplb_heat_collection_status = eplb_heat_collection_status
+
         if num_tokens is not None:
             if num_actual_tokens is None:
                 num_actual_tokens = num_tokens
@@ -199,14 +203,17 @@ def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len)
     global _mc2_tokens_capacity
     if _mc2_tokens_capacity is not None:
         return
-    if vllm_config.compilation_config.cudagraph_capture_sizes:
+    if get_ascend_config().enable_prefill_mc2:
+        max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+    elif vllm_config.compilation_config.cudagraph_capture_sizes:
         max_num_tokens = vllm_config.compilation_config.max_cudagraph_capture_size
     else:
-        # NOTE: To save memory, we cap the max number of tokens to 512.
-        max_num_tokens = min(max_num_reqs * uniform_decode_query_len, 512)
+        max_num_tokens = max_num_reqs * uniform_decode_query_len
     tp_size = vllm_config.parallel_config.tensor_parallel_size
     # Use integer arithmetic for ceiling division.
     num_tokens_per_tp_rank = (max_num_tokens + tp_size - 1) // tp_size
+    # NOTE: To save memory, we cap the max number of tokens to 512.
+    num_tokens_per_tp_rank = min(num_tokens_per_tp_rank, 512)
     _mc2_tokens_capacity = num_tokens_per_tp_rank * tp_size
 
 
@@ -249,7 +256,7 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
     Args:
         num_tokens (int): The number of tokens in the current batch.
         vllm_config (VllmConfig): Runtime configuration for the model.
-        is_draft_model (bool): Whether the model runs in MTP mode (disables fused MC2).
+        is_draft_model (bool): Whether the model runs in MTP mode.
 
     Raises:
         ValueError: If the soc version is unsupported.
@@ -284,7 +291,7 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
         # TODO: drop the EP-size guard when dispatch_ffn_combine supports larger EP sizes
         # TODO: drop speculative method guard when dispatch_gmm_combine_decode supports w16a16
         fused_mc2_enable = get_ascend_config().enable_fused_mc2
-        dispatch_ffn_combine_enable = get_ep_group().world_size <= 32 and (not is_draft_model)
+        dispatch_ffn_combine_enable = get_ep_group().world_size <= 32
         if num_tokens <= mc2_tokens_capacity:
             fused_decode_enable = fused_mc2_enable
             if fused_mc2_enable == 1:
@@ -306,7 +313,11 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
     elif soc_version in {AscendDeviceType._310P}:
         moe_comm_type = MoECommType.ALLGATHER
     elif soc_version in {AscendDeviceType.A5}:
-        num_experts_per_tok = vllm_config.model_config.hf_text_config.num_experts_per_tok
+        num_experts_per_tok = getattr(
+            vllm_config.model_config.hf_text_config,
+            "num_experts_per_tok",
+            getattr(vllm_config.model_config.hf_text_config, "top_k_experts", 1),
+        )
         world_size = vllm_config.parallel_config.world_size_across_dp
         if num_tokens <= mc2_tokens_capacity and world_size > 1:
             moe_comm_type = MoECommType.MC2
@@ -316,6 +327,13 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
             moe_comm_type = MoECommType.ALLTOALL
     else:
         raise ValueError(f"Unsupported soc_version: {soc_version}")
+    logger.debug(
+        "MoE comm method selected: soc=%s, method=%s, num_tokens=%d, mc2_capacity=%s",
+        soc_version,
+        moe_comm_type,
+        num_tokens,
+        mc2_tokens_capacity,
+    )
     return moe_comm_type
 
 
@@ -346,6 +364,7 @@ class _ExtraForwardContextProxy:
         "in_profile_run",
         "padded_num_tokens",
         "sinks",
+        "eplb_heat_collection_status",
     )
 
     def check_extra_attr(self, name: str):

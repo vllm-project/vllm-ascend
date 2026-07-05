@@ -9,8 +9,50 @@ from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 
-from vllm_ascend.utils import AscendDeviceType, get_ascend_config, get_ascend_device_type
+from vllm_ascend.utils import (
+    AscendDeviceType,
+    get_ascend_config,
+    get_ascend_device_type,
+    is_pd_decode_recompute_scheduler_enabled,
+)
 from vllm_ascend.worker.kvcomp_utils import KVCompMetaData
+
+
+def cache_graph_workspace(
+    graph_params,
+    num_tokens: int,
+    candidate_workspace: torch.Tensor,
+    *,
+    use_max_workspace: bool,
+) -> torch.Tensor:
+    # Most models keep the original first-workspace cache behavior. Models with
+    # mixed attention layer shapes may need the largest workspace for a graph
+    # size because layers can require different FIA workspace sizes.
+    current_workspace = graph_params.workspaces.get(num_tokens)
+    if use_max_workspace:
+        if current_workspace is None or (
+            candidate_workspace.numel() * candidate_workspace.element_size()
+            > current_workspace.numel() * current_workspace.element_size()
+        ):
+            graph_params.workspaces[num_tokens] = candidate_workspace
+    elif current_workspace is None:
+        graph_params.workspaces[num_tokens] = candidate_workspace
+    return graph_params.workspaces[num_tokens]
+
+
+@lru_cache(maxsize=1)
+def needs_layer_aware_fia_graph_replay() -> bool:
+    vllm_config = get_current_vllm_config()
+    model_config = vllm_config.model_config
+    hf_config = getattr(model_config, "hf_config", None)
+    hf_text_config = getattr(model_config, "hf_text_config", None)
+    text_config = getattr(hf_config, "text_config", None)
+    model_types = (
+        getattr(hf_config, "model_type", None),
+        getattr(hf_text_config, "model_type", None),
+        getattr(text_config, "model_type", None),
+    )
+    return any(model_type in {"gemma4", "gemma4_text"} for model_type in model_types)
 
 
 def ascend_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
@@ -174,6 +216,9 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     positions: torch.Tensor = None
     positions_cpu: torch.Tensor = None
 
+    # CPU tensor of slot mapping for host-side operations.
+    slot_mapping_cpu: torch.Tensor = None
+
     # Current attention state (e.g., ChunkedPrefill, DecodeOnly).
     attn_state: Any = None
 
@@ -209,6 +254,7 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             # This is really strange since vLLM slices them as well
             block_table_tensor=self.block_table_tensor,
             slot_mapping=self.slot_mapping,
+            slot_mapping_cpu=self.slot_mapping_cpu,
             causal=self.causal,
             actual_seq_lengths_q=self.actual_seq_lengths_q[:num_actual_tokens],
             positions=self.positions,
@@ -269,6 +315,8 @@ def filter_chunked_req_indices(
 def split_decodes_and_prefills(
     common_attn_metadata: AscendCommonAttentionMetadata,
     decode_threshold: int = 1,
+    require_uniform: bool = False,
+    treat_short_extends_as_decodes: bool = True,
 ) -> tuple[int, int, int, int]:
     """
     Assuming a reordered batch, finds the boundary between prefill and decode
@@ -276,10 +324,20 @@ def split_decodes_and_prefills(
     While pcp > 1, query_lens is split across pcp ranks, so we pass in the
     original query_lens and max_query_len to distinguish prefills and decodes.
 
+    The batch is expected to be ordered as:
+    decode -> short_extend -> long_extend -> prefill
+
     Args:
         common_attn_metadata: AscendCommonAttentionMetadata object containing the
             batch metadata.
         decode_threshold: The maximum query length to be considered a decode.
+        require_uniform: If True, requires that all decode requests have the
+            same query length. When set, some queries may be considered
+            prefills even if they are <= decode_threshold, in order to ensure
+            uniformity.
+        treat_short_extends_as_decodes: If True (default), short extends
+            (query_len <= threshold but still prefilling) are counted as
+            decodes. If False, they are counted as prefills.
 
     Returns:
         num_decodes: The number of decode requests.
@@ -292,14 +350,48 @@ def split_decodes_and_prefills(
     max_query_len_pcp_full = long_seq_metadata.max_query_len_pcp_full if long_seq_metadata else 0
     max_query_len = common_attn_metadata.max_query_len if max_query_len_pcp_full == 0 else max_query_len_pcp_full
     num_reqs = common_attn_metadata.num_reqs
+    if num_reqs == 0:
+        return 0, 0, 0, 0
+
     num_tokens = common_attn_metadata.num_actual_tokens
     query_start_loc = common_attn_metadata.query_start_loc_cpu
 
-    if max_query_len <= decode_threshold:
+    # PD D + RecomputeScheduler: num_computed may be N-1 after KV recv while
+    # this step is MTP decode (max_query_len <= threshold).
+    if is_pd_decode_recompute_scheduler_enabled():
+        treat_short_extends_as_decodes = True
+
+    if (
+        max_query_len <= decode_threshold
+        and (not require_uniform or decode_threshold <= 1)
+        and treat_short_extends_as_decodes
+    ):
         return num_reqs, 0, num_tokens, 0
 
-    query_lens = (query_start_loc[1:] - query_start_loc[:-1]) if query_lens_pcp_full is None else query_lens_pcp_full
-    is_prefill = query_lens > decode_threshold
+    query_lens_sharded = query_start_loc[1:] - query_start_loc[:-1]
+    query_lens = query_lens_sharded if query_lens_pcp_full is None else query_lens_pcp_full
+    if query_lens[0].item() > decode_threshold:
+        return 0, num_reqs, 0, num_tokens
+
+    if require_uniform:
+        if torch.all((query_lens == query_lens[0]) | (query_lens == 0)):
+            return num_reqs, 0, num_tokens, 0
+        is_prefill = query_lens != query_lens[0]
+    else:
+        is_prefill = query_lens > decode_threshold
+
+    if not treat_short_extends_as_decodes:
+        assert common_attn_metadata.is_prefilling is not None
+        raw_is_prefilling = common_attn_metadata.is_prefilling
+        is_prefilling = raw_is_prefilling[: query_lens.shape[0]]
+        if is_prefilling.shape[0] < query_lens.shape[0]:
+            is_prefilling = F.pad(
+                is_prefilling,
+                (0, query_lens.shape[0] - is_prefilling.shape[0]),
+                value=False,
+            )
+        is_prefill |= is_prefilling
+
     if not torch.any(is_prefill):
         return num_reqs, 0, num_tokens, 0
 

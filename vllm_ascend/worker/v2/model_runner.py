@@ -16,6 +16,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+
 from contextlib import contextmanager
 
 import numpy as np
@@ -122,6 +123,7 @@ class NPUModelRunner(GPUModelRunner):
         # is necessary for weight_prfetching function, and MoE communication optimization.
         set_weight_prefetch_method(self.ascend_config.weight_prefetch_config)
         # TODO: remove set_cos_and_sin (together with update_cos_sin) when mla can properly handle cos/sin internally
+        self.decode_query_len = self.num_speculative_steps + 1
         set_cos_and_sin(vllm_config, self.max_num_reqs, self.decode_query_len, self.dtype, self.device)
         set_mc2_tokens_capacity(vllm_config, self.max_num_reqs, self.decode_query_len)
         set_mc2_mask(vllm_config, self.device)
@@ -263,9 +265,9 @@ class NPUModelRunner(GPUModelRunner):
 
         query_start_loc_np = query_start_loc_np[: num_reqs_padded + 1]
         query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
-        is_prefilling_np = (
-            self.req_states.num_computed_prefill_tokens[idx_mapping_np] < self.req_states.prefill_len.np[idx_mapping_np]
-        )
+        prefill_len_np = self.req_states.prefill_len.np[idx_mapping_np]
+        num_computed_prefill_tokens_np = self.req_states.num_computed_prefill_tokens[idx_mapping_np]
+        is_prefilling_np = num_computed_prefill_tokens_np < prefill_len_np
 
         # Get prefill tokens if any.
         if np.any(is_prefilling_np):
@@ -318,6 +320,11 @@ class NPUModelRunner(GPUModelRunner):
             out=seq_lens_cpu_upper_bound_np[:num_reqs],
         )
         seq_lens_cpu_upper_bound = torch.from_numpy(seq_lens_cpu_upper_bound_np)
+        num_computed_tokens_np = self.req_states.num_computed_tokens_np[idx_mapping_np]
+        max_seq_len_np = None
+        if getattr(self, "use_pp", False):
+            # max_seq_len is only consumed by the PP `compute_need_sampled_mask`.
+            max_seq_len_np = self.req_states.max_seq_len[idx_mapping_np]
 
         self.input_batch = AscendInputBatch(
             req_ids=req_ids,
@@ -338,6 +345,10 @@ class NPUModelRunner(GPUModelRunner):
             seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             dcp_local_seq_lens=None,  # TODO(Ronald1995): support cp.
             is_prefilling_np=is_prefilling_np,
+            num_computed_tokens_np=num_computed_tokens_np,
+            prefill_len_np=prefill_len_np,
+            num_computed_prefill_tokens_np=num_computed_prefill_tokens_np,
+            max_seq_len_np=max_seq_len_np,
             input_ids=input_ids,
             positions=positions,
             logits_indices=logits_indices,
@@ -372,6 +383,28 @@ class NPUModelRunner(GPUModelRunner):
             num_rejected,
         )
 
+        self._copy_num_computed_tokens_to_cpu()
+
+    def postprocess_sampled(
+        self,
+        idx_mapping,
+        sampled_tokens,
+        num_sampled,
+        num_rejected,
+        query_start_loc=None,
+    ):
+        """Override GPUModelRunner.postprocess_sampled for Ascend NPUs."""
+        super().postprocess_sampled(
+            idx_mapping,
+            sampled_tokens,
+            num_sampled,
+            num_rejected,
+            query_start_loc,
+        )
+
+        self._copy_num_computed_tokens_to_cpu()
+
+    def _copy_num_computed_tokens_to_cpu(self):
         # npu attention backend still need to use seq_lens_cpu,
         # we need to copy num_computed_tokens back to cpu.
         default_stream = torch.cuda.current_stream()
@@ -454,8 +487,21 @@ def graph_manager_wrapper(model_runner):
     """Context manager to override graph manager."""
     original_graph_manager = vllm_model_runner.ModelCudaGraphManager
 
-    def factory(vllm_config: VllmConfig, device: torch.device, cudagraph_mode: CUDAGraphMode, decode_query_len: int):
-        return ModelAclGraphManager(vllm_config, device, cudagraph_mode, decode_query_len, model_runner)
+    def factory(
+        vllm_config: VllmConfig,
+        device: torch.device,
+        cudagraph_mode: CUDAGraphMode,
+        decode_query_len: int,
+        lora_capture_cases: list[int] | None = None,
+    ):
+        return ModelAclGraphManager(
+            vllm_config,
+            device,
+            cudagraph_mode,
+            decode_query_len,
+            model_runner,
+            lora_capture_cases=lora_capture_cases,
+        )
 
     try:
         vllm_model_runner.ModelCudaGraphManager = factory

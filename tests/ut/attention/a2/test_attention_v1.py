@@ -1,7 +1,9 @@
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
 
+import vllm_ascend.attention.attention_v1 as attn_module
 from tests.ut.base import TestBase
 from vllm_ascend.attention.attention_v1 import (
     AscendAttentionBackend,
@@ -10,7 +12,31 @@ from vllm_ascend.attention.attention_v1 import (
     AscendAttentionState,
 )
 from vllm_ascend.attention.kvcomp_attn.attention_utils import get_kvcomp_decode_params, reshape_and_cache_kvcomp
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.attention.utils import (
+    AscendCommonAttentionMetadata,
+    cache_graph_workspace,
+    needs_layer_aware_fia_graph_replay,
+)
+
+
+class TestAttentionGraphHelpers(TestBase):
+    def test_cache_graph_workspace_keeps_first_workspace_by_default(self):
+        graph_params = SimpleNamespace(workspaces={1: torch.empty(4)})
+        candidate_workspace = torch.empty(8)
+
+        result = cache_graph_workspace(graph_params, 1, candidate_workspace, use_max_workspace=False)
+
+        self.assertEqual(result.numel(), 4)
+        self.assertEqual(graph_params.workspaces[1].numel(), 4)
+
+    def test_cache_graph_workspace_updates_to_larger_workspace(self):
+        graph_params = SimpleNamespace(workspaces={1: torch.empty(4)})
+        candidate_workspace = torch.empty(8)
+
+        result = cache_graph_workspace(graph_params, 1, candidate_workspace, use_max_workspace=True)
+
+        self.assertEqual(result.numel(), 8)
+        self.assertEqual(graph_params.workspaces[1].numel(), 8)
 
 
 class TestAscendAttentionBackend(TestBase):
@@ -82,6 +108,32 @@ class TestAscendAttentionMetadataBuilder(TestBase):
 
         self.assertFalse(result)
 
+    def test_unpadded_preserves_internal_seq_lens_cpu(self):
+        internal_seq_lens_cpu = torch.tensor([4, 5, 6], dtype=torch.int32)
+        common_attn_metadata = AscendCommonAttentionMetadata(
+            query_start_loc=torch.tensor([0, 2, 5, 9]),
+            query_start_loc_cpu=torch.tensor([0, 2, 5, 9]),
+            seq_lens=torch.tensor([4, 5, 6], dtype=torch.int32),
+            _seq_lens_cpu=internal_seq_lens_cpu,
+            seq_lens_cpu=None,
+            num_computed_tokens_cpu=None,
+            num_reqs=3,
+            num_actual_tokens=9,
+            max_query_len=4,
+            block_table_tensor=torch.zeros((3, 1), dtype=torch.int32),
+            slot_mapping=torch.arange(9, dtype=torch.int32),
+            causal=True,
+            actual_seq_lengths_q=[2, 3, 4],
+            positions=torch.arange(9),
+            attn_state=AscendAttentionState.ChunkedPrefill,
+            max_seq_len=6,
+        )
+
+        unpadded_metadata = common_attn_metadata.unpadded(num_actual_tokens=5, num_actual_reqs=2)
+
+        self.assertTrue(torch.equal(unpadded_metadata._seq_lens_cpu, internal_seq_lens_cpu[:2]))
+        self.assertIsNone(unpadded_metadata.seq_lens_cpu)
+
     @patch("vllm_ascend.attention.attention_v1.AscendMetadata")
     def test_build(self, mock_ascend_metadata):
         common_attn_metadata = AscendCommonAttentionMetadata(
@@ -136,7 +188,15 @@ class TestAscendAttentionBackendImpl(TestBase):
         self.config_patcher = patch(
             "vllm_ascend.attention.attention_v1.get_current_vllm_config", return_value=self.mock_vllm_config
         )
+        self.utils_config_patcher = patch(
+            "vllm_ascend.attention.utils.get_current_vllm_config", return_value=self.mock_vllm_config
+        )
         self.config_patcher.start()
+        self.utils_config_patcher.start()
+        needs_layer_aware_fia_graph_replay.cache_clear()
+        self.addCleanup(needs_layer_aware_fia_graph_replay.cache_clear)
+        self.addCleanup(self.utils_config_patcher.stop)
+        self.addCleanup(self.config_patcher.stop)
 
         self.impl = AscendAttentionBackendImpl(
             num_heads=8,
@@ -546,3 +606,54 @@ class TestAscendAttentionBackendImpl(TestBase):
         # Verify the result is recorded in hamming_output_records
         self.assertTrue(torch.equal(kvcomp_metadata.hamming_output, torch.ones(2, 5)))
         self.assertIsNotNone(kvcomp_metadata.seq_lens_for_hamming)
+
+    @patch("torch.npu.stream")
+    @patch("torch.npu.graph_task_update_begin")
+    @patch("torch.npu.graph_task_update_end")
+    @patch("torch_npu.npu_fused_infer_attention_score")
+    @patch("vllm_ascend.attention.attention_v1.get_graph_params")
+    @patch("vllm_ascend.attention.attention_v1._EXTRA_CTX")
+    @patch("vllm_ascend.attention.attention_v1.using_paged_attention", return_value=False)
+    @patch("vllm_ascend.attention.attention_v1.needs_layer_aware_fia_graph_replay", return_value=False)
+    @patch("vllm_ascend.attention.attention_v1._ATTN_KEYS_BUFFER", new=[])
+    def test_update_graph_params(
+        self,
+        mock_needs_layer_aware_fia_graph_replay,
+        mock_using_paged_attention,
+        mock_EXTRA_CTX,
+        mock_get_graph_params,
+        mock_fia,
+        mock_graph_task_update_end,
+        mock_graph_task_update_begin,
+        mock_stream,
+    ):
+        """Test behavior when _ATTN_KEYS_BUFFER is [] after dummy_run."""
+
+        mock_EXTRA_CTX.sinks = False
+        mock_EXTRA_CTX.is_draft_model = False
+
+        param: list[MagicMock | None] = [MagicMock()] * 21
+        param[16] = None
+        param[20] = None
+
+        mock_get_graph_params.return_value.attn_params = {1: [tuple(param)] * 3}
+        mock_get_graph_params.return_value.handles = {1: [MagicMock()] * 3}
+        mock_get_graph_params.return_value.events = {1: [MagicMock()] * 3}
+
+        attn_metadata_keys = [
+            "model.layers.10.self_attn.attn",
+            "model.layers.2.self_attn.attn",
+            "model.layers.5.self_attn.attn",
+        ]
+        forward_context = MagicMock()
+        forward_context.attn_metadata = {key: MagicMock() for key in attn_metadata_keys}
+        # breakpoint()
+        self.impl.update_graph_params(self.mock_stream, forward_context, 1, self.mock_vllm_config)
+
+        expected = [
+            "model.layers.2.self_attn.attn",
+            "model.layers.5.self_attn.attn",
+            "model.layers.10.self_attn.attn",
+        ]
+        self.assertEqual(attn_module._ATTN_KEYS_BUFFER, expected)
+        self.assertEqual(mock_fia.out.call_count, 3)

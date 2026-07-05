@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-21 02:03+0000\n"
+"POT-Creation-Date: 2026-07-02 07:02+0000\n"
 "PO-Revision-Date: 2026-04-10 18:37+0800\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -20,12 +20,13 @@ msgstr ""
 "Generated-By: Babel 2.18.0\n"
 
 #: ../../source/tutorials/models/Qwen3-Next.md:1
+#: ../../source/tutorials/models/Qwen3-Next.md:116
 msgid "Qwen3-Next"
 msgstr "Qwen3-Next"
 
 #: ../../source/tutorials/models/Qwen3-Next.md:3
-msgid "Introduction"
-msgstr "简介"
+msgid "1 Introduction"
+msgstr "1.简介"
 
 #: ../../source/tutorials/models/Qwen3-Next.md:5
 msgid ""
@@ -52,55 +53,68 @@ msgstr ""
 "Ascend，该组件处于实验阶段。在后续版本中，其与稳定性和精度相关的性能可能会发生变化，性能将持续得到优化。"
 
 #: ../../source/tutorials/models/Qwen3-Next.md:9
-msgid "The `Qwen3-Next` model is first supported in `vllm-ascend:v0.10.2rc1`."
-msgstr "`Qwen3-Next` 模型从 `vllm-ascend:v0.10.2rc1` 版本开始首次支持。"
+msgid ""
+"The `Qwen3-Next` model is first supported in `vllm-ascend:v0.10.2rc1` and"
+" can stably run in v0.16.0 and later version."
+msgstr "`Qwen3-Next` 模型从 `vllm-ascend:v0.10.2rc1` 版本开始首次支持，并在 v0.16.0 及更高版本中稳定运行。"
 
 #: ../../source/tutorials/models/Qwen3-Next.md:11
-msgid "Supported Features"
-msgstr "支持的特性"
+msgid "2 Supported Features"
+msgstr "2.支持的特性"
 
 #: ../../source/tutorials/models/Qwen3-Next.md:13
 msgid ""
-"Refer to [supported "
-"features](../../user_guide/support_matrix/supported_models.md) to get the"
-" model's supported feature matrix."
-msgstr "请参阅[支持的特性矩阵](../../user_guide/support_matrix/supported_models.md)获取模型支持的特性列表。"
+"Refer to [Supported Features "
+"List](../../user_guide/support_matrix/supported_models.md) to get the "
+"model's supported feature matrix."
+msgstr "请参阅[支持的特性列表](../../user_guide/support_matrix/supported_models.md)获取模型支持的特性矩阵。"
 
 #: ../../source/tutorials/models/Qwen3-Next.md:15
 msgid ""
-"Refer to [feature guide](../../user_guide/feature_guide/index.md) to get "
+"Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get "
 "the feature's configuration."
 msgstr "请参阅[特性指南](../../user_guide/feature_guide/index.md)获取特性的配置方法。"
 
 #: ../../source/tutorials/models/Qwen3-Next.md:17
-msgid "Weight Preparation"
-msgstr "权重准备"
+msgid "3 Prerequisites"
+msgstr "3.前提条件"
 
 #: ../../source/tutorials/models/Qwen3-Next.md:19
-msgid ""
-"Download Link for the `Qwen3-Next-80B-A3B-Instruct` Model Weights: "
-"[Download model weight](https://modelscope.cn/models/Qwen/Qwen3-Next-80B-"
-"A3B-Instruct)"
-msgstr ""
-"`Qwen3-Next-80B-A3B-Instruct` "
-"模型权重的下载链接：[下载模型权重](https://modelscope.cn/models/Qwen/Qwen3-Next-80B-A3B-"
-"Instruct)"
+msgid "3.1 Model Weight"
+msgstr "3.1 模型权重"
 
 #: ../../source/tutorials/models/Qwen3-Next.md:21
-msgid "Deployment"
-msgstr "部署"
+msgid ""
+"`Qwen3-Next-80B-A3B-Instruct`: requires **8 cards in 1 Atlas 800 A3 (64G "
+"× 16) node** or **8 cards in 1 Atlas 800 A2 (64G × 8) node**. [Model "
+"Weight](https://modelscope.cn/models/Qwen/Qwen3-Next-80B-A3B-Instruct)"
+msgstr ""
+"`Qwen3-Next-80B-A3B-Instruct`：需要 **1 个 Atlas 800 A3（64G × 16）节点上的 8 张卡**或 **1 个 Atlas 800 A2（64G × 8）节点上的 8 张卡**。[模型权重](https://modelscope.cn/models/Qwen/Qwen3-Next-80B-A3B-Instruct)"
 
 #: ../../source/tutorials/models/Qwen3-Next.md:23
-msgid ""
-"If the machine environment is an Atlas 800I A3(64G*16), the deployment "
-"approach stays identical."
-msgstr "如果机器环境为 Atlas 800I A3（64G*16），部署方法保持不变。"
+msgid "4 Installation"
+msgstr "4.安装"
 
 #: ../../source/tutorials/models/Qwen3-Next.md:25
-msgid "Run docker container"
-msgstr "运行 Docker 容器"
+msgid "4.1 Docker Image Installation"
+msgstr "4.1 Docker 镜像安装"
 
-#: ../../source/tutorials/models/Qwen3-Next.md:54
+#: ../../source/tutorials/models/Qwen3-Next.md:27
+msgid ""
+"Select an image based on your machine type and start the docker image on "
+"your node, refer to [using docker](../../installation.md#set-up-using-"
+"docker)."
+msgstr "根据您的机器类型选择镜像，并在节点上启动 Docker 镜像，请参考[使用 Docker](../../installation.md#set-up-using-docker)。"
+
+#: ../../source/tutorials/models/Qwen3-Next.md:29
+msgid "**A3 series:**"
+msgstr "**A3 系列：**"
+
+#: ../../source/tutorials/models/Qwen3-Next.md:31
+msgid "Start the docker image on your each node."
+msgstr "在每个节点上启动 Docker 镜像。"
+
+#: ../../source/tutorials/models/Qwen3-Next.md:72
 msgid ""
 "The Qwen3 Next is using [Triton Ascend](https://gitee.com/ascend/triton-"
 "ascend) which is currently experimental. In future versions, there may be"
@@ -110,183 +124,237 @@ msgstr ""
 "Qwen3 Next 使用 [Triton Ascend](https://gitee.com/ascend/triton-"
 "ascend)，该组件目前处于实验阶段。在未来的版本中，可能会发生与稳定性、精度和性能提升相关的行为变化。"
 
-#: ../../source/tutorials/models/Qwen3-Next.md:56
-msgid "Inference"
-msgstr "推理"
+#: ../../source/tutorials/models/Qwen3-Next.md:74
+#: ../../source/tutorials/models/Qwen3-Next.md:108
+msgid "**Installation Verification:**"
+msgstr "**安装验证：**"
 
-#: ../../source/tutorials/models/Qwen3-Next.md
-msgid "Online Inference"
-msgstr "在线推理"
+#: ../../source/tutorials/models/Qwen3-Next.md:80
+#: ../../source/tutorials/models/Qwen3-Next.md:114
+msgid ""
+"Expected result: The version information for both packages is displayed, "
+"confirming a successful installation."
+msgstr "预期结果：显示两个包的版本信息，确认安装成功。"
 
-#: ../../source/tutorials/models/Qwen3-Next.md:62
-msgid "Run the following script to start the vLLM server on multi-NPU:"
-msgstr "运行以下脚本在多 NPU 上启动 vLLM 服务器："
+#: ../../source/tutorials/models/Qwen3-Next.md:83
+#: ../../source/tutorials/models/Qwen3-Next.md:117
+msgid ""
+"If deploying a multi-node environment, set up the environment on each "
+"node."
+msgstr "如果部署多节点环境，请在每个节点上设置环境。"
 
-#: ../../source/tutorials/models/Qwen3-Next.md:68
-msgid "Once your server is started, you can query the model with input prompts."
+#: ../../source/tutorials/models/Qwen3-Next.md:86
+#: ../../source/tutorials/models/Qwen3-Next.md:120
+msgid ""
+"For more details, please refer to the [Installation "
+"Guide](../../installation.md)."
+msgstr "更多详细信息，请参考[安装指南](../../installation.md)。"
+
+#: ../../source/tutorials/models/Qwen3-Next.md:88
+msgid "4.2 Source Code Installation"
+msgstr "4.2 源码安装"
+
+#: ../../source/tutorials/models/Qwen3-Next.md:90
+msgid ""
+"If you prefer not to use the Docker image, you can build from source. "
+"Install vLLM from source first:"
+msgstr "如果您不想使用 Docker 镜像，可以从源码构建。首先从源码安装 vLLM："
+
+#: ../../source/tutorials/models/Qwen3-Next.md:92
+msgid "Clone and install vLLM:"
+msgstr "克隆并安装 vLLM："
+
+#: ../../source/tutorials/models/Qwen3-Next.md:100
+msgid "Clone and install the vLLM-Ascend repository:"
+msgstr "克隆并安装 vLLM-Ascend 仓库："
+
+#: ../../source/tutorials/models/Qwen3-Next.md:122
+msgid "5 Online Service Deployment"
+msgstr "5.在线服务部署"
+
+#: ../../source/tutorials/models/Qwen3-Next.md:124
+msgid "5.1 Single-Node Online Deployment"
+msgstr "5.1 单节点在线部署"
+
+#: ../../source/tutorials/models/Qwen3-Next.md:126
+msgid ""
+"Single-node deployment completes both Prefill and Decode within the same "
+"node. The model `Qwen3-Next-80B-A3B-Instruct` can be deployed on 1 Atlas "
+"800 A3 (64G × 16)."
+msgstr "单节点部署在同一节点内完成 Prefill 和 Decode。模型 `Qwen3-Next-80B-A3B-Instruct` 可以部署在 1 个 Atlas 800 A3（64G × 16）上。"
+
+#: ../../source/tutorials/models/Qwen3-Next.md:128
+msgid ""
+"While a single-node setup supports all input/output scenarios, consider "
+"deploying multinodes for optimal performance."
+msgstr "虽然单节点设置支持所有输入/输出场景，但考虑部署多节点以获得最佳性能。"
+
+#: ../../source/tutorials/models/Qwen3-Next.md:130
+msgid "Startup Command:"
+msgstr "启动命令："
+
+#: ../../source/tutorials/models/Qwen3-Next.md:136
+msgid "If your service start successfully, you can see the info shown below:"
+msgstr "如果服务启动成功，您将看到如下所示的信息："
+
+#: ../../source/tutorials/models/Qwen3-Next.md:144
+msgid "6 Functional Verification"
+msgstr "6.功能验证"
+
+#: ../../source/tutorials/models/Qwen3-Next.md:146
+msgid "Once your server is started, you can query the model with input prompts:"
 msgstr "服务器启动后，您可以使用输入提示词查询模型。"
 
-#: ../../source/tutorials/models/Qwen3-Next.md
-msgid "Offline Inference"
-msgstr "离线推理"
+#: ../../source/tutorials/models/Qwen3-Next.md:161
+msgid "Expected Result:"
+msgstr "预期结果："
 
-#: ../../source/tutorials/models/Qwen3-Next.md:87
-msgid "Run the following script to execute offline inference on multi-NPU:"
-msgstr "运行以下脚本在多 NPU 上执行离线推理："
+#: ../../source/tutorials/models/Qwen3-Next.md:163
+msgid ""
+"The service returns HTTP 200 OK with a JSON response containing the "
+"`choices` field. Example output (content truncated for brevity):"
+msgstr "服务返回 HTTP 200 OK，JSON 响应中包含 `choices` 字段。示例输出（内容已截断）："
 
-#: ../../source/tutorials/models/Qwen3-Next.md:125
-msgid "If you run this script successfully, you can see the info shown below:"
-msgstr "如果成功运行此脚本，将看到如下所示的信息："
+#: ../../source/tutorials/models/Qwen3-Next.md:192
+msgid "7 Accuracy Evaluation"
+msgstr "7.精度评估"
 
-#: ../../source/tutorials/models/Qwen3-Next.md:133
-msgid "Accuracy Evaluation"
-msgstr "精度评估"
-
-#: ../../source/tutorials/models/Qwen3-Next.md:135
-#: ../../source/tutorials/models/Qwen3-Next.md:147
+#: ../../source/tutorials/models/Qwen3-Next.md:194
+#: ../../source/tutorials/models/Qwen3-Next.md:206
 msgid "Using AISBench"
 msgstr "使用 AISBench"
 
-#: ../../source/tutorials/models/Qwen3-Next.md:137
+#: ../../source/tutorials/models/Qwen3-Next.md:196
 msgid ""
 "Refer to [Using "
 "AISBench](../../developer_guide/evaluation/using_ais_bench.md) for "
 "details."
-msgstr ""
-"详细信息请参考[使用 AISBench "
-"进行精度评估](../../developer_guide/evaluation/using_ais_bench.md)。"
+msgstr "详细信息请参考[使用 AISBench 进行精度评估](../../developer_guide/evaluation/using_ais_bench.md)。"
 
-#: ../../source/tutorials/models/Qwen3-Next.md:139
+#: ../../source/tutorials/models/Qwen3-Next.md:198
 msgid ""
 "After execution, you can get the result, here is the result of `Qwen3"
 "-Next-80B-A3B-Instruct` in `vllm-ascend:0.13.0rc1` for reference only."
-msgstr ""
-"执行后即可获得结果，以下是 `Qwen3-Next-80B-A3B-Instruct` 在 `vllm-ascend:0.13.0rc1` "
-"上的结果，仅供参考。"
+msgstr "执行后即可获得结果，以下是 `Qwen3-Next-80B-A3B-Instruct` 在 `vllm-ascend:0.13.0rc1` 上的结果，仅供参考。"
 
-#: ../../source/tutorials/models/Qwen3-Next.md:85
+#: ../../source/tutorials/models/Qwen3-Next.md:116
 msgid "dataset"
 msgstr "数据集"
 
-#: ../../source/tutorials/models/Qwen3-Next.md:85
+#: ../../source/tutorials/models/Qwen3-Next.md:116
 msgid "version"
 msgstr "版本"
 
-#: ../../source/tutorials/models/Qwen3-Next.md:85
+#: ../../source/tutorials/models/Qwen3-Next.md:116
 msgid "metric"
 msgstr "指标"
 
-#: ../../source/tutorials/models/Qwen3-Next.md:85
+#: ../../source/tutorials/models/Qwen3-Next.md:116
 msgid "mode"
 msgstr "模式"
 
-#: ../../source/tutorials/models/Qwen3-Next.md:85
+#: ../../source/tutorials/models/Qwen3-Next.md:116
 msgid "vllm-api-general-chat"
 msgstr "vllm-api-general-chat"
 
-#: ../../source/tutorials/models/Qwen3-Next.md:85
+#: ../../source/tutorials/models/Qwen3-Next.md:116
 msgid "gsm8k"
 msgstr "gsm8k"
 
-#: ../../source/tutorials/models/Qwen3-Next.md:85
+#: ../../source/tutorials/models/Qwen3-Next.md:116
 msgid "-"
 msgstr "-"
 
-#: ../../source/tutorials/models/Qwen3-Next.md:85
+#: ../../source/tutorials/models/Qwen3-Next.md:116
 msgid "accuracy"
 msgstr "准确率"
 
-#: ../../source/tutorials/models/Qwen3-Next.md:85
+#: ../../source/tutorials/models/Qwen3-Next.md:116
 msgid "gen"
 msgstr "生成"
 
-#: ../../source/tutorials/models/Qwen3-Next.md:85
+#: ../../source/tutorials/models/Qwen3-Next.md:116
 msgid "95.53"
 msgstr "95.53"
 
-#: ../../source/tutorials/models/Qwen3-Next.md:145
-msgid "Performance"
-msgstr "性能"
+#: ../../source/tutorials/models/Qwen3-Next.md:204
+msgid "8 Performance Evaluation"
+msgstr "8.性能评估"
 
-#: ../../source/tutorials/models/Qwen3-Next.md:149
+#: ../../source/tutorials/models/Qwen3-Next.md:208
 msgid ""
 "Refer to [Using AISBench for performance "
 "evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-"
 "performance-evaluation) for details."
-msgstr ""
-"详细信息请参考[使用 AISBench "
-"进行性能评估](../../developer_guide/evaluation/using_ais_bench.md#execute-"
-"performance-evaluation)。"
+msgstr "详细信息请参考[使用 AISBench 进行性能评估](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation)。"
 
-#: ../../source/tutorials/models/Qwen3-Next.md:151
+#: ../../source/tutorials/models/Qwen3-Next.md:210
 msgid "Using vLLM Benchmark"
 msgstr "使用 vLLM 基准测试"
 
-#: ../../source/tutorials/models/Qwen3-Next.md:153
+#: ../../source/tutorials/models/Qwen3-Next.md:212
 msgid "Run performance evaluation of `Qwen3-Next` as an example."
 msgstr "以 `Qwen3-Next` 为例运行性能评估。"
 
-#: ../../source/tutorials/models/Qwen3-Next.md:155
+#: ../../source/tutorials/models/Qwen3-Next.md:214
 msgid ""
-"Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) "
+"Refer to [vLLM Benchmark](https://docs.vllm.ai/en/latest/benchmarking/) "
 "for more details."
 msgstr "更多详细信息请参考 [vLLM 基准测试](https://docs.vllm.ai/en/latest/benchmarking/)。"
 
-#: ../../source/tutorials/models/Qwen3-Next.md:157
+#: ../../source/tutorials/models/Qwen3-Next.md:216
 msgid "There are three `vllm bench` subcommands:"
 msgstr "有三个 `vllm bench` 子命令："
 
-#: ../../source/tutorials/models/Qwen3-Next.md:159
+#: ../../source/tutorials/models/Qwen3-Next.md:218
 msgid "`latency`: Benchmark the latency of a single batch of requests."
 msgstr "`latency`：基准测试单批次请求的延迟。"
 
-#: ../../source/tutorials/models/Qwen3-Next.md:160
+#: ../../source/tutorials/models/Qwen3-Next.md:219
 msgid "`serve`: Benchmark the online serving throughput."
 msgstr "`serve`：基准测试在线服务的吞吐量。"
 
-#: ../../source/tutorials/models/Qwen3-Next.md:161
+#: ../../source/tutorials/models/Qwen3-Next.md:220
 msgid "`throughput`: Benchmark offline inference throughput."
 msgstr "`throughput`：基准测试离线推理的吞吐量。"
 
-#: ../../source/tutorials/models/Qwen3-Next.md:163
+#: ../../source/tutorials/models/Qwen3-Next.md:222
 msgid "Take the `serve` as an example. Run the code as follows."
 msgstr "以 `serve` 为例，运行如下代码。"
 
-#: ../../source/tutorials/models/Qwen3-Next.md:170
+#: ../../source/tutorials/models/Qwen3-Next.md:229
 msgid ""
 "After about several minutes, you can get the performance evaluation "
 "result."
 msgstr "大约几分钟后，即可获得性能评估结果。"
 
-#: ../../source/tutorials/models/Qwen3-Next.md:172
+#: ../../source/tutorials/models/Qwen3-Next.md:231
 msgid "The performance result is:"
 msgstr "性能结果如下："
 
-#: ../../source/tutorials/models/Qwen3-Next.md:174
-msgid "**Hardware**: A3-752T, 2 node"
-msgstr "**硬件**：A3-752T，2 节点"
+#: ../../source/tutorials/models/Qwen3-Next.md:241
+msgid "9 Performance Tuning"
+msgstr "9.性能调优"
 
-#: ../../source/tutorials/models/Qwen3-Next.md:176
-msgid "**Deployment**: TP4 + Full Decode Only"
-msgstr "**部署**：TP4 + 纯解码模式"
+#: ../../source/tutorials/models/Qwen3-Next.md:243
+msgid "9.1 Recommended Configurations"
+msgstr "9.1 推荐配置"
 
-#: ../../source/tutorials/models/Qwen3-Next.md:178
-msgid "**Input/Output**: 2k/2k"
-msgstr "**输入/输出**：2k/2k"
+#: ../../source/tutorials/models/Qwen3-Next.md:245
+msgid "**Note**:"
+msgstr "**注意**："
 
-#: ../../source/tutorials/models/Qwen3-Next.md:180
-msgid "**Concurrency**: 32"
-msgstr "**并发数**：32"
+#: ../../source/tutorials/models/Qwen3-Next.md:247
+msgid ""
+"The following configurations are validated in specific test environments "
+"and are for reference only. The optimal configuration depends on factors "
+"such as maximum input/output length, prefix cache hit rate, precision "
+"requirements, and deployment machine ratios. It is recommended to refer "
+"to Section 9.2 for tuning based on actual conditions."
+msgstr ""
+"以下配置在特定测试环境中验证通过，仅供参考。最佳配置取决于最大输入/输出长度、前缀缓存命中率、精度要求以及部署机器配比等因素。建议根据实际条件参考第9.2节进行调优。"
 
-#: ../../source/tutorials/models/Qwen3-Next.md:182
-msgid "**Performance**: 580tps, TPOT 54ms"
-msgstr "**性能**：580 tps，TPOT 54 毫秒"
-
-#: ../../source/tutorials/models/Qwen3-Next.md:184
-msgid "FAQ"
-msgstr "常见问题"
-
-#: ../../source/tutorials/models/Qwen3-Next.md:186
+#: ../../source/tutorials/models/Qwen3-Next.md:249
 msgid ""
 "Qwen3-Next does not support TP>=16 now. Since this model has 16 query "
 "heads but only 2 key and value heads, GQA degenerates into MHA when TP >="
@@ -294,5 +362,182 @@ msgid ""
 "scenarios with a head dimension of 256 (which is the case for this "
 "model)."
 msgstr ""
-"Qwen3-Next 目前不支持 TP >= 16。由于该模型有 16 个查询头，但只有 2 个键值头，当 TP >= 16 时，GQA 会退化为 "
-"MHA。然而，FIA 算子目前无法在头维度为 256 的 MHA 场景下正常工作（该模型正是这种情况）。"
+"Qwen3-Next 目前不支持 TP >= 16。由于该模型有 16 个查询头，但只有 2 个键值头，当 TP >= 16 时，GQA 会退化为"
+" MHA。然而，FIA 算子目前无法在头维度为 256 的 MHA 场景下正常工作（该模型正是这种情况）。"
+
+#: ../../source/tutorials/models/Qwen3-Next.md:251
+msgid "Table 1: Scenario Overview"
+msgstr "表1：场景概览"
+
+#: ../../source/tutorials/models/Qwen3-Next.md:116
+msgid "Scenario"
+msgstr "场景"
+
+#: ../../source/tutorials/models/Qwen3-Next.md:116
+msgid "Deployment Mode"
+msgstr "部署模式"
+
+#: ../../source/tutorials/models/Qwen3-Next.md:116
+msgid "*Total NPUs"
+msgstr "*NPU总数"
+
+#: ../../source/tutorials/models/Qwen3-Next.md:116
+msgid "Weight Version"
+msgstr "权重版本"
+
+#: ../../source/tutorials/models/Qwen3-Next.md:116
+msgid "Key Considerations"
+msgstr "关键考量"
+
+#: ../../source/tutorials/models/Qwen3-Next.md:116
+msgid "High Throughput<br>(16K context)"
+msgstr "高吞吐量<br>(16K上下文)"
+
+#: ../../source/tutorials/models/Qwen3-Next.md:116
+msgid "Single-Node Mixed"
+msgstr "单节点混合"
+
+#: ../../source/tutorials/models/Qwen3-Next.md:116
+msgid "2 (A3)"
+msgstr "2 (A3)"
+
+#: ../../source/tutorials/models/Qwen3-Next.md:116
+msgid "Use tp2 for high-resolution text inputs"
+msgstr "对高分辨率文本输入使用tp2"
+
+#: ../../source/tutorials/models/Qwen3-Next.md:116
+msgid "Long Context<br>(128K, no prefix cache)"
+msgstr "长上下文<br>(128K，无前缀缓存)"
+
+#: ../../source/tutorials/models/Qwen3-Next.md:116
+msgid "tp2 for high-resolution text inputs"
+msgstr "对高分辨率文本输入使用tp2"
+
+#: ../../source/tutorials/models/Qwen3-Next.md:116
+msgid "Long Context<br>(128K, with prefix cache)"
+msgstr "长上下文<br>(128K，有前缀缓存)"
+
+#: ../../source/tutorials/models/Qwen3-Next.md:116
+msgid "Multimodal<br>(1080P)"
+msgstr "多模态<br>(1080P)"
+
+#: ../../source/tutorials/models/Qwen3-Next.md:116
+msgid "tp2 for high-resolution visual inputs"
+msgstr "对高分辨率视觉输入使用tp2"
+
+#: ../../source/tutorials/models/Qwen3-Next.md:260
+msgid ""
+"`*Total NPUs` indicates the total number of NPUs used across all nodes. 1"
+" node = 1 Atlas 800 A3 server (64G × 16 NPUs)."
+msgstr ""
+"`*NPU总数` 表示所有节点使用的NPU总数。1个节点 = 1台 Atlas 800 A3 服务器（64G × 16 NPU）。"
+
+#: ../../source/tutorials/models/Qwen3-Next.md:262
+msgid "Table 2: Detailed Node Configuration"
+msgstr "表2：详细节点配置"
+
+#: ../../source/tutorials/models/Qwen3-Next.md:116
+msgid "Configuration"
+msgstr "配置"
+
+#: ../../source/tutorials/models/Qwen3-Next.md:116
+msgid "NPUs"
+msgstr "NPU数量"
+
+#: ../../source/tutorials/models/Qwen3-Next.md:116
+msgid "TP"
+msgstr "TP"
+
+#: ../../source/tutorials/models/Qwen3-Next.md:116
+msgid "DP"
+msgstr "DP"
+
+#: ../../source/tutorials/models/Qwen3-Next.md:116
+msgid "Max Model Len"
+msgstr "最大模型长度"
+
+#: ../../source/tutorials/models/Qwen3-Next.md:116
+msgid "MTP Speculation Num"
+msgstr "MTP推测数量"
+
+#: ../../source/tutorials/models/Qwen3-Next.md:116
+msgid "High Throughput / Low Latency (16K)"
+msgstr "高吞吐量/低延迟 (16K)"
+
+#: ../../source/tutorials/models/Qwen3-Next.md:116
+msgid "Server / Single Machine"
+msgstr "服务器/单机"
+
+#: ../../source/tutorials/models/Qwen3-Next.md:116
+msgid "2"
+msgstr "2"
+
+#: ../../source/tutorials/models/Qwen3-Next.md:116
+msgid "1"
+msgstr "1"
+
+#: ../../source/tutorials/models/Qwen3-Next.md:116
+msgid "~16K"
+msgstr "~16K"
+
+#: ../../source/tutorials/models/Qwen3-Next.md:116
+msgid "3"
+msgstr "3"
+
+#: ../../source/tutorials/models/Qwen3-Next.md:116
+msgid "Long Context (128K, no cache)"
+msgstr "长上下文 (128K，无缓存)"
+
+#: ../../source/tutorials/models/Qwen3-Next.md:116
+msgid "128K"
+msgstr "128K"
+
+#: ../../source/tutorials/models/Qwen3-Next.md:116
+msgid "Long Context (128K, with cache)"
+msgstr "长上下文 (128K，有缓存)"
+
+#: ../../source/tutorials/models/Qwen3-Next.md:116
+msgid "Multimodal (1080P)"
+msgstr "多模态 (1080P)"
+
+#: ../../source/tutorials/models/Qwen3-Next.md:271
+msgid ""
+"For complete startup commands and parameter descriptions, please refer to"
+" the deployment examples in [Chapter 5](#5-online-service-deployment)."
+msgstr ""
+"完整的启动命令和参数说明，请参考[第5章](#5-online-service-deployment)中的部署示例。"
+
+#: ../../source/tutorials/models/Qwen3-Next.md:273
+msgid "9.2 Tuning Guidelines"
+msgstr "9.2 调优指南"
+
+#: ../../source/tutorials/models/Qwen3-Next.md:275
+msgid "9.2.1 General Tuning Reference"
+msgstr "9.2.1 通用调优参考"
+
+#: ../../source/tutorials/models/Qwen3-Next.md:277
+msgid ""
+"Please refer to the [Public Performance Tuning "
+"Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md)"
+" for tuning methods."
+msgstr ""
+"调优方法请参考[公共性能调优文档](../../developer_guide/performance_and_debug/optimization_and_tuning.md)。"
+
+#: ../../source/tutorials/models/Qwen3-Next.md:279
+msgid ""
+"Please refer to the [Feature "
+"Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed "
+"feature descriptions."
+msgstr "详细特性描述请参考[特性指南](../../user_guide/support_matrix/feature_matrix.md)。"
+
+#: ../../source/tutorials/models/Qwen3-Next.md:281
+msgid "10 FAQ"
+msgstr "10 常见问题"
+
+#: ../../source/tutorials/models/Qwen3-Next.md:283
+msgid ""
+"For common environment, installation, and general parameter issues, "
+"please refer to the [Public "
+"FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)."
+msgstr ""
+"常见环境、安装和通用参数问题，请参考[公共FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)。"

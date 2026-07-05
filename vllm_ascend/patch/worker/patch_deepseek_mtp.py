@@ -4,6 +4,8 @@ import vllm
 from transformers import DeepseekV2Config, DeepseekV3Config
 from vllm.config import VllmConfig
 from vllm.model_executor.models.deepseek_mtp import DeepSeekMTP, DeepSeekMultiTokenPredictorLayer
+from vllm.model_executor.models.deepseek_v2 import GlmMoeDsaForCausalLM
+from vllm.model_executor.models.utils import AutoWeightsLoader
 
 MTP_ROT_WEIGHT_NAME = "rot.weight"
 
@@ -49,8 +51,12 @@ class AscendDeepSeekMultiTokenPredictorLayer(DeepSeekMultiTokenPredictorLayer):
         hidden_states = self.eh_proj(torch.cat([inputs_embeds, previous_hidden_states], dim=-1))
 
         hidden_states, residual = self.mtp_block(positions=positions, hidden_states=hidden_states, residual=None)
-        hidden_states = residual + hidden_states
-        return hidden_states
+        hidden_states = residual + hidden_states  # pre-final-norm (logits hidden)
+        # Recycle the post-final-norm hidden into the next draft step.
+        # compute_logits applies shared_head (== final norm) to the pre-norm
+        # element, so logits and the recycle each get exactly one final-norm.
+        # Matches SGLang's deepseek_nextn.
+        return hidden_states, self.shared_head(hidden_states)
 
 
 class AscendDeepSeekMTP(DeepSeekMTP):
@@ -61,8 +67,14 @@ class AscendDeepSeekMTP(DeepSeekMTP):
             return f"model.layers.{spec_layer}.rot.weight"
 
 
+class AscendGlmMoeDsaForCausalLM(GlmMoeDsaForCausalLM):
+    def load_weights(self, weights):
+        loader = AutoWeightsLoader(self, skip_prefixes=[MTP_ROT_WEIGHT_NAME])
+        return loader.load_weights(weights)
+
+
 vllm.model_executor.models.deepseek_v2.get_spec_layer_idx_from_weight_name = get_spec_layer_idx_from_weight_name
 vllm.model_executor.models.deepseek_mtp.get_spec_layer_idx_from_weight_name = get_spec_layer_idx_from_weight_name
-
 vllm.model_executor.models.deepseek_mtp.DeepSeekMultiTokenPredictorLayer = AscendDeepSeekMultiTokenPredictorLayer
 vllm.model_executor.models.deepseek_mtp.DeepSeekMTP = AscendDeepSeekMTP
+vllm.model_executor.models.deepseek_v2.GlmMoeDsaForCausalLM = AscendGlmMoeDsaForCausalLM

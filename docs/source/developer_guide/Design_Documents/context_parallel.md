@@ -1,6 +1,6 @@
 # Context Parallel (CP)
 
-TL;DR PCP accelerates prefill via sequence splitting. DCP eliminates KV cache redundancy.
+TL;DR: PCP accelerates prefill via sequence splitting. DCP eliminates KV cache redundancy.
 
 ![ContextParallel](../../assets/cp/overview.png)
 
@@ -121,9 +121,31 @@ By predefining the maximum amount of KV cache processed per round, we sequential
 
 ![PCP-ChunkedPrefill](../../assets/cp/chunkedprefill.png)
 
+### SFA DSA-CP Mixed `o_proj` Path
+
+SFA DSA-CP mixed execution intentionally reuses the normal TP-sharded `o_proj`.
+This is part of the DSA-CP mixed data path, not a standalone user-facing `o_proj` TP switch.
+The mixed path is used when one instance may handle both decode-only and prefill/mixed batches, so `o_proj` must support two layouts at runtime:
+
+- **Decode-only batches** keep the decode TP path.
+  SFA outputs are exchanged with an all-to-all in the TP group, then the original TP-sharded `o_proj` runs normally.
+- **Prefill or mixed batches** produce SFA outputs that are not directly compatible with the TP-sharded `o_proj` input layout.
+  Before `o_proj` forward, each rank all-gathers the TP-sharded `o_proj` weight and all input-sharded quantization parameters into temporary full-weight buffers.
+  The full-weight `o_proj` forward runs once for that batch, and the module is then restored to the TP parameter aliases.
+
+The storage invariant is that the original TP-sharded `o_proj` parameter remains the only persistent source of truth.
+`o_proj_tp_*` tensors are aliases of the original parameter storage.
+`o_proj_full_*` tensors are reusable communication buffers for prefill/mixed full-gather execution only.
+They must not become a second persistent copy of the TP weight.
+
+This coupling preserves the existing decode TP behavior, supports prefill/mixed DSA-CP batches, and avoids adding an extra configuration path whose state can drift from DSA-CP mixed execution.
+
 ### Related Files
 
 - slot_mapping computation: `vllm_ascend/worker/block_table.py`
 - sequences splitting and metadata prepare: `vllm_ascend/worker/model_runner_v1.py`
-- GQA backend: `vllm_ascend/attention/attention_cp.py`
-- MLA backend: `vllm_ascend/attention/mla_cp.py`
+- PCP token splitting and metadata generation: `vllm_ascend/worker/pcp_utils.py`
+- GQA backend: `vllm_ascend/attention/context_parallel/attention_cp.py`
+- MLA backend: `vllm_ascend/attention/context_parallel/mla_cp.py`
+- DSA backend: `vllm_ascend/attention/context_parallel/dsa_cp.py`
+- SFA backend: `vllm_ascend/attention/context_parallel/sfa_cp.py`

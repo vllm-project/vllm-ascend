@@ -1,11 +1,11 @@
 -r requirements-lint.txt
 -r requirements.txt
-modelscope>=1.35.1
+modelscope==1.35.3
 openai
 pytest >= 6.0,<9.0.0
 pytest-asyncio
 pytest-mock
-lm-eval==0.4.11
+lm-eval==0.4.12
 types-jsonschema
 xgrammar
 zmq
@@ -21,5 +21,6 @@ scipy
 soundfile
 pytest_mock
 mindstudio-probe>=8.3.0
-xlite==0.1.0rc10.dev210
+xlite==0.1.0rc11.dev210
 uc-manager
+ninja

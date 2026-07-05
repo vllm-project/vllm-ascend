@@ -48,7 +48,9 @@ def chunk_gated_delta_rule_fwd(
         num_decodes = attn_metadata.num_decodes
     chunk_size = 64
     block_indices_cumsum = None if prebuilt_meta is None else prebuilt_meta.block_indices_cumsum
+    cu_seqlens_host = None if prebuilt_meta is None else prebuilt_meta.cu_seqlens_host
     chunk_indices_chunk64 = None if prebuilt_meta is None else prebuilt_meta.chunk_indices_chunk64
+    chunk_indices_chunk64_host = None if prebuilt_meta is None else prebuilt_meta.chunk_indices_chunk64_host
     chunk_offsets_chunk64 = None if prebuilt_meta is None else prebuilt_meta.chunk_offsets_chunk64
     update_chunk_offsets_chunk64 = None if prebuilt_meta is None else prebuilt_meta.update_chunk_offsets_chunk64
     final_chunk_indices_chunk64 = None if prebuilt_meta is None else prebuilt_meta.final_chunk_indices_chunk64
@@ -91,8 +93,12 @@ def chunk_gated_delta_rule_fwd(
     g_ascendc = g.transpose(1, 2).contiguous()
     q_ascendc = q.to(torch.bfloat16).transpose(1, 2).contiguous()
 
-    cu_seqlens = cu_seqlens.to(torch.int64)
+    cu_seqlens = None if cu_seqlens is None else cu_seqlens.to(torch.int64)
     chunk_indices = None if chunk_indices_chunk64 is None else chunk_indices_chunk64.to(torch.int64)
+    if cu_seqlens_host is None and cu_seqlens is not None:
+        cu_seqlens_host = tuple(cu_seqlens.tolist())
+    if chunk_indices_chunk64_host is None and chunk_indices is not None:
+        chunk_indices_chunk64_host = tuple(chunk_indices.flatten().tolist())
     h, v_new, final_state = torch.ops._C_ascend.chunk_gated_delta_rule_fwd_h(
         k_ascendc,
         w_ascendc,
@@ -103,13 +109,18 @@ def chunk_gated_delta_rule_fwd(
         output_final_state=True,
         chunk_size=64,
         save_new_value=True,
-        cu_seqlens=cu_seqlens.tolist() if cu_seqlens is not None else None,
-        chunk_indices=chunk_indices.flatten().tolist() if chunk_indices is not None else None,
+        cu_seqlens=cu_seqlens_host,
+        chunk_indices=chunk_indices_chunk64_host,
         use_exp2=False,
         transpose_state_layout=False,
     )
 
     if get_pcp_group().world_size > 1:
+        # When integrating mtp, since `mix_qkv` has been split, `num_decode`
+        # cannot be directly obtained from the metadata and needs to be recalculated.
+        actual_num_decodes = getattr(prebuilt_meta, "num_decodes", None)
+        if actual_num_decodes is None:
+            actual_num_decodes = num_decodes
         h_update = chunk_gated_delta_rule_fwd_hupdate(
             k=k,
             w=w,
@@ -119,7 +130,7 @@ def chunk_gated_delta_rule_fwd(
             chunk_indices=chunk_indices_chunk64,
             chunk_offsets=chunk_offsets_chunk64,
             update_chunk_offsets=update_chunk_offsets_chunk64,
-            num_decodes=num_decodes,
+            num_decodes=actual_num_decodes,
         )
         all_final_state = get_pcp_group().all_gather(final_state.unsqueeze(0), 0)
         final_chunk_indices = final_chunk_indices_chunk64
@@ -145,7 +156,12 @@ def chunk_gated_delta_rule_fwd(
 
         if get_pcp_group().rank_in_group > 0:
             rerun_initial_state = initial_state.clone()
-            prefill_slice = slice(num_decodes, final_state.shape[0])
+            if cu_seqlens is not None:
+                _ns_lens = cu_seqlens[1:] - cu_seqlens[:-1]
+                prefill_seq_offset = int(((_ns_lens > 0) & (_ns_lens <= 1)).sum().item())
+            else:
+                prefill_seq_offset = num_decodes
+            prefill_slice = slice(prefill_seq_offset, final_state.shape[0])
             rerun_initial_state[prefill_slice] = updated_h_state[prefill_slice]
             h, v_new, _ = chunk_gated_delta_rule_fwd_h(
                 k=k,
@@ -169,8 +185,8 @@ def chunk_gated_delta_rule_fwd(
         scale,
         g=g_ascendc,
         g_gamma=None,
-        cu_seqlens=cu_seqlens.tolist() if cu_seqlens is not None else None,
-        chunk_indices=chunk_indices.flatten().tolist() if chunk_indices is not None else None,
+        cu_seqlens=cu_seqlens_host,
+        chunk_indices=chunk_indices_chunk64_host,
         chunk_size=64,
         transpose_state_layout=False,
     )
@@ -309,14 +325,14 @@ def chunk_gated_delta_rule(
 
     if head_first:
         raise DeprecationWarning(
-            "head_first is deprecated and will be removed in a future version. "
+            "chunk_gated_delta_rule: head_first is deprecated and will be removed in a future version. "
             "Please use head_first=False for now instead.",
             stacklevel=2,
         )
         q, k, v, beta, g = map(lambda x: rearrange(x, "b h t ... -> b t h ..."), (q, k, v, beta, g))
     if not head_first and q.shape[1] < q.shape[2]:
         warnings.warn(
-            f"Input tensor shape suggests potential format mismatch: seq_len ({q.shape[1]}) < num_heads ({q.shape[2]}). "
+            f"chunk_gated_delta_rule: Input tensor shape suggests potential format mismatch: seq_len ({q.shape[1]}) < num_heads ({q.shape[2]}). "
             "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
             "when head_first=False was specified. "
             "Please verify your input tensor format matches the expected shape [B, T, H, ...].",
@@ -325,12 +341,12 @@ def chunk_gated_delta_rule(
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(
-                f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
+                f"chunk_gated_delta_rule: The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
                 f"Please flatten variable-length inputs before processing."
             )
         if initial_state is not None and initial_state.shape[0] != len(cu_seqlens) - 1:
             raise ValueError(
-                f"The number of initial states is expected to be equal to the number of input sequences, "
+                f"chunk_gated_delta_rule: The number of initial states is expected to be equal to the number of input sequences, "
                 f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}."
             )
     if scale is None:

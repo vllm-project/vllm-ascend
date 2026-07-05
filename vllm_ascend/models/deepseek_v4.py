@@ -43,7 +43,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
 )
-from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClamp
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -64,11 +64,16 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
     sequence_parallel_chunk,
 )
+from vllm.models.deepseek_v4.attention import DeepseekV4IndexerCache  # type: ignore[import-not-found,no-redef]
+from vllm.models.deepseek_v4.compressor import CompressorStateCache  # type: ignore[import-not-found,no-redef]
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
+from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache as VllmDeepseekV4SWACache
+from vllm.v1.kv_cache_interface import KVCacheSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec
 from vllm_ascend.ops.dsa import AscendDeepseekSparseAttention, DSAModules
 from vllm_ascend.ops.rope_dsv4 import ComplexExpRotaryEmbedding
 from vllm_ascend.ops.triton.mul_add import muls_add_triton
@@ -81,12 +86,128 @@ from vllm_ascend.utils import (
     vllm_version_is,
 )
 
-if vllm_version_is("0.21.0"):
-    from vllm.model_executor.layers.deepseek_compressor import CompressorStateCache  # type:ignore
-    from vllm.model_executor.layers.deepseek_v4_attention import DeepseekV4IndexerCache  # type:ignore
-else:
-    from vllm.models.deepseek_v4.attention import DeepseekV4IndexerCache
-    from vllm.models.deepseek_v4.compressor import CompressorStateCache
+if not vllm_version_is("0.23.0"):
+    from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_mapping
+
+
+def _get_ascend_dsa_backend():
+    # Keep this lazy to avoid vLLM model-inspection circular imports.
+    from vllm_ascend.attention.dsa_v1 import AscendDSABackend
+
+    return AscendDSABackend
+
+
+def _dsv4_block_sizes():
+    # Lazy import to avoid the circular import chain (layer -> dsa_v1 ->
+    # attention_v1 -> device_op) hit during vLLM subprocess model inspection.
+    from vllm_ascend.models.layer.attention.layer import DSV4_BLOCK_SIZES
+
+    return DSV4_BLOCK_SIZES
+
+
+class AscendCompressorStateCache(CompressorStateCache):
+    def __init__(
+        self,
+        state_dim: int,
+        dtype: torch.dtype,
+        compress_ratio: int,
+        block_size: int,
+        prefix: str,
+    ):
+        super().__init__(state_dim, dtype, compress_ratio, prefix)
+        self.compress_ratio = compress_ratio
+        self.block_size = block_size
+
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+        pads = _dsv4_block_sizes()[vllm_config.cache_config.block_size][1]
+        page_size_padded = pads[0] if self.state_dim == 2 * 256 and self.compress_ratio == 4 else pads[1]
+
+        return AscendSlidingWindowMLASpec(
+            block_size=self.block_size,
+            num_kv_heads=1,
+            head_size=self.state_dim,
+            dtype=self.dtype,
+            sliding_window=self.sliding_window,
+            alignment=None,
+            page_size_padded=page_size_padded,
+        )
+
+    def forward(self): ...
+
+    def get_attn_backend(self):
+        return _get_ascend_dsa_backend()
+
+
+class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
+    def __init__(
+        self,
+        head_dim: int,
+        dtype: torch.dtype,
+        prefix: str,
+        cache_config: CacheConfig,
+        compress_ratio: int = 1,
+    ):
+        super().__init__(head_dim, dtype, prefix, cache_config, compress_ratio)
+
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+        if get_ascend_device_type() in {AscendDeviceType.A5}:
+            self.dtype = torch.float8_e4m3fn
+            vllm_config.cache_config.cache_dtype = "float8_e4m3fn"
+
+        from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+
+        return AscendMLAAttentionSpec(
+            block_size=_dsv4_block_sizes()[vllm_config.cache_config.block_size][0][0],
+            num_kv_heads=1,
+            head_size=self.head_dim,
+            dtype=self.dtype,
+            model_version="deepseek_v4",
+            compress_ratio=self.compress_ratio,
+            cache_dtype_str=self.cache_config.cache_dtype,
+            scale_dim=1 if self.head_dim == 128 else 0,
+            scale_dtype=torch.float if get_ascend_device_type() in {AscendDeviceType.A5} else torch.float16,
+        )
+
+    def forward(self): ...
+
+    def get_attn_backend(self):
+        return _get_ascend_dsa_backend()
+
+
+class AscendDeepseekV4SWACache(VllmDeepseekV4SWACache):
+    def __init__(
+        self,
+        head_dim: int,
+        window_size: int,
+        dtype: torch.dtype,
+        prefix: str,
+        cache_config: CacheConfig,
+    ):
+        super().__init__(head_dim, window_size, torch.uint8, prefix, cache_config)
+        self.dtype = dtype
+
+        self.block_size = _dsv4_block_sizes()[cache_config.block_size][0][1]
+
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+        if get_ascend_device_type() in {AscendDeviceType.A5}:
+            self.dtype = torch.float8_e4m3fn
+            vllm_config.cache_config.cache_dtype = "float8_e4m3fn"
+        cached_head_size = self.head_dim + 128 if get_ascend_device_type() in {AscendDeviceType.A5} else self.head_dim
+        return AscendSlidingWindowMLASpec(
+            block_size=self.block_size,
+            num_kv_heads=1,
+            head_size=cached_head_size,
+            dtype=self.dtype,
+            sliding_window=self.window_size,
+            cache_dtype_str=self.cache_config.cache_dtype,
+            model_version="deepseek_v4",
+            alignment=None,
+        )
+
+    def forward(self): ...
+
+    def get_attn_backend(self):
+        return _get_ascend_dsa_backend()
 
 
 def hadamard_transform_ref(x: torch.Tensor, scale=1.0):
@@ -216,7 +337,10 @@ class DeepseekV2MLP(nn.Module):
         )
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. Only silu is supported for now.")
-        self.act_fn = SiluAndMul()
+        if swiglu_limit is not None:
+            self.act_fn = SiluAndMulWithClamp(swiglu_limit)
+        else:
+            self.act_fn = SiluAndMul()
 
     def forward(self, x):
         gate_up, _ = self.gate_up_proj(x)
@@ -445,7 +569,7 @@ class Indexer(nn.Module):
 
         if self.compress_ratio == 4:
             # TODO(cmq): change the dtype of cache
-            self.k_cache = DeepseekV4IndexerCache(
+            self.k_cache = AscendDeepseekV4IndexerCache(
                 head_dim=self.head_dim,
                 dtype=k_dtype,
                 prefix=f"{prefix}.k_cache",
@@ -519,20 +643,20 @@ class Compressor(nn.Module):
         state_dtype = torch.float32
         # TODO(zyj): change following codes if block_size is configurable & refactor the magic numbers
         if compress_ratio == 4:
-            self.state_cache = CompressorStateCache(
+            self.state_cache = AscendCompressorStateCache(
                 state_dim=2 * self.coff * self.head_dim,  # kv_state + score_state
                 dtype=state_dtype,
                 compress_ratio=compress_ratio,
                 prefix=f"{prefix}.state_cache",
-                block_size=8,
+                block_size=_dsv4_block_sizes()[cache_config.block_size][0][2],  # type: ignore[union-attr]
             )
         elif compress_ratio == 128:
-            self.state_cache = CompressorStateCache(
+            self.state_cache = AscendCompressorStateCache(
                 state_dim=2 * self.head_dim,  # kv_state + score_state
                 dtype=state_dtype,
                 compress_ratio=compress_ratio,
                 prefix=f"{prefix}.state_cache",
-                block_size=16 if get_ascend_device_type() in {AscendDeviceType.A5} else 32,
+                block_size=_dsv4_block_sizes()[cache_config.block_size][0][3],  # type: ignore[union-attr]
             )
         else:
             raise ValueError(
@@ -726,6 +850,16 @@ class DeepseekV4Attention(nn.Module):
                 if 0 <= indexer_seq_idx < len(pattern):
                     skip_topk = pattern[indexer_seq_idx] == "S"
 
+        ascend_device_type = get_ascend_device_type()
+        k_dtype = torch.float8_e4m3fn if ascend_device_type == AscendDeviceType.A5 else torch.bfloat16
+        swa_cache_layer = AscendDeepseekV4SWACache(
+            head_dim=self.head_dim,
+            window_size=self.window_size,
+            dtype=k_dtype,
+            prefix=f"{prefix}.swa_cache",
+            cache_config=cache_config,
+        )
+
         dsa_modules = DSAModules(
             wq_a=self.wq_a,
             q_norm=self.q_norm,
@@ -738,6 +872,7 @@ class DeepseekV4Attention(nn.Module):
             attn_sink=self.attn_sink,
             indexer=self.indexer,
             compressor=self.compressor,
+            swa_cache_layer=swa_cache_layer,
             topk_indices_buffer=topk_indices_buffer,
             skip_topk=skip_topk,
         )
@@ -833,7 +968,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         self.hc_ffn_scale = nn.Parameter(torch.empty(3, dtype=torch.float32))
 
     def hc_pre(self, x: torch.Tensor, hc_fn: torch.Tensor, hc_scale: torch.Tensor, hc_base: torch.Tensor):
-        y = torch.ops._C_ascend.npu_hc_pre(
+        y = torch.ops._C_ascend.npu_hc_pre_v2(
             x, hc_fn, hc_scale, hc_base, self.hc_mult, self.hc_sinkhorn_iters, self.norm_eps, self.hc_eps
         )
         return y
@@ -1145,15 +1280,26 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
-        return FusedMoE.make_expert_params_mapping(
-            self.model,
-            ckpt_gate_proj_name="gate_proj",
-            ckpt_down_proj_name="down_proj",
-            ckpt_up_proj_name="up_proj",
-            num_experts=self.config.n_routed_experts
-            + (self.config.n_shared_experts if getattr(get_ascend_config(), "mix_placement", False) else 0),
-            num_redundant_experts=0,
-        )
+        if vllm_version_is("0.23.0"):
+            return FusedMoE.make_expert_params_mapping(
+                self.model,
+                ckpt_gate_proj_name="gate_proj",
+                ckpt_down_proj_name="down_proj",
+                ckpt_up_proj_name="up_proj",
+                num_experts=self.config.n_routed_experts
+                + (self.config.n_shared_experts if getattr(get_ascend_config(), "mix_placement", False) else 0),
+                num_redundant_experts=0,
+            )
+        else:
+            return fused_moe_make_expert_params_mapping(
+                self.model,
+                ckpt_gate_proj_name="gate_proj",
+                ckpt_down_proj_name="down_proj",
+                ckpt_up_proj_name="up_proj",
+                num_experts=self.config.n_routed_experts
+                + (self.config.n_shared_experts if getattr(get_ascend_config(), "mix_placement", False) else 0),
+                num_redundant_experts=0,
+            )
 
     def get_mtp_target_hidden_states(self) -> torch.Tensor | None:
         """Pre-hc_head residual stream buffer (max_num_batched_tokens,
@@ -1171,15 +1317,26 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
 
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
-        expert_params_mapping = FusedMoE.make_expert_params_mapping(
-            self.model,
-            ckpt_gate_proj_name="gate_proj",
-            ckpt_down_proj_name="down_proj",
-            ckpt_up_proj_name="up_proj",
-            num_experts=self.config.n_routed_experts
-            + (self.config.n_shared_experts if rocm_aiter_moe_shared_expert_enabled else 0),
-            num_redundant_experts=self.num_redundant_experts,
-        )
+        if vllm_version_is("0.23.0"):
+            expert_params_mapping = FusedMoE.make_expert_params_mapping(
+                self.model,
+                ckpt_gate_proj_name="gate_proj",
+                ckpt_down_proj_name="down_proj",
+                ckpt_up_proj_name="up_proj",
+                num_experts=self.config.n_routed_experts
+                + (self.config.n_shared_experts if rocm_aiter_moe_shared_expert_enabled else 0),
+                num_redundant_experts=self.num_redundant_experts,
+            )
+        else:
+            expert_params_mapping = fused_moe_make_expert_params_mapping(
+                self.model,
+                ckpt_gate_proj_name="gate_proj",
+                ckpt_down_proj_name="down_proj",
+                ckpt_up_proj_name="up_proj",
+                num_experts=self.config.n_routed_experts
+                + (self.config.n_shared_experts if rocm_aiter_moe_shared_expert_enabled else 0),
+                num_redundant_experts=self.num_redundant_experts,
+            )
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()

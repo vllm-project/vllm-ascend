@@ -24,7 +24,7 @@ This document will demonstrate the primary validation steps for the model, inclu
 
 **Example 3: Version Information**
 
-This document is validated and written based on **vLLM-Ascend v0.13.0**. The current model (XXX) is fully supported in this version, and all **v0.13.0 and later versions** can run stably. To use the latest features (e.g., PD separation, MTP), it is recommended to use v0.13.0 or a later version.
+This document is validated and written based on **vLLM-Ascend v0.13.0**. The current model (XXX) is fully supported in this version, and all **v0.13.0 and later versions** can run stably. To use the latest features (e.g., PD separation, MTP), it is recommended to use the latest release candidate or official version.
 
 ## 2 Supported Features
 
@@ -77,10 +77,35 @@ If multi-node deployment is required, please follow the [Verify Multi-node Commu
 - Provide specific installation steps and commands (parameters should be explained with meaning, value range, units, etc.).
 - **Version Number Writing Specification:** Prefer using placeholders (values are centrally configured). If a fixed value is used and it differs from the documented validation version, a comment MUST be added stating: "Please replace with your actual version."
 - Provide verification commands and expected status: guide users to check the installation result by executing commands (e.g., docker ps), specifying success criteria such as status codes or output characteristics.
+- When content involves multiple hardware series (e.g., A3/A2), the `tab-set` markup syntax must be used to present them in separate tabs,and the tabs should be arranged with the newest models first.
 
 ### 4.1 Docker Image Installation
 
-**Example:** Omitted
+**Example:**
+
+:::::{tab-set}
+:sync-group: install
+
+::::{tab-item} A3 series
+:sync: A3
+
+```bash
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
+docker run ...
+```
+
+::::
+
+::::{tab-item} A2 series
+:sync: A2
+
+```bash
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+docker run ...
+```
+
+::::
+:::::
 
 ### 4.2 Source Code Installation
 
@@ -95,6 +120,7 @@ If multi-node deployment is required, please follow the [Verify Multi-node Commu
 - Describe the architectural characteristics and applicable scenarios of single-node deployment.
 - Provide startup command templates and key parameter descriptions.
 - Provide service verification methods (e.g., curl commands) and expected results, specifying success indicators (e.g., 200 OK).
+- When content involves multiple hardware series (e.g., A3/A2), the `tab-set` markup syntax must be used to present them in separate tabs,and the tabs should be arranged with the newest models first.
 - Below the startup command, provide guidance on common issues; if already described in the public FAQ, a direct link may be provided.
 
 **Example:**
@@ -122,9 +148,9 @@ Expected Result: Omitted (fill in according to actual output).
 **Content Writing Requirements:**
 
 - Describe the principles of PD separation architecture and applicable scenarios.
-- Provide startup procedures, key configurations, and **deployment verification instructions**.
-- Indicate performance metrics.
+- Provide startup procedures, key configurations, and **deployment verification instructions**, and indicate performance metrics.
 - Below the startup command, provide guidance on common issues; if already described in the public FAQ, a direct link may be provided.
+- When content involves multiple hardware series (e.g., A3/A2), the `tab-set` markup syntax must be used to present them in separate tabs,and the tabs should be arranged with the newest models first.
 
 **Example:** Omitted
 
@@ -182,7 +208,7 @@ lm_eval \
   --output_path ./
 ```
 
-## 8 Performance
+## 8 Performance Evaluation
 
 Omitted. Requirements are the same as for Accuracy Evaluation.
 
@@ -210,10 +236,10 @@ Provide recommended configurations for three typical scenarios (long context, lo
 
 #### Table 2: Detailed Node Configuration
 
-| Scenario | Configuration | #NPUs | TP | DP | BS | Concurrency | Max Context Length | MTP Speculation Num | FUSED_MC2 | EP Switch | FC+CP Switch | Async Scheduling |
+| Scenario | Configuration | NPUs | TP | DP | Max Num Seqs | Max Num Batched Tokens | Max Model Len | MTP Speculation Num | FUSED_MC2 | EP Switch | FC+CP Switch | Async Scheduling |
 |----------|---------------|-------|----|----|----|-------------|--------------------|---------------------|-----------|-----------|--------------|------------------|
-| High Throughput (32K→1K) | Server-P Node / Single Machine | 8 | 8 | 2 | 32 | 64 | 30k | 3 | Off | On | On | On |
-| High Throughput (32K→1K) | Server-D Node | 8 | 2 | 8 | 8 | 64 | 30k | 12 | Off | On | Off | On |
+| High Throughput (32K→1K) | Server-P Node / Single Machine | 8 | 8 | 2 | 32 | 4096 | 30k | 3 | Off | On | On | On |
+| High Throughput (32K→1K) | Server-D Node | 8 | 2 | 8 | 8 | 4096 | 30k | 12 | Off | On | Off | On |
 | Long Context | Server-P Node / Single Machine | | | | | | | | | | | |
 | Long Context | Server-D Node | | | | | | | | | | | |
 | Low Latency | Server-P Node / Single Machine | | | | | | | | | | | |
@@ -221,7 +247,7 @@ Provide recommended configurations for three typical scenarios (long context, lo
 
 > For complete startup commands and parameter descriptions, please refer to the deployment examples in Chapter 5.
 
-### 9.2 Tuning Guidelines (Optional)
+### 9.2 Tuning Guidelines
 
 #### 9.2.1 General Tuning Reference
 
@@ -234,7 +260,7 @@ If no special tuning is involved, directly provide a feature combination table a
 Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
 Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
 
-#### 9.2.2 Model-Specific Optimizations
+#### 9.2.2 Model-Specific Optimizations (Optional)
 
 **Documentation Requirements:**
 
@@ -265,5 +291,5 @@ The following optimizations are enabled by default and require no additional con
 
 **Content Writing Requirements:**
 
-- Add a note at the beginning of the section: For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html); this chapter only covers model-specific issues.
+- Add a note at the beginning of the section: For common environment, installation, and general parameter issues, please refer to the [Public FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html); this chapter only covers model-specific issues.
 - For **model-specific issues**, provide the following elements: problem phenomenon description, cause analysis, and solution measures.
