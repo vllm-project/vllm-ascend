@@ -149,6 +149,137 @@ def _dspark_mhc_post_torch(
     return (mixed_residual + post_term).to(residual.dtype)
 
 
+def _dspark_mhc_pre_custom_op_supported(
+    residual: torch.Tensor,
+    hc_fn: torch.Tensor,
+    hc_scale: torch.Tensor,
+    hc_base: torch.Tensor,
+    hc_pre_eps: float,
+    hc_sinkhorn_eps: float,
+    hc_post_alpha: float,
+) -> bool:
+    if residual.ndim != 3:
+        return False
+    hc_mult = residual.shape[-2]
+    hidden_size = residual.shape[-1]
+    mix_hc = (2 + hc_mult) * hc_mult
+    return (
+        residual.device.type == "npu"
+        and residual.dtype == torch.bfloat16
+        and hc_mult == 4
+        and hidden_size in (4096, 7168)
+        and hc_fn.device.type == "npu"
+        and hc_scale.device.type == "npu"
+        and hc_base.device.type == "npu"
+        and hc_fn.dtype == torch.float32
+        and hc_scale.dtype == torch.float32
+        and hc_base.dtype == torch.float32
+        and hc_fn.shape == (mix_hc, hc_mult * hidden_size)
+        and hc_scale.shape == (3,)
+        and hc_base.shape == (mix_hc,)
+        and hc_pre_eps == hc_sinkhorn_eps
+        and float(hc_post_alpha) == 2.0
+    )
+
+
+def _dspark_mhc_post_custom_op_supported(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    post_mix: torch.Tensor,
+    res_mix: torch.Tensor,
+) -> bool:
+    if post_mix.ndim == 2:
+        post_hc = post_mix.shape[-1]
+        post_shape_ok = True
+    elif post_mix.ndim == 3:
+        post_hc = post_mix.shape[-2]
+        post_shape_ok = post_mix.shape[-1] == 1
+    else:
+        return False
+    return (
+        x.device.type == "npu"
+        and residual.device.type == "npu"
+        and post_mix.device.type == "npu"
+        and res_mix.device.type == "npu"
+        and x.ndim == 2
+        and residual.ndim == 3
+        and post_shape_ok
+        and res_mix.ndim == 3
+        and x.dtype == torch.bfloat16
+        and residual.dtype == torch.bfloat16
+        and post_mix.dtype == torch.float32
+        and res_mix.dtype == torch.float32
+        and x.shape[0] == residual.shape[0] == post_mix.shape[0] == res_mix.shape[0]
+        and residual.shape[-2] == post_hc == res_mix.shape[-2] == res_mix.shape[-1] == 4
+        and x.shape[-1] == residual.shape[-1]
+        and x.shape[-1] in (4096, 7168)
+    )
+
+
+def _dspark_mhc_pre(
+    residual: torch.Tensor,
+    hc_fn: torch.Tensor,
+    hc_scale: torch.Tensor,
+    hc_base: torch.Tensor,
+    rms_eps: float,
+    hc_pre_eps: float,
+    hc_sinkhorn_eps: float,
+    hc_post_alpha: float,
+    sinkhorn_repeat: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    if _dspark_mhc_pre_custom_op_supported(
+        residual,
+        hc_fn,
+        hc_scale,
+        hc_base,
+        hc_pre_eps,
+        hc_sinkhorn_eps,
+        hc_post_alpha,
+    ):
+        layer_input, post_mix, res_mix = torch.ops._C_ascend.npu_hc_pre_v2(
+            residual,
+            hc_fn,
+            hc_scale,
+            hc_base,
+            residual.shape[-2],
+            sinkhorn_repeat,
+            rms_eps,
+            hc_pre_eps,
+        )
+        if post_mix.ndim == residual.ndim - 1:
+            post_mix = post_mix.unsqueeze(-1)
+        return layer_input, post_mix, res_mix
+    return _dspark_mhc_pre_torch(
+        residual,
+        hc_fn,
+        hc_scale,
+        hc_base,
+        rms_eps,
+        hc_pre_eps,
+        hc_sinkhorn_eps,
+        hc_post_alpha,
+        sinkhorn_repeat,
+    )
+
+
+def _dspark_mhc_post(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    post_mix: torch.Tensor,
+    res_mix: torch.Tensor,
+) -> torch.Tensor:
+    if _dspark_mhc_post_custom_op_supported(x, residual, post_mix, res_mix):
+        if post_mix.ndim == residual.ndim and post_mix.shape[-1] == 1:
+            post_mix = post_mix.squeeze(-1)
+        return torch.ops._C_ascend.npu_hc_post(
+            x.unsqueeze(0),
+            residual.unsqueeze(0),
+            post_mix.unsqueeze(0),
+            res_mix.unsqueeze(0),
+        ).squeeze(0)
+    return _dspark_mhc_post_torch(x, residual, post_mix, res_mix)
+
+
 def _dspark_mhc_fused_post_pre_torch(
     x: torch.Tensor,
     residual: torch.Tensor,
@@ -176,6 +307,61 @@ def _dspark_mhc_fused_post_pre_torch(
         sinkhorn_repeat,
     )
     return residual_cur, post_mix_cur, res_mix_cur, layer_input
+
+
+def _dspark_mhc_fused_post_pre(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    post_mix: torch.Tensor,
+    res_mix: torch.Tensor,
+    hc_fn: torch.Tensor,
+    hc_scale: torch.Tensor,
+    hc_base: torch.Tensor,
+    rms_eps: float,
+    hc_pre_eps: float,
+    hc_sinkhorn_eps: float,
+    hc_post_alpha: float,
+    sinkhorn_repeat: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    if (
+        _dspark_mhc_post_custom_op_supported(x, residual, post_mix, res_mix)
+        and _dspark_mhc_pre_custom_op_supported(
+            residual,
+            hc_fn,
+            hc_scale,
+            hc_base,
+            hc_pre_eps,
+            hc_sinkhorn_eps,
+            hc_post_alpha,
+        )
+    ):
+        residual_cur = _dspark_mhc_post(x, residual, post_mix, res_mix)
+        layer_input, post_mix_cur, res_mix_cur = _dspark_mhc_pre(
+            residual_cur,
+            hc_fn,
+            hc_scale,
+            hc_base,
+            rms_eps,
+            hc_pre_eps,
+            hc_sinkhorn_eps,
+            hc_post_alpha,
+            sinkhorn_repeat,
+        )
+        return residual_cur, post_mix_cur, res_mix_cur, layer_input
+    return _dspark_mhc_fused_post_pre_torch(
+        x,
+        residual,
+        post_mix,
+        res_mix,
+        hc_fn,
+        hc_scale,
+        hc_base,
+        rms_eps,
+        hc_pre_eps,
+        hc_sinkhorn_eps,
+        hc_post_alpha,
+        sinkhorn_repeat,
+    )
 
 
 def _dspark_cache_capacity(vllm_config: VllmConfig, block_size: int, window_size: int | None = None) -> int:
@@ -1091,7 +1277,7 @@ class DeepseekV4DSparkDecoderLayer(DeepseekV2DecoderLayer):
         hc_scale: torch.Tensor,
         hc_base: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        return _dspark_mhc_pre_torch(
+        return _dspark_mhc_pre(
             hidden_states,
             hc_fn,
             hc_scale,
@@ -1110,7 +1296,7 @@ class DeepseekV4DSparkDecoderLayer(DeepseekV2DecoderLayer):
         post_mix: torch.Tensor,
         res_mix: torch.Tensor,
     ) -> torch.Tensor:
-        return _dspark_mhc_post_torch(hidden_states, residual, post_mix, res_mix)
+        return _dspark_mhc_post(hidden_states, residual, post_mix, res_mix)
 
     def _mhc_fused_post_pre(
         self,
@@ -1122,7 +1308,7 @@ class DeepseekV4DSparkDecoderLayer(DeepseekV2DecoderLayer):
         hc_scale: torch.Tensor,
         hc_base: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        return _dspark_mhc_fused_post_pre_torch(
+        return _dspark_mhc_fused_post_pre(
             hidden_states,
             residual,
             post_mix,
@@ -1398,7 +1584,7 @@ class DeepseekV4DSparkModel(nn.Module):
         res_mix: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if residual is not None and post_mix is not None and res_mix is not None:
-            hidden_states = _dspark_mhc_post_torch(hidden_states, residual, post_mix, res_mix)
+            hidden_states = _dspark_mhc_post(hidden_states, residual, post_mix, res_mix)
         if hidden_states.dim() == 2:
             return hidden_states
         return _hc_head_torch(
