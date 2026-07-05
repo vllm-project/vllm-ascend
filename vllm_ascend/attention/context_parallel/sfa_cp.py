@@ -23,6 +23,7 @@ from vllm_ascend.distributed.utils import (
 from vllm_ascend.ops.triton.rope import rope_forward_triton_siso
 
 M = TypeVar("M", bound=AscendSFAMetadata)
+_DCP_REMAP_FP32_EXACT_INT_LIMIT = 1 << 24
 
 
 @triton.jit
@@ -888,6 +889,41 @@ class AscendSFADCPImpl(AscendSFAImpl):
                 "Invalid cp_kv_cache_interleave_size: "
                 f"{self.cp_kv_cache_interleave_size}"
             )
+        self._dcp_remap_interleave_size = self.cp_kv_cache_interleave_size
+        self._dcp_remap_interleave_size_is_one = self._dcp_remap_interleave_size == 1
+        self._dcp_remap_use_float_arithmetic = (
+            0
+            < self.vllm_config.model_config.max_model_len
+            <= _DCP_REMAP_FP32_EXACT_INT_LIMIT
+        )
+        self._dcp_remap_scalar_values = {
+            "zero": 0,
+            "neg_one": -1,
+            "dcp_rank": self.dcp_rank,
+            "dcp_size": self.dcp_size,
+            "interleave_size": self._dcp_remap_interleave_size,
+            "combined_size": self.dcp_size * self._dcp_remap_interleave_size,
+        }
+        self._dcp_remap_scalar_tensors = {}
+        self._dcp_remap_order_buffers = {}
+        self._dcp_remap_index_topk = None
+        for config in (
+            getattr(self.vllm_config.model_config, "hf_text_config", None),
+            getattr(self.vllm_config.model_config, "hf_config", None),
+        ):
+            index_topk = getattr(config, "index_topk", None)
+            if isinstance(index_topk, int) and index_topk > 0:
+                self._dcp_remap_index_topk = index_topk
+                break
+        if self.dcp_size > 1 and torch.npu.is_available():
+            device = torch.device("npu", torch.npu.current_device())
+            self._get_dcp_remap_constants(device, torch.int32)
+            if self._dcp_remap_use_float_arithmetic:
+                self._get_dcp_remap_constants(device, torch.float32)
+            if self._dcp_remap_index_topk is not None:
+                self._get_dcp_remap_order_and_count(self._dcp_remap_index_topk, device, torch.int32)
+                if self._dcp_remap_use_float_arithmetic:
+                    self._get_dcp_remap_order_and_count(self._dcp_remap_index_topk, device, torch.float32)
 
     def _all_gather_dim_async(
         self,
@@ -916,47 +952,91 @@ class AscendSFADCPImpl(AscendSFAImpl):
             gathered = gathered.permute(restore_perm).contiguous()
         return gathered
 
+    def _get_dcp_remap_constants(
+        self,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> dict[str, torch.Tensor]:
+        key = (str(device), dtype)
+        constants = self._dcp_remap_scalar_tensors.get(key)
+        if constants is not None:
+            return constants
+
+        constants = {
+            name: torch.tensor(value, dtype=dtype, device=device)
+            for name, value in self._dcp_remap_scalar_values.items()
+        }
+        self._dcp_remap_scalar_tensors[key] = constants
+        return constants
+
+    def _get_dcp_remap_order_and_count(
+        self,
+        topk_count: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        key = (str(device), topk_count, dtype)
+        order_and_count = self._dcp_remap_order_buffers.get(key)
+        if order_and_count is None:
+            order = torch.arange(topk_count, dtype=dtype, device=device)
+            count = torch.tensor(topk_count, dtype=dtype, device=device)
+            order_and_count = (order, count)
+            self._dcp_remap_order_buffers[key] = order_and_count
+        return order_and_count
+
+    def _remap_sparse_indices_for_dcp_float(self, topk_indices: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        constants = self._get_dcp_remap_constants(topk_indices.device, torch.float32)
+        topk_float = topk_indices.to(torch.float32)
+        local_block_indices = torch.floor(topk_float / constants["interleave_size"])
+        local_owner_base = torch.floor(local_block_indices / constants["dcp_size"]) * constants["dcp_size"]
+        local_owner = local_block_indices - local_owner_base
+        local_owner_mask = (topk_float >= constants["zero"]) & (local_owner == constants["dcp_rank"])
+        if self._dcp_remap_interleave_size_is_one:
+            remapped_float = torch.floor(topk_float / constants["dcp_size"])
+        else:
+            local_offsets = topk_float - local_block_indices * constants["interleave_size"]
+            remapped_float = torch.floor(topk_float / constants["combined_size"])
+            remapped_float = remapped_float * constants["interleave_size"] + local_offsets
+        remapped_float = torch.where(local_owner_mask, remapped_float, constants["neg_one"])
+        return remapped_float.to(topk_indices.dtype), local_owner_mask
+
+    def _remap_sparse_indices_for_dcp_int(self, topk_indices: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        constants = self._get_dcp_remap_constants(topk_indices.device, topk_indices.dtype)
+        local_block_indices = torch.div(topk_indices, constants["interleave_size"], rounding_mode="floor")
+        local_owner_mask = (topk_indices >= constants["zero"]) & (
+            torch.remainder(local_block_indices, constants["dcp_size"]) == constants["dcp_rank"]
+        )
+        if self._dcp_remap_interleave_size_is_one:
+            remapped_indices = torch.div(topk_indices, constants["dcp_size"], rounding_mode="floor")
+        else:
+            local_offsets = torch.remainder(topk_indices, constants["interleave_size"])
+            remapped_indices = torch.div(topk_indices, constants["combined_size"], rounding_mode="floor")
+            remapped_indices = remapped_indices * constants["interleave_size"] + local_offsets
+        remapped_indices = torch.where(local_owner_mask, remapped_indices, constants["neg_one"])
+        return remapped_indices, local_owner_mask
+
     def _remap_sparse_indices_for_dcp(self, topk_indices: torch.Tensor) -> torch.Tensor:
         if self.dcp_size <= 1:
             return topk_indices
 
-        interleave_size = self.cp_kv_cache_interleave_size
-        if (interleave_size & (interleave_size - 1) == 0) and (
-            self.dcp_size & (self.dcp_size - 1) == 0
-        ):
-            interleave_shift = interleave_size.bit_length() - 1
-            dcp_shift = self.dcp_size.bit_length() - 1
-            local_block_indices = torch.bitwise_right_shift(topk_indices, interleave_shift)
-            local_owner_mask = (topk_indices >= 0) & (
-                torch.bitwise_and(local_block_indices, self.dcp_size - 1) == self.dcp_rank
-            )
-            if interleave_size == 1:
-                remapped_indices = torch.bitwise_right_shift(topk_indices, dcp_shift)
-            else:
-                local_offsets = torch.bitwise_and(topk_indices, interleave_size - 1)
-                remapped_indices = torch.bitwise_right_shift(topk_indices, dcp_shift + interleave_shift)
-                remapped_indices = torch.bitwise_left_shift(remapped_indices, interleave_shift) + local_offsets
+        if self._dcp_remap_use_float_arithmetic:
+            remapped_indices, local_owner_mask = self._remap_sparse_indices_for_dcp_float(topk_indices)
         else:
-            local_owner_mask = (topk_indices >= 0) & (
-                (topk_indices // interleave_size) % self.dcp_size == self.dcp_rank
-            )
-            if interleave_size == 1:
-                remapped_indices = topk_indices // self.dcp_size
-            else:
-                local_offsets = topk_indices % interleave_size
-                remapped_indices = topk_indices // (self.dcp_size * interleave_size)
-                remapped_indices = remapped_indices * interleave_size + local_offsets
-        remapped_indices = remapped_indices.masked_fill(~local_owner_mask, -1)
+            remapped_indices, local_owner_mask = self._remap_sparse_indices_for_dcp_int(topk_indices)
 
         # Compact local indices to the front without changing their top-k order.
         topk_count = topk_indices.shape[-1]
-        original_order = torch.arange(
+        pack_key_dtype = torch.float32 if self._dcp_remap_use_float_arithmetic else torch.int32
+        original_order, topk_count_tensor = self._get_dcp_remap_order_and_count(
             topk_count,
-            dtype=torch.int32,
-            device=topk_indices.device,
-        ).expand_as(topk_indices)
-        pack_keys = original_order + (~local_owner_mask).to(torch.int32) * topk_count
-        _, pack_order = torch.sort(pack_keys.to(torch.float32), dim=-1)
+            topk_indices.device,
+            pack_key_dtype,
+        )
+        original_order = original_order.expand_as(topk_indices)
+        pack_keys = original_order + (~local_owner_mask).to(pack_key_dtype) * topk_count_tensor
+        if pack_key_dtype != torch.float32:
+            pack_keys = pack_keys.to(torch.float32)
+        _, pack_order = torch.sort(pack_keys, dim=-1)
         return torch.gather(remapped_indices, dim=-1, index=pack_order.to(torch.int32))
 
     def _merge_dsa_cp_dcp_outputs(
