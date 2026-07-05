@@ -69,7 +69,7 @@ class AscendKVBlockZeroer(KVBlockZeroer):
     def init_meta(
         self,
         attn_groups_iter: Iterable["AttentionGroup"],
-        kernel_block_sizes: list[int],
+        kernel_block_sizes: list[list[int]],
         cache_dtype: str,
         runner_only_attn_layers: set[str],
         static_forward_context: dict[str, Any],

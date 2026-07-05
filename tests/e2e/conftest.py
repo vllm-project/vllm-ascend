@@ -872,6 +872,24 @@ def _run_vllm_runner_dp_worker(conn, llm_kwargs: dict[str, Any], dp_rank: int, d
         os.environ["VLLM_DP_MASTER_PORT"] = str(master_port)
         os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
+        from vllm_ascend.utils import vllm_version_is
+
+        if not vllm_version_is("0.23.0"):
+            import torch
+
+            visible = os.environ.get("ASCEND_RT_VISIBLE_DEVICES", "")
+            full_device_ids: list[str] = [d for d in visible.split(",") if d]
+            if not full_device_ids:
+                full_device_ids = [str(i) for i in range(torch.npu.device_count())]
+
+            if llm_kwargs.get("distributed_executor_backend") == "ray":
+                devs = full_device_ids
+                chunk = max(len(devs) // dp_size, 1)
+                start = dp_rank * chunk
+                os.environ["ASCEND_RT_VISIBLE_DEVICES"] = ",".join(devs[start : start + chunk])
+            else:
+                llm_kwargs["device_ids"] = full_device_ids
+
         llm = LLM(**llm_kwargs)
         conn.send({"status": "ready", "rank": dp_rank})
 

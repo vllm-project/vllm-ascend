@@ -1,4 +1,4 @@
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 import torch
@@ -17,10 +17,12 @@ class TestAscendW4A16MXFP4MoEMethod(TestBase):
     @patch("vllm_ascend.quantization.methods.w4a16_mxfp4.ensure_mxfp4_moe_available")
     @patch("vllm_ascend.quantization.methods.w4a16_mxfp4.get_current_vllm_config")
     @patch("vllm_ascend.quantization.methods.w4a16_mxfp4.get_ascend_config")
-    def setUp(self, mock_ascend, mock_vllm, mock_ensure):
+    @patch("vllm_ascend.quantization.methods.w4a16_mxfp4.get_ep_group")
+    def setUp(self, mock_ep_group, mock_ascend, mock_vllm, mock_ensure):
         mock_vllm.return_value = create_mock_vllm_config()
         mock_ascend.return_value = create_mock_ascend_config()
         mock_ensure.return_value = None
+        mock_ep_group.return_value = Mock()
         self.scheme = AscendW4A16MXFP4FusedMoEMethod()
 
     @pytest.mark.skip("Execute after the issue is fixed")

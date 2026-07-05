@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import cast
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -35,6 +36,7 @@ from vllm_ascend.ops.triton.fla.utils import (
 from vllm_ascend.ops.triton.fla.utils import (
     prepare_update_chunk_offsets as runtime_prepare_update_chunk_offsets,
 )
+from vllm_ascend.utils import vllm_version_is
 
 
 @pytest.fixture(autouse=True)
@@ -46,6 +48,19 @@ def _patch_triton_cdiv(monkeypatch):
             lambda a, b: (a + b - 1) // b,
             raising=False,
         )
+
+
+@pytest.fixture(autouse=True)
+def _no_pin_memory():
+    # compute_causal_conv1d_metadata uses np_to_pinned_tensor which reads
+    # PIN_MEMORY.  Without physical NPU, t.pin_memory() raises
+    # "Please register PrivateUse1HooksInterface first".
+    with patch("vllm.utils.torch_utils.PIN_MEMORY", False):
+        if vllm_version_is("0.23.0"):
+            yield
+        else:
+            with patch("vllm.v1.attention.backends.utils.PIN_MEMORY", False):
+                yield
 
 
 @dataclass
