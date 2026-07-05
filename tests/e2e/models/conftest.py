@@ -3,6 +3,7 @@
 from pathlib import Path
 
 import pytest
+import regex as re
 
 
 def pytest_addoption(parser):
@@ -66,3 +67,47 @@ def pytest_generate_tests(metafunc):
             single_config = metafunc.config.getoption("--config")
             config_path = Path(single_config).resolve()
             metafunc.parametrize("config_filename", [config_path])
+
+
+def _patch_nvlm_config():
+    from transformers import PretrainedConfig
+
+    original_to_diff_dict = PretrainedConfig.to_diff_dict
+
+    def patched_to_diff_dict(self):
+        try:
+            return original_to_diff_dict(self)
+        except ValueError:
+            if type(self).__name__ == "NVLM_D_Config":
+                return {}
+            raise
+
+    PretrainedConfig.to_diff_dict = patched_to_diff_dict
+
+
+def _patch_nvlm_chat_template():
+    from lm_eval.models.vllm_vlms import VLLM_VLM
+
+    original_apply_chat_template = VLLM_VLM.apply_chat_template
+
+    def patched_apply_chat_template(self, chat_history, add_generation_prompt=True):
+        if self.model_args.get("model") == "AI-ModelScope/NVLM-D-72B":
+            self.chat_applied = True
+            for message in chat_history:
+                content = message.get("content")
+                if message.get("role") == "user" and isinstance(content, str):
+                    message["content"] = re.sub(r"<image>[ \t]*(?:\r?\n)?", "<image>\n", content)
+            return self.processor.apply_chat_template(
+                chat_history,
+                tokenize=False,
+                add_generation_prompt=add_generation_prompt,
+                continue_final_message=not add_generation_prompt,
+            )
+        return original_apply_chat_template(self, chat_history, add_generation_prompt)
+
+    VLLM_VLM.apply_chat_template = patched_apply_chat_template
+
+
+def pytest_configure(config):
+    _patch_nvlm_config()
+    _patch_nvlm_chat_template()
