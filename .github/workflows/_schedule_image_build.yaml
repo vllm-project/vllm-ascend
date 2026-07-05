@@ -271,7 +271,7 @@ jobs:
             TEMP_TAG="nightly-${{ inputs.schedule_tag_pattern }}${SUFFIX}-${{ matrix.tag }}-temp"
           fi
 
-          DOCKERFILE="Dockerfile_copy.openEuler"
+          DOCKERFILE="${{ inputs.dockerfile || 'Dockerfile' }}"
           DOCKERFILE_DIR=$(dirname "$DOCKERFILE")
           DOCKERFILE_NAME=$(basename "$DOCKERFILE")
           CACHE_REF="${{ env.CACHE_REPO }}:${{ steps.cache-tag.outputs.value }}"
