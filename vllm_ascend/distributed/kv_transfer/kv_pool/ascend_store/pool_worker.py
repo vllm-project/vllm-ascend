@@ -1107,6 +1107,7 @@ class KVPoolWorker:
             block_hashes,
             token_len,
             ExternalCachedBlockPool(exists),
+            apply_eagle=False,
         )
         logger.debug(
             "KV pool coordinator lookup final token_len=%d groups=%s hit=%d",

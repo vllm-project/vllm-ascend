@@ -106,6 +106,33 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         hits = [[16, 32, 48], [32, 48], [16, 32], [32, 48, 64]]
         self.assertEqual(32, cls._max_intersection_hit_position(hits))
 
+    def test_external_coordinator_lookup_disables_eagle_drop(self):
+        cls = self._make_worker_class()
+        worker = object.__new__(cls)
+        worker.num_kv_cache_groups = 1
+        worker.cache_coordinator = MagicMock()
+        worker.cache_coordinator.find_longest_cache_hit.return_value = ((), 128)
+        worker.m_store = MagicMock()
+        worker.m_store.exists.return_value = [1]
+
+        key = MagicMock()
+        key.chunk_hash = "ab" * 32
+        key.to_string.return_value = "key"
+        worker.token_database = MagicMock()
+        worker.token_database.process_tokens.return_value = [(0, 128, key)]
+
+        hit = worker._lookup_with_coordinator(
+            128,
+            [b"h0"],
+            [0],
+            use_layerwise=False,
+            include_all_ranks=False,
+        )
+
+        self.assertEqual(hit, 128)
+        worker.cache_coordinator.find_longest_cache_hit.assert_called_once()
+        self.assertFalse(worker.cache_coordinator.find_longest_cache_hit.call_args.kwargs["apply_eagle"])
+
 
 class TestKVPoolWorkerInit(unittest.TestCase):
     """Test KVPoolWorker initialization with mocked dependencies."""
