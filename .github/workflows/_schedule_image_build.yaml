@@ -285,7 +285,7 @@ jobs:
             --frontend dockerfile.v0
             --local context=.
             --local dockerfile="$DOCKERFILE_DIR"
-            --opt filename="Docker_copy.openEuler"
+            --opt filename="Dockerfile_copy.openEuler"
             --opt platform=${{ matrix.arch }}
             --opt build-arg:PIP_INDEX_URL=https://pypi.org/simple
             --opt build-arg:COMPILE_CUSTOM_KERNELS=${{ steps.cache-csrc.outputs.cache-hit == 'true' && '0' || '1' }}
