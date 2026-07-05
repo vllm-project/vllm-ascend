@@ -7,14 +7,12 @@ import torch_npu
 from vllm.config import VllmConfig
 from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.forward_context import get_forward_context
-from vllm.triton_utils import HAS_TRITON
+from vllm.triton_utils import HAS_TRITON, tl, triton
+from vllm.utils.math_utils import next_power_of_2
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.context_parallel.common_cp import (
-    AscendPCPMetadata,
-    _npu_attention_update,
-)
+from vllm_ascend.attention.context_parallel.common_cp import AscendPCPMetadata
 from vllm_ascend.attention.sfa_v1 import DCPContext, AscendSFAImpl, AscendSFAMetadata, AscendSFAMetadataBuilder
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, enabling_mlapo, split_decodes_and_prefills
 from vllm_ascend.distributed.utils import (
@@ -25,6 +23,100 @@ from vllm_ascend.distributed.utils import (
 from vllm_ascend.ops.triton.rope import rope_forward_triton_siso
 
 M = TypeVar("M", bound=AscendSFAMetadata)
+
+
+@triton.jit
+def _dcp_lse_weighted_combine_kernel(
+    out_recv_ptr,
+    lse_recv_ptr,
+    out_ptr,
+    out_recv_stride_dcp,
+    out_recv_stride_head,
+    out_recv_stride_token,
+    out_recv_stride_dim,
+    lse_recv_stride_dcp,
+    lse_recv_stride_head,
+    lse_recv_stride_token,
+    out_stride_token,
+    out_stride_head,
+    out_stride_dim,
+    DCP_SIZE: tl.constexpr,
+    HEAD_SIZE: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+):
+    token_idx = tl.program_id(0).to(tl.int64)
+    head_idx = tl.program_id(1).to(tl.int64)
+    dim_offsets = tl.arange(0, BLOCK_D)
+    dim_mask = dim_offsets < HEAD_SIZE
+
+    lse_max = -float("inf")
+    for dcp_idx in tl.static_range(DCP_SIZE):
+        lse_val = tl.load(
+            lse_recv_ptr
+            + dcp_idx * lse_recv_stride_dcp
+            + head_idx * lse_recv_stride_head
+            + token_idx * lse_recv_stride_token
+        ).to(tl.float32)
+        lse_val = tl.where(
+            (lse_val != lse_val) | (lse_val == float("inf")),
+            -float("inf"),
+            lse_val,
+        )
+        lse_max = tl.maximum(lse_max, lse_val)
+
+    lse_max = tl.where(lse_max == -float("inf"), 0.0, lse_max)
+    lse_sum = 0.0
+    for dcp_idx in tl.static_range(DCP_SIZE):
+        lse_val = tl.load(
+            lse_recv_ptr
+            + dcp_idx * lse_recv_stride_dcp
+            + head_idx * lse_recv_stride_head
+            + token_idx * lse_recv_stride_token
+        ).to(tl.float32)
+        lse_val = tl.where(
+            (lse_val != lse_val) | (lse_val == float("inf")),
+            -float("inf"),
+            lse_val,
+        )
+        lse_sum += tl.exp(lse_val - lse_max)
+
+    global_lse = tl.log(lse_sum) + lse_max
+
+    acc = tl.zeros([BLOCK_D], dtype=tl.float32)
+    for dcp_idx in tl.static_range(DCP_SIZE):
+        lse_val = tl.load(
+            lse_recv_ptr
+            + dcp_idx * lse_recv_stride_dcp
+            + head_idx * lse_recv_stride_head
+            + token_idx * lse_recv_stride_token
+        ).to(tl.float32)
+        lse_val = tl.where(
+            (lse_val != lse_val) | (lse_val == float("inf")),
+            -float("inf"),
+            lse_val,
+        )
+        weight = tl.exp(lse_val - global_lse)
+        weight = tl.where(weight != weight, 0.0, weight)
+
+        out_vals = tl.load(
+            out_recv_ptr
+            + dcp_idx * out_recv_stride_dcp
+            + head_idx * out_recv_stride_head
+            + token_idx * out_recv_stride_token
+            + dim_offsets * out_recv_stride_dim,
+            mask=dim_mask,
+            other=0.0,
+        ).to(tl.float32)
+        acc += out_vals * weight
+
+    tl.store(
+        out_ptr
+        + token_idx * out_stride_token
+        + head_idx * out_stride_head
+        + dim_offsets * out_stride_dim,
+        acc,
+        mask=dim_mask,
+    )
 
 
 class AscendSFACPMetadataBuilder(AscendSFAMetadataBuilder):
@@ -829,15 +921,31 @@ class AscendSFADCPImpl(AscendSFAImpl):
             return topk_indices
 
         interleave_size = self.cp_kv_cache_interleave_size
-        local_owner_mask = (topk_indices >= 0) & (
-            (topk_indices // interleave_size) % self.dcp_size == self.dcp_rank
-        )
-        if interleave_size == 1:
-            remapped_indices = topk_indices // self.dcp_size
+        if (interleave_size & (interleave_size - 1) == 0) and (
+            self.dcp_size & (self.dcp_size - 1) == 0
+        ):
+            interleave_shift = interleave_size.bit_length() - 1
+            dcp_shift = self.dcp_size.bit_length() - 1
+            local_block_indices = torch.bitwise_right_shift(topk_indices, interleave_shift)
+            local_owner_mask = (topk_indices >= 0) & (
+                torch.bitwise_and(local_block_indices, self.dcp_size - 1) == self.dcp_rank
+            )
+            if interleave_size == 1:
+                remapped_indices = torch.bitwise_right_shift(topk_indices, dcp_shift)
+            else:
+                local_offsets = torch.bitwise_and(topk_indices, interleave_size - 1)
+                remapped_indices = torch.bitwise_right_shift(topk_indices, dcp_shift + interleave_shift)
+                remapped_indices = torch.bitwise_left_shift(remapped_indices, interleave_shift) + local_offsets
         else:
-            local_offsets = topk_indices % interleave_size
-            remapped_indices = topk_indices // (self.dcp_size * interleave_size)
-            remapped_indices = remapped_indices * interleave_size + local_offsets
+            local_owner_mask = (topk_indices >= 0) & (
+                (topk_indices // interleave_size) % self.dcp_size == self.dcp_rank
+            )
+            if interleave_size == 1:
+                remapped_indices = topk_indices // self.dcp_size
+            else:
+                local_offsets = topk_indices % interleave_size
+                remapped_indices = topk_indices // (self.dcp_size * interleave_size)
+                remapped_indices = remapped_indices * interleave_size + local_offsets
         remapped_indices = remapped_indices.masked_fill(~local_owner_mask, -1)
 
         # Compact local indices to the front without changing their top-k order.
@@ -880,33 +988,92 @@ class AscendSFADCPImpl(AscendSFAImpl):
         output, _ = torch_npu.npu_attention_update(lse_flat.unbind(0), out_flat.unbind(0), 0)
         return output.view(num_tokens, num_heads, self.kv_lora_rank)
 
+    def _merge_dcp_outputs_with_triton(
+        self,
+        output_recv: torch.Tensor,
+        lse_recv: torch.Tensor,
+    ) -> torch.Tensor:
+        dcp_size, local_num_heads, num_tokens, head_size = output_recv.shape
+        output = torch.empty(
+            (num_tokens, local_num_heads, head_size),
+            dtype=torch.float32,
+            device=output_recv.device,
+        )
+        block_d = next_power_of_2(head_size)
+        _dcp_lse_weighted_combine_kernel[(num_tokens, local_num_heads, 1)](
+            output_recv,
+            lse_recv,
+            output,
+            output_recv.stride(0),
+            output_recv.stride(1),
+            output_recv.stride(2),
+            output_recv.stride(3),
+            lse_recv.stride(0),
+            lse_recv.stride(1),
+            lse_recv.stride(2),
+            output.stride(0),
+            output.stride(1),
+            output.stride(2),
+            DCP_SIZE=dcp_size,
+            HEAD_SIZE=head_size,
+            BLOCK_D=block_d,
+        )
+        return output
+
+    @staticmethod
+    def _merge_dcp_outputs_with_torch(
+        output_recv: torch.Tensor,
+        lse_recv: torch.Tensor,
+    ) -> torch.Tensor:
+        lse_recv = torch.where(
+            torch.isnan(lse_recv) | torch.isinf(lse_recv),
+            torch.full_like(lse_recv, float("-inf")),
+            lse_recv,
+        )
+        lse_max = torch.amax(lse_recv, dim=0)
+        lse_max = torch.where(
+            lse_max == float("-inf"),
+            torch.zeros_like(lse_max),
+            lse_max,
+        )
+        weights = torch.exp(lse_recv - lse_max.unsqueeze(0))
+        weights = torch.where(torch.isnan(weights), torch.zeros_like(weights), weights)
+        weights = weights / weights.sum(dim=0, keepdim=True).clamp_min(1e-10)
+
+        output = (output_recv.to(torch.float32) * weights.unsqueeze(-1)).sum(dim=0)
+        return output.permute(1, 0, 2).contiguous()
+
     def _merge_dcp_outputs(
         self,
         sfa_output: torch.Tensor,
         softmax_lse: torch.Tensor,
     ) -> torch.Tensor:
         assert self.dcp_group is not None
+        num_tokens, num_heads, head_size = sfa_output.shape
+        assert num_heads % self.dcp_size == 0
+        local_num_heads = num_heads // self.dcp_size
 
-        output_send = sfa_output.permute(1, 2, 0).contiguous()
+        output_send = sfa_output.permute(1, 0, 2).contiguous()
         output_recv = torch.empty_like(output_send)
         dist.all_to_all_single(
             output_recv,
             output_send,
             group=self.dcp_group.device_group,
         )
-        output_recv = output_recv.permute(2, 0, 1).contiguous()
+        output_recv = output_recv.view(self.dcp_size, local_num_heads, num_tokens, head_size)
 
-        lse_send = softmax_lse.to(torch.float32).permute(1, 2, 0).contiguous()
+        lse_send = softmax_lse.to(torch.float32).permute(1, 0, 2).contiguous()
         lse_recv = torch.empty_like(lse_send)
         dist.all_to_all_single(
             lse_recv,
             lse_send,
             group=self.dcp_group.device_group,
         )
-        lse_recv = lse_recv.permute(2, 0, 1).contiguous()
+        lse_recv = lse_recv.view(self.dcp_size, local_num_heads, num_tokens)
 
-        attn_out_lse = torch.cat([output_recv.to(torch.float32), lse_recv], dim=-1)
-        return _npu_attention_update(self.kv_lora_rank, attn_out_lse)
+        if HAS_TRITON:
+            return self._merge_dcp_outputs_with_triton(output_recv, lse_recv)
+        return self._merge_dcp_outputs_with_torch(output_recv, lse_recv)
 
     def _select_dsa_cp_local_tokens(self, output: torch.Tensor, attn_metadata: M) -> torch.Tensor:
         assert attn_metadata.dsa_cp_context is not None
