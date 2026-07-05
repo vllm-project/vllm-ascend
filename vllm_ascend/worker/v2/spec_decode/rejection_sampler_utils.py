@@ -20,7 +20,6 @@
 import torch
 from vllm.triton_utils import tl, triton
 
-
 from vllm_ascend.utils import vllm_version_is
 
 if not vllm_version_is("0.23.0"):
