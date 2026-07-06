@@ -86,6 +86,16 @@ torch_non_c_binding_in_graph_functions_npu = dict.fromkeys(
 torch_non_c_binding_in_graph_functions_npu["torch.npu.stream"] = TorchInGraphFunctionVariable  # noqa: E402
 torch._dynamo.trace_rules.torch_name_rule_map.append(torch_non_c_binding_in_graph_functions_npu)  # noqa: E402
 
+_MOONCAKE_AGENT_METADATA_MODULE = "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector"
+
+
+def _is_mooncake_handshake_metadata(metadata: KVConnectorHandshakeMetadata) -> bool:
+    metadata_type = type(metadata)
+    return (
+        metadata_type.__name__ == "MooncakeAgentMetadata"
+        and metadata_type.__module__ == _MOONCAKE_AGENT_METADATA_MODULE
+    )
+
 
 class NPUWorker(WorkerBase):
     def __init__(
@@ -949,7 +959,7 @@ class NPUWorker(WorkerBase):
 
     def get_kv_connector_handshake_metadata(
         self,
-    ) -> dict[tuple[int, int, int], KVConnectorHandshakeMetadata] | None:
+    ) -> dict[tuple[int, int] | tuple[int, int, int], KVConnectorHandshakeMetadata] | None:
         """Get KV connector metadata from this worker if available."""
         if not has_kv_transfer_group():
             return None
@@ -962,8 +972,10 @@ class NPUWorker(WorkerBase):
             return None
         tp_rank = get_tp_group().rank_in_group
         pp_rank = get_pp_group().rank_in_group
-        pcp_rank = get_pcp_group().rank_in_group
-        return {(pp_rank, pcp_rank, tp_rank): metadata}
+        if _is_mooncake_handshake_metadata(metadata):
+            pcp_rank = get_pcp_group().rank_in_group
+            return {(pp_rank, pcp_rank, tp_rank): metadata}
+        return {(pp_rank, tp_rank): metadata}
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return self.model_runner.get_kv_cache_spec()

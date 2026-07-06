@@ -74,10 +74,10 @@ def test_mooncake_tuple_handshake_metadata_only_routes_to_mooncake() -> None:
     non_mooncake_child.set_xfer_handshake_metadata_pp_aware.assert_not_called()
 
 
-def test_tuple_handshake_metadata_keeps_parent_behavior() -> None:
+def test_pp_tp_tuple_handshake_metadata_keeps_parent_behavior() -> None:
     child = MagicMock()
     connector = _make_connector_with_children(child)
-    metadata: dict[int | tuple[int, ...], Any] = {(0, 0, 0): MagicMock()}
+    metadata: dict[int | tuple[int, ...], Any] = {(0, 0): MagicMock()}
 
     with patch.object(MultiConnector, "set_xfer_handshake_metadata_pp_aware", autospec=True) as mock_parent:
         connector.set_xfer_handshake_metadata_pp_aware(metadata)

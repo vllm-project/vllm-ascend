@@ -52,7 +52,7 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
             for connector in self._connectors:
                 if isinstance(connector, MooncakeConnector):
                     if has_logical_rank_keys:
-                        connector.set_xfer_handshake_metadata(cast(dict[int, KVConnectorHandshakeMetadata], metadata))
+                        connector.set_xfer_handshake_metadata(metadata)
                     else:
                         connector.set_xfer_handshake_metadata_pp_aware(metadata)
                     handled = True
