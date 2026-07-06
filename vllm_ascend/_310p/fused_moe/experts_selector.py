@@ -58,7 +58,16 @@ def select_experts(
         topk_ids: selected expert IDs of shape (num_tokens, top_k).
     """
     if scoring_func == "softmax" and not use_grouped_topk and custom_routing_function is None:
-        topk_weights, topk_ids, _ = torch_npu.npu_moe_gating_top_k_softmax(router_logits, k=top_k)
+        # 310P returns invalid routing results when this op receives more than 1024 tokens.
+        if router_logits.shape[0] > 1024:
+            topk_results = [
+                torch_npu.npu_moe_gating_top_k_softmax(router_logits_chunk, k=top_k)
+                for router_logits_chunk in router_logits.split(1024, dim=0)
+            ]
+            topk_weights = torch.cat([result[0] for result in topk_results], dim=0)
+            topk_ids = torch.cat([result[1] for result in topk_results], dim=0)
+        else:
+            topk_weights, topk_ids, _ = torch_npu.npu_moe_gating_top_k_softmax(router_logits, k=top_k)
         topk_weights = _renormalize_topk_weights(topk_weights, renormalize)
     else:
         topk_weights, topk_ids = _native_select_experts(

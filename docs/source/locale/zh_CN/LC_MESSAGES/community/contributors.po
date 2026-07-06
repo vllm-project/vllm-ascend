@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-05-10 02:19+0000\n"
+"POT-Creation-Date: 2026-07-02 07:02+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -202,8 +202,8 @@ msgid ""
 msgstr "vLLM Ascend 的每个版本都离不开以下贡献者的支持："
 
 #: ../../source/community/contributors.md:28
-msgid "Updated on 2026-03-25:"
-msgstr "更新于 2026-03-25："
+msgid "Updated on 2026-06-24:"
+msgstr "更新于 2026-06-24："
 
 #: ../../source/community/contributors.md
 msgid "Number"
@@ -218,16 +218,1998 @@ msgid "Commit ID"
 msgstr "提交 ID"
 
 #: ../../source/community/contributors.md
+msgid "471"
+msgstr "471"
+
+#: ../../source/community/contributors.md
+msgid "[@1478931959](https://github.com/1478931959)"
+msgstr "[@1478931959](https://github.com/1478931959)"
+
+#: ../../source/community/contributors.md
+msgid "2026/06/24"
+msgstr "2026/06/24"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[eb81619](https://github.com/vllm-project/vllm-"
+"ascend/commit/eb816194a8d2ce1f4048b4037bb4b6e8a269d307)"
+msgstr ""
+"[eb81619](https://github.com/vllm-project/vllm-"
+"ascend/commit/eb816194a8d2ce1f4048b4037bb4b6e8a269d307)"
+
+#: ../../source/community/contributors.md
+msgid "470"
+msgstr "470"
+
+#: ../../source/community/contributors.md
+msgid "[@RICHARDNAN](https://github.com/RICHARDNAN)"
+msgstr "[@RICHARDNAN](https://github.com/RICHARDNAN)"
+
+#: ../../source/community/contributors.md
+msgid "2026/06/23"
+msgstr "2026/06/23"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[9788211](https://github.com/vllm-project/vllm-"
+"ascend/commit/9788211ce67a18aa2f76bc3bcb176e378edc13a8)"
+msgstr ""
+"[9788211](https://github.com/vllm-project/vllm-"
+"ascend/commit/9788211ce67a18aa2f76bc3bcb176e378edc13a8)"
+
+#: ../../source/community/contributors.md
+msgid "469"
+msgstr "469"
+
+#: ../../source/community/contributors.md
+msgid "[@LostFox11](https://github.com/LostFox11)"
+msgstr "[@LostFox11](https://github.com/LostFox11)"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[4467a23](https://github.com/vllm-project/vllm-"
+"ascend/commit/4467a23d084ee8c497e663d9caf85c5329851a78)"
+msgstr ""
+"[4467a23](https://github.com/vllm-project/vllm-"
+"ascend/commit/4467a23d084ee8c497e663d9caf85c5329851a78)"
+
+#: ../../source/community/contributors.md
+msgid "468"
+msgstr "468"
+
+#: ../../source/community/contributors.md
+msgid "[@yjyang62](https://github.com/yjyang62)"
+msgstr "[@yjyang62](https://github.com/yjyang62)"
+
+#: ../../source/community/contributors.md
+msgid "2026/06/22"
+msgstr "2026/06/22"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[92eeab2](https://github.com/vllm-project/vllm-"
+"ascend/commit/92eeab2fe9a73394d2118de3c8459d69cc9d8e62)"
+msgstr ""
+"[92eeab2](https://github.com/vllm-project/vllm-"
+"ascend/commit/92eeab2fe9a73394d2118de3c8459d69cc9d8e62)"
+
+#: ../../source/community/contributors.md
+msgid "467"
+msgstr "467"
+
+#: ../../source/community/contributors.md
+msgid "[@erase266](https://github.com/erase266)"
+msgstr "[@erase266](https://github.com/erase266)"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[682cc2b](https://github.com/vllm-project/vllm-"
+"ascend/commit/682cc2b938446b73a67e9ddfcc5ca2203a3f8088)"
+msgstr ""
+"[682cc2b](https://github.com/vllm-project/vllm-"
+"ascend/commit/682cc2b938446b73a67e9ddfcc5ca2203a3f8088)"
+
+#: ../../source/community/contributors.md
+msgid "466"
+msgstr "466"
+
+#: ../../source/community/contributors.md
+msgid "[@boes129](https://github.com/boes129)"
+msgstr "[@boes129](https://github.com/boes129)"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[2539c01](https://github.com/vllm-project/vllm-"
+"ascend/commit/2539c015aa9754951e99c8478424b96bb329b8c5)"
+msgstr ""
+"[2539c01](https://github.com/vllm-project/vllm-"
+"ascend/commit/2539c015aa9754951e99c8478424b96bb329b8c5)"
+
+#: ../../source/community/contributors.md
+msgid "465"
+msgstr "465"
+
+#: ../../source/community/contributors.md
+msgid "[@zhiyu-wa](https://github.com/zhiyu-wa)"
+msgstr "[@zhiyu-wa](https://github.com/zhiyu-wa)"
+
+#: ../../source/community/contributors.md
+msgid "2026/06/17"
+msgstr "2026/06/17"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[c9a3538](https://github.com/vllm-project/vllm-"
+"ascend/commit/c9a3538cfa7a45d3b5f4ebd55161051332fa3cca)"
+msgstr ""
+"[c9a3538](https://github.com/vllm-project/vllm-"
+"ascend/commit/c9a3538cfa7a45d3b5f4ebd55161051332fa3cca)"
+
+#: ../../source/community/contributors.md
+msgid "464"
+msgstr "464"
+
+#: ../../source/community/contributors.md
+msgid "[@learning-sketch](https://github.com/learning-sketch)"
+msgstr "[@learning-sketch](https://github.com/learning-sketch)"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[ea6e8d2](https://github.com/vllm-project/vllm-"
+"ascend/commit/ea6e8d2200fd5fcdd0dcf2e374c4bae60170031a)"
+msgstr ""
+"[ea6e8d2](https://github.com/vllm-project/vllm-"
+"ascend/commit/ea6e8d2200fd5fcdd0dcf2e374c4bae60170031a)"
+
+#: ../../source/community/contributors.md
+msgid "463"
+msgstr "463"
+
+#: ../../source/community/contributors.md
+msgid "[@He1pa](https://github.com/He1pa)"
+msgstr "[@He1pa](https://github.com/He1pa)"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[3449318](https://github.com/vllm-project/vllm-"
+"ascend/commit/344931832c3f7fb14ce7fe3f8d5c9d8a7b61e2fa)"
+msgstr ""
+"[3449318](https://github.com/vllm-project/vllm-"
+"ascend/commit/344931832c3f7fb14ce7fe3f8d5c9d8a7b61e2fa)"
+
+#: ../../source/community/contributors.md
+msgid "462"
+msgstr "462"
+
+#: ../../source/community/contributors.md
+msgid "[@x1314aq](https://github.com/x1314aq)"
+msgstr "[@x1314aq](https://github.com/x1314aq)"
+
+#: ../../source/community/contributors.md
+msgid "2026/06/16"
+msgstr "2026/06/16"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[324dc45](https://github.com/vllm-project/vllm-"
+"ascend/commit/324dc45ffbada090b48fb2fc0d69ce681e002490)"
+msgstr ""
+"[324dc45](https://github.com/vllm-project/vllm-"
+"ascend/commit/324dc45ffbada090b48fb2fc0d69ce681e002490)"
+
+#: ../../source/community/contributors.md
+msgid "461"
+msgstr "461"
+
+#: ../../source/community/contributors.md
+msgid "[@lHrHenry233](https://github.com/lHrHenry233)"
+msgstr "[@lHrHenry233](https://github.com/lHrHenry233)"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[fad6464](https://github.com/vllm-project/vllm-"
+"ascend/commit/fad646478dff693840cd2e3d67098cc8b51142a6)"
+msgstr ""
+"[fad6464](https://github.com/vllm-project/vllm-"
+"ascend/commit/fad646478dff693840cd2e3d67098cc8b51142a6)"
+
+#: ../../source/community/contributors.md
+msgid "460"
+msgstr "460"
+
+#: ../../source/community/contributors.md
+msgid "[@Dawn952](https://github.com/Dawn952)"
+msgstr "[@Dawn952](https://github.com/Dawn952)"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[e099eeb](https://github.com/vllm-project/vllm-"
+"ascend/commit/e099eeb11ad3247768f3e199e622dded55c99c72)"
+msgstr ""
+"[e099eeb](https://github.com/vllm-project/vllm-"
+"ascend/commit/e099eeb11ad3247768f3e199e622dded55c99c72)"
+
+#: ../../source/community/contributors.md
+msgid "459"
+msgstr "459"
+
+#: ../../source/community/contributors.md
+msgid "[@2416602906](https://github.com/2416602906)"
+msgstr "[@2416602906](https://github.com/2416602906)"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[79ed380](https://github.com/vllm-project/vllm-"
+"ascend/commit/79ed38084b500af6e3945fee023dfefa67f8cce8)"
+msgstr ""
+"[79ed380](https://github.com/vllm-project/vllm-"
+"ascend/commit/79ed38084b500af6e3945fee023dfefa67f8cce8)"
+
+#: ../../source/community/contributors.md
+msgid "458"
+msgstr "458"
+
+#: ../../source/community/contributors.md
+msgid "[@AceCoder0](https://github.com/AceCoder0)"
+msgstr "[@AceCoder0](https://github.com/AceCoder0)"
+
+#: ../../source/community/contributors.md
+msgid "2026/06/15"
+msgstr "2026/06/15"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[f482403](https://github.com/vllm-project/vllm-"
+"ascend/commit/f4824036f0cedac5732f404b686aba140a634a9e)"
+msgstr ""
+"[f482403](https://github.com/vllm-project/vllm-"
+"ascend/commit/f4824036f0cedac5732f404b686aba140a634a9e)"
+
+#: ../../source/community/contributors.md
+msgid "457"
+msgstr "457"
+
+#: ../../source/community/contributors.md
+msgid "[@zhangtao0408](https://github.com/zhangtao0408)"
+msgstr "[@zhangtao0408](https://github.com/zhangtao0408)"
+
+#: ../../source/community/contributors.md
+msgid "2026/06/13"
+msgstr "2026/06/13"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[849a92e](https://github.com/vllm-project/vllm-"
+"ascend/commit/849a92e60b1e7b27036d90e0e5f5002c880fb845)"
+msgstr ""
+"[849a92e](https://github.com/vllm-project/vllm-"
+"ascend/commit/849a92e60b1e7b27036d90e0e5f5002c880fb845)"
+
+#: ../../source/community/contributors.md
+msgid "456"
+msgstr "456"
+
+#: ../../source/community/contributors.md
+msgid "[@MINGJING-WU](https://github.com/MINGJING-WU)"
+msgstr "[@MINGJING-WU](https://github.com/MINGJING-WU)"
+
+#: ../../source/community/contributors.md
+msgid "2026/06/12"
+msgstr "2026/06/12"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[7d768b5](https://github.com/vllm-project/vllm-"
+"ascend/commit/7d768b5cedd598d6d368fef9a2c087f7c1fe8759)"
+msgstr ""
+"[7d768b5](https://github.com/vllm-project/vllm-"
+"ascend/commit/7d768b5cedd598d6d368fef9a2c087f7c1fe8759)"
+
+#: ../../source/community/contributors.md
+msgid "455"
+msgstr "455"
+
+#: ../../source/community/contributors.md
+msgid "[@luobicangqiong](https://github.com/luobicangqiong)"
+msgstr "[@luobicangqiong](https://github.com/luobicangqiong)"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[11e0040](https://github.com/vllm-project/vllm-"
+"ascend/commit/11e004072710415322f5fd504f2bf846142abcb4)"
+msgstr ""
+"[11e0040](https://github.com/vllm-project/vllm-"
+"ascend/commit/11e004072710415322f5fd504f2bf846142abcb4)"
+
+#: ../../source/community/contributors.md
+msgid "454"
+msgstr "454"
+
+#: ../../source/community/contributors.md
+msgid "[@Inference1](https://github.com/Inference1)"
+msgstr "[@Inference1](https://github.com/Inference1)"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[e6a9d71](https://github.com/vllm-project/vllm-"
+"ascend/commit/e6a9d71d0400e89c0d16409d35fe6bd6c24ad180)"
+msgstr ""
+"[e6a9d71](https://github.com/vllm-project/vllm-"
+"ascend/commit/e6a9d71d0400e89c0d16409d35fe6bd6c24ad180)"
+
+#: ../../source/community/contributors.md
+msgid "453"
+msgstr "453"
+
+#: ../../source/community/contributors.md
+msgid "[@evan-ai-arg](https://github.com/evan-ai-arg)"
+msgstr "[@evan-ai-arg](https://github.com/evan-ai-arg)"
+
+#: ../../source/community/contributors.md
+msgid "2026/06/11"
+msgstr "2026/06/11"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[971d50b](https://github.com/vllm-project/vllm-"
+"ascend/commit/971d50b3f982fd2ba7d9ffdee35e985fc54cd808)"
+msgstr ""
+"[971d50b](https://github.com/vllm-project/vllm-"
+"ascend/commit/971d50b3f982fd2ba7d9ffdee35e985fc54cd808)"
+
+#: ../../source/community/contributors.md
+msgid "452"
+msgstr "452"
+
+#: ../../source/community/contributors.md
+msgid "[@robellliu-dev](https://github.com/robellliu-dev)"
+msgstr "[@robellliu-dev](https://github.com/robellliu-dev)"
+
+#: ../../source/community/contributors.md
+msgid "2026/06/10"
+msgstr "2026/06/10"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[bef69f9](https://github.com/vllm-project/vllm-"
+"ascend/commit/bef69f9f4ca72093270b79d6b0e37464d87e3228)"
+msgstr ""
+"[bef69f9](https://github.com/vllm-project/vllm-"
+"ascend/commit/bef69f9f4ca72093270b79d6b0e37464d87e3228)"
+
+#: ../../source/community/contributors.md
+msgid "451"
+msgstr "451"
+
+#: ../../source/community/contributors.md
+msgid "[@li1how](https://github.com/li1how)"
+msgstr "[@li1how](https://github.com/li1how)"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[9914ffa](https://github.com/vllm-project/vllm-"
+"ascend/commit/9914ffa27058165634dd9f46d37dc75debe8ce10)"
+msgstr ""
+"[9914ffa](https://github.com/vllm-project/vllm-"
+"ascend/commit/9914ffa27058165634dd9f46d37dc75debe8ce10)"
+
+#: ../../source/community/contributors.md
+msgid "450"
+msgstr "450"
+
+#: ../../source/community/contributors.md
+msgid "[@goodgoodname](https://github.com/goodgoodname)"
+msgstr "[@goodgoodname](https://github.com/goodgoodname)"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[ee88e35](https://github.com/vllm-project/vllm-"
+"ascend/commit/ee88e356a0703e74cd6499b470f740b319d7dcb5)"
+msgstr ""
+"[ee88e35](https://github.com/vllm-project/vllm-"
+"ascend/commit/ee88e356a0703e74cd6499b470f740b319d7dcb5)"
+
+#: ../../source/community/contributors.md
+msgid "449"
+msgstr "449"
+
+#: ../../source/community/contributors.md
+msgid "[@baolongsun](https://github.com/baolongsun)"
+msgstr "[@baolongsun](https://github.com/baolongsun)"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[fcf5a1d](https://github.com/vllm-project/vllm-"
+"ascend/commit/fcf5a1d549896070d9baf2e58240503a4ca24fd3)"
+msgstr ""
+"[fcf5a1d](https://github.com/vllm-project/vllm-"
+"ascend/commit/fcf5a1d549896070d9baf2e58240503a4ca24fd3)"
+
+#: ../../source/community/contributors.md
+msgid "448"
+msgstr "448"
+
+#: ../../source/community/contributors.md
+msgid "[@AuroraEmiya](https://github.com/AuroraEmiya)"
+msgstr "[@AuroraEmiya](https://github.com/AuroraEmiya)"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[55d5bd1](https://github.com/vllm-project/vllm-"
+"ascend/commit/55d5bd15974e98a7f813bf3e2a480039461f721b)"
+msgstr ""
+"[55d5bd1](https://github.com/vllm-project/vllm-"
+"ascend/commit/55d5bd15974e98a7f813bf3e2a480039461f721b)"
+
+#: ../../source/community/contributors.md
+msgid "447"
+msgstr "447"
+
+#: ../../source/community/contributors.md
+msgid "[@SOMEONEUNSEEN](https://github.com/SOMEONEUNSEEN)"
+msgstr "[@SOMEONEUNSEEN](https://github.com/SOMEONEUNSEEN)"
+
+#: ../../source/community/contributors.md
+msgid "2026/06/09"
+msgstr "2026/06/09"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[77ff286](https://github.com/vllm-project/vllm-"
+"ascend/commit/77ff28652b329796450f5448c7ab51b054697535)"
+msgstr ""
+"[77ff286](https://github.com/vllm-project/vllm-"
+"ascend/commit/77ff28652b329796450f5448c7ab51b054697535)"
+
+#: ../../source/community/contributors.md
+msgid "446"
+msgstr "446"
+
+#: ../../source/community/contributors.md
+msgid "[@zouzy5137](https://github.com/zouzy5137)"
+msgstr "[@zouzy5137](https://github.com/zouzy5137)"
+
+#: ../../source/community/contributors.md
+msgid "2026/06/08"
+msgstr "2026/06/08"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[80cd596](https://github.com/vllm-project/vllm-"
+"ascend/commit/80cd5964286f2a394e3e6b3d1f7581ce901c812a)"
+msgstr ""
+"[80cd596](https://github.com/vllm-project/vllm-"
+"ascend/commit/80cd5964286f2a394e3e6b3d1f7581ce901c812a)"
+
+#: ../../source/community/contributors.md
+msgid "445"
+msgstr "445"
+
+#: ../../source/community/contributors.md
+msgid "[@nofushanquan](https://github.com/nofushanquan)"
+msgstr "[@nofushanquan](https://github.com/nofushanquan)"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[2b4a9da](https://github.com/vllm-project/vllm-"
+"ascend/commit/2b4a9daa66e78e156d72b2c7eb36f82ccef3735a)"
+msgstr ""
+"[2b4a9da](https://github.com/vllm-project/vllm-"
+"ascend/commit/2b4a9daa66e78e156d72b2c7eb36f82ccef3735a)"
+
+#: ../../source/community/contributors.md
+msgid "444"
+msgstr "444"
+
+#: ../../source/community/contributors.md
+msgid "[@Fishermanykx](https://github.com/Fishermanykx)"
+msgstr "[@Fishermanykx](https://github.com/Fishermanykx)"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[f2cac7e](https://github.com/vllm-project/vllm-"
+"ascend/commit/f2cac7e1f9d295b611a50918d9996b7f94ad1d4a)"
+msgstr ""
+"[f2cac7e](https://github.com/vllm-project/vllm-"
+"ascend/commit/f2cac7e1f9d295b611a50918d9996b7f94ad1d4a)"
+
+#: ../../source/community/contributors.md
+msgid "443"
+msgstr "443"
+
+#: ../../source/community/contributors.md
+msgid "[@muziyuhui666](https://github.com/muziyuhui666)"
+msgstr "[@muziyuhui666](https://github.com/muziyuhui666)"
+
+#: ../../source/community/contributors.md
+msgid "2026/06/05"
+msgstr "2026/06/05"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[bf6450e](https://github.com/vllm-project/vllm-"
+"ascend/commit/bf6450e8792ee4189929651ae7f7b538fa0aedc7)"
+msgstr ""
+"[bf6450e](https://github.com/vllm-project/vllm-"
+"ascend/commit/bf6450e8792ee4189929651ae7f7b538fa0aedc7)"
+
+#: ../../source/community/contributors.md
+msgid "442"
+msgstr "442"
+
+#: ../../source/community/contributors.md
+msgid "[@ljy19911228](https://github.com/ljy19911228)"
+msgstr "[@ljy19911228](https://github.com/ljy19911228)"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[b6afa87](https://github.com/vllm-project/vllm-"
+"ascend/commit/b6afa8769a357b47ee6f33d5acbe83173a19a6d0)"
+msgstr ""
+"[b6afa87](https://github.com/vllm-project/vllm-"
+"ascend/commit/b6afa8769a357b47ee6f33d5acbe83173a19a6d0)"
+
+#: ../../source/community/contributors.md
+msgid "441"
+msgstr "441"
+
+#: ../../source/community/contributors.md
+msgid "[@cfq0](https://github.com/cfq0)"
+msgstr "[@cfq0](https://github.com/cfq0)"
+
+#: ../../source/community/contributors.md
+msgid "2026/06/04"
+msgstr "2026/06/04"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[00517cf](https://github.com/vllm-project/vllm-"
+"ascend/commit/00517cfb0326bad05e55afc434b912ed9bf4ede7)"
+msgstr ""
+"[00517cf](https://github.com/vllm-project/vllm-"
+"ascend/commit/00517cfb0326bad05e55afc434b912ed9bf4ede7)"
+
+#: ../../source/community/contributors.md
+msgid "440"
+msgstr "440"
+
+#: ../../source/community/contributors.md
+msgid "[@zqs164](https://github.com/zqs164)"
+msgstr "[@zqs164](https://github.com/zqs164)"
+
+#: ../../source/community/contributors.md
+msgid "2026/06/03"
+msgstr "2026/06/03"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[9784bca](https://github.com/vllm-project/vllm-"
+"ascend/commit/9784bca3da77450efec1a0883ef91ae98a84d73e)"
+msgstr ""
+"[9784bca](https://github.com/vllm-project/vllm-"
+"ascend/commit/9784bca3da77450efec1a0883ef91ae98a84d73e)"
+
+#: ../../source/community/contributors.md
+msgid "439"
+msgstr "439"
+
+#: ../../source/community/contributors.md
+msgid "[@yilunh998](https://github.com/yilunh998)"
+msgstr "[@yilunh998](https://github.com/yilunh998)"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[d7bca90](https://github.com/vllm-project/vllm-"
+"ascend/commit/d7bca90301672a14bc9044b4956746c105d55f05)"
+msgstr ""
+"[d7bca90](https://github.com/vllm-project/vllm-"
+"ascend/commit/d7bca90301672a14bc9044b4956746c105d55f05)"
+
+#: ../../source/community/contributors.md
+msgid "438"
+msgstr "438"
+
+#: ../../source/community/contributors.md
+msgid "[@nomewang](https://github.com/nomewang)"
+msgstr "[@nomewang](https://github.com/nomewang)"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[fcb30be](https://github.com/vllm-project/vllm-"
+"ascend/commit/fcb30bebed4bc493238f2c432844b1f1be16ae6d)"
+msgstr ""
+"[fcb30be](https://github.com/vllm-project/vllm-"
+"ascend/commit/fcb30bebed4bc493238f2c432844b1f1be16ae6d)"
+
+#: ../../source/community/contributors.md
+msgid "437"
+msgstr "437"
+
+#: ../../source/community/contributors.md
+msgid "[@czc-unac](https://github.com/czc-unac)"
+msgstr "[@czc-unac](https://github.com/czc-unac)"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[d7d0d29](https://github.com/vllm-project/vllm-"
+"ascend/commit/d7d0d29ae5664ea87564ec1f1c4b65be043ec293)"
+msgstr ""
+"[d7d0d29](https://github.com/vllm-project/vllm-"
+"ascend/commit/d7d0d29ae5664ea87564ec1f1c4b65be043ec293)"
+
+#: ../../source/community/contributors.md
+msgid "436"
+msgstr "436"
+
+#: ../../source/community/contributors.md
+msgid "[@1-Y-C](https://github.com/1-Y-C)"
+msgstr "[@1-Y-C](https://github.com/1-Y-C)"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[4335bd2](https://github.com/vllm-project/vllm-"
+"ascend/commit/4335bd2561bdd597475da109ba1fb4d2aa929278)"
+msgstr ""
+"[4335bd2](https://github.com/vllm-project/vllm-"
+"ascend/commit/4335bd2561bdd597475da109ba1fb4d2aa929278)"
+
+#: ../../source/community/contributors.md
+msgid "435"
+msgstr "435"
+
+#: ../../source/community/contributors.md
+msgid "[@ztzx3156](https://github.com/ztzx3156)"
+msgstr "[@ztzx3156](https://github.com/ztzx3156)"
+
+#: ../../source/community/contributors.md
+msgid "2026/06/02"
+msgstr "2026/06/02"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[25d8b60](https://github.com/vllm-project/vllm-"
+"ascend/commit/25d8b60844e31b185ee217242c0ba07d80c04962)"
+msgstr ""
+"[25d8b60](https://github.com/vllm-project/vllm-"
+"ascend/commit/25d8b60844e31b185ee217242c0ba07d80c04962)"
+
+#: ../../source/community/contributors.md
+msgid "434"
+msgstr "434"
+
+#: ../../source/community/contributors.md
+msgid "[@Yuli-yx](https://github.com/Yuli-yx)"
+msgstr "[@Yuli-yx](https://github.com/Yuli-yx)"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[c6b853a](https://github.com/vllm-project/vllm-"
+"ascend/commit/c6b853acb1be8cb5b219009ac91f71f5f0022137)"
+msgstr ""
+"[c6b853a](https://github.com/vllm-project/vllm-"
+"ascend/commit/c6b853acb1be8cb5b219009ac91f71f5f0022137)"
+
+#: ../../source/community/contributors.md
+msgid "433"
+msgstr "433"
+
+#: ../../source/community/contributors.md
+msgid "[@U1stRsouland](https://github.com/U1stRsouland)"
+msgstr "[@U1stRsouland](https://github.com/U1stRsouland)"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[7b7475f](https://github.com/vllm-project/vllm-"
+"ascend/commit/7b7475fcde68fd1acf7eaec044f3f59f2ed974a2)"
+msgstr ""
+"[7b7475f](https://github.com/vllm-project/vllm-"
+"ascend/commit/7b7475fcde68fd1acf7eaec044f3f59f2ed974a2)"
+
+#: ../../source/community/contributors.md
+msgid "432"
+msgstr "432"
+
+#: ../../source/community/contributors.md
+msgid "[@KaiMa-endeavour](https://github.com/KaiMa-endeavour)"
+msgstr "[@KaiMa-endeavour](https://github.com/KaiMa-endeavour)"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[d525e72](https://github.com/vllm-project/vllm-"
+"ascend/commit/d525e72a609843e66afc1d14159bc93aee1ed1e7)"
+msgstr ""
+"[d525e72](https://github.com/vllm-project/vllm-"
+"ascend/commit/d525e72a609843e66afc1d14159bc93aee1ed1e7)"
+
+#: ../../source/community/contributors.md
+msgid "431"
+msgstr "431"
+
+#: ../../source/community/contributors.md
+msgid "[@Bybbbb11](https://github.com/Bybbbb11)"
+msgstr "[@Bybbbb11](https://github.com/Bybbbb11)"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[58c59ca](https://github.com/vllm-project/vllm-"
+"ascend/commit/58c59ca5666394c614e955b71f82247c27991b6f)"
+msgstr ""
+"[58c59ca](https://github.com/vllm-project/vllm-"
+"ascend/commit/58c59ca5666394c614e955b71f82247c27991b6f)"
+
+#: ../../source/community/contributors.md
+msgid "430"
+msgstr "430"
+
+#: ../../source/community/contributors.md
+msgid "[@zhangc10](https://github.com/zhangc10)"
+msgstr "[@zhangc10](https://github.com/zhangc10)"
+
+#: ../../source/community/contributors.md
+msgid "2026/06/01"
+msgstr "2026/06/01"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[8b2ec42](https://github.com/vllm-project/vllm-"
+"ascend/commit/8b2ec42febdfe53f57b9fcf18dd6f5dd9b2b1f86)"
+msgstr ""
+"[8b2ec42](https://github.com/vllm-project/vllm-"
+"ascend/commit/8b2ec42febdfe53f57b9fcf18dd6f5dd9b2b1f86)"
+
+#: ../../source/community/contributors.md
+msgid "429"
+msgstr "429"
+
+#: ../../source/community/contributors.md
+msgid "[@jyoung6652](https://github.com/jyoung6652)"
+msgstr "[@jyoung6652](https://github.com/jyoung6652)"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[d9d9e76](https://github.com/vllm-project/vllm-"
+"ascend/commit/d9d9e76912c4553423b512a4a88d981d4ecbf904)"
+msgstr ""
+"[d9d9e76](https://github.com/vllm-project/vllm-"
+"ascend/commit/d9d9e76912c4553423b512a4a88d981d4ecbf904)"
+
+#: ../../source/community/contributors.md
+msgid "428"
+msgstr "428"
+
+#: ../../source/community/contributors.md
+msgid "[@Biuapha](https://github.com/Biuapha)"
+msgstr "[@Biuapha](https://github.com/Biuapha)"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[c50023e](https://github.com/vllm-project/vllm-"
+"ascend/commit/c50023e347505badaa1c72d8f123d87a70be8d14)"
+msgstr ""
+"[c50023e](https://github.com/vllm-project/vllm-"
+"ascend/commit/c50023e347505badaa1c72d8f123d87a70be8d14)"
+
+#: ../../source/community/contributors.md
+msgid "427"
+msgstr "427"
+
+#: ../../source/community/contributors.md
+msgid "[@vladimirevmenoff](https://github.com/vladimirevmenoff)"
+msgstr "[@vladimirevmenoff](https://github.com/vladimirevmenoff)"
+
+#: ../../source/community/contributors.md
+msgid "2026/05/30"
+msgstr "2026/05/30"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[928fa1d](https://github.com/vllm-project/vllm-"
+"ascend/commit/928fa1d862a99230e3cfc69c394dcb8a01c334be)"
+msgstr ""
+"[928fa1d](https://github.com/vllm-project/vllm-"
+"ascend/commit/928fa1d862a99230e3cfc69c394dcb8a01c334be)"
+
+#: ../../source/community/contributors.md
+msgid "426"
+msgstr "426"
+
+#: ../../source/community/contributors.md
+msgid "[@ningjingbengxiaohai](https://github.com/ningjingbengxiaohai)"
+msgstr "[@ningjingbengxiaohai](https://github.com/ningjingbengxiaohai)"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[2a77209](https://github.com/vllm-project/vllm-"
+"ascend/commit/2a77209accf9a49845716cf79d4227bb9237ef32)"
+msgstr ""
+"[2a77209](https://github.com/vllm-project/vllm-"
+"ascend/commit/2a77209accf9a49845716cf79d4227bb9237ef32)"
+
+#: ../../source/community/contributors.md
+msgid "425"
+msgstr "425"
+
+#: ../../source/community/contributors.md
+msgid "[@xszbuaa](https://github.com/xszbuaa)"
+msgstr "[@xszbuaa](https://github.com/xszbuaa)"
+
+#: ../../source/community/contributors.md
+msgid "2026/05/29"
+msgstr "2026/05/29"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[3d0fafd](https://github.com/vllm-project/vllm-"
+"ascend/commit/3d0fafda9a0e46ad275ca2e062936d658f9d319a)"
+msgstr ""
+"[3d0fafd](https://github.com/vllm-project/vllm-"
+"ascend/commit/3d0fafda9a0e46ad275ca2e062936d658f9d319a)"
+
+#: ../../source/community/contributors.md
+msgid "424"
+msgstr "424"
+
+#: ../../source/community/contributors.md
+msgid "[@ZRICHARD9527](https://github.com/ZRICHARD9527)"
+msgstr "[@ZRICHARD9527](https://github.com/ZRICHARD9527)"
+
+#: ../../source/community/contributors.md
+msgid "2026/05/28"
+msgstr "2026/05/28"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[7372661](https://github.com/vllm-project/vllm-"
+"ascend/commit/737266135913650ca27e6a9726492e99764d225d)"
+msgstr ""
+"[7372661](https://github.com/vllm-project/vllm-"
+"ascend/commit/737266135913650ca27e6a9726492e99764d225d)"
+
+#: ../../source/community/contributors.md
+msgid "423"
+msgstr "423"
+
+#: ../../source/community/contributors.md
+msgid "[@xuchi-0808](https://github.com/xuchi-0808)"
+msgstr "[@xuchi-0808](https://github.com/xuchi-0808)"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[1133733](https://github.com/vllm-project/vllm-"
+"ascend/commit/11337339cc3de74042da731e249f2a0cd10ced2f)"
+msgstr ""
+"[1133733](https://github.com/vllm-project/vllm-"
+"ascend/commit/11337339cc3de74042da731e249f2a0cd10ced2f)"
+
+#: ../../source/community/contributors.md
+msgid "422"
+msgstr "422"
+
+#: ../../source/community/contributors.md
+msgid "[@CXY-Katrina](https://github.com/CXY-Katrina)"
+msgstr "[@CXY-Katrina](https://github.com/CXY-Katrina)"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[158635c](https://github.com/vllm-project/vllm-"
+"ascend/commit/158635cda8fb8de6d008038665b1730e46ca9052)"
+msgstr ""
+"[158635c](https://github.com/vllm-project/vllm-"
+"ascend/commit/158635cda8fb8de6d008038665b1730e46ca9052)"
+
+#: ../../source/community/contributors.md
+msgid "421"
+msgstr "421"
+
+#: ../../source/community/contributors.md
+msgid "2026/05/27"
+msgstr "2026/05/27"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[a61e7fd](https://github.com/vllm-project/vllm-"
+"ascend/commit/a61e7fd3af6529386a489a28848623f250fabac9)"
+msgstr ""
+"[a61e7fd](https://github.com/vllm-project/vllm-"
+"ascend/commit/a61e7fd3af6529386a489a28848623f250fabac9)"
+
+#: ../../source/community/contributors.md
+msgid "420"
+msgstr "420"
+
+#: ../../source/community/contributors.md
+msgid "[@zhao-stack](https://github.com/zhao-stack)"
+msgstr "[@zhao-stack](https://github.com/zhao-stack)"
+
+#: ../../source/community/contributors.md
+msgid "2026/05/25"
+msgstr "2026/05/25"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[59517e8](https://github.com/vllm-project/vllm-"
+"ascend/commit/59517e88c211bb75036dcbe4b463553e371de768)"
+msgstr ""
+"[59517e8](https://github.com/vllm-project/vllm-"
+"ascend/commit/59517e88c211bb75036dcbe4b463553e371de768)"
+
+#: ../../source/community/contributors.md
+msgid "419"
+msgstr "419"
+
+#: ../../source/community/contributors.md
+msgid "[@hzx55906](https://github.com/hzx55906)"
+msgstr "[@hzx55906](https://github.com/hzx55906)"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[526141c](https://github.com/vllm-project/vllm-"
+"ascend/commit/526141cf32ddb29246ed0bff05f87e07a2e90f90)"
+msgstr ""
+"[526141c](https://github.com/vllm-project/vllm-"
+"ascend/commit/526141cf32ddb29246ed0bff05f87e07a2e90f90)"
+
+#: ../../source/community/contributors.md
+msgid "418"
+msgstr "418"
+
+#: ../../source/community/contributors.md
+msgid "[@ltdo111](https://github.com/ltdo111)"
+msgstr "[@ltdo111](https://github.com/ltdo111)"
+
+#: ../../source/community/contributors.md
+msgid "2026/05/23"
+msgstr "2026/05/23"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[2331144](https://github.com/vllm-project/vllm-"
+"ascend/commit/2331144f07d590e29a2fab5d8e9b2d323b052107)"
+msgstr ""
+"[2331144](https://github.com/vllm-project/vllm-"
+"ascend/commit/2331144f07d590e29a2fab5d8e9b2d323b052107)"
+
+#: ../../source/community/contributors.md
+msgid "417"
+msgstr "417"
+
+#: ../../source/community/contributors.md
+msgid "[@Shelleyaaa](https://github.com/Shelleyaaa)"
+msgstr "[@Shelleyaaa](https://github.com/Shelleyaaa)"
+
+#: ../../source/community/contributors.md
+msgid "2026/05/22"
+msgstr "2026/05/22"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[7726528](https://github.com/vllm-project/vllm-"
+"ascend/commit/7726528ec34cec8a72931e65215096e3792cbf4a)"
+msgstr ""
+"[7726528](https://github.com/vllm-project/vllm-"
+"ascend/commit/7726528ec34cec8a72931e65215096e3792cbf4a)"
+
+#: ../../source/community/contributors.md
+msgid "416"
+msgstr "416"
+
+#: ../../source/community/contributors.md
+msgid "[@nanxingMy](https://github.com/nanxingMy)"
+msgstr "[@nanxingMy](https://github.com/nanxingMy)"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[c88eac1](https://github.com/vllm-project/vllm-"
+"ascend/commit/c88eac1206a13a6bce0f7783b3be066fa514de39)"
+msgstr ""
+"[c88eac1](https://github.com/vllm-project/vllm-"
+"ascend/commit/c88eac1206a13a6bce0f7783b3be066fa514de39)"
+
+#: ../../source/community/contributors.md
+msgid "415"
+msgstr "415"
+
+#: ../../source/community/contributors.md
+msgid "[@MosCloud](https://github.com/MosCloud)"
+msgstr "[@MosCloud](https://github.com/MosCloud)"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[20e338b](https://github.com/vllm-project/vllm-"
+"ascend/commit/20e338bd7c1267799dcf611acee025f37cdc9535)"
+msgstr ""
+"[20e338b](https://github.com/vllm-project/vllm-"
+"ascend/commit/20e338bd7c1267799dcf611acee025f37cdc9535)"
+
+#: ../../source/community/contributors.md
+msgid "414"
+msgstr "414"
+
+#: ../../source/community/contributors.md
+msgid "[@Tian-Fantasea](https://github.com/Tian-Fantasea)"
+msgstr "[@Tian-Fantasea](https://github.com/Tian-Fantasea)"
+
+#: ../../source/community/contributors.md
+msgid "2026/05/21"
+msgstr "2026/05/21"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[364e665](https://github.com/vllm-project/vllm-"
+"ascend/commit/364e6657077044d189d3c2996796a34b0fc9f611)"
+msgstr ""
+"[364e665](https://github.com/vllm-project/vllm-"
+"ascend/commit/364e6657077044d189d3c2996796a34b0fc9f611)"
+
+#: ../../source/community/contributors.md
+msgid "413"
+msgstr "413"
+
+#: ../../source/community/contributors.md
+msgid "[@panther-zhu](https://github.com/panther-zhu)"
+msgstr "[@panther-zhu](https://github.com/panther-zhu)"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[68a4db5](https://github.com/vllm-project/vllm-"
+"ascend/commit/68a4db5554475d8e413f13d84016b86f5d2c18b7)"
+msgstr ""
+"[68a4db5](https://github.com/vllm-project/vllm-"
+"ascend/commit/68a4db5554475d8e413f13d84016b86f5d2c18b7)"
+
+#: ../../source/community/contributors.md
+msgid "412"
+msgstr "412"
+
+#: ../../source/community/contributors.md
+msgid "[@lizy124](https://github.com/lizy124)"
+msgstr "[@lizy124](https://github.com/lizy124)"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[958daf8](https://github.com/vllm-project/vllm-"
+"ascend/commit/958daf83205ecad0afec3784be0b2a8b38725cd8)"
+msgstr ""
+"[958daf8](https://github.com/vllm-project/vllm-"
+"ascend/commit/958daf83205ecad0afec3784be0b2a8b38725cd8)"
+
+#: ../../source/community/contributors.md
+msgid "411"
+msgstr "411"
+
+#: ../../source/community/contributors.md
+msgid "[@lihaofei-2026](https://github.com/lihaofei-2026)"
+msgstr "[@lihaofei-2026](https://github.com/lihaofei-2026)"
+
+#: ../../source/community/contributors.md
+msgid "2026/05/20"
+msgstr "2026/05/20"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[c03c1ce](https://github.com/vllm-project/vllm-"
+"ascend/commit/c03c1ce422fb011261ffb397386f6aabb198fe8d)"
+msgstr ""
+"[c03c1ce](https://github.com/vllm-project/vllm-"
+"ascend/commit/c03c1ce422fb011261ffb397386f6aabb198fe8d)"
+
+#: ../../source/community/contributors.md
+msgid "410"
+msgstr "410"
+
+#: ../../source/community/contributors.md
+msgid "[@yuhongming-2026](https://github.com/yuhongming-2026)"
+msgstr "[@yuhongming-2026](https://github.com/yuhongming-2026)"
+
+#: ../../source/community/contributors.md
+msgid "2026/05/19"
+msgstr "2026/05/19"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[eb7e9b0](https://github.com/vllm-project/vllm-"
+"ascend/commit/eb7e9b0f10814e251ae4d7ebc1c87e1ff6d1ba95)"
+msgstr ""
+"[eb7e9b0](https://github.com/vllm-project/vllm-"
+"ascend/commit/eb7e9b0f10814e251ae4d7ebc1c87e1ff6d1ba95)"
+
+#: ../../source/community/contributors.md
+msgid "409"
+msgstr "409"
+
+#: ../../source/community/contributors.md
+msgid "[@mccube2000](https://github.com/mccube2000)"
+msgstr "[@mccube2000](https://github.com/mccube2000)"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[8f5962b](https://github.com/vllm-project/vllm-"
+"ascend/commit/8f5962baf97a650dda174af1f0fe5036cdf8e969)"
+msgstr ""
+"[8f5962b](https://github.com/vllm-project/vllm-"
+"ascend/commit/8f5962baf97a650dda174af1f0fe5036cdf8e969)"
+
+#: ../../source/community/contributors.md
+msgid "408"
+msgstr "408"
+
+#: ../../source/community/contributors.md
+msgid "[@ZeroFadeAway](https://github.com/ZeroFadeAway)"
+msgstr "[@ZeroFadeAway](https://github.com/ZeroFadeAway)"
+
+#: ../../source/community/contributors.md
+msgid "2026/05/18"
+msgstr "2026/05/18"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[8dced20](https://github.com/vllm-project/vllm-"
+"ascend/commit/8dced2017ebcf80bf2430043092e011ab795bd2e)"
+msgstr ""
+"[8dced20](https://github.com/vllm-project/vllm-"
+"ascend/commit/8dced2017ebcf80bf2430043092e011ab795bd2e)"
+
+#: ../../source/community/contributors.md
+msgid "407"
+msgstr "407"
+
+#: ../../source/community/contributors.md
+msgid "[@gaozihao-shy](https://github.com/gaozihao-shy)"
+msgstr "[@gaozihao-shy](https://github.com/gaozihao-shy)"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[d857777](https://github.com/vllm-project/vllm-"
+"ascend/commit/d857777d9ce709877203ebe139d58c3b888b7ee0)"
+msgstr ""
+"[d857777](https://github.com/vllm-project/vllm-"
+"ascend/commit/d857777d9ce709877203ebe139d58c3b888b7ee0)"
+
+#: ../../source/community/contributors.md
+msgid "406"
+msgstr "406"
+
+#: ../../source/community/contributors.md
+msgid "[@quancs](https://github.com/quancs)"
+msgstr "[@quancs](https://github.com/quancs)"
+
+#: ../../source/community/contributors.md
+msgid "2026/05/16"
+msgstr "2026/05/16"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[a45cdf9](https://github.com/vllm-project/vllm-"
+"ascend/commit/a45cdf9b99fb8b931269be14532323cdbf89ec7b)"
+msgstr ""
+"[a45cdf9](https://github.com/vllm-project/vllm-"
+"ascend/commit/a45cdf9b99fb8b931269be14532323cdbf89ec7b)"
+
+#: ../../source/community/contributors.md
+msgid "405"
+msgstr "405"
+
+#: ../../source/community/contributors.md
+msgid "[@vvaen](https://github.com/vvaen)"
+msgstr "[@vvaen](https://github.com/vvaen)"
+
+#: ../../source/community/contributors.md
+msgid "2026/05/15"
+msgstr "2026/05/15"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[ac357ed](https://github.com/vllm-project/vllm-"
+"ascend/commit/ac357ed4bbc91c6ad16ba028aa0a76066940d0f4)"
+msgstr ""
+"[ac357ed](https://github.com/vllm-project/vllm-"
+"ascend/commit/ac357ed4bbc91c6ad16ba028aa0a76066940d0f4)"
+
+#: ../../source/community/contributors.md
+msgid "404"
+msgstr "404"
+
+#: ../../source/community/contributors.md
+msgid "[@wenjinhust](https://github.com/wenjinhust)"
+msgstr "[@wenjinhust](https://github.com/wenjinhust)"
+
+#: ../../source/community/contributors.md
+msgid "2026/05/14"
+msgstr "2026/05/14"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[41e4c70](https://github.com/vllm-project/vllm-"
+"ascend/commit/41e4c7043432c65a70cf0478668b234967c60eec)"
+msgstr ""
+"[41e4c70](https://github.com/vllm-project/vllm-"
+"ascend/commit/41e4c7043432c65a70cf0478668b234967c60eec)"
+
+#: ../../source/community/contributors.md
+msgid "403"
+msgstr "403"
+
+#: ../../source/community/contributors.md
+msgid "[@ccc000-cell](https://github.com/ccc000-cell)"
+msgstr "[@ccc000-cell](https://github.com/ccc000-cell)"
+
+#: ../../source/community/contributors.md
+msgid "2026/05/12"
+msgstr "2026/05/12"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[540749d](https://github.com/vllm-project/vllm-"
+"ascend/commit/540749d35548c13ab75e278991f445cdb3df8c91)"
+msgstr ""
+"[540749d](https://github.com/vllm-project/vllm-"
+"ascend/commit/540749d35548c13ab75e278991f445cdb3df8c91)"
+
+#: ../../source/community/contributors.md
+msgid "402"
+msgstr "402"
+
+#: ../../source/community/contributors.md
+msgid "[@AlanisZomeg](https://github.com/AlanisZomeg)"
+msgstr "[@AlanisZomeg](https://github.com/AlanisZomeg)"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[12a3490](https://github.com/vllm-project/vllm-"
+"ascend/commit/12a34900052a4d410fcc0707b857b8a1d1743ded)"
+msgstr ""
+"[12a3490](https://github.com/vllm-project/vllm-"
+"ascend/commit/12a34900052a4d410fcc0707b857b8a1d1743ded)"
+
+#: ../../source/community/contributors.md
+msgid "401"
+msgstr "401"
+
+#: ../../source/community/contributors.md
+msgid "[@zzzzzmeng](https://github.com/zzzzzmeng)"
+msgstr "[@zzzzzmeng](https://github.com/zzzzzmeng)"
+
+#: ../../source/community/contributors.md
+msgid "2026/05/08"
+msgstr "2026/05/08"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[4b3a2af](https://github.com/vllm-project/vllm-"
+"ascend/commit/4b3a2af7170936a0fc1505b85ba246886d433d39)"
+msgstr ""
+"[4b3a2af](https://github.com/vllm-project/vllm-"
+"ascend/commit/4b3a2af7170936a0fc1505b85ba246886d433d39)"
+
+#: ../../source/community/contributors.md
+msgid "400"
+msgstr "400"
+
+#: ../../source/community/contributors.md
+msgid "[@Maybe2191](https://github.com/Maybe2191)"
+msgstr "[@Maybe2191](https://github.com/Maybe2191)"
+
+#: ../../source/community/contributors.md
+msgid "2026/05/07"
+msgstr "2026/05/07"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[66cc615](https://github.com/vllm-project/vllm-"
+"ascend/commit/66cc615237aa0eceaca70fd0f492d83bf506c926)"
+msgstr ""
+"[66cc615](https://github.com/vllm-project/vllm-"
+"ascend/commit/66cc615237aa0eceaca70fd0f492d83bf506c926)"
+
+#: ../../source/community/contributors.md
+msgid "399"
+msgstr "399"
+
+#: ../../source/community/contributors.md
+msgid "[@ChefWu551](https://github.com/ChefWu551)"
+msgstr "[@ChefWu551](https://github.com/ChefWu551)"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[ba074eb](https://github.com/vllm-project/vllm-"
+"ascend/commit/ba074eb4bf095264b2d1280447281633ab66e112)"
+msgstr ""
+"[ba074eb](https://github.com/vllm-project/vllm-"
+"ascend/commit/ba074eb4bf095264b2d1280447281633ab66e112)"
+
+#: ../../source/community/contributors.md
+msgid "398"
+msgstr "398"
+
+#: ../../source/community/contributors.md
+msgid "[@weixinAc](https://github.com/weixinAc)"
+msgstr "[@weixinAc](https://github.com/weixinAc)"
+
+#: ../../source/community/contributors.md
+msgid "2026/05/06"
+msgstr "2026/05/06"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[e7eb844](https://github.com/vllm-project/vllm-"
+"ascend/commit/e7eb844494a45b2bee2df8e5c6de01bf9d6d01fd)"
+msgstr ""
+"[e7eb844](https://github.com/vllm-project/vllm-"
+"ascend/commit/e7eb844494a45b2bee2df8e5c6de01bf9d6d01fd)"
+
+#: ../../source/community/contributors.md
+msgid "397"
+msgstr "397"
+
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend-docs\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#: ../../source/community/contributors.md
+msgid "[@Lin-Qingyang-Alec](https://github.com/Lin-Qingyang-Alec)"
+msgstr "[@Lin-Qingyang-Alec](https://github.com/Lin-Qingyang-Alec)"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[b3196cc](https://github.com/vllm-project/vllm-"
+"ascend/commit/b3196cc80113402d5aad1045abb5de200315b22c)"
+msgstr ""
+"[b3196cc](https://github.com/vllm-project/vllm-"
+"ascend/commit/b3196cc80113402d5aad1045abb5de200315b22c)"
+
+#: ../../source/community/contributors.md
+msgid "396"
+msgstr "396"
+
+#: ../../source/community/contributors.md
+msgid "[@chen-commits](https://github.com/chen-commits)"
+msgstr "[@chen-commits](https://github.com/chen-commits)"
+
+#: ../../source/community/contributors.md
+msgid "2026/05/02"
+msgstr "2026/05/02"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[a5ec266](https://github.com/vllm-project/vllm-"
+"ascend/commit/a5ec26693eec9af9a92b89a18e7111507819e45b)"
+msgstr ""
+"[a5ec266](https://github.com/vllm-project/vllm-"
+"ascend/commit/a5ec26693eec9af9a92b89a18e7111507819e45b)"
+
+#: ../../source/community/contributors.md
+msgid "395"
+msgstr "395"
+
+#: ../../source/community/contributors.md
+msgid "[@alex101-ops](https://github.com/alex101-ops)"
+msgstr "[@alex101-ops](https://github.com/alex101-ops)"
+
+#: ../../source/community/contributors.md
+msgid "2026/04/30"
+msgstr "2026/04/30"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[89b739a](https://github.com/vllm-project/vllm-"
+"ascend/commit/89b739a31e9b92492c9cebd566a08f872609c39b)"
+msgstr ""
+"[89b739a](https://github.com/vllm-project/vllm-"
+"ascend/commit/89b739a31e9b92492c9cebd566a08f872609c39b)"
+
+#: ../../source/community/contributors.md
+msgid "394"
+msgstr "394"
+
+#: ../../source/community/contributors.md
+msgid "[@lihaokun-2026](https://github.com/lihaokun-2026)"
+msgstr "[@lihaokun-2026](https://github.com/lihaokun-2026)"
+
+#: ../../source/community/contributors.md
+msgid "2026/04/22"
+msgstr "2026/04/22"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[c7fde3b](https://github.com/vllm-project/vllm-"
+"ascend/commit/c7fde3b068b3c3223edafba491a7de93f88d39e3)"
+msgstr ""
+"[c7fde3b](https://github.com/vllm-project/vllm-"
+"ascend/commit/c7fde3b068b3c3223edafba491a7de93f88d39e3)"
+
+#: ../../source/community/contributors.md
+msgid "393"
+msgstr "393"
+
+#: ../../source/community/contributors.md
+msgid "[@KlyzhenkoVadim](https://github.com/KlyzhenkoVadim)"
+msgstr "[@KlyzhenkoVadim](https://github.com/KlyzhenkoVadim)"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[4b6a559](https://github.com/vllm-project/vllm-"
+"ascend/commit/4b6a559872b93ba8b3a66a2504fae09647c5bd5a)"
+msgstr ""
+"[4b6a559](https://github.com/vllm-project/vllm-"
+"ascend/commit/4b6a559872b93ba8b3a66a2504fae09647c5bd5a)"
+
+#: ../../source/community/contributors.md
+msgid "392"
+msgstr "392"
+
+#: ../../source/community/contributors.md
+msgid "[@csoulnd](https://github.com/csoulnd)"
+msgstr "[@csoulnd](https://github.com/csoulnd)"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[fe47bf3](https://github.com/vllm-project/vllm-"
+"ascend/commit/fe47bf31e92535ffcf4df19d463ba84daf97523c)"
+msgstr ""
+"[fe47bf3](https://github.com/vllm-project/vllm-"
+"ascend/commit/fe47bf31e92535ffcf4df19d463ba84daf97523c)"
+
+#: ../../source/community/contributors.md
+msgid "391"
+msgstr "391"
+
+#: ../../source/community/contributors.md
+msgid "[@baoxuebin-2026](https://github.com/baoxuebin-2026)"
+msgstr "[@baoxuebin-2026](https://github.com/baoxuebin-2026)"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[1209583](https://github.com/vllm-project/vllm-"
+"ascend/commit/120958309849b36bc617e822cbf2ae384328389b)"
+msgstr ""
+"[1209583](https://github.com/vllm-project/vllm-"
+"ascend/commit/120958309849b36bc617e822cbf2ae384328389b)"
+
+#: ../../source/community/contributors.md
+msgid "390"
+msgstr "390"
+
+#: ../../source/community/contributors.md
+msgid "[@anning-2026](https://github.com/anning-2026)"
+msgstr "[@anning-2026](https://github.com/anning-2026)"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[c7f6d64](https://github.com/vllm-project/vllm-"
+"ascend/commit/c7f6d649dce58444d257e4f083c875423b4ebabe)"
+msgstr ""
+"[c7f6d64](https://github.com/vllm-project/vllm-"
+"ascend/commit/c7f6d649dce58444d257e4f083c875423b4ebabe)"
+
+#: ../../source/community/contributors.md
+msgid "389"
+msgstr "389"
+
+#: ../../source/community/contributors.md
+msgid "[@semiba11er](https://github.com/semiba11er)"
+msgstr "[@semiba11er](https://github.com/semiba11er)"
+
+#: ../../source/community/contributors.md
+msgid "2026/04/21"
+msgstr "2026/04/21"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[87200ac](https://github.com/vllm-project/vllm-"
+"ascend/commit/87200ac0b270bf5be555a4a4d8fb57e8d2cb89f4)"
+msgstr ""
+"[87200ac](https://github.com/vllm-project/vllm-"
+"ascend/commit/87200ac0b270bf5be555a4a4d8fb57e8d2cb89f4)"
+
+#: ../../source/community/contributors.md
+msgid "388"
+msgstr "388"
+
+#: ../../source/community/contributors.md
+msgid "[@linsheng1](https://github.com/linsheng1)"
+msgstr "[@linsheng1](https://github.com/linsheng1)"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[84bddfd](https://github.com/vllm-project/vllm-"
+"ascend/commit/84bddfdccc9224dbb5af6bbd14db299ebc7d0b4d)"
+msgstr ""
+"[84bddfd](https://github.com/vllm-project/vllm-"
+"ascend/commit/84bddfdccc9224dbb5af6bbd14db299ebc7d0b4d)"
+
+#: ../../source/community/contributors.md
+msgid "387"
+msgstr "387"
+
+#: ../../source/community/contributors.md
+msgid "[@donpromax](https://github.com/donpromax)"
+msgstr "[@donpromax](https://github.com/donpromax)"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[756029b](https://github.com/vllm-project/vllm-"
+"ascend/commit/756029b50dcce61d82d08291ae8dc5f9f88b2cba)"
+msgstr ""
+"[756029b](https://github.com/vllm-project/vllm-"
+"ascend/commit/756029b50dcce61d82d08291ae8dc5f9f88b2cba)"
+
+#: ../../source/community/contributors.md
+msgid "386"
+msgstr "386"
+
+#: ../../source/community/contributors.md
+msgid "[@zzzzzz198](https://github.com/zzzzzz198)"
+msgstr "[@zzzzzz198](https://github.com/zzzzzz198)"
+
+#: ../../source/community/contributors.md
+msgid "2026/04/17"
+msgstr "2026/04/17"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[3cc9bce](https://github.com/vllm-project/vllm-"
+"ascend/commit/3cc9bce0f423513474559bf51f55cbb767bffd4a)"
+msgstr ""
+"[3cc9bce](https://github.com/vllm-project/vllm-"
+"ascend/commit/3cc9bce0f423513474559bf51f55cbb767bffd4a)"
+
+#: ../../source/community/contributors.md
+msgid "385"
+msgstr "385"
+
+#: ../../source/community/contributors.md
+msgid "[@triomino](https://github.com/triomino)"
+msgstr "[@triomino](https://github.com/triomino)"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[a837599](https://github.com/vllm-project/vllm-"
+"ascend/commit/a83759948ddadf2b2e9915cb34ce05edcf06ddab)"
+msgstr ""
+"[a837599](https://github.com/vllm-project/vllm-"
+"ascend/commit/a83759948ddadf2b2e9915cb34ce05edcf06ddab)"
+
+#: ../../source/community/contributors.md
+msgid "384"
+msgstr "384"
+
+#: ../../source/community/contributors.md
+msgid "[@skf-1999](https://github.com/skf-1999)"
+msgstr "[@skf-1999](https://github.com/skf-1999)"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[b7f92f3](https://github.com/vllm-project/vllm-"
+"ascend/commit/b7f92f37007b1eba5889618d4549c39d2e4b6ab0)"
+msgstr ""
+"[b7f92f3](https://github.com/vllm-project/vllm-"
+"ascend/commit/b7f92f37007b1eba5889618d4549c39d2e4b6ab0)"
+
+#: ../../source/community/contributors.md
+msgid "383"
+msgstr "383"
+
+#: ../../source/community/contributors.md
+msgid "[@orangeBoxun](https://github.com/orangeBoxun)"
+msgstr "[@orangeBoxun](https://github.com/orangeBoxun)"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[7c73dba](https://github.com/vllm-project/vllm-"
+"ascend/commit/7c73dba4dd6108f4f3d8b391e7dc9c0fe8806b25)"
+msgstr ""
+"[7c73dba](https://github.com/vllm-project/vllm-"
+"ascend/commit/7c73dba4dd6108f4f3d8b391e7dc9c0fe8806b25)"
+
+#: ../../source/community/contributors.md
+msgid "382"
+msgstr "382"
+
+#: ../../source/community/contributors.md
+msgid "[@freyfwt](https://github.com/freyfwt)"
+msgstr "[@freyfwt](https://github.com/freyfwt)"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[fed5c02](https://github.com/vllm-project/vllm-"
+"ascend/commit/fed5c02cd9afd88eb9a2b2fa953d5b3f3da3abfd)"
+msgstr ""
+"[fed5c02](https://github.com/vllm-project/vllm-"
+"ascend/commit/fed5c02cd9afd88eb9a2b2fa953d5b3f3da3abfd)"
+
+#: ../../source/community/contributors.md
+msgid "381"
+msgstr "381"
+
+#: ../../source/community/contributors.md
+msgid "[@Goalina](https://github.com/Goalina)"
+msgstr "[@Goalina](https://github.com/Goalina)"
+
+#: ../../source/community/contributors.md
+msgid "2026/04/16"
+msgstr "2026/04/16"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[69eb7ef](https://github.com/vllm-project/vllm-"
+"ascend/commit/69eb7efcbec29893b60187aa475402bead9ecb1f)"
+msgstr ""
+"[69eb7ef](https://github.com/vllm-project/vllm-"
+"ascend/commit/69eb7efcbec29893b60187aa475402bead9ecb1f)"
+
+#: ../../source/community/contributors.md
+msgid "380"
+msgstr "380"
+
+#: ../../source/community/contributors.md
+msgid "[@yangjiuhua](https://github.com/yangjiuhua)"
+msgstr "[@yangjiuhua](https://github.com/yangjiuhua)"
+
+msgid ""
+msgstr ""
+
+#: ../../source/community/contributors.md
+msgid "2026/04/15"
+msgstr "2026/04/15"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[73aac48](https://github.com/vllm-project/vllm-"
+"ascend/commit/73aac4818165dac8b2bdd49bb5b3b121e80ea895)"
+msgstr ""
+"[73aac48](https://github.com/vllm-project/vllm-"
+"ascend/commit/73aac4818165dac8b2bdd49bb5b3b121e80ea895)"
+
+#: ../../source/community/contributors.md
+msgid "379"
+msgstr "379"
+
+#: ../../source/community/contributors.md
+msgid "[@sunshine202600](https://github.com/sunshine202600)"
+msgstr "[@sunshine202600](https://github.com/sunshine202600)"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[b414cff](https://github.com/vllm-project/vllm-"
+"ascend/commit/b414cff937ff1c8f18a0f08fdcbd063fbd96bf79)"
+msgstr ""
+"[b414cff](https://github.com/vllm-project/vllm-"
+"ascend/commit/b414cff937ff1c8f18a0f08fdcbd063fbd96bf79)"
+
+#: ../../source/community/contributors.md
+msgid "378"
+msgstr "378"
+
+#: ../../source/community/contributors.md
+msgid "[@SumrainChan](https://github.com/SumrainChan)"
+msgstr "[@SumrainChan](https://github.com/SumrainChan)"
+
+#: ../../source/community/contributors.md
+msgid "2026/04/14"
+msgstr "2026/04/14"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[69c4499](https://github.com/vllm-project/vllm-"
+"ascend/commit/69c4499180c63ae578b6728a47545082c843e811)"
+msgstr ""
+"[69c4499](https://github.com/vllm-project/vllm-"
+"ascend/commit/69c4499180c63ae578b6728a47545082c843e811)"
+
+#: ../../source/community/contributors.md
+msgid "377"
+msgstr "377"
+
+#: ../../source/community/contributors.md
+msgid "[@justice-dance](https://github.com/justice-dance)"
+msgstr "[@justice-dance](https://github.com/justice-dance)"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[9e87895](https://github.com/vllm-project/vllm-"
+"ascend/commit/9e87895a8b0d8052b301309395a1afc083faf9a3)"
+msgstr ""
+"[9e87895](https://github.com/vllm-project/vllm-"
+"ascend/commit/9e87895a8b0d8052b301309395a1afc083faf9a3)"
+
+#: ../../source/community/contributors.md
+msgid "376"
+msgstr "376"
+
+#: ../../source/community/contributors.md
+msgid "[@z00918512](https://github.com/z00918512)"
+msgstr "[@z00918512](https://github.com/z00918512)"
+
+#: ../../source/community/contributors.md
+msgid "2026/04/13"
+msgstr "2026/04/13"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[2f4d55e](https://github.com/vllm-project/vllm-"
+"ascend/commit/2f4d55e7e88ca3ff8960bccac749eb380f0c423d)"
+msgstr ""
+"[2f4d55e](https://github.com/vllm-project/vllm-"
+"ascend/commit/2f4d55e7e88ca3ff8960bccac749eb380f0c423d)"
+
+#: ../../source/community/contributors.md
+msgid "375"
+msgstr "375"
+
+#: ../../source/community/contributors.md
+msgid "2026/04/08"
+msgstr "2026/04/08"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[2dbfe46](https://github.com/vllm-project/vllm-"
+"ascend/commit/2dbfe465d522e8793072577673723b0c46805305)"
+msgstr ""
+"[2dbfe46](https://github.com/vllm-project/vllm-"
+"ascend/commit/2dbfe465d522e8793072577673723b0c46805305)"
+
+#: ../../source/community/contributors.md
+msgid "374"
+msgstr "374"
+
+#: ../../source/community/contributors.md
+msgid "[@SijieFu](https://github.com/SijieFu)"
+msgstr "[@SijieFu](https://github.com/SijieFu)"
+
+#: ../../source/community/contributors.md
+msgid "2026/04/03"
+msgstr "2026/04/03"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[223f647](https://github.com/vllm-project/vllm-"
+"ascend/commit/223f647bdeee3381dd07d066926c4db5879f6c7e)"
+msgstr ""
+"[223f647](https://github.com/vllm-project/vllm-"
+"ascend/commit/223f647bdeee3381dd07d066926c4db5879f6c7e)"
+
+#: ../../source/community/contributors.md
+msgid "373"
+msgstr "373"
+
+#: ../../source/community/contributors.md
+msgid "[@lcfenglinwan](https://github.com/lcfenglinwan)"
+msgstr "[@lcfenglinwan](https://github.com/lcfenglinwan)"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[0d768aa](https://github.com/vllm-project/vllm-"
+"ascend/commit/0d768aa9434e947fc6e15a5721c90877be325c76)"
+msgstr ""
+"[0d768aa](https://github.com/vllm-project/vllm-"
+"ascend/commit/0d768aa9434e947fc6e15a5721c90877be325c76)"
+
+#: ../../source/community/contributors.md
+msgid "372"
+msgstr "372"
+
+#: ../../source/community/contributors.md
+msgid "[@AyiStar](https://github.com/AyiStar)"
+msgstr "[@AyiStar](https://github.com/AyiStar)"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[0fccd72](https://github.com/vllm-project/vllm-"
+"ascend/commit/0fccd729be06d12f5b3902be1e3af5541c3143c5)"
+msgstr ""
+"[0fccd72](https://github.com/vllm-project/vllm-"
+"ascend/commit/0fccd729be06d12f5b3902be1e3af5541c3143c5)"
+
+#: ../../source/community/contributors.md
+msgid "371"
+msgstr "371"
+
+#: ../../source/community/contributors.md
+msgid "[@Cztk5380](https://github.com/Cztk5380)"
+msgstr "[@Cztk5380](https://github.com/Cztk5380)"
+
+#: ../../source/community/contributors.md
+msgid "2026/03/30"
+msgstr "2026/03/30"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[7465131](https://github.com/vllm-project/vllm-"
+"ascend/commit/7465131074cddba670efa02cc484eba7d5c9bda7)"
+msgstr ""
+"[7465131](https://github.com/vllm-project/vllm-"
+"ascend/commit/7465131074cddba670efa02cc484eba7d5c9bda7)"
+
+#: ../../source/community/contributors.md
+msgid "370"
+msgstr "370"
+
+#: ../../source/community/contributors.md
+msgid "[@Milkyyx](https://github.com/Milkyyx)"
+msgstr "[@Milkyyx](https://github.com/Milkyyx)"
+
+#: ../../source/community/contributors.md
+msgid "2026/03/29"
+msgstr "2026/03/29"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[11e0583](https://github.com/vllm-project/vllm-"
+"ascend/commit/11e0583474434de15a8968b7fe76a8d5da40f6e7)"
+msgstr ""
+"[11e0583](https://github.com/vllm-project/vllm-"
+"ascend/commit/11e0583474434de15a8968b7fe76a8d5da40f6e7)"
+
+#: ../../source/community/contributors.md
+msgid "369"
+msgstr "369"
+
+#: ../../source/community/contributors.md
+msgid "[@yangsonglin13](https://github.com/yangsonglin13)"
+msgstr "[@yangsonglin13](https://github.com/yangsonglin13)"
+
+#: ../../source/community/contributors.md
+msgid "2026/03/27"
+msgstr "2026/03/27"
+
+#: ../../source/community/contributors.md
+msgid "368"
+msgstr "368"
+
+#: ../../source/community/contributors.md
+msgid "[@YangShuai52](https://github.com/YangShuai52)"
+msgstr "[@YangShuai52](https://github.com/YangShuai52)"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[c53c3f5](https://github.com/vllm-project/vllm-"
+"ascend/commit/c53c3f58180dcd50fd485926e81532151bb19035)"
+msgstr ""
+"[c53c3f5](https://github.com/vllm-project/vllm-"
+"ascend/commit/c53c3f58180dcd50fd485926e81532151bb19035)"
+
+#: ../../source/community/contributors.md
+msgid "367"
+msgstr "367"
+
+#: ../../source/community/contributors.md
+msgid "2026/03/26"
+msgstr "2026/03/26"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[505e2bd](https://github.com/vllm-project/vllm-"
+"ascend/commit/505e2bddf5c0fe32f2ae0543fa1f7fd6adecab3e)"
+msgstr ""
+"[505e2bd](https://github.com/vllm-project/vllm-"
+"ascend/commit/505e2bddf5c0fe32f2ae0543fa1f7fd6adecab3e)"
+
+#: ../../source/community/contributors.md
+msgid "366"
+msgstr "366"
+
+#: ../../source/community/contributors.md
+msgid "[@PHOEBEMOON0802](https://github.com/PHOEBEMOON0802)"
+msgstr "[@PHOEBEMOON0802](https://github.com/PHOEBEMOON0802)"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[55c6800](https://github.com/vllm-project/vllm-"
+"ascend/commit/55c680073d07ee65b6683bf5b49039141089a877)"
+msgstr ""
+"[55c6800](https://github.com/vllm-project/vllm-"
+"ascend/commit/55c680073d07ee65b6683bf5b49039141089a877)"
+
+#: ../../source/community/contributors.md
+msgid "365"
+msgstr "365"
+
+#: ../../source/community/contributors.md
+msgid "[@lenghuixing0330](https://github.com/lenghuixing0330)"
+msgstr "[@lenghuixing0330](https://github.com/lenghuixing0330)"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[1a7cbdb](https://github.com/vllm-project/vllm-"
+"ascend/commit/1a7cbdbaad308ac02f8fce47bb6cbf29dda76e0c)"
+msgstr ""
+"[1a7cbdb](https://github.com/vllm-project/vllm-"
+"ascend/commit/1a7cbdbaad308ac02f8fce47bb6cbf29dda76e0c)"
+
+#: ../../source/community/contributors.md
+msgid "364"
+msgstr "364"
+
+#: ../../source/community/contributors.md
+msgid "[@HarpsealCC](https://github.com/HarpsealCC)"
+msgstr "[@HarpsealCC](https://github.com/HarpsealCC)"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[fe7097f](https://github.com/vllm-project/vllm-"
+"ascend/commit/fe7097f3c663af83e39c19358c184913b10c56a3)"
+msgstr ""
+"[fe7097f](https://github.com/vllm-project/vllm-"
+"ascend/commit/fe7097f3c663af83e39c19358c184913b10c56a3)"
+
+#: ../../source/community/contributors.md
+msgid "363"
+msgstr "363"
+
+#: ../../source/community/contributors.md
+msgid "[@cvSoldier](https://github.com/cvSoldier)"
+msgstr "[@cvSoldier](https://github.com/cvSoldier)"
+
+msgid ""
+"[71ac6d4](https://github.com/vllm-project/vllm-"
+"ascend/commit/71ac6d4f7de55866355351359f4bdb7ead935159)"
+msgstr ""
+"[71ac6d4](https://github.com/vllm-project/vllm-"
+"ascend/commit/71ac6d4f7de55866355351359f4bdb7ead935159)"
+
+#: ../../source/community/contributors.md
+msgid "362"
+msgstr "362"
+
+#: ../../source/community/contributors.md
+msgid "[@zhijie-os](https://github.com/zhijie-os)"
+msgstr "[@zhijie-os](https://github.com/zhijie-os)"
+
+#: ../../source/community/contributors.md
+msgid "2026/03/25"
+msgstr "2026/03/25"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[3e07206](https://github.com/vllm-project/vllm-"
+"ascend/commit/3e072069e53da0a002229a85c8596f33c4be834b)"
+msgstr ""
+"[3e07206](https://github.com/vllm-project/vllm-"
+"ascend/commit/3e072069e53da0a002229a85c8596f33c4be834b)"
+
+#: ../../source/community/contributors.md
+msgid "361"
+msgstr "361"
+
+#: ../../source/community/contributors.md
+msgid "[@Wangbei25](https://github.com/Wangbei25)"
+msgstr "[@Wangbei25](https://github.com/Wangbei25)"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[2db12ed](https://github.com/vllm-project/vllm-"
+"ascend/commit/2db12ed935da1b31bcc7865c2d08c841651b2d38)"
+msgstr ""
+"[2db12ed](https://github.com/vllm-project/vllm-"
+"ascend/commit/2db12ed935da1b31bcc7865c2d08c841651b2d38)"
+
+#: ../../source/community/contributors.md
+msgid "360"
+msgstr "360"
+
+#: ../../source/community/contributors.md
+msgid "[@894743926](https://github.com/894743926)"
+msgstr "[@894743926](https://github.com/894743926)"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[cfe2487](https://github.com/vllm-project/vllm-"
+"ascend/commit/cfe2487082b7dac71701cfcf486b265bea5142f0)"
+msgstr ""
+"[cfe2487](https://github.com/vllm-project/vllm-"
+"ascend/commit/cfe2487082b7dac71701cfcf486b265bea5142f0)"
+
+#: ../../source/community/contributors.md
 msgid "359"
 msgstr "359"
 
 #: ../../source/community/contributors.md
 msgid "[@GoMarck](https://github.com/GoMarck)"
 msgstr "[@GoMarck](https://github.com/GoMarck)"
-
-#: ../../source/community/contributors.md
-msgid "2026/03/25"
-msgstr "2026/03/25"
 
 #: ../../source/community/contributors.md
 msgid ""
@@ -1945,6 +3927,7 @@ msgstr "264"
 msgid "[@chenaoxuan](https://github.com/chenaoxuan)"
 msgstr "[@chenaoxuan](https://github.com/chenaoxuan)"
 
+#: ../../source/community/contributors.md
 msgid ""
 "[6d25372](https://github.com/vllm-project/vllm-"
 "ascend/commit/6d25372baaa0ef018a75b427b387fab8dd2e92b4)"
@@ -4622,7 +6605,7 @@ msgstr "[@Liccol](https://github.com/Liccol)"
 
 #: ../../source/community/contributors.md
 msgid "2025/07/31"
-msgstr "2025/07/31"
+msgstr "2025年07月31日"
 
 #: ../../source/community/contributors.md
 msgid ""
@@ -4658,7 +6641,7 @@ msgstr "[@YuanCheng-coder](https://github.com/YuanCheng-coder)"
 
 #: ../../source/community/contributors.md
 msgid "2025/07/30"
-msgstr "2025/07/30"
+msgstr "2025年07月30日"
 
 #: ../../source/community/contributors.md
 msgid ""
@@ -5842,7 +7825,7 @@ msgstr "[@wonderful199082](https://github.com/wonderful199082)"
 
 #: ../../source/community/contributors.md
 msgid "2025/05/20"
-msgstr "2025/05/20"
+msgstr "2025年05月20日"
 
 #: ../../source/community/contributors.md
 msgid ""
@@ -5862,7 +7845,7 @@ msgstr "[@22dimensions](https://github.com/22dimensions)"
 
 #: ../../source/community/contributors.md
 msgid "2025/05/17"
-msgstr "2025/05/17"
+msgstr "2025年05月17日"
 
 #: ../../source/community/contributors.md
 msgid ""
@@ -5882,7 +7865,7 @@ msgstr "[@cxcxflying](https://github.com/cxcxflying)"
 
 #: ../../source/community/contributors.md
 msgid "2025/05/13"
-msgstr "2025/05/13"
+msgstr "2025年05月13日"
 
 #: ../../source/community/contributors.md
 msgid ""
@@ -5902,7 +7885,7 @@ msgstr "[@NeverRaR](https://github.com/NeverRaR)"
 
 #: ../../source/community/contributors.md
 msgid "2025/05/12"
-msgstr "2025/05/12"
+msgstr "2025年05月12日"
 
 #: ../../source/community/contributors.md
 msgid ""
@@ -5922,7 +7905,7 @@ msgstr "[@chris668899](https://github.com/chris668899)"
 
 #: ../../source/community/contributors.md
 msgid "2025/05/08"
-msgstr "2025/05/08"
+msgstr "2025年05月08日"
 
 #: ../../source/community/contributors.md
 msgid ""
@@ -5942,7 +7925,7 @@ msgstr "[@sunbaosong](https://github.com/sunbaosong)"
 
 #: ../../source/community/contributors.md
 msgid "2025/05/06"
-msgstr "2025/05/06"
+msgstr "2025年05月06日"
 
 #: ../../source/community/contributors.md
 msgid ""
@@ -5958,7 +7941,7 @@ msgstr "43"
 
 #: ../../source/community/contributors.md
 msgid "2025/04/29"
-msgstr "2025/04/29"
+msgstr "2025年04月29日"
 
 #: ../../source/community/contributors.md
 msgid ""
@@ -5978,7 +7961,7 @@ msgstr "[@zouyida2052](https://github.com/zouyida2052)"
 
 #: ../../source/community/contributors.md
 msgid "2025/04/28"
-msgstr "2025/04/28"
+msgstr "2025年04月28日"
 
 #: ../../source/community/contributors.md
 msgid ""
@@ -6022,7 +8005,7 @@ msgstr "39"
 
 #: ../../source/community/contributors.md
 msgid "2025/04/27"
-msgstr "2025/04/27"
+msgstr "2025年04月27日"
 
 #: ../../source/community/contributors.md
 msgid ""
@@ -6042,7 +8025,7 @@ msgstr "[@RongRongStudio](https://github.com/RongRongStudio)"
 
 #: ../../source/community/contributors.md
 msgid "2025/04/23"
-msgstr "2025/04/23"
+msgstr "2025年04月23日"
 
 #: ../../source/community/contributors.md
 msgid ""
@@ -6074,7 +8057,7 @@ msgstr "36"
 
 #: ../../source/community/contributors.md
 msgid "2025/04/17"
-msgstr "2025/04/17"
+msgstr "2025年04月17日"
 
 #: ../../source/community/contributors.md
 msgid ""
