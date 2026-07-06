@@ -685,6 +685,20 @@ class AscendSFACPImpl(AscendSFAImpl):
             return k
 
 
+# SFA DCP replicated-indexer layout:
+#
+# - LightningIndexer cache is replicated on every DCP rank so index selection
+#   can run against the full sequence and keep the same sparse topk semantics as
+#   non-DCP SFA.
+# - SFA KV cache remains DCP-local to preserve the KV memory saving. The sparse
+#   topk indices produced from the replicated indexer view are remapped to local
+#   KV indices before calling sparse flash attention.
+# - BlockTable only owns the DCP-local physical layout. This builder derives the
+#   replicated block table and slot mapping on demand, temporarily builds the
+#   indexer-facing metadata with that replicated view, and then stores the
+#   original DCP-local view in metadata.dcp_context for KV writes and SFA reads.
+# - The replicated view uses the same logical/kernel block size as BlockTable,
+#   including hybrid block splitting.
 class AscendSFADCPMetadataBuilder(AscendSFAMetadataBuilder):
     def __init__(
         self,
