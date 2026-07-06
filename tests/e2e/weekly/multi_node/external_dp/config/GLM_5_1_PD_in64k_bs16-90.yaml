@@ -97,7 +97,7 @@ templates:
       - --max-model-len
       - "140000"
       - --additional-config
-      - '{"fuse_muls_add":true,"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":true,"enable_dsa_cp": true}'
+      - '{"fuse_muls_add":true,"multistream_overlap_shared_expert":true,"enable_dsa_cp": true}'
       - --max-num-batched-tokens
       - "4096"
       - --trust-remote-code
@@ -158,7 +158,7 @@ templates:
       - --max-model-len
       - "140000"
       - --additional-config
-      - '{"fuse_muls_add":true,"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":true,"enable_dsa_cp": true}'
+      - '{"fuse_muls_add":true,"multistream_overlap_shared_expert":true,"enable_dsa_cp": true}'
       - --max-num-batched-tokens
       - "4096"
       - --trust-remote-code

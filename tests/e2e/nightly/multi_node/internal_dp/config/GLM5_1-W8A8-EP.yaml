@@ -53,7 +53,7 @@ deployment:
           "torch_profiler_with_stack": false}'
           --seed 1024
           --max-model-len 131072
-          --additional-config '{"recompute_scheduler_enable": true, "fuse_muls_add": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
+          --additional-config '{"fuse_muls_add": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
           --max-num-batched-tokens 4096
           --trust-remote-code
           --max-num-seqs 64
@@ -101,7 +101,7 @@ deployment:
           "torch_profiler_with_stack": false}'
           --seed 1024
           --max-model-len 131072
-          --additional-config '{"recompute_scheduler_enable": true, "fuse_muls_add": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
+          --additional-config '{"fuse_muls_add": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
           --max-num-batched-tokens 4096
           --trust-remote-code
           --max-num-seqs 64

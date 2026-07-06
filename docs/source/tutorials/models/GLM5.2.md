@@ -674,7 +674,7 @@ Before you start, please
             --served-model-name glm-52 \
             --max-model-len 135000 \
             --speculative-config '{"num_speculative_tokens": 5, "method":"deepseek_mtp"}' \
-            --additional-config '{"enable_sparse_c8":false,"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true,"enable_dsa_cp": true}' \
+            --additional-config '{"enable_sparse_c8":false,"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_dsa_cp": true}' \
             --max-num-batched-tokens 4096 \
             --trust-remote-code \
             --max-num-seqs 64 \
@@ -744,7 +744,7 @@ Before you start, please
             --served-model-name glm-52 \
             --max-model-len 135000 \
             --speculative-config '{"num_speculative_tokens": 5, "method":"deepseek_mtp"}' \
-            --additional-config '{"enable_sparse_c8":false,"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true, "enable_dsa_cp": true}' \
+            --additional-config '{"enable_sparse_c8":false,"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_dsa_cp": true}' \
             --max-num-batched-tokens 4096 \
             --trust-remote-code \
             --max-num-seqs 64 \
@@ -1052,7 +1052,6 @@ vllm serve <MODEL_PATH> \
     "enable_sparse_c8": false,
     "fuse_muls_add": true,
     "multistream_overlap_shared_expert": true,
-    "recompute_scheduler_enable": true,
     "enable_dsa_cp": true
   }' \
   --speculative-config '{"num_speculative_tokens": 3, "method":"deepseek_mtp"}'
