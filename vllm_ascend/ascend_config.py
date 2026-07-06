@@ -162,6 +162,7 @@ class AscendConfig:
         self.enable_cpu_binding = additional_config.get("enable_cpu_binding", True)
         self.enable_sleep_mode_extra_cleanup = additional_config.get("enable_sleep_mode_extra_cleanup", False)
         self.multistream_dsv4_dsa_overlap = additional_config.get("multistream_dsv4_dsa_overlap", True)
+        self.enable_prefill_mc2 = bool(additional_config.get("enable_prefill_mc2", False))
 
         self.enable_matmul_allreduce = self._get_config_value(
             additional_config,
@@ -287,6 +288,21 @@ class AscendConfig:
 
         # Enable dispatch/combine op inter-node communication by ROCE
         self.enable_mc2_hierarchy_comm = additional_config.get("enable_mc2_hierarchy_comm", False)
+
+        # Per-rank token capacity after dispatch in the mega moe (dispatch_ffn_combine) fused operator.
+        # When load imbalance causes a rank to receive more tokens than this limit, the excess tokens
+        # are dropped and skipped from computation, degrading accuracy.
+        # Do not set this too large: workspace memory scales linearly with this value, which matters
+        # especially under long-context scenarios where the operator should not hold too much memory.
+        # Default 65536.
+        self.mega_moe_max_tokens = additional_config.get("mega_moe_max_tokens", 65536)
+        if not isinstance(self.mega_moe_max_tokens, int):
+            raise ValueError(
+                f"mega_moe_max_tokens must be an integer, got {type(self.mega_moe_max_tokens).__name__}: "
+                f"{self.mega_moe_max_tokens}"
+            )
+        if self.mega_moe_max_tokens <= 0:
+            raise ValueError(f"mega_moe_max_tokens must be a positive integer, got {self.mega_moe_max_tokens}")
 
         # Whether to use NPU device group for DP metadata all_reduce.
         # "True": use NPU device group, "False" (default): use CPU group.
@@ -542,12 +558,12 @@ class FinegrainedTPConfig:
             # If it is a dense model, then expert parallel is not needed,
             # and data parallel is also not needed. If the data parallel size is set
             # to greater than 1 in the model launch configuration, its value will be changed to 1 later.
-            # This will cause an issue when lmhead parallel is enabled, as the lmhead
+            # This will cause an issue when finegrained tp is enabled, as it
             # cannot be split into the data parallel communication group, leading to an error.
             if module_tp_size > 0 and not vllm_config.model_config.is_moe:
-                raise AssertionError("The lmhead parallel feature can be enabled only for MOE models.")
+                raise AssertionError("The finegrained tp sizes can be enabled only for MOE models.")
             if module_tp_size > 0 and vllm_config.parallel_config.data_parallel_size % module_tp_size != 0:
-                raise AssertionError("lmhead_tensor_parallel_size must divide by data_parallel_size.")
+                raise AssertionError("finegrained tp sizes must divide by data_parallel_size.")
         if any(size > 0 for size in module_tp_sizes) and enabled_configs:
             logger.info("finegrained_tp_config enabled: %s", ", ".join(enabled_configs))
 

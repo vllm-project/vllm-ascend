@@ -475,7 +475,9 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
         self,
         token_dispatch_input: MoETokenDispatchInput,
     ):
-        with_quant = token_dispatch_input.quant.is_int_quant or token_dispatch_input.quant.is_fp8
+        use_mxfp_quant = token_dispatch_input.quant.is_mxfp
+        with_quant = token_dispatch_input.quant.dispatch_with_quant
+        scale_type = token_dispatch_input.quant.get_scale_type
         hidden_states = token_dispatch_input.hidden_states
         topk_weights = token_dispatch_input.topk_weights
         topk_ids = token_dispatch_input.topk_ids
@@ -493,9 +495,9 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
 
         dynamic_scale_after_all2all = None
         if with_quant:
-            dst_type = torch.float8_e4m3fn if token_dispatch_input.quant.is_fp8 else torch.int8
-            permutated_local_input_tokens, dynamic_scale = torch_npu.npu_dynamic_quant(
-                permutated_local_input_tokens, dst_type=dst_type
+            dst_type = token_dispatch_input.quant.get_dst_type
+            permutated_local_input_tokens, dynamic_scale = DeviceOperator.npu_dynamic_quant(
+                permutated_local_input_tokens, act_quant_type=dst_type, use_mxfp_quant=use_mxfp_quant
             )
             _, dynamic_scale_after_all2all, permute2_ep_all_to_all_handle = async_all_to_all(
                 dynamic_scale, output_splits, input_splits, self.ep_group
@@ -516,6 +518,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
                 dynamic_scale_after_all2all,
                 global_input_tokens_local_experts_indices,
                 with_quant,
+                scale_type,
             )
         )
 
@@ -631,17 +634,43 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
         )
 
     def _dispatch_postprocess(
-        self, global_input_tokens, dynamic_scale_after_all2all, global_input_tokens_local_experts_indices, with_quant
+        self,
+        global_input_tokens,
+        dynamic_scale_after_all2all,
+        global_input_tokens_local_experts_indices,
+        with_quant,
+        scale_type,
     ):
         # Early return if no local experts or no tokens
         if self.num_local_experts <= 1:
             return global_input_tokens, dynamic_scale_after_all2all, None
 
-        # Handle quantized case
-        if with_quant:
-            assert global_input_tokens_local_experts_indices is not None, (
-                "global_input_tokens_local_experts_indices must be provided"
+        assert global_input_tokens_local_experts_indices is not None, (
+            "global_input_tokens_local_experts_indices must be provided"
+        )
+
+        experts_indices_2d_copy = global_input_tokens_local_experts_indices.reshape(
+            global_input_tokens_local_experts_indices.shape[0], 1
+        )
+
+        if scale_type == torch.float8_e8m0fnu:
+            dynamic_scale_for_routing = dynamic_scale_after_all2all.view(torch.float8_e8m0fnu)
+            global_input_tokens, reversed_global_input_permutation_mapping, _, routed_scale = (
+                torch_npu.npu_moe_init_routing_v2(
+                    global_input_tokens,
+                    experts_indices_2d_copy,
+                    scale=dynamic_scale_for_routing,
+                    active_num=experts_indices_2d_copy.shape[0],
+                    expert_num=self.num_local_experts,
+                    expert_tokens_num_type=1,
+                    expert_tokens_num_flag=True,
+                    active_expert_range=[0, self.num_local_experts],
+                )
             )
+            dynamic_scale_after_all2all = routed_scale.view(torch.uint8)
+            experts_indices_2d_copy.untyped_storage().resize_(0)
+            return global_input_tokens, dynamic_scale_after_all2all, reversed_global_input_permutation_mapping
+        elif with_quant:
             dynamic_scale_after_all2all, _ = torch_npu.npu_moe_token_permute(
                 dynamic_scale_after_all2all.unsqueeze(-1), global_input_tokens_local_experts_indices
             )
