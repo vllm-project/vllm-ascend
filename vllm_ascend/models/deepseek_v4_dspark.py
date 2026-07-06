@@ -7,6 +7,7 @@ from collections.abc import Iterable
 import torch
 import torch.nn as nn
 import torch_npu
+from torch.nn import Parameter
 from transformers import PretrainedConfig
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
@@ -17,6 +18,7 @@ from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead, VocabParallelEmbedding
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader, maybe_remap_kv_scale_name
+from vllm.model_executor.utils import set_weight_attrs
 from vllm.model_executor.models.interfaces import SupportsPP
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.sequence import IntermediateTensors
@@ -45,9 +47,23 @@ FP8_E4M3_SUBNORMAL_EXP = -9
 FP8_E4M3_MAX_VALUE = 448.0
 DSPARK_FP8_AMAX_EPS = 1e-4
 DSPARK_NOPE_QDQ_BLOCK_SIZE = 64
+DSPARK_WO_A_DEQUANT_BLOCK_SIZE = 128
 
 def _draft_quant_config(vllm_config: VllmConfig):
     return vllm_config.quant_config
+
+
+def _dequant_dspark_wo_a_weight(weight: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+    block_size = DSPARK_WO_A_DEQUANT_BLOCK_SIZE
+    return (
+        weight.unflatten(0, (-1, block_size))
+        .unflatten(-1, (-1, block_size))
+        .float()
+        .mul(scale[:, None, :, None].float())
+        .flatten(2, 3)
+        .flatten(0, 1)
+        .bfloat16()
+    )
 
 
 def _get_dspark_num_layers(config: PretrainedConfig) -> int:
@@ -502,6 +518,7 @@ class DeepSeekV4DSparkMTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
         expert_mapping = self.model.get_expert_mapping()
         start_layer_idx = self.config.num_hidden_layers
         last_layer_idx = start_layer_idx + self.model.num_dspark_layers - 1
+        wo_a_dequant_cache: dict[str, dict[str, torch.Tensor]] = {}
 
         for name, loaded_weight in weights:
             if name in ("embed.weight", "head.weight"):
@@ -515,6 +532,44 @@ class DeepSeekV4DSparkMTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
                 canonical_name = name.replace(f"model.layers.{last_layer_idx}.", "model.", 1)
                 if canonical_name in params_dict:
                     name = canonical_name
+
+            if name.endswith(".self_attn.wo_a.weight") or name.endswith(".self_attn.wo_a.scale"):
+                base_name, attr = name.rsplit(".", 1)
+                wo_a_dequant_cache.setdefault(base_name, {})[attr] = loaded_weight
+                cache_entry = wo_a_dequant_cache[base_name]
+                if "weight" in cache_entry and "scale" in cache_entry:
+                    del wo_a_dequant_cache[base_name]
+                    mapped = f"{base_name}.weight"
+                    if mapped not in params_dict:
+                        skipped_params.add(mapped)
+                        continue
+                    param = params_dict[mapped]
+                    dequant_weight = _dequant_dspark_wo_a_weight(cache_entry["weight"], cache_entry["scale"])
+                    module_name = base_name.removeprefix("model.")
+                    module = self.model.get_submodule(module_name)
+                    weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                    new_weight = Parameter(
+                        torch.empty(param.shape, dtype=dequant_weight.dtype, device=param.device),
+                        requires_grad=False,
+                    )
+                    set_weight_attrs(
+                        new_weight,
+                        {
+                            "input_dim": getattr(param, "input_dim", 1),
+                            "output_dim": getattr(param, "output_dim", 0),
+                            "weight_loader": weight_loader,
+                        },
+                    )
+                    module.weight = new_weight
+                    if "weight_scale" in module._parameters:
+                        del module._parameters["weight_scale"]
+                    params_dict.pop(f"{base_name}.weight_scale", None)
+                    module.quant_method.process_weights_after_loading = lambda layer: None
+                    params_dict[mapped] = module.weight
+                    weight_loader(module.weight, dequant_weight)
+                    loaded_params.add(mapped)
+                continue
+
             if name.endswith(".scale"):
                 name = name.replace(".scale", ".weight_scale")
 
