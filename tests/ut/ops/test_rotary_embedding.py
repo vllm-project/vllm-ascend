@@ -210,11 +210,12 @@ class TestAscendEmbeddingForwardOOT:
 
         assert mock_npu_op.call_args[0][-1] is True
 
+    @patch("vllm_ascend.ops.rotary_embedding.is_forward_context_available", return_value=True)
     @patch("torch.ops.vllm.maybe_all_gather_and_maybe_unpad")
     @patch("torch.ops.vllm.npu_rotary_embedding")
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     def test_gather_unpad_called_when_all_conditions_met(
-        self, mock_get_forward_context, mock_npu_op, mock_gather, make_embedding
+        self, mock_get_forward_context, mock_npu_op, mock_gather, mock_is_ctx, make_embedding
     ):
         """
         maybe_all_gather_and_maybe_unpad is called iff:
