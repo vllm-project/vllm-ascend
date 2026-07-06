@@ -73,7 +73,6 @@ class PCPManager:
         self.speculative_config = vllm_config.speculative_config
         self.decode_threshold = 1 + (self.speculative_config.num_speculative_tokens if self.speculative_config else 0)
         self.mtp_slot_pad: torch.Tensor | None = None
-        self.mtp_slot_no_cp_pad: torch.Tensor | None = None
         self.vllm_config = vllm_config
         self.pd_decode_recompute_scheduler_enabled = is_pd_decode_recompute_scheduler_enabled(vllm_config)
         self.max_num_tokens = self.vllm_config.scheduler_config.max_num_batched_tokens
@@ -1032,15 +1031,11 @@ class PCPManager:
             input_batch.block_table.compute_slot_mapping_draft(req_indices_mtp, positions_mtp)
             block_table = input_batch.block_table.block_tables[0]
             mtp_slot_ori = block_table.slot_mapping.cpu[:num_tokens_mtp]
-            mtp_slot_no_cp_ori = block_table.slot_mapping_no_cp.cpu[:num_tokens_mtp]
             unpad_mask = np.repeat(False, num_tokens_mtp_pad)
             unpad_mask[:: self.pcp_world_size] = True
             mtp_slot_pad = torch.full([num_tokens_mtp_pad], -1, dtype=torch.int32)
-            mtp_slot_no_cp_pad = torch.full([num_tokens_mtp_pad], -1, dtype=torch.int32)
             mtp_slot_pad[unpad_mask] = mtp_slot_ori
-            mtp_slot_no_cp_pad[unpad_mask] = mtp_slot_no_cp_ori
             self.mtp_slot_pad = mtp_slot_pad.to(self.device, non_blocking=True)
-            self.mtp_slot_no_cp_pad = mtp_slot_no_cp_pad.to(self.device, non_blocking=True)
 
     def _update_input_ids_pcp_full_ids(
         self,

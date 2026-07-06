@@ -11,6 +11,7 @@ from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.utils.math_utils import next_power_of_2
 from vllm.v1.kv_cache_interface import AttentionSpec
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.common_cp import AscendPCPMetadata
 from vllm_ascend.attention.sfa_v1 import DCPContext, AscendSFAImpl, AscendSFAMetadata, AscendSFAMetadataBuilder
@@ -706,6 +707,16 @@ class AscendSFADCPMetadataBuilder(AscendSFAMetadataBuilder):
             dtype=torch.int32,
             device=device,
         )
+        self.replicated_view_block_size = self.kernel_block_size
+        if kv_cache_spec.block_size % self.replicated_view_block_size != 0:
+            raise RuntimeError(
+                "SFA replicated view requires the KV cache block size "
+                f"({kv_cache_spec.block_size}) to be divisible by "
+                f"{self.replicated_view_block_size}."
+            )
+        self.blocks_per_phys_block = kv_cache_spec.block_size // self.replicated_view_block_size
+        self.block_table_replicated_view_buf: torch.Tensor | None = None
+        self.slot_mapping_replicated_view_buf: torch.Tensor | None = None
         assert self.pcp_size == 1, "AscendSFADCPMetadataBuilder only supports DCP without PCP."
         assert self.dcp_size > 1, "AscendSFADCPMetadataBuilder requires DCP world size > 1."
         if self.cp_kv_cache_interleave_size <= 0:
@@ -727,6 +738,132 @@ class AscendSFADCPMetadataBuilder(AscendSFAMetadataBuilder):
             interleave_size,
         )
         return base + remainder
+
+    def _ensure_replicated_view_buffers(
+        self,
+        num_reqs: int,
+        num_input_tokens: int,
+        local_block_table_cols: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        block_table_cols = local_block_table_cols * self.pcp_size * self.dcp_size
+        if (
+            self.block_table_replicated_view_buf is None
+            or self.block_table_replicated_view_buf.shape[0] < num_reqs
+            or self.block_table_replicated_view_buf.shape[1] < block_table_cols
+        ):
+            self.block_table_replicated_view_buf = torch.empty(
+                (num_reqs, block_table_cols),
+                dtype=torch.int32,
+                device=self.device,
+            )
+        if (
+            self.slot_mapping_replicated_view_buf is None
+            or self.slot_mapping_replicated_view_buf.shape[0] < num_input_tokens
+        ):
+            self.slot_mapping_replicated_view_buf = torch.empty(
+                (num_input_tokens,),
+                dtype=torch.int32,
+                device=self.device,
+            )
+        return (
+            self.block_table_replicated_view_buf[:num_reqs, :block_table_cols],
+            self.slot_mapping_replicated_view_buf[:num_input_tokens],
+        )
+
+    def _build_block_table_replicated_view(
+        self,
+        dcp_block_table: torch.Tensor,
+        seq_lens: torch.Tensor,
+    ) -> torch.Tensor:
+        num_reqs = dcp_block_table.shape[0]
+        local_block_table_cols = dcp_block_table.shape[1]
+        block_table_replicated_view, _ = self._ensure_replicated_view_buffers(
+            num_reqs,
+            0,
+            local_block_table_cols,
+        )
+
+        total_cp_size = self.pcp_size * self.dcp_size
+        blocks_per_phys_block = self.blocks_per_phys_block
+        block_table_cols = block_table_replicated_view.shape[1]
+        replicated_col_idx = torch.arange(
+            block_table_cols,
+            dtype=torch.long,
+            device=dcp_block_table.device,
+        )
+        local_col_idx = (
+            replicated_col_idx
+            // (total_cp_size * blocks_per_phys_block)
+            * blocks_per_phys_block
+            + replicated_col_idx % blocks_per_phys_block
+        )
+        rank_in_replicated_view = (replicated_col_idx // blocks_per_phys_block) % total_cp_size
+
+        local_logical_blocks = torch.index_select(dcp_block_table, 1, local_col_idx)
+        block_dtype = local_logical_blocks.dtype
+        rank_in_replicated_view = rank_in_replicated_view.to(block_dtype)
+        if blocks_per_phys_block == 1:
+            replicated_blocks = local_logical_blocks * total_cp_size + rank_in_replicated_view
+        else:
+            local_sub_blocks = local_logical_blocks % blocks_per_phys_block
+            local_phys_blocks = local_logical_blocks // blocks_per_phys_block
+            replicated_blocks = (
+                (local_phys_blocks * total_cp_size + rank_in_replicated_view)
+                * blocks_per_phys_block
+                + local_sub_blocks
+            )
+
+        valid_req_mask = seq_lens[:num_reqs].to(device=self.device) > 0
+        replicated_blocks = torch.where(
+            valid_req_mask[:, None],
+            replicated_blocks,
+            torch.zeros((), dtype=block_dtype, device=self.device),
+        )
+        block_table_replicated_view.copy_(replicated_blocks)
+        return block_table_replicated_view
+
+    def _build_slot_mapping_replicated_view(
+        self,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        block_table_replicated_view: torch.Tensor,
+    ) -> torch.Tensor:
+        num_reqs = common_attn_metadata.num_reqs
+        num_input_tokens = common_attn_metadata.num_input_tokens
+        num_actual_tokens = min(common_attn_metadata.num_actual_tokens, num_input_tokens)
+        _, slot_mapping_replicated_view = self._ensure_replicated_view_buffers(
+            num_reqs,
+            num_input_tokens,
+            common_attn_metadata.block_table_tensor.shape[1],
+        )
+        slot_mapping_replicated_view.fill_(-1)
+        if num_actual_tokens == 0:
+            return slot_mapping_replicated_view
+
+        query_lens = (
+            common_attn_metadata.query_start_loc[1 : num_reqs + 1]
+            - common_attn_metadata.query_start_loc[:num_reqs]
+        )
+        req_indices = torch.repeat_interleave(
+            torch.arange(num_reqs, dtype=torch.long, device=self.device),
+            query_lens.to(device=self.device, dtype=torch.long),
+        )[:num_actual_tokens]
+        if req_indices.numel() == 0:
+            return slot_mapping_replicated_view
+
+        num_actual_tokens = min(num_actual_tokens, req_indices.shape[0])
+        req_indices = req_indices[:num_actual_tokens]
+        positions = common_attn_metadata.positions[:num_actual_tokens].to(
+            device=self.device,
+            dtype=torch.long,
+        )
+        logical_block_idx = positions // self.replicated_view_block_size
+        block_offsets = positions % self.replicated_view_block_size
+        block_table_indices = req_indices * block_table_replicated_view.shape[1] + logical_block_idx
+        block_numbers = block_table_replicated_view.flatten()[block_table_indices]
+        slot_mapping_replicated_view[:num_actual_tokens] = (
+            block_numbers * self.replicated_view_block_size + block_offsets
+        ).to(slot_mapping_replicated_view.dtype)
+        return slot_mapping_replicated_view
 
     def _update_dsa_cp_slot_mapping_for_dcp(
         self,
@@ -751,29 +888,40 @@ class AscendSFADCPMetadataBuilder(AscendSFAMetadataBuilder):
             dsa_cp_context.local_start : dsa_cp_context.local_end_with_pad
         ]
 
-    def _build_with_no_cp_metadata(
+    def _build_with_replicated_view_metadata(
         self,
         common_attn_metadata: AscendCommonAttentionMetadata,
         build_metadata,
         **kwargs,
     ) -> AscendSFAMetadata:
-        slot_mapping_no_cp = kwargs.get("slot_mapping_no_cp")
-        block_table_no_cp = kwargs.get("block_table_no_cp")
-        if slot_mapping_no_cp is None or block_table_no_cp is None:
-            raise RuntimeError("SFA DCP requires no-CP slot mapping and block table metadata.")
-
         dcp_slot_mapping = common_attn_metadata.slot_mapping
         dcp_block_table = common_attn_metadata.block_table_tensor
-        common_attn_metadata.slot_mapping = slot_mapping_no_cp
-        common_attn_metadata.block_table_tensor = block_table_no_cp
+        dcp_slot_mapping_cpu = common_attn_metadata.slot_mapping_cpu
+        num_reqs = common_attn_metadata.num_reqs
+        num_input_tokens = common_attn_metadata.num_input_tokens
+        block_table_replicated_view = self._build_block_table_replicated_view(
+            dcp_block_table[:num_reqs],
+            common_attn_metadata.seq_lens,
+        )
+        slot_mapping_replicated_view = self._build_slot_mapping_replicated_view(
+            common_attn_metadata,
+            block_table_replicated_view,
+        )
+        if get_ascend_config().c8_enable_reshape_optim:
+            slot_mapping_replicated_view_cpu = slot_mapping_replicated_view.to("cpu")
+        else:
+            slot_mapping_replicated_view_cpu = dcp_slot_mapping_cpu
+
+        common_attn_metadata.slot_mapping = slot_mapping_replicated_view
+        common_attn_metadata.block_table_tensor = block_table_replicated_view
+        common_attn_metadata.slot_mapping_cpu = slot_mapping_replicated_view_cpu
         try:
             metadata = build_metadata()
         finally:
             common_attn_metadata.slot_mapping = dcp_slot_mapping
             common_attn_metadata.block_table_tensor = dcp_block_table
+            common_attn_metadata.slot_mapping_cpu = dcp_slot_mapping_cpu
 
-        num_reqs = common_attn_metadata.num_reqs
-        num_input_tokens = common_attn_metadata.num_input_tokens
         dcp_local_seq_lens = common_attn_metadata.dcp_local_seq_lens
         if dcp_local_seq_lens is None:
             dcp_local_seq_lens = self._get_dcp_local_seq_lens(metadata.seq_lens)
@@ -800,7 +948,7 @@ class AscendSFADCPMetadataBuilder(AscendSFAMetadataBuilder):
         fast_build: bool = False,
         **kwargs,
     ) -> AscendSFAMetadata:
-        return self._build_with_no_cp_metadata(
+        return self._build_with_replicated_view_metadata(
             common_attn_metadata,
             lambda: super(AscendSFADCPMetadataBuilder, self).build(
                 common_prefix_len,
@@ -817,7 +965,7 @@ class AscendSFADCPMetadataBuilder(AscendSFAMetadataBuilder):
         draft_index: int,
         **kwargs,
     ) -> AscendSFAMetadata:
-        return self._build_with_no_cp_metadata(
+        return self._build_with_replicated_view_metadata(
             common_attn_metadata,
             lambda: super(AscendSFADCPMetadataBuilder, self).build_for_drafting(
                 common_attn_metadata,
@@ -1258,7 +1406,7 @@ class AscendSFADCPImpl(AscendSFAImpl):
             key_rope=key_rope,
             layout_query="TND",
             layout_kv="PA_BSND",
-            # The no-CP indexer already applies the causal visibility rule.
+            # The replicated-view indexer already applies the causal visibility rule.
             # After DCP remaps topk indices to local KV positions, local KV
             # length no longer shares the same coordinate system as global
             # query length, so SFA must not apply its right-down causal crop.

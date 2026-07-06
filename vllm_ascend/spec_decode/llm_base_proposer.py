@@ -248,10 +248,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             torch.zeros(slot_mapping_lens, dtype=torch.int32, device=device, pin_memory=self.runner.pin_memory)
             for _ in range(self.num_speculative_tokens)
         ]
-        self.slot_mapping_no_cp_group = [
-            torch.zeros(slot_mapping_lens, dtype=torch.int32, device=device, pin_memory=self.runner.pin_memory)
-            for _ in range(self.num_speculative_tokens)
-        ]
 
         # dsv32 needs seq_lens and query_start_loc persistent tensors for full graph mode
         self.seq_lens_group = [
@@ -545,23 +541,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # when update. So we can use the shallow copy.
         return copy.copy(attn_metadata)
 
-    def _get_sfa_dcp_metadata_args(
-        self,
-        num_reqs: int,
-        num_input_tokens: int,
-        slot_mapping_no_cp: torch.Tensor | None = None,
-    ) -> dict[str, torch.Tensor]:
-        if not getattr(self.runner, "sfa_dcp_replicated_indexer", False):
-            return {}
-
-        blk_table = self.runner.input_batch.block_table[0]
-        if slot_mapping_no_cp is None:
-            slot_mapping_no_cp = blk_table.slot_mapping_no_cp.gpu
-        return dict(
-            block_table_no_cp=blk_table.get_device_tensor_no_cp()[:num_reqs],
-            slot_mapping_no_cp=slot_mapping_no_cp[:num_input_tokens],
-        )
-
     def _freeze_draft_index_attn_metadata(self, attn_metadata):
         decode_metadata = getattr(attn_metadata, "decode", None)
         if decode_metadata is not None:
@@ -659,14 +638,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         decode_ratio_to_sas_metadata=dict(),
                         common_ratio_to_sas_metadata=dict(),
                         block_size=kv_cache_spec.block_size,
-                    )
-                if isinstance(builder, AscendSFADCPMetadataBuilder):
-                    extra_attn_metadata_args.update(
-                        self._get_sfa_dcp_metadata_args(
-                            num_reqs,
-                            num_tokens,
-                            self.slot_mapping_no_cp_group[draft_index],
-                        )
                     )
                 # Set the real slot_mapping.
                 slot_mapping_lens = common_attn_metadata.slot_mapping.shape[0]
@@ -929,10 +900,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         slot_mapping_lens = common_attn_metadata.slot_mapping.shape[0]
         self.slot_mapping_group[0][:slot_mapping_lens].copy_(common_attn_metadata.slot_mapping)
         self.slot_mapping_group[0][slot_mapping_lens:].fill_(-1)
-        if getattr(self.runner, "sfa_dcp_replicated_indexer", False):
-            slot_mapping_no_cp = self.runner.input_batch.block_table[0].slot_mapping_no_cp.gpu[:slot_mapping_lens]
-            self.slot_mapping_no_cp_group[0][:slot_mapping_lens].copy_(slot_mapping_no_cp)
-            self.slot_mapping_no_cp_group[0][slot_mapping_lens:].fill_(-1)
         common_attn_metadata.slot_mapping = self.slot_mapping_group[0]
 
         self.seq_lens_group[0][:num_reqs_padded].copy_(common_attn_metadata.seq_lens)
@@ -954,14 +921,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 decode_ratio_to_sas_metadata=dict(),
                 common_ratio_to_sas_metadata=dict(),
                 block_size=self.draft_attn_groups[0].kv_cache_spec.block_size,
-            )
-        if isinstance(builder, AscendSFADCPMetadataBuilder):
-            extra_attn_metadata_args.update(
-                self._get_sfa_dcp_metadata_args(
-                    common_attn_metadata.num_reqs,
-                    common_attn_metadata.num_input_tokens,
-                    self.slot_mapping_no_cp_group[0],
-                )
             )
         attn_metadata = builder.build(0, common_attn_metadata, self.runner.get_model(), **extra_attn_metadata_args)
 
@@ -1032,7 +991,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     + self.cp_slot_offsets[: self.pcp_size].to(slot_idx_base.device)
                 ).reshape(-1)
                 mtp_slot_mapping = self.runner.pcp_manager.mtp_slot_pad
-                mtp_slot_mapping_no_cp = getattr(self.runner.pcp_manager, "mtp_slot_no_cp_pad", None)
 
                 common_attn_metadata.block_table_tensor = common_attn_metadata.block_table_tensor[:batch_size]
 
@@ -1052,7 +1010,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                                 ori_seq_len,
                                 slot_indices,
                                 mtp_slot_mapping,
-                                mtp_slot_mapping_no_cp,
                                 attn_group=attn_group,
                             )
                             for layer_name in self.attn_layer_names:
@@ -1671,7 +1628,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         ori_seq_len=None,
         slot_indices=None,
         mtp_slot_mapping=None,
-        mtp_slot_mapping_no_cp=None,
         attn_group=None,
     ):
         assert draft_index > 0
@@ -1784,11 +1740,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             slot_mapping = mtp_slot_mapping[slot_indices]
             self.slot_mapping_group[draft_index][: batch_size * self.pcp_size] = slot_mapping
             self.slot_mapping_group[draft_index][batch_size * self.pcp_size :].fill_(PADDING_SLOT_ID)
-            if getattr(self.runner, "sfa_dcp_replicated_indexer", False):
-                assert mtp_slot_mapping_no_cp is not None, "SFA DCP MTP requires no-CP MTP slot mapping."
-                slot_mapping_no_cp = mtp_slot_mapping_no_cp[slot_indices]
-                self.slot_mapping_no_cp_group[draft_index][: batch_size * self.pcp_size] = slot_mapping_no_cp
-                self.slot_mapping_no_cp_group[draft_index][batch_size * self.pcp_size :].fill_(PADDING_SLOT_ID)
             common_attn_metadata.slot_mapping = self.slot_mapping_group[draft_index]
         else:
             # NOTE: In vllm, `block_size = attn_metadata_builder.kv_cache_spec.block_size`.
@@ -1840,14 +1791,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 decode_ratio_to_sas_metadata=dict(),
                 common_ratio_to_sas_metadata=dict(),
                 block_size=self.draft_attn_groups[0].kv_cache_spec.block_size,
-            )
-        if isinstance(attn_metadata_builder, AscendSFADCPMetadataBuilder):
-            extra_attn_metadata_args.update(
-                self._get_sfa_dcp_metadata_args(
-                    common_attn_metadata.num_reqs,
-                    common_attn_metadata.num_input_tokens,
-                    self.slot_mapping_no_cp_group[draft_index],
-                )
             )
         attn_metadata = attn_metadata_builder.build_for_drafting(
             common_attn_metadata,
