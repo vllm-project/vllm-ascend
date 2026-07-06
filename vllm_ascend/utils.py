@@ -123,6 +123,32 @@ def is_310p():
     return get_ascend_device_type() == AscendDeviceType._310P
 
 
+_IS_RC_DEVICE: bool | None = None
+
+
+def is_rc_device() -> bool:
+    """Return True if the 310P NPU runs in Root Complex (RC) mode.
+
+    RC mode (e.g. Atlas 200I Pro): host and NPU share memory. EP mode
+    (e.g. Atlas 300I DUO on PCIe): ``lspci`` output typically contains
+    ``accelerators``.
+    """
+    global _IS_RC_DEVICE
+    if not is_310p():
+        return False
+    if _IS_RC_DEVICE is not None:
+        return _IS_RC_DEVICE
+
+    try:
+        import subprocess
+
+        result = subprocess.run(["lspci"], capture_output=True, text=True, check=True)
+        _IS_RC_DEVICE = not any("accelerators" in line.strip() for line in result.stdout.splitlines())
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        _IS_RC_DEVICE = False
+    return _IS_RC_DEVICE
+
+
 def is_950():
     return get_ascend_device_type() == AscendDeviceType.A5
 
@@ -1129,8 +1155,6 @@ def _compute_potential_max_tokens(vllm_config) -> int:
     scheduler_config = vllm_config.scheduler_config
     speculative_config = vllm_config.speculative_config
     uniform_decode_query_len = 1 if not speculative_config else 1 + speculative_config.num_speculative_tokens
-    decode_max_num_seqs = getattr(scheduler_config, "decode_max_num_seqs", 0)
-    max_num_reqs = max(scheduler_config.max_num_seqs, decode_max_num_seqs)
 
     # Use max cudagraph capture size if available, otherwise the maximal uniform
     # decode token count.
@@ -1153,14 +1177,13 @@ def _compute_potential_max_tokens(vllm_config) -> int:
                 potential_max_tokens,
             )
     else:
-        potential_max_tokens = min(max_num_reqs * uniform_decode_query_len, 512)
+        potential_max_tokens = min(scheduler_config.max_num_seqs * uniform_decode_query_len, 512)
     return potential_max_tokens
 
 
 # potential_max_tokens is computed once in the model runner __init__ and reused by
 # both the skip-allreduce decision and the o_proj static-exchange buffer sizing, so
-# neither path recomputes it. Mirrors the _mc2_tokens_capacity set/get pattern in
-# ascend_forward_context.py.
+# neither path recomputes it.
 _potential_max_tokens: int | None = None
 
 

@@ -183,19 +183,18 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             tid2eid=self.tid2eid,
             input_ids=input_ids,
         )
-        if not vllm_version_is("0.23.0"):
+        if vllm_version_is("0.23.0"):
+            model_config = layer.vllm_config.model_config
+        else:
             try:
                 _vllm_config = get_current_vllm_config()
             except AssertionError:
                 _vllm_config = None
-            if (
-                _vllm_config is not None
-                and _vllm_config.model_config is not None
-                and _vllm_config.model_config.enable_return_routed_experts
-            ):
-                capturer = getattr(layer, "_ascend_routed_experts_capturer", None)
-                if capturer is not None:
-                    capturer.capture(layer_id=layer.layer_id, topk_ids=topk_ids)
+            model_config = None if _vllm_config is None else _vllm_config.model_config
+        if model_config is not None and model_config.enable_return_routed_experts:
+            capturer = getattr(layer, "_ascend_routed_experts_capturer", None)
+            if capturer is not None:
+                capturer.capture(layer_id=layer.layer_id, topk_ids=topk_ids)
 
         if zero_expert_num > 0 and zero_expert_type is not None:
             topk_ids, topk_weights, zero_expert_result = zero_experts_compute(

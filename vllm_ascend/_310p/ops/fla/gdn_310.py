@@ -53,6 +53,29 @@ def _as_int64_device_view(tensor: torch.Tensor) -> torch.Tensor:
     return tensor.to(torch.int64)
 
 
+def _zero_padded_tokens(
+    tensor: torch.Tensor,
+    valid_tokens: torch.Tensor,
+    token_dim: int,
+) -> torch.Tensor:
+    if tensor.numel() == 0:
+        return tensor
+
+    token_count = tensor.shape[token_dim]
+    if token_count == 0:
+        return tensor
+
+    positions = torch.arange(
+        token_count,
+        device=tensor.device,
+        dtype=valid_tokens.dtype,
+    )
+    valid_mask = positions < valid_tokens.to(device=tensor.device)
+    mask_shape = [1] * tensor.ndim
+    mask_shape[token_dim] = token_count
+    return tensor * valid_mask.reshape(mask_shape).to(dtype=tensor.dtype)
+
+
 def _get_spec_causal_conv1d_device_args(
     attn_metadata: GDNAttentionMetadata,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -144,6 +167,18 @@ def _flatten_state_indices(
     return flat_dev.contiguous()
 
 
+def _mask_padded_recurrent_accepted_tokens(
+    num_accepted_tokens: torch.Tensor,
+    actual_seq_lengths: torch.Tensor,
+) -> torch.Tensor:
+    accepted_tokens = num_accepted_tokens[: actual_seq_lengths.shape[0]].to(torch.int32).contiguous()
+    return torch.where(
+        actual_seq_lengths > 0,
+        accepted_tokens,
+        torch.zeros_like(accepted_tokens),
+    ).contiguous()
+
+
 def npu_recurrent_gated_delta_rule_310(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -163,9 +198,16 @@ def npu_recurrent_gated_delta_rule_310(
     total_tokens = v.shape[1]
     flat_state_indices = _flatten_state_indices(ssm_state_indices, cu_seqlens, total_tokens)
     actual_seq_lengths = (cu_seqlens[1:] - cu_seqlens[:-1]).to(torch.int32).contiguous()
+    flat_state_indices = torch.clamp_min(
+        flat_state_indices,
+        0,
+    ).contiguous()
     accepted_tokens = None
     if num_accepted_tokens is not None:
-        accepted_tokens = num_accepted_tokens[: actual_seq_lengths.shape[0]].to(torch.int32).contiguous()
+        accepted_tokens = _mask_padded_recurrent_accepted_tokens(
+            num_accepted_tokens,
+            actual_seq_lengths,
+        )
 
     out = torch.ops._C_ascend.npu_recurrent_gated_delta_rule_310(
         query=q.squeeze(0).to(torch.float16).contiguous(),
@@ -220,6 +262,13 @@ def _merge_spec_and_non_spec_outputs_310(
 
 class AscendGatedDeltaNetAttention310(GatedDeltaNetAttention):
     get_state_dtype = _310p_get_state_dtype
+
+    def get_attn_backend(self):
+        from vllm_ascend._310p.ops.gdn_attn_builder_310 import (
+            AscendGDNAttentionBackend310,
+        )
+
+        return AscendGDNAttentionBackend310
 
     def _forward_core(
         self,
@@ -285,6 +334,15 @@ class AscendGatedDeltaNetAttention310(GatedDeltaNetAttention):
             # than total requests; full-batch tensor fails tiling / wrong state offset).
             spec_num_accepted = num_accepted_tokens[: attn_metadata.num_spec_decodes].to(torch.int64)
             uniform_spec_only = attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0
+            # The final entry remains the runtime token count even when
+            # graph metadata includes padded requests.
+            spec_valid_tokens = spec_query_start_loc[-1]
+            if uniform_spec_only:
+                mixed_qkv_spec = _zero_padded_tokens(
+                    mixed_qkv_spec,
+                    spec_valid_tokens,
+                    token_dim=0,
+                )
             if _EXTRA_CTX.capturing and uniform_spec_only:
                 qsl_dev, cidx_dev, nat_dev, qsl_buf, cidx_buf, nat_buf = _get_spec_causal_conv1d_device_args(
                     attn_metadata
@@ -334,7 +392,6 @@ class AscendGatedDeltaNetAttention310(GatedDeltaNetAttention):
                     pad_slot_id=PAD_SLOT_ID,
                     run_mode=1,
                 )
-
         # 1.2: Process the remaining part
         if attn_metadata.num_prefills > 0:
             if mixed_qkv_non_spec is not None:
@@ -477,6 +534,14 @@ class AscendGatedDeltaNetAttention310(GatedDeltaNetAttention):
                 core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
             else:
                 core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)[:num_actual_tokens]
+        if spec_sequence_masks is not None and uniform_spec_only:
+            core_attn_out.copy_(
+                _zero_padded_tokens(
+                    core_attn_out,
+                    spec_valid_tokens,
+                    token_dim=0,
+                )
+            )
         maybe_save_kv_layer_to_connector("", [])
 
 
@@ -494,6 +559,42 @@ def _get_spec_causal_conv1d_update_host_args_310p(
     )
 
 
+def _pad_spec_conv1d_host_args_shape_consistent_dummy_310p(
+    qsl_host: tuple[int, ...],
+    cidx_host: tuple[int, ...],
+    num_accepted_host: tuple[int, ...],
+    cap_x_dim0: int,
+    q_per_seq: int,
+) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+    """Pad dummy requests so query_start_loc reaches the captured token size."""
+    if not qsl_host:
+        return qsl_host, cidx_host, num_accepted_host
+
+    expected_seqs = len(qsl_host) - 1
+    if expected_seqs > len(cidx_host):
+        cidx_host = cidx_host + (PAD_SLOT_ID,) * (expected_seqs - len(cidx_host))
+    if expected_seqs > len(num_accepted_host):
+        num_accepted_host = num_accepted_host + (0,) * (expected_seqs - len(num_accepted_host))
+
+    runtime_qsl_last = int(qsl_host[-1])
+    pad_tokens = cap_x_dim0 - runtime_qsl_last
+    if pad_tokens <= 0 or q_per_seq <= 0:
+        return qsl_host, cidx_host, num_accepted_host
+
+    full_pad_seqs, remainder = divmod(pad_tokens, q_per_seq)
+    next_qsl = runtime_qsl_last
+    for _ in range(full_pad_seqs):
+        next_qsl += q_per_seq
+        qsl_host = qsl_host + (next_qsl,)
+        cidx_host = cidx_host + (PAD_SLOT_ID,)
+        num_accepted_host = num_accepted_host + (0,)
+    if remainder > 0:
+        qsl_host = qsl_host + (cap_x_dim0,)
+        cidx_host = cidx_host + (PAD_SLOT_ID,)
+        num_accepted_host = num_accepted_host + (0,)
+    return qsl_host, cidx_host, num_accepted_host
+
+
 def update_conv1d_graph_params_310p(
     update_stream,
     forward_context,
@@ -503,8 +604,6 @@ def update_conv1d_graph_params_310p(
     draft_attn_metadatas=None,
 ):
     """310P uniform spec-decode GDN conv1d graph replay via device buffer updates."""
-    from vllm_ascend.ops.gdn import _pad_conv1d_host_args_to_capture
-
     graph_params = get_draft_graph_params() if is_draft_model else get_graph_params()
 
     if (
@@ -558,13 +657,14 @@ def update_conv1d_graph_params_310p(
 
             cap_x_dim0 = int(mixed_qkv.size(0))
             qsl_host, cidx_host, num_accepted_host = _get_spec_causal_conv1d_update_host_args_310p(meta)
-            new_query_start_loc, new_cache_indices, new_num_accepted = _pad_conv1d_host_args_to_capture(
-                qsl_host,
-                cidx_host,
-                num_accepted_host,
-                cap_x_dim0=cap_x_dim0,
-                q_per_seq=q_per_seq,
-                with_num_accepted=True,
+            new_query_start_loc, new_cache_indices, new_num_accepted = (
+                _pad_spec_conv1d_host_args_shape_consistent_dummy_310p(
+                    qsl_host,
+                    cidx_host,
+                    num_accepted_host,
+                    cap_x_dim0=cap_x_dim0,
+                    q_per_seq=q_per_seq,
+                )
             )
             _copy_host_tuple_to_int64_buffer(qsl_dev, new_query_start_loc)
             _copy_host_tuple_to_int64_buffer(cidx_dev, new_cache_indices)

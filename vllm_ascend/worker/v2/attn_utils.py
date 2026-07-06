@@ -434,6 +434,7 @@ def _reshape_kv_cache_v2(
     cache_dtype: str,
     kernel_block_sizes: list[int],
     shared_kv_cache_layers: dict[str, str],
+    kv_cache_config: "KVCacheConfig | None" = None,
 ) -> dict[str, tuple[torch.Tensor, torch.Tensor]]:
     vllm_config = get_current_vllm_config()
     is_kv_consumer = (
