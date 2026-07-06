@@ -7,8 +7,7 @@ import torch_npu
 from vllm.config import VllmConfig
 from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.forward_context import get_forward_context
-from vllm.triton_utils import HAS_TRITON, tl, triton
-from vllm.utils.math_utils import next_power_of_2
+from vllm.triton_utils import HAS_TRITON
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -30,98 +29,6 @@ from vllm_ascend.distributed.utils import (
 from vllm_ascend.ops.triton.rope import rope_forward_triton_siso
 
 M = TypeVar("M", bound=AscendSFAMetadata)
-_DCP_REMAP_FP32_EXACT_INT_LIMIT = 1 << 24
-
-
-@triton.jit
-def _dcp_lse_weighted_combine_kernel(
-    out_recv_ptr,
-    lse_recv_ptr,
-    out_ptr,
-    out_recv_stride_dcp,
-    out_recv_stride_head,
-    out_recv_stride_token,
-    out_recv_stride_dim,
-    lse_recv_stride_dcp,
-    lse_recv_stride_head,
-    lse_recv_stride_token,
-    out_stride_token,
-    out_stride_head,
-    out_stride_dim,
-    DCP_SIZE: tl.constexpr,
-    HEAD_SIZE: tl.constexpr,
-    BLOCK_D: tl.constexpr,
-):
-    token_idx = tl.program_id(0).to(tl.int64)
-    head_idx = tl.program_id(1).to(tl.int64)
-    dim_offsets = tl.arange(0, BLOCK_D)
-    dim_mask = dim_offsets < HEAD_SIZE
-
-    lse_max = -float("inf")
-    for dcp_idx in tl.static_range(DCP_SIZE):
-        lse_val = tl.load(
-            lse_recv_ptr
-            + dcp_idx * lse_recv_stride_dcp
-            + head_idx * lse_recv_stride_head
-            + token_idx * lse_recv_stride_token
-        ).to(tl.float32)
-        lse_val = tl.where(
-            (lse_val != lse_val) | (lse_val == float("inf")),
-            -float("inf"),
-            lse_val,
-        )
-        lse_max = tl.maximum(lse_max, lse_val)
-
-    lse_max = tl.where(lse_max == -float("inf"), 0.0, lse_max)
-    lse_sum = 0.0
-    for dcp_idx in tl.static_range(DCP_SIZE):
-        lse_val = tl.load(
-            lse_recv_ptr
-            + dcp_idx * lse_recv_stride_dcp
-            + head_idx * lse_recv_stride_head
-            + token_idx * lse_recv_stride_token
-        ).to(tl.float32)
-        lse_val = tl.where(
-            (lse_val != lse_val) | (lse_val == float("inf")),
-            -float("inf"),
-            lse_val,
-        )
-        lse_sum += tl.exp(lse_val - lse_max)
-
-    global_lse = tl.log(lse_sum) + lse_max
-
-    acc = tl.zeros([BLOCK_D], dtype=tl.float32)
-    for dcp_idx in tl.static_range(DCP_SIZE):
-        lse_val = tl.load(
-            lse_recv_ptr
-            + dcp_idx * lse_recv_stride_dcp
-            + head_idx * lse_recv_stride_head
-            + token_idx * lse_recv_stride_token
-        ).to(tl.float32)
-        lse_val = tl.where(
-            (lse_val != lse_val) | (lse_val == float("inf")),
-            -float("inf"),
-            lse_val,
-        )
-        weight = tl.exp(lse_val - global_lse)
-        weight = tl.where(weight != weight, 0.0, weight)
-
-        out_vals = tl.load(
-            out_recv_ptr
-            + dcp_idx * out_recv_stride_dcp
-            + head_idx * out_recv_stride_head
-            + token_idx * out_recv_stride_token
-            + dim_offsets * out_recv_stride_dim,
-            mask=dim_mask,
-            other=0.0,
-        ).to(tl.float32)
-        acc += out_vals * weight
-
-    tl.store(
-        out_ptr + token_idx * out_stride_token + head_idx * out_stride_head + dim_offsets * out_stride_dim,
-        acc,
-        mask=dim_mask,
-    )
 
 
 class AscendSFACPMetadataBuilder(AscendSFAMetadataBuilder):
@@ -1040,9 +947,6 @@ class AscendSFADCPImpl(AscendSFAImpl):
             raise RuntimeError(f"Invalid cp_kv_cache_interleave_size: {self.cp_kv_cache_interleave_size}")
         self._dcp_remap_interleave_size = self.cp_kv_cache_interleave_size
         self._dcp_remap_interleave_size_is_one = self._dcp_remap_interleave_size == 1
-        self._dcp_remap_use_float_arithmetic = (
-            0 < self.vllm_config.model_config.max_model_len <= _DCP_REMAP_FP32_EXACT_INT_LIMIT
-        )
         self._dcp_remap_scalar_values = {
             "zero": 0,
             "neg_one": -1,
@@ -1064,13 +968,9 @@ class AscendSFADCPImpl(AscendSFAImpl):
                 break
         if self.dcp_size > 1 and torch.npu.is_available():
             device = torch.device("npu", torch.npu.current_device())
-            self._get_dcp_remap_constants(device, torch.int32)
-            if self._dcp_remap_use_float_arithmetic:
-                self._get_dcp_remap_constants(device, torch.float32)
+            self._get_dcp_remap_constants(device, torch.float32)
             if self._dcp_remap_index_topk is not None:
-                self._get_dcp_remap_order_and_count(self._dcp_remap_index_topk, device, torch.int32)
-                if self._dcp_remap_use_float_arithmetic:
-                    self._get_dcp_remap_order_and_count(self._dcp_remap_index_topk, device, torch.float32)
+                self._get_dcp_remap_order_and_count(self._dcp_remap_index_topk, device, torch.float32)
 
     def _all_gather_dim_async(
         self,
@@ -1086,18 +986,6 @@ class AscendSFADCPImpl(AscendSFAImpl):
         restore_perm = tuple(perm.index(i) for i in range(x.dim()))
         gathered, handle = all_gather_async(x.permute(perm).contiguous(), self.dcp_group)
         return gathered, handle, restore_perm
-
-    @staticmethod
-    def _finish_all_gather_dim(
-        gathered: torch.Tensor,
-        handle: torch.distributed.Work | None,
-        restore_perm: tuple[int, ...] | None,
-    ) -> torch.Tensor:
-        if handle is not None:
-            handle.wait()
-        if restore_perm is not None:
-            gathered = gathered.permute(restore_perm).contiguous()
-        return gathered
 
     def _get_dcp_remap_constants(
         self,
@@ -1131,7 +1019,7 @@ class AscendSFADCPImpl(AscendSFAImpl):
             self._dcp_remap_order_buffers[key] = order_and_count
         return order_and_count
 
-    def _remap_sparse_indices_for_dcp_float(self, topk_indices: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def _map_indices_to_local(self, topk_indices: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         constants = self._get_dcp_remap_constants(topk_indices.device, torch.float32)
         topk_float = topk_indices.to(torch.float32)
         local_block_indices = torch.floor(topk_float / constants["interleave_size"])
@@ -1147,33 +1035,16 @@ class AscendSFADCPImpl(AscendSFAImpl):
         remapped_float = torch.where(local_owner_mask, remapped_float, constants["neg_one"])
         return remapped_float.to(topk_indices.dtype), local_owner_mask
 
-    def _remap_sparse_indices_for_dcp_int(self, topk_indices: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        constants = self._get_dcp_remap_constants(topk_indices.device, topk_indices.dtype)
-        local_block_indices = torch.div(topk_indices, constants["interleave_size"], rounding_mode="floor")
-        local_owner_mask = (topk_indices >= constants["zero"]) & (
-            torch.remainder(local_block_indices, constants["dcp_size"]) == constants["dcp_rank"]
-        )
-        if self._dcp_remap_interleave_size_is_one:
-            remapped_indices = torch.div(topk_indices, constants["dcp_size"], rounding_mode="floor")
-        else:
-            local_offsets = torch.remainder(topk_indices, constants["interleave_size"])
-            remapped_indices = torch.div(topk_indices, constants["combined_size"], rounding_mode="floor")
-            remapped_indices = remapped_indices * constants["interleave_size"] + local_offsets
-        remapped_indices = torch.where(local_owner_mask, remapped_indices, constants["neg_one"])
-        return remapped_indices, local_owner_mask
-
-    def _remap_sparse_indices_for_dcp(self, topk_indices: torch.Tensor) -> torch.Tensor:
+    def _remap_sparse_indices(self, topk_indices: torch.Tensor) -> torch.Tensor:
         if self.dcp_size <= 1:
             return topk_indices
 
-        if self._dcp_remap_use_float_arithmetic:
-            remapped_indices, local_owner_mask = self._remap_sparse_indices_for_dcp_float(topk_indices)
-        else:
-            remapped_indices, local_owner_mask = self._remap_sparse_indices_for_dcp_int(topk_indices)
+        # Remap the top-k indices to local KV indices and filter out non-local indices.
+        remapped_indices, local_owner_mask = self._map_indices_to_local(topk_indices)
 
         # Compact local indices to the front without changing their top-k order.
         topk_count = topk_indices.shape[-1]
-        pack_key_dtype = torch.float32 if self._dcp_remap_use_float_arithmetic else torch.int32
+        pack_key_dtype = torch.float32
         original_order, topk_count_tensor = self._get_dcp_remap_order_and_count(
             topk_count,
             topk_indices.device,
@@ -1181,8 +1052,6 @@ class AscendSFADCPImpl(AscendSFAImpl):
         )
         original_order = original_order.expand_as(topk_indices)
         pack_keys = original_order + (~local_owner_mask).to(pack_key_dtype) * topk_count_tensor
-        if pack_key_dtype != torch.float32:
-            pack_keys = pack_keys.to(torch.float32)
         _, pack_order = torch.sort(pack_keys, dim=-1)
         return torch.gather(remapped_indices, dim=-1, index=pack_order.to(torch.int32))
 
@@ -1214,38 +1083,6 @@ class AscendSFADCPImpl(AscendSFAImpl):
         lse_flat = lse_flat.to(torch.float32).flatten(1, -1)
         output, _ = torch_npu.npu_attention_update(lse_flat.unbind(0), out_flat.unbind(0), 0)
         return output.view(num_tokens, num_heads, self.kv_lora_rank)
-
-    def _merge_dcp_outputs_with_triton(
-        self,
-        output_recv: torch.Tensor,
-        lse_recv: torch.Tensor,
-    ) -> torch.Tensor:
-        dcp_size, local_num_heads, num_tokens, head_size = output_recv.shape
-        output = torch.empty(
-            (num_tokens, local_num_heads, head_size),
-            dtype=torch.float32,
-            device=output_recv.device,
-        )
-        block_d = next_power_of_2(head_size)
-        _dcp_lse_weighted_combine_kernel[(num_tokens, local_num_heads, 1)](
-            output_recv,
-            lse_recv,
-            output,
-            output_recv.stride(0),
-            output_recv.stride(1),
-            output_recv.stride(2),
-            output_recv.stride(3),
-            lse_recv.stride(0),
-            lse_recv.stride(1),
-            lse_recv.stride(2),
-            output.stride(0),
-            output.stride(1),
-            output.stride(2),
-            DCP_SIZE=dcp_size,
-            HEAD_SIZE=head_size,
-            BLOCK_D=block_d,
-        )
-        return output
 
     @staticmethod
     def _merge_dcp_outputs_with_torch(
@@ -1298,8 +1135,6 @@ class AscendSFADCPImpl(AscendSFAImpl):
         )
         lse_recv = lse_recv.view(self.dcp_size, local_num_heads, num_tokens)
 
-        if HAS_TRITON:
-            return self._merge_dcp_outputs_with_triton(output_recv, lse_recv)
         return self._merge_dcp_outputs_with_torch(output_recv, lse_recv)
 
     def _select_dsa_cp_local_tokens(self, output: torch.Tensor, attn_metadata: M) -> torch.Tensor:
@@ -1307,12 +1142,14 @@ class AscendSFADCPImpl(AscendSFAImpl):
         dsa_cp_context = attn_metadata.dsa_cp_context
         return output[dsa_cp_context.local_start : dsa_cp_context.local_end_with_pad]
 
-    def _all_gather_query_for_dcp_async(
+    def _start_dcp_query_gather(
         self,
         ql_nope: torch.Tensor,
         q_pe: torch.Tensor,
-        dim: int,
+        attn_metadata: M,
     ) -> DCPQueryGatherContext:
+        assert attn_metadata.dcp_context is not None
+        query_gather_dim = 0 if self.enable_dsa_cp else 1
         assert self.dcp_group is not None
         if ql_nope.shape[:-1] != q_pe.shape[:-1] or ql_nope.dtype != q_pe.dtype:
             raise RuntimeError(
@@ -1328,22 +1165,8 @@ class AscendSFADCPImpl(AscendSFAImpl):
         # incomplete stream dependency on the first prefill. DSA-CP restores
         # token shards on dim 0; native DCP restores query shards on dim 1.
         fused_q = torch.cat([ql_nope, q_pe], dim=-1).contiguous()
-        gathered, handle, restore_perm = self._all_gather_dim_async(fused_q, dim)
+        gathered, handle, restore_perm = self._all_gather_dim_async(fused_q, query_gather_dim)
         return gathered, handle, restore_perm, ql_nope_dim, q_pe_dim
-
-    def _start_dcp_query_gather(
-        self,
-        ql_nope: torch.Tensor,
-        q_pe: torch.Tensor,
-        attn_metadata: M,
-    ) -> DCPQueryGatherContext:
-        assert attn_metadata.dcp_context is not None
-        query_gather_dim = 0 if self.enable_dsa_cp else 1
-        return self._all_gather_query_for_dcp_async(
-            ql_nope.contiguous(),
-            q_pe.contiguous(),
-            dim=query_gather_dim,
-        )
 
     def _record_dcp_query_gather_context(
         self,
@@ -1352,7 +1175,9 @@ class AscendSFADCPImpl(AscendSFAImpl):
         attn_metadata: M,
     ) -> None:
         assert attn_metadata.dcp_context is not None
-        attn_metadata.dcp_context.query_gather_context = self._start_dcp_query_gather(ql_nope, q_pe, attn_metadata)
+        attn_metadata.dcp_context.query_gather_context = self._start_dcp_query_gather(
+            ql_nope, q_pe, attn_metadata
+        )
 
     def _finish_all_gather_query_for_dcp(
         self,
@@ -1362,7 +1187,11 @@ class AscendSFADCPImpl(AscendSFAImpl):
         ql_nope_dim: int,
         q_pe_dim: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        fused_q = self._finish_all_gather_dim(gathered, handle, restore_perm)
+        if handle is not None:
+            handle.wait()
+        if restore_perm is not None:
+            gathered = gathered.permute(restore_perm).contiguous()
+        fused_q = gathered
         ql_nope, q_pe = torch.split(fused_q, [ql_nope_dim, q_pe_dim], dim=-1)
         return ql_nope, q_pe
 
@@ -1392,7 +1221,7 @@ class AscendSFADCPImpl(AscendSFAImpl):
             # the DSA token shards first, then remap for this receiver rank's
             # DCP-local KV shard.
             topk_indices = self.dcp_group.all_gather(topk_indices.contiguous(), dim=0)
-        topk_indices = self._remap_sparse_indices_for_dcp(topk_indices)
+        topk_indices = self._remap_sparse_indices(topk_indices)
         ql_nope, q_pe = self._finish_all_gather_query_for_dcp(
             q_gathered,
             q_handle,
