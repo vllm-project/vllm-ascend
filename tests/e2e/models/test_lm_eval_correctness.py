@@ -109,8 +109,9 @@ def generate_report(tp_size, eval_config, report_data, report_dir, env_config):
 def test_lm_eval_correctness_param(config_filename, tp_size, report_dir, env_config):
     eval_config = yaml.safe_load(config_filename.read_text(encoding="utf-8"))
 
-    if eval_config.get("model_type", "vllm") == "vllm-asr":
-        pytest.skip("Skipping ASR config, use test_asr_eval.py instead")
+    model_type = eval_config.get("model_type", "vllm")
+    if model_type not in {"vllm", "vllm-vlm"}:
+        pytest.skip(f"Skipping non-LM config (model_type={model_type})")
 
     model_args = build_model_args(eval_config, tp_size)
     success = True
