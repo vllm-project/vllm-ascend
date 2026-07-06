@@ -522,7 +522,6 @@ vllm serve Eco-Tech/Kimi-K2.5-W4A8 \
     --gpu-memory-utilization 0.8 \
     --enforce-eager \
     --speculative-config '{"method": "eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens": 3}' \
-    --additional-config '{"recompute_scheduler_enable":true}' \
     --mm-encoder-tp-mode data \
     --kv-transfer-config \
     '{"kv_connector": "MooncakeConnectorV1",
@@ -603,7 +602,6 @@ vllm serve Eco-Tech/Kimi-K2.5-W4A8 \
     --gpu-memory-utilization 0.8 \
     --enforce-eager \
     --speculative-config '{"method": "eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens": 3}' \
-    --additional-config '{"recompute_scheduler_enable":true}' \
     --mm-encoder-tp-mode data \
     --kv-transfer-config \
     '{"kv_connector": "MooncakeConnectorV1",
@@ -790,7 +788,7 @@ Key Parameter Descriptions:
 
 - `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the communication optimization function on the prefill nodes.
 - `VLLM_ASCEND_ENABLE_MLAPO=1`: enables the fusion operator, which can significantly improve performance but consumes more NPU memory. In the Prefill-Decode (PD) separation scenario, enable MLAPO only on decode nodes.
-- `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the Key-Value Cache (KV Cache) of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, it is recommended to enable this configuration on both prefill and decode nodes simultaneously.
+- `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the Key-Value Cache (KV Cache) of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, enable this configuration only on decode nodes.
 - `multistream_overlap_shared_expert: true`: When the Tensor Parallelism (TP) size is 1 or `enable_shared_expert_dp: true`, an additional stream is enabled to overlap the computation process of shared experts for improved efficiency.
 
 The `run_dp_template.sh` scripts use positional parameters (`$1`-`$7`) to receive configuration values from `launch_online_dp.py`:
@@ -1029,24 +1027,24 @@ After about several minutes, you can get the performance evaluation result.
 
 > `*Total NPUs` indicates the total number of NPUs used across all nodes. 1 node = 1 Atlas 800 A3 server (64G × 16 NPUs).
 
-|Scenario|Deployment Mode|*Total NPUs|Weight Version|Key Considerations|
-|--------|---------------|-----------|--------------|------------------|
-|High Throughput / Low Latency<br>(16K context)|Single-Node Mixed|16 (A3)|kimi-k2.5-w4a8|Use dp4 tp4 for optimal throughput and low latency|
-|High Throughput / Low Latency<br>(16K context)|2-Node Data Parallel|16 (A2)|kimi-k2.5-w4a8|dp4 tp4 across 2 nodes; balanced latency and throughput|
-|High Throughput / Low Latency<br>(16K context)|2P2D deployment|64 (A3)|kimi-k2.5-w4a8|Prefill: dp2 tp8; Decode: dp32 tp1 for high concurrency|
-|Long Context<br>(128K, low concurrency ≤4)|Single-Node Mixed|16 (A3)|kimi-k2.5-w4a8|dp1 tp16 to maximize TP, accommodate extreme context lengths|
-|Long Context<br>(128K, high concurrency >4)|Single-Node Mixed|16 (A3)|kimi-k2.5-w4a8|dp2 tp8 to optimize memory bandwidth and support higher concurrency|
+| Scenario                                       |Deployment Mode|*Total NPUs|Weight Version|Key Considerations|
+|------------------------------------------------|---------------|-----------|--------------|------------------|
+| High Throughput / Low Latency<br>(16K context) |Single-Node Mixed|16 (A3)|kimi-k2.5-w4a8|Use dp4 tp4 for optimal throughput and low latency|
+| High Throughput / Low Latency<br>(16K context) |2-Node Data Parallel|16 (A2)|kimi-k2.5-w4a8|dp4 tp4 across 2 nodes; balanced latency and throughput|
+| High Throughput / Low Latency<br>(16K context) |2P2D deployment|64 (A3)|kimi-k2.5-w4a8|Prefill: dp2 tp8; Decode: dp32 tp1 for high concurrency|
+| Long Context<br>(128K, low concurrency ≤4)     |Single-Node Mixed|16 (A3)|kimi-k2.5-w4a8|dp1 tp16 to maximize TP, accommodate extreme context lengths|
+| Long Context<br>(128K, high concurrency >4)    |Single-Node Mixed|16 (A3)|kimi-k2.5-w4a8|dp2 tp8 to optimize memory bandwidth and support higher concurrency|
 
 #### Table 2: Detailed Node Configuration
 
-|Scenario|Configuration|NPUs|TP|DP|Max Model Len|MTP Speculation Num|
-|--------|-------------|-----|--|--|-------------|--------------------|
-|High Throughput / Low Latency (16K)|Server / Single Machine|16|4|4|~16K|3|
-|High Throughput / Low Latency (16K)|Server / 2-Node DP|8|4|2|~16K|3|
-|High Throughput / Low Latency (16K)|Server-P Node|16|8|2|~16K|3|
-|High Throughput / Low Latency (16K)|Server-D Node|16|1|32|~16K|3|
-|Long Context (128K, low concurrency ≤4)|Server / Single Machine|16|16|1|128K|3|
-|Long Context (128K, high concurrency >4)|Server / Single Machine|16|8|2|128K|3|
+| Scenario                                 |Configuration|NPUs|TP|DP|Max Model Len|MTP Speculation Num|
+|------------------------------------------|-------------|-----|--|--|-------------|--------------------|
+| High Throughput / Low Latency (16K)      |Server / Single Machine|16|4|4|~16K|3|
+| High Throughput / Low Latency (16K)      |Server / 2-Node DP|8|4|2|~16K|3|
+| High Throughput / Low Latency (16K)      |Server-P Node|16|8|2|~16K|3|
+| High Throughput / Low Latency (16K)      |Server-D Node|16|1|32|~16K|3|
+| Long Context (128K, low concurrency ≤4)  |Server / Single Machine|16|16|1|128K|3|
+| Long Context (128K, high concurrency >4) |Server / Single Machine|16|8|2|128K|3|
 
 > For complete startup commands and parameter descriptions, please refer to the deployment examples in [Chapter 5](#5-online-service-deployment).
 
