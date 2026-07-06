@@ -1029,8 +1029,7 @@ class PCPManager:
             req_indices_mtp = np.concatenate(req_indices_split)
             positions_mtp = np.concatenate(positions_split)
             input_batch.block_table.compute_slot_mapping_draft(req_indices_mtp, positions_mtp)
-            block_table = input_batch.block_table.block_tables[0]
-            mtp_slot_ori = block_table.slot_mapping.cpu[:num_tokens_mtp]
+            mtp_slot_ori = input_batch.block_table.block_tables[0].slot_mapping.cpu[:num_tokens_mtp]
             unpad_mask = np.repeat(False, num_tokens_mtp_pad)
             unpad_mask[:: self.pcp_world_size] = True
             mtp_slot_pad = torch.full([num_tokens_mtp_pad], -1, dtype=torch.int32)
@@ -1133,15 +1132,7 @@ class PCPManager:
         num_requests = seq_lens.size(0)
         total_world_size = pcp_world_size * dcp_world_size
         seq_lens_tiled = seq_lens.unsqueeze(-1).repeat(1, total_world_size)
-        rank_offsets = (
-            torch.arange(
-                total_world_size,
-                dtype=seq_lens.dtype,
-                device=seq_lens.device,
-            )
-            .unsqueeze(0)
-            .repeat(num_requests, 1)
-        )
+        rank_offsets = torch.arange(total_world_size, dtype=torch.int32).unsqueeze(0).repeat(num_requests, 1)
         base = seq_lens_tiled // cp_kv_cache_interleave_size // total_world_size * cp_kv_cache_interleave_size
         remainder = seq_lens_tiled - base * total_world_size
         remainder = torch.clip(
