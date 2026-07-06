@@ -118,6 +118,7 @@ def get_chip_type() -> str:
             assert npu_name
             return (chip_name + "_" + npu_name).lower()
         elif "A2G3" in chip_name:
+            # A2 case: CH version of the HDK
             return "ascend910b1"
         else:
             raise ValueError(f"Unable to recognize chip name: {chip_name}, please manually set env SOC_VERSION")
