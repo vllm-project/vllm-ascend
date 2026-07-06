@@ -65,7 +65,7 @@ This means two instances must agree on both model identity and deployment topolo
 
 ## Example Commands & Placeholders
 
-> Replace parts in `` `<...>` `` before running.
+> Replace parts in `<...>` before running.
 
 ### 1. Install YuanRong TransferEngine
 

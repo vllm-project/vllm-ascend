@@ -14,7 +14,7 @@ vLLM Ascend is an open-source project under the vLLM community, where the author
 
 - Contributor:
 
-    **Responsibility:** Help new contributors onboarding, handle and respond to community questions, review RFCs and code.
+    **Responsibility:** Help new contributors with onboarding, handle and respond to community questions, review RFCs and code.
 
     **Requirements:** Complete at least 1 contribution. A contributor is someone who consistently and actively participates in a project, including but not limited to issue/review/commits/community involvement.
 

@@ -128,7 +128,7 @@ Not supported yet.
 
 ## Functional Verification
 
-If your service start successfully, you can see the info shown below:
+If your service starts successfully, you can see the info shown below:
 
 ```bash
 INFO:     Started server process [87471]

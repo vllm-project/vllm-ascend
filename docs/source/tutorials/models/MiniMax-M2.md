@@ -189,7 +189,7 @@ Remarks:
     --speculative_config '{"enforce_eager": true, "method": "eagle3", "model": "/path/to/weight/Eagle3/", "num_speculative_tokens": 1}' \
 ```
 
-- If you will to test with `curl` command, you can add following commands addition to start up command above.
+- If you want to test with `curl` command, you can add following commands addition to start up command above.
 
 ```{code-block} bash
     --enable-auto-tool-choice \
