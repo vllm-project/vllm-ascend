@@ -86,7 +86,6 @@ from vllm_ascend.attention.dsa_v1 import (AscendDSAMetadata,
                                           AscendDSAMetadataBuilder)
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          using_paged_attention)
-from vllm_ascend.kv_offload.shmem_host import _acl_malloc_host, _make_host_tensor
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm_ascend.compilation.acl_graph import (ACLGraphWrapper,
@@ -151,6 +150,45 @@ U32_MAX = 0xFFFFFFFF
 @dataclass
 class GraphCaptureContext:
     stream: torch.npu.Stream
+
+
+def _acl_malloc_host(size: int) -> tuple[int, int]:
+    libacl = ctypes.CDLL("libascendcl.so")
+
+    host_ptr = ctypes.c_void_p()
+    ret = libacl.aclrtMallocHost(ctypes.byref(host_ptr), ctypes.c_size_t(size))
+    if ret != 0:
+        raise RuntimeError(
+            f"aclrtMallocHost failed: error {ret} (size={size})."
+        )
+
+    dev_ptr = ctypes.c_void_p()
+    ret = libacl.aclrtHostRegister(
+        host_ptr, ctypes.c_uint64(size), ctypes.c_int(0), ctypes.byref(dev_ptr)
+    )
+    if ret != 0:
+        libacl.aclrtFreeHost(host_ptr)
+        raise RuntimeError(f"aclrtHostRegister failed: error {ret}")
+
+    return host_ptr.value, dev_ptr.value
+
+
+def _compact_strides(shape: tuple[int, ...]) -> tuple[int, ...]:
+    strides = [1] * len(shape)
+    for i in range(len(shape) - 2, -1, -1):
+        strides[i] = strides[i + 1] * shape[i + 1]
+    return tuple(strides)
+
+
+def _make_host_tensor(dev_ptr_int: int, shape: tuple[int, ...],
+                      dtype: torch.dtype, device: torch.device,
+                      size_bytes: int) -> torch.Tensor:
+    storage = torch_npu._C._construct_storage_from_data_pointer(
+        dev_ptr_int, device, size_bytes
+    )
+    return torch.empty(0, dtype=dtype, device=device).set_(
+        storage, 0, shape, _compact_strides(shape)
+    )
 
 
 @dataclass
