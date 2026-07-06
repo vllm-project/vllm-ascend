@@ -42,16 +42,11 @@ Trigger specific nightly test cases on A2 and A3. Supports only PR comments. Tes
 **Usage:**
 
 | Syntax | Scope |
-|---|---|---|
+|---|---|
 | `/nightly <test_cases>` | Runs on `main` branch |
 | `/nightly <test_cases> --branch <branch>` | Runs on the specified branch |
-| `/nightly <test_cases> --aop_enabled` | Enable AOP hooks (bisect / classify) on failure |
 
 Use `--branch <name>` to specify a target branch. Without `--branch`, all arguments are treated as test cases (separated by commas or spaces) and the branch defaults to `main`.
-
-Use `--aop_enabled` to enable the AOP (Aspect-Oriented Programming) pipeline, which
-automatically captures test results, classifies failures (env vs. code), and triggers
-binary bisect for genuine failures. By default, AOP hooks are disabled.
 
 > **Note**: When commenting on a PR, the tests run on the PR branch automatically in the triggered workflow; the `--branch` flag is primarily used in issue comments.
 
@@ -83,12 +78,6 @@ binary bisect for genuine failures. By default, AOP hooks are disabled.
 
 # Run accuracy group tests (branch defaults to main)
 /nightly accuracy-group
-
-# Enable AOP bisect for all tests
-/nightly all --aop_enabled
-
-# Run specific test with AOP on a release branch
-/nightly test_custom_op --branch releases/v0.23.0 --aop_enabled
 ```
 
 This triggers `workflow_dispatch` on both `schedule_nightly_test_a2.yaml` and `schedule_nightly_test_a3.yaml`.

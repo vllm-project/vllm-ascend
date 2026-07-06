@@ -47,11 +47,6 @@ on:
         required: false
         default: ''
         type: string
-      aop_enabled:
-        description: 'Enable AOP hooks (capture / classify / skip-or-process)'
-        required: false
-        default: 'false'
-        type: string
 
 permissions:
   contents: read
