@@ -37,11 +37,6 @@ on:
         required: false
         default: "main"
         type: string
-      vllm_version:
-        description: "vllm version (commit hash or tag)"
-        required: false
-        default: "v0.20.2"
-        type: string
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -56,7 +51,7 @@ concurrency:
 
 jobs:
   lint-and-select-tests:
-    if: ${{ github.event_name == 'pull_request' && (github.event.action != 'labeled' || github.event.label.name == 'ready') }}
+    if: ${{ github.event.action != 'labeled' || github.event.label.name == 'ready' }}
     runs-on: linux-amd64-cpu-8-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
@@ -242,7 +237,6 @@ jobs:
       test_groups: ${{ steps.full-scope.outputs.test_groups }}
       matched_modules: ${{ steps.full-scope.outputs.matched_modules }}
       vllm_ascend_ref: ${{ steps.resolve-refs.outputs.vllm_ascend_ref }}
-      vllm_version: ${{ steps.resolve-refs.outputs.vllm_version }}
       main_commit: ${{ steps.resolve-refs.outputs.main_commit }}
       release_tag: ${{ steps.resolve-refs.outputs.release_tag }}
     steps:
@@ -260,7 +254,6 @@ jobs:
           else
             echo "vllm_ascend_ref=${{ inputs.vllm_ascend_ref || 'main' }}" >> "$GITHUB_OUTPUT"
           fi
-          echo "vllm_version=${{ inputs.vllm_version || 'v0.21.0' }}" >> "$GITHUB_OUTPUT"
           main_commit="$(tr -d '[:space:]' < .github/vllm-main-verified.commit)"
           release_tag="$(tr -d '[:space:]' < .github/vllm-release-tag.commit)"
           [[ "${main_commit}" =~ ^[0-9a-f]{7,40}$ ]] || {
