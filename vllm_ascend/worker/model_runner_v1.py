@@ -1258,6 +1258,14 @@ class NPUModelRunner(GPUModelRunner):
         if self._needs_seq_lens_cpu_sync and async_spec_decode_active:
             self._correct_optimistic_seq_lens_cpu(num_reqs)
 
+        if self.use_compress:
+            dsa_base_tokens = (
+                base_num_computed_tokens_np
+                if base_num_computed_tokens_np is not None
+                else self.input_batch.num_computed_tokens_cpu[:num_reqs]
+            )
+            self._dsa_num_computed_tokens_for_positions_np = dsa_base_tokens.copy()
+
         # For non-PCP, compute slot_mapping on GPU. PCP slot_mapping was
         # already computed on GPU before PCP split the positions.
         if self.pcp_size <= 1:
@@ -2042,6 +2050,13 @@ class NPUModelRunner(GPUModelRunner):
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         with record_function_or_nullcontext("prepare input"):
             with self.synchronize_input_prep():
+                if self.use_async_scheduling and self.use_compress:
+                    # DSA CP graph capture reuses input/attention metadata
+                    # buffers by address. Some DSA graph work may outlive the
+                    # Python current stream, so wait on the device before
+                    # _prepare_inputs overwrites them for the next async step.
+                    torch.npu.synchronize()
+
                 # Fix up prev_req_id_to_index for requests that were discarded
                 # in the previous sample_tokens step. If a request has
                 # prev_num_draft_len > 0 but is missing from
@@ -2219,9 +2234,13 @@ class NPUModelRunner(GPUModelRunner):
                         deferred_state_corrections_fn = None
                     num_reqs = self.input_batch.num_reqs
                     req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens_np)
+                    dsa_base_tokens = getattr(
+                        self, "_dsa_num_computed_tokens_for_positions_np", None)
+                    if dsa_base_tokens is None or dsa_base_tokens.shape[0] < num_reqs:
+                        dsa_base_tokens = self.input_batch.num_computed_tokens_cpu
                     dsa_positions_np = self._dsa_positions_np_buf[:total_num_scheduled_tokens]
                     np.add(
-                        self.input_batch.num_computed_tokens_cpu[req_indices],
+                        dsa_base_tokens[req_indices],
                         self.query_pos.np[:total_num_scheduled_tokens],
                         out=dsa_positions_np,
                     )
