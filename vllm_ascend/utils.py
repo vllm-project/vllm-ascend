@@ -577,10 +577,11 @@ def _patch_get_config_hf_overrides():
     the architecture resolution uses the overridden values.
     """
     import logging
+
     _logger = logging.getLogger(__name__)
 
     from vllm.config.model import ModelConfig as _ModelConfig
-    from vllm.model_executor.models.registry import _ModelRegistry
+
     _orig_post_init = _ModelConfig.__post_init__
 
     def _patched_post_init(self, *args, **kwargs):
@@ -588,23 +589,21 @@ def _patch_get_config_hf_overrides():
         # Re-apply hf_overrides_fn if it was provided but not applied.
         # The original __post_init__ calls get_config() with hf_overrides_fn,
         # but it is not applied (consumed by config_parser.parse()).
-        if hasattr(self, 'hf_overrides') and callable(self.hf_overrides):
+        if hasattr(self, "hf_overrides") and callable(self.hf_overrides):
             self.hf_config = self.hf_overrides(self.hf_config)
             # Refresh model_arch_config (depends on hf_config)
             self.model_arch_config = _ModelConfig.get_model_arch_config(self)
             # Re-resolve architecture with the updated config
             model_info, arch = self.registry.inspect_model_cls(
-                self.architectures, self,
+                self.architectures,
+                self,
             )
             self._model_info = model_info
             self._architecture = arch
         return result
 
     _ModelConfig.__post_init__ = _patched_post_init
-    _logger.info(
-        "vllm_ascend: patched ModelConfig.__post_init__ for "
-        "hf_config_override fix"
-    )
+    _logger.info("vllm_ascend: patched ModelConfig.__post_init__ for hf_config_override fix")
 
 
 def adapt_patch(is_global_patch: bool = False):
@@ -1813,9 +1812,7 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
 
     # Store original configuration and temporarily clear it
     compilation_config = vllm_config.compilation_config
-    original_sizes, compilation_config.cudagraph_capture_sizes = (
-        compilation_config.cudagraph_capture_sizes, None
-    )
+    original_sizes, compilation_config.cudagraph_capture_sizes = (compilation_config.cudagraph_capture_sizes, None)
 
     # Calculate parallel configuration factor
     if not vllm_config.model_config:
@@ -1835,8 +1832,7 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     # Calculate maximum supported batch sizes considering model architecture
     resources_per_graph = num_hidden_layers + 1
     # For suffix decoding, use the suffix path when no draft_model_config
-    if (spec := vllm_config.speculative_config) and \
-            (draft := spec.draft_model_config):
+    if (spec := vllm_config.speculative_config) and (draft := spec.draft_model_config):
         resources_per_graph += draft.get_total_num_hidden_layers() + 1
 
     num_comm_groups = sum(
@@ -1852,19 +1848,14 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
             1
             + num_comm_groups
             + int(parallel_config.enable_expert_parallel)
-            + int(vllm_config.additional_config.get(
-                "multistream_overlap_shared_expert", False))
+            + int(vllm_config.additional_config.get("multistream_overlap_shared_expert", False))
         )
         if is_moe_model(vllm_config):
             parallel_factor += parallel_config.data_parallel_size > 1
         else:
-            MAX_CAPTURE_SIZE = (
-                MAX_CAPTURE_SIZE - parallel_factor * resources_per_graph
-            )
+            MAX_CAPTURE_SIZE = MAX_CAPTURE_SIZE - parallel_factor * resources_per_graph
 
-        max_num_batch_sizes = math.floor(
-            MAX_CAPTURE_SIZE / resources_per_graph / parallel_factor
-        )
+        max_num_batch_sizes = math.floor(MAX_CAPTURE_SIZE / resources_per_graph / parallel_factor)
         logger.info(
             "Calculated maximum supported batch sizes for ACL graph: %s",
             max_num_batch_sizes,
@@ -1876,9 +1867,7 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
             MAX_CAPTURE_SIZE = MAX_CAPTURE_SIZE - CP_ADDITIONAL_STREAM_NUM
 
         max_num_batch_sizes = math.floor(
-            (MAX_CAPTURE_SIZE - num_comm_groups * 40)
-            / resources_per_graph
-            / (1 + num_comm_groups * 2)
+            (MAX_CAPTURE_SIZE - num_comm_groups * 40) / resources_per_graph / (1 + num_comm_groups * 2)
         )
         logger.info(
             "Calculated maximum supported batch sizes for ACL graph: %s",

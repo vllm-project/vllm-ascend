@@ -9,7 +9,6 @@ Uses multiple inheritance to combine the upstream vLLM Gemma4Proposer
 from dataclasses import replace
 
 import torch
-
 from vllm.config import get_layers_from_vllm_config
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.spec_decode.gemma4 import (
@@ -94,7 +93,7 @@ class AscendGemma4Proposer(_VllmGemma4Proposer, AscendSpecDecodeBaseProposer):
 
     def _greedy_sample(self, hidden_states: torch.Tensor) -> torch.Tensor:
         model = self.get_model()
-        if getattr(model, 'masked_embedding', None) is not None:
+        if getattr(model, "masked_embedding", None) is not None:
             return model.get_top_tokens(hidden_states)
         return super()._greedy_sample(hidden_states)
 
@@ -153,19 +152,14 @@ class AscendGemma4Proposer(_VllmGemma4Proposer, AscendSpecDecodeBaseProposer):
 
     def _maybe_share_lm_head(self, target_language_model):
         """Keep draft lm_head; delegate ACL graph setup to Ascend parent."""
-        from vllm.logger import init_logger
-        logger = init_logger(__name__)
-        logger.info(
-            "Gemma4 MTP: keeping draft model's own lm_head "
-            "(draft_dim != backbone_dim)."
-        )
+        from vllm.logger import logger
+
+        logger.info("Gemma4 MTP: keeping draft model's own lm_head (draft_dim != backbone_dim).")
         # The Ascend parent's _maybe_share_lm_head only shares for
         # eagle/dflash or deepseek_mla — neither applies here.
         # But it also wraps self._runnable in ACLGraphWrapper for
         # full-graph mode.  Call it for that side-effect.
-        AscendSpecDecodeBaseProposer._maybe_share_lm_head(
-            self, target_language_model
-        )
+        AscendSpecDecodeBaseProposer._maybe_share_lm_head(self, target_language_model)
 
     # ---- _fix_draft_kv_head_counts -------------------------------------------
     # When the draft model's attention layer is configured with a different
@@ -177,8 +171,7 @@ class AscendGemma4Proposer(_VllmGemma4Proposer, AscendSpecDecodeBaseProposer):
     # values so PA and shared-KV prefill paths produce correct results.
 
     def _fix_draft_kv_head_counts(self, target_model) -> None:
-        from vllm.logger import init_logger
-        logger = init_logger(__name__)
+        from vllm.logger import logger
 
         # Build a lookup from target layer name → (num_heads, num_kv_heads)
         # using the already-computed target_attn_layer_names.
@@ -203,9 +196,9 @@ class AscendGemma4Proposer(_VllmGemma4Proposer, AscendSpecDecodeBaseProposer):
             target_module = target_attn_layers.get(tgt_name)
             if target_module is None:
                 logger.warning(
-                    "Draft layer %d shares KV with '%s' but target "
-                    "module not found — skipping head-count fix.",
-                    draft_idx, tgt_name,
+                    "Draft layer %d shares KV with '%s' but target module not found — skipping head-count fix.",
+                    draft_idx,
+                    tgt_name,
                 )
                 continue
 
@@ -231,9 +224,9 @@ class AscendGemma4Proposer(_VllmGemma4Proposer, AscendSpecDecodeBaseProposer):
                 if target_impl is not None:
                     object.__setattr__(impl, "_kv_share_target_impl", target_impl)
                     logger.info(
-                        "MTP KV-sharing: draft layer %d impl will use "
-                        "target '%s' key_cache at runtime.",
-                        draft_idx, tgt_name,
+                        "MTP KV-sharing: draft layer %d impl will use target '%s' key_cache at runtime.",
+                        draft_idx,
+                        tgt_name,
                     )
                 # Store a reference to the per_group_block_tables dict
                 # so that _get_shared_kv_from_block_table can use the
@@ -245,8 +238,12 @@ class AscendGemma4Proposer(_VllmGemma4Proposer, AscendSpecDecodeBaseProposer):
                     "MTP KV-sharing head fix: draft layer %d "
                     "(heads=%d, kv_heads=%d) -> target '%s' "
                     "(heads=%d, kv_heads=%d)",
-                    draft_idx, draft_nh, draft_nkv,
-                    tgt_name, tgt_nh, tgt_nkv,
+                    draft_idx,
+                    draft_nh,
+                    draft_nkv,
+                    tgt_name,
+                    tgt_nh,
+                    tgt_nkv,
                 )
                 object.__setattr__(attn, "num_kv_heads", tgt_nkv)
                 object.__setattr__(attn, "num_heads", tgt_nh)
@@ -280,12 +277,12 @@ class AscendGemma4Proposer(_VllmGemma4Proposer, AscendSpecDecodeBaseProposer):
     # block_table for this layer's KV cache group.
     def _store_gids_on_impls(self) -> None:
         """Store kv_cache_group_id on each draft attention backend impl."""
-        if not hasattr(self, 'draft_attn_groups'):
+        if not hasattr(self, "draft_attn_groups"):
             return
         # Walk the draft model's layers to find attention impls and match
         # them to attention groups by layer name.
         draft_model = self.get_model()
-        if not (hasattr(draft_model, 'model') and hasattr(draft_model.model, 'layers')):
+        if not (hasattr(draft_model, "model") and hasattr(draft_model.model, "layers")):
             return
         # Build gid lookup from attention group layer names
         ln_to_gid = {}
@@ -294,19 +291,19 @@ class AscendGemma4Proposer(_VllmGemma4Proposer, AscendSpecDecodeBaseProposer):
                 ln_to_gid[ln] = ag.kv_cache_group_id
         # Walk draft model layers
         for draft_idx, layer in enumerate(draft_model.model.layers):
-            attn_layer = getattr(layer, 'self_attn', None)
+            attn_layer = getattr(layer, "self_attn", None)
             if attn_layer is None:
                 continue
-            attn = getattr(attn_layer, 'attn', None)
+            attn = getattr(attn_layer, "attn", None)
             if attn is None:
                 continue
-            impl = getattr(attn, 'impl', None)
+            impl = getattr(attn, "impl", None)
             if impl is None:
                 continue
             # Match by layer name patterns
             for ln, gid in ln_to_gid.items():
                 if f"layers.{draft_idx}.self_attn" in ln:
-                    object.__setattr__(impl, '_kv_share_gid', gid)
+                    object.__setattr__(impl, "_kv_share_gid", gid)
                     break
 
     # ---- load_model --------------------------------------------------------
@@ -341,9 +338,7 @@ class AscendGemma4Proposer(_VllmGemma4Proposer, AscendSpecDecodeBaseProposer):
 
         # Wire cross-model KV sharing: each draft attention layer
         # reads K/V from the corresponding target layer's cache.
-        _VllmGemma4Proposer._setup_gemma4_kv_sharing(
-            self, target_attn_layer_names
-        )
+        _VllmGemma4Proposer._setup_gemma4_kv_sharing(self, target_attn_layer_names)
 
         # Fix num_kv_heads mismatch: the draft model's attention layers
         # may have a different GQA configuration than the target layers

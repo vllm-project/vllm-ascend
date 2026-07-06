@@ -503,10 +503,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     layer_module.shared_head.head = model.lm_head
 
         _has_full = self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs()
-        _is_gemma4_mtp = (
-            self.speculative_config is not None
-            and self.speculative_config.use_gemma4_mtp()
-        )
+        _is_gemma4_mtp = self.speculative_config is not None and self.speculative_config.use_gemma4_mtp()
         # On Ascend, Gemma4 MTP draft runs in eager mode (FDO is not supported
         # for the draft). Disable cuda graph only for Gemma4 MTP so other MTP
         # models keep the upstream FULL-cudagraph draft wrapping below.
@@ -754,7 +751,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         writes KV cache asynchronously on the NPU stream.  We must wait for
         those writes to complete before the draft model reads the KV cache.
         """
-        _ev = getattr(self, '_target_done_event', None)
+        _ev = getattr(self, "_target_done_event", None)
         if _ev is not None:
             _ev.wait()
             self._target_done_event = None

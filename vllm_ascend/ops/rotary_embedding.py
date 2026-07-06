@@ -165,9 +165,7 @@ def rope_forward_oot(
     # KV cache, so key may be None.  Apply RoPE to query only.
     if key is None:
         if offsets is not None:
-            raise NotImplementedError(
-                "Batched rotary embedding is currently not supported on NPU."
-            )
+            raise NotImplementedError("Batched rotary embedding is currently not supported on NPU.")
         num_tokens = query.shape[0]
         if HAS_TRITON:
             query, _ = rope_forward_triton(
@@ -193,8 +191,12 @@ def rope_forward_oot(
                 q_rot = q_rot.contiguous().view(num_tokens, -1)
                 k_dummy = torch.empty_like(q_rot)
                 torch_npu._npu_rotary_embedding(
-                    positions, q_rot, k_dummy, rotary_dim,
-                    cos_sin_cache, is_neox_style,
+                    positions,
+                    q_rot,
+                    k_dummy,
+                    rotary_dim,
+                    cos_sin_cache,
+                    is_neox_style,
                 )
                 q_rot = q_rot.view(num_tokens, -1, rotary_dim)
                 query = torch.cat((q_rot, q_pass), dim=-1).flatten(-2, -1)
@@ -202,8 +204,12 @@ def rope_forward_oot(
                 query = query.contiguous().view(num_tokens, -1)
                 k_dummy = torch.empty_like(query)
                 torch_npu._npu_rotary_embedding(
-                    positions, query, k_dummy, head_size,
-                    cos_sin_cache, is_neox_style,
+                    positions,
+                    query,
+                    k_dummy,
+                    head_size,
+                    cos_sin_cache,
+                    is_neox_style,
                 )
                 query = query.view(num_tokens, -1, head_size).flatten(-2, -1)
         return query, None

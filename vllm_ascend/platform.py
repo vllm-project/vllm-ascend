@@ -543,13 +543,8 @@ class NPUPlatform(Platform):
         # through for FDO graph mode. Scoped to gemma4 MTP so other models
         # keep the upstream FULL_AND_PIECEWISE behavior.
         _spec = getattr(vllm_config, "speculative_config", None)
-        _is_gemma4_mtp = (
-            _spec is not None
-            and hasattr(_spec, "use_gemma4_mtp")
-            and _spec.use_gemma4_mtp()
-        )
-        if (_is_gemma4_mtp
-                and compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE):
+        _is_gemma4_mtp = _spec is not None and hasattr(_spec, "use_gemma4_mtp") and _spec.use_gemma4_mtp()
+        if _is_gemma4_mtp and compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE:
             compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
         # Encoder-decoder models currently only support PIECEWISE mode
@@ -612,8 +607,7 @@ class NPUPlatform(Platform):
             or compilation_config.cudagraph_mode == CUDAGraphMode.FULL
         ):
             logger.info(
-                "FULL_DECODE_ONLY compilation enabled on NPU. "
-                "use_inductor not supported - using only ACL Graph mode"
+                "FULL_DECODE_ONLY compilation enabled on NPU. use_inductor not supported - using only ACL Graph mode"
             )
             compilation_config.use_inductor = False
             compilation_config.splitting_ops = []
