@@ -61,17 +61,43 @@ class AscendDSparkProposer(AscendDflashProposer):
         self.arange_dspark = torch.arange(self.max_positions + 1, device=device, dtype=torch.int32)
         self._dspark_last_draft_logits: torch.Tensor | None = None
         self._dspark_last_draft_probs: torch.Tensor | None = None
+        self._dspark_last_confidence: torch.Tensor | None = None
         self._dspark_probabilistic = vllm_config.speculative_config.draft_sample_method == "probabilistic"
+        self._dspark_confidence_threshold = float(getattr(draft_hf_config, "dspark_confidence_threshold", 0.0) or 0.0)
+        if not 0.0 <= self._dspark_confidence_threshold <= 1.0:
+            raise ValueError(f"dspark_confidence_threshold must be in [0.0, 1.0], got {self._dspark_confidence_threshold}")
 
     def take_last_draft_logits(self) -> torch.Tensor | None:
         draft_logits = self._dspark_last_draft_logits
         self._dspark_last_draft_logits = None
         return draft_logits
 
-    def take_last_draft_probs(self) -> torch.Tensor | None:
+    def take_last_draft_probs(self, num_draft_tokens: list[int] | None = None) -> torch.Tensor | None:
         draft_probs = self._dspark_last_draft_probs
         self._dspark_last_draft_probs = None
-        return draft_probs
+        if draft_probs is None or num_draft_tokens is None:
+            return draft_probs
+        rows = []
+        for req_idx, num_tokens in enumerate(num_draft_tokens):
+            if num_tokens > 0:
+                rows.append(draft_probs[req_idx, :num_tokens])
+        if not rows:
+            return None
+        return torch.cat(rows, dim=0).contiguous()
+
+    def _dspark_confident_prefix_length(self, confidence: torch.Tensor | None, max_tokens: int) -> int:
+        if max_tokens == 0 or self._dspark_confidence_threshold <= 0.0:
+            return max_tokens
+        if confidence is None:
+            return 0
+        confidence = confidence.float().reshape(confidence.shape[0], -1)[:, :max_tokens]
+        below_threshold = confidence.sigmoid() < self._dspark_confidence_threshold
+        if not bool(below_threshold.any().item()):
+            return max_tokens
+        first_low = below_threshold.to(torch.int64).argmax(dim=1)
+        full_len = torch.full_like(first_low, max_tokens)
+        prefix_len = torch.where(below_threshold.any(dim=1), first_low, full_len)
+        return int(prefix_len.min().item())
 
     def initialize_attn_backend(self, kv_cache_config, kernel_block_sizes=None) -> None:
         del kv_cache_config
@@ -313,6 +339,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         draft_logits = torch.empty((num_reqs, block_size, vocab_size), dtype=torch.float32, device=base_logits.device) if use_probabilistic else None
         self._dspark_last_draft_logits = None
         self._dspark_last_draft_probs = None
+        self._dspark_last_confidence = None
         prev_ids = self._dspark_seed_buffer[:num_reqs]
         gumbel_positions = self.positions[:num_sample].view(num_reqs, block_size)
         markov_embeds = []
@@ -342,7 +369,11 @@ class AscendDSparkProposer(AscendDflashProposer):
             self._dspark_last_draft_logits = draft_logits.contiguous()
         confidence = self.model.confidence(head_hidden.view(num_reqs, block_size, -1), torch.stack(markov_embeds, dim=1))
         self._dspark_last_confidence = confidence
-        return self._dspark_draft_buffer[:num_reqs, :block_size]
+        proposal_len = self._dspark_confident_prefix_length(confidence, block_size)
+        if use_probabilistic and proposal_len > 0:
+            assert draft_logits is not None
+            self._dspark_last_draft_probs = draft_logits[:, :proposal_len, :].softmax(dim=-1, dtype=torch.float32).contiguous()
+        return self._dspark_draft_buffer[:num_reqs, :proposal_len]
 
     def _propose(
         self,

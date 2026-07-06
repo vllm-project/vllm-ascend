@@ -2550,9 +2550,12 @@ class NPUModelRunner(GPUModelRunner):
         if self.input_batch.sampling_metadata.top_k is not None and get_ascend_config().enable_reduce_sample:
             max_topk = self.input_batch.top_k_cpu[self.input_batch.top_k_cpu < logits.shape[1]].max()
             self.rejection_sampler.prepare_sampling(max_topk)
+        draft_probs = None
+        if isinstance(self.drafter, AscendDSparkProposer):
+            draft_probs = self.drafter.take_last_draft_probs(spec_decode_metadata.num_draft_tokens)
         sampler_output = self.rejection_sampler(
             spec_decode_metadata,
-            None,  # draft_probs
+            draft_probs,
             logits,
             sampling_metadata,
         )
