@@ -351,6 +351,7 @@ class NPUModelRunner(GPUModelRunner):
             max_seq_len_np=max_seq_len_np,
             input_ids=input_ids,
             positions=positions,
+            is_padding=self.input_buffers.is_padding[:num_tokens_after_padding],
             logits_indices=logits_indices,
             cu_num_logits=cu_num_logits,
             cu_num_logits_np=cu_num_logits_np,

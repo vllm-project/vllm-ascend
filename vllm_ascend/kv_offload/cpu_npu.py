@@ -5,9 +5,13 @@ import numpy as np
 import torch
 from vllm.logger import logger
 from vllm.utils.platform_utils import is_pin_memory_available
-from vllm.v1.attention.backend import AttentionBackend  # type: ignore
-from vllm.v1.kv_offload.mediums import CPULoadStoreSpec, GPULoadStoreSpec
-from vllm.v1.kv_offload.worker.worker import OffloadingHandler, TransferResult, TransferSpec
+from vllm.v1.kv_offload.base import (
+    GPULoadStoreSpec,
+    LoadStoreSpec,
+    OffloadingWorker,
+    TransferResult,
+)
+from vllm.v1.kv_offload.mediums import CPULoadStoreSpec
 
 
 @dataclass
@@ -51,14 +55,13 @@ def expand_block_ids(
     output[: len(all_ids)] = all_ids
 
 
-class CpuNpuOffloadingHandler(OffloadingHandler):
+class CpuNpuOffloadingWorker(OffloadingWorker):
     def __init__(
         self,
         gpu_block_size: int,
         cpu_block_size: int,
         num_cpu_blocks: int,
         gpu_caches: dict[str, torch.Tensor],
-        attn_backends: dict[str, type[AttentionBackend]],
     ):
         assert cpu_block_size % gpu_block_size == 0
         self.block_size_factor = cpu_block_size // gpu_block_size
@@ -139,27 +142,17 @@ class CpuNpuOffloadingHandler(OffloadingHandler):
     def _recycle_event(self, event: torch.npu.Event) -> None:
         self._event_pool.append(event)
 
-    def transfer_async(self, job_id: int, spec: TransferSpec) -> bool:
-        src_spec, dst_spec = spec
-        if isinstance(src_spec, CPULoadStoreSpec):
-            assert isinstance(dst_spec, GPULoadStoreSpec)
-            stream = self.h2d_stream
-            src_base_ptrs = self._cpu_base_ptrs
-            dst_base_ptrs = self._npu_base_ptrs
-            src_block_size_factor = self.block_size_factor
-            dst_block_size_factor = 1
-            is_d2h = False
-            transfers = self._h2d_transfers
-        else:
-            assert isinstance(src_spec, GPULoadStoreSpec)
-            assert isinstance(dst_spec, CPULoadStoreSpec)
-            stream = self.d2h_stream
-            src_base_ptrs = self._npu_base_ptrs
-            dst_base_ptrs = self._cpu_base_ptrs
-            src_block_size_factor = 1
-            dst_block_size_factor = self.block_size_factor
-            is_d2h = True
-            transfers = self._d2h_transfers
+    def submit_store(
+        self, job_id: int, src_spec: GPULoadStoreSpec, dst_spec: LoadStoreSpec
+    ) -> bool:
+        assert isinstance(dst_spec, CPULoadStoreSpec)
+        stream = self.d2h_stream
+        src_base_ptrs = self._npu_base_ptrs
+        dst_base_ptrs = self._cpu_base_ptrs
+        src_block_size_factor = 1
+        dst_block_size_factor = self.block_size_factor
+        is_d2h = True
+        transfers = self._d2h_transfers
 
         src_blocks = src_spec.block_ids
         dst_blocks = dst_spec.block_ids
@@ -183,13 +176,10 @@ class CpuNpuOffloadingHandler(OffloadingHandler):
         )
 
         # Build flat pointer arrays for all sub-tensors × all block pairs.
-        # sub-tensors = [layer0_key, layer0_value, layer1_key, layer1_value, ...]
-        # Fully vectorized via numpy broadcasting (no Python loop).
         num_pairs = src_sub_block_count
         num_sub_tensors = len(self._block_size_in_bytes_arr)
         total = num_pairs * num_sub_tensors
 
-        # (num_sub_tensors, 1) + (1, num_pairs) * (num_sub_tensors, 1) -> (num_sub_tensors, num_pairs)
         bsz_col = self._block_size_in_bytes_arr[:, None]  # (T, 1)
         all_src = (src_base_ptrs[:, None] + src_block_ids[None, :] * bsz_col).ravel()
         all_dst = (dst_base_ptrs[:, None] + dst_block_ids[None, :] * bsz_col).ravel()
@@ -203,18 +193,87 @@ class CpuNpuOffloadingHandler(OffloadingHandler):
         end_event = self._get_event()
 
         if is_d2h:
-            # Wait for model computation to finish before reading NPU data
             stream.wait_stream(torch.npu.current_stream())
         if transfers:
-            # Ensure this transfer starts only after the previous one completes
             last_transfer = transfers[-1]
             stream.wait_event(last_transfer.end_event)
 
         with torch.npu.stream(stream):
             start_event.record(stream)
             if total > 0:
-                direction = 0 if not is_d2h else 1
-                torch.ops._C_ascend.swap_blocks_batch(batch_src, batch_dst, batch_sizes, direction)
+                torch.ops._C_ascend.swap_blocks_batch(batch_src, batch_dst, batch_sizes, 1)
+            end_event.record(stream)
+
+        transfers.append(
+            Transfer(
+                job_id=job_id,
+                stream=stream,
+                start_event=start_event,
+                end_event=end_event,
+                num_bytes=src_sub_block_count * self._total_bytes_per_block,
+            )
+        )
+
+        return True
+
+    def submit_load(
+        self, job_id: int, src_spec: LoadStoreSpec, dst_spec: GPULoadStoreSpec
+    ) -> bool:
+        assert isinstance(src_spec, CPULoadStoreSpec)
+        stream = self.h2d_stream
+        src_base_ptrs = self._cpu_base_ptrs
+        dst_base_ptrs = self._npu_base_ptrs
+        src_block_size_factor = self.block_size_factor
+        dst_block_size_factor = 1
+        is_d2h = False
+        transfers = self._h2d_transfers
+
+        src_blocks = src_spec.block_ids
+        dst_blocks = dst_spec.block_ids
+        assert src_blocks.ndim == 1
+        assert dst_blocks.ndim == 1
+
+        dst_sub_blocks_to_skip = -src_blocks.size % dst_block_size_factor
+        src_sub_block_count = src_blocks.size * src_block_size_factor
+
+        assert src_sub_block_count == dst_blocks.size * dst_block_size_factor - dst_sub_blocks_to_skip
+
+        # Expand block IDs into sub-block IDs
+        src_block_ids = np.empty(src_sub_block_count, dtype=np.int64)
+        dst_block_ids = np.empty(src_sub_block_count, dtype=np.int64)
+        expand_block_ids(src_blocks, src_block_size_factor, src_block_ids)
+        expand_block_ids(
+            dst_blocks,
+            dst_block_size_factor,
+            dst_block_ids,
+            skip_count=dst_sub_blocks_to_skip,
+        )
+
+        # Build flat pointer arrays for all sub-tensors × all block pairs.
+        num_pairs = src_sub_block_count
+        num_sub_tensors = len(self._block_size_in_bytes_arr)
+        total = num_pairs * num_sub_tensors
+
+        bsz_col = self._block_size_in_bytes_arr[:, None]  # (T, 1)
+        all_src = (src_base_ptrs[:, None] + src_block_ids[None, :] * bsz_col).ravel()
+        all_dst = (dst_base_ptrs[:, None] + dst_block_ids[None, :] * bsz_col).ravel()
+        all_sizes = np.broadcast_to(bsz_col, (num_sub_tensors, num_pairs)).ravel().copy()
+
+        batch_src = torch.from_numpy(all_src)
+        batch_dst = torch.from_numpy(all_dst)
+        batch_sizes = torch.from_numpy(all_sizes)
+
+        start_event = self._get_event()
+        end_event = self._get_event()
+
+        if transfers:
+            last_transfer = transfers[-1]
+            stream.wait_event(last_transfer.end_event)
+
+        with torch.npu.stream(stream):
+            start_event.record(stream)
+            if total > 0:
+                torch.ops._C_ascend.swap_blocks_batch(batch_src, batch_dst, batch_sizes, 0)
             end_event.record(stream)
 
         transfers.append(
@@ -231,10 +290,7 @@ class CpuNpuOffloadingHandler(OffloadingHandler):
 
     def get_finished(self) -> list[TransferResult]:
         results: list[TransferResult] = []
-        for transfers, transfer_type in [
-            (self._d2h_transfers, ("NPU", "CPU")),
-            (self._h2d_transfers, ("CPU", "NPU")),
-        ]:
+        for transfers in (self._d2h_transfers, self._h2d_transfers):
             while transfers and transfers[0].end_event.query():
                 transfer = transfers.popleft()
                 transfer_time = transfer.start_event.elapsed_time(transfer.end_event) * 1e-3
@@ -244,7 +300,6 @@ class CpuNpuOffloadingHandler(OffloadingHandler):
                         success=True,
                         transfer_size=transfer.num_bytes,
                         transfer_time=transfer_time,
-                        transfer_type=transfer_type,
                     )
                 )
                 self._recycle_event(transfer.start_event)

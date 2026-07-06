@@ -1,16 +1,11 @@
-from collections.abc import Iterator
-
-import torch
 from vllm.config import VllmConfig
-from vllm.v1.attention.backend import AttentionBackend  # type: ignore
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.kv_offload.abstract import LoadStoreSpec, OffloadingManager
+from vllm.v1.kv_offload.abstract import OffloadingManager
+from vllm.v1.kv_offload.base import CanonicalKVCaches, OffloadingWorker
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
-from vllm.v1.kv_offload.mediums import CPULoadStoreSpec, GPULoadStoreSpec
 from vllm.v1.kv_offload.spec import OffloadingSpec
-from vllm.v1.kv_offload.worker.worker import OffloadingHandler
 
-from vllm_ascend.kv_offload.cpu_npu import CpuNpuOffloadingHandler
+from vllm_ascend.kv_offload.cpu_npu import CpuNpuOffloadingWorker
 
 
 class NPUOffloadingSpec(OffloadingSpec):
@@ -26,7 +21,7 @@ class NPUOffloadingSpec(OffloadingSpec):
         self._manager: OffloadingManager | None = None
 
         # worker-side
-        self._handler: OffloadingHandler | None = None
+        self._worker: OffloadingWorker | None = None
 
     def get_manager(self) -> OffloadingManager:
         if not self._manager:
@@ -42,22 +37,24 @@ class NPUOffloadingSpec(OffloadingSpec):
             )
         return self._manager
 
-    def get_handlers(
+    def get_worker(
         self,
-        kv_caches: dict[str, torch.Tensor],
-        attn_backends: dict[str, type[AttentionBackend]],
-    ) -> Iterator[tuple[type[LoadStoreSpec], type[LoadStoreSpec], OffloadingHandler]]:
-        if not self._handler:
+        kv_caches: CanonicalKVCaches,
+    ) -> OffloadingWorker:
+        if not self._worker:
             assert len(self.gpu_block_size) == 1
             gpu_block_size = self.gpu_block_size[0]
-            self._handler = CpuNpuOffloadingHandler(
-                attn_backends=attn_backends,
+            # Reconstruct the raw gpu_caches dict from canonicalized caches.
+            gpu_caches = {
+                f"layer_{i}": (tensor.tensor,)
+                for i, tensor in enumerate(kv_caches.tensors)
+            }
+            self._worker = CpuNpuOffloadingWorker(
                 gpu_block_size=gpu_block_size,
                 cpu_block_size=gpu_block_size * self.block_size_factor,
                 num_cpu_blocks=self.num_cpu_blocks,
-                gpu_caches=kv_caches,
+                gpu_caches=gpu_caches,
             )
 
-        assert self._handler is not None
-        yield GPULoadStoreSpec, CPULoadStoreSpec, self._handler
-        yield CPULoadStoreSpec, GPULoadStoreSpec, self._handler
+        assert self._worker is not None
+        return self._worker
