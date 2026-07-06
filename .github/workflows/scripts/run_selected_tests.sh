@@ -19,7 +19,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 if [ "$#" -lt 4 ]; then
-  echo "Usage: $0 [--enable-coverage] <npu_type> <num_npus> <with-device|without-device> [--timing] <test> [test ...]"
+  echo "Usage: $0 [--enable-coverage] <npu_type> <num_npus> <with-device|without-device> [--timing] [--continue-on-error] <test> [test ...]"
   exit 1
 fi
 
@@ -29,10 +29,30 @@ mode="$3"
 shift 3
 
 record_timing=false
-if [ "$1" = "--timing" ]; then
-  record_timing=true
-  shift
-fi
+continue_on_error=false
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --timing)
+      record_timing=true
+      shift
+      ;;
+    --continue-on-error)
+      continue_on_error=true
+      shift
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -*)
+      echo "Unknown option: $1"
+      exit 1
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
 
 targets=("$@")
 
@@ -138,7 +158,8 @@ run_pytest_target() {
   else
     test_results+=("${target}|FAILED|${log_file}")
     failed_logs+=("${target}|${log_file}")
-    if [ "${record_timing}" != true ]; then
+    overall_status="${status}"
+    if [ "${continue_on_error}" != true ]; then
       print_summary
       exit "${status}"
     fi
@@ -180,7 +201,8 @@ run_pytest_batch() {
   else
     test_results+=("${target}|FAILED|${log_file}")
     failed_logs+=("${target}|${log_file}")
-    if [ "${record_timing}" != true ]; then
+    overall_status="${status}"
+    if [ "${continue_on_error}" != true ]; then
       print_summary
       exit "${status}"
     fi

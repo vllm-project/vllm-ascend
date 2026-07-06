@@ -1273,6 +1273,7 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
+        spec_step_idx: int = 0,
     ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits

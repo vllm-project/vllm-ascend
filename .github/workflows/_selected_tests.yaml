@@ -45,8 +45,8 @@ on:
       continue_on_error:
         type: boolean
         required: false
-        default: false
-        description: 'Continue running the job even if tests fail'
+        default: true
+        description: 'Continue running all selected test targets after failures, then fail the job at the end'
       enable-coverage:
         type: boolean
         required: false
@@ -57,7 +57,6 @@ on:
         required: false
       OBS_SECRET_ACCESS_KEY_PRECISION:
         required: false
-
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -130,9 +129,24 @@ jobs:
 
       - name: Rebase on latest ${{ inputs.base_ref }}
         run: |
+          retry() {
+            local attempt=1
+            local max_attempts=5
+            local delay=15
+            until "$@"; do
+              local status=$?
+              if [ "${attempt}" -ge "${max_attempts}" ]; then
+                return "${status}"
+              fi
+              echo "Command failed with exit code ${status}; retry ${attempt}/${max_attempts} after ${delay}s: $*"
+              sleep "${delay}"
+              attempt=$((attempt + 1))
+              delay=$((delay * 2))
+            done
+          }
           git config user.name "vllm-ascend-ci"
           git config user.email "vllm-ascend-ci@users.noreply.github.com"
-          git fetch origin ${{ inputs.base_ref }}
+          retry git fetch origin ${{ inputs.base_ref }}
           git rebase origin/${{ inputs.base_ref }}
 
       - name: Get csrc hash
@@ -252,10 +266,9 @@ jobs:
 
       - name: Run selected tests with device
         if: ${{ matrix.group.npu_type != 'cpu' }}
-        continue-on-error: ${{ inputs.continue_on_error }}
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
-          ENABLE_COVERAGE: ${{ inputs.enable-coverage}}
+          ENABLE_COVERAGE: ${{ inputs.enable-coverage }}
         run: |
           . /usr/local/Ascend/ascend-toolkit/set_env.sh
           if [ "${{ inputs.enable-coverage }}" = "true" ]; then
@@ -265,28 +278,37 @@ jobs:
           if [ "${{ inputs.upload_timing }}" = "true" ]; then
             TIMING_FLAG="--timing"
           fi
+          CONTINUE_FLAG=""
+          if [ "${{ inputs.continue_on_error }}" = "true" ]; then
+            CONTINUE_FLAG="--continue-on-error"
+          fi
           .github/workflows/scripts/run_selected_tests.sh \
             "${{ matrix.group.npu_type }}" \
             "${{ matrix.group.num_npus }}" \
             "with-device" \
             ${TIMING_FLAG} \
+            ${CONTINUE_FLAG} \
             ${{ matrix.group.tests }}
 
       - name: Run selected tests without device
         if: ${{ matrix.group.npu_type == 'cpu' }}
-        continue-on-error: ${{ inputs.continue_on_error }}
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           TORCH_DEVICE_BACKEND_AUTOLOAD: 0
-          ENABLE_COVERAGE: ${{ inputs.enable-coverage}}
+          ENABLE_COVERAGE: ${{ inputs.enable-coverage }}
         run: |
           if [ "${{ inputs.enable-coverage }}" = "true" ]; then
             export ENABLE_COVERAGE=true
+          fi
+          CONTINUE_FLAG=""
+          if [ "${{ inputs.continue_on_error }}" = "true" ]; then
+            CONTINUE_FLAG="--continue-on-error"
           fi
           .github/workflows/scripts/run_selected_tests.sh \
             "${{ matrix.group.npu_type }}" \
             "${{ matrix.group.num_npus }}" \
             "without-device" \
+            ${CONTINUE_FLAG} \
             ${{ matrix.group.tests }}
 
       - name: Upload timing data
