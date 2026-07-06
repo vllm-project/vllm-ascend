@@ -443,8 +443,8 @@ def test_chunk_gated_delta_rule_fwd_pcp_chaining_subtracts_initial_state(
     )()
 
     all_gather_returns = [
-        torch.stack([rank0_fs, rank1_fs]),   # all_final_state: [2, N, H, K, V]
-        torch.stack([phi_0, phi_1]),          # all_final_h_update: [2, N, H, K, K]
+        torch.stack([rank0_fs, rank1_fs]),  # all_final_state: [2, N, H, K, V]
+        torch.stack([phi_0, phi_1]),  # all_final_h_update: [2, N, H, K, K]
     ]
 
     group = type(
