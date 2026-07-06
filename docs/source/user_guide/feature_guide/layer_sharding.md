@@ -65,7 +65,7 @@ vllm serve \
 
 With [DSA-CP](https://github.com/vllm-project/vllm-ascend/pull/4702), both `q_b_proj` and `o_proj` layers require large weight matrices to be stored per layer. Sharding these layers across NPUs helps fit extremely deep models (e.g., 61-layer architectures) into limited device memory.
 
-Layer Sharding can only be enabled in PD-disaggregated's **P node**.
+Layer Sharding can only be enabled in PD disaggregated's **P node**.
 
 **Example configuration:**
 
