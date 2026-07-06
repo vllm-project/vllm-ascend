@@ -3247,7 +3247,7 @@ class NPUModelRunner(GPUModelRunner):
                 blk_table = self.input_batch.block_table[kv_cache_gid]
                 slot_mapping = blk_table.slot_mapping.gpu[:maybe_pcp_full_tokens]
                 self.cpu_slot_mapping = blk_table.slot_mapping.cpu[:maybe_pcp_full_tokens]
-                blk_table_tensor = blk_table.get_device_tensor()[:num_reqs_padded]          
+                blk_table_tensor = blk_table.get_device_tensor()[:num_reqs_padded]
                 # Fill unused with -1. Needed for reshape_and_cache in full cuda
                 # graph mode. `blk_table_tensor` -1 to match mamba PAD_SLOT_ID
                 if self.pcp_size == 1:
@@ -3271,10 +3271,7 @@ class NPUModelRunner(GPUModelRunner):
                     )
             return blk_table_tensor, slot_mapping
 
-        (
-            block_table_gid_0,
-            slot_mapping_gid_0,
-        ) = _get_block_table_and_slot_mapping(0)  # type: ignore[arg-type]
+        block_table_gid_0, slot_mapping_gid_0 = _get_block_table_and_slot_mapping(0)
         self.long_seq_metadata, block_table_gid_0 = _get_pcp_metadata(block_table_gid_0)
         num_computed_tokens_cpu = self.input_batch.num_computed_tokens_cpu_tensor[
             :num_reqs_padded
