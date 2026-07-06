@@ -76,18 +76,6 @@ UPDATED_PACKED_MODULES_MAPPING: dict[str, dict[str, list[str]]] = {
         "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
         "o_proj": ["dense"],
     },
-    "step3p5": {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
-        "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
-    },
     # The step3.5 MTP draft (speculative.py sets model_type="step3p5_mtp")
     # reuses the same fused module layout as the verifier.
     "step3p5_mtp": {
@@ -308,12 +296,12 @@ class AscendModelSlimConfig(QuantizationConfig):
                 return name[: -len(src_suffix)] + dst_suffix
         return None
 
-    def _has_quant_weight(self, prefix: str, packed_modules_mapping: Mapping[str, list[str]]) -> bool:
+    def _has_quant_weight(self, prefix: str) -> bool:
         proj_name = prefix.split(".")[-1]
-        if proj_name in packed_modules_mapping:
+        if proj_name in self.packed_modules_mapping:
             return all(
                 f"{prefix.replace(proj_name, shard_proj_name)}.weight" in self.quant_description
-                for shard_proj_name in packed_modules_mapping[proj_name]
+                for shard_proj_name in self.packed_modules_mapping[proj_name]
             )
         return f"{prefix}.weight" in self.quant_description
 
@@ -345,10 +333,9 @@ class AscendModelSlimConfig(QuantizationConfig):
             # is still Step3P5-shaped and queries ``model.layers.*``, so try
             # the Step3P7 wrapper alias only when the direct Step3P5/new-key
             # lookup misses.
-            packed_modules_mapping = get_packed_modules_mapping(model_type)
-            if not self._has_quant_weight(prefix, packed_modules_mapping):
+            if not self._has_quant_weight(prefix):
                 for candidate in (prefix.replace("model.layers.", "language_model.model.layers.", 1),):
-                    if self._has_quant_weight(candidate, packed_modules_mapping):
+                    if self._has_quant_weight(candidate):
                         return candidate
         return prefix
 
