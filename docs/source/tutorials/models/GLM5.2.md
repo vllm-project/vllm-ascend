@@ -333,7 +333,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
 --safetensors-load-strategy 'prefetch' \
 --block-size 128 \
 --async-scheduling \
---additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}' \
+--additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true}' \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
 --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp"}'
 ```
@@ -391,7 +391,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
 --safetensors-load-strategy 'prefetch' \
 --block-size 128 \
 --async-scheduling \
---additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}' \
+--additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true}' \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
 --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp"}'
 ```
@@ -455,7 +455,7 @@ vllm serve <MODEL_PATH> \
   --enable-chunked-prefill \
   --no-enable-prefix-caching \
   --async-scheduling \
-  --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}' \
+  --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true}' \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
   --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp"}'
 ```
@@ -514,7 +514,7 @@ vllm serve <MODEL_PATH> \
   --enable-chunked-prefill \
   --no-enable-prefix-caching \
   --async-scheduling \
-  --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}' \
+  --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true}' \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
   --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp"}'
 ```
@@ -674,7 +674,7 @@ Before you start, please
             --served-model-name glm-52 \
             --max-model-len 135000 \
             --speculative-config '{"num_speculative_tokens": 5, "method":"deepseek_mtp"}' \
-            --additional-config '{"enable_sparse_c8":false,"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true},"enable_dsa_cp": true}' \
+            --additional-config '{"enable_sparse_c8":false,"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true,"enable_dsa_cp": true}' \
             --max-num-batched-tokens 4096 \
             --trust-remote-code \
             --max-num-seqs 64 \
@@ -744,7 +744,7 @@ Before you start, please
             --served-model-name glm-52 \
             --max-model-len 135000 \
             --speculative-config '{"num_speculative_tokens": 5, "method":"deepseek_mtp"}' \
-            --additional-config '{"enable_sparse_c8":false,"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true},"enable_dsa_cp": true}' \
+            --additional-config '{"enable_sparse_c8":false,"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true, "enable_dsa_cp": true}' \
             --max-num-batched-tokens 4096 \
             --trust-remote-code \
             --max-num-seqs 64 \
@@ -816,7 +816,7 @@ Before you start, please
             --max-num-batched-tokens 164 \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
             --speculative-config '{"num_speculative_tokens": 5, "method":"deepseek_mtp"}' \
-            --additional-config '{"enable_sparse_c8":false,"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}' \
+            --additional-config '{"enable_sparse_c8":false,"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true}' \
             --trust-remote-code \
             --max-num-seqs 48 \
             --gpu-memory-utilization 0.92 \
@@ -886,7 +886,7 @@ Before you start, please
             --max-num-batched-tokens 164 \
             --speculative-config '{"num_speculative_tokens": 5, "method":"deepseek_mtp"}' \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-            --additional-config '{"enable_sparse_c8":false,"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}' \
+            --additional-config '{"enable_sparse_c8":false,"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true}' \
             --trust-remote-code \
             --max-num-seqs 48 \
             --gpu-memory-utilization 0.92 \
@@ -1053,9 +1053,6 @@ vllm serve <MODEL_PATH> \
     "fuse_muls_add": true,
     "multistream_overlap_shared_expert": true,
     "recompute_scheduler_enable": true,
-    "ascend_compilation_config": {
-      "enable_npugraph_ex": true
-    },
     "enable_dsa_cp": true
   }' \
   --speculative-config '{"num_speculative_tokens": 3, "method":"deepseek_mtp"}'
@@ -1139,10 +1136,7 @@ vllm serve <MODEL_PATH> \
     "enable_sparse_c8": false,
     "fuse_muls_add": true,
     "multistream_overlap_shared_expert": true,
-    "recompute_scheduler_enable": true,
-    "ascend_compilation_config": {
-      "enable_npugraph_ex": true
-    }
+    "recompute_scheduler_enable": true
   }' \
   --speculative-config '{"num_speculative_tokens": 3, "method":"deepseek_mtp"}'
 ```
