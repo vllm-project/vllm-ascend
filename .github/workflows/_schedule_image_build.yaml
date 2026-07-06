@@ -256,7 +256,7 @@ jobs:
           QUAY_TEMP_USERNAME: "atlas-ci+atlas_test_bot"
           QUAY_TEMP_PASSWORD: "KUMHSMHBH165QQSBBJYRUD6P9M2ESMR7XH01LPKX4OA4NXLLX06JO9XVVKZ766Q2"
         run: |
-          sleep 3600
+          # sleep 3600
           QUAY_AUTH=$(printf "%s:%s" "$QUAY_TEMP_USERNAME" "$QUAY_TEMP_PASSWORD" | base64 -w0)
           GHCR_AUTH=$(printf "%s:%s" "${{ github.actor }}" "${{ secrets.GITHUB_TOKEN }}" | base64 -w0)
           mkdir -p "${DOCKER_CONFIG}"
