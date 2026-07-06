@@ -125,6 +125,7 @@ from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoader
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
 from vllm_ascend.eplb.eplb_updator import EplbUpdator
+from vllm_ascend.model_executor.offloader import create_offloader, set_offloader
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.patch.worker.patch_draft_quarot import patch_load_weights
 from vllm_ascend.quantization.utils import enable_fa_quant
@@ -286,20 +287,7 @@ class NPUModelRunner(GPUModelRunner):
 
         self.pin_memory = PIN_MEMORY
 
-        # Replace the CUDA PrefetchOffloader set by parent __init__ with NPU version.
-        offload_cfg = vllm_config.offload_config
-        if (offload_cfg is not None
-                and getattr(offload_cfg, "prefetch", None) is not None
-                and getattr(offload_cfg.prefetch, "offload_group_size", 0) > 0):
-            from vllm.model_executor.offloader.base import set_offloader
-
-            from vllm_ascend.model_executor.offloader.prefetch import NPUPrefetchOffloader
-            set_offloader(NPUPrefetchOffloader(
-                group_size=offload_cfg.prefetch.offload_group_size,
-                num_in_group=offload_cfg.prefetch.offload_num_in_group,
-                prefetch_step=offload_cfg.prefetch.offload_prefetch_step,
-                offload_params=offload_cfg.prefetch.offload_params,
-            ))
+        set_offloader(create_offloader(self.offload_config))
 
         # NOTE: For FULL mode we change +1 to +2 to reserve extra space for padding.
         # See _pad_query_start_loc_for_fia.
@@ -5142,6 +5130,7 @@ def _torch_cuda_wrapper():
         torch.cuda.stream = torch.npu.stream
         torch.cuda.synchronize = torch.npu.synchronize
         torch.cuda.mem_get_info = torch.npu.mem_get_info
+        torch.cuda.is_current_stream_capturing = torch.npu.is_current_stream_capturing
         yield
     except Exception as e:
         torch.cuda.Event = _EventPlaceholder
@@ -5151,6 +5140,7 @@ def _torch_cuda_wrapper():
         torch.cuda.stream = _StreamPlaceholder
         torch.cuda.synchronize = _StreamPlaceholder
         torch.cuda.mem_get_info = _StreamPlaceholder
+        torch.cuda.is_current_stream_capturing = lambda: False
         raise RuntimeError(f"NPUModelRunner init failed, error is {e}")
     finally:
         # Async model-runner outputs are created after runner initialization.
@@ -5163,6 +5153,7 @@ def _torch_cuda_wrapper():
         torch.cuda.stream = torch.npu.stream
         torch.cuda.synchronize = torch.npu.synchronize
         torch.cuda.mem_get_info = torch.npu.mem_get_info
+        torch.cuda.is_current_stream_capturing = torch.npu.is_current_stream_capturing
 
 
 # TODO: This method will be removed subsequently and implemented in platform.
