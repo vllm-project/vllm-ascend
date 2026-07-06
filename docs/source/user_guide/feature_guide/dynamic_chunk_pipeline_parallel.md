@@ -26,22 +26,43 @@ Currently CPP mainly focuses on optimization during the prefill phase. It is bet
 ### Online Serving
 
 ```bash
-vllm serve <model_path> \
+export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+vllm serve Qwen/Qwen3-30B-A3B \
+    --port <YOUR_PORT> \
+    --tensor-parallel-size 2 \
     --pipeline-parallel-size 2 \
     --enable-chunked-prefill \
+    --enforce-eager \
+    --max-model-len 131072  \
+    --max-num-batched-tokens 32768 \
+    --no-enable-prefix-caching \
+    --no-async-scheduling \
     --additional-config '{"profiling_chunk_config": {"enabled": true}}'
 ```
 
 ### Offline Inference
 
 ```python
-from vllm import LLM
+import os
+from vllm import LLM, SamplingParams
+os.environ["VLLM_ALLOW_LONG_MAX_MODEL_LEN"] = "1"
+prompts = [
+    "The future of AI is",
+]
+sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
 llm = LLM(
-    model="<model_path>",
+    model="Qwen/Qwen3-30B-A3B",
+    tensor_parallel_size=2,
     pipeline_parallel_size=2,
+    enforce_eager=True,
+    max_num_batched_tokens=32768,
+    max_model_len=131072,
+    enable_prefix_caching=False,
+    async_scheduling=False,
     additional_config={"profiling_chunk_config": {"enabled": True}},
 )
+outputs = llm.generate(prompts, sampling_params)
 ```
 
 ## Configuration Parameters
