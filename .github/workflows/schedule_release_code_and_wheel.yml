@@ -41,7 +41,7 @@ on:
 jobs:
   build_and_release_code:
     name: release code
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu-16-hk
     strategy:
       matrix:
         python-version: ["3.12"]
