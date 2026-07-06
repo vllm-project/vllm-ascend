@@ -9,6 +9,7 @@ from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 
+from vllm_ascend.device.utils import FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
 from vllm_ascend.utils import (
     AscendDeviceType,
     get_ascend_config,
@@ -83,11 +84,16 @@ def ascend_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
     return chunked_prefill_workspace_size
 
 
-def using_paged_attention(runtime_shape: int, vllm_config: VllmConfig) -> bool:
+def using_paged_attention(runtime_shape: int, vllm_config: VllmConfig, head_size: int | None = None) -> bool:
     if vllm_config.speculative_config is not None:
         return False
     if get_ascend_device_type() == AscendDeviceType.A5:
         return False
+    # TODO: Remove this fallback when A2/A3 FIA TND supports Gemma4's
+    # 512-dim global attention heads. Decode can use PA directly; prefill is
+    # handled by the device adaptor.
+    if head_size == FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE:
+        return True
     from vllm.config.compilation import CUDAGraphMode
 
     cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
