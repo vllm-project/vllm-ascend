@@ -191,26 +191,26 @@ class TestSlidingWindowAdapter:
         yield
 
     def test_apply_window(self):
-        K, W, B = 3, 64, 16
-        num_reqs = 4
-        fbt = torch.randint(1, 1000, (num_reqs, 20), dtype=torch.int32)
+        K, W, B  = 3, 64, 16
+        max_num_reqs = 16
+        block_table_tensor = torch.randint(1, 1000, (max_num_reqs, 20), dtype=torch.int32)
 
-        adapter = SlidingWindowAdapter(W, B, fbt)
+        adapter = SlidingWindowAdapter(W, B, max_num_reqs, K, self.device)
         clone_ptr = adapter._block_table_clone.data_ptr()
 
         cad = SimpleNamespace(
-            block_table_tensor=fbt,
+            block_table_tensor=block_table_tensor,
             seq_lens=torch.tensor([10, 60, 200, 64], dtype=torch.int32),
             seq_lens_cpu=torch.tensor([10, 60, 200, 64], dtype=torch.int32),
             _seq_lens_cpu=torch.tensor([10, 60, 200, 64], dtype=torch.int32),
             seq_lens_cpu_upper_bound=None,
         )
-        adapter.apply(cad, K)
+        adapter.apply(cad)
 
         # block_table rebinds to the pre-allocated clone (offset-0 view); full table saved
         assert cad.block_table_tensor.data_ptr() == clone_ptr
-        assert adapter.full_block_table is fbt
-        clamped = torch.min(cad.seq_lens, torch.full_like(cad.seq_lens, W))
+        assert adapter.full_block_table is block_table_tensor
+        clamped = torch.tensor([10, 60, 72, 64], dtype=torch.int32)
         assert torch.equal(cad.seq_lens, clamped)
         assert torch.equal(cad._seq_lens_cpu, clamped)
 

@@ -78,7 +78,7 @@ class SlidingWindowAdapter:
     Sliding-window draft attention for the EAGLE3 draft model.
     Caps the draft model's self-attention to the most recent ``window_size`` (W)
     tokens by (a) cropping its block table to the window's blocks and (b) keeping
-    every KV-length tensor the FIA kernel can read (notably ``_seq_lens_cpu``)
+    every KV-length tensor the FIA kernel can read (notably ``_ seq_lens_cpu``)
     capped at W. Slot-mapping is untouched and still addresses the full, absolute
     KV cache via :attr:`full_block_table`.
     """
@@ -87,37 +87,36 @@ class SlidingWindowAdapter:
         self,
         window_size: int,
         block_size: int,
-        block_table_tensor: torch.Tensor
+        max_num_reqs: int,
+        num_speculative_tokens: int,
+        device: torch.device,
     ) -> None:
         self.window_size: int = window_size
         self.block_size: int = block_size
         self.window_blocks = (window_size + block_size - 1) // block_size
         self.max_window_blocks = self.window_blocks + 1
-        self.full_block_table: torch.Tensor = block_table_tensor
+        self.num_speculative_tokens = num_speculative_tokens
         self._block_table_clone = torch.zeros(
-            (block_table_tensor.shape[0], self.max_window_blocks),
-            dtype=block_table_tensor.dtype,
-            device=block_table_tensor.device,
+            (max_num_reqs, self.max_window_blocks),
+            dtype=torch.int32,
+            device=device,
         )
 
     def compute_sliding_window_block_table(
         self,
-        full_seq_lens: torch.Tensor,
-        num_speculative_tokens: int,
+        common_attn_metadata,
         out: torch.Tensor,
     ) -> None:
-        num_reqs = full_seq_lens.shape[0]
-        k = num_speculative_tokens
+        k = self.num_speculative_tokens
         w = self.window_size
         b = self.block_size
+        num_reqs = common_attn_metadata.seq_lens.shape[0]
 
-        final_seq_lens = full_seq_lens + k
-        start_tokens = (final_seq_lens - w).clamp(min=0)
-        start_blocks = (start_tokens // b) * b
-        start_block_indices = start_blocks // b
-
-        tokens_to_cover = final_seq_lens - start_blocks
-        needed_blocks_per_req = (tokens_to_cover + b - 1) // b
+        # Window math on the (NPU) seq_lens. Pure arithmetic -> stays on NPU.
+        self.start_tokens_in_window_rounding = ((common_attn_metadata.seq_lens + k - w).clamp(min=0) // b) * b
+        self._windowed_seq_lens = common_attn_metadata.seq_lens - self.start_tokens_in_window_rounding
+        start_block_indices = self.start_tokens_in_window_rounding // b
+        needed_blocks_per_req = (self._windowed_seq_lens + b - 1) // b
 
         full_cols = self.full_block_table.shape[1]
         # column offset grid [1, max_window_blocks]
@@ -136,29 +135,23 @@ class SlidingWindowAdapter:
     def apply(
         self,
         common_attn_metadata,
-        num_speculative_tokens: int,
     ) -> None:
-        """Crop the draft block table and clamp KV lengths to W (entry point).
-
-        Called from ``dummy_run`` (graph capture) and ``_propose`` (runtime),
-        both passing the pre-window ``full_seq_lens``. No-op when disabled.
-        """
-        full_seq_lens = common_attn_metadata.seq_lens
-        num_reqs = full_seq_lens.shape[0]
+        self.full_block_table = common_attn_metadata.block_table_tensor
+        num_reqs = common_attn_metadata.seq_lens.shape[0]
+        k = self.num_speculative_tokens
         w = self.window_size
+        b = self.block_size
 
-        # Crop into the pre-allocated stable buffer (vectorized, sync-free) and
-        # rebind to an offset-0 slice so block_table data_ptr is identical across
-        # ACL graph capture and replay.
-        self.compute_sliding_window_block_table(
-            full_seq_lens,
-            num_speculative_tokens=num_speculative_tokens,
-            out=self._block_table_clone,
-        )
+        self.compute_sliding_window_block_table(common_attn_metadata, self._block_table_clone)
         common_attn_metadata.block_table_tensor = self._block_table_clone[:num_reqs]
 
-        windowed_seq_lens = full_seq_lens.clamp(max=w)
-        common_attn_metadata.seq_lens = windowed_seq_lens
-        common_attn_metadata.seq_lens_cpu = windowed_seq_lens.clone()
-        common_attn_metadata._seq_lens_cpu = windowed_seq_lens.clone()
-        common_attn_metadata.seq_lens_cpu_upper_bound = windowed_seq_lens.clone()
+        # update NPU seq_lens: reuse the value computed in compute().
+        common_attn_metadata.seq_lens = self._windowed_seq_lens
+
+        # update CPU mirrors: recompute from each one's own CPU tensor -> stays on CPU,
+        # no D2H sync. numerically identical to the NPU
+        for name in ("seq_lens_cpu", "_seq_lens_cpu", "seq_lens_cpu_upper_bound"):
+            src = getattr(common_attn_metadata, name, None)
+            if src is not None:
+                _windowed_cpu = src - ((src + k - w).clamp(min=0) // b) * b
+                setattr(common_attn_metadata, name, _windowed_cpu)

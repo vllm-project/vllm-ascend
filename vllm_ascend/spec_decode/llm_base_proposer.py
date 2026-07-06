@@ -304,18 +304,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             )
         else:
             self.draft_window_size = None
-            
-    def _raise_if_padded_drafter_batch_disabled_and_full_graph_enabled(self):
-        if (
-            self.speculative_config.disable_padded_drafter_batch
-            and self.use_cuda_graph
-            and self.compilation_config.cudagraph_mode.has_full_cudagraphs()
-        ):
-            raise NotImplementedError(
-                "Speculative Decoding with cudagraph mode containing full cudagraphs only "
-                "supports padded drafter batch. Please unset "
-                "disable_padded_drafter_batch in the speculative_config."
-            )
 
     def _raise_if_padded_drafter_batch_disabled_and_full_graph_enabled(self):
         if (
@@ -331,6 +319,15 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         # Sliding window attention for draft model (encapsulated in the adapter).
         self.draft_window_size = self.vllm_config.additional_config.get("draft_window_size")
+        if self.draft_window_size is not None:
+            # initialize sliding window adapter
+            self.sliding_window = SlidingWindowAdapter(
+                self.draft_window_size,
+                self.runner.block_size,
+                self.runner.max_num_reqs,
+                self.num_speculative_tokens,
+                self.device,
+            )
 
     def _get_model(self) -> nn.Module:
         """
@@ -925,19 +922,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 )
 
         if self.draft_window_size is not None:
-            # initialize sliding window adapter
-            self.sliding_window = SlidingWindowAdapter(
-                self.draft_window_size,
-                self.runner.block_size,
-                common_attn_metadata.block_table_tensor
-            )
-
             # Save original seq_lens and apply sliding window before any CP adjustments.
             # Guarded so the clone is skipped when the window is disabled.
-            self.sliding_window.apply(
-                common_attn_metadata,
-                self.num_speculative_tokens,
-            )
+            self.sliding_window.apply(common_attn_metadata)
 
         if self.supports_mm_inputs:
             mm_embeds, is_mm_embed = mm_embed_inputs or (None, None)
