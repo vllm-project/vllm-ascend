@@ -249,6 +249,23 @@ jobs:
           tar -xzf /tmp/crane.tar.gz -C /tmp crane
           chmod +x /tmp/crane
 
+      - name: Verify quay push credentials
+        env:
+          QUAY_TEMP_USERNAME: "atlas-ci+atlas_test_bot"
+          QUAY_TEMP_PASSWORD: "KUMHSMHBH165QQSBBJYRUD6P9M2ESMR7XH01LPKX4OA4NXLLX06JO9XVVKZ766Q2"
+        run: |
+          set +e
+          echo "== 1) crane auth login =="
+          /tmp/crane auth login quay.io -u "$QUAY_TEMP_USERNAME" -p "$QUAY_TEMP_PASSWORD"
+          echo "login rc=$?"
+          echo "== 2) write test: crane copy busybox -> throwaway tag =="
+          PROBE_TAG="quay.io/atlas-ci/vllm-atlas-temp:probe-$(date +%s)"
+          /tmp/crane copy busybox:latest "$PROBE_TAG"
+          echo "push rc=$?"
+          echo "== 3) cleanup probe =="
+          /tmp/crane delete "$PROBE_TAG" 2>/dev/null
+          echo "done"
+
       - name: Build and push
         shell: bash -e {0}
         id: build
