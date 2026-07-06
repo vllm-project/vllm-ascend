@@ -698,17 +698,17 @@ class AscendFusedMoE(FusedMoE):
         # 诊断: 非 AFD 路径 MoE 输出 (fused_experts 后, finalize 前),
         # 对比 AFD 路径 [FFN_MOE_OUT]
         _moe_out = fused_experts_results.routed_out
-        logger.info(
-            "[NONAFD_MOE_OUT] routed_out shape=%s dtype=%s mean=%.6f std=%.6f "
-            "min=%.6f max=%.6f has_nan=%s has_inf=%s",
-            tuple(_moe_out.shape), _moe_out.dtype,
-            _moe_out.float().mean().item(),
-            _moe_out.float().std().item(),
-            _moe_out.float().min().item(),
-            _moe_out.float().max().item(),
-            torch.isnan(_moe_out).any().item(),
-            torch.isinf(_moe_out).any().item(),
-        )
+        # logger.info(
+        #     "[NONAFD_MOE_OUT] routed_out shape=%s dtype=%s mean=%.6f std=%.6f "
+        #     "min=%.6f max=%.6f has_nan=%s has_inf=%s",
+        #     tuple(_moe_out.shape), _moe_out.dtype,
+        #     _moe_out.float().mean().item(),
+        #     _moe_out.float().std().item(),
+        #     _moe_out.float().min().item(),
+        #     _moe_out.float().max().item(),
+        #     torch.isnan(_moe_out).any().item(),
+        #     torch.isinf(_moe_out).any().item(),
+        # )
 
         if self.dynamic_eplb and _EXTRA_CTX.eplb_heat_collection_status:
             expert_tokens = fused_experts_results.expert_tokens
@@ -860,14 +860,14 @@ class AscendFusedMoE(FusedMoE):
         self, hidden_states: torch.Tensor, router_logits: torch.Tensor
     ):
         # 诊断: 非 AFD 路径入口, 对比 AFD 路径 [FFN_GATING_ENTRY]
-        logger.info(
-            "[NONAFD_GATING_ENTRY] hs dim=%d shape=%s dtype=%s "
-            "mean=%.6f std=%.6f",
-            hidden_states.dim(), tuple(hidden_states.shape),
-            hidden_states.dtype,
-            hidden_states.float().mean().item(),
-            hidden_states.float().std().item(),
-        )
+        # logger.info(
+        #     "[NONAFD_GATING_ENTRY] hs dim=%d shape=%s dtype=%s "
+        #     "mean=%.6f std=%.6f",
+        #     hidden_states.dim(), tuple(hidden_states.shape),
+        #     hidden_states.dtype,
+        #     hidden_states.float().mean().item(),
+        #     hidden_states.float().std().item(),
+        # )
         if self.shared_multistream_overlap_gate:
             set_flash_common3_context(shared_experts=self._shared_experts)
 
@@ -883,17 +883,17 @@ class AscendFusedMoE(FusedMoE):
             router_logits = F.linear(hidden_states_fp32, gate.weight_fp32)
             after_routed_experts = torch.npu.current_stream().record_event()
             # 诊断: 非 AFD 路径 router_logits, 对比 AFD 路径 [FFN_ROUTER_LOGITS]
-            logger.info(
-                "[NONAFD_ROUTER_LOGITS] shape=%s dtype=%s mean=%.6f std=%.6f "
-                "min=%.6f max=%.6f has_nan=%s has_inf=%s",
-                tuple(router_logits.shape), router_logits.dtype,
-                router_logits.float().mean().item(),
-                router_logits.float().std().item(),
-                router_logits.float().min().item(),
-                router_logits.float().max().item(),
-                torch.isnan(router_logits).any().item(),
-                torch.isinf(router_logits).any().item(),
-            )
+            # logger.info(
+            #     "[NONAFD_ROUTER_LOGITS] shape=%s dtype=%s mean=%.6f std=%.6f "
+            #     "min=%.6f max=%.6f has_nan=%s has_inf=%s",
+            #     tuple(router_logits.shape), router_logits.dtype,
+            #     router_logits.float().mean().item(),
+            #     router_logits.float().std().item(),
+            #     router_logits.float().min().item(),
+            #     router_logits.float().max().item(),
+            #     torch.isnan(router_logits).any().item(),
+            #     torch.isinf(router_logits).any().item(),
+            # )
         else:
             before_routed_experts = torch.npu.current_stream().record_event()
             after_routed_experts = None
@@ -905,17 +905,17 @@ class AscendFusedMoE(FusedMoE):
         )
         routed_out = fused_moe_results.routed_out
         # 诊断: 非 AFD 路径 finalize 后输出, 对比 AFD 路径 [FFN_FINALIZE_OUT]
-        logger.info(
-            "[NONAFD_ROUTED_OUT] shape=%s dtype=%s mean=%.6f std=%.6f "
-            "min=%.6f max=%.6f has_nan=%s has_inf=%s",
-            tuple(routed_out.shape), routed_out.dtype,
-            routed_out.float().mean().item(),
-            routed_out.float().std().item(),
-            routed_out.float().min().item(),
-            routed_out.float().max().item(),
-            torch.isnan(routed_out).any().item(),
-            torch.isinf(routed_out).any().item(),
-        )
+        # logger.info(
+        #     "[NONAFD_ROUTED_OUT] shape=%s dtype=%s mean=%.6f std=%.6f "
+        #     "min=%.6f max=%.6f has_nan=%s has_inf=%s",
+        #     tuple(routed_out.shape), routed_out.dtype,
+        #     routed_out.float().mean().item(),
+        #     routed_out.float().std().item(),
+        #     routed_out.float().min().item(),
+        #     routed_out.float().max().item(),
+        #     torch.isnan(routed_out).any().item(),
+        #     torch.isinf(routed_out).any().item(),
+        # )
 
         if self._shared_experts is None:
             return routed_out

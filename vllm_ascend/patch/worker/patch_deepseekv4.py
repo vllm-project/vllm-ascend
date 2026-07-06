@@ -196,19 +196,19 @@ def afd_ffn_compute(
     # 对应 attention 侧 [ATTN_SEND_PRE]。内部 MoE 计算 (select_experts /
     # fused_experts / finalize) 复用非 AFD 路径, 详见 [NONAFD_GATING_ENTRY] /
     # [NONAFD_ROUTER_LOGITS] / [NONAFD_ROUTED_OUT] / [NONAFD_MOE_OUT] 日志。
-    logger.info(
-        "[FFN_MOE_ENTRY] hs dim=%d shape=%s dtype=%s "
-        "mean=%.6f std=%.6f min=%.6f max=%.6f has_nan=%s "
-        "| router_logits=%s",
-        hidden_states.dim(), tuple(hidden_states.shape),
-        hidden_states.dtype,
-        hidden_states.float().mean().item(),
-        hidden_states.float().std().item(),
-        hidden_states.float().min().item(),
-        hidden_states.float().max().item(),
-        torch.isnan(hidden_states).any().item(),
-        "provided" if router_logits is not None else "computed_on_ffn",
-    )
+    # logger.info(
+    #     "[FFN_MOE_ENTRY] hs dim=%d shape=%s dtype=%s "
+    #     "mean=%.6f std=%.6f min=%.6f max=%.6f has_nan=%s "
+    #     "| router_logits=%s",
+    #     hidden_states.dim(), tuple(hidden_states.shape),
+    #     hidden_states.dtype,
+    #     hidden_states.float().mean().item(),
+    #     hidden_states.float().std().item(),
+    #     hidden_states.float().min().item(),
+    #     hidden_states.float().max().item(),
+    #     torch.isnan(hidden_states).any().item(),
+    #     "provided" if router_logits is not None else "computed_on_ffn",
+    # )
 
     # Reuse the non-AFD path: call self.forward which goes through the full
     # AscendFusedMoE.forward → runner.forward → _forward_impl →
@@ -245,17 +245,17 @@ def compute_attn_output(
     )
     hidden_states = self.hc_post(hidden_states, residual, post, comb)
     # 诊断: AFD 路径 attention hc_post 输出 (3D), 对应非 AFD [NONAFD_ATTN_HC_POST_OUT]
-    logger.info(
-        "[ATTN_HC_POST_OUT] layer=%d hs dim=%d shape=%s dtype=%s "
-        "mean=%.6f std=%.6f min=%.6f max=%.6f has_nan=%s",
-        layer_idx, hidden_states.dim(), tuple(hidden_states.shape),
-        hidden_states.dtype,
-        hidden_states.float().mean().item(),
-        hidden_states.float().std().item(),
-        hidden_states.float().min().item(),
-        hidden_states.float().max().item(),
-        torch.isnan(hidden_states).any().item(),
-    )
+    # logger.info(
+    #     "[ATTN_HC_POST_OUT] layer=%d hs dim=%d shape=%s dtype=%s "
+    #     "mean=%.6f std=%.6f min=%.6f max=%.6f has_nan=%s",
+    #     layer_idx, hidden_states.dim(), tuple(hidden_states.shape),
+    #     hidden_states.dtype,
+    #     hidden_states.float().mean().item(),
+    #     hidden_states.float().std().item(),
+    #     hidden_states.float().min().item(),
+    #     hidden_states.float().max().item(),
+    #     torch.isnan(hidden_states).any().item(),
+    # )
     return hidden_states
 
 
@@ -281,35 +281,35 @@ def compute_ffn_output(
     layer_idx = getattr(self, "layer_idx", -1)
     residual = hidden_states.clone()
     # 诊断: AFD 路径 FFN hc_pre 前 (3D), 对应非 AFD [NONAFD_FFN_HC_PRE_IN]
-    logger.info(
-        "[FFN_HC_PRE_IN] layer=%d hs dim=%d shape=%s dtype=%s "
-        "mean=%.6f std=%.6f min=%.6f max=%.6f has_nan=%s",
-        layer_idx, hidden_states.dim(), tuple(hidden_states.shape),
-        hidden_states.dtype,
-        hidden_states.float().mean().item(),
-        hidden_states.float().std().item(),
-        hidden_states.float().min().item(),
-        hidden_states.float().max().item(),
-        torch.isnan(hidden_states).any().item(),
-    )
+    # logger.info(
+    #     "[FFN_HC_PRE_IN] layer=%d hs dim=%d shape=%s dtype=%s "
+    #     "mean=%.6f std=%.6f min=%.6f max=%.6f has_nan=%s",
+    #     layer_idx, hidden_states.dim(), tuple(hidden_states.shape),
+    #     hidden_states.dtype,
+    #     hidden_states.float().mean().item(),
+    #     hidden_states.float().std().item(),
+    #     hidden_states.float().min().item(),
+    #     hidden_states.float().max().item(),
+    #     torch.isnan(hidden_states).any().item(),
+    # )
     hidden_states, post, comb = self.hc_pre(
         hidden_states, self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base
     )
     # 诊断: AFD 路径 FFN hc_pre 后 (3D→2D fold), 对应非 AFD [NONAFD_FFN_HC_PRE_OUT]
-    logger.info(
-        "[FFN_HC_PRE_OUT] layer=%d hs dim=%d shape=%s dtype=%s "
-        "mean=%.6f std=%.6f min=%.6f max=%.6f has_nan=%s "
-        "| post shape=%s comb shape=%s",
-        layer_idx, hidden_states.dim(), tuple(hidden_states.shape),
-        hidden_states.dtype,
-        hidden_states.float().mean().item(),
-        hidden_states.float().std().item(),
-        hidden_states.float().min().item(),
-        hidden_states.float().max().item(),
-        torch.isnan(hidden_states).any().item(),
-        tuple(post.shape) if post is not None else None,
-        tuple(comb.shape) if comb is not None else None,
-    )
+    # logger.info(
+    #     "[FFN_HC_PRE_OUT] layer=%d hs dim=%d shape=%s dtype=%s "
+    #     "mean=%.6f std=%.6f min=%.6f max=%.6f has_nan=%s "
+    #     "| post shape=%s comb shape=%s",
+    #     layer_idx, hidden_states.dim(), tuple(hidden_states.shape),
+    #     hidden_states.dtype,
+    #     hidden_states.float().mean().item(),
+    #     hidden_states.float().std().item(),
+    #     hidden_states.float().min().item(),
+    #     hidden_states.float().max().item(),
+    #     torch.isnan(hidden_states).any().item(),
+    #     tuple(post.shape) if post is not None else None,
+    #     tuple(comb.shape) if comb is not None else None,
+    # )
     hidden_states = self.post_attention_layernorm(hidden_states)
     hidden_states = self.mlp.afd_forward(
         hidden_states,
@@ -323,42 +323,42 @@ def compute_ffn_output(
         cam_p2p_ep_name=cam_p2p_ep_name,
     )
     # 诊断: AFD 路径 FFN hc_post 前 (MoE 输出 2D), 对应非 AFD [NONAFD_FFN_HC_POST_IN]
-    logger.info(
-        "[FFN_HC_POST_IN] layer=%d hs dim=%d shape=%s dtype=%s "
-        "mean=%.6f std=%.6f min=%.6f max=%.6f has_nan=%s",
-        layer_idx, hidden_states.dim(), tuple(hidden_states.shape),
-        hidden_states.dtype,
-        hidden_states.float().mean().item(),
-        hidden_states.float().std().item(),
-        hidden_states.float().min().item(),
-        hidden_states.float().max().item(),
-        torch.isnan(hidden_states).any().item(),
-    )
+    # logger.info(
+    #     "[FFN_HC_POST_IN] layer=%d hs dim=%d shape=%s dtype=%s "
+    #     "mean=%.6f std=%.6f min=%.6f max=%.6f has_nan=%s",
+    #     layer_idx, hidden_states.dim(), tuple(hidden_states.shape),
+    #     hidden_states.dtype,
+    #     hidden_states.float().mean().item(),
+    #     hidden_states.float().std().item(),
+    #     hidden_states.float().min().item(),
+    #     hidden_states.float().max().item(),
+    #     torch.isnan(hidden_states).any().item(),
+    # )
     hidden_states = self.hc_post(hidden_states, residual, post, comb)
     # 诊断: AFD 路径 FFN hc_post 后 (2D→3D unfold), 对应非 AFD [NONAFD_FFN_HC_POST_OUT]
-    logger.info(
-        "[FFN_HC_POST_OUT] layer=%d hs dim=%d shape=%s dtype=%s "
-        "mean=%.6f std=%.6f min=%.6f max=%.6f has_nan=%s",
-        layer_idx, hidden_states.dim(), tuple(hidden_states.shape),
-        hidden_states.dtype,
-        hidden_states.float().mean().item(),
-        hidden_states.float().std().item(),
-        hidden_states.float().min().item(),
-        hidden_states.float().max().item(),
-        torch.isnan(hidden_states).any().item(),
-    )
+    # logger.info(
+    #     "[FFN_HC_POST_OUT] layer=%d hs dim=%d shape=%s dtype=%s "
+    #     "mean=%.6f std=%.6f min=%.6f max=%.6f has_nan=%s",
+    #     layer_idx, hidden_states.dim(), tuple(hidden_states.shape),
+    #     hidden_states.dtype,
+    #     hidden_states.float().mean().item(),
+    #     hidden_states.float().std().item(),
+    #     hidden_states.float().min().item(),
+    #     hidden_states.float().max().item(),
+    #     torch.isnan(hidden_states).any().item(),
+    # )
     # 诊断: AFD 路径 FFN 发送前 (即将通过 e2a_group 发送给 attention 侧)
-    logger.info(
-        "[FFN_SEND_PRE] layer=%d hs dim=%d shape=%s dtype=%s "
-        "mean=%.6f std=%.6f min=%.6f max=%.6f has_nan=%s",
-        layer_idx, hidden_states.dim(), tuple(hidden_states.shape),
-        hidden_states.dtype,
-        hidden_states.float().mean().item(),
-        hidden_states.float().std().item(),
-        hidden_states.float().min().item(),
-        hidden_states.float().max().item(),
-        torch.isnan(hidden_states).any().item(),
-    )
+    # logger.info(
+    #     "[FFN_SEND_PRE] layer=%d hs dim=%d shape=%s dtype=%s "
+    #     "mean=%.6f std=%.6f min=%.6f max=%.6f has_nan=%s",
+    #     layer_idx, hidden_states.dim(), tuple(hidden_states.shape),
+    #     hidden_states.dtype,
+    #     hidden_states.float().mean().item(),
+    #     hidden_states.float().std().item(),
+    #     hidden_states.float().min().item(),
+    #     hidden_states.float().max().item(),
+    #     torch.isnan(hidden_states).any().item(),
+    # )
     return hidden_states
 
 
@@ -396,17 +396,17 @@ def forward_m2n(
             )
             # 诊断: AFD 路径 attention 接收 FFN 输出后 (e2a_group 接收完成),
             # 对应 FFN 侧 [FFN_SEND_PRE]
-            logger.info(
-                "[ATTN_RECV_POST] layer=%d hs dim=%d shape=%s dtype=%s "
-                "mean=%.6f std=%.6f min=%.6f max=%.6f has_nan=%s",
-                layer_idx, hidden_states.dim(), tuple(hidden_states.shape),
-                hidden_states.dtype,
-                hidden_states.float().mean().item(),
-                hidden_states.float().std().item(),
-                hidden_states.float().min().item(),
-                hidden_states.float().max().item(),
-                torch.isnan(hidden_states).any().item(),
-            )
+            # logger.info(
+            #     "[ATTN_RECV_POST] layer=%d hs dim=%d shape=%s dtype=%s "
+            #     "mean=%.6f std=%.6f min=%.6f max=%.6f has_nan=%s",
+            #     layer_idx, hidden_states.dim(), tuple(hidden_states.shape),
+            #     hidden_states.dtype,
+            #     hidden_states.float().mean().item(),
+            #     hidden_states.float().std().item(),
+            #     hidden_states.float().min().item(),
+            #     hidden_states.float().max().item(),
+            #     torch.isnan(hidden_states).any().item(),
+            # )
 
         hidden_states = layer.compute_attn_output(
             positions, hidden_states, residual, llama_4_scaling
@@ -419,46 +419,46 @@ def forward_m2n(
 
         # 诊断: AFD 路径 attention 发送前 (即将通过 a2e_group 发送给 FFN 侧),
         # 对应非 AFD [NONAFD_ATTN_HC_POST_OUT]
-        logger.info(
-            "[ATTN_SEND_PRE] layer=%d hs dim=%d shape=%s dtype=%s "
-            "mean=%.6f std=%.6f",
-            layer_idx, hidden_states.dim(), tuple(hidden_states.shape),
-            hidden_states.dtype,
-            hidden_states.float().mean().item(),
-            hidden_states.float().std().item(),
-        )
-        if p2p_input_ids is not None:
-            first8 = p2p_input_ids.flatten()[:8].tolist()
-            logger.info(
-                "[ATTN_SEND_INPUT_IDS] shape=%s dtype=%s first8=%s",
-                tuple(p2p_input_ids.shape), p2p_input_ids.dtype, first8,
-            )
+        # logger.info(
+        #     "[ATTN_SEND_PRE] layer=%d hs dim=%d shape=%s dtype=%s "
+        #     "mean=%.6f std=%.6f",
+        #     layer_idx, hidden_states.dim(), tuple(hidden_states.shape),
+        #     hidden_states.dtype,
+        #     hidden_states.float().mean().item(),
+        #     hidden_states.float().std().item(),
+        # )
+        # if p2p_input_ids is not None:
+        #     first8 = p2p_input_ids.flatten()[:8].tolist()
+            # logger.info(
+            #     "[ATTN_SEND_INPUT_IDS] shape=%s dtype=%s first8=%s",
+            #     tuple(p2p_input_ids.shape), p2p_input_ids.dtype, first8,
+            # )
 
         afd_connector.send_attn_output(
             hidden_states=hidden_states,
             metadata=None,
             input_ids=p2p_input_ids,
         )
-        logger.info(
-            "[ATTN_SEND_DONE] layer=%d send_attn_output completed",
-            layer_idx,
-        )
+        # logger.info(
+        #     "[ATTN_SEND_DONE] layer=%d send_attn_output completed",
+        #     layer_idx,
+        # )
 
     hidden_states = afd_connector.recv_ffn_output(
         hidden_states=hidden_states, metadata=afd_metadata
     )
     # 诊断: AFD 路径 attention 接收最后一层 FFN 输出后
-    logger.info(
-        "[ATTN_RECV_POST] layer=final hs dim=%d shape=%s dtype=%s "
-        "mean=%.6f std=%.6f min=%.6f max=%.6f has_nan=%s",
-        hidden_states.dim(), tuple(hidden_states.shape),
-        hidden_states.dtype,
-        hidden_states.float().mean().item(),
-        hidden_states.float().std().item(),
-        hidden_states.float().min().item(),
-        hidden_states.float().max().item(),
-        torch.isnan(hidden_states).any().item(),
-    )
+    # logger.info(
+    #     "[ATTN_RECV_POST] layer=final hs dim=%d shape=%s dtype=%s "
+    #     "mean=%.6f std=%.6f min=%.6f max=%.6f has_nan=%s",
+    #     hidden_states.dim(), tuple(hidden_states.shape),
+    #     hidden_states.dtype,
+    #     hidden_states.float().mean().item(),
+    #     hidden_states.float().std().item(),
+    #     hidden_states.float().min().item(),
+    #     hidden_states.float().max().item(),
+    #     torch.isnan(hidden_states).any().item(),
+    # )
     return hidden_states, residual
 
 
