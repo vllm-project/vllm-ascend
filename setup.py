@@ -118,7 +118,7 @@ def get_chip_type() -> str:
         elif "950" in chip_name:
             assert npu_name
             return (chip_name + "_" + npu_name).lower()
-        elif "A2G3" in chip_name:
+        elif "a2g3" in chip_name.lower():
             # A2 case: CH version of the HDK
             return "ascend910b1"
         else:
