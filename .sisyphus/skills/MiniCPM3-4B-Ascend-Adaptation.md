@@ -66,7 +66,7 @@ The 4B model fits comfortably on a single 910B3 NPU (64 GiB).
 ```bash
 ASCEND_RT_VISIBLE_DEVICES=5 python3 -c "
 from vllm import LLM, SamplingParams
-llm = LLM(model='/data/zkx/weigths/MiniCPM3-4B', trust_remote_code=True, ...)
+llm = LLM(model='/data/zkx/weights/MiniCPM3-4B', trust_remote_code=True, ...)
 outputs = llm.generate(['Hello'], SamplingParams(temperature=0.7, max_tokens=32))
 print(outputs[0].outputs[0].text)
 "
