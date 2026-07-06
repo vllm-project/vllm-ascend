@@ -89,6 +89,7 @@ class TestNPUWorker(TestBase):
             patch("vllm_ascend.worker.worker.get_kv_transfer_group", return_value=connector),
             patch("vllm_ascend.worker.worker.get_tp_group", return_value=tp_group),
             patch("vllm_ascend.worker.worker.get_pp_group", return_value=pp_group),
+            patch("vllm_ascend.worker.worker.get_pcp_group", return_value=MagicMock(world_size=1)),
         ):
             worker = NPUWorker.__new__(NPUWorker)
             result = worker.get_kv_connector_handshake_metadata()
