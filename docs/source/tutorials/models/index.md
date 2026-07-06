@@ -38,6 +38,7 @@ MiniMax-M2.md
 Hunyuan-A13B-Instruct.md
 Hy3-preview.md
 Minitron-8B-Base.md
+MiniCPM3-4B.md
 LLaVA-OneVision-Qwen2-0.5B-OV.md
 gpt-oss-120b.md
 Mixtral-8x7B-Instruct-v0.1.md
