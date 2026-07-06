@@ -10,7 +10,7 @@ Take the Deepseek-r1-w8a8 model as an example, use 4 Atlas 800T A3 servers to de
 
 ### Physical Layer Requirements
 
-- The physical machines must be located on the same WLAN, with network connectivity.
+- The physical machines must be located on the same LAN, with network connectivity.
 - All NPUs must be interconnected. Intra-node connectivity is via HCCS, and inter-node connectivity is via RDMA.
 
 ### Verification Process
@@ -290,7 +290,7 @@ vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
   --quantization ascend \
   --no-enable-prefix-caching \
   --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}' \
-  --additional-config '{"recompute_scheduler_enable":true,"enable_shared_expert_dp": true}' \
+  --additional-config '{"enable_shared_expert_dp": true}' \
   --kv-transfer-config \
   '{"kv_connector": "MooncakeLayerwiseConnector",
   "kv_role": "kv_producer",
@@ -348,7 +348,7 @@ vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
   --quantization ascend \
   --no-enable-prefix-caching \
   --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}' \
-  --additional-config '{"recompute_scheduler_enable":true,"enable_shared_expert_dp": true}' \
+  --additional-config '{"enable_shared_expert_dp": true}' \
   --kv-transfer-config \
   '{"kv_connector": "MooncakeLayerwiseConnector",
   "kv_role": "kv_producer",
@@ -529,7 +529,7 @@ vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
   --quantization ascend \
   --no-enable-prefix-caching \
   --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}' \
-  --additional-config '{"recompute_scheduler_enable":true,"enable_shared_expert_dp": true}' \
+  --additional-config '{"enable_shared_expert_dp": true}' \
   --kv-transfer-config \
   '{"kv_connector": "MooncakeConnectorV1",
   "kv_role": "kv_producer",
@@ -587,7 +587,7 @@ vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
   --quantization ascend \
   --no-enable-prefix-caching \
   --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}' \
-  --additional-config '{"recompute_scheduler_enable":true,"enable_shared_expert_dp": true}' \
+  --additional-config '{"enable_shared_expert_dp": true}' \
   --kv-transfer-config \
   '{"kv_connector": "MooncakeConnectorV1",
   "kv_role": "kv_producer",

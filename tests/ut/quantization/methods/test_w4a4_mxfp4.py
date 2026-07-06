@@ -40,6 +40,8 @@ class TestAscendW4A4MXFP4LinearMethod(TestBase):
         self.scheme.process_weights_after_loading(layer)
         self.assertEqual(layer.weight.shape, (128, 128))
         self.assertEqual(layer.weight_scale.shape[0], 4)
+        self.assertTrue(layer.weight.data.is_contiguous())
+        self.assertTrue(layer.weight_scale.data.is_contiguous())
 
     @patch("vllm_ascend.quantization.methods.w4a4_mxfp4.torch_npu")
     def test_apply_3d_input(self, mock_npu):
@@ -102,6 +104,10 @@ class TestAscendW4A4MXFP4MoEMethod(TestBase):
         self.scheme.process_weights_after_loading(layer)
         self.assertEqual(layer.w13_weight.shape, (8, 64, 256))
         self.assertEqual(layer.w13_weight_scale.shape, (8, 2, 256, 2))
+        self.assertFalse(layer.w13_weight.data.is_contiguous())
+        self.assertFalse(layer.w2_weight.data.is_contiguous())
+        self.assertFalse(layer.w13_weight_scale.data.is_contiguous())
+        self.assertFalse(layer.w2_weight_scale.data.is_contiguous())
 
     @patch("vllm_ascend.quantization.methods.w4a4_mxfp4.torch_npu")
     @patch("vllm_ascend.quantization.methods.w4a4_mxfp4._EXTRA_CTX")

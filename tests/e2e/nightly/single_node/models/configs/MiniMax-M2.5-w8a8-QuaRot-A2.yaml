@@ -40,7 +40,7 @@ test_cases:
       - "--enable-chunked-prefill"
       - "--enable-prefix-caching"
       - "--max-num-seqs"
-      - "120"
+      - "100"
       - "--max-model-len"
       - "196608"
       - "--seed"
@@ -84,5 +84,5 @@ test_cases:
         max_out_len: 1500
         batch_size: 120
         request_rate: 0
-        baseline: 1728
+        baseline: 2042
         threshold: 0.97

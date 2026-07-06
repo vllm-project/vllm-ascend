@@ -60,7 +60,8 @@ def _ssd_setup_kwargs(config: "MooncakeStoreConfig") -> dict[str, object]:
 
 
 class MooncakeBackend(Backend):
-    def __init__(self, parallel_config: ParallelConfig, lazy_init: bool = False, contribute_memory: bool = True):
+    def __init__(self, parallel_config: ParallelConfig, lazy_init: bool = False):
+        self.parallel_config = parallel_config
         self.config = MooncakeStoreConfig.load_from_env()
         if self.config.protocol != "ascend":
             raise NotImplementedError(f"MooncakeBackend does not support protocol {self.config.protocol!r}.")
@@ -69,7 +70,6 @@ class MooncakeBackend(Backend):
         self.local_seg: str | None = None
         self._use_fabric_mem = os.getenv("ASCEND_ENABLE_USE_FABRIC_MEM", "0") == "1"
         self._lazy_init = lazy_init and self._use_fabric_mem
-        self._contribute_memory = contribute_memory
         self._store_initialized = False
         self._store_init_lock = threading.Lock()
 
@@ -105,7 +105,7 @@ class MooncakeBackend(Backend):
         if ssd_kwargs and ssd_kwargs.get("ssd_offload_path"):
             # Per-rank SSD directory keyed by the globally unique rank so that
             # DP/TP/PP/CP replicas never share a directory (dense and MoE alike).
-            global_rank = get_global_rank()
+            global_rank = get_global_rank(self.parallel_config)
             rank_path = os.path.join(str(ssd_kwargs["ssd_offload_path"]), f"rank_{global_rank}")
             try:
                 os.makedirs(rank_path, exist_ok=True)
@@ -121,8 +121,8 @@ class MooncakeBackend(Backend):
             ret = store.setup(
                 local_hostname=self.local_seg,
                 metadata_server=self.config.metadata_server,
-                global_segment_size=self.config.global_segment_size if self._contribute_memory else 0,
-                local_buffer_size=self.config.local_buffer_size if self._contribute_memory else 0,
+                global_segment_size=self.config.global_segment_size,
+                local_buffer_size=self.config.local_buffer_size,
                 protocol=self.config.protocol,
                 rdma_devices=self.config.device_name,
                 master_server_addr=self.config.master_server_address,
@@ -134,7 +134,7 @@ class MooncakeBackend(Backend):
             ret = store.setup(
                 local_hostname=self.local_seg,
                 metadata_server=self.config.metadata_server,
-                global_segment_size=self.config.global_segment_size if self._contribute_memory else 0,
+                global_segment_size=self.config.global_segment_size,
                 local_buffer_size=0,
                 protocol=self.config.protocol,
                 rdma_devices=self.config.device_name,
@@ -156,11 +156,6 @@ class MooncakeBackend(Backend):
                 self.config.ssd_offload_path,
             )
         return store
-
-    @classmethod
-    def create_scheduler_client(cls, parallel_config: ParallelConfig):
-        torch.npu.set_device(0)
-        return cls(parallel_config, contribute_memory=False)
 
     def set_device(self):
         local_rank = get_world_group().local_rank

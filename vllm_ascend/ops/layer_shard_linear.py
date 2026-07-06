@@ -5,6 +5,7 @@ from functools import lru_cache
 import torch
 import torch.distributed as dist
 from vllm.distributed.parallel_state import GroupCoordinator
+from vllm.logger import logger
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.models.utils import extract_layer_index
 
@@ -61,6 +62,11 @@ class SeriesMetadata:
 
         self.layers.sort(key=lambda x: x.layer_idx)
         self.num_layers = len(self.layers)
+        logger.info(
+            "LayerShard: post_process for series, num_layers=%d, prefetch_step=%d",
+            self.num_layers,
+            self.prefetch_step,
+        )
         assert self.num_layers > 0, "No layers in the series"
         assert self.prefetch_step >= 0 and self.prefetch_step <= max(0, self.num_layers - 2), (
             "prefetch_step must be in [0, num_layers - 2]"

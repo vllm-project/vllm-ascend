@@ -118,7 +118,7 @@ class TestChunkedTokenDatabase(unittest.TestCase):
     def setUp(self):
         self.meta = KeyMetadata("llama", 0, 0, 0, 0)
         self.db = ChunkedTokenDatabase([self.meta], block_size=[16], partitions=None)
-        self.db.set_group_buffers({0: [1000, 2000]}, {0: [160, 320]})
+        self.db.set_group_buffers({0: [1000, 2000]}, {0: [160, 320]}, group_num_layers={0: 1})
 
     def test_make_key_by_hash(self):
         key = self.db._make_key_by_hash("abc")
@@ -149,6 +149,27 @@ class TestChunkedTokenDatabase(unittest.TestCase):
         # first chunk (start=0 < mask_num=16) should be skipped
         self.assertEqual(len(result), 2)
         self.assertEqual(result[0][0], 16)
+
+    def test_process_tokens_with_tail_clipped_block_ids_maps_tail_chunks(self):
+        db = ChunkedTokenDatabase([self.meta], block_size=[128], partitions=None)
+        hashes = [bytes([idx % 251]) * 32 for idx in range(128)]
+
+        result = list(
+            db.process_tokens_with_block_ids(
+                128 * 128,
+                hashes,
+                [1000, 1001, 1002, 1003],
+            )
+        )
+
+        self.assertEqual(
+            [start for start, _, _, _ in result],
+            [124 * 128, 125 * 128, 126 * 128, 127 * 128],
+        )
+        self.assertEqual(
+            [block_id for _, _, _, block_id in result],
+            [1000, 1001, 1002, 1003],
+        )
 
     def test_process_tokens_token_len_shorter_than_all_blocks(self):
         hashes = ["a", "b", "c", "d"]
@@ -198,11 +219,19 @@ class TestChunkedTokenDatabase(unittest.TestCase):
         self.assertEqual(size[0], 80)  # 160/16*8
         self.assertEqual(size[1], 160)  # 320/16*8
 
+    def test_prepare_value_uses_block_id_override(self):
+        addr, size, block_id = self.db.prepare_value(64, 80, [5], block_id=99)
+        self.assertEqual(block_id, 99)
+        self.assertEqual(addr[0], 1000 + 99 * 160)
+        self.assertEqual(addr[1], 2000 + 99 * 320)
+        self.assertEqual(size[0], 160)
+        self.assertEqual(size[1], 320)
+
     def test_prepare_value_layer(self):
         addr, size, block_id = self.db.prepare_value_layer(0, 16, [5, 6], layer_id=0)
         self.assertEqual(block_id, 5)
         self.assertEqual(len(addr), 2)
-        # layer_id=0 => kv_caches_base_addr[0*2 + i] per cache i
+        # layer_id=0, entries_per_layers=2 => group_addrs[0] and group_addrs[1]
         self.assertEqual(addr[0], 1000 + 5 * 160)
         self.assertEqual(addr[1], 2000 + 5 * 320)
 
@@ -282,6 +311,74 @@ class TestRequestTracker(unittest.TestCase):
         tracker = RequestTracker(req_id="r1", token_len=16, allocated_block_ids=[1])
         with self.assertRaises(ValueError):
             tracker.update("invalid")  # type: ignore[arg-type]
+
+    def test_update_mamba_with_tuple(self):
+        tracker = RequestTracker(
+            req_id="r1", token_len=16, allocated_block_ids_by_group=[[1], [2], [3], [4]], block_sizes=[16] * 4
+        )
+        tracker.update(([5, 6], [0, 7], [0, 8], [0, 9]))
+        self.assertEqual(tracker.allocated_block_ids_by_group[0], [1, 5, 6])
+        self.assertEqual(tracker.allocated_block_ids_by_group[1], [2, 0, 7])
+        self.assertEqual(tracker.allocated_block_ids_by_group[2], [3, 0, 8])
+        self.assertEqual(tracker.allocated_block_ids_by_group[3], [4, 0, 9])
+
+    def test_update_mamba_mtp_with_tuple_chunk2(self):
+        tracker = RequestTracker(
+            req_id="r1",
+            token_len=32,
+            allocated_block_ids_by_group=[
+                [1, 2],
+                [0, 3, 4, 5, 6],
+                [0, 7, 8, 9, 10],
+                [0, 11, 12, 13, 14],
+            ],
+            mamba_group_ids=[1, 2, 3],
+            num_speculative_blocks=3,
+            block_sizes=[16] * 4,
+        )
+
+        tracker.update(([15, 16], [4, 17], [8, 18], [12, 19]), 32)
+        self.assertEqual(tracker.allocated_block_ids_by_group[0], [1, 2, 15, 16])
+        self.assertEqual(tracker.allocated_block_ids_by_group[1], [0, 3, 0, 5, 6, 4, 17])
+        self.assertEqual(tracker.allocated_block_ids_by_group[2], [0, 7, 0, 9, 10, 8, 18])
+        self.assertEqual(tracker.allocated_block_ids_by_group[3], [0, 11, 0, 13, 14, 12, 19])
+
+    def test_update_mamba_mtp_with_tuple_chunk8(self):
+        tracker = RequestTracker(
+            req_id="r1",
+            token_len=128,
+            allocated_block_ids_by_group=[
+                [1, 2, 3, 4, 5, 6, 7, 8],
+                [0, 0, 0, 0, 0, 0, 0, 9, 10, 11, 12],
+                [0, 0, 0, 0, 0, 0, 0, 13, 14, 15, 16],
+                [0, 0, 0, 0, 0, 0, 0, 17, 18, 19, 20],
+            ],
+            mamba_group_ids=[1, 2, 3],
+            num_speculative_blocks=3,
+            block_sizes=[16] * 4,
+        )
+
+        tracker.update(
+            (
+                [21, 22, 23, 24, 25, 26, 27, 28],
+                [0, 0, 0, 0, 10, 11, 12, 29],
+                [0, 0, 0, 0, 14, 15, 16, 30],
+                [0, 0, 0, 0, 18, 19, 20, 31],
+            ),
+            128,
+        )
+        self.assertEqual(
+            tracker.allocated_block_ids_by_group[0], [1, 2, 3, 4, 5, 6, 7, 8, 21, 22, 23, 24, 25, 26, 27, 28]
+        )
+        self.assertEqual(
+            tracker.allocated_block_ids_by_group[1], [0, 0, 0, 0, 0, 0, 0, 9, 0, 0, 0, 0, 0, 0, 0, 10, 11, 12, 29]
+        )
+        self.assertEqual(
+            tracker.allocated_block_ids_by_group[2], [0, 0, 0, 0, 0, 0, 0, 13, 0, 0, 0, 0, 0, 0, 0, 14, 15, 16, 30]
+        )
+        self.assertEqual(
+            tracker.allocated_block_ids_by_group[3], [0, 0, 0, 0, 0, 0, 0, 17, 0, 0, 0, 0, 0, 0, 0, 18, 19, 20, 31]
+        )
 
 
 class TestReqMeta(unittest.TestCase):
@@ -379,15 +476,7 @@ class TestReqMeta(unittest.TestCase):
             allocated_block_ids=[0, 1],
             num_saved_tokens=0,
         )
-        # Provide block_hashes (2 full blocks for token_len=32 / granularity=16)
-        # so the boundary_without_hash short-circuit does not zero out the save
-        # length and skip; this exercises the original_block_size propagation.
-        meta = ReqMeta.from_request_tracker(
-            tracker,
-            cache_transfer_granularity=16,
-            original_block_size=8,
-            block_hashes=[b"h0", b"h1"],
-        )
+        meta = ReqMeta.from_request_tracker(tracker, cache_transfer_granularity=16, original_block_size=8)
         self.assertIsNotNone(meta)
         self.assertEqual(meta.original_block_size, 8)
 

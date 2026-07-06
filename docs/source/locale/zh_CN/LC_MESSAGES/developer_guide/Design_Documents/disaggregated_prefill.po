@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-21 02:03+0000\n"
+"POT-Creation-Date: 2026-07-02 07:02+0000\n"
 "PO-Revision-Date: 2026-04-09 18:37+0800\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -329,9 +329,7 @@ msgstr "1.配置参数验证"
 msgid ""
 "Validate KV transfer config by checking whether the kv_connector type is "
 "supported. On transfer failures, emit clear error logs for diagnostics."
-msgstr ""
-"通过检查 kv_connector 类型是否受支持，来验证 KV "
-"传输配置。传输失败时，输出清晰的错误日志以便诊断。"
+msgstr "通过检查 kv_connector 类型是否受支持，来验证 KV 传输配置。传输失败时，输出清晰的错误日志以便诊断。"
 
 #: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:91
 msgid "2. Port Conflict Detection"
@@ -363,7 +361,7 @@ msgstr "限制"
 
 #: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:103
 msgid ""
-"Heterogeneous P and D nodes are not supported—for example, running P "
+"Heterogeneous P and D nodes are not supported, for example, running P "
 "nodes on A2 and D nodes on A3."
 msgstr "不支持异构的 P 节点和 D 节点，例如在 A2 上运行 P 节点、在 A3 上运行 D 节点。"
 

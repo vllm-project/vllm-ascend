@@ -37,7 +37,7 @@ copyright = "2025, vllm-ascend team"
 author = "the vllm-ascend team"
 
 # The full version, including alpha/beta/rc tags
-release = "0.21.0rc1"
+release = "0.22.1rc1"
 
 # -- General configuration ---------------------------------------------------
 
@@ -74,15 +74,15 @@ myst_substitutions = {
     # the branch of vllm, used in vllm clone
     # - main branch: 'main'
     # - vX.Y.Z branch: 'vX.Y.Z'
-    "vllm_version": "v0.21.0",
+    "vllm_version": "v0.22.1",
     # the branch of vllm-ascend, used in vllm-ascend clone and image tag
     # - main branch: 'main'
     # - vX.Y.Z branch: latest vllm-ascend release tag
-    "vllm_ascend_version": "v0.21.0rc1",
+    "vllm_ascend_version": "v0.22.1rc1",
     # the newest release version of vllm-ascend and matched vLLM, used in pip install.
     # This value should be updated when cut down release.
-    "pip_vllm_ascend_version": "0.21.0rc1",
-    "pip_vllm_version": "0.21.0",
+    "pip_vllm_ascend_version": "0.22.1rc1",
+    "pip_vllm_version": "0.22.1",
     # CANN image tag paired with the vllm_ascend_version above
     "cann_image_tag": "9.0.0-910b-ubuntu22.04-py3.12",
     # vLLM commit hash for main branch
@@ -139,6 +139,16 @@ html_theme_options = {
     "repository_url": "https://github.com/vllm-project/vllm-ascend",
     "use_repository_button": True,
     "use_edit_page_button": True,
+    "footer_content_items": [
+        "author.html",
+        "copyright.html",
+        "last-updated.html",
+        "extra-footer.html",
+        "sections/issues-float.html",
+    ],
+}
+html_context = {
+    "rtd_version_slug": os.environ.get("READTHEDOCS_VERSION", "latest"),
 }
 # Add any paths that contain custom static files (such as style sheets) here,
 # relative to this directory. They are copied after the builtin static files,
