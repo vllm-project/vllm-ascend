@@ -154,10 +154,6 @@ jobs:
             echo "benchmark_job_name=${BENCHMARK_JOB_NAME}"
           } >> $GITHUB_OUTPUT
 
-      - name: Prepare scripts
-        run: |
-          install -D tests/e2e/nightly/multi_node/scripts/run.sh /root/.cache/tests/run.sh
-
       - name: Clear resources
         run: |
           set -euo pipefail
