@@ -1,127 +1,123 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""NPU port of PrefetchOffloader — uses torch.npu.* APIs including is_current_stream_capturing."""
+"""Ascend prefetch-based CPU offloading with NZ-format static buffers."""
 
 from collections.abc import Generator
+from dataclasses import dataclass
+from functools import wraps
+from typing import Any
 
 import torch
 import torch.nn as nn
-import torch_npu  # noqa: F401
-import vllm.model_executor.offloader.prefetch_ops  # noqa: F401
-from vllm.logger import logger
-from vllm.model_executor.offloader.base import BaseOffloader, should_pin_memory
+import torch_npu
+from vllm.logger import init_logger
 from vllm.model_executor.offloader.prefetch import (
-    ParamInfo,
+    ParamInfo as VllmParamInfo,
+    PrefetchOffloader,
     StaticBufferPool,
-    _BaseParamOffloader,
+    _CpuParamOffloader,
+    _ModuleOffloader as VllmModuleOffloader,
 )
 
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
 
-class NPUPrefetchOffloader(BaseOffloader):
-    """NPU version of PrefetchOffloader — replaces torch.cuda.* with torch.npu.*."""
+logger = init_logger(__name__)
+
+# mark
+_ASCEND_PREFETCH_NZ_WEIGHT_ATTR = "_vllm_ascend_prefetch_offload_nz_weight"
+
+
+def mark_prefetch_offload_nz_weight(param: nn.Parameter) -> None:
+    """Mark a parameter whose prefetch static buffer must use NZ format."""
+    setattr(param, _ASCEND_PREFETCH_NZ_WEIGHT_ATTR, True)
+
+
+def _is_using_nz_weight(param: nn.Parameter) -> bool:
+    """if its current NPU storage format is FRACTAL_NZ."""
+    if param.data.device.type != "npu":
+        return False
+
+    try:
+        npu_format = int(torch_npu.get_npu_format(param.data))
+    except (AttributeError, RuntimeError, TypeError, ValueError):
+        return False
+
+    if npu_format != ACL_FORMAT_FRACTAL_NZ:
+        return False
+
+    return True
+
+
+def _is_prefetch_offload_nz_weight(param: nn.Parameter) -> bool:
+    return bool(getattr(param, _ASCEND_PREFETCH_NZ_WEIGHT_ATTR, False))
+
+
+@dataclass
+class ParamInfo(VllmParamInfo):
+    """Ascend parameter metadata with static-buffer format requirements."""
+
+    use_nz_buffer: bool = False
+
+
+def _format_static_buffers_for_nz(
+        buffer_pool: StaticBufferPool,
+        param_infos: list[ParamInfo],
+) -> None:
+    """Cast static buffers to NZ format for keys whose parameters require it."""
+    key_to_use_nz: dict[tuple[str, tuple[int, ...], tuple[int, ...], torch.dtype], bool] = {}
+
+    for info in param_infos:
+        if info.key in key_to_use_nz and key_to_use_nz[info.key] != info.use_nz_buffer:
+            raise ValueError(
+                "Conflicting NZ buffer requirements for prefetch static buffer "
+                f"key {info.key}: both NZ and non-NZ parameters use this key."
+            )
+        key_to_use_nz[info.key] = info.use_nz_buffer
+        if info.use_nz_buffer:
+            logger.info("%s enables NZ buffer", info.name)
+
+    for key, use_nz_buffer in key_to_use_nz.items():
+        if not use_nz_buffer:
+            continue
+        buffer_pool._buffers[key] = [
+            torch_npu.npu_format_cast(buffer, ACL_FORMAT_FRACTAL_NZ)
+            for buffer in buffer_pool._buffers[key]
+        ]
+
+
+class AscendPrefetchOffloader(PrefetchOffloader):
+    """Ascend prefetch offloader that reuses vLLM behavior with NZ buffers."""
 
     def __init__(
-        self,
-        group_size: int,
-        num_in_group: int,
-        prefetch_step: int,
-        offload_params: set[str] | None = None,
-        mode: str = "cpu",
+            self,
+            group_size: int,
+            num_in_group: int,
+            prefetch_step: int,
+            offload_params: set[str] | None = None,
+            mode: str = "cpu",
     ):
-        self.group_size = group_size
-        self.num_in_group = num_in_group
-        self.prefetch_step = prefetch_step
-        self.offload_params = offload_params or set()
-        self.mode = mode
-        self.copy_stream = torch.npu.Stream()
-        self.module_offloaders: list[_NPUModuleOffloader] = []
-        self.buffer_pool: StaticBufferPool | None = None
-        self.total_offloaded_bytes = 0
+        super().__init__(
+            group_size=group_size,
+            num_in_group=num_in_group,
+            prefetch_step=prefetch_step,
+            offload_params=offload_params,
+            mode=mode,
+        )
+        self.module_offloaders: list[_ModuleOffloader] = []
 
     def wrap_modules(
-        self,
-        modules_generator: Generator[nn.Module, None, None],
+            self,
+            modules_generator: Generator[nn.Module, None, None],
     ) -> list[nn.Module]:
-        assert len(self.module_offloaders) == 0
+        import vllm.model_executor.offloader.prefetch as vllm_prefetch
 
-        all_modules = []
-        offload_modules = []
-
-        for module_index, module in enumerate(modules_generator):
-            all_modules.append(module)
-            if module_index % self.group_size >= self.group_size - self.num_in_group:
-                if self.offload_params:
-                    whitelist = [
-                        name
-                        for name, _ in module.named_parameters()
-                        if any(f".{p}." in f".{name}." for p in self.offload_params)
-                    ]
-                else:
-                    whitelist = [name for name, _ in module.named_parameters()]
-
-                if not whitelist:
-                    continue
-
-                offload_modules.append(module)
-                self.module_offloaders.append(
-                    _NPUModuleOffloader(
-                        mode=self.mode,
-                        module=module,
-                        copy_stream=self.copy_stream,
-                        whitelist_param_names=whitelist,
-                        layer_idx=len(self.module_offloaders),
-                    )
-                )
-
-        for index, module in enumerate(offload_modules):
-            self._hook_module_forward(index, module)
-
-        return all_modules
-
-    def _hook_module_forward(self, index: int, module: nn.Module):
-        original_forward = module.forward
-
-        def forward(*args, **kwargs):
-            module.forward = original_forward
-            input_tensor = args[0] if args else kwargs.get("hidden_states")
-            torch.ops.vllm.wait_prefetch(input_tensor, index)
-            output = original_forward(*args, **kwargs)
-            next_index = (index + self.prefetch_step) % len(self.module_offloaders)
-            if isinstance(output, tuple):
-                torch.ops.vllm.start_prefetch(output[0], next_index)
-            else:
-                torch.ops.vllm.start_prefetch(output, next_index)
-            module.forward = forward
-            return output
-
-        module.forward = forward
-
-    def _wait_for_layer(self, layer_idx: int):
-        offloader = self.module_offloaders[layer_idx]
-        if torch.npu.is_current_stream_capturing():
-            if not offloader._prefetch_in_capture:
-                return
-            torch.npu.current_stream().wait_event(offloader._copy_done_event)
-            offloader._prefetch_in_capture = False
-        else:
-            if offloader._event_valid_for_eager:
-                torch.npu.current_stream().wait_event(offloader._copy_done_event)
-            else:
-                torch.npu.current_stream().wait_stream(self.copy_stream)
-
-    def _start_prefetch(self, layer_idx: int):
-        self.module_offloaders[layer_idx].start_onload_to_static()
-
-    def sync_prev_onload(self):
-        torch.npu.current_stream().wait_stream(self.copy_stream)
-
-    def join_after_forward(self):
-        for offloader in self.module_offloaders:
-            if offloader._prefetch_in_capture:
-                torch.npu.current_stream().wait_event(offloader._copy_done_event)
-                offloader._prefetch_in_capture = False
+        original_module_offloader = vllm_prefetch._ModuleOffloader
+        vllm_prefetch._ModuleOffloader = _ModuleOffloader
+        try:
+            return super().wrap_modules(modules_generator)
+        finally:
+            vllm_prefetch._ModuleOffloader = original_module_offloader
 
     def post_init(self):
+        """Allocate Ascend NZ-aware static buffers and start initial prefetches."""
         for offloader in self.module_offloaders:
             offloader.sync_cpu_storage()
 
@@ -141,6 +137,8 @@ class NPUPrefetchOffloader(BaseOffloader):
             slot_capacity=self.prefetch_step,
             device=device,
         )
+        # NOTE(wangjin) different from the base, but it is important
+        _format_static_buffers_for_nz(self.buffer_pool, param_infos)
 
         for idx, offloader in enumerate(self.module_offloaders):
             slot_idx = idx % self.prefetch_step
@@ -151,27 +149,27 @@ class NPUPrefetchOffloader(BaseOffloader):
             self.total_offloaded_bytes += offloader.offloaded_bytes
 
         logger.info_once(
-            f"[NPUPrefetchOffloader] Initialized {len(self.module_offloaders)} modules. "
+            f"[AscendPrefetchOffloader] Initialized {len(self.module_offloaders)} modules. "
             f"Total NPU memory saved: {self.total_offloaded_bytes / 1e9:.4f} GB, "
             f"Static buffer pool: {self.buffer_pool.total_bytes / 1e9:.4f} GB "
             f"(group_size={self.group_size}, num_in_group={self.num_in_group}, "
-            f"prefetch_step={self.prefetch_step})"
+            f"prefetch_step={self.prefetch_step}, mode={self.mode})"
         )
 
         for i in range(min(self.prefetch_step, len(self.module_offloaders))):
             self.module_offloaders[i].start_onload_to_static()
 
 
-class _NPUModuleOffloader:
-    """NPU version of _ModuleOffloader: all torch.cuda.* → torch.npu.*."""
+class _ModuleOffloader(VllmModuleOffloader):
+    """vLLM module offloader with Ascend NZ-format detection."""
 
     def __init__(
-        self,
-        mode: str,
-        module: nn.Module,
-        copy_stream: torch.npu.Stream,
-        whitelist_param_names: list[str],
-        layer_idx: int,
+            self,
+            mode: str,
+            module: nn.Module,
+            copy_stream: torch.cuda.Stream,
+            whitelist_param_names: list[str],
+            layer_idx: int,
     ):
         self.mode = mode
         self.module = module
@@ -180,84 +178,80 @@ class _NPUModuleOffloader:
         self.layer_idx = layer_idx
         self.offloaded_bytes = 0
 
-        self._copy_done_event = torch.npu.Event()
+        self._copy_done_event = torch.cuda.Event()
         self._event_valid_for_eager = False
         self._prefetch_in_capture = False
 
-        assert self.device != torch.device("cpu")
+        assert self.device != torch.device("cpu"), (
+            "Module parameters should not already be on CPU "
+            "(offloader handles CPU placement)"
+        )
 
         self._buffer_pool: StaticBufferPool | None = None
         self._buffer_slot_idx: int = 0
 
         param_dict = dict(self.module.named_parameters())
-        assert all(name in param_dict for name in whitelist_param_names)
+        assert all(name in param_dict for name in whitelist_param_names), (
+            f"Whitelist params {whitelist_param_names} not found in module params "
+            f"{list(param_dict.keys())}"
+        )
 
+        if mode != "cpu":
+            raise ValueError(f"Unknown offload mode: {mode}")
         self._param_offloaders = {
-            name: _BaseParamOffloader.create(mode, module=module, param_name=name) for name in whitelist_param_names
+            name: _CpuParamOffloader(module=module, param_name=name)
+            for name in whitelist_param_names
         }
+        # NOTE(wangjin) different from base
+        self._wrap_process_weights_for_format_detection()
 
-    def post_init(self):
+    def _capture_static_buffer_formats_from_npu_params(self) -> None:
+        """
+        This function should be invoked during the `process_weights_after_loading`.
+        And during `process_weights_after_loading`, the weights would be loaded to NPU
+        for quantization and transformation of NPU formats.
+        So the format of weights could be figured out during the `process_weights_after_loading`.
+        This function is for checking the format of the weights,
+        and set a mark to param if its weights is in NZ format.
+        """
         for param_offloader in self._param_offloaders.values():
-            param_offloader.post_init()
-            self.offloaded_bytes += param_offloader.offloaded_bytes
+            param = param_offloader._param
+            if _is_using_nz_weight(param):
+                mark_prefetch_offload_nz_weight(param)
 
-    def sync_cpu_storage(self):
-        for param_offloader in self._param_offloaders.values():
-            param_offloader.sync_cpu_storage()
+    def _wrap_process_weights_for_format_detection(self) -> None:
+        """maybe_trans_nz was called only in quantization scenario"""
+        wrapped_quant_methods: set[int] = set()
+        for submodule in self.module.modules():
+            quant_method = getattr(submodule, "quant_method", None)
+            if quant_method is not None and id(quant_method) not in wrapped_quant_methods:
+                process_weights = getattr(quant_method, "process_weights_after_loading", None)
+                if callable(process_weights):
+                    quant_method.process_weights_after_loading = self._wrap_process_weights(process_weights)
+                    wrapped_quant_methods.add(id(quant_method))
 
-        deleted = [
-            name for name, offloader in self._param_offloaders.items() if getattr(offloader, "_param_deleted", False)
-        ]
-        for name in deleted:
-            del self._param_offloaders[name]
+    def _wrap_process_weights(self, process_weights: Any) -> Any:
+        @wraps(process_weights)
+        def wrapped_process_weights(*args: Any, **kwargs: Any) -> Any:
+            result = process_weights(*args, **kwargs)
+            self._capture_static_buffer_formats_from_npu_params()
+            return result
+
+        return wrapped_process_weights
 
     def get_param_infos(self) -> list[ParamInfo]:
         infos = []
         for name, offloader in self._param_offloaders.items():
             cpu_storage = offloader._cpu_storage
-            assert cpu_storage is not None
+            assert cpu_storage is not None, "CPU storage not initialized"
             infos.append(
                 ParamInfo(
                     name=name,
                     shape=tuple(cpu_storage.shape),
                     stride=tuple(cpu_storage.stride()),
                     dtype=cpu_storage.dtype,
+                    # NOTE(wangjin) different from base
+                    use_nz_buffer=_is_prefetch_offload_nz_weight(offloader._param),
                 )
             )
         return infos
-
-    def assign_buffer_slot(self, pool: StaticBufferPool, slot_idx: int):
-        self._buffer_pool = pool
-        self._buffer_slot_idx = slot_idx
-        for name, offloader in self._param_offloaders.items():
-            cpu_storage = offloader._cpu_storage
-            assert cpu_storage is not None
-            buffer = pool.get_buffer(
-                name=name,
-                shape=tuple(cpu_storage.shape),
-                stride=tuple(cpu_storage.stride()),
-                dtype=cpu_storage.dtype,
-                slot_idx=slot_idx,
-            )
-            offloader.assign_static_buffer(buffer)
-
-    def start_onload_to_static(self):
-        assert self._buffer_pool is not None
-
-        self._prefetch_in_capture = torch.npu.is_current_stream_capturing()
-
-        fork_event = torch.npu.Event()
-        torch.npu.current_stream().record_event(fork_event)
-        self.copy_stream.wait_event(fork_event)
-
-        with torch.npu.stream(self.copy_stream):
-            for name, offloader in self._param_offloaders.items():
-                cpu_storage = offloader._cpu_storage
-                gpu_buffer = offloader._gpu_buffer
-                assert cpu_storage is not None
-                assert gpu_buffer is not None
-                assert not should_pin_memory() or cpu_storage.is_pinned(), f"CPU storage for {name} is not pinned!"
-                gpu_buffer.copy_(cpu_storage, non_blocking=True)
-
-        self._copy_done_event.record(self.copy_stream)
-        self._event_valid_for_eager = not torch.npu.is_current_stream_capturing()
