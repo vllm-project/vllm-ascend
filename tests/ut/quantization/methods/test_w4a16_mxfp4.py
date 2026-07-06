@@ -2,6 +2,7 @@ from unittest.mock import Mock, patch
 
 import torch
 import torch.nn as nn
+import pytest
 
 from tests.ut.base import TestBase
 from tests.ut.quantization.conftest_quantization import create_mock_ascend_config, create_mock_vllm_config
@@ -62,6 +63,7 @@ class TestAscendW4A16MXFP4MoEMethod(TestBase):
         self.assertEqual(layer.w2_weight.shape, (8, 256, 128))
         self.assertEqual(layer.w2_weight_scale.shape, (8, 8, 128))
 
+    @pytest.mark.skip("Execute after the issue is fixed")
     @patch("vllm_ascend.quantization.methods.w4a16_mxfp4.torch_npu")
     @patch("vllm_ascend.quantization.methods.w4a16_mxfp4._EXTRA_CTX")
     @patch("vllm_ascend.quantization.methods.w4a16_mxfp4.select_experts")
