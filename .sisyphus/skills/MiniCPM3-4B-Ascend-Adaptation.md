@@ -19,21 +19,25 @@ MiniCPM3-4B ships custom modeling code in its repository (`modeling_minicpm.py`,
 ### 3. Model Config Issues with `rope_parameters`
 
 The model's `config.json` has `rope_scaling` (not `rope_parameters`). vLLM internally normalizes this, but warnings appear:
-```
+
+```text
 `rope_parameters`'s short_factor field must have length 48, got 16
 ```
+
 These warnings are benign — the model works correctly despite them. The MiniCPM3-4B uses `qk_rope_head_dim=32`, so the factor arrays should have `32/2=16` elements, not 48.
 
 ### 4. Triton-Ascend PCH Compilation Bug
 
 **Symptoms:** Runtime crash with:
-```
+
+```text
 RuntimeError: Failed to compile ... precompiled.h.gch, error: ,cmd=['...', '-shared', '-fPIC', '-o', gch_path]
 ```
 
 **Root cause:** `triton/backends/ascend/utils.py` passes `-shared -fPIC` flags for precompiled header (`.gch`) compilation. clang++ rejects `-shared` for header compilation.
 
 **Fix:** Remove `-shared` from line 357 (keep `-fPIC` for PIE consistency):
+
 ```python
 # BEFORE:
 cc_cmd += ["-std=c++17", "-shared", "-fPIC", "-o", gch_path]
@@ -58,7 +62,8 @@ The 4B model fits comfortably on a single 910B3 NPU (64 GiB).
 ## Effective Prompts
 
 ### Initial Model Loading Test
-```
+
+```bash
 ASCEND_RT_VISIBLE_DEVICES=5 python3 -c "
 from vllm import LLM, SamplingParams
 llm = LLM(model='/data/zkx/weigths/MiniCPM3-4B', trust_remote_code=True, ...)
@@ -68,14 +73,16 @@ print(outputs[0].outputs[0].text)
 ```
 
 ### Debugging Triton PCH Issue
-```
+
+```bash
 # Reproduce manually:
 /usr/bin/clang++ -x c++-header precompiled.h ... -shared -fPIC -o precompiled.h.gch
 # → clang++: error: cannot specify -o when generating multiple output files
 ```
 
 ### Full Serving Test
-```
+
+```bash
 ASCEND_RT_VISIBLE_DEVICES=5 vllm serve /path/to/MiniCPM3-4B \
   --served-model-name minicpm3-4b \
   --tensor-parallel-size 1 \

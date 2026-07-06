@@ -52,7 +52,7 @@ docker run --rm \
   -v /root/.cache:/root/.cache \
   -v /data/models:/data/models \
   -p 8000:8000 \
-  -it $IMAGE bash
+   -it $IMAGE bash
 ```
 
 If you do not want to use the docker image, you can also build from source:
@@ -80,7 +80,7 @@ vllm serve /path/to/MiniCPM3-4B \
   --max-model-len 4096 \
   --gpu-memory-utilization 0.85 \
   --trust-remote-code \
-  --port 8000
+   --port 8000
 ```
 
 **Key parameters**:
