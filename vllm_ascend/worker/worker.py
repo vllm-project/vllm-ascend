@@ -757,12 +757,19 @@ class NPUWorker(WorkerBase):
                 WeightTransferEngineFactory,
             )
 
-            # main: create_engine takes (config, parallel_config, model)
-            self.weight_transfer_engine = WeightTransferEngineFactory.create_engine(
-                self.vllm_config.weight_transfer_config,
-                self.vllm_config.parallel_config,
-                self.model_runner.get_model(),
-            )
+            if vllm_version_is("0.23.0"):
+                self.weight_transfer_engine = WeightTransferEngineFactory.create_engine(
+                    self.vllm_config.weight_transfer_config,
+                    self.vllm_config.parallel_config,
+                    self.model_runner.get_model(),
+                )
+            else:
+                self.weight_transfer_engine = WeightTransferEngineFactory.create_engine(
+                    self.vllm_config.weight_transfer_config,
+                    self.vllm_config,
+                    self.device,
+                    self.model_runner.get_model(),
+                )
 
     def compile_or_warm_up_model(self) -> CompilationTimes:
         # Note: need to adapt for graph mode.

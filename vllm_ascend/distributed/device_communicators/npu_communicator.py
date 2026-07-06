@@ -20,6 +20,23 @@ import torch.distributed as dist
 from vllm.distributed.device_communicators.base_device_communicator import DeviceCommunicatorBase
 
 
+class _NpuAll2AllManager:
+    """No-op all2all_manager for NPU. Used by vLLM main's fault-tolerance
+    check (data_parallel_size > 1 and is_moe); NPU does not register a real
+    one because it uses mc2 / all_gather for MoE communication.
+    """
+
+    @property
+    def support_fault_tolerance(self) -> bool:
+        return False
+
+    def query_fault(self) -> torch.Tensor:
+        return torch.zeros(1, dtype=torch.bool, device="cpu")
+
+    def query_active_mask(self) -> torch.Tensor:
+        return torch.zeros(1, dtype=torch.bool, device="cpu")
+
+
 class NPUCommunicator(DeviceCommunicatorBase):
     def __init__(
         self,
@@ -36,6 +53,7 @@ class NPUCommunicator(DeviceCommunicatorBase):
         # For compatibility (mainly for reusing graph capturing code in vllm),
         # init custom all-reduce implementation interface as in CUDACommunicator.
         self.ca_comm = None
+        self.all2all_manager = _NpuAll2AllManager()
 
     def all_to_all(
         self,
