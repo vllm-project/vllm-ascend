@@ -8,6 +8,8 @@
 #define RECOMPUTE_WU_FWD_TORCH_ADPT_H
 
 #include <tuple>
+#include <algorithm>
+#include <ATen/TensorIndexing.h>
 
 namespace vllm_ascend {
 
@@ -79,10 +81,84 @@ std::tuple<at::Tensor, at::Tensor> npu_recompute_wu_fwd(
         TORCH_CHECK(batch == 1, "varlen mode expects batch size 1, got ", batch);
     }
 
-    auto w = at::empty({batch, hv, seq_len, key_dim}, k.options());
-    auto u = at::empty_like(v);
-    const c10::optional<at::Tensor> gk = c10::nullopt;
-    EXEC_NPU_CMD(aclnnRecomputeWUFwd, k, v, beta, a, g, gk, cu_seqlens, chunk_indices, chunk_size, w, u);
+    auto w = at::zeros({batch, hv, seq_len, key_dim}, k.options());
+    auto u = at::zeros_like(v);
+
+    if (!cu_seqlens.has_value()) {
+        using at::indexing::Slice;
+
+        const int64_t key_group_size = hv / hk;
+        for (int64_t b = 0; b < batch; ++b) {
+            for (int64_t h = 0; h < hv; ++h) {
+                const int64_t hk_idx = h / key_group_size;
+                for (int64_t start = 0; start < seq_len; start += chunk_size) {
+                    const int64_t end = std::min(start + chunk_size, seq_len);
+                    const int64_t block_len = end - start;
+
+                    auto a_block = a.index({b, h, Slice(start, end), Slice(0, block_len)}).to(at::kFloat);
+                    auto beta_block = beta.index({b, h, Slice(start, end)}).to(at::kFloat).unsqueeze(-1);
+                    auto g_block = g.index({b, h, Slice(start, end)}).to(at::kFloat).unsqueeze(-1);
+                    auto v_block = v.index({b, h, Slice(start, end), Slice()}).to(at::kFloat);
+                    auto k_block = k.index({b, hk_idx, Slice(start, end), Slice()}).to(at::kFloat);
+
+                    auto vb = v_block * beta_block;
+                    auto kbg_exp = k_block * beta_block * at::exp(g_block);
+                    u.index_put_({b, h, Slice(start, end), Slice()}, at::matmul(a_block, vb).to(v.scalar_type()));
+                    w.index_put_({b, h, Slice(start, end), Slice()}, at::matmul(a_block, kbg_exp).to(k.scalar_type()));
+                }
+            }
+        }
+        return std::make_tuple(w, u);
+    }
+
+    using at::indexing::Slice;
+
+    const auto cu = cu_seqlens.value();
+    const auto chunks = chunk_indices.value();
+    TORCH_CHECK(cu.size() >= 2, "cu_seqlens must contain at least start and end offsets, got ", cu.size());
+    TORCH_CHECK(cu[0] == 0, "cu_seqlens must start from 0, got ", cu[0]);
+    TORCH_CHECK(cu[cu.size() - 1] == seq_len,
+                "last cu_seqlens entry must equal sequence length, got ", cu[cu.size() - 1],
+                " and T=", seq_len);
+    TORCH_CHECK(chunks.size() % 2 == 0,
+                "chunk_indices must contain flattened (seq_id, chunk_id) pairs, got ", chunks.size(),
+                " values");
+    for (int64_t i = 1; i < static_cast<int64_t>(cu.size()); ++i) {
+        TORCH_CHECK(cu[i] >= cu[i - 1], "cu_seqlens must be non-decreasing, got ", cu[i - 1], " then ", cu[i]);
+        TORCH_CHECK(cu[i] <= seq_len, "cu_seqlens entry exceeds sequence length: ", cu[i], " > ", seq_len);
+    }
+
+    const int64_t key_group_size = hv / hk;
+    for (int64_t flat_idx = 0; flat_idx < static_cast<int64_t>(chunks.size()); flat_idx += 2) {
+        const int64_t seq_id = chunks[flat_idx];
+        const int64_t chunk_id = chunks[flat_idx + 1];
+        TORCH_CHECK(seq_id >= 0 && seq_id + 1 < static_cast<int64_t>(cu.size()),
+                    "chunk_indices seq_id out of range: ", seq_id, " for cu_seqlens size ", cu.size());
+        TORCH_CHECK(chunk_id >= 0, "chunk_indices chunk_id must be non-negative, got ", chunk_id);
+
+        const int64_t seq_start = cu[seq_id];
+        const int64_t seq_end = cu[seq_id + 1];
+        const int64_t start = seq_start + chunk_id * chunk_size;
+        TORCH_CHECK(start < seq_end,
+                    "chunk_indices points past sequence end: seq_id=", seq_id,
+                    ", chunk_id=", chunk_id, ", start=", start, ", seq_end=", seq_end);
+        const int64_t end = std::min(start + chunk_size, seq_end);
+        const int64_t block_len = end - start;
+
+        for (int64_t h = 0; h < hv; ++h) {
+            const int64_t hk_idx = h / key_group_size;
+            auto a_block = a.index({0, h, Slice(start, end), Slice(0, block_len)}).to(at::kFloat);
+            auto beta_block = beta.index({0, h, Slice(start, end)}).to(at::kFloat).unsqueeze(-1);
+            auto g_block = g.index({0, h, Slice(start, end)}).to(at::kFloat).unsqueeze(-1);
+            auto v_block = v.index({0, h, Slice(start, end), Slice()}).to(at::kFloat);
+            auto k_block = k.index({0, hk_idx, Slice(start, end), Slice()}).to(at::kFloat);
+
+            auto vb = v_block * beta_block;
+            auto kbg_exp = k_block * beta_block * at::exp(g_block);
+            u.index_put_({0, h, Slice(start, end), Slice()}, at::matmul(a_block, vb).to(v.scalar_type()));
+            w.index_put_({0, h, Slice(start, end), Slice()}, at::matmul(a_block, kbg_exp).to(k.scalar_type()));
+        }
+    }
     return std::make_tuple(w, u);
 }
 

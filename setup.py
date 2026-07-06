@@ -314,7 +314,11 @@ class cmake_build_ext(build_ext):
         # add CMAKE_INSTALL_PATH
         cmake_args += [f"-DCMAKE_INSTALL_PREFIX={install_path}"]
 
-        cmake_args += [f"-DCMAKE_PREFIX_PATH={pybind11_cmake_path}"]
+        torch_cmake_path = os.path.join(
+            get_paths()["purelib"], "torch", "share", "cmake"
+        )
+        cmake_prefix_paths = ";".join([pybind11_cmake_path, torch_cmake_path])
+        cmake_args += [f"-DCMAKE_PREFIX_PATH={cmake_prefix_paths}"]
 
         soc_version_map = {
             "910b": "ascend910b1",
@@ -437,9 +441,12 @@ class cmake_build_ext(build_ext):
             print(f"Copy: {src_cann_ops_custom} -> {dst_cann_ops_custom}")
 
     def run(self):
-        if envs.COMPILE_CUSTOM_KERNELS:
+        skip_build_aclnn = os.environ.get("VLLM_ASCEND_SKIP_BUILD_ACLNN") == "1"
+        if envs.COMPILE_CUSTOM_KERNELS and not skip_build_aclnn:
             # First, ensure ACLNN custom-ops is built and installed.
             self.run_command("build_aclnn")
+        elif skip_build_aclnn:
+            print("Skipping build_aclnn because VLLM_ASCEND_SKIP_BUILD_ACLNN=1")
 
         # Then, run the standard build_ext command to compile the extensions
         super().run()
