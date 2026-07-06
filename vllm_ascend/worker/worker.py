@@ -942,7 +942,7 @@ class NPUWorker(WorkerBase):
 
     def get_kv_connector_handshake_metadata(
         self,
-    ) -> dict[int | tuple[int, ...], KVConnectorHandshakeMetadata] | None:
+    ) -> dict[tuple[int, int, int], KVConnectorHandshakeMetadata] | None:
         """Get KV connector metadata from this worker if available."""
         if not has_kv_transfer_group():
             return None
@@ -953,16 +953,10 @@ class NPUWorker(WorkerBase):
         # metadata across workers.
         if (metadata := connector.get_handshake_metadata()) is None:
             return None
-        logical_rank = getattr(metadata, "logical_rank", None)
-        if isinstance(logical_rank, int):
-            return {logical_rank: metadata}
         tp_rank = get_tp_group().rank_in_group
         pp_rank = get_pp_group().rank_in_group
-        pcp_size = get_pcp_group().world_size
-        if pcp_size > 1:
-            pcp_rank = get_pcp_group().rank_in_group
-            return {(pp_rank, pcp_rank, tp_rank): metadata}
-        return {(pp_rank, tp_rank): metadata}
+        pcp_rank = get_pcp_group().rank_in_group
+        return {(pp_rank, pcp_rank, tp_rank): metadata}
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return self.model_runner.get_kv_cache_spec()

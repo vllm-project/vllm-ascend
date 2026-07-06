@@ -105,7 +105,6 @@ class MooncakeAgentMetadata(msgspec.Struct, omit_defaults=True, dict=True):
     block_strides: list[list[int]]
     local_ip: str = ""
     handshake_port: int = 0
-    logical_rank: int = 0
 
 
 def get_mooncake_handshake_logical_rank(
@@ -318,7 +317,6 @@ class KVCacheSendingThread(threading.Thread):
             with bind_handshake_zmq_ctx(self.side_channel_host) as (sock, handshake_port):
                 self.handshake_port = handshake_port
                 self.metadata.handshake_port = handshake_port
-                self.metadata.logical_rank = self.logical_rank
                 path = make_zmq_path("tcp", self.side_channel_host, handshake_port)
                 logical_path = make_zmq_path("tcp", self.side_channel_host, self.logical_handshake_port)
                 logger.info(
@@ -1862,18 +1860,31 @@ class MooncakeConnectorScheduler:
             remote_block_size=self.block_size,
         )
 
-    def _port_offset_from_handshake_metadata(
-        self,
-        rank_metadata: KVConnectorHandshakeMetadata,
-        metadata_key: int | tuple[int, ...],
-    ) -> int:
-        kv_port = self.vllm_config.kv_transfer_config.kv_port
-        handshake_port = getattr(rank_metadata, "handshake_port", 0)
-        if handshake_port > 0:
-            return handshake_port - kv_port
+    def _port_offset_from_handshake_metadata(self, metadata_key: int | tuple[int, ...]) -> int:
         if isinstance(metadata_key, int):
             return metadata_key
-        raise ValueError(f"Mooncake handshake metadata missing handshake_port for worker key {metadata_key}")
+
+        if len(metadata_key) == 3:
+            pp_rank, pcp_rank, tp_rank = metadata_key
+            return get_mooncake_handshake_logical_rank(
+                pp_rank,
+                self.tp_size,
+                tp_rank,
+                pcp_rank,
+                self.pcp_size,
+            )
+
+        if len(metadata_key) == 2 and self.pcp_size == 1:
+            pp_rank, tp_rank = metadata_key
+            return get_mooncake_handshake_logical_rank(
+                pp_rank,
+                self.tp_size,
+                tp_rank,
+                pcp_rank=0,
+                pcp_size=1,
+            )
+
+        raise ValueError(f"Unsupported Mooncake handshake metadata worker key {metadata_key}")
 
     def set_xfer_handshake_metadata_from_workers(
         self,
@@ -1885,12 +1896,7 @@ class MooncakeConnectorScheduler:
 
         updated_mapping: dict[str, dict[str, Any]] = {}
         for metadata_key, rank_metadata in metadata.items():
-            logical_rank = getattr(rank_metadata, "logical_rank", None)
-            port_offset = (
-                logical_rank
-                if isinstance(logical_rank, int)
-                else self._port_offset_from_handshake_metadata(rank_metadata, metadata_key)
-            )
+            port_offset = self._port_offset_from_handshake_metadata(metadata_key)
             handshake_port = getattr(rank_metadata, "handshake_port", 0)
             if not isinstance(handshake_port, int) or handshake_port <= 0:
                 raise ValueError(f"Missing actual Mooncake handshake port for logical rank {port_offset}.")
@@ -2341,7 +2347,6 @@ class MooncakeConnectorWorker:
             block_strides=self.block_stride_per_addr,
             local_ip=get_ip(),
             handshake_port=self.handshake_port,
-            logical_rank=self.logical_rank,
         )
         self.xfer_handshake_metadata = metadata
 
@@ -2394,7 +2399,6 @@ class MooncakeConnectorWorker:
             logical_rank = getattr(self.kv_send_thread, "logical_rank", None)
             if isinstance(logical_rank, int):
                 self.logical_rank = logical_rank
-                metadata.logical_rank = logical_rank
             logical_handshake_port = getattr(self.kv_send_thread, "logical_handshake_port", None)
             if isinstance(logical_handshake_port, int):
                 self.logical_handshake_port = logical_handshake_port

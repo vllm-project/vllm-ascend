@@ -8,7 +8,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
 
-from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import MooncakeConnector
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import MooncakeAgentMetadata, MooncakeConnector
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector import MooncakeLayerwiseConnector
 
 if TYPE_CHECKING:
@@ -32,28 +32,32 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
         )
 
     def set_xfer_handshake_metadata_pp_aware(
-        self, metadata: dict[int | tuple[int, int], KVConnectorHandshakeMetadata]
+        self, metadata: dict[int | tuple[int, ...], KVConnectorHandshakeMetadata]
     ) -> None:
         if not metadata:
             return super().set_xfer_handshake_metadata_pp_aware(metadata)
 
         has_logical_rank_keys = any(isinstance(key, int) for key in metadata)
-        has_pp_tp_keys = any(isinstance(key, tuple) for key in metadata)
-        if has_logical_rank_keys and has_pp_tp_keys:
-            raise ValueError("Mixed int logical-rank and (pp_rank, tp_rank) handshake metadata keys are not supported.")
+        has_tuple_keys = any(isinstance(key, tuple) for key in metadata)
+        if has_logical_rank_keys and has_tuple_keys:
+            raise ValueError("Mixed int logical-rank and tuple handshake metadata keys are not supported.")
 
-        if has_logical_rank_keys:
-            # Logical-rank metadata is Mooncake-specific. MultiConnector still
-            # cannot carry multiple heterogeneous handshake payload types in a
-            # single exchange, so do not broadcast MooncakeAgentMetadata to
-            # strongly typed connectors such as NIXL.
+        has_mooncake_metadata = any(
+            isinstance(rank_metadata, MooncakeAgentMetadata) for rank_metadata in metadata.values()
+        )
+        if has_logical_rank_keys or has_mooncake_metadata:
+            # MooncakeAgentMetadata is strongly typed and should not be
+            # broadcast to other typed connectors such as NIXL.
             handled = False
             for connector in self._connectors:
                 if isinstance(connector, MooncakeConnector):
-                    connector.set_xfer_handshake_metadata(cast(dict[int, KVConnectorHandshakeMetadata], metadata))
+                    if has_logical_rank_keys:
+                        connector.set_xfer_handshake_metadata(cast(dict[int, KVConnectorHandshakeMetadata], metadata))
+                    else:
+                        connector.set_xfer_handshake_metadata_pp_aware(metadata)
                     handled = True
             if not handled:
-                raise ValueError("Logical-rank handshake metadata requires a MooncakeConnector child.")
+                raise ValueError("Mooncake handshake metadata requires a MooncakeConnector child.")
             return
 
         return super().set_xfer_handshake_metadata_pp_aware(metadata)

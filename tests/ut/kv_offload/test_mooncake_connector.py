@@ -102,6 +102,19 @@ def make_agent_metadata(**overrides: Any) -> MooncakeAgentMetadata:
     return MooncakeAgentMetadata(**metadata)
 
 
+def patch_kv_sending_thread_parallel_groups(test_case: unittest.TestCase) -> None:
+    patcher = patch.dict(
+        KVCacheSendingThread.__init__.__globals__,
+        {
+            "get_pp_group": MagicMock(return_value=_mock_pp_group),
+            "get_pcp_group": MagicMock(return_value=_mock_pcp_group),
+            "get_tensor_model_parallel_world_size": MagicMock(return_value=4),
+        },
+    )
+    patcher.start()
+    test_case.addCleanup(patcher.stop)
+
+
 class TestKVCacheTaskTrackerInit(unittest.TestCase):
     def test_init_basic_properties(self):
         tracker = KVCacheTaskTracker()
@@ -147,6 +160,7 @@ class TestGetAndClearFinishedSingleRequests(unittest.TestCase):
 
 class TestKVCacheSendingThreadInit(unittest.TestCase):
     def setUp(self):
+        patch_kv_sending_thread_parallel_groups(self)
         kv_caches: dict[str, Any] = {}
         self.common_args: dict[str, Any] = {
             "tp_rank": 1,
@@ -190,6 +204,7 @@ class TestKVCacheSendingThreadInit(unittest.TestCase):
 
 class TestGetAndClearFinishedRequests(unittest.TestCase):
     def setUp(self):
+        patch_kv_sending_thread_parallel_groups(self)
         kv_caches: dict[str, Any] = {}
         self.common_args: dict[str, Any] = {
             "tp_rank": 1,
@@ -216,6 +231,7 @@ class TestGetAndClearFinishedRequests(unittest.TestCase):
 
 class TestKVCacheSendingThread(unittest.TestCase):
     def test_run_handles_get_meta_and_done_recv_msgs(self):
+        patch_kv_sending_thread_parallel_groups(self)
         ready_event = threading.Event()
         metadata = make_agent_metadata(
             engine_id="engine1",
@@ -264,7 +280,6 @@ class TestKVCacheSendingThread(unittest.TestCase):
         self.assertEqual(meta.kv_caches_base_addr, [[12345678]])
         self.assertEqual(meta.num_blocks, 2)
         self.assertEqual(meta.handshake_port, actual_port)
-        self.assertEqual(meta.logical_rank, 0)
 
         req_id = "request_42"
         thread.task_tracker.add_req_to_process(req_id)
@@ -1250,15 +1265,14 @@ class TestMooncakeConnectorSchedulerMatchedTokens(unittest.TestCase):
         self.assertEqual(meta.requests["req1"].num_computed_tokens, 16)
         self.assertEqual(len(self.scheduler._reqs_need_recv), 0)
 
-    def test_set_xfer_handshake_metadata_records_actual_port_by_logical_rank(self):
+    def test_set_xfer_handshake_metadata_records_actual_port_by_tuple_key(self):
         metadata = make_agent_metadata(
             engine_id="remote_engine",
             local_ip="10.0.0.8",
             handshake_port=45123,
-            logical_rank=3,
         )
 
-        self.scheduler.set_xfer_handshake_metadata({0: metadata})
+        self.scheduler.set_xfer_handshake_metadata({(0, 0, 3): metadata})
 
         self.assertEqual(
             self.scheduler.multi_nodes_meta_mapping["3"],
@@ -1274,29 +1288,26 @@ class TestMooncakeConnectorSchedulerMatchedTokens(unittest.TestCase):
             engine_id="remote_engine",
             local_ip="10.0.0.8",
             handshake_port=0,
-            logical_rank=3,
         )
 
         with self.assertRaisesRegex(ValueError, "Missing actual Mooncake handshake port"):
-            self.scheduler.set_xfer_handshake_metadata({0: metadata})
+            self.scheduler.set_xfer_handshake_metadata({(0, 0, 3): metadata})
 
-    def test_connector_pp_aware_metadata_accepts_logical_rank_keys(self):
+    def test_connector_pp_aware_metadata_accepts_pp_pcp_tp_keys(self):
         connector = MooncakeConnector.__new__(MooncakeConnector)
         connector.connector_scheduler = self.scheduler
         first_metadata = make_agent_metadata(
             engine_id="remote_engine_0",
             local_ip="10.0.0.8",
             handshake_port=45100,
-            logical_rank=0,
         )
         second_metadata = make_agent_metadata(
             engine_id="remote_engine_1",
             local_ip="10.0.0.9",
             handshake_port=45101,
-            logical_rank=1,
         )
 
-        connector.set_xfer_handshake_metadata_pp_aware({0: first_metadata, 1: second_metadata})
+        connector.set_xfer_handshake_metadata_pp_aware({(0, 0, 0): first_metadata, (0, 0, 1): second_metadata})
 
         self.assertEqual(
             self.scheduler.multi_nodes_meta_mapping,

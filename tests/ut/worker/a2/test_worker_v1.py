@@ -53,29 +53,30 @@ class TestNPUWorker(TestBase):
         self.distributed_init_method = "tcp://localhost:12345"
         self.is_driver_worker = False
 
-    def test_get_kv_connector_handshake_metadata_uses_logical_rank_key(self):
+    def test_get_kv_connector_handshake_metadata_uses_pp_pcp_tp_key(self):
         from vllm_ascend.worker.worker import NPUWorker
 
         metadata = MagicMock()
-        metadata.logical_rank = 7
         connector = MagicMock()
         connector.get_handshake_metadata.return_value = metadata
+        tp_group = MagicMock(rank_in_group=3)
+        pp_group = MagicMock(rank_in_group=2)
+        pcp_group = MagicMock(rank_in_group=1)
 
         with (
             patch("vllm_ascend.worker.worker.has_kv_transfer_group", return_value=True),
             patch("vllm_ascend.worker.worker.get_kv_transfer_group", return_value=connector),
-            patch("vllm_ascend.worker.worker.get_tp_group") as mock_get_tp_group,
-            patch("vllm_ascend.worker.worker.get_pp_group") as mock_get_pp_group,
+            patch("vllm_ascend.worker.worker.get_tp_group", return_value=tp_group),
+            patch("vllm_ascend.worker.worker.get_pp_group", return_value=pp_group),
+            patch("vllm_ascend.worker.worker.get_pcp_group", return_value=pcp_group),
         ):
             worker = NPUWorker.__new__(NPUWorker)
             result = worker.get_kv_connector_handshake_metadata()
 
         assert result is not None
-        self.assertIs(result[7], metadata)
-        mock_get_tp_group.assert_not_called()
-        mock_get_pp_group.assert_not_called()
+        self.assertIs(result[(2, 1, 3)], metadata)
 
-    def test_get_kv_connector_handshake_metadata_keeps_pp_tp_key_fallback(self):
+    def test_get_kv_connector_handshake_metadata_includes_zero_pcp_rank(self):
         from vllm_ascend.worker.worker import NPUWorker
 
         metadata = object()
@@ -83,19 +84,20 @@ class TestNPUWorker(TestBase):
         connector.get_handshake_metadata.return_value = metadata
         tp_group = MagicMock(rank_in_group=3)
         pp_group = MagicMock(rank_in_group=2)
+        pcp_group = MagicMock(rank_in_group=0)
 
         with (
             patch("vllm_ascend.worker.worker.has_kv_transfer_group", return_value=True),
             patch("vllm_ascend.worker.worker.get_kv_transfer_group", return_value=connector),
             patch("vllm_ascend.worker.worker.get_tp_group", return_value=tp_group),
             patch("vllm_ascend.worker.worker.get_pp_group", return_value=pp_group),
-            patch("vllm_ascend.worker.worker.get_pcp_group", return_value=MagicMock(world_size=1)),
+            patch("vllm_ascend.worker.worker.get_pcp_group", return_value=pcp_group),
         ):
             worker = NPUWorker.__new__(NPUWorker)
             result = worker.get_kv_connector_handshake_metadata()
 
         assert result is not None
-        self.assertIs(result[(2, 3)], metadata)
+        self.assertIs(result[(2, 0, 3)], metadata)
 
     @patch("vllm_ascend.utils.adapt_patch")
     @patch("vllm_ascend.ops")
