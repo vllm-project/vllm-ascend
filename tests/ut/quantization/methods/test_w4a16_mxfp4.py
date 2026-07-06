@@ -1,8 +1,8 @@
 from unittest.mock import Mock, patch
 
+import pytest
 import torch
 import torch.nn as nn
-import pytest
 
 from tests.ut.base import TestBase
 from tests.ut.quantization.conftest_quantization import create_mock_ascend_config, create_mock_vllm_config
