@@ -44,4 +44,14 @@ Mixtral-8x7B-Instruct-v0.1.md
 Qwen3-ASR-1.7B.md
 Qwen2.5-Math-RM-72B.md
 InternVL3.5
+TeleChat2-3B.md
+:::
+
+## Adaptation Reports
+
+:::{toctree}
+:caption: Model Adaptation Reports
+:maxdepth: 1
+TeleChat2-3B-adaptation-report.md
+Gemma4-E4B-it-adaptation-report.md
 :::
