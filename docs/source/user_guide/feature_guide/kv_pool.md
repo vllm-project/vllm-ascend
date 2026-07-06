@@ -803,18 +803,62 @@ documentation: <https://etcd.io/docs/v3.7/op-guide/clustering/>
 
 ### Start Datasystem Worker
 
-Start a Datasystem worker on each node by using `dscli`:
+Start a Datasystem worker on each node by using `dscli`. The following
+configuration is a recommended starting point for high-throughput KV Pool
+workloads:
 
 ```bash
+WORKER_LOG_DIR="/var/log/yuanrong/worker"
+sudo mkdir -p "${WORKER_LOG_DIR}"
+sudo chown "$(id -u):$(id -g)" "${WORKER_LOG_DIR}"
+
 dscli start -w \
   --worker_address "${WORKER_IP}:31501" \
   --etcd_address "${ETCD_IP}:2379" \
+  --log_dir "${WORKER_LOG_DIR}" \
   --shared_memory_size_mb 40960 \
-  --enable_worker_worker_batch_get=true
+  --arena_per_tenant 1 \
+  --enable_huge_tlb true \
+  --enable_fallocate false \
+  --rpc_thread_num 64 \
+  --oc_thread_num 64 \
+  --enable_worker_worker_batch_get true \
+  --sc_regular_socket_num 0 \
+  --sc_stream_socket_num 0
 ```
 
 The `--worker_address` value is consumed later by `DS_WORKER_ADDR`, so keep
 the host and port identical on the same node.
+
+The tuning parameters above have the following effects:
+
+| Parameter | Description |
+| :--- | :--- |
+| `log_dir` | Sets the Datasystem worker log directory. Create the directory and grant the worker process write permission before startup. |
+| `arena_per_tenant=1` | Uses one shared-memory arena per tenant as a conservative starting point for memory and file-descriptor usage. |
+| `enable_huge_tlb=true` | Backs worker shared memory with HugeTLB pages. Reserve enough 2 MiB huge pages before starting the worker. |
+| `enable_fallocate=false` | Disables `fallocate` for the shared-memory file; use this setting with the HugeTLB configuration above. |
+| `rpc_thread_num=64` | Sets the RPC/ZMQ service concurrency. |
+| `oc_thread_num=64` | Sets the Object Cache business-thread pool size. |
+| `enable_worker_worker_batch_get=true` | Enables batched Object Cache reads between Datasystem workers. |
+| `sc_regular_socket_num=0`, `sc_stream_socket_num=0` | Disables the Stream Cache service. Both values must be greater than zero to enable it; keep them at zero when KV Pool does not use Stream Cache. |
+
+For `shared_memory_size_mb=40960`, reserve at least 20480 2 MiB huge pages and
+verify that they are available before starting the worker:
+
+```bash
+grep -E "HugePages_Total|HugePages_Free|Hugepagesize" /proc/meminfo
+```
+
+Worker logs, including files whose base name is normally
+`datasystem_worker`, are written under the `--log_dir` directory. Use an
+absolute path so the log location does not depend on the worker process's
+current directory.
+
+These thread counts are tuning starting points rather than universal defaults.
+Adjust them according to the available CPU cores and measured request
+throughput. Because `-w` consumes the remaining command-line arguments, place
+any `dscli start` options such as `--timeout` before `-w`.
 
 For more parameters, refer to the `dscli` usage documentation on the Yuanrong
 Datasystem official site:
@@ -834,15 +878,23 @@ Set the following environment variables on each node before starting vLLM:
 | :--- | :--- | :--- | :--- |
 | `PYTHONHASHSEED` | Yes | `0` | Must be consistent across all nodes to guarantee uniform hash generation. |
 | `DS_WORKER_ADDR` | Yes | N/A | Datasystem worker address in `<host>:<port>` format. This must match the local `dscli start --worker_address` value. |
+| `DATASYSTEM_CLIENT_LOG_DIR` | No | `~/.datasystem/logs` | Directory for Yuanrong client SDK logs created by the vLLM process. Use a directory separate from the worker logs. |
 | `DS_ENABLE_EXCLUSIVE_CONNECTION` | No | `0` | Passed to Yuanrong `HeteroClient.enable_exclusive_connection`. Use `1` to enable the exclusive connection mode when required by your deployment. |
 | `DS_ENABLE_REMOTE_H2D` | No | `0` | Passed to Yuanrong `HeteroClient.enable_remote_h2d`. Use `1` only after the Remote H2D requirements below are met. |
 
 ```bash
 export PYTHONHASHSEED=0
 export DS_WORKER_ADDR="${WORKER_IP}:31501"
+export DATASYSTEM_CLIENT_LOG_DIR="/var/log/yuanrong/client"
 export DS_ENABLE_EXCLUSIVE_CONNECTION=0
 export DS_ENABLE_REMOTE_H2D=0
+
+mkdir -p "${DATASYSTEM_CLIENT_LOG_DIR}"
 ```
+
+Set `DATASYSTEM_CLIENT_LOG_DIR` before starting vLLM because the Yuanrong
+client reads it during logging initialization. Client SDK logs, whose base
+name is normally `ds_client`, are written to this directory.
 
 #### Remote H2D Requirements
 
@@ -861,12 +913,17 @@ enabled and verified in the Yuanrong Datasystem deployment:
 dscli start -w \
   --worker_address "${WORKER_IP}:31501" \
   --etcd_address "${ETCD_IP}:2379" \
+  --log_dir "/var/log/yuanrong/worker" \
   --shared_memory_size_mb 40960 \
   --arena_per_tenant 1 \
   --enable_huge_tlb true \
   --enable_fallocate false \
-  --remote_h2d_device_ids "0,1,2,3,4,5,6,7" \
-  --enable_worker_worker_batch_get=true
+  --rpc_thread_num 64 \
+  --oc_thread_num 64 \
+  --enable_worker_worker_batch_get true \
+  --sc_regular_socket_num 0 \
+  --sc_stream_socket_num 0 \
+  --remote_h2d_device_ids "0,1,2,3,4,5,6,7"
 ```
 
 * Make sure the NPU driver, firmware, and CANN toolkit required by Yuanrong
@@ -937,9 +994,11 @@ and the worker process. Each instance must use a unique port value.
 
 ### Notes
 
-* The Yuanrong backend normalizes KV keys before calling Datasystem. Keys longer
-  than 255 characters or containing unsupported characters are rewritten, so do
-  not rely on the raw key string when debugging backend storage.
+* The Yuanrong backend normalizes KV keys before calling Datasystem. Supported
+  ASCII keys up to 1024 bytes are preserved. Longer keys or keys containing
+  unsupported characters are rewritten to a maximum of 1024 characters with a
+  hash suffix, so do not rely on the raw key string when debugging backend
+  storage.
 * No extra buffer pre-registration step is required for Yuanrong. The backend
   uses device pointers directly when building blob lists.
 
