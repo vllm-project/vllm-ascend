@@ -229,7 +229,7 @@ jobs:
 
   clear-pre-logs:
     needs: [parse-trigger]
-    runs-on: linux-aarch64-0
+    runs-on: linux-aarch64-310p-4
     steps:
       - name: Clear pre-logs on pvc
         run: |
