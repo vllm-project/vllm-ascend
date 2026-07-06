@@ -356,7 +356,6 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
         #  MXFP4 keeps dispatch unquantized in AllGather path, and quantizes again inside the MLP path.
         with_quant = (
             token_dispatch_input.quant.dispatch_with_quant
-            and token_dispatch_input.quant.quant_type != QuantType.MXFP4
             and token_dispatch_input.quant.quant_type != QuantType.W8A8FP8
         )
         is_mxfp = token_dispatch_input.quant.is_mxfp
@@ -365,12 +364,19 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
         topk_ids = token_dispatch_input.topk_ids
         expert_map = token_dispatch_input.routing.expert_map
         dynamic_scale = token_dispatch_input.routing.pertoken_scale
+        quant_type = token_dispatch_input.quant.quant_type
+        act_quant_type = (
+            token_dispatch_input.quant.mxfp.act_quant_type if token_dispatch_input.quant.mxfp is not None else None
+        )
         global_redundant_expert_num = token_dispatch_input.routing.global_redundant_expert_num
         restore_shape = hidden_states.shape
         # Fuse the first dynamic quant of moe_mlp into initrouting when
         # dispatch_with_quant is on but got a None dynamic_scale.
         if with_quant and dynamic_scale is None:
-            quant_mode = 3 if is_mxfp else 1
+            if quant_type == QuantType.MXFP4:
+                quant_mode = 9
+            else:
+                quant_mode = 3 if is_mxfp else 1
         else:
             quant_mode = -1
 
@@ -401,6 +407,7 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
             expert_tokens_num_flag=True,
             active_expert_range=[first_expert_idx, last_expert_idx],
             quant_mode=quant_mode,
+            act_quant_type=act_quant_type,
         )
         expert_tokens = expert_tokens.to(torch.int64)
         group_list_type = 1  # `count` mode

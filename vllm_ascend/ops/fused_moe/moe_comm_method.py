@@ -130,6 +130,7 @@ class MoECommMethod(ABC):
             torch.bfloat16,
             torch.int8,
             torch.float8_e4m3fn,
+            torch.uint8,
         ], f"Unsupported hidden_states dtype: {fused_experts_input.hidden_states.dtype}"
 
         moe_comm_method = _EXTRA_CTX.moe_comm_method
