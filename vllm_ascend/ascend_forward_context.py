@@ -366,8 +366,6 @@ def select_moe_comm_method(
                     and fused_decode_guard
                     and _cann_megamoe_supported_by_config(vllm_config, quant_type)
                 )
-                if in_profile_run and fused_decode_enable:
-                    fused_decode_enable = False
             moe_comm_type = MoECommType.FUSED_MC2 if fused_decode_enable else MoECommType.MC2
         else:
             fused_prefill_enable = fused_mc2_enable

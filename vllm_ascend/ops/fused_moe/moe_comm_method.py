@@ -51,6 +51,7 @@ from vllm_ascend.quantization.quant_type import QuantType
 _MoECommMethods: dict[MoECommType | None, MoECommMethod] = {}
 
 _CANN_ACL_INT8 = 258
+_CANN_ACL_INT4 = 285
 _CANN_TORCH_FLOAT8_E4M3FN = 24
 
 _CANN_MEGA_MOE_QUANT_MODE_INT8 = 2
@@ -160,11 +161,11 @@ def _normalize_cann_activation(activation) -> str:
     )
 
 
-def _get_cann_mega_moe_quant_settings(quant_type: QuantType) -> tuple[int, int | None]:
-    # Returns only (dispatch_quant_mode, dispatch_quant_out_dtype).
-    # weight1_type/weight2_type are reserved params in the mega_moe doc
-    # ("use default") and are NOT passed; the op infers weight precision from
-    # the tensor dtype + FRACTAL_NZ layout.
+def _get_cann_mega_moe_quant_settings(quant_type: QuantType) -> tuple[int, int | None, int | None]:
+    # Returns (dispatch_quant_mode, dispatch_quant_out_dtype, weight_type).
+    # The current custom op package still requires explicit INT4 for W4A8
+    # packed weights; otherwise it derives W4A8's packed N as an INT8 N and
+    # rejects weight2.
     #
     # dispatch_quant_out_dtype: the doc types this as torch.dtype (torch.int8 /
     # torch.float8_e4m3fn). We pass the ACL enum ints (258 / 24) because W8A8
@@ -173,13 +174,13 @@ def _get_cann_mega_moe_quant_settings(quant_type: QuantType) -> tuple[int, int |
     # so keep the working values until the W4A8 accuracy root cause is found on
     # the operator side.
     if quant_type == QuantType.W8A8:
-        return (_CANN_MEGA_MOE_QUANT_MODE_INT8, _CANN_ACL_INT8)
+        return (_CANN_MEGA_MOE_QUANT_MODE_INT8, _CANN_ACL_INT8, _CANN_ACL_INT8)
     if quant_type == QuantType.W4A8:
-        return (_CANN_MEGA_MOE_QUANT_MODE_INT8, _CANN_ACL_INT8)
+        return (_CANN_MEGA_MOE_QUANT_MODE_INT8, _CANN_ACL_INT8, _CANN_ACL_INT4)
     if quant_type == QuantType.MXFP8:
-        return (_CANN_MEGA_MOE_QUANT_MODE_MX, _CANN_TORCH_FLOAT8_E4M3FN)
+        return (_CANN_MEGA_MOE_QUANT_MODE_MX, _CANN_TORCH_FLOAT8_E4M3FN, None)
     if quant_type == QuantType.W4A8MXFP:
-        return (_CANN_MEGA_MOE_QUANT_MODE_MX, _CANN_TORCH_FLOAT8_E4M3FN)
+        return (_CANN_MEGA_MOE_QUANT_MODE_MX, _CANN_TORCH_FLOAT8_E4M3FN, None)
     raise RuntimeError(
         "CANN 9.1 MegaMoe integration supports W8A8/W4A8 INT on A2/A3 and MXFP on FP8-capable "
         "MegaMoe platforms. "
@@ -520,11 +521,7 @@ class FusedMC2CommImpl(MoECommMethod):
                 num_topk,
                 hidden,
                 intermediate_hidden,
-                # max_recv_token_num / combine_quant_mode / comm_alg are omitted
-                # so the op uses its documented defaults: max_recv_token_num=0
-                # means "auto-size the recv buffer to the comm-domain capacity"
-                # (more reliable than us hand-computing the range maximum), and
-                # combine_quant_mode / comm_alg are reserved params.
+                max_recv_token_num=num_max_tokens_per_rank,
                 dispatch_quant_mode=dispatch_quant_mode,
                 dispatch_quant_out_dtype=dispatch_quant_out_dtype,
             )
@@ -542,12 +539,7 @@ class FusedMC2CommImpl(MoECommMethod):
         assert isinstance(self.token_dispatcher, TokenDispatcherWithMC2)
 
         _, mega_moe = self._load_cann_mega_moe_ops()
-        # weight1_type/weight2_type are NOT passed: the doc marks them reserved
-        # ("use default") and the op infers weight precision from the tensor
-        # dtype + FRACTAL_NZ layout. Passing a non-default weight_type once made
-        # the tiling derive a wrong N (A3 W4A8 read l1's packed last dim 512 as
-        # N/2 instead of the real intermediate 2048), tripping the weight2 check.
-        dispatch_quant_mode, dispatch_quant_out_dtype = _get_cann_mega_moe_quant_settings(
+        dispatch_quant_mode, dispatch_quant_out_dtype, weight_type = _get_cann_mega_moe_quant_settings(
             fused_experts_input.quant.quant_type
         )
         weight1 = _as_tensor_list(fused_experts_input.weights.w1, "w1")
@@ -619,8 +611,8 @@ class FusedMC2CommImpl(MoECommMethod):
             x_active_mask=x_active_mask,
             activation=_normalize_cann_activation(fused_experts_input.activation),
             activation_clamp=activation_clamp,
-            # weight1_type / weight2_type deliberately omitted — reserved params,
-            # the op auto-detects INT4(INT32) vs INT8 from the tensor dtype.
+            weight1_type=weight_type,
+            weight2_type=weight_type,
         )
         # NOTE: self.expert_token_nums is only used by the
         # dispatch_ffn_combine path (enable_fused_mc2 == 1) as a
