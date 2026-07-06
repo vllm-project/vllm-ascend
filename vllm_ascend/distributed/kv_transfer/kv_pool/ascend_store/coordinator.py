@@ -102,6 +102,14 @@ class AscendStoreCoordinator:
         for group_id, group in enumerate(self.kv_cache_groups):
             spec = _unwrap_spec(group.kv_cache_spec)
             effective_spec = _copy_spec_with_block_size(spec, self.group_effective_block_sizes[group_id])
+            if (
+                not _uses_reachable_mask(self.group_cache_families[group_id])
+                and getattr(effective_spec, "compress_ratio", 1) > 1
+            ):
+                # The cache family already folds the compression ratio into
+                # the external key granularity. Avoid applying it again inside
+                # CompressAttentionManager.find_longest_cache_hit().
+                effective_spec = replace(effective_spec, compress_ratio=1)
             self.group_effective_specs.append(effective_spec)
             manager_cls = _get_manager_class(spec)
 
@@ -124,6 +132,9 @@ class AscendStoreCoordinator:
         }
         if self.use_eagle and not self.eagle_attn_group_indices:
             self.eagle_attn_group_indices = set(range(len(self.attention_groups)))
+        self.eagle_reachable_group_ids: set[int] = {
+            group_id for index in self.eagle_attn_group_indices for group_id in self.attention_groups[index][1]
+        }
 
     def find_longest_cache_hit(
         self,
@@ -181,7 +192,7 @@ class AscendStoreCoordinator:
                 end_block=num_chunks,
                 alignment_tokens=self.lcm_block_size,
                 kv_cache_spec=spec,
-                use_eagle=group_id in self.eagle_group_ids,
+                use_eagle=group_id in self.eagle_reachable_group_ids,
                 retention_interval=self.retention_interval,
                 num_prompt_tokens=num_prompt_tokens,
             )

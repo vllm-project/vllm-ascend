@@ -27,13 +27,16 @@ gdn_ops.update_conv1d_graph_params = update_conv1d_graph_params_310p
 AscendSpecDecodeBaseProposer.set_inputs_first_pass = (  # type: ignore[method-assign]
     AscendSpecDecodeBaseProposer310.set_inputs_first_pass
 )
-
 # Patch _warmup_prefill_kernels to no-op on 310P: triton.next_power_of_2 does
 # not exist in the triton version used on 310P CI, and NPU does not use these
 # CUDA warmup kernel anyway.
 QwenGatedDeltaNetAttention._warmup_prefill_kernels = lambda self, qkv_or_qkvz, v_dim: None  # type: ignore[method-assign]
 QwenGatedDeltaNetAttention._forward_core = AscendGatedDeltaNetAttention310._forward_core
 QwenGatedDeltaNetAttention.get_state_dtype = AscendGatedDeltaNetAttention310.get_state_dtype
+
+# 310P: make Qwen GDN use the 310P attention backend, including the
+# MTP ACL graph padding replay fixes provided by gdn_attn_builder_310.py.
+QwenGatedDeltaNetAttention.get_attn_backend = AscendGatedDeltaNetAttention310.get_attn_backend
 
 if is_rc_device():
     from vllm.v1.attention.backends.gdn_attn import GDNAttentionBackend
