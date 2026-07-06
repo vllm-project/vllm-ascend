@@ -16,7 +16,7 @@
 #
 
 # Reusable workflow that exercises the cpu-32-hk buildkitd pipeline end to
-# end: it runs on linux-amd64-cpu-32-hk, relies on the Vault-injected
+# end: it runs on linux-arm64-cpu-32-hk, relies on the Vault-injected
 # buildkitd TLS certs (ca.pem/cert.pem/key.pem) under DOCKER_CONFIG, and
 # drives `buildctl` against the shared buildkitd daemon to build the CI test
 # image. This is a dedicated verification of the ascend-ci-deployment fix
@@ -66,7 +66,7 @@ jobs:
             soc: "ascend910_9391"
             arch: arm64
             mode: device
-            runner: linux-amd64-cpu-32-hk
+            runner: linux-arm64-cpu-32-hk
             vllm_label: main
             vllm_version: ${{ inputs.vllm_main_commit }}
     container:
