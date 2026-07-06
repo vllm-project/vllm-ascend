@@ -38,7 +38,7 @@ To enable **Layer Sharding Linear**, specify the target linear layers using the 
 ```
 
 > **Restriction**
-> Layer Sharding can only be enabled in PD-disaggregated's **P node**.
+> Layer Sharding can only be enabled in PD disaggregated's **P node**.
 > Layer Sharding is not supported by RFork weight transfer. If `--load-format rfork` is used with `layer_sharding`, RFork transfer is bypassed and the model is loaded through the default model loader.
 
 ---
@@ -66,7 +66,7 @@ vllm serve \
 
 With [DSA-CP](https://github.com/vllm-project/vllm-ascend/pull/4702), both `q_b_proj` and `o_proj` layers require large weight matrices to be stored per layer. Sharding these layers across NPUs helps fit extremely deep models (e.g., 61-layer architectures) into limited device memory.
 
-Layer Sharding can only be enabled in PD-disaggregated's **P node**.
+Layer Sharding can only be enabled in PD disaggregated's **P node**.
 
 **Example configuration:**
 

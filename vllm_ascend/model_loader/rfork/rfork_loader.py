@@ -25,6 +25,7 @@ from torch.nn import Module
 from vllm.config import ModelConfig, VllmConfig
 from vllm.config.load import LoadConfig
 from vllm.distributed import get_tensor_model_parallel_rank
+from vllm.distributed.parallel_state import get_ep_group, get_pp_group
 from vllm.logger import logger
 from vllm.model_executor.model_loader import register_model_loader
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
@@ -78,6 +79,27 @@ def _get_rfork_worker_attr(vllm_config: VllmConfig, model_config: ModelConfig) -
     return "rfork_draft_worker" if _is_draft_model(vllm_config, model_config) else "rfork_worker"
 
 
+def _get_ep_rank(vllm_config: VllmConfig) -> int | None:
+    parallel_config = vllm_config.parallel_config
+    if not parallel_config.enable_expert_parallel or getattr(parallel_config, "is_moe_model", None) is False:
+        return None
+
+    try:
+        return get_ep_group().rank_in_group
+    except AssertionError as e:
+        raise RuntimeError("Expert parallelism is enabled, but the EP group is not initialized.") from e
+
+
+def _get_pp_rank(vllm_config: VllmConfig) -> int | None:
+    if getattr(vllm_config.parallel_config, "pipeline_parallel_size", 1) <= 1:
+        return None
+
+    try:
+        return get_pp_group().rank_in_group
+    except AssertionError as e:
+        raise RuntimeError("Pipeline parallelism is enabled, but the PP group is not initialized.") from e
+
+
 def _make_fallback_load_config(load_config: LoadConfig) -> LoadConfig:
     fallback_load_config = copy(load_config)
     fallback_load_config.load_format = "auto"
@@ -88,6 +110,18 @@ def _make_fallback_load_config(load_config: LoadConfig) -> LoadConfig:
 def _is_layer_sharding_enabled(vllm_config: VllmConfig) -> bool:
     additional_config = getattr(vllm_config, "additional_config", None) or {}
     return bool(additional_config.get("layer_sharding"))
+
+
+def _is_dynamic_eplb_enabled(vllm_config: VllmConfig) -> bool:
+    parallel_config = getattr(vllm_config, "parallel_config", None)
+    if bool(getattr(parallel_config, "enable_eplb", False)):
+        return True
+
+    additional_config = getattr(vllm_config, "additional_config", None) or {}
+    eplb_config = additional_config.get("eplb_config", {})
+    if not isinstance(eplb_config, dict):
+        return False
+    return bool(eplb_config.get("dynamic_eplb") or eplb_config.get("expert_map_record_path"))
 
 
 @register_model_loader("rfork")
@@ -158,6 +192,8 @@ class RForkModelLoader(BaseModelLoader):
             disaggregation_mode = "kv_both" if kv_transfer_config is None else str(kv_transfer_config.kv_role)
             is_draft_model = _is_draft_model(vllm_config, model_config)
             device_id = torch.distributed.get_rank()
+            pp_rank = _get_pp_rank(vllm_config)
+            ep_rank = _get_ep_rank(vllm_config)
             rfork_worker = RForkWorker(
                 disaggregation_mode=disaggregation_mode,
                 node_rank=vllm_config.parallel_config.node_rank,
@@ -169,6 +205,8 @@ class RForkModelLoader(BaseModelLoader):
                 seed_timeout_sec=self.seed_timeout_sec,
                 seed_key_separator=self.seed_key_separator,
                 is_draft_model=is_draft_model,
+                pp_rank=pp_rank,
+                ep_rank=ep_rank,
             )
             setattr(self.load_config, worker_attr, rfork_worker)
             logger.info(
@@ -194,10 +232,16 @@ class RForkModelLoader(BaseModelLoader):
 
         with set_default_torch_dtype(model_config.dtype):
             need_del = False
+            bypass_reason = None
             if _is_layer_sharding_enabled(vllm_config):
+                bypass_reason = "additional_config.layer_sharding"
+            elif _is_dynamic_eplb_enabled(vllm_config):
+                bypass_reason = "dynamic EPLB"
+
+            if bypass_reason is not None:
                 logger.warning(
-                    "RFork transfer is disabled when additional_config.layer_sharding "
-                    "is enabled; using the default model loader."
+                    "RFork transfer is disabled when %s is enabled; using the default model loader.",
+                    bypass_reason,
                 )
                 fallback_load_config = _make_fallback_load_config(self.load_config)
 
@@ -211,7 +255,7 @@ class RForkModelLoader(BaseModelLoader):
                         prefix=prefix,
                     )
                 except Exception:
-                    logger.exception("RFork disabled for layer_sharding, but default loader failed.")
+                    logger.exception("RFork disabled for %s, but default loader failed.", bypass_reason)
                     raise
 
             rfork_worker = self._ensure_rfork_worker(vllm_config, model_config)

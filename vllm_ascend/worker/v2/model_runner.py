@@ -123,6 +123,7 @@ class NPUModelRunner(GPUModelRunner):
         # is necessary for weight_prfetching function, and MoE communication optimization.
         set_weight_prefetch_method(self.ascend_config.weight_prefetch_config)
         # TODO: remove set_cos_and_sin (together with update_cos_sin) when mla can properly handle cos/sin internally
+        self.decode_query_len = self.num_speculative_steps + 1
         set_cos_and_sin(vllm_config, self.max_num_reqs, self.decode_query_len, self.dtype, self.device)
         set_mc2_tokens_capacity(vllm_config, self.max_num_reqs, self.decode_query_len)
         set_mc2_mask(vllm_config, self.device)
@@ -486,8 +487,21 @@ def graph_manager_wrapper(model_runner):
     """Context manager to override graph manager."""
     original_graph_manager = vllm_model_runner.ModelCudaGraphManager
 
-    def factory(vllm_config: VllmConfig, device: torch.device, cudagraph_mode: CUDAGraphMode, decode_query_len: int):
-        return ModelAclGraphManager(vllm_config, device, cudagraph_mode, decode_query_len, model_runner)
+    def factory(
+        vllm_config: VllmConfig,
+        device: torch.device,
+        cudagraph_mode: CUDAGraphMode,
+        decode_query_len: int,
+        lora_capture_cases: list[int] | None = None,
+    ):
+        return ModelAclGraphManager(
+            vllm_config,
+            device,
+            cudagraph_mode,
+            decode_query_len,
+            model_runner,
+            lora_capture_cases=lora_capture_cases,
+        )
 
     try:
         vllm_model_runner.ModelCudaGraphManager = factory

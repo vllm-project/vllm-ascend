@@ -1,0 +1,1291 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-02 07:02+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:1
+msgid "Qwen3.5-27B/Qwen3.6-27B"
+msgstr "Qwen3.5-27B/Qwen3.6-27B"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:3
+msgid "1 Introduction"
+msgstr "1 简介"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:5
+msgid ""
+"Qwen3.5-27B and Qwen3.6-27B are dense hybrid Mamba-Transformer language "
+"models in the Qwen3.5/Qwen3.6 family, integrating breakthroughs in "
+"architectural efficiency, reinforcement learning scale, and global "
+"accessibility. They share the same hybrid attention design (GDN + full "
+"attention), so deployment on Ascend NPUs follows the same pattern for "
+"both models. They are suitable for general-purpose text generation tasks "
+"such as dialogue, content creation, and code generation running on Ascend"
+" NPUs."
+msgstr ""
+"Qwen3.5-27B和Qwen3.6-27B是Qwen3.5/Qwen3.6系列中的密集混合Mamba-Transformer语言模型，集成了架构效率、强化学习规模和全球可访问性方面的突破。它们共享相同的混合注意力设计（GDN + 全注意力），因此在Ascend NPU上的部署对两个模型遵循相同的模式。它们适用于在Ascend NPU上运行的通用文本生成任务，如对话、内容创作和代码生成。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:7
+msgid ""
+"This document will demonstrate the main validation steps for the models, "
+"including supported features, feature configuration, environment "
+"preparation, single-node and multi-node deployment, as well as accuracy "
+"and performance evaluation."
+msgstr ""
+"本文档将演示模型的主要验证步骤，包括支持的功能、功能配置、环境准备、单节点和多节点部署，以及准确性和性能评估。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:9
+msgid ""
+"It is **strongly recommended to use the latest release candidate (rc) "
+"version or the latest official version** of `vllm-ascend`. As a minimum-"
+"version requirement, `Qwen3.5-27B` is first supported in `vllm-"
+"ascend:v0.17.0rc1`, and `Qwen3.6-27B` is first supported in `vllm-"
+"ascend:v0.18.0rc1`."
+msgstr ""
+"**强烈建议使用`vllm-ascend`的最新候选发布（rc）版本或最新正式版本**。作为最低版本要求，`Qwen3.5-27B`首次支持于`vllm-ascend:v0.17.0rc1`，`Qwen3.6-27B`首次支持于`vllm-ascend:v0.18.0rc1`。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:11
+msgid "2 Supported Features"
+msgstr "2 支持的功能"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:13
+msgid ""
+"Please refer to the [Supported Features "
+"List](../../user_guide/support_matrix/supported_models.md) for the model "
+"support matrix."
+msgstr ""
+"请参考[支持功能列表](../../user_guide/support_matrix/supported_models.md)了解模型支持矩阵。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:15
+msgid ""
+"Please refer to the [Feature "
+"Guide](../../user_guide/feature_guide/index.md) for feature configuration"
+" information."
+msgstr ""
+"请参考[功能指南](../../user_guide/feature_guide/index.md)了解功能配置信息。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:17
+msgid "3 Prerequisites"
+msgstr "3 前提条件"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:19
+msgid "3.1 Model Weight"
+msgstr "3.1 模型权重"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:21
+msgid "**Qwen3.5-27B**"
+msgstr "**Qwen3.5-27B**"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:23
+msgid ""
+"`Qwen3.5-27B` (BF16 version): requires 1 Atlas 800 A3 (64G × 16) node or "
+"1 Atlas 800 A2 (64G × 8) node. [Download model "
+"weight](https://modelscope.cn/models/Qwen/Qwen3.5-27B)"
+msgstr ""
+"`Qwen3.5-27B`（BF16版本）：需要1个Atlas 800 A3（64G × 16）节点或1个Atlas 800 A2（64G × 8）节点。[下载模型权重](https://modelscope.cn/models/Qwen/Qwen3.5-27B)"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:24
+msgid ""
+"`Qwen3.5-27B-w8a8` (Quantized version): requires 1 Atlas 800 A3 (64G × "
+"16) node or 1 Atlas 800 A2 (64G × 8) node. [Download model "
+"weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-27B-w8a8-mtp)"
+msgstr ""
+"`Qwen3.5-27B-w8a8`（量化版本）：需要1个Atlas 800 A3（64G × 16）节点或1个Atlas 800 A2（64G × 8）节点。[下载模型权重](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-27B-w8a8-mtp)"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:26
+msgid "**Qwen3.6-27B**"
+msgstr "**Qwen3.6-27B**"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:28
+msgid ""
+"`Qwen3.6-27B` (BF16 version): requires 1 Atlas 800 A3 (64G × 16) node or "
+"1 Atlas 800 A2 (64G × 8) node. [Download model "
+"weight](https://modelscope.cn/models/Qwen/Qwen3.6-27B)"
+msgstr ""
+"`Qwen3.6-27B`（BF16版本）：需要1个Atlas 800 A3（64G × 16）节点或1个Atlas 800 A2（64G × 8）节点。[下载模型权重](https://modelscope.cn/models/Qwen/Qwen3.6-27B)"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:29
+msgid ""
+"`Qwen3.6-27B-w8a8` (Quantized version): requires 1 Atlas 800 A3 (64G × "
+"16) node or 1 Atlas 800 A2 (64G × 8) node. [Download model "
+"weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.6-27B-w8a8)"
+msgstr ""
+"`Qwen3.6-27B-w8a8`（量化版本）：需要1个Atlas 800 A3（64G × 16）节点或1个Atlas 800 A2（64G × 8）节点。[下载模型权重](https://www.modelscope.cn/models/Eco-Tech/Qwen3.6-27B-w8a8)"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:31
+msgid ""
+"It is recommended to download the model weight to the shared directory of"
+" multiple nodes, such as `/root/.cache/`."
+msgstr ""
+"建议将模型权重下载到多个节点的共享目录中，例如`/root/.cache/`。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:33
+msgid "3.2 Verify Multi-node Communication"
+msgstr "3.2 验证多节点通信"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:35
+msgid ""
+"If you want to deploy multi-node environment, you need to verify multi-"
+"node communication according to [verify multi-node communication "
+"environment](../../installation.md#verify-multi-node-communication)."
+msgstr ""
+"如果要部署多节点环境，需要按照[验证多节点通信环境](../../installation.md#verify-multi-node-communication)验证多节点通信。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:37
+msgid "4 Installation"
+msgstr "4 安装"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:39
+msgid "4.1 Docker Image Installation"
+msgstr "4.1 Docker镜像安装"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:41
+msgid ""
+"Select an image based on your machine type and start the docker image on "
+"your node, refer to [using docker](../../installation.md#set-up-using-"
+"docker)."
+msgstr ""
+"根据机器类型选择镜像并在节点上启动docker镜像，参考[使用docker](../../installation.md#set-up-using-docker)。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:43
+msgid ""
+"It is **recommended to use the latest release candidate (rc) version or "
+"the latest official version** of the `vllm-ascend` image to ensure the "
+"best compatibility and access to the latest features. As a minimum-"
+"version requirement, use `vllm-ascend:v0.17.0rc1` (or a later version) "
+"for `Qwen3.5-27B`, and `vllm-ascend:v0.18.0rc1` (or a later version) for "
+"`Qwen3.6-27B`. For `Qwen3.6-27B` on Atlas 800 A3, please use the matching"
+" `v0.18.0rc1-a3` (or a later `-a3`) image."
+msgstr ""
+"**建议使用`vllm-ascend`镜像的最新候选发布（rc）版本或最新正式版本**，以确保最佳兼容性并访问最新功能。作为最低版本要求，`Qwen3.5-27B`使用`vllm-ascend:v0.17.0rc1`（或更高版本），`Qwen3.6-27B`使用`vllm-ascend:v0.18.0rc1`（或更高版本）。对于Atlas 800 A3上的`Qwen3.6-27B`，请使用匹配的`v0.18.0rc1-a3`（或更高版本的`-a3`）镜像。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md
+msgid "A3 series"
+msgstr "A3系列"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:52
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:95
+msgid "Start the docker image on your each node."
+msgstr "在每个节点上启动docker镜像。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md
+msgid "A2 series"
+msgstr "A2系列"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:127
+msgid ""
+"After a successful docker run, you can verify the running container "
+"service by executing the `docker ps` command. The expected result is that"
+" the container `vllm-ascend` is listed with status `Up`, confirming the "
+"docker installation is successful."
+msgstr ""
+"docker运行成功后，可以通过执行`docker ps`命令验证正在运行的容器服务。预期结果是容器`vllm-ascend`被列出且状态为`Up`，确认docker安装成功。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:129
+msgid "4.2 Source Code Installation"
+msgstr "4.2 源码安装"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:131
+msgid ""
+"If you don't want to use the docker image as above, you can also build "
+"all from source:"
+msgstr ""
+"如果不想使用上述docker镜像，也可以从源码构建所有内容："
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:133
+msgid "Clone the repository and install `vllm-ascend` from source:"
+msgstr "克隆仓库并从源码安装`vllm-ascend`："
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:141
+msgid ""
+"For the complete installation steps, refer to "
+"[installation](../../installation.md)."
+msgstr ""
+"完整的安装步骤请参考[安装](../../installation.md)。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:143
+msgid ""
+"If you want to deploy a multi-node environment, you need to set up the "
+"environment on each node."
+msgstr ""
+"如果要部署多节点环境，需要在每个节点上设置环境。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:145
+msgid ""
+"To verify the source code installation, run the following command and "
+"confirm the displayed version matches the one you installed:"
+msgstr ""
+"要验证源码安装，运行以下命令并确认显示的版本与安装的版本匹配："
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:151
+msgid ""
+"Expected result: The version information of `vllm-ascend` is displayed, "
+"confirming a successful installation."
+msgstr ""
+"预期结果：显示`vllm-ascend`的版本信息，确认安装成功。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:153
+msgid "5 Online Service Deployment"
+msgstr "5 在线服务部署"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:155
+msgid "5.1 Single-Node Online Deployment"
+msgstr "5.1 单节点在线部署"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:157
+msgid ""
+"Single-node deployment completes both Prefill and Decode within the same "
+"node, suitable for development, testing, and medium-scale inference "
+"scenarios. The `Qwen3.5-27B`, `Qwen3.5-27B-w8a8`, `Qwen3.6-27B`, and "
+"`Qwen3.6-27B-w8a8` models can all be deployed on 1 Atlas 800 A3 (64G × "
+"16) or 1 Atlas 800 A2 (64G × 8). The quantized versions need to start "
+"with the `--quantization ascend` parameter."
+msgstr ""
+"单节点部署在同一节点内完成Prefill和Decode，适用于开发、测试和中规模推理场景。`Qwen3.5-27B`、`Qwen3.5-27B-w8a8`、`Qwen3.6-27B`和`Qwen3.6-27B-w8a8`模型都可以部署在1个Atlas 800 A3（64G × 16）或1个Atlas 800 A2（64G × 8）上。量化版本需要使用`--quantization ascend`参数启动。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:159
+msgid ""
+"Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so "
+"the `qwen3_5_mtp` speculative decoding method can be used for both."
+msgstr ""
+"`Qwen3.5-27B`和`Qwen3.6-27B`共享相同的MTP头部设计，因此`qwen3_5_mtp`推测解码方法可用于两者。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:161
+msgid "**Qwen3.5-27B-w8a8**"
+msgstr "**Qwen3.5-27B-w8a8**"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:163
+msgid "Startup Command:"
+msgstr "启动命令："
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:196
+msgid "**Qwen3.6-27B-w8a8**"
+msgstr "**Qwen3.6-27B-w8a8**"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:198
+msgid "Startup Command (supports up to 262144 context length):"
+msgstr "启动命令（支持最高262144上下文长度）："
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:231
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:432
+msgid "Key Parameter Descriptions:"
+msgstr "关键参数说明："
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:233
+msgid ""
+"`--data-parallel-size 1` and `--tensor-parallel-size 2` are common "
+"settings for data parallelism (DP) and tensor parallelism (TP) sizes."
+msgstr ""
+"`--data-parallel-size 1`和`--tensor-parallel-size 2`是数据并行（DP）和张量并行（TP）大小的常见设置。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:234
+msgid ""
+"`--max-model-len` represents the context length, which is the maximum "
+"value of the input plus output for a single request. The Qwen3.6-27B "
+"model supports up to 262144."
+msgstr ""
+"`--max-model-len`表示上下文长度，即单个请求的输入加输出的最大值。Qwen3.6-27B模型支持最高262144。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:235
+msgid ""
+"`--max-num-seqs` indicates the maximum number of requests that each DP "
+"group is allowed to process. If the number of requests sent to the "
+"service exceeds this limit, the excess requests will remain in a waiting "
+"state and will not be scheduled. Note that the time spent in the waiting "
+"state is also counted in metrics such as TTFT and TPOT. Therefore, when "
+"testing performance, it is generally recommended that `--max-num-seqs` * "
+"`--data-parallel-size` >= the actual total concurrency."
+msgstr ""
+"`--max-num-seqs`表示每个DP组允许处理的最大请求数。如果发送到服务的请求数超过此限制，多余的请求将保持在等待状态，不会被调度。注意，等待状态的时间也会计入TTFT和TPOT等指标。因此，在测试性能时，通常建议`--max-num-seqs` * `--data-parallel-size` >= 实际总并发数。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:236
+msgid ""
+"`--max-num-batched-tokens` represents the maximum number of tokens that "
+"the model can process in a single step. Currently, vLLM v1 scheduling "
+"enables ChunkPrefill/SplitFuse by default, which means:"
+msgstr ""
+"`--max-num-batched-tokens`表示模型单步可处理的最大token数。目前vLLM v1调度默认启用ChunkPrefill/SplitFuse，这意味着："
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:237
+msgid ""
+"(1) If the input length of a request is greater than `--max-num-batched-"
+"tokens`, it will be divided into multiple rounds of computation according"
+" to `--max-num-batched-tokens`;"
+msgstr ""
+"(1)如果请求的输入长度大于`--max-num-batched-tokens`，将根据`--max-num-batched-tokens`分成多轮计算；"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:238
+msgid ""
+"(2) Decode requests are prioritized for scheduling, and prefill requests "
+"are scheduled only if there is available capacity."
+msgstr ""
+"(2)Decode请求优先调度，仅在有可用容量时才调度prefill请求。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:239
+msgid ""
+"Generally, if `--max-num-batched-tokens` is set to a larger value, the "
+"overall latency will be lower, but the pressure on HBM memory (activation"
+" value usage) will be greater."
+msgstr ""
+"通常，如果`--max-num-batched-tokens`设置较大，整体延迟会更低，但对HBM内存（激活值使用）的压力会更大。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:240
+msgid ""
+"`--gpu-memory-utilization` represents the proportion of HBM that vLLM "
+"will use for actual inference. Its essential function is to calculate the"
+" available kv_cache size. During the warm-up phase (referred to as "
+"profile run in vLLM), vLLM records the peak HBM memory usage during an "
+"inference process with an input size of `--max-num-batched-tokens`. The "
+"available kv_cache size is then calculated as: `--gpu-memory-utilization`"
+" * HBM size - peak HBM memory usage. Therefore, the larger the value of "
+"`--gpu-memory-utilization`, the more kv_cache can be used. However, since"
+" the HBM memory usage during the warm-up phase may differ from that "
+"during actual inference (e.g., due to uneven EP load), setting `--gpu-"
+"memory-utilization` too high may lead to OOM (Out of Memory) issues "
+"during actual inference. The default value is `0.9`."
+msgstr ""
+"`--gpu-memory-utilization`表示vLLM将用于实际推理的HBM比例。其基本功能是计算可用的kv_cache大小。在预热阶段（vLLM中称为profile run），vLLM记录输入大小为`--max-num-batched-tokens`的推理过程中的峰值HBM内存使用量。然后可用kv_cache大小计算为：`--gpu-memory-utilization` * HBM大小 - 峰值HBM内存使用量。因此，`--gpu-memory-utilization`值越大，可使用的kv_cache越多。但由于预热阶段的内存使用可能与实际推理不同（例如由于EP负载不均），设置`--gpu-memory-utilization`过高可能导致实际推理中出现OOM（内存不足）问题。默认值为`0.9`。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:241
+msgid ""
+"`--no-enable-prefix-caching` indicates that prefix caching is disabled. "
+"The current implementation of hybrid kv cache for Qwen3.5-27B / "
+"Qwen3.6-27B may result in a very large effective `block_size` when prefix"
+" caching is enabled (e.g., 2048), which means any prefix shorter than "
+"`block_size` will never be cached. If your workload has many short "
+"repeated prefixes, consider keeping prefix caching disabled. For related "
+"issues, see the [Public "
+"FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)."
+msgstr ""
+"`--no-enable-prefix-caching`表示禁用前缀缓存。Qwen3.5-27B / Qwen3.6-27B的混合kv缓存当前实现可能导致启用前缀缓存时有效`block_size`非常大（例如2048），这意味着任何短于`block_size`的前缀都不会被缓存。如果工作负载中有许多短重复前缀，请考虑保持禁用前缀缓存。相关问题请参见[公共FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:242
+msgid ""
+"`--quantization ascend` indicates that quantization is used. To disable "
+"quantization, remove this option."
+msgstr ""
+"`--quantization ascend`表示使用量化。要禁用量化，请移除该选项。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:243
+msgid ""
+"`--speculative-config` uses `qwen3_5_mtp` for both `Qwen3.5-27B` and "
+"`Qwen3.6-27B` because they share the same MTP head design."
+msgstr ""
+"`--speculative-config` 对 `Qwen3.5-27B` 和 `Qwen3.6-27B` 均使用 `qwen3_5_mtp`，"
+"因为它们共享相同的 MTP 头部设计。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:244
+msgid ""
+"`--compilation-config` contains configurations related to the aclgraph "
+"graph mode. The most significant configurations are `\"cudagraph_mode\"` "
+"and `\"cudagraph_capture_sizes\"`, which have the following meanings:"
+msgstr ""
+"`--compilation-config` 包含与 aclgraph 图模式相关的配置。最重要的配置是 "
+"`\"cudagraph_mode\"` 和 `\"cudagraph_capture_sizes\"`，其含义如下："
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:245
+msgid ""
+"`\"cudagraph_mode\"`: represents the specific graph mode. Currently, "
+"`\"PIECEWISE\"` and `\"FULL_DECODE_ONLY\"` are supported. The graph mode "
+"is mainly used to reduce the cost of operator dispatch. Currently, "
+"`\"FULL_DECODE_ONLY\"` is recommended."
+msgstr ""
+"`\"cudagraph_mode\"`：表示具体的图模式。目前支持 `\"PIECEWISE\"` 和 "
+"`\"FULL_DECODE_ONLY\"`。图模式主要用于降低算子调度开销。目前推荐使用 "
+"`\"FULL_DECODE_ONLY\"`。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:246
+msgid ""
+"`\"cudagraph_capture_sizes\"`: represents different levels of graph "
+"modes. The default value is `[1, 2, 4, 8, 16, 24, 32, 40,..., --max-num-"
+"seqs]`. In the graph mode, the input for graphs at different levels is "
+"fixed, and inputs between levels are automatically padded to the next "
+"level. Currently, the default setting is recommended. Only in some "
+"scenarios is it necessary to set this separately to achieve optimal "
+"performance."
+msgstr ""
+"`\"cudagraph_capture_sizes\"`：表示不同级别的图模式。默认值为 `[1, 2, 4, 8, 16, 24, 32, 40,..., --max-num-"
+"seqs]`。在图模式下，不同级别图的输入是固定的，级别之间的输入会自动填充到下一级别。"
+"目前推荐使用默认设置。仅在部分场景下需要单独设置以达到最佳性能。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:248
+msgid ""
+"Common Issues Tip: If you encounter issues, please refer to the [Public "
+"FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for "
+"troubleshooting."
+msgstr ""
+"常见问题提示：如果遇到问题，请参考 [公共 FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) "
+"进行故障排除。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:250
+msgid "Service Verification:"
+msgstr "服务验证："
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:252
+msgid ""
+"If the service starts successfully, the following startup log will be "
+"displayed:"
+msgstr "如果服务启动成功，将显示以下启动日志："
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:260
+msgid ""
+"For functional testing (e.g., `completions` and `chat.completions` curl "
+"examples with expected responses), please refer to [Section 6](#6"
+"-functional-verification)."
+msgstr ""
+"对于功能测试（例如，带有预期响应的 `completions` 和 `chat.completions` curl 示例），"
+"请参考[第6节](#6-functional-verification)。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:262
+msgid "5.2 Multi-Node PD Separation Deployment"
+msgstr "5.2 多节点 PD 分离部署"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:264
+msgid ""
+"For high-concurrency production scenarios, multi-node PD (Prefill-Decode)"
+" separation can be used to scale the service. The recommended approach is"
+" to use Mooncake for deployment: [Mooncake Multi-Node PD Disaggregation "
+"Guide](../features/pd_disaggregation_mooncake_multi_node.md)."
+msgstr ""
+"对于高并发生产场景，可以使用多节点 PD（Prefill-Decode）分离来扩展服务。"
+"推荐使用 Mooncake 进行部署：[Mooncake 多节点 PD 分离指南](../features/pd_disaggregation_mooncake_multi_node.md)。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:266
+msgid ""
+"In the standard single-node deployment mode, Prefill (prompt processing) "
+"and Decode (token generation) tasks run on the same set of NPUs. This can"
+" lead to two issues:"
+msgstr ""
+"在标准单节点部署模式下，Prefill（提示处理）和 Decode（令牌生成）任务运行在同一组 NPU 上。"
+"这可能导致两个问题："
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:268
+msgid ""
+"**Prefill preemption interrupts Decode**: Prefill is a compute-intensive "
+"task that processes the entire input context at once, while Decode "
+"generates tokens one by one. When a new user request arrives, its Prefill"
+" phase can preempt and interrupt ongoing Decode tasks, causing jitter and"
+" higher time-per-output-token (TPOT) latency."
+msgstr ""
+"**Prefill 抢占中断 Decode**：Prefill 是计算密集型任务，一次性处理整个输入上下文，"
+"而 Decode 逐个生成令牌。当新用户请求到达时，其 Prefill 阶段可能抢占并中断正在进行的 Decode 任务，"
+"导致抖动和更高的每个输出令牌时间（TPOT）延迟。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:269
+msgid ""
+"**Inflexible resource allocation**: Prefill and Decode have fundamentally"
+" different computational characteristics — Prefill is compute-bound and "
+"memory-bandwidth-intensive, while Decode is memory-bandwidth-bound. "
+"Running them on the same hardware forces a compromise that satisfies "
+"neither optimally."
+msgstr ""
+"**不灵活的资源分配**：Prefill 和 Decode 具有根本不同的计算特性——Prefill 是计算受限且内存带宽密集型的，"
+"而 Decode 是内存带宽受限的。在相同硬件上运行它们会迫使做出折中，无法最优地满足任何一方。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:271
+msgid ""
+"PD (Prefill-Decode) separation addresses these issues by running Prefill "
+"and Decode on dedicated node groups, each configured independently:"
+msgstr ""
+"PD（Prefill-Decode）分离通过在专用节点组上运行 Prefill 和 Decode 来解决这些问题，"
+"每个节点组独立配置："
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:273
+msgid ""
+"**Prefill nodes** focus on high-throughput prompt processing, optimized "
+"for compute and communication (e.g., enabling FlashComm for Allreduce "
+"acceleration)."
+msgstr ""
+"**Prefill 节点**专注于高吞吐量提示处理，针对计算和通信进行了优化（例如，启用 FlashComm 进行 Allreduce 加速）。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:274
+msgid ""
+"**Decode nodes** focus on low-latency token generation, optimized for "
+"memory bandwidth (e.g., enabling async-scheduling and full-decode "
+"aclgraph)."
+msgstr ""
+"**Decode 节点**专注于低延迟令牌生成，针对内存带宽进行了优化（例如，启用异步调度和全解码 aclgraph）。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:276
+msgid ""
+"For `Qwen3.5-27B-w8a8` and `Qwen3.6-27B-w8a8`, a typical **1P1D** "
+"configuration requires **2 Atlas 800 A3 (64G × 16) nodes** (1 Prefill "
+"node + 1 Decode node), with **TP=2** and **DP=8** on each node, which "
+"fully utilizes all 16 NPUs of an Atlas A3. The example below uses "
+"`Qwen3.5-27B-w8a8`; for `Qwen3.6-27B-w8a8`, replace the model path with "
+"`Eco-Tech/Qwen3.6-27B-w8a8` and adjust `--served-model-name` to `qwen3.6`"
+" (and `--max-model-len` to 262144 if needed)."
+msgstr ""
+"对于 `Qwen3.5-27B-w8a8` 和 `Qwen3.6-27B-w8a8`，典型的 **1P1D** 配置需要 "
+"**2 个 Atlas 800 A3 (64G × 16) 节点**（1 个 Prefill 节点 + 1 个 Decode 节点），"
+"每个节点上 **TP=2** 和 **DP=8**，这充分利用了 Atlas A3 的所有 16 个 NPU。"
+"以下示例使用 `Qwen3.5-27B-w8a8`；对于 `Qwen3.6-27B-w8a8`，将模型路径替换为 "
+"`Eco-Tech/Qwen3.6-27B-w8a8`，并将 `--served-model-name` 调整为 `qwen3.6`"
+"（如果需要，将 `--max-model-len` 调整为 262144）。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:278
+msgid ""
+"**Why TP=2 + DP=8 (DP-first strategy)?** The `Qwen3.5-27B-w8a8` (and "
+"`Qwen3.6-27B-w8a8`) model is only ~30 GB, which easily fits in a single "
+"NPU (each NPU has 64 GB HBM). **TP > 1 is mainly needed for models that "
+"do not fit in one NPU.** For a 27 B model, `TP=2` is sufficient to "
+"balance operator-dispatch overhead across NPUs, while **maximizing DP** "
+"keeps all 16 NPUs of an Atlas A3 busy with independent request batches, "
+"fully utilizing the hardware. This **DP-first parallelism strategy** is "
+"the standard practice for small dense models (e.g., Qwen3.5-27B, "
+"Qwen3.6-27B, Llama-3-8B) and has been validated by the [Qwen3.5-27B B200 "
+"benchmark](https://thenextgentechinsider.com/pulse/qwen-35-27b-delivers-"
+"11m-tokenssecond-on-nvidia-b200-cluster), where switching from TP=8 to "
+"DP=8 lifted per-node throughput from 9.5k to 95k tokens/s."
+msgstr ""
+"**为什么是 TP=2 + DP=8（DP 优先策略）？** `Qwen3.5-27B-w8a8`（和 "
+"`Qwen3.6-27B-w8a8`）模型仅约 30 GB，轻松适配单个 NPU（每个 NPU 有 64 GB HBM）。"
+"**TP > 1 主要适用于无法放入单个 NPU 的模型。** 对于 27B 模型，`TP=2` 足以平衡 NPU 间的算子调度开销，"
+"而 **最大化 DP** 使 Atlas A3 的所有 16 个 NPU 都忙于处理独立的请求批次，"
+"充分利用硬件。这种 **DP 优先的并行策略** 是小型密集模型（例如 Qwen3.5-27B、"
+"Qwen3.6-27B、Llama-3-8B）的标准做法，并已通过 [Qwen3.5-27B B200 基准测试]"
+"(https://thenextgentechinsider.com/pulse/qwen-35-27b-delivers-"
+"11m-tokenssecond-on-nvidia-b200-cluster) 验证，其中从 TP=8 切换到 "
+"DP=8 将每节点吞吐量从 9.5k 提升到 95k tokens/s。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:280
+msgid ""
+"**Note**: Since `Qwen3.5-27B` and `Qwen3.6-27B` fit in a single node, "
+"multi-node PD separation is only recommended for high-concurrency "
+"production deployments. For the Mooncake deployment specifics, please "
+"refer to the [Mooncake Multi-Node PD Disaggregation "
+"Guide](../features/pd_disaggregation_mooncake_multi_node.md)."
+msgstr ""
+"**注意**：由于 `Qwen3.5-27B` 和 `Qwen3.6-27B` 可放入单个节点，"
+"多节点 PD 分离仅推荐用于高并发生产部署。有关 Mooncake 部署的详细信息，"
+"请参考 [Mooncake 多节点 PD 分离指南](../features/pd_disaggregation_mooncake_multi_node.md)。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:282
+msgid "To run the vllm-ascend Prefill-Decode Disaggregation service, you need to:"
+msgstr "要运行 vllm-ascend Prefill-Decode 分离服务，您需要："
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:284
+msgid ""
+"Deploy a `launch_online_dp.py` script and a `run_dp_template.sh` script "
+"on each node;"
+msgstr ""
+"在每个节点上部署 `launch_online_dp.py` 脚本和 `run_dp_template.sh` 脚本；"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:285
+msgid ""
+"Deploy a `load_balance_proxy_server_example.py` script on the prefill "
+"master node to forward requests."
+msgstr ""
+"在 prefill 主节点上部署 `load_balance_proxy_server_example.py` 脚本以转发请求。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:287
+msgid ""
+"`launch_online_dp.py` is used to launch external dp vllm servers.  "
+"[launch_online_dp.py](https://github.com/vllm-project/vllm-"
+"ascend/blob/main/examples/external_online_dp/launch_online_dp.py)"
+msgstr ""
+"`launch_online_dp.py` 用于启动外部 dp vllm 服务器。"
+"[launch_online_dp.py](https://github.com/vllm-project/vllm-"
+"ascend/blob/main/examples/external_online_dp/launch_online_dp.py)"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:290
+msgid "Parameter descriptions:"
+msgstr "参数说明："
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "Parameter"
+msgstr "参数"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "Type"
+msgstr "类型"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "Required"
+msgstr "必需"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "Default"
+msgstr "默认值"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "Description"
+msgstr "描述"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "`--dp-size`"
+msgstr "`--dp-size`"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "int"
+msgstr "int"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "Yes"
+msgstr "是"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "-"
+msgstr "-"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "Data parallel size (total number of DP ranks across all nodes)."
+msgstr "数据并行大小（所有节点上 DP rank 的总数）。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "`--tp-size`"
+msgstr "`--tp-size`"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "No"
+msgstr "否"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "1"
+msgstr "1"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "Tensor parallel size within each DP rank."
+msgstr "每个 DP rank 内的张量并行大小。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "`--dp-size-local`"
+msgstr "`--dp-size-local`"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "(same as `--dp-size`)"
+msgstr "（与 `--dp-size` 相同）"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid ""
+"Number of DP ranks on the current node. If not set, defaults to `--dp-"
+"size`."
+msgstr ""
+"当前节点上的 DP rank 数量。如果未设置，默认为 `--dp-size`。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "`--dp-rank-start`"
+msgstr "`--dp-rank-start`"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "0"
+msgstr "0"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "Starting rank offset for data parallel ranks on this node."
+msgstr "此节点上数据并行 rank 的起始偏移量。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "`--dp-address`"
+msgstr "`--dp-address`"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "str"
+msgstr "str"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "IP address of the data parallel master node (node 0)."
+msgstr "数据并行主节点（节点 0）的 IP 地址。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "`--dp-rpc-port`"
+msgstr "`--dp-rpc-port`"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "12345"
+msgstr "12345"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "RPC port for data parallel master communication."
+msgstr "数据并行主节点通信的 RPC 端口。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "`--vllm-start-port`"
+msgstr "`--vllm-start-port`"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "9000"
+msgstr "9000"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid ""
+"Starting port for each vLLM engine instance on this node. Each DP rank's "
+"engine port = `vllm_start_port` + local rank index."
+msgstr ""
+"此节点上每个 vLLM 引擎实例的起始端口。每个 DP rank 的引擎端口 = `vllm_start_port` + 本地 rank 索引。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:302
+msgid ""
+"Prefill Node 0 `run_dp_template.sh` script. You can get the template in "
+"the repository's examples: [run_dp_template.sh](https://github.com/vllm-"
+"project/vllm-"
+"ascend/blob/main/examples/external_online_dp/run_dp_template.sh)."
+msgstr ""
+"Prefill 节点 0 的 `run_dp_template.sh` 脚本。您可以在仓库的示例中获取模板："
+"[run_dp_template.sh](https://github.com/vllm-"
+"project/vllm-"
+"ascend/blob/main/examples/external_online_dp/run_dp_template.sh)。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:367
+msgid ""
+"Decode Node 0 `run_dp_template.sh` script. You can get the template in "
+"the repository's examples: [run_dp_template.sh](https://github.com/vllm-"
+"project/vllm-"
+"ascend/blob/main/examples/external_online_dp/run_dp_template.sh)."
+msgstr ""
+"Decode 节点 0 的 `run_dp_template.sh` 脚本。您可以在仓库的示例中获取模板："
+"[run_dp_template.sh](https://github.com/vllm-"
+"project/vllm-"
+"ascend/blob/main/examples/external_online_dp/run_dp_template.sh)。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:434
+msgid ""
+"`VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the Allreduce communication "
+"optimization on prefill nodes, which reduces the communication overhead "
+"of long-context prefill."
+msgstr ""
+"`VLLM_ASCEND_ENABLE_FLASHCOMM1=1`：在 prefill 节点上启用 Allreduce 通信优化，"
+"减少长上下文 prefill 的通信开销。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:435
+msgid ""
+"`recompute_scheduler_enable: true`: enables the recomputation scheduler. "
+"When the KV Cache of the decode node is insufficient, requests will be "
+"sent to the prefill node to recompute the KV Cache. In the PD separation "
+"scenario, it is recommended to enable this configuration on both prefill "
+"and decode nodes simultaneously."
+msgstr ""
+"`recompute_scheduler_enable: true`：启用重计算调度器。当 decode 节点的 KV Cache 不足时，"
+"请求将被发送到 prefill 节点以重新计算 KV Cache。在 PD 分离场景中，"
+"建议同时在 prefill 和 decode 节点上启用此配置。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:436
+msgid ""
+"`--async-scheduling` (on decode nodes): enables asynchronous scheduling, "
+"which can reduce TPOT for high-concurrency decode workloads."
+msgstr ""
+"`--async-scheduling`（在 decode 节点上）：启用异步调度，可减少高并发 decode 工作负载的 TPOT。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:437
+#, python-brace-format
+msgid ""
+"`--compilation-config '{\"cudagraph_mode\":\"FULL_DECODE_ONLY\"}'` (on "
+"decode nodes): enables the full-decode aclgraph mode, which significantly"
+" reduces scheduling latency on the decode side."
+msgstr ""
+"`--compilation-config '{\"cudagraph_mode\":\"FULL_DECODE_ONLY\"}'`（在 decode 节点上）："
+"启用全解码 aclgraph 模式，显著减少 decode 侧的调度延迟。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:439
+msgid "Run server for each node:"
+msgstr "为每个节点运行服务器："
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:448
+msgid "Run the proxy server on the prefill master node."
+msgstr "在 prefill 主节点上运行代理服务器。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:450
+msgid ""
+"You can get the proxy program in the repository's examples: "
+"[load_balance_proxy_server_example.py](https://github.com/vllm-project"
+"/vllm-"
+"ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)."
+msgstr ""
+"您可以在仓库的示例中获取代理程序："
+"[load_balance_proxy_server_example.py](https://github.com/vllm-project"
+"/vllm-"
+"ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)。"
+
+msgstr ""
+"注意：由于每个节点有8个DP rank（使用`--vllm-start-port 7100` + 本地rank索引，占用端口7100-7107），"
+"需要在代理命令中列出每个节点的全部8个端口："
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:482
+msgid "Deployment Verification:"
+msgstr "部署验证："
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:484
+msgid ""
+"After the PD separation service is fully started, send a request through "
+"the proxy port on the prefill master node to verify that Prefill and "
+"Decode nodes are working correctly together:"
+msgstr ""
+"PD分离服务完全启动后，通过prefill主节点的代理端口发送请求，验证Prefill和Decode节点是否协同正常工作："
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:500
+msgid ""
+"**Note**: For `Qwen3.6-27B-w8a8`, change the `model` field above to "
+"`\"qwen3.6\"` and the `--served-model-name` of the Prefill/Decode nodes "
+"to `qwen3.6`."
+msgstr ""
+"**注意**：对于`Qwen3.6-27B-w8a8`，将上述`model`字段改为`\"qwen3.6\"`，并将Prefill/Decode节点的"
+"`--served-model-name`改为`qwen3.6`。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:502
+msgid ""
+"Expected Result: The proxy returns HTTP 200 OK. The JSON response "
+"contains the `choices` field with the generated text, confirming that "
+"Prefill nodes have successfully processed the prompt and Decode nodes "
+"have generated the response."
+msgstr ""
+"预期结果：代理返回HTTP 200 OK。JSON响应包含`choices`字段及生成的文本，确认Prefill节点已成功处理提示词，"
+"Decode节点已生成响应。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:504
+msgid ""
+"Common Issues Tip: If you encounter issues with PD separation deployment,"
+" please refer to the [Public "
+"FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for "
+"troubleshooting."
+msgstr ""
+"常见问题提示：如果遇到PD分离部署问题，请参考[公共FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)进行故障排除。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:506
+msgid "6 Functional Verification"
+msgstr "6 功能验证"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:508
+msgid ""
+"After the service is started, the model can be invoked by sending a "
+"prompt. Two API interfaces are supported: `completions` and "
+"`chat.completions`. Use the `--served-model-name` you configured "
+"(`qwen3.5` for `Qwen3.5-27B` or `qwen3.6` for `Qwen3.6-27B`)."
+msgstr ""
+"服务启动后，可通过发送提示词调用模型。支持两种API接口：`completions`和`chat.completions`。"
+"使用配置的`--served-model-name`（`Qwen3.5-27B`对应`qwen3.5`，`Qwen3.6-27B`对应`qwen3.6`）。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:510
+msgid "**Completions API:**"
+msgstr "**Completions API：**"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:523
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:541
+msgid ""
+"**Note**: For `Qwen3.6-27B`, set `\"model\": \"qwen3.6\"` in the request "
+"body."
+msgstr ""
+"**注意**：对于`Qwen3.6-27B`，在请求体中设置`\"model\": \"qwen3.6\"`。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:525
+msgid "**Chat Completions API:**"
+msgstr "**Chat Completions API：**"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:543
+msgid ""
+"Expected Result: The service returns HTTP 200 OK. The JSON response "
+"contains the `choices` field with generated text. Example output for the "
+"completions API (content truncated for brevity):"
+msgstr ""
+"预期结果：服务返回HTTP 200 OK。JSON响应包含`choices`字段及生成的文本。Completions API示例输出（内容已截断）："
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:567
+msgid "7 Accuracy Evaluation"
+msgstr "7 精度评估"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:569
+msgid "Here are two accuracy evaluation methods."
+msgstr "以下是两种精度评估方法。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:571
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:611
+msgid "Using AISBench"
+msgstr "使用AISBench"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:573
+msgid ""
+"Refer to [Using "
+"AISBench](../../developer_guide/evaluation/using_ais_bench.md) for "
+"details."
+msgstr "详情请参考[使用AISBench](../../developer_guide/evaluation/using_ais_bench.md)。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:575
+msgid ""
+"After execution, you can get the result. Here is the result of `Qwen3.5"
+"-27B-w8a8` in `vllm-ascend:v0.17.0rc1` for reference only. The accuracy "
+"result of `Qwen3.6-27B-w8a8` can be obtained in the same way and is not "
+"listed here."
+msgstr ""
+"执行后可获取结果。以下为`vllm-ascend:v0.17.0rc1`中`Qwen3.5-27B-w8a8`的结果，仅供参考。"
+"`Qwen3.6-27B-w8a8`的精度结果可通过相同方式获取，此处不再列出。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "dataset"
+msgstr "数据集"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "version"
+msgstr "版本"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "metric"
+msgstr "指标"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "mode"
+msgstr "模式"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "vllm-api-general-chat"
+msgstr "vllm-api-general-chat"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "gsm8k"
+msgstr "gsm8k"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "accuracy"
+msgstr "准确率"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "gen"
+msgstr "生成"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "96.74"
+msgstr "96.74"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:581
+msgid "Using Language Model Evaluation Harness"
+msgstr "使用Language Model Evaluation Harness"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:583
+msgid ""
+"Using the `gsm8k` dataset as an example test dataset, run the accuracy "
+"evaluation for `Qwen3.5-27B-w8a8` in online mode."
+msgstr "以`gsm8k`数据集为例，在在线模式下对`Qwen3.5-27B-w8a8`进行精度评估。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:585
+msgid ""
+"For `lm_eval` installation, please refer to [Using "
+"lm_eval](../../developer_guide/evaluation/using_lm_eval.md)."
+msgstr "`lm_eval`安装请参考[使用lm_eval](../../developer_guide/evaluation/using_lm_eval.md)。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:586
+msgid "Run `lm_eval` to execute the accuracy evaluation."
+msgstr "运行`lm_eval`执行精度评估。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:609
+msgid "8 Performance Evaluation"
+msgstr "8 性能评估"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:613
+msgid ""
+"Refer to [Using AISBench for performance "
+"evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-"
+"performance-evaluation) for details."
+msgstr "详情请参考[使用AISBench进行性能评估](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation)。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:615
+msgid "Using vLLM Benchmark"
+msgstr "使用vLLM Benchmark"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:617
+msgid ""
+"Run performance evaluation of `Qwen3.5-27B-w8a8` or `Qwen3.6-27B-w8a8` as"
+" an example."
+msgstr "以`Qwen3.5-27B-w8a8`或`Qwen3.6-27B-w8a8`为例进行性能评估。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:619
+msgid ""
+"Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) "
+"for more details."
+msgstr "更多详情请参考[vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/)。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:621
+msgid "There are three `vllm bench` subcommands:"
+msgstr "`vllm bench`包含三个子命令："
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:623
+msgid "`latency`: Benchmark the latency of a single batch of requests."
+msgstr "`latency`：基准测试单批请求的延迟。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:624
+msgid "`serve`: Benchmark the online serving throughput."
+msgstr "`serve`：基准测试在线服务吞吐量。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:625
+msgid "`throughput`: Benchmark offline inference throughput."
+msgstr "`throughput`：基准测试离线推理吞吐量。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:627
+msgid "Take the `serve` as an example. Run the code as follows."
+msgstr "以`serve`为例，运行如下代码。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:637
+msgid ""
+"After about several minutes, you can get the performance evaluation "
+"result."
+msgstr "大约几分钟后，即可获取性能评估结果。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:639
+msgid "9 Performance Tuning"
+msgstr "9 性能调优"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:641
+msgid "9.1 Recommended Configurations"
+msgstr "9.1 推荐配置"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:643
+msgid ""
+"**Note**: The following configurations are validated in specific test "
+"environments and are for reference only. The optimal configuration "
+"depends on factors such as maximum input/output length, prefix cache hit "
+"rate, precision requirements, and deployment machine ratios. It is "
+"recommended to refer to [Section 9.2](#92-tuning-guidelines) for tuning "
+"based on actual conditions."
+msgstr ""
+"**注意**：以下配置在特定测试环境中验证，仅供参考。最佳配置取决于最大输入/输出长度、前缀缓存命中率、"
+"精度要求和部署机器比例等因素。建议参考[第9.2节](#92-tuning-guidelines)根据实际情况进行调优。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:645
+msgid ""
+"**Parallelism Strategy**: `Qwen3.5-27B-w8a8` and `Qwen3.6-27B-w8a8` are "
+"only ~30 GB and easily fit in a single NPU (64 GB HBM per NPU). Following"
+" the **DP-first** principle, **TP=2 is the recommended default** for most"
+" scenarios, and the remaining NPUs should be allocated to DP for parallel"
+" request batches. **TP=8 is only recommended for ultra-long context "
+"(256K+) scenarios**, where it shards the KV cache across 8 NPUs to "
+"maximize the available context window per rank. For `Qwen3.6-27B-w8a8`, "
+"you can also raise `--max-model-len` up to 262144 in the same TP/DP "
+"layout."
+msgstr ""
+"**并行策略**：`Qwen3.5-27B-w8a8`和`Qwen3.6-27B-w8a8`仅约30 GB，可轻松放入单个NPU（每NPU 64 GB HBM）。"
+"遵循**DP优先**原则，**TP=2是大多数场景的推荐默认值**，其余NPU应分配给DP以并行处理请求批次。"
+"**TP=8仅推荐用于超长上下文（256K+）场景**，此时将KV缓存分片到8个NPU上，以最大化每个rank的可用上下文窗口。"
+"对于`Qwen3.6-27B-w8a8`，在相同的TP/DP布局下，还可以将`--max-model-len`提升至262144。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:647
+msgid "Table 1: Scenario Overview"
+msgstr "表1：场景概览"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "Scenario"
+msgstr "场景"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "Deployment Mode"
+msgstr "部署模式"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "*Total NPUs"
+msgstr "*总NPU数"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "Weight Version"
+msgstr "权重版本"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "Key Considerations"
+msgstr "关键考量"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "High Throughput<br>(128K context)"
+msgstr "高吞吐<br>(128K上下文)"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "Single-Node (A2)"
+msgstr "单节点(A2)"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "8 (A2)"
+msgstr "8 (A2)"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "Qwen3.5-27B-w8a8 / Qwen3.6-27B-w8a8"
+msgstr "Qwen3.5-27B-w8a8 / Qwen3.6-27B-w8a8"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "TP=2 + DP=4 fully utilizes all 8 NPUs for parallel request batches"
+msgstr "TP=2 + DP=4充分利用全部8个NPU并行处理请求批次"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "Single-Node (A3)"
+msgstr "单节点(A3)"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "16 (A3)"
+msgstr "16 (A3)"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "TP=2 + DP=8 fully utilizes all 16 NPUs for parallel request batches"
+msgstr "TP=2 + DP=8充分利用全部16个NPU并行处理请求批次"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "Low Latency<br>(128K context)"
+msgstr "低延迟<br>(128K上下文)"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid ""
+"TP=2 + DP=8 reduces per-layer Allreduce overhead for small interactive "
+"batches"
+msgstr "TP=2 + DP=8减少小交互批次的逐层Allreduce开销"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "Long Context<br>(256K+ context)"
+msgstr "长上下文<br>(256K+上下文)"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid ""
+"TP=8 + DP=2 shards the KV cache across 8 NPUs to maximize the available "
+"context window"
+msgstr "TP=8 + DP=2将KV缓存分片到8个NPU上，最大化可用上下文窗口"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:656
+msgid ""
+"`*Total NPUs` indicates the total number of NPUs used across all nodes. 1"
+" Atlas 800 A3 node = 16 NPUs, 1 Atlas 800 A2 node = 8 NPUs."
+msgstr ""
+"`*总NPU数`表示所有节点使用的NPU总数。1个Atlas 800 A3节点=16个NPU，1个Atlas 800 A2节点=8个NPU。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:658
+msgid "Table 2: Detailed Node Configuration"
+msgstr "表2：详细节点配置"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "Configuration"
+msgstr "配置"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "NPUs"
+msgstr "NPU数"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "TP"
+msgstr "TP"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "DP"
+msgstr "DP"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "Max Num Seqs"
+msgstr "最大序列数"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "Max Num Batched Tokens"
+msgstr "最大批处理Token数"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "Max Model Len"
+msgstr "最大模型长度"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "MTP Speculation Num"
+msgstr "MTP推测数"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "Async Scheduling"
+msgstr "异步调度"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "High Throughput (128K)"
+msgstr "高吞吐(128K)"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "8"
+msgstr "8"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "2"
+msgstr "2"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "4"
+msgstr "4"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "32"
+msgstr "32"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "16384"
+msgstr "16384"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "133000"
+msgstr "133000"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "3"
+msgstr "3"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "On"
+msgstr "开启"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "16"
+msgstr "16"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "Low Latency (128K)"
+msgstr "低延迟(128K)"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "4096"
+msgstr "4096"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "Long Context (256K+)"
+msgstr "长上下文(256K+)"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "8192"
+msgstr "8192"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:97
+msgid "266000"
+msgstr "266000"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:667
+msgid ""
+"For complete startup commands and parameter descriptions, please refer to"
+" the deployment examples in [Chapter 5](#5-online-service-deployment)."
+msgstr ""
+"完整的启动命令和参数说明请参考[第5章](#5-online-service-deployment)中的部署示例。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:669
+msgid "9.2 Tuning Guidelines"
+msgstr "9.2 调优指南"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:671
+msgid "9.2.1 General Tuning Reference"
+msgstr "9.2.1 通用调优参考"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:673
+msgid ""
+"Please refer to the [Public Performance Tuning "
+"Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md)"
+" for tuning methods. Please refer to the [Feature "
+"Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed "
+"feature descriptions."
+msgstr ""
+"调优方法请参考[公共性能调优文档](../../developer_guide/performance_and_debug/optimization_and_tuning.md)。"
+"详细功能描述请参考[功能指南](../../user_guide/support_matrix/feature_matrix.md)。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:676
+msgid "10 FAQ"
+msgstr "10 常见问题"
+
+#: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:678
+msgid ""
+"For common environment, installation, and general parameter issues, "
+"please refer to the [vLLM-Ascend Public "
+"FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)."
+msgstr ""
+"常见环境、安装和通用参数问题请参考[vLLM-Ascend公共FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)。"

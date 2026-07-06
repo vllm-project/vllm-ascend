@@ -68,6 +68,12 @@ GET_META_MSG = b"get_meta_msg"
 DONE_RECVING_MSG = b"done_recving_msg"
 
 
+# A busy peer can otherwise keep a global executor worker forever when the
+# number of peers is larger than max_workers. Yield after a small FIFO batch so
+# other peers already waiting in the global executor queue can make progress.
+MAX_REQUESTS_PER_PEER_HANDLER = 5
+
+
 class RemotePortInfo(TypedDict):
     num: int
     host: str
@@ -399,9 +405,16 @@ class KVCacheRecvingThread(threading.Thread):
         self.hma_group_size = hma_group_size
         self.mamba_ssm_size = mamba_ssm_size
         self.remote_te_port: dict[str, dict[int, int]] = SizedDict()
+        self.remote_metadata_lock = threading.Lock()
 
         self.request_queue: queue.Queue[Any] = queue.Queue()
         self.executor = ThreadPoolExecutor(max_workers=32)
+        self.peer_request_queues: defaultdict[tuple[str, int], deque[dict[str, Any]]] = defaultdict(deque)
+        self.active_peer_request_handlers: set[tuple[str, int]] = set()
+        self.peer_request_queues_lock = threading.Lock()
+        self.request_task_counts: defaultdict[str, int] = defaultdict(int)
+        self.finished_request_markers: set[str] = set()
+        self.request_task_counts_lock = threading.Lock()
 
         self.task_tracker = KVCacheTaskTracker()
 
@@ -413,7 +426,6 @@ class KVCacheRecvingThread(threading.Thread):
         ] = defaultdict(  # type: ignore
             deque
         )
-        self.remote_poller = zmq.Poller()  # type: ignore
         self.timeout = 1.0  # seconds
 
         self.vllm_config = vllm_config
@@ -440,6 +452,7 @@ class KVCacheRecvingThread(threading.Thread):
                 self.v_head_dim = self.model_config.hf_text_config.head_dim
                 self.num_kv_heads = max(self.model_config.hf_text_config.num_key_value_heads // self.tp_size, 1)
         self.proc_not_transfer_request: dict[str, bool] = {}
+        self.proc_not_transfer_request_lock = threading.Lock()
 
     def add_request(
         self,
@@ -493,9 +506,78 @@ class KVCacheRecvingThread(threading.Thread):
                     logger.warning("Received a None request. ")
                     self.request_queue.task_done()
                     continue
-                self._handle_request(request_data)
+                self._submit_request(request_data)
             except Exception as e:
                 logger.error("Error in KVCacheTransferThread. error=%s. ", e)
+
+    def _submit_request(self, request_data: dict[str, Any]) -> None:
+        peer_key = (request_data["remote_host"], request_data["remote_handshake_port"])
+        self._mark_request_task_submitted(request_data)
+        should_start_worker = False
+        with self.peer_request_queues_lock:
+            self.peer_request_queues[peer_key].append(request_data)
+            if peer_key not in self.active_peer_request_handlers:
+                self.active_peer_request_handlers.add(peer_key)
+                should_start_worker = True
+
+        if should_start_worker:
+            self.executor.submit(self._handle_peer_requests, peer_key)
+
+    def _handle_peer_requests(self, peer_key: tuple[str, int]) -> None:
+        requests_handled = 0
+        while requests_handled < MAX_REQUESTS_PER_PEER_HANDLER:
+            with self.peer_request_queues_lock:
+                peer_queue = self.peer_request_queues.get(peer_key)
+                if not peer_queue:
+                    self.peer_request_queues.pop(peer_key, None)
+                    self.active_peer_request_handlers.discard(peer_key)
+                    return
+                req_meta = peer_queue.popleft()
+
+            requests_handled += 1
+            try:
+                self._handle_request(req_meta)
+            except Exception:
+                logger.exception(
+                    "Error handling KV cache transfer request for peer %s:%d.",
+                    peer_key[0],
+                    peer_key[1],
+                )
+
+        should_resubmit = False
+        with self.peer_request_queues_lock:
+            peer_queue = self.peer_request_queues.get(peer_key)
+            if peer_queue:
+                should_resubmit = True
+            else:
+                self.peer_request_queues.pop(peer_key, None)
+                self.active_peer_request_handlers.discard(peer_key)
+
+        if should_resubmit:
+            self.executor.submit(self._handle_peer_requests, peer_key)
+
+    def _mark_request_task_submitted(self, req_meta: dict[str, Any]) -> None:
+        request_id = req_meta["request_id"]
+        with self.request_task_counts_lock:
+            self.request_task_counts[request_id] += 1
+            if req_meta["all_task_done"]:
+                self.finished_request_markers.add(request_id)
+
+    def _mark_request_task_done(self, request_id: str, all_task_done: bool) -> bool:
+        with self.request_task_counts_lock:
+            pending_count = self.request_task_counts.get(request_id)
+            if pending_count is None:
+                return all_task_done
+
+            pending_count -= 1
+            if pending_count > 0:
+                self.request_task_counts[request_id] = pending_count
+                return False
+
+            self.request_task_counts.pop(request_id, None)
+            has_finished_marker = request_id in self.finished_request_markers
+            self.finished_request_markers.discard(request_id)
+            return has_finished_marker
 
     def _handle_request(self, req_meta: dict[str, Any]):
         request_id = req_meta["request_id"]
@@ -516,11 +598,11 @@ class KVCacheRecvingThread(threading.Thread):
             logger.exception("Failed to transfer KV cache for request %s.", remote_request_id)
         finally:
             self._send_done_signal_to_free_remote_port(remote_request_id, remote_host, remote_port_send_num)
-            if all_task_done:
+            if self._mark_request_task_done(request_id, all_task_done):
                 if len(req_meta["local_block_ids"]) > 0:
                     self.task_tracker.update_done_task_count(request_id)
-                if request_id in self.proc_not_transfer_request:
-                    del self.proc_not_transfer_request[request_id]
+                with self.proc_not_transfer_request_lock:
+                    self.proc_not_transfer_request.pop(remote_request_id, None)
             self.request_queue.task_done()
             # Always send the done signal to the remote host to ensure proper
             # resource cleanup. Failing to do so may cause a memory leak on the
@@ -532,14 +614,17 @@ class KVCacheRecvingThread(threading.Thread):
     ):
         if self.side_channel_port != self.local_handshake_port or not remote_port_send_num:
             return
-        if request_id not in self.proc_not_transfer_request:
-            self.proc_not_transfer_request[request_id] = True
-        if self.proc_not_transfer_request[request_id]:
+        with self.proc_not_transfer_request_lock:
+            if request_id not in self.proc_not_transfer_request:
+                self.proc_not_transfer_request[request_id] = True
+            should_send = self.proc_not_transfer_request[request_id]
+            if should_send:
+                self.proc_not_transfer_request[request_id] = False
+        if should_send:
             for remote_port in remote_port_send_num:
                 if remote_port_send_num[remote_port]["num"] == 0:
                     remote_host_ = remote_port_send_num[remote_port]["host"]
                     self._send_done_recv_signal(request_id, remote_host_, remote_port, remote_port_send_num)
-            self.proc_not_transfer_request[request_id] = False
 
     def _transfer_kv_cache_all_groups(self, req_meta: dict[str, Any]):
         """Handle a KV cache transfer request."""
@@ -560,14 +645,17 @@ class KVCacheRecvingThread(threading.Thread):
 
         num_remote_blocks = sum(len(group_block_ids) for group_block_ids in remote_block_ids)  # noqa: F841
         # Check if we have the remote metadata cached.
-        if (
-            remote_engine_id not in self.kv_caches_base_addr
-            or remote_handshake_port not in self.kv_caches_base_addr[remote_engine_id]
-        ):
+        with self.remote_metadata_lock:
+            has_remote_metadata = (
+                remote_engine_id in self.kv_caches_base_addr
+                and remote_handshake_port in self.kv_caches_base_addr[remote_engine_id]
+            )
+        if not has_remote_metadata:
             self._get_remote_metadata(remote_host, remote_handshake_port)
-        remote_kv_caches_base_addrs = self.kv_caches_base_addr[remote_engine_id][remote_handshake_port]
-        local_kv_caches_base_addrs = self.kv_caches_base_addr[self.local_engine_id][self.local_handshake_port]
-        remote_transfer_port = self.remote_te_port[remote_engine_id][remote_handshake_port]
+        with self.remote_metadata_lock:
+            remote_kv_caches_base_addrs = self.kv_caches_base_addr[remote_engine_id][remote_handshake_port]
+            local_kv_caches_base_addrs = self.kv_caches_base_addr[self.local_engine_id][self.local_handshake_port]
+            remote_transfer_port = self.remote_te_port[remote_engine_id][remote_handshake_port]
         session_id = f"{remote_host}:{remote_transfer_port}"
 
         req_start_time = time.perf_counter()
@@ -642,10 +730,12 @@ class KVCacheRecvingThread(threading.Thread):
             remote_block_ids = remote_block_ids[-num_local_blocks:]
 
         # Check if we have the remote metadata cached.
-        if (
-            remote_engine_id not in self.kv_caches_base_addr
-            or remote_handshake_port not in self.kv_caches_base_addr[remote_engine_id]
-        ):
+        with self.remote_metadata_lock:
+            has_remote_metadata = (
+                remote_engine_id in self.kv_caches_base_addr
+                and remote_handshake_port in self.kv_caches_base_addr[remote_engine_id]
+            )
+        if not has_remote_metadata:
             self._get_remote_metadata(remote_host, remote_handshake_port)
 
         if tp_num_need_pulls == 1:
@@ -664,7 +754,10 @@ class KVCacheRecvingThread(threading.Thread):
         prefill_pp_rank = offset // tp_num_need_pulls  # PP rank where current request resides
         inner_offset = offset % tp_num_need_pulls  # Offset within each PP stage
 
-        remote_kv_caches_base_addrs = self.kv_caches_base_addr[remote_engine_id][remote_handshake_port]
+        with self.remote_metadata_lock:
+            remote_kv_caches_base_addrs = self.kv_caches_base_addr[remote_engine_id][remote_handshake_port]
+            local_kv_caches_base_addrs_all = self.kv_caches_base_addr[self.local_engine_id][self.local_handshake_port]
+            remote_transfer_port = self.remote_te_port[remote_engine_id][remote_handshake_port]
         first_layer_index, end_layer_index = self.pp_layer_indices[prefill_pp_rank]
         # support MTP layer kv transfer
         if self.vllm_config.speculative_config is not None:
@@ -672,11 +765,10 @@ class KVCacheRecvingThread(threading.Thread):
             if prefill_pp_rank == self._prefill_pp_size - 1:
                 end_layer_index = end_layer_index + 1
         num_cache_per_layer = len(list(self.kv_caches.values())[0])  # Number of KV caches per layer
-        local_kv_caches_base_addrs = self.kv_caches_base_addr[self.local_engine_id][self.local_handshake_port][
+        local_kv_caches_base_addrs = local_kv_caches_base_addrs_all[
             first_layer_index * num_cache_per_layer : end_layer_index * num_cache_per_layer
         ]
         logger.debug("transfer kv cache first_layer_index:%s , end_layer_index:%s", first_layer_index, end_layer_index)
-        remote_transfer_port = self.remote_te_port[remote_engine_id][remote_handshake_port]
         num_blocks = len(local_block_ids)
         session_id = f"{remote_host}:{remote_transfer_port}"
 
@@ -855,14 +947,20 @@ class KVCacheRecvingThread(threading.Thread):
         try:
             sock = self._get_remote_socket(remote_host, remote_handshake_port)
             ensure_zmq_send(sock, self.encoder.encode((GET_META_MSG, "")), f"{remote_host}:{remote_handshake_port}")
-            metadata_bytes = ensure_zmq_recv(sock, self.remote_poller, f"{remote_host}:{remote_handshake_port}")
+            metadata_bytes = ensure_zmq_recv(sock, f"{remote_host}:{remote_handshake_port}")
             agent_meta = self.decoder.decode(metadata_bytes)
             engine_id = agent_meta.engine_id
             assert engine_id != self.local_engine_id, (
                 f"Conflict engine id {engine_id} with local engine id {self.local_engine_id}."
             )
-            self.kv_caches_base_addr[engine_id][remote_handshake_port] = agent_meta.kv_caches_base_addr
-            self.remote_te_port[engine_id][remote_handshake_port] = agent_meta.te_rpc_port
+            with self.remote_metadata_lock:
+                self.kv_caches_base_addr[engine_id][remote_handshake_port] = agent_meta.kv_caches_base_addr
+                self.remote_te_port[engine_id][remote_handshake_port] = agent_meta.te_rpc_port
+        except Exception:
+            if isinstance(sock, zmq.Socket):  # type: ignore
+                sock.close()
+                sock = None
+            raise
         finally:
             if sock is not None:
                 self._return_remote_socket(sock, remote_host, remote_handshake_port)
@@ -883,9 +981,7 @@ class KVCacheRecvingThread(threading.Thread):
             sock = self._get_remote_socket(remote_host, remote_handshake_port)
             data_bytes = self.encoder.encode((DONE_RECVING_MSG, request_id, remote_port_send_num))
             ensure_zmq_send(sock, data_bytes, f"{remote_host}:{remote_handshake_port}")
-            resp = ensure_zmq_recv(
-                sock, self.remote_poller, f"{remote_host}:{remote_handshake_port}", timeout=self.timeout
-            )
+            resp = ensure_zmq_recv(sock, f"{remote_host}:{remote_handshake_port}")
             logger.debug("Received response for request %s: %s", request_id, resp.decode("utf-8"))
             if resp != b"ACK":
                 logger.error(
@@ -923,7 +1019,10 @@ class KVCacheRecvingThread(threading.Thread):
                 zmq.SNDTIMEO,  # type: ignore
                 int(self.timeout * 1000),
             )
-            self.remote_poller.register(sock, zmq.POLLIN)  # type: ignore
+            sock.setsockopt(
+                zmq.RCVTIMEO,  # type: ignore
+                int(self.timeout * 1000),
+            )
             return sock
 
     def _return_remote_socket(
@@ -1907,19 +2006,13 @@ def ensure_zmq_send(
 
 def ensure_zmq_recv(
     socket: zmq.Socket,  # type: ignore
-    poller: zmq.Poller,  # type: ignore
     path: str,
-    timeout: float = 1.0,
     max_retries: int = 3,
 ) -> bytes:
     retries_left = max_retries
     while True:
         try:
-            if dict(poller.poll(int(timeout * 1000))):  # milliseconds
-                data = socket.recv()
-                return data
-            else:
-                raise zmq.ZMQError("Receive timeout")  # type: ignore
+            return socket.recv()
         except zmq.ZMQError as e:  # type: ignore
             retries_left -= 1
             if retries_left > 0:

@@ -18,7 +18,7 @@
 #
 
 import copy
-import math
+import logging
 from collections.abc import Callable
 from itertools import accumulate
 from typing import TYPE_CHECKING, Any
@@ -31,6 +31,7 @@ from vllm.logger import logger
 from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.v1.utils import CpuGpuBuffer
 
+from vllm_ascend.utils import is_pd_decode_recompute_scheduler_enabled
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
 if TYPE_CHECKING:
@@ -72,6 +73,7 @@ class PCPManager:
         self.speculative_config = vllm_config.speculative_config
         self.decode_threshold = 1 + (self.speculative_config.num_speculative_tokens if self.speculative_config else 0)
         self.vllm_config = vllm_config
+        self.pd_decode_recompute_scheduler_enabled = is_pd_decode_recompute_scheduler_enabled(vllm_config)
         self.max_num_tokens = self.vllm_config.scheduler_config.max_num_batched_tokens
         self.max_num_reqs = self.vllm_config.scheduler_config.max_num_seqs
         self.device = device
@@ -150,6 +152,7 @@ class PCPManager:
         self.pcp_padded_tokens_length = 0
         self.num_scheduled_tokens_padded: np.ndarray | None = None
         self.max_num_tokens_across_pcp = 0
+        self.total_pcp_padding_tokens_fla = 0
         self.pcp_tokens_padded = None
         self.total_num_scheduled_tokens = 0
         self._local_num_scheduled_tokens: np.ndarray | None = None
@@ -195,8 +198,8 @@ class PCPManager:
 
         return cu_num_tokens, arange
 
-    @staticmethod
     def classify_decode_request_mask(
+        self,
         num_scheduled_tokens: np.ndarray | torch.Tensor,
         num_computed_tokens: np.ndarray | torch.Tensor,
         num_prompt_tokens: np.ndarray | torch.Tensor,
@@ -209,8 +212,11 @@ class PCPManager:
         """
 
         has_context = num_computed_tokens > 0
-        done_prefilling = num_computed_tokens >= num_prompt_tokens
         is_below_threshold = num_scheduled_tokens <= decode_threshold
+        done_prefilling = num_computed_tokens >= num_prompt_tokens
+        if self.pd_decode_recompute_scheduler_enabled:
+            # PD D + RecomputeScheduler: KV recv leaves num_computed at N-1.
+            done_prefilling = done_prefilling | (num_computed_tokens == num_prompt_tokens - 1)
         return has_context & is_below_threshold & done_prefilling
 
     def init_batch_info(
@@ -250,16 +256,7 @@ class PCPManager:
         if self.num_prefill_reqs <= 0:
             return cu_num_scheduled_tokens
 
-        # Prepend 0 so per-req lengths come out of the diff cleanly. This
-        # also fixes the num_decode_reqs == 0 case, where the raw diff
-        # cu[1:] - cu[:-1] would drop the first req's length and the base
-        # below would index cu[-1] instead of 0.
-        padded_cu = np.concatenate(([0], cu_num_scheduled_tokens))
-        per_req_lens = padded_cu[1:] - padded_cu[:-1]
-
-        prefill_lens = per_req_lens[self.num_decode_reqs :]
-        pad_multiple = self.pcp_world_size * 2
-        prefill_lens = [math.ceil(num / pad_multiple) * pad_multiple for num in prefill_lens]
+        prefill_lens = self.pcp_tokens[self.num_decode_reqs : self.num_decode_reqs + self.num_prefill_reqs]
         pads = copy.deepcopy(num_pcp_pads)
         pads[self.num_decode_reqs :] = np.cumsum(pads[self.num_decode_reqs :])
         base = int(cu_num_scheduled_tokens[self.num_decode_reqs - 1]) if self.num_decode_reqs > 0 else 0
@@ -933,9 +930,10 @@ class PCPManager:
                 hidden_states = F.pad(
                     hidden_states, pad=(0, 0, 0, self.pcp_padded_tokens_fla), mode="constant", value=0
                 )
-            hidden_states = get_pcp_group().all_gather(
-                hidden_states[: self.max_num_tokens_across_pcp].contiguous(), dim=0
+            hidden_states = (
+                hidden_states[: self.max_num_tokens_across_pcp] if self.max_num_tokens_across_pcp > 0 else hidden_states
             )
+            hidden_states = get_pcp_group().all_gather(hidden_states.contiguous(), dim=0)
             restore_idx = self.pcp_enter_fa_restore_idx[: hidden_states.shape[0] - self.total_pcp_padding_tokens_fla]
             return torch.index_select(hidden_states, 0, restore_idx)
 
@@ -1182,6 +1180,11 @@ class PCPManager:
                 self.dcp_world_size,
                 self.vllm_config.parallel_config.cp_kv_cache_interleave_size,
             )
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "[PCP][DFX] num_computed_tokens_of_pcp_dcp=%s",
+                    num_computed_tokens_of_pcp_dcp.tolist(),
+                )
 
             pcp_unpad_mask = self.pcp_unpad_mask_cpu[: self.pcp_padded_tokens_length]
             long_seq_metadata = AscendPrefillContextParallelMetadata(
@@ -1310,6 +1313,16 @@ class PCPManager:
                     long_seq_metadata.pcp_enter_fa_restore_idx = self.pcp_enter_fa_restore_idx[
                         : pcp_unpad_mask.sum() + self.num_decode_tokens * (self.pcp_world_size - 1)
                     ]
+                    if logger.isEnabledFor(logging.DEBUG):
+                        logger.debug(
+                            "[PCP][DFX] long_seq_metadata reorder idx: "
+                            "pcp_allgather_restore_idx=%s, "
+                            "pcp_exit_fa_scatter_idx=%s, "
+                            "pcp_enter_fa_restore_idx=%s",
+                            long_seq_metadata.pcp_allgather_restore_idx.detach().cpu().tolist(),
+                            long_seq_metadata.pcp_exit_fa_scatter_idx.detach().cpu().tolist(),
+                            long_seq_metadata.pcp_enter_fa_restore_idx.detach().cpu().tolist(),
+                        )
                     long_seq_metadata.max_num_tokens_across_pcp = self.max_num_tokens_across_pcp
                     long_seq_metadata.total_num_scheduled_tokens = self.total_num_scheduled_tokens
                 long_seq_metadata.q_head_idx_tensor = self.q_head_idx_tensor
@@ -1337,31 +1350,35 @@ class PCPManager:
                 long_seq_metadata.tail_actual_seq_lengths_kv = self.extra_long_seq_kwargs["tail_actual_seq_lengths_kv"]
                 long_seq_metadata.attn_chunk_seqlens = attn_chunk_seqlens
 
-            # Generate MTP attention masks for decode requests when dcp_size > 1 with speculative decoding
+            # Generate MTP attention masks for decode requests when cp_size > 1
+            # with speculative decoding.
             if (
                 self.dcp_world_size * self.pcp_world_size > 1
                 and self.speculative_config
-                and self.num_decode_reqs > 0
                 and num_scheduled_tokens is not None
             ):
-                # Extract decode request info from input_batch and num_scheduled_tokens
-                decode_num_scheduled_tokens = num_scheduled_tokens[: self.num_decode_reqs]
-                if fixed_decode_seq_lens_cpu is not None:
-                    decode_num_computed_tokens = (
-                        fixed_decode_seq_lens_cpu[: self.num_decode_reqs] - decode_num_scheduled_tokens
-                    ).tolist()
-                else:
-                    decode_num_computed_tokens = input_batch.num_computed_tokens_cpu[: self.num_decode_reqs].tolist()
+                # Generate the mask contents for the real decode requests.
+                if self.num_decode_reqs > 0:
+                    decode_num_scheduled_tokens = num_scheduled_tokens[: self.num_decode_reqs]
+                    if fixed_decode_seq_lens_cpu is not None:
+                        decode_num_computed_tokens = (
+                            fixed_decode_seq_lens_cpu[: self.num_decode_reqs] - decode_num_scheduled_tokens
+                        ).tolist()
+                    else:
+                        decode_num_computed_tokens = input_batch.num_computed_tokens_cpu[
+                            : self.num_decode_reqs
+                        ].tolist()
 
-                dcp_mtp_attn_mask = self.generate_mtp_attention_mask_for_decode(
-                    decode_num_computed_tokens, decode_num_scheduled_tokens
-                )
-                if dcp_mtp_attn_mask is not None:
-                    self.dcp_mtp_attn_mask.np[: self.num_decode_reqs] = dcp_mtp_attn_mask
-                    self.dcp_mtp_attn_mask.copy_to_gpu(self.num_decode_reqs)
-                    long_seq_metadata.dcp_mtp_attn_mask = self.dcp_mtp_attn_mask.gpu[: self.num_decode_reqs]
-                else:
-                    long_seq_metadata.dcp_mtp_attn_mask = None
+                    dcp_mtp_attn_mask = self.generate_mtp_attention_mask_for_decode(
+                        decode_num_computed_tokens, decode_num_scheduled_tokens
+                    )
+                    if dcp_mtp_attn_mask is not None:
+                        self.dcp_mtp_attn_mask.np[: self.num_decode_reqs] = dcp_mtp_attn_mask
+                        self.dcp_mtp_attn_mask.copy_to_gpu(self.num_decode_reqs)
+                # Always expose the (stable, pre-allocated) MTP mask buffer
+                # for cp>1 + speculative decode, even when num_decode_reqs == 0.
+                mask_n = self.num_decode_reqs if self.num_decode_reqs > 0 else num_reqs
+                long_seq_metadata.dcp_mtp_attn_mask = self.dcp_mtp_attn_mask.gpu[:mask_n]
             else:
                 long_seq_metadata.dcp_mtp_attn_mask = None
 

@@ -513,8 +513,8 @@ class NPUPlatform(Platform):
         from vllm.config.compilation import CUDAGraphMode
 
         if ascend_config.xlite_graph_config.enabled:
-            if ascend_config.xlite_graph_config.full_mode:
-                logger.info("ACLGraph is disabled under xlite full mode")
+            if ascend_config.xlite_graph_config.full_mode and vllm_config.speculative_config is None:
+                logger.info("ACLGraph has been disabled when speculation is disabled in xlite full mode")
                 enforce_eager = True
                 model_config.enforce_eager = True
                 compilation_config.cudagraph_mode = CUDAGraphMode.NONE
@@ -937,7 +937,7 @@ class NPUPlatform(Platform):
         # compared to v1, v2's forward context lacks some fields, such as:
         # is_first_layer, prefetch_mlp_gate_up_proj, prefetch_mlp_gate_down_proj,
         # prefetch_mlp_enabled, model_instance, is_draft_model.
-        if not envs_vllm.VLLM_USE_V2_MODEL_RUNNER:
+        if not vllm_config.use_v2_model_runner:
             return {}
 
         # is_draft_model will be removed later, so we set it to False temporarily.

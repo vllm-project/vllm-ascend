@@ -101,7 +101,7 @@ sysctl -w vm.swappiness=0
 sysctl -w kernel.numa_balancing=0
 sysctl -w kernel.sched_migration_cost_ns=50000
 
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=0
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export TASK_QUEUE_ENABLE=1
@@ -127,10 +127,8 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/InternVL3_5-38B-w8a8/ 
     --additional-config '{"enable_weight_nz_layout": true, "enable_cpu_binding": true}' \
     --mm-processor-cache-gb 0 \
     --enable-chunked-prefill \
-    --enable-prefix-caching \
     --safetensors-load-strategy 'prefetch' \
     --allowed-local-media-path "/
-
 ```
 
 ::::
@@ -167,16 +165,16 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/InternVL3_5-241B-A28B-
     --trust-remote-code \
     --async-scheduling \
     --max-model-len 40960 \
-    --max-num-batched-tokens 16384 \
-    --tensor-parallel-size 16 \
-    --max-num-seqs 16 \
+    --max-num-batched-tokens 4096 \
+    --tensor-parallel-size 4 \
+    --data-parallel-size 2 \
+    --max-num-seqs 70 \
     --gpu-memory-utilization 0.9 \
     --async-scheduling \
-    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4,32,64,128,192,256,512]}' \
+    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
     --additional-config '{"enable_weight_nz_layout": true, "enable_cpu_binding": true}' \
     --mm-processor-cache-gb 0 \
     --enable-chunked-prefill \
-    --enable-prefix-caching \
     --enable-expert-parallel \
     --safetensors-load-strategy 'prefetch' \
     --allowed-local-media-path "/"

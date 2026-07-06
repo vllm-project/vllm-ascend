@@ -65,9 +65,9 @@ def test_responses_parser_allows_named_tool_choice_with_none_content():
     )
     parser = _DummyDelegatingParser(tokenizer=None)
 
-    tool_calls, content = parser._parse_tool_calls(
-        request=request,
+    tool_calls, content = parser._extract_tool_calls(
         content=None,
+        request=request,
         enable_auto_tools=False,
     )
 
@@ -93,10 +93,33 @@ def test_chat_completion_response_omits_empty_tool_calls_payload():
     response = _chat_response(ChatMessage(role="assistant", content="done"))
 
     payload = response.model_dump()
+    payload_json = response.model_dump_json()
 
     assert "tool_calls" not in payload["choices"][0]["message"]
     parsed = OpenAIChatCompletion.model_validate(payload)
     assert parsed.choices[0].message.tool_calls is None
+    parsed_json = OpenAIChatCompletion.model_validate_json(payload_json)
+    assert parsed_json.choices[0].message.tool_calls is None
+
+
+def test_chat_completion_response_model_dump_json_uses_json_mode(monkeypatch):
+    seen_kwargs = {}
+
+    def fake_model_dump(self, *args, **kwargs):
+        seen_kwargs.update(kwargs)
+        return {"choices": [{"message": {"tool_calls": []}}]}
+
+    monkeypatch.setattr(
+        patch_tool_choice_none_content,
+        "_original_chat_completion_response_model_dump",
+        fake_model_dump,
+    )
+
+    response = _chat_response(ChatMessage(role="assistant", content="done"))
+    payload_json = response.model_dump_json()
+
+    assert seen_kwargs["mode"] == "json"
+    assert payload_json == '{"choices":[{"message":{}}]}'
 
 
 def test_chat_completion_response_keeps_non_empty_tool_calls_payload():

@@ -30,7 +30,6 @@ from vllm_ascend.attention.utils import (
     enable_cp,
     enabling_mlapo,
     maybe_save_kv_layer_to_connector,
-    notify_kv_cache_written,
     split_decodes_and_prefills,
     trans_rope_weight,
     transdata,
@@ -45,7 +44,6 @@ from vllm_ascend.compilation.acl_graph import (
 )
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.device_op import DeviceOperator
-from vllm_ascend.memcache_comm_fence import record_attention_compute_start
 from vllm_ascend.ops.layer_shard_linear import (
     is_hidden_layer,
     post_process_after_loading_for_shard_weight_series,
@@ -758,6 +756,14 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.speculative_config = self.vllm_config.speculative_config
         self.enable_mlapo = enabling_mlapo(self.vllm_config)
 
+        self.is_kv_producer = (
+            self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.is_kv_producer
+        )
+        self.is_kv_both = (
+            self.vllm_config.kv_transfer_config is not None
+            and self.vllm_config.kv_transfer_config.is_kv_producer
+            and self.vllm_config.kv_transfer_config.is_kv_consumer
+        )
         self.layer_name = kwargs.get("layer_name")
         self.fa_quant_layer = enable_fa_quant(self.vllm_config, self.layer_name)
         if self.fa_quant_layer:
@@ -1285,7 +1291,6 @@ class AscendMLAImpl(MLAAttentionImpl):
             "actual_seq_lengths": actual_seq_lengths_q,
             "actual_seq_lengths_kv": actual_seq_lengths_kv,
         }
-        record_attention_compute_start()
 
         if self.head_padding > 0:
             query = torch.cat((q_nope, q_pe), dim=-1)
@@ -1679,16 +1684,15 @@ class AscendMLAImpl(MLAAttentionImpl):
         if has_prefill:
             wait_for_kv_layer_from_connector(layer_name)
         # Preprocess for decode tokens
+        if self.is_kv_producer and not self.is_kv_both:
+            attn_metadata.reshape_cache_event = torch.npu.Event()
         if has_decode:
             decode_preprocess_res = self.mla_preprocess_decode(q_c, kv_no_split, kv_cache, attn_metadata)
         # Preprocess for prefill tokens
         if has_prefill:
             prefill_preprocess_res = self.mla_preprocess_prefill(q_c, kv_no_split, kv_cache, attn_metadata)
-        # Let the connector record any sync primitive it needs once the paged KV
-        # cache for this layer has been written. No-op for connectors that don't
-        # implement on_kv_cache_written; the decision to actually transfer is made
-        # by the connector/scheduler, not here.
-        notify_kv_cache_written(layer_name)
+        if self.is_kv_producer and not self.is_kv_both:
+            attn_metadata.reshape_cache_event.record()
         return decode_preprocess_res, prefill_preprocess_res
 
     def get_num_actual_tokens(self, attn_metadata: M):
@@ -1800,5 +1804,6 @@ class AscendMLAImpl(MLAAttentionImpl):
         output[...] = self.o_proj(o_proj_input, is_prefill=prefill_preprocess_res is not None)[0]
 
         del o_proj_input
-        maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
+        if self.is_kv_producer and not self.is_kv_both:
+            maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
         return output_padded

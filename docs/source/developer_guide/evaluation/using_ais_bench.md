@@ -219,6 +219,9 @@ ais_bench --models vllm_api_general_chat --datasets livecodebench_code_generate_
 # run AIME 2024 dataset
 ais_bench --models vllm_api_general_chat --datasets aime2024_gen_0_shot_chat_prompt.py --mode all --dump-eval-details --merge-ds
 
+# run GSM8K dataset
+ais_bench --models vllm_api_general_chat --datasets gsm8k_gen_0_shot_cot_chat_prompt.py --mode all --dump-eval-details --merge-ds
+
 ```
 
 After each dataset execution, you can get the result from saved files such as `outputs/default/20250628_151326`, there is an example as follows:
@@ -268,6 +271,9 @@ ais_bench --models vllm_api_general_chat --datasets livecodebench_code_generate_
 
 # run AIME 2024 dataset
 ais_bench --models vllm_api_general_chat --datasets aime2024_gen_0_shot_chat_prompt.py --summarizer default_perf --mode perf
+
+# run GSM8K dataset
+ais_bench --models vllm_api_general_chat --datasets gsm8k_gen_0_shot_cot_str_perf.py --summarizer default_perf --mode perf
 ```
 
 Multi-modal benchmarks (text + images):

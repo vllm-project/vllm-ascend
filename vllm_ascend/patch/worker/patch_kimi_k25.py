@@ -42,9 +42,14 @@ def get_rope_shape(org, interpolation_mode, shape):
 
 
 class AscendLearnable2DInterpPosEmbDivided_fixed(nn.Module):
-    def forward(self, x: torch.Tensor, grid_thws: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, grid_thws: torch.Tensor | list) -> torch.Tensor:
         pos_embs = []
-        for t, h, w in grid_thws.tolist():
+        if isinstance(grid_thws, torch.Tensor):
+            grid_list = grid_thws.tolist()
+        else:
+            grid_list = grid_thws
+
+        for t, h, w in grid_list:
             assert t <= self.num_frames, (
                 f"[vllm-ascend/patch_kimi_k25] Invalid frame count. t={t}, num_frames={self.num_frames}"
             )
