@@ -21,7 +21,6 @@ The comment itself triggers the workflow — no label is required.
 | `/nightly` | Run **all** nightly tests |
 | `/nightly all` | Run **all** nightly tests (same as above) |
 | `/nightly test1 test2 ...` | Run only the **named** tests |
-| `/nightly <tests> --aop_enabled` | Run named tests with AOP bisect / classify enabled |
 
 :::{note}
 Only repository **Contributors** (Triage role) and **Maintainers** (Write role) can
@@ -226,22 +225,6 @@ Run a single accuracy model (only that model from a group):
 Re-trigger after fixing an issue: just push a new commit. The `synchronize` event
 re-runs the workflow and picks up the existing `/nightly` comment automatically — no
 need to post a new comment.
-
-## AOP Hooks (Bisect)
-
-Add `--aop_enabled` to any `/nightly` command to enable the AOP pipeline:
-
-```text
-/nightly all --aop_enabled
-```
-
-When enabled, the workflow will:
-
-1. **Capture** the test result (pass / fail).
-2. **Classify** the failure as environmental (network, infra) or code-related.
-3. **Bisect** genuine code failures to pinpoint the offending commit.
-
-This is useful for automated root-cause analysis of nightly regressions.
 
 ## Adding a New Test Case — Worked Example
 
