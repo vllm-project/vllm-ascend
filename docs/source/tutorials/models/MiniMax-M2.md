@@ -63,9 +63,8 @@ export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
 
 docker run \
     --name vllm-ascend-env \
-    --shm-size=128g \
-    --net=host \
-    --privileged=true \
+    --ipc host \
+    --net host \
     --device /dev/davinci0 \
     --device /dev/davinci1 \
     --device /dev/davinci2 \
@@ -92,10 +91,6 @@ docker run \
     -v /usr/local/sbin:/usr/local/sbin \
     -v /home:/home \
     -v /data:/data \
-    -v /tmp:/tmp \
-    -v /mnt:/mnt \
-    -v /usr/share/zoneinfo/Asia/Shanghai:/etc/localtime \
-    -v /root:/host_root \
     -it -d $IMAGE bash
 ```
 
@@ -126,9 +121,8 @@ export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 
 docker run \
     --name vllm-ascend-env \
-    --shm-size=128g \
-    --net=host \
-    --privileged=true \
+    --ipc host \
+    --net host \
     --device /dev/davinci0 \
     --device /dev/davinci1 \
     --device /dev/davinci2 \
@@ -147,10 +141,6 @@ docker run \
     -v /usr/local/sbin:/usr/local/sbin \
     -v /home:/home \
     -v /data:/data \
-    -v /tmp:/tmp \
-    -v /mnt:/mnt \
-    -v /usr/share/zoneinfo/Asia/Shanghai:/etc/localtime \
-    -v /root:/host_root \
     -it -d $IMAGE bash
 ```
 
