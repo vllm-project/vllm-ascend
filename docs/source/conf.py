@@ -139,6 +139,16 @@ html_theme_options = {
     "repository_url": "https://github.com/vllm-project/vllm-ascend",
     "use_repository_button": True,
     "use_edit_page_button": True,
+    "footer_content_items": [
+        "author.html",
+        "copyright.html",
+        "last-updated.html",
+        "extra-footer.html",
+        "sections/issues-float.html",
+    ],
+}
+html_context = {
+    "rtd_version_slug": os.environ.get("READTHEDOCS_VERSION", "latest"),
 }
 # Add any paths that contain custom static files (such as style sheets) here,
 # relative to this directory. They are copied after the builtin static files,
