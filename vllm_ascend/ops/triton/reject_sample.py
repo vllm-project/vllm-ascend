@@ -454,8 +454,6 @@ def rejection_greedy_sample_with_triton(
 ):
     vec_len = output_token_ids.shape[0]
 
-    bonus_token_ids = bonus_token_ids.squeeze(1)
-
     if min(num_draft_tokens) == 1 and max(num_draft_tokens) == 1 and is_greedy is None:
         rejection_greedy_sample_spec_len_1_triton[(grid,)](
             output_token_ids,
