@@ -80,6 +80,19 @@ After the sleep-mode allocator restores the original (untransposed) memory, `wak
 
 This step is skipped entirely for dense models (which have no expert weights) and for quantized models (whose weights are handled by the quantization method).
 
+## Prepare Model Weights
+
+Use the `Qwen2.5-0.5B-Instruct` model weights. With `VLLM_USE_MODELSCOPE=True`, the model will be downloaded automatically from ModelScope.
+
+```{list-table}
+:header-rows: 1
+
+* - Model
+  - ModelScope Link
+* - Qwen2.5-0.5B-Instruct
+  - [Qwen/Qwen2.5-0.5B-Instruct](https://www.modelscope.cn/models/Qwen/Qwen2.5-0.5B-Instruct)
+```
+
 ## Usage
 
 The following is a simple example of how to use sleep mode.
@@ -106,7 +119,7 @@ The following is a simple example of how to use sleep mode.
         # record npu memory use baseline in case other process is running
         used_bytes_baseline = total - free
         llm = LLM("Qwen/Qwen2.5-0.5B-Instruct", enable_sleep_mode=True)
-        sampling_params = SamplingParams(temperature=0, max_completion_tokens=10)
+        sampling_params = SamplingParams(temperature=0, max_tokens=10)
         output = llm.generate(prompt, sampling_params)
 
         llm.sleep(level=1)
@@ -165,7 +178,7 @@ The following is a simple example of how to use sleep mode.
         -d '{
             "model": "Qwen/Qwen2.5-0.5B-Instruct",
             "prompt": "The future of AI is",
-            "max_completion_tokens": 7,
+            "max_tokens": 7,
             "temperature": 0
         }'
     ```

@@ -24,6 +24,27 @@ from vllm.model_executor.models.deepseek_v2 import (
 from vllm.model_executor.models.utils import extract_layer_index
 
 
+def _should_skip_indexer_init(
+    config: DeepseekV2Config | DeepseekV3Config,
+    prefix: str,
+    skip_topk: bool,
+) -> bool:
+    if not skip_topk:
+        return False
+
+    layer_id = extract_layer_index(prefix)
+    num_hidden_layers = getattr(config, "num_hidden_layers", None)
+    if num_hidden_layers is not None and layer_id >= num_hidden_layers:
+        return False
+
+    # GLM-5.2 describes checkpoint-level shared indexers explicitly. Runtime
+    # IndexCache overrides on GLM-5.1 only skip top-k computation; its
+    # checkpoint still contains an Indexer for every layer.
+    indexer_types = getattr(config, "indexer_types", None)
+    indexer_type = indexer_types[layer_id] if indexer_types is not None and layer_id < len(indexer_types) else None
+    return isinstance(indexer_type, str) and indexer_type.lower() == "shared"
+
+
 def _deepseek_v2_mla_attention_init(
     self,
     vllm_config: VllmConfig,
@@ -161,10 +182,8 @@ def _deepseek_v2_mla_attention_init(
 
     # IndexCache config.
     #
-    # PR #45895 的关键修改是：
-    # 1. 在创建 Indexer 前先计算当前层是否 skip_topk；
-    # 2. skip_topk 的 backbone 层不创建 Indexer；
-    # 3. MTP/nextn 层即使命中 skip pattern，也必须创建完整 Indexer。
+    # skip_topk controls top-k reuse. Indexer initialization is skipped only
+    # when the checkpoint marks this layer as sharing another layer's Indexer.
     _skip_topk = False
     _index_topk_freq = getattr(
         config,
@@ -196,19 +215,8 @@ def _deepseek_v2_mla_attention_init(
     elif 0 <= layer_id < len(_index_topk_pattern):
         _skip_topk = _index_topk_pattern[layer_id] == "S"
 
-    # Skip pattern only governs backbone layers.
-    #
-    # MTP/nextn layers must always build a complete Indexer. The MTP
-    # implementation computes top-k indices at draft step 0, then changes
-    # skip_topk dynamically during the remaining speculative iterations.
-    _num_hidden_layers = getattr(
-        config,
-        "num_hidden_layers",
-        None,
-    )
-    is_mtp_layer = _num_hidden_layers is not None and layer_id >= _num_hidden_layers
-
-    if self.is_v32 and (not _skip_topk or is_mtp_layer):
+    skip_indexer_init = _should_skip_indexer_init(config, prefix, _skip_topk)
+    if self.is_v32 and not skip_indexer_init:
         self.indexer_rope_emb = get_rope(
             qk_rope_head_dim,
             max_position=max_position_embeddings,
