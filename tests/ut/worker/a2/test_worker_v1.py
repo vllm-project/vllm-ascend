@@ -249,6 +249,7 @@ class TestNPUWorker(TestBase):
             mock_allocator.wake_up.assert_called_once_with(tags=["test_tag"])
             worker.sleep_wakeup_manager.wakeup.assert_called_once_with(["test_tag"])
 
+    @patch("vllm_ascend.worker.worker.current_platform")
     @patch("vllm_ascend.worker.worker.MemorySnapshot")
     @patch("vllm_ascend.worker.worker.NPUWorker._init_worker_distributed_environment")
     @patch("vllm_ascend.worker.worker.init_device_properties_triton")
@@ -265,6 +266,7 @@ class TestNPUWorker(TestBase):
         mock_init_triton,
         mock_init_dist_env,
         mock_snapshot_cls,
+        mock_current_platform,
     ):
         """Test _init_device method"""
         from vllm_ascend.worker.worker import AscendDeviceType, NPUWorker
@@ -279,15 +281,21 @@ class TestNPUWorker(TestBase):
         mock_snapshot.total_memory = 2000
         mock_snapshot_cls.return_value = mock_snapshot
 
+        # Mock current_platform for v0.24.0 init_device path
+        mock_current_platform.logical_device_id_to_visible_device_id.return_value = 0
+        mock_current_platform.device_type = "npu"
+
         # Create worker mock
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
-            worker.local_rank = 1
+            worker.local_rank = 0
             worker.model_config = MagicMock()
             worker.model_config.seed = 42
             worker.parallel_config = MagicMock()
             worker.parallel_config.local_world_size = 0
             worker.parallel_config.data_parallel_size = 1
+            worker.parallel_config.assigned_physical_gpu_ids = None
+            worker.parallel_config.distributed_executor_backend = "ray"
             worker.vllm_config = MagicMock()
             worker.vllm_config.kv_transfer_config = None
             worker.cache_config = MagicMock()
@@ -297,7 +305,7 @@ class TestNPUWorker(TestBase):
             result = worker._init_device()
 
             mock_init_dist_env.assert_called_once()
-            self.assertEqual(str(result), "npu:1")
+            self.assertEqual(str(result), "npu:0")
             self.assertEqual(worker.init_snapshot, mock_snapshot)
             self.assertEqual(worker.requested_memory, 2000 * 0.5)
 

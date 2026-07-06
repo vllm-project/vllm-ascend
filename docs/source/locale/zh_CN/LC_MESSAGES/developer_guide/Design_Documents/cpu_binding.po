@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-06-22 05:29+0000\n"
+"POT-Creation-Date: 2026-07-02 07:02+0000\n"
 "PO-Revision-Date: 2026-04-09 18:37+0800\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -131,7 +131,8 @@ msgid ""
 "`total_logic_npus`. On Ascend 950, `Chip Logic ID` is not reported, so "
 "`NPU ID` is used as the logical ID."
 msgstr ""
-"将卡/芯片 ID 映射到全局逻辑 NPU ID，并提供 `total_logic_npus`。在 Ascend 950 上，`Chip Logic ID` 未报告，因此使用 `NPU ID` 作为逻辑 ID。"
+"将卡/芯片 ID 映射到全局逻辑 NPU ID，并提供 `total_logic_npus`。在 Ascend 950 上，`Chip Logic"
+" ID` 未报告，因此使用 `NPU ID` 作为逻辑 ID。"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md
 msgid "Running NPUs"
@@ -145,8 +146,7 @@ msgstr "`npu-smi info` 进程表，经 `ASCEND_RT_VISIBLE_DEVICES` 过滤"
 msgid ""
 "Identifies the logical NPUs used by this worker process. A2/A3 process "
 "rows use `NPU Chip`; Ascend 950 process rows use `NPU ID`."
-msgstr ""
-"识别此工作进程使用的逻辑 NPU。A2/A3 进程行使用 `NPU Chip`；Ascend 950 进程行使用 `NPU ID`。"
+msgstr "识别此工作进程使用的逻辑 NPU。A2/A3 进程行使用 `NPU Chip`；Ascend 950 进程行使用 `NPU ID`。"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md
 msgid "Topology affinity"
@@ -221,7 +221,9 @@ msgid ""
 " ID` instead of `NPU Chip`. Global logical NPU ID based slicing keeps CPU"
 " pools deterministic without relying on missing affinity data."
 msgstr ""
-"Ascend 950 报告 NPU 到 NPU/NIC 的拓扑，但不在 `npu-smi info -t topo` 中报告 NPU 到 CPU 的亲和性。它还通过 `NPU ID` 而非 `NPU Chip` 报告进程行。基于全局逻辑 NPU ID 的分片在不依赖缺失亲和性数据的情况下保持 CPU 池的确定性。"
+"Ascend 950 报告 NPU 到 NPU/NIC 的拓扑，但不在 `npu-smi info -t topo` 中报告 NPU 到 CPU "
+"的亲和性。它还通过 `NPU ID` 而非 `NPU Chip` 报告进程行。基于全局逻辑 NPU ID 的分片在不依赖缺失亲和性数据的情况下保持"
+" CPU 池的确定性。"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md
 msgid "A2 and Atlas 300 inference products"
@@ -237,7 +239,8 @@ msgid ""
 "information through `npu-smi info -t topo`, so they use this topology "
 "signal when available."
 msgstr ""
-"A2 和 Atlas 300 推理产品通过 `npu-smi info -t topo` 提供 NPU 到 CPU 的亲和性信息，因此它们在可用时使用此拓扑信号。"
+"A2 和 Atlas 300 推理产品通过 `npu-smi info -t topo` 提供 NPU 到 CPU "
+"的亲和性信息，因此它们在可用时使用此拓扑信号。"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md:51
 msgid ""
@@ -263,10 +266,9 @@ msgid ""
 " therefore partitions the sorted `allowed_cpus` list by global logical "
 "NPU ID."
 msgstr ""
-"`global_slice` 专为没有有用 NPU 到 CPU 亲和性信号的设备设计，包括 A3 和 Ascend 950。由于 A3 的 **HCCS "
-"互联使得每个 NPU 到每个 NUMA 节点的距离几乎相同**，拓扑亲和性不是一个有用的放置信号。Ascend "
-"950 同样暴露 UB/NIC 拓扑但不暴露 CPU 亲和性。因此，分配器根据全局逻辑 NPU ID 对排序后的 `allowed_cpus` "
-"列表进行分区。"
+"`global_slice` 专为没有有用 NPU 到 CPU 亲和性信号的设备设计，包括 A3 和 Ascend 950。由于 A3 的 "
+"**HCCS 互联使得每个 NPU 到每个 NUMA 节点的距离几乎相同**，拓扑亲和性不是一个有用的放置信号。Ascend 950 同样暴露 "
+"UB/NIC 拓扑但不暴露 CPU 亲和性。因此，分配器根据全局逻辑 NPU ID 对排序后的 `allowed_cpus` 列表进行分区。"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md:64
 msgid "Determine `total_npus` in this order:"
@@ -335,7 +337,8 @@ msgid ""
 "binding, at least 1 CPU for the main worker, 1 CPU for ACL thread, and 1 "
 "CPU for release thread."
 msgstr ""
-"支持 IRQ 绑定的设备需要 `base >= 5`：2 个 CPU 用于 SQ/CQ IRQ 绑定，至少 1 个 CPU 用于主工作线程，1 个 CPU 用于 ACL 线程，1 个 CPU 用于释放线程。"
+"支持 IRQ 绑定的设备需要 `base >= 5`：2 个 CPU 用于 SQ/CQ IRQ 绑定，至少 1 个 CPU 用于主工作线程，1 个"
+" CPU 用于 ACL 线程，1 个 CPU 用于释放线程。"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md:87
 msgid ""
@@ -343,7 +346,8 @@ msgid ""
 "requires `base >= 3`: at least 1 CPU for the main worker, 1 CPU for ACL "
 "thread, and 1 CPU for release thread."
 msgstr ""
-"Ascend 950 跳过 IRQ 绑定且不预留 SQ/CQ IRQ CPU，因此需要 `base >= 3`：至少 1 个 CPU 用于主工作线程，1 个 CPU 用于 ACL 线程，1 个 CPU 用于释放线程。"
+"Ascend 950 跳过 IRQ 绑定且不预留 SQ/CQ IRQ CPU，因此需要 `base >= 3`：至少 1 个 CPU "
+"用于主工作线程，1 个 CPU 用于 ACL 线程，1 个 CPU 用于释放线程。"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md:91
 msgid "topo_affinity"
@@ -357,46 +361,46 @@ msgid ""
 "from NPU topology affinity when it is available and then avoids overlap "
 "for shared affinity groups."
 msgstr ""
-"`topo_affinity` 专为 A2、Atlas 300 推理产品及其他非 A3 设备类型设计。A2 和 Atlas 300 "
-"推理产品暴露了**有意义的 NPU 到 CPU 亲和性信息**，因此分配器在可用时从 NPU 拓扑亲和性开始，然后避免共享亲和性组的重叠。"
+"`topo_affinity`专为A2、Atlas 300推理产品及其他非A3设备类型设计。A2和Atlas 300"
+"推理产品暴露了**有意义的NPU到CPU亲和性信息**，因此分配器在可用时从NPU拓扑亲和性开始，然后避免共享亲和性组的重叠。"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md:99
 msgid "Build candidate NPUs from all logical NPUs:"
-msgstr "从所有逻辑 NPU 构建候选 NPU："
+msgstr "从所有逻辑NPU构建候选NPU："
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md:100
 msgid "always include running NPUs"
-msgstr "始终包含运行中的 NPU"
+msgstr "始终包含运行中的NPU"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md:101
 msgid ""
 "include non-running NPUs only when their affinity overlaps this process's"
 " allowed cpuset"
-msgstr "仅当非运行中 NPU 的亲和性与该进程的允许 cpuset 重叠时才包含它们"
+msgstr "仅当非运行中NPU的亲和性与该进程的允许cpuset重叠时才包含它们"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md:102
 msgid "For each candidate NPU, intersect topo affinity with `allowed_cpus`."
-msgstr "对于每个候选 NPU，将拓扑亲和性与 `allowed_cpus` 取交集。"
+msgstr "对于每个候选NPU，将拓扑亲和性与`allowed_cpus`取交集。"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md:103
 msgid "If the intersection is empty for a candidate, binding fails for this rank."
-msgstr "如果某个候选 NPU 的交集为空，则此 rank 的绑定失败。"
+msgstr "如果某个候选NPU的交集为空，则此rank的绑定失败。"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md:104
 msgid ""
 "If the affinity CPUs are all on one NUMA node, extend the pool with CPUs "
 "from the next NUMA node, constrained by `allowed_cpus`."
-msgstr "如果亲和性 CPU 都在一个 NUMA 节点上，则使用来自下一个 NUMA 节点的 CPU 扩展池，受 `allowed_cpus` 约束。"
+msgstr "如果亲和性CPU都在一个NUMA节点上，则使用来自下一个NUMA节点的CPU扩展池，受`allowed_cpus`约束。"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md:105
 msgid ""
 "Group NPUs with identical extended pools and split each shared pool "
 "evenly across that group."
-msgstr "将具有相同扩展池的 NPU 分组，并在该组内均匀分割每个共享池。"
+msgstr "将具有相同扩展池的NPU分组，并在该组内均匀分割每个共享池。"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md:106
 msgid "Keep only running NPUs in the final `npu_cpu_pool`."
-msgstr "在最终的 `npu_cpu_pool` 中仅保留运行中的 NPU。"
+msgstr "在最终的`npu_cpu_pool`中仅保留运行中的NPU。"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md:108
 msgid ""
@@ -471,7 +475,9 @@ msgid ""
 "binding fails for this rank and the worker logs a warning from the "
 "caller. The minimum is 5 CPUs per NPU for devices with IRQ binding, and 3"
 " CPUs per NPU for Ascend 950."
-msgstr "如果最终池中的CPU少于所选角色拆分所需的数量，则此rank的绑定失败，工作进程将从调用者处记录警告。对于支持IRQ绑定的设备，每个NPU至少需要5个CPU；对于Ascend 950，每个NPU至少需要3个CPU。"
+msgstr ""
+"如果最终池中的CPU少于所选角色拆分所需的数量，则此rank的绑定失败，工作进程将从调用者处记录警告。对于支持IRQ绑定的设备，每个NPU至少需要5个CPU；对于Ascend"
+" 950，每个NPU至少需要3个CPU。"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md:137
 msgid "Conditional Host Tuning"
@@ -496,7 +502,9 @@ msgid ""
 "corresponding NPU when `/proc/irq` is writable and IRQ files can be "
 "resolved. Ascend 950 skips this step and gives those CPUs to the main "
 "worker instead."
-msgstr "当`/proc/irq`可写且IRQ文件可解析时，IRQ绑定将NPU中断处理放置在为相应NPU保留的CPU上。Ascend 950跳过此步骤，并将这些CPU分配给主工作进程。"
+msgstr ""
+"当`/proc/irq`可写且IRQ文件可解析时，IRQ绑定将NPU中断处理放置在为相应NPU保留的CPU上。Ascend"
+" 950跳过此步骤，并将这些CPU分配给主工作进程。"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md:149
 msgid ""
@@ -743,12 +751,47 @@ msgstr "2"
 msgid "168-191"
 msgstr "168-191"
 
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:221
+msgid ""
+"This avoids overlapping CPU pools even when the two workers are launched "
+"as independent single-card services."
+msgstr ""
+"即使两个工作进程作为独立的单卡服务启动，这也能避免CPU池重叠。"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:223
+msgid "Logs"
+msgstr "日志"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:225
+msgid "The allocator logs the selected mode and allocation plan:"
+msgstr "分配器记录所选模式和分配计划："
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:233
+#, fuzzy
+msgid "Limitations"
+msgstr "限制"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:235
+msgid "CPU binding runs only on ARM. It is skipped on x86_64."
+msgstr "CPU绑定仅在ARM上运行，在x86_64上跳过。"
+
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md:236
 msgid ""
 "Each final NPU pool must have enough CPUs for its role split: at least 5 "
 "CPUs for devices with IRQ binding, and at least 3 CPUs for Ascend 950."
+msgstr "每个最终NPU池必须有足够的CPU用于角色拆分：对于支持IRQ绑定的设备至少需要5个CPU，对于Ascend 950至少需要3个CPU。"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:238
+msgid ""
+"`global_slice` is deterministic and provides CPU/NUMA isolation when the "
+"cpuset is NUMA-aligned, but it cannot guarantee NUMA-local pools when CPU"
+" numbering or cpuset layout crosses NUMA boundaries."
 msgstr ""
-"每个最终NPU池必须有足够的CPU用于角色拆分：对于支持IRQ绑定的设备至少需要5个CPU，对于Ascend 950至少需要3个CPU。"
+"`global_slice`是确定性的，当cpuset与NUMA对齐时提供CPU/NUMA隔离，但当CPU编号或cpuset布局跨越NUMA边界时，无法保证NUMA本地池。"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:241
+msgid "`topo_affinity` depends on usable output from `npu-smi info -t topo`."
+msgstr "`topo_affinity`依赖于`npu-smi info -t topo`的可用输出。"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md:242
 msgid ""
@@ -756,4 +799,44 @@ msgid ""
 "information. Ascend 950 skips IRQ binding even when `/proc/irq` is "
 "writable, and does not reserve IRQ CPUs in its role split."
 msgstr ""
-"IRQ绑定需要可写的`/proc/irq`和可解析的PCI/IRQ信息。即使`/proc/irq`可写，Ascend 950也会跳过IRQ绑定，并且在其角色拆分中不保留IRQ CPU。"
+"IRQ绑定需要可写的`/proc/irq`和可解析的PCI/IRQ信息。即使`/proc/irq`可写，Ascend "
+"950也会跳过IRQ绑定，并且在其角色拆分中不保留IRQ CPU。"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:245
+msgid ""
+"Memory migration requires `migratepages`; otherwise only memory migration"
+" is skipped. CPU affinity still applies, but performance may degrade "
+"because existing pages are not moved to the target NUMA node and may be "
+"read through higher-latency remote NUMA access."
+msgstr ""
+"内存迁移需要`migratepages`；否则仅跳过内存迁移。CPU亲和性仍然生效，但性能可能下降，因为现有页面不会移动到目标NUMA节点，可能通过更高延迟的远程NUMA访问读取。"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:249
+msgid ""
+"If an exception escapes the binding flow, `NPUWorker` logs a warning and "
+"skips CPU binding for that rank."
+msgstr "如果异常逃逸出绑定流程，`NPUWorker`会记录警告并跳过该rank的CPU绑定。"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:251
+msgid "References"
+msgstr "参考"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:253
+msgid "Implementation: `vllm_ascend/cpu_binding.py`"
+msgstr "实现：`vllm_ascend/cpu_binding.py`"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:254
+msgid "Worker integration: `vllm_ascend/worker/worker.py`"
+msgstr "工作进程集成：`vllm_ascend/worker/worker.py`"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:255
+msgid ""
+"Config: `vllm_ascend/ascend_config.py` and "
+"`docs/source/user_guide/configuration/additional_config.md`"
+msgstr ""
+"配置：`vllm_ascend/ascend_config.py` 和 "
+"`docs/source/user_guide/configuration/additional_config.md`"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:256
+msgid "Tests: `tests/ut/device_allocator/test_cpu_binding.py`"
+msgstr "测试：`tests/ut/device_allocator/test_cpu_binding.py`"

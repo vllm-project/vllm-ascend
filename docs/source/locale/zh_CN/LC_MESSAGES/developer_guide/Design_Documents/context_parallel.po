@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-06-22 05:29+0000\n"
+"POT-Creation-Date: 2026-07-02 07:02+0000\n"
 "PO-Revision-Date: 2026-04-09 18:37+0800\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -25,9 +25,9 @@ msgstr "上下文并行（CP）"
 
 #: ../../source/developer_guide/Design_Documents/context_parallel.md:3
 msgid ""
-"TL;DR PCP accelerates prefill via sequence splitting. DCP eliminates KV "
+"TL;DR: PCP accelerates prefill via sequence splitting. DCP eliminates KV "
 "cache redundancy."
-msgstr "TL;DR PCP 通过序列切分加速预填充。DCP 消除 KV 缓存冗余。"
+msgstr "TL;DR：PCP 通过序列切分加速预填充。DCP 消除 KV 缓存冗余。"
 
 #: ../../source/developer_guide/Design_Documents/context_parallel.md:5
 msgid "![ContextParallel](../../assets/cp/overview.png)"
@@ -54,7 +54,8 @@ msgstr "什么是 CP？"
 msgid ""
 "**Context Parallel (CP)** is a strategy for parallelizing computation "
 "along the sequence dimension across multiple devices."
-msgstr "**上下文并行（Context Parallel，CP）** 是一种在多个设备上沿序列维度进行并行计算的策略。"
+msgstr ""
+"**上下文并行（Context Parallel，CP）** 是一种在多个设备上沿序列维度进行并行计算的策略。"
 
 #: ../../source/developer_guide/Design_Documents/context_parallel.md:13
 msgid ""
@@ -425,37 +426,92 @@ msgid "PCP-ChunkedPrefill"
 msgstr "PCP-ChunkedPrefill"
 
 #: ../../source/developer_guide/Design_Documents/context_parallel.md:124
+msgid "SFA DSA-CP Mixed `o_proj` Path"
+msgstr "SFA DSA-CP 混合 `o_proj` 路径"
+
+#: ../../source/developer_guide/Design_Documents/context_parallel.md:126
+msgid ""
+"SFA DSA-CP mixed execution intentionally reuses the normal TP-sharded "
+"`o_proj`. This is part of the DSA-CP mixed data path, not a standalone "
+"user-facing `o_proj` TP switch. The mixed path is used when one instance "
+"may handle both decode-only and prefill/mixed batches, so `o_proj` must "
+"support two layouts at runtime:"
+msgstr ""
+"SFA DSA-CP 混合执行有意复用了常规的 TP 分片 `o_proj`。这是 DSA-CP 混合数据路径的一部分，而非独立的面向用户的 `o_proj` TP "
+"开关。当单个实例可能同时处理仅解码批次和预填充/混合批次时，会使用该混合路径，因此 `o_proj` 必须在运行时支持两种布局："
+
+#: ../../source/developer_guide/Design_Documents/context_parallel.md:130
+msgid ""
+"**Decode-only batches** keep the decode TP path. SFA outputs are "
+"exchanged with an all-to-all in the TP group, then the original TP-"
+"sharded `o_proj` runs normally."
+msgstr ""
+"**仅解码批次**保持解码 TP 路径。SFA 输出通过 TP 组内的 all-to-all 进行交换，然后原始的 TP 分片 `o_proj` 正常运行。"
+
+#: ../../source/developer_guide/Design_Documents/context_parallel.md:132
+msgid ""
+"**Prefill or mixed batches** produce SFA outputs that are not directly "
+"compatible with the TP-sharded `o_proj` input layout. Before `o_proj` "
+"forward, each rank all-gathers the TP-sharded `o_proj` weight and all "
+"input-sharded quantization parameters into temporary full-weight buffers."
+" The full-weight `o_proj` forward runs once for that batch, and the "
+"module is then restored to the TP parameter aliases."
+msgstr ""
+"**预填充或混合批次**产生的 SFA 输出与 TP 分片 `o_proj` 的输入布局不直接兼容。在 `o_proj` 前向传播之前，每个 rank "
+"将 TP 分片的 `o_proj` 权重和所有输入分片的量化参数 all-gather 到临时的全权重缓冲区中。全权重 `o_proj` 前向传播对该批次运行一次，然后模块恢复到"
+" TP 参数别名。"
+
+#: ../../source/developer_guide/Design_Documents/context_parallel.md:136
+msgid ""
+"The storage invariant is that the original TP-sharded `o_proj` parameter "
+"remains the only persistent source of truth. `o_proj_tp_*` tensors are "
+"aliases of the original parameter storage. `o_proj_full_*` tensors are "
+"reusable communication buffers for prefill/mixed full-gather execution "
+"only. They must not become a second persistent copy of the TP weight."
+msgstr ""
+"存储不变性在于原始的 TP 分片 `o_proj` 参数仍然是唯一的持久化真实来源。`o_proj_tp_*` 张量是原始参数存储的别名。`o_proj_full_*` "
+"张量是仅用于预填充/混合全收集执行的可重用通信缓冲区。它们不得成为 TP 权重的第二个持久化副本。"
+
+#: ../../source/developer_guide/Design_Documents/context_parallel.md:141
+msgid ""
+"This coupling preserves the existing decode TP behavior, supports "
+"prefill/mixed DSA-CP batches, and avoids adding an extra configuration "
+"path whose state can drift from DSA-CP mixed execution."
+msgstr ""
+"这种耦合保留了现有的解码 TP 行为，支持预填充/混合 DSA-CP 批次，并避免了添加一个其状态可能偏离 DSA-CP 混合执行的额外配置路径。"
+
+#: ../../source/developer_guide/Design_Documents/context_parallel.md:143
 msgid "Related Files"
 msgstr "相关文件"
 
-#: ../../source/developer_guide/Design_Documents/context_parallel.md:126
+#: ../../source/developer_guide/Design_Documents/context_parallel.md:145
 msgid "slot_mapping computation: `vllm_ascend/worker/block_table.py`"
 msgstr "slot_mapping 计算：`vllm_ascend/worker/block_table.py`"
 
-#: ../../source/developer_guide/Design_Documents/context_parallel.md:127
+#: ../../source/developer_guide/Design_Documents/context_parallel.md:146
 msgid ""
 "sequences splitting and metadata prepare: "
 "`vllm_ascend/worker/model_runner_v1.py`"
 msgstr "序列切分与元数据准备：`vllm_ascend/worker/model_runner_v1.py`"
 
-#: ../../source/developer_guide/Design_Documents/context_parallel.md:128
+#: ../../source/developer_guide/Design_Documents/context_parallel.md:147
 msgid ""
 "PCP token splitting and metadata generation: "
 "`vllm_ascend/worker/pcp_utils.py`"
 msgstr "PCP token 切分与元数据生成：`vllm_ascend/worker/pcp_utils.py`"
 
-#: ../../source/developer_guide/Design_Documents/context_parallel.md:129
+#: ../../source/developer_guide/Design_Documents/context_parallel.md:148
 msgid "GQA backend: `vllm_ascend/attention/context_parallel/attention_cp.py`"
 msgstr "GQA 后端：`vllm_ascend/attention/context_parallel/attention_cp.py`"
 
-#: ../../source/developer_guide/Design_Documents/context_parallel.md:130
+#: ../../source/developer_guide/Design_Documents/context_parallel.md:149
 msgid "MLA backend: `vllm_ascend/attention/context_parallel/mla_cp.py`"
 msgstr "MLA 后端：`vllm_ascend/attention/context_parallel/mla_cp.py`"
 
-#: ../../source/developer_guide/Design_Documents/context_parallel.md:131
+#: ../../source/developer_guide/Design_Documents/context_parallel.md:150
 msgid "DSA backend: `vllm_ascend/attention/context_parallel/dsa_cp.py`"
 msgstr "DSA 后端：`vllm_ascend/attention/context_parallel/dsa_cp.py`"
 
-#: ../../source/developer_guide/Design_Documents/context_parallel.md:132
+#: ../../source/developer_guide/Design_Documents/context_parallel.md:151
 msgid "SFA backend: `vllm_ascend/attention/context_parallel/sfa_cp.py`"
 msgstr "SFA 后端：`vllm_ascend/attention/context_parallel/sfa_cp.py`"

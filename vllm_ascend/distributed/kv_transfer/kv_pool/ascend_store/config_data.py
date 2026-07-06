@@ -336,7 +336,10 @@ class ChunkedTokenDatabase:
         size_list: list[int] = []
         group_block_size = self.get_block_size(kv_cache_group_id)
         if block_id is None:
-            block_id = block_ids[start // group_block_size]
+            block_idx = start // group_block_size
+            if block_idx >= len(block_ids):
+                return addr_list, size_list, 0
+            block_id = block_ids[block_idx]
         group_addrs, group_block_len, group_block_stride = self._get_group_buffers(kv_cache_group_id, cache_role)
         length = len(group_block_len)
         if length == 0:
@@ -352,15 +355,23 @@ class ChunkedTokenDatabase:
 
     def prepare_value_layer(self, start: int, end: int, block_ids: list[int], layer_id: int):
         group_block_size = self.get_block_size(0)
-        block_id = block_ids[start // group_block_size]
+        block_idx = start // group_block_size
+        if block_idx >= len(block_ids):
+            return [], [], 0
+        block_id = block_ids[block_idx]
         addr_list: list[int] = []
         size_list: list[int] = []
         group_addrs, group_block_len, group_block_stride = self._get_group_buffers(0)
-        length = len(group_block_len)
-        for i in range(length):
-            block_stride = group_block_stride[i] if group_block_stride else group_block_len[i]
-            addr = group_addrs[layer_id * length] + block_id * block_stride
-            size = int(group_block_len[i] / group_block_size * (end - start))
+        num_layers = self.group_num_layers.get("kv", {}).get(0, 1)
+        entries_per_layer = len(group_addrs) // num_layers if num_layers else 0
+        if layer_id >= num_layers or entries_per_layer == 0:
+            return [], [], 0
+        start_idx = layer_id * entries_per_layer
+        for i in range(entries_per_layer):
+            idx = start_idx + i
+            block_stride = group_block_stride[idx] if group_block_stride else group_block_len[idx]
+            addr = group_addrs[idx] + block_id * block_stride
+            size = int(group_block_len[idx] / group_block_size * (end - start))
             addr_list.append(addr)
             size_list.append(size)
         return addr_list, size_list, block_id
