@@ -20,7 +20,6 @@ from vllm_ascend.utils import (
     has_layer_idx,
     is_drafter_moe_model,
     is_moe_model,
-    speculative_enable_dispatch_gmm_combine_decode,
 )
 
 
@@ -32,6 +31,14 @@ class MoECommType(Enum):
 
 
 _MRV2_IN_PROFILE_RUN: ContextVar[bool] = ContextVar("_MRV2_IN_PROFILE_RUN", default=False)
+_CANN_MEGAMOE_SUPPORTED_QUANT_NAMES = {
+    "w8a8",
+    "w4a8",
+    "w8a8_dynamic",
+    "w4a8_dynamic",
+    "quanttype.w8a8",
+    "quanttype.w4a8",
+}
 
 
 @contextmanager
@@ -52,6 +59,27 @@ def override_mrv2_in_profile_run(enabled: bool):
 
 def get_mrv2_in_profile_run() -> bool:
     return _MRV2_IN_PROFILE_RUN.get()
+
+
+def _cann_megamoe_supported_by_config(vllm_config: VllmConfig, quant_type: Any) -> bool:
+    hf_text_config = vllm_config.model_config.hf_text_config
+    hidden_size = getattr(hf_text_config, "hidden_size", None)
+    if hidden_size is None and hasattr(vllm_config.model_config, "get_hidden_size"):
+        hidden_size = vllm_config.model_config.get_hidden_size()
+    if hidden_size is None:
+        return False
+    hidden_size = int(hidden_size)
+    # Hidden-size bounds come from the CANN 9.1 MegaMoe kernel constraints:
+    # the dispatch / FFN / combine cube tiles require hidden in the closed
+    # range [1024, 8192] and a multiple of 512 (the cube K-step). Models
+    # outside this range (e.g. small Qwen variants with hidden=896, or any
+    # hidden=9216 LLaMA-style head) are silently routed back to MC2.
+    if hidden_size < 1024 or hidden_size > 8192 or hidden_size % 512 != 0:
+        return False
+    if quant_type is None:
+        return True
+    quant_name = str(getattr(quant_type, "name", quant_type)).lower()
+    return quant_name in _CANN_MEGAMOE_SUPPORTED_QUANT_NAMES
 
 
 @contextmanager
@@ -95,7 +123,12 @@ def set_ascend_forward_context(
         from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
 
         max_num_tokens = int(num_tokens_across_dp.max().item()) if num_tokens_across_dp is not None else num_tokens
-        moe_comm_type = select_moe_comm_method(max_num_tokens, vllm_config, is_draft_model)
+        moe_comm_type = select_moe_comm_method(
+            max_num_tokens,
+            vllm_config,
+            is_draft_model,
+            in_profile_run=in_profile_run,
+        )
 
         forward_context.moe_comm_type = moe_comm_type
         forward_context.moe_comm_method = get_moe_comm_method(moe_comm_type)
@@ -210,6 +243,14 @@ def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len)
     else:
         max_num_tokens = max_num_reqs * uniform_decode_query_len
     tp_size = vllm_config.parallel_config.tensor_parallel_size
+    # FIX(mega all-route): raise routing capacity so prefill also selects FUSED_MC2 (mega),
+    # capped at 512 (MegaMoe BS<=512). Serve sets max_num_batched_tokens<=512.
+    try:
+        from vllm_ascend.ascend_config import get_ascend_config as _gac
+        if _gac().enable_fused_mc2 == 2:
+            max_num_tokens = min(max(max_num_tokens, int(vllm_config.scheduler_config.max_num_batched_tokens)), 512)
+    except Exception:
+        pass
     # Use integer arithmetic for ceiling division.
     num_tokens_per_tp_rank = (max_num_tokens + tp_size - 1) // tp_size
     # NOTE: To save memory, we cap the max number of tokens to 512.
@@ -237,7 +278,12 @@ def get_mc2_mask():
     return _reserved_mc2_mask
 
 
-def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_model=False) -> MoECommType | None:
+def select_moe_comm_method(
+    num_tokens: int,
+    vllm_config: VllmConfig,
+    is_draft_model=False,
+    in_profile_run: bool = False,
+) -> MoECommType | None:
     """Select the MoE communication method according to parallel settings,
     device generation, token count, and quantization.
 
@@ -277,36 +323,59 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
     if not vllm_config.parallel_config.enable_expert_parallel or get_ep_group().world_size == 1:
         moe_comm_type = MoECommType.ALLGATHER
     elif soc_version in {AscendDeviceType.A2}:
+        # A2 historically lacked the dispatch_ffn_combine fused op
+        # (enable_fused_mc2 == 1, A3 only). CANN 9.1 MegaMoe
+        # (enable_fused_mc2 == 2) is the first fused MC2 path validated on A2,
+        # so opt-in here for the decode-shaped batch only. Prefill on A2 keeps
+        # the existing ALLGATHER path until MegaMoe is validated for large M.
+        fused_mc2_enable = get_ascend_config().enable_fused_mc2
+        # FIX(mega): profile+prefill+decode of the MAIN model route to MegaMoe (its W4A8 routed-expert
+        # standard weights are freed). The MTP drafter, however, runs a piecewise-compiled graph where
+        # the MegaMoe custom op fails on-device, so keep the drafter on the standard path (its weights
+        # are preserved by process_weights_after_loading via the is_draft/mtp guard).
+        fused_decode_guard = get_ep_group().world_size <= 32 and (not is_draft_model)
         num_experts = vllm_config.model_config.get_num_experts()
         ep_world_size = (
             vllm_config.parallel_config.world_size_across_dp // vllm_config.parallel_config.pipeline_parallel_size
         )
         num_experts_per_device = num_experts // ep_world_size
-        if num_experts_per_device <= 24 and ep_world_size >= 16 and num_tokens <= mc2_tokens_capacity:
+
+        fused_mc2_eligible = (
+            fused_mc2_enable == 2 and fused_decode_guard and _cann_megamoe_supported_by_config(vllm_config, quant_type)
+        )
+        # FIX(mega all-route): do NOT disable MegaMoe during profile_run. Weights are ND int8
+        # only (no standard NZ-int32 path), so profiling must also exercise MegaMoe. Shapes match
+        # because max_num_batched_tokens is capped to the MC2 capacity (<=512).
+        _ = in_profile_run
+
+        if fused_mc2_eligible and num_tokens <= mc2_tokens_capacity:
+            moe_comm_type = MoECommType.FUSED_MC2
+        elif num_experts_per_device <= 24 and ep_world_size >= 16 and num_tokens <= mc2_tokens_capacity:
             moe_comm_type = MoECommType.MC2
         else:
             moe_comm_type = MoECommType.ALLGATHER
 
     elif soc_version in {AscendDeviceType.A3}:
         # TODO: drop the EP-size guard when dispatch_ffn_combine supports larger EP sizes
-        # TODO: drop speculative method guard when dispatch_gmm_combine_decode supports w16a16
         fused_mc2_enable = get_ascend_config().enable_fused_mc2
-        dispatch_ffn_combine_enable = get_ep_group().world_size <= 32
+        fused_decode_guard = get_ep_group().world_size <= 32 and (not is_draft_model)
         if num_tokens <= mc2_tokens_capacity:
             fused_decode_enable = fused_mc2_enable
             if fused_mc2_enable == 1:
-                fused_decode_enable = fused_mc2_enable and dispatch_ffn_combine_enable
+                fused_decode_enable = fused_mc2_enable and fused_decode_guard
             elif fused_mc2_enable == 2:
                 fused_decode_enable = (
                     fused_mc2_enable
-                    and speculative_enable_dispatch_gmm_combine_decode(vllm_config)
-                    and quant_type == "w8a8_dynamic"
+                    and fused_decode_guard
+                    and _cann_megamoe_supported_by_config(vllm_config, quant_type)
                 )
+                if in_profile_run and fused_decode_enable:
+                    fused_decode_enable = False
             moe_comm_type = MoECommType.FUSED_MC2 if fused_decode_enable else MoECommType.MC2
         else:
             fused_prefill_enable = fused_mc2_enable
             if fused_mc2_enable == 1:
-                fused_prefill_enable = fused_mc2_enable and dispatch_ffn_combine_enable
+                fused_prefill_enable = fused_mc2_enable and fused_decode_guard
             elif fused_mc2_enable == 2:
                 fused_prefill_enable = False
             moe_comm_type = MoECommType.FUSED_MC2 if fused_prefill_enable else MoECommType.ALLTOALL
