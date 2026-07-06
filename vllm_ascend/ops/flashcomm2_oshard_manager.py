@@ -1,5 +1,6 @@
 from typing import Any
 
+from vllm.logger import logger
 from vllm.model_executor.models.utils import extract_layer_index
 
 from vllm_ascend.distributed.parallel_state import get_shard_weight_group
@@ -92,6 +93,7 @@ class Flashcomm2OShardManager:
 
         This should be called once after the model weights have been fully loaded.
         """
+        logger.info("OShard: post_process_after_loading for %d shard layers", len(self._shard_layers))
         if self._shard_layers:
             # Pick any layer (e.g., the first one) to trigger the shard post-processing
             any_layer = next(iter(self._shard_layers.values()))

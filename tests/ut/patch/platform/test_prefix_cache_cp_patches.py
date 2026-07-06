@@ -26,7 +26,6 @@ from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     _ascend_resolve_kv_cache_block_sizes,
 )
 from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager
-from vllm_ascend.utils import vllm_version_is
 
 
 def _make_hybrid_kv_cache_config(
@@ -305,6 +304,84 @@ def test_get_kv_cache_coordinator_uses_ascend_for_deepseek_v4(monkeypatch) -> No
     assert coordinator is sentinel
 
 
+class _FakeEagleManager:
+    def __init__(self) -> None:
+        self.use_eagle = False
+
+
+def test_verify_and_split_propagates_eagle_to_managers() -> None:
+    """Regression for DeepSeek-V4 prefix-cache hit rate 0% with MTP/EAGLE.
+
+    The eagle bit must reach each single-type manager: the SWA write path
+    (``cache_blocks`` -> ``reachable_block_mask``) keys the retained checkpoint
+    tail on ``manager.use_eagle``, while the read path
+    (``find_longest_cache_hit``) applies ``drop_eagle_block`` to the same
+    groups. If the manager keeps the default ``use_eagle=False`` the retained
+    tail is one block short of the eagle peek boundary, the SWA group never
+    hits, and the min-over-groups hybrid hit collapses to 0%.
+    """
+    kv_cache_config = _make_deepseek_v4_kv_cache_config()
+
+    coordinator = AscendHybridKVCacheCoordinator.__new__(AscendHybridKVCacheCoordinator)
+    coordinator.kv_cache_config = kv_cache_config
+    coordinator.dcp_world_size = 1
+    coordinator.pcp_world_size = 1
+    coordinator.enable_caching = True
+    # The c128 group (index 1) carries the EAGLE/MTP layers.
+    coordinator.eagle_group_ids = {1}
+
+    coordinator.single_type_managers = (_FakeEagleManager(), _FakeEagleManager())
+
+    coordinator.verify_and_split_kv_cache_groups()
+
+    assert coordinator.single_type_managers[1].use_eagle is True
+    assert coordinator.single_type_managers[0].use_eagle is False
+
+
+def test_verify_and_split_propagates_eagle_to_merged_spec_siblings() -> None:
+    """Upstream ``_annotate_eagle_groups_deepseek_v4`` flags only the single
+    group holding the MTP layer, but the read path merges same-spec groups and
+    applies ``drop_eagle_block`` to the whole merged group. So every sibling
+    sharing that spec must also get ``use_eagle=True`` on the write path, else
+    ``get_cached_block`` (which needs the block cached for *all* group ids)
+    misses and the hit collapses to 0%.
+    """
+    base_config = _make_deepseek_v4_kv_cache_config()
+    # Reuse the c128 spec object so the two c128 groups compare equal and merge
+    # into one attention group in verify_and_split.
+    c128_group_spec = base_config.kv_cache_groups[1].kv_cache_spec
+    kv_cache_config = KVCacheConfig(
+        num_blocks=base_config.num_blocks,
+        kv_cache_tensors=base_config.kv_cache_tensors,
+        kv_cache_groups=[
+            base_config.kv_cache_groups[0],  # c4   -> gid 0 (distinct spec)
+            base_config.kv_cache_groups[1],  # c128 -> gid 1
+            KVCacheGroupSpec(layer_names=["c128_attn_mtp"], kv_cache_spec=c128_group_spec),  # gid 2
+        ],
+    )
+
+    coordinator = AscendHybridKVCacheCoordinator.__new__(AscendHybridKVCacheCoordinator)
+    coordinator.kv_cache_config = kv_cache_config
+    coordinator.dcp_world_size = 1
+    coordinator.pcp_world_size = 1
+    coordinator.enable_caching = True
+    # Only the MTP sibling (gid 2) is flagged, exactly as upstream does.
+    coordinator.eagle_group_ids = {2}
+
+    coordinator.single_type_managers = (
+        _FakeEagleManager(),
+        _FakeEagleManager(),
+        _FakeEagleManager(),
+    )
+
+    coordinator.verify_and_split_kv_cache_groups()
+
+    # Both gid 1 and gid 2 share the c128 spec and merge, so both must be eagle.
+    assert coordinator.single_type_managers[1].use_eagle is True
+    assert coordinator.single_type_managers[2].use_eagle is True
+    assert coordinator.single_type_managers[0].use_eagle is False
+
+
 def test_deepseek_v4_detection_handles_non_mapping_nested_specs() -> None:
     kv_cache_spec = SimpleNamespace(
         kv_cache_specs=[
@@ -340,10 +417,7 @@ def test_ascend_mamba_manager_uses_logical_block_size_with_prefix_caching() -> N
         dcp_world_size=2,
         pcp_world_size=2,
     )
-    # vLLM main added a required ``scheduler_block_size`` arg to
-    # ``SingleTypeKVCacheManager.__init__``; v0.21.0 has no such parameter.
-    if not vllm_version_is("0.21.0"):
-        manager_kwargs["scheduler_block_size"] = mamba_spec.block_size
+    manager_kwargs["scheduler_block_size"] = mamba_spec.block_size
     manager = AscendMambaManager(**manager_kwargs)
 
     assert manager.block_size == mamba_spec.block_size

@@ -92,30 +92,36 @@ def _validate_optional_output(
     if tensor is None:
         return
     if tensor.device != expected_device:
-        raise ValueError(f"{name} must be on device {expected_device}, got {tensor.device}")
+        raise ValueError(
+            f"chunk_gated_delta_rule meta: {name} must be on device {expected_device}, got {tensor.device}"
+        )
     if tensor.dtype not in (torch.int32, torch.int64):
-        raise ValueError(f"{name} must have int32 or int64 dtype, got {tensor.dtype}")
+        raise ValueError(f"chunk_gated_delta_rule meta: {name} must have int32 or int64 dtype, got {tensor.dtype}")
     if not tensor.is_contiguous():
-        raise ValueError(f"{name} must be contiguous")
+        raise ValueError(f"chunk_gated_delta_rule meta: {name} must be contiguous")
     if expected_shape is not None and tuple(tensor.shape) != expected_shape:
-        raise ValueError(f"{name} must have shape {expected_shape}, got {tuple(tensor.shape)}")
+        raise ValueError(
+            f"chunk_gated_delta_rule meta: {name} must have shape {expected_shape}, got {tuple(tensor.shape)}"
+        )
 
 
 def _validate_cu_seqlens(cu_seqlens: torch.Tensor, chunk_size: int) -> None:
     if not isinstance(cu_seqlens, torch.Tensor):
-        raise TypeError("cu_seqlens must be a torch.Tensor")
+        raise TypeError("chunk_gated_delta_rule meta: cu_seqlens must be a torch.Tensor")
     if cu_seqlens.device.type != "npu":
-        raise ValueError(f"cu_seqlens must be on NPU, got {cu_seqlens.device}")
+        raise ValueError(f"chunk_gated_delta_rule meta: cu_seqlens must be on NPU, got {cu_seqlens.device}")
     if cu_seqlens.dtype not in (torch.int32, torch.int64):
-        raise ValueError(f"cu_seqlens must have int32 or int64 dtype, got {cu_seqlens.dtype}")
+        raise ValueError(
+            f"chunk_gated_delta_rule meta: cu_seqlens must have int32 or int64 dtype, got {cu_seqlens.dtype}"
+        )
     if cu_seqlens.ndim != 1:
-        raise ValueError(f"cu_seqlens must be 1D, got shape {tuple(cu_seqlens.shape)}")
+        raise ValueError(f"chunk_gated_delta_rule meta: cu_seqlens must be 1D, got shape {tuple(cu_seqlens.shape)}")
     if cu_seqlens.shape[0] < 1:
-        raise ValueError("cu_seqlens must contain at least one element")
+        raise ValueError("chunk_gated_delta_rule meta: cu_seqlens must contain at least one element")
     if not cu_seqlens.is_contiguous():
-        raise ValueError("cu_seqlens must be contiguous")
+        raise ValueError("chunk_gated_delta_rule meta: cu_seqlens must be contiguous")
     if chunk_size <= 0:
-        raise ValueError(f"chunk_size must be positive, got {chunk_size}")
+        raise ValueError(f"chunk_gated_delta_rule meta: chunk_size must be positive, got {chunk_size}")
 
 
 def _build_seq_lens(cu_seqlens: torch.Tensor) -> torch.Tensor:
@@ -199,7 +205,10 @@ def _build_chunk_meta_device_from_seq_lens(
         expected_device=seq_lens.device,
     )
     if out_chunk_indices is not None and (out_chunk_indices.ndim != 2 or out_chunk_indices.shape[1] != 2):
-        raise ValueError(f"out_chunk_indices must have shape [num_chunks, 2], got {tuple(out_chunk_indices.shape)}")
+        raise ValueError(
+            f"chunk_gated_delta_rule meta: out_chunk_indices must have shape [num_chunks, 2],"
+            f"got {tuple(out_chunk_indices.shape)}"
+        )
     _validate_optional_output(
         "out_chunk_offsets",
         out_chunk_offsets,
@@ -284,7 +293,7 @@ def build_chunk_meta_device(
     if validate_inputs:
         _validate_cu_seqlens(cu_seqlens, chunk_size)
     elif chunk_size <= 0:
-        raise ValueError(f"chunk_size must be positive, got {chunk_size}")
+        raise ValueError(f"chunk_gated_delta_rule meta: chunk_size must be positive, got {chunk_size}")
     _build_chunk_meta_device_from_seq_lens(
         _build_seq_lens(cu_seqlens) if seq_lens is None else seq_lens,
         chunk_size,

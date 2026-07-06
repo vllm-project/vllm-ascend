@@ -16,7 +16,7 @@ test_cases:
       - "--port"
       - "$SERVER_PORT"
       - "--max-model-len"
-      - "4096"
+      - "8192"
       - "--trust-remote-code"
       - "--distributed-executor-backend"
       - "mp"

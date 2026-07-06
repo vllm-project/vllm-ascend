@@ -1,7 +1,9 @@
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
 
+import vllm_ascend.attention.attention_v1 as attn_module
 from tests.ut.base import TestBase
 from vllm_ascend.attention.attention_v1 import (
     AscendAttentionBackend,
@@ -10,7 +12,43 @@ from vllm_ascend.attention.attention_v1 import (
     AscendAttentionState,
 )
 from vllm_ascend.attention.kvcomp_attn.attention_utils import get_kvcomp_decode_params, reshape_and_cache_kvcomp
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.attention.utils import (
+    AscendCommonAttentionMetadata,
+    cache_graph_workspace,
+    needs_layer_aware_fia_graph_replay,
+    using_paged_attention,
+)
+from vllm_ascend.device.device_op import A5DeviceAdaptor
+from vllm_ascend.device.utils import FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
+from vllm_ascend.utils import AscendDeviceType
+
+LARGE_HEAD_PREFILL_PATH = "vllm_ascend.device.utils.npu_large_head_prefill_attention"
+
+
+class TestAttentionGraphHelpers(TestBase):
+    def test_cache_graph_workspace_keeps_first_workspace_by_default(self):
+        graph_params = SimpleNamespace(workspaces={1: torch.empty(4)})
+        candidate_workspace = torch.empty(8)
+
+        result = cache_graph_workspace(graph_params, 1, candidate_workspace, use_max_workspace=False)
+
+        self.assertEqual(result.numel(), 4)
+        self.assertEqual(graph_params.workspaces[1].numel(), 4)
+
+    def test_cache_graph_workspace_updates_to_larger_workspace(self):
+        graph_params = SimpleNamespace(workspaces={1: torch.empty(4)})
+        candidate_workspace = torch.empty(8)
+
+        result = cache_graph_workspace(graph_params, 1, candidate_workspace, use_max_workspace=True)
+
+        self.assertEqual(result.numel(), 8)
+        self.assertEqual(graph_params.workspaces[1].numel(), 8)
+
+    def test_large_head_uses_paged_attention_on_a2(self):
+        vllm_config = MagicMock()
+        vllm_config.speculative_config = None
+        with patch("vllm_ascend.attention.utils.get_ascend_device_type", return_value=AscendDeviceType.A2):
+            self.assertTrue(using_paged_attention(1, vllm_config, head_size=FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE))
 
 
 class TestAscendAttentionBackend(TestBase):
@@ -68,7 +106,6 @@ class TestAscendAttentionMetadataBuilder(TestBase):
         self.mock_vllm_config.cache_config.block_size = 64
         self.mock_vllm_config.compilation_config.cudagraph_mode = None
         self.mock_vllm_config.scheduler_config.max_num_seqs = 10
-        self.mock_vllm_config.scheduler_config.decode_max_num_seqs = 10
         self.mock_vllm_config.scheduler_config.chunked_prefill_enabled = False
         self.mock_device = "cpu:0"
         torch.Tensor.pin_memory = lambda x: x  # noqa
@@ -81,6 +118,32 @@ class TestAscendAttentionMetadataBuilder(TestBase):
         result = self.builder.reorder_batch(mock_input_batch, mock_scheduler_output)
 
         self.assertFalse(result)
+
+    def test_unpadded_preserves_internal_seq_lens_cpu(self):
+        internal_seq_lens_cpu = torch.tensor([4, 5, 6], dtype=torch.int32)
+        common_attn_metadata = AscendCommonAttentionMetadata(
+            query_start_loc=torch.tensor([0, 2, 5, 9]),
+            query_start_loc_cpu=torch.tensor([0, 2, 5, 9]),
+            seq_lens=torch.tensor([4, 5, 6], dtype=torch.int32),
+            _seq_lens_cpu=internal_seq_lens_cpu,
+            seq_lens_cpu=None,
+            num_computed_tokens_cpu=None,
+            num_reqs=3,
+            num_actual_tokens=9,
+            max_query_len=4,
+            block_table_tensor=torch.zeros((3, 1), dtype=torch.int32),
+            slot_mapping=torch.arange(9, dtype=torch.int32),
+            causal=True,
+            actual_seq_lengths_q=[2, 3, 4],
+            positions=torch.arange(9),
+            attn_state=AscendAttentionState.ChunkedPrefill,
+            max_seq_len=6,
+        )
+
+        unpadded_metadata = common_attn_metadata.unpadded(num_actual_tokens=5, num_actual_reqs=2)
+
+        self.assertTrue(torch.equal(unpadded_metadata._seq_lens_cpu, internal_seq_lens_cpu[:2]))
+        self.assertIsNone(unpadded_metadata.seq_lens_cpu)
 
     @patch("vllm_ascend.attention.attention_v1.AscendMetadata")
     def test_build(self, mock_ascend_metadata):
@@ -136,7 +199,15 @@ class TestAscendAttentionBackendImpl(TestBase):
         self.config_patcher = patch(
             "vllm_ascend.attention.attention_v1.get_current_vllm_config", return_value=self.mock_vllm_config
         )
+        self.utils_config_patcher = patch(
+            "vllm_ascend.attention.utils.get_current_vllm_config", return_value=self.mock_vllm_config
+        )
         self.config_patcher.start()
+        self.utils_config_patcher.start()
+        needs_layer_aware_fia_graph_replay.cache_clear()
+        self.addCleanup(needs_layer_aware_fia_graph_replay.cache_clear)
+        self.addCleanup(self.utils_config_patcher.stop)
+        self.addCleanup(self.config_patcher.stop)
 
         self.impl = AscendAttentionBackendImpl(
             num_heads=8,
@@ -203,6 +274,110 @@ class TestAscendAttentionBackendImpl(TestBase):
             kv_sharing_target_layer_name=None,
             sinks=torch.tensor([-3.4062], dtype=torch.bfloat16),
         )
+
+        self.impl_large_head = AscendAttentionBackendImpl(
+            num_heads=8,
+            head_size=FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE,
+            scale=1.0,
+            num_kv_heads=8,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype="float16",
+            logits_soft_cap=None,
+            attn_type=self.attention_type.DECODER,
+            kv_sharing_target_layer_name=None,
+        )
+
+    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
+    def test_large_head_prefill_uses_device_operator_fallback(self, mock_get_forward_context):
+        query = torch.randn(2, 8, FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE)
+        key = torch.randn(2, 8, FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE)
+        value = torch.randn(2, 8, FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE)
+        output = torch.empty_like(query)
+        metadata = self.attn_metadata
+        metadata.attn_state = AscendAttentionState.PrefillNoCache
+        metadata.actual_seq_lengths_q = [2]
+        metadata.causal = True
+        metadata.attn_mask = None
+        mock_get_forward_context.return_value = MagicMock(capturing=False)
+
+        with patch(LARGE_HEAD_PREFILL_PATH, return_value=(torch.ones_like(query), None)) as mock_forward:
+            result = self.impl_large_head.forward_impl(query, key, value, (), metadata, output)
+
+        mock_forward.assert_called_once()
+        self.assertIs(result, output)
+        self.assertTrue(torch.equal(result, torch.ones_like(query)))
+
+    def test_supported_head_prefill_uses_fia(self):
+        query = torch.randn(2, 8, 64)
+        key = torch.randn(2, 8, 64)
+        value = torch.randn(2, 8, 64)
+        output = torch.empty_like(query)
+        metadata = self.attn_metadata
+        metadata.attn_state = AscendAttentionState.PrefillNoCache
+        metadata.actual_seq_lengths_q = [2]
+
+        self.impl.forward_fused_infer_attention = MagicMock(return_value=output)
+        with patch(LARGE_HEAD_PREFILL_PATH, return_value=(torch.empty_like(query), None)) as mock_forward:
+            result = self.impl.forward_impl(query, key, value, (), metadata, output)
+
+        mock_forward.assert_not_called()
+        self.impl.forward_fused_infer_attention.assert_called_once()
+        self.assertIs(result, output)
+
+    @patch("vllm_ascend.attention.attention_v1.using_paged_attention", return_value=True)
+    def test_decode_uses_paged_attention(self, mock_using_pa):
+        query = torch.randn(2, 8, FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE)
+        output = torch.empty_like(query)
+        metadata = self.attn_metadata
+        metadata.attn_state = AscendAttentionState.DecodeOnly
+
+        self.impl_large_head.forward_paged_attention = MagicMock(return_value=output)
+        self.impl_large_head.forward_fused_infer_attention = MagicMock(return_value=output)
+
+        result = self.impl_large_head.forward_impl(query, None, None, (), metadata, output)
+
+        self.impl_large_head.forward_paged_attention.assert_called_once()
+        self.impl_large_head.forward_fused_infer_attention.assert_not_called()
+        self.assertIs(result, output)
+        mock_using_pa.assert_called_once()
+
+    @patch("torch_npu.npu_fused_infer_attention_score")
+    def test_a5_device_operator_uses_fia_for_large_head(self, mock_fia):
+        query = torch.randn(2, 8, FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE)
+        key = torch.randn(2, 8, FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE)
+        value = torch.randn(2, 8, FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE)
+        metadata = self.attn_metadata
+        metadata.attn_state = AscendAttentionState.PrefillNoCache
+        metadata.actual_seq_lengths_q = [2]
+
+        mock_fia.return_value = (torch.ones_like(query), None)
+        with patch(LARGE_HEAD_PREFILL_PATH, return_value=(torch.empty_like(query), None)) as mock_forward:
+            result = A5DeviceAdaptor.npu_fused_infer_attention_score(
+                query=query,
+                key=key,
+                value=value,
+                attn_metadata=metadata,
+                key_cache=None,
+                value_cache=None,
+                current_key=key,
+                current_value=value,
+                num_heads=8,
+                num_key_value_heads=8,
+                head_size=FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE,
+                scale=1.0,
+                is_prefill_no_cache=True,
+                block_table=None,
+                input_layout="TND",
+                block_size=128,
+                actual_seq_lengths=[2],
+                actual_seq_lengths_kv=[2],
+                sparse_mode=3,
+            )
+
+        mock_forward.assert_not_called()
+        mock_fia.assert_called_once()
+        self.assertEqual(result[0].shape, query.shape)
 
     def test_forward_no_attn_metadata(self):
         """Test forward pass when attn_metadata is None"""
@@ -546,3 +721,54 @@ class TestAscendAttentionBackendImpl(TestBase):
         # Verify the result is recorded in hamming_output_records
         self.assertTrue(torch.equal(kvcomp_metadata.hamming_output, torch.ones(2, 5)))
         self.assertIsNotNone(kvcomp_metadata.seq_lens_for_hamming)
+
+    @patch("torch.npu.stream")
+    @patch("torch.npu.graph_task_update_begin")
+    @patch("torch.npu.graph_task_update_end")
+    @patch("torch_npu.npu_fused_infer_attention_score")
+    @patch("vllm_ascend.attention.attention_v1.get_graph_params")
+    @patch("vllm_ascend.attention.attention_v1._EXTRA_CTX")
+    @patch("vllm_ascend.attention.attention_v1.using_paged_attention", return_value=False)
+    @patch("vllm_ascend.attention.attention_v1.needs_layer_aware_fia_graph_replay", return_value=False)
+    @patch("vllm_ascend.attention.attention_v1._ATTN_KEYS_BUFFER", new=[])
+    def test_update_graph_params(
+        self,
+        mock_needs_layer_aware_fia_graph_replay,
+        mock_using_paged_attention,
+        mock_EXTRA_CTX,
+        mock_get_graph_params,
+        mock_fia,
+        mock_graph_task_update_end,
+        mock_graph_task_update_begin,
+        mock_stream,
+    ):
+        """Test behavior when _ATTN_KEYS_BUFFER is [] after dummy_run."""
+
+        mock_EXTRA_CTX.sinks = False
+        mock_EXTRA_CTX.is_draft_model = False
+
+        param: list[MagicMock | None] = [MagicMock()] * 21
+        param[16] = None
+        param[20] = None
+
+        mock_get_graph_params.return_value.attn_params = {1: [tuple(param)] * 3}
+        mock_get_graph_params.return_value.handles = {1: [MagicMock()] * 3}
+        mock_get_graph_params.return_value.events = {1: [MagicMock()] * 3}
+
+        attn_metadata_keys = [
+            "model.layers.10.self_attn.attn",
+            "model.layers.2.self_attn.attn",
+            "model.layers.5.self_attn.attn",
+        ]
+        forward_context = MagicMock()
+        forward_context.attn_metadata = {key: MagicMock() for key in attn_metadata_keys}
+        # breakpoint()
+        self.impl.update_graph_params(self.mock_stream, forward_context, 1, self.mock_vllm_config)
+
+        expected = [
+            "model.layers.2.self_attn.attn",
+            "model.layers.5.self_attn.attn",
+            "model.layers.10.self_attn.attn",
+        ]
+        self.assertEqual(attn_module._ATTN_KEYS_BUFFER, expected)
+        self.assertEqual(mock_fia.out.call_count, 3)

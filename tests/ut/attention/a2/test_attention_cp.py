@@ -4,6 +4,7 @@ import torch
 
 from tests.ut.attention.utils import patch_distributed_groups
 from tests.ut.base import TestBase
+from vllm_ascend.attention import utils as attention_utils
 from vllm_ascend.attention.attention_v1 import AscendMetadata
 from vllm_ascend.attention.context_parallel.attention_cp import AscendAttentionCPImpl
 from vllm_ascend.attention.context_parallel.common_cp import (
@@ -36,7 +37,15 @@ class TestAscendAttentionCPImpl(TestBase):
         self.config_patcher = patch(
             "vllm_ascend.attention.attention_v1.get_current_vllm_config", return_value=self.mock_vllm_config
         )
+        self.utils_config_patcher = patch(
+            "vllm_ascend.attention.utils.get_current_vllm_config", return_value=self.mock_vllm_config
+        )
         self.config_patcher.start()
+        self.utils_config_patcher.start()
+        attention_utils.needs_layer_aware_fia_graph_replay.cache_clear()
+        self.addCleanup(attention_utils.needs_layer_aware_fia_graph_replay.cache_clear)
+        self.addCleanup(self.utils_config_patcher.stop)
+        self.addCleanup(self.config_patcher.stop)
 
         self.impl = AscendAttentionCPImpl(
             num_heads=8,
@@ -282,6 +291,20 @@ class TestUpdateNpuAttnOutLse(TestBase):
         self.layer_no_quant.layer_name = "test_layer"
         self.layer_no_quant._k_scale_float = 1.0
         self.layer_no_quant._v_scale_float = 1.0
+        self.mock_vllm_config = MagicMock()
+        self.mock_vllm_config.speculative_config = None
+        self.config_patcher = patch(
+            "vllm_ascend.attention.attention_v1.get_current_vllm_config", return_value=self.mock_vllm_config
+        )
+        self.utils_config_patcher = patch(
+            "vllm_ascend.attention.utils.get_current_vllm_config", return_value=self.mock_vllm_config
+        )
+        self.config_patcher.start()
+        self.utils_config_patcher.start()
+        attention_utils.needs_layer_aware_fia_graph_replay.cache_clear()
+        self.addCleanup(attention_utils.needs_layer_aware_fia_graph_replay.cache_clear)
+        self.addCleanup(self.utils_config_patcher.stop)
+        self.addCleanup(self.config_patcher.stop)
 
         self.impl = AscendAttentionCPImpl(
             num_heads=8,

@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-10 04:47+0000\n"
+"POT-Creation-Date: 2026-06-22 05:29+0000\n"
 "PO-Revision-Date: 2026-01-22 16:30+0800\n"
 "Last-Translator: Gemini\n"
 "Language: zh_CN\n"
@@ -366,6 +366,54 @@ msgstr "声明的支持"
 msgid "Practical meaning"
 msgstr "实际含义"
 
+#: ../../source/user_guide/feature_guide/graph_mode.md
+msgid "`attention_v1`"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/graph_mode.md
+msgid "`ALWAYS`"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/graph_mode.md
+msgid "Supports graph execution for mixed prefill/decode batches"
+msgstr "支持混合 prefill/decode 批次的图执行"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md
+msgid "`context_parallel/attention_cp`"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/graph_mode.md
+msgid "`mla_v1`"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/graph_mode.md
+msgid "`UNIFORM_BATCH`"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/graph_mode.md
+msgid ""
+"Graph execution is limited to uniform batches; full graph is more "
+"restricted"
+msgstr "图执行仅限于均匀批次；全图限制更多"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md
+msgid "`context_parallel/mla_cp`"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/graph_mode.md
+msgid "`sfa_v1`"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/graph_mode.md
+msgid "`context_parallel/sfa_cp`"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/graph_mode.md:109
+msgid ""
+"This is why the effective graph mode on Ascend may differ from the mode "
+"requested in configuration."
+msgstr "这就是 Ascend 上的有效图模式可能与配置中请求的模式不同的原因。"
+
 #: ../../source/user_guide/feature_guide/graph_mode.md:111
 msgid "Troubleshooting capture resource exhaustion"
 msgstr "捕获资源耗尽问题排查"
@@ -376,7 +424,9 @@ msgid ""
 "runtime resources available on the current stack, vLLM Ascend now raises "
 "a dedicated error with mitigation guidance. In practice, the most useful "
 "actions are:"
-msgstr "如果 ACLGraph 捕获失败，因为配置的图大小超过了当前栈上可用的运行时资源，vLLM Ascend 现在会引发一个带有缓解指导的专用错误。实际上，最有用的操作是："
+msgstr ""
+"如果 ACLGraph 捕获失败，因为配置的图大小超过了当前栈上可用的运行时资源，vLLM Ascend "
+"现在会引发一个带有缓解指导的专用错误。实际上，最有用的操作是："
 
 #: ../../source/user_guide/feature_guide/graph_mode.md:115
 msgid "upgrade to a newer HDK/CANN stack if one is available;"
@@ -601,9 +651,11 @@ msgid ""
 "when the workload is mostly uniform decode."
 msgstr ""
 "如果 ACL 图捕获失败，错误文本中包含确认的流资源签名，例如 `207008` 与 `Stream resources are "
-"insufficient` 或 `Insufficient_Stream_Resources`，vLLM Ascend 将重新引发该捕获失败，并附带针对性的缓解指导。"
-"实际上，主要手段是：升级到较新的 HDK/CANN 栈，减少 `cudagraph_capture_sizes`，降低 "
-"`max_cudagraph_capture_size`，或者在工作负载主要是均匀解码时优先使用 `FULL` / `FULL_DECODE_ONLY`。"
+"insufficient` 或 `Insufficient_Stream_Resources`，vLLM Ascend "
+"将重新引发该捕获失败，并附带针对性的缓解指导。实际上，主要手段是：升级到较新的 HDK/CANN 栈，减少 "
+"`cudagraph_capture_sizes`，降低 "
+"`max_cudagraph_capture_size`，或者在工作负载主要是均匀解码时优先使用 `FULL` / "
+"`FULL_DECODE_ONLY`。"
 
 #: ../../source/user_guide/feature_guide/graph_mode.md:276
 msgid "**Offline example:**"

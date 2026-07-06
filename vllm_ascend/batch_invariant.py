@@ -82,6 +82,10 @@ def override_envs_for_invariance():
 
     os.environ["HCCL_DETERMINISTIC"] = "strict"
     os.environ["LCCL_DETERMINISTIC"] = "1"
+    logger.debug(
+        "Batch-invariant env override: weight_nz_mode=0, enable_matmul_allreduce=False, "
+        "HCCL_DETERMINISTIC=strict, LCCL_DETERMINISTIC=1",
+    )
 
 
 _batch_invariant_LIB = None
@@ -90,6 +94,11 @@ _batch_invariant_LIB = None
 def enable_batch_invariant_mode():
     global _batch_invariant_LIB
     _batch_invariant_LIB = torch.library.Library("aten", "IMPL")
+    logger.debug(
+        "Batch-invariant op registration: Triton=%s, AscendC=%s",
+        HAS_TRITON,
+        HAS_ASCENDC_BATCH_INVARIANT,
+    )
 
     # Register operators only implemented in triton.
     if HAS_TRITON:

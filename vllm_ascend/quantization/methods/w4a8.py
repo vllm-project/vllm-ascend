@@ -674,12 +674,12 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2).contiguous()
         layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2).contiguous()
 
-        def process_scale_compressed_tensors(scale: torch.Tensor):
+        def process_scale_compressed_tensors(scale: torch.Tensor, squeeze: bool = True):
             scale = scale.transpose(1, 2).to(torch.float32).contiguous()
             scale_np = scale.cpu().numpy()
             scale_np.dtype = np.uint32
             scale_uint64_tensor = torch.from_numpy(scale_np.astype(np.int64)).npu()
-            if self.is_per_channel_weight:
+            if self.is_per_channel_weight and squeeze:
                 return self.maybe_squeeze_per_channel_weight_scale(scale_uint64_tensor)
             return scale_uint64_tensor
 
@@ -708,7 +708,8 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         w2_bias = update_bias_compressed_tensors(layer.w2_weight.data, layer.w2_weight_scale.data, self.weight_strategy)
 
         layer.w13_weight_scale.data = process_scale_compressed_tensors(layer.w13_weight_scale.data)
-        layer.w2_weight_scale.data = process_scale_compressed_tensors(layer.w2_weight_scale.data)
+        # To use torch_npu.npu_grouped_matmul, keep w2_weigh_scale unsqueezed
+        layer.w2_weight_scale.data = process_scale_compressed_tensors(layer.w2_weight_scale.data, False)
 
         w13_scale_bias = torch.nn.Parameter(w13_bias, requires_grad=False)
         layer.register_parameter("w13_scale_bias", w13_scale_bias)

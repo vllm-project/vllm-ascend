@@ -66,42 +66,9 @@ Make sure your vLLM and vLLM Ascend are installed after your Python configuratio
 
 ## Optimizations
 
-### 1. Compilation Optimization
+### 1. Memory Allocator Optimization
 
-#### 1.1. Install optimized `python` (OUT OF DATE)
-
-Python supports **LTO** and **PGO** optimization starting from version `3.6` and above, which can be enabled at compile time. And we have offered optimized `python` packages directly to users for the sake of convenience. You can also reproduce the `python` build following this [tutorial](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0063.html) according to your specific scenarios.
-
-```{code-block} bash
-   :substitutions:
-mkdir -p /workspace/tmp
-cd /workspace/tmp
-
-# Download prebuilt lib and packages
-wget https://repo.oepkgs.net/ascend/pytorch/vllm/lib/libcrypto.so.1.1
-wget https://repo.oepkgs.net/ascend/pytorch/vllm/lib/libomp.so
-wget https://repo.oepkgs.net/ascend/pytorch/vllm/lib/libssl.so.1.1
-wget https://repo.oepkgs.net/ascend/pytorch/vllm/python/py311_bisheng.tar.gz
-
-# Configure python and pip
-
-cp ./*.so* /usr/local/lib
-tar -zxvf ./py311_bisheng.tar.gz -C /usr/local/
-mv  /usr/local/py311_bisheng/  /usr/local/python
-sed -i "1c#\!/usr/local/python/bin/python3.11" /usr/local/python/bin/pip3
-sed -i "1c#\!/usr/local/python/bin/python3.11" /usr/local/python/bin/pip3.11
-ln -sf  /usr/local/python/bin/python3  /usr/bin/python
-ln -sf  /usr/local/python/bin/python3  /usr/bin/python3
-ln -sf  /usr/local/python/bin/python3.11  /usr/bin/python3.11
-ln -sf  /usr/local/python/bin/pip3  /usr/bin/pip3
-ln -sf  /usr/local/python/bin/pip3  /usr/bin/pip
-
-export PATH=/usr/bin:/usr/local/python/bin:$PATH
-```
-
-### 2. OS Optimization
-
-#### 2.1. jemalloc
+#### 1.1. jemalloc
 
 **jemalloc** is a memory allocator that improves performance for multi-threaded scenarios and can reduce memory fragmentation. jemalloc uses a local thread memory manager to allocate variables, which can avoid lock competition between threads and can hugely optimize performance.
 
@@ -115,7 +82,7 @@ sudo apt install libjemalloc2
 export LD_PRELOAD=/usr/lib/"$(uname -i)"-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 ```
 
-#### 2.2. Tcmalloc
+#### 1.2. Tcmalloc
 
 **TCMalloc (Thread Caching Malloc)** is a universal memory allocator that improves overall performance while ensuring low latency by introducing a multi-level cache structure, reducing mutex contention and optimizing large object processing flow. Find more [details](https://www.hiascend.com/document/detail/zh/Pytorch/700/ptmoddevg/trainingmigrguide/performance_tuning_0068.html).
 
@@ -138,7 +105,7 @@ export LD_PRELOAD="$LD_PRELOAD:<path>"
 ldd `which python`
 ```
 
-### 3. `torch_npu` Optimization
+### 2. `torch_npu` Optimization
 
 Some performance tuning features in `torch_npu` are controlled by environment variables. Some features and their related environment variables are shown below.
 
@@ -169,9 +136,9 @@ export TASK_QUEUE_ENABLE=2
 export CPU_AFFINITY_CONF=1
 ```
 
-### 4. CANN Optimization
+### 3. CANN Optimization
 
-#### 4.1. HCCL Optimization
+#### 3.1. HCCL Optimization
 
 There are some performance tuning features in HCCL, which are controlled by environment variables.
 
@@ -189,7 +156,7 @@ Plus, there are more features for performance optimization in specific scenarios
 - `HCCL_RDMA_SL`: Use this var to configure service level of RDMA NIC. Find more [details](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0046.html).
 - `HCCL_BUFFSIZE`: Use this var to control the cache size for sharing data between two NPUs. Find more [details](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0047.html).
 
-### 5. OS Optimization
+### 4. Kernel Optimization
 
 This section describes operating system–level optimizations applied on the host machine (bare metal or Kubernetes node) to improve performance stability, latency, and throughput for inference workloads.
 
@@ -197,7 +164,7 @@ This section describes operating system–level optimizations applied on the hos
 These settings must be applied on the host OS and with root privileges. Not inside containers.
 :::
 
-#### 5.1
+#### 4.1
 
 Set CPU Frequency Governor to `performance`
 
@@ -216,7 +183,7 @@ Benefits
 - Reduces latency jitter
 - Improves predictability for inference workloads
 
-#### 5.2 Disable Swap Usage
+#### 4.2 Disable Swap Usage
 
 ```shell
 sysctl -w vm.swappiness=0
@@ -236,7 +203,7 @@ Notes
 - For inference workloads, swap can introduce second-level latency
 - Recommended values are `0` or `1`
 
-#### 5.3 Disable Automatic NUMA Balancing
+#### 4.3 Disable Automatic NUMA Balancing
 
 ```shell
 sysctl -w kernel.numa_balancing=0
@@ -258,7 +225,7 @@ Recommended For
 - Ascend / NPU deployments with explicit NUMA binding
 - Systems with manually managed CPU and memory affinity
 
-#### 5.4 Increase Scheduler Migration Cost
+#### 4.4 Increase Scheduler Migration Cost
 
 ```shell
 sysctl -w kernel.sched_migration_cost_ns=50000

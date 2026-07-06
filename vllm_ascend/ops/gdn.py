@@ -21,19 +21,10 @@ from einops import rearrange
 from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fla.ops.l2norm import l2norm_fwd
-
-from vllm_ascend.utils import vllm_version_is
-
-if vllm_version_is("0.21.0"):
-    from vllm.model_executor.layers.mamba.gdn_linear_attn import (  # type: ignore[import-not-found]
-        GatedDeltaNetAttention,
-    )
-else:
-    from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
-
+from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
 from vllm.triton_utils import triton
-from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
+from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata  # type: ignore
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
@@ -44,10 +35,11 @@ from vllm_ascend.compilation.acl_graph import (
     get_graph_params,
 )
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionBackend
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
-from vllm_ascend.ops.triton.mamba.causal_conv1d import causal_conv1d_fn
+from vllm_ascend.ops.triton.mamba.causal_conv1d import extract_last_width
 from vllm_ascend.utils import weak_ref_tensors
 
 
@@ -60,14 +52,29 @@ def to_int64_tuple(tensor: torch.Tensor) -> tuple[int, ...]:
 
 def _check_and_get_host_args(attn_metadata, field_name: str, sub_field_name: str):
     if (fallback_meta := getattr(attn_metadata, field_name, None)) is None:
-        raise RuntimeError(
-            f"Expected attn_metadata.{field_name}.{sub_field_name} for patched GDN non-spec prefill path."
-        )
+        raise RuntimeError(f"Expected attn_metadata.{field_name}.{sub_field_name} for Ascend GDN fallback path.")
     return fallback_meta
 
 
+def _check_and_get_runtime_prefill_args(attn_metadata, field_name: str):
+    value = getattr(attn_metadata, field_name, None)
+    if value is None:
+        raise RuntimeError(f"Expected attn_metadata.{field_name} for Ascend GDN prefill path.")
+    return value
+
+
 def get_non_spec_causal_conv1d_host_args(attn_metadata) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-    fallback_meta = _check_and_get_host_args(attn_metadata, "non_spec_prefill_fallback_meta", "causal_conv1d")
+    fallback_meta = getattr(attn_metadata, "non_spec_prefill_fallback_meta", None)
+    if fallback_meta is None:
+        query_start_loc = _check_and_get_runtime_prefill_args(attn_metadata, "non_spec_query_start_loc")
+        cache_indices = _check_and_get_runtime_prefill_args(attn_metadata, "non_spec_state_indices_tensor")
+        has_initial_state = _check_and_get_runtime_prefill_args(attn_metadata, "has_initial_state")
+        return (
+            to_int64_tuple(query_start_loc),
+            to_int64_tuple(cache_indices),
+            to_int64_tuple(has_initial_state),
+        )
+
     causal_conv1d_meta = fallback_meta.causal_conv1d
     return (
         to_int64_tuple(causal_conv1d_meta.query_start_loc_cpu),
@@ -214,6 +221,13 @@ def update_conv1d_graph_params(
                         q_per_seq=q_per_seq,
                         with_num_accepted=True,
                     )
+                elif branch == "spec" and meta.spec_sequence_masks is None:
+                    # The captured graph may contain a spec conv1d task even
+                    # when this DP rank has no runtime spec sequence. Leaving
+                    # cache_indices empty makes the kernel use default
+                    # batch-indexed state writes, which can corrupt conv_state.
+                    # Mark every input row as -1 so the task is a state no-op.
+                    new_cache_indices = (-1,) * cap_x_dim0
                 elif branch == "non_spec_decode":
                     non_sdq_host, non_sd_cidx_host = get_causal_conv1d_update_host_args(meta)
                     new_query_start_loc, new_cache_indices, _ = _pad_conv1d_host_args_to_capture(
@@ -246,7 +260,9 @@ def update_conv1d_graph_params(
 
 
 def get_non_spec_chunked_prefill_meta(attn_metadata):
-    fallback_meta = _check_and_get_host_args(attn_metadata, "non_spec_prefill_fallback_meta", "chunk")
+    fallback_meta = getattr(attn_metadata, "non_spec_prefill_fallback_meta", None)
+    if fallback_meta is None:
+        return None
     return fallback_meta.chunk
 
 
@@ -275,6 +291,9 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
     def _warmup_prefill_kernels_v0202(self, mixed_qkv: torch.Tensor) -> None:
         return
 
+    def get_attn_backend(self) -> type[AttentionBackend]:
+        return AscendGDNAttentionBackend
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -292,10 +311,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             ba, _ = self.in_proj_ba(hidden_states)
             z, _ = self.in_proj_z(hidden_states)
             z = z.reshape(z.size(0), -1, self.head_v_dim)
-            if vllm_version_is("0.21.0"):
-                b, a = ba.chunk(2, dim=-1)
-            else:
-                b, a = self.split_ba(ba)
+            b, a = self._split_ba_for_tp(ba)
             b = b.contiguous()
             a = a.contiguous()
         else:
@@ -307,10 +323,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)
                 z = z.reshape(z.size(0), -1, self.head_v_dim)
                 ba, _ = self.in_proj_ba(hidden_states)
-                if vllm_version_is("0.21.0"):
-                    b, a = ba.chunk(2, dim=-1)
-                else:
-                    b, a = self.split_ba(ba)
+                b, a = self._split_ba_for_tp(ba)
 
                 b = b.contiguous()
                 a = a.contiguous()
@@ -339,24 +352,14 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             device=hidden_states.device,
         )
 
-        if vllm_version_is("0.21.0"):
-            torch.ops.vllm.gdn_attention_core(
-                mixed_qkv,
-                b,
-                a,
-                core_attn_out,
-                False,
-                self.prefix,
-            )
-        else:
-            torch.ops.vllm.qwen_gdn_attention_core(
-                mixed_qkv,
-                b,
-                a,
-                core_attn_out,
-                self.prefix,
-                False,
-            )
+        torch.ops.vllm.qwen_gdn_attention_core(
+            mixed_qkv,
+            b,
+            a,
+            core_attn_out,
+            self.prefix,
+            False,
+        )
 
         # ============================================================
         # Part 3: Output Projection
@@ -502,21 +505,53 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         if attn_metadata.num_prefills > 0:
             if mixed_qkv_non_spec is not None:
                 if get_pcp_group().world_size > 1:
+                    conv_weights_T = conv_weights.transpose(0, 1)
+                    activation_num = 1 if self.activation else 0
+                    non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor
+                    (query_start_loc_opt, cache_indices_opt, initial_state_mode_opt) = (
+                        get_non_spec_causal_conv1d_host_args(attn_metadata)
+                    )
+                    width = conv_weights.shape[1]
+                    state_len = width - 1
+                    num_seqs = non_spec_query_start_loc.shape[0] - 1
+                    prefill_seq_offset = max(0, num_seqs - attn_metadata.num_prefills)
+                    prefill_cache_indices = non_spec_state_indices_tensor[prefill_seq_offset:]
                     mixed_qkv_non_spec_T = mixed_qkv_non_spec.transpose(0, 1)
-                    has_initial_state = attn_metadata.has_initial_state
-                    non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor  # noqa: E501
-                    conv_state = self_kv_cache[0].transpose(-1, -2)
-                    mixed_qkv_non_spec = causal_conv1d_fn(
-                        mixed_qkv_non_spec_T,
-                        conv_weights,
-                        self.conv1d.bias,
-                        activation=self.activation,
-                        conv_states=conv_state,
-                        has_initial_state=has_initial_state,
-                        cache_indices=non_spec_state_indices_tensor,
-                        query_start_loc=non_spec_query_start_loc,
-                        metadata=attn_metadata,
-                    ).transpose(0, 1)
+                    last_width_prefill_x = extract_last_width(
+                        mixed_qkv_non_spec_T, non_spec_query_start_loc[prefill_seq_offset:], state_len
+                    )
+                    pcp_rank = get_pcp_group().rank_in_group
+                    all_last_width_prefill_x = get_pcp_group().all_gather(
+                        last_width_prefill_x.unsqueeze(0).contiguous(), 0
+                    )
+                    if pcp_rank > 0 and prefill_cache_indices.shape[0] > 0:
+                        self_kv_cache[0][prefill_cache_indices, :state_len, :] = all_last_width_prefill_x[
+                            pcp_rank - 1, ...
+                        ].transpose(-1, -2)
+                        ism_list = list(initial_state_mode_opt)
+                        for i in range(prefill_seq_offset, len(ism_list)):
+                            ism_list[i] = 1
+                        initial_state_mode_opt = tuple(ism_list)
+                    mixed_qkv_non_spec_output = torch.empty_like(mixed_qkv_non_spec)
+                    torch.ops._C_ascend.npu_causal_conv1d_custom(
+                        mixed_qkv_non_spec_output,
+                        mixed_qkv_non_spec,
+                        conv_weights_T,
+                        conv_state=self_kv_cache[0],
+                        bias_opt=self.conv1d.bias,
+                        query_start_loc_opt=query_start_loc_opt,
+                        cache_indices_opt=cache_indices_opt,
+                        initial_state_mode_opt=initial_state_mode_opt,
+                        num_accepted_tokens_opt=[],
+                        activation_mode=activation_num,
+                        pad_slot_id=PAD_SLOT_ID,
+                        run_mode=0,
+                    )
+                    mixed_qkv_non_spec = mixed_qkv_non_spec_output
+                    if prefill_cache_indices.shape[0] > 0:
+                        self_kv_cache[0][prefill_cache_indices, :state_len, :] = all_last_width_prefill_x[
+                            -1, ...
+                        ].transpose(-1, -2)
                 else:
                     conv_weights_T = conv_weights.transpose(0, 1)
                     activation_num = 1 if self.activation else 0

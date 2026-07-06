@@ -105,20 +105,37 @@ class MemcacheBackend(Backend):
 
     def get(self, key: list[str], addr: list[list[int]], size: list[list[int]]):
         if self._lazy_init and not self._store_initialized:
-            logger.error("get() called before store init. keys=%s. Call put() first to trigger initialization.", key)
+            logger.error(
+                "Failed to get %d keys out of %d. Store is not initialized; "
+                "call put() first to trigger initialization.",
+                len(key),
+                len(key),
+            )
+            logger.debug("Failed to get key details. keys=%s", key)
             return
         assert self.store is not None
         try:
             res = self.store.batch_get_into_layers(key, addr, size, MmcDirect.COPY_G2L.value)
-            for value in res:
-                if value != 0:
-                    logger.error(
-                        "Failed to get key. keys=%s, result=%s. Check key existence and memory state.", key, res
-                    )
+            failed_codes = [int(value) for value in res if value != 0]
+            failed_count = len(failed_codes)
+            if failed_count:
+                error_codes = sorted(set(failed_codes))
+                logger.error(
+                    "Failed to get %d keys out of %d. error_codes=%s. Check key existence and memory state.",
+                    failed_count,
+                    len(key),
+                    error_codes,
+                )
+                logger.debug("Failed to get key details. keys=%s, result=%s", key, res)
             return res
         except Exception as e:
             logger.error(
-                "Failed to get key. keys=%s, type=%s, error=%s. Check store state and network.",
+                "Failed to get %d keys out of %d. Check store state and network.",
+                len(key),
+                len(key),
+            )
+            logger.debug(
+                "Failed to get key details. keys=%s, type=%s, error=%s",
                 key,
                 type(e).__name__,
                 e,
@@ -130,14 +147,30 @@ class MemcacheBackend(Backend):
             self._ensure_initialized()
             assert self.store is not None
             res = self.store.batch_put_from_layers(key, addr, size, MmcDirect.COPY_L2G.value)
-            for value in res:
-                if value != 0:
-                    logger.error("Failed to put key. keys=%s, result=%s. Check memory and store capacity.", key, res)
-                    if self._lazy_init:
-                        logger.warning("First DSV4(compress) request failure is expected. This is normal behavior.")
+            failed_codes = [int(value) for value in res if value != 0]
+            failed_count = len(failed_codes)
+            if failed_count:
+                error_codes = sorted(set(failed_codes))
+                logger.error(
+                    "Failed to put %d keys out of %d. error_codes=%s. Check memory and store capacity.",
+                    failed_count,
+                    len(key),
+                    error_codes,
+                )
+                logger.debug("Failed to put key details. keys=%s, result=%s", key, res)
+                if self._lazy_init:
+                    logger.warning("First DSV4(compress) request failure is expected. This is normal behavior.")
         except Exception as e:
             logger.error(
-                "Failed to put key. keys=%s, type=%s, error=%s. Check store state and memory.", key, type(e).__name__, e
+                "Failed to put %d keys out of %d. Check store state and memory.",
+                len(key),
+                len(key),
+            )
+            logger.debug(
+                "Failed to put key details. keys=%s, type=%s, error=%s",
+                key,
+                type(e).__name__,
+                e,
             )
             if self._lazy_init:
                 logger.warning("First DSV4(compress) request failure is expected. This is normal behavior.")

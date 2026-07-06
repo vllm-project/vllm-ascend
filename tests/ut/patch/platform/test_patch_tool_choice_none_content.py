@@ -1,10 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import pytest
 from openai.types.chat.chat_completion import ChatCompletion as OpenAIChatCompletion
 from openai.types.chat.chat_completion_chunk import ChatCompletionChunk
 from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
     ChatCompletionResponse,
     ChatCompletionResponseChoice,
     ChatCompletionResponseStreamChoice,
@@ -19,12 +17,10 @@ from vllm.entrypoints.openai.engine.protocol import (
     ToolCall,
     UsageInfo,
 )
-from vllm.entrypoints.openai.engine.serving import OpenAIServing
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.parser.abstract_parser import DelegatingParser
 
 from vllm_ascend.patch.platform import patch_tool_choice_none_content  # noqa: F401
-from vllm_ascend.utils import vllm_version_is
 
 
 class _DummyDelegatingParser(DelegatingParser):
@@ -52,55 +48,6 @@ class _DummyDelegatingParser(DelegatingParser):
         return None
 
 
-@pytest.mark.skipif(
-    not vllm_version_is("0.21.0"), reason="OpenAIServing._parse_tool_calls_from_content exists only in v0.21.0"
-)
-def test_parse_tool_calls_from_content_allows_named_tool_choice_with_none_content():
-    request = ChatCompletionRequest.model_validate(
-        {
-            "model": "test-model",
-            "messages": [{"role": "user", "content": "test"}],
-            "tools": [
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "get_weather",
-                        "parameters": {"type": "object", "properties": {}},
-                    },
-                }
-            ],
-            "tool_choice": {"type": "function", "function": {"name": "get_weather"}},
-        }
-    )
-
-    tool_calls, content = OpenAIServing._parse_tool_calls_from_content(
-        request=request,
-        tokenizer=None,
-        enable_auto_tools=True,
-        tool_parser_cls=None,
-        content=None,
-    )
-
-    assert content is None
-    assert tool_calls == []
-    assert not request.tool_choice
-
-    tool_calls, content = OpenAIServing._parse_tool_calls_from_content(
-        request=request,
-        tokenizer=None,
-        enable_auto_tools=True,
-        tool_parser_cls=None,
-        content='{"city": "Beijing"}',
-    )
-
-    assert content is None
-    assert request.tool_choice
-    assert tool_calls is not None
-    assert len(tool_calls) == 1
-    assert tool_calls[0].name == "get_weather"
-    assert tool_calls[0].arguments == '{"city": "Beijing"}'
-
-
 def test_responses_parser_allows_named_tool_choice_with_none_content():
     request = ResponsesRequest.model_validate(
         {
@@ -118,9 +65,9 @@ def test_responses_parser_allows_named_tool_choice_with_none_content():
     )
     parser = _DummyDelegatingParser(tokenizer=None)
 
-    tool_calls, content = parser._parse_tool_calls(
-        request=request,
+    tool_calls, content = parser._extract_tool_calls(
         content=None,
+        request=request,
         enable_auto_tools=False,
     )
 
@@ -146,10 +93,33 @@ def test_chat_completion_response_omits_empty_tool_calls_payload():
     response = _chat_response(ChatMessage(role="assistant", content="done"))
 
     payload = response.model_dump()
+    payload_json = response.model_dump_json()
 
     assert "tool_calls" not in payload["choices"][0]["message"]
     parsed = OpenAIChatCompletion.model_validate(payload)
     assert parsed.choices[0].message.tool_calls is None
+    parsed_json = OpenAIChatCompletion.model_validate_json(payload_json)
+    assert parsed_json.choices[0].message.tool_calls is None
+
+
+def test_chat_completion_response_model_dump_json_uses_json_mode(monkeypatch):
+    seen_kwargs = {}
+
+    def fake_model_dump(self, *args, **kwargs):
+        seen_kwargs.update(kwargs)
+        return {"choices": [{"message": {"tool_calls": []}}]}
+
+    monkeypatch.setattr(
+        patch_tool_choice_none_content,
+        "_original_chat_completion_response_model_dump",
+        fake_model_dump,
+    )
+
+    response = _chat_response(ChatMessage(role="assistant", content="done"))
+    payload_json = response.model_dump_json()
+
+    assert seen_kwargs["mode"] == "json"
+    assert payload_json == '{"choices":[{"message":{}}]}'
 
 
 def test_chat_completion_response_keeps_non_empty_tool_calls_payload():

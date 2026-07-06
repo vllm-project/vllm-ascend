@@ -62,6 +62,12 @@ class ModelNetLoaderElastic(BaseModelLoader):
 
         # Try to read config file at first
         extra = load_config.model_loader_extra_config
+
+        if extra is not None and not isinstance(extra, dict):
+            err_msg = "NetLoader requires --model-loader-extra-config to be a JSON object."
+            logger.error(err_msg)
+            raise RuntimeError(err_msg)
+
         if extra and "CONFIG_FILE" in extra:
             try:
                 logger.info("Reading configs in file %s ...", load_config.model_loader_extra_config["CONFIG_FILE"])

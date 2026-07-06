@@ -28,6 +28,7 @@ __pycache__/
 # Distribution / packaging
 .Python
 build/
+build_out/
 !csrc/cmake/third_party/build/
 !csrc/cmake/third_party/build/modules/
 !csrc/cmake/third_party/build/modules/patch/

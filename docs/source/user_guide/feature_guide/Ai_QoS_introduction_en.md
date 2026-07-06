@@ -23,7 +23,7 @@
 ## Build AI QoS Module
 
 Build and install the AI QoS extension before using `tools/ai_qos.py`.
-The DSMI include/library paths are environment-dependent. Locate the paths on your machine first, then replace `YOUR_DSMI_INCLUDE_DIR` and `YOUR_DSMI_LIBRARY_FILE` in the command (for example, `/usr/local/Ascend/driver/include` and `/usr/local/Ascend/driver/lib64/driver/libdrvdsmi_host.so`).
+The DSMI include‑file (dsmi_common_interface.h) and library‑file (libdrvdsmi_host.so) paths are environment-dependent. Locate the paths on your machine first, then replace `YOUR_DSMI_INCLUDE_DIR` and `YOUR_DSMI_LIBRARY_FILE` in the command (for example, `/usr/local/Ascend/driver/include` and `/usr/local/Ascend/driver/lib64/driver/libdrvdsmi_host.so`).
 
 In most deployments, these commands are executed inside a container. When creating the container, make sure the DSMI header/library directories are mounted into the container filesystem; otherwise CMake cannot find the files.
 
@@ -51,7 +51,7 @@ cmake --install tools/ai_qos/build
 
 ​### 2) Manual mode
 
-​python tools/ai_qos.py --mode manual --AIV_D2D *{priority}* --AIV_H2D *{priority}* --SDMA_D2D *{priority}* --SDMA_H2D *{priority}* --PCIEDMA_H2D *{priority}*
+​python tools/ai_qos.py --mode manual --AIV_D2D {priority} --AIV_H2D {priority} --SDMA_D2D {priority} --SDMA_H2D {priority} --PCIEDMA_H2D {priority}
 
 ​AI QoS manual mode calculates the QoS tag of traffic based on the priority of different types of traffic set by users, and generates and prints the UB switch configuration.You can copy the outputs and log in to the UB switch to configure the QoS configurations of UB switch. This configuration will overwrite the current QoS configuration on the UB switch. If there is any existing QoS configuration, please back it up in advance.
 
@@ -60,7 +60,7 @@ cmake --install tools/ai_qos/build
 | Name              | Type | Default                                                      | Description                                                  |
 | ----------------- | ---- | ------------------------------------------------------------ | ------------------------------------------------------------ |
 | mode              | str  | auto                                                         | The  mode of AI QoS, default mode is "auto", another mode is  "manual",some parameters need to be configured if you choose  "manual" mode. |
-| qos_manual_config | /    | AIV_D2D: high,<br />AIV_H2D: high,<br />SDMA_D2D: high,<br />SDMA_H2D: low,<br />PCIEDMA_H2D: high | Parameters  for "manual" mode, determined the QoS priority of different types  of traffic.     <br />The default configuration is the same as "auto" mode.     <br />Typical traffic types are as follows for reference:     AIV_D2D: AIV-based  Device-to-Device communication, such as dispatch and combine.<br /> AIV_H2D: AIV-based  Operator Delivery.<br /> SDMA_D2D: SDMA-based  Device-to-Device communication, such as Allreduce and Allgather.<br />SDMA_H2D: SDMA-based  Host-to-Device/Device-to-Host communication, such as KVCache offloading and  prefetching.<br />PCIEDMA_H2D: PCIEDMA-based  Operator Delivery.   <br />  You can change the priority of different types of traffic, with  "high/middle/low" options available.Due to hardware restrictions,  "PCIEDMA_H2D" only supports  "high/low" priority. |
+| AIV_D2D、AIV_H2D、SDMA_D2D、SDMA_H2D、PCIEDMA_H2D | str    | AIV_D2D: high,<br />AIV_H2D: high,<br />SDMA_D2D: high,<br />SDMA_H2D: low,<br />PCIEDMA_H2D: high | Parameters  for "manual" mode, determined the QoS priority of different types  of traffic.     <br />The default configuration is the same as "auto" mode.     <br />Typical traffic types are as follows for reference:     AIV_D2D: AIV-based  Device-to-Device communication, such as dispatch and combine.<br /> AIV_H2D: AIV-based  Operator Delivery.<br /> SDMA_D2D: SDMA-based  Device-to-Device communication, such as Allreduce and Allgather.<br />SDMA_H2D: SDMA-based  Host-to-Device/Device-to-Host communication, such as KVCache offloading and  prefetching.<br />PCIEDMA_H2D: PCIe DMA-based  Operator Delivery.   <br />  You can change the priority of different types of traffic, with  "high/middle/low" options available.Due to hardware restrictions,  "PCIEDMA_H2D" only supports  "high/low" priority. |
 
 **How to disable AI QoS**:
 
