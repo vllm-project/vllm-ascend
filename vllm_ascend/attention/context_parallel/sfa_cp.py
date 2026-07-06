@@ -1,4 +1,4 @@
-from typing import TypeVar
+from typing import Any, TypeVar
 
 import numpy as np
 import torch
@@ -105,8 +105,9 @@ class AscendSFACPMetadataBuilder(AscendSFAMetadataBuilder):
         common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
         fast_build: bool = False,
+        **kwargs: Any,
     ) -> AscendSFAMetadata:
-        metadata_cls = super().build(common_prefix_len, common_attn_metadata, fast_build)
+        metadata_cls = super().build(common_prefix_len, common_attn_metadata, fast_build, **kwargs)
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = split_decodes_and_prefills(
             common_attn_metadata,
             decode_threshold=self.decode_threshold,
@@ -955,8 +956,8 @@ class AscendSFADCPImpl(AscendSFAImpl):
             "interleave_size": self._dcp_remap_interleave_size,
             "combined_size": self.dcp_size * self._dcp_remap_interleave_size,
         }
-        self._dcp_remap_scalar_tensors = {}
-        self._dcp_remap_order_buffers = {}
+        self._dcp_remap_scalar_tensors: dict[tuple[str, torch.dtype], dict[str, torch.Tensor]] = {}
+        self._dcp_remap_order_buffers: dict[tuple[str, int, torch.dtype], tuple[torch.Tensor, torch.Tensor]] = {}
         self._dcp_remap_index_topk = None
         for config in (
             getattr(self.vllm_config.model_config, "hf_text_config", None),
