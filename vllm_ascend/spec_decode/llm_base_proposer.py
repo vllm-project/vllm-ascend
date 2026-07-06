@@ -42,6 +42,7 @@ from vllm.v1.spec_decode.utils import (
 )
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
+import vllm_ascend.envs as envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
@@ -54,7 +55,7 @@ from vllm_ascend.models.llama_eagle3_vwn import Eagle3VwnLlamaForCausalLM
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 from vllm_ascend.utils import enable_sp, lmhead_tp_enable, shared_expert_dp_enabled
-import vllm_ascend.envs as envs
+
 
 @contextmanager
 def patch_tensor_parallel_group(tp_group):
