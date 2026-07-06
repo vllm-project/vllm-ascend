@@ -77,30 +77,43 @@ def _run_external_launcher(cmd, env):
 
 
 @pytest.mark.parametrize("model", MODELS)
-@patch.dict(os.environ, {"HCCL_BUFFSIZE": "500"})
 def test_qwen3_external_launcher(model):
     env = os.environ.copy()
-    # TODO: Change to 2 when ci machine has 4 cards
-    cmd = [
-        sys.executable,
-        str(EXTERNAL_LAUNCHER_SCRIPT),
-        "--model",
-        model,
-        "--tp-size",
-        "1",
-        "--node-size",
-        "1",
-        "--node-rank",
-        "0",
-        "--proc-per-node",
-        "2",
-        "--trust-remote-code",
-    ]
+    env["HCCL_BUFFSIZE"] = "500"
+    if DEVICE_NAME != "Ascend910B":
+        # TODO: Change to 2 when ci machine has 4 cards
+        cmd = [
+            sys.executable,
+            str(EXTERNAL_LAUNCHER_SCRIPT),
+            "--model",
+            model,
+            "--tp-size",
+            "1",
+            "--node-size",
+            "1",
+            "--node-rank",
+            "0",
+            "--proc-per-node",
+            "2",
+            "--trust-remote-code",
+        ]
+    else:
+        wait_until_npu_memory_free(target_free_percentage=0.7)(lambda: None)()
+        env["VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE"] = "1"
+        cmd = [
+            sys.executable,
+            str(EXTERNAL_LAUNCHER_SCRIPT),
+            "--model",
+            model,
+            "--trust-remote-code",
+        ]
 
     proc, output = _run_external_launcher(cmd, env)
 
-    assert "TP RANKS: [0]" in output
-    assert "TP RANKS: [1]" in output
+    if DEVICE_NAME != "Ascend910B":
+        assert "TP RANKS: [0]" in output
+        assert "TP RANKS: [1]" in output
+
     assert "Generated text:" in output
     assert proc.returncode == 0
 
@@ -203,27 +216,4 @@ def test_qwen3_external_launcher_with_sleepmode_level2():
 
     assert "Generated text:" in output
     assert "Sleep and wake up successfully!!" in output
-    assert proc.returncode == 0
-
-
-@pytest.mark.skipif(
-    DEVICE_NAME != "Ascend910B",
-    reason="This test is only for Ascend910B devices.",
-)
-@pytest.mark.parametrize("model", MODELS)
-@wait_until_npu_memory_free(target_free_percentage=0.7)
-@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE": "1", "HCCL_BUFFSIZE": "500"})
-def test_qwen3_external_launcher_with_matmul_allreduce(model):
-    env = os.environ.copy()
-    cmd = [
-        sys.executable,
-        str(EXTERNAL_LAUNCHER_SCRIPT),
-        "--model",
-        model,
-        "--trust-remote-code",
-    ]
-
-    proc, output = _run_external_launcher(cmd, env)
-
-    assert "Generated text:" in output
     assert proc.returncode == 0
