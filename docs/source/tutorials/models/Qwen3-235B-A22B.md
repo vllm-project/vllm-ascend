@@ -53,7 +53,7 @@ Successfully installed msmodelslim-{version}
 **Run quantization:**
 
 ```shell
-cd examples/Qwen3-MOE
+cd example/Qwen3-MOE
 # Run the following command to quantize the model.
 python3 quant_qwen_moe_w8a8.py --model_path /path/to/your/Qwen3-235B-A22B \
     --save_path /path/to/your/Qwen3-235B-A22B-W8A8-rot \
@@ -188,25 +188,9 @@ Expected result: The version information is displayed, matching the pulled image
 
 ### 4.2 Source Code Installation
 
-If you prefer not to use the Docker image, you can build from source:
+If you prefer to build from source instead of using the Docker image, install vLLM-Ascend following the [Installation Guide](../../installation.md).
 
-1. Clone and install vLLM:
-
-   ```bash
-   git clone https://github.com/vllm-project/vllm.git
-   cd vllm
-   pip install -e .
-   ```
-
-2. Clone and install the vLLM-Ascend repository:
-
-   ```bash
-   git clone https://github.com/vllm-project/vllm-ascend.git
-   cd vllm-ascend
-   pip install -e .
-   ```
-
-**Installation Verification:**
+To verify the source installation:
 
 ```bash
 pip show vllm-ascend
@@ -217,8 +201,6 @@ Expected result: The version information is displayed, confirming a successful i
 :::{note}
 If deploying a multi-node environment, set up the environment on each node.
 :::
-
-For more details, please refer to the [Installation Guide](../../installation.md).
 
 ## 5 Online Service Deployment
 
@@ -232,7 +214,6 @@ Single-node deployment completes both Prefill and Decode within the same node, s
 Atlas 800I A2/A3:
 
 ```shell
-export VLLM_USE_MODELSCOPE=True
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export HCCL_BUFFSIZE=512
@@ -636,15 +617,7 @@ Expected result: HTTP 200 with a JSON response containing the `choices` field wi
 
 ### Using AISBench
 
-For details, please refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md).
-
-Install from source:
-
-  ```bash
-  git clone https://github.com/AISBench/benchmark.git
-  cd benchmark
-  pip install -e .
-  ```
+For setup details, including installation, dataset download, and configuration, please refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md).
 
 The following is an example configuration for the accuracy evaluation config file:
 
@@ -743,7 +716,6 @@ There are three `vllm bench` subcommands:
 Take `serve` as an example:
 
 ```shell
-export VLLM_USE_MODELSCOPE=True
 vllm bench serve \
     --model your_model_path \
     --dataset-name random \

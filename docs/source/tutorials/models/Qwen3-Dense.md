@@ -166,25 +166,9 @@ Expected result: The version information is displayed, matching the pulled image
 
 ### 4.2 Source Code Installation
 
-If you prefer not to use the Docker image, you can build from source:
+If you prefer to build from source instead of using the Docker image, install vLLM-Ascend following the [Installation Guide](../../installation.md).
 
-1. Clone and install vLLM:
-
-   ```bash
-   git clone https://github.com/vllm-project/vllm.git
-   cd vllm
-   pip install -e .
-   ```
-
-2. Clone and install the vLLM-Ascend repository:
-
-   ```bash
-   git clone https://github.com/vllm-project/vllm-ascend.git
-   cd vllm-ascend
-   pip install -e .
-   ```
-
-**Installation Verification:**
+To verify the source installation:
 
 ```bash
 pip show vllm-ascend
@@ -195,8 +179,6 @@ Expected result: The version information is displayed, confirming a successful i
 :::{note}
 If deploying a multi-node environment, set up the environment on each node.
 :::
-
-For more details, please refer to the [Installation Guide](../../installation.md).
 
 ## 5 Online Service Deployment
 
@@ -314,15 +296,7 @@ Expected result: HTTP 200 with a JSON response containing the `choices` field wi
 
 ### Using AISBench
 
-For details, please refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md).
-
-Install from source:
-
-  ```bash
-  git clone https://github.com/AISBench/benchmark.git
-  cd benchmark
-  pip install -e .
-  ```
+For setup details, including installation, dataset download, and configuration, please refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md).
 
 The following is an example configuration for the accuracy evaluation config file:
 
