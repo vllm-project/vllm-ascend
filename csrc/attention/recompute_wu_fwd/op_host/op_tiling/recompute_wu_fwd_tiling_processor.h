@@ -28,8 +28,6 @@
 #define unlikely(x) __builtin_expect(!!(x), 0)
 #endif
 
-using GDN::RecomputeWUFwdTilingData;
-
 namespace optiling {
 
 static constexpr int64_t RECOMPUTE_WU_FWD_V_DIM_128 = 128;
@@ -40,8 +38,8 @@ static constexpr size_t RECOMPUTE_WU_FWD_INPUT_V_IDX = 1;
 static constexpr size_t RECOMPUTE_WU_FWD_INPUT_BETA_IDX = 2;
 static constexpr size_t RECOMPUTE_WU_FWD_INPUT_A_IDX = 3;
 static constexpr size_t RECOMPUTE_WU_FWD_INPUT_G_IDX = 4;
-static constexpr size_t RECOMPUTE_WU_FWD_INPUT_SEQLENS_IDX = 5;
-static constexpr size_t RECOMPUTE_WU_FWD_INPUT_CHUNK_INDICES_IDX = 6;
+static constexpr size_t RECOMPUTE_WU_FWD_INPUT_SEQLENS_IDX = 6;
+static constexpr size_t RECOMPUTE_WU_FWD_INPUT_CHUNK_INDICES_IDX = 7;
 
 static constexpr size_t RECOMPUTE_WU_FWD_DIM_NUM_3 = 3;
 static constexpr size_t RECOMPUTE_WU_FWD_DIM_NUM_4 = 4;
@@ -87,7 +85,7 @@ struct RecomputeWUFwdTilingContext {
 
 class RecomputeWUFwdTilingProcessor {
     RecomputeWUFwdTilingContext &ctx_;
-    RecomputeWUFwdTilingData &tiling_;
+    GDN::RecomputeWUFwdTilingData &tiling_;
     size_t workspaceSize_ = 0;
     int64_t B = 0;
     int64_t Hk = 0;
@@ -99,7 +97,7 @@ class RecomputeWUFwdTilingProcessor {
     int64_t chunkSize = 0;
 
 public:
-    explicit RecomputeWUFwdTilingProcessor(RecomputeWUFwdTilingContext &ctx, RecomputeWUFwdTilingData &tiling)
+    explicit RecomputeWUFwdTilingProcessor(RecomputeWUFwdTilingContext &ctx, GDN::RecomputeWUFwdTilingData &tiling)
         : ctx_(ctx), tiling_(tiling)
     {
     }

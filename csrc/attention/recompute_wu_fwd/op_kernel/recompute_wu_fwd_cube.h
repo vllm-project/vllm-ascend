@@ -18,8 +18,6 @@
 
 #include "recompute_wu_fwd_struct.h"
 
-using GDN::RecomputeWUFwdTilingData;
-
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
 #define CATLASS_ARCH 3510
 #else
@@ -222,7 +220,7 @@ public:
 
     __aicore__ inline void Process();
 
-    __aicore__ inline void Init(const RecomputeWUFwdTilingData &tiling);
+    __aicore__ inline void Init(const GDN::RecomputeWUFwdTilingData &tiling);
 
 private:
     uint64_t B = 0;
@@ -255,7 +253,7 @@ __aicore__ inline RecomputeWUFwdProcess<kType, betaType, L1TileShape, L0TileShap
       chunk_indices(chunk_indices_), w(w_), u(u_), workspace(workspace_){};
 
 template <typename kType, typename betaType, typename L1TileShape, typename L0TileShape>
-__aicore__ void inline RecomputeWUFwdProcess<kType, betaType, L1TileShape, L0TileShape>::Init(const RecomputeWUFwdTilingData &tiling)
+__aicore__ void inline RecomputeWUFwdProcess<kType, betaType, L1TileShape, L0TileShape>::Init(const GDN::RecomputeWUFwdTilingData &tiling)
 {
     B = tiling.B;
     T = tiling.T;

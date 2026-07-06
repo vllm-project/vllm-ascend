@@ -470,6 +470,7 @@ function(add_bin_compile_target)
     endforeach()
 
     set(_ops_target_list)
+    set(_ops_config_files)
     set(compile_scripts)
     file(GLOB scripts_list ${GEN_OUT_DIR}/*.sh)
     list(APPEND compile_scripts ${scripts_list})
@@ -496,6 +497,7 @@ function(add_bin_compile_target)
             add_custom_target(${OP_TARGET_NAME})
             add_dependencies(${op_file} ${OP_TARGET_NAME})
             list(APPEND _ops_target_list ${OP_TARGET_NAME})
+            list(APPEND _ops_config_files ${BIN_OUT_DIR}/${op_file}.json)
 
             set(OP_SRC_OUT_DIR  ${SRC_OUT_DIR}/${op_file})
             set(OP_BIN_OUT_DIR  ${BIN_OUT_DIR}/${op_file})
@@ -515,6 +517,10 @@ function(add_bin_compile_target)
             if (DEFINED ${op_file}_depends)
                 foreach(depend_info ${${op_file}_depends})
                     get_filename_component(_depend_op_name "${depend_info}" NAME)
+                    set(_depend_dst ${SRC_OUT_DIR}/${_depend_op_name})
+                    if("${depend_info}" MATCHES "^third_party/catlass/include/(catlass|tla)$" OR "${depend_info}" STREQUAL "moe/common/kernel_utils")
+                        set(_depend_dst ${SRC_OUT_DIR}/ascendc/common/${_depend_op_name})
+                    endif()
                     set(_depend_op_target ${_depend_op_name}_${BINARY_COMPUTE_UNIT}_src_copy)
                     add_ops_src_copy(
                             TARGET_NAME
@@ -522,7 +528,7 @@ function(add_bin_compile_target)
                             SRC
                             ${CMAKE_SOURCE_DIR}/${depend_info}
                             DST
-                            ${SRC_OUT_DIR}/${_depend_op_name}
+                            ${_depend_dst}
                             COMPUTE_UNIT
                             ${BINARY_COMPUTE_UNIT}
                             BE_RELIED
@@ -556,6 +562,13 @@ function(add_bin_compile_target)
                 install(FILES ${BIN_OUT_DIR}/${op_file}.json
                         DESTINATION ${_INSTALL_DIR}/config/${BINARY_COMPUTE_UNIT}/ops_transformer OPTIONAL
                 )
+                if("${op_file}" STREQUAL "recompute_wu_fwd")
+                    install(FILES ${BIN_OUT_DIR}/${op_file}.json
+                            DESTINATION ${_INSTALL_DIR}/config/${BINARY_COMPUTE_UNIT}/ops_transformer
+                            RENAME recompute_w_u_fwd.json
+                            OPTIONAL
+                    )
+                endif()
             else()
                 install(DIRECTORY ${OP_BIN_OUT_DIR}
                         DESTINATION ${_INSTALL_DIR}/${BINARY_COMPUTE_UNIT} OPTIONAL
@@ -563,6 +576,15 @@ function(add_bin_compile_target)
                 install(FILES ${BIN_OUT_DIR}/${op_file}.json
                         DESTINATION ${_INSTALL_DIR}/config/${BINARY_COMPUTE_UNIT} OPTIONAL
                 )
+                # CANN derives the dynamic config filename from RecomputeWUFwd as
+                # recompute_w_u_fwd.json, while the migrated source package uses recompute_wu_fwd.
+                if("${op_file}" STREQUAL "recompute_wu_fwd")
+                    install(FILES ${BIN_OUT_DIR}/${op_file}.json
+                            DESTINATION ${_INSTALL_DIR}/config/${BINARY_COMPUTE_UNIT}
+                            RENAME recompute_w_u_fwd.json
+                            OPTIONAL
+                    )
+                endif()
             endif()
         endif ()
 
@@ -642,13 +664,14 @@ function(add_bin_compile_target)
         set(BINARY_INFO_CONFIG_FILE ${BIN_OUT_DIR}/binary_info_config.json)
         set(RELOCATABLE_KERNEL_INFO_CONFIG_FILE ${BIN_OUT_DIR}/relocatable_kernel_info_config.json)
 
-        add_custom_command(OUTPUT ${BINARY_INFO_CONFIG_FILE}
+        list(REMOVE_DUPLICATES _ops_config_files)
+        add_custom_command(OUTPUT ${BINARY_INFO_CONFIG_FILE} ${_ops_config_files}
                 COMMAND ${HI_PYTHON} ${ASCENDC_CMAKE_UTIL_DIR}/ascendc_ops_config.py -p ${BIN_OUT_DIR} -s ${BINARY_COMPUTE_UNIT}
                 DEPENDS ${_ops_target_list}
         )
 
         add_custom_target(${OPS_CONFIG_TARGET}
-                DEPENDS ${BINARY_INFO_CONFIG_FILE}
+                DEPENDS ${BINARY_INFO_CONFIG_FILE} ${_ops_config_files}
         )
 
         add_dependencies(ops_transformer_config ${OPS_CONFIG_TARGET})

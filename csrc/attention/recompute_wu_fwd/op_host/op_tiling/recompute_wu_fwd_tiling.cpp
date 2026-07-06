@@ -20,7 +20,7 @@
 
 namespace optiling {
 
-static void RecomputeWUFwdTilingDataPrint(gert::TilingContext *context, const RecomputeWUFwdTilingData &tiling)
+static void RecomputeWUFwdTilingDataPrint(gert::TilingContext *context, const GDN::RecomputeWUFwdTilingData &tiling)
 {
     auto nodeName = context->GetNodeName();
     OP_LOGD(nodeName, ">>>>>>>>>>>>>>> Start to print RecomputeWUFwd tiling data <<<<<<<<<<<<<<<<");
@@ -40,8 +40,7 @@ static void RecomputeWUFwdTilingDataPrint(gert::TilingContext *context, const Re
 ge::graphStatus Tiling4RecomputeWUFwd(gert::TilingContext *context)
 {
     OP_LOGD(context->GetNodeName(), "Tiling4RecomputeWUFwd start.");
-    RecomputeWUFwdTilingData *tiling = context->GetTilingData<RecomputeWUFwdTilingData>();
-    OP_CHECK_NULL_WITH_CONTEXT(context, tiling);
+    GDN::RecomputeWUFwdTilingData tiling{};
 
     auto attrPtr = context->GetAttrs();
     OP_CHECK_NULL_WITH_CONTEXT(context, attrPtr);
@@ -80,16 +79,32 @@ ge::graphStatus Tiling4RecomputeWUFwd(gert::TilingContext *context)
         sysWorkspaceSize,
     };
 
-    RecomputeWUFwdTilingProcessor processor(ctx, *tiling);
+    RecomputeWUFwdTilingProcessor processor(ctx, tiling);
     OP_CHECK_IF(processor.Process() != ge::GRAPH_SUCCESS, , return ge::GRAPH_FAILED);
 
-    if (tiling->V == RECOMPUTE_WU_FWD_V_DIM_256) {
+    if (tiling.V == RECOMPUTE_WU_FWD_V_DIM_256) {
         context->SetTilingKey(2);
     } else {
         context->SetTilingKey(1);
     }
-    OP_LOGD(context->GetNodeName(), "tilingKey: %d (V=%ld)", context->GetTilingKey(), tiling->V);
-    RecomputeWUFwdTilingDataPrint(context, *tiling);
+    OP_LOGD(context->GetNodeName(), "tilingKey: %d (V=%ld)", context->GetTilingKey(), tiling.V);
+    RecomputeWUFwdTilingDataPrint(context, tiling);
+
+    RecomputeWUFwdTilingData tilingData;
+    tilingData.set_B(tiling.B);
+    tilingData.set_Hk(tiling.Hk);
+    tilingData.set_Hv(tiling.Hv);
+    tilingData.set_hvPerHk(tiling.hvPerHk);
+    tilingData.set_T(tiling.T);
+    tilingData.set_K(tiling.K);
+    tilingData.set_V(tiling.V);
+    tilingData.set_chunkNum(tiling.chunkNum);
+    tilingData.set_chunkSize(tiling.chunkSize);
+    tilingData.set_vbVecRow(tiling.vbVecRow);
+    tilingData.set_kbgExpVecRow(tiling.kbgExpVecRow);
+    tilingData.set_isVariable(tiling.isVariable);
+    tilingData.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tilingData.GetDataSize());
 
     context->SetBlockDim(ascendcPlatform.GetCoreNumAic());
     size_t *currentWorkspace = context->GetWorkspaceSizes(1);

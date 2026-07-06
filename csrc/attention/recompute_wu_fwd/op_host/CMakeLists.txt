@@ -7,6 +7,10 @@
 # -----------------------------------------------------------------------------------------------------------
 set(CATLASS_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/third_party/catlass/include")
 get_filename_component(CATLASS_INCLUDE_DIR_ABS ${CATLASS_INCLUDE_DIR} ABSOLUTE)
+set(recompute_wu_fwd_depends
+    third_party/catlass/include/catlass
+    third_party/catlass/include/tla
+    CACHE INTERNAL "Dependencies for recompute_wu_fwd")
 
 add_op_to_compiled_list()
 if (BUILD_OPEN_PROJECT)

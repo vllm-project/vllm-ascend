@@ -20,8 +20,6 @@
 #include "catlass/arch/cross_core_sync.hpp"
 using namespace AscendC;
 
-using GDN::RecomputeWUFwdTilingData;
-
 template <typename kType, typename betaType>
 class RecomputeWUFwdVectorProcess {
 public:
@@ -33,7 +31,7 @@ public:
     __aicore__ inline void Process();
     __aicore__ inline void ProcessVb();
     __aicore__ inline void ProcessKbgExp();
-    __aicore__ inline void Init(const RecomputeWUFwdTilingData &tiling, AscendC::TPipe *pipe_);
+    __aicore__ inline void Init(const GDN::RecomputeWUFwdTilingData &tiling, AscendC::TPipe *pipe_);
 
 private:
     uint64_t B = 0;
@@ -94,7 +92,7 @@ __aicore__ inline RecomputeWUFwdVectorProcess<kType, betaType>::RecomputeWUFwdVe
 
 template <typename kType, typename betaType>
 __aicore__ void inline RecomputeWUFwdVectorProcess<kType, betaType>::Init(
-    const RecomputeWUFwdTilingData &tiling, AscendC::TPipe *pipe_)
+    const GDN::RecomputeWUFwdTilingData &tiling, AscendC::TPipe *pipe_)
 {
     pipe = pipe_;
     workSpaceTensor.SetGlobalBuffer((__gm__ kType *)workspace);

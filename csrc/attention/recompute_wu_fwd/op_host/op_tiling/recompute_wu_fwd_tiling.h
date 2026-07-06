@@ -9,16 +9,32 @@
 
 /*!
  * \file recompute_wu_fwd_tiling.h
- * \brief Compatibility include for recompute_wu_fwd tiling data.
+ * \brief Registered tiling data for recompute_wu_fwd.
  */
 
 #pragma once
 
-#include "../../op_kernel/recompute_wu_fwd_struct.h"
+#include <cstdint>
+#include <register/tilingdata_base.h>
 
 namespace optiling {
 
-using GDN::RecomputeWUFwdTilingData;
+BEGIN_TILING_DATA_DEF(RecomputeWUFwdTilingData)
+TILING_DATA_FIELD_DEF(int64_t, B);
+TILING_DATA_FIELD_DEF(int64_t, Hk);
+TILING_DATA_FIELD_DEF(int64_t, Hv);
+TILING_DATA_FIELD_DEF(int64_t, hvPerHk);
+TILING_DATA_FIELD_DEF(int64_t, T);
+TILING_DATA_FIELD_DEF(int64_t, K);
+TILING_DATA_FIELD_DEF(int64_t, V);
+TILING_DATA_FIELD_DEF(int64_t, chunkNum);
+TILING_DATA_FIELD_DEF(int64_t, chunkSize);
+TILING_DATA_FIELD_DEF(int64_t, vbVecRow);
+TILING_DATA_FIELD_DEF(int64_t, kbgExpVecRow);
+TILING_DATA_FIELD_DEF(int64_t, isVariable);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(RecomputeWUFwd, RecomputeWUFwdTilingData)
 
 struct RecomputeWUFwdCompileInfo {};
 
