@@ -72,6 +72,14 @@ SWA_INT_MAX = 2147483647
 _ATTN_KEYS_BUFFER = None
 
 
+@dataclass
+class PagedAttentionGraphParam:
+    """Mark PA params when PA and FIA share one graph replay list."""
+
+    params: tuple
+    layer_name: str | None
+
+
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
 class AscendAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
@@ -475,6 +483,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     graph_params.handles[num_tokens],
                     graph_params.events[num_tokens],
                 ):
+                    if isinstance(param, PagedAttentionGraphParam):
+                        param = param.params
                     (
                         query,
                         key_cache,
@@ -565,6 +575,55 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     handles,
                     events,
                 ):
+                    if isinstance(param, PagedAttentionGraphParam):
+                        (
+                            query,
+                            key_cache,
+                            value_cache,
+                            num_kv_heads,
+                            num_heads,
+                            scale,
+                            block_table,
+                            seq_lens,
+                            output,
+                        ) = param.params
+                        if _EXTRA_CTX.is_draft_model:
+                            draft_step, key = draft_attn_key_steps[attn_count]
+                            block_table = attn_metadata[draft_step][key].block_tables
+                            seq_lens = attn_metadata[draft_step][key].seq_lens
+                            attn_count = attn_count + 1
+                        else:
+                            layer_name = param.layer_name
+                            metadata_key = layer_name if layer_name is not None and layer_name in attn_metadata else key
+                            block_table = attn_metadata[metadata_key].block_tables
+                            seq_lens = attn_metadata[metadata_key].seq_lens
+                        workspace = torch_npu._npu_paged_attention_get_workspace(
+                            query=query,
+                            key_cache=key_cache,
+                            value_cache=value_cache,
+                            num_kv_heads=num_kv_heads,
+                            num_heads=num_heads,
+                            scale_value=scale,
+                            block_table=block_table,
+                            context_lens=seq_lens,
+                            out=output,
+                        )
+                        torch.npu.graph_task_update_begin(update_stream, handle)
+                        torch_npu._npu_paged_attention(
+                            query=query,
+                            key_cache=key_cache,
+                            value_cache=value_cache,
+                            num_kv_heads=num_kv_heads,
+                            num_heads=num_heads,
+                            scale_value=scale,
+                            block_table=block_table,
+                            context_lens=seq_lens,
+                            out=output,
+                            workspace=workspace,
+                        )
+                        torch.npu.graph_task_update_end(update_stream)
+                        event.record(update_stream)
+                        continue
                     (
                         query,
                         key_cache,
@@ -1137,16 +1196,19 @@ class AscendAttentionBackendImpl(AttentionImpl):
             event.reset(stream)
             graph_params.events[num_tokens].append(event)
             graph_params.attn_params[num_tokens].append(
-                (
-                    weak_ref_tensors(query),
-                    weak_ref_tensors(self.key_cache),
-                    weak_ref_tensors(self.value_cache),
-                    self.num_kv_heads,
-                    self.num_heads,
-                    self.scale,
-                    attn_metadata.block_tables,
-                    attn_metadata.seq_lens,
-                    weak_ref_tensors(output),
+                PagedAttentionGraphParam(
+                    (
+                        weak_ref_tensors(query),
+                        weak_ref_tensors(self.key_cache),
+                        weak_ref_tensors(self.value_cache),
+                        self.num_kv_heads,
+                        self.num_heads,
+                        self.scale,
+                        attn_metadata.block_tables,
+                        attn_metadata.seq_lens,
+                        weak_ref_tensors(output),
+                    ),
+                    self._graph_metadata_layer_name() if self._use_layer_aware_fia_graph_replay else None,
                 )
             )
 
