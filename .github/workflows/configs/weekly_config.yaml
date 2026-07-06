@@ -1,4 +1,4 @@
- # Single source of truth for the Weekly-A2 / Weekly-A3 test matrix.
+# Single source of truth for the Weekly-A2 / Weekly-A3 test matrix.
 # Mirrors nightly_config.yaml's layout but only contains the sections
 # exercised by schedule_weekly_test_a2.yaml and schedule_weekly_test_a3.yaml.
 # Adding a new weekly test case is just appending a `- name: ...` entry
