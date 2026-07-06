@@ -39,6 +39,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
 )
 from vllm.forward_context import get_forward_context
+from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.model_loader.weight_utils import (
@@ -61,11 +62,81 @@ from vllm_ascend.ops.triton.mul_add import muls_add_triton
 from vllm_ascend.utils import enable_dsa_cp
 
 
+# ---------------------------------------------------------------------------
+# AFD P2P Custom Ops
+# ---------------------------------------------------------------------------
+# Dynamo 无法 trace P2P 通信中的 pickle.dumps (用于 metadata 序列化)。
+# 将 attention 侧的 P2P send/recv 注册为 custom op, Dynamo 会将其视为
+# 不透明图节点 (通过 fake_impl 提供 shape 推断), 不再尝试 trace 内部逻辑。
+# 这样 AFD 模型 forward 可以被 aot_compile / npugraph 正常编译, 与非 AFD
+# 路径一致。FFN 侧使用 NPUGraph 捕获 (不走 Dynamo), 无需此处理。
+
+def afd_p2p_send_attn_output(
+    hidden_states: torch.Tensor,
+    input_ids: Optional[torch.Tensor],
+) -> torch.Tensor:
+    """P2P send: attention → ffn (via a2e_group). Custom op wrapper.
+
+    Retrieves the connector from forward_context and delegates to
+    ``connector.send_attn_output``. Returns ``hidden_states`` unchanged
+    (passthrough) so the compiled graph maintains data flow.
+    """
+    afd_connector = get_forward_context().afd_metadata.afd_connector
+    afd_connector.send_attn_output(
+        hidden_states=hidden_states,
+        metadata=None,
+        input_ids=input_ids,
+    )
+    return hidden_states
+
+
+def afd_p2p_send_attn_output_fake(
+    hidden_states: torch.Tensor,
+    input_ids: Optional[torch.Tensor],
+) -> torch.Tensor:
+    return torch.empty_like(hidden_states)
+
+
+def afd_p2p_recv_ffn_output(
+    hidden_states: torch.Tensor,
+) -> torch.Tensor:
+    """P2P recv: ffn → attention (via e2a_group). Custom op wrapper.
+
+    Returns the received ``hidden_states`` tensor (same shape as input).
+    """
+    afd_connector = get_forward_context().afd_metadata.afd_connector
+    return afd_connector.recv_ffn_output(
+        hidden_states=hidden_states,
+        metadata=None,
+    )
+
+
+def afd_p2p_recv_ffn_output_fake(
+    hidden_states: torch.Tensor,
+) -> torch.Tensor:
+    return torch.empty_like(hidden_states)
+
+
+direct_register_custom_op(
+    op_name="afd_p2p_send_attn_output",
+    op_func=afd_p2p_send_attn_output,
+    fake_impl=afd_p2p_send_attn_output_fake,
+    mutates_args=[],
+    dispatch_key="PrivateUse1",
+)
+
+direct_register_custom_op(
+    op_name="afd_p2p_recv_ffn_output",
+    op_func=afd_p2p_recv_ffn_output,
+    fake_impl=afd_p2p_recv_ffn_output_fake,
+    mutates_args=[],
+    dispatch_key="PrivateUse1",
+)
+
 
 # ---------------------------------------------------------------------------
 # DeepseekV4MoE.afd_forward
 # ---------------------------------------------------------------------------
-# @torch.compiler.disable
 def afd_forward(
     self: DeepseekV4MoE,
     hidden_states: torch.Tensor,
@@ -154,7 +225,6 @@ def afd_forward(
 # ---------------------------------------------------------------------------
 # AscendFusedMoE.afd_ffn_compute
 # ---------------------------------------------------------------------------
-# @torch.compiler.disable
 def afd_ffn_compute(
     self: AscendFusedMoE,
     layer: AscendFusedMoE,
@@ -365,7 +435,6 @@ def compute_ffn_output(
 # ---------------------------------------------------------------------------
 # DeepseekV4Model.forward_m2n / forward (AFD dispatch)
 # ---------------------------------------------------------------------------
-# @torch.compiler.disable
 def forward_m2n(
     self: DeepseekV4Model,
     hidden_states: torch.Tensor,
@@ -386,14 +455,11 @@ def forward_m2n(
       3. send the attention output + input_ids to the FFN worker.
     After the loop, the final FFN output is received.
     """
-    afd_connector = afd_metadata.afd_connector
-
     for layer in islice(self.layers, self.start_layer, self.end_layer):
         layer_idx = getattr(layer, "layer_idx", -1)
         if layer.layer_idx > 0:
-            hidden_states = afd_connector.recv_ffn_output(
-                hidden_states=hidden_states, metadata=None
-            )
+            # P2P recv: 使用 custom op 包装, 避免 Dynamo trace pickle.dumps
+            hidden_states = torch.ops.vllm.afd_p2p_recv_ffn_output(hidden_states)
             # 诊断: AFD 路径 attention 接收 FFN 输出后 (e2a_group 接收完成),
             # 对应 FFN 侧 [FFN_SEND_PRE]
             # logger.info(
@@ -434,19 +500,17 @@ def forward_m2n(
             #     tuple(p2p_input_ids.shape), p2p_input_ids.dtype, first8,
             # )
 
-        afd_connector.send_attn_output(
-            hidden_states=hidden_states,
-            metadata=None,
-            input_ids=p2p_input_ids,
+        # P2P send: 使用 custom op 包装, 避免 Dynamo trace pickle.dumps
+        hidden_states = torch.ops.vllm.afd_p2p_send_attn_output(
+            hidden_states, p2p_input_ids
         )
         # logger.info(
         #     "[ATTN_SEND_DONE] layer=%d send_attn_output completed",
         #     layer_idx,
         # )
 
-    hidden_states = afd_connector.recv_ffn_output(
-        hidden_states=hidden_states, metadata=afd_metadata
-    )
+    # P2P recv (final): 使用 custom op 包装, 避免 Dynamo trace pickle.dumps
+    hidden_states = torch.ops.vllm.afd_p2p_recv_ffn_output(hidden_states)
     # 诊断: AFD 路径 attention 接收最后一层 FFN 输出后
     # logger.info(
     #     "[ATTN_RECV_POST] layer=final hs dim=%d shape=%s dtype=%s "
