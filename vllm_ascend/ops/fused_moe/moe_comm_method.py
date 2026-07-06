@@ -491,10 +491,16 @@ class FusedMC2CommImpl(MoECommMethod):
             num_experts = int(fused_experts_input.routing.expert_map.numel()) + redundant_experts
         else:
             num_experts = int(self.moe_config.num_experts) + redundant_experts
+        expert_per_rank = max(1, num_experts // int(self.token_dispatcher.ep_world_size))
+        max_recv_token_num = max(
+            1,
+            num_max_tokens_per_rank * int(self.token_dispatcher.ep_world_size) * min(num_topk, expert_per_rank),
+        )
         key = (
             id(group),
             num_experts,
             num_max_tokens_per_rank,
+            max_recv_token_num,
             num_topk,
             hidden,
             intermediate_hidden,
@@ -521,7 +527,7 @@ class FusedMC2CommImpl(MoECommMethod):
                 num_topk,
                 hidden,
                 intermediate_hidden,
-                max_recv_token_num=num_max_tokens_per_rank,
+                max_recv_token_num=max_recv_token_num,
                 dispatch_quant_mode=dispatch_quant_mode,
                 dispatch_quant_out_dtype=dispatch_quant_out_dtype,
             )
