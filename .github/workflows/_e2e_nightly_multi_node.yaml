@@ -234,10 +234,21 @@ jobs:
 
       - name: Prepare scripts
         run: |
-          install -D tests/e2e/common/multi_node/run.sh /root/.cache/tests/run.sh
-          install -D tests/e2e/common/multi_node/download_archive.sh /root/.cache/tests/download_archive.sh
-          install -D tests/e2e/nightly/scripts/bisect_args.sh /root/.cache/tests/bisect_args.sh
-          install -D .github/workflows/scripts/collect_download.py /root/.cache/tests/collect_download.py
+          # /root/.cache/tests is a PVC shared by every concurrent multi-node job.
+          # `install` creates a missing destination with O_EXCL, so writing the
+          # final path directly races with other runs and fails with
+          # "cannot create regular file ... File exists". Stage to a per-run
+          # unique name and rename into place atomically instead.
+          set -euo pipefail
+          mkdir -p /root/.cache/tests
+          install -D tests/e2e/common/multi_node/run.sh "/root/.cache/tests/.run.sh.${LWS_NAME}"
+          mv -f "/root/.cache/tests/.run.sh.${LWS_NAME}" /root/.cache/tests/run.sh
+          install -D tests/e2e/common/multi_node/download_archive.sh "/root/.cache/tests/.download_archive.sh.${LWS_NAME}"
+          mv -f "/root/.cache/tests/.download_archive.sh.${LWS_NAME}" /root/.cache/tests/download_archive.sh
+          install -D tests/e2e/nightly/scripts/bisect_args.sh "/root/.cache/tests/.bisect_args.sh.${LWS_NAME}"
+          mv -f "/root/.cache/tests/.bisect_args.sh.${LWS_NAME}" /root/.cache/tests/bisect_args.sh
+          install -D .github/workflows/scripts/collect_download.py "/root/.cache/tests/.collect_download.py.${LWS_NAME}"
+          mv -f "/root/.cache/tests/.collect_download.py.${LWS_NAME}" /root/.cache/tests/collect_download.py
 
       - name: Launch cluster
         env:
