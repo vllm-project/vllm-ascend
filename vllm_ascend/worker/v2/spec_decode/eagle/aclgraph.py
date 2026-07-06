@@ -62,7 +62,7 @@ class PrefillEagleAclGraphManager(PrefillSpeculatorCudaGraphManager):
     def capture(
         self,
         forward_fn: Callable,
-        full_cg_attn_states: dict[BatchExecutionDescriptor, AttentionStatePair],
+        attn_states: dict[BatchExecutionDescriptor, AttentionStatePair],
         progress_bar_desc: str = "Capturing CUDA graphs",
     ) -> None:
         """Capture ACL graphs for Eagle."""
