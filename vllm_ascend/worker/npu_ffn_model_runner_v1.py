@@ -149,7 +149,7 @@ class NPUFFNModelRunner(NPUModelRunner, GPUFFNModelRunner):
                     graph = acl_graph_info['graph']
                     graph.replay()
                     self.replay_cnt += 1
-                    logger.debug(
+                    logger.info(
                         "ffn replay, replay_cnt is %s, dp_metadata_key=%s",
                         self.replay_cnt, dp_metadata_key)
                 else:
@@ -162,7 +162,7 @@ class NPUFFNModelRunner(NPUModelRunner, GPUFFNModelRunner):
                         dp_metadata_list=dp_metadata_list)
             else:
                 # Eager mode for non-ubatch or no aclgraph.
-                logger.debug("ffn_forward, is_ubatch is %s", is_ubatch)
+                logger.info("ffn_forward, is_ubatch is %s", is_ubatch)
                 self._ffn_forward(
                     aclgraph_runtime_mode=CUDAGraphMode.NONE,
                     dp_metadata_list=dp_metadata_list)
