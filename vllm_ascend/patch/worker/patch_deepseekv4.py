@@ -132,7 +132,35 @@ def afd_forward(
                 shared_output, final_hidden_states, 1.0 / self.routed_scaling_factor
             )
     else:
+        # AFD 路径: compute_moe 只返回 routed_out (非 tuple), 需要手动计算
+        # shared_experts 并合并, 与 DeepseekV4MoE.forward (非 AFD 路径) 保持
+        # 一致。否则缺少 shared_experts 贡献和 routed_scaling_factor, 导致
+        # 输出乱码。
         final_hidden_states = fused_moe_out
+        if self.shared_experts is not None:
+            from vllm_ascend.ascend_forward_context import MoECommType
+            from vllm_ascend.utils import shared_expert_dp_enabled
+            from vllm.distributed import tensor_model_parallel_all_reduce
+            shared_output = self.shared_experts(hidden_states)
+            fwd_ctx = get_forward_context()
+            moe_comm_type = getattr(fwd_ctx, "moe_comm_type", None)
+            if (
+                moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2,
+                                  MoECommType.FUSED_MC2}
+                and not shared_expert_dp_enabled()
+            ):
+                shared_output = tensor_model_parallel_all_reduce(shared_output)
+            if hidden_states.dtype != torch.float16:
+                if not self.is_rocm_aiter_moe_enabled:
+                    final_hidden_states = muls_add_triton(
+                        final_hidden_states, shared_output,
+                        self.routed_scaling_factor
+                    )
+            else:
+                final_hidden_states = muls_add_triton(
+                    shared_output, final_hidden_states,
+                    1.0 / self.routed_scaling_factor
+                )
 
     if self.is_sequence_parallel:
         final_hidden_states = tensor_model_parallel_all_gather(final_hidden_states, 0)
