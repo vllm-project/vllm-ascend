@@ -38,8 +38,12 @@ class TestVllmAdaptor(unittest.TestCase):
         num_dense_layers = getattr(config, "first_k_dense_replace", 0)
         self.model.model.layers[num_dense_layers].mlp.experts.quant_type = QuantType.W8A8
 
-        self.mock_rank = patch("vllm_ascend.eplb.adaptor.vllm_adaptor.dist.get_rank", return_value=0).start()
-        self.mock_size = patch("vllm_ascend.eplb.adaptor.vllm_adaptor.dist.get_world_size", return_value=4).start()
+        patcher = patch("vllm_ascend.eplb.adaptor.vllm_adaptor.get_dynamic_eplb_group", return_value=MagicMock())
+        self.mock_get_group = patcher.start()
+        self.addCleanup(patcher.stop)
+        self.mock_group = self.mock_get_group.return_value
+        self.mock_group.rank_in_group = 0
+        self.mock_group.world_size = 4
 
     @patch("torch.empty_like", return_value=torch.zeros(16, 32))
     @patch("vllm_ascend.eplb.adaptor.vllm_adaptor.get_ascend_config")
@@ -183,8 +187,6 @@ class TestVllmAdaptor(unittest.TestCase):
             VllmEplbAdaptor(model)
 
     def tearDown(self):
-        self.mock_rank.stop()
-        self.mock_size.stop()
         VllmEplbAdaptor._registered_moe_layers = []
 
 
