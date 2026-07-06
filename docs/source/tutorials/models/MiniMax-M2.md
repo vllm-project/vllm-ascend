@@ -89,8 +89,6 @@ docker run \
     -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
     -v /etc/ascend_install.info:/etc/ascend_install.info \
     -v /usr/local/sbin:/usr/local/sbin \
-    -v /home:/home \
-    -v /data:/data \
     -it -d $IMAGE bash
 ```
 
@@ -139,14 +137,16 @@ docker run \
     -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
     -v /etc/ascend_install.info:/etc/ascend_install.info \
     -v /usr/local/sbin:/usr/local/sbin \
-    -v /home:/home \
-    -v /data:/data \
     -it -d $IMAGE bash
 ```
 
 ::::
 
 :::::
+
+:::{tip}
+The mounts above are the minimum required for NPU driver access. Add additional `-v` mounts (e.g., model weight paths, datasets) as needed for your environment.
+:::
 
 The default workdir is `/workspace`. vLLM and vLLM-Ascend are installed as Python packages in site-packages.
 
