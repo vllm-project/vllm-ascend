@@ -958,10 +958,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         is_prefill_batch = num_prefill_reqs > 0 or metadata_has_prefill
         if self.pcp_size * self.dcp_size > 1:
             is_decode_only_batch = num_decode_reqs > 0 and not is_prefill_batch
-            if (
-                self.num_speculative_tokens > 1
-                and is_decode_only_batch
-            ):
+            if self.num_speculative_tokens > 1 and is_decode_only_batch:
                 # For pcp/dcp, tokens are split across different cp ranks,
                 # so we can not simply update slot_mapping by += 1.
                 # Instead, we pre-allocate mtp slot_mapping in model_runner
@@ -970,8 +967,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 query_start_loc_pcp_full = self.runner.pcp_manager.query_start_loc_pcp_full.gpu
                 cu_num_tokens_pcp_full = query_start_loc_pcp_full[1 : num_decode_reqs + 1]
                 query_lens_d_device = (
-                    query_start_loc_pcp_full[1 : num_decode_reqs + 1]
-                    - query_start_loc_pcp_full[:num_decode_reqs]
+                    query_start_loc_pcp_full[1 : num_decode_reqs + 1] - query_start_loc_pcp_full[:num_decode_reqs]
                 )
                 num_reject_tokens = cu_num_tokens_pcp_full - ori_token_indices_to_sample - 1
                 num_accept_tokens = query_lens_d_device - num_reject_tokens
@@ -987,8 +983,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     + (num_accept_tokens.to(torch.int64) - 1) * self.pcp_size
                 )
                 slot_indices = (
-                    slot_idx_base[:, None]
-                    + self.cp_slot_offsets[: self.pcp_size].to(slot_idx_base.device)
+                    slot_idx_base[:, None] + self.cp_slot_offsets[: self.pcp_size].to(slot_idx_base.device)
                 ).reshape(-1)
                 mtp_slot_mapping = self.runner.pcp_manager.mtp_slot_pad
 
@@ -1807,9 +1802,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     dtype=dcp_seq_lens.dtype,
                     non_blocking=True,
                 )
-                dcp_seq_lens[: sfa_cp_seq_len.shape[0]].copy_(
-                    sfa_cp_seq_len, non_blocking=True
-                )
+                dcp_seq_lens[: sfa_cp_seq_len.shape[0]].copy_(sfa_cp_seq_len, non_blocking=True)
                 dcp_seq_lens[sfa_cp_seq_len.shape[0] :].fill_(0)
             else:
                 kv_cache_spec = self.draft_attn_groups[0].kv_cache_spec

@@ -15,11 +15,11 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.common_cp import AscendPCPMetadata
 from vllm_ascend.attention.sfa_v1 import (
-    DCPContext,
-    DCPQueryGatherContext,
     AscendSFAImpl,
     AscendSFAMetadata,
     AscendSFAMetadataBuilder,
+    DCPContext,
+    DCPQueryGatherContext,
 )
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, enabling_mlapo, split_decodes_and_prefills
 from vllm_ascend.distributed.utils import (
@@ -118,10 +118,7 @@ def _dcp_lse_weighted_combine_kernel(
         acc += out_vals * weight
 
     tl.store(
-        out_ptr
-        + token_idx * out_stride_token
-        + head_idx * out_stride_head
-        + dim_offsets * out_stride_dim,
+        out_ptr + token_idx * out_stride_token + head_idx * out_stride_head + dim_offsets * out_stride_dim,
         acc,
         mask=dim_mask,
     )
@@ -740,11 +737,7 @@ class AscendSFADCPMetadataBuilder(AscendSFAMetadataBuilder):
         assert self.pcp_size == 1, "AscendSFADCPMetadataBuilder only supports DCP without PCP."
         assert self.dcp_size > 1, "AscendSFADCPMetadataBuilder requires DCP world size > 1."
         if self.cp_kv_cache_interleave_size <= 0:
-            raise RuntimeError(
-                "Invalid cp_kv_cache_interleave_size: "
-                f"{self.cp_kv_cache_interleave_size}"
-            )
-
+            raise RuntimeError(f"Invalid cp_kv_cache_interleave_size: {self.cp_kv_cache_interleave_size}")
 
     def _get_dcp_local_seq_lens(self, seq_lens: torch.Tensor) -> torch.Tensor:
         total_cp_size = self.pcp_size * self.dcp_size
@@ -812,9 +805,7 @@ class AscendSFADCPMetadataBuilder(AscendSFAMetadataBuilder):
             device=dcp_block_table.device,
         )
         local_col_idx = (
-            replicated_col_idx
-            // (total_cp_size * blocks_per_phys_block)
-            * blocks_per_phys_block
+            replicated_col_idx // (total_cp_size * blocks_per_phys_block) * blocks_per_phys_block
             + replicated_col_idx % blocks_per_phys_block
         )
         rank_in_replicated_view = (replicated_col_idx // blocks_per_phys_block) % total_cp_size
@@ -828,10 +819,8 @@ class AscendSFADCPMetadataBuilder(AscendSFAMetadataBuilder):
             local_sub_blocks = local_logical_blocks % blocks_per_phys_block
             local_phys_blocks = local_logical_blocks // blocks_per_phys_block
             replicated_blocks = (
-                (local_phys_blocks * total_cp_size + rank_in_replicated_view)
-                * blocks_per_phys_block
-                + local_sub_blocks
-            )
+                local_phys_blocks * total_cp_size + rank_in_replicated_view
+            ) * blocks_per_phys_block + local_sub_blocks
 
         valid_req_mask = seq_lens[:num_reqs].to(device=self.device) > 0
         replicated_blocks = torch.where(
@@ -860,8 +849,7 @@ class AscendSFADCPMetadataBuilder(AscendSFAMetadataBuilder):
             return slot_mapping_replicated_view
 
         query_lens = (
-            common_attn_metadata.query_start_loc[1 : num_reqs + 1]
-            - common_attn_metadata.query_start_loc[:num_reqs]
+            common_attn_metadata.query_start_loc[1 : num_reqs + 1] - common_attn_metadata.query_start_loc[:num_reqs]
         )
         req_indices = torch.repeat_interleave(
             torch.arange(num_reqs, dtype=torch.long, device=self.device),
@@ -904,9 +892,7 @@ class AscendSFADCPMetadataBuilder(AscendSFAMetadataBuilder):
             )
         else:
             slot_mapping = slot_mapping[: dsa_cp_context.num_tokens_pad]
-        dsa_cp_context.slot_mapping_cp = slot_mapping[
-            dsa_cp_context.local_start : dsa_cp_context.local_end_with_pad
-        ]
+        dsa_cp_context.slot_mapping_cp = slot_mapping[dsa_cp_context.local_start : dsa_cp_context.local_end_with_pad]
 
     def _build_with_replicated_view_metadata(
         self,
@@ -1049,20 +1035,13 @@ class AscendSFADCPImpl(AscendSFAImpl):
         self.dcp_size = dcp_group.world_size
         self.dcp_rank = dcp_group.rank_in_group if self.dcp_size > 1 else 0
         self.dcp_group = dcp_group if self.dcp_size > 1 else None
-        self.cp_kv_cache_interleave_size = (
-            self.vllm_config.parallel_config.cp_kv_cache_interleave_size
-        )
+        self.cp_kv_cache_interleave_size = self.vllm_config.parallel_config.cp_kv_cache_interleave_size
         if self.cp_kv_cache_interleave_size <= 0:
-            raise RuntimeError(
-                "Invalid cp_kv_cache_interleave_size: "
-                f"{self.cp_kv_cache_interleave_size}"
-            )
+            raise RuntimeError(f"Invalid cp_kv_cache_interleave_size: {self.cp_kv_cache_interleave_size}")
         self._dcp_remap_interleave_size = self.cp_kv_cache_interleave_size
         self._dcp_remap_interleave_size_is_one = self._dcp_remap_interleave_size == 1
         self._dcp_remap_use_float_arithmetic = (
-            0
-            < self.vllm_config.model_config.max_model_len
-            <= _DCP_REMAP_FP32_EXACT_INT_LIMIT
+            0 < self.vllm_config.model_config.max_model_len <= _DCP_REMAP_FP32_EXACT_INT_LIMIT
         )
         self._dcp_remap_scalar_values = {
             "zero": 0,
@@ -1373,9 +1352,7 @@ class AscendSFADCPImpl(AscendSFAImpl):
         attn_metadata: M,
     ) -> None:
         assert attn_metadata.dcp_context is not None
-        attn_metadata.dcp_context.query_gather_context = self._start_dcp_query_gather(
-            ql_nope, q_pe, attn_metadata
-        )
+        attn_metadata.dcp_context.query_gather_context = self._start_dcp_query_gather(ql_nope, q_pe, attn_metadata)
 
     def _finish_all_gather_query_for_dcp(
         self,

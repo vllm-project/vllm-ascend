@@ -2107,7 +2107,9 @@ class NPUModelRunner(GPUModelRunner):
         # TODO(Ronald1995): deepcopy is expensive when there is a large
         # number of requests, optimize it later.
         if ((
-            self.use_async_scheduling and self.num_spec_tokens and self._draft_token_ids is None  # type: ignore[has-type]
+            self.use_async_scheduling
+            and self.num_spec_tokens
+            and self._draft_token_ids is None  # type: ignore[has-type]
         ) or (
             # NOTE: This branch specifically triggers a deepcopy during the prefill phase 
             # only for PCP (Parallel Context Processing) + Multi-Modal (MM) scenarios. 
@@ -3362,7 +3364,11 @@ class NPUModelRunner(GPUModelRunner):
 
             # add kvcomp_metadata into common_attn_metadata
             if (for_cudagraph_capture
-                    and not isinstance(builder, (AscendDSAMetadataBuilder, AscendDSACPMetadataBuilder, AscendSFADCPMetadataBuilder))):
+                    and not isinstance(builder, (
+                        AscendDSAMetadataBuilder,
+                        AscendDSACPMetadataBuilder,
+                        AscendSFADCPMetadataBuilder,
+                    ))):
                 attn_metadata_i = builder.build_for_cudagraph_capture(common_attn_metadata)
             else:
                 attn_metadata_i = builder.build(
@@ -4520,8 +4526,9 @@ class NPUModelRunner(GPUModelRunner):
                     if self.use_sparse and has_indexer_cache and "cache_only_layers" not in layer_name:
                         if current_sparse_c8:
                             if get_ascend_device_type() == AscendDeviceType.A5:
-                                raw_k_tensor, raw_dsa_k_tensor, raw_dsa_k_scale_tensor = kv_cache_raw_tensors[  # type: ignore
-                                    layer_name]
+                                raw_k_tensor, raw_dsa_k_tensor, raw_dsa_k_scale_tensor = (
+                                    kv_cache_raw_tensors[layer_name]  # type: ignore
+                                )
                                 assert raw_dsa_k_tensor is not None
                                 assert raw_dsa_k_scale_tensor is not None
                                 sum_page_size_bytes = (

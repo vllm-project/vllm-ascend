@@ -167,6 +167,7 @@ def enable_cp():
     prefill_config = get_current_vllm_config().parallel_config
     return prefill_config.prefill_context_parallel_size > 1 or prefill_config.decode_context_parallel_size > 1
 
+
 @lru_cache(maxsize=1)
 def enable_sfa_dcp_replicated_indexer():
     vllm_config = get_current_vllm_config()
@@ -174,6 +175,7 @@ def enable_sfa_dcp_replicated_indexer():
     if additional_config.get("sfa_dcp_replicated_indexer", False):
         return vllm_config.parallel_config.decode_context_parallel_size > 1
     return False
+
 
 @dataclass
 class AscendPrefillContextParallelMetadata:

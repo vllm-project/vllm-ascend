@@ -156,12 +156,14 @@ class AscendSFABackend(AttentionBackend):
     def get_supported_kernel_block_sizes() -> list[int]:
         return [128]
 
+
 @dataclass
 class DCPContext:
     slot_mapping: torch.Tensor
     block_table: torch.Tensor
     seq_lens: torch.Tensor
     query_gather_context: DCPQueryGatherContext | None = None
+
 
 @dataclass
 class DSACPContext:
