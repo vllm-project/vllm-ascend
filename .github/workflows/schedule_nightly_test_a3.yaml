@@ -53,6 +53,8 @@ on:
         required: false
         default: false
         type: boolean
+  pull_request:
+    types: [labeled, synchronize]
 
 permissions:
   contents: read
