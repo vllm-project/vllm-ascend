@@ -75,8 +75,32 @@ env:
   CACHE_REPO: ghcr.io/vllm-project/vllm-ascend
 
 jobs:
+  verify-crane:
+    name: verify crane (${{ matrix.tag }}, host)
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - tag: amd64
+            runner: linux-amd64-cpu-32-hk
+          - tag: arm64
+            runner: linux-arm64-cpu-32-hk
+    steps:
+      - name: Download and verify crane
+        run: |
+          set -e
+          ARCH=$(uname -m | sed 's/aarch64/arm64/')
+          CRANE_VERSION="v0.20.2"
+          curl -fsSL "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_${ARCH}.tar.gz" -o /tmp/crane.tar.gz
+          tar -xzf /tmp/crane.tar.gz -C /tmp crane
+          chmod +x /tmp/crane
+          echo "::notice::crane installed successfully"
+          /tmp/crane version
+
   build-push-digest:
     name: build
+    needs: verify-crane
     runs-on: ${{ matrix.runner }}
     permissions:
       packages: write
@@ -412,7 +436,7 @@ jobs:
         run: |
           ARCH=$(uname -m | sed 's/aarch64/arm64/')
           CRANE_VERSION="v0.20.2"
-          wget -S "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_${CRANE_VERSION#v}_Linux_${ARCH}.tar.gz" -O /tmp/crane.tar.gz
+          curl -fsSL "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_${ARCH}.tar.gz" -o /tmp/crane.tar.gz
           tar -xzf /tmp/crane.tar.gz -C /tmp crane
           chmod +x /tmp/crane
           /tmp/crane auth login quay.io -u "$QUAY_USERNAME" -p "$QUAY_PASSWORD"
@@ -477,7 +501,7 @@ jobs:
         run: |
           ARCH=$(uname -m | sed 's/aarch64/arm64/')
           CRANE_VERSION="v0.20.2"
-          wget -q "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_${CRANE_VERSION#v}_Linux_${ARCH}.tar.gz" -O /tmp/crane.tar.gz
+          curl -fsSL "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_${ARCH}.tar.gz" -o /tmp/crane.tar.gz
           tar -xzf /tmp/crane.tar.gz -C /tmp crane
           chmod +x /tmp/crane
           /tmp/crane auth login quay.io -u "$QUAY_TEMP_USERNAME" -p "$QUAY_TEMP_PASSWORD"
