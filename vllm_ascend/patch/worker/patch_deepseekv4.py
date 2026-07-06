@@ -455,9 +455,34 @@ def compute_ffn_output(
     Runs ``hc_pre -> post_attention_layernorm -> mlp.afd_forward -> hc_post``
     using the routing tensors received from the attention worker.
     """
+    # 诊断: FFN 侧 hc_pre 前 (从 attention 侧 P2P 接收的 3D 张量)
+    logger.info(
+        "[FFN_HC_PRE_IN] layer=%d hs dim=%d shape=%s dtype=%s "
+        "mean=%.6f std=%.6f min=%.6f max=%.6f has_nan=%s",
+        layer_idx, hidden_states.dim(), tuple(hidden_states.shape),
+        hidden_states.dtype,
+        hidden_states.float().mean().item(),
+        hidden_states.float().std().item(),
+        hidden_states.float().min().item(),
+        hidden_states.float().max().item(),
+        torch.isnan(hidden_states).any().item(),
+    )
     residual = hidden_states.clone()
     hidden_states, post, comb = self.hc_pre(
         hidden_states, self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base
+    )
+    # 诊断: FFN 侧 hc_pre 后 (3D→2D fold), 即将进入 post_attention_layernorm + MoE
+    logger.info(
+        "[FFN_HC_PRE_OUT] layer=%d hs dim=%d shape=%s mean=%.6f std=%.6f "
+        "min=%.6f max=%.6f has_nan=%s | post shape=%s comb shape=%s",
+        layer_idx, hidden_states.dim(), tuple(hidden_states.shape),
+        hidden_states.float().mean().item(),
+        hidden_states.float().std().item(),
+        hidden_states.float().min().item(),
+        hidden_states.float().max().item(),
+        torch.isnan(hidden_states).any().item(),
+        tuple(post.shape) if post is not None else None,
+        tuple(comb.shape) if comb is not None else None,
     )
     hidden_states = self.post_attention_layernorm(hidden_states)
     hidden_states = self.mlp.afd_forward(
@@ -471,7 +496,29 @@ def compute_ffn_output(
         x_active_mask=x_active_mask,
         cam_p2p_ep_name=cam_p2p_ep_name,
     )
+    # 诊断: FFN 侧 hc_post 前 (MoE 输出 2D), 即将进入 hc_post (2D→3D unfold)
+    logger.info(
+        "[FFN_HC_POST_IN] layer=%d hs dim=%d shape=%s mean=%.6f std=%.6f "
+        "min=%.6f max=%.6f has_nan=%s",
+        layer_idx, hidden_states.dim(), tuple(hidden_states.shape),
+        hidden_states.float().mean().item(),
+        hidden_states.float().std().item(),
+        hidden_states.float().min().item(),
+        hidden_states.float().max().item(),
+        torch.isnan(hidden_states).any().item(),
+    )
     hidden_states = self.hc_post(hidden_states, residual, post, comb)
+    # 诊断: FFN 侧 hc_post 后 (3D unfold), 即将通过 P2P 回传给 attention 侧
+    logger.info(
+        "[FFN_HC_POST_OUT] layer=%d hs dim=%d shape=%s mean=%.6f std=%.6f "
+        "min=%.6f max=%.6f has_nan=%s",
+        layer_idx, hidden_states.dim(), tuple(hidden_states.shape),
+        hidden_states.float().mean().item(),
+        hidden_states.float().std().item(),
+        hidden_states.float().min().item(),
+        hidden_states.float().max().item(),
+        torch.isnan(hidden_states).any().item(),
+    )
     return hidden_states
 
 
