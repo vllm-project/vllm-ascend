@@ -560,6 +560,8 @@ class NPUModelRunner(GPUModelRunner):
         self.query_lens: torch.Tensor | None = None
         self.cpu_slot_mapping = None
         self.sampling_done_event: torch.npu.Event | None = None
+        self._dspark_draft_probs: torch.Tensor | None = None
+        self._dspark_draft_probs_req_ids: list[str] | None = None
 
         # self.cudagraph_batch_sizes sorts in ascending order.
         if (
@@ -1645,6 +1647,38 @@ class NPUModelRunner(GPUModelRunner):
             self.valid_sampled_token_count_gpu = valid_sampled_tokens_count # type: ignore[no-redef]
         self.input_batch.prev_sampled_token_ids = next_token_ids.unsqueeze(1)
 
+    def _get_dspark_draft_probs(self, spec_decode_metadata: SpecDecodeMetadata) -> torch.Tensor | None:
+        draft_probs = self._dspark_draft_probs
+        draft_probs_req_ids = self._dspark_draft_probs_req_ids
+        self._dspark_draft_probs = None
+        self._dspark_draft_probs_req_ids = None
+        if draft_probs is None:
+            return None
+
+        req_ids = self.input_batch.req_ids[: len(spec_decode_metadata.num_draft_tokens)]
+        if draft_probs_req_ids is None:
+            ordered_probs = draft_probs
+        else:
+            req_id_to_idx = {req_id: idx for idx, req_id in enumerate(draft_probs_req_ids)}
+            rows_by_req = []
+            for req_id, num_tokens in zip(req_ids, spec_decode_metadata.num_draft_tokens):
+                prev_idx = req_id_to_idx.get(req_id)
+                if prev_idx is None:
+                    if num_tokens > 0:
+                        return None
+                    rows_by_req.append(draft_probs.new_empty((draft_probs.shape[1], draft_probs.shape[2])))
+                else:
+                    rows_by_req.append(draft_probs[prev_idx])
+            ordered_probs = torch.stack(rows_by_req, dim=0) if rows_by_req else draft_probs[:0]
+
+        rows = []
+        for req_idx, num_tokens in enumerate(spec_decode_metadata.num_draft_tokens):
+            if num_tokens > 0:
+                rows.append(ordered_probs[req_idx, :num_tokens])
+        if not rows:
+            return None
+        return torch.cat(rows, dim=0).contiguous()
+
     # TODO: Once the PCP features are complete, it will fully inherit the classes from the VLLM community.
     def propose_draft_token_ids(
         self,
@@ -1872,6 +1906,8 @@ class NPUModelRunner(GPUModelRunner):
                 num_scheduled_tokens=num_scheduled_tokens,
                 num_rejected_tokens_gpu=num_rejected_tokens_gpu,
             )
+            if isinstance(self.drafter, AscendDSparkProposer):
+                self._dspark_draft_probs, self._dspark_draft_probs_req_ids = self.drafter.take_last_draft_probs_by_req_id()
         else:
             raise ValueError(f"Unknown speculative decoding method: {self.speculative_config.method}")
 
@@ -2552,7 +2588,7 @@ class NPUModelRunner(GPUModelRunner):
             self.rejection_sampler.prepare_sampling(max_topk)
         draft_probs = None
         if isinstance(self.drafter, AscendDSparkProposer):
-            draft_probs = self.drafter.take_last_draft_probs(spec_decode_metadata.num_draft_tokens)
+            draft_probs = self._get_dspark_draft_probs(spec_decode_metadata)
         sampler_output = self.rejection_sampler(
             spec_decode_metadata,
             draft_probs,

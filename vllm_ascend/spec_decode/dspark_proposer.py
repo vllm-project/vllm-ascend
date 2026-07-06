@@ -62,6 +62,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         self._dspark_last_draft_logits: torch.Tensor | None = None
         self._dspark_last_draft_probs: torch.Tensor | None = None
         self._dspark_last_confidence: torch.Tensor | None = None
+        self._dspark_last_req_ids: list[str] | None = None
         self._dspark_probabilistic = vllm_config.speculative_config.draft_sample_method == "probabilistic"
         self._dspark_confidence_threshold = float(getattr(draft_hf_config, "dspark_confidence_threshold", 0.0) or 0.0)
         if not 0.0 <= self._dspark_confidence_threshold <= 1.0:
@@ -75,6 +76,7 @@ class AscendDSparkProposer(AscendDflashProposer):
     def take_last_draft_probs(self, num_draft_tokens: list[int] | None = None) -> torch.Tensor | None:
         draft_probs = self._dspark_last_draft_probs
         self._dspark_last_draft_probs = None
+        self._dspark_last_req_ids = None
         if draft_probs is None or num_draft_tokens is None:
             return draft_probs
         rows = []
@@ -98,6 +100,21 @@ class AscendDSparkProposer(AscendDflashProposer):
         full_len = torch.full_like(first_low, max_tokens)
         prefix_len = torch.where(below_threshold.any(dim=1), first_low, full_len)
         return int(prefix_len.min().item())
+
+    def take_last_draft_probs_by_req_id(self) -> tuple[torch.Tensor | None, list[str] | None]:
+        draft_probs = self._dspark_last_draft_probs
+        req_ids = self._dspark_last_req_ids
+        self._dspark_last_draft_probs = None
+        self._dspark_last_req_ids = None
+        return draft_probs, req_ids
+
+    def _current_req_ids(self, batch_size: int) -> list[str] | None:
+        if self.runner is None or not hasattr(self.runner, "input_batch"):
+            return None
+        req_ids = getattr(self.runner.input_batch, "req_ids", None)
+        if req_ids is None:
+            return None
+        return list(req_ids[:batch_size])
 
     def initialize_attn_backend(self, kv_cache_config, kernel_block_sizes=None) -> None:
         del kv_cache_config
@@ -248,6 +265,8 @@ class AscendDSparkProposer(AscendDflashProposer):
             context_cursor = out_end
         self._dflash_num_context = context_cursor
         token_indices_to_sample = torch.arange(num_query_total, dtype=torch.int32, device=self.device)
+        model_config = getattr(getattr(self, "vllm_config", None), "model_config", None)
+        max_model_len = int(getattr(model_config, "max_model_len", 0) or 0)
         for req_idx in range(batch_size):
             request_slot = request_slots[req_idx]
             ctx_start = int(cad.query_start_loc[req_idx].item())
@@ -259,21 +278,31 @@ class AscendDSparkProposer(AscendDflashProposer):
             last_pos = target_positions[valid_ctx_end - 1]
             out_start = req_idx * block_size
             out_end = out_start + block_size
-            self.positions[out_start:out_end] = last_pos + 1 + self.arange_dspark[:block_size]
+            draft_positions = last_pos + 1 + self.arange_dspark[:block_size]
+            if max_model_len > 0:
+                exceeds_max_model_len = draft_positions >= max_model_len
+                draft_positions = torch.where(exceeds_max_model_len, torch.zeros_like(draft_positions), draft_positions)
+            else:
+                exceeds_max_model_len = torch.zeros(block_size, dtype=torch.bool, device=draft_positions.device)
+            self.positions[out_start:out_end] = draft_positions
             self.input_ids[out_start] = next_token_ids[req_idx]
             if block_size > 1:
                 self.input_ids[out_start + 1 : out_end] = self.parallel_drafting_token_id
             self._request_slots_buffer[out_start:out_end] = request_slot
             if getattr(cad, "block_table_tensor", None) is not None:
-                block_nums = self.positions[out_start:out_end] // self.kernel_block_size
-                block_offsets = self.positions[out_start:out_end] % self.kernel_block_size
+                block_nums = draft_positions // self.kernel_block_size
+                block_offsets = draft_positions % self.kernel_block_size
                 block_ids = cad.block_table_tensor[req_idx].index_select(0, block_nums.long())
-                self._slot_mapping_buffer[out_start:out_end] = block_ids.to(torch.int32) * self.kernel_block_size + block_offsets
+                slot_mapping = block_ids.to(torch.int32) * self.kernel_block_size + block_offsets
             else:
-                self._slot_mapping_buffer[out_start:out_end] = self.positions[out_start:out_end]
+                slot_mapping = draft_positions.to(torch.int32)
+            slot_mapping.masked_fill_(exceeds_max_model_len, -1)
+            self._slot_mapping_buffer[out_start:out_end] = slot_mapping
         effective_seq_lens = cad.seq_lens - num_rejected_tokens_gpu if has_num_rejected else cad.seq_lens
         cad.query_start_loc = self.arange_dspark[: batch_size + 1] * block_size
         cad.seq_lens = effective_seq_lens + block_size
+        if max_model_len > 0:
+            cad.seq_lens = cad.seq_lens.clamp(max=max_model_len)
         cad.query_start_loc_cpu = (torch.from_numpy(self.token_arange_np[: batch_size + 1]).clone() * block_size).to(torch.int32)
         if hasattr(cad, "actual_seq_lengths_q"):
             cad.actual_seq_lengths_q = [block_size] * batch_size
@@ -283,6 +312,8 @@ class AscendDSparkProposer(AscendDflashProposer):
         cad.num_input_tokens = num_query_total
         cad.max_query_len = block_size
         cad.max_seq_len = cad.max_seq_len + block_size
+        if max_model_len > 0:
+            cad.max_seq_len = min(cad.max_seq_len, max_model_len)
         cad.slot_mapping = self._slot_mapping_buffer[:num_query_total]
         cad.positions = self.positions[:num_query_total]
         cad.causal = False
@@ -311,19 +342,43 @@ class AscendDSparkProposer(AscendDflashProposer):
     def _get_draft_idx_mapping(self, num_reqs: int, device: torch.device) -> torch.Tensor:
         return self._dspark_idx_mapping_buffer[:num_reqs].to(device=device, dtype=torch.int32).contiguous()
 
+    def _get_runner_idx_mapping(self, num_reqs: int, device: torch.device) -> torch.Tensor | None:
+        input_batch = getattr(getattr(self, "runner", None), "input_batch", None)
+        runner_idx_mapping = getattr(input_batch, "idx_mapping", None)
+        if isinstance(runner_idx_mapping, torch.Tensor):
+            return runner_idx_mapping[:num_reqs].to(device=device, dtype=torch.long).contiguous()
+        return None
+
     def _get_draft_sampling_temperature(self, sampling_metadata: SamplingMetadata, num_reqs: int, device: torch.device) -> torch.Tensor:
         temperature = sampling_metadata.temperature
         if temperature is None:
             default = 0.0 if sampling_metadata.all_greedy else 1.0
             return torch.full((num_reqs,), default, dtype=torch.float32, device=device)
+        runner_idx_mapping = self._get_runner_idx_mapping(num_reqs, temperature.device)
+        if runner_idx_mapping is not None and temperature.shape[0] > num_reqs:
+            return temperature.index_select(0, runner_idx_mapping).to(device=device, dtype=torch.float32).contiguous()
+        if runner_idx_mapping is not None and temperature.shape[0] == num_reqs:
+            return temperature.to(device=device, dtype=torch.float32).contiguous()
         return temperature[:num_reqs].to(device=device, dtype=torch.float32).contiguous()
 
     def _get_draft_sampling_seeds(self, sampling_metadata: SamplingMetadata, num_reqs: int, device: torch.device) -> torch.Tensor:
+        runner = getattr(self, "runner", None)
+        sampler = getattr(runner, "sampler", None)
+        sampling_states = getattr(sampler, "sampling_states", None)
+        runner_seeds = getattr(getattr(sampling_states, "seeds", None), "gpu", None)
+        if isinstance(runner_seeds, torch.Tensor):
+            runner_idx_mapping = self._get_runner_idx_mapping(num_reqs, runner_seeds.device)
+            if runner_idx_mapping is not None and runner_seeds.shape[0] > num_reqs:
+                return runner_seeds.index_select(0, runner_idx_mapping).to(device=device, dtype=torch.int64).contiguous()
+            return runner_seeds[:num_reqs].to(device=device, dtype=torch.int64).contiguous()
         seeds = self._dspark_sampling_seed_buffer[:num_reqs]
         model_config = getattr(getattr(self, "vllm_config", None), "model_config", None)
         base_seed = int(getattr(model_config, "seed", 0) or 0)
+        runner_idx_mapping = self._get_runner_idx_mapping(num_reqs, device)
+        runner_idx_mapping_cpu = runner_idx_mapping.cpu().tolist() if runner_idx_mapping is not None else None
         for req_idx in range(num_reqs):
-            generator = sampling_metadata.generators.get(req_idx)
+            generator_idx = runner_idx_mapping_cpu[req_idx] if runner_idx_mapping_cpu is not None else req_idx
+            generator = sampling_metadata.generators.get(generator_idx)
             seeds[req_idx] = int(generator.initial_seed()) if generator is not None else base_seed + req_idx * 9973
         return seeds.to(device=device, dtype=torch.int64).contiguous()
 
@@ -340,6 +395,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         self._dspark_last_draft_logits = None
         self._dspark_last_draft_probs = None
         self._dspark_last_confidence = None
+        self._dspark_last_req_ids = None
         prev_ids = self._dspark_seed_buffer[:num_reqs]
         gumbel_positions = self.positions[:num_sample].view(num_reqs, block_size)
         markov_embeds = []
@@ -373,6 +429,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         if use_probabilistic and proposal_len > 0:
             assert draft_logits is not None
             self._dspark_last_draft_probs = draft_logits[:, :proposal_len, :].softmax(dim=-1, dtype=torch.float32).contiguous()
+            self._dspark_last_req_ids = self._current_req_ids(num_reqs)
         return self._dspark_draft_buffer[:num_reqs, :proposal_len]
 
     def _propose(
