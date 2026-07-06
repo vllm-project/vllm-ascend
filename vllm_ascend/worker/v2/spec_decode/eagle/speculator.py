@@ -28,7 +28,6 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import AttentionStatePair, BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
@@ -36,7 +35,6 @@ from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.spec_decode.autoregressive import (  # type: ignore[import-not-found]
     speculator as vllm_speculator_module,  # type: ignore[import-not-found]
 )
-from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import update_draft_inputs
 from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -193,9 +191,7 @@ class AscendEagleSpeculator(EagleSpeculator):
         if self.num_speculative_steps == 1:
             return
 
-        # Capture the decode draft generation routine (model forward +
-        # sample + update_draft_inputs) for a single
-        # step.
+        # Capture all decode draft generation steps as a single graph.
         assert self.decode_cudagraph_manager is not None
         with build_attn_metadata_wrapper():
             self.decode_cudagraph_manager.capture(
@@ -239,43 +235,19 @@ class AscendEagleSpeculator(EagleSpeculator):
         num_tokens_across_dp: torch.Tensor | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
     ) -> None:
-        positions = self.input_buffers.positions[:num_reqs]
-        query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
-        idx_mapping = self.idx_mapping[:num_reqs]
-        for step in range(1, self.num_speculative_steps):
-            self.current_draft_step.fill_(step)
-            # Run the eagle model.
-            last_hidden_states, hidden_states = self._run_model(
-                num_tokens_padded,
-                attn_metadata,
-                slot_mappings,
-                num_tokens_across_dp,
-                cudagraph_runtime_mode,
-            )
-            last_hidden_states = last_hidden_states[:num_reqs]
-            hidden_states = hidden_states[:num_reqs]
-            draft_tokens = self.sample_draft(
-                last_hidden_states,
-                positions,
-                idx_mapping,
-                self.temperature,
-                self.seeds,
-                self.current_draft_step,
-                self.draft_logits,
-            )
-            self.draft_tokens[:num_reqs, step] = draft_tokens
-            if step < self.num_speculative_steps - 1:
-                # Update the inputs for the next step.
-                update_eagle_inputs(
-                    draft_tokens,
-                    hidden_states,
-                    self.input_buffers,
-                    self.hidden_states,
-                    self.max_model_len,
-                )
-                if attn_metadata is not None:
-                    self.block_tables.compute_slot_mappings(idx_mapping, query_start_loc, positions, num_tokens_padded)
-            self._increment_decode_attn_metadata(attn_metadata)
+        """Thin override: delegate to upstream single-step ``_generate_draft``,
+        then apply Ascend-specific attention-metadata updates required by the
+        FIA operator."""
+        super()._generate_draft(
+            num_reqs,
+            num_tokens_padded,
+            attn_metadata,
+            slot_mappings,
+            num_tokens_across_dp,
+            cudagraph_runtime_mode,
+        )
+        if attn_metadata is not None:
+            self._update_decode_attn_metadata(attn_metadata, 1, num_reqs)
 
     def _multi_step_decode(
         self,
@@ -284,53 +256,39 @@ class AscendEagleSpeculator(EagleSpeculator):
         batch_desc: BatchExecutionDescriptor,
         num_tokens_across_dp: torch.Tensor | None,
     ) -> None:
+        """Minimal override to handle the merged multi-step graph in FULL mode.
+
+        In FULL mode the captured graph already contains all speculative
+        steps, so ``run_fullgraph`` is called once instead of once per
+        step.  For PIECEWISE / NONE modes we delegate to the upstream
+        ``_multi_step_decode`` which iterates over steps and calls
+        ``_generate_draft`` per step.
         """
-        Override to replay all N-1 decode steps in a single graph call.
-
-        NOTE: This method should follow the same logical structure as
-        AutoRegressiveSpeculator._multi_step_decode in upstream vLLM.
-        Specifically, the iteration over speculative steps, per-step
-        rebuild of attention metadata / slot mappings, and the FULL /
-        non-FULL code paths should align with that implementation.
-        """
-        positions = self.input_buffers.positions[:num_reqs]
-        query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
-        idx_mapping = self.idx_mapping[:num_reqs]
-
-        attn_metadata = None
-        slot_mappings_by_layer = None
-
-        if not skip_attn and self.advance_draft_positions:
-            # Build attention metadata and slot mappings for the draft
-            # decode steps. It is necessary to rebuild the attention
-            # metadata even when replaying the FULL graph so that any
-            # attention metadata builder state is updated.
-            slot_mappings = self.block_tables.compute_slot_mappings(
-                idx_mapping,
-                query_start_loc,
-                positions,
-                batch_desc.num_tokens,
-            )
-            slot_mappings_by_layer = build_slot_mappings_by_layer(slot_mappings, self.kv_cache_config)
-            attn_metadata = self._build_draft_attn_metadata(
-                num_reqs=num_reqs,
-                num_reqs_padded=batch_desc.num_reqs or num_reqs,
-                num_tokens_padded=batch_desc.num_tokens,
-            )
         if batch_desc.cg_mode == CUDAGraphMode.FULL:
-            # Replay the full graph for draft generation.
             assert self.decode_cudagraph_manager is not None
             self.decode_cudagraph_manager.run_fullgraph(batch_desc)
-        else:
-            self._ascend_prepare_decode_draft(attn_metadata, num_reqs)
-            self._generate_draft(
-                num_reqs,
-                batch_desc.num_tokens,
-                attn_metadata,
-                slot_mappings_by_layer,
-                num_tokens_across_dp=num_tokens_across_dp,
-                cudagraph_runtime_mode=batch_desc.cg_mode,
-            )
+            return
+        super()._multi_step_decode(num_reqs, skip_attn, batch_desc, num_tokens_across_dp)
+
+    def _build_draft_attn_metadata(
+        self,
+        num_reqs: int,
+        num_reqs_padded: int,
+        num_tokens_padded: int,
+        num_query_per_req: int = 1,
+        causal: bool = True,
+    ) -> dict[str, Any] | None:
+        attn_metadata = super()._build_draft_attn_metadata(
+            num_reqs,
+            num_reqs_padded,
+            num_tokens_padded,
+            num_query_per_req,
+            causal,
+        )
+        if attn_metadata is not None:
+            for metadata in attn_metadata.values():
+                metadata.attn_state = AscendAttentionState.DecodeOnly
+        return attn_metadata
 
     def build_draft_attn_metadatas(self, num_reqs_padded, is_draft_model_prefill):
         """Build draft_attn_metadatas for partial-merged draft graph."""
@@ -351,29 +309,11 @@ class AscendEagleSpeculator(EagleSpeculator):
 
         return draft_attn_metadatas
 
-    def _ascend_prepare_decode_draft(self, attn_metadata: dict[str, Any] | None, num_reqs: int) -> None:
-        self._init_decode_attn_metadata(attn_metadata, num_reqs)
-        self._increment_decode_attn_metadata(attn_metadata)
-
     def _ascend_update_seq_lens(self, attn_metadata: dict[str, Any] | None) -> None:
         if attn_metadata is not None:
             for attn_meta in attn_metadata.values():
                 attn_meta.seq_lens = attn_meta.seq_lens + 1
                 attn_meta.seq_len_list = attn_meta.seq_lens.tolist()
-
-    def _init_decode_attn_metadata(self, attn_metadata: dict[str, Any] | None, num_reqs: int):
-        """Initialize attention metadata for decode phase on Ascend NPUs."""
-        if attn_metadata is None:
-            return
-
-        attn_state = AscendAttentionState.DecodeOnly
-        seq_lens_cpu = self._get_seq_lens_cpu()[:num_reqs]
-
-        # attn_metadata is build in vllm's super class.
-        # We need to update attn_state for each layer's metadata.
-        for metadata in attn_metadata.values():
-            metadata.attn_state = attn_state
-            metadata.seq_lens_cpu = seq_lens_cpu
 
     def _init_decode_draft_attn_metadatas(self, attn_metadata: dict[str, Any] | None, num_reqs_padded: int):
         """Initialize attention metadata for decode phase in graph mode on Ascend NPUs."""
@@ -395,11 +335,6 @@ class AscendEagleSpeculator(EagleSpeculator):
             draft_attn_metadatas.append(per_step_attn_metadata)
 
         return draft_attn_metadatas
-
-    def _increment_decode_attn_metadata(self, attn_metadata: dict[str, Any] | None):
-        """Increment attention metadata for decode phase on Ascend NPUs."""
-        # in eager mode, attn_metadata's seq_lens_cpu and input_buffers's seq_lens_cpu shares the memory
-        self._update_decode_attn_metadata(attn_metadata, 1)
 
     def _update_decode_attn_metadata(
         self, attn_metadata: dict[str, Any] | None, step: int, num_reqs: int | None = None
