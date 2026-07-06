@@ -48,6 +48,11 @@ on:
         required: false
         default: ''
         type: string
+      aop_enabled:
+        description: 'Enable AOP hooks (capture / classify / skip-or-process)'
+        required: false
+        default: 'false'
+        type: string
 
 permissions:
   contents: read
@@ -195,6 +200,7 @@ jobs:
       config_file_path: ${{ matrix.test_config.config_file_path }}
       name: ${{ matrix.test_config.name }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref }}
+      aop_multi_enabled: ${{ inputs.aop_enabled }}
       request_id: ${{ inputs.request_id || '' }}
       should_run: >-
         ${{
@@ -233,6 +239,7 @@ jobs:
       config_file_path: ${{ matrix.test_config.config_file_path }}
       name: ${{ matrix.test_config.name }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref }}
+      aop_multi_enabled: ${{ inputs.aop_enabled }}
       request_id: ${{ inputs.request_id || '' }}
       should_run: >-
         ${{
@@ -274,6 +281,7 @@ jobs:
         }}
       request_id: ${{ inputs.request_id || '' }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
+      aop_single_enabled: ${{ inputs.aop_enabled }}
 
   multi-card-tests:
     name: single-node
@@ -303,6 +311,7 @@ jobs:
         }}
       request_id: ${{ inputs.request_id || '' }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
+      aop_single_enabled: ${{ inputs.aop_enabled }}
     secrets:
       OBS_ACCESS_KEY_ID: ${{ secrets.OBS_ACCESS_KEY_ID }}
       OBS_SECRET_ACCESS_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
