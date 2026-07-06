@@ -84,8 +84,6 @@ templates:
       - --no-enable-prefix_caching
       - --speculative-config
       - '{"method":"eagle3","model":"vllm-ascend/MiniMax-M2.5-eagle-model-0318","num_speculative_tokens":3}'
-      - --additional-config
-      - '{"recompute_scheduler_enable": true}'
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_producer",
