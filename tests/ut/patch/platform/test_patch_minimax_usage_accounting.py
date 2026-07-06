@@ -4,16 +4,15 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
+from vllm.parser.abstract_parser import _WrappedParser
 from vllm.parser.parser_manager import ParserManager
 from vllm.reasoning.minimax_m2_reasoning_parser import (
     MiniMaxM2AppendThinkReasoningParser,
     MiniMaxM2ReasoningParser,
 )
 
-from vllm_ascend.patch.platform import (
-    patch_chat_usage_accounting as usage_patch,
-)
-from vllm_ascend.patch.platform import patch_minimax_usage_accounting  # noqa: F401
+from vllm_ascend.patch.platform import patch_minimax_usage_accounting as usage_patch
 
 
 class FakeTokenizer:
@@ -138,13 +137,9 @@ def test_make_full_response_usage_sums_reasoning_tokens():
         def _make_usage_info(self, **kwargs):
             return usage_patch._make_usage_info(self, **kwargs)
 
-    class FakeReasoningParser:
-        def count_reasoning_tokens(self, token_ids):
-            return 2 if 2 in token_ids else 0
-
     state = usage_patch._create_usage_tracking_state(
         num_choices=2,
-        reasoning_parser=FakeReasoningParser(),
+        reasoning_parser=MiniMaxM2ReasoningParser(FakeTokenizer()),
     )
     state.num_prompt_tokens = 3
     state.num_cached_tokens = 1
@@ -157,7 +152,7 @@ def test_make_full_response_usage_sums_reasoning_tokens():
     assert usage.prompt_tokens == 3
     assert usage.completion_tokens == 6
     assert usage.total_tokens == 9
-    assert usage.completion_tokens_details.reasoning_tokens == 2
+    assert usage.completion_tokens_details.reasoning_tokens == 4
     assert usage.prompt_tokens_details is None
 
 
@@ -168,13 +163,11 @@ def test_make_full_response_usage_accepts_wrapped_reasoning_parser():
         def _make_usage_info(self, **kwargs):
             return usage_patch._make_usage_info(self, **kwargs)
 
-    class FakeReasoningParser:
-        def count_reasoning_tokens(self, token_ids):
-            return token_ids.index(2) if 2 in token_ids else len(token_ids)
-
     state = usage_patch._create_usage_tracking_state(
         num_choices=1,
-        reasoning_parser=SimpleNamespace(reasoning_parser=FakeReasoningParser()),
+        reasoning_parser=SimpleNamespace(
+            reasoning_parser=MiniMaxM2ReasoningParser(FakeTokenizer()),
+        ),
     )
     state.num_prompt_tokens = 3
     state.final_res = SimpleNamespace(num_cached_tokens=None)
@@ -196,10 +189,25 @@ def test_count_reasoning_tokens_accepts_minimax_unified_parser():
     parser = parser_cls(FakeTokenizer(), tools=[])
 
     assert not hasattr(parser, "count_reasoning_tokens")
-    assert usage_patch._count_reasoning_tokens_for_usage([10, 11, 2, 20], parser) == 2
+    assert usage_patch._count_minimax_reasoning_tokens_for_usage([10, 11, 2, 20], parser) == 2
 
 
-def test_count_reasoning_tokens_accepts_deepseek_parser_manager_wrapper():
+def test_count_reasoning_tokens_accepts_wrapped_minimax_parser():
+    original_reasoning_parser_cls = _WrappedParser.reasoning_parser_cls
+    original_tool_parser_cls = _WrappedParser.tool_parser_cls
+    try:
+        _WrappedParser.reasoning_parser_cls = MiniMaxM2ReasoningParser
+        _WrappedParser.tool_parser_cls = None
+        parser = _WrappedParser(FakeTokenizer())
+
+        assert usage_patch._count_minimax_reasoning_tokens_for_usage([10, 11, 2, 20], parser) == 2
+        assert usage_patch._is_minimax_reasoning_parser(parser)
+    finally:
+        _WrappedParser.reasoning_parser_cls = original_reasoning_parser_cls
+        _WrappedParser.tool_parser_cls = original_tool_parser_cls
+
+
+def test_count_reasoning_tokens_skips_non_minimax_parser_manager_wrapper():
     parser_cls = ParserManager.get_parser(
         tool_parser_name="deepseek_v4",
         reasoning_parser_name="deepseek_v4",
@@ -209,17 +217,140 @@ def test_count_reasoning_tokens_accepts_deepseek_parser_manager_wrapper():
     parser = parser_cls(FakeTokenizer(), tools=[])
 
     assert not hasattr(parser, "count_reasoning_tokens")
-    assert usage_patch._count_reasoning_tokens_for_usage([10, 11], parser) == 0
+    assert usage_patch._count_minimax_reasoning_tokens_for_usage([10, 11], parser) is None
+    assert not usage_patch._is_minimax_reasoning_parser(parser)
 
 
-def test_stream_usage_details_are_injected_without_replacing_source():
+def test_non_minimax_parser_does_not_enable_tracking_by_default():
     class FakeReasoningParser:
         def count_reasoning_tokens(self, token_ids):
-            return token_ids.index(2) if 2 in token_ids else len(token_ids)
+            return len(token_ids)
+
+    parser = FakeReasoningParser()
+
+    assert usage_patch._count_minimax_reasoning_tokens_for_usage([10, 11], parser) is None
+    assert not usage_patch._is_minimax_reasoning_parser(parser)
+    assert usage_patch._sum_reasoning_tokens_for_usage([[10, 11]], parser) is None
+
+
+def test_make_full_response_usage_skips_non_minimax_reasoning_details():
+    class FakeServing:
+        enable_prompt_tokens_details = True
+
+        def _make_usage_info(self, **kwargs):
+            return usage_patch._make_usage_info(self, **kwargs)
+
+    class FakeReasoningParser:
+        def count_reasoning_tokens(self, token_ids):
+            return len(token_ids)
 
     state = usage_patch._create_usage_tracking_state(
         num_choices=1,
         reasoning_parser=FakeReasoningParser(),
+        enable_prompt_tokens_details=True,
+    )
+    state.num_prompt_tokens = 3
+    state.num_cached_tokens = 0
+    state.final_res = SimpleNamespace(num_cached_tokens=0)
+    state.completion_tokens = [2]
+    state.raw_output_token_ids = [[10, 11]]
+
+    usage = usage_patch._make_full_response_usage(FakeServing(), state)
+
+    assert usage.completion_tokens_details is None
+    assert usage.prompt_tokens_details.cached_tokens == 0
+
+
+def test_chat_generators_are_not_patched_at_class_level():
+    assert (
+        OpenAIServingChat.chat_completion_stream_generator is not usage_patch._wrapped_chat_completion_stream_generator
+    )
+    assert OpenAIServingChat.chat_completion_full_generator is not usage_patch._wrapped_chat_completion_full_generator
+
+
+def test_chat_init_is_not_wrapped_by_minimax_usage_patch():
+    assert not hasattr(OpenAIServingChat, "_ascend_original_init_for_minimax_usage")
+    assert "patch_minimax_usage_accounting.py" not in OpenAIServingChat.__init__.__code__.co_filename
+
+
+def test_reasoning_parser_cls_descriptor_preserves_default_access():
+    descriptor = OpenAIServingChat.__dict__["reasoning_parser_cls"]
+    serving = object.__new__(OpenAIServingChat)
+
+    assert OpenAIServingChat.reasoning_parser_cls is descriptor.default_value
+    assert serving.reasoning_parser_cls is descriptor.default_value
+
+
+def test_chat_usage_wrapper_is_bound_only_for_target_instances():
+    class FakeReasoningParser:
+        pass
+
+    non_minimax_serving = SimpleNamespace(
+        enable_prompt_tokens_details=False,
+        reasoning_parser_cls=FakeReasoningParser,
+    )
+    minimax_serving = SimpleNamespace(
+        enable_prompt_tokens_details=False,
+        reasoning_parser_cls=MiniMaxM2ReasoningParser,
+    )
+    non_minimax_prompt_details_serving = SimpleNamespace(
+        enable_prompt_tokens_details=True,
+        reasoning_parser_cls=FakeReasoningParser,
+    )
+
+    assert not usage_patch._should_patch_chat_usage_instance(non_minimax_serving)
+    assert usage_patch._should_patch_chat_usage_instance(minimax_serving)
+    assert not usage_patch._should_patch_chat_usage_instance(non_minimax_prompt_details_serving)
+
+
+def test_reasoning_parser_cls_assignment_binds_only_minimax_instances():
+    class FakeReasoningParser:
+        pass
+
+    non_minimax_serving = object.__new__(OpenAIServingChat)
+    non_minimax_serving.reasoning_parser_cls = FakeReasoningParser
+
+    assert non_minimax_serving.reasoning_parser_cls is FakeReasoningParser
+    assert "chat_completion_stream_generator" not in non_minimax_serving.__dict__
+    assert "chat_completion_full_generator" not in non_minimax_serving.__dict__
+
+    minimax_serving = object.__new__(OpenAIServingChat)
+    minimax_serving.reasoning_parser_cls = MiniMaxM2ReasoningParser
+
+    assert minimax_serving.reasoning_parser_cls is MiniMaxM2ReasoningParser
+    assert (
+        minimax_serving.chat_completion_stream_generator.__func__
+        is usage_patch._wrapped_chat_completion_stream_generator
+    )
+    assert (
+        minimax_serving.chat_completion_full_generator.__func__ is usage_patch._wrapped_chat_completion_full_generator
+    )
+
+
+def test_instance_wrapper_composes_with_class_level_stream_patches():
+    serving = SimpleNamespace(
+        enable_prompt_tokens_details=False,
+        reasoning_parser_cls=MiniMaxM2ReasoningParser,
+    )
+
+    usage_patch._patch_chat_usage_instance(serving)
+
+    assert (
+        serving._ascend_original_chat_completion_stream_generator.__func__
+        is OpenAIServingChat.chat_completion_stream_generator
+    )
+    assert (
+        serving._ascend_original_chat_completion_full_generator.__func__
+        is OpenAIServingChat.chat_completion_full_generator
+    )
+    assert serving.chat_completion_stream_generator.__func__ is usage_patch._wrapped_chat_completion_stream_generator
+    assert serving.chat_completion_full_generator.__func__ is usage_patch._wrapped_chat_completion_full_generator
+
+
+def test_stream_usage_details_are_injected_without_replacing_source():
+    state = usage_patch._create_usage_tracking_state(
+        num_choices=1,
+        reasoning_parser=MiniMaxM2ReasoningParser(FakeTokenizer()),
         enable_prompt_tokens_details=True,
     )
     state.num_cached_tokens = 0

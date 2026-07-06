@@ -40,7 +40,7 @@ The following table compares the features of `flash_attn_with_kvcache` between G
 The `flash_attn_with_kvcache` interface on NPU is semantically consistent with the GPU FA3 version in terms of API parameters. The key differences are:
 
 1. **Unsupported features on NPU FA3**: Sliding window attention, RoPE, ALiBi, Softcapping, and FP8 quantization are not yet supported.
-2. **Graph capture**: The tiling of `flash_attn_with_kvcache` is processed on the host side and is currently being optimized. It does not support ACL graph capture (i.e., cannot be captured into a computational graph for acceleration). Please use `enforce_eager=True` when enabling FA3.
+2. **Graph capture**: The tiling of `flash_attn_with_kvcache` is processed on the host side and is currently being optimized. It does not support ACL graph capture (i.e., cannot be captured into a computational graph for acceleration). Please use `compilation_config={"cudagraph_mode": "PIECEWISE"}` when enabling FA3.
 
 ## Hardware Requirements
 
@@ -67,7 +67,9 @@ To enable FA3, you need to:
 To start a vLLM server with FA3 enabled:
 
 ```bash
-VLLM_BATCH_INVARIANT=1 vllm serve Qwen/Qwen3-8B --attention-backend FLASH_ATTN
+VLLM_BATCH_INVARIANT=1 vllm serve Qwen/Qwen3-8B \
+  --attention-backend FLASH_ATTN \
+  --compilation-config '{"cudagraph_mode": "PIECEWISE"}'
 ```
 
 Then use the OpenAI-compatible client:
@@ -117,6 +119,7 @@ llm = LLM(
     model="Qwen/Qwen3-8B",
     tensor_parallel_size=1,
     attention_backend="FLASH_ATTN",
+    compilation_config={"cudagraph_mode": "PIECEWISE"},
 )
 
 outputs = llm.generate(prompts, sampling_params)
@@ -132,7 +135,7 @@ for output in outputs:
 
 - **Package not yet open-sourced**: The `flash_attn_npu` package required for FA3 has not yet been released. External users cannot use FA3 until the package is available.
 - **Sliding window not supported**: FA3 does not support sliding window attention. Models that require sliding window need to use the default FIA backend.
-- **ACL graph capture not supported**: The tiling of `flash_attn_with_kvcache` is processed on the host side and currently does not support ACL graph capture. Please use `enforce_eager=True` when enabling FA3.
+- **ACL graph capture not supported**: The tiling of `flash_attn_with_kvcache` is processed on the host side and currently does not support ACL graph capture. Please use `compilation_config={"cudagraph_mode": "PIECEWISE"}` when enabling FA3.
 - **RoPE not supported**: FA3 does not support rotary position embedding within the attention kernel. vLLM-Ascend patches this by using the PyTorch native RoPE fallback instead.
 - **ALiBi not supported**: FA3 does not support ALiBi (Attention with Linear Biases).
 - **Softcapping not supported**: FA3 does not support attention logit softcapping.

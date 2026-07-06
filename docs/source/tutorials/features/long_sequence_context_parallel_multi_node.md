@@ -244,6 +244,7 @@ We can run the following scripts to launch a server on the prefiller/decoder nod
       --max-num-seqs 4 \
       --trust-remote-code \
       --gpu-memory-utilization 0.96 \
+      --additional-config '{"recompute_scheduler_enable": true}' \
       --speculative-config '{"num_speculative_tokens": 3, "method":"deepseek_mtp"}' \
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[1,2,4]}' \
       --kv-transfer-config \
@@ -308,6 +309,7 @@ The parameters are explained as follows:
 - `--enable-expert-parallel` indicates that EP is enabled. Note that vLLM does not support a mixed approach of ETP and EP; that is, MoE can either use pure EP or pure TP.
 - `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.
 - `--quantization` "ascend" indicates that quantization is used. To disable quantization, remove this option.
+- `--additional-config '{"recompute_scheduler_enable": true}'`: enables the recomputation scheduler. When the Key-Value Cache (KV Cache) of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, it is recommended to enable this configuration on decode nodes.
 - `--compilation-config` contains configurations related to the aclgraph graph mode. The most significant configurations are "cudagraph_mode" and "cudagraph_capture_sizes", which have the following meanings:
 "cudagraph_mode": represents the specific graph mode. Currently, "PIECEWISE" and "FULL_DECODE_ONLY" are supported. The graph mode is mainly used to reduce the cost of operator dispatch. Currently, "FULL_DECODE_ONLY" is recommended.
 - "cudagraph_capture_sizes": represents different levels of graph modes. The default value is [1, 2, 4, 8, 16, 24, 32, 40,..., `--max-num-seqs`]. In the graph mode, the input for graphs at different levels is fixed, and inputs between levels are automatically padded to the next level. Currently, the default setting is recommended. Only in some scenarios is it necessary to set this separately to achieve optimal performance.

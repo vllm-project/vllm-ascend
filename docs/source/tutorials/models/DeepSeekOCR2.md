@@ -1,6 +1,6 @@
 # DeepSeek-OCR-2
 
-## Introduction
+## 1 Introduction
 
 DeepSeekOCR2 is a model to investigate the role of vision encoders from an LLM-centric viewpoint.
 
@@ -8,36 +8,41 @@ The `DeepSeek-OCR-2` model is first supported in `vllm-ascend:v0.16.0` and can s
 
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node deployment, accuracy and performance evaluation.
 
-## Supported Features
+## 2 Supported Features
 
-Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
-Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
+Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
-## Environment Preparation
+## 3 Prerequisites
 
-### Model Weight
+### 3.1 Model Weight
 
 - `DeepSeek-OCR-2`: [Download model weight](https://huggingface.co/deepseek-ai/DeepSeek-OCR-2).
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
-### Verify Multi-node Communication(Optional)
+### 3.2 Verify Multi-node Communication
 
 If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../installation.md#verify-multi-node-communication).
 
-### Installation
+## 4 Installation
+
+### 4.1 Docker Image Installation
 
 You can use our official docker image to run `DeepSeek-OCR-2` directly.
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
 
+:::::{tab-set}
+:sync-group: install
+
+::::{tab-item} A2 series
+:sync: A2
+
 ```{code-block} bash
    :substitutions:
-# Update --device according to your device (Atlas A2: /dev/davinci[0-7] Atlas A3:/dev/davinci[0-15]).
-# Update the vllm-ascend image according to your environment.
-# Note you should download the weight to /root/.cache in advance.
-# Update the vllm-ascend image
+
 export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 export NAME=vllm-ascend
 
@@ -68,11 +73,59 @@ docker run --rm \
 -it $IMAGE bash
 ```
 
+::::
+::::{tab-item} A3 series
+:sync: A3
+
+```{code-block} bash
+   :substitutions:
+
+export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+export NAME=vllm-ascend
+
+# Run the container using the defined variables
+# Note: If you are running bridge network with docker, please expose available ports for multiple nodes communication in advance.
+docker run --rm \
+--name $NAME \
+--net=host \
+--shm-size=1g \
+--device /dev/davinci0 \
+--device /dev/davinci1 \
+--device /dev/davinci2 \
+--device /dev/davinci3 \
+--device /dev/davinci4 \
+--device /dev/davinci5 \
+--device /dev/davinci6 \
+--device /dev/davinci7 \
+--device /dev/davinci8 \
+--device /dev/davinci9 \
+--device /dev/davinci10 \
+--device /dev/davinci11 \
+--device /dev/davinci12 \
+--device /dev/davinci13 \
+--device /dev/davinci14 \
+--device /dev/davinci15 \
+--device /dev/davinci_manager \
+--device /dev/devmm_svm \
+--device /dev/hisi_hdc \
+-v /usr/local/dcmi:/usr/local/dcmi \
+-v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+-v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+-v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+-v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+-v /etc/ascend_install.info:/etc/ascend_install.info \
+-v /root/.cache:/root/.cache \
+-it $IMAGE bash
+```
+
+::::
+:::::
+
 If you want to deploy multi-node environment, you need to set up environment on each node.
 
-## Deployment
+## 5 Online Service Deployment
 
-### Single-node Deployment
+### 5.1 Single-Node Online Deployment
 
 - `DeepSeek-OCR-2` can be deployed on 1 Atlas 800 A2.
 
@@ -112,15 +165,15 @@ The parameters are explained as follows:
 - `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.
 - `--gpu-memory-utilization` represents the proportion of HBM that vLLM will use for actual inference. Its essential function is to calculate the available kv_cache size. During the warm-up phase (referred to as profile run in vLLM), vLLM records the peak GPU memory usage during an inference process with an input size of `--max-num-batched-tokens`. The available kv_cache size is then calculated as: `--gpu-memory-utilization` * HBM size - peak GPU memory usage. Therefore, the larger the value of `--gpu-memory-utilization`, the more kv_cache can be used. However, since the GPU memory usage during the warm-up phase may differ from that during actual inference (e.g., due to uneven EP load), setting `--gpu-memory-utilization` too high may lead to OOM (Out of Memory) issues during actual inference. The default value is `0.9`.
 
-### Multi-node Deployment
+### 5.2 Multi-node Deployment
 
 Single-node deployment is recommended.
 
-### Prefill-Decode Disaggregation
+### 5.3 Prefill-Decode Disaggregation
 
 We don't need to Prefill-Decode disaggregation
 
-## Functional Verification
+## 6 Functional Verification
 
 If your service start successfully, you can see the info shown below:
 
@@ -143,9 +196,7 @@ curl http://<node0_ip>:<port>/v1/completions \
     }'
 ```
 
-## Accuracy Evaluation
-
-Here is an accuracy evaluation method.
+## 7 Accuracy Evaluation
 
 ### Using AISBench
 
@@ -158,7 +209,7 @@ Here is an accuracy evaluation method.
 | textvqa | - | accuracy | gen | 50.28 | 1 Atlas 800 A2 |
 | ominidocbench | - | accuracy | gen | 66.86 | 1 Atlas 800 A2 |
 
-## Performance
+## 8 Performance Evaluation
 
 ### Using AISBench
 
@@ -172,11 +223,31 @@ The performance result is:
 
 **Performance**: TTFT = 2s, TPOT = 200ms, Average performance of each card is 864 TPS (Token Per Second).
 
-## Best Practices
+## 9 Performance Tuning
 
-In this chapter, we recommend best practices. for details about best practices, see the "Single-node Deployment" section.
+### 9.1 Recommended Configurations
 
-## FAQ
+> **Note**: The following configurations are validated in specific test environments and are for reference only. The optimal configuration depends on factors such as maximum input/output length, prefix cache hit rate, precision requirements, and deployment machine ratios. It is recommended to refer to Section 9.2 for tuning based on actual conditions.
+
+#### Table 1: Scenario Overview
+
+> `*Total NPUs` indicates the total number of NPUs used across all nodes. 1 node = 1 Atlas 800 A3 server (64G × 16 NPUs).
+
+|Scenario|Deployment Mode|*Total NPUs|Weight Version|Key Considerations|
+|--------|---------------|-----------|--------------|------------------|
+|Multimodal<br>(1080P)|Single-Node Mixed|16 (A3)|deepseekocr2|dp1 tp1 for high-resolution visual inputs|
+
+### 9.2 Tuning Guidelines
+
+#### 9.2.1 General Tuning Reference
+
+Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
+
+Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+
+## 10 FAQ
+
+For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).
 
 - **Q: Startup fails with HCCL port conflicts (address already bound). What should I do?**
 
