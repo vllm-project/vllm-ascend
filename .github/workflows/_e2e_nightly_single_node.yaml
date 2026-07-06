@@ -64,6 +64,11 @@ on:
         default: 120
         type: string
         description: test case execution timeout period,default:120 minutes
+      aop_single_enabled:
+        required: false
+        type: boolean
+        default: false
+        description: enable AOP hooks (capture / classify / skip-or-process)
     secrets:
       OBS_ACCESS_KEY_ID:
         required: false
@@ -220,6 +225,7 @@ jobs:
           fi
 
       - name: Run Pytest (py-driven)
+        id: pytest-driven
         if: ${{ inputs.tests != '' }}
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
@@ -229,10 +235,14 @@ jobs:
         run: |
           export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
           echo "Running pytest with tests path: ${{ inputs.tests }}"
+          mkdir -p /tmp/test-logs
+          set -o pipefail
           pytest -sv "${{ inputs.tests }}" \
-          --ignore=tests/e2e/nightly/single_node/ops/singlecard_ops/test_fused_moe.py
+            --ignore=tests/e2e/nightly/single_node/ops/singlecard_ops/test_fused_moe.py \
+            2>&1 | tee /tmp/test-logs/pytest-driven.log
 
       - name: Run Pytest (YAML-driven)
+        id: yaml-test
         if: ${{ always() && inputs.config_file_path != '' }}
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
@@ -246,7 +256,125 @@ jobs:
           export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
           echo "export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib" >> ~/.bashrc
           echo "Running YAML-driven test with config: ${{ inputs.config_file_path }}"
-          pytest -sv tests/e2e/nightly/single_node/models/scripts/test_single_node.py
+          mkdir -p /tmp/test-logs
+          set -o pipefail
+          pytest -sv tests/e2e/nightly/single_node/models/scripts/test_single_node.py \
+            2>&1 | tee /tmp/test-logs/yaml-test.log
+
+      - name: Update good_table.csv on success
+        if: >-
+          ${{ always() &&
+          (steps.pytest-driven.outcome == 'success' || steps.pytest-driven.outcome == 'skipped') &&
+          (steps.yaml-test.outcome == 'success' || steps.yaml-test.outcome == 'skipped') &&
+          (steps.pytest-driven.outcome == 'success' || steps.yaml-test.outcome == 'success') }}
+        working-directory: /vllm-workspace/vllm-ascend
+        env:
+          TEST_NAME: ${{ inputs.name || inputs.config_file_path || inputs.tests }}
+          TEST_PATH: ${{ inputs.config_file_path || inputs.tests }}
+          CONFIG_BASE_PATH: ${{ inputs.config_base_path }}
+          RUN_LINK: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          VLLM_ASCEND_VERSION: ${{ env.VLLM_ASCEND_VERSION }}
+        run: |
+          python3 tests/e2e/nightly/scripts/update_good_table.py \
+            --cache-csv "/root/.cache/vllm-ascend/${{ inputs.vllm_ascend_branch }}/nightly/good_table.csv" \
+            --test-name "$TEST_NAME" \
+            --test-path "$TEST_PATH" \
+            --config-base-path "$CONFIG_BASE_PATH" \
+            --run-link  "$RUN_LINK" \
+            --vllm-dir  "/vllm-workspace/vllm" \
+            --vllm-ascend-dir "/vllm-workspace/vllm-ascend" \
+            --vllm-ascend-version "$VLLM_ASCEND_VERSION"
+
+      # ============================================
+      # AOP hooks: intercept test results uniformly
+      # ============================================
+
+      - name: Capture test result
+        id: test-result
+        if: ${{ always() && inputs.aop_single_enabled && (inputs.config_file_path != '' || inputs.tests != '') }}
+        working-directory: /vllm-workspace/vllm-ascend
+        run: |
+          bash tests/e2e/nightly/scripts/aop_capture.sh \
+            "${{ steps.yaml-test.outcome }}" \
+            "${{ steps.pytest-driven.outcome }}"
+
+      - name: Classify failure
+        id: classify
+        if: ${{ always() && inputs.aop_single_enabled && steps.test-result.outputs.result == 'failure' }}
+        working-directory: /vllm-workspace/vllm-ascend
+        run: |
+          bash tests/e2e/nightly/scripts/aop_classify.sh \
+            "${{ steps.test-result.outputs.failed_test }}"
+
+      # ============================================================
+      # Decision gate:
+      #   env_failure     → Skip directly (no need to check age)
+      #   not_env_failure → Check commit age → old? Skip : Process
+      # ============================================================
+
+      - name: Skip - env issue
+        if: >-
+          ${{ always() && inputs.aop_single_enabled &&
+          steps.classify.outputs.failure_type == 'env_failure' }}
+        working-directory: /vllm-workspace/vllm-ascend
+        run: |
+          bash tests/e2e/nightly/scripts/aop_skip.sh \
+            "env_failure" "" "" "" \
+            "${{ steps.test-result.outputs.pytest_summary }}" \
+            "${{ steps.test-result.outputs.yaml_summary }}"
+
+      - name: Check commit age
+        id: commit-age
+        if: ${{ always() && inputs.aop_single_enabled && steps.classify.outputs.failure_type == 'not_env_failure' }}
+        working-directory: /vllm-workspace/vllm-ascend
+        run: |
+          bash tests/e2e/nightly/scripts/aop_commit_age.sh \
+            "${{ inputs.name || inputs.config_file_path || inputs.tests }}" \
+            "/root/.cache/vllm-ascend/${{ inputs.vllm_ascend_branch }}/nightly/good_table.csv"
+
+      - name: Skip - old commit
+        if: >-
+          ${{ always() && inputs.aop_single_enabled &&
+          steps.classify.outputs.failure_type == 'not_env_failure' &&
+          steps.commit-age.outputs.is_old == 'true' }}
+        working-directory: /vllm-workspace/vllm-ascend
+        run: |
+          bash tests/e2e/nightly/scripts/aop_skip.sh \
+            "not_env_failure" \
+            "${{ steps.commit-age.outputs.last_status }}" \
+            "${{ steps.commit-age.outputs.last_date }}" \
+            "${{ steps.commit-age.outputs.commit_age_days }}" \
+            "${{ steps.test-result.outputs.pytest_summary }}" \
+            "${{ steps.test-result.outputs.yaml_summary }}"
+
+      - name: Process - recent real failure
+        if: >-
+          ${{ always() && inputs.aop_single_enabled &&
+          steps.classify.outputs.failure_type == 'not_env_failure' &&
+          steps.commit-age.outputs.is_old == 'false' }}
+        working-directory: /vllm-workspace/vllm-ascend
+        env:
+          GOOD_TABLE: /root/.cache/vllm-ascend/${{ inputs.vllm_ascend_branch }}/nightly/good_table.csv
+        run: |
+          bash tests/e2e/nightly/scripts/aop_process.sh \
+            "${{ steps.classify.outputs.failure_type }}" \
+            "${{ steps.commit-age.outputs.commit_age_days }}" \
+            "${{ inputs.runner }}" \
+            "${{ inputs.tests }}" \
+            "${{ inputs.config_file_path }}" \
+            "${{ steps.test-result.outputs.pytest_summary }}" \
+            "${{ steps.test-result.outputs.yaml_summary }}" \
+            "single_node" \
+            "HEAD" \
+            "" \
+            "${{ inputs.name }}"
+
+      - name: On success
+        if: ${{ always() && inputs.aop_single_enabled && steps.test-result.outputs.result == 'success' }}
+        run: |
+          echo ">>> All tests passed!"
+
+      # ============================================
 
       - name: Set benchmark artifact timestamp
         if: ${{ always() && inputs.config_file_path != '' }}

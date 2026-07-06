@@ -32,19 +32,23 @@ from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.spec_decode.extract_hidden_states_proposer import (
     AscendExtractHiddenStatesProposer,
 )
+from vllm_ascend.utils import vllm_version_is
 
 
 @pytest.fixture(autouse=True)
 def _no_pin_memory():
-    # On Ascend/NPU CI runners without physical hardware, torch.zeros(...,
-    # pin_memory=True) triggers aclInit and fails.  Patch
-    # is_pin_memory_available so vllm's ExtractHiddenStatesProposer.__init__
-    # creates CpuGpuBuffer with pin_memory=False.
-    with patch(
-        "vllm.v1.spec_decode.extract_hidden_states.is_pin_memory_available",
-        return_value=False,
-    ):
-        yield
+    if vllm_version_is("0.23.0"):
+        with patch(
+            "vllm.v1.spec_decode.extract_hidden_states.is_pin_memory_available",
+            return_value=False,
+        ):
+            yield
+    else:
+        with patch(
+            "vllm.v1.spec_decode.extract_hidden_states.PIN_MEMORY",
+            False,
+        ):
+            yield
 
 
 class MockCachedRequestState:

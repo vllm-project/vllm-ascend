@@ -16,6 +16,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+import gc
 import os
 import random
 
@@ -23,9 +24,12 @@ import pytest
 import torch
 from vllm import SamplingParams
 
-from tests.e2e.conftest import VllmRunner
+from tests.e2e.conftest import ModelName, VllmRunner, model_cache
 
-DEFAULT_MODEL = "Qwen/Qwen3-0.6B"
+DEFAULT_MODEL = ModelName.QWEN3_06B
+
+
+os.environ["VLLM_BATCH_INVARIANT"] = "1"
 
 
 @pytest.fixture(autouse=True)
@@ -106,14 +110,28 @@ def _extract_step_logprobs(generate_output):
 
 
 @pytest.mark.timeout(1000)
-def test_aclgraph_v1_generation_is_deterministic_across_batch_sizes_with_needle(monkeypatch: pytest.MonkeyPatch):
+@pytest.mark.model(
+    model_name=DEFAULT_MODEL,
+    quantization=None,
+    max_model_len=8192,
+    dtype="bfloat16",
+    gpu_memory_utilization=0.9,
+    enable_prefix_caching=False,
+    max_num_seqs=32,
+    tensor_parallel_size=1,
+    distributed_executor_backend="mp",
+    compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1, 32, 64]},
+)
+def test_aclgraph_v1_generation_is_deterministic_across_batch_sizes_with_needle(
+    monkeypatch: pytest.MonkeyPatch, vllm_runner
+):
     """
     Ensures that the same request (the 'needle' prompt) yields identical output
     whether run alone (bs=1) or mixed into a larger batch (e.g., bs=64),
     using the high-level v1 LLM() API only (no manual batching).
 
     Strategy:
-    - Create two LLM engines with identical config except max_num_seqs: 1 vs N.
+    - Use the shared vllm_runner fixture
     - Compute a baseline output for the needle prompt with the bs=1 engine.
     - For many trials, generate a batch (size N) where the needle appears at a
       random position among random filler prompts using the bs=N engine.
@@ -131,18 +149,11 @@ def test_aclgraph_v1_generation_is_deterministic_across_batch_sizes_with_needle(
     seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
     random.seed(seed)
 
-    # Allow overrides from environment (useful for CI tuning)
-    model = DEFAULT_MODEL
-
     num_trials = int(os.getenv("VLLM_NEEDLE_TRIALS", "5"))
     max_batch_size = int(os.getenv("VLLM_NEEDLE_BATCH_SIZE", "64"))
     min_random_prompt = int(os.getenv("VLLM_MIN_PROMPT", "1024"))
     max_random_prompt = int(os.getenv("VLLM_MAX_PROMPT", "2048"))
     assert max_batch_size >= 2, "Batch size should be >= 2 to mix needle."
-
-    # Keep GPU memory usage low to avoid startup allocation failures.
-    gpu_mem_util = float(os.getenv("VLLM_GPU_MEMORY_UTILIZATION", "0.95"))
-    max_model_len = int(os.getenv("VLLM_MAX_MODEL_LEN", "5120"))
 
     # Sampling parameters: longer outputs with a more random-sounding
     # continuation,but still deterministic due to fixed seed.
@@ -159,65 +170,61 @@ def test_aclgraph_v1_generation_is_deterministic_across_batch_sizes_with_needle(
 
     needle_prompt = "There once was a "
 
-    with VllmRunner(
-        model_name=model,
-        max_num_seqs=max_batch_size,
-        gpu_memory_utilization=gpu_mem_util,
-        max_model_len=max_model_len,
-        dtype="bfloat16",
-        tensor_parallel_size=int(os.getenv("VLLM_TP_SIZE", "1")),
-        enable_prefix_caching=False,
-        distributed_executor_backend="mp",
-        compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1, 32, 64]},
-    ) as vllm_model:
-        # Baseline generation for the needle prompt alone.
-        baseline_out = vllm_model.generate([needle_prompt], sampling)
-        assert len(baseline_out) == 1
-        assert len(baseline_out[0][1]) >= 1
-        baseline_text = baseline_out[0][1][0]
+    # Baseline generation for the needle prompt alone.
+    baseline_out = vllm_runner.generate([needle_prompt], sampling)
+    assert len(baseline_out) == 1
+    assert len(baseline_out[0][1]) >= 1
+    baseline_text = baseline_out[0][1][0]
+    mismatches = 0
 
-        mismatches = 0
+    for trial in range(num_trials):
+        # Create a batch of size `max_batch_size` and insert the needle at
+        # a random index
+        prompts: list[str] = []
+        batch_size = random.randint(max_batch_size // 2, max_batch_size)
+        needle_pos = random.randint(0, batch_size - 1)
+        for i in range(batch_size):
+            if i == needle_pos:
+                prompts.append(needle_prompt)
+            else:
+                prompts.append(_random_prompt(min_random_prompt, max_random_prompt))
 
-        for trial in range(num_trials):
-            # Create a batch of size `max_batch_size` and insert the needle at
-            # a random index
-            prompts: list[str] = []
-            batch_size = random.randint(max_batch_size // 2, max_batch_size)
-            needle_pos = random.randint(0, batch_size - 1)
-            for i in range(batch_size):
-                if i == needle_pos:
-                    prompts.append(needle_prompt)
-                else:
-                    prompts.append(_random_prompt(min_random_prompt, max_random_prompt))
+        # Generate with the larger-batch engine
+        outputs = vllm_runner.generate(prompts, sampling)
+        # Find the needle output by position
+        needle_output = outputs[needle_pos][1]
+        text = needle_output[0]
 
-            # Generate with the larger-batch engine
-            outputs = vllm_model.generate(prompts, sampling)
-            # Find the needle output by position
-            needle_output = outputs[needle_pos][1]
-            text = needle_output[0]
+        if text != baseline_text:
+            print(f"{text}\n\n== Not the same as ==\n\n{baseline_text}\n\n")
+            mismatches += 1
 
-            if text != baseline_text:
-                print(f"{text}\n\n== Not the same as ==\n\n{baseline_text}\n\n")
-                mismatches += 1
+    passes = num_trials - mismatches
+    # Dump how many passed vs failed
+    print(f"[determinism] total={num_trials}, passed={passes}, failed={mismatches}, max_batch_size={max_batch_size}")
 
-        passes = num_trials - mismatches
-        # Dump how many passed vs failed
-        print(
-            f"[determinism] total={num_trials}, passed={passes}, failed={mismatches}, max_batch_size={max_batch_size}"
+    if mismatches > 0:
+        pytest.fail(
+            f"Nondeterministic outputs detected: {mismatches} failed out "
+            f"of {num_trials} trials (max_batch_size={max_batch_size})."
         )
 
-        if mismatches > 0:
-            pytest.fail(
-                f"Nondeterministic outputs detected: {mismatches} failed out "
-                f"of {num_trials} trials (max_batch_size={max_batch_size})."
-            )
 
-
-def test_aclgraph_logprobs_bitwise_batch_invariance_bs1_vs_bsN(monkeypatch: pytest.MonkeyPatch):
+@pytest.mark.model(
+    model_name=DEFAULT_MODEL,
+    quantization=None,
+    max_model_len=8192,
+    dtype="bfloat16",
+    gpu_memory_utilization=0.9,
+    enable_prefix_caching=False,
+    max_num_seqs=32,
+    tensor_parallel_size=1,
+    distributed_executor_backend="mp",
+    compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1, 32, 64]},
+)
+def test_aclgraph_logprobs_bitwise_batch_invariance_bs1_vs_bsN(monkeypatch: pytest.MonkeyPatch, vllm_runner):
     seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
     random.seed(seed)
-    model_name = DEFAULT_MODEL
-    tp_size = int(os.getenv("VLLM_TEST_TP_SIZE", "1"))
 
     # For batch invariance, disable custom all-reduce to ensure deterministic
     # all-reduce operations (custom all-reduce may not be deterministic)
@@ -227,102 +234,128 @@ def test_aclgraph_logprobs_bitwise_batch_invariance_bs1_vs_bsN(monkeypatch: pyte
 
     if disable_custom_ar:
         print(f"\n{'=' * 80}")
-        print(f"BATCH INVARIANCE MODE: Disabling custom all-reduce (TP={tp_size})")
+        print(f"BATCH INVARIANCE MODE: Disabling custom all-reduce (TP={1})")
         print(f"{'=' * 80}\n")
 
-    with VllmRunner(
-        model_name=model_name,
-        tensor_parallel_size=tp_size,
-        enable_prefix_caching=False,
-        max_num_seqs=32,
-        max_model_len=8192,
-        dtype="bfloat16",
-        gpu_memory_utilization=0.9,
-        distributed_executor_backend="mp",
-        compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1, 32, 64]},
-    ) as vllm_model:
-        # Use more realistic prompts for better token generation
-        prompts = [_random_prompt(10, 50) for i in range(32)]
+    # Use more realistic prompts for better token generation
+    prompts = [_random_prompt(10, 50) for i in range(32)]
 
-        sp = SamplingParams(
-            temperature=0.6,
-            top_p=1.0,
-            max_tokens=8,
-            seed=1234,
-            logprobs=5,
+    # BS=1: run prompts individually and collect logprobs per step.
+    sp = SamplingParams(
+        temperature=0.6,
+        top_p=1.0,
+        max_tokens=8,
+        seed=1234,
+        logprobs=5,
+    )
+
+    # BS=1: run prompts individually and collect logprobs per step.
+    print("\n" + "=" * 80)
+    print("STARTING BS=1 RUNS (each prompt individually)")
+    print("=" * 80 + "\n")
+
+    bs1_logprobs_per_prompt = []
+    bs1_tokens_per_prompt = []
+    for idx, p in enumerate(prompts):
+        print(f"\n[BS=1] Running prompt {idx}/{len(prompts)} - Preview: {p[:80]}...")
+        outs = vllm_runner.generate_w_logprobs([p], sp, use_tqdm=False)
+        assert len(outs) == 1
+        step_logprobs, token_ids = _extract_step_logprobs(outs[0])
+        if step_logprobs is None:
+            pytest.skip("Logits are not available on RequestOutput; enable logprobs return to run this test.")
+        bs1_logprobs_per_prompt.append(step_logprobs)
+        bs1_tokens_per_prompt.append(token_ids)
+        print(f"[BS=1] Prompt {idx} generated tokens: {token_ids}")
+
+    # BS=N: run prompts in a batch and collect logprobs per step for each
+    # prompt.
+    print("\n" + "=" * 80)
+    print(f"STARTING BS={len(prompts)} RUN (all prompts batched)")
+    print("=" * 80 + "\n")
+
+    outs_batched = vllm_runner.generate_w_logprobs(prompts, sp, use_tqdm=False)
+    assert len(outs_batched) == len(prompts)
+    bsN_logprobs_per_prompt = []
+    bsN_tokens_per_prompt = []
+
+    print(f"\n[BS={len(prompts)}] Processing batched outputs...")
+    for idx, o in enumerate(outs_batched):
+        tokens = o[0]
+        print(f"[BS={len(prompts)}] Prompt {idx} generated tokens: {tokens}")
+        step_logprobs, token_ids = _extract_step_logprobs(o)
+        if step_logprobs is None:
+            pytest.skip("Logits are not available on RequestOutput; enable logprobs return to run this test.")
+        bsN_logprobs_per_prompt.append(step_logprobs)
+        bsN_tokens_per_prompt.append(token_ids)
+
+    # Compare step-by-step logprobs for each prompt between BS=1 and BS=N runs.
+    failed_prompts = []
+    for i, (logprobs_bs1, logprobs_bsN, tokens_bs1, tokens_bsN) in enumerate(
+        zip(
+            bs1_logprobs_per_prompt,
+            bsN_logprobs_per_prompt,
+            bs1_tokens_per_prompt,
+            bsN_tokens_per_prompt,
         )
-
-        # BS=1: run prompts individually and collect logprobs per step.
-        print("\n" + "=" * 80)
-        print("STARTING BS=1 RUNS (each prompt individually)")
-        print("=" * 80 + "\n")
-
-        bs1_logprobs_per_prompt = []
-        bs1_tokens_per_prompt = []
-        for idx, p in enumerate(prompts):
-            print(f"\n[BS=1] Running prompt {idx}/{len(prompts)} - Preview: {p[:80]}...")
-            outs = vllm_model.generate_w_logprobs([p], sp, use_tqdm=False)
-            assert len(outs) == 1
-            # print(outs)
-            step_logprobs, token_ids = _extract_step_logprobs(outs[0])
-            if step_logprobs is None:
-                pytest.skip("Logits are not available on RequestOutput; enable logprobs return to run this test.")
-            bs1_logprobs_per_prompt.append(step_logprobs)
-            bs1_tokens_per_prompt.append(token_ids)
-            print(f"[BS=1] Prompt {idx} generated tokens: {token_ids}")
-
-        # BS=N: run prompts in a batch and collect logprobs per step for each
-        # prompt.
-        print("\n" + "=" * 80)
-        print(f"STARTING BS={len(prompts)} RUN (all prompts batched)")
-        print("=" * 80 + "\n")
-
-        outs_batched = vllm_model.generate_w_logprobs(prompts, sp, use_tqdm=False)
-        assert len(outs_batched) == len(prompts)
-        bsN_logprobs_per_prompt = []
-        bsN_tokens_per_prompt = []
-
-        print(f"\n[BS={len(prompts)}] Processing batched outputs...")
-        for idx, o in enumerate(outs_batched):
-            tokens = o[0]
-            print(f"[BS={len(prompts)}] Prompt {idx} generated tokens: {tokens}")
-            step_logprobs, token_ids = _extract_step_logprobs(o)
-            if step_logprobs is None:
-                pytest.skip("Logits are not available on RequestOutput; enable logprobs return to run this test.")
-            bsN_logprobs_per_prompt.append(step_logprobs)
-            bsN_tokens_per_prompt.append(token_ids)
-
-        # Compare step-by-step logprobs for each prompt between BS=1 and BS=N runs.
-        failed_prompts = []
-        for i, (logprobs_bs1, logprobs_bsN, tokens_bs1, tokens_bsN) in enumerate(
-            zip(
-                bs1_logprobs_per_prompt,
-                bsN_logprobs_per_prompt,
-                bs1_tokens_per_prompt,
-                bsN_tokens_per_prompt,
+    ):
+        if len(logprobs_bs1) != len(logprobs_bsN):
+            reason = f"Different number of steps: {len(logprobs_bs1)} (BS=1) vs {len(logprobs_bsN)} (BS=N)"
+            failed_prompts.append(
+                {
+                    "prompt_idx": i,
+                    "step": "all",
+                    "reason": reason,
+                    "prompt_preview": prompts[i][:100],
+                    "bs1_tokens": tokens_bs1,
+                    "bsN_tokens": tokens_bsN,
+                }
             )
-        ):
-            if len(logprobs_bs1) != len(logprobs_bsN):
-                reason = f"Different number of steps: {len(logprobs_bs1)} (BS=1) vs {len(logprobs_bsN)} (BS=N)"
+            continue
+
+        # Check if tokens match first
+        if tokens_bs1 != tokens_bsN:
+            failed_prompts.append(
+                {
+                    "prompt_idx": i,
+                    "step": "sampling",
+                    "reason": "Different tokens sampled",
+                    "prompt_preview": prompts[i][:100],
+                    "bs1_tokens": tokens_bs1,
+                    "bsN_tokens": tokens_bsN,
+                    "bs1_all_logprobs": [logprobs_bs1[s].tolist() for s in range(len(logprobs_bs1))],
+                    "bsN_all_logprobs": [logprobs_bsN[s].tolist() for s in range(len(logprobs_bsN))],
+                }
+            )
+            continue
+
+        for t, (a, b) in enumerate(zip(logprobs_bs1, logprobs_bsN)):
+            if a.shape != b.shape:
                 failed_prompts.append(
                     {
                         "prompt_idx": i,
-                        "step": "all",
-                        "reason": reason,
+                        "step": t,
+                        "reason": f"Shape mismatch: {a.shape} vs {b.shape}",
                         "prompt_preview": prompts[i][:100],
                         "bs1_tokens": tokens_bs1,
                         "bsN_tokens": tokens_bsN,
                     }
                 )
-                continue
+                break
 
-            # Check if tokens match first
-            if tokens_bs1 != tokens_bsN:
+            if not torch.equal(a, b):
+                max_diff = torch.abs(a - b).max().item()
+                # Print which token failed
+                print(f"\n[DIVERGENCE] Prompt {i}, Token {t}: max_diff={max_diff:.6e}")
+                bs1_tok = tokens_bs1[t] if t < len(tokens_bs1) else "N/A"
+                bsN_tok = tokens_bsN[t] if t < len(tokens_bsN) else "N/A"
+                print(f"  Token IDs: bs1={bs1_tok}, bsN={bsN_tok}")
+                print(f"  BS=1 logprob: {a.tolist()}")
+                print(f"  BS=N logprob: {b.tolist()}")
                 failed_prompts.append(
                     {
                         "prompt_idx": i,
-                        "step": "sampling",
-                        "reason": "Different tokens sampled",
+                        "step": t,
+                        "reason": f"Bitwise mismatch (max_diff={max_diff:.6e})",
                         "prompt_preview": prompts[i][:100],
                         "bs1_tokens": tokens_bs1,
                         "bsN_tokens": tokens_bsN,
@@ -330,46 +363,8 @@ def test_aclgraph_logprobs_bitwise_batch_invariance_bs1_vs_bsN(monkeypatch: pyte
                         "bsN_all_logprobs": [logprobs_bsN[s].tolist() for s in range(len(logprobs_bsN))],
                     }
                 )
-                continue
-
-            for t, (a, b) in enumerate(zip(logprobs_bs1, logprobs_bsN)):
-                if a.shape != b.shape:
-                    failed_prompts.append(
-                        {
-                            "prompt_idx": i,
-                            "step": t,
-                            "reason": f"Shape mismatch: {a.shape} vs {b.shape}",
-                            "prompt_preview": prompts[i][:100],
-                            "bs1_tokens": tokens_bs1,
-                            "bsN_tokens": tokens_bsN,
-                        }
-                    )
-                    break
-
-                if not torch.equal(a, b):
-                    max_diff = torch.abs(a - b).max().item()
-                    # Print which token failed
-                    print(f"\n[DIVERGENCE] Prompt {i}, Token {t}: max_diff={max_diff:.6e}")
-                    bs1_tok = tokens_bs1[t] if t < len(tokens_bs1) else "N/A"
-                    bsN_tok = tokens_bsN[t] if t < len(tokens_bsN) else "N/A"
-                    print(f"  Token IDs: bs1={bs1_tok}, bsN={bsN_tok}")
-                    print(f"  BS=1 logprob: {a.tolist()}")
-                    print(f"  BS=N logprob: {b.tolist()}")
-                    failed_prompts.append(
-                        {
-                            "prompt_idx": i,
-                            "step": t,
-                            "reason": f"Bitwise mismatch (max_diff={max_diff:.6e})",
-                            "prompt_preview": prompts[i][:100],
-                            "bs1_tokens": tokens_bs1,
-                            "bsN_tokens": tokens_bsN,
-                            "bs1_all_logprobs": [logprobs_bs1[s].tolist() for s in range(len(logprobs_bs1))],
-                            "bsN_all_logprobs": [logprobs_bsN[s].tolist() for s in range(len(logprobs_bsN))],
-                        }
-                    )
-                    break
-
-        # Print summary of all failures
+                break
+    # Print summary of all failures
     if failed_prompts:
         print(f"\n{'=' * 80}")
         fail_msg = f"BATCH INVARIANCE FAILURES: {len(failed_prompts)}/{len(prompts)} prompts failed"
@@ -402,42 +397,43 @@ def test_aclgraph_logprobs_bitwise_batch_invariance_bs1_vs_bsN(monkeypatch: pyte
         pytest.fail(msg)
 
 
-def test_aclgraph_simple_generation(monkeypatch: pytest.MonkeyPatch):
+@pytest.mark.model(
+    model_name=DEFAULT_MODEL,
+    quantization=None,
+    max_model_len=8192,
+    dtype="bfloat16",
+    gpu_memory_utilization=0.9,
+    enable_prefix_caching=False,
+    max_num_seqs=32,
+    tensor_parallel_size=1,
+    distributed_executor_backend="mp",
+    compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1, 32, 64]},
+)
+def test_aclgraph_simple_generation(monkeypatch: pytest.MonkeyPatch, vllm_runner):
     """
     Simple test that runs the model with a basic prompt and prints the output.
     Useful for quick smoke testing and debugging.
+    Uses vllm_runner fixture for model reuse.
     """
-    model = DEFAULT_MODEL
 
-    with VllmRunner(
-        model_name=model,
-        max_num_seqs=1,
-        tensor_parallel_size=int(os.getenv("VLLM_TP_SIZE", "1")),
-        gpu_memory_utilization=0.9,
-        max_model_len=2048,
-        dtype="float16",
-        enable_prefix_caching=False,
-        compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1, 32, 64]},
-        distributed_executor_backend="mp",
-    ) as vllm_model:
-        prompt = "The capital of France is"
-        sampling_params = SamplingParams(
-            temperature=0.0,
-            max_tokens=20,
-        )
+    prompt = "The capital of France is"
+    sampling_params = SamplingParams(
+        temperature=0.0,
+        max_tokens=20,
+    )
 
-        print(f"\n{'=' * 80}")
-        print("Running simple generation test")
-        print(f"Prompt: '{prompt}'")
-        print(f"{'=' * 80}\n")
+    print(f"\n{'=' * 80}")
+    print("Running simple generation test")
+    print(f"Prompt: '{prompt}'")
+    print(f"{'=' * 80}\n")
 
-        outputs = vllm_model.generate([prompt], sampling_params)
+    outputs = vllm_runner.generate([prompt], sampling_params)
 
-        assert len(outputs) == 1
-        output_text = outputs[0][1][0]
+    assert len(outputs) == 1
+    output_text = outputs[0][1][0]
 
-        print(f"Full completion: '{output_text}'")
-        print(f"{'=' * 80}\n")
+    print(f"Full completion: '{output_text}'")
+    print(f"{'=' * 80}\n")
 
 
 def test_aclgraph_logprobs_without_batch_invariance_should_fail(monkeypatch: pytest.MonkeyPatch):
@@ -450,6 +446,11 @@ def test_aclgraph_logprobs_without_batch_invariance_should_fail(monkeypatch: pyt
     The test will PASS if we detect differences (proving batch invariance matters).
     The test will FAIL if everything matches (suggesting batch invariance isn't needed).
     """
+    model_cache.clear()
+
+    gc.collect()
+    torch.npu.empty_cache()
+
     # CRITICAL: Disable batch invariance for this test
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "0")
     seed = int(os.getenv("VLLM_TEST_SEED", "12345"))

@@ -203,14 +203,17 @@ def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len)
     global _mc2_tokens_capacity
     if _mc2_tokens_capacity is not None:
         return
-    if vllm_config.compilation_config.cudagraph_capture_sizes:
+    if get_ascend_config().enable_prefill_mc2:
+        max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+    elif vllm_config.compilation_config.cudagraph_capture_sizes:
         max_num_tokens = vllm_config.compilation_config.max_cudagraph_capture_size
     else:
-        # NOTE: To save memory, we cap the max number of tokens to 512.
-        max_num_tokens = min(max_num_reqs * uniform_decode_query_len, 512)
+        max_num_tokens = max_num_reqs * uniform_decode_query_len
     tp_size = vllm_config.parallel_config.tensor_parallel_size
     # Use integer arithmetic for ceiling division.
     num_tokens_per_tp_rank = (max_num_tokens + tp_size - 1) // tp_size
+    # NOTE: To save memory, we cap the max number of tokens to 512.
+    num_tokens_per_tp_rank = min(num_tokens_per_tp_rank, 512)
     _mc2_tokens_capacity = num_tokens_per_tp_rank * tp_size
 
 

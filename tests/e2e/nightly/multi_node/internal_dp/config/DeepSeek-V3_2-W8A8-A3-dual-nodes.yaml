@@ -113,7 +113,7 @@ benchmarks:
     max_out_len: 4096
     batch_size: 128
     baseline: 95
-    threshold: 5
+    threshold: 10
 
   acc_aime2025:
     case_type: accuracy

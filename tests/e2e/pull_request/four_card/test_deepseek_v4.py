@@ -55,7 +55,7 @@ def test_deepseek_v4_w4a8_tp4_basic_greedy():
         compilation_config={
             "cudagraph_mode": "FULL_DECODE_ONLY",
         },
-        speculative_config={"num_speculative_tokens": 1, "method": "mtp", "enforce_eager": True},
+        speculative_config={"num_speculative_tokens": 1, "method": "mtp"},
     ) as vllm_model:
         outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
         expected_token_ids = [
