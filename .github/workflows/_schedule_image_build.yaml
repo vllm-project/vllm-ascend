@@ -351,7 +351,7 @@ jobs:
     # container:
     #   image: ${{ inputs.image }}
     needs: build-push-digest
-    if: ${{ inputs.should_push && !inputs.temp_only }}
+    # if: ${{ inputs.should_push && !inputs.temp_only }}
     permissions:
       contents: read
     steps:
