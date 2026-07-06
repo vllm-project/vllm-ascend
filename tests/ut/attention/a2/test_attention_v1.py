@@ -16,7 +16,13 @@ from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     cache_graph_workspace,
     needs_layer_aware_fia_graph_replay,
+    using_paged_attention,
 )
+from vllm_ascend.device.device_op import A5DeviceAdaptor
+from vllm_ascend.device.utils import FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
+from vllm_ascend.utils import AscendDeviceType
+
+LARGE_HEAD_PREFILL_PATH = "vllm_ascend.device.utils.npu_large_head_prefill_attention"
 
 
 class TestAttentionGraphHelpers(TestBase):
@@ -37,6 +43,12 @@ class TestAttentionGraphHelpers(TestBase):
 
         self.assertEqual(result.numel(), 8)
         self.assertEqual(graph_params.workspaces[1].numel(), 8)
+
+    def test_large_head_uses_paged_attention_on_a2(self):
+        vllm_config = MagicMock()
+        vllm_config.speculative_config = None
+        with patch("vllm_ascend.attention.utils.get_ascend_device_type", return_value=AscendDeviceType.A2):
+            self.assertTrue(using_paged_attention(1, vllm_config, head_size=FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE))
 
 
 class TestAscendAttentionBackend(TestBase):
@@ -263,6 +275,110 @@ class TestAscendAttentionBackendImpl(TestBase):
             kv_sharing_target_layer_name=None,
             sinks=torch.tensor([-3.4062], dtype=torch.bfloat16),
         )
+
+        self.impl_large_head = AscendAttentionBackendImpl(
+            num_heads=8,
+            head_size=FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE,
+            scale=1.0,
+            num_kv_heads=8,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype="float16",
+            logits_soft_cap=None,
+            attn_type=self.attention_type.DECODER,
+            kv_sharing_target_layer_name=None,
+        )
+
+    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
+    def test_large_head_prefill_uses_device_operator_fallback(self, mock_get_forward_context):
+        query = torch.randn(2, 8, FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE)
+        key = torch.randn(2, 8, FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE)
+        value = torch.randn(2, 8, FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE)
+        output = torch.empty_like(query)
+        metadata = self.attn_metadata
+        metadata.attn_state = AscendAttentionState.PrefillNoCache
+        metadata.actual_seq_lengths_q = [2]
+        metadata.causal = True
+        metadata.attn_mask = None
+        mock_get_forward_context.return_value = MagicMock(capturing=False)
+
+        with patch(LARGE_HEAD_PREFILL_PATH, return_value=(torch.ones_like(query), None)) as mock_forward:
+            result = self.impl_large_head.forward_impl(query, key, value, (), metadata, output)
+
+        mock_forward.assert_called_once()
+        self.assertIs(result, output)
+        self.assertTrue(torch.equal(result, torch.ones_like(query)))
+
+    def test_supported_head_prefill_uses_fia(self):
+        query = torch.randn(2, 8, 64)
+        key = torch.randn(2, 8, 64)
+        value = torch.randn(2, 8, 64)
+        output = torch.empty_like(query)
+        metadata = self.attn_metadata
+        metadata.attn_state = AscendAttentionState.PrefillNoCache
+        metadata.actual_seq_lengths_q = [2]
+
+        self.impl.forward_fused_infer_attention = MagicMock(return_value=output)
+        with patch(LARGE_HEAD_PREFILL_PATH, return_value=(torch.empty_like(query), None)) as mock_forward:
+            result = self.impl.forward_impl(query, key, value, (), metadata, output)
+
+        mock_forward.assert_not_called()
+        self.impl.forward_fused_infer_attention.assert_called_once()
+        self.assertIs(result, output)
+
+    @patch("vllm_ascend.attention.attention_v1.using_paged_attention", return_value=True)
+    def test_decode_uses_paged_attention(self, mock_using_pa):
+        query = torch.randn(2, 8, FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE)
+        output = torch.empty_like(query)
+        metadata = self.attn_metadata
+        metadata.attn_state = AscendAttentionState.DecodeOnly
+
+        self.impl_large_head.forward_paged_attention = MagicMock(return_value=output)
+        self.impl_large_head.forward_fused_infer_attention = MagicMock(return_value=output)
+
+        result = self.impl_large_head.forward_impl(query, None, None, (), metadata, output)
+
+        self.impl_large_head.forward_paged_attention.assert_called_once()
+        self.impl_large_head.forward_fused_infer_attention.assert_not_called()
+        self.assertIs(result, output)
+        mock_using_pa.assert_called_once()
+
+    @patch("torch_npu.npu_fused_infer_attention_score")
+    def test_a5_device_operator_uses_fia_for_large_head(self, mock_fia):
+        query = torch.randn(2, 8, FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE)
+        key = torch.randn(2, 8, FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE)
+        value = torch.randn(2, 8, FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE)
+        metadata = self.attn_metadata
+        metadata.attn_state = AscendAttentionState.PrefillNoCache
+        metadata.actual_seq_lengths_q = [2]
+
+        mock_fia.return_value = (torch.ones_like(query), None)
+        with patch(LARGE_HEAD_PREFILL_PATH, return_value=(torch.empty_like(query), None)) as mock_forward:
+            result = A5DeviceAdaptor.npu_fused_infer_attention_score(
+                query=query,
+                key=key,
+                value=value,
+                attn_metadata=metadata,
+                key_cache=None,
+                value_cache=None,
+                current_key=key,
+                current_value=value,
+                num_heads=8,
+                num_key_value_heads=8,
+                head_size=FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE,
+                scale=1.0,
+                is_prefill_no_cache=True,
+                block_table=None,
+                input_layout="TND",
+                block_size=128,
+                actual_seq_lengths=[2],
+                actual_seq_lengths_kv=[2],
+                sparse_mode=3,
+            )
+
+        mock_forward.assert_not_called()
+        mock_fia.assert_called_once()
+        self.assertEqual(result[0].shape, query.shape)
 
     def test_forward_no_attn_metadata(self):
         """Test forward pass when attn_metadata is None"""

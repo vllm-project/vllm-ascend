@@ -49,6 +49,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper, update_full_graph_params
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.parallel_state import get_lmhead_tp_group
 from vllm_ascend.models.llama_eagle3_vwn import Eagle3VwnLlamaForCausalLM
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
@@ -212,6 +213,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             self.tp_group_context = nullcontext()
 
         self.use_cuda_graph = self.runner._use_aclgraph() and not self.speculative_config.enforce_eager
+        self._raise_if_padded_drafter_batch_disabled_and_full_graph_enabled()
 
         # GLM series models: speculative decoding does not yet support running
         # the draft model in graph mode. Force the draft model to always use
@@ -276,6 +278,18 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.token_arange_np = np.arange(self.max_num_tokens + 1, dtype=np.int32)
         self.enable_enpu = self.runner.enable_enpu
         self.use_eagle = self.runner.use_eagle
+
+    def _raise_if_padded_drafter_batch_disabled_and_full_graph_enabled(self):
+        if (
+            self.speculative_config.disable_padded_drafter_batch
+            and self.use_cuda_graph
+            and self.compilation_config.cudagraph_mode.has_full_cudagraphs()
+        ):
+            raise NotImplementedError(
+                "Speculative Decoding with cudagraph mode containing full cudagraphs only "
+                "supports padded drafter batch. Please unset "
+                "disable_padded_drafter_batch in the speculative_config."
+            )
 
     def _get_model(self) -> nn.Module:
         """
@@ -1820,7 +1834,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         discard_sampled_tokens_req_indices = discard_request_indices[:num_discarded_requests]
 
         valid_sampled_token_ids_gpu = sampled_token_ids.clone()
-        valid_sampled_token_ids_gpu.index_fill_(0, discard_sampled_tokens_req_indices, -1)
+        valid_sampled_token_ids_gpu = DeviceOperator.index_fill(
+            valid_sampled_token_ids_gpu,
+            0,
+            discard_sampled_tokens_req_indices,
+            -1,
+        )
 
         # Generate a mask for all valid tokens within those requests
         valid_mask = (valid_sampled_token_ids_gpu != -1) & (valid_sampled_token_ids_gpu < gpu_input_batch.vocab_size)

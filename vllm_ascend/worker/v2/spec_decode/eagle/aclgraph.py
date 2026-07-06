@@ -12,9 +12,9 @@ from vllm.logger import logger
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import (  # type: ignore[import-not-found]
-    AttentionStatePair as CapturedAttentionState,
+    AttentionStatePair,
+    BatchExecutionDescriptor,
 )
-from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (  # type: ignore[import-not-found]
@@ -67,15 +67,15 @@ class PrefillEagleAclGraphManager(PrefillEagleCudaGraphManager):
     def capture(
         self,
         forward_fn: Callable,
-        full_cg_attn_states: dict[BatchExecutionDescriptor, CapturedAttentionState],
+        attn_states: dict[BatchExecutionDescriptor, AttentionStatePair],
         progress_bar_desc: str = "Capturing CUDA graphs",
     ) -> None:
         """Capture ACL graphs for Eagle."""
         with communicator_switch(), model_capture_wrapper(self.speculator, self.is_draft_model_prefill):
             super().capture(
                 forward_fn,
-                full_cg_attn_states,
-                progress_bar_desc,
+                attn_states,
+                progress_bar_desc=progress_bar_desc,
             )
 
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
@@ -172,7 +172,7 @@ class DecodeEagleAclGraphManager(DecodeEagleCudaGraphManager):
                 block_tables,
                 attn_groups,
                 kv_cache_config,
-                progress_bar_desc,
+                progress_bar_desc=progress_bar_desc,
             )
 
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
