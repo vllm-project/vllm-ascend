@@ -77,7 +77,7 @@ jobs:
     name: Parse trigger and determine test scope
     if: >-
       github.event_name == 'workflow_dispatch'
-    runs-on: linux-aarch64-310pb3-0
+    runs-on: linux-aarch64-310p-0
     outputs:
       run: ${{ steps.parse.outputs.run }}
       filter: ${{ steps.parse.outputs.filter }}
@@ -109,7 +109,7 @@ jobs:
   setup-vars:
     name: Export global env vars as job outputs
     needs: parse-trigger
-    runs-on: linux-aarch64-310pb3-0
+    runs-on: linux-aarch64-310p-0
     outputs:
       cann_image: ${{ steps.export.outputs.cann_image }}
       ascend_log_prefix: ${{ steps.export.outputs.ascend_log_prefix }}
@@ -229,7 +229,7 @@ jobs:
 
   clear-pre-logs:
     needs: [parse-trigger]
-    runs-on: linux-aarch64-310pb3-0
+    runs-on: linux-aarch64-0
     steps:
       - name: Clear pre-logs on pvc
         run: |
@@ -243,7 +243,7 @@ jobs:
       always() &&
       github.event_name == 'workflow_dispatch' &&
       needs.parse-trigger.result == 'success'
-    runs-on: linux-aarch64-310pb3-0
+    runs-on: linux-aarch64-310p-0
     steps:
       - name: Merge all benchmark result artifacts
         continue-on-error: true
