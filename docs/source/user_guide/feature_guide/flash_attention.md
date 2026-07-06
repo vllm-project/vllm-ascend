@@ -150,7 +150,7 @@ FA3 has been tested and verified on the following models:
 - **Qwen3 (Dense)**: `Qwen/Qwen3-0.6B`, `Qwen/Qwen3-1.7B`, `Qwen/Qwen3-8B`
 - **Qwen3 (MoE)**: `Qwen/Qwen3-30B-A3B`
 
-Other models have not been tested yet and will be supported in the future if not supported after been tested.
+Other models have not been tested yet and will be supported in the future if not supported after being tested.
 
 ## Future Improvements
 
