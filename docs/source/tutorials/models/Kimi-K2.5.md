@@ -783,6 +783,9 @@ vllm serve Eco-Tech/Kimi-K2.5-W4A8 \
     }'
 ```
 
+::::
+:::::
+
 Key Parameter Descriptions:
 
 - `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the communication optimization function on the prefill nodes.
