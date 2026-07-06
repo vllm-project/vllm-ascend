@@ -904,7 +904,7 @@ curl http://<node0_ip>:<port>/v1/completions \
 
 ## 7 Accuracy Evaluation
 
-Here are one accuracy evaluation methods.
+Here are one accuracy evaluation method.
 
 ### Using AISBench
 
@@ -960,6 +960,8 @@ After about several minutes, you can get the performance evaluation result.
 ## 9 Performance Tuning
 
 ### 9.1 Recommended Configurations
+
+> **Note**: The following configurations are validated in specific test environments and are for reference only. The optimal configuration depends on factors such as maximum input/output length, prefix cache hit rate, precision requirements, and deployment machine ratios. It is recommended to refer to Section 9.2 for tuning based on actual conditions.
 
 #### Table 1: Scenario Overview
 
