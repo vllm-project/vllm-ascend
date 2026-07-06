@@ -17,6 +17,7 @@
 
 
 import torch
+import torch.distributed as dist
 from torch import nn
 from torch.nn.parameter import Parameter
 from vllm.distributed import divide
@@ -38,7 +39,7 @@ from vllm.model_executor.utils import set_weight_attrs
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import get_embed_tp_group, get_lmhead_tp_group
-from vllm_ascend.utils import embedding_tp_enable, lmhead_tp_enable
+from vllm_ascend.utils import embedding_tp_enable, get_potential_max_tokens, lmhead_tp_enable
 
 
 class AscendVocabParallelEmbedding(VocabParallelEmbedding):
@@ -167,7 +168,45 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
             return self._forward_origin(input_)
 
     def _forward_embed_tp(self, input_):
-        complete_input = self.comm_group.all_gather(input_, dim=0)
+        num_tokens = input_.shape[0]
+
+        # potential_max_tokens is computed once in the model runner __init__, so
+        # reading it here is a cheap global lookup. Validate before allocating so
+        # an oversized batch fails fast.
+        capacity = get_potential_max_tokens()
+        if num_tokens > capacity:
+            raise ValueError(
+                f"embedding_tp static capacity {capacity} < num_tokens "
+                f"{num_tokens}; increase max_cudagraph_capture_size or "
+                f"max_num_batched_tokens."
+            )
+
+        # Lazy init on first call (profiling run, which precedes ACL graph
+        # capture). Static buffers keep a stable device address across all
+        # later capture/replay cycles — graph replay requires the same
+        # address that was recorded at capture (comm_group.all_gather and
+        # reduce_scatter internally torch.empty() per call, which would
+        # desync the HCCL operator recorded at capture).
+        # Mirrors the OTP v13 fix in dsa_v1.py:_forward_o_proj.
+        if not hasattr(self, "_embed_ag_in_buf"):
+            device = input_.device
+            # all_gather buffers carry token IDs (int64).
+            self._embed_ag_in_buf = torch.zeros((capacity,), dtype=input_.dtype, device=device)
+            self._embed_ag_out_buf = torch.empty((self.tp_size * capacity,), dtype=input_.dtype, device=device)
+            # reduce_scatter buffers carry bf16 embeddings.
+            self._embed_rs_in_buf = torch.empty(
+                (self.tp_size * capacity, self.embedding_dim), dtype=self.params_dtype, device=device
+            )
+            self._embed_rs_out_buf = torch.empty((capacity, self.embedding_dim), dtype=self.params_dtype, device=device)
+
+        # Pad input into the address-stable all_gather input buffer.
+        self._embed_ag_in_buf.zero_()
+        self._embed_ag_in_buf[:num_tokens].copy_(input_)
+        dist.all_gather_into_tensor(self._embed_ag_out_buf, self._embed_ag_in_buf, group=self.comm_group.device_group)
+        complete_input = self._embed_ag_out_buf
+
+        # Masking unchanged; padding rows map to OOB and get masked to 0
+        # via masked_fill_ below (token_id=0 stays in-range after shift).
         masked_input, input_mask = self._get_masked_input_and_mask(
             complete_input,
             self.shard_indices.org_vocab_start_index,
@@ -176,12 +215,16 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
             self.shard_indices.added_vocab_start_index,
             self.shard_indices.added_vocab_end_index,
         )
-        # Get the embeddings.
+        # Embedding lookup is a local op (F.embedding); its fresh allocation
+        # does not affect ACL graph replay. Copy into the static rs_in
+        # buffer so reduce_scatter reads from a stable address.
         output_parallel = self.quant_method.embedding(self, masked_input.long())
-        output_parallel.masked_fill_(input_mask.unsqueeze(-1), 0)
-        output = self.comm_group.reduce_scatter(output_parallel, dim=0)
-        output = output.view(input_.shape[0], -1)
-        return output
+        self._embed_rs_in_buf.copy_(output_parallel)
+        self._embed_rs_in_buf.masked_fill_(input_mask.unsqueeze(-1), 0)
+        dist.reduce_scatter_tensor(self._embed_rs_out_buf, self._embed_rs_in_buf, group=self.comm_group.device_group)
+
+        # Strip padding rows; preserve the original return shape.
+        return self._embed_rs_out_buf[:num_tokens].view(num_tokens, -1)
 
     def _forward_origin(self, input_):
         if self.tp_size > 1:

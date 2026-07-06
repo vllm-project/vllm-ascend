@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import cast
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -35,6 +36,7 @@ from vllm_ascend.ops.triton.fla.utils import (
 from vllm_ascend.ops.triton.fla.utils import (
     prepare_update_chunk_offsets as runtime_prepare_update_chunk_offsets,
 )
+from vllm_ascend.utils import vllm_version_is
 
 
 @pytest.fixture(autouse=True)
@@ -46,6 +48,19 @@ def _patch_triton_cdiv(monkeypatch):
             lambda a, b: (a + b - 1) // b,
             raising=False,
         )
+
+
+@pytest.fixture(autouse=True)
+def _no_pin_memory():
+    # compute_causal_conv1d_metadata uses np_to_pinned_tensor which reads
+    # PIN_MEMORY.  Without physical NPU, t.pin_memory() raises
+    # "Please register PrivateUse1HooksInterface first".
+    with patch("vllm.utils.torch_utils.PIN_MEMORY", False):
+        if vllm_version_is("0.23.0"):
+            yield
+        else:
+            with patch("vllm.v1.attention.backends.utils.PIN_MEMORY", False):
+                yield
 
 
 @dataclass
@@ -82,6 +97,16 @@ def create_common_attn_metadata(
     max_seq_len = int(seq_lens_cpu.max())
     context_lens = [batch_spec.seq_lens[i] - batch_spec.query_lens[i] for i in range(batch_spec.batch_size)]
     num_computed_tokens_cpu = torch.tensor(context_lens, dtype=torch.int32)
+    # Mirror model_runner: is_prefilling = num_computed < num_prompt_tokens.
+    # Chunked prefills still have prompt tokens beyond num_computed; decodes do not.
+    num_prompt_tokens_cpu = torch.tensor(
+        [
+            context_lens[i] + batch_spec.query_lens[i] if batch_spec.query_lens[i] > 1 else context_lens[i]
+            for i in range(batch_spec.batch_size)
+        ],
+        dtype=torch.int32,
+    )
+    is_prefilling = num_computed_tokens_cpu < num_prompt_tokens_cpu
     max_blocks = (max(batch_spec.seq_lens) + block_size - 1) // block_size
     block_table_tensor = torch.arange(
         batch_spec.batch_size * max_blocks,
@@ -103,6 +128,7 @@ def create_common_attn_metadata(
         block_table_tensor=block_table_tensor,
         slot_mapping=slot_mapping,
         causal=True,
+        is_prefilling=is_prefilling,
     )
 
 

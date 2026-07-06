@@ -1,0 +1,883 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-02 07:02+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:1
+msgid "Qwen3.6-35B-A3B Deployment Tutorial"
+msgstr "Qwen3.6-35B-A3B 部署教程"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:3
+msgid "1 Introduction"
+msgstr "1 简介"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:5
+msgid ""
+"Qwen3.6-35B-A3B is a sparse MoE model in the Qwen3.6 family, with 35B "
+"total parameters and about 3B activated parameters per token. It uses the"
+" hybrid attention architecture used by Qwen3.5-style models, and is "
+"suitable for long-context online serving on Ascend hardware."
+msgstr ""
+"Qwen3.6-35B-A3B 是 Qwen3.6 系列中的稀疏 MoE 模型，总参数量为 35B，每个 token 激活约 3B 参数。它采用 Qwen3.5 风格模型使用的混合注意力架构，适用于 Ascend 硬件上的长上下文在线服务。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:7
+msgid ""
+"This document describes the main validation steps for the model, "
+"including supported features, prerequisites, installation, single-node "
+"online deployment, functional verification, accuracy and performance "
+"evaluation, performance tuning, and FAQs."
+msgstr ""
+"本文档描述了该模型的主要验证步骤，包括支持特性、前提条件、安装、单节点在线部署、功能验证、精度与性能评估、性能调优以及常见问题解答。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:9
+msgid ""
+"The `Qwen3.6-35B-A3B` model is first supported in `vllm-"
+"ascend:v0.18.0rc1`. Use `v0.18.0rc1` or later for this model. The "
+"examples below use the version placeholder configured by the "
+"documentation build system."
+msgstr ""
+"`Qwen3.6-35B-A3B` 模型首次在 `vllm-ascend:v0.18.0rc1` 中得到支持。请使用 `v0.18.0rc1` 或更高版本。以下示例使用文档构建系统配置的版本占位符。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:11
+msgid "2 Supported Features"
+msgstr "2 支持特性"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:13
+msgid ""
+"Refer to [supported "
+"features](../../user_guide/support_matrix/supported_models.md) to get the"
+" model's supported feature matrix, including BF16, W8A8 quantization, "
+"chunked prefill, automatic prefix caching, asynchronous scheduling, "
+"tensor parallelism, expert parallelism, and ACLGraph support."
+msgstr ""
+"请参考[支持特性](../../user_guide/support_matrix/supported_models.md)获取模型的支持特性矩阵，包括 BF16、W8A8 量化、chunked prefill、自动前缀缓存、异步调度、张量并行、专家并行以及 ACLGraph 支持。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:15
+msgid ""
+"Refer to [feature guide](../../user_guide/feature_guide/index.md) to get "
+"feature configuration details."
+msgstr ""
+"请参考[特性指南](../../user_guide/feature_guide/index.md)获取特性配置详情。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:17
+msgid "3 Prerequisites"
+msgstr "3 前提条件"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:19
+msgid "3.1 Model Weight"
+msgstr "3.1 模型权重"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:21
+msgid ""
+"`Qwen3.6-35B-A3B` (BF16 version): requires 1 Atlas 800 A3 (64G x 16) node"
+" or 1 Atlas 800 A2 (64G x 8) node. [Download model "
+"weight](https://modelscope.cn/models/Qwen/Qwen3.6-35B-A3B)."
+msgstr ""
+"`Qwen3.6-35B-A3B` (BF16 版本)：需要 1 个 Atlas 800 A3 (64G x 16) 节点或 1 个 Atlas 800 A2 (64G x 8) 节点。[下载模型权重](https://modelscope.cn/models/Qwen/Qwen3.6-35B-A3B)。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:22
+msgid ""
+"`Qwen3.6-35B-A3B-w8a8` (quantized version): requires 1 Atlas 800 A3 (64G "
+"x 16) node or 1 Atlas 800 A2 (64G x 8) node. [Download model "
+"weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.6-35B-A3B-w8a8)."
+msgstr ""
+"`Qwen3.6-35B-A3B-w8a8` (量化版本)：需要 1 个 Atlas 800 A3 (64G x 16) 节点或 1 个 Atlas 800 A2 (64G x 8) 节点。[下载模型权重](https://www.modelscope.cn/models/Eco-Tech/Qwen3.6-35B-A3B-w8a8)。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:24
+msgid "It is recommended to download the model weight to `/root/.cache/`."
+msgstr "建议将模型权重下载到 `/root/.cache/`。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:26
+msgid "4 Installation"
+msgstr "4 安装"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:28
+msgid "4.1 Docker Image Installation"
+msgstr "4.1 Docker 镜像安装"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:30
+msgid ""
+"Select an image based on your machine type. For example, use "
+"`quay.io/ascend/vllm-ascend:|vllm_ascend_version|` for Atlas 800 A2 and "
+"`quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3` for Atlas 800 A3."
+msgstr ""
+"根据机器类型选择镜像。例如，Atlas 800 A2 使用 `quay.io/ascend/vllm-ascend:|vllm_ascend_version|`，Atlas 800 A3 使用 `quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3`。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:32
+msgid ""
+"Refer to [using docker](../../installation.md#set-up-using-docker) for "
+"the complete installation guide."
+msgstr ""
+"请参考[使用 docker](../../installation.md#set-up-using-docker)获取完整安装指南。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:69
+msgid ""
+"After entering the container, verify that vLLM and vLLM-Ascend can be "
+"imported:"
+msgstr ""
+"进入容器后，验证 vLLM 和 vLLM-Ascend 是否可以导入："
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:75
+msgid "4.2 Source Code Installation"
+msgstr "4.2 源码安装"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:77
+msgid ""
+"You can also build and install `vllm-ascend` from source. Refer to [set "
+"up using python](../../installation.md#set-up-using-python)."
+msgstr ""
+"您也可以从源码构建并安装 `vllm-ascend`。请参考[使用 python 设置](../../installation.md#set-up-using-python)。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:79
+msgid "5 Online Service Deployment"
+msgstr "5 在线服务部署"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:81
+msgid "5.1 Single-Node Online Deployment"
+msgstr "5.1 单节点在线部署"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:83
+msgid ""
+"Single-node deployment runs both Prefill and Decode on the same node. "
+"`Qwen3.6-35B-A3B-w8a8` can be deployed on 1 Atlas 800 A3 (64G x 16) or 1 "
+"Atlas 800 A2 (64G x 8). The W8A8 version needs `--quantization ascend`."
+msgstr ""
+"单节点部署将 Prefill 和 Decode 运行在同一个节点上。`Qwen3.6-35B-A3B-w8a8` 可以部署在 1 个 Atlas 800 A3 (64G x 16) 或 1 个 Atlas 800 A2 (64G x 8) 上。W8A8 版本需要 `--quantization ascend`。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:85
+msgid ""
+"Run the following script to execute online inference with up to 262144 "
+"context length on 1 Atlas 800 A3 (64G x 16)."
+msgstr ""
+"运行以下脚本，在 1 个 Atlas 800 A3 (64G x 16) 上执行最长 262144 上下文长度的在线推理。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:126
+msgid ""
+"Common Issues Tip: If the service fails to start, HBM is insufficient, or"
+" requests are not scheduled as expected, refer to [FAQs](../../faqs.md) "
+"first, and then check the model-specific FAQ in Section 10."
+msgstr ""
+"常见问题提示：如果服务启动失败、HBM 不足或请求未按预期调度，请先参考[常见问题解答](../../faqs.md)，然后查看第 10 节中的模型特定 FAQ。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:128
+msgid "**Key parameters:**"
+msgstr "**关键参数：**"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:130
+msgid ""
+"`--data-parallel-size 1` and `--tensor-parallel-size 2` set DP and TP for"
+" the default single-node serving example."
+msgstr ""
+"`--data-parallel-size 1` 和 `--tensor-parallel-size 2` 为默认的单节点服务示例设置 DP 和 TP。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:131
+msgid ""
+"`--enable-expert-parallel` enables expert parallelism for MoE layers. Do "
+"not mix MoE tensor parallelism and expert parallelism in the same MoE "
+"layer."
+msgstr ""
+"`--enable-expert-parallel` 为 MoE 层启用专家并行。不要在同一个 MoE 层中混合使用 MoE 张量并行和专家并行。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:132
+msgid ""
+"`--max-model-len` is the maximum input plus output length for a single "
+"request. Increase it only when enough KV cache is available."
+msgstr ""
+"`--max-model-len` 是单个请求的最大输入加输出长度。仅在 KV cache 充足时增加。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:133
+msgid ""
+"`--max-num-seqs` is the maximum number of active requests scheduled by "
+"each DP group. For performance tests, set `--max-num-seqs * --data-"
+"parallel-size` greater than or equal to the test concurrency."
+msgstr ""
+"`--max-num-seqs` 是每个 DP 组调度的最大活跃请求数。对于性能测试，设置 `--max-num-seqs * --data-parallel-size` 大于或等于测试并发数。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:134
+msgid ""
+"`--max-num-batched-tokens` is the maximum number of tokens processed in "
+"one scheduler step. A larger value can improve prefill efficiency but "
+"consumes more activation memory."
+msgstr ""
+"`--max-num-batched-tokens` 是单个调度步骤中处理的最大 token 数。较大的值可以提高 prefill 效率，但会消耗更多激活内存。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:135
+msgid ""
+"`--gpu-memory-utilization` controls how much HBM vLLM can use to "
+"calculate KV cache capacity. A higher value increases KV cache size but "
+"can trigger OOM if runtime memory is higher than the profile run."
+msgstr ""
+"`--gpu-memory-utilization` 控制 vLLM 可用于计算 KV cache 容量的 HBM 比例。较高的值会增加 KV cache 大小，但如果运行时内存高于 profile 运行，则可能触发 OOM。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:136
+msgid ""
+"`--enable-prefix-caching` enables prefix caching. For long-context "
+"serving, monitor memory usage because prefix caching can increase KV "
+"cache pressure."
+msgstr ""
+"`--enable-prefix-caching` 启用前缀缓存。对于长上下文服务，请监控内存使用情况，因为前缀缓存可能会增加 KV cache 压力。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:137
+msgid ""
+"`--quantization ascend` enables Ascend quantization for the W8A8 model. "
+"Remove this option when deploying the BF16 model."
+msgstr ""
+"`--quantization ascend` 为 W8A8 模型启用 Ascend 量化。部署 BF16 模型时请移除该选项。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:138
+#, python-brace-format
+msgid ""
+"`--compilation-config '{\"cudagraph_mode\":\"FULL_DECODE_ONLY\"}'` "
+"enables full decode ACLGraph replay to reduce dispatch overhead."
+msgstr ""
+"`--compilation-config '{\"cudagraph_mode\":\"FULL_DECODE_ONLY\"}'` 启用完整 decode ACLGraph 重放以减少调度开销。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:139
+msgid ""
+"`--additional-config` enables Ascend-specific optimizations. "
+"`enable_flashcomm1` enables FlashComm1, "
+"`multistream_overlap_shared_expert` overlaps shared expert computation, "
+"and `enable_cpu_binding` enables Ascend-native CPU binding."
+msgstr ""
+"`--additional-config` 启用 Ascend 特定优化。`enable_flashcomm1` 启用 FlashComm1，`multistream_overlap_shared_expert` 重叠共享专家计算，`enable_cpu_binding` 启用 Ascend 原生 CPU 绑定。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:140
+msgid ""
+"`--async-scheduling` enables asynchronous scheduling, which can improve "
+"high-concurrency throughput."
+msgstr ""
+"`--async-scheduling` 启用异步调度，可以提高高并发吞吐量。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:142
+msgid "6 Functional Verification"
+msgstr "6 功能验证"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:144
+msgid ""
+"After the server is started, send a request to verify basic model "
+"functionality."
+msgstr ""
+"服务器启动后，发送请求以验证基本模型功能。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:157
+msgid ""
+"Expected result: the HTTP status is 200 and the JSON response contains a "
+"`choices` field with generated text."
+msgstr ""
+"预期结果：HTTP 状态码为 200，JSON 响应包含带有生成文本的 `choices` 字段。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:159
+msgid "7 Accuracy Evaluation"
+msgstr "7 精度评估"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:161
+msgid "Here are two accuracy evaluation methods."
+msgstr "以下是两种精度评估方法。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:163
+msgid "7.1 Using AISBench"
+msgstr "7.1 使用 AISBench"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:165
+msgid ""
+"Refer to [Using "
+"AISBench](../../developer_guide/evaluation/using_ais_bench.md) for "
+"details. After execution, you can get the accuracy result of `Qwen3.6"
+"-35B-A3B-w8a8`."
+msgstr ""
+"详情请参考[使用 AISBench](../../developer_guide/evaluation/using_ais_bench.md)。执行后，您可以获得 `Qwen3.6-35B-A3B-w8a8` 的精度结果。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:167
+msgid "7.2 Using Language Model Evaluation Harness"
+msgstr "7.2 使用 Language Model Evaluation Harness"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:169
+msgid ""
+"Refer to [Using "
+"lm_eval](../../developer_guide/evaluation/using_lm_eval.md) for "
+"installation and usage details. When using online serving, set `base_url`"
+" to the endpoint started in Section 5."
+msgstr ""
+"安装和使用详情请参考[使用 lm_eval](../../developer_guide/evaluation/using_lm_eval.md)。使用在线服务时，将 `base_url` 设置为第 5 节中启动的端点。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:179
+msgid "8 Performance Evaluation"
+msgstr "8 性能评估"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:181
+msgid "8.1 Using AISBench"
+msgstr "8.1 使用 AISBench"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:183
+msgid ""
+"Refer to [Using AISBench for performance "
+"evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-"
+"performance-evaluation) for details."
+msgstr ""
+"详情请参考[使用 AISBench 进行性能评估](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation)。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:185
+msgid "8.2 Using vLLM Benchmark"
+msgstr "8.2 使用 vLLM Benchmark"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:187
+msgid ""
+"Run performance evaluation of `Qwen3.6-35B-A3B-w8a8` as an example. Refer"
+" to [vLLM benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for "
+"more details."
+msgstr ""
+"以 `Qwen3.6-35B-A3B-w8a8` 的性能评估为例。更多详情请参考 [vLLM benchmark](https://docs.vllm.ai/en/latest/benchmarking/)。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:189
+msgid "There are three `vllm bench` subcommands:"
+msgstr "有三个 `vllm bench` 子命令："
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:191
+msgid "`latency`: benchmark the latency of a single batch of requests."
+msgstr "`latency`：对单批请求的延迟进行基准测试。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:192
+msgid "`serve`: benchmark online serving throughput."
+msgstr "`serve`：对在线服务吞吐量进行基准测试。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:193
+msgid "`throughput`: benchmark offline inference throughput."
+msgstr "`throughput`：对离线推理吞吐量进行基准测试。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:195
+msgid "Take `serve` as an example:"
+msgstr "以 `serve` 为例："
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:211
+msgid "After several minutes, you can get the performance evaluation result."
+msgstr "几分钟后，您可以获得性能评估结果。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:213
+msgid "9 Performance Tuning"
+msgstr "9 性能调优"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:215
+msgid "9.1 Recommended Configurations"
+msgstr "9.1 推荐配置"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:217
+msgid ""
+"The following configurations are validated in specific test environments "
+"and are for reference only. The optimal configuration depends on hardware"
+" type, maximum input/output length, request concurrency, prefix cache hit"
+" rate, and quantization. Tune the parameters in Section 9.2 based on your"
+" actual workload."
+msgstr ""
+"以下配置在特定测试环境中验证，仅供参考。最佳配置取决于硬件类型、最大输入/输出长度、请求并发数、前缀缓存命中率和量化方式。请根据实际工作负载调整第 9.2 节中的参数。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "Scenario"
+msgstr "场景"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "Deployment Mode"
+msgstr "部署模式"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "Total NPUs"
+msgstr "NPU总数"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "Weight Version"
+msgstr "权重版本"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "Key Considerations"
+msgstr "关键考量"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "Long context"
+msgstr "长上下文"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "Single-node online serving"
+msgstr "单节点在线服务"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "2 or more NPUs"
+msgstr "2个及以上NPU"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "W8A8"
+msgstr "W8A8"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid ""
+"Use larger `--max-model-len` and reserve enough KV cache. Lower `--max-"
+"num-seqs` if OOM occurs."
+msgstr ""
+"使用更大的`--max-model-len`并预留足够的KV缓存。若发生OOM则降低`--max-"
+"num-seqs`。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "High throughput"
+msgstr "高吞吐"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "8 or more NPUs"
+msgstr "8个及以上NPU"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid ""
+"Increase local DP groups within one node and tune `--max-num-batched-"
+"tokens`."
+msgstr ""
+"增加单节点内的本地DP组数量，并调整`--max-num-batched-"
+"tokens`。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "Low latency"
+msgstr "低延迟"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid ""
+"Use smaller `--max-num-batched-tokens`, full decode ACLGraph, and disable"
+" speculative decoding by default."
+msgstr ""
+"使用较小的`--max-num-batched-tokens`、全解码ACLGraph，并默认关闭推测解码。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "Node Role"
+msgstr "节点角色"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "NPUs"
+msgstr "NPU数量"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "TP"
+msgstr "TP"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "DP"
+msgstr "DP"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "Max Num Seqs"
+msgstr "最大序列数"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "Max Model Len"
+msgstr "最大模型长度"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "Max Num Batched Tokens"
+msgstr "最大批处理Token数"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "Prefix Cache"
+msgstr "前缀缓存"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "Main Optimizations"
+msgstr "主要优化"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "Single node"
+msgstr "单节点"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "2 or more"
+msgstr "2个及以上"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "2"
+msgstr "2"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "1"
+msgstr "1"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "128"
+msgstr "128"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "262144"
+msgstr "262144"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "16384"
+msgstr "16384"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "On"
+msgstr "开启"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "FullGraph, FlashComm1, shared expert overlap, CPU binding"
+msgstr "FullGraph、FlashComm1、共享专家重叠、CPU绑定"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "8 or more"
+msgstr "8个及以上"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "4 or more"
+msgstr "4个及以上"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "32 per DP"
+msgstr "每个DP 32"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "65536"
+msgstr "65536"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "8192"
+msgstr "8192"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "FullGraph, FlashComm1, async scheduling, shared expert overlap"
+msgstr "FullGraph、FlashComm1、异步调度、共享专家重叠"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "Tune by concurrency"
+msgstr "按并发度调整"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "32768 or 65536"
+msgstr "32768或65536"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "1024 to 4096"
+msgstr "1024到4096"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "Workload dependent"
+msgstr "取决于工作负载"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "FullGraph, CPU binding, speculative decoding disabled"
+msgstr "FullGraph、CPU绑定、关闭推测解码"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:231
+msgid "9.2 Tuning Guidelines"
+msgstr "9.2 调优指南"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:233
+msgid ""
+"Refer to [public performance tuning "
+"documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md)"
+" for general tuning methods, and refer to [feature "
+"matrix](../../user_guide/support_matrix/feature_matrix.md) for feature "
+"descriptions."
+msgstr ""
+"通用调优方法请参考[公开性能调优文档](../../developer_guide/performance_and_debug/optimization_and_tuning.md)，"
+"功能描述请参考[特性矩阵](../../user_guide/support_matrix/feature_matrix.md)。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:235
+msgid "Recommended tuning order:"
+msgstr "推荐调优顺序："
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:237
+msgid ""
+"Use single-node deployment. If more throughput is required, increase "
+"local DP groups within the same node."
+msgstr ""
+"使用单节点部署。如需更高吞吐，增加同一节点内的本地DP组数量。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:238
+msgid ""
+"Choose the maximum context length with `--max-model-len`. Long context "
+"increases KV cache usage, so reduce `--max-num-seqs` or `--gpu-memory-"
+"utilization` if OOM occurs."
+msgstr ""
+"通过`--max-model-len`选择最大上下文长度。长上下文会增加KV缓存使用量，"
+"若发生OOM则降低`--max-num-seqs`或`--gpu-memory-utilization`。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:239
+msgid ""
+"Tune `--max-num-batched-tokens`. Larger values usually improve prefill "
+"throughput but increase activation memory. Decode-heavy workloads usually"
+" need smaller values."
+msgstr ""
+"调整`--max-num-batched-tokens`。较大值通常提升预填充吞吐但增加激活内存。"
+"解码密集型工作负载通常需要较小值。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:240
+msgid ""
+"Tune `--max-num-seqs` according to service concurrency. Requests above "
+"this value wait in the queue and the waiting time is counted in TTFT and "
+"TPOT."
+msgstr ""
+"根据服务并发度调整`--max-num-seqs`。超过此值的请求将在队列中等待，"
+"等待时间计入TTFT和TPOT。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:241
+msgid ""
+"Tune `--gpu-memory-utilization`. Increase it to provide more KV cache, "
+"but leave headroom for runtime memory fluctuation and expert imbalance."
+msgstr ""
+"调整`--gpu-memory-utilization`。增大可提供更多KV缓存，"
+"但需为运行时内存波动和专家不平衡预留空间。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:242
+msgid ""
+"Tune ACLGraph capture. `FULL_DECODE_ONLY` is recommended for decode. If "
+"you set `cudagraph_capture_sizes` manually, include common decode batch "
+"sizes. With FlashComm1, use capture sizes that are multiples of TP size."
+msgstr ""
+"调整ACLGraph捕获。解码推荐使用`FULL_DECODE_ONLY`。"
+"若手动设置`cudagraph_capture_sizes`，需包含常见解码批大小。"
+"使用FlashComm1时，捕获大小应为TP大小的倍数。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:244
+msgid "9.3 Model-Specific Optimizations"
+msgstr "9.3 模型特定优化"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "Optimization"
+msgstr "优化项"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "Enablement"
+msgstr "启用方式"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "Benefit"
+msgstr "收益"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "Notes"
+msgstr "备注"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "Hybrid attention support"
+msgstr "混合注意力支持"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "Enabled by model implementation"
+msgstr "由模型实现启用"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "Supports Qwen3.6 long-context inference."
+msgstr "支持Qwen3.6长上下文推理。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "Tune context length based on KV cache capacity."
+msgstr "根据KV缓存容量调整上下文长度。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "Full decode ACLGraph"
+msgstr "全解码ACLGraph"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+#, python-brace-format
+msgid "`--compilation-config '{\"cudagraph_mode\":\"FULL_DECODE_ONLY\"}'`"
+msgstr "`--compilation-config '{\"cudagraph_mode\":\"FULL_DECODE_ONLY\"}'`"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "Reduces operator dispatch overhead and stabilizes decode performance."
+msgstr "减少算子调度开销，稳定解码性能。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "Recommended for decode-heavy serving."
+msgstr "推荐用于解码密集型服务。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "FlashComm1"
+msgstr "FlashComm1"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+#, python-brace-format
+msgid "`--additional-config '{\"enable_flashcomm1\": true}'`"
+msgstr "`--additional-config '{\"enable_flashcomm1\": true}'`"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "Reduces communication overhead in TP and high-concurrency scenarios."
+msgstr "减少TP和高并发场景下的通信开销。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "May not help low-concurrency workloads."
+msgstr "可能对低并发工作负载无帮助。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "Shared expert overlap"
+msgstr "共享专家重叠"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+#, python-brace-format
+msgid "`--additional-config '{\"multistream_overlap_shared_expert\": true}'`"
+msgstr "`--additional-config '{\"multistream_overlap_shared_expert\": true}'`"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "Overlaps shared expert computation in MoE workloads."
+msgstr "在MoE工作负载中重叠共享专家计算。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "Recommended for throughput scenarios."
+msgstr "推荐用于吞吐场景。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "Asynchronous scheduling"
+msgstr "异步调度"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "`--async-scheduling`"
+msgstr "`--async-scheduling`"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "Improves high-concurrency throughput by using non-blocking scheduling."
+msgstr "通过非阻塞调度提升高并发吞吐。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "Disable it and compare if the workload is latency-sensitive."
+msgstr "若工作负载对延迟敏感，请关闭并对比效果。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "Prefix caching"
+msgstr "前缀缓存"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "`--enable-prefix-caching`"
+msgstr "`--enable-prefix-caching`"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "Improves repeated-prefix workloads."
+msgstr "改善重复前缀工作负载。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "Monitor HBM usage for long-context workloads."
+msgstr "长上下文工作负载需监控HBM使用量。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "Qwen3.6 MTP speculative decoding"
+msgstr "Qwen3.6 MTP推测解码"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+#, python-brace-format
+msgid ""
+"`--speculative-config '{\"method\": \"qwen3_5_mtp\", "
+"\"num_speculative_tokens\": 3, \"enforce_eager\": true}'`"
+msgstr ""
+"`--speculative-config '{\"method\": \"qwen3_5_mtp\", "
+"\"num_speculative_tokens\": 3, \"enforce_eager\": true}'`"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "Can improve decode throughput when stable and accepted tokens are high."
+msgstr "在稳定且接受token数高时可提升解码吞吐。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:34
+msgid "Validate stability, TTFT, TPOT, and throughput for your workload."
+msgstr "针对您的工作负载验证稳定性、TTFT、TPOT和吞吐。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:256
+msgid "10 FAQ"
+msgstr "10 常见问题"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:258
+msgid ""
+"For common environment, installation, and general parameter issues, refer"
+" to [FAQs](../../faqs.md). This section only covers model-specific issues"
+" for Qwen3.6-35B-A3B."
+msgstr ""
+"常见环境、安装和通用参数问题请参考[常见问题](../../faqs.md)。"
+"本节仅涵盖Qwen3.6-35B-A3B的模型特定问题。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:260
+msgid ""
+"Q1: Why does the service report OOM during startup or soon after "
+"accepting requests?"
+msgstr ""
+"Q1:为什么服务在启动时或刚接受请求后报告OOM？"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:262
+msgid ""
+"**Phenomenon:** The service fails during profile run, or it starts "
+"successfully but reports OOM when real traffic arrives."
+msgstr ""
+"**现象：**服务在profile运行期间失败，或启动成功但在真实流量到达时报告OOM。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:264
+msgid ""
+"**Cause:** Qwen3.6 long-context serving consumes a large KV cache. Large "
+"`--max-model-len`, large `--max-num-seqs`, large `--max-num-batched-"
+"tokens`, or high `--gpu-memory-utilization` can leave insufficient HBM "
+"headroom."
+msgstr ""
+"**原因：**Qwen3.6长上下文服务消耗大量KV缓存。较大的`--max-model-len`、`--max-num-seqs`、`--max-num-batched-tokens`或较高的`--gpu-memory-utilization`可能导致HBM余量不足。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:266
+msgid ""
+"**Solution:** Use the W8A8 model with `--quantization ascend` when "
+"possible, lower `--max-model-len`, lower `--max-num-seqs`, lower `--max-"
+"num-batched-tokens`, or reduce `--gpu-memory-utilization`. Keep "
+"`PYTORCH_NPU_ALLOC_CONF=expandable_segments:True`."
+msgstr ""
+"**解决方案：**尽可能使用带`--quantization ascend`的W8A8模型，降低`--max-model-len`、`--max-num-seqs`、`--max-num-batched-tokens`，或减少`--gpu-memory-utilization`。保持`PYTORCH_NPU_ALLOC_CONF=expandable_segments:True`。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:268
+msgid "Q2: Why does enabling prefix caching not improve performance?"
+msgstr "Q2:为什么启用前缀缓存没有提升性能？"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:270
+msgid ""
+"**Phenomenon:** Prefix caching is enabled, but throughput or latency does"
+" not improve."
+msgstr ""
+"**现象：**已启用前缀缓存，但吞吐量或延迟没有改善。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:272
+msgid ""
+"**Cause:** Prefix caching only helps when requests share reusable "
+"prefixes. For random prompts or low cache hit rates, it may add memory "
+"pressure without visible gains."
+msgstr ""
+"**原因：**前缀缓存仅在请求共享可重用前缀时才有帮助。对于随机提示或低缓存命中率，它可能增加内存压力而无明显收益。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:274
+msgid ""
+"**Solution:** Enable prefix caching for repeated-prefix workloads. For "
+"random benchmark datasets or memory-constrained long-context workloads, "
+"compare with `--no-enable-prefix-caching`."
+msgstr ""
+"**解决方案：**对重复前缀的工作负载启用前缀缓存。对于随机基准数据集或内存受限的长上下文工作负载，与`--no-enable-prefix-caching`进行比较。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:276
+msgid "Q3: How should I tune async scheduling for Qwen3.6?"
+msgstr "Q3:如何为Qwen3.6调整异步调度？"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:278
+msgid ""
+"**Phenomenon:** Throughput improves in high-concurrency scenarios, but "
+"some latency-sensitive workloads may not benefit."
+msgstr ""
+"**现象：**在高并发场景下吞吐量提升，但某些延迟敏感型工作负载可能无法受益。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:280
+msgid ""
+"**Cause:** Asynchronous scheduling reduces blocking overhead, but the "
+"benefit depends on concurrency, prompt/output length, and graph capture "
+"shape."
+msgstr ""
+"**原因：**异步调度减少了阻塞开销，但收益取决于并发度、提示/输出长度和图捕获形状。"
+
+#: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:282
+msgid ""
+"**Solution:** Use `--async-scheduling` for high-throughput serving. For "
+"low-latency serving, compare TTFT and TPOT with and without this option."
+msgstr ""
+"**解决方案：**对高吞吐量服务使用`--async-scheduling`。对于低延迟服务，比较启用和禁用此选项时的TTFT和TPOT。"

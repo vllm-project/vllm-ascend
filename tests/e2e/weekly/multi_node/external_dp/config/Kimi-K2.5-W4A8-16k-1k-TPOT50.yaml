@@ -1,0 +1,246 @@
+test_name: "multi-node-kimi-k2.5-w4a8-ep-16k-1k-TPOT50"
+model: "Eco-Tech/Kimi-K2.5-W4A8"
+num_nodes: 4
+npu_per_node: 16
+
+routing:
+  type: "disaggregated_prefill"
+  groups:
+    prefiller: [ 0, 1 ]
+    decoder: [ 2, 3 ]
+
+config:
+  - node_index: 0
+    port_start: 7100
+    dp_rpc_port: 12321
+    dp_size: 2
+    dp_size_local: 2
+    dp_rank_start: 0
+    tp_size: 8
+    dp_address: "${NODE_0_IP}"
+
+  - node_index: 1
+    port_start: 7100
+    dp_rpc_port: 12321
+    dp_size: 2
+    dp_size_local: 2
+    dp_rank_start: 0
+    tp_size: 8
+    dp_address: "${NODE_1_IP}"
+
+  - node_index: 2
+    port_start: 7100
+    dp_rpc_port: 12321
+    dp_size: 32
+    dp_size_local: 16
+    dp_rank_start: 0
+    tp_size: 1
+    dp_address: "${NODE_2_IP}"
+
+  - node_index: 3
+    port_start: 7100
+    dp_rpc_port: 12321
+    dp_size: 32
+    dp_size_local: 16
+    dp_rank_start: 16
+    tp_size: 1
+    dp_address: "${NODE_2_IP}"
+
+env_common: &env_common
+  SERVER_PORT: "${PORT}"
+  VLLM_RPC_TIMEOUT: "3600000"
+  VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "30000"
+  HCCL_OP_EXPANSION_MODE: "AIV"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  OMP_PROC_BIND: "false"
+  OMP_NUM_THREADS: "1"
+  TASK_QUEUE_ENABLE: "1"
+  ASCEND_BUFFER_POOL: "4:8"
+  ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
+
+env_prefill: &env_prefill
+  <<: *env_common
+  HCCL_BUFFSIZE: "256"
+  VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+
+env_decode: &env_decode
+  <<: *env_common
+  HCCL_BUFFSIZE: "1800"
+  VLLM_ASCEND_ENABLE_MLAPO: "1"
+
+templates:
+  - node_index: 0
+    envs:
+      <<: *env_prefill
+    server_cmd_template:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - $SERVER_PORT
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --enable-expert-parallel
+      - --seed
+      - "1024"
+      - --quantization
+      - "ascend"
+      - --trust-remote-code
+      - --max-num-seqs
+      - "8"
+      - --max-model-len
+      - "32768"
+      - --max-num-batched-tokens
+      - "16384"
+      - --no-enable-prefix-caching
+      - --gpu-memory-utilization
+      - "0.8"
+      - --enforce-eager
+      - --speculative-config
+      - '{"method": "eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens": 3}'
+      - --kv-transfer-config
+      - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_producer", "kv_port": "30000", "engine_id": "0", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 8}, "decode": {"dp_size": 32, "tp_size": 1}}}'
+
+  - node_index: 1
+    envs:
+      <<: *env_prefill
+    server_cmd_template:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - $SERVER_PORT
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --enable-expert-parallel
+      - --seed
+      - "1024"
+      - --quantization
+      - "ascend"
+      - --trust-remote-code
+      - --max-num-seqs
+      - "8"
+      - --max-model-len
+      - "32768"
+      - --max-num-batched-tokens
+      - "16384"
+      - --no-enable-prefix-caching
+      - --gpu-memory-utilization
+      - "0.8"
+      - --enforce-eager
+      - --speculative-config
+      - '{"method": "eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens": 3}'
+      - --kv-transfer-config
+      - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_producer", "kv_port": "30100", "engine_id": "1", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 8}, "decode": {"dp_size": 32, "tp_size": 1}}}'
+
+  - node_index: 2
+    envs:
+      <<: *env_decode
+    server_cmd_template:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - $SERVER_PORT
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --enable-expert-parallel
+      - --seed
+      - "1024"
+      - --quantization
+      - "ascend"
+      - --trust-remote-code
+      - --max-num-seqs
+      - "48"
+      - --max-model-len
+      - "32768"
+      - --max-num-batched-tokens
+      - "256"
+      - --no-enable-prefix-caching
+      - --gpu-memory-utilization
+      - "0.95"
+      - --compilation-config
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4,8,16,32,48,64,80,96,112,128,144,160]}'
+      - --additional-config
+      - '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": false}'
+      - --speculative-config
+      - '{"method": "eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens": 3}'
+      - --kv-transfer-config
+      - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_consumer", "kv_port": "30200", "engine_id": "2", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 8}, "decode": {"dp_size": 32, "tp_size": 1}}}'
+
+  - node_index: 3
+    envs:
+      <<: *env_decode
+    server_cmd_template:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - $SERVER_PORT
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --enable-expert-parallel
+      - --seed
+      - "1024"
+      - --quantization
+      - "ascend"
+      - --trust-remote-code
+      - --max-num-seqs
+      - "48"
+      - --max-model-len
+      - "32768"
+      - --max-num-batched-tokens
+      - "256"
+      - --no-enable-prefix-caching
+      - --gpu-memory-utilization
+      - "0.95"
+      - --compilation-config
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4,8,16,32,48,64,80,96,112,128,144,160]}'
+      - --additional-config
+      - '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": false}'
+      - --speculative-config
+      - '{"method": "eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens": 3}'
+      - --kv-transfer-config
+      - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_consumer", "kv_port": "30200", "engine_id": "2", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 8}, "decode": {"dp_size": 32, "tp_size": 1}}}'
+
+
+benchmarks:
+  perf:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs1024_kimi25
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 1024
+    max_out_len: 1024
+    batch_size: 256
+    request_rate: 3
+    baseline: 2099.9
+    threshold: 0.95

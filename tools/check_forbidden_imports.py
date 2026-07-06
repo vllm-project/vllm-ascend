@@ -41,6 +41,8 @@ CHECK_IMPORTS = {
         tip=("Avoid using pickle or cloudpickle or add this file to tools/check_forbidden_imports.py."),
         allowed_files={
             "vllm_ascend/distributed/kv_transfer/kv_pool/cpu_offload/metadata.py",
+            "vllm_ascend/distributed/weight_transfer/npu_ipc_engine.py",
+            "tests/ut/distributed/test_hccl_weight_transfer.py",
         },
     ),
     "re": ForbiddenImport(

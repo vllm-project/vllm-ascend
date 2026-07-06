@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-05-06 02:14+0000\n"
+"POT-Creation-Date: 2026-06-22 05:29+0000\n"
 "PO-Revision-Date: 2026-04-10 18:37+0800\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -27,16 +27,14 @@ msgstr "CPU 绑定"
 msgid ""
 "**Starting from vllm-ascend v0.18.0rc1, CPU binding is enabled by default"
 " on ARM-based Ascend servers.**"
-msgstr ""
-"**从 vllm-ascend v0.18.0rc1 开始，CPU 绑定在基于 ARM 的昇腾服务器上默认启用。**"
+msgstr "**从 vllm-ascend v0.18.0rc1 开始，CPU 绑定在基于 ARM 的昇腾服务器上默认启用。**"
 
 #: ../../source/user_guide/feature_guide/cpu_binding.md:6
 msgid ""
 "**You usually do not need to configure it manually.** Set "
 "`enable_cpu_binding` only when you want to disable it or make the default"
 " explicit."
-msgstr ""
-"**通常您无需手动配置。** 仅当您想禁用它或明确默认行为时，才设置 `enable_cpu_binding`。"
+msgstr "**通常您无需手动配置。** 仅当您想禁用它或明确默认行为时，才设置 `enable_cpu_binding`。"
 
 #: ../../source/user_guide/feature_guide/cpu_binding.md:9
 msgid "Benefits of CPU Binding"
@@ -47,24 +45,21 @@ msgid ""
 "CPU Binding improves **host-side scheduling** for multi-socket ARM "
 "servers with Ascend NPUs. It is designed to solve three common host-side "
 "inference performance issues:"
-msgstr ""
-"CPU 绑定改进了配备昇腾 NPU 的多插槽 ARM 服务器的**主机侧调度**。它旨在解决三个常见的主机侧推理性能问题："
+msgstr "CPU 绑定改进了配备昇腾 NPU 的多插槽 ARM 服务器的**主机侧调度**。它旨在解决三个常见的主机侧推理性能问题："
 
 #: ../../source/user_guide/feature_guide/cpu_binding.md:14
 msgid ""
 "**Lower cross-NUMA traffic.** Worker processes stay closer to the CPU and"
 " memory resources selected for their active NPU, reducing remote NUMA "
 "access."
-msgstr ""
-"**降低跨 NUMA 流量。** Worker 进程更靠近为其活跃 NPU 选择的 CPU 和内存资源，从而减少远程 NUMA 访问。"
+msgstr "**降低跨 NUMA 流量。** Worker 进程更靠近为其活跃 NPU 选择的 CPU 和内存资源，从而减少远程 NUMA 访问。"
 
 #: ../../source/user_guide/feature_guide/cpu_binding.md:16
 msgid ""
 "**Lower context-switch overhead from thread preemption.** Key runtime "
 "threads run on stable CPU ranges, reducing scheduler movement and CPU "
 "contention on busy hosts."
-msgstr ""
-"**降低线程抢占导致的上下文切换开销。** 关键运行时线程在稳定的 CPU 范围内运行，减少调度器移动和繁忙主机上的 CPU 争用。"
+msgstr "**降低线程抢占导致的上下文切换开销。** 关键运行时线程在稳定的 CPU 范围内运行，减少调度器移动和繁忙主机上的 CPU 争用。"
 
 #: ../../source/user_guide/feature_guide/cpu_binding.md:19
 msgid ""
@@ -73,7 +68,8 @@ msgid ""
 "tail-latency jitter and makes throughput more predictable during multi-"
 "NPU serving."
 msgstr ""
-"**更好的延迟稳定性和多 Worker 隔离。** 独立的 Worker 避免共享相同的 CPU/NUMA 资源，这有助于减少尾延迟抖动，并使多 NPU 服务期间的吞吐量更可预测。"
+"**更好的延迟稳定性和多 Worker 隔离。** 独立的 Worker 避免共享相同的 CPU/NUMA 资源，这有助于减少尾延迟抖动，并使多 "
+"NPU 服务期间的吞吐量更可预测。"
 
 #: ../../source/user_guide/feature_guide/cpu_binding.md:23
 msgid ""
@@ -82,7 +78,8 @@ msgid ""
 "migration support is unavailable, CPU affinity still works, but memory "
 "locality may be worse and latency or throughput may degrade."
 msgstr ""
-"此功能是主机侧的性能优化。**它不会改变模型执行逻辑或数值输出。** 当内存迁移支持不可用时，CPU 亲和性仍然有效，但内存局部性可能会变差，延迟或吞吐量可能会下降。"
+"此功能是主机侧的性能优化。**它不会改变模型执行逻辑或数值输出。** 当内存迁移支持不可用时，CPU "
+"亲和性仍然有效，但内存局部性可能会变差，延迟或吞吐量可能会下降。"
 
 #: ../../source/user_guide/feature_guide/cpu_binding.md:28
 msgid "Usage"
@@ -116,7 +113,8 @@ msgid ""
 "`procps` / `procps-ng` in v0.18.0rc1 and earlier releases. **Starting "
 "from v0.18.0rc1, the official images also include `numactl`.**"
 msgstr ""
-"官方 vllm-ascend 镜像在 v0.18.0rc1 及更早版本中已包含 `util-linux` 和 `procps` / `procps-ng`。**从 v0.18.0rc1 开始，官方镜像还包含了 `numactl`。**"
+"官方 vllm-ascend 镜像在 v0.18.0rc1 及更早版本中已包含 `util-linux` 和 `procps` / "
+"`procps-ng`。**从 v0.18.0rc1 开始，官方镜像还包含了 `numactl`。**"
 
 #: ../../source/user_guide/feature_guide/cpu_binding.md:72
 msgid "If you are not using the official image, install the host tools manually:"
@@ -129,17 +127,32 @@ msgid ""
 " pages already placed on remote NUMA nodes are not migrated, which **can "
 "reduce locality and degrade latency or throughput.**"
 msgstr ""
-"**没有 `numactl` / `migratepages`，vLLM Ascend 仅跳过内存迁移。** Worker 进程和运行时线程仍会被绑定，但已放置在远程 NUMA 节点上的页面不会被迁移，这**可能会降低局部性并导致延迟或吞吐量下降。**"
+"**没有 `numactl` / `migratepages`，vLLM Ascend 仅跳过内存迁移。** Worker "
+"进程和运行时线程仍会被绑定，但已放置在远程 NUMA 节点上的页面不会被迁移，这**可能会降低局部性并导致延迟或吞吐量下降。**"
 
 #: ../../source/user_guide/feature_guide/cpu_binding.md:90
 msgid ""
 "For optimal locality, use a cpuset that is evenly distributed across NUMA"
 " nodes. Unbalanced cpusets may reduce the locality benefit of CPU "
 "binding."
-msgstr ""
-"为获得最佳局部性，请使用在 NUMA 节点间均匀分布的 cpuset。不平衡的 cpuset 可能会降低 CPU 绑定的局部性优势。"
+msgstr "为获得最佳局部性，请使用在 NUMA 节点间均匀分布的 cpuset。不平衡的 cpuset 可能会降低 CPU 绑定的局部性优势。"
 
 #: ../../source/user_guide/feature_guide/cpu_binding.md:93
+msgid ""
+"On Ascend 950, CPU binding uses deterministic global CPU slicing because "
+"Ascend 950 does not report NPU-to-CPU affinity in `npu-smi info -t topo`."
+" Ascend 950 still pins worker, ACL, and release threads and can still "
+"migrate memory pages when `migratepages` is available. Because Ascend 950"
+" skips IRQ binding, it does not reserve the first two CPUs in each NPU "
+"pool for IRQ handling. Those CPUs are assigned to the main worker "
+"instead."
+msgstr ""
+"在 Ascend 950 上，CPU 绑定使用确定性的全局 CPU 切片，因为 Ascend 950 不在 `npu-smi info -t topo` "
+"中报告 NPU 到 CPU 的亲和性。Ascend 950 仍然绑定 worker、ACL 和 release 线程，并且在 "
+"`migratepages` 可用时仍可迁移内存页。由于 Ascend 950 跳过 IRQ 绑定，它不会在每个 NPU "
+"池中为 IRQ 处理预留前两个 CPU。这些 CPU 改为分配给主 worker。"
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md:100
 msgid ""
 "For IRQ binding, the process also needs permission to read "
 "`/proc/interrupts` and write `/proc/irq/*/smp_affinity`. If `irqbalance` "
@@ -147,23 +160,32 @@ msgid ""
 "before applying IRQ affinity. In containers where `systemctl` is "
 "unavailable, stop `irqbalance` on the host when IRQ affinity matters."
 msgstr ""
-"对于 IRQ 绑定，进程还需要读取 `/proc/interrupts` 和写入 `/proc/irq/*/smp_affinity` 的权限。如果 `irqbalance` 正在运行且进程可以使用 `systemctl`，vLLM Ascend 会在应用 IRQ 亲和性之前停止它。在无法使用 `systemctl` 的容器中，当 IRQ 亲和性很重要时，请在主机上停止 `irqbalance`。"
-
-#: ../../source/user_guide/feature_guide/cpu_binding.md:99
-msgid ""
-"On the host, stop `irqbalance` before starting vLLM when you need stable "
-"IRQ affinity:"
-msgstr ""
-"在主机上，当您需要稳定的 IRQ 亲和性时，请在启动 vLLM 前停止 `irqbalance`："
+"对于 IRQ 绑定，进程还需要读取 `/proc/interrupts` 和写入 `/proc/irq/*/smp_affinity` "
+"的权限。如果 `irqbalance` 正在运行且进程可以使用 `systemctl`，vLLM Ascend 会在应用 IRQ "
+"亲和性之前停止它。在无法使用 `systemctl` 的容器中，当 IRQ 亲和性很重要时，请在主机上停止 `irqbalance`。"
 
 #: ../../source/user_guide/feature_guide/cpu_binding.md:106
 msgid ""
+"Ascend 950 does not apply IRQ binding. When running on Ascend 950, the "
+"log contains `[irq] IRQ binding skipped on Ascend 950.` and no "
+"`/proc/irq/*/smp_affinity` files are written by this feature."
+msgstr ""
+"Ascend 950 不应用 IRQ 绑定。在 Ascend 950 上运行时，日志包含 `[irq] IRQ binding skipped on Ascend 950.`，"
+"并且此功能不会写入任何 `/proc/irq/*/smp_affinity` 文件。"
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md:110
+msgid ""
+"On the host, stop `irqbalance` before starting vLLM when you need stable "
+"IRQ affinity:"
+msgstr "在主机上，当您需要稳定的 IRQ 亲和性时，请在启动 vLLM 前停止 `irqbalance`："
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md:117
+msgid ""
 "After the vLLM service exits, restart it if the host should return to the"
 " default IRQ balancing policy:"
-msgstr ""
-"vLLM 服务退出后，如果主机应恢复默认的 IRQ 平衡策略，请重新启动它："
+msgstr "vLLM 服务退出后，如果主机应恢复默认的 IRQ 平衡策略，请重新启动它："
 
-#: ../../source/user_guide/feature_guide/cpu_binding.md:113
+#: ../../source/user_guide/feature_guide/cpu_binding.md:124
 msgid "Troubleshooting"
 msgstr "常见问题与故障排查"
 
@@ -199,8 +221,7 @@ msgstr "`Can not get running npu info.`"
 msgid ""
 "No running NPU was found, or `ASCEND_RT_VISIBLE_DEVICES` filtered all "
 "NPUs."
-msgstr ""
-"未找到正在运行的 NPU，或者 `ASCEND_RT_VISIBLE_DEVICES` 过滤掉了所有 NPU。"
+msgstr "未找到正在运行的 NPU，或者 `ASCEND_RT_VISIBLE_DEVICES` 过滤掉了所有 NPU。"
 
 #: ../../source/user_guide/feature_guide/cpu_binding.md
 msgid "Check visible NPU IDs and `npu-smi info`."
@@ -211,8 +232,12 @@ msgid "`Insufficient CPUs for binding...`"
 msgstr "`Insufficient CPUs for binding...`"
 
 #: ../../source/user_guide/feature_guide/cpu_binding.md
-msgid "Fewer than 5 CPUs are available per logical NPU."
-msgstr "每个逻辑 NPU 可用的 CPU 少于 5 个。"
+msgid ""
+"Fewer CPUs are available than the role split requires. Devices with IRQ "
+"binding need at least 5 CPUs per logical NPU; Ascend 950 needs at least "
+"3."
+msgstr ""
+"可用 CPU 少于角色拆分所需的数量。具有 IRQ 绑定的设备每个逻辑 NPU 至少需要 5 个 CPU；Ascend 950 至少需要 3 个。"
 
 #: ../../source/user_guide/feature_guide/cpu_binding.md
 msgid "Expand the cpuset or reduce visible NPUs."
@@ -230,8 +255,7 @@ msgstr "拓扑亲和性不可用。"
 msgid ""
 "vLLM Ascend falls back to `global_slice`; check `npu-smi info -t topo` "
 "only if topology affinity is expected on this device."
-msgstr ""
-"vLLM Ascend 回退到 `global_slice`；仅当此设备上预期有拓扑亲和性时，才检查 `npu-smi info -t topo`。"
+msgstr "vLLM Ascend 回退到 `global_slice`；仅当此设备上预期有拓扑亲和性时，才检查 `npu-smi info -t topo`。"
 
 #: ../../source/user_guide/feature_guide/cpu_binding.md
 msgid "`The 'migratepages' command is not available...`"
@@ -246,6 +270,20 @@ msgid "Install `numactl` if NUMA locality or performance is affected."
 msgstr "如果 NUMA 局部性或性能受到影响，请安装 `numactl`。"
 
 #: ../../source/user_guide/feature_guide/cpu_binding.md
+msgid "`[irq] IRQ binding skipped on Ascend 950.`"
+msgstr "`[irq] IRQ binding skipped on Ascend 950.`"
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md
+msgid "Ascend 950 does not use the IRQ binding step."
+msgstr "Ascend 950 不使用 IRQ 绑定步骤。"
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md
+msgid ""
+"No action needed. Worker, ACL, release thread binding and memory "
+"migration still proceed."
+msgstr "无需任何操作。Worker、ACL、release 线程绑定和内存迁移仍会继续。"
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md
 msgid "`Bind cpus failed in rank...`"
 msgstr "`Bind cpus failed in rank...`"
 
@@ -257,17 +295,14 @@ msgstr "某个绑定步骤失败，该 rank 的 CPU 绑定被跳过。"
 msgid ""
 "Check `taskset`, `lscpu`, `npu-smi`, cpuset size, and `/proc/irq` "
 "permissions."
-msgstr ""
-"检查 `taskset`、`lscpu`、`npu-smi`、cpuset 大小和 `/proc/irq` 权限。"
+msgstr "检查 `taskset`、`lscpu`、`npu-smi`、cpuset 大小和 `/proc/irq` 权限。"
 
 #~ msgid ""
 #~ "1. Ensure the process is running "
 #~ "on visible NPUs; 2. Verify that "
 #~ "the `ASCEND_RT_VISIBLE_DEVICES` value matches "
 #~ "the actual logical NPU IDs."
-#~ msgstr ""
-#~ "1.确保进程在可见的 NPU 上运行；2.验证 "
-#~ "`ASCEND_RT_VISIBLE_DEVICES` 的值与实际逻辑 NPU ID 匹配。"
+#~ msgstr "1.确保进程在可见的 NPU 上运行；2.验证 `ASCEND_RT_VISIBLE_DEVICES` 的值与实际逻辑 NPU ID 匹配。"
 
 #~ msgid ""
 #~ "The number of CPU cores allocated "
@@ -384,10 +419,13 @@ msgstr ""
 #~ msgid ""
 #~ "**Key Limitations**: ARM‑only; relies on "
 #~ "symmetric NUMA layouts; binding fails if"
-#~ " the CPU pool has fewer than 5"
-#~ " cores; binding errors trigger a "
+#~ " the CPU pool has fewer than 5 "
+#~ "cores; binding errors trigger a "
 #~ "warning log but do not terminate "
 #~ "the process."
 #~ msgstr ""
 #~ "**主要限制**：仅限 ARM 架构；依赖对称 NUMA 布局；如果 CPU"
 #~ " 池少于 5 个核心，绑定失败；绑定错误会触发警告日志，但不会终止进程。"
+
+#~ msgid "Fewer than 5 CPUs are available per logical NPU."
+#~ msgstr "每个逻辑 NPU 可用的 CPU 少于 5 个。"

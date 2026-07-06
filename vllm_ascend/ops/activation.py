@@ -17,7 +17,13 @@
 
 import torch
 import torch_npu
-from vllm.model_executor.layers.activation import QuickGELU, SiluAndMul, SiluAndMulWithClamp, SwigluOAIAndMul
+from vllm.model_executor.layers.activation import (
+    QuickGELU,
+    SiluAndMul,
+    SiluAndMulWithClamp,
+    SwigluOAIAndMul,
+    SwigluStepAndMul,
+)
 
 from vllm_ascend.utils import get_weight_prefetch_method
 
@@ -59,3 +65,16 @@ class AscendSwigluOAIAndMul:
 
         layer = MinimalSwigluOAIAndMul()
         return SwigluOAIAndMul.forward_native(layer, x)
+
+
+class AscendSwigluStepAndMul:
+    def swiglustep_forward(x: torch.Tensor, limit: float = 7.0) -> torch.Tensor:
+        if limit is None:
+            raise ValueError("SwigluStepAndMul requires limit to be set.")
+
+        class MinimalSwigluStepAndMul:
+            def __init__(self):
+                self.limit = limit
+
+        layer = MinimalSwigluStepAndMul()
+        return SwigluStepAndMul.forward_native(layer, x)

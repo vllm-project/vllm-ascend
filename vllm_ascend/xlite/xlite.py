@@ -566,26 +566,37 @@ def get_adapter_xlite_model(runnable: nn.Module, vllm_config: VllmConfig) -> Xli
 class XliteWrapper:
     """A graph-based wrapper that dispatches between xlite and runnable paths."""
 
-    def __init__(self, runnable: nn.Module, vllm_config: VllmConfig):
+    def __init__(self, runnable: nn.Module, vllm_config: VllmConfig, device: torch.device) -> None:
         """Initialize xlite runtime, model tensors, and hidden-state workspace.
 
         Args:
             runnable (nn.Module): The runnable model implementation.
             vllm_config (VllmConfig): Runtime configuration for execution.
+            device (torch.device): The device to initialize the xlite model on.
 
         Raises:
             ValueError: If xlite runtime tensor-pool initialization fails.
         """
         self.runnable = runnable
+        self.device = device
         self.full_mode = get_ascend_config().xlite_graph_config.full_mode
 
         rank = torch.distributed.get_rank()
         local_rank = get_world_group().local_rank
         self.data_parallel_size = vllm_config.parallel_config.data_parallel_size
-        self.xlite_rt = Runtime(local_rank, 0, rank, get_tensor_model_parallel_world_size(), self.data_parallel_size)
 
         self.adapter_xlite_model = get_adapter_xlite_model(runnable, vllm_config)
         (self.xlite_model, self.freq_cis, hidden_size, dtype) = self.adapter_xlite_model.initialize()
+        xlite_config = self.adapter_xlite_model.xlite_config
+        self.xlite_rt = Runtime(
+            devid=local_rank,
+            size=0,
+            rank=rank,
+            tp_size=xlite_config.def_tp_size,
+            dp_size=xlite_config.def_dp_size,
+            moe_tp_size=xlite_config.moe_tp_size,
+            moe_ep_size=xlite_config.moe_ep_size,
+        )
 
         rt_pool_size = self.xlite_model.get_tensor_pool_size()
         if rank == 0:
@@ -594,7 +605,7 @@ class XliteWrapper:
             raise ValueError(f"xlite wrapper init failed! runtime pool size: {rt_pool_size} MB")
 
         max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
-        self.hidden_states = torch.empty(max_num_tokens, hidden_size, device=f"npu:{local_rank}", dtype=dtype)
+        self.hidden_states = torch.empty(max_num_tokens, hidden_size, device=self.device, dtype=dtype)
 
     def __getattr__(self, key: str) -> Any:
         """Proxy unknown attributes to the wrapped runnable model.
@@ -638,6 +649,7 @@ class XliteWrapper:
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
+        **model_kwargs: Any,
     ) -> XliteForwardResult:
         """Run one forward step through xlite graph or fallback runnable path.
 
@@ -647,19 +659,29 @@ class XliteWrapper:
             intermediate_tensors (Optional[IntermediateTensors]): Optional intermediate tensors from pipeline stages.
             inputs_embeds (Optional[torch.Tensor]): Optional external input embeddings (e.g. multimodal/deepstack
                 scenarios).
+            **model_kwargs (Any): Additional keyword arguments for the runnable.
 
         Returns:
             XliteForwardResult: Forward outputs from xlite graph or the original runnable implementation.
         """
         forward_context = get_forward_context()
+        if getattr(forward_context, "in_profile_run", False):
+            if self.full_mode:
+                # In full mode, xlite handles both prefill and decode, and aclgraph runnable should not reserve memory.
+                # This is to avoid redundant memory allocation that reduces KV cache capacity and regresses performance.
+                # NOTE: returning a single hidden state tensor may break the vLLM pipeline if the runnable expects a
+                # tuple of outputs, e.g., (hidden_states, aux_hidden_states) under certain speculative scenarios
+                return self.hidden_states
+            return self.runnable(input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs)
+
         attn_metadata: Any = forward_context.attn_metadata
         if attn_metadata is None:
-            return self.runnable(input_ids, positions, intermediate_tensors, inputs_embeds)
+            return self.runnable(input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs)
 
         attn_metadata = attn_metadata[0] if isinstance(attn_metadata, list) else attn_metadata
         attn_metadata = next(iter(attn_metadata.values()), None)
         if not isinstance(attn_metadata, self.adapter_xlite_model._attn_metadata_type):
-            return self.runnable(input_ids, positions, intermediate_tensors, inputs_embeds)
+            return self.runnable(input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs)
 
         with_prefill = attn_metadata.attn_state not in (
             AscendAttentionState.DecodeOnly,
@@ -675,12 +697,12 @@ class XliteWrapper:
         else:
             use_xlite_graph = not with_prefill or self.full_mode
 
-        attn_metadata_router = AttnMetadataRouter(attn_metadata=attn_metadata, device="cpu")
         if not use_xlite_graph:
             # fall back to runnable for prefill in decode-only mode
             # or when the number of tokens exceeds the graph capacity in non-full mode
-            return self.runnable(input_ids, positions, intermediate_tensors, inputs_embeds)
+            return self.runnable(input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs)
 
+        attn_metadata_router = AttnMetadataRouter(attn_metadata=attn_metadata, device="cpu")
         seq_lens = attn_metadata_router.seq_lens
         cum_query_lens = attn_metadata_router.cu_query_lens[-seq_lens.size(0) :].to(device=seq_lens.device)
         query_lens = torch.diff(cum_query_lens, prepend=seq_lens.new_zeros(1))

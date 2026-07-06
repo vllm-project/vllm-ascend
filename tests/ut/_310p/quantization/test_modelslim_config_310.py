@@ -15,7 +15,6 @@
 
 from unittest.mock import MagicMock, patch
 
-from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig, FusedMoEParallelConfig
 from vllm.model_executor.layers.linear import LinearBase
 
@@ -23,6 +22,12 @@ from tests.ut.base import TestBase
 from vllm_ascend._310p.fused_moe.fused_moe import AscendUnquantizedFusedMoEMethod310
 from vllm_ascend._310p.quantization.modelslim_config import AscendModelSlimConfig310
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.23.0"):
+    from vllm.model_executor.layers.fused_moe import FusedMoE
+else:
+    from vllm.model_executor.layers.fused_moe import RoutedExperts
 
 
 class TestAscendModelSlimConfig310(TestBase):
@@ -91,7 +96,11 @@ class TestAscendModelSlimConfig310(TestBase):
         )
 
     def test_get_quant_method_for_fused_moe_310(self):
-        fused_moe_layer = MagicMock(spec=FusedMoE)
+        if vllm_version_is("0.23.0"):
+            fused_moe_cls = FusedMoE
+        else:
+            fused_moe_cls = RoutedExperts
+        fused_moe_layer = MagicMock(spec=fused_moe_cls)
         fused_moe_layer.moe = MagicMock(spec=FusedMoEConfig)
         fused_moe_layer.moe_config = MagicMock(spec=FusedMoEConfig)
         fused_moe_layer.moe_config.moe_backend = "auto"
