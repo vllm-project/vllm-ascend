@@ -214,6 +214,7 @@ class Eagle3VwnLlamaForCausalLM(Eagle3LlamaForCausalLM):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
+        spec_step_idx: int = 0,
     ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         if self.draft_id_to_target_id is None:

@@ -1,10 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+from importlib.util import find_spec
 from unittest.mock import MagicMock
 
+import pytest
+
+if find_spec("vllm.tool_parsers.deepseekv4_tool_parser") is None:
+    pytest.skip(
+        "upstream vLLM removed deepseekv4_tool_parser",
+        allow_module_level=True,
+    )
+
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-from vllm.tool_parsers.deepseekv4_tool_parser import DeepSeekV4ToolParser
+from vllm.tool_parsers.deepseekv4_tool_parser import DeepSeekV4ToolParser  # type: ignore[import-not-found]
 
 from vllm_ascend.patch.platform import patch_deepseek_v4_tool_call_parser
 
