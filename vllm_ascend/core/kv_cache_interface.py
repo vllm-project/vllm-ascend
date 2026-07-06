@@ -79,9 +79,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             kv_bytes = num_heads_per_page * kv_dim * get_dtype_size(kv_dtype)
             qli_bytes = num_heads_per_page * index_head_dim * get_dtype_size(self.c8_k_cache_dtype)
             qli_scale_bytes = (
-                num_heads_per_page
-                * self.sfa_dcp_replicated_indexer_size
-                * get_dtype_size(self.c8_k_scale_cache_dtype)
+                num_heads_per_page * self.sfa_dcp_replicated_indexer_size * get_dtype_size(self.c8_k_scale_cache_dtype)
             )
             return kv_bytes + qli_bytes + qli_scale_bytes
 
