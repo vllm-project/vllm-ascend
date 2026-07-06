@@ -1175,9 +1175,7 @@ class AscendSFADCPImpl(AscendSFAImpl):
         attn_metadata: M,
     ) -> None:
         assert attn_metadata.dcp_context is not None
-        attn_metadata.dcp_context.query_gather_context = self._start_dcp_query_gather(
-            ql_nope, q_pe, attn_metadata
-        )
+        attn_metadata.dcp_context.query_gather_context = self._start_dcp_query_gather(ql_nope, q_pe, attn_metadata)
 
     def _finish_all_gather_query_for_dcp(
         self,
