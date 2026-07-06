@@ -576,7 +576,7 @@ export TASK_QUEUE_ENABLE=1
 export ASCEND_BUFFER_POOL=4:8
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
-export HCCL_BUFFSIZE=1100
+export HCCL_BUFFSIZE=800
 export VLLM_ASCEND_ENABLE_MLAPO=1
 export ASCEND_RT_VISIBLE_DEVICES=$1
 
@@ -595,7 +595,7 @@ vllm serve Eco-Tech/Kimi-K2.6-W4A8 \
     --trust-remote-code \
     --max-num-seqs 8 \
     --max-model-len 32768 \
-    --max-num-batched-tokens 4 \
+    --max-num-batched-tokens 32 \
     --no-enable-prefix-caching \
     --gpu-memory-utilization 0.91 \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
@@ -637,9 +637,9 @@ Key Parameter Descriptions:
     # p1
     python launch_online_dp.py --dp-size 4 --tp-size 4 --dp-size-local 4 --dp-rank-start 0 --dp-address 141.xx.xx.2 --dp-rpc-port 12321 --vllm-start-port 7100
     # d0
-    python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 8 --dp-rank-start 0 --dp-address 141.xx.xx.3 --dp-rpc-port 12321 --vllm-start-port 7100
+    python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 4 --dp-rank-start 0 --dp-address 141.xx.xx.3 --dp-rpc-port 12321 --vllm-start-port 7100
     # d1
-    python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 8 --dp-rank-start 8 --dp-address 141.xx.xx.3 --dp-rpc-port 12321 --vllm-start-port 7100
+    python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 4 --dp-rank-start 4 --dp-address 141.xx.xx.3 --dp-rpc-port 12321 --vllm-start-port 7100
     ```
 
 3. Run the `proxy.sh` script on the prefill master node
