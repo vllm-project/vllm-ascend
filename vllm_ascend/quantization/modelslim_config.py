@@ -533,7 +533,7 @@ class AscendModelSlimConfig(QuantizationConfig):
 
     def get_cache_scale_mapper(self) -> "WeightsMapper | None":
         suffix_map = {}
-        if self.quant_description.get("kv_cache_type") == "C8":
+        if self.enable_c8_quant:
             suffix_map.update(
                 {
                     ".k_proj.kv_cache_scale": ".attn.k_cache_scale",
@@ -543,16 +543,19 @@ class AscendModelSlimConfig(QuantizationConfig):
                 }
             )
         if self.enable_fa_quant:
-            suffix_map.update(
-                {
-                    ".fa_q.scale": ".mla_attn.fa_q.scale",
-                    ".fa_k.scale": ".mla_attn.fa_k.scale",
-                    ".fa_v.scale": ".mla_attn.fa_v.scale",
-                    ".fa_q.offset": ".mla_attn.fa_q.offset",
-                    ".fa_k.offset": ".mla_attn.fa_k.offset",
-                    ".fa_v.offset": ".mla_attn.fa_v.offset",
-                }
-            )
+            vllm_config = get_current_vllm_config()
+            model_type = vllm_config.model_config.hf_config.model_type
+            if model_type in ["deepseek_v2", "deepseek_v3", "deepseek_v32"]:
+                suffix_map.update(
+                    {
+                        ".fa_q.scale": ".mla_attn.mla_attn.fa_q.scale",
+                        ".fa_k.scale": ".mla_attn.mla_attn.fa_k.scale",
+                        ".fa_v.scale": ".mla_attn.mla_attn.fa_v.scale",
+                        ".fa_q.offset": ".mla_attn.mla_attn.fa_q.offset",
+                        ".fa_k.offset": ".mla_attn.mla_attn.fa_k.offset",
+                        ".fa_v.offset": ".mla_attn.mla_attn.fa_v.offset",
+                    }
+                )
         if self.enable_indexer_quant:
             suffix_map.update(
                 {
