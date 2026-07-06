@@ -2647,6 +2647,86 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                     expected_finishes={0: 2, 1: 1},
                 )
 
+    def test_hybrid_no_cp_uses_kv_cache_group_ids_for_split_transfer_groups(self):
+        with patch.object(
+            self.vllm_config.kv_transfer_config,
+            "get_from_extra_config",
+            side_effect=lambda k, d=None: {
+                "prefill": {"tp_size": 4, "dp_size": 1, "pp_size": 1},
+                "decode": {"tp_size": 2, "dp_size": 1, "pp_size": 1},
+            }.get(k, d),
+        ):
+            self.vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = False
+            self.vllm_config.model_config.is_deepseek_mla = False
+            self.vllm_config.model_config.hf_text_config.num_key_value_heads = 8
+            worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
+
+        worker._is_hma_required = True
+        worker.use_mla = False
+        worker.use_sparse = False
+        worker.num_key_value_heads = 8
+        worker.tp_size = 2
+        worker.tp_rank = 0
+        worker.pcp_size = 1
+        worker.dcp_size = 1
+        worker.pcp_rank = 0
+        worker.dcp_rank = 0
+        worker._decode_tp_size = 2
+        worker._prefill_tp_size = 4
+        worker._prefill_pp_size = 1
+        worker.side_channel_port = 5000
+        worker.handshake_port = worker.side_channel_port + worker.tp_rank
+        worker.local_remote_block_port_mapping = {}
+        worker.remote_port_send_num = {}
+        worker.block_size_scale = [[1], [1], [1]]
+        worker.kv_group2layeridx = {
+            0: (
+                {
+                    "kv_cache_spec_type": "FullAttentionSpec",
+                    "kv_cache_group_id": 0,
+                    "kv_cache_spec": {"num_kv_heads": 1},
+                },
+                [0],
+            ),
+            1: (
+                {
+                    "kv_cache_spec_type": "FullAttentionSpec",
+                    "kv_cache_group_id": 0,
+                    "kv_cache_spec": {"num_kv_heads": 8},
+                },
+                [1],
+            ),
+            2: (
+                {
+                    "kv_cache_spec_type": "MambaSpec",
+                    "kv_cache_group_id": 1,
+                },
+                [2],
+            ),
+        }
+
+        meta = types.SimpleNamespace(
+            remote_pcp_size=1,
+            remote_dcp_size=1,
+            remote_ptp_size=4,
+            remote_port=31000,
+            remote_block_ids=([50, 51, 52, 53], [60, 61, 62, 63]),
+            local_block_ids=([70, 71, 72, 73], [80, 81, 82, 83]),
+            num_external_tokens=4 * worker.block_size,
+            num_prompt_blocks=4,
+            num_computed_tokens=0,
+            remote_engine_id="remote_hybrid_split_transfer_groups",
+            remote_host="localhost",
+            remote_multi_nodes_meta_mapping={},
+            remote_block_size=16,
+        )
+
+        ports, local_ids, remote_ids = worker._get_kv_split_metadata("req_hybrid_split", cast(ReqMeta, meta))
+
+        self.assertEqual(len(ports), 1)
+        self.assertEqual(local_ids, [([70, 71, 72, 73], [80, 81, 82, 83])])
+        self.assertEqual(remote_ids, [([50, 51, 52, 53], [60, 61, 62, 63])])
+
     def test_get_tp_num_need_pulls(self):
         worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
         worker.num_key_value_heads = 8
