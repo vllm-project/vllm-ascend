@@ -14,7 +14,13 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.common_cp import AscendPCPMetadata
-from vllm_ascend.attention.sfa_v1 import DCPContext, AscendSFAImpl, AscendSFAMetadata, AscendSFAMetadataBuilder
+from vllm_ascend.attention.sfa_v1 import (
+    DCPContext,
+    DCPQueryGatherContext,
+    AscendSFAImpl,
+    AscendSFAMetadata,
+    AscendSFAMetadataBuilder,
+)
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, enabling_mlapo, split_decodes_and_prefills
 from vllm_ascend.distributed.utils import (
     all_gather_async,
@@ -1327,7 +1333,7 @@ class AscendSFADCPImpl(AscendSFAImpl):
         ql_nope: torch.Tensor,
         q_pe: torch.Tensor,
         dim: int,
-    ) -> tuple[torch.Tensor, torch.distributed.Work | None, tuple[int, ...] | None, int, int]:
+    ) -> DCPQueryGatherContext:
         assert self.dcp_group is not None
         if ql_nope.shape[:-1] != q_pe.shape[:-1] or ql_nope.dtype != q_pe.dtype:
             raise RuntimeError(
@@ -1351,13 +1357,24 @@ class AscendSFADCPImpl(AscendSFAImpl):
         ql_nope: torch.Tensor,
         q_pe: torch.Tensor,
         attn_metadata: M,
-    ) -> tuple[torch.Tensor, torch.distributed.Work | None, tuple[int, ...] | None, int, int]:
+    ) -> DCPQueryGatherContext:
         assert attn_metadata.dcp_context is not None
         query_gather_dim = 0 if self.enable_dsa_cp else 1
         return self._all_gather_query_for_dcp_async(
             ql_nope.contiguous(),
             q_pe.contiguous(),
             dim=query_gather_dim,
+        )
+
+    def _record_dcp_query_gather_context(
+        self,
+        ql_nope: torch.Tensor,
+        q_pe: torch.Tensor,
+        attn_metadata: M,
+    ) -> None:
+        assert attn_metadata.dcp_context is not None
+        attn_metadata.dcp_context.query_gather_context = self._start_dcp_query_gather(
+            ql_nope, q_pe, attn_metadata
         )
 
     def _finish_all_gather_query_for_dcp(
@@ -1381,10 +1398,12 @@ class AscendSFADCPImpl(AscendSFAImpl):
         attn_metadata,
         actual_seq_lengths_query,
         actual_seq_lengths_key,
-        query_gather_context=None,
     ):
         assert attn_metadata.dcp_context is not None
         assert self.dcp_group is not None
+        dcp_context = attn_metadata.dcp_context
+        query_gather_context = dcp_context.query_gather_context
+        dcp_context.query_gather_context = None
         if query_gather_context is None:
             query_gather_context = self._start_dcp_query_gather(ql_nope, q_pe, attn_metadata)
         q_gathered, q_handle, q_restore_perm, ql_nope_dim, q_pe_dim = query_gather_context
