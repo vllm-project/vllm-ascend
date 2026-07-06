@@ -10,11 +10,11 @@ from vllm_ascend.attention.attention_v1 import (
     AscendAttentionBackendImpl,
     AscendAttentionMetadataBuilder,
     AscendAttentionState,
-    PagedAttentionGraphParam,
 )
 from vllm_ascend.attention.kvcomp_attn.attention_utils import get_kvcomp_decode_params, reshape_and_cache_kvcomp
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
+    PagedAttentionGraphParam,
     cache_graph_workspace,
     needs_layer_aware_fia_graph_replay,
     using_paged_attention,

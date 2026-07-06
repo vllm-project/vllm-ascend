@@ -49,10 +49,12 @@ from vllm_ascend.attention.kvcomp_attn.attention_utils import (
 )
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
+    PagedAttentionGraphParam,
     cache_graph_workspace,
     enable_cp,
     needs_layer_aware_fia_graph_replay,
     split_decodes_and_prefills,
+    update_paged_attention_graph_param,
     using_paged_attention,
 )
 from vllm_ascend.compilation.acl_graph import (
@@ -70,14 +72,6 @@ from vllm_ascend.worker.kvcomp_utils import KVCompMetaData
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
 _ATTN_KEYS_BUFFER = None
-
-
-@dataclass
-class PagedAttentionGraphParam:
-    """Mark PA params when PA and FIA share one graph replay list."""
-
-    params: tuple
-    layer_name: str | None
 
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
@@ -576,17 +570,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     events,
                 ):
                     if isinstance(param, PagedAttentionGraphParam):
-                        (
-                            query,
-                            key_cache,
-                            value_cache,
-                            num_kv_heads,
-                            num_heads,
-                            scale,
-                            block_table,
-                            seq_lens,
-                            output,
-                        ) = param.params
                         if _EXTRA_CTX.is_draft_model:
                             draft_step, key = draft_attn_key_steps[attn_count]
                             block_table = attn_metadata[draft_step][key].block_tables
@@ -597,32 +580,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                             metadata_key = layer_name if layer_name is not None and layer_name in attn_metadata else key
                             block_table = attn_metadata[metadata_key].block_tables
                             seq_lens = attn_metadata[metadata_key].seq_lens
-                        workspace = torch_npu._npu_paged_attention_get_workspace(
-                            query=query,
-                            key_cache=key_cache,
-                            value_cache=value_cache,
-                            num_kv_heads=num_kv_heads,
-                            num_heads=num_heads,
-                            scale_value=scale,
-                            block_table=block_table,
-                            context_lens=seq_lens,
-                            out=output,
-                        )
-                        torch.npu.graph_task_update_begin(update_stream, handle)
-                        torch_npu._npu_paged_attention(
-                            query=query,
-                            key_cache=key_cache,
-                            value_cache=value_cache,
-                            num_kv_heads=num_kv_heads,
-                            num_heads=num_heads,
-                            scale_value=scale,
-                            block_table=block_table,
-                            context_lens=seq_lens,
-                            out=output,
-                            workspace=workspace,
-                        )
-                        torch.npu.graph_task_update_end(update_stream)
-                        event.record(update_stream)
+                        update_paged_attention_graph_param(update_stream, handle, event, param, block_table, seq_lens)
                         continue
                     (
                         query,
