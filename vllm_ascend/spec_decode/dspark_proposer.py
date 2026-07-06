@@ -10,10 +10,10 @@ from dataclasses import replace
 from typing import Any
 
 import torch
-from vllm.config import CUDAGraphMode, CompilationMode, VllmConfig, get_layers_from_vllm_config
+from vllm.config import CompilationMode, CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
 from vllm.forward_context import BatchDescriptor, get_forward_context
-from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.logger import logger
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
@@ -898,8 +898,8 @@ class AscendDSparkProposer(AscendDflashProposer):
         if not _dspark_standard_dsa_enabled() or not getattr(self, "draft_attn_groups", []):
             block_table = self._get_draft_block_table(cad, batch_size)
             primary_gid = getattr(self, "kv_cache_gid", 0)
-            by_gid = {} if block_table is None else {primary_gid: block_table}
-            return by_gid, self._layer_map_from_gid_map(by_gid)
+            primary_by_gid = {} if block_table is None else {primary_gid: block_table}
+            return primary_by_gid, self._layer_map_from_gid_map(primary_by_gid)
 
         by_gid: dict[int, torch.Tensor] = {}
         for attn_group in self.draft_attn_groups:
@@ -1338,6 +1338,7 @@ class AscendDSparkProposer(AscendDflashProposer):
 
     def build_model_inputs_first_pass(self, num_input_tokens: int) -> dict[str, Any]:
         AscendDSparkProposer._precompute_context_kv_first_pass(self)
+        token_to_req_indices = getattr(self, "_dspark_token_to_req_indices_buffer", None)
         model_inputs = dict(
             input_ids=self.input_ids[:num_input_tokens],
             positions=self.positions[:num_input_tokens],
@@ -1354,8 +1355,8 @@ class AscendDSparkProposer(AscendDflashProposer):
             else getattr(self, "_dspark_block_table", None),
             dspark_query_start_loc=getattr(self, "_dspark_query_start_loc", None),
             dspark_seq_lens=getattr(self, "_dspark_seq_lens", None),
-            dspark_token_to_req_indices=getattr(self, "_dspark_token_to_req_indices_buffer", None)[:num_input_tokens]
-            if isinstance(getattr(self, "_dspark_token_to_req_indices_buffer", None), torch.Tensor)
+            dspark_token_to_req_indices=token_to_req_indices[:num_input_tokens]
+            if isinstance(token_to_req_indices, torch.Tensor)
             else None,
         )
         return model_inputs
@@ -1446,6 +1447,7 @@ class AscendDSparkProposer(AscendDflashProposer):
             if use_probabilistic:
                 assert sampling_metadata is not None
                 assert draft_logits is not None
+                assert gumbel_positions is not None
                 draft_ids = self._sample_draft_ids(
                     logits,
                     draft_logits,
@@ -1670,7 +1672,10 @@ class AscendDSparkProposer(AscendDflashProposer):
         stage_start_ns = _dspark_perf_start(getattr(self, "device", None)) if perf_enabled else 0
         token_indices_to_sample_len = model_num_reqs * block_size
         token_indices_buffer = getattr(self, "token_indices_to_sample", None)
-        if isinstance(token_indices_buffer, torch.Tensor) and token_indices_buffer.numel() >= token_indices_to_sample_len:
+        if (
+            isinstance(token_indices_buffer, torch.Tensor)
+            and token_indices_buffer.numel() >= token_indices_to_sample_len
+        ):
             actual_sample_count = min(token_indices_to_sample.shape[0], token_indices_to_sample_len)
             token_indices_buffer[:actual_sample_count].copy_(token_indices_to_sample[:actual_sample_count])
             if token_indices_to_sample_len > actual_sample_count:
@@ -1780,14 +1785,16 @@ class AscendDSparkProposer(AscendDflashProposer):
                 )
             if model_num_reqs != actual_num_reqs:
                 draft_token_ids = draft_token_ids[:actual_num_reqs]
-                if isinstance(getattr(self, "_dspark_last_draft_logits", None), torch.Tensor):
-                    self._dspark_last_draft_logits = self._dspark_last_draft_logits[:actual_num_reqs].contiguous()
-                if isinstance(getattr(self, "_dspark_last_draft_probs", None), torch.Tensor):
-                    self._dspark_last_draft_probs = self._dspark_last_draft_probs[:actual_num_reqs].contiguous()
-                if isinstance(getattr(self, "_dspark_last_draft_logit_components", None), dict):
+                last_draft_logits = getattr(self, "_dspark_last_draft_logits", None)
+                if isinstance(last_draft_logits, torch.Tensor):
+                    self._dspark_last_draft_logits = last_draft_logits[:actual_num_reqs].contiguous()
+                last_draft_probs = getattr(self, "_dspark_last_draft_probs", None)
+                if isinstance(last_draft_probs, torch.Tensor):
+                    self._dspark_last_draft_probs = last_draft_probs[:actual_num_reqs].contiguous()
+                last_logit_components = getattr(self, "_dspark_last_draft_logit_components", None)
+                if isinstance(last_logit_components, dict):
                     self._dspark_last_draft_logit_components = {
-                        name: value[:actual_num_reqs].contiguous()
-                        for name, value in self._dspark_last_draft_logit_components.items()
+                        name: value[:actual_num_reqs].contiguous() for name, value in last_logit_components.items()
                     }
             if _dspark_reject_debug_enabled():
                 print(

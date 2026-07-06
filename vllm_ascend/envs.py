@@ -142,9 +142,7 @@ env_variables: dict[str, Callable[[], Any]] = {
     ),
     # Synchronize NPU before/after each timed DSpark stage. This is intrusive
     # but gives more meaningful timings for diagnosis runs.
-    "VLLM_ASCEND_DSPARK_PERF_TRACE_SYNC": lambda: bool(
-        int(os.getenv("VLLM_ASCEND_DSPARK_PERF_TRACE_SYNC", "1"))
-    ),
+    "VLLM_ASCEND_DSPARK_PERF_TRACE_SYNC": lambda: bool(int(os.getenv("VLLM_ASCEND_DSPARK_PERF_TRACE_SYNC", "1"))),
 }
 
 # end-env-vars-definition

@@ -1221,6 +1221,9 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         reqs_start = kwargs.get("reqs_start")
         tokens_start = kwargs.get("tokens_start")
         num_prefill_tokens = kwargs.get("num_prefill_tokens")
+        assert reqs_start is not None
+        assert tokens_start is not None
+        assert num_prefill_tokens is not None
         query_start_loc = common_attn_metadata.query_start_loc
         prefill_query_start_loc = query_start_loc[reqs_start:] - query_start_loc[reqs_start]
         seq_lens_q = prefill_query_start_loc[1:] - prefill_query_start_loc[:-1]

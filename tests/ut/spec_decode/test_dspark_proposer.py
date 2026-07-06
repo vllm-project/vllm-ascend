@@ -505,6 +505,41 @@ def test_dspark_set_inputs_first_pass_uses_anchor_first_block(monkeypatch):
     assert proposer._dflash_num_context == 6
 
 
+def test_dspark_slot_mapping_from_block_table_keeps_explicit_slots_for_empty_request():
+    block_size = 4
+    proposer = SimpleNamespace(kernel_block_size=block_size)
+    slot_mapping_from_block_table = AscendDSparkProposer._slot_mapping_from_block_table.__get__(proposer)
+    block_table = torch.tensor(
+        [
+            [12, 3, 14],
+            [99, 88, 77],
+            [42, 7, 64],
+        ],
+        dtype=torch.int32,
+    )
+
+    first_req_slots = slot_mapping_from_block_table(
+        torch.tensor([1, 4, 7, 9], dtype=torch.int32),
+        0,
+        block_table,
+    )
+    empty_req_slots = slot_mapping_from_block_table(
+        torch.empty(0, dtype=torch.int32),
+        1,
+        block_table,
+    )
+    third_req_slots = slot_mapping_from_block_table(
+        torch.tensor([0, 5, 10], dtype=torch.int32),
+        2,
+        block_table,
+    )
+
+    torch.testing.assert_close(first_req_slots, torch.tensor([49, 12, 15, 57], dtype=torch.int32))
+    assert empty_req_slots.dtype == torch.int32
+    assert empty_req_slots.numel() == 0
+    torch.testing.assert_close(third_req_slots, torch.tensor([168, 29, 258], dtype=torch.int32))
+
+
 def test_dspark_set_inputs_first_pass_masks_tokens_past_max_model_len(monkeypatch):
     monkeypatch.setenv("VLLM_ASCEND_DSPARK_USE_PRIVATE_CACHE", "1")
     device = torch.device("cpu")
@@ -1587,19 +1622,24 @@ def test_dspark_standard_dsa_propose_pads_model_inputs(monkeypatch):
             return torch.arange(input_ids.numel() * 4, dtype=torch.float32).view(input_ids.numel(), 4)
 
     builder = _FakeMetadataBuilder(_FakeKVSpec(), ["draft.swa"], SimpleNamespace(), torch.device("cpu"))
+
+    def sync_metadata_across_dp(
+        num_tokens,
+        is_draft_model,
+        cudagraph_mode=dspark_proposer_module.CUDAGraphMode.NONE,
+        allow_dp_padding=False,
+    ):
+        del num_tokens, is_draft_model, allow_dp_padding
+        return (
+            6,
+            torch.tensor([6], dtype=torch.int32),
+            cudagraph_mode,
+        )
+
     proposer = SimpleNamespace(
         device=torch.device("cpu"),
         vllm_config=SimpleNamespace(),
-        runner=SimpleNamespace(
-            _sync_metadata_across_dp=lambda num_tokens,
-            is_draft_model,
-            cudagraph_mode=dspark_proposer_module.CUDAGraphMode.NONE,
-            allow_dp_padding=False: (
-                6,
-                torch.tensor([6], dtype=torch.int32),
-                cudagraph_mode,
-            )
-        ),
+        runner=SimpleNamespace(_sync_metadata_across_dp=sync_metadata_across_dp),
         model=FakeModel(),
         num_speculative_tokens=5,
         parallel_drafting_token_id=99,
@@ -1798,18 +1838,22 @@ def test_dspark_dummy_run_keeps_drafter_eager_when_graph_disabled(monkeypatch):
             )
             return torch.zeros((input_ids.numel(), 4), dtype=torch.float32)
 
+    def sync_metadata_across_dp(
+        num_tokens,
+        is_draft_model,
+        cudagraph_mode=dspark_proposer_module.CUDAGraphMode.NONE,
+        allow_dp_padding=False,
+    ):
+        del is_draft_model, allow_dp_padding
+        return (
+            num_tokens,
+            torch.tensor([num_tokens], dtype=torch.int32),
+            cudagraph_mode,
+        )
+
     proposer = SimpleNamespace(
         use_cuda_graph=False,
-        runner=SimpleNamespace(
-            _sync_metadata_across_dp=lambda num_tokens,
-            is_draft_model,
-            cudagraph_mode=dspark_proposer_module.CUDAGraphMode.NONE,
-            allow_dp_padding=False: (
-                num_tokens,
-                torch.tensor([num_tokens], dtype=torch.int32),
-                cudagraph_mode,
-            )
-        ),
+        runner=SimpleNamespace(_sync_metadata_across_dp=sync_metadata_across_dp),
         vllm_config=SimpleNamespace(),
         model=FakeModel(),
         num_speculative_tokens=5,
@@ -2002,9 +2046,12 @@ def test_dspark_propose_uses_aclgraph_dispatch_when_enabled(monkeypatch):
     pad_calls = []
     runnable_calls = []
     sample_calls = []
-    proposer._build_standard_dsa_attn_metadata = lambda common, num_input_tokens, num_actual_tokens: build_calls.append(
-        (common, num_input_tokens, num_actual_tokens)
-    ) or [{"draft.swa": object()}]
+
+    def fake_build_standard_dsa_attn_metadata(common, num_input_tokens, num_actual_tokens):
+        build_calls.append((common, num_input_tokens, num_actual_tokens))
+        return [{"draft.swa": object()}]
+
+    proposer._build_standard_dsa_attn_metadata = fake_build_standard_dsa_attn_metadata
     proposer._pad_draft_query_buffers = lambda num_actual_tokens, num_input_tokens: pad_calls.append(
         (num_actual_tokens, num_input_tokens)
     )
@@ -2159,9 +2206,12 @@ def test_dspark_propose_runs_padded_graph_reqs_and_slices_result(monkeypatch):
     pad_calls = []
     runnable_calls = []
     sample_calls = []
-    proposer._build_standard_dsa_attn_metadata = lambda common, num_input_tokens, num_actual_tokens: build_calls.append(
-        (common, num_input_tokens, num_actual_tokens)
-    ) or []
+
+    def fake_build_standard_dsa_attn_metadata(common, num_input_tokens, num_actual_tokens):
+        build_calls.append((common, num_input_tokens, num_actual_tokens))
+        return []
+
+    proposer._build_standard_dsa_attn_metadata = fake_build_standard_dsa_attn_metadata
     proposer._pad_draft_query_buffers = lambda num_actual_tokens, num_input_tokens: pad_calls.append(
         (num_actual_tokens, num_input_tokens)
     )

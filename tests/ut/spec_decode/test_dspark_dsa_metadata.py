@@ -68,6 +68,7 @@ def test_dspark_dsa_window_does_not_encode_dspark_full_block():
 
 def test_dspark_dsa_decode_metadata_uses_noncausal_window(monkeypatch):
     captured = {}
+
     def fake_metadata_op(**kwargs):
         captured.update(kwargs)
         return torch.tensor([123], dtype=torch.int32)

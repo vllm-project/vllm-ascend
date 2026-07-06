@@ -2120,10 +2120,11 @@ class NPUModelRunner(GPUModelRunner):
         self,
         metadata: SpecDecodeMetadata,
     ) -> dict[str, torch.Tensor] | None:
-        if self._draft_logit_components is None:
+        draft_logit_components = getattr(self, "_draft_logit_components", None)
+        if draft_logit_components is None:
             return None
         components: dict[str, torch.Tensor] = {}
-        for name, value in self._draft_logit_components.items():
+        for name, value in draft_logit_components.items():
             flattened = self._get_spec_decode_draft_distribution(
                 metadata,
                 value,
@@ -3587,8 +3588,9 @@ class NPUModelRunner(GPUModelRunner):
                 cm.block_table_tensor, cm.slot_mapping = _get_block_table_and_slot_mapping(
                     kv_cache_gid
                 )
-            if self.speculative_config and hasattr(self.drafter, "set_per_group_attn_metadata"):
-                self.drafter.set_per_group_attn_metadata(kv_cache_gid, cm.block_table_tensor, cm.slot_mapping)
+            drafter = self.drafter
+            if self.speculative_config and drafter is not None and hasattr(drafter, "set_per_group_attn_metadata"):
+                drafter.set_per_group_attn_metadata(kv_cache_gid, cm.block_table_tensor, cm.slot_mapping)
             if self.speculative_config and spec_decode_common_attn_metadata is None:
                 if isinstance(self.drafter, AscendEagleProposer | AscendDraftModelProposer | AscendDflashProposer):
                     drafter_attn_layer_names = getattr(self.drafter, "attn_layer_names", [])

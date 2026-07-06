@@ -16,6 +16,7 @@
 #
 
 from contextlib import contextmanager
+from typing import Any
 
 import torch
 from vllm.v1.outputs import SamplerOutput
@@ -50,7 +51,10 @@ class AscendRejectionSampler310(AscendRejectionSampler):
         draft_probs: torch.Tensor | None,
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
+        draft_logits: torch.Tensor | None = None,
+        draft_logit_components: dict[str, Any] | None = None,
     ) -> SamplerOutput:
+        del draft_logits, draft_logit_components
         with _bind_sample_recovered_tokens(self.sample_recovered_tokens):
             return super().forward(metadata, draft_probs, logits, sampling_metadata)
 

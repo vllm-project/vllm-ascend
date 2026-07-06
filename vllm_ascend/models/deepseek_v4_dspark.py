@@ -323,17 +323,14 @@ def _dspark_mhc_fused_post_pre(
     hc_post_alpha: float,
     sinkhorn_repeat: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    if (
-        _dspark_mhc_post_custom_op_supported(x, residual, post_mix, res_mix)
-        and _dspark_mhc_pre_custom_op_supported(
-            residual,
-            hc_fn,
-            hc_scale,
-            hc_base,
-            hc_pre_eps,
-            hc_sinkhorn_eps,
-            hc_post_alpha,
-        )
+    if _dspark_mhc_post_custom_op_supported(x, residual, post_mix, res_mix) and _dspark_mhc_pre_custom_op_supported(
+        residual,
+        hc_fn,
+        hc_scale,
+        hc_base,
+        hc_pre_eps,
+        hc_sinkhorn_eps,
+        hc_post_alpha,
     ):
         residual_cur = _dspark_mhc_post(x, residual, post_mix, res_mix)
         layer_input, post_mix_cur, res_mix_cur = _dspark_mhc_pre(
@@ -657,8 +654,7 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
             shared_kv = shared_kv[:num_actual_tokens]
             slot_mapping = slot_mapping[:num_actual_tokens]
         capture_mode = (
-            getattr(forward_context, "cudagraph_runtime_mode", CUDAGraphMode.NONE)
-            == CUDAGraphMode.FULL
+            getattr(forward_context, "cudagraph_runtime_mode", CUDAGraphMode.NONE) == CUDAGraphMode.FULL
             or torch.compiler.is_compiling()
         )
         if capture_mode:
@@ -787,15 +783,16 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
             return None
         forward_context = _maybe_get_forward_context()
         capture_mode = (
-            getattr(forward_context, "cudagraph_runtime_mode", CUDAGraphMode.NONE)
-            == CUDAGraphMode.FULL
+            getattr(forward_context, "cudagraph_runtime_mode", CUDAGraphMode.NONE) == CUDAGraphMode.FULL
             or torch.compiler.is_compiling()
         )
         if block_table is None:
             if capture_mode:
                 raise RuntimeError("DSpark standard-cache attention requires block_table during graph capture")
             if not capture_mode:
-                logger.warning_once("DSpark standard SWA cache PTA path has no block_table; falling back to private cache")
+                logger.warning_once(
+                    "DSpark standard SWA cache PTA path has no block_table; falling back to private cache"
+                )
             return None
 
         swa_cache_layer = self.dsa_attn.swa_cache_layer
@@ -1111,8 +1108,7 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         k, v = self._expand_private_kv(shared_kv)
         forward_context = _maybe_get_forward_context()
         capture_mode = (
-            getattr(forward_context, "cudagraph_runtime_mode", CUDAGraphMode.NONE)
-            == CUDAGraphMode.FULL
+            getattr(forward_context, "cudagraph_runtime_mode", CUDAGraphMode.NONE) == CUDAGraphMode.FULL
             or torch.compiler.is_compiling()
         )
         if not capture_mode:
@@ -1149,7 +1145,7 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
             request_slots,
         )
 
-    def forward(
+    def forward(  # type: ignore[override]
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
@@ -1324,7 +1320,7 @@ class DeepseekV4DSparkDecoderLayer(DeepseekV2DecoderLayer):
             self.hc_sinkhorn_iters,
         )
 
-    def forward(
+    def forward(  # type: ignore[override]
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,

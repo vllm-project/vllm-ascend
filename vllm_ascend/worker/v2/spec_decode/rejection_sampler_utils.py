@@ -303,7 +303,7 @@ def _probabilistic_rejection_kernel(
                 target_logit = tl.load(target_logits_ptr + logit_idx * target_logits_stride + draft_sampled).to(
                     tl.float32
                 )
-                target_lse = _compute_global_lse(
+                target_lse = _compute_global_lse(  # type: ignore[misc]
                     target_local_max_ptr,
                     target_local_max_stride,
                     target_local_sumexp_ptr,
@@ -321,7 +321,7 @@ def _probabilistic_rejection_kernel(
                         + i * draft_logits_stride_1
                         + draft_sampled
                     ).to(tl.float32)
-                    draft_lse = _compute_global_lse(
+                    draft_lse = _compute_global_lse(  # type: ignore[misc]
                         draft_local_max_ptr,
                         draft_local_max_stride,
                         draft_local_sumexp_ptr,
@@ -405,7 +405,7 @@ def rejection_sample(
     target_local_sumexp = target_logits.new_empty(num_logits, vocab_num_blocks, dtype=torch.float32)
     draft_local_max = target_logits.new_empty(num_logits, vocab_num_blocks, dtype=torch.float32)
     draft_local_sumexp = target_logits.new_empty(num_logits, vocab_num_blocks, dtype=torch.float32)
-    _compute_block_stats_kernel[(num_logits, vocab_num_blocks)](
+    _compute_block_stats_kernel[(num_logits, vocab_num_blocks)](  # type: ignore[index]
         target_local_argmax,
         target_local_argmax.stride(0),
         target_local_max,

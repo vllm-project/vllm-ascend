@@ -18,6 +18,30 @@ def _has_npu() -> bool:
 
 
 @pytest.mark.skipif(not _has_npu(), reason="requires Ascend NPU")
+def test_dspark_standard_cache_store_matches_explicit_slot_reference():
+    from vllm_ascend.device.device_op import DeviceOperator
+
+    enable_custom_op()
+    torch.npu.set_device(0)
+
+    device = torch.device("npu:0")
+    dtype = torch.bfloat16
+    block_size = 4
+    cache = torch.zeros(5, block_size, 1, 8, dtype=dtype, device=device)
+    shared_kv = (torch.arange(48, dtype=torch.float32, device=device).view(6, 1, 8) * 0.01).to(dtype)
+    flat_slots = torch.tensor([3, 8, 9, 1, 14, 4], dtype=torch.int32, device=device)
+    slot_mapping = DeviceOperator.format_dsa_slot_mapping(flat_slots, block_size)
+
+    DeviceOperator.dsa_kv_compress_scatter(cache, shared_kv, slot_mapping)
+
+    expected = torch.zeros_like(cache.cpu())
+    shared_kv_cpu = shared_kv.cpu()
+    for token_idx, slot in enumerate(flat_slots.cpu().tolist()):
+        expected[slot // block_size, slot % block_size].copy_(shared_kv_cpu[token_idx])
+    torch.testing.assert_close(cache.cpu(), expected)
+
+
+@pytest.mark.skipif(not _has_npu(), reason="requires Ascend NPU")
 @pytest.mark.skipif(
     os.getenv("VLLM_ASCEND_DSPARK_USE_PTA_REF", "0") == "1",
     reason="DSpark SAS fast path is disabled by PTA reference env",

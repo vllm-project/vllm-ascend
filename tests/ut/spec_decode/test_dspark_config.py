@@ -3,6 +3,7 @@
 import runpy
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 import torch
@@ -551,7 +552,7 @@ def test_dspark_decoder_layer_uses_upstream_style_mhc_state_flow():
     layer.post_attention_layernorm = lambda x: x + 100
     layer.self_attn = lambda positions, hidden_states, _kv_cache, **kwargs: hidden_states + 1000
     layer.mlp = lambda hidden_states, input_ids: hidden_states + 10000
-    calls = []
+    calls: list[tuple[Any, ...]] = []
 
     def fake_pre(hidden_states, hc_fn, hc_scale, hc_base):
         calls.append(("pre", hidden_states.clone(), hc_fn, hc_scale, hc_base))
@@ -733,7 +734,7 @@ def test_dspark_store_standard_swa_kv_uses_dsa_slot_mapping(monkeypatch):
     from vllm_ascend.device import device_op as device_op_module
 
     monkeypatch.delenv("VLLM_ASCEND_DSPARK_USE_PRIVATE_CACHE", raising=False)
-    calls = []
+    calls: list[tuple[Any, ...]] = []
 
     def fake_format(slot_mapping, block_size):
         calls.append(("format", slot_mapping.clone(), block_size))
@@ -767,6 +768,42 @@ def test_dspark_store_standard_swa_kv_uses_dsa_slot_mapping(monkeypatch):
     torch.testing.assert_close(calls[1][3], torch.tensor([[1, 1], [2, 2]], dtype=torch.int32))
 
 
+def test_dspark_store_standard_swa_kv_preserves_explicit_slot_semantics(monkeypatch):
+    from vllm_ascend.device import device_op as device_op_module
+
+    monkeypatch.delenv("VLLM_ASCEND_DSPARK_USE_PRIVATE_CACHE", raising=False)
+
+    def fake_format(slot_mapping, block_size):
+        return torch.stack([slot_mapping // block_size, slot_mapping % block_size], dim=-1)
+
+    def fake_scatter(cache, shared_kv, slot_mapping):
+        for token_idx, (block_idx, block_offset) in enumerate(slot_mapping.tolist()):
+            cache[block_idx, block_offset].copy_(shared_kv[token_idx])
+
+    monkeypatch.setattr(device_op_module.DeviceOperator, "format_dsa_slot_mapping", staticmethod(fake_format))
+    monkeypatch.setattr(device_op_module.DeviceOperator, "dsa_kv_compress_scatter", staticmethod(fake_scatter))
+
+    block_size = 4
+    cache = torch.zeros(5, block_size, 1, 2)
+    attn = SimpleNamespace(
+        dsa_attn=SimpleNamespace(
+            swa_cache_layer=SimpleNamespace(
+                kv_cache=cache,
+                block_size=block_size,
+            )
+        )
+    )
+    shared_kv = torch.arange(12, dtype=torch.float32).view(6, 1, 2)
+    slot_mapping = torch.tensor([3, 8, 9, 1, 14, 4], dtype=torch.int32)
+
+    DeepseekV4DSparkAttention._store_standard_swa_kv(attn, shared_kv, slot_mapping)
+
+    expected = torch.zeros_like(cache)
+    for token_idx, slot in enumerate(slot_mapping.tolist()):
+        expected[slot // block_size, slot % block_size].copy_(shared_kv[token_idx])
+    torch.testing.assert_close(cache, expected)
+
+
 def test_dspark_store_standard_swa_kv_capture_slices_padding(monkeypatch):
     from vllm_ascend.device import device_op as device_op_module
 
@@ -785,7 +822,7 @@ def test_dspark_store_standard_swa_kv_capture_slices_padding(monkeypatch):
         "_sync_npu_device_for_standard_pta",
         lambda tensor: (_ for _ in ()).throw(AssertionError("capture path must not synchronize")),
     )
-    calls = []
+    calls: list[tuple[Any, ...]] = []
 
     def fake_format(slot_mapping, block_size):
         calls.append(("format", slot_mapping.clone(), block_size))

@@ -207,8 +207,8 @@ def convert(args: argparse.Namespace) -> None:
     write_config(source, output)
 
     keys_by_shard: dict[str, list[str]] = defaultdict(list)
-    for name, shard in source_weight_map.items():
-        keys_by_shard[shard].append(name)
+    for name, shard_name in source_weight_map.items():
+        keys_by_shard[shard_name].append(name)
 
     scale_keys_to_skip = {
         name for name in source_weight_map if name.endswith(".scale") and paired_weight_name(name) in source_weight_map

@@ -108,6 +108,7 @@
   base: attention_common
   source_file_dependencies:
     - vllm_ascend/attention/dsa_v1.py
+    - vllm_ascend/attention/dsa_window.py
   tests:
     - tests/e2e/pull_request/four_card/test_deepseek_v4.py
 
