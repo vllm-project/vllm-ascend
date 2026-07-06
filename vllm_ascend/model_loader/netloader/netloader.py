@@ -188,7 +188,7 @@ class ModelNetLoaderElastic(BaseModelLoader):
             seen_context_ids.add(context_id)
 
             try:
-                context_size = len(static_forward_context)
+                context_size = str(len(static_forward_context))
             except TypeError:
                 context_size = "unknown"
             static_forward_context.clear()
@@ -386,12 +386,12 @@ class ModelNetLoaderElastic(BaseModelLoader):
         if need_process_weights_after_loading:
             process_weights_after_loading(model, model_config, torch.device(device_config.device))
 
-        if model is None:
-            logger.error("NetLoader elastic loads model fails")
-            return None
-
         if not is_draft:
             self._sync_target_netloader_before_draft(vllm_config)
+
+        if model is None:
+            logger.error("NetLoader elastic loads model fails")
+            raise RuntimeError("NetLoader elastic loads model fails")
 
         return model.eval()
 

@@ -39,6 +39,7 @@ class DummyVllmConfig:
     parallel_config = DummyParallelConfig()
     additional_config = None
     quant_config = None
+    speculative_config: object | None = None
 
 
 class DummyModelConfig:
@@ -271,6 +272,36 @@ def test_target_model_waits_for_all_netloader_ranks_before_draft(mock_logger, mo
     vllm_config = DummyVllmConfig()
     vllm_config.speculative_config = object()
     loader.load_model(vllm_config, DummyModelConfig())
+
+    assert barrier_calls == ["barrier"]
+
+
+@patch("vllm_ascend.model_loader.netloader.netloader.logger")
+def test_failed_target_model_participates_in_barrier_before_error(mock_logger, monkeypatch):
+    _patch_loader_common(monkeypatch)
+    monkeypatch.setattr("vllm_ascend.model_loader.netloader.netloader.elastic_load", lambda **kwargs: None)
+    monkeypatch.setattr(
+        "vllm_ascend.model_loader.netloader.netloader.revert_to_default",
+        lambda *args, **kwargs: (None, False),
+    )
+
+    barrier_calls = []
+    monkeypatch.setattr("torch.distributed.is_available", lambda: True)
+    monkeypatch.setattr("torch.distributed.is_initialized", lambda: True)
+    monkeypatch.setattr("torch.distributed.barrier", lambda: barrier_calls.append("barrier"))
+
+    extra = {
+        "SOURCE": [{"device_id": 0, "sources": ["127.0.0.1:5000"]}],
+        "MODEL": "dummy-model",
+        "LISTEN_PORT": 5555,
+        "INT8_CACHE": "dram",
+    }
+    loader = make_loader_with_config(extra)
+    vllm_config = DummyVllmConfig()
+    vllm_config.speculative_config = object()
+
+    with pytest.raises(RuntimeError, match="NetLoader elastic loads model fails"):
+        loader.load_model(vllm_config, DummyModelConfig())
 
     assert barrier_calls == ["barrier"]
 
