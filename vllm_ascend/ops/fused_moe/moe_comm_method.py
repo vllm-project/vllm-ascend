@@ -19,6 +19,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 import torch
+from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -270,8 +271,11 @@ class FusedMC2CommImpl(MoECommMethod):
         super().__init__(moe_config)
         if get_ascend_config().enable_fused_mc2 == 1:
             self.expert_token_nums = torch.zeros([self.moe_config.num_local_experts], dtype=torch.int32, device="npu")
+            vllm_config = get_current_vllm_config()
+            self.max_output_size = vllm_config.scheduler_config.max_num_batched_tokens
         else:
             self.expert_token_nums = None
+            self.max_output_size = 0
 
     def pad_and_split_input_ids(self, input_ids):
         return self.prepare_finalize.pad_and_split_input_ids(input_ids)  # type: ignore[attr-defined]
@@ -317,7 +321,7 @@ class FusedMC2CommImpl(MoECommMethod):
                 bias2=fused_experts_input.weights.w2_scale_bias,
                 probs=fused_experts_input.topk_weights.to(torch.float32),
                 group=self.token_dispatcher.moe_all_to_all_group_name,
-                max_output_size=131072,
+                max_output_size=self.max_output_size,
                 swiglu_limit=fused_experts_input.swiglu_limit,
                 x_active_mask=fused_experts_input.routing.mc2_mask,
                 out=out,
