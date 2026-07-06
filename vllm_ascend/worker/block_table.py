@@ -93,19 +93,8 @@ class BlockTable:
         if self.pcp_world_size * self.dcp_world_size > 1:
             duplicate_size += num_speculative_tokens
         self.block_table = self._make_buffer(max_num_reqs * duplicate_size, logical_table_size, dtype=torch.int32)
-        total_cp_world_size = self.pcp_world_size * self.dcp_world_size
-        no_cp_logical_table_size = logical_table_size
-        if total_cp_world_size > 1 and not self.is_mamba_group:
-            no_cp_logical_table_size *= total_cp_world_size
-        self.block_table_no_cp = self._make_buffer(
-            max_num_reqs * duplicate_size, no_cp_logical_table_size, dtype=torch.int32
-        )
         self.num_blocks_per_row = np.zeros(max_num_reqs, dtype=np.int32)
-        self.num_blocks_per_row_no_cp = np.zeros(max_num_reqs, dtype=np.int32)
         self.slot_mapping = self._make_buffer(
-            self.max_num_batched_tokens + 2 * self.pcp_world_size * self.max_num_reqs, dtype=torch.int32
-        )
-        self.slot_mapping_no_cp = self._make_buffer(
             self.max_num_batched_tokens + 2 * self.pcp_world_size * self.max_num_reqs, dtype=torch.int32
         )
 
@@ -120,24 +109,17 @@ class BlockTable:
         if not block_ids:
             return
         block_ids = np.array(block_ids, dtype=np.int32)
-        block_ids_no_cp = self._expand_cp_physical_blocks_to_no_cp(block_ids)
         if self.use_hybrid_blocks:
             block_ids = self._convert_physical_to_logical_blocks(block_ids)
-            block_ids_no_cp = self._convert_physical_to_logical_blocks(block_ids_no_cp)
 
         num_blocks = len(block_ids)
-        num_blocks_no_cp = len(block_ids_no_cp)
         start = self.num_blocks_per_row[row_idx]
-        start_no_cp = self.num_blocks_per_row_no_cp[row_idx]
 
         self.block_table.np[row_idx, start : start + num_blocks] = block_ids
-        self.block_table_no_cp.np[row_idx, start_no_cp : start_no_cp + num_blocks_no_cp] = block_ids_no_cp
         self.num_blocks_per_row[row_idx] += num_blocks
-        self.num_blocks_per_row_no_cp[row_idx] += num_blocks_no_cp
 
     def add_row(self, block_ids: list[int], row_idx: int) -> None:
         self.num_blocks_per_row[row_idx] = 0
-        self.num_blocks_per_row_no_cp[row_idx] = 0
         self.append_row(block_ids, row_idx)
 
     def clear_row(self, row_idx: int) -> None:
@@ -145,18 +127,11 @@ class BlockTable:
         if num_blocks > 0:
             self.block_table.np[row_idx, :num_blocks] = 0
         self.num_blocks_per_row[row_idx] = 0
-        num_blocks_no_cp = self.num_blocks_per_row_no_cp[row_idx]
-        if num_blocks_no_cp > 0:
-            self.block_table_no_cp.np[row_idx, :num_blocks_no_cp] = 0
-        self.num_blocks_per_row_no_cp[row_idx] = 0
 
     def move_row(self, src: int, tgt: int) -> None:
         num_blocks = self.num_blocks_per_row[src]
         self.block_table.np[tgt, :num_blocks] = self.block_table.np[src, :num_blocks]
         self.num_blocks_per_row[tgt] = num_blocks
-        num_blocks_no_cp = self.num_blocks_per_row_no_cp[src]
-        self.block_table_no_cp.np[tgt, :num_blocks_no_cp] = self.block_table_no_cp.np[src, :num_blocks_no_cp]
-        self.num_blocks_per_row_no_cp[tgt] = num_blocks_no_cp
 
     def swap_row(self, src: int, tgt: int) -> None:
         num_blocks_src = self.num_blocks_per_row[src]
@@ -165,12 +140,6 @@ class BlockTable:
         self.num_blocks_per_row[tgt] = num_blocks_src
 
         self.block_table.np[[src, tgt]] = self.block_table.np[[tgt, src]]
-        num_blocks_no_cp_src = self.num_blocks_per_row_no_cp[src]
-        num_blocks_no_cp_tgt = self.num_blocks_per_row_no_cp[tgt]
-        self.num_blocks_per_row_no_cp[src] = num_blocks_no_cp_tgt
-        self.num_blocks_per_row_no_cp[tgt] = num_blocks_no_cp_src
-
-        self.block_table_no_cp.np[[src, tgt]] = self.block_table_no_cp.np[[tgt, src]]
 
     def compute_slot_mapping(
         self,
@@ -203,7 +172,6 @@ class BlockTable:
                 PAD_ID=PAD_SLOT_ID,
                 BLOCK_SIZE=1024,
             )
-            self.slot_mapping_no_cp.gpu[:num_tokens] = self.slot_mapping.gpu[:num_tokens]
 
     def compute_slot_mapping_draft(self, req_indices: np.ndarray, positions: np.ndarray) -> None:
         # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
@@ -233,13 +201,7 @@ class BlockTable:
             block_numbers = self.block_table.np.ravel()[block_table_indices]
             block_offsets = positions % self.block_size
             np.add(block_numbers * self.block_size, block_offsets, out=self.slot_mapping.np[: req_indices.shape[0]])
-            np.add(
-                block_numbers * self.block_size,
-                block_offsets,
-                out=self.slot_mapping_no_cp.np[: req_indices.shape[0]],
-            )
             self.slot_mapping.copy_to_gpu(req_indices.shape[0])
-            self.slot_mapping_no_cp.copy_to_gpu(req_indices.shape[0])
 
     def _compute_pcp_dcp_slot_mapping(
         self,
@@ -287,50 +249,13 @@ class BlockTable:
             block_numbers = self.block_table.cpu.flatten()[block_table_indices]
             slot_mapping = block_numbers * self.block_size + block_offsets
             self.slot_mapping.cpu[: req_indices.shape[0]] = torch.where(mask, slot_mapping, -1)
-        self._compute_no_cp_slot_mapping(req_indices, positions)
 
     def commit_block_table(self, num_reqs: int) -> None:
         self.block_table.copy_to_gpu(num_reqs)
-        self.block_table_no_cp.copy_to_gpu(num_reqs)
 
     def clear(self) -> None:
         self.block_table.fill_(0)
         self.block_table.cpu.fill_(0)
-        self.block_table_no_cp.fill_(0)
-        self.block_table_no_cp.cpu.fill_(0)
-
-    def _expand_cp_physical_blocks_to_no_cp(self, block_ids: np.ndarray) -> np.ndarray:
-        total_cp_world_size = self.pcp_world_size * self.dcp_world_size
-        if total_cp_world_size <= 1 or self.is_mamba_group:
-            return block_ids
-        expanded_blocks: list[int] = []
-        for block_id in block_ids:
-            # CP block ids are 0-based block-group ids. Each CP block group
-            # maps to a contiguous no-CP physical block range, matching
-            # Mooncake's SFA replicated indexer block expansion.
-            start_block = int(block_id) * total_cp_world_size
-            expanded_blocks.extend(range(start_block, start_block + total_cp_world_size))
-        return np.array(expanded_blocks, dtype=np.int32)
-
-    def _compute_no_cp_slot_mapping(
-        self,
-        req_indices: torch.Tensor,
-        positions: torch.Tensor,
-    ) -> None:
-        logical_block_idx = positions // self.block_size
-        block_table_indices = (
-            req_indices * self.block_table_no_cp.gpu.shape[1] + logical_block_idx
-            if positions.device.type != "cpu"
-            else req_indices * self.block_table_no_cp.cpu.shape[1] + logical_block_idx
-        )
-        block_offsets = positions % self.block_size
-
-        if positions.device.type != "cpu":
-            block_numbers = self.block_table_no_cp.gpu.flatten()[block_table_indices]
-            self.slot_mapping_no_cp.gpu[: req_indices.shape[0]] = block_numbers * self.block_size + block_offsets
-        else:
-            block_numbers = self.block_table_no_cp.cpu.flatten()[block_table_indices]
-            self.slot_mapping_no_cp.cpu[: req_indices.shape[0]] = block_numbers * self.block_size + block_offsets
 
     def _convert_physical_to_logical_blocks(self, physical_blocks: np.ndarray) -> np.ndarray:
         """Convert physical block IDs to logical block IDs."""
@@ -355,27 +280,13 @@ class BlockTable:
             return self.block_table.gpu[:num_reqs]
         return self.block_table.gpu
 
-    def get_device_tensor_no_cp(self, num_reqs: int | None = None) -> torch.Tensor:
-        """Returns the device tensor of the no-CP block table."""
-        if num_reqs is not None:
-            return self.block_table_no_cp.gpu[:num_reqs]
-        return self.block_table_no_cp.gpu
-
     def get_cpu_tensor(self) -> torch.Tensor:
         """Returns the CPU tensor of the block table."""
         return self.block_table.cpu
 
-    def get_cpu_tensor_no_cp(self) -> torch.Tensor:
-        """Returns the CPU tensor of the no-CP block table."""
-        return self.block_table_no_cp.cpu
-
     def get_numpy_array(self) -> np.ndarray:
         """Returns the numpy array of the block table."""
         return self.block_table.np
-
-    def get_numpy_array_no_cp(self) -> np.ndarray:
-        """Returns the numpy array of the no-CP block table."""
-        return self.block_table_no_cp.np
 
     def _make_buffer(self, *size: int | torch.SymInt, dtype: torch.dtype) -> CpuGpuBuffer:
         return CpuGpuBuffer(*size, dtype=dtype, device=self.device, pin_memory=self.pin_memory)

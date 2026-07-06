@@ -3225,8 +3225,6 @@ class NPUModelRunner(GPUModelRunner):
         ):
             assert num_reqs_padded is not None and num_tokens_padded is not None
             kv_cache_spec = kv_cache_groups[kv_cache_gid].kv_cache_spec
-            block_table_no_cp = None
-            slot_mapping_no_cp = None
             if self.pcp_size > 1:
                 total_num_pcp_pads = sum(self.pcp_manager.num_pcp_pads_cpu[:num_reqs])
                 if self.pcp_manager.pcp_use_hybrid_attn:
@@ -3253,18 +3251,11 @@ class NPUModelRunner(GPUModelRunner):
                 slot_mapping = blk_table.slot_mapping.gpu[:maybe_pcp_full_tokens]
                 self.cpu_slot_mapping = blk_table.slot_mapping.cpu[:maybe_pcp_full_tokens]
                 blk_table_tensor = blk_table.get_device_tensor()[:num_reqs_padded]          
-                if self.sfa_dcp_replicated_indexer:
-                    block_table_no_cp = blk_table.get_device_tensor_no_cp()[:num_reqs_padded]
-                    slot_mapping_no_cp = blk_table.slot_mapping_no_cp.gpu[:maybe_pcp_full_tokens]
                 # Fill unused with -1. Needed for reshape_and_cache in full cuda
                 # graph mode. `blk_table_tensor` -1 to match mamba PAD_SLOT_ID
                 if self.pcp_size == 1:
                     slot_mapping[num_tokens:num_tokens_padded].fill_(-1)
                     blk_table_tensor[num_reqs:num_reqs_padded].fill_(0)
-                    if slot_mapping_no_cp is not None:
-                        slot_mapping_no_cp[num_tokens:num_tokens_padded].fill_(-1)
-                    if block_table_no_cp is not None:
-                        block_table_no_cp[num_reqs:num_reqs_padded].fill_(0)
             if self.pcp_size > 1:
                 slot_mapping = self.pcp_manager.get_padded_slot_mapping(
                     num_tokens,
@@ -3281,13 +3272,11 @@ class NPUModelRunner(GPUModelRunner):
                     self.routed_experts_slot_mapping_device[:n].copy_(
                         slot_mapping
                     )
-            return blk_table_tensor, slot_mapping, block_table_no_cp, slot_mapping_no_cp
+            return blk_table_tensor, slot_mapping
 
         (
             block_table_gid_0,
             slot_mapping_gid_0,
-            block_table_no_cp_gid_0,
-            slot_mapping_no_cp_gid_0,
         ) = _get_block_table_and_slot_mapping(0)  # type: ignore[arg-type]
         self.long_seq_metadata, block_table_gid_0 = _get_pcp_metadata(block_table_gid_0)
         num_computed_tokens_cpu = self.input_batch.num_computed_tokens_cpu_tensor[
@@ -3375,12 +3364,6 @@ class NPUModelRunner(GPUModelRunner):
                     decode_ratio_to_sas_metadata=decode_ratio_to_sas_metadata,
                     common_ratio_to_sas_metadata=common_ratio_to_sas_metadata,
                     block_size=attn_group.kv_cache_spec.block_size,
-                )
-
-            if self.sfa_dcp_replicated_indexer:
-                extra_attn_metadata_args = dict(
-                    block_table_no_cp=block_table_no_cp_gid_0,
-                    slot_mapping_no_cp=slot_mapping_no_cp_gid_0,
                 )
 
             # add kvcomp_metadata into common_attn_metadata
