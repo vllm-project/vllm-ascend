@@ -74,6 +74,7 @@ Select an image based on your machine type and start the docker image on your no
         -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
         -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /etc/hccn.conf:/etc/hccn.conf \
+        -v /root/.cache:/root/.cache \
         -it $IMAGE bash
     ```
 
@@ -106,6 +107,7 @@ Select an image based on your machine type and start the docker image on your no
         -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
         -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /etc/hccn.conf:/etc/hccn.conf \
+        -v /root/.cache:/root/.cache \
         -it $IMAGE bash
     ```
 
@@ -123,7 +125,9 @@ If you want to deploy a multi-node environment, you need to set up the environme
 
 !!! note
 
-    In this tutorial, we suppose you downloaded the model weight to `/root/.cache/`. Feel free to change it to your own path.
+    In this tutorial, we suppose you downloaded the model weight to `/root/.cache/modelscope/hub/models/vllm-ascend/`. Feel free to change it to your own path.
+
+    It is recommended that the following service code be encapsulated in a .sh script file and executed in Bash mode.
 
 ### 5.1 Single-Node Online Deployment
 
