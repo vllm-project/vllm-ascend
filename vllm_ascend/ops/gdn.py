@@ -84,11 +84,29 @@ def get_non_spec_causal_conv1d_host_args(attn_metadata) -> tuple[tuple[int, ...]
 
 
 def get_causal_conv1d_update_host_args(attn_metadata) -> tuple[tuple[int, ...], tuple[int, ...]]:
-    fallback_meta = _check_and_get_host_args(attn_metadata, "non_spec_decode_fallback_meta", "causal_conv1d")
-    causal_conv1d_meta = fallback_meta.causal_conv1d
-    return (
-        to_int64_tuple(causal_conv1d_meta.query_start_loc_cpu),
-        to_int64_tuple(causal_conv1d_meta.cache_indices_cpu),
+    fallback_meta = getattr(attn_metadata, "non_spec_decode_fallback_meta", None)
+    if fallback_meta is not None:
+        causal_conv1d_meta = fallback_meta.causal_conv1d
+        return (
+            to_int64_tuple(causal_conv1d_meta.query_start_loc_cpu),
+            to_int64_tuple(causal_conv1d_meta.cache_indices_cpu),
+        )
+
+    fallback_meta = getattr(attn_metadata, "non_spec_prefill_fallback_meta", None)
+    if fallback_meta is not None:
+        causal_conv1d_meta = fallback_meta.causal_conv1d
+        query_start_loc_host = to_int64_tuple(causal_conv1d_meta.query_start_loc_cpu)
+        is_single_token_prefill = len(query_start_loc_host) > 1 and all(
+            end - start == 1 for start, end in zip(query_start_loc_host, query_start_loc_host[1:])
+        )
+        if is_single_token_prefill:
+            return (
+                query_start_loc_host,
+                to_int64_tuple(causal_conv1d_meta.cache_indices_cpu),
+            )
+
+    raise RuntimeError(
+        "Expected attn_metadata.non_spec_decode_fallback_meta.causal_conv1d for Ascend GDN fallback path."
     )
 
 

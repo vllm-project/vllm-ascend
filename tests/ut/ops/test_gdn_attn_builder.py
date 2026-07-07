@@ -15,6 +15,7 @@ from vllm.v1.kv_cache_interface import MambaSpec
 from vllm_ascend.ops import gdn_attn_builder as ascend_gdn_attn_builder
 from vllm_ascend.ops.gdn import (
     AscendGatedDeltaNetAttention,
+    get_causal_conv1d_update_host_args,
     get_non_spec_causal_conv1d_host_args,
     get_non_spec_chunked_prefill_meta,
     to_int64_tuple,
@@ -423,6 +424,38 @@ def test_get_non_spec_causal_conv1d_host_args_requires_runtime_metadata():
 
     with pytest.raises(RuntimeError, match="has_initial_state"):
         get_non_spec_causal_conv1d_host_args(attn_metadata)
+
+
+def test_get_causal_conv1d_update_host_args_accepts_single_token_prefill_fallback_meta():
+    attn_metadata = SimpleNamespace(
+        non_spec_decode_fallback_meta=None,
+        non_spec_prefill_fallback_meta=SimpleNamespace(
+            causal_conv1d=SimpleNamespace(
+                query_start_loc_cpu=torch.tensor([0, 1, 2], dtype=torch.int32),
+                cache_indices_cpu=torch.tensor([3, 9], dtype=torch.int32),
+            ),
+        ),
+    )
+
+    assert get_causal_conv1d_update_host_args(attn_metadata) == (
+        (0, 1, 2),
+        (3, 9),
+    )
+
+
+def test_get_causal_conv1d_update_host_args_rejects_multi_token_prefill_fallback_meta():
+    attn_metadata = SimpleNamespace(
+        non_spec_decode_fallback_meta=None,
+        non_spec_prefill_fallback_meta=SimpleNamespace(
+            causal_conv1d=SimpleNamespace(
+                query_start_loc_cpu=torch.tensor([0, 2], dtype=torch.int32),
+                cache_indices_cpu=torch.tensor([3], dtype=torch.int32),
+            ),
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="non_spec_decode_fallback_meta"):
+        get_causal_conv1d_update_host_args(attn_metadata)
 
 
 def test_get_non_spec_chunked_prefill_meta_allows_missing_prefill_fallback_meta():
