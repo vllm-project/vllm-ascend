@@ -126,6 +126,11 @@ When batch invariance is enabled, vLLM:
 3. Disables certain optimizations that may introduce non-determinism
 
 ```{note}
+The batch invariance attention operators currently do not support
+`FULL'、'FULL_DECODE_ONLY` cudagraph mode.
+```
+
+```{note}
 Enabling batch invariance may impact performance compared to the default non-deterministic mode. This trade-off is intentional to guarantee reproducibility.
 ```
 
@@ -134,6 +139,7 @@ Enabling batch invariance may impact performance compared to the default non-det
 The batch invariance feature is under active development. Planned improvements include:
 
 - Support for additional NPUs series
+- Support `FULL'、'FULL_DECODE_ONLY` cudagraph mode with batch invariance attention operators
 - Expanded model coverage
 - Performance optimizations
 - Additional testing and validation
