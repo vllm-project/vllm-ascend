@@ -84,14 +84,21 @@ def _solve_tri_golden(x, layout):
 
 
 @pytest.mark.parametrize(
-    ("layout", "shape"),
+    ("layout", "shape", "dtype"),
     [
-        ("bhtd", (1, 2, 32, 16)),
-        ("bsnd", (1, 32, 2, 16)),
+        ("bhtd", (1, 2, 32, 16), torch.float16),
+        ("bsnd", (1, 32, 2, 16), torch.float16),
+        ("bhtd", (1, 16, 64, 16), torch.float16),
+        ("bhtd", (1, 16, 128, 64), torch.float16),
+        ("bhtd", (1, 16, 128, 128), torch.bfloat16),
+        ("bsnd", (1, 128, 16, 64), torch.bfloat16),
+        ("bsnd", (1, 128, 16, 128), torch.bfloat16),
+        ("bhtd", (2, 8, 256, 64), torch.float16),
+        ("bhtd", (1, 4, 64, 32), torch.bfloat16),
     ],
 )
-def test_npu_solve_tri_matches_cpu_golden(layout, shape):
-    x = _make_strict_lower_triangular(shape, layout)
+def test_npu_solve_tri_matches_cpu_golden(layout, shape, dtype):
+    x = _make_strict_lower_triangular(shape, layout, dtype=dtype)
     expected = _solve_tri_golden(x, layout)
 
     actual = torch.ops._C_ascend.npu_solve_tri(x.npu(), layout=layout).cpu()
@@ -118,3 +125,54 @@ def test_npu_solve_tri_meta_shape():
     assert out.shape == x.shape
     assert out.dtype == x.dtype
     assert out.device.type == "meta"
+
+
+def _all_npu_devices():
+    return list(range(torch.npu.device_count()))
+
+
+@pytest.mark.parametrize("device_id", _all_npu_devices())
+@pytest.mark.parametrize(
+    ("layout", "shape", "dtype"),
+    [
+        ("bhtd", (1, 16, 128, 64), torch.float16),
+        ("bhtd", (1, 16, 128, 128), torch.bfloat16),
+        ("bsnd", (1, 128, 16, 128), torch.bfloat16),
+    ],
+)
+def test_npu_solve_tri_all_devices(device_id, layout, shape, dtype):
+    torch.npu.set_device(device_id)
+    x = _make_strict_lower_triangular(shape, layout, dtype=dtype)
+    expected = _solve_tri_golden(x, layout)
+
+    actual = torch.ops._C_ascend.npu_solve_tri(
+        x.to(f"npu:{device_id}"), layout=layout
+    ).cpu()
+    torch.npu.synchronize(device_id)
+
+    np.testing.assert_allclose(
+        actual.float().numpy(),
+        expected.float().numpy(),
+        rtol=1e-2,
+        atol=1e-2,
+    )
+
+    bt = shape[-1]
+    eye = torch.eye(bt, dtype=torch.float32)
+    max_err = 0.0
+    for a_block, y_block in zip(_iter_blocks(x, layout), _iter_blocks(actual, layout)):
+        err = ((eye + a_block.float()) @ y_block.float() - eye).abs().max().item()
+        max_err = max(max_err, err)
+    assert max_err < 2e-2
+
+
+@pytest.mark.parametrize("device_id", _all_npu_devices())
+def test_npu_solve_tri_stress(device_id):
+    torch.npu.set_device(device_id)
+    shape = (1, 16, 256, 128)
+    for i in range(50):
+        x = _make_strict_lower_triangular(shape, "bhtd", dtype=torch.bfloat16)
+        actual = torch.ops._C_ascend.npu_solve_tri(
+            x.to(f"npu:{device_id}"), layout="bhtd"
+        )
+    torch.npu.synchronize(device_id)
