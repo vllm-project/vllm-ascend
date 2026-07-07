@@ -27,12 +27,18 @@ fi
 
 # Global config
 API_PREFIX="https://174e1b821a8446f38998a67186ba766e.apic.cn-southwest-2.huaweicloudapis.com/aurogon_service"
-MR_THIRD_ID=9692
+MR_THIRD_ID="${PR_NUMBER:-}"
 NETWORK_ZONE=github
 PROJECT_PATH=vllm-project/vllm-ascend
 BIND_ID_API2=11
 PAGE_CURR=1
 PAGE_SIZE=100
+
+if [ -z "${MR_THIRD_ID}" ]; then
+    echo "ERROR: PR_NUMBER is empty. It must be provided via the pull_request event or workflow_dispatch input."
+    exit 1
+fi
+echo "Using current PR number as MR_THIRD_ID: ${MR_THIRD_ID}"
 
 # Global config
 # API_PREFIX="https://174e1b821a8446f38998a67186ba766e.apic.cn-southwest-2.huaweicloudapis.com/aurogon_service"
