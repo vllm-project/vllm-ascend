@@ -477,8 +477,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     graph_params.handles[num_tokens],
                     graph_params.events[num_tokens],
                 ):
-                    if isinstance(param, PagedAttentionGraphParam):
-                        param = param.params
                     (
                         query,
                         key_cache,
@@ -569,26 +567,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     handles,
                     events,
                 ):
-                    if isinstance(param, PagedAttentionGraphParam):
-                        if _EXTRA_CTX.is_draft_model:
-                            draft_step, key = draft_attn_key_steps[attn_count]
-                            block_table = attn_metadata[draft_step][key].block_tables
-                            seq_lens = attn_metadata[draft_step][key].seq_lens
-                            attn_count = attn_count + 1
-                        else:
-                            layer_name = param.layer_name
-                            metadata_key = layer_name if layer_name is not None and layer_name in attn_metadata else key
-                            block_table = attn_metadata[metadata_key].block_tables
-                            seq_lens = attn_metadata[metadata_key].seq_lens
-                        update_paged_attention_graph_param(
-                            update_stream,
-                            handle,
-                            event,
-                            param,
-                            block_table,
-                            seq_lens,
-                        )
-                        continue
                     (
                         query,
                         key_cache,

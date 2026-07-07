@@ -27,6 +27,9 @@ class PagedAttentionGraphParam:
     params: tuple
     layer_name: str | None
 
+    def __iter__(self):
+        return iter(self.params)
+
 
 def update_paged_attention_graph_param(
     update_stream,
