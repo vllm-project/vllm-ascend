@@ -6,17 +6,17 @@
 #
 msgid ""
 msgstr ""
-"Project-Id-Version: vllm-ascend \n"
+"Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
 "POT-Creation-Date: 2026-07-02 07:02+0000\n"
 "PO-Revision-Date: 2026-04-10 18:37+0800\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
-"Language: zh_CN\n"
 "Language-Team: zh_CN <LL@li.org>\n"
-"Plural-Forms: nplurals=1; plural=0;\n"
+"Language: zh_CN\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: Babel 2.18.0\n"
 
 #: ../../source/tutorials/hardwares/310p.md:1
@@ -44,13 +44,13 @@ msgstr "安装说明"
 
 #: ../../source/tutorials/hardwares/310p.md:14
 msgid ""
-"If installing from source, `vllm` and `vllm-ascend` may automatically "
-"pull in `triton` and `triton-ascend` dependencies, which may cause "
-"unexpected issues on Atlas 300I DUO. Please uninstall them before running"
-" on Atlas 300I DUO:"
+"If installing from source, `vllm` and `vllm-ascend` may automatically pull "
+"in `triton` and `triton-ascend` dependencies, which may cause unexpected "
+"issues on Atlas 300I DUO. Please uninstall them before running on Atlas 300I"
+" DUO:"
 msgstr ""
-"如果从源码安装，`vllm` 和 `vllm-ascend` 可能会自动引入 `triton` 和 `triton-ascend` 依赖，这可能在"
-" Atlas 300I DUO 上导致意外问题。请在 Atlas 300I DUO 上运行前卸载它们："
+"如果从源码安装，`vllm` 和 `vllm-ascend` 可能会自动引入 `triton` 和 `triton-ascend` 依赖，这可能在 "
+"Atlas 300I DUO 上导致意外问题。请在 Atlas 300I DUO 上运行前卸载它们："
 
 #: ../../source/tutorials/hardwares/310p.md:20
 msgid "Graph Mode Notes"
@@ -58,16 +58,17 @@ msgstr "图模式说明"
 
 #: ../../source/tutorials/hardwares/310p.md:23
 msgid ""
-"The current release supports `FULL_DECODE_ONLY` graph mode on Atlas 300I "
-"DUO devices, but the following limitations apply due to hardware event-id"
-" resource constraints:"
-msgstr "当前版本在 Atlas 300I DUO 设备上支持 `FULL_DECODE_ONLY` 图模式，但由于硬件事件ID资源限制，存在以下限制："
+"The current release supports `FULL_DECODE_ONLY` graph mode on Atlas 300I DUO"
+" devices, but the following limitations apply due to hardware event-id "
+"resource constraints:"
+msgstr ""
+"当前版本在 Atlas 300I DUO 设备上支持 `FULL_DECODE_ONLY` 图模式，但由于硬件事件ID资源限制，存在以下限制："
 
 #: ../../source/tutorials/hardwares/310p.md:25
 msgid ""
 "When multiple Tensor Parallel (TP) ranks are enabled, the number of "
-"capturable graphs is limited and depends on the model depth. For example,"
-" Qwen3-32B can capture and replay 2 graphs."
+"capturable graphs is limited and depends on the model depth. For example, "
+"Qwen3-32B can capture and replay 2 graphs."
 msgstr "当启用多个张量并行（TP）rank时，可捕获的图数量有限，且取决于模型深度。例如，Qwen3-32B 可以捕获并重放 2 个图。"
 
 #: ../../source/tutorials/hardwares/310p.md:26
@@ -76,9 +77,9 @@ msgstr "当 TP=1 时，没有此限制。"
 
 #: ../../source/tutorials/hardwares/310p.md:27
 msgid ""
-"We have reached out to the relevant experts for a solution. A software-"
-"based fix is considered feasible, but full support will take additional "
-"time. Thank you for your understanding."
+"We have reached out to the relevant experts for a solution. A software-based"
+" fix is considered feasible, but full support will take additional time. "
+"Thank you for your understanding."
 msgstr "我们已联系相关专家寻求解决方案。基于软件的修复被认为是可行的，但完全支持需要额外时间。感谢您的理解。"
 
 #: ../../source/tutorials/hardwares/310p.md:31
@@ -105,10 +106,11 @@ msgstr "Atlas 200I Pro 加速模块"
 msgid ""
 "When starting a container on Atlas 200I Pro, mount additional driver "
 "libraries and configuration files required by `npu-smi`. Without these "
-"mounts, `npu-smi` commands may fail inside the container. Use the command"
-" below for your container OS."
+"mounts, `npu-smi` commands may fail inside the container. Use the command "
+"below for your container OS."
 msgstr ""
-"在 Atlas 200I Pro 上启动容器时，请挂载 `npu-smi` 所需的额外驱动库和配置文件。如果没有这些挂载，容器内的 `npu-smi` 命令可能会失败。请根据您的容器操作系统使用以下命令。"
+"在 Atlas 200I Pro 上启动容器时，请挂载 `npu-smi` 所需的额外驱动库和配置文件。如果没有这些挂载，容器内的 `npu-smi` "
+"命令可能会失败。请根据您的容器操作系统使用以下命令。"
 
 #: ../../source/tutorials/hardwares/310p.md:76
 msgid ""
@@ -116,7 +118,8 @@ msgid ""
 "according to the NPU ID you want to use. You can query available devices "
 "with `ll /dev/ | grep davinci`."
 msgstr ""
-"Atlas 200I Pro 也使用 Ascend 310P。请根据您要使用的 NPU ID 调整 `--device=/dev/davinci0`。您可以使用 `ll /dev/ | grep davinci` 查询可用设备。"
+"Atlas 200I Pro 也使用 Ascend 310P。请根据您要使用的 NPU ID 调整 "
+"`--device=/dev/davinci0`。您可以使用 `ll /dev/ | grep davinci` 查询可用设备。"
 
 #: ../../source/tutorials/hardwares/310p.md
 msgid "Ubuntu 24.04"
@@ -137,11 +140,11 @@ msgstr "NPU 在线推理"
 #: ../../source/tutorials/hardwares/310p.md:165
 msgid ""
 "For Atlas 300I DUO (310P), do not rely on `max-model-len` auto detection "
-"(that is, do not omit the `--max-model-len` argument), because it may "
-"cause OOM."
+"(that is, do not omit the `--max-model-len` argument), because it may cause "
+"OOM."
 msgstr ""
-"对于 Atlas 300I DUO (310P)，请不要依赖 `max-model-len` 的自动检测（即不要省略 `--max-model-"
-"len` 参数），因为这可能导致 OOM。"
+"对于 Atlas 300I DUO (310P)，请不要依赖 `max-model-len` 的自动检测（即不要省略 `--max-model-len`"
+" 参数），因为这可能导致 OOM。"
 
 #: ../../source/tutorials/hardwares/310p.md:168
 msgid "Reason, based on the current 310P attention path:"
@@ -149,8 +152,8 @@ msgstr "原因（基于当前 310P 注意力路径）："
 
 #: ../../source/tutorials/hardwares/310p.md:170
 msgid ""
-"`AscendAttentionMetadataBuilder310` passes `model_config.max_model_len` "
-"to `AttentionMaskBuilder310`."
+"`AscendAttentionMetadataBuilder310` passes `model_config.max_model_len` to "
+"`AttentionMaskBuilder310`."
 msgstr ""
 "`AscendAttentionMetadataBuilder310` 将 `model_config.max_model_len` 传递给 "
 "`AttentionMaskBuilder310`。"
@@ -158,8 +161,7 @@ msgstr ""
 #: ../../source/tutorials/hardwares/310p.md:172
 msgid ""
 "`AttentionMaskBuilder310` builds a full causal mask with shape "
-"`[max_model_len, max_model_len]` in float16, then converts it to "
-"FRACTAL_NZ."
+"`[max_model_len, max_model_len]` in float16, then converts it to FRACTAL_NZ."
 msgstr ""
 "`AttentionMaskBuilder310` 构建一个形状为 `[max_model_len, max_model_len]` "
 "的完整因果掩码（使用 float16），然后将其转换为 FRACTAL_NZ 格式。"
@@ -167,18 +169,18 @@ msgstr ""
 #: ../../source/tutorials/hardwares/310p.md:174
 msgid ""
 "In the 310P `attention_v1` prefill/chunked-prefill path "
-"(`_npu_flash_attention` / `_npu_paged_attention_splitfuse`), this "
-"explicit mask tensor is consumed directly, and there is currently no "
-"compressed-mask path."
+"(`_npu_flash_attention` / `_npu_paged_attention_splitfuse`), this explicit "
+"mask tensor is consumed directly, and there is currently no compressed-mask "
+"path."
 msgstr ""
 "在 310P 的 `attention_v1` 预填充/分块预填充路径（`_npu_flash_attention` / "
 "`_npu_paged_attention_splitfuse`）中，此显式掩码张量被直接使用，并且目前没有压缩掩码路径。"
 
 #: ../../source/tutorials/hardwares/310p.md:179
 msgid ""
-"If auto detection resolves to a large context length, the mask allocation"
-" (`O(max_model_len^2)`) may exceed NPU memory and trigger OOM. Always set"
-" an explicit and conservative value, for example `--max-model-len 16384`."
+"If auto detection resolves to a large context length, the mask allocation "
+"(`O(max_model_len^2)`) may exceed NPU memory and trigger OOM. Always set an "
+"explicit and conservative value, for example `--max-model-len 16384`."
 msgstr ""
 "如果自动解析出的上下文长度较大，掩码分配（`O(max_model_len^2)`）可能会超出 NPU 内存并触发 "
 "OOM。请始终设置一个保守的显式值，例如 `--max-model-len 16384`。"
@@ -225,11 +227,11 @@ msgstr "Qwen3-14B-W8A8SC-310"
 
 #: ../../source/tutorials/hardwares/310p.md:198
 msgid ""
-"[Eco-Tech/Qwen3-14B-w8a8sc-310-vllm](https://www.modelscope.cn/models"
-"/Eco-Tech/Qwen3-14B-w8a8sc-310-vllm)"
+"[Eco-Tech/Qwen3-14B-w8a8sc-310-vllm](https://www.modelscope.cn/models/Eco-"
+"Tech/Qwen3-14B-w8a8sc-310-vllm)"
 msgstr ""
-"[Eco-Tech/Qwen3-14B-w8a8sc-310-vllm](https://www.modelscope.cn/models"
-"/Eco-Tech/Qwen3-14B-w8a8sc-310-vllm)"
+"[Eco-Tech/Qwen3-14B-w8a8sc-310-vllm](https://www.modelscope.cn/models/Eco-"
+"Tech/Qwen3-14B-w8a8sc-310-vllm)"
 
 #: ../../source/tutorials/hardwares/310p.md:199
 msgid "Qwen3-32B-W8A8SC-310"
@@ -237,11 +239,11 @@ msgstr "Qwen3-32B-W8A8SC-310"
 
 #: ../../source/tutorials/hardwares/310p.md:200
 msgid ""
-"[Eco-Tech/Qwen3-32B-w8a8sc-310-vllm](https://www.modelscope.cn/models"
-"/Eco-Tech/Qwen3-32B-w8a8sc-310-vllm)"
+"[Eco-Tech/Qwen3-32B-w8a8sc-310-vllm](https://www.modelscope.cn/models/Eco-"
+"Tech/Qwen3-32B-w8a8sc-310-vllm)"
 msgstr ""
-"[Eco-Tech/Qwen3-32B-w8a8sc-310-vllm](https://www.modelscope.cn/models"
-"/Eco-Tech/Qwen3-32B-w8a8sc-310-vllm)"
+"[Eco-Tech/Qwen3-32B-w8a8sc-310-vllm](https://www.modelscope.cn/models/Eco-"
+"Tech/Qwen3-32B-w8a8sc-310-vllm)"
 
 #: ../../source/tutorials/hardwares/310p.md
 msgid "Qwen3-8B-W8A8SC"
@@ -256,7 +258,8 @@ msgid "Qwen3-32B-W8A8SC"
 msgstr "Qwen3-32B-W8A8SC"
 
 #: ../../source/tutorials/hardwares/310p.md:278
-msgid "Once the server is started, you can query the model with input prompts:"
+msgid ""
+"Once the server is started, you can query the model with input prompts:"
 msgstr "服务器启动后，您可以使用输入提示词查询模型。"
 
 #: ../../source/tutorials/hardwares/310p.md:290
@@ -270,8 +273,7 @@ msgstr "离线推理"
 
 #: ../../source/tutorials/hardwares/310p.md:294
 msgid ""
-"Run the following script, `example.py`, to execute offline inference on "
-"NPU."
+"Run the following script, `example.py`, to execute offline inference on NPU."
 msgstr "运行以下脚本（`example.py`）在 NPU 上执行离线推理。"
 
 #: ../../source/tutorials/hardwares/310p.md:495
@@ -284,9 +286,116 @@ msgstr "结束语"
 
 #: ../../source/tutorials/hardwares/310p.md:505
 msgid ""
-"For early access to Qwen3-MoE, Qwen3-VL, and preview support for Qwen3.5 "
-"and Qwen3.6 with performance acceleration, follow #7394 for updated "
-"deployment guidance."
+"For early access to Qwen3-MoE, Qwen3-VL, and preview support for Qwen3.5 and"
+" Qwen3.6 with performance acceleration, follow #7394 for updated deployment "
+"guidance."
 msgstr ""
 "如需提前体验 Qwen3-MoE、Qwen3-VL，以及 Qwen3.5 和 Qwen3.6 的预览支持（含性能加速），请关注 #7394 "
 "获取更新的部署指南。"
+
+msgid "# Atlas 300I DUO / Atlas 200I Pro"
+msgstr ""
+
+msgid ""
+"This tutorial covers vLLM deployment on Ascend 310P inference hardware, including\n"
+"Atlas 300I DUO and Atlas 200I Pro acceleration modules."
+msgstr ""
+
+msgid "!!! note"
+msgstr ""
+
+msgid "## Run vLLM on Atlas 300I DUO"
+msgstr ""
+
+msgid "### Install Notes"
+msgstr ""
+
+msgid "### Graph Mode Notes"
+msgstr ""
+
+msgid "!!! warning"
+msgstr ""
+
+msgid ""
+"- When multiple Tensor Parallel (TP) ranks are enabled, the number of capturable graphs is limited and depends on the model depth. For example, Qwen3-32B can capture and replay 2 graphs.\n"
+"    - There is no such limitation when TP=1.\n"
+"    - We have reached out to the relevant experts for a solution. A software-based fix is considered feasible, but full support will take additional time. Thank you for your understanding."
+msgstr ""
+
+msgid "### Deployment"
+msgstr ""
+
+msgid "#### Atlas 300I DUO"
+msgstr ""
+
+msgid "#### Atlas 200I Pro Acceleration Module"
+msgstr ""
+
+msgid ""
+"When starting a container on Atlas 200I Pro, mount additional driver libraries and\n"
+"configuration files required by `npu-smi`. Without these mounts, `npu-smi` commands\n"
+"may fail inside the container. Use the command below for your container OS."
+msgstr ""
+
+msgid ""
+"Atlas 200I Pro also uses Ascend 310P. Adjust `--device=/dev/davinci0` according to\n"
+"    the NPU ID you want to use. You can query available devices with\n"
+"    `ll /dev/ | grep davinci`."
+msgstr ""
+
+msgid "=== \"Ubuntu 24.04\""
+msgstr ""
+
+msgid "=== \"openEuler 24.03\""
+msgstr ""
+
+msgid "### Online Inference on NPU"
+msgstr ""
+
+msgid ""
+"For Atlas 300I DUO (310P), do not rely on `max-model-len` auto detection\n"
+"    (that is, do not omit the `--max-model-len` argument), because it may cause OOM."
+msgstr ""
+
+msgid ""
+"- `AscendAttentionMetadataBuilder310` passes `model_config.max_model_len`\n"
+"      to `AttentionMaskBuilder310`.\n"
+"    - `AttentionMaskBuilder310` builds a full causal mask with shape\n"
+"      `[max_model_len, max_model_len]` in float16, then converts it to FRACTAL_NZ.\n"
+"    - In the 310P `attention_v1` prefill/chunked-prefill path\n"
+"      (`_npu_flash_attention` / `_npu_paged_attention_splitfuse`),\n"
+"      this explicit mask tensor is consumed directly, and there is currently\n"
+"      no compressed-mask path."
+msgstr ""
+
+msgid ""
+"If auto detection resolves to a large context length, the mask allocation\n"
+"    (`O(max_model_len^2)`) may exceed NPU memory and trigger OOM.\n"
+"    Always set an explicit and conservative value, for example `--max-model-len 16384`."
+msgstr ""
+
+msgid "#### Prepare Model Weights"
+msgstr ""
+
+msgid ""
+"| Model | ModelScope Link |\n"
+"| --- | --- |\n"
+"| Qwen3-8B-W8A8SC-310 | [Eco-Tech/Qwen3-8B-w8a8sc-310-vllm](https://www.modelscope.cn/models/Eco-Tech/Qwen3-8B-w8a8sc-310-vllm) |\n"
+"| Qwen3-14B-W8A8SC-310 | [Eco-Tech/Qwen3-14B-w8a8sc-310-vllm](https://www.modelscope.cn/models/Eco-Tech/Qwen3-14B-w8a8sc-310-vllm) |\n"
+"| Qwen3-32B-W8A8SC-310 | [Eco-Tech/Qwen3-32B-w8a8sc-310-vllm](https://www.modelscope.cn/models/Eco-Tech/Qwen3-32B-w8a8sc-310-vllm) |"
+msgstr ""
+
+msgid "=== \"Qwen3-8B-W8A8SC\""
+msgstr ""
+
+msgid "=== \"Qwen3-14B-W8A8SC\""
+msgstr ""
+
+msgid "=== \"Qwen3-32B-W8A8SC\""
+msgstr ""
+
+msgid "### Offline Inference"
+msgstr ""
+
+msgid "### Closing Notes"
+msgstr ""
