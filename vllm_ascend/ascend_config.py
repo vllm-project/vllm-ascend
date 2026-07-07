@@ -378,12 +378,13 @@ class AscendConfig:
         pcp_size = parallel_config.prefill_context_parallel_size
         dcp_size = parallel_config.decode_context_parallel_size
         tp_size = parallel_config.tensor_parallel_size
-        assert pcp_size == 1 and dcp_size == tp_size, (
-            "SFA DCP replicated indexer requires pcp_size == 1 and "
-            "dcp_size == tensor_parallel_size, but got "
-            f"pcp_size={pcp_size}, dcp_size={dcp_size}, "
-            f"tensor_parallel_size={tp_size}."
-        )
+        if pcp_size != 1 or dcp_size != tp_size:
+            raise ValueError(
+                "SFA DCP replicated indexer requires pcp_size == 1 and "
+                "dcp_size == tensor_parallel_size, but got "
+                f"pcp_size={pcp_size}, dcp_size={dcp_size}, "
+                f"tensor_parallel_size={tp_size}."
+            )
 
         if not self.enable_sparse_c8:
             return
