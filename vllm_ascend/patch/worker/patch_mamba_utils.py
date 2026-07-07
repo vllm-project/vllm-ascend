@@ -192,6 +192,24 @@ else:
     mamba_utils.do_mamba_copy_block = _do_mamba_copy_block_torch
     mamba_utils.postprocess_mamba_align_gpu = _postprocess_mamba_align_gpu_cpu_fallback
 
+# Ascend NPU does not support DT_UINT64 in aclnnInplaceZero.
+# MambaCopyBuffers.create() uses torch.uint64 for src_ptrs/dst_ptrs,
+# which triggers a runtime error. Remap to int64 at the source.
+_original_create = MambaCopyBuffers.create
+
+
+@classmethod
+def _patched_create(cls, max_num_reqs, kv_cache_config, copy_funcs, make_buffer):
+    return _original_create(
+        max_num_reqs,
+        kv_cache_config,
+        copy_funcs,
+        lambda n, dtype: make_buffer(n, dtype=torch.int64 if dtype == torch.uint64 else dtype),
+    )
+
+
+MambaCopyBuffers.create = _patched_create
+
 
 def preprocess_mamba(
     scheduler_output: SchedulerOutput,

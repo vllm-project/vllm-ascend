@@ -21,6 +21,7 @@ import torch
 import torch.nn.functional as F
 
 from vllm_ascend._310p.ops.fla.l2norm import l2norm_310p
+from vllm_ascend.utils import is_rc_device
 
 CHUNK_SIZE = 64
 
@@ -344,7 +345,18 @@ def _compute_kernel_inputs_from_torch_wy(
 
     lower_decay = (g.unsqueeze(-1) - g.unsqueeze(-2)).tril().exp().float().tril()
     k_beta = key * beta.unsqueeze(-1)
-    attn = -(k_beta @ key.transpose(-1, -2) * lower_decay)
+    if is_rc_device():
+        attn_chunks: list[torch.Tensor] = []
+        for c in range(num_chunks):
+            k_beta_c = k_beta[:, :, c]  # [B, Hv, S, D]
+            key_c = key[:, :, c]  # [B, Hv, S, D]
+            key_c_t = key_c.transpose(-1, -2).contiguous()  # [B, Hv, D, S]
+            lower_decay_c = lower_decay[:, :, c]  # [B, Hv, S, S]
+            attn_c = -(k_beta_c @ key_c_t * lower_decay_c)
+            attn_chunks.append(attn_c)
+        attn = torch.stack(attn_chunks, dim=2)  # [B, Hv, C, S, S]
+    else:
+        attn = -(k_beta @ key.transpose(-1, -2) * lower_decay)
     mask_diag = torch.triu(
         torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=k.device),
         diagonal=0,

@@ -34,88 +34,79 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
 
-:::::{tab-set}
-:sync-group: install
+=== "A3 series"
 
-::::{tab-item} A3 series
-:sync: A3
+    Start the docker image on your each node.
 
-Start the docker image on your each node.
+    ```bash
 
-```{code-block} bash
-   :substitutions:
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
+    docker run --rm \
+        --name vllm-ascend \
+        --shm-size=1g \
+        --net=host \
+        --privileged=true \
+        --device /dev/davinci0 \
+        --device /dev/davinci1 \
+        --device /dev/davinci2 \
+        --device /dev/davinci3 \
+        --device /dev/davinci4 \
+        --device /dev/davinci5 \
+        --device /dev/davinci6 \
+        --device /dev/davinci7 \
+        --device /dev/davinci8 \
+        --device /dev/davinci9 \
+        --device /dev/davinci10 \
+        --device /dev/davinci11 \
+        --device /dev/davinci12 \
+        --device /dev/davinci13 \
+        --device /dev/davinci14 \
+        --device /dev/davinci15 \
+        --device /dev/davinci_manager \
+        --device /dev/devmm_svm \
+        --device /dev/hisi_hdc \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v /root/.cache:/root/.cache \
+        -it $IMAGE bash
+    ```
 
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
-docker run --rm \
-    --name vllm-ascend \
-    --shm-size=1g \
-    --net=host \
-    --device /dev/davinci0 \
-    --device /dev/davinci1 \
-    --device /dev/davinci2 \
-    --device /dev/davinci3 \
-    --device /dev/davinci4 \
-    --device /dev/davinci5 \
-    --device /dev/davinci6 \
-    --device /dev/davinci7 \
-    --device /dev/davinci8 \
-    --device /dev/davinci9 \
-    --device /dev/davinci10 \
-    --device /dev/davinci11 \
-    --device /dev/davinci12 \
-    --device /dev/davinci13 \
-    --device /dev/davinci14 \
-    --device /dev/davinci15 \
-    --device /dev/davinci_manager \
-    --device /dev/devmm_svm \
-    --device /dev/hisi_hdc \
-    -v /usr/local/dcmi:/usr/local/dcmi \
-    -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
-    -v /root/.cache:/root/.cache \
-    -it $IMAGE bash
-```
+=== "A2 series"
 
-::::
-::::{tab-item} A2 series
-:sync: A2
+    Start the docker image on your each node.
 
-Start the docker image on your each node.
+    ```bash
 
-```{code-block} bash
-   :substitutions:
-
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
-docker run --rm \
-    --name vllm-ascend \
-    --shm-size=1g \
-    --net=host \
-    --device /dev/davinci0 \
-    --device /dev/davinci1 \
-    --device /dev/davinci2 \
-    --device /dev/davinci3 \
-    --device /dev/davinci4 \
-    --device /dev/davinci5 \
-    --device /dev/davinci6 \
-    --device /dev/davinci7 \
-    --device /dev/davinci_manager \
-    --device /dev/devmm_svm \
-    --device /dev/hisi_hdc \
-    -v /usr/local/dcmi:/usr/local/dcmi \
-    -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
-    -v /root/.cache:/root/.cache \
-    -it $IMAGE bash
-```
-
-::::
-:::::
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
+    docker run --rm \
+        --name vllm-ascend \
+        --shm-size=1g \
+        --net=host \
+        --privileged=true \
+        --device /dev/davinci0 \
+        --device /dev/davinci1 \
+        --device /dev/davinci2 \
+        --device /dev/davinci3 \
+        --device /dev/davinci4 \
+        --device /dev/davinci5 \
+        --device /dev/davinci6 \
+        --device /dev/davinci7 \
+        --device /dev/davinci_manager \
+        --device /dev/devmm_svm \
+        --device /dev/hisi_hdc \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v /root/.cache:/root/.cache \
+        -it $IMAGE bash
+    ```
 
 After a successful docker run, you can verify the running container service by executing the `docker ps` command.
 
@@ -178,7 +169,7 @@ vllm serve Eco-Tech/Kimi-K2.6-W4A8 \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
     --mm-processor-cache-gb 0 \
     --mm-encoder-tp-mode data \
-    --speculative-config '{"method": "dflash","model": "z-lab/Kimi-K2.6-DFlash", "num_speculative_tokens": 15}'
+    --speculative-config '{"method": "dflash","model": "z-lab/Kimi-K2.5-DFlash", "num_speculative_tokens": 15}'
 ```
 
 Key Parameter Descriptions:
@@ -194,7 +185,7 @@ Common Issues Tip: If you encounter issues, please refer to the [Public FAQ](htt
 Service Verification:
 
 ```shell
-curl http://<node0_ip>:8088/v1/chat/completions \
+curl http://<node_ip>:8088/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{
         "model": "kimi_k26",
@@ -350,7 +341,6 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
       --gpu-memory-utilization 0.95 \
       --enforce-eager \
       --speculative-config '{"method": "eagle3", "model":"lightseekorg/kimi-k2.6-eagle3", "num_speculative_tokens": 3}' \
-      --additional-config '{"recompute_scheduler_enable":true}' \
       --mm-encoder-tp-mode data \
       --kv-transfer-config \
       '{"kv_connector": "MooncakeConnectorV1",
@@ -428,7 +418,6 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
       --gpu-memory-utilization 0.95 \
       --enforce-eager \
       --speculative-config '{"method": "eagle3", "model":"lightseekorg/kimi-k2.6-eagle3", "num_speculative_tokens": 3}' \
-      --additional-config '{"recompute_scheduler_enable":true}' \
       --mm-encoder-tp-mode data \
       --kv-transfer-config \
       '{"kv_connector": "MooncakeConnectorV1",
@@ -606,7 +595,7 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
 
     - `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the communication optimization function on the prefill nodes.
     - `VLLM_ASCEND_ENABLE_MLAPO=1`: enables the fusion operator, which can significantly improve performance but consumes more NPU memory. In the Prefill-Decode (PD) separation scenario, enable MLAPO only on decode nodes.
-    - `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the Key-Value Cache (KV Cache) of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, it is recommended to enable this configuration on both prefill and decode nodes simultaneously.
+    - `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the Key-Value Cache (KV Cache) of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, enable this configuration only on decode nodes.
     - `multistream_overlap_shared_expert: true`: When the Tensor Parallelism (TP) size is 1 or `enable_shared_expert_dp: true`, an additional stream is enabled to overlap the computation process of shared experts for improved efficiency.
 
 6. Run server for each node:
@@ -801,7 +790,6 @@ There are three `vllm bench` subcommands:
 Take the `serve` as an example. Run the code as follows.
 
 ```shell
-export VLLM_USE_MODELSCOPE=True
 vllm bench serve --model Eco-Tech/Kimi-K2.6-w4a8 --dataset-name random --random-input 1024 --num-prompts 200 --request-rate 1 --save-result --result-dir ./
 ```
 
@@ -819,27 +807,27 @@ After about several minutes, you can get the performance evaluation result.
 
 |Scenario|Deployment Mode|*Total NPUs|Weight Version|Key Considerations|
 |--------|---------------|-----------|--------------|------------------|
-|High Throughput<br>(16K context)|Single-Node Mixed|16 (A3)|kimi-k2.6-w4a8|Use dp2 tp8 to balance memory capacity and compute efficiency|
-|High Throughput<br>(16K context)|1P1D deployment|32 (A3)|kimi-k2.6-w4a8|dp2 tp8 on both P and D nodes; balanced latency and throughput|
-|High Throughput<br>(16K context)|2P2D deployment|64 (A3)|kimi-k2.6-w4a8|Scale from dp4 tp4 to dp8 tp4 across nodes|
+|High Throughput<br>(16K input)|Single-Node Mixed|16 (A3)|kimi-k2.6-w4a8|Use dp2 tp8 to balance memory capacity and compute efficiency|
+|High Throughput<br>(16K input)|1P1D deployment|32 (A3)|kimi-k2.6-w4a8|dp2 tp8 on both P and D nodes; balanced latency and throughput|
+|High Throughput<br>(16K input)|2P1D deployment|64 (A3)|kimi-k2.6-w4a8|Scale from dp4 tp4 to dp8 tp4 across nodes|
 |Long Context<br>(128K, no prefix cache)|Single-Node Mixed|16 (A3)|kimi-k2.6-w4a8|dp1 tp16 to maximize TP, accommodate extreme context lengths|
 |Long Context<br>(128K, with prefix cache)|Single-Node Mixed|16 (A3)|kimi-k2.6-w4a8|dp2 tp8 to optimize memory bandwidth and improve cache utilization|
 |Multimodal<br>(1080P)|Single-Node Mixed|16 (A3)|kimi-k2.6-w4a8|dp1 tp16 for high-resolution visual inputs|
 |Multimodal<br>(1080P)|1P1D deployment|32 (A3)|kimi-k2.6-w4a8|dp2 tp8 or dp16 tp1, depending on memory and concurrency|
-|Multimodal<br>(1080P)|2P2D deployment|64 (A3)|kimi-k2.6-w4a8|dp8 tp2 to dp32 tp1, maximize throughput for heavy multimodal workloads|
+|Multimodal<br>(1080P)|2P1D deployment|64 (A3)|kimi-k2.6-w4a8|dp8 tp2 to dp32 tp1, maximize throughput for heavy multimodal workloads|
 
 #### Table 2: Detailed Node Configuration
 
 |Scenario|Configuration|NPUs|TP|DP|Max Model Len|MTP Speculation Num|
 |--------|-------------|-----|--|--|-------------------|--------------------|
-|High Throughput / Low Latency (16K)|Server / Single Machine|16|8|2|~16K|15|
-|High Throughput / Low Latency (16K)|Server-P Node|16|8|2|~16K|3|
-|High Throughput / Low Latency (16K)|Server-D Node|16|8|2|~16K|3|
-|Long Context (128K, no cache)|Server / Single Machine|16|16|1|128K|15|
-|Long Context (128K, with cache)|Server / Single Machine|16|8|2|128K|15|
-|Multimodal (1080P)|Server / Single Machine|16|16|1|~16K|15|
-|Multimodal (1080P)|Server-P Node|16|8|2|~16K|3|
-|Multimodal (1080P)|Server-D Node|16|1|16|~16K|3|
+|High Throughput / Low Latency (16K)|Server / Single Machine|16|8|2|17K|15|
+|High Throughput / Low Latency (16K)|Server-P Node|16|8|2|17K|3|
+|High Throughput / Low Latency (16K)|Server-D Node|16|8|2|17K|3|
+|Long Context (128K, no cache)|Server / Single Machine|16|16|1|130K|15|
+|Long Context (128K, with cache)|Server / Single Machine|16|8|2|130K|15|
+|Multimodal (1080P)|Server / Single Machine|16|16|1|17K|15|
+|Multimodal (1080P)|Server-P Node|16|8|2|17K|3|
+|Multimodal (1080P)|Server-D Node|16|1|16|17K|3|
 
 > For complete startup commands and parameter descriptions, please refer to the deployment examples in [Chapter 5](#5-online-service-deployment).
 
@@ -847,8 +835,6 @@ After about several minutes, you can get the performance evaluation result.
 `max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario. For other settings, please refer to the **[Deployment](#5-online-service-deployment)** chapter.
 
 ### 9.2 Tuning Guidelines
-
-#### 9.2.1 General Tuning Reference
 
 Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
 

@@ -441,6 +441,41 @@ def test_is_pd_decode_recompute_scheduler_enabled_decode_consumer():
         assert utils.is_pd_decode_recompute_scheduler_enabled(vllm_config) is True
 
 
+def test_is_rc_device_returns_false_on_non_310p():
+    utils._IS_RC_DEVICE = None
+    with mock.patch("vllm_ascend.utils.is_310p", return_value=False):
+        assert utils.is_rc_device() is False
+
+
+def test_is_rc_device_detects_ep_from_lspci():
+    utils._IS_RC_DEVICE = None
+    with (
+        mock.patch("vllm_ascend.utils.is_310p", return_value=True),
+        mock.patch("subprocess.run") as mock_run,
+    ):
+        mock_run.return_value.stdout = "00:00.0 accelerators: Huawei Technologies Co., Ltd."
+        assert utils.is_rc_device() is False
+
+
+def test_is_rc_device_detects_rc_from_lspci():
+    utils._IS_RC_DEVICE = None
+    with (
+        mock.patch("vllm_ascend.utils.is_310p", return_value=True),
+        mock.patch("subprocess.run") as mock_run,
+    ):
+        mock_run.return_value.stdout = "00:00.0 PCI bridge: Huawei Technologies Co., Ltd."
+        assert utils.is_rc_device() is True
+
+
+def test_is_rc_device_defaults_to_ep_when_lspci_unavailable():
+    utils._IS_RC_DEVICE = None
+    with (
+        mock.patch("vllm_ascend.utils.is_310p", return_value=True),
+        mock.patch("subprocess.run", side_effect=FileNotFoundError),
+    ):
+        assert utils.is_rc_device() is False
+
+
 def test_is_pd_decode_recompute_scheduler_enabled_decode_consumer_disabled():
     vllm_config = mock.MagicMock()
     vllm_config.kv_transfer_config = mock.MagicMock()

@@ -138,7 +138,7 @@ class AscendConfig:
                 )
         self.multistream_overlap_shared_expert = additional_config.get("multistream_overlap_shared_expert", False)
         self.multistream_overlap_gate = additional_config.get("multistream_overlap_gate", False)
-        # PD-disaggregated only (kv_producer/kv_consumer); invalid in PD-mixed (kv_both / no kv_transfer_config).
+        # PD-disaggregated D node only (kv_consumer); invalid on P nodes and in PD-mixed mode.
         self.recompute_scheduler_enable = additional_config.get("recompute_scheduler_enable", False)
         # DSV4 oproj / embedding fine-grained TP (oproj_tensor_parallel_size /
         # embedding_tensor_parallel_size) use static, graph-stable exchange
@@ -288,6 +288,21 @@ class AscendConfig:
 
         # Enable dispatch/combine op inter-node communication by ROCE
         self.enable_mc2_hierarchy_comm = additional_config.get("enable_mc2_hierarchy_comm", False)
+
+        # Per-rank token capacity after dispatch in the mega moe (dispatch_ffn_combine) fused operator.
+        # When load imbalance causes a rank to receive more tokens than this limit, the excess tokens
+        # are dropped and skipped from computation, degrading accuracy.
+        # Do not set this too large: workspace memory scales linearly with this value, which matters
+        # especially under long-context scenarios where the operator should not hold too much memory.
+        # Default 65536.
+        self.mega_moe_max_tokens = additional_config.get("mega_moe_max_tokens", 65536)
+        if not isinstance(self.mega_moe_max_tokens, int):
+            raise ValueError(
+                f"mega_moe_max_tokens must be an integer, got {type(self.mega_moe_max_tokens).__name__}: "
+                f"{self.mega_moe_max_tokens}"
+            )
+        if self.mega_moe_max_tokens <= 0:
+            raise ValueError(f"mega_moe_max_tokens must be a positive integer, got {self.mega_moe_max_tokens}")
 
         # Whether to use NPU device group for DP metadata all_reduce.
         # "True": use NPU device group, "False" (default): use CPU group.
