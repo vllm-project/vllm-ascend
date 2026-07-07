@@ -58,9 +58,9 @@ The table below is the release compatibility matrix for vLLM Ascend release.
 | v0.7.3.post1| v0.7.3            | >= 3.9, < 3.12  | 8.1.RC1     | 2.5.1 / 2.5.1                   |                   |              |
 | v0.7.3      | v0.7.3            | >= 3.9, < 3.12  | 8.1.RC1     | 2.5.1 / 2.5.1                   |                   |              |
 
-:::{note}
-If you're using v0.7.3, don't forget to install [mindie-turbo](https://pypi.org/project/mindie-turbo) as well.
-:::
+!!! note
+
+    If you're using v0.7.3, don't forget to install [mindie-turbo](https://pypi.org/project/mindie-turbo) as well.
 
 For main branch of vLLM Ascend, we usually make it compatible with the latest vLLM release and a newer commit hash of vLLM. Please note that this table is usually updated. Please check it regularly.
 
@@ -169,7 +169,7 @@ For main branch, vLLM Ascend should work with vLLM main branch and latest 1 or 2
 
 ## Document branch policy
 
-To reduce maintenance costs, **all branch documentation content should remain consistent, and version differences can be controlled via variables in [docs/source/conf.py](https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/conf.py)**. While this is not a simple task, it is a principle we should strive to follow.
+To reduce maintenance costs, **all branch documentation content should remain consistent, and version differences can be controlled via variables in the `extra:` block of [mkdocs.yml](https://github.com/vllm-project/vllm-ascend/blob/main/mkdocs.yml)**. While this is not a simple task, it is a principle we should strive to follow.
 
 | Version | Purpose | Code Branch |
 |-----|-----|---------|

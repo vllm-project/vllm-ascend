@@ -35,10 +35,6 @@ msgstr "开发者指南"
 msgid "Community"
 msgstr "社区"
 
-#: ../../source/index.md:1
-msgid "Welcome to vLLM Ascend Plugin"
-msgstr "欢迎使用 vLLM Ascend 插件"
-
 #: ../../source/index.md:3
 msgid "vLLM"
 msgstr "vLLM"
