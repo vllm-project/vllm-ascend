@@ -1,0 +1,318 @@
+# MkDocs configuration for vLLM Ascend documentation
+# Used for both English and Chinese builds.
+# Language is selected via the DOCS_LANG environment variable (default: en).
+# Chinese builds also set DOCS_DIR, DOCS_THEME_LANG, DOCS_SITE_NAME,
+# DOCS_SITE_URL, DOCS_PALETTE_*, DOCS_MACROS_DIR, DOCS_IS_RELEASE.
+# See .readthedocs.zh.yaml for the env vars used by the Chinese build.
+#
+# Deployed on Read the Docs with Material for MkDocs theme.
+
+site_name: !ENV [DOCS_SITE_NAME, 'vLLM Ascend']
+site_url: !ENV [DOCS_SITE_URL, 'https://docs.vllm.ai/projects/ascend/en/latest/']
+site_description: vLLM Ascend plugin - a community-maintained hardware plugin for running vLLM on the Ascend NPU.
+site_author: the vllm-ascend team
+repo_url: https://github.com/vllm-project/vllm-ascend
+repo_name: vllm-project/vllm-ascend
+edit_uri: edit/main/docs/source/
+
+docs_dir: !ENV [DOCS_DIR, docs/source]
+
+# ---- Theme: Material for MkDocs ----
+theme:
+  name: material
+  language: !ENV [DOCS_THEME_LANG, en]
+  logo: logos/vllm-ascend-logo-text-light.png
+  favicon: logos/vllm-ascend-logo-text-light.png
+  features:
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.sections
+    - navigation.expand
+    - navigation.indexes
+    - navigation.top
+    - navigation.tracking
+    - toc.follow
+    - search.suggest
+    - search.highlight
+    - search.share
+    - content.code.copy
+    - content.code.select
+    - content.tabs.link
+    - content.action.edit
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: !ENV [DOCS_PALETTE_LIGHT_PRIMARY, white]
+      accent: indigo
+      logo: logos/vllm-ascend-logo-text-light.png
+      toggle:
+        icon: material/brightness-7
+        name: !ENV [DOCS_PALETTE_LIGHT_TOGGLE_NAME, 'Switch to dark mode']
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: !ENV [DOCS_PALETTE_DARK_PRIMARY, black]
+      accent: indigo
+      logo: logos/vllm-ascend-logo-text-dark.png
+      toggle:
+        icon: material/brightness-4
+        name: !ENV [DOCS_PALETTE_DARK_TOGGLE_NAME, 'Switch to system preference']
+  icon:
+    repo: fontawesome/brands/github
+  custom_dir: docs/overrides
+
+# ---- Plugins ----
+plugins:
+  - search:
+      separator: '[\s\-,:!=\[\]()"]+'
+      # Both sites add ja for Lunr; English pages still index fine with ja enabled.
+      lang:
+        - en
+        - ja
+  - macros:
+      include_dir: !ENV [DOCS_MACROS_DIR, docs/source]
+      on_undefined: keep
+  - exclude:
+      glob:
+        - "_build/*"
+        - "*.zh.md"
+        - "_templates/*"
+        - "release.template.md"
+        - "zh/*"
+        # Internal helpers that should never be served as static files.
+        # docs/source/conf.py is a JSON-output shim for tooling (e.g.
+        # tests/e2e/common.sh, .github/workflows/labeled_doctest.yaml);
+        # publishing it to the docs site would leak the version-source
+        # helper to readers.
+        - "conf.py"
+        - "__pycache__/*"
+
+# ---- Hooks ----
+hooks:
+  - docs/hooks/model_code.py
+  # Sets per-page and per-section titles for the active language.
+  # See docs/hooks/nav_titles.py for the title mapping.
+  - docs/hooks/nav_titles.py
+
+# ---- Markdown extensions ----
+markdown_extensions:
+  # Python Markdown
+  - abbr
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+      toc_depth: 3
+  # Python Markdown Extensions
+  - pymdownx.arithmatex:
+      generic: true
+  - pymdownx.betterem:
+      smart_enable: all
+  - pymdownx.caret
+  - pymdownx.details
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.keys
+  - pymdownx.mark
+  - pymdownx.smartsymbols
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.tilde
+
+# ---- Extra CSS/JS ----
+extra_css:
+  - stylesheets/extra.css
+
+extra:
+  # Toggle via DOCS_IS_RELEASE env var (set by .readthedocs.yaml for tag builds).
+  is_release: !ENV [DOCS_IS_RELEASE, false]
+  # Version substitutions used by macros plugin
+  vllm_version: v0.22.1
+  vllm_ascend_version: v0.22.1rc1
+  pip_vllm_ascend_version: 0.22.1rc1
+  pip_vllm_version: 0.22.1
+  cann_image_tag: 9.0.0-910b-ubuntu22.04-py3.12
+  main_python_version: ">= 3.10, < 3.13"
+  main_cann_version: "9.0.0"
+  main_pytorch_torch_npu_version: "2.10.0 / 2.10.0"
+  main_triton_ascend_version: "3.2.1"
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/vllm-project/vllm-ascend
+  generator: false
+
+# ---- Navigation ----
+# File paths are listed without labels; titles come from each page's H1
+# (or the bilingual mapping in docs/hooks/nav_titles.py). Section titles
+# are translated by the same hook based on the section's first child.
+nav:
+  - index.md
+  - Getting Started:
+    - getting_started.md
+    - quick_start.md
+    - installation.md
+    - Model Tutorials:
+        - tutorials/models/index.md
+        - tutorials/models/Qwen3-Dense.md
+        - tutorials/models/Qwen-VL-Dense.md
+        - tutorials/models/Qwen3-30B-A3B.md
+        - tutorials/models/Qwen3-235B-A22B.md
+        - tutorials/models/Qwen3-VL-30B-A3B-Instruct.md
+        - tutorials/models/Qwen3-VL-235B-A22B-Instruct.md
+        - tutorials/models/Qwen3-Coder-30B-A3B.md
+        - tutorials/models/Qwen3_embedding.md
+        - tutorials/models/Qwen3-VL-Embedding.md
+        - tutorials/models/Qwen3_reranker.md
+        - tutorials/models/Qwen3-VL-Reranker.md
+        - tutorials/models/Qwen3-Next.md
+        - tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md
+        - tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md
+        - tutorials/models/Qwen3.5-397B-A17B.md
+        - tutorials/models/Qwen3.6-35B-A3B.md
+        - tutorials/models/DeepSeek-V3.1.md
+        - tutorials/models/DeepSeek-V3.2.md
+        - tutorials/models/DeepSeek-V4-Flash.md
+        - tutorials/models/DeepSeek-V4-Pro.md
+        - tutorials/models/DeepSeek-R1.md
+        - tutorials/models/DeepSeekOCR2.md
+        - tutorials/models/GLM4.x.md
+        - tutorials/models/GLM5.md
+        - tutorials/models/GLM5.2.md
+        - tutorials/models/Kimi-K2-Thinking.md
+        - tutorials/models/Kimi-K2.5.md
+        - tutorials/models/Kimi-K2.6.md
+        - tutorials/models/PaddleOCR-VL.md
+        - tutorials/models/MiniMax-M2.md
+        - tutorials/models/Hunyuan-A13B-Instruct.md
+        - tutorials/models/Hy3-preview.md
+        - tutorials/models/Minitron-8B-Base.md
+        - tutorials/models/LLaVA-OneVision-Qwen2-0.5B-OV.md
+        - tutorials/models/gpt-oss-120b.md
+        - tutorials/models/Mixtral-8x7B-Instruct-v0.1.md
+        - tutorials/models/Qwen3-ASR-1.7B.md
+        - tutorials/models/Qwen2.5-Math-RM-72B.md
+        - tutorials/models/InternVL3.5.md
+    - Feature Tutorials:
+        - tutorials/features/index.md
+        - tutorials/features/pd_colocated_mooncake_multi_instance.md
+        - tutorials/features/pd_disaggregation_mooncake_single_node.md
+        - tutorials/features/pd_disaggregation_mooncake_multi_node.md
+        - tutorials/features/long_sequence_context_parallel_single_node.md
+        - tutorials/features/long_sequence_context_parallel_multi_node.md
+        - tutorials/features/dynamic_chunked_pipeline_parallel.md
+        - tutorials/features/suffix_speculative_decoding.md
+        - tutorials/features/ray.md
+    - Hardware Tutorials:
+        - tutorials/hardwares/index.md
+        - tutorials/hardwares/310p.md
+    - faqs.md
+  - User Guide:
+    - user_guide/index.md
+    - user_guide/support_matrix/index.md
+    - user_guide/support_matrix/supported_models.md
+    - user_guide/support_matrix/supported_features.md
+    - user_guide/support_matrix/feature_matrix.md
+    - Configuration:
+        - user_guide/configuration/index.md
+        - user_guide/configuration/env_vars.md
+        - user_guide/configuration/additional_config.md
+    - Feature Guide:
+        - user_guide/feature_guide/index.md
+        - user_guide/feature_guide/graph_mode.md
+        - user_guide/feature_guide/cpu_binding.md
+        - user_guide/feature_guide/Ai_QoS_introduction_en.md
+        - user_guide/feature_guide/quantization.md
+        - user_guide/feature_guide/sleep_mode.md
+        - user_guide/feature_guide/structured_output.md
+        - user_guide/feature_guide/lora.md
+        - user_guide/feature_guide/expert_parallelism_load_balancer.md
+        - user_guide/feature_guide/netloader.md
+        - user_guide/feature_guide/rfork.md
+        - user_guide/feature_guide/dynamic_batch.md
+        - user_guide/feature_guide/epd_disaggregation.md
+        - user_guide/feature_guide/kv_pool.md
+        - user_guide/feature_guide/kv_cache_cpu_offload.md
+        - user_guide/feature_guide/external_dp.md
+        - user_guide/feature_guide/large_scale_ep.md
+        - user_guide/feature_guide/ucm_deployment.md
+        - user_guide/feature_guide/Fine_grained_TP.md
+        - user_guide/feature_guide/layer_sharding.md
+        - user_guide/feature_guide/speculative_decoding.md
+        - user_guide/feature_guide/context_parallel.md
+        - user_guide/feature_guide/weight_prefetch.md
+        - user_guide/feature_guide/sequence_parallelism.md
+        - user_guide/feature_guide/batch_invariance.md
+        - user_guide/feature_guide/lmcache_ascend_deployment.md
+        - user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md
+        - user_guide/feature_guide/flash_attention.md
+    - Deployment Guide:
+        - user_guide/deployment_guide/index.md
+        - user_guide/deployment_guide/using_volcano_kthena.md
+        - user_guide/deployment_guide/using_mindie_motor.md
+    - user_guide/release_notes.md
+  - Developer Guide:
+    - developer_guide/index.md
+    - Contribution:
+        - developer_guide/contribution/index.md
+        - developer_guide/contribution/testing.md
+        - developer_guide/contribution/doc_writing.md
+        - developer_guide/contribution/multi_node_test.md
+        - developer_guide/contribution/nightly_ci_test.md
+        - developer_guide/contribution/e2e_ci_test.md
+    - Design Documents:
+        - developer_guide/Design_Documents/index.md
+        - developer_guide/Design_Documents/patch.md
+        - developer_guide/Design_Documents/cpu_binding.md
+        - developer_guide/Design_Documents/ModelRunner_prepare_inputs.md
+        - developer_guide/Design_Documents/disaggregated_prefill.md
+        - developer_guide/Design_Documents/eplb_swift_balancer.md
+        - developer_guide/Design_Documents/ACL_Graph.md
+        - developer_guide/Design_Documents/KV_Cache_Pool_Guide.md
+        - developer_guide/Design_Documents/add_custom_aclnn_op.md
+        - developer_guide/Design_Documents/context_parallel.md
+        - developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md
+        - developer_guide/Design_Documents/quantization.md
+        - developer_guide/Design_Documents/npugraph_ex.md
+    - Evaluation:
+        - developer_guide/evaluation/index.md
+        - developer_guide/evaluation/using_evalscope.md
+        - developer_guide/evaluation/using_lm_eval.md
+        - developer_guide/evaluation/using_ais_bench.md
+        - developer_guide/evaluation/using_opencompass.md
+    - Performance and Debug:
+        - developer_guide/performance_and_debug/index.md
+        - developer_guide/performance_and_debug/performance_benchmark.md
+        - developer_guide/performance_and_debug/optimization_and_tuning.md
+        - developer_guide/performance_and_debug/service_profiling_guide.md
+        - developer_guide/performance_and_debug/msprobe_guide.md
+  - Community:
+    - community/index.md
+    - community/governance.md
+    - community/contributors.md
+    - community/issue-workflow-guidelines.md
+    - community/slash-commands.md
+    - community/versioning_policy.md
+    - User Stories:
+        - community/user_stories/index.md
+        - community/user_stories/llamafactory.md
+
+# ---- Watch ----
+watch:
+  - docs/source
+  - mkdocs.yml

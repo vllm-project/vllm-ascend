@@ -144,7 +144,7 @@ msgid ""
 msgstr ""
 "FC1 是 vllm-ascend 中的特有优化，目前基于 Custom OP 实现，但难以支持 VL 类模型（原因详见 "
 "[[RFC]: support sequence parallelism by pass](https://github.com/vllm-project/vllm-ascend/issues/5712)）。"
-因此，目前 FC1 和 SP 是互补的关系。"
+"因此，目前 FC1 和 SP 是互补的关系。"
 
 #: ../../source/user_guide/feature_guide/sequence_parallelism.md:40
 msgid "Support Matrix"
@@ -417,7 +417,7 @@ msgid ""
 "and `sp_min_token_num` is None, set default `sp_min_token_num` (1000 for "
 "Dense models, 1 for MoE models)"
 msgstr "`NPUPlatform.apply_config_platform_defaults`：如果 `enable_sp` 为 `True` 且 `sp_min_token_num` 为 None，"
-则设置默认的 `sp_min_token_num`（稠密模型为 1000，MoE 模型为 1）"
+"则设置默认的 `sp_min_token_num`（稠密模型为 1000，MoE 模型为 1）"
 
 #: ../../source/user_guide/feature_guide/sequence_parallelism.md:108
 msgid ""
