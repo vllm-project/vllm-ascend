@@ -637,7 +637,7 @@ class AscendSFADCPMetadataBuilder(AscendSFAMetadataBuilder):
                 f"{self.replicated_view_block_size}."
             )
         self.blocks_per_phys_block = kv_cache_spec.block_size // self.replicated_view_block_size
-        max_num_reqs = vllm_config.scheduler_config.max_num_seqs
+        max_num_reqs = vllm_config.scheduler_config.max_num_seqs + 2 * self.pcp_size * vllm_config.scheduler_config.max_num_seqs
         max_num_input_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         self.block_table_replicated_view_buf: torch.Tensor = torch.empty(
             (max_num_reqs, max_num_reqs * self.blocks_per_phys_block * self.pcp_size * self.dcp_size),
