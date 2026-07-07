@@ -30,7 +30,7 @@ You can use our official docker image to run GLM-5.2 directly.
 
     Start the docker image on your each node.
 
-    ```bash
+    ```shell
 
     export IMAGE=quay.io/ascend/vllm-ascend:glm5.2-a3
     export NAME=vllm-ascend
@@ -74,7 +74,7 @@ You can use our official docker image to run GLM-5.2 directly.
 
     Start the docker image on each of your nodes.
 
-    ```bash
+    ```shell
 
     export IMAGE=quay.io/ascend/vllm-ascend:glm5.2
     docker run --rm \
@@ -112,7 +112,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 Run the following script to execute online inference.
 
-```bash
+```shell
 export HCCL_OP_EXPANSION_MODE="AIV"
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=1
@@ -159,7 +159,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
     **node 0**
 
-    ```bash
+    ```shell
     # this obtained through ifconfig
     # nic_name is the network interface name corresponding to local_ip of the current node
     nic_name="xxx"
@@ -208,7 +208,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
     **node 1**
 
-    ```bash
+    ```shell
     # this obtained through ifconfig
     # nic_name is the network interface name corresponding to local_ip of the current node
     nic_name="xxx"
@@ -263,7 +263,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
     **node 0**
 
-    ```bash
+    ```shell
     # this obtained through ifconfig
     # nic_name is the network interface name corresponding to local_ip of the current node
     nic_name="xxx"
@@ -319,7 +319,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
     **node 1**
 
-    ```bash
+    ```shell
     # this obtained through ifconfig
     # nic_name is the network interface name corresponding to local_ip of the current node
     nic_name="xxx"
@@ -649,7 +649,7 @@ Before you start, please
             --served-model-name glm-52 \
             --max-model-len 135000 \
             --speculative-config '{"num_speculative_tokens": 5, "method":"deepseek_mtp"}' \
-            --additional-config '{"enable_sparse_c8":false,"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_dsa_cp": true}' \
+            --additional-config '{"enable_sparse_c8":false,"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true,"enable_dsa_cp": true}' \
             --max-num-batched-tokens 4096 \
             --trust-remote-code \
             --max-num-seqs 64 \
@@ -719,7 +719,7 @@ Before you start, please
             --served-model-name glm-52 \
             --max-model-len 135000 \
             --speculative-config '{"num_speculative_tokens": 5, "method":"deepseek_mtp"}' \
-            --additional-config '{"enable_sparse_c8":false,"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_dsa_cp": true}' \
+            --additional-config '{"enable_sparse_c8":false,"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true, "enable_dsa_cp": true}' \
             --max-num-batched-tokens 4096 \
             --trust-remote-code \
             --max-num-seqs 64 \
@@ -1027,6 +1027,7 @@ vllm serve <MODEL_PATH> \
     "enable_sparse_c8": false,
     "fuse_muls_add": true,
     "multistream_overlap_shared_expert": true,
+    "recompute_scheduler_enable": true,
     "enable_dsa_cp": true
   }' \
   --speculative-config '{"num_speculative_tokens": 3, "method":"deepseek_mtp"}'
