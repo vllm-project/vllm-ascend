@@ -15,6 +15,8 @@
 # limitations under the License.
 #
 
+import os
+
 from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.utils import is_310p, vllm_version_is
@@ -87,3 +89,6 @@ if _V2_MODEL_RUNNER_SUPPORTED:
 # only patch routed experts capture in main2main.
 if _V2_MODEL_RUNNER_SUPPORTED:
     import vllm_ascend.patch.worker.patch_routed_experts_capture  # noqa
+
+if os.getenv("VLLM_ASCEND_TRACE", "0") == "1":
+    import vllm_ascend.patch.worker.patch_trace  # noqa
