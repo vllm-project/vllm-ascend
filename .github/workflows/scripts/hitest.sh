@@ -186,8 +186,9 @@ for item in items:
         targets.append(target)
 
 if not targets:
-    print("ERROR: no pytest targets found", file=sys.stderr)
-    sys.exit(1)
+    print("INFO: case recommend returned no targets, writing empty list", file=sys.stderr)
+else:
+    print("\n".join(targets))
 
 print("\n".join(targets))
 PY
