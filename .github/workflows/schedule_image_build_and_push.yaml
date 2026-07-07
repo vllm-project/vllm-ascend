@@ -94,10 +94,10 @@ jobs:
     strategy:
       matrix:
         build_meta:
-          - name: A2 Ubuntu
-            dockerfile: Dockerfile
-            suffix: ""
-            image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-910b-ubuntu22.04-py3.12
+          # - name: A2 Ubuntu
+          #   dockerfile: Dockerfile
+          #   suffix: ""
+          #   image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-910b-ubuntu22.04-py3.12
 
           - name: A2 openeuler
             dockerfile: Dockerfile.openEuler
