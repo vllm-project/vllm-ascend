@@ -48,6 +48,7 @@ Select an image based on your machine type and start the docker image on your no
         --name vllm-ascend \
         --shm-size=512g \
         --net=host \
+        --privileged=true \
         --device /dev/davinci0 \
         --device /dev/davinci1 \
         --device /dev/davinci2 \
@@ -89,6 +90,7 @@ Select an image based on your machine type and start the docker image on your no
         --name vllm-ascend \
         --shm-size=512g \
         --net=host \
+        --privileged=true \
         --device /dev/davinci0 \
         --device /dev/davinci1 \
         --device /dev/davinci2 \
@@ -233,7 +235,7 @@ Key Parameter Descriptions:
 - `--async-scheduling` enables asynchronous scheduling to overlap CPU scheduling with NPU computation.
 - `VLLM_ASCEND_ENABLE_FLASHCOMM1=1` enables the FlashComm communication optimization.
 
-Common Issues Tip: If you encounter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+Common Issues Tip: If you encounter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs/) for troubleshooting.
 
 Service Verification:
 
@@ -837,7 +839,7 @@ Deployment Verification:
 
 After the PD separation service is fully started, send a request through the proxy port on the prefill master node to verify that Prefill and Decode nodes are working correctly together. Refer to [Prefill-Decode Disaggregation (Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md) for the proxy verification method.
 
-Common Issues Tip: If you encounter issues with PD separation deployment, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+Common Issues Tip: If you encounter issues with PD separation deployment, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs/) for troubleshooting.
 
 #### 5.2.3 Ultra-Long Sequence Deployment
 
@@ -938,4 +940,4 @@ Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matr
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html); this chapter only covers model-specific issues.
+For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs/); this chapter only covers model-specific issues.
