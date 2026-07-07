@@ -709,7 +709,7 @@ class AscendSFADCPMetadataBuilder(AscendSFAMetadataBuilder):
         block_table_cols = block_table_replicated_view.shape[1]
         replicated_col_idx = torch.arange(
             block_table_cols,
-            dtype=torch.long,
+            dtype=torch.int32,
             device=dcp_block_table.device,
         )
         local_col_idx = (
@@ -760,8 +760,8 @@ class AscendSFADCPMetadataBuilder(AscendSFAMetadataBuilder):
             common_attn_metadata.query_start_loc[1 : num_reqs + 1] - common_attn_metadata.query_start_loc[:num_reqs]
         )
         req_indices = torch.repeat_interleave(
-            torch.arange(num_reqs, dtype=torch.long, device=self.device),
-            query_lens.to(device=self.device, dtype=torch.long),
+            torch.arange(num_reqs, dtype=torch.int32, device=self.device),
+            query_lens.to(device=self.device, dtype=torch.int32),
         )[:num_actual_tokens]
         if req_indices.numel() == 0:
             return slot_mapping_replicated_view
@@ -770,7 +770,7 @@ class AscendSFADCPMetadataBuilder(AscendSFAMetadataBuilder):
         req_indices = req_indices[:num_actual_tokens]
         positions = common_attn_metadata.positions[:num_actual_tokens].to(
             device=self.device,
-            dtype=torch.long,
+            dtype=torch.int32,
         )
         logical_block_idx = positions // self.replicated_view_block_size
         block_offsets = positions % self.replicated_view_block_size
