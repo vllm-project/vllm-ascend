@@ -18,6 +18,7 @@
 #
 
 from contextlib import contextmanager
+from typing import Any
 
 import numpy as np
 import torch
@@ -46,7 +47,7 @@ from vllm_ascend.ascend_forward_context import (
     set_mc2_tokens_capacity,
 )
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
-from vllm_ascend.utils import set_weight_prefetch_method
+from vllm_ascend.utils import set_weight_prefetch_method, vllm_version_is
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
@@ -326,7 +327,7 @@ class NPUModelRunner(GPUModelRunner):
             # max_seq_len is only consumed by the PP `compute_need_sampled_mask`.
             max_seq_len_np = self.req_states.max_seq_len[idx_mapping_np]
 
-        self.input_batch = AscendInputBatch(
+        input_batch_kwargs: dict[str, Any] = dict(
             req_ids=req_ids,
             num_reqs=num_reqs,
             num_reqs_after_padding=num_reqs_padded,
@@ -351,7 +352,6 @@ class NPUModelRunner(GPUModelRunner):
             max_seq_len_np=max_seq_len_np,
             input_ids=input_ids,
             positions=positions,
-            is_padding=self.input_buffers.is_padding[:num_tokens_after_padding],
             logits_indices=logits_indices,
             cu_num_logits=cu_num_logits,
             cu_num_logits_np=cu_num_logits_np,
@@ -362,6 +362,9 @@ class NPUModelRunner(GPUModelRunner):
             seq_lens_np=self.input_buffers.seq_lens_np,
             attn_state=attn_state,
         )
+        if not vllm_version_is("0.24.0"):
+            input_batch_kwargs["is_padding"] = self.input_buffers.is_padding[:num_tokens_after_padding]
+        self.input_batch = AscendInputBatch(**input_batch_kwargs)
 
         # For mla/sfa, update cos/sin. Here is for execute_model.
         update_cos_sin(self.input_batch.positions)
