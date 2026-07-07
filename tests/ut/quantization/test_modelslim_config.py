@@ -16,6 +16,7 @@ from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.quantization.modelslim_config import (
     MODELSLIM_CONFIG_FILENAME,
     AscendModelSlimConfig,
+    get_linear_quant_type,
 )
 from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, vllm_version_is
 
@@ -208,6 +209,32 @@ class TestAscendModelSlimConfig(TestBase):
         config = AscendModelSlimConfig(bad_config)
         with self.assertRaises(ValueError):
             config.is_layer_skipped_ascend("fused_layer", fused_mapping)
+
+    def test_missing_k_eq_v_v_proj_shard_uses_present_shards(self):
+        prefix = "model.layers.5.self_attn.qkv_proj"
+        fused_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
+        quant_description = {
+            "model.layers.5.self_attn.q_proj.weight": "W8A8_DYNAMIC",
+            "model.layers.5.self_attn.k_proj.weight": "W8A8_DYNAMIC",
+        }
+        config = AscendModelSlimConfig(quant_description)
+
+        self.assertEqual(get_linear_quant_type(quant_description, prefix, fused_mapping), "W8A8_DYNAMIC")
+        self.assertFalse(config.is_layer_skipped_ascend(prefix, fused_mapping))
+
+    def test_missing_required_packed_shard_still_raises(self):
+        prefix = "model.layers.5.self_attn.qkv_proj"
+        fused_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
+        quant_description = {
+            "model.layers.5.self_attn.k_proj.weight": "W8A8_DYNAMIC",
+            "model.layers.5.self_attn.v_proj.weight": "W8A8_DYNAMIC",
+        }
+        config = AscendModelSlimConfig(quant_description)
+
+        with self.assertRaises(KeyError):
+            get_linear_quant_type(quant_description, prefix, fused_mapping)
+        with self.assertRaises(KeyError):
+            config.is_layer_skipped_ascend(prefix, fused_mapping)
 
     def test_init_with_default_config(self):
         config = AscendModelSlimConfig()
