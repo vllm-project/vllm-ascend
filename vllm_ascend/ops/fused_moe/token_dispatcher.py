@@ -493,8 +493,8 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
         ) = self._dispatch_preprocess(hidden_states, topk_ids)
 
         dynamic_scale_after_all2all = None
+        dst_type = token_dispatch_input.quant.get_dst_type
         if with_quant:
-            dst_type = token_dispatch_input.quant.get_dst_type
             permutated_local_input_tokens, dynamic_scale = DeviceOperator.npu_dynamic_quant(
                 permutated_local_input_tokens, act_quant_type=dst_type, use_mxfp_quant=use_mxfp_quant
             )
@@ -517,6 +517,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
                 dynamic_scale_after_all2all,
                 global_input_tokens_local_experts_indices,
                 with_quant,
+                dst_type,
                 scale_type,
             )
         )
@@ -638,6 +639,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
         dynamic_scale_after_all2all,
         global_input_tokens_local_experts_indices,
         with_quant,
+        dst_type,
         scale_type,
     ):
         # Early return if no local experts or no tokens
@@ -664,6 +666,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
                     expert_tokens_num_type=1,
                     expert_tokens_num_flag=True,
                     active_expert_range=[0, self.num_local_experts],
+                    x_dtype=dst_type,
                 )
             )
             dynamic_scale_after_all2all = routed_scale.view(torch.uint8)
