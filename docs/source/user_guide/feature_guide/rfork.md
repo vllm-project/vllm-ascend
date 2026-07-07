@@ -36,7 +36,7 @@ To enable RFork, pass `--load-format rfork` and provide RFork settings through `
 ### RFork Prerequisites
 
 - Install the runtime dependency `YuanRong TransferEngine` on every RFork instance.
-- Run a planner service that implements the RFork seed protocol. A simple mock planner script is provided at [`rfork_planner.py`](../../../../examples/rfork/rfork_planner.py).
+- Run a planner service that implements the RFork seed protocol. A simple mock planner script is provided at [`rfork_planner.py`](https://github.com/vllm-project/vllm-ascend/blob/main/examples/rfork/rfork_planner.py).
 
 ### Configuration Fields
 
@@ -104,7 +104,7 @@ pip install openyuanrong-transfer-engine
 
 ### 2. Start the Planner
 
-A simple planner implementation is provided at [`rfork_planner.py`](../../../../examples/rfork/rfork_planner.py).
+A simple planner implementation is provided at [`rfork_planner.py`](https://github.com/vllm-project/vllm-ascend/blob/main/examples/rfork/rfork_planner.py).
 
 ```shell
 python rfork_planner.py \
@@ -153,4 +153,4 @@ vllm serve <model_path> \
 - If RFORK is used, **each worker process** must bind a listening port. That port is assigned randomly.
 - RFork weight transfer does not support `additional_config.layer_sharding`. If `--load-format rfork` is used together with `layer_sharding`, RFork transfer is bypassed and the model is loaded through the default model loader.
 - RFork weight transfer does not support dynamic EPLB because expert weights and placement can change after the seed service starts. If `eplb_config.dynamic_eplb` or `eplb_config.expert_map_record_path` enables dynamic EPLB, RFork transfer is bypassed and the model is loaded through the default model loader.
-- The example [`rfork_planner.py`](../../../../examples/rfork/rfork_planner.py) is only a simple mock implementation. If you need stronger scheduling, capacity management, or production-grade availability behavior, implement your own planner based on the RFork seed protocol.
+- The example [`rfork_planner.py`](https://github.com/vllm-project/vllm-ascend/blob/main/examples/rfork/rfork_planner.py) is only a simple mock implementation. If you need stronger scheduling, capacity management, or production-grade availability behavior, implement your own planner based on the RFork seed protocol.

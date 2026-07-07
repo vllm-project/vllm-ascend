@@ -30,59 +30,49 @@ You can use our official docker image to run `PaddleOCR-VL` directly.
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
 
-:::::{tab-set}
-:sync-group: install
+=== "A2 series"
 
-::::{tab-item} A2 series
-:sync: A2
+    ```bash
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
+    docker run --rm \
+        --name vllm-ascend \
+        --shm-size=1g \
+        --net=host \
+        --device /dev/davinci0 \
+        --device /dev/davinci_manager \
+        --device /dev/devmm_svm \
+        --device /dev/hisi_hdc \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v /root/.cache:/root/.cache \
+        -it $IMAGE bash
+    ```
 
-```bash
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
-docker run --rm \
-    --name vllm-ascend \
-    --shm-size=1g \
-    --net=host \
-    --device /dev/davinci0 \
-    --device /dev/davinci_manager \
-    --device /dev/devmm_svm \
-    --device /dev/hisi_hdc \
-    -v /usr/local/dcmi:/usr/local/dcmi \
-    -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
-    -v /root/.cache:/root/.cache \
-    -it $IMAGE bash
-```
+=== "Atlas 300 inference products"
 
-::::
-
-::::{tab-item} Atlas 300 inference products
-:sync: atlas300
-
-```bash
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-310p
-docker run --rm \
-    --name vllm-ascend \
-    --shm-size=1g \
-    --net=host \
-    --device /dev/davinci0 \
-    --device /dev/davinci_manager \
-    --device /dev/devmm_svm \
-    --device /dev/hisi_hdc \
-    -v /usr/local/dcmi:/usr/local/dcmi \
-    -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
-    -v /root/.cache:/root/.cache \
-    -it $IMAGE bash
-```
-
-::::
-:::::
+    ```bash
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p
+    docker run --rm \
+        --name vllm-ascend \
+        --shm-size=1g \
+        --net=host \
+        --device /dev/davinci0 \
+        --device /dev/davinci_manager \
+        --device /dev/devmm_svm \
+        --device /dev/hisi_hdc \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v /root/.cache:/root/.cache \
+        -it $IMAGE bash
+    ```
 
 After a successful docker run, you can verify the running container service by executing the `docker ps` command.
 
@@ -92,9 +82,9 @@ If you don't want to use the docker image as above, you can also build all from 
 
 - Install `vllm-ascend` from source, refer to [installation](../../installation.md).
 
-:::{note}
-If you are using Atlas 300 inference products, you may need to uninstall `triton-ascend` to avoid dependency conflicts.
-:::
+!!! note
+
+    If you are using Atlas 300 inference products, you may need to uninstall `triton-ascend` to avoid dependency conflicts.
 
 ## 5 Online Service Deployment
 
@@ -110,66 +100,56 @@ Follow these steps to start the inference service:
 
 Startup Command:
 
-:::::{tab-set}
-:sync-group: install
+=== "A2 series"
 
-::::{tab-item} A2 series
-:sync: A2
+    ```bash
+    #!/bin/sh
+    export VLLM_USE_MODELSCOPE=True
+    export MODEL_PATH="PaddlePaddle/PaddleOCR-VL"
+    export TASK_QUEUE_ENABLE=1
+    export CPU_AFFINITY_CONF=1
+    export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
 
-```bash
-#!/bin/sh
-export VLLM_USE_MODELSCOPE=True
-export MODEL_PATH="PaddlePaddle/PaddleOCR-VL"
-export TASK_QUEUE_ENABLE=1
-export CPU_AFFINITY_CONF=1
-export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
+    vllm serve ${MODEL_PATH} \
+              --max-num-batched-tokens 16384 \
+              --served-model-name PaddleOCR-VL-0.9B \
+              --trust-remote-code \
+              --no-enable-prefix-caching \
+              --mm-processor-cache-gb 0 \
+              --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+              --additional_config '{"enable_cpu_binding":true}' \
+              --port 8000
+    ```
 
-vllm serve ${MODEL_PATH} \
-          --max-num-batched-tokens 16384 \
-          --served-model-name PaddleOCR-VL-0.9B \
-          --trust-remote-code \
-          --no-enable-prefix-caching \
-          --mm-processor-cache-gb 0 \
-          --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-          --additional_config '{"enable_cpu_binding":true}' \
-          --port 8000
-```
+=== "Atlas 300 inference products"
 
-::::
+    ```bash
+    #!/bin/sh
+    export VLLM_USE_MODELSCOPE=True
+    export MODEL_PATH="PaddlePaddle/PaddleOCR-VL"
+    export TASK_QUEUE_ENABLE=1
+    export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
 
-::::{tab-item} Atlas 300 inference products
-:sync: atlas300
+    vllm serve ${MODEL_PATH} \
+              --max_model_len 16384 \
+              --served-model-name PaddleOCR-VL-0.9B \
+              --trust-remote-code \
+              --no-enable-prefix-caching \
+              --mm-processor-cache-gb 0 \
+              --dtype float16 \
+              --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+              --additional_config '{"ascend_compilation_config": {"fuse_norm_quant": false}, "enable_cpu_binding":true}' \
+              --port 8000
+    ```
 
-```bash
-#!/bin/sh
-export VLLM_USE_MODELSCOPE=True
-export MODEL_PATH="PaddlePaddle/PaddleOCR-VL"
-export TASK_QUEUE_ENABLE=1
-export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
+!!! note
 
-vllm serve ${MODEL_PATH} \
-          --max_model_len 16384 \
-          --served-model-name PaddleOCR-VL-0.9B \
-          --trust-remote-code \
-          --no-enable-prefix-caching \
-          --mm-processor-cache-gb 0 \
-          --dtype float16 \
-          --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-          --additional_config '{"ascend_compilation_config": {"fuse_norm_quant": false}, "enable_cpu_binding":true}' \
-          --port 8000
-```
+    On Atlas 300 inference products:
 
-::::
-:::::
-
-:::{note}
-On Atlas 300 inference products:
-
-- Only `float16` dtype is supported.
-- The `--max_model_len` option is added to prevent errors when generating the attention operator mask.
-- Graph compilation (`--compilation-config`) requires **CANN version >= 9.0.0**. If your CANN version is lower, please revert to eager mode by replacing the `--compilation-config` argument with `--enforce-eager`.
-- The `fuse_norm_quant` option in `--additional_config` is disabled (`false`) because it is not supported by the graph compilation on this hardware. Keep this setting unchanged.
-:::
+    - Only `float16` dtype is supported.
+    - The `--max_model_len` option is added to prevent errors when generating the attention operator mask.
+    - Graph compilation (`--compilation-config`) requires **CANN version >= 9.0.0**. If your CANN version is lower, please revert to eager mode by replacing the `--compilation-config` argument with `--enforce-eager`.
+    - The `fuse_norm_quant` option in `--additional_config` is disabled (`false`) because it is not supported by the graph compilation on this hardware. Keep this setting unchanged.
 
 Key Parameter Descriptions:
 
@@ -193,71 +173,61 @@ Not supported yet.
 
 In the above example, we demonstrated how to use vLLM to infer the PaddleOCR-VL-0.9B model. Typically, we also need to integrate the PP-DocLayoutV2 model to fully unleash the capabilities of the PaddleOCR-VL model, making it more consistent with the examples provided by the official PaddlePaddle documentation.
 
-:::{note}
-Use separate virtual environments for VLLM and PP-DocLayoutV2 to prevent dependency conflicts.
-:::
+!!! note
 
-:::::{tab-set}
-:sync-group: install
+    Use separate virtual environments for VLLM and PP-DocLayoutV2 to prevent dependency conflicts.
 
-::::{tab-item} A2 series
-:sync: A2
+=== "A2 series"
 
-The A2 series device supports inference using the PaddlePaddle framework.
+    The A2 series device supports inference using the PaddlePaddle framework.
 
-1. Pull the PaddlePaddle-compatible CANN image
+    1. Pull the PaddlePaddle-compatible CANN image
 
-    ```bash
-    docker pull ccr-2vdh3abv-pub.cnc.bj.baidubce.com/device/paddle-npu:cann800-ubuntu20-npu-910b-base-aarch64-gcc84
-    ```
+        ```bash
+        docker pull ccr-2vdh3abv-pub.cnc.bj.baidubce.com/device/paddle-npu:cann800-ubuntu20-npu-910b-base-aarch64-gcc84
+        ```
 
-    Start the container using the following command:
+        Start the container using the following command:
 
-    ```bash
-    docker run -it --name paddle-npu-dev -v $(pwd):/work \
-        --privileged --network=host --shm-size=128G -w=/work \
-        -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
-        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-        -v /usr/local/dcmi:/usr/local/dcmi \
-        -e ASCEND_RT_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" \
-        ccr-2vdh3abv-pub.cnc.bj.baidubce.com/device/paddle-npu:cann800-ubuntu20-npu-910b-base-$(uname -m)-gcc84 /bin/bash
-    ```
+        ```bash
+        docker run -it --name paddle-npu-dev -v $(pwd):/work \
+            --privileged --network=host --shm-size=128G -w=/work \
+            -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
+            -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+            -v /usr/local/dcmi:/usr/local/dcmi \
+            -e ASCEND_RT_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" \
+            ccr-2vdh3abv-pub.cnc.bj.baidubce.com/device/paddle-npu:cann800-ubuntu20-npu-910b-base-$(uname -m)-gcc84 /bin/bash
+        ```
 
-2. Install [PaddlePaddle](https://www.paddlepaddle.org.cn/install/quick?docurl=undefined) and [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR)
+    2. Install [PaddlePaddle](https://www.paddlepaddle.org.cn/install/quick?docurl=undefined) and [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR)
 
-    ```bash
-    python -m pip install paddlepaddle==3.2.0
-    wget https://paddle-whl.bj.bcebos.com/stable/npu/paddle-custom-npu/paddle_custom_npu-3.2.0-cp310-cp310-linux_aarch64.whl
-    pip  install  paddle_custom_npu-3.2.0-cp310-cp310-linux_aarch64.whl
-    python -m pip install -U "paddleocr[doc-parser]"
-    pip install safetensors
-    ```
+        ```bash
+        python -m pip install paddlepaddle==3.2.0
+        wget https://paddle-whl.bj.bcebos.com/stable/npu/paddle-custom-npu/paddle_custom_npu-3.2.0-cp310-cp310-linux_aarch64.whl
+        pip  install  paddle_custom_npu-3.2.0-cp310-cp310-linux_aarch64.whl
+        python -m pip install -U "paddleocr[doc-parser]"
+        pip install safetensors
+        ```
 
-    :::{note}
-    The OpenCV component may be missing:
+        !!! note
 
-    ```bash
-    apt-get update
-    apt-get install -y libgl1 libglib2.0-0
-    ```
+                The OpenCV component may be missing:
 
-    CANN-8.0.0 does not support some versions of NumPy and OpenCV. It is recommended to install the specified versions.
+                ```bash
+                apt-get update
+                apt-get install -y libgl1 libglib2.0-0
+                ```
 
-    ```bash
-    python -m pip install numpy==1.26.4
-    python -m pip install opencv-python==3.4.18.65
-    ```
-    :::
+                CANN-8.0.0 does not support some versions of NumPy and OpenCV. It is recommended to install the specified versions.
 
-::::
+                ```bash
+                python -m pip install numpy==1.26.4
+                python -m pip install opencv-python==3.4.18.65
+                ```
 
-::::{tab-item} Atlas 300 inference products
-:sync: atlas300
+=== "Atlas 300 inference products"
 
-The Atlas 300 inference products support only the OM model inference. For details about the process, see the guide provided in [ModelZoo](https://gitcode.com/Ascend/ModelZoo-PyTorch/tree/master/ACL_PyTorch/built-in/ocr/PP-DocLayoutV2).
-
-::::
-:::::
+    The Atlas 300 inference products support only the OM model inference. For details about the process, see the guide provided in [ModelZoo](https://gitcode.com/Ascend/ModelZoo-PyTorch/tree/master/ACL_PyTorch/built-in/ocr/PP-DocLayoutV2).
 
 ##### 5.3.2 Using vLLM as the backend, combined with PP-DocLayoutV2 for offline inference
 

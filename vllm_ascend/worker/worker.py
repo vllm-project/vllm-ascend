@@ -21,6 +21,7 @@ import copy
 import gc
 import logging
 from types import NoneType
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -29,7 +30,7 @@ import vllm.envs as envs_vllm
 from torch_npu.op_plugin.atb._atb_ops import _register_atb_extensions
 from torch_npu.profiler import dynamic_profile as dp
 from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
-from vllm.distributed import ensure_model_parallel_initialized, init_distributed_environment
+from vllm.distributed import ensure_model_parallel_initialized, get_pcp_group, init_distributed_environment
 from vllm.distributed.ec_transfer import ensure_ec_transfer_initialized
 from vllm.distributed.kv_transfer import (
     ensure_kv_transfer_initialized,
@@ -757,12 +758,19 @@ class NPUWorker(WorkerBase):
                 WeightTransferEngineFactory,
             )
 
-            # main: create_engine takes (config, parallel_config, model)
-            self.weight_transfer_engine = WeightTransferEngineFactory.create_engine(
-                self.vllm_config.weight_transfer_config,
-                self.vllm_config.parallel_config,
-                self.model_runner.get_model(),
-            )
+            if vllm_version_is("0.23.0"):
+                self.weight_transfer_engine = WeightTransferEngineFactory.create_engine(
+                    self.vllm_config.weight_transfer_config,
+                    self.vllm_config.parallel_config,
+                    self.model_runner.get_model(),
+                )
+            else:
+                self.weight_transfer_engine = WeightTransferEngineFactory.create_engine(
+                    self.vllm_config.weight_transfer_config,
+                    self.vllm_config,
+                    self.device,
+                    self.model_runner.get_model(),
+                )
 
     def compile_or_warm_up_model(self) -> CompilationTimes:
         # Note: need to adapt for graph mode.
@@ -942,7 +950,7 @@ class NPUWorker(WorkerBase):
 
     def get_kv_connector_handshake_metadata(
         self,
-    ) -> dict[int, KVConnectorHandshakeMetadata] | dict[tuple[int, int], KVConnectorHandshakeMetadata] | None:
+    ) -> dict[tuple[int, ...], KVConnectorHandshakeMetadata] | None:
         """Get KV connector metadata from this worker if available."""
         if not has_kv_transfer_group():
             return None
@@ -955,6 +963,10 @@ class NPUWorker(WorkerBase):
             return None
         tp_rank = get_tp_group().rank_in_group
         pp_rank = get_pp_group().rank_in_group
+        pcp_size = get_pcp_group().world_size
+        if pcp_size > 1:
+            pcp_rank = get_pcp_group().rank_in_group
+            return {(pp_rank, pcp_rank, tp_rank): metadata}
         return {(pp_rank, tp_rank): metadata}
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
@@ -1078,6 +1090,12 @@ class NPUWorker(WorkerBase):
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         return self.model_runner.take_draft_token_ids()
+
+    def update_config(self, overrides: dict[str, Any]) -> None:
+        self.model_runner.update_config(overrides)
+
+    def reload_weights(self, *args, **kwargs) -> None:
+        self.model_runner.reload_weights(*args, **kwargs)
 
     def check_health(self) -> None:
         import subprocess
