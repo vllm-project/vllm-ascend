@@ -720,6 +720,74 @@ class NPUModelRunner(GPUModelRunner):
             return self.model.unwrap()
         return self.model
 
+    def _is_pd_prefill_worker(self) -> bool:
+        return self.is_kv_producer and not self.is_kv_consumer
+
+    def _apply_pp_sampled_tokens_from_scheduler_output(
+        self,
+        scheduler_output: "SchedulerOutput",
+    ) -> None:
+        pp = get_pp_group()
+        if (
+            not self.use_async_scheduling
+            or pp.is_last_rank
+            or self._is_pd_prefill_worker()
+        ):
+            return
+
+        self.input_batch.prev_sampled_token_ids = None
+        self.input_batch.prev_req_id_to_index = {}
+
+        req_data = scheduler_output.scheduled_cached_reqs
+        new_token_ids = req_data.new_token_ids
+        if not new_token_ids:
+            return
+
+        num_prev_reqs = self.input_batch.num_reqs
+        if num_prev_reqs == 0:
+            return
+
+        discard_req_indices = np.nonzero(
+            self.discard_request_mask.np[:num_prev_reqs]
+        )[0]
+        discarded = set(discard_req_indices)
+        prev_req_indices = {
+            req_id: req_index
+            for req_index, req_id in enumerate(
+                self.input_batch.req_ids[:num_prev_reqs]
+            )
+            if req_index not in discarded
+        }
+        prev_req_id_to_index: dict[str, int] = {}
+        prev_sampled_token_ids = [PLACEHOLDER_TOKEN_ID] * num_prev_reqs
+
+        for req_index, req_id in enumerate(req_data.req_ids):
+            if req_index >= len(new_token_ids):
+                break
+            token_ids = new_token_ids[req_index]
+            if not token_ids or req_data.num_output_tokens[req_index] <= 0:
+                continue
+            prev_req_index = prev_req_indices.get(req_id)
+            if prev_req_index is None:
+                continue
+            prev_req_id_to_index[req_id] = prev_req_index
+            prev_sampled_token_ids[prev_req_index] = token_ids[-1]
+            if (req_state := self.requests.get(req_id)) is not None:
+                req_state.output_token_ids.append(PLACEHOLDER_TOKEN_ID)
+            pos = self.input_batch.num_tokens_no_spec[prev_req_index]
+            self.input_batch.is_token_ids[prev_req_index, pos] = True
+            self.input_batch.num_tokens_no_spec[prev_req_index] = pos + 1
+
+        if not prev_req_id_to_index:
+            return
+
+        self.input_batch.prev_req_id_to_index = prev_req_id_to_index
+        self.input_batch.prev_sampled_token_ids = torch.tensor(
+            prev_sampled_token_ids,
+            dtype=torch.int32,
+            device=self.device,
+        ).unsqueeze(1)
+
     def _update_states(self, scheduler_output: "SchedulerOutput") -> Callable | None:
         # Temporary rewind guard for KV-load-failure recompute.
         # This can be removed after the upstream fix is merged.
@@ -735,6 +803,7 @@ class NPUModelRunner(GPUModelRunner):
                 if num_computed_tokens < req_state.num_computed_tokens:
                     req_state.prev_num_draft_len = 0
 
+        self._apply_pp_sampled_tokens_from_scheduler_output(scheduler_output)
         return super()._update_states(scheduler_output)
 
     def _pad_query_start_loc_for_fia(
@@ -1931,6 +2000,13 @@ class NPUModelRunner(GPUModelRunner):
                 num_scheduled_tokens=num_scheduled_tokens,
                 num_rejected_tokens_gpu=num_rejected_tokens_gpu,
             )
+            if get_pp_group().world_size > 1 and hasattr(
+                self.drafter, "take_last_draft_probs"
+            ):
+                draft_probs = self.drafter.take_last_draft_probs()
+                if draft_probs is not None:
+                    self._draft_probs = draft_probs
+                    self._draft_prob_req_ids = self.input_batch.req_ids.copy()
         else:
             raise ValueError(f"Unknown speculative decoding method: {self.speculative_config.method}")
 
@@ -1944,6 +2020,7 @@ class NPUModelRunner(GPUModelRunner):
         if self.use_async_scheduling and not (
             scheduler_output.has_structured_output_requests
             or self.input_batch.sampling_metadata.output_token_ids
+            or get_pp_group().world_size > 1
         ):
             return
         self._draft_token_req_ids = self.input_batch.req_ids.copy()
@@ -2425,15 +2502,10 @@ class NPUModelRunner(GPUModelRunner):
         kv_connector_output = self.kv_connector_output
         self.kv_connector_output = None
         pp = get_pp_group()
-        skip_pp_pd_broadcast = self.is_kv_producer and pp.world_size > 1
+        use_pp_spec_decode = self.speculative_config is not None and pp.world_size > 1
 
         if self.execute_model_state is None:
             # Nothing to do (PP non-final rank case), output isn't used.
-            # receive sampled token ids from the last PP rank when using
-            # async scheduling + pipeline parallelism so downstream code
-            # (e.g., PCP input preparation) can access them.
-            if self.use_async_scheduling and pp.world_size > 1 and not skip_pp_pd_broadcast:
-                self._pp_receive_prev_sampled_token_ids_to_input_batch()
             if not kv_connector_output:
                 return None  # noqa
             # In case of PP with kv transfer, we need to pass through the
@@ -2501,6 +2573,27 @@ class NPUModelRunner(GPUModelRunner):
             )
             self._copy_draft_token_ids_to_cpu(scheduler_output)
 
+        output_spec_token_ids = None
+        use_padded_batch = False
+        early_pp_padded_drafter = False
+        if self.speculative_config:
+            use_padded_batch = (
+                self.speculative_config.use_eagle()
+                or self.speculative_config.uses_draft_model()
+                or self.speculative_config.uses_extract_hidden_states()
+                or self.speculative_config.use_ngram_gpu()
+            ) and not self.speculative_config.disable_padded_drafter_batch
+            early_pp_padded_drafter = (
+                use_pp_spec_decode
+                and not self.use_async_scheduling
+                and use_padded_batch
+            )
+            if early_pp_padded_drafter:
+                self._draft_token_ids = None
+                self._draft_token_req_ids = None
+                with record_function_or_nullcontext("draft_token"):
+                    propose_draft_token_ids(sampler_output.sampled_token_ids)
+
         (
             logprobs_lists,
             valid_sampled_token_ids,
@@ -2519,17 +2612,10 @@ class NPUModelRunner(GPUModelRunner):
 
         with record_function_or_nullcontext("draft_token"):
             if self.speculative_config:
-                use_padded_batch = (
-                    self.speculative_config
-                    and (
-                        self.speculative_config.use_eagle()
-                        or self.speculative_config.uses_draft_model()
-                        or self.speculative_config.uses_extract_hidden_states()
-                        or self.speculative_config.use_ngram_gpu()
-                    )
-                    and not self.speculative_config.disable_padded_drafter_batch
-                )
-                if use_padded_batch:
+                if not early_pp_padded_drafter:
+                    self._draft_token_ids = None
+                    self._draft_token_req_ids = None
+                if use_padded_batch and not early_pp_padded_drafter:
                     # EAGLE speculative decoding can use the GPU sampled tokens
                     # as inputs, and does not need to wait for bookkeeping to finish.
                     propose_draft_token_ids(sampler_output.sampled_token_ids)
@@ -2544,10 +2630,27 @@ class NPUModelRunner(GPUModelRunner):
             if self.speculative_config is not None:
                 self.finalize_kv_connector()
 
+            draft_token_ids = self._draft_token_ids if use_pp_spec_decode else None
+            if draft_token_ids is not None:
+                if isinstance(draft_token_ids, torch.Tensor):
+                    num_reqs = draft_token_ids.shape[0]
+                    draft_ids_list = draft_token_ids[:num_reqs].cpu().tolist()
+                    draft_req_ids = self._draft_token_req_ids
+                else:
+                    draft_ids_list = draft_token_ids
+                    draft_req_ids = self.input_batch.req_ids
+                if draft_ids_list and draft_req_ids:
+                    draft_by_req_id = dict(zip(draft_req_ids, draft_ids_list))
+                    output_spec_token_ids = [
+                        draft_by_req_id.get(req_id, [])
+                        for req_id in req_ids_output_copy
+                    ]
+
         model_runner_output = ModelRunnerOutput(
             req_ids=req_ids_output_copy,
             req_id_to_index=req_id_to_index_output_copy,
             sampled_token_ids=valid_sampled_token_ids,
+            spec_token_ids=output_spec_token_ids,
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
             kv_connector_output=kv_connector_output,
@@ -2573,13 +2676,6 @@ class NPUModelRunner(GPUModelRunner):
             ):
                 global_stream().wait_event(self.sampling_done_event)
                 self._update_states_after_model_execute(sampler_output.sampled_token_ids, scheduler_output)
-
-        # In async scheduling + PP, broadcast sampled token ids from the
-        # last PP rank so other PP ranks can receive them without going
-        # through the scheduler/engine IPC path.
-        if self.use_async_scheduling:
-            if pp.world_size > 1 and pp.is_last_rank and not skip_pp_pd_broadcast:
-                self._pp_broadcast_prev_sampled_token_ids(sampler_output.sampled_token_ids)
 
         if not self.use_async_scheduling:
             if self.routed_experts_initialized:
@@ -2651,9 +2747,14 @@ class NPUModelRunner(GPUModelRunner):
         if self.input_batch.sampling_metadata.top_k is not None and get_ascend_config().enable_reduce_sample:
             max_topk = self.input_batch.top_k_cpu[self.input_batch.top_k_cpu < logits.shape[1]].max()
             self.rejection_sampler.prepare_sampling(max_topk)
+        draft_probs = (
+            self._get_spec_decode_draft_probs(spec_decode_metadata)
+            if get_pp_group().world_size > 1
+            else None
+        )
         sampler_output = self.rejection_sampler(
             spec_decode_metadata,
-            None,  # draft_probs
+            draft_probs,
             logits,
             sampling_metadata,
         )
