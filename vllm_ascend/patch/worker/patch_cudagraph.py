@@ -2,6 +2,8 @@ from vllm.config import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 
+from vllm_ascend.utils import vllm_version_is
+
 
 def _create_padded_batch_descriptor(
     self,
@@ -20,8 +22,12 @@ def _create_padded_batch_descriptor(
         and self.cudagraph_mode.has_mode(CUDAGraphMode.FULL)
         and self.cudagraph_mode != CUDAGraphMode.FULL
     ):
-        num_reqs = min(num_tokens_padded // uniform_decode_query_len, max_num_seqs)
-        assert num_tokens_padded % uniform_decode_query_len == 0
+        if vllm_version_is("0.24.0") or num_tokens_padded % uniform_decode_query_len == 0:
+            num_reqs = min(num_tokens_padded // uniform_decode_query_len, max_num_seqs)
+            assert num_tokens_padded % uniform_decode_query_len == 0
+        else:
+            uniform_decode = False
+            num_reqs = min(num_tokens_padded, max_num_seqs)
     else:
         uniform_decode = False
         num_reqs = min(num_tokens_padded, max_num_seqs)
