@@ -4,7 +4,10 @@ hide:
   - toc
 ---
 
-![vLLM](./logos/vllm-ascend-logo-text-light.png)
+<p class="home-hero">
+<img class="md-logo__img--light" src="./logos/vllm-ascend-logo-text-light.png#only-light" alt="vLLM">
+<img class="md-logo__img--dark" src="./logos/vllm-ascend-logo-text-dark.png#only-dark" alt="vLLM">
+</p>
 
 <p style="text-align:center">
 <strong>vLLM Ascend Plugin

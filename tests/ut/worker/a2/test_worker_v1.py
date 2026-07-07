@@ -1342,6 +1342,33 @@ class TestNPUWorker(TestBase):
             # When both flags are False, return EMPTY_MODEL_RUNNER_OUTPUT directly.
             self.assertEqual(result, mock_empty_output)
 
+    def test_update_config(self):
+        """Test update_config delegates to model_runner.update_config"""
+        from vllm_ascend.worker.worker import NPUWorker
+
+        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+            worker = NPUWorker()
+            worker.model_runner = MagicMock()
+
+            overrides = {"load_config": {"load_format": "dummy"}}
+            worker.update_config(overrides)
+
+            worker.model_runner.update_config.assert_called_once_with(overrides)
+
+    def test_reload_weights(self):
+        """Test reload_weights delegates to model_runner.reload_weights"""
+        from vllm_ascend.worker.worker import NPUWorker
+
+        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+            worker = NPUWorker()
+            worker.model_runner = MagicMock()
+
+            worker.reload_weights(weights_path="/tmp/weights", is_checkpoint_format=True)
+
+            worker.model_runner.reload_weights.assert_called_once_with(
+                weights_path="/tmp/weights", is_checkpoint_format=True
+            )
+
 
 class TestNPUWorkerWeightUpdate(TestBase):
     def _make_worker(self, engine=None):
