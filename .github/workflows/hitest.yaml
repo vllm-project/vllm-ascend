@@ -57,6 +57,7 @@ jobs:
           X_APIG_APPCODE: ${{ secrets.AUROGON_APPCODE }}
           APP_KEY: ${{ secrets.AUROGON_APPKEY }}
           APP_SECRET: ${{ secrets.AUROGON_APPSECRET }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           echo "====DEBUG ENV START===="
           echo "AUROGON_API_PREFIX=$AUROGON_API_PREFIX"
