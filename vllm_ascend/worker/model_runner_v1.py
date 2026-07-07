@@ -4971,13 +4971,21 @@ class NPUModelRunner(GPUModelRunner):
                     min_cg_attn_backend = attn_backend.__name__
 
         with update_pass_config(self):
+            # vLLM PR #45953 inserted ``use_v2_model_runner`` into this signature
+            # (before ``tensor_parallel_size``) and added the dynamic-SD full-graph
+            # sizing to Model Runner V2. This is the V1 model runner, which relies
+            # on ``resolve_cudagraph_mode_and_sizes`` to perform the spec-decode
+            # cudagraph-size adjustment itself, so it must pass
+            # ``use_v2_model_runner=False``. Bind the trailing arguments by keyword
+            # so the call is robust to further parameter-order changes.
             cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
                 min_cg_support,
                 min_cg_attn_backend,
                 self.uniform_decode_query_len,
-                self.parallel_config.tensor_parallel_size,
-                self.kv_cache_config,
-                self.max_num_reqs,
+                use_v2_model_runner=False,
+                tensor_parallel_size=self.parallel_config.tensor_parallel_size,
+                kv_cache_config=self.kv_cache_config,
+                max_num_reqs=self.max_num_reqs,
                 is_profiling=is_profiling,
             )
             self.cudagraph_dispatcher.initialize_cudagraph_keys(
