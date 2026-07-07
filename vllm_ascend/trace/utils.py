@@ -7,17 +7,22 @@
 import logging
 import multiprocessing
 import os
-from pathlib import Path
+import re
 import socket
 import threading
 import time
 import uuid
+from contextlib import suppress
+from pathlib import Path
 from typing import Any
 
 PREFILL = "prefill"
 DECODE = "decode"
 
 _LOGGER_LOCK = threading.Lock()
+_VLLM_INTERNAL_REQUEST_ID_RE = re.compile(
+    r"^(?P<external>.+)-[0-9a-fA-F]{8}$"
+)
 
 
 def safe_print(directory: str, message: str) -> None:
@@ -62,7 +67,30 @@ def get_role() -> str:
     return os.getenv("ROLE", "unknown_role")
 
 
+def _request_id_from_attrs(obj: Any, default: str = "unknown") -> str:
+    for attr in ("external_req_id", "raw_request_id", "request_id", "req_id"):
+        value = getattr(obj, attr, None)
+        if value is not None:
+            return str(value)
+    return default
+
+
+def normalize_request_id(request_id: Any, default: str = "unknown") -> str:
+    """Return the external request ID used to aggregate trace records."""
+    if isinstance(request_id, str):
+        request_id_str = request_id
+    else:
+        fallback = str(request_id) if default == "unknown" else default
+        request_id_str = _request_id_from_attrs(request_id, fallback)
+
+    match = _VLLM_INTERNAL_REQUEST_ID_RE.fullmatch(request_id_str)
+    if match:
+        return match.group("external")
+    return request_id_str
+
+
 def log_action(action: str, request_id: Any, role: str | None = None) -> None:
+    request_id = normalize_request_id(request_id)
     safe_print(
         trace_output_directory,
         f"<<<Action: {action}; Timestamp:{time.time()}; "
@@ -90,24 +118,16 @@ def get_or_set_chat_request_id(request: Any, raw_request: Any | None = None) -> 
         base_id = getattr(request, "request_id", None)
     if base_id is None:
         base_id = uuid.uuid4().hex
-        try:
-            setattr(request, "request_id", base_id)
-        except Exception:
-            pass
+        with suppress(Exception):
+            request.request_id = base_id
 
     request_id = str(base_id)
     if not request_id.startswith("chatcmpl-"):
         request_id = f"chatcmpl-{request_id}"
-    try:
-        setattr(request, "raw_request_id", request_id)
-    except Exception:
-        pass
+    with suppress(Exception):
+        request.raw_request_id = request_id
     return request_id
 
 
 def request_id_from_obj(obj: Any, default: str = "unknown") -> str:
-    for attr in ("request_id", "req_id", "raw_request_id"):
-        value = getattr(obj, attr, None)
-        if value is not None:
-            return str(value)
-    return default
+    return normalize_request_id(_request_id_from_attrs(obj, default))

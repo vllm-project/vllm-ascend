@@ -4,14 +4,26 @@
 # NOTE: This optional report parser writes .xlsx files through pandas/openpyxl.
 # Install those packages in the log-analysis environment before running it.
 
-import csv
-import re
 import os
-from collections import defaultdict
+import re
 import sys
-import pandas as pd
-import openpyxl
 import traceback
+from collections import defaultdict
+
+import openpyxl  # noqa: F401
+import pandas as pd
+
+_VLLM_INTERNAL_REQUEST_ID_RE = re.compile(
+    r"^(?P<external>.+)-[0-9a-fA-F]{8}$"
+)
+
+
+def _normalize_request_id(request_id):
+    # vLLM V1 may rewrite EngineCore request IDs as "<external>-<8 hex>".
+    match = _VLLM_INTERNAL_REQUEST_ID_RE.fullmatch(request_id)
+    if match:
+        return match.group("external")
+    return request_id
 
 
 def _collect_engine_core_timing(root_dir):
@@ -30,7 +42,7 @@ def _collect_engine_core_timing(root_dir):
                 continue
             log_file_path = os.path.join(dirpath, filename)
             try:
-                with open(log_file_path, "r", encoding="latin1") as file:
+                with open(log_file_path, encoding="latin1") as file:
                     for line in file:
                         if "profile_mainmodel:" in line:
                             _get_main_model_info(engine_core_info, line)
@@ -153,7 +165,7 @@ def _get_final_df(data_by_request, request_role):
             continue
         row = {"RequestID": request_id, "P_NODE": prefill, "D_NODE": decode}
         # Add timestamps for each action, "-" for missing actions
-        for action in action_map.keys():
+        for action in action_map:
             row[action] = actions.get(action, "-")
         data.append(row)
 
@@ -181,7 +193,7 @@ def _get_step_line(
         log_file_path = os.path.join(dirpath, filename)
         print(f"Processing log file: {log_file_path}")
         try:
-            with open(log_file_path, "r", encoding="latin1") as file:
+            with open(log_file_path, encoding="latin1") as file:
                 for line in file:
                     # main model info
                     if "profile_mainmodel:" in line:
@@ -196,7 +208,7 @@ def _get_step_line(
                         st_idx = line.find("profile:") + len("profile: ")
                         line = line[st_idx:]
                         # if "prefill" in line:
-                        if not "[]" in line:
+                        if "[]" not in line:
                             engine_step_lines.append(line)
                         else:
                             line = _set_decode_info(
@@ -210,6 +222,7 @@ def _get_step_line(
                         match = re.match(pattern, line.strip())
                         if match:
                             action, timestamp, request_id, role = match.groups()
+                            request_id = _normalize_request_id(request_id.strip())
                             role, ip = role.split("_")
                             action = action.strip()
                             timestamp = float(timestamp)
@@ -385,7 +398,19 @@ def _set_decode_info(decode_engine_step_lines, engine_core_info, line):
         )
         line = (
             line.strip()
-            + f"|{info.get('main_model_start_time')}|{info.get('main_model_end_time')}|{info.get('execute_main_model_cost_time')}|{info.get('mtp_model_start_time')}|{info.get('mtp_model_end_time')}|{info.get('execute_mtp_model_cost_time')}\n"
+            + "|"
+            + "|".join(
+                str(info.get(key))
+                for key in (
+                    "main_model_start_time",
+                    "main_model_end_time",
+                    "execute_main_model_cost_time",
+                    "mtp_model_start_time",
+                    "mtp_model_end_time",
+                    "execute_mtp_model_cost_time",
+                )
+            )
+            + "\n"
         )
     decode_engine_step_lines.append(line)
     return line
