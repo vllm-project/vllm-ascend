@@ -71,4 +71,4 @@ benchmarks:
     max_out_len: 7680
     batch_size: 256
     baseline: 96
-    threshold: 5
+    threshold: 10

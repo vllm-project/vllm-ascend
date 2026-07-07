@@ -112,39 +112,58 @@
 #       Remove this patch if upstream provides an official NPU graph-capture
 #       guidance / auto-configuration path for HCCL.
 #
-# ** 7. File: platform/patch_chat_usage_accounting.py**
+#   3. `vllm.config.speculative.SpeculativeConfig._verify_args`
+#    Why:
+#       Upstream vLLM's eagle3/extract_hidden_states restricts target model types
+#       via a whitelist. MiniMax-M2 should be allowed once the worker-side model
+#       can emit auxiliary hidden states.
+#    How：
+#       Monkey-patch `_verify_args` to bypass only the whitelist ValueError for
+#       MiniMax model_type when method is eagle3/extract_hidden_states.
+#       SpeculativeConfig is a Pydantic dataclass (`@config`); init validation calls
+#       `__pydantic_decorators__.model_validators["_verify_args"].func`, so that
+#       `Decorator.func` must be replaced (not only `SpeculativeConfig._verify_args`),
+#       then `rebuild_dataclass(SpeculativeConfig, force=True)`.
+#       If `VllmConfig` was imported earlier, also `rebuild_dataclass(VllmConfig, ...)`
+#       so nested `speculative_config` validation does not use a stale schema.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/37512
+#    Future Plan:
+#       Remove this patch once upstream whitelist includes MiniMax.
+#
+#   4. `vllm.model_executor.models.registry` (spec decode aliases)
+#    Why:
+#       Some Eagle3 draft checkpoints may declare a MiniMax-specific architecture
+#       string while reusing the shared Eagle3 implementation.
+#    How：
+#       Register `Eagle3MiniMaxM2ForCausalLM` as an alias pointing to the
+#       existing Eagle3 implementation in the speculative decoding registry.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/37512
+#    Future Plan:
+#       Drop the alias once upstream registry includes it or the checkpoint
+#       standardizes architecture strings.
+#
+# ** 7. File: platform/patch_minimax_usage_accounting.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.entrypoints.openai.chat_completion.serving.OpenAIServingChat`
+#      `vllm.reasoning.minimax_m2_reasoning_parser`
 #    Why:
-#       Chat usage accounting needs to report
+#       MiniMax-M2 chat usage accounting needs to report
 #       `completion_tokens_details.reasoning_tokens` for both streaming and
-#       non-streaming chat completions.
+#       non-streaming chat completions without slowing other reasoning models.
 #    How：
-#       Extend `UsageInfo` and update chat usage construction to count reasoning
-#       tokens from raw output token ids when the active reasoning parser
-#       supports token counting.
+#       Monkey-patch MiniMax reasoning token counters and bind usage-accounting
+#       wrappers only on MiniMax chat-serving instances.
 #    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/37955
+#       https://github.com/vllm-project/vllm/pull/45701
+#       https://github.com/vllm-project/vllm/pull/45802
 #    Future Plan:
-#       Remove this patch once the runtime vLLM version contains the upstream
-#       reasoning usage-accounting support.
+#       Remove this patch after both upstream vLLM PRs are merged and the
+#       supported vLLM revision used by vLLM Ascend includes them through the
+#       regular main-to-main sync.
 #
-# ** 7a. File: platform/patch_minimax_usage_accounting.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.reasoning.minimax_m2_reasoning_parser`
-#    Why:
-#       MiniMax-M2 reasoning parsers need token-count support for the generic
-#       chat usage-accounting wrapper.
-#    How：
-#       Monkey-patch MiniMax reasoning token counters so usage accounting can
-#       derive reasoning-token counts from raw output token ids.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/37955
-#    Future Plan:
-#       Remove this patch once the runtime vLLM version contains the upstream
-#       MiniMax reasoning-token counting fix.
-#
-# ** 7b. File: platform/patch_glm_tool_call_streaming.py**
+# ** 7a. File: platform/patch_glm_tool_call_streaming.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.entrypoints.openai.chat_completion.serving.OpenAIServingChat`
 #    Why:
@@ -164,7 +183,7 @@
 #       Remove this patch once the supported vLLM version contains the upstream
 #       GLM tool-call final chunk fixes.
 #
-# ** 7c. File: platform/patch_glm47_tool_call_parser.py**
+# ** 7b. File: platform/patch_glm47_tool_call_parser.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.tool_parsers.glm47_moe_tool_parser.Glm47MoeModelToolParser`
 #    Why:
@@ -741,14 +760,16 @@
 #       Remove this patch when vllm supports rotary quant or pluggable `MultiTokenPredictorLayer`.
 # ** 19a. File: worker/patch_deepseek_v2.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.models.deepseek_v2.DeepseekV2Attention.__init__`
+#   1. `vllm.model_executor.models.deepseek_v2.DeepseekV2MLAAttention.__init__`
 #    Why:
-#       GLM/DeepSeek DSA models can skip topk on selected layers. Those layers
-#       should not initialize `Indexer`, while MTP layers still need full indexer
-#       initialization.
+#       GLM-5.2 checkpoints omit `Indexer` weights on shared-indexer layers,
+#       while GLM-5.1 IndexCache overrides only skip top-k computation and keep
+#       per-layer `Indexer` weights. Treating both layouts alike breaks GLM-5.1
+#       weight loading.
 #    How:
-#       Wrap `DeepseekV2Attention.__init__` and skip `Indexer` construction on
-#       backbone layers whose config marks topk as skipped.
+#       Skip `Indexer` construction only when the layer both skips top-k and is
+#       explicitly marked `shared` in `indexer_types`. MTP layers always retain
+#       a complete `Indexer`.
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/pull/45895
 #    Future Plan:
@@ -821,6 +842,30 @@
 #    Future Plan:
 #       The maybe_remap_kv_scale_name function of the community is reconstructed to support
 #       multiple backends.
+# ** 21b. File: worker/patch_process_weights_after_loading.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.model_loader.utils.process_weights_after_loading`
+#      `vllm.model_executor.model_loader.base_loader.process_weights_after_loading`
+#      and imported references in vllm-ascend model loaders
+#    Why:
+#       DSA attention is implemented in vllm-ascend as the plugin layer
+#       `DSAAttention`. Upstream vLLM only runs post-load attention weight
+#       processing for built-in attention classes, so
+#       `DSAAttention.process_weights_after_loading()` is skipped in the
+#       original loader flow. DSV4 DSA-CP o-proj TP initialization must run in
+#       this post-load phase rather than being initialized lazily in forward.
+#    How:
+#       Rebind the upstream `process_weights_after_loading` helper, including
+#       already-imported loader references, so `DSAAttention` participates in
+#       the same post-load traversal while preserving the original quant-method
+#       and torchao reload behavior.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm-ascend/pull/10694
+#       https://github.com/vllm-project/vllm/pull/46828
+#    Future Plan:
+#       Remove this patch once the supported vLLM version includes PR #46828.
+#       Then register `DSAAttention` through vLLM's post-load weight-processing
+#       registry instead of monkey-patching model-loader helpers.
 # ** 22. File: worker/patch_v2/patch_input_batch.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.input_batch.InputBatch`
@@ -932,12 +977,43 @@
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.single_type_kv_cache_manager.MambaManager`
 #    Why:
-#       Upstream hybrid prefix cache lookup does not support PCP/DCP.
+#       1. Upstream hybrid prefix cache lookup does not support PCP/DCP.
+#       2. Upstream MambaManager#get_num_blocks_to_allocate give the
+#          wrong number of blocks when an external cache hit occurred
 #    How:
-#       Replace MambaManager with AscendMambaManager for prefix cache hit lookup
-#       on hybrid Mamba paths (logical mamba block_size when caching is enabled).
+#       1. Replace MambaManager with AscendMambaManager for prefix cache hit lookup
+#          on hybrid Mamba paths (logical mamba block_size when caching is enabled).
+#       2. Override the get_num_blocks_to_allocate method to fix the number of blocks
+#          when hitting the external cache and loading synchronously
 #    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/40996
+#       1. https://github.com/vllm-project/vllm/pull/40996
+#       2. https://github.com/vllm-project/vllm/pull/46892
 #    Future Plan:
-#       Upstream PR #40996 adds hybrid prefix cache lookup for DCP only; PCP is
-#       not supported yet. Remove this patch once upstream supports both PCP and DCP.
+#       1. Upstream PR #40996 adds hybrid prefix cache lookup for DCP only; PCP is
+#          not supported yet. Remove this patch once upstream supports both PCP and DCP.
+#       2. Remove this patch once upstream accept 46892 pr or fixed the bug by other pr.
+#
+# ** 30. File: platform/patch_use_v2_model_runner.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.config.vllm.VllmConfig.use_v2_model_runner`
+#    Why:
+#       Upstream vLLM enables the v2 model runner not only via the
+#       VLLM_USE_V2_MODEL_RUNNER env var but also based on model
+#       architecture whitelists, Triton availability, and feature
+#       compatibility checks. On Ascend the NPU v2 runner is not yet
+#       compatible with all upstream-defaulted models and features, so
+#       enabling by model architecture can crash. We override the
+#       property to read only VLLM_USE_V2_MODEL_RUNNER, deferring
+#       model/framework checks to the NPU runner itself.
+#    How:
+#       Monkey-patch VllmConfig.use_v2_model_runner to return
+#       envs.VLLM_USE_V2_MODEL_RUNNER (defaulting to False when unset).
+#       worker/patch_v2/patch_use_v2_model_runner.py reuses this platform
+#       patch so EngineCore and worker processes share the same behavior.
+#    Related PR (if no, explain why):
+#       1. https://github.com/vllm-project/vllm-ascend/pull/11389
+#    Future Plan:
+#       Remove this patch once vllm-ascend fully supports the v2 model
+#       runner and can rely on upstream's default enablement heuristics
+#       (model architecture, Triton, feature checks) without crashes or
+#       degraded functionality.

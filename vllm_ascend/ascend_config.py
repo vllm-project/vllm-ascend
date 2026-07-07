@@ -32,6 +32,7 @@ class AscendConfig:
     def __init__(self, vllm_config: "VllmConfig"):
         self.vllm_config = vllm_config
         additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
+        self._check_mooncake_c8_kv_cache_quant(vllm_config)
 
         xlite_graph_config = additional_config.get("xlite_graph_config", {})
         self.xlite_graph_config = XliteGraphConfig(xlite_graph_config, vllm_config)
@@ -137,7 +138,7 @@ class AscendConfig:
                 )
         self.multistream_overlap_shared_expert = additional_config.get("multistream_overlap_shared_expert", False)
         self.multistream_overlap_gate = additional_config.get("multistream_overlap_gate", False)
-        # PD-disaggregated only (kv_producer/kv_consumer); invalid in PD-mixed (kv_both / no kv_transfer_config).
+        # PD-disaggregated D node only (kv_consumer); invalid on P nodes and in PD-mixed mode.
         self.recompute_scheduler_enable = additional_config.get("recompute_scheduler_enable", False)
         # DSV4 oproj / embedding fine-grained TP (oproj_tensor_parallel_size /
         # embedding_tensor_parallel_size) use static, graph-stable exchange
@@ -161,6 +162,7 @@ class AscendConfig:
         self.enable_cpu_binding = additional_config.get("enable_cpu_binding", True)
         self.enable_sleep_mode_extra_cleanup = additional_config.get("enable_sleep_mode_extra_cleanup", False)
         self.multistream_dsv4_dsa_overlap = additional_config.get("multistream_dsv4_dsa_overlap", True)
+        self.enable_prefill_mc2 = bool(additional_config.get("enable_prefill_mc2", False))
 
         self.enable_matmul_allreduce = self._get_config_value(
             additional_config,
@@ -287,6 +289,21 @@ class AscendConfig:
         # Enable dispatch/combine op inter-node communication by ROCE
         self.enable_mc2_hierarchy_comm = additional_config.get("enable_mc2_hierarchy_comm", False)
 
+        # Per-rank token capacity after dispatch in the mega moe (dispatch_ffn_combine) fused operator.
+        # When load imbalance causes a rank to receive more tokens than this limit, the excess tokens
+        # are dropped and skipped from computation, degrading accuracy.
+        # Do not set this too large: workspace memory scales linearly with this value, which matters
+        # especially under long-context scenarios where the operator should not hold too much memory.
+        # Default 65536.
+        self.mega_moe_max_tokens = additional_config.get("mega_moe_max_tokens", 65536)
+        if not isinstance(self.mega_moe_max_tokens, int):
+            raise ValueError(
+                f"mega_moe_max_tokens must be an integer, got {type(self.mega_moe_max_tokens).__name__}: "
+                f"{self.mega_moe_max_tokens}"
+            )
+        if self.mega_moe_max_tokens <= 0:
+            raise ValueError(f"mega_moe_max_tokens must be a positive integer, got {self.mega_moe_max_tokens}")
+
         # Whether to use NPU device group for DP metadata all_reduce.
         # "True": use NPU device group, "False" (default): use CPU group.
         self.dp_allreduce_on_npu = additional_config.get("dp_allreduce_on_npu", False)
@@ -319,6 +336,32 @@ class AscendConfig:
                 "next release."
             )
         return env_value
+
+    @classmethod
+    def _check_mooncake_c8_kv_cache_quant(cls, vllm_config: "VllmConfig") -> None:
+        kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+        if kv_transfer_config is None:
+            return
+
+        quant_config = getattr(vllm_config, "quant_config", None)
+        enable_c8_quant = getattr(quant_config, "enable_c8_quant", False)
+        if enable_c8_quant is not True:
+            return
+
+        from vllm_ascend.utils import is_gqa_backend, uses_mooncake_connector
+
+        if not is_gqa_backend(vllm_config):
+            return
+
+        if not uses_mooncake_connector(kv_transfer_config):
+            return
+
+        raise ValueError(
+            "MooncakeConnector does not support C8 KV cache quantization on GQA models. "
+            "The producer keeps KV cache in bf16 while the consumer allocates int8 KV cache, so raw "
+            "Mooncake transfer would reinterpret bf16 bytes as int8. Please disable C8 KV cache quantization "
+            "or use MooncakeLayerwiseConnector, which quantizes KV cache before transfer."
+        )
 
     def _check_mix_placement(self):
         if self.mix_placement:
@@ -515,12 +558,12 @@ class FinegrainedTPConfig:
             # If it is a dense model, then expert parallel is not needed,
             # and data parallel is also not needed. If the data parallel size is set
             # to greater than 1 in the model launch configuration, its value will be changed to 1 later.
-            # This will cause an issue when lmhead parallel is enabled, as the lmhead
+            # This will cause an issue when finegrained tp is enabled, as it
             # cannot be split into the data parallel communication group, leading to an error.
             if module_tp_size > 0 and not vllm_config.model_config.is_moe:
-                raise AssertionError("The lmhead parallel feature can be enabled only for MOE models.")
+                raise AssertionError("The finegrained tp sizes can be enabled only for MOE models.")
             if module_tp_size > 0 and vllm_config.parallel_config.data_parallel_size % module_tp_size != 0:
-                raise AssertionError("lmhead_tensor_parallel_size must divide by data_parallel_size.")
+                raise AssertionError("finegrained tp sizes must divide by data_parallel_size.")
         if any(size > 0 for size in module_tp_sizes) and enabled_configs:
             logger.info("finegrained_tp_config enabled: %s", ", ".join(enabled_configs))
 
@@ -604,10 +647,8 @@ class XliteGraphConfig:
         self.enabled = xlite_graph_config.get("enabled", False)
         self.full_mode = xlite_graph_config.get("full_mode", False)
         if self.enabled:
-            if bool(vllm_config.speculative_config):
-                raise RuntimeError(
-                    "Xlite graph mode is not compatible with speculative decoding. Please disable speculative decoding."
-                )
+            if bool(vllm_config.speculative_config) and vllm_config.speculative_config.num_speculative_tokens != 1:
+                raise RuntimeError("Xlite graph mode only support speculative decoding with num_speculative_tokens=1.")
             if vllm_config.parallel_config.pipeline_parallel_size > 1:
                 raise RuntimeError(
                     "Xlite graph mode is not compatible with pipeline parallelism. "

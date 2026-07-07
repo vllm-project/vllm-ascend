@@ -68,6 +68,9 @@ namespace vllm_ascend {
 
 namespace {
 
+constexpr int64_t DSA_SLOT_MAPPING_FLAT = 1;
+constexpr int64_t DSA_SLOT_MAPPING_BLOCK_OFFSET = 2;
+
 struct DevicePrintPayload {
     std::string message;
     at::Tensor host_tensor_snapshot;
@@ -1028,6 +1031,118 @@ std::tuple<at::Tensor> compressor(const at::Tensor &x, const at::Tensor &wkv, co
                     rotary_mode, cache_mode, state_cache_stride_dim0, cmp_kv);
 
     return std::tuple<at::Tensor>(cmp_kv);
+}
+
+void check_compressor_metadata_common(
+    const at::Tensor &rope_cos, const at::Tensor &rope_sin, const at::Tensor &cu_seqlens,
+    const at::Tensor &start_pos, const at::Tensor &kv_block_table, int64_t kv_block_size,
+    int64_t slot_mapping_format, int64_t compress_ratio, int64_t num_reqs_actual)
+{
+    constexpr int64_t DIM_2 = 2;
+    constexpr int64_t VALUE_0 = 0;
+
+    TORCH_CHECK(rope_cos.defined() && rope_sin.defined(), "rope_cos and rope_sin should be defined");
+    TORCH_CHECK(rope_cos.dim() == DIM_2 && rope_sin.dim() == DIM_2,
+                "rope_cos and rope_sin should be 2D tensors");
+    TORCH_CHECK(rope_cos.scalar_type() == rope_sin.scalar_type(),
+                "rope_cos and rope_sin should have same dtype");
+    TORCH_CHECK(rope_cos.size(0) == rope_sin.size(0) && rope_cos.size(1) == rope_sin.size(1),
+                "rope_cos and rope_sin should have same shape");
+    TORCH_CHECK(rope_cos.size(0) > VALUE_0 && rope_cos.size(1) > VALUE_0,
+                "rope_cos shape should be non-empty");
+    TORCH_CHECK(cu_seqlens.defined() && cu_seqlens.dim() == 1, "cu_seqlens should be a 1D tensor");
+    TORCH_CHECK(start_pos.defined() && start_pos.dim() == 1, "start_pos should be a 1D tensor");
+    TORCH_CHECK(kv_block_table.defined() && kv_block_table.dim() == DIM_2, "kv_block_table should be a 2D tensor");
+    TORCH_CHECK(kv_block_size > VALUE_0, "kv_block_size should be greater than 0");
+    TORCH_CHECK(compress_ratio > VALUE_0, "compress_ratio should be greater than 0");
+    TORCH_CHECK(slot_mapping_format == DSA_SLOT_MAPPING_BLOCK_OFFSET || slot_mapping_format == DSA_SLOT_MAPPING_FLAT,
+                "slot_mapping_format should be 1(flat) or 2(block_offset), but got ", slot_mapping_format);
+    TORCH_CHECK(num_reqs_actual > VALUE_0, "num_reqs_actual should be greater than 0");
+    TORCH_CHECK(cu_seqlens.size(0) > num_reqs_actual,
+                "cu_seqlens dim0 should be greater than num_reqs_actual");
+    TORCH_CHECK(start_pos.size(0) >= num_reqs_actual,
+                "start_pos dim0 should be greater than or equal to num_reqs_actual");
+    TORCH_CHECK(kv_block_table.size(0) >= num_reqs_actual,
+                "kv_block_table dim0 should be greater than or equal to num_reqs_actual");
+}
+
+void check_compressor_metadata_outputs(
+    const at::Tensor &rope_cos, const at::Tensor &compress_cos, const at::Tensor &compress_sin,
+    const at::Tensor &slot_mapping, int64_t slot_mapping_format)
+{
+    constexpr int64_t DIM_2 = 2;
+    constexpr int64_t VALUE_0 = 0;
+
+    TORCH_CHECK(compress_cos.defined() && compress_sin.defined() && slot_mapping.defined(),
+                "compress_cos, compress_sin, and slot_mapping should be defined");
+    TORCH_CHECK(compress_cos.dim() >= DIM_2, "compress_cos dim num should be at least 2");
+    TORCH_CHECK(compress_sin.dim() == compress_cos.dim(), "compress_cos and compress_sin should have same dim num");
+    TORCH_CHECK(compress_cos.size(0) > VALUE_0, "compress_cos dim0 should be greater than 0");
+    TORCH_CHECK(compress_cos.size(compress_cos.dim() - 1) == rope_cos.size(1),
+                "compress_cos last dim should match rope dim");
+    for (int64_t dim_idx = 0; dim_idx < compress_cos.dim(); ++dim_idx) {
+        TORCH_CHECK(compress_sin.size(dim_idx) == compress_cos.size(dim_idx),
+                    "compress_cos and compress_sin should have same shape");
+    }
+    TORCH_CHECK(compress_cos.scalar_type() == rope_cos.scalar_type() &&
+                    compress_sin.scalar_type() == rope_cos.scalar_type(),
+                "compress outputs should have same dtype as rope_cos");
+    TORCH_CHECK(slot_mapping.scalar_type() == at::kInt, "slot_mapping dtype should be int32");
+    if (slot_mapping_format == DSA_SLOT_MAPPING_BLOCK_OFFSET) {
+        TORCH_CHECK(slot_mapping.dim() == DIM_2 && slot_mapping.size(0) == compress_cos.size(0) &&
+                        slot_mapping.size(1) == DIM_2,
+                    "block_offset slot_mapping should have shape [num_rows, 2]");
+    } else {
+        TORCH_CHECK(slot_mapping.dim() == 1 && slot_mapping.size(0) == compress_cos.size(0),
+                    "flat slot_mapping should have shape [num_rows]");
+    }
+}
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor> compressor_metadata(
+    const at::Tensor &rope_cos, const at::Tensor &rope_sin, const at::Tensor &cu_seqlens,
+    const at::Tensor &start_pos, const at::Tensor &kv_block_table, int64_t kv_block_size,
+    int64_t slot_mapping_format, int64_t compress_ratio, int64_t num_compressed_tokens, int64_t num_reqs_actual)
+{
+    constexpr int64_t VALUE_0 = 0;
+
+    check_compressor_metadata_common(
+        rope_cos, rope_sin, cu_seqlens, start_pos, kv_block_table, kv_block_size, slot_mapping_format, compress_ratio,
+        num_reqs_actual);
+    TORCH_CHECK(num_compressed_tokens > VALUE_0, "num_compressed_tokens should be greater than 0");
+
+    at::SmallVector<int64_t, 4> rope_output_size = {num_compressed_tokens, 1, 1, rope_cos.size(1)};
+    at::Tensor compress_cos = at::empty(rope_output_size, rope_cos.options());
+    at::Tensor compress_sin = at::empty(rope_output_size, rope_sin.options());
+
+    at::SmallVector<int64_t, 2> slot_mapping_size;
+    if (slot_mapping_format == DSA_SLOT_MAPPING_BLOCK_OFFSET) {
+        slot_mapping_size = {num_compressed_tokens, 2};
+    } else {
+        slot_mapping_size = {num_compressed_tokens};
+    }
+    at::Tensor slot_mapping = at::empty(slot_mapping_size, kv_block_table.options().dtype(at::kInt));
+
+    EXEC_NPU_CMD(aclnnCompressorMetadata, rope_cos, rope_sin, cu_seqlens, start_pos, kv_block_table,
+                 kv_block_size, slot_mapping_format, compress_ratio, num_reqs_actual, compress_cos, compress_sin,
+                 slot_mapping);
+    return std::make_tuple(compress_cos, compress_sin, slot_mapping);
+}
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor> compressor_metadata_out(
+    const at::Tensor &rope_cos, const at::Tensor &rope_sin, const at::Tensor &cu_seqlens,
+    const at::Tensor &start_pos, const at::Tensor &kv_block_table, int64_t kv_block_size,
+    int64_t slot_mapping_format, int64_t compress_ratio, int64_t num_reqs_actual, at::Tensor &compress_cos,
+    at::Tensor &compress_sin, at::Tensor &slot_mapping)
+{
+    check_compressor_metadata_common(
+        rope_cos, rope_sin, cu_seqlens, start_pos, kv_block_table, kv_block_size, slot_mapping_format, compress_ratio,
+        num_reqs_actual);
+    check_compressor_metadata_outputs(rope_cos, compress_cos, compress_sin, slot_mapping, slot_mapping_format);
+
+    EXEC_NPU_CMD(aclnnCompressorMetadata, rope_cos, rope_sin, cu_seqlens, start_pos, kv_block_table,
+                 kv_block_size, slot_mapping_format, compress_ratio, num_reqs_actual, compress_cos, compress_sin,
+                 slot_mapping);
+    return std::make_tuple(compress_cos, compress_sin, slot_mapping);
 }
 
 std::tuple<at::Tensor, at::Tensor> construct_quant_lightning_indexer_output_tensor(const at::Tensor& query, const at::Tensor& key,
@@ -2440,6 +2555,26 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         ") -> Tensor"
         );
     ops.impl("compressor", torch::kPrivateUse1, &vllm_ascend::compressor);
+
+    ops.def(
+        "compressor_metadata("
+            "Tensor rope_cos, Tensor rope_sin, "
+            "Tensor cu_seqlens, Tensor start_pos, Tensor kv_block_table, "
+            "int kv_block_size, int slot_mapping_format, int compress_ratio, int num_compressed_tokens, "
+            "int num_reqs_actual"
+        ") -> (Tensor, Tensor, Tensor)"
+        );
+    ops.impl("compressor_metadata", torch::kPrivateUse1, &vllm_ascend::compressor_metadata);
+
+    ops.def(
+        "compressor_metadata_out("
+            "Tensor rope_cos, Tensor rope_sin, "
+            "Tensor cu_seqlens, Tensor start_pos, Tensor kv_block_table, "
+            "int kv_block_size, int slot_mapping_format, int compress_ratio, int num_reqs_actual, "
+            "Tensor(a!) compress_cos, Tensor(b!) compress_sin, Tensor(c!) slot_mapping"
+        ") -> (Tensor(a!), Tensor(b!), Tensor(c!))"
+        );
+    ops.impl("compressor_metadata_out", torch::kPrivateUse1, &vllm_ascend::compressor_metadata_out);
 
     ops.def(
         "npu_vllm_quant_lightning_indexer("

@@ -1,8 +1,6 @@
-#!/usr/bin/env bash
-
 #
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
-# Copyright 2023 The vLLM team.
+# This file is a part of the vllm-ascend project.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,8 +13,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# This file is a part of the vllm-ascend project.
-# Adapted from https://github.com/vllm-project/vllm/tree/main/tools
 #
 
-sphinx-lint --disable trailing-whitespace,missing-final-newline docs
+# Reuse the platform patch. Keeping the monkey patch in one module avoids
+# wrapping an already patched FusedMoE factory during worker initialization.
+import vllm_ascend.patch.platform.patch_fused_moe  # noqa: F401
