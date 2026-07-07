@@ -21,7 +21,7 @@ from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig, ParallelConfig
+    from vllm.config import ParallelConfig, VllmConfig
 
 
 class AscendConfig:
@@ -364,7 +364,9 @@ class AscendConfig:
             "or use MooncakeLayerwiseConnector, which quantizes KV cache before transfer."
         )
 
-    def _check_sfa_dcp_replicated_indexer(self, parallel_config: "ParallelConfig", additional_config: dict[str, Any], use_sparse: bool) -> None:
+    def _check_sfa_dcp_replicated_indexer(
+        self, parallel_config: "ParallelConfig", additional_config: dict[str, Any], use_sparse: bool
+    ) -> None:
         if not additional_config.get("sfa_dcp_replicated_indexer", False):
             return
         if not use_sparse:
