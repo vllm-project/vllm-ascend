@@ -23,8 +23,6 @@ from vllm_ascend.attention.sfa_v1 import (
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, enabling_mlapo, split_decodes_and_prefills
 from vllm_ascend.distributed.utils import (
     all_gather_async,
-    get_decode_context_model_parallel_rank,
-    get_decode_context_model_parallel_world_size,
 )
 from vllm_ascend.ops.triton.rope import rope_forward_triton_siso
 
@@ -623,10 +621,9 @@ class AscendSFADCPMetadataBuilder(AscendSFAMetadataBuilder):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device, metadata_cls, supports_dcp_with_varlen)
         self.pcp_size = get_pcp_group().world_size
         self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
-        self.dcp_size = get_decode_context_model_parallel_world_size()
-        self.dcp_rank = get_decode_context_model_parallel_rank() if self.dcp_size > 1 else 0
+        self.dcp_size = get_dcp_group().world_size
+        self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_size > 1 else 0
         self.cp_kv_cache_interleave_size = vllm_config.parallel_config.cp_kv_cache_interleave_size
-        self._dcp_metadata_debug_print_count = 0
         self.dcp_local_seq_lens_buf = torch.empty(
             vllm_config.scheduler_config.max_num_seqs,
             dtype=torch.int32,
@@ -640,8 +637,23 @@ class AscendSFADCPMetadataBuilder(AscendSFAMetadataBuilder):
                 f"{self.replicated_view_block_size}."
             )
         self.blocks_per_phys_block = kv_cache_spec.block_size // self.replicated_view_block_size
-        self.block_table_replicated_view_buf: torch.Tensor | None = None
-        self.slot_mapping_replicated_view_buf: torch.Tensor | None = None
+        max_num_reqs = vllm_config.scheduler_config.max_num_seqs
+        max_num_input_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        self.block_table_replicated_view_buf: torch.Tensor = torch.empty(
+            (max_num_reqs, max_num_reqs * self.blocks_per_phys_block * self.pcp_size * self.dcp_size),
+            dtype=torch.int32,
+            device=device,
+        )
+        self.arange_buffer: torch.Tensor = torch.arange(
+            max_num_reqs * self.blocks_per_phys_block * self.pcp_size * self.dcp_size,
+            dtype=torch.int32,
+            device=device,
+        )
+        self.slot_mapping_replicated_view_buf: torch.Tensor = torch.empty(
+            (max_num_input_tokens,),
+            dtype=torch.int32,
+            device=device,
+        )
         assert self.pcp_size == 1, "AscendSFADCPMetadataBuilder only supports DCP without PCP."
         assert self.dcp_size > 1, "AscendSFADCPMetadataBuilder requires DCP world size > 1."
         if self.cp_kv_cache_interleave_size <= 0:
@@ -665,29 +677,26 @@ class AscendSFADCPMetadataBuilder(AscendSFAMetadataBuilder):
         num_reqs: int,
         num_input_tokens: int,
         local_block_table_cols: int,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         block_table_cols = local_block_table_cols * self.pcp_size * self.dcp_size
         if (
-            self.block_table_replicated_view_buf is None
-            or self.block_table_replicated_view_buf.shape[0] < num_reqs
+            self.block_table_replicated_view_buf.shape[0] < num_reqs
             or self.block_table_replicated_view_buf.shape[1] < block_table_cols
         ):
-            self.block_table_replicated_view_buf = torch.empty(
-                (num_reqs, block_table_cols),
-                dtype=torch.int32,
-                device=self.device,
+            raise RuntimeError(
+                f"Replicated view buffer is too small: "
+                f"block_table_replicated_view_buf.shape={self.block_table_replicated_view_buf.shape}, "
+                f"num_reqs={num_reqs}, block_table_cols={block_table_cols}"
             )
-        if (
-            self.slot_mapping_replicated_view_buf is None
-            or self.slot_mapping_replicated_view_buf.shape[0] < num_input_tokens
-        ):
-            self.slot_mapping_replicated_view_buf = torch.empty(
-                (num_input_tokens,),
-                dtype=torch.int32,
-                device=self.device,
+        if self.slot_mapping_replicated_view_buf.shape[0] < num_input_tokens:
+            raise RuntimeError(
+                f"Replicated view buffer is too small: "
+                f"slot_mapping_replicated_view_buf.shape={self.slot_mapping_replicated_view_buf.shape}, "
+                f"num_input_tokens={num_input_tokens}"
             )
         return (
             self.block_table_replicated_view_buf[:num_reqs, :block_table_cols],
+            self.arange_buffer[:block_table_cols],
             self.slot_mapping_replicated_view_buf[:num_input_tokens],
         )
 
@@ -698,7 +707,7 @@ class AscendSFADCPMetadataBuilder(AscendSFAMetadataBuilder):
     ) -> torch.Tensor:
         num_reqs = dcp_block_table.shape[0]
         local_block_table_cols = dcp_block_table.shape[1]
-        block_table_replicated_view, _ = self._ensure_replicated_view_buffers(
+        block_table_replicated_view, replicated_col_idx, _ = self._ensure_replicated_view_buffers(
             num_reqs,
             0,
             local_block_table_cols,
@@ -706,12 +715,6 @@ class AscendSFADCPMetadataBuilder(AscendSFAMetadataBuilder):
 
         total_cp_size = self.pcp_size * self.dcp_size
         blocks_per_phys_block = self.blocks_per_phys_block
-        block_table_cols = block_table_replicated_view.shape[1]
-        replicated_col_idx = torch.arange(
-            block_table_cols,
-            dtype=torch.int32,
-            device=dcp_block_table.device,
-        )
         local_col_idx = (
             replicated_col_idx // (total_cp_size * blocks_per_phys_block) * blocks_per_phys_block
             + replicated_col_idx % blocks_per_phys_block
@@ -741,7 +744,7 @@ class AscendSFADCPMetadataBuilder(AscendSFAMetadataBuilder):
         num_reqs = common_attn_metadata.num_reqs
         num_input_tokens = common_attn_metadata.num_input_tokens
         num_actual_tokens = min(common_attn_metadata.num_actual_tokens, num_input_tokens)
-        _, slot_mapping_replicated_view = self._ensure_replicated_view_buffers(
+        _, _, slot_mapping_replicated_view = self._ensure_replicated_view_buffers(
             num_reqs,
             num_input_tokens,
             common_attn_metadata.block_table_tensor.shape[1],
@@ -818,6 +821,9 @@ class AscendSFADCPMetadataBuilder(AscendSFAMetadataBuilder):
         if get_ascend_config().c8_enable_reshape_optim:
             slot_mapping_replicated_view_cpu = slot_mapping_replicated_view.to("cpu")
         else:
+            # In the case of c8_enable_reshape_optim=False,
+            # the slot_mapping_cpu is not used in the kernel, so we can just use the original
+            # dcp_slot_mapping_cpu to avoid unnecessary data transfer.
             slot_mapping_replicated_view_cpu = dcp_slot_mapping_cpu
 
         common_attn_metadata.slot_mapping = slot_mapping_replicated_view
@@ -969,9 +975,19 @@ class AscendSFADCPImpl(AscendSFAImpl):
         gathered, handle = all_gather_async(x.permute(perm).contiguous(), self.dcp_group)
         return gathered, handle, restore_perm
 
-    def _map_sparse_indices_to_local(self, topk_indices: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        # Keep remap in floating-point ops: some NPU integer bitwise ops fall
-        # back to CPU and break graph capture.
+    def _remap_sparse_indices(self, topk_indices: torch.Tensor) -> torch.Tensor:
+        if self.dcp_size <= 1:
+            return topk_indices
+
+        topk_count = topk_indices.shape[-1]
+        if topk_count > self._dcp_index_topk:
+            raise RuntimeError(
+                f"topk_indices last dimension ({topk_count}) exceeds configured index_topk "
+                f"({self._dcp_index_topk})."
+            )
+
+        # Remap the topk indices from the replicated view to the DCP-local KV cache view.
+        # We use float32 for better performace on Ascend.
         topk_indices_fp32 = topk_indices.to(torch.float32)
         interleave_size = self._dcp_interleave_size
         local_block_indices = torch.floor(topk_indices_fp32 / interleave_size)
@@ -989,20 +1005,6 @@ class AscendSFADCPImpl(AscendSFAImpl):
             remapped_indices_fp32,
             self._remap_invalid_index,
         ).to(topk_indices.dtype)
-        return remapped_indices, local_owner_mask
-
-    def _remap_sparse_indices(self, topk_indices: torch.Tensor) -> torch.Tensor:
-        if self.dcp_size <= 1:
-            return topk_indices
-
-        topk_count = topk_indices.shape[-1]
-        if topk_count > self._dcp_index_topk:
-            raise RuntimeError(
-                f"topk_indices last dimension ({topk_count}) exceeds configured index_topk "
-                f"({self._dcp_index_topk})."
-            )
-
-        remapped_indices, local_owner_mask = self._map_sparse_indices_to_local(topk_indices)
 
         # Compact local indices to the front without changing their top-k order.
         original_order = self._remap_order[:topk_count].expand_as(topk_indices)
