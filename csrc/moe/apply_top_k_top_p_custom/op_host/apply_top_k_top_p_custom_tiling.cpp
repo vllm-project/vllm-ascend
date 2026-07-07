@@ -183,10 +183,21 @@ void ApplyTopKTopPCustomTiling::SetTilingKey() {
 
 void ApplyTopKTopPCustomTiling::GetUsedCore()
 {
-    if (coreNum_ > 0) {
-        batchPerCore_ = coreNum_ == uint32_t(0) ? batchSize_ : batchSize_ / coreNum_;
-        tailBatch_ = batchSize_ % coreNum_;
-        usedCoreNum_ = coreNum_;
+    // For the top-p-only path the vocab is split across cores via vCnt
+    // (vCnt = coreNum/batchSize when batchSize < coreNum). That v-split routes a
+    // batch's scatter tasks to cores that never ran the PRE phase (loopBatch_==0)
+    // and read stale softMaxGm -> entire output row masked to -inf.
+    // Cap the used cores to batchSize so vCnt==1 and every scatter core also ran
+    // PRE (each core does exactly one batch end-to-end). Combined/top-k paths
+    // are untouched.
+    uint32_t effCoreNum = coreNum_;
+    if (onlyTopP_ > 0 && batchSize_ > 0 && batchSize_ < coreNum_) {
+        effCoreNum = batchSize_;
+    }
+    if (effCoreNum > 0) {
+        batchPerCore_ = batchSize_ / effCoreNum;
+        tailBatch_ = batchSize_ % effCoreNum;
+        usedCoreNum_ = effCoreNum;
     }
 }
 
