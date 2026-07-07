@@ -205,6 +205,7 @@ class TestAscendConfig(TestBase):
 
         with self.assertRaisesRegex(ValueError, "does not support C8 KV cache quantization"):
             init_ascend_config(test_vllm_config)
+
     @_clean_up_ascend_config
     @patch("vllm_ascend.ascend_config.logger.warning")
     @patch("vllm_ascend.utils.is_310p", return_value=True)
