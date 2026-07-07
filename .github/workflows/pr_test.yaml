@@ -214,3 +214,41 @@ jobs:
       ref: ${{ github.event.pull_request.head.sha }}
       base_ref: ${{ github.base_ref }}
       test_groups: ${{ needs.lint-and-select-tests.outputs.test_groups }}
+
+  # 新增 HITEST 任务，并行执行、复用 lint 输出、独立调用 hitest.yaml
+  run-hitest:
+    needs: lint-and-select-tests
+    if: ${{ needs.lint-and-select-tests.outputs.has_tests == 'true' && contains(github.event.pull_request.labels.*.name, 'ready') }}
+    strategy:
+      matrix:
+        vllm_version:
+          - ${{ needs.lint-and-select-tests.outputs.main_commit }}
+          - ${{ needs.lint-and-select-tests.outputs.release_tag }}
+    uses: ./.github/workflows/hitest.yaml
+    with:
+      vllm: ${{ matrix.vllm_version }}
+      ref: ${{ github.event.pull_request.head.sha }}
+      base_ref: ${{ github.base_ref }}
+      test_groups: ${{ needs.lint-and-select-tests.outputs.test_groups }}
+    outputs:
+      # 透传 hitest 子 workflow 输出的执行结果
+      hitest_result: ${{ steps.hitest-output.outputs.hitest_result }}
+      hitest_failed_groups: ${{ steps.hitest-output.outputs.failed_test_groups }}
+
+  # 可选：聚合所有测试任务结果（如需统一校验 E2E + HITEST 全部通过）
+  aggregate-test-result:
+    needs: [run-selected-tests, run-hitest]
+    if: always()
+    runs-on: linux-amd64-cpu-8-hk
+    steps:
+      - name: Collect E2E & HITEST status
+        run: |
+          E2E_STATUS=${{ needs.run-selected-tests.result }}
+          HITEST_STATUS=${{ needs.run-hitest.result }}
+          echo "E2E test job status: ${E2E_STATUS}"
+          echo "HITEST job status: ${HITEST_STATUS}"
+          if [[ "${E2E_STATUS}" != "success" || "${HITEST_STATUS}" != "success" ]]; then
+            echo "::error::Some test jobs failed, check run-selected-tests or run-hitest logs"
+            exit 1
+          fi
+          echo "All test jobs passed successfully"
