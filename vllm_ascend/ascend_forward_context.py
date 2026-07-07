@@ -353,25 +353,31 @@ def select_moe_comm_method(
             moe_comm_type = MoECommType.ALLGATHER
 
     elif soc_version in {AscendDeviceType.A3}:
-        # TODO: drop the EP-size guard when dispatch_ffn_combine supports larger EP sizes
+        # TODO: drop the EP-size guard when dispatch_ffn_combine supports larger EP sizes.
         fused_mc2_enable = get_ascend_config().enable_fused_mc2
         fused_decode_guard = get_ep_group().world_size <= 32 and (not is_draft_model)
+        fused_mega_moe_supported = (
+            fused_mc2_enable == 2
+            and fused_decode_guard
+            and _cann_megamoe_supported_by_config(vllm_config, quant_type)
+        )
         if num_tokens <= mc2_tokens_capacity:
-            fused_decode_enable = fused_mc2_enable
+            # Covers decode AND chunked-prefill chunks capped by mc2_tokens_capacity.
+            # Only these small batches may enter MegaMoe.
             if fused_mc2_enable == 1:
-                fused_decode_enable = fused_mc2_enable and fused_decode_guard
+                fused_small_batch_enable = fused_decode_guard
             elif fused_mc2_enable == 2:
-                fused_decode_enable = (
-                    fused_mc2_enable
-                    and fused_decode_guard
-                    and _cann_megamoe_supported_by_config(vllm_config, quant_type)
-                )
-            moe_comm_type = MoECommType.FUSED_MC2 if fused_decode_enable else MoECommType.MC2
+                fused_small_batch_enable = fused_mega_moe_supported
+            else:
+                fused_small_batch_enable = False
+            moe_comm_type = MoECommType.FUSED_MC2 if fused_small_batch_enable else MoECommType.MC2
         else:
-            fused_prefill_enable = fused_mc2_enable
+            # Large prefill (num_tokens > mc2_tokens_capacity) must NOT go directly to
+            # CANN MegaMoe; keep the ALLTOALL fallback. It enters MegaMoe only after
+            # chunked prefill produces <= mc2_tokens_capacity chunks (handled above).
             if fused_mc2_enable == 1:
-                fused_prefill_enable = fused_mc2_enable and fused_decode_guard
-            elif fused_mc2_enable == 2:
+                fused_prefill_enable = fused_decode_guard
+            else:
                 fused_prefill_enable = False
             moe_comm_type = MoECommType.FUSED_MC2 if fused_prefill_enable else MoECommType.ALLTOALL
     elif soc_version in {AscendDeviceType._310P}:
