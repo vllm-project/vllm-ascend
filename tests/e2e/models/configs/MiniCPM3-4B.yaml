@@ -14,9 +14,9 @@ tasks:
 - name: "gsm8k"
   metrics:
   - name: "exact_match,strict-match"
-    value: 0.45
+    value: 0.77
   - name: "exact_match,flexible-extract"
-    value: 0.50
+    value: 0.78
 
 num_fewshot: 5
 apply_chat_template: true
