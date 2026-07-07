@@ -158,28 +158,33 @@ sysctl -w vm.swappiness=0
 sysctl -w kernel.numa_balancing=0
 sysctl -w kernel.sched_migration_cost_ns=50000
 
-export HCCL_BUFFSIZE=800
+export HCCL_BUFFSIZE=600
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-export VLLM_ASCEND_BALANCE_SCHEDULING=1
+export VLLM_ASCEND_BALANCE_SCHEDULING=0
 
 vllm serve Eco-Tech/Kimi-K2.6-W4A8 \
     --quantization ascend \
-    --served-model-name kimi_k26 \
+    --tool-call-parser kimi_k2 \
+    --reasoning-parser kimi_k2 \
     --allowed-local-media-path / \
+    --served-model-name kimi_k26 \
     --trust-remote-code \
     --tensor-parallel-size 4 \
     --data-parallel-size 4 \
     --no-enable-prefix-caching \
     --enable-expert-parallel \
-    --port 8088 \
+    --port 8089 \
     --max-num-seqs 4 \
-    --max-model-len 32768 \
+    --max-model-len 34816 \
     --max-num-batched-tokens 16384 \
-    --gpu-memory-utilization 0.9 \
+    --gpu-memory-utilization 0.87 \
     --seed 42 \
+    --async-scheduling \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+    --profiler-config '{"profiler": "torch", "torch_profiler_dir": "./vllm_profile", "torch_profiler_with_stack": true}' \
     --mm-processor-cache-gb 0 \
     --mm-encoder-tp-mode data \
+    --additional-config '{"enable_balance_scheduling": true}' \
     --speculative-config '{"method": "dflash","model": "z-lab/Kimi-K2.5-DFlash", "num_speculative_tokens": 15}'
 ```
 
@@ -325,6 +330,8 @@ sysctl -w kernel.numa_balancing=0
 sysctl kernel.sched_migration_cost_ns=50000
 export VLLM_RPC_TIMEOUT=3600000
 export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
+export HCCL_EXEC_TIMEOUT=204
+export HCCL_CONNECT_TIMEOUT=120
 
 export HCCL_OP_EXPANSION_MODE="AIV"
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
@@ -334,7 +341,7 @@ export TASK_QUEUE_ENABLE=1
 export ASCEND_BUFFER_POOL=4:8
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
-export HCCL_BUFFSIZE=800
+export HCCL_BUFFSIZE=1536
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export ASCEND_RT_VISIBLE_DEVICES=$1
 
@@ -351,14 +358,16 @@ vllm serve Eco-Tech/Kimi-K2.6-W4A8 \
     --quantization ascend \
     --served-model-name kimi_k26 \
     --trust-remote-code \
-    --max-num-seqs 4 \
-    --max-model-len 32768 \
+    --max-num-seqs 1 \
+    --max-model-len 133120 \
     --max-num-batched-tokens 16384 \
     --no-enable-prefix-caching \
-    --gpu-memory-utilization 0.95 \
+    --gpu-memory-utilization 0.92 \
     --enforce-eager \
-    --speculative-config '{"method": "eagle3", "model":"lightseekorg/kimi-k2.6-eagle3", "num_speculative_tokens": 3}' \
-    --additional-config '{"recompute_scheduler_enable":true}' \
+    --enable-auto-tool-choice \
+    --tool-call-parser kimi_k2 \
+    --reasoning-parser kimi_k2 \
+    --additional-config '{"recompute_scheduler_enable":true,"enable_shared_expert_dp": true}' \
     --mm-encoder-tp-mode data \
     --kv-transfer-config \
     '{"kv_connector": "MooncakeConnectorV1",
@@ -366,6 +375,7 @@ vllm serve Eco-Tech/Kimi-K2.6-W4A8 \
     "kv_port": "30000",
     "engine_id": "0",
     "kv_connector_extra_config": {
+            "use_ascend_direct": true,
             "prefill": {
                     "dp_size": 4,
                     "tp_size": 4
@@ -406,6 +416,8 @@ sysctl -w kernel.numa_balancing=0
 sysctl kernel.sched_migration_cost_ns=50000
 export VLLM_RPC_TIMEOUT=3600000
 export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
+export HCCL_EXEC_TIMEOUT=204
+export HCCL_CONNECT_TIMEOUT=120
 
 export HCCL_OP_EXPANSION_MODE="AIV"
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
@@ -415,7 +427,7 @@ export TASK_QUEUE_ENABLE=1
 export ASCEND_BUFFER_POOL=4:8
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
-export HCCL_BUFFSIZE=800
+export HCCL_BUFFSIZE=1536
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export ASCEND_RT_VISIBLE_DEVICES=$1
 
@@ -432,14 +444,16 @@ vllm serve Eco-Tech/Kimi-K2.6-W4A8 \
     --quantization ascend \
     --served-model-name kimi_k26 \
     --trust-remote-code \
-    --max-num-seqs 4 \
-    --max-model-len 32768 \
+    --max-num-seqs 1 \
+    --max-model-len 133120 \
     --max-num-batched-tokens 16384 \
     --no-enable-prefix-caching \
-    --gpu-memory-utilization 0.95 \
+    --gpu-memory-utilization 0.92 \
     --enforce-eager \
-    --speculative-config '{"method": "eagle3", "model":"lightseekorg/kimi-k2.6-eagle3", "num_speculative_tokens": 3}' \
-    --additional-config '{"recompute_scheduler_enable":true}' \
+    --enable-auto-tool-choice \
+    --tool-call-parser kimi_k2 \
+    --reasoning-parser kimi_k2 \
+    --additional-config '{"recompute_scheduler_enable":true,"enable_shared_expert_dp": true}' \
     --mm-encoder-tp-mode data \
     --kv-transfer-config \
     '{"kv_connector": "MooncakeConnectorV1",
@@ -486,6 +500,8 @@ sysctl -w vm.swappiness=0
 sysctl -w kernel.numa_balancing=0
 sysctl kernel.sched_migration_cost_ns=50000
 export VLLM_RPC_TIMEOUT=3600000
+export HCCL_EXEC_TIMEOUT=204
+export HCCL_CONNECT_TIMEOUT=120
 export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
 
 export HCCL_OP_EXPANSION_MODE="AIV"
@@ -514,12 +530,15 @@ vllm serve Eco-Tech/Kimi-K2.6-W4A8 \
     --served-model-name kimi_k26 \
     --trust-remote-code \
     --max-num-seqs 8 \
-    --max-model-len 32768 \
+    --max-model-len 133720 \
     --max-num-batched-tokens 32 \
     --no-enable-prefix-caching \
     --gpu-memory-utilization 0.91 \
+    --enable-auto-tool-choice \
+    --tool-call-parser kimi_k2 \
+    --reasoning-parser kimi_k2 \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": false}' \
+    --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": true}' \
     --speculative-config '{"method": "eagle3", "model":"lightseekorg/kimi-k2.6-eagle3", "num_speculative_tokens": 3}' \
     --kv-transfer-config \
     '{"kv_connector": "MooncakeConnectorV1",
@@ -566,6 +585,8 @@ sysctl -w vm.swappiness=0
 sysctl -w kernel.numa_balancing=0
 sysctl kernel.sched_migration_cost_ns=50000
 export VLLM_RPC_TIMEOUT=3600000
+export HCCL_EXEC_TIMEOUT=204
+export HCCL_CONNECT_TIMEOUT=120
 export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
 
 export HCCL_OP_EXPANSION_MODE="AIV"
@@ -594,12 +615,15 @@ vllm serve Eco-Tech/Kimi-K2.6-W4A8 \
     --served-model-name kimi_k26 \
     --trust-remote-code \
     --max-num-seqs 8 \
-    --max-model-len 32768 \
+    --max-model-len 133720 \
     --max-num-batched-tokens 32 \
     --no-enable-prefix-caching \
     --gpu-memory-utilization 0.91 \
+    --enable-auto-tool-choice \
+    --tool-call-parser kimi_k2 \
+    --reasoning-parser kimi_k2 \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": false}' \
+    --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": true}' \
     --speculative-config '{"method": "eagle3", "model":"lightseekorg/kimi-k2.6-eagle3", "num_speculative_tokens": 3}' \
     --kv-transfer-config \
     '{"kv_connector": "MooncakeConnectorV1",
