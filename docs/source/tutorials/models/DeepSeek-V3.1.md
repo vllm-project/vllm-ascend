@@ -643,7 +643,6 @@ Parameter descriptions:
 
 === "Node 1(Decode)"
 
-
     ```shell
     # this obtained through ifconfig
     # nic_name is the network interface name corresponding to local_ip of the current node
