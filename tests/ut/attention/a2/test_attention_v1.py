@@ -51,6 +51,64 @@ class TestAttentionGraphHelpers(TestBase):
         with patch("vllm_ascend.attention.utils.get_ascend_device_type", return_value=AscendDeviceType.A2):
             self.assertTrue(using_paged_attention(1, vllm_config, head_size=FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE))
 
+    @patch("vllm_ascend.attention.attention_v1.update_paged_attention_graph_param")
+    @patch("vllm_ascend.attention.attention_v1.needs_layer_aware_fia_graph_replay", return_value=True)
+    @patch("vllm_ascend.attention.attention_v1.using_paged_attention", return_value=False)
+    @patch("vllm_ascend.attention.attention_v1.get_graph_params")
+    def test_fia_graph_update_dispatches_paged_attention_param(
+        self,
+        mock_get_graph_params,
+        _mock_using_paged_attention,
+        _mock_needs_layer_aware_replay,
+        mock_update_pa_param,
+    ):
+        layer_name = "model.layers.0.self_attn.attn"
+        block_table = torch.zeros(1, 1, dtype=torch.int32)
+        seq_lens = torch.tensor([1], dtype=torch.int32)
+        param = PagedAttentionGraphParam(params=(), layer_name=layer_name)
+        handle = MagicMock()
+        event = MagicMock()
+        graph_params = SimpleNamespace(
+            attn_params={1: [param]},
+            handles={1: [handle]},
+            events={1: [event]},
+            workspaces={},
+        )
+        mock_get_graph_params.return_value = graph_params
+        forward_context = SimpleNamespace(
+            attn_metadata={
+                layer_name: SimpleNamespace(
+                    block_tables=block_table,
+                    seq_lens=seq_lens,
+                )
+            }
+        )
+        stream_context = MagicMock()
+        stream_context.__enter__.return_value = None
+        stream_context.__exit__.return_value = None
+        update_stream = MagicMock()
+
+        with (
+            patch("vllm_ascend.attention.attention_v1.torch.npu.stream", return_value=stream_context, create=True),
+            patch.object(attn_module._EXTRA_CTX, "is_draft_model", False, create=True),
+            patch.object(attn_module._EXTRA_CTX, "sinks", False, create=True),
+        ):
+            AscendAttentionBackendImpl.update_graph_params(
+                update_stream=update_stream,
+                forward_context=forward_context,
+                num_tokens=1,
+                vllm_config=MagicMock(),
+            )
+
+        mock_update_pa_param.assert_called_once_with(
+            update_stream,
+            handle,
+            event,
+            param,
+            block_table,
+            seq_lens,
+        )
+
 
 class TestAscendAttentionBackend(TestBase):
     def setUp(self):
