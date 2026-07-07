@@ -62,6 +62,9 @@ class GDNChunkedPrefillMetadata:
     chunk_indices_large_block: torch.Tensor
     block_indices_cumsum: torch.Tensor
     num_decodes: int = 0
+    _buffer_slot: object | None = None
+    cu_seqlens_kern: tuple[int, ...] | None = None
+    keep_meta: torch.Tensor | None = None
 
 
 @dataclass
@@ -118,6 +121,41 @@ def _build_non_spec_chunked_prefill_metadata(
     cu_seqlens_cpu: torch.Tensor,
     device: torch.device,
 ) -> GDNChunkedPrefillMetadata:
+    cu_seqlens_host = tuple(cu_seqlens_cpu.to(torch.int64).tolist())
+    num_decodes = sum(
+        1 for i in range(len(cu_seqlens_host) - 1) if 0 < cu_seqlens_host[i + 1] - cu_seqlens_host[i] <= 1
+    )
+    # Pre-compute compact cu_seqlens for AscendC kernels so each layer
+    # can reuse them instead of calling _compact_empty_segments again.
+    cu = torch.tensor(cu_seqlens_host, dtype=torch.int64)
+    keep = (cu[1:] - cu[:-1]) > 0
+    if bool(keep.all()):
+        cu_seqlens_kern = None
+        keep_meta = None
+    else:
+        cu_seqlens_kern = tuple(torch.cat([cu[:1], cu[1:][keep]]).tolist())
+        keep_meta = keep
+    return GDNChunkedPrefillMetadata(
+        cu_seqlens_cpu=cu_seqlens_cpu,
+        cu_seqlens_host=cu_seqlens_host,
+        chunk_indices_chunk64_host=_build_chunk_indices_host(
+            cu_seqlens_cpu,
+            builder._ascend_gdn_chunk_size,
+        ),
+        chunk_indices_chunk64=tensors["chunk_indices_chunk64"],
+        chunk_offsets_chunk64=tensors["chunk_offsets_chunk64"],
+        update_chunk_offsets_chunk64=tensors["update_chunk_offsets_chunk64"],
+        final_chunk_indices_chunk64=tensors["final_chunk_indices_chunk64"],
+        chunk_indices_large_block=tensors["chunk_indices_large_block"],
+        block_indices_cumsum=tensors["block_indices_cumsum"],
+        num_decodes=num_decodes,
+        _buffer_slot=slot,
+        cu_seqlens_kern=cu_seqlens_kern,
+        keep_meta=keep_meta,
+    )
+
+
+def _get_gdn_num_heads(builder) -> int:
     hf_text_config = getattr(builder.vllm_config.model_config, "hf_text_config", None)
     if hf_text_config is not None and hasattr(hf_text_config, "linear_num_value_heads"):
         gdn_num_heads = (

@@ -133,7 +133,19 @@ def chunk_gated_delta_rule_fwd(
     # Compact zero-length segments for the AscendC kernels (see
     # _compact_empty_segments). chunk_indices_chunk64 is already compact-ranked and
     # is reused as-is; only cu_seqlens / initial_state need compacting.
-    cu_seqlens_kern, initial_state_kern, keep_meta = _compact_empty_segments(cu_seqlens_host, initial_state)
+    # Pre-computed compact info from metadata avoids recomputation across layers:
+    # cu_seqlens_kern and keep_meta only depend on cu_seqlens_host (batch-wide),
+    # so they are built once and cached in GDNChunkedPrefillMetadata.
+    if prebuilt_meta is not None and hasattr(prebuilt_meta, 'keep_meta'):
+        cu_seqlens_kern = cu_seqlens_host if prebuilt_meta.cu_seqlens_kern is None else prebuilt_meta.cu_seqlens_kern
+        keep_meta = prebuilt_meta.keep_meta
+        initial_state_kern = (
+            initial_state[keep_meta.to(initial_state.device)]
+            if initial_state is not None and keep_meta is not None
+            else initial_state
+        )
+    else:
+        cu_seqlens_kern, initial_state_kern, keep_meta = _compact_empty_segments(cu_seqlens_host, initial_state)
     h, v_new, final_state = torch.ops._C_ascend.chunk_gated_delta_rule_fwd_h(
         k_ascendc,
         w_ascendc,
