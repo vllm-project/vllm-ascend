@@ -359,9 +359,9 @@ public:
         std::vector<int64_t> expectChunkIndices;
         for (int64_t i = 1; i < seqlensDim0; i++) {
             int64_t curSeqLen = cuSeqlens[i] - cuSeqlens[i - 1];
-            OP_CHECK_IF(curSeqLen <= 0,
+            OP_CHECK_IF(curSeqLen < 0,
                         OP_LOGE(ctx_.nodeName,
-                                "Check seqlens data failed, the seqlens[%ld]:[%ld] should be larger than seqlens[%ld]:[%ld]",
+                                "Check seqlens data failed, the seqlens[%ld]:[%ld] should be no smaller than seqlens[%ld]:[%ld]",
                                 i, cuSeqlens[i], i - 1, cuSeqlens[i - 1]),
                         return ge::GRAPH_FAILED);
             for (int64_t j = 0; j < curSeqLen; j += chunkSize) {

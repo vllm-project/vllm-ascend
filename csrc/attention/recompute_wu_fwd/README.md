@@ -446,7 +446,7 @@ print(w.shape, u.shape)
     - `B` 必须为 `1`
     - `cu_seqlens` 为一维 `int64` Tensor
     - `cu_seqlens[0]` 必须为 `0`
-    - `cu_seqlens` 必须严格递增
+    - `cu_seqlens` 必须非递减，允许 0-length sequence
     - `chunk_indices` 为一维 `int64` Tensor
     - `chunk_indices` 必须是 `[seq_id, chunk_id]` 的 flatten 形式
 
