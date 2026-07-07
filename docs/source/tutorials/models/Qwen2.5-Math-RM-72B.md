@@ -33,9 +33,8 @@ These versions support multi-NPU deployment, allowing the model to utilize all a
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
 
-```{code-block} bash
-   :substitutions:
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+```bash
+export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 docker run --rm \
     --device /dev/davinci0 \
     --device /dev/davinci1 \
@@ -77,9 +76,9 @@ vllm serve ${MODEL_PATH} \
           --task reward
 ```
 
-:::{note}
-The `--task reward` parameter is required to run the model in reward model mode for scoring mathematical solutions.
-:::
+!!! note
+
+    The `--task reward` parameter is required to run the model in reward model mode for scoring mathematical solutions.
 
 ## Functional Verification
 

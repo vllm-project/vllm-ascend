@@ -346,6 +346,8 @@ msgstr "`--gpu-memory-utilization 0.9`：控制 vLLM 使用的内存比例。"
 msgid "`--trust-remote-code`: allows loading model-specific remote code."
 msgstr "`--trust-remote-code`：允许加载模型特定的远程代码。"
 
+#: ../../source/tutorials/models/Kimi-K2-Thinking.md:207
+msgid "`--enable-expert-parallel`: enables expert parallelism for MoE layers."
 msgstr "`--enable-expert-parallel`：为MoE层启用专家并行。"
 
 #: ../../source/tutorials/models/Kimi-K2-Thinking.md:208

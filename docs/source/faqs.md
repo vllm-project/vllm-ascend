@@ -48,10 +48,9 @@ If you want to use container image for offline environments (no internet connect
 
 **Exporting Docker images:**
 
-```{code-block} bash
-   :substitutions:
+```bash
 # Pull the image on a machine with internet access
-TAG=|vllm_ascend_version|
+TAG={{ vllm_ascend_version }}
 docker pull quay.io/ascend/vllm-ascend:$TAG
 
 # Export the image to a tar file and compress to tar.gz
@@ -60,10 +59,9 @@ docker save quay.io/ascend/vllm-ascend:$TAG | gzip > vllm-ascend-$TAG.tar.gz
 
 **Importing Docker images in environment without internet access:**
 
-```{code-block} bash
-   :substitutions:
+```bash
 # Transfer the tar/tar.gz file to the offline environment and load it
-TAG=|vllm_ascend_version|
+TAG={{ vllm_ascend_version }}
 docker load -i vllm-ascend-$TAG.tar.gz
 
 # Verify the image is loaded

@@ -23,25 +23,23 @@ Currently, we provide the all-in-one images.[Download images](https://quay.io/re
 
 #### Docker Pull (by tag)
 
-```{code-block} bash
-   :substitutions:
+```bash
 
-docker pull quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+docker pull quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 
 ```
 
 #### Docker run
 
-```{code-block} bash
-   :substitutions:
+```bash
 
 # Update --device according to your device (Atlas A2: /dev/davinci[0-7] Atlas A3:/dev/davinci[0-15]).
 # Update the vllm-ascend image according to your environment.
 # Note you should download the weight to /root/.cache in advance.
 # For Atlas A2 machines:
-# export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+# export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 # For Atlas A3 machines:
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
+export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
 docker run --rm \
     --name vllm-ascend-env \
     --shm-size=1g \

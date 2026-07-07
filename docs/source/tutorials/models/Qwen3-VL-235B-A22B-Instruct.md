@@ -28,58 +28,52 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
 ### Installation
 
-:::::{tab-set}
-::::{tab-item} Use docker image
+=== "Use docker image"
 
-For example, using images `quay.io/ascend/vllm-ascend:v0.11.0rc2`(for Atlas 800 A2) and `quay.io/ascend/vllm-ascend:v0.11.0rc2-a3`(for Atlas 800 A3).
+    For example, using images `quay.io/ascend/vllm-ascend:v0.11.0rc2`(for Atlas 800 A2) and `quay.io/ascend/vllm-ascend:v0.11.0rc2-a3`(for Atlas 800 A3).
 
-Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
+    Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
 
-```{code-block} bash
-  :substitutions:
-  # Update --device according to your device (Atlas A2: /dev/davinci[0-7] Atlas A3:/dev/davinci[0-15]).
-  # Update the vllm-ascend image according to your environment.
-  # Note you should download the weight to /root/.cache in advance.
-  # Update the vllm-ascend image
-  export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:|vllm_ascend_version|
-  export NAME=vllm-ascend
+    ```bash
+      # Update --device according to your device (Atlas A2: /dev/davinci[0-7] Atlas A3:/dev/davinci[0-15]).
+      # Update the vllm-ascend image according to your environment.
+      # Note you should download the weight to /root/.cache in advance.
+      # Update the vllm-ascend image
+      export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
+      export NAME=vllm-ascend
 
-  # Run the container using the defined variables
-  # Note: If you are running bridge network with docker, please expose available ports for multiple nodes communication in advance
-  docker run --rm \
-  --name $NAME \
-  --net=host \
-  --privileged=true \
-  --shm-size=500g \
-  --device /dev/davinci0 \
-  --device /dev/davinci1 \
-  --device /dev/davinci2 \
-  --device /dev/davinci3 \
-  --device /dev/davinci4 \
-  --device /dev/davinci5 \
-  --device /dev/davinci6 \
-  --device /dev/davinci7 \
-  --device /dev/davinci_manager \
-  --device /dev/devmm_svm \
-  --device /dev/hisi_hdc \
-  -v /usr/local/dcmi:/usr/local/dcmi \
-  -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-  -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-  -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-  -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-  -v /etc/ascend_install.info:/etc/ascend_install.info \
-  -it $IMAGE bash
-```
+      # Run the container using the defined variables
+      # Note: If you are running bridge network with docker, please expose available ports for multiple nodes communication in advance
+      docker run --rm \
+      --name $NAME \
+      --net=host \
+      --privileged=true \
+      --shm-size=500g \
+      --device /dev/davinci0 \
+      --device /dev/davinci1 \
+      --device /dev/davinci2 \
+      --device /dev/davinci3 \
+      --device /dev/davinci4 \
+      --device /dev/davinci5 \
+      --device /dev/davinci6 \
+      --device /dev/davinci7 \
+      --device /dev/davinci_manager \
+      --device /dev/devmm_svm \
+      --device /dev/hisi_hdc \
+      -v /usr/local/dcmi:/usr/local/dcmi \
+      -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+      -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+      -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+      -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+      -v /etc/ascend_install.info:/etc/ascend_install.info \
+      -it $IMAGE bash
+    ```
 
-::::
-::::{tab-item} Build from source
+=== "Build from source"
 
-You can build all from source.
+    You can build all from source.
 
-- Install `vllm-ascend`, refer to [set up using python](../../installation.md#set-up-using-python).
-
-::::
-:::::
+    - Install `vllm-ascend`, refer to [set up using python](../../installation.md#set-up-using-python).
 
 If you want to deploy multi-node environment, you need to set up environment on each node.
 

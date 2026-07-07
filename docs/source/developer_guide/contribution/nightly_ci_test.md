@@ -22,14 +22,14 @@ The comment itself triggers the workflow — no label is required.
 | `/nightly all` | Run **all** nightly tests (same as above) |
 | `/nightly test1 test2 ...` | Run only the **named** tests |
 
-:::{note}
-Only repository **Contributors** (Triage role) and **Maintainers** (Write role) can
-trigger the `/nightly` command. If you do not have this permission, ask a maintainer
-to post the comment for you. You can find the list of maintainers and contributors in
-the project's [Governance](../../community/governance.md) page or by checking the
-[CODEOWNERS](https://github.com/vllm-project/vllm-ascend/blob/main/.github/CODEOWNERS)
-file.
-:::
+!!! note
+
+    Only repository **Contributors** (Triage role) and **Maintainers** (Write role) can
+    trigger the `/nightly` command. If you do not have this permission, ask a maintainer
+    to post the comment for you. You can find the list of maintainers and contributors in
+    the project's [Governance](../../community/governance.md) page or by checking the
+    [CODEOWNERS](https://github.com/vllm-project/vllm-ascend/blob/main/.github/CODEOWNERS)
+    file.
 
 ### 2. Wait for results
 
@@ -183,12 +183,12 @@ The `pr-accuracy-group-*` entries only run on `/nightly` (PR-triggered) runs;
 | `Qwen3-30B-QuaRot` | Qwen3-30B QuaRot + eagle3 |
 | `Qwen3-32B-QuaRot` | Qwen3-32B QuaRot + eagle3 |
 
-:::{warning}
-The A3 resource pool has a maximum concurrency of **5×16 NPUs**. Multi-node tests
-run with `max-parallel: 2` to avoid resource exhaustion. Running `/nightly all` on
-A3 will queue a large number of jobs — prefer targeting specific test names when
-possible.
-:::
+!!! warning
+
+    The A3 resource pool has a maximum concurrency of **5×16 NPUs**. Multi-node tests
+    run with `max-parallel: 2` to avoid resource exhaustion. Running `/nightly all` on
+    A3 will queue a large number of jobs — prefer targeting specific test names when
+    possible.
 
 ## Examples
 

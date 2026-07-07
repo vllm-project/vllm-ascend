@@ -18,9 +18,8 @@ Download to shared directory such as `/mnt/weight/`
 
 ### Run with Docker
 
-```{code-block} bash
-   :substitutions:
-export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+```bash
+export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 export NAME=vllm-ascend
 
 docker run --rm \

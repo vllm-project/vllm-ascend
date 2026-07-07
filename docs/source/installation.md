@@ -38,84 +38,72 @@ Refer to [Ascend Environment Setup Guide](https://ascend.github.io/docs/sources/
 
 ### Configure software environment
 
-:::::{tab-set}
-:sync-group: install
+=== "Before using pip"
 
-::::{tab-item} Before using pip
-:selected:
-:sync: pip
+    The easiest way to prepare your software environment is using CANN image directly:
 
-The easiest way to prepare your software environment is using CANN image directly:
+    !!! note
 
-```{note}
-The CANN prebuilt image includes NNAL (Ascend Neural Network Acceleration Library), which provides libatb.so for advanced tensor operations. No additional installation is required when using the prebuilt image.
-```
+        The CANN prebuilt image includes NNAL (Ascend Neural Network Acceleration Library), which provides libatb.so for advanced tensor operations. No additional installation is required when using the prebuilt image.
 
-```{code-block} bash
-   :substitutions:
-# Update DEVICE according to your device (/dev/davinci[0-7])
-export DEVICE=/dev/davinci7
-# Update the vllm-ascend image
-export IMAGE=quay.io/ascend/cann:|cann_image_tag|
-docker run --rm \
-    --name vllm-ascend-env \
-    --shm-size=1g \
-    --device $DEVICE \
-    --device /dev/davinci_manager \
-    --device /dev/devmm_svm \
-    --device /dev/hisi_hdc \
-    -v /usr/local/dcmi:/usr/local/dcmi \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
-    -v /root/.cache:/root/.cache \
-    -it $IMAGE bash
-```
+    ```bash
+    # Update DEVICE according to your device (/dev/davinci[0-7])
+    export DEVICE=/dev/davinci7
+    # Update the vllm-ascend image
+    export IMAGE=quay.io/ascend/cann:{{ cann_image_tag }}
+    docker run --rm \
+        --name vllm-ascend-env \
+        --shm-size=1g \
+        --device $DEVICE \
+        --device /dev/davinci_manager \
+        --device /dev/devmm_svm \
+        --device /dev/hisi_hdc \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v /root/.cache:/root/.cache \
+        -it $IMAGE bash
+    ```
 
-:::{dropdown} Click here to see "Install CANN manually"
-:animate: fade-in-slide-down
-You can also install CANN manually:
+    ??? 'Click here to see "Install CANN manually"'
 
-```{warning}
-If you encounter "libatb.so not found" errors during runtime, please ensure NNAL is properly installed as shown in the manual installation steps below.
-```
+        You can also install CANN manually:
 
-```bash
-# Create a virtual environment.
-python -m venv vllm-ascend-env
-source vllm-ascend-env/bin/activate
+        !!! warning
 
-# Install required Python packages.
-python -m pip install --upgrade pip
-pip3 install attrs numpy decorator sympy cffi pyyaml pathlib2 psutil protobuf scipy requests absl-py wheel typing_extensions
+            If you encounter "libatb.so not found" errors during runtime, please ensure NNAL is properly installed as shown in the manual installation steps below.
 
-# Download and install the CANN package.
-wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%209.0.0/Ascend-cann-toolkit_9.0.0_linux-"$(uname -i)".run
-chmod +x ./Ascend-cann-toolkit_9.0.0_linux-"$(uname -i)".run
-./Ascend-cann-toolkit_9.0.0_linux-"$(uname -i)".run --full
-source /usr/local/Ascend/ascend-toolkit/set_env.sh
+        ```bash
+        # Create a virtual environment.
+        python -m venv vllm-ascend-env
+        source vllm-ascend-env/bin/activate
 
-wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%209.0.0/Ascend-cann-910b-ops_9.0.0_linux-"$(uname -i)".run
-chmod +x ./Ascend-cann-910b-ops_9.0.0_linux-"$(uname -i)".run
-./Ascend-cann-910b-ops_9.0.0_linux-"$(uname -i)".run --install
+        # Install required Python packages.
+        python -m pip install --upgrade pip
+        pip3 install attrs numpy decorator sympy cffi pyyaml pathlib2 psutil protobuf scipy requests absl-py wheel typing_extensions
 
-wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%209.0.0/Ascend-cann-nnal_9.0.0_linux-"$(uname -i)".run
-chmod +x ./Ascend-cann-nnal_9.0.0_linux-"$(uname -i)".run
-./Ascend-cann-nnal_9.0.0_linux-"$(uname -i)".run --install
+        # Download and install the CANN package.
+        wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%209.0.0/Ascend-cann-toolkit_9.0.0_linux-"$(uname -i)".run
+        chmod +x ./Ascend-cann-toolkit_9.0.0_linux-"$(uname -i)".run
+        ./Ascend-cann-toolkit_9.0.0_linux-"$(uname -i)".run --full
+        source /usr/local/Ascend/ascend-toolkit/set_env.sh
 
-source /usr/local/Ascend/nnal/atb/set_env.sh
-```
+        wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%209.0.0/Ascend-cann-910b-ops_9.0.0_linux-"$(uname -i)".run
+        chmod +x ./Ascend-cann-910b-ops_9.0.0_linux-"$(uname -i)".run
+        ./Ascend-cann-910b-ops_9.0.0_linux-"$(uname -i)".run --install
 
-:::
+        wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%209.0.0/Ascend-cann-nnal_9.0.0_linux-"$(uname -i)".run
+        chmod +x ./Ascend-cann-nnal_9.0.0_linux-"$(uname -i)".run
+        ./Ascend-cann-nnal_9.0.0_linux-"$(uname -i)".run --install
 
-::::
+        source /usr/local/Ascend/nnal/atb/set_env.sh
+        ```
 
-::::{tab-item} Before using docker
-:sync: docker
-No extra steps are needed if you are using the `vllm-ascend` prebuilt Docker image.
-::::
-:::::
+=== "Before using docker"
+
+    No extra steps are needed if you are using the `vllm-ascend` prebuilt Docker image.
 
 Once this is done, you can start to set up `vllm` and `vllm-ascend`.
 
@@ -142,109 +130,95 @@ pip config set global.extra-index-url "https://download.pytorch.org/whl/cpu/"
 
 Then you can install `vllm` and `vllm-ascend` from a **pre-built wheel** using one of the following methods:
 
-:::::{tab-set}
-:sync-group: install-method
+=== "Original installation"
 
-::::{tab-item} Original installation
-:sync: original
+    ```bash
 
-```{code-block} bash
-   :substitutions:
+    # Install vllm-project/vllm. The newest supported version is {{ vllm_version }}.
+    pip install vllm=={{ pip_vllm_version }}
 
-# Install vllm-project/vllm. The newest supported version is |vllm_version|.
-pip install vllm==|pip_vllm_version|
+    # Install vllm-project/vllm-ascend.
+    pip install \
+    --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi/variant https://mirrors.huaweicloud.com/ascend/repos/pypi  \
+    vllm-ascend=={{ pip_vllm_ascend_version }}
 
-# Install vllm-project/vllm-ascend.
-pip install \
---extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi/variant https://mirrors.huaweicloud.com/ascend/repos/pypi  \
-vllm-ascend==|pip_vllm_ascend_version|
+    ```
 
-```
+=== "uv-wheelnext installation"
 
-::::
+    The `uv-wheelnext` installation downloads only the delta on top of vllm, resulting in a smaller download size. First install `uv-wheelnext` to support incremental wheels:
 
-::::{tab-item} uv-wheelnext installation
-:sync: uv-wheelnext
+    ```bash
+    # install uv-wheelnext
+    curl -LsSf https://astral.sh/uv/install.sh | sed 's/verify_checksum "$_file"/true/' | INSTALLER_DOWNLOAD_URL=https://wheelnext.astral.sh sh
+    source $HOME/.local/bin/env
+    ```
 
-The `uv-wheelnext` installation downloads only the delta on top of vllm, resulting in a smaller download size. First install `uv-wheelnext` to support incremental wheels:
+    ```bash
 
-```bash
-# install uv-wheelnext
-curl -LsSf https://astral.sh/uv/install.sh | sed 's/verify_checksum "$_file"/true/' | INSTALLER_DOWNLOAD_URL=https://wheelnext.astral.sh sh
-source $HOME/.local/bin/env
-```
+    # Install vllm-project/vllm. The newest supported version is {{ vllm_version }}.
+    pip install vllm=={{ pip_vllm_version }}
 
-```{code-block} bash
-   :substitutions:
+    # Install vllm-project/vllm-ascend from wheelnext index.
+    uv pip install --system \
+    --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi/variant   \
+    --index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple \
+    vllm-ascend=={{ pip_vllm_ascend_version }}
 
-# Install vllm-project/vllm. The newest supported version is |vllm_version|.
-pip install vllm==|pip_vllm_version|
+    ```
 
-# Install vllm-project/vllm-ascend from wheelnext index.
-uv pip install --system \
---extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi/variant   \
---index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple \
-vllm-ascend==|pip_vllm_ascend_version|
+    !!! note
 
-```
+        If you encounter errors during `uv pip install` (e.g., corrupted cache or stale package data), try clearing the uv cache first and then re-run the install command:
 
-```{note}
-If you encounter errors during `uv pip install` (e.g., corrupted cache or stale package data), try clearing the uv cache first and then re-run the install command:
+            uv cache clean
 
-    uv cache clean
+??? 'Click here to see "Build from source code"'
 
-```
+    or build from **source code**:
 
-::::
-:::::
+    !!! note
 
-:::{dropdown} Click here to see "Build from source code"
-or build from **source code**:
+        To install `triton-ascend`, run:
 
-```{note}
-To install `triton-ascend`, run:
+        pip install triton-ascend==3.2.1 --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
 
-pip install triton-ascend==3.2.1 --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
+        If you are installing via `uv`, make sure to install `triton-ascend` **last**, after all other packages have been installed, to avoid dependency resolution conflicts.
 
-If you are installing via `uv`, make sure to install `triton-ascend` **last**, after all other packages have been installed, to avoid dependency resolution conflicts.
-```
+    ```bash
 
-```{code-block} bash
-   :substitutions:
+    # Install vLLM.
+    git clone --depth 1 --branch {{ vllm_version }} https://github.com/vllm-project/vllm
+    cd vllm
+    VLLM_TARGET_DEVICE=empty pip install -e .
+    cd ..
 
-# Install vLLM.
-git clone --depth 1 --branch |vllm_version| https://github.com/vllm-project/vllm
-cd vllm
-VLLM_TARGET_DEVICE=empty pip install -e .
-cd ..
+    # Install vLLM Ascend.
+    git clone --depth 1 --branch {{ vllm_ascend_version }} https://github.com/vllm-project/vllm-ascend.git
+    cd vllm-ascend
+    git submodule update --init --recursive
+    pip install -e .
+    cd ..
+    ```
 
-# Install vLLM Ascend.
-git clone --depth 1 --branch |vllm_ascend_version| https://github.com/vllm-project/vllm-ascend.git
-cd vllm-ascend
-git submodule update --init --recursive
-pip install -e .
-cd ..
-```
+    If you are building custom operators for Atlas A3, you should run `git submodule update --init --recursive` manually, or ensure your environment has internet access.
 
-If you are building custom operators for Atlas A3, you should run `git submodule update --init --recursive` manually, or ensure your environment has internet access.
-:::
+!!! note
 
-```{note}
-To build custom operators, gcc/g++ higher than 8 and C++17 or higher are required. If you are using `pip install -e .` and encounter a torch-npu version conflict, please install with `pip install --no-build-isolation -e .` to build on system env.
-If you encounter other problems during compiling, it is probably because an unexpected compiler is being used, you may export `CXX_COMPILER` and `C_COMPILER` in the environment to specify your g++ and gcc locations before compiling.
+    To build custom operators, gcc/g++ higher than 8 and C++17 or higher are required. If you are using `pip install -e .` and encounter a torch-npu version conflict, please install with `pip install --no-build-isolation -e .` to build on system env.
+    If you encounter other problems during compiling, it is probably because an unexpected compiler is being used, you may export `CXX_COMPILER` and `C_COMPILER` in the environment to specify your g++ and gcc locations before compiling.
 
-If you are building in a CPU-only environment where `npu-smi` is unavailable, you need to set `SOC_VERSION` before `pip install -e .` so the build can target the correct chip. You can refer to `Dockerfile*` defaults, for example:
+    If you are building in a CPU-only environment where `npu-smi` is unavailable, you need to set `SOC_VERSION` before `pip install -e .` so the build can target the correct chip. You can refer to `Dockerfile*` defaults, for example:
 
-- Atlas A2: `export SOC_VERSION=ascend910b1`
-- Atlas A3: `export SOC_VERSION=ascend910_9391`
-- Atlas 300I: `export SOC_VERSION=ascend310p1`
-- Ascend 950 Products: `export SOC_VERSION=<value starting with "ascend950">`
-```
+    - Atlas A2: `export SOC_VERSION=ascend910b1`
+    - Atlas A3: `export SOC_VERSION=ascend910_9391`
+    - Atlas 300I: `export SOC_VERSION=ascend310p1`
+    - Ascend 950 Products: `export SOC_VERSION=<value starting with "ascend950">`
 
-```{note}
-To enable the batch invariance feature, set `VLLM_BATCH_INVARIANT=1` before building vllm-ascend to install the batch invariance custom operator library during the installation process.
-For usage guidance on the batch invariance feature, see <https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/user_guide/feature_guide/batch_invariance.md>
-```
+!!! note
+
+    To enable the batch invariance feature, set `VLLM_BATCH_INVARIANT=1` before building vllm-ascend to install the batch invariance custom operator library during the installation process.
+    For usage guidance on the batch invariance feature, see <https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/user_guide/feature_guide/batch_invariance.md>
 
 ## Set up using Docker
 
@@ -261,24 +235,22 @@ Supported images as following.
 | vllm-ascend:{{ vllm_ascend_version }}-310p | Atlas 300I | Ubuntu |
 | vllm-ascend:{{ vllm_ascend_version }}-310p-openeuler | Atlas 300I | openEuler |
 
-:::{dropdown} Click here to see "Build from Dockerfile"
-or build IMAGE from **source code**:
+??? 'Click here to see "Build from Dockerfile"'
+
+    or build IMAGE from **source code**:
+
+    ```bash
+    git clone https://github.com/vllm-project/vllm-ascend.git
+    cd vllm-ascend
+    docker build -t vllm-ascend-dev-image:latest -f ./Dockerfile .
+    ```
 
 ```bash
-git clone https://github.com/vllm-project/vllm-ascend.git
-cd vllm-ascend
-docker build -t vllm-ascend-dev-image:latest -f ./Dockerfile .
-```
-
-:::
-
-```{code-block} bash
-   :substitutions:
 
 # Update --device according to your device (Atlas A2: /dev/davinci[0-7] Atlas A3:/dev/davinci[0-15]).
 # Update the vllm-ascend image according to your environment.
 # Note you should download the weight to /root/.cache in advance.
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 docker run --rm \
     --name vllm-ascend-env \
     --shm-size=1g \
@@ -391,73 +363,55 @@ First, check physical layer connectivity, then verify each node, and finally ver
 
 Execute the following commands on each node in sequence. The results must all be `success` and the status must be `UP`:
 
-:::::{tab-set}
-:sync-group: multi-node
+=== "A2 series"
 
-::::{tab-item} A2 series
-:sync: A2
+    ```bash
+     # Check the remote switch ports
+     for i in {0..7}; do hccn_tool -i $i -lldp -g | grep Ifname; done 
+     # Get the link status of the Ethernet ports (UP or DOWN)
+     for i in {0..7}; do hccn_tool -i $i -link -g ; done
+     # Check the network health status
+     for i in {0..7}; do hccn_tool -i $i -net_health -g ; done
+     # View the network detected IP configuration
+     for i in {0..7}; do hccn_tool -i $i -netdetect -g ; done
+     # View gateway configuration
+     for i in {0..7}; do hccn_tool -i $i -gateway -g ; done
+     # View NPU network configuration
+     cat /etc/hccn.conf
+    ```
 
-```bash
- # Check the remote switch ports
- for i in {0..7}; do hccn_tool -i $i -lldp -g | grep Ifname; done 
- # Get the link status of the Ethernet ports (UP or DOWN)
- for i in {0..7}; do hccn_tool -i $i -link -g ; done
- # Check the network health status
- for i in {0..7}; do hccn_tool -i $i -net_health -g ; done
- # View the network detected IP configuration
- for i in {0..7}; do hccn_tool -i $i -netdetect -g ; done
- # View gateway configuration
- for i in {0..7}; do hccn_tool -i $i -gateway -g ; done
- # View NPU network configuration
- cat /etc/hccn.conf
-```
+=== "A3 series"
 
-::::
-::::{tab-item} A3 series
-:sync: A3
-
-```bash
- # Check the remote switch ports
- for i in {0..15}; do hccn_tool -i $i -lldp -g | grep Ifname; done 
- # Get the link status of the Ethernet ports (UP or DOWN)
- for i in {0..15}; do hccn_tool -i $i -link -g ; done
- # Check the network health status
- for i in {0..15}; do hccn_tool -i $i -net_health -g ; done
- # View the network detected IP configuration
- for i in {0..15}; do hccn_tool -i $i -netdetect -g ; done
- # View gateway configuration
- for i in {0..15}; do hccn_tool -i $i -gateway -g ; done
- # View NPU network configuration
- cat /etc/hccn.conf
-```
-
-::::
-:::::
+    ```bash
+     # Check the remote switch ports
+     for i in {0..15}; do hccn_tool -i $i -lldp -g | grep Ifname; done 
+     # Get the link status of the Ethernet ports (UP or DOWN)
+     for i in {0..15}; do hccn_tool -i $i -link -g ; done
+     # Check the network health status
+     for i in {0..15}; do hccn_tool -i $i -net_health -g ; done
+     # View the network detected IP configuration
+     for i in {0..15}; do hccn_tool -i $i -netdetect -g ; done
+     # View gateway configuration
+     for i in {0..15}; do hccn_tool -i $i -gateway -g ; done
+     # View NPU network configuration
+     cat /etc/hccn.conf
+    ```
 
 #### Interconnect Verification
 
 ##### 1. Get NPU IP Addresses
 
-:::::{tab-set}
-:sync-group: multi-node
+=== "A2 series"
 
-::::{tab-item} A2 series
-:sync: A2
+    ```bash
+    for i in {0..7}; do hccn_tool -i $i -ip -g | grep ipaddr; done
+    ```
 
-```bash
-for i in {0..7}; do hccn_tool -i $i -ip -g | grep ipaddr; done
-```
+=== "A3 series"
 
-::::
-::::{tab-item} A3 series
-:sync: A3
-
-```bash
-for i in {0..15}; do hccn_tool -i $i -ip -g | grep ipaddr; done
-```
-
-::::
-:::::
+    ```bash
+    for i in {0..15}; do hccn_tool -i $i -ip -g | grep ipaddr; done
+    ```
 
 ##### 2. Cross-Node PING Test
 
@@ -472,97 +426,86 @@ Using vLLM-ascend official container is more efficient to run multi-node environ
 
 Run the following command to start the container in each node (You should download the weight to /root/.cache in advance):
 
-:::::{tab-set}
-:sync-group: multi-node
+=== "A2 series"
 
-::::{tab-item} A2 series
-:sync: A2
+    ```bash
+    # Update the vllm-ascend image
+    # openEuler:
+    # export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-openeuler
+    # Ubuntu:
+    # export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 
-```{code-block} bash
-   :substitutions:
-# Update the vllm-ascend image
-# openEuler:
-# export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-openeuler
-# Ubuntu:
-# export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+    # Run the container using the defined variables
+    # Note if you are running bridge network with docker, Please expose available ports
+    # for multiple nodes communication in advance
+    docker run --rm \
+    --name vllm-ascend \
+    --net=host \
+    --shm-size=1g \
+    --device /dev/davinci0 \
+    --device /dev/davinci1 \
+    --device /dev/davinci2 \
+    --device /dev/davinci3 \
+    --device /dev/davinci4 \
+    --device /dev/davinci5 \
+    --device /dev/davinci6 \
+    --device /dev/davinci7 \
+    --device /dev/davinci_manager \
+    --device /dev/devmm_svm \
+    --device /dev/hisi_hdc \
+    -v /usr/local/dcmi:/usr/local/dcmi \
+    -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+    -v /etc/ascend_install.info:/etc/ascend_install.info \
+    -v /root/.cache:/root/.cache \
+    -it $IMAGE bash
+    ```
 
-# Run the container using the defined variables
-# Note if you are running bridge network with docker, Please expose available ports
-# for multiple nodes communication in advance
-docker run --rm \
---name vllm-ascend \
---net=host \
---shm-size=1g \
---device /dev/davinci0 \
---device /dev/davinci1 \
---device /dev/davinci2 \
---device /dev/davinci3 \
---device /dev/davinci4 \
---device /dev/davinci5 \
---device /dev/davinci6 \
---device /dev/davinci7 \
---device /dev/davinci_manager \
---device /dev/devmm_svm \
---device /dev/hisi_hdc \
--v /usr/local/dcmi:/usr/local/dcmi \
--v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
--v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
--v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
--v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
--v /etc/ascend_install.info:/etc/ascend_install.info \
--v /root/.cache:/root/.cache \
--it $IMAGE bash
-```
+=== "A3 series"
 
-::::
-::::{tab-item} A3 series
-:sync: A3
+    ```bash
+    # Update the vllm-ascend image
+    # openEuler:
+    # export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3-openeuler
+    # Ubuntu:
+    # export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
 
-```{code-block} bash
-   :substitutions:
-# Update the vllm-ascend image
-# openEuler:
-# export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3-openeuler
-# Ubuntu:
-# export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
-
-# Run the container using the defined variables
-# Note if you are running bridge network with docker, Please expose available ports
-# for multiple nodes communication in advance
-docker run --rm \
---name vllm-ascend \
---net=host \
---shm-size=1g \
---device /dev/davinci0 \
---device /dev/davinci1 \
---device /dev/davinci2 \
---device /dev/davinci3 \
---device /dev/davinci4 \
---device /dev/davinci5 \
---device /dev/davinci6 \
---device /dev/davinci7 \
---device /dev/davinci8 \
---device /dev/davinci9 \
---device /dev/davinci10 \
---device /dev/davinci11 \
---device /dev/davinci12 \
---device /dev/davinci13 \
---device /dev/davinci14 \
---device /dev/davinci15 \
---device /dev/davinci_manager \
---device /dev/devmm_svm \
---device /dev/hisi_hdc \
--v /usr/local/dcmi:/usr/local/dcmi \
--v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
--v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
--v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
--v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
--v /etc/ascend_install.info:/etc/ascend_install.info \
--v /root/.cache:/root/.cache \
--it $IMAGE bash
-```
-
-::::
-:::::
+    # Run the container using the defined variables
+    # Note if you are running bridge network with docker, Please expose available ports
+    # for multiple nodes communication in advance
+    docker run --rm \
+    --name vllm-ascend \
+    --net=host \
+    --shm-size=1g \
+    --device /dev/davinci0 \
+    --device /dev/davinci1 \
+    --device /dev/davinci2 \
+    --device /dev/davinci3 \
+    --device /dev/davinci4 \
+    --device /dev/davinci5 \
+    --device /dev/davinci6 \
+    --device /dev/davinci7 \
+    --device /dev/davinci8 \
+    --device /dev/davinci9 \
+    --device /dev/davinci10 \
+    --device /dev/davinci11 \
+    --device /dev/davinci12 \
+    --device /dev/davinci13 \
+    --device /dev/davinci14 \
+    --device /dev/davinci15 \
+    --device /dev/davinci_manager \
+    --device /dev/devmm_svm \
+    --device /dev/hisi_hdc \
+    -v /usr/local/dcmi:/usr/local/dcmi \
+    -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+    -v /etc/ascend_install.info:/etc/ascend_install.info \
+    -v /root/.cache:/root/.cache \
+    -it $IMAGE bash
+    ```

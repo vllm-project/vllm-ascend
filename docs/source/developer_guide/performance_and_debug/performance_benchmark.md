@@ -12,11 +12,10 @@ This document details the benchmark methodology for vllm-ascend, aimed at evalua
   
 ## 1. Run docker container
 
-```{code-block} bash
-   :substitutions:
+```bash
 # Update DEVICE according to your device (/dev/davinci[0-7])
 export DEVICE=/dev/davinci7
-export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 docker run --rm \
 --name vllm-ascend \
 --shm-size=1g \
@@ -79,16 +78,15 @@ th {
 | Spec Bench | ✅ | ✅ | `wget https://raw.githubusercontent.com/hemingkx/Spec-Bench/refs/heads/main/data/spec_bench/question.jsonl` |
 | Custom | ✅ | ✅ | Local file: `data.jsonl` |
 
-:::{note}
-The datasets mentioned above are all links to datasets on huggingface.
-The dataset's `dataset-name` should be set to `hf`.
-For local `dataset-path`, please set `hf-name` to its Hugging Face ID like
+!!! note
 
-```bash
---dataset-path /datasets/VisionArena-Chat/ --hf-name lmarena-ai/VisionArena-Chat
-```
+    The datasets mentioned above are all links to datasets on huggingface.
+    The dataset's `dataset-name` should be set to `hf`.
+    For local `dataset-path`, please set `hf-name` to its Hugging Face ID like
 
-:::
+    ```bash
+    --dataset-path /datasets/VisionArena-Chat/ --hf-name lmarena-ai/VisionArena-Chat
+    ```
 
 ### 3.2 Run basic benchmark
 

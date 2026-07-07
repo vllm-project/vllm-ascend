@@ -32,88 +32,77 @@ It is recommended to download the model weight to the shared directory of multip
 
 You can use our official docker image to run `GLM-4.x` directly.
 
-:::::{tab-set}
-:sync-group: install
+=== "A3 series"
 
-::::{tab-item} A3 series
-:sync: A3
+    Start the docker image on each node.
 
-Start the docker image on each node.
+    ```bash
 
-```{code-block} bash
-   :substitutions:
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
+    docker run --rm \
+        --name vllm-ascend \
+        --shm-size=1g \
+        --net=host \
+        --device /dev/davinci0 \
+        --device /dev/davinci1 \
+        --device /dev/davinci2 \
+        --device /dev/davinci3 \
+        --device /dev/davinci4 \
+        --device /dev/davinci5 \
+        --device /dev/davinci6 \
+        --device /dev/davinci7 \
+        --device /dev/davinci8 \
+        --device /dev/davinci9 \
+        --device /dev/davinci10 \
+        --device /dev/davinci11 \
+        --device /dev/davinci12 \
+        --device /dev/davinci13 \
+        --device /dev/davinci14 \
+        --device /dev/davinci15 \
+        --device /dev/davinci_manager \
+        --device /dev/devmm_svm \
+        --device /dev/hisi_hdc \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v /root/.cache:/root/.cache \
+        -it $IMAGE bash
+    ```
 
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
-docker run --rm \
-    --name vllm-ascend \
-    --shm-size=1g \
-    --net=host \
-    --device /dev/davinci0 \
-    --device /dev/davinci1 \
-    --device /dev/davinci2 \
-    --device /dev/davinci3 \
-    --device /dev/davinci4 \
-    --device /dev/davinci5 \
-    --device /dev/davinci6 \
-    --device /dev/davinci7 \
-    --device /dev/davinci8 \
-    --device /dev/davinci9 \
-    --device /dev/davinci10 \
-    --device /dev/davinci11 \
-    --device /dev/davinci12 \
-    --device /dev/davinci13 \
-    --device /dev/davinci14 \
-    --device /dev/davinci15 \
-    --device /dev/davinci_manager \
-    --device /dev/devmm_svm \
-    --device /dev/hisi_hdc \
-    -v /usr/local/dcmi:/usr/local/dcmi \
-    -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
-    -v /root/.cache:/root/.cache \
-    -it $IMAGE bash
-```
+=== "A2 series"
 
-::::
-::::{tab-item} A2 series
-:sync: A2
+    Start the docker image on your each node.
 
-Start the docker image on your each node.
+    ```bash
 
-```{code-block} bash
-   :substitutions:
-
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
-docker run --rm \
-    --name vllm-ascend \
-    --shm-size=1g \
-    --net=host \
-    --device /dev/davinci0 \
-    --device /dev/davinci1 \
-    --device /dev/davinci2 \
-    --device /dev/davinci3 \
-    --device /dev/davinci4 \
-    --device /dev/davinci5 \
-    --device /dev/davinci6 \
-    --device /dev/davinci7 \
-    --device /dev/davinci_manager \
-    --device /dev/devmm_svm \
-    --device /dev/hisi_hdc \
-    -v /usr/local/dcmi:/usr/local/dcmi \
-    -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
-    -v /root/.cache:/root/.cache \
-    -it $IMAGE bash
-```
-
-::::
-:::::
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
+    docker run --rm \
+        --name vllm-ascend \
+        --shm-size=1g \
+        --net=host \
+        --device /dev/davinci0 \
+        --device /dev/davinci1 \
+        --device /dev/davinci2 \
+        --device /dev/davinci3 \
+        --device /dev/davinci4 \
+        --device /dev/davinci5 \
+        --device /dev/davinci6 \
+        --device /dev/davinci7 \
+        --device /dev/davinci_manager \
+        --device /dev/devmm_svm \
+        --device /dev/hisi_hdc \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v /root/.cache:/root/.cache \
+        -it $IMAGE bash
+    ```
 
 In addition, if you don't want to use the docker image as above, you can also build all from source:
 

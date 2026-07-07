@@ -42,7 +42,7 @@ Start the docker image on each node.
 
 ``` bash
 # Update the vllm-ascend image
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 
 docker run --rm \
 --name vllm-ascend \
@@ -105,9 +105,9 @@ pip show vllm vllm-ascend
 
 Expected result: The version information for both packages is displayed, confirming a successful installation.
 
-:::{note}
-If deploying a multi-node environment, set up the environment on each node.
-:::
+!!! note
+
+    If deploying a multi-node environment, set up the environment on each node.
 
 For more details, please refer to the [Installation Guide](../../installation.md).
 

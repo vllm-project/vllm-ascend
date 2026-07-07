@@ -37,88 +37,77 @@ If you want to deploy a multi-node environment, you need to verify multi-node co
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
 
-:::::{tab-set}
-:sync-group: install
+=== "A3 series"
 
-::::{tab-item} A3 series
-:sync: A3
+    Start the docker image on each node.
 
-Start the docker image on each node.
+    ```bash
 
-```{code-block} bash
-   :substitutions:
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
+    docker run --rm \
+        --name vllm-ascend \
+        --shm-size=512g \
+        --net=host \
+        --device /dev/davinci0 \
+        --device /dev/davinci1 \
+        --device /dev/davinci2 \
+        --device /dev/davinci3 \
+        --device /dev/davinci4 \
+        --device /dev/davinci5 \
+        --device /dev/davinci6 \
+        --device /dev/davinci7 \
+        --device /dev/davinci8 \
+        --device /dev/davinci9 \
+        --device /dev/davinci10 \
+        --device /dev/davinci11 \
+        --device /dev/davinci12 \
+        --device /dev/davinci13 \
+        --device /dev/davinci14 \
+        --device /dev/davinci15 \
+        --device /dev/davinci_manager \
+        --device /dev/devmm_svm \
+        --device /dev/hisi_hdc \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v /etc/hccn.conf:/etc/hccn.conf \
+        -it $IMAGE bash
+    ```
 
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
-docker run --rm \
-    --name vllm-ascend \
-    --shm-size=512g \
-    --net=host \
-    --device /dev/davinci0 \
-    --device /dev/davinci1 \
-    --device /dev/davinci2 \
-    --device /dev/davinci3 \
-    --device /dev/davinci4 \
-    --device /dev/davinci5 \
-    --device /dev/davinci6 \
-    --device /dev/davinci7 \
-    --device /dev/davinci8 \
-    --device /dev/davinci9 \
-    --device /dev/davinci10 \
-    --device /dev/davinci11 \
-    --device /dev/davinci12 \
-    --device /dev/davinci13 \
-    --device /dev/davinci14 \
-    --device /dev/davinci15 \
-    --device /dev/davinci_manager \
-    --device /dev/devmm_svm \
-    --device /dev/hisi_hdc \
-    -v /usr/local/dcmi:/usr/local/dcmi \
-    -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
-    -v /etc/hccn.conf:/etc/hccn.conf \
-    -it $IMAGE bash
-```
+=== "A2 series"
 
-::::
-::::{tab-item} A2 series
-:sync: A2
+    Start the docker image on each node.
 
-Start the docker image on each node.
+    ```bash
 
-```{code-block} bash
-   :substitutions:
-
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
-docker run --rm \
-    --name vllm-ascend \
-    --shm-size=512g \
-    --net=host \
-    --device /dev/davinci0 \
-    --device /dev/davinci1 \
-    --device /dev/davinci2 \
-    --device /dev/davinci3 \
-    --device /dev/davinci4 \
-    --device /dev/davinci5 \
-    --device /dev/davinci6 \
-    --device /dev/davinci7 \
-    --device /dev/davinci_manager \
-    --device /dev/devmm_svm \
-    --device /dev/hisi_hdc \
-    -v /usr/local/dcmi:/usr/local/dcmi \
-    -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
-    -v /etc/hccn.conf:/etc/hccn.conf \
-    -it $IMAGE bash
-```
-
-::::
-:::::
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
+    docker run --rm \
+        --name vllm-ascend \
+        --shm-size=512g \
+        --net=host \
+        --device /dev/davinci0 \
+        --device /dev/davinci1 \
+        --device /dev/davinci2 \
+        --device /dev/davinci3 \
+        --device /dev/davinci4 \
+        --device /dev/davinci5 \
+        --device /dev/davinci6 \
+        --device /dev/davinci7 \
+        --device /dev/davinci_manager \
+        --device /dev/devmm_svm \
+        --device /dev/hisi_hdc \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v /etc/hccn.conf:/etc/hccn.conf \
+        -it $IMAGE bash
+    ```
 
 After a successful docker run, you can verify the running container service by executing the `docker ps` command.
 
@@ -132,297 +121,288 @@ If you want to deploy a multi-node environment, you need to set up the environme
 
 ## 5 Online Service Deployment
 
-:::{note}
-In this tutorial, we suppose you downloaded the model weight to `/root/.cache/`. Feel free to change it to your own path.
-:::
+!!! note
+
+    In this tutorial, we suppose you downloaded the model weight to `/root/.cache/`. Feel free to change it to your own path.
 
 ### 5.1 Multi-Node Online Deployment
 
 The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 (128G × 8) nodes or 4 Atlas 800 A2 (64G × 8) nodes. Run the following scripts on each node respectively.
 
-:::::{tab-set}
-:sync-group: install
+=== "A2 series"
 
-::::{tab-item} A2 series
-:sync: A2
+    **Node0**
 
-**Node0**
+    ```bash
+    local_ip="xxx"
+    node0_ip="xxxx"
 
-```bash
-local_ip="xxx"
-node0_ip="xxxx"
+    export HCCL_IF_IP=$local_ip
+    export IFNAME="xxx"
+    export GLOO_SOCKET_IFNAME="$IFNAME"
+    export TP_SOCKET_IFNAME="$IFNAME"
+    export HCCL_SOCKET_IFNAME="$IFNAME"
+    export HCCL_BUFFSIZE=512
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 
-export HCCL_IF_IP=$local_ip
-export IFNAME="xxx"
-export GLOO_SOCKET_IFNAME="$IFNAME"
-export TP_SOCKET_IFNAME="$IFNAME"
-export HCCL_SOCKET_IFNAME="$IFNAME"
-export HCCL_BUFFSIZE=512
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=10
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export ACL_OP_INIT_MODE=1
+    export VLLM_ENGINE_READY_TIMEOUT_S=3600
+    export HCCL_OP_EXPANSION_MODE="AIV"
 
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=10
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export ACL_OP_INIT_MODE=1
-export VLLM_ENGINE_READY_TIMEOUT_S=3600
-export HCCL_OP_EXPANSION_MODE="AIV"
+    export TASK_QUEUE_ENABLE=1
+    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
-export TASK_QUEUE_ENABLE=1
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 
-export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+    export HCCL_CONNECT_TIMEOUT=7200
+    export ASCEND_CONNECT_TIMEOUT=10000
+    export ASCEND_TRANSFER_TIMEOUT=10000
+    export VLLM_RPC_TIMEOUT=1800000
 
-export HCCL_CONNECT_TIMEOUT=7200
-export ASCEND_CONNECT_TIMEOUT=10000
-export ASCEND_TRANSFER_TIMEOUT=10000
-export VLLM_RPC_TIMEOUT=1800000
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-mtp \
+      --host 0.0.0.0 \
+      --port 10010 \
+      --max-model-len 135000 \
+      --max-num-batched-tokens 4096 \
+      --served-model-name dsv4 \
+      --gpu-memory-utilization 0.9 \
+      --max-num-seqs 16 \
+      --data-parallel-size 4 \
+      --tensor-parallel-size 8 \
+      --data-parallel-size-local 1 \
+      --data-parallel-start-rank 0 \
+      --data-parallel-address $node0_ip  \
+      --enable-expert-parallel \
+      --quantization ascend \
+      --no-enable-prefix-caching \
+      --tokenizer-mode deepseek_v4 \
+      --tool-call-parser deepseek_v4 \
+      --enable-auto-tool-choice \
+      --reasoning-parser deepseek_v4 \
+      --async-scheduling \
+      --safetensors-load-strategy 'prefetch' \
+      --block-size 128 \
+      --speculative-config '{
+         "num_speculative_tokens": 1,
+         "method": "mtp",
+         "enforce_eager": true
+      }' \
+      --additional-config '{
+         "ascend_compilation_config":{
+            "enable_npugraph_ex":true,
+            "enable_static_kernel":false
+         },
+         "enable_cpu_binding": true,
+         "enable_shared_expert_dp": true,
+         "multistream_overlap_shared_expert":true
+      }' \
+      --compilation-config '{
+         "cudagraph_mode":"FULL_DECODE_ONLY"
+      }' \
+      --model-loader-extra-config '{
+         "enable_multithread_load": "true",
+         "num_threads": 128
+      }'
+    ```
 
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-mtp \
-  --host 0.0.0.0 \
-  --port 10010 \
-  --max-model-len 135000 \
-  --max-num-batched-tokens 4096 \
-  --served-model-name dsv4 \
-  --gpu-memory-utilization 0.9 \
-  --max-num-seqs 16 \
-  --data-parallel-size 4 \
-  --tensor-parallel-size 8 \
-  --data-parallel-size-local 1 \
-  --data-parallel-start-rank 0 \
-  --data-parallel-address $node0_ip  \
-  --enable-expert-parallel \
-  --quantization ascend \
-  --no-enable-prefix-caching \
-  --tokenizer-mode deepseek_v4 \
-  --tool-call-parser deepseek_v4 \
-  --enable-auto-tool-choice \
-  --reasoning-parser deepseek_v4 \
-  --async-scheduling \
-  --safetensors-load-strategy 'prefetch' \
-  --block-size 128 \
-  --speculative-config '{
-     "num_speculative_tokens": 1,
-     "method": "mtp",
-     "enforce_eager": true
-  }' \
-  --additional-config '{
-     "ascend_compilation_config":{
-        "enable_npugraph_ex":true,
-        "enable_static_kernel":false
-     },
-     "enable_cpu_binding": true,
-     "enable_shared_expert_dp": true,
-     "multistream_overlap_shared_expert":true
-  }' \
-  --compilation-config '{
-     "cudagraph_mode":"FULL_DECODE_ONLY"
-  }' \
-  --model-loader-extra-config '{
-     "enable_multithread_load": "true",
-     "num_threads": 128
-  }'
-```
+    **Node1-Node3**
 
-**Node1-Node3**
+    ```bash
+    local_ip="xxx"
+    node0_ip="xxxx"
 
-```bash
-local_ip="xxx"
-node0_ip="xxxx"
+    export HCCL_IF_IP=$local_ip
+    export IFNAME="xxx"
+    export GLOO_SOCKET_IFNAME="$IFNAME"
+    export TP_SOCKET_IFNAME="$IFNAME"
+    export HCCL_SOCKET_IFNAME="$IFNAME"
+    export HCCL_BUFFSIZE=512
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 
-export HCCL_IF_IP=$local_ip
-export IFNAME="xxx"
-export GLOO_SOCKET_IFNAME="$IFNAME"
-export TP_SOCKET_IFNAME="$IFNAME"
-export HCCL_SOCKET_IFNAME="$IFNAME"
-export HCCL_BUFFSIZE=512
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=10
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export ACL_OP_INIT_MODE=1
+    export VLLM_ENGINE_READY_TIMEOUT_S=3600
+    export HCCL_OP_EXPANSION_MODE="AIV"
 
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=10
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export ACL_OP_INIT_MODE=1
-export VLLM_ENGINE_READY_TIMEOUT_S=3600
-export HCCL_OP_EXPANSION_MODE="AIV"
+    export TASK_QUEUE_ENABLE=1
+    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
-export TASK_QUEUE_ENABLE=1
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 
-export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+    export HCCL_CONNECT_TIMEOUT=7200
+    export ASCEND_CONNECT_TIMEOUT=10000
+    export ASCEND_TRANSFER_TIMEOUT=10000
+    export VLLM_RPC_TIMEOUT=1800000
 
-export HCCL_CONNECT_TIMEOUT=7200
-export ASCEND_CONNECT_TIMEOUT=10000
-export ASCEND_TRANSFER_TIMEOUT=10000
-export VLLM_RPC_TIMEOUT=1800000
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-mtp \
+      --host 0.0.0.0 \
+      --port 10010 \
+      --max-model-len 135000 \
+      --max-num-batched-tokens 4096 \
+      --served-model-name dsv4 \
+      --gpu-memory-utilization 0.9 \
+      --max-num-seqs 16 \
+      --data-parallel-size 4 \
+      --tensor-parallel-size 8 \
+      --data-parallel-size-local 1 \
+      --data-parallel-start-rank 1 \
+      --data-parallel-address $node0_ip  \
+      --enable-expert-parallel \
+      --quantization ascend \
+      --no-enable-prefix-caching \
+      --tokenizer-mode deepseek_v4 \
+      --tool-call-parser deepseek_v4 \
+      --enable-auto-tool-choice \
+      --reasoning-parser deepseek_v4 \
+      --async-scheduling \
+      --safetensors-load-strategy 'prefetch' \
+      --block-size 128 \
+      --headless \
+      --speculative-config '{
+         "num_speculative_tokens": 1,
+         "method": "mtp",
+         "enforce_eager": true
+      }' \
+      --additional-config '{
+         "ascend_compilation_config":{
+            "enable_npugraph_ex":true,
+            "enable_static_kernel":false
+         },
+         "enable_cpu_binding": true,
+         "enable_shared_expert_dp": true,
+         "multistream_overlap_shared_expert":true
+      }' \
+      --compilation-config '{
+         "cudagraph_mode":"FULL_DECODE_ONLY"
+      }' \
+      --model-loader-extra-config '{
+         "enable_multithread_load": "true",
+         "num_threads": 128
+      }'
+    ```
 
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-mtp \
-  --host 0.0.0.0 \
-  --port 10010 \
-  --max-model-len 135000 \
-  --max-num-batched-tokens 4096 \
-  --served-model-name dsv4 \
-  --gpu-memory-utilization 0.9 \
-  --max-num-seqs 16 \
-  --data-parallel-size 4 \
-  --tensor-parallel-size 8 \
-  --data-parallel-size-local 1 \
-  --data-parallel-start-rank 1 \
-  --data-parallel-address $node0_ip  \
-  --enable-expert-parallel \
-  --quantization ascend \
-  --no-enable-prefix-caching \
-  --tokenizer-mode deepseek_v4 \
-  --tool-call-parser deepseek_v4 \
-  --enable-auto-tool-choice \
-  --reasoning-parser deepseek_v4 \
-  --async-scheduling \
-  --safetensors-load-strategy 'prefetch' \
-  --block-size 128 \
-  --headless \
-  --speculative-config '{
-     "num_speculative_tokens": 1,
-     "method": "mtp",
-     "enforce_eager": true
-  }' \
-  --additional-config '{
-     "ascend_compilation_config":{
-        "enable_npugraph_ex":true,
-        "enable_static_kernel":false
-     },
-     "enable_cpu_binding": true,
-     "enable_shared_expert_dp": true,
-     "multistream_overlap_shared_expert":true
-  }' \
-  --compilation-config '{
-     "cudagraph_mode":"FULL_DECODE_ONLY"
-  }' \
-  --model-loader-extra-config '{
-     "enable_multithread_load": "true",
-     "num_threads": 128
-  }'
-```
+=== "A3 series"
 
-::::
-::::{tab-item} A3 series
-:sync: A3
+    **Node0**
 
-**Node0**
+    ```bash
+    # this obtained through ifconfig
+    # nic_name is the network interface name corresponding to local_ip of the current node
+    nic_name="xxx"
+    local_ip="xxx"
 
-```bash
-# this obtained through ifconfig
-# nic_name is the network interface name corresponding to local_ip of the current node
-nic_name="xxx"
-local_ip="xxx"
+    # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
+    node0_ip="xxxx"
 
-# The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
-node0_ip="xxxx"
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export HCCL_IF_IP=$local_ip
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export TP_SOCKET_IFNAME=$nic_name
+    export HCCL_SOCKET_IFNAME=$nic_name
+    export HCCL_BUFFSIZE=2048
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=10
+    export TASK_QUEUE_ENABLE=1
+    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
-export HCCL_OP_EXPANSION_MODE="AIV"
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-export HCCL_BUFFSIZE=2048
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=10
-export TASK_QUEUE_ENABLE=1
-export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-mtp \
+      --safetensors-load-strategy 'prefetch' \
+      --max-model-len 135000  \
+      --max-num-batched-tokens 4096 \
+      --served-model-name dsv4 \
+      --gpu-memory-utilization 0.9 \
+      --max-num-seqs 32 \
+      --data-parallel-size 2 \
+      --data-parallel-size-local 1 \
+      --data-parallel-start-rank 0 \
+      --data-parallel-address $node0_ip \
+      --data-parallel-rpc-port 13399 \
+      --tensor-parallel-size 16 \
+      --enable-expert-parallel \
+      --quantization ascend \
+      --port 8900 \
+      --host 0.0.0.0 \
+      --block-size 128 \
+      --async-scheduling \
+      --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+      --tokenizer-mode deepseek_v4 \
+      --tool-call-parser deepseek_v4 \
+      --enable-auto-tool-choice \
+      --reasoning-parser deepseek_v4 \
+      --speculative-config '{"num_speculative_tokens": 1,"method": "mtp","enforce_eager": true}' \
+      --additional-config '
+        {"ascend_compilation_config":{
+            "enable_npugraph_ex":true,
+            "enable_static_kernel":false
+            },
+        "enable_cpu_binding": true,
+        "multistream_overlap_shared_expert":true}'
+    ```
 
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-mtp \
-  --safetensors-load-strategy 'prefetch' \
-  --max-model-len 135000  \
-  --max-num-batched-tokens 4096 \
-  --served-model-name dsv4 \
-  --gpu-memory-utilization 0.9 \
-  --max-num-seqs 32 \
-  --data-parallel-size 2 \
-  --data-parallel-size-local 1 \
-  --data-parallel-start-rank 0 \
-  --data-parallel-address $node0_ip \
-  --data-parallel-rpc-port 13399 \
-  --tensor-parallel-size 16 \
-  --enable-expert-parallel \
-  --quantization ascend \
-  --port 8900 \
-  --host 0.0.0.0 \
-  --block-size 128 \
-  --async-scheduling \
-  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-  --tokenizer-mode deepseek_v4 \
-  --tool-call-parser deepseek_v4 \
-  --enable-auto-tool-choice \
-  --reasoning-parser deepseek_v4 \
-  --speculative-config '{"num_speculative_tokens": 1,"method": "mtp","enforce_eager": true}' \
-  --additional-config '
-    {"ascend_compilation_config":{
-        "enable_npugraph_ex":true,
-        "enable_static_kernel":false
-        },
-    "enable_cpu_binding": true,
-    "multistream_overlap_shared_expert":true}'
-```
+    **Node1**
 
-**Node1**
+    ```bash
+    # this obtained through ifconfig
+    # nic_name is the network interface name corresponding to local_ip of the current node
+    nic_name="xxx"
+    local_ip="xxx"
 
-```bash
-# this obtained through ifconfig
-# nic_name is the network interface name corresponding to local_ip of the current node
-nic_name="xxx"
-local_ip="xxx"
+    # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
+    node0_ip="xxxx"
 
-# The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
-node0_ip="xxxx"
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export HCCL_IF_IP=$local_ip
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export TP_SOCKET_IFNAME=$nic_name
+    export HCCL_SOCKET_IFNAME=$nic_name
+    export HCCL_BUFFSIZE=2048
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=10
+    export TASK_QUEUE_ENABLE=1
+    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
-export HCCL_OP_EXPANSION_MODE="AIV"
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-export HCCL_BUFFSIZE=2048
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=10
-export TASK_QUEUE_ENABLE=1
-export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-mtp \
-  --safetensors-load-strategy 'prefetch' \
-  --max-model-len 135000  \
-  --max-num-batched-tokens 4096 \
-  --served-model-name dsv4 \
-  --gpu-memory-utilization 0.9 \
-  --max-num-seqs 32 \
-  --data-parallel-size 2 \
-  --data-parallel-size-local 1 \
-  --data-parallel-start-rank 1 \
-  --data-parallel-address $node0_ip \
-  --data-parallel-rpc-port 13399 \
-  --tensor-parallel-size 16 \
-  --enable-expert-parallel \
-  --quantization ascend \
-  --port 8900 \
-  --host 0.0.0.0 \
-  --block-size 128 \
-  --async-scheduling \
-  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-  --tokenizer-mode deepseek_v4 \
-  --tool-call-parser deepseek_v4 \
-  --enable-auto-tool-choice \
-  --reasoning-parser deepseek_v4 \
-  --speculative-config '{"num_speculative_tokens": 1,"method": "mtp","enforce_eager": true}' \
-  --additional-config '
-    {"ascend_compilation_config":{
-        "enable_npugraph_ex":true,
-        "enable_static_kernel":false
-        },
-    "enable_cpu_binding": true,
-    "multistream_overlap_shared_expert":true}'
-```
-
-::::
-:::::
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-mtp \
+      --safetensors-load-strategy 'prefetch' \
+      --max-model-len 135000  \
+      --max-num-batched-tokens 4096 \
+      --served-model-name dsv4 \
+      --gpu-memory-utilization 0.9 \
+      --max-num-seqs 32 \
+      --data-parallel-size 2 \
+      --data-parallel-size-local 1 \
+      --data-parallel-start-rank 1 \
+      --data-parallel-address $node0_ip \
+      --data-parallel-rpc-port 13399 \
+      --tensor-parallel-size 16 \
+      --enable-expert-parallel \
+      --quantization ascend \
+      --port 8900 \
+      --host 0.0.0.0 \
+      --block-size 128 \
+      --async-scheduling \
+      --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+      --tokenizer-mode deepseek_v4 \
+      --tool-call-parser deepseek_v4 \
+      --enable-auto-tool-choice \
+      --reasoning-parser deepseek_v4 \
+      --speculative-config '{"num_speculative_tokens": 1,"method": "mtp","enforce_eager": true}' \
+      --additional-config '
+        {"ascend_compilation_config":{
+            "enable_npugraph_ex":true,
+            "enable_static_kernel":false
+            },
+        "enable_cpu_binding": true,
+        "multistream_overlap_shared_expert":true}'
+    ```
 
 Key Parameter Descriptions:
 

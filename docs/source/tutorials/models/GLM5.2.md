@@ -26,69 +26,21 @@ It is recommended to download the model weight to the shared directory of multip
 
 You can use our official docker image to run GLM-5.2 directly.
 
-:::::{tab-set}
-:sync-group: install
+=== "A3 series"
 
-::::{tab-item} A3 series
-:sync: A3
+    Start the docker image on your each node.
 
-Start the docker image on your each node.
+    ```bash
 
-```{code-block} bash
-   :substitutions:
+    export IMAGE=quay.io/ascend/vllm-ascend:glm5.2-a3
+    export NAME=vllm-ascend
 
-export IMAGE=quay.io/ascend/vllm-ascend:glm5.2-a3
-export NAME=vllm-ascend
-
-# Run the container using the defined variables
-# Note: If you are running bridge network with docker, please expose available ports for multiple nodes communication in advance
-docker run --rm \
---name $NAME \
---net=host \
---shm-size=1g \
---device /dev/davinci0 \
---device /dev/davinci1 \
---device /dev/davinci2 \
---device /dev/davinci3 \
---device /dev/davinci4 \
---device /dev/davinci5 \
---device /dev/davinci6 \
---device /dev/davinci7 \
---device /dev/davinci8 \
---device /dev/davinci9 \
---device /dev/davinci10 \
---device /dev/davinci11 \
---device /dev/davinci12 \
---device /dev/davinci13 \
---device /dev/davinci14 \
---device /dev/davinci15 \
---device /dev/davinci_manager \
---device /dev/devmm_svm \
---device /dev/hisi_hdc \
--v /usr/local/dcmi:/usr/local/dcmi \
--v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
--v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
--v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
--v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
--v /etc/ascend_install.info:/etc/ascend_install.info \
--v /root/.cache:/root/.cache \
--it $IMAGE bash
-```
-
-::::
-::::{tab-item} A2 series
-:sync: A2
-
-Start the docker image on each of your nodes.
-
-```{code-block} bash
-   :substitutions:
-
-export IMAGE=quay.io/ascend/vllm-ascend:glm5.2
-docker run --rm \
-    --name vllm-ascend \
-    --shm-size=1g \
+    # Run the container using the defined variables
+    # Note: If you are running bridge network with docker, please expose available ports for multiple nodes communication in advance
+    docker run --rm \
+    --name $NAME \
     --net=host \
+    --shm-size=1g \
     --device /dev/davinci0 \
     --device /dev/davinci1 \
     --device /dev/davinci2 \
@@ -97,6 +49,14 @@ docker run --rm \
     --device /dev/davinci5 \
     --device /dev/davinci6 \
     --device /dev/davinci7 \
+    --device /dev/davinci8 \
+    --device /dev/davinci9 \
+    --device /dev/davinci10 \
+    --device /dev/davinci11 \
+    --device /dev/davinci12 \
+    --device /dev/davinci13 \
+    --device /dev/davinci14 \
+    --device /dev/davinci15 \
     --device /dev/davinci_manager \
     --device /dev/devmm_svm \
     --device /dev/hisi_hdc \
@@ -108,10 +68,39 @@ docker run --rm \
     -v /etc/ascend_install.info:/etc/ascend_install.info \
     -v /root/.cache:/root/.cache \
     -it $IMAGE bash
-```
+    ```
 
-::::
-:::::
+=== "A2 series"
+
+    Start the docker image on each of your nodes.
+
+    ```bash
+
+    export IMAGE=quay.io/ascend/vllm-ascend:glm5.2
+    docker run --rm \
+        --name vllm-ascend \
+        --shm-size=1g \
+        --net=host \
+        --device /dev/davinci0 \
+        --device /dev/davinci1 \
+        --device /dev/davinci2 \
+        --device /dev/davinci3 \
+        --device /dev/davinci4 \
+        --device /dev/davinci5 \
+        --device /dev/davinci6 \
+        --device /dev/davinci7 \
+        --device /dev/davinci_manager \
+        --device /dev/devmm_svm \
+        --device /dev/hisi_hdc \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v /root/.cache:/root/.cache \
+        -it $IMAGE bash
+    ```
 
 If you want to deploy multi-node environment, you need to set up environment on each node.
 
@@ -123,8 +112,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 Run the following script to execute online inference.
 
-```{code-block} bash
-   :substitutions:
+```bash
 export HCCL_OP_EXPANSION_MODE="AIV"
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=1
@@ -163,241 +151,228 @@ The parameters are explained as follows:
 
 If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../installation.md#verify-multi-node-communication).
 
-:::::{tab-set}
-:sync-group: install
+=== "A3 series"
 
-::::{tab-item} A3 series
-:sync: A3
+    - `glm-5.2-w8a8`: can be deployed on 2 Atlas 800 A3 (64G × 16).
 
-- `glm-5.2-w8a8`: can be deployed on 2 Atlas 800 A3 (64G × 16).
+    Run the following scripts on two nodes respectively.
 
-Run the following scripts on two nodes respectively.
+    **node 0**
 
-**node 0**
+    ```bash
+    # this obtained through ifconfig
+    # nic_name is the network interface name corresponding to local_ip of the current node
+    nic_name="xxx"
+    local_ip="xxx"
 
-```{code-block} bash
-   :substitutions:
-# this obtained through ifconfig
-# nic_name is the network interface name corresponding to local_ip of the current node
-nic_name="xxx"
-local_ip="xxx"
+    # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
+    node0_ip="xxxx"
 
-# The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
-node0_ip="xxxx"
+    export VLLM_VERSION=0.21.0
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export VLLM_ASCEND_BALANCE_SCHEDULING=0
+    export HCCL_IF_IP=$local_ip
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export TP_SOCKET_IFNAME=$nic_name
+    export HCCL_SOCKET_IFNAME=$nic_name
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=1
+    export HCCL_BUFFSIZE=400
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export VLLM_ASCEND_ENABLE_MLAPO=1
+    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+    export ASCEND_LAUNCH_BLOCKING=0
 
-export VLLM_VERSION=0.21.0
-export HCCL_OP_EXPANSION_MODE="AIV"
-export VLLM_ASCEND_BALANCE_SCHEDULING=0
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
-export HCCL_BUFFSIZE=400
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ASCEND_ENABLE_MLAPO=1
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-export ASCEND_LAUNCH_BLOCKING=0
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
+    --host 0.0.0.0 \
+    --port 8077 \
+    --data-parallel-size 2 \
+    --data-parallel-size-local 1 \
+    --data-parallel-address $node0_ip \
+    --data-parallel-rpc-port 12980 \
+    --tensor-parallel-size 16 \
+    --seed 1024 \
+    --served-model-name glm-52 \
+    --max-num-seqs 48 \
+    --max-model-len 64000 \
+    --max-num-batched-tokens 4096 \
+    --trust-remote-code \
+    --gpu-memory-utilization 0.93 \
+    --quantization ascend \
+    --enable-prefix-caching \
+    --async-scheduling \
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+    --additional-config '{"enable_npugraph_ex": true,"fuse_muls_add":true,"multistream_overlap_shared_expert":true}' \
+    --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp"}'
+    ```
 
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
---host 0.0.0.0 \
---port 8077 \
---data-parallel-size 2 \
---data-parallel-size-local 1 \
---data-parallel-address $node0_ip \
---data-parallel-rpc-port 12980 \
---tensor-parallel-size 16 \
---seed 1024 \
---served-model-name glm-52 \
---max-num-seqs 48 \
---max-model-len 64000 \
---max-num-batched-tokens 4096 \
---trust-remote-code \
---gpu-memory-utilization 0.93 \
---quantization ascend \
---enable-prefix-caching \
---async-scheduling \
---compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---additional-config '{"enable_npugraph_ex": true,"fuse_muls_add":true,"multistream_overlap_shared_expert":true}' \
---speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp"}'
-```
+    **node 1**
 
-**node 1**
+    ```bash
+    # this obtained through ifconfig
+    # nic_name is the network interface name corresponding to local_ip of the current node
+    nic_name="xxx"
+    local_ip="xxx"
 
-```{code-block} bash
-   :substitutions:
-# this obtained through ifconfig
-# nic_name is the network interface name corresponding to local_ip of the current node
-nic_name="xxx"
-local_ip="xxx"
+    # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
+    node0_ip="xxxx"
 
-# The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
-node0_ip="xxxx"
+    export VLLM_VERSION=0.21.0
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export VLLM_ASCEND_BALANCE_SCHEDULING=0
+    export HCCL_IF_IP=$local_ip
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export TP_SOCKET_IFNAME=$nic_name
+    export HCCL_SOCKET_IFNAME=$nic_name
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=1
+    export HCCL_BUFFSIZE=400
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export VLLM_ASCEND_ENABLE_MLAPO=1
+    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+    export ASCEND_LAUNCH_BLOCKING=0
 
-export VLLM_VERSION=0.21.0
-export HCCL_OP_EXPANSION_MODE="AIV"
-export VLLM_ASCEND_BALANCE_SCHEDULING=0
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
-export HCCL_BUFFSIZE=400
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ASCEND_ENABLE_MLAPO=1
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-export ASCEND_LAUNCH_BLOCKING=0
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
+    --host 0.0.0.0 \
+    --port 8077 \
+    --headless \
+    --data-parallel-size 2 \
+    --data-parallel-size-local 1 \
+    --data-parallel-start-rank 1 \
+    --data-parallel-rpc-port 12980 \
+    --data-parallel-address $node0_ip \
+    --tensor-parallel-size 16 \
+    --seed 1024 \
+    --served-model-name glm-52 \
+    --max-num-seqs 48 \
+    --max-model-len 64000 \
+    --max-num-batched-tokens 4096 \
+    --trust-remote-code \
+    --gpu-memory-utilization 0.93 \
+    --quantization ascend \
+    --enable-prefix-caching \
+    --async-scheduling \
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+    --additional-config '{"enable_npugraph_ex": true,"fuse_muls_add":true,"multistream_overlap_shared_expert":true}' \
+    --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp"}'
+    ```
 
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
---host 0.0.0.0 \
---port 8077 \
---headless \
---data-parallel-size 2 \
---data-parallel-size-local 1 \
---data-parallel-start-rank 1 \
---data-parallel-rpc-port 12980 \
---data-parallel-address $node0_ip \
---tensor-parallel-size 16 \
---seed 1024 \
---served-model-name glm-52 \
---max-num-seqs 48 \
---max-model-len 64000 \
---max-num-batched-tokens 4096 \
---trust-remote-code \
---gpu-memory-utilization 0.93 \
---quantization ascend \
---enable-prefix-caching \
---async-scheduling \
---compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---additional-config '{"enable_npugraph_ex": true,"fuse_muls_add":true,"multistream_overlap_shared_expert":true}' \
---speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp"}'
-```
+=== "A2 series"
 
-::::
-::::{tab-item} A2 series
-:sync: A2
+    - `glm-5.2-w8a8`: can be deployed on 2 Atlas 800 A2 (64G × 32).
 
-- `glm-5.2-w8a8`: can be deployed on 2 Atlas 800 A2 (64G × 32).
+    **node 0**
 
-**node 0**
+    ```bash
+    # this obtained through ifconfig
+    # nic_name is the network interface name corresponding to local_ip of the current node
+    nic_name="xxx"
+    local_ip="xxx"
 
-```{code-block} bash
-   :substitutions:
-# this obtained through ifconfig
-# nic_name is the network interface name corresponding to local_ip of the current node
-nic_name="xxx"
-local_ip="xxx"
+    # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
+    node0_ip="xxx"
 
-# The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
-node0_ip="xxx"
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export HCCL_IF_IP=$local_ip
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export TP_SOCKET_IFNAME=$nic_name
+    export HCCL_SOCKET_IFNAME=$nic_name
+    export VLLM_RPC_TIMEOUT=360000
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+    export HCCL_EXEC_TIMEOUT=200
+    export HCCL_CONNECT_TIMEOUT=120
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=10
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export ACL_OP_INIT_MODE=1
+    #export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+    #export USE_MULTI_GROUPS_KV_CACHE=1
+    #export USE_MULTI_BLOCK_POOL=1
+    export TASK_QUEUE_ENABLE=1
+    export CPU_AFFINITY_CONF=1
+    export VLLM_ENGINE_READY_TIMEOUT_S=1200
 
-export HCCL_OP_EXPANSION_MODE="AIV"
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-export VLLM_RPC_TIMEOUT=360000
-export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
-export HCCL_EXEC_TIMEOUT=200
-export HCCL_CONNECT_TIMEOUT=120
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=10
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export ACL_OP_INIT_MODE=1
-#export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-#export USE_MULTI_GROUPS_KV_CACHE=1
-#export USE_MULTI_BLOCK_POOL=1
-export TASK_QUEUE_ENABLE=1
-export CPU_AFFINITY_CONF=1
-export VLLM_ENGINE_READY_TIMEOUT_S=1200
+    export VLLM_VERSION=0.21.0
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
+    --max_model_len 40000 \
+    --max-num-batched-tokens 4096 \
+    --served-model-name glm-52 \
+    --seed 1024 \
+    --gpu-memory-utilization 0.95 \
+    --api-server-count 1 \
+    --max-num-seqs 16 \
+    --data-parallel-size 2 \
+    --data-parallel-size-local 1 \
+    --data-parallel-address $node0_ip \
+    --data-parallel-rpc-port 13389 \
+    --tensor-parallel-size 8 \
+    --enable-expert-parallel \
+    --quantization ascend \
+    --port 7000 \
+    --safetensors-load-strategy 'prefetch' \
+    --block-size 128 \
+    --async-scheduling \
+    --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true}' \
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+    --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp"}'
+    ```
 
-export VLLM_VERSION=0.21.0
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
---max_model_len 40000 \
---max-num-batched-tokens 4096 \
---served-model-name glm-52 \
---seed 1024 \
---gpu-memory-utilization 0.95 \
---api-server-count 1 \
---max-num-seqs 16 \
---data-parallel-size 2 \
---data-parallel-size-local 1 \
---data-parallel-address $node0_ip \
---data-parallel-rpc-port 13389 \
---tensor-parallel-size 8 \
---enable-expert-parallel \
---quantization ascend \
---port 7000 \
---safetensors-load-strategy 'prefetch' \
---block-size 128 \
---async-scheduling \
---additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true}' \
---compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp"}'
-```
+    **node 1**
 
-**node 1**
+    ```bash
+    # this obtained through ifconfig
+    # nic_name is the network interface name corresponding to local_ip of the current node
+    nic_name="xxx"
+    local_ip="xxx"
 
-```{code-block} bash
-   :substitutions:
-# this obtained through ifconfig
-# nic_name is the network interface name corresponding to local_ip of the current node
-nic_name="xxx"
-local_ip="xxx"
+    # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
+    node0_ip="xxx"
 
-# The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
-node0_ip="xxx"
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export HCCL_IF_IP=$local_ip
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export TP_SOCKET_IFNAME=$nic_name
+    export HCCL_SOCKET_IFNAME=$nic_name
+    export VLLM_RPC_TIMEOUT=360000
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+    export HCCL_EXEC_TIMEOUT=200
+    export HCCL_CONNECT_TIMEOUT=120
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=10
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export ACL_OP_INIT_MODE=1
+    #export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+    #export USE_MULTI_GROUPS_KV_CACHE=1
+    #export USE_MULTI_BLOCK_POOL=1
+    export TASK_QUEUE_ENABLE=1
+    export CPU_AFFINITY_CONF=1
+    export VLLM_ENGINE_READY_TIMEOUT_S=1200
 
-export HCCL_OP_EXPANSION_MODE="AIV"
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-export VLLM_RPC_TIMEOUT=360000
-export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
-export HCCL_EXEC_TIMEOUT=200
-export HCCL_CONNECT_TIMEOUT=120
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=10
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export ACL_OP_INIT_MODE=1
-#export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-#export USE_MULTI_GROUPS_KV_CACHE=1
-#export USE_MULTI_BLOCK_POOL=1
-export TASK_QUEUE_ENABLE=1
-export CPU_AFFINITY_CONF=1
-export VLLM_ENGINE_READY_TIMEOUT_S=1200
-
-export VLLM_VERSION=0.21.0
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
---max_model_len 40000 \
---max-num-batched-tokens 4096 \
---served-model-name glm-52 \
---seed 1024 \
---gpu-memory-utilization 0.95 \
---max-num-seqs 16 \
---headless \
---data-parallel-size 2 \
---data-parallel-size-local 1 \
---data-parallel-start-rank 1 \
---data-parallel-address $node0_ip \
---data-parallel-rpc-port 13389 \
---tensor-parallel-size 8 \
---enable-expert-parallel \
---quantization ascend \
---port 7000 \
---safetensors-load-strategy 'prefetch' \
---block-size 128 \
---async-scheduling \
---additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true}' \
---compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp"}'
-```
-
-::::
-:::::
+    export VLLM_VERSION=0.21.0
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
+    --max_model_len 40000 \
+    --max-num-batched-tokens 4096 \
+    --served-model-name glm-52 \
+    --seed 1024 \
+    --gpu-memory-utilization 0.95 \
+    --max-num-seqs 16 \
+    --headless \
+    --data-parallel-size 2 \
+    --data-parallel-size-local 1 \
+    --data-parallel-start-rank 1 \
+    --data-parallel-address $node0_ip \
+    --data-parallel-rpc-port 13389 \
+    --tensor-parallel-size 8 \
+    --enable-expert-parallel \
+    --quantization ascend \
+    --port 7000 \
+    --safetensors-load-strategy 'prefetch' \
+    --block-size 128 \
+    --async-scheduling \
+    --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true}' \
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+    --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp"}'
+    ```
 
 ### Co-located Deployment on 4 Nodes (200k context)
 

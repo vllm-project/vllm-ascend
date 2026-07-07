@@ -1,8 +1,8 @@
 # Dynamic Chunked Pipeline Parallel
 
-:::{note}
-For design details and mathematical models, see [Design Document](../../developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md). For deployment tutorial, see [Dynamic Chunked Pipeline Parallel Tutorial](../../tutorials/features/dynamic_chunked_pipeline_parallel.md).
-:::
+!!! note
+
+    For design details and mathematical models, see [Design Document](../../developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md). For deployment tutorial, see [Dynamic Chunked Pipeline Parallel Tutorial](../../tutorials/features/dynamic_chunked_pipeline_parallel.md).
 
 ## Overview
 

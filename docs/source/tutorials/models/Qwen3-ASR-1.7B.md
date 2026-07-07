@@ -23,9 +23,8 @@ It is recommended to download the model weight to the shared directory of multip
 
 You can use our official docker image to run `Qwen3-ASR-1.7B` directly.
 
-```{code-block} bash
-   :substitutions:
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+```bash
+export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 docker run --rm \
   --name vllm-ascend \
   --shm-size=1g \

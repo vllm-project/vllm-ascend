@@ -6,149 +6,131 @@ This document explains how to write unit tests, E2E tests, and nightly tests to 
 
 The fastest way to set up a test environment is to use the main branch's container image:
 
-:::::{tab-set}
-:sync-group: e2e
+=== "Local (CPU)"
 
-::::{tab-item} Local (CPU)
-:selected:
-:sync: cpu
+    You can run the unit tests on CPUs with the following steps:
 
-You can run the unit tests on CPUs with the following steps:
+    ```bash
 
-```{code-block} bash
-   :substitutions:
+    cd ~/vllm-project/
+    # ls
+    # vllm  vllm-ascend
 
-cd ~/vllm-project/
-# ls
-# vllm  vllm-ascend
+    # Use mirror to speed up download
+    # docker pull m.daocloud.io/quay.io/ascend/cann:{{ cann_image_tag }}
+    export IMAGE=quay.io/ascend/cann:{{ cann_image_tag }}
+    docker run --rm --name vllm-ascend-ut \
+        -v $(pwd):/vllm-project \
+        -v ~/.cache:/root/.cache \
+        -ti $IMAGE bash
 
-# Use mirror to speed up download
-# docker pull m.daocloud.io/quay.io/ascend/cann:|cann_image_tag|
-export IMAGE=quay.io/ascend/cann:|cann_image_tag|
-docker run --rm --name vllm-ascend-ut \
-    -v $(pwd):/vllm-project \
-    -v ~/.cache:/root/.cache \
-    -ti $IMAGE bash
+    # (Optional) Configure mirror to speed up download
+    sed -i 's|ports.ubuntu.com|mirrors.huaweicloud.com|g' /etc/apt/sources.list
+    pip config set global.index-url https://mirrors.huaweicloud.com/repository/pypi/simple/
 
-# (Optional) Configure mirror to speed up download
-sed -i 's|ports.ubuntu.com|mirrors.huaweicloud.com|g' /etc/apt/sources.list
-pip config set global.index-url https://mirrors.huaweicloud.com/repository/pypi/simple/
+    # For torch-npu dev version or x86 machine
+    export PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu/ https://mirrors.huaweicloud.com/ascend/repos/pypi"
 
-# For torch-npu dev version or x86 machine
-export PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu/ https://mirrors.huaweicloud.com/ascend/repos/pypi"
+    # src path
+    export SRC_WORKSPACE=/vllm-workspace
+    mkdir -p $SRC_WORKSPACE
+    cd $SRC_WORKSPACE
 
-# src path
-export SRC_WORKSPACE=/vllm-workspace
-mkdir -p $SRC_WORKSPACE
-cd $SRC_WORKSPACE
+    apt-get update -y
+    apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake libnuma-dev curl gnupg2
 
-apt-get update -y
-apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake libnuma-dev curl gnupg2
+    git clone -b {{ vllm_ascend_version }} --depth 1 https://github.com/vllm-project/vllm-ascend.git
+    git clone --depth 1 https://github.com/vllm-project/vllm.git
 
-git clone -b |vllm_ascend_version| --depth 1 https://github.com/vllm-project/vllm-ascend.git
-git clone --depth 1 https://github.com/vllm-project/vllm.git
+    # vllm
+    cd $SRC_WORKSPACE/vllm
+    VLLM_TARGET_DEVICE=empty python3 -m pip install .
+    python3 -m pip uninstall -y triton
 
-# vllm
-cd $SRC_WORKSPACE/vllm
-VLLM_TARGET_DEVICE=empty python3 -m pip install .
-python3 -m pip uninstall -y triton
+    # vllm-ascend
+    cd $SRC_WORKSPACE/vllm-ascend
+    export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/$(uname -m)-linux/devlib
+    # For cpu environment, set SOC_VERSION for different chips.
+    # See https://github.com/vllm-project/vllm-ascend/blob/3cb0af0bcf3299089ca7e72159fa36e825a470f8/setup.py#L132 for detail.
+    export SOC_VERSION="ascend910b1"
+    python3 -m pip install .
+    python3 -m pip install -r requirements-dev.txt
+    ```
 
-# vllm-ascend
-cd $SRC_WORKSPACE/vllm-ascend
-export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/$(uname -m)-linux/devlib
-# For cpu environment, set SOC_VERSION for different chips.
-# See https://github.com/vllm-project/vllm-ascend/blob/3cb0af0bcf3299089ca7e72159fa36e825a470f8/setup.py#L132 for detail.
-export SOC_VERSION="ascend910b1"
-python3 -m pip install .
-python3 -m pip install -r requirements-dev.txt
-```
+=== "Single card"
 
-::::
+    ```bash
 
-::::{tab-item} Single card
-:sync: single
+    # Update DEVICE according to your device (/dev/davinci[0-7])
+    export DEVICE=/dev/davinci0
+    # Update the vllm-ascend image
+    export IMAGE=quay.io/ascend/vllm-ascend:main
+    docker run --rm \
+        --name vllm-ascend \
+        --shm-size=1g \
+        --device $DEVICE \
+        --device /dev/davinci_manager \
+        --device /dev/devmm_svm \
+        --device /dev/hisi_hdc \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v /root/.cache:/root/.cache \
+        -p 8000:8000 \
+        -it $IMAGE bash
+    ```
 
-```{code-block} bash
-   :substitutions:
+    After starting the container, you should install the required packages:
 
-# Update DEVICE according to your device (/dev/davinci[0-7])
-export DEVICE=/dev/davinci0
-# Update the vllm-ascend image
-export IMAGE=quay.io/ascend/vllm-ascend:main
-docker run --rm \
-    --name vllm-ascend \
-    --shm-size=1g \
-    --device $DEVICE \
-    --device /dev/davinci_manager \
-    --device /dev/devmm_svm \
-    --device /dev/hisi_hdc \
-    -v /usr/local/dcmi:/usr/local/dcmi \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
-    -v /root/.cache:/root/.cache \
-    -p 8000:8000 \
-    -it $IMAGE bash
-```
+    ```bash
+    # Prepare
+    pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
 
-After starting the container, you should install the required packages:
+    # Switch to the /vllm-workspace/vllm-ascend directory
+    cd /vllm-workspace/vllm-ascend/
 
-```bash
-# Prepare
-pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+    # Install required packages
+    pip install -r requirements-dev.txt
+    ```
 
-# Switch to the /vllm-workspace/vllm-ascend directory
-cd /vllm-workspace/vllm-ascend/
+=== "Multi cards"
 
-# Install required packages
-pip install -r requirements-dev.txt
-```
+    ```bash
+    # Update the vllm-ascend image
+    export IMAGE=quay.io/ascend/vllm-ascend:main
+    docker run --rm \
+        --name vllm-ascend \
+        --shm-size=1g \
+        --device /dev/davinci0 \
+        --device /dev/davinci1 \
+        --device /dev/davinci2 \
+        --device /dev/davinci3 \
+        --device /dev/davinci_manager \
+        --device /dev/devmm_svm \
+        --device /dev/hisi_hdc \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v /root/.cache:/root/.cache \
+        -p 8000:8000 \
+        -it $IMAGE bash
+    ```
 
-::::
+    After starting the container, you should install the required packages:
 
-::::{tab-item} Multi cards
-:sync: multi
+    ```bash
+    cd /vllm-workspace/vllm-ascend/
 
-```{code-block} bash
-   :substitutions:
-# Update the vllm-ascend image
-export IMAGE=quay.io/ascend/vllm-ascend:main
-docker run --rm \
-    --name vllm-ascend \
-    --shm-size=1g \
-    --device /dev/davinci0 \
-    --device /dev/davinci1 \
-    --device /dev/davinci2 \
-    --device /dev/davinci3 \
-    --device /dev/davinci_manager \
-    --device /dev/devmm_svm \
-    --device /dev/hisi_hdc \
-    -v /usr/local/dcmi:/usr/local/dcmi \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
-    -v /root/.cache:/root/.cache \
-    -p 8000:8000 \
-    -it $IMAGE bash
-```
+    # Prepare
+    pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
 
-After starting the container, you should install the required packages:
-
-```bash
-cd /vllm-workspace/vllm-ascend/
-
-# Prepare
-pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
-
-# Install required packages
-pip install -r requirements-dev.txt
-```
-
-::::
-
-:::::
+    # Install required packages
+    pip install -r requirements-dev.txt
+    ```
 
 ## Running tests
 
@@ -162,50 +144,35 @@ There are several principles to follow when writing unit tests:
 - Example: [tests/ut/test_ascend_config.py](https://github.com/vllm-project/vllm-ascend/blob/main/tests/ut/test_ascend_config.py).
 - You can run the unit tests using `pytest`:
 
-:::::{tab-set}
-:sync-group: e2e
+=== "Local (CPU)"
 
-::::{tab-item} Local (CPU)
-:selected:
-:sync: cpu
+    ```bash
+    # Run unit tests
+    export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/$(uname -m)-linux/devlib
+    TORCH_DEVICE_BACKEND_AUTOLOAD=0 pytest -sv tests/ut
+    ```
 
-```bash
-# Run unit tests
-export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/$(uname -m)-linux/devlib
-TORCH_DEVICE_BACKEND_AUTOLOAD=0 pytest -sv tests/ut
-```
+=== "Single-card"
 
-::::
+    ```bash
+    cd /vllm-workspace/vllm-ascend/
+    # Run all single-card tests
+    pytest -sv tests/ut
 
-::::{tab-item} Single-card
-:sync: single
+    # Run single test
+    pytest -sv tests/ut/test_ascend_config.py
+    ```
 
-```bash
-cd /vllm-workspace/vllm-ascend/
-# Run all single-card tests
-pytest -sv tests/ut
+=== "Multi-card"
 
-# Run single test
-pytest -sv tests/ut/test_ascend_config.py
-```
+    ```bash
+    cd /vllm-workspace/vllm-ascend/
+    # Run all multi-card tests
+    pytest -sv tests/ut
 
-::::
-
-::::{tab-item} Multi-card
-:sync: multi
-
-```bash
-cd /vllm-workspace/vllm-ascend/
-# Run all multi-card tests
-pytest -sv tests/ut
-
-# Run single test
-pytest -sv tests/ut/test_ascend_config.py
-```
-
-::::
-
-:::::
+    # Run single test
+    pytest -sv tests/ut/test_ascend_config.py
+    ```
 
 ### E2E test
 
@@ -215,51 +182,38 @@ Although vllm-ascend CI provides E2E tests on Ascend CI (for example,
 #### PR-triggered E2E test
 
 You can run tests with `pytest` as well. Typical examples:
-:::::{tab-set}
-:sync-group: e2e
 
-::::{tab-item} Local (CPU)
-:sync: cpu
+=== "Local (CPU)"
 
-You can't run the E2E test on CPUs.
-::::
+    You can't run the E2E test on CPUs.
 
-::::{tab-item} Single-card
-:selected:
-:sync: single
+=== "Single-card"
 
-```bash
-cd /vllm-workspace/vllm-ascend/
-# Run all single-card tests
-VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/one_card/
+    ```bash
+    cd /vllm-workspace/vllm-ascend/
+    # Run all single-card tests
+    VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/one_card/
 
-# Run a certain test script
-VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/one_card/test_camem.py
+    # Run a certain test script
+    VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/one_card/test_camem.py
 
-# Run a certain case in test script
-VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/one_card/test_camem.py::test_end_to_end
-```
+    # Run a certain case in test script
+    VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/one_card/test_camem.py::test_end_to_end
+    ```
 
-::::
+=== "Multi-card"
 
-::::{tab-item} Multi-card
-:sync: multi
+    ```bash
+    cd /vllm-workspace/vllm-ascend/
+    # Run all multi-card tests
+    VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/two_card/
 
-```bash
-cd /vllm-workspace/vllm-ascend/
-# Run all multi-card tests
-VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/two_card/
+    # Run a certain test script
+    VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/two_card/test_qwen3_moe_eplb.py
 
-# Run a certain test script
-VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/two_card/test_qwen3_moe_eplb.py
-
-# Run a certain case in test script
-VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/two_card/test_qwen3_moe_eplb.py::test_qwen3_moe_w8a8_distributed_tp2_ep_dynamic_eplb
-```
-
-::::
-
-:::::
+    # Run a certain case in test script
+    VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/two_card/test_qwen3_moe_eplb.py::test_qwen3_moe_w8a8_distributed_tp2_ep_dynamic_eplb
+    ```
 
 This will reproduce the E2E test behavior.
 
@@ -267,42 +221,28 @@ This will reproduce the E2E test behavior.
 
 You can run tests with `pytest` as well. Typical examples:
 
-:::::{tab-set}
-:sync-group: e2e
+=== "Local (CPU)"
 
-::::{tab-item} Local (CPU)
-:sync: cpu
+    You can't run the E2E test on CPUs.
 
-You can't run the E2E test on CPUs.
-::::
+=== "Single-card"
 
-::::{tab-item} Single-card
-:selected:
-:sync: single
+    ```bash
+    cd /vllm-workspace/vllm-ascend/
+    # run all single-card op tests
+    VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/
+    ```
 
-```bash
-cd /vllm-workspace/vllm-ascend/
-# run all single-card op tests
-VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/
-```
+=== "Multi-card"
 
-::::
+    ```bash
+    cd /vllm-workspace/vllm-ascend/
+    # run all multi-card op tests on A2
+    VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/nightly/single_node/ops/multicard_ops_a2/
 
-::::{tab-item} Multi-card
-:sync: multi
-
-```bash
-cd /vllm-workspace/vllm-ascend/
-# run all multi-card op tests on A2
-VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/nightly/single_node/ops/multicard_ops_a2/
-
-# run all multi-card op tests on A3
-VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/nightly/single_node/ops/multicard_ops_a3/
-```
-
-::::
-
-:::::
+    # run all multi-card op tests on A3
+    VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/nightly/single_node/ops/multicard_ops_a3/
+    ```
 
 For running nightly single-node model test cases locally, refer to the following example.
 
