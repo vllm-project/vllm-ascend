@@ -973,9 +973,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 num_reject_tokens = cu_num_tokens_pcp_full - ori_token_indices_to_sample - 1
                 num_accept_tokens = query_lens_d_device - num_reject_tokens
                 ori_seq_len = getattr(attn_metadata_i, "seq_lens", None)
+                ori_seq_len_cpu = getattr(attn_metadata_i, "seq_lens_cpu", None)
                 if ori_seq_len is None:
-                    ori_seq_len = attn_metadata_i.seq_lens_cpu
+                    ori_seq_len = ori_seq_len_cpu
                 ori_seq_len = ori_seq_len[:batch_size].clone()
+                if ori_seq_len_cpu is not None:
+                    ori_seq_len_cpu = ori_seq_len_cpu[:batch_size].clone()
                 slot_idx_base = (
                     query_start_loc_pcp_full[:num_decode_reqs].to(torch.int64) * self.pcp_size
                     + torch.arange(num_decode_reqs, device=self.device, dtype=torch.int64)
@@ -1005,6 +1008,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                                 used_update_positions,
                                 aclgraph_runtime_mode,
                                 ori_seq_len,
+                                ori_seq_len_cpu,
                                 slot_indices,
                                 mtp_slot_mapping,
                                 attn_group=attn_group,
@@ -1417,11 +1421,17 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             # update pcp related params
             ori_token_indices_to_sample = None
             query_lens_d = None
+            query_lens_d_device = None
             if self.pcp_size * self.dcp_size > 1:
                 assert long_seq_metadata is not None
                 cad.prefill_context_parallel_metadata = long_seq_metadata
                 ori_token_indices_to_sample = token_indices_to_sample.clone()
                 query_lens_d = self.runner.query_lens[:num_decode_reqs]
+                query_start_loc_pcp_full = self.runner.pcp_manager.query_start_loc_pcp_full.gpu
+                query_lens_d_device = (
+                    query_start_loc_pcp_full[1 : num_decode_reqs + 1]
+                    - query_start_loc_pcp_full[:num_decode_reqs]
+                )
             if self.pcp_size > 1:
                 # 1. preprocess decode/prefill input_ids & target_hidden_states
                 # decode input_ids: keep unchanged
@@ -1429,7 +1439,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 # prefill input_ids: add padding and pcp split
                 # prefill target_hidden_states: pcp split
                 assert query_lens_d is not None
-                num_tokens_d = query_lens_d.sum().item()
+                assert query_lens_d_device is not None
+                num_tokens_d = self.runner.pcp_manager.num_decode_tokens
                 num_tokens_d_padded = num_tokens_d * self.pcp_size
                 input_ids_d = self.input_ids[:num_tokens_d]
                 input_ids_p = self.input_ids[num_tokens_d:num_tokens]
@@ -1440,19 +1451,23 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         # [rank0 all decode tokens, rank1 all decode tokens, ...].
                         target_hidden_states_d = target_hidden_states_d_padded[:num_tokens_d]
                     else:
-                        # remove padding (from pcp all-gather) in decode part
-                        mask_start_loc = torch.cat(
-                            [
-                                torch.tensor([0], dtype=torch.int32, device=query_lens_d.device),
-                                torch.cumsum(query_lens_d * self.pcp_size, dim=0)[:-1],
-                            ]
+                        # Keep decode unpadding indices on device to avoid a host index list.
+                        decode_req_starts = query_start_loc_pcp_full[:num_decode_reqs].to(torch.int64)
+                        decode_query_lens = query_lens_d_device.to(torch.int64)
+                        decode_padded_starts = decode_req_starts * self.pcp_size
+                        decode_req_starts_per_token = torch.repeat_interleave(
+                            decode_req_starts,
+                            decode_query_lens,
+                            output_size=num_tokens_d,
                         )
-                        mask_len = query_lens_d
-                        mask = []
-                        for req_id in range(num_decode_reqs):
-                            assert None not in (mask_start_loc, mask_len)
-                            mask += list(range(mask_start_loc[req_id], mask_start_loc[req_id] + mask_len[req_id]))
-                        target_hidden_states_d = target_hidden_states_d_padded[mask]
+                        decode_padded_starts_per_token = torch.repeat_interleave(
+                            decode_padded_starts,
+                            decode_query_lens,
+                            output_size=num_tokens_d,
+                        )
+                        decode_offsets = self.arange[:num_tokens_d].to(torch.int64) - decode_req_starts_per_token
+                        decode_hidden_state_indices = decode_padded_starts_per_token + decode_offsets
+                        target_hidden_states_d = target_hidden_states_d_padded[decode_hidden_state_indices]
                 else:
                     target_hidden_states_d = target_hidden_states_d_padded
                 target_hidden_states_p = target_hidden_states[num_tokens_d_padded:]
@@ -1485,7 +1500,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         cad.seq_lens_cpu[-num_prefill_reqs:] = seq_lens_p
                     if cad._seq_lens_cpu is not None:
                         cad._seq_lens_cpu[-num_prefill_reqs:] = seq_lens_p
-                    query_start_loc_p = cu_num_tokens_p[1:] + cad.query_start_loc[num_decode_reqs].item()
+                    query_start_loc_p = cu_num_tokens_p[1:] + cad.query_start_loc_cpu[num_decode_reqs].item()
                     cad.query_start_loc[-num_prefill_reqs:] = query_start_loc_p
                     cad.query_start_loc_cpu[-num_prefill_reqs:] = query_start_loc_p
 
@@ -1623,6 +1638,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         used_update_positions,
         aclgraph_runtime_mode,
         ori_seq_len=None,
+        ori_seq_len_cpu=None,
         slot_indices=None,
         mtp_slot_mapping=None,
         attn_group=None,
@@ -1725,8 +1741,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             common_attn_metadata.positions[:batch_size].copy_(clamped_positions)
 
         if self.pcp_size * self.dcp_size > 1:
+            kv_cache_spec = getattr(attn_group, "kv_cache_spec", self.draft_attn_groups[0].kv_cache_spec)
+            seq_len_for_cp_metadata = ori_seq_len
+            if not isinstance(kv_cache_spec, AscendMLAAttentionSpec) and ori_seq_len_cpu is not None:
+                # Non-MLA CP metadata is numpy-backed, so keep this path on CPU.
+                seq_len_for_cp_metadata = ori_seq_len_cpu
             num_computed_tokens_of_pcp_dcp = self.runner.pcp_manager._get_cp_local_seq_lens(
-                ori_seq_len + draft_index + 1,
+                seq_len_for_cp_metadata + draft_index + 1,
                 self.pcp_size,
                 self.dcp_size,
                 self.runner.parallel_config.cp_kv_cache_interleave_size,
