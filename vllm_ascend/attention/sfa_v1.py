@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, NamedTuple, TypeVar
 
 import scipy  # type: ignore
 import torch
@@ -75,13 +75,19 @@ O_PROJ_ACLNN_INPUT_PARAMS = (
     "aclnn_input_offset",
 )
 
-DCPQueryGatherContext = tuple[
-    torch.Tensor,
-    torch.distributed.Work | None,
-    tuple[int, ...] | None,
-    int,
-    int,
-]
+
+class DCPQueryGatherContext(NamedTuple):
+    """State needed to finish the async fused DCP query all-gather."""
+
+    # The gathered fused query tensor: cat([ql_nope, q_pe], dim=-1).
+    gathered: torch.Tensor
+    # Async all-gather work handle. None means the gather completed synchronously.
+    handle: torch.distributed.Work | None
+    # Permutation that restores the original dimension order after dim>0 gather.
+    restore_perm: tuple[int, ...] | None
+    # Last-dimension sizes used to split the fused query back into ql_nope/q_pe.
+    ql_nope_dim: int
+    q_pe_dim: int
 
 
 def _get_indexer_types(configs: tuple[Any, ...]) -> Any | None:

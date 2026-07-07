@@ -108,7 +108,11 @@ from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBui
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadataBuilder
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, using_paged_attention
+from vllm_ascend.attention.utils import (
+    AscendCommonAttentionMetadata,
+    enable_sfa_dcp_replicated_indexer,
+    using_paged_attention,
+)
 
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -451,17 +455,7 @@ class NPUModelRunner(GPUModelRunner):
                 max_buffer_num_tokens, dtype=torch.int64, device=self.device)
             
         self.sfa_dcp_replicated_indexer_size = 1
-        sfa_dcp_replicated_indexer = self.use_sparse and (self.vllm_config.additional_config or {}).get(
-            "sfa_dcp_replicated_indexer", False
-        )
-        if sfa_dcp_replicated_indexer:
-            assert self.pcp_size == 1 and \
-            self.dcp_size == self.parallel_config.tensor_parallel_size
-            if self.use_sparse_c8_indexer and get_ascend_device_type() == AscendDeviceType.A5:
-                raise NotImplementedError(
-                    "SFA DCP with sparse C8 LightningIndexer cache is not supported on A5 yet. "
-                    "A5 uses the fused CKV quant sparse attention path, which needs a separate DCP LSE merge."
-                )
+        if enable_sfa_dcp_replicated_indexer():
             self.sfa_dcp_replicated_indexer_size = self.dcp_size
             self.sparse_head_dim = (*self.sparse_head_dim[:-1], self.sparse_head_dim[-1] * self.dcp_size)
             
