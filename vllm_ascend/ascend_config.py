@@ -294,8 +294,8 @@ class AscendConfig:
         # are dropped and skipped from computation, degrading accuracy.
         # Do not set this too large: workspace memory scales linearly with this value, which matters
         # especially under long-context scenarios where the operator should not hold too much memory.
-        # Default 65536.
-        self.mega_moe_max_tokens = additional_config.get("mega_moe_max_tokens", 65536)
+        # Default 131072.
+        self.mega_moe_max_tokens = additional_config.get("mega_moe_max_tokens", 131072)
         if not isinstance(self.mega_moe_max_tokens, int):
             raise ValueError(
                 f"mega_moe_max_tokens must be an integer, got {type(self.mega_moe_max_tokens).__name__}: "
