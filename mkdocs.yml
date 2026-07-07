@@ -69,6 +69,7 @@ plugins:
         - en
         - ja
   - macros:
+      module_name: docs/hooks/macros_main
       include_dir: !ENV [DOCS_MACROS_DIR, docs/source]
       on_undefined: keep
   - exclude:

@@ -1,16 +1,17 @@
+#
 msgid ""
 msgstr ""
-"Project-Id-Version:  vllm-ascend\n"
+"Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
 "POT-Creation-Date: 2026-07-02 07:02+0000\n"
 "PO-Revision-Date: 2026-01-22 10:00+0800\n"
 "Last-Translator: Your Name <email@example.com>\n"
-"Language: zh_CN\n"
 "Language-Team: zh_CN <LL@li.org>\n"
-"Plural-Forms: nplurals=1; plural=0;\n"
+"Language: zh_CN\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: Babel 2.18.0\n"
 
 #: ../../source/developer_guide/contribution/testing.md:1
@@ -19,8 +20,8 @@ msgstr "测试"
 
 #: ../../source/developer_guide/contribution/testing.md:3
 msgid ""
-"This document explains how to write unit tests, E2E tests, and nightly "
-"tests to verify your feature implementation."
+"This document explains how to write unit tests, E2E tests, and nightly tests"
+" to verify your feature implementation."
 msgstr "本文档介绍如何编写单元测试、端到端（E2E）测试和夜间测试，以验证您所实现的功能。"
 
 #: ../../source/developer_guide/contribution/testing.md:5
@@ -47,7 +48,8 @@ msgstr "单卡"
 
 #: ../../source/developer_guide/contribution/testing.md:97
 #: ../../source/developer_guide/contribution/testing.md:139
-msgid "After starting the container, you should install the required packages:"
+msgid ""
+"After starting the container, you should install the required packages:"
 msgstr "启动容器后，您需要安装必要的依赖包："
 
 #: ../../source/developer_guide/contribution/testing.md
@@ -68,8 +70,8 @@ msgstr "编写单元测试时需遵循以下原则："
 
 #: ../../source/developer_guide/contribution/testing.md:159
 msgid ""
-"The test file path should be consistent with the source file and start "
-"with the `test_` prefix, such as: `vllm_ascend/worker/worker.py` --> "
+"The test file path should be consistent with the source file and start with "
+"the `test_` prefix, such as: `vllm_ascend/worker/worker.py` --> "
 "`tests/ut/worker/test_worker.py`"
 msgstr ""
 "测试文件路径应与源代码文件路径保持一致，并以 `test_` 为前缀，例如：`vllm_ascend/worker/worker.py` → "
@@ -93,8 +95,8 @@ msgstr "所有单元测试都可在 CPU 上运行，因此必须在主机端模�
 
 #: ../../source/developer_guide/contribution/testing.md:162
 msgid ""
-"Example: [tests/ut/test_ascend_config.py](https://github.com/vllm-project"
-"/vllm-ascend/blob/main/tests/ut/test_ascend_config.py)."
+"Example: [tests/ut/test_ascend_config.py](https://github.com/vllm-"
+"project/vllm-ascend/blob/main/tests/ut/test_ascend_config.py)."
 msgstr ""
 "示例：[tests/ut/test_ascend_config.py](https://github.com/vllm-project/vllm-"
 "ascend/blob/main/tests/ut/test_ascend_config.py)。"
@@ -123,17 +125,14 @@ msgid ""
 "[schedule_nightly_test_a3.yaml](https://github.com/vllm-project/vllm-"
 "ascend/blob/main/.github/workflows/schedule_nightly_test_a3.yaml), "
 "[pr_test.yaml](https://github.com/vllm-project/vllm-"
-"ascend/blob/main/.github/workflows/pr_test.yaml)), you can run them "
-"locally."
+"ascend/blob/main/.github/workflows/pr_test.yaml)), you can run them locally."
 msgstr ""
 "虽然 vllm-ascend CI 在 Ascend CI 上提供了 E2E "
-"测试（例如，[schedule_nightly_test_a2.yaml](https://github.com/vllm-project"
-"/vllm-"
-"ascend/blob/main/.github/workflows/schedule_nightly_test_a2.yaml)、[schedule_nightly_test_a3.yaml](https://github.com"
-"/vllm-project/vllm-"
-"ascend/blob/main/.github/workflows/schedule_nightly_test_a3.yaml)、[pr_test.yaml](https://github.com"
-"/vllm-project/vllm-"
-"ascend/blob/main/.github/workflows/pr_test.yaml)），但您也可以在本地运行它们。"
+"测试（例如，[schedule_nightly_test_a2.yaml](https://github.com/vllm-project/vllm-"
+"ascend/blob/main/.github/workflows/schedule_nightly_test_a2.yaml)、[schedule_nightly_test_a3.yaml](https://github.com/vllm-"
+"project/vllm-"
+"ascend/blob/main/.github/workflows/schedule_nightly_test_a3.yaml)、[pr_test.yaml](https://github.com/vllm-"
+"project/vllm-ascend/blob/main/.github/workflows/pr_test.yaml)），但您也可以在本地运行它们。"
 
 #: ../../source/developer_guide/contribution/testing.md:215
 msgid "PR-triggered E2E test"
@@ -176,47 +175,45 @@ msgstr "E2E 测试示例"
 #: ../../source/developer_guide/contribution/testing.md:318
 msgid ""
 "Offline test example: "
-"[`tests/e2e/pull_request/one_card/test_camem.py`](https://github.com"
-"/vllm-project/vllm-"
-"ascend/blob/main/tests/e2e/pull_request/one_card/test_camem.py)"
+"[`tests/e2e/pull_request/one_card/test_camem.py`](https://github.com/vllm-"
+"project/vllm-ascend/blob/main/tests/e2e/pull_request/one_card/test_camem.py)"
 msgstr ""
-"离线测试示例：[`tests/e2e/pull_request/one_card/test_camem.py`](https://github.com"
-"/vllm-project/vllm-"
-"ascend/blob/main/tests/e2e/pull_request/one_card/test_camem.py)"
+"离线测试示例：[`tests/e2e/pull_request/one_card/test_camem.py`](https://github.com/vllm-"
+"project/vllm-ascend/blob/main/tests/e2e/pull_request/one_card/test_camem.py)"
 
 #: ../../source/developer_guide/contribution/testing.md:319
 msgid ""
 "Online test example: "
-"[`tests/e2e/pull_request/two_card/aclgraph/test_single_request_aclgraph.py`](https://github.com"
-"/vllm-project/vllm-"
+"[`tests/e2e/pull_request/two_card/aclgraph/test_single_request_aclgraph.py`](https://github.com/vllm-"
+"project/vllm-"
 "ascend/blob/main/tests/e2e/pull_request/two_card/aclgraph/test_single_request_aclgraph.py)"
 msgstr ""
-"在线测试示例：[`tests/e2e/pull_request/two_card/aclgraph/test_single_request_aclgraph.py`](https://github.com"
-"/vllm-project/vllm-"
+"在线测试示例：[`tests/e2e/pull_request/two_card/aclgraph/test_single_request_aclgraph.py`](https://github.com/vllm-"
+"project/vllm-"
 "ascend/blob/main/tests/e2e/pull_request/two_card/aclgraph/test_single_request_aclgraph.py)"
 
 #: ../../source/developer_guide/contribution/testing.md:320
 msgid ""
 "Correctness test example: "
-"[`tests/e2e/pull_request/one_card/aclgraph/test_aclgraph_accuracy.py`](https://github.com"
-"/vllm-project/vllm-"
+"[`tests/e2e/pull_request/one_card/aclgraph/test_aclgraph_accuracy.py`](https://github.com/vllm-"
+"project/vllm-"
 "ascend/blob/main/tests/e2e/pull_request/one_card/aclgraph/test_aclgraph_accuracy.py)"
 msgstr ""
-"正确性测试示例：[`tests/e2e/pull_request/one_card/aclgraph/test_aclgraph_accuracy.py`](https://github.com"
-"/vllm-project/vllm-"
+"正确性测试示例：[`tests/e2e/pull_request/one_card/aclgraph/test_aclgraph_accuracy.py`](https://github.com/vllm-"
+"project/vllm-"
 "ascend/blob/main/tests/e2e/pull_request/one_card/aclgraph/test_aclgraph_accuracy.py)"
 
 #: ../../source/developer_guide/contribution/testing.md:322
 msgid ""
 "The CI resource is limited, and you might need to reduce the number of "
-"layers of a model. Below is an example of how to generate a reduced layer"
-" model:"
+"layers of a model. Below is an example of how to generate a reduced layer "
+"model:"
 msgstr "由于 CI 资源有限，您可能需要减少模型的层数。以下是一个如何生成精简层数模型的示例："
 
 #: ../../source/developer_guide/contribution/testing.md:324
 msgid ""
-"Fork the original model repo in modelscope. All the files in the repo "
-"except for weights are required."
+"Fork the original model repo in modelscope. All the files in the repo except"
+" for weights are required."
 msgstr "在 modelscope 上 fork 原始模型仓库。除权重文件外，需要保留仓库中的所有文件。"
 
 #: ../../source/developer_guide/contribution/testing.md:325
@@ -229,8 +226,8 @@ msgstr "在配置中将 `num_hidden_layers` 设置为期望的层数，例如：
 #: ../../source/developer_guide/contribution/testing.md:326
 msgid ""
 "Copy the following python script as `generate_random_weight.py`. Set the "
-"relevant parameters `MODEL_LOCAL_PATH`, `DIST_DTYPE` and "
-"`DIST_MODEL_PATH` as needed:"
+"relevant parameters `MODEL_LOCAL_PATH`, `DIST_DTYPE` and `DIST_MODEL_PATH` "
+"as needed:"
 msgstr ""
 "将以下 Python 脚本保存为 `generate_random_weight.py`，并根据需要设置 "
 "`MODEL_LOCAL_PATH`、`DIST_DTYPE` 和 `DIST_MODEL_PATH` 参数："
@@ -241,10 +238,10 @@ msgstr "运行文档测试（doctest）"
 
 #: ../../source/developer_guide/contribution/testing.md:346
 msgid ""
-"vllm-ascend provides a `vllm-ascend/tests/e2e/run_doctests.sh` command to"
-" run all doctests in the doc files. The doctest is a good way to make "
-"sure docs stay current and examples remain executable, which can be run "
-"locally as follows:"
+"vllm-ascend provides a `vllm-ascend/tests/e2e/run_doctests.sh` command to "
+"run all doctests in the doc files. The doctest is a good way to make sure "
+"docs stay current and examples remain executable, which can be run locally "
+"as follows:"
 msgstr ""
 "vllm-ascend 提供了 `vllm-ascend/tests/e2e/run_doctests.sh` 命令，用于运行所有文档文件中的 "
 "doctest。Doctest 是确保文档内容及时更新且示例代码保持可执行性的有效方法，您可以通过以下方式在本地运行："
@@ -268,9 +265,8 @@ msgstr "您可以通过以下方式在本地验证 Sphinx 文档中的外部链�
 
 #: ../../source/developer_guide/contribution/testing.md:364
 msgid ""
-"To check links in a specific Markdown file, pass the file to `sphinx-"
-"build`. For example, to check only "
-"`docs/source/user_guide/release_notes.md`:"
+"To check links in a specific Markdown file, pass the file to `sphinx-build`."
+" For example, to check only `docs/source/user_guide/release_notes.md`:"
 msgstr ""
 "要检查特定 Markdown 文件中的链接，请将该文件传递给 `sphinx-build`。例如，仅检查 "
 "`docs/source/user_guide/release_notes.md`："
@@ -286,3 +282,88 @@ msgstr "`docs/_build/linkcheck/output.txt`"
 #: ../../source/developer_guide/contribution/testing.md:376
 msgid "`docs/_build/linkcheck/output.json`"
 msgstr "`docs/_build/linkcheck/output.json`"
+
+msgid "# Testing"
+msgstr ""
+
+msgid "## Set up a test environment"
+msgstr ""
+
+msgid "=== \"Local (CPU)\""
+msgstr ""
+
+msgid "=== \"Single card\""
+msgstr ""
+
+msgid "=== \"Multi cards\""
+msgstr ""
+
+msgid "## Running tests"
+msgstr ""
+
+msgid "### Unit tests"
+msgstr ""
+
+msgid ""
+"- The test file path should be consistent with the source file and start with the `test_` prefix, such as: `vllm_ascend/worker/worker.py` --> `tests/ut/worker/test_worker.py`\n"
+"- The vLLM Ascend test uses unittest framework. See [the Python unittest documentation](https://docs.python.org/3/library/unittest.html#module-unittest) to understand how to write unit tests.\n"
+"- All unit tests can be run on CPUs, so you must mock the device-related functions on the host.\n"
+"- Example: [tests/ut/test_ascend_config.py](https://github.com/vllm-project/vllm-ascend/blob/main/tests/ut/test_ascend_config.py).\n"
+"- You can run the unit tests using `pytest`:"
+msgstr ""
+
+msgid "=== \"Single-card\""
+msgstr ""
+
+msgid "=== \"Multi-card\""
+msgstr ""
+
+msgid "### E2E test"
+msgstr ""
+
+msgid ""
+"Although vllm-ascend CI provides E2E tests on Ascend CI (for example,\n"
+"[schedule_nightly_test_a2.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/schedule_nightly_test_a2.yaml), [schedule_nightly_test_a3.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/schedule_nightly_test_a3.yaml), [pr_test.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/pr_test.yaml)), you can run them locally."
+msgstr ""
+
+msgid "#### PR-triggered E2E test"
+msgstr ""
+
+msgid "#### Nightly-triggered E2E test"
+msgstr ""
+
+msgid "#### E2E test examples"
+msgstr ""
+
+msgid ""
+"- Offline test example: [`tests/e2e/pull_request/one_card/test_camem.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/pull_request/one_card/test_camem.py)\n"
+"- Online test example: [`tests/e2e/pull_request/two_card/aclgraph/test_single_request_aclgraph.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/pull_request/two_card/aclgraph/test_single_request_aclgraph.py)\n"
+"- Correctness test example: [`tests/e2e/pull_request/one_card/aclgraph/test_aclgraph_accuracy.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/pull_request/one_card/aclgraph/test_aclgraph_accuracy.py)"
+msgstr ""
+
+msgid ""
+"1. Fork the original model repo in modelscope. All the files in the repo except for weights are required.\n"
+"2. Set `num_hidden_layers` to the expected number of layers, e.g., `{\"num_hidden_layers\": 2,}`\n"
+"3. Copy the following python script as `generate_random_weight.py`. Set the relevant parameters `MODEL_LOCAL_PATH`, `DIST_DTYPE` and `DIST_MODEL_PATH` as needed:"
+msgstr ""
+
+msgid "### Run doctest"
+msgstr ""
+
+msgid ""
+"vllm-ascend provides a `vllm-ascend/tests/e2e/run_doctests.sh` command to run all doctests in the doc files.\n"
+"The doctest is a good way to make sure docs stay current and examples remain executable, which can be run locally as follows:"
+msgstr ""
+
+msgid "### Run docs link check"
+msgstr ""
+
+msgid ""
+"To check links in a specific Markdown file, pass the file to `sphinx-build`.\n"
+"For example, to check only `docs/source/user_guide/release_notes.md`:"
+msgstr ""
+
+msgid ""
+"- `docs/_build/linkcheck/output.txt`\n"
+"- `docs/_build/linkcheck/output.json`"
+msgstr ""
