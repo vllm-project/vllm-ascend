@@ -719,8 +719,6 @@ class AscendSFADCPMetadataBuilder(AscendSFAMetadataBuilder):
         rank_in_replicated_view = (replicated_col_idx // blocks_per_phys_block) % total_cp_size
 
         local_logical_blocks = torch.index_select(dcp_block_table, 1, local_col_idx)
-        block_dtype = local_logical_blocks.dtype
-        rank_in_replicated_view = rank_in_replicated_view.to(block_dtype)
         if blocks_per_phys_block == 1:
             replicated_blocks = local_logical_blocks * total_cp_size + rank_in_replicated_view
         else:
@@ -730,12 +728,8 @@ class AscendSFADCPMetadataBuilder(AscendSFAMetadataBuilder):
                 local_phys_blocks * total_cp_size + rank_in_replicated_view
             ) * blocks_per_phys_block + local_sub_blocks
 
-        valid_req_mask = seq_lens[:num_reqs].to(device=self.device) > 0
-        replicated_blocks = torch.where(
-            valid_req_mask[:, None],
-            replicated_blocks,
-            torch.zeros((), dtype=block_dtype, device=self.device),
-        )
+        invalid_req_mask = seq_lens[:num_reqs].to(device=self.device) <= 0
+        replicated_blocks[invalid_req_mask[:, None]] = 0
         block_table_replicated_view.copy_(replicated_blocks)
         return block_table_replicated_view
 
