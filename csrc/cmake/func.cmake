@@ -272,6 +272,14 @@ function(add_ops_compile_options)
         return()
     endif()
 
+    if(NOT OP_COMPILE_OP_NAME)
+        set(OP_COMPILE_COMPUTE_UNIT ${ASCEND_COMPUTE_UNIT})
+    endif()
+
+    if(NOT OP_COMPILE_COMPUTE_UNIT)
+        message(FATAL_ERROR "Error: add_ops_compile_options requires COMPUTE_UNIT for ${OP_COMPILE_OP_NAME}")
+    endif()
+
     if(ADD_OPS_COMPILE_OPTION_V2)
         execute_process(COMMAND ${HI_PYTHON} ${ASCENDC_CMAKE_UTIL_DIR}/ascendc_gen_options.py
                 ${ASCEND_CUSTOM_OPTIONS} ${OP_COMPILE_OP_NAME}
@@ -302,6 +310,7 @@ function(add_ops_tiling_keys)
         list(JOIN OP_COMPILE_TILING_KEYS "," STRING_TILING_KEYS)
         add_ops_compile_options(
                 OP_NAME ${OP_COMPILE_OP_NAME}
+                COMPUTE_UNIT ${OP_COMPILE_COMPUTE_UNIT}
                 OPTIONS --tiling_key=${STRING_TILING_KEYS}
         )
     else()
@@ -347,6 +356,7 @@ function(add_opc_config)
     if(_OPC_CONFIG)
         add_ops_compile_options(
                 OP_NAME ${OP_COMPILE_OP_NAME}
+                COMPUTE_UNIT ${OP_COMPILE_COMPUTE_UNIT}
                 OPTIONS ${_OPC_CONFIG}
         )
     endif()
