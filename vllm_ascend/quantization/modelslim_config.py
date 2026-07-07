@@ -543,24 +543,21 @@ class AscendModelSlimConfig(QuantizationConfig):
                 }
             )
         if self.enable_fa_quant:
-            vllm_config = get_current_vllm_config()
-            model_type = vllm_config.model_config.hf_config.model_type
-            if model_type in ["deepseek_v2", "deepseek_v3", "deepseek_v32"]:
-                suffix_map.update(
-                    {
-                        ".fa_q.scale": ".mla_attn.mla_attn.fa_q.scale",
-                        ".fa_k.scale": ".mla_attn.mla_attn.fa_k.scale",
-                        ".fa_v.scale": ".mla_attn.mla_attn.fa_v.scale",
-                        ".fa_q.offset": ".mla_attn.mla_attn.fa_q.offset",
-                        ".fa_k.offset": ".mla_attn.mla_attn.fa_k.offset",
-                        ".fa_v.offset": ".mla_attn.mla_attn.fa_v.offset",
-                    }
-                )
+            suffix_map.update(
+                {
+                    ".fa_q.scale": ".mla_attn.mla_attn.fa_q.scale",
+                    ".fa_k.scale": ".mla_attn.mla_attn.fa_k.scale",
+                    ".fa_v.scale": ".mla_attn.mla_attn.fa_v.scale",
+                    ".fa_q.offset": ".mla_attn.mla_attn.fa_q.offset",
+                    ".fa_k.offset": ".mla_attn.mla_attn.fa_k.offset",
+                    ".fa_v.offset": ".mla_attn.mla_attn.fa_v.offset",
+                }
+            )
         if self.enable_indexer_quant:
             suffix_map.update(
                 {
-                    ".indexer.q_rot": ".mla_attn.indexer.q_rot",
-                    ".indexer.k_rot": ".mla_attn.indexer.k_rot",
+                    ".indexer.q_rot": ".mla_attn.mla_attn.indexer.q_rot",
+                    ".indexer.k_rot": ".mla_attn.mla_attn.indexer.k_rot",
                 }
             )
         if not suffix_map:
