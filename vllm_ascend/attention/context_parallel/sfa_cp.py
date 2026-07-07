@@ -755,7 +755,7 @@ class AscendSFADCPMetadataBuilder(AscendSFAMetadataBuilder):
         )
         req_indices = torch.repeat_interleave(
             torch.arange(num_reqs, dtype=torch.int32, device=self.device),
-            query_lens.to(device=self.device, dtype=torch.int32),
+            query_lens.to(device=self.device),
         )[:num_actual_tokens]
         if req_indices.numel() == 0:
             return slot_mapping_replicated_view
@@ -772,7 +772,7 @@ class AscendSFADCPMetadataBuilder(AscendSFAMetadataBuilder):
         block_numbers = block_table_replicated_view.flatten()[block_table_indices]
         slot_mapping_replicated_view[:num_actual_tokens] = (
             block_numbers * self.replicated_view_block_size + block_offsets
-        ).to(slot_mapping_replicated_view.dtype)
+        )
         return slot_mapping_replicated_view
 
     def _update_dsa_cp_slot_mapping_for_dcp(
@@ -937,35 +937,22 @@ class AscendSFADCPImpl(AscendSFAImpl):
         self.dcp_size = dcp_group.world_size
         self.dcp_rank = dcp_group.rank_in_group if self.dcp_size > 1 else 0
         self.dcp_group = dcp_group if self.dcp_size > 1 else None
-        self.cp_kv_cache_interleave_size = self.vllm_config.parallel_config.cp_kv_cache_interleave_size
-        if self.cp_kv_cache_interleave_size <= 0:
-            raise RuntimeError(f"Invalid cp_kv_cache_interleave_size: {self.cp_kv_cache_interleave_size}")
-        self._dcp_remap_interleave_size = self.cp_kv_cache_interleave_size
-        self._dcp_remap_interleave_size_is_one = self._dcp_remap_interleave_size == 1
-        self._dcp_remap_scalar_values = {
-            "zero": 0,
-            "neg_one": -1,
-            "dcp_rank": self.dcp_rank,
-            "dcp_size": self.dcp_size,
-            "interleave_size": self._dcp_remap_interleave_size,
-            "combined_size": self.dcp_size * self._dcp_remap_interleave_size,
-        }
-        self._dcp_remap_scalar_tensors: dict[tuple[str, torch.dtype], dict[str, torch.Tensor]] = {}
-        self._dcp_remap_order_buffers: dict[tuple[str, int, torch.dtype], tuple[torch.Tensor, torch.Tensor]] = {}
-        self._dcp_remap_index_topk = None
+        self._dcp_interleave_size = self.vllm_config.parallel_config.cp_kv_cache_interleave_size
+        if self._dcp_interleave_size <= 0:
+            raise RuntimeError(f"Invalid cp_kv_cache_interleave_size: {self._dcp_interleave_size}")
+        self._dcp_index_topk = 0
         for config in (
             getattr(self.vllm_config.model_config, "hf_text_config", None),
             getattr(self.vllm_config.model_config, "hf_config", None),
         ):
             index_topk = getattr(config, "index_topk", None)
             if isinstance(index_topk, int) and index_topk > 0:
-                self._dcp_remap_index_topk = index_topk
+                self._dcp_index_topk = index_topk
                 break
-        if self.dcp_size > 1 and torch.npu.is_available():
-            device = torch.device("npu", torch.npu.current_device())
-            self._get_dcp_remap_constants(device, torch.float32)
-            if self._dcp_remap_index_topk is not None:
-                self._get_dcp_remap_order_and_count(self._dcp_remap_index_topk, device, torch.float32)
+        if self._dcp_index_topk <= 0:
+            raise RuntimeError("index_topk must be set in the model config for DCP SFA.")
+        self._remap_order = torch.arange(self._dcp_index_topk, dtype=torch.float32, device=self.device)
+        self._remap_invalid_index = torch.tensor(-1.0, dtype=torch.float32, device=self.device)
 
     def _all_gather_dim_async(
         self,
@@ -982,71 +969,44 @@ class AscendSFADCPImpl(AscendSFAImpl):
         gathered, handle = all_gather_async(x.permute(perm).contiguous(), self.dcp_group)
         return gathered, handle, restore_perm
 
-    def _get_dcp_remap_constants(
-        self,
-        device: torch.device,
-        dtype: torch.dtype,
-    ) -> dict[str, torch.Tensor]:
-        key = (str(device), dtype)
-        constants = self._dcp_remap_scalar_tensors.get(key)
-        if constants is not None:
-            return constants
-
-        constants = {
-            name: torch.tensor(value, dtype=dtype, device=device)
-            for name, value in self._dcp_remap_scalar_values.items()
-        }
-        self._dcp_remap_scalar_tensors[key] = constants
-        return constants
-
-    def _get_dcp_remap_order_and_count(
-        self,
-        topk_count: int,
-        device: torch.device,
-        dtype: torch.dtype,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        key = (str(device), topk_count, dtype)
-        order_and_count = self._dcp_remap_order_buffers.get(key)
-        if order_and_count is None:
-            order = torch.arange(topk_count, dtype=dtype, device=device)
-            count = torch.tensor(topk_count, dtype=dtype, device=device)
-            order_and_count = (order, count)
-            self._dcp_remap_order_buffers[key] = order_and_count
-        return order_and_count
-
-    def _map_indices_to_local(self, topk_indices: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        constants = self._get_dcp_remap_constants(topk_indices.device, torch.float32)
-        topk_float = topk_indices.to(torch.float32)
-        local_block_indices = torch.floor(topk_float / constants["interleave_size"])
-        local_owner_base = torch.floor(local_block_indices / constants["dcp_size"]) * constants["dcp_size"]
+    def _map_sparse_indices_to_local(self, topk_indices: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        # Keep remap in floating-point ops: some NPU integer bitwise ops fall
+        # back to CPU and break graph capture.
+        topk_indices_fp32 = topk_indices.to(torch.float32)
+        interleave_size = self._dcp_interleave_size
+        local_block_indices = torch.floor(topk_indices_fp32 / interleave_size)
+        local_owner_base = torch.floor(local_block_indices / self.dcp_size) * self.dcp_size
         local_owner = local_block_indices - local_owner_base
-        local_owner_mask = (topk_float >= constants["zero"]) & (local_owner == constants["dcp_rank"])
-        if self._dcp_remap_interleave_size_is_one:
-            remapped_float = torch.floor(topk_float / constants["dcp_size"])
+        local_owner_mask = (topk_indices_fp32 >= 0) & (local_owner == self.dcp_rank)
+        if interleave_size == 1:
+            remapped_indices_fp32 = torch.floor(topk_indices_fp32 / self.dcp_size)
         else:
-            local_offsets = topk_float - local_block_indices * constants["interleave_size"]
-            remapped_float = torch.floor(topk_float / constants["combined_size"])
-            remapped_float = remapped_float * constants["interleave_size"] + local_offsets
-        remapped_float = torch.where(local_owner_mask, remapped_float, constants["neg_one"])
-        return remapped_float.to(topk_indices.dtype), local_owner_mask
+            local_offsets = topk_indices_fp32 - local_block_indices * interleave_size
+            remapped_indices_fp32 = torch.floor(topk_indices_fp32 / (self.dcp_size * interleave_size))
+            remapped_indices_fp32 = remapped_indices_fp32 * interleave_size + local_offsets
+        remapped_indices = torch.where(
+            local_owner_mask,
+            remapped_indices_fp32,
+            self._remap_invalid_index,
+        ).to(topk_indices.dtype)
+        return remapped_indices, local_owner_mask
 
     def _remap_sparse_indices(self, topk_indices: torch.Tensor) -> torch.Tensor:
         if self.dcp_size <= 1:
             return topk_indices
 
-        # Remap the top-k indices to local KV indices and filter out non-local indices.
-        remapped_indices, local_owner_mask = self._map_indices_to_local(topk_indices)
+        topk_count = topk_indices.shape[-1]
+        if topk_count > self._dcp_index_topk:
+            raise RuntimeError(
+                f"topk_indices last dimension ({topk_count}) exceeds configured index_topk "
+                f"({self._dcp_index_topk})."
+            )
+
+        remapped_indices, local_owner_mask = self._map_sparse_indices_to_local(topk_indices)
 
         # Compact local indices to the front without changing their top-k order.
-        topk_count = topk_indices.shape[-1]
-        pack_key_dtype = torch.float32
-        original_order, topk_count_tensor = self._get_dcp_remap_order_and_count(
-            topk_count,
-            topk_indices.device,
-            pack_key_dtype,
-        )
-        original_order = original_order.expand_as(topk_indices)
-        pack_keys = original_order + (~local_owner_mask).to(pack_key_dtype) * topk_count_tensor
+        original_order = self._remap_order[:topk_count].expand_as(topk_indices)
+        pack_keys = original_order + (~local_owner_mask).to(torch.float32) * topk_count
         _, pack_order = torch.sort(pack_keys, dim=-1)
         return torch.gather(remapped_indices, dim=-1, index=pack_order.to(torch.int32))
 
@@ -1058,7 +1018,7 @@ class AscendSFADCPImpl(AscendSFAImpl):
         # DSA-CP keeps the head dimension replicated/full.  Only DCP shards KV,
         # so merge the per-DCP partial outputs explicitly instead of using the
         # common CP helper, which assumes DCP also shards heads.
-        num_tokens, num_heads, _ = sfa_output.shape
+        num_tokens, num_heads, head_size = sfa_output.shape
         assert self.dcp_group is not None
         out_flat = self.dcp_group.all_gather(sfa_output.contiguous(), dim=0)
         lse_flat = self.dcp_group.all_gather(softmax_lse.contiguous(), dim=0)
@@ -1066,7 +1026,7 @@ class AscendSFADCPImpl(AscendSFAImpl):
             self.dcp_size,
             num_tokens,
             num_heads,
-            self.kv_lora_rank,
+            head_size,
         )
         lse_flat = lse_flat.view(
             self.dcp_size,
@@ -1077,26 +1037,18 @@ class AscendSFADCPImpl(AscendSFAImpl):
         out_flat = out_flat.to(torch.float32).flatten(1, 2)
         lse_flat = lse_flat.to(torch.float32).flatten(1, -1)
         output, _ = torch_npu.npu_attention_update(lse_flat.unbind(0), out_flat.unbind(0), 0)
-        return output.view(num_tokens, num_heads, self.kv_lora_rank)
+        return output.view(num_tokens, num_heads, head_size)
 
     @staticmethod
     def _merge_dcp_outputs_with_torch(
         output_recv: torch.Tensor,
         lse_recv: torch.Tensor,
     ) -> torch.Tensor:
-        lse_recv = torch.where(
-            torch.isnan(lse_recv) | torch.isinf(lse_recv),
-            torch.full_like(lse_recv, float("-inf")),
-            lse_recv,
-        )
+        lse_recv = lse_recv.masked_fill(torch.isnan(lse_recv) | torch.isinf(lse_recv), float("-inf"))
         lse_max = torch.amax(lse_recv, dim=0)
-        lse_max = torch.where(
-            lse_max == float("-inf"),
-            torch.zeros_like(lse_max),
-            lse_max,
-        )
+        lse_max = lse_max.masked_fill(lse_max == float("-inf"), 0.0)
         weights = torch.exp(lse_recv - lse_max.unsqueeze(0))
-        weights = torch.where(torch.isnan(weights), torch.zeros_like(weights), weights)
+        weights = weights.masked_fill(torch.isnan(weights), 0.0)
         weights = weights / weights.sum(dim=0, keepdim=True).clamp_min(1e-10)
 
         output = (output_recv.to(torch.float32) * weights.unsqueeze(-1)).sum(dim=0)
@@ -1107,7 +1059,7 @@ class AscendSFADCPImpl(AscendSFAImpl):
         sfa_output: torch.Tensor,
         softmax_lse: torch.Tensor,
     ) -> torch.Tensor:
-        assert self.dcp_group is not None
+        assert self.dcp_group is not None, "DCP output merge requires dcp_group when dcp_size > 1."
         num_tokens, num_heads, head_size = sfa_output.shape
         assert num_heads % self.dcp_size == 0
         local_num_heads = num_heads // self.dcp_size
@@ -1132,20 +1084,13 @@ class AscendSFADCPImpl(AscendSFAImpl):
 
         return self._merge_dcp_outputs_with_torch(output_recv, lse_recv)
 
-    def _select_dsa_cp_local_tokens(self, output: torch.Tensor, attn_metadata: M) -> torch.Tensor:
-        assert attn_metadata.dsa_cp_context is not None
-        dsa_cp_context = attn_metadata.dsa_cp_context
-        return output[dsa_cp_context.local_start : dsa_cp_context.local_end_with_pad]
-
     def _start_dcp_query_gather(
         self,
         ql_nope: torch.Tensor,
         q_pe: torch.Tensor,
-        attn_metadata: M,
     ) -> DCPQueryGatherContext:
-        assert attn_metadata.dcp_context is not None
         query_gather_dim = 0 if self.enable_dsa_cp else 1
-        assert self.dcp_group is not None
+        assert self.dcp_group is not None, "DCP query gather requires dcp_group when dcp_size > 1."
         if ql_nope.shape[:-1] != q_pe.shape[:-1] or ql_nope.dtype != q_pe.dtype:
             raise RuntimeError(
                 "Cannot fuse DCP query gather for ql_nope/q_pe with "
@@ -1161,7 +1106,7 @@ class AscendSFADCPImpl(AscendSFAImpl):
         # token shards on dim 0; native DCP restores query shards on dim 1.
         fused_q = torch.cat([ql_nope, q_pe], dim=-1).contiguous()
         gathered, handle, restore_perm = self._all_gather_dim_async(fused_q, query_gather_dim)
-        return gathered, handle, restore_perm, ql_nope_dim, q_pe_dim
+        return DCPQueryGatherContext(gathered, handle, restore_perm, ql_nope_dim, q_pe_dim)
 
     def _record_dcp_query_gather_context(
         self,
@@ -1169,24 +1114,19 @@ class AscendSFADCPImpl(AscendSFAImpl):
         q_pe: torch.Tensor,
         attn_metadata: M,
     ) -> None:
-        assert attn_metadata.dcp_context is not None
-        attn_metadata.dcp_context.query_gather_context = self._start_dcp_query_gather(ql_nope, q_pe, attn_metadata)
+        assert attn_metadata.dcp_context is not None, "DCP SFA requires attn_metadata.dcp_context."
+        attn_metadata.dcp_context.query_gather_context = self._start_dcp_query_gather(ql_nope, q_pe)
 
     def _finish_all_gather_query_for_dcp(
         self,
-        gathered: torch.Tensor,
-        handle: torch.distributed.Work | None,
-        restore_perm: tuple[int, ...] | None,
-        ql_nope_dim: int,
-        q_pe_dim: int,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        if handle is not None:
-            handle.wait()
-        if restore_perm is not None:
-            gathered = gathered.permute(restore_perm).contiguous()
-        fused_q = gathered
-        ql_nope, q_pe = torch.split(fused_q, [ql_nope_dim, q_pe_dim], dim=-1)
-        return ql_nope, q_pe
+        context: DCPQueryGatherContext,
+    ) -> tuple[torch.Tensor, ...]:
+        if context.handle is not None:
+            context.handle.wait()
+        gathered = context.gathered
+        if context.restore_perm is not None:
+            gathered = gathered.permute(context.restore_perm).contiguous()
+        return torch.split(gathered, [context.ql_nope_dim, context.q_pe_dim], dim=-1)
 
     def _execute_sparse_flash_attention_process(
         self,
@@ -1198,14 +1138,13 @@ class AscendSFADCPImpl(AscendSFAImpl):
         actual_seq_lengths_query,
         actual_seq_lengths_key,
     ):
-        assert attn_metadata.dcp_context is not None
-        assert self.dcp_group is not None
+        assert attn_metadata.dcp_context is not None, "DCP SFA requires attn_metadata.dcp_context."
+        assert self.dcp_group is not None, "DCP SFA requires dcp_group when dcp_size > 1."
         dcp_context = attn_metadata.dcp_context
         query_gather_context = dcp_context.query_gather_context
         dcp_context.query_gather_context = None
         if query_gather_context is None:
-            query_gather_context = self._start_dcp_query_gather(ql_nope, q_pe, attn_metadata)
-        q_gathered, q_handle, q_restore_perm, ql_nope_dim, q_pe_dim = query_gather_context
+            query_gather_context = self._start_dcp_query_gather(ql_nope, q_pe)
         if self.enable_dsa_cp:
             # DSA-CP shards the token sequence. Restore the flat token order for
             # SFA, and use the original full query lengths for varlen metadata.
@@ -1215,13 +1154,7 @@ class AscendSFADCPImpl(AscendSFAImpl):
             # DCP-local KV shard.
             topk_indices = self.dcp_group.all_gather(topk_indices.contiguous(), dim=0)
         topk_indices = self._remap_sparse_indices(topk_indices)
-        ql_nope, q_pe = self._finish_all_gather_query_for_dcp(
-            q_gathered,
-            q_handle,
-            q_restore_perm,
-            ql_nope_dim,
-            q_pe_dim,
-        )
+        ql_nope, q_pe = self._finish_all_gather_query_for_dcp(query_gather_context)
         kv = kv_cache[0]
         key_rope = kv_cache[1]
         sfa_output, softmax_max, softmax_sum = torch.ops._C_ascend.npu_sparse_flash_attention(
@@ -1253,7 +1186,9 @@ class AscendSFADCPImpl(AscendSFAImpl):
         softmax_lse = softmax_lse.permute(1, 0, 2).reshape(softmax_lse.shape[1], -1, 1)
         if self.enable_dsa_cp:
             output = self._merge_dsa_cp_dcp_outputs(sfa_output, softmax_lse)
-            output = self._select_dsa_cp_local_tokens(output, attn_metadata)
+            assert attn_metadata.dsa_cp_context is not None, "DSA-CP DCP output selection requires dsa_cp_context."
+            dsa_cp_context = attn_metadata.dsa_cp_context
+            output = output[dsa_cp_context.local_start : dsa_cp_context.local_end_with_pad]
             return output.to(output_dtype)
         output = self._merge_dcp_outputs(sfa_output, softmax_lse)
         return output.to(output_dtype)
