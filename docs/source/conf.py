@@ -1,191 +1,213 @@
-#
-# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
-# Copyright 2023 The vLLM team.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-# This file is a part of the vllm-ascend project.
-# Adapted from vllm-project/vllm/docs/source/conf.py
-#
+"""Documentation configuration shim.
 
-# -- Path setup --------------------------------------------------------------
+The legacy Sphinx ``conf.py`` exposed version variables as JSON when
+invoked as a script, so tooling like the ``labeled_doctest`` workflow
+and ``tests/e2e/common.sh`` could extract them with ``jq``.
 
-# If extensions (or modules to document with autodoc) are in another directory,
-# add these directories to sys.path here. If the directory is relative to the
-# documentation root, use os.path.abspath to make it absolute, like shown here.
-#
+After the migration to mkdocs the source of truth for those variables
+is the ``extra:`` block of ``mkdocs.yml``. This file is a thin shim
+that re-exports them in the same JSON shape, so existing tooling keeps
+working without modification.
+
+Output schema (printed to stdout)::
+
+    {
+        "vllm_version": "vX.Y.Z",
+        "vllm_ascend_version": "vX.Y.ZrcN",
+        "pip_vllm_version": "X.Y.Z",
+        "pip_vllm_ascend_version": "X.Y.ZrcN",
+        "cann_image_tag": "...",
+        "main_python_version": "...",
+        "main_cann_version": "...",
+        "main_pytorch_torch_npu_version": "...",
+        "main_triton_ascend_version": "...",
+        "main_vllm_commit": "<sha>",
+        "main_vllm_tag": "<tag>",
+    }
+
+Edit version variables in ``mkdocs.yml`` (``extra:`` block), not here.
+
+Only the standard library is used so this script can run in minimal
+environments (e.g. CI containers that do not have ``mkdocs``,
+``pyyaml`` or ``pyyaml_env_tag`` installed).
+"""
+
 import json
 import os
-import sys
+import re
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+REPO_ROOT = Path(__file__).resolve().parents[2]
+MKDOCS_YML = REPO_ROOT / "mkdocs.yml"
 
-# -- Project information -----------------------------------------------------
+# Only the version / substitution keys are forwarded. The mkdocs.yml
+# ``extra:`` block also holds non-substitution fields (e.g. ``is_release``,
+# ``social``, ``generator``) which tooling does not consume.
+VERSION_KEYS = (
+    "vllm_version",
+    "vllm_ascend_version",
+    "pip_vllm_ascend_version",
+    "pip_vllm_version",
+    "cann_image_tag",
+    "main_python_version",
+    "main_cann_version",
+    "main_pytorch_torch_npu_version",
+    "main_triton_ascend_version",
+)
 
-project = "vllm-ascend"
-copyright = "2025, vllm-ascend team"
-author = "the vllm-ascend team"
+# Matches a top-level ``key: value`` entry inside the ``extra:`` mapping
+# at a given indentation level. The caller passes the indent width via
+# ``{indent}`` and we only match keys at exactly that depth so that
+# nested structures (e.g. ``social:`` -> ``- icon:``) are ignored.
+# The value is everything from the first non-space character after the
+# colon up to a trailing comment (which we strip). Quoted strings are
+# kept verbatim; ``!ENV`` references are resolved to their first
+# non-empty env var (or the literal default).
+_EXTRA_ENTRY_RE = re.compile(
+    r"""
+    ^(?P<key>[A-Za-z_][A-Za-z0-9_]*)\s*:\s*      # key + colon
+    (?P<value>(?:
+        "(?:[^"\\]|\\.)*"        |              # double-quoted string
+        '(?:[^'\\]|\\.)*'        |              # single-quoted string
+        \[[^\]]*\]                |              # flow sequence (e.g. !ENV [...])
+        [^\s#][^#]*                            # bare scalar up to comment
+    ))
+    """,
+    re.VERBOSE,
+)
 
-# The full version, including alpha/beta/rc tags
-release = "0.22.1rc1"
 
-# -- General configuration ---------------------------------------------------
+def _strip_comment(value):
+    """Drop a trailing ``# ...`` comment, respecting quoted strings."""
+    in_quote = None
+    for i, ch in enumerate(value):
+        if in_quote:
+            if ch == in_quote:
+                in_quote = None
+            continue
+        if ch in ('"', "'"):
+            in_quote = ch
+            continue
+        if ch == "#" and (i == 0 or value[i - 1].isspace()):
+            return value[:i]
+    return value
 
-# Add any Sphinx extension module names here, as strings. They can be
-# extensions coming with Sphinx (named 'sphinx.ext.*') or your custom
-# ones.
 
-# Copy from https://github.com/vllm-project/vllm/blob/main/docs/source/conf.py
-extensions = [
-    "sphinx.ext.napoleon",
-    "sphinx.ext.intersphinx",
-    "sphinx.ext.mathjax",
-    "sphinx_copybutton",
-    "sphinx.ext.autodoc",
-    "sphinx.ext.autosummary",
-    "myst_parser",
-    "sphinxarg.ext",
-    "sphinx_design",
-    "sphinx_togglebutton",
-    "sphinx_substitution_extensions",
-    "tools.docs_codegen.sphinx_extension",
-]
+def _coerce(value):
+    """Resolve ``!ENV [...]`` references and strip surrounding quotes.
 
-myst_enable_extensions = ["colon_fence", "amsmath", "dollarmath", "substitution"]
+    The mkdocs ``!ENV`` tag has the shape ``[VAR, default, ...]``; the
+    first non-empty variable wins, and the last list element is the
+    literal default. We do not need full YAML semantics here, only
+    enough to read the version scalars.
+    """
+    value = _strip_comment(value).strip()
+    if not value.startswith("!ENV"):
+        return _unquote(value)
+    # Extract the bracketed argument list.
+    m = re.match(r"!ENV\s*\[(?P<body>.*)\]\s*$", value, re.DOTALL)
+    if not m:
+        return _unquote(value)
+    body = m.group("body")
+    # Tokenise the bracketed list, respecting quotes.
+    tokens, buf, in_quote = [], [], None
+    for ch in body:
+        if in_quote:
+            buf.append(ch)
+            if ch == in_quote:
+                in_quote = None
+            continue
+        if ch in ('"', "'"):
+            in_quote = ch
+            buf.append(ch)
+        elif ch == ",":
+            tokens.append("".join(buf).strip())
+            buf = []
+        else:
+            buf.append(ch)
+    if buf:
+        tokens.append("".join(buf).strip())
 
-# Change this when cut down release
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-_VLLM_MAIN_VERIFIED_COMMIT_PATH = _REPO_ROOT / ".github" / "vllm-main-verified.commit"
-_VLLM_RELEASE_TAG_PATH = _REPO_ROOT / ".github" / "vllm-release-tag.commit"
-_VLLM_MAIN_VERIFIED_COMMIT = _VLLM_MAIN_VERIFIED_COMMIT_PATH.read_text(encoding="utf-8").strip()
-_VLLM_RELEASE_TAG = _VLLM_RELEASE_TAG_PATH.read_text(encoding="utf-8").strip()
+    # Walk tokens: the last token is the literal default; any preceding
+    # ones are env-var names. Use the first env var that is set.
+    for token in tokens[:-1]:
+        var_name = _unquote(token)
+        if var_name and var_name in os.environ:
+            return os.environ[var_name]
+    return _unquote(tokens[-1]) if tokens else ""
 
-myst_substitutions = {
-    # the branch of vllm, used in vllm clone
-    # - main branch: 'main'
-    # - vX.Y.Z branch: 'vX.Y.Z'
-    "vllm_version": "v0.22.1",
-    # the branch of vllm-ascend, used in vllm-ascend clone and image tag
-    # - main branch: 'main'
-    # - vX.Y.Z branch: latest vllm-ascend release tag
-    "vllm_ascend_version": "v0.22.1rc1",
-    # the newest release version of vllm-ascend and matched vLLM, used in pip install.
-    # This value should be updated when cut down release.
-    "pip_vllm_ascend_version": "0.22.1rc1",
-    "pip_vllm_version": "0.22.1",
-    # CANN image tag paired with the vllm_ascend_version above
-    "cann_image_tag": "9.0.0-910b-ubuntu22.04-py3.12",
-    # vLLM commit hash for main branch
-    "main_vllm_commit": _VLLM_MAIN_VERIFIED_COMMIT,
-    # vLLM tag for main branch
-    "main_vllm_tag": _VLLM_RELEASE_TAG,
-    # Python version for main branch
-    "main_python_version": ">= 3.10, < 3.13",
-    # CANN version for main branch
-    "main_cann_version": "9.0.0",
-    # PyTorch/torch_npu version for main branch
-    "main_pytorch_torch_npu_version": "2.10.0 / 2.10.0",
-    # Triton Ascend version for main branch
-    "main_triton_ascend_version": "3.2.1",
-}
 
-# For cross-file header anchors
-myst_heading_anchors = 5
+def _unquote(value):
+    """Strip a single layer of matching single/double quotes."""
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+        return value[1:-1]
+    return value
 
-# Add any paths that contain templates here, relative to this directory.
-templates_path = ["_templates"]
 
-# The language for content autogenerated by Sphinx. Refer to documentation
-# for a list of supported languages.
-#
-# This is also used if you do content translation via gettext catalogs.
-# Usually you set "language" from the command line for these cases.
-locale_dirs = ["locale/"]
-gettext_compact = False
-# List of patterns, relative to source directory, that match files and
-# directories to ignore when looking for source files.
-# This pattern also affects html_static_path and html_extra_path.
-exclude_patterns = [
-    "_build",
-    "Thumbs.db",
-    ".DS_Store",
-    ".venv",
-    "README.md",
-    "user_guide/release.template.md",
-    # TODO(yikun): Remove this after zh supported
-    "**/*.zh.md",
-]
+def _load_extra_block():
+    """Parse the ``extra:`` mapping out of ``mkdocs.yml``.
 
-# -- Options for HTML output -------------------------------------------------
+    We avoid a full YAML load (which would require PyYAML and a
+    resolver for mkdocs' ``!ENV`` / ``!!python/name`` tags) by reading
+    the file line-by-line and matching the ``key: value`` entries at
+    exactly the indent depth of the ``extra:`` block. Nested
+    structures (e.g. ``social:`` -> ``- icon:``) are skipped by the
+    indent check. The version keys we care about are all plain
+    scalars, so this is sufficient.
+    """
+    text = MKDOCS_YML.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    in_extra = False
+    extra_indent = None
+    result = {}
+    for line in lines:
+        stripped = line.lstrip()
+        if not in_extra:
+            # Look for the top-level ``extra:`` mapping.
+            if re.match(r"^extra\s*:\s*(#.*)?$", stripped):
+                in_extra = True
+            continue
+        # Inside ``extra:``. Blank and comment-only lines don't move us.
+        if not stripped:
+            continue
+        if stripped.startswith("#"):
+            continue
+        indent = len(line) - len(stripped)
+        if extra_indent is None:
+            extra_indent = indent
+        # End the block when we dedent past its top level.
+        if indent < extra_indent:
+            break
+        # Skip nested entries (e.g. inside ``social:``).
+        if indent > extra_indent:
+            continue
+        m = _EXTRA_ENTRY_RE.match(stripped)
+        if not m:
+            continue
+        key = m.group("key")
+        if key in result:
+            # Don't silently overwrite; first wins to match YAML semantics.
+            continue
+        result[key] = _coerce(m.group("value"))
+    return result
 
-# The theme to use for HTML and HTML Help pages.  See the documentation for
-# a list of builtin themes.
-#
-html_title = project
-html_theme = "sphinx_book_theme"
-html_logo = "logos/vllm-ascend-logo-text-light.png"
-html_theme_options = {
-    "path_to_docs": "docs/source",
-    "repository_url": "https://github.com/vllm-project/vllm-ascend",
-    "use_repository_button": True,
-    "use_edit_page_button": True,
-    "footer_content_items": [
-        "author.html",
-        "copyright.html",
-        "last-updated.html",
-        "extra-footer.html",
-        "sections/issues-float.html",
-    ],
-}
-html_context = {
-    "rtd_version_slug": os.environ.get("READTHEDOCS_VERSION", "latest"),
-}
-# Add any paths that contain custom static files (such as style sheets) here,
-# relative to this directory. They are copied after the builtin static files,
-# so a file named "default.css" will overwrite the builtin "default.css".
-# html_static_path = ['_static']
-# Copy llms.txt to site root so it is available as /llms.txt.
-html_extra_path = ["llms.txt"]
 
-# -- Options for linkcheck builder -------------------------------------------
+def _read_text(path):
+    return path.read_text(encoding="utf-8").strip() if path.exists() else "unknown"
 
-# Check external links without validating remote anchors. Many third-party
-# sites render anchors dynamically, which makes anchor checks flaky in CI.
-linkcheck_anchors = False
-linkcheck_retries = 3
-linkcheck_timeout = 15
-linkcheck_workers = 10
 
-# Example service endpoints in docs are intentionally not reachable from CI.
-linkcheck_ignore = [
-    r"https?://localhost(:\d+)?($|/.*)",
-    r"https?://127\.0\.0\.1(:\d+)?($|/.*)",
-    r"https?://0\.0\.0\.0(:\d+)?($|/.*)",
-    r"https?://192\.0\.0\.1(:\d+)?($|/.*)",
-    r"https?://<[^>]+>.*",
-    r"https://github\.com/vllm-project/vllm-ascend/issues/new/choose",
-    r"https://github\.com/[^/?#]+/?$",
-    r"https?://.*\$%7B.*%7D.*",
-]
+def main():
+    extra = _load_extra_block()
+    output = {key: extra[key] for key in VERSION_KEYS if key in extra}
+    # ``main_vllm_commit`` and ``main_vllm_tag`` are not stored in
+    # mkdocs.yml; they live as commit-shas in the .github/ directory and
+    # are read by ``main.py`` (mkdocs-macros) at build time. Include them
+    # here so the diagnostic dump in labeled_doctest matches the legacy
+    # output.
+    output["main_vllm_commit"] = _read_text(REPO_ROOT / ".github" / "vllm-main-verified.commit")
+    output["main_vllm_tag"] = _read_text(REPO_ROOT / ".github" / "vllm-release-tag.commit")
+    print(json.dumps(output))
 
-READTHEDOCS_VERSION_TYPE = os.environ.get("READTHEDOCS_VERSION_TYPE")
-if READTHEDOCS_VERSION_TYPE == "tag":
-    # remove the warning banner if the version is a tagged release
-    header_file = os.path.join(os.path.dirname(__file__), "_templates/sections/header.html")
-    # The file might be removed already if the build is triggered multiple times
-    # (readthedocs build both HTML and PDF versions separately)
-    if os.path.exists(header_file):
-        os.remove(header_file)
 
 if __name__ == "__main__":
-    print(json.dumps(myst_substitutions))
+    main()
