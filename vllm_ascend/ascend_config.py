@@ -368,6 +368,11 @@ class AscendConfig:
         )
 
     def _check_sfa_dcp_replicated_indexer(self, parallel_config: "ParallelConfig", additional_config: dict[str, Any], use_sparse: bool) -> None:
+        if not additional_config.get("sfa_dcp_replicated_indexer", False):
+            return
+        if not use_sparse:
+            raise ValueError("sfa_dcp_replicated_indexer requires an SFA sparse model with index_topk.")
+
         pcp_size = parallel_config.prefill_context_parallel_size
         dcp_size = parallel_config.decode_context_parallel_size
         tp_size = parallel_config.tensor_parallel_size
@@ -377,10 +382,7 @@ class AscendConfig:
             f"pcp_size={pcp_size}, dcp_size={dcp_size}, "
             f"tensor_parallel_size={tp_size}."
         )
-        if not additional_config.get("sfa_dcp_replicated_indexer", False):
-            return
-        if not use_sparse:
-            raise ValueError("sfa_dcp_replicated_indexer requires an SFA sparse model with index_topk.")
+
         if not self.enable_sparse_c8:
             return
 
