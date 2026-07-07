@@ -957,8 +957,9 @@ class AscendSFADCPImpl(AscendSFAImpl):
                 break
         if self._dcp_index_topk <= 0:
             raise RuntimeError("index_topk must be set in the model config for DCP SFA.")
-        self._remap_order = torch.arange(self._dcp_index_topk, dtype=torch.float32, device=self.device)
-        self._remap_invalid_index = torch.tensor(-1.0, dtype=torch.float32, device=self.device)
+        device = self.q_proj.weight.device
+        self._remap_order = torch.arange(self._dcp_index_topk, dtype=torch.float32, device=device)
+        self._remap_invalid_index = torch.tensor(-1.0, dtype=torch.float32, device=device)
 
     def _all_gather_dim_async(
         self,
@@ -987,7 +988,7 @@ class AscendSFADCPImpl(AscendSFAImpl):
             )
 
         # Remap the topk indices from the replicated view to the DCP-local KV cache view.
-        # We use float32 for better performace on Ascend.
+        # We use float32 for better performance on Ascend.
         topk_indices_fp32 = topk_indices.to(torch.float32)
         interleave_size = self._dcp_interleave_size
         local_block_indices = torch.floor(topk_indices_fp32 / interleave_size)
