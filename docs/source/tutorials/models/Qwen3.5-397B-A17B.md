@@ -14,9 +14,9 @@ Refer to [supported features](../../user_guide/support_matrix/supported_models.m
 
 Refer to [feature guide](../../user_guide/feature_guide/index.md) to get feature configuration details.
 
-:::{note}
-The support matrix records the maximum verified capability for this model. The startup examples in this document use practical validation settings for online serving and performance testing. Adjust `--max-model-len`, `--max-num-seqs`, and `--max-num-batched-tokens` based on your service workload and available KV cache.
-:::
+!!! note
+
+    The support matrix records the maximum verified capability for this model. The startup examples in this document use practical validation settings for online serving and performance testing. Adjust `--max-model-len`, `--max-num-seqs`, and `--max-num-batched-tokens` based on your service workload and available KV cache.
 
 ## 3 Prerequisites
 
@@ -35,18 +35,17 @@ If you want to deploy the model in a multi-node environment, verify the communic
 
 ### 4.1 Docker Image Installation
 
-Select an image based on your machine type. For example, use `quay.io/ascend/vllm-ascend:|vllm_ascend_version|` for Atlas 800 A2 and `quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3` for Atlas 800 A3.
+Select an image based on your machine type. For example, use `quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}` for Atlas 800 A2 and `quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3` for Atlas 800 A3.
 
 Refer to [using docker](../../installation.md#set-up-using-docker) for the complete installation guide.
 
-```{code-block} bash
-:substitutions:
+```bash
 
 # Update --device according to your device.
 # Atlas A2: /dev/davinci[0-7]
 # Atlas A3: /dev/davinci[0-15]
 # Download the model weight to /root/.cache in advance.
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 export NAME=vllm-ascend
 
 docker run --rm \
