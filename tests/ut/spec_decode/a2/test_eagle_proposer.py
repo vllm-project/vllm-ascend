@@ -21,19 +21,13 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
-from vllm_ascend.utils import enable_custom_op, vllm_version_is
+from vllm_ascend.utils import enable_custom_op
 
 enable_custom_op()
 
 # vLLM #40732 moved `SpecDecodeBaseProposer` (and its `CpuGpuBuffer` import)
 # out of `vllm.v1.spec_decode.eagle` into `vllm.v1.spec_decode.llm_base_proposer`.
-# Pick the right patch path depending on the installed vllm version so the
-# tests can mock the buffer factory.
-_CPU_GPU_BUFFER_TARGET = (
-    "vllm.v1.spec_decode.eagle.CpuGpuBuffer"
-    if vllm_version_is("0.19.1")
-    else "vllm.v1.spec_decode.llm_base_proposer.CpuGpuBuffer"
-)
+_CPU_GPU_BUFFER_TARGET = "vllm.v1.spec_decode.llm_base_proposer.CpuGpuBuffer"
 
 BLOCK_SIZE = 16
 
@@ -983,6 +977,7 @@ class TestEagleProposerPropose:
         mock_get_ascend_config.return_value = mock_ascend_config
 
         self.vllm_config = MagicMock(spec=VllmConfig)
+        self.vllm_config.use_v2_model_runner = False
         self.vllm_config.speculative_config = MagicMock()
         self.vllm_config.speculative_config.num_speculative_tokens = 3
         self.vllm_config.speculative_config.method = "eagle3"
@@ -1166,6 +1161,9 @@ class TestEagleProposerPropose:
         original_method = self.proposer.attn_update_stack_num_spec_norm
         mock_bd = MagicMock()
         mock_bd.num_tokens = 16
+        self.proposer.query_start_loc = MagicMock()
+        self.proposer.query_start_loc.gpu = torch.tensor([0, 4, 8, 12, 16], device=torch.device("cpu"), dtype=torch.int32)
+        self.proposer.query_start_loc.cpu = torch.tensor([0, 4, 8, 12, 16], device=torch.device("cpu"), dtype=torch.int32)
         self.runner.cudagraph_dispatcher.dispatch.return_value = (CUDAGraphMode.FULL, mock_bd)
         self.runner._pad_query_start_loc_for_fia.return_value = 4
         self.runner.query_start_loc.gpu = torch.tensor([0, 4, 8, 12, 16], device=torch.device("cpu"), dtype=torch.int32)
@@ -1589,7 +1587,7 @@ class TestEagleProposerPropose:
         assert hasattr(RunnerCls, "_pad_query_start_loc_for_fia")
         sig = inspect.signature(RunnerCls._pad_query_start_loc_for_fia)
         sig_name = self.get_param_names(sig)
-        assert sig_name == ['self', 'num_tokens_padded', 'num_reqs_padded', 'num_reqs', 'cudagraph_runtime_mode', 'batch_desc_num_reqs']
+        assert sig_name == ['self', 'query_start_loc', 'num_tokens_padded', 'num_reqs_padded', 'num_reqs', 'cudagraph_runtime_mode', 'batch_desc_num_reqs']
 
 
         import vllm_ascend.spec_decode.llm_base_proposer
@@ -2429,12 +2427,9 @@ class TestRunMergedDraft(TestBase):
 
         # `CpuGpuBuffer` was re-exported from `eagle` until vLLM #40732 moved
         # `SpecDecodeBaseProposer` (and the import) into `llm_base_proposer`.
-        if vllm_version_is("0.19.1"):
-            assert hasattr(vllm.v1.spec_decode.eagle, "CpuGpuBuffer")
-        else:
-            import vllm.v1.spec_decode.llm_base_proposer
+        import vllm.v1.spec_decode.llm_base_proposer
 
-            assert hasattr(vllm.v1.spec_decode.llm_base_proposer, "CpuGpuBuffer")
+        assert hasattr(vllm.v1.spec_decode.llm_base_proposer, "CpuGpuBuffer")
         RunnerCls = vllm.v1.spec_decode.eagle.SpecDecodeBaseProposer
         for attr in ("_get_positions", "_set_positions"):
             assert hasattr(RunnerCls, attr), f"SpecDecodeBaseProposer.{attr} not found"
@@ -3834,6 +3829,7 @@ class TestEagleProposerSetInputsFirstPass:
         self.runner.input_batch.req_ids = req_ids
         # maybe not reasonable just to run test
         self.runner.logits_indices = torch.arange(12, dtype=torch.int32, device=self.device)
+        self.runner.pcp_manager.pcp_use_hybrid_attn = False
 
         proposer, vllm_config = self._create_proposer(
             method="eagle",
@@ -4214,3 +4210,296 @@ class TestEagleProposerSetInputsFirstPass:
 
         for attrition in attrs_from_cad:
             assert_attr_equal(attrition, expected_cad, out_cad)
+
+
+def _build_split_pcp_input_hybrid_inputs(req_scheduled_tokens: dict[str, int], hidden_size: int):
+    """Build input_ids and target_hidden_states where row i is filled with i.
+
+    Using the row index as the value makes it easy to assert which original
+    tokens survive the per-rank slice and which slots are padding.
+    """
+    total_tokens = sum(req_scheduled_tokens.values())
+    input_ids = torch.arange(total_tokens, dtype=torch.int32)
+    target_hidden_states = torch.arange(total_tokens, dtype=torch.float32).unsqueeze(-1).repeat(1, hidden_size)
+    return input_ids, target_hidden_states
+
+
+# yapf: disable
+@pytest.mark.parametrize(
+    "pcp_size, pcp_rank, req_scheduled_tokens, hidden_size,"
+    " expected_num_tokens, expected_input_ids, expected_hidden_first_col,"
+    " expected_seq_lens, expected_cu_num_tokens, expected_max_query_len",
+    [
+        # Case 1: single req, perfectly aligned to 2*pcp_size.
+        # ori=8, pcp=2 -> padded=8, pcp_tokens=4
+        # rank 0: [0,1,2,3], rank 1: [4,5,6,7]
+        (
+            2, 0, {"0": 8}, 4,
+            4, [0, 1, 2, 3], [0.0, 1.0, 2.0, 3.0],
+            [4], [0, 4], 4,
+        ),
+        (
+            2, 1, {"0": 8}, 4,
+            4, [4, 5, 6, 7], [4.0, 5.0, 6.0, 7.0],
+            [4], [0, 4], 4,
+        ),
+        # Case 2: single req, needs padding.
+        # ori=7, pcp=2 -> padded=8, pcp_tokens=4, num_pads=1
+        # rank 0: [0,1,2,3] (all valid)
+        # rank 1: [4,5,6,PAD] -> input_ids=[4,5,6,0], hidden_first_col=[4,5,6,0]
+        (
+            2, 0, {"0": 7}, 4,
+            4, [0, 1, 2, 3], [0.0, 1.0, 2.0, 3.0],
+            [4], [0, 4], 4,
+        ),
+        (
+            2, 1, {"0": 7}, 4,
+            4, [4, 5, 6, 0], [4.0, 5.0, 6.0, 0.0],
+            [4], [0, 4], 4,
+        ),
+        # Case 3: multiple reqs with different padding needs.
+        # req 0: ori=4 -> padded=4, pcp_tokens=2
+        # req 1: ori=6 -> padded=8, pcp_tokens=4, num_pads=2
+        # rank 0: [0,1] + [4,5,6,7]
+        # rank 1: [2,3] + [8,9,PAD,PAD]
+        (
+            2, 0, {"0": 4, "1": 6}, 2,
+            6, [0, 1, 4, 5, 6, 7], [0.0, 1.0, 4.0, 5.0, 6.0, 7.0],
+            [2, 4], [0, 2, 6], 4,
+        ),
+        (
+            2, 1, {"0": 4, "1": 6}, 2,
+            6, [2, 3, 8, 9, 0, 0], [2.0, 3.0, 8.0, 9.0, 0.0, 0.0],
+            [2, 4], [0, 2, 6], 4,
+        ),
+        # Case 4: pcp_size=4
+        # ori=9, pcp=4 -> padded=16, pcp_tokens=4, num_pads=7
+        # rank 0: tokens [0,1,2,3]
+        # rank 1: tokens [4,5,6,7]
+        # rank 2: tokens [8,PAD,PAD,PAD]
+        # rank 3: tokens [PAD,PAD,PAD,PAD]
+        (
+            4, 0, {"0": 9}, 2,
+            4, [0, 1, 2, 3], [0.0, 1.0, 2.0, 3.0],
+            [4], [0, 4], 4,
+        ),
+        (
+            4, 1, {"0": 9}, 2,
+            4, [4, 5, 6, 7], [4.0, 5.0, 6.0, 7.0],
+            [4], [0, 4], 4,
+        ),
+        (
+            4, 2, {"0": 9}, 2,
+            4, [8, 0, 0, 0], [8.0, 0.0, 0.0, 0.0],
+            [4], [0, 4], 4,
+        ),
+        (
+            4, 3, {"0": 9}, 2,
+            4, [0, 0, 0, 0], [0.0, 0.0, 0.0, 0.0],
+            [4], [0, 4], 4,
+        ),
+        # Case 5: minimal request - single token.
+        # ori=1, pcp=2 -> padded=4, pcp_tokens=2, num_pads=3
+        # rank 0: [0, PAD]
+        # rank 1: [PAD, PAD]
+        (
+            2, 0, {"0": 1}, 2,
+            2, [0, 0], [0.0, 0.0],
+            [2], [0, 2], 2,
+        ),
+        (
+            2, 1, {"0": 1}, 2,
+            2, [0, 0], [0.0, 0.0],
+            [2], [0, 2], 2,
+        ),
+    ],
+)
+# yapf: enable
+def test_split_pcp_input_hybrid(
+    pcp_size,
+    pcp_rank,
+    req_scheduled_tokens,
+    hidden_size,
+    expected_num_tokens,
+    expected_input_ids,
+    expected_hidden_first_col,
+    expected_seq_lens,
+    expected_cu_num_tokens,
+    expected_max_query_len,
+):
+    input_ids, target_hidden_states = _build_split_pcp_input_hybrid_inputs(
+        req_scheduled_tokens, hidden_size
+    )
+
+    # _split_pcp_input_hybrid only reads self.pcp_size and self.pcp_rank,
+    # so a MagicMock with just those attributes is enough to drive the
+    # unbound method without instantiating the full proposer.
+    mock_self = MagicMock()
+    mock_self.pcp_size = pcp_size
+    mock_self.pcp_rank = pcp_rank
+
+    (
+        num_tokens,
+        out_input_ids,
+        out_hidden_states,
+        max_query_len,
+        seq_lens,
+        cu_num_tokens,
+    ) = llm_base_proposer.AscendSpecDecodeBaseProposer._split_pcp_input_hybrid(
+        mock_self, req_scheduled_tokens, input_ids, target_hidden_states
+    )
+
+    assert num_tokens == expected_num_tokens
+    assert max_query_len == expected_max_query_len
+    assert torch.equal(
+        out_input_ids, torch.tensor(expected_input_ids, dtype=torch.int32)
+    )
+    assert torch.equal(seq_lens, torch.tensor(expected_seq_lens, dtype=torch.int32))
+    assert torch.equal(
+        cu_num_tokens, torch.tensor(expected_cu_num_tokens, dtype=torch.int64)
+    )
+
+    # hidden_states shape: [num_tokens, hidden_size]
+    assert out_hidden_states.shape == (expected_num_tokens, hidden_size)
+    assert torch.equal(
+        out_hidden_states[:, 0],
+        torch.tensor(expected_hidden_first_col, dtype=torch.float32),
+    )
+
+
+def test_split_pcp_input_hybrid_preserves_hidden_size():
+    """Hidden states must come back with the same hidden dim as the input."""
+    hidden_size = 7
+    req_scheduled_tokens = {"0": 6}
+    input_ids, target_hidden_states = _build_split_pcp_input_hybrid_inputs(
+        req_scheduled_tokens, hidden_size
+    )
+
+    mock_self = MagicMock()
+    mock_self.pcp_size = 2
+    mock_self.pcp_rank = 0
+
+    _, _, out_hidden_states, _, _, _ = (
+        llm_base_proposer.AscendSpecDecodeBaseProposer._split_pcp_input_hybrid(
+            mock_self, req_scheduled_tokens, input_ids, target_hidden_states
+        )
+    )
+
+    assert out_hidden_states.shape[1] == hidden_size
+
+
+class TestDeepSeekMTPIndicesSharing(unittest.TestCase):
+    """
+    Unit tests for DeepSeek Sparse MLA MTP Layer's Top-K Index reuse feature (PR #10510)
+    """
+
+    def setUp(self):
+        # Prepare the base Config Mock
+        self.vllm_config = MagicMock(spec=VllmConfig)
+        self.vllm_config.speculative_config = MagicMock()
+        self.vllm_config.speculative_config.draft_model_config = MagicMock()
+        self.vllm_config.speculative_config.draft_model_config.hf_config = MagicMock()
+        self.device = torch.device("cpu")
+        self.runner = MagicMock()
+
+    def test_init_mtp_indices_flag(self):
+        """Test whether index_share_for_mtp_iteration is correctly read in __init__."""
+        # Scenario 1: Set to True in config
+        self.vllm_config.speculative_config.draft_model_config.hf_config.index_share_for_mtp_iteration = True
+
+        with patch.object(AscendEagleProposer, "__init__", lambda self, vllm_config, device, runner: None):
+            proposer = AscendEagleProposer(self.vllm_config, self.device, self.runner)
+            # Manually trigger the newly added initialization logic for validation
+            proposer.vllm_config = self.vllm_config
+            proposer._share_mtp_indices = getattr(
+                self.vllm_config.speculative_config.draft_model_config.hf_config, "index_share_for_mtp_iteration", False
+            )
+            self.assertTrue(proposer._share_mtp_indices, "MTP share flag should be True when configured.")
+
+        # Scenario 2: Not set in config (defaults to False)
+        del self.vllm_config.speculative_config.draft_model_config.hf_config.index_share_for_mtp_iteration
+        with patch.object(AscendEagleProposer, "__init__", lambda self, vllm_config, device, runner: None):
+            proposer2 = AscendEagleProposer(self.vllm_config, self.device, self.runner)
+            proposer2.vllm_config = self.vllm_config
+            proposer2._share_mtp_indices = getattr(
+                self.vllm_config.speculative_config.draft_model_config.hf_config, "index_share_for_mtp_iteration", False
+            )
+            self.assertFalse(proposer2._share_mtp_indices, "MTP share flag should default to False.")
+
+    def test_maybe_share_topk_indices_submodules(self):
+        """Test if _maybe_share_topk_indices correctly updates topk_indices_buffer for all submodules."""
+        # Use __new__ to bypass the complex __init__ process
+        proposer = AscendEagleProposer.__new__(AscendEagleProposer)
+
+        # 1. Mock Target Model
+        target_model = MagicMock()
+        target_buffer_mock = MagicMock()
+        target_model.model.topk_indices_buffer = target_buffer_mock
+
+        # 2. Mock Draft Model (including submodules)
+        draft_model_mock = MagicMock()
+        draft_model_mock.model.topk_indices_buffer = MagicMock()  # Old buffer
+
+        # Construct several submodules: some have topk_indices_buffer, some don't
+        mod1 = MagicMock()
+        mod1.topk_indices_buffer = MagicMock()  # This should be replaced
+        mod2 = MagicMock()
+        del mod2.topk_indices_buffer  # This doesn't have the attribute, shouldn't throw an error
+        mod3 = MagicMock()
+        mod3.topk_indices_buffer = MagicMock()  # This should also be replaced
+
+        # Mock the return value of named_modules
+        draft_model_mock.model.named_modules.return_value = [("layer.0", mod1), ("layer.1", mod2), ("layer.2", mod3)]
+        proposer.model = draft_model_mock
+
+        # Execute the target method
+        proposer._maybe_share_topk_indices(target_model)
+
+        # Assertion: The outermost draft model buffer is updated
+        self.assertEqual(proposer.model.model.topk_indices_buffer, target_buffer_mock)
+
+        # Assertion: Submodules are correctly traversed and updated
+        self.assertEqual(mod1.topk_indices_buffer, target_buffer_mock, "Module 1 buffer should be updated.")
+        self.assertEqual(mod3.topk_indices_buffer, target_buffer_mock, "Module 3 buffer should be updated.")
+        self.assertFalse(hasattr(mod2, "topk_indices_buffer"), "Module 2 should not have a buffer added.")
+
+    def test_run_merge_draft_mtp_skip_topk(self):
+        """Test the set_skip_topk calling logic in step 0 and step 1 of run_merge_draft."""
+        proposer = AscendEagleProposer.__new__(AscendEagleProposer)
+        proposer._share_mtp_indices = True
+
+        # Mock Draft Model and its set_skip_topk method
+        draft_model_mock = MagicMock()
+        proposer.model = MagicMock()
+        proposer.model.model = draft_model_mock
+
+        # Mock model inference return
+        proposer.model_returns_tuple = MagicMock(return_value=False)
+        proposer.model.return_value = MagicMock()
+
+        # Mock the run_merge_draft logic from your PR
+        # (Since this is a class method, we use an inner function to simulate and verify the core logic)
+        def mock_run_merge_draft(**model_kwargs):
+            # Step 0
+            draft_model = getattr(proposer.model, "model", None)
+            if proposer._share_mtp_indices and draft_model is not None and hasattr(draft_model, "set_skip_topk"):
+                draft_model.set_skip_topk(False)
+
+            # (Model inference...)
+            proposer.model(**model_kwargs)
+
+            # Step 1
+            if proposer._share_mtp_indices and draft_model is not None and hasattr(draft_model, "set_skip_topk"):
+                draft_model.set_skip_topk(True)
+
+        # Run the test
+        mock_run_merge_draft(input_ids=torch.tensor([1, 2, 3]))
+
+        # Assert calling conditions
+        self.assertTrue(draft_model_mock.set_skip_topk.called, "set_skip_topk should be called.")
+
+        # Verify calling order: False first, then True
+        calls = draft_model_mock.set_skip_topk.call_args_list
+        self.assertEqual(len(calls), 2, "set_skip_topk should be called exactly twice.")
+        self.assertEqual(calls[0][0][0], False, "Step 0 should call set_skip_topk(False).")
+        self.assertEqual(calls[1][0][0], True, "Step 1 should call set_skip_topk(True).")

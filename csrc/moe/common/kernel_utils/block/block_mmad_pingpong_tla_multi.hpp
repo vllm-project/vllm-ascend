@@ -203,7 +203,12 @@ public:
     CATLASS_DEVICE
     BlockMmadTla(Arch::Resource<ArchTag> &resource, uint32_t l1BufAddrStart = 0)
     {
+#ifdef CATLASS_UNIFIED_CORE
+        resourcePtr = &resource;
+        {
+#else
         if ASCEND_IS_AIC {
+#endif
             uint32_t l1AOffset = l1BufAddrStart;
             uint32_t l1BOffset = l1BufAddrStart + L1A_TILE_SIZE * L1A_STAGES;
             // Init buffers
@@ -253,8 +258,11 @@ public:
 
     CATLASS_DEVICE
     void preSetFlags() {
-
+#ifdef CATLASS_UNIFIED_CORE
+        {
+#else
         if ASCEND_IS_AIC {
+#endif
             // use HF32 when USE_HF32_MODE is true
             if constexpr (USE_HF32_MODE) {
                 AscendC::SetHF32Mode(true);
@@ -294,7 +302,11 @@ public:
 
     CATLASS_DEVICE
     void finalWaitFlags() {
+#ifdef CATLASS_UNIFIED_CORE
+        {
+#else
         if ASCEND_IS_AIC {
+#endif
             if constexpr (USE_HF32_MODE) {
                 AscendC::SetHF32Mode(false);
             }
@@ -344,11 +356,12 @@ public:
         using CopyGmToL1B = typename TileCopy_::template CopyGmToL1B<TensorB>;
         CopyGmToL1A copyGmToL1A;
         CopyGmToL1B copyGmToL1B;
-#if (defined (CATLASS_ARCH) && CATLASS_ARCH == 2201)
+#ifdef CATLASS_UNIFIED_CORE
+        // 310P: no Fixpipe, no DataCopyCO12Dst. L0C exits via DataCopy L0C→UB then UB→GM.
+#elif (defined (CATLASS_ARCH) && CATLASS_ARCH == 2201)
         using CopyL0CToGm = typename TileCopy_::template CopyL0CToGm<TensorC>;
         CopyL0CToGm copyL0CToDst;
-#endif        
-#if (defined (CATLASS_ARCH) && CATLASS_ARCH == 3510)
+#elif (defined (CATLASS_ARCH) && CATLASS_ARCH == 3510)
         using CopyL0CToDst = typename TileCopy_::template CopyL0CToDst<TensorC>;
         CopyL0CToDst copyL0CToDst;
 #endif        
@@ -619,6 +632,60 @@ public:
         }
 
         // copy block out
+#ifdef CATLASS_UNIFIED_CORE
+        {
+            // 310P unified core: L0C→UB via DataCopy, then UB→GM.
+            // No Fixpipe or DataCopyCO12Dst on dav_m200.
+            uint32_t mAligned = (mBlockActual + 15) / 16 * 16;
+            uint32_t nAligned = (nBlockActual + 15) / 16 * 16;
+            uint32_t tileElems = mAligned * nAligned;
+            uint32_t tileBytes = tileElems * sizeof(ElementAccumulator);
+
+            // UB temp for L0C→UB transfer. Offset 0 is safe: on unified core,
+            // mmad and epilogue run sequentially so UB is not shared concurrently.
+            // The epilogue allocates its own UB regions at higher offsets (≥32KB).
+            AscendC::LocalTensor<ElementAccumulator> co2Temp =
+                resourcePtr->ubBuf.template GetBufferByByte<ElementAccumulator>(0);
+
+            AscendC::PipeBarrier<PIPE_ALL>();
+
+            // L0C → UB: BLOCK_MODE_MATRIX copies raw NZ fractals to UB
+            // For float: blockLen unit = 1024B (one 16×16 fractal)
+            AscendC::DataCopyParams l0c2ubParams;
+            l0c2ubParams.blockCount = static_cast<uint8_t>(nAligned / 16);
+            l0c2ubParams.blockLen = static_cast<uint16_t>(mAligned / 16);
+            l0c2ubParams.srcStride = 0;
+            l0c2ubParams.dstStride = 0;
+            AscendC::DataCopyEnhancedParams enhParams;
+            enhParams.blockMode = AscendC::BlockMode::BLOCK_MODE_MATRIX;
+            AscendC::DataCopy(co2Temp, l0CTensorList[l0CListId], l0c2ubParams, enhParams);
+            AscendC::PipeBarrier<PIPE_ALL>();
+
+            // UB → GM: fractal-by-fractal with strided DataCopy (NZ→ND deformat)
+            // NZ in UB: [N/16 Z-cols][M/16 fractals][16 rows][16 cols]
+            // ND in GM: [M rows][N cols]
+            auto dstOffset = tensorC.layout()(tensorC.coord());
+            uint32_t gmStride = tla::get<0>(tensorC.stride());
+            uint32_t mFracs = mAligned / 16;
+            uint32_t nFracs = nAligned / 16;
+            for (uint32_t nf = 0; nf < nFracs; nf++) {
+                for (uint32_t mf = 0; mf < mFracs; mf++) {
+                    uint32_t ubOff = (nf * mFracs + mf) * 256;
+                    uint32_t gmRow = mf * 16;
+                    uint32_t gmCol = nf * 16;
+                    uint32_t gmOff = dstOffset + gmRow * gmStride + gmCol;
+                    AscendC::DataCopyParams fracParams;
+                    fracParams.blockCount = 16;
+                    fracParams.blockLen = static_cast<uint16_t>(16 * sizeof(ElementAccumulator) / 32);
+                    fracParams.srcStride = 0;
+                    fracParams.dstStride = static_cast<uint16_t>((gmStride - 16) * sizeof(ElementAccumulator) / 32);
+                    AscendC::DataCopy(tensorC.data()[gmOff], co2Temp[ubOff], fracParams);
+                }
+            }
+            AscendC::PipeBarrier<PIPE_ALL>();
+            l0CListId = (l0CListId + 1 < L0C_STAGES) ? (l0CListId + 1) : 0;
+        }
+#else
         if constexpr (!ENABLE_UNIT_FLAG) {
             AscendC::SetFlag<AscendC::HardEvent::M_FIX>(l0CEventList[l0CListId]);
             AscendC::WaitFlag<AscendC::HardEvent::M_FIX>(l0CEventList[l0CListId]);
@@ -628,6 +695,7 @@ public:
         } else {
             copyL0CToDst(tensorC, tensorL0C, 0b11);
         }
+#endif
     }
 
 protected:
@@ -649,6 +717,9 @@ protected:
     AscendC::LocalTensor<ElementAccumulator> l0CTensorList[L0C_STAGES];
     AscendC::LocalTensor<uint8_t> l1BiasTensor;
     AscendC::LocalTensor<ElementAccumulator> l0BiasTensor;
+#ifdef CATLASS_UNIFIED_CORE
+    Arch::Resource<ArchTag>* resourcePtr{nullptr};
+#endif
 
     // Multi-stage event id list
     int32_t l1AEventList[L1A_STAGES];

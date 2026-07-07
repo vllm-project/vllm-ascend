@@ -60,6 +60,7 @@ class GDNChunkedPrefillMetadata:
     final_chunk_indices_chunk64: torch.Tensor
     chunk_indices_large_block: torch.Tensor
     block_indices_cumsum: torch.Tensor
+    num_decodes: int = 0
     _buffer_slot: object | None = None
 
 
@@ -368,9 +369,13 @@ def _build_chunked_prefill_metadata(
     cu_seqlens_cpu: torch.Tensor,
     slot: _GDNChunkedPrefillBufferSlot | None = None,
 ) -> GDNChunkedPrefillMetadata:
+    cu_seqlens_host = tuple(cu_seqlens_cpu.to(torch.int64).tolist())
+    num_decodes = sum(
+        1 for i in range(len(cu_seqlens_host) - 1) if 0 < cu_seqlens_host[i + 1] - cu_seqlens_host[i] <= 1
+    )
     return GDNChunkedPrefillMetadata(
         cu_seqlens_cpu=cu_seqlens_cpu,
-        cu_seqlens_host=tuple(cu_seqlens_cpu.to(torch.int64).tolist()),
+        cu_seqlens_host=cu_seqlens_host,
         chunk_indices_chunk64_host=_build_chunk_indices_host(
             cu_seqlens_cpu,
             builder._ascend_gdn_chunk_size,
@@ -381,6 +386,7 @@ def _build_chunked_prefill_metadata(
         final_chunk_indices_chunk64=tensors["final_chunk_indices_chunk64"],
         chunk_indices_large_block=tensors["chunk_indices_large_block"],
         block_indices_cumsum=tensors["block_indices_cumsum"],
+        num_decodes=num_decodes,
         _buffer_slot=slot,
     )
 
@@ -753,12 +759,18 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             self.vllm_config.scheduler_config.max_num_seqs,
             self.decode_cudagraph_max_bs,
         )
+
+        self.spec_sequence_masks: torch.Tensor = torch.empty(
+            (sequence_index_capacity,), dtype=torch.bool, device=device
+        )
+
         self.spec_sequence_masks_cpu: torch.Tensor = torch.empty(
             (sequence_index_capacity,),
             dtype=torch.bool,
             device="cpu",
             pin_memory=device.type != "cpu",
         )
+
         self.spec_sequence_indices_cpu: torch.Tensor = torch.empty(
             (sequence_index_capacity,),
             dtype=torch.int64,
@@ -791,7 +803,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         super()._init_reorder_batch_threshold(
             reorder_batch_threshold,
             supports_spec_as_decode,
-            supports_dcp_with_varlen,
+            True,
         )
         if self.reorder_batch_threshold != 1:  # type: ignore
             speculative_config = self.vllm_config.speculative_config
@@ -977,6 +989,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = split_decodes_and_prefills(
                 m,
                 decode_threshold=1,
+                treat_short_extends_as_decodes=False,
             )
             num_spec_decode_tokens = 0
             spec_token_indx = None
@@ -1121,18 +1134,16 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             ).to(device=gpu_device, non_blocking=True)
 
         if num_prefills > 0:
-            has_initial_state = context_lens_tensor > 0
-            if spec_sequence_masks_cpu is not None:
-                assert non_spec_sequence_indices is not None
-                has_initial_state = torch.index_select(
-                    has_initial_state,
-                    0,
-                    non_spec_sequence_indices,
+            has_initial_state, nums_dict, batch_ptr, token_chunk_offset_ptr = (
+                self._build_prefill_has_initial_state_and_causal_conv1d_meta(
+                    common_attn_metadata=m,
+                    context_lens_tensor=context_lens_tensor,
+                    num_prefills=num_prefills,
+                    spec_sequence_masks_cpu=spec_sequence_masks_cpu,
+                    non_spec_sequence_indices=non_spec_sequence_indices,
+                    non_spec_query_start_loc_cpu=non_spec_query_start_loc_cpu,
+                    query_start_loc=query_start_loc,
                 )
-                assert non_spec_query_start_loc_cpu is not None
-            nums_dict, batch_ptr, token_chunk_offset_ptr = compute_causal_conv1d_metadata(
-                non_spec_query_start_loc_cpu,
-                device=query_start_loc.device,
             )
         else:
             has_initial_state = None
@@ -1151,6 +1162,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             and num_spec_decode_tokens <= self.decode_cudagraph_max_bs
         ):
             assert spec_sequence_masks is not None
+            self.spec_state_indices_tensor[batch_size:].fill_(NULL_BLOCK_ID)
             self.spec_state_indices_tensor[:num_spec_decodes].copy_(
                 spec_state_indices_tensor,
                 non_blocking=True,
@@ -1253,6 +1265,38 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             common_attn_metadata,
             num_decode_draft_tokens_cpu,
         )
+
+    def _build_prefill_has_initial_state_and_causal_conv1d_meta(
+        self,
+        *,
+        common_attn_metadata: CommonAttentionMetadata,
+        context_lens_tensor: torch.Tensor,
+        num_prefills: int,
+        spec_sequence_masks_cpu: torch.Tensor | None,
+        non_spec_sequence_indices: torch.Tensor | None,
+        non_spec_query_start_loc_cpu: torch.Tensor | None,
+        query_start_loc: torch.Tensor,
+    ) -> tuple[
+        torch.Tensor | None,
+        dict[int, dict[str, object]] | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+    ]:
+        del common_attn_metadata, num_prefills
+        has_initial_state = context_lens_tensor > 0
+        if spec_sequence_masks_cpu is not None:
+            assert non_spec_sequence_indices is not None
+            has_initial_state = torch.index_select(
+                has_initial_state,
+                0,
+                non_spec_sequence_indices,
+            )
+            assert non_spec_query_start_loc_cpu is not None
+        nums_dict, batch_ptr, token_chunk_offset_ptr = compute_causal_conv1d_metadata(
+            non_spec_query_start_loc_cpu,
+            device=query_start_loc.device,
+        )
+        return has_initial_state, nums_dict, batch_ptr, token_chunk_offset_ptr
 
 
 class AscendGDNAttentionBackend(GDNAttentionBackend):

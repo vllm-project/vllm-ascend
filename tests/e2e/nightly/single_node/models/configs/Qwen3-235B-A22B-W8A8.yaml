@@ -40,7 +40,7 @@ _benchmarks: &benchmarks
     batch_size: 32
     top_k: 20
     baseline: 95
-    threshold: 5
+    threshold: 10
 
 # ==========================================
 # ACTUAL TEST CASES

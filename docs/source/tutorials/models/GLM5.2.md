@@ -2,7 +2,7 @@
 
 ## Introduction
 
-[GLM-5.2](https://huggingface.co/zai-org/GLM-5.2) use a Mixture-of-Experts (MoE) architecture and targets complex systems engineering and long-horizon agentic tasks.
+[GLM-5.2](https://huggingface.co/zai-org/GLM-5.2) uses a Mixture-of-Experts (MoE) architecture and targets complex systems engineering and long-horizon agentic tasks.
 
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, accuracy and performance evaluation.
 
@@ -16,15 +16,15 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### Model Weight
 
-- `GLM-5.2`(BF16 version)require 2 Atlas 800 A3 (128G × 8) node or 4 Atlas 800 A2 (64G × 8) node.: [Download model weight](https://www.modelscope.cn/models/ZhipuAI/GLM-5.2).
-- `GLM-5.2-w8a8`: require 1 Atlas 800 A3 (128G × 8) node or 2 Atlas 800 A2 (64G × 8) node.[Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.2-w8a8).
-- You can use [msmodelslim](https://gitcode.com/Ascend/msmodelslim) to quantify the model naively.
+- `GLM-5.2`(BF16 version): requires 2 Atlas 800 A3 (128G × 8) node or 4 Atlas 800 A2 (64G × 8) node.[Download model weight](https://www.modelscope.cn/models/ZhipuAI/GLM-5.2).
+- `GLM-5.2-w8a8`: requires 1 Atlas 800 A3 (128G × 8) node or 2 Atlas 800 A2 (64G × 8) node.[Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.2-w8a8).
+- You can use [msmodelslim](https://gitcode.com/Ascend/msmodelslim) to quantize the model directly.
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
 
 ### Installation
 
-You can use our official docker image to run GLM-5 directly.
+You can use our official docker image to run GLM-5.2 directly.
 
 :::::{tab-set}
 :sync-group: install
@@ -79,7 +79,7 @@ docker run --rm \
 ::::{tab-item} A2 series
 :sync: A2
 
-Start the docker image on your each node.
+Start the docker image on each of your nodes.
 
 ```{code-block} bash
    :substitutions:
@@ -157,7 +157,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
 **Notice:**
 The parameters are explained as follows:
 
-- For single-node deployment, we recommend using `dp2tp8` and turn off expert parallel in low-latency scenarios.
+- For single-node deployment, we recommend using `dp1tp16` and turn off expert parallel in low-latency scenarios.
 
 ### Multi-node Deployment
 
@@ -209,7 +209,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
 --data-parallel-rpc-port 12980 \
 --tensor-parallel-size 16 \
 --seed 1024 \
---served-model-name glm-5 \
+--served-model-name glm-52 \
 --max-num-seqs 48 \
 --max-model-len 64000 \
 --max-num-batched-tokens 4096 \
@@ -261,7 +261,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
 --data-parallel-address $node0_ip \
 --tensor-parallel-size 16 \
 --seed 1024 \
---served-model-name glm-5 \
+--served-model-name glm-52 \
 --max-num-seqs 48 \
 --max-model-len 64000 \
 --max-num-batched-tokens 4096 \
@@ -324,7 +324,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
 --max-num-seqs 16 \
 --data-parallel-size 2 \
 --data-parallel-size-local 1 \
---data-parallel-address $local_ip \
+--data-parallel-address $node0_ip \
 --data-parallel-rpc-port 13389 \
 --tensor-parallel-size 8 \
 --enable-expert-parallel \
@@ -333,7 +333,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
 --safetensors-load-strategy 'prefetch' \
 --block-size 128 \
 --async-scheduling \
---additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}' \
+--additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true}' \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
 --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp"}'
 ```
@@ -377,13 +377,12 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
 --served-model-name glm-52 \
 --seed 1024 \
 --gpu-memory-utilization 0.95 \
---api-server-count 1 \
 --max-num-seqs 16 \
 --headless \
 --data-parallel-size 2 \
 --data-parallel-size-local 1 \
 --data-parallel-start-rank 1 \
---data-parallel-address $local_ip \
+--data-parallel-address $node0_ip \
 --data-parallel-rpc-port 13389 \
 --tensor-parallel-size 8 \
 --enable-expert-parallel \
@@ -392,7 +391,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
 --safetensors-load-strategy 'prefetch' \
 --block-size 128 \
 --async-scheduling \
---additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}' \
+--additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true}' \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
 --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp"}'
 ```
@@ -438,7 +437,7 @@ export VLLM_VERSION=0.21.0
 vllm serve <MODEL_PATH> \
   --max_model_len 200000 \
   --max-num-batched-tokens 4096 \
-  --served-model-name glm \
+  --served-model-name glm-52 \
   --seed 1024 \
   --api-server-count 1 \
   --gpu-memory-utilization 0.95 \
@@ -456,7 +455,7 @@ vllm serve <MODEL_PATH> \
   --enable-chunked-prefill \
   --no-enable-prefix-caching \
   --async-scheduling \
-  --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}' \
+  --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true}' \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
   --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp"}'
 ```
@@ -497,7 +496,7 @@ vllm serve <MODEL_PATH> \
   --max_model_len 200000 \
   --max-num-batched-tokens 4096 \
   --headless \
-  --served-model-name glm \
+  --served-model-name glm-52 \
   --seed 1024 \
   --gpu-memory-utilization 0.95 \
   --max-num-seqs 32 \
@@ -515,7 +514,7 @@ vllm serve <MODEL_PATH> \
   --enable-chunked-prefill \
   --no-enable-prefix-caching \
   --async-scheduling \
-  --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}' \
+  --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true}' \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
   --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp"}'
 ```
@@ -675,7 +674,7 @@ Before you start, please
             --served-model-name glm-52 \
             --max-model-len 135000 \
             --speculative-config '{"num_speculative_tokens": 5, "method":"deepseek_mtp"}' \
-            --additional-config '{"enable_sparse_c8":false,"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true},"enable_dsa_cp": true}' \
+            --additional-config '{"enable_sparse_c8":false,"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_dsa_cp": true}' \
             --max-num-batched-tokens 4096 \
             --trust-remote-code \
             --max-num-seqs 64 \
@@ -745,7 +744,7 @@ Before you start, please
             --served-model-name glm-52 \
             --max-model-len 135000 \
             --speculative-config '{"num_speculative_tokens": 5, "method":"deepseek_mtp"}' \
-            --additional-config '{"enable_sparse_c8":false,"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true},"enable_dsa_cp": true}' \
+            --additional-config '{"enable_sparse_c8":false,"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_dsa_cp": true}' \
             --max-num-batched-tokens 4096 \
             --trust-remote-code \
             --max-num-seqs 64 \
@@ -817,7 +816,7 @@ Before you start, please
             --max-num-batched-tokens 164 \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
             --speculative-config '{"num_speculative_tokens": 5, "method":"deepseek_mtp"}' \
-            --additional-config '{"enable_sparse_c8":false,"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}' \
+            --additional-config '{"enable_sparse_c8":false,"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true}' \
             --trust-remote-code \
             --max-num-seqs 48 \
             --gpu-memory-utilization 0.92 \
@@ -872,7 +871,7 @@ Before you start, please
         export VLLM_ASCEND_ENABLE_MLAPO=1
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
 
-        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5.2-w8a8 \
+        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
             --host 0.0.0.0 \
             --port $2 \
             --data-parallel-size $3 \
@@ -887,7 +886,7 @@ Before you start, please
             --max-num-batched-tokens 164 \
             --speculative-config '{"num_speculative_tokens": 5, "method":"deepseek_mtp"}' \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-            --additional-config '{"enable_sparse_c8":false,"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}' \
+            --additional-config '{"enable_sparse_c8":false,"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true}' \
             --trust-remote-code \
             --max-num-seqs 48 \
             --gpu-memory-utilization 0.92 \
@@ -921,28 +920,28 @@ Once the preparation is done, you can start the server with the following comman
 
     ```shell
     # change ip to your own
-    python launch_online_dp.py --dp-size 2 --tp-size 16  --dp-size-local 2 --dp-rank-start 0 --dp-address $node_p0_ip --dp-rpc-port 16591 --vllm-start-port 9081
+    python launch_online_dp.py --dp-size 2 --tp-size 16  --dp-size-local 1 --dp-rank-start 0 --dp-address $node_p0_ip --dp-rpc-port 16591 --vllm-start-port 9081
     ```
 
 2. Prefill node 1
 
     ```shell
     # change ip to your own
-    python launch_online_dp.py --dp-size 2 --tp-size 16  --dp-size-local 2 --dp-rank-start 1 --dp-address $node_p0_ip --dp-rpc-port 16591 --vllm-start-port 9081
+    python launch_online_dp.py --dp-size 2 --tp-size 16  --dp-size-local 1 --dp-rank-start 1 --dp-address $node_p0_ip --dp-rpc-port 16591 --vllm-start-port 9081
     ```
 
 3. Decode node 0
 
     ```shell
     # change ip to your own
-    python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 4 --dp-rank-start 0 --dp-address $node_p0_ip --dp-rpc-port 16600 --vllm-start-port 9900
+    python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 4 --dp-rank-start 0 --dp-address $node_d0_ip --dp-rpc-port 16600 --vllm-start-port 9900
     ```
 
 4. Decode node 1
 
     ```shell
     # change ip to your own
-    python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 4 --dp-rank-start 4 --dp-address $node_p0_ip --dp-rpc-port 16600 --vllm-start-port 9900
+    python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 4 --dp-rank-start 4 --dp-address $node_d0_ip --dp-rpc-port 16600 --vllm-start-port 9900
     ```
 
 To set up request forwarding, run the following script on any machine. You can get the proxy program in the repository's examples: [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
@@ -955,10 +954,10 @@ python load_balance_proxy_server_example.py \
     --port 8000 \
     --host 0.0.0.0 \
     --prefiller-hosts \
-       $node_p0_ip \
-       $node_p1_ip \
+      $node_p0_ip \
+      $node_p1_ip \
     --prefiller-ports \
-       9081 9081 \
+      9081 9081 \
     --decoder-hosts \
       $node_d0_ip \
       $node_d0_ip \
@@ -970,7 +969,7 @@ python load_balance_proxy_server_example.py \
       $node_d1_ip \
     --decoder-ports \
       9900 9901 9902 9903 \
-      9900 9901 9902 9903 \  
+      9900 9901 9902 9903
 ```
 
 #### Deployment on 8 Atlas 800 A2
@@ -1015,7 +1014,7 @@ vllm serve <MODEL_PATH> \
   --tensor-parallel-size $7 \
   --enable-expert-parallel \
   --seed 1024 \
-  --served-model-name glm5.2 \
+  --served-model-name glm-52 \
   --max-model-len 115168 \
   --max-num-batched-tokens 4096 \
   --trust-remote-code \
@@ -1053,10 +1052,6 @@ vllm serve <MODEL_PATH> \
     "enable_sparse_c8": false,
     "fuse_muls_add": true,
     "multistream_overlap_shared_expert": true,
-    "recompute_scheduler_enable": true,
-    "ascend_compilation_config": {
-      "enable_npugraph_ex": true
-    },
     "enable_dsa_cp": true
   }' \
   --speculative-config '{"num_speculative_tokens": 3, "method":"deepseek_mtp"}'
@@ -1102,7 +1097,7 @@ vllm serve <MODEL_PATH> \
   --tensor-parallel-size $7 \
   --enable-expert-parallel \
   --seed 1024 \
-  --served-model-name glm5.2 \
+  --served-model-name glm-52 \
   --max-model-len 135168 \
   --max-num-batched-tokens 164 \
   --trust-remote-code \
@@ -1140,10 +1135,7 @@ vllm serve <MODEL_PATH> \
     "enable_sparse_c8": false,
     "fuse_muls_add": true,
     "multistream_overlap_shared_expert": true,
-    "recompute_scheduler_enable": true,
-    "ascend_compilation_config": {
-      "enable_npugraph_ex": true
-    }
+    "recompute_scheduler_enable": true
   }' \
   --speculative-config '{"num_speculative_tokens": 3, "method":"deepseek_mtp"}'
 ```
@@ -1180,13 +1172,13 @@ python load_balance_proxy_server_example.py \
     --port 8000 \
     --host 0.0.0.0 \
     --prefiller-hosts \
-       $node_p0_ip \
-       $node_p1_ip \
-       $node_p2_ip \
-       $node_p3_ip \
+      $node_p0_ip \
+      $node_p1_ip \
+      $node_p2_ip \
+      $node_p3_ip \
     --prefiller-ports \
-       9081 9081 \
-       9081 9081 \
+      9081 9081 \
+      9081 9081 \
     --decoder-hosts \
       $node_d0_ip \
       $node_d0_ip \
@@ -1198,7 +1190,7 @@ python load_balance_proxy_server_example.py \
       $node_d3_ip \
     --decoder-ports \
       9900 9901 9900 9901 \
-      9900 9901 9900 9901 \  
+      9900 9901 9900 9901
 ```
 
 **Notice:**

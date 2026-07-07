@@ -1,6 +1,6 @@
 [files]
 # these files may be written in non english words
-extend-exclude = [".pre-commit-config.yaml",]
+extend-exclude = [".pre-commit-config.yaml", "docs/source/community/contributors.md",]
 ignore-hidden = true
 ignore-files = true
 ignore-dot = true
@@ -45,6 +45,7 @@ depthwise_seperable_CNN = "depthwise_seperable_CNN"
 mata = "mata"
 iy = "iy"
 tendencias = "tendencias"
+PARD = "PARD"
 # intel cpu features
 tme = "tme"
 dout = "dout"

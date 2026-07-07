@@ -210,7 +210,7 @@ class TestExpertsSelector:
         hidden_states = torch.randn(num_tokens, hidden_size)
         router_logits = torch.randn(num_tokens, num_experts)
 
-        def simple_custom_routing(hidden_states, gating_output, topk, renormalize, num_experts):
+        def simple_custom_routing(hidden_states, gating_output, topk, renormalize):
             if scoring_func == "softmax":
                 weights = gating_output.softmax(dim=-1)
             else:
@@ -308,7 +308,7 @@ class TestExpertsSelector:
         hidden_states = torch.randn(num_tokens, hidden_size)
         router_logits = torch.randn(num_tokens, num_experts)
 
-        def custom_routing(hidden_states, gating_output, topk, renormalize, num_experts):
+        def custom_routing(hidden_states, gating_output, topk, renormalize):
             weights = gating_output.softmax(dim=-1)
             topk_weights, topk_ids = weights.topk(topk, dim=-1)
             if renormalize:
@@ -340,7 +340,7 @@ class TestExpertsSelector:
         hidden_states = torch.randn(num_tokens, hidden_size)
         router_logits = torch.randn(num_tokens, num_experts)
 
-        def simple_routing(hidden_states, gating_output, topk, renormalize, num_experts):
+        def simple_routing(hidden_states, gating_output, topk, renormalize):
             weights = gating_output.softmax(dim=-1)
             topk_weights, topk_ids = weights.topk(topk, dim=-1)
             if renormalize:
@@ -375,7 +375,7 @@ class TestExpertsSelector:
         hidden_states = torch.randn(num_tokens, hidden_size)
         router_logits = torch.randn(num_tokens, num_experts)
 
-        def simple_routing(hidden_states, gating_output, topk, renormalize, num_experts):
+        def simple_routing(hidden_states, gating_output, topk, renormalize):
             weights = gating_output.softmax(dim=-1)
             topk_weights, topk_ids = weights.topk(topk, dim=-1)
             if renormalize:

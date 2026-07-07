@@ -23,10 +23,7 @@ def test_suffix_acceptance(
             "num_speculative_tokens": 10,
         },
         max_model_len=1024,
-        compilation_config={
-            "cudagraph_mode": "PIECEWISE",
-            "cudagraph_capture_sizes": [1, 2, 4, 8],
-        },
+        max_cudagraph_capture_size=16,
         disable_log_stats=False,
     ) as runner:
         for i in range(10):

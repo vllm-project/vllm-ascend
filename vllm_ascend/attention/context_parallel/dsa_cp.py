@@ -9,17 +9,20 @@ import torch_npu
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tp_group
 from vllm.v1.attention.backend import AttentionCGSupport, AttentionMetadataBuilder
-from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.attention.abstract import DSAAttentionImpl
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, split_decodes_and_prefills
+from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
-from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
+from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa, get_full_cos_and_sin_dsa
 from vllm_ascend.quantization.methods.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.utils import (
     AscendDeviceType,
+    enable_dsa_cp_with_o_proj_tp,
     get_ascend_device_type,
     olora_tp_enable,
 )
@@ -80,14 +83,17 @@ class AscendDSAReqMetadata:
     input_positions: torch.Tensor
     block_table: torch.Tensor
     seq_lens: torch.Tensor
-    slot_mapping: torch.Tensor
+    slot_mapping: torch.Tensor | None
+    block_size: int
     query_start_loc: torch.Tensor
     cp_metadata: DSACPMetadata
+    num_compressed_tokens: int | None = None
     sin: torch.Tensor = None
     cos: torch.Tensor = None
-    compress_sin: torch.Tensor = None
-    compress_cos: torch.Tensor = None
+    full_compress_sin: torch.Tensor = None
+    full_compress_cos: torch.Tensor = None
     start_pos: torch.Tensor = None
+    num_reqs_actual: int | None = None
     sas_metadata: torch.Tensor = None
     qli_metadata: torch.Tensor = None
     cu_cmp_seqlen_list: torch.Tensor = None
@@ -141,7 +147,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
     start_pos_prefill: torch.Tensor | None = None
     req_sas_metadata: torch.Tensor
     req_qli_metadata: torch.Tensor
-    block_size: int | None = 128
+    block_size: int = 128
     """
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
@@ -149,7 +155,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
     def __init__(
         self,
-        kv_cache_spec: MLAAttentionSpec,
+        kv_cache_spec: AscendMLAAttentionSpec,
         layer_names: list[str],
         vllm_config: VllmConfig,
         device: torch.device,
@@ -189,9 +195,20 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     ) from e
                 log_dim = math.ceil(math.log2(indexer_head_dim))
                 dim_padded = 2**log_dim
-                AscendDSACPMetadataBuilder.hadamard = torch.tensor(
-                    hadamard(dim_padded, dtype=float), dtype=torch.float, device=self.device
-                ).to(torch.bfloat16)
+                if self.vllm_config.model_config.enable_sleep_mode:
+                    # Sleep mode allocates KV inside CaMemAllocator; tag Hadamard so
+                    # sleep/wake does not treat it as KV cache.
+                    from vllm_ascend.device_allocator.camem import CaMemAllocator
+
+                    allocator = CaMemAllocator.get_instance()
+                    with allocator.use_allocation_tag(CaMemAllocator.sleep_persistent_tag):
+                        AscendDSACPMetadataBuilder.hadamard = torch.tensor(
+                            hadamard(dim_padded, dtype=float), dtype=torch.float, device=self.device
+                        ).to(torch.bfloat16)
+                else:
+                    AscendDSACPMetadataBuilder.hadamard = torch.tensor(
+                        hadamard(dim_padded, dtype=float), dtype=torch.float, device=self.device
+                    ).to(torch.bfloat16)
         self.start_pos_prefill = torch.zeros(scheduler_config.max_num_seqs, dtype=torch.int32, device=self.device)
         self.req_sas_metadata = torch.zeros(1024, dtype=torch.int32, device=self.device)
         self.req_qli_metadata = torch.zeros(1024, dtype=torch.int32, device=self.device)
@@ -259,10 +276,9 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         num_reqs_actual = kwargs.get("num_reqs_actual")
         self.block_size = kwargs.get("block_size", 128)
 
-        common_ratio = kwargs.get("common_ratio_to_sas_metadata")
-        if common_ratio is None:
-            common_ratio = {}
-        self.common_ratio_to_sas_metadata = common_ratio
+        common_ratio_to_sas_metadata = kwargs.get("common_ratio_to_sas_metadata")
+        assert common_ratio_to_sas_metadata is not None
+        self.common_ratio_to_sas_metadata = common_ratio_to_sas_metadata
         self.num_actual_tokens = common_attn_metadata.num_actual_tokens
         attn_state = kwargs.get("attn_state", common_attn_metadata.attn_state)
         has_prefill = _has_prefill(attn_state)
@@ -270,7 +286,11 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         num_input_tokens = common_attn_metadata.num_input_tokens
         if self.common_ratio_to_sas_metadata.get("input_positions", None) is None:
             self.num_decodes, self.num_prefills, self.num_decode_tokens, self.num_prefill_tokens = (
-                split_decodes_and_prefills(common_attn_metadata, decode_threshold=self.decode_threshold)
+                split_decodes_and_prefills(
+                    common_attn_metadata,
+                    decode_threshold=self.decode_threshold,
+                    treat_short_extends_as_decodes=False,
+                )
             )
             self.common_ratio_to_sas_metadata["num_decodes"] = self.num_decodes
             self.common_ratio_to_sas_metadata["num_prefills"] = self.num_prefills
@@ -337,8 +357,8 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
     def build_for_drafting(
         self,
-        draft_step: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
+        draft_index: int,
         fast_build: bool = False,
         **kwargs,
     ) -> AscendDSAMetadata:
@@ -346,7 +366,9 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         num_reqs = common_attn_metadata.num_reqs
         num_input_tokens = common_attn_metadata.num_input_tokens
         num_decodes, num_prefills, num_decode_tokens, _ = split_decodes_and_prefills(
-            common_attn_metadata, decode_threshold=self.decode_threshold
+            common_attn_metadata,
+            decode_threshold=self.decode_threshold,
+            treat_short_extends_as_decodes=False,
         )
 
         self.num_decodes = num_decodes
@@ -364,13 +386,13 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
 
         assert self.spec_slot_mapping is not None
-        self.spec_slot_mapping[draft_step - 1][:num_input_tokens] = DeviceOperator.format_dsa_slot_mapping(
+        self.spec_slot_mapping[draft_index - 1][:num_input_tokens] = DeviceOperator.format_dsa_slot_mapping(
             slot_mapping, self.block_size
         )
 
         self.block_table = common_attn_metadata.block_table_tensor[:num_reqs]
         req_metadata = self.build_req_metadata_for_drafting(
-            draft_step=draft_step,
+            draft_index=draft_index,
             common_attn_metadata=common_attn_metadata,
             input_positions=input_positions,
             num_input_tokens=num_input_tokens,
@@ -396,7 +418,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
     def build_req_metadata_for_drafting(
         self,
-        draft_step: int,
+        draft_index: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
         input_positions: torch.Tensor,
         num_input_tokens: int,
@@ -425,8 +447,8 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             query_start_loc=query_start_loc,
             seq_lens=self.seq_lens[:num_reqs],
             use_cache=False,
-            local_query_start_loc=self.spec_local_query_start_loc[draft_step - 1],
-            local_seq_lens=self.spec_local_seq_lens[draft_step - 1],
+            local_query_start_loc=self.spec_local_query_start_loc[draft_index - 1],
+            local_seq_lens=self.spec_local_seq_lens[draft_index - 1],
         )
         local_query_start_loc = local_query_start_loc.clone()
         local_seq_lens = local_seq_lens.clone()
@@ -446,7 +468,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         start_pos = self.seq_lens[:num_reqs] - seq_lens_q
 
         assert self.spec_slot_mapping is not None
-        slot_mapping = self.spec_slot_mapping[draft_step - 1][: self.num_actual_tokens]
+        slot_mapping = self.spec_slot_mapping[draft_index - 1][: self.num_actual_tokens]
 
         num_heads = self.model_config.hf_config.num_attention_heads
         metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op()
@@ -505,18 +527,25 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             input_positions=input_positions,
             block_table=self.block_table[:num_reqs, ...],
             slot_mapping=slot_mapping,
+            block_size=self.block_size,
             seq_lens=self.seq_lens[:num_reqs],
             query_start_loc=query_start_loc,
             cp_metadata=cp_metadata,
             sin=sin,
             cos=cos,
-            compress_sin=None,
-            compress_cos=None,
             start_pos=start_pos,
             sas_metadata=sas_metadata,
             qli_metadata=None,
             cu_cmp_seqlen_list=None,
         )
+
+    def _num_compressor_metadata_rows(
+        self,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+    ) -> int:
+        assert self.num_actual_tokens is not None
+        num_tokens = self.num_actual_tokens
+        return min(num_tokens, num_tokens // self.compressor_ratio + common_attn_metadata.num_reqs)
 
     def build_req_metadata(
         self,
@@ -578,29 +607,28 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.start_pos_prefill.fill_(0)
         self.start_pos_prefill[:num_reqs] = start_pos
 
-        if num_reqs_actual is not None and num_reqs_actual < num_reqs:
-            self.start_pos_prefill[num_reqs_actual:].fill_(0)
-            self.block_table[num_reqs_actual:num_reqs, ...].fill_(0)
+        if num_reqs_actual is None:
+            num_reqs_actual = num_reqs
+        else:
+            num_reqs_actual = min(num_reqs_actual, num_reqs)
+            if num_reqs_actual < num_reqs:
+                self.start_pos_prefill[num_reqs_actual:].fill_(0)
+                self.block_table[num_reqs_actual:num_reqs, ...].fill_(0)
 
         # --- Compressed positions ---
-        compress_cos, compress_sin = None, None
+        full_compress_cos, full_compress_sin = None, None
         cu_cmp_seqlens = self._get_cmp_seqlens_for_metadata(has_prefill)
-        actual_num_tokens = self.num_actual_tokens
-        actual_input_positions_cpu = input_positions_cpu[:actual_num_tokens]
 
         if self.compressor_ratio > 1:
             layer_name = f"c{self.compressor_ratio}"
-            compressed_input_positions = self._get_padded_compressed_position(
-                actual_input_positions_cpu, self.compressor_ratio, num_reqs, actual_num_tokens
-            )
-            compress_cos, compress_sin = get_cos_and_sin_dsa(
-                {layer_name: compressed_input_positions}, use_cache=not has_prefill
-            )
-
-        slot_mapping_size = self._get_slot_mapping_size(
-            actual_input_positions_cpu, self.compressor_ratio, num_reqs, actual_num_tokens
-        )
-        slot_mapping = self.slot_mapping[:slot_mapping_size]
+            # Keep only graph inputs here. The compressor metadata op itself is
+            # launched in forward at the real compressor consumer.
+            num_compressed_tokens = self._num_compressor_metadata_rows(common_attn_metadata)
+            full_compress_cos, full_compress_sin = get_full_cos_and_sin_dsa(layer_name)
+            slot_mapping = None
+        else:
+            num_compressed_tokens = None
+            slot_mapping = self.slot_mapping[: self.num_actual_tokens]
 
         # --- SAS metadata (all requests combined) ---
         num_heads = self.model_config.hf_config.num_attention_heads
@@ -642,14 +670,17 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             input_positions=input_positions,
             block_table=self.block_table[:num_reqs, ...],
             slot_mapping=slot_mapping,
+            block_size=self.block_size,
             seq_lens=self.seq_lens[:num_reqs],
             query_start_loc=query_start_loc,
             cp_metadata=cp_metadata,
             sin=sin,
             cos=cos,
-            compress_sin=compress_sin,
-            compress_cos=compress_cos,
+            full_compress_sin=full_compress_sin,
+            full_compress_cos=full_compress_cos,
             start_pos=self.start_pos_prefill[:num_reqs],
+            num_compressed_tokens=num_compressed_tokens,
+            num_reqs_actual=num_reqs_actual,
             sas_metadata=sas_metadata,
             qli_metadata=qli_metadata,
             cu_cmp_seqlen_list=cu_cmp_seqlens,
@@ -742,30 +773,12 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             local_sin,
         )
 
-    # --- helper: padded compressed positions ---
-    def _get_padded_compressed_position(self, input_positions, compress_ratio, num_reqs, num_input_tokens):
-        if compress_ratio <= 1:
-            return input_positions
-        mask = ((input_positions + 1) % compress_ratio) == 0
-        pos = input_positions[mask]
-        pos = (pos + 1) - compress_ratio
-        target_shape = (min(num_input_tokens, num_input_tokens // compress_ratio + num_reqs),)
-        pad_right = target_shape[0] - pos.shape[0]
-        return F.pad(pos, (0, pad_right), value=0.0)
-
     def _get_cmp_seqlens_for_metadata(self, has_prefill):
         if self.compressor_ratio <= 1:
             return None
         if has_prefill:
             return None
         return DeviceOperator.get_dsa_decode_cu_seqlens_cmp_kv(self.cu_seqlens_cmp_kv)
-
-    def _get_slot_mapping_size(self, input_positions, compress_ratio, num_reqs, num_input_tokens):
-        if compress_ratio <= 1:
-            return self.num_actual_tokens
-        return self._get_padded_compressed_position(input_positions, compress_ratio, num_reqs, num_input_tokens).shape[
-            0
-        ]
 
     def _build_sas_metadata(
         self,
@@ -851,7 +864,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         if metadata is None:
             max_seqlen_q = max(1, int(seq_lens_q.max().item()))
             max_seqlen_k = max(1, int(seq_lens.max().item()))
-            metadata = torch.ops._C_ascend.npu_quant_lightning_indexer_metadata(
+            metadata = torch.ops._C_ascend.npu_vllm_quant_lightning_indexer_metadata(
                 actual_seq_lengths_query=query_start_loc[1:].clone(),
                 actual_seq_lengths_key=seq_lens.clone(),
                 num_heads_q=self.model_config.hf_config.index_n_heads,
@@ -903,6 +916,11 @@ class AscendDSACPImpl(DSAAttentionImpl):
     understand this class
     """
 
+    wo_a_full_pool: ClassVar[torch.Tensor | None] = None
+    wo_a_full_weight_scale_pool: ClassVar[torch.Tensor | None] = None
+    wo_b_full_pool: ClassVar[torch.Tensor | None] = None
+    wo_b_full_weight_scale_pool: ClassVar[torch.Tensor | None] = None
+
     def __init__(
         self,
         n_heads: int,
@@ -950,6 +968,12 @@ class AscendDSACPImpl(DSAAttentionImpl):
         self.wo_a = kwargs["wo_a"]
         self.wo_b = kwargs["wo_b"]
 
+        self.enable_dsa_cp_with_o_proj_tp = enable_dsa_cp_with_o_proj_tp() and (
+            get_ascend_device_type() == AscendDeviceType.A5
+        )
+        self._wo_a_dynamic_quant = False
+        self._wo_b_dynamic_quant = False
+
         self.eps = kwargs["eps"]
 
         self.attn_sink = kwargs["attn_sink"]
@@ -988,12 +1012,168 @@ class AscendDSACPImpl(DSAAttentionImpl):
             self.compressor_norm = self.compressor.norm
             self.compressor_norm_eps = self.compressor.norm_eps
 
+    def _compute_compressor_metadata(
+        self,
+        metadata: AscendDSAReqMetadata,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        assert metadata.full_compress_cos is not None
+        assert metadata.full_compress_sin is not None
+        assert metadata.num_compressed_tokens is not None
+        assert metadata.start_pos is not None
+        assert metadata.num_reqs_actual is not None
+        full_compress_cos = metadata.full_compress_cos.view(
+            metadata.full_compress_cos.shape[0],
+            metadata.full_compress_cos.shape[-1],
+        )
+        full_compress_sin = metadata.full_compress_sin.view(
+            metadata.full_compress_sin.shape[0],
+            metadata.full_compress_sin.shape[-1],
+        )
+        return torch.ops._C_ascend.compressor_metadata(
+            full_compress_cos,
+            full_compress_sin,
+            metadata.query_start_loc,
+            metadata.start_pos,
+            metadata.block_table,
+            metadata.block_size,
+            DeviceOperator.get_dsa_compressor_slot_mapping_format(),
+            self.compress_ratio,
+            metadata.num_compressed_tokens,
+            metadata.num_reqs_actual,
+        )
+
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         if self.attn_sink.numel() != self.num_heads:
             raise RuntimeError(
                 "DSA-CP expects full-head attn_sink loaded on every TP rank, "
                 f"got {self.attn_sink.numel()} heads, expected {self.num_heads}."
             )
+        if self.enable_dsa_cp_with_o_proj_tp:
+            self._maybe_init_o_proj_tp_full_params()
+
+    @staticmethod
+    def _check_dynamic_quant(layer: torch.nn.Module) -> bool:
+        return get_ascend_device_type() in {AscendDeviceType.A5} and hasattr(layer, "weight_scale")
+
+    def _maybe_init_o_proj_tp_full_params(self) -> None:
+        self._wo_a_dynamic_quant = type(self)._check_dynamic_quant(self.wo_a)
+        self._wo_b_dynamic_quant = type(self)._check_dynamic_quant(self.wo_b)
+        if AscendDSACPImpl.wo_a_full_pool is None:
+            sample = self.wo_a.weight
+            AscendDSACPImpl.wo_a_full_pool = torch.empty(
+                (sample.shape[0] * self.tp_size, *sample.shape[1:]),
+                dtype=sample.dtype,
+                device=sample.device,
+            )
+        self.wo_a_tp_weight = self.wo_a.weight.clone().detach().contiguous()
+        self.wo_a.weight.set_(self.wo_a_tp_weight)
+        if AscendDSACPImpl.wo_b_full_pool is None:
+            sample = self.wo_b.weight
+            AscendDSACPImpl.wo_b_full_pool = torch.empty(
+                (sample.shape[0] * self.tp_size, *sample.shape[1:]),
+                dtype=sample.dtype,
+                device=sample.device,
+            )
+        self.wo_b_tp_weight = self.wo_b.weight.clone().detach().contiguous()
+        self.wo_b.weight.set_(self.wo_b_tp_weight)
+
+        if self._wo_a_dynamic_quant:
+            if AscendDSACPImpl.wo_a_full_weight_scale_pool is None:
+                sample = self.wo_a.weight_scale
+                AscendDSACPImpl.wo_a_full_weight_scale_pool = torch.empty(
+                    (sample.shape[0] * self.tp_size, *sample.shape[1:]),
+                    dtype=sample.dtype,
+                    device=sample.device,
+                )
+            self.wo_a_tp_weight_scale = self.wo_a.weight_scale.clone().detach().contiguous()
+            self.wo_a.weight_scale.set_(self.wo_a_tp_weight_scale)
+        if self._wo_b_dynamic_quant:
+            if AscendDSACPImpl.wo_b_full_weight_scale_pool is None:
+                sample = self.wo_b.weight_scale
+                AscendDSACPImpl.wo_b_full_weight_scale_pool = torch.empty(
+                    (sample.shape[0] * self.tp_size, *sample.shape[1:]),
+                    dtype=sample.dtype,
+                    device=sample.device,
+                )
+            self.wo_b_tp_weight_scale = self.wo_b.weight_scale.clone().detach().contiguous()
+            self.wo_b.weight_scale.set_(self.wo_b_tp_weight_scale)
+
+    def _maybe_all_gather_o_proj_full_weight(
+        self,
+        enabled: bool,
+    ) -> list[torch.distributed.Work]:
+        if not enabled:
+            return []
+        handles = []
+        assert AscendDSACPImpl.wo_a_full_pool is not None
+        _, weight_handle = all_gather_async(
+            self.wo_a_tp_weight,
+            self.tp_group,
+            output=AscendDSACPImpl.wo_a_full_pool,
+        )
+        if weight_handle is not None:
+            handles.append(weight_handle)
+        assert AscendDSACPImpl.wo_b_full_pool is not None
+        _, wo_b_weight_handle = all_gather_async(
+            self.wo_b_tp_weight,
+            self.tp_group,
+            output=AscendDSACPImpl.wo_b_full_pool,
+        )
+        if wo_b_weight_handle is not None:
+            handles.append(wo_b_weight_handle)
+        if self._wo_a_dynamic_quant:
+            assert AscendDSACPImpl.wo_a_full_weight_scale_pool is not None
+            _, weight_scale_handle = all_gather_async(
+                self.wo_a_tp_weight_scale,
+                self.tp_group,
+                output=AscendDSACPImpl.wo_a_full_weight_scale_pool,
+            )
+            if weight_scale_handle is not None:
+                handles.append(weight_scale_handle)
+        if self._wo_b_dynamic_quant:
+            assert AscendDSACPImpl.wo_b_full_weight_scale_pool is not None
+            _, wo_b_weight_scale_handle = all_gather_async(
+                self.wo_b_tp_weight_scale,
+                self.tp_group,
+                output=AscendDSACPImpl.wo_b_full_weight_scale_pool,
+            )
+            if wo_b_weight_scale_handle is not None:
+                handles.append(wo_b_weight_scale_handle)
+        return handles
+
+    def _switch_o_proj_to_full_weight(
+        self,
+        handles: list[torch.distributed.Work],
+    ) -> None:
+        for handle in handles:
+            handle.wait()
+        assert AscendDSACPImpl.wo_a_full_pool is not None
+        self.wo_a.weight.set_(AscendDSACPImpl.wo_a_full_pool)
+        if self._wo_a_dynamic_quant:
+            assert AscendDSACPImpl.wo_a_full_weight_scale_pool is not None
+            self.wo_a.weight_scale.set_(AscendDSACPImpl.wo_a_full_weight_scale_pool)
+        assert AscendDSACPImpl.wo_b_full_pool is not None
+        self.wo_b.weight.set_(AscendDSACPImpl.wo_b_full_pool)
+        if self._wo_b_dynamic_quant:
+            assert AscendDSACPImpl.wo_b_full_weight_scale_pool is not None
+            self.wo_b.weight_scale.set_(AscendDSACPImpl.wo_b_full_weight_scale_pool)
+
+    def _switch_o_proj_to_tp_weight(self) -> None:
+        self.wo_a.weight.set_(self.wo_a_tp_weight)
+        if self._wo_a_dynamic_quant:
+            self.wo_a.weight_scale.set_(self.wo_a_tp_weight_scale)
+        self.wo_b.weight.set_(self.wo_b_tp_weight)
+        if self._wo_b_dynamic_quant:
+            self.wo_b.weight_scale.set_(self.wo_b_tp_weight_scale)
+
+    def _apply_wo_b(
+        self,
+        o_proj_input: torch.Tensor,
+        full_weight: bool,
+    ) -> torch.Tensor:
+        if not full_weight:
+            return self.wo_b(o_proj_input)
+        return self.wo_b.quant_method.apply(self.wo_b, o_proj_input, bias=None)
 
     def forward(  # type: ignore[override]
         self,
@@ -1010,47 +1190,75 @@ class AscendDSACPImpl(DSAAttentionImpl):
             return output.fill_(0)
         if not isinstance(attn_metadata, list):
             attn_metadata = [attn_metadata]
-        local_attn_output = self._forward(layer_name, hidden_states, kv_cache, attn_metadata, need_gather_q_kv)
-        o_proj_input = self._restore_tp_head_layout(local_attn_output, layer_name, attn_metadata[0])
+        full_gather_wo_a_enabled = (
+            self.tp_size > 1
+            and self.enable_dsa_cp_with_o_proj_tp
+            and attn_metadata[0].attn_state
+            not in {
+                AscendAttentionState.DecodeOnly,
+                AscendAttentionState.SpecDecoding,
+            }
+        )
+        local_attn_output, o_proj_full_handles = self._forward(
+            layer_name,
+            hidden_states,
+            kv_cache,
+            attn_metadata,
+            need_gather_q_kv,
+            full_gather_wo_a_enabled,
+        )
+        o_proj_input = self._restore_tp_head_layout(
+            local_attn_output,
+            layer_name,
+            attn_metadata[0],
+            skip_all_to_all=full_gather_wo_a_enabled,
+        )
         num_tokens = o_proj_input.shape[0]
 
         # o
-        if get_ascend_device_type() in {AscendDeviceType.A5}:
-            o = o_proj_input.view(num_tokens, self.n_local_groups, -1)
-            o, swiglu_out_scale = torch_npu.npu_dynamic_mx_quant(o, dst_type=torch.float8_e4m3fn)
-            o = torch_npu.npu_transpose_quant_batchmatmul(
-                o,
-                self.wo_a.weight,
-                dtype=torch.bfloat16,
-                bias=None,
-                group_sizes=(0, 0, 32),
-                x1_scale=swiglu_out_scale.view(torch.float8_e8m0fnu),
-                x2_scale=self.wo_a.weight_scale.view(torch.float8_e8m0fnu),
-                perm_x1=(1, 0, 2),
-                perm_x2=(0, 1, 2),
-                perm_y=(1, 0, 2),
-            )
-            o = o.reshape(num_tokens, -1)
-            output[...] = self.wo_b(o)
-        else:
-            o_proj_input = o_proj_input.view(num_tokens, self.n_local_groups, -1)
-            if olora_tp_enable():
-                o_proj_input = self.wo_a(o_proj_input)
-            else:
-                # wo_a = self.wo_a.weight.view(self.n_local_groups, self.o_lora_rank, -1)
-                # o = torch.einsum("tgd,grd->tgr", o, wo_a)
-                o_proj_input = torch_npu.npu_transpose_batchmatmul(
-                    o_proj_input,
+        if full_gather_wo_a_enabled:
+            self._switch_o_proj_to_full_weight(o_proj_full_handles)
+        o_proj_groups = self.n_group if full_gather_wo_a_enabled else self.n_local_groups
+        try:
+            if get_ascend_device_type() in {AscendDeviceType.A5}:
+                o = o_proj_input.view(num_tokens, o_proj_groups, -1)
+                o, swiglu_out_scale = torch_npu.npu_dynamic_mx_quant(o, dst_type=torch.float8_e4m3fn)
+                o = torch_npu.npu_transpose_quant_batchmatmul(
+                    o,
                     self.wo_a.weight,
+                    dtype=torch.bfloat16,
                     bias=None,
-                    scale=None,
+                    group_sizes=(0, 0, 32),
+                    x1_scale=swiglu_out_scale.view(torch.float8_e8m0fnu),
+                    x2_scale=self.wo_a.weight_scale.view(torch.float8_e8m0fnu),
                     perm_x1=(1, 0, 2),
                     perm_x2=(0, 1, 2),
                     perm_y=(1, 0, 2),
-                    batch_split_factor=1,
                 )
-            o_proj_input = o_proj_input.reshape(num_tokens, -1)
-            output[...] = self.wo_b(o_proj_input)
+                o = o.reshape(num_tokens, -1)
+                output[...] = self._apply_wo_b(o, full_gather_wo_a_enabled)
+            else:
+                o_proj_input = o_proj_input.view(num_tokens, o_proj_groups, -1)
+                if olora_tp_enable():
+                    o_proj_input = self.wo_a(o_proj_input)
+                else:
+                    # wo_a = self.wo_a.weight.view(o_proj_groups, self.o_lora_rank, -1)
+                    # o = torch.einsum("tgd,grd->tgr", o, wo_a)
+                    o_proj_input = torch_npu.npu_transpose_batchmatmul(
+                        o_proj_input,
+                        self.wo_a.weight,
+                        bias=None,
+                        scale=None,
+                        perm_x1=(1, 0, 2),
+                        perm_x2=(0, 1, 2),
+                        perm_y=(1, 0, 2),
+                        batch_split_factor=1,
+                    )
+                o_proj_input = o_proj_input.reshape(num_tokens, -1)
+                output[...] = self._apply_wo_b(o_proj_input, full_gather_wo_a_enabled)
+        finally:
+            if full_gather_wo_a_enabled:
+                self._switch_o_proj_to_tp_weight()
 
         return output
 
@@ -1061,6 +1269,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
         kv_cache: tuple,
         attn_metadata: list[M],
         need_gather_q_kv: bool = False,
+        full_gather_wo_a_enabled: bool = False,
     ):
         """Run full-sequence KV cache updates and local-token attention."""
         (compress_kv_cache, swa_kv_cache, state_cache, _, _, _) = DeviceOperator.unpack_dsa_forward_kv_cache(
@@ -1148,6 +1357,8 @@ class AscendDSACPImpl(DSAAttentionImpl):
             partial_slice=[self.nope_head_dim, self.head_dim],
         )
 
+        o_proj_full_handles = self._maybe_all_gather_o_proj_full_weight(full_gather_wo_a_enabled)
+
         kv = self.wkv(hidden_states_cache)
         kv = self.kv_norm(kv)
         assert self.rope_head_dim is not None
@@ -1165,15 +1376,11 @@ class AscendDSACPImpl(DSAAttentionImpl):
         if self.compress_ratio > 1:
             assert compressor_attn_metadata.req_metadata is not None
             assert compressor_kv_state_metadata.req_metadata is not None
-            compress_cos = req_metadata.compress_cos[layer_name]
-            compress_sin = req_metadata.compress_sin[layer_name]
             if self.compress_ratio == 4:
                 self._update_indexer_cache(
                     x=hidden_states_cache,
                     kv_cache=kv_cache,
                     attn_metadata=attn_metadata,
-                    compressed_cos=compress_cos,
-                    compressed_sin=compress_sin,
                     actual_seq_lengths_query=actual_seq_lengths_query,
                 )
                 compress_topk_idxs = self._indexer_select_topk(
@@ -1189,6 +1396,9 @@ class AscendDSACPImpl(DSAAttentionImpl):
                 )
 
             coff = 2 if self.compressor_overlap else 1
+            compress_cos, compress_sin, compress_slot_mapping = self._compute_compressor_metadata(
+                compressor_attn_metadata.req_metadata,
+            )
             compressed_kv = torch.ops._C_ascend.compressor(
                 hidden_states_cache,
                 self.compressor_wkv.weight,
@@ -1212,9 +1422,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
 
             if compressed_kv.numel() == 0:
                 compressed_kv = None
-            DeviceOperator.dsa_kv_compress_scatter(
-                compress_kv_cache, compressed_kv, compressor_attn_metadata.req_metadata.slot_mapping
-            )
+            DeviceOperator.dsa_kv_compress_scatter(compress_kv_cache, compressed_kv, compress_slot_mapping)
 
         attn_op = DeviceOperator.get_dsa_sparse_attn_op()
         extra_attn_kwargs: dict = DeviceOperator.get_dsa_sparse_attn_base_kwargs()
@@ -1276,13 +1484,14 @@ class AscendDSACPImpl(DSAAttentionImpl):
                 cmp_mask_mode=3,
                 **common_attn_kwargs,
             )[0]
-        return attn_output
+        return attn_output, o_proj_full_handles
 
     def _restore_tp_head_layout(
         self,
         local_attn_output: torch.Tensor,
         layer_name: str,
         attn_metadata: M,
+        skip_all_to_all: bool = False,
     ) -> torch.Tensor:
         assert attn_metadata.req_metadata is not None
         req_metadata = attn_metadata.req_metadata
@@ -1296,7 +1505,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
             partial_slice=[self.nope_head_dim, self.head_dim],
         )
 
-        if self.tp_size == 1:
+        if self.tp_size == 1 or skip_all_to_all:
             return local_attn_output
 
         send = (
@@ -1314,8 +1523,6 @@ class AscendDSACPImpl(DSAAttentionImpl):
         x: torch.Tensor,
         kv_cache: tuple[torch.Tensor, ...],
         attn_metadata: list[M],
-        compressed_cos: torch.Tensor,
-        compressed_sin: torch.Tensor,
         actual_seq_lengths_query: torch.Tensor,
     ) -> None:
         (indexer_state_cache, indexer_k_cache, indexer_scale_cache, indexer_full_cache) = (
@@ -1328,6 +1535,9 @@ class AscendDSACPImpl(DSAAttentionImpl):
         assert indexer_kv_scale_metadata.req_metadata is not None
         assert indexer_kv_state_metadata.req_metadata is not None
         assert self.indexer is not None
+        compressed_cos, compressed_sin, indexer_slot_mapping = self._compute_compressor_metadata(
+            indexer_kv_scale_metadata.req_metadata,
+        )
         kv = torch.ops._C_ascend.compressor(
             x,
             self.indexcom_wkv.weight,
@@ -1358,13 +1568,13 @@ class AscendDSACPImpl(DSAAttentionImpl):
             kv,
             indexer_k_cache,
             indexer_full_cache,
-            indexer_kv_scale_metadata.req_metadata.slot_mapping,
+            indexer_slot_mapping,
         )
         if kv_scale is not None:
             DeviceOperator.dsa_indexer_scatter_scale_part3(
                 kv_scale,
                 indexer_scale_cache,
-                indexer_kv_scale_metadata.req_metadata.slot_mapping,
+                indexer_slot_mapping,
             )
 
     def _indexer_select_topk(
@@ -1415,7 +1625,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
         assert indexer_kv_scale_metadata.req_metadata is not None
         qli_metadata = indexer_kv_scale_metadata.req_metadata.qli_metadata
         block_table = indexer_kv_scale_metadata.req_metadata.block_table
-        topk_idxs, _ = torch.ops._C_ascend.npu_quant_lightning_indexer(
+        topk_idxs, _ = torch.ops._C_ascend.npu_vllm_quant_lightning_indexer(
             query=q,
             key=indexer_k_cache,
             weights=DeviceOperator.prepare_dsa_indexer_weights(weights),
