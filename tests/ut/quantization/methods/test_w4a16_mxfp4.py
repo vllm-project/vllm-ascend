@@ -68,7 +68,7 @@ class TestAscendW4A16MXFP4MoEMethod(TestBase):
     def test_apply_full_params(self, mock_select, mock_ctx, mock_npu):
         tokens = 4
         layer = nn.Module()
-        layer.swiglu_limit = None
+        layer.swiglu_limit = 0.0
         layer.w13_weight = nn.Parameter(torch.randint(0, 255, (8, 64, 256), dtype=torch.uint8), requires_grad=False)
         layer.w2_weight = nn.Parameter(torch.randint(0, 255, (8, 128, 128), dtype=torch.uint8), requires_grad=False)
         layer.w13_weight_scale = nn.Parameter(
