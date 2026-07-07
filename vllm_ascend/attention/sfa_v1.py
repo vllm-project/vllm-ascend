@@ -882,6 +882,9 @@ class AscendSFAImpl(MLAAttentionImpl):
         sample = self.o_proj.weight
         self.o_proj_full_weight_gather_dim = 1 if self._is_o_proj_unquantized() else 0
         if self.o_proj_full_weight_gather_dim == 0:
+            self._ensure_o_proj_quant_params_contiguous()
+            sample = self.o_proj.weight
+        if self.o_proj_full_weight_gather_dim == 0:
             full_shape = (sample.shape[0] * self.tp_size, sample.shape[1])
             gather_shape = full_shape
         else:
@@ -932,6 +935,11 @@ class AscendSFAImpl(MLAAttentionImpl):
             self.o_proj_full_input_sharded_quant_params[param_name] = torch.empty(
                 (param.shape[0] * self.tp_size, *param.shape[1:]), dtype=param.dtype, device=param.device
             )
+
+    def _ensure_o_proj_quant_params_contiguous(self):
+        self.o_proj.weight.data = self.o_proj.weight.data.contiguous()
+        for _, param in self._iter_o_proj_input_sharded_quant_params():
+            param.data = param.data.contiguous()
 
     def _iter_o_proj_input_sharded_quant_params(self):
         if not isinstance(self.o_proj, nn.Module):

@@ -29,13 +29,13 @@ class TestAscendSFAOProjTPParams(TestBase):
     class _OProj(torch.nn.Module):
         def __init__(self):
             super().__init__()
-            self.weight = torch.nn.Parameter(torch.randn(4, 3), requires_grad=False)
+            self.weight = torch.nn.Parameter(torch.randn(3, 4).transpose(0, 1), requires_grad=False)
             self.aclnn_input_scale = torch.nn.Parameter(torch.randn(3), requires_grad=False)
-            self.weight_scale_second = torch.nn.Parameter(torch.randn(4, 2), requires_grad=False)
+            self.weight_scale_second = torch.nn.Parameter(torch.randn(2, 4).transpose(0, 1), requires_grad=False)
             self.weight_scale_second.input_dim = 1
-            self.weight_offset_second = torch.nn.Parameter(torch.randn(4, 2), requires_grad=False)
+            self.weight_offset_second = torch.nn.Parameter(torch.randn(2, 4).transpose(0, 1), requires_grad=False)
             self.weight_offset_second.input_dim = 1
-            self.extra_input_scale = torch.nn.Parameter(torch.randn(4, 2), requires_grad=False)
+            self.extra_input_scale = torch.nn.Parameter(torch.randn(2, 4).transpose(0, 1), requires_grad=False)
             self.extra_input_scale.input_dim = 1
             self.weight_scale = torch.nn.Parameter(torch.randn(4), requires_grad=False)
 
@@ -52,10 +52,16 @@ class TestAscendSFAOProjTPParams(TestBase):
     def test_o_proj_tp_params_alias_original_storage(self):
         impl = self._make_impl()
         o_proj = impl.o_proj
+        self.assertFalse(o_proj.weight.is_contiguous())
+        self.assertFalse(o_proj.weight_scale_second.is_contiguous())
+        self.assertFalse(o_proj.weight_offset_second.is_contiguous())
+        self.assertFalse(o_proj.extra_input_scale.is_contiguous())
 
         impl._init_o_proj_tp_full_params()
 
         self.assertEqual(impl.o_proj_tp_weight.data_ptr(), o_proj.weight.data_ptr())
+        self.assertTrue(impl.o_proj_tp_weight.is_contiguous())
+        self.assertTrue(impl.o_proj_full_pool.is_contiguous())
         self.assertEqual(
             impl.o_proj_tp_aclnn_input_params["aclnn_input_scale"].data_ptr(),
             o_proj.aclnn_input_scale.data_ptr(),
@@ -64,14 +70,17 @@ class TestAscendSFAOProjTPParams(TestBase):
             impl.o_proj_tp_input_sharded_quant_params["weight_scale_second"].data_ptr(),
             o_proj.weight_scale_second.data_ptr(),
         )
+        self.assertTrue(impl.o_proj_tp_input_sharded_quant_params["weight_scale_second"].is_contiguous())
         self.assertEqual(
             impl.o_proj_tp_input_sharded_quant_params["weight_offset_second"].data_ptr(),
             o_proj.weight_offset_second.data_ptr(),
         )
+        self.assertTrue(impl.o_proj_tp_input_sharded_quant_params["weight_offset_second"].is_contiguous())
         self.assertEqual(
             impl.o_proj_tp_input_sharded_quant_params["extra_input_scale"].data_ptr(),
             o_proj.extra_input_scale.data_ptr(),
         )
+        self.assertTrue(impl.o_proj_tp_input_sharded_quant_params["extra_input_scale"].is_contiguous())
         self.assertNotIn("weight_scale", impl.o_proj_tp_input_sharded_quant_params)
 
     def test_o_proj_full_weight_forward_restores_tp_storage(self):
