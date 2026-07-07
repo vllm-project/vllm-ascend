@@ -178,7 +178,7 @@ vllm serve Eco-Tech/Kimi-K2.5-W4A8 \
   --gpu-memory-utilization 0.9 \
   --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
   --speculative-config '{"method":"eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens":3}' \
-  --mm-encoder-tp-mode data
+  --mm-encoder-tp-mode data \
   --enable-auto-tool-choice \
   --tool-call-parser kimi_k2 \
   --reasoning-parser kimi_k2 \
@@ -316,7 +316,7 @@ vllm serve Eco-Tech/Kimi-K2.5-W4A8 \
   --gpu-memory-utilization 0.9 \
   --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
   --speculative-config '{"method":"eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens":3}' \
-  --mm-encoder-tp-mode data
+  --mm-encoder-tp-mode data \
   --enable-auto-tool-choice \
   --tool-call-parser kimi_k2 \
   --reasoning-parser kimi_k2 \
@@ -389,7 +389,7 @@ vllm serve Eco-Tech/Kimi-K2.5-W4A8 \
   --gpu-memory-utilization 0.9 \
   --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
   --speculative-config '{"method":"eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens":3}' \
-  --mm-encoder-tp-mode data
+  --mm-encoder-tp-mode data \
   --enable-auto-tool-choice \
   --tool-call-parser kimi_k2 \
   --reasoning-parser kimi_k2 \
