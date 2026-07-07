@@ -169,7 +169,7 @@ Key Parameter Descriptions:
 - `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.
 - If you use the w4a8 weight, more memory will be allocated to kvcache, and you can try to increase system throughput to achieve greater throughput.
 
-Common Issues Tip: If you encounter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+Common Issues Tip: If you encounter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs/) for troubleshooting.
 
 Service Verification:
 
