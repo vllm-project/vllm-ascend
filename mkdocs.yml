@@ -142,6 +142,10 @@ extra_css:
 extra:
   # Toggle via DOCS_IS_RELEASE env var (set by .readthedocs.yaml for tag builds).
   is_release: !ENV [DOCS_IS_RELEASE, false]
+  # Read the Docs build context, exposed to override templates (e.g. the
+  # floating "report issue" button in docs/overrides/main.html).
+  rtd_version: !ENV [READTHEDOCS_VERSION, latest]
+  docs_lang: !ENV [DOCS_LANG, en]
   # Version substitutions used by macros plugin
   vllm_version: v0.22.1
   vllm_ascend_version: v0.22.1rc1

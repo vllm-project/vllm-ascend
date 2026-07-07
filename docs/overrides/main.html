@@ -1,5 +1,7 @@
 {% extends "base.html" %}
 
+{% set t = config.extra.i18n[config.extra.docs_lang] %}
+
 {% block announce %}
 <style>
   .md-banner {
@@ -21,9 +23,64 @@
 </style>
 {% if not config.extra.is_release %}
 <div class="md-announce">
-  You are viewing the latest developer preview docs.
-  <a href="https://docs.vllm.ai/projects/ascend/en/v0.18.0">Click here</a>
-  to view docs for the latest stable release (v0.18.0).
+  {{ t.banner_preview }}
+  <a href="https://docs.vllm.ai/projects/ascend/en/v0.18.0">{{ t.banner_link }}</a>
+  {{ t.banner_suffix }}
 </div>
 {% endif %}
+
+{% set lang_path = "/zh-cn/" if config.extra.docs_lang == "zh" else "/en/" %}
+{% set page_path = page.url if page.url else "" %}
+{% set full_path = lang_path ~ config.extra.rtd_version ~ "/" ~ page_path %}
+{% set issue_title = "[Doc]: Feedback for `" ~ full_path ~ "`" %}
+{% set issue_url = "https://github.com/vllm-project/vllm-ascend/issues/new?template=100-documentation.yml&title=" ~ issue_title | urlencode %}
+<a href="{{ issue_url }}"
+   class="issues-float-btn"
+   target="_blank" rel="noopener" aria-label="{{ t.aria_report }}">
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" aria-hidden="true">
+    <path d="M20 8h-2.81c-.45-.78-1.07-1.45-1.82-1.96L17 4.41 15.59 3l-2.17 2.17a6.002 6.002 0 0 0-5.83 0L5.41 3 4 4.41 5.62 6.04C4.88 6.55 4.26 7.22 3.81 8H1v2h2.09c-.05.33-.09.66-.09 1v1H1v2h2v1c0 .34.04.67.09 1H1v2h2.81c1.04 1.79 2.97 3 5.19 3s4.15-1.21 5.19-3H17v-2h-2.09c.05-.33.09-.66.09-1v-1h2v-2h-2v-1c0-.34-.04-.67-.09-1H20V8zm-6 8h-4v-2h4v2zm0-4h-4v-2h4v2z"/>
+  </svg>
+  <span>{{ t.btn_report }}</span>
+</a>
+<style>
+  .issues-float-btn {
+    position: fixed;
+    bottom: 4.5rem;
+    right: 1.5rem;
+    z-index: 1100;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.55rem 1.1rem;
+    border-radius: 999px;
+    background-color: var(--md-accent-fg-color);
+    color: #fff !important;
+    font-size: 0.75rem;
+    font-weight: 700;
+    line-height: 1;
+    text-decoration: none;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, .25);
+    transition: background-color 0.2s, transform 0.2s, box-shadow 0.2s;
+  }
+  .issues-float-btn:hover {
+    background-color: var(--md-accent-fg-color);
+    filter: brightness(1.15);
+    transform: translateY(-1px);
+    box-shadow: 0 6px 16px rgba(0, 0, 0, .3);
+  }
+  .issues-float-btn:focus-visible {
+    outline: 2px solid var(--md-accent-fg-color);
+    outline-offset: 2px;
+  }
+  .issues-float-btn svg {
+    width: 1.1em;
+    height: 1.1em;
+    fill: currentColor;
+  }
+  @media print {
+    .issues-float-btn {
+      display: none;
+    }
+  }
+</style>
 {% endblock %}
