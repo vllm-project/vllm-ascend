@@ -5,6 +5,7 @@
 from typing import Any
 
 import torch
+import vllm.v1.worker.gpu.spec_decode.dflash.speculator as vllm_dflash_speculator
 from vllm.config import VllmConfig
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.input_batch import InputBatch
@@ -190,16 +191,19 @@ def _prepare_dflash_inputs_kernel_ascend(
         for i in range(num_reqs, max_num_reqs):
             tl.store(out_seq_lens_ptr + i, 0)
         # Padded sample slots point at query index 0 (a valid row in
-        # last_hidden_states) so CG replay never reads OOB.
+        # last_hidden_states) so CG replay never reads OOB. Padded sample
+        # idx mappings point to -1, which is ignored during sampling.
         pad_start = num_reqs * num_speculative_steps
         pad_end = max_num_reqs * num_speculative_steps
         for i in range(pad_start, pad_end):
             tl.store(out_sample_indices_ptr + i, 0)
             tl.store(out_sample_pos_ptr + i, 0)
-            tl.store(out_sample_idx_mapping_ptr + i, 0)
+            tl.store(out_sample_idx_mapping_ptr + i, -1)
         # Pad query slot mappings past num_query_tokens with PAD so the
         # captured CG sees PAD slots (no K/V write) for replay sizes
         # larger than the current request count.
         q_pad_start = num_reqs * num_query_per_req
         for i in range(q_pad_start, max_num_tokens):
             tl.store(out_query_slot_mapping_ptr + i, PAD_SLOT_ID)
+
+vllm_dflash_speculator._prepare_dflash_inputs_kernel = _prepare_dflash_inputs_kernel_ascend
