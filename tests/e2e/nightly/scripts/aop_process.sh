@@ -76,7 +76,7 @@ fi
 GOOD_TABLE="${GOOD_TABLE:-}"
 
 BISECT_CMD=(
-  python -m tests.e2e.nightly.bisect.auto_bisect
+  python -m tools.bisect.auto_bisect
   --scene "${SCENE}"
   --bad-commit "${BAD_COMMIT}"
   --good-table "${GOOD_TABLE}"
