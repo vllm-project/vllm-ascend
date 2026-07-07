@@ -48,6 +48,7 @@ Select an image based on your machine type and start the docker image on your no
         --name vllm-ascend \
         --shm-size=512g \
         --net=host \
+        --privileged=true \
         --device /dev/davinci0 \
         --device /dev/davinci1 \
         --device /dev/davinci2 \
@@ -89,6 +90,7 @@ Select an image based on your machine type and start the docker image on your no
         --name vllm-ascend \
         --shm-size=512g \
         --net=host \
+        --privileged=true \
         --device /dev/davinci0 \
         --device /dev/davinci1 \
         --device /dev/davinci2 \
