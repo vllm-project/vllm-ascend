@@ -42,87 +42,75 @@ Select an image based on your machine type and start the docker image on your no
 
 It is **recommended to use the latest release candidate (rc) version or the latest official version** of the `vllm-ascend` image to ensure the best compatibility and access to the latest features. As a minimum-version requirement, use `vllm-ascend:v0.17.0rc1` (or a later version) for `Qwen3.5-27B`, and `vllm-ascend:v0.18.0rc1` (or a later version) for `Qwen3.6-27B`. For `Qwen3.6-27B` on Atlas 800 A3, please use the matching `v0.18.0rc1-a3` (or a later `-a3`) image.
 
-:::::{tab-set}
-:sync-group: install
+=== "A3 series"
 
-::::{tab-item} A3 series
-:sync: A3
+    Start the docker image on your each node.
 
-Start the docker image on your each node.
+    ```bash
+    export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
+    docker run --rm \
+        --name vllm-ascend \
+        --shm-size=1g \
+        --net=host \
+        --device /dev/davinci0 \
+        --device /dev/davinci1 \
+        --device /dev/davinci2 \
+        --device /dev/davinci3 \
+        --device /dev/davinci4 \
+        --device /dev/davinci5 \
+        --device /dev/davinci6 \
+        --device /dev/davinci7 \
+        --device /dev/davinci8 \
+        --device /dev/davinci9 \
+        --device /dev/davinci10 \
+        --device /dev/davinci11 \
+        --device /dev/davinci12 \
+        --device /dev/davinci13 \
+        --device /dev/davinci14 \
+        --device /dev/davinci15 \
+        --device /dev/davinci_manager \
+        --device /dev/devmm_svm \
+        --device /dev/hisi_hdc \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v /root/.cache:/root/.cache \
+        -it $IMAGE bash
+    ```
 
-```{code-block} bash
-  :substitutions:
-export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
-docker run --rm \
-    --name vllm-ascend \
-    --shm-size=1g \
-    --net=host \
-    --device /dev/davinci0 \
-    --device /dev/davinci1 \
-    --device /dev/davinci2 \
-    --device /dev/davinci3 \
-    --device /dev/davinci4 \
-    --device /dev/davinci5 \
-    --device /dev/davinci6 \
-    --device /dev/davinci7 \
-    --device /dev/davinci8 \
-    --device /dev/davinci9 \
-    --device /dev/davinci10 \
-    --device /dev/davinci11 \
-    --device /dev/davinci12 \
-    --device /dev/davinci13 \
-    --device /dev/davinci14 \
-    --device /dev/davinci15 \
-    --device /dev/davinci_manager \
-    --device /dev/devmm_svm \
-    --device /dev/hisi_hdc \
-    -v /usr/local/dcmi:/usr/local/dcmi \
-    -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
-    -v /root/.cache:/root/.cache \
-    -it $IMAGE bash
-```
+=== "A2 series"
 
-::::
+    Start the docker image on your each node.
 
-::::{tab-item} A2 series
-:sync: A2
-
-Start the docker image on your each node.
-
-```{code-block} bash
-  :substitutions:
-export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:|vllm_ascend_version|
-docker run --rm \
-    --name vllm-ascend \
-    --shm-size=1g \
-    --net=host \
-    --device /dev/davinci0 \
-    --device /dev/davinci1 \
-    --device /dev/davinci2 \
-    --device /dev/davinci3 \
-    --device /dev/davinci4 \
-    --device /dev/davinci5 \
-    --device /dev/davinci6 \
-    --device /dev/davinci7 \
-    --device /dev/davinci_manager \
-    --device /dev/devmm_svm \
-    --device /dev/hisi_hdc \
-    -v /usr/local/dcmi:/usr/local/dcmi \
-    -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
-    -v /root/.cache:/root/.cache \
-    -it $IMAGE bash
-```
-
-::::
-:::::
+    ```bash
+    export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
+    docker run --rm \
+        --name vllm-ascend \
+        --shm-size=1g \
+        --net=host \
+        --device /dev/davinci0 \
+        --device /dev/davinci1 \
+        --device /dev/davinci2 \
+        --device /dev/davinci3 \
+        --device /dev/davinci4 \
+        --device /dev/davinci5 \
+        --device /dev/davinci6 \
+        --device /dev/davinci7 \
+        --device /dev/davinci_manager \
+        --device /dev/devmm_svm \
+        --device /dev/hisi_hdc \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v /root/.cache:/root/.cache \
+        -it $IMAGE bash
+    ```
 
 After a successful docker run, you can verify the running container service by executing the `docker ps` command. The expected result is that the container `vllm-ascend` is listed with status `Up`, confirming the docker installation is successful.
 
@@ -262,14 +250,14 @@ Key Parameter Descriptions:
     - (2) Decode requests are prioritized for scheduling, and prefill requests are scheduled only if there is available capacity.
     - Generally, if `--max-num-batched-tokens` is set to a larger value, the overall latency will be lower, but the pressure on HBM memory (activation value usage) will be greater.
 - `--gpu-memory-utilization` represents the proportion of HBM that vLLM will use for actual inference. Its essential function is to calculate the available kv_cache size. During the warm-up phase (referred to as profile run in vLLM), vLLM records the peak HBM memory usage during an inference process with an input size of `--max-num-batched-tokens`. The available kv_cache size is then calculated as: `--gpu-memory-utilization` * HBM size - peak HBM memory usage. Therefore, the larger the value of `--gpu-memory-utilization`, the more kv_cache can be used. However, since the HBM memory usage during the warm-up phase may differ from that during actual inference (e.g., due to uneven EP load), setting `--gpu-memory-utilization` too high may lead to OOM (Out of Memory) issues during actual inference. The default value is `0.9`.
-- `--no-enable-prefix-caching` indicates that prefix caching is disabled. The current implementation of hybrid kv cache for Qwen3.5-27B / Qwen3.6-27B may result in a very large effective `block_size` when prefix caching is enabled (e.g., 2048), which means any prefix shorter than `block_size` will never be cached. If your workload has many short repeated prefixes, consider keeping prefix caching disabled. For related issues, see the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).
+- `--no-enable-prefix-caching` indicates that prefix caching is disabled. The current implementation of hybrid kv cache for Qwen3.5-27B / Qwen3.6-27B may result in a very large effective `block_size` when prefix caching is enabled (e.g., 2048), which means any prefix shorter than `block_size` will never be cached. If your workload has many short repeated prefixes, consider keeping prefix caching disabled. For related issues, see the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs/).
 - `--quantization ascend` indicates that quantization is used. To disable quantization, remove this option.
 - `--speculative-config` uses `qwen3_5_mtp` for both `Qwen3.5-27B` and `Qwen3.6-27B` because they share the same MTP head design.
 - `--compilation-config` contains configurations related to the aclgraph graph mode. The most significant configurations are `"cudagraph_mode"` and `"cudagraph_capture_sizes"`, which have the following meanings:
     - `"cudagraph_mode"`: represents the specific graph mode. Currently, `"PIECEWISE"` and `"FULL_DECODE_ONLY"` are supported. The graph mode is mainly used to reduce the cost of operator dispatch. Currently, `"FULL_DECODE_ONLY"` is recommended.
     - `"cudagraph_capture_sizes"`: represents different levels of graph modes. The default value is `[1, 2, 4, 8, 16, 24, 32, 40,..., --max-num-seqs]`. In the graph mode, the input for graphs at different levels is fixed, and inputs between levels are automatically padded to the next level. Currently, the default setting is recommended. Only in some scenarios is it necessary to set this separately to achieve optimal performance.
 
-Common Issues Tip: If you encounter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+Common Issues Tip: If you encounter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs/) for troubleshooting.
 
 Service Verification:
 
@@ -369,7 +357,7 @@ To run the vllm-ascend Prefill-Decode Disaggregation service, you need to:
       --gpu-memory-utilization 0.95 \
       --enforce-eager \
       --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
-      --additional-config '{"recompute_scheduler_enable":true,"enable_cpu_binding":true}' \
+      --additional-config '{"enable_cpu_binding":true}' \
       --kv-transfer-config \
       '{"kv_connector": "MooncakeConnectorV1",
       "kv_role": "kv_producer",
@@ -456,7 +444,7 @@ To run the vllm-ascend Prefill-Decode Disaggregation service, you need to:
 Key Parameter Descriptions:
 
 - `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the Allreduce communication optimization on prefill nodes, which reduces the communication overhead of long-context prefill.
-- `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the KV Cache of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, it is recommended to enable this configuration on both prefill and decode nodes simultaneously.
+- `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the KV Cache of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, enable this configuration only on decode nodes.
 - `--async-scheduling` (on decode nodes): enables asynchronous scheduling, which can reduce TPOT for high-concurrency decode workloads.
 - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` (on decode nodes): enables the full-decode aclgraph mode, which significantly reduces scheduling latency on the decode side.
 
@@ -525,7 +513,7 @@ curl http://<proxy_node0_ip>:1999/v1/chat/completions \
 
 Expected Result: The proxy returns HTTP 200 OK. The JSON response contains the `choices` field with the generated text, confirming that Prefill nodes have successfully processed the prompt and Decode nodes have generated the response.
 
-Common Issues Tip: If you encounter issues with PD separation deployment, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+Common Issues Tip: If you encounter issues with PD separation deployment, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs/) for troubleshooting.
 
 ## 6 Functional Verification
 
@@ -736,4 +724,4 @@ Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matr
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, please refer to the [vLLM-Ascend Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).
+For common environment, installation, and general parameter issues, please refer to the [vLLM-Ascend Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs/).

@@ -30,7 +30,7 @@ require 1 Atlas 800 A3 (64G × 16) node:
 You can use our official docker image to run InternVL3_5 directly.
 
 ``` bash
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
+export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
 export NAME=vllm-ascend
 
 # Run the container using the defined variables
@@ -82,106 +82,96 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 ### 5.1 Single-Node Online Deployment
 
-:::::{tab-set}
-:sync-group: deployment
+=== "InternVL3_5-38B"
 
-::::{tab-item} InternVL3_5-38B
-:sync: 38b
+    - Quantized model `InternVL3_5-38B-w8a8` can be deployed on 1 Atlas 800 A3 (64G × 16) .
 
-- Quantized model `InternVL3_5-38B-w8a8` can be deployed on 1 Atlas 800 A3 (64G × 16) .
+    Run the following script to execute online inference.
 
-Run the following script to execute online inference.
+    Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
 
-Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
+    ```bash
+    echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
+    sysctl -w vm.swappiness=0
+    sysctl -w kernel.numa_balancing=0
+    sysctl -w kernel.sched_migration_cost_ns=50000
 
-```{code-block} bash
-   :substitutions:
-echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
-sysctl -w vm.swappiness=0
-sysctl -w kernel.numa_balancing=0
-sysctl -w kernel.sched_migration_cost_ns=50000
+    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+    export VLLM_ASCEND_ENABLE_FUSED_MC2=1
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export TASK_QUEUE_ENABLE=1
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=1
+    export VLLM_USE_V1=1
+    export VLLM_TORCH_PROFILER_WITH_STACK=0
+    export HCCL_BUFFSIZE=1536
 
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-export VLLM_ASCEND_ENABLE_FUSED_MC2=1
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export TASK_QUEUE_ENABLE=1
-export HCCL_OP_EXPANSION_MODE="AIV"
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
-export VLLM_USE_V1=1
-export VLLM_TORCH_PROFILER_WITH_STACK=0
-export HCCL_BUFFSIZE=1536
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/InternVL3_5-38B-w8a8/ \
+        --port 2002 \
+        --served-model-name internvl3_5 \
+        --trust-remote-code \
+        --async-scheduling \
+        --max-model-len 40960 \
+        --max-num-batched-tokens 16384 \
+        --tensor-parallel-size 4 \
+        --max-num-seqs 32 \
+        --gpu-memory-utilization 0.9 \
+        --async-scheduling \
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4,32,64,128,192,256,512]}' \
+        --additional-config '{"enable_weight_nz_layout": true, "enable_cpu_binding": true}' \
+        --mm-processor-cache-gb 0 \
+        --enable-chunked-prefill \
+        --safetensors-load-strategy 'prefetch' \
+        --allowed-local-media-path "/"
 
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/InternVL3_5-38B-w8a8/ \
-    --port 2002 \
-    --served-model-name internvl3_5 \
-    --trust-remote-code \
-    --async-scheduling \
-    --max-model-len 40960 \
-    --max-num-batched-tokens 16384 \
-    --tensor-parallel-size 4 \
-    --max-num-seqs 32 \
-    --gpu-memory-utilization 0.9 \
-    --async-scheduling \
-    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4,32,64,128,192,256,512]}' \
-    --additional-config '{"enable_weight_nz_layout": true, "enable_cpu_binding": true}' \
-    --mm-processor-cache-gb 0 \
-    --enable-chunked-prefill \
-    --safetensors-load-strategy 'prefetch' \
-    --allowed-local-media-path "/
-```
+    ```
 
-::::
-::::{tab-item} InternVL3_5-241B-A28B
-:sync: 241b
+=== "InternVL3_5-241B-A28B"
 
-- Quantized model `InternVL3_5-241B-A28B-w8a8` can be deployed on 1 Atlas 800 A3 (64G × 16) .
+    - Quantized model `InternVL3_5-241B-A28B-w8a8` can be deployed on 1 Atlas 800 A3 (64G × 16) .
 
-Run the following script to execute online inference.
+    Run the following script to execute online inference.
 
-Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
+    Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
 
-```{code-block} bash
-   :substitutions:
-echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
-sysctl -w vm.swappiness=0
-sysctl -w kernel.numa_balancing=0
-sysctl -w kernel.sched_migration_cost_ns=50000
+    ```bash
+    echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
+    sysctl -w vm.swappiness=0
+    sysctl -w kernel.numa_balancing=0
+    sysctl -w kernel.sched_migration_cost_ns=50000
 
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-export VLLM_ASCEND_ENABLE_FUSED_MC2=1
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export TASK_QUEUE_ENABLE=1
-export HCCL_OP_EXPANSION_MODE="AIV"
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
-export VLLM_USE_V1=1
-export VLLM_TORCH_PROFILER_WITH_STACK=0
-export HCCL_BUFFSIZE=1536
+    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+    export VLLM_ASCEND_ENABLE_FUSED_MC2=1
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export TASK_QUEUE_ENABLE=1
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=1
+    export VLLM_USE_V1=1
+    export VLLM_TORCH_PROFILER_WITH_STACK=0
+    export HCCL_BUFFSIZE=1536
 
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/InternVL3_5-241B-A28B-w8a8/ \
-    --port 2001 \
-    --served-model-name internvl3_5 \
-    --trust-remote-code \
-    --async-scheduling \
-    --max-model-len 40960 \
-    --max-num-batched-tokens 4096 \
-    --tensor-parallel-size 4 \
-    --data-parallel-size 2 \
-    --max-num-seqs 70 \
-    --gpu-memory-utilization 0.9 \
-    --async-scheduling \
-    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_weight_nz_layout": true, "enable_cpu_binding": true}' \
-    --mm-processor-cache-gb 0 \
-    --enable-chunked-prefill \
-    --enable-expert-parallel \
-    --safetensors-load-strategy 'prefetch' \
-    --allowed-local-media-path "/"
-```
-
-::::
-:::::
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/InternVL3_5-241B-A28B-w8a8/ \
+        --port 2001 \
+        --served-model-name internvl3_5 \
+        --trust-remote-code \
+        --async-scheduling \
+        --max-model-len 40960 \
+        --max-num-batched-tokens 4096 \
+        --tensor-parallel-size 4 \
+        --data-parallel-size 2 \
+        --max-num-seqs 70 \
+        --gpu-memory-utilization 0.9 \
+        --async-scheduling \
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+        --additional-config '{"enable_weight_nz_layout": true, "enable_cpu_binding": true}' \
+        --mm-processor-cache-gb 0 \
+        --enable-chunked-prefill \
+        --enable-expert-parallel \
+        --safetensors-load-strategy 'prefetch' \
+        --allowed-local-media-path "/"
+    ```
 
 **Notice:**
 

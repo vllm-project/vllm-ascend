@@ -677,10 +677,10 @@ class NPUPlatform(Platform):
         if ascend_config.recompute_scheduler_enable:
             kv_transfer_config = vllm_config.kv_transfer_config
             kv_role = getattr(kv_transfer_config, "kv_role", None)
-            if kv_transfer_config is None or kv_role == "kv_both":
+            if kv_transfer_config is None or kv_role != "kv_consumer":
                 raise ValueError(
-                    "recompute_scheduler_enable can only be enabled in PD-disaggregated mode "
-                    "(kv_role='kv_producer' or 'kv_consumer'), and is not supported in PD-mixed mode."
+                    "recompute_scheduler_enable can only be enabled on PD-disaggregated D nodes "
+                    f"(kv_role='kv_consumer', but got kv_role={kv_role!r}), and is not supported in PD-mixed mode."
                 )
 
             from vllm_ascend.core.recompute_scheduler import RecomputeSchedulerConfig
@@ -937,7 +937,7 @@ class NPUPlatform(Platform):
         # compared to v1, v2's forward context lacks some fields, such as:
         # is_first_layer, prefetch_mlp_gate_up_proj, prefetch_mlp_gate_down_proj,
         # prefetch_mlp_enabled, model_instance, is_draft_model.
-        if not envs_vllm.VLLM_USE_V2_MODEL_RUNNER:
+        if not vllm_config.use_v2_model_runner:
             return {}
 
         # is_draft_model will be removed later, so we set it to False temporarily.

@@ -42,10 +42,9 @@ Select an image based on your machine type and start the container on your node.
 
 **A3 series**
 
-```{code-block} bash
-   :substitutions:
+```bash
 # Update the vllm-ascend image
-export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 export NAME=vllm-ascend
 
 # Run the container using the defined variables
@@ -87,10 +86,10 @@ docker run --rm \
 
 Map your model weight directory into the container (the example maps it to `/root/.cache/`).
 
-```{code-block} bash
+```bash
 #!/bin/sh
 NAME=minimax
-IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 
 docker run -itd -u 0 --ipc=host \
   -e VLLM_USE_MODELSCOPE=True \
@@ -152,15 +151,15 @@ python -c "import vllm_ascend; print(vllm_ascend.__version__)"
 
 ## 5 Online Service Deployment
 
-:::{note}
-In this tutorial, we assume you have downloaded the model weights. Replace `/path/to/weight/` with your actual model weight path.
-:::
+!!! note
+
+    In this tutorial, we assume you have downloaded the model weights. Replace `/path/to/weight/` with your actual model weight path.
 
 ### 5.1 Single-Node Online Deployment
 
 Single-node deployment completes both Prefill and Decode within the same node, suitable for development, testing, and low-to-medium throughput production scenarios.
 
-**Common Issues Tip:** If you encounter OOM, HCCL port conflicts, or other startup issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting. For MiniMax-specific issues, refer to [Chapter 10 FAQ](#10-faq).
+**Common Issues Tip:** If you encounter OOM, HCCL port conflicts, or other startup issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs/) for troubleshooting. For MiniMax-specific issues, refer to [Chapter 10 FAQ](#10-faq).
 
 #### A3 (single node)
 
@@ -170,7 +169,7 @@ Notes:
 
 - If you only care about short-context low latency, you can set `--max-model-len 32768`, `--tensor-parallel-size 4`, and `--data-parallel-size 4`.
 
-```{code-block} bash
+```bash
 export HCCL_OP_EXPANSION_MODE="AIV"
 export HCCL_BUFFSIZE=1024
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
@@ -212,7 +211,7 @@ Remarks:
 - If you mainly rely on the reasoning semantics of `/v1/responses`, it is recommended to use `--reasoning-parser minimax_m2` instead.
 - To achieve better performance on long-context scenarios (e.g., 128k or 64k), we recommend the following adjustments:
 
-```{code-block} bash
+```bash
     --tensor-parallel-size 8 \
     --data-parallel-size 1 \
     --decode-context-parallel-size 1 \
@@ -229,7 +228,7 @@ Remarks:
 
 - If you need to test with `curl` and tool calling, add the following to the startup command:
 
-```{code-block} bash
+```bash
     --enable-auto-tool-choice \
     --tool-call-parser minimax_m2 \
     --reasoning-parser minimax_m2_append_think \
@@ -237,7 +236,7 @@ Remarks:
 
 #### A2 (single node)
 
-```{code-block} bash
+```bash
 export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 export HCCL_OP_EXPANSION_MODE="AIV"
 export HCCL_BUFFSIZE=512
@@ -274,7 +273,7 @@ vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
 
 - If you need to test with `curl` and tool calling, add the following to the startup command:
 
-```{code-block} bash
+```bash
     --enable-auto-tool-choice \
     --tool-call-parser minimax_m2 \
     --reasoning-parser minimax_m2_append_think \
@@ -286,7 +285,7 @@ PD (Prefill-Decode) separation splits the Prefill and Decode phases across diffe
 
 **Hardware**: 2× Atlas 800 A3 (64G × 16), one for Prefill, one for Decode.
 
-**Common Issues Tip:** For PD separation specific issues such as KV transfer timeouts or Mooncake connection errors, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html). For MiniMax-specific PD separation issues, refer to [Chapter 10 FAQ](#10-faq).
+**Common Issues Tip:** For PD separation specific issues such as KV transfer timeouts or Mooncake connection errors, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs/). For MiniMax-specific PD separation issues, refer to [Chapter 10 FAQ](#10-faq).
 
 First, prepare `launch_online_dp.py` on each node:
 
@@ -675,7 +674,7 @@ The following optimizations are enabled by default and require no additional con
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html). This chapter only covers MiniMax-M2 (M2.5/M2.7) model-specific issues.
+For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs/). This chapter only covers MiniMax-M2 (M2.5/M2.7) model-specific issues.
 
 - **Q: Does C8 quantization support EAGLE3 speculative decoding?**
 

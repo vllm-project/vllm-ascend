@@ -52,7 +52,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import DeviceMemoryProfiler
-from vllm.utils.torch_utils import get_dtype_size
+from vllm.utils.torch_utils import PIN_MEMORY, get_dtype_size
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -279,6 +279,9 @@ class NPUModelRunner(GPUModelRunner):
 
         with _torch_cuda_wrapper():
             super().__init__(vllm_config, device)
+
+        if not vllm_version_is("0.23.0"):
+            self.pin_memory = PIN_MEMORY
 
         # Replace the CUDA PrefetchOffloader set by parent __init__ with NPU version.
         offload_cfg = vllm_config.offload_config
@@ -1695,8 +1698,24 @@ class NPUModelRunner(GPUModelRunner):
         if not self.drafter:
             # Speculative decoding is not enabled.
             draft_token_ids = None
-        elif isinstance(self.drafter, (AscendNgramProposer, AscendSuffixDecodingProposer)):
-            draft_token_ids = self.drafter.propose(valid_sampled_token_ids)
+        elif isinstance(self.drafter, AscendNgramProposer):
+            if vllm_version_is("0.23.0"):
+                draft_token_ids = self.drafter.propose(valid_sampled_token_ids)
+            else:
+                draft_token_ids = self.drafter.propose(
+                    scheduler_output.num_spec_tokens_to_schedule,
+                    valid_sampled_token_ids,
+                    self.input_batch.num_tokens_no_spec,
+                    self.input_batch.token_ids_cpu,
+                )
+        elif isinstance(self.drafter, AscendSuffixDecodingProposer):
+            if vllm_version_is("0.23.0"):
+                draft_token_ids = self.drafter.propose(valid_sampled_token_ids)
+            else:
+                draft_token_ids = self.drafter.propose(
+                    valid_sampled_token_ids,
+                    num_speculative_tokens=scheduler_output.num_spec_tokens_to_schedule,
+                )
         elif isinstance(self.drafter, AscendNgramProposerNPU):
             batch_size = min(self.input_batch.num_reqs, self.token_ids_gpu_tensor.shape[0])
 
@@ -1760,11 +1779,19 @@ class NPUModelRunner(GPUModelRunner):
             common_attn_metadata = spec_decode_common_attn_metadata
             target_hidden_states = [h[:num_scheduled_tokens] for h in aux_hidden_states]
 
-            draft_token_ids = self.drafter.propose(
-                sampled_token_ids=valid_sampled_token_ids,
-                target_hidden_states=target_hidden_states,
-                common_attn_metadata=common_attn_metadata,
-            )
+            if vllm_version_is("0.23.0"):
+                draft_token_ids = self.drafter.propose(
+                    sampled_token_ids=valid_sampled_token_ids,
+                    target_hidden_states=target_hidden_states,
+                    common_attn_metadata=common_attn_metadata,
+                )
+            else:
+                draft_token_ids = self.drafter.propose(
+                    self.speculative_config.num_speculative_tokens,
+                    sampled_token_ids=valid_sampled_token_ids,
+                    target_hidden_states=target_hidden_states,
+                    common_attn_metadata=common_attn_metadata,
+                )
             next_token_ids, valid_sampled_tokens_count = (
                 self.drafter.prepare_next_token_ids_padded(
                     valid_sampled_token_ids,
@@ -4682,9 +4709,10 @@ class NPUModelRunner(GPUModelRunner):
             if isinstance(kv_cache_group.kv_cache_spec, MambaSpec):
                 mamba_blocks_per_req = (
                     max_num_blocks_per_req if self.cache_config.enable_prefix_caching else 1
-                ) + kv_cache_group.kv_cache_spec.num_speculative_blocks
+                ) 
 
                 max_num_blocks_per_req = max(max_num_blocks_per_req, mamba_blocks_per_req)
+                max_num_blocks_per_req += kv_cache_group.kv_cache_spec.num_speculative_blocks
             max_num_blocks.append(max_num_blocks_per_req)
 
         if (block_sizes != [self.cache_config.block_size]

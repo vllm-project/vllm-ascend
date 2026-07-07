@@ -37,88 +37,81 @@ If you want to deploy a multi-node environment, you need to verify multi-node co
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
 
-:::::{tab-set}
-:sync-group: install
+=== "A3 series"
 
-::::{tab-item} A3 series
-:sync: A3
+    Start the docker image on each node.
 
-Start the docker image on each node.
+    ```bash
 
-```{code-block} bash
-   :substitutions:
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
+    docker run --rm \
+        --name vllm-ascend \
+        --shm-size=512g \
+        --net=host \
+        --privileged=true \
+        --device /dev/davinci0 \
+        --device /dev/davinci1 \
+        --device /dev/davinci2 \
+        --device /dev/davinci3 \
+        --device /dev/davinci4 \
+        --device /dev/davinci5 \
+        --device /dev/davinci6 \
+        --device /dev/davinci7 \
+        --device /dev/davinci8 \
+        --device /dev/davinci9 \
+        --device /dev/davinci10 \
+        --device /dev/davinci11 \
+        --device /dev/davinci12 \
+        --device /dev/davinci13 \
+        --device /dev/davinci14 \
+        --device /dev/davinci15 \
+        --device /dev/davinci_manager \
+        --device /dev/devmm_svm \
+        --device /dev/hisi_hdc \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v /etc/hccn.conf:/etc/hccn.conf \
+        -v /root/.cache:/root/.cache \
+        -it $IMAGE bash
+    ```
 
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
-docker run --rm \
-    --name vllm-ascend \
-    --shm-size=512g \
-    --net=host \
-    --device /dev/davinci0 \
-    --device /dev/davinci1 \
-    --device /dev/davinci2 \
-    --device /dev/davinci3 \
-    --device /dev/davinci4 \
-    --device /dev/davinci5 \
-    --device /dev/davinci6 \
-    --device /dev/davinci7 \
-    --device /dev/davinci8 \
-    --device /dev/davinci9 \
-    --device /dev/davinci10 \
-    --device /dev/davinci11 \
-    --device /dev/davinci12 \
-    --device /dev/davinci13 \
-    --device /dev/davinci14 \
-    --device /dev/davinci15 \
-    --device /dev/davinci_manager \
-    --device /dev/devmm_svm \
-    --device /dev/hisi_hdc \
-    -v /usr/local/dcmi:/usr/local/dcmi \
-    -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
-    -v /etc/hccn.conf:/etc/hccn.conf \
-    -it $IMAGE bash
-```
+=== "A2 series"
 
-::::
-::::{tab-item} A2 series
-:sync: A2
+    Start the docker image on each node.
 
-Start the docker image on each node.
+    ```bash
 
-```{code-block} bash
-   :substitutions:
-
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
-docker run --rm \
-    --name vllm-ascend \
-    --shm-size=512g \
-    --net=host \
-    --device /dev/davinci0 \
-    --device /dev/davinci1 \
-    --device /dev/davinci2 \
-    --device /dev/davinci3 \
-    --device /dev/davinci4 \
-    --device /dev/davinci5 \
-    --device /dev/davinci6 \
-    --device /dev/davinci7 \
-    --device /dev/davinci_manager \
-    --device /dev/devmm_svm \
-    --device /dev/hisi_hdc \
-    -v /usr/local/dcmi:/usr/local/dcmi \
-    -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
-    -v /etc/hccn.conf:/etc/hccn.conf \
-    -it $IMAGE bash
-```
-
-::::
-:::::
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
+    docker run --rm \
+        --name vllm-ascend \
+        --shm-size=512g \
+        --net=host \
+        --privileged=true \
+        --device /dev/davinci0 \
+        --device /dev/davinci1 \
+        --device /dev/davinci2 \
+        --device /dev/davinci3 \
+        --device /dev/davinci4 \
+        --device /dev/davinci5 \
+        --device /dev/davinci6 \
+        --device /dev/davinci7 \
+        --device /dev/davinci_manager \
+        --device /dev/devmm_svm \
+        --device /dev/hisi_hdc \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v /etc/hccn.conf:/etc/hccn.conf \
+        -v /root/.cache:/root/.cache \
+        -it $IMAGE bash
+    ```
 
 After a successful docker run, you can verify the running container service by executing the `docker ps` command.
 
@@ -132,113 +125,106 @@ If you want to deploy a multi-node environment, you need to set up the environme
 
 ## 5 Online Service Deployment
 
-:::{note}
-In this tutorial, we suppose you downloaded the model weight to `/root/.cache/`. Feel free to change it to your own path.
-:::
+!!! note
+
+    In this tutorial, we suppose you downloaded the model weight to `/root/.cache/modelscope/hub/models/vllm-ascend/`. Feel free to change it to your own path.
+
+    It is recommended that the following service code be encapsulated in a .sh script file and executed in Bash mode.
 
 ### 5.1 Single-Node Online Deployment
 
 Single-node deployment completes both Prefill and Decode within the same node. The quantized model `DeepSeek-V4-Flash-w8a8-mtp` can be deployed on 1 Atlas 800 A3 (128G × 8) or 1 Atlas 800 A2 (64G × 8).
 
-:::::{tab-set}
-:sync-group: install
+=== "A2 series"
 
-::::{tab-item} A2 series
-:sync: A2
+    Run the following script to execute online inference.
 
-Run the following script to execute online inference.
+    ```shell
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=10
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+    export HCCL_BUFFSIZE=1024
+    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+    export TASK_QUEUE_ENABLE=1
+    export HCCL_OP_EXPANSION_MODE="AIV"
 
-```shell
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=10
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-export HCCL_BUFFSIZE=1024
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-export TASK_QUEUE_ENABLE=1
-export HCCL_OP_EXPANSION_MODE="AIV"
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Flash-w8a8-mtp \
+        --max-model-len 133120 \
+        --max-num-batched-tokens 8192 \
+        --served-model-name dsv4 \
+        --gpu-memory-utilization 0.9 \
+        --max-num-seqs 32 \
+        --data-parallel-size 1 \
+        --tensor-parallel-size 8 \
+        --enable-expert-parallel \
+        --tokenizer-mode deepseek_v4 \
+        --tool-call-parser deepseek_v4 \
+        --enable-auto-tool-choice \
+        --reasoning-parser deepseek_v4 \
+        --safetensors-load-strategy 'prefetch' \
+        --no-enable-prefix-caching \
+        --model-loader-extra-config='{"enable_multithread_load": "true", "num_threads": 128}' \
+        --quantization ascend \
+        --port 8900 \
+        --block-size 128 \
+        --speculative-config '{"num_speculative_tokens": 1,"method": "mtp","enforce_eager": true}' \
+        --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+        --async-scheduling \
+        --additional-config '
+        {"ascend_compilation_config":{
+            "enable_npugraph_ex":true,
+            "enable_static_kernel":false
+            },
+        "enable_cpu_binding": true,
+        "enable_dsa_cp": true,
+        "multistream_overlap_shared_expert":true}'
+    ```
 
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Flash-w8a8-mtp \
-    --max-model-len 133120 \
-    --max-num-batched-tokens 8192 \
-    --served-model-name dsv4 \
-    --gpu-memory-utilization 0.9 \
-    --max-num-seqs 32 \
-    --data-parallel-size 1 \
-    --tensor-parallel-size 8 \
-    --enable-expert-parallel \
-    --tokenizer-mode deepseek_v4 \
-    --tool-call-parser deepseek_v4 \
-    --enable-auto-tool-choice \
-    --reasoning-parser deepseek_v4 \
-    --safetensors-load-strategy 'prefetch' \
-    --no-enable-prefix-caching \
-    --model-loader-extra-config='{"enable_multithread_load": "true", "num_threads": 128}' \
-    --quantization ascend \
-    --port 8900 \
-    --block-size 128 \
-    --speculative-config '{"num_speculative_tokens": 1,"method": "mtp","enforce_eager": true}' \
-    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --async-scheduling \
-    --additional-config '
-    {"ascend_compilation_config":{
-        "enable_npugraph_ex":true,
-        "enable_static_kernel":false
-        },
-    "enable_cpu_binding": true,
-    "enable_dsa_cp": true,
-    "multistream_overlap_shared_expert":true}'
-```
+=== "A3 series"
 
-::::
-::::{tab-item} A3 series
-:sync: A3
+    Run the following script to execute online inference.
 
-Run the following script to execute online inference.
+    ```shell
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=10
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+    export HCCL_BUFFSIZE=1024
+    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+    export TASK_QUEUE_ENABLE=1
+    export HCCL_OP_EXPANSION_MODE="AIV"
 
-```shell
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=10
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-export HCCL_BUFFSIZE=1024
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-export TASK_QUEUE_ENABLE=1
-export HCCL_OP_EXPANSION_MODE="AIV"
-
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Flash-w8a8-mtp \
-    --max-model-len 1048576 \
-    --max-num-batched-tokens 10240 \
-    --served-model-name dsv4 \
-    --gpu-memory-utilization 0.9 \
-    --api-server-count 1 \
-    --max-num-seqs 64 \
-    --data-parallel-size 4 \
-    --tensor-parallel-size 4 \
-    --enable-expert-parallel \
-    --tokenizer-mode deepseek_v4 \
-    --tool-call-parser deepseek_v4 \
-    --enable-auto-tool-choice \
-    --reasoning-parser deepseek_v4 \
-    --safetensors-load-strategy 'prefetch' \
-    --model-loader-extra-config='{"enable_multithread_load": "true", "num_threads": 128}' \
-    --quantization ascend \
-    --port 8900 \
-    --block-size 128 \
-    --speculative-config '{"num_speculative_tokens": 1,"method": "mtp","enforce_eager": true}' \
-    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --async-scheduling \
-    --additional-config '
-    {"ascend_compilation_config":{
-        "enable_npugraph_ex":true,
-        "enable_static_kernel":false
-        },
-    "enable_cpu_binding": true,
-    "multistream_overlap_shared_expert":true}'
-```
-
-::::
-:::::
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Flash-w8a8-mtp \
+        --max-model-len 1048576 \
+        --max-num-batched-tokens 10240 \
+        --served-model-name dsv4 \
+        --gpu-memory-utilization 0.9 \
+        --api-server-count 1 \
+        --max-num-seqs 64 \
+        --data-parallel-size 4 \
+        --tensor-parallel-size 4 \
+        --enable-expert-parallel \
+        --tokenizer-mode deepseek_v4 \
+        --tool-call-parser deepseek_v4 \
+        --enable-auto-tool-choice \
+        --reasoning-parser deepseek_v4 \
+        --safetensors-load-strategy 'prefetch' \
+        --model-loader-extra-config='{"enable_multithread_load": "true", "num_threads": 128}' \
+        --quantization ascend \
+        --port 8900 \
+        --block-size 128 \
+        --speculative-config '{"num_speculative_tokens": 1,"method": "mtp","enforce_eager": true}' \
+        --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+        --async-scheduling \
+        --additional-config '
+        {"ascend_compilation_config":{
+            "enable_npugraph_ex":true,
+            "enable_static_kernel":false
+            },
+        "enable_cpu_binding": true,
+        "multistream_overlap_shared_expert":true}'
+    ```
 
 Key Parameter Descriptions:
 
@@ -249,7 +235,7 @@ Key Parameter Descriptions:
 - `--async-scheduling` enables asynchronous scheduling to overlap CPU scheduling with NPU computation.
 - `VLLM_ASCEND_ENABLE_FLASHCOMM1=1` enables the FlashComm communication optimization.
 
-Common Issues Tip: If you encounter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+Common Issues Tip: If you encounter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs/) for troubleshooting.
 
 Service Verification:
 
@@ -593,7 +579,6 @@ Before you start, please:
     import subprocess
     import sys
 
-
     def parse_args():
         parser = argparse.ArgumentParser()
         parser.add_argument("--dp-size", type=int, required=True, help="Data parallel size.")
@@ -605,7 +590,6 @@ Before you start, please:
         parser.add_argument("--vllm-start-port", type=int, default=9000, help="Starting port for the engine.")
         return parser.parse_args()
 
-
     args = parse_args()
     dp_size = args.dp_size
     tp_size = args.tp_size
@@ -616,7 +600,6 @@ Before you start, please:
     dp_address = args.dp_address
     dp_rpc_port = args.dp_rpc_port
     vllm_start_port = args.vllm_start_port
-
 
     def run_command(visible_devices, dp_rank, vllm_engine_port):
         command = [
@@ -631,7 +614,6 @@ Before you start, please:
             str(tp_size),
         ]
         subprocess.run(command, check=True)
-
 
     if __name__ == "__main__":
         template_path = "./run_dp_template.sh"
@@ -849,7 +831,7 @@ Before you start, please:
 Key Parameter Descriptions:
 
 - `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the communication optimization function on the prefill nodes.
-- `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the KV Cache of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, it is recommended to enable this configuration on decode nodes.
+- `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the KV Cache of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, enable this configuration only on decode nodes.
 - `MooncakeHybridConnector`: the KV transfer connector used for PD separation, transferring KV Cache between prefill and decode nodes.
 - `enable_shared_expert_dp: true`: enables data parallelism for shared experts, applicable to MoE models.
 
@@ -857,7 +839,7 @@ Deployment Verification:
 
 After the PD separation service is fully started, send a request through the proxy port on the prefill master node to verify that Prefill and Decode nodes are working correctly together. Refer to [Prefill-Decode Disaggregation (Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md) for the proxy verification method.
 
-Common Issues Tip: If you encounter issues with PD separation deployment, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+Common Issues Tip: If you encounter issues with PD separation deployment, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs/) for troubleshooting.
 
 #### 5.2.3 Ultra-Long Sequence Deployment
 
@@ -958,4 +940,4 @@ Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matr
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html); this chapter only covers model-specific issues.
+For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs/); this chapter only covers model-specific issues.

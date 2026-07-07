@@ -33,88 +33,79 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
 
-:::::{tab-set}
-:sync-group: install
+=== "A3 series"
 
-::::{tab-item} A3 series
-:sync: A3
+    Start the docker image on your each node.
 
-Start the docker image on your each node.
+    ```bash
 
-```{code-block} bash
-   :substitutions:
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
+    docker run --rm \
+        --name vllm-ascend \
+        --shm-size=1g \
+        --net=host \
+        --privileged=true \
+        --device /dev/davinci0 \
+        --device /dev/davinci1 \
+        --device /dev/davinci2 \
+        --device /dev/davinci3 \
+        --device /dev/davinci4 \
+        --device /dev/davinci5 \
+        --device /dev/davinci6 \
+        --device /dev/davinci7 \
+        --device /dev/davinci8 \
+        --device /dev/davinci9 \
+        --device /dev/davinci10 \
+        --device /dev/davinci11 \
+        --device /dev/davinci12 \
+        --device /dev/davinci13 \
+        --device /dev/davinci14 \
+        --device /dev/davinci15 \
+        --device /dev/davinci_manager \
+        --device /dev/devmm_svm \
+        --device /dev/hisi_hdc \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v /root/.cache:/root/.cache \
+        -it $IMAGE bash
+    ```
 
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
-docker run --rm \
-    --name vllm-ascend \
-    --shm-size=1g \
-    --net=host \
-    --device /dev/davinci0 \
-    --device /dev/davinci1 \
-    --device /dev/davinci2 \
-    --device /dev/davinci3 \
-    --device /dev/davinci4 \
-    --device /dev/davinci5 \
-    --device /dev/davinci6 \
-    --device /dev/davinci7 \
-    --device /dev/davinci8 \
-    --device /dev/davinci9 \
-    --device /dev/davinci10 \
-    --device /dev/davinci11 \
-    --device /dev/davinci12 \
-    --device /dev/davinci13 \
-    --device /dev/davinci14 \
-    --device /dev/davinci15 \
-    --device /dev/davinci_manager \
-    --device /dev/devmm_svm \
-    --device /dev/hisi_hdc \
-    -v /usr/local/dcmi:/usr/local/dcmi \
-    -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
-    -v /root/.cache:/root/.cache \
-    -it $IMAGE bash
-```
+=== "A2 series"
 
-::::
-::::{tab-item} A2 series
-:sync: A2
+    Start the docker image on your each node.
 
-Start the docker image on your each node.
+    ```bash
 
-```{code-block} bash
-   :substitutions:
-
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
-docker run --rm \
-    --name vllm-ascend \
-    --shm-size=1g \
-    --net=host \
-    --device /dev/davinci0 \
-    --device /dev/davinci1 \
-    --device /dev/davinci2 \
-    --device /dev/davinci3 \
-    --device /dev/davinci4 \
-    --device /dev/davinci5 \
-    --device /dev/davinci6 \
-    --device /dev/davinci7 \
-    --device /dev/davinci_manager \
-    --device /dev/devmm_svm \
-    --device /dev/hisi_hdc \
-    -v /usr/local/dcmi:/usr/local/dcmi \
-    -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
-    -v /root/.cache:/root/.cache \
-    -it $IMAGE bash
-```
-
-::::
-:::::
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
+    docker run --rm \
+        --name vllm-ascend \
+        --shm-size=1g \
+        --net=host \
+        --privileged=true \
+        --device /dev/davinci0 \
+        --device /dev/davinci1 \
+        --device /dev/davinci2 \
+        --device /dev/davinci3 \
+        --device /dev/davinci4 \
+        --device /dev/davinci5 \
+        --device /dev/davinci6 \
+        --device /dev/davinci7 \
+        --device /dev/davinci_manager \
+        --device /dev/devmm_svm \
+        --device /dev/hisi_hdc \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v /root/.cache:/root/.cache \
+        -it $IMAGE bash
+    ```
 
 After a successful docker run, you can verify the running container service by executing the `docker ps` command.
 
@@ -136,8 +127,7 @@ Run the following script to execute online inference.
 
 Startup Command:
 
-```{code-block} bash
-   :substitutions:
+```bash
 #!/bin/sh
 # [Optional] jemalloc
 # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
@@ -174,7 +164,7 @@ vllm serve Eco-Tech/Kimi-K2.5-W4A8 \
   --max-model-len 32768 \
   --max-num-batched-tokens 16384 \
   --gpu-memory-utilization 0.9 \
-  --compilation-config '{"cudagraph_capture_sizes":[4,8,16,32,64,128,256], "cudagraph_mode":"FULL_DECODE_ONLY"}' \
+  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
   --speculative-config '{"method":"eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens":3}' \
   --mm-encoder-tp-mode data
 ```
@@ -188,12 +178,12 @@ Key Parameter Descriptions:
 - `--mm-encoder-tp-mode` indicates how to optimize multi-modal encoder inference using tensor parallelism (TP). If you want to test the multimodal inputs, we recommend using `data`.
 - If you use the w4a8 weight, more memory will be allocated to kvcache, and you can try to increase system throughput to achieve greater throughput.
 
-Common Issues Tip: If you encounter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+Common Issues Tip: If you encounter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs/) for troubleshooting.
 
 Service Verification:
 
 ```shell
-curl http://<node0_ip>:8088/v1/chat/completions \
+curl http://<node_ip>:8088/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{
         "model": "kimi_k25",
@@ -304,7 +294,7 @@ vllm serve Eco-Tech/Kimi-K2.5-W4A8 \
   --max-model-len 32768 \
   --max-num-batched-tokens 16384 \
   --gpu-memory-utilization 0.9 \
-  --compilation-config '{"cudagraph_capture_sizes":[4,8,16,32,64], "cudagraph_mode":"FULL_DECODE_ONLY"}' \
+  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
   --speculative-config '{"method":"eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens":3}' \
   --mm-encoder-tp-mode data
 ```
@@ -371,7 +361,7 @@ vllm serve Eco-Tech/Kimi-K2.5-W4A8 \
   --max-model-len 32768 \
   --max-num-batched-tokens 16384 \
   --gpu-memory-utilization 0.9 \
-  --compilation-config '{"cudagraph_capture_sizes":[4,8,16,32,64], "cudagraph_mode":"FULL_DECODE_ONLY"}' \
+  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
   --speculative-config '{"method":"eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens":3}' \
   --mm-encoder-tp-mode data
 ```
@@ -386,7 +376,7 @@ Key Parameter Descriptions:
 - `--headless`: indicates that this vLLM instance is not the master service node. Only set on non-master nodes (Node 1). The master node (Node 0) should NOT set this flag.
 - For single-node deployment, we recommend using `dp4 tp4` instead of `dp2 tp8`.
 
-Common Issues Tip: If you encounter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+Common Issues Tip: If you encounter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs/) for troubleshooting.
 
 Service Verification:
 
@@ -503,7 +493,6 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
       --gpu-memory-utilization 0.8 \
       --enforce-eager \
       --speculative-config '{"method": "eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens": 3}' \
-      --additional-config '{"recompute_scheduler_enable":true}' \
       --mm-encoder-tp-mode data \
       --kv-transfer-config \
       '{"kv_connector": "MooncakeConnectorV1",
@@ -581,7 +570,6 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
       --gpu-memory-utilization 0.8 \
       --enforce-eager \
       --speculative-config '{"method": "eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens": 3}' \
-      --additional-config '{"recompute_scheduler_enable":true}' \
       --mm-encoder-tp-mode data \
       --kv-transfer-config \
       '{"kv_connector": "MooncakeConnectorV1",
@@ -657,7 +645,7 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
       --max-num-batched-tokens 256 \
       --no-enable-prefix-caching \
       --gpu-memory-utilization 0.95 \
-      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4,8,16,32,48,64,80,96,112,128,144,160]}' \
+      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
       --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": false}' \
       --speculative-config '{"method": "eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens": 3}' \
       --kv-transfer-config \
@@ -734,7 +722,7 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
       --max-num-batched-tokens 256 \
       --no-enable-prefix-caching \
       --gpu-memory-utilization 0.95 \
-      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4,8,16,32,48,64,80,96,112,128,144,160]}' \
+      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
       --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": false}' \
       --speculative-config '{"method": "eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens": 3}' \
       --kv-transfer-config \
@@ -759,8 +747,7 @@ Key Parameter Descriptions:
 
 - `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the communication optimization function on the prefill nodes.
 - `VLLM_ASCEND_ENABLE_MLAPO=1`: enables the fusion operator, which can significantly improve performance but consumes more NPU memory. In the Prefill-Decode (PD) separation scenario, enable MLAPO only on decode nodes.
-- `cudagraph_capture_sizes`: The recommended value is `n x (mtp + 1)`. And the min is `n = 1` and the max is `n = max-num-seqs`. For other values, it is recommended to set them to the number of frequently occurring requests on the Decode (D) node.
-- `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the Key-Value Cache (KV Cache) of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, it is recommended to enable this configuration on both prefill and decode nodes simultaneously.
+- `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the Key-Value Cache (KV Cache) of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, enable this configuration only on decode nodes.
 - `multistream_overlap_shared_expert: true`: When the Tensor Parallelism (TP) size is 1 or `enable_shared_expert_dp: true`, an additional stream is enabled to overlap the computation process of shared experts for improved efficiency.
 
 The `run_dp_template.sh` scripts use positional parameters (`$1`-`$7`) to receive configuration values from `launch_online_dp.py`:
@@ -894,7 +881,7 @@ The proxy returns HTTP 200 OK. The JSON response contains the `choices` field wi
 }
 ```
 
-Common Issues Tip: If you encounter issues with PD separation deployment, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+Common Issues Tip: If you encounter issues with PD separation deployment, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs/) for troubleshooting.
 
 ## 6 Functional Verification
 
@@ -984,7 +971,6 @@ There are three `vllm bench` subcommands:
 Take the `serve` as an example. Run the code as follows.
 
 ```shell
-export VLLM_USE_MODELSCOPE=True
 vllm bench serve --model Eco-Tech/Kimi-K2.5-w4a8 --dataset-name random --random-input 1024 --num-prompts 200 --request-rate 1 --save-result --result-dir ./
 ```
 
@@ -1032,7 +1018,7 @@ Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matr
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html); this chapter only covers model-specific issues.
+For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs/); this chapter only covers model-specific issues.
 
 - **Q: What is the recommended TP/DP configuration for single-node deployment?**
 

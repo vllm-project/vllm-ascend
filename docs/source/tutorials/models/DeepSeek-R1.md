@@ -29,13 +29,12 @@ You can use our official docker image to run `DeepSeek-R1-W8A8` directly.
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
 
-```{code-block} bash
-   :substitutions:
+```bash
 # Update --device according to your device (Atlas A2: /dev/davinci[0-7] Atlas A3:/dev/davinci[0-15]).
 # Update the vllm-ascend image according to your environment.
 # Note you should download the weight to /root/.cache in advance.
 # Update the vllm-ascend image
-export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 export NAME=vllm-ascend
 
 # Run the container using the defined variables
@@ -74,155 +73,148 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 - `DeepSeek-R1-W8A8`: require 1 Atlas 800 A3 (64G × 16) nodes or 2 Atlas 800 A2 (64G × 8).
 
-:::::{tab-set}
-:sync-group: install
+=== "DeepSeek-R1-W8A8 A3 series"
 
-::::{tab-item} DeepSeek-R1-W8A8 A3 series
+    ```shell
+    #!/bin/sh
 
-```shell
-#!/bin/sh
+    # this obtained through ifconfig
+    # nic_name is the network interface name corresponding to local_ip of the current node
+    nic_name="xxxx"
+    local_ip="xxxx"
 
-# this obtained through ifconfig
-# nic_name is the network interface name corresponding to local_ip of the current node
-nic_name="xxxx"
-local_ip="xxxx"
+    # AIV
+    export HCCL_OP_EXPANSION_MODE="AIV"
 
-# AIV
-export HCCL_OP_EXPANSION_MODE="AIV"
+    export HCCL_IF_IP=$local_ip
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export TP_SOCKET_IFNAME=$nic_name
+    export HCCL_SOCKET_IFNAME=$nic_name
+    export VLLM_ASCEND_BALANCE_SCHEDULING=1
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export VLLM_USE_MODELSCOPE=True
 
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-export VLLM_ASCEND_BALANCE_SCHEDULING=1
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_USE_MODELSCOPE=True
+    vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
+      --host 0.0.0.0 \
+      --port 8000 \
+      --data-parallel-size 4 \
+      --tensor-parallel-size 4 \
+      --quantization ascend \
+      --seed 1024 \
+      --served-model-name deepseek_r1 \
+      --enable-expert-parallel \
+      --max-num-seqs 16 \
+      --max-model-len 16384 \
+      --max-num-batched-tokens 4096 \
+      --trust-remote-code \
+      --gpu-memory-utilization 0.92 \
+      --speculative-config '{"num_speculative_tokens":3,"method":"mtp"}' \
+      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+    ```
 
-vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
-  --host 0.0.0.0 \
-  --port 8000 \
-  --data-parallel-size 4 \
-  --tensor-parallel-size 4 \
-  --quantization ascend \
-  --seed 1024 \
-  --served-model-name deepseek_r1 \
-  --enable-expert-parallel \
-  --max-num-seqs 16 \
-  --max-model-len 16384 \
-  --max-num-batched-tokens 4096 \
-  --trust-remote-code \
-  --gpu-memory-utilization 0.92 \
-  --speculative-config '{"num_speculative_tokens":3,"method":"mtp"}' \
-  --compilation-config '{"cudagraph_capture_sizes":[4,16,32,48,64], "cudagraph_mode": "FULL_DECODE_ONLY"}'
-```
+    **Notice:**
+    The parameters are explained as follows:
 
-**Notice:**
-The parameters are explained as follows:
+    - Setting the environment variable `VLLM_ASCEND_BALANCE_SCHEDULING=1` enables balance scheduling. This may help increase output throughput and reduce TPOT in v1 scheduler. However, TTFT may degrade in some scenarios. Furthermore, enabling this feature is not recommended in scenarios where PD is separated.
+    - For single-node deployment, we recommend using `dp4tp4` instead of `dp2tp8`.
+    - `--max-model-len` specifies the maximum context length - that is, the sum of input and output tokens for a single request. For performance testing with an input length of 3.5K and output length of 1.5K, a value of `16384` is sufficient, however, for precision testing, please set it to at least `35000`.
+    - `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.
+    - If you use the w4a8 weight, more memory will be allocated to kvcache, and you can try to increase system throughput to achieve greater throughput.
 
-- Setting the environment variable `VLLM_ASCEND_BALANCE_SCHEDULING=1` enables balance scheduling. This may help increase output throughput and reduce TPOT in v1 scheduler. However, TTFT may degrade in some scenarios. Furthermore, enabling this feature is not recommended in scenarios where PD is separated.
-- For single-node deployment, we recommend using `dp4tp4` instead of `dp2tp8`.
-- `--max-model-len` specifies the maximum context length - that is, the sum of input and output tokens for a single request. For performance testing with an input length of 3.5K and output length of 1.5K, a value of `16384` is sufficient, however, for precision testing, please set it to at least `35000`.
-- `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.
-- If you use the w4a8 weight, more memory will be allocated to kvcache, and you can try to increase system throughput to achieve greater throughput.
+=== "DeepSeek-R1-W8A8 A2 series"
 
-::::
-::::{tab-item} DeepSeek-R1-W8A8 A2 series
+    Run the following scripts on two nodes respectively.
 
-Run the following scripts on two nodes respectively.
+    **Node 0**
 
-**Node 0**
+    ```shell
+    #!/bin/sh
 
-```shell
-#!/bin/sh
+    # this obtained through ifconfig
+    # nic_name is the network interface name corresponding to local_ip of the current node
+    nic_name="xxxx"
+    local_ip="xxxx"
 
-# this obtained through ifconfig
-# nic_name is the network interface name corresponding to local_ip of the current node
-nic_name="xxxx"
-local_ip="xxxx"
+    export HCCL_IF_IP=$local_ip
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export TP_SOCKET_IFNAME=$nic_name
+    export HCCL_SOCKET_IFNAME=$nic_name
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=1
+    export HCCL_BUFFSIZE=200
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export VLLM_ASCEND_BALANCE_SCHEDULING=1
+    export HCCL_INTRA_PCIE_ENABLE=1
+    export HCCL_INTRA_ROCE_ENABLE=0
+    export VLLM_USE_MODELSCOPE=True
 
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
-export HCCL_BUFFSIZE=200
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ASCEND_BALANCE_SCHEDULING=1
-export HCCL_INTRA_PCIE_ENABLE=1
-export HCCL_INTRA_ROCE_ENABLE=0
-export VLLM_USE_MODELSCOPE=True
+    vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
+      --host 0.0.0.0 \
+      --port 8000 \
+      --data-parallel-size 4 \
+      --data-parallel-size-local 2 \
+      --data-parallel-address $local_ip \
+      --data-parallel-rpc-port 13389 \
+      --tensor-parallel-size 4 \
+      --quantization ascend \
+      --seed 1024 \
+      --served-model-name deepseek_r1 \
+      --enable-expert-parallel \
+      --max-num-seqs 16 \
+      --max-model-len 16384 \
+      --max-num-batched-tokens 4096 \
+      --trust-remote-code \
+      --gpu-memory-utilization 0.92 \
+      --speculative-config '{"num_speculative_tokens":3,"method":"mtp"}' \
+      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+    ```
 
-vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
-  --host 0.0.0.0 \
-  --port 8000 \
-  --data-parallel-size 4 \
-  --data-parallel-size-local 2 \
-  --data-parallel-address $local_ip \
-  --data-parallel-rpc-port 13389 \
-  --tensor-parallel-size 4 \
-  --quantization ascend \
-  --seed 1024 \
-  --served-model-name deepseek_r1 \
-  --enable-expert-parallel \
-  --max-num-seqs 16 \
-  --max-model-len 16384 \
-  --max-num-batched-tokens 4096 \
-  --trust-remote-code \
-  --gpu-memory-utilization 0.92 \
-  --speculative-config '{"num_speculative_tokens":3,"method":"mtp"}' \
-  --compilation-config '{"cudagraph_capture_sizes":[4,16,32,48,64], "cudagraph_mode": "FULL_DECODE_ONLY"}'
-```
+    **Node 1**
 
-**Node 1**
+    ```shell
+    #!/bin/sh
 
-```shell
-#!/bin/sh
+    # this is obtained through ifconfig
+    # nic_name is the network interface name corresponding to local_ip of the current node
+    nic_name="xxxx"
+    local_ip="xxxx"
+    node0_ip="xxxx" # same as the local_IP address in node 0
 
-# this is obtained through ifconfig
-# nic_name is the network interface name corresponding to local_ip of the current node
-nic_name="xxxx"
-local_ip="xxxx"
-node0_ip="xxxx" # same as the local_IP address in node 0
+    export HCCL_IF_IP=$local_ip
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export TP_SOCKET_IFNAME=$nic_name
+    export HCCL_SOCKET_IFNAME=$nic_name
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=1
+    export HCCL_BUFFSIZE=200
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export VLLM_ASCEND_BALANCE_SCHEDULING=1
+    export HCCL_INTRA_PCIE_ENABLE=1
+    export HCCL_INTRA_ROCE_ENABLE=0
+    export VLLM_USE_MODELSCOPE=True
 
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
-export HCCL_BUFFSIZE=200
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ASCEND_BALANCE_SCHEDULING=1
-export HCCL_INTRA_PCIE_ENABLE=1
-export HCCL_INTRA_ROCE_ENABLE=0
-export VLLM_USE_MODELSCOPE=True
-
-vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
-  --host 0.0.0.0 \
-  --port 8000 \
-  --headless \
-  --data-parallel-size 4 \
-  --data-parallel-size-local 2 \
-  --data-parallel-start-rank 2 \
-  --data-parallel-address $node0_ip \
-  --data-parallel-rpc-port 13389 \
-  --tensor-parallel-size 4 \
-  --quantization ascend \
-  --seed 1024 \
-  --served-model-name deepseek_r1 \
-  --enable-expert-parallel \
-  --max-num-seqs 16 \
-  --max-model-len 16384 \
-  --max-num-batched-tokens 4096 \
-  --trust-remote-code \
-  --gpu-memory-utilization 0.92 \
-  --speculative-config '{"num_speculative_tokens":3,"method":"mtp"}' \
-  --compilation-config '{"cudagraph_capture_sizes":[4,16,32,48,64], "cudagraph_mode": "FULL_DECODE_ONLY"}'
-```
-
-::::
-:::::
+    vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
+      --host 0.0.0.0 \
+      --port 8000 \
+      --headless \
+      --data-parallel-size 4 \
+      --data-parallel-size-local 2 \
+      --data-parallel-start-rank 2 \
+      --data-parallel-address $node0_ip \
+      --data-parallel-rpc-port 13389 \
+      --tensor-parallel-size 4 \
+      --quantization ascend \
+      --seed 1024 \
+      --served-model-name deepseek_r1 \
+      --enable-expert-parallel \
+      --max-num-seqs 16 \
+      --max-model-len 16384 \
+      --max-num-batched-tokens 4096 \
+      --trust-remote-code \
+      --gpu-memory-utilization 0.92 \
+      --speculative-config '{"num_speculative_tokens":3,"method":"mtp"}' \
+      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+    ```
 
 ### Prefill-Decode Disaggregation
 
