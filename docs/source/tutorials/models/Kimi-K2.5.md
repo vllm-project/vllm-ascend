@@ -237,7 +237,7 @@ Run the following scripts on two nodes respectively.
 
 === "Node 0"
 
-Startup Command:
+    Startup Command:
 
     ```shell
     #!/bin/sh
@@ -305,7 +305,7 @@ Startup Command:
 
 === "Node 1"
 
-Startup Command:
+    Startup Command:
 
     ```shell
     #!/bin/sh
