@@ -735,7 +735,23 @@ class NPUModelRunner(GPUModelRunner):
                 if num_computed_tokens < req_state.num_computed_tokens:
                     req_state.prev_num_draft_len = 0
 
-        return super()._update_states(scheduler_output)
+        result = super()._update_states(scheduler_output)
+
+        # For preempted-then-resumed requests, attach the prefill token
+        # count to the CachedRequestState so that its (patched) num_tokens
+        # property returns the full token history instead of just the
+        # original prompt length. The request only appears in
+        # scheduled_new_reqs once (first chunk), but the attribute
+        # persists on the state instance for subsequent steps.
+        for new_req_data in scheduler_output.scheduled_new_reqs:
+            if new_req_data.prefill_token_ids:
+                req_state = self.requests.get(new_req_data.req_id)
+                if req_state is not None:
+                    req_state._prefill_token_count = len(
+                        new_req_data.prefill_token_ids
+                    )
+
+        return result
 
     def _pad_query_start_loc_for_fia(
         self,

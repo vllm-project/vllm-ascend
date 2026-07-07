@@ -25,9 +25,32 @@ from vllm.v1.kv_cache_interface import KVCacheGroupSpec
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.pool.metadata import PoolingStates
 from vllm.v1.sample.logits_processor import BatchUpdateBuilder, LogitsProcessors
-from vllm.v1.worker.gpu_input_batch import InputBatch
+from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
 from vllm_ascend.worker.block_table import MultiGroupBlockTable
+
+# Patch CachedRequestState.num_tokens for preempted-then-resumed
+# requests. The scheduler's NewRequestData.prefill_token_ids carries
+# the full _all_token_ids (prompt + old output tokens). Store that
+# length on the request state so num_tokens reflects the total token
+# count, not just the original prompt length. This keeps the discard
+# decision (discard_requests_mask) aligned with the scheduler's
+# is_prefill_chunk without needing a global cache on the model runner.
+_original_num_tokens_prop = CachedRequestState.num_tokens
+
+
+def _patched_num_tokens(self) -> int:
+    # - Normal requests: base = num_prompt_tokens (e.g. 63)
+    # - Preempted requests: base = _prefill_token_count (e.g. 3685,
+    #   includes old output tokens).  output_token_ids grows naturally
+    #   as new tokens are appended during resumption/decode.
+    prefill_count = getattr(self, "_prefill_token_count", 0)
+    if prefill_count:
+        return prefill_count + len(self.output_token_ids)
+    return self.num_prompt_tokens + len(self.output_token_ids)
+
+
+CachedRequestState.num_tokens = property(_patched_num_tokens)
 
 
 class NPUInputBatch(InputBatch):
