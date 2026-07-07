@@ -33,7 +33,7 @@ def define_env(env):
     """Define environment variables and macros for mkdocs-macros plugin."""
 
     # Load commit info from files
-    repo_root = Path(__file__).resolve().parent
+    repo_root = Path(__file__).resolve().parent.parent.parent
     commit_path = repo_root / ".github" / "vllm-main-verified.commit"
     tag_path = repo_root / ".github" / "vllm-release-tag.commit"
 
