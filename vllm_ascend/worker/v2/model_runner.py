@@ -356,13 +356,14 @@ class NPUModelRunner(GPUModelRunner):
             cu_num_logits=cu_num_logits,
             cu_num_logits_np=cu_num_logits_np,
             has_structured_output_reqs=scheduler_output.has_structured_output_requests,
-            # TODO: only populated for R-SWA (not supported yet).
-            prompt_lens=None,
             # extra attributes for ascend npus.
             seq_lens_np=self.input_buffers.seq_lens_np,
             attn_state=attn_state,
         )
         if not vllm_version_is("0.24.0"):
+            # Upstream main adds prompt_lens for R-SWA; v0.24.0 InputBatch
+            # does not have this dataclass field yet.
+            input_batch_kwargs["prompt_lens"] = None
             input_batch_kwargs["is_padding"] = self.input_buffers.is_padding[:num_tokens_after_padding]
         self.input_batch = AscendInputBatch(**input_batch_kwargs)
 
