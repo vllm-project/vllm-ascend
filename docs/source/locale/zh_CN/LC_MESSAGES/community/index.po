@@ -1,0 +1,102 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2026, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-07 00:00+0000\n"
+"PO-Revision-Date: 2026-07-07 12:00+0800\n"
+"Last-Translator: \n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: manual\n"
+
+#: ../../source/community/index.md:1
+msgid "Community"
+msgstr "社区"
+
+#: ../../source/community/index.md:3
+msgid ""
+"Welcome to the vLLM Ascend community! This section covers governance, "
+"contribution workflows, and community resources."
+msgstr "欢迎加入 vLLM Ascend 社区！本节涵盖治理、贡献流程和社区资源。"
+
+#: ../../source/community/index.md:5
+msgid "Governance"
+msgstr "治理"
+
+#: ../../source/community/index.md:7
+msgid ""
+"**[Governance](governance.md)** — Project governance and decision-making "
+"process"
+msgstr "**[治理](governance.md)** — 项目治理和决策流程"
+
+#: ../../source/community/index.md:8
+msgid "**[Contributors](contributors.md)** — Our contributors"
+msgstr "**[贡献者](contributors.md)** — 我们的贡献者"
+
+#: ../../source/community/index.md:9
+msgid ""
+"**[Versioning Policy](versioning_policy.md)** — Versioning and release "
+"policy"
+msgstr "**[版本策略](versioning_policy.md)** — 版本与发布策略"
+
+#: ../../source/community/index.md:11
+msgid "Workflows"
+msgstr "工作流程"
+
+#: ../../source/community/index.md:13
+msgid ""
+"**[Issue Workflow Guidelines](issue-workflow-guidelines.md)** — How issues "
+"are triaged and managed"
+msgstr "**[Issue 工作流指南](issue-workflow-guidelines.md)** — Issue 如何分类和管理"
+
+#: ../../source/community/index.md:14
+msgid ""
+"**[Slash Commands](slash-commands.md)** — CI/CD slash commands for pull "
+"requests"
+msgstr "**[Slash 命令](slash-commands.md)** — PR 的 CI/CD Slash 命令"
+
+#: ../../source/community/index.md:16
+msgid "User Stories"
+msgstr "用户故事"
+
+#: ../../source/community/index.md:18
+msgid ""
+"**[User Stories](user_stories/index.md)** — Case studies from the community"
+msgstr "**[用户故事](user_stories/index.md)** — 社区案例分享"
+
+msgid "# Community"
+msgstr ""
+
+msgid "## Governance"
+msgstr ""
+
+msgid ""
+"- **[Governance](governance.md)** — Project governance and decision-making process\n"
+"- **[Contributors](contributors.md)** — Our contributors\n"
+"- **[Versioning Policy](versioning_policy.md)** — Versioning and release policy"
+msgstr ""
+
+msgid "## Workflows"
+msgstr ""
+
+msgid ""
+"- **[Issue Workflow Guidelines](issue-workflow-guidelines.md)** — How issues are triaged and managed\n"
+"- **[Slash Commands](slash-commands.md)** — CI/CD slash commands for pull requests"
+msgstr ""
+
+msgid "## User Stories"
+msgstr ""
+
+msgid ""
+"- **[User Stories](user_stories/index.md)** — Case studies from the "
+"community"
+msgstr ""

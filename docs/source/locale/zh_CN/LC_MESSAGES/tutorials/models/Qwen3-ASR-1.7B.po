@@ -1,16 +1,17 @@
+#
 msgid ""
 msgstr ""
-"Project-Id-Version: vllm-ascend \n"
+"Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
 "POT-Creation-Date: 2026-07-02 07:02+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
-"Language: zh_CN\n"
 "Language-Team: zh_CN <LL@li.org>\n"
-"Plural-Forms: nplurals=1; plural=0;\n"
+"Language: zh_CN\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: Babel 2.18.0\n"
 
 #: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:1
@@ -27,17 +28,17 @@ msgid ""
 "speech recognition (ASR) model developed by the Qwen Team. It delivers "
 "industry-leading recognition accuracy across Chinese/English multi-scene "
 "speech, Chinese dialects, multilingual and singing voice scenarios, with "
-"native support for long audio and streaming inference, and deep "
-"optimization for Ascend NPU hardware."
+"native support for long audio and streaming inference, and deep optimization"
+" for Ascend NPU hardware."
 msgstr ""
 "发布的Qwen3-ASR-1.7B是Qwen团队开发的轻量级高性能自动语音识别(ASR)模型。它在中英文多场景语音、中文方言、多语言及歌唱场景中提供行业领先的识别精度，原生支持长音频和流式推理，并针对Ascend"
 " NPU硬件进行了深度优化。"
 
 #: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:7
 msgid ""
-"This document will show the main verification steps of the model, "
-"including supported features, feature configuration, environment "
-"preparation, single-node deployment, accuracy and performance evaluation."
+"This document will show the main verification steps of the model, including "
+"supported features, feature configuration, environment preparation, single-"
+"node deployment, accuracy and performance evaluation."
 msgstr "本文档将展示该模型的主要验证步骤，包括支持特性、特性配置、环境准备、单节点部署、精度和性能评估。"
 
 #: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:9
@@ -50,25 +51,23 @@ msgstr "模型权重"
 
 #: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:13
 msgid ""
-"`Qwen3-ASR-1.7B`(BF16 version): requires 1 Ascend 910B (with 1 x 64G "
-"NPUs)."
+"`Qwen3-ASR-1.7B`(BF16 version): requires 1 Ascend 910B (with 1 x 64G NPUs)."
 msgstr ""
 "`Qwen3-ASR-1.7B`(BF16版本)：需要1个Ascend 910B（1 x 64G "
 "NPU）。[下载模型权重](https://modelscope.cn/models/Qwen/Qwen3-ASR-1.7B)"
 
 #: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:15
 msgid ""
-"`Qwen3-ASR-1.7B`(BF16 version): requires 1 Ascend 310P (with 1 x 48G "
-"NPUs). [Download model "
-"weight](https://modelscope.cn/models/Qwen/Qwen3-ASR-1.7B)."
+"`Qwen3-ASR-1.7B`(BF16 version): requires 1 Ascend 310P (with 1 x 48G NPUs). "
+"[Download model weight](https://modelscope.cn/models/Qwen/Qwen3-ASR-1.7B)."
 msgstr ""
 "`Qwen3-ASR-1.7B`(BF16版本)：需要1个Ascend 310P（1 x 48G "
 "NPU）。[下载模型权重](https://modelscope.cn/models/Qwen/Qwen3-ASR-1.7B)。"
 
 #: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:18
 msgid ""
-"It is recommended to download the model weight to the shared directory of"
-" multiple nodes, such as `/root/.cache/`."
+"It is recommended to download the model weight to the shared directory of "
+"multiple nodes, such as `/root/.cache/`."
 msgstr "建议将模型权重下载到多节点共享目录，例如`/root/.cache/`。"
 
 #: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:20
@@ -80,7 +79,8 @@ msgid "`Qwen3-ASR-1.7B` is supported in `vllm-ascend`."
 msgstr "`Qwen3-ASR-1.7B`在`vllm-ascend`中得到支持。"
 
 #: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:24
-msgid "You can use our official docker image to run `Qwen3-ASR-1.7B` directly."
+msgid ""
+"You can use our official docker image to run `Qwen3-ASR-1.7B` directly."
 msgstr "您可以直接使用我们的官方docker镜像运行`Qwen3-ASR-1.7B`。"
 
 #: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:47
@@ -112,7 +112,8 @@ msgid "Functional Verification"
 msgstr "功能验证"
 
 #: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:79
-msgid "Once your server is started, you can query the model with input prompts:"
+msgid ""
+"Once your server is started, you can query the model with input prompts:"
 msgstr "服务器启动后，您可以使用输入提示词查询模型："
 
 #: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:95
@@ -121,8 +122,7 @@ msgstr "精度评估"
 
 #: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:97
 msgid ""
-"After all samples were processed, transcription quality was measured "
-"using:"
+"After all samples were processed, transcription quality was measured using:"
 msgstr "处理完所有样本后，使用以下指标衡量转录质量："
 
 #: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:99
@@ -150,3 +150,51 @@ msgid ""
 "Further benchmarking is recommended for latency distribution, concurrent "
 "throughput, long-audio scenarios, and system resource utilization."
 msgstr "建议进一步对延迟分布、并发吞吐量、长音频场景和系统资源利用率进行基准测试。"
+
+msgid "# Qwen3-ASR-1.7B"
+msgstr ""
+
+msgid "## Introduction"
+msgstr ""
+
+msgid "## Environment Preparation"
+msgstr ""
+
+msgid "### Model Weight"
+msgstr ""
+
+msgid ""
+"`Qwen3-ASR-1.7B`(BF16 version): requires 1 Ascend 310P (with 1 x 48G NPUs).\n"
+"[Download model weight](https://modelscope.cn/models/Qwen/Qwen3-ASR-1.7B)."
+msgstr ""
+
+msgid "### Installation"
+msgstr ""
+
+msgid ""
+"- Install `vllm-ascend` from source, refer to "
+"[installation](../../installation.md)."
+msgstr ""
+
+msgid "## Deployment"
+msgstr ""
+
+msgid "### Atlas 300I A2 2UP"
+msgstr ""
+
+msgid "### Atlas 300I DUO"
+msgstr ""
+
+msgid "## Functional Verification"
+msgstr ""
+
+msgid "## Accuracy Evaluation"
+msgstr ""
+
+msgid ""
+"- WER (Word Error Rate) for word-level recognition accuracy\n"
+"- CER (Character Error Rate) for character-level recognition accuracy"
+msgstr ""
+
+msgid "### Remarks"
+msgstr ""

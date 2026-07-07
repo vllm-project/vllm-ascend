@@ -6,17 +6,17 @@
 #
 msgid ""
 msgstr ""
-"Project-Id-Version: vllm-ascend \n"
+"Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
 "POT-Creation-Date: 2026-05-22 04:30+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
-"Language: zh_CN\n"
 "Language-Team: zh_CN <LL@li.org>\n"
-"Plural-Forms: nplurals=1; plural=0;\n"
+"Language: zh_CN\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: Babel 2.18.0\n"
 
 #: ../../source/community/issue-workflow-guidelines.md:1
@@ -25,13 +25,14 @@ msgstr "Issue 工作流指南"
 
 #: ../../source/community/issue-workflow-guidelines.md:3
 msgid ""
-"This document defines the standard lifecycle for Issues in the vLLM "
-"Ascend project — from creation through triage, active handling, and final"
-" closure. It establishes consistent label usage, owner assignment, and "
-"communication expectations to ensure smooth collaboration between "
-"contributors and maintainers."
+"This document defines the standard lifecycle for Issues in the vLLM Ascend "
+"project — from creation through triage, active handling, and final closure. "
+"It establishes consistent label usage, owner assignment, and communication "
+"expectations to ensure smooth collaboration between contributors and "
+"maintainers."
 msgstr ""
-"本文档定义了 vLLM Ascend 项目中 Issue 的标准生命周期——从创建、分类、积极处理到最终关闭。它建立了统一的标签使用、负责人分配和沟通期望，以确保贡献者与维护者之间的顺畅协作。"
+"本文档定义了 vLLM Ascend 项目中 Issue "
+"的标准生命周期——从创建、分类、积极处理到最终关闭。它建立了统一的标签使用、负责人分配和沟通期望，以确保贡献者与维护者之间的顺畅协作。"
 
 #: ../../source/community/issue-workflow-guidelines.md:5
 msgid "1. Label Categories"
@@ -58,7 +59,8 @@ msgid "`triage review`"
 msgstr "`triage review`"
 
 #: ../../source/community/issue-workflow-guidelines.md
-msgid "Newly filed or unseen issue awaiting initial assessment by a maintainer"
+msgid ""
+"Newly filed or unseen issue awaiting initial assessment by a maintainer"
 msgstr "新提交或未查看的 Issue，等待维护者进行初步评估"
 
 #: ../../source/community/issue-workflow-guidelines.md
@@ -95,8 +97,8 @@ msgstr "`stale`"
 
 #: ../../source/community/issue-workflow-guidelines.md
 msgid ""
-"No activity for an extended period; parties have been notified and the "
-"issue will be auto-closed if there is no response"
+"No activity for an extended period; parties have been notified and the issue"
+" will be auto-closed if there is no response"
 msgstr "长时间无活动；相关方已收到通知，若无回应将自动关闭"
 
 #: ../../source/community/issue-workflow-guidelines.md
@@ -121,8 +123,8 @@ msgstr "`wontfix`"
 
 #: ../../source/community/issue-workflow-guidelines.md
 msgid ""
-"The issue will not be addressed; as this issue is out of scope, unviable,"
-" or intentionally ignored for the foreseeable future"
+"The issue will not be addressed; as this issue is out of scope, unviable, or"
+" intentionally ignored for the foreseeable future"
 msgstr "此 Issue 将不予处理；因其超出范围、不可行，或在可预见的未来被有意忽略"
 
 #: ../../source/community/issue-workflow-guidelines.md:22
@@ -147,8 +149,8 @@ msgstr "`RFC`"
 
 #: ../../source/community/issue-workflow-guidelines.md
 msgid ""
-"Request for Comments — significant architectural or design change "
-"requiring community discussion"
+"Request for Comments — significant architectural or design change requiring "
+"community discussion"
 msgstr "征求意见——需要社区讨论的重大架构或设计变更"
 
 #: ../../source/community/issue-workflow-guidelines.md
@@ -278,8 +280,8 @@ msgstr "当值班维护者首次接手 Issue 时："
 #: ../../source/community/issue-workflow-guidelines.md:61
 msgid ""
 "Apply `triaged` to signal that the issue can be classified and Add the "
-"relevant module label so the issue can be routed to the appropriate "
-"module maintainer for detailed triage."
+"relevant module label so the issue can be routed to the appropriate module "
+"maintainer for detailed triage."
 msgstr "应用 `triaged` 标签表示该 Issue 可被分类，并添加相关模块标签，以便将其路由至相应的模块维护者进行详细分类。"
 
 #: ../../source/community/issue-workflow-guidelines.md:62
@@ -299,9 +301,12 @@ msgstr "在彻底审查 Issue 内容后："
 #: ../../source/community/issue-workflow-guidelines.md:68
 msgid ""
 "Verify and apply the appropriate **issue type** label (`bug`, `feature "
-"request`, `RFC`, `question`, `documentation`, `installation`, "
-"`performance`, `new model`, etc.)."
-msgstr "验证并应用适当的 **Issue 类型** 标签（`bug`、`feature request`、`RFC`、`question`、`documentation`、`installation`、`performance`、`new model` 等）。"
+"request`, `RFC`, `question`, `documentation`, `installation`, `performance`,"
+" `new model`, etc.)."
+msgstr ""
+"验证并应用适当的 **Issue 类型** 标签（`bug`、`feature "
+"request`、`RFC`、`question`、`documentation`、`installation`、`performance`、`new "
+"model` 等）。"
 
 #: ../../source/community/issue-workflow-guidelines.md:69
 msgid "Handle terminal states:"
@@ -309,9 +314,9 @@ msgstr "处理终态："
 
 #: ../../source/community/issue-workflow-guidelines.md:70
 msgid ""
-"For duplicates, apply the `duplicated` label, provide an explanation and "
-"a link to the existing issue or PR. If there are no further questions, "
-"close the issue."
+"For duplicates, apply the `duplicated` label, provide an explanation and a "
+"link to the existing issue or PR. If there are no further questions, close "
+"the issue."
 msgstr "对于重复项，应用 `duplicated` 标签，提供解释并链接到现有 Issue 或 PR。若无进一步问题，则关闭该 Issue。"
 
 #: ../../source/community/issue-workflow-guidelines.md:71
@@ -319,7 +324,9 @@ msgid ""
 "For invalid reports, provide an explanation, apply the `invalid` and "
 "`resolved` label, and close the issue. The issue creator can comment or "
 "request to reopen if they have further questions."
-msgstr "对于无效报告，提供解释，应用 `invalid` 和 `resolved` 标签，并关闭 Issue。Issue 创建者如有进一步问题，可评论或请求重新打开。"
+msgstr ""
+"对于无效报告，提供解释，应用 `invalid` 和 `resolved` 标签，并关闭 Issue。Issue "
+"创建者如有进一步问题，可评论或请求重新打开。"
 
 #: ../../source/community/issue-workflow-guidelines.md:72
 msgid "Optionally apply a **priority** label (`high`, `medium`, or `low`)."
@@ -327,8 +334,8 @@ msgstr "可选地应用 **优先级** 标签（`high`、`medium` 或 `low`）。
 
 #: ../../source/community/issue-workflow-guidelines.md:73
 msgid ""
-"If community contributions are welcome, apply `help wanted`. For well-"
-"scoped beginner-friendly tasks, also apply `good first issue`."
+"If community contributions are welcome, apply `help wanted`. For well-scoped"
+" beginner-friendly tasks, also apply `good first issue`."
 msgstr "如果欢迎社区贡献，应用 `help wanted`。对于范围明确、适合初学者的任务，同时应用 `good first issue`。"
 
 #: ../../source/community/issue-workflow-guidelines.md:74
@@ -353,12 +360,105 @@ msgstr "保持 Issue 处于进行中状态，直至通过合并的 PR 或其他�
 
 #: ../../source/community/issue-workflow-guidelines.md:81
 msgid ""
-"Once the issue is resolved, apply `resolved` and close it, ideally with a"
-" reference to the merged PR or a short explanation of the resolution."
+"Once the issue is resolved, apply `resolved` and close it, ideally with a "
+"reference to the merged PR or a short explanation of the resolution."
 msgstr "Issue 解决后，应用 `resolved` 标签并关闭，最好附上合并的 PR 引用或简要的解决说明。"
 
 #: ../../source/community/issue-workflow-guidelines.md:82
 msgid ""
-"If the issue remains inactive for an extended period, apply `stale` as "
-"the final state before auto-closure."
+"If the issue remains inactive for an extended period, apply `stale` as the "
+"final state before auto-closure."
 msgstr "如果 Issue 长时间处于非活跃状态，在自动关闭前应用 `stale` 作为最终状态。"
+
+msgid "# Issue Workflow Guidelines"
+msgstr ""
+
+msgid "## 1. Label Categories"
+msgstr ""
+
+msgid "### 1.1 Status Labels"
+msgstr ""
+
+msgid ""
+"| Label           | Description                                                                                                                      |\n"
+"|-----------------|----------------------------------------------------------------------------------------------------------------------------------|\n"
+"| `triage review` | Newly filed or unseen issue awaiting initial assessment by a maintainer                                                          |\n"
+"| `triaged`       | Assessment complete; type, priority, and module have been determined                                                             |\n"
+"| `wait-feedback` | Blocked on an external dependency or awaiting a response before work can proceed                                                 |\n"
+"| `resolved`      | Issue has been closed — either via a merged PR, or through non-code resolution (e.g., answered question, configuration guidance) |\n"
+"| `stale`         | No activity for an extended period; parties have been notified and the issue will be auto-closed if there is no response         |\n"
+"| `duplicated`    | A duplicate of an existing open issue or merged PR                                                                               |\n"
+"| `invalid`       | The issue report is invalid, unclear, or not reproducible                                                                        |\n"
+"| `wontfix`       | The issue will not be addressed; as this issue is out of scope, unviable, or intentionally ignored for the foreseeable future    |"
+msgstr ""
+
+msgid "### 1.2 Type Labels"
+msgstr ""
+
+msgid ""
+"| Label             | Description                                                                                      |\n"
+"|-------------------|--------------------------------------------------------------------------------------------------|\n"
+"| `feature request` | Request for new functionality                                                                    |\n"
+"| `RFC`             | Request for Comments — significant architectural or design change requiring community discussion |\n"
+"| `new model`       | Request to add support for a new model on Ascend NPU                                             |\n"
+"| `usage`           | A usage question; no code change may be required                                                 |\n"
+"| `question`        | A general question; no code change may be required                                               |\n"
+"| `documentation`   | Improvements or corrections to documentation                                                     |\n"
+"| `installation`    | Issues related to setup and deployment                                                           |\n"
+"| `performance`     | Performance regression, bottleneck, or optimization request                                      |\n"
+"| `bug`             | Something is not working correctly or behaves unexpectedly                                       |"
+msgstr ""
+
+msgid "### 1.3 Priority Labels (Optional)"
+msgstr ""
+
+msgid ""
+"| Label    | Description                                                    |\n"
+"|----------|----------------------------------------------------------------|\n"
+"| `high`   | High priority; should be resolved in the current or next cycle |\n"
+"| `medium` | Normal priority; handled in the regular development flow       |\n"
+"| `low`    | Low priority; edge case or minor issue that can be deferred    |"
+msgstr ""
+
+msgid "### 1.4 Contribution Labels (Optional)"
+msgstr ""
+
+msgid ""
+"| Label              | Description                                                      |\n"
+"|--------------------|------------------------------------------------------------------|\n"
+"| `good first issue` | A well-scoped, low-complexity task suitable for new contributors |\n"
+"| `help wanted`      | Community contributions are welcome and encouraged               |"
+msgstr ""
+
+msgid "## 2. Workflow"
+msgstr ""
+
+msgid "### Phase 1 — First Response"
+msgstr ""
+
+msgid ""
+"- Apply `triaged` to signal that the issue can be classified and Add the relevant module label so the issue can be routed to the appropriate module maintainer for detailed triage.\n"
+"- Apply `triage review` to signal that the issue requires more review and specitfic analysis before classification."
+msgstr ""
+
+msgid "### Phase 2 — Triage and Analysis"
+msgstr ""
+
+msgid ""
+"- Verify and apply the appropriate **issue type** label (`bug`, `feature request`, `RFC`, `question`, `documentation`, `installation`, `performance`, `new model`, etc.).\n"
+"- Handle terminal states:\n"
+"    - For duplicates, apply the `duplicated` label, provide an explanation and a link to the existing issue or PR. If there are no further questions, close the issue.\n"
+"    - For invalid reports, provide an explanation, apply the `invalid` and `resolved` label, and close the issue. The issue creator can comment or request to reopen if they have further questions.\n"
+"- Optionally apply a **priority** label (`high`, `medium`, or `low`).\n"
+"- If community contributions are welcome, apply `help wanted`. For well-scoped beginner-friendly tasks, also apply `good first issue`.\n"
+"- Assign the issue owner and replace `triage review` with `triaged` to indicate that triage is complete."
+msgstr ""
+
+msgid "### Phase 3 — Closure"
+msgstr ""
+
+msgid ""
+"- Keep the issue in progress until it is resolved through a merged PR or another confirmed resolution path.\n"
+"- Once the issue is resolved, apply `resolved` and close it, ideally with a reference to the merged PR or a short explanation of the resolution.\n"
+"- If the issue remains inactive for an extended period, apply `stale` as the final state before auto-closure."
+msgstr ""

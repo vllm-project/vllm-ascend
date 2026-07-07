@@ -29,10 +29,12 @@ from openai import AsyncOpenAI
 
 SYSTEM_PROMPT = (
     "You are a professional technical documentation translation expert, "
-    "proficient in English-Chinese technical document translation."
+    "proficient in translating MkDocs markdown documentation from English to Chinese."
 )
 
-TRANSLATION_PROMPT = """Translate this Sphinx PO file (gettext format) from English to Chinese.
+TRANSLATION_PROMPT = """Translate this PO file (gettext format) from English to Chinese.
+
+This PO file is used to translate MkDocs (Material for MkDocs) markdown documentation.
 
 Rules:
 1. Only modify msgstr "", keep msgid unchanged
@@ -44,10 +46,10 @@ Rules:
 7. For difficult parts, keep original English
 8. Remove "#, fuzzy" markers
 9. Do NOT translate proper nouns: person names, contributor names, author names must be kept as-is in msgstr
-10. In list items, no space between marker and Chinese text: "1.中文" not "1. 中文"
-    (space causes Sphinx to ignore the translation)
-11.For Markdown links [text](url), translate the display text inside [], but keep the URL inside () unchanged.
-   Example: [Section 5.1](#51-single-node-online-deployment) → [第 5.1 节](#51-single-node-online-deployment)
+10. For markdown links [text](url), translate the display text inside [], but keep the URL inside () unchanged.
+   Example: [Quick Start](quick_start.md) → [快速开始](quick_start.md)
+11. For markdown headings (lines starting with #), translate the heading text
+12. Preserve markdown formatting: bold (**text**), italic (*text*), inline code (`code`), lists (-, 1.), blockquotes (>)
 
 Return ONLY the complete PO file content, no extra explanations.
 

@@ -6,17 +6,17 @@
 #
 msgid ""
 msgstr ""
-"Project-Id-Version: vllm-ascend \n"
+"Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
 "POT-Creation-Date: 2026-04-14 02:04+0000\n"
 "PO-Revision-Date: 2026-01-22 18:35+0800\n"
 "Last-Translator: Gemini\n"
-"Language: zh_CN\n"
 "Language-Team: zh_CN <LL@li.org>\n"
-"Plural-Forms: nplurals=1; plural=0;\n"
+"Language: zh_CN\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: Babel 2.18.0\n"
 
 #: ../../source/user_guide/deployment_guide/using_volcano_kthena.md:1
@@ -25,16 +25,16 @@ msgstr "使用 Volcano Kthena"
 
 #: ../../source/user_guide/deployment_guide/using_volcano_kthena.md:3
 msgid ""
-"This guide shows how to run **prefill–decode (PD) disaggregation** on "
-"Huawei Ascend NPUs using **vLLM-Ascend**, with "
+"This guide shows how to run **prefill–decode (PD) disaggregation** on Huawei"
+" Ascend NPUs using **vLLM-Ascend**, with "
 "[**Kthena**](https://kthena.volcano.sh/) handling orchestration on "
 "Kubernetes. About vLLM support with Kthena, please refer to [Deploy vLLM "
 "with "
 "Kthena](https://docs.vllm.ai/en/latest/deployment/integrations/kthena/)."
 msgstr ""
 "本指南介绍如何使用 **vLLM-Ascend** 在华为昇腾 NPU 上运行 **预填充-解码 (PD) 分离** 推理，并由 "
-"[**Kthena**](https://kthena.volcano.sh/) 在 Kubernetes 上负责编排。关于 Kthena 对 "
-"vLLM 的支持，请参考 [使用 Kthena 部署 "
+"[**Kthena**](https://kthena.volcano.sh/) 在 Kubernetes 上负责编排。关于 Kthena 对 vLLM"
+" 的支持，请参考 [使用 Kthena 部署 "
 "vLLM](https://docs.vllm.ai/en/latest/deployment/integrations/kthena/)。"
 
 #: ../../source/user_guide/deployment_guide/using_volcano_kthena.md:7
@@ -54,7 +54,8 @@ msgid "Processes input tokens and builds the key–value (KV) cache."
 msgstr "处理输入令牌并构建键值 (KV) 缓存。"
 
 #: ../../source/user_guide/deployment_guide/using_volcano_kthena.md:13
-msgid "Batch-friendly, high-throughput, well-suited to parallel NPU execution."
+msgid ""
+"Batch-friendly, high-throughput, well-suited to parallel NPU execution."
 msgstr "批处理友好、高吞吐量，非常适合 NPU 并行执行。"
 
 #: ../../source/user_guide/deployment_guide/using_volcano_kthena.md:14
@@ -81,14 +82,16 @@ msgstr "2.使用 Kthena 在 Kubernetes 上部署"
 
 #: ../../source/user_guide/deployment_guide/using_volcano_kthena.md:24
 msgid ""
-"[Kthena](https://kthena.volcano.sh/) is a Kubernetes-native LLM inference"
-" platform that transforms how organizations deploy and manage Large "
-"Language Models in production. Built with declarative model lifecycle "
-"management and intelligent request routing, it provides high-performance "
-"and enterprise-grade scalability for LLM inference workloads. In this "
-"example, we use three key Custom Resource Definitions (CRDs):"
+"[Kthena](https://kthena.volcano.sh/) is a Kubernetes-native LLM inference "
+"platform that transforms how organizations deploy and manage Large Language "
+"Models in production. Built with declarative model lifecycle management and "
+"intelligent request routing, it provides high-performance and enterprise-"
+"grade scalability for LLM inference workloads. In this example, we use three"
+" key Custom Resource Definitions (CRDs):"
 msgstr ""
-"[Kthena](https://kthena.volcano.sh/) 是一个 Kubernetes 原生的 LLM 推理平台，它改变了组织在生产环境中部署和管理大语言模型的方式。它基于声明式模型生命周期管理和智能请求路由构建，为 LLM 推理工作负载提供高性能和企业级可扩展性。在本示例中，我们使用了三个关键的自定义资源定义 (CRD)："
+"[Kthena](https://kthena.volcano.sh/) 是一个 Kubernetes 原生的 LLM "
+"推理平台，它改变了组织在生产环境中部署和管理大语言模型的方式。它基于声明式模型生命周期管理和智能请求路由构建，为 LLM "
+"推理工作负载提供高性能和企业级可扩展性。在本示例中，我们使用了三个关键的自定义资源定义 (CRD)："
 
 #: ../../source/user_guide/deployment_guide/using_volcano_kthena.md:26
 msgid "`ModelServing` — defines the workloads (prefill and decode roles)."
@@ -104,8 +107,8 @@ msgstr "`ModelRoute` — 暴露一个稳定的模型端点。"
 
 #: ../../source/user_guide/deployment_guide/using_volcano_kthena.md:30
 msgid ""
-"This section uses the `deepseek-ai/DeepSeek-V2-Lite` example, but you can"
-" swap in any model supported by vLLM-Ascend."
+"This section uses the `deepseek-ai/DeepSeek-V2-Lite` example, but you can "
+"swap in any model supported by vLLM-Ascend."
 msgstr "本节使用 `deepseek-ai/DeepSeek-V2-Lite` 作为示例，但您可以替换为 vLLM-Ascend 支持的任何模型。"
 
 #: ../../source/user_guide/deployment_guide/using_volcano_kthena.md:32
@@ -118,25 +121,24 @@ msgstr "拥有昇腾 NPU 节点的 Kubernetes 集群："
 
 #: ../../source/user_guide/deployment_guide/using_volcano_kthena.md:36
 msgid ""
-"The resources corresponding to different NPU Drivers may vary slightly. "
-"For example:"
+"The resources corresponding to different NPU Drivers may vary slightly. For "
+"example:"
 msgstr "对应不同 NPU 驱动程序的资源名称可能略有不同。例如："
 
 #: ../../source/user_guide/deployment_guide/using_volcano_kthena.md:38
 msgid ""
 "If using [MindCluster](https://gitee.com/ascend/mind-"
-"cluster#https://gitee.com/link?target=https%3A%2F%2Fgitcode.com%2FAscend"
-"%2Fmind-cluster), please use `huawei.com/Ascend310P` or "
-"`huawei.com/Ascend910`."
+"cluster#https://gitee.com/link?target=https%3A%2F%2Fgitcode.com%2FAscend%2Fmind-"
+"cluster), please use `huawei.com/Ascend310P` or `huawei.com/Ascend910`."
 msgstr ""
 "如果使用 [MindCluster](https://gitee.com/ascend/mind-cluster)，请使用 "
 "`huawei.com/Ascend310P` 或 `huawei.com/Ascend910`。"
 
 #: ../../source/user_guide/deployment_guide/using_volcano_kthena.md:40
 msgid ""
-"If running on CCE (Cloud Container Engine) of Huawei Cloud and the [CCE "
-"AI Suite Plugin (Ascend NPU)](https://support.huaweicloud.com/intl/en-us"
-"/usermanual-cce/cce_10_0239.html) is installed, please use "
+"If running on CCE (Cloud Container Engine) of Huawei Cloud and the [CCE AI "
+"Suite Plugin (Ascend NPU)](https://support.huaweicloud.com/intl/en-"
+"us/usermanual-cce/cce_10_0239.html) is installed, please use "
 "`huawei.com/ascend-310` or `huawei.com/ascend-1980`."
 msgstr ""
 "如果运行在华为云 CCE（云容器引擎）上且已安装 [CCE AI 套件插件 (Ascend "
@@ -162,8 +164,9 @@ msgid ""
 "sh/kthena/blob/main/examples/model-serving/prefill-decode-"
 "disaggregation.yaml>"
 msgstr ""
-"Kthena 提供了一个具体示例：<https://github.com/volcano-sh/kthena/blob/main/examples"
-"/model-serving/prefill-decode-disaggregation.yaml>"
+"Kthena 提供了一个具体示例：<https://github.com/volcano-"
+"sh/kthena/blob/main/examples/model-serving/prefill-decode-"
+"disaggregation.yaml>"
 
 #: ../../source/user_guide/deployment_guide/using_volcano_kthena.md:48
 msgid "Deploy it with the command below:"
@@ -188,8 +191,8 @@ msgstr "`deepseek-v2-lite-0-decode-0-0`"
 
 #: ../../source/user_guide/deployment_guide/using_volcano_kthena.md:298
 msgid ""
-"To enable the LLM access, we still need to configure the routing layer "
-"with `ModelServer` and `ModelRoute`."
+"To enable the LLM access, we still need to configure the routing layer with "
+"`ModelServer` and `ModelRoute`."
 msgstr "为了启用 LLM 访问，我们仍需要通过 `ModelServer` 和 `ModelRoute` 配置路由层。"
 
 #: ../../source/user_guide/deployment_guide/using_volcano_kthena.md:300
@@ -293,3 +296,82 @@ msgid ""
 "For more advanced features, please refer to the [Kthena "
 "website](https://kthena.volcano.sh/)."
 msgstr "更多高级功能，请参考 [Kthena 网站](https://kthena.volcano.sh/)。"
+
+msgid "# Using Volcano Kthena"
+msgstr ""
+
+msgid "## 2. Deploy on Kubernetes with Kthena"
+msgstr ""
+
+msgid ""
+"- `ModelServing` — defines the workloads (prefill and decode roles).\n"
+"- `ModelServer` — manages PD groupings and internal routing.\n"
+"- `ModelRoute` — exposes a stable model endpoint."
+msgstr ""
+
+msgid "### 2.1 Prerequisites"
+msgstr ""
+
+msgid "- Kubernetes cluster with Ascend NPU nodes:"
+msgstr ""
+
+msgid ""
+"- If using [MindCluster](https://gitee.com/ascend/mind-"
+"cluster#https://gitee.com/link?target=https%3A%2F%2Fgitcode.com%2FAscend%2Fmind-"
+"cluster), please use `huawei.com/Ascend310P` or `huawei.com/Ascend910`."
+msgstr ""
+
+msgid ""
+"- If running on CCE (Cloud Container Engine) of Huawei Cloud and the [CCE AI"
+" Suite Plugin (Ascend NPU)](https://support.huaweicloud.com/intl/en-"
+"us/usermanual-cce/cce_10_0239.html) is installed, please use "
+"`huawei.com/ascend-310` or `huawei.com/ascend-1980`."
+msgstr ""
+
+msgid ""
+"- Kthena installed. Please follow the [Kthena installation "
+"guide](https://kthena.volcano.sh/docs/getting-started/installation)."
+msgstr ""
+
+msgid ""
+"### 2.2 Deploy Prefill-Decode Disaggregated DeepSeek-V2-Lite on Kubernetes"
+msgstr ""
+
+msgid ""
+"- `deepseek-v2-lite-0-prefill-0-0`\n"
+"- `deepseek-v2-lite-0-decode-0-0`"
+msgstr ""
+
+msgid "### 2.3 ModelServer: PD Group Management"
+msgstr ""
+
+msgid ""
+"- Selects the `ModelServing` workloads via labels.\n"
+"- Groups prefill and decode Pods into PD pairs.\n"
+"- Configures KV connector details and timeouts.\n"
+"- Exposes an internal gRPC/HTTP interface."
+msgstr ""
+
+msgid "### 2.4 ModelRoute: User-Facing Endpoint"
+msgstr ""
+
+msgid "## 3. Verification"
+msgstr ""
+
+msgid "### 3.1 Check Workloads"
+msgstr ""
+
+msgid "### 3.2 Test the Chat Endpoint"
+msgstr ""
+
+msgid ""
+"- The prefill and decode services are both running on Ascend NPUs.\n"
+"- KV transfer between them is working.\n"
+"- The Kthena routing layer is correctly fronting the vLLM-Ascend plugin."
+msgstr ""
+
+msgid "## 4. Cleanup"
+msgstr ""
+
+msgid "## 5. Summary"
+msgstr ""

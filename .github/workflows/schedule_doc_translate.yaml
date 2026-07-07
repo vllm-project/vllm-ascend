@@ -61,10 +61,11 @@ jobs:
           git config user.email "${{ github.actor }}@users.noreply.github.com"
           git checkout -B "${BRANCH_NAME}" "upstream/${TARGET_BRANCH}"
 
-          # Use latest translation script from upstream/main
+          # Use latest translation scripts from upstream/main
           git checkout upstream/main -- .github/workflows/scripts/po_translate.py
+          git checkout upstream/main -- .github/workflows/scripts/detect_po_changes.py
           git checkout upstream/main -- docs/requirements-docs.txt
-          git restore --staged .github/workflows/scripts/po_translate.py docs/requirements-docs.txt
+          git restore --staged .github/workflows/scripts/po_translate.py .github/workflows/scripts/detect_po_changes.py docs/requirements-docs.txt
 
       - name: Setup Python
         uses: actions/setup-python@v6
@@ -74,27 +75,29 @@ jobs:
       - name: Build docs and generate PO files
         working-directory: ./docs
         run: |
-          sudo apt-get update && sudo apt-get install -y make
           pip install -r requirements-docs.txt
-          make clean && make html
-          sphinx-build -b gettext source _build/gettext
-          sphinx-intl update -p _build/gettext -l zh_CN
+          cd ..
+          python .github/workflows/scripts/detect_po_changes.py --output-json /tmp/po_changes.json
 
       - name: Detect PO files to translate
         id: detect
         run: |
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          tracked=$(git diff --name-only --diff-filter=ACMUX || true)
-          untracked=$(git ls-files --others --exclude-standard || true)
-          po_files=$(printf "%s\n%s" "$tracked" "$untracked" | grep '\.po$' | tr '\n' ',' | sed 's/,$//' || true)
+          [ ! -f /tmp/po_changes.json ] && echo "No changes detected" && exit 0
 
-          if [ -z "$po_files" ]; then
-            echo "No PO files to translate"
-            echo "has_changes=false" >> $GITHUB_OUTPUT
+          has_changes=$(python3 -c "import json; print(json.load(open('/tmp/po_changes.json')).get('has_changes', False))")
+          echo "has_changes=$has_changes" >> $GITHUB_OUTPUT
+
+          if [ "$has_changes" = "True" ]; then
+            files=$(python3 -c "
+          import json
+          with open('/tmp/po_changes.json') as f:
+              data = json.load(f)
+          print(','.join(data.get('files', [])))
+          ")
+            echo "files=$files" >> $GITHUB_OUTPUT
+            echo "PO files: $files"
           else
-            echo "PO files: $po_files"
-            echo "has_changes=true" >> $GITHUB_OUTPUT
-            echo "files=$po_files" >> $GITHUB_OUTPUT
+            echo "No PO files to translate"
           fi
 
       - name: Translate PO files
@@ -139,6 +142,11 @@ jobs:
             echo "$file_list"
             echo "EOF"
           } >> $GITHUB_OUTPUT
+
+      - name: Generate Chinese docs
+        if: steps.detect.outputs.has_changes == 'true'
+        run: |
+          python tools/generate_zh_docs.py
 
       - name: Commit and push
         if: steps.detect.outputs.has_changes == 'true'

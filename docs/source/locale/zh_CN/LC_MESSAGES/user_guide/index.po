@@ -1,0 +1,143 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2026, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-07 00:00+0000\n"
+"PO-Revision-Date: 2026-07-07 12:00+0800\n"
+"Last-Translator: \n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: manual\n"
+
+#: ../../source/user_guide/index.md:1
+msgid "User Guide"
+msgstr "用户指南"
+
+#: ../../source/user_guide/index.md:3
+msgid ""
+"This section provides comprehensive documentation for using vLLM Ascend in "
+"production environments."
+msgstr "本节提供了在生产环境中使用 vLLM Ascend 的全面文档。"
+
+#: ../../source/user_guide/index.md:5
+msgid "Support Matrix"
+msgstr "支持矩阵"
+
+#: ../../source/user_guide/index.md:7
+msgid ""
+"**[Supported Models](support_matrix/supported_models.md)** — Models "
+"supported by vLLM Ascend"
+msgstr "**[支持的模型](support_matrix/supported_models.md)** — vLLM Ascend 支持的模型"
+
+#: ../../source/user_guide/index.md:8
+msgid ""
+"**[Supported Features](support_matrix/supported_features.md)** — Features "
+"supported on Ascend NPU"
+msgstr "**[支持的功能](support_matrix/supported_features.md)** — Ascend NPU 支持的功能"
+
+#: ../../source/user_guide/index.md:9
+msgid ""
+"**[Feature Matrix](support_matrix/feature_matrix.md)** — Feature "
+"compatibility across hardware versions"
+msgstr "**[功能矩阵](support_matrix/feature_matrix.md)** — 跨硬件版本的功能兼容性"
+
+#: ../../source/user_guide/index.md:11
+msgid "Configuration"
+msgstr "配置"
+
+#: ../../source/user_guide/index.md:13
+msgid ""
+"**[Environment Variables](configuration/env_vars.md)** — Configure vLLM "
+"Ascend via environment variables"
+msgstr "**[环境变量](configuration/env_vars.md)** — 通过环境变量配置 vLLM Ascend"
+
+#: ../../source/user_guide/index.md:14
+msgid ""
+"**[Additional Configuration](configuration/additional_config.md)** — "
+"Additional configuration options"
+msgstr "**[附加配置](configuration/additional_config.md)** — 额外的配置选项"
+
+#: ../../source/user_guide/index.md:16
+msgid "Feature Guide"
+msgstr "功能指南"
+
+#: ../../source/user_guide/index.md:18
+msgid ""
+"Explore detailed guides for vLLM Ascend features including graph mode, CPU "
+"binding, quantization, sleep mode, structured output, LoRA, expert "
+"parallelism load balancing, and more."
+msgstr "浏览 vLLM Ascend 功能的详细指南，包括图模式、CPU 绑定、量化、休眠模式、结构化输出、LoRA、专家并行负载均衡等。"
+
+#: ../../source/user_guide/index.md:20
+msgid "Deployment Guide"
+msgstr "部署指南"
+
+#: ../../source/user_guide/index.md:22
+msgid ""
+"**[Using Volcano Kthena](deployment_guide/using_volcano_kthena.md)** — "
+"Deploy with Volcano Kthena"
+msgstr ""
+"**[使用 Volcano Kthena](deployment_guide/using_volcano_kthena.md)** — 使用 "
+"Volcano Kthena 部署"
+
+#: ../../source/user_guide/index.md:23
+msgid ""
+"**[Using MindIE Motor](deployment_guide/using_mindie_motor.md)** — Deploy "
+"with MindIE Motor"
+msgstr ""
+"**[使用 MindIE Motor](deployment_guide/using_mindie_motor.md)** — 使用 MindIE "
+"Motor 部署"
+
+#: ../../source/user_guide/index.md:25
+msgid "Release Notes"
+msgstr "发布说明"
+
+#: ../../source/user_guide/index.md:27
+msgid "**[Release Notes](release_notes.md)** — Latest release information"
+msgstr "**[发布说明](release_notes.md)** — 最新发布信息"
+
+msgid "# User Guide"
+msgstr ""
+
+msgid "## Support Matrix"
+msgstr ""
+
+msgid ""
+"- **[Supported Models](support_matrix/supported_models.md)** — Models supported by vLLM Ascend\n"
+"- **[Supported Features](support_matrix/supported_features.md)** — Features supported on Ascend NPU\n"
+"- **[Feature Matrix](support_matrix/feature_matrix.md)** — Feature compatibility across hardware versions"
+msgstr ""
+
+msgid "## Configuration"
+msgstr ""
+
+msgid ""
+"- **[Environment Variables](configuration/env_vars.md)** — Configure vLLM Ascend via environment variables\n"
+"- **[Additional Configuration](configuration/additional_config.md)** — Additional configuration options"
+msgstr ""
+
+msgid "## Feature Guide"
+msgstr ""
+
+msgid "## Deployment Guide"
+msgstr ""
+
+msgid ""
+"- **[Using Volcano Kthena](deployment_guide/using_volcano_kthena.md)** — Deploy with Volcano Kthena\n"
+"- **[Using MindIE Motor](deployment_guide/using_mindie_motor.md)** — Deploy with MindIE Motor"
+msgstr ""
+
+msgid "## Release Notes"
+msgstr ""
+
+msgid "- **[Release Notes](release_notes.md)** — Latest release information"
+msgstr ""

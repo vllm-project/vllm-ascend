@@ -6,17 +6,17 @@
 #
 msgid ""
 msgstr ""
-"Project-Id-Version: vllm-ascend \n"
+"Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
 "POT-Creation-Date: 2026-05-09 02:22+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
-"Language: zh_CN\n"
 "Language-Team: zh_CN <LL@li.org>\n"
-"Plural-Forms: nplurals=1; plural=0;\n"
+"Language: zh_CN\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: Babel 2.18.0\n"
 
 #: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:1
@@ -29,12 +29,13 @@ msgstr "简介"
 
 #: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:5
 msgid ""
-"Hunyuan-A13B-Instruct is a fine-grained hybrid expert model (MoE) "
-"developed by Tencent. This model has a total of 80 billion parameters, 13"
-" billion activation parameters, supports 256K ultra-long contexts, and "
-"possesses native thought chain (CoT) reasoning capabilities."
+"Hunyuan-A13B-Instruct is a fine-grained hybrid expert model (MoE) developed "
+"by Tencent. This model has a total of 80 billion parameters, 13 billion "
+"activation parameters, supports 256K ultra-long contexts, and possesses "
+"native thought chain (CoT) reasoning capabilities."
 msgstr ""
-"Hunyuan-A13B-Instruct 是腾讯开发的细粒度混合专家模型（MoE）。该模型总参数量为800亿，激活参数量为130亿，支持256K超长上下文，并具备原生思维链（CoT）推理能力。"
+"Hunyuan-A13B-Instruct "
+"是腾讯开发的细粒度混合专家模型（MoE）。该模型总参数量为800亿，激活参数量为130亿，支持256K超长上下文，并具备原生思维链（CoT）推理能力。"
 
 #: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:7
 msgid "Environment Preparation"
@@ -47,15 +48,16 @@ msgstr "模型权重"
 #: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:11
 msgid ""
 "`Hunyuan-A13B-Instruct`(BF16 version): [Download model "
-"weight](https://www.modelscope.cn/models/Tencent-Hunyuan/Hunyuan-A13B-"
-"Instruct)."
+"weight](https://www.modelscope.cn/models/Tencent-"
+"Hunyuan/Hunyuan-A13B-Instruct)."
 msgstr ""
-"`Hunyuan-A13B-Instruct`（BF16版本）：[下载模型权重](https://www.modelscope.cn/models/Tencent-Hunyuan/Hunyuan-A13B-Instruct)。"
+"`Hunyuan-A13B-Instruct`（BF16版本）：[下载模型权重](https://www.modelscope.cn/models/Tencent-"
+"Hunyuan/Hunyuan-A13B-Instruct)。"
 
 #: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:13
 msgid ""
-"It is recommended to download the model weight to the shared directory of"
-" multiple nodes, such as `/root/.cache/`"
+"It is recommended to download the model weight to the shared directory of "
+"multiple nodes, such as `/root/.cache/`"
 msgstr "建议将模型权重下载到多节点的共享目录，例如 `/root/.cache/`"
 
 #: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:15
@@ -74,14 +76,15 @@ msgstr "从源码构建："
 msgid "Software Stack Version Verification"
 msgstr "软件栈版本验证"
 
-#: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:66
 # TODO: 需在 Python 3.12 环境验证后更新版本号
+#: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:66
 msgid ""
 "The environment is based on CANN built into the GiteeAI platform, and "
 "successfully runs vLLM |vllm_ascend_version|, and vLLM-"
 "Ascend:|vllm_ascend_version| through the Python 3.11.6 Conda environment."
 msgstr ""
-"该环境基于 GiteeAI 平台内置的 CANN，并通过 Python 3.11.6 Conda 环境成功运行了 vLLM |vllm_ascend_version| 和 vLLM-Ascend:|vllm_ascend_version|。"
+"该环境基于 GiteeAI 平台内置的 CANN，并通过 Python 3.11.6 Conda 环境成功运行了 vLLM "
+"|vllm_ascend_version| 和 vLLM-Ascend:|vllm_ascend_version|。"
 
 #: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:68
 msgid "Deployment"
@@ -138,7 +141,8 @@ msgid ""
 "configuration, the model achieved an accuracy of 94.77% in the accuracy "
 "generation mode."
 msgstr ""
-"在 GiteeAI 平台上，使用 AISBench 工具在 GSM8K 基准集上对该模型进行了测试验证：在 7cd45e 版本配置下，该模型在精度生成模式下达到了 94.77% 的准确率。"
+"在 GiteeAI 平台上，使用 AISBench 工具在 GSM8K 基准集上对该模型进行了测试验证：在 7cd45e "
+"版本配置下，该模型在精度生成模式下达到了 94.77% 的准确率。"
 
 #: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:124
 #: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:153
@@ -207,8 +211,8 @@ msgstr "以运行 `Hunyuan-A13B-Instruct` 的性能评估为例。"
 
 #: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:209
 msgid ""
-"Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) "
-"for more details."
+"Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for "
+"more details."
 msgstr ""
 "更多详情请参考 [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/)。"
 
@@ -234,6 +238,74 @@ msgstr "以 `serve` 为例。运行代码如下。"
 
 #: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:232
 msgid ""
-"After about several minutes, you can get the performance evaluation "
-"result."
+"After about several minutes, you can get the performance evaluation result."
 msgstr "大约几分钟后，您将获得性能评估结果。"
+
+msgid "# Hunyuan-A13B-Instruct"
+msgstr ""
+
+msgid "## Introduction"
+msgstr ""
+
+msgid "## Environment Preparation"
+msgstr ""
+
+msgid "### Model Weight"
+msgstr ""
+
+msgid ""
+"- `Hunyuan-A13B-Instruct`(BF16 version): [Download model "
+"weight](https://www.modelscope.cn/models/Tencent-"
+"Hunyuan/Hunyuan-A13B-Instruct)."
+msgstr ""
+
+msgid "### Installation"
+msgstr ""
+
+msgid ""
+"### Software Stack Version Verification\n"
+" <!-- TODO: update to Python 3.12 after verification -->\n"
+"The environment is based on CANN built into the GiteeAI platform, and successfully runs vLLM {{ vllm_ascend_version }}, and vLLM-Ascend:{{ vllm_ascend_version }} through the Python 3.11.6 Conda environment."
+msgstr ""
+
+msgid "## Deployment"
+msgstr ""
+
+msgid "### Single-node Deployment (4-NPU)"
+msgstr ""
+
+msgid "### Key Performance Indicators"
+msgstr ""
+
+msgid ""
+"- Memory usage for weights: each NPU has a static memory usage of approximately 37.46 GB.\n"
+"- Graph compilation (ACL Graph): with PIECEWISE mode enabled, the system automatically captures the graph in approximately 18 seconds, which can significantly accelerate subsequent inference.\n"
+"- KV cache capacity: the remaining NPU memory can provide concurrent cache space for approximately 529,152 tokens."
+msgstr ""
+
+msgid "## Functional Verification"
+msgstr ""
+
+msgid "## Accuracy Evaluation"
+msgstr ""
+
+msgid ""
+"| dataset | version | metric | mode | vllm-api-general-chat |\n"
+"| --- | --- | --- | --- | --- |\n"
+"| gsm8k | 7cd45e | accuracy | gen | 94.77 |"
+msgstr ""
+
+msgid "## Performance"
+msgstr ""
+
+msgid "### Using AISBench"
+msgstr ""
+
+msgid "### Using vLLM Benchmark"
+msgstr ""
+
+msgid ""
+"- `latency`: Benchmark the latency of a single batch of requests.\n"
+"- `serve`: Benchmark the online serving throughput.\n"
+"- `throughput`: Benchmark offline inference throughput."
+msgstr ""

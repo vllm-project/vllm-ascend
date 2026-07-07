@@ -1,6 +1,6 @@
 [files]
 # these files may be written in non english words
-extend-exclude = [".pre-commit-config.yaml", "docs/source/community/contributors.md",]
+extend-exclude = [".pre-commit-config.yaml", "docs/source/community/contributors.md", "docs/source/locale/",]
 ignore-hidden = true
 ignore-files = true
 ignore-dot = true

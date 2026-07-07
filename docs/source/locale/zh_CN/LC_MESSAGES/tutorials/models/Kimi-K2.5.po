@@ -6,17 +6,17 @@
 #
 msgid ""
 msgstr ""
-"Project-Id-Version: vllm-ascend \n"
+"Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
 "POT-Creation-Date: 2026-07-02 07:02+0000\n"
 "PO-Revision-Date: 2026-04-10 18:37+0800\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
-"Language: zh_CN\n"
 "Language-Team: zh_CN <LL@li.org>\n"
-"Plural-Forms: nplurals=1; plural=0;\n"
+"Language: zh_CN\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: Babel 2.18.0\n"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:1
@@ -29,30 +29,30 @@ msgstr "1.简介"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:5
 msgid ""
-"Kimi K2.5 is an open-source, native multimodal agentic model built "
-"through continual pretraining on approximately 15 trillion mixed visual "
-"and text tokens atop Kimi-K2-Base. It seamlessly integrates vision and "
-"language understanding with advanced agentic capabilities, instant and "
-"thinking modes, as well as conversational and agentic paradigms."
+"Kimi K2.5 is an open-source, native multimodal agentic model built through "
+"continual pretraining on approximately 15 trillion mixed visual and text "
+"tokens atop Kimi-K2-Base. It seamlessly integrates vision and language "
+"understanding with advanced agentic capabilities, instant and thinking "
+"modes, as well as conversational and agentic paradigms."
 msgstr ""
 "Kimi K2.5 是一个开源的、原生的多模态智能体模型，通过在 Kimi-K2-Base 基础上对约 15 万亿混合视觉和文本 token "
 "进行持续预训练而构建。它将视觉和语言理解与高级智能体能力、即时模式和思考模式，以及对话范式和智能体范式无缝集成。"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:7
 msgid ""
-"This document will show the main verification steps of the model, "
-"including supported features, feature configuration, environment "
-"preparation, single-node and multi-node deployment, accuracy and "
-"performance evaluation."
+"This document will show the main verification steps of the model, including "
+"supported features, feature configuration, environment preparation, single-"
+"node and multi-node deployment, accuracy and performance evaluation."
 msgstr "本文档将展示模型的主要验证步骤，包括支持的特性、特性配置、环境准备、单节点和多节点部署、精度评估和性能评估。"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:9
 msgid ""
-"This document is validated and written based on **vLLM-Ascend "
-"v0.17.0rc1**. The current model (Kimi-K2.5) is first supported in this "
-"version, and **v0.17.0rc1 and later versions** can run stably."
+"This document is validated and written based on **vLLM-Ascend v0.17.0rc1**. "
+"The current model (Kimi-K2.5) is first supported in this version, and "
+"**v0.17.0rc1 and later versions** can run stably."
 msgstr ""
-"本文档基于 **vLLM-Ascend v0.17.0rc1** 进行验证和编写。当前模型（Kimi-K2.5）在此版本中首次得到支持，**v0.17.0rc1 及更高版本**可稳定运行。"
+"本文档基于 **vLLM-Ascend v0.17.0rc1** "
+"进行验证和编写。当前模型（Kimi-K2.5）在此版本中首次得到支持，**v0.17.0rc1 及更高版本**可稳定运行。"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:11
 msgid "2 Supported Features"
@@ -61,14 +61,15 @@ msgstr "2.支持的特性"
 #: ../../source/tutorials/models/Kimi-K2.5.md:13
 msgid ""
 "Refer to [supported "
-"features](../../user_guide/support_matrix/supported_models.md) to get the"
-" model's supported feature matrix."
-msgstr "请参阅[支持的特性矩阵](../../user_guide/support_matrix/supported_models.md)获取模型支持的特性列表。"
+"features](../../user_guide/support_matrix/supported_models.md) to get the "
+"model's supported feature matrix."
+msgstr ""
+"请参阅[支持的特性矩阵](../../user_guide/support_matrix/supported_models.md)获取模型支持的特性列表。"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:15
 msgid ""
-"Refer to [feature guide](../../user_guide/feature_guide/index.md) to get "
-"the feature's configuration."
+"Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the"
+" feature's configuration."
 msgstr "请参阅[特性指南](../../user_guide/feature_guide/index.md)获取特性的配置方法。"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:17
@@ -81,11 +82,13 @@ msgstr "3.1 模型权重"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:21
 msgid ""
-"`Kimi-K2.5-w4a8` (Quantized version for w4a8): requires 1 Atlas 800 A3 "
-"(64G × 16) node or 2 Atlas 800 A2 (64G × 8) nodes. [Download model "
+"`Kimi-K2.5-w4a8` (Quantized version for w4a8): requires 1 Atlas 800 A3 (64G "
+"× 16) node or 2 Atlas 800 A2 (64G × 8) nodes. [Download model "
 "weight](https://modelscope.cn/models/Eco-Tech/Kimi-K2.5-W4A8)."
 msgstr ""
-"`Kimi-K2.5-w4a8`（w4a8 量化版本）：需要 1 台 Atlas 800 A3（64G × 16）节点或 2 台 Atlas 800 A2（64G × 8）节点。[下载模型权重](https://modelscope.cn/models/Eco-Tech/Kimi-K2.5-W4A8)。"
+"`Kimi-K2.5-w4a8`（w4a8 量化版本）：需要 1 台 Atlas 800 A3（64G × 16）节点或 2 台 Atlas 800 "
+"A2（64G × 8）节点。[下载模型权重](https://modelscope.cn/models/Eco-"
+"Tech/Kimi-K2.5-W4A8)。"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:22
 msgid ""
@@ -98,8 +101,8 @@ msgstr ""
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:24
 msgid ""
-"It is recommended to download the model weight to the shared directory of"
-" multiple nodes, such as `/root/.cache/`."
+"It is recommended to download the model weight to the shared directory of "
+"multiple nodes, such as `/root/.cache/`."
 msgstr "建议将模型权重下载到多节点共享目录，例如 `/root/.cache/`。"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:26
@@ -108,8 +111,8 @@ msgstr "3.2 验证多节点通信（可选）"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:28
 msgid ""
-"If you want to deploy multi-node environment, you need to verify multi-"
-"node communication according to [verify multi-node communication "
+"If you want to deploy multi-node environment, you need to verify multi-node "
+"communication according to [verify multi-node communication "
 "environment](../../installation.md#verify-multi-node-communication)."
 msgstr ""
 "如果要部署多节点环境，需要按照[验证多节点通信环境](../../installation.md#verify-multi-node-"
@@ -129,8 +132,8 @@ msgid ""
 "your node, refer to [using docker](../../installation.md#set-up-using-"
 "docker)."
 msgstr ""
-"根据您的机器类型选择镜像，并在节点上启动 Docker 镜像，请参考[使用 Docker 安装](../../installation.md"
-"#set-up-using-docker)。"
+"根据您的机器类型选择镜像，并在节点上启动 Docker 镜像，请参考[使用 Docker 安装](../../installation.md#set-"
+"up-using-docker)。"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md
 msgid "A3 series"
@@ -147,8 +150,8 @@ msgstr "A2 系列"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:119
 msgid ""
-"After a successful docker run, you can verify the running container "
-"service by executing the `docker ps` command."
+"After a successful docker run, you can verify the running container service "
+"by executing the `docker ps` command."
 msgstr "Docker 运行成功后，可以通过执行 `docker ps` 命令验证正在运行的容器服务。"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:121
@@ -157,8 +160,8 @@ msgstr "4.2 源码安装"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:123
 msgid ""
-"If you don't want to use the docker image as above, you can also build "
-"all from source:"
+"If you don't want to use the docker image as above, you can also build all "
+"from source:"
 msgstr "如果您不想使用上述 Docker 镜像，也可以从源码构建："
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:125
@@ -169,8 +172,8 @@ msgstr "从源码安装 `vllm-ascend`，请参考[安装指南](../../installati
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:127
 msgid ""
-"If you want to deploy multi-node environment, you need to set up "
-"environment on each node."
+"If you want to deploy multi-node environment, you need to set up environment"
+" on each node."
 msgstr "如果要部署多节点环境，需要在每个节点上设置环境。"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:129
@@ -184,9 +187,11 @@ msgstr "5.1 单节点在线部署"
 #: ../../source/tutorials/models/Kimi-K2.5.md:133
 msgid ""
 "Single-node deployment completes both Prefill and Decode within the same "
-"node. The quantized model `Kimi-K2.5-w4a8` can be deployed on 1 Atlas 800"
-" A3 (64G × 16)."
-msgstr "单节点部署在同一节点内完成 Prefill 和 Decode。量化模型 `Kimi-K2.5-w4a8` 可以部署在 1 台 Atlas 800 A3（64G × 16）上。"
+"node. The quantized model `Kimi-K2.5-w4a8` can be deployed on 1 Atlas 800 A3"
+" (64G × 16)."
+msgstr ""
+"单节点部署在同一节点内完成 Prefill 和 Decode。量化模型 `Kimi-K2.5-w4a8` 可以部署在 1 台 Atlas 800 "
+"A3（64G × 16）上。"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:135
 msgid "Run the following script to execute online inference."
@@ -206,11 +211,10 @@ msgstr "关键参数说明："
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:184
 msgid ""
-"Setting the environment variable `VLLM_ASCEND_BALANCE_SCHEDULING=1` "
-"enables balance scheduling. This may help increase output throughput and "
-"reduce TPOT in v1 scheduler. However, TTFT may degrade in some scenarios."
-" Furthermore, enabling this feature is not recommended in scenarios where"
-" PD is separated."
+"Setting the environment variable `VLLM_ASCEND_BALANCE_SCHEDULING=1` enables "
+"balance scheduling. This may help increase output throughput and reduce TPOT"
+" in v1 scheduler. However, TTFT may degrade in some scenarios. Furthermore, "
+"enabling this feature is not recommended in scenarios where PD is separated."
 msgstr ""
 "设置环境变量 `VLLM_ASCEND_BALANCE_SCHEDULING=1` 可启用均衡调度。这有助于提高 v1 调度器的输出吞吐量并降低 "
 "TPOT。但在某些场景下 TTFT 可能会下降。此外，不建议在 PD 分离场景下启用此特性。"
@@ -224,32 +228,32 @@ msgstr "对于单节点部署，建议使用 `dp4 tp4` 而不是 `dp2 tp8`。"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:186
 msgid ""
-"`--max-model-len` specifies the maximum context length - that is, the sum"
-" of input and output tokens for a single request. For performance testing"
-" with an input length of 3.5K and output length of 1.5K, a value of "
-"`16384` is sufficient, however, for precision testing, please set it at "
-"least `35000`."
+"`--max-model-len` specifies the maximum context length - that is, the sum of"
+" input and output tokens for a single request. For performance testing with "
+"an input length of 3.5K and output length of 1.5K, a value of `16384` is "
+"sufficient, however, for precision testing, please set it at least `35000`."
 msgstr ""
 "`--max-model-len` 指定最大上下文长度，即单个请求的输入 token 和输出 token 之和。对于输入长度 3.5K、输出长度 "
 "1.5K 的性能测试，`16384` 的值已经足够；但对于精度测试，请至少设置为 `35000`。"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:187
 msgid ""
-"`--no-enable-prefix-caching` indicates that prefix caching is disabled. "
-"To enable it, remove this option."
+"`--no-enable-prefix-caching` indicates that prefix caching is disabled. To "
+"enable it, remove this option."
 msgstr "`--no-enable-prefix-caching` 表示禁用前缀缓存。要启用前缀缓存，请移除该选项。"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:188
 msgid ""
 "`--mm-encoder-tp-mode` indicates how to optimize multi-modal encoder "
-"inference using tensor parallelism (TP). If you want to test the "
-"multimodal inputs, we recommend using `data`."
-msgstr "`--mm-encoder-tp-mode` 表示如何使用张量并行（TP）优化多模态编码器推理。如果要测试多模态输入，我们推荐使用 `data`。"
+"inference using tensor parallelism (TP). If you want to test the multimodal "
+"inputs, we recommend using `data`."
+msgstr ""
+"`--mm-encoder-tp-mode` 表示如何使用张量并行（TP）优化多模态编码器推理。如果要测试多模态输入，我们推荐使用 `data`。"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:189
 msgid ""
-"If you use the w4a8 weight, more memory will be allocated to kvcache, and"
-" you can try to increase system throughput to achieve greater throughput."
+"If you use the w4a8 weight, more memory will be allocated to kvcache, and "
+"you can try to increase system throughput to achieve greater throughput."
 msgstr "如果使用 w4a8 权重，更多内存将分配给 kvcache，您可以尝试增加系统吞吐量以获得更高的吞吐性能。"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:191
@@ -258,7 +262,9 @@ msgid ""
 "Common Issues Tip: If you encounter issues, please refer to the [Public "
 "FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for "
 "troubleshooting."
-msgstr "常见问题提示：如果遇到问题，请参考[公共 FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) 进行故障排除。"
+msgstr ""
+"常见问题提示：如果遇到问题，请参考[公共 "
+"FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) 进行故障排除。"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:193
 #: ../../source/tutorials/models/Kimi-K2.5.md:391
@@ -285,9 +291,10 @@ msgstr "5.2 多节点数据并行部署"
 #: ../../source/tutorials/models/Kimi-K2.5.md:243
 msgid ""
 "`Kimi-K2.5-w4a8` can be deployed across multiple nodes using data "
-"parallelism. This deployment mode requires at least 2 Atlas 800 A2 (64G ×"
-" 8) nodes."
-msgstr "`Kimi-K2.5-w4a8` 可以使用数据并行部署在多个节点上。此部署模式至少需要 2 台 Atlas 800 A2（64G × 8）节点。"
+"parallelism. This deployment mode requires at least 2 Atlas 800 A2 (64G × 8)"
+" nodes."
+msgstr ""
+"`Kimi-K2.5-w4a8` 可以使用数据并行部署在多个节点上。此部署模式至少需要 2 台 Atlas 800 A2（64G × 8）节点。"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:245
 msgid "Run the following scripts on two nodes respectively."
@@ -304,50 +311,54 @@ msgstr "**节点 1**"
 #: ../../source/tutorials/models/Kimi-K2.5.md:381
 msgid ""
 "`--data-parallel-size`: total number of data parallel ranks across all "
-"nodes. In this example, `4` means the model is split across 4 DP ranks "
-"total (2 per node)."
-msgstr "`--data-parallel-size`：所有节点上的数据并行 rank 总数。在本示例中，`4` 表示模型分布在总共 4 个 DP rank 上（每个节点 2 个）。"
+"nodes. In this example, `4` means the model is split across 4 DP ranks total"
+" (2 per node)."
+msgstr ""
+"`--data-parallel-size`：所有节点上的数据并行 rank 总数。在本示例中，`4` 表示模型分布在总共 4 个 DP rank "
+"上（每个节点 2 个）。"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:382
 msgid ""
-"`--data-parallel-size-local`: number of data parallel ranks running on "
-"the current node. In this example, each node runs 2 DP ranks."
-msgstr "`--data-parallel-size-local`：当前节点上运行的数据并行 rank 数量。在本示例中，每个节点运行 2 个 DP rank。"
+"`--data-parallel-size-local`: number of data parallel ranks running on the "
+"current node. In this example, each node runs 2 DP ranks."
+msgstr ""
+"`--data-parallel-size-local`：当前节点上运行的数据并行 rank 数量。在本示例中，每个节点运行 2 个 DP rank。"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:383
 msgid ""
-"`--data-parallel-start-rank`: starting rank offset for data parallel "
-"ranks on this node. Node 0 starts at rank 0 (default), Node 1 starts at "
-"rank 2. This ensures each node's DP ranks occupy distinct positions in "
-"the overall rank space."
-msgstr "`--data-parallel-start-rank`：此节点上数据并行 rank 的起始偏移量。节点 0 从 rank 0 开始（默认），节点 1 从 rank 2 开始。这确保每个节点的 DP rank 在整体 rank 空间中占据不同的位置。"
+"`--data-parallel-start-rank`: starting rank offset for data parallel ranks "
+"on this node. Node 0 starts at rank 0 (default), Node 1 starts at rank 2. "
+"This ensures each node's DP ranks occupy distinct positions in the overall "
+"rank space."
+msgstr ""
+"`--data-parallel-start-rank`：此节点上数据并行 rank 的起始偏移量。节点 0 从 rank 0 开始（默认），节点 1 "
+"从 rank 2 开始。这确保每个节点的 DP rank 在整体 rank 空间中占据不同的位置。"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:384
 msgid ""
-"`--data-parallel-address`: IP address of the data parallel master node "
-"(Node 0). This value must be consistent with `local_ip` set on Node 0."
-msgstr "`--data-parallel-address`：数据并行主节点（节点 0）的 IP 地址。此值必须与节点 0 上设置的 `local_ip` 一致。"
+"`--data-parallel-address`: IP address of the data parallel master node (Node"
+" 0). This value must be consistent with `local_ip` set on Node 0."
+msgstr ""
+"`--data-parallel-address`：数据并行主节点（节点 0）的 IP 地址。此值必须与节点 0 上设置的 `local_ip` 一致。"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:385
 msgid ""
-"`--data-parallel-rpc-port`: RPC port for data parallel master "
-"communication. Must be the same across all nodes."
+"`--data-parallel-rpc-port`: RPC port for data parallel master communication."
+" Must be the same across all nodes."
 msgstr "`--data-parallel-rpc-port`：数据并行主节点通信的 RPC 端口。所有节点上的值必须相同。"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:386
 msgid ""
-"`--headless`: indicates that this vLLM instance is not the master service"
-" node. Only set on non-master nodes (Node 1). The master node (Node 0) "
-"should NOT set this flag."
-msgstr ""
-"`--headless`：表示此 vLLM 实例不是主服务节点。仅在非主节点（节点 1）上设置。主节点（节点 0）不应设置此标志。"
+"`--headless`: indicates that this vLLM instance is not the master service "
+"node. Only set on non-master nodes (Node 1). The master node (Node 0) should"
+" NOT set this flag."
+msgstr "`--headless`：表示此 vLLM 实例不是主服务节点。仅在非主节点（节点 1）上设置。主节点（节点 0）不应设置此标志。"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:414
 msgid ""
-"The service returns HTTP 200 OK. The JSON response contains the `choices`"
-" field with the generated text."
-msgstr ""
-"服务返回 HTTP 200 OK。JSON 响应中包含 `choices` 字段，其中包含生成的文本。"
+"The service returns HTTP 200 OK. The JSON response contains the `choices` "
+"field with the generated text."
+msgstr "服务返回 HTTP 200 OK。JSON 响应中包含 `choices` 字段，其中包含生成的文本。"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:416
 msgid "5.3 Multi-Node PD Separation Deployment"
@@ -363,44 +374,42 @@ msgstr ""
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:420
 msgid ""
-"In the standard single-node deployment mode, Prefill (prompt processing) "
-"and Decode (token generation) tasks run on the same set of NPUs. PD "
-"(Prefill-Decode) separation addresses this by running Prefill and Decode "
-"on dedicated node groups, each configured independently:"
+"In the standard single-node deployment mode, Prefill (prompt processing) and"
+" Decode (token generation) tasks run on the same set of NPUs. PD (Prefill-"
+"Decode) separation addresses this by running Prefill and Decode on dedicated"
+" node groups, each configured independently:"
 msgstr ""
-"在标准单节点部署模式下，预填充（提示处理）和解码（令牌生成）任务在同一组 NPU 上运行。PD（预填充-解码）分离通过将预填充和解码运行在专用节点组上来解决此问题，每个节点组独立配置："
+"在标准单节点部署模式下，预填充（提示处理）和解码（令牌生成）任务在同一组 NPU 上运行。PD（预填充-"
+"解码）分离通过将预填充和解码运行在专用节点组上来解决此问题，每个节点组独立配置："
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:422
 msgid ""
-"**Prefill nodes** focus on high-throughput prompt processing, optimized "
-"for compute and communication (e.g., enabling FlashComm for Allreduce "
+"**Prefill nodes** focus on high-throughput prompt processing, optimized for "
+"compute and communication (e.g., enabling FlashComm for Allreduce "
 "acceleration)."
-msgstr ""
-"**预填充节点**专注于高吞吐量提示处理，针对计算和通信进行了优化（例如，启用 FlashComm 以加速 Allreduce）。"
+msgstr "**预填充节点**专注于高吞吐量提示处理，针对计算和通信进行了优化（例如，启用 FlashComm 以加速 Allreduce）。"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:423
 msgid ""
-"**Decode nodes** focus on low-latency token generation, optimized for "
-"memory bandwidth (e.g., enabling MLAPO fusion operators)."
-msgstr ""
-"**解码节点**专注于低延迟令牌生成，针对内存带宽进行了优化（例如，启用 MLAPO 融合算子）。"
+"**Decode nodes** focus on low-latency token generation, optimized for memory"
+" bandwidth (e.g., enabling MLAPO fusion operators)."
+msgstr "**解码节点**专注于低延迟令牌生成，针对内存带宽进行了优化（例如，启用 MLAPO 融合算子）。"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:425
 msgid ""
-"This architecture is recommended for production deployments with "
-"concurrent multi-user workloads, where stable latency and high throughput"
-" are both required."
-msgstr ""
-"此架构推荐用于具有并发多用户工作负载的生产部署，其中需要稳定的延迟和高吞吐量。"
+"This architecture is recommended for production deployments with concurrent "
+"multi-user workloads, where stable latency and high throughput are both "
+"required."
+msgstr "此架构推荐用于具有并发多用户工作负载的生产部署，其中需要稳定的延迟和高吞吐量。"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:427
 msgid ""
 "Take Atlas 800 A3 (64G × 16) for example, we recommend to deploy 2P1D (4 "
-"nodes) rather than 1P1D (2 nodes), because there is not enough NPU memory"
-" to serve high concurrency in 1P1D case."
+"nodes) rather than 1P1D (2 nodes), because there is not enough NPU memory to"
+" serve high concurrency in 1P1D case."
 msgstr ""
-"以 Atlas 800 A3（64G × 16）为例，我们建议部署 2P1D（4 节点）而不是 1P1D（2 节点），因为在 1P1D "
-"情况下没有足够的 NPU 内存来支持高并发。"
+"以 Atlas 800 A3（64G × 16）为例，我们建议部署 2P1D（4 节点）而不是 1P1D（2 节点），因为在 1P1D 情况下没有足够的"
+" NPU 内存来支持高并发。"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:429
 msgid "`Kimi-K2.5-w4a8 2P1D`: requires 4 Atlas 800 A3 (64G × 16) nodes."
@@ -408,10 +417,10 @@ msgstr "`Kimi-K2.5-w4a8 2P1D` 需要 4 台 Atlas 800 A3（64G × 16）节点。"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:431
 msgid ""
-"To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need "
-"to deploy a `launch_online_dp.py` script and a `run_dp_template.sh` "
-"script on each node and deploy a `proxy.sh` script on prefill master node"
-" to forward requests."
+"To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to "
+"deploy a `launch_online_dp.py` script and a `run_dp_template.sh` script on "
+"each node and deploy a `proxy.sh` script on prefill master node to forward "
+"requests."
 msgstr ""
 "要运行 vllm-ascend 的 `预填充-解码分离` 服务，您需要在每个节点上部署 `launch_online_dp.py` 脚本和 "
 "`run_dp_template.sh` 脚本，并在预填充主节点上部署 `proxy.sh` 脚本以转发请求。"
@@ -496,8 +505,7 @@ msgstr "（与 `--dp-size` 相同）"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:139
 msgid ""
-"Number of DP ranks on the current node. If not set, defaults to `--dp-"
-"size`."
+"Number of DP ranks on the current node. If not set, defaults to `--dp-size`."
 msgstr "当前节点上的 DP 排名数量。如果未设置，默认为 `--dp-size`。"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:139
@@ -546,10 +554,9 @@ msgstr "9000"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:139
 msgid ""
-"Starting port for each vLLM engine instance on this node. Each DP rank's"
-" engine port = `vllm_start_port` + local rank index."
-msgstr ""
-"此节点上每个 vLLM 引擎实例的起始端口。每个 DP 排名的引擎端口 = `vllm_start_port` + 本地排名索引。"
+"Starting port for each vLLM engine instance on this node. Each DP rank's "
+"engine port = `vllm_start_port` + local rank index."
+msgstr "此节点上每个 vLLM 引擎实例的起始端口。每个 DP 排名的引擎端口 = `vllm_start_port` + 本地排名索引。"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:448
 msgid "Prefill Node 0 `run_dp_template.sh` script"
@@ -569,54 +576,53 @@ msgstr "解码节点 1 的 `run_dp_template.sh` 脚本"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:760
 msgid ""
-"`VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the communication optimization"
-" function on the prefill nodes."
+"`VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the communication optimization "
+"function on the prefill nodes."
 msgstr "`VLLM_ASCEND_ENABLE_FLASHCOMM1=1`：在预填充节点上启用通信优化功能。"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:761
 msgid ""
 "`VLLM_ASCEND_ENABLE_MLAPO=1`: enables the fusion operator, which can "
 "significantly improve performance but consumes more NPU memory. In the "
-"Prefill-Decode (PD) separation scenario, enable MLAPO only on decode "
-"nodes."
+"Prefill-Decode (PD) separation scenario, enable MLAPO only on decode nodes."
 msgstr ""
-"`VLLM_ASCEND_ENABLE_MLAPO=1`：启用融合算子，可以显著提升性能但会消耗更多 NPU "
-"内存。在预填充-解码（PD）分离场景下，仅在解码节点上启用 MLAPO。"
+"`VLLM_ASCEND_ENABLE_MLAPO=1`：启用融合算子，可以显著提升性能但会消耗更多 NPU 内存。在预填充-"
+"解码（PD）分离场景下，仅在解码节点上启用 MLAPO。"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:762
 msgid ""
-"`cudagraph_capture_sizes`: The recommended value is `n x (mtp + 1)`. And "
-"the min is `n = 1` and the max is `n = max-num-seqs`. For other values, "
-"it is recommended to set them to the number of frequently occurring "
-"requests on the Decode (D) node."
+"`cudagraph_capture_sizes`: The recommended value is `n x (mtp + 1)`. And the"
+" min is `n = 1` and the max is `n = max-num-seqs`. For other values, it is "
+"recommended to set them to the number of frequently occurring requests on "
+"the Decode (D) node."
 msgstr ""
-"`cudagraph_capture_sizes`：推荐值为 `n x (mtp + 1)`。最小值为 `n = 1`，最大值为 `n = "
-"max-num-seqs`。对于其他值，建议设置为解码（D）节点上频繁出现的请求数量。"
+"`cudagraph_capture_sizes`：推荐值为 `n x (mtp + 1)`。最小值为 `n = 1`，最大值为 `n = max-"
+"num-seqs`。对于其他值，建议设置为解码（D）节点上频繁出现的请求数量。"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:763
 msgid ""
 "`recompute_scheduler_enable: true`: enables the recomputation scheduler. "
 "When the Key-Value Cache (KV Cache) of the decode node is insufficient, "
-"requests will be sent to the prefill node to recompute the KV Cache. In "
-"the PD separation scenario, enable this configuration only on decode nodes."
+"requests will be sent to the prefill node to recompute the KV Cache. In the "
+"PD separation scenario, enable this configuration only on decode nodes."
 msgstr ""
 "`recompute_scheduler_enable: true`：启用重计算调度器。当解码节点的 KV "
 "缓存不足时，请求将被发送到预填充节点以重新计算 KV 缓存。在 PD 分离场景下，仅在解码节点上启用此配置。"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:764
 msgid ""
-"`multistream_overlap_shared_expert: true`: When the Tensor Parallelism "
-"(TP) size is 1 or `enable_shared_expert_dp: true`, an additional stream "
-"is enabled to overlap the computation process of shared experts for "
-"improved efficiency."
+"`multistream_overlap_shared_expert: true`: When the Tensor Parallelism (TP) "
+"size is 1 or `enable_shared_expert_dp: true`, an additional stream is "
+"enabled to overlap the computation process of shared experts for improved "
+"efficiency."
 msgstr ""
 "`multistream_overlap_shared_expert: true`：当张量并行（TP）大小为 1 或 "
 "`enable_shared_expert_dp: true` 时，启用额外的流以重叠共享专家的计算过程，从而提高效率。"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:766
 msgid ""
-"The `run_dp_template.sh` scripts use positional parameters (`$1`-`$7`) to"
-" receive configuration values from `launch_online_dp.py`:"
+"The `run_dp_template.sh` scripts use positional parameters (`$1`-`$7`) to "
+"receive configuration values from `launch_online_dp.py`:"
 msgstr ""
 "`run_dp_template.sh` 脚本使用位置参数（`$1`-`$7`）从 `launch_online_dp.py` 接收配置值："
 
@@ -625,14 +631,16 @@ msgid ""
 "`$1` (`ASCEND_RT_VISIBLE_DEVICES`): the NPU devices assigned to this DP "
 "instance, e.g., `0,1,2,3` or `4,5,6,7`."
 msgstr ""
-"`$1`（`ASCEND_RT_VISIBLE_DEVICES`）：分配给此 DP 实例的 NPU 设备，例如 `0,1,2,3` 或 `4,5,6,7`。"
+"`$1`（`ASCEND_RT_VISIBLE_DEVICES`）：分配给此 DP 实例的 NPU 设备，例如 `0,1,2,3` 或 "
+"`4,5,6,7`。"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:769
 msgid ""
-"`$2` (`--port`): the vLLM server port for this DP instance, auto-assigned"
-" starting from `--vllm-start-port` (e.g., `7100`, `7101`)."
+"`$2` (`--port`): the vLLM server port for this DP instance, auto-assigned "
+"starting from `--vllm-start-port` (e.g., `7100`, `7101`)."
 msgstr ""
-"`$2`（`--port`）：此 DP 实例的 vLLM 服务器端口，从 `--vllm-start-port` 开始自动分配（例如 `7100`、`7101`）。"
+"`$2`（`--port`）：此 DP 实例的 vLLM 服务器端口，从 `--vllm-start-port` 开始自动分配（例如 "
+"`7100`、`7101`）。"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:770
 msgid "`$3` (`--data-parallel-size`): total number of DP ranks."
@@ -647,7 +655,8 @@ msgid "`$5` (`--data-parallel-address`): IP address of the DP master node."
 msgstr "`$5`（`--data-parallel-address`）：DP 主节点的 IP 地址。"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:773
-msgid "`$6` (`--data-parallel-rpc-port`): RPC port for DP master communication."
+msgid ""
+"`$6` (`--data-parallel-rpc-port`): RPC port for DP master communication."
 msgstr "`$6`（`--data-parallel-rpc-port`）：DP 主节点通信的 RPC 端口。"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:774
@@ -664,14 +673,13 @@ msgstr "在预填充主节点上运行 `proxy.sh` 脚本"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:791
 msgid ""
-"Run a proxy server on the same node with the prefiller service instance. "
-"You can get the proxy program in the repository's examples: "
-"[load_balance_proxy_server_example.py](https://github.com/vllm-project"
-"/vllm-"
+"Run a proxy server on the same node with the prefiller service instance. You"
+" can get the proxy program in the repository's examples: "
+"[load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-"
 "ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)"
 msgstr ""
-"在与预填充服务实例相同的节点上运行代理服务器。您可以在仓库的示例中获取代理程序：[load_balance_proxy_server_example.py](https://github.com"
-"/vllm-project/vllm-"
+"在与预填充服务实例相同的节点上运行代理服务器。您可以在仓库的示例中获取代理程序：[load_balance_proxy_server_example.py](https://github.com/vllm-"
+"project/vllm-"
 "ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:847
@@ -680,11 +688,10 @@ msgstr "部署验证："
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:849
 msgid ""
-"After the PD separation service is fully started, send a request through "
-"the proxy port on the prefill master node to verify that Prefill and "
-"Decode nodes are working correctly together:"
-msgstr ""
-"PD 分离服务完全启动后，通过预填充主节点上的代理端口发送请求，以验证预填充节点和解码节点是否协同工作正常："
+"After the PD separation service is fully started, send a request through the"
+" proxy port on the prefill master node to verify that Prefill and Decode "
+"nodes are working correctly together:"
+msgstr "PD 分离服务完全启动后，通过预填充主节点上的代理端口发送请求，以验证预填充节点和解码节点是否协同工作正常："
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:872
 msgid ""
@@ -697,24 +704,27 @@ msgstr ""
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:897
 msgid ""
-"Common Issues Tip: If you encounter issues with PD separation deployment,"
-" please refer to the [Public "
+"Common Issues Tip: If you encounter issues with PD separation deployment, "
+"please refer to the [Public "
 "FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for "
 "troubleshooting."
-msgstr "常见问题提示：如果遇到 PD 分离部署问题，请参考[公共 FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) 进行故障排除。"
+msgstr ""
+"常见问题提示：如果遇到 PD 分离部署问题，请参考[公共 "
+"FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) 进行故障排除。"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:899
 msgid "6 Functional Verification"
 msgstr "6 功能验证"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:901
-msgid "Once your server is started, you can query the model with input prompts:"
+msgid ""
+"Once your server is started, you can query the model with input prompts:"
 msgstr "服务器启动后，您可以使用输入提示词查询模型："
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:924
 msgid ""
-"The service returns HTTP 200 OK. The JSON response contains the `choices`"
-" field with the generated text, along with usage statistics:"
+"The service returns HTTP 200 OK. The JSON response contains the `choices` "
+"field with the generated text, along with usage statistics:"
 msgstr "服务返回 HTTP 200 OK。JSON 响应包含 `choices` 字段，其中包含生成的文本以及使用统计信息："
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:949
@@ -733,9 +743,10 @@ msgstr "使用 AISBench"
 #: ../../source/tutorials/models/Kimi-K2.5.md:955
 msgid ""
 "Refer to [Using "
-"AISBench](../../developer_guide/evaluation/using_ais_bench.md) for "
-"details."
-msgstr "详细信息请参考[使用 AISBench 进行精度评估](../../developer_guide/evaluation/using_ais_bench.md)。"
+"AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details."
+msgstr ""
+"详细信息请参考[使用 AISBench "
+"进行精度评估](../../developer_guide/evaluation/using_ais_bench.md)。"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:957
 msgid ""
@@ -820,7 +831,10 @@ msgid ""
 "Refer to [Using AISBench for performance "
 "evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-"
 "performance-evaluation) for details."
-msgstr "详细信息请参考[使用 AISBench 进行性能评估](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation)。"
+msgstr ""
+"详细信息请参考[使用 AISBench "
+"进行性能评估](../../developer_guide/evaluation/using_ais_bench.md#execute-"
+"performance-evaluation)。"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:972
 msgid "Using vLLM Benchmark"
@@ -832,8 +846,8 @@ msgstr "以 `Kimi-K2.5-w4a8` 为例运行性能评估。"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:976
 msgid ""
-"Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) "
-"for more details."
+"Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for "
+"more details."
 msgstr "更多详细信息请参考 [vLLM 基准测试](https://docs.vllm.ai/en/latest/benchmarking/)。"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:978
@@ -858,8 +872,7 @@ msgstr "以 `serve` 为例，运行如下代码。"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:991
 msgid ""
-"After about several minutes, you can get the performance evaluation "
-"result."
+"After about several minutes, you can get the performance evaluation result."
 msgstr "大约几分钟后，即可获得性能评估结果。"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:993
@@ -873,12 +886,13 @@ msgstr "9.1 推荐配置"
 #: ../../source/tutorials/models/Kimi-K2.5.md:997
 msgid ""
 "**Note**: The following configurations are validated in specific test "
-"environments and are for reference only. The optimal configuration "
-"depends on factors such as maximum input/output length, prefix cache hit "
-"rate, precision requirements, and deployment machine ratios. It is "
-"recommended to refer to Section 9.2 for tuning based on actual "
-"conditions."
-msgstr "**注意**：以下配置在特定测试环境中验证，仅供参考。最佳配置取决于最大输入/输出长度、前缀缓存命中率、精度要求和部署机器比例等因素。建议根据实际情况参考第 9.2 节进行调整。"
+"environments and are for reference only. The optimal configuration depends "
+"on factors such as maximum input/output length, prefix cache hit rate, "
+"precision requirements, and deployment machine ratios. It is recommended to "
+"refer to Section 9.2 for tuning based on actual conditions."
+msgstr ""
+"**注意**：以下配置在特定测试环境中验证，仅供参考。最佳配置取决于最大输入/输出长度、前缀缓存命中率、精度要求和部署机器比例等因素。建议根据实际情况参考第"
+" 9.2 节进行调整。"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:999
 msgid "Table 1: Scenario Overview"
@@ -886,8 +900,8 @@ msgstr "表 1：场景概览"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:1001
 msgid ""
-"`*Total NPUs` indicates the total number of NPUs used across all nodes. 1"
-" node = 1 Atlas 800 A3 server (64G × 16 NPUs)."
+"`*Total NPUs` indicates the total number of NPUs used across all nodes. 1 "
+"node = 1 Atlas 800 A3 server (64G × 16 NPUs)."
 msgstr "`*总 NPU 数`表示所有节点使用的 NPU 总数。1 节点 = 1 台 Atlas 800 A3 服务器（64G × 16 NPU）。"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:139
@@ -1060,14 +1074,14 @@ msgstr "长上下文（128K，高并发 >4）"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:1022
 msgid ""
-"For complete startup commands and parameter descriptions, please refer to"
-" the deployment examples in [Chapter 5](#5-online-service-deployment)."
+"For complete startup commands and parameter descriptions, please refer to "
+"the deployment examples in [Chapter 5](#5-online-service-deployment)."
 msgstr "完整的启动命令和参数描述，请参考[第 5 章](#5-online-service-deployment)中的部署示例。"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:1024
 msgid ""
-"**Notice:** `max-model-len` and `max-num-seqs` need to be set according "
-"to the actual usage scenario. For other settings, please refer to the "
+"**Notice:** `max-model-len` and `max-num-seqs` need to be set according to "
+"the actual usage scenario. For other settings, please refer to the "
 "**[Deployment](#5-online-service-deployment)** chapter."
 msgstr ""
 "**注意：** `max-model-len` 和 `max-num-seqs` "
@@ -1083,15 +1097,15 @@ msgid ""
 "Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md)"
 " for tuning methods."
 msgstr ""
-"请参考[公共性能调优文档](../../developer_guide/performance_and_debug/optimization_and_tuning.md)"
-"了解调优方法。"
+"请参考[公共性能调优文档](../../developer_guide/performance_and_debug/optimization_and_tuning.md)了解调优方法。"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:1031
 msgid ""
 "Please refer to the [Feature "
 "Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed "
 "feature descriptions."
-msgstr "请参考[特性指南](../../user_guide/support_matrix/feature_matrix.md)获取详细的特性描述。"
+msgstr ""
+"请参考[特性指南](../../user_guide/support_matrix/feature_matrix.md)获取详细的特性描述。"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:1033
 msgid "10 FAQ"
@@ -1099,37 +1113,272 @@ msgstr "10 常见问题"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:1035
 msgid ""
-"For common environment, installation, and general parameter issues, "
-"please refer to the [Public "
-"FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html); this "
-"chapter only covers model-specific issues."
+"For common environment, installation, and general parameter issues, please "
+"refer to the [Public "
+"FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html); this chapter"
+" only covers model-specific issues."
 msgstr ""
-"对于常见的环境、安装和通用参数问题，请参考[公共常见问题](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)；"
-"本章仅涵盖模型特定问题。"
+"对于常见的环境、安装和通用参数问题，请参考[公共常见问题](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)；本章仅涵盖模型特定问题。"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:1037
 msgid ""
 "**Q: What is the recommended TP/DP configuration for single-node "
 "deployment?**"
-msgstr ""
-"**问：单节点部署时推荐的 TP/DP 配置是什么？**"
+msgstr "**问：单节点部署时推荐的 TP/DP 配置是什么？**"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:1039
 msgid ""
-"A: For single-node deployment, we recommend using `dp4 tp4` instead of "
-"`dp2 tp8`."
+"A: For single-node deployment, we recommend using `dp4 tp4` instead of `dp2 "
+"tp8`."
 msgstr "答：对于单节点部署，建议使用 `dp4 tp4` 而不是 `dp2 tp8`。"
 
+msgid "# Kimi-K2.5"
+msgstr ""
+
+msgid "## 1 Introduction"
+msgstr ""
+
+msgid "## 2 Supported Features"
+msgstr ""
+
+msgid "## 3 Prerequisites"
+msgstr ""
+
+msgid "### 3.1 Model Weight"
+msgstr ""
+
+msgid ""
+"- `Kimi-K2.5-w4a8` (Quantized version for w4a8): requires 1 Atlas 800 A3 (64G × 16) node or 2 Atlas 800 A2 (64G × 8) nodes. [Download model weight](https://modelscope.cn/models/Eco-Tech/Kimi-K2.5-W4A8).\n"
+"- `kimi-k2.5-eagle3` (Eagle3 MTP draft model for accelerating inference of Kimi-K2.5): [Download model weight](https://huggingface.co/lightseekorg/kimi-k2.5-eagle3)"
+msgstr ""
+
+msgid "### 3.2 Verify Multi-node Communication (Optional)"
+msgstr ""
+
+msgid "## 4 Installation"
+msgstr ""
+
+msgid "### 4.1 Docker Image Installation"
+msgstr ""
+
+msgid "=== \"A3 series\""
+msgstr ""
+
+msgid "=== \"A2 series\""
+msgstr ""
+
+msgid "### 4.2 Source Code Installation"
+msgstr ""
+
+msgid ""
+"- Install `vllm-ascend` from source, refer to "
+"[installation](../../installation.md)."
+msgstr ""
+
+msgid "## 5 Online Service Deployment"
+msgstr ""
+
+msgid "### 5.1 Single-Node Online Deployment"
+msgstr ""
+
+msgid ""
+"- Setting the environment variable `VLLM_ASCEND_BALANCE_SCHEDULING=1` enables balance scheduling. This may help increase output throughput and reduce TPOT in v1 scheduler. However, TTFT may degrade in some scenarios. Furthermore, enabling this feature is not recommended in scenarios where PD is separated.\n"
+"- For single-node deployment, we recommend using `dp4 tp4` instead of `dp2 tp8`.\n"
+"- `--max-model-len` specifies the maximum context length - that is, the sum of input and output tokens for a single request. For performance testing with an input length of 3.5K and output length of 1.5K, a value of `16384` is sufficient, however, for precision testing, please set it at least `35000`.\n"
+"- `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.\n"
+"- `--mm-encoder-tp-mode` indicates how to optimize multi-modal encoder inference using tensor parallelism (TP). If you want to test the multimodal inputs, we recommend using `data`.\n"
+"- If you use the w4a8 weight, more memory will be allocated to kvcache, and you can try to increase system throughput to achieve greater throughput."
+msgstr ""
+
+msgid "### 5.2 Multi-Node Data Parallel Deployment"
+msgstr ""
+
+msgid ""
+"- `--data-parallel-size`: total number of data parallel ranks across all nodes. In this example, `4` means the model is split across 4 DP ranks total (2 per node).\n"
+"- `--data-parallel-size-local`: number of data parallel ranks running on the current node. In this example, each node runs 2 DP ranks.\n"
+"- `--data-parallel-start-rank`: starting rank offset for data parallel ranks on this node. Node 0 starts at rank 0 (default), Node 1 starts at rank 2. This ensures each node's DP ranks occupy distinct positions in the overall rank space.\n"
+"- `--data-parallel-address`: IP address of the data parallel master node (Node 0). This value must be consistent with `local_ip` set on Node 0.\n"
+"- `--data-parallel-rpc-port`: RPC port for data parallel master communication. Must be the same across all nodes.\n"
+"- `--headless`: indicates that this vLLM instance is not the master service node. Only set on non-master nodes (Node 1). The master node (Node 0) should NOT set this flag.\n"
+"- For single-node deployment, we recommend using `dp4 tp4` instead of `dp2 tp8`."
+msgstr ""
+
+msgid "### 5.3 Multi-Node PD Separation Deployment"
+msgstr ""
+
+msgid ""
+"- **Prefill nodes** focus on high-throughput prompt processing, optimized for compute and communication (e.g., enabling FlashComm for Allreduce acceleration).\n"
+"- **Decode nodes** focus on low-latency token generation, optimized for memory bandwidth (e.g., enabling MLAPO fusion operators)."
+msgstr ""
+
+msgid "- `Kimi-K2.5-w4a8 2P1D`: requires 4 Atlas 800 A3 (64G × 16) nodes."
+msgstr ""
+
+msgid ""
+"1. `launch_online_dp.py` to launch external dp vllm servers.\n"
+"    [launch_online_dp.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/launch_online_dp.py)"
+msgstr ""
+
+msgid ""
+"|Parameter|Type|Required|Default|Description|\n"
+"    |---------|----|--------|-------|-----------|\n"
+"    |`--dp-size`|int|Yes|-|Data parallel size (total number of DP ranks across all nodes).|\n"
+"    |`--tp-size`|int|No|1|Tensor parallel size within each DP rank.|\n"
+"    |`--dp-size-local`|int|No|(same as `--dp-size`)|Number of DP ranks on the current node. If not set, defaults to `--dp-size`.|\n"
+"    |`--dp-rank-start`|int|No|0|Starting rank offset for data parallel ranks on this node.|\n"
+"    |`--dp-address`|str|Yes|-|IP address of the data parallel master node (node 0).|\n"
+"    |`--dp-rpc-port`|str|No|12345|RPC port for data parallel master communication.|\n"
+"    |`--vllm-start-port`|int|No|9000|Starting port for each vLLM engine instance on this node. Each DP rank's engine port = `vllm_start_port` + local rank index.|"
+msgstr ""
+
+msgid "2. Prefill Node 0 `run_dp_template.sh` script"
+msgstr ""
+
+msgid "3. Prefill Node 1 `run_dp_template.sh` script"
+msgstr ""
+
+msgid "4. Decode Node 0 `run_dp_template.sh` script"
+msgstr ""
+
+msgid "5. Decode Node 1 `run_dp_template.sh` script"
+msgstr ""
+
+msgid ""
+"- `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the communication optimization function on the prefill nodes.\n"
+"- `VLLM_ASCEND_ENABLE_MLAPO=1`: enables the fusion operator, which can significantly improve performance but consumes more NPU memory. In the Prefill-Decode (PD) separation scenario, enable MLAPO only on decode nodes.\n"
+"- `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the Key-Value Cache (KV Cache) of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, enable this configuration only on decode nodes.\n"
+"- `multistream_overlap_shared_expert: true`: When the Tensor Parallelism (TP) size is 1 or `enable_shared_expert_dp: true`, an additional stream is enabled to overlap the computation process of shared experts for improved efficiency."
+msgstr ""
+
+msgid ""
+"- `$1` (`ASCEND_RT_VISIBLE_DEVICES`): the NPU devices assigned to this DP instance, e.g., `0,1,2,3` or `4,5,6,7`.\n"
+"- `$2` (`--port`): the vLLM server port for this DP instance, auto-assigned starting from `--vllm-start-port` (e.g., `7100`, `7101`).\n"
+"- `$3` (`--data-parallel-size`): total number of DP ranks.\n"
+"- `$4` (`--data-parallel-rank`): the rank index of this DP instance.\n"
+"- `$5` (`--data-parallel-address`): IP address of the DP master node.\n"
+"- `$6` (`--data-parallel-rpc-port`): RPC port for DP master communication.\n"
+"- `$7` (`--tensor-parallel-size`): TP size within each DP rank."
+msgstr ""
+
+msgid "6. Run server for each node:"
+msgstr ""
+
+msgid "7. Run the `proxy.sh` script on the prefill master node"
+msgstr ""
+
+msgid "## 6 Functional Verification"
+msgstr ""
+
+msgid "## 7 Accuracy Evaluation"
+msgstr ""
+
+msgid "### Using AISBench"
+msgstr ""
+
+msgid ""
+"1. Refer to [Using "
+"AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details."
+msgstr ""
+
+msgid ""
+"2. After execution, you can get the result. Here is the result of "
+"`Kimi-K2.5-w4a8` in `vllm-ascend:v0.17.0rc1` for reference only."
+msgstr ""
+
+msgid ""
+"| dataset | version | metric | mode | vllm-api-general-chat | note |\n"
+"| ----- | ----- | ----- | ----- | ----- | ----- |\n"
+"| GSM8K | - | accuracy | gen | 96.07 | 1 Atlas 800 A3 (64G × 16) |\n"
+"| AIME2025 | - | accuracy | gen | 90.00 | 1 Atlas 800 A3 (64G × 16) |\n"
+"| GPQA | - | accuracy | gen | 84.85 | 1 Atlas 800 A3 (64G × 16) |\n"
+"| TextVQA | - | accuracy | gen | 80.29 | 1 Atlas 800 A3 (64G × 16) |"
+msgstr ""
+
+msgid "## 8 Performance Evaluation"
+msgstr ""
+
+msgid "### Using vLLM Benchmark"
+msgstr ""
+
+msgid ""
+"- `latency`: Benchmark the latency of a single batch of requests.\n"
+"- `serve`: Benchmark the online serving throughput.\n"
+"- `throughput`: Benchmark offline inference throughput."
+msgstr ""
+
+msgid "## 9 Performance Tuning"
+msgstr ""
+
+msgid "### 9.1 Recommended Configurations"
+msgstr ""
+
+msgid ""
+"> **Note**: The following configurations are validated in specific test "
+"environments and are for reference only. The optimal configuration depends "
+"on factors such as maximum input/output length, prefix cache hit rate, "
+"precision requirements, and deployment machine ratios. It is recommended to "
+"refer to Section 9.2 for tuning based on actual conditions."
+msgstr ""
+
+msgid "#### Table 1: Scenario Overview"
+msgstr ""
+
+msgid ""
+"> `*Total NPUs` indicates the total number of NPUs used across all nodes. 1 "
+"node = 1 Atlas 800 A3 server (64G × 16 NPUs)."
+msgstr ""
+
+msgid ""
+"|Scenario|Deployment Mode|*Total NPUs|Weight Version|Key Considerations|\n"
+"|--------|---------------|-----------|--------------|------------------|\n"
+"|High Throughput / Low Latency<br>(16K context)|Single-Node Mixed|16 (A3)|kimi-k2.5-w4a8|Use dp4 tp4 for optimal throughput and low latency|\n"
+"|High Throughput / Low Latency<br>(16K context)|2-Node Data Parallel|16 (A2)|kimi-k2.5-w4a8|dp4 tp4 across 2 nodes; balanced latency and throughput|\n"
+"|High Throughput / Low Latency<br>(16K context)|2P2D deployment|64 (A3)|kimi-k2.5-w4a8|Prefill: dp2 tp8; Decode: dp32 tp1 for high concurrency|\n"
+"|Long Context<br>(128K, low concurrency ≤4)|Single-Node Mixed|16 (A3)|kimi-k2.5-w4a8|dp1 tp16 to maximize TP, accommodate extreme context lengths|\n"
+"|Long Context<br>(128K, high concurrency >4)|Single-Node Mixed|16 (A3)|kimi-k2.5-w4a8|dp2 tp8 to optimize memory bandwidth and support higher concurrency|"
+msgstr ""
+
+msgid "#### Table 2: Detailed Node Configuration"
+msgstr ""
+
+msgid ""
+"|Scenario|Configuration|NPUs|TP|DP|Max Model Len|MTP Speculation Num|\n"
+"|--------|-------------|-----|--|--|-------------|--------------------|\n"
+"|High Throughput / Low Latency (16K)|Server / Single Machine|16|4|4|~16K|3|\n"
+"|High Throughput / Low Latency (16K)|Server / 2-Node DP|8|4|2|~16K|3|\n"
+"|High Throughput / Low Latency (16K)|Server-P Node|16|8|2|~16K|3|\n"
+"|High Throughput / Low Latency (16K)|Server-D Node|16|1|32|~16K|3|\n"
+"|Long Context (128K, low concurrency ≤4)|Server / Single Machine|16|16|1|128K|3|\n"
+"|Long Context (128K, high concurrency >4)|Server / Single Machine|16|8|2|128K|3|"
+msgstr ""
+
+msgid ""
+"> For complete startup commands and parameter descriptions, please refer to "
+"the deployment examples in [Chapter 5](#5-online-service-deployment)."
+msgstr ""
+
+msgid ""
+"**Notice:**\n"
+"`max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario. For other settings, please refer to the **[Deployment](#5-online-service-deployment)** chapter."
+msgstr ""
+
+msgid "### 9.2 Tuning Guidelines"
+msgstr ""
+
+msgid "## 10 FAQ"
+msgstr ""
+
+msgid ""
+"- **Q: What is the recommended TP/DP configuration for single-node "
+"deployment?**"
+msgstr ""
+
 #~ msgid ""
-#~ "`--async-scheduling`: enables the asynchronous"
-#~ " scheduling function. When Multi-Token "
-#~ "Prediction (MTP) is enabled, asynchronous "
-#~ "scheduling of operator delivery can be"
-#~ " implemented to overlap the operator "
-#~ "delivery latency."
+#~ "`--async-scheduling`: enables the asynchronous scheduling function. When "
+#~ "Multi-Token Prediction (MTP) is enabled, asynchronous scheduling of operator"
+#~ " delivery can be implemented to overlap the operator delivery latency."
 #~ msgstr ""
-#~ "`--async-scheduling`：启用异步调度功能。当启用多 Token "
-#~ "预测（MTP）时，可以实现算子下发的异步调度，从而掩盖算子下发的延迟。"
+#~ "`--async-scheduling`：启用异步调度功能。当启用多 Token 预测（MTP）时，可以实现算子下发的异步调度，从而掩盖算子下发的延迟。"
 
 #~ msgid "The `Kimi-K2.5` model is first supported in `vllm-ascend:v0.17.0rc1`."
 #~ msgstr "`Kimi-K2.5` 模型从 `vllm-ascend:v0.17.0rc1` 版本开始首次支持。"
@@ -1156,27 +1405,22 @@ msgstr "答：对于单节点部署，建议使用 `dp4 tp4` 而不是 `dp2 tp8`
 #~ msgstr "在本章中，我们针对三种场景推荐最佳实践："
 
 #~ msgid ""
-#~ "Long-context: For long sequences with"
-#~ " low concurrency (≤ 4): set `dp1 "
-#~ "tp16`; For long sequences with high "
-#~ "concurrency (> 4): set `dp2 tp8`"
+#~ "Long-context: For long sequences with low concurrency (≤ 4): set `dp1 tp16`;"
+#~ " For long sequences with high concurrency (> 4): set `dp2 tp8`"
 #~ msgstr "长上下文：对于低并发（≤ 4）的长序列：设置 `dp1 tp16`；对于高并发（> 4）的长序列：设置 `dp2 tp8`"
 
 #~ msgid ""
-#~ "Low-latency: For short sequences with"
-#~ " low latency: we recommend setting "
-#~ "`dp2 tp8`"
+#~ "Low-latency: For short sequences with low latency: we recommend setting `dp2"
+#~ " tp8`"
 #~ msgstr "低延迟：对于短序列的低延迟场景：我们推荐设置 `dp2 tp8`"
 
 #~ msgid ""
-#~ "High-throughput: For short sequences "
-#~ "with high throughput: we also recommend"
+#~ "High-throughput: For short sequences with high throughput: we also recommend"
 #~ " setting `dp4 tp4`"
 #~ msgstr "高吞吐：对于短序列的高吞吐场景：我们也推荐设置 `dp4 tp4`"
 
 #~ msgid ""
-#~ "**Q: Startup fails with HCCL port "
-#~ "conflicts (address already bound). What "
+#~ "**Q: Startup fails with HCCL port conflicts (address already bound). What "
 #~ "should I do?**"
 #~ msgstr "**问：启动失败，出现 HCCL 端口冲突（地址已被绑定）。该怎么办？**"
 
@@ -1187,12 +1431,9 @@ msgstr "答：对于单节点部署，建议使用 `dp4 tp4` 而不是 `dp2 tp8`
 #~ msgstr "**问：如何处理 OOM 或启动不稳定的问题？**"
 
 #~ msgid ""
-#~ "A: Reduce `--max-num-seqs` and "
-#~ "`--max-model-len` first. If needed, "
-#~ "reduce concurrency and load-testing "
-#~ "pressure (e.g., `max-concurrency` / "
-#~ "`num-prompts`)."
+#~ "A: Reduce `--max-num-seqs` and `--max-model-len` first. If needed, reduce "
+#~ "concurrency and load-testing pressure (e.g., `max-concurrency` / `num-"
+#~ "prompts`)."
 #~ msgstr ""
-#~ "答：首先减小 `--max-num-seqs` 和 `--max-"
-#~ "model-len`。如有必要，降低并发和压测压力（例如 `max-concurrency` /"
-#~ " `num-prompts`）。"
+#~ "答：首先减小 `--max-num-seqs` 和 `--max-model-len`。如有必要，降低并发和压测压力（例如 `max-"
+#~ "concurrency` / `num-prompts`）。"

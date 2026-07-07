@@ -6,17 +6,17 @@
 #
 msgid ""
 msgstr ""
-"Project-Id-Version: vllm-ascend \n"
+"Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
 "POT-Creation-Date: 2026-04-09 18:37+0800\n"
 "PO-Revision-Date: 2026-04-10 18:37+0800\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
-"Language: zh_CN\n"
 "Language-Team: zh_CN <LL@li.org>\n"
-"Plural-Forms: nplurals=1; plural=0;\n"
+"Language: zh_CN\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: Babel 2.18.0\n"
 
 #: ../../source/tutorials/models/DeepSeek-R1.md:1
@@ -29,25 +29,23 @@ msgstr "简介"
 
 #: ../../source/tutorials/models/DeepSeek-R1.md:5
 msgid ""
-"DeepSeek-R1 is a high-performance Mixture-of-Experts (MoE) large language"
-" model developed by DeepSeek Company. It excels in complex logical "
-"reasoning, mathematical problem-solving, and code generation. By "
-"dynamically activating its expert networks, it delivers exceptional "
-"performance while maintaining computational efficiency. Building upon R1,"
-" DeepSeek-R1-W8A8 is a fully quantized version of the model. It employs "
-"8-bit integer (INT8) quantization for both weights and activations, which"
-" significantly reduces the model's memory footprint and computational "
-"requirements, enabling more efficient deployment and application in "
-"resource-constrained environments. This article takes the "
-"`DeepSeek-R1-W8A8` version as an example to introduce the deployment of "
-"the R1 series models."
+"DeepSeek-R1 is a high-performance Mixture-of-Experts (MoE) large language "
+"model developed by DeepSeek Company. It excels in complex logical reasoning,"
+" mathematical problem-solving, and code generation. By dynamically "
+"activating its expert networks, it delivers exceptional performance while "
+"maintaining computational efficiency. Building upon R1, DeepSeek-R1-W8A8 is "
+"a fully quantized version of the model. It employs 8-bit integer (INT8) "
+"quantization for both weights and activations, which significantly reduces "
+"the model's memory footprint and computational requirements, enabling more "
+"efficient deployment and application in resource-constrained environments. "
+"This article takes the `DeepSeek-R1-W8A8` version as an example to introduce"
+" the deployment of the R1 series models."
 msgstr ""
-"DeepSeek-R1 是由深度求索公司开发的高性能混合专家（MoE）大语言模型。"
-"它在复杂逻辑推理、数学问题求解和代码生成方面表现出色。通过动态激活专家网络，"
-"它在保持计算效率的同时提供了卓越的性能。基于 R1，DeepSeek-R1-W8A8 是该模型的全量化版本。"
-"它对权重和激活值均采用 8 位整数（INT8）量化，显著降低了模型的内存占用和计算需求，"
-"使其能够在资源受限的环境中进行更高效的部署和应用。本文以 `DeepSeek-R1-W8A8` 版本为例，"
-"介绍 R1 系列模型的部署。"
+"DeepSeek-R1 "
+"是由深度求索公司开发的高性能混合专家（MoE）大语言模型。它在复杂逻辑推理、数学问题求解和代码生成方面表现出色。通过动态激活专家网络，它在保持计算效率的同时提供了卓越的性能。基于"
+" R1，DeepSeek-R1-W8A8 是该模型的全量化版本。它对权重和激活值均采用 8 "
+"位整数（INT8）量化，显著降低了模型的内存占用和计算需求，使其能够在资源受限的环境中进行更高效的部署和应用。本文以 "
+"`DeepSeek-R1-W8A8` 版本为例，介绍 R1 系列模型的部署。"
 
 #: ../../source/tutorials/models/DeepSeek-R1.md:8
 msgid "Supported Features"
@@ -56,17 +54,16 @@ msgstr "支持的特性"
 #: ../../source/tutorials/models/DeepSeek-R1.md:10
 msgid ""
 "Refer to [supported "
-"features](../../user_guide/support_matrix/supported_models.md) to get the"
-" model's supported feature matrix."
+"features](../../user_guide/support_matrix/supported_models.md) to get the "
+"model's supported feature matrix."
 msgstr ""
 "请参阅[支持的特性矩阵](../../user_guide/support_matrix/supported_models.md)获取模型支持的特性列表。"
 
 #: ../../source/tutorials/models/DeepSeek-R1.md:12
 msgid ""
-"Refer to [feature guide](../../user_guide/feature_guide/index.md) to get "
-"the feature's configuration."
-msgstr ""
-"请参阅[特性指南](../../user_guide/feature_guide/index.md)获取特性的配置方法。"
+"Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the"
+" feature's configuration."
+msgstr "请参阅[特性指南](../../user_guide/feature_guide/index.md)获取特性的配置方法。"
 
 #: ../../source/tutorials/models/DeepSeek-R1.md:14
 msgid "Environment Preparation"
@@ -82,15 +79,15 @@ msgid ""
 "nodes or 2 Atlas 800 A2 (64G × 8) nodes. [Download model "
 "weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-R1-W8A8)"
 msgstr ""
-"`DeepSeek-R1-W8A8`（量化版本）：需要 1 个 Atlas 800 A3（64G × 16）节点或 2 个 Atlas 800 A2（64G × 8）节点。"
-"[下载模型权重](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-R1-W8A8)"
+"`DeepSeek-R1-W8A8`（量化版本）：需要 1 个 Atlas 800 A3（64G × 16）节点或 2 个 Atlas 800 "
+"A2（64G × 8）节点。[下载模型权重](https://www.modelscope.cn/models/vllm-"
+"ascend/DeepSeek-R1-W8A8)"
 
 #: ../../source/tutorials/models/DeepSeek-R1.md:20
 msgid ""
-"It is recommended to download the model weight to the shared directory of"
-" multiple nodes."
-msgstr ""
-"建议将模型权重下载到多节点共享目录。"
+"It is recommended to download the model weight to the shared directory of "
+"multiple nodes."
+msgstr "建议将模型权重下载到多节点共享目录。"
 
 #: ../../source/tutorials/models/DeepSeek-R1.md:22
 msgid "Verify Multi-node Communication(Optional)"
@@ -98,18 +95,20 @@ msgstr "验证多节点通信（可选）"
 
 #: ../../source/tutorials/models/DeepSeek-R1.md:24
 msgid ""
-"If you want to deploy multi-node environment, you need to verify multi-"
-"node communication according to [verify multi-node communication "
+"If you want to deploy multi-node environment, you need to verify multi-node "
+"communication according to [verify multi-node communication "
 "environment](../../installation.md#verify-multi-node-communication)."
 msgstr ""
-"如果要部署多节点环境，需要按照[验证多节点通信环境](../../installation.md#verify-multi-node-communication)验证多节点通信。"
+"如果要部署多节点环境，需要按照[验证多节点通信环境](../../installation.md#verify-multi-node-"
+"communication)验证多节点通信。"
 
 #: ../../source/tutorials/models/DeepSeek-R1.md:26
 msgid "Installation"
 msgstr "安装"
 
 #: ../../source/tutorials/models/DeepSeek-R1.md:28
-msgid "You can use our official docker image to run `DeepSeek-R1-W8A8` directly."
+msgid ""
+"You can use our official docker image to run `DeepSeek-R1-W8A8` directly."
 msgstr "您可以使用官方 Docker 镜像直接运行 `DeepSeek-R1-W8A8`。"
 
 #: ../../source/tutorials/models/DeepSeek-R1.md:30
@@ -118,12 +117,13 @@ msgid ""
 "your node, refer to [using docker](../../installation.md#set-up-using-"
 "docker)."
 msgstr ""
-"根据您的机器类型选择镜像，并在节点上启动 Docker 镜像，请参考[使用 Docker 安装](../../installation.md#set-up-using-docker)。"
+"根据您的机器类型选择镜像，并在节点上启动 Docker 镜像，请参考[使用 Docker 安装](../../installation.md#set-"
+"up-using-docker)。"
 
 #: ../../source/tutorials/models/DeepSeek-R1.md:69
 msgid ""
-"If you want to deploy multi-node environment, you need to set up "
-"environment on each node."
+"If you want to deploy multi-node environment, you need to set up environment"
+" on each node."
 msgstr "如果要部署多节点环境，需要在每个节点上设置环境。"
 
 #: ../../source/tutorials/models/DeepSeek-R1.md:71
@@ -136,9 +136,11 @@ msgstr "服务化部署"
 
 #: ../../source/tutorials/models/DeepSeek-R1.md:75
 msgid ""
-"`DeepSeek-R1-W8A8`: require 1 Atlas 800 A3 (64G × 16) nodes or 2 Atlas "
-"800 A2 (64G × 8)."
-msgstr "`DeepSeek-R1-W8A8`：需要 1 个 Atlas 800 A3（64G × 16）节点或 2 个 Atlas 800 A2（64G × 8）节点。"
+"`DeepSeek-R1-W8A8`: require 1 Atlas 800 A3 (64G × 16) nodes or 2 Atlas 800 "
+"A2 (64G × 8)."
+msgstr ""
+"`DeepSeek-R1-W8A8`：需要 1 个 Atlas 800 A3（64G × 16）节点或 2 个 Atlas 800 A2（64G × "
+"8）节点。"
 
 #: ../../source/tutorials/models/DeepSeek-R1.md
 msgid "DeepSeek-R1-W8A8 A3 series"
@@ -150,43 +152,40 @@ msgstr "**注意：** 参数解释如下："
 
 #: ../../source/tutorials/models/DeepSeek-R1.md:123
 msgid ""
-"Setting the environment variable `VLLM_ASCEND_BALANCE_SCHEDULING=1` "
-"enables balance scheduling. This may help increase output throughput and "
-"reduce TPOT in v1 scheduler. However, TTFT may degrade in some scenarios."
-" Furthermore, enabling this feature is not recommended in scenarios where"
-" PD is separated."
+"Setting the environment variable `VLLM_ASCEND_BALANCE_SCHEDULING=1` enables "
+"balance scheduling. This may help increase output throughput and reduce TPOT"
+" in v1 scheduler. However, TTFT may degrade in some scenarios. Furthermore, "
+"enabling this feature is not recommended in scenarios where PD is separated."
 msgstr ""
-"设置环境变量 `VLLM_ASCEND_BALANCE_SCHEDULING=1` 可启用均衡调度。"
-"这有助于提高 v1 调度器的输出吞吐量并降低 TPOT。但在某些场景下 TTFT 可能会下降。"
-"此外，不建议在 PD 分离场景下启用此特性。"
+"设置环境变量 `VLLM_ASCEND_BALANCE_SCHEDULING=1` 可启用均衡调度。这有助于提高 v1 调度器的输出吞吐量并降低 "
+"TPOT。但在某些场景下 TTFT 可能会下降。此外，不建议在 PD 分离场景下启用此特性。"
 
 #: ../../source/tutorials/models/DeepSeek-R1.md:124
 msgid ""
-"For single-node deployment, we recommend using `dp4tp4` instead of "
-"`dp2tp8`."
+"For single-node deployment, we recommend using `dp4tp4` instead of `dp2tp8`."
 msgstr "对于单节点部署，建议使用 `dp4tp4` 而不是 `dp2tp8`。"
 
 #: ../../source/tutorials/models/DeepSeek-R1.md:125
 msgid ""
-"`--max-model-len` specifies the maximum context length - that is, the sum"
-" of input and output tokens for a single request. For performance testing"
-" with an input length of 3.5K and output length of 1.5K, a value of "
-"`16384` is sufficient, however, for precision testing, please set it to "
-"at least `35000`."
+"`--max-model-len` specifies the maximum context length - that is, the sum of"
+" input and output tokens for a single request. For performance testing with "
+"an input length of 3.5K and output length of 1.5K, a value of `16384` is "
+"sufficient, however, for precision testing, please set it to at least "
+"`35000`."
 msgstr ""
-"`--max-model-len` 指定最大上下文长度，即单个请求的输入 token 和输出 token 之和。"
-"对于输入长度 3.5K、输出长度 1.5K 的性能测试，`16384` 的值已经足够；但对于精度测试，请至少设置为 `35000`。"
+"`--max-model-len` 指定最大上下文长度，即单个请求的输入 token 和输出 token 之和。对于输入长度 3.5K、输出长度 "
+"1.5K 的性能测试，`16384` 的值已经足够；但对于精度测试，请至少设置为 `35000`。"
 
 #: ../../source/tutorials/models/DeepSeek-R1.md:126
 msgid ""
-"`--no-enable-prefix-caching` indicates that prefix caching is disabled. "
-"To enable it, remove this option."
+"`--no-enable-prefix-caching` indicates that prefix caching is disabled. To "
+"enable it, remove this option."
 msgstr "`--no-enable-prefix-caching` 表示禁用前缀缓存。要启用前缀缓存，请移除该选项。"
 
 #: ../../source/tutorials/models/DeepSeek-R1.md:127
 msgid ""
-"If you use the w4a8 weight, more memory will be allocated to kvcache, and"
-" you can try to increase system throughput to achieve greater throughput."
+"If you use the w4a8 weight, more memory will be allocated to kvcache, and "
+"you can try to increase system throughput to achieve greater throughput."
 msgstr "如果使用 w4a8 权重，更多内存将分配给 kvcache，您可以尝试增加系统吞吐量以获得更高的吞吐性能。"
 
 #: ../../source/tutorials/models/DeepSeek-R1.md
@@ -224,7 +223,8 @@ msgid "Functional Verification"
 msgstr "功能验证"
 
 #: ../../source/tutorials/models/DeepSeek-R1.md:238
-msgid "Once your server is started, you can query the model with input prompts:"
+msgid ""
+"Once your server is started, you can query the model with input prompts:"
 msgstr "服务器启动后，您可以使用输入提示词查询模型："
 
 #: ../../source/tutorials/models/DeepSeek-R1.md:251
@@ -243,17 +243,16 @@ msgstr "使用 AISBench"
 #: ../../source/tutorials/models/DeepSeek-R1.md:257
 msgid ""
 "Refer to [Using "
-"AISBench](../../developer_guide/evaluation/using_ais_bench.md) for "
-"details."
+"AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details."
 msgstr ""
-"详细信息请参考[使用 AISBench 进行精度评估](../../developer_guide/evaluation/using_ais_bench.md)。"
+"详细信息请参考[使用 AISBench "
+"进行精度评估](../../developer_guide/evaluation/using_ais_bench.md)。"
 
 #: ../../source/tutorials/models/DeepSeek-R1.md:259
 msgid ""
 "After execution, you can get the result, here is the result of "
 "`DeepSeek-R1-W8A8` in `vllm-ascend:0.11.0rc2` for reference only."
-msgstr ""
-"执行后即可获得结果，以下是 `DeepSeek-R1-W8A8` 在 `vllm-ascend:0.11.0rc2` 上的结果，仅供参考。"
+msgstr "执行后即可获得结果，以下是 `DeepSeek-R1-W8A8` 在 `vllm-ascend:0.11.0rc2` 上的结果，仅供参考。"
 
 #: ../../source/tutorials/models/DeepSeek-R1.md:130
 msgid "dataset"
@@ -309,18 +308,17 @@ msgstr "使用 Language Model Evaluation Harness"
 
 #: ../../source/tutorials/models/DeepSeek-R1.md:268
 msgid ""
-"As an example, take the `gsm8k` dataset as a test dataset, and run "
-"accuracy evaluation of `DeepSeek-R1-W8A8` in online mode."
-msgstr ""
-"以 `gsm8k` 数据集为例，以在线模式运行 `DeepSeek-R1-W8A8` 的精度评估。"
+"As an example, take the `gsm8k` dataset as a test dataset, and run accuracy "
+"evaluation of `DeepSeek-R1-W8A8` in online mode."
+msgstr "以 `gsm8k` 数据集为例，以在线模式运行 `DeepSeek-R1-W8A8` 的精度评估。"
 
 #: ../../source/tutorials/models/DeepSeek-R1.md:270
 msgid ""
-"Refer to [Using "
-"lm_eval](../../developer_guide/evaluation/using_lm_eval.md) for `lm_eval`"
-" installation."
+"Refer to [Using lm_eval](../../developer_guide/evaluation/using_lm_eval.md) "
+"for `lm_eval` installation."
 msgstr ""
-"请参考[使用 lm_eval 进行精度评估](../../developer_guide/evaluation/using_lm_eval.md)了解 `lm_eval` 的安装方法。"
+"请参考[使用 lm_eval 进行精度评估](../../developer_guide/evaluation/using_lm_eval.md)了解 "
+"`lm_eval` 的安装方法。"
 
 #: ../../source/tutorials/models/DeepSeek-R1.md:272
 msgid "Run `lm_eval` to execute the accuracy evaluation."
@@ -340,7 +338,9 @@ msgid ""
 "evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-"
 "performance-evaluation) for details."
 msgstr ""
-"详细信息请参考[使用 AISBench 进行性能评估](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation)。"
+"详细信息请参考[使用 AISBench "
+"进行性能评估](../../developer_guide/evaluation/using_ais_bench.md#execute-"
+"performance-evaluation)。"
 
 #: ../../source/tutorials/models/DeepSeek-R1.md:290
 msgid "Using vLLM Benchmark"
@@ -352,8 +352,8 @@ msgstr "以 `DeepSeek-R1-W8A8` 为例运行性能评估。"
 
 #: ../../source/tutorials/models/DeepSeek-R1.md:294
 msgid ""
-"Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) "
-"for more details."
+"Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for "
+"more details."
 msgstr "更多详细信息请参考 [vLLM 基准测试](https://docs.vllm.ai/en/latest/benchmarking/)。"
 
 #: ../../source/tutorials/models/DeepSeek-R1.md:296
@@ -378,6 +378,123 @@ msgstr "以 `serve` 为例，运行如下代码。"
 
 #: ../../source/tutorials/models/DeepSeek-R1.md:309
 msgid ""
-"After about several minutes, you can get the performance evaluation "
-"result."
+"After about several minutes, you can get the performance evaluation result."
 msgstr "大约几分钟后，即可获得性能评估结果。"
+
+msgid "# DeepSeek-R1"
+msgstr ""
+
+msgid "## Introduction"
+msgstr ""
+
+msgid ""
+"DeepSeek-R1 is a high-performance Mixture-of-Experts (MoE) large language model developed by DeepSeek Company. It excels in complex logical reasoning, mathematical problem-solving, and code generation. By dynamically activating its expert networks, it delivers exceptional performance while maintaining computational efficiency. Building upon R1, DeepSeek-R1-W8A8 is a fully quantized version of the model. It employs 8-bit integer (INT8) quantization for both weights and activations, which significantly reduces the model's memory footprint and computational requirements, enabling more efficient deployment and application in resource-constrained environments.\n"
+"This article takes the `DeepSeek-R1-W8A8` version as an example to introduce the deployment of the R1 series models."
+msgstr ""
+
+msgid "## Supported Features"
+msgstr ""
+
+msgid "## Environment Preparation"
+msgstr ""
+
+msgid "### Model Weight"
+msgstr ""
+
+msgid ""
+"- `DeepSeek-R1-W8A8`(Quantized version): require 1 Atlas 800 A3 (64G × 16) "
+"nodes or 2 Atlas 800 A2 (64G × 8) nodes. [Download model "
+"weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-R1-W8A8)"
+msgstr ""
+
+msgid "### Verify Multi-node Communication(Optional)"
+msgstr ""
+
+msgid "### Installation"
+msgstr ""
+
+msgid "## Deployment"
+msgstr ""
+
+msgid "### Service-oriented Deployment"
+msgstr ""
+
+msgid ""
+"- `DeepSeek-R1-W8A8`: require 1 Atlas 800 A3 (64G × 16) nodes or 2 Atlas 800"
+" A2 (64G × 8)."
+msgstr ""
+
+msgid "=== \"DeepSeek-R1-W8A8 A3 series\""
+msgstr ""
+
+msgid ""
+"**Notice:**\n"
+"    The parameters are explained as follows:"
+msgstr ""
+
+msgid ""
+"- Setting the environment variable `VLLM_ASCEND_BALANCE_SCHEDULING=1` enables balance scheduling. This may help increase output throughput and reduce TPOT in v1 scheduler. However, TTFT may degrade in some scenarios. Furthermore, enabling this feature is not recommended in scenarios where PD is separated.\n"
+"    - For single-node deployment, we recommend using `dp4tp4` instead of `dp2tp8`.\n"
+"    - `--max-model-len` specifies the maximum context length - that is, the sum of input and output tokens for a single request. For performance testing with an input length of 3.5K and output length of 1.5K, a value of `16384` is sufficient, however, for precision testing, please set it to at least `35000`.\n"
+"    - `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.\n"
+"    - If you use the w4a8 weight, more memory will be allocated to kvcache, and you can try to increase system throughput to achieve greater throughput."
+msgstr ""
+
+msgid "=== \"DeepSeek-R1-W8A8 A2 series\""
+msgstr ""
+
+msgid "### Prefill-Decode Disaggregation"
+msgstr ""
+
+msgid "## Functional Verification"
+msgstr ""
+
+msgid "## Accuracy Evaluation"
+msgstr ""
+
+msgid "### Using AISBench"
+msgstr ""
+
+msgid ""
+"1. Refer to [Using "
+"AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details."
+msgstr ""
+
+msgid ""
+"2. After execution, you can get the result, here is the result of "
+"`DeepSeek-R1-W8A8` in `vllm-ascend:0.11.0rc2` for reference only."
+msgstr ""
+
+msgid ""
+"| dataset | version | metric | mode | vllm-api-general-chat |\n"
+"    |----- | ----- | ----- | ----- | -----|\n"
+"    | aime2024dataset | - | accuracy | gen | 80.00 |\n"
+"    | gpqadataset | - | accuracy | gen | 72.22 |"
+msgstr ""
+
+msgid "### Using Language Model Evaluation Harness"
+msgstr ""
+
+msgid ""
+"1. Refer to [Using "
+"lm_eval](../../developer_guide/evaluation/using_lm_eval.md) for `lm_eval` "
+"installation."
+msgstr ""
+
+msgid "2. Run `lm_eval` to execute the accuracy evaluation."
+msgstr ""
+
+msgid "3. After execution, you can get the result."
+msgstr ""
+
+msgid "## Performance"
+msgstr ""
+
+msgid "### Using vLLM Benchmark"
+msgstr ""
+
+msgid ""
+"- `latency`: Benchmark the latency of a single batch of requests.\n"
+"- `serve`: Benchmark the online serving throughput.\n"
+"- `throughput`: Benchmark offline inference throughput."
+msgstr ""

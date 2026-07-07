@@ -6,17 +6,17 @@
 #
 msgid ""
 msgstr ""
-"Project-Id-Version: vllm-ascend \n"
+"Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
 "POT-Creation-Date: 2026-07-02 07:02+0000\n"
 "PO-Revision-Date: 2026-04-10 18:37+0800\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
-"Language: zh_CN\n"
 "Language-Team: zh_CN <LL@li.org>\n"
-"Plural-Forms: nplurals=1; plural=0;\n"
+"Language: zh_CN\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: Babel 2.18.0\n"
 
 #: ../../source/tutorials/models/DeepSeekOCR2.md:1
@@ -29,23 +29,22 @@ msgstr "1 简介"
 
 #: ../../source/tutorials/models/DeepSeekOCR2.md:5
 msgid ""
-"DeepSeekOCR2 is a model to investigate the role of vision encoders from "
-"an LLM-centric viewpoint."
+"DeepSeekOCR2 is a model to investigate the role of vision encoders from an "
+"LLM-centric viewpoint."
 msgstr "DeepSeekOCR2 是一个从以 LLM 为中心的视角研究视觉编码器作用的模型。"
 
 #: ../../source/tutorials/models/DeepSeekOCR2.md:7
 msgid ""
-"The `DeepSeek-OCR-2` model is first supported in `vllm-ascend:v0.16.0` "
-"and can stably run in v0.16.0 and later version."
+"The `DeepSeek-OCR-2` model is first supported in `vllm-ascend:v0.16.0` and "
+"can stably run in v0.16.0 and later version."
 msgstr ""
-"`DeepSeek-OCR-2` 模型从 `vllm-ascend:v0.16.0` 版本开始首次支持，并可在 v0.16.0 "
-"及更高版本中稳定运行。"
+"`DeepSeek-OCR-2` 模型从 `vllm-ascend:v0.16.0` 版本开始首次支持，并可在 v0.16.0 及更高版本中稳定运行。"
 
 #: ../../source/tutorials/models/DeepSeekOCR2.md:9
 msgid ""
-"This document will show the main verification steps of the model, "
-"including supported features, feature configuration, environment "
-"preparation, single-node deployment, accuracy and performance evaluation."
+"This document will show the main verification steps of the model, including "
+"supported features, feature configuration, environment preparation, single-"
+"node deployment, accuracy and performance evaluation."
 msgstr "本文档将展示模型的主要验证步骤，包括支持的特性、特性配置、环境准备、单节点部署、精度评估和性能评估。"
 
 #: ../../source/tutorials/models/DeepSeekOCR2.md:11
@@ -57,12 +56,13 @@ msgid ""
 "Refer to [Supported Features "
 "List](../../user_guide/support_matrix/supported_models.md) to get the "
 "model's supported feature matrix."
-msgstr "请参阅[支持的特性列表](../../user_guide/support_matrix/supported_models.md)获取模型支持的特性矩阵。"
+msgstr ""
+"请参阅[支持的特性列表](../../user_guide/support_matrix/supported_models.md)获取模型支持的特性矩阵。"
 
 #: ../../source/tutorials/models/DeepSeekOCR2.md:15
 msgid ""
-"Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get "
-"the feature's configuration."
+"Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the"
+" feature's configuration."
 msgstr "请参阅[特性指南](../../user_guide/feature_guide/index.md)获取特性的配置方法。"
 
 #: ../../source/tutorials/models/DeepSeekOCR2.md:17
@@ -75,16 +75,16 @@ msgstr "3.1 模型权重"
 
 #: ../../source/tutorials/models/DeepSeekOCR2.md:21
 msgid ""
-"`DeepSeek-OCR-2`: [Download model weight](https://huggingface.co"
-"/deepseek-ai/DeepSeek-OCR-2)."
+"`DeepSeek-OCR-2`: [Download model weight](https://huggingface.co/deepseek-"
+"ai/DeepSeek-OCR-2)."
 msgstr ""
 "`DeepSeek-OCR-2`：[下载模型权重](https://huggingface.co/deepseek-ai/DeepSeek-"
 "OCR-2)。"
 
 #: ../../source/tutorials/models/DeepSeekOCR2.md:23
 msgid ""
-"It is recommended to download the model weight to the shared directory of"
-" multiple nodes, such as `/root/.cache/`."
+"It is recommended to download the model weight to the shared directory of "
+"multiple nodes, such as `/root/.cache/`."
 msgstr "建议将模型权重下载到多节点共享目录，例如 `/root/.cache/`。"
 
 #: ../../source/tutorials/models/DeepSeekOCR2.md:25
@@ -93,8 +93,8 @@ msgstr "3.2 验证多节点通信"
 
 #: ../../source/tutorials/models/DeepSeekOCR2.md:27
 msgid ""
-"If you want to deploy multi-node environment, you need to verify multi-"
-"node communication according to [verify multi-node communication "
+"If you want to deploy multi-node environment, you need to verify multi-node "
+"communication according to [verify multi-node communication "
 "environment](../../installation.md#verify-multi-node-communication)."
 msgstr ""
 "如果要部署多节点环境，需要按照[验证多节点通信环境](../../installation.md#verify-multi-node-"
@@ -109,7 +109,8 @@ msgid "4.1 Docker Image Installation"
 msgstr "4.1 Docker 镜像安装"
 
 #: ../../source/tutorials/models/DeepSeekOCR2.md:33
-msgid "You can use our official docker image to run `DeepSeek-OCR-2` directly."
+msgid ""
+"You can use our official docker image to run `DeepSeek-OCR-2` directly."
 msgstr "您可以使用官方 Docker 镜像直接运行 `DeepSeek-OCR-2`。"
 
 #: ../../source/tutorials/models/DeepSeekOCR2.md:35
@@ -118,8 +119,8 @@ msgid ""
 "your node, refer to [using docker](../../installation.md#set-up-using-"
 "docker)."
 msgstr ""
-"根据您的机器类型选择镜像，并在节点上启动 Docker 镜像，请参考[使用 Docker 安装](../../installation.md"
-"#set-up-using-docker)。"
+"根据您的机器类型选择镜像，并在节点上启动 Docker 镜像，请参考[使用 Docker 安装](../../installation.md#set-"
+"up-using-docker)。"
 
 #: ../../source/tutorials/models/DeepSeekOCR2.md
 msgid "A2 series"
@@ -131,8 +132,8 @@ msgstr "A3 系列"
 
 #: ../../source/tutorials/models/DeepSeekOCR2.md:124
 msgid ""
-"If you want to deploy multi-node environment, you need to set up "
-"environment on each node."
+"If you want to deploy multi-node environment, you need to set up environment"
+" on each node."
 msgstr "如果要部署多节点环境，需要在每个节点上设置环境。"
 
 #: ../../source/tutorials/models/DeepSeekOCR2.md:126
@@ -157,35 +158,35 @@ msgstr "**注意：** 参数说明如下："
 
 #: ../../source/tutorials/models/DeepSeekOCR2.md:164
 msgid ""
-"`--max-model-len` specifies the maximum context length - that is, the sum"
-" of input and output tokens for a single request."
+"`--max-model-len` specifies the maximum context length - that is, the sum of"
+" input and output tokens for a single request."
 msgstr "`--max-model-len` 指定最大上下文长度，即单个请求的输入和输出 token 总和。"
 
 #: ../../source/tutorials/models/DeepSeekOCR2.md:165
 msgid ""
-"`--no-enable-prefix-caching` indicates that prefix caching is disabled. "
-"To enable it, remove this option."
+"`--no-enable-prefix-caching` indicates that prefix caching is disabled. To "
+"enable it, remove this option."
 msgstr "`--no-enable-prefix-caching` 表示禁用前缀缓存。要启用它，请移除该选项。"
 
 #: ../../source/tutorials/models/DeepSeekOCR2.md:166
 msgid ""
-"`--gpu-memory-utilization` represents the proportion of HBM that vLLM "
-"will use for actual inference. Its essential function is to calculate the"
-" available kv_cache size. During the warm-up phase (referred to as "
-"profile run in vLLM), vLLM records the peak GPU memory usage during an "
-"inference process with an input size of `--max-num-batched-tokens`. The "
-"available kv_cache size is then calculated as: `--gpu-memory-utilization`"
-" * HBM size - peak GPU memory usage. Therefore, the larger the value of "
-"`--gpu-memory-utilization`, the more kv_cache can be used. However, since"
-" the GPU memory usage during the warm-up phase may differ from that "
-"during actual inference (e.g., due to uneven EP load), setting `--gpu-"
-"memory-utilization` too high may lead to OOM (Out of Memory) issues "
-"during actual inference. The default value is `0.9`."
+"`--gpu-memory-utilization` represents the proportion of HBM that vLLM will "
+"use for actual inference. Its essential function is to calculate the "
+"available kv_cache size. During the warm-up phase (referred to as profile "
+"run in vLLM), vLLM records the peak GPU memory usage during an inference "
+"process with an input size of `--max-num-batched-tokens`. The available "
+"kv_cache size is then calculated as: `--gpu-memory-utilization` * HBM size -"
+" peak GPU memory usage. Therefore, the larger the value of `--gpu-memory-"
+"utilization`, the more kv_cache can be used. However, since the GPU memory "
+"usage during the warm-up phase may differ from that during actual inference "
+"(e.g., due to uneven EP load), setting `--gpu-memory-utilization` too high "
+"may lead to OOM (Out of Memory) issues during actual inference. The default "
+"value is `0.9`."
 msgstr ""
 "`--gpu-memory-utilization` 表示 vLLM 用于实际推理的 HBM 比例。其核心功能是计算可用的 kv_cache "
 "大小。在预热阶段（vLLM 中称为 profile run），vLLM 会记录输入大小为 `--max-num-batched-tokens` "
-"的推理过程中的峰值 GPU 内存使用量。可用 kv_cache 大小计算方式为：`--gpu-memory-utilization` * HBM "
-"大小 - 峰值 GPU 内存使用量。因此，`--gpu-memory-utilization` 值越大，可使用的 kv_cache "
+"的推理过程中的峰值 GPU 内存使用量。可用 kv_cache 大小计算方式为：`--gpu-memory-utilization` * HBM 大小 "
+"- 峰值 GPU 内存使用量。因此，`--gpu-memory-utilization` 值越大，可使用的 kv_cache "
 "越多。但由于预热阶段与实际推理阶段的 GPU 内存使用可能存在差异（例如 EP 负载不均），设置过高的 `--gpu-memory-"
 "utilization` 可能导致实际推理时出现 OOM（内存不足）问题。默认值为 `0.9`。"
 
@@ -214,7 +215,8 @@ msgid "If your service start successfully, you can see the info shown below:"
 msgstr "如果服务启动成功，您将看到如下所示的信息："
 
 #: ../../source/tutorials/models/DeepSeekOCR2.md:186
-msgid "Once your server is started, you can query the model with input prompts:"
+msgid ""
+"Once your server is started, you can query the model with input prompts:"
 msgstr "服务器启动后，您可以使用输入提示词查询模型："
 
 #: ../../source/tutorials/models/DeepSeekOCR2.md:199
@@ -229,8 +231,7 @@ msgstr "使用 AISBench"
 #: ../../source/tutorials/models/DeepSeekOCR2.md:203
 msgid ""
 "Refer to [Using "
-"AISBench](../../developer_guide/evaluation/using_ais_bench.md) for "
-"details."
+"AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details."
 msgstr ""
 "详细信息请参考[使用 AISBench "
 "进行精度评估](../../developer_guide/evaluation/using_ais_bench.md)。"
@@ -325,8 +326,8 @@ msgstr "**输入/输出**：1080P/256"
 
 #: ../../source/tutorials/models/DeepSeekOCR2.md:224
 msgid ""
-"**Performance**: TTFT = 2s, TPOT = 200ms, Average performance of each "
-"card is 864 TPS (Token Per Second)."
+"**Performance**: TTFT = 2s, TPOT = 200ms, Average performance of each card "
+"is 864 TPS (Token Per Second)."
 msgstr "**性能**：TTFT = 2 秒，TPOT = 200 毫秒，每卡平均性能为 864 TPS（每秒处理 Token 数）。"
 
 #: ../../source/tutorials/models/DeepSeekOCR2.md:226
@@ -340,12 +341,13 @@ msgstr "9.1 推荐配置"
 #: ../../source/tutorials/models/DeepSeekOCR2.md:230
 msgid ""
 "**Note**: The following configurations are validated in specific test "
-"environments and are for reference only. The optimal configuration "
-"depends on factors such as maximum input/output length, prefix cache hit "
-"rate, precision requirements, and deployment machine ratios. It is "
-"recommended to refer to Section 9.2 for tuning based on actual "
-"conditions."
-msgstr "**注意**：以下配置在特定测试环境中验证通过，仅供参考。最佳配置取决于最大输入/输出长度、前缀缓存命中率、精度要求和部署机器比例等因素。建议根据实际情况参考第 9.2 节进行调优。"
+"environments and are for reference only. The optimal configuration depends "
+"on factors such as maximum input/output length, prefix cache hit rate, "
+"precision requirements, and deployment machine ratios. It is recommended to "
+"refer to Section 9.2 for tuning based on actual conditions."
+msgstr ""
+"**注意**：以下配置在特定测试环境中验证通过，仅供参考。最佳配置取决于最大输入/输出长度、前缀缓存命中率、精度要求和部署机器比例等因素。建议根据实际情况参考第"
+" 9.2 节进行调优。"
 
 #: ../../source/tutorials/models/DeepSeekOCR2.md:232
 msgid "Table 1: Scenario Overview"
@@ -353,10 +355,9 @@ msgstr "表1：场景概览"
 
 #: ../../source/tutorials/models/DeepSeekOCR2.md:234
 msgid ""
-"`*Total NPUs` indicates the total number of NPUs used across all nodes. 1"
-" node = 1 Atlas 800 A3 server (64G × 16 NPUs)."
-msgstr ""
-"`*总NPU数`表示所有节点使用的NPU总数。1个节点 = 1台Atlas 800 A3服务器（64G × 16 NPU）。"
+"`*Total NPUs` indicates the total number of NPUs used across all nodes. 1 "
+"node = 1 Atlas 800 A3 server (64G × 16 NPUs)."
+msgstr "`*总NPU数`表示所有节点使用的NPU总数。1个节点 = 1台Atlas 800 A3服务器（64G × 16 NPU）。"
 
 #: ../../source/tutorials/models/DeepSeekOCR2.md:81
 msgid "Scenario"
@@ -419,7 +420,8 @@ msgid ""
 "Please refer to the [Feature "
 "Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed "
 "feature descriptions."
-msgstr "请参阅[特性指南](../../user_guide/support_matrix/feature_matrix.md)获取详细的特性描述。"
+msgstr ""
+"请参阅[特性指南](../../user_guide/support_matrix/feature_matrix.md)获取详细的特性描述。"
 
 #: ../../source/tutorials/models/DeepSeekOCR2.md:248
 msgid "10 FAQ"
@@ -427,16 +429,16 @@ msgstr "10 常见问题"
 
 #: ../../source/tutorials/models/DeepSeekOCR2.md:250
 msgid ""
-"For common environment, installation, and general parameter issues, "
-"please refer to the [Public "
+"For common environment, installation, and general parameter issues, please "
+"refer to the [Public "
 "FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)."
 msgstr ""
 "对于常见的环境、安装和通用参数问题，请参阅[公共FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)。"
 
 #: ../../source/tutorials/models/DeepSeekOCR2.md:252
 msgid ""
-"**Q: Startup fails with HCCL port conflicts (address already bound). What"
-" should I do?**"
+"**Q: Startup fails with HCCL port conflicts (address already bound). What "
+"should I do?**"
 msgstr "**问：启动失败，HCCL 端口冲突（地址已绑定）。该怎么办？**"
 
 #: ../../source/tutorials/models/DeepSeekOCR2.md:254
@@ -449,9 +451,144 @@ msgstr "**问：如何处理 OOM 或不稳定启动？**"
 
 #: ../../source/tutorials/models/DeepSeekOCR2.md:258
 msgid ""
-"A: Reduce `--max-num-seqs` and `--max-model-len` first. If needed, reduce"
-" concurrency and load-testing pressure (e.g., `max-concurrency` / `num-"
+"A: Reduce `--max-num-seqs` and `--max-model-len` first. If needed, reduce "
+"concurrency and load-testing pressure (e.g., `max-concurrency` / `num-"
 "prompts`)."
 msgstr ""
 "答：首先减少 `--max-num-seqs` 和 `--max-model-len`。如有必要，降低并发和负载测试压力（例如 `max-"
 "concurrency` / `num-prompts`）。"
+
+msgid "# DeepSeek-OCR-2"
+msgstr ""
+
+msgid "## 1 Introduction"
+msgstr ""
+
+msgid "## 2 Supported Features"
+msgstr ""
+
+msgid "## 3 Prerequisites"
+msgstr ""
+
+msgid "### 3.1 Model Weight"
+msgstr ""
+
+msgid ""
+"- `DeepSeek-OCR-2`: [Download model weight](https://huggingface.co/deepseek-"
+"ai/DeepSeek-OCR-2)."
+msgstr ""
+
+msgid "### 3.2 Verify Multi-node Communication"
+msgstr ""
+
+msgid "## 4 Installation"
+msgstr ""
+
+msgid "### 4.1 Docker Image Installation"
+msgstr ""
+
+msgid "=== \"A2 series\""
+msgstr ""
+
+msgid "=== \"A3 series\""
+msgstr ""
+
+msgid "## 5 Online Service Deployment"
+msgstr ""
+
+msgid "### 5.1 Single-Node Online Deployment"
+msgstr ""
+
+msgid "- `DeepSeek-OCR-2` can be deployed on 1 Atlas 800 A2."
+msgstr ""
+
+msgid ""
+"**Notice:**\n"
+"The parameters are explained as follows:"
+msgstr ""
+
+msgid ""
+"- `--max-model-len` specifies the maximum context length - that is, the sum of input and output tokens for a single request.\n"
+"- `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.\n"
+"- `--gpu-memory-utilization` represents the proportion of HBM that vLLM will use for actual inference. Its essential function is to calculate the available kv_cache size. During the warm-up phase (referred to as profile run in vLLM), vLLM records the peak GPU memory usage during an inference process with an input size of `--max-num-batched-tokens`. The available kv_cache size is then calculated as: `--gpu-memory-utilization` * HBM size - peak GPU memory usage. Therefore, the larger the value of `--gpu-memory-utilization`, the more kv_cache can be used. However, since the GPU memory usage during the warm-up phase may differ from that during actual inference (e.g., due to uneven EP load), setting `--gpu-memory-utilization` too high may lead to OOM (Out of Memory) issues during actual inference. The default value is `0.9`."
+msgstr ""
+
+msgid "### 5.2 Multi-node Deployment"
+msgstr ""
+
+msgid "### 5.3 Prefill-Decode Disaggregation"
+msgstr ""
+
+msgid "## 6 Functional Verification"
+msgstr ""
+
+msgid "## 7 Accuracy Evaluation"
+msgstr ""
+
+msgid "### Using AISBench"
+msgstr ""
+
+msgid ""
+"1. Refer to [Using "
+"AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details."
+msgstr ""
+
+msgid ""
+"2. After execution, you can get the result, here is the result of `DeepSeek-"
+"OCR-2` for reference only."
+msgstr ""
+
+msgid ""
+"| dataset | version | metric | mode | vllm-api-general-chat | note |\n"
+"|----- | ----- | ----- | ----- | -----| ----- |\n"
+"| textvqa | - | accuracy | gen | 50.28 | 1 Atlas 800 A2 |\n"
+"| ominidocbench | - | accuracy | gen | 66.86 | 1 Atlas 800 A2 |"
+msgstr ""
+
+msgid "## 8 Performance Evaluation"
+msgstr ""
+
+msgid "## 9 Performance Tuning"
+msgstr ""
+
+msgid "### 9.1 Recommended Configurations"
+msgstr ""
+
+msgid ""
+"> **Note**: The following configurations are validated in specific test "
+"environments and are for reference only. The optimal configuration depends "
+"on factors such as maximum input/output length, prefix cache hit rate, "
+"precision requirements, and deployment machine ratios. It is recommended to "
+"refer to Section 9.2 for tuning based on actual conditions."
+msgstr ""
+
+msgid "#### Table 1: Scenario Overview"
+msgstr ""
+
+msgid ""
+"> `*Total NPUs` indicates the total number of NPUs used across all nodes. 1 "
+"node = 1 Atlas 800 A3 server (64G × 16 NPUs)."
+msgstr ""
+
+msgid ""
+"|Scenario|Deployment Mode|*Total NPUs|Weight Version|Key Considerations|\n"
+"|--------|---------------|-----------|--------------|------------------|\n"
+"|Multimodal<br>(1080P)|Single-Node Mixed|16 (A3)|deepseekocr2|dp1 tp1 for high-resolution visual inputs|"
+msgstr ""
+
+msgid "### 9.2 Tuning Guidelines"
+msgstr ""
+
+msgid "#### 9.2.1 General Tuning Reference"
+msgstr ""
+
+msgid "## 10 FAQ"
+msgstr ""
+
+msgid ""
+"- **Q: Startup fails with HCCL port conflicts (address already bound). What "
+"should I do?**"
+msgstr ""
+
+msgid "- **Q: How to handle OOM or unstable startup?**"
+msgstr ""

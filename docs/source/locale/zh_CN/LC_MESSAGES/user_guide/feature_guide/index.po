@@ -27,3 +27,6 @@ msgstr "特性指南"
 #: ../../user_guide/feature_guide/index.md:3
 msgid "This section provides a detailed usage guide of vLLM Ascend features."
 msgstr "本节提供了 vLLM Ascend 功能的详细使用指南。"
+
+msgid "# Feature Guide"
+msgstr ""

@@ -6,17 +6,17 @@
 #
 msgid ""
 msgstr ""
-"Project-Id-Version: vllm-ascend \n"
+"Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
 "POT-Creation-Date: 2026-07-02 07:02+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
-"Language: zh_CN\n"
 "Language-Team: zh_CN <LL@li.org>\n"
-"Plural-Forms: nplurals=1; plural=0;\n"
+"Language: zh_CN\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: Babel 2.18.0\n"
 
 #: ../../source/community/slash-commands.md:1
@@ -25,10 +25,11 @@ msgstr "斜杠命令"
 
 #: ../../source/community/slash-commands.md:3
 msgid ""
-"vLLM Ascend supports slash commands in pull request comments to trigger "
-"CI workflows. See the [Permission](#permission) section for who can "
-"trigger each command."
-msgstr "vLLM Ascend 支持在拉取请求评论中使用斜杠命令来触发 CI 工作流。有关谁可以触发每个命令，请参阅[权限](#permission)部分。"
+"vLLM Ascend supports slash commands in pull request comments to trigger CI "
+"workflows. See the [Permission](#permission) section for who can trigger "
+"each command."
+msgstr ""
+"vLLM Ascend 支持在拉取请求评论中使用斜杠命令来触发 CI 工作流。有关谁可以触发每个命令，请参阅[权限](#permission)部分。"
 
 #: ../../source/community/slash-commands.md:5
 msgid "Available Commands"
@@ -42,8 +43,7 @@ msgstr "`/e2e`"
 #: ../../source/community/slash-commands.md:9
 msgid ""
 "Run specific E2E tests under `tests/e2e/pull_request/`. Tests are "
-"automatically routed to the appropriate NPU runner based on the test "
-"path."
+"automatically routed to the appropriate NPU runner based on the test path."
 msgstr "运行 `tests/e2e/pull_request/` 下的特定 E2E 测试。测试会根据路径自动路由到相应的 NPU 运行器。"
 
 #: ../../source/community/slash-commands.md:11
@@ -108,8 +108,8 @@ msgstr "A2 单卡"
 #: ../../source/community/slash-commands.md:34
 msgid ""
 "Only test paths under `tests/e2e/pull_request/` are supported. Tests in "
-"`tests/e2e/nightly/`, `tests/e2e/models/`, or `tests/e2e/doctests/` are "
-"not accepted by `/e2e`. Use `/nightly` for nightly tests."
+"`tests/e2e/nightly/`, `tests/e2e/models/`, or `tests/e2e/doctests/` are not "
+"accepted by `/e2e`. Use `/nightly` for nightly tests."
 msgstr ""
 "仅支持 `tests/e2e/pull_request/` 下的测试路径。`/e2e` 不接受 "
 "`tests/e2e/nightly/`、`tests/e2e/models/` 或 `tests/e2e/doctests/` "
@@ -128,14 +128,12 @@ msgstr "`/nightly`"
 
 #: ../../source/community/slash-commands.md:40
 msgid ""
-"Trigger specific nightly test cases on A2 and A3. Supports only PR "
-"comments. Test case names correspond to the `test_config.name` entries "
-"defined in `schedule_nightly_test_a2.yaml` and "
-"`schedule_nightly_test_a3.yaml`."
+"Trigger specific nightly test cases on A2 and A3. Supports only PR comments."
+" Test case names correspond to the `test_config.name` entries defined in "
+"`schedule_nightly_test_a2.yaml` and `schedule_nightly_test_a3.yaml`."
 msgstr ""
-"在 A2 和 A3 上触发特定的夜间测试用例。仅支持 PR 评论。测试用例名称对应于 "
-"`schedule_nightly_test_a2.yaml` 和 `schedule_nightly_test_a3.yaml` 中定义的 "
-"`test_config.name` 条目。"
+"在 A2 和 A3 上触发特定的夜间测试用例。仅支持 PR 评论。测试用例名称对应于 `schedule_nightly_test_a2.yaml` 和"
+" `schedule_nightly_test_a3.yaml` 中定义的 `test_config.name` 条目。"
 
 #: ../../source/community/slash-commands.md:42
 #: ../../source/community/slash-commands.md:89
@@ -170,18 +168,18 @@ msgstr "在指定分支上运行"
 
 #: ../../source/community/slash-commands.md:49
 msgid ""
-"Use `--branch <name>` to specify a target branch. Without `--branch`, all"
-" arguments are treated as test cases (separated by commas or spaces) and "
-"the branch defaults to `main`."
+"Use `--branch <name>` to specify a target branch. Without `--branch`, all "
+"arguments are treated as test cases (separated by commas or spaces) and the "
+"branch defaults to `main`."
 msgstr ""
-"使用 `--branch <name>` 指定目标分支。如果不使用 `--branch`，所有参数都被视为测试用例（用逗号或空格分隔），分支默认为"
-" `main`。"
+"使用 `--branch <name>` 指定目标分支。如果不使用 `--branch`，所有参数都被视为测试用例（用逗号或空格分隔），分支默认为 "
+"`main`。"
 
 #: ../../source/community/slash-commands.md:51
 msgid ""
 "**Note**: When commenting on a PR, the tests run on the PR branch "
-"automatically in the triggered workflow; the `--branch` flag is primarily"
-" used in issue comments."
+"automatically in the triggered workflow; the `--branch` flag is primarily "
+"used in issue comments."
 msgstr "**注意**：在 PR 上评论时，测试会在触发的工作流中自动在 PR 分支上运行；`--branch` 标志主要用于 issue 评论。"
 
 #: ../../source/community/slash-commands.md:53
@@ -190,13 +188,13 @@ msgstr "**常见测试用例名称（A2）：**"
 
 #: ../../source/community/slash-commands.md:55
 msgid ""
-"`test_custom_op`, `test_custom_op_multi_card`, `qwen3-vl-32b-instruct-"
-"w8a8`, `qwen3-32b-int8`, `MiniMax-M2.5-w8a8-QuaRot-A2`, `Qwen3.5-27B-"
-"w8a8-A2`, `Qwen3.5-397B-A17B-w4a8-mtp`, `accuracy-group`"
+"`test_custom_op`, `test_custom_op_multi_card`, `qwen3-vl-32b-instruct-w8a8`,"
+" `qwen3-32b-int8`, `MiniMax-M2.5-w8a8-QuaRot-A2`, `Qwen3.5-27B-w8a8-A2`, "
+"`Qwen3.5-397B-A17B-w4a8-mtp`, `accuracy-group`"
 msgstr ""
-"`test_custom_op`, `test_custom_op_multi_card`, `qwen3-vl-32b-instruct-"
-"w8a8`, `qwen3-32b-int8`, `MiniMax-M2.5-w8a8-QuaRot-A2`, `Qwen3.5-27B-"
-"w8a8-A2`, `Qwen3.5-397B-A17B-w4a8-mtp`, `accuracy-group`"
+"`test_custom_op`, `test_custom_op_multi_card`, `qwen3-vl-32b-instruct-w8a8`,"
+" `qwen3-32b-int8`, `MiniMax-M2.5-w8a8-QuaRot-A2`, `Qwen3.5-27B-w8a8-A2`, "
+"`Qwen3.5-397B-A17B-w4a8-mtp`, `accuracy-group`"
 
 #: ../../source/community/slash-commands.md:57
 msgid "**Common test case names (A3):**"
@@ -205,20 +203,20 @@ msgstr "**常见测试用例名称（A3）：**"
 #: ../../source/community/slash-commands.md:59
 msgid ""
 "`multi-node-deepseek-v3.2-W8A8-EP`, `mtpx-deepseek-r1-0528-w8a8`, "
-"`deepseek-r1-0528-w8a8`, `kimi-k2-thinking`, `qwen3-vl-235b-a22b-"
-"instruct-w8a8`, `custom-multi-ops`, ..."
+"`deepseek-r1-0528-w8a8`, `kimi-k2-thinking`, "
+"`qwen3-vl-235b-a22b-instruct-w8a8`, `custom-multi-ops`, ..."
 msgstr ""
 "`multi-node-deepseek-v3.2-W8A8-EP`, `mtpx-deepseek-r1-0528-w8a8`, "
-"`deepseek-r1-0528-w8a8`, `kimi-k2-thinking`, `qwen3-vl-235b-a22b-"
-"instruct-w8a8`, `custom-multi-ops`, ..."
+"`deepseek-r1-0528-w8a8`, `kimi-k2-thinking`, "
+"`qwen3-vl-235b-a22b-instruct-w8a8`, `custom-multi-ops`, ..."
 
 #: ../../source/community/slash-commands.md:83
 msgid ""
-"This triggers `workflow_dispatch` on both `schedule_nightly_test_a2.yaml`"
-" and `schedule_nightly_test_a3.yaml`."
+"This triggers `workflow_dispatch` on both `schedule_nightly_test_a2.yaml` "
+"and `schedule_nightly_test_a3.yaml`."
 msgstr ""
-"这会在 `schedule_nightly_test_a2.yaml` 和 `schedule_nightly_test_a3.yaml` 上触发"
-" `workflow_dispatch`。"
+"这会在 `schedule_nightly_test_a2.yaml` 和 `schedule_nightly_test_a3.yaml` 上触发 "
+"`workflow_dispatch`。"
 
 #: ../../source/community/slash-commands.md
 #: ../../source/community/slash-commands.md:85
@@ -227,8 +225,8 @@ msgstr "`/cherry-pick`"
 
 #: ../../source/community/slash-commands.md:87
 msgid ""
-"Cherry-pick a PR's commits onto a specified target branch and create a "
-"new PR. This is useful for backporting fixes to release branches."
+"Cherry-pick a PR's commits onto a specified target branch and create a new "
+"PR. This is useful for backporting fixes to release branches."
 msgstr "将 PR 的提交拣选到指定的目标分支并创建一个新的 PR。这对于将修复回溯到发布分支非常有用。"
 
 #: ../../source/community/slash-commands.md
@@ -248,12 +246,14 @@ msgid ""
 "A new PR will be created with the title format `[Cherry-pick] "
 "<original_title> (from #<PR_NUMBER>)` and a body linking back to the "
 "original PR."
-msgstr "将创建一个新的 PR，标题格式为 `[Cherry-pick] <original_title> (from #<PR_NUMBER>)`，正文中包含指向原始 PR 的链接。"
+msgstr ""
+"将创建一个新的 PR，标题格式为 `[Cherry-pick] <original_title> (from "
+"#<PR_NUMBER>)`，正文中包含指向原始 PR 的链接。"
 
 #: ../../source/community/slash-commands.md:107
 msgid ""
-"If the cherry-pick encounters merge conflicts, the command will report "
-"the failure and the cherry-pick must be done manually."
+"If the cherry-pick encounters merge conflicts, the command will report the "
+"failure and the cherry-pick must be done manually."
 msgstr "如果拣选遇到合并冲突，命令将报告失败，必须手动进行拣选。"
 
 #: ../../source/community/slash-commands.md
@@ -278,15 +278,17 @@ msgstr "**示例：**"
 #: ../../source/community/slash-commands.md:125
 msgid ""
 "A new PR will be created with the title format `[Revert] Revert "
-"\"original_title\" (#PR_NUMBER)` and a body linking back to the original "
-"PR and its merge commit."
-msgstr "将创建一个新的 PR，标题格式为 `[Revert] Revert \"original_title\" (#PR_NUMBER)`，正文中包含指向原始 PR 及其合并提交的链接。"
+"\"original_title\" (#PR_NUMBER)` and a body linking back to the original PR "
+"and its merge commit."
+msgstr ""
+"将创建一个新的 PR，标题格式为 `[Revert] Revert \"original_title\" (#PR_NUMBER)`，正文中包含指向原始"
+" PR 及其合并提交的链接。"
 
 #: ../../source/community/slash-commands.md:127
 msgid ""
-"Only merged PRs can be reverted. If the revert encounters merge conflicts"
-" (e.g., because the base branch has diverged significantly), the command "
-"will report the failure and the revert must be done manually."
+"Only merged PRs can be reverted. If the revert encounters merge conflicts "
+"(e.g., because the base branch has diverged significantly), the command will"
+" report the failure and the revert must be done manually."
 msgstr "只有已合并的 PR 才能被回退。如果回退遇到合并冲突（例如，因为基分支已经严重偏离），命令将报告失败，必须手动进行回退。"
 
 #: ../../source/community/slash-commands.md
@@ -306,8 +308,8 @@ msgstr "行为"
 
 #: ../../source/community/slash-commands.md:142
 msgid ""
-"When you comment a slash command, a 👀 reaction is added to your comment "
-"to indicate it has been received"
+"When you comment a slash command, a 👀 reaction is added to your comment to "
+"indicate it has been received"
 msgstr "当您评论斜杠命令时，您的评论会添加 👀 反应，表示已收到"
 
 #: ../../source/community/slash-commands.md:143
@@ -360,5 +362,101 @@ msgid ""
 "Permission is verified via the GitHub API "
 "(`repos/{owner}/{repo}/collaborators/{user}/permission`)."
 msgstr ""
-"权限通过 GitHub API (`repos/{owner}/{repo}/collaborators/{user}/permission`) "
-"验证。"
+"权限通过 GitHub API (`repos/{owner}/{repo}/collaborators/{user}/permission`) 验证。"
+
+msgid "# Slash Commands"
+msgstr ""
+
+msgid "## Available Commands"
+msgstr ""
+
+msgid "### `/e2e`"
+msgstr ""
+
+msgid ""
+"| Test path contains | Runner |\n"
+"|---|---|\n"
+"| `four_card/_310p` | 310P 4-card |\n"
+"| `_310p` (under `one_card`/`two_card`) | 310P single card |\n"
+"| `four_card` | A3 4-card |\n"
+"| `two_card` | A3 2-card |\n"
+"| Others (e.g. `one_card`) | A2 single card |"
+msgstr ""
+
+msgid ""
+"> Only test paths under `tests/e2e/pull_request/` are supported. Tests in "
+"`tests/e2e/nightly/`, `tests/e2e/models/`, or `tests/e2e/doctests/` are not "
+"accepted by `/e2e`. Use `/nightly` for nightly tests."
+msgstr ""
+
+msgid "### `/nightly`"
+msgstr ""
+
+msgid ""
+"| Syntax | Scope |\n"
+"|---|---|\n"
+"| `/nightly <test_cases>` | Runs on `main` branch |\n"
+"| `/nightly <test_cases> --branch <branch>` | Runs on the specified branch |"
+msgstr ""
+
+msgid ""
+"> **Note**: When commenting on a PR, the tests run on the PR branch "
+"automatically in the triggered workflow; the `--branch` flag is primarily "
+"used in issue comments."
+msgstr ""
+
+msgid "### `/cherry-pick`"
+msgstr ""
+
+msgid ""
+"| Syntax | Description |\n"
+"|---|---|\n"
+"| `/cherry-pick <target_branch>` | Cherry-pick onto the specified branch |"
+msgstr ""
+
+msgid "### `/revert`"
+msgstr ""
+
+msgid ""
+"| Syntax | Description |\n"
+"|---|---|\n"
+"| `/revert` | Revert this PR (no arguments needed) |"
+msgstr ""
+
+msgid "### `/rerun`"
+msgstr ""
+
+msgid "## Behavior"
+msgstr ""
+
+msgid ""
+"1. When you comment a slash command, a 👀 reaction is added to your comment to indicate it has been received\n"
+"2. The corresponding CI workflow is triggered asynchronously\n"
+"3. Upon completion, a 🎉 reaction and a summary comment are added"
+msgstr ""
+
+msgid "## Scope"
+msgstr ""
+
+msgid ""
+"| Command | PR comments | Issue comments |\n"
+"|---|---|---|\n"
+"| `/e2e` | ✅ | ❌ |\n"
+"| `/rerun` | ✅ | ❌ |\n"
+"| `/cherry-pick` | ✅ | ❌ |\n"
+"| `/revert` | ✅ | ❌ |\n"
+"| `/nightly` | ✅ | ❌ |"
+msgstr ""
+
+msgid "## Permission"
+msgstr ""
+
+msgid ""
+"| Command | Who can trigger |\n"
+"|---|---|\n"
+"| `/e2e` | PR author, or users with triage+ permission on the repository |\n"
+"| `/rerun` | PR author, or users with triage+ permission on the repository |\n"
+"| `/cherry-pick` | PR author, or users with triage+ permission on the repository |\n"
+"| `/revert` | PR author, or users with triage+ permission on the repository |\n"
+"| `/nightly` | Users with triage+ permission on the repository only |"
+msgstr ""

@@ -28,3 +28,5 @@ msgstr "特性与模型"
 msgid "This section provides a detailed matrix supported by vLLM Ascend."
 msgstr "本节提供了 vLLM Ascend 的详细支持矩阵。"
 
+msgid "# Features and Models"
+msgstr ""

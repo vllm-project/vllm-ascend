@@ -6,17 +6,17 @@
 #
 msgid ""
 msgstr ""
-"Project-Id-Version:  vllm-ascend\n"
+"Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
 "POT-Creation-Date: 2026-07-02 07:02+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
-"Language: zh_CN\n"
 "Language-Team: zh_CN <LL@li.org>\n"
-"Plural-Forms: nplurals=1; plural=0;\n"
+"Language: zh_CN\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: Babel 2.18.0\n"
 
 #: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:1
@@ -25,25 +25,23 @@ msgstr "性能基准测试"
 
 #: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:3
 msgid ""
-"This document details the benchmark methodology for vllm-ascend, aimed at"
-" evaluating the performance under a variety of workloads. To maintain "
+"This document details the benchmark methodology for vllm-ascend, aimed at "
+"evaluating the performance under a variety of workloads. To maintain "
 "alignment with vLLM, we use the [benchmark](https://github.com/vllm-"
 "project/vllm/tree/main/benchmarks) script provided by the vllm project."
 msgstr ""
-"本文档详细介绍了 vllm-ascend 的基准测试方法，旨在评估其在多种工作负载下的性能。为与 vLLM 保持一致，我们使用 vllm "
-"项目提供的 [benchmark](https://github.com/vllm-"
-"project/vllm/tree/main/benchmarks) 脚本。"
+"本文档详细介绍了 vllm-ascend 的基准测试方法，旨在评估其在多种工作负载下的性能。为与 vLLM 保持一致，我们使用 vllm 项目提供的 "
+"[benchmark](https://github.com/vllm-project/vllm/tree/main/benchmarks) 脚本。"
 
 #: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:5
 msgid ""
-"**Benchmark Coverage**: We measure offline E2E latency and throughput, "
-"and fixed-QPS online serving benchmarks. For more details, see [vllm-"
-"ascend benchmark scripts](https://github.com/vllm-project/vllm-"
+"**Benchmark Coverage**: We measure offline E2E latency and throughput, and "
+"fixed-QPS online serving benchmarks. For more details, see [vllm-ascend "
+"benchmark scripts](https://github.com/vllm-project/vllm-"
 "ascend/tree/main/benchmarks)."
 msgstr ""
 "**基准测试覆盖范围**：我们测量离线端到端延迟与吞吐量，以及固定 QPS 的在线服务基准测试。更多详情，请参阅 [vllm-ascend "
-"基准测试脚本](https://github.com/vllm-project/vllm-"
-"ascend/tree/main/benchmarks)。"
+"基准测试脚本](https://github.com/vllm-project/vllm-ascend/tree/main/benchmarks)。"
 
 #: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:7
 msgid "**Legend Description**:"
@@ -131,22 +129,23 @@ msgstr "ShareGPT4V（图像）"
 msgid ""
 "`wget https://huggingface.co/datasets/Lin-"
 "Chen/ShareGPT4V/resolve/main/sharegpt4v_instruct_gpt4-vision_cap100k.json`<br>Note"
-" that the images need to be downloaded separately. For example, to "
-"download COCO's 2017 Train images:<br>`wget "
+" that the images need to be downloaded separately. For example, to download "
+"COCO's 2017 Train images:<br>`wget "
 "http://images.cocodataset.org/zips/train2017.zip`"
 msgstr ""
 "`wget https://huggingface.co/datasets/Lin-"
 "Chen/ShareGPT4V/resolve/main/sharegpt4v_instruct_gpt4-vision_cap100k.json`<br>注意：图像需要单独下载。例如，要下载"
-" COCO 2017 训练图像：<br>`wget "
-"http://images.cocodataset.org/zips/train2017.zip`"
+" COCO 2017 训练图像：<br>`wget http://images.cocodataset.org/zips/train2017.zip`"
 
 #: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:15
 msgid "ShareGPT4Video (Video)"
 msgstr "ShareGPT4Video（视频）"
 
 #: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:15
-msgid "`git clone https://huggingface.co/datasets/ShareGPT4Video/ShareGPT4Video`"
-msgstr "`git clone https://huggingface.co/datasets/ShareGPT4Video/ShareGPT4Video`"
+msgid ""
+"`git clone https://huggingface.co/datasets/ShareGPT4Video/ShareGPT4Video`"
+msgstr ""
+"`git clone https://huggingface.co/datasets/ShareGPT4Video/ShareGPT4Video`"
 
 #: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:15
 msgid "BurstGPT"
@@ -226,11 +225,9 @@ msgstr "HuggingFace-AIMO"
 
 #: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:15
 msgid ""
-"`AI-MO/aimo-validation-aime`, `AI-MO/NuminaMath-1.5`, `AI-MO/NuminaMath-"
-"CoT`"
+"`AI-MO/aimo-validation-aime`, `AI-MO/NuminaMath-1.5`, `AI-MO/NuminaMath-CoT`"
 msgstr ""
-"`AI-MO/aimo-validation-aime`, `AI-MO/NuminaMath-1.5`, `AI-MO/NuminaMath-"
-"CoT`"
+"`AI-MO/aimo-validation-aime`, `AI-MO/NuminaMath-1.5`, `AI-MO/NuminaMath-CoT`"
 
 #: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:15
 msgid "HuggingFace-Other"
@@ -278,12 +275,12 @@ msgstr "本地文件：`data.jsonl`"
 
 #: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:83
 msgid ""
-"The datasets mentioned above are all links to datasets on huggingface. "
-"The dataset's `dataset-name` should be set to `hf`. For local `dataset-"
-"path`, please set `hf-name` to its Hugging Face ID like"
+"The datasets mentioned above are all links to datasets on huggingface. The "
+"dataset's `dataset-name` should be set to `hf`. For local `dataset-path`, "
+"please set `hf-name` to its Hugging Face ID like"
 msgstr ""
-"上述数据集均为 Hugging Face 上数据集的链接。数据集的 `dataset-name` 应设置为 `hf`。对于本地的 "
-"`dataset-path`，请将其 `hf-name` 设置为对应的 Hugging Face ID，例如："
+"上述数据集均为 Hugging Face 上数据集的链接。数据集的 `dataset-name` 应设置为 `hf`。对于本地的 `dataset-"
+"path`，请将其 `hf-name` 设置为对应的 Hugging Face ID，例如："
 
 #: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:93
 msgid "3.2 Run basic benchmark"
@@ -320,3 +317,79 @@ msgstr "3.2.3多模态基准测试"
 #: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:217
 msgid "3.2.4 Embedding Benchmark"
 msgstr "3.2.4嵌入基准测试"
+
+msgid "# Performance Benchmark"
+msgstr ""
+
+msgid ""
+"- ✅ = Supported\n"
+"- 🟡 = Partial / Work in progress\n"
+"- 🚧 = Under development"
+msgstr ""
+
+msgid "## 1. Run docker container"
+msgstr ""
+
+msgid "## 2. Install dependencies"
+msgstr ""
+
+msgid "## 3. Run basic benchmarks"
+msgstr ""
+
+msgid "### 3.1 Dataset"
+msgstr ""
+
+msgid ""
+"<style>\n"
+"th {\n"
+"  min-width: 0 !important;\n"
+"}\n"
+"</style>"
+msgstr ""
+
+msgid ""
+"| Dataset | Online | Offline | Data Path |\n"
+"|---------|--------|---------|-----------|\n"
+"| ShareGPT | ✅ | ✅ | `wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json` |\n"
+"| ShareGPT4V (Image) | ✅ | ✅ | `wget https://huggingface.co/datasets/Lin-Chen/ShareGPT4V/resolve/main/sharegpt4v_instruct_gpt4-vision_cap100k.json`<br>Note that the images need to be downloaded separately. For example, to download COCO's 2017 Train images:<br>`wget http://images.cocodataset.org/zips/train2017.zip` |\n"
+"| ShareGPT4Video (Video) | ✅ | ✅ | `git clone https://huggingface.co/datasets/ShareGPT4Video/ShareGPT4Video` |\n"
+"| BurstGPT | ✅ | ✅ | `wget https://github.com/HPMLL/BurstGPT/releases/download/v1.1/BurstGPT_without_fails_2.csv` |\n"
+"| Sonnet (deprecated) | ✅ | ✅ | Local file: `benchmarks/sonnet.txt` |\n"
+"| Random | ✅ | ✅ | `synthetic` |\n"
+"| RandomMultiModal (Image/Video) | 🟡 | 🚧 | `synthetic` |\n"
+"| RandomForReranking | ✅ | ✅ | `synthetic` |\n"
+"| Prefix Repetition | ✅ | ✅ | `synthetic` |\n"
+"| HuggingFace-VisionArena | ✅ | ✅ | `lmarena-ai/VisionArena-Chat` |\n"
+"| HuggingFace-MMVU | ✅ | ✅ | `yale-nlp/MMVU` |\n"
+"| HuggingFace-InstructCoder | ✅ | ✅ | `likaixin/InstructCoder` |\n"
+"| HuggingFace-AIMO | ✅ | ✅ | `AI-MO/aimo-validation-aime`, `AI-MO/NuminaMath-1.5`, `AI-MO/NuminaMath-CoT` |\n"
+"| HuggingFace-Other | ✅ | ✅ | `lmms-lab/LLaVA-OneVision-Data`, `Aeala/ShareGPT_Vicuna_unfiltered` |\n"
+"| HuggingFace-MTBench | ✅ | ✅ | `philschmid/mt-bench` |\n"
+"| HuggingFace-Blazedit | ✅ | ✅ | `vdaita/edit_5k_char`, `vdaita/edit_10k_char` |\n"
+"| Spec Bench | ✅ | ✅ | `wget https://raw.githubusercontent.com/hemingkx/Spec-Bench/refs/heads/main/data/spec_bench/question.jsonl` |\n"
+"| Custom | ✅ | ✅ | Local file: `data.jsonl` |"
+msgstr ""
+
+msgid "!!! note"
+msgstr ""
+
+msgid ""
+"The datasets mentioned above are all links to datasets on huggingface.\n"
+"    The dataset's `dataset-name` should be set to `hf`.\n"
+"    For local `dataset-path`, please set `hf-name` to its Hugging Face ID like"
+msgstr ""
+
+msgid "### 3.2 Run basic benchmark"
+msgstr ""
+
+msgid "#### 3.2.1 Online serving"
+msgstr ""
+
+msgid "#### 3.2.2 Offline Throughput Benchmark"
+msgstr ""
+
+msgid "#### 3.2.3 Multi-Modal Benchmark"
+msgstr ""
+
+msgid "#### 3.2.4 Embedding Benchmark"
+msgstr ""

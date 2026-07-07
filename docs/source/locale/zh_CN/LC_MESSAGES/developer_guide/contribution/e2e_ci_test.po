@@ -6,17 +6,17 @@
 #
 msgid ""
 msgstr ""
-"Project-Id-Version: vllm-ascend \n"
+"Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
 "POT-Creation-Date: 2026-06-07 05:04+0000\n"
 "PO-Revision-Date: 2026-04-09 22:05+0800\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
-"Language: zh_CN\n"
 "Language-Team: zh_CN <LL@li.org>\n"
-"Plural-Forms: nplurals=1; plural=0;\n"
+"Language: zh_CN\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: Babel 2.18.0\n"
 
 #: ../../source/developer_guide/contribution/e2e_ci_test.md:1
@@ -35,15 +35,17 @@ msgstr "背景"
 
 #: ../../source/developer_guide/contribution/e2e_ci_test.md:8
 msgid ""
-"The `E2E-Full` workflow (`pr_test.yaml`) normally runs the complete E2E "
-"test suite when a PR has `ready` label. This is expensive in CI resources"
-" and time."
-msgstr "当 PR 具有 `ready` 标签时，`E2E-Full` 工作流（`pr_test.yaml`）通常会运行完整的 E2E 测试套件。这会消耗大量的 CI 资源和时间。"
+"The `E2E-Full` workflow (`pr_test.yaml`) normally runs the complete E2E test"
+" suite when a PR has `ready` label. This is expensive in CI resources and "
+"time."
+msgstr ""
+"当 PR 具有 `ready` 标签时，`E2E-Full` 工作流（`pr_test.yaml`）通常会运行完整的 E2E 测试套件。这会消耗大量的 "
+"CI 资源和时间。"
 
 #: ../../source/developer_guide/contribution/e2e_ci_test.md:12
 msgid ""
-"Authorized users can trigger only the specific test files they care about"
-" by posting a `/e2e` comment on the PR, then adding the `ready` label."
+"Authorized users can trigger only the specific test files they care about by"
+" posting a `/e2e` comment on the PR, then adding the `ready` label."
 msgstr "授权用户可以通过在 PR 上发布 `/e2e` 评论，然后添加 `ready` 标签，仅触发他们关心的特定测试文件。"
 
 #: ../../source/developer_guide/contribution/e2e_ci_test.md:15
@@ -116,25 +118,30 @@ msgstr "2.添加标签"
 
 #: ../../source/developer_guide/contribution/e2e_ci_test.md:38
 msgid ""
-"After posting the comment, add the **`ready`** label to your PR. Adding "
-"the label is what actually **triggers** the workflow — at that point the "
+"After posting the comment, add the **`ready`** label to your PR. Adding the "
+"label is what actually **triggers** the workflow — at that point the "
 "workflow reads the existing comments to find the `/e2e` command."
-msgstr "发布评论后，为 PR 添加 **`ready`** 标签。添加标签才是实际**触发**工作流的操作——此时工作流会读取现有评论以找到 `/e2e` 命令。"
+msgstr ""
+"发布评论后，为 PR 添加 **`ready`** 标签。添加标签才是实际**触发**工作流的操作——此时工作流会读取现有评论以找到 `/e2e` "
+"命令。"
 
 #: ../../source/developer_guide/contribution/e2e_ci_test.md:43
 msgid ""
-"Only repository **Contributors** (Triage role) and **Maintainers** (Write"
-" role) can add labels. If you do not have this permission, ask a "
-"maintainer to add the label for you. You can find the list of maintainers"
-" and contributors by checking the [CODEOWNERS](https://github.com/vllm-"
+"Only repository **Contributors** (Triage role) and **Maintainers** (Write "
+"role) can add labels. If you do not have this permission, ask a maintainer "
+"to add the label for you. You can find the list of maintainers and "
+"contributors by checking the [CODEOWNERS](https://github.com/vllm-"
 "project/vllm-ascend/blob/main/.github/CODEOWNERS) file."
-msgstr "只有仓库的**贡献者**（Triage 角色）和**维护者**（Write 角色）可以添加标签。如果您没有此权限，请让维护者为您添加标签。您可以通过查看 [CODEOWNERS](https://github.com/vllm-project/vllm-ascend/blob/main/.github/CODEOWNERS) 文件来找到维护者和贡献者列表。"
+msgstr ""
+"只有仓库的**贡献者**（Triage 角色）和**维护者**（Write 角色）可以添加标签。如果您没有此权限，请让维护者为您添加标签。您可以通过查看"
+" [CODEOWNERS](https://github.com/vllm-project/vllm-"
+"ascend/blob/main/.github/CODEOWNERS) 文件来找到维护者和贡献者列表。"
 
 #: ../../source/developer_guide/contribution/e2e_ci_test.md:51
 msgid ""
 "The comment must be posted **before** the label is added. If you add the "
-"label first, the workflow will find no `/e2e` comment and will not "
-"trigger any per-test runs."
+"label first, the workflow will find no `/e2e` comment and will not trigger "
+"any per-test runs."
 msgstr "评论必须在添加标签**之前**发布。如果您先添加标签，工作流将找不到 `/e2e` 评论，也不会触发任何单测试运行。"
 
 #: ../../source/developer_guide/contribution/e2e_ci_test.md:56
@@ -150,8 +157,8 @@ msgstr "3.等待结果"
 
 #: ../../source/developer_guide/contribution/e2e_ci_test.md:63
 msgid ""
-"GitHub Actions will trigger the `E2E-Full` workflow. Only the hardware "
-"jobs matching the provided test paths will run, which saves CI resources."
+"GitHub Actions will trigger the `E2E-Full` workflow. Only the hardware jobs "
+"matching the provided test paths will run, which saves CI resources."
 msgstr "GitHub Actions 将触发 `E2E-Full` 工作流。只有与提供的测试路径匹配的硬件任务会运行，从而节省 CI 资源。"
 
 #: ../../source/developer_guide/contribution/e2e_ci_test.md:66
@@ -243,13 +250,14 @@ msgid "Test Path Reference"
 msgstr "测试路径参考"
 
 #: ../../source/developer_guide/contribution/e2e_ci_test.md:84
-msgid "The `tests/e2e/pull_request/` directory is organized by hardware category:"
+msgid ""
+"The `tests/e2e/pull_request/` directory is organized by hardware category:"
 msgstr "`tests/e2e/pull_request/` 目录按硬件类别组织："
 
 #: ../../source/developer_guide/contribution/e2e_ci_test.md:93
 msgid ""
-"310P tests use `_310p` subdirectories or `_310p.py` filename suffix under"
-" the corresponding card directory:"
+"310P tests use `_310p` subdirectories or `_310p.py` filename suffix under "
+"the corresponding card directory:"
 msgstr "310P 测试在对应卡目录下使用 `_310p` 子目录或 `_310p.py` 文件名后缀："
 
 #: ../../source/developer_guide/contribution/e2e_ci_test.md:101
@@ -334,10 +342,11 @@ msgstr "在一条评论中跨多个硬件类别运行测试："
 
 #: ../../source/developer_guide/contribution/e2e_ci_test.md:130
 msgid ""
-"Re-trigger after fixing an issue: just push a new commit. The "
-"`synchronize` event re-runs the workflow and picks up the existing `/e2e`"
-" comment automatically — no need to post a new comment."
-msgstr "修复问题后重新触发：只需推送一个新的提交。`synchronize` 事件会重新运行工作流并自动获取现有的 `/e2e` 评论——无需发布新评论。"
+"Re-trigger after fixing an issue: just push a new commit. The `synchronize` "
+"event re-runs the workflow and picks up the existing `/e2e` comment "
+"automatically — no need to post a new comment."
+msgstr ""
+"修复问题后重新触发：只需推送一个新的提交。`synchronize` 事件会重新运行工作流并自动获取现有的 `/e2e` 评论——无需发布新评论。"
 
 #: ../../source/developer_guide/contribution/e2e_ci_test.md:134
 msgid "Troubleshooting"
@@ -349,21 +358,21 @@ msgstr "**添加标签后工作流未启动。**"
 
 #: ../../source/developer_guide/contribution/e2e_ci_test.md:138
 msgid ""
-"Make sure the `/e2e` comment was posted **before** the label was added. "
-"If the label was added first, remove it and re-add it after posting the "
+"Make sure the `/e2e` comment was posted **before** the label was added. If "
+"the label was added first, remove it and re-add it after posting the "
 "comment."
 msgstr "确保 `/e2e` 评论是在添加标签**之前**发布的。如果先添加了标签，请移除它，然后在发布评论后重新添加。"
 
 #: ../../source/developer_guide/contribution/e2e_ci_test.md:140
 msgid ""
-"Check that the comment starts exactly with `/e2e` followed by at least "
-"one path, with no leading spaces or extra characters before the slash."
+"Check that the comment starts exactly with `/e2e` followed by at least one "
+"path, with no leading spaces or extra characters before the slash."
 msgstr "检查评论是否以 `/e2e` 精确开头，后跟至少一个路径，斜杠前没有前导空格或多余字符。"
 
 #: ../../source/developer_guide/contribution/e2e_ci_test.md:142
 msgid ""
-"To re-trigger after fixing an issue, simply push a new commit — the "
-"workflow will reuse the existing `/e2e` comment automatically."
+"To re-trigger after fixing an issue, simply push a new commit — the workflow"
+" will reuse the existing `/e2e` comment automatically."
 msgstr "修复问题后重新触发，只需推送一个新的提交——工作流会自动重用现有的 `/e2e` 评论。"
 
 #: ../../source/developer_guide/contribution/e2e_ci_test.md:145
@@ -373,11 +382,11 @@ msgstr "**测试运行在了错误的硬件上。**"
 #: ../../source/developer_guide/contribution/e2e_ci_test.md:147
 msgid ""
 "Check that the path includes the expected directory segment (`one_card`, "
-"`two_card`, `four_card`, or `_310p`). Paths that do not match any of "
-"these patterns are routed to the one_card runner by default."
+"`two_card`, `four_card`, or `_310p`). Paths that do not match any of these "
+"patterns are routed to the one_card runner by default."
 msgstr ""
-"检查路径是否包含预期的目录片段（`one_card`、`two_card`、`four_card` 或 `_310p`）。不匹配这些模式的路径默认会被路由到 "
-"one_card runner。"
+"检查路径是否包含预期的目录片段（`one_card`、`two_card`、`four_card` 或 "
+"`_310p`）。不匹配这些模式的路径默认会被路由到 one_card runner。"
 
 #: ../../source/developer_guide/contribution/e2e_ci_test.md:151
 msgid "**The `parse-comment` job skipped with a permission error.**"
@@ -385,9 +394,169 @@ msgstr "**`parse-comment` 任务因权限错误被跳过。**"
 
 #: ../../source/developer_guide/contribution/e2e_ci_test.md:153
 msgid ""
-"Only the PR author or write/admin collaborators can use the comment "
-"trigger. Ask a maintainer to post the `/e2e` comment instead."
+"Only the PR author or write/admin collaborators can use the comment trigger."
+" Ask a maintainer to post the `/e2e` comment instead."
 msgstr "只有 PR 作者或具有写入/管理员权限的协作者可以使用评论触发功能。请让维护者代为发布 `/e2e` 评论。"
+
+msgid "# E2E CI Test"
+msgstr ""
+
+msgid ""
+"This document explains how to trigger specific E2E tests against your PR code via a\n"
+"comment command, without running the full E2E test suite."
+msgstr ""
+
+msgid "## Background"
+msgstr ""
+
+msgid ""
+"The `E2E-Full` workflow (`pr_test.yaml`) normally runs the complete E2E test suite\n"
+"when a PR has `ready` label. This is expensive in CI resources\n"
+"and time."
+msgstr ""
+
+msgid ""
+"Authorized users can trigger only the specific test files they care about by posting a\n"
+"`/e2e` comment on the PR, then adding the `ready` label."
+msgstr ""
+
+msgid "## How to Trigger"
+msgstr ""
+
+msgid "### 1. Post a comment"
+msgstr ""
+
+msgid ""
+"- Each path must be a valid pytest path relative to the repository root.\n"
+"- Multiple paths can be listed in a single comment, separated by spaces.\n"
+"- A specific test case can be targeted using `::` notation."
+msgstr ""
+
+msgid ""
+"| Comment format | Effect |\n"
+"|---|---|\n"
+"| `/e2e tests/e2e/pull_request/one_card/test_foo.py` | Run one test file on one_card |\n"
+"| `/e2e tests/e2e/pull_request/two_card/test_bar.py` | Run one test file on two_card |\n"
+"| `/e2e path1 path2 path3` | Run multiple files, routed by path pattern |\n"
+"| `/e2e tests/e2e/pull_request/one_card/test_foo.py::test_case` | Run a specific test case |"
+msgstr ""
+
+msgid "### 2. Add the label"
+msgstr ""
+
+msgid ""
+"After posting the comment, add the **`ready`** label to your PR.\n"
+"Adding the label is what actually **triggers** the workflow — at that point the workflow\n"
+"reads the existing comments to find the `/e2e` command."
+msgstr ""
+
+msgid "!!! note"
+msgstr ""
+
+msgid ""
+"Only repository **Contributors** (Triage role) and **Maintainers** (Write role) can add\n"
+"    labels. If you do not have this permission, ask a maintainer to add the label for you.\n"
+"    You can find the list of maintainers and contributors by checking the\n"
+"    [CODEOWNERS](https://github.com/vllm-project/vllm-ascend/blob/main/.github/CODEOWNERS)\n"
+"    file."
+msgstr ""
+
+msgid "!!! warning"
+msgstr ""
+
+msgid ""
+"The comment must be posted **before** the label is added. If you add the label first,\n"
+"    the workflow will find no `/e2e` comment and will not trigger any per-test runs."
+msgstr ""
+
+msgid ""
+"Additionally, only the **PR author** or collaborators with **write or admin** repository\n"
+"    access can trigger tests via comment. The workflow validates the commenter's permission\n"
+"    before proceeding."
+msgstr ""
+
+msgid "### 3. Wait for results"
+msgstr ""
+
+msgid ""
+"GitHub Actions will trigger the `E2E-Full` workflow. Only the hardware jobs matching\n"
+"the provided test paths will run, which saves CI resources."
+msgstr ""
+
+msgid "## Path Routing Rules"
+msgstr ""
+
+msgid ""
+"The workflow automatically routes each test path to the correct hardware runner based\n"
+"on path patterns:"
+msgstr ""
+
+msgid ""
+"| Path pattern | Hardware | Runner |\n"
+"|---|---|---|\n"
+"| `two_card` in path | two_card A3 NPU | `linux-aarch64-a3-2` |\n"
+"| `four_card` in path | four_card A3 NPU | `linux-aarch64-a3-4` |\n"
+"| `_310p` in filename under one/two_card | Ascend 310P x1 | `linux-aarch64-310p-*` |\n"
+"| `_310p` in filename under four_card | Ascend 310P x4 | `linux-aarch64-310p-*` |\n"
+"| All other paths | one_card A2 NPU | `linux-aarch64-a2b3-1` |"
+msgstr ""
+
+msgid ""
+"When paths from multiple categories are listed in a single comment, each category's\n"
+"tests run on its respective hardware in parallel."
+msgstr ""
+
+msgid "## Test Path Reference"
+msgstr ""
+
+msgid ""
+"310P tests use `_310p` subdirectories or `_310p.py` filename suffix under the\n"
+"corresponding card directory:"
+msgstr ""
+
+msgid "## Comparison with Full E2E Suite"
+msgstr ""
+
+msgid ""
+"| Aspect | Full E2E suite | Per-test comment trigger |\n"
+"|---|---|---|\n"
+"| Trigger | `ready` labels | `/e2e` comment + `ready` label |\n"
+"| Scope | All E2E tests | Only specified test paths |\n"
+"| Who can trigger | Anyone who can add labels | PR author or write/admin collaborator |\n"
+"| Use case | Pre-merge validation | Iterative debugging of specific tests |"
+msgstr ""
+
+msgid "## Examples"
+msgstr ""
+
+msgid ""
+"Re-trigger after fixing an issue: just push a new commit. The `synchronize` event\n"
+"re-runs the workflow and picks up the existing `/e2e` comment automatically — no need\n"
+"to post a new comment."
+msgstr ""
+
+msgid "## Troubleshooting"
+msgstr ""
+
+msgid ""
+"- Make sure the `/e2e` comment was posted **before** the label was added.\n"
+"  If the label was added first, remove it and re-add it after posting the comment.\n"
+"- Check that the comment starts exactly with `/e2e` followed by at least one path,\n"
+"  with no leading spaces or extra characters before the slash.\n"
+"- To re-trigger after fixing an issue, simply push a new commit — the workflow will\n"
+"  reuse the existing `/e2e` comment automatically."
+msgstr ""
+
+msgid ""
+"- Check that the path includes the expected directory segment (`one_card`, `two_card`,\n"
+"  `four_card`, or `_310p`). Paths that do not match any of these patterns are routed to\n"
+"  the one_card runner by default."
+msgstr ""
+
+msgid ""
+"- Only the PR author or write/admin collaborators can use the comment trigger.\n"
+"  Ask a maintainer to post the `/e2e` comment instead."
+msgstr ""
 
 #~ msgid "`multicard/2-cards` in path"
 #~ msgstr "路径中包含 `multicard/2-cards`"

@@ -6,17 +6,17 @@
 #
 msgid ""
 msgstr ""
-"Project-Id-Version: vllm-ascend \n"
+"Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
 "POT-Creation-Date: 2026-04-21 02:03+0000\n"
 "PO-Revision-Date: 2026-01-22 18:20+0800\n"
 "Last-Translator: Gemini\n"
-"Language: zh_CN\n"
 "Language-Team: zh_CN <LL@li.org>\n"
-"Plural-Forms: nplurals=1; plural=0;\n"
+"Language: zh_CN\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: Babel 2.18.0\n"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md:1
@@ -43,18 +43,18 @@ msgstr "上下文并行的优势"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md:9
 msgid ""
-"Context parallel mainly solves the problem of serving long context "
-"requests. As prefill and decode present quite different characteristics "
-"and have quite different SLO (service level objectives), we need to "
-"implement context parallel separately for them. The major considerations "
-"are:"
-msgstr "上下文并行主要解决长上下文请求的服务问题。由于预填充（Prefill）和解码（Decode）具有显著不同的特性及服务水平目标（SLO），我们需要分别为它们实现上下文并行。主要考量点包括："
+"Context parallel mainly solves the problem of serving long context requests."
+" As prefill and decode present quite different characteristics and have "
+"quite different SLO (service level objectives), we need to implement context"
+" parallel separately for them. The major considerations are:"
+msgstr ""
+"上下文并行主要解决长上下文请求的服务问题。由于预填充（Prefill）和解码（Decode）具有显著不同的特性及服务水平目标（SLO），我们需要分别为它们实现上下文并行。主要考量点包括："
 
 #: ../../source/user_guide/feature_guide/context_parallel.md:11
 msgid ""
-"For long context prefill, we can use context parallel to reduce TTFT "
-"(time to first token) by amortizing the computation time of the prefill "
-"across query tokens."
+"For long context prefill, we can use context parallel to reduce TTFT (time "
+"to first token) by amortizing the computation time of the prefill across "
+"query tokens."
 msgstr "对于长上下文预填充，我们可以使用上下文并行，通过在查询令牌间分摊预填充的计算时间来降低首令牌延迟（TTFT）。"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md:12
@@ -79,8 +79,8 @@ msgstr "支持场景"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md:18
 msgid ""
-"Currently context parallel can be used together with most other features,"
-" supported features are as follows:"
+"Currently context parallel can be used together with most other features, "
+"supported features are as follows:"
 msgstr "目前上下文并行可与大多数其他功能结合使用，支持的功能如下："
 
 #: ../../source/user_guide/feature_guide/context_parallel.md
@@ -132,8 +132,8 @@ msgid ""
 "You can enable `PCP` and `DCP` by `prefill_context_parallel_size` and "
 "`decode_context_parallel_size`, refer to the following example:"
 msgstr ""
-"您可以通过 `prefill_context_parallel_size` 和 `decode_context_parallel_size` 启用"
-" `PCP` 和 `DCP`，请参考以下示例："
+"您可以通过 `prefill_context_parallel_size` 和 `decode_context_parallel_size` 启用 "
+"`PCP` 和 `DCP`，请参考以下示例："
 
 #: ../../source/user_guide/feature_guide/context_parallel.md:29
 msgid "Offline example:"
@@ -146,11 +146,10 @@ msgstr "在线示例："
 #: ../../source/user_guide/feature_guide/context_parallel.md:57
 msgid ""
 "The total world size is `tensor_parallel_size` * "
-"`prefill_context_parallel_size`, so the examples above need 4 NPUs for "
-"each."
+"`prefill_context_parallel_size`, so the examples above need 4 NPUs for each."
 msgstr ""
-"总的世界大小为 `tensor_parallel_size` * "
-"`prefill_context_parallel_size`，因此上述每个示例都需要 4 个 NPU。"
+"总的世界大小为 `tensor_parallel_size` * `prefill_context_parallel_size`，因此上述每个示例都需要"
+" 4 个 NPU。"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md:59
 msgid "Constraints"
@@ -196,11 +195,11 @@ msgstr ""
 
 #: ../../source/user_guide/feature_guide/context_parallel.md:69
 msgid ""
-"While using Context Parallel in KV cache transfer-needed scenario (e.g. "
-"KV pooling, PD disaggregation), to simplify KV cache transmission, "
+"While using Context Parallel in KV cache transfer-needed scenario (e.g. KV "
+"pooling, PD disaggregation), to simplify KV cache transmission, "
 "`cp_kv_cache_interleave_size` must be set to the same value of KV cache "
-"`block_size`(default: 128), which specifies CP to split KV cache in a "
-"block-interleave style. For example:"
+"`block_size`(default: 128), which specifies CP to split KV cache in a block-"
+"interleave style. For example:"
 msgstr ""
 "在需要传输 KV 缓存的场景（例如 KV 池化、PD 分离）中使用上下文并行时，为简化 KV 缓存传输，必须将 "
 "`cp_kv_cache_interleave_size` 设置为与 KV 缓存 "
@@ -213,13 +212,13 @@ msgstr "实验结果"
 #: ../../source/user_guide/feature_guide/context_parallel.md:82
 msgid ""
 "To evaluate the effectiveness of Context Parallel in long sequence LLM "
-"inference scenarios, we use **DeepSeek-R1-W8A8** and **Qwen3-235B**, "
-"deploy PD disaggregate instances in the environment of 64 cards Ascend "
-"Atlas A3 inference products*64G (A3), the configuration and performance "
-"data are as follows."
+"inference scenarios, we use **DeepSeek-R1-W8A8** and **Qwen3-235B**, deploy "
+"PD disaggregate instances in the environment of 64 cards Ascend Atlas A3 "
+"inference products*64G (A3), the configuration and performance data are as "
+"follows."
 msgstr ""
-"为评估上下文并行在长序列 LLM 推理场景中的有效性，我们使用 **DeepSeek-R1-W8A8** 和 **Qwen3-235B** "
-"模型，在 64 卡 Ascend Atlas A3 推理产品*64G (A3) 环境下部署 PD 分离实例，配置和性能数据如下。"
+"为评估上下文并行在长序列 LLM 推理场景中的有效性，我们使用 **DeepSeek-R1-W8A8** 和 **Qwen3-235B** 模型，在 "
+"64 卡 Ascend Atlas A3 推理产品*64G (A3) 环境下部署 PD 分离实例，配置和性能数据如下。"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md:84
 msgid "DeepSeek-R1-W8A8:"
@@ -308,3 +307,80 @@ msgstr "TTFT: 8.9s <br> TPOT: 86ms"
 #: ../../source/user_guide/feature_guide/context_parallel.md
 msgid "TTFT: 22.7s <br> TPOT: 121ms"
 msgstr "TTFT: 22.7s <br> TPOT: 121ms"
+
+msgid "# Context Parallel Guide"
+msgstr ""
+
+msgid "## Overview"
+msgstr ""
+
+msgid "## Benefits of Context Parallel"
+msgstr ""
+
+msgid ""
+"- For long context prefill, we can use context parallel to reduce TTFT (time to first token) by amortizing the computation time of the prefill across query tokens.\n"
+"- For long context decode, we can use context parallel to reduce KV cache duplication and offer more space for KV cache to increase the batch size (and hence the throughput)."
+msgstr ""
+
+msgid "## Supported Scenarios"
+msgstr ""
+
+msgid ""
+"|         | Eager | Graph | Prefix <br> Cache | Chunked <br> Prefill | SpecDecode <br> (MTP) | PD <br> disaggregation | MLAPO |\n"
+"| ------- | ----- | ----- | ------ | ------ | ----- | ----- | ----- |\n"
+"| **PCP** | ✅    | ✅     | ✅      | ✅       | ✅      | ✅ | ✅|\n"
+"| **DCP** | ✅    | ✅     | ✅      | ✅       | ✅      | ✅ | ✅ |"
+msgstr ""
+
+msgid "## How to use Context Parallel"
+msgstr ""
+
+msgid "- Offline example:"
+msgstr ""
+
+msgid "- Online example:"
+msgstr ""
+
+msgid "## Constraints"
+msgstr ""
+
+msgid ""
+"- While using DCP, the following constraints must be met:\n"
+"    - For MLA-based model, such as DeepSeek-R1:\n"
+"        - `tensor_parallel_size >= decode_context_parallel_size`\n"
+"        - `tensor_parallel_size % decode_context_parallel_size == 0`\n"
+"    - For GQA-based model, such as Qwen3-235B:\n"
+"        - `(tensor_parallel_size // num_key_value_heads) >= decode_context_parallel_size`\n"
+"        - `(tensor_parallel_size // num_key_value_heads) % decode_context_parallel_size == 0`"
+msgstr ""
+
+msgid ""
+"- While using Context Parallel in KV cache transfer-needed scenario (e.g. KV"
+" pooling, PD disaggregation), to simplify KV cache transmission, "
+"`cp_kv_cache_interleave_size` must be set to the same value of KV cache "
+"`block_size`(default: 128), which specifies CP to split KV cache in a block-"
+"interleave style. For example:"
+msgstr ""
+
+msgid "## Experimental Results"
+msgstr ""
+
+msgid "- DeepSeek-R1-W8A8:"
+msgstr ""
+
+msgid ""
+"| Configuration | Input length <br> 32k | Input length <br> 64k | Input length <br> 128k |\n"
+"    | ----------------------------- | ------------------------- | ------------------------- | ------------------------- |\n"
+"    | P node: (DP2 TP8 EP16) *2 <br> D node: (DP32 EP32)*1       | TTFT: 9.3s <br> TPOT: 72ms | TTFT: 22.8s <br> TPOT: 74ms | TTFT: 73.2s <br> TPOT: 82ms |\n"
+"    | P node: (PCP2 TP8 DCP8 EP16) *2 <br> D node: (DP32 EP32)*1 | TTFT: 7.9s <br> TPOT: 74ms | TTFT: 15.9s <br> TPOT: 78ms | TTFT: 46.0s <br> TPOT: 83ms |"
+msgstr ""
+
+msgid "- Qwen3-235B:"
+msgstr ""
+
+msgid ""
+"| Configuration | Input length <br> 32k | Input length <br> 64k | Input length <br> 120k |\n"
+"    | ----------------------------- | ------------------------- | ------------------------- | ------------------------- |\n"
+"    | P node: (DP2 TP8 EP16) *2 <br> D node: (DP32 EP32)*1       | TTFT: 5.1s <br> TPOT: 65ms | TTFT: 13.1s <br> TPOT: 85ms | TTFT: 33.9s <br> TPOT: 120ms |\n"
+"    | P node: (PCP2 TP8 DCP2 EP16) *2 <br> D node: (DP32 EP32)*1 | TTFT: 3.0s <br> TPOT: 66ms | TTFT: 8.9s <br> TPOT: 86ms | TTFT: 22.7s <br> TPOT: 121ms |"
+msgstr ""

@@ -1,0 +1,96 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2026, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-07 00:00+0000\n"
+"PO-Revision-Date: 2026-07-07 12:00+0800\n"
+"Last-Translator: \n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: manual\n"
+
+#: ../../source/getting_started.md:1
+msgid "Getting Started"
+msgstr "概览"
+
+#: ../../source/getting_started.md:3
+msgid ""
+"Welcome to the vLLM Ascend Plugin! This section will help you get up and "
+"running quickly."
+msgstr "欢迎使用 vLLM Ascend 插件！本节将帮助您快速上手。"
+
+#: ../../source/getting_started.md:5
+msgid "Quick Navigation"
+msgstr "快速导航"
+
+#: ../../source/getting_started.md:7
+msgid "**[Quick Start](quick_start.md)** — Get started with a minimal example"
+msgstr "**[快速开始](quick_start.md)** — 通过一个最小示例快速入门"
+
+#: ../../source/getting_started.md:8
+msgid "**[Installation](installation.md)** — Install vLLM and vLLM Ascend"
+msgstr "**[安装](installation.md)** — 安装 vLLM 与 vLLM Ascend"
+
+#: ../../source/getting_started.md:9
+msgid ""
+"**[Model Tutorials](tutorials/models/index.md)** — Step-by-step guides for "
+"running specific models"
+msgstr "**[模型教程](tutorials/models/index.md)** — 运行特定模型的分步指南"
+
+#: ../../source/getting_started.md:10
+msgid ""
+"**[Feature Tutorials](tutorials/features/index.md)** — Explore advanced "
+"features like PD disaggregation, context parallel, and more"
+msgstr "**[功能教程](tutorials/features/index.md)** — 探索高级功能，如 PD 分离、上下文并行等"
+
+#: ../../source/getting_started.md:11
+msgid ""
+"**[Hardware Tutorials](tutorials/hardwares/index.md)** — Hardware-specific "
+"guides"
+msgstr "**[硬件教程](tutorials/hardwares/index.md)** — 硬件相关指南"
+
+#: ../../source/getting_started.md:12
+msgid "**[FAQs](faqs.md)** — Frequently asked questions"
+msgstr "**[常见问题](faqs.md)** — 常见问题解答"
+
+#: ../../source/getting_started.md:14
+msgid "What is vLLM Ascend?"
+msgstr "什么是 vLLM Ascend？"
+
+#: ../../source/getting_started.md:16
+msgid ""
+"vLLM Ascend plugin (vllm-ascend) is a community-maintained hardware plugin "
+"for running vLLM on the Ascend NPU. It provides a hardware-pluggable "
+"interface that decouples the integration of the Ascend NPU with vLLM, "
+"enabling popular open-source models to run seamlessly on Ascend hardware."
+msgstr ""
+"vLLM Ascend 插件（vllm-ascend）是一个由社区维护的硬件插件，用于在 Ascend NPU 上运行 "
+"vLLM。它提供了一个硬件可插拔接口，将 Ascend NPU 与 vLLM 的集成解耦，使流行的开源模型能够在 Ascend 硬件上无缝运行。"
+
+msgid "# Getting Started"
+msgstr ""
+
+msgid "## Quick Navigation"
+msgstr ""
+
+msgid ""
+"- **[Quick Start](quick_start.md)** — Get started with a minimal example\n"
+"- **[Installation](installation.md)** — Install vLLM and vLLM Ascend\n"
+"- **[Model Tutorials](tutorials/models/index.md)** — Step-by-step guides for running specific models\n"
+"- **[Feature Tutorials](tutorials/features/index.md)** — Explore advanced features like PD disaggregation, context parallel, and more\n"
+"- **[Hardware Tutorials](tutorials/hardwares/index.md)** — Hardware-specific guides\n"
+"- **[FAQs](faqs.md)** — Frequently asked questions"
+msgstr ""
+
+msgid "## What is vLLM Ascend?"
+msgstr ""
