@@ -135,8 +135,8 @@ fi
 BUS_SUCCESS2=$(echo "${CASE_RET}" | grep -o '"success":[a-z]*' | cut -d: -f2)
 BUS_CODE2=$(echo "${CASE_RET}" | grep -o '"code":[0-9]*' | cut -d: -f2)
 if [[ "${BUS_SUCCESS2}" != "true" ]];then
-    echo "WARN: case recommend api business fail, code:${BUS_CODE2}, skip ut"
-    exit 0
+    echo "ERROR: case recommend api business fail, code:${BUS_CODE2}, resp:${CASE_RET}"
+    exit 15
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
