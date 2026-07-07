@@ -275,6 +275,12 @@ def rope_forward_triton(
         BLOCK_SIZE_HEAD = 64
     else:
         BLOCK_SIZE_HEAD = 32
+    # LOCAL WORKAROUND (not for commit): gemma4 large head_dim (256 sliding /
+    # 512 full-attention) overflows the A2 (Ascend910B3) unified buffer at the
+    # default head tile ("ub overflow, requires 1581056 bits while 1572864
+    # bits available"). Shrink the head tile for large head_dim.
+    if head_dim > 128:
+        BLOCK_SIZE_HEAD = min(BLOCK_SIZE_HEAD, 16)
     num_vectorcore = get_vectorcore_num()
     n_row = min(num_tokens, num_vectorcore)
 
