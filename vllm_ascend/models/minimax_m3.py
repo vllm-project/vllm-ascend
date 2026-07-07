@@ -712,15 +712,17 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
                 # stacked dense/shared-expert mappings rewrite them.
                 if ("block_sparse_moe.experts." in name) and name not in params_dict:
                     continue
-                name = name.replace(weight_name, param_name)
-                if name.endswith(".bias") and name not in params_dict:
+                param_name_full = name.replace(weight_name, param_name)
+                if param_name_full.endswith(".bias") and param_name_full not in params_dict:
                     mark_skipped("missing_bias")
                     continue
-                if is_pp_missing_parameter(name, self):
+                if is_pp_missing_parameter(param_name_full, self):
                     mark_skipped("pp_missing")
                     continue
-                if name.endswith((".k_scale", ".v_scale")):
-                    remapped_name = maybe_remap_kv_scale_name(name, params_dict)
+                if param_name_full.endswith((".k_scale", ".v_scale")):
+                    remapped_name = maybe_remap_kv_scale_name(
+                        param_name_full, params_dict
+                    )
                     if remapped_name is not None and remapped_name in params_dict:
                         param = params_dict[remapped_name]
                         weight_loader = getattr(
@@ -729,13 +731,13 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
                         weight_loader(param, loaded_weight)
                         mark_loaded(remapped_name)
                         break
-                if name not in params_dict:
+                if param_name_full not in params_dict:
                     continue
 
-                param = params_dict[name]
+                param = params_dict[param_name_full]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
-                mark_loaded(name)
+                mark_loaded(param_name_full)
                 break
             else:
                 is_expert_weight = False
