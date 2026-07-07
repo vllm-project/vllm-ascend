@@ -34,92 +34,81 @@ You can use our official docker image to run `DeepSeek-OCR-2` directly.
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
 
-:::::{tab-set}
-:sync-group: install
+=== "A2 series"
 
-::::{tab-item} A2 series
-:sync: A2
+    ```bash
 
-```{code-block} bash
-   :substitutions:
+    export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
+    export NAME=vllm-ascend
 
-export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:|vllm_ascend_version|
-export NAME=vllm-ascend
+    # Run the container using the defined variables
+    # Note: If you are running bridge network with docker, please expose available ports for multiple nodes communication in advance.
+    docker run --rm \
+    --name $NAME \
+    --net=host \
+    --shm-size=1g \
+    --device /dev/davinci0 \
+    --device /dev/davinci1 \
+    --device /dev/davinci2 \
+    --device /dev/davinci3 \
+    --device /dev/davinci4 \
+    --device /dev/davinci5 \
+    --device /dev/davinci6 \
+    --device /dev/davinci7 \
+    --device /dev/davinci_manager \
+    --device /dev/devmm_svm \
+    --device /dev/hisi_hdc \
+    -v /usr/local/dcmi:/usr/local/dcmi \
+    -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+    -v /etc/ascend_install.info:/etc/ascend_install.info \
+    -v /root/.cache:/root/.cache \
+    -it $IMAGE bash
+    ```
 
-# Run the container using the defined variables
-# Note: If you are running bridge network with docker, please expose available ports for multiple nodes communication in advance.
-docker run --rm \
---name $NAME \
---net=host \
---shm-size=1g \
---device /dev/davinci0 \
---device /dev/davinci1 \
---device /dev/davinci2 \
---device /dev/davinci3 \
---device /dev/davinci4 \
---device /dev/davinci5 \
---device /dev/davinci6 \
---device /dev/davinci7 \
---device /dev/davinci_manager \
---device /dev/devmm_svm \
---device /dev/hisi_hdc \
--v /usr/local/dcmi:/usr/local/dcmi \
--v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
--v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
--v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
--v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
--v /etc/ascend_install.info:/etc/ascend_install.info \
--v /root/.cache:/root/.cache \
--it $IMAGE bash
-```
+=== "A3 series"
 
-::::
-::::{tab-item} A3 series
-:sync: A3
+    ```bash
 
-```{code-block} bash
-   :substitutions:
+    export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
+    export NAME=vllm-ascend
 
-export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:|vllm_ascend_version|
-export NAME=vllm-ascend
-
-# Run the container using the defined variables
-# Note: If you are running bridge network with docker, please expose available ports for multiple nodes communication in advance.
-docker run --rm \
---name $NAME \
---net=host \
---shm-size=1g \
---device /dev/davinci0 \
---device /dev/davinci1 \
---device /dev/davinci2 \
---device /dev/davinci3 \
---device /dev/davinci4 \
---device /dev/davinci5 \
---device /dev/davinci6 \
---device /dev/davinci7 \
---device /dev/davinci8 \
---device /dev/davinci9 \
---device /dev/davinci10 \
---device /dev/davinci11 \
---device /dev/davinci12 \
---device /dev/davinci13 \
---device /dev/davinci14 \
---device /dev/davinci15 \
---device /dev/davinci_manager \
---device /dev/devmm_svm \
---device /dev/hisi_hdc \
--v /usr/local/dcmi:/usr/local/dcmi \
--v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
--v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
--v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
--v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
--v /etc/ascend_install.info:/etc/ascend_install.info \
--v /root/.cache:/root/.cache \
--it $IMAGE bash
-```
-
-::::
-:::::
+    # Run the container using the defined variables
+    # Note: If you are running bridge network with docker, please expose available ports for multiple nodes communication in advance.
+    docker run --rm \
+    --name $NAME \
+    --net=host \
+    --shm-size=1g \
+    --device /dev/davinci0 \
+    --device /dev/davinci1 \
+    --device /dev/davinci2 \
+    --device /dev/davinci3 \
+    --device /dev/davinci4 \
+    --device /dev/davinci5 \
+    --device /dev/davinci6 \
+    --device /dev/davinci7 \
+    --device /dev/davinci8 \
+    --device /dev/davinci9 \
+    --device /dev/davinci10 \
+    --device /dev/davinci11 \
+    --device /dev/davinci12 \
+    --device /dev/davinci13 \
+    --device /dev/davinci14 \
+    --device /dev/davinci15 \
+    --device /dev/davinci_manager \
+    --device /dev/devmm_svm \
+    --device /dev/hisi_hdc \
+    -v /usr/local/dcmi:/usr/local/dcmi \
+    -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+    -v /etc/ascend_install.info:/etc/ascend_install.info \
+    -v /root/.cache:/root/.cache \
+    -it $IMAGE bash
+    ```
 
 If you want to deploy multi-node environment, you need to set up environment on each node.
 

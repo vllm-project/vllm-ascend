@@ -26,9 +26,8 @@ You can use the official docker image to run `LLaVA-OneVision-Qwen2-0.5B-OV` dir
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
 
-```{code-block} bash
-   :substitutions:
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+```bash
+export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 docker run --rm \
     --name vllm-ascend \
     --shm-size=1g \
