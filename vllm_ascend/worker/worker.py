@@ -21,6 +21,7 @@ import copy
 import gc
 import logging
 from types import NoneType
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -1089,6 +1090,12 @@ class NPUWorker(WorkerBase):
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         return self.model_runner.take_draft_token_ids()
+
+    def update_config(self, overrides: dict[str, Any]) -> None:
+        self.model_runner.update_config(overrides)
+
+    def reload_weights(self, *args, **kwargs) -> None:
+        self.model_runner.reload_weights(*args, **kwargs)
 
     def check_health(self) -> None:
         import subprocess

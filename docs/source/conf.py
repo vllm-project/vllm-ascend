@@ -201,7 +201,7 @@ def main():
     output = {key: extra[key] for key in VERSION_KEYS if key in extra}
     # ``main_vllm_commit`` and ``main_vllm_tag`` are not stored in
     # mkdocs.yml; they live as commit-shas in the .github/ directory and
-    # are read by ``main.py`` (mkdocs-macros) at build time. Include them
+    # are read by ``docs/hooks/macros_main.py`` (mkdocs-macros) at build time. Include them
     # here so the diagnostic dump in labeled_doctest matches the legacy
     # output.
     output["main_vllm_commit"] = _read_text(REPO_ROOT / ".github" / "vllm-main-verified.commit")

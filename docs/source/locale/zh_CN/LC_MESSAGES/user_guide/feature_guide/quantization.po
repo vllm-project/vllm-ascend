@@ -6,17 +6,17 @@
 #
 msgid ""
 msgstr ""
-"Project-Id-Version:  vllm-ascend\n"
+"Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
 "POT-Creation-Date: 2026-06-22 05:29+0000\n"
 "PO-Revision-Date: 2026-01-22 16:40+0800\n"
 "Last-Translator: Gemini\n"
-"Language: zh_CN\n"
 "Language-Team: zh_CN <LL@li.org>\n"
-"Plural-Forms: nplurals=1; plural=0;\n"
+"Language: zh_CN\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: Babel 2.18.0\n"
 
 #: ../../source/user_guide/feature_guide/quantization.md:1
@@ -25,16 +25,16 @@ msgstr "量化指南"
 
 #: ../../source/user_guide/feature_guide/quantization.md:3
 msgid ""
-"Model quantization is a technique that reduces model size and "
-"computational overhead by lowering the numerical precision of weights and"
-" activations, thereby saving memory and improving inference speed."
+"Model quantization is a technique that reduces model size and computational "
+"overhead by lowering the numerical precision of weights and activations, "
+"thereby saving memory and improving inference speed."
 msgstr "模型量化是一种通过降低权重和激活值的数值精度来减少模型大小和计算开销的技术，从而节省内存并提高推理速度。"
 
 #: ../../source/user_guide/feature_guide/quantization.md:5
 msgid ""
-"`vLLM Ascend` supports multiple quantization methods. This guide provides"
-" instructions for using different quantization tools and running "
-"quantized models on vLLM Ascend."
+"`vLLM Ascend` supports multiple quantization methods. This guide provides "
+"instructions for using different quantization tools and running quantized "
+"models on vLLM Ascend."
 msgstr "`vLLM Ascend` 支持多种量化方法。本指南提供了使用不同量化工具以及在 vLLM Ascend 上运行量化模型的说明。"
 
 #: ../../source/user_guide/feature_guide/quantization.md:7
@@ -43,10 +43,10 @@ msgstr "**注意**"
 
 #: ../../source/user_guide/feature_guide/quantization.md:9
 msgid ""
-"You can choose to convert the model yourself or use the quantized model "
-"we uploaded. See <https://www.modelscope.cn/models/vllm-ascend/Kimi-K2"
-"-Instruct-W8A8>. Before you quantize a model, ensure sufficient RAM is "
-"available."
+"You can choose to convert the model yourself or use the quantized model we "
+"uploaded. See <https://www.modelscope.cn/models/vllm-"
+"ascend/Kimi-K2-Instruct-W8A8>. Before you quantize a model, ensure "
+"sufficient RAM is available."
 msgstr ""
 "您可以选择自行转换模型，也可以使用我们上传的量化模型。请参阅 <https://www.modelscope.cn/models/vllm-"
 "ascend/Kimi-K2-Instruct-W8A8>。在量化模型之前，请确保有足够的 RAM 可用。"
@@ -67,16 +67,15 @@ msgstr "1.ModelSlim（推荐）"
 
 #: ../../source/user_guide/feature_guide/quantization.md:19
 msgid ""
-"[ModelSlim](https://gitcode.com/Ascend/msmodelslim/blob/master/README.md)"
-" is an Ascend-friendly compression tool focused on acceleration, using "
-"compression techniques, and built for Ascend hardware. It includes a "
-"series of inference optimization technologies such as quantization and "
-"compression, aiming to accelerate large language dense models, MoE "
-"models, multimodal understanding models, multimodal generation models, "
-"etc."
+"[ModelSlim](https://gitcode.com/Ascend/msmodelslim/blob/master/README.md) is"
+" an Ascend-friendly compression tool focused on acceleration, using "
+"compression techniques, and built for Ascend hardware. It includes a series "
+"of inference optimization technologies such as quantization and compression,"
+" aiming to accelerate large language dense models, MoE models, multimodal "
+"understanding models, multimodal generation models, etc."
 msgstr ""
-"[ModelSlim](https://gitcode.com/Ascend/msmodelslim/blob/master/README.md)"
-" 是一个对 Ascend 友好的压缩工具，专注于利用压缩技术实现加速，并专为 Ascend "
+"[ModelSlim](https://gitcode.com/Ascend/msmodelslim/blob/master/README.md) "
+"是一个对 Ascend 友好的压缩工具，专注于利用压缩技术实现加速，并专为 Ascend "
 "硬件构建。它包含一系列推理优化技术，如量化和压缩，旨在加速大语言稠密模型、MoE 模型、多模态理解模型、多模态生成模型等。"
 
 #: ../../source/user_guide/feature_guide/quantization.md:21
@@ -88,7 +87,9 @@ msgstr "安装"
 msgid ""
 "To use ModelSlim for model quantization, install it from its [Git "
 "repository](https://gitcode.com/Ascend/msmodelslim):"
-msgstr "若要使用 ModelSlim 进行模型量化，请从其 [Git 仓库](https://gitcode.com/Ascend/msmodelslim) 安装："
+msgstr ""
+"若要使用 ModelSlim 进行模型量化，请从其 [Git 仓库](https://gitcode.com/Ascend/msmodelslim) "
+"安装："
 
 #: ../../source/user_guide/feature_guide/quantization.md:34
 #: ../../source/user_guide/feature_guide/quantization.md:73
@@ -97,8 +98,8 @@ msgstr "模型量化"
 
 #: ../../source/user_guide/feature_guide/quantization.md:36
 msgid ""
-"The following example shows how to generate W8A8 quantized weights for "
-"the [Qwen3-MoE "
+"The following example shows how to generate W8A8 quantized weights for the "
+"[Qwen3-MoE "
 "model](https://gitcode.com/Ascend/msmodelslim/blob/master/example/Qwen3-MOE/README.md)."
 msgstr ""
 "以下示例展示了如何为 [Qwen3-MoE "
@@ -120,8 +121,7 @@ msgid ""
 "For more examples, refer to the [official "
 "examples](https://gitcode.com/Ascend/msmodelslim/tree/master/example)."
 msgstr ""
-"更多示例请参考 "
-"[官方示例](https://gitcode.com/Ascend/msmodelslim/tree/master/example)。"
+"更多示例请参考 [官方示例](https://gitcode.com/Ascend/msmodelslim/tree/master/example)。"
 
 #: ../../source/user_guide/feature_guide/quantization.md:63
 msgid "2. LLM-Compressor"
@@ -157,20 +157,19 @@ msgstr "为 MoE 模型生成 W8A8 动态量化权重的示例："
 
 #: ../../source/user_guide/feature_guide/quantization.md:101
 msgid ""
-"For more content, refer to the [official examples](https://github.com"
-"/vllm-project/llm-compressor/tree/main/examples)."
+"For more content, refer to the [official examples](https://github.com/vllm-"
+"project/llm-compressor/tree/main/examples)."
 msgstr ""
 "更多内容请参考 [官方示例](https://github.com/vllm-project/llm-"
 "compressor/tree/main/examples)。"
 
 #: ../../source/user_guide/feature_guide/quantization.md:103
 msgid ""
-"The quantization types currently supported by LLM-Compressor can be "
-"viewed in the `vllm_ascend/quantization/compressed_tensors_config.py` "
-"file."
+"The quantization types currently supported by LLM-Compressor can be viewed "
+"in the `vllm_ascend/quantization/compressed_tensors_config.py` file."
 msgstr ""
-"LLM-Compressor 当前支持的量化类型可在 `vllm_ascend/quantization/compressed_tensors_config.py` "
-"文件中查看。"
+"LLM-Compressor 当前支持的量化类型可在 "
+"`vllm_ascend/quantization/compressed_tensors_config.py` 文件中查看。"
 
 #: ../../source/user_guide/feature_guide/quantization.md:105
 msgid "Running Quantized Models"
@@ -178,13 +177,13 @@ msgstr "运行量化模型"
 
 #: ../../source/user_guide/feature_guide/quantization.md:107
 msgid ""
-"Once you have a quantized model which is generated by **ModelSlim**, you "
-"can use vLLM Ascend for inference by specifying the `--quantization "
-"ascend` parameter to enable quantization features, while for models "
-"quantized by **LLM-Compressor**, do not need to add this parameter."
+"Once you have a quantized model which is generated by **ModelSlim**, you can"
+" use vLLM Ascend for inference by specifying the `--quantization ascend` "
+"parameter to enable quantization features, while for models quantized by "
+"**LLM-Compressor**, do not need to add this parameter."
 msgstr ""
-"一旦您拥有了由 **ModelSlim** 生成的量化模型，您可以通过指定 `--quantization ascend` "
-"参数来启用量化特性并使用 vLLM Ascend 进行推理；而对于由 **LLM-Compressor** 量化的模型，则无需添加此参数。"
+"一旦您拥有了由 **ModelSlim** 生成的量化模型，您可以通过指定 `--quantization ascend` 参数来启用量化特性并使用 "
+"vLLM Ascend 进行推理；而对于由 **LLM-Compressor** 量化的模型，则无需添加此参数。"
 
 #: ../../source/user_guide/feature_guide/quantization.md:109
 msgid "Offline Inference"
@@ -203,11 +202,63 @@ msgid "[ModelSlim GitCode](https://gitcode.com/Ascend/msmodelslim)"
 msgstr "[ModelSlim GitCode](https://gitcode.com/Ascend/msmodelslim)"
 
 #: ../../source/user_guide/feature_guide/quantization.md:160
-msgid "[LLM-Compressor GitHub](https://github.com/vllm-project/llm-compressor)"
-msgstr "[LLM-Compressor GitHub](https://github.com/vllm-project/llm-compressor)"
+msgid ""
+"[LLM-Compressor GitHub](https://github.com/vllm-project/llm-compressor)"
+msgstr ""
+"[LLM-Compressor GitHub](https://github.com/vllm-project/llm-compressor)"
 
 #: ../../source/user_guide/feature_guide/quantization.md:161
 msgid ""
 "[vLLM Quantization "
 "Guide](https://docs.vllm.ai/en/latest/features/quantization/)"
 msgstr "[vLLM 量化指南](https://docs.vllm.ai/en/latest/features/quantization/)"
+
+msgid "# Quantization Guide"
+msgstr ""
+
+msgid ""
+"> **Note**\n"
+">\n"
+"> You can choose to convert the model yourself or use the quantized model we uploaded.\n"
+"> See <https://www.modelscope.cn/models/vllm-ascend/Kimi-K2-Instruct-W8A8>.\n"
+"> Before you quantize a model, ensure sufficient RAM is available."
+msgstr ""
+
+msgid "## Quantization Tools"
+msgstr ""
+
+msgid "### 1. ModelSlim (Recommended)"
+msgstr ""
+
+msgid "#### Installation"
+msgstr ""
+
+msgid "#### Model Quantization"
+msgstr ""
+
+msgid "### 2. LLM-Compressor"
+msgstr ""
+
+msgid "##### Dense Quantization"
+msgstr ""
+
+msgid "##### MoE Quantization"
+msgstr ""
+
+msgid "## Running Quantized Models"
+msgstr ""
+
+msgid "### Offline Inference"
+msgstr ""
+
+msgid "### Online Inference"
+msgstr ""
+
+msgid "## References"
+msgstr ""
+
+msgid ""
+"- [ModelSlim GitCode](https://gitcode.com/Ascend/msmodelslim)\n"
+"- [LLM-Compressor GitHub](https://github.com/vllm-project/llm-compressor)\n"
+"- [vLLM Quantization Guide](https://docs.vllm.ai/en/latest/features/quantization/)"
+msgstr ""

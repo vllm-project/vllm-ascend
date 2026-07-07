@@ -23,3 +23,6 @@ msgstr ""
 #: ../../developer_guide/evaluation/index.md:3
 msgid "Accuracy"
 msgstr "准确性"
+
+msgid "# Accuracy"
+msgstr ""
