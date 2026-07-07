@@ -57,10 +57,9 @@ For setting up a multi-node inference cluster with Ray, **containerized deployme
 
 Below is the example container setup command, which should be executed on **all nodes** :
 
-```{code-block} bash
-   :substitutions:
+```bash
 # Update the vllm-ascend image
-export IMAGE=quay.nju.edu.cn/ascend/vllm-ascend:|vllm_ascend_version|
+export IMAGE=quay.nju.edu.cn/ascend/vllm-ascend:{{ vllm_ascend_version }}
 export NAME=vllm-ascend
 
 # Run the container using the defined variables
@@ -103,10 +102,10 @@ Below are the commands for the primary and secondary nodes:
 
 **Primary node**:
 
-:::{note}
-When starting a Ray cluster for multi-node inference, the environment variables on each node must be set **before** starting the Ray cluster for them to take effect.
-Updating the environment variables requires restarting the Ray cluster.
-:::
+!!! note
+
+    When starting a Ray cluster for multi-node inference, the environment variables on each node must be set **before** starting the Ray cluster for them to take effect.
+    Updating the environment variables requires restarting the Ray cluster.
 
 ```shell
 # Head node
@@ -120,9 +119,9 @@ ray start --head
 
 **Secondary node**:
 
-:::{note}
-When starting a Ray cluster for multi-node inference, the environment variables on each node must be set **before** starting the Ray cluster for them to take effect. Updating the environment variables requires restarting the Ray cluster.
-:::
+!!! note
+
+    When starting a Ray cluster for multi-node inference, the environment variables on each node must be set **before** starting the Ray cluster for them to take effect. Updating the environment variables requires restarting the Ray cluster.
 
 ```shell
 # Worker node

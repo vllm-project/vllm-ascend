@@ -39,24 +39,24 @@ After posting the comment, add the **`ready`** label to your PR.
 Adding the label is what actually **triggers** the workflow — at that point the workflow
 reads the existing comments to find the `/e2e` command.
 
-:::{note}
-Only repository **Contributors** (Triage role) and **Maintainers** (Write role) can add
-labels. If you do not have this permission, ask a maintainer to add the label for you.
-You can find the list of maintainers and contributors by checking the
-[CODEOWNERS](https://github.com/vllm-project/vllm-ascend/blob/main/.github/CODEOWNERS)
-file.
-:::
+!!! note
 
-:::{important}
-The comment must be posted **before** the label is added. If you add the label first,
-the workflow will find no `/e2e` comment and will not trigger any per-test runs.
-:::
+    Only repository **Contributors** (Triage role) and **Maintainers** (Write role) can add
+    labels. If you do not have this permission, ask a maintainer to add the label for you.
+    You can find the list of maintainers and contributors by checking the
+    [CODEOWNERS](https://github.com/vllm-project/vllm-ascend/blob/main/.github/CODEOWNERS)
+    file.
 
-:::{note}
-Additionally, only the **PR author** or collaborators with **write or admin** repository
-access can trigger tests via comment. The workflow validates the commenter's permission
-before proceeding.
-:::
+!!! warning
+
+    The comment must be posted **before** the label is added. If you add the label first,
+    the workflow will find no `/e2e` comment and will not trigger any per-test runs.
+
+!!! note
+
+    Additionally, only the **PR author** or collaborators with **write or admin** repository
+    access can trigger tests via comment. The workflow validates the commenter's permission
+    before proceeding.
 
 ### 3. Wait for results
 
