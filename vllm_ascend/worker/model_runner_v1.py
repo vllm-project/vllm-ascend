@@ -150,6 +150,7 @@ else:
 
 
 from vllm.model_executor.layers.attention import Attention, MLAAttention
+from vllm_ascend.ec_manager.score_encoder_cache import get_score_encoder_cache_config
 
 # if true, allow tensor initialization and casting with internal format (e.g., NZ)
 torch.npu.config.allow_internal_format = True
@@ -433,6 +434,11 @@ class NPUModelRunner(GPUModelRunner):
             self.cudagraph_batch_sizes = []
         self.mamba_state_idx: dict[str, int] = {}
         self._mamba_copy_bufs: mamba_utils.MambaCopyBuffers | None = None
+
+        # score encoder cache相关
+        self.tmp_encoder_cache: dict[str, torch.Tensor] = {}
+        self.cpu_encoder_cache: dict[str, torch.Tensor] = {}
+        self.cached: dict[str, set[str]] = {}
 
     @property
     def use_cp(self) -> bool:
@@ -1132,9 +1138,23 @@ class NPUModelRunner(GPUModelRunner):
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         with record_function_or_nullcontext("prepare input"):
             with self.synchronize_input_prep():
+                for req_id in scheduler_output.finished_req_ids:
+                    req = self.requests.get(req_id, None)
+                    if req is not None:
+                        self.free_tmp_cache(req_id, req)
+
+                # Free the cached encoder outputs.
+                self._async_process_scheduler_output(scheduler_output)
                 # Update persistent batch states.
                 self._update_states(scheduler_output)
 
+                for new_req_data in scheduler_output.scheduled_new_reqs:
+                    for mm_feature in new_req_data.mm_features:
+                        new_req_id = new_req_data.req_id
+                        if new_req_id in self.requests:
+                            continue
+                        cur_hash = mm_feature.identifier
+                        self.cached.setdefault(cur_hash, set()).add(new_req_id)
                 if has_ec_transfer() and get_ec_transfer().is_producer:
                     with self.maybe_get_ec_connector_output(
                         scheduler_output,
@@ -1435,6 +1455,33 @@ class NPUModelRunner(GPUModelRunner):
             )
             self.kv_connector_output = kv_connector_output
         return None
+
+    def get_encoder_cache_output(
+            self,
+            mm_hash: str,
+            output: torch.Tensor,
+    ) -> torch.Tensor:
+        if get_score_encoder_cache_config(self.vllm_config).enabled:
+            staging = torch.empty_like(
+                output,
+                device="cpu",
+                pin_memory=True
+            )
+            staging.copy_(output.detach(), non_blocking=True)
+            self.cpu_encoder_cache[mm_hash] = staging
+
+            if (
+                    mm_hash in output.promoting_mm_hashes and
+                    mm_hash not in output.free_encoder_mm_hashes
+            ):
+                # If the entry is marked for promotion and not marked for eviction,
+                # keep it in the device (GPU) cache as well.
+                self.encoder_cache[mm_hash] = output
+            else:
+                self.tmp_encoder_cache[mm_hash] = output
+        else:
+            self.encoder_cache[mm_hash] = output
+        return output
 
     @torch.inference_mode()
     def sample_tokens(
@@ -3365,6 +3412,55 @@ class NPUModelRunner(GPUModelRunner):
                     if isinstance(tensor, torch.Tensor) and tensor.device.type != "cpu":
                         mm_data[field] = tensor.cpu()
 
+    def free_tmp_cache(self, req_id, request):
+        if not get_score_encoder_cache_config(self.vllm_config).enabled:
+            self.cached.clear()
+            return
+        free_mm_hashes = set()
+        if request.mm_features is None:
+            return
+        for mm_feature in request.mm_features:
+            free_mm_hashes.add(mm_feature.identifier)
+
+        for mm_hash in free_mm_hashes:
+            self.cached[mm_hash].discard(req_id)
+            if not self.cached.get(mm_hash):
+                del self.cached[mm_hash]
+                if mm_hash in self.tmp_encoder_cache:
+                    del self.tmp_encoder_cache[mm_hash]
+
+    def _async_process_scheduler_output(self, scheduler_output: "SchedulerOutput") -> None:
+        # Free the cached encoder outputs.
+        for mm_hash in scheduler_output.free_encoder_mm_hashes:
+            value = self.encoder_cache.pop(mm_hash, None)
+            if value is None and mm_hash not in scheduler_output.promoting_mm_hashes:
+                self.cpu_encoder_cache.pop(mm_hash, None)
+
+        # Handle promotion: move selected cache entries from CPU to device (e.g., GPU/NPU).
+        for mm_hash in scheduler_output.promoting_mm_hashes:
+            cpu_value = self.cpu_encoder_cache.get(mm_hash, None)
+            if cpu_value is None:
+                continue
+
+            staging = cpu_value.pin_memory()
+            gpu_value = staging.detach().to(self.device, non_blocking=True)
+            gpu_value.record_stream(torch.cuda.current_stream())
+
+            self.encoder_cache[mm_hash] = gpu_value
+            del staging
+
+        # Handle CPU fetch requests: load required cache entries from CPU to temporary device cache.
+        for mm_hash in scheduler_output.cpu_get_encoder_mm_hashes:
+            if mm_hash in self.encoder_cache or mm_hash in self.tmp_encoder_cache:
+                continue
+            cpu_value = self.cpu_encoder_cache.get(mm_hash, None)
+            if cpu_value is None:
+                continue
+            staging = cpu_value.pin_memory()
+            gpu_value = staging.detach().to(self.device, non_blocking=True)
+            gpu_value.record_stream(torch.cuda.current_stream())
+            self.tmp_encoder_cache[mm_hash] = gpu_value
+            del staging
 
 def _post_process_cudagraph_mode(tensor: torch.Tensor) -> int:
     """
