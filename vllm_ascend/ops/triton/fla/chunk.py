@@ -136,7 +136,7 @@ def chunk_gated_delta_rule_fwd(
     # Pre-computed compact info from metadata avoids recomputation across layers:
     # cu_seqlens_kern and keep_meta only depend on cu_seqlens_host (batch-wide),
     # so they are built once and cached in GDNChunkedPrefillMetadata.
-    if prebuilt_meta is not None and hasattr(prebuilt_meta, 'keep_meta'):
+    if prebuilt_meta is not None and hasattr(prebuilt_meta, "keep_meta"):
         cu_seqlens_kern = cu_seqlens_host if prebuilt_meta.cu_seqlens_kern is None else prebuilt_meta.cu_seqlens_kern
         keep_meta = prebuilt_meta.keep_meta
         initial_state_kern = (
