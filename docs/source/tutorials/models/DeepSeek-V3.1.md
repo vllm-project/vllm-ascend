@@ -44,10 +44,11 @@ You can use our official docker image to run `DeepSeek-V3.1` directly.
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
 
 === "A3 series"
+
     Start the docker image on your each node.
 
-    ```bash
-    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
+    ```shell
+    export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
     docker run --rm \
         --name vllm-ascend \
         --shm-size=1g \
@@ -83,10 +84,11 @@ Select an image based on your machine type and start the docker image on your no
     ```
 
 === "A2 series"
+
     Start the docker image on your each node.
 
-    ```bash
-    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
+    ```shell
+    export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
     docker run --rm \
         --name vllm-ascend \
         --shm-size=1g \
@@ -236,6 +238,7 @@ The service returns HTTP 200 OK with a JSON response containing the `choices` fi
 Run the following scripts on two nodes respectively.
 
 === "Node 0"
+
     Startup Command:
 
     ```shell
@@ -288,6 +291,7 @@ Run the following scripts on two nodes respectively.
     ```
 
 === "Node 1"
+
     Startup Command:
 
     ```shell
@@ -411,305 +415,311 @@ Parameter descriptions:
 
 1. `run_dp_template.sh` script
 
-    === "Node 0(Prefill)"
-        ```shell
-        # this obtained through ifconfig
-        # nic_name is the network interface name corresponding to local_ip of the current node
-        nic_name="xxx"
-        local_ip="141.xx.xx.1"
+=== "Node 0(Prefill)"
 
-        # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
-        node0_ip="xxxx"
+    ```shell
+    # this obtained through ifconfig
+    # nic_name is the network interface name corresponding to local_ip of the current node
+    nic_name="xxx"
+    local_ip="141.xx.xx.1"
 
-        # [Optional] jemalloc
-        # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
-        # export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+    # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
+    node0_ip="xxxx"
 
-        export HCCL_IF_IP=$local_ip
-        export GLOO_SOCKET_IFNAME=$nic_name
-        export TP_SOCKET_IFNAME=$nic_name
-        export HCCL_SOCKET_IFNAME=$nic_name
+    # [Optional] jemalloc
+    # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
+    # export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 
-        export VLLM_RPC_TIMEOUT=3600000
-        export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-        export HCCL_EXEC_TIMEOUT=204
-        export HCCL_CONNECT_TIMEOUT=120
+    export HCCL_IF_IP=$local_ip
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export TP_SOCKET_IFNAME=$nic_name
+    export HCCL_SOCKET_IFNAME=$nic_name
 
-        export OMP_PROC_BIND=false
-        export OMP_NUM_THREADS=10
-        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        export HCCL_BUFFSIZE=256
-        export TASK_QUEUE_ENABLE=1
-        export HCCL_OP_EXPANSION_MODE="AIV"
-        export VLLM_USE_V1=1
-        export ASCEND_RT_VISIBLE_DEVICES=$1
-        export ASCEND_BUFFER_POOL=4:8
-        export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+    export VLLM_RPC_TIMEOUT=3600000
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
+    export HCCL_EXEC_TIMEOUT=204
+    export HCCL_CONNECT_TIMEOUT=120
 
-        export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=10
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export HCCL_BUFFSIZE=256
+    export TASK_QUEUE_ENABLE=1
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export VLLM_USE_V1=1
+    export ASCEND_RT_VISIBLE_DEVICES=$1
+    export ASCEND_BUFFER_POOL=4:8
+    export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
-        vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
-            --host 0.0.0.0 \
-            --port $2 \
-            --data-parallel-size $3 \
-            --data-parallel-rank $4 \
-            --data-parallel-address $5 \
-            --data-parallel-rpc-port $6 \
-            --tensor-parallel-size $7 \
-            --enable-expert-parallel \
-            --seed 1024 \
-            --served-model-name deepseek_v3 \
-            --max-model-len 65536 \
-            --max-num-batched-tokens 16384 \
-            --max-num-seqs 8 \
-            --enforce-eager \
-            --trust-remote-code \
-            --gpu-memory-utilization 0.9 \
-            --quantization ascend \
-            --no-enable-prefix-caching \
-            --speculative-config '{"num_speculative_tokens": 1, "method": "mtp"}' \
-            --kv-transfer-config \
-            '{"kv_connector": "MooncakeConnectorV1",
-            "kv_role": "kv_producer",
-            "kv_port": "30000",
-            "kv_connector_extra_config": {
-                    "prefill": {
-                            "dp_size": 2,
-                            "tp_size": 8
-                    },
-                    "decode": {
-                            "dp_size": 32,
-                            "tp_size": 1
-                    }
+    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+
+    vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
+        --host 0.0.0.0 \
+        --port $2 \
+        --data-parallel-size $3 \
+        --data-parallel-rank $4 \
+        --data-parallel-address $5 \
+        --data-parallel-rpc-port $6 \
+        --tensor-parallel-size $7 \
+        --enable-expert-parallel \
+        --seed 1024 \
+        --served-model-name deepseek_v3 \
+        --max-model-len 65536 \
+        --max-num-batched-tokens 16384 \
+        --max-num-seqs 8 \
+        --enforce-eager \
+        --trust-remote-code \
+        --gpu-memory-utilization 0.9 \
+        --quantization ascend \
+        --no-enable-prefix-caching \
+        --speculative-config '{"num_speculative_tokens": 1, "method": "mtp"}' \
+        --additional-config '{"recompute_scheduler_enable":true}' \
+        --kv-transfer-config \
+        '{"kv_connector": "MooncakeConnectorV1",
+        "kv_role": "kv_producer",
+        "kv_port": "30000",
+        "kv_connector_extra_config": {
+                "prefill": {
+                        "dp_size": 2,
+                        "tp_size": 8
+                },
+                "decode": {
+                        "dp_size": 32,
+                        "tp_size": 1
                 }
-            }'
-        ```
+            }
+        }'
+    ```
 
-    === "Node 1(Prefill)"
-        ```shell
-        # this obtained through ifconfig
-        # nic_name is the network interface name corresponding to local_ip of the current node
-        nic_name="xxx"
-        local_ip="141.xx.xx.2"
+=== "Node 1(Prefill)"
 
-        # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
-        node0_ip="xxxx"
+    ```shell
+    # this obtained through ifconfig
+    # nic_name is the network interface name corresponding to local_ip of the current node
+    nic_name="xxx"
+    local_ip="141.xx.xx.2"
 
-        # [Optional] jemalloc
-        # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
-        # export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+    # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
+    node0_ip="xxxx"
 
-        export HCCL_IF_IP=$local_ip
-        export GLOO_SOCKET_IFNAME=$nic_name
-        export TP_SOCKET_IFNAME=$nic_name
-        export HCCL_SOCKET_IFNAME=$nic_name
+    # [Optional] jemalloc
+    # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
+    # export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 
-        export VLLM_RPC_TIMEOUT=3600000
-        export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-        export HCCL_EXEC_TIMEOUT=204
-        export HCCL_CONNECT_TIMEOUT=120
+    export HCCL_IF_IP=$local_ip
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export TP_SOCKET_IFNAME=$nic_name
+    export HCCL_SOCKET_IFNAME=$nic_name
 
-        export OMP_PROC_BIND=false
-        export OMP_NUM_THREADS=10
-        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        export HCCL_BUFFSIZE=256
-        export TASK_QUEUE_ENABLE=1
-        export HCCL_OP_EXPANSION_MODE="AIV"
-        export VLLM_USE_V1=1
-        export ASCEND_RT_VISIBLE_DEVICES=$1
-        export ASCEND_BUFFER_POOL=4:8
-        export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+    export VLLM_RPC_TIMEOUT=3600000
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
+    export HCCL_EXEC_TIMEOUT=204
+    export HCCL_CONNECT_TIMEOUT=120
 
-        export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=10
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export HCCL_BUFFSIZE=256
+    export TASK_QUEUE_ENABLE=1
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export VLLM_USE_V1=1
+    export ASCEND_RT_VISIBLE_DEVICES=$1
+    export ASCEND_BUFFER_POOL=4:8
+    export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
-        vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
-            --host 0.0.0.0 \
-            --port $2 \
-            --data-parallel-size $3 \
-            --data-parallel-rank $4 \
-            --data-parallel-address $5 \
-            --data-parallel-rpc-port $6 \
-            --tensor-parallel-size $7 \
-            --enable-expert-parallel \
-            --seed 1024 \
-            --served-model-name deepseek_v3 \
-            --max-model-len 65536 \
-            --max-num-batched-tokens 16384 \
-            --max-num-seqs 8 \
-            --enforce-eager \
-            --trust-remote-code \
-            --gpu-memory-utilization 0.9 \
-            --quantization ascend \
-            --no-enable-prefix-caching \
-            --speculative-config '{"num_speculative_tokens": 1, "method": "mtp"}' \
-            --kv-transfer-config \
-            '{"kv_connector": "MooncakeConnectorV1",
-            "kv_role": "kv_producer",
-            "kv_port": "30100",
-            "kv_connector_extra_config": {
-                    "prefill": {
-                            "dp_size": 2,
-                            "tp_size": 8
-                    },
-                    "decode": {
-                            "dp_size": 32,
-                            "tp_size": 1
-                    }
+    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+
+    vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
+        --host 0.0.0.0 \
+        --port $2 \
+        --data-parallel-size $3 \
+        --data-parallel-rank $4 \
+        --data-parallel-address $5 \
+        --data-parallel-rpc-port $6 \
+        --tensor-parallel-size $7 \
+        --enable-expert-parallel \
+        --seed 1024 \
+        --served-model-name deepseek_v3 \
+        --max-model-len 65536 \
+        --max-num-batched-tokens 16384 \
+        --max-num-seqs 8 \
+        --enforce-eager \
+        --trust-remote-code \
+        --gpu-memory-utilization 0.9 \
+        --quantization ascend \
+        --no-enable-prefix-caching \
+        --speculative-config '{"num_speculative_tokens": 1, "method": "mtp"}' \
+        --additional-config '{"recompute_scheduler_enable":true}' \
+        --kv-transfer-config \
+        '{"kv_connector": "MooncakeConnectorV1",
+        "kv_role": "kv_producer",
+        "kv_port": "30100",
+        "kv_connector_extra_config": {
+                "prefill": {
+                        "dp_size": 2,
+                        "tp_size": 8
+                },
+                "decode": {
+                        "dp_size": 32,
+                        "tp_size": 1
                 }
-            }'
-        ```
+            }
+        }'
+    ```
 
-    === "Node 0(Decode)"
-        ```shell
-        # this obtained through ifconfig
-        # nic_name is the network interface name corresponding to local_ip of the current node
-        nic_name="xxx"
-        local_ip="141.xx.xx.3"
+=== "Node 0(Decode)"
 
-        # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
-        node0_ip="xxxx"
+    ```shell
+    # this obtained through ifconfig
+    # nic_name is the network interface name corresponding to local_ip of the current node
+    nic_name="xxx"
+    local_ip="141.xx.xx.3"
 
-        # [Optional] jemalloc
-        # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
-        # export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+    # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
+    node0_ip="xxxx"
 
-        export HCCL_IF_IP=$local_ip
-        export GLOO_SOCKET_IFNAME=$nic_name
-        export TP_SOCKET_IFNAME=$nic_name
-        export HCCL_SOCKET_IFNAME=$nic_name
+    # [Optional] jemalloc
+    # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
+    # export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 
-        export VLLM_RPC_TIMEOUT=3600000
-        export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-        export HCCL_EXEC_TIMEOUT=204
-        export HCCL_CONNECT_TIMEOUT=120
+    export HCCL_IF_IP=$local_ip
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export TP_SOCKET_IFNAME=$nic_name
+    export HCCL_SOCKET_IFNAME=$nic_name
 
-        export OMP_PROC_BIND=false
-        export OMP_NUM_THREADS=10
-        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        export HCCL_BUFFSIZE=1100
-        export TASK_QUEUE_ENABLE=1
-        export HCCL_OP_EXPANSION_MODE="AIV"
-        export VLLM_USE_V1=1
-        export ASCEND_RT_VISIBLE_DEVICES=$1
-        export ASCEND_BUFFER_POOL=4:8
-        export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+    export VLLM_RPC_TIMEOUT=3600000
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
+    export HCCL_EXEC_TIMEOUT=204
+    export HCCL_CONNECT_TIMEOUT=120
 
-        vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
-            --host 0.0.0.0 \
-            --port $2 \
-            --data-parallel-size $3 \
-            --data-parallel-rank $4 \
-            --data-parallel-address $5 \
-            --data-parallel-rpc-port $6 \
-            --tensor-parallel-size $7 \
-            --enable-expert-parallel \
-            --seed 1024 \
-            --served-model-name deepseek_v3 \
-            --max-model-len 65536 \
-            --max-num-batched-tokens 256 \
-            --max-num-seqs 28 \
-            --trust-remote-code \
-            --gpu-memory-utilization 0.92 \
-            --quantization ascend \
-            --no-enable-prefix-caching \
-            --speculative-config '{"num_speculative_tokens": 1, "method": "mtp"}' \
-            --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-            --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": true,"finegrained_tp_config": {"lmhead_tensor_parallel_size":16}}' \
-            --kv-transfer-config \
-            '{"kv_connector": "MooncakeConnectorV1",
-            "kv_role": "kv_consumer",
-            "kv_port": "30200",
-            "kv_connector_extra_config": {
-                    "prefill": {
-                            "dp_size": 2,
-                            "tp_size": 8
-                    },
-                    "decode": {
-                            "dp_size": 32,
-                            "tp_size": 1
-                    }
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=10
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export HCCL_BUFFSIZE=1100
+    export TASK_QUEUE_ENABLE=1
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export VLLM_USE_V1=1
+    export ASCEND_RT_VISIBLE_DEVICES=$1
+    export ASCEND_BUFFER_POOL=4:8
+    export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+
+    vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
+        --host 0.0.0.0 \
+        --port $2 \
+        --data-parallel-size $3 \
+        --data-parallel-rank $4 \
+        --data-parallel-address $5 \
+        --data-parallel-rpc-port $6 \
+        --tensor-parallel-size $7 \
+        --enable-expert-parallel \
+        --seed 1024 \
+        --served-model-name deepseek_v3 \
+        --max-model-len 65536 \
+        --max-num-batched-tokens 256 \
+        --max-num-seqs 28 \
+        --trust-remote-code \
+        --gpu-memory-utilization 0.92 \
+        --quantization ascend \
+        --no-enable-prefix-caching \
+        --speculative-config '{"num_speculative_tokens": 1, "method": "mtp"}' \
+        --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+        --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": true,"finegrained_tp_config": {"lmhead_tensor_parallel_size":16}}' \
+        --kv-transfer-config \
+        '{"kv_connector": "MooncakeConnectorV1",
+        "kv_role": "kv_consumer",
+        "kv_port": "30200",
+        "kv_connector_extra_config": {
+                "prefill": {
+                        "dp_size": 2,
+                        "tp_size": 8
+                },
+                "decode": {
+                        "dp_size": 32,
+                        "tp_size": 1
                 }
-            }'
-        ```
+            }
+        }'
+    ```
 
-    === "Node 1(Decode)"
-        ```shell
-        # this obtained through ifconfig
-        # nic_name is the network interface name corresponding to local_ip of the current node
-        nic_name="xxx"
-        local_ip="141.xx.xx.4"
+=== "Node 1(Decode)"
 
-        # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
-        node0_ip="xxxx"
+    ```shell
+    # this obtained through ifconfig
+    # nic_name is the network interface name corresponding to local_ip of the current node
+    nic_name="xxx"
+    local_ip="141.xx.xx.4"
 
-        # [Optional] jemalloc
-        # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
-        # export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+    # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
+    node0_ip="xxxx"
 
-        export HCCL_IF_IP=$local_ip
-        export GLOO_SOCKET_IFNAME=$nic_name
-        export TP_SOCKET_IFNAME=$nic_name
-        export HCCL_SOCKET_IFNAME=$nic_name
+    # [Optional] jemalloc
+    # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
+    # export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 
-        export VLLM_RPC_TIMEOUT=3600000
-        export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-        export HCCL_EXEC_TIMEOUT=204
-        export HCCL_CONNECT_TIMEOUT=120
+    export HCCL_IF_IP=$local_ip
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export TP_SOCKET_IFNAME=$nic_name
+    export HCCL_SOCKET_IFNAME=$nic_name
 
-        export OMP_PROC_BIND=false
-        export OMP_NUM_THREADS=10
-        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        export HCCL_BUFFSIZE=1100
-        export TASK_QUEUE_ENABLE=1
-        export HCCL_OP_EXPANSION_MODE="AIV"
-        export VLLM_USE_V1=1
-        export ASCEND_RT_VISIBLE_DEVICES=$1
-        export ASCEND_BUFFER_POOL=4:8
-        export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+    export VLLM_RPC_TIMEOUT=3600000
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
+    export HCCL_EXEC_TIMEOUT=204
+    export HCCL_CONNECT_TIMEOUT=120
 
-        vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
-            --host 0.0.0.0 \
-            --port $2 \
-            --data-parallel-size $3 \
-            --data-parallel-rank $4 \
-            --data-parallel-address $5 \
-            --data-parallel-rpc-port $6 \
-            --tensor-parallel-size $7 \
-            --enable-expert-parallel \
-            --seed 1024 \
-            --served-model-name deepseek_v3 \
-            --max-model-len 65536 \
-            --max-num-batched-tokens 256 \
-            --max-num-seqs 28 \
-            --trust-remote-code \
-            --gpu-memory-utilization 0.92 \
-            --quantization ascend \
-            --no-enable-prefix-caching \
-            --speculative-config '{"num_speculative_tokens": 1, "method": "mtp"}' \
-            --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-            --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": true,"finegrained_tp_config": {"lmhead_tensor_parallel_size":16}}' \
-            --kv-transfer-config \
-            '{"kv_connector": "MooncakeConnectorV1",
-            "kv_role": "kv_consumer",
-            "kv_port": "30200",
-            "kv_connector_extra_config": {
-                    "prefill": {
-                            "dp_size": 2,
-                            "tp_size": 8
-                    },
-                    "decode": {
-                            "dp_size": 32,
-                            "tp_size": 1
-                    }
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=10
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export HCCL_BUFFSIZE=1100
+    export TASK_QUEUE_ENABLE=1
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export VLLM_USE_V1=1
+    export ASCEND_RT_VISIBLE_DEVICES=$1
+    export ASCEND_BUFFER_POOL=4:8
+    export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+
+    vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
+        --host 0.0.0.0 \
+        --port $2 \
+        --data-parallel-size $3 \
+        --data-parallel-rank $4 \
+        --data-parallel-address $5 \
+        --data-parallel-rpc-port $6 \
+        --tensor-parallel-size $7 \
+        --enable-expert-parallel \
+        --seed 1024 \
+        --served-model-name deepseek_v3 \
+        --max-model-len 65536 \
+        --max-num-batched-tokens 256 \
+        --max-num-seqs 28 \
+        --trust-remote-code \
+        --gpu-memory-utilization 0.92 \
+        --quantization ascend \
+        --no-enable-prefix-caching \
+        --speculative-config '{"num_speculative_tokens": 1, "method": "mtp"}' \
+        --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+        --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": true,"finegrained_tp_config": {"lmhead_tensor_parallel_size":16}}' \
+        --kv-transfer-config \
+        '{"kv_connector": "MooncakeConnectorV1",
+        "kv_role": "kv_consumer",
+        "kv_port": "30200",
+        "kv_connector_extra_config": {
+                "prefill": {
+                        "dp_size": 2,
+                        "tp_size": 8
+                },
+                "decode": {
+                        "dp_size": 32,
+                        "tp_size": 1
                 }
-            }'
-        ```
+            }
+        }'
+    ```
 
 Key Parameter Descriptions:
 
 - `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the communication optimization function on the prefill nodes.
 - `VLLM_ASCEND_ENABLE_MLAPO=1`: enables the fusion operator, which can significantly improve performance but consumes more NPU memory. In the Prefill-Decode (PD) separation scenario, enable MLAPO only on decode nodes.
-- `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the Key-Value Cache (KV Cache) of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, enable this configuration only on decode nodes.
+- `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the Key-Value Cache (KV Cache) of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, it is recommended to enable this configuration on both prefill and decode nodes simultaneously.
 - `multistream_overlap_shared_expert: true`: When the Tensor Parallelism (TP) size is 1 or `enable_shared_expert_dp: true`, an additional stream is enabled to overlap the computation process of shared experts for improved efficiency.
 - `lmhead_tensor_parallel_size: 16`: When the Tensor Parallelism (TP) size of the decode node is 1, this parameter allows the TP size of the LMHead embedding layer to be greater than 1, which is used to reduce the computational load of each card on the LMHead embedding layer.
 

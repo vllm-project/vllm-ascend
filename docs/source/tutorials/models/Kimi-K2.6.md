@@ -38,9 +38,8 @@ Select an image based on your machine type and start the docker image on your no
 
     Start the docker image on your each node.
 
-    ```bash
-
-    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
+    ```shell
+    export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
     docker run --rm \
         --name vllm-ascend \
         --shm-size=1g \
@@ -79,9 +78,8 @@ Select an image based on your machine type and start the docker image on your no
 
     Start the docker image on your each node.
 
-    ```bash
-
-    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
+    ```shell
+    export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
     docker run --rm \
         --name vllm-ascend \
         --shm-size=1g \
@@ -147,28 +145,33 @@ sysctl -w vm.swappiness=0
 sysctl -w kernel.numa_balancing=0
 sysctl -w kernel.sched_migration_cost_ns=50000
 
-export HCCL_BUFFSIZE=800
+export HCCL_BUFFSIZE=600
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-export VLLM_ASCEND_BALANCE_SCHEDULING=1
+export VLLM_ASCEND_BALANCE_SCHEDULING=0
 
 vllm serve Eco-Tech/Kimi-K2.6-W4A8 \
     --quantization ascend \
-    --served-model-name kimi_k26 \
+    --tool-call-parser kimi_k2 \
+    --reasoning-parser kimi_k2 \
     --allowed-local-media-path / \
+    --served-model-name kimi_k26 \
     --trust-remote-code \
     --tensor-parallel-size 4 \
     --data-parallel-size 4 \
     --no-enable-prefix-caching \
     --enable-expert-parallel \
-    --port 8088 \
+    --port 8089 \
     --max-num-seqs 4 \
-    --max-model-len 32768 \
+    --max-model-len 34816 \
     --max-num-batched-tokens 16384 \
-    --gpu-memory-utilization 0.9 \
+    --gpu-memory-utilization 0.87 \
     --seed 42 \
+    --async-scheduling \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+    --profiler-config '{"profiler": "torch", "torch_profiler_dir": "./vllm_profile", "torch_profiler_with_stack": true}' \
     --mm-processor-cache-gb 0 \
     --mm-encoder-tp-mode data \
+    --additional-config '{"enable_balance_scheduling": true}' \
     --speculative-config '{"method": "dflash","model": "z-lab/Kimi-K2.5-DFlash", "num_speculative_tokens": 15}'
 ```
 
@@ -268,22 +271,23 @@ Take Atlas 800 A3 (64G × 16) for example, we recommend to deploy 2P1D (4 nodes)
 
 To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to deploy a `launch_online_dp.py` script and a `run_dp_template.sh` script on each node and deploy a `proxy.sh` script on prefill master node to forward requests.
 
-1. `launch_online_dp.py` to launch external dp vllm servers.
-    [launch_online_dp.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/launch_online_dp.py)
+[launch_online_dp.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/launch_online_dp.py)
 
-    Parameter descriptions:
+Parameter descriptions:
 
-    |Parameter|Type|Required|Default|Description|
-    |---------|----|--------|-------|-----------|
-    |`--dp-size`|int|Yes|-|Data parallel size (total number of DP ranks across all nodes).|
-    |`--tp-size`|int|No|1|Tensor parallel size within each DP rank.|
-    |`--dp-size-local`|int|No|(same as `--dp-size`)|Number of DP ranks on the current node. If not set, defaults to `--dp-size`.|
-    |`--dp-rank-start`|int|No|0|Starting rank offset for data parallel ranks on this node.|
-    |`--dp-address`|str|Yes|-|IP address of the data parallel master node (node 0).|
-    |`--dp-rpc-port`|str|No|12345|RPC port for data parallel master communication.|
-    |`--vllm-start-port`|int|No|9000|Starting port for each vLLM engine instance on this node. Each DP rank's engine port = `vllm_start_port` + local rank index.|
+|Parameter|Type|Required|Default|Description|
+|---------|----|--------|-------|-----------|
+|`--dp-size`|int|Yes|-|Data parallel size (total number of DP ranks across all nodes).|
+|`--tp-size`|int|No|1|Tensor parallel size within each DP rank.|
+|`--dp-size-local`|int|No|(same as `--dp-size`)|Number of DP ranks on the current node. If not set, defaults to `--dp-size`.|
+|`--dp-rank-start`|int|No|0|Starting rank offset for data parallel ranks on this node.|
+|`--dp-address`|str|Yes|-|IP address of the data parallel master node (node 0).|
+|`--dp-rpc-port`|str|No|12345|RPC port for data parallel master communication.|
+|`--vllm-start-port`|int|No|9000|Starting port for each vLLM engine instance on this node. Each DP rank's engine port = `vllm_start_port` + local rank index.|
 
-2. Prefill Node 0 `run_dp_template.sh` script
+1. `run_dp_template.sh` script
+
+=== "Node 0(Prefill)"
 
     ```shell
     # this obtained through ifconfig
@@ -308,6 +312,8 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
     sysctl kernel.sched_migration_cost_ns=50000
     export VLLM_RPC_TIMEOUT=3600000
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
+    export HCCL_EXEC_TIMEOUT=204
+    export HCCL_CONNECT_TIMEOUT=120
 
     export HCCL_OP_EXPANSION_MODE="AIV"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
@@ -317,37 +323,41 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
     export ASCEND_BUFFER_POOL=4:8
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
-    export HCCL_BUFFSIZE=800
+    export HCCL_BUFFSIZE=1536
     export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
     export ASCEND_RT_VISIBLE_DEVICES=$1
 
     vllm serve Eco-Tech/Kimi-K2.6-W4A8 \
-      --host 0.0.0.0 \
-      --port $2 \
-      --data-parallel-size $3 \
-      --data-parallel-rank $4 \
-      --data-parallel-address $5 \
-      --data-parallel-rpc-port $6 \
-      --tensor-parallel-size $7 \
-      --enable-expert-parallel \
-      --seed 1024 \
-      --quantization ascend \
-      --served-model-name kimi_k26 \
-      --trust-remote-code \
-      --max-num-seqs 4 \
-      --max-model-len 32768 \
-      --max-num-batched-tokens 16384 \
-      --no-enable-prefix-caching \
-      --gpu-memory-utilization 0.95 \
-      --enforce-eager \
-      --speculative-config '{"method": "eagle3", "model":"lightseekorg/kimi-k2.6-eagle3", "num_speculative_tokens": 3}' \
-      --mm-encoder-tp-mode data \
-      --kv-transfer-config \
-      '{"kv_connector": "MooncakeConnectorV1",
-      "kv_role": "kv_producer",
-      "kv_port": "30000",
-      "engine_id": "0",
-      "kv_connector_extra_config": {
+        --host 0.0.0.0 \
+        --port $2 \
+        --data-parallel-size $3 \
+        --data-parallel-rank $4 \
+        --data-parallel-address $5 \
+        --data-parallel-rpc-port $6 \
+        --tensor-parallel-size $7 \
+        --enable-expert-parallel \
+        --seed 1024 \
+        --quantization ascend \
+        --served-model-name kimi_k26 \
+        --trust-remote-code \
+        --max-num-seqs 1 \
+        --max-model-len 133120 \
+        --max-num-batched-tokens 16384 \
+        --no-enable-prefix-caching \
+        --gpu-memory-utilization 0.92 \
+        --enforce-eager \
+        --enable-auto-tool-choice \
+        --tool-call-parser kimi_k2 \
+        --reasoning-parser kimi_k2 \
+        --additional-config '{"recompute_scheduler_enable":true,"enable_shared_expert_dp": true}' \
+        --mm-encoder-tp-mode data \
+        --kv-transfer-config \
+        '{"kv_connector": "MooncakeConnectorV1",
+        "kv_role": "kv_producer",
+        "kv_port": "30000",
+        "engine_id": "0",
+        "kv_connector_extra_config": {
+                "use_ascend_direct": true,
                 "prefill": {
                         "dp_size": 4,
                         "tp_size": 4
@@ -356,11 +366,11 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
                         "dp_size": 8,
                         "tp_size": 4
                 }
-          }
-      }'
+            }
+        }'
     ```
 
-3. Prefill Node 1 `run_dp_template.sh` script
+=== "Node 1(Prefill)"
 
     ```shell
     # this obtained through ifconfig
@@ -385,6 +395,8 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
     sysctl kernel.sched_migration_cost_ns=50000
     export VLLM_RPC_TIMEOUT=3600000
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
+    export HCCL_EXEC_TIMEOUT=204
+    export HCCL_CONNECT_TIMEOUT=120
 
     export HCCL_OP_EXPANSION_MODE="AIV"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
@@ -394,37 +406,40 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
     export ASCEND_BUFFER_POOL=4:8
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
-    export HCCL_BUFFSIZE=800
+    export HCCL_BUFFSIZE=1536
     export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
     export ASCEND_RT_VISIBLE_DEVICES=$1
 
     vllm serve Eco-Tech/Kimi-K2.6-W4A8 \
-      --host 0.0.0.0 \
-      --port $2 \
-      --data-parallel-size $3 \
-      --data-parallel-rank $4 \
-      --data-parallel-address $5 \
-      --data-parallel-rpc-port $6 \
-      --tensor-parallel-size $7 \
-      --enable-expert-parallel \
-      --seed 1024 \
-      --quantization ascend \
-      --served-model-name kimi_k26 \
-      --trust-remote-code \
-      --max-num-seqs 4 \
-      --max-model-len 32768 \
-      --max-num-batched-tokens 16384 \
-      --no-enable-prefix-caching \
-      --gpu-memory-utilization 0.95 \
-      --enforce-eager \
-      --speculative-config '{"method": "eagle3", "model":"lightseekorg/kimi-k2.6-eagle3", "num_speculative_tokens": 3}' \
-      --mm-encoder-tp-mode data \
-      --kv-transfer-config \
-      '{"kv_connector": "MooncakeConnectorV1",
-      "kv_role": "kv_producer",
-      "kv_port": "30100",
-      "engine_id": "1",
-      "kv_connector_extra_config": {
+        --host 0.0.0.0 \
+        --port $2 \
+        --data-parallel-size $3 \
+        --data-parallel-rank $4 \
+        --data-parallel-address $5 \
+        --data-parallel-rpc-port $6 \
+        --tensor-parallel-size $7 \
+        --enable-expert-parallel \
+        --seed 1024 \
+        --quantization ascend \
+        --served-model-name kimi_k26 \
+        --trust-remote-code \
+        --max-num-seqs 1 \
+        --max-model-len 133120 \
+        --max-num-batched-tokens 16384 \
+        --no-enable-prefix-caching \
+        --gpu-memory-utilization 0.92 \
+        --enforce-eager \
+        --enable-auto-tool-choice \
+        --tool-call-parser kimi_k2 \
+        --reasoning-parser kimi_k2 \
+        --additional-config '{"recompute_scheduler_enable":true,"enable_shared_expert_dp": true}' \
+        --mm-encoder-tp-mode data \
+        --kv-transfer-config \
+        '{"kv_connector": "MooncakeConnectorV1",
+        "kv_role": "kv_producer",
+        "kv_port": "30100",
+        "engine_id": "1",
+        "kv_connector_extra_config": {
                 "prefill": {
                         "dp_size": 4,
                         "tp_size": 4
@@ -433,11 +448,11 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
                         "dp_size": 8,
                         "tp_size": 4
                 }
-          }
-      }'
+            }
+        }'
     ```
 
-4. Decode Node 0 `run_dp_template.sh` script
+=== "Node 0(Decode)"
 
     ```shell
     # this obtained through ifconfig
@@ -461,6 +476,8 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
     sysctl -w kernel.numa_balancing=0
     sysctl kernel.sched_migration_cost_ns=50000
     export VLLM_RPC_TIMEOUT=3600000
+    export HCCL_EXEC_TIMEOUT=204
+    export HCCL_CONNECT_TIMEOUT=120
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
 
     export HCCL_OP_EXPANSION_MODE="AIV"
@@ -476,32 +493,35 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
     export ASCEND_RT_VISIBLE_DEVICES=$1
 
     vllm serve Eco-Tech/Kimi-K2.6-W4A8 \
-      --host 0.0.0.0 \
-      --port $2 \
-      --data-parallel-size $3 \
-      --data-parallel-rank $4 \
-      --data-parallel-address $5 \
-      --data-parallel-rpc-port $6 \
-      --tensor-parallel-size $7 \
-      --enable-expert-parallel \
-      --seed 1024 \
-      --quantization ascend \
-      --served-model-name kimi_k26 \
-      --trust-remote-code \
-      --max-num-seqs 8 \
-      --max-model-len 32768 \
-      --max-num-batched-tokens 32 \
-      --no-enable-prefix-caching \
-      --gpu-memory-utilization 0.91 \
-      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-      --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": false}' \
-      --speculative-config '{"method": "eagle3", "model":"lightseekorg/kimi-k2.6-eagle3", "num_speculative_tokens": 3}' \
-      --kv-transfer-config \
-      '{"kv_connector": "MooncakeConnectorV1",
-      "kv_role": "kv_consumer",
-      "kv_port": "30200",
-      "engine_id": "2",
-      "kv_connector_extra_config": {
+        --host 0.0.0.0 \
+        --port $2 \
+        --data-parallel-size $3 \
+        --data-parallel-rank $4 \
+        --data-parallel-address $5 \
+        --data-parallel-rpc-port $6 \
+        --tensor-parallel-size $7 \
+        --enable-expert-parallel \
+        --seed 1024 \
+        --quantization ascend \
+        --served-model-name kimi_k26 \
+        --trust-remote-code \
+        --max-num-seqs 8 \
+        --max-model-len 133720 \
+        --max-num-batched-tokens 32 \
+        --no-enable-prefix-caching \
+        --gpu-memory-utilization 0.91 \
+        --enable-auto-tool-choice \
+        --tool-call-parser kimi_k2 \
+        --reasoning-parser kimi_k2 \
+        --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+        --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": true}' \
+        --speculative-config '{"method": "eagle3", "model":"lightseekorg/kimi-k2.6-eagle3", "num_speculative_tokens": 3}' \
+        --kv-transfer-config \
+        '{"kv_connector": "MooncakeConnectorV1",
+        "kv_role": "kv_consumer",
+        "kv_port": "30200",
+        "engine_id": "2",
+        "kv_connector_extra_config": {
                 "prefill": {
                         "dp_size": 4,
                         "tp_size": 4
@@ -510,11 +530,11 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
                         "dp_size": 8,
                         "tp_size": 4
                 }
-          }
-      }'
+            }
+        }'
     ```
 
-5. Decode Node 1 `run_dp_template.sh` script
+=== "Node 1(Decode)"
 
     ```shell
     # this obtained through ifconfig
@@ -538,6 +558,8 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
     sysctl -w kernel.numa_balancing=0
     sysctl kernel.sched_migration_cost_ns=50000
     export VLLM_RPC_TIMEOUT=3600000
+    export HCCL_EXEC_TIMEOUT=204
+    export HCCL_CONNECT_TIMEOUT=120
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
 
     export HCCL_OP_EXPANSION_MODE="AIV"
@@ -548,37 +570,40 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
     export ASCEND_BUFFER_POOL=4:8
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
-    export HCCL_BUFFSIZE=1100
+    export HCCL_BUFFSIZE=800
     export VLLM_ASCEND_ENABLE_MLAPO=1
     export ASCEND_RT_VISIBLE_DEVICES=$1
 
     vllm serve Eco-Tech/Kimi-K2.6-W4A8 \
-      --host 0.0.0.0 \
-      --port $2 \
-      --data-parallel-size $3 \
-      --data-parallel-rank $4 \
-      --data-parallel-address $5 \
-      --data-parallel-rpc-port $6 \
-      --tensor-parallel-size $7 \
-      --enable-expert-parallel \
-      --seed 1024 \
-      --quantization ascend \
-      --served-model-name kimi_k26 \
-      --trust-remote-code \
-      --max-num-seqs 8 \
-      --max-model-len 32768 \
-      --max-num-batched-tokens 4 \
-      --no-enable-prefix-caching \
-      --gpu-memory-utilization 0.91 \
-      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-      --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": false}' \
-      --speculative-config '{"method": "eagle3", "model":"lightseekorg/kimi-k2.6-eagle3", "num_speculative_tokens": 3}' \
-      --kv-transfer-config \
-      '{"kv_connector": "MooncakeConnectorV1",
-      "kv_role": "kv_consumer",
-      "kv_port": "30300",
-      "engine_id": "3",
-      "kv_connector_extra_config": {
+        --host 0.0.0.0 \
+        --port $2 \
+        --data-parallel-size $3 \
+        --data-parallel-rank $4 \
+        --data-parallel-address $5 \
+        --data-parallel-rpc-port $6 \
+        --tensor-parallel-size $7 \
+        --enable-expert-parallel \
+        --seed 1024 \
+        --quantization ascend \
+        --served-model-name kimi_k26 \
+        --trust-remote-code \
+        --max-num-seqs 8 \
+        --max-model-len 133720 \
+        --max-num-batched-tokens 32 \
+        --no-enable-prefix-caching \
+        --gpu-memory-utilization 0.91 \
+        --enable-auto-tool-choice \
+        --tool-call-parser kimi_k2 \
+        --reasoning-parser kimi_k2 \
+        --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+        --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": true}' \
+        --speculative-config '{"method": "eagle3", "model":"lightseekorg/kimi-k2.6-eagle3", "num_speculative_tokens": 3}' \
+        --kv-transfer-config \
+        '{"kv_connector": "MooncakeConnectorV1",
+        "kv_role": "kv_consumer",
+        "kv_port": "30300",
+        "engine_id": "3",
+        "kv_connector_extra_config": {
                 "prefill": {
                         "dp_size": 4,
                         "tp_size": 4
@@ -587,18 +612,18 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
                         "dp_size": 8,
                         "tp_size": 4
                 }
-          }
-      }'
+            }
+        }'
     ```
 
-    Key Parameter Descriptions:
+Key Parameter Descriptions:
 
-    - `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the communication optimization function on the prefill nodes.
-    - `VLLM_ASCEND_ENABLE_MLAPO=1`: enables the fusion operator, which can significantly improve performance but consumes more NPU memory. In the Prefill-Decode (PD) separation scenario, enable MLAPO only on decode nodes.
-    - `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the Key-Value Cache (KV Cache) of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, enable this configuration only on decode nodes.
-    - `multistream_overlap_shared_expert: true`: When the Tensor Parallelism (TP) size is 1 or `enable_shared_expert_dp: true`, an additional stream is enabled to overlap the computation process of shared experts for improved efficiency.
+- `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the communication optimization function on the prefill nodes.
+- `VLLM_ASCEND_ENABLE_MLAPO=1`: enables the fusion operator, which can significantly improve performance but consumes more NPU memory. In the Prefill-Decode (PD) separation scenario, enable MLAPO only on decode nodes.
+- `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the Key-Value Cache (KV Cache) of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, it is recommended to enable this configuration on both prefill and decode nodes simultaneously.
+- `multistream_overlap_shared_expert: true`: When the Tensor Parallelism (TP) size is 1 or `enable_shared_expert_dp: true`, an additional stream is enabled to overlap the computation process of shared experts for improved efficiency.
 
-6. Run server for each node:
+2. Run server for each node:
 
     ```shell
     # p0
@@ -606,12 +631,12 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
     # p1
     python launch_online_dp.py --dp-size 4 --tp-size 4 --dp-size-local 4 --dp-rank-start 0 --dp-address 141.xx.xx.2 --dp-rpc-port 12321 --vllm-start-port 7100
     # d0
-    python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 8 --dp-rank-start 0 --dp-address 141.xx.xx.3 --dp-rpc-port 12321 --vllm-start-port 7100
+    python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 4 --dp-rank-start 0 --dp-address 141.xx.xx.3 --dp-rpc-port 12321 --vllm-start-port 7100
     # d1
-    python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 8 --dp-rank-start 8 --dp-address 141.xx.xx.3 --dp-rpc-port 12321 --vllm-start-port 7100
+    python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 4 --dp-rank-start 4 --dp-address 141.xx.xx.3 --dp-rpc-port 12321 --vllm-start-port 7100
     ```
 
-7. Run the `proxy.sh` script on the prefill master node
+3. Run the `proxy.sh` script on the prefill master node
 
     Run a proxy server on the same node with the prefiller service instance. You can get the proxy program in the repository's examples: [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
 
