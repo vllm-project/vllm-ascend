@@ -104,25 +104,25 @@ jobs:
             suffix: "openeuler"
             image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-910b-openeuler24.03-py3.12
 
-          # - name: A3 Ubuntu
-          #   dockerfile: Dockerfile.a3
-          #   suffix: "a3"
-          #   image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-ubuntu22.04-py3.12
+          - name: A3 Ubuntu
+            dockerfile: Dockerfile.a3
+            suffix: "a3"
+            image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-ubuntu22.04-py3.12
 
-          # - name: A3 openEuler
-          #   dockerfile: Dockerfile.a3.openEuler
-          #   suffix: "a3-openeuler"
-          #   image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-openeuler24.03-py3.12
+          - name: A3 openEuler
+            dockerfile: Dockerfile.a3.openEuler
+            suffix: "a3-openeuler"
+            image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-openeuler24.03-py3.12
 
-          # - name: 310P Ubuntu
-          #   dockerfile: Dockerfile.310p
-          #   suffix: "310p"
-          #   image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.1.0-beta.1-310p-ubuntu22.04-py3.12
+          - name: 310P Ubuntu
+            dockerfile: Dockerfile.310p
+            suffix: "310p"
+            image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.1.0-beta.1-310p-ubuntu22.04-py3.12
 
-          # - name: 310P openEuler
-          #   dockerfile: Dockerfile.310p.openEuler
-          #   suffix: "310p-openeuler"
-          #   image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.1.0-beta.1-310p-openeuler24.03-py3.12
+          - name: 310P openEuler
+            dockerfile: Dockerfile.310p.openEuler
+            suffix: "310p-openeuler"
+            image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.1.0-beta.1-310p-openeuler24.03-py3.12
 
     uses: ./.github/workflows/_schedule_image_build.yaml
     with:
