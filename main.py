@@ -6,6 +6,28 @@ Variables are defined in the 'extra' section of mkdocs.yml.
 
 from pathlib import Path
 
+# UI string translations keyed by DOCS_LANG. Injected into config.extra.i18n
+# in define_env() so override templates (e.g. docs/overrides/main.html) can
+# read them via config.extra.i18n[config.extra.docs_lang]. The macros
+# plugin's env.variables are only available in markdown content, not in
+# override templates, hence the detour through config.extra.
+UI_STRINGS = {
+    "en": {
+        "banner_preview": "You are viewing the latest developer preview docs.",
+        "banner_link": "Click here",
+        "banner_suffix": "to view docs for the latest stable release (v0.18.0).",
+        "btn_report": "report issue",
+        "aria_report": "Report a documentation issue",
+    },
+    "zh": {
+        "banner_preview": "您正在查看最新的开发者预览版文档。",
+        "banner_link": "点击此处",
+        "banner_suffix": "查看最新稳定版（v0.18.0）的文档。",
+        "btn_report": "反馈问题",
+        "aria_report": "报告文档问题",
+    },
+}
+
 
 def define_env(env):
     """Define environment variables and macros for mkdocs-macros plugin."""
@@ -37,6 +59,12 @@ def define_env(env):
     env.variables["main_triton_ascend_version"] = env.variables.get("main_triton_ascend_version", "3.2.1")
     env.variables["main_vllm_commit"] = main_vllm_commit
     env.variables["main_vllm_tag"] = main_vllm_tag
+
+    # Expose UI translations to override templates by attaching the dict
+    # to config.extra. See module docstring for the rationale.
+    config = env.variables.get("config")
+    if config is not None:
+        config.extra["i18n"] = UI_STRINGS
 
     @env.macro
     def include_code(file_path, start_after=None, end_before=None, language="python"):

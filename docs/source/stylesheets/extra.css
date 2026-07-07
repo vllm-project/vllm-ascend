@@ -7,6 +7,38 @@
   align-items: center;
 }
 
+/* Theme-aware logo swap. The .md-logo wrapper in main.css forces
+   .md-logo img to display:block, so the two <img> elements would
+   stack vertically and overlap visually if neither were hidden.
+   Material's [src$="#only-dark"]{display:none} only covers one half
+   of the swap, so we add explicit class-based rules here for both
+   halves. The class selectors win on specificity (.class > [attr])
+   and don't depend on URL fragment matching. */
+[data-md-color-scheme="default"] .md-logo__img--dark,
+[data-md-color-scheme="default"] .home-hero img[src$="#only-dark"] {
+  display: none !important;
+}
+[data-md-color-scheme="slate"] .md-logo__img--light,
+[data-md-color-scheme="slate"] .home-hero img[src$="#only-light"] {
+  display: none !important;
+}
+
+/* Centered hero logo on the home page. The previous .md-typeset .figure
+   rule didn't match the <p> wrapper mkdocs emits for markdown images,
+   so the logo rendered left-aligned and visually overlapped the header
+   logo. Use a dedicated class with explicit centering and spacing. */
+.home-hero {
+  text-align: center;
+  margin: 2rem 0 2.5rem;
+}
+.home-hero img {
+  display: block;
+  margin: 0 auto;
+  max-width: 720px;
+  width: 100%;
+  height: auto;
+}
+
 /* Make tables more compact */
 .md-typeset table:not([class]) th,
 .md-typeset table:not([class]) td {
