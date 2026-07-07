@@ -24,6 +24,7 @@ Run `pytest tests/e2e/pull_request/two_card/test_gpt_oss_distributed.py`.
 import pytest
 
 from tests.e2e.conftest import VllmRunner
+from vllm_ascend.utils import vllm_version_is
 
 GPT_OSS_MODELS = [
     "unsloth/gpt-oss-20b-BF16",
@@ -31,6 +32,7 @@ GPT_OSS_MODELS = [
 
 
 @pytest.mark.parametrize("model", GPT_OSS_MODELS)
+@pytest.mark.skipif(vllm_version_is("0.24.0"), reason="GPT-OSS checkpoint layout needs the newer vLLM loader.")
 def test_gpt_oss_distributed_tp2(model):
     example_prompts = [
         "Hello, my name is",
