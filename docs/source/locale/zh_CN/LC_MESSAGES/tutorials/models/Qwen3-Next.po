@@ -6,17 +6,17 @@
 #
 msgid ""
 msgstr ""
-"Project-Id-Version: vllm-ascend \n"
+"Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
 "POT-Creation-Date: 2026-07-02 07:02+0000\n"
 "PO-Revision-Date: 2026-04-10 18:37+0800\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
-"Language: zh_CN\n"
 "Language-Team: zh_CN <LL@li.org>\n"
-"Plural-Forms: nplurals=1; plural=0;\n"
+"Language: zh_CN\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: Babel 2.18.0\n"
 
 #: ../../source/tutorials/models/Qwen3-Next.md:1
@@ -30,12 +30,11 @@ msgstr "1.简介"
 
 #: ../../source/tutorials/models/Qwen3-Next.md:5
 msgid ""
-"The Qwen3-Next model is a sparse MoE (Mixture of Experts) model with high"
-" sparsity. Compared to the MoE architecture of Qwen3, it has introduced "
-"key improvements in aspects such as the hybrid attention mechanism and "
-"multi-token prediction mechanism, enhancing the training and inference "
-"efficiency of the model under long contexts and large total parameter "
-"scales."
+"The Qwen3-Next model is a sparse MoE (Mixture of Experts) model with high "
+"sparsity. Compared to the MoE architecture of Qwen3, it has introduced key "
+"improvements in aspects such as the hybrid attention mechanism and multi-"
+"token prediction mechanism, enhancing the training and inference efficiency "
+"of the model under long contexts and large total parameter scales."
 msgstr ""
 "Qwen3-Next 模型是一个高稀疏度的稀疏 MoE（混合专家）模型。与 Qwen3 的 MoE 架构相比，它在混合注意力机制和多 Token "
 "预测机制等方面引入了关键改进，提升了模型在长上下文和大总参数规模下的训练和推理效率。"
@@ -43,20 +42,21 @@ msgstr ""
 #: ../../source/tutorials/models/Qwen3-Next.md:7
 msgid ""
 "This document will present the core verification steps of the model, "
-"including supported features, environment preparation, as well as "
-"accuracy and performance evaluation. Qwen3 Next is currently using Triton"
-" Ascend, which is in the experimental phase. In subsequent versions, its "
-"performance related to stability and accuracy may change, and performance"
-" will be continuously optimized."
+"including supported features, environment preparation, as well as accuracy "
+"and performance evaluation. Qwen3 Next is currently using Triton Ascend, "
+"which is in the experimental phase. In subsequent versions, its performance "
+"related to stability and accuracy may change, and performance will be "
+"continuously optimized."
 msgstr ""
 "本文档将展示模型的核心验证步骤，包括支持的特性、环境准备，以及精度评估和性能评估。Qwen3 Next 目前使用 Triton "
 "Ascend，该组件处于实验阶段。在后续版本中，其与稳定性和精度相关的性能可能会发生变化，性能将持续得到优化。"
 
 #: ../../source/tutorials/models/Qwen3-Next.md:9
 msgid ""
-"The `Qwen3-Next` model is first supported in `vllm-ascend:v0.10.2rc1` and"
-" can stably run in v0.16.0 and later version."
-msgstr "`Qwen3-Next` 模型从 `vllm-ascend:v0.10.2rc1` 版本开始首次支持，并在 v0.16.0 及更高版本中稳定运行。"
+"The `Qwen3-Next` model is first supported in `vllm-ascend:v0.10.2rc1` and "
+"can stably run in v0.16.0 and later version."
+msgstr ""
+"`Qwen3-Next` 模型从 `vllm-ascend:v0.10.2rc1` 版本开始首次支持，并在 v0.16.0 及更高版本中稳定运行。"
 
 #: ../../source/tutorials/models/Qwen3-Next.md:11
 msgid "2 Supported Features"
@@ -67,12 +67,13 @@ msgid ""
 "Refer to [Supported Features "
 "List](../../user_guide/support_matrix/supported_models.md) to get the "
 "model's supported feature matrix."
-msgstr "请参阅[支持的特性列表](../../user_guide/support_matrix/supported_models.md)获取模型支持的特性矩阵。"
+msgstr ""
+"请参阅[支持的特性列表](../../user_guide/support_matrix/supported_models.md)获取模型支持的特性矩阵。"
 
 #: ../../source/tutorials/models/Qwen3-Next.md:15
 msgid ""
-"Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get "
-"the feature's configuration."
+"Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the"
+" feature's configuration."
 msgstr "请参阅[特性指南](../../user_guide/feature_guide/index.md)获取特性的配置方法。"
 
 #: ../../source/tutorials/models/Qwen3-Next.md:17
@@ -85,11 +86,13 @@ msgstr "3.1 模型权重"
 
 #: ../../source/tutorials/models/Qwen3-Next.md:21
 msgid ""
-"`Qwen3-Next-80B-A3B-Instruct`: requires **8 cards in 1 Atlas 800 A3 (64G "
-"× 16) node** or **8 cards in 1 Atlas 800 A2 (64G × 8) node**. [Model "
+"`Qwen3-Next-80B-A3B-Instruct`: requires **8 cards in 1 Atlas 800 A3 (64G × "
+"16) node** or **8 cards in 1 Atlas 800 A2 (64G × 8) node**. [Model "
 "Weight](https://modelscope.cn/models/Qwen/Qwen3-Next-80B-A3B-Instruct)"
 msgstr ""
-"`Qwen3-Next-80B-A3B-Instruct`：需要 **1 个 Atlas 800 A3（64G × 16）节点上的 8 张卡**或 **1 个 Atlas 800 A2（64G × 8）节点上的 8 张卡**。[模型权重](https://modelscope.cn/models/Qwen/Qwen3-Next-80B-A3B-Instruct)"
+"`Qwen3-Next-80B-A3B-Instruct`：需要 **1 个 Atlas 800 A3（64G × 16）节点上的 8 张卡**或 "
+"**1 个 Atlas 800 A2（64G × 8）节点上的 8 "
+"张卡**。[模型权重](https://modelscope.cn/models/Qwen/Qwen3-Next-80B-A3B-Instruct)"
 
 #: ../../source/tutorials/models/Qwen3-Next.md:23
 msgid "4 Installation"
@@ -104,7 +107,9 @@ msgid ""
 "Select an image based on your machine type and start the docker image on "
 "your node, refer to [using docker](../../installation.md#set-up-using-"
 "docker)."
-msgstr "根据您的机器类型选择镜像，并在节点上启动 Docker 镜像，请参考[使用 Docker](../../installation.md#set-up-using-docker)。"
+msgstr ""
+"根据您的机器类型选择镜像，并在节点上启动 Docker 镜像，请参考[使用 Docker](../../installation.md#set-up-"
+"using-docker)。"
 
 #: ../../source/tutorials/models/Qwen3-Next.md:29
 msgid "**A3 series:**"
@@ -117,8 +122,8 @@ msgstr "在每个节点上启动 Docker 镜像。"
 #: ../../source/tutorials/models/Qwen3-Next.md:72
 msgid ""
 "The Qwen3 Next is using [Triton Ascend](https://gitee.com/ascend/triton-"
-"ascend) which is currently experimental. In future versions, there may be"
-" behavioral changes related to stability, accuracy, and performance "
+"ascend) which is currently experimental. In future versions, there may be "
+"behavioral changes related to stability, accuracy, and performance "
 "improvement."
 msgstr ""
 "Qwen3 Next 使用 [Triton Ascend](https://gitee.com/ascend/triton-"
@@ -139,8 +144,7 @@ msgstr "预期结果：显示两个包的版本信息，确认安装成功。"
 #: ../../source/tutorials/models/Qwen3-Next.md:83
 #: ../../source/tutorials/models/Qwen3-Next.md:117
 msgid ""
-"If deploying a multi-node environment, set up the environment on each "
-"node."
+"If deploying a multi-node environment, set up the environment on each node."
 msgstr "如果部署多节点环境，请在每个节点上设置环境。"
 
 #: ../../source/tutorials/models/Qwen3-Next.md:86
@@ -179,9 +183,11 @@ msgstr "5.1 单节点在线部署"
 #: ../../source/tutorials/models/Qwen3-Next.md:126
 msgid ""
 "Single-node deployment completes both Prefill and Decode within the same "
-"node. The model `Qwen3-Next-80B-A3B-Instruct` can be deployed on 1 Atlas "
-"800 A3 (64G × 16)."
-msgstr "单节点部署在同一节点内完成 Prefill 和 Decode。模型 `Qwen3-Next-80B-A3B-Instruct` 可以部署在 1 个 Atlas 800 A3（64G × 16）上。"
+"node. The model `Qwen3-Next-80B-A3B-Instruct` can be deployed on 1 Atlas 800"
+" A3 (64G × 16)."
+msgstr ""
+"单节点部署在同一节点内完成 Prefill 和 Decode。模型 `Qwen3-Next-80B-A3B-Instruct` 可以部署在 1 个 "
+"Atlas 800 A3（64G × 16）上。"
 
 #: ../../source/tutorials/models/Qwen3-Next.md:128
 msgid ""
@@ -202,7 +208,8 @@ msgid "6 Functional Verification"
 msgstr "6.功能验证"
 
 #: ../../source/tutorials/models/Qwen3-Next.md:146
-msgid "Once your server is started, you can query the model with input prompts:"
+msgid ""
+"Once your server is started, you can query the model with input prompts:"
 msgstr "服务器启动后，您可以使用输入提示词查询模型。"
 
 #: ../../source/tutorials/models/Qwen3-Next.md:161
@@ -227,15 +234,18 @@ msgstr "使用 AISBench"
 #: ../../source/tutorials/models/Qwen3-Next.md:196
 msgid ""
 "Refer to [Using "
-"AISBench](../../developer_guide/evaluation/using_ais_bench.md) for "
-"details."
-msgstr "详细信息请参考[使用 AISBench 进行精度评估](../../developer_guide/evaluation/using_ais_bench.md)。"
+"AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details."
+msgstr ""
+"详细信息请参考[使用 AISBench "
+"进行精度评估](../../developer_guide/evaluation/using_ais_bench.md)。"
 
 #: ../../source/tutorials/models/Qwen3-Next.md:198
 msgid ""
-"After execution, you can get the result, here is the result of `Qwen3"
-"-Next-80B-A3B-Instruct` in `vllm-ascend:0.13.0rc1` for reference only."
-msgstr "执行后即可获得结果，以下是 `Qwen3-Next-80B-A3B-Instruct` 在 `vllm-ascend:0.13.0rc1` 上的结果，仅供参考。"
+"After execution, you can get the result, here is the result of "
+"`Qwen3-Next-80B-A3B-Instruct` in `vllm-ascend:0.13.0rc1` for reference only."
+msgstr ""
+"执行后即可获得结果，以下是 `Qwen3-Next-80B-A3B-Instruct` 在 `vllm-ascend:0.13.0rc1` "
+"上的结果，仅供参考。"
 
 #: ../../source/tutorials/models/Qwen3-Next.md:116
 msgid "dataset"
@@ -286,7 +296,10 @@ msgid ""
 "Refer to [Using AISBench for performance "
 "evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-"
 "performance-evaluation) for details."
-msgstr "详细信息请参考[使用 AISBench 进行性能评估](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation)。"
+msgstr ""
+"详细信息请参考[使用 AISBench "
+"进行性能评估](../../developer_guide/evaluation/using_ais_bench.md#execute-"
+"performance-evaluation)。"
 
 #: ../../source/tutorials/models/Qwen3-Next.md:210
 msgid "Using vLLM Benchmark"
@@ -298,8 +311,8 @@ msgstr "以 `Qwen3-Next` 为例运行性能评估。"
 
 #: ../../source/tutorials/models/Qwen3-Next.md:214
 msgid ""
-"Refer to [vLLM Benchmark](https://docs.vllm.ai/en/latest/benchmarking/) "
-"for more details."
+"Refer to [vLLM Benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for "
+"more details."
 msgstr "更多详细信息请参考 [vLLM 基准测试](https://docs.vllm.ai/en/latest/benchmarking/)。"
 
 #: ../../source/tutorials/models/Qwen3-Next.md:216
@@ -324,8 +337,7 @@ msgstr "以 `serve` 为例，运行如下代码。"
 
 #: ../../source/tutorials/models/Qwen3-Next.md:229
 msgid ""
-"After about several minutes, you can get the performance evaluation "
-"result."
+"After about several minutes, you can get the performance evaluation result."
 msgstr "大约几分钟后，即可获得性能评估结果。"
 
 #: ../../source/tutorials/models/Qwen3-Next.md:231
@@ -346,24 +358,23 @@ msgstr "**注意**："
 
 #: ../../source/tutorials/models/Qwen3-Next.md:247
 msgid ""
-"The following configurations are validated in specific test environments "
-"and are for reference only. The optimal configuration depends on factors "
-"such as maximum input/output length, prefix cache hit rate, precision "
-"requirements, and deployment machine ratios. It is recommended to refer "
-"to Section 9.2 for tuning based on actual conditions."
+"The following configurations are validated in specific test environments and"
+" are for reference only. The optimal configuration depends on factors such "
+"as maximum input/output length, prefix cache hit rate, precision "
+"requirements, and deployment machine ratios. It is recommended to refer to "
+"Section 9.2 for tuning based on actual conditions."
 msgstr ""
 "以下配置在特定测试环境中验证通过，仅供参考。最佳配置取决于最大输入/输出长度、前缀缓存命中率、精度要求以及部署机器配比等因素。建议根据实际条件参考第9.2节进行调优。"
 
 #: ../../source/tutorials/models/Qwen3-Next.md:249
 msgid ""
-"Qwen3-Next does not support TP>=16 now. Since this model has 16 query "
-"heads but only 2 key and value heads, GQA degenerates into MHA when TP >="
-" 16. However, the FIA operator currently fails to function in MHA "
-"scenarios with a head dimension of 256 (which is the case for this "
-"model)."
+"Qwen3-Next does not support TP>=16 now. Since this model has 16 query heads "
+"but only 2 key and value heads, GQA degenerates into MHA when TP >= 16. "
+"However, the FIA operator currently fails to function in MHA scenarios with "
+"a head dimension of 256 (which is the case for this model)."
 msgstr ""
-"Qwen3-Next 目前不支持 TP >= 16。由于该模型有 16 个查询头，但只有 2 个键值头，当 TP >= 16 时，GQA 会退化为"
-" MHA。然而，FIA 算子目前无法在头维度为 256 的 MHA 场景下正常工作（该模型正是这种情况）。"
+"Qwen3-Next 目前不支持 TP >= 16。由于该模型有 16 个查询头，但只有 2 个键值头，当 TP >= 16 时，GQA 会退化为 "
+"MHA。然而，FIA 算子目前无法在头维度为 256 的 MHA 场景下正常工作（该模型正是这种情况）。"
 
 #: ../../source/tutorials/models/Qwen3-Next.md:251
 msgid "Table 1: Scenario Overview"
@@ -427,10 +438,9 @@ msgstr "对高分辨率视觉输入使用tp2"
 
 #: ../../source/tutorials/models/Qwen3-Next.md:260
 msgid ""
-"`*Total NPUs` indicates the total number of NPUs used across all nodes. 1"
-" node = 1 Atlas 800 A3 server (64G × 16 NPUs)."
-msgstr ""
-"`*NPU总数` 表示所有节点使用的NPU总数。1个节点 = 1台 Atlas 800 A3 服务器（64G × 16 NPU）。"
+"`*Total NPUs` indicates the total number of NPUs used across all nodes. 1 "
+"node = 1 Atlas 800 A3 server (64G × 16 NPUs)."
+msgstr "`*NPU总数` 表示所有节点使用的NPU总数。1个节点 = 1台 Atlas 800 A3 服务器（64G × 16 NPU）。"
 
 #: ../../source/tutorials/models/Qwen3-Next.md:262
 msgid "Table 2: Detailed Node Configuration"
@@ -502,10 +512,9 @@ msgstr "多模态 (1080P)"
 
 #: ../../source/tutorials/models/Qwen3-Next.md:271
 msgid ""
-"For complete startup commands and parameter descriptions, please refer to"
-" the deployment examples in [Chapter 5](#5-online-service-deployment)."
-msgstr ""
-"完整的启动命令和参数说明，请参考[第5章](#5-online-service-deployment)中的部署示例。"
+"For complete startup commands and parameter descriptions, please refer to "
+"the deployment examples in [Chapter 5](#5-online-service-deployment)."
+msgstr "完整的启动命令和参数说明，请参考[第5章](#5-online-service-deployment)中的部署示例。"
 
 #: ../../source/tutorials/models/Qwen3-Next.md:273
 msgid "9.2 Tuning Guidelines"
@@ -536,8 +545,141 @@ msgstr "10 常见问题"
 
 #: ../../source/tutorials/models/Qwen3-Next.md:283
 msgid ""
-"For common environment, installation, and general parameter issues, "
-"please refer to the [Public "
+"For common environment, installation, and general parameter issues, please "
+"refer to the [Public "
 "FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)."
 msgstr ""
 "常见环境、安装和通用参数问题，请参考[公共FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)。"
+
+msgid "# Qwen3-Next"
+msgstr ""
+
+msgid "## 1 Introduction"
+msgstr ""
+
+msgid "## 2 Supported Features"
+msgstr ""
+
+msgid "## 3 Prerequisites"
+msgstr ""
+
+msgid "### 3.1 Model Weight"
+msgstr ""
+
+msgid "## 4 Installation"
+msgstr ""
+
+msgid "### 4.1 Docker Image Installation"
+msgstr ""
+
+msgid "!!! note"
+msgstr ""
+
+msgid "### 4.2 Source Code Installation"
+msgstr ""
+
+msgid "1. Clone and install vLLM:"
+msgstr ""
+
+msgid "2. Clone and install the vLLM-Ascend repository:"
+msgstr ""
+
+msgid "## 5 Online Service Deployment"
+msgstr ""
+
+msgid "### 5.1 Single-Node Online Deployment"
+msgstr ""
+
+msgid "## 6 Functional Verification"
+msgstr ""
+
+msgid "## 7 Accuracy Evaluation"
+msgstr ""
+
+msgid "### Using AISBench"
+msgstr ""
+
+msgid ""
+"1. Refer to [Using "
+"AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details."
+msgstr ""
+
+msgid ""
+"2. After execution, you can get the result, here is the result of "
+"`Qwen3-Next-80B-A3B-Instruct` in `vllm-ascend:0.13.0rc1` for reference only."
+msgstr ""
+
+msgid ""
+"| dataset | version | metric | mode | vllm-api-general-chat |\n"
+"|----- | ----- | ----- | ----- | -----|\n"
+"| gsm8k | - | accuracy | gen | 95.53 |"
+msgstr ""
+
+msgid "## 8 Performance Evaluation"
+msgstr ""
+
+msgid "### Using vLLM Benchmark"
+msgstr ""
+
+msgid ""
+"- `latency`: Benchmark the latency of a single batch of requests.\n"
+"- `serve`: Benchmark the online serving throughput.\n"
+"- `throughput`: Benchmark offline inference throughput."
+msgstr ""
+
+msgid "## 9 Performance Tuning"
+msgstr ""
+
+msgid "### 9.1 Recommended Configurations"
+msgstr ""
+
+msgid ""
+"> **Note**:\n"
+">\n"
+"> - The following configurations are validated in specific test environments and are for reference only. The optimal configuration depends on factors such as maximum input/output length, prefix cache hit rate, precision requirements, and deployment machine ratios. It is recommended to refer to Section 9.2 for tuning based on actual conditions.\n"
+">\n"
+"> - Qwen3-Next does not support TP>=16 now. Since this model has 16 query heads but only 2 key and value heads, GQA degenerates into MHA when TP >= 16. However, the FIA operator currently fails to function in MHA scenarios with a head dimension of 256 (which is the case for this model)."
+msgstr ""
+
+msgid "#### Table 1: Scenario Overview"
+msgstr ""
+
+msgid ""
+"|Scenario|Deployment Mode|*Total NPUs|Weight Version|Key Considerations|\n"
+"|--------|---------------|-----------|--------------|------------------|\n"
+"|High Throughput<br>(16K context)|Single-Node Mixed|2 (A3)|Qwen3-Next|Use tp2 for high-resolution text inputs|\n"
+"|Long Context<br>(128K, no prefix cache)|Single-Node Mixed|2 (A3)|Qwen3-Next|tp2 for high-resolution text inputs|\n"
+"|Long Context<br>(128K, with prefix cache)|Single-Node Mixed|2 (A3)|Qwen3-Next|tp2 for high-resolution text inputs|\n"
+"|Multimodal<br>(1080P)|Single-Node Mixed|2 (A3)|Qwen3-Next|tp2 for high-resolution visual inputs|"
+msgstr ""
+
+msgid ""
+"> `*Total NPUs` indicates the total number of NPUs used across all nodes. 1 "
+"node = 1 Atlas 800 A3 server (64G × 16 NPUs)."
+msgstr ""
+
+msgid "#### Table 2: Detailed Node Configuration"
+msgstr ""
+
+msgid ""
+"|Scenario|Configuration|NPUs|TP|DP|Max Model Len|MTP Speculation Num|\n"
+"|--------|-------------|-----|--|--|-------------------|--------------------|\n"
+"|High Throughput / Low Latency (16K)|Server / Single Machine|2|1|1|~16K|3|\n"
+"|Long Context (128K, no cache)|Server / Single Machine|2|1|1|128K|3|\n"
+"|Long Context (128K, with cache)|Server / Single Machine|2|1|1|128K|3|\n"
+"|Multimodal (1080P)|Server / Single Machine|2|1|1|~16K|3|"
+msgstr ""
+
+msgid ""
+"> For complete startup commands and parameter descriptions, please refer to "
+"the deployment examples in [Chapter 5](#5-online-service-deployment)."
+msgstr ""
+
+msgid "### 9.2 Tuning Guidelines"
+msgstr ""
+
+msgid "#### 9.2.1 General Tuning Reference"
+msgstr ""
+
+msgid "## 10 FAQ"
+msgstr ""

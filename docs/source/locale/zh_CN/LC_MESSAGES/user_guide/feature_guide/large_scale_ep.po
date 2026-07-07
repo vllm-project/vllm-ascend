@@ -6,17 +6,17 @@
 #
 msgid ""
 msgstr ""
-"Project-Id-Version: vllm-ascend \n"
+"Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
 "POT-Creation-Date: 2026-06-07 05:04+0000\n"
 "PO-Revision-Date: 2026-01-22 16:45+0800\n"
 "Last-Translator: Gemini\n"
-"Language: zh_CN\n"
 "Language-Team: zh_CN <LL@li.org>\n"
-"Plural-Forms: nplurals=1; plural=0;\n"
+"Language: zh_CN\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: Babel 2.18.0\n"
 
 #: ../../source/user_guide/feature_guide/large_scale_ep.md:1
@@ -30,22 +30,21 @@ msgstr "快速开始"
 #: ../../source/user_guide/feature_guide/large_scale_ep.md:5
 msgid ""
 "vLLM-Ascend now supports prefill-decode (PD) disaggregation in the large-"
-"scale **Expert Parallelism (EP)** scenario. To achieve better "
-"performance, the distributed DP server is applied in vLLM-Ascend. In the "
-"PD separation scenario, different optimization strategies can be "
-"implemented based on the distinct characteristics of PD nodes, thereby "
-"enabling more flexible model deployment. Taking the DeepSeek model as an "
-"example, using 8 Atlas 800T A3 servers to deploy the model. Assume the IP"
-" of the servers starts from 192.0.0.1 and ends by 192.0.0.8. Use the "
-"first 4 servers as prefiller nodes and the last 4 servers as decoder "
-"nodes. And the prefiller nodes are deployed as master nodes "
-"independently, while the decoder nodes use the 192.0.0.5 node as the "
-"master node."
+"scale **Expert Parallelism (EP)** scenario. To achieve better performance, "
+"the distributed DP server is applied in vLLM-Ascend. In the PD separation "
+"scenario, different optimization strategies can be implemented based on the "
+"distinct characteristics of PD nodes, thereby enabling more flexible model "
+"deployment. Taking the DeepSeek model as an example, using 8 Atlas 800T A3 "
+"servers to deploy the model. Assume the IP of the servers starts from "
+"192.0.0.1 and ends by 192.0.0.8. Use the first 4 servers as prefiller nodes "
+"and the last 4 servers as decoder nodes. And the prefiller nodes are "
+"deployed as master nodes independently, while the decoder nodes use the "
+"192.0.0.5 node as the master node."
 msgstr ""
-"vLLM-Ascend 现已支持在大规模**专家并行（EP）** 场景下的预填充-解码（PD）分离。为获得更佳性能，vLLM-Ascend "
-"应用了分布式 DP 服务端。在 PD 分离场景中，可根据 PD 节点的不同特性实施不同的优化策略，从而实现更灵活的模型部署。以 DeepSeek "
-"模型为例，使用 8 台 Atlas 800T A3 服务器部署模型。假设服务器 IP 从 192.0.0.1 到 192.0.0.8。将前 4 "
-"台服务器用作预填充节点，后 4 台服务器用作解码节点。预填充节点各自独立部署为主节点，而解码节点则使用 192.0.0.5 节点作为主节点。"
+"vLLM-Ascend 现已支持在大规模**专家并行（EP）** 场景下的预填充-解码（PD）分离。为获得更佳性能，vLLM-Ascend 应用了分布式"
+" DP 服务端。在 PD 分离场景中，可根据 PD 节点的不同特性实施不同的优化策略，从而实现更灵活的模型部署。以 DeepSeek 模型为例，使用 8"
+" 台 Atlas 800T A3 服务器部署模型。假设服务器 IP 从 192.0.0.1 到 192.0.0.8。将前 4 台服务器用作预填充节点，后"
+" 4 台服务器用作解码节点。预填充节点各自独立部署为主节点，而解码节点则使用 192.0.0.5 节点作为主节点。"
 
 #: ../../source/user_guide/feature_guide/large_scale_ep.md:8
 msgid "Verify Multi-Node Communication Environment"
@@ -64,9 +63,9 @@ msgstr "物理机必须位于同一局域网内，并具备网络连通性。"
 #: ../../source/user_guide/feature_guide/large_scale_ep.md:13
 msgid ""
 "All NPUs must be interconnected. For the Atlas A2 generation, intra-node "
-"connectivity is via HCCS, and inter-node connectivity is via RDMA. For "
-"the Atlas A3 generation, both intra-node and inter-node connectivity are "
-"via HCCS."
+"connectivity is via HCCS, and inter-node connectivity is via RDMA. For the "
+"Atlas A3 generation, both intra-node and inter-node connectivity are via "
+"HCCS."
 msgstr ""
 "所有 NPU 必须互联。对于 Atlas A2 系列，节点内通过 HCCS 连接，节点间通过 RDMA 连接。对于 Atlas A3 "
 "系列，节点内和节点间均通过 HCCS 连接。"
@@ -87,8 +86,8 @@ msgstr "单节点验证："
 #: ../../source/user_guide/feature_guide/large_scale_ep.md:24
 #: ../../source/user_guide/feature_guide/large_scale_ep.md:66
 msgid ""
-"Execute the following commands on each node in sequence. The results must"
-" all be `success` and the status must be `UP`:"
+"Execute the following commands on each node in sequence. The results must "
+"all be `success` and the status must be `UP`:"
 msgstr "依次在每个节点上执行以下命令。结果必须全部为 `success` 且状态为 `UP`："
 
 #: ../../source/user_guide/feature_guide/large_scale_ep.md:41
@@ -119,9 +118,9 @@ msgstr "生成带配置的脚本"
 
 #: ../../source/user_guide/feature_guide/large_scale_ep.md:102
 msgid ""
-"In the PD separation scenario, we provide an optimized configuration. You"
-" can use the following shell script for configuring the prefiller and "
-"decoder nodes respectively."
+"In the PD separation scenario, we provide an optimized configuration. You "
+"can use the following shell script for configuring the prefiller and decoder"
+" nodes respectively."
 msgstr "在 PD 分离场景下，我们提供了优化配置。您可以使用以下 Shell 脚本分别配置预填充节点和解码节点。"
 
 #: ../../source/user_guide/feature_guide/large_scale_ep.md
@@ -145,9 +144,9 @@ msgstr "在所有节点上执行以下 Python 文件以使用分布式 DP 服务
 #: ../../source/user_guide/feature_guide/large_scale_ep.md:315
 msgid ""
 "Note that the prefiller nodes and the decoder nodes may have different "
-"configurations. In this example, each prefiller node is deployed as a "
-"master node independently, while the decoder nodes use the 192.0.0.5 node"
-" as the master node. This leads to differences in 'dp_size_local' and "
+"configurations. In this example, each prefiller node is deployed as a master"
+" node independently, while the decoder nodes use the 192.0.0.5 node as the "
+"master node. This leads to differences in 'dp_size_local' and "
 "'dp_rank_start'"
 msgstr ""
 "请注意，预填充节点和解码节点可能具有不同的配置。在此示例中，每个预填充节点独立部署为主节点，而解码节点则使用 192.0.0.5 "
@@ -274,19 +273,16 @@ msgid ""
 "commands to install aisbench"
 msgstr ""
 "我们建议使用 aisbench "
-"工具来评估性能。[aisbench](https://github.com/AISBench/benchmark)。执行以下命令安装 "
-"aisbench"
+"工具来评估性能。[aisbench](https://github.com/AISBench/benchmark)。执行以下命令安装 aisbench"
 
 #: ../../source/user_guide/feature_guide/large_scale_ep.md:374
 msgid ""
-"You need to cancel the http proxy before assessing performance, as "
-"follows:"
+"You need to cancel the http proxy before assessing performance, as follows:"
 msgstr "在评估性能之前，您需要取消 HTTP 代理，如下所示："
 
 #: ../../source/user_guide/feature_guide/large_scale_ep.md:382
 msgid ""
-"You can place your datasets in the directory: "
-"`benchmark/ais_bench/datasets`"
+"You can place your datasets in the directory: `benchmark/ais_bench/datasets`"
 msgstr "您可以将数据集放置在目录：`benchmark/ais_bench/datasets` 中"
 
 #: ../../source/user_guide/feature_guide/large_scale_ep.md:383
@@ -300,8 +296,8 @@ msgstr ""
 
 #: ../../source/user_guide/feature_guide/large_scale_ep.md:409
 msgid ""
-"Taking the gsm8k dataset as an example, execute the following commands to"
-" assess performance."
+"Taking the gsm8k dataset as an example, execute the following commands to "
+"assess performance."
 msgstr "以 gsm8k 数据集为例，执行以下命令评估性能。"
 
 #: ../../source/user_guide/feature_guide/large_scale_ep.md:415
@@ -360,8 +356,8 @@ msgstr "'--additional-config' 参数介绍："
 
 #: ../../source/user_guide/feature_guide/large_scale_ep.md:468
 msgid ""
-"**\"enable_weight_nz_layout\"**: Whether to convert quantized weights to "
-"NZ format to accelerate matrix multiplication."
+"**\"enable_weight_nz_layout\"**: Whether to convert quantized weights to NZ "
+"format to accelerate matrix multiplication."
 msgstr "**\"enable_weight_nz_layout\"**：是否将量化权重转换为 NZ 格式以加速矩阵乘法。"
 
 #: ../../source/user_guide/feature_guide/large_scale_ep.md:469
@@ -380,14 +376,13 @@ msgstr "推荐配置示例"
 
 #: ../../source/user_guide/feature_guide/large_scale_ep.md:481
 msgid ""
-"For example, if the average input length is 3.5k, and the output length "
-"is 1.1k, the context length is 16k, the max length of the input dataset "
-"is 7K. In this scenario, we give a recommended configuration for "
-"distributed DP server with high EP. Here we use 4 nodes for prefill and 4"
-" nodes for decode."
+"For example, if the average input length is 3.5k, and the output length is "
+"1.1k, the context length is 16k, the max length of the input dataset is 7K. "
+"In this scenario, we give a recommended configuration for distributed DP "
+"server with high EP. Here we use 4 nodes for prefill and 4 nodes for decode."
 msgstr ""
-"例如，如果平均输入长度为 3.5k，输出长度为 1.1k，上下文长度为 16k，输入数据集的最大长度为 7k。在此场景下，我们为支持高 EP "
-"的分布式 DP 服务器提供一套推荐配置。这里我们使用 4 个节点进行 Prefill，4 个节点进行 Decode。"
+"例如，如果平均输入长度为 3.5k，输出长度为 1.1k，上下文长度为 16k，输入数据集的最大长度为 7k。在此场景下，我们为支持高 EP 的分布式 "
+"DP 服务器提供一套推荐配置。这里我们使用 4 个节点进行 Prefill，4 个节点进行 Decode。"
 
 #: ../../source/user_guide/feature_guide/large_scale_ep.md:280
 msgid "node"
@@ -475,8 +470,8 @@ msgstr "28"
 
 #: ../../source/user_guide/feature_guide/large_scale_ep.md:489
 msgid ""
-"Note that these configurations are not related to optimization. You need "
-"to adjust these parameters based on actual scenarios."
+"Note that these configurations are not related to optimization. You need to "
+"adjust these parameters based on actual scenarios."
 msgstr "请注意，这些配置与优化逻辑无关。您需要根据实际场景调整这些参数。"
 
 #: ../../source/user_guide/feature_guide/large_scale_ep.md:492
@@ -489,8 +484,167 @@ msgstr "1.Prefiller 节点需要预热"
 
 #: ../../source/user_guide/feature_guide/large_scale_ep.md:496
 msgid ""
-"Since the computation of some NPU operators requires several rounds of "
-"warm-up to achieve best performance, we recommend preheating the service "
-"with some requests before conducting performance tests to achieve the "
-"best end-to-end throughput."
+"Since the computation of some NPU operators requires several rounds of warm-"
+"up to achieve best performance, we recommend preheating the service with "
+"some requests before conducting performance tests to achieve the best end-"
+"to-end throughput."
 msgstr "由于某些 NPU 算子的计算需要多轮预热才能达到最佳性能，我们建议在进行性能测试前先用一些请求预热服务，以获得最佳的端到端吞吐量。"
+
+msgid "# Distributed DP Server With Large-Scale Expert Parallelism"
+msgstr ""
+
+msgid "## Getting Started"
+msgstr ""
+
+msgid ""
+"vLLM-Ascend now supports prefill-decode (PD) disaggregation in the large-scale **Expert Parallelism (EP)** scenario. To achieve better performance, the distributed DP server is applied in vLLM-Ascend. In the PD separation scenario, different optimization strategies can be implemented based on the distinct characteristics of PD nodes, thereby enabling more flexible model deployment. \\\n"
+"Taking the DeepSeek model as an example, using 8 Atlas 800T A3 servers to deploy the model. Assume the IP of the servers starts from 192.0.0.1 and ends by 192.0.0.8. Use the first 4 servers as prefiller nodes and the last 4 servers as decoder nodes. And the prefiller nodes are deployed as master nodes independently, while the decoder nodes use the 192.0.0.5 node as the master node."
+msgstr ""
+
+msgid "## Verify Multi-Node Communication Environment"
+msgstr ""
+
+msgid "### Physical Layer Requirements"
+msgstr ""
+
+msgid ""
+"- The physical machines must be located on the same LAN, with network connectivity.\n"
+"- All NPUs must be interconnected. For the Atlas A2 generation, intra-node connectivity is via HCCS, and inter-node connectivity is via RDMA. For the Atlas A3 generation, both intra-node and inter-node connectivity are via HCCS."
+msgstr ""
+
+msgid "### Verification Process"
+msgstr ""
+
+msgid "=== \"A3\""
+msgstr ""
+
+msgid "1. Single Node Verification:"
+msgstr ""
+
+msgid "2. Get NPU IP Addresses"
+msgstr ""
+
+msgid "3. Get superpodid and SDID"
+msgstr ""
+
+msgid "4. Cross-Node PING Test"
+msgstr ""
+
+msgid "=== \"A2\""
+msgstr ""
+
+msgid "3. Cross-Node PING Test"
+msgstr ""
+
+msgid "## Large-Scale EP model deployment"
+msgstr ""
+
+msgid "### Generate script with configurations"
+msgstr ""
+
+msgid "=== \"Prefiller node\""
+msgstr ""
+
+msgid "=== \"Decoder node\""
+msgstr ""
+
+msgid "### Start Distributed DP Server for prefill-decode disaggregation"
+msgstr ""
+
+msgid "## Example proxy for Distributed DP Server"
+msgstr ""
+
+msgid ""
+"|Parameter  | meaning |\n"
+"| --- | --- |\n"
+"| --port | Proxy service Port |\n"
+"| --host | Proxy service Host IP|\n"
+"| --prefiller-hosts | Hosts of prefiller nodes |\n"
+"| --prefiller-hosts-num | Number of repetitions for prefiller node hosts |\n"
+"| --prefiller-ports | Ports of prefiller nodes |\n"
+"| --prefiller-ports-inc | Number of increments for prefiller node ports |\n"
+"| --decoder-hosts | Hosts of decoder nodes |\n"
+"| --decoder-hosts-num | Number of repetitions for decoder node hosts |\n"
+"| --decoder-ports | Ports of decoder nodes |\n"
+"| --decoder-ports-inc | Number of increments for decoder node ports |"
+msgstr ""
+
+msgid "## Benchmark"
+msgstr ""
+
+msgid ""
+"- You can place your datasets in the directory: `benchmark/ais_bench/datasets`\n"
+"- You can change the configuration in the directory :`benchmark/ais_bench/benchmark/configs/models/vllm_api` Take `vllm_api_stream_chat.py` as an example:"
+msgstr ""
+
+msgid ""
+"- Taking the gsm8k dataset as an example, execute the following commands to "
+"assess performance."
+msgstr ""
+
+msgid ""
+"- For more details on commands and parameters for aisbench, refer to "
+"[aisbench](https://github.com/AISBench/benchmark)"
+msgstr ""
+
+msgid "## Prefill & Decode Configuration Details"
+msgstr ""
+
+msgid "- **prefiller node**"
+msgstr ""
+
+msgid ""
+"1. set HCCL_BUFFSIZE=256\n"
+"2. add '--enforce-eager' command to 'vllm serve'\n"
+"3. Take '--kv-transfer-config' as follows:"
+msgstr ""
+
+msgid "4. Take '--additional-config' as follows:"
+msgstr ""
+
+msgid "- **decoder node**"
+msgstr ""
+
+msgid ""
+"1. set HCCL_BUFFSIZE=1024\n"
+"2. Take '--kv-transfer-config' as follows:"
+msgstr ""
+
+msgid "3. Take '--additional-config' as follows:"
+msgstr ""
+
+msgid "### Parameters Description"
+msgstr ""
+
+msgid "1. '--additional-config' Parameter Introduction:"
+msgstr ""
+
+msgid ""
+"- **\"enable_weight_nz_layout\"**: Whether to convert quantized weights to NZ format to accelerate matrix multiplication.\n"
+"   - **\"enable_prefill_optimizations\"**: Whether to enable DeepSeek models' prefill optimizations.\n"
+"     <br>"
+msgstr ""
+
+msgid ""
+"2. Enable MTP\n"
+"Add the following command to your configurations."
+msgstr ""
+
+msgid "### Recommended Configuration Example"
+msgstr ""
+
+msgid ""
+"| node     | DP | TP | EP | max-model-len | max-num-batched-tokens | max-num-seqs |  gpu-memory-utilization |\n"
+"|----------|----|----|----|---------------|------------------------|--------------|-----------|\n"
+"| prefill  | 2  |  8 | 16 |     17000     |         16384          |      4       |    0.9    |\n"
+"| decode   | 64 |  1 | 64 |     17000     |          256           |      28      |    0.9    |"
+msgstr ""
+
+msgid "!!! note"
+msgstr ""
+
+msgid "## FAQ"
+msgstr ""
+
+msgid "### 1. Prefiller nodes need to warm up"
+msgstr ""

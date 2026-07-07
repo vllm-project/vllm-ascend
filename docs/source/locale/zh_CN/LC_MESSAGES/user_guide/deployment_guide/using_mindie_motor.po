@@ -6,17 +6,17 @@
 #
 msgid ""
 msgstr ""
-"Project-Id-Version: vllm-ascend \n"
+"Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
 "POT-Creation-Date: 2026-07-02 07:02+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
-"Language: zh_CN\n"
 "Language-Team: zh_CN <LL@li.org>\n"
-"Plural-Forms: nplurals=1; plural=0;\n"
+"Language: zh_CN\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: Babel 2.18.0\n"
 
 #: ../../source/user_guide/deployment_guide/using_mindie_motor.md:1
@@ -29,14 +29,16 @@ msgstr "1.概述"
 
 #: ../../source/user_guide/deployment_guide/using_mindie_motor.md:5
 msgid ""
-"[MindIE-Motor](https://gitcode.com/Ascend/MindIE-PyMotor) provides one-"
-"click deployment for **prefill–decode (PD) disaggregation** and **PD "
-"aggregation** on Ascend NPUs with vLLM-Ascend. It uses **high-performance"
-" scheduling and load balancing**, together with **RAS (Reliability, "
-"Availability and Serviceability) capabilities**, to build inference "
-"services that are fast and highly stable."
+"[MindIE-Motor](https://gitcode.com/Ascend/MindIE-PyMotor) provides one-click"
+" deployment for **prefill–decode (PD) disaggregation** and **PD "
+"aggregation** on Ascend NPUs with vLLM-Ascend. It uses **high-performance "
+"scheduling and load balancing**, together with **RAS (Reliability, "
+"Availability and Serviceability) capabilities**, to build inference services"
+" that are fast and highly stable."
 msgstr ""
-"[MindIE-Motor](https://gitcode.com/Ascend/MindIE-PyMotor)为Ascend NPU上的vLLM-Ascend提供**prefill–decode (PD)分离**和**PD聚合**的一键部署。它采用**高性能调度和负载均衡**，结合**RAS（可靠性、可用性和可服务性）能力**，构建快速且高度稳定的推理服务。"
+"[MindIE-Motor](https://gitcode.com/Ascend/MindIE-PyMotor)为Ascend NPU上的vLLM-"
+"Ascend提供**prefill–decode "
+"(PD)分离**和**PD聚合**的一键部署。它采用**高性能调度和负载均衡**，结合**RAS（可靠性、可用性和可服务性）能力**，构建快速且高度稳定的推理服务。"
 
 #: ../../source/user_guide/deployment_guide/using_mindie_motor.md:7
 msgid "2. Getting Started"
@@ -50,3 +52,12 @@ msgid ""
 msgstr ""
 "快速部署说明请参考[MindIE-Motor快速开始](https://gitcode.com/Ascend/MindIE-"
 "PyMotor/blob/master/docs/zh/user_guide/README.md)。"
+
+msgid "# Deploy vLLM-Ascend with MindIE-Motor"
+msgstr ""
+
+msgid "## 1. Overview"
+msgstr ""
+
+msgid "## 2. Getting Started"
+msgstr ""
