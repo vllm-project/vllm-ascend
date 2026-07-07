@@ -30,3 +30,6 @@ msgid ""
 "Ascend. Developers can refer to this guide to understand how vLLM Ascend "
 "works."
 msgstr "本节概述了 vLLM Ascend 中实现的功能。开发者可以参考本指南以了解 vLLM Ascend 的工作原理。"
+
+msgid "# Design Documents"
+msgstr ""

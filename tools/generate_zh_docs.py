@@ -24,6 +24,10 @@ INLINE_CODE_RE = re.compile(r"`[^`]+`")
 URL_RE = re.compile(r"https?://\S+")
 LINK_TARGET_RE = re.compile(r"\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
 
+# Combined pattern that matches everything that should be protected from
+# translation: inline code, bare URLs, and markdown link targets.
+PROTECTED_RE = re.compile(rf"{INLINE_CODE_RE.pattern}|{URL_RE.pattern}|{LINK_TARGET_RE.pattern}")
+
 
 def parse_po_file(po_path: Path) -> dict:
     """Parse a .po file and return msgid -> msgstr mapping."""
@@ -63,11 +67,14 @@ def _split_by_code_blocks(content: str) -> list:
         if not in_code:
             if fence_start > pos:
                 segments.append((content[pos:fence_start], False))
-            pos = match.end()
+            # Include the fence line itself (e.g. `` ```bash ``) as part
+            # of the code segment so it is not lost.
+            pos = fence_start
             in_code = True
             fence_marker = marker[0]
         else:
             if marker[0] == fence_marker:
+                # Include the closing fence line in the code segment.
                 segments.append((content[pos : match.end()], True))
                 pos = match.end()
                 in_code = False
@@ -88,9 +95,7 @@ def _protect_spans(text: str) -> list:
     parts = []
     last_end = 0
 
-    combined = re.compile(rf"{INLINE_CODE_RE.pattern}|{URL_RE.pattern}|{LINK_TARGET_RE.pattern}")
-
-    for match in combined.finditer(text):
+    for match in PROTECTED_RE.finditer(text):
         if match.start() > last_end:
             parts.append((text[last_end : match.start()], False))
         parts.append((match.group(), True))
@@ -105,8 +110,11 @@ def _protect_spans(text: str) -> list:
 def apply_translations(content: str, translations: dict) -> str:
     """Apply translations to markdown content.
 
-    Replacements are restricted to text outside of fenced code blocks,
-    inline code, and URLs to avoid corrupting code examples or links.
+    Translations are first applied to the full prose text (outside fenced
+    code blocks) so that msgids containing link syntax (e.g. "[text](url)")
+    are matched correctly.  Afterwards, inline code, URLs, and link targets
+    are restored from the original text to prevent short-msgid replacements
+    (e.g. "mode" → "模式") from leaking into URLs or code.
     """
     if not translations:
         return content
@@ -125,17 +133,25 @@ def apply_translations(content: str, translations: dict) -> str:
             result_parts.append(seg_text)
             continue
 
-        parts = _protect_spans(seg_text)
-        for part_text, is_protected in parts:
-            if is_protected:
-                result_parts.append(part_text)
-                continue
+        # Phase 1 — translate the full segment so msgids that cross
+        # protected-span boundaries (e.g. a msgid containing a markdown
+        # link) still match.
+        translated = seg_text
+        for msgid, msgstr in sorted_items:
+            if msgid.strip() and msgstr.strip():
+                translated = translated.replace(msgid, msgstr)
 
-            for msgid, msgstr in sorted_items:
-                if msgid.strip() and msgstr.strip():
-                    part_text = part_text.replace(msgid, msgstr)
-
-            result_parts.append(part_text)
+        # Phase 2 — protect spans on both the original and the translated
+        # text.  Where the original had a protected span (URL, inline
+        # code, link target), restore the original text — this prevents
+        # short msgids like "mode" → "模式" from corrupting URLs.
+        orig_spans = _protect_spans(seg_text)
+        xlat_spans = _protect_spans(translated)
+        for (orig_text, orig_protected), (xlat_text, _xlat_protected) in zip(orig_spans, xlat_spans):
+            if orig_protected:
+                result_parts.append(orig_text)
+            else:
+                result_parts.append(xlat_text)
 
     return "".join(result_parts)
 
