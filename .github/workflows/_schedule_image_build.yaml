@@ -298,10 +298,10 @@ jobs:
           QUAY_TEMP_PASSWORD: "KUMHSMHBH165QQSBBJYRUD6P9M2ESMR7XH01LPKX4OA4NXLLX06JO9XVVKZ766Q2"
         run: |
           # sleep 3600
-          QUAY_AUTH=$(printf "%s:%s" "$QUAY_TEMP_USERNAME" "$QUAY_TEMP_PASSWORD" | base64 -w0)
-          GHCR_AUTH=$(printf "%s:%s" "${{ github.actor }}" "${{ secrets.GITHUB_TOKEN }}" | base64 -w0)
-          mkdir -p "${DOCKER_CONFIG}"
-          printf '%s' "{\"auths\":{\"quay.io\":{\"auth\":\"${QUAY_AUTH}\"},\"ghcr.io\":{\"auth\":\"${GHCR_AUTH}\"}}}" > "${DOCKER_CONFIG}/config.json"
+          # QUAY_AUTH=$(printf "%s:%s" "$QUAY_TEMP_USERNAME" "$QUAY_TEMP_PASSWORD" | base64 -w0)
+          # GHCR_AUTH=$(printf "%s:%s" "${{ github.actor }}" "${{ secrets.GITHUB_TOKEN }}" | base64 -w0)
+          # mkdir -p "${DOCKER_CONFIG}"
+          # printf '%s' "{\"auths\":{\"quay.io\":{\"auth\":\"${QUAY_AUTH}\"},\"ghcr.io\":{\"auth\":\"${GHCR_AUTH}\"}}}" > "${DOCKER_CONFIG}/config.json"
           set -e
 
           SUFFIX=""
