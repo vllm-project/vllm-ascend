@@ -264,6 +264,7 @@ jobs:
       - name: Update good_table.csv on success
         if: >-
           ${{ always() &&
+          inputs.request_id == '' &&
           (steps.pytest-driven.outcome == 'success' || steps.pytest-driven.outcome == 'skipped') &&
           (steps.yaml-test.outcome == 'success' || steps.yaml-test.outcome == 'skipped') &&
           (steps.pytest-driven.outcome == 'success' || steps.yaml-test.outcome == 'success') }}

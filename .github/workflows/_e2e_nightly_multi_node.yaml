@@ -329,8 +329,7 @@ jobs:
           rm -f "$LEADER_TMP"
 
       - name: Update good_table.csv on success
-        # if: ${{ steps.stream_logs.outcome == 'success' && inputs.request_id == '' }}
-        if: ${{ steps.stream_logs.outcome == 'success'}}
+        if: ${{ steps.stream_logs.outcome == 'success' && inputs.request_id == '' }}
         env:
           TEST_NAME: ${{ inputs.name || inputs.config_file_path }}
           TEST_PATH: ${{ inputs.config_file_path }}

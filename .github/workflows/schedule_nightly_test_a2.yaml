@@ -47,6 +47,11 @@ on:
         required: false
         default: ''
         type: string
+      aop_enabled:
+        description: 'Enable AOP hooks (capture / classify / skip-or-process)'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -193,6 +198,7 @@ jobs:
       vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
       request_id: ${{ inputs.request_id || '' }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
+      aop_single_enabled: ${{ inputs.aop_enabled }}
       should_run: >-
         ${{
           needs.parse-trigger.outputs.run == 'true' && (
@@ -230,6 +236,7 @@ jobs:
       config_file_path: ${{ matrix.test_config.config_file_path }}
       name: ${{ matrix.test_config.name }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref }}
+      aop_multi_enabled: ${{ inputs.aop_enabled }}
       should_run: >-
         ${{
           needs.parse-trigger.outputs.run == 'true' && (
