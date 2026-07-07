@@ -67,7 +67,7 @@ Refer to [Ascend Environment Setup Guide](https://ascend.github.io/docs/sources/
         -it $IMAGE bash
     ```
 
-    ??? 'Click here to see "Install CANN manually"'
+    ??? "Click here to see 'Install CANN manually'"
 
         You can also install CANN manually:
 
@@ -173,7 +173,7 @@ Then you can install `vllm` and `vllm-ascend` from a **pre-built wheel** using o
 
             uv cache clean
 
-??? 'Click here to see "Build from source code"'
+??? "Click here to see 'Build from source code'"
 
     or build from **source code**:
 
@@ -235,7 +235,7 @@ Supported images as following.
 | vllm-ascend:{{ vllm_ascend_version }}-310p | Atlas 300I | Ubuntu |
 | vllm-ascend:{{ vllm_ascend_version }}-310p-openeuler | Atlas 300I | openEuler |
 
-??? 'Click here to see "Build from Dockerfile"'
+??? "Click here to see 'Build from Dockerfile'"
 
     or build IMAGE from **source code**:
 
