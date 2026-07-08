@@ -1,0 +1,208 @@
+#
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+name: 'Validate: Third-Party Actions on Self-Hosted'
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/validate_third_party_actions.yaml'
+
+defaults:
+  run:
+    shell: bash -el {0}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate-paths-filter:
+    name: validate-dorny-paths-filter
+    runs-on: linux-amd64-cpu-4-hk
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: dorny/paths-filter
+        uses: dorny/paths-filter@v4
+        id: filter
+        with:
+          filters: |
+            workflows:
+              - '.github/workflows/**'
+            source:
+              - 'vllm_ascend/**'
+              - 'csrc/**'
+              - 'setup.py'
+            docs:
+              - 'docs/**'
+              - '*.md'
+            tests:
+              - 'tests/**'
+
+      - name: Verify paths-filter output
+        run: |
+          echo "workflows changed: ${{ steps.filter.outputs.workflows }}"
+          echo "source changed: ${{ steps.filter.outputs.source }}"
+          echo "docs changed: ${{ steps.filter.outputs.docs }}"
+          echo "tests changed: ${{ steps.filter.outputs.tests }}"
+          echo "dorny/paths-filter validation OK"
+
+  validate-changed-files:
+    name: validate-tj-actions-changed-files
+    runs-on: linux-amd64-cpu-4-hk
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: tj-actions/changed-files
+        id: changed-files
+        uses: tj-actions/changed-files@v47
+        with:
+          files: |
+            .github/workflows/**
+            vllm_ascend/**
+            csrc/**
+
+      - name: Verify changed-files output
+        run: |
+          echo "any_changed: ${{ steps.changed-files.outputs.any_changed }}"
+          echo "all_changed_files: ${{ steps.changed-files.outputs.all_changed_files }}"
+          echo "tj-actions/changed-files validation OK"
+
+      - name: Security note
+        run: |
+          echo "::notice title=Security Reminder::tj-actions/changed-files@v47 has had supply chain security incidents. Consider replacing with dorny/paths-filter@v4 or native git diff commands."
+
+  validate-ascend-artifact-upload:
+    name: validate-ascend-gha-runners-artifact-upload
+    runs-on: linux-amd64-cpu-4-hk
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v7
+
+      - name: Create test content
+        run: |
+          mkdir -p /tmp/ascend-artifact-test
+          echo "ascend-gha-runners/artifact/upload validation test" > /tmp/ascend-artifact-test/test.txt
+          echo "runner=$(uname -m)" >> /tmp/ascend-artifact-test/test.txt
+          echo "timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> /tmp/ascend-artifact-test/test.txt
+
+      - name: Upload via ascend-gha-runners/artifact/upload
+        id: ascend-upload
+        continue-on-error: true
+        uses: ascend-gha-runners/artifact/upload@v0.3
+        with:
+          name: validate-ascend-artifact-${{ github.run_id }}
+          path: /tmp/ascend-artifact-test/
+          if-no-files-found: warn
+          retention-days: 1
+
+      - name: Upload via standard actions/upload-artifact (fallback)
+        uses: actions/upload-artifact@v7
+        with:
+          name: validate-ascend-artifact-${{ github.run_id }}
+          path: /tmp/ascend-artifact-test/
+          if-no-files-found: warn
+          retention-days: 1
+
+      - name: Report ascend-gha-runners result
+        run: |
+          if [ "${{ steps.ascend-upload.outcome }}" == "success" ]; then
+            echo "ascend-gha-runners/artifact/upload@v0.3 works on self-hosted"
+          elif [ "${{ steps.ascend-upload.outcome }}" == "skipped" ]; then
+            echo "::notice::ascend-gha-runners/artifact/upload skipped (missing OBS credentials)"
+          else
+            echo "::warning::ascend-gha-runners/artifact/upload failed - check OBS credentials and network"
+          fi
+
+  validate-pr-context-actions:
+    name: validate-peter-evans-comment
+    runs-on: linux-amd64-cpu-4-hk
+    if: github.event_name == 'pull_request'
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v7
+
+      - name: peter-evans/create-or-update-comment
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          issue-number: ${{ github.event.pull_request.number }}
+          body: |
+            ## Third-Party Actions Validation
+
+            ✅ `peter-evans/create-or-update-comment@v5` works on self-hosted runner `${{ runner.name }}`
+
+            - Runner: `${{ runner.name }}`
+            - Arch: `${{ runner.arch }}`
+            - OS: `${{ runner.os }}`
+
+      - name: Verify comment posted
+        run: echo "peter-evans/create-or-update-comment@v5 validation OK"
+
+  documentation:
+    name: actions-validation-documentation
+    runs-on: linux-amd64-cpu-4-hk
+    if: github.event_name == 'workflow_dispatch'
+
+    steps:
+      - name: Print validation documentation
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const summary = `
+            ## PR-Context-Dependent Actions Validation
+
+            The following actions require a PR/issue context and **cannot be validated** via \`workflow_dispatch\`:
+
+            | Action | Context | Validation Method |
+            |--------|---------|-------------------|
+            | \`peter-evans/create-or-update-comment@v5\` | PR/Issue | Trigger via PR event |
+            | \`peter-evans/slash-command-dispatch@v5\` | Issue Comment | Use slash command in PR |
+            | \`actions/stale@v10\` | Issue/PR | Schedule or manual trigger |
+            | \`actions/labeler@v6\` | PR | Trigger via PR event |
+            | \`github/issue-labeler@v3.4\` | Issue | Trigger via issue event |
+            | \`eps1lon/actions-label-merge-conflict@v3\` | PR | Trigger via PR event |
+
+            **Recommended**: Create a test PR with the \`pull_request\` trigger to validate these actions.
+
+            ## Actions with Security Concerns
+
+            | Action | Concern | Recommendation |
+            |--------|---------|----------------|
+            | \`tj-actions/changed-files@v47\` | Past supply chain security incidents | Replace with \`dorny/paths-filter@v4\` or native \`git diff\` |
+            | \`jlumbroso/free-disk-space\` | Destructive on self-hosted runners (removes system packages) | **Remove entirely** from self-hosted workflows |
+
+            ## Actions Requiring Special Credentials
+
+            | Action | Credential Required | Notes |
+            |--------|---------------------|-------|
+            | \`ascend-gha-runners/artifact/upload@v0.3\` | OBS Access Key + Secret Key | Must be configured in self-hosted runner secrets |
+            | \`docker/login-action@v4\` (to Quay) | Quay username/password | Must be configured in repo/organization secrets |
+            `;
+            console.log(summary);
+            return summary;
