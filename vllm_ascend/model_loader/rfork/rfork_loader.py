@@ -17,7 +17,9 @@
 import gc
 import os
 import time
+from contextlib import contextmanager
 from copy import copy
+from typing import Any, cast
 
 import torch
 import torch.nn as nn
@@ -105,6 +107,93 @@ def _make_fallback_load_config(load_config: LoadConfig) -> LoadConfig:
     fallback_load_config.load_format = "auto"
     fallback_load_config.model_loader_extra_config = {}
     return fallback_load_config
+
+
+def _reset_process_global_model_state(vllm_config: VllmConfig, model: Module | None = None) -> None:
+    """Clear process-global registries populated by a discarded model.
+
+    RFork fallback re-runs ``get_model`` in the same worker process after
+    discarding a failed model. Layer ``__init__`` registers each prefix into
+    ``compilation_config.static_forward_context`` (used by Attention, FusedMoE,
+    DeepseekV32IndexerCache, Compressor, KDA, GDN, ...) and raises
+    ``Duplicate layer name`` if a prefix is already present. ``del model`` only
+    releases the module instance; the registries survive. Remove only entries
+    owned by the discarded model so unrelated state in the same worker remains
+    available for later profiling/compilation.
+    """
+    stale_modules = set(model.modules()) if model is not None else None
+    removed_names: set[str] = set()
+    compilation_config = getattr(vllm_config, "compilation_config", None)
+    if compilation_config is not None:
+        static_forward_context = getattr(compilation_config, "static_forward_context", None)
+        if isinstance(static_forward_context, dict):
+            if stale_modules is None:
+                removed_names.update(static_forward_context)
+                static_forward_context.clear()
+            else:
+                for name, module in list(static_forward_context.items()):
+                    if module in stale_modules:
+                        removed_names.add(name)
+                        del static_forward_context[name]
+        static_all_moe_layers = getattr(compilation_config, "static_all_moe_layers", None)
+        if isinstance(static_all_moe_layers, list):
+            if stale_modules is None:
+                static_all_moe_layers.clear()
+            else:
+                static_all_moe_layers[:] = [
+                    layer
+                    for layer in static_all_moe_layers
+                    if layer not in stale_modules and layer not in removed_names
+                ]
+
+    # ROPE instances are cached globally and keyed by config; clear them so the
+    # re-initialized model builds fresh rope rather than reusing stale entries
+    # bound to the discarded model.
+    try:
+        from vllm.model_executor.layers.rotary_embedding import _ROPE_DICT
+
+        if isinstance(_ROPE_DICT, dict):
+            _ROPE_DICT.clear()
+    except Exception as e:  # pragma: no cover - best-effort across vLLM versions
+        logger.debug("RFork fallback: skip clearing _ROPE_DICT: %s", e)
+
+
+@contextmanager
+def _rfork_pre_transfer_weight_processing(model: Module):
+    """Bypass FusedMoE post-load validation during RFork pre-transfer layout work.
+
+    AscendFusedMoE wraps quant_method.process_weights_after_loading with a
+    shared-expert consistency check. RFork's processed-layout transfer calls
+    process_weights_after_loading before receiver weights arrive, so only this
+    RFork phase should use the wrapped function's original implementation.
+    """
+    from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE
+
+    restored: list[tuple[Any, object]] = []
+    seen_quant_methods: set[int] = set()
+    for module in model.modules():
+        if not isinstance(module, AscendFusedMoE):
+            continue
+
+        quant_method = getattr(module, "quant_method", None) or getattr(module, "_quant_method", None)
+        if quant_method is None or id(quant_method) in seen_quant_methods:
+            continue
+
+        process_weights = getattr(quant_method, "process_weights_after_loading", None)
+        original_process_weights = getattr(process_weights, "__wrapped__", None)
+        if original_process_weights is None:
+            continue
+
+        quant_method = cast(Any, quant_method)
+        seen_quant_methods.add(id(quant_method))
+        restored.append((quant_method, process_weights))
+        quant_method.process_weights_after_loading = original_process_weights
+
+    try:
+        yield
+    finally:
+        for quant_method, process_weights in restored:
+            quant_method.process_weights_after_loading = process_weights
 
 
 def _is_layer_sharding_enabled(vllm_config: VllmConfig) -> bool:
@@ -274,7 +363,8 @@ class RForkModelLoader(BaseModelLoader):
 
                 if processed_layout_transfer:
                     logger.info("RFork uses post-load tensor layout transfer for quantized model.")
-                    process_weights_after_loading(model, model_config, target_device)
+                    with _rfork_pre_transfer_weight_processing(model):
+                        process_weights_after_loading(model, model_config, target_device)
 
                 weight_load_start_time = time.perf_counter()
                 if not rfork_worker.pre_transfer(model):
@@ -300,6 +390,13 @@ class RForkModelLoader(BaseModelLoader):
                 rfork_worker.reset_transfer_state()
 
                 if need_del:
+                    # initialize_model populates process-global layer registries
+                    # (compilation_config.static_forward_context, _ROPE_DICT)
+                    # that survive `del model` and would raise "Duplicate layer
+                    # name" on re-init. Clear only entries owned by this failed
+                    # RFork model before rebuilding in the same process.
+                    _reset_process_global_model_state(vllm_config, model)
+
                     del model
                     gc.collect()
                     torch.npu.empty_cache()
