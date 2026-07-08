@@ -39,7 +39,7 @@ from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionBackend
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
-from vllm_ascend.ops.triton.mamba.causal_conv1d import causal_conv1d_fn
+from vllm_ascend.ops.triton.mamba.causal_conv1d import extract_last_width
 from vllm_ascend.utils import weak_ref_tensors
 
 
@@ -505,21 +505,53 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         if attn_metadata.num_prefills > 0:
             if mixed_qkv_non_spec is not None:
                 if get_pcp_group().world_size > 1:
+                    conv_weights_T = conv_weights.transpose(0, 1)
+                    activation_num = 1 if self.activation else 0
+                    non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor
+                    (query_start_loc_opt, cache_indices_opt, initial_state_mode_opt) = (
+                        get_non_spec_causal_conv1d_host_args(attn_metadata)
+                    )
+                    width = conv_weights.shape[1]
+                    state_len = width - 1
+                    num_seqs = non_spec_query_start_loc.shape[0] - 1
+                    prefill_seq_offset = max(0, num_seqs - attn_metadata.num_prefills)
+                    prefill_cache_indices = non_spec_state_indices_tensor[prefill_seq_offset:]
                     mixed_qkv_non_spec_T = mixed_qkv_non_spec.transpose(0, 1)
-                    has_initial_state = attn_metadata.has_initial_state
-                    non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor  # noqa: E501
-                    conv_state = self_kv_cache[0].transpose(-1, -2)
-                    mixed_qkv_non_spec = causal_conv1d_fn(
-                        mixed_qkv_non_spec_T,
-                        conv_weights,
-                        self.conv1d.bias,
-                        activation=self.activation,
-                        conv_states=conv_state,
-                        has_initial_state=has_initial_state,
-                        cache_indices=non_spec_state_indices_tensor,
-                        query_start_loc=non_spec_query_start_loc,
-                        metadata=attn_metadata,
-                    ).transpose(0, 1)
+                    last_width_prefill_x = extract_last_width(
+                        mixed_qkv_non_spec_T, non_spec_query_start_loc[prefill_seq_offset:], state_len
+                    )
+                    pcp_rank = get_pcp_group().rank_in_group
+                    all_last_width_prefill_x = get_pcp_group().all_gather(
+                        last_width_prefill_x.unsqueeze(0).contiguous(), 0
+                    )
+                    if pcp_rank > 0 and prefill_cache_indices.shape[0] > 0:
+                        self_kv_cache[0][prefill_cache_indices, :state_len, :] = all_last_width_prefill_x[
+                            pcp_rank - 1, ...
+                        ].transpose(-1, -2)
+                        ism_list = list(initial_state_mode_opt)
+                        for i in range(prefill_seq_offset, len(ism_list)):
+                            ism_list[i] = 1
+                        initial_state_mode_opt = tuple(ism_list)
+                    mixed_qkv_non_spec_output = torch.empty_like(mixed_qkv_non_spec)
+                    torch.ops._C_ascend.npu_causal_conv1d_custom(
+                        mixed_qkv_non_spec_output,
+                        mixed_qkv_non_spec,
+                        conv_weights_T,
+                        conv_state=self_kv_cache[0],
+                        bias_opt=self.conv1d.bias,
+                        query_start_loc_opt=query_start_loc_opt,
+                        cache_indices_opt=cache_indices_opt,
+                        initial_state_mode_opt=initial_state_mode_opt,
+                        num_accepted_tokens_opt=[],
+                        activation_mode=activation_num,
+                        pad_slot_id=PAD_SLOT_ID,
+                        run_mode=0,
+                    )
+                    mixed_qkv_non_spec = mixed_qkv_non_spec_output
+                    if prefill_cache_indices.shape[0] > 0:
+                        self_kv_cache[0][prefill_cache_indices, :state_len, :] = all_last_width_prefill_x[
+                            -1, ...
+                        ].transpose(-1, -2)
                 else:
                     conv_weights_T = conv_weights.transpose(0, 1)
                     activation_num = 1 if self.activation else 0

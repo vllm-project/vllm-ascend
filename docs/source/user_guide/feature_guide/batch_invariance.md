@@ -1,14 +1,14 @@
 # Batch Invariance
 
-```{note}
-Batch invariance is currently in beta. Some features are still under active development.
-Track progress and planned improvements at <https://github.com/vllm-project/vllm-ascend/issues/5487>
-```
+!!! note
 
-```{note}
-To install the batch invariance custom operator library, set `VLLM_BATCH_INVARIANT=1` before building vllm-ascend.
-For installation instructions, see <https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/installation.md#set-up-using-python>
-```
+    Batch invariance is currently in beta. Some features are still under active development.
+    Track progress and planned improvements at <https://github.com/vllm-project/vllm-ascend/issues/5487>
+
+!!! note
+
+    To install the batch invariance custom operator library, set `VLLM_BATCH_INVARIANT=1` before building vllm-ascend.
+    For installation instructions, see <https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/installation.md#set-up-using-python>
 
 This document shows how to enable batch invariance in vLLM-Ascend. Batch invariance ensures that the output of a model is deterministic and independent of the batch size or the order of requests in a batch.
 
@@ -43,7 +43,8 @@ export VLLM_BATCH_INVARIANT=1
 To start a vLLM server with batch invariance enabled:
 
 ```bash
-VLLM_BATCH_INVARIANT=1 vllm serve Qwen/Qwen3-8B
+VLLM_BATCH_INVARIANT=1 vllm serve Qwen/Qwen3-8B \
+  --compilation-config '{"cudagraph_mode": "PIECEWISE"}'
 ```
 
 Then use the OpenAI-compatible client:
@@ -94,6 +95,7 @@ sampling_params = SamplingParams(
 llm = LLM(
     model="Qwen/Qwen3-8B",
     tensor_parallel_size=1,
+    compilation_config={"cudagraph_mode": "PIECEWISE"},
 )
 
 # Outputs will be deterministic regardless of batch size
@@ -123,15 +125,21 @@ When batch invariance is enabled, vLLM:
 2. Ensures consistent numerical behavior across different batch sizes
 3. Disables certain optimizations that may introduce non-determinism
 
-```{note}
-Enabling batch invariance may impact performance compared to the default non-deterministic mode. This trade-off is intentional to guarantee reproducibility.
-```
+!!! note
+
+    The batch invariance attention operators currently do not support
+    `FULL'、'FULL_DECODE_ONLY` cudagraph mode.
+
+!!! note
+
+    Enabling batch invariance may impact performance compared to the default non-deterministic mode. This trade-off is intentional to guarantee reproducibility.
 
 ## Future Improvements
 
 The batch invariance feature is under active development. Planned improvements include:
 
 - Support for additional NPUs series
+- Support `FULL'、'FULL_DECODE_ONLY` cudagraph mode with batch invariance attention operators
 - Expanded model coverage
 - Performance optimizations
 - Additional testing and validation

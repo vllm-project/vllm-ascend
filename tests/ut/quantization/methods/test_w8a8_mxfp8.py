@@ -47,6 +47,8 @@ class TestAscendW8A8MXFP8LinearMethod(TestBase):
         self.assertEqual(layer._mxfp8_original_shapes["weight"], (128, 256))
         self.assertTrue(layer._mxfp8_transformed)
         self.assertEqual(layer.weight_scale.shape, (4, 128, 2))
+        self.assertTrue(layer.weight.data.is_contiguous())
+        self.assertTrue(layer.weight_scale.data.is_contiguous())
 
     def test_restore_after_process_returns_original_shape(self):
         layer = nn.Module()
@@ -120,6 +122,10 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
         self.assertTrue(hasattr(layer, "_mxfp8_original_shapes"))
         self.assertIn("w13_weight", layer._mxfp8_original_shapes)
         self.assertEqual(layer.w13_weight.shape, (original_shape[0], original_shape[2], original_shape[1]))
+        self.assertFalse(layer.w13_weight.data.is_contiguous())
+        self.assertFalse(layer.w2_weight.data.is_contiguous())
+        self.assertFalse(layer.w13_weight_scale.data.is_contiguous())
+        self.assertFalse(layer.w2_weight_scale.data.is_contiguous())
 
     def test_restore_weights_for_rl_loading(self):
         layer = create_mxfp_moe_layer(

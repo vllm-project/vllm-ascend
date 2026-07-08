@@ -2,9 +2,9 @@
 
 ## Getting Started
 
-:::{note}
-Context parallel feature currently is only supported on Atlas A3 device, and will be supported on Atlas A2 in the future.
-:::
+!!! note
+
+    Context parallel feature currently is only supported on Atlas A3 device, and will be supported on Atlas A2 in the future.
 
 vLLM-Ascend now supports long sequence with context parallel options. This guide takes one-by-one steps to verify these features with constrained resources.
 
@@ -28,10 +28,9 @@ You can use our official Docker image to run `DeepSeek-V3.1` directly.
 
 Select an image based on your machine type and start the Docker image on your node, refer to [using Docker](../../installation.md#set-up-using-docker).
 
-```{code-block} bash
-   :substitutions:
+```bash
 # Update the vllm-ascend image according to your environment.
-export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 export NAME=vllm-ascend
 
 # Run the container using the defined variables
@@ -69,203 +68,190 @@ We can run the following scripts to launch a server on the prefiller/decoder nod
 
 1. Run the following script to execute online 128k inference on three nodes respectively.
 
-    :::::{tab-set}
-    :sync-group: nodes
+    === "Prefiller node 1"
 
-    ::::{tab-item} Prefiller node 1
-    :sync: prefill node1
+            ```shell
+            nic_name="eth0"  # network card name
+            local_ip="192.0.0.1"
+            master_addr="192.0.0.1"
+            export HCCL_IF_IP=$local_ip
+            export GLOO_SOCKET_IFNAME=$nic_name
+            export TP_SOCKET_IFNAME=$nic_name
+            export HCCL_SOCKET_IFNAME=$nic_name
+            export HCCL_BUFFSIZE=768
+            export OMP_PROC_BIND=false
+            export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+            export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
+            export OMP_NUM_THREADS=1
+            export HCCL_OP_EXPANSION_MODE="AIV"
+            export VLLM_USE_V1=1
+            export TASK_QUEUE_ENABLE=1
 
-    ```shell
-    nic_name="eth0"  # network card name
-    local_ip="192.0.0.1"
-    master_addr="192.0.0.1"
-    export HCCL_IF_IP=$local_ip
-    export GLOO_SOCKET_IFNAME=$nic_name
-    export TP_SOCKET_IFNAME=$nic_name
-    export HCCL_SOCKET_IFNAME=$nic_name
-    export HCCL_BUFFSIZE=768
-    export OMP_PROC_BIND=false
-    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-    export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
-    export OMP_NUM_THREADS=1
-    export HCCL_OP_EXPANSION_MODE="AIV"
-    export VLLM_USE_V1=1
-    export TASK_QUEUE_ENABLE=1
+            vllm serve /path_to_weight/DeepSeek-V3.1_w8a8mix_mtp \
+              --host 0.0.0.0 \
+              --port 8004 \
+              --decode-context-parallel-size 8 \
+              --prefill-context-parallel-size 2 \
+              --cp-kv-cache-interleave-size 128 \
+              --tensor-parallel-size 16 \
+              --enable-expert-parallel \
+              --quantization ascend \
+              --enforce-eager \
+              --served-model-name deepseek_v3 \
+              --seed 1024 \
+              --no-enable-chunked-prefill \
+              --no-enable-prefix-caching \
+              --max-num-seqs 1 \
+              --max-model-len 136000 \
+              --max-num-batched-tokens 136000 \
+              --block-size 128 \
+              --trust-remote-code \
+              --gpu-memory-utilization 0.8 \
+              --nnodes 2 \
+              --node-rank 0 \
+              --master-addr $master_addr \
+              --master-port 7001 \
+              --speculative-config '{"num_speculative_tokens": 3, "method":"deepseek_mtp"}' \
+              --kv-transfer-config \
+              '{"kv_connector": "MooncakeConnectorV1",
+              "kv_role": "kv_producer",
+              "kv_port": "30000",
+              "kv_connector_extra_config": {
+                        "use_ascend_direct": true,
+                        "prefill": {
+                                "dp_size": 1,
+                                "tp_size": 16
+                        },
+                        "decode": {
+                                "dp_size": 1,
+                                "tp_size": 16
+                        }
+                  }
+              }'
+            ```
 
-    vllm serve /path_to_weight/DeepSeek-V3.1_w8a8mix_mtp \
-      --host 0.0.0.0 \
-      --port 8004 \
-      --decode-context-parallel-size 8 \
-      --prefill-context-parallel-size 2 \
-      --cp-kv-cache-interleave-size 128 \
-      --tensor-parallel-size 16 \
-      --enable-expert-parallel \
-      --quantization ascend \
-      --enforce-eager \
-      --served-model-name deepseek_v3 \
-      --seed 1024 \
-      --no-enable-chunked-prefill \
-      --no-enable-prefix-caching \
-      --max-num-seqs 1 \
-      --max-model-len 136000 \
-      --max-num-batched-tokens 136000 \
-      --block-size 128 \
-      --trust-remote-code \
-      --gpu-memory-utilization 0.8 \
-      --nnodes 2 \
-      --node-rank 0 \
-      --master-addr $master_addr \
-      --master-port 7001 \
-      --speculative-config '{"num_speculative_tokens": 3, "method":"deepseek_mtp"}' \
-      --kv-transfer-config \
-      '{"kv_connector": "MooncakeConnectorV1",
-      "kv_role": "kv_producer",
-      "kv_port": "30000",
-      "kv_connector_extra_config": {
-                "use_ascend_direct": true,
-                "prefill": {
-                        "dp_size": 1,
-                        "tp_size": 16
-                },
-                "decode": {
-                        "dp_size": 1,
-                        "tp_size": 16
-                }
-          }
-      }'
-    ```
+    === "Prefiller node 2"
 
-    ::::
+            ```shell
+            nic_name="eth0"  # network card name
+            local_ip="192.0.0.2"
+            master_addr="192.0.0.1"
+            export HCCL_IF_IP=$local_ip
+            export GLOO_SOCKET_IFNAME=$nic_name
+            export TP_SOCKET_IFNAME=$nic_name
+            export HCCL_SOCKET_IFNAME=$nic_name
+            export HCCL_BUFFSIZE=768
+            export OMP_PROC_BIND=false
+            export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+            export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
+            export OMP_NUM_THREADS=1
+            export HCCL_OP_EXPANSION_MODE="AIV"
+            export VLLM_USE_V1=1
+            export TASK_QUEUE_ENABLE=1
 
-    ::::{tab-item} Prefiller node 2
-    :sync: prefill node2
+            vllm serve /path_to_weight/DeepSeek-V3.1_w8a8mix_mtp \
+              --host 0.0.0.0 \
+              --port 8004 \
+              --decode-context-parallel-size 8 \
+              --prefill-context-parallel-size 2 \
+              --cp-kv-cache-interleave-size 128 \
+              --tensor-parallel-size 16 \
+              --enable-expert-parallel \
+              --quantization ascend \
+              --enforce-eager \
+              --served-model-name deepseek_v3 \
+              --seed 1024 \
+              --no-enable-chunked-prefill \
+              --no-enable-prefix-caching \
+              --max-num-seqs 1 \
+              --max-model-len 136000 \
+              --max-num-batched-tokens 136000 \
+              --block-size 128 \
+              --trust-remote-code \
+              --gpu-memory-utilization 0.8 \
+              --nnodes 2 \
+              --node-rank 1 \
+              --headless \
+              --master-addr $master_addr \
+              --master-port 7001 \
+              --speculative-config '{"num_speculative_tokens": 3, "method":"deepseek_mtp"}' \
+              --kv-transfer-config \
+              '{"kv_connector": "MooncakeConnectorV1",
+              "kv_role": "kv_producer",
+              "kv_port": "30000",
+              "kv_connector_extra_config": {
+                        "use_ascend_direct": true,
+                        "prefill": {
+                                "dp_size": 1,
+                                "tp_size": 16
+                        },
+                        "decode": {
+                                "dp_size": 1,
+                                "tp_size": 16
+                        }
+                  }
+              }'
+            ```
 
-    ```shell
-    nic_name="eth0"  # network card name
-    local_ip="192.0.0.2"
-    master_addr="192.0.0.1"
-    export HCCL_IF_IP=$local_ip
-    export GLOO_SOCKET_IFNAME=$nic_name
-    export TP_SOCKET_IFNAME=$nic_name
-    export HCCL_SOCKET_IFNAME=$nic_name
-    export HCCL_BUFFSIZE=768
-    export OMP_PROC_BIND=false
-    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-    export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
-    export OMP_NUM_THREADS=1
-    export HCCL_OP_EXPANSION_MODE="AIV"
-    export VLLM_USE_V1=1
-    export TASK_QUEUE_ENABLE=1
+    === "Decoder node 1"
 
-    vllm serve /path_to_weight/DeepSeek-V3.1_w8a8mix_mtp \
-      --host 0.0.0.0 \
-      --port 8004 \
-      --decode-context-parallel-size 8 \
-      --prefill-context-parallel-size 2 \
-      --cp-kv-cache-interleave-size 128 \
-      --tensor-parallel-size 16 \
-      --enable-expert-parallel \
-      --quantization ascend \
-      --enforce-eager \
-      --served-model-name deepseek_v3 \
-      --seed 1024 \
-      --no-enable-chunked-prefill \
-      --no-enable-prefix-caching \
-      --max-num-seqs 1 \
-      --max-model-len 136000 \
-      --max-num-batched-tokens 136000 \
-      --block-size 128 \
-      --trust-remote-code \
-      --gpu-memory-utilization 0.8 \
-      --nnodes 2 \
-      --node-rank 1 \
-      --headless \
-      --master-addr $master_addr \
-      --master-port 7001 \
-      --speculative-config '{"num_speculative_tokens": 3, "method":"deepseek_mtp"}' \
-      --kv-transfer-config \
-      '{"kv_connector": "MooncakeConnectorV1",
-      "kv_role": "kv_producer",
-      "kv_port": "30000",
-      "kv_connector_extra_config": {
-                "use_ascend_direct": true,
-                "prefill": {
-                        "dp_size": 1,
-                        "tp_size": 16
-                },
-                "decode": {
-                        "dp_size": 1,
-                        "tp_size": 16
-                }
-          }
-      }'
-    ```
+            ```shell
+            nic_name="eth0"  # network card name
+            local_ip="192.0.0.3"
+            export HCCL_IF_IP=$local_ip
+            export GLOO_SOCKET_IFNAME=$nic_name
+            export TP_SOCKET_IFNAME=$nic_name
+            export HCCL_SOCKET_IFNAME=$nic_name
+            export HCCL_BUFFSIZE=768
+            export OMP_PROC_BIND=false
+            export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
+            export OMP_NUM_THREADS=1
+            export HCCL_OP_EXPANSION_MODE="AIV"
+            export VLLM_USE_V1=1
+            export TASK_QUEUE_ENABLE=1
 
-    ::::
-
-    ::::{tab-item} Decoder node 1
-    :sync: decoder node1
-
-    ```shell
-    nic_name="eth0"  # network card name
-    local_ip="192.0.0.3"
-    export HCCL_IF_IP=$local_ip
-    export GLOO_SOCKET_IFNAME=$nic_name
-    export TP_SOCKET_IFNAME=$nic_name
-    export HCCL_SOCKET_IFNAME=$nic_name
-    export HCCL_BUFFSIZE=768
-    export OMP_PROC_BIND=false
-    export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
-    export OMP_NUM_THREADS=1
-    export HCCL_OP_EXPANSION_MODE="AIV"
-    export VLLM_USE_V1=1
-    export TASK_QUEUE_ENABLE=1
-
-    vllm serve /path_to_weight/DeepSeek-V3.1_w8a8mix_mtp \
-      --host 0.0.0.0 \
-      --port 8004 \
-      --api-server-count 1 \
-      --data-parallel-size 1 \
-      --data-parallel-size-local 1 \
-      --data-parallel-start-rank 0 \
-      --data-parallel-address $local_ip \
-      --data-parallel-rpc-port 5980  \
-      --decode-context-parallel-size 1 \
-      --tensor-parallel-size 16 \
-      --enable-expert-parallel \
-      --quantization ascend \
-      --no-enable-prefix-caching \
-      --distributed-executor-backend mp \
-      --served-model-name deepseek_v3 \
-      --seed 1024 \
-      --max-model-len 136000 \
-      --max-num-batched-tokens 128 \
-      --enable-chunked-prefill \
-      --max-num-seqs 4 \
-      --trust-remote-code \
-      --gpu-memory-utilization 0.96 \
-      --speculative-config '{"num_speculative_tokens": 3, "method":"deepseek_mtp"}' \
-      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[1,2,4]}' \
-      --kv-transfer-config \
-      '{"kv_connector": "MooncakeConnectorV1",
-      "kv_role": "kv_consumer",
-      "kv_port": "30200",
-      "kv_connector_extra_config": {
-                "prefill": {
-                        "dp_size": 1,
-                        "tp_size": 16
-                },
-                "decode": {
-                        "dp_size": 1,
-                        "tp_size": 16
-                }
-          }
-      }'
-    ```
-
-    ::::
-
-    :::::
+            vllm serve /path_to_weight/DeepSeek-V3.1_w8a8mix_mtp \
+              --host 0.0.0.0 \
+              --port 8004 \
+              --api-server-count 1 \
+              --data-parallel-size 1 \
+              --data-parallel-size-local 1 \
+              --data-parallel-start-rank 0 \
+              --data-parallel-address $local_ip \
+              --data-parallel-rpc-port 5980  \
+              --decode-context-parallel-size 1 \
+              --tensor-parallel-size 16 \
+              --enable-expert-parallel \
+              --quantization ascend \
+              --no-enable-prefix-caching \
+              --distributed-executor-backend mp \
+              --served-model-name deepseek_v3 \
+              --seed 1024 \
+              --max-model-len 136000 \
+              --max-num-batched-tokens 128 \
+              --enable-chunked-prefill \
+              --max-num-seqs 4 \
+              --trust-remote-code \
+              --gpu-memory-utilization 0.96 \
+              --additional-config '{"recompute_scheduler_enable": true}' \
+              --speculative-config '{"num_speculative_tokens": 3, "method":"deepseek_mtp"}' \
+              --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[1,2,4]}' \
+              --kv-transfer-config \
+              '{"kv_connector": "MooncakeConnectorV1",
+              "kv_role": "kv_consumer",
+              "kv_port": "30200",
+              "kv_connector_extra_config": {
+                        "prefill": {
+                                "dp_size": 1,
+                                "tp_size": 16
+                        },
+                        "decode": {
+                                "dp_size": 1,
+                                "tp_size": 16
+                        }
+                  }
+              }'
+            ```
 
 2. Prefill master node `proxy.sh` script
 
@@ -303,11 +289,12 @@ The parameters are explained as follows:
 - `--max-num-batched-tokens` represents the maximum number of tokens that the model can process in a single step. Currently, vLLM v1 scheduling enables ChunkPrefill/SplitFuse by default, which means:
     - (1) If the input length of a request is greater than `--max-num-batched-tokens`, it will be divided into multiple rounds of computation according to `--max-num-batched-tokens`;
     - (2) Decode requests are prioritized for scheduling, and prefill requests are scheduled only if there is available capacity.
-    - Generally, if `--max-num-batched-tokens` is set to a larger value, the overall latency will be lower, but the pressure on GPU memory (activation value usage) will be greater.
-- `--gpu-memory-utilization` represents the proportion of HBM that vLLM will use for actual inference. Its essential function is to calculate the available kv_cache size. During the warm-up phase (referred to as profile run in vLLM), vLLM records the peak GPU memory usage during an inference process with an input size of `--max-num-batched-tokens`. The available kv_cache size is then calculated as: `--gpu-memory-utilization` * HBM size - peak GPU memory usage. Therefore, the larger the value of `--gpu-memory-utilization`, the more kv_cache can be used. However, since the GPU memory usage during the warm-up phase may differ from that during actual inference (e.g., due to uneven EP load), setting `--gpu-memory-utilization` too high may lead to OOM (Out of Memory) issues during actual inference. The default value is `0.9`.
+    - Generally, if `--max-num-batched-tokens` is set to a larger value, the overall latency will be lower, but the pressure on NPU memory (activation value usage) will be greater.
+- `--gpu-memory-utilization` represents the proportion of HBM that vLLM will use for actual inference. Its essential function is to calculate the available kv_cache size. During the warm-up phase (referred to as profile run in vLLM), vLLM records the peak NPU memory usage during an inference process with an input size of `--max-num-batched-tokens`. The available kv_cache size is then calculated as: `--gpu-memory-utilization` * HBM size - peak NPU memory usage. Therefore, the larger the value of `--gpu-memory-utilization`, the more kv_cache can be used. However, since the NPU memory usage during the warm-up phase may differ from that during actual inference (e.g., due to uneven EP load), setting `--gpu-memory-utilization` too high may lead to OOM (Out of Memory) issues during actual inference. The default value is `0.9`.
 - `--enable-expert-parallel` indicates that EP is enabled. Note that vLLM does not support a mixed approach of ETP and EP; that is, MoE can either use pure EP or pure TP.
 - `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.
 - `--quantization` "ascend" indicates that quantization is used. To disable quantization, remove this option.
+- `--additional-config '{"recompute_scheduler_enable": true}'`: enables the recomputation scheduler. When the Key-Value Cache (KV Cache) of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, enable this configuration only on decode nodes.
 - `--compilation-config` contains configurations related to the aclgraph graph mode. The most significant configurations are "cudagraph_mode" and "cudagraph_capture_sizes", which have the following meanings:
 "cudagraph_mode": represents the specific graph mode. Currently, "PIECEWISE" and "FULL_DECODE_ONLY" are supported. The graph mode is mainly used to reduce the cost of operator dispatch. Currently, "FULL_DECODE_ONLY" is recommended.
 - "cudagraph_capture_sizes": represents different levels of graph modes. The default value is [1, 2, 4, 8, 16, 24, 32, 40,..., `--max-num-seqs`]. In the graph mode, the input for graphs at different levels is fixed, and inputs between levels are automatically padded to the next level. Currently, the default setting is recommended. Only in some scenarios is it necessary to set this separately to achieve optimal performance.

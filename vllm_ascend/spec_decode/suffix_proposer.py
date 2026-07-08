@@ -1,4 +1,7 @@
+import torch
 from vllm.v1.spec_decode.suffix_decoding import SuffixDecodingProposer
+
+from vllm_ascend.utils import vllm_version_is
 
 
 class AscendSuffixDecodingProposer(SuffixDecodingProposer):
@@ -20,5 +23,20 @@ class AscendSuffixDecodingProposer(SuffixDecodingProposer):
     ):
         pass
 
-    def propose(self, valid_sampled_token_ids):
-        return super().propose(self.runner.input_batch, valid_sampled_token_ids)
+    def propose(
+        self,
+        sampled_token_ids: list[list[int]],
+        num_tokens_no_spec=None,
+        token_ids_cpu=None,
+        num_speculative_tokens: int = 0,
+        slot_mappings: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None = None,
+    ):
+        if vllm_version_is("0.23.0"):
+            return super().propose(self.runner.input_batch, sampled_token_ids)
+        else:
+            return super().propose(
+                num_speculative_tokens,
+                self.runner.input_batch,
+                sampled_token_ids,
+                slot_mappings,
+            )

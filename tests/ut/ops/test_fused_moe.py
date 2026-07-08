@@ -27,11 +27,6 @@ from pytest_mock import MockerFixture
 
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.ops.fused_moe import fused_moe as fused_moe_module
-from vllm_ascend.ops.fused_moe.fused_moe import (
-    AscendFusedMoE,
-    AscendMoERunner,
-    AscendUnquantizedFusedMoEMethod,
-)
 from vllm_ascend.ops.fused_moe.moe_comm_method import FusedExpertsResult
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoEMlpComputeInput,
@@ -40,9 +35,22 @@ from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoEWeights,
 )
 from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.utils import AscendDeviceType, adapt_patch
+from vllm_ascend.utils import AscendDeviceType, adapt_patch, vllm_version_is
 
-adapt_patch(True)
+if vllm_version_is("0.23.0"):
+    from vllm_ascend.ops.fused_moe import fused_moe_0_23_0 as fused_moe_legacy_module
+    from vllm_ascend.ops.fused_moe.fused_moe import (
+        AscendFusedMoE,
+        AscendMoERunner,
+        AscendUnquantizedFusedMoEMethod,
+    )
+
+    adapt_patch(True)
+else:
+    pytest.skip(
+        "Legacy AscendFusedMoE UTs are only for vLLM 0.23.0.",
+        allow_module_level=True,
+    )
 
 
 def mock_ep_and_mc2_group(mocker):
@@ -515,9 +523,9 @@ class TestAscendMoERunner:
     )
     def test_runner_reduction_properties(self, monkeypatch, moe_comm_type, flash_comm_v1_enabled, expected):
         runner = AscendMoERunner.__new__(AscendMoERunner)
-        monkeypatch.setattr(fused_moe_module, "_EXTRA_CTX", SimpleNamespace(moe_comm_type=moe_comm_type))
+        monkeypatch.setattr(fused_moe_legacy_module, "_EXTRA_CTX", SimpleNamespace(moe_comm_type=moe_comm_type))
         monkeypatch.setattr(
-            fused_moe_module,
+            fused_moe_legacy_module,
             "_EXTRA_CTX",
             SimpleNamespace(moe_comm_type=moe_comm_type, flash_comm_v1_enabled=flash_comm_v1_enabled),
         )
@@ -648,9 +656,9 @@ class TestAscendFusedMoE:
             expert_tokens=torch.tensor([2, 5]),
             group_list_type=0,
         )
-        monkeypatch.setattr(fused_moe_module, "get_forward_context", MagicMock(return_value=forward_context))
+        monkeypatch.setattr(fused_moe_legacy_module, "get_forward_context", MagicMock(return_value=forward_context))
         monkeypatch.setattr(
-            fused_moe_module,
+            fused_moe_legacy_module,
             "_EXTRA_CTX",
             SimpleNamespace(
                 in_profile_run=True,
@@ -724,9 +732,9 @@ class TestAscendFusedMoE:
             expert_tokens=torch.tensor([4, 6]),
             group_list_type=1,
         )
-        monkeypatch.setattr(fused_moe_module, "get_forward_context", MagicMock(return_value=SimpleNamespace()))
+        monkeypatch.setattr(fused_moe_legacy_module, "get_forward_context", MagicMock(return_value=SimpleNamespace()))
         monkeypatch.setattr(
-            fused_moe_module,
+            fused_moe_legacy_module,
             "_EXTRA_CTX",
             SimpleNamespace(
                 in_profile_run=False,

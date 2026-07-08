@@ -494,7 +494,7 @@ gh pr create --repo vllm-project/vllm-ascend \
 | `docs/source/user_guide/release_notes.md` | Add new release notes |
 | `docs/source/community/versioning_policy.md` | Compatibility matrix, release window |
 | `docs/source/community/contributors.md` | New contributors |
-| `docs/conf.py` | Package version |
+| `mkdocs.yml` | Package version (in `extra:` block) |
 | `.github/workflows/schedule_image_build_and_push.yaml` | Config |
 
 ### 7.2 Version Update Script

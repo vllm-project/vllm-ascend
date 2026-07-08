@@ -123,6 +123,32 @@ def is_310p():
     return get_ascend_device_type() == AscendDeviceType._310P
 
 
+_IS_RC_DEVICE: bool | None = None
+
+
+def is_rc_device() -> bool:
+    """Return True if the 310P NPU runs in Root Complex (RC) mode.
+
+    RC mode (e.g. Atlas 200I Pro): host and NPU share memory. EP mode
+    (e.g. Atlas 300I DUO on PCIe): ``lspci`` output typically contains
+    ``accelerators``.
+    """
+    global _IS_RC_DEVICE
+    if not is_310p():
+        return False
+    if _IS_RC_DEVICE is not None:
+        return _IS_RC_DEVICE
+
+    try:
+        import subprocess
+
+        result = subprocess.run(["lspci"], capture_output=True, text=True, check=True)
+        _IS_RC_DEVICE = not any("accelerators" in line.strip() for line in result.stdout.splitlines())
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        _IS_RC_DEVICE = False
+    return _IS_RC_DEVICE
+
+
 def is_950():
     return get_ascend_device_type() == AscendDeviceType.A5
 
@@ -653,7 +679,6 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     )
     from vllm_ascend.ops.bailing_moe_linear_attn import AscendBailingMoELinearAttention
     from vllm_ascend.ops.conv import AscendConv3dLayer
-    from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE
     from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
     from vllm_ascend.ops.layernorm import AscendGemmaRMSNorm, AscendRMSNorm, AscendRMSNormGated
     from vllm_ascend.ops.linear import (
@@ -699,7 +724,6 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "LogitsProcessor": AscendLogitsProcessor,
         "RMSNorm": AscendRMSNorm,
         "GemmaRMSNorm": AscendGemmaRMSNorm,
-        "FusedMoE": AscendFusedMoE,
         "MultiHeadLatentAttentionWrapper": AscendMultiHeadLatentAttention,
         "MMEncoderAttention": AscendMMEncoderAttention,
         "ApplyRotaryEmb": AscendApplyRotaryEmb,
@@ -710,6 +734,10 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "GatedDeltaNetAttention": AscendGatedDeltaNetAttention,
         "BailingMoELinearAttention": AscendBailingMoELinearAttention,
     }
+    if vllm_version_is("0.23.0"):
+        from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE
+
+        REGISTERED_ASCEND_OPS["FusedMoE"] = AscendFusedMoE
 
     if vllm_config is None:
         try:
@@ -725,7 +753,6 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
 
     # 310P: override selected ops with 310P implementations (keep minimal changes outside _310p)
     if is_310p():
-        from vllm_ascend._310p.fused_moe.fused_moe import AscendFusedMoE310
         from vllm_ascend._310p.ops.activation import AscendSiluAndMul310
         from vllm_ascend._310p.ops.conv import AscendConv3dLayer310
         from vllm_ascend._310p.ops.fla.gdn_310 import AscendGatedDeltaNetAttention310
@@ -748,7 +775,6 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
                 "RMSNorm": AscendRMSNorm310,
                 "GemmaRMSNorm": AscendGemmaRMSNorm310,
                 "RMSNormGated": AscendRMSNormGated310,
-                "FusedMoE": AscendFusedMoE310,
                 "ParallelLMHead": AscendParallelLMHead310,
                 "VocabParallelEmbedding": AscendVocabParallelEmbedding310,
                 "MMEncoderAttention": AscendMMEncoderAttention310,
@@ -757,6 +783,10 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
                 "MRotaryEmbedding": AscendMRotaryEmbedding310,
             }
         )
+        if vllm_version_is("0.23.0"):
+            from vllm_ascend._310p.fused_moe.fused_moe import AscendFusedMoE310
+
+            REGISTERED_ASCEND_OPS["FusedMoE"] = AscendFusedMoE310
 
     for name, op_cls in REGISTERED_ASCEND_OPS.items():
         CustomOp.register_oot(_decorated_op_cls=op_cls, name=name)
@@ -1125,8 +1155,6 @@ def _compute_potential_max_tokens(vllm_config) -> int:
     scheduler_config = vllm_config.scheduler_config
     speculative_config = vllm_config.speculative_config
     uniform_decode_query_len = 1 if not speculative_config else 1 + speculative_config.num_speculative_tokens
-    decode_max_num_seqs = getattr(scheduler_config, "decode_max_num_seqs", 0)
-    max_num_reqs = max(scheduler_config.max_num_seqs, decode_max_num_seqs)
 
     # Use max cudagraph capture size if available, otherwise the maximal uniform
     # decode token count.
@@ -1149,14 +1177,13 @@ def _compute_potential_max_tokens(vllm_config) -> int:
                 potential_max_tokens,
             )
     else:
-        potential_max_tokens = min(max_num_reqs * uniform_decode_query_len, 512)
+        potential_max_tokens = min(scheduler_config.max_num_seqs * uniform_decode_query_len, 512)
     return potential_max_tokens
 
 
 # potential_max_tokens is computed once in the model runner __init__ and reused by
 # both the skip-allreduce decision and the o_proj static-exchange buffer sizing, so
-# neither path recomputes it. Mirrors the _mc2_tokens_capacity set/get pattern in
-# ascend_forward_context.py.
+# neither path recomputes it.
 _potential_max_tokens: int | None = None
 
 
@@ -1398,6 +1425,53 @@ def check_kv_extra_config(vllm_config):
         _check("prefill", vllm_config.kv_transfer_config.get_from_extra_config("prefill", {}))
     if vllm_config.kv_transfer_config.is_kv_consumer:
         _check("decode", vllm_config.kv_transfer_config.get_from_extra_config("decode", {}))
+
+
+def is_gqa_backend(vllm_config: VllmConfig) -> bool:
+    model_config = getattr(vllm_config, "model_config", None)
+    if model_config is None:
+        return False
+
+    if getattr(model_config, "is_deepseek_mla", False) or getattr(model_config, "use_mla", False):
+        return False
+
+    model_arch_config = getattr(model_config, "model_arch_config", None)
+    total_num_attention_heads = getattr(model_arch_config, "total_num_attention_heads", None)
+    get_total_num_kv_heads = getattr(model_config, "get_total_num_kv_heads", None)
+    if total_num_attention_heads is None or not callable(get_total_num_kv_heads):
+        return False
+
+    total_num_kv_heads = get_total_num_kv_heads()
+    if total_num_kv_heads is None:
+        return False
+
+    return total_num_attention_heads != total_num_kv_heads
+
+
+def uses_mooncake_connector(kv_transfer_config: Any) -> bool:
+    mooncake_connector_names = {"MooncakeConnector", "MooncakeConnectorV1"}
+    return bool(_collect_kv_connector_names(kv_transfer_config) & mooncake_connector_names)
+
+
+def _collect_kv_connector_names(value: Any) -> set[str]:
+    connector_names: set[str] = set()
+    if isinstance(value, dict):
+        connector = value.get("kv_connector")
+        if isinstance(connector, str):
+            connector_names.add(connector)
+        for nested_value in value.values():
+            connector_names.update(_collect_kv_connector_names(nested_value))
+    elif isinstance(value, (list, tuple)):
+        for nested_value in value:
+            connector_names.update(_collect_kv_connector_names(nested_value))
+    else:
+        connector = getattr(value, "kv_connector", None)
+        if isinstance(connector, str):
+            connector_names.add(connector)
+        extra_config = getattr(value, "kv_connector_extra_config", None)
+        if isinstance(extra_config, (dict, list, tuple)):
+            connector_names.update(_collect_kv_connector_names(extra_config))
+    return connector_names
 
 
 def singleton(cls):
