@@ -112,7 +112,7 @@ from vllm.v1.worker.ubatch_utils import (
 from vllm.v1.worker.utils import AttentionGroup, select_common_block_size
 
 # yapf: enable
-from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_config import get_ascend_config, get_score_encoder_cache_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
 from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadataBuilder
@@ -942,11 +942,11 @@ class NPUModelRunner(GPUModelRunner):
                     del self.tmp_encoder_cache[mm_hash]
 
     def _async_process_scheduler_output(self, scheduler_output: "SchedulerOutput") -> None:
+        ec_manager_metadata = getattr(scheduler_output, "ec_manager_metadata", None)
+        assert ec_manager_metadata is not None, "SchedulerOutput.ec_manager_metadata is None, ec cache scheduling metadata missing"
         # Free the cached encoder outputs.
-        promoting_mm_hashes = getattr(scheduler_output, "promoting_mm_hashes", [])
-        cpu_get_encoder_mm_hashes = getattr(
-            scheduler_output, "cpu_get_encoder_mm_hashes", []
-        )
+        promoting_mm_hashes = ec_manager_metadata.promoting_mm_hashes
+        cpu_get_encoder_mm_hashes = ec_manager_metadata.cpu_get_encoder_mm_hashes
 
         for mm_hash in scheduler_output.free_encoder_mm_hashes:
             value = self.encoder_cache.pop(mm_hash, None)
@@ -1324,7 +1324,9 @@ class NPUModelRunner(GPUModelRunner):
             )
             encoder_outputs.extend(curr_group_outputs)
 
-        promoting_mm_hashes = getattr(scheduler_output, "promoting_mm_hashes", [])
+        ec_manager_metadata = getattr(scheduler_output, "ec_manager_metadata", None)
+        assert ec_manager_metadata is not None, "SchedulerOutput.ec_manager_metadata is None, ec cache scheduling metadata missing"
+        promoting_mm_hashes = ec_manager_metadata.promoting_mm_hashes
 
         # Cache the encoder outputs by mm_hash
         for (mm_hash, pos_info), output in zip(mm_hashes_pos, encoder_outputs):
