@@ -156,6 +156,7 @@ jobs:
 
       - name: Run pre-commit
         env:
+          PRE_COMMIT_HOME: /tmp/pre-commit-cache
           PRE_COMMIT_COLOR: always
           FORCE_COLOR: "1"
           TERM: xterm-256color
