@@ -14,6 +14,7 @@
 # limitations under the License.
 #
 
+from functools import wraps
 from types import SimpleNamespace
 
 import pytest
@@ -27,6 +28,8 @@ from vllm_ascend.model_loader.rfork.rfork_loader import (
     _is_draft_model,
     _is_dynamic_eplb_enabled,
     _make_fallback_load_config,
+    _reset_process_global_model_state,
+    _rfork_pre_transfer_weight_processing,
 )
 from vllm_ascend.model_loader.rfork.seed_protocol import get_local_seed_key
 
@@ -483,3 +486,176 @@ def test_rfork_native_eplb_uses_default_loader(monkeypatch):
     assert captured["load_config"] is not load_config
     assert captured["load_config"].load_format == "auto"
     assert captured["load_config"].model_loader_extra_config == {}
+
+
+def test_rfork_fallback_clears_only_failed_model_state_before_reinit(monkeypatch):
+    """Fallback re-init in the same process must first clear stale layer registries."""
+    import vllm.model_executor.model_loader as model_loader
+    from vllm.model_executor.layers.rotary_embedding import _ROPE_DICT
+
+    load_config = DummyLoadConfig({"model_url": "model", "model_deploy_strategy_name": "tp8"})
+    loader = RForkModelLoader(load_config)
+    model_config = SimpleNamespace(dtype=torch.float32, model="/models/test", quantization="ascend")
+    vllm_config = _vllm_config(model_config=model_config)
+    stale_attention = SimpleNamespace()
+    stale_moe = SimpleNamespace()
+    unrelated_layer = SimpleNamespace()
+    fallback_down_proj = SimpleNamespace()
+    vllm_config.compilation_config = SimpleNamespace(
+        static_forward_context={
+            "model.layers.0.self_attn.indexer.k_cache": stale_attention,
+            "unrelated.layer": unrelated_layer,
+        },
+        static_all_moe_layers=[
+            stale_moe,
+            "model.layers.0.self_attn.indexer.k_cache",
+            "unrelated.layer",
+        ],
+    )
+    _ROPE_DICT[("identity", 1.0, 32768)] = object()
+
+    class _DiscardedModel:
+        def modules(self):
+            return iter([self, stale_attention, stale_moe])
+
+    rfork_model = _DiscardedModel()
+    expected_model = SimpleNamespace()
+    get_model_calls = []
+
+    def fake_get_model(**kwargs):
+        get_model_calls.append(kwargs)
+        assert vllm_config.compilation_config.static_forward_context == {
+            "unrelated.layer": unrelated_layer,
+        }
+        assert vllm_config.compilation_config.static_all_moe_layers == ["unrelated.layer"]
+        assert _ROPE_DICT == {}
+        vllm_config.compilation_config.static_forward_context["model.layers.0.mlp.down_proj"] = fallback_down_proj
+        return expected_model
+
+    rfork_worker = SimpleNamespace(
+        is_seed_available=lambda: True,
+        pre_transfer=lambda model: True,
+        transfer=lambda model: False,
+        post_transfer=lambda: True,
+        reset_transfer_state=lambda: None,
+        start_seed_service=lambda model: None,
+    )
+
+    monkeypatch.setattr(loader, "_ensure_rfork_worker", lambda vc, mc: rfork_worker)
+    monkeypatch.setattr(model_loader, "get_model", fake_get_model)
+    monkeypatch.setattr(
+        "vllm_ascend.model_loader.rfork.rfork_loader.initialize_model",
+        lambda **kwargs: rfork_model,
+    )
+    monkeypatch.setattr(
+        "vllm_ascend.model_loader.rfork.rfork_loader.process_weights_after_loading",
+        lambda *args, **kwargs: None,
+    )
+
+    model = loader.load_model(vllm_config=vllm_config, model_config=model_config)
+
+    assert model is expected_model
+    assert len(get_model_calls) == 1
+    assert vllm_config.compilation_config.static_forward_context == {
+        "unrelated.layer": unrelated_layer,
+        "model.layers.0.mlp.down_proj": fallback_down_proj,
+    }
+    assert vllm_config.compilation_config.static_all_moe_layers == ["unrelated.layer"]
+    assert _ROPE_DICT == {}
+
+
+def test_rfork_seed_miss_fallback_preserves_existing_process_global_state(monkeypatch):
+    import vllm.model_executor.model_loader as model_loader
+    from vllm.model_executor.layers.rotary_embedding import _ROPE_DICT
+
+    load_config = DummyLoadConfig({"model_url": "model", "model_deploy_strategy_name": "tp8"})
+    loader = RForkModelLoader(load_config)
+    model_config = SimpleNamespace(dtype=torch.float32, model="/models/test", quantization="ascend")
+    vllm_config = _vllm_config(model_config=model_config)
+    existing_layer = SimpleNamespace()
+    vllm_config.compilation_config = SimpleNamespace(
+        static_forward_context={"existing.layer": existing_layer},
+        static_all_moe_layers=["existing.layer"],
+    )
+    rope_key = ("identity", 1.0, 32768)
+    rope_value = object()
+    _ROPE_DICT[rope_key] = rope_value
+
+    expected_model = SimpleNamespace()
+
+    def fake_get_model(**kwargs):
+        assert vllm_config.compilation_config.static_forward_context == {
+            "existing.layer": existing_layer,
+        }
+        assert vllm_config.compilation_config.static_all_moe_layers == ["existing.layer"]
+        assert _ROPE_DICT[rope_key] is rope_value
+        return expected_model
+
+    rfork_worker = SimpleNamespace(
+        is_seed_available=lambda: False,
+        post_transfer=lambda: True,
+        reset_transfer_state=lambda: None,
+        start_seed_service=lambda model: None,
+    )
+
+    monkeypatch.setattr(loader, "_ensure_rfork_worker", lambda vc, mc: rfork_worker)
+    monkeypatch.setattr(model_loader, "get_model", fake_get_model)
+    monkeypatch.setattr(
+        "vllm_ascend.model_loader.rfork.rfork_loader.initialize_model",
+        lambda **kwargs: pytest.fail("seed-miss fallback must not initialize an RFork model"),
+    )
+
+    model = loader.load_model(vllm_config=vllm_config, model_config=model_config)
+
+    assert model is expected_model
+    assert vllm_config.compilation_config.static_forward_context == {
+        "existing.layer": existing_layer,
+    }
+    assert vllm_config.compilation_config.static_all_moe_layers == ["existing.layer"]
+    assert _ROPE_DICT[rope_key] is rope_value
+
+
+def test_reset_process_global_model_state_is_safe_when_attrs_missing():
+    vllm_config = SimpleNamespace(compilation_config=SimpleNamespace())
+    _reset_process_global_model_state(vllm_config)
+
+
+def test_rfork_pre_transfer_weight_processing_unwraps_and_restores_quant_methods(monkeypatch):
+    import vllm_ascend.ops.fused_moe.fused_moe as fused_moe_module
+
+    class _FakeAscendMoERunner:
+        def __init__(self, quant_method):
+            self.quant_method = quant_method
+
+    calls = []
+
+    def original_process_weights(*args, **kwargs):
+        calls.append("original")
+
+    @wraps(original_process_weights)
+    def wrapped_process_weights(*args, **kwargs):
+        calls.append("wrapped")
+        original_process_weights(*args, **kwargs)
+
+    quant_method = SimpleNamespace(process_weights_after_loading=wrapped_process_weights)
+    fused_moe_layer = _FakeAscendMoERunner(quant_method)
+    other_layer = SimpleNamespace()
+
+    class _FakeModule:
+        def modules(self):
+            return iter([self, fused_moe_layer, other_layer])
+
+    fake_module = _FakeModule()
+    monkeypatch.setattr(fused_moe_module, "AscendMoERunner", _FakeAscendMoERunner)
+
+    with _rfork_pre_transfer_weight_processing(fake_module):
+        assert quant_method.process_weights_after_loading is original_process_weights
+        quant_method.process_weights_after_loading()
+    assert quant_method.process_weights_after_loading is wrapped_process_weights
+    assert calls == ["original"]
+
+    # Restoration must happen even when the wrapped block raises.
+    with pytest.raises(RuntimeError, match="boom"), _rfork_pre_transfer_weight_processing(fake_module):
+        assert quant_method.process_weights_after_loading is original_process_weights
+        raise RuntimeError("boom")
+    assert quant_method.process_weights_after_loading is wrapped_process_weights
