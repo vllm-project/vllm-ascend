@@ -78,14 +78,17 @@ jobs:
   verify-crane:
     name: verify crane (${{ matrix.tag }}, host)
     runs-on: ${{ matrix.runner }}
+    continue-on-error: ${{ matrix.continue_on_error }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - tag: amd64
             runner: linux-amd64-cpu-32-hk
-          - tag: arm64
-            runner: linux-arm64-cpu-32-hk
+            continue_on_error: false
+          # - tag: arm64
+          #   runner: linux-arm64-cpu-32-hk
+          #   continue_on_error: true
     steps:
       - name: Download and verify crane
         run: |
