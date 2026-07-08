@@ -27,6 +27,7 @@ import torch
 import vllm.envs as envs_vllm
 from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
+from vllm.config.ec_manager_config import EncoderCacheManagerMetadata, EncoderCacheManagerConfig
 
 # todo: please remove it when solve cuda hard code in vllm
 os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
@@ -34,6 +35,8 @@ os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from vllm_ascend.ascend_config import init_ascend_config
+from vllm_ascend import register_ec_manager
+from vllm_ascend.ascend_config import get_score_encoder_cache_config
 
 # isort: off
 from vllm_ascend.utils import (
@@ -478,6 +481,12 @@ class NPUPlatform(Platform):
             vllm_config.additional_config.setdefault("ascend_fusion_config", {}).update(
                 vars(ascend_fusion_config) if not isinstance(ascend_fusion_config, dict) else ascend_fusion_config
             )
+
+        score_encoder_cache_config = get_score_encoder_cache_config(vllm_config)
+        if score_encoder_cache_config.enabled:
+            logger.info("score_encoder_cache_config is enabled")
+            vllm_config.ec_manager_config = EncoderCacheManagerConfig()
+            vllm_config.ec_manager_config.encoder_cache_manager_cls = register_ec_manager()
 
         enforce_eager = getattr(model_config, "enforce_eager", False)
 
