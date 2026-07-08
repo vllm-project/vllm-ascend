@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 _WRAPPED_ATTR = "__vllm_ascend_trace_wrapped__"
 _APPLIED_SCOPES: set[str] = set()
-_DEFAULT_NAMELIST = Path(__file__).with_name("omnilogger_namelist_vllm_023.yml")
+_DEFAULT_NAMELIST = Path(__file__).with_name("tracelogger_namelist.yml")
 
 _WRAPPERS: dict[str, Callable[..., Any]] = {
     "marker": marker_prof_wrapper,

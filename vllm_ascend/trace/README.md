@@ -27,13 +27,13 @@ Optional but recommended:
 
 ```bash
 export TRACE_OUTPUT_DIRECTORY=/tmp/vllm_ascend_trace
-export PROFILING_NAMELIST=/path/to/omnilogger_namelist_vllm_023.yml
+export PROFILING_NAMELIST=/path/to/tracelogger_namelist.yml
 ```
 
 If `PROFILING_NAMELIST` is not set, vLLM-Ascend uses the packaged default:
 
 ```text
-vllm_ascend/trace/omnilogger_namelist_vllm_023.yml
+vllm_ascend/trace/tracelogger_namelist.yml
 ```
 
 If `PROFILING_NAMELIST` is set, the custom YAML is loaded first and the
@@ -46,7 +46,7 @@ wrapped is skipped, so duplicate wrapping is avoided.
 export VLLM_ASCEND_TRACE=1
 export ROLE=prefill
 export TRACE_OUTPUT_DIRECTORY=/tmp/vllm_ascend_trace/prefill
-export PROFILING_NAMELIST=/path/to/vllm_ascend/trace/omnilogger_namelist_vllm_023.yml
+export PROFILING_NAMELIST=/path/to/vllm_ascend/trace/tracelogger_namelist.yml
 
 vllm serve ...
 ```
@@ -57,7 +57,7 @@ vllm serve ...
 export VLLM_ASCEND_TRACE=1
 export ROLE=decode
 export TRACE_OUTPUT_DIRECTORY=/tmp/vllm_ascend_trace/decode
-export PROFILING_NAMELIST=/path/to/vllm_ascend/trace/omnilogger_namelist_vllm_023.yml
+export PROFILING_NAMELIST=/path/to/vllm_ascend/trace/tracelogger_namelist.yml
 
 vllm serve ...
 ```
@@ -128,7 +128,7 @@ profile_mtpmodel: ...
 The parser is located at:
 
 ```text
-tools/omni_trace/parse_logs.py
+tools/trace/parse_logs.py
 ```
 
 It is an optional log-analysis tool. The analysis environment needs `pandas`
@@ -137,7 +137,7 @@ and `openpyxl` installed because the report is written as `.xlsx`.
 Run:
 
 ```bash
-python tools/omni_trace/parse_logs.py /path/to/all_pd_logs_directory
+python tools/trace/parse_logs.py /path/to/all_pd_logs_directory
 ```
 
 Reports are generated in the input log directory:
