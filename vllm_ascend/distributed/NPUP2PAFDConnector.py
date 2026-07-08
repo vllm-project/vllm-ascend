@@ -426,9 +426,9 @@ class NPUP2PAFDConnector(AFDConnectorBase):
         )
         # work_list can be used for waiting later if we need to ensure send completion
         # Here we don't wait, letting the send proceed asynchronously in the background
-        self.e2a_group.send_object(metadata, dst)
-        if metadata is not None:
-            metadata.send_handle_list = work_list
+        # self.e2a_group.send_object(metadata, dst)
+        # if metadata is not None:
+        #     metadata.send_handle_list = work_list
 
     def recv_ffn_output(self,
                         hidden_states: Optional[torch.Tensor] = None,
@@ -450,13 +450,13 @@ class NPUP2PAFDConnector(AFDConnectorBase):
             all_gather_group=None,
         )
         # Asynchronously receive independent metadata
-        metadata = self.e2a_group.recv_object(src)
-        # Wait for tensor receive completion (because we need to use data immediately)
-        if metadata is not None:
-            metadata.recv_handle_list = work_list
-        else:
-            for work in work_list:
-                work.wait()
+        # metadata = self.e2a_group.recv_object(src)
+        # # Wait for tensor receive completion (because we need to use data immediately)
+        # if metadata is not None:
+        #     metadata.recv_handle_list = work_list
+        # else:
+        #     for work in work_list:
+        #         work.wait()
         recv_hs = intermediate_tensors["hidden_states"]
         return recv_hs
 
