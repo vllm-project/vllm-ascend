@@ -368,7 +368,7 @@ class AscendFusedMoE(FusedMoE):
 
     def set_lora_context(self, lora_context):
         self._ascend_moe_lora_context = lora_context
-    
+
     def update_expert_map(self, new_expert_map):
         self._expert_map = new_expert_map
 
