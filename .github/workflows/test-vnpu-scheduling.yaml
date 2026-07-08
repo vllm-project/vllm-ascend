@@ -22,7 +22,7 @@ on:
 
 jobs:
   vnpu-scheduling-test:
-    runs-on: linux-aarch64-a2-8-vnpu-gy006
+    runs-on: linux-aarch64-a2-3-vnpu-gy006
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-910b-ubuntu22.04-py3.12
 
