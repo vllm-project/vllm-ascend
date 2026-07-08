@@ -114,9 +114,9 @@ jobs:
             runner: linux-amd64-cpu-32-hk
             tag: amd64
 
-          - arch: linux/arm64
-            runner: linux-arm64-cpu-32-hk
-            tag: arm64
+          # - arch: linux/arm64
+          #   runner: linux-arm64-cpu-32-hk
+          #   tag: arm64
     container:
       image: ${{ inputs.image }}
     steps:
