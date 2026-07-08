@@ -533,8 +533,14 @@ class DeepSeekV4DSparkMTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
                 if canonical_name in params_dict:
                     name = canonical_name
 
-            if name.endswith(".self_attn.wo_a.weight") or name.endswith(".self_attn.wo_a.scale"):
+            if (
+                name.endswith(".self_attn.wo_a.weight")
+                or name.endswith(".self_attn.wo_a.scale")
+                or name.endswith(".self_attn.wo_a.weight_scale")
+            ):
                 base_name, attr = name.rsplit(".", 1)
+                if attr == "weight_scale":
+                    attr = "scale"
                 wo_a_dequant_cache.setdefault(base_name, {})[attr] = loaded_weight
                 cache_entry = wo_a_dequant_cache[base_name]
                 if "weight" in cache_entry and "scale" in cache_entry:
@@ -671,7 +677,7 @@ class DeepSeekV4DSparkMTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
         name = name.replace(".w1.", ".gate_proj.")
         name = name.replace(".w2.", ".down_proj.")
         name = name.replace(".w3.", ".up_proj.")
-        if name.endswith(".scale"):
+        if name.endswith(".scale") and not name.endswith(".self_attn.wo_a.scale"):
             name = name.replace(".scale", ".weight_scale")
         if ".gate.bias" in name:
             name = name.replace(".gate.bias", ".gate.e_score_correction_bias")
