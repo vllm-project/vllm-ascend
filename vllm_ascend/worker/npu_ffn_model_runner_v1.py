@@ -121,19 +121,14 @@ class NPUFFNModelRunner(NPUModelRunner, GPUFFNModelRunner):
     @torch.inference_mode()
     def execute_model(self, scheduler_output=None, intermediate_tensors=None,
                      dp_metadata_list: dict | None = None):
-        """Execute FFN computation for a single request.
+        """Execute FFN computation for a single request
 
         Args:
-            scheduler_output: scheduler output (usually None on FFN side)
-            intermediate_tensors: intermediate tensors (usually None on FFN side)
-            dp_metadata_list: per-stage token metadata received from the
-                attention side. If None, the connector will block-recieve
-                it from the attention side via recv_dp_metadata_list().
+            scheduler_output: 调度器输出（FFN侧通常为None）
+            intermediate_tensors: 中间张量（FFN侧通常为None）
+            dp_metadata_list: dp_metadata列表，包含每个stage的token数量信息
         """
         try:
-            # Receive dp_metadata_list from attention side if not provided.
-            # The FFN worker loop calls execute_model without dp_metadata_list,
-            # so we must receive it here to stay synchronized with attention.
             if dp_metadata_list is None and self.connector is not None:
                 dp_metadata_list, _, _ = (
                     self.connector.recv_dp_metadata_list()
@@ -196,8 +191,7 @@ class NPUFFNModelRunner(NPUModelRunner, GPUFFNModelRunner):
         if is_warmup:
             # Warmup mode: only run forward, don't capture graph.
             self._warmup_model(dp_metadata_list=dp_metadata_list)
-            logger.info("FFN warmup completed, dp_metadata_list=%s",
-                        dp_metadata_list)
+            logger.info("FFN warmup completed, dp_metadata_list=%s", dp_metadata_list)
         else:
             # Capture mode: capture a single graph based on dp_metadata_list.
             self._capture_model(dp_metadata_list=dp_metadata_list)
@@ -235,10 +229,11 @@ class NPUFFNModelRunner(NPUModelRunner, GPUFFNModelRunner):
         )
 
     def _warmup_model(self, dp_metadata_list: dict = None) -> None:
-        """Run warmup: only run forward without capturing graph.
+        """执行warmup，只运行forward不capture graph
 
         Args:
-            dp_metadata_list: dp_metadata list received from the attention side
+            is_ubatch: 是否为ubatch模式
+            dp_metadata_list: 从Attention侧接收的dp_metadata列表
         """
         dp_metadata_key = self._get_dp_metadata_key(dp_metadata_list)
 
@@ -290,20 +285,20 @@ class NPUFFNModelRunner(NPUModelRunner, GPUFFNModelRunner):
                                   uniform_decode: bool,
                                   dp_metadata_key: tuple = None,
                                   dp_metadata_list: dict = None):
-        """Capture a single ACL graph (no warmup loop).
+        """捕获单个 ACL graph（无 warmup 循环）
 
         Args:
-            cudagraph_runtime_mode: graph mode
-            uniform_decode: whether uniform decode
-            dp_metadata_key: dp_metadata key for storing the graph
-            dp_metadata_list: dp_metadata list
+            num_tokens: token数量
+            cudagraph_runtime_mode: graph模式
+            uniform_decode: 是否为uniform decode
+            is_ubatch: 是否为ubatch模式
+            dp_metadata_key: dp_metadata的key，用于存储graph
         """
         assert cudagraph_runtime_mode != CUDAGraphMode.NONE
         logger.info("Capturing ACL graph for dp_metadata_key=%s",
                     dp_metadata_key)
 
-        # Capture directly without warmup (warmup is controlled by the
-        # attention side).
+        # 直接capture，不做warmup（warmup由Attention侧控制）
         self._dummy_run(aclgraph_runtime_mode=cudagraph_runtime_mode,
                         uniform_decode=uniform_decode,
                         dp_metadata_list=dp_metadata_list,
@@ -315,28 +310,16 @@ class NPUFFNModelRunner(NPUModelRunner, GPUFFNModelRunner):
                    dp_metadata_list: dict | None = None,
                    dp_metadata_key: tuple = None,
                    **kwargs):
-        """Run a dummy forward for warmup or graph capture.
+        """执行dummy run用于warmup或capture
 
         Args:
-            aclgraph_runtime_mode: ACL graph runtime mode
-            uniform_decode: whether uniform decode
-            dp_metadata_list: per-stage token metadata
-            dp_metadata_key: dp_metadata key (replaces num_tokens as the key)
+            num_tokens: token数量
+            aclgraph_runtime_mode: ACL graph运行模式
+            force_attention: 是否强制attention
+            uniform_decode: 是否为uniform decode
+            dp_metadata_list: dp_metadata列表，包含每个stage的token数量信息
+            dp_metadata_key: dp_metadata的key，用于存储graph（替代num_tokens作为key）
         """
-        # During profile_run the attention side calls send_dp_metadata_list
-        # in its _dummy_run and blocks waiting for FFN to receive. If FFN's
-        # _dummy_run is invoked without dp_metadata_list (the profile_run
-        # path), we must recv it here first to unblock the attention side;
-        # otherwise both sides deadlock (attention waits on send, FFN waits
-        # on recv_attn_output inside _ffn_forward). This mirrors the pattern
-        # used by execute_model above.
-        if dp_metadata_list is None and self.connector is not None:
-            dp_metadata_list, _, _ = self.connector.recv_dp_metadata_list()
-            logger.info(
-                "FFN _dummy_run received dp_metadata_list=%s via "
-                "recv_dp_metadata_list (profile_run path)",
-                dp_metadata_list)
-            dp_metadata_key = self._get_dp_metadata_key(dp_metadata_list)
 
         is_ubatch = dp_metadata_list is not None and len(dp_metadata_list) > 1
         logger.info("is_ubatch in _dummy_run is %s", is_ubatch)

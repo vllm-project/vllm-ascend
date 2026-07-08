@@ -650,12 +650,10 @@ class NPUModelRunner(GPUModelRunner):
 
     def _build_afd_dp_metadata_list(self, ubatch_slices_padded,
                                     num_tokens: int = 0) -> dict:
-        """Build dp_metadata_list to send to the FFN side.
+        """构建dp_metadata_list用于发送给FFN侧
 
         Args:
             ubatch_slices_padded: ubatch slices with padding
-            num_tokens: number of tokens (used as fallback when
-                forward_context.dp_metadata is not set, e.g. during _dummy_run)
 
         Returns:
             dict: {stage_idx: DPMetadata}
@@ -674,19 +672,19 @@ class NPUModelRunner(GPUModelRunner):
                 )
         else:
             # Single stage: reuse the current dp_metadata from forward context.
-            dp_metadata = get_forward_context().dp_metadata
-            if dp_metadata is None:
-                # During _dummy_run / graph capture, dp_metadata may not be
-                # set yet. Create a default one so FFN can capture graphs.
-                # NOTE: bypass DPMetadata.make() because it asserts
-                # data_parallel_size > 1, which is not required for AFD.
-                dp_size = self.vllm_config.parallel_config.data_parallel_size
-                ubatch_num_tokens_across_dp = torch.tensor(
-                    [num_tokens] * dp_size, device="cpu", dtype=torch.int32
-                )
-                dp_metadata = DPMetadata(
-                    num_tokens_across_dp_cpu=ubatch_num_tokens_across_dp)
-            dp_metadata_list[0] = dp_metadata
+            dp_metadata_list[0] = get_forward_context().dp_metadata
+            # if dp_metadata is None:
+            #     # During _dummy_run / graph capture, dp_metadata may not be
+            #     # set yet. Create a default one so FFN can capture graphs.
+            #     # NOTE: bypass DPMetadata.make() because it asserts
+            #     # data_parallel_size > 1, which is not required for AFD.
+            #     dp_size = self.vllm_config.parallel_config.data_parallel_size
+            #     ubatch_num_tokens_across_dp = torch.tensor(
+            #         [num_tokens] * dp_size, device="cpu", dtype=torch.int32
+            #     )
+            #     dp_metadata = DPMetadata(
+            #         num_tokens_across_dp_cpu=ubatch_num_tokens_across_dp)
+            # dp_metadata_list[0] = dp_metadata
         return dp_metadata_list
 
     def _build_afd_metadata(
@@ -719,7 +717,6 @@ class NPUModelRunner(GPUModelRunner):
     def _use_aclgraph(self) -> bool:
         return (
             self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-            and self.compilation_config.mode == CompilationMode.VLLM_COMPILE
             and not self.model_config.enforce_eager
         )
 
