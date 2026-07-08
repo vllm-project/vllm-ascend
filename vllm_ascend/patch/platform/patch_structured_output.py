@@ -69,10 +69,16 @@ def _patch_sampling_params_validation() -> None:
 
     def _validate_structured_outputs(
         self: SamplingParams,
+        model_config: Any,
         structured_outputs_config: Any,
         tokenizer: Any,
     ) -> None:
-        result = original_validate(self, structured_outputs_config, tokenizer)
+        result = original_validate(
+            self,
+            model_config,
+            structured_outputs_config,
+            tokenizer,
+        )
         request_backend = _sampling_params_backend(self)
         if structured_outputs_config is None or request_backend is None:
             return result
