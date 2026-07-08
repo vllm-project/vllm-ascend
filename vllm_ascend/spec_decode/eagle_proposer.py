@@ -10,3 +10,6 @@ from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBasePropos
 class AscendEagleProposer(EagleProposer, AscendSpecDecodeBaseProposer):
     def __init__(self, vllm_config: VllmConfig, device: torch.device, runner=None):
         AscendSpecDecodeBaseProposer.__init__(self, vllm_config, device, True, runner=runner)
+
+    def compute_draft_token_ids(self, hidden_states: torch.Tensor):
+        return AscendSpecDecodeBaseProposer.compute_draft_token_ids(self, hidden_states)
