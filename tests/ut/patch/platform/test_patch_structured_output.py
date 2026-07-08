@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from inspect import signature
 from types import SimpleNamespace
 
 import pytest
@@ -52,7 +53,14 @@ def make_request(backend: str):
 
 
 def validate_structured_outputs(params, config):
-    params._validate_structured_outputs(MODEL_CONFIG, config, tokenizer=object())
+    original_validate = getattr(
+        SamplingParams,
+        patch_structured_output._ORIGINAL_VALIDATE_ATTR,
+    )
+    if "model_config" in signature(original_validate).parameters:
+        params._validate_structured_outputs(MODEL_CONFIG, config, tokenizer=object())
+    else:
+        params._validate_structured_outputs(config, tokenizer=object())
 
 
 def test_sampling_params_rejects_mixed_structured_output_backends(monkeypatch):
