@@ -360,8 +360,8 @@ class NPUModelRunner(GPUModelRunner):
             seq_lens_np=self.input_buffers.seq_lens_np,
             attn_state=attn_state,
         )
-        if not vllm_version_is("0.24.0"):
-            # Upstream main adds prompt_lens for R-SWA; v0.24.0 InputBatch
+        if not vllm_version_is("0.23.0"):
+            # Upstream main adds prompt_lens for R-SWA; v0.23.0 InputBatch
             # does not have this dataclass field yet.
             input_batch_kwargs["prompt_lens"] = None
             input_batch_kwargs["is_padding"] = self.input_buffers.is_padding[:num_tokens_after_padding]

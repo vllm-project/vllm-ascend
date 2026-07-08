@@ -344,8 +344,7 @@ if not vllm_version_is("0.23.0"):
             combined_states = torch.cat([hidden_states, residual], dim=-1)
             combined_states = tensor_model_parallel_all_gather(combined_states, 0)
             combined_states = combined_states[: positions.shape[0]]
-            hidden_size = self.config.hidden_size if vllm_version_is("0.24.0") else self.hidden_size
-            hidden_states, residual = combined_states.split([hidden_size, hidden_size], dim=-1)
+            hidden_states, residual = combined_states.split([self.hidden_size, self.hidden_size], dim=-1)
             residual = residual.contiguous()
 
         if self.end_layer in self.aux_hidden_state_layers:
