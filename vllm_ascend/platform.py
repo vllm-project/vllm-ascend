@@ -44,9 +44,11 @@ from vllm_ascend.utils import (
     AscendDeviceType,
     bootstrap_custom_op_env,
     check_kv_extra_config,
+    enable_sfa_dcp_replicated_indexer,
     flashcomm2_enable,
     get_ascend_device_type,
     is_moe_model,
+    model_uses_sfa_sparse,
     refresh_block_size,
     update_cudagraph_capture_sizes,
     is_310p,
@@ -712,14 +714,8 @@ class NPUPlatform(Platform):
             import vllm_ascend.patch.platform.patch_profiling_chunk  # noqa
 
         cp_size = parallel_config.decode_context_parallel_size * parallel_config.prefill_context_parallel_size
-        use_sparse = (
-            model_config is not None
-            and model_config.hf_text_config is not None
-            and hasattr(model_config.hf_text_config, "index_topk")
-        )
-        sfa_dcp_replicated_indexer = use_sparse and (vllm_config.additional_config or {}).get(
-            "sfa_dcp_replicated_indexer", False
-        )
+        use_sparse = model_uses_sfa_sparse(model_config)
+        sfa_dcp_replicated_indexer = enable_sfa_dcp_replicated_indexer(vllm_config)
         if (
             vllm_config.kv_transfer_config is not None
             and cache_config.block_size != parallel_config.cp_kv_cache_interleave_size
@@ -733,16 +729,9 @@ class NPUPlatform(Platform):
             )
 
         if use_sparse and cp_size > 1 and parallel_config.cp_kv_cache_interleave_size != cache_config.block_size:
-            if sfa_dcp_replicated_indexer:
+            if not sfa_dcp_replicated_indexer:
                 logger.warning_once(
-                    "SFA DCP replicated indexer is running with "
-                    f"cp_kv_cache_interleave_size({parallel_config.cp_kv_cache_interleave_size})"
-                    f" != block_size({cache_config.block_size}). "
-                    "Keep the configured cp_kv_cache_interleave_size."
-                )
-            else:
-                logger.warning_once(
-                    "The current SFA's PCP&DCP implementation requires "
+                    "The current SFA's PCP implementation requires "
                     f"cp_kv_cache_interleave_size({parallel_config.cp_kv_cache_interleave_size})"
                     f" == block_size({cache_config.block_size}). "
                     f"Override cp_kv_cache_interleave_size to {cache_config.block_size}."
