@@ -47,6 +47,26 @@ def _tensor_view_from_data_ptr(state: torch.Tensor, start_addr: int, num_element
     return flat_state.narrow(0, element_offset, num_elements)
 
 
+def _copy_mamba_state(src: torch.Tensor, dst: torch.Tensor) -> None:
+    """Copy a Mamba state slice without an unnecessary staging tensor.
+
+    State moves between different cache blocks do not overlap, so ``copy_``
+    can read directly from the source. Keep the clone fallback for same-block
+    moves whose source and destination ranges overlap.
+    """
+    src_begin = src.data_ptr()
+    src_end = src_begin + src.numel() * src.element_size()
+    dst_begin = dst.data_ptr()
+    dst_end = dst_begin + dst.numel() * dst.element_size()
+
+    if src_begin == dst_begin and src_end == dst_end:
+        return
+    if src_end <= dst_begin or dst_end <= src_begin:
+        dst.copy_(src)
+    else:
+        dst.copy_(src.clone())
+
+
 def _get_tensor_copy_pairs(copy_bufs: mamba_utils.MambaCopyBuffers) -> list[tuple[torch.Tensor, torch.Tensor]]:
     if copy_bufs.offset == 0 or not hasattr(copy_bufs, "_tensor_copy_pairs"):
         copy_bufs._tensor_copy_pairs = []
@@ -101,7 +121,7 @@ def _do_mamba_copy_block_torch(copy_bufs: mamba_utils.MambaCopyBuffers):
         raise RuntimeError("Mamba tensor copy metadata is incomplete.")
 
     for src_state, dst_state in tensor_copy_pairs:
-        dst_state.copy_(src_state.clone())
+        _copy_mamba_state(src_state, dst_state)
     copy_bufs._tensor_copy_pairs = []
 
 
@@ -172,7 +192,7 @@ def _postprocess_mamba_align_gpu_cpu_fallback(
                     dst_state = _tensor_view_from_data_ptr(
                         state, state[dest_block_id].data_ptr(), copy_spec.num_elements
                     )
-                    dst_state.copy_(src_state.clone())
+                    _copy_mamba_state(src_state, dst_state)
 
 
 def _batch_memcpy_unavailable(src_ptrs, dst_ptrs, sizes):
