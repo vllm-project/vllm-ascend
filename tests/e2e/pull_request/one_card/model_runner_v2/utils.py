@@ -29,9 +29,9 @@ def calculate_acceptance_per_pos(
     for metric in metrics:
         if metric.name == "vllm:spec_decode_num_drafts":
             assert isinstance(metric, counter_type)
-            num_drafts += metric.value
+            num_drafts += metric.value  # type: ignore[attr-defined]
         elif metric.name == "vllm:spec_decode_num_accepted_tokens_per_pos":
             assert isinstance(metric, vector_type)
-            for pos in range(len(metric.values)):
-                accepted_per_pos[pos] += metric.values[pos]
+            for pos in range(len(metric.values)):  # type: ignore[attr-defined]
+                accepted_per_pos[pos] += metric.values[pos]  # type: ignore[attr-defined]
     return [a / num_drafts for a in accepted_per_pos]
