@@ -15,8 +15,6 @@
 # limitations under the License.
 #
 
-import os
-
 from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.utils import is_310p, vllm_version_is
