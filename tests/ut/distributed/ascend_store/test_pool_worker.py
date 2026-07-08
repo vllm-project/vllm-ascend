@@ -785,5 +785,298 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         self.assertIn("r1", worker.finished_store_req)
 
 
+class TestKVPoolWorkerTpMismatch(unittest.TestCase):
+    """Tests for TP-asymmetric prefill/decode strided KV transfer.
+
+    Scenario: decode node (tp2) stores KV, prefill node (tp4) loads/hits.
+    Qwen3-8B GQA: num_kv_heads=8 -> decode tp2 holds 4 heads/rank, prefill tp4
+    holds 2 heads/rank; effective_tp=4, decode num_sub_keys=2.
+    """
+
+    def _make_vllm_config(self, kv_role="kv_consumer", extra_config=None, num_kv_heads=8, use_sparse=False):
+        config = MagicMock()
+        config.model_config.model = "qwen/qwen3-8b"
+        config.model_config.use_mla = False
+        if use_sparse:
+            config.model_config.hf_text_config = MagicMock()
+            config.model_config.hf_text_config.index_topk = 32
+        else:
+            config.model_config.hf_text_config = MagicMock(spec=[])  # no index_topk
+        config.model_config.get_num_layers.return_value = 36
+        config.model_config.get_total_num_kv_heads.return_value = num_kv_heads
+        config.model_config.max_model_len = 4096
+        config.parallel_config.data_parallel_rank = 0
+        config.parallel_config.rank = 0
+        config.parallel_config.pipeline_parallel_size = 1
+        config.kv_transfer_config.kv_role = kv_role
+        config.kv_transfer_config.kv_connector_extra_config = extra_config or {"backend": "mooncake"}
+        config.cache_config.block_size = 16
+        config.kv_events_config = None
+        return config
+
+    def _patches(self, tp_rank=0, tp_size=2):
+        return [
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_tensor_model_parallel_rank",
+                return_value=tp_rank,
+            ),
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_tensor_model_parallel_world_size",
+                return_value=tp_size,
+            ),
+            patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_pcp_group"),
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_decode_context_model_parallel_world_size",
+                return_value=1,
+            ),
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_decode_context_model_parallel_rank",
+                return_value=0,
+            ),
+            patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.importlib"),
+        ]
+
+    def _start(self, patches):
+        mocks = [p.start() for p in patches]
+        pcp_group = MagicMock()
+        pcp_group.world_size = 1
+        mocks[2].return_value = pcp_group  # get_pcp_group -> pcp_group
+        mocks[5].import_module.return_value = MagicMock()  # importlib.import_module
+        return mocks
+
+    def _make_worker(
+        self,
+        *,
+        tp_size=2,
+        tp_rank=0,
+        kv_role="kv_consumer",
+        extra_config=None,
+        num_kv_heads=8,
+        use_sparse=False,
+        use_layerwize=False,
+    ):
+        patches = self._patches(tp_rank=tp_rank, tp_size=tp_size)
+        self._start(patches)
+        try:
+            cfg = self._make_vllm_config(
+                kv_role=kv_role, extra_config=extra_config, num_kv_heads=num_kv_heads, use_sparse=use_sparse
+            )
+            from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+
+            return KVPoolWorker(cfg, use_layerwize=use_layerwize)
+        finally:
+            for p in patches:
+                p.stop()
+
+    def test_tp_mismatch_detected_decode_tp2_prefill_tp4(self):
+        worker = self._make_worker(
+            tp_size=2, kv_role="kv_consumer", extra_config={"backend": "mooncake", "prefill_tp_size": 4}, num_kv_heads=8
+        )
+        self.assertTrue(worker.tp_mismatch)
+        self.assertEqual(worker.peer_tp_size, 4)
+        self.assertEqual(worker.effective_tp_size, 4)
+        self.assertEqual(worker.local_heads_per_rank, 4)
+        self.assertEqual(worker.effective_heads_per_rank, 2)
+        self.assertEqual(worker.num_sub_keys, 2)
+
+    def test_tp_mismatch_disabled_when_no_config(self):
+        # No prefill_tp_size/decode_tp_size -> tp_mismatch False (original behavior)
+        worker = self._make_worker(
+            tp_size=2, kv_role="kv_consumer", extra_config={"backend": "mooncake"}, num_kv_heads=8
+        )
+        self.assertFalse(worker.tp_mismatch)
+        self.assertEqual(worker.num_sub_keys, 1)
+        self.assertEqual(worker.effective_tp_size, 2)
+
+    def test_tp_mismatch_disabled_when_peer_equal(self):
+        worker = self._make_worker(
+            tp_size=2, kv_role="kv_consumer", extra_config={"backend": "mooncake", "prefill_tp_size": 2}, num_kv_heads=8
+        )
+        self.assertFalse(worker.tp_mismatch)
+
+    def test_tp_mismatch_disabled_when_use_mla(self):
+        patches = self._patches(tp_rank=0, tp_size=2)
+        self._start(patches)
+        try:
+            cfg = self._make_vllm_config(
+                kv_role="kv_consumer", extra_config={"backend": "mooncake", "prefill_tp_size": 4}, num_kv_heads=8
+            )
+            cfg.model_config.use_mla = True
+            from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+
+            worker = KVPoolWorker(cfg, use_layerwize=False)
+        finally:
+            for p in patches:
+                p.stop()
+        # use_mla -> num_kv_head forced to 1, can't satisfy >= effective_tp_size
+        self.assertFalse(worker.tp_mismatch)
+
+    def test_tp_mismatch_rejects_use_sparse(self):
+        patches = self._patches(tp_rank=0, tp_size=2)
+        self._start(patches)
+        try:
+            cfg = self._make_vllm_config(
+                kv_role="kv_consumer",
+                extra_config={"backend": "mooncake", "prefill_tp_size": 4},
+                num_kv_heads=8,
+                use_sparse=True,
+            )
+            from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+
+            with self.assertRaises(ValueError):
+                KVPoolWorker(cfg, use_layerwize=False)
+        finally:
+            for p in patches:
+                p.stop()
+
+    def test_tp_mismatch_rejects_layerwise(self):
+        patches = self._patches(tp_rank=0, tp_size=2)
+        self._start(patches)
+        try:
+            cfg = self._make_vllm_config(
+                kv_role="kv_consumer", extra_config={"backend": "mooncake", "prefill_tp_size": 4}, num_kv_heads=8
+            )
+            from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+
+            with self.assertRaises(ValueError):
+                KVPoolWorker(cfg, use_layerwize=True)
+        finally:
+            for p in patches:
+                p.stop()
+
+    def test_make_sub_key_str_rewrites_rank(self):
+        worker = self._make_worker(
+            tp_rank=1, tp_size=2, extra_config={"backend": "mooncake", "prefill_tp_size": 4}, num_kv_heads=8
+        )
+        rank = worker.metadata[0].head_or_tp_rank  # = 1 for tp_rank=1
+
+        class FakeKey:
+            def to_string(self):
+                return f"model@head_or_tp_rank:{rank}@pp_rank:0@k0"
+
+        out = worker._make_sub_key_str(FakeKey(), effective_rank=3)
+        self.assertIn("@head_or_tp_rank:3", out)
+        self.assertNotIn(f"@head_or_tp_rank:{rank}", out)
+
+    def test_build_strided_addrs_uses_stride(self):
+        worker = self._make_worker(extra_config={"backend": "mooncake", "prefill_tp_size": 4}, num_kv_heads=8)
+        # Simulate register_kv_caches outputs (group-0 dict structure).
+        worker.block_size = 4
+        worker.group_kv_caches_base_addr = {0: [1000]}
+        worker.group_block_len = {0: [64]}  # bytes per block
+        worker.group_block_stride = {0: [128]}  # padded stride (> block_len)
+        worker.sub_size_bytes = 8
+        addrs, sizes = worker._build_strided_addrs(block_id=2, token_count=3, sub_idx=1)
+        # per_token_bytes = 64 // 4 = 16; block_base = 1000 + 2*128 = 1256
+        # sub_idx=1 -> head_offset = 8
+        # addrs = [1256+0*16+8, 1256+1*16+8, 1256+2*16+8] = [1264, 1280, 1296]
+        self.assertEqual(addrs, [1264, 1280, 1296])
+        self.assertEqual(sizes, [8, 8, 8])
+
+    def test_build_tp_mismatch_keys_and_addrs_counts_and_ranks(self):
+        worker = self._make_worker(
+            tp_rank=1, tp_size=2, extra_config={"backend": "mooncake", "prefill_tp_size": 4}, num_kv_heads=8
+        )
+        worker.block_size = 4
+        worker.group_kv_caches_base_addr = {0: [0]}
+        worker.group_block_len = {0: [16]}
+        worker.group_block_stride = {0: [16]}
+        worker.sub_size_bytes = 2
+
+        class FakeKey:
+            def __init__(self, i):
+                self.i = i
+
+            def to_string(self):
+                return f"m@head_or_tp_rank:{worker.metadata[0].head_or_tp_rank}@pp_rank:0@k{self.i}"
+
+        def fake_process_tokens(token_len, block_hashes, mask_num=0):
+            yield 0, 4, FakeKey(0)
+            yield 4, 8, FakeKey(1)
+
+        worker.token_database = MagicMock()
+        worker.token_database.process_tokens.side_effect = fake_process_tokens
+
+        keys, addrs, sizes, block_ids = worker._build_tp_mismatch_keys_and_addrs(
+            block_hashes=[b"h0", b"h1"], block_ids=[10, 11], token_len=8, mask_num=0
+        )
+        # 2 chunks * num_sub_keys=2 = 4 keys
+        self.assertEqual(len(keys), 4)
+        self.assertEqual(len(addrs), 4)
+        self.assertEqual(len(sizes), 4)
+        self.assertEqual(len(block_ids), 4)
+        # tp_rank=1, num_sub_keys=2 -> effective_rank = 1*2 + {0,1} = {2,3}
+        self.assertIn("@head_or_tp_rank:2", keys[0])
+        self.assertIn("@head_or_tp_rank:3", keys[1])
+
+    def test_load_kv_tp_mismatch_calls_backend_get(self):
+        worker = self._make_worker(extra_config={"backend": "mooncake", "prefill_tp_size": 4}, num_kv_heads=8)
+        worker.block_size = 4
+        worker.group_kv_caches_base_addr = {0: [0]}
+        worker.group_block_len = {0: [16]}
+        worker.group_block_stride = {0: [16]}
+        worker.sub_size_bytes = 2
+        worker.m_store = MagicMock()
+        worker.m_store.get.return_value = [0]  # success
+
+        class FakeKey:
+            def to_string(self):
+                return f"m@head_or_tp_rank:{worker.metadata[0].head_or_tp_rank}@pp_rank:0@k0"
+
+        worker.token_database = MagicMock()
+        worker.token_database.process_tokens.side_effect = lambda *a, **kw: iter([(0, 4, FakeKey())])
+
+        worker._load_kv_tp_mismatch(block_hashes=[b"h0"], block_ids=[5], token_len=4, mask_num=0)
+        worker.m_store.get.assert_called_once()
+
+    def test_store_kv_tp_mismatch_skips_when_not_stored(self):
+        worker = self._make_worker(extra_config={"backend": "mooncake", "prefill_tp_size": 4}, num_kv_heads=8)
+        worker.kv_send_thread = MagicMock()
+        worker.kv_send_thread.is_stored_request.return_value = False
+        req = ReqMeta(
+            req_id="r1", token_len_chunk=4, block_ids_by_group=[[5]], block_hashes=[b"h0"], current_event=None
+        )
+        worker._store_kv_tp_mismatch(req)
+        worker.kv_send_thread.dec_stored_request.assert_not_called()
+
+    def test_store_kv_tp_mismatch_puts_missing_and_decrements(self):
+        worker = self._make_worker(extra_config={"backend": "mooncake", "prefill_tp_size": 4}, num_kv_heads=8)
+        worker.block_size = 4
+        worker.group_kv_caches_base_addr = {0: [0]}
+        worker.group_block_len = {0: [16]}
+        worker.group_block_stride = {0: [16]}
+        worker.sub_size_bytes = 2
+        worker.m_store = MagicMock()
+        worker.enable_kv_events = False
+
+        class FakeKey:
+            def to_string(self):
+                return f"m@head_or_tp_rank:{worker.metadata[0].head_or_tp_rank}@pp_rank:0@k0"
+
+        worker.token_database = MagicMock()
+        worker.token_database.process_tokens.side_effect = lambda *a, **kw: iter([(0, 4, FakeKey())])
+
+        send_thread = MagicMock()
+        send_thread.is_stored_request.return_value = True
+        # 2 sub-keys: first missing, second present -> only the first is put.
+        send_thread.lookup.return_value = [False, True]
+        worker.kv_send_thread = send_thread
+
+        req = ReqMeta(
+            req_id="r1", token_len_chunk=4, block_ids_by_group=[[5]], block_hashes=[b"h0"], current_event=None
+        )
+        worker._store_kv_tp_mismatch(req)
+        worker.m_store.put.assert_called_once()
+        put_keys = worker.m_store.put.call_args.args[0]
+        self.assertEqual(len(put_keys), 1)
+        send_thread.dec_stored_request.assert_called_once_with("r1")
+
+    def test_get_group_tp_size_uses_effective_tp(self):
+        worker = self._make_worker(
+            tp_size=2, extra_config={"backend": "mooncake", "prefill_tp_size": 4}, num_kv_heads=8
+        )
+        self.assertEqual(worker.get_group_tp_size(0), 4)  # effective_tp_size under tp_mismatch
+
+
 if __name__ == "__main__":
     unittest.main()

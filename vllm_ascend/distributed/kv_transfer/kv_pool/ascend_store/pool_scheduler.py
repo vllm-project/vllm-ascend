@@ -120,6 +120,37 @@ class KVPoolScheduler:
         self.sending_events: dict[int, int] = {}
         self._expected_worker_count = vllm_config.parallel_config.world_size
 
+        # --- TP-asymmetric (mirror KVPoolWorker gating for scheduler side) ---
+        # Under tp_mismatch, decode/chunked requests with no new blocks must still
+        # produce load metadata so the worker can load previously-stored KV.
+        # Wrapped in try/except so unit-test MagicMock configs keep tp_mismatch=False
+        # (i.e. original behavior); production configs are real and compute normally.
+        self.tp_mismatch = False
+        try:
+            _extra_cfg = vllm_config.kv_transfer_config.kv_connector_extra_config
+            if not isinstance(_extra_cfg, dict):
+                raise TypeError("kv_connector_extra_config is not a dict")
+            _local_tp = int(vllm_config.parallel_config.tensor_parallel_size)
+            _num_kv_head = int(vllm_config.model_config.get_total_num_kv_heads())
+            _use_mla = (
+                isinstance(getattr(vllm_config.model_config, "use_mla", False), bool)
+                and vllm_config.model_config.use_mla
+            )
+            if self.kv_role == "kv_consumer":
+                _peer_tp = int(_extra_cfg.get("prefill_tp_size", _local_tp))
+            else:
+                _peer_tp = int(_extra_cfg.get("decode_tp_size", _local_tp))
+            _effective_tp = max(_local_tp, _peer_tp)
+            self.tp_mismatch = (
+                _peer_tp != _local_tp
+                and not _use_mla
+                and not self.use_hybrid
+                and _num_kv_head >= _effective_tp
+                and _num_kv_head % _effective_tp == 0
+            )
+        except Exception:
+            self.tp_mismatch = False
+
     def _infer_group_families(self) -> list[str]:
         kv_cache_groups = self.kv_cache_config.kv_cache_groups if self.kv_cache_config is not None else None
         return infer_group_cache_families(kv_cache_groups, self.compress_ratios, self.hf_config)
@@ -429,9 +460,11 @@ class KVPoolScheduler:
             for i, req_id in enumerate(cached_reqs.req_ids):
                 # resumed request
                 new_block_ids = cached_reqs.new_block_ids[i]
-                if not new_block_ids:
+                if not new_block_ids and not self.tp_mismatch:
                     continue
                 if req_id in self._preempted_req_ids:
+                    if not new_block_ids:
+                        continue
                     self._preempted_req_ids.discard(req_id)
                     load_spec = self.load_specs.pop(req_id, None)
                     request_tuple = self._unfinished_requests.get(req_id)
@@ -482,10 +515,12 @@ class KVPoolScheduler:
                         raise ValueError(
                             f"Request {req_id} is not in _unfinished_requests, but it is scheduled to be cached"
                         )
-                    num_computed_token = cached_reqs.num_computed_tokens[i]
-                    if num_computed_token >= len(request.prompt_token_ids):
-                        continue
-                    request_tracker.update(new_block_ids, request.num_computed_tokens)
+                    if not self.tp_mismatch:
+                        num_computed_token = cached_reqs.num_computed_tokens[i]
+                        if num_computed_token >= len(request.prompt_token_ids):
+                            continue
+                    if new_block_ids:
+                        request_tracker.update(new_block_ids, request.num_computed_tokens)
 
                     last_chunk_tokens_num = (
                         self._floor_to_cache_transfer_granularity(len(request.prompt_token_ids))

@@ -599,5 +599,87 @@ class TestKVCacheStoreLayerRecvingThread(unittest.TestCase):
         self.assertTrue(get_event.is_set())
 
 
+class TestKVTransferTpMismatchDispatch(unittest.TestCase):
+    """TP-mismatch worker dispatch wiring for Sending/Recving threads."""
+
+    def _make_sending(self, worker=None, exists_result=None):
+        store = FakeStore(exists_result or [0, 0, 0, 0])
+        db = FakeTokenDatabase()
+        t = KVCacheStoreSendingThread(
+            m_store=store,
+            token_database=db,
+            block_size=16,
+            tp_rank=0,
+            dcp_size=1,
+            put_step=1,
+            kv_role="kv_producer",
+            ready_event=threading.Event(),
+            group_uses_align_state=[False],
+            enable_kv_event=False,
+            worker=worker,
+        )
+        return t, store
+
+    def _make_recving(self, worker=None):
+        store = FakeStore([0, 0, 0, 0])
+        db = FakeTokenDatabase()
+        t = KVCacheStoreRecvingThread(
+            m_store=store,
+            token_database=db,
+            block_size=16,
+            tp_rank=0,
+            dcp_size=1,
+            ready_event=threading.Event(),
+            invalid_block_ids=set(),
+            invalid_block_ids_lock=threading.Lock(),
+            worker=worker,
+        )
+        return t, store
+
+    def test_sending_dispatches_to_worker_when_tp_mismatch(self):
+        worker = MagicMock()
+        worker.tp_mismatch = True
+        t, _ = self._make_sending(worker=worker)
+        req = ReqMeta(
+            req_id="r1", token_len_chunk=16, block_ids_by_group=[[0]], block_hashes=[b"h0"], current_event=None
+        )
+        t.request_queue.put(req)
+        t._handle_request(req)
+        worker._store_kv_tp_mismatch.assert_called_once_with(req)
+
+    def test_sending_normal_path_when_worker_none(self):
+        # worker=None -> tp_mismatch dispatch skipped, normal store path runs.
+        t, store = self._make_sending(worker=None, exists_result=[1, 0, 1, 0])
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=64,
+            block_ids=[0, 1, 2, 3],
+            block_hashes=[b"h0", b"h1", b"h2", b"h3"],
+            current_event=None,
+        )
+        t.add_stored_request("r1")
+        t.request_queue.put(req)
+        t._handle_request(req)
+        self.assertEqual(len(store.put_calls), 1)  # normal path executed
+
+    def test_recving_dispatches_to_worker_when_tp_mismatch(self):
+        worker = MagicMock()
+        worker.tp_mismatch = True
+        t, _ = self._make_recving(worker=worker)
+        req = ReqMeta(
+            req_id="r1", token_len_chunk=16, block_ids_by_group=[[0]], block_hashes=[b"h0"], current_event=None
+        )
+        req.load_spec = MagicMock()
+        req.load_spec.token_len = 16
+        req.load_spec.vllm_cached_tokens = 0
+        t.request_queue.put(req)
+        t._handle_request(req)
+        worker._load_kv_tp_mismatch.assert_called_once()
+        args = worker._load_kv_tp_mismatch.call_args.args
+        # (block_hashes, block_ids, token_len, mask_num)
+        self.assertEqual(args[2], 16)  # token_len
+        self.assertEqual(args[3], 0)  # mask_num
+
+
 if __name__ == "__main__":
     unittest.main()

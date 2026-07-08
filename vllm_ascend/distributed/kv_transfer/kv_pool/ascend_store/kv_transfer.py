@@ -257,6 +257,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         ready_event: threading.Event,
         group_uses_align_state: list[bool],
         enable_kv_event: bool = False,
+        worker: Any = None,
     ):
         super().__init__(
             m_store, token_database, block_size, tp_rank, dcp_size, ready_event, name="KVCacheSendingThread"
@@ -268,10 +269,23 @@ class KVCacheStoreSendingThread(KVTransferThread):
         self.enable_kv_event = enable_kv_event
         self.completed_events_lock = threading.Lock()
         self.completed_events: dict[int, int] = {}
+        self.worker = worker
 
     def add_stored_request(self, req_id: str):
         with self.done_task_lock:
             self.stored_requests[req_id] += 1
+
+    def is_stored_request(self, req_id: str) -> bool:
+        with self.done_task_lock:
+            return req_id in self.stored_requests
+
+    def get_stored_request_count(self, req_id: str) -> int | None:
+        with self.done_task_lock:
+            return self.stored_requests.get(req_id)
+
+    def get_stored_requests_snapshot(self) -> dict[str, int]:
+        with self.done_task_lock:
+            return dict(self.stored_requests)
 
     def dec_stored_request(self, req_id: str):
         with self.done_task_lock:
@@ -297,6 +311,12 @@ class KVCacheStoreSendingThread(KVTransferThread):
         return completed_events
 
     def _handle_request(self, req_meta: ReqMeta):
+        if self.worker is not None and getattr(self.worker, "tp_mismatch", False):
+            try:
+                self.worker._store_kv_tp_mismatch(req_meta)
+            finally:
+                self.request_queue.task_done()
+            return
         token_len = req_meta.token_len_chunk
         req_id = req_meta.req_id
         current_event = req_meta.current_event
@@ -449,14 +469,33 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         ready_event: threading.Event,
         invalid_block_ids: set[int],
         invalid_block_ids_lock: threading.Lock,
+        worker: Any = None,
     ):
         super().__init__(
             m_store, token_database, block_size, tp_rank, dcp_size, ready_event, name="KVCacheStoreRecvingThread"
         )
         self._invalid_block_ids = invalid_block_ids
         self._invalid_block_ids_lock = invalid_block_ids_lock
+        self.worker = worker
 
     def _handle_request(self, req_meta: ReqMeta):
+        if self.worker is not None and getattr(self.worker, "tp_mismatch", False):
+            token_len = req_meta.load_spec.token_len  # type: ignore[union-attr]
+            group_block_size = self._get_block_size(0)
+            mask_num = (
+                req_meta.load_spec.vllm_cached_tokens  # type: ignore[union-attr]
+                // group_block_size
+                * group_block_size
+            )
+            self.worker._load_kv_tp_mismatch(
+                req_meta.block_hashes,
+                req_meta.block_ids_by_group[0],
+                token_len,
+                mask_num,
+            )
+            self.set_finished_request(req_meta.req_id)
+            self.request_queue.task_done()
+            return
         token_len = req_meta.load_spec.token_len  # type: ignore[union-attr]
         req_id = req_meta.req_id
         addr_list = []
