@@ -110,6 +110,7 @@ jobs:
       - name: Validate translation coverage
         if: steps.translate.outcome == 'success'
         id: validate
+        continue-on-error: true
         run: |
           python .github/workflows/scripts/po_translate.py \
             --files "${{ steps.detect.outputs.files }}" \

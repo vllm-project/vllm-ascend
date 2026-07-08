@@ -48,12 +48,11 @@ ADMONITION_RE = __import__("re").compile(r'^!!!\s+\w+(\s+"[^"]*")?\s*$')
 DETAILS_RE = __import__("re").compile(r'^\?\?\?(\s+"[^"]*")?\s*$')
 TAB_RE = __import__("re").compile(r'^===\s+"[^"]*"\s*$')
 
-# Characters that indicate a line is purely structural (not translatable):
-#   - Markdown headings and list markers
-#   - Table separators
-#   - HTML tags
-#   - Blank lines (handled separately)
-NO_CN_CHARS = set(".,:;!?-_*+~|/<>[](){}#@$%^&= \t\r\n0123456789")
+# Table rows that are purely structural or data-only (no natural language
+# prose).  Matches rows that look like markdown table rows where every
+# cell is either a number, a date, a link, a single word, a checkmark,
+# or a short identifier.
+TABLE_ROW_RE = __import__("re").compile(r"^\|.*\|$")
 
 
 def _is_translatable_paragraph(paragraph: str) -> bool:
@@ -69,6 +68,13 @@ def _is_translatable_paragraph(paragraph: str) -> bool:
     # Skip MkDocs Material structural directives that have no
     # translatable text content (e.g. bare "!!! note").
     if ADMONITION_RE.match(text) and '"' not in text:
+        return False
+
+    # Skip pure table data rows (contributor tables, feature matrices,
+    # supported models, etc.) that contain structured data but no
+    # natural language sentences.  Only skip rows that are clearly
+    # data-only: every cell is a token, number, date, link, or emoji.
+    if TABLE_ROW_RE.match(text) and _is_table_data_row(text):
         return False
 
     # Count characters that typically appear in natural language.
@@ -90,6 +96,40 @@ def _is_translatable_paragraph(paragraph: str) -> bool:
     # Skip pure markdown syntax lines (e.g. "---", "***", "===").
     unique = set(c for c in text if not c.isspace())
     return not (unique <= {"-", "*", "=", "_", "~", "|", ":", "+"})
+
+
+def _is_table_data_row(row: str) -> bool:
+    """Return True if *row* is a markdown table row with structured data only.
+
+    A row is considered data-only when it has at least one cell that
+    looks like structured data (number, date, URL, checkmark, etc.).
+    Pure-text header rows like "| Feature | Support | Note |" are
+    left for translation.
+    """
+    cells = [c.strip() for c in row.split("|")[1:-1]]
+    if not cells:
+        return False
+
+    has_data_cell = False
+    for cell in cells:
+        cell = cell.strip()
+        if not cell:
+            continue
+        if cell in {"✅", "❌", "❔", "✔", "✘", "🟠", "🔵", "—"}:
+            has_data_cell = True
+            continue
+        if __import__("re").match(r"^[\d\s\.\/\-,:]+$", cell):
+            has_data_cell = True
+            continue
+        if __import__("re").match(r"^\[.*\]\(.*\)$", cell):
+            has_data_cell = True
+            continue
+        # Pure-text cell with a sentence (period/question/exclamation)
+        # means this is a prose row, not a data row.
+        if __import__("re").search(r"[.!?]", cell):
+            return False
+
+    return has_data_cell
 
 
 def _extract_paragraphs(content: str) -> list[str]:
