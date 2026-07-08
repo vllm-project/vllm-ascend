@@ -306,6 +306,25 @@ class AscendGemma4Proposer(_VllmGemma4Proposer, AscendSpecDecodeBaseProposer):
                     object.__setattr__(impl, "_kv_share_gid", gid)
                     break
 
+    # ---- target->draft KV sync --------------------------------------------
+    # Gemma4 MTP reads K/V from the target model's KV cache, so the draft must
+    # wait for the target's (async, FDO-graph) KV writes to land before it
+    # reads.  This is Gemma4-specific: other draft proposers own their KV
+    # cache and need no such sync.  Hence the override lives here (gemma4
+    # gated by class) rather than in the shared base proposer.
+
+    def _sync_wait_target_events(self) -> None:
+        """Wait for the NPU event recorded after target forward completes.
+
+        In draft_eager/both_fdo mode, the target model's FDO graph replay
+        writes KV cache asynchronously on the NPU stream.  We must wait for
+        those writes to complete before the draft model reads the KV cache.
+        """
+        _ev = getattr(self, "_target_done_event", None)
+        if _ev is not None:
+            _ev.wait()
+            self._target_done_event = None
+
     # ---- load_model --------------------------------------------------------
     # We need BOTH:
     #   a) Ascend's load_model (loads draft model, identifies draft layers,

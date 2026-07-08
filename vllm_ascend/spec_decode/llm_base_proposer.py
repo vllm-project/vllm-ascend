@@ -747,14 +747,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     def _sync_wait_target_events(self) -> None:
         """Wait for NPU events recorded after target forward completes.
 
-        In draft_eager/both_fdo mode, the target model's FDO graph replay
-        writes KV cache asynchronously on the NPU stream.  We must wait for
-        those writes to complete before the draft model reads the KV cache.
+        No-op in the shared base: only Gemma4 MTP reads the target model's
+        KV cache and thus needs to wait on the target's async KV writes.
+        AscendGemma4Proposer overrides this with the real event-wait; all
+        other draft proposers own their KV cache and fall through here.
         """
-        _ev = getattr(self, "_target_done_event", None)
-        if _ev is not None:
-            _ev.wait()
-            self._target_done_event = None
+        return
 
     def _propose(
         self,
