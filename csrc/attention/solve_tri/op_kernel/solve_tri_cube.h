@@ -501,9 +501,8 @@ __aicore__ inline void SolveTriCube<MATRIX_SIZE, T>::LoadToL0A_Offset(int32_t sl
     loadParams.srcStride = NUM_FRACS;
     loadParams.dstGap = 0;
     loadParams.ifTranspose = false;
-    int32_t srcStep = (slot == SLOT_INPUT) ? (NUM_FRACS + 1) * FRAC_LEN : FRAC_LEN;
     for (int32_t i = 0; i < NUM_FRACS; ++i) {
-        int32_t src = slot * L1_SLOT_ELEMS + i * srcStep;
+        int32_t src = slot * L1_SLOT_ELEMS + i * FRAC_LEN;
         int32_t dst = offset + i * NUM_FRACS * FRAC_LEN;
         LoadData(l0a_[dst], l1_[src], loadParams);
     }
@@ -519,9 +518,8 @@ __aicore__ inline void SolveTriCube<MATRIX_SIZE, T>::LoadToL0B_Offset(int32_t sl
     loadParams.srcStride = NUM_FRACS;
     loadParams.dstGap = 0;
     loadParams.ifTranspose = true;
-    int32_t srcStep = (slot == SLOT_INPUT) ? (NUM_FRACS + 1) * FRAC_LEN : FRAC_LEN;
     for (int32_t i = 0; i < NUM_FRACS; ++i) {
-        int32_t src = slot * L1_SLOT_ELEMS + i * srcStep;
+        int32_t src = slot * L1_SLOT_ELEMS + i * FRAC_LEN;
         int32_t dst = offset + i * NUM_FRACS * FRAC_LEN;
         LoadData(l0b_[dst], l1_[src], loadParams);
     }
