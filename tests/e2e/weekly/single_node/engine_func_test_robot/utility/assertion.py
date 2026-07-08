@@ -106,6 +106,21 @@ def assert_error_code_400(response, msg=""):
             check.equal(int(match.group(1)), 400, f"{msg}Streaming response error code is not 400")
 
 
+def assert_image_edit_response_fields(response, msg=""):
+    """Verify image edit response contains the required output fields."""
+    assert_status_code_200(response, msg)
+    response_json = response.json()
+    check.is_true("data" in response_json, f"{msg}Response should contain data field")
+    check.is_true(response_json.get("data"), f"{msg}data should contain at least one result")
+
+    for idx, item in enumerate(response_json["data"]):
+        has_b64 = bool(item.get("b64_json"))
+        has_url = bool(item.get("url"))
+        check.is_true(has_b64 or has_url, f"{msg}data[{idx}] should contain b64_json or url")
+
+    return response_json
+
+
 def assert_top_logprobs_count(response, top_logprobs_value, msg=""):
     """Verify the number of top_logprobs in logprobs"""
     content_type = response.headers.get("Content-Type", "")
