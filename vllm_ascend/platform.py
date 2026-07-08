@@ -717,10 +717,17 @@ class NPUPlatform(Platform):
         use_sparse = model_uses_sfa_sparse(model_config)
         sfa_dcp_replicated_indexer = enable_sfa_dcp_replicated_indexer(vllm_config)
         if (
+            sfa_dcp_replicated_indexer
+            and parallel_config.decode_context_parallel_size != parallel_config.tensor_parallel_size
+        ):
+            raise AssertionError(
+                f"DCP for SFA is only supported when dcp_size({parallel_config.decode_context_parallel_size}) "
+                f"== tp_size({parallel_config.tensor_parallel_size})."
+            )
+        if (
             vllm_config.kv_transfer_config is not None
             and cache_config.block_size != parallel_config.cp_kv_cache_interleave_size
             and cp_size > 1
-            and not sfa_dcp_replicated_indexer
         ):
             raise AssertionError(
                 f"cp_kv_cache_interleave_size({parallel_config.cp_kv_cache_interleave_size}) "
