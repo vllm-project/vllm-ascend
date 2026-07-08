@@ -18,8 +18,8 @@ msgstr ""
 "Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: detect_po_changes.py\n"
 
-msgid "# Model Tutorials"
-msgstr "# 模型教程"
+#~ msgid "# Model Tutorials"
+#~ msgstr "# 模型教程"
 
-msgid "This section provides tutorials for different models of vLLM Ascend."
-msgstr "本节提供 vLLM Ascend 不同模型的教程。"
+#~ msgid "This section provides tutorials for different models of vLLM Ascend."
+#~ msgstr "本节提供 vLLM Ascend 不同模型的教程。"

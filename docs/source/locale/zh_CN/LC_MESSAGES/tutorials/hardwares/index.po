@@ -18,8 +18,8 @@ msgstr ""
 "Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: detect_po_changes.py\n"
 
-msgid "# Hardware Tutorials"
-msgstr "# 硬件教程"
+#~ msgid "# Hardware Tutorials"
+#~ msgstr "# 硬件教程"
 
-msgid "This section provides tutorials on different hardware of vLLM Ascend."
-msgstr "本节提供关于 vLLM Ascend 不同硬件的教程。"
+#~ msgid "This section provides tutorials on different hardware of vLLM Ascend."
+#~ msgstr "本节提供关于 vLLM Ascend 不同硬件的教程。"

@@ -18,8 +18,8 @@ msgstr ""
 "Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: detect_po_changes.py\n"
 
-msgid "# Feature Guide"
-msgstr "# 功能指南"
+#~ msgid "# Feature Guide"
+#~ msgstr "# 功能指南"
 
-msgid "This section provides a detailed usage guide of vLLM Ascend features."
-msgstr "本节提供 vLLM Ascend 功能的详细使用指南。"
+#~ msgid "This section provides a detailed usage guide of vLLM Ascend features."
+#~ msgstr "本节提供 vLLM Ascend 功能的详细使用指南。"

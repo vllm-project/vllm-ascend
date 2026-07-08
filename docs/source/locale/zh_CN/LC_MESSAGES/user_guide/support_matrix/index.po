@@ -18,8 +18,8 @@ msgstr ""
 "Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: detect_po_changes.py\n"
 
-msgid "# Features and Models"
-msgstr "# 特性与模型"
+#~ msgid "# Features and Models"
+#~ msgstr "# 特性与模型"
 
-msgid "This section provides a detailed matrix supported by vLLM Ascend."
-msgstr "本节提供了 vLLM Ascend 支持的详细矩阵。"
+#~ msgid "This section provides a detailed matrix supported by vLLM Ascend."
+#~ msgstr "本节提供了 vLLM Ascend 支持的详细矩阵。"
