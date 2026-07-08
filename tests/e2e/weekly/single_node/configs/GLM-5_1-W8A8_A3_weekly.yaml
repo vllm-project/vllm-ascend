@@ -33,7 +33,7 @@ _server_cmd: &server_cmd
   - "--compilation-config"
   - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
   - "--speculative-config"
-  - '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
+  - '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager": true}'
 
 
 _benchmarks: &benchmarks
@@ -81,7 +81,7 @@ _benchmarks_bs10: &benchmarks_bs10
     dataset_path: vllm-ascend/GSM8K_prefix90_in65536_bs100_glm
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 10
+    num_prompts: 20
     max_out_len: 1024
     batch_size: 5
     request_rate: 0
