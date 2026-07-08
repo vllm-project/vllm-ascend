@@ -47,6 +47,17 @@ on:
         required: false
         default: false
         description: 'Continue running the job even if tests fail'
+      enable-coverage:
+        type: boolean
+        required: false
+        default: false
+        description: 'Whether to run tests with coverage enabled.'
+    secrets:
+      OBS_ACCESS_KEY_PRECISION:
+        required: false
+      OBS_SECRET_ACCESS_KEY_PRECISION:
+        required: false
+
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -244,8 +255,12 @@ jobs:
         continue-on-error: ${{ inputs.continue_on_error }}
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
+          ENABLE_COVERAGE: ${{ inputs.enable-coverage}}
         run: |
           . /usr/local/Ascend/ascend-toolkit/set_env.sh
+          if [ "${{ inputs.enable-coverage }}" = "true" ]; then
+            export ENABLE_COVERAGE=true
+          fi
           TIMING_FLAG=""
           if [ "${{ inputs.upload_timing }}" = "true" ]; then
             TIMING_FLAG="--timing"
@@ -263,7 +278,11 @@ jobs:
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           TORCH_DEVICE_BACKEND_AUTOLOAD: 0
+          ENABLE_COVERAGE: ${{ inputs.enable-coverage}}
         run: |
+          if [ "${{ inputs.enable-coverage }}" = "true" ]; then
+            export ENABLE_COVERAGE=true
+          fi
           .github/workflows/scripts/run_selected_tests.sh \
             "${{ matrix.group.npu_type }}" \
             "${{ matrix.group.num_npus }}" \
@@ -280,6 +299,17 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+      - name: Upload coverage data
+        if: ${{ always() && inputs.enable-coverage }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: selected-test-coverage-vllm-${{ inputs.vllm }}-${{ matrix.group.npu_type }}-${{ matrix.group.num_npus }}card-${{ matrix.group.partition }}
+          path: tests/outputs/**/covdata/**
+          if-no-files-found: ignore
+          retention-days: 14
+          compression-level: 0
+
       - name: Upload selected test logs
         if: always()
         continue-on-error: true
@@ -290,3 +320,112 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
           compression-level: 0
+
+  upload-coverage-to-obs:
+      if: ${{ always() && inputs.enable-coverage }}
+      needs: selected-tests
+      runs-on: ubuntu-latest
+      continue-on-error: true
+      env:
+        OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY_PRECISION }}
+        OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY_PRECISION }}
+      steps:
+        - name: Checkout vllm-ascend source code
+          uses: actions/checkout@v6
+          with:
+            ref: ${{ inputs.ref || github.ref }}
+
+        - name: Download all coverage artifacts
+          uses: actions/download-artifact@v5
+          with:
+            path: all-coverage
+            pattern: selected-test-coverage-*
+            merge-multiple: true
+
+        - name: Debug - List downloaded coverage files
+          run: |
+            echo "=== all-coverage top level ==="
+            find all-coverage -maxdepth 1 2>/dev/null | head -20 || echo "all-coverage directory not exist"
+            echo ""
+            echo "=== all-coverage total file count ==="
+            find all-coverage -type f 2>/dev/null | wc -l
+            echo "=== sample covdata dirs ==="
+            find all-coverage -type d -name covdata 2>/dev/null | head -10
+            echo "=== sample files ==="
+            find all-coverage -path '*/covdata/*' -type f 2>/dev/null | head -10
+
+        - name: Assemble and compress coverage files
+          run: |
+            set -euo pipefail
+            TASK_DATE=$(date +%Y%m%d%H)
+            TASK_NAME="VLLM-ASCEND@task_${TASK_DATE}"
+            COVERAGE_PKG_DIR="coverage/vllm-ascend"
+            TASK_DIR="${COVERAGE_PKG_DIR}/${TASK_NAME}"
+            mkdir -p "${TASK_DIR}" "${COVERAGE_PKG_DIR}/covstub/vllm_ascend"
+
+            COVERAGE_FILE_COUNT=0
+            while IFS= read -r f; do
+              rel="${f#all-coverage/}"
+              case "${rel}" in
+                selected-test-coverage-*/*) rel="${rel#*/}" ;;
+              esac
+              dest="${TASK_DIR}/${rel}"
+              mkdir -p "$(dirname "${dest}")"
+              cp "${f}" "${dest}"
+              COVERAGE_FILE_COUNT=$((COVERAGE_FILE_COUNT + 1))
+            done < <(find all-coverage -path '*/covdata/*' -type f 2>/dev/null)
+
+            echo "Copied ${COVERAGE_FILE_COUNT} coverage files to ${TASK_DIR}"
+            if [ "${COVERAGE_FILE_COUNT}" -eq 0 ]; then
+              echo "::error::No coverage files found under all-coverage/*/covdata/"
+              exit 1
+            fi
+
+            cp -r vllm_ascend/. "${COVERAGE_PKG_DIR}/covstub/vllm_ascend/"
+            cp tests/coverage_settingInfo.xml "${COVERAGE_PKG_DIR}/settingInfo.xml"
+            echo "${TASK_NAME}" > coverage_version.txt
+
+            echo "=== package top level ==="
+            find "${COVERAGE_PKG_DIR}" -maxdepth 1 2>/dev/null | head -20 || true
+            echo "=== task dir file count ==="
+            find "${TASK_DIR}" -type f | wc -l
+
+            tar cf coverage.tar -C coverage vllm-ascend
+            echo "Packed coverage/vllm-ascend into coverage.tar"
+            du -h coverage.tar
+            echo "=== tar contents (sample) ==="
+            tar tf coverage.tar | head -20 || true
+            echo "=== tar task file count ==="
+            tar tf coverage.tar | grep -c "vllm-ascend/${TASK_NAME}/" || true
+
+            {
+              echo "TASK_DATE=${TASK_DATE}"
+              echo "TASK_NAME=${TASK_NAME}"
+            } >> "${GITHUB_ENV}"
+
+        - name: Upload coverage to OBS
+          run: |
+            pip install esdk-obs-python --quiet
+            python3 - <<'EOF'
+            import os
+            from obs import ObsClient
+
+            OBS_BUCKET = 'vllm-ascend'
+            OBS_PREFIX = 'ci/precision-test'
+            client = ObsClient(
+                access_key_id=os.environ['OBS_ACCESS_KEY'],
+                secret_access_key=os.environ['OBS_SECRET_KEY'],
+                server='https://obs.cn-north-4.myhuaweicloud.com'
+            )
+
+            uploads = [
+                ('coverage.tar', f'{OBS_PREFIX}/coverage.tar'),
+                ('coverage_version.txt', f'{OBS_PREFIX}/coverage_version.txt'),
+            ]
+            for local_path, obs_path in uploads:
+                resp = client.putFile(OBS_BUCKET, obs_path, local_path)
+                if resp.status < 300:
+                    print(f'Uploaded: {local_path} -> {obs_path}')
+                else:
+                    raise Exception(f'Failed to upload {local_path}: {resp.errorMessage}')
+            EOF
