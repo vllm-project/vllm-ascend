@@ -161,11 +161,6 @@ def maybe_compute_actual_seq_lengths(
     return filtered, filtered
 
 
-# ---------------------------------------------------------------------------
-# Replay-time FIA task updates
-# ---------------------------------------------------------------------------
-
-
 def update_encoder_graph_params(
     update_stream: torch.npu.Stream,
     token_budget: int,
