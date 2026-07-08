@@ -1,33 +1,29 @@
 # SOME DESCRIPTIVE TITLE.
-# Copyright (C) 2025, vllm-ascend team
-# This file is distributed under the same license as the vllm-ascend
-# package.
-# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+# Copyright (C) 2026, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
 #
 msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-02 07:02+0000\n"
-"PO-Revision-Date: 2026-01-22 16:15+0800\n"
-"Last-Translator: Gemini\n"
+"POT-Creation-Date: 2026-07-08 14:01+0000\n"
+"PO-Revision-Date: 2026-07-08 14:01+0000\n"
+"Last-Translator: \n"
 "Language-Team: zh_CN <LL@li.org>\n"
 "Language: zh_CN\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
 "Plural-Forms: nplurals=1; plural=0;\n"
-"Generated-By: Babel 2.18.0\n"
+"Generated-By: detect_po_changes.py\n"
 
-#: ../../source/user_guide/feature_guide/sleep_mode.md:1
-msgid "Sleep Mode Guide"
-msgstr "睡眠模式指南"
+msgid "# Sleep Mode Guide"
+msgstr "# 休眠模式指南"
 
-#: ../../source/user_guide/feature_guide/sleep_mode.md:3
-msgid "Overview"
-msgstr "概述"
+msgid "## Overview"
+msgstr "## 概述"
 
-#: ../../source/user_guide/feature_guide/sleep_mode.md:5
 msgid ""
 "Sleep Mode is an API designed to offload model weights and discard KV cache "
 "from NPU memory. This functionality is essential for reinforcement learning "
@@ -36,82 +32,58 @@ msgid ""
 "autoregressive generation using inference engines like vLLM, followed by "
 "forward and backward passes for optimization."
 msgstr ""
-"睡眠模式是一个旨在从 NPU 内存中卸载模型权重并丢弃 KV 缓存的 API。此功能对于强化学习（RL）后训练工作负载至关重要，特别是在 "
-"PPO、GRPO 或 DPO 等在线算法中。在训练过程中，策略模型通常使用 vLLM 等推理引擎进行自回归生成，随后进行前向和反向传播以进行优化。"
+"休眠模式是一种API，旨在将模型权重卸载并从NPU内存中丢弃KV缓存。此功能对于强化学习（RL）后训练工作负载至关重要，尤其是在PPO、GRPO或DPO等在线算法中。训练期间，策略模型通常使用vLLM等推理引擎执行自回归生成，随后进行前向和反向传播以进行优化。"
 
-#: ../../source/user_guide/feature_guide/sleep_mode.md:7
 msgid ""
 "Since the generation and training phases may employ different model "
 "parallelism strategies, it becomes crucial to free KV cache and even offload"
 " model parameters stored within vLLM during training. This ensures efficient"
 " memory utilization and avoids resource contention on the NPU."
 msgstr ""
-"由于生成和训练阶段可能采用不同的模型并行策略，因此在训练期间释放 KV 缓存甚至卸载存储在 vLLM "
-"中的模型参数变得至关重要。这确保了高效的内存利用，并避免了 NPU 上的资源争用。"
+"由于生成和训练阶段可能采用不同的模型并行策略，因此在训练期间释放KV缓存甚至卸载vLLM中存储的模型参数变得至关重要。这确保了高效的内存利用，并避免了NPU上的资源争用。"
 
-#: ../../source/user_guide/feature_guide/sleep_mode.md:9
-msgid "Getting started"
-msgstr "快速入门"
+msgid "## Getting started"
+msgstr "## 快速开始"
 
-#: ../../source/user_guide/feature_guide/sleep_mode.md:11
-#, python-brace-format
 msgid ""
 "With `enable_sleep_mode=True`, the way we manage memory (malloc, free) in "
 "vLLM is under a specific memory pool. During model loading and KV cache "
 "initialization, we tag the memory as a map: `{\"weight\": data, "
 "\"kv_cache\": data}`."
 msgstr ""
-"当设置 `enable_sleep_mode=True` 时，vLLM 中管理内存（malloc, "
-"free）的方式将在一个特定的内存池下进行。在模型加载和 KV 缓存初始化期间，我们将内存标记为一个映射：`{\"weight\": data, "
+"当设置`enable_sleep_mode=True`时，我们在vLLM中管理内存（malloc, "
+"free）的方式是在一个特定的内存池下进行的。在模型加载和KV缓存初始化期间，我们将内存标记为一个映射：`{\"weight\": data, "
 "\"kv_cache\": data}`。"
 
-#: ../../source/user_guide/feature_guide/sleep_mode.md:13
 msgid ""
 "The engine (v0/v1) supports two sleep levels to manage memory during idle "
 "periods:"
-msgstr "引擎（v0/v1）支持两个睡眠级别来管理空闲期间的内存："
+msgstr "引擎（v0/v1）支持两种休眠级别来管理空闲期间的内存："
 
-#: ../../source/user_guide/feature_guide/sleep_mode.md:15
-msgid "Level 1 Sleep"
-msgstr "一级睡眠"
-
-#: ../../source/user_guide/feature_guide/sleep_mode.md:16
-msgid "Action: Offloads model weights and discards the KV cache."
-msgstr "操作：卸载模型权重并丢弃 KV 缓存。"
-
-#: ../../source/user_guide/feature_guide/sleep_mode.md:17
-msgid "Memory: Model weights are moved to CPU memory; KV cache is forgotten."
-msgstr "内存：模型权重被移动到 CPU 内存；KV 缓存被清除。"
-
-#: ../../source/user_guide/feature_guide/sleep_mode.md:18
-msgid "Use Case: Suitable when reusing the same model later."
-msgstr "用例：适用于稍后需要重用同一模型的情况。"
-
-#: ../../source/user_guide/feature_guide/sleep_mode.md:19
 msgid ""
-"Note: Ensure sufficient CPU memory is available to hold the model weights."
-msgstr "注意：确保有足够的 CPU 内存来存放模型权重。"
+"- Level 1 Sleep\n"
+"    - Action: Offloads model weights and discards the KV cache.\n"
+"    - Memory: Model weights are moved to CPU memory; KV cache is forgotten.\n"
+"    - Use Case: Suitable when reusing the same model later.\n"
+"    - Note: Ensure sufficient CPU memory is available to hold the model weights."
+msgstr ""
+"- 一级休眠\n"
+"    - 操作：卸载模型权重并丢弃KV缓存。\n"
+"    - 内存：模型权重移至CPU内存；KV缓存被遗忘。\n"
+"    - 使用场景：适用于稍后重用同一模型的情况。\n"
+"    - 注意：确保有足够的CPU内存来容纳模型权重。"
 
-#: ../../source/user_guide/feature_guide/sleep_mode.md:21
-msgid "Level 2 Sleep"
-msgstr "二级睡眠"
-
-#: ../../source/user_guide/feature_guide/sleep_mode.md:22
-msgid "Action: Discards both model weights and KV cache."
-msgstr "操作：同时丢弃模型权重和 KV 缓存。"
-
-#: ../../source/user_guide/feature_guide/sleep_mode.md:23
 msgid ""
-"Memory: The content of both the model weights and KV cache is forgotten."
-msgstr "内存：模型权重和 KV 缓存的内容都会被清除。"
+"- Level 2 Sleep\n"
+"    - Action: Discards both model weights and KV cache.\n"
+"    - Memory: The content of both the model weights and KV cache is forgotten.\n"
+"    - Use Case: Ideal when switching to a different model or updating the current one."
+msgstr ""
+"- 二级休眠\n"
+"    - 操作：丢弃模型权重和KV缓存。\n"
+"    - 内存：模型权重和KV缓存的内容均被遗忘。\n"
+"    - 使用场景：适用于切换到不同模型或更新当前模型的情况。"
 
-#: ../../source/user_guide/feature_guide/sleep_mode.md:24
-msgid ""
-"Use Case: Ideal when switching to a different model or updating the current "
-"one."
-msgstr "用例：在切换到不同模型或更新当前模型时最为理想。"
-
-#: ../../source/user_guide/feature_guide/sleep_mode.md:26
 msgid ""
 "Since this feature uses the low-level API "
 "[AscendCL](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/82RC1alpha002/API/appdevgapi/appdevgapi_07_0000.html),"
@@ -120,62 +92,46 @@ msgid ""
 " build from source. If you are using < v0.12.0rc1, remember to set `export "
 "COMPILE_CUSTOM_KERNELS=1`."
 msgstr ""
-"由于此功能使用了底层 API "
-"[AscendCL](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/82RC1alpha002/API/appdevgapi/appdevgapi_07_0000.html)，为了使用睡眠模式，您应遵循"
-" [安装指南](https://docs.vllm.ai/projects/ascend/en/latest/installation.html) "
-"并从源码构建。如果您使用的版本早于 v0.12.0rc1，请记得设置 `export COMPILE_CUSTOM_KERNELS=1`。"
+"由于此功能使用底层API "
+"[AscendCL](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/82RC1alpha002/API/appdevgapi/appdevgapi_07_0000.html)，为了使用休眠模式，您应遵循[安装指南](https://docs.vllm.ai/projects/ascend/en/latest/installation.html)并从源码构建。如果您使用的是低于v0.12.0rc1的版本，请记得设置`export"
+" COMPILE_CUSTOM_KERNELS=1`。"
 
-#: ../../source/user_guide/feature_guide/sleep_mode.md:28
-msgid "Optional extra cleanup"
-msgstr "可选额外清理"
+msgid "## Optional extra cleanup"
+msgstr "## 可选的额外清理"
 
-#: ../../source/user_guide/feature_guide/sleep_mode.md:30
 msgid ""
 "By default, sleep mode only releases memory managed by the sleep-mode "
 "allocator. For RL workloads that need to return more NPU memory to the "
 "trainer, vLLM Ascend also provides an optional extra cleanup path:"
 msgstr ""
-"默认情况下，睡眠模式仅释放由睡眠模式分配器管理的内存。对于需要将更多 NPU 内存归还给训练器的 RL 工作负载，vLLM Ascend "
-"还提供了一个可选的额外清理路径："
+"默认情况下，休眠模式仅释放由休眠模式分配器管理的内存。对于需要将更多NPU内存返回给训练器的RL工作负载，vLLM "
+"Ascend还提供了一个可选的额外清理路径："
 
-#: ../../source/user_guide/feature_guide/sleep_mode.md:40
 msgid ""
 "For online serving, pass the same option through `--additional-config`:"
-msgstr "对于在线服务，通过 `--additional-config` 传递相同选项："
+msgstr "对于在线服务，通过`--additional-config`传递相同的选项："
 
-#: ../../source/user_guide/feature_guide/sleep_mode.md:48
 msgid ""
 "When `enable_sleep_mode_extra_cleanup` is enabled, `sleep()` additionally:"
-msgstr "当启用 `enable_sleep_mode_extra_cleanup` 时，`sleep()` 还会额外执行以下操作："
+msgstr "当启用`enable_sleep_mode_extra_cleanup`时，`sleep()`还会执行以下操作："
 
-#: ../../source/user_guide/feature_guide/sleep_mode.md:50
 msgid ""
-"clears ACL graph attention workspaces and invalidates captured ACL graph "
-"caches when ACL graph is enabled;"
-msgstr "当启用 ACL graph 时，清除 ACL graph attention 工作空间并使已捕获的 ACL graph 缓存失效；"
+"- clears ACL graph attention workspaces and invalidates captured ACL graph caches when ACL graph is enabled;\n"
+"- resets the model runner graph manager so ACL graphs can be captured again after wakeup;\n"
+"- waits for pending pipeline-parallel send work, synchronizes the NPU, and destroys HCCL process groups."
+msgstr ""
+"- 当启用ACL图时，清除ACL图注意力工作空间并使捕获的ACL图缓存失效；\n"
+"- 重置模型运行器图管理器，以便在唤醒后可以重新捕获ACL图；\n"
+"- 等待待处理的流水线并行发送工作完成，同步NPU，并销毁HCCL进程组。"
 
-#: ../../source/user_guide/feature_guide/sleep_mode.md:51
-msgid ""
-"resets the model runner graph manager so ACL graphs can be captured again "
-"after wakeup;"
-msgstr "重置模型运行器 graph 管理器，以便在唤醒后可以重新捕获 ACL graphs；"
-
-#: ../../source/user_guide/feature_guide/sleep_mode.md:52
-msgid ""
-"waits for pending pipeline-parallel send work, synchronizes the NPU, and "
-"destroys HCCL process groups."
-msgstr "等待待处理的流水线并行发送工作完成，同步 NPU，并销毁 HCCL 进程组。"
-
-#: ../../source/user_guide/feature_guide/sleep_mode.md:54
 msgid ""
 "During `wake_up()`, vLLM Ascend restores the HCCL process groups, refreshes "
 "MoE dispatcher HCCL metadata, restores sleep-mode allocator memory, and "
 "recaptures ACL graphs when needed."
 msgstr ""
-"在 `wake_up()` 期间，vLLM Ascend 会恢复 HCCL 进程组，刷新 MoE 调度器 HCCL "
-"元数据，恢复睡眠模式分配器内存，并在需要时重新捕获 ACL graphs。"
+"在`wake_up()`期间，vLLM "
+"Ascend会恢复HCCL进程组，刷新MoE调度器的HCCL元数据，恢复休眠模式分配器的内存，并在需要时重新捕获ACL图。"
 
-#: ../../source/user_guide/feature_guide/sleep_mode.md:57
 msgid ""
 "Extra cleanup trades lower sleep-time NPU memory usage for longer wakeup "
 "latency. In particular, if ACL graph is enabled, `wake_up()` must call "
@@ -183,34 +139,26 @@ msgid ""
 "`enable_sleep_mode_extra_cleanup` disabled when lower wakeup latency is more"
 " important than releasing HCCL and ACL graph workspace memory."
 msgstr ""
-"额外清理以更长的唤醒延迟为代价换取更低的睡眠期 NPU 内存使用。特别是，如果启用了 ACL graph，`wake_up()` "
-"必须在模型状态恢复后再次调用 `capture_model()`。当更低的唤醒延迟比释放 HCCL 和 ACL graph 工作空间内存更重要时，请保持"
-" `enable_sleep_mode_extra_cleanup` 禁用。"
+"额外清理以更长的唤醒延迟为代价，换取更低的休眠期NPU内存使用。特别是，如果启用了ACL图，`wake_up()`必须在模型状态恢复后再次调用`capture_model()`。当更低的唤醒延迟比释放HCCL和ACL图工作空间内存更重要时，请保持`enable_sleep_mode_extra_cleanup`禁用。"
 
-#: ../../source/user_guide/feature_guide/sleep_mode.md:60
 msgid "For level 2 sleep, wakeup can be split into two phases:"
-msgstr "对于二级睡眠，唤醒可以分为两个阶段："
+msgstr "对于二级休眠，唤醒可以分为两个阶段："
 
-#: ../../source/user_guide/feature_guide/sleep_mode.md:68
 msgid ""
 "With extra cleanup enabled, ACL graphs are recaptured only when `tags` is "
 "`None` or contains `\"kv_cache\"`. This avoids recapturing graphs before "
 "externally reloaded weights and KV-cache state are ready."
 msgstr ""
-"启用额外清理后，仅当 `tags` 为 `None` 或包含 `\"kv_cache\"` 时才会重新捕获 ACL "
-"graphs。这避免了在外部重新加载的权重和 KV-cache 状态准备就绪之前重新捕获 graphs。"
+"启用额外清理后，仅当`tags`为`None`或包含`\"kv_cache\"`时才会重新捕获ACL图。这避免了在外部重新加载的权重和KV缓存状态准备好之前重新捕获图。"
 
-#: ../../source/user_guide/feature_guide/sleep_mode.md:70
-msgid "Expert weight layout restoration"
-msgstr "专家权重布局恢复"
+msgid "### Expert weight layout restoration"
+msgstr "### 专家权重布局恢复"
 
-#: ../../source/user_guide/feature_guide/sleep_mode.md:72
 msgid ""
 "For dense models, `wake_up()` simply restores the model weights to NPU "
 "memory; the tensor layout is unchanged."
-msgstr "对于稠密模型，`wake_up()` 仅将模型权重恢复到 NPU 内存；张量布局保持不变。"
+msgstr "对于稠密模型，`wake_up()`仅将模型权重恢复到NPU内存；张量布局保持不变。"
 
-#: ../../source/user_guide/feature_guide/sleep_mode.md:74
 msgid ""
 "For **unquantized MoE models** (`quant_config is None`), the fused expert "
 "weights are stored in a transposed layout for NPU matmul efficiency. This "
@@ -220,137 +168,59 @@ msgid ""
 "`w13_weight` and `w2_weight` to convert the standard checkpoint layout into "
 "the format required by the `torch_npu.npu_grouped_matmul` operator."
 msgstr ""
-"对于**未量化的 MoE 模型**（`quant_config is None`），融合的专家权重以转置布局存储以提高 NPU matmul "
-"效率。该布局在模型加载时由 `process_weights_after_loading()` 生成一次：加载权重后，该方法对 `w13_weight`"
-" 和 `w2_weight` 的第二个和第三个维度进行转置（`transpose(1, 2)`），将标准检查点布局转换为 "
-"`torch_npu.npu_grouped_matmul` 算子所需的格式。"
+"对于**未量化的MoE模型**（`quant_config is "
+"None`），融合的专家权重以转置布局存储，以提高NPU矩阵乘法的效率。此布局在模型加载时由`process_weights_after_loading()`生成一次：加载权重后，该方法转置`w13_weight`和`w2_weight`的第二和第三维度（`transpose(1,"
+" 2)`），将标准检查点布局转换为`torch_npu.npu_grouped_matmul`算子所需的格式。"
 
-#: ../../source/user_guide/feature_guide/sleep_mode.md:76
 msgid ""
 "After the sleep-mode allocator restores the original (untransposed) memory, "
 "`wake_up()` re-applies the same transpose to the affected expert weights "
 "when the `\"weights\"` tag is being restored:"
-msgstr "在睡眠模式分配器恢复原始（未转置）内存后，`wake_up()` 在恢复 `\"weights\"` 标签时对受影响的专家权重重新应用相同的转置："
+msgstr "在休眠模式分配器恢复原始（未转置）内存后，当恢复`\"weights\"`标签时，`wake_up()`会对受影响的专家权重重新应用相同的转置："
 
-#: ../../source/user_guide/feature_guide/sleep_mode.md:78
 msgid ""
-"`w13_weight` (gate/up projection): transposed back to the runtime layout "
-"when its second dimension matches `hidden_size`;"
-msgstr "`w13_weight`（gate/up projection）：当其第二个维度匹配 `hidden_size` 时，转置回运行时布局；"
+"- `w13_weight` (gate/up projection): transposed back to the runtime layout when its second dimension matches `hidden_size`;\n"
+"- `w2_weight` (down projection): transposed back to the runtime layout when its third dimension matches `hidden_size`."
+msgstr ""
+"- `w13_weight`（门控/上投影）：当其第二维度匹配`hidden_size`时，转置回运行时布局；\n"
+"- `w2_weight`（下投影）：当其第三维度匹配`hidden_size`时，转置回运行时布局。"
 
-#: ../../source/user_guide/feature_guide/sleep_mode.md:79
-msgid ""
-"`w2_weight` (down projection): transposed back to the runtime layout when "
-"its third dimension matches `hidden_size`."
-msgstr "`w2_weight`（down projection）：当其第三个维度匹配 `hidden_size` 时，转置回运行时布局。"
-
-#: ../../source/user_guide/feature_guide/sleep_mode.md:81
 msgid ""
 "This step is skipped entirely for dense models (which have no expert "
 "weights) and for quantized models (whose weights are handled by the "
 "quantization method)."
 msgstr "对于稠密模型（没有专家权重）和量化模型（其权重由量化方法处理），此步骤完全跳过。"
 
-#: ../../source/user_guide/feature_guide/sleep_mode.md:82
-msgid "Prepare Model Weights"
-msgstr "准备模型权重"
+msgid "## Prepare Model Weights"
+msgstr "## 准备模型权重"
 
-#: ../../source/user_guide/feature_guide/sleep_mode.md:83
 msgid ""
 "Use the `Qwen2.5-0.5B-Instruct` model weights. With "
 "`VLLM_USE_MODELSCOPE=True`, the model will be downloaded automatically from "
 "ModelScope."
 msgstr ""
-"使用 `Qwen2.5-0.5B-Instruct` 模型的权重。若设置 `VLLM_USE_MODELSCOPE=True`，模型将自动从 "
-"ModelScope 下载。"
-
-#: ../../source/user_guide/feature_guide/sleep_mode.md:84
-msgid "Model"
-msgstr "模型"
-
-#: ../../source/user_guide/feature_guide/sleep_mode.md:85
-msgid "ModelScope Link"
-msgstr "ModelScope链接"
-
-#: ../../source/user_guide/feature_guide/sleep_mode.md:86
-msgid "Usage"
-msgstr "使用方法"
-
-#: ../../source/user_guide/feature_guide/sleep_mode.md:87
-msgid "The following is a simple example of how to use sleep mode."
-msgstr "以下是如何使用睡眠模式的一个简单示例。"
-
-#: ../../source/user_guide/feature_guide/sleep_mode.md:88
-msgid "Offline inference:"
-msgstr "离线推理："
-
-#: ../../source/user_guide/feature_guide/sleep_mode.md:127
-msgid "Online serving:"
-msgstr "在线服务："
-
-#: ../../source/user_guide/feature_guide/sleep_mode.md:129
-msgid ""
-"Considering there may be a risk of malicious access, please make sure you "
-"are under a dev-mode, and explicitly specify the dev environment "
-"`VLLM_SERVER_DEV_MODE` to expose these endpoints (sleep/wake up)."
-msgstr ""
-"考虑到可能存在恶意访问的风险，请确保您处于开发模式，并显式指定开发环境变量 `VLLM_SERVER_DEV_MODE` "
-"以暴露这些端点（sleep/wake up）。"
-
-msgid "# Sleep Mode Guide"
-msgstr ""
-
-msgid "## Overview"
-msgstr ""
-
-msgid "## Getting started"
-msgstr ""
-
-msgid ""
-"- Level 1 Sleep\n"
-"    - Action: Offloads model weights and discards the KV cache.\n"
-"    - Memory: Model weights are moved to CPU memory; KV cache is forgotten.\n"
-"    - Use Case: Suitable when reusing the same model later.\n"
-"    - Note: Ensure sufficient CPU memory is available to hold the model weights."
-msgstr ""
-
-msgid ""
-"- Level 2 Sleep\n"
-"    - Action: Discards both model weights and KV cache.\n"
-"    - Memory: The content of both the model weights and KV cache is forgotten.\n"
-"    - Use Case: Ideal when switching to a different model or updating the current one."
-msgstr ""
-
-msgid "## Optional extra cleanup"
-msgstr ""
-
-msgid ""
-"- clears ACL graph attention workspaces and invalidates captured ACL graph caches when ACL graph is enabled;\n"
-"- resets the model runner graph manager so ACL graphs can be captured again after wakeup;\n"
-"- waits for pending pipeline-parallel send work, synchronizes the NPU, and destroys HCCL process groups."
-msgstr ""
-
-msgid "!!! note"
-msgstr ""
-
-msgid "### Expert weight layout restoration"
-msgstr ""
-
-msgid ""
-"- `w13_weight` (gate/up projection): transposed back to the runtime layout when its second dimension matches `hidden_size`;\n"
-"- `w2_weight` (down projection): transposed back to the runtime layout when its third dimension matches `hidden_size`."
-msgstr ""
-
-msgid "## Prepare Model Weights"
-msgstr ""
+"使用`Qwen2.5-0.5B-Instruct`模型权重。设置`VLLM_USE_MODELSCOPE=True`后，模型将从ModelScope自动下载。"
 
 msgid "## Usage"
-msgstr ""
+msgstr "## 使用方法"
+
+msgid "The following is a simple example of how to use sleep mode."
+msgstr "以下是一个如何使用休眠模式的简单示例。"
 
 msgid "- Offline inference:"
-msgstr ""
+msgstr "- 离线推理："
 
 msgid ""
 "- Online serving:\n"
 "    !!! note"
 msgstr ""
+"- 在线服务：\n"
+"    !!! note"
+
+msgid ""
+"Considering there may be a risk of malicious access, please make sure you "
+"are under a dev-mode, and explicitly specify the dev environment "
+"`VLLM_SERVER_DEV_MODE` to expose these endpoints (sleep/wake up)."
+msgstr ""
+"考虑到可能存在恶意访问的风险，请确保您处于开发模式，并明确指定开发环境`VLLM_SERVER_DEV_MODE`以暴露这些端点（sleep/wake "
+"up）。"
