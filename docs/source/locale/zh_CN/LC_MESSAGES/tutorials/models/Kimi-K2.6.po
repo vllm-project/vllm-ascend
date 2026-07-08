@@ -572,16 +572,16 @@ msgstr ""
 "v0.21 或更高版本，则此要求不再适用。"
 
 msgid "Start the docker image on your each node."
-msgstr ""
+msgstr "在每个节点上启动 Docker 镜像。"
 
 msgid "Key Parameter Descriptions:"
-msgstr ""
+msgstr "关键参数说明："
 
 msgid "Expected Result:"
-msgstr ""
+msgstr "预期结果："
 
 msgid "Expected Result:"
-msgstr ""
+msgstr "预期结果："
 
 msgid "### Using AISBench"
-msgstr ""
+msgstr "### 使用 AISBench"

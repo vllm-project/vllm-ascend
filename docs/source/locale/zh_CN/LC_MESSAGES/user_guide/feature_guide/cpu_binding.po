@@ -173,7 +173,7 @@ msgstr ""
 "| `Bind cpus failed in rank...` | 绑定步骤失败，该 rank 的 CPU 绑定被跳过。 | 检查 `taskset`、`lscpu`、`npu-smi`、cpuset 大小和 `/proc/irq` 权限。 |"
 
 msgid "Default behavior:"
-msgstr ""
+msgstr "默认行为："
 
 msgid "Disable CPU binding:"
-msgstr ""
+msgstr "禁用CPU绑定："

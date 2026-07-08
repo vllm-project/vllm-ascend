@@ -188,31 +188,31 @@ msgstr ""
 
 msgid ""
 "After starting the container, you should install the required packages:"
-msgstr ""
+msgstr "启动容器后，您需要安装所需的软件包："
 
 msgid "=== \"Local (CPU)\""
-msgstr ""
+msgstr "=== \"本地（CPU）\""
 
 msgid "=== \"Local (CPU)\""
-msgstr ""
+msgstr "=== \"本地（CPU）\""
 
 msgid "=== \"Single-card\""
-msgstr ""
+msgstr "=== \"单卡\""
 
 msgid "=== \"Multi-card\""
-msgstr ""
+msgstr "=== \"多卡\""
 
 msgid "You can run tests with `pytest` as well. Typical examples:"
-msgstr ""
+msgstr "您也可以使用 `pytest` 运行测试。典型示例如下："
 
 msgid "=== \"Local (CPU)\""
-msgstr ""
+msgstr "=== \"本地（CPU）\""
 
 msgid "You can't run the E2E test on CPUs."
-msgstr ""
+msgstr "无法在CPU上运行端到端测试。"
 
 msgid "=== \"Single-card\""
-msgstr ""
+msgstr "=== \"单卡\""
 
 msgid "=== \"Multi-card\""
-msgstr ""
+msgstr "=== \"多卡\""

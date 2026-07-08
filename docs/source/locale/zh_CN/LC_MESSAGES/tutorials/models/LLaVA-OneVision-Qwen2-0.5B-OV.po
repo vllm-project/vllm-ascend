@@ -157,4 +157,4 @@ msgstr ""
 
 msgid ""
 "If the request succeeds, you can see a response similar to the following:"
-msgstr ""
+msgstr "如果请求成功，您将看到类似如下的响应："

@@ -751,45 +751,51 @@ msgstr ""
 "Prefill 实例的吞吐量，从而提升了整个系统的吞吐量。"
 
 msgid "**Example: 2P2D Setup**"
-msgstr ""
+msgstr "**示例：2P2D 配置**"
 
 msgid "**Step 4: Run Load Balancing Service**"
-msgstr ""
+msgstr "**步骤 4：运行负载均衡服务**"
 
 msgid "**Step 5: Performance Testing**"
-msgstr ""
+msgstr "**步骤 5：性能测试**"
 
 msgid "**Step 1: Prepare UCM Configuration File**"
-msgstr ""
+msgstr "**步骤 1：准备 UCM 配置文件**"
 
 msgid ""
 "Create a configuration file (e.g., `ucm_config_example.yaml`) with "
 "PipelineStore:"
-msgstr ""
+msgstr "创建一个包含 PipelineStore 的配置文件（例如 `ucm_config_example.yaml`）："
 
 msgid "Key configuration parameters:"
-msgstr ""
+msgstr "关键配置参数："
 
 msgid ""
 "> **Note**: For more configuration options, refer to [UCM PipelineStore "
 "Documentation](https://ucm.readthedocs.io/en/latest/user-guide/prefix-"
 "cache/pipeline_store.html)."
 msgstr ""
+"> **注意**：更多配置选项请参考 [UCM PipelineStore "
+"文档](https://ucm.readthedocs.io/en/latest/user-guide/prefix-"
+"cache/pipeline_store.html)。"
 
 msgid "**Step 1: Run Mooncake Master Service**"
-msgstr ""
+msgstr "**步骤 1：运行 Mooncake Master 服务**"
 
 msgid "Run Mooncake master on any node (e.g., 192.168.10.1):"
-msgstr ""
+msgstr "在任意节点上运行 Mooncake master（例如 192.168.10.1）："
 
 msgid "Key configuration parameters:"
-msgstr ""
+msgstr "关键配置参数："
 
 msgid ""
 "> **Note**: For more configuration options, refer to [UCM PipelineStore "
 "Documentation](https://ucm.readthedocs.io/en/latest/user-guide/prefix-"
 "cache/pipeline_store.html)."
 msgstr ""
+"> **注意**：更多配置选项请参考 [UCM PipelineStore "
+"文档](https://ucm.readthedocs.io/en/latest/user-guide/prefix-"
+"cache/pipeline_store.html)。"
 
 msgid "**Step 4: Run Load Balancing Service**"
-msgstr ""
+msgstr "**步骤 4：运行负载均衡服务**"

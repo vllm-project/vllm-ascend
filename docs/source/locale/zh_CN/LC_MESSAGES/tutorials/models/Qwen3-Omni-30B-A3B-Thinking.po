@@ -466,16 +466,19 @@ msgstr ""
 "对于常见的环境、安装和通用参数问题，请参考[公开常见问题解答](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)。"
 
 msgid "**Installation Verification:**"
-msgstr ""
+msgstr "**安装验证：**"
 
 msgid "Example AISBench settings for this configuration:"
-msgstr ""
+msgstr "此配置的 AISBench 设置示例："
 
 msgid ""
 "- `request_rate`: 0\n"
 "    - `batch_size`: 32\n"
 "    - Input/Output length: 2048/2048 or 3500/1500"
 msgstr ""
+"- `request_rate`：0\n"
+"    - `batch_size`：32\n"
+"    - 输入/输出长度：2048/2048 或 3500/1500"
 
 msgid "Example AISBench settings for this configuration:"
-msgstr ""
+msgstr "此配置的 AISBench 设置示例："

@@ -355,36 +355,38 @@ msgstr ""
 "FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)。"
 
 msgid "Start the docker image on your each node."
-msgstr ""
+msgstr "在每个节点上启动 Docker 镜像。"
 
 msgid "Startup Command:"
-msgstr ""
+msgstr "启动命令："
 
 msgid "Startup Command:"
-msgstr ""
+msgstr "启动命令："
 
 msgid "Key Parameter Descriptions:"
-msgstr ""
+msgstr "关键参数说明："
 
 msgid ""
 "Common Issues Tip: If you encounter issues, please refer to the [Public "
 "FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for "
 "troubleshooting."
 msgstr ""
+"常见问题提示：如遇问题，请参考[公共 "
+"FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) 进行故障排查。"
 
 msgid "Service Verification:"
-msgstr ""
+msgstr "服务验证："
 
 msgid "Expected Result:"
-msgstr ""
+msgstr "预期结果："
 
 msgid "### Using AISBench"
-msgstr ""
+msgstr "### 使用 AISBench"
 
 msgid ""
 "We recommend using DeepSeek-V3.1 for deployment: "
 "[DeepSeek-V3.1](./DeepSeek-V3.1.md)."
-msgstr ""
+msgstr "我们推荐使用 DeepSeek-V3.1 进行部署：[DeepSeek-V3.1](./DeepSeek-V3.1.md)。"
 
 msgid "This solution has been tested and demonstrates excellent performance."
-msgstr ""
+msgstr "该方案已通过测试，表现出卓越的性能。"

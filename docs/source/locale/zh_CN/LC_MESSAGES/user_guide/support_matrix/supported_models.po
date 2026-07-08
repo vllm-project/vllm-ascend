@@ -219,10 +219,10 @@ msgstr ""
 "| Ultravox                       | 🟡            | 需要测试                                                            |       |"
 
 msgid "### Generative Models"
-msgstr ""
+msgstr "### 生成式模型"
 
 msgid "#### Core Supported Models"
-msgstr ""
+msgstr "#### 核心支持模型"
 
 msgid "#### Extended Compatible Models"
-msgstr ""
+msgstr "#### 扩展兼容模型"

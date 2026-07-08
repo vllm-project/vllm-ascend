@@ -568,19 +568,22 @@ msgstr ""
 " token的扩展上下文。"
 
 msgid "**Installation Verification:**"
-msgstr ""
+msgstr "**安装验证：**"
 
 msgid "### Using AISBench"
-msgstr ""
+msgstr "### 使用 AISBench"
 
 msgid "Example AISBench settings for this configuration:"
-msgstr ""
+msgstr "此配置的 AISBench 设置示例："
 
 msgid ""
 "- `request_rate`: 0\n"
 "    - `batch_size`: 32\n"
 "    - Input/Output length: 2048/2048 or 3500/1500"
 msgstr ""
+"- `request_rate`: 0\n"
+"    - `batch_size`: 32\n"
+"    - 输入/输出长度：2048/2048 或 3500/1500"
 
 msgid "Example AISBench settings for this configuration:"
-msgstr ""
+msgstr "此配置的 AISBench 设置示例："

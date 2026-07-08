@@ -376,25 +376,25 @@ msgid "A: Please add following configurations in vLLM startup command"
 msgstr "答：请在 vLLM 启动命令中添加以下配置"
 
 msgid "=== \"A3 series\""
-msgstr ""
+msgstr "=== \"A3 系列\""
 
 msgid "=== \"A2 series\""
-msgstr ""
+msgstr "=== \"A2 系列\""
 
 msgid "**node 0**"
-msgstr ""
+msgstr "**节点 0**"
 
 msgid "**node 1**"
-msgstr ""
+msgstr "**节点 1**"
 
 msgid "2. Prefill node 1"
-msgstr ""
+msgstr "2. 预填充节点 1"
 
 msgid "3. Decode node 0"
-msgstr ""
+msgstr "3. 解码节点 0"
 
 msgid "4. Decode node 1"
-msgstr ""
+msgstr "4. 解码节点 1"
 
 msgid ""
 "To set up request forwarding, run the following script on any machine. You "
@@ -402,6 +402,9 @@ msgid ""
 "[load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-"
 "ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)"
 msgstr ""
+"要设置请求转发，请在任意机器上运行以下脚本。您可以在仓库的示例中获取代理程序：[load_balance_proxy_server_example.py](https://github.com/vllm-"
+"project/vllm-"
+"ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)"
 
 msgid "### Using AISBench"
-msgstr ""
+msgstr "### 使用 AISBench"

@@ -206,6 +206,13 @@ msgid ""
 "- `--headless`: indicates that this vLLM instance is not the master service node. Only set on non-master nodes (Node 1). The master node (Node 0) should NOT set this flag.\n"
 "- For single-node deployment, we recommend using `dp4 tp4` instead of `dp2 tp8`."
 msgstr ""
+"- `--data-parallel-size`：所有节点上数据并行秩的总数。在此示例中，`4` 表示模型总共分布在 4 个 DP 秩上（每个节点 2 个）。\n"
+"- `--data-parallel-size-local`：当前节点上运行的数据并行秩数量。在此示例中，每个节点运行 2 个 DP 秩。\n"
+"- `--data-parallel-start-rank`：当前节点上数据并行秩的起始秩偏移量。节点 0 从秩 0 开始（默认），节点 1 从秩 2 开始。这确保每个节点的 DP 秩在整体秩空间中占据不同的位置。\n"
+"- `--data-parallel-address`：数据并行主节点（节点 0）的 IP 地址。此值必须与节点 0 上设置的 `local_ip` 一致。\n"
+"- `--data-parallel-rpc-port`：数据并行主节点通信的 RPC 端口。所有节点必须相同。\n"
+"- `--headless`：表示此 vLLM 实例不是主服务节点。仅在非主节点（节点 1）上设置。主节点（节点 0）不应设置此标志。\n"
+"- 对于单节点部署，我们建议使用 `dp4 tp4` 而不是 `dp2 tp8`。"
 
 msgid ""
 "Common Issues Tip: If you encounter issues, please refer to the [Public "
@@ -595,37 +602,39 @@ msgid ""
 msgstr "答：对于单节点部署，我们推荐使用`dp4 tp4`而非`dp2 tp8`。"
 
 msgid "Start the docker image on your each node."
-msgstr ""
+msgstr "在每个节点上启动 Docker 镜像。"
 
 msgid "Startup Command:"
-msgstr ""
+msgstr "启动命令："
 
 msgid "Startup Command:"
-msgstr ""
+msgstr "启动命令："
 
 msgid "Key Parameter Descriptions:"
-msgstr ""
+msgstr "关键参数说明："
 
 msgid ""
 "Common Issues Tip: If you encounter issues, please refer to the [Public "
 "FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for "
 "troubleshooting."
 msgstr ""
+"常见问题提示：如果遇到问题，请参考[公共 "
+"FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) 进行故障排除。"
 
 msgid "Service Verification:"
-msgstr ""
+msgstr "服务验证："
 
 msgid "Expected Result:"
-msgstr ""
+msgstr "预期结果："
 
 msgid "Key Parameter Descriptions:"
-msgstr ""
+msgstr "关键参数说明："
 
 msgid "Expected Result:"
-msgstr ""
+msgstr "预期结果："
 
 msgid "Expected Result:"
-msgstr ""
+msgstr "预期结果："
 
 msgid "### Using AISBench"
-msgstr ""
+msgstr "### 使用 AISBench"

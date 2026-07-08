@@ -303,4 +303,4 @@ msgstr ""
 "concurrency` / `num-prompts`）。"
 
 msgid "### Using AISBench"
-msgstr ""
+msgstr "### 使用AISBench"

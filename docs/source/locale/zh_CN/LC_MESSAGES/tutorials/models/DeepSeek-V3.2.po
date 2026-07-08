@@ -327,31 +327,31 @@ msgstr ""
 "calling-example)。"
 
 msgid "Start the docker image on your each node."
-msgstr ""
+msgstr "在每个节点上启动 Docker 镜像。"
 
 msgid "=== \"A3 series\""
-msgstr ""
+msgstr "=== \"A3 系列\""
 
 msgid "=== \"A2 series\""
-msgstr ""
+msgstr "=== \"A2 系列\""
 
 msgid "**Node0**"
-msgstr ""
+msgstr "**节点0**"
 
 msgid "**Node1**"
-msgstr ""
+msgstr "**节点1**"
 
 msgid "1. Prefill node 0"
-msgstr ""
+msgstr "1. 预填充节点0"
 
 msgid "2. Prefill node 1"
-msgstr ""
+msgstr "2. 预填充节点1"
 
 msgid "3. Decode node 0"
-msgstr ""
+msgstr "3. 解码节点0"
 
 msgid "4. Decode node 1"
-msgstr ""
+msgstr "4. 解码节点1"
 
 msgid "### Using AISBench"
-msgstr ""
+msgstr "### 使用 AISBench"

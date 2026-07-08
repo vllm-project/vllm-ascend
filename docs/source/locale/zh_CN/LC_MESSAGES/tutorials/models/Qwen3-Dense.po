@@ -454,9 +454,9 @@ msgstr ""
 "Dense 模型的特定问题。"
 
 msgid "### Using AISBench"
-msgstr ""
+msgstr "### 使用AISBench"
 
 msgid ""
 "The following is an example configuration for the accuracy evaluation config"
 " file:"
-msgstr ""
+msgstr "以下是精度评估配置文件的示例配置："

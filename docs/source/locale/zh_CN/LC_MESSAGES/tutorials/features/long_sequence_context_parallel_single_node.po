@@ -213,7 +213,7 @@ msgstr ""
 "| random  | - | performance | perf | 17.36s |"
 
 msgid "**Notice:**"
-msgstr ""
+msgstr "**注意：**"
 
 msgid "### Using AISBench"
-msgstr ""
+msgstr "### 使用AISBench"
