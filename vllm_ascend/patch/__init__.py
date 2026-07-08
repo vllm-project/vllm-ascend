@@ -629,15 +629,13 @@
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.minimax_m2.MiniMaxM2MoE.forward`
 #    Why:
-#       In TP mode, MiniMax-M2 MoE needs a backend-aware reduction path to avoid
-#       unnecessary communication / maintain correctness on NPU.
+#       MiniMax-M2 routing should keep router logits in fp32 on NPU.
 #    How：
-#       Replace the forward to call `experts.maybe_all_reduce_tensor_model_parallel`
-#       when `tp_size > 1`.
+#       Replace the forward to cast hidden states to fp32 before the gate.
 #    Related PR (if no, explain why):
 #       No, model-specific behavior.
 #    Future Plan:
-#       Move this behavior upstream once a generic MoE reduce hook exists.
+#       Remove this patch once upstream behavior is sufficient for Ascend.
 #
 #   2. `vllm.model_executor.models.minimax_m2.MiniMaxM2Attention.forward`
 #    Why:
