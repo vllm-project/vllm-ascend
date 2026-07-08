@@ -281,8 +281,9 @@ def test_failed_target_model_participates_in_barrier_before_error(mock_logger, m
     _patch_loader_common(monkeypatch)
     monkeypatch.setattr("vllm_ascend.model_loader.netloader.netloader.elastic_load", lambda **kwargs: None)
     monkeypatch.setattr(
-        "vllm_ascend.model_loader.netloader.netloader.revert_to_default",
-        lambda *args, **kwargs: (None, False),
+        ModelNetLoaderElastic,
+        "revert_to_default",
+        lambda self, *args, **kwargs: (None, False),
     )
 
     barrier_calls = []
