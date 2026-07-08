@@ -161,7 +161,7 @@ Key Parameter Descriptions:
 - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` enables full decode graph compilation for improved performance. On Atlas 300 inference products, `fuse_norm_quant` in graph compilation is disabled by default in `--additional_config`.
 - `--additional_config '{"enable_cpu_binding":true}'` enables CPU binding to improve performance.
 
-Common Issues Tip: If you encounter startup issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs/) for troubleshooting.
+Common Issues Tip: If you encounter startup issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
 
 ### 5.2 Multi-Node PD Separation Deployment
 
@@ -366,7 +366,7 @@ Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matr
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs/); this chapter only covers model-specific issues.
+For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html); this chapter only covers model-specific issues.
 
 - **Q: What are the deployment requirements for Atlas 300 inference products?**
 

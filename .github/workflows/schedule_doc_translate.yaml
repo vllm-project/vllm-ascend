@@ -149,11 +149,6 @@ jobs:
             echo "EOF"
           } >> $GITHUB_OUTPUT
 
-      - name: Generate Chinese docs
-        if: steps.validate.outcome == 'success'
-        run: |
-          python tools/generate_zh_docs.py
-
       - name: Commit and push
         if: steps.validate.outcome == 'success'
         env:
