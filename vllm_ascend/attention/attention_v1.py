@@ -72,6 +72,26 @@ SWA_INT_MAX = 2147483647
 _ATTN_KEYS_BUFFER = None
 
 
+def _filter_fia_attn_keys(attn_keys, attn_metadata):
+    """Keep only the self-attention (FIA) layers in the graph-replay key list.
+
+    Hybrid models such as Qwen3.5 / Qwen3-Next mix self-attention layers
+    (updated through npu_fused_infer_attention_score) with linear-attention
+    (GatedDeltaNet) layers. Only the self-attention layers are captured into
+    `graph_params.attn_params`; the linear-attention layers use a separate
+    conv1d update path and their metadata (`GDNAttentionMetadata`) has neither
+    `seq_lens_list` nor `actual_seq_lengths_q`. Iterating the raw key list in
+    the FIA graph-replay loop therefore reaches a linear-attention key and
+    raises ``AttributeError: 'GDNAttentionMetadata' object has no attribute
+    'seq_lens_list'``. Drop those keys so the loop only visits FIA metadata.
+    """
+    return [
+        key for key in attn_keys
+        if hasattr(attn_metadata[key], "seq_lens_list")
+        and hasattr(attn_metadata[key], "actual_seq_lengths_q")
+    ]
+
+
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
 class AscendAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
@@ -529,6 +549,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 graph_params = get_graph_params()
                 attn_metadata = forward_context.attn_metadata
                 attn_keys = list(attn_metadata.keys())
+                attn_keys = _filter_fia_attn_keys(attn_keys, attn_metadata)
             # For Qwen3-next, since the kv_cache_config has already categorized
             # linear_attn and self_attn, the attn_metadata is first arranged with
             # self_attn followed by linear_attn. Therefore, using zip directly
@@ -634,6 +655,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 graph_params = get_graph_params()
                 attn_metadata = forward_context.attn_metadata
                 attn_keys = list(attn_metadata.keys())
+                attn_keys = _filter_fia_attn_keys(attn_keys, attn_metadata)
                 if not use_layer_aware_replay:
                     # In some speculative methods (such as DFlash), the order of
                     # attn_keys in the Target model will be disrupted instead of
