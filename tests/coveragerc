@@ -1,0 +1,39 @@
+[run]
+branch = True
+# 指定覆盖数据中文件路径采用绝对路径，便于后续分析时路径匹配
+relative_files = False
+# 指定产生的覆盖数据文件基础名称，可采用绝对路径
+data_file = /mnt/share/s00837289/covdata/coverage
+# 对覆盖数据文件增加进程ID等标识
+parallel = True
+# 项目使用的并发库，默认thread。若代码采用了multiprocessing, gevent, greenlet, 或eventlet等并发库，则需显示指定。如任务调度框架celery可采用单进程模式，使用了multiprocessing库，则此选项需追加multiprocessing
+concurrency = thread,multiprocessing
+# 注册信号15，以便“kill pid”杀进程前可导出覆盖数据，若业务代码本身注册了15处理函数，则应关闭。默认关闭
+sigterm = False
+# debug配置，方便定位可能的异常。按需开启
+# debug=pid,dataio,dataop
+# debug_file=/opt/coveragepy_debug.out
+# 禁用coverage.py警告打印
+disable_warnings=no-data-collected,module-not-python
+# 配置可采集覆盖数据的源码文件列表，支持通配符*匹配，支持通过逗号分隔多个值。根据实际调整
+include = 
+    */vllm_ascend/*
+    # 目录usr下任何格式python代码
+    /vllm_ascend/*
+# 配置需排除覆盖数据采集的文件列表，作用于include配置处理之后。语法同include
+omit = */.local/*
+    /usr/*
+    utils/tirefire.py
+# agent配置常驻进程覆盖采集执行机。2025年3月所出烛龙版本7.5.4a0.dev2新增配置项
+# 是否开启执行机覆盖数据收取接口服务，默认False
+#agent_enable=False
+# 指定收取服务使用端口，默认8088。可配置为0以采用随机端口
+#agent_port=8088
+# 是否开启收取日志信息打印，默认False
+#agent_debug=False
+# 开始日志打印是，收取服务日志文件绝对路径
+#agent_debug_file=/path/to/coverage_agent.log
+# 指定导出数据超时配置，默认3秒
+#agent_dump_timeout=3
+# 导出数据是否采用API方式，默认True。True：调用dump方法方式；False：kill -34方式
+#agent_dump_in_api=True
