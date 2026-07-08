@@ -1,0 +1,49 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+name: test-vnpu-scheduling
+
+on:
+  workflow_dispatch:
+
+jobs:
+  vnpu-scheduling-test:
+    runs-on: linux-aarch64-a2-8-vnpu-gy006
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-910b-ubuntu22.04-py3.12
+
+    steps:
+      - name: Check NPU info (vnpu)
+        run: |
+          echo "=== Runner Info ==="
+          echo "Hostname: $(hostname)"
+          echo "Architecture: $(uname -m)"
+          echo ""
+
+          echo "=== NPU SMI Info ==="
+          npu-smi info
+
+      - name: Show NPU device count
+        run: |
+          echo "=== NPU Device Count ==="
+          npu-smi info -l | grep -c "npu" || echo "npu-smi list failed"
+
+      - name: Verify scheduling label
+        run: |
+          echo "=== Scheduling Verification ==="
+          echo "This job was successfully scheduled to runner: linux-aarch64-a2-8-vnpu-gy006"
+          echo "vnpu label scheduling test PASSED"
