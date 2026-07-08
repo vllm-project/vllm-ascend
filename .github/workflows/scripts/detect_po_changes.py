@@ -208,7 +208,7 @@ def _relative_to_source(path: Path) -> str:
 def _write_po_from_paragraphs(po_path: Path, rel: str, paragraphs: list[str], dry_run: bool = False) -> bool:
     """Write a fresh .po file from extracted paragraphs, discarding any existing translations."""
     header = _po_header(str(rel))
-    body_entries = "\n\n".join(f'msgid "{p.replace(chr(34), chr(92) + chr(34))}"\nmsgstr ""' for p in paragraphs)
+    body_entries = "\n\n".join(_po_entry_block(p) for p in paragraphs)
     if dry_run:
         print(f"  [DRY-RUN] Would force-regenerate: {po_path} ({len(paragraphs)} entries)")
         return True
@@ -216,6 +216,28 @@ def _write_po_from_paragraphs(po_path: Path, rel: str, paragraphs: list[str], dr
     po_path.write_text(header + body_entries + "\n", encoding="utf-8")
     print(f"  Force-regenerated: {po_path} ({len(paragraphs)} entries)")
     return True
+
+
+def _po_entry_block(msgid: str) -> str:
+    """Build a valid PO entry block (msgid + msgstr) for *msgid*.
+
+    Multi-line msgid values are wrapped with empty-string continuation
+    lines as required by the PO format.  The final continuation line
+    does NOT carry a trailing \\n.
+    """
+    lines = msgid.split("\n")
+    if len(lines) == 1:
+        escaped = msgid.replace("\\", "\\\\").replace('"', '\\"')
+        return f'msgid "{escaped}"\nmsgstr ""'
+    parts = ['msgid ""']
+    for i, line in enumerate(lines):
+        escaped = line.replace("\\", "\\\\").replace('"', '\\"')
+        if i < len(lines) - 1:
+            parts.append(f'"{escaped}\\n"')
+        else:
+            parts.append(f'"{escaped}"')
+    parts.append('msgstr ""')
+    return "\n".join(parts)
 
 
 def process_file(source_path: Path, dry_run: bool = False, force: bool = False) -> bool:
