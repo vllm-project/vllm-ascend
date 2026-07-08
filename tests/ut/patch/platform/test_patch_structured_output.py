@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from inspect import signature
 from types import SimpleNamespace
 
 import pytest
@@ -10,6 +11,8 @@ from vllm.v1.structured_output import StructuredOutputManager, backend_guidance,
 from vllm.v1.structured_output.backend_types import StructuredOutputOptions
 
 from vllm_ascend.patch.platform import patch_structured_output  # noqa: F401
+
+MODEL_CONFIG = SimpleNamespace(is_diffusion=False)
 
 
 class FakeBackend:
@@ -49,6 +52,17 @@ def make_request(backend: str):
     )
 
 
+def validate_structured_outputs(params, config):
+    original_validate = getattr(
+        SamplingParams,
+        patch_structured_output._ORIGINAL_VALIDATE_ATTR,
+    )
+    if "model_config" in signature(original_validate).parameters:
+        params._validate_structured_outputs(MODEL_CONFIG, config, tokenizer=object())
+    else:
+        params._validate_structured_outputs(config, tokenizer=object())
+
+
 def test_sampling_params_rejects_mixed_structured_output_backends(monkeypatch):
     def fake_validate_xgrammar(sampling_params):
         schema = sampling_params.structured_outputs.json
@@ -73,14 +87,14 @@ def test_sampling_params_rejects_mixed_structured_output_backends(monkeypatch):
 
     config = StructuredOutputsConfig(backend="auto")
     xgrammar_params = SamplingParams(structured_outputs=StructuredOutputsParams(json={"type": "object"}))
-    xgrammar_params._validate_structured_outputs(config, tokenizer=object())
+    validate_structured_outputs(xgrammar_params, config)
 
     assert xgrammar_params.structured_outputs._backend == "xgrammar"
     assert getattr(config, patch_structured_output._BACKEND_ATTR) == "xgrammar"
 
     guidance_params = SamplingParams(structured_outputs=StructuredOutputsParams(json={"force_guidance": True}))
     with pytest.raises(ValueError, match="already using 'xgrammar'.*'guidance'"):
-        guidance_params._validate_structured_outputs(config, tokenizer=object())
+        validate_structured_outputs(guidance_params, config)
 
 
 def test_sampling_params_allows_consistent_guidance_backend(monkeypatch):
@@ -98,7 +112,7 @@ def test_sampling_params_allows_consistent_guidance_backend(monkeypatch):
     config = StructuredOutputsConfig(backend="guidance")
     for _ in range(2):
         params = SamplingParams(structured_outputs=StructuredOutputsParams(json={"type": "array"}))
-        params._validate_structured_outputs(config, tokenizer=object())
+        validate_structured_outputs(params, config)
 
         assert params.structured_outputs._backend == "guidance"
         assert getattr(config, patch_structured_output._BACKEND_ATTR) == "guidance"
@@ -124,7 +138,7 @@ def test_failed_first_validation_does_not_lock_config(monkeypatch):
     config = StructuredOutputsConfig(backend="auto")
     params = SamplingParams(structured_outputs=StructuredOutputsParams(json={"force_guidance": True}))
     with pytest.raises(ValueError, match="guidance error"):
-        params._validate_structured_outputs(config, tokenizer=object())
+        validate_structured_outputs(params, config)
 
     assert not hasattr(config, patch_structured_output._BACKEND_ATTR)
 

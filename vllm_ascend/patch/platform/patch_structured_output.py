@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from inspect import Signature, signature
 from typing import Any
 
 from vllm.exceptions import VLLMValidationError
@@ -60,19 +61,40 @@ def _sampling_params_backend(sampling_params: SamplingParams) -> str | None:
     return backend if isinstance(backend, str) else None
 
 
+def _structured_outputs_config_from_call(
+    validate_signature: Signature,
+    sampling_params: SamplingParams,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+) -> Any:
+    bound_arguments = validate_signature.bind_partial(
+        sampling_params,
+        *args,
+        **kwargs,
+    )
+    return bound_arguments.arguments.get("structured_outputs_config")
+
+
 def _patch_sampling_params_validation() -> None:
     if getattr(SamplingParams, _PATCHED_SAMPLING_PARAMS_ATTR, False):
         return
 
     original_validate = SamplingParams._validate_structured_outputs
+    validate_signature = signature(original_validate)
     setattr(SamplingParams, _ORIGINAL_VALIDATE_ATTR, original_validate)
 
     def _validate_structured_outputs(
         self: SamplingParams,
-        structured_outputs_config: Any,
-        tokenizer: Any,
+        *args: Any,
+        **kwargs: Any,
     ) -> None:
-        result = original_validate(self, structured_outputs_config, tokenizer)
+        result = original_validate(self, *args, **kwargs)
+        structured_outputs_config = _structured_outputs_config_from_call(
+            validate_signature,
+            self,
+            args,
+            kwargs,
+        )
         request_backend = _sampling_params_backend(self)
         if structured_outputs_config is None or request_backend is None:
             return result
