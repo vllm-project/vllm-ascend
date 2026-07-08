@@ -185,6 +185,30 @@ packed_modules_model_mapping: dict[str, dict[str, list[str]]] = {
         ],
         "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
     },
+    "gemma4": {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+        "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+    },
+    "gemma4_text": {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+        "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+    },
     "glm4_moe_lite": {
         "gate_up_proj": ["gate_proj", "up_proj"],
         "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
@@ -328,6 +352,16 @@ QUANT_MODEL_SUBSTR_MAPPINGS = {
     # lookup matches the on-disk naming.
     "step3p5_mtp": {
         ".mtp_block.": ".",
+    },
+    # Gemma4 MoE renames ".experts." to ".moe.experts." in the vLLM module tree
+    # (gemma4.py weight mapper), but the ModelSlim quant description keeps the
+    # original ".experts." naming. Strip the ".moe" infix so the quant lookup
+    # matches the on-disk keys.
+    "gemma4": {
+        ".moe.experts": ".experts",
+    },
+    "gemma4_text": {
+        ".moe.experts": ".experts",
     },
 }
 

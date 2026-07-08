@@ -17,6 +17,7 @@ from vllm_ascend.quantization.modelslim_config import (
     MODELSLIM_CONFIG_FILENAME,
     AscendModelSlimConfig,
     get_linear_quant_type,
+    get_packed_modules_mapping,
 )
 from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, vllm_version_is
 
@@ -318,6 +319,24 @@ class TestAscendModelSlimConfig(TestBase):
         self.assertIn("model.layers.0.weight", config.quant_description)
         self.assertEqual(config.quant_description["model.layers.0.weight"], "INT8")
 
+    def test_apply_extra_quant_adaptations_does_not_add_global_moe_expert_alias(self):
+        config = AscendModelSlimConfig(
+            {
+                "model.layers.0.experts.0.gate_proj.weight": "INT8",
+            }
+        )
+
+        self.assertNotIn("model.layers.0.moe.experts.0.gate_proj.weight", config.quant_description)
+
+    def test_apply_extra_quant_adaptations_keeps_existing_moe_expert_keys(self):
+        config = AscendModelSlimConfig(
+            {
+                "model.layers.0.moe.experts.0.gate_proj.weight": "INT8",
+            }
+        )
+
+        self.assertEqual(config.quant_description["model.layers.0.moe.experts.0.gate_proj.weight"], "INT8")
+
 
 class TestApplyVllmMapper(TestBase):
     def test_apply_mapper_with_populated_quant_description(self):
@@ -378,6 +397,69 @@ class TestQuantPrefixMapper(TestBase):
                 )
 
                 self.assertEqual(prefix, expected)
+
+    def test_gemma4_moe_experts_prefix_maps_to_quant_description_keys(self):
+        quant_description = {
+            "language_model.model.layers.0.experts.0.gate_proj.weight": "W8A8_DYNAMIC",
+            "language_model.model.layers.0.experts.0.up_proj.weight": "W8A8_DYNAMIC",
+            "language_model.model.layers.0.experts.0.down_proj.weight": "W8A8_DYNAMIC",
+        }
+        for model_type in ("gemma4", "gemma4_text"):
+            with self.subTest(model_type=model_type):
+                config = AscendModelSlimConfig(quant_description)
+
+                prefix = config.quant_prefix_mapper(
+                    model_type,
+                    "language_model.model.layers.0.moe.experts",
+                )
+                packed_mapping = get_packed_modules_mapping(model_type)
+
+                self.assertEqual(prefix, "language_model.model.layers.0.experts")
+                self.assertEqual(get_linear_quant_type(quant_description, prefix, packed_mapping), "W8A8_DYNAMIC")
+                self.assertFalse(config.is_layer_skipped_ascend(prefix, packed_mapping))
+
+    def test_gemma4_packed_modules_mapping_covers_attention_mlp_and_moe(self):
+        expected_mapping = {
+            "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+            "gate_up_proj": ["gate_proj", "up_proj"],
+            "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+        }
+        for model_type in ("gemma4", "gemma4_text"):
+            with self.subTest(model_type=model_type):
+                self.assertEqual(get_packed_modules_mapping(model_type), expected_mapping)
+
+    def test_gemma4_moe_experts_float_shards_are_skipped_together(self):
+        quant_description = {
+            "language_model.model.layers.0.experts.0.gate_proj.weight": "FLOAT",
+            "language_model.model.layers.0.experts.0.up_proj.weight": "FLOAT",
+            "language_model.model.layers.0.experts.0.down_proj.weight": "FLOAT",
+        }
+        config = AscendModelSlimConfig(quant_description)
+        prefix = config.quant_prefix_mapper("gemma4", "language_model.model.layers.0.moe.experts")
+
+        self.assertTrue(config.is_layer_skipped_ascend(prefix, get_packed_modules_mapping("gemma4")))
+
+    def test_gemma4_moe_experts_mixed_shards_still_raise(self):
+        quant_description = {
+            "language_model.model.layers.0.experts.0.gate_proj.weight": "FLOAT",
+            "language_model.model.layers.0.experts.0.up_proj.weight": "W8A8_DYNAMIC",
+            "language_model.model.layers.0.experts.0.down_proj.weight": "W8A8_DYNAMIC",
+        }
+        config = AscendModelSlimConfig(quant_description)
+        prefix = config.quant_prefix_mapper("gemma4", "language_model.model.layers.0.moe.experts")
+        packed_mapping = get_packed_modules_mapping("gemma4")
+
+        with self.assertRaises(ValueError):
+            get_linear_quant_type(quant_description, prefix, packed_mapping)
+        with self.assertRaises(ValueError):
+            config.is_layer_skipped_ascend(prefix, packed_mapping)
+
+    def test_non_gemma4_moe_experts_prefix_is_not_rewritten(self):
+        config = AscendModelSlimConfig()
+
+        prefix = config.quant_prefix_mapper("qwen3_5_moe", "model.layers.0.moe.experts")
+
+        self.assertEqual(prefix, "model.layers.0.moe.experts")
 
 
 class TestGetCacheScale(TestBase):
