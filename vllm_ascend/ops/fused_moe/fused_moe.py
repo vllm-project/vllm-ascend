@@ -547,7 +547,7 @@ else:
 
         def set_lora_context(self, lora_context):
             self.routed_experts._ascend_moe_lora_context = lora_context
-        
+
         def no_shared_forward_impl(  # type: ignore[override]
             self, hidden_states: torch.Tensor, router_logits: torch.Tensor, return_with_event: bool = False
         ) -> torch.Tensor | FusedMoEResult:
