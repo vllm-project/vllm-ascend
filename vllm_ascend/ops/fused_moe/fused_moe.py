@@ -27,6 +27,10 @@ from vllm.distributed import get_dp_group, get_ep_group, get_tp_group, tensor_mo
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
+from vllm.model_executor.layers.fused_moe.layer import (
+    FusedMoE,  # noqa: F401
+    MoERunner,
+)
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
@@ -49,12 +53,8 @@ from vllm_ascend.utils import (
 )
 
 if vllm_version_is("0.23.0"):
-    from vllm.model_executor.layers.fused_moe.layer import FusedMoE, UnquantizedFusedMoEMethod  # noqa: F401
-    from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner  # type: ignore
+    from vllm.model_executor.layers.fused_moe.layer import UnquantizedFusedMoEMethod
 else:
-    from vllm.model_executor.layers.fused_moe.layer import (
-        MoERunner,
-    )
     from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import UnquantizedFusedMoEMethod
 
 
@@ -515,31 +515,9 @@ else:
             self._quant_method.process_weights_after_loading = wrapped_process_weights  # type: ignore[method-assign]
 
         def _needs_routed_expert_parameter_aliases(self) -> bool:
-            # test_gpt_oss_distributed_tp2
-            # test_qwen3_moe_routing_replay[Qwen/Qwen3.5-35B-A3B]
-            # test_multimodal_reasoning_pp_full_decode_only
             vllm_config = get_current_vllm_config()
             hf_config = getattr(vllm_config.model_config, "hf_config", None)
-            model_type = getattr(hf_config, "model_type", None)
-            architectures = getattr(hf_config, "architectures", ()) or ()
-            if model_type in {"qwen3_5_mtp", "step3p5_mtp"} or set(architectures) & {
-                "Qwen3_5MoeMTP",
-                "Step3p5MTP",
-            }:
-                return False
-            if self.layer_name.startswith("mtp.") or ".mtp." in self.layer_name:
-                return False
-            return model_type in {
-                "aria",
-                "aria_text",
-                "gpt_oss",
-                "qwen3_5_moe",
-                "qwen3_vl_moe",
-                "qwen3_vl_moe_text",
-                "step3_text",
-                "step3_vl",
-                "step3p5",
-            }
+            return getattr(hf_config, "model_type", None) == "gpt_oss"
 
         @property
         def is_internal_router(self) -> bool:
