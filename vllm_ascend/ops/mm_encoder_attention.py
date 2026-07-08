@@ -118,8 +118,8 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         q_len: int,
         cu_seqlens: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if cu_seqlens is not None:
-            return cu_seqlens if cu_seqlens.device.type == "cpu" else cu_seqlens.cpu()
+        if cu_seqlens is not None and cu_seqlens.device.type == "cpu":
+            return cu_seqlens
 
         # If cu_seqlens is not provided, we create a default one assuming all sequences have the same length.
         # This is used by models such as Hunyuan-OCR, which always pass None as cu_seqlens and rely on the operator to
