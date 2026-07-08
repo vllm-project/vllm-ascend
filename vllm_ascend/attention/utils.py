@@ -7,6 +7,7 @@ import torch.nn.functional as F
 import torch_npu
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group, is_v1_kv_transfer_group
+from vllm.utils.math_utils import cdiv
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 
@@ -542,3 +543,295 @@ def enabling_mlapo(vllm_config: VllmConfig) -> bool:
         and not vllm_config.kv_transfer_config.is_kv_producer
     )
     return bool(config_val and is_decode_instance)
+
+
+# ---------------------------------------------------------------------------
+# Gemma4 MTP KV-sharing helpers
+#
+# Draft-model attention layers in Gemma4 MTP share K/V with the corresponding
+# target-model layers (kv_sharing_target_layer_name).  On Ascend, the draft
+# layers are Q-only: Gemma4MTPAttention.forward() passes a torch.empty dummy
+# as K/V, so the draft cannot rely on its own (empty) cache.  These helpers
+# gather the shared K/V from the target layer's paged cache and run a manual
+# PyTorch SDPA cross-attention, because Ascend FIA (npu_fusion_attention)
+# cannot handle cross-attention where actual_seq_qlen != actual_seq_kvlen.
+#
+# Kept in attention/utils.py (not attention_v1.py) per code-review
+# requirement: attention_v1.py only calls maybe_kv_share_prefill /
+# should_skip_draft_kv_write / notify_kv_cache_written.
+# ---------------------------------------------------------------------------
+
+
+def notify_kv_cache_written(layer_name: str = ""):
+    """Notify the KV-transfer connector that KV cache has been written.
+
+    No-op when there is no v1 KV-transfer group (the common case for
+    Gemma4 MTP, which uses in-process KV-sharing via kv_sharing_target_layer_name
+    rather than a distributed connector).  Restored from the revert of PR #11021
+    (commit 44312516) — only the no-op stub is needed here, not the rest of
+    the Layerwise KV Pooling machinery.
+    """
+    if not has_kv_transfer_group() or not is_v1_kv_transfer_group():
+        return
+    connector = get_kv_transfer_group()
+    on_kv_cache_written = getattr(connector, "on_kv_cache_written", None)
+    if on_kv_cache_written is not None:
+        on_kv_cache_written(layer_name)
+
+
+def _forward_shared_kv_prefill_attention(
+    impl,
+    query: torch.Tensor,
+    shared_key: torch.Tensor,
+    shared_value: torch.Tensor,
+    attn_metadata,
+    output: torch.Tensor,
+) -> torch.Tensor:
+    """Manual PyTorch attention with already-dense shared KV from block_table.
+
+    Ascend FIA (npu_fusion_attention) cannot handle cross-attention where
+    actual_seq_qlen differs from actual_seq_kvlen — it either crashes with
+    mask shape errors or produces zero output.  Use PyTorch's
+    scaled_dot_product_attention instead, which correctly supports
+    cross-attention with arbitrary Q/KV lengths and GQA (grouped-query
+    attention).
+    """
+    num_tokens = attn_metadata.actual_seq_lengths_q[-1]
+    q = query[:num_tokens]  # [T, H, D]
+    k = shared_key           # [S, Hkv, D]
+    v = shared_value         # [S, Hkv, D]
+
+    # Create causal cross-attention mask.  Query position i can attend
+    # to KV positions [0, kv_len - q_len + i].  For sliding-window
+    # layers, additionally restrict to the last `sliding_window` tokens.
+    S = k.shape[0]
+    offset = S - num_tokens
+    mask = torch.ones(num_tokens, S, dtype=q.dtype, device=q.device) * float('-inf')
+    for i in range(num_tokens):
+        window_start = max(0, i + offset - impl.sliding_window + 1) \
+            if impl.sliding_window is not None and S > impl.sliding_window \
+            else 0
+        causal_end = i + offset + 1
+        mask[i, window_start:causal_end] = 0
+    attn_mask = mask
+
+    # Handle GQA: expand KV heads to match Q heads.
+    # Ascend NPU's scaled_dot_product_attention does not broadcast
+    # head dimension, so we must explicitly repeat KV heads.
+    if q.shape[1] != k.shape[1]:
+        n_rep = q.shape[1] // k.shape[1]
+        k = k.repeat_interleave(n_rep, dim=1)  # [S, Hkv, D] -> [S, Hq, D]
+        v = v.repeat_interleave(n_rep, dim=1)  # [S, Hkv, D] -> [S, Hq, D]
+
+    # Always use 4D format [B, H, L, D] for Ascend NPU.
+    q_4d = q.unsqueeze(0).transpose(1, 2)   # [T, H, D] -> [1, H, T, D]
+    k_4d = k.unsqueeze(0).transpose(1, 2)   # [S, H, D] -> [1, H, S, D]
+    v_4d = v.unsqueeze(0).transpose(1, 2)   # [S, H, D] -> [1, H, S, D]
+    attn_mask = attn_mask.unsqueeze(0).unsqueeze(0)  # [T, S] -> [1, 1, T, S]
+    attn_output = F.scaled_dot_product_attention(
+        q_4d, k_4d, v_4d,
+        attn_mask=attn_mask,
+        scale=impl.scale,
+    )  # [1, H, T, D]
+    attn_output = attn_output.squeeze(0).transpose(0, 1)  # [T, H, D]
+
+    output[:num_tokens] = attn_output
+    return output
+
+
+def _gather_paged_kv_to_dense(
+    impl,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    seq_lens: list,
+) -> tuple:
+    block_size = key_cache.shape[1]
+    seq_lens_tensor = torch.tensor(seq_lens, dtype=torch.long, device=key_cache.device)
+    max_seq_len = int(seq_lens_tensor.max().item())
+    num_blocks = cdiv(max_seq_len, block_size)
+    block_table_sliced = block_table[: len(seq_lens), :num_blocks].long()
+
+    flat_block_ids = block_table_sliced.reshape(-1)
+    max_tokens_padded = num_blocks * block_size
+    dense_shape = (
+        len(seq_lens),
+        max_tokens_padded,
+        impl.num_kv_heads,
+        impl.head_size,
+    )
+    gathered_key = key_cache.index_select(0, flat_block_ids).reshape(dense_shape)
+    gathered_value = value_cache.index_select(0, flat_block_ids).reshape(dense_shape)
+
+    positions = torch.arange(max_tokens_padded, dtype=torch.long, device=key_cache.device)
+    valid_mask = positions.unsqueeze(0) < seq_lens_tensor.unsqueeze(1)
+    return gathered_key[valid_mask].contiguous(), gathered_value[valid_mask].contiguous()
+
+
+def _get_current_token_shared_kv(
+    impl,
+    attn_metadata,
+) -> tuple:
+    """Gather current-token KV from the producer layer's shared cache."""
+    if impl.key_cache is None or impl.value_cache is None:
+        return None, None
+    num_tokens = attn_metadata.actual_seq_lengths_q[-1]
+    if attn_metadata.slot_mapping is None or attn_metadata.slot_mapping.numel() < num_tokens:
+        return None, None
+    slots = attn_metadata.slot_mapping[:num_tokens].long()
+    key = impl.key_cache.reshape(-1, impl.num_kv_heads, impl.head_size).index_select(0, slots)
+    value = impl.value_cache.reshape(-1, impl.num_kv_heads, impl.head_size).index_select(0, slots)
+    return key, value
+
+
+def _get_shared_kv_from_block_table(
+    impl,
+    attn_metadata,
+) -> tuple:
+    """Gather K/V from the shared target cache using block tables.
+
+    Used when slot_mapping is not available (e.g., during speculative
+    decoding where the draft model inherits attn_metadata from the
+    target but slot_mapping may not be populated for draft layers).
+
+    For KV-sharing draft layers, impl.key_cache points to the draft
+    model's own (empty) cache.  We must swap to the target layer's
+    cache via _kv_share_target_impl, mirroring the PA path fix.
+    """
+    _tgt_impl = getattr(impl, '_kv_share_target_impl', None)
+    if _tgt_impl is not None and _tgt_impl.key_cache is not None:
+        read_kc = _tgt_impl.key_cache
+        read_vc = _tgt_impl.value_cache
+    else:
+        read_kc = impl.key_cache
+        read_vc = impl.value_cache
+
+    if read_kc is None or read_vc is None:
+        return None, None
+
+    # Per-group block-table routing: draft layers share KV with target
+    # layers that may be in DIFFERENT KV cache groups.  attn_metadata.block_tables
+    # is the common (gid=0) table; using it for layers whose target is in gid≠0
+    # reads from the wrong pool.  Route each layer to its per-group block_table
+    # via _kv_share_gid (set by _store_gids_on_impls) + _per_group_bt_ref
+    # (the {gid: block_table} dict set by set_per_group_block_table).
+    _my_gid = getattr(impl, '_kv_share_gid', None)
+    _per_group_bt = getattr(impl, '_per_group_bt_ref', None)
+    _routed_bt = None
+    if _my_gid is not None and _per_group_bt is not None and _my_gid in _per_group_bt:
+        _routed_bt = _per_group_bt[_my_gid]
+    block_table = _routed_bt if _routed_bt is not None else attn_metadata.block_tables
+    seq_lens = attn_metadata.seq_lens_list
+    if block_table is None or not seq_lens:
+        return None, None
+
+    try:
+        dense_key, dense_value = _gather_paged_kv_to_dense(
+            impl, read_kc, read_vc, block_table, seq_lens,
+        )
+        # Zero-value fallback: if the routed block_table gave all-zero KV
+        # (wrong pool), try the other groups' block_tables.  Reverse
+        # iteration prefers the global-attention group (highest gid).
+        _k_mean = dense_key.float().mean().item()
+        _per_group_bt = getattr(impl, '_per_group_bt_ref', None)
+        if abs(_k_mean) < 1e-6 and _per_group_bt is not None and len(_per_group_bt) > 0:
+            for _gid, _bt in reversed(list(_per_group_bt.items())):
+                try:
+                    _dk, _dv = _gather_paged_kv_to_dense(
+                        impl, read_kc, read_vc, _bt, seq_lens,
+                    )
+                    _km = _dk.float().mean().item()
+                    if abs(_km) > 1e-6:
+                        dense_key, dense_value = _dk, _dv
+                        break
+                except Exception:
+                    continue
+        return dense_key, dense_value
+    except Exception:
+        return None, None
+
+
+def maybe_kv_share_prefill(
+    impl,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    kv_cache,
+    attn_metadata,
+    output: torch.Tensor,
+):
+    """Intercept entry point for KV-sharing draft layers.
+
+    Called at the top of AscendAttentionBackendImpl.forward_impl.  Returns
+    the attention output tensor if this layer is a KV-sharing draft layer
+    whose prefill should be computed from the shared target cache via
+    PyTorch SDPA; returns None to let the caller fall through to the
+    normal FIA / PA path.
+
+    Also initialises impl.key_cache / impl.value_cache from the kv_cache
+    tuple for KV-sharing layers (they do not own a private cache).
+    """
+    from vllm_ascend.attention.attention_v1 import AscendAttentionState
+    from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+
+    # Ensure self.key_cache / self.value_cache are initialised from the
+    # kv_cache tuple BEFORE the shared-KV lookup, otherwise they will be
+    # None (draft layers do not own a private cache).
+    if (
+        impl.kv_sharing_target_layer_name is not None
+        and impl.key_cache is None
+        and kv_cache is not None
+        and len(kv_cache) >= 2
+    ):
+        impl.key_cache, impl.value_cache = kv_cache[0], kv_cache[1]
+
+    _kv_prefill_eligible = (
+        impl.kv_sharing_target_layer_name is not None
+        and key is not None
+        and value is not None
+        and query.shape[0] == key.shape[0]
+        and attn_metadata.attn_state in (
+            AscendAttentionState.PrefillNoCache,
+            AscendAttentionState.ChunkedPrefill,
+            AscendAttentionState.SpecDecoding,
+        )
+    )
+    if not _kv_prefill_eligible:
+        return None
+
+    # For SpecDecoding / draft-model layers, slot_mapping points to
+    # empty/wrong positions (draft layers do not write KV).  Skip the
+    # slot-based lookup and go straight to the block-table gather.
+    if (
+        attn_metadata.attn_state != AscendAttentionState.SpecDecoding
+        and not getattr(_EXTRA_CTX, 'is_draft_model', False)
+    ):
+        shared_key, shared_value = _get_current_token_shared_kv(impl, attn_metadata)
+    else:
+        shared_key, shared_value = None, None
+
+    if shared_key is None or shared_value is None:
+        shared_key, shared_value = _get_shared_kv_from_block_table(impl, attn_metadata)
+
+    if shared_key is None or shared_value is None:
+        return None
+
+    return _forward_shared_kv_prefill_attention(
+        impl, query, shared_key, shared_value, attn_metadata, output,
+    )
+
+
+def should_skip_draft_kv_write(impl) -> bool:
+    """True for Q-only draft KV-sharing layers.
+
+    Gemma4MTPAttention.forward() creates a dummy K/V via torch.empty() and
+    passes it as key/value to self.attn().  Writing this uninitialized
+    memory back via reshape_and_cache would corrupt the shared target KV
+    cache, causing progressive degradation across sequential loop steps.
+    Skip the write for draft KV-shared layers — they only READ.
+    """
+    from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+    return (
+        getattr(impl, 'kv_sharing_target_layer_name', None) is not None
+        and getattr(_EXTRA_CTX, 'is_draft_model', False)
+    )

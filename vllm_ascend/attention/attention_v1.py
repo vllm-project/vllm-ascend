@@ -52,7 +52,10 @@ from vllm_ascend.attention.utils import (
     PagedAttentionGraphParam,
     cache_graph_workspace,
     enable_cp,
+    maybe_kv_share_prefill,
     needs_layer_aware_fia_graph_replay,
+    notify_kv_cache_written,
+    should_skip_draft_kv_write,
     split_decodes_and_prefills,
     update_paged_attention_graph_param,
     using_paged_attention,
@@ -1462,6 +1465,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 attn_metadata.reshape_cache_event = torch.npu.Event()
             if self.key_cache is None:
                 self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
+            if self.kv_sharing_target_layer_name is not None:
+                # KV-sharing target layers (e.g. Gemma4 MTP draft) consume
+                # the producer layer's cache.  Re-caching here would overwrite
+                # the shared KV slots before attention reads it.
+                if self.is_kv_producer:
+                    attn_metadata.reshape_cache_event.record()
+                return query, key, value, output
             slots = attn_metadata.slot_mapping
             encoder_decoder = self.attn_type == AttentionType.ENCODER_DECODER
             DeviceOperator.reshape_and_cache(
@@ -1473,6 +1483,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 # see: https://github.com/vllm-project/vllm/blob/ce88756b967c2c5006746a424c15dd59a284ed8c/vllm/model_executor/layers/attention/cross_attention.py#L117
                 slot_mapping=slots[: attn_metadata.num_actual_tokens] if not encoder_decoder else slots.to(torch.int32),
             )
+            notify_kv_cache_written()
             if self.is_kv_producer:
                 attn_metadata.reshape_cache_event.record()
         return query, key, value, output
@@ -1487,7 +1498,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output: torch.Tensor,
     ):
         num_tokens = query.shape[0]
-
+        # KV-sharing draft layers (Gemma4 MTP) read K/V from the target
+        # layer's paged cache via PyTorch SDPA; FIA cannot handle the
+        # cross-attention where Q length != KV length.  Returns None to
+        # fall through to the normal path for non-KV-sharing layers.
+        _kv_share_out = maybe_kv_share_prefill(
+            self, query, key, value, kv_cache, attn_metadata, output,
+        )
+        if _kv_share_out is not None:
+            return _kv_share_out
         if (
             attn_metadata.attn_state == AscendAttentionState.DecodeOnly
             and self.sliding_window is None
@@ -1550,7 +1569,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
 
         output_padded = None
-        if key is not None and value is not None:
+        if key is not None and value is not None and not should_skip_draft_kv_write(self):
             output_padded = output
             query, key, value, output_padded = self.reshape_and_cache(
                 query, key, value, kv_cache, attn_metadata, output
