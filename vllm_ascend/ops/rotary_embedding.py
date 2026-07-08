@@ -161,59 +161,9 @@ def rope_forward_oot(
     is_neox_style: bool,
     offsets: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    # Gemma4 MTP attention is Q-only — K/V come from the target model's
-    # KV cache, so key may be None.  Apply RoPE to query only.
-    if key is None:
-        if offsets is not None:
-            raise NotImplementedError("Batched rotary embedding is currently not supported on NPU.")
-        num_tokens = query.shape[0]
-        if HAS_TRITON:
-            query, _ = rope_forward_triton(
-                query.view(num_tokens, -1, head_size),
-                # Create a dummy key to satisfy the API
-                torch.empty(num_tokens, 0, head_size, dtype=query.dtype, device=query.device),
-                cos_sin_cache=cos_sin_cache,
-                positions=positions,
-                rope_dim=rotary_dim,
-                is_neox_style=is_neox_style,
-            )
-        else:
-            # Non-Triton fallback: reuse the NPU rotary op with a throwaway
-            # key buffer so only the query is rotated. This mirrors the
-            # normal (key is not None) path and avoids hand-rolling cos/sin
-            # pairs, which is easy to get wrong for both neox and interleaved
-            # styles (see PR review: the previous manual implementation had
-            # shape mismatches and an incorrect interleaved formula).
-            if rotary_dim < head_size:
-                query = query.view(num_tokens, -1, head_size)
-                q_rot = query[..., :rotary_dim]
-                q_pass = query[..., rotary_dim:]
-                q_rot = q_rot.contiguous().view(num_tokens, -1)
-                k_dummy = torch.empty_like(q_rot)
-                torch_npu._npu_rotary_embedding(
-                    positions,
-                    q_rot,
-                    k_dummy,
-                    rotary_dim,
-                    cos_sin_cache,
-                    is_neox_style,
-                )
-                q_rot = q_rot.view(num_tokens, -1, rotary_dim)
-                query = torch.cat((q_rot, q_pass), dim=-1).flatten(-2, -1)
-            else:
-                query = query.contiguous().view(num_tokens, -1)
-                k_dummy = torch.empty_like(query)
-                torch_npu._npu_rotary_embedding(
-                    positions,
-                    query,
-                    k_dummy,
-                    head_size,
-                    cos_sin_cache,
-                    is_neox_style,
-                )
-                query = query.view(num_tokens, -1, head_size).flatten(-2, -1)
-        return query, None
-
+    # NOTE: key is None (Gemma4 MTP Q-only) is handled by the caller
+    # (AscendRotaryEmbedding.forward_oot) via gemma4_q_only_rope; this shared
+    # op only handles the normal key-is-not-None path.
     query_shape, key_shape = query.shape, key.shape
     if offsets is not None:
         raise NotImplementedError("Batched rotary embedding is currently not supported on NPU.")
@@ -295,6 +245,17 @@ class AscendRotaryEmbedding(RotaryEmbedding):
         is_neox_style = self.is_neox_style
         if is_neox_style_override is not None:
             is_neox_style = is_neox_style_override
+        # Gemma4 MTP Q-only attention passes key=None (K/V come from the
+        # target's KV cache).  This is the only model that does so; route it
+        # to the Gemma4-specific Q-only RoPE helper instead of the shared op
+        # (which requires a real key).  See gemma4_proposer.gemma4_q_only_rope.
+        if key is None:
+            from vllm_ascend.spec_decode.gemma4_proposer import gemma4_q_only_rope
+
+            q = gemma4_q_only_rope(
+                positions, query, self.cos_sin_cache, self.head_size, self.rotary_dim, is_neox_style
+            )
+            return q, None
         is_draft_model = _EXTRA_CTX.is_draft_model if is_forward_context_available() else False
         flash_comm_v1_enabled = _EXTRA_CTX.flash_comm_v1_enabled if is_forward_context_available() else False
         if is_draft_model and self.use_mtp and flash_comm_v1_enabled:
