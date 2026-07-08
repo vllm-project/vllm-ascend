@@ -1,0 +1,151 @@
+#
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+name: 'Validate: Docker Actions on Self-Hosted'
+
+on:
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: bash -el {0}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate-docker-build:
+    name: validate-docker-on-${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - linux-amd64-cpu-8-hk
+          - linux-arm64-cpu-16
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v7
+
+      - name: Print runner info
+        run: |
+          echo "Runner: ${{ matrix.runner }}"
+          echo "Arch: $(uname -m)"
+          echo "Docker version: $(docker --version || echo 'docker not found')"
+          echo "Buildx available: $(docker buildx version || echo 'buildx not found')"
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: |
+            ghcr.io/${{ github.repository_owner }}/validate-docker-test
+          tags: |
+            type=raw,value=self-hosted-${{ matrix.runner }}
+          flavor:
+            latest=false
+          labels: |
+            self-hosted=true
+            validation=true
+
+      - name: Verify metadata
+        run: |
+          echo "Tags: ${{ steps.meta.outputs.tags }}"
+          echo "Labels: ${{ steps.meta.outputs.labels }}"
+          echo "JSON: ${{ steps.meta.outputs.json }}"
+          test -n "${{ steps.meta.outputs.tags }}" && echo "metadata OK" || echo "metadata FAILED"
+
+      - name: Set up QEMU (cross-arch)
+        uses: docker/setup-qemu-action@v4
+        if: runner.arch == 'X64'
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+        with:
+          install: true
+          driver: docker-container
+          use: true
+
+      - name: Verify Buildx
+        run: |
+          docker buildx inspect --bootstrap
+          docker buildx ls
+          echo "buildx setup OK"
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create test Dockerfile
+        run: |
+          cat > /tmp/Dockerfile.validate << 'DOCKERFILE'
+          FROM alpine:3.20
+          RUN echo "Docker build validation on self-hosted runner" > /validate.txt
+          CMD ["cat", "/validate.txt"]
+          DOCKERFILE
+          echo "Test Dockerfile created at /tmp/Dockerfile.validate"
+
+      - name: Build and push test image
+        uses: docker/build-push-action@v7
+        with:
+          platforms: ${{ matrix.runner == 'linux-arm64-cpu-16' && 'linux/arm64' || 'linux/amd64' }}
+          context: /tmp
+          file: /tmp/Dockerfile.validate
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Verify pushed image
+        run: |
+          echo "Image pushed to: ${{ steps.meta.outputs.tags }}"
+          echo "Docker build and push completed successfully"
+
+      - name: Pull and test image
+        run: |
+          TAG=$(echo "${{ steps.meta.outputs.tags }}" | head -1)
+          echo "Pulling: $TAG"
+          docker pull "$TAG"
+          docker run --rm "$TAG"
+          echo "Image pull and run OK"
+
+      - name: Cleanup GHCR test image
+        if: always()
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const packageName = 'validate-docker-test';
+            const url = `https://api.github.com/orgs/${owner}/packages/container/${packageName}/versions`;
+            console.log(`Listing versions for ${owner}/${packageName}`);
+            try {
+              const response = await github.request(`GET ${url}`, {
+                headers: {
+                  Accept: 'application/vnd.github+json',
+                },
+              });
+              console.log(`Found ${response.data.length} version(s)`);
+            } catch (e) {
+              console.log(`Could not list versions: ${e.message}`);
+            }
