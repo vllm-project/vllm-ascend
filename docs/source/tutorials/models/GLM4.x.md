@@ -141,7 +141,7 @@ vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
   --quantization ascend \
   --trust-remote-code \
   --gpu-memory-utilization 0.9 \
-  --speculative-config '{"num_speculative_tokens": 3, "method":"mtp"}' \
+  --speculative-config '{"num_speculative_tokens": 3, "method":"mtp", "enforce_eager":true}' \
   --compilation-config '{"cudagraph_capture_sizes": [1,2,4,8,16,32,64,128,256,512], "cudagraph_mode": "FULL_DECODE_ONLY"}' \
   --additional-config '{"enable_shared_expert_dp": true, "ascend_fusion_config": {"fusion_ops_gmmswigluquant": false}}'
 ```
@@ -199,7 +199,7 @@ vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
   --reasoning-parser glm45 \
   --tool-call-parser glm47 \
   --served-model-name glm47 \
-  --speculative-config '{"num_speculative_tokens": 3, "method":"mtp"}' \
+  --speculative-config '{"num_speculative_tokens": 3, "method":"mtp", "enforce_eager":true}' \
   --compilation-config '{"cudagraph_capture_sizes": [1,2,4,8,16,32,64,128,256,512], "cudagraph_mode": "FULL_DECODE_ONLY"}' \
   --additional-config '{"enable_shared_expert_dp": true, "ascend_fusion_config": {"fusion_ops_gmmswigluquant": false}}'
 ```
@@ -249,7 +249,7 @@ vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
   --reasoning-parser glm45 \
   --tool-call-parser glm47 \
   --served-model-name glm47 \
-  --speculative-config '{"num_speculative_tokens": 3, "method":"mtp"}' \
+  --speculative-config '{"num_speculative_tokens": 3, "method":"mtp", "enforce_eager":true}' \
   --compilation-config '{"cudagraph_capture_sizes": [1,2,4,8,16,32,64,128,256,512], "cudagraph_mode": "FULL_DECODE_ONLY"}' \
   --additional-config '{"enable_shared_expert_dp": true, "ascend_fusion_config": {"fusion_ops_gmmswigluquant": false}}'
 ```
@@ -406,7 +406,7 @@ Before you start, please
             --gpu-memory-utilization 0.9 \
             --quantization ascend \
             --enforce-eager \
-            --speculative-config '{"num_speculative_tokens": 3, "method":"mtp"}' \
+            --speculative-config '{"num_speculative_tokens": 3, "method":"mtp", "enforce_eager":true}' \
             --profiler-config '{"profiler": "torch", "torch_profiler_dir": "./vllm_profile", "torch_profiler_with_stack": false}' \
             --additional-config '{"enable_shared_expert_dp": true, "ascend_fusion_config": {"fusion_ops_gmmswigluquant": false}}' \
             --kv-transfer-config \
@@ -468,7 +468,7 @@ Before you start, please
             --gpu-memory-utilization 0.9 \
             --quantization ascend \
             --enforce-eager \
-            --speculative-config '{"num_speculative_tokens": 3, "method":"mtp"}' \
+            --speculative-config '{"num_speculative_tokens": 3, "method":"mtp", "enforce_eager":true}' \
             --profiler-config '{"profiler": "torch", "torch_profiler_dir": "./vllm_profile", "torch_profiler_with_stack": false}' \
             --additional-config '{"enable_shared_expert_dp": true, "ascend_fusion_config": {"fusion_ops_gmmswigluquant": false}}' \
             --kv-transfer-config \
@@ -532,7 +532,7 @@ Before you start, please
             --trust-remote-code \
             --gpu-memory-utilization 0.9 \
             --quantization ascend \
-            --speculative-config '{"num_speculative_tokens": 3, "method":"mtp"}' \
+            --speculative-config '{"num_speculative_tokens": 3, "method":"mtp", "enforce_eager":true}' \
             --profiler-config \
             '{"profiler": "torch",
             "torch_profiler_dir": "./vllm_profile",
@@ -600,13 +600,13 @@ Before you start, please
             --trust-remote-code \
             --gpu-memory-utilization 0.9 \
             --quantization ascend \
-            --speculative-config '{"num_speculative_tokens": 3, "method":"mtp"}' \
+            --speculative-config '{"num_speculative_tokens": 3, "method":"mtp", "enforce_eager":true}' \
             --profiler-config \
             '{"profiler": "torch",
             "torch_profiler_dir": "./vllm_profile",
             "torch_profiler_with_stack": false}' \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY",  "cudagraph_capture_sizes":[1,2,4,6,8,10,12,14,16,18,20,24,26,28,30,32,64,128,256,512]}' \
-            --additional-config '{"recompute_scheduler_enable": true, "enable_shared_expert_dp": true, "ascend_fusion_config": {"fusion_ops_gmmswigluquant": false}}' \
+            --additional-config '{"enable_shared_expert_dp": true, "ascend_fusion_config": {"fusion_ops_gmmswigluquant": false}}' \
             --kv-transfer-config \
             '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_consumer",
