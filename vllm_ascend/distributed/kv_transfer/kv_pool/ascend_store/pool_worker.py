@@ -105,6 +105,14 @@ class KVPoolWorker:
 
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get("load_async", False)
+        # Per-chunk put timeout (seconds) for the request-level circuit breaker in
+        # KVCacheStoreSendingThread: a chunk whose put exceeds this is dropped and
+        # the rest of that request's puts are short-circuited (bounds accumulated
+        # congestion from one slow/stuck transfer). Default 10s; set <= 0 to
+        # disable the timeout.
+        self.put_timeout_s = vllm_config.kv_transfer_config.kv_connector_extra_config.get("put_timeout_s", 10.0)
+        if self.put_timeout_s is not None and self.put_timeout_s <= 0:
+            self.put_timeout_s = None
         self._invalid_block_ids: set[int] = set()
         self._invalid_block_ids_lock = threading.Lock()
         self.consumer_is_to_put = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
@@ -502,6 +510,7 @@ class KVPoolWorker:
                     ready_event_sending,
                     self.group_uses_align_state,
                     self.enable_kv_events,
+                    self.put_timeout_s,
                 )
                 self.kv_send_thread.start()
             if self.load_async:

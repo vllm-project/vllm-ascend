@@ -1,7 +1,7 @@
 import queue
 import threading
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeout
 from typing import Any
 
 import torch
@@ -41,8 +41,6 @@ class KVTransferThread(threading.Thread):
         self.token_database = token_database
         self.done_task_lock = threading.Lock()
         self.request_queue: queue.Queue[Any] = queue.Queue()
-        # TODO(jianzs): make this configurable
-        self.executor = ThreadPoolExecutor(max_workers=32)
         self.finished_requests: set[str] = set()
         self.kv_event_lock = threading.Lock()
         self.kv_events: list[BlockStored] = []
@@ -257,6 +255,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         ready_event: threading.Event,
         group_uses_align_state: list[bool],
         enable_kv_event: bool = False,
+        put_timeout_s: float | None = 10.0,
     ):
         super().__init__(
             m_store, token_database, block_size, tp_rank, dcp_size, ready_event, name="KVCacheSendingThread"
@@ -268,6 +267,14 @@ class KVCacheStoreSendingThread(KVTransferThread):
         self.enable_kv_event = enable_kv_event
         self.completed_events_lock = threading.Lock()
         self.completed_events: dict[int, int] = {}
+        # Per-request put-timeout circuit breaker: once a chunk's put exceeds
+        # put_timeout_s, the whole request's remaining puts are skipped so that
+        # one slow/stuck transfer can't make a request's chunks each wait a full
+        # timeout (accumulated congestion). See _handle_request.
+        self.put_timeout_s = put_timeout_s
+        if self.put_timeout_s is not None and self.put_timeout_s <= 0:
+            self.put_timeout_s = None
+        self._failed_requests: set[str] = set()
 
     def add_stored_request(self, req_id: str):
         with self.done_task_lock:
@@ -282,6 +289,33 @@ class KVCacheStoreSendingThread(KVTransferThread):
         with self.done_task_lock:
             if req_id in self.stored_requests:
                 del self.stored_requests[req_id]
+            self._failed_requests.discard(req_id)
+
+    def _mark_request_failed(self, req_id: str):
+        """Circuit-break a request whose put timed out: skip its remaining puts."""
+        with self.done_task_lock:
+            self._failed_requests.add(req_id)
+
+    def _is_request_failed(self, req_id: str) -> bool:
+        with self.done_task_lock:
+            return req_id in self._failed_requests
+
+    def _run_put_with_timeout(self, put_fn):
+        exception_holder: list[Exception] = []
+
+        def thread_target():
+            try:
+                put_fn()
+            except Exception as e:
+                exception_holder.append(e)
+
+        put_thread = threading.Thread(target=thread_target, daemon=True, name="KVCacheStorePutThread")
+        put_thread.start()
+        put_thread.join(timeout=self.put_timeout_s)
+        if put_thread.is_alive():
+            raise FuturesTimeout()
+        if exception_holder:
+            raise exception_holder[0]
 
     def mark_completed_events(self, event_id: int | None) -> None:
         if event_id is not None:
@@ -302,7 +336,12 @@ class KVCacheStoreSendingThread(KVTransferThread):
         current_event = req_meta.current_event
         try:
             if req_id not in self.stored_requests:
-                self.request_queue.task_done()
+                return
+
+            # Per-request circuit breaker: a prior chunk of this request already
+            # timed out, so skip all of its remaining puts. Accounting still runs
+            # in `finally`, so the request's blocks are released normally.
+            if self._is_request_failed(req_id):
                 return
 
             store_masks = self._store_mask(req_meta)
@@ -424,18 +463,48 @@ class KVCacheStoreSendingThread(KVTransferThread):
                         kv_cache_group_id=group_id,
                     )
 
-                if current_event is not None:
-                    current_event.synchronize()
-                self.m_store.put(keys, addrs, sizes)
+                # Bound the put (including current_event.synchronize(), which is
+                # the unbounded hang point) with a wall-clock timeout. On timeout,
+                # circuit-break the whole request and stop here; `finally` still
+                # runs so the blocks are released. A timeout thus degrades to a
+                # cache miss, never a permanent leak or hang.
+                def _do_put(keys=keys, addrs=addrs, sizes=sizes, event=current_event):
+                    if event is not None:
+                        event.synchronize()
+                    self.m_store.put(keys, addrs, sizes)
+
+                try:
+                    self._run_put_with_timeout(_do_put)
+                except FuturesTimeout:
+                    self._mark_request_failed(req_id)
+                    logger.warning(
+                        "KV pool put timed out after %.1fs; circuit-breaking request %s "
+                        "(group %d) and skipping its remaining puts.",
+                        self.put_timeout_s,
+                        req_id,
+                        group_id,
+                    )
+                    break
+                except Exception as e:
+                    logger.error(
+                        "KV pool put failed for request %s group %d. type=%s, error=%s",
+                        req_id,
+                        group_id,
+                        type(e).__name__,
+                        e,
+                    )
+                    break
 
                 # TODO Query specific replica info to update the event
                 if self.enable_kv_event and stored_events is not None:
                     self.update_kv_event(stored_events)
         finally:
-            # always free blocks
+            # Always account, even on timeout / skip / exception, so
+            # stored_requests reaches 0 and the scheduler can release the blocks
+            # (a stuck put becomes transient back-pressure, not a permanent leak).
             self.mark_completed_events(req_meta.event_id)
-        self.dec_stored_request(req_id)
-        self.request_queue.task_done()
+            self.dec_stored_request(req_id)
+            self.request_queue.task_done()
 
 
 class KVCacheStoreRecvingThread(KVTransferThread):

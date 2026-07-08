@@ -35,6 +35,7 @@ When `MultiConnector` is used, configure `kv_load_failure_policy` on the `MultiC
 | :--- | :--- |
 | `lookup_rpc_port` | Port for RPC Communication Between Pooling Scheduler Process and Worker Process: Each Instance Requires a Unique Port Configuration. |
 | `load_async` | Whether to Enable Asynchronous Loading. The default value is false. |
+| `put_timeout_s` | Timeout in seconds for AscendStore KV put operations. The default value is 10.0. Set it to 0 or a negative value to disable the timeout. |
 | `backend` | Set the storage backend for kvpool (`mooncake`, `memcache`, `yuanrong`), with the default being `mooncake`. |
 | `consumer_is_to_put` | Whether Decode node put KV Cache into KV Pool. The default value is false. |
 | `consumer_is_to_load` | Whether Decode node load KV cache from KV Pool. The default value is false. |

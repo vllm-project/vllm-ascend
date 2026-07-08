@@ -155,6 +155,16 @@ msgid "Whether to Enable Asynchronous Loading. The default value is false."
 msgstr "是否启用异步加载。默认值为 false。"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md
+msgid "`put_timeout_s`"
+msgstr "`put_timeout_s`"
+
+#: ../../source/user_guide/feature_guide/kv_pool.md
+msgid ""
+"Timeout in seconds for AscendStore KV put operations. The default value is "
+"10.0. Set it to 0 or a negative value to disable the timeout."
+msgstr "AscendStore KV put 操作的超时时间，单位为秒。默认值为 10.0。设置为 0 或负数可禁用超时。"
+
+#: ../../source/user_guide/feature_guide/kv_pool.md
 msgid "`backend`"
 msgstr "`backend`"
 

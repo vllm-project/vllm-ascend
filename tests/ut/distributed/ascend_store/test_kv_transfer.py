@@ -599,5 +599,156 @@ class TestKVCacheStoreLayerRecvingThread(unittest.TestCase):
         self.assertTrue(get_event.is_set())
 
 
+class _BlockingPutStore(FakeStore):
+    """FakeStore whose put() blocks until release() is called.
+
+    Used to make a put reliably exceed put_timeout_s so the request-level
+    circuit breaker fires deterministically (no wall-clock sleeps in the test).
+    """
+
+    def __init__(self, exists_result=None):
+        super().__init__(exists_result)
+        self._release = threading.Event()
+
+    def put(self, keys, addrs, sizes):
+        # Block until released; 10s safety bound so a broken test can't hang.
+        self._release.wait(timeout=10)
+        super().put(keys, addrs, sizes)
+
+    def release(self):
+        self._release.set()
+
+
+class TestKVCacheStoreSendingThreadPutTimeout(unittest.TestCase):
+    """Request-level put-timeout circuit breaker (see kv_transfer.py)."""
+
+    def _make_thread(self, store, put_timeout_s=0.05):
+        db = FakeTokenDatabase()
+        return KVCacheStoreSendingThread(
+            m_store=store,
+            token_database=db,
+            block_size=16,
+            tp_rank=0,
+            dcp_size=1,
+            put_step=1,
+            kv_role="kv_producer",
+            ready_event=threading.Event(),
+            group_uses_align_state=[False],
+            enable_kv_event=False,
+            put_timeout_s=put_timeout_s,
+        )
+
+    def _make_req(self, req_id="r1"):
+        return ReqMeta(
+            req_id=req_id,
+            token_len_chunk=32,
+            block_ids=[0, 1],
+            block_hashes=[b"h0", b"h1"],  # type: ignore[arg-type]
+            current_event=None,
+        )
+
+    def test_put_timeout_circuit_breaks_and_still_accounts(self):
+        # put blocks past the timeout -> request is circuit-broken, but
+        # accounting must still run in finally (count -> 0, queue drained),
+        # so blocks get released. A timeout must never become a leak.
+        store = _BlockingPutStore([0, 0])
+        t = self._make_thread(store, put_timeout_s=0.05)
+        req = self._make_req("r1")
+        t.add_stored_request("r1")
+        t.request_queue.put(req)
+        try:
+            t._handle_request(req)
+            self.assertTrue(t._is_request_failed("r1"))
+            self.assertEqual(t.stored_requests["r1"], 0)
+            self.assertEqual(t.request_queue.unfinished_tasks, 0)
+        finally:
+            store.release()  # let the background executor thread finish & exit
+
+    def test_failed_request_skips_remaining_puts(self):
+        # Already-failed request: the breaker skips the put even with a fast
+        # store, and the chunk is still accounted (so the request can finish).
+        store = FakeStore([0, 0])
+        t = self._make_thread(store, put_timeout_s=10.0)
+        t._mark_request_failed("r1")
+        req = self._make_req("r1")
+        t.add_stored_request("r1")
+        t.request_queue.put(req)
+        t._handle_request(req)
+        self.assertEqual(len(store.put_calls), 0)
+        self.assertEqual(t.stored_requests["r1"], 0)
+        self.assertEqual(t.request_queue.unfinished_tasks, 0)
+
+    def test_normal_put_within_timeout_not_broken(self):
+        # Healthy fast put within the timeout: not broken, put happens once,
+        # accounting normal. (Regression: large timeout == old behavior.)
+        store = FakeStore([0, 0])
+        t = self._make_thread(store, put_timeout_s=10.0)
+        req = self._make_req("r1")
+        t.add_stored_request("r1")
+        t.request_queue.put(req)
+        t._handle_request(req)
+        self.assertFalse(t._is_request_failed("r1"))
+        self.assertEqual(len(store.put_calls), 1)
+        self.assertEqual(t.stored_requests["r1"], 0)
+
+    def test_put_timeout_does_not_use_shared_executor(self):
+        # A hung backend put must not consume the shared executor forever.
+        store = FakeStore([0, 0])
+        t = self._make_thread(store, put_timeout_s=10.0)
+        if hasattr(t, "executor"):
+            t.executor.submit = MagicMock(side_effect=AssertionError("shared executor should not be used"))
+        req = self._make_req("r1")
+        t.add_stored_request("r1")
+        t.request_queue.put(req)
+        t._handle_request(req)
+        if hasattr(t, "executor"):
+            t.executor.submit.assert_not_called()
+        self.assertEqual(len(store.put_calls), 1)
+
+    def test_none_put_timeout_disables_timeout(self):
+        store = FakeStore([0, 0])
+        t = self._make_thread(store, put_timeout_s=None)
+        req = self._make_req("r1")
+        t.add_stored_request("r1")
+        t.request_queue.put(req)
+        t._handle_request(req)
+        self.assertFalse(t._is_request_failed("r1"))
+        self.assertEqual(len(store.put_calls), 1)
+
+    def test_non_positive_put_timeout_disables_timeout(self):
+        store = FakeStore([0, 0])
+        t = self._make_thread(store, put_timeout_s=0)
+        req = self._make_req("r1")
+        t.add_stored_request("r1")
+        t.request_queue.put(req)
+        t._handle_request(req)
+        self.assertIsNone(t.put_timeout_s)
+        self.assertFalse(t._is_request_failed("r1"))
+        self.assertEqual(len(store.put_calls), 1)
+
+    def test_put_exception_still_accounts(self):
+        # A put that raises (not a timeout) is caught and still accounted.
+        store = FakeStore([0, 0])
+        store.put = MagicMock(side_effect=RuntimeError("boom"))
+        t = self._make_thread(store, put_timeout_s=10.0)
+        req = self._make_req("r1")
+        t.add_stored_request("r1")
+        t.request_queue.put(req)
+        t._handle_request(req)
+        self.assertEqual(t.stored_requests["r1"], 0)
+        self.assertEqual(t.request_queue.unfinished_tasks, 0)
+
+    def test_delete_finished_clears_failed_flag(self):
+        # Cleaning up a request must also clear its circuit-breaker flag so the
+        # _failed_requests set can't grow unbounded.
+        store = FakeStore([0, 0])
+        t = self._make_thread(store)
+        t._mark_request_failed("r1")
+        self.assertTrue(t._is_request_failed("r1"))
+        t.add_stored_request("r1")
+        t.delete_finished_stored_request("r1")
+        self.assertFalse(t._is_request_failed("r1"))
+
+
 if __name__ == "__main__":
     unittest.main()
