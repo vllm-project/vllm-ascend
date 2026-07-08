@@ -154,16 +154,16 @@ jobs:
         run: |
           CSRC_HASH=$(find ./csrc ./setup.py ./CMakeLists.txt ./cmake \
             -type f -not -path '*/.*' | sort | xargs sha256sum | sha256sum | awk '{print $1}')
-          echo "CSRC_HASH=$CSRC_HASH" >> $GITHUB_OUTPUT
+          echo "CSRC_HASH=$CSRC_HASH" >> "$GITHUB_OUTPUT"
 
       - name: Get architecture
         id: get_arch
         run: |
           ARCH=$(uname -m)
           case "$ARCH" in
-            x86_64) echo "arch=X64" >> $GITHUB_OUTPUT ;;
-            aarch64) echo "arch=ARM64" >> $GITHUB_OUTPUT ;;
-            *) echo "arch=$ARCH" >> $GITHUB_OUTPUT ;;
+            x86_64) echo "arch=X64" >> "$GITHUB_OUTPUT" ;;
+            aarch64) echo "arch=ARM64" >> "$GITHUB_OUTPUT" ;;
+            *) echo "arch=$ARCH" >> "$GITHUB_OUTPUT" ;;
           esac
 
       - uses: dorny/paths-filter@v4
