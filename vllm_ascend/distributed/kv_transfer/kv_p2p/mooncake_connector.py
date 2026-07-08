@@ -67,7 +67,7 @@ from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_rank,
     get_decode_context_model_parallel_world_size,
 )
-from vllm_ascend.utils import enable_custom_op
+from vllm_ascend.utils import enable_custom_op, refresh_block_size
 
 # isort: off
 if TYPE_CHECKING:
@@ -1526,6 +1526,7 @@ class MooncakeConnectorScheduler:
     def __init__(self, vllm_config: VllmConfig, engine_id: str, kv_cache_config: KVCacheConfig):
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
+        refresh_block_size(vllm_config)
         init_ascend_config(vllm_config)
         self.ascend_config = get_ascend_config()
         self.block_size = vllm_config.cache_config.block_size
