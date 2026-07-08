@@ -365,6 +365,33 @@ FULL_FEATURE_MODEL_CASES = [
             "enforce_eager": True,
         },
     ),
+    AccuracyCase(
+        name="dsv3_2_sfa_dcp_replicated_indexer",
+        model="vllm-ascend/DeepSeek-V3.2-W8A8-Pruning",
+        prompts=COMMON_PROMPTS,
+        expected_outputs=(DSV3_2_GOLDEN, *DSV3_2_GOLDEN_BACKUPS),
+        max_tokens=5,
+        runner_kwargs={
+            "max_model_len": 1024,
+            "max_num_seqs": MAX_NUM_SEQS,
+            "max_num_batched_tokens": 1024,
+            "tensor_parallel_size": 2,
+            "prefill_context_parallel_size": 1,
+            "decode_context_parallel_size": 2,
+            "enable_expert_parallel": True,
+            "enable_chunked_prefill": True,
+            "enable_prefix_caching": True,
+            "gpu_memory_utilization": 0.2,
+            "cp_kv_cache_interleave_size": 1,
+            "block_size": 128,
+            "quantization": "ascend",
+            "long_prefill_token_threshold": 128,
+            "compilation_config": FULL_DECODE_GRAPH,
+            "additional_config": {
+                "enable_flashcomm1": True,
+            },
+        },
+    ),
     pytest.param(
         AccuracyCase(
             name="deepseek_mtp3_pcp_dcp_full_features",
