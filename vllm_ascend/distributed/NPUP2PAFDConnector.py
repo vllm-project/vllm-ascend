@@ -321,7 +321,7 @@ class NPUP2PAFDConnector(AFDConnectorBase):
         try:
             # Use async send instead of sync send
             # Use a2e_group for attention -> expert/ffn communication
-            self.current_stream_synchronize(self.backend)
+            # self.current_stream_synchronize(self.backend)
             dst = (self.a2e_group.rank_in_group + 1) % self.a2e_group.world_size
             work_list = self._send_tensor_dict_async(
                 intermediate_tensors.tensors,
@@ -417,7 +417,7 @@ class NPUP2PAFDConnector(AFDConnectorBase):
         )
         # Use async send instead of sync send
         # Use e2a_group for expert/ffn -> attention communication
-        self.current_stream_synchronize(self.backend)
+        # self.current_stream_synchronize(self.backend)
         dst = (self.e2a_group.rank_in_group + 1) % self.e2a_group.world_size
         work_list = self._send_tensor_dict_async(
             intermediate_tensors.tensors,
