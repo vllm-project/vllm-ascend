@@ -303,11 +303,13 @@ class POTranslator:
         return response
 
 
-def validate_coverage(files_arg: str) -> int:
+def validate_coverage(files_arg: str, ignore_error: bool = False) -> int:
     """Check that every msgstr in the given PO files is non-empty.
 
     Prints a per-file summary and returns 0 when all files pass,
-    1 when any file has untranslated entries.
+    1 when any file has untranslated entries (unless *ignore_error* is True,
+    in which case untranslated entries only produce warnings and the exit
+    code is always 0).
     """
     file_list = [f.strip() for f in files_arg.split(",") if f.strip()]
     total_entries = 0
@@ -332,7 +334,8 @@ def validate_coverage(files_arg: str) -> int:
         untranslated += len(empty)
 
         if empty:
-            print(f"  FAIL: {path.name} — {len(empty)}/{file_entries} untranslated")
+            label = "WARN" if ignore_error else "FAIL"
+            print(f"  {label}: {path.name} — {len(empty)}/{file_entries} untranslated")
             for e in empty[:5]:
                 preview = e.msgid[:80].replace("\n", "\\n")
                 print(f'         msgid="{preview}..."')
@@ -346,6 +349,10 @@ def validate_coverage(files_arg: str) -> int:
         f"\nCoverage: {total_entries - untranslated}/{total_entries} translated "
         f"({untranslated} missing) in {len(file_list)} file(s)"
     )
+    if ignore_error:
+        if failed_files:
+            print("Validation errors ignored (--ignore-validation-error).")
+        return 0
     return 1 if failed_files else 0
 
 
@@ -360,10 +367,16 @@ async def async_main():
         action="store_true",
         help="Only validate translation coverage, do not translate",
     )
+    parser.add_argument(
+        "--ignore-validation-error",
+        action="store_true",
+        help="When used with --validate-only, print warnings instead of failing on untranslated entries. "
+        "When used without --validate-only, translation failures do not cause a non-zero exit code.",
+    )
     args = parser.parse_args()
 
     if args.validate_only:
-        return validate_coverage(args.files)
+        return validate_coverage(args.files, ignore_error=args.ignore_validation_error)
 
     api_key = args.api_key or os.getenv("DEEPSEEK_API_KEY")
     if not api_key:
@@ -391,6 +404,10 @@ async def async_main():
     out.write_text(json.dumps(results, indent=2, ensure_ascii=False), encoding="utf-8")
 
     print(f"\nResult: {len(success_files)}/{len(file_list)} translated -> {args.output_json}")
+    if args.ignore_validation_error:
+        if len(success_files) < len(file_list):
+            print("Translation errors ignored (--ignore-validation-error), continuing with successful files.")
+        return 0
     return 0 if success_files else 1
 
 
