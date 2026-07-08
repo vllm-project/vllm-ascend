@@ -228,7 +228,6 @@ The `extract_hidden_states` method is a special speculative decoding mode that d
     from safetensors import safe_open
     from vllm import LLM, SamplingParams
 
-
     def main():
         with tempfile.TemporaryDirectory() as tmpdirname:
             llm = LLM(
@@ -269,7 +268,6 @@ The `extract_hidden_states` method is a special speculative decoding mode that d
                     hidden_states = f.get_tensor("hidden_states")
                     print("Shape:", hidden_states.shape)
                     # Shape: (num_tokens, num_layers, hidden_size)
-
 
     if __name__ == "__main__":
         main()

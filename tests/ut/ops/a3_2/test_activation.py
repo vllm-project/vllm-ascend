@@ -24,7 +24,7 @@ from vllm_ascend.ops.activation import (
     AscendQuickGELU,
     AscendSiluAndMul,
     AscendSwigluOAIAndMul,
-    swiglustep_and_mul,
+    AscendSwigluStepAndMul,
 )
 from vllm_ascend.utils import is_310p as is_310p_hw
 
@@ -207,7 +207,7 @@ class TestAscendSwigluOAIAndMul:
 class TestSwiglustepAndMul:
     def test_swiglustep_and_mul_matches_reference_formula(self):
         x = torch.tensor([[1.0, 2.0, -3.0, 4.0, 5.0, -6.0, 7.0, -8.0]], dtype=torch.float32)
-        result = swiglustep_and_mul(x)
+        result = AscendSwigluStepAndMul.swiglustep_forward(x)
         expected = _swiglustep_and_mul_reference(x)
 
         assert result.shape == (1, x.shape[-1] // 2)
@@ -218,7 +218,7 @@ class TestSwiglustepAndMul:
         # gate = first half, up = second half (contiguous split via chunk),
         # NOT the interleaved layout used by SwigluOAI.
         x = torch.tensor([[1.0, 2.0, 3.0, 4.0, 10.0, 20.0, 30.0, 40.0]], dtype=torch.float32)
-        result = swiglustep_and_mul(x, limit=100.0)
+        result = AscendSwigluStepAndMul.swiglustep_forward(x, limit=100.0)
         expected = _swiglustep_and_mul_reference(x, limit=100.0)
         interleaved = torch.nn.functional.silu(x[..., ::2]) * x[..., 1::2]
 
@@ -228,7 +228,7 @@ class TestSwiglustepAndMul:
     def test_swiglustep_and_mul_with_custom_limit_matches_reference(self):
         x = torch.tensor([[9.0, 8.0, -5.0, -9.0]], dtype=torch.float32)
         limit = 3.0
-        result = swiglustep_and_mul(x, limit=limit)
+        result = AscendSwigluStepAndMul.swiglustep_forward(x, limit=limit)
         expected = _swiglustep_and_mul_reference(x, limit=limit)
 
         assert torch.allclose(result, expected, atol=1e-6)
@@ -237,7 +237,7 @@ class TestSwiglustepAndMul:
         # gate = [100, 100] -> silu(~100) clamped to 7.0;
         # up   = [-100, -100] -> clamped to -7.0  =>  7.0 * -7.0 = -49.0
         x = torch.tensor([[100.0, 100.0, -100.0, -100.0]], dtype=torch.float32)
-        result = swiglustep_and_mul(x)
+        result = AscendSwigluStepAndMul.swiglustep_forward(x)
         expected = _swiglustep_and_mul_reference(x)
 
         assert torch.allclose(result, expected, atol=1e-5)
@@ -247,12 +247,17 @@ class TestSwiglustepAndMul:
 
     def test_swiglustep_and_mul_large_input(self):
         x = torch.randn(64, 128, dtype=torch.float32)
-        result = swiglustep_and_mul(x)
+        result = AscendSwigluStepAndMul.swiglustep_forward(x)
         expected = _swiglustep_and_mul_reference(x)
 
         assert result.shape == (64, 64)
         assert torch.allclose(result, expected, atol=1e-5)
         assert not torch.isnan(result).any()
+
+    def test_swiglustep_and_mul_validates_limit(self):
+        x = torch.tensor([[8.0, 9.0, -2.0, -8.0]], dtype=torch.float32)
+        with pytest.raises(ValueError, match="requires limit"):
+            AscendSwigluStepAndMul.swiglustep_forward(x, limit=None)
 
 
 class TestActivationNPUPrecision:
@@ -331,7 +336,7 @@ class TestActivationNPUPrecision:
         x_cpu = torch.randn(16, 16, dtype=torch.float32) * 4
         x_npu = x_cpu.to(dtype=dtype, device="npu")
 
-        result = swiglustep_and_mul(x_npu).cpu()
+        result = AscendSwigluStepAndMul.swiglustep_forward(x_npu).cpu()
         expected = _swiglustep_and_mul_reference(x_cpu.to(dtype=dtype)).float()
 
         assert result.shape == (16, 8)

@@ -36,6 +36,8 @@
 namespace vllm_ascend {
 namespace meta {
 const int64_t INT4_NUMS_IN_INT32 = 8;
+constexpr int64_t DSA_SLOT_MAPPING_FLAT = 1;
+constexpr int64_t DSA_SLOT_MAPPING_BLOCK_OFFSET = 2;
 
 #ifdef VLLM_ENABLE_ATB_AND_DIRECT_KERNELS
 std::tuple<at::Tensor, at::Tensor> get_masked_input_and_mask_meta(
@@ -861,6 +863,47 @@ compressor_meta(const at::Tensor &x, const at::Tensor &wkv, const at::Tensor &wg
     std::tuple<at::Tensor> output = construct_compressor_output_tensor(x, norm_weight, rope_sin, cmp_ratio, coff);
 
     return output;
+}
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor> compressor_metadata_meta(
+    const at::Tensor &rope_cos, const at::Tensor &rope_sin, const at::Tensor &cu_seqlens,
+    const at::Tensor &start_pos, const at::Tensor &kv_block_table, int64_t kv_block_size,
+    int64_t slot_mapping_format, int64_t compress_ratio, int64_t num_compressed_tokens, int64_t num_reqs_actual)
+{
+    constexpr int64_t VALUE_0 = 0;
+
+    TORCH_CHECK(rope_cos.dim() == 2 && rope_sin.dim() == 2, "rope_cos and rope_sin should be 2D tensors");
+    TORCH_CHECK(rope_cos.scalar_type() == rope_sin.scalar_type(),
+                "rope_cos and rope_sin should have same dtype");
+    TORCH_CHECK(rope_cos.size(0) == rope_sin.size(0) && rope_cos.size(1) == rope_sin.size(1),
+                "rope_cos and rope_sin should have same shape");
+    TORCH_CHECK(rope_cos.size(0) > VALUE_0 && rope_cos.size(1) > VALUE_0,
+                "rope_cos shape should be non-empty");
+    TORCH_CHECK(kv_block_size > VALUE_0, "kv_block_size should be greater than 0");
+    TORCH_CHECK(compress_ratio > VALUE_0, "compress_ratio should be greater than 0");
+    TORCH_CHECK(num_compressed_tokens > VALUE_0, "num_compressed_tokens should be greater than 0");
+    TORCH_CHECK(num_reqs_actual > VALUE_0, "num_reqs_actual should be greater than 0");
+    TORCH_CHECK(cu_seqlens.size(0) > num_reqs_actual,
+                "cu_seqlens dim0 should be greater than num_reqs_actual");
+    TORCH_CHECK(start_pos.size(0) >= num_reqs_actual,
+                "start_pos dim0 should be greater than or equal to num_reqs_actual");
+    TORCH_CHECK(kv_block_table.size(0) >= num_reqs_actual,
+                "kv_block_table dim0 should be greater than or equal to num_reqs_actual");
+
+    at::SmallVector<int64_t, 4> rope_output_size = {num_compressed_tokens, 1, 1, rope_cos.size(1)};
+    at::Tensor compress_cos = at::empty(rope_output_size, rope_cos.options());
+    at::Tensor compress_sin = at::empty(rope_output_size, rope_sin.options());
+
+    at::SmallVector<int64_t, 2> slot_mapping_size;
+    if (slot_mapping_format == DSA_SLOT_MAPPING_BLOCK_OFFSET) {
+        slot_mapping_size = {num_compressed_tokens, 2};
+    } else {
+        TORCH_CHECK(slot_mapping_format == DSA_SLOT_MAPPING_FLAT,
+                    "slot_mapping_format should be 1(flat) or 2(block_offset), but got ", slot_mapping_format);
+        slot_mapping_size = {num_compressed_tokens};
+    }
+    at::Tensor slot_mapping = at::empty(slot_mapping_size, kv_block_table.options().dtype(at::kInt));
+    return std::make_tuple(compress_cos, compress_sin, slot_mapping);
 }
 
 std::tuple<at::Tensor, at::Tensor> construct_quant_lightning_indexer_output_tensor(const at::Tensor& query, const at::Tensor& key,
@@ -1712,6 +1755,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("moe_grouped_matmul", &vllm_ascend::meta::moe_grouped_matmul_meta);
     ops.impl("moe_gating_top_k_hash", &vllm_ascend::meta::moe_gating_top_k_hash_meta);
     ops.impl("compressor", &vllm_ascend::meta::compressor_meta);
+    ops.impl("compressor_metadata", &vllm_ascend::meta::compressor_metadata_meta);
     ops.impl("npu_vllm_quant_lightning_indexer", &vllm_ascend::meta::npu_vllm_quant_lightning_indexer_meta);
     ops.impl("npu_vllm_quant_lightning_indexer_metadata", &vllm_ascend::meta::npu_vllm_quant_lightning_indexer_metadata_meta);
     ops.impl("npu_sparse_attn_sharedkv", &vllm_ascend::meta::npu_sparse_attn_sharedkv_meta);

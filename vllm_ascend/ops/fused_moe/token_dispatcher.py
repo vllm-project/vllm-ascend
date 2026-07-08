@@ -29,6 +29,7 @@ from vllm.config import get_current_vllm_config
 from vllm.distributed.parallel_state import get_ep_group
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_forward_context import get_mc2_tokens_capacity
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.comm_utils import async_all_to_all, gather_from_sequence_parallel_region
@@ -120,18 +121,9 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         # Here we need to calculate the global_bs = max_bs_per_rank * ep_world_size to execute
         # dispatch & combine operators with different input num_tokens per rank.
         vllm_config = get_current_vllm_config()
-        scheduler_config = vllm_config.scheduler_config
-        compilation_config = vllm_config.compilation_config
-        speculative_config = vllm_config.speculative_config
         tp_size = vllm_config.parallel_config.tensor_parallel_size
-        uniform_decode_query_len = 1 if not speculative_config else 1 + speculative_config.num_speculative_tokens
-        decode_max_num_seqs = getattr(scheduler_config, "decode_max_num_seqs", 0)
-        max_num_reqs = max(scheduler_config.max_num_seqs, decode_max_num_seqs)
-        if compilation_config.cudagraph_capture_sizes:
-            max_num_tokens = compilation_config.max_cudagraph_capture_size
-        else:
-            max_num_tokens = min(max_num_reqs * uniform_decode_query_len, 512)
-        num_tokens_per_tp_rank = (max_num_tokens + tp_size - 1) // tp_size
+        mc2_tokens_capacity = get_mc2_tokens_capacity()
+        num_tokens_per_tp_rank = mc2_tokens_capacity // tp_size
         _max_global_bs = num_tokens_per_tp_rank * self.ep_world_size
 
         # When allreduce across DP is not skipped, tokens are uniform across ranks:
@@ -364,7 +356,6 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
         #  MXFP4 keeps dispatch unquantized in AllGather path, and quantizes again inside the MLP path.
         with_quant = (
             token_dispatch_input.quant.dispatch_with_quant
-            and token_dispatch_input.quant.quant_type != QuantType.MXFP4
             and token_dispatch_input.quant.quant_type != QuantType.W8A8FP8
         )
         is_mxfp = token_dispatch_input.quant.is_mxfp
@@ -373,12 +364,19 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
         topk_ids = token_dispatch_input.topk_ids
         expert_map = token_dispatch_input.routing.expert_map
         dynamic_scale = token_dispatch_input.routing.pertoken_scale
+        quant_type = token_dispatch_input.quant.quant_type
+        act_quant_type = (
+            token_dispatch_input.quant.mxfp.act_quant_type if token_dispatch_input.quant.mxfp is not None else None
+        )
         global_redundant_expert_num = token_dispatch_input.routing.global_redundant_expert_num
         restore_shape = hidden_states.shape
         # Fuse the first dynamic quant of moe_mlp into initrouting when
         # dispatch_with_quant is on but got a None dynamic_scale.
         if with_quant and dynamic_scale is None:
-            quant_mode = 3 if is_mxfp else 1
+            if quant_type == QuantType.MXFP4:
+                quant_mode = 9
+            else:
+                quant_mode = 3 if is_mxfp else 1
         else:
             quant_mode = -1
 
@@ -409,6 +407,7 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
             expert_tokens_num_flag=True,
             active_expert_range=[first_expert_idx, last_expert_idx],
             quant_mode=quant_mode,
+            act_quant_type=act_quant_type,
         )
         expert_tokens = expert_tokens.to(torch.int64)
         group_list_type = 1  # `count` mode
@@ -426,9 +425,9 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
         )
 
     def token_combine(self, hidden_states, combine_metadata, bias=None):
-        final_hidden_states = torch_npu.npu_moe_token_unpermute(
+        final_hidden_states = DeviceOperator.npu_moe_token_unpermute(
             permuted_tokens=hidden_states,
-            sorted_indices=torch.abs(combine_metadata.expanded_row_idx),
+            sorted_indices=combine_metadata.expanded_row_idx,
             probs=combine_metadata.topk_weights,
         )
         if len(combine_metadata.restore_shape) == 3:

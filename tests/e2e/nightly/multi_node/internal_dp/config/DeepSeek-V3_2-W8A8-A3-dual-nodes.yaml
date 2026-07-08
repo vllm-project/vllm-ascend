@@ -13,6 +13,7 @@ env_common: &env_common
   VLLM_ASCEND_ENABLE_MLAPO: 1
   VLLM_ASCEND_ENABLE_FLASHCOMM1: 1
   ASCEND_A3_EBA_ENABLE: 1
+  VLLM_ENGINE_READY_TIMEOUT_S: 3000
 
 # TODO: need to identify why TP and mtp+1 divisibility rules break on dual-node case
 
@@ -32,7 +33,7 @@ deployment:
       --quantization ascend
       --seed 1024
       --enable-expert-parallel
-      --max-num-seqs 16
+      --max-num-seqs 128
       --max-model-len 90000
       --max-num-batched-tokens 4096
       --no-enable-prefix-caching
@@ -58,7 +59,7 @@ deployment:
       --quantization ascend
       --seed 1024
       --enable-expert-parallel
-      --max-num-seqs 16
+      --max-num-seqs 128
       --max-model-len 90000
       --max-num-batched-tokens 4096
       --no-enable-prefix-caching
@@ -100,7 +101,7 @@ benchmarks:
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
     num_prompts: 512
     max_out_len: 3000
-    batch_size: 1
+    batch_size: 256
     request_rate: 11.2
     baseline: 305.2903 
     threshold: 0.97
@@ -111,9 +112,9 @@ benchmarks:
     request_conf: vllm_api_general_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
     max_out_len: 4096
-    batch_size: 64
+    batch_size: 128
     baseline: 95
-    threshold: 5
+    threshold: 10
 
   acc_aime2025:
     case_type: accuracy

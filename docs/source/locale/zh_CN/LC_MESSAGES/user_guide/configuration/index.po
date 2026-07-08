@@ -27,3 +27,6 @@ msgstr "配置指南"
 #: ../../user_guide/configuration/index.md:3
 msgid "This section provides a detailed configuration guide of vLLM Ascend."
 msgstr "本节提供了 vLLM Ascend 的详细配置指南。"
+
+msgid "# Configuration Guide"
+msgstr ""
