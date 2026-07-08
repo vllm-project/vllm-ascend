@@ -647,6 +647,15 @@
     - tests/e2e/pull_request/two_card/test_qwen3_5_35b_a3b_w8a8.py
 
 # === Others ===
+- name: nightly_bisect
+  optional: true
+  cpu_only: true
+  source_file_dependencies:
+    - tools/bisect
+    - tests/ut/tools/bisect
+  tests:
+    - tests/ut/tools/bisect
+
 - name: _tools
   optional: false
   source_file_dependencies:
@@ -817,7 +826,6 @@ partition:
   a3_x2: 3
   a3_x4: 3
   cpu_x0: 1
-
 
 
 
