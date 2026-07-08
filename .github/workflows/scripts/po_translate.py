@@ -50,11 +50,12 @@ CRITICAL RULES — violations will cause the translation to be rejected:
 --- OUTPUT FORMAT ---
 1. Return ONLY the same list of msgid/msgstr pairs with msgstr filled in.
    No markdown code fences (```), no explanations, no summaries, no greetings.
-2. Every msgid from the input MUST appear exactly once in the output with its
-   corresponding msgstr filled in. Do not drop, merge, split, or reorder entries.
-3. Keep msgid lines COMPLETELY UNCHANGED — never modify source text.
+2. The number of entries in your output MUST EQUAL the number in the input.
+   Count them: if you received N entries, you must return exactly N entries.
+   Do NOT drop, merge, split, reorder, or add entries under any circumstance.
+3. Keep msgid lines COMPLETELY UNCHANGED — copy them exactly as-is from input.
 
---- WHAT TO PRESERVE ---
+--- WHAT TO PRESERVE (keep EXACTLY as in msgid) ---
 4. All format specifiers: %s, %d, %f, {{}}, {{{{}}}}, {{name}}, etc.
 5. All markdown syntax: **bold**, *italic*, `inline code`, ```code blocks```,
    [links](urls), ![images](urls), # headings, - lists, 1. ordered lists,
@@ -64,41 +65,49 @@ CRITICAL RULES — violations will cause the translation to be rejected:
 8. Proper nouns: person names, contributor names, author names, company names,
    product names (vLLM, Ascend, CANN, Huawei, etc.).
 
+--- CONTENT THAT SHOULD NOT BE TRANSLATED ---
+9. DO NOT translate contributor names, GitHub usernames, or dates.
+   These should be copied verbatim from msgid to msgstr.
+   Example: "Xiyuan Wang [@wangxiyuan] 2025-01-15" → keep as-is.
+
+10. DO NOT translate table headers or table separator rows that are purely
+    structural. Copy them verbatim.
+    Example: "| Name | GitHub ID | Date |" → keep as-is.
+    Example: "|:-----------:|:-----:|:-----:|" → keep as-is.
+
+11. DO NOT translate code identifiers, variable names, CLI flags, or shell
+    commands. Copy them verbatim.
+    Example: "--data-parallel-size" → keep as-is.
+    Example: "vllm serve /path/to/model" → keep as-is.
+
+12. DO NOT translate URLs, email addresses, or paths.
+    Copy them verbatim from msgid to msgstr.
+
 --- MkDocs MATERIAL EXTENSIONS ---
-These are special MkDocs syntax elements. Keep the KEYWORDS and STRUCTURE
-exactly as-is; only translate the human-readable TEXT parts.
+13. ADMONITIONS (!!! type): Keep "!!!" and type keyword (note, warning, tip)
+    in English. Only translate the title text after type.
+    Example: msgid "!!! note" → msgstr "!!! note"
+    Example: msgid "!!! note \"Important\"" → msgstr "!!! note \"重要\""
 
-9. ADMONITIONS: Lines starting with "!!! type" or "!!! type \"title\"".
-   The type keyword (note, warning, tip, danger, etc.) and the "!!!" marker
-   MUST stay in English.
-   Examples:
-     msgid "!!! note"               → msgstr "!!! note"  (no translatable text)
-     msgid "!!! warning"            → msgstr "!!! warning"
-     msgid "!!! note \"Important\""  → msgstr "!!! note \"重要\""
+14. COLLAPSIBLE BLOCKS (???): Keep "???" and quote syntax. Translate only
+    the title text inside quotes.
+    Example: msgid "??? \"Click here...\"" → msgstr "??? \"点击这里...\""
 
-10. COLLAPSIBLE BLOCKS: Lines starting with "??? \"title\"".
-    Keep "???" and the quote syntax; translate only the title text inside quotes.
-    Example:
-      msgid "??? \"Click here to see 'Build from Dockerfile'\""  → msgstr "??? \"点击这里查看'从Dockerfile构建'\""
-
-11. CONTENT TABS: Lines starting with "=== \"label\"".
-    Keep "===" and the quote syntax; translate only the label text.
-    Example:
-      msgid "=== \"Before using pip\""  → msgstr "=== \"使用pip之前\""
+15. CONTENT TABS (===): Keep "===" and quote syntax. Translate only the label.
+    Example: msgid "=== \"Before using pip\"" → msgstr "=== \"使用pip之前\""
 
 --- TRANSLATION QUALITY ---
-12. Use natural, fluent Chinese technical documentation style. Avoid word-by-word
-    literal translation. Restructure long English sentences into natural Chinese
-    sentence flow.
-13. Use standard Chinese technical terminology consistently.
-14. For markdown links [text](url): translate the display text in [] but keep the
-    URL in () exactly as-is. Example: [Quick Start](quick_start.md) → [快速开始](quick_start.md)
-15. For headings (# Title): translate the heading text.
-16. DO NOT add "#, fuzzy" markers.
-17. If a msgid is purely structural (symbols, code, file paths only), copy it
-    verbatim to msgstr — do not attempt to translate.
-18. Never invent or guess content. If genuinely unsure about a term, leave it in
-    English rather than creating a wrong translation.
+16. Use natural, fluent Chinese technical documentation style. Avoid word-by-word
+    literal translation.
+17. Use standard Chinese technical terminology consistently.
+18. For markdown links [text](url): translate the display text in [] but keep
+    the URL in () exactly as-is.
+    Example: [Quick Start](quick_start.md) → [快速开始](quick_start.md)
+19. For headings (# Title): translate the heading text.
+20. DO NOT add "#, fuzzy" markers.
+21. If a msgid is purely structural (symbols, code, file paths only), copy it
+    verbatim to msgstr.
+22. Never invent or guess content. If unsure about a term, leave it in English.
 
 {content}"""
 
@@ -166,13 +175,17 @@ class POTranslator:
                     return False
 
             # Parse the translated snippet and merge back.
-            if not self._merge_translations(po, untranslated, translated_snippet):
+            merged = self._merge_translations(po, untranslated, translated_snippet)
+            if merged == 0:
                 shutil.copy2(backup, po_path)
                 print("FAILED (merge)")
                 return False
 
             po.save(str(path))
-            print("OK")
+            if merged < len(untranslated):
+                print(f"OK ({merged}/{len(untranslated)} merged)")
+            else:
+                print("OK")
             return True
         except Exception as e:
             print(f"ERROR: {e}")
@@ -252,26 +265,31 @@ class POTranslator:
         return translated
 
     @staticmethod
-    def _merge_translations(po, untranslated: list[POEntry], translated_snippet: str) -> bool:
-        """Parse translated snippet and merge msgstr values back into *po*."""
+    def _merge_translations(po, untranslated: list[POEntry], translated_snippet: str) -> int:
+        """Parse translated snippet and merge msgstr values back into *po*.
+
+        Returns the number of entries that were successfully merged.
+        If zero entries could be merged, the translation is considered failed.
+        """
         try:
             translated_po = pofile(translated_snippet)
         except Exception:
-            return False
+            return 0
 
         translated_map: dict[str, str] = {}
         for entry in translated_po:
             if entry.msgid and entry.msgstr:
                 translated_map[entry.msgid] = entry.msgstr
 
+        merged = 0
         for entry in untranslated:
             if entry.msgid in translated_map:
                 entry.msgstr = translated_map[entry.msgid]
+                merged += 1
             else:
                 print(f"\n    Missing translation for: {entry.msgid[:60]}...")
-                return False
 
-        return True
+        return merged
 
     @staticmethod
     def _clean_response(response: str) -> str:
