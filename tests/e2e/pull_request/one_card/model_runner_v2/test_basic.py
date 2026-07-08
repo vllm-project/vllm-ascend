@@ -31,6 +31,8 @@ MAIN_MODELS = ["LLM-Research/Meta-Llama-3.1-8B-Instruct"]
 EGALE_MODELS = ["vllm-ascend/EAGLE-LLaMA3.1-Instruct-8B"]
 DFLASH_MAIN_MODEL = ["Qwen/Qwen3-8B"]
 DFLASH_MODELS = ["z-lab/Qwen3-8B-DFlash-b16"]
+DSPARK_MAIN_MODEL = ["Qwen/Qwen3-8B"]
+DSPARK_MODELS = ["deepseek-ai/dspark_qwen3_8b_block7"]
 
 pytestmark = pytest.mark.skipif(
     vllm_version_is("0.23.0"),
@@ -118,7 +120,6 @@ def test_egale_spec_decoding(
         runner.model.generate(prompts, sampling_params)
 
 
-@pytest.mark.skipif(True, reason="Fix me, it's broken because of vllm new commit.")
 @pytest.mark.parametrize("model", DFLASH_MAIN_MODEL)
 @pytest.mark.parametrize("dflash_model", DFLASH_MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
@@ -148,6 +149,59 @@ def test_dflash_spec_decoding(
         speculative_config={
             "model": dflash_model,
             "method": "dflash",
+            "num_speculative_tokens": num_speculative_tokens,
+        },
+    ) as runner:
+        runner.model.generate(prompts, sampling_params)
+        metrics = runner.model.get_metrics()
+
+    num_drafts = 0
+    acceptance_counts = [0] * num_speculative_tokens
+    for metric in metrics:
+        if metric.name == "vllm:spec_decode_num_drafts":
+            assert isinstance(metric, Counter)
+            num_drafts += metric.value
+        elif metric.name == "vllm:spec_decode_num_accepted_tokens_per_pos":
+            assert isinstance(metric, Vector)
+            for pos in range(len(metric.values)):
+                acceptance_counts[pos] += metric.values[pos]
+
+    print("-" * 60)
+    for i in range(num_speculative_tokens):
+        rate = acceptance_counts[i] / num_drafts if num_drafts > 0 else 0
+        print(f"acceptance at token {i}: {rate:.4f}")
+    print("-" * 60)
+
+
+@pytest.mark.parametrize("model", DSPARK_MAIN_MODEL)
+@pytest.mark.parametrize("dspark_model", DSPARK_MODELS)
+@pytest.mark.parametrize("max_tokens", [32])
+@pytest.mark.parametrize("enforce_eager", [True])
+@patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
+def test_dspark_spec_decoding(
+    model: str,
+    dspark_model: str,
+    max_tokens: int,
+    enforce_eager: bool,
+) -> None:
+    prompts = [
+        "Hello, my name is",
+        "The president of the United States is",
+        "The capital of France is",
+        "The future of AI is",
+    ]
+
+    num_speculative_tokens = 7
+    sampling_params = SamplingParams(max_tokens=max_tokens, temperature=0.0)
+    with VllmRunner(
+        model,
+        max_model_len=1024,
+        enforce_eager=enforce_eager,
+        disable_log_stats=False,
+        async_scheduling=True,
+        speculative_config={
+            "model": dspark_model,
+            "method": "dspark",
             "num_speculative_tokens": num_speculative_tokens,
         },
     ) as runner:
