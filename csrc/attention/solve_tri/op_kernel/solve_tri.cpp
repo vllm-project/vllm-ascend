@@ -15,8 +15,8 @@
 using namespace AscendC;
 
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
-extern "C" __global__ __aicore__ void solve_tri(GM_ADDR x, GM_ADDR cu_seqlens, GM_ADDR chunk_indices,
-                                                GM_ADDR x_out, GM_ADDR workspace, GM_ADDR tiling)
+__global__ __aicore__ void solve_tri(GM_ADDR x, GM_ADDR cu_seqlens, GM_ADDR chunk_indices,
+                                     GM_ADDR x_out, GM_ADDR workspace, GM_ADDR tiling)
 {
     if (TILING_KEY_IS(1)) {
         KERNEL_TASK_TYPE(1, KERNEL_TYPE_MIX_AIC_1_2);
