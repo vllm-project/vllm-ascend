@@ -560,6 +560,8 @@ class AscendModelSlimConfig(QuantizationConfig):
                     ".indexer.k_rot": ".mla_attn.mla_attn.indexer.k_rot",
                 }
             )
+        if vllm_version_is("0.23.0"):
+            return WeightsMapper(orig_to_new_suffix=suffix_map) if suffix_map else None
         if not suffix_map:
             return QuantizationConfig.get_cache_scale_mapper()
         cache_scale_mapper = WeightsMapper(orig_to_new_suffix=suffix_map)
