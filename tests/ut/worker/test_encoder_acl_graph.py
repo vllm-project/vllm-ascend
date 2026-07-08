@@ -18,6 +18,7 @@ import pytest
 import torch
 from vllm.config import CompilationConfig, VllmConfig
 
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker import encoder_acl_graph
 from vllm_ascend.worker.encoder_acl_graph import (
     EncoderAclGraphManager,
@@ -27,7 +28,6 @@ from vllm_ascend.worker.encoder_acl_graph import (
     set_encoder_graph_params,
     update_encoder_graph_params,
 )
-from vllm_ascend.utils import vllm_version_is
 
 
 def _reset_encoder_acl_graph_state() -> None:
