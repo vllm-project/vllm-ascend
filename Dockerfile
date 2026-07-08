@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
-#
+# #
 
 FROM quay.io/ascend/cann:9.0.0-910b-ubuntu22.04-py3.12
 
