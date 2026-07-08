@@ -25,7 +25,7 @@ DEVICE_BINDING_MODE: dict["AscendDeviceType", str] = {
     AscendDeviceType.A2: TOPO_AFFINITY_MODE,
     AscendDeviceType.A3: GLOBAL_SLICE_MODE,
     AscendDeviceType._310P: TOPO_AFFINITY_MODE,
-    AscendDeviceType.A5: GLOBAL_SLICE_MODE,
+    AscendDeviceType.A5: TOPO_AFFINITY_MODE,
 }
 NO_IRQ_BINDING_DEVICE_TYPES = {AscendDeviceType.A5}
 
@@ -213,6 +213,7 @@ class CpuAlloc:
         self.assign_main: dict[int, list[int]] = {}
         self.assign_acl: dict[int, list[int]] = {}
         self.assign_rel: dict[int, list[int]] = {}
+        self.uvb_cpu_pool: list[int] = []
 
     @staticmethod
     def cpu_to_mask(cpu: int) -> str:
@@ -292,6 +293,141 @@ class CpuAlloc:
             self.numa_to_cpu_map[node].append(cpu)
         if len(self.numa_to_cpu_map) == 0:
             raise RuntimeError("lscpu command output error, no NUMA node available. Please check!")
+
+    @staticmethod
+    def parse_threads_per_core(lscpu_message: str) -> int | None:
+        for line in lscpu_message.splitlines():
+            if "Thread(s) per core:" not in line:
+                continue
+            value = line.split(":", 1)[1].strip()
+            if value.isdigit():
+                return int(value)
+        return None
+
+    @staticmethod
+    def get_uvb_poll_window_threads(thread_message: str) -> list[str]:
+        thread_ids = []
+        for line in thread_message.splitlines():
+            if "uvb_poll_window_thread" not in line:
+                continue
+            parts = line.split()
+            if len(parts) >= 2 and parts[1].isdigit():
+                thread_ids.append(parts[1])
+        return thread_ids
+
+    def get_ascend_950_cluster_size(self) -> int | None:
+        lscpu_message, _ = execute_command(["lscpu"])
+        threads_per_core = self.parse_threads_per_core(lscpu_message)
+        if threads_per_core not in {1, 2}:
+            logger.warning(
+                "[cpu_bind_ascend_950] unsupported Thread(s) per core: %s. action: skip worker CPU binding.",
+                threads_per_core,
+            )
+            return None
+        return 8 * threads_per_core
+
+    def get_single_numa_node(self, cpu_list: list[int]) -> int | None:
+        if not cpu_list:
+            return None
+        nodes = {self.cpu_node[cpu] for cpu in cpu_list}
+        if len(nodes) != 1:
+            return None
+        return next(iter(nodes))
+
+    def bind_uvb_poll_window_threads(self) -> None:
+        self.uvb_cpu_pool = [
+            cpu for cpu in self.numa_to_cpu_map.get(0, []) if cpu in self.device_info.allowed_cpus and cpu != 0
+        ]
+        if not self.uvb_cpu_pool:
+            logger.info("[cpu_bind_ascend_950] no available NUMA0 CPUs for uvb_poll_window_thread.")
+            return
+
+        thread_message, _ = execute_command(["ps", "-Te"])
+        uvb_threads = self.get_uvb_poll_window_threads(thread_message)
+        if not uvb_threads:
+            logger.warning(
+                "[cpu_bind_ascend_950] uvb_poll_window_thread not found. "
+                "If running in Docker, start the container with '--pid=host'."
+            )
+            return
+
+        for thread_id in uvb_threads:
+            try:
+                self.bind(thread_id, self.uvb_cpu_pool, False)
+            except RuntimeError as e:
+                logger.warning(
+                    "[cpu_bind_ascend_950] failed to bind uvb_poll_window_thread %s: %s. "
+                    "If running in Docker, start the container with '--pid=host'.",
+                    thread_id,
+                    e,
+                )
+
+    def build_ascend_950_cpu_pools(self) -> bool:
+        if not self.device_info.npu_affinity:
+            logger.warning("[cpu_bind_ascend_950] NPU topo affinity not found. action: skip worker CPU binding.")
+            return False
+
+        cluster_size = self.get_ascend_950_cluster_size()
+        if cluster_size is None:
+            return False
+
+        allowed_cpu_set = set(self.device_info.allowed_cpus)
+        uvb_cpu_set = set(self.uvb_cpu_pool)
+        candidate_npus = [
+            npu
+            for npu in self.device_info.all_logic_npus
+            if npu in self.device_info.running_npu_list
+            or any(cpu in allowed_cpu_set for cpu in self.device_info.npu_affinity.get(npu, []))
+        ]
+
+        numa_to_npus: dict[int, list[int]] = defaultdict(list)
+        for npu in candidate_npus:
+            base_cpu_list = [
+                cpu for cpu in self.device_info.npu_affinity.get(npu, []) if cpu in self.device_info.allowed_cpus
+            ]
+            numa_node = self.get_single_numa_node(base_cpu_list)
+            if numa_node is None:
+                logger.warning(
+                    "[cpu_bind_ascend_950] invalid topo affinity. npu=%s, cpus=%s. action: skip worker CPU binding.",
+                    npu,
+                    base_cpu_list,
+                )
+                return False
+            numa_to_npus[numa_node].append(npu)
+
+        final: dict[int, list[int]] = {}
+        for numa_node, npu_list in numa_to_npus.items():
+            cpu_list = [
+                cpu
+                for cpu in sorted(self.numa_to_cpu_map.get(numa_node, []))
+                if cpu in self.device_info.allowed_cpus and cpu not in uvb_cpu_set
+            ]
+            clusters = [
+                cpu_list[i : i + cluster_size]
+                for i in range(0, len(cpu_list) - len(cpu_list) % cluster_size, cluster_size)
+            ]
+            npu_list = sorted(npu_list)
+            if len(clusters) < len(npu_list):
+                logger.warning(
+                    "[cpu_bind_ascend_950] insufficient CPU clusters. numa=%s, clusters=%s, npus=%s. "
+                    "action: skip worker CPU binding.",
+                    numa_node,
+                    len(clusters),
+                    npu_list,
+                )
+                return False
+            for index, npu in enumerate(npu_list):
+                final[npu] = clusters[index]
+
+        try:
+            self.npu_cpu_pool = {npu: final[npu] for npu in self.device_info.running_npu_list}
+        except KeyError as e:
+            logger.warning(
+                "[cpu_bind_ascend_950] failed to build CPU pool for visible NPU %s. action: skip worker CPU binding.",
+                e,
+            )
+            return False
+        return True
 
     def build_global_slice_cpu_pool(self) -> None:
         """
@@ -382,22 +518,26 @@ class CpuAlloc:
             return MIN_CPUS_PER_NPU
         return MIN_CPUS_PER_NPU_WITHOUT_IRQ
 
-    def build_cpu_pools(self) -> None:
+    def build_cpu_pools(self) -> bool:
         self.build_cpu_node_map()
 
         mode = self._binding_mode()
         logger.info(
             "[cpu_bind_mode] mode=%s rank=%s visible_npus=%s", mode, self.rank_id, self.device_info.running_npu_list
         )
+        if get_ascend_device_type() == AscendDeviceType.A5:
+            self.bind_uvb_poll_window_threads()
+            return self.build_ascend_950_cpu_pools()
+
         if mode == GLOBAL_SLICE_MODE:
             self.build_global_slice_cpu_pool()
-            return
+            return True
 
         # topo_affinity mode
         if not self.device_info.npu_affinity:
             logger.warning("NPU topo affinity not found. action: fallback to global-slice CPU binding.")
             self.build_global_slice_cpu_pool()
-            return
+            return True
 
         allowed_cpu_set = set(self.device_info.allowed_cpus)
         # Consider all logical NPUs to avoid CPU distribution overlap across worker processes.
@@ -430,8 +570,15 @@ class CpuAlloc:
                 final.update(self.average_distribute({key: npu_list}))
         # Keep only visible NPUs in the final binding pool. Non-visible NPUs are used only to avoid overlap.
         self.npu_cpu_pool = {npu: final[npu] for npu in self.device_info.running_npu_list}
+        return True
 
     def allocate(self) -> None:
+        if get_ascend_device_type() == AscendDeviceType.A5:
+            self.assign_main = {npu: pool for npu, pool in self.npu_cpu_pool.items()}
+            self.assign_acl = {npu: [] for npu in self.npu_cpu_pool}
+            self.assign_rel = {npu: [] for npu in self.npu_cpu_pool}
+            return
+
         reserve_irq_cpus = self._reserve_irq_cpus()
         min_cpus_per_npu = self._min_cpus_per_npu()
         for npu, pool in self.npu_cpu_pool.items():
@@ -493,6 +640,10 @@ class CpuAlloc:
         )
 
     def bind_threads(self) -> None:
+        if get_ascend_device_type() == AscendDeviceType.A5:
+            self.bind_ascend_950_threads()
+            return
+
         thread_message, _ = execute_command(["ps", "-Te"])
         threads_map = self.get_threads_map(thread_message)
         main_pid = str(psutil.Process().pid)
@@ -503,6 +654,12 @@ class CpuAlloc:
         for release_thread in threads_map.get(main_pid, {}).get("release_thread", []):
             self.bind(release_thread, self.assign_rel[current_npu], False)
         # Migrate memory once for the whole process, after all threads are pinned.
+        self.bind_memory(main_pid, current_npu)
+
+    def bind_ascend_950_threads(self) -> None:
+        main_pid = str(psutil.Process().pid)
+        current_npu = self.device_info.running_npu_list[self.rank_id]
+        self.bind(main_pid, self.assign_main[current_npu], True)
         self.bind_memory(main_pid, current_npu)
 
     def bind_npu_irq(self) -> None:
@@ -596,7 +753,8 @@ class CpuAlloc:
             f.write(self.cpu_to_mask(cq_cpu))
 
     def run_all(self) -> None:
-        self.build_cpu_pools()
+        if not self.build_cpu_pools():
+            return
         self.allocate()
         self.print_plan()
         self.bind_threads()
