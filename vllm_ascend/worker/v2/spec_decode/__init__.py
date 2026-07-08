@@ -33,6 +33,7 @@ def init_speculator(
         from vllm_ascend.worker.v2.spec_decode.dspark.speculator import (
             AscendDSparkSpeculator,
         )
+
         return AscendDSparkSpeculator(vllm_config, device)
     if speculative_config.use_dflash():
         from vllm_ascend.worker.v2.spec_decode.dflash.speculator import (
