@@ -196,6 +196,7 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
         BaseLayerWithLoRA.set_mapping(self, punica_wrapper)
         self.base_layer.set_lora_context(self._build_lora_context())
 
+
 class AscendFusedMoE3DWithLoRA(AscendFusedMoEWithLoRA, FusedMoE3DWithLoRA):
     """For checkpoints that already fuse w1+w3 into a 3D weight (single slice)."""
 
