@@ -561,7 +561,7 @@ class AscendModelSlimConfig(QuantizationConfig):
                 }
             )
         if not suffix_map:
-            return None
+            return WeightsMapper()
         return WeightsMapper(orig_to_new_suffix=suffix_map)
 
     def _has_quant_weight(self, prefix: str, packed_modules_mapping: Mapping[str, list[str]]) -> bool:
