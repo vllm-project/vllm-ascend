@@ -112,6 +112,21 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         v = F.pad(v, (0, pad_len), mode="constant", value=0)
         return q, k, v, origin_head_dim
 
+    def _maybe_compute_cu_seqlens(
+        self,
+        bsz: int,
+        q_len: int,
+        cu_seqlens: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if cu_seqlens is not None:
+            return cu_seqlens
+
+        # If cu_seqlens is not provided, we create a default one assuming all sequences have the same length.
+        # This is used by models such as Hunyuan-OCR, which always pass None as cu_seqlens and rely on the operator to
+        # compute it internally.
+        cu_seqlens = torch.arange(0, (bsz + 1) * q_len, step=q_len, dtype=torch.int32, device="cpu")
+        return cu_seqlens
+
     @staticmethod
     def _maybe_unpad_output(
         context_layer: torch.Tensor,
@@ -182,14 +197,14 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         key: torch.Tensor,
         value: torch.Tensor,
         *,
-        cu_seqlens: torch.Tensor,
+        cu_seqlens: torch.Tensor | None = None,
         is_reshaped: bool,
         bsz: int,
         q_len: int,
     ) -> torch.Tensor:
         actual_seq_lengths_q, actual_seq_lengths_kv = maybe_compute_actual_seq_lengths(
             num_query_tokens=query.shape[0],
-            cu_seqlens=cu_seqlens,
+            cu_seqlens=self._maybe_compute_cu_seqlens(bsz, q_len, cu_seqlens),
         )
         q, k, v, origin_head_dim = self._maybe_pad_qkv(query, key, value)
         context_layer = self._run_vit_fia(q, k, v, actual_seq_lengths_q, actual_seq_lengths_kv)
@@ -207,7 +222,7 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         key: torch.Tensor,
         value: torch.Tensor,
         *,
-        cu_seqlens: torch.Tensor,
+        cu_seqlens: torch.Tensor | None = None,
         is_reshaped: bool,
         bsz: int,
         q_len: int,
@@ -220,7 +235,7 @@ class AscendMMEncoderAttention(MMEncoderAttention):
 
         actual_seq_lengths_q, actual_seq_lengths_kv = maybe_compute_actual_seq_lengths(
             num_query_tokens=query.shape[0],
-            cu_seqlens=torch.arange(0, (bsz + 1) * q_len, step=q_len, dtype=torch.int32, device="cpu"),
+            cu_seqlens=self._maybe_compute_cu_seqlens(bsz, q_len, cu_seqlens),
         )
         q, k, v, origin_head_dim = self._maybe_pad_qkv(query, key, value)
 
@@ -296,7 +311,7 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        cu_seqlens: torch.Tensor,
+        cu_seqlens: torch.Tensor | None = None,
         max_seqlen: torch.Tensor | None = None,
         sequence_lengths: torch.Tensor | None = None,
     ):
