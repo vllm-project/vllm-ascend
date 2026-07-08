@@ -204,19 +204,9 @@ jobs:
       request_id: ${{ inputs.request_id || '' }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
 
-  clear-pre-logs:
-    runs-on: linux-aarch64-310p-4
-    needs: [double-node-tests]
-    if: needs.double-node-tests.result != 'skipped'
-    steps:
-      - name: Clear pre-logs on pvc
-        run: |
-          # Clear logs generated before the test to avoid confusion
-          rm -rf "${ASCEND_LOG_PREFIX:?}"/* || true
-
   merge-benchmark-artifacts:
     name: Merge benchmark artifacts into weekly-310p.zip
-    needs: [parse-trigger, single-node-tests]
+    needs: [single-node-tests]
     if: >-
       always() &&
       github.event_name == 'workflow_dispatch' &&
