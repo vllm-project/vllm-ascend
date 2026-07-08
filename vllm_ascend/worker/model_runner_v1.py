@@ -189,6 +189,7 @@ else:
 from vllm.model_executor.layers.attention import Attention, MLAAttention
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSlidingWindowMLASpec
+from vllm_ascend.ascend_config import get_score_encoder_cache_config
 
 # if true, allow tensor initialization and casting with internal format (e.g., NZ)
 torch.npu.config.allow_internal_format = True
@@ -879,11 +880,11 @@ class NPUModelRunner(GPUModelRunner):
                     del self.tmp_encoder_cache[mm_hash]
 
     def _async_process_scheduler_output(self, scheduler_output: "SchedulerOutput") -> None:
+        ec_manager_metadata = getattr(scheduler_output, "ec_manager_metadata", None)
+        assert ec_manager_metadata is not None, "SchedulerOutput.ec_manager_metadata is None, ec cache scheduling metadata missing"
         # Free the cached encoder outputs.
-        promoting_mm_hashes = getattr(scheduler_output, "promoting_mm_hashes", [])
-        cpu_get_encoder_mm_hashes = getattr(
-            scheduler_output, "cpu_get_encoder_mm_hashes", []
-        )
+        promoting_mm_hashes = ec_manager_metadata.promoting_mm_hashes
+        cpu_get_encoder_mm_hashes = ec_manager_metadata.cpu_get_encoder_mm_hashes
 
         for mm_hash in scheduler_output.free_encoder_mm_hashes:
             value = self.encoder_cache.pop(mm_hash, None)
@@ -898,7 +899,7 @@ class NPUModelRunner(GPUModelRunner):
 
             staging = cpu_value.pin_memory()
             npu_value = staging.detach().to(self.device, non_blocking=True)
-            # �?staging 的生命周期绑定到 NPU stream
+            # �?staging 的生命周期绑定到 NPU stream
             # npu_value.record_stream(torch.npu.current_stream())
 
             self.encoder_cache[mm_hash] = npu_value
@@ -912,7 +913,7 @@ class NPUModelRunner(GPUModelRunner):
                 continue
             staging = cpu_value.pin_memory()
             npu_value = staging.detach().to(self.device, non_blocking=True)
-            # 保证拷贝完成�?staging 不会被释�?
+            # 保证拷贝完成�?staging 不会被释�?
             # npu_value.record_stream(torch.npu.current_stream())
             self.tmp_encoder_cache[mm_hash] = npu_value
             del staging
@@ -1261,7 +1262,9 @@ class NPUModelRunner(GPUModelRunner):
             )
             encoder_outputs.extend(curr_group_outputs)
 
-        promoting_mm_hashes = getattr(scheduler_output, "promoting_mm_hashes", [])
+        ec_manager_metadata = getattr(scheduler_output, "ec_manager_metadata", None)
+        assert ec_manager_metadata is not None, "SchedulerOutput.ec_manager_metadata is None, ec cache scheduling metadata missing"
+        promoting_mm_hashes = ec_manager_metadata.promoting_mm_hashes
 
         # Cache the encoder outputs by mm_hash
         for (mm_hash, pos_info), output in zip(mm_hashes_pos, encoder_outputs):
@@ -1278,8 +1281,8 @@ class NPUModelRunner(GPUModelRunner):
                     mm_hash in promoting_mm_hashes and
                     mm_hash not in scheduler_output.free_encoder_mm_hashes
                 ):
-                    # 如果还在晋升列表，且不在淘汰列表，还要放入npu�?
-                    # 1.首次进入，放cpu  2.命中cpu，不晋升 3.命中cpu，晋�?4.由于别人晋升被淘�?
+                    # 如果还在晋升列表，且不在淘汰列表，还要放入npu�?
+                    # 1.首次进入，放cpu  2.命中cpu，不晋升 3.命中cpu，晋�?4.由于别人晋升被淘�?
                     self.encoder_cache[mm_hash] = output
                 else:
                     self.tmp_encoder_cache[mm_hash] = output
@@ -2325,7 +2328,7 @@ class NPUModelRunner(GPUModelRunner):
         elif isinstance(self.drafter, AscendNgramProposerNPU):
             batch_size = min(self.input_batch.num_reqs, self.token_ids_gpu_tensor.shape[0])
 
-            # prepare sampled_token_ids tensor（list �?padded tensor�?
+            # prepare sampled_token_ids tensor（list �?padded tensor�?
             sampled_token_ids = valid_sampled_token_ids
             if isinstance(sampled_token_ids, list):
                 max_len = max((len(sublist) for sublist in sampled_token_ids), default=0)
@@ -2352,7 +2355,7 @@ class NPUModelRunner(GPUModelRunner):
                 k=self.drafter.k,
             )
 
-            # only async scheduling, set prev_sampled_token_ids�?
+            # only async scheduling, set prev_sampled_token_ids�?
             if self.use_async_scheduling:
                 self.input_batch.prev_sampled_token_ids = next_token_ids.unsqueeze(1)
 
