@@ -33,5 +33,8 @@ def send_completion_request(api_client, **overrides):
     return send_request(api_client, COMPLETIONS_URI, body)
 
 
-def send_request(api_client, uri, request_body):
-    return api_client.post(uri, json=request_body, headers=JSON_HEADERS)
+def send_request(api_client, uri, request_body, headers=None):
+    request_headers = dict(JSON_HEADERS)
+    if headers:
+        request_headers.update(headers)
+    return api_client.post(uri, json=request_body, headers=request_headers)
