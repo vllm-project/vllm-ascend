@@ -5,7 +5,7 @@ import dataclasses
 import weakref
 from collections.abc import Callable
 from contextlib import ExitStack
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, ClassVar
 from unittest.mock import patch
 
@@ -327,6 +327,10 @@ class GraphParams:
     conv1d_params: dict[int, list[tuple]]  # for causal conv1d params
     conv1d_handles: dict[int, list[torch_npu._C._NPUTaskGroupHandle]]  # for causal conv1d params handles
     conv1d_events: dict[int, list[torch.npu.ExternalEvent]]  # for causal conv1d params events
+    conv1d_replay_buffers_310: dict[
+        tuple[int, ...],
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+    ] = field(default_factory=dict)
 
 
 _graph_params: GraphParams | None = None

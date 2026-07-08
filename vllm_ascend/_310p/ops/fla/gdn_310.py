@@ -78,11 +78,15 @@ def _zero_padded_tokens(
 
 def _get_spec_causal_conv1d_device_args(
     attn_metadata: GDNAttentionMetadata,
+    replay_buffers: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     num_spec_decodes = attn_metadata.num_spec_decodes
-    query_start_loc_buf = _as_int64_device_view(attn_metadata.spec_query_start_loc)
-    cache_indices_buf = _as_int64_device_view(attn_metadata.spec_state_indices_tensor[:, 0])
-    num_accepted_buf = _as_int64_device_view(attn_metadata.num_accepted_tokens)
+    if replay_buffers is None:
+        query_start_loc_buf = _as_int64_device_view(attn_metadata.spec_query_start_loc)
+        cache_indices_buf = _as_int64_device_view(attn_metadata.spec_state_indices_tensor[:, 0])
+        num_accepted_buf = _as_int64_device_view(attn_metadata.num_accepted_tokens)
+    else:
+        query_start_loc_buf, cache_indices_buf, num_accepted_buf = replay_buffers
     return (
         query_start_loc_buf[: num_spec_decodes + 1],
         cache_indices_buf[:num_spec_decodes],
@@ -344,11 +348,26 @@ class AscendGatedDeltaNetAttention310(GatedDeltaNetAttention):
                     token_dim=0,
                 )
             if _EXTRA_CTX.capturing and uniform_spec_only:
-                qsl_dev, cidx_dev, nat_dev, qsl_buf, cidx_buf, nat_buf = _get_spec_causal_conv1d_device_args(
-                    attn_metadata
-                )
                 spec_q_per_seq = int(attn_metadata.spec_state_indices_tensor.size(-1))
                 graph_params = get_draft_graph_params() if _EXTRA_CTX.is_draft_model else get_graph_params()
+                replay_buffer_key = (
+                    num_actual_tokens,
+                    spec_q_per_seq,
+                    attn_metadata.spec_query_start_loc.data_ptr(),
+                    attn_metadata.spec_state_indices_tensor.data_ptr(),
+                    attn_metadata.num_accepted_tokens.data_ptr(),
+                )
+                replay_buffers = graph_params.conv1d_replay_buffers_310.get(replay_buffer_key)
+                qsl_dev, cidx_dev, nat_dev, qsl_buf, cidx_buf, nat_buf = _get_spec_causal_conv1d_device_args(
+                    attn_metadata,
+                    replay_buffers,
+                )
+                if replay_buffers is None:
+                    graph_params.conv1d_replay_buffers_310[replay_buffer_key] = (
+                        qsl_buf,
+                        cidx_buf,
+                        nat_buf,
+                    )
                 _register_310_conv1d_buffer_replay(
                     graph_params,
                     num_actual_tokens,
@@ -613,6 +632,7 @@ def update_conv1d_graph_params_310p(
     ):
         return
 
+    updated_replay_buffers: set[tuple[int, int, int]] = set()
     attn_metadata = forward_context.attn_metadata
     if is_draft_model and draft_attn_metadatas is not None:
         attn_metadata = draft_attn_metadatas
@@ -654,6 +674,15 @@ def update_conv1d_graph_params_310p(
                 continue
             if meta.spec_sequence_masks is None:
                 continue
+            
+            replay_buffer_key = (
+                qsl_dev.data_ptr(),
+                cidx_dev.data_ptr(),
+                nat_dev.data_ptr() if nat_dev is not None else 0,
+            )
+            if replay_buffer_key in updated_replay_buffers:
+                continue
+            updated_replay_buffers.add(replay_buffer_key)
 
             cap_x_dim0 = int(mixed_qkv.size(0))
             qsl_host, cidx_host, num_accepted_host = _get_spec_causal_conv1d_update_host_args_310p(meta)
