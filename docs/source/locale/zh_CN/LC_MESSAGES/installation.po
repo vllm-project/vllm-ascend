@@ -378,13 +378,13 @@ msgid "=== \"A3 series\""
 msgstr "=== \"A3 系列\""
 
 msgid "=== \"A2 series\""
-msgstr ""
+msgstr "=== \"A2系列\""
 
 msgid "=== \"A3 series\""
-msgstr ""
+msgstr "=== \"A3系列\""
 
 msgid "=== \"A2 series\""
-msgstr ""
+msgstr "=== \"A2系列\""
 
 msgid "=== \"A3 series\""
-msgstr ""
+msgstr "=== \"A3系列\""

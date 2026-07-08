@@ -560,60 +560,63 @@ msgstr ""
 "FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)；本章仅涵盖模型特定问题。"
 
 msgid "Start the docker image on each node."
-msgstr ""
+msgstr "在每个节点上启动 Docker 镜像。"
 
 msgid "=== \"A2 series\""
-msgstr ""
+msgstr "=== \"A2 系列\""
 
 msgid "=== \"A3 series\""
-msgstr ""
+msgstr "=== \"A3 系列\""
 
 msgid "**Node0**"
-msgstr ""
+msgstr "**节点0**"
 
 msgid "1. Prefill node 0"
-msgstr ""
+msgstr "1. 预填充节点0"
 
 msgid "2. Prefill node 1"
-msgstr ""
+msgstr "2. 预填充节点1"
 
 msgid "Before you start, please:"
-msgstr ""
+msgstr "开始之前，请："
 
 msgid "1. Prepare the script `launch_online_dp.py` on each node."
-msgstr ""
+msgstr "1. 在每个节点上准备脚本 `launch_online_dp.py`。"
 
 msgid "2. Prepare the script `run_dp_template.sh` on each node."
-msgstr ""
+msgstr "2. 在每个节点上准备脚本 `run_dp_template.sh`。"
 
 msgid "3. Start the server with the following command on each node."
-msgstr ""
+msgstr "3. 在每个节点上使用以下命令启动服务器。"
 
 msgid "1. Prefill node 0"
-msgstr ""
+msgstr "1. 预填充节点0"
 
 msgid "2. Prefill node 1"
-msgstr ""
+msgstr "2. 预填充节点1"
 
 msgid "4. Deploy the P-D disaggregation proxy."
-msgstr ""
+msgstr "4. 部署 P-D 分离代理。"
 
 msgid ""
 "Refer to [Prefill-Decode Disaggregation "
 "(Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md) to deploy "
 "the P-D disaggregation proxy."
 msgstr ""
+"请参考 [预填充-解码分离 "
+"(Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md) 来部署 P-D "
+"分离代理。"
 
 msgid "Key Parameter Descriptions:"
-msgstr ""
+msgstr "关键参数说明："
 
 msgid "Expected Result:"
-msgstr ""
+msgstr "预期结果："
 
 msgid ""
 "The service returns HTTP 200 OK with a JSON response containing the "
 "`choices` field."
-msgstr ""
+msgstr "服务返回 HTTP 200 OK，JSON 响应中包含 `choices` 字段。"
 
 msgid "### Using AISBench"
-msgstr ""
+msgstr "### 使用 AISBench"

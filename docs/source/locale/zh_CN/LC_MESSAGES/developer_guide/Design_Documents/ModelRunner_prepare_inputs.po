@@ -467,7 +467,7 @@ msgid ""
 msgstr "希望本文档能帮助你更好地理解 vLLM 如何为模型前向传播准备输入。如果你有任何好的想法，欢迎向我们贡献。"
 
 msgid "#### Obtain inputs"
-msgstr ""
+msgstr "#### 获取输入"
 
 msgid "#### Build inputs attention metadata"
-msgstr ""
+msgstr "#### 构建输入注意力元数据"

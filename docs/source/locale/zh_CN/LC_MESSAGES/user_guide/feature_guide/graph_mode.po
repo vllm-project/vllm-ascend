@@ -420,19 +420,19 @@ msgstr ""
 "- [ACL 图开发者指南](../../developer_guide/Design_Documents/ACL_Graph.md)"
 
 msgid "Offline example:"
-msgstr ""
+msgstr "离线示例："
 
 msgid "Online example:"
-msgstr ""
+msgstr "在线示例："
 
 msgid "Offline example:"
-msgstr ""
+msgstr "离线示例："
 
 msgid "Online example:"
-msgstr ""
+msgstr "在线示例："
 
 msgid "Offline example:"
-msgstr ""
+msgstr "离线示例："
 
 msgid "Online example:"
-msgstr ""
+msgstr "在线示例："

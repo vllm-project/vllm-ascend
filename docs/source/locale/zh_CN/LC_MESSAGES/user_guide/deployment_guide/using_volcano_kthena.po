@@ -213,4 +213,4 @@ msgid ""
 msgstr "更多高级功能，请参考 [Kthena 网站](https://kthena.volcano.sh/)。"
 
 msgid "or"
-msgstr ""
+msgstr "或"

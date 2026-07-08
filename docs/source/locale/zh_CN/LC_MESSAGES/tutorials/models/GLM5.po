@@ -438,68 +438,68 @@ msgid "A: Please add following configurations in vLLM startup command"
 msgstr "答：请在 vLLM 启动命令中添加以下配置"
 
 msgid "Start the docker image on your each node."
-msgstr ""
+msgstr "在每个节点上启动 Docker 镜像。"
 
 msgid ""
 "If you want to deploy multi-node environment, you need to set up environment"
 " on each node."
-msgstr ""
+msgstr "如果要部署多节点环境，需要在每个节点上配置环境。"
 
 msgid "=== \"A3 series\""
-msgstr ""
+msgstr "=== \"A3 系列\""
 
 msgid "Run the following script to execute online inference."
-msgstr ""
+msgstr "运行以下脚本执行在线推理。"
 
 msgid "=== \"A2 series\""
-msgstr ""
+msgstr "=== \"A2 系列\""
 
 msgid "Run the following script to execute online inference."
-msgstr ""
+msgstr "运行以下脚本执行在线推理。"
 
 msgid ""
 "Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md)."
-msgstr ""
+msgstr "常见问题提示：如果遇到问题，请参考[常见问题](../../faqs.md)。"
 
 msgid ""
 "Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md)."
-msgstr ""
+msgstr "常见问题提示：如果遇到问题，请参考[常见问题](../../faqs.md)。"
 
 msgid "=== \"A3 series\""
-msgstr ""
+msgstr "=== \"A3 系列\""
 
 msgid "=== \"A2 series\""
-msgstr ""
+msgstr "=== \"A2 系列\""
 
 msgid "Run the following scripts on two nodes respectively."
-msgstr ""
+msgstr "分别在两个节点上运行以下脚本。"
 
 msgid "**node 0**"
-msgstr ""
+msgstr "**节点 0**"
 
 msgid "**node 1**"
-msgstr ""
+msgstr "**节点 1**"
 
 msgid "Run the following scripts on two nodes respectively."
-msgstr ""
+msgstr "分别在两个节点上运行以下脚本。"
 
 msgid "**node 0**"
-msgstr ""
+msgstr "**节点 0**"
 
 msgid "**node 1**"
-msgstr ""
+msgstr "**节点 1**"
 
 msgid "2. Prefill node 1"
-msgstr ""
+msgstr "2. 预填充节点 1"
 
 msgid "3. Decode node 0"
-msgstr ""
+msgstr "3. 解码节点 0"
 
 msgid "4. Decode node 1"
-msgstr ""
+msgstr "4. 解码节点 1"
 
 msgid "5. Decode node 2"
-msgstr ""
+msgstr "5. 解码节点 2"
 
 msgid "6. Decode node 3"
-msgstr ""
+msgstr "6. 解码节点 3"

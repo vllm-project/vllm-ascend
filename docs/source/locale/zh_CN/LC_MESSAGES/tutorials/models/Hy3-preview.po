@@ -238,4 +238,4 @@ msgstr ""
 "- 正式的 AISBench 精度结果待定，应在实际基准测试运行后添加。"
 
 msgid "### Using AISBench"
-msgstr ""
+msgstr "### 使用AISBench"

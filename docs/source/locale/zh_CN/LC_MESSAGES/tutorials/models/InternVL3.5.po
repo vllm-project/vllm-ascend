@@ -218,8 +218,8 @@ msgid ""
 msgstr "- 常见问题提示：如果遇到问题，请参考[常见问题解答](../../faqs.md)。"
 
 msgid "Run the following script to execute online inference."
-msgstr ""
+msgstr "运行以下脚本执行在线推理。"
 
 msgid ""
 "Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md)."
-msgstr ""
+msgstr "常见问题提示：如果遇到问题，请参考[常见问题](../../faqs.md)。"

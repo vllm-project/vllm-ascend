@@ -697,12 +697,12 @@ msgid "Start the docker image on your each node."
 msgstr ""
 
 msgid "Key Parameter Descriptions:"
-msgstr ""
+msgstr "关键参数说明："
 
 msgid ""
 "> **Note**: For `Qwen3.6-27B`, set `\"model\": \"qwen3.6\"` in the request "
 "body."
-msgstr ""
+msgstr "> **注意**：对于 `Qwen3.6-27B`，请在请求体中设置 `\"model\": \"qwen3.6\"`。"
 
 msgid "### Using AISBench"
-msgstr ""
+msgstr "### 使用 AISBench"

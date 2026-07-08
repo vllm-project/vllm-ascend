@@ -387,34 +387,40 @@ msgstr ""
 "`GeneratedScript.language`，以便 Sphinx 能够正确高亮生成的文字块。"
 
 msgid "Write the doc block like this:"
-msgstr ""
+msgstr "请按如下方式编写文档块："
 
 msgid ""
 "set -eux\n"
 "{{ generated }}"
 msgstr ""
+"set -eux\n"
+"{{ generated }}"
 
 msgid "Write the doc block like this:"
-msgstr ""
+msgstr "请按如下方式编写文档块："
 
 msgid "Write the doc block like this:"
-msgstr ""
+msgstr "请按如下方式编写文档块："
 
 msgid ""
 "set -eux\n"
 "{{ generated }}"
 msgstr ""
+"set -eux\n"
+"{{ generated }}"
 
 msgid "Generated shell script:"
-msgstr ""
+msgstr "生成的Shell脚本："
 
 msgid "Write the doc block like this:"
-msgstr ""
+msgstr "请按如下方式编写文档块："
 
 msgid ""
 "set -eux\n"
 "{{ generated }}"
 msgstr ""
+"set -eux\n"
+"{{ generated }}"
 
 msgid "Generated shell script:"
-msgstr ""
+msgstr "生成的Shell脚本："

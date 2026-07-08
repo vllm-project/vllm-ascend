@@ -138,4 +138,4 @@ msgstr "大约几分钟后，您可以获得性能评估结果。按照本教程
 msgid ""
 "If you run this script successfully, you will see a list of scores printed "
 "to the console, similar to this:"
-msgstr ""
+msgstr "如果成功运行此脚本，您将看到控制台打印出一系列分数，类似于这样："

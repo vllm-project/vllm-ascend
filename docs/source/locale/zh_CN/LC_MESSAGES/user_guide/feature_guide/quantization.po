@@ -175,7 +175,7 @@ msgstr ""
 "- [vLLM 量化指南](https://docs.vllm.ai/en/latest/features/quantization/)"
 
 msgid "#### Installation"
-msgstr ""
+msgstr "#### 安装"
 
 msgid "#### Model Quantization"
-msgstr ""
+msgstr "#### 模型量化"

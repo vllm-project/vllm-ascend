@@ -291,16 +291,16 @@ msgstr ""
 "进行验证。"
 
 msgid "**Examples:**"
-msgstr ""
+msgstr "**示例：**"
 
 msgid "**Usage:**"
-msgstr ""
+msgstr "**用法：**"
 
 msgid "**Examples:**"
-msgstr ""
+msgstr "**示例：**"
 
 msgid "**Usage:**"
-msgstr ""
+msgstr "**用法：**"
 
 msgid "**Examples:**"
-msgstr ""
+msgstr "**示例：**"
