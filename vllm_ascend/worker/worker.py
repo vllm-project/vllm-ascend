@@ -660,16 +660,16 @@ class NPUWorker(WorkerBase):
         return int(self.available_kv_cache_memory_bytes)
 
     def profile_memory(self) -> None:
-        """Profiles the torch reserved memory, torch allocated memory, infer profile torch peak in execute_model()."""
+        """Profiles the torch reserved memory, torch allocated memory, torch peak allocated memory in execute_model()."""
         self.torch_reserved = torch.npu.memory_reserved()
         self.torch_allocated = torch.npu.memory_allocated()
-        self.infer_profile_torch_peak = torch.npu.memory_stats(self.device).get("allocated_bytes.all.peak", 0)
+        self.torch_peak_allocated = torch.npu.memory_stats(self.device).get("allocated_bytes.all.peak", 0)
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
-                "torch reserved memory: %.2f GiB, torch allocated memory: %.2f GiB, infer profile torch peak: %.2f GiB",
+                "torch reserved memory: %.2f GiB, torch allocated memory: %.2f GiB, torch peak allocated memory: %.2f GiB",
                 self.torch_reserved / GiB_bytes,
                 self.torch_allocated / GiB_bytes,
-                self.infer_profile_torch_peak / GiB_bytes,
+                self.torch_peak_allocated / GiB_bytes,
             )
 
     def execute_model(
@@ -832,7 +832,6 @@ class NPUWorker(WorkerBase):
             self.npugraph_memory_bytes = npugraph_memory_bytes
             suggested_to_requested = int(self.requested_memory) - non_kv_memory - redundancy_buffer
             suggested_to_gpu_limit = int(self.init_snapshot.free_memory) - non_kv_memory - redundancy_buffer
-            torch.npu.reset_peak_memory_stats(self.device)
             msg = (
                 f"Free memory on device "
                 f"({format_gib(self.init_snapshot.free_memory)}/"
@@ -853,13 +852,10 @@ class NPUWorker(WorkerBase):
                 f"{format_gib(self.available_kv_cache_memory_bytes)} GiB."
                 f"Warmup stage memory: reserved {format_gib(torch.npu.memory_reserved())} GiB, "
                 f"allocated {format_gib(torch.npu.memory_allocated())} GiB."
-                f"Peak memory during warmup: {format_gib(self.profile_torch_peak)} GiB."
-
             )
             logger.info(msg)
-
-
-
+            # Reset peak memory after warmup to make sure get correct peak memory during inference.
+            torch.npu.reset_peak_memory_stats(self.device)
         # Call ATB matmul to warm up; otherwise, the first operation (ReshapeAndCache)
         # may cause performance degradation at runtime.
         if get_ascend_device_type() != AscendDeviceType.A5:
