@@ -327,8 +327,10 @@ jobs:
       runs-on: ubuntu-latest
       continue-on-error: true
       env:
-        OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY_PRECISION }}
-        OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY_PRECISION }}
+        # OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY_PRECISION }}
+        OBS_ACCESS_KEY: 'HPUAYLRPR6DJKAA9EUBT'
+        # OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY_PRECISION }}
+        OBS_SECRET_KEY: 'rQJcALjyJqot784hUYfQb20MQOIPJNaMsf9PTfZY'
       steps:
         - name: Checkout vllm-ascend source code
           uses: actions/checkout@v6
