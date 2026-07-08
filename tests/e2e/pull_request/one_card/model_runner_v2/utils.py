@@ -17,11 +17,9 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 
 def calculate_acceptance_per_pos(
-    metrics: list[Any],
+    metrics: list,
     num_speculative_tokens: int,
     counter_type: type,
     vector_type: type,
