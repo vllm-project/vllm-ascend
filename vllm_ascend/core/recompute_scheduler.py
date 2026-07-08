@@ -277,7 +277,7 @@ class RecomputeScheduler(Scheduler):
                 continue
 
             # Schedule newly needed KV blocks for the request.
-            with record_function_or_nullcontext("schedule: allocate_slots"):
+            with record_function_or_nullcontext("schedule:allocate_slots"):
                 while True:
                     new_blocks = self.kv_cache_manager.allocate_slots(
                         request,
@@ -744,7 +744,7 @@ class RecomputeScheduler(Scheduler):
         # Get the longest common prefix among all requests in the running queue.
         # This can be potentially used for cascade attention.
         num_common_prefix_blocks = [0] * len(self.kv_cache_config.kv_cache_groups)
-        with record_function_or_nullcontext("schedule: get_num_common_prefix_blocks"):
+        with record_function_or_nullcontext("schedule:get_num_common_prefix_blocks"):
             if self.running:
                 any_request_id = self.running[0].request_id
                 num_common_prefix_blocks = self.kv_cache_manager.get_num_common_prefix_blocks(any_request_id)
@@ -767,7 +767,7 @@ class RecomputeScheduler(Scheduler):
                 for req in scheduled_new_reqs
             ]
 
-        with record_function_or_nullcontext("schedule: make_cached_request_data"):
+        with record_function_or_nullcontext("schedule:make_cached_request_data"):
             cached_reqs_data = self._make_cached_request_data(
                 scheduled_running_reqs,
                 scheduled_resumed_reqs,
@@ -817,7 +817,7 @@ class RecomputeScheduler(Scheduler):
             ec_meta: ECConnectorMetadata = self.ec_connector.build_connector_meta(scheduler_output)
             scheduler_output.ec_connector_metadata = ec_meta
 
-        with record_function_or_nullcontext("schedule: update_after_schedule"):
+        with record_function_or_nullcontext("schedule:update_after_schedule"):
             self._update_after_schedule(scheduler_output)
         return scheduler_output
 
