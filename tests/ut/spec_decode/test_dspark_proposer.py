@@ -46,6 +46,174 @@ def test_dspark_perf_record_writes_jsonl(monkeypatch, tmp_path):
     assert proposer._dspark_perf_trace_records == 1
 
 
+def test_dspark_draft_cudagraph_keys_use_dspark_query_len(monkeypatch):
+    class FakeCompilationConfig:
+        def __init__(self):
+            self.cudagraph_capture_sizes = [6, 12, 18]
+            self.adjust_calls = []
+
+        def __copy__(self):
+            copied = type(self)()
+            copied.cudagraph_capture_sizes = list(self.cudagraph_capture_sizes)
+            copied.adjust_calls = list(self.adjust_calls)
+            return copied
+
+        def adjust_cudagraph_sizes_for_spec_decode(self, uniform_decode_query_len, tensor_parallel_size):
+            self.adjust_calls.append((uniform_decode_query_len, tensor_parallel_size))
+            self.cudagraph_capture_sizes = [5, 10, 15]
+
+    @dataclass
+    class FakeVllmConfig:
+        compilation_config: FakeCompilationConfig
+        parallel_config: SimpleNamespace
+
+    dispatchers = []
+
+    class FakeDispatcher:
+        def __init__(self, vllm_config):
+            self.vllm_config = vllm_config
+            self.uniform_decode_query_len = 6
+            self.mode = None
+            self.query_len = None
+            dispatchers.append(self)
+
+        def initialize_cudagraph_keys(self, cudagraph_mode, uniform_decode_query_len=1):
+            self.mode = cudagraph_mode
+            self.query_len = uniform_decode_query_len
+
+        def get_capture_descs(self):
+            return [
+                (
+                    self.mode,
+                    [
+                        SimpleNamespace(num_tokens=size)
+                        for size in self.vllm_config.compilation_config.cudagraph_capture_sizes
+                    ],
+                )
+            ]
+
+    monkeypatch.setattr(dspark_proposer_module, "CudagraphDispatcher", FakeDispatcher)
+
+    compilation_config = FakeCompilationConfig()
+    proposer = SimpleNamespace(
+        num_speculative_tokens=5,
+        use_cuda_graph=True,
+        _dspark_enable_draft_aclgraph=True,
+        vllm_config=FakeVllmConfig(
+            compilation_config=compilation_config,
+            parallel_config=SimpleNamespace(tensor_parallel_size=4),
+        ),
+    )
+
+    AscendDSparkProposer.initialize_cudagraph_keys(
+        proposer,
+        dspark_proposer_module.CUDAGraphMode.FULL_AND_PIECEWISE,
+    )
+
+    assert compilation_config.cudagraph_capture_sizes == [6, 12, 18]
+    assert compilation_config.adjust_calls == []
+    assert dispatchers[0].mode == dspark_proposer_module.CUDAGraphMode.FULL_DECODE_ONLY
+    assert dispatchers[0].query_len == 5
+    assert dispatchers[0].uniform_decode_query_len == 5
+    assert dispatchers[0].vllm_config.compilation_config.adjust_calls == [(5, 4)]
+    assert AscendDSparkProposer.get_cudagraph_capture_sizes(proposer) == [5, 10, 15]
+
+
+def test_dspark_draft_cudagraph_keys_follow_target_full_graph_reqs(monkeypatch):
+    class FakeCompilationConfig:
+        def __init__(self):
+            self.cudagraph_capture_sizes = [6, 12, 18, 24, 36, 72, 96]
+            self.max_cudagraph_capture_size = 96
+            self.adjust_calls = []
+
+        def __copy__(self):
+            copied = type(self)()
+            copied.cudagraph_capture_sizes = list(self.cudagraph_capture_sizes)
+            copied.max_cudagraph_capture_size = self.max_cudagraph_capture_size
+            copied.adjust_calls = list(self.adjust_calls)
+            return copied
+
+        def adjust_cudagraph_sizes_for_spec_decode(self, uniform_decode_query_len, tensor_parallel_size):
+            self.adjust_calls.append((uniform_decode_query_len, tensor_parallel_size))
+            self.cudagraph_capture_sizes = [5, 10, 15]
+
+    @dataclass
+    class FakeVllmConfig:
+        compilation_config: FakeCompilationConfig
+        parallel_config: SimpleNamespace
+
+    dispatchers = []
+
+    class FakeDispatcher:
+        def __init__(self, vllm_config):
+            self.vllm_config = vllm_config
+            self.uniform_decode_query_len = 6
+            self.mode = None
+            self.query_len = None
+            dispatchers.append(self)
+
+        def initialize_cudagraph_keys(self, cudagraph_mode, uniform_decode_query_len=1):
+            self.mode = cudagraph_mode
+            self.query_len = uniform_decode_query_len
+
+        def get_capture_descs(self):
+            return [
+                (
+                    self.mode,
+                    [
+                        SimpleNamespace(num_tokens=size)
+                        for size in self.vllm_config.compilation_config.cudagraph_capture_sizes
+                    ],
+                )
+            ]
+
+    class FakeTargetDispatcher:
+        def get_capture_descs(self):
+            return [
+                (
+                    dspark_proposer_module.CUDAGraphMode.PIECEWISE,
+                    [SimpleNamespace(num_tokens=96, num_reqs=None, uniform=False)],
+                ),
+                (
+                    dspark_proposer_module.CUDAGraphMode.FULL,
+                    [
+                        SimpleNamespace(num_tokens=96, num_reqs=16, uniform=True),
+                        SimpleNamespace(num_tokens=72, num_reqs=12, uniform=True),
+                        SimpleNamespace(num_tokens=36, num_reqs=6, uniform=True),
+                    ],
+                ),
+            ]
+
+    monkeypatch.setattr(dspark_proposer_module, "CudagraphDispatcher", FakeDispatcher)
+
+    compilation_config = FakeCompilationConfig()
+    proposer = SimpleNamespace(
+        num_speculative_tokens=5,
+        use_cuda_graph=True,
+        _dspark_enable_draft_aclgraph=True,
+        runner=SimpleNamespace(cudagraph_dispatcher=FakeTargetDispatcher()),
+        vllm_config=FakeVllmConfig(
+            compilation_config=compilation_config,
+            parallel_config=SimpleNamespace(tensor_parallel_size=4),
+        ),
+    )
+
+    AscendDSparkProposer.initialize_cudagraph_keys(
+        proposer,
+        dspark_proposer_module.CUDAGraphMode.FULL_AND_PIECEWISE,
+    )
+
+    draft_config = dispatchers[0].vllm_config.compilation_config
+    assert compilation_config.cudagraph_capture_sizes == [6, 12, 18, 24, 36, 72, 96]
+    assert compilation_config.adjust_calls == []
+    assert draft_config.adjust_calls == []
+    assert draft_config.cudagraph_capture_sizes == [30, 60, 80]
+    assert draft_config.max_cudagraph_capture_size == 80
+    assert dispatchers[0].query_len == 5
+    assert dispatchers[0].uniform_decode_query_len == 5
+    assert AscendDSparkProposer.get_cudagraph_capture_sizes(proposer) == [30, 60, 80]
+
+
 class _FakeDSparkModel:
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         return hidden_states
@@ -169,6 +337,7 @@ def test_dspark_sample_sequential_reduce_sample_uses_tp_greedy(monkeypatch):
 def test_dspark_sample_sequential_caches_greedy_logits_for_accept_debug(monkeypatch):
     monkeypatch.setenv("VLLM_ASCEND_DSPARK_ACCEPT_DEBUG_PATH", "/tmp/dspark_accept_debug.jsonl")
     monkeypatch.setenv("VLLM_ASCEND_DSPARK_ACCEPT_DEBUG_TOPK", "2")
+    monkeypatch.setenv("VLLM_ASCEND_DSPARK_ACCEPT_DEBUG_FULL_COMPONENTS", "1")
     monkeypatch.setattr(
         dspark_proposer_module,
         "greedy_sample",
@@ -206,6 +375,9 @@ def test_dspark_sample_sequential_caches_greedy_logits_for_accept_debug(monkeypa
     assert components["final_top_ids"].shape == (1, 2, 2)
     torch.testing.assert_close(components["final_top_ids"][0, :, 0], torch.tensor([2, 3], dtype=torch.int64))
     torch.testing.assert_close(components["final_top_values"][0, :, 0], torch.full((2,), 10.0))
+    assert components["base_logits"].shape == (1, 2, 5)
+    assert components["markov_bias_logits"].shape == (1, 2, 5)
+    torch.testing.assert_close(components["base_logits"], torch.zeros((1, 2, 5), dtype=torch.float32))
     take_components = AscendDSparkProposer.take_last_draft_logit_components.__get__(proposer)
     assert take_components() is components
     assert proposer._dspark_last_draft_logit_components is None
@@ -477,7 +649,7 @@ def test_dspark_set_inputs_first_pass_uses_anchor_first_block(monkeypatch):
     )
     torch.testing.assert_close(
         cad.slot_mapping,
-        torch.tensor([160, 161, 162, 250, 251, 252], dtype=torch.int32),
+        torch.tensor([8, 9, 10, 18, 19, 20], dtype=torch.int32),
     )
     torch.testing.assert_close(cad.query_start_loc, torch.tensor([0, 3, 6], dtype=torch.int32))
     torch.testing.assert_close(cad.query_start_loc_cpu, torch.tensor([0, 3, 6], dtype=torch.int32))
@@ -599,7 +771,7 @@ def test_dspark_set_inputs_first_pass_masks_tokens_past_max_model_len(monkeypatc
     )
 
     torch.testing.assert_close(proposer.positions, torch.tensor([9, 0, 0], dtype=torch.int32))
-    torch.testing.assert_close(cad.slot_mapping, torch.tensor([161, -1, -1], dtype=torch.int32))
+    torch.testing.assert_close(cad.slot_mapping, torch.tensor([9, -1, -1], dtype=torch.int32))
     torch.testing.assert_close(cad.seq_lens, torch.tensor([10], dtype=torch.int32))
     assert cad.max_seq_len == 10
 
@@ -997,6 +1169,69 @@ def test_dspark_standard_dsa_block_table_uses_stable_buffer(monkeypatch):
     torch.testing.assert_close(first, torch.tensor([[9, 8], [7, 6]], dtype=torch.int32))
 
 
+def test_dspark_standard_dsa_refreshes_query_slot_mapping_after_graph_padding(monkeypatch):
+    monkeypatch.delenv("VLLM_ASCEND_DSPARK_USE_PRIVATE_CACHE", raising=False)
+
+    proposer = SimpleNamespace(
+        device=torch.device("cpu"),
+        kv_cache_gid=0,
+        kernel_block_size=32,
+        num_speculative_tokens=5,
+        positions=torch.tensor([44, 45, 46, 47, 48, 92, 93, 94, 95, 96, 0, 0], dtype=torch.int32),
+        _slot_mapping_buffer=torch.full((12,), 777, dtype=torch.int32),
+        _dspark_query_slot_mapping_buffers={},
+        _dspark_block_tables_by_gid={
+            0: torch.tensor(
+                [
+                    [4, 5, 6, 7],
+                    [10, 11, 12, 13],
+                ],
+                dtype=torch.int32,
+            )
+        },
+        draft_attn_groups=[
+            SimpleNamespace(
+                kv_cache_group_id=0,
+                kv_cache_spec=SimpleNamespace(block_size=32),
+                layer_names=["draft.swa"],
+            )
+        ],
+    )
+    proposer._slot_mapping_buffer_for_gid = AscendDSparkProposer._slot_mapping_buffer_for_gid.__get__(proposer)
+    proposer._slot_mapping_from_block_table = AscendDSparkProposer._slot_mapping_from_block_table.__get__(proposer)
+    proposer._layer_map_from_gid_map = AscendDSparkProposer._layer_map_from_gid_map.__get__(proposer)
+
+    AscendDSparkProposer._refresh_query_slot_mappings_from_block_tables(
+        proposer,
+        num_actual_tokens=10,
+        num_input_tokens=12,
+        actual_num_reqs=2,
+        model_num_reqs=3,
+    )
+
+    torch.testing.assert_close(
+        proposer._slot_mapping_buffer,
+        torch.tensor(
+            [
+                172,
+                173,
+                174,
+                175,
+                176,
+                412,
+                413,
+                414,
+                415,
+                416,
+                -1,
+                -1,
+            ],
+            dtype=torch.int32,
+        ),
+    )
+    assert proposer._dspark_query_slot_mappings_by_layer["draft.swa"] is proposer._slot_mapping_buffer
+
+
 def test_dspark_standard_dsa_block_table_uses_max_model_len_capacity(monkeypatch):
     monkeypatch.delenv("VLLM_ASCEND_DSPARK_USE_PRIVATE_CACHE", raising=False)
 
@@ -1250,7 +1485,7 @@ def test_dspark_set_inputs_first_pass_stores_rejected_context_tokens(monkeypatch
     )
     torch.testing.assert_close(
         cad.slot_mapping,
-        torch.tensor([165, 166, 167, 408, 409, 410], dtype=torch.int32),
+        torch.tensor([13, 14, 15, 32, 33, 34], dtype=torch.int32),
     )
     torch.testing.assert_close(cad.query_start_loc, torch.tensor([0, 3, 6], dtype=torch.int32))
     torch.testing.assert_close(cad.query_start_loc_cpu, torch.tensor([0, 3, 6], dtype=torch.int32))
@@ -1317,6 +1552,8 @@ def test_dspark_build_model_inputs_first_pass_returns_query_slot_mapping():
 
     model_inputs = AscendDSparkProposer.build_model_inputs_first_pass(proposer, 3)
 
+    assert len(calls) == 0
+    AscendDSparkProposer._precompute_context_kv_first_pass(proposer)
     assert len(calls) == 1
     context_states, context_positions, context_slot_mapping, context_request_slots = calls[0]
     torch.testing.assert_close(context_states, proposer._dflash_hidden_states[:2])
@@ -1329,11 +1566,49 @@ def test_dspark_build_model_inputs_first_pass_returns_query_slot_mapping():
     torch.testing.assert_close(model_inputs["slot_mapping"], proposer._slot_mapping_buffer)
 
 
+def test_dspark_reset_request_slots_runs_outside_context_precompute():
+    reset_calls = []
+
+    class FakeModel:
+        def reset_request_slots(self, request_slots):
+            reset_calls.append(request_slots.clone())
+
+        def precompute_and_store_context_kv(
+            self,
+            context_states,
+            context_positions,
+            context_slot_mapping,
+            context_request_slots,
+        ):
+            pass
+
+    proposer = SimpleNamespace(
+        device=torch.device("cpu"),
+        _dspark_slots_to_reset=[3, 5],
+        model=FakeModel(),
+        _dflash_num_context=1,
+        _dflash_hidden_states=torch.zeros(1, 2),
+        _context_positions_buffer=torch.zeros(1, dtype=torch.int32),
+        _context_slot_mapping_buffer=torch.zeros(1, dtype=torch.int32),
+        _context_request_slots_buffer=torch.zeros(1, dtype=torch.int32),
+        _slot_mapping_buffer=torch.zeros(1, dtype=torch.int32),
+    )
+
+    AscendDSparkProposer._reset_dspark_request_slots(proposer)
+    AscendDSparkProposer._precompute_context_kv_first_pass(proposer)
+
+    assert len(reset_calls) == 1
+    torch.testing.assert_close(reset_calls[0], torch.tensor([3, 5], dtype=torch.int32))
+    assert proposer._dspark_slots_to_reset == []
+
+
 class _FakeKVSpec:
     block_size = 64
 
 
 class _FakeMetadataBuilder:
+    block_size = 128
+
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
         self.kv_cache_spec = kv_cache_spec
         self.layer_names = layer_names
@@ -1421,6 +1696,7 @@ def test_dspark_initialize_attn_backend_standard_dsa(monkeypatch):
     assert group.backend is _FakeBackend
     assert group.kv_cache_spec is kv_spec
     assert group.kv_cache_group_id == 0
+    assert group.get_metadata_builder().block_size == 64
     assert proposer.kernel_block_size == 64
     assert proposer.block_size == 5
 
@@ -1572,6 +1848,8 @@ def test_dspark_standard_dsa_propose_pads_model_inputs(monkeypatch):
     def clone_value(value):
         if isinstance(value, dict):
             return {key: val.clone() if isinstance(val, torch.Tensor) else val for key, val in value.items()}
+        if isinstance(value, tuple):
+            return tuple(val.clone() if isinstance(val, torch.Tensor) else val for val in value)
         if isinstance(value, torch.Tensor):
             return value.clone()
         return value
@@ -1660,6 +1938,7 @@ def test_dspark_standard_dsa_propose_pads_model_inputs(monkeypatch):
         _context_request_slots_buffer=torch.zeros(4, dtype=torch.int32),
         _context_slot_mapping_buffer=torch.zeros(4, dtype=torch.int32),
         _dspark_slots_to_reset=[],
+        _draft_attn_layer_names_ordered=["draft.swa"],
         draft_attn_groups=[
             AttentionGroup(
                 _FakeBackend,
@@ -1686,6 +1965,7 @@ def test_dspark_standard_dsa_propose_pads_model_inputs(monkeypatch):
     proposer._layer_map_from_gid_map = AscendDSparkProposer._layer_map_from_gid_map.__get__(proposer)
     proposer._slot_mapping_buffer_for_gid = AscendDSparkProposer._slot_mapping_buffer_for_gid.__get__(proposer)
     proposer._slot_mapping_from_block_table = AscendDSparkProposer._slot_mapping_from_block_table.__get__(proposer)
+    proposer._layer_tuple_from_tensor_map = AscendDSparkProposer._layer_tuple_from_tensor_map.__get__(proposer)
     proposer._build_standard_dsa_attn_metadata = AscendDSparkProposer._build_standard_dsa_attn_metadata.__get__(
         proposer
     )
@@ -1746,13 +2026,13 @@ def test_dspark_standard_dsa_propose_pads_model_inputs(monkeypatch):
     )
     assert set(precompute_calls[0][2]) == {"draft.swa"}
     torch.testing.assert_close(precompute_calls[0][2]["draft.swa"], torch.tensor([3, 4], dtype=torch.int32))
-    assert set(model_calls[0]["slot_mapping"]) == {"draft.swa"}
+    assert len(model_calls[0]["slot_mapping"]) == 1
     torch.testing.assert_close(
-        model_calls[0]["slot_mapping"]["draft.swa"],
+        model_calls[0]["slot_mapping"][0],
         torch.tensor([5, 6, 7, 8, 9, -1], dtype=torch.int32),
     )
-    assert set(model_calls[0]["block_table"]) == {"draft.swa"}
-    torch.testing.assert_close(model_calls[0]["block_table"]["draft.swa"], torch.tensor([[0]], dtype=torch.int32))
+    assert len(model_calls[0]["block_table"]) == 1
+    torch.testing.assert_close(model_calls[0]["block_table"][0], torch.tensor([[0]], dtype=torch.int32))
     torch.testing.assert_close(
         model_calls[0]["dspark_query_start_loc"],
         torch.tensor([0, 5], dtype=torch.int32),
@@ -1769,11 +2049,368 @@ def test_dspark_standard_dsa_propose_pads_model_inputs(monkeypatch):
     assert metadata_call["num_input_tokens"] == 6
     assert metadata_call["num_actual_tokens"] == 5
     torch.testing.assert_close(metadata_call["positions"], model_calls[0]["positions"])
-    torch.testing.assert_close(metadata_call["slot_mapping"], model_calls[0]["slot_mapping"]["draft.swa"])
+    torch.testing.assert_close(metadata_call["slot_mapping"], model_calls[0]["slot_mapping"][0])
+
+
+def test_dspark_full_graph_keeps_complete_padded_request_rows(monkeypatch):
+    monkeypatch.setenv("VLLM_ASCEND_DSPARK_USE_PRIVATE_CACHE", "1")
+
+    context_kwargs = []
+
+    class FakeForwardContextManager:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def fake_set_ascend_forward_context(attn_metadata, vllm_config, **kwargs):
+        del attn_metadata, vllm_config
+        context_kwargs.append(kwargs)
+        return FakeForwardContextManager()
+
+    def fake_get_forward_context():
+        return SimpleNamespace(
+            cudagraph_runtime_mode=context_kwargs[-1]["aclgraph_runtime_mode"],
+            moe_layer_index=0,
+        )
+
+    monkeypatch.setattr(
+        dspark_proposer_module,
+        "set_ascend_forward_context",
+        fake_set_ascend_forward_context,
+    )
+    monkeypatch.setattr(
+        dspark_proposer_module,
+        "get_forward_context",
+        fake_get_forward_context,
+    )
+    monkeypatch.setattr(dspark_proposer_module, "_EXTRA_CTX", SimpleNamespace(capturing=False))
+
+    block_size = 5
+    actual_num_reqs = 15
+    actual_num_tokens = actual_num_reqs * block_size
+    padded_num_tokens = 80
+
+    class FakeDispatcher:
+        def dispatch(self, **kwargs):
+            del kwargs
+            return (
+                dspark_proposer_module.CUDAGraphMode.FULL,
+                SimpleNamespace(num_tokens=padded_num_tokens, num_reqs=actual_num_reqs),
+            )
+
+    def sync_metadata_across_dp(
+        num_tokens,
+        is_draft_model,
+        cudagraph_mode=dspark_proposer_module.CUDAGraphMode.NONE,
+        allow_dp_padding=False,
+    ):
+        del num_tokens, is_draft_model, allow_dp_padding
+        return (
+            padded_num_tokens,
+            torch.tensor([padded_num_tokens], dtype=torch.int32),
+            cudagraph_mode,
+        )
+
+    class FakeModel:
+        def precompute_and_store_context_kv(
+            self,
+            context_states,
+            context_positions,
+            context_slot_mapping,
+            context_request_slots,
+        ):
+            del context_states, context_positions, context_slot_mapping, context_request_slots
+
+    cad = AscendCommonAttentionMetadata(
+        query_start_loc=torch.arange(actual_num_reqs + 1, dtype=torch.int32) * block_size,
+        query_start_loc_cpu=torch.arange(actual_num_reqs + 1, dtype=torch.int32) * block_size,
+        seq_lens=torch.full((actual_num_reqs,), 100, dtype=torch.int32),
+        _seq_lens_cpu=torch.full((actual_num_reqs,), 100, dtype=torch.int32),
+        seq_lens_cpu=None,
+        num_computed_tokens_cpu=None,
+        num_reqs=actual_num_reqs,
+        num_actual_tokens=actual_num_tokens,
+        num_input_tokens=actual_num_tokens,
+        max_query_len=block_size,
+        actual_seq_lengths_q=[block_size] * actual_num_reqs,
+        block_table_tensor=torch.zeros((actual_num_reqs, 4), dtype=torch.int32),
+        slot_mapping=torch.arange(actual_num_tokens, dtype=torch.int32),
+        positions=torch.arange(actual_num_tokens, dtype=torch.int32),
+        attn_state=AscendAttentionState.SpecDecoding,
+        decode_token_per_req=block_size,
+        max_seq_len=100,
+    )
+
+    sample_calls = []
+
+    def set_inputs_first_pass(**kwargs):
+        del kwargs
+        return (
+            actual_num_tokens,
+            torch.arange(actual_num_tokens, dtype=torch.int32),
+            cad,
+            None,
+        )
+
+    def run_model(**model_inputs):
+        return torch.zeros((model_inputs["input_ids"].shape[0], 4), dtype=torch.float32)
+
+    def sample_sequential(num_reqs, head_hidden, token_indices_to_sample, sampling_metadata):
+        sample_calls.append(
+            (
+                num_reqs,
+                head_hidden.shape[0],
+                token_indices_to_sample.clone(),
+                sampling_metadata,
+            )
+        )
+        return torch.zeros((num_reqs, block_size), dtype=torch.int64)
+
+    proposer = SimpleNamespace(
+        device=torch.device("cpu"),
+        vllm_config=SimpleNamespace(),
+        runner=SimpleNamespace(
+            input_batch=SimpleNamespace(lora_id_to_lora_request={}),
+            cudagraph_dispatcher=FakeDispatcher(),
+            _sync_metadata_across_dp=sync_metadata_across_dp,
+        ),
+        dp_rank=0,
+        use_cuda_graph=True,
+        draft_attn_groups=[],
+        model=FakeModel(),
+        _runnable=run_model,
+        _dspark_graph_runnable_uses_buffers=False,
+        num_speculative_tokens=block_size,
+        parallel_drafting_token_id=99,
+        input_ids=torch.zeros(actual_num_tokens, dtype=torch.int64),
+        positions=torch.arange(actual_num_tokens, dtype=torch.int32),
+        _request_slots_buffer=torch.zeros(actual_num_tokens, dtype=torch.int32),
+        _slot_mapping_buffer=torch.arange(actual_num_tokens, dtype=torch.int32),
+        _dspark_token_to_req_indices_buffer=torch.arange(actual_num_tokens, dtype=torch.int32),
+        _dspark_query_start_loc_buffer=torch.zeros(padded_num_tokens + 1, dtype=torch.int32),
+        _dspark_query_start_loc_cpu_buffer=torch.zeros(padded_num_tokens + 1, dtype=torch.int32),
+        _dspark_seq_lens_buffer=torch.zeros(padded_num_tokens, dtype=torch.int32),
+        _dspark_seq_lens_cpu_buffer=torch.zeros(padded_num_tokens, dtype=torch.int32),
+        _dflash_num_context=0,
+        _dflash_hidden_states=torch.zeros((1, 4), dtype=torch.float32),
+        _context_positions_buffer=torch.zeros(1, dtype=torch.int32),
+        _context_request_slots_buffer=torch.zeros(1, dtype=torch.int32),
+        _context_slot_mapping_buffer=torch.zeros(1, dtype=torch.int32),
+        _dspark_slots_to_reset=[],
+        set_inputs_first_pass=set_inputs_first_pass,
+        _sample_sequential=sample_sequential,
+    )
+
+    draft_tokens = AscendDSparkProposer._propose(
+        proposer,
+        target_token_ids=torch.zeros(actual_num_tokens, dtype=torch.int64),
+        target_positions=torch.arange(actual_num_tokens, dtype=torch.int32),
+        target_hidden_states=torch.zeros((actual_num_tokens, 4), dtype=torch.float32),
+        next_token_ids=torch.zeros(actual_num_reqs, dtype=torch.int64),
+        token_indices_to_sample=None,
+        common_attn_metadata=cad,
+        target_model_batch_desc=SimpleNamespace(),
+        sampling_metadata=SimpleNamespace(),
+    )
+
+    assert draft_tokens.shape == (actual_num_reqs, block_size)
+    assert len(sample_calls) == 1
+    assert sample_calls[0][0] == 16
+    assert cad.num_reqs == 16
+    torch.testing.assert_close(
+        cad.query_start_loc,
+        torch.tensor(
+            [0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 75],
+            dtype=torch.int32,
+        ),
+    )
+    torch.testing.assert_close(cad.seq_lens, torch.tensor([100] * actual_num_reqs + [0], dtype=torch.int32))
+    assert cad.actual_seq_lengths_q == [block_size] * actual_num_reqs + [0]
+
+
+def test_dspark_full_graph_builds_standard_dsa_metadata_at_padded_shape(monkeypatch):
+    monkeypatch.delenv("VLLM_ASCEND_DSPARK_USE_PRIVATE_CACHE", raising=False)
+
+    context_kwargs = []
+
+    class FakeForwardContextManager:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def fake_set_ascend_forward_context(attn_metadata, vllm_config, **kwargs):
+        del attn_metadata, vllm_config
+        context_kwargs.append(kwargs)
+        return FakeForwardContextManager()
+
+    def fake_get_forward_context():
+        return SimpleNamespace(
+            cudagraph_runtime_mode=context_kwargs[-1]["aclgraph_runtime_mode"],
+            moe_layer_index=0,
+        )
+
+    monkeypatch.setattr(
+        dspark_proposer_module,
+        "set_ascend_forward_context",
+        fake_set_ascend_forward_context,
+    )
+    monkeypatch.setattr(
+        dspark_proposer_module,
+        "get_forward_context",
+        fake_get_forward_context,
+    )
+    monkeypatch.setattr(dspark_proposer_module, "_EXTRA_CTX", SimpleNamespace(capturing=False))
+
+    block_size = 5
+    actual_num_reqs = 1
+    actual_num_tokens = actual_num_reqs * block_size
+    padded_num_tokens = 10
+    metadata_calls = []
+
+    class FakeDispatcher:
+        def dispatch(self, **kwargs):
+            del kwargs
+            return (
+                dspark_proposer_module.CUDAGraphMode.FULL,
+                SimpleNamespace(num_tokens=padded_num_tokens, num_reqs=2, uniform=True),
+            )
+
+    def sync_metadata_across_dp(
+        num_tokens,
+        is_draft_model,
+        cudagraph_mode=dspark_proposer_module.CUDAGraphMode.NONE,
+        allow_dp_padding=False,
+    ):
+        del num_tokens, is_draft_model, allow_dp_padding
+        return (
+            padded_num_tokens,
+            torch.tensor([padded_num_tokens], dtype=torch.int32),
+            cudagraph_mode,
+        )
+
+    class FakeModel:
+        def precompute_and_store_context_kv(
+            self,
+            context_states,
+            context_positions,
+            context_slot_mapping,
+            context_request_slots,
+        ):
+            del context_states, context_positions, context_slot_mapping, context_request_slots
+
+    cad = AscendCommonAttentionMetadata(
+        query_start_loc=torch.tensor([0, actual_num_tokens], dtype=torch.int32),
+        query_start_loc_cpu=torch.tensor([0, actual_num_tokens], dtype=torch.int32),
+        seq_lens=torch.tensor([100], dtype=torch.int32),
+        _seq_lens_cpu=torch.tensor([100], dtype=torch.int32),
+        seq_lens_cpu=None,
+        num_computed_tokens_cpu=None,
+        num_reqs=actual_num_reqs,
+        num_actual_tokens=actual_num_tokens,
+        num_input_tokens=actual_num_tokens,
+        max_query_len=block_size,
+        actual_seq_lengths_q=[block_size],
+        block_table_tensor=torch.zeros((actual_num_reqs, 4), dtype=torch.int32),
+        slot_mapping=torch.arange(actual_num_tokens, dtype=torch.int32),
+        positions=torch.arange(actual_num_tokens, dtype=torch.int32),
+        attn_state=AscendAttentionState.SpecDecoding,
+        decode_token_per_req=block_size,
+        max_seq_len=100,
+    )
+
+    def set_inputs_first_pass(**kwargs):
+        del kwargs
+        return (
+            actual_num_tokens,
+            torch.arange(actual_num_tokens, dtype=torch.int32),
+            cad,
+            None,
+        )
+
+    def build_standard_dsa_attn_metadata(common_attn_metadata, num_input_tokens, num_actual_tokens):
+        metadata_calls.append(
+            (
+                int(common_attn_metadata.num_reqs),
+                int(num_input_tokens),
+                int(num_actual_tokens),
+                common_attn_metadata.query_start_loc.clone(),
+            )
+        )
+        return []
+
+    def run_model(**model_inputs):
+        return torch.zeros((model_inputs["input_ids"].shape[0], 4), dtype=torch.float32)
+
+    def sample_sequential(num_reqs, head_hidden, token_indices_to_sample, sampling_metadata):
+        del head_hidden, token_indices_to_sample, sampling_metadata
+        return torch.zeros((num_reqs, block_size), dtype=torch.int64)
+
+    proposer = SimpleNamespace(
+        device=torch.device("cpu"),
+        vllm_config=SimpleNamespace(),
+        runner=SimpleNamespace(
+            input_batch=SimpleNamespace(lora_id_to_lora_request={}),
+            cudagraph_dispatcher=FakeDispatcher(),
+            _sync_metadata_across_dp=sync_metadata_across_dp,
+        ),
+        dp_rank=0,
+        use_cuda_graph=True,
+        draft_attn_groups=[],
+        model=FakeModel(),
+        _runnable=run_model,
+        _dspark_graph_runnable_uses_buffers=False,
+        num_speculative_tokens=block_size,
+        parallel_drafting_token_id=99,
+        input_ids=torch.zeros(padded_num_tokens, dtype=torch.int64),
+        positions=torch.arange(padded_num_tokens, dtype=torch.int32),
+        _request_slots_buffer=torch.zeros(padded_num_tokens, dtype=torch.int32),
+        _slot_mapping_buffer=torch.arange(padded_num_tokens, dtype=torch.int32),
+        _dspark_token_to_req_indices_buffer=torch.zeros(padded_num_tokens, dtype=torch.int32),
+        _dspark_query_start_loc_buffer=torch.zeros(3, dtype=torch.int32),
+        _dspark_query_start_loc_cpu_buffer=torch.zeros(3, dtype=torch.int32),
+        _dspark_seq_lens_buffer=torch.zeros(2, dtype=torch.int32),
+        _dspark_seq_lens_cpu_buffer=torch.zeros(2, dtype=torch.int32),
+        _dflash_num_context=0,
+        _dflash_hidden_states=torch.zeros((1, 4), dtype=torch.float32),
+        _context_positions_buffer=torch.zeros(1, dtype=torch.int32),
+        _context_request_slots_buffer=torch.zeros(1, dtype=torch.int32),
+        _context_slot_mapping_buffer=torch.zeros(1, dtype=torch.int32),
+        _dspark_slots_to_reset=[],
+        set_inputs_first_pass=set_inputs_first_pass,
+        _build_standard_dsa_attn_metadata=build_standard_dsa_attn_metadata,
+        _sample_sequential=sample_sequential,
+    )
+    proposer._pad_draft_query_buffers = AscendDSparkProposer._pad_draft_query_buffers.__get__(proposer)
+
+    AscendDSparkProposer._propose(
+        proposer,
+        target_token_ids=torch.zeros(actual_num_tokens, dtype=torch.int64),
+        target_positions=torch.arange(actual_num_tokens, dtype=torch.int32),
+        target_hidden_states=torch.zeros((actual_num_tokens, 4), dtype=torch.float32),
+        next_token_ids=torch.zeros(actual_num_reqs, dtype=torch.int64),
+        token_indices_to_sample=None,
+        common_attn_metadata=cad,
+        target_model_batch_desc=SimpleNamespace(),
+        sampling_metadata=SimpleNamespace(),
+    )
+
+    assert len(metadata_calls) == 1
+    num_reqs, num_input_tokens, num_actual_tokens, query_start_loc = metadata_calls[0]
+    assert num_reqs == 2
+    assert num_input_tokens == padded_num_tokens
+    assert num_actual_tokens == padded_num_tokens
+    torch.testing.assert_close(
+        query_start_loc,
+        torch.tensor([0, actual_num_tokens, actual_num_tokens], dtype=torch.int32),
+    )
 
 
 def test_dspark_dummy_run_keeps_drafter_eager_when_graph_disabled(monkeypatch):
-    monkeypatch.delenv("VLLM_ASCEND_DSPARK_USE_PRIVATE_CACHE", raising=False)
+    monkeypatch.setenv("VLLM_ASCEND_DSPARK_USE_PRIVATE_CACHE", "1")
 
     context_calls = []
 
@@ -1887,32 +2524,273 @@ def test_dspark_dummy_run_keeps_drafter_eager_when_graph_disabled(monkeypatch):
     assert len(context_calls) == 1
     assert context_calls[0][2]["aclgraph_runtime_mode"] == dspark_proposer_module.CUDAGraphMode.NONE
 
+    class FakeDispatcher:
+        def dispatch(self, **kwargs):
+            del kwargs
+            raise AssertionError("draft graph dispatcher must not run during PIECEWISE capture")
 
-def test_dspark_load_model_disables_dspark_drafter_graph(monkeypatch):
+    proposer.use_cuda_graph = True
+    proposer.runner.cudagraph_dispatcher = FakeDispatcher()
+    AscendDSparkProposer.dummy_run(
+        proposer,
+        num_tokens=5,
+        num_reqs=1,
+        aclgraph_runtime_mode=dspark_proposer_module.CUDAGraphMode.PIECEWISE,
+    )
+
+    assert len(context_calls) == 2
+    assert context_calls[1][2]["aclgraph_runtime_mode"] == dspark_proposer_module.CUDAGraphMode.NONE
+
+
+def test_dspark_dummy_run_standard_dsa_graph_uses_per_layer_slot_mapping(monkeypatch):
+    monkeypatch.delenv("VLLM_ASCEND_DSPARK_USE_PRIVATE_CACHE", raising=False)
+
+    context_calls = []
+
+    class FakeForwardContextManager:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def fake_set_ascend_forward_context(attn_metadata, vllm_config, **kwargs):
+        context_calls.append((attn_metadata, vllm_config, kwargs))
+        return FakeForwardContextManager()
+
+    def fake_get_forward_context():
+        return SimpleNamespace(cudagraph_runtime_mode=context_calls[-1][2]["aclgraph_runtime_mode"])
+
+    monkeypatch.setattr(dspark_proposer_module, "set_ascend_forward_context", fake_set_ascend_forward_context)
+    monkeypatch.setattr(dspark_proposer_module, "get_forward_context", fake_get_forward_context)
+    monkeypatch.setattr(dspark_proposer_module, "_EXTRA_CTX", SimpleNamespace(capturing=False))
+
+    class FakeModel:
+        def precompute_and_store_context_kv(
+            self,
+            context_states,
+            context_positions,
+            context_slot_mapping,
+            context_request_slots,
+        ):
+            del context_states, context_positions, context_slot_mapping, context_request_slots
+
+    def sync_metadata_across_dp(
+        num_tokens,
+        is_draft_model,
+        cudagraph_mode=dspark_proposer_module.CUDAGraphMode.NONE,
+        allow_dp_padding=False,
+    ):
+        del num_tokens, is_draft_model, allow_dp_padding
+        return 6, torch.tensor([6], dtype=torch.int32), cudagraph_mode
+
+    class FakeDispatcher:
+        def dispatch(self, *, num_tokens, uniform_decode, has_lora, valid_modes=None):
+            del uniform_decode, has_lora, valid_modes
+            return dspark_proposer_module.CUDAGraphMode.FULL, dspark_proposer_module.BatchDescriptor(
+                num_tokens=num_tokens,
+                num_reqs=1,
+                uniform=True,
+            )
+
+    builder = _FakeMetadataBuilder(_FakeKVSpec(), ["draft.swa"], SimpleNamespace(), torch.device("cpu"))
+    model_calls = []
+
+    def fake_run_model(**model_inputs):
+        model_calls.append(model_inputs)
+        input_ids = model_inputs["input_ids"]
+        return torch.zeros((input_ids.numel(), 4), dtype=torch.float32)
+
+    proposer = SimpleNamespace(
+        use_cuda_graph=True,
+        runner=SimpleNamespace(
+            _sync_metadata_across_dp=sync_metadata_across_dp,
+            cudagraph_dispatcher=FakeDispatcher(),
+        ),
+        vllm_config=SimpleNamespace(),
+        model=FakeModel(),
+        num_speculative_tokens=5,
+        max_query_tokens=8,
+        parallel_drafting_token_id=99,
+        kernel_block_size=64,
+        input_ids=torch.zeros(8, dtype=torch.int64),
+        positions=torch.zeros(8, dtype=torch.int32),
+        hidden_states=torch.zeros(8, 4, dtype=torch.float32),
+        _context_positions_buffer=torch.zeros(8, dtype=torch.int32),
+        _context_request_slots_buffer=torch.zeros(8, dtype=torch.int32),
+        _context_slot_mapping_buffer=torch.zeros(8, dtype=torch.int32),
+        _slot_mapping_buffer=torch.zeros(8, dtype=torch.int32),
+        _request_slots_buffer=torch.zeros(8, dtype=torch.int32),
+        _dspark_token_to_req_indices_buffer=torch.zeros(8, dtype=torch.int32),
+        _dspark_token_to_req_indices=None,
+        _draft_attn_layer_names_ordered=["draft.swa"],
+        draft_attn_groups=[
+            AttentionGroup(
+                _FakeBackend,
+                ["draft.swa"],
+                builder.kv_cache_spec,
+                0,
+                [builder],
+            )
+        ],
+        _runnable=fake_run_model,
+    )
+    proposer._pad_draft_query_buffers = AscendDSparkProposer._pad_draft_query_buffers.__get__(proposer)
+    proposer._get_draft_block_table_for_gid = AscendDSparkProposer._get_draft_block_table_for_gid.__get__(proposer)
+    proposer._get_draft_block_tables = AscendDSparkProposer._get_draft_block_tables.__get__(proposer)
+    proposer._layer_map_from_gid_map = AscendDSparkProposer._layer_map_from_gid_map.__get__(proposer)
+    proposer._slot_mapping_buffer_for_gid = AscendDSparkProposer._slot_mapping_buffer_for_gid.__get__(proposer)
+    proposer._layer_tuple_from_tensor_map = AscendDSparkProposer._layer_tuple_from_tensor_map.__get__(proposer)
+    proposer._build_standard_dsa_attn_metadata = AscendDSparkProposer._build_standard_dsa_attn_metadata.__get__(
+        proposer
+    )
+    proposer._update_full_graph_params = lambda *args, **kwargs: None
+
+    AscendDSparkProposer.dummy_run(
+        proposer,
+        num_tokens=5,
+        num_reqs=1,
+        aclgraph_runtime_mode=dspark_proposer_module.CUDAGraphMode.FULL,
+    )
+
+    assert len(model_calls) == 1
+    slot_mapping = model_calls[0]["slot_mapping"]
+    assert isinstance(slot_mapping, tuple)
+    assert len(slot_mapping) == 1
+    torch.testing.assert_close(slot_mapping[0], torch.tensor([0, 0, 0, 0, 0, -1], dtype=torch.int32))
+    assert isinstance(model_calls[0]["block_table"], tuple)
+    torch.testing.assert_close(builder.calls[0]["slot_mapping"], slot_mapping[0])
+    assert context_calls[0][2]["aclgraph_runtime_mode"] == dspark_proposer_module.CUDAGraphMode.FULL
+
+
+def test_dspark_profile_dummy_skips_inner_compile_before_draft_cache_init(monkeypatch):
+    monkeypatch.delenv("VLLM_ASCEND_DSPARK_USE_PRIVATE_CACHE", raising=False)
+
+    context_calls = []
+
+    class FakeForwardContextManager:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def fake_set_ascend_forward_context(attn_metadata, vllm_config, **kwargs):
+        context_calls.append((attn_metadata, vllm_config, kwargs))
+        return FakeForwardContextManager()
+
+    def fake_get_forward_context():
+        return SimpleNamespace(cudagraph_runtime_mode=context_calls[-1][2]["aclgraph_runtime_mode"])
+
+    monkeypatch.setattr(dspark_proposer_module, "set_ascend_forward_context", fake_set_ascend_forward_context)
+    monkeypatch.setattr(dspark_proposer_module, "get_forward_context", fake_get_forward_context)
+
+    def sync_metadata_across_dp(num_tokens, is_draft_model, cudagraph_mode=dspark_proposer_module.CUDAGraphMode.NONE, allow_dp_padding=False):
+        del is_draft_model, cudagraph_mode, allow_dp_padding
+        return num_tokens, torch.tensor([num_tokens], dtype=torch.int32), dspark_proposer_module.CUDAGraphMode.NONE
+
+    proposer = SimpleNamespace(
+        use_cuda_graph=True,
+        runner=SimpleNamespace(_sync_metadata_across_dp=sync_metadata_across_dp),
+        vllm_config=SimpleNamespace(),
+        num_speculative_tokens=5,
+        max_query_tokens=8,
+        input_ids=torch.zeros(8, dtype=torch.int64),
+        positions=torch.zeros(8, dtype=torch.int32),
+        hidden_states=torch.zeros(8, 4, dtype=torch.float32),
+        _slot_mapping_buffer=torch.zeros(8, dtype=torch.int32),
+        _request_slots_buffer=torch.zeros(8, dtype=torch.int32),
+        draft_attn_groups=[],
+    )
+
+    AscendDSparkProposer.dummy_run(
+        proposer,
+        num_tokens=5,
+        num_reqs=0,
+        aclgraph_runtime_mode=dspark_proposer_module.CUDAGraphMode.FULL,
+        is_profile=True,
+    )
+
+    assert len(context_calls) == 1
+    assert context_calls[0][2]["aclgraph_runtime_mode"] == dspark_proposer_module.CUDAGraphMode.NONE
+    assert context_calls[0][2]["skip_compiled"] is True
+
+
+def test_dspark_load_model_keeps_eager_fallback(monkeypatch):
     base_seen_use_cuda_graph = []
-    warnings = []
 
     def fake_base_load_model(self, model):
         del model
         base_seen_use_cuda_graph.append(self.use_cuda_graph)
 
     monkeypatch.setattr(dspark_proposer_module.AscendDflashProposer, "load_model", fake_base_load_model)
-    monkeypatch.setattr(
-        dspark_proposer_module.logger,
-        "warning_once",
-        lambda *args, **kwargs: warnings.append(args),
-    )
-
     proposer = object.__new__(AscendDSparkProposer)
-    proposer.use_cuda_graph = True
+    proposer.use_cuda_graph = False
+    proposer.speculative_config = SimpleNamespace(enforce_eager=True)
 
     AscendDSparkProposer.load_model(proposer, model=object())
 
     assert base_seen_use_cuda_graph == [False]
     assert proposer.use_cuda_graph is False
     assert proposer._runnable.__func__ is AscendDSparkProposer._run_dspark_model
-    assert len(warnings) == 1
-    assert "DSpark drafter ACLGraph is disabled" in warnings[0][0]
+
+
+def test_dspark_load_model_wraps_dspark_forward_when_graph_enabled(monkeypatch):
+    base_seen_use_cuda_graph = []
+    infos = []
+    streams = []
+    wrappers = []
+
+    class FakeACLGraphWrapper:
+        def __init__(self, runnable, vllm_config, runtime_mode, *, use_eagle, enable_enpu):
+            self.runnable = runnable
+            self.vllm_config = vllm_config
+            self.runtime_mode = runtime_mode
+            self.use_eagle = use_eagle
+            self.enable_enpu = enable_enpu
+            wrappers.append(self)
+
+    def fake_base_load_model(self, model):
+        del model
+        base_seen_use_cuda_graph.append(self.use_cuda_graph)
+
+    monkeypatch.setattr(dspark_proposer_module.AscendDflashProposer, "load_model", fake_base_load_model)
+    monkeypatch.setattr(dspark_proposer_module, "ACLGraphWrapper", FakeACLGraphWrapper)
+    monkeypatch.setattr(
+        dspark_proposer_module.torch,
+        "npu",
+        SimpleNamespace(Stream=lambda: streams.append("stream") or "stream"),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        dspark_proposer_module.logger,
+        "info_once",
+        lambda *args, **kwargs: infos.append(args),
+    )
+
+    proposer = object.__new__(AscendDSparkProposer)
+    proposer.use_cuda_graph = True
+    proposer._dspark_enable_draft_aclgraph = True
+    proposer.vllm_config = SimpleNamespace()
+    proposer.use_eagle = False
+    proposer.enable_enpu = True
+
+    AscendDSparkProposer.load_model(proposer, model=object())
+
+    assert base_seen_use_cuda_graph == [False]
+    assert proposer.use_cuda_graph is True
+    assert proposer.update_stream == "stream"
+    assert streams == ["stream"]
+    assert len(wrappers) == 1
+    assert proposer._runnable is wrappers[0]
+    assert wrappers[0].runnable.__func__ is AscendDSparkProposer._run_dspark_model_from_graph_buffers
+    assert proposer._dspark_graph_runnable_uses_buffers is True
+    assert wrappers[0].runtime_mode == dspark_proposer_module.CUDAGraphMode.FULL
+    assert wrappers[0].use_eagle is False
+    assert wrappers[0].enable_enpu is True
+    assert len(infos) == 1
+    assert "enabled" in infos[0][0]
+    assert "enforce_eager=true" in infos[0][0]
 
 
 def test_dspark_draft_vllm_config_disables_inner_compile(monkeypatch):
@@ -1940,6 +2818,15 @@ def test_dspark_draft_vllm_config_disables_inner_compile(monkeypatch):
     )
 
     proposer = object.__new__(AscendDSparkProposer)
+    proposer.speculative_config = SimpleNamespace(enforce_eager=False)
+    draft_config = AscendDSparkProposer._create_draft_vllm_config(proposer)
+
+    assert draft_config.model_config.enforce_eager is True
+    assert draft_config.compilation_config.mode == dspark_proposer_module.CompilationMode.NONE
+    assert base_config.model_config.enforce_eager is False
+    assert base_config.compilation_config.mode == dspark_proposer_module.CompilationMode.VLLM_COMPILE
+
+    proposer.speculative_config = SimpleNamespace(enforce_eager=True)
     draft_config = AscendDSparkProposer._create_draft_vllm_config(proposer)
 
     assert draft_config.model_config.enforce_eager is True
@@ -1974,8 +2861,8 @@ def test_dspark_propose_uses_aclgraph_dispatch_when_enabled(monkeypatch):
     monkeypatch.setattr(dspark_proposer_module, "get_forward_context", fake_get_forward_context)
     monkeypatch.setattr(dspark_proposer_module, "_EXTRA_CTX", SimpleNamespace(capturing=False))
 
-    first_batch_descriptor = dspark_proposer_module.BatchDescriptor(num_tokens=6, num_reqs=1, uniform=True)
-    batch_descriptor = dspark_proposer_module.BatchDescriptor(num_tokens=12, num_reqs=2, uniform=True)
+    first_batch_descriptor = dspark_proposer_module.BatchDescriptor(num_tokens=10, num_reqs=2, uniform=True)
+    batch_descriptor = dspark_proposer_module.BatchDescriptor(num_tokens=10, num_reqs=2, uniform=True)
 
     class FakeDispatcher:
         def __init__(self):
@@ -2000,8 +2887,8 @@ def test_dspark_propose_uses_aclgraph_dispatch_when_enabled(monkeypatch):
     def fake_sync_metadata(num_tokens, is_draft_model, cudagraph_mode, allow_dp_padding):
         sync_calls.append((num_tokens, is_draft_model, cudagraph_mode, allow_dp_padding))
         return (
-            12,
-            torch.tensor([12], dtype=torch.int32),
+            10,
+            torch.tensor([10], dtype=torch.int32),
             cudagraph_mode,
         )
 
@@ -2018,6 +2905,8 @@ def test_dspark_propose_uses_aclgraph_dispatch_when_enabled(monkeypatch):
         vllm_config=SimpleNamespace(),
         device=torch.device("cpu"),
         use_cuda_graph=True,
+        _dspark_graph_runnable_uses_buffers=True,
+        _dspark_graph_model_inputs=None,
         dp_rank=0,
         num_speculative_tokens=5,
         draft_attn_groups=[],
@@ -2028,19 +2917,22 @@ def test_dspark_propose_uses_aclgraph_dispatch_when_enabled(monkeypatch):
         _context_positions_buffer=torch.empty((0,), dtype=torch.int32),
         _context_slot_mapping_buffer=torch.empty((0,), dtype=torch.int32),
         _context_request_slots_buffer=torch.empty((0,), dtype=torch.int32),
-        _slot_mapping_buffer=torch.empty((0,), dtype=torch.int32),
+        input_ids=torch.zeros(12, dtype=torch.int64),
+        positions=torch.zeros(12, dtype=torch.int32),
+        _request_slots_buffer=torch.zeros(12, dtype=torch.int32),
+        _slot_mapping_buffer=torch.zeros(12, dtype=torch.int32),
         _dspark_token_to_req_indices_buffer=torch.zeros(8, dtype=torch.int32),
         token_indices_to_sample=torch.full((16,), -1, dtype=torch.int32),
     )
 
     common_attn_metadata = SimpleNamespace(
-        num_reqs=1,
-        seq_lens=torch.tensor([10], dtype=torch.int32),
-        query_start_loc=torch.tensor([0, 5], dtype=torch.int32),
-        query_start_loc_cpu=torch.tensor([0, 5], dtype=torch.int32),
+        num_reqs=2,
+        seq_lens=torch.tensor([10, 20], dtype=torch.int32),
+        query_start_loc=torch.tensor([0, 5, 10], dtype=torch.int32),
+        query_start_loc_cpu=torch.tensor([0, 5, 10], dtype=torch.int32),
     )
-    token_indices = torch.arange(5, dtype=torch.int32)
-    proposer.set_inputs_first_pass = lambda **kwargs: (5, token_indices, common_attn_metadata, None)
+    token_indices = torch.arange(10, dtype=torch.int32)
+    proposer.set_inputs_first_pass = lambda **kwargs: (10, token_indices, common_attn_metadata, None)
 
     build_calls = []
     pad_calls = []
@@ -2056,8 +2948,8 @@ def test_dspark_propose_uses_aclgraph_dispatch_when_enabled(monkeypatch):
         (num_actual_tokens, num_input_tokens)
     )
 
-    def fake_runnable(**kwargs):
-        runnable_calls.append(kwargs)
+    def fake_runnable():
+        runnable_calls.append(proposer._dspark_graph_model_inputs)
         return torch.zeros((12, 4), dtype=torch.float32)
 
     def fake_sample(num_reqs, head_hidden, token_indices_to_sample, sampling_metadata):
@@ -2086,28 +2978,31 @@ def test_dspark_propose_uses_aclgraph_dispatch_when_enabled(monkeypatch):
         sampling_metadata=SimpleNamespace(),
     )
 
-    torch.testing.assert_close(draft_tokens, torch.tensor([[7, 8, 9, 10, 11]], dtype=torch.int64))
+    torch.testing.assert_close(
+        draft_tokens,
+        torch.tensor([[7, 8, 9, 10, 11], [70, 80, 90, 100, 110]], dtype=torch.int64),
+    )
     assert dispatcher.calls == [
-        {"num_tokens": 5, "uniform_decode": True, "has_lora": False, "valid_modes": None},
+        {"num_tokens": 10, "uniform_decode": True, "has_lora": False, "valid_modes": None},
         {
-            "num_tokens": 12,
+            "num_tokens": 10,
             "uniform_decode": True,
             "has_lora": False,
             "valid_modes": {dspark_proposer_module.CUDAGraphMode.FULL},
         },
     ]
-    assert sync_calls == [(6, True, dspark_proposer_module.CUDAGraphMode.FULL, True)]
+    assert sync_calls == [(10, True, dspark_proposer_module.CUDAGraphMode.FULL, True)]
     assert len(context_calls) == 1
     _, _, context_kwargs = context_calls[0]
     assert context_kwargs["aclgraph_runtime_mode"] == dspark_proposer_module.CUDAGraphMode.FULL
     assert context_kwargs["batch_descriptor"] == batch_descriptor
-    assert context_kwargs["num_tokens"] == 12
-    torch.testing.assert_close(context_kwargs["num_tokens_across_dp"], torch.tensor([12], dtype=torch.int32))
-    assert context_kwargs["num_actual_tokens"] == 5
-    assert build_calls == [(common_attn_metadata, 12, 5)]
-    assert pad_calls == [(5, 12)]
+    assert context_kwargs["num_tokens"] == 10
+    torch.testing.assert_close(context_kwargs["num_tokens_across_dp"], torch.tensor([10], dtype=torch.int32))
+    assert context_kwargs["num_actual_tokens"] == 10
+    assert build_calls == [(common_attn_metadata, 10, 10)]
+    assert pad_calls == [(10, 10)]
     assert len(runnable_calls) == 1
-    assert runnable_calls[0]["num_input_tokens"] == 12
+    assert runnable_calls[0]["input_ids"].shape[0] == 10
     assert len(sample_calls) == 1
     assert sample_calls[0]["num_reqs"] == 2
     torch.testing.assert_close(
@@ -2158,7 +3053,7 @@ def test_dspark_propose_runs_padded_graph_reqs_and_slices_result(monkeypatch):
                     uniform=True,
                 )
             return dspark_proposer_module.CUDAGraphMode.FULL, dspark_proposer_module.BatchDescriptor(
-                num_tokens=num_tokens,
+                num_tokens=10,
                 num_reqs=2,
                 uniform=True,
             )
@@ -2168,8 +3063,8 @@ def test_dspark_propose_runs_padded_graph_reqs_and_slices_result(monkeypatch):
             input_batch=SimpleNamespace(lora_id_to_lora_request={}),
             cudagraph_dispatcher=FakeDispatcher(),
             _sync_metadata_across_dp=lambda num_tokens, is_draft_model, cudagraph_mode, allow_dp_padding: (
-                12,
-                torch.tensor([12], dtype=torch.int32),
+                10,
+                torch.tensor([10], dtype=torch.int32),
                 dspark_proposer_module.CUDAGraphMode.FULL,
             ),
         ),
@@ -2186,7 +3081,10 @@ def test_dspark_propose_runs_padded_graph_reqs_and_slices_result(monkeypatch):
         _context_positions_buffer=torch.empty((0,), dtype=torch.int32),
         _context_slot_mapping_buffer=torch.empty((0,), dtype=torch.int32),
         _context_request_slots_buffer=torch.empty((0,), dtype=torch.int32),
-        _slot_mapping_buffer=torch.empty((0,), dtype=torch.int32),
+        input_ids=torch.zeros(12, dtype=torch.int64),
+        positions=torch.zeros(12, dtype=torch.int32),
+        _request_slots_buffer=torch.zeros(12, dtype=torch.int32),
+        _slot_mapping_buffer=torch.zeros(12, dtype=torch.int32),
         token_indices_to_sample=torch.full((16,), -1, dtype=torch.int32),
         _dspark_token_to_req_indices_buffer=torch.zeros(10, dtype=torch.int32),
         _dspark_last_draft_logits=None,
@@ -2218,7 +3116,7 @@ def test_dspark_propose_runs_padded_graph_reqs_and_slices_result(monkeypatch):
 
     def fake_runnable(**kwargs):
         runnable_calls.append(kwargs)
-        return torch.zeros((12, 4), dtype=torch.float32)
+        return torch.zeros((10, 4), dtype=torch.float32)
 
     def fake_sample(num_reqs, head_hidden, token_indices_to_sample, sampling_metadata):
         del head_hidden, token_indices_to_sample, sampling_metadata
@@ -2245,7 +3143,9 @@ def test_dspark_propose_runs_padded_graph_reqs_and_slices_result(monkeypatch):
     )
 
     torch.testing.assert_close(draft_tokens, torch.tensor([[7, 8, 9, 10, 11]], dtype=torch.int64))
-    assert runnable_calls[0]["num_input_tokens"] == 12
+    assert context_calls[0][2]["aclgraph_runtime_mode"] == dspark_proposer_module.CUDAGraphMode.FULL
+    assert context_calls[0][2]["batch_descriptor"].num_tokens == 10
+    assert runnable_calls[0]["input_ids"].shape[0] == 10
     assert sample_calls == [2]
     assert common_attn_metadata.num_reqs == 2
     torch.testing.assert_close(common_attn_metadata.query_start_loc, torch.tensor([0, 5, 5], dtype=torch.int32))
@@ -2253,10 +3153,10 @@ def test_dspark_propose_runs_padded_graph_reqs_and_slices_result(monkeypatch):
     torch.testing.assert_close(common_attn_metadata.seq_lens, torch.tensor([10, 0], dtype=torch.int32))
     torch.testing.assert_close(common_attn_metadata._seq_lens_cpu, torch.tensor([10, 0], dtype=torch.int32))
     assert common_attn_metadata.actual_seq_lengths_q == [5, 0]
-    assert pad_calls == [(5, 12)]
-    assert build_calls == [(common_attn_metadata, 12, 5)]
-    assert context_calls[0][2]["num_tokens"] == 12
-    assert context_calls[0][2]["num_actual_tokens"] == 5
+    assert pad_calls == [(5, 10)]
+    assert build_calls == [(common_attn_metadata, 10, 10)]
+    assert context_calls[0][2]["num_tokens"] == 10
+    assert context_calls[0][2]["num_actual_tokens"] == 10
     assert proposer._dspark_last_draft_logits.shape == (1, 5, 3)
     assert proposer._dspark_last_draft_logit_components["final_top_ids"].shape == (1, 5, 2)
 

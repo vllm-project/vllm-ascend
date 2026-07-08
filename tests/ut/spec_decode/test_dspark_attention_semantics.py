@@ -10,6 +10,7 @@ from vllm_ascend.models.deepseek_v4_dspark import (
     _dspark_cache_capacity,
 )
 from vllm_ascend.ops.dspark_attention import (
+    _dspark_sas_active_query_tokens,
     _dspark_sas_lens_match_scheduling,
     _dspark_sas_window,
     _dspark_sparse_sas_window,
@@ -274,6 +275,32 @@ def test_dspark_sas_lens_guard_accepts_partial_block_padding():
     )
 
 
+def test_dspark_sas_active_tokens_honor_actual_tokens_under_graph_padding():
+    query_start_loc = torch.tensor([0, 5, 10, 15, 20, 20, 20], dtype=torch.int32)
+    dspark_swa_lens = torch.ones(36, dtype=torch.int32)
+
+    assert (
+        _dspark_sas_active_query_tokens(
+            q_num_tokens=36,
+            dspark_swa_lens=dspark_swa_lens,
+            query_start_loc=query_start_loc,
+            num_query_tokens=20,
+            skip_scheduling_guard=True,
+        )
+        == 20
+    )
+    assert (
+        _dspark_sas_active_query_tokens(
+            q_num_tokens=36,
+            dspark_swa_lens=dspark_swa_lens,
+            query_start_loc=query_start_loc,
+            num_query_tokens=None,
+            skip_scheduling_guard=True,
+        )
+        == 36
+    )
+
+
 def test_dspark_sas_lens_guard_ignores_trailing_dp_padding():
     block_size = 5
     window_size = 7
@@ -314,6 +341,24 @@ def test_dspark_sas_lens_guard_ignores_trailing_dp_padding():
         window_size=window_size,
         num_query_tokens=positions.numel(),
     )
+
+
+def test_dspark_swa_indices_token_to_req_all_invalid_rows_are_empty():
+    indices, lens = build_dspark_swa_indices(
+        torch.arange(8, dtype=torch.int32).view(1, 8),
+        torch.tensor([0, 1, 2], dtype=torch.int32),
+        torch.full((3,), -1, dtype=torch.int32),
+        block_size=3,
+        window_size=4,
+        cache_block_size=4,
+        index_width=8,
+        query_start_loc=torch.tensor([0, 3], dtype=torch.int32),
+        seq_lens=torch.tensor([3], dtype=torch.int32),
+        token_to_req_indices=torch.full((3,), -1, dtype=torch.int32),
+    )
+
+    torch.testing.assert_close(lens, torch.zeros(3, dtype=torch.int32))
+    assert torch.all(indices == -1)
 
 
 def test_dspark_sas_lens_guard_rejects_interleaved_token_to_req():

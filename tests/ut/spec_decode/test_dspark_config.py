@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 import torch
+from safetensors.torch import save_file
 from transformers import PretrainedConfig
 
 import vllm_ascend.models.deepseek_v4_dspark as dspark_model_module
@@ -16,7 +17,10 @@ from vllm_ascend.models.deepseek_v4_dspark import (
     DeepseekV4DSparkDecoderLayer,
     DeepseekV4DSparkModel,
     DeepSeekV4DSparkMTP,
+    _apply_dspark_quarot_rotation,
+    _draft_quant_config,
     _get_dspark_num_mtp_layers,
+    _load_dspark_quarot_rotation,
     _maybe_fp8_e4m3fn_qdq,
     _maybe_fp8_qdq_nope_dims,
     _should_apply_dspark_fp8_qdq,
@@ -44,6 +48,53 @@ def test_dspark_deepseek_v4_hf_config_override():
     assert patched.ptd_token_id == 128799
 
 
+def test_dspark_quarot_rotation_loads_optional_modelslim_metadata(tmp_path):
+    rotation_path = tmp_path / "quarot" / "rotation.safetensors"
+    rotation_path.parent.mkdir()
+    expected = torch.tensor([[1.0, 2.0], [3.0, 4.0]], dtype=torch.float32)
+    save_file({"global_rotation": expected}, rotation_path)
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(model=str(tmp_path)),
+        quant_config=SimpleNamespace(
+            quant_description={
+                "optional": {
+                    "quarot": {
+                        "rotation_map": {
+                            "global_rotation": "quarot/rotation.safetensors",
+                        }
+                    }
+                }
+            }
+        ),
+    )
+
+    rotation = _load_dspark_quarot_rotation(vllm_config)
+
+    torch.testing.assert_close(rotation, expected)
+
+
+def test_dspark_quarot_rotation_apply_respects_transpose_flag():
+    hidden_states = torch.tensor([[10.0, 20.0]], dtype=torch.float32)
+    rotation = torch.tensor([[1.0, 2.0], [3.0, 4.0]], dtype=torch.float32)
+
+    torch.testing.assert_close(
+        _apply_dspark_quarot_rotation(hidden_states, rotation, transpose=False),
+        torch.tensor([[70.0, 100.0]], dtype=torch.float32),
+    )
+    torch.testing.assert_close(
+        _apply_dspark_quarot_rotation(hidden_states, rotation, transpose=True),
+        torch.tensor([[50.0, 110.0]], dtype=torch.float32),
+    )
+
+
+def test_dspark_quarot_rotation_apply_requires_same_device():
+    hidden_states = torch.tensor([[10.0, 20.0]], dtype=torch.float32)
+    rotation = torch.empty((2, 2), dtype=torch.float32, device="meta")
+
+    with pytest.raises(RuntimeError, match="must be loaded on the same device"):
+        _apply_dspark_quarot_rotation(hidden_states, rotation, transpose=False)
+
+
 def test_dspark_num_mtp_layers_prefers_upstream_config_name():
     config = SimpleNamespace(n_mtp_layers=4, dspark_num_mtp_layers=2)
 
@@ -60,6 +111,31 @@ def test_dspark_fp8_qdq_is_disabled_for_bf16_dequantized_checkpoints():
     assert _should_apply_dspark_fp8_qdq(SimpleNamespace(dspark_mtp_dequantized_to_bf16=True)) is False
     assert _should_apply_dspark_fp8_qdq(SimpleNamespace(dspark_full_dequantized_to_bf16=True)) is False
     assert _should_apply_dspark_fp8_qdq(SimpleNamespace()) is True
+
+
+def test_dspark_draft_quant_config_supports_bf16_and_w4a8():
+    quant_config = object()
+
+    def make_config(*, parent_quant_config, mtp_dequantized_to_bf16=False):
+        draft_config = SimpleNamespace(dspark_mtp_dequantized_to_bf16=mtp_dequantized_to_bf16)
+        return SimpleNamespace(
+            quant_config=parent_quant_config,
+            speculative_config=SimpleNamespace(
+                draft_model_config=SimpleNamespace(hf_config=draft_config),
+            ),
+        )
+
+    assert _draft_quant_config(make_config(parent_quant_config=None)) is None
+    assert _draft_quant_config(make_config(parent_quant_config=quant_config)) is quant_config
+    assert (
+        _draft_quant_config(
+            make_config(
+                parent_quant_config=quant_config,
+                mtp_dequantized_to_bf16=True,
+            )
+        )
+        is None
+    )
 
 
 def test_dspark_fp8_qdq_helpers_return_input_when_disabled():
@@ -121,14 +197,13 @@ def test_dspark_attention_uses_upstream_no_compression_ratio(monkeypatch):
     assert attn.dsa_attn.compress_ratio == 1
 
 
-def test_dspark_target_layer_ids_follow_upstream_one_based_numbering():
+def test_dspark_target_layer_ids_match_upstream_aux_capture_semantics():
     target_layer_ids = {40, 41, 42}
 
-    assert not _is_dspark_target_layer(38, target_layer_ids)
-    assert _is_dspark_target_layer(39, target_layer_ids)
+    assert not _is_dspark_target_layer(39, target_layer_ids)
     assert _is_dspark_target_layer(40, target_layer_ids)
     assert _is_dspark_target_layer(41, target_layer_ids)
-    assert not _is_dspark_target_layer(42, target_layer_ids)
+    assert _is_dspark_target_layer(42, target_layer_ids)
 
 
 def test_dspark_remap_skips_unused_confidence_head_weights():
@@ -413,6 +488,75 @@ def test_dspark_precompute_context_kv_selects_prefix_mapped_slot_mappings(monkey
 
     assert calls[0][4] is slot_mapping_61
     assert calls[1][4] is slot_mapping_62
+
+
+def test_dspark_precompute_context_kv_skips_private_cache_for_standard_dsa(monkeypatch):
+    monkeypatch.delenv("VLLM_ASCEND_DSPARK_USE_PRIVATE_CACHE", raising=False)
+    monkeypatch.delenv("VLLM_ASCEND_DSPARK_ATTENTION_DIFF_PATH", raising=False)
+    monkeypatch.delenv("VLLM_ASCEND_DSPARK_KV_DIFF_PATH", raising=False)
+
+    calls = []
+    shared_kv = torch.ones(2, 1, 4)
+
+    def fail_expand(_shared_kv):
+        raise AssertionError("private cache should not be materialized on the standard DSA path")
+
+    attention = SimpleNamespace(
+        _project_shared_kv=lambda _main_x, _positions: shared_kv,
+        _expand_private_kv=fail_expand,
+        _store_standard_swa_kv=lambda kv, mapping: calls.append((kv, mapping)),
+        _maybe_dump_standard_kv_write_trace=lambda *_args: None,
+    )
+    positions = torch.tensor([4, 5], dtype=torch.int32)
+    slot_mapping = torch.tensor([40, 41], dtype=torch.int32)
+
+    DeepseekV4DSparkAttention.precompute_context_kv(
+        attention,
+        torch.zeros(2, 4),
+        positions,
+        request_slots=torch.tensor([0, 0], dtype=torch.int32),
+        context_slot_mapping=slot_mapping,
+    )
+
+    assert calls == [(shared_kv, slot_mapping)]
+
+
+def test_dspark_precompute_context_kv_keeps_private_cache_fallback(monkeypatch):
+    monkeypatch.setenv("VLLM_ASCEND_DSPARK_USE_PRIVATE_CACHE", "1")
+
+    shared_kv = torch.ones(2, 1, 4)
+    private_k = torch.full((2, 1, 4), 2.0)
+    private_v = torch.full((2, 1, 4), 3.0)
+    expand_calls = []
+    attention = SimpleNamespace(
+        _project_shared_kv=lambda _main_x, _positions: shared_kv,
+        _expand_private_kv=lambda kv: expand_calls.append(kv) or (private_k, private_v),
+        _store_standard_swa_kv=lambda *_args: None,
+        _maybe_dump_standard_kv_write_trace=lambda *_args: None,
+        _ensure_dspark_cache=lambda *_args: None,
+        _dspark_cache_capacity=8,
+        _dspark_max_request_slots=2,
+        _dspark_k_cache=torch.zeros(2, 8, 1, 4),
+        _dspark_v_cache=torch.zeros(2, 8, 1, 4),
+        _dspark_cache_positions=torch.zeros(2, 8, dtype=torch.int32),
+        _dspark_cache_valid=torch.zeros(2, 8, dtype=torch.bool),
+    )
+    positions = torch.tensor([4, 5], dtype=torch.int32)
+    request_slots = torch.tensor([1, 1], dtype=torch.int32)
+
+    DeepseekV4DSparkAttention.precompute_context_kv(
+        attention,
+        torch.zeros(2, 4),
+        positions,
+        request_slots=request_slots,
+        context_slot_mapping=torch.tensor([40, 41], dtype=torch.int32),
+    )
+
+    assert expand_calls == [shared_kv]
+    torch.testing.assert_close(attention._dspark_k_cache[1, 4:6], private_k)
+    torch.testing.assert_close(attention._dspark_v_cache[1, 4:6], private_v)
+    torch.testing.assert_close(attention._dspark_cache_positions[1, 4:6], positions)
+    torch.testing.assert_close(attention._dspark_cache_valid[1, 4:6], torch.ones(2, dtype=torch.bool))
 
 
 def test_dspark_forward_passes_query_slot_mapping_to_layers():

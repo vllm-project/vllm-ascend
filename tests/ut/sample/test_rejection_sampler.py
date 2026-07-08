@@ -169,6 +169,24 @@ class TestAscendRejectionSampler(TestBase):
             ],
             dtype=torch.float32,
         ).contiguous()
+        draft_logit_components = {
+            "base_logits": torch.tensor(
+                [
+                    [0.0, 1.5, 0.2],
+                    [0.1, 0.2, 1.5],
+                    [2.0, 0.1, 0.5],
+                ],
+                dtype=torch.float32,
+            ).contiguous(),
+            "markov_bias_logits": torch.tensor(
+                [
+                    [0.2, 1.0, -0.1],
+                    [0.0, 0.0, 1.0],
+                    [-1.0, 0.1, 1.6],
+                ],
+                dtype=torch.float32,
+            ).contiguous(),
+        }
         sampling_metadata = SimpleNamespace(
             all_greedy=True,
             all_random=False,
@@ -197,6 +215,7 @@ class TestAscendRejectionSampler(TestBase):
                     torch.tensor([[7], [8]], dtype=torch.int32),
                     sampling_metadata,
                     draft_logits=draft_logits,
+                    draft_logit_components=draft_logit_components,
                 )
 
             assert output.tolist() == [[1, 2, 7], [0, PLACEHOLDER_TOKEN_ID, PLACEHOLDER_TOKEN_ID]]
@@ -215,14 +234,71 @@ class TestAscendRejectionSampler(TestBase):
         assert first_pos["output_matches_draft"] is True
         assert first_pos["target_argmax"] == 1
         assert first_pos["target_rank_of_draft"] == 1
+        assert first_pos["draft_rank_of_target_argmax"] == 1
+        assert first_pos["draft_margin_top1_minus_target_argmax"] == 0.0
         assert first_pos["target_topk"][0]["token_id"] == 1
         assert first_pos["draft_topk"][0]["token_id"] == 1
+        assert first_pos["draft_components"]["base_rank_of_target_argmax"] == 1
+        assert first_pos["draft_components"]["markov_bias_rank_of_target_argmax"] == 1
+        assert first_pos["draft_components"]["final_rank_of_target_argmax"] == 1
         assert record["requests"][1]["output_matches_draft_prefix_len"] == 0
         second_pos = record["requests"][1]["positions"][0]
         assert second_pos["draft_token"] == 2
         assert second_pos["output_token"] == 0
         assert second_pos["output_matches_draft"] is False
         assert second_pos["target_rank_of_draft"] == 2
+        assert second_pos["draft_rank_of_target_argmax"] == 3
+        assert second_pos["draft_components"]["base_rank_of_target_argmax"] == 1
+
+    @patch("vllm_ascend.sample.rejection_sampler.get_ascend_config")
+    @patch("vllm_ascend.sample.rejection_sampler.HAS_TRITON", False)
+    def test_dspark_accept_debug_draft_probs_do_not_emit_logit_fields(self, mock_ascend_config):
+        mock_ascend_config.return_value = SimpleNamespace(
+            enable_reduce_sample=False,
+            rejection_sampler_config=SimpleNamespace(
+                enable_block_verify=False,
+                enable_entropy_verify=False,
+                posterior_threshold=0.95,
+                posterior_alpha=0.4,
+            ),
+        )
+        sampling_metadata = SimpleNamespace(
+            all_greedy=True,
+            all_random=False,
+            temperature=None,
+            generators={},
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            debug_path = os.path.join(tmp_dir, "accept_debug.jsonl")
+            with patch.dict(
+                os.environ,
+                {
+                    "VLLM_ASCEND_DSPARK_ACCEPT_DEBUG_PATH": debug_path,
+                    "VLLM_ASCEND_DSPARK_ACCEPT_DEBUG_MAX_REQS": "1",
+                    "VLLM_ASCEND_DSPARK_ACCEPT_DEBUG_MAX_POSITIONS": "1",
+                },
+            ):
+                output = rejection_sample(
+                    torch.tensor([1], dtype=torch.int32),
+                    [1],
+                    1,
+                    torch.tensor([1], dtype=torch.int32),
+                    torch.tensor([[0.1, 0.7, 0.2]], dtype=torch.float32).contiguous(),
+                    torch.tensor([[0.1, 3.0, 0.2]], dtype=torch.float32).contiguous(),
+                    torch.tensor([[9]], dtype=torch.int32),
+                    sampling_metadata,
+                )
+
+            with open(debug_path, encoding="utf-8") as f:
+                record = json.loads(f.readline())
+
+        assert output.tolist() == [[1, 9]]
+        assert record["has_draft_logits"] is False
+        assert record["has_draft_probs"] is True
+        first_pos = record["requests"][0]["positions"][0]
+        assert first_pos["draft_logprob_target_argmax"] is not None
+        assert "draft_logit_target_argmax" not in first_pos
 
     @patch("torch.arange", new=mock_pin_memory(torch.arange))
     @patch("torch.ones", new=mock_pin_memory(torch.ones))

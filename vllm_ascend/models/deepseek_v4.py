@@ -91,9 +91,9 @@ if not vllm_version_is("0.23.0"):
 
 
 def _is_dspark_target_layer(layer_idx: int, target_layer_ids: set[int]) -> bool:
-    # DSpark configs follow upstream vLLM and store target layer numbers as
-    # 1-based decoder layer ids, while local layer_idx is 0-based.
-    return layer_idx + 1 in target_layer_ids
+    # Upstream maps DSpark target_layer_ids to aux capture ids with +1.
+    # Capturing after local layer_idx is therefore equivalent to layer_idx.
+    return layer_idx in target_layer_ids
 
 
 def _make_deepseek_v4_expert_params_mapping(

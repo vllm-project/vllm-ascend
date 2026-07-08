@@ -314,6 +314,43 @@ class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
         torch.testing.assert_close(flattened, expected)
         self.assertTrue(flattened.is_contiguous())
 
+    def test_mask_sampled_token_ids_respects_scheduled_draft_width(self):
+        sampled_token_ids = torch.tensor(
+            [
+                [10, 11, 12, 13, 14, 999],
+                [20, 21, 22, 23, 24, 25],
+                [30, 777, 778, 779, 780, 781],
+            ],
+            dtype=torch.int64,
+        )
+        metadata = SimpleNamespace(
+            cu_num_draft_tokens=torch.tensor([4, 9, 9], dtype=torch.int32),
+        )
+
+        masked = NPUModelRunner._mask_sampled_token_ids_to_scheduled_width(
+            sampled_token_ids,
+            metadata,
+        )
+
+        torch.testing.assert_close(
+            masked,
+            torch.tensor(
+                [
+                    [10, 11, 12, 13, 14, -1],
+                    [20, 21, 22, 23, 24, 25],
+                    [30, -1, -1, -1, -1, -1],
+                ],
+                dtype=torch.int64,
+            ),
+        )
+        self.assertIs(
+            NPUModelRunner._mask_sampled_token_ids_to_scheduled_width(
+                sampled_token_ids,
+                None,
+            ),
+            sampled_token_ids,
+        )
+
     @patch("vllm_ascend.worker.model_runner_v1.get_ascend_config")
     @patch("vllm_ascend.worker.model_runner_v1.lmhead_tp_enable")
     def test_sample_passes_draft_logits_to_rejection_sampler(self, mock_lmhead_tp_enable, mock_get_ascend_config):

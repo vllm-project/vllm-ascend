@@ -1768,6 +1768,30 @@ class NPUModelRunner(GPUModelRunner):
             self.valid_sampled_token_count_gpu = valid_sampled_tokens_count # type: ignore[no-redef]
         self.input_batch.prev_sampled_token_ids = next_token_ids.unsqueeze(1)
 
+    @staticmethod
+    def _mask_sampled_token_ids_to_scheduled_width(
+        sampled_token_ids: torch.Tensor,
+        spec_decode_metadata: SpecDecodeMetadata | None,
+    ) -> torch.Tensor:
+        if spec_decode_metadata is None:
+            return sampled_token_ids
+        cu_num_draft_tokens = spec_decode_metadata.cu_num_draft_tokens
+        num_draft_tokens = torch.empty_like(cu_num_draft_tokens)
+        num_draft_tokens[:1] = cu_num_draft_tokens[:1]
+        num_draft_tokens[1:] = cu_num_draft_tokens[1:] - cu_num_draft_tokens[:-1]
+        max_valid_width = num_draft_tokens[: sampled_token_ids.shape[0]] + 1
+        columns = torch.arange(
+            sampled_token_ids.shape[1],
+            device=sampled_token_ids.device,
+            dtype=max_valid_width.dtype,
+        )
+        valid_columns = columns.unsqueeze(0) < max_valid_width.unsqueeze(1)
+        return torch.where(
+            valid_columns,
+            sampled_token_ids,
+            sampled_token_ids.new_full((), -1),
+        )
+
     # TODO: Once the PCP features are complete, it will fully inherit the classes from the VLLM community.
     def propose_draft_token_ids(
         self,
@@ -1882,7 +1906,10 @@ class NPUModelRunner(GPUModelRunner):
                 )
             next_token_ids, valid_sampled_tokens_count = (
                 self.drafter.prepare_next_token_ids_padded(
-                    valid_sampled_token_ids,
+                    self._mask_sampled_token_ids_to_scheduled_width(
+                        valid_sampled_token_ids,
+                        spec_decode_metadata,
+                    ),
                     self.requests,
                     self.input_batch,
                     self.discard_request_indices.gpu,
@@ -1914,6 +1941,10 @@ class NPUModelRunner(GPUModelRunner):
                     "sampled_token_ids should be a torch.Tensor whenpadded-batch is enabled."
                 )
                 assert self.drafter is not None
+                sampled_token_ids = self._mask_sampled_token_ids_to_scheduled_width(
+                    sampled_token_ids,
+                    spec_decode_metadata,
+                )
                 next_token_ids, valid_sampled_tokens_count = self.drafter.prepare_next_token_ids_padded(
                     sampled_token_ids,
                     self.requests,
@@ -5284,6 +5315,10 @@ class NPUModelRunner(GPUModelRunner):
             and self.drafter is not None
             and (
                 self.speculative_config.use_eagle()
+                or (
+                    hasattr(self.speculative_config, "use_dspark")
+                    and self.speculative_config.use_dspark()
+                )
                 or self.speculative_config.uses_extract_hidden_states()
             )
         ):
@@ -5299,13 +5334,18 @@ class NPUModelRunner(GPUModelRunner):
             for _, descs in capture_descs
             for desc in descs
         })
+        draft_capture_sizes = capture_sizes
+        if self.speculative_config and self.drafter is not None:
+            get_draft_capture_sizes = getattr(self.drafter, "get_cudagraph_capture_sizes", None)
+            if get_draft_capture_sizes is not None:
+                draft_capture_sizes = sorted(set(capture_sizes).union(get_draft_capture_sizes()))
 
         # NOTE: Since aclgraph_batch_sizes cannot be determined until here,
         # we set the graph params right before initializing the keys.
         if self.use_aclgraph:
             set_graph_params(capture_sizes)
             if self.speculative_config:
-                set_draft_graph_params(capture_sizes)
+                set_draft_graph_params(draft_capture_sizes)
 
     def capture_model(self) -> int:
         """Capture NPU graphs and return actual graph pool memory bytes consumed."""

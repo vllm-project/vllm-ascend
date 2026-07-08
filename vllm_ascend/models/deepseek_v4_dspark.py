@@ -10,13 +10,16 @@ projects them into the draft attention context and emits a full draft block.
 
 import json
 import os
+import time
 import typing
 from collections.abc import Iterable
+from pathlib import Path
 
 import regex as re
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from safetensors.torch import load_file
 from transformers import PretrainedConfig
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CUDAGraphMode, VllmConfig
@@ -87,6 +90,41 @@ def _should_apply_dspark_fp8_qdq(config: PretrainedConfig) -> bool:
         getattr(config, "dspark_mtp_dequantized_to_bf16", False)
         or getattr(config, "dspark_full_dequantized_to_bf16", False)
     )
+
+
+def _load_dspark_quarot_rotation(
+    vllm_config: VllmConfig,
+    device: torch.device | str | None = None,
+) -> torch.Tensor | None:
+    quant_config = vllm_config.quant_config
+    quant_description = getattr(quant_config, "quant_description", None)
+    if not isinstance(quant_description, dict):
+        return None
+    try:
+        rotation_relative_path = quant_description["optional"]["quarot"]["rotation_map"]["global_rotation"]
+    except KeyError:
+        return None
+
+    rotation_path = Path(vllm_config.model_config.model) / rotation_relative_path
+    rotation = load_file(rotation_path)["global_rotation"].to(device=device, dtype=torch.float32)
+    logger.info_once("Loaded DSpark QuaRot rotation from %s", rotation_path)
+    return rotation
+
+
+def _apply_dspark_quarot_rotation(
+    hidden_states: torch.Tensor,
+    rotation: torch.Tensor | None,
+    transpose: bool,
+) -> torch.Tensor:
+    if rotation is None:
+        return hidden_states
+    rotation = rotation.t() if transpose else rotation
+    if rotation.device != hidden_states.device:
+        raise RuntimeError("DSpark QuaRot rotation must be loaded on the same device as hidden states")
+    return torch.matmul(
+        hidden_states.to(torch.float32),
+        rotation,
+    ).to(hidden_states.dtype)
 
 
 def _dspark_mhc_pre_torch(
@@ -411,6 +449,68 @@ def _dspark_kv_write_trace_path() -> str | None:
 
 def _dspark_kv_write_trace_max_records() -> int:
     return envs.VLLM_ASCEND_DSPARK_KV_WRITE_TRACE_MAX_RECORDS
+
+
+def _dspark_private_context_cache_required(context_slot_mapping: torch.Tensor | None) -> bool:
+    if not _dspark_standard_dsa_enabled():
+        return True
+    if context_slot_mapping is None:
+        return True
+    return bool(_dspark_attention_diff_path() or _dspark_kv_diff_path())
+
+
+def _dspark_perf_trace_path() -> str | None:
+    return envs.VLLM_ASCEND_DSPARK_PERF_TRACE_PATH
+
+
+def _dspark_perf_trace_max_records() -> int:
+    return envs.VLLM_ASCEND_DSPARK_PERF_TRACE_MAX_RECORDS
+
+
+def _dspark_perf_trace_sync_enabled() -> bool:
+    return envs.VLLM_ASCEND_DSPARK_PERF_TRACE_SYNC
+
+
+def _dspark_perf_sync(tensor: torch.Tensor | None) -> None:
+    if not _dspark_perf_trace_sync_enabled() or tensor is None or tensor.device.type != "npu" or not hasattr(torch, "npu"):
+        return
+    try:
+        torch.npu.synchronize()
+    except RuntimeError:
+        return
+
+
+def _dspark_perf_start(tensor: torch.Tensor | None) -> int:
+    _dspark_perf_sync(tensor)
+    return time.perf_counter_ns()
+
+
+def _write_dspark_perf_record(
+    owner: typing.Any,
+    stage: str,
+    start_ns: int,
+    sync_tensor: torch.Tensor | None = None,
+    **kwargs: typing.Any,
+) -> None:
+    path = _dspark_perf_trace_path()
+    if not path:
+        return
+    records = int(getattr(owner, "_dspark_perf_trace_records", 0))
+    if records >= _dspark_perf_trace_max_records():
+        return
+
+    _dspark_perf_sync(sync_tensor)
+    record = {
+        "pid": os.getpid(),
+        "rank": os.getenv("RANK"),
+        "local_rank": os.getenv("LOCAL_RANK"),
+        "stage": stage,
+        "elapsed_ms": (time.perf_counter_ns() - start_ns) / 1_000_000.0,
+    }
+    record.update(kwargs)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=True) + "\n")
+    setattr(owner, "_dspark_perf_trace_records", records + 1)
 
 
 def _sync_npu_device_for_standard_pta(tensor: torch.Tensor) -> None:
@@ -786,6 +886,8 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
             getattr(forward_context, "cudagraph_runtime_mode", CUDAGraphMode.NONE) == CUDAGraphMode.FULL
             or torch.compiler.is_compiling()
         )
+        if block_table is None and capture_mode:
+            block_table = self._standard_dspark_block_table(forward_context)
         if block_table is None:
             if capture_mode:
                 raise RuntimeError("DSpark standard-cache attention requires block_table during graph capture")
@@ -859,13 +961,10 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
             token_to_req_indices=dspark_token_to_req_indices,
         )
 
-    def _standard_dspark_swa_metadata(
-        self,
-        forward_context: typing.Any,
-    ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
+    def _standard_dspark_layer_metadata(self, forward_context: typing.Any) -> typing.Any | None:
         draft_attn_metadatas = getattr(forward_context, "draft_attn_metadatas", None)
         if not draft_attn_metadatas:
-            return None, None, None
+            return None
 
         swa_cache_layer = getattr(self.dsa_attn, "swa_cache_layer", None)
         layer_names = (
@@ -882,17 +981,45 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
                     break
             if metadata is None:
                 continue
-            for sub_metadata in (
-                getattr(metadata, "decode", None),
-                getattr(metadata, "prefill", None),
-                metadata,
-            ):
-                if sub_metadata is None:
-                    continue
-                dspark_swa_indices = getattr(sub_metadata, "dspark_swa_indices", None)
-                dspark_swa_lens = getattr(sub_metadata, "dspark_swa_lens", None)
-                if dspark_swa_indices is not None and dspark_swa_lens is not None:
-                    return dspark_swa_indices, dspark_swa_lens, getattr(sub_metadata, "sas_metadata", None)
+            return metadata
+        return None
+
+    def _standard_dspark_block_table(self, forward_context: typing.Any) -> torch.Tensor | None:
+        metadata = self._standard_dspark_layer_metadata(forward_context)
+        if metadata is None:
+            return None
+        for sub_metadata in (
+            metadata,
+            getattr(metadata, "decode", None),
+            getattr(metadata, "prefill", None),
+        ):
+            if sub_metadata is None:
+                continue
+            block_table = getattr(sub_metadata, "block_table", None)
+            if block_table is None:
+                block_table = getattr(sub_metadata, "block_tables", None)
+            if isinstance(block_table, torch.Tensor):
+                return block_table
+        return None
+
+    def _standard_dspark_swa_metadata(
+        self,
+        forward_context: typing.Any,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
+        metadata = self._standard_dspark_layer_metadata(forward_context)
+        if metadata is None:
+            return None, None, None
+        for sub_metadata in (
+            getattr(metadata, "decode", None),
+            getattr(metadata, "prefill", None),
+            metadata,
+        ):
+            if sub_metadata is None:
+                continue
+            dspark_swa_indices = getattr(sub_metadata, "dspark_swa_indices", None)
+            dspark_swa_lens = getattr(sub_metadata, "dspark_swa_lens", None)
+            if dspark_swa_indices is not None and dspark_swa_lens is not None:
+                return dspark_swa_indices, dspark_swa_lens, getattr(sub_metadata, "sas_metadata", None)
         return None, None, None
 
     def _maybe_dump_standard_attention_diff(
@@ -1105,6 +1232,16 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         if positions.numel() == 0:
             return
         shared_kv = self._project_shared_kv(main_x, positions)
+        self._store_standard_swa_kv(shared_kv, context_slot_mapping)
+        self._maybe_dump_standard_kv_write_trace(
+            "context",
+            positions,
+            context_slot_mapping,
+            request_slots,
+        )
+        if not _dspark_private_context_cache_required(context_slot_mapping):
+            return
+
         k, v = self._expand_private_kv(shared_kv)
         forward_context = _maybe_get_forward_context()
         capture_mode = (
@@ -1137,13 +1274,6 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         self._dspark_v_cache[slots_long, cache_indices] = v
         self._dspark_cache_positions[slots_long, cache_indices] = positions.to(torch.int32)
         self._dspark_cache_valid[slots_long, cache_indices] = True
-        self._store_standard_swa_kv(shared_kv, context_slot_mapping)
-        self._maybe_dump_standard_kv_write_trace(
-            "context",
-            positions,
-            context_slot_mapping,
-            request_slots,
-        )
 
     def forward(  # type: ignore[override]
         self,
@@ -1158,6 +1288,9 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         dspark_token_to_req_indices: torch.Tensor | None = None,
     ) -> torch.Tensor:
         del llama_4_scaling
+        perf_enabled = bool(_dspark_perf_trace_path())
+        layer_prefix = getattr(getattr(self.dsa_attn, "swa_cache_layer", None), "prefix", None)
+        stage_start_ns = _dspark_perf_start(hidden_states) if perf_enabled else 0
         qr = self.q_norm(_linear_output(self.wq_a, hidden_states))
         kv = self.kv_norm(_linear_output(self.wkv, hidden_states))
 
@@ -1168,22 +1301,17 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         q_pe = _apply_dsv4_rope(self.rotary_emb, positions, q_pe)
         k_pe = _apply_dsv4_rope(self.rotary_emb, positions, k_pe.unsqueeze(1)).squeeze(1)
         shared_kv = torch.cat([k_nope, k_pe], dim=-1).view(-1, 1, self.head_dim).contiguous()
-        kv = _maybe_fp8_qdq_nope_dims(
-            shared_kv.squeeze(1),
-            self.nope_head_dim,
-            self._dspark_apply_fp8_qdq,
-        )
-        k_nope, k_pe = kv.split([self.nope_head_dim, self.rope_head_dim], dim=-1)
-
         q = torch.cat([q_nope, q_pe], dim=-1)
-        k = torch.cat(
-            [
-                k_nope.unsqueeze(1).expand(-1, self.n_local_heads, -1),
-                k_pe.unsqueeze(1).expand(-1, self.n_local_heads, -1),
-            ],
-            dim=-1,
-        ).contiguous()
-        v = kv.unsqueeze(1).expand(-1, self.n_local_heads, -1).contiguous()
+        if perf_enabled:
+            _write_dspark_perf_record(
+                self,
+                "draft_attn_qkv_project",
+                stage_start_ns,
+                q,
+                layer=layer_prefix,
+                num_tokens=int(hidden_states.shape[0]),
+            )
+        stage_start_ns = _dspark_perf_start(hidden_states) if perf_enabled else 0
         standard_slot_mapping = self._standard_query_slot_mapping_from_block_table(
             positions,
             slot_mapping,
@@ -1203,6 +1331,17 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
             block_table,
             request_slots,
         )
+        if perf_enabled:
+            _write_dspark_perf_record(
+                self,
+                "draft_attn_store_kv",
+                stage_start_ns,
+                shared_kv,
+                layer=layer_prefix,
+                num_tokens=int(hidden_states.shape[0]),
+                standard_cache=bool(standard_slot_mapping is not None),
+            )
+        stage_start_ns = _dspark_perf_start(hidden_states) if perf_enabled else 0
         standard_attn_out = self._run_standard_dspark_attention(
             q,
             positions,
@@ -1215,8 +1354,25 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
             dspark_token_to_req_indices,
         )
         private_attn_out = None
-        if standard_attn_out is not None and _dspark_attention_diff_path():
-            private_attn_out = self._run_dspark_attention(q, k, v, positions, request_slots)
+        need_private_attn = standard_attn_out is None or (
+            standard_attn_out is not None and _dspark_attention_diff_path()
+        )
+        if need_private_attn:
+            private_kv = _maybe_fp8_qdq_nope_dims(
+                shared_kv.squeeze(1),
+                self.nope_head_dim,
+                self._dspark_apply_fp8_qdq,
+            )
+            private_k_nope, private_k_pe = private_kv.split([self.nope_head_dim, self.rope_head_dim], dim=-1)
+            private_k = torch.cat(
+                [
+                    private_k_nope.unsqueeze(1).expand(-1, self.n_local_heads, -1),
+                    private_k_pe.unsqueeze(1).expand(-1, self.n_local_heads, -1),
+                ],
+                dim=-1,
+            ).contiguous()
+            private_v = private_kv.unsqueeze(1).expand(-1, self.n_local_heads, -1).contiguous()
+            private_attn_out = self._run_dspark_attention(q, private_k, private_v, positions, request_slots)
         if _dspark_attention_diff_path() and standard_attn_out is not None and private_attn_out is not None:
             self._maybe_dump_standard_attention_diff(
                 standard_attn_out,
@@ -1228,9 +1384,21 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         attn_out = (
             standard_attn_out
             if standard_attn_out is not None
-            else self._run_dspark_attention(q, k, v, positions, request_slots)
+            else private_attn_out
         )
+        assert attn_out is not None
+        if perf_enabled:
+            _write_dspark_perf_record(
+                self,
+                "draft_attn_core",
+                stage_start_ns,
+                attn_out,
+                layer=layer_prefix,
+                num_tokens=int(hidden_states.shape[0]),
+                standard_cache=bool(standard_attn_out is not None),
+            )
 
+        stage_start_ns = _dspark_perf_start(hidden_states) if perf_enabled else 0
         attn_out = _apply_dsv4_rope_tail(
             self.rotary_emb,
             positions,
@@ -1248,6 +1416,15 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         )
         z = _grouped_wo_a_projection(attn_out, wo_a).flatten(1)
         projected = _linear_output(self.wo_b, z)
+        if perf_enabled:
+            _write_dspark_perf_record(
+                self,
+                "draft_attn_output_proj",
+                stage_start_ns,
+                projected,
+                layer=layer_prefix,
+                num_tokens=int(hidden_states.shape[0]),
+            )
         return projected
 
 
@@ -1337,6 +1514,13 @@ class DeepseekV4DSparkDecoderLayer(DeepseekV2DecoderLayer):
         dspark_token_to_req_indices: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         del llama_4_scaling
+        perf_enabled = bool(_dspark_perf_trace_path())
+        layer_prefix = getattr(
+            getattr(getattr(self.self_attn, "dsa_attn", None), "swa_cache_layer", None),
+            "prefix",
+            None,
+        )
+        stage_start_ns = _dspark_perf_start(hidden_states) if perf_enabled else 0
         if residual is None:
             residual = hidden_states
             hidden_states, post_mix, res_mix = self._mhc_pre(
@@ -1357,6 +1541,15 @@ class DeepseekV4DSparkDecoderLayer(DeepseekV2DecoderLayer):
                 self.hc_attn_base,
             )
         hidden_states = self.input_layernorm(hidden_states)
+        if perf_enabled:
+            _write_dspark_perf_record(
+                self,
+                "draft_layer_attn_prepare",
+                stage_start_ns,
+                hidden_states,
+                layer=layer_prefix,
+                num_tokens=int(hidden_states.shape[0]),
+            )
         attn_kwargs = {
             "request_slots": request_slots,
             "slot_mapping": slot_mapping,
@@ -1368,13 +1561,24 @@ class DeepseekV4DSparkDecoderLayer(DeepseekV2DecoderLayer):
                 dspark_seq_lens=dspark_seq_lens,
                 dspark_token_to_req_indices=dspark_token_to_req_indices,
             )
+        stage_start_ns = _dspark_perf_start(hidden_states) if perf_enabled else 0
         hidden_states = self.self_attn(
             positions,
             hidden_states,
             None,
             **attn_kwargs,
         )
+        if perf_enabled:
+            _write_dspark_perf_record(
+                self,
+                "draft_layer_self_attn",
+                stage_start_ns,
+                hidden_states,
+                layer=layer_prefix,
+                num_tokens=int(hidden_states.shape[0]),
+            )
 
+        stage_start_ns = _dspark_perf_start(hidden_states) if perf_enabled else 0
         residual, post_mix, res_mix, hidden_states = self._mhc_fused_post_pre(
             hidden_states,
             residual,
@@ -1385,7 +1589,26 @@ class DeepseekV4DSparkDecoderLayer(DeepseekV2DecoderLayer):
             self.hc_ffn_base,
         )
         hidden_states = self.post_attention_layernorm(hidden_states)
+        if perf_enabled:
+            _write_dspark_perf_record(
+                self,
+                "draft_layer_ffn_prepare",
+                stage_start_ns,
+                hidden_states,
+                layer=layer_prefix,
+                num_tokens=int(hidden_states.shape[0]),
+            )
+        stage_start_ns = _dspark_perf_start(hidden_states) if perf_enabled else 0
         hidden_states = self.mlp(hidden_states, input_ids)
+        if perf_enabled:
+            _write_dspark_perf_record(
+                self,
+                "draft_layer_mlp",
+                stage_start_ns,
+                hidden_states,
+                layer=layer_prefix,
+                num_tokens=int(hidden_states.shape[0]),
+            )
         return hidden_states, residual, post_mix, res_mix
 
 
@@ -1477,6 +1700,10 @@ class DeepseekV4DSparkModel(nn.Module):
             torch.empty(1, dtype=torch.float32),
             requires_grad=False,
         )
+        device_config = getattr(vllm_config, "device_config", None)
+        rotation_device = getattr(device_config, "device", current_platform.device_type)
+        rotation = _load_dspark_quarot_rotation(vllm_config, device=rotation_device)
+        self.register_buffer("_dspark_quarot_rotation", rotation, persistent=False)
         last_layer = self.layers[str(last_layer_idx)]
         last_layer.norm = self.norm
         last_layer.markov_head = self.markov_head
@@ -1485,7 +1712,12 @@ class DeepseekV4DSparkModel(nn.Module):
         last_layer.hc_head_scale = self.hc_head_scale
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.embed_tokens(input_ids)
+        inputs_embeds = self.embed_tokens(input_ids)
+        return _apply_dspark_quarot_rotation(
+            inputs_embeds,
+            self._dspark_quarot_rotation,
+            transpose=True,
+        )
 
     def get_draft_kv_cache_layer_names(self) -> list[str]:
         return [layer.self_attn.dsa_attn.swa_cache_layer.prefix for layer in self.layers.values()]
@@ -1531,15 +1763,33 @@ class DeepseekV4DSparkModel(nn.Module):
         inputs_embeds: torch.Tensor | None = None,
         hidden_states: torch.Tensor | None = None,
         request_slots: torch.Tensor | None = None,
-        slot_mapping: torch.Tensor | dict[str, torch.Tensor] | dict[int, torch.Tensor] | None = None,
-        block_table: torch.Tensor | dict[str, torch.Tensor] | dict[int, torch.Tensor] | None = None,
+        slot_mapping: torch.Tensor
+        | tuple[torch.Tensor, ...]
+        | dict[str, torch.Tensor]
+        | dict[int, torch.Tensor]
+        | None = None,
+        block_table: torch.Tensor
+        | tuple[torch.Tensor, ...]
+        | dict[str, torch.Tensor]
+        | dict[int, torch.Tensor]
+        | None = None,
         dspark_query_start_loc: torch.Tensor | None = None,
         dspark_seq_lens: torch.Tensor | None = None,
         dspark_token_to_req_indices: torch.Tensor | None = None,
     ) -> torch.Tensor:
         del hidden_states
+        perf_enabled = bool(_dspark_perf_trace_path())
         if inputs_embeds is None:
-            inputs_embeds = self.embed_tokens(input_ids)
+            stage_start_ns = _dspark_perf_start(input_ids) if perf_enabled else 0
+            inputs_embeds = self.embed_input_ids(input_ids)
+            if perf_enabled:
+                _write_dspark_perf_record(
+                    self,
+                    "draft_embed_inputs",
+                    stage_start_ns,
+                    inputs_embeds,
+                    num_tokens=int(input_ids.shape[0]),
+                )
         hidden_states = inputs_embeds.unsqueeze(-2).repeat(1, self.hc_mult, 1)
         residual = post_mix = res_mix = None
         for layer_idx, (layer_key, layer) in enumerate(self.layers.items()):
@@ -1565,12 +1815,32 @@ class DeepseekV4DSparkModel(nn.Module):
                     dspark_seq_lens=dspark_seq_lens,
                     dspark_token_to_req_indices=dspark_token_to_req_indices,
                 )
+            stage_start_ns = _dspark_perf_start(hidden_states) if perf_enabled else 0
             layer_output = layer(**layer_kwargs)
             if isinstance(layer_output, tuple) and len(layer_output) == 4:
                 hidden_states, residual, post_mix, res_mix = layer_output
             else:
                 hidden_states = layer_output
+            if perf_enabled:
+                _write_dspark_perf_record(
+                    self,
+                    "draft_layer_total",
+                    stage_start_ns,
+                    hidden_states,
+                    layer=layer_prefix,
+                    layer_idx=int(layer_idx),
+                    num_tokens=int(hidden_states.shape[0]),
+                )
+        stage_start_ns = _dspark_perf_start(hidden_states) if perf_enabled else 0
         head_hidden = self.compute_head_hidden(hidden_states, residual, post_mix, res_mix)
+        if perf_enabled:
+            _write_dspark_perf_record(
+                self,
+                "draft_head_hidden",
+                stage_start_ns,
+                head_hidden,
+                num_tokens=int(head_hidden.shape[0]),
+            )
         return head_hidden
 
     def compute_head_hidden(
@@ -1606,7 +1876,15 @@ class DeepseekV4DSparkModel(nn.Module):
         logits_processor: LogitsProcessor,
     ) -> torch.Tensor:
         head_hidden = self.compute_head_hidden(hidden_states)
-        return logits_processor(lm_head, self.norm(head_hidden))
+        head_hidden = self.norm(head_hidden)
+        if self._dspark_quarot_rotation is not None:
+            head_hidden = head_hidden / self.norm.weight.to(device=head_hidden.device, dtype=head_hidden.dtype)
+        head_hidden = _apply_dspark_quarot_rotation(
+            head_hidden,
+            self._dspark_quarot_rotation,
+            transpose=False,
+        )
+        return logits_processor(lm_head, head_hidden)
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return _make_deepseek_v4_expert_params_mapping(
@@ -1660,8 +1938,8 @@ class DeepSeekV4DSparkMTP(nn.Module, DeepseekV2MixtureOfExperts):
         inputs_embeds: torch.Tensor | None = None,
         spec_step_idx: int = 0,
         request_slots: torch.Tensor | None = None,
-        slot_mapping: torch.Tensor | None = None,
-        block_table: torch.Tensor | None = None,
+        slot_mapping: torch.Tensor | tuple[torch.Tensor, ...] | None = None,
+        block_table: torch.Tensor | tuple[torch.Tensor, ...] | None = None,
         dspark_query_start_loc: torch.Tensor | None = None,
         dspark_seq_lens: torch.Tensor | None = None,
         dspark_token_to_req_indices: torch.Tensor | None = None,

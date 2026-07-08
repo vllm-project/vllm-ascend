@@ -107,6 +107,35 @@ def _token_logprob(row: torch.Tensor | None, token_id: int, indices: torch.Tenso
     return float(logprobs[local_id])
 
 
+def _token_value(row: torch.Tensor | None, token_id: int | None, indices: torch.Tensor | None = None) -> float | None:
+    if row is None or token_id is None or token_id < 0:
+        return None
+    row_cpu = row.detach().float().cpu()
+    if indices is not None:
+        indices_cpu = indices.detach().cpu()
+        matches = (indices_cpu == token_id).nonzero(as_tuple=True)[0]
+        if matches.numel() == 0:
+            return None
+        local_id = int(matches[0])
+    elif token_id >= row_cpu.numel():
+        return None
+    else:
+        local_id = token_id
+    return float(row_cpu[local_id])
+
+
+def _token_margin_top1_minus(
+    row: torch.Tensor | None,
+    token_id: int | None,
+    indices: torch.Tensor | None = None,
+) -> float | None:
+    value = _token_value(row, token_id, indices)
+    if value is None or row is None:
+        return None
+    row_cpu = row.detach().float().cpu()
+    return float(row_cpu.max().item() - value)
+
+
 def _component_scalar(
     components: dict[str, torch.Tensor] | None,
     name: str,
@@ -148,6 +177,8 @@ def _component_topk_records(
 def _draft_component_record(
     components: dict[str, torch.Tensor] | None,
     flat_idx: int,
+    target_token: int | None = None,
+    final_row: torch.Tensor | None = None,
 ) -> dict[str, object] | None:
     if components is None:
         return None
@@ -168,6 +199,19 @@ def _draft_component_record(
         topk = _component_topk_records(components, prefix, flat_idx)
         if topk:
             record[f"{prefix}_topk"] = topk
+    if target_token is not None:
+        for prefix in ("base", "markov_bias"):
+            rows = components.get(f"{prefix}_logits")
+            if rows is None or flat_idx >= rows.shape[0]:
+                continue
+            row = rows[flat_idx]
+            record[f"{prefix}_logit_at_target_argmax"] = _token_value(row, target_token)
+            record[f"{prefix}_rank_of_target_argmax"] = _token_rank(row, target_token)
+            record[f"{prefix}_margin_top1_minus_target_argmax"] = _token_margin_top1_minus(row, target_token)
+        if final_row is not None:
+            record["final_logit_at_target_argmax"] = _token_value(final_row, target_token)
+            record["final_rank_of_target_argmax"] = _token_rank(final_row, target_token)
+            record["final_margin_top1_minus_target_argmax"] = _token_margin_top1_minus(final_row, target_token)
     return record or None
 
 
@@ -241,29 +285,44 @@ def _dump_dspark_accept_debug(
                 draft_row = (
                     draft_logits[flat_idx] if draft_logits is not None and flat_idx < draft_logits.shape[0] else None
                 )
+                draft_row_is_logits = draft_row is not None
                 if draft_row is None and draft_probs is not None and flat_idx < draft_probs.shape[0]:
                     draft_row = draft_probs[flat_idx].clamp_min(torch.finfo(torch.float32).tiny).log()
-
-                positions.append(
-                    {
-                        "pos": pos,
-                        "flat_index": flat_idx,
-                        "draft_token": draft_token,
-                        "output_token": output_token,
-                        "output_matches_draft": output_matches_draft,
-                        "target_argmax": (
-                            int(target_argmax_cpu[flat_idx].item())
-                            if target_argmax_cpu is not None and flat_idx < target_argmax_cpu.numel()
-                            else None
-                        ),
-                        "target_rank_of_draft": _token_rank(target_row, draft_token, target_index_row),
-                        "target_logprob_draft": _token_logprob(target_row, draft_token, target_index_row),
-                        "draft_logprob_draft": _token_logprob(draft_row, draft_token),
-                        "target_topk": _topk_records(target_row, top_k, target_index_row),
-                        "draft_topk": _topk_records(draft_row, top_k),
-                        "draft_components": _draft_component_record(draft_logit_components, flat_idx),
-                    }
+                target_token = (
+                    int(target_argmax_cpu[flat_idx].item())
+                    if target_argmax_cpu is not None and flat_idx < target_argmax_cpu.numel()
+                    else None
                 )
+
+                position_record = {
+                    "pos": pos,
+                    "flat_index": flat_idx,
+                    "draft_token": draft_token,
+                    "output_token": output_token,
+                    "output_matches_draft": output_matches_draft,
+                    "target_argmax": target_token,
+                    "target_rank_of_draft": _token_rank(target_row, draft_token, target_index_row),
+                    "target_logprob_draft": _token_logprob(target_row, draft_token, target_index_row),
+                    "draft_logprob_draft": _token_logprob(draft_row, draft_token),
+                    "draft_rank_of_target_argmax": _token_rank(draft_row, target_token)
+                    if target_token is not None
+                    else None,
+                    "draft_logprob_target_argmax": _token_logprob(draft_row, target_token)
+                    if target_token is not None
+                    else None,
+                    "draft_margin_top1_minus_target_argmax": _token_margin_top1_minus(draft_row, target_token),
+                    "target_topk": _topk_records(target_row, top_k, target_index_row),
+                    "draft_topk": _topk_records(draft_row, top_k),
+                    "draft_components": _draft_component_record(
+                        draft_logit_components,
+                        flat_idx,
+                        target_token=target_token,
+                        final_row=draft_row if draft_row_is_logits else None,
+                    ),
+                }
+                if draft_row_is_logits:
+                    position_record["draft_logit_target_argmax"] = _token_value(draft_row, target_token)
+                positions.append(position_record)
 
             requests.append(
                 {
