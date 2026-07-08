@@ -1,0 +1,180 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2026, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-07 00:00+0000\n"
+"PO-Revision-Date: 2026-07-07 12:00+0800\n"
+"Last-Translator: \n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: manual\n"
+
+#: ../../source/developer_guide/index.md:1
+msgid "Developer Guide"
+msgstr "开发者指南"
+
+#: ../../source/developer_guide/index.md:3
+msgid ""
+"This section is for developers who want to contribute to vLLM Ascend or "
+"understand its internal architecture."
+msgstr "本节面向希望为 vLLM Ascend 贡献代码或了解其内部架构的开发者。"
+
+#: ../../source/developer_guide/index.md:5
+msgid "Contribution"
+msgstr "贡献"
+
+#: ../../source/developer_guide/index.md:7
+msgid ""
+"**[Contribution Guide](contribution/index.md)** — How to contribute to vLLM "
+"Ascend"
+msgstr "**[贡献指南](contribution/index.md)** — 如何为 vLLM Ascend 贡献代码"
+
+#: ../../source/developer_guide/index.md:8
+msgid ""
+"**[Testing](contribution/testing.md)** — Write and run unit, E2E, and "
+"nightly tests"
+msgstr "**[测试](contribution/testing.md)** — 编写和运行单元、端到端及夜间测试"
+
+#: ../../source/developer_guide/index.md:9
+msgid ""
+"**[Doc Writing](contribution/doc_writing.md)** — Documentation contribution "
+"guide"
+msgstr "**[文档编写](contribution/doc_writing.md)** — 文档贡献指南"
+
+#: ../../source/developer_guide/index.md:10
+msgid ""
+"**[Multi-Node Test](contribution/multi_node_test.md)** — Multi-node testing "
+"guide"
+msgstr "**[多节点测试](contribution/multi_node_test.md)** — 多节点测试指南"
+
+#: ../../source/developer_guide/index.md:11
+msgid ""
+"**[Nightly CI Test](contribution/nightly_ci_test.md)** — Nightly CI testing"
+msgstr "**[夜间 CI 测试](contribution/nightly_ci_test.md)** — 夜间 CI 测试"
+
+#: ../../source/developer_guide/index.md:12
+msgid "**[E2E CI Test](contribution/e2e_ci_test.md)** — E2E CI testing"
+msgstr "**[端到端 CI 测试](contribution/e2e_ci_test.md)** — 端到端 CI 测试"
+
+#: ../../source/developer_guide/index.md:14
+msgid "Design Documents"
+msgstr "设计文档"
+
+#: ../../source/developer_guide/index.md:16
+msgid ""
+"Explore the design documents covering patch architecture, CPU binding, model"
+" runner internals, disaggregated prefill, EPLB, ACL Graph, KV Cache Pool, "
+"custom operators, context parallel, quantization, and NPUGraph."
+msgstr ""
+"浏览涵盖补丁架构、CPU 绑定、模型运行器内部机制、分离式预填充、EPLB、ACL 图、KV Cache 池、自定义算子、上下文并行、量化及 "
+"NPUGraph 的设计文档。"
+
+#: ../../source/developer_guide/index.md:18
+msgid "Evaluation"
+msgstr "评估"
+
+#: ../../source/developer_guide/index.md:20
+msgid ""
+"**[Using EvalScope](evaluation/using_evalscope.md)** — Model evaluation with"
+" EvalScope"
+msgstr ""
+"**[使用 EvalScope](evaluation/using_evalscope.md)** — 使用 EvalScope 进行模型评估"
+
+#: ../../source/developer_guide/index.md:21
+msgid ""
+"**[Using lm_eval](evaluation/using_lm_eval.md)** — Model evaluation with "
+"lm_eval"
+msgstr "**[使用 lm_eval](evaluation/using_lm_eval.md)** — 使用 lm_eval 进行模型评估"
+
+#: ../../source/developer_guide/index.md:22
+msgid ""
+"**[Using AISBench](evaluation/using_ais_bench.md)** — Model evaluation with "
+"AISBench"
+msgstr "**[使用 AISBench](evaluation/using_ais_bench.md)** — 使用 AISBench 进行模型评估"
+
+#: ../../source/developer_guide/index.md:23
+msgid ""
+"**[Using OpenCompass](evaluation/using_opencompass.md)** — Model evaluation "
+"with OpenCompass"
+msgstr ""
+"**[使用 OpenCompass](evaluation/using_opencompass.md)** — 使用 OpenCompass "
+"进行模型评估"
+
+#: ../../source/developer_guide/index.md:25
+msgid "Performance and Debug"
+msgstr "性能与调试"
+
+#: ../../source/developer_guide/index.md:27
+msgid ""
+"**[Performance Benchmark](performance_and_debug/performance_benchmark.md)** "
+"— Benchmarking guide"
+msgstr "**[性能基准测试](performance_and_debug/performance_benchmark.md)** — 基准测试指南"
+
+#: ../../source/developer_guide/index.md:28
+msgid ""
+"**[Optimization and "
+"Tuning](performance_and_debug/optimization_and_tuning.md)** — Performance "
+"optimization"
+msgstr "**[优化与调优](performance_and_debug/optimization_and_tuning.md)** — 性能优化"
+
+#: ../../source/developer_guide/index.md:29
+msgid ""
+"**[Service Profiling "
+"Guide](performance_and_debug/service_profiling_guide.md)** — Service "
+"profiling"
+msgstr ""
+"**[服务性能分析指南](performance_and_debug/service_profiling_guide.md)** — 服务性能分析"
+
+#: ../../source/developer_guide/index.md:30
+msgid ""
+"**[msprobe Guide](performance_and_debug/msprobe_guide.md)** — Debugging with"
+" msprobe"
+msgstr ""
+"**[msprobe 指南](performance_and_debug/msprobe_guide.md)** — 使用 msprobe 进行调试"
+
+msgid "# Developer Guide"
+msgstr ""
+
+msgid "## Contribution"
+msgstr ""
+
+msgid ""
+"- **[Contribution Guide](contribution/index.md)** — How to contribute to vLLM Ascend\n"
+"- **[Testing](contribution/testing.md)** — Write and run unit, E2E, and nightly tests\n"
+"- **[Doc Writing](contribution/doc_writing.md)** — Documentation contribution guide\n"
+"- **[Multi-Node Test](contribution/multi_node_test.md)** — Multi-node testing guide\n"
+"- **[Nightly CI Test](contribution/nightly_ci_test.md)** — Nightly CI testing\n"
+"- **[E2E CI Test](contribution/e2e_ci_test.md)** — E2E CI testing"
+msgstr ""
+
+msgid "## Design Documents"
+msgstr ""
+
+msgid "## Evaluation"
+msgstr ""
+
+msgid ""
+"- **[Using EvalScope](evaluation/using_evalscope.md)** — Model evaluation with EvalScope\n"
+"- **[Using lm_eval](evaluation/using_lm_eval.md)** — Model evaluation with lm_eval\n"
+"- **[Using AISBench](evaluation/using_ais_bench.md)** — Model evaluation with AISBench\n"
+"- **[Using OpenCompass](evaluation/using_opencompass.md)** — Model evaluation with OpenCompass"
+msgstr ""
+
+msgid "## Performance and Debug"
+msgstr ""
+
+msgid ""
+"- **[Performance Benchmark](performance_and_debug/performance_benchmark.md)** — Benchmarking guide\n"
+"- **[Optimization and Tuning](performance_and_debug/optimization_and_tuning.md)** — Performance optimization\n"
+"- **[Service Profiling Guide](performance_and_debug/service_profiling_guide.md)** — Service profiling\n"
+"- **[msprobe Guide](performance_and_debug/msprobe_guide.md)** — Debugging with msprobe"
+msgstr ""

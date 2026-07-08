@@ -353,22 +353,115 @@ class TestQuantPrefixMapper(TestBase):
                 self.assertEqual(prefix, expected)
 
 
-class TestGetCacheScale(TestBase):
-    def test_c8_kv_cache_type_k_proj_scale(self):
+class TestGetCacheScaleMapper(TestBase):
+    def test_c8_kv_cache_type_returns_mapper(self):
         config = AscendModelSlimConfig({"kv_cache_type": "C8"})
-        result = config.get_cache_scale("model.layers.0.k_proj.kv_cache_scale")
-        self.assertEqual(result, "model.layers.0.attn.k_cache_scale")
-        result = config.get_cache_scale("model.layers.0.v_proj.kv_cache_offset")
-        self.assertEqual(result, "model.layers.0.attn.v_cache_offset")
+        mapper = config.get_cache_scale_mapper()
+        self.assertIsNotNone(mapper)
+        # C8 mappings: k_proj → attn
+        self.assertEqual(
+            mapper._map_name("model.layers.0.k_proj.kv_cache_scale"),
+            "model.layers.0.attn.k_cache_scale",
+        )
+        self.assertEqual(
+            mapper._map_name("model.layers.0.k_proj.kv_cache_offset"),
+            "model.layers.0.attn.k_cache_offset",
+        )
+        self.assertEqual(
+            mapper._map_name("model.layers.0.v_proj.kv_cache_scale"),
+            "model.layers.0.attn.v_cache_scale",
+        )
+        self.assertEqual(
+            mapper._map_name("model.layers.0.v_proj.kv_cache_offset"),
+            "model.layers.0.attn.v_cache_offset",
+        )
 
-    def test_no_match(self):
+    def test_no_match_returns_none(self):
         config = AscendModelSlimConfig({"kv_cache_type": "FLOAT"})
-        result = config.get_cache_scale("model.layers.0.k_proj.kv_cache_scale")
-        self.assertIsNone(result)
+        mapper = config.get_cache_scale_mapper()
+        self.assertIsNone(mapper)
 
+        config = AscendModelSlimConfig({})
+        mapper = config.get_cache_scale_mapper()
+        self.assertIsNone(mapper)
+
+    def test_fa_quant_returns_mapper(self):
+        config = AscendModelSlimConfig(
+            {
+                "fa_quant_type": "C8",
+                "layers.1.fa_k.scale": "C8",
+            }
+        )
+        mapper = config.get_cache_scale_mapper()
+        self.assertIsNotNone(mapper)
+        self.assertEqual(
+            mapper._map_name("model.layers.1.fa_k.scale"),
+            "model.layers.1.mla_attn.mla_attn.fa_k.scale",
+        )
+        self.assertEqual(
+            mapper._map_name("model.layers.1.fa_q.scale"),
+            "model.layers.1.mla_attn.mla_attn.fa_q.scale",
+        )
+        self.assertEqual(
+            mapper._map_name("model.layers.1.fa_v.offset"),
+            "model.layers.1.mla_attn.mla_attn.fa_v.offset",
+        )
+
+    def test_indexer_quant_returns_mapper(self):
+        config = AscendModelSlimConfig(
+            {
+                "indexer_quant_type": "INT8",
+                "layers.1.indexer.quant_type": "INT8",
+            }
+        )
+        mapper = config.get_cache_scale_mapper()
+        self.assertIsNotNone(mapper)
+        self.assertEqual(
+            mapper._map_name("model.layers.1.indexer.q_rot"),
+            "model.layers.1.mla_attn.mla_attn.indexer.q_rot",
+        )
+        self.assertEqual(
+            mapper._map_name("model.layers.1.indexer.k_rot"),
+            "model.layers.1.mla_attn.mla_attn.indexer.k_rot",
+        )
+
+    def test_combined_quant_types_returns_mapper_with_all_suffixes(self):
+        config = AscendModelSlimConfig(
+            {
+                "kv_cache_type": "C8",
+                "fa_quant_type": "C8",
+                "layers.1.fa_k.scale": "C8",
+                "indexer_quant_type": "INT8",
+                "layers.2.indexer.quant_type": "INT8",
+            }
+        )
+        mapper = config.get_cache_scale_mapper()
+        self.assertIsNotNone(mapper)
+        # C8 mapping
+        self.assertEqual(
+            mapper._map_name("model.layers.0.k_proj.kv_cache_scale"),
+            "model.layers.0.attn.k_cache_scale",
+        )
+        # FA quant mapping
+        self.assertEqual(
+            mapper._map_name("model.layers.1.fa_k.scale"),
+            "model.layers.1.mla_attn.mla_attn.fa_k.scale",
+        )
+        # Indexer quant mapping
+        self.assertEqual(
+            mapper._map_name("model.layers.2.indexer.k_rot"),
+            "model.layers.2.mla_attn.mla_attn.indexer.k_rot",
+        )
+
+    def test_unmapped_key_returns_unchanged(self):
         config = AscendModelSlimConfig({"kv_cache_type": "C8"})
-        result = config.get_cache_scale("model.layers.0.other_key")
-        self.assertIsNone(result)
+        mapper = config.get_cache_scale_mapper()
+        self.assertIsNotNone(mapper)
+        # C8 mapper doesn't cover FA quant keys
+        self.assertEqual(
+            mapper._map_name("model.layers.0.other_key"),
+            "model.layers.0.other_key",
+        )
 
 
 class TestGetKvQuantDtype(TestBase):

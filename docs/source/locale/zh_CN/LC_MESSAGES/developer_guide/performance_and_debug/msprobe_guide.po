@@ -1,4 +1,4 @@
-﻿# SOME DESCRIPTIVE TITLE.
+# SOME DESCRIPTIVE TITLE.
 # Copyright (C) 2025, vllm-ascend team
 # This file is distributed under the same license as the vllm-ascend
 # package.
@@ -116,16 +116,18 @@ msgstr "2.1 准备 dump 配置内容"
 
 #: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:44
 msgid ""
-"Prepare configuration content that can be parsed by `PrecisionDebugger`. You "
-"can use either of the following ways:"
+"Prepare configuration content that can be parsed by `PrecisionDebugger`. You"
+" can use either of the following ways:"
 msgstr "准备可被 `PrecisionDebugger` 解析的配置内容。你可以使用以下任一方式："
 
 #: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:46
-msgid "Pass the config object directly through `--additional-config.dump_config`."
+msgid ""
+"Pass the config object directly through `--additional-config.dump_config`."
 msgstr "通过 `--additional-config.dump_config` 直接传入配置对象。"
 
 #: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:47
-msgid "Pass a config file path through `--additional-config.dump_config_path`."
+msgid ""
+"Pass a config file path through `--additional-config.dump_config_path`."
 msgstr "通过 `--additional-config.dump_config_path` 传入配置文件路径。"
 
 #: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:49
@@ -328,7 +330,8 @@ msgid "3. Enable `msprobe` in vllm-ascend"
 msgstr "3.在 vllm-ascend 中启用 `msprobe`"
 
 #: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:115
-msgid "Start vLLM and pass the dump config content through `--additional-config`:"
+msgid ""
+"Start vLLM and pass the dump config content through `--additional-config`:"
 msgstr "启动 vLLM，并通过 `--additional-config` 传递 dump 配置内容："
 
 #: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:136
@@ -674,6 +677,186 @@ msgid ""
 " same as the examples above."
 msgstr "`mix` 级别的 dump.json 同时包含 L0 和 L1 级别的数据；文件格式与上述示例相同。"
 
+msgid "# MSProbe Debugging Guide"
+msgstr ""
+
+msgid "## 0. Background Concepts"
+msgstr ""
+
+msgid ""
+"- **L0**: dumps tensors at the module level and generates `construct.json` so that visualization tools can rebuild the network structure. A model or submodule handle must be passed in.\n"
+"- **L1**: collects operator-level statistics only, which is suitable for lightweight troubleshooting.\n"
+"- **mix**: captures both structural information and operator statistics, which is useful when you need both graph reconstruction and numerical comparisons."
+msgstr ""
+
+msgid "## 1. Prerequisites"
+msgstr ""
+
+msgid "### 1.1 Install `msprobe`"
+msgstr ""
+
+msgid "### 1.2 Graph mode dump (optional)"
+msgstr ""
+
+msgid "1. Install `aclgraph_dump` from source code:"
+msgstr ""
+
+msgid "## 2. Collecting Data with `msprobe`"
+msgstr ""
+
+msgid "### 2.1 Prepare the dump configuration content"
+msgstr ""
+
+msgid ""
+"- Pass the config object directly through `--additional-config.dump_config`.\n"
+"- Pass a config file path through `--additional-config.dump_config_path`."
+msgstr ""
+
+msgid ""
+"| Field       | Description                                                                                                                                                                                                 | Required | Eager Mode | Graph Mode |\n"
+"|:-----------:|:-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|:--------:|:-------------:|:-------------:|\n"
+"| `task`      | Type of dump task. Common PyTorch values include `\"statistics\"` and `\"tensor\"`. A statistics task collects tensor statistics (mean, variance, max, min, etc.) while a tensor task captures arbitrary tensors. |    Yes   |      ✅       |      ✅       |\n"
+"| `dump_path` | Directory where dump results are stored. When omitted, `msprobe` uses its default path.                                                                                                                     |    No    |      ✅       |      ✅       |\n"
+"| `rank`      | Ranks to sample. An empty list collects every rank. For single-card tasks, you must set this field to `[]`.                                                                                                 |    No    |      ✅       |      ✅       |\n"
+"| `step`      | Token iteration(s) to sample. An empty list means every iteration.                                                                                                                                         |    No    |      ✅       |      ❌       |\n"
+"| `level`     | Dump level string (`\"L0\"`, `\"L1\"`, or `\"mix\"`). `L0` targets `nn.Module`, `L1` targets `torch.api`, and `mix` collects both.                                                                                 |    Yes   |      ✅       |      ✅       |\n"
+"| `async_dump`| Whether to enable asynchronous dump (supported for PyTorch `statistics`/`tensor` tasks). Defaults to `false`.                                                                                              |    No    |      ✅       |      ❌       |\n"
+"| `scope`     | Module range to sample. An empty list collects every module.                                                                                                                                                |    No    |      ✅       |      ❌       |\n"
+"| `dump_enable` | Dynamic switch for enabling/disabling dump in `PrecisionDebugger` during one running training/inference job. This allows turning dump on or off on demand in the same job.                             |    No    |      ✅       |      ❌       |\n"
+"| `list`      | Operator range to sample. An empty list collects every operator.                                                                                                                                            |    No    |      ✅       |      ✅       |"
+msgstr ""
+
+msgid ""
+"- `scope` (list[str]): In PyTorch PyNative scenarios this field restricts "
+"the dump range. Provide two module or API names that follow the tool's "
+"naming convention to lock a range; only data between the two names will be "
+"dumped. Examples:"
+msgstr ""
+
+msgid ""
+"- `list` (list[str]): Custom operator list. Options include:\n"
+"    - Supply the full names of specific APIs in PyTorch pynative scenarios to only dump those APIs. Example: `\"list\": [\"Tensor.permute.1.forward\", \"Tensor.transpose.2.forward\", \"Torch.relu.3.forward\"]`.\n"
+"    - When `level=mix`, you can provide module names so that the dump expands to everything produced while the module is running. Example: `\"list\": [\"Module.module.language_model.encoder.layers.0.mlp.ParallelMlp.forward.0\"]`.\n"
+"    - Provide a substring such as `\"list\": [\"relu\"]` to dump every API whose name contains the substring. When `level=mix`, modules whose names contain the substring are also expanded."
+msgstr ""
+
+msgid ""
+"Example configuration:\n"
+"eager mode:"
+msgstr ""
+
+msgid "## 3. Enable `msprobe` in vllm-ascend"
+msgstr ""
+
+msgid ""
+"1. Start vLLM and pass the dump config content through `--additional-"
+"config`:"
+msgstr ""
+
+msgid "## 4. Send requests and collect dumps"
+msgstr ""
+
+msgid "1. Send inference requests as usual, for example:"
+msgstr ""
+
+msgid ""
+"2. Each request drives the sequence `msprobe: start -> forward -> stop -> "
+"step`. The runner invokes `step()` on every code path, so you always get a "
+"complete dataset even if inference returns early."
+msgstr ""
+
+msgid ""
+"3. Dump files are written into `dump_path`. They usually contain:\n"
+"   - Tensor files grouped by operator/module.\n"
+"   - `dump.json`, which records metadata such as dtype, shape, min/max, and `requires_grad`.\n"
+"   - `construct.json`, which is generated when `level` is `L0` or `mix` (required for visualization)."
+msgstr ""
+
+msgid ""
+"Example directory layout:\n"
+"   eager mode:"
+msgstr ""
+
+msgid ""
+"- `rank`: Device ID. Each card writes its data to the corresponding `rank{ID}` directory. In non-distributed scenarios the directory is simply named `rank`.\n"
+"   - `dump_tensor_data`: Tensor payloads that were collected.\n"
+"   - `dump.json`: Statistics for the forward data of each API or module, including names, dtype, shape, max, min, mean, L2 norm (square root of the L2 variance), and CRC-32 when `summary_mode=\"md5\"`. See [dump.json file description](#dumpjson-file-description) for details.\n"
+"   - `dump_error_info.log`: Present only when the dump tool encountered an error and records the failure log.\n"
+"   - `stack.json`: Call stacks for APIs/modules.\n"
+"   - `construct.json`: Hierarchical structure description. Empty when `level=L1`."
+msgstr ""
+
+msgid ""
+"- `dump.json`: Statistics for the forward data of each API or module, "
+"including names, dtype, shape, max, min, mean, L2 norm (square root of the "
+"L2 variance), and CRC-32 when `summary_mode=\"md5\"`. See [dump.json file "
+"description](#dumpjson-file-description) for details."
+msgstr ""
+
+msgid "## 5. Analyze the results"
+msgstr ""
+
+msgid "### 5.1 Prerequisites"
+msgstr ""
+
+msgid "### 5.2 Visualization"
+msgstr ""
+
+msgid ""
+"1. Ensure dump data is visualization-ready:\n"
+"   - Dump level must be `L0` or `mix` so `construct.json` is non-empty.\n"
+"   - Each rank directory should contain `dump.json`, `stack.json`, and `construct.json`."
+msgstr ""
+
+msgid ""
+"2. Choose command mode:\n"
+"   - Single-graph build:"
+msgstr ""
+
+msgid "- Graph comparison:"
+msgstr ""
+
+msgid ""
+"- Common optional flags:\n"
+"     - `-oc` / `--overflow_check`: enable overflow marking\n"
+"     - `-fm` / `--fuzzy_match`: enable fuzzy matching for node mapping\n"
+"     - `-lm` / `--layer_mapping [mapping.yaml]`: cross-framework/layer mapping compare\n"
+"     - `-tensor_log`: print per-node compare log (tensor dump scenarios)\n"
+"     - `-progress_log`: print detailed progress log"
+msgstr ""
+
+msgid ""
+"3. Path granularity is auto-detected by `graph_visualize`:\n"
+"   - Single-rank: `.../step0/rank0`\n"
+"   - Multi-rank (batch): `.../step0`\n"
+"   - Multi-step (batch): dump root path containing `step*`"
+msgstr ""
+
+msgid ""
+"4. Output files:\n"
+"   - Single-graph build: `build_{timestamp}.vis.db`\n"
+"   - Graph comparison: `compare_{timestamp}.vis.db`"
+msgstr ""
+
+msgid "5. Launch TensorBoard with the output directory:"
+msgstr ""
+
+msgid ""
+"6. In the visualization UI, inspect structure and numeric differences:\n"
+"   - Switch rank/step to locate unstable nodes quickly.\n"
+"   - Use search/filter to focus on target ops/modules.\n"
+"   - For compare mode, prioritize highlighted high-difference nodes and trace surrounding I/O/parameters."
+msgstr ""
+
+msgid "## 6. Troubleshooting"
+msgstr ""
+
+msgid ""
+"- `RuntimeError: Please enforce eager mode`: Restart vLLM and add the `--enforce-eager` flag.\n"
+"- No dump files: Confirm that the JSON path is correct and every node has write permission. In distributed scenarios set `keep_all_ranks` so that every rank writes its own dump.\n"
+"- Dumps are too large: Start with a `statistics` task to locate abnormal tensors, then narrow the scope with `scope`/`list`/`tensor_list`, `filters`, `token_range`, etc."
+msgstr ""
+
 #~ msgid "1.2 Visualization dependencies (optional)"
 #~ msgstr "1.2 可视化依赖（可选）"
 
@@ -777,4 +960,3 @@ msgstr "`mix` 级别的 dump.json 同时包含 L0 和 L1 级别的数据；文�
 #~ "you manually map nodes between the problem and benchmark graphs before "
 #~ "generating comparison results."
 #~ msgstr "手动映射：自动映射无法覆盖所有情况，因此该工具允许您在生成比较结果之前，手动映射问题和基准图中的节点。"
-
