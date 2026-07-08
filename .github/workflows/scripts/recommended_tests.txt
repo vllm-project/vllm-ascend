@@ -1,0 +1,10 @@
+# Recommended regression tests. One pytest target per line.
+# Parsed by the `select-recommended-tests` job in `.github/workflows/pr_test.yaml`.
+## Supported formats:
+#   tests/e2e/pull_request/one_card/test_foo.py
+#   tests/e2e/pull_request/one_card/test_foo.py::TestClass::test_method
+#   tests/ut/attention/a2/test_attention_v1.py
+
+tests/e2e/pull_request/one_card/test_batch_invariant.py
+tests/ut/attention/test_attention_mask.py
+tests/e2e/pull_request/two_card/test_flashcomm_distributed.py::test_qwen3_dense_prefetch_mlp_weight_tp2

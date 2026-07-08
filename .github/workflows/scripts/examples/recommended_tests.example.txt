@@ -1,0 +1,14 @@
+# One pytest target per line. Lines starting with # and blank lines are ignored.
+#
+# Supported formats:
+#   tests/e2e/pull_request/one_card/test_foo.py
+#   tests/e2e/pull_request/one_card/test_foo.py::TestClass
+#   tests/e2e/pull_request/one_card/test_foo.py::TestClass::test_method
+#   tests/ut/attention/a2/test_attention_v1.py
+#
+# Copy this file to `.github/workflows/scripts/recommended_tests.txt`.
+# The list is consumed by the `select-recommended-tests` job in `pr_test.yaml`.
+
+tests/e2e/pull_request/one_card/test_batch_invariant.py
+tests/ut/attention/test_attention_mask.py
+tests/e2e/pull_request/two_card/test_flashcomm_distributed.py::test_qwen3_dense_prefetch_mlp_weight_tp2

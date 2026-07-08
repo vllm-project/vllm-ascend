@@ -752,3 +752,72 @@ def test_explicit_e2e_tests_runs_only_specified_paths(tmp_path, monkeypatch, cap
     a2_tests = {t for g in a2_groups for t in g["tests"].split()}
     assert a2_tests == {rel_one_a, rel_one_b}
     assert all(g["partition"].endswith("-5") for g in a2_groups)
+
+
+def test_load_test_list_file_ignores_comments_and_blank_lines(tmp_path):
+    list_file = tmp_path / "tests.txt"
+    list_file.write_text(
+        "\n".join(
+            [
+                "# full line comment",
+                "  tests/e2e/pull_request/one_card/test_a.py  # inline comment",
+                "",
+                "tests/ut/test_b.py::TestCase::test_method",
+            ]
+        )
+    )
+    assert select_tests._load_test_list_file(list_file) == [
+        "tests/e2e/pull_request/one_card/test_a.py",
+        "tests/ut/test_b.py::TestCase::test_method",
+    ]
+
+
+def test_test_list_file_routes_ut_and_e2e_targets(tmp_path, monkeypatch, capsys):
+    test_root = tmp_path / "tests"
+    e2e_one_card = test_root / "e2e" / "pull_request" / "one_card"
+    ut_dir = test_root / "ut" / "mod" / "a2"
+    for path in (e2e_one_card, ut_dir):
+        path.mkdir(parents=True)
+    e2e_file = e2e_one_card / "test_e2e.py"
+    ut_file = ut_dir / "test_ut.py"
+    for path in (e2e_file, ut_file):
+        path.write_text("")
+
+    config_modules = [
+        {
+            "name": "always_run",
+            "optional": False,
+            "source_file_dependencies": ["src/any.py"],
+            "tests": ["tests/e2e/pull_request/one_card", "tests/ut/mod"],
+        },
+    ]
+    runner_mapping = {
+        "tests/e2e/pull_request/one_card": {"default": "a2_x1"},
+        "tests/ut/mod/a2": {"default": "a2_x1"},
+    }
+    config_path = tmp_path / "config.yaml"
+    _write_two_doc_config(config_path, config_modules, {"runner_mapping": runner_mapping})
+    runner_file = tmp_path / "runner_label.json"
+    runner_file.write_text(json.dumps({"a2-runner": {"chip": "a2", "npu_num": 1}}))
+    monkeypatch.setattr(select_tests, "_RUNNER_LABEL_PATH", runner_file)
+    monkeypatch.chdir(tmp_path)
+
+    list_file = tmp_path / "recommended.txt"
+    rel_e2e = "tests/e2e/pull_request/one_card/test_e2e.py"
+    rel_ut = "tests/ut/mod/a2/test_ut.py::TestClass::test_method"
+    list_file.write_text("\n".join([rel_e2e, rel_ut]))
+
+    capsys.readouterr()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["select_tests.py", "--config", str(config_path), "--test-list-file", str(list_file)],
+    )
+    select_tests.main()
+    captured = capsys.readouterr()
+    groups_line = next((line for line in captured.out.splitlines() if line.startswith("test_groups=")), None)
+    assert groups_line is not None
+    test_groups = json.loads(groups_line.removeprefix("test_groups="))
+    selected = {t for g in test_groups for t in g["tests"].split()}
+    assert selected == {rel_e2e, rel_ut}
+    assert captured.out.split("matched_modules=")[1].strip() == ""
