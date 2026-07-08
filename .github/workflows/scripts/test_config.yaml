@@ -683,7 +683,6 @@ estimated_times:
   tests/e2e/pull_request/one_card/compile/test_graphex_qknorm_rope_fusion.py: 160
   tests/e2e/pull_request/one_card/compile/test_norm_quant_fusion.py: 120
   tests/e2e/pull_request/one_card/lora/test_ilama_lora.py: 210
-<<<<<<< HEAD
   tests/e2e/pull_request/one_card/lora/test_llama32_lora.py: 340
   tests/e2e/pull_request/one_card/lora/test_lora_with_spec_decode.py: 650
   tests/e2e/pull_request/one_card/lora/test_qwen35_densemodel_lora.py: 360
@@ -702,27 +701,6 @@ estimated_times:
   tests/e2e/pull_request/one_card/spec_decode/test_ngram.py: 170
   tests/e2e/pull_request/one_card/spec_decode/test_ngram_npu.py: 170
   tests/e2e/pull_request/one_card/spec_decode/test_suffix.py: 160
-=======
-  tests/e2e/pull_request/one_card/lora/test_llama32_lora.py: 130
-  tests/e2e/pull_request/one_card/lora/test_lora_with_spec_decode.py: 570
-  tests/e2e/pull_request/one_card/lora/test_olmoe_lora.py: 300
-  tests/e2e/pull_request/one_card/lora/test_qwen35_densemodel_lora.py: 330
-  tests/e2e/pull_request/one_card/lora/test_qwen3_multi_loras.py: 180
-  tests/e2e/pull_request/one_card/lora/test_qwen3_reranker_lora.py: 190
-  tests/e2e/pull_request/one_card/model_runner_v2/test_basic.py: 30
-  tests/e2e/pull_request/one_card/model_runner_v2/test_uva.py: 30
-  tests/e2e/pull_request/one_card/pooling/test_classification.py: 200
-  tests/e2e/pull_request/one_card/pooling/test_embedding.py: 430
-  tests/e2e/pull_request/one_card/pooling/test_scoring.py: 560
-  tests/e2e/pull_request/one_card/spec_decode/test_dflash.py: 230
-  tests/e2e/pull_request/one_card/spec_decode/test_draft_parallel.py: 210
-  tests/e2e/pull_request/one_card/spec_decode/test_eagle.py: 340
-  tests/e2e/pull_request/one_card/spec_decode/test_extract_hidden_states.py: 400
-  tests/e2e/pull_request/one_card/spec_decode/test_mtp_eagle_correctness.py: 160
-  tests/e2e/pull_request/one_card/spec_decode/test_ngram.py: 160
-  tests/e2e/pull_request/one_card/spec_decode/test_ngram_npu.py: 180
-  tests/e2e/pull_request/one_card/spec_decode/test_suffix.py: 140
->>>>>>> bb7328f06 (lint)
   tests/e2e/pull_request/one_card/test_attention_fa3.py: 30
   tests/e2e/pull_request/one_card/test_batch_invariant.py: 740
   tests/e2e/pull_request/one_card/test_camem.py: 160
