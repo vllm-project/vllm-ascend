@@ -8,6 +8,7 @@ from vllm.config import VllmConfig
 from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.triton_utils import HAS_TRITON
+from vllm.utils.math_utils import cdiv
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -624,8 +625,15 @@ class AscendSFADCPMetadataBuilder(AscendSFAMetadataBuilder):
         self.dcp_size = get_dcp_group().world_size
         self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_size > 1 else 0
         self.cp_kv_cache_interleave_size = vllm_config.parallel_config.cp_kv_cache_interleave_size
+        assert self.pcp_size == 1, "AscendSFADCPMetadataBuilder only supports DCP without PCP."
+        assert self.dcp_size > 1, "AscendSFADCPMetadataBuilder requires DCP world size > 1."
+        if self.cp_kv_cache_interleave_size <= 0:
+            raise RuntimeError(f"Invalid cp_kv_cache_interleave_size: {self.cp_kv_cache_interleave_size}")
+
+        # Full-graph FIA padding can append one dummy request.
+        max_num_reqs = vllm_config.scheduler_config.max_num_seqs + 1
         self.dcp_local_seq_lens_buf = torch.empty(
-            vllm_config.scheduler_config.max_num_seqs,
+            max_num_reqs,
             dtype=torch.int32,
             device=device,
         )
@@ -637,17 +645,22 @@ class AscendSFADCPMetadataBuilder(AscendSFAMetadataBuilder):
                 f"{self.replicated_view_block_size}."
             )
         self.blocks_per_phys_block = kv_cache_spec.block_size // self.replicated_view_block_size
-        max_num_reqs = (
-            vllm_config.scheduler_config.max_num_seqs + 2 * self.pcp_size * vllm_config.scheduler_config.max_num_seqs
-        )
         max_num_input_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        max_model_len = vllm_config.model_config.max_model_len
+        total_cp_size = self.pcp_size * self.dcp_size
+        # Match BlockTable's local logical width, then expand it to the
+        # replicated view seen by the SFA indexer.
+        max_local_block_table_cols = (
+            cdiv(max_model_len, kv_cache_spec.block_size * total_cp_size) * self.blocks_per_phys_block
+        )
+        max_replicated_block_table_cols = max_local_block_table_cols * total_cp_size
         self.block_table_replicated_view_buf: torch.Tensor = torch.empty(
-            (max_num_reqs, max_num_reqs * self.blocks_per_phys_block * self.pcp_size * self.dcp_size),
+            (max_num_reqs, max_replicated_block_table_cols),
             dtype=torch.int32,
             device=device,
         )
         self.arange_buffer: torch.Tensor = torch.arange(
-            max_num_reqs * self.blocks_per_phys_block * self.pcp_size * self.dcp_size,
+            max_replicated_block_table_cols,
             dtype=torch.int32,
             device=device,
         )
@@ -656,10 +669,6 @@ class AscendSFADCPMetadataBuilder(AscendSFAMetadataBuilder):
             dtype=torch.int32,
             device=device,
         )
-        assert self.pcp_size == 1, "AscendSFADCPMetadataBuilder only supports DCP without PCP."
-        assert self.dcp_size > 1, "AscendSFADCPMetadataBuilder requires DCP world size > 1."
-        if self.cp_kv_cache_interleave_size <= 0:
-            raise RuntimeError(f"Invalid cp_kv_cache_interleave_size: {self.cp_kv_cache_interleave_size}")
 
     def _get_dcp_local_seq_lens(self, seq_lens: torch.Tensor) -> torch.Tensor:
         total_cp_size = self.pcp_size * self.dcp_size
