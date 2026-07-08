@@ -51,15 +51,6 @@ project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 
 mkdir -p "${pytest_log_dir}"
 
-<<<<<<< HEAD
-setup_vllm_cache_root() {
-  if [ "${CI:-}" != "true" ]; then
-    return
-  fi
-  export VLLM_CACHE_ROOT
-  VLLM_CACHE_ROOT="$(mktemp -d "${RUNNER_TEMP:-/tmp}/vllm-cache-${npu_type}-${num_npus}card.XXXXXX")"
-  echo "Using vLLM cache root: ${VLLM_CACHE_ROOT}"
-=======
 setup_coverage() {
   local target="$1"
   local test_basename="${target%.py}"
@@ -69,9 +60,6 @@ setup_coverage() {
   mkdir -p "${covdata_dir}"
   export COVERAGE_FILE="${covdata_dir}/coverage"
   echo -e "  \033[33mCOVERAGE_FILE:\033[0m ${COVERAGE_FILE}"
-<<<<<<< HEAD
->>>>>>> ea10c0c3 (accurcy)
-=======
 }
 
 setup_vllm_cache_root() {
@@ -81,7 +69,6 @@ setup_vllm_cache_root() {
   export VLLM_CACHE_ROOT
   VLLM_CACHE_ROOT="$(mktemp -d "${RUNNER_TEMP:-/tmp}/vllm-cache-${npu_type}-${num_npus}card.XXXXXX")"
   echo "Using vLLM cache root: ${VLLM_CACHE_ROOT}"
->>>>>>> ecd09715 (pre-commit fix)
 }
 
 print_test_info() {
