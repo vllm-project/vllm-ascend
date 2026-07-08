@@ -52,7 +52,6 @@ from vllm.lora.layers.fused_moe import FusedMoE3DWithLoRA, FusedMoEWithLoRA
 from vllm.lora.layers.utils import _get_lora_device
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.utils import vllm_version_is
 
 
 def _assert_ascend_moe_lora_supported(base_layer: nn.Module) -> None:
@@ -195,11 +194,7 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
         # adapter_enabled and the punica wrapper), so building it once here is
         # sufficient.
         BaseLayerWithLoRA.set_mapping(self, punica_wrapper)
-        lora_context_host = self.base_layer
-        if not vllm_version_is("0.23.0"):
-            lora_context_host = self.base_layer.routed_experts
-        lora_context_host._ascend_moe_lora_context = self._build_lora_context()
-
+        self.base_layer.set_lora_context(self._build_lora_context())
 
 class AscendFusedMoE3DWithLoRA(AscendFusedMoEWithLoRA, FusedMoE3DWithLoRA):
     """For checkpoints that already fuse w1+w3 into a 3D weight (single slice)."""
