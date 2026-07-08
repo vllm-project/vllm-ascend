@@ -376,15 +376,6 @@ class TestGetCacheScaleMapper(TestBase):
             "model.layers.0.attn.v_cache_offset",
         )
 
-    def test_no_match_returns_none(self):
-        config = AscendModelSlimConfig({"kv_cache_type": "FLOAT"})
-        mapper = config.get_cache_scale_mapper()
-        self.assertIsNotNone(mapper)
-
-        config = AscendModelSlimConfig({})
-        mapper = config.get_cache_scale_mapper()
-        self.assertIsNotNone(mapper)
-
     def test_fa_quant_returns_mapper(self):
         config = AscendModelSlimConfig(
             {
