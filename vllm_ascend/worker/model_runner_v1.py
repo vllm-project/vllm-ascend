@@ -1788,15 +1788,22 @@ class NPUModelRunner(GPUModelRunner):
                 num_prefill_reqs = 0
                 num_decode_reqs = 0
 
-            # Let the target override the hidden state fed to the drafter
-            # (e.g. DeepSeek V4 MTP needs the pre-hc_head residual). Safe to
-            # rebind here: hidden_states was already consumed for sampling
-            # above and is not used again in this branch.
-            mtp_hidden_states = getattr(
-                self.get_model(), "get_mtp_target_hidden_states", lambda: None
-            )()
-            if mtp_hidden_states is not None:
-                hidden_states = mtp_hidden_states
+            # Let DeepSeek-V4 variants override the hidden state fed to the
+            # drafter. MTP needs the pre-hc_head residual, while DSpark needs
+            # the concatenated mean-HC states from dspark_target_layer_ids.
+            is_dspark_spec_decode = self.speculative_config.method == "dspark"
+            if is_dspark_spec_decode:
+                dspark_hidden_states = getattr(
+                    self.get_model(), "get_dspark_target_hidden_states", lambda: None
+                )()
+                if dspark_hidden_states is not None:
+                    hidden_states = dspark_hidden_states
+            else:
+                mtp_hidden_states = getattr(
+                    self.get_model(), "get_mtp_target_hidden_states", lambda: None
+                )()
+                if mtp_hidden_states is not None:
+                    hidden_states = mtp_hidden_states
 
             num_rejected_tokens_gpu = None
             if spec_decode_metadata is None:
@@ -1806,14 +1813,14 @@ class NPUModelRunner(GPUModelRunner):
                     target_token_ids = input_ids_pcp_full[:num_scheduled_tokens]
                     target_positions = self._get_positions(num_scheduled_tokens)
                     target_hidden_states = hidden_states
-                    if self.use_aux_hidden_state_outputs:
+                    if self.use_aux_hidden_state_outputs and not is_dspark_spec_decode:
                         target_hidden_states = torch.cat([h for h in aux_hidden_states], dim=-1)
                 else:
                     token_indices_to_sample = None
                     # input_ids can be None for multimodal models.
                     target_token_ids = self.input_ids.gpu[:num_scheduled_tokens]
                     target_positions = self._get_positions(num_scheduled_tokens)
-                    if self.use_aux_hidden_state_outputs:
+                    if self.use_aux_hidden_state_outputs and not is_dspark_spec_decode:
                         target_hidden_states = torch.cat([h[:num_scheduled_tokens] for h in aux_hidden_states], dim=-1)
                     else:
                         target_hidden_states = hidden_states[:num_scheduled_tokens]
@@ -1843,12 +1850,12 @@ class NPUModelRunner(GPUModelRunner):
                     target_token_ids = input_ids_pcp_full[token_indices]
                     target_positions = positions
                     target_hidden_states = hidden_states
-                    if self.use_aux_hidden_state_outputs:
+                    if self.use_aux_hidden_state_outputs and not is_dspark_spec_decode:
                         target_hidden_states = torch.cat([h for h in aux_hidden_states], dim=-1)
                 else:
                     target_token_ids = self.input_ids.gpu[token_indices]
                     target_positions = self._get_positions(token_indices)
-                    if self.use_aux_hidden_state_outputs:
+                    if self.use_aux_hidden_state_outputs and not is_dspark_spec_decode:
                         target_hidden_states = torch.cat([h[token_indices] for h in aux_hidden_states], dim=-1)
                     else:
                         target_hidden_states = hidden_states[token_indices]
@@ -3594,9 +3601,17 @@ class NPUModelRunner(GPUModelRunner):
     def profile_run(self) -> None:
         self.eplb_warmup()
         mc2_tokens_capacity = get_mc2_tokens_capacity()
-        if self.max_num_tokens > mc2_tokens_capacity and select_moe_comm_method(
-            mc2_tokens_capacity, self.vllm_config
-        ) in {MoECommType.MC2, MoECommType.FUSED_MC2}:
+        skip_mc2_profile = (
+            self.speculative_config is not None
+            and self.speculative_config.method == "dspark"
+        )
+        if (
+            not skip_mc2_profile
+            and mc2_tokens_capacity is not None
+            and self.max_num_tokens > mc2_tokens_capacity
+            and select_moe_comm_method(mc2_tokens_capacity, self.vllm_config)
+            in {MoECommType.MC2, MoECommType.FUSED_MC2}
+        ):
             self._dummy_run(mc2_tokens_capacity, with_prefill=True, is_profile=True)
         origin_max_num_tokens = self.max_num_tokens
         # in the pcp scenario, the split sequence needs to be used for profile run

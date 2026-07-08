@@ -970,17 +970,85 @@ class DeepseekV2DecoderLayer(nn.Module):
         self.hc_attn_scale = nn.Parameter(torch.empty(3, dtype=torch.float32))
         self.hc_ffn_scale = nn.Parameter(torch.empty(3, dtype=torch.float32))
 
-    def hc_pre(self, x: torch.Tensor, hc_fn: torch.Tensor, hc_scale: torch.Tensor, hc_base: torch.Tensor):
-        y = torch.ops._C_ascend.npu_hc_pre(
-            x, hc_fn, hc_scale, hc_base, self.hc_mult, self.hc_sinkhorn_iters, self.norm_eps, self.hc_eps
+    def _is_missing_hc_op(self, err: RuntimeError) -> bool:
+        msg = str(err)
+        return (
+            "aclnnHcPre" in msg
+            or "aclnnHcPost" in msg
+            or "npu_hc_pre" in msg
+            or "npu_hc_post" in msg
+            or "libopapi" in msg
         )
-        return y
+
+    def _warn_hc_fallback_once(self):
+        if getattr(self, "_hc_fallback_warned", False):
+            return
+        self._hc_fallback_warned = True
+        print("[DSV4] Ascend HC fused op unavailable; using torch HC fallback.", flush=True)
+
+    def _hc_pre_torch(self, x: torch.Tensor, hc_fn: torch.Tensor, hc_scale: torch.Tensor, hc_base: torch.Tensor):
+        shape, dtype = x.shape, x.dtype
+        hc_mult = self.hc_mult
+        flat_x = x.flatten(1).float()
+        rsqrt = torch.rsqrt(flat_x.square().mean(-1, keepdim=True) + self.norm_eps)
+        mixes = F.linear(flat_x, hc_fn.float())
+
+        pre_mix = mixes[:, :hc_mult]
+        post_mix = mixes[:, hc_mult : 2 * hc_mult]
+        comb_mix = mixes[:, 2 * hc_mult :].view(-1, hc_mult, hc_mult)
+
+        pre_base = hc_base[:hc_mult]
+        post_base = hc_base[hc_mult : 2 * hc_mult]
+        comb_base = hc_base[2 * hc_mult :].view(hc_mult, hc_mult)
+
+        pre = torch.sigmoid(pre_mix * rsqrt * hc_scale[0] + pre_base) + self.hc_eps
+        y = torch.sum(pre.unsqueeze(-1) * x.view(shape).float(), dim=1).to(dtype)
+
+        post = torch.sigmoid(post_mix * rsqrt * hc_scale[1] + post_base) * 2.0
+
+        comb_logits = comb_mix * rsqrt.view(-1, 1, 1) * hc_scale[2] + comb_base
+        comb = torch.softmax(comb_logits, dim=-1) + self.hc_eps
+        comb = comb / (comb.sum(dim=1, keepdim=True) + self.hc_eps)
+        for _ in range(max(int(self.hc_sinkhorn_iters) - 1, 0)):
+            comb = comb / (comb.sum(dim=-1, keepdim=True) + self.hc_eps)
+            comb = comb / (comb.sum(dim=1, keepdim=True) + self.hc_eps)
+        return y, post, comb
+
+    def _hc_post_torch(
+        self, x: torch.Tensor, residual: torch.Tensor, post: torch.Tensor, comb: torch.Tensor
+    ) -> torch.Tensor:
+        y = torch.einsum("tih,tij->tjh", residual.float(), comb.float())
+        y = y + x.float().unsqueeze(1) * post.float().unsqueeze(-1)
+        return y.to(x.dtype)
+
+    def hc_pre(self, x: torch.Tensor, hc_fn: torch.Tensor, hc_scale: torch.Tensor, hc_base: torch.Tensor):
+        if getattr(self, "_use_torch_hc_pre", False):
+            return self._hc_pre_torch(x, hc_fn, hc_scale, hc_base)
+        try:
+            return torch.ops._C_ascend.npu_hc_pre(
+                x, hc_fn, hc_scale, hc_base, self.hc_mult, self.hc_sinkhorn_iters, self.norm_eps, self.hc_eps
+            )
+        except RuntimeError as err:
+            if not self._is_missing_hc_op(err):
+                raise
+            self._use_torch_hc_pre = True
+            self._warn_hc_fallback_once()
+            return self._hc_pre_torch(x, hc_fn, hc_scale, hc_base)
 
     def hc_post(self, x: torch.Tensor, residual: torch.Tensor, post: torch.Tensor, comb: torch.Tensor):
-        y = torch.ops._C_ascend.npu_hc_post(
-            x.unsqueeze(dim=0), residual.unsqueeze(dim=0), post.unsqueeze(dim=0), comb.unsqueeze(dim=0)
-        )
-        return y.squeeze(dim=0)
+        if getattr(self, "_use_torch_hc_post", False):
+            return self._hc_post_torch(x, residual, post, comb)
+        try:
+            y = torch.ops._C_ascend.npu_hc_post(
+                x.unsqueeze(dim=0), residual.unsqueeze(dim=0), post.unsqueeze(dim=0), comb.unsqueeze(dim=0)
+            )
+            return y.squeeze(dim=0)
+        except RuntimeError as err:
+            if not self._is_missing_hc_op(err):
+                raise
+            self._use_torch_hc_post = True
+            self._warn_hc_fallback_once()
+            return self._hc_post_torch(x, residual, post, comb)
 
     def forward(
         self,
@@ -1039,6 +1107,20 @@ class DeepseekV4Model(nn.Module):
         # Expose at model level so spec_decode/llm_base_proposer can share
         # this buffer with the MTP draft via attribute replacement.
         self.topk_indices_buffer = topk_indices_buffer
+
+        self._dspark_target_layer_ids = tuple(
+            int(layer_id)
+            for layer_id in (getattr(config, "dspark_target_layer_ids", None) or ())
+        )
+        if self._dspark_target_layer_ids:
+            self._dspark_hidden_buffer = torch.empty(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                len(self._dspark_target_layer_ids) * config.hidden_size,
+                dtype=vllm_config.model_config.dtype,
+                device=self.device,
+            )
+        else:
+            self._dspark_hidden_buffer = None
 
         # EAGLE3 / DSpark aux-hidden-state taps. Empty tuple => fully inert.
         self.aux_hidden_state_layers: tuple[int, ...] = ()
@@ -1141,15 +1223,44 @@ class DeepseekV4Model(nn.Module):
         else:
             llama_4_scaling = None
 
+        from vllm_ascend.ascend_forward_context import get_forward_context
+
+        forward_ctx = get_forward_context()
+
+        def maybe_gather_full_tokens(tensor: torch.Tensor) -> torch.Tensor:
+            if forward_ctx is not None and forward_ctx.flash_comm_v1_enabled:
+                tensor = tensor_model_parallel_all_gather(tensor, dim=0)
+                pad_size = forward_ctx.pad_size
+                if pad_size > 0:
+                    tensor = tensor[:-pad_size]
+            return tensor
+
         aux_hidden_states: list[torch.Tensor] = []
         if get_pp_group().is_first_rank:
             hidden_states = hidden_states.unsqueeze(1).repeat(1, self.hc_mult, 1)  # (b, s, h) -> (b, s, c, h)
+        dspark_hiddens: list[torch.Tensor] = []
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states, residual = layer(positions, hidden_states, residual, llama_4_scaling)
             if self.aux_hidden_state_layers and layer.layer_idx in self.aux_hidden_state_layers:
                 # HC-form [T, hc_mult, hidden], already post-residual -> mean over
                 # hc copies -> [T, hidden] so runner's cat(dim=-1) = [T, hidden*N].
                 aux_hidden_states.append(hidden_states.mean(dim=1))
+            if (
+                self._dspark_hidden_buffer is not None
+                and layer.layer_idx in self._dspark_target_layer_ids
+            ):
+                dspark_hiddens.append(
+                    maybe_gather_full_tokens(hidden_states.mean(dim=1))
+                )
+
+        if (
+            self._dspark_hidden_buffer is not None
+            and len(dspark_hiddens) == len(self._dspark_target_layer_ids)
+        ):
+            dspark_hidden_states = torch.cat(dspark_hiddens, dim=-1)
+            self._dspark_hidden_buffer[
+                : dspark_hidden_states.shape[0]
+            ].copy_(dspark_hidden_states)
 
         # Stash pre-hc_head residual for the MTP draft (captured copy_).
         # When FlashComm1 (sequence parallelism) is enabled, tokens are
@@ -1158,9 +1269,6 @@ class DeepseekV4Model(nn.Module):
         # MTP layers receive the full token set — otherwise only rank 0's
         # partition is valid and the rest of the buffer holds stale data,
         # leading to NaN values and low acceptance rate.
-        from vllm_ascend.ascend_forward_context import get_forward_context
-
-        forward_ctx = get_forward_context()
         if forward_ctx is not None and forward_ctx.flash_comm_v1_enabled:
             h_states_flat = tensor_model_parallel_all_gather(hidden_states.flatten(1), dim=0)
             pad_size = forward_ctx.pad_size
@@ -1315,6 +1423,14 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
         hc_mult * hidden_size) for the MTP draft model. Populated by
         forward(); valid after each target step."""
         return getattr(self.model, "_mtp_hidden_buffer", None)
+
+    def get_dspark_target_hidden_states(self) -> torch.Tensor | None:
+        """Mean-HC hidden states from ``dspark_target_layer_ids``.
+
+        DSpark consumes the concatenation of configured target-layer hidden
+        states, not the MTP pre-hc_head residual stream.
+        """
+        return getattr(self.model, "_dspark_hidden_buffer", None)
 
     # ---- EAGLE3 / DSpark auxiliary hidden-state interface ----
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:

@@ -125,9 +125,13 @@ class DeepSeekV4DSparkModel(nn.Module):
         self.hc_eps = config.hc_eps
         self.block_size = config.dspark_block_size          # gamma = 5
         self.noise_token_id = config.dspark_noise_token_id  # 128799
-        self.target_layer_ids = list(config.dspark_target_layer_ids)  # [40,41,42]
+        self.target_layer_ids = list(getattr(config, "dspark_target_layer_ids", []) or [])
+        if not self.target_layer_ids:
+            raise ValueError(
+                "DSpark requires dspark_target_layer_ids in the draft config.")
         self.markov_rank = config.dspark_markov_rank        # 256
-        self.n_stages = config.n_mtp_layers                 # 3
+        self.n_stages = int(
+            getattr(config, "n_mtp_layers", None) or len(self.target_layer_ids))
         self.base_layer_id = config.num_hidden_layers       # 43
 
         # QUAROT_PATCH_V1: QuaRot anti-rotation for the DSpark context path.

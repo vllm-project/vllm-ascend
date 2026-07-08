@@ -9,6 +9,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import vllm.distributed.parallel_state as _parallel_state
 from vllm.config import CompilationMode, CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
 from vllm.distributed.parallel_state import (
     get_pcp_group,
@@ -16,7 +17,6 @@ from vllm.distributed.parallel_state import (
     get_tp_group,
     get_world_group,
     init_model_parallel_group,
-    patch_tensor_parallel_group,
 )
 from vllm.forward_context import BatchDescriptor, ForwardContext, get_forward_context
 from vllm.logger import logger
@@ -53,6 +53,21 @@ from vllm_ascend.distributed.parallel_state import get_lmhead_tp_group
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 from vllm_ascend.utils import enable_sp, lmhead_tp_enable, shared_expert_dp_enabled
+
+try:
+    from vllm.distributed.parallel_state import patch_tensor_parallel_group
+except ImportError:
+
+    @contextmanager
+    def patch_tensor_parallel_group(tp_group):
+        old_tp_group = _parallel_state.get_tp_group()
+        _parallel_state._TP_STATE_PATCHED = True
+        _parallel_state._TP = tp_group
+        try:
+            yield
+        finally:
+            _parallel_state._TP_STATE_PATCHED = False
+            _parallel_state._TP = old_tp_group
 
 # Currently we will fix block size to a small one since `num_reqs` can't be too large
 _PREPARE_INPUTS_BLOCK_SIZE = 4
@@ -138,6 +153,26 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         # Assign runner before it's used in the methods below
         self.runner = runner
+
+        # vLLM's DeepSeek-V4 MTP path expands hidden_size to hc_mult * hidden
+        # because MTP consumes the pre-hc_head residual. DSpark first projects
+        # the configured target-layer concat back to the draft hidden basis, so
+        # downstream buffers and assertions must stay at the draft hidden size.
+        if self.method == "dspark":
+            dspark_hidden_size = self.draft_model_config.get_hidden_size()
+            if self.hidden_size != dspark_hidden_size:
+                self.hidden_size = dspark_hidden_size
+                self.hidden_states = torch.zeros(
+                    (self.max_num_tokens, self.hidden_size),
+                    dtype=self.dtype,
+                    device=device,
+                )
+                if self.parallel_drafting_hidden_state_tensor is not None:
+                    self.parallel_drafting_hidden_state_tensor = torch.empty(
+                        self.hidden_size,
+                        dtype=self.dtype,
+                        device=self.device,
+                    )
 
         logger.debug(
             "[spec_decode/base] Initializing spec decode proposer: method=%s,"
