@@ -22,6 +22,7 @@ from copy import copy
 from typing import Any, cast
 
 import torch
+import vllm
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -37,10 +38,11 @@ from vllm.v1.worker.gpu.spec_decode.autoregressive import (  # type: ignore[impo
 from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
+from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
-from vllm_ascend.worker.v2.spec_decode.eagle.aclgraph import PrefillEagleAclGraphManager
+from vllm_ascend.worker.v2.spec_decode.eagle.aclgraph import DecodeEagleAclGraphManager, PrefillEagleAclGraphManager
 
+_BUILD_ATTN_METADATA_MODULE = vllm.v1.worker.gpu.spec_decode.speculator
 
 logger = logging.getLogger(__name__)
 
@@ -371,6 +373,17 @@ class AscendEagleSpeculator(EagleSpeculator):
         assert self.input_batch is not None
         seq_lens_cpu = torch.from_numpy(self.input_batch.seq_lens_np)
         return seq_lens_cpu
+
+
+@contextmanager
+def build_attn_metadata_wrapper():
+    """Context manager to override attention metadata building for Ascend NPUs."""
+    original_func = _BUILD_ATTN_METADATA_MODULE.build_attn_metadata
+    try:
+        _BUILD_ATTN_METADATA_MODULE.build_attn_metadata = build_attn_metadata
+        yield
+    finally:
+        _BUILD_ATTN_METADATA_MODULE.build_attn_metadata = original_func
 
 
 # TODO Remove this patch when cann fix the gather bug.
