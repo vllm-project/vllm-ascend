@@ -1,7 +1,6 @@
 import pytest
 
-from tests.e2e.weekly.single_node.engine_func_test_robot.utility import assertion
-from tests.e2e.weekly.single_node.engine_func_test_robot.utility import completion_request
+from tests.e2e.weekly.single_node.engine_func_test_robot.utility import assertion, completion_request
 
 
 @pytest.mark.parametrize(
@@ -12,7 +11,7 @@ from tests.e2e.weekly.single_node.engine_func_test_robot.utility import completi
         [],
         [{"type": "text", "text": "Hello."}],
         [{"type": "text", "text": "Hello."}, {"type": "text", "text": "Continue."}],
-        "Line1\nLine2\tTabbed\"Quoted\"\\Backslash",
+        'Line1\nLine2\tTabbed"Quoted"\\Backslash',
         "A" * 5000,
     ],
     ids=["string", "empty_string", "empty_array", "text_object", "many_text_objects", "escaped", "long_text"],

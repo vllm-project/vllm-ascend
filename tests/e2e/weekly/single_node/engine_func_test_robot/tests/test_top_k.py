@@ -1,7 +1,6 @@
 import pytest
 
-from tests.e2e.weekly.single_node.engine_func_test_robot.utility import assertion
-from tests.e2e.weekly.single_node.engine_func_test_robot.utility import completion_request
+from tests.e2e.weekly.single_node.engine_func_test_robot.utility import assertion, completion_request
 
 
 @pytest.mark.parametrize("top_k", [1, 50, -1], ids=["min", "typical", "disabled"])

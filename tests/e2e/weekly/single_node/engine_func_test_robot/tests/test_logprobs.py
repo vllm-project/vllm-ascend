@@ -1,7 +1,6 @@
 import pytest
 
-from tests.e2e.weekly.single_node.engine_func_test_robot.utility import assertion
-from tests.e2e.weekly.single_node.engine_func_test_robot.utility import completion_request
+from tests.e2e.weekly.single_node.engine_func_test_robot.utility import assertion, completion_request
 
 
 @pytest.mark.parametrize("top_logprobs", [0, 5, 20], ids=["none", "typical", "max"])

@@ -1,7 +1,6 @@
 import pytest
 
-from tests.e2e.weekly.single_node.engine_func_test_robot.utility import assertion
-from tests.e2e.weekly.single_node.engine_func_test_robot.utility import completion_request
+from tests.e2e.weekly.single_node.engine_func_test_robot.utility import assertion, completion_request
 
 
 def _assert_choice_count(response, expected):
