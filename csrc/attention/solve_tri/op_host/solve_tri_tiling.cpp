@@ -6,7 +6,7 @@
  #include "register/op_impl_registry.h"
  #include "tiling/platform/platform_ascendc.h"
  #include <string>
- 
+
  namespace optiling {
  
  constexpr uint32_t INPUT_X_IDX = 0;
@@ -131,18 +131,20 @@ constexpr uint32_t ATTR_LAYOUT_IDX = 0;
      if (usedCoreNum > coreNum) usedCoreNum = coreNum;
      context->SetBlockDim(usedCoreNum);
  
-     // Workspace: 用于存储辅助矩阵 (-I, ZERO, +I) + 每核中转缓冲区
-     // 需要加上系统 workspace 大小
+     // Workspace: ascend950 全程片上缓存，仅预留系统 workspace；910b 需 GM 辅助矩阵中转区
      uint32_t sysWorkspaceSize = ascendcPlatform.GetLibApiWorkSpaceSize();
+     size_t* ws = context->GetWorkspaceSizes(1);
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+     ws[0] = sysWorkspaceSize;
+#else
      size_t sharedSize = 3 * chunkSize * chunkSize * sizeof(uint16_t);  // I + -I + ZERO
      size_t perCoreSize = 2 * chunkSize * chunkSize * sizeof(uint16_t);  // 每核 2 个中转区（X 流 + Y 流双缓冲）
      size_t userWorkspaceSize = sharedSize + usedCoreNum * perCoreSize;
      // 对齐到 512 字节
      userWorkspaceSize = ((userWorkspaceSize + 511) / 512) * 512;
      // 总 workspace = 用户 workspace + 系统 workspace
-     size_t* ws = context->GetWorkspaceSizes(1);
      ws[0] = userWorkspaceSize + sysWorkspaceSize;
- 
+#endif
      return ge::GRAPH_SUCCESS;
  }
  
@@ -156,6 +158,5 @@ constexpr uint32_t ATTR_LAYOUT_IDX = 0;
  IMPL_OP_OPTILING(SolveTri)
      .Tiling(SolveTriTilingFunc)
      .TilingParse<SolveTriCompileInfo>(SolveTriTilingParse);
- 
+
  }  // namespace optiling
- 
