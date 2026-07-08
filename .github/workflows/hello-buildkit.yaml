@@ -5,7 +5,7 @@ on:
 
 jobs:
   hello:
-    runs-on: [self-hosted, linux-aarch64-cpu-2-buildkit-gy006]
+    runs-on: linux-aarch64-cpu-2-buildkit-gy006
     steps:
       - name: Hello
         run: |
