@@ -1898,6 +1898,7 @@ def llama32_lora_files():
 
 @pytest.fixture(scope="session")
 def qwen35_text_lora_files():
+    return "/data1/workspace-py/qwen35-4b-text-only-sql-lora"
     return snapshot_download(repo_id="vllm-ascend/qwen35-4b-text-only-sql-lora")
 
 
