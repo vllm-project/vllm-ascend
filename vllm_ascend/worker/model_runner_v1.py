@@ -2769,22 +2769,24 @@ class NPUModelRunner(GPUModelRunner):
                     sampling_metadata=sampling_metadata,
                 )
 
-        if lmhead_tp_enable() and logits is not None:
-            logits = logits[: len(spec_decode_metadata.logits_indices)]
-        if self.input_batch.sampling_metadata.top_k is not None and is_reduce_sample_enabled():
-            max_topk = self.input_batch.top_k_cpu[self.input_batch.top_k_cpu < logits.shape[1]].max()
-            self.rejection_sampler.prepare_sampling(max_topk)
-        draft_probs = (
-            self._get_spec_decode_draft_probs(spec_decode_metadata)
-            if get_pp_group().world_size > 1
-            else None
-        )
-        sampler_output = self.rejection_sampler(
-            spec_decode_metadata,
-            draft_probs,
-            logits,
-            sampling_metadata,
-        )
+            if lmhead_tp_enable() and logits is not None:
+                logits = logits[: len(spec_decode_metadata.logits_indices)]
+            if self.input_batch.sampling_metadata.top_k is not None and reduce_sample_enabled():
+                max_topk = self.input_batch.top_k_cpu[self.input_batch.top_k_cpu < logits.shape[1]].max()
+                self.rejection_sampler.prepare_sampling(max_topk)
+            draft_probs = (
+                self._get_spec_decode_draft_probs(spec_decode_metadata)
+                if get_pp_group().world_size > 1
+                else None
+            )
+            sampler_output = self.rejection_sampler(
+                spec_decode_metadata,
+                draft_probs,
+                logits,
+                sampling_metadata,
+            )
+        finally:
+            set_reduce_sample_force_disabled(False)
         return sampler_output
 
     # TODO: remove this func after eagle_proposer is refactored and

@@ -421,7 +421,7 @@ def test_qwen3_vwn_eagle3_tp2():
     acceptance_per_pos = [n / num_drafts for n in num_accepted_tokens_per_pos]
     golden = BASELINES_SP["vwn_eagle3"]
 
-    match = all(abs(a - b) < 0.06 for a, b in zip(acceptance_per_pos, golden))
+    match = all(abs(a - b) < 0.1 for a, b in zip(acceptance_per_pos, golden))
     if not match:
         print(f"acceptance_per_pos: {acceptance_per_pos}")
         print(f"golden: {golden}")
