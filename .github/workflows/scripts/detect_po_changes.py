@@ -39,6 +39,15 @@ FRONTMATTER_DELIM = "---"
 FENCE_RE = __import__("re").compile(r"^(`{3,}|~{3,})")
 COMMENT_RE = __import__("re").compile(r"^<!--.*-->$")
 
+# MkDocs Material extensions that should be recognized but whose
+# translatable content is extracted as separate paragraphs.
+# - !!! type ["title"]   → admonition (note, warning, tip, etc.)
+# - ??? ["title"]        → collapsible/details
+# - === "tab label"      → content tabs
+ADMONITION_RE = __import__("re").compile(r'^!!!\s+\w+(\s+"[^"]*")?\s*$')
+DETAILS_RE = __import__("re").compile(r'^\?\?\?(\s+"[^"]*")?\s*$')
+TAB_RE = __import__("re").compile(r'^===\s+"[^"]*"\s*$')
+
 # Characters that indicate a line is purely structural (not translatable):
 #   - Markdown headings and list markers
 #   - Table separators
@@ -55,6 +64,11 @@ def _is_translatable_paragraph(paragraph: str) -> bool:
 
     # Skip pure markdown anchors like ``<a id="..."></a>``.
     if COMMENT_RE.match(text):
+        return False
+
+    # Skip MkDocs Material structural directives that have no
+    # translatable text content (e.g. bare "!!! note").
+    if ADMONITION_RE.match(text) and '"' not in text:
         return False
 
     # Count characters that typically appear in natural language.
@@ -191,8 +205,25 @@ def _relative_to_source(path: Path) -> str:
     return str(path.relative_to(SOURCE_DIR))
 
 
-def process_file(source_path: Path, dry_run: bool = False) -> bool:
+def _write_po_from_paragraphs(po_path: Path, rel: str, paragraphs: list[str], dry_run: bool = False) -> bool:
+    """Write a fresh .po file from extracted paragraphs, discarding any existing translations."""
+    header = _po_header(str(rel))
+    body_entries = "\n\n".join(f'msgid "{p.replace(chr(34), chr(92) + chr(34))}"\nmsgstr ""' for p in paragraphs)
+    if dry_run:
+        print(f"  [DRY-RUN] Would force-regenerate: {po_path} ({len(paragraphs)} entries)")
+        return True
+    po_path.parent.mkdir(parents=True, exist_ok=True)
+    po_path.write_text(header + body_entries + "\n", encoding="utf-8")
+    print(f"  Force-regenerated: {po_path} ({len(paragraphs)} entries)")
+    return True
+
+
+def process_file(source_path: Path, dry_run: bool = False, force: bool = False) -> bool:
     """Create or update the .po file for *source_path*.
+
+    If *force* is True, the entire .po file is regenerated from the source
+    markdown, discarding any existing translations.  Otherwise only new
+    paragraphs are appended and existing translations are preserved.
 
     Returns True if the .po file was created or modified and contains
     at least one untranslated entry.
@@ -209,39 +240,99 @@ def process_file(source_path: Path, dry_run: bool = False) -> bool:
     if not paragraphs:
         return False
 
-    if not po_path.exists():
-        # Create new .po file.
-        header = _po_header(str(rel))
-        body_entries = "\n\n".join(f'msgid "{p.replace(chr(34), chr(92) + chr(34))}"\nmsgstr ""' for p in paragraphs)
-        if dry_run:
-            print(f"  [DRY-RUN] Would create: {po_path}")
-            return True
-        po_path.parent.mkdir(parents=True, exist_ok=True)
-        po_path.write_text(header + body_entries + "\n", encoding="utf-8")
-        print(f"  Created: {po_path} ({len(paragraphs)} entries)")
-        return True
+    if force and po_path.exists():
+        return _write_po_from_paragraphs(po_path, str(rel), paragraphs, dry_run)
 
-    # Update existing .po file.
+    if not po_path.exists():
+        return _write_po_from_paragraphs(po_path, str(rel), paragraphs, dry_run)
+
+    # Incremental update: detect new, removed, and modified paragraphs.
     po = pofile(str(po_path))
-    existing_msgids = {entry.msgid for entry in po if entry.msgid}
+    entries_by_msgid: dict[str, POEntry] = {}
+    for entry in po:
+        if entry.msgid:
+            entries_by_msgid[entry.msgid] = entry
 
     new_count = 0
+    modified_count = 0
+    removed_count = 0
+
     for para in paragraphs:
-        if para not in existing_msgids:
+        if para in entries_by_msgid:
+            continue
+        # Check if this is a modification of an existing paragraph
+        # (similar msgid that got updated in the source).
+        matched = _find_similar_entry(para, entries_by_msgid)
+        if matched is not None:
+            old_entry = entries_by_msgid.pop(matched)
+            new_entry = _build_po_entry(para)
+            new_entry.msgstr = ""  # force re-translation for modified paragraph
+            po.append(new_entry)
+            modified_count += 1
+        else:
             po.append(_build_po_entry(para))
-            existing_msgids.add(para)
             new_count += 1
 
-    if new_count == 0:
+    # Mark paragraphs that no longer exist in source as obsolete.
+    # Any entry still in entries_by_msgid is not in the new paragraphs list.
+    for old_entry in entries_by_msgid.values():
+        old_entry.obsolete = True
+        removed_count += 1
+
+    change_count = new_count + modified_count + removed_count
+    if change_count == 0:
         return _has_empty_msgstr(po)
 
     if dry_run:
-        print(f"  [DRY-RUN] Would add {new_count} entries to: {po_path}")
+        parts = []
+        if new_count:
+            parts.append(f"+{new_count} new")
+        if modified_count:
+            parts.append(f"~{modified_count} modified")
+        if removed_count:
+            parts.append(f"-{removed_count} removed")
+        print(f"  [DRY-RUN] Would update: {po_path} ({', '.join(parts)})")
         return True
 
     po.save(str(po_path))
-    print(f"  Updated: {po_path} (+{new_count} new entries)")
+    parts = []
+    if new_count:
+        parts.append(f"+{new_count} new")
+    if modified_count:
+        parts.append(f"~{modified_count} modified")
+    if removed_count:
+        parts.append(f"-{removed_count} removed")
+    print(f"  Updated: {po_path} ({', '.join(parts)})")
     return True
+
+
+def _find_similar_entry(new_para: str, entries: dict[str, POEntry]) -> str | None:
+    """Check if *new_para* is likely a modified version of an existing entry.
+
+    Returns the msgid of the matching entry, or None.
+    Uses a simple heuristic: the first non-trivial line of each paragraph
+    must be identical, which handles cases where a paragraph was edited
+    by adding/removing lines in the middle or end.
+    """
+    new_first = _first_significant_line(new_para)
+    if not new_first:
+        return None
+    for msgid in entries:
+        if _first_significant_line(msgid) == new_first:
+            return msgid
+    return None
+
+
+def _first_significant_line(text: str) -> str:
+    """Return the first non-empty, non-link-reference line of *text*."""
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("[") and stripped.endswith(")") and "](" in stripped:
+            continue
+        return stripped
+    return ""
 
 
 def _has_empty_msgstr(po: POFile) -> bool:
@@ -261,6 +352,11 @@ def main() -> int:
         action="store_true",
         help="Do not write .po files, just report changes.",
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Force full regeneration of ALL .po files, discarding existing translations.",
+    )
     args = parser.parse_args()
 
     # Collect English markdown files.
@@ -276,10 +372,13 @@ def main() -> int:
 
     print(f"Scanning {len(en_files)} English markdown files...")
 
+    if args.force:
+        print("--force enabled: regenerating ALL .po files from scratch")
+
     needs_translation: list[str] = []
     for source_path in en_files:
         try:
-            if process_file(source_path, dry_run=args.dry_run):
+            if process_file(source_path, dry_run=args.dry_run, force=args.force):
                 rel = _relative_to_source(source_path)
                 po_rel = str(LOCALE_DIR / Path(rel).with_suffix(".po"))
                 needs_translation.append(po_rel)
