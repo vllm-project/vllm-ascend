@@ -44,12 +44,7 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         block_tables: Any,
     ) -> None:
         super().set_attn(model_state, kv_cache_config, block_tables)
-        self._context_slot_mappings = torch.zeros(
-            len(self.draft_kv_cache_group_ids),
-            self.max_num_tokens,
-            dtype=torch.int32,
-            device=self.device,
-        )
+        self._context_slot_mappings = self._context_slot_mappings.to(torch.int32)
 
     def propose(
         self,
