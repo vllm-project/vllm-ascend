@@ -42,14 +42,14 @@ _server_cmd: &server_cmd
 _benchmarks: &benchmarks
       perf:
         case_type: performance
-        dataset_path: vllm-ascend/GSM8K-in131072-bs100-qwen3
+        dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs100_qwen
         request_conf: vllm_api_stream_chat
         dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-        num_prompts: 8
+        num_prompts: 16
         max_out_len: 1024
-        batch_size: 2
+        batch_size: 4
         request_rate: 0
-        baseline: 1
+        baseline: 165.23
         threshold: 0.97
 
 
@@ -63,7 +63,7 @@ _benchmarks_bs144: &benchmarks_bs144
       max_out_len: 1024
       batch_size: 36
       request_rate: 0
-      baseline: 1
+      baseline: 630.88
       threshold: 0.97
 
 _benchmarks_bs36: &benchmarks_bs36
@@ -76,7 +76,7 @@ _benchmarks_bs36: &benchmarks_bs36
       max_out_len: 1024
       batch_size: 9
       request_rate: 0
-      baseline: 1
+      baseline: 336.80
       threshold: 0.97
 
 _benchmarks_bs48: &benchmarks_bs48
@@ -89,7 +89,7 @@ _benchmarks_bs48: &benchmarks_bs48
       max_out_len: 512
       batch_size: 12
       request_rate: 0
-      baseline: 1
+      baseline: 180.60
       threshold: 0.97
 
 _benchmarks_bs16: &benchmarks_bs16
@@ -102,7 +102,7 @@ _benchmarks_bs16: &benchmarks_bs16
       max_out_len: 512
       batch_size: 4
       request_rate: 0
-      baseline: 1
+      baseline: 118.17
       threshold: 0.97
 
 
@@ -116,7 +116,7 @@ _benchmarks_bs160: &benchmarks_bs160
       max_out_len: 512
       batch_size: 40
       request_rate: 0
-      baseline: 1
+      baseline: 689.71
       threshold: 0.97
 
 _benchmarks_bs32: &benchmarks_bs32
@@ -129,7 +129,7 @@ _benchmarks_bs32: &benchmarks_bs32
       max_out_len: 512
       batch_size: 8
       request_rate: 0
-      baseline: 1
+      baseline: 303.07
       threshold: 0.97
 
 _benchmarks_bs8: &benchmarks_bs8
@@ -142,7 +142,7 @@ _benchmarks_bs8: &benchmarks_bs8
       max_out_len: 1024
       batch_size: 2
       request_rate: 0
-      baseline: 1
+      baseline: 93.10
       threshold: 0.97
 
 _benchmarks_bs32_in65536: &benchmarks_bs32_in65536
@@ -155,7 +155,7 @@ _benchmarks_bs32_in65536: &benchmarks_bs32_in65536
       max_out_len: 1024
       batch_size: 8
       request_rate: 0
-      baseline: 1
+      baseline: 160.55
       threshold: 0.97
 
 _benchmarks_bs136: &benchmarks_bs136
@@ -168,7 +168,7 @@ _benchmarks_bs136: &benchmarks_bs136
       max_out_len: 1024
       batch_size: 34
       request_rate: 0
-      baseline: 1
+      baseline: 618.66
       threshold: 0.97
 
 _benchmarks_bs16_in65536: &benchmarks_bs16_in65536
@@ -181,7 +181,7 @@ _benchmarks_bs16_in65536: &benchmarks_bs16_in65536
       max_out_len: 1024
       batch_size: 4
       request_rate: 0
-      baseline: 1
+      baseline: 198.87
       threshold: 0.97
 
 _benchmarks_bs80: &benchmarks_bs80
@@ -194,7 +194,7 @@ _benchmarks_bs80: &benchmarks_bs80
     max_out_len: 1024
     batch_size: 20
     request_rate: 0
-    baseline: 1
+    baseline: 335.95
     threshold: 0.97
 
 # ==========================================

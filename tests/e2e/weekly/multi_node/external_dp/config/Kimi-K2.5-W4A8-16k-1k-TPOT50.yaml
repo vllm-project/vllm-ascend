@@ -57,7 +57,7 @@ env_common: &env_common
   TASK_QUEUE_ENABLE: "1"
   ASCEND_BUFFER_POOL: "4:8"
   ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
-
+  VLLM_USE_MODELSCOPE: "true"
 env_prefill: &env_prefill
   <<: *env_common
   HCCL_BUFFSIZE: "256"
