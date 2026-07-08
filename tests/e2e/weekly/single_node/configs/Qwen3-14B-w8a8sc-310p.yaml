@@ -1,0 +1,58 @@
+# ==========================================
+# ACTUAL TEST CASES
+# ==========================================
+
+test_cases:
+  - name: "qwen3-14b"
+    model: "Eco-Tech/Qwen3-14B-w8a8sc-310-vllm/TP1/Qwen3-14B-w8a8sc-310-vllm-tp1"
+    envs:
+      SERVER_PORT: "DEFAULT_PORT"
+    server_cmd:
+      - "--port"
+      - "$SERVER_PORT"
+      - "--tensor-parallel-size"
+      - "1"
+      - "--gpu-memory-utilization"
+      - "0.8"
+      - "--max-num-seqs"
+      - "32"
+      - "--dtype"
+      - "float16"
+      - "--quantization"
+      - "ascend"
+      - "--max-model-len"
+      - "20480"
+      - "--no-enable-prefix-caching"
+      - "--load_format"
+      - "sharded_state"
+      - "--compilation-config"
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[1,4,8,16,24,32]}'
+      - "--additional-config"
+      - '{"ascend_compilation_config":{"enable_npugraph_ex":false, "fuse_norm_quant": false}}'
+      - "--default-chat-template-kwargs"
+      - '{"enable_thinking": false}'
+
+    benchmarks:
+      perf:
+        case_type: performance
+        dataset_path: vllm-ascend/GSM8K-in512-bs100-qwen3
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 4
+        max_out_len: 512
+        batch_size: 1
+        request_rate: 0
+        baseline: 10.7
+        threshold: 0.95
+      acc:
+        case_type: accuracy
+        dataset_path: vllm-ascend/SuperGLUE
+        request_conf: vllm_api_general_chat
+        dataset_conf: BoolQ/SuperGLUE_BoolQ_gen_0_shot_cot_str
+        max_out_len: 10240
+        batch_size: 32
+        baseline: 89.3
+        threshold: 1
+        temperature: 0
+        top_p: 0.95
+        ignore_eos: false

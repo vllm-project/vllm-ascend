@@ -86,3 +86,20 @@ a3:
       - name: MiniMax-M2.5-w8a8
         os: linux-aarch64-a3-16
         config_file_path: MiniMax-M2.5-W8A8-A3.yaml
+
+310p:
+  single_node:
+    test_config:
+      # pytest-driven tests
+      - name: engine-func-tests
+        os: linux-aarch64-310p-4
+        tests: tests/e2e/weekly/single_node/engine_func_test_robot
+      - name: Qwen3-8B-w8a8sc-310p
+        os: linux-aarch64-310p-4
+        config_file_path: Qwen3-8B-w8a8sc-310p.yaml
+      - name: Qwen3-14B-w8a8sc-310p
+        os: linux-aarch64-310p-4
+        config_file_path: Qwen3-14B-w8a8sc-310p.yaml
+      - name: Qwen3-32B-w8a8sc-310p
+        os: linux-aarch64-310p-4
+        config_file_path: Qwen3-32B-w8a8sc-310p.yaml

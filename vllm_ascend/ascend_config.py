@@ -138,7 +138,7 @@ class AscendConfig:
                 )
         self.multistream_overlap_shared_expert = additional_config.get("multistream_overlap_shared_expert", False)
         self.multistream_overlap_gate = additional_config.get("multistream_overlap_gate", False)
-        # PD-disaggregated only (kv_producer/kv_consumer); invalid in PD-mixed (kv_both / no kv_transfer_config).
+        # PD-disaggregated D node only (kv_consumer); invalid on P nodes and in PD-mixed mode.
         self.recompute_scheduler_enable = additional_config.get("recompute_scheduler_enable", False)
         # DSV4 oproj / embedding fine-grained TP (oproj_tensor_parallel_size /
         # embedding_tensor_parallel_size) use static, graph-stable exchange
@@ -294,8 +294,8 @@ class AscendConfig:
         # are dropped and skipped from computation, degrading accuracy.
         # Do not set this too large: workspace memory scales linearly with this value, which matters
         # especially under long-context scenarios where the operator should not hold too much memory.
-        # Default 65536.
-        self.mega_moe_max_tokens = additional_config.get("mega_moe_max_tokens", 65536)
+        # Default 131072.
+        self.mega_moe_max_tokens = additional_config.get("mega_moe_max_tokens", 131072)
         if not isinstance(self.mega_moe_max_tokens, int):
             raise ValueError(
                 f"mega_moe_max_tokens must be an integer, got {type(self.mega_moe_max_tokens).__name__}: "
