@@ -174,10 +174,6 @@ def test_manager_uses_npu_graph_in_capture_budget_graph():
 
     fake_graph = MagicMock()
     with (
-        patch(
-            "vllm_ascend.worker.encoder_acl_graph.vllm_version_is",
-            return_value=False,
-        ),
         patch("vllm_ascend.worker.encoder_acl_graph.torch.npu.NPUGraph", return_value=fake_graph),
         patch("vllm_ascend.worker.encoder_acl_graph.torch.npu.graph"),
         patch(
