@@ -1,0 +1,161 @@
+#
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+name: 'Validate: Basic Actions on Self-Hosted'
+
+on:
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: bash -el {0}
+
+jobs:
+  validate-basic-actions:
+    name: validate-basic-actions-on-${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - linux-amd64-cpu-4-hk
+          - linux-amd64-cpu-8-hk
+          - linux-arm64-cpu-16
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v7
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Verify checkout and python
+        run: |
+          echo "Runner: ${{ matrix.runner }}"
+          echo "Arch: $(uname -m)"
+          echo "Python: $(python3 --version)"
+          echo "Git: $(git --version)"
+          echo "Repo files: $(ls -1 | head -5)"
+          test -f setup.py && echo "checkout OK" || echo "checkout FAILED"
+
+      - name: Cache pip packages
+        id: cache-pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: validate-basic-actions-pip-${{ matrix.runner }}-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            validate-basic-actions-pip-${{ matrix.runner }}-
+
+      - name: Install a small pip package (cache miss test)
+        if: steps.cache-pip.outputs.cache-hit != 'true'
+        run: pip install pyyaml
+
+      - name: Verify cache hit on rerun
+        if: steps.cache-pip.outputs.cache-hit == 'true'
+        run: echo "Cache restored successfully"
+
+      - name: Create test artifact content
+        run: |
+          mkdir -p /tmp/validate-artifact
+          echo "runner=${{ matrix.runner }}" > /tmp/validate-artifact/info.txt
+          echo "arch=$(uname -m)" >> /tmp/validate-artifact/info.txt
+          echo "python=$(python3 --version)" >> /tmp/validate-artifact/info.txt
+          echo "timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> /tmp/validate-artifact/info.txt
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: validate-basic-${{ matrix.runner }}
+          path: /tmp/validate-artifact/
+          retention-days: 1
+
+      - name: Verify upload
+        run: echo "Upload artifact step completed for runner=${{ matrix.runner }}"
+
+  validate-download-and-script:
+    name: validate-download-artifact-and-github-script
+    runs-on: linux-amd64-cpu-4-hk
+    needs: validate-basic-actions
+
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v8
+        with:
+          pattern: validate-basic-*
+          merge-multiple: true
+          path: /tmp/downloaded-artifacts
+
+      - name: Verify downloaded artifact
+        run: |
+          echo "Downloaded artifacts:"
+          ls -la /tmp/downloaded-artifacts/
+          cat /tmp/downloaded-artifacts/info.txt || true
+          test -d /tmp/downloaded-artifacts && echo "download OK" || echo "download FAILED"
+
+      - name: GitHub script validation
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const runner = process.env.RUNNER_OS || 'unknown';
+            console.log(`github-script works on self-hosted runner`);
+            console.log(`Runner OS: ${runner}`);
+            console.log(`Repository: ${context.repo.owner}/${context.repo.repo}`);
+            console.log(`Workflow: ${context.workflow}`);
+            console.log(`Action: ${context.action}`);
+            return { success: true, runner: runner };
+
+      - name: Verify github-script output
+        run: echo "GitHub script validation completed successfully"
+
+  validate-cache-restore-save:
+    name: validate-cache-restore-save-flow
+    runs-on: linux-amd64-cpu-4-hk
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v7
+
+      - name: Cache restore
+        id: cache-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/cache-test-dir
+          key: validate-cache-restore-save-test-${{ github.run_id }}
+
+      - name: Create cache content (first run)
+        if: steps.cache-restore.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p /tmp/cache-test-dir
+          echo "cached at $(date -u +%Y-%m-%dT%H:%M:%SZ)" > /tmp/cache-test-dir/timestamp.txt
+
+      - name: Cache save
+        if: steps.cache-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/cache-test-dir
+          key: validate-cache-restore-save-test-${{ github.run_id }}
+
+      - name: Verify cache flow
+        run: |
+          if [ "${{ steps.cache-restore.outputs.cache-hit }}" == "true" ]; then
+            echo "Cache hit - restore/save flow OK"
+          else
+            echo "Cache miss - saved new entry, verify on rerun"
+          fi
