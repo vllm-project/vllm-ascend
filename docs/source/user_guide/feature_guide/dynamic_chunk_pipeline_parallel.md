@@ -6,16 +6,24 @@
 
 ## Overview
 
-Dynamic Chunked Pipeline Parallel (CPP) is a profiling-based dynamic chunking strategy that optimizes prefill performance for long sequences in Pipeline Parallelism (PP) scenarios.
+Dynamic Chunked Pipeline Parallel (CPP) is a profiling-based dynamic chunking strategy that optimizes prefill performance for long sequences in Pipeline Parallelism (PP) scenarios. **CPP is designed to be used on the Prefiller (P) node in Prefill-Decode (PD) disaggregation deployments.** By dynamically calculating the optimal chunk size based on profiling data, CPP significantly reduces Time-To-First-Token (TTFT) for long sequences on P nodes.
+
+:::{important}
+CPP should be configured on the **P (Prefiller) node** in a PD disaggregation setup. The D (Decoder) node does not require CPP configuration. For PD disaggregation deployment guidance, refer to the tutorials below:
+
+- [PD Disaggregation Single Node (Qwen2.5-VL)](../../tutorials/features/pd_disaggregation_mooncake_single_node.md)
+- [PD Disaggregation Multi Node (Deepseek)](../../tutorials/features/pd_disaggregation_mooncake_multi_node.md)
+:::
 
 ### When to Use
 
+- **PD disaggregation P node**: Enables CPP on the Prefiller node to optimize long-sequence prefill with Pipeline Parallelism. The Decoder node does not need CPP.
 - **Variable-length sequence serving**: PP does not introduce degradation on short sequences, and gains benefits through dynamic chunks on long sequences.
 - **Ultra-long sequence inference**: For sequences exceeding single-machine memory capacity (e.g., 1M tokens), dynamic chunking significantly reduces pipeline idle time.
 
 ## Supported Scenarios
 
-Currently CPP mainly focuses on optimization during the prefill phase. It is better to be used in PD disaggregation scenarios. Supported features are as follows:
+CPP focuses on optimization during the prefill phase on the **P node in PD disaggregation** scenarios. It is better to be used in PD disaggregation scenarios. Supported features are as follows:
 
 |         | Eager | Graph | Prefix <br> Cache | Chunked <br> Prefill |
 | ------- | ----- | ----- | ------ | ------ |
@@ -23,47 +31,117 @@ Currently CPP mainly focuses on optimization during the prefill phase. It is bet
 
 ## How to Enable
 
-### Online Serving
+### PD Disaggregation Deployment Example
 
-```bash
+In a PD disaggregation setup, enable CPP **only on the P (Prefiller) node**. Below is a complete example using the MooncakeConnector for a **1P1D** architecture.
+
+Note:
+
+- It is currently known that `async-scheduling` may cause performance degradation in the prefill stage of PP, and `async-scheduling` provides minimal benefit to prefill. Therefore, it is currently recommended not to enable asynchronous scheduling on P nodes of PP.
+- It is recommended to use `MooncakeConnectorV1` as the `kv_connector`, as it provides more comprehensive support for PP.
+
+:::::{tab-set}
+
+::::{tab-item} P Node (Prefiller — with CPP)
+
+```shell
+# For nic_name, run the `ifconfig` command to check the network adapter whose IP address is the same as that of the local host.
+nic_name=<COMMAND_RESULT>
+local_ip=<YOUR_MACHINE_IP>
+
+export HCCL_IF_IP=$local_ip
+export GLOO_SOCKET_IFNAME=$nic_name 
+export TP_SOCKET_IFNAME=$nic_name
+export HCCL_SOCKET_IFNAME=$nic_name
 export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+
 vllm serve Qwen/Qwen3-30B-A3B \
-    --port <YOUR_PORT> \
+    --host 0.0.0.0 \
+    --port 13700 \
     --tensor-parallel-size 2 \
     --pipeline-parallel-size 2 \
-    --enable-chunked-prefill \
     --enforce-eager \
-    --max-model-len 131072  \
+    --max-model-len 131072 \
     --max-num-batched-tokens 32768 \
-    --no-enable-prefix-caching \
+    --enable-prefix-caching \
     --no-async-scheduling \
-    --additional-config '{"profiling_chunk_config": {"enabled": true}}'
+    --additional-config '{"profiling_chunk_config": {"enabled": true}}' \
+    --kv-transfer-config \
+    '{
+        "kv_connector": "MooncakeConnectorV1",
+        "kv_role": "kv_producer",
+        "kv_port": "30000",
+        "engine_id": "0",
+        "kv_connector_extra_config": {
+            "prefill": {
+                "pp_size": 2,
+                "dp_size": 1,
+                "tp_size": 2
+            },
+            "decode": {
+                "dp_size": 2,
+                "tp_size": 2
+            }
+        }
+    }'
 ```
 
-### Offline Inference
+::::
 
-```python
-import os
-from vllm import LLM, SamplingParams
-os.environ["VLLM_ALLOW_LONG_MAX_MODEL_LEN"] = "1"
-prompts = [
-    "The future of AI is",
-]
-sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
+::::{tab-item} D Node (Decoder — without CPP)
 
-llm = LLM(
-    model="Qwen/Qwen3-30B-A3B",
-    tensor_parallel_size=2,
-    pipeline_parallel_size=2,
-    enforce_eager=True,
-    max_num_batched_tokens=32768,
-    max_model_len=131072,
-    enable_prefix_caching=False,
-    async_scheduling=False,
-    additional_config={"profiling_chunk_config": {"enabled": True}},
-)
-outputs = llm.generate(prompts, sampling_params)
+```shell
+# For nic_name, run the `ifconfig` command to check the network adapter whose IP address is the same as that of the local host.
+nic_name=<COMMAND_RESULT>
+local_ip=<YOUR_MACHINE_IP>
+
+export HCCL_IF_IP=$local_ip
+export GLOO_SOCKET_IFNAME=$nic_name 
+export TP_SOCKET_IFNAME=$nic_name
+export HCCL_SOCKET_IFNAME=$nic_name
+export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+
+vllm serve Qwen/Qwen3-30B-A3B \
+    --host 0.0.0.0 \
+    --port 13701 \
+    --data-parallel-size 2 \
+    --tensor-parallel-size 2 \
+    --enable-prefix-caching \
+    --max-model-len 131072 \
+    --max-num-batched-tokens 256 \
+    --gpu-memory-utilization 0.9 \
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+    --kv-transfer-config \
+    '{
+        "kv_connector": "MooncakeConnectorV1",
+        "kv_role": "kv_consumer",
+        "kv_port": "30000",
+        "engine_id": "0",
+        "kv_connector_extra_config": {
+            "prefill": {
+                "pp_size": 2,
+                "dp_size": 1,
+                "tp_size": 2
+            },
+            "decode": {
+                "dp_size": 2,
+                "tp_size": 2
+            }
+        }
+    }'
 ```
+
+::::
+
+:::::
+
+> **Key points for PD disaggregation with CPP:**
+>
+> - CPP (`profiling_chunk_config.enabled`, `--enable-chunked-prefill`, `--pipeline-parallel-size > 1`) is configured **only on the P node**.
+> - The D node runs without chunked prefill and without pipeline parallelism — it focuses on low-latency token-by-token decoding.
+> - For complete PD disaggregation setup instructions (environment verification, Mooncake installation, proxy deployment), see:
+>     - [PD Disaggregation Single Node](../../tutorials/features/pd_disaggregation_mooncake_single_node.md)
+>     - [PD Disaggregation Multi Node](../../tutorials/features/pd_disaggregation_mooncake_multi_node.md)
 
 ## Configuration Parameters
 
