@@ -494,6 +494,10 @@ class KVCacheRecvingThread(threading.Thread):
             else 0
         )
         self.use_mla = self.model_config.is_deepseek_mla
+        self.use_sparse = hasattr(self.vllm_config.model_config.hf_text_config, "index_topk")
+        self.sfa_dcp_replicate_k = self.use_sparse and (self.vllm_config.additional_config or {}).get(
+            "sfa_dcp_replicate_k", False
+        )
         self.is_hma_required = is_hma_required
         self.block_size = self.vllm_config.cache_config.block_size
         try:
@@ -544,6 +548,8 @@ class KVCacheRecvingThread(threading.Thread):
         remote_port_send_num: dict[int, RemotePortInfo] | None = None,
         num_computed_tokens: int = 0,
         all_task_done: bool = False,
+        local_block_ids_replicate_k: BlockIds | None = None,
+        remote_block_ids_replicate_k: BlockIds | None = None,
     ):
         """Add a new request to the queue for processing."""
         if remote_port_send_num is None:
@@ -552,6 +558,8 @@ class KVCacheRecvingThread(threading.Thread):
             "request_id": request_id,
             "local_block_ids": local_block_ids,
             "remote_block_ids": remote_block_ids,
+            "local_block_ids_replicate_k": local_block_ids_replicate_k or tuple(),
+            "remote_block_ids_replicate_k": remote_block_ids_replicate_k or tuple(),
             "group_pulls": group_pulls,
             "remote_engine_id": remote_engine_id,
             "remote_request_id": remote_request_id,
@@ -733,6 +741,8 @@ class KVCacheRecvingThread(threading.Thread):
         remote_request_id = req_meta["remote_request_id"]
         local_block_ids: BlockIds = req_meta["local_block_ids"]
         remote_block_ids: BlockIds = req_meta["remote_block_ids"]
+        local_block_ids_replicate_k: BlockIds = req_meta.get("local_block_ids_replicate_k", tuple())
+        remote_block_ids_replicate_k: BlockIds = req_meta.get("remote_block_ids_replicate_k", tuple())
         group_pulls: list[GroupPull] = req_meta["group_pulls"]
         remote_engine_id = req_meta["remote_engine_id"]
         remote_host = req_meta["remote_host"]
@@ -811,6 +821,12 @@ class KVCacheRecvingThread(threading.Thread):
                 grouped_remote_block_ids = [[remote_group_block_ids[transfer_block_idx]]]
                 grouped_local_block_ids = [[local_group_block_ids[0]]]
 
+            if self.sfa_dcp_replicate_k and local_block_ids_replicate_k:
+                grouped_remote_k_block_ids, grouped_local_k_block_ids = group_concurrent_contiguous(
+                    remote_block_ids_replicate_k[0],
+                    local_block_ids_replicate_k[0],
+                )
+
             if is_mamba_group:
                 for layer_idx in layer_indices:
                     start_meta_idx = len(src_list)
@@ -856,13 +872,20 @@ class KVCacheRecvingThread(threading.Thread):
                     block_stride = self.block_stride_per_addr[layer_idx][cache_idx]
                     remote_block_stride = remote_block_stride_per_addr[layer_idx][cache_idx]
                     inner_block_len = block_len // tp_num_need_pulls
-                    transfer_remote_block_ids, transfer_local_block_ids = split_if_not_byte_contiguous(
-                        grouped_remote_block_ids,
-                        grouped_local_block_ids,
-                        src_block_stride=remote_block_stride,
-                        dst_block_stride=block_stride,
-                        block_len=inner_block_len,
-                    )
+                    if self.sfa_dcp_replicate_k and self.block_size_scale[layer_idx][cache_idx] > 1:
+                        if local_block_ids_replicate_k:
+                            transfer_remote_block_ids = grouped_remote_k_block_ids
+                            transfer_local_block_ids = grouped_local_k_block_ids
+                        else:
+                            continue
+                    else:
+                        transfer_remote_block_ids, transfer_local_block_ids = split_if_not_byte_contiguous(
+                            grouped_remote_block_ids,
+                            grouped_local_block_ids,
+                            src_block_stride=remote_block_stride,
+                            dst_block_stride=block_stride,
+                            block_len=inner_block_len,
+                        )
                     for remote_block_id, local_block_id in zip(transfer_remote_block_ids, transfer_local_block_ids):
                         src = src_layer_base_addr + local_block_id[0] * block_stride + inner_offset * inner_block_len
                         dst = dst_layer_base_addr + remote_block_id[0] * remote_block_stride
@@ -2225,6 +2248,9 @@ class MooncakeConnectorWorker:
         """Register the KV Cache data."""
         self.use_mla = self.vllm_config.model_config.is_deepseek_mla
         self.use_sparse = hasattr(self.vllm_config.model_config.hf_text_config, "index_topk")
+        self.sfa_dcp_replicate_k = self.use_sparse and (self.vllm_config.additional_config or {}).get(
+            "sfa_dcp_replicate_k", False
+        )
 
         self.num_blocks = self.kv_cache_config.num_blocks
         logger.info("num_blocks: %s", self.num_blocks)
@@ -3183,6 +3209,92 @@ class MooncakeConnectorWorker:
             tp_num_need_pulls=num_group_pulls,
             use_mla=num_key_value_heads == 1,
         )[self.tp_rank]
+    def _get_sfa_replicate_k_remote_handshake_port(
+        self,
+        meta: ReqMeta,
+    ) -> int | None:
+        if not self.sfa_dcp_replicate_k:
+            return None
+        remote_cp_size = meta.remote_pcp_size * meta.remote_dcp_size
+        local_cp_size = self.pcp_size * self.dcp_size
+        if local_cp_size == 0 or remote_cp_size % local_cp_size != 0:
+            raise AssertionError(
+                f"SFA replicate-K expects remote cp size({remote_cp_size}) to be divisible by "
+                f"local cp size({local_cp_size})."
+            )
+        local_cp_rank = self.dcp_rank + self.pcp_rank * self.dcp_size
+        remote_cp_rank = local_cp_rank * (remote_cp_size // local_cp_size)
+        return meta.remote_port + remote_cp_rank
+
+    def _get_sfa_replicate_k_block_ids(
+        self,
+        meta: ReqMeta,
+    ) -> tuple[BlockIds, BlockIds]:
+        if not self.sfa_dcp_replicate_k:
+            return tuple(), tuple()
+        if meta.num_external_tokens <= 0 or not meta.remote_block_ids or not meta.local_block_ids:
+            return tuple(), tuple()
+
+        if len(meta.remote_block_ids) != 1 or len(meta.local_block_ids) != 1:
+            raise AssertionError(
+                "SFA replicate-K currently expects exactly one KV cache group. "
+                f"Got remote groups={len(meta.remote_block_ids)}, local groups={len(meta.local_block_ids)}."
+            )
+
+        remote_cp_size = meta.remote_pcp_size * meta.remote_dcp_size
+        local_cp_size = self.pcp_size * self.dcp_size
+        if local_cp_size == 0 or remote_cp_size % local_cp_size != 0:
+            raise AssertionError(
+                f"SFA replicate-K expects remote cp size({remote_cp_size}) to be divisible by "
+                f"local cp size({local_cp_size})."
+            )
+
+        num_prefix_cached_blocks = min(meta.num_computed_tokens // self.block_size, meta.num_prompt_blocks)
+        num_external_blocks = meta.num_prompt_blocks - num_prefix_cached_blocks
+        num_external_blocks_from_tokens = math.ceil(meta.num_external_tokens / self.block_size)
+        if num_external_blocks < num_external_blocks_from_tokens:
+            raise AssertionError(
+                f"num_external_blocks({num_external_blocks}) derived from num_computed_tokens "
+                f"must cover num_external_blocks_from_tokens({num_external_blocks_from_tokens})."
+            )
+
+        def expand_cp_group_blocks(block_ids: list[int], cp_size: int) -> list[int]:
+            expanded_blocks: list[int] = []
+            for block_id in block_ids:
+                start_block = int(block_id) * cp_size
+                expanded_blocks.extend(range(start_block, start_block + cp_size))
+            return expanded_blocks
+
+        remote_expanded = expand_cp_group_blocks(list(meta.remote_block_ids[0]), remote_cp_size)
+        local_external_expanded = expand_cp_group_blocks(list(meta.local_block_ids[0]), local_cp_size)
+        local_external_expanded = local_external_expanded[:num_external_blocks]
+        local_full_expanded = [-1] * num_prefix_cached_blocks + local_external_expanded
+
+        # The expanded lists are already in no-CP block units, so the prefix
+        # offset is the original no-CP block count directly.
+        remote_start_idx = num_prefix_cached_blocks
+        remote_external_expanded = remote_expanded[remote_start_idx:]
+        remote_external_expanded = remote_external_expanded[: len(local_external_expanded)]
+        local_external_expanded = local_external_expanded[: len(remote_external_expanded)]
+
+        logger.debug(
+            "Mooncake SFA replicate-K block ids prepared. remote_cp_size=%s local_cp_size=%s "
+            "num_prompt_blocks=%s num_computed_tokens=%s num_external_blocks=%s "
+            "num_external_blocks_from_tokens=%s num_prefix_cached_blocks=%s local_full_len=%s "
+            "local_external_len=%s remote_external_len=%s",
+            remote_cp_size,
+            local_cp_size,
+            meta.num_prompt_blocks,
+            meta.num_computed_tokens,
+            num_external_blocks,
+            num_external_blocks_from_tokens,
+            num_prefix_cached_blocks,
+            len(local_full_expanded),
+            len(local_external_expanded),
+            len(remote_external_expanded),
+        )
+
+        return (local_external_expanded,), (remote_external_expanded,)
 
     def start_load_kv(self, metadata: MooncakeConnectorMetadata):
         """Start loading KV blocks from remote engine."""
@@ -3205,12 +3317,31 @@ class MooncakeConnectorWorker:
 
             remote_req_id = meta.remote_request_id
             prefill_tp_size: int = meta.remote_ptp_size if meta.remote_ptp_size is not None else self._prefill_tp_size
+            replicate_k_remote_port = self._get_sfa_replicate_k_remote_handshake_port(meta)
+            (
+                local_block_ids_replicate_k,
+                remote_block_ids_replicate_k,
+            ) = self._get_sfa_replicate_k_block_ids(meta)
 
             (
                 remote_handshake_port_list,
                 local_block_ids_list,
                 remote_block_ids_list,
             ) = self._get_kv_split_metadata(remote_req_id, meta)
+            replicate_k_transfer_port = replicate_k_remote_port
+            has_replicate_k_blocks = any(local_block_ids_replicate_k) and any(remote_block_ids_replicate_k)
+            if replicate_k_remote_port is not None and has_replicate_k_blocks:
+                remote_transfer_ports = [port for remote_ports in remote_handshake_port_list for port in remote_ports]
+                if replicate_k_remote_port not in remote_transfer_ports:
+                    replicate_k_transfer_port = remote_transfer_ports[0] if remote_transfer_ports else None
+                    if replicate_k_transfer_port is not None:
+                        logger.warning(
+                            "Mooncake SFA replicate-K remote port %s is not in normal KV transfer ports %s. "
+                            "Use existing remote port %s because K cache is replicated on P workers.",
+                            replicate_k_remote_port,
+                            remote_transfer_ports,
+                            replicate_k_transfer_port,
+                        )
             group_pulls_list = self._get_group_pulls_metadata(
                 remote_req_id,
                 remote_handshake_port_list,
@@ -3235,6 +3366,16 @@ class MooncakeConnectorWorker:
                         if meta.remote_pcp_size * meta.remote_dcp_size > 1
                         else None
                     )
+                    local_block_ids_replicate_k_for_port = (
+                        local_block_ids_replicate_k
+                        if replicate_k_transfer_port is not None and remote_handshake_port == replicate_k_transfer_port
+                        else None
+                    )
+                    remote_block_ids_replicate_k_for_port = (
+                        remote_block_ids_replicate_k
+                        if replicate_k_transfer_port is not None and remote_handshake_port == replicate_k_transfer_port
+                        else None
+                    )
                     self.kv_recv_thread.add_request(
                         request_id=req_id,
                         remote_request_id=remote_req_id,
@@ -3251,6 +3392,8 @@ class MooncakeConnectorWorker:
                             and remote_tp_offset == len(remote_ports) - 1
                         ),
                         remote_block_size=meta.remote_block_size,
+                        local_block_ids_replicate_k=local_block_ids_replicate_k_for_port,
+                        remote_block_ids_replicate_k=remote_block_ids_replicate_k_for_port,
                     )
 
         if self.kv_send_thread is not None and self.pcp_size * self.dcp_size == 1:
