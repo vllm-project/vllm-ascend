@@ -31,11 +31,12 @@ function(gen_opbuild_target)
     -fno-common
   )
 
+  string(REPLACE ";" "\;" _opbuild_product_name "${ASCEND_COMPUTE_UNIT}")
   add_custom_command(OUTPUT ${OPBUILD_OUT_SRCS} ${OPBUILD_OUT_HEADERS}
                      COMMAND OPS_PROTO_SEPARATE=1
                              OPS_PROJECT_NAME=${OPBUILD_PREFIX}
                              OPS_ACLNN_GEN=${OPBUILD_GENACLNN}
-                             OPS_PRODUCT_NAME=\"${ASCEND_COMPUTE_UNIT}\"
+                             OPS_PRODUCT_NAME=\"${_opbuild_product_name}\"
                              ${OP_BUILD_TOOL}
                              $<TARGET_FILE:gen_op_host_${OPBUILD_PREFIX}>
                              ${OPBUILD_OUT_DIR}/${OPBUILD_OUT_SUB_DIR}
