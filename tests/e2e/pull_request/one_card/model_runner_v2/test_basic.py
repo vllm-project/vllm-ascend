@@ -110,6 +110,7 @@ def test_egale_spec_decoding(
         model,
         max_model_len=1024,
         enforce_eager=enforce_eager,
+        disable_log_stats=False,
         async_scheduling=True,
         speculative_config={
             "model": eagle_model,

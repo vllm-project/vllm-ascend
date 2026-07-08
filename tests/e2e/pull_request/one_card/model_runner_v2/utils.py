@@ -17,9 +17,11 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 
 def calculate_acceptance_per_pos(
-    metrics: list,
+    metrics: list[Any],
     num_speculative_tokens: int,
     counter_type: type,
     vector_type: type,
@@ -29,9 +31,9 @@ def calculate_acceptance_per_pos(
     for metric in metrics:
         if metric.name == "vllm:spec_decode_num_drafts":
             assert isinstance(metric, counter_type)
-            num_drafts += metric.value  # type: ignore[attr-defined]
+            num_drafts += metric.value
         elif metric.name == "vllm:spec_decode_num_accepted_tokens_per_pos":
             assert isinstance(metric, vector_type)
-            for pos in range(len(metric.values)):  # type: ignore[attr-defined]
-                accepted_per_pos[pos] += metric.values[pos]  # type: ignore[attr-defined]
+            for pos in range(len(metric.values)):
+                accepted_per_pos[pos] += metric.values[pos]
     return [a / num_drafts for a in accepted_per_pos]

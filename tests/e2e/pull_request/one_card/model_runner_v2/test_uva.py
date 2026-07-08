@@ -22,6 +22,7 @@ import pytest
 from vllm import SamplingParams
 
 from tests.e2e.conftest import VllmRunner
+from tests.e2e.pull_request.one_card.model_runner_v2.utils import calculate_acceptance_per_pos
 from vllm_ascend.utils import vllm_version_is
 
 MODELS = ["Qwen/Qwen3-0.6B"]
@@ -101,6 +102,7 @@ def test_egale_spec_decoding(
         model,
         max_model_len=1024,
         enforce_eager=enforce_eager,
+        disable_log_stats=False,
         async_scheduling=True,
         speculative_config={
             "model": eagle_model,
@@ -110,4 +112,22 @@ def test_egale_spec_decoding(
         compilation_config=compilation_config,
     ) as runner:
         runner.model.generate(prompts, sampling_params)
+
+    metrics = runner.model.get_metrics()
+    num_drafts = 0
+    acceptance_counts = [0] * num_speculative_tokens
+    for metric in metrics:
+        if metric.name == "vllm:spec_decode_num_drafts":
+            assert isinstance(metric, Counter)
+            num_drafts += metric.value
+        elif metric.name == "vllm:spec_decode_num_accepted_tokens_per_pos":
+            assert isinstance(metric, Vector)
+            for pos in range(len(metric.values)):
+                acceptance_counts[pos] += metric.values[pos]
+
+    print("-" * 60)
+    for i in range(num_speculative_tokens):
+        rate = acceptance_counts[i] / num_drafts if num_drafts > 0 else 0
+        print(f"acceptance at token {i}: {rate:.4f}")
+    print("-" * 60)
 
