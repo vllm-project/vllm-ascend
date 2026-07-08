@@ -379,8 +379,8 @@ def get_packed_modules_mapping(model_type: str) -> dict[str, list[str]]:
     return packed_modules_model_mapping.get(model_type, {})
 
 
-def _is_missing_k_eq_v_shard(shard_key: str, quant_description: Mapping[str, Any]) -> bool:
-    """Return whether the missing shard matches Gemma4's k_eq_v layout.
+def _is_missing_v_shard(shard_key: str, quant_description: Mapping[str, Any]) -> bool:
+    """Return whether the missing shard is Gemma4's replicated v_proj.
 
     k_eq_v layers do not have a dedicated v_proj entry because v_proj is
     replicated from k_proj at load time. Keep q_proj/k_proj mandatory so other
@@ -415,7 +415,7 @@ def get_linear_quant_type(
             shard_key = shard_prefix + ".weight"
             # Only Gemma4 k_eq_v is allowed to omit v_proj; other missing
             # shards fall through to the original dictionary lookup below.
-            if shard_key not in quant_description and _is_missing_k_eq_v_shard(shard_key, quant_description):
+            if shard_key not in quant_description and _is_missing_v_shard(shard_key, quant_description):
                 continue
             shard_quant_type = quant_description[shard_key]
 
@@ -744,9 +744,7 @@ class AscendModelSlimConfig(QuantizationConfig):
                 shard_key = shard_prefix + ".weight"
                 # Preserve the original failure behavior except for the known
                 # k_eq_v case where v_proj is replicated from k_proj.
-                if shard_key not in self.quant_description and _is_missing_k_eq_v_shard(
-                    shard_key, self.quant_description
-                ):
+                if shard_key not in self.quant_description and _is_missing_v_shard(shard_key, self.quant_description):
                     continue
                 is_shard_skipped = self.quant_description[shard_key] == "FLOAT"
 
