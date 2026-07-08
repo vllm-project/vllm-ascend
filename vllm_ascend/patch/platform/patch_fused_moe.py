@@ -35,6 +35,27 @@ if not vllm_version_is("0.23.0"):
 
     # Capture the real original before fused_moe.py's module-level code runs.
     _original_FusedMoE = _fused_moe_layer.FusedMoE
+    _original_make_expert_params_mapping = _fused_moe_layer.fused_moe_make_expert_params_mapping
+    _FUSED_MOE_ENABLE_EPLB_ARG_INDEX = 22
+    _FUSED_MOE_NUM_REDUNDANT_EXPERTS_ARG_INDEX = 23
+    _EXPERT_MAPPING_NUM_REDUNDANT_EXPERTS_ARG_INDEX = 5
+
+    def _replace_positional_arg(args, index, value):
+        if len(args) <= index:
+            return args, False
+        return (*args[:index], value, *args[index + 1:]), True
+
+    def _ascend_eplb_overrides() -> tuple[int, bool]:
+        from vllm_ascend.ascend_config import get_ascend_config
+
+        eplb_config = get_ascend_config().eplb_config
+        num_redundant_experts = int(eplb_config.num_redundant_experts)
+        enable_eplb = (
+            bool(eplb_config.dynamic_eplb)
+            or eplb_config.expert_map_path is not None
+            or num_redundant_experts > 0
+        )
+        return num_redundant_experts, enable_eplb
 
     if is_310p():
         from vllm_ascend._310p.fused_moe.fused_moe import AscendMoERunner310 as _DefaultAscendMoERunner
@@ -44,6 +65,17 @@ if not vllm_version_is("0.23.0"):
     def _ascend_FusedMoE(*args, runner_cls=None, runner_args=None, **kwargs):
         if runner_cls is None:
             runner_cls = _DefaultAscendMoERunner
+        ascend_redundant_experts, ascend_enable_eplb = _ascend_eplb_overrides()
+        if ascend_enable_eplb:
+            args, replaced = _replace_positional_arg(args, _FUSED_MOE_ENABLE_EPLB_ARG_INDEX, True)
+            if not replaced:
+                kwargs["enable_eplb"] = True
+        if ascend_redundant_experts > 0:
+            args, replaced = _replace_positional_arg(
+                args, _FUSED_MOE_NUM_REDUNDANT_EXPERTS_ARG_INDEX, ascend_redundant_experts
+            )
+            if not replaced:
+                kwargs["num_redundant_experts"] = ascend_redundant_experts
         # 'hash' is a DeepSeek V4 flag already consumed before FusedMoE is called;
         # 'tid2eid' is Ascend-specific and must reach AscendMoERunner via runner_args.
         kwargs.pop("hash", None)
@@ -53,5 +85,22 @@ if not vllm_version_is("0.23.0"):
             runner_args["tid2eid"] = tid2eid
         return _original_FusedMoE(*args, runner_cls=runner_cls, runner_args=runner_args, **kwargs)
 
+    def _ascend_make_expert_params_mapping(*args, **kwargs):
+        ascend_redundant_experts, _ = _ascend_eplb_overrides()
+        if ascend_redundant_experts > 0:
+            # vLLM sees Ascend's redundant expert count for metadata and
+            # allocation, while Ascend EPLB loads checkpoint weights through
+            # logical expert ids and places duplicates via expert_map.
+            args, replaced = _replace_positional_arg(
+                args,
+                _EXPERT_MAPPING_NUM_REDUNDANT_EXPERTS_ARG_INDEX,
+                0,
+            )
+            if not replaced:
+                kwargs["num_redundant_experts"] = 0
+        return _original_make_expert_params_mapping(*args, **kwargs)
+
     _fused_moe_layer.FusedMoE = _ascend_FusedMoE
     _fused_moe_pkg.FusedMoE = _ascend_FusedMoE
+    _fused_moe_layer.fused_moe_make_expert_params_mapping = _ascend_make_expert_params_mapping
+    _fused_moe_pkg.fused_moe_make_expert_params_mapping = _ascend_make_expert_params_mapping

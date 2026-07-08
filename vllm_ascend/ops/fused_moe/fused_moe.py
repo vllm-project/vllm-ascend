@@ -392,6 +392,7 @@ else:
 
             if mix_placement:
                 moe_config.num_experts += n_shared_experts
+                moe_config.num_logical_experts += n_shared_experts
 
             (
                 self.global_expert_map,
@@ -408,15 +409,23 @@ else:
             )
 
             moe_config.global_redundant_expert_num = self.global_redundant_expert_num
-            local_num_experts = (moe_config.num_experts + self.global_redundant_expert_num) // moe_config.ep_size
+            logical_num_experts = int(getattr(moe_config, "num_logical_experts", moe_config.num_experts))
+            global_num_experts = logical_num_experts + self.global_redundant_expert_num
+            moe_config.num_experts = global_num_experts
+            local_num_experts = global_num_experts // moe_config.ep_size
             moe_config.num_local_experts = local_num_experts
             routed_experts.expert_map_manager._local_num_experts = local_num_experts
             routed_experts.expert_map_manager._expert_map = self._expert_map
+            routed_experts.update_expert_map_info()
+            self.local_num_experts = local_num_experts
+            self.global_num_experts = global_num_experts
+            self.ep_rank = moe_config.ep_rank
+            self.ep_size = moe_config.ep_size
 
             self.dynamic_eplb = eplb_config.dynamic_eplb and (self.log2phy is not None)
             self.multi_stage = False
             self.moe_load = torch.zeros(local_num_experts, dtype=torch.int64).npu()
-            if self.dynamic_eplb and eplb_config.expert_heat_collection_interval > 1:
+            if self.dynamic_eplb and eplb_config.eplb_policy_type == 3:
                 self.multi_stage = True
                 self.load_counter = torch.tensor(0, dtype=torch.int32, device="npu")
                 self.num_iter = eplb_config.expert_heat_collection_interval
@@ -499,6 +508,43 @@ else:
 
             return quant_type
 
+        def __getattr__(self, name: str):
+            try:
+                return super().__getattr__(name)
+            except AttributeError as exc:
+                forwarded_expert_attrs = {
+                    "w13_weight",
+                    "w2_weight",
+                    "w13_bias",
+                    "w2_bias",
+                    "w13_weight_list",
+                    "w2_weight_list",
+                    "w13_weight_scale",
+                    "w2_weight_scale",
+                    "w13_weight_scale_list",
+                    "w2_weight_scale_list",
+                    "w13_weight_scale_fp32",
+                    "w13_weight_scale_fp32_list",
+                    "w13_scale_bias",
+                    "w2_scale_bias",
+                    "w13_scale_bias_list",
+                    "w2_scale_bias_list",
+                    "fused_w1_scale",
+                    "fused_w2_scale",
+                    "fused_w1_scale_list",
+                    "fused_w2_scale_list",
+                }
+                if name not in forwarded_expert_attrs:
+                    raise exc
+                modules = self.__dict__.get("_modules")
+                routed_experts = modules.get("routed_experts") if modules is not None else None
+                if routed_experts is not None:
+                    try:
+                        return getattr(routed_experts, name)
+                    except AttributeError:
+                        pass
+                raise exc
+
         @property
         def is_internal_router(self) -> bool:
             gate = self.gate
@@ -541,6 +587,25 @@ else:
         ) -> torch.Tensor:
             states = torch.ops.vllm.maybe_all_reduce_tensor_model_parallel(states)
             return states[..., :trunc_size]
+
+        def update_expert_map(self, new_expert_map: torch.Tensor | None = None):
+            if new_expert_map is None:
+                self.routed_experts.update_expert_map()
+                self._expert_map = self.routed_experts.expert_map_manager.expert_map
+                return
+
+            self._expert_map = new_expert_map
+            self.routed_experts.expert_map_manager._expert_map = new_expert_map
+            self.routed_experts.update_expert_map_info()
+
+        def get_log2phy_map(self):
+            return self.log2phy
+
+        def clear_moe_load(self):
+            if self.moe_load is not None:
+                self.moe_load.zero_()
+            if self.multi_stage:
+                self.load_counter.zero_()
 
         def no_shared_forward_impl(  # type: ignore[override]
             self, hidden_states: torch.Tensor, router_logits: torch.Tensor, return_with_event: bool = False

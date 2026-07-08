@@ -871,6 +871,39 @@ def _is_ascend_config_initialized(config: AscendConfig | None) -> bool:
     return hasattr(config, "ascend_compilation_config") and hasattr(config, "eplb_config")
 
 
+def _sync_ascend_eplb_config_to_vllm(vllm_config, ascend_config: AscendConfig) -> None:
+    parallel_config = getattr(vllm_config, "parallel_config", None)
+    if parallel_config is None:
+        return
+
+    eplb_config = ascend_config.eplb_config
+    num_redundant_experts = int(eplb_config.num_redundant_experts)
+    enable_eplb = (
+        bool(eplb_config.dynamic_eplb)
+        or eplb_config.expert_map_path is not None
+        or num_redundant_experts > 0
+    )
+    if not enable_eplb:
+        return
+
+    if not getattr(parallel_config, "enable_eplb", False):
+        logger.info_once(
+            "Sync Ascend EPLB config to vLLM: enable_eplb=True."
+        )
+        parallel_config.enable_eplb = True
+
+    vllm_eplb_config = getattr(parallel_config, "eplb_config", None)
+    if vllm_eplb_config is None or num_redundant_experts <= 0:
+        return
+
+    if vllm_eplb_config.num_redundant_experts != num_redundant_experts:
+        logger.info_once(
+            "Sync Ascend EPLB config to vLLM: num_redundant_experts=%s.",
+            num_redundant_experts,
+        )
+        vllm_eplb_config.num_redundant_experts = num_redundant_experts
+
+
 def init_ascend_config(vllm_config):
     additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
     refresh = additional_config.get("refresh", False) if additional_config else False
@@ -883,6 +916,7 @@ def init_ascend_config(vllm_config):
     ):
         return _ASCEND_CONFIG
     new_config = AscendConfig(vllm_config)
+    _sync_ascend_eplb_config_to_vllm(vllm_config, new_config)
     if _is_ascend_config_initialized(new_config):
         _ASCEND_CONFIG = new_config
     else:
