@@ -17,11 +17,10 @@ from vllm.distributed.parallel_state import (
     get_world_group, init_afd_process_group, init_model_parallel_group)
 from vllm.config import VllmConfig, CUDAGraphMode, CompilationMode
 from vllm.sequence import IntermediateTensors
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.forward_context import get_forward_context
 from vllm_ascend.distributed.metadata import NPUP2PAFDConnectorMetadata
 
-logger = init_logger(__name__)
 
 
 class DefaultProcessGroupSwitcher:
@@ -572,7 +571,7 @@ class NPUP2PAFDConnector(AFDConnectorBase):
                                        dtype=torch.long,
                                        device="npu")
 
-            logger.debug(
+            logger.info(
                 "send_dp_metadata_list dst:%s is_graph_capturing:%s is_warmup:%s",
                 dst, is_graph_capturing, is_warmup)
 
@@ -586,7 +585,7 @@ class NPUP2PAFDConnector(AFDConnectorBase):
             tuple: (data, is_graph_capturing, is_warmup)
         """
         src = self.p2p_rank % self.min_size + self.ffn_size
-        logger.debug(f"recv_dp_metadata_list src:{src}")
+        logger.info(f"recv_dp_metadata_list src:{src}")
 
         size_tensor = torch.empty(1, dtype=torch.long, device="npu")
         rank_size = torch.distributed.recv(size_tensor, src=src, group=self.p2p_pg)
@@ -607,7 +606,7 @@ class NPUP2PAFDConnector(AFDConnectorBase):
             data, is_graph_capturing = obj
             is_warmup = False
 
-        logger.debug("recv_dp_metadata_list is_graph_capturing:%s is_warmup:%s",
+        logger.info("recv_dp_metadata_list is_graph_capturing:%s is_warmup:%s",
                      is_graph_capturing, is_warmup)
 
         return data, is_graph_capturing, is_warmup
