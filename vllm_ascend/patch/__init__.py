@@ -269,7 +269,76 @@
 #
 # ** 10b. File: platform/patch_pp_mtp.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.config.model.ModelConfig.verify_with_parallel_config`
+#   1. `vllm.v1.outputs.ModelRunnerOutput`
+#    Why:
+#       PP + MTP mixed deployment needs the model runner to return the draft
+#       tokens produced for the same scheduler output. Upstream output objects
+#       do not carry `spec_token_ids` on all supported vLLM revisions.
+#    How：
+#       Add a backward-compatible `spec_token_ids` field to `ModelRunnerOutput`
+#       and `EMPTY_MODEL_RUNNER_OUTPUT` when the field is missing.
+#    Related PR (if no, explain why):
+#       Backport of local vLLM PP+MTP branch changes.
+#    Future Plan:
+#       Remove this patch once the supported vLLM version carries PP-safe
+#       speculative token metadata in `ModelRunnerOutput`.
+#
+#   2. `vllm.v1.engine.core.EngineCore.post_step`
+#    Why:
+#       With PP batch queue, synchronous scheduling can schedule the next batch
+#       before the previous model output is consumed. Calling `post_step` in that
+#       window updates `request.spec_token_ids` from live request state that may
+#       already belong to the newer schedule step.
+#    How：
+#       In PP + MTP + batch queue + sync scheduling, skip `post_step` after model
+#       execution and let scheduler output processing perform the spec token
+#       writeback from the corresponding `ModelRunnerOutput`.
+#    Related PR (if no, explain why):
+#       Backport of local vLLM PP+MTP branch changes.
+#    Future Plan:
+#       Remove this patch when upstream makes spec token writeback output-owned
+#       for PP batch queue.
+#
+#   3. `vllm.v1.core.sched.scheduler.Scheduler._update_after_schedule`
+#      `vllm.v1.core.sched.scheduler.Scheduler.update_from_output`
+#    Why:
+#       PP async scheduling must not schedule the same decode request again
+#       before the previous output has written sampled/spec tokens back. Without
+#       this request-level in-flight fence, the next step may use stale sampled
+#       tokens and produce incorrect target-model output. Intermediate prefill
+#       chunks do not depend on sampled/spec writeback and should remain
+#       schedulable to keep the PP pipeline filled.
+#    How：
+#       After scheduling, set a temporary decode fence for final prefill/decode
+#       chunks in PP IPC mode. Release the fence in `update_from_output` after
+#       the matching output is processed. For PP + MTP, also filter zero-token
+#       placeholder requests before delegating to upstream scheduler accounting,
+#       then write `request.spec_token_ids` from `model_runner_output.spec_token_ids`.
+#    Related PR (if no, explain why):
+#       Backport of local vLLM PP+MTP branch changes.
+#    Future Plan:
+#       Remove this patch once upstream supports request-level PP async fences
+#       and output-owned spec token writeback.
+#
+#   4. `vllm.v1.core.sched.scheduler.Scheduler._make_cached_request_data`
+#    Why:
+#       Upstream PP async scheduling relies on direct PP-rank GPU broadcast for
+#       sampled-token handoff and omits `new_token_ids` from cached request data.
+#       vLLM Ascend routes PP sampled-token handoff through scheduler IPC, so
+#       non-last PP ranks need the previous sampled token in both sync and async
+#       scheduling. This also avoids copying draft tokens as confirmed tokens in
+#       PP + MTP mixed deployment.
+#    How：
+#       Temporarily build cached request data with sync-PP semantics in PP IPC
+#       mode, then fill the last confirmed output token for requests whose
+#       clamped upstream slice is empty.
+#    Related PR (if no, explain why):
+#       Backport of local vLLM PP+MTP branch changes.
+#    Future Plan:
+#       Remove this patch once upstream provides a scheduler-owned PP sampled
+#       token handoff path that works for both sync and async scheduling.
+#
+#   5. `vllm.config.model.ModelConfig.verify_with_parallel_config`
 #    Why:
 #       Local Eagle/MTP drafters are loaded on the last PP stage rather than
 #       partitioned across all PP ranks. Upstream `ModelConfig.verify_with_parallel_config`
@@ -829,44 +898,7 @@
 #    Future Plan:
 #       Remove this patch when:
 #       vLLM itself supports kv transfer for mamba
-# ** 21. File: worker/patch_weight_utils.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.models.deepseek_v2.DeepseekV2ForCausalLM.load_weights`
-#    Why:
-#       The C8 weight quantized by modelslim will modify the model structure,
-#       and the scale and offset required for kvcache quantization will increase.
-#       In addition, the names of the quantization parameters are different from
-#       those in the community.
-#    How：
-#       we have enhanced the maybe_remap_kv_scale_name function.
-#    Future Plan:
-#       The maybe_remap_kv_scale_name function of the community is reconstructed to support
-#       multiple backends.
-# ** 21b. File: worker/patch_process_weights_after_loading.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.model_loader.utils.process_weights_after_loading`
-#      `vllm.model_executor.model_loader.base_loader.process_weights_after_loading`
-#      and imported references in vllm-ascend model loaders
-#    Why:
-#       DSA attention is implemented in vllm-ascend as the plugin layer
-#       `DSAAttention`. Upstream vLLM only runs post-load attention weight
-#       processing for built-in attention classes, so
-#       `DSAAttention.process_weights_after_loading()` is skipped in the
-#       original loader flow. DSV4 DSA-CP o-proj TP initialization must run in
-#       this post-load phase rather than being initialized lazily in forward.
-#    How:
-#       Rebind the upstream `process_weights_after_loading` helper, including
-#       already-imported loader references, so `DSAAttention` participates in
-#       the same post-load traversal while preserving the original quant-method
-#       and torchao reload behavior.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm-ascend/pull/10694
-#       https://github.com/vllm-project/vllm/pull/46828
-#    Future Plan:
-#       Remove this patch once the supported vLLM version includes PR #46828.
-#       Then register `DSAAttention` through vLLM's post-load weight-processing
-#       registry instead of monkey-patching model-loader helpers.
-# ** 22. File: worker/patch_v2/patch_input_batch.py**
+# ** 21. File: worker/patch_v2/patch_input_batch.py
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.input_batch.InputBatch`
 #    Why:
@@ -876,7 +908,7 @@
 #       replace InputBatch with AscendInputBatch.
 #    Future Plan:
 #       remove this patch when vLLM-ascend's make_dummy behavior aligns with vLLM.
-# ** 23. File: worker/patch_v2/patch_block_table.py**
+# ** 22. File: worker/patch_v2/patch_block_table.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.block_table.BlockTables`
 #    Why:
@@ -888,7 +920,7 @@
 #    Future Plan:
 #       remove this patch when vLLM-ascend's BlockTables can initialize
 #       slot mapping as torch.int64 dtype.
-# ** 24. File: worker/patch_v2/patch_model_state.py**
+# ** 23. File: worker/patch_v2/patch_model_state.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.model_states.default.init_model_state`
 #    Why:
@@ -898,7 +930,7 @@
 #       Define AscendModelState and initialize it in init_model_state.
 #    Future Plan:
 #       remove this when vllm-ascend's attention metadata is align with vllm.
-# ** 25. File: worker/patch_v2/patch_triton.py**
+# ** 24. File: worker/patch_v2/patch_triton.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.sample.logprob`, `vllm.v1.worker.gpu.sample.penalties.apply_penalties`,
 #      `vllm.v1.worker.gpu.sample.gumbel.gumbel_sample`
@@ -911,30 +943,7 @@
 #    Future Plan:
 #       Remove this patch when vLLM support the dispatch function.
 #
-# ** 26. File: worker/patch_gqa_c8.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.models.qwen3.Qwen3ForCausalLM.load_weights`
-#    Why:
-#       The GQA W8A8C8 model stores per-channel KV cache scales and offsets
-#       (k_cache_scale, k_cache_offset, v_cache_scale, v_cache_offset) under
-#       weight names that AutoWeightsLoader does not recognise and would
-#       silently discard.  Without these scales the INT8 KV cache cannot be
-#       dequantised correctly at inference time.
-#    How:
-#       Wrap load_weights to intercept the C8 scale/offset tensors before they
-#       reach the base loader.  Each intercepted tensor is routed to the
-#       corresponding nn.Parameter via its weight_loader, then excluded from
-#       the remaining weight stream so the base loader never sees it.
-#    Related PR (if no, explain why):
-#       This PR (Qwen3-32B and GLM4.7  W8A8C8 support).  Upstream vLLM's weight-loading
-#       pipeline does not yet have a generic hook for hardware-plugin-defined
-#       KV cache parameters.
-#    Future Plan:
-#       Remove this patch when vLLM provides a first-class extension point
-#       for loading extra KV cache quantisation parameters in model load_weights,
-#       or when the GQA model's weight names are aligned with the parameter
-#       names expected by the quantisation backend.
-# ** 27. File: worker/patch_qwen3vl.py**
+# ** 25. File: worker/patch_qwen3vl.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.qwen3.Qwen3Attention.forward` and
 #      `vllm.model_executor.models.qwen3_moe.Qwen3MoeAttention.forward`
@@ -945,7 +954,7 @@
 #       when using mrope.
 #    Future Plan:
 #       Remove this patch when vllm-ascend supports pattern matching for this fused kernel.
-# ** 28. File: worker/patch_qwen3_dflash.py**
+# ** 26. File: worker/patch_qwen3_dflash.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.qwen3_dflash.DFlashQwen3Model.precompute_and_store_context_kv`
 #    Why:
@@ -973,7 +982,7 @@
 #       Remove this patch when upstream vLLM supports MoE communication type abstraction that
 #       can be extended by hardware plugins like vllm-ascend.
 #
-# ** 29. File: platform/patch_mamba_manager.py**
+# ** 27. File: platform/patch_mamba_manager.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.single_type_kv_cache_manager.MambaManager`
 #    Why:
