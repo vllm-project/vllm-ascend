@@ -207,7 +207,7 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         key: torch.Tensor,
         value: torch.Tensor,
         *,
-        cu_seqlens: torch.Tensor | None,
+        cu_seqlens: torch.Tensor,
         is_reshaped: bool,
         bsz: int,
         q_len: int,
@@ -218,12 +218,9 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         if token_budget is None or params is None:
             raise RuntimeError("Encoder graph capture state was not initialized (missing token_budget).")
 
-        if cu_seqlens is None:
-            cu_seqlens = torch.arange(0, (bsz + 1) * q_len, step=q_len, dtype=torch.int32, device="cpu")
-
         actual_seq_lengths_q, actual_seq_lengths_kv = maybe_compute_actual_seq_lengths(
             num_query_tokens=query.shape[0],
-            cu_seqlens=cu_seqlens,
+            cu_seqlens=torch.arange(0, (bsz + 1) * q_len, step=q_len, dtype=torch.int32, device="cpu"),
         )
         q, k, v, origin_head_dim = self._maybe_pad_qkv(query, key, value)
 

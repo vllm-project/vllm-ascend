@@ -295,10 +295,8 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
             output_buffer = torch.empty_like(output)
 
         graph = torch.npu.NPUGraph()
-        cu_seqlens = values.get("cu_seqlens")
-        cu_seqlens_cpu = None if cu_seqlens is None else cu_seqlens.cpu()
         with (
-            set_encoder_forward_context(token_budget, True, cu_seqlens_cpu=cu_seqlens_cpu),
+            set_encoder_forward_context(token_budget, True),
             torch.inference_mode(),
             torch.npu.graph(graph, self.graph_pool),
         ):
