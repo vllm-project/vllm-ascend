@@ -128,7 +128,7 @@ class EplbUpdator:
 
     def forward_end(self, eplb_heat_collection_status: bool = True):
         if self.wakeup_eplb_worker_flag():
-            with record_function_or_nullcontext("EPLB gather moe load"):
+            with record_function_or_nullcontext("EPLB_gather_moe_load"):
                 self.compute_and_set_moe_load()
                 self.wakeup_eplb_worker()
 
