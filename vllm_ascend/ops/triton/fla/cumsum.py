@@ -90,6 +90,14 @@ def chunk_local_cumsum_scalar(
         B, T, H = g.shape
     assert chunk_size == 2 ** (chunk_size.bit_length() - 1), "chunk_size must be a power of 2"
     OPTIM_BLOCK_SIZE = triton.next_power_of_2((2**18) // (H * chunk_size))
+    # Force the single-chunk path (N_CHUNKS = BLOCK_T // chunk_size == 1). The Ascend
+    # triton backend miscompiles the multi-chunk 3D reshape/trans/cumsum in the kernel
+    # below at some per-rank head counts: empirically H=8 (e.g. TP8, H=num_v_heads//tp)
+    # is wrong for *every* N_CHUNKS>1 and correct only at N_CHUNKS=1, while H=16 (TP4) is
+    # correct everywhere. This produced garbled model output at TP8. N_CHUNKS=1 is verified
+    # correct for all head counts, and cumsum is cheap so the extra blocks are negligible.
+    # Must stay in sync with gdn_attn_builder._ascend_gdn_cumsum_block_size.
+    OPTIM_BLOCK_SIZE = chunk_size
     if cu_seqlens is not None and block_indices is None:
         block_indices = prepare_chunk_indices(cu_seqlens, chunk_size=OPTIM_BLOCK_SIZE)
     num_blocks = len(block_indices) if cu_seqlens is not None else triton.cdiv(T, OPTIM_BLOCK_SIZE)

@@ -445,6 +445,11 @@ def _ensure_chunk_meta_state(builder, device: torch.device) -> None:
     gdn_num_heads = _get_gdn_num_heads(builder)
     cumsum_chunks = max(1, _GDN_CUMSUM_WORKING_SET // (gdn_num_heads * builder._ascend_gdn_chunk_size))
     builder._ascend_gdn_cumsum_block_size = _next_power_of_2(cumsum_chunks)
+    # Force the single-chunk cumsum path (block == chunk size, i.e. N_CHUNKS=1). The Ascend
+    # triton backend miscompiles the multi-chunk cumsum at some per-rank head counts
+    # (e.g. TP8 H=8 is wrong for every N_CHUNKS>1), garbling output. Keep in sync with
+    # cumsum.py OPTIM_BLOCK_SIZE.
+    builder._ascend_gdn_cumsum_block_size = builder._ascend_gdn_chunk_size
     builder._ascend_gdn_chunked_prefill_pool_idx = -1
     builder._ascend_gdn_chunked_prefill_pool = []
     if device.type != "cpu":
