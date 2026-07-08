@@ -159,7 +159,7 @@ python -c "import vllm_ascend; print(vllm_ascend.__version__)"
 
 Single-node deployment completes both Prefill and Decode within the same node, suitable for development, testing, and low-to-medium throughput production scenarios.
 
-**Common Issues Tip:** If you encounter OOM, HCCL port conflicts, or other startup issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs/) for troubleshooting. For MiniMax-specific issues, refer to [Chapter 10 FAQ](#10-faq).
+**Common Issues Tip:** If you encounter OOM, HCCL port conflicts, or other startup issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting. For MiniMax-specific issues, refer to [Chapter 10 FAQ](#10-faq).
 
 #### A3 (single node)
 
@@ -285,7 +285,7 @@ PD (Prefill-Decode) separation splits the Prefill and Decode phases across diffe
 
 **Hardware**: 2× Atlas 800 A3 (64G × 16), one for Prefill, one for Decode.
 
-**Common Issues Tip:** For PD separation specific issues such as KV transfer timeouts or Mooncake connection errors, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs/). For MiniMax-specific PD separation issues, refer to [Chapter 10 FAQ](#10-faq).
+**Common Issues Tip:** For PD separation specific issues such as KV transfer timeouts or Mooncake connection errors, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html). For MiniMax-specific PD separation issues, refer to [Chapter 10 FAQ](#10-faq).
 
 First, prepare `launch_online_dp.py` on each node:
 
@@ -674,7 +674,7 @@ The following optimizations are enabled by default and require no additional con
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs/). This chapter only covers MiniMax-M2 (M2.5/M2.7) model-specific issues.
+For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html). This chapter only covers MiniMax-M2 (M2.5/M2.7) model-specific issues.
 
 - **Q: Does C8 quantization support EAGLE3 speculative decoding?**
 

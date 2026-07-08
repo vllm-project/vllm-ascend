@@ -55,7 +55,7 @@ CRITICAL RULES — violations will cause the translation to be rejected:
 3. Keep msgid lines COMPLETELY UNCHANGED — never modify source text.
 
 --- WHAT TO PRESERVE ---
-4. All format specifiers: %s, %d, %f, {}, {{}}, {name}, etc.
+4. All format specifiers: %s, %d, %f, {{}}, {{{{}}}}, {{name}}, etc.
 5. All markdown syntax: **bold**, *italic*, `inline code`, ```code blocks```,
    [links](urls), ![images](urls), # headings, - lists, 1. ordered lists,
    > blockquotes, | tables, --- horizontal rules.
@@ -186,8 +186,20 @@ class POTranslator:
         """Build a minimal PO content string containing only *entries*."""
         parts = []
         for entry in entries:
-            escaped = entry.msgid.replace('"', '\\"')
-            parts.append(f'msgid "{escaped}"\nmsgstr ""')
+            lines = entry.msgid.split("\n")
+            if len(lines) == 1:
+                escaped = entry.msgid.replace("\\", "\\\\").replace('"', '\\"')
+                parts.append(f'msgid "{escaped}"\nmsgstr ""')
+            else:
+                block = ['msgid ""']
+                for i, line in enumerate(lines):
+                    escaped = line.replace("\\", "\\\\").replace('"', '\\"')
+                    if i < len(lines) - 1:
+                        block.append(f'"{escaped}\\n"')
+                    else:
+                        block.append(f'"{escaped}"')
+                block.append('msgstr ""')
+                parts.append("\n".join(block))
         return "\n\n".join(parts) + "\n"
 
     @staticmethod
