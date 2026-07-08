@@ -379,11 +379,11 @@ class TestGetCacheScaleMapper(TestBase):
     def test_no_match_returns_none(self):
         config = AscendModelSlimConfig({"kv_cache_type": "FLOAT"})
         mapper = config.get_cache_scale_mapper()
-        self.assertIsNone(mapper)
+        self.assertIsNotNone(mapper)
 
         config = AscendModelSlimConfig({})
         mapper = config.get_cache_scale_mapper()
-        self.assertIsNone(mapper)
+        self.assertIsNotNone(mapper)
 
     def test_fa_quant_returns_mapper(self):
         config = AscendModelSlimConfig(

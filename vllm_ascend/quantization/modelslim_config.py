@@ -561,8 +561,9 @@ class AscendModelSlimConfig(QuantizationConfig):
                 }
             )
         if not suffix_map:
-            return None
-        return WeightsMapper(orig_to_new_suffix=suffix_map)
+            return QuantizationConfig.get_cache_scale_mapper()
+        cache_scale_mapper = WeightsMapper(orig_to_new_suffix=suffix_map)
+        return cache_scale_mapper | QuantizationConfig.get_cache_scale_mapper()
 
     def _has_quant_weight(self, prefix: str, packed_modules_mapping: Mapping[str, list[str]]) -> bool:
         proj_name = prefix.split(".")[-1]
