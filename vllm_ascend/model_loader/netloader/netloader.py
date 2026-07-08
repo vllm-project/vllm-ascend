@@ -21,7 +21,7 @@ from copy import deepcopy
 
 import torch
 from torch import nn
-from vllm.config import LoadConfig, ModelConfig, VllmConfig
+from vllm.config import LoadConfig, ModelConfig, VllmConfig, get_current_vllm_config_or_none
 from vllm.logger import logger
 from vllm.model_executor.model_loader import register_model_loader
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
@@ -34,12 +34,6 @@ from .load import elastic_load
 from .utils import find_free_port, is_valid_path_prefix
 
 DRAFT_PORT_OFFSET = 10000
-
-try:
-    # Older vLLM versions may not expose the current-config accessor.
-    from vllm.config import get_current_vllm_config
-except ImportError:
-    get_current_vllm_config = None
 
 
 @register_model_loader("netloader")
@@ -169,11 +163,9 @@ class ModelNetLoaderElastic(BaseModelLoader):
     def _clear_static_forward_context(vllm_config: VllmConfig) -> None:
         """Clear static layer registrations before rebuilding the model on fallback."""
         candidates = [("vllm_config", vllm_config)]
-        if get_current_vllm_config is not None:
-            try:
-                candidates.append(("current_vllm_config", get_current_vllm_config()))
-            except Exception as e:
-                logger.debug("Failed to get current vLLM config while clearing static context: %s", e)
+        current_vllm_config = get_current_vllm_config_or_none()
+        if current_vllm_config is not None:
+            candidates.append(("current_vllm_config", current_vllm_config))
 
         cleared_contexts = []
         seen_context_ids = set()

@@ -148,7 +148,7 @@ def test_clear_static_forward_context_clears_current_vllm_config(monkeypatch):
     passed_config.compilation_config.static_forward_context["passed.layer"] = object()
     current_config.compilation_config.static_forward_context["current.layer"] = object()
     monkeypatch.setattr(
-        "vllm_ascend.model_loader.netloader.netloader.get_current_vllm_config",
+        "vllm_ascend.model_loader.netloader.netloader.get_current_vllm_config_or_none",
         lambda: current_config,
     )
 
