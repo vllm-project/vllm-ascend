@@ -459,7 +459,6 @@ def test_chunk_gated_delta_rule_fwd_pcp_chaining_subtracts_initial_state(
 
     monkeypatch.setattr(chunk, "get_forward_context", lambda: type("Ctx", (), {"attn_metadata": None})())
     monkeypatch.setattr(chunk, "get_pcp_group", lambda: group)
-    monkeypatch.setattr(chunk, "get_tensor_model_parallel_rank", lambda: 0)
     monkeypatch.setattr(chunk, "chunk_local_cumsum", lambda *a, **kw: _DummyTensor("g_cumsum"))
     monkeypatch.setattr(chunk, "chunk_scaled_dot_kkt_fwd", lambda *a, **kw: _DummyTensor("A"))
     monkeypatch.setattr(chunk, "solve_tril", lambda *a, **kw: _DummyTensor("A_solved"))
