@@ -148,6 +148,90 @@ def quant_apply_mlp(
     bias1, bias2 = None, None
     _output_dtype = w2_scale[0].dtype if isinstance(w2_scale, list) else w2_scale.dtype
 
+    # GELU is not supported by the fused SwiGLU+quant NPU operators used below.
+    # Run a separate dequant GMM -> GELU -> (re)quant -> GMM2 path so quantized
+    # MoE layers use the same activation as the float model (e.g. Gemma4, which
+    # uses gelu_tanh). Returns early and leaves the SwiGLU paths untouched.
+    if not use_mxfp_quant and activation in (MoEActivation.GELU, MoEActivation.GELU_TANH):
+        approximate = "tanh" if activation == MoEActivation.GELU_TANH else "none"
+        if w1_offset is not None:
+            # W4A16: float input, antiquant GMM for both projections.
+            gate_up = torch_npu.npu_grouped_matmul(
+                x=[unquantized_hidden_states],
+                weight=[w1],
+                antiquant_scale=[w1_scale],
+                antiquant_offset=[w1_offset],
+                split_item=2,
+                group_list_type=group_list_type,
+                group_type=0,
+                group_list=group_list,
+                output_dtype=_output_dtype,
+            )[0]
+            dispose_tensor(unquantized_hidden_states)
+            gate, up = gate_up.chunk(2, dim=-1)
+            hidden_states = torch.nn.functional.gelu(gate, approximate=approximate) * up
+            before_gmm2_evt = torch.npu.current_stream().record_event()
+            hidden_states = torch_npu.npu_grouped_matmul(
+                x=[hidden_states],
+                weight=[w2],
+                antiquant_scale=[w2_scale],
+                antiquant_offset=[w2_offset],
+                split_item=2,
+                group_list_type=group_list_type,
+                group_type=0,
+                group_list=group_list,
+                output_dtype=_output_dtype,
+            )[0]
+            return hidden_states, before_gmm2_evt
+
+        # W8A8 / W4A8: quantized input -> dequant GMM1 -> GELU -> requant -> GMM2.
+        if w1_scale_bias is not None:
+            if group_list_type == 0:
+                group_list = torch.cat([group_list[:1], torch.diff(group_list, dim=0)])
+                group_list_type = 1
+            bias1, bias2 = w1_scale_bias, w2_scale_bias
+            _output_dtype = torch.bfloat16
+        w1_scale_gmm = w1_scale if isinstance(w1_scale, list) else [w1_scale]
+        if w1_scale_gmm[0].dtype != _output_dtype:
+            w1_scale_gmm = [s.to(_output_dtype) for s in w1_scale_gmm]
+        gate_up = torch_npu.npu_grouped_matmul(
+            x=[hidden_states],
+            weight=w1,
+            scale=w1_scale_gmm,
+            bias=bias1,
+            per_token_scale=[pertoken_scale],
+            split_item=2,
+            group_list_type=group_list_type,
+            group_type=0,
+            group_list=group_list,
+            output_dtype=_output_dtype,
+        )[0]
+        if quantized_hidden_states is not None:
+            dispose_tensor(quantized_hidden_states)
+        gate, up = gate_up.chunk(2, dim=-1)
+        hidden_states = torch.nn.functional.gelu(gate, approximate=approximate) * up
+        hidden_states, out_scale = torch_npu.npu_dynamic_quant(hidden_states)
+        before_gmm2_evt = torch.npu.current_stream().record_event()
+        hidden_states = DeviceOperator.npu_grouped_matmul_gmm2(
+            hidden_states=hidden_states,
+            weight=w2,
+            weight_scale=w2_scale,
+            per_token_scale=out_scale,
+            group_list=group_list,
+            group_list_type=group_list_type,
+            input_dtype=input_hidden_dtype,
+            act_quant_type=act_quant_type,
+            weight_quant_type=weight_quant_type,
+            scale_type=scale_type,
+            per_token_scale_type=per_token_scale_type,
+            use_bf16=use_bf16,
+            use_mxfp_quant=use_mxfp_quant,
+            bias=bias2,
+            fallback_output_dtype=_output_dtype,
+            mxfp_quant_dtype=mxfp_quant_dtype,
+        )
+        return hidden_states, before_gmm2_evt
+
     weight_prefetch_method = get_weight_prefetch_method()
     if weight_prefetch_method:
         weight_prefetch_method.maybe_prefetch_moe_weight_postprocess(hidden_states)
