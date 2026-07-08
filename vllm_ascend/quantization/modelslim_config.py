@@ -66,25 +66,6 @@ def _is_fused_moe_layer(layer: torch.nn.Module) -> bool:
 # The config filename that ModelSlim generates after quantizing a model.
 MODELSLIM_CONFIG_FILENAME = "quant_model_description.json"
 
-_C8_SCALE_MAPPING = MappingProxyType(
-    {
-        "k_proj.kv_cache_scale": "attn.k_cache_scale",
-        "k_proj.kv_cache_offset": "attn.k_cache_offset",
-        "v_proj.kv_cache_scale": "attn.v_cache_scale",
-        "v_proj.kv_cache_offset": "attn.v_cache_offset",
-    }
-)
-
-
-def _map_c8_cache_scale_name(quant_description: Mapping[str, Any], name: str) -> str | None:
-    if quant_description.get("kv_cache_type") != "C8":
-        return None
-    for src_suffix, dst_suffix in _C8_SCALE_MAPPING.items():
-        if name.endswith(src_suffix):
-            return name[: -len(src_suffix)] + dst_suffix
-    return None
-
-
 # key: model_type
 # value: dict of fused module name -> list of original module names
 packed_modules_model_mapping: dict[str, dict[str, list[str]]] = {
@@ -617,10 +598,6 @@ class AscendModelSlimConfig(QuantizationConfig):
                 return name[: -len(src_suffix)] + dst_suffix
         return None
 
-    def get_cache_scale(self, name: str) -> str | None:
-        """Map checkpoint C8 KV scale/offset names to vLLM parameter names."""
-        return _map_c8_cache_scale_name(self.quant_description, name)
-
     def _has_quant_weight(self, prefix: str, packed_modules_mapping: Mapping[str, list[str]]) -> bool:
         proj_name = prefix.split(".")[-1]
         if proj_name in packed_modules_mapping:
@@ -1013,10 +990,3 @@ class AscendModelSlimConfig(QuantizationConfig):
                     self.indexer_quant_layers.append(int(_id))
                 if "k_proj.kv_cache_scale" in key:
                     self.c8_quant_layers.append(int(_id))
-
-
-def _modelslim_get_cache_scale(self: AscendModelSlimConfig, name: str) -> str | None:
-    return _map_c8_cache_scale_name(self.quant_description, name)
-
-
-type.__setattr__(AscendModelSlimConfig, "get_cache_scale", _modelslim_get_cache_scale)
