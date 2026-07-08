@@ -68,12 +68,6 @@ msgstr "## 使用方法"
 msgid "### Online Serving"
 msgstr "### 在线服务"
 
-msgid "Default behavior:"
-msgstr "默认行为："
-
-msgid "Disable CPU binding:"
-msgstr "禁用 CPU 绑定："
-
 msgid "### Offline Inference"
 msgstr "### 离线推理"
 
@@ -177,3 +171,9 @@ msgstr ""
 "| `The 'migratepages' command is not available...` | 跳过内存迁移，但 CPU 线程绑定仍继续。 | 如果 NUMA 局部性或性能受到影响，请安装 `numactl`。 |\n"
 "| `[irq] IRQ binding skipped on Ascend 950.` | Ascend 950 不使用 IRQ 绑定步骤。 | 无需操作。工作进程、ACL、释放线程绑定和内存迁移仍将继续。 |\n"
 "| `Bind cpus failed in rank...` | 绑定步骤失败，该 rank 的 CPU 绑定被跳过。 | 检查 `taskset`、`lscpu`、`npu-smi`、cpuset 大小和 `/proc/irq` 权限。 |"
+
+msgid "Default behavior:"
+msgstr ""
+
+msgid "Disable CPU binding:"
+msgstr ""

@@ -167,9 +167,6 @@ msgstr "服务器启动后，您可以使用输入提示查询模型："
 msgid "## 7 Accuracy Evaluation"
 msgstr "## 7 精度评估"
 
-msgid "### Using AISBench"
-msgstr "### 使用 AISBench"
-
 msgid ""
 "1. Refer to [Using "
 "AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details."
@@ -304,3 +301,6 @@ msgid ""
 msgstr ""
 "答：首先减少`--max-num-seqs`和`--max-model-len`。如有必要，降低并发和负载测试压力（例如`max-"
 "concurrency` / `num-prompts`）。"
+
+msgid "### Using AISBench"
+msgstr ""

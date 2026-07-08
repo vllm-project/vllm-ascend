@@ -50,17 +50,6 @@ msgstr "### 验证流程"
 msgid "=== \"A3\""
 msgstr "=== \"A3\""
 
-msgid "1. Single Node Verification:"
-msgstr "1. 单节点验证："
-
-msgid ""
-"Execute the following commands on each node in sequence. The results must "
-"all be `success` and the status must be `UP`:"
-msgstr "在每个节点上依次执行以下命令。结果必须全部为 `success`，状态必须为 `UP`："
-
-msgid "2. Get NPU IP Addresses"
-msgstr "2. 获取 NPU IP 地址"
-
 msgid "3. Get superpodid and SDID"
 msgstr "3. 获取 superpodid 和 SDID"
 
@@ -95,12 +84,6 @@ msgid ""
 "can use the following shell script for configuring the prefiller and decoder"
 " nodes respectively."
 msgstr "在 PD 分离场景下，我们提供了一种优化配置。您可以使用以下 shell 脚本分别配置预填充节点和解码节点。"
-
-msgid "=== \"Prefiller node\""
-msgstr "=== \"预填充节点\""
-
-msgid "=== \"Decoder node\""
-msgstr "=== \"解码节点\""
 
 msgid "### Start Distributed DP Server for prefill-decode disaggregation"
 msgstr "### 启动分布式 DP 服务器以实现预填充-解码分离"
@@ -300,3 +283,20 @@ msgid ""
 "some requests before conducting performance tests to achieve the best end-"
 "to-end throughput."
 msgstr "由于某些NPU算子的计算需要多轮预热才能达到最佳性能，我们建议在进行性能测试前，先用一些请求预热服务，以获得最佳的端到端吞吐量。"
+
+msgid "1. Single Node Verification:"
+msgstr ""
+
+msgid ""
+"Execute the following commands on each node in sequence. The results must "
+"all be `success` and the status must be `UP`:"
+msgstr ""
+
+msgid "2. Get NPU IP Addresses"
+msgstr ""
+
+msgid "=== \"Prefiller node\""
+msgstr ""
+
+msgid "=== \"Decoder node\""
+msgstr ""

@@ -43,12 +43,6 @@ msgstr ""
 msgid "## Text-Only Language Models"
 msgstr "## 纯文本语言模型"
 
-msgid "### Generative Models"
-msgstr "### 生成模型"
-
-msgid "#### Core Supported Models"
-msgstr "#### 核心支持的模型"
-
 msgid ""
 "| Model                         | Support   | Note                                                                 | BF16 | Supported Hardware | W8A8 | Chunked Prefill | Automatic Prefix Cache | LoRA | Speculative Decoding | Async Scheduling | Tensor Parallel | Pipeline Parallel | Expert Parallel | Data Parallel | Prefill-decode Disaggregation | Piecewise AclGraph | Fullgraph AclGraph | max-model-len | MLP Weight Prefetch | Doc |\n"
 "|-------------------------------|-----------|----------------------------------------------------------------------|------|--------------------|------|-----------------|------------------------|------|----------------------|------------------|-----------------|-------------------|-----------------|---------------|-------------------------------|--------------------|--------------------|---------------|---------------------|-----|\n"
@@ -89,9 +83,6 @@ msgstr ""
 "| DeepseekOCR2                  | ✅        |                                                                      | ✅ | A2/A3 ||✅||||✅|||||||||| [DeepSeekOCR2](../../tutorials/models/DeepSeekOCR2.md) |\n"
 "| MiniMax-M2.5/2.7                  | ✅        |                                                                      | ✅ | A2/A3/Ascend950 (Ascend950 experimental) |✅|✅|✅|❌|✅|✅|✅|🟡|✅|✅|✅|🟡|✅|200k|🟡| [MiniMax-M2](../../tutorials/models/MiniMax-M2.md) |\n"
 "| Qwen2.5-Math-RM-72B           | ✅        | vllm-rm, tensor_parallel_size=4, max_model_len=4096 | ✅ | A2 | ✅ | 🟡 | 🟡 | ❌ | 🟡 | ✅ | ✅ | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 4096 | 🟡 | [Qwen2.5-Math-RM-72B](../../tutorials/models/Qwen2.5-Math-RM-72B.md) |"
-
-msgid "#### Extended Compatible Models"
-msgstr "#### 扩展兼容模型"
 
 msgid ""
 "| Model                         | Support   | Note                                                                 | Supported Hardware |\n"
@@ -226,3 +217,12 @@ msgstr ""
 "| InternVL2.0/2.5/3.0<br>InternVideo2.5/Mono-InternVL | ❌ | [2064](https://github.com/vllm-project/vllm-ascend/issues/2064) |  |\n"
 "| Whisper                        | ❌            | [2262](https://github.com/vllm-project/vllm-ascend/issues/2262)      |       |\n"
 "| Ultravox                       | 🟡            | 需要测试                                                            |       |"
+
+msgid "### Generative Models"
+msgstr ""
+
+msgid "#### Core Supported Models"
+msgstr ""
+
+msgid "#### Extended Compatible Models"
+msgstr ""

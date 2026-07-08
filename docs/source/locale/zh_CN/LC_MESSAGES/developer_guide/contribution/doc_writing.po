@@ -119,9 +119,6 @@ msgstr ""
 "`8000`。`model` 变为 `vllm serve <model>`，`server_cmd` 加上可选的 `server_cmd_extra`"
 " 变为命令参数。两个命令字段都可以是 shell 字符串或扁平令牌列表。"
 
-msgid "Write the doc block like this:"
-msgstr "请按如下方式编写文档块："
-
 msgid ""
 ":block_name: qwen3_8b_single_node\n"
 ":converter_tag: single_node\n"
@@ -132,16 +129,6 @@ msgstr ""
 ":converter_tag: single_node\n"
 ":test_case_path: tests/e2e/nightly/single_node/models/configs/your_model.yaml\n"
 ":case_index: 0"
-
-msgid ""
-"set -eux\n"
-"{{ generated }}"
-msgstr ""
-"set -eux\n"
-"{{ generated }}"
-
-msgid "Generated shell script:"
-msgstr "生成的 Shell 脚本："
 
 msgid "#### converter_tag: `multi_node`"
 msgstr "#### converter_tag: `multi_node`"
@@ -157,9 +144,6 @@ msgid ""
 msgstr ""
 "`server_cmd` 必须是一个以 `vllm serve <model>` 开头的完整命令。它可以写成 shell 字符串或扁平令牌列表。"
 
-msgid "Write the doc block like this:"
-msgstr "请按如下方式编写文档块："
-
 msgid ""
 ":block_name: qwen3_235b_worker_1\n"
 ":converter_tag: multi_node\n"
@@ -170,13 +154,6 @@ msgstr ""
 ":converter_tag: multi_node\n"
 ":test_case_path: tests/e2e/nightly/multi_node/internal_dp/config/your_model.yaml\n"
 ":host_index: 1"
-
-msgid ""
-"set -eux\n"
-"{{ generated }}"
-msgstr ""
-"set -eux\n"
-"{{ generated }}"
 
 msgid "Generated shell script for `host_index: 1`:"
 msgstr "为 `host_index: 1` 生成的 shell 脚本："
@@ -224,9 +201,6 @@ msgid ""
 "are left unchanged."
 msgstr "未知的花括号变量和无花括号的 shell 引用（例如 `$SERVER_PORT`）保持不变。"
 
-msgid "Write the doc block like this:"
-msgstr "请按如下方式编写文档块："
-
 msgid ""
 ":block_name: glm_external_dp_template_node0\n"
 ":converter_tag: external_dp_template\n"
@@ -267,9 +241,6 @@ msgstr ""
 "`external_dp_launch` 读取完整的 `config` 列表，并为每个节点渲染一条 `launch_online_dp.py` "
 "命令。它不接受索引选项。"
 
-msgid "Write the doc block like this:"
-msgstr "请按如下方式编写文档块："
-
 msgid ""
 ":block_name: glm_external_dp_launch\n"
 ":converter_tag: external_dp_launch\n"
@@ -278,16 +249,6 @@ msgstr ""
 ":block_name: glm_external_dp_launch\n"
 ":converter_tag: external_dp_launch\n"
 ":test_case_path: tests/e2e/nightly/multi_node/external_dp/config/your_model.yaml"
-
-msgid ""
-"set -eux\n"
-"{{ generated }}"
-msgstr ""
-"set -eux\n"
-"{{ generated }}"
-
-msgid "Generated shell script:"
-msgstr "生成的 Shell 脚本："
 
 msgid "#### converter_tag: `external_dp_proxy`"
 msgstr "#### converter_tag: `external_dp_proxy`"
@@ -424,3 +385,36 @@ msgid ""
 msgstr ""
 "如果转换器应渲染非 Shell 的内容，请相应地设置\n"
 "`GeneratedScript.language`，以便 Sphinx 能够正确高亮生成的文字块。"
+
+msgid "Write the doc block like this:"
+msgstr ""
+
+msgid ""
+"set -eux\n"
+"{{ generated }}"
+msgstr ""
+
+msgid "Write the doc block like this:"
+msgstr ""
+
+msgid "Write the doc block like this:"
+msgstr ""
+
+msgid ""
+"set -eux\n"
+"{{ generated }}"
+msgstr ""
+
+msgid "Generated shell script:"
+msgstr ""
+
+msgid "Write the doc block like this:"
+msgstr ""
+
+msgid ""
+"set -eux\n"
+"{{ generated }}"
+msgstr ""
+
+msgid "Generated shell script:"
+msgstr ""

@@ -109,11 +109,6 @@ msgstr "服务器启动后，您可以按照以下示例发送请求。"
 msgid "### requests demo + formatting query & document"
 msgstr "### 请求示例 + 格式化查询与文档"
 
-msgid ""
-"If you run this script successfully, you will see a list of scores printed "
-"to the console, similar to this:"
-msgstr "如果您成功运行此脚本，您将看到控制台打印出一系列分数，类似如下："
-
 msgid "### Offline Inference"
 msgstr "### 离线推理"
 
@@ -139,3 +134,8 @@ msgid ""
 "After about several minutes, you can get the performance evaluation result. "
 "With this tutorial, the performance result is:"
 msgstr "大约几分钟后，您可以获得性能评估结果。按照本教程，性能结果如下："
+
+msgid ""
+"If you run this script successfully, you will see a list of scores printed "
+"to the console, similar to this:"
+msgstr ""

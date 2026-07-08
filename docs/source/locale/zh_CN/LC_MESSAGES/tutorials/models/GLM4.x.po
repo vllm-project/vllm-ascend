@@ -179,18 +179,6 @@ msgstr "1. 在每个节点上准备脚本 `launch_online_dp.py`："
 msgid "2. prepare the script `run_dp_template.sh` on each node."
 msgstr "2. 在每个节点上准备脚本 `run_dp_template.sh`。"
 
-msgid "1. Prefill node 0"
-msgstr "1. Prefill节点 0"
-
-msgid "2. Prefill node 1"
-msgstr "2. Prefill节点 1"
-
-msgid "3. Decode node 0"
-msgstr "3. Decode节点 0"
-
-msgid "4. Decode node 1"
-msgstr "4. Decode节点 1"
-
 msgid ""
 "Once the preparation is done, you can start the server with the following "
 "command on each node:"
@@ -233,9 +221,6 @@ msgstr "## 精度评估"
 
 msgid "Here are two accuracy evaluation methods."
 msgstr "这里提供两种精度评估方法。"
-
-msgid "### Using AISBench"
-msgstr "### 使用AISBench"
 
 msgid ""
 "1. Refer to [Using "
@@ -354,3 +339,18 @@ msgid ""
 msgstr ""
 "答：首先减小`--max-num-seqs`和`--max-model-len`。如有必要，降低并发度和负载测试压力（例如`max-"
 "concurrency` / `num-prompts`）。"
+
+msgid "1. Prefill node 0"
+msgstr ""
+
+msgid "2. Prefill node 1"
+msgstr ""
+
+msgid "3. Decode node 0"
+msgstr ""
+
+msgid "4. Decode node 1"
+msgstr ""
+
+msgid "### Using AISBench"
+msgstr ""

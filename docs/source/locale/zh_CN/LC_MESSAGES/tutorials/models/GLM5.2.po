@@ -79,14 +79,8 @@ msgstr "### 安装"
 msgid "You can use our official docker image to run GLM-5.2 directly."
 msgstr "您可以直接使用官方Docker镜像运行GLM-5.2。"
 
-msgid "=== \"A3 series\""
-msgstr "=== \"A3系列\""
-
 msgid "Start the docker image on your each node."
 msgstr "在每个节点上启动Docker镜像。"
-
-msgid "=== \"A2 series\""
-msgstr "=== \"A2系列\""
 
 msgid "Start the docker image on each of your nodes."
 msgstr "在每个节点上启动Docker镜像。"
@@ -141,12 +135,6 @@ msgstr "- `glm-5.2-w8a8`：可部署在2个Atlas 800 A3（64G × 16）上。"
 
 msgid "Run the following scripts on two nodes respectively."
 msgstr "分别在两个节点上运行以下脚本。"
-
-msgid "**node 0**"
-msgstr "**节点0**"
-
-msgid "**node 1**"
-msgstr "**节点1**"
 
 msgid "=== \"A2 series\""
 msgstr "=== \"A2系列\""
@@ -220,15 +208,6 @@ msgstr ""
 "为在prefill阶段支持200k上下文窗口，需要在每个prefill节点的`--additional_config`中添加参数`\"layer_sharding\": [\"q_b_proj\"]`。\n"
 "    1. Prefill节点0"
 
-msgid "2. Prefill node 1"
-msgstr "2. Prefill节点1"
-
-msgid "3. Decode node 0"
-msgstr "3. Decode节点0"
-
-msgid "4. Decode node 1"
-msgstr "4. Decode节点1"
-
 msgid ""
 "Once the preparation is done, you can start the server with the following "
 "command on each node:"
@@ -245,16 +224,6 @@ msgstr "3. Decode节点0"
 
 msgid "4. Decode node 1"
 msgstr "4. Decode节点1"
-
-msgid ""
-"To set up request forwarding, run the following script on any machine. You "
-"can get the proxy program in the repository's examples: "
-"[load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-"
-"ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)"
-msgstr ""
-"要设置请求转发，请在任意机器上运行以下脚本。您可以在仓库的示例中获取代理程序：[load_balance_proxy_server_example.py](https://github.com/vllm-"
-"project/vllm-"
-"ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)"
 
 msgid "#### Deployment on 8 Atlas 800 A2"
 msgstr "#### 在8个Atlas 800 A2上部署"
@@ -350,9 +319,6 @@ msgstr "## 精度评估"
 msgid "Here are two accuracy evaluation methods."
 msgstr "这里提供两种精度评估方法。"
 
-msgid "### Using AISBench"
-msgstr "### 使用 AISBench"
-
 msgid ""
 "1. Refer to [Using "
 "AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details."
@@ -408,3 +374,34 @@ msgstr "- **问：如何为 GLM-5.2 启用函数调用？**"
 
 msgid "A: Please add following configurations in vLLM startup command"
 msgstr "答：请在 vLLM 启动命令中添加以下配置"
+
+msgid "=== \"A3 series\""
+msgstr ""
+
+msgid "=== \"A2 series\""
+msgstr ""
+
+msgid "**node 0**"
+msgstr ""
+
+msgid "**node 1**"
+msgstr ""
+
+msgid "2. Prefill node 1"
+msgstr ""
+
+msgid "3. Decode node 0"
+msgstr ""
+
+msgid "4. Decode node 1"
+msgstr ""
+
+msgid ""
+"To set up request forwarding, run the following script on any machine. You "
+"can get the proxy program in the repository's examples: "
+"[load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-"
+"ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)"
+msgstr ""
+
+msgid "### Using AISBench"
+msgstr ""

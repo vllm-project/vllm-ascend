@@ -167,9 +167,6 @@ msgid ""
 msgstr ""
 "默认工作目录是 `/workspace`。vLLM 和 vLLM-Ascend 作为 Python 包安装在 site-packages 中。"
 
-msgid "**Installation Verification:**"
-msgstr "**安装验证：**"
-
 msgid ""
 "After starting the container, run the following command to verify the "
 "installation:"
@@ -418,23 +415,8 @@ msgstr "> 详细参数说明请参考第5节的部署示例。"
 msgid "**Low Latency Configuration:**"
 msgstr "**低延迟配置：**"
 
-msgid "Example AISBench settings for this configuration:"
-msgstr "此配置的AISBench设置示例："
-
-msgid ""
-"- `request_rate`: 0\n"
-"    - `batch_size`: 32\n"
-"    - Input/Output length: 2048/2048 or 3500/1500"
-msgstr ""
-"- `request_rate`：0\n"
-"    - `batch_size`：32\n"
-"    - 输入/输出长度：2048/2048 或 3500/1500"
-
 msgid "**High Throughput Configuration:**"
 msgstr "**高吞吐配置：**"
-
-msgid "Example AISBench settings for this configuration:"
-msgstr "此配置的AISBench设置示例："
 
 msgid ""
 "- `request_rate`: 0\n"
@@ -482,3 +464,18 @@ msgid ""
 "FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)."
 msgstr ""
 "对于常见的环境、安装和通用参数问题，请参考[公开常见问题解答](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)。"
+
+msgid "**Installation Verification:**"
+msgstr ""
+
+msgid "Example AISBench settings for this configuration:"
+msgstr ""
+
+msgid ""
+"- `request_rate`: 0\n"
+"    - `batch_size`: 32\n"
+"    - Input/Output length: 2048/2048 or 3500/1500"
+msgstr ""
+
+msgid "Example AISBench settings for this configuration:"
+msgstr ""

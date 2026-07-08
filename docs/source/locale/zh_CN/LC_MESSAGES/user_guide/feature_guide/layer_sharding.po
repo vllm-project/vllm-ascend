@@ -109,9 +109,6 @@ msgstr ""
 "当使用 [FlashComm2](https://github.com/vllm-project/vllm-ascend/pull/4188) "
 "时，每层内存中必须驻留完整的输出投影（`o_proj`）矩阵。层分片通过将这些权重分布到不同设备上，显著降低了内存压力。"
 
-msgid "**Example configuration:**"
-msgstr "**示例配置：**"
-
 msgid "### DSA-CP-enabled"
 msgstr "### 启用DSA-CP"
 
@@ -130,3 +127,6 @@ msgstr "层分片只能在PD分离架构的 **P节点** 中启用。"
 
 msgid "**Example configuration:**"
 msgstr "**示例配置：**"
+
+msgid "**Example configuration:**"
+msgstr ""

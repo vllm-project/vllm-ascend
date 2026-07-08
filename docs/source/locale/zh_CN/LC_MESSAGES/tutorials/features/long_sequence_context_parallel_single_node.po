@@ -79,9 +79,6 @@ msgstr ""
 msgid "Run the following script to execute online 128k inference."
 msgstr "运行以下脚本执行在线 128k 推理。"
 
-msgid "**Notice:**"
-msgstr "**注意：**"
-
 msgid ""
 "- for vllm version below `v0.12.0` use parameter: `--rope_scaling '{\"rope_type\":\"yarn\",\"factor\":4,\"original_max_position_embeddings\":32768}' \\`\n"
 "- for vllm version `v0.12.0` use parameter: `--hf-overrides '{\"rope_parameters\": {\"rope_type\":\"yarn\",\"rope_theta\":1000000,\"factor\":4,\"original_max_position_embeddings\":32768}}' \\`"
@@ -141,9 +138,6 @@ msgstr ""
 
 msgid "## Accuracy Evaluation"
 msgstr "## 精度评估"
-
-msgid "### Using AISBench"
-msgstr "### 使用AISBench"
 
 msgid ""
 "1. Refer to [Using "
@@ -217,3 +211,9 @@ msgstr ""
 "| dataset | version | metric      | mode | ttft   |\n"
 "|---------| ----- |-------------|------|--------|\n"
 "| random  | - | performance | perf | 17.36s |"
+
+msgid "**Notice:**"
+msgstr ""
+
+msgid "### Using AISBench"
+msgstr ""

@@ -349,23 +349,11 @@ msgid ""
 "all be `success` and the status must be `UP`:"
 msgstr "在每个节点上依次执行以下命令。结果必须全部为 `success`，且状态必须为 `UP`："
 
-msgid "=== \"A2 series\""
-msgstr "=== \"A2 系列\""
-
-msgid "=== \"A3 series\""
-msgstr "=== \"A3 系列\""
-
 msgid "#### Interconnect Verification"
 msgstr "#### 互联验证"
 
 msgid "##### 1. Get NPU IP Addresses"
 msgstr "##### 1. 获取 NPU IP 地址"
-
-msgid "=== \"A2 series\""
-msgstr "=== \"A2 系列\""
-
-msgid "=== \"A3 series\""
-msgstr "=== \"A3 系列\""
 
 msgid "##### 2. Cross-Node PING Test"
 msgstr "##### 2. 跨节点 PING 测试"
@@ -388,3 +376,15 @@ msgstr "=== \"A2 系列\""
 
 msgid "=== \"A3 series\""
 msgstr "=== \"A3 系列\""
+
+msgid "=== \"A2 series\""
+msgstr ""
+
+msgid "=== \"A3 series\""
+msgstr ""
+
+msgid "=== \"A2 series\""
+msgstr ""
+
+msgid "=== \"A3 series\""
+msgstr ""

@@ -160,9 +160,6 @@ msgid ""
 msgstr ""
 "默认工作目录是 `/workspace`。vLLM 和 vLLM-Ascend 作为 Python 包安装在 site-packages 中。"
 
-msgid "**Installation Verification:**"
-msgstr "**安装验证：**"
-
 msgid ""
 "After starting the container, run the following command to verify the "
 "installation:"
@@ -290,9 +287,6 @@ msgstr "预期结果：HTTP 200，返回包含`choices`字段及生成文本的J
 
 msgid "## 7 Accuracy Evaluation"
 msgstr "## 7 精度评估"
-
-msgid "### Using AISBench"
-msgstr "### 使用AISBench"
 
 msgid ""
 "For setup details, including installation, dataset download, and "
@@ -497,23 +491,8 @@ msgstr "> 有关详细参数说明，请参考第5节中的部署示例。"
 msgid "**Low Latency Configuration:**"
 msgstr "**低延迟配置：**"
 
-msgid "Example AISBench settings for this configuration:"
-msgstr "此配置的AISBench设置示例："
-
-msgid ""
-"- `request_rate`: 0\n"
-"    - `batch_size`: 32\n"
-"    - Input/Output length: 2048/2048 or 3500/1500"
-msgstr ""
-"- `request_rate`: 0\n"
-"    - `batch_size`: 32\n"
-"    - 输入/输出长度：2048/2048 或 3500/1500"
-
 msgid "**High Throughput Configuration:**"
 msgstr "**高吞吐配置：**"
-
-msgid "Example AISBench settings for this configuration:"
-msgstr "此配置的AISBench设置示例："
 
 msgid ""
 "- `request_rate`: 0\n"
@@ -587,3 +566,21 @@ msgid ""
 msgstr ""
 "Qwen3-Coder-30B-A3B与基础版Qwen3-30B-A3B共享相同的MoE架构（30.5B/3.3B），但专门针对编码任务进行了微调，针对智能体编码、函数调用进行了优化，并支持高达1M"
 " token的扩展上下文。"
+
+msgid "**Installation Verification:**"
+msgstr ""
+
+msgid "### Using AISBench"
+msgstr ""
+
+msgid "Example AISBench settings for this configuration:"
+msgstr ""
+
+msgid ""
+"- `request_rate`: 0\n"
+"    - `batch_size`: 32\n"
+"    - Input/Output length: 2048/2048 or 3500/1500"
+msgstr ""
+
+msgid "Example AISBench settings for this configuration:"
+msgstr ""

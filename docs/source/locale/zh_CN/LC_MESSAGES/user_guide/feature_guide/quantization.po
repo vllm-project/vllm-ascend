@@ -69,18 +69,12 @@ msgstr ""
 "是一个对 Ascend 友好的压缩工具，专注于加速，采用压缩技术，并专为 Ascend "
 "硬件构建。它包含一系列推理优化技术，如量化和压缩，旨在加速大语言稠密模型、MoE 模型、多模态理解模型、多模态生成模型等。"
 
-msgid "#### Installation"
-msgstr "#### 安装"
-
 msgid ""
 "To use ModelSlim for model quantization, install it from its [Git "
 "repository](https://gitcode.com/Ascend/msmodelslim):"
 msgstr ""
 "要使用 ModelSlim 进行模型量化，请从其 [Git 仓库](https://gitcode.com/Ascend/msmodelslim) "
 "安装："
-
-msgid "#### Model Quantization"
-msgstr "#### 模型量化"
 
 msgid ""
 "The following example shows how to generate W8A8 quantized weights for the "
@@ -179,3 +173,9 @@ msgstr ""
 "- [ModelSlim GitCode](https://gitcode.com/Ascend/msmodelslim)\n"
 "- [LLM-Compressor GitHub](https://github.com/vllm-project/llm-compressor)\n"
 "- [vLLM 量化指南](https://docs.vllm.ai/en/latest/features/quantization/)"
+
+msgid "#### Installation"
+msgstr ""
+
+msgid "#### Model Quantization"
+msgstr ""

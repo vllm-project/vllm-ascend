@@ -173,21 +173,9 @@ msgstr ""
 "| Qwen3-14B-W8A8SC-310 | [Eco-Tech/Qwen3-14B-w8a8sc-310-vllm](https://www.modelscope.cn/models/Eco-Tech/Qwen3-14B-w8a8sc-310-vllm) |\n"
 "| Qwen3-32B-W8A8SC-310 | [Eco-Tech/Qwen3-32B-w8a8sc-310-vllm](https://www.modelscope.cn/models/Eco-Tech/Qwen3-32B-w8a8sc-310-vllm) |"
 
-msgid "=== \"Qwen3-8B-W8A8SC\""
-msgstr "=== \"Qwen3-8B-W8A8SC\""
-
-msgid "=== \"Qwen3-14B-W8A8SC\""
-msgstr "=== \"Qwen3-14B-W8A8SC\""
-
-msgid "=== \"Qwen3-32B-W8A8SC\""
-msgstr "=== \"Qwen3-32B-W8A8SC\""
-
 msgid ""
 "Once the server is started, you can query the model with input prompts:"
 msgstr "服务器启动后，您可以使用输入提示查询模型："
-
-msgid "If the script runs successfully, you can see the generated result."
-msgstr "如果脚本运行成功，您可以看到生成的结果。"
 
 msgid "### Offline Inference"
 msgstr "### 离线推理"
@@ -220,3 +208,15 @@ msgid ""
 "guidance."
 msgstr ""
 "如需抢先体验Qwen3-MoE、Qwen3-VL，以及Qwen3.5和Qwen3.6的性能加速预览支持，请关注#7394以获取更新的部署指南。"
+
+msgid "=== \"Qwen3-8B-W8A8SC\""
+msgstr ""
+
+msgid "=== \"Qwen3-14B-W8A8SC\""
+msgstr ""
+
+msgid "=== \"Qwen3-32B-W8A8SC\""
+msgstr ""
+
+msgid "If the script runs successfully, you can see the generated result."
+msgstr ""

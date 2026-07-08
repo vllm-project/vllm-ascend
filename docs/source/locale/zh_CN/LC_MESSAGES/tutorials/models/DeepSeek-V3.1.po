@@ -126,9 +126,6 @@ msgstr ""
 msgid "=== \"A3 series\""
 msgstr "=== \"A3 系列\""
 
-msgid "Start the docker image on your each node."
-msgstr "在每个节点上启动 Docker 镜像。"
-
 msgid "=== \"A2 series\""
 msgstr "=== \"A2 系列\""
 
@@ -172,12 +169,6 @@ msgstr ""
 "单节点部署在同一节点内完成 Prefill 和 Decode。量化模型 `DeepSeek-V3.1-w8a8-mtp-QuaRot` 可部署在 1 台"
 " Atlas 800 A3（64G × 16）上。"
 
-msgid "Startup Command:"
-msgstr "启动命令："
-
-msgid "Key Parameter Descriptions:"
-msgstr "关键参数说明："
-
 msgid ""
 "- Setting the environment variable `VLLM_ASCEND_BALANCE_SCHEDULING=1` enables balance scheduling. This may help increase output throughput and reduce TPOT in v1 scheduler. However, TTFT may degrade in some scenarios. Furthermore, enabling this feature is not recommended in scenarios where PD is separated.\n"
 "- For single-node deployment, we recommend using `dp4tp4` instead of `dp2tp8`.\n"
@@ -190,20 +181,6 @@ msgstr ""
 "- `--max-model-len` 指定最大上下文长度，即单个请求的输入和输出 token 之和。对于输入长度 3.5K、输出长度 1.5K 的性能测试，`16384` 的值已足够；但对于精度测试，请至少设置为 `35000`。\n"
 "- `--no-enable-prefix-caching` 表示禁用前缀缓存。如需启用，请移除该选项。\n"
 "- 如果使用 w4a8 权重，将有更多内存分配给 kvcache，您可以尝试增加系统吞吐量以获得更大的吞吐。"
-
-msgid ""
-"Common Issues Tip: If you encounter issues, please refer to the [Public "
-"FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for "
-"troubleshooting."
-msgstr ""
-"常见问题提示：如果遇到问题，请参考[公共 "
-"FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) 进行故障排除。"
-
-msgid "Service Verification:"
-msgstr "服务验证："
-
-msgid "Expected Result:"
-msgstr "预期结果："
 
 msgid ""
 "The service returns HTTP 200 OK with a JSON response containing the "
@@ -224,17 +201,11 @@ msgstr "分别在两个节点上运行以下脚本。"
 msgid "=== \"Node 0\""
 msgstr "=== \"节点 0\""
 
-msgid "Startup Command:"
-msgstr "启动命令："
-
 msgid "=== \"Node 1\""
 msgstr "=== \"节点 1\""
 
 msgid "Startup Command:"
 msgstr "启动命令："
-
-msgid "Key Parameter Descriptions:"
-msgstr "关键参数说明："
 
 msgid ""
 "- `--data-parallel-size`: total number of data parallel ranks across all nodes. In this example, `4` means the model is split across 4 DP ranks total (2 per node).\n"
@@ -263,9 +234,6 @@ msgstr ""
 
 msgid "Service Verification:"
 msgstr "服务验证："
-
-msgid "Expected Result:"
-msgstr "预期结果："
 
 msgid ""
 "The service returns HTTP 200 OK. The JSON response contains the `choices` "
@@ -445,9 +413,6 @@ msgstr "## 7 精度评估"
 
 msgid "Here is one accuracy evaluation method."
 msgstr "以下是一种精度评估方法。"
-
-msgid "### Using AISBench"
-msgstr "### 使用 AISBench"
 
 msgid ""
 "1. Refer to [Using "
@@ -661,3 +626,36 @@ msgid ""
 "FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)."
 msgstr ""
 "常见环境、安装及通用参数问题，请参考[公共常见问题](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)。"
+
+msgid "Start the docker image on your each node."
+msgstr ""
+
+msgid "Startup Command:"
+msgstr ""
+
+msgid "Startup Command:"
+msgstr ""
+
+msgid "Key Parameter Descriptions:"
+msgstr ""
+
+msgid ""
+"Common Issues Tip: If you encounter issues, please refer to the [Public "
+"FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for "
+"troubleshooting."
+msgstr ""
+
+msgid "Service Verification:"
+msgstr ""
+
+msgid "Expected Result:"
+msgstr ""
+
+msgid "Key Parameter Descriptions:"
+msgstr ""
+
+msgid "Expected Result:"
+msgstr ""
+
+msgid "### Using AISBench"
+msgstr ""

@@ -143,9 +143,6 @@ msgstr ""
 msgid "=== \"A3 series\""
 msgstr "=== \"A3 系列\""
 
-msgid "Start the docker image on your each node."
-msgstr "在每个节点上启动 docker 镜像。"
-
 msgid "=== \"A2 series\""
 msgstr "=== \"A2 系列\""
 
@@ -243,9 +240,6 @@ msgstr ""
 
 msgid "Startup Command (supports up to 262144 context length):"
 msgstr "启动命令（支持最长 262144 上下文长度）："
-
-msgid "Key Parameter Descriptions:"
-msgstr "关键参数说明："
 
 msgid ""
 "- `--data-parallel-size 1` and `--tensor-parallel-size 2` are common settings for data parallelism (DP) and tensor parallelism (TP) sizes.\n"
@@ -494,11 +488,6 @@ msgstr ""
 msgid "**Completions API:**"
 msgstr "**Completions API：**"
 
-msgid ""
-"> **Note**: For `Qwen3.6-27B`, set `\"model\": \"qwen3.6\"` in the request "
-"body."
-msgstr "> **注意**：对于 `Qwen3.6-27B`，请在请求体中设置 `\"model\": \"qwen3.6\"`。"
-
 msgid "**Chat Completions API:**"
 msgstr "**Chat Completions API：**"
 
@@ -520,9 +509,6 @@ msgstr "## 7 精度评估"
 
 msgid "Here are two accuracy evaluation methods."
 msgstr "以下是两种精度评估方法。"
-
-msgid "### Using AISBench"
-msgstr "### 使用 AISBench"
 
 msgid ""
 "1. Refer to [Using "
@@ -706,3 +692,17 @@ msgid ""
 msgstr ""
 "常见环境、安装及通用参数问题，请参考[vLLM-Ascend "
 "公共常见问题](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)。"
+
+msgid "Start the docker image on your each node."
+msgstr ""
+
+msgid "Key Parameter Descriptions:"
+msgstr ""
+
+msgid ""
+"> **Note**: For `Qwen3.6-27B`, set `\"model\": \"qwen3.6\"` in the request "
+"body."
+msgstr ""
+
+msgid "### Using AISBench"
+msgstr ""

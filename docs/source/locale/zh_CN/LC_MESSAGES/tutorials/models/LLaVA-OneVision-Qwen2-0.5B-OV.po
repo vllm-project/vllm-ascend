@@ -129,10 +129,6 @@ msgstr "您可以先验证模型是否已通过 OpenAI 兼容 API 暴露："
 msgid "### Text-only Request"
 msgstr "### 纯文本请求"
 
-msgid ""
-"If the request succeeds, you can see a response similar to the following:"
-msgstr "如果请求成功，您可以看到类似以下的响应："
-
 msgid "### Image Understanding Request"
 msgstr "### 图像理解请求"
 
@@ -158,3 +154,7 @@ msgstr ""
 "| dataset | platform | metric | value |\n"
 "|----- | ----- | ----- | ----- |\n"
 "| ceval-valid | A2 | acc,none | 0.42 |"
+
+msgid ""
+"If the request succeeds, you can see a response similar to the following:"
+msgstr ""

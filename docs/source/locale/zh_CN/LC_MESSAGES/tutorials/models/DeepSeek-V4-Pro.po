@@ -116,15 +116,6 @@ msgstr ""
 "根据您的机器类型选择镜像，并在节点上启动 docker 镜像，请参考[使用 docker](../../installation.md#set-up-"
 "using-docker)。"
 
-msgid "=== \"A3 series\""
-msgstr "=== \"A3 系列\""
-
-msgid "Start the docker image on each node."
-msgstr "在每个节点上启动 docker 镜像。"
-
-msgid "=== \"A2 series\""
-msgstr "=== \"A2 系列\""
-
 msgid "Start the docker image on each node."
 msgstr "在每个节点上启动 docker 镜像。"
 
@@ -181,9 +172,6 @@ msgstr ""
 msgid "=== \"A2 series\""
 msgstr "=== \"A2 系列\""
 
-msgid "**Node0**"
-msgstr "**节点0**"
-
 msgid "**Node1-Node3**"
 msgstr "**节点1-节点3**"
 
@@ -195,9 +183,6 @@ msgstr "**节点0**"
 
 msgid "**Node1**"
 msgstr "**节点1**"
-
-msgid "Key Parameter Descriptions:"
-msgstr "关键参数说明："
 
 msgid ""
 "- `--data-parallel-start-rank` specifies the starting data parallel rank of the current node. Each node must be set to a unique value (e.g., Node0 = 0, Node1 = 1).\n"
@@ -228,14 +213,6 @@ msgstr ""
 
 msgid "Service Verification:"
 msgstr "服务验证："
-
-msgid "Expected Result:"
-msgstr "预期结果："
-
-msgid ""
-"The service returns HTTP 200 OK with a JSON response containing the "
-"`choices` field."
-msgstr "服务返回HTTP 200 OK，并返回包含`choices`字段的JSON响应。"
 
 msgid "### 5.2 Multi-Node PD Separation Deployment"
 msgstr "### 5.2 多节点 PD 分离部署"
@@ -272,12 +249,6 @@ msgid ""
 msgstr ""
 "本节展示了在Atlas 800 A3（128G × 8）多节点环境下，以1P1D配置部署DeepSeek-V4-Pro以获得更优性能的指南。"
 
-msgid "Before you start, please:"
-msgstr "开始前，请："
-
-msgid "1. Prepare the script `launch_online_dp.py` on each node."
-msgstr "1. 在每个节点上准备脚本 `launch_online_dp.py`。"
-
 msgid "Parameter descriptions:"
 msgstr "参数说明："
 
@@ -302,43 +273,14 @@ msgstr ""
 "    |`--dp-rpc-port`|str|否|12345|数据并行主节点通信的RPC端口。|\n"
 "    |`--vllm-start-port`|int|否|9000|此节点上每个vLLM引擎实例的起始端口。|"
 
-msgid "2. Prepare the script `run_dp_template.sh` on each node."
-msgstr "2. 在每个节点上准备脚本 `run_dp_template.sh`。"
-
-msgid "1. Prefill node 0"
-msgstr "1. Prefill节点0"
-
-msgid "2. Prefill node 1"
-msgstr "2. Prefill节点1"
-
 msgid "3. Decode node (Same as another D node)"
 msgstr "3. Decode节点（与另一个D节点相同）"
-
-msgid "3. Start the server with the following command on each node."
-msgstr "3. 在每个节点上使用以下命令启动服务器。"
-
-msgid "1. Prefill node 0"
-msgstr "1. Prefill节点0"
-
-msgid "2. Prefill node 1"
-msgstr "2. Prefill节点1"
 
 msgid "3. Decode node 0"
 msgstr "3. Decode节点0"
 
 msgid "4. Decode node 1"
 msgstr "4. Decode节点1"
-
-msgid "4. Deploy the P-D disaggregation proxy."
-msgstr "4. 部署P-D分离代理。"
-
-msgid ""
-"Refer to [Prefill-Decode Disaggregation "
-"(Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md) to deploy "
-"the P-D disaggregation proxy."
-msgstr ""
-"请参考[Prefill-Decode分离 "
-"(Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md)部署P-D分离代理。"
 
 msgid "#### 5.2.2 A2 Series PD Separation Deployment"
 msgstr "#### 5.2.2 A2系列PD分离部署"
@@ -465,9 +407,6 @@ msgstr "## 7 精度评估"
 
 msgid "Here are two accuracy evaluation methods."
 msgstr "以下是两种精度评估方法。"
-
-msgid "### Using AISBench"
-msgstr "### 使用 AISBench"
 
 msgid ""
 "1. Refer to [Using "
@@ -619,3 +558,62 @@ msgid ""
 msgstr ""
 "常见环境、安装和通用参数问题，请参考[公共 "
 "FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)；本章仅涵盖模型特定问题。"
+
+msgid "Start the docker image on each node."
+msgstr ""
+
+msgid "=== \"A2 series\""
+msgstr ""
+
+msgid "=== \"A3 series\""
+msgstr ""
+
+msgid "**Node0**"
+msgstr ""
+
+msgid "1. Prefill node 0"
+msgstr ""
+
+msgid "2. Prefill node 1"
+msgstr ""
+
+msgid "Before you start, please:"
+msgstr ""
+
+msgid "1. Prepare the script `launch_online_dp.py` on each node."
+msgstr ""
+
+msgid "2. Prepare the script `run_dp_template.sh` on each node."
+msgstr ""
+
+msgid "3. Start the server with the following command on each node."
+msgstr ""
+
+msgid "1. Prefill node 0"
+msgstr ""
+
+msgid "2. Prefill node 1"
+msgstr ""
+
+msgid "4. Deploy the P-D disaggregation proxy."
+msgstr ""
+
+msgid ""
+"Refer to [Prefill-Decode Disaggregation "
+"(Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md) to deploy "
+"the P-D disaggregation proxy."
+msgstr ""
+
+msgid "Key Parameter Descriptions:"
+msgstr ""
+
+msgid "Expected Result:"
+msgstr ""
+
+msgid ""
+"The service returns HTTP 200 OK with a JSON response containing the "
+"`choices` field."
+msgstr ""
+
+msgid "### Using AISBench"
+msgstr ""

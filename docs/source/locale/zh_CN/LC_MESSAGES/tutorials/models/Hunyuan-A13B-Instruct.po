@@ -110,9 +110,6 @@ msgstr ""
 "在 GiteeAI 平台上，使用 AISBench 工具在 GSM8K 基准集上对模型进行了测试验证：在 7cd45e "
 "版本配置下，模型在精度生成模式下达到了 94.77% 的准确率。"
 
-msgid "output:"
-msgstr "输出："
-
 msgid "The markdown formatted result is as follows:"
 msgstr "Markdown 格式的结果如下："
 
@@ -164,3 +161,6 @@ msgstr "以 `serve` 为例，运行如下代码。"
 msgid ""
 "After about several minutes, you can get the performance evaluation result."
 msgstr "大约几分钟后，即可获得性能评估结果。"
+
+msgid "output:"
+msgstr ""

@@ -185,9 +185,6 @@ msgstr ""
 msgid "## Accuracy Evaluation"
 msgstr ""
 
-msgid "### Using AISBench"
-msgstr ""
-
 msgid ""
 "1. Refer to [Using "
 "AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details."
@@ -205,9 +202,6 @@ msgid ""
 msgstr ""
 
 msgid "## Performance"
-msgstr ""
-
-msgid "### Using AISBench"
 msgstr ""
 
 msgid ""
@@ -251,3 +245,9 @@ msgstr ""
 "| 数据集 | 版本 | 指标        | 模式 | ttft   |\n"
 "|---------| ----- |-------------|------|--------|\n"
 "| random  | - | 性能 | perf | 20.7s |"
+
+msgid "### Using AISBench"
+msgstr ""
+
+msgid "### Using AISBench"
+msgstr ""

@@ -39,9 +39,6 @@ msgid ""
 "automatically routed to the appropriate NPU runner based on the test path."
 msgstr "运行 `tests/e2e/pull_request/` 下的特定 E2E 测试。测试会根据路径自动路由到相应的 NPU 运行器。"
 
-msgid "**Examples:**"
-msgstr "**示例：**"
-
 msgid "**Routing rules** (matched in order):"
 msgstr "**路由规则**（按顺序匹配）："
 
@@ -87,9 +84,6 @@ msgstr ""
 "在 A2 和 A3 上触发特定的 nightly 测试用例。仅支持 PR 评论。测试用例名称对应于 "
 "`schedule_nightly_test_a2.yaml` 和 `schedule_nightly_test_a3.yaml` 中定义的 "
 "`test_config.name` 条目。"
-
-msgid "**Usage:**"
-msgstr "**用法：**"
 
 msgid ""
 "| Syntax | Scope |\n"
@@ -152,9 +146,6 @@ msgstr ""
 "`deepseek-r1-0528-w8a8`, `kimi-k2-thinking`, "
 "`qwen3-vl-235b-a22b-instruct-w8a8`, `custom-multi-ops`, ..."
 
-msgid "**Examples:**"
-msgstr "**示例：**"
-
 msgid ""
 "This triggers `workflow_dispatch` on both `schedule_nightly_test_a2.yaml` "
 "and `schedule_nightly_test_a3.yaml`."
@@ -170,9 +161,6 @@ msgid ""
 "PR. This is useful for backporting fixes to release branches."
 msgstr "将一个 PR 的提交 cherry-pick 到指定的目标分支并创建一个新的 PR。这对于将修复反向移植到发布分支非常有用。"
 
-msgid "**Usage:**"
-msgstr "**用法：**"
-
 msgid ""
 "| Syntax | Description |\n"
 "|---|---|\n"
@@ -181,9 +169,6 @@ msgstr ""
 "| 语法 | 描述 |\n"
 "|---|---|\n"
 "| `/cherry-pick <target_branch>` | Cherry-pick 到指定分支 |"
-
-msgid "**Examples:**"
-msgstr "**示例：**"
 
 msgid ""
 "A new PR will be created with the title format `[Cherry-pick] "
@@ -304,3 +289,18 @@ msgid ""
 msgstr ""
 "权限通过 GitHub API (`repos/{owner}/{repo}/collaborators/{user}/permission`) "
 "进行验证。"
+
+msgid "**Examples:**"
+msgstr ""
+
+msgid "**Usage:**"
+msgstr ""
+
+msgid "**Examples:**"
+msgstr ""
+
+msgid "**Usage:**"
+msgstr ""
+
+msgid "**Examples:**"
+msgstr ""

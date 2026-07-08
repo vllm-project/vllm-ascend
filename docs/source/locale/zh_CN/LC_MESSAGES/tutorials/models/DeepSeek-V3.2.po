@@ -89,15 +89,6 @@ msgstr "### 安装"
 msgid "You can use our official docker image to run `DeepSeek-V3.2` directly."
 msgstr "您可以直接使用官方 Docker 镜像运行 `DeepSeek-V3.2`。"
 
-msgid "=== \"A3 series\""
-msgstr "=== \"A3 系列\""
-
-msgid "Start the docker image on your each node."
-msgstr "在每个节点上启动 Docker 镜像。"
-
-msgid "=== \"A2 series\""
-msgstr "=== \"A2 系列\""
-
 msgid "Start the docker image on your each node."
 msgstr "在每个节点上启动 Docker 镜像。"
 
@@ -147,12 +138,6 @@ msgstr "分别在两个节点上运行以下脚本。"
 msgid "=== \"A3 series\""
 msgstr "=== \"A3 系列\""
 
-msgid "**Node0**"
-msgstr "**节点0**"
-
-msgid "**Node1**"
-msgstr "**节点1**"
-
 msgid "=== \"A2 series\""
 msgstr "=== \"A2 系列\""
 
@@ -178,18 +163,6 @@ msgstr "1. 在每个节点上准备脚本 `launch_online_dp.py`："
 
 msgid "2. prepare the script `run_dp_template.sh` on each node."
 msgstr "2. 在每个节点上准备脚本 `run_dp_template.sh`。"
-
-msgid "1. Prefill node 0"
-msgstr "1. 预填充节点 0"
-
-msgid "2. Prefill node 1"
-msgstr "2. 预填充节点 1"
-
-msgid "3. Decode node 0"
-msgstr "3. 解码节点 0"
-
-msgid "4. Decode node 1"
-msgstr "4. 解码节点 1"
 
 msgid ""
 "Once the preparation is done, you can start the server with the following command on each node:\n"
@@ -249,9 +222,6 @@ msgstr "## 精度评估"
 
 msgid "Here are two accuracy evaluation methods."
 msgstr "这里提供两种精度评估方法。"
-
-msgid "### Using AISBench"
-msgstr "### 使用 AISBench"
 
 msgid ""
 "1. Refer to [Using "
@@ -355,3 +325,33 @@ msgid ""
 msgstr ""
 "详情请参考[DeepSeek-V3.2使用指南](https://docs.vllm.ai/projects/recipes/en/latest/DeepSeek/DeepSeek-V3_2.html#tool-"
 "calling-example)。"
+
+msgid "Start the docker image on your each node."
+msgstr ""
+
+msgid "=== \"A3 series\""
+msgstr ""
+
+msgid "=== \"A2 series\""
+msgstr ""
+
+msgid "**Node0**"
+msgstr ""
+
+msgid "**Node1**"
+msgstr ""
+
+msgid "1. Prefill node 0"
+msgstr ""
+
+msgid "2. Prefill node 1"
+msgstr ""
+
+msgid "3. Decode node 0"
+msgstr ""
+
+msgid "4. Decode node 1"
+msgstr ""
+
+msgid "### Using AISBench"
+msgstr ""

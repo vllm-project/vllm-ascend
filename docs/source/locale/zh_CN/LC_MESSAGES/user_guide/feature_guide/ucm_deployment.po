@@ -241,9 +241,6 @@ msgstr ""
 "> **重要**：对于跨节点部署，所有预填充和解码节点必须能够访问**共享存储后端**（例如 NFS 挂载目录或 "
 "3FS）。在继续之前，请确保所有节点均可访问该存储路径。"
 
-msgid "**Example: 2P2D Setup**"
-msgstr "**示例：2P2D 部署**"
-
 msgid ""
 "Assume 2 Prefill instances on node 192.168.10.1 (ports 7800, 7801) and 2 "
 "Decode instances on node 192.168.10.2 (ports 7802, 7803), with a shared NFS "
@@ -251,17 +248,6 @@ msgid ""
 msgstr ""
 "假设在节点 192.168.10.1 上有 2 个 Prefill 实例（端口 7800、7801），在节点 192.168.10.2 上有 2 个 "
 "Decode 实例（端口 7802、7803），共享 NFS 存储位于 `/mnt/test1`。"
-
-msgid "**Step 1: Prepare UCM Configuration File**"
-msgstr "**步骤 1：准备 UCM 配置文件**"
-
-msgid ""
-"Create a configuration file (e.g., `ucm_config_example.yaml`) with "
-"PipelineStore:"
-msgstr "创建一个包含 PipelineStore 的配置文件（例如 `ucm_config_example.yaml`）："
-
-msgid "Key configuration parameters:"
-msgstr "关键配置参数："
 
 msgid ""
 "- **storage_backends**: The shared storage directory accessible from all "
@@ -303,12 +289,6 @@ msgstr ""
 "要在同一节点上启动第二个 Decode 实例，请相应修改 `--port`（例如端口 7803）和 "
 "`ASCEND_RT_VISIBLE_DEVICES`。"
 
-msgid "**Step 4: Run Load Balancing Service**"
-msgstr "**步骤 4：运行负载均衡服务**"
-
-msgid "**Step 5: Performance Testing**"
-msgstr "**步骤 5：性能测试**"
-
 msgid "#### Distributed PD Disaggregation (P2P)"
 msgstr "#### 分布式 PD 分离部署 (P2P)"
 
@@ -340,12 +320,6 @@ msgstr ""
 "假设在节点 192.168.10.1 上有 2 个 Prefill 实例（端口 9000、9001），在节点 192.168.10.2 上有 2 个 "
 "Decode 实例（端口 9000、9001）。"
 
-msgid "**Step 1: Run Mooncake Master Service**"
-msgstr "**步骤 1：运行 Mooncake 主服务**"
-
-msgid "Run Mooncake master on any node (e.g., 192.168.10.1):"
-msgstr "在任意节点（例如 192.168.10.1）上运行 Mooncake 主服务："
-
 msgid "Prepare `mooncake.json` on each node:"
 msgstr "在每个节点上准备 `mooncake.json`："
 
@@ -353,15 +327,6 @@ msgid ""
 "Also prepare a UCM configuration file (`ucm_config_example.yaml`) for prefix"
 " cache on Prefill nodes:"
 msgstr "同时为 Prefill 节点上的前缀缓存准备一个 UCM 配置文件（`ucm_config_example.yaml`）："
-
-msgid ""
-"> **Note**: For more configuration options, refer to [UCM PipelineStore "
-"Documentation](https://ucm.readthedocs.io/en/latest/user-guide/prefix-"
-"cache/pipeline_store.html)."
-msgstr ""
-"> **注意**：更多配置选项，请参考 [UCM PipelineStore "
-"文档](https://ucm.readthedocs.io/en/latest/user-guide/prefix-"
-"cache/pipeline_store.html)。"
 
 msgid "**Step 2: Run Prefill Service**"
 msgstr "**步骤 2：运行 Prefill 服务**"
@@ -384,9 +349,6 @@ msgid ""
 msgstr ""
 "要在同一节点上启动多个 Decode 实例，请为每个实例修改 `--port`、`kv_port` 和 "
 "`ASCEND_RT_VISIBLE_DEVICES`（例如第二个实例使用端口 9001 和 kv_port 20002）。"
-
-msgid "**Step 4: Run Load Balancing Service**"
-msgstr "**步骤 4：运行负载均衡服务**"
 
 msgid "**Step 5: Performance Testing**"
 msgstr "**步骤 5：性能测试**"
@@ -427,22 +389,10 @@ msgid ""
 "PipelineStore:"
 msgstr "创建一个包含 PipelineStore 的配置文件（例如 `ucm_config_example.yaml`）："
 
-msgid "Key configuration parameters:"
-msgstr "关键配置参数："
-
 msgid ""
 "- **storage_backends**: Directory for KV cache storage. Can be local SSD or "
 "NFS-mounted path."
 msgstr "- **storage_backends**：KV 缓存存储目录。可以是本地 SSD 或 NFS 挂载路径。"
-
-msgid ""
-"> **Note**: For more configuration options, refer to [UCM PipelineStore "
-"Documentation](https://ucm.readthedocs.io/en/latest/user-guide/prefix-"
-"cache/pipeline_store.html)."
-msgstr ""
-"> **注意**：更多配置选项，请参考 [UCM PipelineStore "
-"文档](https://ucm.readthedocs.io/en/latest/user-guide/prefix-"
-"cache/pipeline_store.html)。"
 
 msgid "**Step 2: Run PD-Mixed Service**"
 msgstr "**步骤 2：运行 PD 混合服务**"
@@ -799,3 +749,47 @@ msgstr ""
 "的实际缓存命中率低于预期的 0.8。UCM 通过将所有 KV 缓存存储在共享的外部存储中来解决此限制，确保无论请求由哪个 DP "
 "进程处理，都能命中缓存数据。这保证了真实的缓存命中率等于预填充比例 0.8，与 HBM PC 相比显著降低了 TTFT。改进的 TTFT 有效提高了 "
 "Prefill 实例的吞吐量，从而提升了整个系统的吞吐量。"
+
+msgid "**Example: 2P2D Setup**"
+msgstr ""
+
+msgid "**Step 4: Run Load Balancing Service**"
+msgstr ""
+
+msgid "**Step 5: Performance Testing**"
+msgstr ""
+
+msgid "**Step 1: Prepare UCM Configuration File**"
+msgstr ""
+
+msgid ""
+"Create a configuration file (e.g., `ucm_config_example.yaml`) with "
+"PipelineStore:"
+msgstr ""
+
+msgid "Key configuration parameters:"
+msgstr ""
+
+msgid ""
+"> **Note**: For more configuration options, refer to [UCM PipelineStore "
+"Documentation](https://ucm.readthedocs.io/en/latest/user-guide/prefix-"
+"cache/pipeline_store.html)."
+msgstr ""
+
+msgid "**Step 1: Run Mooncake Master Service**"
+msgstr ""
+
+msgid "Run Mooncake master on any node (e.g., 192.168.10.1):"
+msgstr ""
+
+msgid "Key configuration parameters:"
+msgstr ""
+
+msgid ""
+"> **Note**: For more configuration options, refer to [UCM PipelineStore "
+"Documentation](https://ucm.readthedocs.io/en/latest/user-guide/prefix-"
+"cache/pipeline_store.html)."
+msgstr ""
+
+msgid "**Step 4: Run Load Balancing Service**"
+msgstr ""

@@ -119,22 +119,8 @@ msgstr "### 4.1 Docker 镜像安装"
 msgid "You can use our official docker image to run GLM-5/5.1 directly."
 msgstr "您可以直接使用我们的官方 Docker 镜像来运行 GLM-5/5.1。"
 
-msgid "=== \"A3 series\""
-msgstr "=== \"A3 系列\""
-
 msgid "Start the docker image on your each node."
 msgstr "在每个节点上启动 Docker 镜像。"
-
-msgid "=== \"A2 series\""
-msgstr "=== \"A2 系列\""
-
-msgid "Start the docker image on your each node."
-msgstr "在每个节点上启动 Docker 镜像。"
-
-msgid ""
-"If you want to deploy multi-node environment, you need to set up environment"
-" on each node."
-msgstr "如果要部署多节点环境，需要在每个节点上进行环境设置。"
 
 msgid ""
 "To verify the successful installation of the environment, please refer to "
@@ -165,21 +151,11 @@ msgstr "## 5 在线服务部署"
 msgid "### 5.1 Single-Node Online Deployment"
 msgstr "### 5.1 单节点在线部署"
 
-msgid "=== \"A3 series\""
-msgstr "=== \"A3 系列\""
-
 msgid ""
 "- Quantized model `glm-5-w4a8` and `glm-5.1-w4a8` can be deployed on 1 Atlas"
 " 800 A3 (64G × 16) ."
 msgstr ""
 "- 量化模型 `glm-5-w4a8` 和 `glm-5.1-w4a8` 可部署在 1 台 Atlas 800 A3（64G × 16）上。"
-
-msgid "Run the following script to execute online inference."
-msgstr "运行以下脚本执行在线推理。"
-
-msgid ""
-"Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md)."
-msgstr "常见问题提示：如果遇到问题，请参考[常见问题解答](../../faqs.md)。"
 
 msgid ""
 "- Quantized model `glm-5-w8a8` and `glm-5.1-w8a8` can be deployed on 1 Atlas"
@@ -187,22 +163,12 @@ msgid ""
 msgstr ""
 "- 量化模型 `glm-5-w8a8` 和 `glm-5.1-w8a8` 可部署在 1 台 Atlas 800 A3（64G × 16）上。"
 
-msgid "Run the following script to execute online inference."
-msgstr "运行以下脚本执行在线推理。"
-
-msgid "=== \"A2 series\""
-msgstr "=== \"A2 系列\""
-
 msgid ""
 "- Quantized model `glm-5-w4a8` can be deployed on 1 Atlas 800 A2 (64G × 8) ."
 msgstr "- 量化模型 `glm-5-w4a8` 可部署在 1 台 Atlas 800 A2（64G × 8）上。"
 
 msgid "Run the following script to execute online inference."
 msgstr "运行以下脚本执行在线推理。"
-
-msgid ""
-"Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md)."
-msgstr "常见问题提示：如果遇到问题，请参考[常见问题解答](../../faqs.md)。"
 
 msgid ""
 "**Notice:**\n"
@@ -239,26 +205,8 @@ msgid ""
 "16)."
 msgstr "- `glm-5-bf16` 和 `glm-5.1-bf16`：至少需要 2 台 Atlas 800 A3（64G × 16）。"
 
-msgid "Run the following scripts on two nodes respectively."
-msgstr "分别在两个节点上运行以下脚本。"
-
-msgid "**node 0**"
-msgstr "**节点 0**"
-
-msgid "**node 1**"
-msgstr "**节点 1**"
-
 msgid "=== \"A2 series\""
 msgstr "=== \"A2 系列\""
-
-msgid "Run the following scripts on two nodes respectively."
-msgstr "分别在两个节点上运行以下脚本。"
-
-msgid "**node 0**"
-msgstr "**节点 0**"
-
-msgid "**node 1**"
-msgstr "**节点 1**"
 
 msgid ""
 "- For bf16 weight, use this script on each node to enable [Multi Token "
@@ -306,21 +254,6 @@ msgid ""
 msgstr ""
 "为了在预填充阶段支持 200k 上下文窗口，需要在每个预填充节点的 `--additional_config` 中添加参数 `\"layer_sharding\": [\"q_b_proj\", \"o_proj\"]`。\n"
 "    1. 预填充节点 0"
-
-msgid "2. Prefill node 1"
-msgstr "2. 预填充节点 1"
-
-msgid "3. Decode node 0"
-msgstr "3. 解码节点 0"
-
-msgid "4. Decode node 1"
-msgstr "4. 解码节点 1"
-
-msgid "5. Decode node 2"
-msgstr "5. 解码节点 2"
-
-msgid "6. Decode node 3"
-msgstr "6. 解码节点 3"
 
 msgid ""
 "Once the preparation is done, you can start the server with the following "
@@ -503,3 +436,70 @@ msgstr "- **问：如何为 GLM-5 启用函数调用？**"
 
 msgid "A: Please add following configurations in vLLM startup command"
 msgstr "答：请在 vLLM 启动命令中添加以下配置"
+
+msgid "Start the docker image on your each node."
+msgstr ""
+
+msgid ""
+"If you want to deploy multi-node environment, you need to set up environment"
+" on each node."
+msgstr ""
+
+msgid "=== \"A3 series\""
+msgstr ""
+
+msgid "Run the following script to execute online inference."
+msgstr ""
+
+msgid "=== \"A2 series\""
+msgstr ""
+
+msgid "Run the following script to execute online inference."
+msgstr ""
+
+msgid ""
+"Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md)."
+msgstr ""
+
+msgid ""
+"Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md)."
+msgstr ""
+
+msgid "=== \"A3 series\""
+msgstr ""
+
+msgid "=== \"A2 series\""
+msgstr ""
+
+msgid "Run the following scripts on two nodes respectively."
+msgstr ""
+
+msgid "**node 0**"
+msgstr ""
+
+msgid "**node 1**"
+msgstr ""
+
+msgid "Run the following scripts on two nodes respectively."
+msgstr ""
+
+msgid "**node 0**"
+msgstr ""
+
+msgid "**node 1**"
+msgstr ""
+
+msgid "2. Prefill node 1"
+msgstr ""
+
+msgid "3. Decode node 0"
+msgstr ""
+
+msgid "4. Decode node 1"
+msgstr ""
+
+msgid "5. Decode node 2"
+msgstr ""
+
+msgid "6. Decode node 3"
+msgstr ""

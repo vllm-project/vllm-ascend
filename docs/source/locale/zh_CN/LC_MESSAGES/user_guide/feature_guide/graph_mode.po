@@ -136,12 +136,6 @@ msgstr ""
 msgid "### Basic usage"
 msgstr "### 基本用法"
 
-msgid "Offline example:"
-msgstr "离线示例："
-
-msgid "Online example:"
-msgstr "在线示例："
-
 msgid "### Explicit `cudagraph_mode` configuration"
 msgstr "### 显式 `cudagraph_mode` 配置"
 
@@ -279,12 +273,6 @@ msgstr "### 显式配置"
 msgid "To explicitly control Npugraph_ex:"
 msgstr "要显式控制 Npugraph_ex："
 
-msgid "Offline example:"
-msgstr "离线示例："
-
-msgid "Online example:"
-msgstr "在线示例："
-
 msgid "To disable Npugraph_ex explicitly:"
 msgstr "要显式禁用 Npugraph_ex："
 
@@ -307,12 +295,6 @@ msgid ""
 "is not affected."
 msgstr ""
 "启用静态内核会在服务启动时的图捕获阶段触发一次编译过程。根据要编译的算子数量和模型复杂度，这可能会增加**几分钟到几十分钟**的启动时间。完成后，后续的请求处理不受影响。"
-
-msgid "Offline example:"
-msgstr "离线示例："
-
-msgid "Online example:"
-msgstr "在线示例："
 
 msgid "#### Verifying static kernel is active"
 msgstr "#### 验证静态内核已生效"
@@ -436,3 +418,21 @@ msgstr ""
 "- [Npugraph_ex 指南](https://www.hiascend.com/document/detail/zh/Pytorch/2600/modthirdparty/torchairuseguide/docs/zh/overview.md)\n"
 "- [Npugraph_ex RFC](https://github.com/vllm-project/vllm-ascend/issues/4715)\n"
 "- [ACL 图开发者指南](../../developer_guide/Design_Documents/ACL_Graph.md)"
+
+msgid "Offline example:"
+msgstr ""
+
+msgid "Online example:"
+msgstr ""
+
+msgid "Offline example:"
+msgstr ""
+
+msgid "Online example:"
+msgstr ""
+
+msgid "Offline example:"
+msgstr ""
+
+msgid "Online example:"
+msgstr ""

@@ -108,9 +108,6 @@ msgstr ""
 "| `prefill_pp_size` | Prefill PP大小，当Prefill节点启用PP时需要设置。 |\n"
 "| `prefill_pp_layer_partition` | Prefill PP层分区，当Prefill节点启用PP时需要设置。 |"
 
-msgid "### Environment Variable Configuration"
-msgstr "### 环境变量配置"
-
 msgid ""
 "To guarantee uniform hash generation, it is required to synchronize the "
 "PYTHONHASHSEED environment variable across all nodes upon enabling KV Pool."
@@ -227,12 +224,6 @@ msgid ""
 "`default_kv_lease_ttl` controls the default lease TTL for KV objects (milliseconds); configure it via `--default_kv_lease_ttl` and keep it larger than `ASCEND_CONNECT_TIMEOUT` and `ASCEND_TRANSFER_TIMEOUT`."
 msgstr ""
 
-msgid "### PD Disaggregation Scenario"
-msgstr "### PD 分离场景"
-
-msgid "#### 1. Run `prefill` Node and `decode` Node"
-msgstr "#### 1. 运行 `prefill` 节点和 `decode` 节点"
-
 msgid ""
 "Using `MultiConnector` to simultaneously utilize both `MooncakeConnectorV1` "
 "and `AscendStoreConnector`. `MooncakeConnectorV1` performs kv_transfer, "
@@ -260,31 +251,16 @@ msgid ""
 "`prefill_pp_layer_partition` also needs to be set. Example as follows:"
 msgstr ""
 
-msgid "#### 2. Start proxy_server"
-msgstr "#### 2. 启动 proxy_server"
-
 msgid "Change localhost to your actual IP address."
 msgstr ""
-
-msgid "#### 3. Run Inference"
-msgstr "#### 3. 运行推理"
 
 msgid ""
 "Configure the localhost, port, and model weight path in the command to your "
 "own settings."
 msgstr ""
 
-msgid "Short question:"
-msgstr ""
-
-msgid "Long question:"
-msgstr ""
-
 msgid "### PD-Mixed Inference"
 msgstr ""
-
-msgid "#### 1. Run Mixed Deployment Script"
-msgstr "#### 1. 运行混合部署脚本"
 
 msgid "Content of pd_mix.sh:"
 msgstr ""
@@ -297,12 +273,6 @@ msgid ""
 "own settings. The requests sent will only go to the port where the mixed "
 "deployment script is located, and there is no need to start a separate "
 "proxy."
-msgstr ""
-
-msgid "Short question:"
-msgstr ""
-
-msgid "Long question:"
 msgstr ""
 
 msgid ""
@@ -482,9 +452,6 @@ msgstr ""
 "`AscendStoreConnector`。`MooncakeConnectorV1` 执行 kv_transfer，而 "
 "`AscendStoreConnector` 启用 KV Cache Pool"
 
-msgid "#### 800I A2/800T A2/800I A3/800T A3 Series"
-msgstr "#### 800I A2/800T A2/800I A3/800T A3 系列"
-
 msgid "**run_prefill.sh/run_decode.sh:**"
 msgstr "**run_prefill.sh/run_decode.sh：**"
 
@@ -515,9 +482,6 @@ msgstr "#### 800I A2/800T A2/800I A3/800T A3 系列"
 
 msgid "**Run_pd_mix.sh:**"
 msgstr "**Run_pd_mix.sh：**"
-
-msgid "#### [2. Run Inference](#2-run-inference)"
-msgstr "#### [2. 运行推理](#2-run-inference)"
 
 msgid "## Example of using Yuanrong as a KV Pool backend"
 msgstr "## 使用 Yuanrong 作为 KV Pool 后端的示例"
@@ -1010,3 +974,39 @@ msgid ""
 msgstr ""
 "有关临时的 DSv4 已知问题，请参阅：\n"
 "<https://github.com/vllm-project/vllm-ascend/issues/9975>"
+
+msgid "Short question:"
+msgstr ""
+
+msgid "Long question:"
+msgstr ""
+
+msgid "Short question:"
+msgstr ""
+
+msgid "Long question:"
+msgstr ""
+
+msgid "### PD Disaggregation Scenario"
+msgstr ""
+
+msgid "#### 1. Run `prefill` Node and `decode` Node"
+msgstr ""
+
+msgid "#### 2. Start proxy_server"
+msgstr ""
+
+msgid "#### 3. Run Inference"
+msgstr ""
+
+msgid "#### 1. Run Mixed Deployment Script"
+msgstr ""
+
+msgid "#### 800I A2/800T A2/800I A3/800T A3 Series"
+msgstr ""
+
+msgid "### Environment Variable Configuration"
+msgstr ""
+
+msgid "#### [2. Run Inference](#2-run-inference)"
+msgstr ""

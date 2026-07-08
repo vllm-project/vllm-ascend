@@ -48,21 +48,6 @@ msgstr "您可以使用输入提示查询结果："
 msgid "The output format matches the following:"
 msgstr "输出格式如下所示："
 
-msgid "Install lm-eval in the container:"
-msgstr "在容器中安装 lm-eval："
-
-msgid ""
-"The Docker container is launched with `VLLM_USE_MODELSCOPE=True`, which may\n"
-"    cause lm-eval to download datasets from ModelScope instead of HuggingFace.\n"
-"    Setting `USE_MODELSCOPE_HUB=0` disables this behavior so that lm-eval can\n"
-"    fetch datasets from HuggingFace correctly."
-msgstr ""
-"Docker 容器启动时设置了 `VLLM_USE_MODELSCOPE=True`，这可能导致 lm-eval 从 ModelScope 而非 HuggingFace 下载数据集。\n"
-"    设置 `USE_MODELSCOPE_HUB=0` 可禁用此行为，使 lm-eval 能够正确地从 HuggingFace 获取数据集。"
-
-msgid "Run the following command:"
-msgstr "运行以下命令："
-
 msgid "After 30 minutes, the output is as shown below:"
 msgstr "30 分钟后，输出如下所示："
 
@@ -125,3 +110,16 @@ msgstr ""
 "[3]: https://github.com/EleutherAI/lm-evaluation-harness/blob/main/lm_eval/tasks/gsm8k/gsm8k.yaml\n"
 "[4]: https://github.com/EleutherAI/lm-evaluation-harness/blob/main/lm_eval/tasks/mmlu/default/_default_template_yaml\n"
 "[5]: https://github.com/EleutherAI/lm-evaluation-harness/blob/main/docs/README.md"
+
+msgid "Install lm-eval in the container:"
+msgstr ""
+
+msgid ""
+"The Docker container is launched with `VLLM_USE_MODELSCOPE=True`, which may\n"
+"    cause lm-eval to download datasets from ModelScope instead of HuggingFace.\n"
+"    Setting `USE_MODELSCOPE_HUB=0` disables this behavior so that lm-eval can\n"
+"    fetch datasets from HuggingFace correctly."
+msgstr ""
+
+msgid "Run the following command:"
+msgstr ""

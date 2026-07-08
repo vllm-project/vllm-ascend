@@ -19,10 +19,8 @@ msgstr ""
 "Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: Babel 2.17.0\n"
 
-#: ../../source/user_guide/deployment_guide/index.md:1
-#: ../../source/user_guide/deployment_guide/index.md:3
-msgid "Deployment Guide"
-msgstr "部署指南"
-
 msgid "# Deployment Guide"
 msgstr ""
+
+#~ msgid "Deployment Guide"
+#~ msgstr "部署指南"

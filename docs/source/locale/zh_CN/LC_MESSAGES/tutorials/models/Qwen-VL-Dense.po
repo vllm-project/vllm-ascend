@@ -120,9 +120,6 @@ msgstr "**A3系列：**"
 msgid "Start the docker image on each node."
 msgstr "在每个节点上启动docker镜像。"
 
-msgid "**Installation Verification:**"
-msgstr "**安装验证：**"
-
 msgid ""
 "After starting the container, run the following command to verify the "
 "installation:"
@@ -382,3 +379,6 @@ msgid ""
 "FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)."
 msgstr ""
 "关于常见环境、安装和通用参数问题，请参考[公共FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)。"
+
+msgid "**Installation Verification:**"
+msgstr ""

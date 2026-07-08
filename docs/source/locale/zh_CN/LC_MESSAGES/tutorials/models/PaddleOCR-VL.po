@@ -105,12 +105,6 @@ msgstr ""
 "根据您的机器类型选择镜像，并在节点上启动 Docker 镜像，请参考[使用 Docker](../../installation.md#set-up-"
 "using-docker)。"
 
-msgid "=== \"A2 series\""
-msgstr "=== \"A2 系列\""
-
-msgid "=== \"Atlas 300 inference products\""
-msgstr "=== \"Atlas 300 推理产品\""
-
 msgid ""
 "After a successful docker run, you can verify the running container service "
 "by executing the `docker ps` command."
@@ -162,12 +156,6 @@ msgstr ""
 
 msgid "Startup Command:"
 msgstr "启动命令："
-
-msgid "=== \"A2 series\""
-msgstr "=== \"A2 系列\""
-
-msgid "=== \"Atlas 300 inference products\""
-msgstr "=== \"Atlas 300 推理产品\""
 
 msgid "On Atlas 300 inference products:"
 msgstr "在 Atlas 300 推理产品上："
@@ -444,3 +432,15 @@ msgid ""
 "See [Section 4.2](#42-source-code-installation) for details."
 msgstr ""
 "答：您可能需要卸载 `triton-ascend` 以避免依赖冲突。详见[第 4.2 节](#42-source-code-installation)。"
+
+msgid "=== \"A2 series\""
+msgstr ""
+
+msgid "=== \"Atlas 300 inference products\""
+msgstr ""
+
+msgid "=== \"A2 series\""
+msgstr ""
+
+msgid "=== \"Atlas 300 inference products\""
+msgstr ""

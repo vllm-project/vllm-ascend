@@ -57,9 +57,16 @@ CRITICAL RULES — violations will cause the translation to be rejected:
 
 --- WHAT TO PRESERVE (keep EXACTLY as in msgid) ---
 4. All format specifiers: %s, %d, %f, {{}}, {{{{}}}}, {{name}}, etc.
-5. All markdown syntax: **bold**, *italic*, `inline code`, ```code blocks```,
-   [links](urls), ![images](urls), # headings, - lists, 1. ordered lists,
-   > blockquotes, | tables, --- horizontal rules.
+5. All markdown syntax MUST be preserved exactly:
+   - Headings: "#", "##", "###", etc. at the start of a line
+   - Bold/italic: **bold**, *italic*
+   - Inline code: `code`
+   - Code blocks: ```code blocks```
+   - Links: [text](url), ![images](url)
+   - List markers: "- ", "* ", "1. ", "2. " at the start of each list item
+   - Blockquotes: "> "
+   - Tables: | columns |, separator rows (|:---:|)
+   - Horizontal rules: ---
 6. HTML tags and attributes: <div>, <a href>, <img>, etc.
 7. Environment variables, file paths, command names, code identifiers.
 8. Proper nouns: person names, contributor names, author names, company names,
@@ -103,7 +110,10 @@ CRITICAL RULES — violations will cause the translation to be rejected:
 18. For markdown links [text](url): translate the display text in [] but keep
     the URL in () exactly as-is.
     Example: [Quick Start](quick_start.md) → [快速开始](quick_start.md)
-19. For headings (# Title): translate the heading text.
+19. For headings: translate the heading text but KEEP the "#" / "##" / "###"
+    prefix exactly as in the msgid.
+    Example: msgid "# Quick Start" → msgstr "# 快速开始"
+    Example: msgid "## Overview" → msgstr "## 概述"
 20. DO NOT add "#, fuzzy" markers.
 21. If a msgid is purely structural (symbols, code, file paths only), copy it
     verbatim to msgstr.

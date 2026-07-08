@@ -159,18 +159,12 @@ msgstr "这些设置必须在宿主机操作系统上以 root 权限应用，而
 msgid "Set CPU Frequency Governor to `performance`"
 msgstr "将 CPU 频率调节器设置为 `performance`"
 
-msgid "Purpose"
-msgstr "目的"
-
 msgid ""
 "- Forces all CPU cores to run under the `performance` governor\n"
 "- Disables dynamic frequency scaling (e.g., `ondemand`, `powersave`)"
 msgstr ""
 "- 强制所有 CPU 核心在 `performance` 调节器下运行\n"
 "- 禁用动态频率缩放（例如 `ondemand`、`powersave`）"
-
-msgid "Benefits"
-msgstr "优势"
 
 msgid ""
 "- Keeps CPU cores at maximum frequency\n"
@@ -184,14 +178,8 @@ msgstr ""
 msgid "#### 4.2 Disable Swap Usage"
 msgstr "#### 4.2 禁用交换空间使用"
 
-msgid "Purpose"
-msgstr "目的"
-
 msgid "- Minimizes the kernel’s tendency to swap memory pages to disk"
 msgstr "- 最小化内核将内存页交换到磁盘的倾向"
-
-msgid "Benefits"
-msgstr "优势"
 
 msgid ""
 "- Prevents severe latency spikes caused by swapping\n"
@@ -213,14 +201,8 @@ msgstr ""
 msgid "#### 4.3 Disable Automatic NUMA Balancing"
 msgstr "#### 4.3 禁用自动 NUMA 平衡"
 
-msgid "Purpose"
-msgstr "目的"
-
 msgid "- Disables the kernel’s automatic NUMA page migration mechanism"
 msgstr "- 禁用内核的自动 NUMA 页面迁移机制"
-
-msgid "Benefits"
-msgstr "优势"
 
 msgid ""
 "- Prevents background memory page migrations\n"
@@ -276,3 +258,21 @@ msgstr ""
 "- 单位：纳秒 (ns)\n"
 "- 典型推荐范围：50000–100000\n"
 "- 值越高，线程越倾向于停留在同一 CPU 核心上"
+
+msgid "Purpose"
+msgstr ""
+
+msgid "Benefits"
+msgstr ""
+
+msgid "Purpose"
+msgstr ""
+
+msgid "Benefits"
+msgstr ""
+
+msgid "Purpose"
+msgstr ""
+
+msgid "Benefits"
+msgstr ""

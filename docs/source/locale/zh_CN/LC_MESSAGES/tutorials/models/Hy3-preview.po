@@ -147,9 +147,6 @@ msgstr "## 精度评估"
 msgid "Here are two accuracy evaluation methods."
 msgstr "这里提供两种精度评估方法。"
 
-msgid "### Using AISBench"
-msgstr "### 使用 AISBench"
-
 msgid ""
 "1. Refer to [Using "
 "AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details."
@@ -239,3 +236,6 @@ msgid ""
 msgstr ""
 "- 模型配置支持 262,144 个 token，但本指南仅验证了 32,768 个 token 的服务。更大的上下文需要单独进行容量验证。\n"
 "- 正式的 AISBench 精度结果待定，应在实际基准测试运行后添加。"
+
+msgid "### Using AISBench"
+msgstr ""

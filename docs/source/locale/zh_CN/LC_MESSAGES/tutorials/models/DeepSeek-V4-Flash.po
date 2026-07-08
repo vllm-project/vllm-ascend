@@ -111,15 +111,6 @@ msgstr ""
 "根据您的机器类型选择镜像，并在节点上启动 Docker 镜像，请参考[使用 Docker](../../installation.md#set-up-"
 "using-docker)。"
 
-msgid "=== \"A3 series\""
-msgstr "=== \"A3 系列\""
-
-msgid "Start the docker image on each node."
-msgstr "在每个节点上启动 Docker 镜像。"
-
-msgid "=== \"A2 series\""
-msgstr "=== \"A2 系列\""
-
 msgid "Start the docker image on each node."
 msgstr "在每个节点上启动 Docker 镜像。"
 
@@ -176,17 +167,11 @@ msgstr ""
 msgid "=== \"A2 series\""
 msgstr "=== \"A2 系列\""
 
-msgid "Run the following script to execute online inference."
-msgstr "运行以下脚本执行在线推理。"
-
 msgid "=== \"A3 series\""
 msgstr "=== \"A3 系列\""
 
 msgid "Run the following script to execute online inference."
 msgstr "运行以下脚本执行在线推理。"
-
-msgid "Key Parameter Descriptions:"
-msgstr "关键参数说明："
 
 msgid ""
 "- `--max-model-len` specifies the maximum context length - that is, the sum of input and output tokens for a single request. Adjust it according to your actual scenario.\n"
@@ -213,14 +198,6 @@ msgstr ""
 
 msgid "Service Verification:"
 msgstr "服务验证："
-
-msgid "Expected Result:"
-msgstr "预期结果："
-
-msgid ""
-"The service returns HTTP 200 OK with a JSON response containing the "
-"`choices` field."
-msgstr "服务返回HTTP 200 OK，JSON响应中包含`choices`字段。"
 
 msgid "### 5.2 Multi-Node PD Separation Deployment"
 msgstr "### 5.2 多节点 PD 分离部署"
@@ -269,12 +246,6 @@ msgid ""
 msgstr ""
 "本节展示在Atlas 800 A3（128G × 8）多节点环境下，采用1P1D配置部署DeepSeek-V4-Flash以获得更优性能的指南。"
 
-msgid "Before you start, please:"
-msgstr "开始前，请："
-
-msgid "1. Prepare the script `launch_online_dp.py` on each node."
-msgstr "1. 在每个节点上准备脚本 `launch_online_dp.py`。"
-
 msgid "Parameter descriptions:"
 msgstr "参数说明："
 
@@ -298,27 +269,6 @@ msgstr ""
 "    |`--dp-address`|str|是|-|数据并行主节点的IP地址。|\n"
 "    |`--dp-rpc-port`|str|否|12345|数据并行主节点通信的RPC端口。|\n"
 "    |`--vllm-start-port`|int|否|9000|此节点上每个vLLM引擎实例的起始端口。"
-
-msgid "2. Prepare the script `run_dp_template.sh` on each node."
-msgstr "2. 在每个节点上准备脚本 `run_dp_template.sh`。"
-
-msgid "1. Prefill node"
-msgstr "1. Prefill节点"
-
-msgid "2. Decode node"
-msgstr "2. Decode节点"
-
-msgid "3. Start the server with the following command on each node."
-msgstr "3. 在每个节点上使用以下命令启动服务器。"
-
-msgid "1. Prefill node"
-msgstr "1. Prefill节点"
-
-msgid "2. Decode node"
-msgstr "2. Decode节点"
-
-msgid "4. Deploy the P-D disaggregation proxy."
-msgstr "4. 部署P-D分离代理。"
 
 msgid ""
 "Refer to [Prefill-Decode Disaggregation "
@@ -474,9 +424,6 @@ msgstr "## 7 精度评估"
 msgid "Here are two accuracy evaluation methods."
 msgstr "以下是两种精度评估方法。"
 
-msgid "### Using AISBench"
-msgstr "### 使用AISBench"
-
 msgid ""
 "1. Refer to [Using "
 "AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details."
@@ -626,3 +573,56 @@ msgid ""
 " only covers model-specific issues."
 msgstr ""
 "常见环境、安装和通用参数问题请参考[公共FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)；本章仅涵盖模型特定问题。"
+
+msgid "Start the docker image on each node."
+msgstr ""
+
+msgid "=== \"A2 series\""
+msgstr ""
+
+msgid "=== \"A3 series\""
+msgstr ""
+
+msgid "Run the following script to execute online inference."
+msgstr ""
+
+msgid "1. Prefill node"
+msgstr ""
+
+msgid "2. Decode node"
+msgstr ""
+
+msgid "Before you start, please:"
+msgstr ""
+
+msgid "1. Prepare the script `launch_online_dp.py` on each node."
+msgstr ""
+
+msgid "2. Prepare the script `run_dp_template.sh` on each node."
+msgstr ""
+
+msgid "3. Start the server with the following command on each node."
+msgstr ""
+
+msgid "1. Prefill node"
+msgstr ""
+
+msgid "2. Decode node"
+msgstr ""
+
+msgid "4. Deploy the P-D disaggregation proxy."
+msgstr ""
+
+msgid "Key Parameter Descriptions:"
+msgstr ""
+
+msgid "Expected Result:"
+msgstr ""
+
+msgid ""
+"The service returns HTTP 200 OK with a JSON response containing the "
+"`choices` field."
+msgstr ""
+
+msgid "### Using AISBench"
+msgstr ""

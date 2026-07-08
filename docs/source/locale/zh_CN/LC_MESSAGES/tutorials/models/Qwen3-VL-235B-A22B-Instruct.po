@@ -221,9 +221,6 @@ msgstr "## 精度评估"
 msgid "Here are two accuracy evaluation methods."
 msgstr "以下是两种精度评估方法。"
 
-msgid "### Using AISBench"
-msgstr "### 使用 AISBench"
-
 msgid ""
 "1. Refer to [Using "
 "AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details."
@@ -293,3 +290,6 @@ msgstr "以 `serve` 为例。按如下方式运行代码。"
 msgid ""
 "After about several minutes, you can get the performance evaluation result."
 msgstr "大约几分钟后，您将获得性能评估结果。"
+
+msgid "### Using AISBench"
+msgstr ""

@@ -19,10 +19,8 @@ msgstr ""
 "Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: Babel 2.17.0\n"
 
-#: ../../developer_guide/evaluation/index.md:1
-#: ../../developer_guide/evaluation/index.md:3
-msgid "Accuracy"
-msgstr "准确性"
-
 msgid "# Accuracy"
 msgstr ""
+
+#~ msgid "Accuracy"
+#~ msgstr "准确性"

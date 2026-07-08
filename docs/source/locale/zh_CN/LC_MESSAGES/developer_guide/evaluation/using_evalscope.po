@@ -58,9 +58,6 @@ msgid ""
 "dataset) for accuracy testing:"
 msgstr "您可以使用 `evalscope eval` 运行 GSM8K（一个小学数学基准数据集）进行精度测试："
 
-msgid "After 1 to 2 minutes, the output is shown below:"
-msgstr "1 到 2 分钟后，输出如下所示："
-
 msgid ""
 "See more details in [EvalScope doc - Model API Service "
 "Evaluation](https://evalscope.readthedocs.io/en/latest/get_started/basic_usage.html#model-"
@@ -96,3 +93,6 @@ msgstr ""
 "更多详情请参见 [EvalScope 文档 - "
 "模型推理压力测试](https://evalscope.readthedocs.io/en/latest/user_guides/stress_test/quick_start.html#basic-"
 "usage)。"
+
+msgid "After 1 to 2 minutes, the output is shown below:"
+msgstr ""

@@ -34,18 +34,11 @@ msgid ""
 "container image:"
 msgstr "搭建测试环境最快的方式是使用主分支的容器镜像："
 
-msgid "=== \"Local (CPU)\""
-msgstr "=== \"本地 (CPU)\""
-
 msgid "You can run the unit tests on CPUs with the following steps:"
 msgstr "您可以按照以下步骤在 CPU 上运行单元测试："
 
 msgid "=== \"Single card\""
 msgstr "=== \"单卡\""
-
-msgid ""
-"After starting the container, you should install the required packages:"
-msgstr "启动容器后，您需要安装所需的软件包："
 
 msgid "=== \"Multi cards\""
 msgstr "=== \"多卡\""
@@ -76,15 +69,6 @@ msgstr ""
 "- 示例：[tests/ut/test_ascend_config.py](https://github.com/vllm-project/vllm-ascend/blob/main/tests/ut/test_ascend_config.py)。\n"
 "- 您可以使用 `pytest` 运行单元测试："
 
-msgid "=== \"Local (CPU)\""
-msgstr "=== \"本地 (CPU)\""
-
-msgid "=== \"Single-card\""
-msgstr "=== \"单卡\""
-
-msgid "=== \"Multi-card\""
-msgstr "=== \"多卡\""
-
 msgid "### E2E test"
 msgstr "### 端到端测试"
 
@@ -102,21 +86,6 @@ msgstr ""
 
 msgid "#### PR-triggered E2E test"
 msgstr "#### PR 触发的端到端测试"
-
-msgid "You can run tests with `pytest` as well. Typical examples:"
-msgstr "您也可以使用 `pytest` 运行测试。典型示例如下："
-
-msgid "=== \"Local (CPU)\""
-msgstr "=== \"本地 (CPU)\""
-
-msgid "You can't run the E2E test on CPUs."
-msgstr "您无法在 CPU 上运行端到端测试。"
-
-msgid "=== \"Single-card\""
-msgstr "=== \"单卡\""
-
-msgid "=== \"Multi-card\""
-msgstr "=== \"多卡\""
 
 msgid "This will reproduce the E2E test behavior."
 msgstr "这将重现端到端测试的行为。"
@@ -216,3 +185,34 @@ msgid ""
 msgstr ""
 "- `docs/_build/linkcheck/output.txt`\n"
 "- `docs/_build/linkcheck/output.json`"
+
+msgid ""
+"After starting the container, you should install the required packages:"
+msgstr ""
+
+msgid "=== \"Local (CPU)\""
+msgstr ""
+
+msgid "=== \"Local (CPU)\""
+msgstr ""
+
+msgid "=== \"Single-card\""
+msgstr ""
+
+msgid "=== \"Multi-card\""
+msgstr ""
+
+msgid "You can run tests with `pytest` as well. Typical examples:"
+msgstr ""
+
+msgid "=== \"Local (CPU)\""
+msgstr ""
+
+msgid "You can't run the E2E test on CPUs."
+msgstr ""
+
+msgid "=== \"Single-card\""
+msgstr ""
+
+msgid "=== \"Multi-card\""
+msgstr ""
