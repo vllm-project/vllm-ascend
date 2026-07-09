@@ -120,6 +120,12 @@ jobs:
           path: ./vllm-empty
           ref: ${{ steps.vllm.outputs.main_commit }}
 
+      - name: Install vllm-project/vllm from source
+        working-directory: ./vllm-empty
+        run: |
+          VLLM_TARGET_DEVICE=empty pip install .
+          pip uninstall -y triton
+
       - uses: dorny/paths-filter@v4
         id: filter
         with:
@@ -170,12 +176,6 @@ jobs:
           git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
           pre-commit run --all-files --hook-stage manual --show-diff-on-failure
 
-      - name: Install vllm-project/vllm from source
-        working-directory: ./vllm-empty
-        run: |
-          VLLM_TARGET_DEVICE=empty uv pip install .
-          pip uninstall -y triton
-          
       - name: Run mypy
         run: |
           PYTHONPATH="$PYTHONPATH:$(pwd)/vllm-empty"
