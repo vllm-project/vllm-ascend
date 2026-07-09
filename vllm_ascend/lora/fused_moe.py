@@ -47,6 +47,7 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
+from vllm.logger import logger
 from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.lora.layers.fused_moe import FusedMoE3DWithLoRA, FusedMoEWithLoRA
 from vllm.lora.layers.utils import _get_lora_device
@@ -73,11 +74,33 @@ def _assert_ascend_moe_lora_supported(base_layer: nn.Module) -> None:
             "Set VLLM_ASCEND_ENABLE_FUSED_MC2=0."
         )
     if getattr(base_layer, "_shared_experts", None) is not None:
-        raise AssertionError(
-            "Ascend MoE LoRA v1 does not wrap the shared_experts path "
-            "(it runs outside quant_method.apply). The target model "
-            "Qwen3-30B-A3B-Thinking-2507 has no shared experts; models "
-            "like DeepSeek-V3 are not yet supported."
+        # Models with shared experts (e.g. Qwen3.5-MoE, DeepSeek-V3) run the
+        # shared-experts LoRA through vLLM's standard dense wrappers, whose
+        # expand-slice path does not match the _C_ascend.sgmv_expand stacked
+        # lora_b layout (and vLLM's torch_ops einsum fallback fails on the
+        # same layout). By default this is rejected up-front.
+        #
+        # Set VLLM_ASCEND_MOE_LORA_ALLOW_SHARED_EXPERTS=1 to route the
+        # expand-slice path through PunicaWrapperNPU's torch.bmm fallback
+        # (per-token gather + bmm), which avoids both ops. This is
+        # experimental and adds overhead (a throughput drop vs the fused NPU
+        # op); the routed-experts LoRA delta is applied by this wrapper while
+        # shared-experts/dense LoRA is handled by vLLM's dense wrappers.
+        if not envs_ascend.VLLM_ASCEND_MOE_LORA_ALLOW_SHARED_EXPERTS:
+            raise AssertionError(
+                "Ascend MoE LoRA v1 does not wrap the shared_experts path by "
+                "default (Qwen3-30B-A3B-Thinking-2507 has no shared experts). "
+                "For models with shared experts (e.g. Qwen3.5-MoE, "
+                "DeepSeek-V3), set VLLM_ASCEND_MOE_LORA_ALLOW_SHARED_EXPERTS=1 "
+                "to route the expand-slice path through a torch.bmm fallback "
+                "(experimental; expect ~30-40% throughput drop)."
+            )
+        logger.warning_once(
+            "Ascend MoE LoRA: shared_experts detected and "
+            "VLLM_ASCEND_MOE_LORA_ALLOW_SHARED_EXPERTS=1. Routed-experts LoRA "
+            "delta is applied by this wrapper; shared-experts/dense LoRA is "
+            "handled by vLLM's standard dense wrappers, with the expand-slice "
+            "path routed to an experimental torch.bmm fallback."
         )
     if getattr(base_layer, "multistream_overlap_gate", False):
         raise AssertionError(
