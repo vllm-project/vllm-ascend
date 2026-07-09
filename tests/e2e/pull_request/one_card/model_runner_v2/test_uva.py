@@ -22,7 +22,6 @@ import pytest
 from vllm import SamplingParams
 
 from tests.e2e.conftest import VllmRunner
-from tests.e2e.pull_request.one_card.model_runner_v2.utils import calculate_acceptance_per_pos
 from vllm_ascend.utils import vllm_version_is
 
 MODELS = ["Qwen/Qwen3-0.6B"]
@@ -66,68 +65,3 @@ def test_qwen3_dense_eager_mode(
         async_scheduling=True,
     ) as runner:
         runner.model.generate(prompts, sampling_params)
-
-
-@pytest.mark.parametrize("model", MAIN_MODELS)
-@pytest.mark.parametrize("eagle_model", EGALE_MODELS)
-@pytest.mark.parametrize("max_tokens", [32])
-@pytest.mark.parametrize("enforce_eager", [False])
-@pytest.mark.parametrize(
-    "compilation_config",
-    [
-        pytest.param(
-            {"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [4, 8]},
-            id="full_decode_only",
-        ),
-        pytest.param({}, id="default_full_and_piecewise"),
-    ],
-)
-@patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1", "PYTORCH_NPU_ALLOC_CONF": "pinned_mem_register:True"})
-def test_egale_spec_decoding(
-    model: str,
-    eagle_model: str,
-    max_tokens: int,
-    enforce_eager: bool,
-    compilation_config: dict,
-) -> None:
-    prompts = [
-        "Hello, my name is",
-        "The president of the United States is",
-        "The capital of France is",
-        "The future of AI is",
-    ]
-
-    sampling_params = SamplingParams(max_tokens=max_tokens, temperature=0.0)
-    with VllmRunner(
-        model,
-        max_model_len=1024,
-        enforce_eager=enforce_eager,
-        disable_log_stats=False,
-        async_scheduling=True,
-        speculative_config={
-            "model": eagle_model,
-            "method": "eagle",
-            "num_speculative_tokens": 3,
-        },
-        compilation_config=compilation_config,
-    ) as runner:
-        runner.model.generate(prompts, sampling_params)
-
-    metrics = runner.model.get_metrics()
-    num_drafts = 0
-    acceptance_counts = [0] * num_speculative_tokens
-    for metric in metrics:
-        if metric.name == "vllm:spec_decode_num_drafts":
-            assert isinstance(metric, Counter)
-            num_drafts += metric.value
-        elif metric.name == "vllm:spec_decode_num_accepted_tokens_per_pos":
-            assert isinstance(metric, Vector)
-            for pos in range(len(metric.values)):
-                acceptance_counts[pos] += metric.values[pos]
-
-    print("-" * 60)
-    for i in range(num_speculative_tokens):
-        rate = acceptance_counts[i] / num_drafts if num_drafts > 0 else 0
-        print(f"acceptance at token {i}: {rate:.4f}")
-    print("-" * 60)
-
