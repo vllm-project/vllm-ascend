@@ -547,6 +547,36 @@ class NPUPlatform(Platform):
         if _is_gemma4_mtp and compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE:
             compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
+        # Gemma4 MTP on A2/A3 with graph mode (FULL / FULL_DECODE_ONLY):
+        # the head_dim=512 global-attention layers cannot use FIA TND (no
+        # 512 support) and have no block_table-capable 512 op, so the graph
+        # capture path routes them to the decode paged-attention kernel.
+        # That kernel assumes 1 query token per req; MTP verify with K>1
+        # sends K+1 query tokens per req, which the decode PA misreads as
+        # K+1 separate single-token requests -> pos1/pos2 attention is wrong
+        # -> pos1/pos2 acceptance collapses (observed ~3%/0.1% vs eager ~58%).
+        # pos0 is unaffected (~80-95%).  K=1 only uses pos0, so K=1 graph
+        # mode works well (observed 80% acceptance, 36.9 tok/s on 910B4).
+        # Recommend K=1 on A2/A3 graph mode until a 512-capable graph
+        # attention path (padded-dense npu_fusion_attention) is available.
+        if (
+            _is_gemma4_mtp
+            and _spec is not None
+            and getattr(_spec, "num_speculative_tokens", 0) > 1
+            and get_ascend_device_type() in (AscendDeviceType.A2, AscendDeviceType.A3)
+            and compilation_config.cudagraph_mode in (CUDAGraphMode.FULL, CUDAGraphMode.FULL_DECODE_ONLY)
+        ):
+            logger.warning(
+                "Gemma4 MTP with num_speculative_tokens=%d on A2/A3 graph mode "
+                "(%s): pos1/pos2 acceptance will collapse because the head_dim=512 "
+                "global-attention layers route to the decode paged-attention kernel "
+                "during graph replay, which misreads the K+1 verify query tokens. "
+                "Recommend num_speculative_tokens=1 (observed 80%% acceptance, "
+                "36.9 tok/s on 910B4). K>1 works correctly under eager mode.",
+                _spec.num_speculative_tokens,
+                compilation_config.cudagraph_mode.name,
+            )
+
         # Encoder-decoder models currently only support PIECEWISE mode
         # TODO(Jian Li): Confirm this behavior and explain why
         if (
