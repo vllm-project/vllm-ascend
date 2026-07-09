@@ -71,9 +71,7 @@ Expected result: the command prints the installed vLLM Ascend version without er
 
 Single-node deployment runs both Prefill and Decode on the same node, and is suitable for functional verification and single-node serving. The following examples show eager and ACLGraph startup commands. The commands use 4 visible NPUs as an example. Adjust `ASCEND_RT_VISIBLE_DEVICES` and `--tensor-parallel-size` when using a different device count.
 
-:::{note}
-In this tutorial, `/root/.cache/path/to/gemma4` is a placeholder. Replace it with your actual Gemma4 model path.
-:::
+> **Note**: In this tutorial, `/root/.cache/path/to/gemma4` is a placeholder. Replace it with your actual Gemma4 model path.
 
 #### Eager Mode
 
@@ -135,9 +133,9 @@ curl http://127.0.0.1:8000/v1/completions \
 
 Expected result: the HTTP status is 200 and the JSON response contains a `choices` field with generated text.
 
-### 5.2 Multi-Node PD Separation Deployment
+### 5.2 Multi-Card Deployment
 
-This document focuses on single-node online deployment for Gemma4 on Atlas A2, Atlas A3, and Ascend 950 Products. Multi-node Prefill-Decode separation deployment is not covered in this tutorial.
+This tutorial provides single-node multi-card deployment examples for Gemma4 on Atlas A2, Atlas A3, and Ascend 950 Products. For different model sizes or device counts, adjust `ASCEND_RT_VISIBLE_DEVICES` and `--tensor-parallel-size` according to the available NPUs.
 
 ## 6 Functional Verification
 
