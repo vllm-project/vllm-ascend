@@ -340,9 +340,11 @@ class TestAscendSFAMetadataBuilder(TestBase):
 
         mock_get_current_vllm_config.return_value = cfg
         kv_cache_spec = MagicMock()
+        kv_cache_spec.block_size = 128
         layer_names = ["layer1", "layer2"]
         vllm_config = MagicMock()
         vllm_config.cache_config.block_size = 16
+        vllm_config.scheduler_config.max_num_seqs = 16
         vllm_config.model_config.max_model_len = 1024
         vllm_config.model_config.get_head_size.return_value = 64
         vllm_config.model_config.dtype = torch.float16
