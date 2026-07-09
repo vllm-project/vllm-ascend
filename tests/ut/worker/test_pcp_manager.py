@@ -707,6 +707,7 @@ def test_generate_mtp_attention_mask_for_decode(
         dcp_world_size=dcp_world_size,
         dcp_rank=dcp_rank,
         interleave_size=interleave_size,
+        num_speculative_tokens=num_scheduled - 1,
     )
 
     num_scheduled_tokens = np.array([num_scheduled], dtype=np.int32)
