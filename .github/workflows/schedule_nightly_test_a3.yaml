@@ -76,7 +76,7 @@ jobs:
     name: Parse trigger and determine test scope
     if: >-
       github.event_name == 'workflow_dispatch'
-    runs-on: linux-aarch64-a2b3-0
+    runs-on: linux-aarch64-a3-0
     outputs:
       run: ${{ steps.parse.outputs.run }}
       filter: ${{ steps.parse.outputs.filter }}
@@ -108,7 +108,7 @@ jobs:
   setup-vars:
     name: Export global env vars as job outputs
     needs: parse-trigger
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu-8-hk
     outputs:
       ascend_log_prefix: ${{ steps.export.outputs.ascend_log_prefix }}
       vllm_ascend_branches: ${{ steps.export.outputs.vllm_ascend_branches }}
@@ -324,7 +324,7 @@ jobs:
       always() &&
       github.event_name == 'workflow_dispatch' &&
       needs.parse-trigger.result == 'success'
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu-8-hk
     steps:
       - name: Merge all benchmark result artifacts
         continue-on-error: true
