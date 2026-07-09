@@ -54,6 +54,8 @@ CRITICAL RULES — violations will cause the translation to be rejected:
    Count them: if you received N entries, you must return exactly N entries.
    Do NOT drop, merge, split, reorder, or add entries under any circumstance.
 3. Keep msgid lines COMPLETELY UNCHANGED — copy them exactly as-is from input.
+   NEVER change `msgid ""` to anything else (not `msgstr ""`, not `msgid "..."`).
+   Multi-line entries start with `msgid ""` — that is NOT a typo, keep it.
 
 --- WHAT TO PRESERVE (keep EXACTLY as in msgid) ---
 4. All format specifiers: %s, %d, %f, {{}}, {{{{}}}}, {{name}}, etc.
@@ -122,6 +124,21 @@ CRITICAL RULES — violations will cause the translation to be rejected:
 {content}"""
 
 
+def _normalize_msgid(text: str) -> str:
+    """Normalize a msgid for fuzzy comparison.
+
+    Strips trailing whitespace from each line, removes trailing blank lines,
+    and collapses trailing spaces within each line.  This handles common
+    API-induced differences like trailing spaces or extra blank lines, while
+    preserving the line structure needed for correct matching.
+    """
+    lines = [line.rstrip() for line in text.split("\n")]
+    # Remove trailing empty lines.
+    while lines and not lines[-1]:
+        lines.pop()
+    return "\n".join(lines)
+
+
 class POTranslator:
     def __init__(self, api_key: str, max_concurrent: int = 5):
         self.client = AsyncOpenAI(api_key=api_key, base_url="https://api.deepseek.com")
@@ -142,7 +159,10 @@ class POTranslator:
             temperature=0.3,
         )
         text = response.choices[0].message.content
-        return self._clean_response(text) if text else None
+        if not text:
+            return None
+        cleaned = self._clean_response(text)
+        return cleaned if cleaned else None  # empty means retry needed
 
     async def translate_file(self, po_path: str) -> bool:
         path = Path(po_path)
@@ -174,18 +194,50 @@ class POTranslator:
                 translated_chunks = await self._translate_chunks(chunks)
                 if translated_chunks is None:
                     shutil.copy2(backup, po_path)
-                    print("FAILED")
+                    print("FAILED (all chunks)")
                     return False
-                translated_snippet = "\n\n".join(translated_chunks)
+                # Filter out failed chunks (None values).
+                successful = [c for c in translated_chunks if c is not None]
+                if not successful:
+                    shutil.copy2(backup, po_path)
+                    print("FAILED (no successful chunks)")
+                    return False
+                if len(successful) < len(chunks):
+                    print(
+                        f"({len(successful)}/{len(chunks)} chunks succeeded)",
+                        end=" ",
+                        flush=True,
+                    )
+                # Merge each chunk individually — one malformed chunk
+                # won't block the rest.
+                total_merged = 0
+                for chunk_result in successful:
+                    try:
+                        chunk_po = pofile(chunk_result)
+                    except Exception:
+                        continue
+                    chunk_map: dict[str, str] = {}
+                    for entry in chunk_po:
+                        if entry.msgid and entry.msgstr:
+                            chunk_map[entry.msgid] = entry.msgstr
+                    for entry in untranslated:
+                        if entry.msgid in chunk_map:
+                            entry.msgstr = chunk_map[entry.msgid]
+                            total_merged += 1
+                        else:
+                            matched = POTranslator._fuzzy_match(entry.msgid, chunk_map)
+                            if matched is not None:
+                                entry.msgstr = chunk_map[matched]
+                                total_merged += 1
+                merged = total_merged
             else:
                 translated_snippet = await self._call_api(snippet)
                 if translated_snippet is None:
                     shutil.copy2(backup, po_path)
                     print("FAILED")
                     return False
+                merged = self._merge_translations(po, untranslated, translated_snippet)
 
-            # Parse the translated snippet and merge back.
-            merged = self._merge_translations(po, untranslated, translated_snippet)
             if merged == 0:
                 shutil.copy2(backup, po_path)
                 print("FAILED (merge)")
@@ -206,7 +258,13 @@ class POTranslator:
 
     @staticmethod
     def _build_snippet(entries: list[POEntry]) -> str:
-        """Build a minimal PO content string containing only *entries*."""
+        """Build a minimal PO content string containing only *entries*.
+
+        Multi-line msgid values are collapsed into single-line format with
+        literal ``\\n`` escapes so that the API does not try to "translate"
+        the msgid continuation-line structure itself (which would corrupt the
+        PO format and make round-trip parsing impossible).
+        """
         parts = []
         for entry in entries:
             lines = entry.msgid.split("\n")
@@ -214,15 +272,12 @@ class POTranslator:
                 escaped = entry.msgid.replace("\\", "\\\\").replace('"', '\\"')
                 parts.append(f'msgid "{escaped}"\nmsgstr ""')
             else:
-                block = ['msgid ""']
-                for i, line in enumerate(lines):
-                    escaped = line.replace("\\", "\\\\").replace('"', '\\"')
-                    if i < len(lines) - 1:
-                        block.append(f'"{escaped}\\n"')
-                    else:
-                        block.append(f'"{escaped}"')
-                block.append('msgstr ""')
-                parts.append("\n".join(block))
+                # Collapse multi-line msgid into a single line with
+                # literal \n escapes so the API treats it as one unit.
+                collapsed = entry.msgid.replace("\\", "\\\\").replace('"', '\\"')
+                # Replace actual newlines with literal \n in the string.
+                collapsed = collapsed.replace("\n", "\\n")
+                parts.append(f'msgid "{collapsed}"\nmsgstr ""')
         return "\n\n".join(parts) + "\n"
 
     @staticmethod
@@ -248,30 +303,45 @@ class POTranslator:
         return chunks if len(chunks) > 1 else [snippet]
 
     async def _translate_chunks(self, chunks: list[str]) -> list[str] | None:
+        """Translate *chunks* concurrently with per-chunk retries.
+
+        Returns a list of translated strings (same length as *chunks*), with
+        ``None`` for chunks that failed after all retries.  Returns ``None``
+        only if *every* chunk failed.
+        """
         total = len(chunks)
         sem = asyncio.Semaphore(self.max_concurrent)
 
-        async def do_chunk(idx: int) -> tuple[int, str | None, str | None]:
+        async def do_chunk(idx: int) -> tuple[int, str | None]:
             async with sem:
                 info = f"chunk {idx + 1}/{total}"
-                try:
-                    result = await self._call_api(chunks[idx], chunk_info=info)
-                    if result is None:
-                        return (idx, None, "empty response")
-                    return (idx, result, None)
-                except Exception as e:
-                    return (idx, None, str(e)[:50])
+                for attempt in range(3):
+                    try:
+                        result = await self._call_api(chunks[idx], chunk_info=info)
+                        if result is not None:
+                            return (idx, result)
+                    except Exception:
+                        if attempt < 2:
+                            await asyncio.sleep(2)
+                            continue
+                    if attempt < 2:
+                        await asyncio.sleep(2)
+                print(f"\n    Chunk {idx + 1} failed after 3 attempts", flush=True)
+                return (idx, None)
 
         print(f"({total} chunks, {self.max_concurrent} parallel)", end=" ", flush=True)
         results = await asyncio.gather(*[do_chunk(i) for i in range(total)])
 
         translated: list[str | None] = [None] * total
-        for idx, chunk_text, error in results:
-            if error:
-                print(f"\n    Chunk {idx + 1} failed: {error}")
-                return None
-            translated[idx] = chunk_text.strip("\n")
+        failed = 0
+        for idx, chunk_text in results:
+            if chunk_text is not None:
+                translated[idx] = chunk_text.strip("\n")
+            else:
+                failed += 1
 
+        if failed == total:
+            return None  # every chunk failed
         return translated
 
     @staticmethod
@@ -283,7 +353,11 @@ class POTranslator:
         """
         try:
             translated_po = pofile(translated_snippet)
-        except Exception:
+        except Exception as e:
+            print(f"\n    Parse error in translated snippet: {e}")
+            # Print the first and last 200 chars to help debug.
+            preview = translated_snippet[:200] + " ... " + translated_snippet[-200:]
+            print(f"    Snippet preview: {preview}")
             return 0
 
         translated_map: dict[str, str] = {}
@@ -297,9 +371,58 @@ class POTranslator:
                 entry.msgstr = translated_map[entry.msgid]
                 merged += 1
             else:
-                print(f"\n    Missing translation for: {entry.msgid[:60]}...")
+                # Exact match failed — try fuzzy matching.
+                matched = POTranslator._fuzzy_match(entry.msgid, translated_map)
+                if matched is not None:
+                    entry.msgstr = translated_map[matched]
+                    merged += 1
+                    print(f"\n    Fuzzy-matched: {entry.msgid[:60]}...")
+                else:
+                    # If there's only one untranslated entry and all
+                    # exact/fuzzy matches failed, try best-effort: check
+                    # if the API returned a single entry whose msgid looks
+                    # like a translation (different from the original
+                    # msgid but with a non-empty msgid).  The API likely
+                    # "translated" the msgid itself.
+                    if len(untranslated) == 1:
+                        if translated_map:
+                            first_key = next(iter(translated_map))
+                            entry.msgstr = translated_map[first_key]
+                            merged += 1
+                            print(f"\n    Best-effort match (only entry): {entry.msgid[:60]}...")
+                        else:
+                            # translated_map is empty because all entries
+                            # have empty msgstr.  Check if parsed entries
+                            # have a non-empty msgid (API put translation
+                            # into msgid) and take that as msgstr.
+                            for pe in translated_po:
+                                if pe.msgid and not pe.msgstr:
+                                    entry.msgstr = pe.msgid
+                                    merged += 1
+                                    print(
+                                        f"\n    Best-effort (API returned translation as msgid): {entry.msgid[:60]}..."
+                                    )
+                                    break
+                            if not merged:
+                                print(f"\n    Missing translation for: {entry.msgid[:60]}...")
+                    else:
+                        print(f"\n    Missing translation for: {entry.msgid[:60]}...")
 
         return merged
+
+    @staticmethod
+    def _fuzzy_match(msgid: str, translated_map: dict[str, str]) -> str | None:
+        """Try to find *msgid* in *translated_map* using normalized comparison.
+
+        Normalizes both sides by collapsing whitespace and stripping trailing
+        newlines, then returns the key from *translated_map* that matches, or
+        None.
+        """
+        norm_orig = _normalize_msgid(msgid)
+        for key in translated_map:
+            if _normalize_msgid(key) == norm_orig:
+                return key
+        return None
 
     @staticmethod
     def _clean_response(response: str) -> str:
@@ -310,6 +433,18 @@ class POTranslator:
             while lines and lines[-1].strip() == "```":
                 lines.pop()
             response = "\n".join(lines).strip()
+
+        # Fix API returning ``msgstr "..."`` instead of ``msgid "..."``
+        # for single-line entries.
+        if 'msgid "' not in response and 'msgstr "' in response:
+            response = response.replace('msgstr "', 'msgid "', 1)
+
+        # Detect when API returns plain translated text instead of PO
+        # format (e.g. a bare list of "- ..." lines).  Return an empty
+        # string so the caller retries with smaller chunks.
+        if 'msgid "' not in response and 'msgstr "' not in response:
+            return ""
+
         return response
 
 
