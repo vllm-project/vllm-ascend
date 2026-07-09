@@ -282,7 +282,8 @@
       "vllm-ascend/Qwen3-30B-A3B-vwn-eagle-model",
       "Eco-Tech/Qwen3-8B-w8a8sc-310-vllm/TP1/Qwen3-8B-w8a8sc-310-vllm-tp1",
       "Eco-Tech/Qwen3-14B-w8a8sc-310-vllm/TP1/Qwen3-14B-w8a8sc-310-vllm-tp1",
-      "Eco-Tech/Qwen3-32B-w8a8sc-310-vllm/TP4/Qwen3-32B-w8a8sc-310-vllm-tp4"
+      "Eco-Tech/Qwen3-32B-w8a8sc-310-vllm/TP4/Qwen3-32B-w8a8sc-310-vllm-tp4",
+      "Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp"
     ],
     "datasets": [
       "vllm-ascend/GSM8K-in1024-bs210",
