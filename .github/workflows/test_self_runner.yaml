@@ -187,6 +187,56 @@ jobs:
           } >> "${GITHUB_OUTPUT}"
 
 
+build_and_release_code:
+    name: release code
+    runs-on: linux-amd64-cpu-8-hk
+    strategy:
+      matrix:
+        python-version: ["3.12"]
+    steps:
+      - name: checkout vllm-ascend
+        if: ${{ github.event_name != 'workflow_dispatch' }}
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: checkout vllm-ascend ${{ inputs.tag }}
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          ref: ${{ inputs.tag }}
+
+      - name: Print
+        run: |
+          lscpu
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python3 -m pip install twine setuptools_scm
+
+      - name: Generate tar.gz
+        env:
+          SOC_VERSION: ascend910b1
+        run: |
+          python3 setup.py sdist
+          ls dist
+
+      - name: Archive tar.gz
+        uses: actions/upload-artifact@v7
+        with:
+          name: vllm-ascend-src
+          path: dist/*
+
+    #   - name: Release
+    #     if: ${{ github.event_name == 'push' }}
+    #     run: |
+    #       python3 -m twine upload dist/* -u __token__ -p ${{ secrets.PYPI_TOKEN }}
 
 #schedule_nightly_test_a3.yaml 测试 linux-aarch64-a3-0
 
@@ -222,10 +272,11 @@ jobs:
             core.setOutput('run', 'false');
             core.setOutput('filter', '');
 
+  # use linux-aarch64-a3-0 better but cant use actions/setup-python@v5
   setup-vars:
     name: Export global env vars as job outputs
     needs: parse-trigger
-    runs-on: linux-aarch64-a3-0
+    runs-on: linux-amd64-cpu-8-hk
     outputs:
       ascend_log_prefix: ${{ steps.export.outputs.ascend_log_prefix }}
       vllm_ascend_branches: ${{ steps.export.outputs.vllm_ascend_branches }}
