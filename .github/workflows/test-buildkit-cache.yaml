@@ -20,30 +20,80 @@ jobs:
           RUN echo cache-probe > /tmp/cache-probe-marker
           DOCKERFILE
 
-      - name: buildctl with gRPC debug
+      - name: Test buildctl without proxy
         run: |
-          set +e
-          export GRPC_GO_LOG_SEVERITY_LEVEL=info
-          export GRPC_GO_LOG_VERBOSITY_LEVEL=99
-          export GODEBUG=x509sha1=1
+          set -e
+          unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy
           buildctl \
             --addr "${BUILDKITD_ADDR}" \
             --tlscacert "${DOCKER_CONFIG}/ca.pem" \
             --tlscert  "${DOCKER_CONFIG}/cert.pem" \
             --tlskey   "${DOCKER_CONFIG}/key.pem" \
             debug workers 2>&1
-          echo "exit=$?"
-        continue-on-error: true
+          echo "SUCCESS"
 
-      - name: buildctl test - add tlsservername
+      - name: Round 1 (expect cache MISS)
         run: |
-          set +e
+          set -e
+          unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy
+          echo "=== Round 1: fresh pull, expect MISS in registry-proxy log ==="
+          T0=$(date +%s)
           buildctl \
             --addr "${BUILDKITD_ADDR}" \
             --tlscacert "${DOCKER_CONFIG}/ca.pem" \
             --tlscert  "${DOCKER_CONFIG}/cert.pem" \
             --tlskey   "${DOCKER_CONFIG}/key.pem" \
-            --tlsservername buildkitd-service.buildkitd \
-            debug workers 2>&1
-          echo "exit=$?"
-        continue-on-error: true
+            build \
+            --frontend dockerfile.v0 \
+            --local context=/tmp/ctx \
+            --local dockerfile=/tmp/ctx \
+            --no-cache \
+            --output type=image,name=test-torch-npu-cache:round1,push=false
+          T1=$(date +%s)
+          ROUND1_S=$((T1-T0))
+          echo "round1_s=${ROUND1_S}"
+          echo "ROUND1_S=${ROUND1_S}" >> "${GITHUB_ENV}"
+
+      - name: Prune buildkitd local cache
+        run: |
+          unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy
+          buildctl \
+            --addr "${BUILDKITD_ADDR}" \
+            --tlscacert "${DOCKER_CONFIG}/ca.pem" \
+            --tlscert  "${DOCKER_CONFIG}/cert.pem" \
+            --tlskey   "${DOCKER_CONFIG}/key.pem" \
+            prune --all \
+            || true
+
+      - name: Round 2 (expect cache HIT)
+        run: |
+          set -e
+          unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy
+          echo "=== Round 2: warm cache from round 1, expect HIT in registry-proxy log ==="
+          T0=$(date +%s)
+          buildctl \
+            --addr "${BUILDKITD_ADDR}" \
+            --tlscacert "${DOCKER_CONFIG}/ca.pem" \
+            --tlscert  "${DOCKER_CONFIG}/cert.pem" \
+            --tlskey   "${DOCKER_CONFIG}/key.pem" \
+            build \
+            --frontend dockerfile.v0 \
+            --local context=/tmp/ctx \
+            --local dockerfile=/tmp/ctx \
+            --no-cache \
+            --output type=image,name=test-torch-npu-cache:round2,push=false
+          T1=$(date +%s)
+          ROUND2_S=$((T1-T0))
+          echo "round2_s=${ROUND2_S}"
+
+          if [ "${ROUND1_S}" -gt 0 ]; then
+            DELTA_PCT=$(( (ROUND1_S - ROUND2_S) * 100 / ROUND1_S ))
+            echo "delta=${DELTA_PCT}% faster on round 2"
+          fi
+
+      - name: Summary
+        run: |
+          echo "=== BuildKit Cache Test Summary ==="
+          echo "Round 1 (cold): ${ROUND1_S}s"
+          echo "Round 2 (warm): see previous step for round2_s"
+          echo "✅ Both rounds completed"
