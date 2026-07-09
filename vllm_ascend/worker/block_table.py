@@ -108,7 +108,7 @@ class BlockTable:
     ) -> None:
         if not block_ids:
             return
-        block_ids = np.array(block_ids, dtype=np.int32)
+        block_ids = np.array(block_ids)
         if self.use_hybrid_blocks:
             block_ids = self._convert_physical_to_logical_blocks(block_ids)
 
