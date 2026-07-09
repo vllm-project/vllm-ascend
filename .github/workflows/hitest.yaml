@@ -40,7 +40,6 @@ concurrency:
 jobs:
   run-hitest:
     runs-on: linux-amd64-cpu-8-hk
-    # 完全移除container，原生runner直接读取secrets，无任何透传限制
     steps:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v7
@@ -50,7 +49,6 @@ jobs:
       - name: Git safe directory config
         run: git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
 
-      # 跳过pre-commit lint，直接执行业务脚本，规避pip/pip3缺失问题
       - name: Execute hitest entry
         env:
           AUROGON_API_PREFIX: https://174e1b821a8446f38998a67186ba766e.apic.cn-southwest-2.huaweicloudapis.com/aurogon_service
