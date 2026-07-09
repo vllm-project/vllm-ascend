@@ -20,7 +20,6 @@ from typing import Any
 import torch
 from vllm.config import VllmConfig
 from vllm.v1.kv_cache_interface import AttentionSpec
-from vllm.v1.attention.backend import CommonAttentionMetadata
 
 from vllm_ascend._310p.attention.attention_mask import (
     AttentionMaskBuilder310,
@@ -59,11 +58,11 @@ class AscendAttentionMetadataBuilder310(AscendAttentionMetadataBuilder):
     """
 
     def __init__(
-            self,
-            kv_cache_spec: AttentionSpec,
-            layer_names: list[str],
-            vllm_config: VllmConfig,
-            device: torch.device,
+        self,
+        kv_cache_spec: AttentionSpec,
+        layer_names: list[str],
+        vllm_config: VllmConfig,
+        device: torch.device,
     ):
         """
         Initializes the metadata builder and the 310P-specific mask builder.
@@ -86,34 +85,27 @@ class AscendAttentionMetadataBuilder310(AscendAttentionMetadataBuilder):
             self._query_lens_cpu_buffer = torch.empty(max_num_seqs, dtype=torch.int32, device="cpu", pin_memory=True)
 
     def _fill_query_lens_cpu(
-            self,
-            num_reqs: int,
-            query_start_loc_cpu: torch.Tensor,
-            is_drafting: bool = False
+        self,
+        num_reqs: int,
+        query_start_loc_cpu: torch.Tensor,
     ) -> torch.Tensor:
         """Pinned CPU per-request query lengths for ATB splitfuse (host qLensTensor)."""
         if self._query_lens_cpu_buffer is None:
-            return (query_start_loc_cpu[1: num_reqs + 1] - query_start_loc_cpu[:num_reqs]).contiguous()
-        if is_drafting:
-            # We are using the same buffer for multi-step drafting,
-            # so we have to clone the buffer or the q lens of step 0
-            # will be overwritten by the following steps.
-            buffer = self._query_lens_cpu_buffer[:num_reqs].clone()
-        else:
-            buffer = self._query_lens_cpu_buffer[:num_reqs]
+            return (query_start_loc_cpu[1 : num_reqs + 1] - query_start_loc_cpu[:num_reqs]).contiguous()
+
+        buffer = self._query_lens_cpu_buffer
         torch.sub(
-            query_start_loc_cpu[1: num_reqs + 1],
+            query_start_loc_cpu[1 : num_reqs + 1],
             query_start_loc_cpu[:num_reqs],
-            out=buffer,
+            out=buffer[:num_reqs],
         )
-        return buffer
+        return buffer[:num_reqs]
 
     def build(
-            self,
-            common_prefix_len: int,
-            common_attn_metadata: AscendCommonAttentionMetadata,
-            fast_build: bool = False,
-            is_drafting: bool = False,
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        fast_build: bool = False,
     ) -> AscendMetadata:
         attn_metadata = super().build(common_prefix_len, common_attn_metadata, fast_build)
 
@@ -130,30 +122,14 @@ class AscendAttentionMetadataBuilder310(AscendAttentionMetadataBuilder):
         # ATB splitfuse qLensTensor must be host; filled here (outside graph forward).
         set_query_lens_cpu(
             attn_metadata,
-            self._fill_query_lens_cpu(num_reqs, query_start_loc_cpu, is_drafting),
+            self._fill_query_lens_cpu(num_reqs, query_start_loc_cpu),
         )
 
         # Bind device-side views for in-place graph replay updates.
         attn_metadata.seq_lens = common_attn_metadata.seq_lens[:num_reqs]
-        attn_metadata.seq_lens_list = attn_metadata.seq_lens.tolist()
         attn_metadata.query_start_loc = common_attn_metadata.query_start_loc[: num_reqs + 1]
-        attn_metadata.actual_seq_lengths_q = (query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]).tolist()
-        attn_metadata.is_spec = False
 
         if is_compressed_mask_supported():
             attn_metadata.attn_mask = AttentionMaskBuilder310.get_compressed_splitfuse_mask(self.device)
 
         return attn_metadata
-
-    def build_for_drafting(
-            self,
-            common_attn_metadata: CommonAttentionMetadata,
-            draft_index: int,
-    ):
-        # override build_for_drafting for passing status.
-        return self.build(
-            common_prefix_len=0,
-            common_attn_metadata=common_attn_metadata,
-            fast_build=True,
-            is_drafting=True
-        )
