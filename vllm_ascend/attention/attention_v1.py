@@ -70,7 +70,7 @@ from vllm_ascend.compilation.acl_graph import (
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.utils import FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
 from vllm_ascend.ops.flashcomm2_oshard_manager import flashcomm2_oshard_manager
-from vllm_ascend.utils import weak_ref_tensors
+from vllm_ascend.utils import is_950, weak_ref_tensors
 from vllm_ascend.worker.kvcomp_utils import KVCompMetaData
 
 # default max value of sliding window size
@@ -1278,10 +1278,17 @@ class AscendAttentionBackendImpl(AttentionImpl):
             # mirroring using_paged_attention(head_size=512) in forward_impl.
             # KV-sharing draft 512 layers are intercepted earlier by
             # maybe_kv_share_prefill and never reach here.
+            #
+            # A5 gate: on A5 (950) full_graph_pa segfaults in
+            # atb::_npu_paged_attention during capture for this layer; A5's
+            # original path (full_graph_fia below) works.  This fix targets
+            # A2/A3 (910B4) where FIA TND raises error 561002.  See commit
+            # 32a8647e for the A2/A3 root cause.
             if (
                 self.head_size == FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
                 and self.sliding_window is None
                 and not _EXTRA_CTX.is_draft_model
+                and not is_950()
             ):
                 return self.full_graph_pa(query, attn_metadata, output)
             if self.sinks is not None:
