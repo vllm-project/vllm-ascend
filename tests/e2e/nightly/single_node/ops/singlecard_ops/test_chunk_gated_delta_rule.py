@@ -108,14 +108,15 @@ def _stage1(query, key, value, g, beta, scale, C):
             beta_chunk = _get_chunk(beta[:, nid], C, idx)
 
             (g_cum_c, k_cumdecay_c, v_inner_c, qg_c, kg_c, qkt_c) = _stage1_chunk(
-                q_chunk, k_chunk, v_chunk, g_chunk, beta_chunk, scale)
+                q_chunk, k_chunk, v_chunk, g_chunk, beta_chunk, scale
+            )
 
-            g_cum[nid, idx:idx + C] = g_cum_c
-            k_cumdecay[nid, idx:idx + C, :] = k_cumdecay_c
-            v_inner[nid, idx:idx + C, :] = v_inner_c
-            q_prime[nid, idx:idx + C, :] = qg_c
-            kg[nid, idx:idx + C, :] = kg_c
-            qkt[nid, idx:idx + C, :] = qkt_c
+            g_cum[nid, idx: idx + C] = g_cum_c
+            k_cumdecay[nid, idx: idx + C, :] = k_cumdecay_c
+            v_inner[nid, idx: idx + C, :] = v_inner_c
+            q_prime[nid, idx: idx + C, :] = qg_c
+            kg[nid, idx: idx + C, :] = kg_c
+            qkt[nid, idx: idx + C, :] = qkt_c
 
     return g_cum, k_cumdecay, v_inner, q_prime, kg, qkt
 
@@ -128,7 +129,7 @@ def _stage2_chunk(q_prime, v_inner, g_cum, k_cumdecay, state, kg):
     v_prime = k_cumdecay.float() @ bf16_state.float().transpose(0, 1)
     v_new = v_inner + v_prime
 
-    state_out = (v_new.transpose(0, 1).to(torch.bfloat16).float() @ kg.float())
+    state_out = v_new.transpose(0, 1).to(torch.bfloat16).float() @ kg.float()
     state_old = state.float() * g_cum.exp()[-1]
     state_old = state_old + state_out
 
@@ -146,15 +147,15 @@ def _stage2(q_prime, v_inner, g_cum, k_cumdecay, state, kg, C):
         cur_state = state[nid]
         for idx in range(0, Sp, C):
             cur_state, attn_inter_c, v_new_c = _stage2_chunk(
-                q_prime[nid, idx:idx + C, :],
-                v_inner[nid, idx:idx + C, :],
-                g_cum[nid, idx:idx + C],
-                k_cumdecay[nid, idx:idx + C, :],
+                q_prime[nid, idx : idx + C, :],
+                v_inner[nid, idx : idx + C, :],
+                g_cum[nid, idx : idx + C],
+                k_cumdecay[nid, idx : idx + C, :],
                 cur_state,
-                kg[nid, idx:idx + C, :],
+                kg[nid, idx : idx + C, :],
             )
-            attn_inter[nid, idx:idx + C, :] = attn_inter_c
-            v_new[nid, idx:idx + C, :] = v_new_c
+            attn_inter[nid, idx : idx + C, :] = attn_inter_c
+            v_new[nid, idx : idx + C, :] = v_new_c
         final_state[nid, ...] = cur_state
     return final_state, attn_inter, v_new
 
@@ -164,8 +165,8 @@ def _stage3_chunk(qkt, value, scale, g_cum, attn_inter, v_new):
     device = value.device
     C = value.shape[0]
     lower = torch.tril(torch.ones(C, C, dtype=torch.bool, device=device), diagonal=0)
-    masked_qkt = (qkt.float() * scale * ((g_cum[:, None] - g_cum[None, :]) * lower).exp() * lower.float())
-    attn_inner = (masked_qkt.to(torch.bfloat16).float() @ v_new.to(torch.bfloat16).float())
+    masked_qkt = qkt.float() * scale * ((g_cum[:, None] - g_cum[None, :]) * lower).exp() * lower.float()
+    attn_inner = masked_qkt.to(torch.bfloat16).float() @ v_new.to(torch.bfloat16).float()
     return (attn_inter + attn_inner).to(torch.bfloat16)
 
 
@@ -176,13 +177,13 @@ def _stage3(qkt, value, scale, g_cum, attn_inter, v_new, C):
 
     for nid in range(Nv):
         for idx in range(0, Sp, C):
-            attn_out[idx:idx + C, nid, ...] = _stage3_chunk(
-                qkt[nid, idx:idx + C, :],
+            attn_out[idx : idx + C, nid, ...] = _stage3_chunk(
+                qkt[nid, idx : idx + C, :],
                 _get_chunk(value[:, nid, :], C, idx),
                 scale,
-                g_cum[nid, idx:idx + C],
-                attn_inter[nid, idx:idx + C, :],
-                v_new[nid, idx:idx + C, :],
+                g_cum[nid, idx : idx + C],
+                attn_inter[nid, idx : idx + C, :],
+                v_new[nid, idx : idx + C, :],
             )
     return attn_out
 
@@ -220,7 +221,8 @@ def golden_chunk_gated_delta_rule(query, key, value, beta, scale, initial_state,
         end = start + S
 
         g_cum, k_cum_decay, v_inner, q_prime, kg, qkt = _stage1(
-            query[start:end], key[start:end], value[start:end], g[start:end], beta[start:end], scale, C)
+            query[start:end], key[start:end], value[start:end], g[start:end], beta[start:end], scale, C
+        )
 
         cur_state, attn_inter, v_new = _stage2(q_prime, v_inner, g_cum, k_cum_decay, cur_state, kg, C)
         final_state[bid] = cur_state
@@ -248,7 +250,7 @@ def _make_inputs(batch_size, seqlen, nk, nv, dk, dv, seed=SEED):
     v = torch.rand((T, nv, dv), dtype=dtype)
     g = torch.rand((T, nv), dtype=torch.float32) * -1.0
     beta = torch.rand((T, nv), dtype=dtype)
-    scale = 1.0 / (dk ** 0.5)
+    scale = 1.0 / (dk**0.5)
     initial_state = torch.rand((batch_size, nv, dv, dk), dtype=torch.float32)
     seq_lengths = torch.tensor([seqlen] * batch_size, dtype=torch.int32)
 
