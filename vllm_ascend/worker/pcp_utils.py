@@ -137,7 +137,9 @@ class PCPManager:
             self.max_num_tokens + 2 * self.pcp_world_size * self.max_num_reqs, dtype=torch.int32, device=self.device
         )
         self.pcp_fa_padding_restore_idx = torch.zeros(
-            self.max_num_tokens + 2 * self.pcp_world_size * self.max_num_reqs, dtype=torch.int32, device=self.device
+            self.max_num_tokens * self.pcp_world_size + 2 * self.pcp_world_size * self.max_num_reqs,
+            dtype=torch.int32,
+            device=self.device,
         )
         self.pcp_use_hybrid_attn = self.vllm_config.model_config.hf_config.model_type in (
             "qwen3_next",
