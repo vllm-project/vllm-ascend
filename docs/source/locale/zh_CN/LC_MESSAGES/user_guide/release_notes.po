@@ -18,7 +18,6 @@ msgstr ""
 "Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: Babel 2.18.0\n"
 
-#: ../../source/user_guide/release_notes.md:49
 msgid ""
 "We're excited to announce the release of v0.21.0rc1 for vLLM Ascend. This is"
 " the first release candidate for the v0.21.0 release line, building on "
@@ -28,7 +27,6 @@ msgstr ""
 "我们很高兴地宣布 vLLM Ascend v0.21.0rc1 发布。这是 v0.21.0 发布系列的第一个候选版本，基于 v0.20.2rc1 "
 "构建。请按照[官方文档](https://docs.vllm.ai/projects/ascend/en/latest)开始使用。"
 
-#: ../../source/user_guide/release_notes.md:189
 msgid ""
 "We're excited to announce the release of v0.20.2rc1 for vLLM Ascend. This is"
 " the first release candidate for the v0.20.2 release line. Please follow the"
@@ -38,7 +36,6 @@ msgstr ""
 "我们很高兴地宣布 vLLM Ascend v0.20.2rc1 发布。这是 v0.20.2 发布系列的第一个候选版本。请按照 "
 "[官方文档](https://docs.vllm.ai/projects/ascend/en/latest) 开始使用。"
 
-#: ../../source/user_guide/release_notes.md:253
 msgid ""
 "We're excited to announce the release of v0.18.0 for vLLM Ascend. This is "
 "the official release for v0.18.0. Please follow the [official "
@@ -47,17 +44,12 @@ msgstr ""
 "我们很高兴地宣布 vLLM Ascend v0.18.0 正式发布。这是 v0.18.0 的正式版本。请按照 "
 "[官方文档](https://docs.vllm.ai/projects/ascend/en/v0.18.0) 开始使用。"
 
-#: ../../source/user_guide/release_notes.md:257
-#: ../../source/user_guide/release_notes.md:855
 msgid "**Model Support**"
 msgstr "**模型支持**"
 
-#: ../../source/user_guide/release_notes.md:265
-#: ../../source/user_guide/release_notes.md:866
 msgid "**Core Features**"
 msgstr "**核心功能**"
 
-#: ../../source/user_guide/release_notes.md:374
 msgid ""
 "This is the first release candidate of v0.19.1 for vLLM Ascend, based on "
 "vLLM v0.19.1. This release includes significant performance optimizations, "
@@ -66,21 +58,17 @@ msgstr ""
 "这是基于 vLLM v0.19.1 的 vLLM Ascend v0.19.1 "
 "首个候选发布版本。此版本包含显著的性能优化、新模型支持、硬件扩展以及重要的错误修复。"
 
-#: ../../source/user_guide/release_notes.md:376
 msgid ""
 "Please follow the [official "
 "doc](https://docs.vllm.ai/projects/ascend/en/latest) to get started."
 msgstr "请按照[官方文档](https://docs.vllm.ai/projects/ascend/en/latest)开始使用。"
 
-#: ../../source/user_guide/release_notes.md:490
 msgid "**Important Bug Fixes:**"
 msgstr "**重要 Bug 修复**："
 
-#: ../../source/user_guide/release_notes.md:526
 msgid "**Other Bug Fixes:**"
 msgstr "**其他Bug修复：**"
 
-#: ../../source/user_guide/release_notes.md:576
 msgid ""
 "This is the first release candidate of v0.18.0 for vLLM Ascend. Please "
 "follow the [official doc](https://docs.vllm.ai/projects/ascend/en/latest) to"
@@ -89,7 +77,6 @@ msgstr ""
 "这是 vLLM Ascend v0.18.0 的第一个候选发布版本。请按照 "
 "[官方文档](https://docs.vllm.ai/projects/ascend/en/latest) 开始使用。"
 
-#: ../../source/user_guide/release_notes.md:617
 msgid ""
 "This is the first release candidate of v0.17.0 for vLLM Ascend. Please "
 "follow the [official doc](https://docs.vllm.ai/projects/ascend/en/latest) to"
@@ -98,7 +85,6 @@ msgstr ""
 "这是 vLLM Ascend v0.17.0 的第一个候选发布版本。请按照 "
 "[官方文档](https://docs.vllm.ai/projects/ascend/en/latest) 开始使用。"
 
-#: ../../source/user_guide/release_notes.md:671
 msgid ""
 "This is the first release candidate of v0.16.0 for vLLM Ascend. Please "
 "follow the [official doc](https://docs.vllm.ai/projects/ascend/en/latest) to"
@@ -107,7 +93,6 @@ msgstr ""
 "这是 vLLM Ascend v0.16.0 的第一个候选发布版本。请按照 "
 "[官方文档](https://docs.vllm.ai/projects/ascend/en/latest) 开始使用。"
 
-#: ../../source/user_guide/release_notes.md:762
 msgid ""
 "This is the first release candidate of v0.15.0 for vLLM Ascend. Please "
 "follow the [official doc](https://docs.vllm.ai/projects/ascend/en/latest) to"
@@ -116,7 +101,6 @@ msgstr ""
 "这是 vLLM Ascend v0.15.0 的第一个候选发布版本。请按照 "
 "[官方文档](https://docs.vllm.ai/projects/ascend/en/latest) 开始使用。"
 
-#: ../../source/user_guide/release_notes.md:851
 msgid ""
 "This is the final release of v0.13.0 for vLLM Ascend. Please follow the "
 "[official doc](https://docs.vllm.ai/projects/ascend/en/v0.13.0/) to get "
@@ -125,13 +109,11 @@ msgstr ""
 "这是 vLLM Ascend v0.13.0 的最终版本。请按照 "
 "[官方文档](https://docs.vllm.ai/projects/ascend/en/v0.13.0/) 开始使用。"
 
-#: ../../source/user_guide/release_notes.md:900
 msgid ""
 "Many custom ops and triton kernels were added in this release to speed up "
 "model performance:"
 msgstr "本版本添加了许多自定义算子和 Triton 内核以加速模型性能："
 
-#: ../../source/user_guide/release_notes.md:964
 msgid ""
 "This is the first release candidate of v0.14.0 for vLLM Ascend. Please "
 "follow the [official doc](https://docs.vllm.ai/projects/ascend/en/latest) to"
@@ -144,7 +126,6 @@ msgstr ""
 "v0.13.0rc2 中的所有更改。因此我们仅列出与 v0.13.0rc2 的差异。如果您是从 v0.13.0rc1 升级，请同时阅读 "
 "v0.14.0rc1 和 v0.13.0rc2 的发布说明。"
 
-#: ../../source/user_guide/release_notes.md:1013
 msgid ""
 "This is the second release candidate of v0.13.0 for vLLM Ascend. In this rc "
 "release, we fixed lots of bugs and improved the performance of many models. "
@@ -156,7 +137,6 @@ msgstr ""
 "[官方文档](https://docs.vllm.ai/projects/ascend/en/v0.13.0/) 开始使用。欢迎任何反馈以帮助我们改进 "
 "v0.13.0 的最终版本。"
 
-#: ../../source/user_guide/release_notes.md:1017
 msgid ""
 "We mainly focus on quality and performance improvement in this release. The "
 "spec decode, graph mode, context parallel and EPLB have been improved "
@@ -166,7 +146,6 @@ msgstr ""
 "在此版本中，我们主要关注质量和性能的改进。推测式解码、图模式、上下文并行和 EPLB 都得到了显著提升。修复了大量错误，并提升了 "
 "DeepSeek3.1/3.2、Qwen3 Dense/MOE 等模型的性能。"
 
-#: ../../source/user_guide/release_notes.md:1068
 msgid ""
 "This is the first release candidate of v0.13.0 for vLLM Ascend. We landed "
 "lots of bug fix, performance improvement and feature support in this "
@@ -177,11 +156,9 @@ msgstr ""
 "这是 vLLM Ascend v0.13.0 的第一个候选发布版本，在此版本中完成了大量的错误修复、性能改进和功能支持。欢迎提供任何反馈以帮助我们改进 "
 "vLLM Ascend，请按照 [官方文档](https://docs.vllm.ai/projects/ascend/en/latest) 开始使用。"
 
-#: ../../source/user_guide/release_notes.md:1088
 msgid "Some general performance improvement:"
 msgstr "一些常规性能改进："
 
-#: ../../source/user_guide/release_notes.md:1125
 msgid ""
 "We're excited to announce the release of v0.11.0 for vLLM Ascend. This is "
 "the official release for v0.11.0. Please follow the [official "
@@ -193,7 +170,6 @@ msgstr ""
 "[官方文档](https://docs.vllm.ai/projects/ascend/en/v0.11.0) 开始使用。如有需要，我们未来会考虑发布 "
 "post 版本。本发行说明仅包含自 v0.11.0rc3 以来的重要变更和注意事项。"
 
-#: ../../source/user_guide/release_notes.md:1163
 msgid ""
 "This is the first release candidate of v0.12.0 for vLLM Ascend. We landed "
 "lots of bug fix, performance improvement and feature support in this "
@@ -205,7 +181,6 @@ msgstr ""
 "的第一个候选发布版本。在此版本中，我们完成了大量的错误修复、性能改进和功能支持。欢迎提供任何反馈以帮助我们改进 vLLM Ascend。请按照 "
 "[官方文档](https://docs.vllm.ai/projects/ascend/en/latest) 开始使用。"
 
-#: ../../source/user_guide/release_notes.md:1213
 msgid ""
 "This is the third release candidate of v0.11.0 for vLLM Ascend. For quality "
 "reasons, we released a new rc before the official release. Thanks for all "
@@ -215,7 +190,6 @@ msgstr ""
 "这是 vLLM Ascend v0.11.0 的第三个候选发布版本。出于质量考虑，我们在正式发布前推出了新的 rc 版本。感谢您的所有反馈。请按照 "
 "[官方文档](https://docs.vllm.ai/projects/ascend/en/v0.11.0) 开始使用。"
 
-#: ../../source/user_guide/release_notes.md:1232
 msgid ""
 "This is the second release candidate of v0.11.0 for vLLM Ascend. In this "
 "release, we solved many bugs to improve the quality. Thanks for all your "
@@ -227,7 +201,6 @@ msgstr ""
 "的第二个候选发布版本。在此版本中，我们解决了许多错误以提升质量。感谢您的所有反馈。我们将继续致力于错误修复和性能改进。v0.11.0 "
 "正式版即将发布。请按照 [官方文档](https://docs.vllm.ai/projects/ascend/en/v0.11.0) 开始使用。"
 
-#: ../../source/user_guide/release_notes.md:1301
 msgid ""
 "This is the special release candidate of v0.11.0 for vLLM Ascend. Please "
 "follow the [official doc](https://github.com/vllm-project/vllm-"
@@ -236,7 +209,6 @@ msgstr ""
 "这是 vLLM Ascend v0.11.0 的特殊候选发布版本。请按照 [官方文档](https://github.com/vllm-"
 "project/vllm-ascend/tree/v0.11.0rc0) 开始使用。"
 
-#: ../../source/user_guide/release_notes.md:1325
 msgid ""
 "This is the 1st release candidate of v0.10.2 for vLLM Ascend. Please follow "
 "the [official doc](https://github.com/vllm-project/vllm-"
@@ -245,7 +217,6 @@ msgstr ""
 "这是 vLLM Ascend v0.10.2 的第一个候选发布版本。请按照 [官方文档](https://github.com/vllm-"
 "project/vllm-ascend/tree/v0.10.2rc1) 开始使用。"
 
-#: ../../source/user_guide/release_notes.md:1368
 msgid ""
 "This is the 1st release candidate of v0.10.1 for vLLM Ascend. Please follow "
 "the [official doc](https://github.com/vllm-project/vllm-"
@@ -254,7 +225,6 @@ msgstr ""
 "这是 vLLM Ascend v0.10.1 的第一个候选发布版本。请按照[官方文档](https://github.com/vllm-"
 "project/vllm-ascend/tree/v0.10.1rc1)开始使用。"
 
-#: ../../source/user_guide/release_notes.md:1420
 msgid ""
 "We are excited to announce the newest official release of vLLM Ascend. This "
 "release includes many feature supports, performance improvements and bug "
@@ -264,7 +234,6 @@ msgstr ""
 "我们很高兴宣布 vLLM Ascend 的最新正式版本发布。此版本包含了许多新功能支持、性能优化以及 bug 修复。我们建议用户从 0.7.3 "
 "版本升级至此版本。请务必设置 `VLLM_USE_V1=1` 以使用 V1 引擎。"
 
-#: ../../source/user_guide/release_notes.md:1422
 msgid ""
 "In this release, we added many enhancements for large scale expert parallel "
 "case. It's recommended to follow the [official "
@@ -274,19 +243,16 @@ msgstr ""
 "在此版本中，我们针对大规模专家并行（EP）场景增加了许多增强功能。建议参考 [官方指南](https://github.com/vllm-"
 "project/vllm-ascend/blob/v0.9.1/docs/source/tutorials/large_scale_ep.md)。"
 
-#: ../../source/user_guide/release_notes.md:1424
 msgid ""
 "Please note that this release note will list all the important changes from "
 "last official release(v0.7.3)"
 msgstr "请注意，此发布说明将列出自上一个正式版本（v0.7.3）以来的所有重要变更。"
 
-#: ../../source/user_guide/release_notes.md:1439
 msgid ""
 "The following notes are especially for reference when upgrading from last "
 "final release (v0.7.3):"
 msgstr "以下说明特别供从上一个正式版本（v0.7.3）升级时参考："
 
-#: ../../source/user_guide/release_notes.md:1468
 msgid ""
 "This is the 3rd release candidate of v0.9.1 for vLLM Ascend. Please follow "
 "the [official doc](https://docs.vllm.ai/projects/ascend/en/v0.9.1/) to get "
@@ -295,7 +261,6 @@ msgstr ""
 "这是 vLLM Ascend v0.9.1 的第 3 个候选发布版本。请按照 "
 "[官方文档](https://docs.vllm.ai/projects/ascend/en/v0.9.1/) 开始使用。"
 
-#: ../../source/user_guide/release_notes.md:1498
 msgid ""
 "This is the 1st release candidate of v0.10.0 for vLLM Ascend. Please follow "
 "the [official doc](https://github.com/vllm-project/vllm-"
@@ -305,7 +270,6 @@ msgstr ""
 "这是 vLLM Ascend v0.10.0 的第一个候选发布版本。请按照[官方文档](https://github.com/vllm-"
 "project/vllm-ascend/tree/v0.10.0rc1)开始使用。此版本已完全移除 V0 引擎。"
 
-#: ../../source/user_guide/release_notes.md:1557
 msgid ""
 "This is the 2nd release candidate of v0.9.1 for vLLM Ascend. Please follow "
 "the [official doc](https://docs.vllm.ai/projects/ascend/en/v0.9.1/) to get "
@@ -314,7 +278,6 @@ msgstr ""
 "这是 vLLM Ascend v0.9.1 的第二个候选发布版本。请按照 "
 "[官方文档](https://docs.vllm.ai/projects/ascend/en/v0.9.1/) 开始使用。"
 
-#: ../../source/user_guide/release_notes.md:1669
 msgid ""
 "This is the 1st release candidate of v0.9.2 for vLLM Ascend. Please follow "
 "the [official doc](https://github.com/vllm-project/vllm-"
@@ -327,7 +290,6 @@ msgstr ""
 "project/vllm-ascend/tree/v0.9.2rc1)开始使用。从本次发布起，V1 引擎将默认启用，不再需要设置 "
 "`VLLM_USE_V1=1`。此外，该版本也是最后一个支持 V0 引擎的版本，V0 相关代码将在未来被清理。"
 
-#: ../../source/user_guide/release_notes.md:1716
 msgid ""
 "**Full Changelog**: <https://github.com/vllm-project/vllm-"
 "ascend/compare/v0.9.1rc1...v0.9.2rc1>"
@@ -335,7 +297,6 @@ msgstr ""
 "**完整更新日志**: <https://github.com/vllm-project/vllm-"
 "ascend/compare/v0.9.1rc1...v0.9.2rc1>"
 
-#: ../../source/user_guide/release_notes.md:1720
 msgid ""
 "This is the 1st release candidate of v0.9.1 for vLLM Ascend. Please follow "
 "the [official doc](https://github.com/vllm-project/vllm-"
@@ -344,7 +305,6 @@ msgstr ""
 "这是 vLLM Ascend v0.9.1 的第一个候选发布版本。请按照[官方文档](https://github.com/vllm-"
 "project/vllm-ascend/tree/v0.9.1rc1)开始使用。"
 
-#: ../../source/user_guide/release_notes.md:1727
 msgid ""
 "After careful consideration, above features **will NOT be included in "
 "v0.9.1-dev branch (v0.9.1 final release)** taking into account the v0.9.1 "
@@ -354,13 +314,11 @@ msgstr ""
 "经过慎重考虑，考虑到 v0.9.1 版本的发布质量要求以及功能的快速迭代，上述功能**将不会包含在 v0.9.1-dev 分支（v0.9.1 "
 "正式版）中**。我们将在 0.9.2rc1 及更高版本中对此进行改进。"
 
-#: ../../source/user_guide/release_notes.md:1758
 msgid ""
 "<https://github.com/vllm-project/vllm-ascend/compare/v0.9.0rc2...v0.9.1rc1>"
 msgstr ""
 "<https://github.com/vllm-project/vllm-ascend/compare/v0.9.0rc2...v0.9.1rc1>"
 
-#: ../../source/user_guide/release_notes.md:1769
 msgid ""
 "**Full Changelog**: <https://github.com/vllm-project/vllm-"
 "ascend/compare/v0.9.0rc2...v0.9.1rc1>"
@@ -368,13 +326,11 @@ msgstr ""
 "**完整更新日志**: <https://github.com/vllm-project/vllm-"
 "ascend/compare/v0.9.0rc2...v0.9.1rc1>"
 
-#: ../../source/user_guide/release_notes.md:1773
 msgid ""
 "This release contains some quick fixes for v0.9.0rc1. Please use this "
 "release instead of v0.9.0rc1."
 msgstr "本次发布包含了一些针对 v0.9.0rc1 的快速修复。请使用本次发布版本，而不是 v0.9.0rc1。"
 
-#: ../../source/user_guide/release_notes.md:1781
 msgid ""
 "This is the 1st release candidate of v0.9.0 for vllm-ascend. Please follow "
 "the [official doc](https://github.com/vllm-project/vllm-"
@@ -387,7 +343,6 @@ msgstr ""
 "project/vllm-ascend/tree/v0.9.0rc1)开启您的旅程。从本次发布开始，推荐使用 V1 引擎。V0 "
 "引擎的代码已被冻结且不再维护。请设置环境变量 `VLLM_USE_V1=1` 以启用 V1 引擎。"
 
-#: ../../source/user_guide/release_notes.md:1819
 msgid ""
 "This is the first post release of 0.7.3. Please follow the [official "
 "doc](https://docs.vllm.ai/projects/ascend/en/v0.7.3) to start the journey. "
@@ -396,12 +351,9 @@ msgstr ""
 "这是 0.7.3 的第一个修订版本（post "
 "release）。请按照[官方文档](https://docs.vllm.ai/projects/ascend/en/v0.7.3)开始使用。本次更新包含以下更改："
 
-#: ../../source/user_guide/release_notes.md:1841
-#: ../../source/user_guide/release_notes.md:2002
 msgid "🎉 Hello, World!"
 msgstr "🎉 你好，世界！"
 
-#: ../../source/user_guide/release_notes.md:1843
 msgid ""
 "We are excited to announce the release of 0.7.3 for vllm-ascend. This is the"
 " first official release. The functionality, performance, and stability of "
@@ -414,7 +366,6 @@ msgstr ""
 "正式发布。这是首个正式发布的版本。该版本的功能、性能和稳定性已通过充分的测试和验证。我们鼓励您试用并提供反馈。如有需要，我们将在未来发布 Bug "
 "修复版本。请参阅[官方文档](https://docs.vllm.ai/projects/ascend/en/v0.7.3)开启您的旅程。"
 
-#: ../../source/user_guide/release_notes.md:1870
 msgid ""
 "This is the 1st release candidate of v0.8.5 for vllm-ascend. Please follow "
 "the [official doc](https://github.com/vllm-project/vllm-"
@@ -429,7 +380,6 @@ msgstr ""
 "V1 引擎，详情请查看[特性支持矩阵](https://github.com/vllm-project/vllm-"
 "ascend/blob/v0.8.5rc1/docs/source/user_guide/suppoted_features.md)。"
 
-#: ../../source/user_guide/release_notes.md:1896
 msgid ""
 "This is the second release candidate of v0.8.4 for vllm-ascend. Please "
 "follow the [official doc](https://github.com/vllm-project/vllm-"
@@ -441,7 +391,6 @@ msgstr ""
 "project/vllm-ascend/tree/v0.8.4rc2)开启您的旅程。本版本包含了一些实验性功能，如 W8A8 "
 "量化以及专家并行（EP）/数据并行（DP）支持。我们将在下一个版本中进一步提升这些功能的稳定性。"
 
-#: ../../source/user_guide/release_notes.md:1919
 msgid ""
 "This is the first release candidate of v0.8.4 for vllm-ascend. Please follow"
 " the [official doc](https://github.com/vllm-project/vllm-"
@@ -459,7 +408,6 @@ msgstr ""
 "v0.8.4rc2。详情请参阅[版本发布政策](https://docs.vllm.ai/projects/ascend/en/latest/community/versioning_policy.html#release-"
 "window)。"
 
-#: ../../source/user_guide/release_notes.md:1942
 msgid ""
 "This is 2nd release candidate of v0.7.3 for vllm-ascend. Please follow the "
 "[official doc](https://docs.vllm.ai/projects/ascend/en/v0.7.3) to start the "
@@ -468,7 +416,6 @@ msgstr ""
 "这是 vllm-ascend v0.7.3 "
 "的第二个候选发布版本。请参考[官方文档](https://docs.vllm.ai/projects/ascend/en/v0.7.3)开始使用。"
 
-#: ../../source/user_guide/release_notes.md:1968
 msgid ""
 "🎉 Hello, World! This is the first release candidate of v0.7.3 for vllm-"
 "ascend. Please follow the [official "
@@ -477,13 +424,11 @@ msgstr ""
 "🎉 你好，世界！这是 vllm-ascend v0.7.3 "
 "的第一个候选发布版本。请参考[官方文档](https://docs.vllm.ai/projects/ascend/en/v0.7.3)开启您的体验。"
 
-#: ../../source/user_guide/release_notes.md:2004
 msgid ""
 "We are excited to announce the first release candidate of v0.7.1 for vllm-"
 "ascend."
 msgstr "我们很高兴地宣布 vllm-ascend v0.7.1 的第一个候选发布版本。"
 
-#: ../../source/user_guide/release_notes.md:2006
 msgid ""
 "vLLM Ascend Plugin (vllm-ascend) is a community maintained hardware plugin "
 "for running vLLM on the Ascend NPU. With this release, users can now enjoy "
@@ -492,7 +437,6 @@ msgstr ""
 "vLLM Ascend Plugin (vllm-ascend) 是一个由社区维护的硬件插件，用于在 Ascend NPU 上运行 "
 "vLLM。通过此版本，用户现在可以在 Ascend NPU 上享受 vLLM 的最新功能与改进。"
 
-#: ../../source/user_guide/release_notes.md:2008
 msgid ""
 "Please follow the [official "
 "doc](https://docs.vllm.ai/projects/ascend/en/v0.7.1) to start the journey. "

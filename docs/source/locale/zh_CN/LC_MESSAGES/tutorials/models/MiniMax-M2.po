@@ -22,7 +22,6 @@ msgstr ""
 msgid ""
 msgstr ""
 
-#: ../../source/tutorials/models/MiniMax-M2.md:5
 msgid ""
 "MiniMax-M2 is MiniMax's flagship large language model series, including "
 "**MiniMax-M2.5** and **MiniMax-M2.7**. It is reinforced for high-value "
@@ -32,7 +31,6 @@ msgid ""
 msgstr ""
 "MiniMax-M2是MiniMax的旗舰大语言模型系列，包括**MiniMax-M2.5**和**MiniMax-M2.7**。该系列针对代码生成、智能体工具调用/搜索以及复杂办公工作流等高价值场景进行了强化，重点强调推理效率和在挑战性任务上的端到端速度。"
 
-#: ../../source/tutorials/models/MiniMax-M2.md:7
 msgid ""
 "This document will show the main verification steps for both MiniMax-M2.5 "
 "and MiniMax-M2.7, including supported features, feature configuration, "
@@ -41,7 +39,6 @@ msgid ""
 msgstr ""
 "本文档将展示MiniMax-M2.5和MiniMax-M2.7的主要验证步骤，包括支持特性、特性配置、环境准备、单节点和多节点部署、精度及性能评估。"
 
-#: ../../source/tutorials/models/MiniMax-M2.md:9
 msgid ""
 "This document is written based on the latest vLLM-Ascend version. Both "
 "MiniMax-M2.5 and MiniMax-M2.7 are fully supported. To use the latest "
@@ -51,7 +48,6 @@ msgstr ""
 "本文档基于最新的vLLM-"
 "Ascend版本编写。MiniMax-M2.5和MiniMax-M2.7均得到完全支持。如需使用最新特性（如PD分离、EAGLE3推测解码），建议使用最新版本。"
 
-#: ../../source/tutorials/models/MiniMax-M2.md:13
 msgid ""
 "Refer to [supported "
 "features](../../user_guide/support_matrix/supported_models.md) to get the "
@@ -59,13 +55,11 @@ msgid ""
 msgstr ""
 "请参考[支持特性](../../user_guide/support_matrix/supported_models.md)获取模型的支持特性矩阵。"
 
-#: ../../source/tutorials/models/MiniMax-M2.md:15
 msgid ""
 "Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the"
 " feature's configuration."
 msgstr "请参考[特性指南](../../user_guide/feature_guide/index.md)获取特性的配置方法。"
 
-#: ../../source/tutorials/models/MiniMax-M2.md:21
 msgid ""
 "The following model weights and EAGLE3 weights are available on ModelScope. "
 "Search for the corresponding model name on "
@@ -73,13 +67,11 @@ msgid ""
 msgstr ""
 "以下模型权重和EAGLE3权重可在ModelScope上获取。在[ModelScope](https://modelscope.cn)上搜索对应的模型名称以获取最新的权重文件。"
 
-#: ../../source/tutorials/models/MiniMax-M2.md:31
 msgid ""
 "It is recommended to download the model weights to a shared directory, such "
 "as `/root/.cache/`."
 msgstr "建议将模型权重下载到共享目录中，例如`/root/.cache/`。"
 
-#: ../../source/tutorials/models/MiniMax-M2.md:35
 msgid ""
 "If you need to deploy a multi-node environment, verify the multi-node "
 "communication according to [Verify Multi-node Communication "
@@ -88,7 +80,6 @@ msgstr ""
 "如果需要部署多节点环境，请按照[验证多节点通信环境](../../installation.md#verify-multi-node-"
 "communication)验证多节点通信。"
 
-#: ../../source/tutorials/models/MiniMax-M2.md:41
 msgid ""
 "Select an image based on your machine type and start the container on your "
 "node. For the available image tags and published versions, refer to [Using "
@@ -97,65 +88,53 @@ msgstr ""
 "根据机器类型选择镜像并在节点上启动容器。可用的镜像标签和发布版本请参考[使用Docker](../../installation.md#set-up-"
 "using-docker)。"
 
-#: ../../source/tutorials/models/MiniMax-M2.md:43
 msgid "**A3 series**"
 msgstr "**A3系列**"
 
-#: ../../source/tutorials/models/MiniMax-M2.md:86
 msgid "**A2 series**"
 msgstr "**A2系列**"
 
-#: ../../source/tutorials/models/MiniMax-M2.md:88
 msgid ""
 "Map your model weight directory into the container (the example maps it to "
 "`/root/.cache/`)."
 msgstr "将模型权重目录映射到容器中（示例映射到`/root/.cache/`）。"
 
-#: ../../source/tutorials/models/MiniMax-M2.md:122
 msgid ""
 "Save the script as `minimax-docker-run.sh`, then start and enter the "
 "container:"
 msgstr "将脚本保存为`minimax-docker-run.sh`，然后启动并进入容器："
 
-#: ../../source/tutorials/models/MiniMax-M2.md:129
 msgid "**Verification:**"
 msgstr "**验证：**"
 
-#: ../../source/tutorials/models/MiniMax-M2.md:131
 msgid "After starting the container, verify the installation with:"
 msgstr "启动容器后，使用以下命令验证安装："
 
-#: ../../source/tutorials/models/MiniMax-M2.md:141
 msgid ""
 "Expected result: `docker ps` shows the container with status \"Up\", and "
 "`npu-smi info` lists the expected number of NPU devices."
 msgstr "预期结果：`docker ps`显示容器状态为\"Up\"，`npu-smi info`列出预期的NPU设备数量。"
 
-#: ../../source/tutorials/models/MiniMax-M2.md:145
 msgid ""
 "If you prefer to build from source instead of using the Docker image, "
 "install vLLM-Ascend following the [Installation "
 "Guide](../../installation.md)."
 msgstr "如果希望从源码构建而非使用Docker镜像，请按照[安装指南](../../installation.md)安装vLLM-Ascend。"
 
-#: ../../source/tutorials/models/MiniMax-M2.md:147
 msgid "To verify the source installation:"
 msgstr "验证源码安装："
 
-#: ../../source/tutorials/models/MiniMax-M2.md:156
 msgid ""
 "In this tutorial, we assume you have downloaded the model weights. Replace "
 "`/path/to/weight/` with your actual model weight path."
 msgstr "在本教程中，我们假设您已下载模型权重。请将`/path/to/weight/`替换为实际的模型权重路径。"
 
-#: ../../source/tutorials/models/MiniMax-M2.md:161
 msgid ""
 "Single-node deployment completes both Prefill and Decode within the same "
 "node, suitable for development, testing, and low-to-medium throughput "
 "production scenarios."
 msgstr "单节点部署在同一节点内完成Prefill和Decode阶段，适用于开发、测试以及中低吞吐量的生产场景。"
 
-#: ../../source/tutorials/models/MiniMax-M2.md:163
 msgid ""
 "**Common Issues Tip:** If you encounter OOM, HCCL port conflicts, or other "
 "startup issues, please refer to the [Public "
@@ -166,21 +145,17 @@ msgstr ""
 "**常见问题提示：** "
 "如果遇到OOM、HCCL端口冲突或其他启动问题，请参考[公共FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)进行排查。MiniMax相关问题请参考[第10章FAQ](#10-faq)。"
 
-#: ../../source/tutorials/models/MiniMax-M2.md:167
 msgid ""
 "Below is a recommended startup configuration for short-context conditions "
 "(e.g., 3.5k input / 1.5k output) to achieve good performance."
 msgstr "以下是短上下文场景（如3.5k输入/1.5k输出）的推荐启动配置，以获得良好性能。"
 
-#: ../../source/tutorials/models/MiniMax-M2.md:169
 msgid "Notes:"
 msgstr "注意："
 
-#: ../../source/tutorials/models/MiniMax-M2.md:209
 msgid "Remarks:"
 msgstr "说明："
 
-#: ../../source/tutorials/models/MiniMax-M2.md:285
 msgid ""
 "PD (Prefill-Decode) separation splits the Prefill and Decode phases across "
 "different nodes for better throughput. The following 1P1D configuration is "
@@ -189,12 +164,10 @@ msgstr ""
 "PD（Prefill-"
 "Decode）分离将Prefill和Decode阶段分散到不同节点上，以获得更好的吞吐量。以下1P1D配置已在`MiniMax-M2.7-W8A8`的128k输入/输出场景中验证。"
 
-#: ../../source/tutorials/models/MiniMax-M2.md:287
 msgid ""
 "**Hardware**: 2× Atlas 800 A3 (64G × 16), one for Prefill, one for Decode."
 msgstr "**硬件**: 2× Atlas 800 A3 (64G × 16)，一台用于Prefill，一台用于Decode。"
 
-#: ../../source/tutorials/models/MiniMax-M2.md:289
 msgid ""
 "**Common Issues Tip:** For PD separation specific issues such as KV transfer"
 " timeouts or Mooncake connection errors, please refer to the [Public "
@@ -204,35 +177,27 @@ msgstr ""
 "**常见问题提示:** "
 "对于PD分离的特定问题，如KV传输超时或Mooncake连接错误，请参考[公共FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)。对于MiniMax特定的PD分离问题，请参考[第10章FAQ](#10-faq)。"
 
-#: ../../source/tutorials/models/MiniMax-M2.md:291
 msgid "First, prepare `launch_online_dp.py` on each node:"
 msgstr "首先，在每个节点上准备`launch_online_dp.py`："
 
-#: ../../source/tutorials/models/MiniMax-M2.md:333
 msgid "Then prepare `run_dp_template.sh` on each node."
 msgstr "然后在每个节点上准备`run_dp_template.sh`。"
 
-#: ../../source/tutorials/models/MiniMax-M2.md:335
 msgid "**Prefill node** (set `nic_name` and `local_ip` to your own):"
 msgstr "**Prefill节点**（将`nic_name`和`local_ip`设置为自己的）："
 
-#: ../../source/tutorials/models/MiniMax-M2.md:397
 msgid "**Decode node** (set `nic_name` and `local_ip` to your own):"
 msgstr "**Decode节点**（将`nic_name`和`local_ip`设置为自己的）："
 
-#: ../../source/tutorials/models/MiniMax-M2.md:461
 msgid "Once the scripts are ready, start the servers on each node."
 msgstr "脚本准备好后，在每个节点上启动服务器。"
 
-#: ../../source/tutorials/models/MiniMax-M2.md:463
 msgid "**Prefill node:**"
 msgstr "**Prefill节点:**"
 
-#: ../../source/tutorials/models/MiniMax-M2.md:473
 msgid "**Decode node:**"
 msgstr "**Decode节点:**"
 
-#: ../../source/tutorials/models/MiniMax-M2.md:485
 msgid ""
 "Run the proxy on any machine that can reach both nodes. You can get the "
 "proxy script from the repository: "
@@ -243,55 +208,45 @@ msgstr ""
 "project/vllm-"
 "ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)。"
 
-#: ../../source/tutorials/models/MiniMax-M2.md:503
 msgid "The service is then accessible at `http://<proxy_ip>:8009`."
 msgstr "然后服务可通过`http://<proxy_ip>:8009`访问。"
 
-#: ../../source/tutorials/models/MiniMax-M2.md:507
 msgid ""
 "Once your server is started, you can query the model with input prompts."
 msgstr "服务器启动后，你可以使用输入提示查询模型。"
 
-#: ../../source/tutorials/models/MiniMax-M2.md:509
 msgid "**Note:**"
 msgstr "**注意:**"
 
-#: ../../source/tutorials/models/MiniMax-M2.md:528
 msgid ""
 "Expected result: HTTP 200 with a JSON response containing a `choices` field "
 "with the model's reply text."
 msgstr "预期结果：HTTP 200，返回JSON响应，包含`choices`字段，其中包含模型的回复文本。"
 
-#: ../../source/tutorials/models/MiniMax-M2.md:545
 msgid ""
 "Expected result: The response should contain a coherent self-introduction "
 "and tool call parameter format in the `content` field."
 msgstr "预期结果：响应应在`content`字段中包含连贯的自我介绍和工具调用参数格式。"
 
-#: ../../source/tutorials/models/MiniMax-M2.md:576
 msgid ""
 "Expected result: HTTP 200 with a JSON response containing a `tool_calls` "
 "field with the function name and arguments."
 msgstr "预期结果：HTTP 200，返回JSON响应，包含`tool_calls`字段，其中包含函数名和参数。"
 
-#: ../../source/tutorials/models/MiniMax-M2.md:582
 msgid "Here are two accuracy evaluation methods."
 msgstr "以下是两种精度评估方法。"
 
-#: ../../source/tutorials/models/MiniMax-M2.md:586
 msgid ""
 "For details, please refer to [Using "
 "AISBench](../../developer_guide/evaluation/using_ais_bench.md)."
 msgstr ""
 "详情请参考[使用AISBench](../../developer_guide/evaluation/using_ais_bench.md)。"
 
-#: ../../source/tutorials/models/MiniMax-M2.md:590
 msgid ""
 "Using the `gsm8k` dataset as an example test dataset, run the accuracy "
 "evaluation for `MiniMax-M2.7-W8A8` in online mode."
 msgstr "以`gsm8k`数据集为例，在在线模式下运行`MiniMax-M2.7-W8A8`的精度评估。"
 
-#: ../../source/tutorials/models/MiniMax-M2.md:607
 msgid ""
 "Refer to [Using AISBench for performance "
 "evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-"
@@ -300,28 +255,23 @@ msgstr ""
 "详情请参考[使用AISBench进行性能评估](../../developer_guide/evaluation/using_ais_bench.md#execute-"
 "performance-evaluation)。"
 
-#: ../../source/tutorials/models/MiniMax-M2.md:611
 msgid "Run performance evaluation for `MiniMax-M2.7-W8A8` as an example."
 msgstr "以`MiniMax-M2.7-W8A8`为例运行性能评估。"
 
-#: ../../source/tutorials/models/MiniMax-M2.md:613
 msgid ""
 "Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for "
 "more details."
 msgstr ""
 "更多详情请参考[vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/)。"
 
-#: ../../source/tutorials/models/MiniMax-M2.md:615
 msgid "Take the `serve` subcommand as an example:"
 msgstr "以`serve`子命令为例："
 
-#: ../../source/tutorials/models/MiniMax-M2.md:635
 msgid ""
 "The following configurations are validated on the self-test report "
 "(AR20260326132822) and are categorized by use case."
 msgstr "以下配置在自测报告（AR20260326132822）上验证，并按使用场景分类。"
 
-#: ../../source/tutorials/models/MiniMax-M2.md:650
 msgid ""
 "Please refer to the [Public Performance Tuning "
 "Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md)"
@@ -329,20 +279,17 @@ msgid ""
 msgstr ""
 "通用调优方法请参考[公共性能调优文档](../../developer_guide/performance_and_debug/optimization_and_tuning.md)。"
 
-#: ../../source/tutorials/models/MiniMax-M2.md:652
 msgid ""
 "Please refer to the [Feature "
 "Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed "
 "feature descriptions."
 msgstr "详细功能描述请参考[功能指南](../../user_guide/support_matrix/feature_matrix.md)。"
 
-#: ../../source/tutorials/models/MiniMax-M2.md:658
 msgid ""
 "The following optimizations are enabled by default and require no additional"
 " configuration:"
 msgstr "以下优化默认启用，无需额外配置："
 
-#: ../../source/tutorials/models/MiniMax-M2.md:678
 msgid ""
 "For common environment, installation, and general parameter issues, please "
 "refer to the [Public "
@@ -351,17 +298,14 @@ msgid ""
 msgstr ""
 "常见环境、安装和通用参数问题请参考[公共FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)。本章仅涵盖MiniMax-M2(M2.5/M2.7)模型特定问题。"
 
-#: ../../source/tutorials/models/MiniMax-M2.md:682
 msgid "A: Not yet. C8 quantization with EAGLE3 is currently unsupported."
 msgstr "答：暂不支持。C8量化与EAGLE3目前不兼容。"
 
-#: ../../source/tutorials/models/MiniMax-M2.md:686
 msgid ""
 "A: For tool calling tasks, it is recommended to use `--reasoning-parser "
 "minimax_m2_append_think`."
 msgstr "答：对于工具调用任务，建议使用`--reasoning-parser minimax_m2_append_think`。"
 
-#: ../../source/tutorials/models/MiniMax-M2.md:690
 msgid ""
 "A: This is expected. The parser keeps `<think>...</think>` inside `content`."
 " If you mainly rely on the reasoning semantics of `/v1/responses`, use "
@@ -370,7 +314,6 @@ msgstr ""
 "答：这是预期行为。解析器将`<think>...</think>`保留在`content`中。如果主要依赖`/v1/responses`的推理语义，请改用`--reasoning-"
 "parser minimax_m2`。"
 
-#: ../../source/tutorials/models/MiniMax-M2.md:694
 msgid ""
 "A: Check whether another process is already occupying the port (e.g., `lsof "
 "-i :<port>` or `ss -tlnp | grep <port>`). If a port conflict is found, "
@@ -380,7 +323,6 @@ msgstr ""
 "答：检查是否有其他进程已占用该端口(例如`lsof -i :<port>`或`ss -tlnp | grep "
 "<port>`)。如果发现端口冲突，使用`--port`切换到其他端口，或终止占用该端口的特定进程。"
 
-#: ../../source/tutorials/models/MiniMax-M2.md:698
 msgid ""
 "A: Refer to the upstream vLLM guide on [out-of-memory "
 "troubleshooting](https://docs.vllm.ai/en/latest/usage/troubleshooting/#out-"
@@ -392,7 +334,6 @@ msgstr ""
 "of-memory)。简而言之：首先减少`--max-num-seqs`和`--max-num-batched-tokens`，降低`--gpu-"
 "memory-utilization`(例如从0.9降至0.85)，或减少并发请求数。"
 
-#: ../../source/tutorials/models/MiniMax-M2.md:702
 msgid ""
 "A: This guide uses `minimax_m2_append_think` so that `<think>...</think>` is"
 " kept in `content`. If you mainly rely on the reasoning semantics of "
@@ -401,7 +342,6 @@ msgstr ""
 "答：本指南使用`minimax_m2_append_think`以便将`<think>...</think>`保留在`content`中。如果主要依赖`/v1/responses`的推理语义，请考虑使用`--reasoning-"
 "parser minimax_m2`。"
 
-#: ../../source/tutorials/models/MiniMax-M2.md:706
 msgid ""
 "A: At minimum, expose the serving port (e.g., `8000`). For multi-node "
 "deployment, also ensure HCCL communication ports and DP RPC ports are "

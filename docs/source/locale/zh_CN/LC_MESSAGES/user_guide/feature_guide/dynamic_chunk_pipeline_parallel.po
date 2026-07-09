@@ -14,7 +14,6 @@ msgstr ""
 "Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: Babel 2.18.0\n"
 
-#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:4
 msgid ""
 "For design details and mathematical models, see [Design "
 "Document](../../developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md)."
@@ -23,21 +22,18 @@ msgid ""
 msgstr ""
 "设计细节和数学模型请参见[设计文档](../../developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md)。部署教程请参见[动态分块流水线并行教程](../../tutorials/features/dynamic_chunked_pipeline_parallel.md)。"
 
-#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:9
 msgid ""
 "Dynamic Chunked Pipeline Parallel (CPP) is a profiling-based dynamic "
 "chunking strategy that optimizes prefill performance for long sequences in "
 "Pipeline Parallelism (PP) scenarios."
 msgstr "动态分块流水线并行（CPP）是一种基于性能分析的动态分块策略，用于优化流水线并行（PP）场景中长序列的预填充性能。"
 
-#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:18
 msgid ""
 "Currently CPP mainly focuses on optimization during the prefill phase. It is"
 " better to be used in PD disaggregation scenarios. Supported features are as"
 " follows:"
 msgstr "目前CPP主要专注于预填充阶段的优化，建议在PD分离场景中使用。支持的功能如下："
 
-#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:69
 msgid ""
 "**Notably, the TTFT of CPP is very sensitive to `max-num-batched-tokens` "
 "(considered the initial chunksize for dynamic solving).** Because if it is "
@@ -51,12 +47,10 @@ msgstr ""
 "因为如果设置过大，会引入显著的计算空洞；如果设置过小，则会导致算子效率下降。为给动态调整留出足够空间，建议处理的序列越长，`max-num-"
 "batched-tokens`设置越大。推荐值："
 
-#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:78
 msgid ""
 "For optimal performance, online calibrate with real data before production:"
 msgstr "为获得最佳性能，建议在生产前使用真实数据进行在线校准："
 
-#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:80
 msgid ""
 "You can use aisbench to generate fixed-length random datasets. Refer to "
 "[Using AISBench for performance "
@@ -66,14 +60,12 @@ msgstr ""
 "可使用aisbench生成固定长度的随机数据集，详情请参见[使用AISBench进行性能评估](../../developer_guide/evaluation/using_ais_bench.md#execute-"
 "performance-evaluation)。"
 
-#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:108
 msgid ""
 "Configure online calibration data length to match your `max-model-len`. Use "
 "`batch_size=1` and ensure data differs to avoid cache hits if prefix caching"
 " is enabled."
 msgstr "配置在线校准数据长度以匹配`max-model-len`。使用`batch_size=1`，并确保数据不同以避免启用前缀缓存时的缓存命中。"
 
-#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:112
 msgid ""
 "Refer to [Using AISBench for performance "
 "evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-"
@@ -82,7 +74,6 @@ msgstr ""
 "详情请参见[使用AISBench进行性能评估](../../developer_guide/evaluation/using_ais_bench.md#execute-"
 "performance-evaluation)。"
 
-#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:114
 msgid ""
 "To evaluate the effectiveness of Dynamic Chunked Pipeline Parallel in long "
 "sequence LLM inference scenarios, we use **DeepSeek-V3.1-W8A8** and "
@@ -92,11 +83,9 @@ msgstr ""
 "为评估动态分块流水线并行在长序列LLM推理场景中的效果，我们使用**DeepSeek-V3.1-W8A8**和**Qwen3-235B**，在Ascend"
 " Atlas A3推理产品*64G（A3）上部署P实例，配置和性能数据如下。"
 
-#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:116
 msgid "**Fixed-length requests, concurrency=1**:"
 msgstr "**固定长度请求，并发数=1**："
 
-#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:130
 msgid "**Variable-length requests, concurrency=4**:"
 msgstr "**变长请求，并发数=4**："
 

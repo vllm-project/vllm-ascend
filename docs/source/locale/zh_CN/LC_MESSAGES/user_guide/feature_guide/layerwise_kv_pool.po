@@ -19,11 +19,9 @@ msgstr ""
 "Content-Transfer-Encoding: 8bit\n"
 "Generated-By: Babel 2.18.0\n"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md:1
 msgid "Layerwise KV Pool"
 msgstr "逐层KV池"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md:3
 msgid ""
 "Layerwise mode is an optimization for the AscendStore KV Pool that saves "
 "and loads KV cache **layer by layer** instead of as a single bulk copy. "
@@ -34,7 +32,6 @@ msgstr ""
 "逐层模式是AscendStore KV池的一种优化方式，它将KV缓存**逐层**保存和加载，而非作为单个批量拷贝。"
 "通过将一层的传输与下一层的注意力计算流水线化，减少了因整个KV缓存必须全部到达后才能进行任何前向计算而导致的停顿。"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md:9
 msgid ""
 "Layerwise mode works in **both PD-Mixed** (`kv_role: \"kv_both\"`) and "
 "**PD disaggregation** (`kv_role: \"kv_producer\"` / `\"kv_consumer\"`) "
@@ -44,11 +41,9 @@ msgstr ""
 "逐层模式在**PD混合**（`kv_role: \"kv_both\"`）和**PD分离**（`kv_role: \"kv_producer\"` / `\"kv_consumer\"`）场景下均适用。"
 "有关通用KV池架构和后端设置，请参阅[KV池指南](kv_pool.md)。"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md:14
 msgid "How It Works (Brief)"
 msgstr "工作原理（简述）"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md:16
 msgid ""
 "Without layerwise mode, the KV cache for a request is saved to (or loaded"
 " from) the pool as one bulk operation after the full forward pass "
@@ -58,11 +53,9 @@ msgstr ""
 "不使用逐层模式时，请求的KV缓存会在完整前向传播完成后（或开始前）作为一次批量操作保存到（或加载自）池中。"
 "对于长提示词，这种批量传输会引入序列化停顿。"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md:21
 msgid "Layerwise mode splits the save/load at the layer granularity:"
 msgstr "逐层模式以层为粒度拆分保存/加载操作："
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md:23
 msgid ""
 "**Saving** (producer / kv_both): after computing layer *i*'s attention, "
 "the KV for that layer is immediately sent to the pool backend. The next "
@@ -71,7 +64,6 @@ msgstr ""
 "**保存**（producer / kv_both）：计算完第*i*层的注意力后，该层的KV立即发送到池后端。"
 "下一层的计算与传输并行进行。"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md:26
 msgid ""
 "**Loading** (consumer / kv_both): before computing layer *i*'s attention,"
 " the system waits for layer *i*'s KV to arrive from the pool "
@@ -81,18 +73,15 @@ msgstr ""
 "**加载**（consumer / kv_both）：计算第*i*层注意力之前，系统等待第*i*层的KV从池中到达"
 "（`wait_for_layer_load`），然后继续执行。第*i+1*层的传输与第*i*层的注意力计算重叠。"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md:31
 msgid ""
 "The net effect: save/load latency is amortized across the forward pass "
 "rather than concentrated as a single blocking step."
 msgstr ""
 "最终效果：保存/加载延迟在前向传播过程中被分摊，而非集中为单个阻塞步骤。"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md:34
 msgid "Prerequisites"
 msgstr "前提条件"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md:36
 msgid ""
 "Layerwise mode currently requires the **memcache** backend (`backend: "
 "\"memcache\"`). Install and configure memcache_hybrid before proceeding —"
@@ -102,154 +91,120 @@ msgstr ""
 "逐层模式当前需要**memcache**后端（`backend: \"memcache\"`）。"
 "请先安装并配置memcache_hybrid——有关memcache安装、配置文件（`mmc-meta.conf` / `mmc-local.conf`）和MetaService启动，请参阅[KV池指南](kv_pool.md)。"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md:41
 msgid "Additional setup:"
 msgstr "额外设置："
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md:55
 msgid "Configuration"
 msgstr "配置"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md:57
 msgid "Add `use_layerwise: true` to the `AscendStoreConnector` extra config:"
 msgstr "在`AscendStoreConnector`的额外配置中添加`use_layerwise: true`："
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md:71
 msgid ""
 "Change `\"kv_role\"` to `\"kv_producer\"` or `\"kv_consumer\"` for PD "
 "disaggregation."
 "
 msgstr "对于PD分离，将`\"kv_role\"`改为`\"kv_producer\"`或`\"kv_consumer\"`。"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md:73
 msgid "Key Parameters"
 msgstr "关键参数"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md
 msgid "Parameter"
 msgstr "参数"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md
 msgid "Default"
 msgstr "默认值"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md
 msgid "Description"
 msgstr "描述"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md
 msgid "`use_layerwise`"
 msgstr "`use_layerwise`"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md
 msgid "`false`"
 msgstr "`false`"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md
 msgid "Enable layer-by-layer KV save/load. Requires `backend: \"memcache\"`."
 msgstr "启用逐层KV保存/加载。需要`backend: \"memcache\"`。"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md
 msgid "`backend`"
 msgstr "`backend`"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md
 msgid "`\"mooncake\"`"
 msgstr "`\"mooncake\"`"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md
 msgid "Storage backend. Layerwise currently supports `\"memcache\"` only."
 msgstr "存储后端。逐层模式当前仅支持`\"memcache\"`。"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md
 msgid "`mooncake_rpc_port`"
 msgstr "`mooncake_rpc_port`"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md
 msgid "`\"0\"`"
 msgstr "`\"0\"`"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md
 msgid ""
 "RPC port for the scheduler↔worker lookup service. Use `\"0\"` to auto-"
 "assign, or a unique port per instance."
 "
 msgstr "调度器↔工作节点查找服务的RPC端口。使用`\"0\"`自动分配，或为每个实例指定唯一端口。"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md
 msgid "`layerwise_prefetch_layers`"
 msgstr "`layerwise_prefetch_layers`"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md
 msgid "`1`"
 msgstr "`1`"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md
 msgid ""
 "Number of layers to prefetch ahead of the compute frontier. Higher values"
 " improve overlap at the cost of memory."
 "
 msgstr "在计算前沿之前预取的层数。更高的值可改善重叠，但会消耗更多内存。"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md
 msgid "`layerwise_max_transfer_blocks`"
 msgstr "`layerwise_max_transfer_blocks`"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md
 msgid "`0` (unlimited)"
 msgstr "`0`（无限制）"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md
 msgid "Maximum number of KV blocks per transfer batch."
 msgstr "每个传输批次的KV块最大数量。"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md
 msgid "`layerwise_max_transfer_bytes`"
 msgstr "`layerwise_max_transfer_bytes`"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md
 msgid "Maximum bytes per transfer batch."
 msgstr "每个传输批次的最大字节数。"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md
 msgid "`h2d_stagger_us`"
 msgstr "`h2d_stagger_us`"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md
 msgid "`0`"
 msgstr "`0`"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md
 msgid ""
 "Stagger delay (microseconds) between H2D copies across TP ranks to avoid "
 "bus contention."
 "
 msgstr "TP ranks之间H2D拷贝的错开延迟（微秒），以避免总线争用。"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md
 msgid "`discard_partial_chunks`"
 msgstr "`discard_partial_chunks`"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md
 msgid "`true` (non-layerwise) / `false` (layerwise)"
 msgstr "`true`（非逐层）/ `false`（逐层）"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md
 msgid ""
 "Whether to discard KV for incomplete chunk boundaries. Layerwise defaults"
 " to `false` to preserve partial layers."
 "
 msgstr "是否丢弃不完整块边界的KV。逐层模式默认为`false`以保留部分层。"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md:86
 msgid "Usage Scenarios"
 msgstr "使用场景"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md:88
 msgid "PD-Mixed (kv_both)"
 msgstr "PD混合（kv_both）"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md:90
 msgid ""
 "A single vLLM instance acts as both producer and consumer. The pool "
 "serves as a shared prefix cache: completed requests' KV is saved layer by"
@@ -259,15 +214,12 @@ msgstr ""
 "单个vLLM实例同时充当生产者和消费者。池作为共享前缀缓存：已完成请求的KV逐层保存，"
 "具有重叠前缀的新请求逐层加载KV。无需代理。"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md:117
 msgid "Send requests directly to port 8100 — no proxy required."
 msgstr "直接向端口8100发送请求——无需代理。"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md:119
 msgid "PD Disaggregation (kv_producer + kv_consumer)"
 msgstr "PD分离（kv_producer + kv_consumer）"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md:121
 msgid ""
 "Separate prefiller and decoder instances. The prefiller saves KV layer by"
 " layer; the decoder loads it layer by layer. A layerwise proxy "
@@ -277,22 +229,18 @@ msgstr ""
 "独立的预填充和解码器实例。预填充器逐层保存KV；解码器逐层加载KV。"
 "逐层代理通过其`/v1/metaserver`端点协调请求路由和逐层KV放置。"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md:125
 msgid "**Prefiller:**"
 msgstr "**预填充器：**"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md:148
 msgid "**Decoder:**"
 msgstr "**解码器：**"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md:171
 msgid ""
 "**Layerwise proxy** (different from the standard disagg proxy — serves "
 "`/v1/metaserver`):"
 msgstr ""
 "**逐层代理**（与标准分离代理不同——提供`/v1/metaserver`服务）："
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md:184
 msgid ""
 "**Note:** The proxy `--host` must **not** be `0.0.0.0` (wildcard). The "
 "decoder connects back to `host:port/v1/metaserver`, so use a reachable "
@@ -301,19 +249,15 @@ msgstr ""
 "**注意：** 代理`--host`**不能**是`0.0.0.0`（通配符）。"
 "解码器会回连到`host:port/v1/metaserver`，因此请使用可访问的IP。"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md:187
 msgid "Send requests to the proxy:"
 msgstr "向代理发送请求："
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md:200
 msgid "Tuning"
 msgstr "调优"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md:202
 msgid "Prefetch Depth"
 msgstr "预取深度"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md:204
 msgid ""
 "Increase `layerwise_prefetch_layers` (default `1`) to prefetch more "
 "layers ahead of the compute frontier. This increases transfer/compute "
@@ -322,11 +266,9 @@ msgstr ""
 "增加`layerwise_prefetch_layers`（默认`1`）以在计算前沿之前预取更多层。"
 "这增加了传输/计算重叠，但会使用更多临时缓冲区。典型值：`1–4`。"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md:208
 msgid "Transfer Batching"
 msgstr "传输批处理"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md:210
 msgid ""
 "Use `layerwise_max_transfer_blocks` or `layerwise_max_transfer_bytes` to "
 "limit the size of each transfer batch. This prevents a single large layer"
@@ -335,11 +277,9 @@ msgstr ""
 "使用`layerwise_max_transfer_blocks`或`layerwise_max_transfer_bytes`限制每个传输批次的大小。"
 "这可以防止单个大层独占传输总线。设置为`0`（默认）表示无限制。"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md:214
 msgid "H2D Stagger"
 msgstr "H2D错开"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md:216
 msgid ""
 "On multi-TP deployments, H2D (host-to-device) copies for all TP ranks can"
 " contend on the PCIe/HCCS bus. Set `h2d_stagger_us` to spread them out "
@@ -348,11 +288,9 @@ msgstr ""
 "在多TP部署中，所有TP ranks的H2D（主机到设备）拷贝可能会争用PCIe/HCCS总线。"
 "设置`h2d_stagger_us`以分散它们（例如`100`表示ranks之间错开100微秒）。"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md:220
 msgid "Supported Models"
 msgstr "支持的模型"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md:222
 msgid ""
 "Layerwise mode integrates with the **MLA** (`mla_v1`) and **SFA** "
 "(`sfa_v1`) attention backends. DeepSeek-V2/V3 and other MLA-based models "
@@ -361,7 +299,6 @@ msgstr ""
 "逐层模式与**MLA**（`mla_v1`）和**SFA**（`sfa_v1`）注意力后端集成。"
 "支持DeepSeek-V2/V3和其他基于MLA的模型。"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md:225
 msgid ""
 "Basic full attention (`attention_v1`) and all context-parallel (CP) "
 "variants (`mla_cp`, `sfa_cp`, `attention_cp`) do **not** yet integrate "
@@ -370,18 +307,15 @@ msgstr ""
 "基本全注意力（`attention_v1`）和所有上下文并行（CP）变体（`mla_cp`、`sfa_cp`、`attention_cp`）**
 "尚未**集成逐层等待/保存调用。逐层+CP是未来工作。"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md:229
 msgid "Limitations"
 msgstr "限制"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md:231
 msgid ""
 "**Backend**: Only `memcache` is supported for layerwise mode (`mooncake` "
 "and `yuanrong` do not support `use_layerwise`)."
 msgstr ""
 "**后端**：逐层模式仅支持`memcache`（`mooncake`和`yuanrong`不支持`use_layerwise`）。"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md:233
 msgid ""
 "**Hybrid KV cache**: Not supported — layerwise raises "
 "`NotImplementedError` when the model has multiple KV cache group families"
@@ -390,14 +324,12 @@ msgstr ""
 "**混合KV缓存**：不支持——当模型有多个KV缓存组族（混合MLA+滑动窗口注意力）时，"
 "逐层模式会抛出`NotImplementedError`。"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md:236
 msgid ""
 "**Context parallel**: Layerwise is not yet integrated with CP attention "
 "backends."
 "
 msgstr "**上下文并行**：逐层模式尚未与CP注意力后端集成。"
 
-#: ../../source/user_guide/feature_guide/layerwise_kv_pool.md:238
 msgid ""
 "**PD disaggregation proxy**: When using `kv_producer` / `kv_consumer`, "
 "the dedicated layerwise proxy "

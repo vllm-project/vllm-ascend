@@ -19,19 +19,16 @@ msgstr ""
 "Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: Babel 2.18.0\n"
 
-#: ../../source/developer_guide/Design_Documents/quantization.md:3
 msgid ""
 "This document provides guidance for adapting quantization algorithms and "
 "models related to **ModelSlim**."
 msgstr "本文档为适配与 **ModelSlim** 相关的量化算法和模型提供指导。"
 
-#: ../../source/developer_guide/Design_Documents/quantization.md:9
 msgid ""
 "The current process for registering and obtaining quantization methods in "
 "vLLM Ascend is as follows:"
 msgstr "vLLM Ascend 中注册和获取量化方法的当前流程如下："
 
-#: ../../source/developer_guide/Design_Documents/quantization.md:13
 msgid ""
 "vLLM Ascend registers a custom Ascend quantization method. By configuring "
 "the `--quantization ascend` parameter (or `quantization=\"ascend\"` for "
@@ -45,7 +42,6 @@ msgstr ""
 "`AscendModelSlimConfig`，并调用 `get_quant_method` 来获取每个权重部分对应的量化方法，存储在 "
 "`quant_method` 属性中。"
 
-#: ../../source/developer_guide/Design_Documents/quantization.md:15
 msgid ""
 "Currently supported quantization methods include `AscendLinearMethod`, "
 "`AscendFusedMoEMethod`, `AscendEmbeddingMethod`, and their corresponding "
@@ -55,19 +51,16 @@ msgstr ""
 "`AscendLinearMethod`、`AscendFusedMoEMethod`、`AscendEmbeddingMethod` "
 "及其对应的非量化方法："
 
-#: ../../source/developer_guide/Design_Documents/quantization.md:19
 msgid ""
 "The quantization method base class defined by vLLM  and the overall call "
 "flow of quantization methods are as follows:"
 msgstr "vLLM 定义的量化方法基类以及量化方法的整体调用流程如下："
 
-#: ../../source/developer_guide/Design_Documents/quantization.md:23
 msgid ""
 "The `embedding` method is generally not implemented for quantization, "
 "focusing only on the other three methods."
 msgstr "量化通常不实现 `embedding` 方法，只关注其他三种方法。"
 
-#: ../../source/developer_guide/Design_Documents/quantization.md:25
 msgid ""
 "The `create_weights` method is used for weight initialization; the "
 "`process_weights_after_loading` method is used for weight post-processing, "
@@ -78,7 +71,6 @@ msgstr ""
 "`create_weights` 方法用于权重初始化；`process_weights_after_loading` "
 "方法用于权重的后处理，例如转置、格式转换、数据类型转换等；`apply` 方法用于在前向过程中执行激活量化和量化矩阵乘法计算。"
 
-#: ../../source/developer_guide/Design_Documents/quantization.md:27
 msgid ""
 "We need to implement the `create_weights`, `process_weights_after_loading`, "
 "and `apply` methods for different **layers** (**attention**, **mlp**, **MoE "
@@ -87,7 +79,6 @@ msgstr ""
 "我们需要针对不同的**层**（**attention**、**mlp**、**MoE (Mixture of Experts)**）实现 "
 "`create_weights`、`process_weights_after_loading` 和 `apply` 方法。"
 
-#: ../../source/developer_guide/Design_Documents/quantization.md:29
 msgid ""
 "**Supplement**: When loading the model, the quantized model's description "
 "file **quant_model_description.json** needs to be read. This file describes "
@@ -97,18 +88,15 @@ msgstr ""
 "**补充**：加载模型时，需要读取量化模型的描述文件 "
 "**quant_model_description.json**。该文件描述了模型权重各部分的量化配置和参数，例如："
 
-#: ../../source/developer_guide/Design_Documents/quantization.md:49
 msgid ""
 "Based on the above content, we present a brief description of the adaptation"
 " process for quantization algorithms and quantized models."
 msgstr "基于以上内容，我们简要介绍量化算法和量化模型的适配流程。"
 
-#: ../../source/developer_guide/Design_Documents/quantization.md:73
 msgid ""
 "Adapting a new quantized model requires ensuring the following three points:"
 msgstr "适配新的量化模型需要确保以下三点："
 
-#: ../../source/developer_guide/Design_Documents/quantization.md:100
 msgid ""
 "vLLM Ascend supports multiple quantization algorithms. The following table "
 "provides an overview of each quantization algorithm based on the "
@@ -116,14 +104,12 @@ msgid ""
 msgstr ""
 "vLLM Ascend 支持多种量化算法。下表基于 `vllm_ascend.quantization` 模块中的实现，概述了每种量化算法："
 
-#: ../../source/developer_guide/Design_Documents/quantization.md:112
 msgid ""
 "**Static vs Dynamic:** Static quantization uses pre-computed scaling factors"
 " with better performance, while dynamic quantization computes scaling "
 "factors on-the-fly for each token/activation tensor with higher precision."
 msgstr "**静态 vs 动态：** 静态量化使用预计算的缩放因子，性能更好；动态量化为每个 token/激活张量实时计算缩放因子，精度更高。"
 
-#: ../../source/developer_guide/Design_Documents/quantization.md:114
 msgid ""
 "**Granularity:** Refers to the scope of scaling factor computation (e.g., "
 "per-tensor, per-channel, per-group)."

@@ -19,76 +19,59 @@ msgstr ""
 "Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: Babel 2.18.0\n"
 
-#: ../../source/developer_guide/Design_Documents/cpu_binding.md:24
 msgid "This is also why upstream NUMA flags are adapted on Ascend:"
 msgstr "这也是上游 NUMA 标志在 Ascend 上被适配的原因："
 
-#: ../../source/developer_guide/Design_Documents/cpu_binding.md:31
 msgid "The allocator derives its plan from runtime host state:"
 msgstr "分配器根据运行时主机状态推导其计划："
 
-#: ../../source/developer_guide/Design_Documents/cpu_binding.md:43
 msgid "The binding strategy is selected by Ascend device type:"
 msgstr "绑定策略根据 Ascend 设备类型选择："
 
-#: ../../source/developer_guide/Design_Documents/cpu_binding.md:51
 msgid ""
 "If `topo_affinity` is selected but topo affinity is unavailable, the "
 "allocator falls back to `global_slice`."
 msgstr "如果选择了 `topo_affinity` 但拓扑亲和性不可用，分配器将回退到 `global_slice`。"
 
-#: ../../source/developer_guide/Design_Documents/cpu_binding.md:82
 msgid ""
 "`global_slice` requires enough CPUs for the selected device's role split:"
 msgstr "`global_slice` 需要足够的 CPU 来满足所选设备的角色拆分："
 
-#: ../../source/developer_guide/Design_Documents/cpu_binding.md:114
 msgid "After a CPU pool is built, the allocator splits it by role:"
 msgstr "构建CPU池后，分配器按角色进行拆分："
 
-#: ../../source/developer_guide/Design_Documents/cpu_binding.md:116
 msgid "For devices with IRQ binding:"
 msgstr "对于支持IRQ绑定的设备："
 
-#: ../../source/developer_guide/Design_Documents/cpu_binding.md:125
 msgid "For Ascend 950:"
 msgstr "对于Ascend 950："
 
-#: ../../source/developer_guide/Design_Documents/cpu_binding.md:159
 msgid "Inputs:"
 msgstr "输入："
 
-#: ../../source/developer_guide/Design_Documents/cpu_binding.md:165
 msgid "Computation:"
 msgstr "计算："
 
-#: ../../source/developer_guide/Design_Documents/cpu_binding.md:172
 msgid "Global slice view:"
 msgstr "全局切片视图："
 
-#: ../../source/developer_guide/Design_Documents/cpu_binding.md:180
 msgid "Role split inside each worker slice:"
 msgstr "每个工作进程切片内的角色拆分："
 
-#: ../../source/developer_guide/Design_Documents/cpu_binding.md:188
 msgid "Concrete examples:"
 msgstr "具体示例："
 
-#: ../../source/developer_guide/Design_Documents/cpu_binding.md:202
 msgid "Inputs from an A2 topology:"
 msgstr "来自A2拓扑的输入："
 
-#: ../../source/developer_guide/Design_Documents/cpu_binding.md:214
 msgid "Final pools:"
 msgstr "最终池："
 
-#: ../../source/developer_guide/Design_Documents/cpu_binding.md:221
 msgid ""
 "This avoids overlapping CPU pools even when the two workers are launched as "
 "independent single-card services."
 msgstr "即使两个工作进程作为独立的单卡服务启动，这也能避免CPU池重叠。"
 
-#: ../../source/developer_guide/Design_Documents/cpu_binding.md:225
 msgid "The allocator logs the selected mode and allocation plan:"
 msgstr "分配器记录所选模式和分配计划："
 

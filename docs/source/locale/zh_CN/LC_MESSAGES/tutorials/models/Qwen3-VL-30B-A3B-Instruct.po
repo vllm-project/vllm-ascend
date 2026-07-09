@@ -19,7 +19,6 @@ msgstr ""
 "Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: Babel 2.18.0\n"
 
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:5
 msgid ""
 "The Qwen-VL (Vision-Language) series from Alibaba Cloud comprises a family "
 "of powerful Large Vision-Language Models (LVLMs) designed for comprehensive "
@@ -30,19 +29,16 @@ msgstr ""
 "阿里云的通义千问视觉语言（Qwen-"
 "VL）系列包含一系列强大的大型视觉语言模型（LVLM），专为全面的多模态理解而设计。它们接受图像、文本和边界框作为输入，输出文本和检测框，支持图像检测、多模态对话和多图像推理等高级功能。"
 
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:7
 msgid ""
 "This document will show the main verification steps of the "
 "`Qwen3-VL-30B-A3B-Instruct`."
 msgstr "本文档将展示 `Qwen3-VL-30B-A3B-Instruct` 的主要验证步骤。"
 
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:18
 msgid ""
 "Running this model requires 1 Atlas 800I A2 (64G × 8) node or 1 Atlas 800 A3"
 " (64G × 16) node."
 msgstr "运行此模型需要 1 个 Atlas 800I A2（64G × 8）节点或 1 个 Atlas 800 A3（64G × 16）节点。"
 
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:20
 msgid ""
 "Download model weight at [ModelScope "
 "Website](https://modelscope.cn/models/Qwen/Qwen3-VL-30B-A3B-Instruct) or "
@@ -52,21 +48,17 @@ msgstr ""
 "网站](https://modelscope.cn/models/Qwen/Qwen3-VL-30B-A3B-Instruct) "
 "下载模型权重，或使用以下命令下载："
 
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:27
 msgid ""
 "It is recommended to download the model weights to the shared directory of "
 "multiple nodes, such as `/root/.cache/`."
 msgstr "建议将模型权重下载到多节点共享目录，例如 `/root/.cache/`。"
 
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:31
 msgid "Run docker container:"
 msgstr "运行 Docker 容器："
 
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:58
 msgid "Setup environment variables:"
 msgstr "设置环境变量："
 
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:69
 msgid ""
 "`max_split_size_mb` prevents the native allocator from splitting blocks "
 "larger than this size (in MB). This can reduce fragmentation and may allow "
@@ -77,15 +69,11 @@ msgstr ""
 "`max_split_size_mb` 可防止原生分配器拆分大于此大小（以 MB "
 "为单位）的块。这可以减少碎片，并可能使一些边缘工作负载在不耗尽内存的情况下完成。更多详情请参见[此处](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/800alpha003/apiref/envref/envref_07_0061.html)。"
 
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:83
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:146
 msgid ""
 "Run the following command inside the container to start the vLLM server on "
 "multi-NPU:"
 msgstr "在容器内运行以下命令在多 NPU 上启动 vLLM 服务器："
 
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:95
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:157
 msgid ""
 "vllm-ascend supports Expert Parallelism (EP) via `--enable-expert-parallel`,"
 " which allows experts in MoE models to be deployed on separate GPUs for "
@@ -94,7 +82,6 @@ msgstr ""
 "vllm-ascend 通过 `--enable-expert-parallel` 支持专家并行（EP），允许将 MoE 模型中的专家部署到不同的 "
 "GPU 上以提高吞吐量。"
 
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:97
 msgid ""
 "It's highly recommended to specify `--limit-mm-per-prompt.video 0` if your "
 "inference server will only process image inputs since enabling video inputs "
@@ -103,8 +90,6 @@ msgstr ""
 "如果推理服务器仅处理图像输入，强烈建议指定 `--limit-mm-per-prompt.video "
 "0`，因为启用视频输入会消耗更多预留用于长视频嵌入的内存。"
 
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:99
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:159
 msgid ""
 "You can set `--max-model-len` to preserve memory. By default the model's "
 "context length is 262K, but `--max-model-len 128000` is good for most "
@@ -113,29 +98,21 @@ msgstr ""
 "可以设置 `--max-model-len` 来节省内存。默认情况下模型的上下文长度为 262K，但 `--max-model-len 128000` "
 "适用于大多数场景。"
 
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:102
 msgid "If your service starts successfully, you can see the info shown below:"
 msgstr "如果服务启动成功，您将看到如下所示的信息："
 
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:110
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:172
 msgid ""
 "Once your server is started, you can query the model with input prompts:"
 msgstr "服务器启动后，您可以使用输入提示词查询模型："
 
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:128
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:190
 msgid ""
 "If you query the server successfully, you can see the info shown below "
 "(client):"
 msgstr "如果查询服务器成功，您将看到如下所示的信息（客户端）："
 
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:134
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:196
 msgid "Logs of the vllm server:"
 msgstr "vLLM 服务器日志："
 
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:161
 msgid ""
 "Set `--allowed-local-media-path /media` to use your local video that located"
 " at `/media`, since directly download the video during serving can be "
@@ -144,11 +121,9 @@ msgstr ""
 "设置 `--allowed-local-media-path /media` 以使用位于 `/media` "
 "的本地视频，因为由于网络问题，在服务期间直接下载视频可能极其缓慢。"
 
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:164
 msgid "If your service start successfully, you can see the info shown below:"
 msgstr "如果服务启动成功，您将看到如下所示的信息："
 
-#: ../../source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md:207
 msgid ""
 "The usage of offline inference with `Qwen3-VL-30B-A3B-Instruct` is totally "
 "the same as that of `Qwen3-VL-8B-Instruct`, find more details at "

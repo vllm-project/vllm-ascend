@@ -19,7 +19,6 @@ msgstr ""
 "Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: Babel 2.18.0\n"
 
-#: ../../source/tutorials/models/Kimi-K2-Thinking.md:5
 msgid ""
 "Kimi-K2-Thinking is a large-scale Mixture-of-Experts (MoE) model developed "
 "by Moonshot AI. It features a hybrid thinking architecture that excels in "
@@ -28,7 +27,6 @@ msgstr ""
 "Kimi-K2-Thinking 是 Moonshot AI "
 "开发的大规模混合专家（MoE）模型。它采用混合思考架构，在复杂推理和问题求解任务中表现出色。"
 
-#: ../../source/tutorials/models/Kimi-K2-Thinking.md:7
 msgid ""
 "This document will demonstrate the main verification steps of the model, "
 "including supported features, environment preparation, installation, online "
@@ -36,13 +34,11 @@ msgid ""
 "performance evaluation, performance tuning, and FAQ."
 msgstr "本文档将展示模型的主要验证步骤，包括支持的特性、环境准备、安装、在线服务部署、功能验证、精度评估、性能评估、性能调优及常见问题解答。"
 
-#: ../../source/tutorials/models/Kimi-K2-Thinking.md:9
 msgid ""
 "This document is recommended to use the latest release candidate or official"
 " version."
 msgstr "建议使用最新的候选发布版本或正式版本。"
 
-#: ../../source/tutorials/models/Kimi-K2-Thinking.md:13
 msgid ""
 "Refer to [supported "
 "features](../../user_guide/support_matrix/supported_models.md) to get the "
@@ -50,19 +46,16 @@ msgid ""
 msgstr ""
 "请参阅[支持的特性矩阵](../../user_guide/support_matrix/supported_models.md)获取模型支持的特性列表。"
 
-#: ../../source/tutorials/models/Kimi-K2-Thinking.md:15
 msgid ""
 "Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the"
 " feature's configuration."
 msgstr "请参阅[特性指南](../../user_guide/feature_guide/index.md)获取特性的配置方法。"
 
-#: ../../source/tutorials/models/Kimi-K2-Thinking.md:23
 msgid ""
 "It is recommended to download the model weight to the shared directory, such"
 " as `/mnt/sfs_turbo/.cache/`."
 msgstr "建议将模型权重下载到共享目录，例如 `/mnt/sfs_turbo/.cache/`。"
 
-#: ../../source/tutorials/models/Kimi-K2-Thinking.md:25
 msgid ""
 "After downloading the model weights, please edit the value of "
 "`\"quantization_config.config_groups.group_0.targets\"` from `[\"Linear\"]` "
@@ -73,16 +66,13 @@ msgstr ""
 "`\"quantization_config.config_groups.group_0.targets\"` 的值从 `[\"Linear\"]` "
 "修改为 `[\"MoE\"]` 以验证量化模型。"
 
-#: ../../source/tutorials/models/Kimi-K2-Thinking.md:41
 msgid "Your model files should look like:"
 msgstr "您的模型文件结构如下所示："
 
-#: ../../source/tutorials/models/Kimi-K2-Thinking.md:64
 msgid ""
 "You can use the official Docker image to run `Kimi-K2-Thinking` directly."
 msgstr "您可以使用官方 Docker 镜像直接运行 `Kimi-K2-Thinking`。"
 
-#: ../../source/tutorials/models/Kimi-K2-Thinking.md:66
 msgid ""
 "Select an image based on your machine type and start the Docker image on "
 "your node, refer to [using docker](../../installation.md#set-up-using-"
@@ -91,90 +81,70 @@ msgstr ""
 "根据您的机器类型选择镜像，并在节点上启动 Docker 镜像，请参考[使用 Docker 安装](../../installation.md#set-"
 "up-using-docker)。"
 
-#: ../../source/tutorials/models/Kimi-K2-Thinking.md:108
 msgid "**Parameter Descriptions:**"
 msgstr "**参数说明：**"
 
-#: ../../source/tutorials/models/Kimi-K2-Thinking.md:122
 msgid ""
 "After the container starts, run the following command on the host to verify "
 "the container status:"
 msgstr "容器启动后，在主机上运行以下命令验证容器状态："
 
-#: ../../source/tutorials/models/Kimi-K2-Thinking.md:128
-#: ../../source/tutorials/models/Kimi-K2-Thinking.md:140
-#: ../../source/tutorials/models/Kimi-K2-Thinking.md:170
-#: ../../source/tutorials/models/Kimi-K2-Thinking.md:220
 msgid "Expected Status:"
 msgstr "预期状态："
 
-#: ../../source/tutorials/models/Kimi-K2-Thinking.md:134
 msgid ""
 "Run the following command in the container to verify that Ascend devices are"
 " visible:"
 msgstr "在容器中运行以下命令验证 Ascend 设备是否可见："
 
-#: ../../source/tutorials/models/Kimi-K2-Thinking.md:148
 msgid ""
 "If you do not want to use the Docker image, you can also build from source:"
 msgstr "如果不想使用 Docker 镜像，也可以从源码构建："
 
-#: ../../source/tutorials/models/Kimi-K2-Thinking.md:164
 msgid "To verify the source installation, run:"
 msgstr "验证源码安装，请运行："
 
-#: ../../source/tutorials/models/Kimi-K2-Thinking.md:175
 msgid ""
 "If you want to deploy a multi-node environment, set up the same software "
 "environment on each node."
 msgstr "如果要部署多节点环境，请在每个节点上设置相同的软件环境。"
 
-#: ../../source/tutorials/models/Kimi-K2-Thinking.md:181
 msgid ""
 "Single-node deployment completes both Prefill and Decode within the same "
 "node, suitable for online inference scenarios with moderate concurrency "
 "requirements."
 msgstr "单节点部署在同一节点内完成 Prefill 和 Decode，适用于中等并发需求的在线推理场景。"
 
-#: ../../source/tutorials/models/Kimi-K2-Thinking.md:183
 msgid ""
 "For an Atlas 800 A3 (64G x 16) node, `tensor-parallel-size` should be at "
 "least 16."
 msgstr "对于 Atlas 800 A3（64G*16）节点，`tensor-parallel-size` 至少应为 16。"
 
-#: ../../source/tutorials/models/Kimi-K2-Thinking.md:185
 msgid "Run the following script to start the vLLM server:"
 msgstr "运行以下脚本启动 vLLM 服务器："
 
-#: ../../source/tutorials/models/Kimi-K2-Thinking.md:193
 msgid "**Parameter and Environment Variable Descriptions:**"
 msgstr "**参数和环境变量说明：**"
 
-#: ../../source/tutorials/models/Kimi-K2-Thinking.md:210
 msgid "**Service Verification:**"
 msgstr "**服务验证：**"
 
-#: ../../source/tutorials/models/Kimi-K2-Thinking.md:212
 msgid "After the service starts, you should see logs similar to:"
 msgstr "服务启动后，您应看到类似如下的日志："
 
-#: ../../source/tutorials/models/Kimi-K2-Thinking.md:228
 msgid ""
 "After the service is started, the model can be invoked by sending a prompt:"
 msgstr "服务启动后，可通过发送提示词来调用模型："
 
-#: ../../source/tutorials/models/Kimi-K2-Thinking.md:240
 msgid "Expected Result:"
 msgstr "预期结果："
 
-#: ../../source/tutorials/models/Kimi-K2-Thinking.md:249
 msgid ""
 "For details, please refer to [Using "
 "AISBench](../../developer_guide/evaluation/using_ais_bench.md)."
 msgstr ""
 "详细信息请参考[使用AISBench](../../developer_guide/evaluation/using_ais_bench.md)。"
 
-#: ../../source/tutorials/models/Kimi-K2-Thinking.md:253
 msgid ""
 "You can use [lm-eval](https://github.com/EleutherAI/lm-evaluation-harness) "
 "to evaluate the model accuracy through the OpenAI-compatible API."
@@ -182,18 +152,15 @@ msgstr ""
 "您可以使用[lm-eval](https://github.com/EleutherAI/lm-evaluation-"
 "harness)通过OpenAI兼容API评估模型精度。"
 
-#: ../../source/tutorials/models/Kimi-K2-Thinking.md:255
 msgid ""
 "For `lm_eval` installation, please refer to [Using "
 "lm_eval](../../developer_guide/evaluation/using_lm_eval.md)."
 msgstr ""
 "关于`lm_eval`的安装，请参考[使用lm_eval](../../developer_guide/evaluation/using_lm_eval.md)。"
 
-#: ../../source/tutorials/models/Kimi-K2-Thinking.md:257
 msgid "Run `lm_eval` to execute the accuracy evaluation:"
 msgstr "运行`lm_eval`执行精度评估："
 
-#: ../../source/tutorials/models/Kimi-K2-Thinking.md:267
 msgid ""
 "Reference configuration: `gsm8k` (5-shot), `--apply_chat_template`, "
 "`--fewshot_as_multiturn`, greedy decoding (`temperature=0.0`, `top_p=1.0`), "
@@ -201,7 +168,6 @@ msgid ""
 msgstr ""
 "参考配置：`gsm8k`（5-shot）、`--apply_chat_template`、`--fewshot_as_multiturn`、贪心解码（`temperature=0.0`、`top_p=1.0`）、最大输出token数2048、批大小1。"
 
-#: ../../source/tutorials/models/Kimi-K2-Thinking.md:269
 msgid ""
 "Below are reference `gsm8k` results for `Kimi-K2-Thinking` powered by `vllm-"
 "ascend:v0.20.2rc1`, evaluated on one Atlas 800 A3 node (64G × 16)."
@@ -209,23 +175,19 @@ msgstr ""
 "以下为基于`vllm-ascend:v0.20.2rc1`的`Kimi-K2-Thinking`在单个Atlas 800 A3节点（64G × "
 "16）上评估的参考`gsm8k`结果。"
 
-#: ../../source/tutorials/models/Kimi-K2-Thinking.md:278
 msgid ""
 "Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for "
 "more details."
 msgstr "更多详情请参考[vllm基准测试](https://docs.vllm.ai/en/latest/benchmarking/)。"
 
-#: ../../source/tutorials/models/Kimi-K2-Thinking.md:280
 msgid "**Test Command Example:**"
 msgstr "**测试命令示例：**"
 
-#: ../../source/tutorials/models/Kimi-K2-Thinking.md:294
 msgid ""
 "After the benchmark completes, you can get the performance result, including"
 " request throughput, output token throughput, TTFT, TPOT, and ITL."
 msgstr "基准测试完成后，您将获得性能结果，包括请求吞吐量、输出token吞吐量、TTFT、TPOT和ITL。"
 
-#: ../../source/tutorials/models/Kimi-K2-Thinking.md:296
 msgid ""
 "The following reference results are obtained with `vllm-ascend:v0.20.2rc1` "
 "on one Atlas 800 A3 node (64G × 16), using OpenAI chat serving, random "
@@ -234,17 +196,14 @@ msgstr ""
 "以下参考结果基于`vllm-ascend:v0.20.2rc1`在单个Atlas 800 A3节点（64G × "
 "16）上获得，使用OpenAI聊天服务、随机输入/输出长度、10个提示词和`--request-rate 1`："
 
-#: ../../source/tutorials/models/Kimi-K2-Thinking.md:304
 msgid ""
 "For a concurrency sweep, keep the input and output length fixed and vary "
 "`--max-concurrency`:"
 msgstr "对于并发扫描，保持输入和输出长度固定，并改变`--max-concurrency`："
 
-#: ../../source/tutorials/models/Kimi-K2-Thinking.md:326
 msgid "Reference results for 1024 input tokens and 1024 output tokens are:"
 msgstr "1024个输入token和1024个输出token的参考结果如下："
 
-#: ../../source/tutorials/models/Kimi-K2-Thinking.md:368
 msgid ""
 "Please refer to the [Public Performance Tuning "
 "Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md)"
@@ -252,14 +211,12 @@ msgid ""
 msgstr ""
 "通用调优方法请参考[公共性能调优文档](../../developer_guide/performance_and_debug/optimization_and_tuning.md)。"
 
-#: ../../source/tutorials/models/Kimi-K2-Thinking.md:370
 msgid ""
 "Please refer to the [Feature "
 "Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed "
 "feature descriptions."
 msgstr "详细特性描述请参考[特性指南](../../user_guide/support_matrix/feature_matrix.md)。"
 
-#: ../../source/tutorials/models/Kimi-K2-Thinking.md:378
 msgid ""
 "A: The server registers the model under its full path "
 "`moonshotai/Kimi-K2-Thinking` by default. When the request uses the short "

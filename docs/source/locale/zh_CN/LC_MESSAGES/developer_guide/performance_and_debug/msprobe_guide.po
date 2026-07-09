@@ -19,7 +19,6 @@ msgstr ""
 "Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: Babel 2.17.0\n"
 
-#: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:3
 msgid ""
 "During inference or training runs we often encounter accuracy anomalies such"
 " as outputs drifting away from the expectation, unstable numerical behavior "
@@ -36,25 +35,20 @@ msgstr ""
 "在推理或训练过程中，我们常会遇到精度异常问题，例如输出偏离预期、出现数值不稳定（NaN/Inf）现象，或预测结果与标签不再匹配。要定位根本原因，必须监控并捕获模型执行过程中产生的中间数据——包括特征图、权重、激活值和各层输出。通过在特定阶段捕获关键张量、记录核心层的输入输出对，并保留上下文元数据（提示词、张量数据类型、硬件配置等），我们可以系统性地追踪精度退化或数值误差的源头。本指南描述了诊断"
 " AI 模型精度问题的端到端工作流（重点针对 vllm-ascend 服务）：准备工作、数据采集以及分析与验证。"
 
-#: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:5
 msgid ""
 "For more details, see [Ascend/msprobe](https://gitcode.com/Ascend/msprobe)."
 msgstr "更多详情请参阅 [Ascend/msprobe](https://gitcode.com/Ascend/msprobe)。"
 
-#: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:9
 msgid "`msprobe` supports three accuracy levels:"
 msgstr "`msprobe` 支持三种精度级别："
 
-#: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:19
 msgid "Install msprobe with pip:"
 msgstr "使用 pip 安装 msprobe："
 
-#: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:27
 msgid ""
 "If you need to dump cudagraph graphs, you need to install from source code:"
 msgstr "如果需要采集 cudagraph 图，请从源码安装："
 
-#: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:40
 msgid ""
 "We generally follow a coarse-to-fine strategy when capturing data. First, "
 "identify the token where the issue shows up, and then decide which range "
@@ -62,22 +56,18 @@ msgid ""
 "below."
 msgstr "我们通常采用由粗到细的策略采集数据。首先确定问题出现的 token，然后决定围绕该 token 需要采样的范围。典型工作流程如下所述。"
 
-#: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:44
 msgid ""
 "Prepare configuration content that can be parsed by `PrecisionDebugger`. You"
 " can use either of the following ways:"
 msgstr "准备可被 `PrecisionDebugger` 解析的配置内容。你可以使用以下任一方式："
 
-#: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:49
 msgid "Common fields are:"
 msgstr "常见字段如下："
 
-#: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:58
 msgid ""
 "To restrict the operators that are captured, configure the `list` block:"
 msgstr "如需限制捕获的算子范围，可配置 `list` 块："
 
-#: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:68
 msgid ""
 "The `level` setting determines what can be provided—modules when `level=L0`,"
 " APIs when `level=L1`, and either modules or APIs when `level=mix`."
@@ -85,19 +75,15 @@ msgstr ""
 "`level` 设置决定了可提供的内容——`level=L0` 时使用模块名，`level=L1` 时使用 API 名，`level=mix` "
 "时两者皆可。"
 
-#: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:96
 msgid "Graph mode:"
 msgstr "图模式："
 
-#: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:136
 msgid "Compatibility mode (legacy) is still supported:"
 msgstr "兼容模式（legacy）仍然支持："
 
-#: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:181
 msgid "graph mode:"
 msgstr "图模式："
 
-#: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:212
 msgid ""
 "You typically need two dump datasets: one from the \"problem side\" (the run"
 " that exposes the accuracy or numerical error) and another from the "
@@ -116,7 +102,6 @@ msgstr ""
 " 就能进行比较并定位差异节点。如果找不到完全干净的基准，可以先采集问题侧数据，手动构建最小可复现案例，然后进行自比较。下文中，我们假设问题采集目录为 "
 "`problem_dump`，基准采集目录为 `bench_dump`。"
 
-#: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:216
 msgid ""
 "Use `msprobe graph_visualize` to build or compare graphs, then open the "
 "generated `*.vis.db` file(s) with TensorBoard (`tb_graph_ascend` plugin)."

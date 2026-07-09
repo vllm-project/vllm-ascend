@@ -14,7 +14,6 @@ msgstr ""
 "Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: Babel 2.18.0\n"
 
-#: ../../source/user_guide/feature_guide/flash_attention.md:8
 msgid ""
 "This document shows how to enable Flash Attention 3 (FA3) in vLLM-Ascend. "
 "FA3 provides a training-inference consistent attention implementation for "
@@ -22,7 +21,6 @@ msgid ""
 msgstr ""
 "本文档介绍如何在vLLM-Ascend中启用Flash Attention 3 (FA3)。FA3为Ascend NPU提供了训练推理一致的注意力实现。"
 
-#: ../../source/user_guide/feature_guide/flash_attention.md:12
 msgid ""
 "In RL training frameworks such as veRL, the attention computation during "
 "training uses Flash Attention. When vLLM-Ascend serves as the inference "
@@ -35,31 +33,26 @@ msgstr ""
 "Attention (FIA)实现与训练侧的Flash Attention不同，可能导致训练推理不一致。为解决此问题，vLLM-"
 "Ascend引入了FA3注意力后端以保持与训练侧的一致性。"
 
-#: ../../source/user_guide/feature_guide/flash_attention.md:14
 msgid "FA3 is crucial for the following scenarios:"
 msgstr "FA3在以下场景中至关重要："
 
-#: ../../source/user_guide/feature_guide/flash_attention.md:22
 msgid ""
 "The following table compares the features of `flash_attn_with_kvcache` "
 "between GPU FA3 and Ascend NPU FA3:"
 msgstr "下表比较了GPU FA3和Ascend NPU FA3中`flash_attn_with_kvcache`的功能："
 
-#: ../../source/user_guide/feature_guide/flash_attention.md:40
 msgid ""
 "The `flash_attn_with_kvcache` interface on NPU is semantically consistent "
 "with the GPU FA3 version in terms of API parameters. The key differences "
 "are:"
 msgstr "NPU上的`flash_attn_with_kvcache`接口在API参数上与GPU FA3版本语义一致。主要差异如下："
 
-#: ../../source/user_guide/feature_guide/flash_attention.md:52
 msgid ""
 "FA3 requires the `flash_attn_npu` package, which provides the "
 "`flash_attn_npu_v3` module with the `flash_attn_with_kvcache` operator."
 msgstr ""
 "FA3需要`flash_attn_npu`包，该包提供包含`flash_attn_with_kvcache`算子的`flash_attn_npu_v3`模块。"
 
-#: ../../source/user_guide/feature_guide/flash_attention.md:56
 msgid ""
 "Install the `flash_attn_npu` wheel package refer to: "
 "<https://github.com/MinghuasLab/flash-attention-"
@@ -68,41 +61,33 @@ msgstr ""
 "安装`flash_attn_npu` wheel包，请参考：<https://github.com/MinghuasLab/flash-"
 "attention-npu/blob/main/README.md#installation>。"
 
-#: ../../source/user_guide/feature_guide/flash_attention.md:60
 msgid "To enable FA3, you need to:"
 msgstr "要启用FA3，您需要："
 
-#: ../../source/user_guide/feature_guide/flash_attention.md:67
 msgid "To start a vLLM server with FA3 enabled:"
 msgstr "启动启用FA3的vLLM服务器："
 
-#: ../../source/user_guide/feature_guide/flash_attention.md:75
 msgid "Then use the OpenAI-compatible client:"
 msgstr "然后使用OpenAI兼容客户端："
 
-#: ../../source/user_guide/feature_guide/flash_attention.md:98
 msgid "For offline batch inference with FA3:"
 msgstr "使用FA3进行离线批量推理："
 
-#: ../../source/user_guide/feature_guide/flash_attention.md:146
 msgid ""
 "Enabling FA3 may cause performance degradation compared to the default FIA "
 "backend. This trade-off is intentional to guarantee training-inference "
 "consistency."
 msgstr "与默认FIA后端相比，启用FA3可能导致性能下降。这种权衡是有意为之，以保证训练推理一致性。"
 
-#: ../../source/user_guide/feature_guide/flash_attention.md:151
 msgid "FA3 has been tested and verified on the following models:"
 msgstr "FA3已在以下模型上测试验证："
 
-#: ../../source/user_guide/feature_guide/flash_attention.md:156
 #, fuzzy
 msgid ""
 "Other models have not been tested yet and will be supported in the future if"
 " not supported after being tested."
 msgstr "其他模型尚未测试，未来将在测试后根据结果决定是否支持。"
 
-#: ../../source/user_guide/feature_guide/flash_attention.md:160
 msgid ""
 "The FA3 feature is under active development. Planned improvements include:"
 msgstr "FA3功能正在积极开发中。计划改进包括："
