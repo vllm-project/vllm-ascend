@@ -27,11 +27,12 @@ jobs:
           set -e
           echo "=== Round 1: fresh pull, expect MISS in registry-proxy log ==="
           T0=$(date +%s)
-          buildctl build \
+          buildctl \
             --addr "${BUILDKITD_ADDR}" \
             --tlscacert "${DOCKER_CONFIG}/ca.pem" \
             --tlscert  "${DOCKER_CONFIG}/cert.pem" \
             --tlskey   "${DOCKER_CONFIG}/key.pem" \
+            build \
             --frontend dockerfile.v0 \
             --local context=/tmp/ctx \
             --local dockerfile=/tmp/ctx \
@@ -44,11 +45,12 @@ jobs:
 
       - name: Prune buildkitd local cache
         run: |
-          buildctl prune --all \
+          buildctl \
             --addr "${BUILDKITD_ADDR}" \
             --tlscacert "${DOCKER_CONFIG}/ca.pem" \
             --tlscert  "${DOCKER_CONFIG}/cert.pem" \
             --tlskey   "${DOCKER_CONFIG}/key.pem" \
+            prune --all \
             || true
 
       - name: Round 2 (expect cache HIT)
@@ -56,11 +58,12 @@ jobs:
           set -e
           echo "=== Round 2: warm cache from round 1, expect HIT in registry-proxy log ==="
           T0=$(date +%s)
-          buildctl build \
+          buildctl \
             --addr "${BUILDKITD_ADDR}" \
             --tlscacert "${DOCKER_CONFIG}/ca.pem" \
             --tlscert  "${DOCKER_CONFIG}/cert.pem" \
             --tlskey   "${DOCKER_CONFIG}/key.pem" \
+            build \
             --frontend dockerfile.v0 \
             --local context=/tmp/ctx \
             --local dockerfile=/tmp/ctx \
