@@ -1226,8 +1226,34 @@ class NPUModelRunner(GPUModelRunner):
             and prev_req_id_to_index
             and self.pcp_manager.num_decode_reqs > 0
         )
+        device_rebuild_async_inputs = (
+            should_rebuild_async_inputs
+            and prev_positions_gpu is not None
+            and not with_prefill
+            and not self.enable_prompt_embeds
+            and not self.input_batch.req_prompt_embeds
+            and not self.supports_mm_inputs
+        )
         base_num_computed_tokens_np = None
-        if should_rebuild_async_inputs:
+        if device_rebuild_async_inputs:
+            if self.pcp_size > 1:
+                position_offsets_gpu = torch.from_numpy(
+                    position_pcp[:total_num_scheduled_tokens]
+                ).pin_memory().to(
+                    dtype=torch.int64,
+                    device=self.device,
+                    non_blocking=True,
+                )
+            else:
+                position_offsets_gpu = self.query_pos.gpu[
+                    :total_num_scheduled_tokens
+                ].to(torch.int64)
+            positions_gpu = (
+                self.num_computed_tokens[req_indices_gpu].to(torch.int64)
+                + position_offsets_gpu
+            )
+            self.positions[:total_num_scheduled_tokens].copy_(positions_gpu)
+        elif should_rebuild_async_inputs:
             # Rebuild CPU-side inputs from async-corrected decode lengths. The
             # valid counts were already copied on a side stream in the previous
             # step, so avoid pulling num_computed_tokens back from the device.
@@ -1262,7 +1288,9 @@ class NPUModelRunner(GPUModelRunner):
                 base_num_computed_tokens_np,
             )
 
-        if self.pcp_size > 1 or should_rebuild_async_inputs:
+        if device_rebuild_async_inputs:
+            pass
+        elif self.pcp_size > 1 or should_rebuild_async_inputs:
             # PCP and async rebuild both compute the correct positions on CPU.
             # Copy positions_np to GPU so input_ids and positions stay aligned.
 
@@ -1288,47 +1316,128 @@ class NPUModelRunner(GPUModelRunner):
             cu_num_tokens_full = self.pcp_manager.async_rebuild_cu_num_tokens_full
             num_tokens_full = self.pcp_manager.async_rebuild_num_tokens_full
 
-            assert base_num_computed_tokens_np is not None
-            base = base_num_computed_tokens_np
-
-            token_counts = np.diff(np.concatenate(([0], cu_num_tokens_full)))
-            token_starts = np.repeat(cu_num_tokens_full - token_counts, token_counts)
-            query_pos = self.arange_np[:num_tokens_full] - token_starts
-
-            positions_full = np.empty(num_tokens_full, dtype=np.int64)
-            np.add(base[req_indices_full], query_pos, out=positions_full)
-
-            if self.pcp_size > 1:
-                pre_pcp_query_start_loc = torch.zeros(
-                    num_reqs + 1,
-                    dtype=torch.int32,
+            if device_rebuild_async_inputs:
+                query_start_loc_full = (
+                    self.pcp_manager.query_start_loc_pcp_full.gpu[: num_reqs + 1]
+                )
+                query_lens_full = (
+                    query_start_loc_full[1:] - query_start_loc_full[:-1]
+                ).to(torch.int64)
+                req_indices_full_gpu = torch.repeat_interleave(
+                    self.pcp_manager.pcp_req_offsets[:num_reqs],
+                    query_lens_full,
+                    output_size=num_tokens_full,
+                )
+                token_offsets_full = torch.arange(
+                    num_tokens_full,
+                    dtype=torch.int64,
                     device=self.device,
                 )
-                pre_pcp_query_start_loc[1 : num_reqs + 1] = torch.from_numpy(
-                    cu_num_tokens_full
-                ).to(dtype=torch.int32, device=self.device)
-
-                self.input_batch.block_table.compute_slot_mapping(
-                    num_reqs,
-                    pre_pcp_query_start_loc,
-                    torch.from_numpy(positions_full).to(self.device),
+                positions_full_gpu = (
+                    self.num_computed_tokens[req_indices_full_gpu].to(torch.int64)
+                    + token_offsets_full
+                    - query_start_loc_full[req_indices_full_gpu].to(torch.int64)
                 )
 
-            self.pcp_manager.generate_pcp_mtp_input(
-                num_tokens_full,
-                scheduler_output.num_scheduled_tokens,
-                with_prefill,
-                self.input_batch,
-                self.arange_np,
-                req_indices_full,
-                positions_full,
-                cu_num_tokens_full,
-                self._draft_token_ids,  # type: ignore[has-type]
-                scheduler_output,
-                self.num_spec_tokens,
-                precomputed_positions_np=positions_full,
-                prev_positions=prev_positions_gpu,
-            )
+                if self.pcp_size > 1:
+                    self.input_batch.block_table.compute_slot_mapping(
+                        num_reqs,
+                        query_start_loc_full,
+                        positions_full_gpu,
+                    )
+
+                extra_tokens = self.pcp_manager.decode_threshold - 2
+                if extra_tokens > 0 and not with_prefill:
+                    mtp_lens = query_lens_full + extra_tokens
+                    num_tokens_mtp = num_tokens_full + num_reqs * extra_tokens
+                    req_indices_mtp = torch.repeat_interleave(
+                        self.pcp_manager.pcp_req_offsets[:num_reqs],
+                        mtp_lens,
+                        output_size=num_tokens_mtp,
+                    )
+                    mtp_start_loc = torch.empty(
+                        num_reqs + 1,
+                        dtype=torch.int64,
+                        device=self.device,
+                    )
+                    mtp_start_loc[0].fill_(0)
+                    mtp_start_loc[1:] = torch.cumsum(mtp_lens, dim=0)
+                    mtp_offsets = torch.arange(
+                        num_tokens_mtp,
+                        dtype=torch.int64,
+                        device=self.device,
+                    )
+                    positions_mtp = (
+                        self.num_computed_tokens[req_indices_mtp].to(torch.int64)
+                        + mtp_offsets
+                        - mtp_start_loc[req_indices_mtp]
+                    )
+                    self.input_batch.block_table.compute_slot_mapping_draft(
+                        req_indices_mtp,
+                        positions_mtp,
+                    )
+                    mtp_slot_ori = (
+                        self.input_batch.block_table.block_tables[0]
+                        .slot_mapping.gpu[:num_tokens_mtp]
+                    )
+                    num_tokens_mtp_pad = num_tokens_mtp * self.pcp_size
+                    if (
+                        self.pcp_manager.mtp_slot_pad is None
+                        or self.pcp_manager.mtp_slot_pad.numel()
+                        < num_tokens_mtp_pad
+                    ):
+                        self.pcp_manager.mtp_slot_pad = torch.empty(
+                            num_tokens_mtp_pad,
+                            dtype=torch.int32,
+                            device=self.device,
+                        )
+                    mtp_slot_pad = self.pcp_manager.mtp_slot_pad[
+                        :num_tokens_mtp_pad
+                    ]
+                    mtp_slot_pad.fill_(-1)
+                    mtp_slot_pad[:: self.pcp_size].copy_(mtp_slot_ori)
+            else:
+                assert base_num_computed_tokens_np is not None
+                base = base_num_computed_tokens_np
+
+                token_counts = np.diff(np.concatenate(([0], cu_num_tokens_full)))
+                token_starts = np.repeat(cu_num_tokens_full - token_counts, token_counts)
+                query_pos = self.arange_np[:num_tokens_full] - token_starts
+
+                positions_full = np.empty(num_tokens_full, dtype=np.int64)
+                np.add(base[req_indices_full], query_pos, out=positions_full)
+
+                if self.pcp_size > 1:
+                    pre_pcp_query_start_loc = torch.zeros(
+                        num_reqs + 1,
+                        dtype=torch.int32,
+                        device=self.device,
+                    )
+                    pre_pcp_query_start_loc[1 : num_reqs + 1] = torch.from_numpy(
+                        cu_num_tokens_full
+                    ).to(dtype=torch.int32, device=self.device)
+
+                    self.input_batch.block_table.compute_slot_mapping(
+                        num_reqs,
+                        pre_pcp_query_start_loc,
+                        torch.from_numpy(positions_full).to(self.device),
+                    )
+
+                self.pcp_manager.generate_pcp_mtp_input(
+                    num_tokens_full,
+                    scheduler_output.num_scheduled_tokens,
+                    with_prefill,
+                    self.input_batch,
+                    self.arange_np,
+                    req_indices_full,
+                    positions_full,
+                    cu_num_tokens_full,
+                    self._draft_token_ids,  # type: ignore[has-type]
+                    scheduler_output,
+                    self.num_spec_tokens,
+                    precomputed_positions_np=positions_full,
+                    prev_positions=prev_positions_gpu,
+                )
 
         # In async spec decode mode, optimistic_seq_lens_cpu assumes all
         # tokens from the previous speculative step were accepted. Correct it
