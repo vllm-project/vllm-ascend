@@ -169,12 +169,10 @@ class TestAscendReplicatedLinear(BaseLinearTest):
 
 
 class TestColumnParallelOpDispatch(unittest.TestCase):
-    """Tests for _get_column_parallel_op factory — DSV4 removal, share_expert, g_proj."""
+    """Tests for _get_column_parallel_op factory — share_expert, g_proj."""
 
     def setUp(self):
         self.mock_layer = MagicMock()
-        self.mock_layer.tp_size = 2
-        self.mock_layer.tp_rank = 0
         self._patches = [
             patch("vllm_ascend.ops.linear_op.mlp_tp_enable", return_value=False),
             patch("vllm_ascend.ops.linear_op.oproj_tp_enable", return_value=False),
@@ -194,13 +192,6 @@ class TestColumnParallelOpDispatch(unittest.TestCase):
 
         return _get_column_parallel_op(prefix, self.mock_layer)
 
-    def test_wo_a_returns_none(self):
-        """DSV4OProjColumnParallelOp removed — wo_a no longer resolves."""
-        self.assertIsNone(self._get_column_op("wo_a"))
-        self._patches.append(patch("vllm_ascend.ops.linear_op.oproj_tp_enable", return_value=True))
-        self._patches[-1].start()
-        self.assertIsNone(self._get_column_op("wo_a"))
-
     def test_share_expert_disabled_with_sp_column(self):
         """share_expert / shared_expert prefix → None when SP enabled."""
         self._patches.append(patch("vllm_ascend.ops.linear_op.enable_sp", return_value=True))
@@ -216,12 +207,10 @@ class TestColumnParallelOpDispatch(unittest.TestCase):
 
 
 class TestRowParallelOpDispatch(unittest.TestCase):
-    """Tests for _get_row_parallel_op factory — DSV4 removal, share_expert."""
+    """Tests for _get_row_parallel_op factory — share_expert."""
 
     def setUp(self):
         self.mock_layer = MagicMock()
-        self.mock_layer.tp_size = 2
-        self.mock_layer.tp_rank = 0
         self._patches = [
             patch("vllm_ascend.ops.linear_op.mlp_tp_enable", return_value=False),
             patch("vllm_ascend.ops.linear_op.oproj_tp_enable", return_value=False),
@@ -242,13 +231,6 @@ class TestRowParallelOpDispatch(unittest.TestCase):
 
         return _get_row_parallel_op(prefix, self.mock_layer)
 
-    def test_wo_b_returns_none(self):
-        """DSV4OProjRowParallelOp removed — wo_b no longer resolves."""
-        self.assertIsNone(self._get_row_op("wo_b"))
-        self._patches.append(patch("vllm_ascend.ops.linear_op.oproj_tp_enable", return_value=True))
-        self._patches[-1].start()
-        self.assertIsNone(self._get_row_op("wo_b"))
-
     def test_share_expert_disabled_with_sp_row(self):
         """share_expert / shared_expert prefix → None when SP enabled."""
         self._patches.append(patch("vllm_ascend.ops.linear_op.enable_sp", return_value=True))
@@ -263,11 +245,9 @@ class TestGetParallelOpShareExpert(unittest.TestCase):
     def setUp(self):
         self.mock_layer = MagicMock()
         self.mock_group = MagicMock()
-        self.mock_group.world_size = 4
-        self.mock_group.rank_in_group = 1
         self._patches = [
             patch("vllm_ascend.ops.linear_op.get_tp_group", return_value=self.mock_group),
-            patch("vllm_ascend.ops.linear_op.shared_expert_dp_enabled", return_value=False),
+            patch("vllm_ascend.ops.linear_op.shared_expert_dp_enabled", return_value=True),
         ]
         for p in self._patches:
             p.start()
@@ -286,18 +266,12 @@ class TestGetParallelOpShareExpert(unittest.TestCase):
         for prefix in (
             "model.layers.0.mlp.share_expert.gate_up_proj",
             "model.layers.0.mlp.shared_expert.gate_up_proj",
+            "model.layers.0.mlp.shared_experts.gate_up_proj",
         ):
             custom_op, tp_rank, tp_size = self._call(prefix)
             self.assertIsNone(custom_op)
             self.assertEqual(tp_rank, 0)
             self.assertEqual(tp_size, 1)
-
-        self._patches.append(patch("vllm_ascend.ops.linear_op.shared_expert_dp_enabled", return_value=True))
-        self._patches[-1].start()
-        custom_op, tp_rank, tp_size = self._call("model.layers.0.mlp.shared_experts.gate_up_proj")
-        self.assertIsNone(custom_op)
-        self.assertEqual(tp_rank, 0)
-        self.assertEqual(tp_size, 1)
 
 
 if __name__ == "__main__":
