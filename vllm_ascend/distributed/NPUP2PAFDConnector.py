@@ -211,7 +211,7 @@ class NPUP2PAFDConnector(AFDConnectorBase):
         # Split tensor dictionary into metadata and tensor list
         metadata_list, tensor_list = _split_tensor_dict(tensor_dict)
 
-        logger.info(f"[p2p] send tensor dict to dst={dst}, metadata_list={metadata_list}, tensor_list={tensor_list}")
+        logger.info(f"[p2p] send tensor dict to dst={dst}, metadata_list={metadata_list}, tensor_list={tensor_list.shape}")
 
         # Send metadata first (synchronously, as metadata is small and on CPU)
         process_group.send_object(metadata_list, dst=dst)
@@ -264,7 +264,7 @@ class NPUP2PAFDConnector(AFDConnectorBase):
         # Receive metadata first synchronously (need to know tensor shape and type)
         recv_metadata_list = process_group.recv_object(src=src)
 
-        logger.info(f"[p2p] recv tensor dict from src={src}, metadata_list={recv_metadata_list}")
+        logger.info(f"[p2p] recv tensor dict from src={src}, metadata_list={recv_metadata_list.shape}")
 
         # Create empty tensor dictionary and work list
         tensor_dict: dict[str, Any] = {}
