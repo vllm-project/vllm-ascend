@@ -132,12 +132,11 @@ Once the script completes, you can find the results in the benchmarks/results fo
 
 ```shell
 .
-|-- serving_qwen2_5_7B_tp1_qps_1.json
-|-- serving_qwen2_5_7B_tp1_qps_16.json
-|-- serving_qwen2_5_7B_tp1_qps_4.json
-|-- serving_qwen2_5_7B_tp1_qps_inf.json
-|-- latency_qwen2_5_7B_tp1.json
-|-- throughput_qwen2_5_7B_tp1.json
+|-- serving_qwen2_5_7Bvl_tp1_qps_1.json
+|-- serving_qwen2_5_7Bvl_tp1_qps_16.json
+|-- serving_qwen2_5_7Bvl_tp1_qps_4.json
+|-- serving_qwen2_5_7Bvl_tp1_qps_inf.json
+|-- throughput_qwen2_5_7Bvl_tp1.json
 ```
 
 These files contain detailed benchmarking results for further analysis.

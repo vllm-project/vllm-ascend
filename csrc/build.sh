@@ -551,7 +551,7 @@ function build_kernel(){
 
 build_lib() {
   echo $dotted_line
-  echo "Start to build libs ${BUILD_LIBS[@]}"
+  echo "Start to build libs ${BUILD_LIBS[*]}"
   clean
 
   if [ ! -d "${BUILD_PATH}" ]; then
@@ -566,7 +566,7 @@ build_lib() {
   done
 
   echo $dotted_line
-  echo "Build libs ${BUILD_LIBS[@]} success"
+  echo "Build libs ${BUILD_LIBS[*]} success"
   echo $dotted_line
 }
 
@@ -1455,7 +1455,7 @@ build_ut() {
 
   if [ $(cmake -LA -N . | grep 'UTEST_FRAMEWORK_NEW:BOOL=' | cut -d'=' -f2) == "TRUE" ]; then
     local has_valid_target="FALSE"
-    for UT_TARGET in ${UT_TARGETS[@]} ; do
+    for UT_TARGET in "${UT_TARGETS[@]}" ; do
         if cmake --build . --target help | grep -w "$UT_TARGET"; then
             echo "Building target: $UT_TARGET."
             if ! cmake --build . --target ${UT_TARGET} ${JOB_NUM}; then

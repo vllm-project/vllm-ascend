@@ -39,7 +39,7 @@ DATA_PARALLEL_SCRIPT = REPO_ROOT / "examples" / "offline_data_parallel.py"
 @pytest.mark.parametrize("max_tokens", [32])
 @patch.dict(os.environ, {"ASCEND_RT_VISIBLE_DEVICES": "0,1"})
 @patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024"})
-@wait_until_npu_memory_free(target_free_percentage=0.95)
+@wait_until_npu_memory_free(target_free_percentage=0.7)
 def test_qwen3_inference_dp2(model, max_tokens):
     moe_models = ["Qwen/Qwen3-30B-A3B", "vllm-ascend/Qwen3-30B-A3B-W8A8"]
     quantization_models = ["vllm-ascend/Qwen3-30B-A3B-W8A8"]

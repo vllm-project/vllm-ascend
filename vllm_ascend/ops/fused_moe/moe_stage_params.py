@@ -69,11 +69,15 @@ class MoEQuantParams:
 
     @property
     def is_mxfp(self) -> bool:
-        return self.quant_type in (QuantType.MXFP8, QuantType.MXFP4, QuantType.W4A8MXFP)
+        return self.quant_type in (QuantType.MXFP8, QuantType.MXFP4, QuantType.W4A8MXFP, QuantType.W4A16MXFP4)
 
     @property
     def is_int_quant(self) -> bool:
         return self.quant_type in (QuantType.W8A8, QuantType.W4A8)
+
+    @property
+    def is_fp8(self) -> bool:
+        return self.quant_type == QuantType.W8A8FP8
 
     @property
     def use_w4a8_per_channel_gmm_swiglu(self) -> bool:
@@ -81,7 +85,14 @@ class MoEQuantParams:
 
     @property
     def dispatch_with_quant(self) -> bool:
-        return self.quant_type in (QuantType.W8A8, QuantType.W4A8, QuantType.MXFP8, QuantType.MXFP4, QuantType.W4A8MXFP)
+        return self.quant_type in (
+            QuantType.W8A8,
+            QuantType.W4A8,
+            QuantType.MXFP8,
+            QuantType.MXFP4,
+            QuantType.W4A8MXFP,
+            QuantType.W8A8FP8,
+        )
 
 
 __all__ = [

@@ -32,20 +32,31 @@ def start_fastapi_server(
     local_seed_key,
     info,
 ):
-    logger.info("[RFork Seed] Preparing socket with dynamic port...")
+    logger.debug("[RFork Seed] Preparing socket with dynamic port...")
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.bind(("0.0.0.0", 0))
     _, port = sock.getsockname()
-    logger.info("[RFork Seed] Assigned dynamic port: %s", port)
+    logger.debug("[RFork Seed] Assigned dynamic port: %s", port)
 
     app = FastAPI()
+    rfork_transfer_engine_info = info
+    rfork_transfer_engine_shape_info = None
+    if isinstance(info, (list, tuple)) and len(info) == 3:
+        rfork_transfer_engine_info = (info[0], info[1])
+        rfork_transfer_engine_shape_info = info[2]
 
     @app.get("/get_rfork_transfer_engine_info")
     def get_rfork_transfer_engine_info(seed_key: str):
         if seed_key == local_seed_key:
-            return {"rfork_transfer_engine_info": info}
+            return {"rfork_transfer_engine_info": rfork_transfer_engine_info}
         return {"rfork_transfer_engine_info": None}
+
+    @app.get("/get_rfork_transfer_engine_shape_info")
+    def get_rfork_transfer_engine_shape_info(seed_key: str):
+        if seed_key == local_seed_key:
+            return {"rfork_transfer_engine_shape_info": rfork_transfer_engine_shape_info}
+        return {"rfork_transfer_engine_shape_info": None}
 
     @app.get("/rfork_fetch_seed")
     def rfork_fetch_seed():
@@ -67,7 +78,7 @@ def start_fastapi_server(
         sock.close()
         return
 
-    logger.info("[RFork Seed] FastAPI server starting on port %s...", port)
+    logger.debug("[RFork Seed] FastAPI server starting on port %s...", port)
     server.run(sockets=[sock])
     sock.close()
 

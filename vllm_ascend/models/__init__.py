@@ -18,3 +18,7 @@ def register_model():
         "DeepSeekV4MTPModel",
         "vllm_ascend.models.deepseek_v4_mtp:DeepSeekV4MTP",
     )
+    ModelRegistry.register_model(
+        "LlamaForCausalLMVwnEagle3",
+        "vllm_ascend.models.llama_eagle3_vwn:Eagle3VwnLlamaForCausalLM",
+    )

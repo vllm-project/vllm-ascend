@@ -11,6 +11,7 @@ from vllm.logger import logger
 from vllm.utils.network_utils import split_host_port
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.backend import Backend
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 
 def _iter_slices(total: int, batch_size: int):
@@ -39,7 +40,7 @@ class YuanrongConfig:
 
 
 class YuanrongHelper:
-    _DS_KEY_MAX_LEN = 255
+    _DS_KEY_MAX_LEN = 1024
     _DS_KEY_ALLOWED_PATTERN = re.compile(r"^[a-zA-Z0-9\-_!@#%\^\*\(\)\+\=\:;]+$")
     _DS_KEY_INVALID_CHAR_PATTERN = re.compile(r"[^a-zA-Z0-9\-_!@#%\^\*\(\)\+\=\:;]")
     _DS_KEY_HASH_SUFFIX_LEN = 16
@@ -114,6 +115,9 @@ class YuanrongBackend(Backend):
             enable_remote_h2d=self.config.enable_remote_h2d,
         )
         self._hetero_client.init()
+        self._is_a2 = get_ascend_device_type() in {AscendDeviceType.A2}
+        self._registered_buffers: tuple[list[int], list[int]] | None = None
+        self._buffers_registered = False
 
     def _ensure_device_ready(self):
         if self._helper._device_id is None:
@@ -126,9 +130,19 @@ class YuanrongBackend(Backend):
         self._helper._device_id = int(torch.npu.current_device())
 
     def register_buffer(self, ptrs: list[int], lengths: list[int]):
-        # Yuanrong APIs consume device pointers directly when building blob
-        # lists. No explicit pre-registration is required.
-        self._ensure_device_ready()
+        self._registered_buffers = (list(ptrs), list(lengths))
+        self._register_buffers_if_needed()
+
+    def _register_buffers_if_needed(self):
+        if self._is_a2:
+            return
+        if not self.config.enable_remote_h2d:
+            return
+        if self._registered_buffers is None or self._buffers_registered:
+            return
+        ptrs, lengths = self._registered_buffers
+        self._hetero_client.pre_register_device_memory(ptrs, lengths)  # type: ignore[union-attr]
+        self._buffers_registered = True
 
     def exists(self, keys: list[str]) -> list[int]:
         if len(keys) == 0:
@@ -152,9 +166,9 @@ class YuanrongBackend(Backend):
             )
             return [0] * len(keys)
 
-    def get(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
+    def get(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]) -> list[int] | None:
         if len(keys) == 0:
-            return
+            return []
         failed_keys_for_log = keys
         try:
             self._ensure_device_ready()
@@ -181,6 +195,8 @@ class YuanrongBackend(Backend):
                     len(keys),
                 )
                 logger.debug("Failed to get key details. failed_keys=%s", failed_keys)
+            failed_set = set(failed_keys)
+            return [1 if k in failed_set else 0 for k in keys]
         except Exception as exc:
             logger.error(
                 "Failed to get %d keys out of %d. Check network and yuanrong service.",
@@ -193,6 +209,7 @@ class YuanrongBackend(Backend):
                 type(exc).__name__,
                 exc,
             )
+            return None
 
     def put(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
         if len(keys) == 0:

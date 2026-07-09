@@ -10,9 +10,12 @@ This document will show the main verification steps of the model, including supp
 
 ### Model Weight
 
-`Qwen3-ASR-1.7B`(BF16 version): requires 1 Ascend 910B (with 1 x 64G NPUs). [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-ASR-1.7B)
+`Qwen3-ASR-1.7B`(BF16 version): requires 1 Ascend 910B (with 1 x 64G NPUs).
 
-It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
+`Qwen3-ASR-1.7B`(BF16 version): requires 1 Ascend 310P (with 1 x 48G NPUs).
+[Download model weight](https://modelscope.cn/models/Qwen/Qwen3-ASR-1.7B).
+
+It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
 ### Installation
 
@@ -47,13 +50,27 @@ In addition, if you don't want to use the docker image as above, you can also bu
 
 ## Deployment
 
-``` bash
+### Atlas 300I A2 2UP
 
+```shell
 vllm serve "Qwen/Qwen3-ASR-1.7B" \
   --tensor-parallel-size 1 \
   --max-model-len 4096 \
   --gpu-memory-utilization 0.9 \
   --enforce-eager \
+  --port 8000
+```
+
+### Atlas 300I DUO
+
+```shell
+vllm serve "Qwen/Qwen3-ASR-1.7B" \
+  --tensor-parallel-size 1 \
+  --gpu_memory_utilization 0.9 \
+  --dtype float16 \
+  --max_model_len 4096 \
+  --additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false}}' \
+  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,4]}' \
   --port 8000
 ```
 
@@ -81,27 +98,6 @@ After all samples were processed, transcription quality was measured using:
 
 - WER (Word Error Rate) for word-level recognition accuracy
 - CER (Character Error Rate) for character-level recognition accuracy
-
-The current evaluation results are:
-
-| Category | Dataset | Metric | Result |
-|----------|---------|--------|--------|
-| Accuracy | librispeech_asr / clean / test | Total Samples | 500 |
-| Accuracy | librispeech_asr / clean / test | Success | 500 |
-| Accuracy | librispeech_asr / clean / test | Failure | 0 |
-| Accuracy | librispeech_asr / clean / test | WER | 0.035 |
-
-## Performance
-
-### Baseline Result
-
-In the current evaluation, **Qwen3-ASR-1.7B** processed **100 samples** in approximately **57 seconds**, achieving an average throughput of **1.73 samples/s** under the current online serving setup.
-
-| Category | Dataset | Metric | Result |
-|----------|---------|--------|--------|
-| Performance | LibriSpeech test/clean (100 samples) | Total Samples | 100 |
-| Performance | LibriSpeech test/clean (100 samples) | Total Runtime | 57 s |
-| Performance | LibriSpeech test/clean (100 samples) | Average Throughput | 1.73 samples/s |
 
 ### Remarks
 

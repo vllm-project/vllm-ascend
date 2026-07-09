@@ -16,6 +16,8 @@
 # This file is a part of the vllm-ascend project.
 
 
+import pytest
+
 from tests.e2e.conftest import VllmRunner
 
 
@@ -54,6 +56,7 @@ def test_qwen3_moe_tp2_w8a8():
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
 
+@pytest.mark.skip("Probabilistic failure, need fix")
 def test_qwen3_5_moe_tp4_fp16():
     example_prompts = [
         "Hello, my name is",

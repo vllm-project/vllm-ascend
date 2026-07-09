@@ -11,7 +11,7 @@ from tests.e2e.conftest import (
 )
 
 
-@wait_until_npu_memory_free(target_free_percentage=0.95)
+@wait_until_npu_memory_free(target_free_percentage=0.7)
 def test_qwen_pooling_classify_correctness() -> None:
     model_name = snapshot_download(
         "Howeee/Qwen2.5-1.5B-apeach",

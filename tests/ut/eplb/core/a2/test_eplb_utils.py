@@ -8,7 +8,8 @@ from vllm.config import VllmConfig
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig, FusedMoEParallelConfig
 
 from vllm_ascend.ascend_config import init_ascend_config
-from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
+from vllm_ascend.eplb.core.eplb_utils import generate_log2phy_map, init_eplb_config
+from vllm_ascend.utils import vllm_version_is
 # isort: on
 
 
@@ -25,19 +26,36 @@ class TestAscendConfig(unittest.TestCase):
         from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 
         moe_parallel_config = FusedMoEParallelConfig(2, 0, 1, 2, 1, 1, 1, 1, 1, True, "hccl", enable_eplb=True)
-        moe_config = FusedMoEConfig(
-            num_experts=8,
-            experts_per_token=8,
-            hidden_dim=8192,
-            intermediate_size_per_partition=5,
-            num_local_experts=8,
-            num_logical_experts=8,
-            activation="silu",
-            device="npu",
-            routing_method=RoutingMethodType.Simulated,
-            moe_parallel_config=moe_parallel_config,
-            in_dtype=torch.float16,
-        )
+        if vllm_version_is("0.23.0"):
+            moe_config = FusedMoEConfig(
+                num_experts=8,
+                experts_per_token=8,
+                hidden_dim=8192,
+                intermediate_size_per_partition=5,
+                num_local_experts=8,
+                num_logical_experts=8,
+                activation="silu",
+                device="npu",
+                routing_method=RoutingMethodType.Simulated,
+                moe_parallel_config=moe_parallel_config,
+                in_dtype=torch.float16,
+            )
+        else:
+            from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+
+            moe_config = FusedMoEConfig(
+                num_experts=8,
+                experts_per_token=8,
+                hidden_dim=8192,
+                intermediate_size=10,
+                num_local_experts=8,
+                num_logical_experts=8,
+                activation=MoEActivation.SILU,
+                device="npu",
+                routing_method=RoutingMethodType.Simulated,
+                moe_parallel_config=moe_parallel_config,
+                in_dtype=torch.float16,
+            )
         moe_config.supports_eplb = True
         self.vllm_config = vllm_config
         self.moe_config = moe_config
@@ -68,6 +86,26 @@ class TestAscendConfig(unittest.TestCase):
         self.assertTrue(torch.equal(expert_map, gt_expert_map))
         self.assertTrue(torch.equal(log2phy, gt_log2phy))
         self.assertEqual(redundant_experts, 2)
+
+    def test_generate_log2phy_map_rotates_tail_tp_rank_with_tp_size(self):
+        global_expert_map = [
+            torch.tensor([0, -1], dtype=torch.int32),
+            torch.tensor([0, -1], dtype=torch.int32),
+            torch.tensor([0, -1], dtype=torch.int32),
+            torch.tensor([0, -1], dtype=torch.int32),
+            torch.tensor([-1, 0], dtype=torch.int32),
+            torch.tensor([-1, 0], dtype=torch.int32),
+            torch.tensor([-1, 0], dtype=torch.int32),
+            torch.tensor([-1, 0], dtype=torch.int32),
+        ]
+
+        fallback_tail_dp1 = generate_log2phy_map(global_expert_map, ep_rank=7)
+        rotated_tail_dp0 = generate_log2phy_map(global_expert_map, ep_rank=3, tp_size=4)
+        rotated_tail_dp1 = generate_log2phy_map(global_expert_map, ep_rank=7, tp_size=4)
+
+        self.assertTrue(torch.equal(fallback_tail_dp1, torch.tensor([3, 7], dtype=torch.int32)))
+        self.assertTrue(torch.equal(rotated_tail_dp0, torch.tensor([3, 4], dtype=torch.int32)))
+        self.assertTrue(torch.equal(rotated_tail_dp1, torch.tensor([0, 5], dtype=torch.int32)))
 
     def test_init_eplb_config_without_eplb(self):
         self.vllm_config.additional_config = {"refresh": True}

@@ -37,7 +37,7 @@ Tests are run against both the community vLLM version and the latest release.
 
 ### `/nightly`
 
-Trigger specific nightly test cases on A2 and A3. Supports both PR and issue comments. Test case names correspond to the `test_config.name` entries defined in `schedule_nightly_test_a2.yaml` and `schedule_nightly_test_a3.yaml`.
+Trigger specific nightly test cases on A2 and A3. Supports only PR comments. Test case names correspond to the `test_config.name` entries defined in `schedule_nightly_test_a2.yaml` and `schedule_nightly_test_a3.yaml`.
 
 **Usage:**
 
@@ -65,7 +65,7 @@ Use `--branch <name>` to specify a target branch. Without `--branch`, all argume
 /nightly qwen3-vl-32b-instruct-w8a8
 
 # Run on a specific release branch
-/nightly qwen3-vl-32b-instruct-w8a8 --branch releases/v0.21.0
+/nightly qwen3-vl-32b-instruct-w8a8 --branch releases/v0.23.0
 
 # Run all tests on a specific branch
 /nightly all --branch my-feature-branch
@@ -81,6 +81,50 @@ Use `--branch <name>` to specify a target branch. Without `--branch`, all argume
 ```
 
 This triggers `workflow_dispatch` on both `schedule_nightly_test_a2.yaml` and `schedule_nightly_test_a3.yaml`.
+
+### `/cherry-pick`
+
+Cherry-pick a PR's commits onto a specified target branch and create a new PR. This is useful for backporting fixes to release branches.
+
+**Usage:**
+
+| Syntax | Description |
+|---|---|
+| `/cherry-pick <target_branch>` | Cherry-pick onto the specified branch |
+
+**Examples:**
+
+```text
+# Cherry-pick to a release branch
+/cherry-pick releases/v0.23.0
+
+# Cherry-pick to main
+/cherry-pick main
+```
+
+A new PR will be created with the title format `[Cherry-pick] <original_title> (from #<PR_NUMBER>)` and a body linking back to the original PR.
+
+If the cherry-pick encounters merge conflicts, the command will report the failure and the cherry-pick must be done manually.
+
+### `/revert`
+
+Revert a merged PR by creating a new PR that reverses its changes. The revert targets the same base branch the original PR was merged into.
+
+**Usage:**
+
+| Syntax | Description |
+|---|---|
+| `/revert` | Revert this PR (no arguments needed) |
+
+**Example:**
+
+```text
+/revert
+```
+
+A new PR will be created with the title format `[Revert] Revert "original_title" (#PR_NUMBER)` and a body linking back to the original PR and its merge commit.
+
+Only merged PRs can be reverted. If the revert encounters merge conflicts (e.g., because the base branch has diverged significantly), the command will report the failure and the revert must be done manually.
 
 ### `/rerun`
 
@@ -105,7 +149,9 @@ Re-run all failed workflow runs on the current PR commit. Useful when CI jobs fa
 |---|---|---|
 | `/e2e` | ✅ | ❌ |
 | `/rerun` | ✅ | ❌ |
-| `/nightly` | ✅ | ✅ |
+| `/cherry-pick` | ✅ | ❌ |
+| `/revert` | ✅ | ❌ |
+| `/nightly` | ✅ | ❌ |
 
 ## Permission
 
@@ -113,6 +159,8 @@ Re-run all failed workflow runs on the current PR commit. Useful when CI jobs fa
 |---|---|
 | `/e2e` | PR author, or users with triage+ permission on the repository |
 | `/rerun` | PR author, or users with triage+ permission on the repository |
+| `/cherry-pick` | PR author, or users with triage+ permission on the repository |
+| `/revert` | PR author, or users with triage+ permission on the repository |
 | `/nightly` | Users with triage+ permission on the repository only |
 
 Permission is verified via the GitHub API (`repos/{owner}/{repo}/collaborators/{user}/permission`).

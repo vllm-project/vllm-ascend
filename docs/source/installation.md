@@ -238,7 +238,7 @@ If you are building in a CPU-only environment where `npu-smi` is unavailable, yo
 - Atlas A2: `export SOC_VERSION=ascend910b1`
 - Atlas A3: `export SOC_VERSION=ascend910_9391`
 - Atlas 300I: `export SOC_VERSION=ascend310p1`
-- Atlas A5: `export SOC_VERSION=<value starting with "ascend950">`
+- Ascend 950 Products: `export SOC_VERSION=<value starting with "ascend950">`
 ```
 
 ```{note}
@@ -367,7 +367,7 @@ Prompt: 'The capital of France is', Generated text: ' a city. What is the capita
 Prompt: 'The future of AI is', Generated text: ' a topic that is being discussed in various contexts. In the business world, AI'
 ```
 
-This section shows process exits after offline inference, and is does not affect actual inference:
+This section shows process exits after offline inference, and does not affect actual inference:
 
 ```bash
 (EngineCore pid=970) INFO 05-12 11:36:00 [core.py:1201] Shutdown initiated (timeout=0)

@@ -59,9 +59,7 @@ representative at an online or offline/IRL event.
 
 ## Enforcement
 
-Instances of abusive, harassing, or otherwise unacceptable behavior may be
-reported to the community leaders responsible for enforcement in the #code-of-conduct
-channel in the [vLLM Discord](https://discord.com/invite/jz7wjKhh6g).
+If you experience any abusive, harassing, or otherwise unacceptable behavior, please feel free to report it to us via [Ascend opensource assistant](docs/source/community/images/ascend_assistant.png) or <contact@ascend.osinfra.cn>.
 All complaints will be reviewed and investigated promptly and fairly.
 
 All community leaders are obligated to respect the privacy and security of the

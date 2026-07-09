@@ -27,7 +27,11 @@ namespace {
 
 constexpr uint64_t TILING_KEY_BF16 = 1;
 constexpr uint64_t TILING_KEY_FP16 = 2;
+constexpr uint64_t TILING_KEY_PARAM_BF16_OFFSET = 2;
+constexpr uint64_t TILING_KEY_PARAM_FP16_OFFSET = 4;
+constexpr size_t INPUT_INDEX_A_LOG = 0;
 constexpr size_t INPUT_INDEX_A = 1;
+constexpr size_t INPUT_INDEX_DT_BIAS = 3;
 
 } // namespace
 
@@ -64,20 +68,35 @@ ge::graphStatus FusedGdnGatingTilingFunc(gert::TilingContext *context)
     }
 
     float beta = 1.0f;
+    float threshold = 20.0f;
     auto *attrs = context->GetAttrs();
     if (attrs != nullptr) {
         const float *betaAttr = attrs->GetAttrPointer<float>(0);
         if (betaAttr != nullptr)      { beta      = *betaAttr; }
+        const float *thresholdAttr = attrs->GetAttrPointer<float>(1);
+        if (thresholdAttr != nullptr) { threshold = *thresholdAttr; }
     }
 
     auto *aDesc = context->GetInputDesc(INPUT_INDEX_A);
-    if (aDesc == nullptr) {
+    auto *aLogDesc = context->GetInputDesc(INPUT_INDEX_A_LOG);
+    auto *dtBiasDesc = context->GetInputDesc(INPUT_INDEX_DT_BIAS);
+    if (aDesc == nullptr || aLogDesc == nullptr || dtBiasDesc == nullptr) {
         return ge::GRAPH_FAILED;
     }
     ge::DataType aDtype = aDesc->GetDataType();
+    ge::DataType aLogDtype = aLogDesc->GetDataType();
+    ge::DataType dtBiasDtype = dtBiasDesc->GetDataType();
+    if (aLogDtype != dtBiasDtype) {
+        return ge::GRAPH_FAILED;
+    }
     uint64_t tilingKey = TILING_KEY_BF16;
     if (aDtype == ge::DT_FLOAT16) {
         tilingKey = TILING_KEY_FP16;
+    }
+    if (aLogDtype == ge::DT_BF16) {
+        tilingKey += TILING_KEY_PARAM_BF16_OFFSET;
+    } else if (aLogDtype == ge::DT_FLOAT16) {
+        tilingKey += TILING_KEY_PARAM_FP16_OFFSET;
     }
 
     uint32_t blockDim = static_cast<uint32_t>(numBatches);
@@ -117,6 +136,7 @@ ge::graphStatus FusedGdnGatingTilingFunc(gert::TilingContext *context)
     td.rowsPerIter   = rowsPerIter;
     td.useBulkDma    = useBulkDma ? 1u : 0u;
     td.beta          = beta;
+    td.threshold     = threshold;
 
     const size_t tilingSize = sizeof(FusedGdnGatingTilingData);
     auto *rawTilingData = context->GetRawTilingData();

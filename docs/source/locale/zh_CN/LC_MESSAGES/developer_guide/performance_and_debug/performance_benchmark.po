@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version:  vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-05-06 02:14+0000\n"
+"POT-Creation-Date: 2026-07-02 07:02+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -314,9 +314,9 @@ msgid "If successful, you will see the following output"
 msgstr "如果成功，您将看到以下输出："
 
 #: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:168
-msgid "3.2.4 Multi-Modal Benchmark"
-msgstr "3.2.4多模态基准测试"
+msgid "3.2.3 Multi-Modal Benchmark"
+msgstr "3.2.3多模态基准测试"
 
 #: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:217
-msgid "3.2.5 Embedding Benchmark"
-msgstr "3.2.5嵌入基准测试"
+msgid "3.2.4 Embedding Benchmark"
+msgstr "3.2.4嵌入基准测试"

@@ -38,6 +38,8 @@ class RForkWorker:
         seed_timeout_sec: float = 30.0,
         seed_key_separator: str = "$",
         is_draft_model: bool = False,
+        pp_rank: int | None = None,
+        ep_rank: int | None = None,
     ):
         self.device_id = device_id
         self.rfork_seed = None
@@ -54,6 +56,8 @@ class RForkWorker:
             model_deploy_strategy_name=model_deploy_strategy_name,
             seed_key_separator=seed_key_separator,
             is_draft_worker=is_draft_model,
+            pp_rank=pp_rank,
+            ep_rank=ep_rank,
         )
 
     def is_seed_available(self) -> bool:
@@ -69,6 +73,13 @@ class RForkWorker:
         except AssertionError as e:
             logger.exception("Pre-transfer failed for device_id=%s: %s", self.device_id, e)
             return False
+
+    def reset_transfer_state(self) -> None:
+        try:
+            self.transfer_backend.unregister_memory_region()
+        except Exception as e:
+            logger.warning("Failed to unregister rfork memory region: %s", e)
+        self.ready_to_start_seed_service = False
 
     def transfer(self, model) -> bool:
         try:
@@ -93,6 +104,7 @@ class RForkWorker:
             logger.info("rfork seed is None, no need to release.")
             return True
         self.seed_protocol.release_seed(self.rfork_seed)
+        self.rfork_seed = None
         return True
 
     def start_seed_service(self, model):
@@ -113,18 +125,20 @@ class RForkWorker:
             (
                 self.transfer_backend.rfork_transfer_engine_session_id,
                 self.transfer_backend.rfork_transfer_engine_weights_info_dict,
+                self.transfer_backend.rfork_transfer_engine_weights_shape_dict,
             ),
             health_timeout_sec=self.seed_timeout_sec,
         )
-        if port > 0:
-            self.rfork_heartbeat_thread = threading.Thread(
-                target=self.seed_protocol.report_seed,
-                args=(port,),
-                daemon=True,
-                name="RForkHeartbeat",
-            )
-            self.rfork_heartbeat_thread.start()
-            logger.info(
-                self.device_id,
-            )
+        if port <= 0:
+            logger.warning("start_seed_service failed for device_id=%s", self.device_id)
+            return
+
+        self.rfork_heartbeat_thread = threading.Thread(
+            target=self.seed_protocol.report_seed,
+            args=(port,),
+            daemon=True,
+            name="RForkHeartbeat",
+        )
+        self.rfork_heartbeat_thread.start()
+        logger.info("Seed service started for device_id=%s, port=%s", self.device_id, port)
         self.seed_service_started = True

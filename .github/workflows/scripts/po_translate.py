@@ -46,6 +46,8 @@ Rules:
 9. Do NOT translate proper nouns: person names, contributor names, author names must be kept as-is in msgstr
 10. In list items, no space between marker and Chinese text: "1.中文" not "1. 中文"
     (space causes Sphinx to ignore the translation)
+11.For Markdown links [text](url), translate the display text inside [], but keep the URL inside () unchanged.
+   Example: [Section 5.1](#51-single-node-online-deployment) → [第 5.1 节](#51-single-node-online-deployment)
 
 Return ONLY the complete PO file content, no extra explanations.
 

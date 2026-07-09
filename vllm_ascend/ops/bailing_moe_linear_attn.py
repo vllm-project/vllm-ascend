@@ -27,7 +27,7 @@ import torch
 import torch.nn.functional as F
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fla.ops.layernorm_guard import layernorm_fn
-from vllm.model_executor.layers.mamba.linear_attn import (
+from vllm.model_executor.layers.mamba.linear.minimax_linear_attn import (  # type: ignore[import-not-found]
     clear_linear_attention_cache_for_new_sequences,
     linear_attention_decode,
     linear_attention_prefill_and_mix,

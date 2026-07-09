@@ -191,11 +191,12 @@ ge::graphStatus HcPreTilingRegbase::CalcRegbaseOpTiling()
     int64_t rowOnceLoop = std::min(rowOfFormerBlock_, minRowPerCore);
 
     hcMultAlign_ = RoundUp(hcMult_, BLOCK_SIZE / sizeof(float));
-    int64_t mixSize = rowOnceLoop * RoundUp(hcMix_, BLOCK_SIZE / sizeof(float));
+    int64_t mixSize = rowOnceLoop * RoundUp(hcMix_, BLOCK_SIZE / sizeof(float)) * sizeof(float);
     int64_t xSize = rowOnceLoop * hcMult_ * RoundUp(d_, 16) * 2 * DOUBLE_BUFFER; // x是bfloat16_t 类型
     int64_t ySize = rowOnceLoop * RoundUp(d_, 16) * 2 * DOUBLE_BUFFER;
     int64_t postSize = rowOnceLoop * hcMultAlign_ * sizeof(float) * DOUBLE_BUFFER;
-    int64_t combFragSize = rowOnceLoop * hcMult_ * hcMultAlign_ * sizeof(float) * DOUBLE_BUFFER;
+    // comb is packed in UB as hcMult * hcMult, so size it by the actual footprint.
+    int64_t combFragSize = rowOnceLoop * hcMult_ * hcMult_ * sizeof(float) * DOUBLE_BUFFER;
     int64_t base0Size = hcMultAlign_ * sizeof(float);
     int64_t base1Size = hcMultAlign_ * sizeof(float);
     int64_t base2Size = hcMult_ * hcMultAlign_ * sizeof(float);
@@ -240,11 +241,11 @@ ge::graphStatus HcPreTilingRegbase::CalcRegbaseOpTiling()
     // d全载,尝试搬入更多的bs
     if (dFactor_ == d_) {
         while (rowFactor_ <= mUbSize) {
-            mixSize = rowFactor_ * RoundUp(hcMix_, BLOCK_SIZE / sizeof(float));
+            mixSize = rowFactor_ * RoundUp(hcMix_, BLOCK_SIZE / sizeof(float)) * sizeof(float);
             xSize = rowFactor_ * hcMult_ * RoundUp(d_, 16) * 2 * DOUBLE_BUFFER; // x是bfloat16_t 类型
             ySize = rowFactor_ * RoundUp(d_, 16) * 2 * DOUBLE_BUFFER;
             postSize = rowFactor_ * hcMultAlign_ * sizeof(float) * DOUBLE_BUFFER;
-            combFragSize = rowFactor_ * hcMult_ * hcMultAlign_ * sizeof(float) * DOUBLE_BUFFER;
+            combFragSize = rowFactor_ * hcMult_ * hcMult_ * sizeof(float) * DOUBLE_BUFFER;
             totalSize = mixSize + xSize + ySize + postSize + combFragSize;
             if (totalSize > bufferPool1Size) {
                 rowFactor_ = rowFactor_ - 1;
@@ -312,7 +313,8 @@ ge::graphStatus HcPreTilingRegbase::CalcMKSplitCorePart2Tiling()
     int64_t xSize = rowOnceLoop * hcMult_ * RoundUp(d_, 16) * 2 * DOUBLE_BUFFER; // x是bfloat16_t 类型
     int64_t ySize = rowOnceLoop * RoundUp(d_, 16) * 2 * DOUBLE_BUFFER;
     int64_t postSize = rowOnceLoop * hcMultAlign_ * sizeof(float) * DOUBLE_BUFFER;
-    int64_t combFragSize = rowOnceLoop * hcMult_ * hcMultAlign_ * sizeof(float) * DOUBLE_BUFFER;
+    // comb is packed in UB as hcMult * hcMult, so size it by the actual footprint.
+    int64_t combFragSize = rowOnceLoop * hcMult_ * hcMult_ * sizeof(float) * DOUBLE_BUFFER;
     int64_t base0Size = hcMultAlign_ * sizeof(float);
     int64_t base1Size = hcMultAlign_ * sizeof(float);
     int64_t base2Size = hcMult_ * hcMultAlign_ * sizeof(float);
@@ -355,7 +357,7 @@ ge::graphStatus HcPreTilingRegbase::CalcMKSplitCorePart2Tiling()
             xSize = rowFactor_ * hcMult_ * RoundUp(d_, 16) * 2 * DOUBLE_BUFFER; // x是bfloat16_t 类型
             ySize = rowFactor_ * RoundUp(d_, 16) * 2 * DOUBLE_BUFFER;
             postSize = rowFactor_ * hcMultAlign_ * sizeof(float) * DOUBLE_BUFFER;
-            combFragSize = rowFactor_ * hcMult_ * hcMultAlign_ * sizeof(float) * DOUBLE_BUFFER;
+            combFragSize = rowFactor_ * hcMult_ * hcMult_ * sizeof(float) * DOUBLE_BUFFER;
             base0Size = hcMultAlign_ * sizeof(float);
             base1Size = hcMultAlign_ * sizeof(float);
             base2Size = hcMult_ * hcMultAlign_ * sizeof(float);

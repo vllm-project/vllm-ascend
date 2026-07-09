@@ -1,6 +1,8 @@
 import torch
 import torch_npu
 
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+
 # TODO(linfeng): Temporary compatibility shim for MXFP4/MXFP8 because current torch_npu
 # releases do not expose the required dtype attributes yet. Simplify or remove this
 # file after the torch_npu release in March 2026 includes those dtype symbols.
@@ -20,6 +22,10 @@ def _get_missing_symbols(symbols: tuple[str, ...]) -> list[str]:
     return [symbol for symbol in symbols if not hasattr(torch_npu, symbol)]
 
 
+def _is_dynamic_mx_quant_fusion_soc_supported() -> bool:
+    return get_ascend_device_type() == AscendDeviceType.A5
+
+
 def _ensure_symbols_available(feature: str, symbols: tuple[str, ...]) -> None:
     missing_symbols = _get_missing_symbols(symbols)
     if not missing_symbols:
@@ -28,6 +34,22 @@ def _ensure_symbols_available(feature: str, symbols: tuple[str, ...]) -> None:
     raise RuntimeError(
         f"{feature} requires a newer torch_npu runtime. Missing symbols: {missing_symbols_str}. "
         "Please upgrade torch_npu or disable MXFP quantization."
+    )
+
+
+def is_add_rms_norm_dynamic_mx_quant_fusion_available() -> bool:
+    return (
+        _is_dynamic_mx_quant_fusion_soc_supported()
+        and hasattr(torch, "float8_e4m3fn")
+        and not _get_missing_symbols(("npu_dynamic_mx_quant", "npu_add_rms_norm_dynamic_mx_quant"))
+    )
+
+
+def is_rms_norm_dynamic_mx_quant_fusion_available() -> bool:
+    return (
+        _is_dynamic_mx_quant_fusion_soc_supported()
+        and hasattr(torch, "float8_e4m3fn")
+        and not _get_missing_symbols(("npu_dynamic_mx_quant", "npu_rms_norm_dynamic_mx_quant"))
     )
 
 

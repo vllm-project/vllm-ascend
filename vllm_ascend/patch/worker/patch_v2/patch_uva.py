@@ -16,11 +16,44 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+import os
 from collections.abc import Callable, Sequence
+from importlib.metadata import version
 
 import numpy as np
 import torch
 import vllm.v1.worker.gpu.buffer_utils
+from vllm.logger import logger
+
+
+def check_triton_ascend_version_valid() -> bool:
+    """
+    Check triton-ascend version and warn about UVA feature disablement in 3.2.1.
+    If version isn't 3.2.1, return True.
+    """
+    # Target version that disables UVA feature
+    DISABLE_UVA_VERSION = "3.2.1"
+    installed_version = version("triton-ascend")
+    # Check if current version is the one with UVA disabled
+    if installed_version == DISABLE_UVA_VERSION:
+        logger.warning(
+            "triton-ascend %s disables the UVA feature.\n"
+            "Related bug issue: https://github.com/triton-lang/triton-ascend/issues/783",
+            DISABLE_UVA_VERSION,
+        )
+        return False
+    return True
+
+
+def is_uva_available() -> bool:
+    """check if uva feature is supported in this environment"""
+    # FIXME(chenboxun): There is an issue with using the UVA feature alongside triton-ascend3.2.1.
+    # Thus UVA feature is disabled when using version 3.2.1
+    # (Related bug issue link: https://github.com/triton-lang/triton-ascend/issues/783)
+    return (
+        "pinned_mem_register:True" in os.environ.get("PYTORCH_NPU_ALLOC_CONF", {})
+        and check_triton_ascend_version_valid()
+    )
 
 
 def get_row_indices_from_key(key: int | slice | tuple, dim_size: int) -> set[int]:
@@ -89,30 +122,34 @@ class MonitoredTorchTensor:
 
 
 class UvaBufferWrapper:
-    """Ascend NPU doesn't support UVA tensors directly. This is a wrapper class
-    that provides CPU and NPU views of a UVA tensor."""
+    """
+    Ascend NPU doesn't support UVA tensors directly.
+    This is a wrapper class that provides CPU and NPU views of a UVA tensor.
+    However if users add environment parameter below, UVA feature is Supported.
+    os.environ['PYTORCH_NPU_ALLOC_CONF'] = 'pinned_mem_register:True'
+    """
 
     def __init__(self, size: int | Sequence[int], dtype: torch.dtype):
         self._cpu: torch.Tensor = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=True)
-        self._np = self._cpu.numpy()
-        self._uva: torch.Tensor = torch.zeros_like(self._cpu, device="npu")
+        self._np: np.ndarray = self._cpu.numpy()
         self._modified_indices: set[int] = set()
+        self._uva: torch.Tensor = self._cpu if is_uva_available() else torch.zeros_like(self._cpu, device="npu")
 
     def _mark_cpu_modified(self, key: int):
         self._modified_indices.add(key)
 
     @property
     def cpu(self):
-        return MonitoredTorchTensor(self._cpu, self._mark_cpu_modified)
+        return self._cpu if is_uva_available() else MonitoredTorchTensor(self._cpu, self._mark_cpu_modified)
 
     @property
     def np(self):
-        return MonitoredNumPyArray(self._np, self._mark_cpu_modified)
+        return self._np if is_uva_available() else MonitoredNumPyArray(self._np, self._mark_cpu_modified)
 
     @property
     def uva(self):
         """Get the device data of the buffer."""
-        if self._modified_indices:
+        if not is_uva_available() and self._modified_indices:
             # Sort for better memory access locality
             dirty_rows = sorted(self._modified_indices)
             # can't use copy_ method, because copy_ for index tensor

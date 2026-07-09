@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Generic, TypeVar
+from typing import Any, Generic, TypeVar
 
 import numpy as np
 import torch
@@ -71,6 +71,7 @@ class MoEFusedExpertsInput:
     swiglu_limit: float = 0.0
     swiglu_alpha: float = 1.0
     swiglu_beta: float = 0.0
+    lora_context: Any = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,6 +146,9 @@ class MoEMlpComputeInput:
     swiglu_limit: float = 0.0
     swiglu_alpha: float = 1.0
     swiglu_beta: float = 0.0
+    expanded_row_idx: torch.Tensor | None = None
+    topk_ids: torch.Tensor | None = None
+    lora_context: Any = None
 
 
 __all__ = [

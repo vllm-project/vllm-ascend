@@ -98,7 +98,7 @@ It's highly recommended to specify `--limit-mm-per-prompt.video 0` if your infer
 You can set `--max-model-len` to preserve memory. By default the model's context length is 262K, but `--max-model-len 128000` is good for most scenarios.
 :::
 
-If your service start successfully, you can see the info shown below:
+If your service starts successfully, you can see the info shown below:
 
 ```bash
 INFO:     Started server process [746077]

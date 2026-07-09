@@ -13,8 +13,9 @@ from vllm.config import KVTransferConfig, VllmConfig
 from vllm.logger import logger
 from vllm.utils.network_utils import make_zmq_socket
 from vllm.utils.torch_utils import get_dtype_size
-from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec
 
+from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.cpu_offload.cpu_kv_cache_manager import CPUKVCacheManager
 
 
@@ -137,7 +138,7 @@ class MetadataServer:
         # follow the assumption that each layer has the same spec
         layer = next(iter(kv_cache_specs.values()))
         assert all([layer.page_size_bytes == any.page_size_bytes for any in kv_cache_specs.values()])
-        use_mla = isinstance(layer, MLAAttentionSpec)
+        use_mla = isinstance(layer, AscendMLAAttentionSpec)
         # mla shares the same kv cache among different tp
         if use_mla:
             tp_rank = 0

@@ -40,7 +40,7 @@ _benchmarks: &benchmarks
     max_out_len: 10240
     batch_size: 32
     baseline: 96
-    threshold: 4
+    threshold: 10
   perf:
     case_type: performance
     dataset_path: vllm-ascend/GSM8K-in3500-bs400

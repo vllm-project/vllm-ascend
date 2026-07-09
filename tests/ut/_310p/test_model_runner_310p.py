@@ -18,6 +18,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
+from vllm.config import CUDAGraphMode
 from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
 
 from tests.ut.base import TestBase
@@ -48,6 +49,45 @@ def test_prepare_inputs_keeps_aclgraph_metadata_on_cpu() -> None:
     assert "self._positions_cpu_buf[:total_num_scheduled_tokens]" in source
     assert "self.seq_lens[:num_reqs].copy_(" in source
     assert "self.optimistic_seq_lens_cpu[:num_reqs]" in source
+
+
+def test_model_forward_updates_mtp_full_graph_params_before_replay() -> None:
+    runner = object.__new__(NPUModelRunner310)
+    runner.uses_mrope = False
+    runner.enable_enpu = False
+    runner.speculative_config = SimpleNamespace(method="mtp")
+    runner.update_stream = MagicMock()
+    runner._all_gather_hidden_states_and_aux = MagicMock()
+
+    calls = []
+
+    def fake_update(*args):
+        calls.append("update")
+
+    def fake_model(**kwargs):
+        calls.append("model")
+        return torch.ones(1)
+
+    runner.model = fake_model
+    runner._update_full_graph_params_if_needed = fake_update
+    forward_context = SimpleNamespace(
+        cudagraph_runtime_mode=CUDAGraphMode.FULL,
+        capturing=False,
+        flash_comm_v1_enabled=False,
+    )
+
+    with patch(
+        "vllm_ascend._310p.model_runner_310p.get_forward_context",
+        return_value=forward_context,
+    ):
+        hidden_states = runner._model_forward(
+            8,
+            input_ids=torch.tensor([1]),
+            positions=torch.tensor([0]),
+        )
+
+    assert calls == ["update", "model"]
+    torch.testing.assert_close(hidden_states, torch.ones(1))
 
 
 class TestNPUModelRunner310(TestBase):

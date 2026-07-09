@@ -12,9 +12,6 @@
 #   - Publish when tag with v* (pep440 version)  ===>  vllm-ascend:v1.2.3 / vllm-ascend:v1.2.3rc1
 name: Image Build and Push
 on:
-  schedule:
-    # UTC+8: 12pm, 21pm
-    - cron: '0 4,13 * * *'
   push:
     tags:
       - 'v*'
@@ -32,6 +29,8 @@ on:
         type: choice
         options:
           - main
+          - v0.23.0rc1
+          - v0.22.1rc1
           - v0.21.0rc1
           - v0.20.2rc1
           - none
@@ -42,9 +41,21 @@ on:
         type: choice
         options:
           - main
+          - releases/v0.22.1rc
+          - releases/v0.21.0rc
           - releases/v0.20.2rc
           - releases/v0.18.0
           - none
+      vllm_commit:
+        description: 'vLLM commit hash (must be paired with vllm_ascend_commit; mutually exclusive with tag/branch). Image will be pushed only to QUAY_TEMP_USERNAME.'
+        required: false
+        default: ''
+        type: string
+      vllm_ascend_commit:
+        description: 'vllm-ascend commit hash (must be paired with vllm_commit; mutually exclusive with tag/branch). Image will be pushed only to QUAY_TEMP_USERNAME.'
+        required: false
+        default: ''
+        type: string
 
 permissions:
   packages: write
@@ -53,7 +64,8 @@ permissions:
 jobs:
   image_build:
     name: Image Build and Push
-    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'image-build')) && github.event_name != 'schedule' }}
+    if: ${{ !((github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'image-build')))
+        && !(github.event_name == 'workflow_dispatch' && inputs.vllm_commit != '' && inputs.vllm_ascend_commit != '') }}
     strategy:
       matrix:
         build_meta:
@@ -80,22 +92,23 @@ jobs:
       dockerfile: ${{ matrix.build_meta.dockerfile }}
       suffix: ${{ matrix.build_meta.suffix }}
       quay_username: ${{ vars.QUAY_USERNAME }}
+      quay_temp_username: ${{ vars.QUAY_TEMP_USERNAME }}
       should_push: ${{ github.repository_owner == 'vllm-project' && (github.event_name != 'pull_request') }}
       workflow_dispatch_tag: ${{ inputs.tag != 'none' && inputs.tag || '' }}
       branch_ref: ${{ inputs.branch != 'none' && inputs.branch || '' }}
     secrets:
       QUAY_PASSWORD: ${{ secrets.QUAY_PASSWORD }}
+      QUAY_TEMP_PASSWORD: ${{ secrets.QUAY_TEMP_PASSWORD }}
 
-  schedule_image_build:
-    name: Image Build and Push
-    if: ${{ github.event_name == 'schedule' }}
+  image_build_by_commit:
+    name: Image Build (commit mode) and Push to QUAY_TEMP
+    if: ${{ github.event_name == 'workflow_dispatch'
+        && inputs.vllm_commit != ''
+        && inputs.vllm_ascend_commit != ''
+        && inputs.tag == 'none'
+        && inputs.branch == 'none' }}
     strategy:
-      max-parallel: 6
       matrix:
-        branch_meta:
-          - branch_ref: main
-            schedule_tag_pattern: main
-            artifact_prefix: digests
         build_meta:
           - name: A2 Ubuntu
             dockerfile: Dockerfile
@@ -119,11 +132,14 @@ jobs:
     with:
       dockerfile: ${{ matrix.build_meta.dockerfile }}
       suffix: ${{ matrix.build_meta.suffix }}
-      quay_username: ${{ vars.QUAY_USERNAME }}
-      should_push: ${{ github.repository_owner == 'vllm-project' && (github.event_name != 'pull_request') }}
-      workflow_dispatch_tag: ${{ inputs.tag != 'none' && inputs.tag || '' }}
-      branch_ref: ${{ matrix.branch_meta.branch_ref }}
-      schedule_tag_pattern: ${{ matrix.branch_meta.schedule_tag_pattern }}
-      artifact_prefix: ${{ matrix.branch_meta.artifact_prefix }}
+      quay_temp_username: ${{ vars.QUAY_TEMP_USERNAME }}
+      # Commit mode always pushes (to QUAY_TEMP_REPO only) and never promotes
+      # the image to QUAY_REPO via merge-image, so quay_username is intentionally omitted.
+      should_push: true
+      temp_only: true
+      vllm_commit: ${{ inputs.vllm_commit }}
+      vllm_ascend_commit: ${{ inputs.vllm_ascend_commit }}
+      workflow_dispatch_tag: ''
+      branch_ref: ''
     secrets:
-      QUAY_PASSWORD: ${{ secrets.QUAY_PASSWORD }}
+      QUAY_TEMP_PASSWORD: ${{ secrets.QUAY_TEMP_PASSWORD }}

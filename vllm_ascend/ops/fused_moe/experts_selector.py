@@ -110,7 +110,6 @@ def select_experts(
             scoring_func=scoring_func,
             routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
-            num_experts=num_experts,
             tid2eid=None,
             input_ids=None,
         )
@@ -322,7 +321,6 @@ def _native_select_experts(
     scoring_func: str = "softmax",
     routed_scaling_factor: float = 1.0,
     e_score_correction_bias: torch.Tensor | None = None,
-    num_experts: torch.Tensor | None = None,
     use_hash: bool = False,
     tid2eid: dict[int, int] | None = None,
     input_ids: torch.Tensor | None = None,
@@ -379,7 +377,6 @@ def _native_select_experts(
             gating_output=router_logits,
             topk=top_k,
             renormalize=renormalize,
-            num_experts=num_experts,
         )
         # Required by npu_moe_init_routing
         topk_ids = topk_ids.to(torch.int32)
