@@ -42,6 +42,8 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import (
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector import (
     MooncakeConnectorWorker as MooncakeHybridConnectorWorker,
+)
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector import (
     ReqMeta as HybridReqMeta,
 )
 from vllm_ascend.utils import check_kv_extra_config
@@ -57,8 +59,8 @@ def _make_vllm_config(kv_role: str, tp_size: int, dp_size: int, extra_config: di
     cfg.kv_transfer_config.is_kv_producer = kv_role == "kv_producer"
     cfg.kv_transfer_config.is_kv_consumer = kv_role == "kv_consumer"
     cfg.kv_transfer_config.kv_connector_extra_config = extra_config
-    cfg.kv_transfer_config.get_from_extra_config = lambda key, default=None: (
-        extra_config.get(key, default if default is not None else {})
+    cfg.kv_transfer_config.get_from_extra_config = lambda key, default=None: extra_config.get(
+        key, default if default is not None else {}
     )
     return cfg
 
@@ -172,7 +174,9 @@ class TestPSideFallbackToExtraConfig(unittest.TestCase):
         worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
         worker.kv_role = "kv_producer"
         cfg = _make_vllm_config(
-            "kv_producer", tp_size=4, dp_size=4,
+            "kv_producer",
+            tp_size=4,
+            dp_size=4,
             extra_config={"decode": {"tp_size": 1, "dp_size": 16}},
         )
         worker._resolve_parallel_sizes(cfg)
@@ -185,7 +189,9 @@ class TestPSideFallbackToExtraConfig(unittest.TestCase):
         worker.kv_role = "kv_producer"
         # P tp=2 but config claims decode tp=4 -> invalid.
         cfg = _make_vllm_config(
-            "kv_producer", tp_size=2, dp_size=4,
+            "kv_producer",
+            tp_size=2,
+            dp_size=4,
             extra_config={"prefill": {"tp_size": 2}, "decode": {"tp_size": 4}},
         )
         with self.assertRaises(ValueError):
@@ -230,8 +236,8 @@ class TestCheckKvExtraConfig(unittest.TestCase):
         cfg.parallel_config.data_parallel_size = dp_size
         cfg.kv_transfer_config.is_kv_producer = kv_role == "kv_producer"
         cfg.kv_transfer_config.is_kv_consumer = kv_role == "kv_consumer"
-        cfg.kv_transfer_config.get_from_extra_config = lambda key, default=None: (
-            extra_config.get(key, default if default is not None else {})
+        cfg.kv_transfer_config.get_from_extra_config = lambda key, default=None: extra_config.get(
+            key, default if default is not None else {}
         )
         return cfg
 
@@ -243,7 +249,9 @@ class TestCheckKvExtraConfig(unittest.TestCase):
     def test_local_tp_mismatch_raises(self):
         # Producer's local prefill config tp must match local tp.
         cfg = self._make(
-            "kv_producer", tp_size=4, dp_size=4,
+            "kv_producer",
+            tp_size=4,
+            dp_size=4,
             extra_config={"prefill": {"tp_size": 8}},
         )
         with self.assertRaises(ValueError):
@@ -251,7 +259,9 @@ class TestCheckKvExtraConfig(unittest.TestCase):
 
     def test_local_dp_mismatch_raises(self):
         cfg = self._make(
-            "kv_consumer", tp_size=1, dp_size=16,
+            "kv_consumer",
+            tp_size=1,
+            dp_size=16,
             extra_config={"decode": {"dp_size": 8}},
         )
         with self.assertRaises(ValueError):
@@ -259,7 +269,9 @@ class TestCheckKvExtraConfig(unittest.TestCase):
 
     def test_local_config_matches_does_not_raise(self):
         cfg = self._make(
-            "kv_producer", tp_size=4, dp_size=4,
+            "kv_producer",
+            tp_size=4,
+            dp_size=4,
             extra_config={"prefill": {"tp_size": 4, "dp_size": 4}},
         )
         check_kv_extra_config(cfg)

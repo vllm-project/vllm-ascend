@@ -1406,8 +1406,7 @@ def check_kv_extra_config(vllm_config):
         dp_key = "dp_size"
         if not config:
             logger.debug(
-                "KV transfer extra config '%s' not provided; "
-                "remote topology will be auto-discovered.",
+                "KV transfer extra config '%s' not provided; remote topology will be auto-discovered.",
                 name,
             )
             return
