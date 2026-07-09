@@ -1093,8 +1093,8 @@ class PCPManager:
             # So input_ids.cpu will have all the input ids.
             return
         # Upload the index tensors asynchronously so the scatter can be non-blocking.
-        sampled_tokens_index_tensor = torch.tensor(sample_flattened_indices, dtype=torch.int64)
-        prev_common_req_indices_tensor = torch.tensor(prev_common_req_indices, dtype=torch.int64)
+        sampled_tokens_index_tensor = torch.tensor(sample_flattened_indices, dtype=torch.int64, device=self.device)
+        prev_common_req_indices_tensor = torch.tensor(prev_common_req_indices, dtype=torch.int64, device=self.device)
         self.input_ids_pcp_full.gpu.scatter_(
             dim=0,
             index=sampled_tokens_index_tensor,
@@ -1106,8 +1106,8 @@ class PCPManager:
             return
 
         assert isinstance(draft_token_ids, torch.Tensor)
-        draft_tokens_index_tensor = torch.tensor(spec_flattened_indices, dtype=torch.int64)
-        prev_draft_token_indices_tensor = torch.tensor(prev_draft_token_indices, dtype=torch.int64)
+        draft_tokens_index_tensor = torch.tensor(spec_flattened_indices, dtype=torch.int64, device=self.device)
+        prev_draft_token_indices_tensor = torch.tensor(prev_draft_token_indices, dtype=torch.int64, device=self.device)
 
         # because input_ids dtype is torch.int32,
         # so convert draft_token_ids to torch.int32 here.
