@@ -6,7 +6,7 @@ import weakref
 from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import dataclass
-from typing import Any, ClassVar
+from typing import Any
 from unittest.mock import patch
 
 import torch
@@ -30,13 +30,7 @@ _STREAM_RESOURCE_ERROR_MARKERS = (
     "insufficient_stream_resources",
     "stream resources are insufficient",
 )
-_STREAM_RESOURCE_GUIDANCE = (
-    "ACL graph capture failed with a known stream-resource exhaustion "
-    "signature. Consider upgrading to a newer HDK/CANN stack, reducing "
-    "cudagraph_capture_sizes, lowering max_cudagraph_capture_size, preferring "
-    "FULL or FULL_DECODE_ONLY for mostly uniform decode workloads, or "
-    "temporarily disabling graph mode to confirm the failure is capture-related."
-)
+_OLD_HDK_CAPTURE_ERROR_MARKERS = ("alloc sq cq fail",)
 
 
 def _is_stream_resource_capture_error(exc: RuntimeError) -> bool:
@@ -47,8 +41,9 @@ def _is_stream_resource_capture_error(exc: RuntimeError) -> bool:
     return has_stream_resource_marker or (has_error_code and "stream resource" in lowered_message)
 
 
-def _raise_stream_resource_capture_error(exc: RuntimeError) -> None:
-    raise RuntimeError(f"{_STREAM_RESOURCE_GUIDANCE}\nOriginal error:\n{exc}") from exc
+def _is_old_hdk_capture_error(exc: RuntimeError) -> bool:
+    message = str(exc).lower()
+    return any(marker in message for marker in _OLD_HDK_CAPTURE_ERROR_MARKERS)
 
 
 @dataclasses.dataclass
@@ -87,13 +82,6 @@ class ACLGraphWrapper:
     guaranteed when VLLM_LOGGING_LEVEL == "DEBUG".
     """
 
-    _all_instances: ClassVar[weakref.WeakSet["ACLGraphWrapper"]] = weakref.WeakSet()
-
-    @classmethod
-    def clear_all_graphs(cls) -> None:
-        for instance in list(cls._all_instances):
-            instance.clear_graphs()
-
     def __init__(
         self,
         runnable: Callable,
@@ -128,8 +116,6 @@ class ACLGraphWrapper:
         self.use_eagle = use_eagle
         _acl_graph_wrappers.add(self)
 
-        ACLGraphWrapper._all_instances.add(self)
-
     def __getattr__(self, key: str):
         # allow accessing the attributes of the runnable.
         if hasattr(self.runnable, key):
@@ -143,13 +129,6 @@ class ACLGraphWrapper:
     def unwrap(self) -> Callable:
         # in case we need to access the original runnable.
         return self.runnable
-
-    @property
-    def cudagraph_wrapper(self) -> "ACLGraphWrapper":
-        return self
-
-    def clear_graphs(self) -> None:
-        self.concrete_aclgraph_entries.clear()
 
     def __call__(self, *args, **kwargs):
         forward_context = get_forward_context()
@@ -222,8 +201,22 @@ class ACLGraphWrapper:
                             # any other acl graph.
                             output = weak_ref_tensors(output)
                 except RuntimeError as exc:
-                    if _is_stream_resource_capture_error(exc):
-                        _raise_stream_resource_capture_error(exc)
+                    if _is_old_hdk_capture_error(exc):
+                        raise RuntimeError(
+                            "ACL graph capture failed with an old Ascend HDK/CANN stack "
+                            "signature (`Alloc sq cq fail`). Please upgrade Ascend HDK to "
+                            "25.5.1 or later and use the matching CANN stack.\n"
+                            f"Original error:\n{exc}"
+                        ) from exc
+                    elif _is_stream_resource_capture_error(exc):
+                        raise RuntimeError(
+                            "ACL graph capture failed with a known stream-resource exhaustion "
+                            "signature. Consider reducing cudagraph_capture_sizes, lowering "
+                            "max_cudagraph_capture_size, preferring FULL or FULL_DECODE_ONLY for "
+                            "mostly uniform decode workloads, or temporarily disabling graph mode "
+                            "to confirm the failure is capture-related.\n"
+                            f"Original error:\n{exc}"
+                        ) from exc
                     raise
 
             # here we always use weak ref for the workspaces
@@ -330,13 +323,6 @@ class GraphParams:
 
 
 _graph_params: GraphParams | None = None
-
-
-def reset_graph_params():
-    global _graph_params, _draft_graph_params, _draft_graph_prefill_params
-    _graph_params = None
-    _draft_graph_params = None
-    _draft_graph_prefill_params = None
 
 
 def set_graph_params(aclgraph_capture_sizes: list[int]):

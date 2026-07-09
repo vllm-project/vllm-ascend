@@ -30,9 +30,8 @@ The verified configuration uses one Atlas A3 node with 16 NPUs and 64 GB HBM per
 
 You can use our official docker image to run Hy3-preview directly. For Atlas A3 machines, select the image variant with the `-a3` suffix. The official image already includes the vLLM and vLLM Ascend runtime needed for the verified serving path.
 
-```{code-block} bash
-  :substitutions:
-  export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
+```bash
+  export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
   export NAME=vllm-ascend
 
   docker run --rm \

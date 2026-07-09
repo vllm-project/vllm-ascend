@@ -292,5 +292,5 @@ lm_eval \
 
 **资料写作要求：**
 
-- 在章节开头添加说明：常见环境、安装、通用参数问题请参考[公共FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)；本章仅收录本模型特有疑难问题。
+- 在章节开头添加说明：常见环境、安装、通用参数问题请参考[公共FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)；本章仅收录本模型特有疑难问题。
 - 针对**本模型特有疑难问题** ，提供以下要素：问题现象描述、原因分析、解决措施。

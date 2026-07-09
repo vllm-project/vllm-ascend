@@ -149,6 +149,7 @@ def build_fused_experts_input(
     swiglu_limit: float | None = 0.0,
     swiglu_alpha: float = 1.0,
     swiglu_beta: float = 0.0,
+    lora_context=None,
 ) -> MoEFusedExpertsInput:
     if not vllm_version_is("0.23.0") and swiglu_limit is None:
         swiglu_limit = 0.0
@@ -197,6 +198,7 @@ def build_fused_experts_input(
         swiglu_limit=swiglu_limit,
         swiglu_alpha=swiglu_alpha,
         swiglu_beta=swiglu_beta,
+        lora_context=lora_context,
     )
 
 
@@ -223,6 +225,8 @@ def build_mlp_compute_input(
     if fused_experts_input.quant.is_mxfp and fused_experts_input.quant.mxfp is None:
         raise ValueError("fused_experts_input.quant.mxfp is required for MXFP quant types.")
 
+    expanded_row_idx = getattr(token_dispatch_output.combine_metadata, "expanded_row_idx", None)
+
     return MoEMlpComputeInput(
         hidden_states=token_dispatch_output.hidden_states,
         group_list=token_dispatch_output.group_list,
@@ -232,7 +236,14 @@ def build_mlp_compute_input(
         weights=fused_experts_input.weights,
         quant=fused_experts_input.quant,
         fusion=fused_experts_input.quant.quant_type
-        in (QuantType.W8A8, QuantType.MXFP8, QuantType.MXFP4, QuantType.W4A8MXFP, QuantType.W8A8FP8)
+        in (
+            QuantType.W8A8,
+            QuantType.MXFP8,
+            QuantType.MXFP4,
+            QuantType.W4A8MXFP,
+            QuantType.W8A8FP8,
+            QuantType.W4A16MXFP4,
+        )
         and use_fusion_ops,
         activation=fused_experts_input.activation,
         need_trans=fused_experts_input.need_trans,
@@ -240,6 +251,9 @@ def build_mlp_compute_input(
         swiglu_limit=fused_experts_input.swiglu_limit,
         swiglu_alpha=fused_experts_input.swiglu_alpha,
         swiglu_beta=fused_experts_input.swiglu_beta,
+        expanded_row_idx=expanded_row_idx,
+        topk_ids=fused_experts_input.topk_ids,
+        lora_context=fused_experts_input.lora_context,
     )
 
 
