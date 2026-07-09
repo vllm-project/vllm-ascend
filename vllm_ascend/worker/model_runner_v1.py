@@ -5019,7 +5019,7 @@ class NPUModelRunner(GPUModelRunner):
                         block_size=self.block_size,
                         num_kv_heads=1,
                         head_size=sum(sparse_head_dim),
-                        sparse_head_dim=self.sparse_head_dim,
+                        sparse_head_dim=sparse_head_dim,
                         dtype=self.kv_cache_dtype,
                         cache_dtype_str=self.vllm_config.cache_config.cache_dtype,
                         cache_sparse_c8=self.ascend_config.is_sparse_c8_layer(layer_name),
