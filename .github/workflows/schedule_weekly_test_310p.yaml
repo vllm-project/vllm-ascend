@@ -174,7 +174,7 @@ jobs:
 
   single-node-tests:
     name: single-node
-    needs: [setup-vars, parse-trigger, build-image, double-node-tests]
+    needs: [setup-vars, parse-trigger, build-image]
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&
@@ -206,7 +206,7 @@ jobs:
 
   merge-benchmark-artifacts:
     name: Merge benchmark artifacts into weekly-310p.zip
-    needs: [single-node-tests]
+    needs: [parse-trigger, single-node-tests]
     if: >-
       always() &&
       github.event_name == 'workflow_dispatch' &&
