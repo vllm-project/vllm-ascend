@@ -39,6 +39,243 @@ if vllm_version_is("0.25.1"):
     from vllm.model_executor.layers.fla.ops.l2norm import l2norm_fwd  # type: ignore[import-not-found]
 else:
     from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
+from vllm_ascend.utils import weak_ref_tensors
+
+
+def to_int64_tuple(tensor: torch.Tensor) -> tuple[int, ...]:
+    tensor = tensor.to(torch.int64)
+    if tensor.dim() == 0:
+        return (tensor.item(),)
+    return tuple(tensor.tolist())
+
+
+def _check_and_get_host_args(attn_metadata, field_name: str, sub_field_name: str):
+    if (fallback_meta := getattr(attn_metadata, field_name, None)) is None:
+        raise RuntimeError(f"Expected attn_metadata.{field_name}.{sub_field_name} for Ascend GDN fallback path.")
+    return fallback_meta
+
+
+def _check_and_get_runtime_prefill_args(attn_metadata, field_name: str):
+    value = getattr(attn_metadata, field_name, None)
+    if value is None:
+        raise RuntimeError(f"Expected attn_metadata.{field_name} for Ascend GDN prefill path.")
+    return value
+
+
+def get_non_spec_causal_conv1d_host_args(attn_metadata) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+    fallback_meta = getattr(attn_metadata, "non_spec_prefill_fallback_meta", None)
+    if fallback_meta is None:
+        query_start_loc = _check_and_get_runtime_prefill_args(attn_metadata, "non_spec_query_start_loc")
+        cache_indices = _check_and_get_runtime_prefill_args(attn_metadata, "non_spec_state_indices_tensor")
+        has_initial_state = _check_and_get_runtime_prefill_args(attn_metadata, "has_initial_state")
+        return (
+            to_int64_tuple(query_start_loc),
+            to_int64_tuple(cache_indices),
+            to_int64_tuple(has_initial_state),
+        )
+
+    causal_conv1d_meta = fallback_meta.causal_conv1d
+    return (
+        to_int64_tuple(causal_conv1d_meta.query_start_loc_cpu),
+        to_int64_tuple(causal_conv1d_meta.cache_indices_cpu),
+        to_int64_tuple(causal_conv1d_meta.has_initial_state_cpu),
+    )
+
+
+def get_causal_conv1d_update_host_args(attn_metadata) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    fallback_meta = _check_and_get_host_args(attn_metadata, "non_spec_decode_fallback_meta", "causal_conv1d")
+    causal_conv1d_meta = fallback_meta.causal_conv1d
+    return (
+        to_int64_tuple(causal_conv1d_meta.query_start_loc_cpu),
+        to_int64_tuple(causal_conv1d_meta.cache_indices_cpu),
+    )
+
+
+def get_spec_causal_conv1d_update_host_args(attn_metadata) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+    fallback_meta = _check_and_get_host_args(attn_metadata, "spec_decode_fallback_meta", "spec_causal_conv1d")
+    causal_conv1d_meta = fallback_meta.spec_causal_conv1d
+
+    return (
+        to_int64_tuple(causal_conv1d_meta.query_start_loc_cpu),
+        to_int64_tuple(causal_conv1d_meta.cache_indices_cpu),
+        to_int64_tuple(causal_conv1d_meta.num_accepted_tokens_cpu),
+    )
+
+
+def _pad_conv1d_host_args_to_capture(
+    qsl_host: tuple[int, ...],
+    cidx_host: tuple[int, ...],
+    num_accepted_host: tuple[int, ...] | tuple,
+    cap_x_dim0: int,
+    q_per_seq: int,
+    with_num_accepted: bool,
+) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...] | tuple]:
+    """Pad runtime host arguments with dummy requests at the end to align to capture-time x.shape[0].
+
+    During capture, ACL Graph records ``cuSeqlen = mixed_qkv.shape[0]`` (= ``cap_x_dim0``),
+    and tiling strictly validates ``qsl[last] == cuSeqlen``.
+    Runtime may have fewer requests than capture (e.g., FIA adds a dummy request to query_start_loc,
+    but vLLM marks it as non-spec/non-decode, so spec/non_spec_decode host args only cover real requests).
+    This function pads dummy requests at the end with ``q_per_seq`` stride to ensure ``qsl[last] == cap_x_dim0``.
+    Dummy requests use ``PAD_SLOT_ID`` as cache_index,  and the kernel skips state writeback for them.
+    """
+    if not qsl_host:
+        return qsl_host, cidx_host, num_accepted_host
+
+    expected_seqs = len(qsl_host) - 1
+    cidx_pad = expected_seqs - len(cidx_host)
+    if cidx_pad > 0:
+        cidx_host = tuple(cidx_host) + (PAD_SLOT_ID,) * cidx_pad
+    if with_num_accepted:
+        nat_pad = expected_seqs - len(num_accepted_host)
+        if nat_pad > 0:
+            num_accepted_host = tuple(num_accepted_host) + (1,) * nat_pad
+
+    runtime_qsl_last = int(qsl_host[-1])
+    pad_tokens = cap_x_dim0 - runtime_qsl_last
+    if pad_tokens <= 0 or q_per_seq <= 0:
+        return qsl_host, cidx_host, num_accepted_host
+    pad_seqs = pad_tokens // q_per_seq
+    if pad_seqs <= 0:
+        return qsl_host, cidx_host, num_accepted_host
+    # query start loc is cunsum
+    extra_qsl = tuple(runtime_qsl_last + (i + 1) * q_per_seq for i in range(pad_seqs))
+    qsl_host = qsl_host + extra_qsl
+    cidx_host = cidx_host + (PAD_SLOT_ID,) * pad_seqs
+    if with_num_accepted:
+        num_accepted_host = tuple(num_accepted_host) + (1,) * pad_seqs
+    return qsl_host, cidx_host, num_accepted_host
+
+
+def update_conv1d_graph_params(
+    update_stream,
+    forward_context,
+    num_tokens,
+    vllm_config,
+    is_draft_model=False,
+    draft_attn_metadatas=None,
+):
+    """Update host-side parameters for conv1d."""
+    from vllm_ascend.compilation.acl_graph import get_draft_graph_params, get_graph_params
+
+    graph_params = get_draft_graph_params() if is_draft_model else get_graph_params()
+
+    if (
+        graph_params is None
+        or num_tokens not in graph_params.conv1d_params
+        or len(graph_params.conv1d_params[num_tokens]) == 0
+    ):
+        return
+
+    attn_metadata = forward_context.attn_metadata
+    if is_draft_model and draft_attn_metadatas is not None:
+        attn_metadata = draft_attn_metadatas
+
+    with torch.npu.stream(update_stream):
+        for param, handle, event in zip(
+            graph_params.conv1d_params[num_tokens],
+            graph_params.conv1d_handles[num_tokens],
+            graph_params.conv1d_events[num_tokens],
+        ):
+            # Unpack parameters captured during graph capture
+            (
+                output,
+                mixed_qkv,
+                conv_weights_T,
+                conv_state,
+                bias,
+                activation_num,
+                pad_slot_id,
+                run_mode,
+                branch,
+                layer_prefix,
+                _,
+                _,
+                _,
+                q_per_seq,
+            ) = param
+
+            new_query_start_loc: tuple[int, ...] = ()
+            new_cache_indices: tuple[int, ...] = ()
+            new_num_accepted: tuple[int, ...] = ()
+
+            if run_mode == 1 and attn_metadata is not None:
+                # get gdn metadata by captured layer_prefix
+                meta = attn_metadata
+                if isinstance(meta, dict):
+                    meta = meta.get(layer_prefix, None)
+                    assert isinstance(meta, GDNAttentionMetadata)
+
+                if meta is None:
+                    continue
+
+                cap_x_dim0 = int(mixed_qkv.size(0))
+                if branch == "spec" and meta.spec_sequence_masks is not None:
+                    qsl_host, cidx_host, num_accepted_host = get_spec_causal_conv1d_update_host_args(meta)
+                    new_query_start_loc, new_cache_indices, new_num_accepted = _pad_conv1d_host_args_to_capture(
+                        qsl_host,
+                        cidx_host,
+                        num_accepted_host,
+                        cap_x_dim0=cap_x_dim0,
+                        q_per_seq=q_per_seq,
+                        with_num_accepted=True,
+                    )
+                elif branch == "spec" and meta.spec_sequence_masks is None:
+                    # The captured graph may contain a spec conv1d task even
+                    # when this DP rank has no runtime spec sequence. Leaving
+                    # cache_indices empty makes the kernel use default
+                    # batch-indexed state writes, which can corrupt conv_state.
+                    # Mark every input row as -1 so the task is a state no-op.
+                    new_cache_indices = (-1,) * cap_x_dim0
+                elif branch == "non_spec_decode":
+                    # Mirror the spec branch above: the captured graph may
+                    # contain a non-spec-decode conv1d task even when this
+                    # replay's batch has no runtime non-spec decode. That
+                    # happens when spec-decode (MTP) sequences are present: the
+                    # builder folds the plain decodes into prefills and sets
+                    # num_decodes to 0, so `non_spec_decode_fallback_meta` is
+                    # None. Fetching host args off the missing meta then raises
+                    # "Expected attn_metadata.non_spec_decode_fallback_meta..."
+                    # and kills the engine. Make the task a state no-op
+                    # (cache_indices = -1) instead, exactly like the spec case.
+                    if getattr(meta, "non_spec_decode_fallback_meta", None) is None:
+                        new_cache_indices = (-1,) * cap_x_dim0
+                    else:
+                        non_sdq_host, non_sd_cidx_host = get_causal_conv1d_update_host_args(meta)
+                        new_query_start_loc, new_cache_indices, _ = _pad_conv1d_host_args_to_capture(
+                            non_sdq_host,
+                            non_sd_cidx_host,
+                            (),
+                            cap_x_dim0=cap_x_dim0,
+                            q_per_seq=q_per_seq,
+                            with_num_accepted=False,
+                        )
+                    new_num_accepted = ()
+
+            torch.npu.graph_task_update_begin(update_stream, handle)
+            torch.ops._C_ascend.npu_causal_conv1d_custom(
+                output,
+                mixed_qkv,
+                conv_weights_T,
+                conv_state=conv_state,
+                bias_opt=bias,
+                query_start_loc_opt=new_query_start_loc,
+                cache_indices_opt=new_cache_indices,
+                initial_state_mode_opt=(),
+                num_accepted_tokens_opt=new_num_accepted,
+                activation_mode=activation_num,
+                pad_slot_id=pad_slot_id,
+                run_mode=run_mode,
+            )
+            torch.npu.graph_task_update_end(update_stream)
+            event.record(update_stream)
+
+
+def get_non_spec_chunked_prefill_meta(attn_metadata):
+    fallback_meta = getattr(attn_metadata, "non_spec_prefill_fallback_meta", None)
+    if fallback_meta is None:
+        return None
+    return fallback_meta.chunk
 
 
 class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
