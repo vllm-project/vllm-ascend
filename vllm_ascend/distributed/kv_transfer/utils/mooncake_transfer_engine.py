@@ -41,27 +41,47 @@ class GlobalTE:
             self.is_register_buffer = True
 
     def reset(self):
-        """[snapshot] Drop the cached transfer engine so it can be re-initialized
-        on a new host IP after container snapshot restore (PD-disaggregated only).
-
-        The next get_transfer_engine() call will create a brand-new engine bound
-        to the new hostname. We best-effort release the old engine's RPC endpoint
-        first so the listening port can be reused.
-        """
+        """Drop cached TE. Caller must unregister_memory on old engine BEFORE this."""
         with self.transfer_engine_lock:
             old_engine = self.transfer_engine
             self.transfer_engine = None
         with self.register_buffer_lock:
             self.is_register_buffer = False
-        if old_engine is not None:
-            for closer in ("close", "shutdown", "deinitialize", "finalize", "stop"):
-                fn = getattr(old_engine, closer, None)
-                if callable(fn):
-                    with suppress(Exception):
-                        fn()
-                    break
-        # Drop the last reference; rely on GC/destructor to free native resources.
-        del old_engine
+
+        if old_engine is None:
+            return
+
+        # TransferEngine 没有可用的 close/finalize；必须把最后一个 Python 引用清掉，
+        # 并立刻触发析构，不能留给 GC 延后执行。
+        try:
+            del old_engine
+            import gc
+            gc.collect()
+        except Exception as e:
+            logger.warning("[snapshot] destroy old TransferEngine failed: %s", e)
+
+
+        # """[snapshot] Drop the cached transfer engine so it can be re-initialized
+        # on a new host IP after container snapshot restore (PD-disaggregated only).
+
+        # The next get_transfer_engine() call will create a brand-new engine bound
+        # to the new hostname. We best-effort release the old engine's RPC endpoint
+        # first so the listening port can be reused.
+        # """
+        # with self.transfer_engine_lock:
+        #     old_engine = self.transfer_engine
+        #     self.transfer_engine = None
+        # with self.register_buffer_lock:
+        #     self.is_register_buffer = False
+        # if old_engine is not None:
+        #     for closer in ("close", "shutdown", "deinitialize", "finalize", "stop"):
+        #         fn = getattr(old_engine, closer, None)
+        #         if callable(fn):
+        #             with suppress(Exception):
+        #                 fn()
+        #             break
+        # # Drop the last reference; rely on GC/destructor to free native resources.
+        # del old_engine
 
 
 global_te = GlobalTE()
