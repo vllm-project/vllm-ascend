@@ -245,6 +245,7 @@ class ExecuteModelState(NamedTuple):
 
     scheduler_output: "SchedulerOutput"
     logits: torch.Tensor
+    unpadded_logits_indices: torch.Tensor
     spec_decode_metadata: SpecDecodeMetadata | None
     spec_decode_common_attn_metadata: AscendCommonAttentionMetadata | None
     hidden_states: torch.Tensor
@@ -860,12 +861,14 @@ class NPUModelRunner(GPUModelRunner):
         num_scheduled_tokens: np.ndarray,
     ) -> tuple[
         torch.Tensor,
+        torch.Tensor,
         SpecDecodeMetadata | None,
         int,
     ]:
         """
         :return: tuple[
             logits_indices,
+            unpadded_logits_indices,
             spec_decode_metadata,
             total_num_scheduled_tokens,
         ]
@@ -1392,8 +1395,7 @@ class NPUModelRunner(GPUModelRunner):
             self.num_decode_draft_tokens.np[:num_reqs] = num_decode_draft_tokens
             self.num_decode_draft_tokens.np[num_reqs:].fill(-1)
             self.num_decode_draft_tokens.copy_to_gpu()
-        # save logits_indices for pcp spec decode usage
-        self.logits_indices = logits_indices
+        unpadded_logits_indices = logits_indices
 
         # Hot-Swap lora model
         if self.lora_config:
@@ -1418,6 +1420,7 @@ class NPUModelRunner(GPUModelRunner):
 
         return (
             logits_indices,
+            unpadded_logits_indices,
             spec_decode_metadata,
             total_num_scheduled_tokens,
         )
@@ -1762,6 +1765,7 @@ class NPUModelRunner(GPUModelRunner):
         aux_hidden_states: torch.Tensor = None,
         sample_hidden_states: torch.Tensor = None,
         target_model_batch_desc: BatchDescriptor = None,
+        main_logits_indices: torch.Tensor | None = None,
     ) -> list[list[int]] | None:
         if not self.drafter:
             # Speculative decoding is not enabled.
@@ -1998,6 +2002,7 @@ class NPUModelRunner(GPUModelRunner):
                 scheduler_output=scheduler_output,
                 num_scheduled_tokens=num_scheduled_tokens,
                 num_rejected_tokens_gpu=num_rejected_tokens_gpu,
+                main_logits_indices=main_logits_indices,
             )
             if get_pp_group().world_size > 1 and hasattr(
                 self.drafter, "take_last_draft_probs"
@@ -2186,6 +2191,7 @@ class NPUModelRunner(GPUModelRunner):
                 max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
                 (
                     logits_indices,
+                    unpadded_logits_indices,
                     spec_decode_metadata,
                     total_num_scheduled_tokens,
                 ) = self._prepare_inputs(
@@ -2475,6 +2481,7 @@ class NPUModelRunner(GPUModelRunner):
             self.execute_model_state = ExecuteModelState(
                 scheduler_output,
                 logits,
+                unpadded_logits_indices,
                 spec_decode_metadata,
                 spec_decode_common_attn_metadata,
                 hidden_states,
@@ -2520,6 +2527,7 @@ class NPUModelRunner(GPUModelRunner):
         (
             scheduler_output,
             logits,
+            unpadded_logits_indices,
             spec_decode_metadata,
             spec_decode_common_attn_metadata,
             hidden_states,
@@ -2569,6 +2577,7 @@ class NPUModelRunner(GPUModelRunner):
                 aux_hidden_states,
                 sample_hidden_states,
                 batch_desc,
+                main_logits_indices=unpadded_logits_indices,
             )
             self._copy_draft_token_ids_to_cpu(scheduler_output)
 

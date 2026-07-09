@@ -1611,7 +1611,7 @@ class TestEagleProposerPropose:
                             'token_indices_to_sample', 'common_attn_metadata', 'target_model_batch_desc',
                             'sampling_metadata', 'mm_embed_inputs', 'req_scheduled_tokens', 'long_seq_metadata',
                             'num_prefill_reqs', 'num_decode_reqs', 'scheduler_output', 'num_scheduled_tokens',
-                            'num_rejected_tokens_gpu'
+                            'num_rejected_tokens_gpu', 'main_logits_indices'
                         ]
 
 
@@ -3827,8 +3827,8 @@ class TestEagleProposerSetInputsFirstPass:
         self.runner.query_lens = torch.tensor(query_lens, dtype=torch.int32, device=self.device)
         self.runner.input_batch = MagicMock()
         self.runner.input_batch.req_ids = req_ids
-        # maybe not reasonable just to run test
-        self.runner.logits_indices = torch.arange(12, dtype=torch.int32, device=self.device)
+        main_logits_indices = torch.arange(12, dtype=torch.int32, device=self.device)
+        self.runner.logits_indices = main_logits_indices + 100
         self.runner.pcp_manager.pcp_use_hybrid_attn = False
 
         proposer, vllm_config = self._create_proposer(
@@ -3883,6 +3883,7 @@ class TestEagleProposerSetInputsFirstPass:
                 long_seq_metadata=long_seq_metadata,
                 num_prefill_reqs=num_prefill_reqs,
                 num_decode_reqs=num_decode_reqs,
+                main_logits_indices=main_logits_indices,
             )
         )
 

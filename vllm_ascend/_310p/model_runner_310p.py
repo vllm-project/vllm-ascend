@@ -248,7 +248,7 @@ class NPUModelRunner310(NPUModelRunner):
         self,
         scheduler_output: SchedulerOutput,
         num_scheduled_tokens: np.ndarray,
-    ) -> tuple[torch.Tensor, SpecDecodeMetadata | None, int]:
+    ) -> tuple[torch.Tensor, torch.Tensor, SpecDecodeMetadata | None, int]:
         """
         310P cannot use the Triton slot-mapping kernel or the generic NPU Add
         kernels used by the base runner for decode metadata. Keep those pieces
@@ -577,7 +577,7 @@ class NPUModelRunner310(NPUModelRunner):
             self.num_decode_draft_tokens.np[num_reqs:].fill(-1)
             self.num_decode_draft_tokens.copy_to_gpu()
 
-        self.logits_indices = logits_indices
+        unpadded_logits_indices = logits_indices
 
         if self.lora_config:
             assert np.sum(num_sampled_tokens) <= self.vllm_config.scheduler_config.max_num_batched_tokens
@@ -600,6 +600,7 @@ class NPUModelRunner310(NPUModelRunner):
 
         return (
             logits_indices,
+            unpadded_logits_indices,
             spec_decode_metadata,
             total_num_scheduled_tokens,
         )

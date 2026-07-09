@@ -751,6 +751,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         scheduler_output: SchedulerOutput = None,
         num_scheduled_tokens: int = 0,
         num_rejected_tokens_gpu: torch.Tensor | None = None,
+        main_logits_indices: torch.Tensor | None = None,
     ) -> torch.Tensor:
         batch_size = common_attn_metadata.batch_size()
 
@@ -782,6 +783,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             long_seq_metadata=long_seq_metadata,
             num_prefill_reqs=num_prefill_reqs,
             num_decode_reqs=num_decode_reqs,
+            main_logits_indices=main_logits_indices,
         )
         if self.pcp_size * self.dcp_size > 1:
             assert long_seq_args is not None
@@ -1397,6 +1399,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         long_seq_metadata=None,
         num_prefill_reqs=0,
         num_decode_reqs=0,
+        main_logits_indices: torch.Tensor | None = None,
     ) -> tuple[int, torch.Tensor, CommonAttentionMetadata, tuple[Any, Any] | None]:
         if not self.needs_extra_input_slots:
             # Default EAGLE pathway: no reshaping of input tensors needed.
@@ -1471,12 +1474,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 self.input_ids[:num_tokens].copy_(torch.cat([input_ids_d, input_ids_p], dim=0))
                 target_hidden_states = torch.cat([target_hidden_states_d, target_hidden_states_p], dim=0)
                 # 2. update sample_indices according to main model
+                if main_logits_indices is None:
+                    raise RuntimeError("main_logits_indices must be provided when PCP is enabled.")
                 if num_decode_reqs:
-                    token_indices_to_sample[:num_decode_reqs] = self.runner.logits_indices[
+                    token_indices_to_sample[:num_decode_reqs] = main_logits_indices[
                         token_indices_to_sample[:num_decode_reqs]
                     ]
                 if num_prefill_reqs:
-                    token_indices_to_sample[-num_prefill_reqs:] = self.runner.logits_indices[-num_prefill_reqs:]
+                    token_indices_to_sample[-num_prefill_reqs:] = main_logits_indices[-num_prefill_reqs:]
                     # 3. update attn_metadata params that may be influenced by pcp
                     cad.num_actual_tokens = num_tokens
                     cad.max_query_len = max(self.decode_threshold, max_query_len_p)
