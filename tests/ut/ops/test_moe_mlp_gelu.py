@@ -17,8 +17,8 @@ import torch_npu  # noqa: F401  -- registers torch.npu used by the module under 
 from torch.nn import functional as F
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
-from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ascend_forward_context import MoECommType
+from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.fused_moe import moe_mlp as moe_mlp_mod
 from vllm_ascend.ops.fused_moe.moe_mlp import quant_apply_mlp
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
@@ -42,22 +42,27 @@ def _patch_npu_stream():
 class _GeluPathBase(unittest.TestCase):
     """Common helpers for the GELU-path tests."""
 
-    def _common_w8a8_kwargs(self, *, activation, w1_scale_dtype=torch.float32,
-                            w2_scale_dtype=torch.float32,
-                            w1_scale_bias=None, w2_scale_bias=None,
-                            group_list_type=1, group_list=None,
-                            dynamic_scale=None):
+    def _common_w8a8_kwargs(
+        self,
+        *,
+        activation,
+        w1_scale_dtype=torch.float32,
+        w2_scale_dtype=torch.float32,
+        w1_scale_bias=None,
+        w2_scale_bias=None,
+        group_list_type=1,
+        group_list=None,
+        dynamic_scale=None,
+    ):
         return dict(
             hidden_states=torch.randn(1, 4),
             w1=torch.randn(1, 8, 4),
             w1_scale=[torch.randn(1, 8, dtype=w1_scale_dtype)],
             w2=torch.randn(1, 4, 1),
             w2_scale=[torch.randn(1, 4, dtype=w2_scale_dtype)],
-            group_list=group_list if group_list is not None
-            else torch.tensor([1], dtype=torch.int64),
+            group_list=group_list if group_list is not None else torch.tensor([1], dtype=torch.int64),
             group_list_type=group_list_type,
-            dynamic_scale=dynamic_scale if dynamic_scale is not None
-            else torch.randn(1, 1),
+            dynamic_scale=dynamic_scale if dynamic_scale is not None else torch.randn(1, 1),
             w1_scale_bias=w1_scale_bias,
             w2_scale_bias=w2_scale_bias,
             w1_offset=None,
@@ -118,13 +123,14 @@ class TestQuantApplyMlpGeluPath(_GeluPathBase):
         gmm2_out = torch.tensor([[9.0]])
         stream_patch, evt = _patch_npu_stream()
 
-        with stream_patch, \
-                patch("torch_npu.npu_grouped_matmul", return_value=[gate_up]) as mock_gmm1, \
-                patch("torch_npu.npu_dynamic_quant", side_effect=fake_dynamic_quant) as mock_dq, \
-                patch.object(DeviceOperator, "npu_grouped_matmul_gmm2", return_value=gmm2_out) as mock_gmm2, \
-                patch(f"{MOE_MLP}.dispose_tensor") as mock_dispose:
-            out, out_evt = quant_apply_mlp(**self._common_w8a8_kwargs(
-                activation=MoEActivation.GELU_TANH))
+        with (
+            stream_patch,
+            patch("torch_npu.npu_grouped_matmul", return_value=[gate_up]) as mock_gmm1,
+            patch("torch_npu.npu_dynamic_quant", side_effect=fake_dynamic_quant) as mock_dq,
+            patch.object(DeviceOperator, "npu_grouped_matmul_gmm2", return_value=gmm2_out) as mock_gmm2,
+            patch(f"{MOE_MLP}.dispose_tensor"),
+        ):
+            out, out_evt = quant_apply_mlp(**self._common_w8a8_kwargs(activation=MoEActivation.GELU_TANH))
 
         # GELU math applied with tanh approximation before requantization.
         self.assertTrue(torch.allclose(captured["x"], expected, atol=1e-6))
@@ -138,8 +144,7 @@ class TestQuantApplyMlpGeluPath(_GeluPathBase):
         mock_dq.assert_called_once()
         mock_gmm2.assert_called_once()
         # GMM2 received the requant per-token scale returned by dynamic_quant.
-        self.assertIs(mock_gmm2.call_args.kwargs["per_token_scale"],
-                      captured["scale"])
+        self.assertIs(mock_gmm2.call_args.kwargs["per_token_scale"], captured["scale"])
         # Return contract: (hidden_states, before_gmm2_evt).
         self.assertIs(out, gmm2_out)
         self.assertIs(out_evt, evt)
@@ -158,18 +163,17 @@ class TestQuantApplyMlpGeluPath(_GeluPathBase):
             return x, torch.ones(1, dtype=torch.float32)
 
         stream_patch, _ = _patch_npu_stream()
-        with stream_patch, \
-                patch("torch_npu.npu_grouped_matmul", return_value=[gate_up]), \
-                patch("torch_npu.npu_dynamic_quant", side_effect=fake_dynamic_quant), \
-                patch.object(DeviceOperator, "npu_grouped_matmul_gmm2",
-                             return_value=torch.zeros(1, 3)), \
-                patch(f"{MOE_MLP}.dispose_tensor"):
-            quant_apply_mlp(**self._common_w8a8_kwargs(
-                activation=MoEActivation.GELU))
+        with (
+            stream_patch,
+            patch("torch_npu.npu_grouped_matmul", return_value=[gate_up]),
+            patch("torch_npu.npu_dynamic_quant", side_effect=fake_dynamic_quant),
+            patch.object(DeviceOperator, "npu_grouped_matmul_gmm2", return_value=torch.zeros(1, 3)),
+            patch(f"{MOE_MLP}.dispose_tensor"),
+        ):
+            quant_apply_mlp(**self._common_w8a8_kwargs(activation=MoEActivation.GELU))
 
         # exact GELU (approximate='none') differs from tanh; ensure 'none' used.
-        self.assertFalse(torch.allclose(
-            captured["x"], F.gelu(gate, approximate="tanh") * up, atol=1e-6))
+        self.assertFalse(torch.allclose(captured["x"], F.gelu(gate, approximate="tanh") * up, atol=1e-6))
         self.assertTrue(torch.allclose(captured["x"], expected, atol=1e-6))
 
     def test_w4a16_gelu_uses_antiquant_path(self):
@@ -181,12 +185,13 @@ class TestQuantApplyMlpGeluPath(_GeluPathBase):
         gmm2_out = torch.tensor([[3.0]])
 
         stream_patch, evt = _patch_npu_stream()
-        with stream_patch, \
-                patch("torch_npu.npu_grouped_matmul",
-                      side_effect=[[gate_up], [gmm2_out]]) as mock_gmm, \
-                patch("torch_npu.npu_dynamic_quant") as mock_dq, \
-                patch.object(DeviceOperator, "npu_grouped_matmul_gmm2") as mock_gmm2, \
-                patch(f"{MOE_MLP}.dispose_tensor"):
+        with (
+            stream_patch,
+            patch("torch_npu.npu_grouped_matmul", side_effect=[[gate_up], [gmm2_out]]) as mock_gmm,
+            patch("torch_npu.npu_dynamic_quant") as mock_dq,
+            patch.object(DeviceOperator, "npu_grouped_matmul_gmm2") as mock_gmm2,
+            patch(f"{MOE_MLP}.dispose_tensor"),
+        ):
             kwargs = self._common_w8a8_kwargs(activation=MoEActivation.GELU_TANH)
             # Switch to the W4A16 antiquant layout.
             kwargs["w1_offset"] = torch.randn(1, 8, 4)
@@ -218,19 +223,23 @@ class TestQuantApplyMlpGeluPath(_GeluPathBase):
         w2_sb = [torch.zeros(1)]
 
         stream_patch, _ = _patch_npu_stream()
-        with stream_patch, \
-                patch("torch_npu.npu_grouped_matmul", return_value=[gate_up]) as mock_gmm1, \
-                patch("torch_npu.npu_dynamic_quant",
-                      side_effect=lambda x: (x, torch.ones(1))), \
-                patch.object(DeviceOperator, "npu_grouped_matmul_gmm2",
-                             return_value=torch.zeros(1, 2)), \
-                patch(f"{MOE_MLP}.dispose_tensor"), \
-                patch("torch.cat", wraps=torch.cat) as mock_cat:
-            quant_apply_mlp(**self._common_w8a8_kwargs(
-                activation=MoEActivation.GELU_TANH,
-                w1_scale_bias=w1_sb, w2_scale_bias=w2_sb,
-                group_list_type=0,
-                group_list=torch.tensor([0, 1], dtype=torch.int64)))
+        with (
+            stream_patch,
+            patch("torch_npu.npu_grouped_matmul", return_value=[gate_up]) as mock_gmm1,
+            patch("torch_npu.npu_dynamic_quant", side_effect=lambda x: (x, torch.ones(1))),
+            patch.object(DeviceOperator, "npu_grouped_matmul_gmm2", return_value=torch.zeros(1, 2)),
+            patch(f"{MOE_MLP}.dispose_tensor"),
+            patch("torch.cat", wraps=torch.cat) as mock_cat,
+        ):
+            quant_apply_mlp(
+                **self._common_w8a8_kwargs(
+                    activation=MoEActivation.GELU_TANH,
+                    w1_scale_bias=w1_sb,
+                    w2_scale_bias=w2_sb,
+                    group_list_type=0,
+                    group_list=torch.tensor([0, 1], dtype=torch.int64),
+                )
+            )
 
         gmm1_kwargs = mock_gmm1.call_args.kwargs
         # bias1 propagated to GMM1.
@@ -242,19 +251,20 @@ class TestQuantApplyMlpGeluPath(_GeluPathBase):
         """When w1_scale dtype != _output_dtype, it is cast before GMM1."""
         gate_up = torch.zeros(1, 8)
         stream_patch, _ = _patch_npu_stream()
-        with stream_patch, \
-                patch("torch_npu.npu_grouped_matmul", return_value=[gate_up]) as mock_gmm1, \
-                patch("torch_npu.npu_dynamic_quant",
-                      side_effect=lambda x: (x, torch.ones(1))), \
-                patch.object(DeviceOperator, "npu_grouped_matmul_gmm2",
-                             return_value=torch.zeros(1, 4)), \
-                patch(f"{MOE_MLP}.dispose_tensor"):
+        with (
+            stream_patch,
+            patch("torch_npu.npu_grouped_matmul", return_value=[gate_up]) as mock_gmm1,
+            patch("torch_npu.npu_dynamic_quant", side_effect=lambda x: (x, torch.ones(1))),
+            patch.object(DeviceOperator, "npu_grouped_matmul_gmm2", return_value=torch.zeros(1, 4)),
+            patch(f"{MOE_MLP}.dispose_tensor"),
+        ):
             # w1_scale fp32, w2_scale bf16 -> _output_dtype = bfloat16, so the
             # GELU path must cast w1_scale to bfloat16 before GMM1.
-            quant_apply_mlp(**self._common_w8a8_kwargs(
-                activation=MoEActivation.GELU_TANH,
-                w1_scale_dtype=torch.float32,
-                w2_scale_dtype=torch.bfloat16))
+            quant_apply_mlp(
+                **self._common_w8a8_kwargs(
+                    activation=MoEActivation.GELU_TANH, w1_scale_dtype=torch.float32, w2_scale_dtype=torch.bfloat16
+                )
+            )
 
         scale_arg = mock_gmm1.call_args.kwargs["scale"]
         self.assertEqual(scale_arg[0].dtype, torch.bfloat16)
@@ -263,16 +273,15 @@ class TestQuantApplyMlpGeluPath(_GeluPathBase):
         """GELU path must use torch.gelu, never the SwiGLU NPU op."""
         gate_up = torch.zeros(1, 8)
         stream_patch, _ = _patch_npu_stream()
-        with stream_patch, \
-                patch("torch_npu.npu_grouped_matmul", return_value=[gate_up]), \
-                patch("torch_npu.npu_dynamic_quant",
-                      side_effect=lambda x: (x, torch.ones(1))), \
-                patch.object(DeviceOperator, "npu_grouped_matmul_gmm2",
-                             return_value=torch.zeros(1, 4)), \
-                patch(f"{MOE_MLP}.dispose_tensor"), \
-                patch("torch_npu.npu_swiglu") as mock_swiglu:
-            quant_apply_mlp(**self._common_w8a8_kwargs(
-                activation=MoEActivation.GELU_TANH))
+        with (
+            stream_patch,
+            patch("torch_npu.npu_grouped_matmul", return_value=[gate_up]),
+            patch("torch_npu.npu_dynamic_quant", side_effect=lambda x: (x, torch.ones(1))),
+            patch.object(DeviceOperator, "npu_grouped_matmul_gmm2", return_value=torch.zeros(1, 4)),
+            patch(f"{MOE_MLP}.dispose_tensor"),
+            patch("torch_npu.npu_swiglu") as mock_swiglu,
+        ):
+            quant_apply_mlp(**self._common_w8a8_kwargs(activation=MoEActivation.GELU_TANH))
         mock_swiglu.assert_not_called()
 
     def test_fusion_on_gelu_skips_fused_swiglu_quant(self):
@@ -284,14 +293,14 @@ class TestQuantApplyMlpGeluPath(_GeluPathBase):
         stream_patch, _ = _patch_npu_stream()
         kwargs = self._common_w8a8_kwargs(activation=MoEActivation.GELU_TANH)
         kwargs["fusion"] = True  # -> use_gmm_swiglu_quant_fusion = True
-        with stream_patch, \
-                patch("torch_npu.npu_grouped_matmul", return_value=[gate_up]) as mock_gmm, \
-                patch("torch_npu.npu_dynamic_quant",
-                      side_effect=lambda x: (x, torch.ones(1))), \
-                patch.object(DeviceOperator, "npu_grouped_matmul_gmm2",
-                             return_value=torch.zeros(1, 4)), \
-                patch.object(DeviceOperator, "npu_grouped_matmul_swiglu_quant") as mock_fused, \
-                patch(f"{MOE_MLP}.dispose_tensor"):
+        with (
+            stream_patch,
+            patch("torch_npu.npu_grouped_matmul", return_value=[gate_up]) as mock_gmm,
+            patch("torch_npu.npu_dynamic_quant", side_effect=lambda x: (x, torch.ones(1))),
+            patch.object(DeviceOperator, "npu_grouped_matmul_gmm2", return_value=torch.zeros(1, 4)),
+            patch.object(DeviceOperator, "npu_grouped_matmul_swiglu_quant") as mock_fused,
+            patch(f"{MOE_MLP}.dispose_tensor"),
+        ):
             quant_apply_mlp(**kwargs)
         # Fused SwiGLU+quant op must NOT be called for GELU.
         mock_fused.assert_not_called()
@@ -306,17 +315,16 @@ class TestQuantApplyMlpGeluPath(_GeluPathBase):
         self._ctx_mock.moe_comm_type = MoECommType.MC2  # force is_mc2 True
         gate_up = torch.zeros(1, 8)
         stream_patch, _ = _patch_npu_stream()
-        with stream_patch, \
-                patch("torch_npu.npu_grouped_matmul", return_value=[gate_up]) as mock_gmm, \
-                patch("torch_npu.npu_dynamic_quant",
-                      side_effect=lambda x: (x, torch.ones(1))), \
-                patch.object(DeviceOperator, "npu_grouped_matmul_gmm2",
-                             return_value=torch.zeros(1, 4)), \
-                patch("torch.ops._C_ascend.npu_dequant_swiglu_quant", create=True) as mock_mc2_fused, \
-                patch.object(DeviceOperator, "npu_grouped_matmul_swiglu_quant") as mock_fused, \
-                patch(f"{MOE_MLP}.dispose_tensor"):
-            quant_apply_mlp(**self._common_w8a8_kwargs(
-                activation=MoEActivation.GELU_TANH))
+        with (
+            stream_patch,
+            patch("torch_npu.npu_grouped_matmul", return_value=[gate_up]) as mock_gmm,
+            patch("torch_npu.npu_dynamic_quant", side_effect=lambda x: (x, torch.ones(1))),
+            patch.object(DeviceOperator, "npu_grouped_matmul_gmm2", return_value=torch.zeros(1, 4)),
+            patch("torch.ops._C_ascend.npu_dequant_swiglu_quant", create=True) as mock_mc2_fused,
+            patch.object(DeviceOperator, "npu_grouped_matmul_swiglu_quant") as mock_fused,
+            patch(f"{MOE_MLP}.dispose_tensor"),
+        ):
+            quant_apply_mlp(**self._common_w8a8_kwargs(activation=MoEActivation.GELU_TANH))
         # MC2 fused SwiGLU op must NOT be called for GELU.
         mock_mc2_fused.assert_not_called()
         mock_fused.assert_not_called()
@@ -330,18 +338,18 @@ class TestQuantApplyMlpNoGeluImpact(unittest.TestCase):
     def _run_non_gelu(self, activation):
         gate_up = torch.zeros(1, 8)
         stream_patch, _ = _patch_npu_stream()
-        with stream_patch, \
-                patch(f"{MOE_MLP}._EXTRA_CTX") as mock_ctx, \
-                patch(f"{MOE_MLP}.get_weight_prefetch_method", return_value=None), \
-                patch(f"{MOE_MLP}.HAS_TRITON", False), \
-                patch("torch_npu.npu_grouped_matmul", return_value=[gate_up]) as mock_gmm, \
-                patch("torch_npu.npu_swiglu", return_value=torch.zeros(1, 4)) as mock_swiglu, \
-                patch("torch_npu.npu_dynamic_quant",
-                      side_effect=lambda x: (x, torch.ones(1))) as mock_dq, \
-                patch.object(DeviceOperator, "npu_grouped_matmul_gmm2",
-                             return_value=torch.zeros(1, 4)) as mock_gmm2, \
-                patch(f"{MOE_MLP}.dispose_tensor"), \
-                patch("torch.nn.functional.gelu") as mock_gelu:
+        with (
+            stream_patch,
+            patch(f"{MOE_MLP}._EXTRA_CTX") as mock_ctx,
+            patch(f"{MOE_MLP}.get_weight_prefetch_method", return_value=None),
+            patch(f"{MOE_MLP}.HAS_TRITON", False),
+            patch("torch_npu.npu_grouped_matmul", return_value=[gate_up]),
+            patch("torch_npu.npu_swiglu", return_value=torch.zeros(1, 4)) as mock_swiglu,
+            patch("torch_npu.npu_dynamic_quant", side_effect=lambda x: (x, torch.ones(1))),
+            patch.object(DeviceOperator, "npu_grouped_matmul_gmm2", return_value=torch.zeros(1, 4)),
+            patch(f"{MOE_MLP}.dispose_tensor"),
+            patch("torch.nn.functional.gelu") as mock_gelu,
+        ):
             mock_ctx.moe_comm_type = -1  # not MoECommType.MC2
             quant_apply_mlp(
                 hidden_states=torch.randn(1, 4),
@@ -407,15 +415,16 @@ class TestUnifiedApplyMlpThreadsGeluActivation(unittest.TestCase):
             dynamic_eplb=False,
         )
 
-        with patch(f"{MOE_MLP}.quant_apply_mlp", return_value=expected) as mock_quant, \
-                patch(f"{MOE_MLP}.unquant_apply_mlp") as mock_unquant:
+        with (
+            patch(f"{MOE_MLP}.quant_apply_mlp", return_value=expected) as mock_quant,
+            patch(f"{MOE_MLP}.unquant_apply_mlp") as mock_unquant,
+        ):
             out = moe_mlp_mod.unified_apply_mlp(mlp_compute_input=mlp_compute_input)
 
         self.assertIs(out, expected)
         mock_unquant.assert_not_called()
         mock_quant.assert_called_once()
-        self.assertEqual(mock_quant.call_args.kwargs["activation"],
-                         MoEActivation.GELU_TANH)
+        self.assertEqual(mock_quant.call_args.kwargs["activation"], MoEActivation.GELU_TANH)
 
 
 if __name__ == "__main__":

@@ -276,7 +276,12 @@ def quant_apply_mlp(
             # TODO w4a8 scene: dynamic acquisition of dtype in the future
             _output_dtype = torch.bfloat16
 
-        if use_w4a8_per_channel_gmm_swiglu and enable_custom_op() and activation != MoEActivation.SWIGLUSTEP and not is_gelu_activation:
+        if (
+            use_w4a8_per_channel_gmm_swiglu
+            and enable_custom_op()
+            and activation != MoEActivation.SWIGLUSTEP
+            and not is_gelu_activation
+        ):
             hidden_states, swiglu_out_scale = torch.ops._C_ascend.grouped_matmul_swiglu_quant_v2(
                 x=hidden_states,
                 weight=w1,
