@@ -32,6 +32,6 @@ class QuantType(Enum):
     W8A8MXFP = 3   # W and A are MXFP8
     W4A16 = 4      # W is INT4, A is BF16 or FP16
     W4A4MXFP = 5   # W and A are MXFP4
-    W4A8MXFP = 6   # W is MXFP4, A MXFP8
+    W4A8MXFP = 6   # W is MXFP4, A is MXFP8
     W8A8FP = 7     # W and A are FP8
     W4A16MXFP = 8  # W is MXFP4, A is BF16 or FP16

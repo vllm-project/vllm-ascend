@@ -275,7 +275,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
 
         assert expert_map is not None
         # NOTE: quant_mode differs by quant features:
-        # - A5 MXFP communication uses quant_mode=4 only for MXFP8 currently.
+        # - A5 MXFP communication uses quant_mode=4 only for W8A8MXFP currently.
         if comm_quant_mode is not None:
             quant_mode = comm_quant_mode
         elif quant_type == QuantType.W8A8MXFP:
