@@ -1,705 +1,219 @@
 # SOME DESCRIPTIVE TITLE.
-# Copyright (C) 2025, vllm-ascend team
-# This file is distributed under the same license as the vllm-ascend
-# package.
-# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+# Copyright (C) 2026, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
 #
 msgid ""
 msgstr ""
-"Project-Id-Version:  vllm-ascend\n"
+"Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-02 07:02+0000\n"
-"PO-Revision-Date: 2026-01-22 16:18+0800\n"
-"Last-Translator: Gemini\n"
-"Language: zh_CN\n"
+"POT-Creation-Date: 2026-07-08 14:01+0000\n"
+"PO-Revision-Date: 2026-07-08 14:01+0000\n"
+"Last-Translator: \n"
 "Language-Team: zh_CN <LL@li.org>\n"
-"Plural-Forms: nplurals=1; plural=0;\n"
+"Language: zh_CN\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"Generated-By: Babel 2.18.0\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: detect_po_changes.py\n"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:1
-msgid "Supported Models"
-msgstr "支持的模型"
+msgid "# Supported Models"
+msgstr "# 支持的模型"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:3
 msgid ""
 "Get the latest info here: <https://github.com/vllm-project/vllm-"
 "ascend/issues/1608>"
-msgstr "在此处获取最新信息：<https://github.com/vllm-project/vllm-ascend/issues/1608>"
+msgstr "获取最新信息：<https://github.com/vllm-project/vllm-ascend/issues/1608>"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:5
 msgid "**Legend Description**:"
-msgstr "**图例说明**:"
+msgstr "**图例说明**："
 
-#: ../../source/user_guide/support_matrix/supported_models.md:7
-msgid "✅ = Supported model/feature"
-msgstr "✅ = 支持的模型/功能"
-
-#: ../../source/user_guide/support_matrix/supported_models.md:8
-msgid "🔵 = Experimental supported model/feature"
-msgstr "🔵 = 实验性支持的模型/功能"
-
-#: ../../source/user_guide/support_matrix/supported_models.md:9
-msgid "❌ = Not supported model/feature"
-msgstr "❌ = 不支持的模型/功能"
-
-#: ../../source/user_guide/support_matrix/supported_models.md:10
-msgid "🟡 = Not tested or verified"
-msgstr "🟡 = 未测试或未验证"
-
-#: ../../source/user_guide/support_matrix/supported_models.md:12
-msgid "Text-Only Language Models"
-msgstr "纯文本语言模型"
-
-#: ../../source/user_guide/support_matrix/supported_models.md:14
-#: ../../source/user_guide/support_matrix/supported_models.md:81
-msgid "Generative Models"
-msgstr "生成模型"
-
-#: ../../source/user_guide/support_matrix/supported_models.md:16
-#: ../../source/user_guide/support_matrix/supported_models.md:83
-msgid "Core Supported Models"
-msgstr "核心支持的模型"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Model"
-msgstr "模型"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Support"
-msgstr "支持情况"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Note"
-msgstr "备注"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "BF16"
-msgstr "BF16"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Supported Hardware"
-msgstr "支持的硬件"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "W8A8"
-msgstr "W8A8"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Chunked Prefill"
-msgstr "分块预填充"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Automatic Prefix Cache"
-msgstr "自动前缀缓存"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "LoRA"
-msgstr "LoRA"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Speculative Decoding"
-msgstr "推测解码"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Async Scheduling"
-msgstr "异步调度"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Tensor Parallel"
-msgstr "张量并行"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Pipeline Parallel"
-msgstr "流水线并行"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Expert Parallel"
-msgstr "专家并行"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Data Parallel"
-msgstr "数据并行"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Prefill-decode Disaggregation"
-msgstr "预填充-解码分离"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Piecewise AclGraph"
-msgstr "分段 AclGraph"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Fullgraph AclGraph"
-msgstr "全图 AclGraph"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "max-model-len"
-msgstr "最大模型长度"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "MLP Weight Prefetch"
-msgstr "MLP 权重预取"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Doc"
-msgstr "文档"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "DeepSeek V4-Flash"
-msgstr "DeepSeek V4-Flash"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "✅"
-msgstr "✅"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "A2/A3"
-msgstr "A2/A3"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "1M"
-msgstr "1M"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "[DeepSeek-V4](../../tutorials/models/DeepSeek-V4-Flash.md)"
-msgstr "[DeepSeek-V4](../../tutorials/models/DeepSeek-V4-Flash.md)"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "DeepSeek V4-Pro"
-msgstr "DeepSeek V4-Pro"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "[DeepSeek-V4](../../tutorials/models/DeepSeek-V4-Pro.md)"
-msgstr "[DeepSeek-V4](../../tutorials/models/DeepSeek-V4-Pro.md)"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "DeepSeek V3/3.1"
-msgstr "DeepSeek V3/3.1"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "240k"
-msgstr "240k"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "[DeepSeek-V3.1](../../tutorials/models/DeepSeek-V3.1.md)"
-msgstr "[DeepSeek-V3.1](../../tutorials/models/DeepSeek-V3.1.md)"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "DeepSeek V3.2"
-msgstr "DeepSeek V3.2"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "🔵"
-msgstr "🔵"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "160k"
-msgstr "160k"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "[DeepSeek-V3.2](../../tutorials/models/DeepSeek-V3.2.md)"
-msgstr "[DeepSeek-V3.2](../../tutorials/models/DeepSeek-V3.2.md)"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "DeepSeek R1"
-msgstr "DeepSeek R1"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "128k"
-msgstr "128k"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "[DeepSeek-R1](../../tutorials/models/DeepSeek-R1.md)"
-msgstr "[DeepSeek-R1](../../tutorials/models/DeepSeek-R1.md)"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Qwen3-Dense"
-msgstr "Qwen3-Dense"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "[Qwen3-Dense](../../tutorials/models/Qwen3-Dense.md)"
-msgstr "[Qwen3-Dense](../../tutorials/models/Qwen3-Dense.md)"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Qwen3-30B-A3B"
-msgstr "Qwen3-30B-A3B"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "[Qwen3-30B-A3B](../../tutorials/models/Qwen3-30B-A3B.md)"
-msgstr "[Qwen3-30B-A3B](../../tutorials/models/Qwen3-30B-A3B.md)"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Qwen3-Coder-30B-A3B"
-msgstr "Qwen3-Coder-30B-A3B"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "[Qwen3-Coder-30B-A3B](../../tutorials/models/Qwen3-Coder-30B-A3B.md)"
-msgstr "[Qwen3-Coder-30B-A3B](../../tutorials/models/Qwen3-Coder-30B-A3B.md)"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Qwen3-235B-A22B"
-msgstr "Qwen3-235B-A22B"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "256k"
-msgstr "256k"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "[Qwen3-235B-A22B](../../tutorials/models/Qwen3-235B-A22B.md)"
-msgstr "[Qwen3-235B-A22B](../../tutorials/models/Qwen3-235B-A22B.md)"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Qwen3-Next"
-msgstr "Qwen3-Next"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "[Qwen3-Next](../../tutorials/models/Qwen3-Next.md)"
-msgstr "[Qwen3-Next](../../tutorials/models/Qwen3-Next.md)"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "GLM-4.x"
-msgstr "GLM-4.x"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "198k"
-msgstr "198k"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "[GLM-4.x](../../tutorials/models/GLM4.x.md)"
-msgstr "[GLM-4.x](../../tutorials/models/GLM4.x.md)"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "GLM-5/5.1"
-msgstr "GLM-5/5.1"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "200k"
-msgstr "200k"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "[GLM-5](../../tutorials/models/GLM5.md)"
-msgstr "[GLM-5](../../tutorials/models/GLM5.md)"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "GLM-5.2"
-msgstr "GLM-5.2"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "[GLM-5](../../tutorials/models/GLM5.2.md)"
-msgstr "[GLM-5](../../tutorials/models/GLM5.2.md)"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Kimi-K2-Thinking"
-msgstr "Kimi-K2-Thinking"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "[Kimi-K2-Thinking](../../tutorials/models/Kimi-K2-Thinking.md)"
-msgstr "[Kimi-K2-Thinking](../../tutorials/models/Kimi-K2-Thinking.md)"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "DeepseekOCR2"
-msgstr "DeepseekOCR2"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "[DeepSeekOCR2](../../tutorials/models/DeepSeekOCR2.md)"
-msgstr "[DeepSeekOCR2](../../tutorials/models/DeepSeekOCR2.md)"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "MiniMax-M2.5/2.7"
-msgstr "MiniMax-M2.5/2.7"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "A2/A3/Ascend950 (Ascend950 experimental)"
-msgstr "A2/A3/Ascend950 (Ascend950 实验性)"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "❌"
-msgstr "❌"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "🟡"
-msgstr "🟡"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "[MiniMax-M2](../../tutorials/models/MiniMax-M2.md)"
-msgstr "[MiniMax-M2](../../tutorials/models/MiniMax-M2.md)"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Qwen2.5-Math-RM-72B"
-msgstr "Qwen2.5-Math-RM-72B"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "vllm-rm, tensor_parallel_size=4, max_model_len=4096"
-msgstr "vllm-rm, tensor_parallel_size=4, max_model_len=4096"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "A2"
-msgstr "A2"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "4096"
-msgstr "4096"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "[Qwen2.5-Math-RM-72B](../../tutorials/models/Qwen2.5-Math-RM-72B.md)"
-msgstr "[Qwen2.5-Math-RM-72B](../../tutorials/models/Qwen2.5-Math-RM-72B.md)"
-
-#: ../../source/user_guide/support_matrix/supported_models.md:38
-#: ../../source/user_guide/support_matrix/supported_models.md:95
-msgid "Extended Compatible Models"
-msgstr "扩展兼容模型"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "DeepSeek Distill (Qwen/Llama)"
-msgstr "DeepSeek Distill (Qwen/Llama)"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Qwen3-based"
-msgstr "基于 Qwen3"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Qwen2"
-msgstr "Qwen2"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Qwen2.5"
-msgstr "Qwen2.5"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Qwen2-based"
-msgstr "基于 Qwen2"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "QwQ-32B"
-msgstr "QwQ-32B"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Llama2/3/3.1/3.2"
-msgstr "Llama2/3/3.1/3.2"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Internlm"
-msgstr "Internlm"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "[#1962](https://github.com/vllm-project/vllm-ascend/issues/1962)"
-msgstr "[#1962](https://github.com/vllm-project/vllm-ascend/issues/1962)"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Baichuan"
-msgstr "Baichuan"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Baichuan2"
-msgstr "Baichuan2"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Phi-4-mini"
-msgstr "Phi-4-mini"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "MiniCPM"
-msgstr "MiniCPM"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "MiniCPM3"
-msgstr "MiniCPM3"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Ernie4.5"
-msgstr "Ernie4.5"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Ernie4.5-Moe"
-msgstr "Ernie4.5-Moe"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Gemma-2"
-msgstr "Gemma-2"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Gemma-3"
-msgstr "Gemma-3"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Phi-3/4"
-msgstr "Phi-3/4"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Mistral/Mistral-Instruct"
-msgstr "Mistral/Mistral-Instruct"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Hy3-preview"
-msgstr "Hy3-preview"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "A3"
-msgstr "A3"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "DeepSeek V2.5"
-msgstr "DeepSeek V2.5"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Need test"
-msgstr "需要测试"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Mllama"
-msgstr "Mllama"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "MiniMax-Text"
-msgstr "MiniMax-Text"
-
-#: ../../source/user_guide/support_matrix/supported_models.md:66
-msgid "Pooling Models"
-msgstr "池化模型"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Qwen3-Embedding"
-msgstr "Qwen3-Embedding"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "[Qwen3_embedding](../../tutorials/models/Qwen3_embedding.md)"
-msgstr "[Qwen3_embedding](../../tutorials/models/Qwen3_embedding.md)"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Qwen3-VL-Embedding"
-msgstr "Qwen3-VL-Embedding"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "[Qwen3-VL-Embedding](../../tutorials/models/Qwen3-VL-Embedding.md)"
-msgstr "[Qwen3-VL-Embedding](../../tutorials/models/Qwen3-VL-Embedding.md)"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Qwen3-Reranker"
-msgstr "Qwen3-Reranker"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "[Qwen3_reranker](../../tutorials/models/Qwen3_reranker.md)"
-msgstr "[Qwen3_reranker](../../tutorials/models/Qwen3_reranker.md)"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Qwen3-VL-Reranker"
-msgstr "Qwen3-VL-Reranker"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "[Qwen3-VL-Reranker](../../tutorials/models/Qwen3-VL-Reranker.md)"
-msgstr "[Qwen3-VL-Reranker](../../tutorials/models/Qwen3-VL-Reranker.md)"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Molmo"
-msgstr "Molmo"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "[1942](https://github.com/vllm-project/vllm-ascend/issues/1942)"
-msgstr "[1942](https://github.com/vllm-project/vllm-ascend/issues/1942)"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "XLM-RoBERTa-based"
-msgstr "基于XLM-RoBERTa"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Bert"
-msgstr "Bert"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Reward Model, gsm8k_correctness accuracy=0.80"
-msgstr "奖励模型，gsm8k_correctness 准确率=0.80"
-
-#: ../../source/user_guide/support_matrix/supported_models.md:79
-msgid "Multimodal Language Models"
-msgstr "多模态语言模型"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Qwen3-VL"
-msgstr "Qwen3-VL"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "[Qwen-VL-Dense](../../tutorials/models/Qwen-VL-Dense.md)"
-msgstr "[Qwen-VL-Dense](../../tutorials/models/Qwen-VL-Dense.md)"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Qwen3-VL-MOE"
-msgstr "Qwen3-VL-MOE"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "[Qwen3-VL-MOE](../../tutorials/models/Qwen3-VL-235B-A22B-Instruct.md)"
-msgstr "[Qwen3-VL-MOE](../../tutorials/models/Qwen3-VL-235B-A22B-Instruct.md)"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Qwen3.5-397B-A17B"
-msgstr "Qwen3.5-397B-A17B"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "1010000"
-msgstr "1010000"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "[Qwen3.5-397B-A17B](../../tutorials/models/Qwen3.5-397B-A17B.md)"
-msgstr "[Qwen3.5-397B-A17B](../../tutorials/models/Qwen3.5-397B-A17B.md)"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Qwen3.5-27B / Qwen3.6-27B"
-msgstr "Qwen3.5-27B / Qwen3.6-27B"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "262144"
-msgstr "262144"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
 msgid ""
-"[Qwen3.5-27B / Qwen3.6-27B](../../tutorials/models/Qwen3.5-27B-"
-"Qwen3.6-27B.md)"
+"- ✅ = Supported model/feature\n"
+"- 🔵 = Experimental supported model/feature\n"
+"- ❌ = Not supported model/feature\n"
+"- 🟡 = Not tested or verified"
 msgstr ""
-"[Qwen3.5-27B / Qwen3.6-27B](../../tutorials/models/Qwen3.5-27B-"
-"Qwen3.6-27B.md)"
+"- ✅ = 支持的模型/功能\n"
+"- 🔵 = 实验性支持的模型/功能\n"
+"- ❌ = 不支持的模型/功能\n"
+"- 🟡 = 未经测试或验证"
 
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Qwen3.6-35B-A3B"
-msgstr "Qwen3.6-35B-A3B"
+msgid "## Text-Only Language Models"
+msgstr "## 纯文本语言模型"
 
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "[Qwen3.6-35B-A3B](../../tutorials/models/Qwen3.6-35B-A3B.md)"
-msgstr "[Qwen3.6-35B-A3B](../../tutorials/models/Qwen3.6-35B-A3B.md)"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Qwen3-Omni-30B-A3B-Thinking"
-msgstr "Qwen3-Omni-30B-A3B-Thinking"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
 msgid ""
-"[Qwen3-Omni-30B-A3B-Thinking](../../tutorials/models/Qwen3-Omni-30B-A3B-"
-"Thinking.md)"
+"| Model                         | Support   | Note                                                                 | BF16 | Supported Hardware | W8A8 | Chunked Prefill | Automatic Prefix Cache | LoRA | Speculative Decoding | Async Scheduling | Tensor Parallel | Pipeline Parallel | Expert Parallel | Data Parallel | Prefill-decode Disaggregation | Piecewise AclGraph | Fullgraph AclGraph | max-model-len | MLP Weight Prefetch | Doc |\n"
+"|-------------------------------|-----------|----------------------------------------------------------------------|------|--------------------|------|-----------------|------------------------|------|----------------------|------------------|-----------------|-------------------|-----------------|---------------|-------------------------------|--------------------|--------------------|---------------|---------------------|-----|\n"
+"| DeepSeek V4-Flash               | ✅        |                                                                      | ✅ | A2/A3 | ✅ | ✅ |✅|| ✅ |✅| ✅ || ✅ | ✅ | ✅ || ✅ | 1M || [DeepSeek-V4](../../tutorials/models/DeepSeek-V4-Flash.md) |\n"
+"| DeepSeek V4-Pro               | ✅        |                                                                      | ✅ | A2/A3 | ✅ | ✅ |✅|| ✅ |✅| ✅ || ✅ | ✅ | ✅ || ✅ | 1M || [DeepSeek-V4](../../tutorials/models/DeepSeek-V4-Pro.md) |\n"
+"| DeepSeek V3/3.1               | ✅        |                                                                      | ✅ | A2/A3 | ✅ | ✅ | ✅ || ✅ || ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 240k || [DeepSeek-V3.1](../../tutorials/models/DeepSeek-V3.1.md) |\n"
+"| DeepSeek V3.2                 | 🔵        |                                                                      | ✅ | A2/A3 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 160k | ✅ | [DeepSeek-V3.2](../../tutorials/models/DeepSeek-V3.2.md) |\n"
+"| DeepSeek R1                   | ✅        |                                                                      | ✅ | A2/A3 | ✅ | ✅ | ✅ || ✅ || ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 128k || [DeepSeek-R1](../../tutorials/models/DeepSeek-R1.md) |\n"
+"| Qwen3-Dense                         | ✅        |                                                                      | ✅ | A2/A3 | ✅ | ✅ | ✅ ||| ✅ | ✅ ||| ✅ || ✅ | ✅ | 128k | ✅ | [Qwen3-Dense](../../tutorials/models/Qwen3-Dense.md) |\n"
+"| Qwen3-30B-A3B                 | ✅        |                                                                      | ✅ | A2/A3 | ✅ | ✅ | ✅ || ✅ | ✅ | ✅ || ✅ | ✅ || ✅ | ✅ ||| [Qwen3-30B-A3B](../../tutorials/models/Qwen3-30B-A3B.md) |\n"
+"| Qwen3-Coder-30B-A3B           | ✅        |                                                                      | ✅ | A2/A3 | ✅ | ✅ | ✅ || ✅ | ✅ | ✅ || ✅ | ✅ || ✅ | ✅ ||| [Qwen3-Coder-30B-A3B](../../tutorials/models/Qwen3-Coder-30B-A3B.md) |\n"
+"| Qwen3-235B-A22B                    | ✅        |                                                                      | ✅ | A2/A3 | ✅ | ✅ | ✅ ||| ✅ | ✅ || ✅ | ✅ | ✅ | ✅ | ✅ | 256k || [Qwen3-235B-A22B](../../tutorials/models/Qwen3-235B-A22B.md) |\n"
+"| Qwen3-Next                    | 🔵        |                                                                      | ✅ | A2/A3 | ✅ |||||| ✅ ||| ✅ || ✅ | ✅ ||| [Qwen3-Next](../../tutorials/models/Qwen3-Next.md) |\n"
+"| GLM-4.x                       | 🔵        |                                                                      || A2/A3 |✅|✅|✅||✅|✅|✅||✅|✅|✅|✅|✅|198k||[GLM-4.x](../../tutorials/models/GLM4.x.md)|\n"
+"| GLM-5/5.1                         | 🔵        |                                                                      | ✅ | A2/A3 | ✅ | ✅ | ✅ || ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 200k || [GLM-5](../../tutorials/models/GLM5.md) |\n"
+"| GLM-5.2                         | 🔵        |                                                                      | ✅ | A2/A3 | ✅ | ✅ | ✅ || ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 200k || [GLM-5](../../tutorials/models/GLM5.2.md) |\n"
+"| Kimi-K2-Thinking              | 🔵        |                                                                      || A2/A3 |||||||||||||||| [Kimi-K2-Thinking](../../tutorials/models/Kimi-K2-Thinking.md) |\n"
+"| DeepseekOCR2                  | ✅        |                                                                      | ✅ | A2/A3 ||✅||||✅|||||||||| [DeepSeekOCR2](../../tutorials/models/DeepSeekOCR2.md) |\n"
+"| MiniMax-M2.5/2.7                  | ✅        |                                                                      | ✅ | A2/A3/Ascend950 (Ascend950 experimental) |✅|✅|✅|❌|✅|✅|✅|🟡|✅|✅|✅|🟡|✅|200k|🟡| [MiniMax-M2](../../tutorials/models/MiniMax-M2.md) |\n"
+"| Qwen2.5-Math-RM-72B           | ✅        | vllm-rm, tensor_parallel_size=4, max_model_len=4096 | ✅ | A2 | ✅ | 🟡 | 🟡 | ❌ | 🟡 | ✅ | ✅ | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 4096 | 🟡 | [Qwen2.5-Math-RM-72B](../../tutorials/models/Qwen2.5-Math-RM-72B.md) |"
 msgstr ""
-"[Qwen3-Omni-30B-A3B-Thinking](../../tutorials/models/Qwen3-Omni-30B-A3B-"
-"Thinking.md)"
+"| 模型                         | 支持状态   | 备注                                                                 | BF16 | 支持的硬件 | W8A8 | Chunked Prefill | Automatic Prefix Cache | LoRA | Speculative Decoding | Async Scheduling | Tensor Parallel | Pipeline Parallel | Expert Parallel | Data Parallel | Prefill-decode Disaggregation | Piecewise AclGraph | Fullgraph AclGraph | max-model-len | MLP Weight Prefetch | 文档 |\n"
+"|-------------------------------|-----------|----------------------------------------------------------------------|------|--------------------|------|-----------------|------------------------|------|----------------------|------------------|-----------------|-------------------|-----------------|---------------|-------------------------------|--------------------|--------------------|---------------|---------------------|-----|\n"
+"| DeepSeek V4-Flash               | ✅        |                                                                      | ✅ | A2/A3 | ✅ | ✅ |✅|| ✅ |✅| ✅ || ✅ | ✅ | ✅ || ✅ | 1M || [DeepSeek-V4](../../tutorials/models/DeepSeek-V4-Flash.md) |\n"
+"| DeepSeek V4-Pro               | ✅        |                                                                      | ✅ | A2/A3 | ✅ | ✅ |✅|| ✅ |✅| ✅ || ✅ | ✅ | ✅ || ✅ | 1M || [DeepSeek-V4](../../tutorials/models/DeepSeek-V4-Pro.md) |\n"
+"| DeepSeek V3/3.1               | ✅        |                                                                      | ✅ | A2/A3 | ✅ | ✅ | ✅ || ✅ || ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 240k || [DeepSeek-V3.1](../../tutorials/models/DeepSeek-V3.1.md) |\n"
+"| DeepSeek V3.2                 | 🔵        |                                                                      | ✅ | A2/A3 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 160k | ✅ | [DeepSeek-V3.2](../../tutorials/models/DeepSeek-V3.2.md) |\n"
+"| DeepSeek R1                   | ✅        |                                                                      | ✅ | A2/A3 | ✅ | ✅ | ✅ || ✅ || ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 128k || [DeepSeek-R1](../../tutorials/models/DeepSeek-R1.md) |\n"
+"| Qwen3-Dense                         | ✅        |                                                                      | ✅ | A2/A3 | ✅ | ✅ | ✅ ||| ✅ | ✅ ||| ✅ || ✅ | ✅ | 128k | ✅ | [Qwen3-Dense](../../tutorials/models/Qwen3-Dense.md) |\n"
+"| Qwen3-30B-A3B                 | ✅        |                                                                      | ✅ | A2/A3 | ✅ | ✅ | ✅ || ✅ | ✅ | ✅ || ✅ | ✅ || ✅ | ✅ ||| [Qwen3-30B-A3B](../../tutorials/models/Qwen3-30B-A3B.md) |\n"
+"| Qwen3-Coder-30B-A3B           | ✅        |                                                                      | ✅ | A2/A3 | ✅ | ✅ | ✅ || ✅ | ✅ | ✅ || ✅ | ✅ || ✅ | ✅ ||| [Qwen3-Coder-30B-A3B](../../tutorials/models/Qwen3-Coder-30B-A3B.md) |\n"
+"| Qwen3-235B-A22B                    | ✅        |                                                                      | ✅ | A2/A3 | ✅ | ✅ | ✅ ||| ✅ | ✅ || ✅ | ✅ | ✅ | ✅ | ✅ | 256k || [Qwen3-235B-A22B](../../tutorials/models/Qwen3-235B-A22B.md) |\n"
+"| Qwen3-Next                    | 🔵        |                                                                      | ✅ | A2/A3 | ✅ |||||| ✅ ||| ✅ || ✅ | ✅ ||| [Qwen3-Next](../../tutorials/models/Qwen3-Next.md) |\n"
+"| GLM-4.x                       | 🔵        |                                                                      || A2/A3 |✅|✅|✅||✅|✅|✅||✅|✅|✅|✅|✅|198k||[GLM-4.x](../../tutorials/models/GLM4.x.md)|\n"
+"| GLM-5/5.1                         | 🔵        |                                                                      | ✅ | A2/A3 | ✅ | ✅ | ✅ || ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 200k || [GLM-5](../../tutorials/models/GLM5.md) |\n"
+"| GLM-5.2                         | 🔵        |                                                                      | ✅ | A2/A3 | ✅ | ✅ | ✅ || ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 200k || [GLM-5](../../tutorials/models/GLM5.2.md) |\n"
+"| Kimi-K2-Thinking              | 🔵        |                                                                      || A2/A3 |||||||||||||||| [Kimi-K2-Thinking](../../tutorials/models/Kimi-K2-Thinking.md) |\n"
+"| DeepseekOCR2                  | ✅        |                                                                      | ✅ | A2/A3 ||✅||||✅|||||||||| [DeepSeekOCR2](../../tutorials/models/DeepSeekOCR2.md) |\n"
+"| MiniMax-M2.5/2.7                  | ✅        |                                                                      | ✅ | A2/A3/Ascend950 (Ascend950 experimental) |✅|✅|✅|❌|✅|✅|✅|🟡|✅|✅|✅|🟡|✅|200k|🟡| [MiniMax-M2](../../tutorials/models/MiniMax-M2.md) |\n"
+"| Qwen2.5-Math-RM-72B           | ✅        | vllm-rm, tensor_parallel_size=4, max_model_len=4096 | ✅ | A2 | ✅ | 🟡 | 🟡 | ❌ | 🟡 | ✅ | ✅ | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 4096 | 🟡 | [Qwen2.5-Math-RM-72B](../../tutorials/models/Qwen2.5-Math-RM-72B.md) |"
 
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Kimi-K2.5/Kimi-K2.6"
-msgstr "Kimi-K2.5/Kimi-K2.6"
+msgid ""
+"| Model                         | Support   | Note                                                                 | Supported Hardware |\n"
+"|-------------------------------|-----------|----------------------------------------------------------------------|--------------------|\n"
+"| DeepSeek Distill (Qwen/Llama) | ✅        |                                                                      | A2/A3 |\n"
+"| Qwen3-based                   | ✅        |                                                                      | A2/A3 |\n"
+"| Qwen2                         | ✅        |                                                                      | A2/A3 |\n"
+"| Qwen2.5                       | ✅        |                                                                      | A2/A3 |\n"
+"| Qwen2-based                   | ✅        |                                                                      | A2/A3 |\n"
+"| QwQ-32B                       | ✅        |                                                                      | A2/A3 |\n"
+"| Llama2/3/3.1/3.2              | ✅        |                                                                      | A2/A3 |\n"
+"| Internlm                      | 🔵        | [#1962](https://github.com/vllm-project/vllm-ascend/issues/1962)     | A2/A3 |\n"
+"| Baichuan                      | 🔵        |                                                                      | A2/A3 |\n"
+"| Baichuan2                     | 🔵        |                                                                      | A2/A3 |\n"
+"| Phi-4-mini                    | 🔵        |                                                                      | A2/A3 |\n"
+"| MiniCPM                       | 🔵        |                                                                      | A2/A3 |\n"
+"| MiniCPM3                      | 🔵        |                                                                      | A2/A3 |\n"
+"| Ernie4.5                      | 🔵        |                                                                      | A2/A3 |\n"
+"| Ernie4.5-Moe                  | 🔵        |                                                                      | A2/A3 |\n"
+"| Gemma-2                       | 🔵        |                                                                      | A2/A3 |\n"
+"| Gemma-3                       | 🔵        |                                                                      | A2/A3 |\n"
+"| Phi-3/4                       | 🔵        |                                                                      | A2/A3 |\n"
+"| Mistral/Mistral-Instruct      | 🔵        |                                                                      | A2/A3 |\n"
+"| Hy3-preview                   | 🔵        |                                                                      | A3    |\n"
+"| DeepSeek V2.5                 | 🟡        | Need test                                                            |       |\n"
+"| Mllama                        | 🟡        | Need test                                                            |       |\n"
+"| MiniMax-Text                  | 🟡        | Need test                                                            |       |"
+msgstr ""
 
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "[Kimi-K2.5](../../tutorials/models/Kimi-K2.5.md)/[Kimi-K2.6](../../tutorials/models/Kimi-K2.6.md)"
-msgstr "[Kimi-K2.5](../../tutorials/models/Kimi-K2.5.md)/[Kimi-K2.6](../../tutorials/models/Kimi-K2.6.md)"
+msgid "### Pooling Models"
+msgstr "### 池化模型"
 
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Qwen2-VL"
-msgstr "Qwen2-VL"
+msgid ""
+"| Model                         | Support   | Note                                                                 |    Supported Hardware    |  Doc |\n"
+"|-------------------------------|-----------|----------------------------------------------------------------------|--------------------------|------|\n"
+"| Qwen3-Embedding               | 🔵        |                                                                      |         A2/A3            | [Qwen3_embedding](../../tutorials/models/Qwen3_embedding.md)|\n"
+"| Qwen3-VL-Embedding            | 🔵        |                                                                      |         A2/A3            | [Qwen3-VL-Embedding](../../tutorials/models/Qwen3-VL-Embedding.md)|\n"
+"| Qwen3-Reranker                | 🔵        |                                                                      |         A2/A3            | [Qwen3_reranker](../../tutorials/models/Qwen3_reranker.md)|\n"
+"| Qwen3-VL-Reranker             | 🔵        |                                                                      |         A2/A3            | [Qwen3-VL-Reranker](../../tutorials/models/Qwen3-VL-Reranker.md)|\n"
+"| Molmo                         | 🔵        | [1942](https://github.com/vllm-project/vllm-ascend/issues/1942)      |         A2/A3            |      |\n"
+"| XLM-RoBERTa-based             | 🔵        |                                                                      |         A2/A3            |      |\n"
+"| Bert                          | 🔵        |                                                                      |         A2/A3            |      |\n"
+"| Qwen2.5-Math-RM-72B           | ✅        | Reward Model, gsm8k_correctness accuracy=0.80 | A2 | [Qwen2.5-Math-RM-72B](../../tutorials/models/Qwen2.5-Math-RM-72B.md) |"
+msgstr ""
+"| 模型                           | 支持状态 | 备注                                                                 |    支持的硬件    |  文档 |\n"
+"|-------------------------------|-----------|----------------------------------------------------------------------|--------------------------|------|\n"
+"| Qwen3-Embedding               | 🔵        |                                                                      |         A2/A3            | [Qwen3_Embedding](../../tutorials/models/Qwen3_embedding.md)|\n"
+"| Qwen3-VL-Embedding            | 🔵        |                                                                      |         A2/A3            | [Qwen3-VL-Embedding](../../tutorials/models/Qwen3-VL-Embedding.md)|\n"
+"| Qwen3-Reranker                | 🔵        |                                                                      |         A2/A3            | [Qwen3_Reranker](../../tutorials/models/Qwen3_reranker.md)|\n"
+"| Qwen3-VL-Reranker             | 🔵        |                                                                      |         A2/A3            | [Qwen3-VL-Reranker](../../tutorials/models/Qwen3-VL-Reranker.md)|\n"
+"| Molmo                         | 🔵        | [1942](https://github.com/vllm-project/vllm-ascend/issues/1942)      |         A2/A3            |      |\n"
+"| XLM-RoBERTa-based             | 🔵        |                                                                      |         A2/A3            |      |\n"
+"| Bert                          | 🔵        |                                                                      |         A2/A3            |      |\n"
+"| Qwen2.5-Math-RM-72B           | ✅        | 奖励模型，gsm8k_correctness 准确率=0.80 | A2 | [Qwen2.5-Math-RM-72B](../../tutorials/models/Qwen2.5-Math-RM-72B.md) |"
 
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Qwen3-Omni"
-msgstr "Qwen3-Omni"
+msgid "## Multimodal Language Models"
+msgstr "## 多模态语言模型"
 
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "QVQ"
-msgstr "QVQ"
+msgid "### Generative Models"
+msgstr "### 生成模型"
 
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Qwen2-Audio"
-msgstr "Qwen2-Audio"
+msgid "#### Core Supported Models"
+msgstr "#### 核心支持的模型"
 
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Aria"
-msgstr "Aria"
+msgid ""
+"| Model                          | Support       | Note                                                                 | BF16 | Supported Hardware | W8A8 | Chunked Prefill | Automatic Prefix Cache | LoRA | Speculative Decoding | Async Scheduling | Tensor Parallel | Pipeline Parallel | Expert Parallel | Data Parallel | Prefill-decode Disaggregation | Piecewise AclGraph | Fullgraph AclGraph | max-model-len | MLP Weight Prefetch | Doc |\n"
+"|--------------------------------|---------------|----------------------------------------------------------------------|------|--------------------|------|-----------------|------------------------|------|----------------------|------------------|-----------------|-------------------|-----------------|---------------|-------------------------------|--------------------|--------------------|---------------|---------------------|-----|\n"
+"| Qwen3-VL                       | ✅            |                                                                      ||A2/A3|||||||✅|||||✅|✅||| [Qwen-VL-Dense](../../tutorials/models/Qwen-VL-Dense.md) |\n"
+"| Qwen3-VL-MOE                   | ✅            |                                                                      | ✅ | A2/A3||✅|✅|||✅|✅|✅|✅|✅|✅|✅|✅|256k||[Qwen3-VL-MOE](../../tutorials/models/Qwen3-VL-235B-A22B-Instruct.md)|\n"
+"| Qwen3.5-397B-A17B              | ✅            |                                                                      |✅| A2/A3 |✅|✅|✅||✅|✅|✅||✅|✅|✅|✅|✅|1010000|| [Qwen3.5-397B-A17B](../../tutorials/models/Qwen3.5-397B-A17B.md) |\n"
+"| Qwen3.5-27B / Qwen3.6-27B                    | ✅            |                                                                      |✅| A2/A3 |✅|✅|✅||✅|✅|✅||✅|✅|✅|✅|✅|262144|| [Qwen3.5-27B / Qwen3.6-27B](../../tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md) |\n"
+"| Qwen3.6-35B-A3B                | 🔵            |                                                                      |✅| A2/A3 |✅|✅|✅||🔵|✅|✅||✅|✅|❌|✅|✅|262144|| [Qwen3.6-35B-A3B](../../tutorials/models/Qwen3.6-35B-A3B.md) |\n"
+"| Qwen3-Omni-30B-A3B-Thinking    | 🔵            |                                                                      ||A2/A3|||||||✅||✅|||||||[Qwen3-Omni-30B-A3B-Thinking](../../tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md)|\n"
+"| Kimi-K2.5/Kimi-K2.6    | ✅            |                                                                      ||A2/A3||✅|✅||✅|✅|✅||✅|✅|✅|✅|✅|262144||[Kimi-K2.5](../../tutorials/models/Kimi-K2.5.md)/[Kimi-K2.6](../../tutorials/models/Kimi-K2.6.md)|"
+msgstr ""
+"| 模型                          | 支持状态       | 备注                                                                 | BF16 | 支持的硬件 | W8A8 | 分块预填充 | 自动前缀缓存 | LoRA | 推测解码 | 异步调度 | 张量并行 | 流水线并行 | 专家并行 | 数据并行 | 预填充-解码分离 | 分段AclGraph | 全图AclGraph | max-model-len | MLP权重预取 | 文档 |\n"
+"|--------------------------------|---------------|----------------------------------------------------------------------|------|--------------------|------|-----------------|------------------------|------|----------------------|------------------|-----------------|-------------------|-----------------|---------------|-------------------------------|--------------------|--------------------|---------------|---------------------|-----|\n"
+"| Qwen3-VL                       | ✅            |                                                                      ||A2/A3|||||||✅|||||✅|✅||| [Qwen-VL-Dense](../../tutorials/models/Qwen-VL-Dense.md) |\n"
+"| Qwen3-VL-MOE                   | ✅            |                                                                      | ✅ | A2/A3||✅|✅|||✅|✅|✅|✅|✅|✅|✅|✅|256k||[Qwen3-VL-MOE](../../tutorials/models/Qwen3-VL-235B-A22B-Instruct.md)|\n"
+"| Qwen3.5-397B-A17B              | ✅            |                                                                      |✅| A2/A3 |✅|✅|✅||✅|✅|✅||✅|✅|✅|✅|✅|1010000|| [Qwen3.5-397B-A17B](../../tutorials/models/Qwen3.5-397B-A17B.md) |\n"
+"| Qwen3.5-27B / Qwen3.6-27B                    | ✅            |                                                                      |✅| A2/A3 |✅|✅|✅||✅|✅|✅||✅|✅|✅|✅|✅|262144|| [Qwen3.5-27B / Qwen3.6-27B](../../tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md) |\n"
+"| Qwen3.6-35B-A3B                | 🔵            |                                                                      |✅| A2/A3 |✅|✅|✅||🔵|✅|✅||✅|✅|❌|✅|✅|262144|| [Qwen3.6-35B-A3B](../../tutorials/models/Qwen3.6-35B-A3B.md) |\n"
+"| Qwen3-Omni-30B-A3B-Thinking    | 🔵            |                                                                      ||A2/A3|||||||✅||✅|||||||[Qwen3-Omni-30B-A3B-Thinking](../../tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md)|\n"
+"| Kimi-K2.5/Kimi-K2.6    | ✅            |                                                                      ||A2/A3||✅|✅||✅|✅|✅||✅|✅|✅|✅|✅|262144||[Kimi-K2.5](../../tutorials/models/Kimi-K2.5.md)/[Kimi-K2.6](../../tutorials/models/Kimi-K2.6.md)|"
 
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "LLaVA-Next"
-msgstr "LLaVA-Next"
+msgid ""
+"| Model                          | Support       | Note                                                                 | Supported Hardware |\n"
+"|--------------------------------|---------------|----------------------------------------------------------------------|--------------------|\n"
+"| Qwen2-VL                       | ✅            |                                                                      | A2/A3 |\n"
+"| Qwen3-Omni                     | 🔵            |                                                                      | A2/A3 |\n"
+"| QVQ                            | 🔵            |                                                                      | A2/A3 |\n"
+"| Qwen2-Audio                    | 🔵            |                                                                      | A2/A3 |\n"
+"| Aria                           | 🔵            |                                                                      | A2/A3 |\n"
+"| LLaVA-Next                     | 🔵            |                                                                      | A2/A3 |\n"
+"| LLaVA-Next-Video               | 🔵            |                                                                      | A2/A3 |\n"
+"| MiniCPM-V                      | 🔵            |                                                                      | A2/A3 |\n"
+"| Mistral3                       | 🔵            |                                                                      | A2/A3 |\n"
+"| Phi-3-Vision/Phi-3.5-Vision    | 🔵            |                                                                      | A2/A3 |\n"
+"| Gemma3                         | 🔵            |                                                                      | A2/A3 |\n"
+"| Llama3.2                       | 🔵            |                                                                      | A2/A3 |\n"
+"| PaddleOCR-VL                   | 🔵            |                                                                      | A2/A3 |\n"
+"| Llama4                         | ❌            | [1972](https://github.com/vllm-project/vllm-ascend/issues/1972)      |       |\n"
+"| Keye-VL-8B-Preview             | ❌            | [1961](https://github.com/vllm-project/vllm-ascend/issues/1961)      |       |\n"
+"| Florence-2                     | ❌            | [2259](https://github.com/vllm-project/vllm-ascend/issues/2259)      |       |\n"
+"| GLM-4V                         | ❌            | [2260](https://github.com/vllm-project/vllm-ascend/issues/2260)      |       |\n"
+"| InternVL2.0/2.5/3.0<br>InternVideo2.5/Mono-InternVL | ❌ | [2064](https://github.com/vllm-project/vllm-ascend/issues/2064) |  |\n"
+"| Whisper                        | ❌            | [2262](https://github.com/vllm-project/vllm-ascend/issues/2262)      |       |\n"
+"| Ultravox                       | 🟡            | Need test                                                            |       |"
+msgstr ""
+"| 模型                          | 支持状态       | 备注                                                                 | 支持的硬件 |\n"
+"|--------------------------------|---------------|----------------------------------------------------------------------|--------------------|\n"
+"| Qwen2-VL                       | ✅            |                                                                      | A2/A3 |\n"
+"| Qwen3-Omni                     | 🔵            |                                                                      | A2/A3 |\n"
+"| QVQ                            | 🔵            |                                                                      | A2/A3 |\n"
+"| Qwen2-Audio                    | 🔵            |                                                                      | A2/A3 |\n"
+"| Aria                           | 🔵            |                                                                      | A2/A3 |\n"
+"| LLaVA-Next                     | 🔵            |                                                                      | A2/A3 |\n"
+"| LLaVA-Next-Video               | 🔵            |                                                                      | A2/A3 |\n"
+"| MiniCPM-V                      | 🔵            |                                                                      | A2/A3 |\n"
+"| Mistral3                       | 🔵            |                                                                      | A2/A3 |\n"
+"| Phi-3-Vision/Phi-3.5-Vision    | 🔵            |                                                                      | A2/A3 |\n"
+"| Gemma3                         | 🔵            |                                                                      | A2/A3 |\n"
+"| Llama3.2                       | 🔵            |                                                                      | A2/A3 |\n"
+"| PaddleOCR-VL                   | 🔵            |                                                                      | A2/A3 |\n"
+"| Llama4                         | ❌            | [1972](https://github.com/vllm-project/vllm-ascend/issues/1972)      |       |\n"
+"| Keye-VL-8B-Preview             | ❌            | [1961](https://github.com/vllm-project/vllm-ascend/issues/1961)      |       |\n"
+"| Florence-2                     | ❌            | [2259](https://github.com/vllm-project/vllm-ascend/issues/2259)      |       |\n"
+"| GLM-4V                         | ❌            | [2260](https://github.com/vllm-project/vllm-ascend/issues/2260)      |       |\n"
+"| InternVL2.0/2.5/3.0<br>InternVideo2.5/Mono-InternVL | ❌ | [2064](https://github.com/vllm-project/vllm-ascend/issues/2064) |  |\n"
+"| Whisper                        | ❌            | [2262](https://github.com/vllm-project/vllm-ascend/issues/2262)      |       |\n"
+"| Ultravox                       | 🟡            | 需要测试                                                            |       |"
 
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "LLaVA-Next-Video"
-msgstr "LLaVA-Next-Video"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "MiniCPM-V"
-msgstr "MiniCPM-V"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Mistral3"
-msgstr "Mistral3"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Phi-3-Vision/Phi-3.5-Vision"
-msgstr "Phi-3-Vision/Phi-3.5-Vision"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Gemma3"
-msgstr "Gemma3"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Llama3.2"
-msgstr "Llama3.2"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "PaddleOCR-VL"
-msgstr "PaddleOCR-VL"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Llama4"
-msgstr "Llama4"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "[1972](https://github.com/vllm-project/vllm-ascend/issues/1972)"
-msgstr "[1972](https://github.com/vllm-project/vllm-ascend/issues/1972)"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Keye-VL-8B-Preview"
-msgstr "Keye-VL-8B-Preview"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "[1961](https://github.com/vllm-project/vllm-ascend/issues/1961)"
-msgstr "[1961](https://github.com/vllm-project/vllm-ascend/issues/1961)"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Florence-2"
-msgstr "Florence-2"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "[2259](https://github.com/vllm-project/vllm-ascend/issues/2259)"
-msgstr "[2259](https://github.com/vllm-project/vllm-ascend/issues/2259)"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "GLM-4V"
-msgstr "GLM-4V"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "[2260](https://github.com/vllm-project/vllm-ascend/issues/2260)"
-msgstr "[2260](https://github.com/vllm-project/vllm-ascend/issues/2260)"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "InternVL2.0/2.5/3.0<br>InternVideo2.5/Mono-InternVL"
-msgstr "InternVL2.0/2.5/3.0<br>InternVideo2.5/Mono-InternVL"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "[2064](https://github.com/vllm-project/vllm-ascend/issues/2064)"
-msgstr "[2064](https://github.com/vllm-project/vllm-ascend/issues/2064)"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Whisper"
-msgstr "Whisper"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "[2262](https://github.com/vllm-project/vllm-ascend/issues/2262)"
-msgstr "[2262](https://github.com/vllm-project/vllm-ascend/issues/2262)"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Ultravox"
-msgstr "Ultravox"
-
-#~ msgid "Qwen3"
-#~ msgstr "Qwen3"
-
-#~ msgid "Qwen3-Moe"
-#~ msgstr "Qwen3-Moe"
-
-#~ msgid "192k"
-#~ msgstr "192k"
-
-#~ msgid "Qwen3.5-27B"
-#~ msgstr "Qwen3.5-27B"
+msgid "#### Extended Compatible Models"
+msgstr "#### 扩展兼容模型"

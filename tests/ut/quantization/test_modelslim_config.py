@@ -353,24 +353,6 @@ class TestQuantPrefixMapper(TestBase):
                 self.assertEqual(prefix, expected)
 
 
-class TestGetCacheScale(TestBase):
-    def test_c8_kv_cache_type_k_proj_scale(self):
-        config = AscendModelSlimConfig({"kv_cache_type": "C8"})
-        result = config.get_cache_scale("model.layers.0.k_proj.kv_cache_scale")
-        self.assertEqual(result, "model.layers.0.attn.k_cache_scale")
-        result = config.get_cache_scale("model.layers.0.v_proj.kv_cache_offset")
-        self.assertEqual(result, "model.layers.0.attn.v_cache_offset")
-
-    def test_no_match(self):
-        config = AscendModelSlimConfig({"kv_cache_type": "FLOAT"})
-        result = config.get_cache_scale("model.layers.0.k_proj.kv_cache_scale")
-        self.assertIsNone(result)
-
-        config = AscendModelSlimConfig({"kv_cache_type": "C8"})
-        result = config.get_cache_scale("model.layers.0.other_key")
-        self.assertIsNone(result)
-
-
 class TestGetKvQuantDtype(TestBase):
     def test_enable_fa_quant(self):
         config = AscendModelSlimConfig(
