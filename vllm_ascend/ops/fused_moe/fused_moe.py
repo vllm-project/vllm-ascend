@@ -468,6 +468,9 @@ class AscendFusedMoE(FusedMoE):
             self.swiglu_alpha = getattr(text_config, "swiglu_alpha", getattr(hf_config, "swiglu_alpha", 1.0))
         if getattr(self, "swiglu_beta", None) is None:
             self.swiglu_beta = getattr(text_config, "swiglu_beta", getattr(hf_config, "swiglu_beta", 0.0))
+        model_type = getattr(text_config, "model_type", getattr(hf_config, "model_type", None))
+        if model_type in ("minimax_m3", "minimax_m3_vl") and self.activation == "swigluoai":
+            self.swigluoai_uninterleave = True
 
         moe_quant_params = {
             "num_experts": self.local_num_experts,
