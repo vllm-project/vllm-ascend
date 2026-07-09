@@ -34,13 +34,14 @@ def _make_vllm_config(
     max_model_len=128,
     max_num_batched_tokens=10000,
     max_num_seqs=1000,
+    cp_kv_cache_interleave_size=64,
 ):
     vllm_config = MagicMock()
     vllm_config.model_config = MagicMock()
     vllm_config.model_config.use_mla = use_mla
     vllm_config.model_config.hf_config.model_type = model_type
     vllm_config.model_config.max_model_len = max_model_len
-    vllm_config.parallel_config.cp_kv_cache_interleave_size = 64
+    vllm_config.parallel_config.cp_kv_cache_interleave_size = cp_kv_cache_interleave_size
     vllm_config.scheduler_config.max_num_batched_tokens = max_num_batched_tokens
     vllm_config.scheduler_config.max_num_seqs = max_num_seqs
     vllm_config.speculative_config.num_speculative_tokens = num_speculative_tokens
@@ -60,6 +61,7 @@ def _make_pcp_manager(
     max_model_len=128,
     max_buffer_num_tokens=10000,
     max_num_reqs=1000,
+    cp_kv_cache_interleave_size=64,
 ):
     return PCPManager(
         pcp_world_size=pcp_world_size,
@@ -76,6 +78,7 @@ def _make_pcp_manager(
             max_model_len=max_model_len,
             max_num_batched_tokens=max_buffer_num_tokens,
             max_num_seqs=max_num_reqs,
+            cp_kv_cache_interleave_size=cp_kv_cache_interleave_size,
         ),
         use_async_scheduling=False,
         pin_memory=False,
@@ -902,42 +905,153 @@ def test_hybrid_padded_slot_mapping_uses_independent_kv_group_buffers():
     assert pcp_manager.pcp_padded_slot_mapping_list[0][:12].tolist() == expected_group0
 
 
-def test_generate_mtp_attention_mask_for_decode_exact_values():
+def _ref_mtp_mask_lens(
+    history_len: int,
+    num_scheduled: int,
+    cp_rank: int,
+    cp_size: int,
+    interleave_size: int,
+) -> tuple[int, list[int]]:
+    """Reference: compute per-rank KV length and k_upper per query position.
+
+    Follows the same interleave-aware formulas as
+    ``generate_mtp_attention_mask_for_decode``.
+    """
+    total_len = history_len + num_scheduled
+    # Per-rank KV length
+    base_k = total_len // interleave_size // cp_size * interleave_size
+    remainder_k = total_len - base_k * cp_size
+    k_lens = base_k + max(0, min(remainder_k - cp_rank * interleave_size, interleave_size))
+
+    context_len = history_len
+    k_uppers: list[int] = []
+    for qi in range(num_scheduled):
+        pos = context_len + qi
+        base_q = pos // interleave_size // cp_size * interleave_size
+        remainder_q = pos - base_q * cp_size
+        local_q = base_q + max(0, min(remainder_q - cp_rank * interleave_size, interleave_size))
+        k_upper = local_q - 1
+        k_uppers.append(k_upper)
+
+    return k_lens, k_uppers
+
+
+def _build_ref_mask(
+    q_lens: int,
+    k_lens: int,
+    k_uppers: list[int],
+) -> torch.Tensor:
+    """Build the reference attention mask with the same logic as the function under test."""
+    mask = torch.zeros(q_lens, k_lens, dtype=torch.bool)
+    for qi, ku in enumerate(k_uppers):
+        if ku >= 0:
+            mask[qi, ku + 1 :] = True
+        # When ku < 0 the guard (ku >= 0) makes the AND-gate False, so mask stays False.
+    return mask
+
+
+# yapf: disable
+@pytest.mark.parametrize(
+    "dcp_world_size, dcp_rank, history_len, num_scheduled, interleave_size",
+    [
+        # interleave_size=1: token-level interleave, all cp_rank see similar counts
+        (2, 0, 200, 100, 1),
+        (2, 1, 200, 100, 1),
+        (4, 0, 300, 50, 1),
+        (4, 3, 300, 50, 1),
+        # interleave_size=128: block-level interleave
+        # total_len < 128: rank-0 owns everything, rank-1 owns nothing
+        (2, 0, 50, 10, 128),
+        (2, 1, 50, 10, 128),
+        # total_len crosses one interleave boundary (128 < L < 256)
+        (2, 0, 100, 50, 128),
+        (2, 1, 100, 50, 128),
+        # total_len crosses multiple interleave boundaries (L > 256)
+        (2, 0, 200, 100, 128),
+        (2, 1, 200, 100, 128),
+        # exactly at interleave boundary
+        (2, 0, 128, 10, 128),
+        (2, 1, 128, 10, 128),
+        # cp_size=4 with interleave_size=128
+        (4, 0, 300, 50, 128),
+        (4, 2, 300, 50, 128),
+        (4, 3, 300, 50, 128),
+    ],
+)
+# yapf: enable
+def test_generate_mtp_attention_mask_for_decode(
+    dcp_world_size: int,
+    dcp_rank: int,
+    history_len: int,
+    num_scheduled: int,
+    interleave_size: int,
+):
+    """Verify interleave-aware MTP attention masks for decode requests.
+
+    Compares the function output against a reference implementation that
+    applies the same formulas.  Covers both token-level (I=1) and
+    block-level (I=128) interleave patterns.
+    """
+    pcp_world_size = 1
+    cp_size = dcp_world_size * pcp_world_size
+    cp_rank = dcp_rank
+
     pcp_manager = _make_pcp_manager(
-        pcp_world_size=1,
-        dcp_world_size=2,
-        dcp_rank=0,
-        num_speculative_tokens=3,
-        max_model_len=16,
+        pcp_world_size=pcp_world_size,
+        dcp_world_size=dcp_world_size,
+        dcp_rank=dcp_rank,
+        num_speculative_tokens=num_scheduled - 1,
+        max_model_len=4096,
+        max_buffer_num_tokens=4096,
+        max_num_reqs=8,
+        cp_kv_cache_interleave_size=interleave_size,
     )
-    num_scheduled_tokens = np.array([4], dtype=np.int32)
-    num_computed_tokens = np.array([5], dtype=np.int32)
-    num_prompt_tokens = np.array([5], dtype=np.int32)
+
+    num_scheduled_tokens = np.array([num_scheduled], dtype=np.int32)
+    num_computed_tokens = np.array([history_len], dtype=np.int32)
+    num_prompt_tokens = np.array([history_len], dtype=np.int32)
     pcp_manager.init_batch_info(
         num_scheduled_tokens,
         num_reqs=1,
         num_computed_tokens=num_computed_tokens,
         num_prompt_tokens=num_prompt_tokens,
     )
+    assert pcp_manager.num_decode_reqs == 1
 
-    mask = pcp_manager.generate_mtp_attention_mask_for_decode(
-        decode_num_computed_tokens=[5],
+    result = pcp_manager.generate_mtp_attention_mask_for_decode(
+        decode_num_computed_tokens=[history_len],
         decode_num_scheduled_tokens=num_scheduled_tokens,
     )
+    assert result is not None
 
-    expected = torch.tensor(
-        [
-            [
-                [False, False, False, True, True],
-                [False, False, False, False, True],
-                [False, False, False, False, True],
-                [False, False, False, False, False],
-            ]
-        ],
-        dtype=torch.bool,
+    ref_k_lens, ref_k_uppers = _ref_mtp_mask_lens(
+        history_len, num_scheduled, cp_rank, cp_size, interleave_size
     )
-    assert torch.equal(mask[:, :4, :5], expected)
-    assert not mask[:, :4, 5:].any()
+    ref_mask = _build_ref_mask(num_scheduled, ref_k_lens, ref_k_uppers)
+
+    max_q = num_scheduled
+    max_k = ref_k_lens
+
+    if ref_k_lens == 0:
+        # k_lens=0 means valid.any() is False; function returns early with
+        # zero-filled mask.
+        assert result[0, :max_q, :max_k].sum() == 0, (
+            f"Expected all-False mask for k_lens=0, "
+            f"history={history_len}, scheduled={num_scheduled}, dcp_rank={dcp_rank}"
+        )
+        return
+
+    actual_mask = result[0, :max_q, :max_k]
+    assert actual_mask.shape == ref_mask.shape, (
+        f"Shape mismatch: {actual_mask.shape} vs {ref_mask.shape}"
+    )
+    assert torch.equal(actual_mask, ref_mask), (
+        f"Mask mismatch for "
+        f"history={history_len}, scheduled={num_scheduled}, "
+        f"dcp_rank={dcp_rank}, interleave={interleave_size}\n"
+        f"ref_k_lens={ref_k_lens}, ref_k_uppers={ref_k_uppers}\n"
+        f"Expected:\n{ref_mask.int()}\nGot:\n{actual_mask.int()}"
+    )
 
 
 def test_remap_mrope_positions_for_pcp_uses_local_positions():

@@ -1,8 +1,4 @@
-#!/usr/bin/env bash
-
-#
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
-# Copyright 2023 The vLLM team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,7 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
-# Adapted from https://github.com/vllm-project/vllm/tree/main/tools
-#
+"""Auto-Bisect tooling for nightly E2E test failures.
 
-sphinx-lint --disable trailing-whitespace,missing-final-newline docs
+Given a failing nightly test case, this package binary-searches the
+``vllm-ascend`` commit history between the last-known-good commit and the
+currently failing commit to pinpoint the first bad commit (and the PR it
+belongs to). It deliberately reuses the existing nightly launch entries
+(``test_single_node.py`` / ``multi_node/scripts/run.sh``) so that the bisect
+reproduces the exact nightly environment.
+"""
