@@ -97,6 +97,11 @@ set(CMAKE_CXX_STANDARD 17 CACHE STRING "c++17 is needed for this project")
 set_directory_properties(PROPERTIES
     ADDITIONAL_MAKE_CLEAN_FILES "${CMAKE_BINARY_DIR}/_CPack_Packages"
 )
+set(VLLM_ASCEND_CANN_COMPAT_HEADER "${OPS_TRANSFORMER_DIR}/common/include/cann_compat.h")
+list(APPEND OPS_COMPILE_OPTIONS -include${VLLM_ASCEND_CANN_COMPAT_HEADER})
+add_compile_options(
+    $<$<COMPILE_LANGUAGE:CXX>:-include${VLLM_ASCEND_CANN_COMPAT_HEADER}>
+)
 
 include(cmake/config.cmake)
 include(cmake/func.cmake)
