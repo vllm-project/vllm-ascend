@@ -129,22 +129,27 @@ __aicore__ inline void DataCopyCustom(GlobalTensor<T> dstGm, LocalTensor<T> inLo
                     DataCopyParams copyParamslast = {1, 1, 0, 0};
                     DataCopy(dstGm[elem - numPerBlock], inLocal[elemAlignDown], copyParamslast);
                 } else {
+                    // Whole payload fits in the first block (elem < numPerBlock).
+                    // Front-align at dstGm[0]: read the block back to preserve the
+                    // trailing bytes [elem..numPerBlock), patch [0..elem), write it
+                    // back. Back-aligning here (dstGm[elem - numPerBlock]) is a
+                    // negative offset -> OOB/UB.
                     T tmp[COMPAT_BLOCK_BYTES];
                     SetWaitFlag<HardEvent::MTE2_S>(HardEvent::MTE2_S);
                     SetWaitFlag<HardEvent::V_S>(HardEvent::V_S);
                     for (uint32_t i = 0; i < elem; i++) {
-                        tmp[i] = inLocal.GetValue(elem - 1 - i);
+                        tmp[i] = inLocal.GetValue(i);
                     }
                     DataCopyParams copyParamslast = {1, 1, 0, 0};
                     SetWaitFlag<HardEvent::S_MTE2>(HardEvent::S_MTE2);
                     SetWaitFlag<HardEvent::MTE3_MTE2>(HardEvent::MTE3_MTE2);
-                    DataCopy(inLocal, dstGm[elem - numPerBlock], copyParamslast);
+                    DataCopy(inLocal, dstGm[0], copyParamslast);
                     SetWaitFlag<HardEvent::MTE2_S>(HardEvent::MTE2_S);
                     for (uint32_t i = 0; i < elem; i++) {
-                        inLocal.SetValue(numPerBlock - 1 - i, tmp[i]);
+                        inLocal.SetValue(i, tmp[i]);
                     }
                     SetWaitFlag<HardEvent::S_MTE3>(HardEvent::S_MTE3);
-                    DataCopy(dstGm[elem - numPerBlock], inLocal, copyParamslast);
+                    DataCopy(dstGm[0], inLocal, copyParamslast);
                 }
             } else if constexpr (isAtomic) {
                 SetWaitFlag<HardEvent::MTE2_S>(HardEvent::MTE2_S);

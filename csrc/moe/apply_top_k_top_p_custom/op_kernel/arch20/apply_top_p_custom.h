@@ -305,7 +305,7 @@ __aicore__ inline void ApplyTopPCustom<inputT, calT, outputT>::ScatterSingleTask
             DataCopyPadCustom(cumsumLocal, softMaxGm[gmOffset],
                 {1, static_cast<uint32_t>(curCopyLength * sizeof(float)), 0, 0, 0}, {false, 0, 0, 0});
             DataCopyPadCustom(sortedIndicesLocal, mGmSortedIndices_[gmOffset],
-                {1, static_cast<uint32_t>(curCopyLength * sizeof(float)), 0, 0, 0}, {false, 0, 0, 0});
+                {1, static_cast<uint32_t>(curCopyLength * sizeof(int32_t)), 0, 0, 0}, {false, 0, 0, 0});
             DataCopyPadCustom(sortedValueLocal, mGmSortedValue_[gmOffset],
                     {1, static_cast<uint32_t>(curCopyLength * sizeof(inputT)), 0, 0, 0}, {false, 0, 0, 0});
             MTE2ToSSync();
@@ -442,7 +442,7 @@ __aicore__ inline void ApplyTopPCustom<inputT, calT, outputT>::GetSoftmaxSum(uin
         // needBack: on unaligned vocab this write's tail would over-write the next
         // batch's out[0..) and race cross-core with that batch's own -inf init (UB).
         DataCopyCustom<outputT, true>(mGmOut_[currentGmIdx], outInfLocal.template ReinterpretCast<outputT>(),
-                    {1, static_cast<uint32_t>(loopDataNum * sizeof(inputT)), 0, 0, 0});
+                    {1, static_cast<uint32_t>(loopDataNum * sizeof(outputT)), 0, 0, 0});
         MTE3ToMTE2Sync();
         if constexpr (!IsSameType<inputT, float>::value) {
             DataCopyPadCustom(softMaxLocal, mGmSortedValue_[currentGmIdx],
