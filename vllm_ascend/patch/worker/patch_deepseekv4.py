@@ -458,71 +458,17 @@ def forward_m2n(
     for layer in islice(self.layers, self.start_layer, self.end_layer):
         layer_idx = getattr(layer, "layer_idx", -1)
         if layer.layer_idx > 0:
-            # P2P recv: 使用 custom op 包装, 避免 Dynamo trace pickle.dumps
             hidden_states = torch.ops.vllm.afd_p2p_recv_ffn_output(hidden_states)
-            # 诊断: AFD 路径 attention 接收 FFN 输出后 (e2a_group 接收完成),
-            # 对应 FFN 侧 [FFN_SEND_PRE]
-            # logger.info(
-            #     "[ATTN_RECV_POST] layer=%d hs dim=%d shape=%s dtype=%s "
-            #     "mean=%.6f std=%.6f min=%.6f max=%.6f has_nan=%s",
-            #     layer_idx, hidden_states.dim(), tuple(hidden_states.shape),
-            #     hidden_states.dtype,
-            #     hidden_states.float().mean().item(),
-            #     hidden_states.float().std().item(),
-            #     hidden_states.float().min().item(),
-            #     hidden_states.float().max().item(),
-            #     torch.isnan(hidden_states).any().item(),
-            # )
-
         hidden_states = layer.compute_attn_output(
             positions, hidden_states, residual, llama_4_scaling
         )
-
-        # input_ids is needed on the FFN side for tid2eid (logical→physical
-        # expert mapping) inside select_experts. Gate/router computation is
-        # done entirely on the FFN side.
         p2p_input_ids = getattr(get_forward_context(), "input_ids", None)
 
-        # 诊断: AFD 路径 attention 发送前 (即将通过 a2e_group 发送给 FFN 侧),
-        # 对应非 AFD [NONAFD_ATTN_HC_POST_OUT]
-        # logger.info(
-        #     "[ATTN_SEND_PRE] layer=%d hs dim=%d shape=%s dtype=%s "
-        #     "mean=%.6f std=%.6f",
-        #     layer_idx, hidden_states.dim(), tuple(hidden_states.shape),
-        #     hidden_states.dtype,
-        #     hidden_states.float().mean().item(),
-        #     hidden_states.float().std().item(),
-        # )
-        # if p2p_input_ids is not None:
-        #     first8 = p2p_input_ids.flatten()[:8].tolist()
-            # logger.info(
-            #     "[ATTN_SEND_INPUT_IDS] shape=%s dtype=%s first8=%s",
-            #     tuple(p2p_input_ids.shape), p2p_input_ids.dtype, first8,
-            # )
-
-        # P2P send: 使用 custom op 包装, 避免 Dynamo trace pickle.dumps
         hidden_states = torch.ops.vllm.afd_p2p_send_attn_output(
             hidden_states, p2p_input_ids
         )
-        # logger.info(
-        #     "[ATTN_SEND_DONE] layer=%d send_attn_output completed",
-        #     layer_idx,
-        # )
-
-    # P2P recv (final): 使用 custom op 包装, 避免 Dynamo trace pickle.dumps
     hidden_states = torch.ops.vllm.afd_p2p_recv_ffn_output(hidden_states)
-    # 诊断: AFD 路径 attention 接收最后一层 FFN 输出后
-    # logger.info(
-    #     "[ATTN_RECV_POST] layer=final hs dim=%d shape=%s dtype=%s "
-    #     "mean=%.6f std=%.6f min=%.6f max=%.6f has_nan=%s",
-    #     hidden_states.dim(), tuple(hidden_states.shape),
-    #     hidden_states.dtype,
-    #     hidden_states.float().mean().item(),
-    #     hidden_states.float().std().item(),
-    #     hidden_states.float().min().item(),
-    #     hidden_states.float().max().item(),
-    #     torch.isnan(hidden_states).any().item(),
-    # )
+
     return hidden_states, residual
 
 

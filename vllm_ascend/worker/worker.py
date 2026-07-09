@@ -749,6 +749,7 @@ class NPUWorker(WorkerBase):
 
         npugraph_memory_bytes = 0
         if not self.model_config.enforce_eager:
+            logger.info("Capture model")
             npugraph_memory_bytes = self.model_runner.capture_model()
 
         # Compare actual vs estimated ACL graph memory (if we did profiling)
@@ -1072,20 +1073,20 @@ class NPUWorker(WorkerBase):
 
         # self.model_runner.initialize_afd_connector()
 
-        # if self.model_runner.use_aclgraph:
-        #     dp_metadata_list, is_graph_capturing, is_warmup = (
-        #         self.model_runner.connector.recv_dp_metadata_list()
-        #     )
-        #     logger.info(
-        #         "FFN received dp_metadata_list for capture: "
-        #         "is_graph_capturing=%s, is_warmup=%s",
-        #         is_graph_capturing, is_warmup,
-        #     )
-        #     self.model_runner.capture_model(dp_metadata_list=dp_metadata_list)
-        # else:
-        #     logger.info(
-        #         "Eager mode (use_aclgraph=False), skip recv_dp_metadata_list "
-        #         "and capture_model; worker loop will recv in execute_model")
+        if self.model_runner.use_aclgraph:
+            dp_metadata_list, is_graph_capturing, is_warmup = (
+                self.model_runner.connector.recv_dp_metadata_list()
+            )
+            logger.info(
+                "FFN received dp_metadata_list for capture: "
+                "is_graph_capturing=%s, is_warmup=%s",
+                is_graph_capturing, is_warmup,
+            )
+            self.model_runner.capture_model(dp_metadata_list=dp_metadata_list)
+        else:
+            logger.info(
+                "Eager mode (use_aclgraph=False), skip recv_dp_metadata_list "
+                "and capture_model; worker loop will recv in execute_model")
 
         self._ffn_shutdown_event = threading.Event()
 
@@ -1096,32 +1097,50 @@ class NPUWorker(WorkerBase):
 
             try:
                 while not self._ffn_shutdown_event.is_set():
-                    # self.model_runner.prof.step()
-                    # 接收dp_metadata_list
-                    (
-                        dp_metadata_list,
-                        is_attn_graph_capturing,
-                        is_warmup,
-                    ) = self.model_runner.connector.recv_dp_metadata_list()
-                    logger.info(f"jcz dp_metadata_list:{dp_metadata_list} is_attn_graph_capturing:{is_attn_graph_capturing} is_warmup:{is_warmup}")
-                    if is_attn_graph_capturing or (is_warmup and not self.model_config.enforce_eager):
-                        # Capture模式：根据metadata执行warmup或capture
-                        self.model_runner.capture_model(
-                            dp_metadata_list=dp_metadata_list,
-                            is_warmup=is_warmup,
-                            is_attn_graph_capturing=is_attn_graph_capturing,
-                        )
-                    else:
-                        # 正常推理
-                        self.model_runner.execute_model(
-                            scheduler_output=None,
-                            dp_metadata_list=dp_metadata_list,
-                        )
-
+                    dp_metadata_list, is_graph_capturing, is_warmup = (self.model_runner.connector.recv_dp_metadata_list())
+                    logger.info(f"execute_model dp_metadata_list:{dp_metadata_list} is_graph_capturing:{is_graph_capturing} is_warmup:{is_warmup}")
+                    self.model_runner.execute_model(
+                        scheduler_output=None,
+                        dp_metadata_list=dp_metadata_list,
+                    )
                     torch.npu.synchronize()
             except Exception as e:
                 logger.error("FFN worker loop error: %s", e)
                 raise
+
+        # def ffn_worker_loop():
+        #     # Set NPU device for this thread (thread-local context)
+        #     torch.npu.set_device(self.device)
+        #     logger.info("FFN worker loop started")
+
+        #     try:
+        #         while not self._ffn_shutdown_event.is_set():
+        #             # self.model_runner.prof.step()
+        #             # 接收dp_metadata_list
+        #             (
+        #                 dp_metadata_list,
+        #                 is_attn_graph_capturing,
+        #                 is_warmup,
+        #             ) = self.model_runner.connector.recv_dp_metadata_list()
+        #             logger.info(f"jcz dp_metadata_list:{dp_metadata_list} is_attn_graph_capturing:{is_attn_graph_capturing} is_warmup:{is_warmup}")
+        #             if is_attn_graph_capturing or (is_warmup and not self.model_config.enforce_eager):
+        #                 # Capture模式：根据metadata执行warmup或capture
+        #                 self.model_runner.capture_model(
+        #                     dp_metadata_list=dp_metadata_list,
+        #                     is_warmup=is_warmup,
+        #                     is_attn_graph_capturing=is_attn_graph_capturing,
+        #                 )
+        #             else:
+        #                 # 正常推理
+        #                 self.model_runner.execute_model(
+        #                     scheduler_output=None,
+        #                     dp_metadata_list=dp_metadata_list,
+        #                 )
+
+        #             torch.npu.synchronize()
+        #     except Exception as e:
+        #         logger.error("FFN worker loop error: %s", e)
+        #         raise
 
         self._ffn_thread = threading.Thread(target=ffn_worker_loop, daemon=True)
         self._ffn_thread.start()

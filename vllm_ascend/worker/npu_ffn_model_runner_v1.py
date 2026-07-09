@@ -188,13 +188,19 @@ class NPUFFNModelRunner(NPUModelRunner, GPUFFNModelRunner):
         start_free_npu_memory = torch.npu.mem_get_info()[0]
 
         set_cudagraph_capturing_enabled(True)
-        if is_warmup:
-            # Warmup mode: only run forward, don't capture graph.
-            self._warmup_model(dp_metadata_list=dp_metadata_list)
-            logger.info("FFN warmup completed, dp_metadata_list=%s", dp_metadata_list)
-        else:
-            # Capture mode: capture a single graph based on dp_metadata_list.
-            self._capture_model(dp_metadata_list=dp_metadata_list)
+        # if is_warmup:
+        #     # Warmup mode: only run forward, don't capture graph.
+        #     self._warmup_model(dp_metadata_list=dp_metadata_list)
+        #     logger.info("FFN warmup completed, dp_metadata_list=%s", dp_metadata_list)
+        # else:
+        #     # Capture mode: capture a single graph based on dp_metadata_list.
+        #     self._capture_model(dp_metadata_list=dp_metadata_list)
+        logger.info("FFN warmup, dp_metadata_list=%s", dp_metadata_list)
+        self._warmup_model(dp_metadata_list=dp_metadata_list)
+        logger.info("FFN warmup completed, dp_metadata_list=%s", dp_metadata_list)
+        self._capture_model(dp_metadata_list=dp_metadata_list)
+        logger.info("FFN capture completed, dp_metadata_list=%s", dp_metadata_list)
+
         set_cudagraph_capturing_enabled(False)
 
         end_time = time.perf_counter()
