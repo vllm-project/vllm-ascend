@@ -125,14 +125,12 @@ def prune_capture_sizes_for_950(vllm_config):
 
 DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
     {
-        "DeepseekV2ForCausalLM",
         "Qwen2MoeForCausalLM",
-        "GraniteMoeForCausalLM",
     }
 )
 
 
-def _ascend_is_default_v2_model_runner_model(vllm_config: VllmConfig) -> bool:
+def _is_default_v2_model_runner_model(vllm_config: VllmConfig) -> bool:
     model_config = vllm_config.model_config
     if model_config is None:
         return False
@@ -149,7 +147,7 @@ def _ascend_is_default_v2_model_runner_model(vllm_config: VllmConfig) -> bool:
     return any(arch in DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES for arch in architectures) or not model_config.is_moe
 
 
-def _ascend_get_v2_model_runner_unsupported_features(vllm_config: VllmConfig) -> list[str]:
+def _get_v2_model_runner_unsupported_features(vllm_config: VllmConfig) -> list[str]:
     unsupported: list[str] = []
     model_config = vllm_config.model_config
     speculative_config = vllm_config.speculative_config
@@ -229,7 +227,7 @@ def _ascend_get_v2_model_runner_unsupported_features(vllm_config: VllmConfig) ->
     return unsupported
 
 
-def _ascend_use_v2_model_runner(vllm_config: VllmConfig) -> bool:
+def _use_v2_model_runner(vllm_config: VllmConfig) -> bool:
     use_v2_model_runner = envs_vllm.VLLM_USE_V2_MODEL_RUNNER
     if use_v2_model_runner is not None:
         return use_v2_model_runner
@@ -240,7 +238,7 @@ def _ascend_use_v2_model_runner(vllm_config: VllmConfig) -> bool:
     if vllm_config.model_config is not None and vllm_config.model_config.is_diffusion:
         return True
 
-    if not _ascend_is_default_v2_model_runner_model(vllm_config):
+    if not _is_default_v2_model_runner_model(vllm_config):
         return False
 
     from vllm.triton_utils import HAS_TRITON  # noqa: E402
@@ -249,7 +247,7 @@ def _ascend_use_v2_model_runner(vllm_config: VllmConfig) -> bool:
         logger.warning_once("Model Runner V2 requires Triton; using the V1 model runner instead.")
         return False
 
-    unsupported = _ascend_get_v2_model_runner_unsupported_features(vllm_config)
+    unsupported = _get_v2_model_runner_unsupported_features(vllm_config)
     if unsupported:
         logger.warning_once(
             "Model Runner V2 does not yet support %s; using the V1 model runner instead.",
@@ -554,9 +552,9 @@ class NPUPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
-        from vllm.config.vllm import VllmConfig as _VllmConfig
+        from vllm.config.vllm import VllmConfig as VllmConfig
 
-        _VllmConfig.use_v2_model_runner = property(_ascend_use_v2_model_runner)
+        VllmConfig.use_v2_model_runner = property(_use_v2_model_runner)
 
         from vllm_ascend.quantization.utils import maybe_auto_detect_quantization
 
