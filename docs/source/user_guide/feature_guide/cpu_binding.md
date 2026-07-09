@@ -110,6 +110,16 @@ Ascend 950 does not apply IRQ binding. When running on Ascend 950, the log conta
 `[irq] IRQ binding skipped on Ascend 950.` and no `/proc/irq/*/smp_affinity` files are
 written by this feature.
 
+Ascend 950 allocation logs use `worker=[...]` instead of `acl=[...]` or
+`release=[...]`, because ACL/release threads are not separately pinned on this
+device type. When UVB polling threads are found and bound, the log also reports
+their thread IDs and CPU pool:
+
+```text
+Ascend 950 NPU0: worker=[...]
+[cpu_bind_ascend_950] uvb_poll_window_thread tids=[...] cpus=[...]
+```
+
 On the host, stop `irqbalance` before starting vLLM when you need stable IRQ
 affinity:
 

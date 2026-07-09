@@ -242,6 +242,17 @@ The CPU allocation plan is as follows:
 NPU0: main=[...] acl=[...] release=[...]
 ```
 
+Ascend 950 uses a different role split, so its plan log does not include ACL or
+release fields. UVB polling thread binding is reported separately when matching
+threads are found:
+
+```text
+[cpu_bind_mode] mode=topo_affinity rank=0 visible_npus=[0]
+The CPU allocation plan is as follows:
+Ascend 950 NPU0: worker=[...]
+[cpu_bind_ascend_950] uvb_poll_window_thread tids=[...] cpus=[...]
+```
+
 ## Limitations
 
 - CPU binding runs only on ARM. It is skipped on x86_64.
