@@ -770,6 +770,7 @@ class AscendSFADCPMetadataBuilder(AscendSFAMetadataBuilder):
         req_indices = torch.repeat_interleave(
             torch.arange(num_reqs, dtype=torch.int32, device=self.device),
             query_lens.to(device=self.device),
+            output_size=num_input_tokens,
         )[:num_actual_tokens]
         if req_indices.numel() == 0:
             return slot_mapping_replicated_view
