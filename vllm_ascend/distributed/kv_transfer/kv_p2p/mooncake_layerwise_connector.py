@@ -1228,8 +1228,29 @@ class MooncakeLayerwiseConnectorWorker:
         self.side_channel_host = local_ip
 
         kv_cfg = self.vllm_config.kv_transfer_config
-        if kv_cfg is None or not kv_cfg.is_kv_consumer:
+        if kv_cfg is None or not (kv_cfg.is_kv_producer or kv_cfg.is_kv_consumer):
             return
+
+        # [snapshot] Release the KV memory regions on the OLD engine before it is
+        # torn down. reset()->__del__ only does closeSegment + engine_.reset() and
+        # never explicitly unregisters the externally-registered KV cache, so the
+        # stale HCCL one-sided MR / memHandle from before the snapshot is left
+        # behind. The rebuilt engine then re-registers on top of that stale native
+        # MR state and produces an invalid memHandle at connect time (103900/103902).
+        old_engine = getattr(self, "engine", None)
+        if old_engine is not None:
+            if self._registered_regions is not None:
+                for ptr in self._registered_regions.ptrs:
+                    try:
+                        old_engine.unregister_memory(ptr)
+                    except Exception as e:
+                        logger.warning("[snapshot][rebuild] unregister region %s failed: %s", hex(ptr), e)
+            for tensor in (self.k_buffer, self.v_buffer):
+                if tensor is not None:
+                    try:
+                        old_engine.unregister_memory(tensor.data_ptr())
+                    except Exception as e:
+                        logger.warning("[snapshot][rebuild] unregister kv_buffer failed: %s", e)
 
         global_te.reset()
         self.engine = global_te.get_transfer_engine(local_ip, device_name=None)
@@ -1245,6 +1266,18 @@ class MooncakeLayerwiseConnectorWorker:
                 ret = self.engine.register_memory(tensor.data_ptr(), tensor.numel() * tensor.element_size())
                 if ret != 0:
                     raise RuntimeError("Mooncake kv_buffer re-registration failed after snapshot restore.")
+
+        # [snapshot] producer: the send thread caches its own engine handle at
+        # construction time. After global_te.reset() that cached handle points at
+        # the destroyed pre-snapshot engine, so re-point it at the rebuilt engine.
+        # The send thread itself is not torn down/recreated here (unlike recv).
+        if self.kv_send_layer_thread is not None:
+            self.kv_send_layer_thread.engine = self.engine
+
+        # Consumer side: restart the recv thread so its ROUTER socket rebinds on
+        # the new pod IP.
+        if not kv_cfg.is_kv_consumer:
+            return
 
         if self.kv_recv_layer_thread is None:
             return
