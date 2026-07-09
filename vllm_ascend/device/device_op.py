@@ -1190,6 +1190,10 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                 output_dtype=output_dtype,
             )[0]
 
+        if mxfp_quant_dtype == QuantType.W4A8MXFP:
+            gmm2_scale = None  # type: ignore[assignment]
+            gmm2_kwargs.update({"antiquant_scale": [weight_scale]})
+
         return torch_npu.npu_grouped_matmul(
             x=[hidden_states],
             weight=gmm2_weight,
