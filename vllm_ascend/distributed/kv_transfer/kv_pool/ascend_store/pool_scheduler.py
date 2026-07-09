@@ -31,6 +31,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     RequestTracker,
     get_cache_family_granularity,
     infer_group_cache_families,
+    infer_tp_mismatch_info,
     normalize_block_ids_by_group,
 )
 
@@ -120,36 +121,16 @@ class KVPoolScheduler:
         self.sending_events: dict[int, int] = {}
         self._expected_worker_count = vllm_config.parallel_config.world_size
 
-        # --- TP-asymmetric (mirror KVPoolWorker gating for scheduler side) ---
-        # Under tp_mismatch, decode/chunked requests with no new blocks must still
-        # produce load metadata so the worker can load previously-stored KV.
-        # Wrapped in try/except so unit-test MagicMock configs keep tp_mismatch=False
-        # (i.e. original behavior); production configs are real and compute normally.
-        self.tp_mismatch = False
-        try:
-            _extra_cfg = vllm_config.kv_transfer_config.kv_connector_extra_config
-            if not isinstance(_extra_cfg, dict):
-                raise TypeError("kv_connector_extra_config is not a dict")
-            _local_tp = int(vllm_config.parallel_config.tensor_parallel_size)
-            _num_kv_head = int(vllm_config.model_config.get_total_num_kv_heads())
-            _use_mla = (
-                isinstance(getattr(vllm_config.model_config, "use_mla", False), bool)
-                and vllm_config.model_config.use_mla
-            )
-            if self.kv_role == "kv_consumer":
-                _peer_tp = int(_extra_cfg.get("prefill_tp_size", _local_tp))
-            else:
-                _peer_tp = int(_extra_cfg.get("decode_tp_size", _local_tp))
-            _effective_tp = max(_local_tp, _peer_tp)
-            self.tp_mismatch = (
-                _peer_tp != _local_tp
-                and not _use_mla
-                and not self.use_hybrid
-                and _num_kv_head >= _effective_tp
-                and _num_kv_head % _effective_tp == 0
-            )
-        except Exception:
-            self.tp_mismatch = False
+        use_mla = getattr(vllm_config.model_config, "use_mla", False)
+        tp_mismatch_info = infer_tp_mismatch_info(
+            self.kv_role,
+            vllm_config.kv_transfer_config.kv_connector_extra_config,
+            getattr(vllm_config.parallel_config, "tensor_parallel_size", 1),
+            vllm_config.model_config.get_total_num_kv_heads(),
+            use_mla if isinstance(use_mla, bool) else False,
+            use_hybrid=self.use_hybrid,
+        )
+        self.tp_mismatch = tp_mismatch_info.enabled
 
     def _infer_group_families(self) -> list[str]:
         kv_cache_groups = self.kv_cache_config.kv_cache_groups if self.kv_cache_config is not None else None

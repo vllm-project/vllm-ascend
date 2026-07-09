@@ -33,6 +33,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     get_block_hashes,
     get_cache_family_granularity,
     infer_group_cache_families,
+    infer_tp_mismatch_info,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import (
     AscendStoreCoordinator,
@@ -156,23 +157,17 @@ class KVPoolWorker:
             self.head_or_tp_rank = self.tp_rank
             self.put_step = 1
 
-        # --- TP-asymmetric (PD disaggregation with mismatched prefill/decode TP) ---
-        # Peer TP size:
-        # - On prefill (kv_producer / kv_both): peer is decode -> use decode_tp_size
-        # - On decode  (kv_consumer with consumer_is_to_put): peer is prefill -> use prefill_tp_size
-        # Both default to local tp_size -> tp_mismatch stays False -> zero behavior change.
         extra_cfg = vllm_config.kv_transfer_config.kv_connector_extra_config
-        if self.kv_role == "kv_consumer":
-            self.peer_tp_size = int(extra_cfg.get("prefill_tp_size", self.tp_size))
-        else:
-            self.peer_tp_size = int(extra_cfg.get("decode_tp_size", self.tp_size))
-        self.effective_tp_size = max(self.tp_size, self.peer_tp_size)
-        self.tp_mismatch = (
-            self.peer_tp_size != self.tp_size
-            and not self.use_mla
-            and self.num_kv_head >= self.effective_tp_size
-            and self.num_kv_head % self.effective_tp_size == 0
+        tp_mismatch_info = infer_tp_mismatch_info(
+            self.kv_role,
+            extra_cfg,
+            self.tp_size,
+            self.num_kv_head,
+            self.use_mla,
         )
+        self.peer_tp_size = tp_mismatch_info.peer_tp_size
+        self.effective_tp_size = tp_mismatch_info.effective_tp_size
+        self.tp_mismatch = tp_mismatch_info.enabled
         if self.tp_mismatch:
             if self.use_sparse:
                 raise ValueError(
@@ -192,9 +187,9 @@ class KVPoolWorker:
                     "is not yet supported with hybrid KV cache layouts (e.g. DSV4). "
                     "The strided I/O path assumes a single dense KV group."
                 )
-            self.local_heads_per_rank = self.num_kv_head // self.tp_size
-            self.effective_heads_per_rank = self.num_kv_head // self.effective_tp_size
-            self.num_sub_keys = self.local_heads_per_rank // self.effective_heads_per_rank
+            self.local_heads_per_rank = tp_mismatch_info.local_heads_per_rank
+            self.effective_heads_per_rank = tp_mismatch_info.effective_heads_per_rank
+            self.num_sub_keys = tp_mismatch_info.num_sub_keys
             logger.info(
                 "TP mismatch detected: local_tp=%d, peer_tp=%d, effective_tp=%d, "
                 "local_heads_per_rank=%d, effective_heads_per_rank=%d, num_sub_keys=%d",
@@ -206,9 +201,9 @@ class KVPoolWorker:
                 self.num_sub_keys,
             )
         else:
-            self.local_heads_per_rank = self.num_kv_head // self.tp_size if self.tp_size <= self.num_kv_head else 1
-            self.effective_heads_per_rank = self.local_heads_per_rank
-            self.num_sub_keys = 1
+            self.local_heads_per_rank = tp_mismatch_info.local_heads_per_rank
+            self.effective_heads_per_rank = tp_mismatch_info.effective_heads_per_rank
+            self.num_sub_keys = tp_mismatch_info.num_sub_keys
 
         partitions = None
         if self.kv_role == "kv_consumer" and self.consumer_is_to_put:
@@ -1000,8 +995,12 @@ class KVPoolWorker:
         all_addrs: list[list[int]] = []
         all_sizes: list[list[int]] = []
         all_block_ids: list[int] = []
-        for start, end, base_key in self.token_database.process_tokens(token_len, block_hashes, mask_num):
-            block_id = block_ids[start // self.block_size]
+        for start, end, base_key, block_id in self.token_database.process_tokens_with_block_ids(
+            token_len,
+            block_hashes,
+            block_ids,
+            mask_num,
+        ):
             token_count = end - start
             for sub_idx in range(self.num_sub_keys):
                 effective_rank = self.tp_rank * self.num_sub_keys + sub_idx
@@ -1037,78 +1036,80 @@ class KVPoolWorker:
         ret = self.m_store.get(keys_c, addrs_c, sizes_c)
         if ret is not None and any(r != 0 for r in ret):
             missing_block_ids = record_failed_blocks(block_ids_c, ret)
-            self._invalid_block_ids.update(missing_block_ids)
+            with self._invalid_block_ids_lock:
+                self._invalid_block_ids.update(missing_block_ids)
         elif ret is None:
             missing_block_ids = record_failed_blocks(block_ids_c, [1] * len(block_ids_c))
-            self._invalid_block_ids.update(missing_block_ids)
+            with self._invalid_block_ids_lock:
+                self._invalid_block_ids.update(missing_block_ids)
         logger.debug(
             "KV pool worker tp_mismatch get returned keys=%d",
             len(keys_c),
         )
 
     def _store_kv_tp_mismatch(self, req_meta: ReqMeta) -> None:
-        if self.kv_send_thread is None:
+        send_thread = self.kv_send_thread
+        if send_thread is None:
             return
         req_id = req_meta.req_id
-        if not self.kv_send_thread.is_stored_request(req_id):  # type: ignore[attr-defined]
+        if not send_thread.is_stored_request(req_id):  # type: ignore[attr-defined]
             return
-        token_len = req_meta.token_len_chunk
-        block_ids = req_meta.block_ids_by_group[0]
-        keys, addrs, sizes, _ = self._build_tp_mismatch_keys_and_addrs(
-            req_meta.block_hashes, block_ids, token_len, mask_num=0
-        )
-        if not keys:
-            self.kv_send_thread.dec_stored_request(req_id)  # type: ignore[attr-defined]
-            return
-        exists_states = self.kv_send_thread.lookup(keys)  # type: ignore[attr-defined]
-        missing_indices = [i for i, exists in enumerate(exists_states) if not exists]
-        if not missing_indices:
-            self.kv_send_thread.dec_stored_request(req_id)  # type: ignore[attr-defined]
-            return
-        keys = [keys[i] for i in missing_indices]
-        addrs = [addrs[i] for i in missing_indices]
-        sizes = [sizes[i] for i in missing_indices]
-        if req_meta.current_event is not None:
-            req_meta.current_event.synchronize()
-        logger.debug(
-            "KV pool worker tp_mismatch put req=%s keys=%d sample_keys=%s",
-            req_id,
-            len(keys),
-            keys[:3],
-        )
-        self.m_store.put(keys, addrs, sizes)
-
-        if self.enable_kv_events:
-            event_block_size = (
-                req_meta.original_block_size[0]
-                if isinstance(req_meta.original_block_size, list)
-                else req_meta.original_block_size
+        try:
+            token_len = req_meta.token_len_chunk
+            block_ids = req_meta.block_ids_by_group[0]
+            keys, addrs, sizes, _ = self._build_tp_mismatch_keys_and_addrs(
+                req_meta.block_hashes, block_ids, token_len, mask_num=0
             )
-            stored_events: list[BlockStored] = []
-            prev_key = None
-            for idx, (start, end, _base_key) in enumerate(
-                self.token_database.process_tokens(token_len, req_meta.block_hashes)
-            ):
-                if idx >= len(req_meta.block_hashes):
-                    break
-                block_hash = maybe_convert_block_hash(req_meta.block_hashes[idx])
-                token_ids = req_meta.token_ids[start:end] if req_meta.token_ids is not None else None
-                stored_events.append(
-                    BlockStored(
-                        block_hashes=[block_hash],
-                        parent_block_hash=prev_key,
-                        token_ids=token_ids,
-                        block_size=event_block_size,
-                        lora_id=None,
-                        medium="cpu",
-                        lora_name=None,
-                    )
-                )
-                prev_key = block_hash
-            if stored_events:
-                self.kv_send_thread.update_kv_event(stored_events)  # type: ignore[attr-defined]
+            if not keys:
+                return
+            exists_states = send_thread.lookup(keys)  # type: ignore[attr-defined]
+            missing_indices = [i for i, exists in enumerate(exists_states) if not exists]
+            if not missing_indices:
+                return
+            keys = [keys[i] for i in missing_indices]
+            addrs = [addrs[i] for i in missing_indices]
+            sizes = [sizes[i] for i in missing_indices]
+            if req_meta.current_event is not None:
+                req_meta.current_event.synchronize()
+            logger.debug(
+                "KV pool worker tp_mismatch put req=%s keys=%d sample_keys=%s",
+                req_id,
+                len(keys),
+                keys[:3],
+            )
+            self.m_store.put(keys, addrs, sizes)
 
-        self.kv_send_thread.dec_stored_request(req_id)  # type: ignore[attr-defined]
+            if self.enable_kv_events:
+                event_block_size = (
+                    req_meta.original_block_size[0]
+                    if isinstance(req_meta.original_block_size, list)
+                    else req_meta.original_block_size
+                )
+                stored_events: list[BlockStored] = []
+                prev_key = None
+                for idx, (start, end, _base_key) in enumerate(
+                    self.token_database.process_tokens(token_len, req_meta.block_hashes)
+                ):
+                    if idx >= len(req_meta.block_hashes):
+                        break
+                    block_hash = maybe_convert_block_hash(req_meta.block_hashes[idx])
+                    token_ids = req_meta.token_ids[start:end] if req_meta.token_ids is not None else None
+                    stored_events.append(
+                        BlockStored(
+                            block_hashes=[block_hash],
+                            parent_block_hash=prev_key,
+                            token_ids=token_ids,
+                            block_size=event_block_size,
+                            lora_id=None,
+                            medium="cpu",
+                            lora_name=None,
+                        )
+                    )
+                    prev_key = block_hash
+                if stored_events:
+                    send_thread.update_kv_event(stored_events)  # type: ignore[attr-defined]
+        finally:
+            send_thread.dec_stored_request(req_id)  # type: ignore[attr-defined]
 
     def get_finished(self, finished_req_ids: set[str], meta: AscendConnectorMetadata) -> tuple[set[str], set[str]]:
         done_sending = (
@@ -1277,6 +1278,15 @@ class KVPoolWorker:
             value_end = len(key)
         return f"{key[:value_start]}{value}{key[value_end:]}"
 
+    def _expand_lookup_keys_by_rank(self, keys: list[str], group_id: int) -> list[str]:
+        expanded: list[str] = []
+        for pp_rank in range(self.pp_size):
+            for tp_rank in range(self.get_group_tp_size(group_id)):
+                for key in keys:
+                    tp_key = self._replace_key_field(key, "head_or_tp_rank", tp_rank)
+                    expanded.append(self._replace_key_field(tp_key, "pp_rank", pp_rank))
+        return expanded
+
     @staticmethod
     def _chunk_hash_to_bytes(chunk_hash: str) -> bytes:
         if len(chunk_hash) == 64:
@@ -1289,13 +1299,7 @@ class KVPoolWorker:
     def _expand_lookup_key_variants(self, key: str, group_id: int, include_all_ranks: bool) -> list[str]:
         if not include_all_ranks:
             return [key]
-        variants: list[str] = []
-        group_tp_size = self.get_group_tp_size(group_id)
-        for tp_rank in range(group_tp_size):
-            tp_key = self._replace_key_field(key, "head_or_tp_rank", tp_rank)
-            for pp_rank in range(self.pp_size):
-                variants.append(self._replace_key_field(tp_key, "pp_rank", pp_rank))
-        return variants
+        return self._expand_lookup_keys_by_rank([key], group_id)
 
     def _lookup_with_coordinator(
         self,
@@ -1405,35 +1409,8 @@ class KVPoolWorker:
                 if not keys:
                     return 0
 
-                multi_tp_keys = keys[:]
-                if self.tp_mismatch:
-                    check_tp_size = min(self.effective_tp_size, self._get_group_num_kv_heads(group_id))
-                    base_rank = self.metadata[group_id].head_or_tp_rank
-                    for i in range(check_tp_size):
-                        if i == base_rank:
-                            continue
-                        for key_str in keys:
-                            multi_tp_keys.append(self._replace_key_field(key_str, "head_or_tp_rank", i))
-                    pp_base_keys = multi_tp_keys.copy()
-                    base_pp = self.metadata[group_id].pp_rank
-                    for i in range(self.pp_size):
-                        if i == base_pp:
-                            continue
-                        for key_str in pp_base_keys:
-                            multi_tp_keys.append(self._replace_key_field(key_str, "pp_rank", i))
-                    num_ranks = check_tp_size * self.pp_size
-                else:
-                    group_tp_size = self.get_group_tp_size(group_id)
-                    for i in range(1, group_tp_size):
-                        for key_str in keys:
-                            new_str = key_str.replace("@head_or_tp_rank:0", f"@head_or_tp_rank:{i}", 1)
-                            multi_tp_keys.append(new_str)
-                    pp_base_keys = multi_tp_keys.copy()
-                    for i in range(1, self.pp_size):
-                        for key_str in pp_base_keys:
-                            new_str = key_str.replace("@pp_rank:0", f"@pp_rank:{i}", 1)
-                            multi_tp_keys.append(new_str)
-                    num_ranks = group_tp_size * self.pp_size
+                multi_tp_keys = self._expand_lookup_keys_by_rank(keys, group_id)
+                num_ranks = len(multi_tp_keys) // len(keys)
                 res = self.m_store.exists(multi_tp_keys)  # type: ignore[assignment]
                 num_block = len(keys)
                 if use_layerwise:

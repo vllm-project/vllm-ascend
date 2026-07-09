@@ -680,6 +680,35 @@ class TestKVTransferTpMismatchDispatch(unittest.TestCase):
         self.assertEqual(args[2], 16)  # token_len
         self.assertEqual(args[3], 0)  # mask_num
 
+    def test_recving_tp_mismatch_missing_load_spec_finishes(self):
+        worker = MagicMock()
+        worker.tp_mismatch = True
+        t, _ = self._make_recving(worker=worker)
+        req = ReqMeta(
+            req_id="r1", token_len_chunk=16, block_ids_by_group=[[0]], block_hashes=[b"h0"], current_event=None
+        )
+        t.request_queue.put(req)
+        t._handle_request(req)
+        worker._load_kv_tp_mismatch.assert_not_called()
+        self.assertEqual(t.get_and_clear_finished_requests(), {"r1"})
+        self.assertEqual(t.request_queue.unfinished_tasks, 0)
+
+    def test_recving_tp_mismatch_task_done_on_exception(self):
+        worker = MagicMock()
+        worker.tp_mismatch = True
+        worker._load_kv_tp_mismatch.side_effect = RuntimeError("load failed")
+        t, _ = self._make_recving(worker=worker)
+        req = ReqMeta(
+            req_id="r1", token_len_chunk=16, block_ids_by_group=[[0]], block_hashes=[b"h0"], current_event=None
+        )
+        req.load_spec = MagicMock()
+        req.load_spec.token_len = 16
+        req.load_spec.vllm_cached_tokens = 0
+        t.request_queue.put(req)
+        with self.assertRaises(RuntimeError):
+            t._handle_request(req)
+        self.assertEqual(t.request_queue.unfinished_tasks, 0)
+
 
 if __name__ == "__main__":
     unittest.main()
