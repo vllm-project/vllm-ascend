@@ -173,6 +173,10 @@ nav:
     - getting_started.md
     - quick_start.md
     - installation.md
+    - Recipes:
+        - recipes/index.md
+        - recipes/format.md
+        - recipes/qwen3_dense_a3.md
     - Model Tutorials:
         - tutorials/models/index.md
         - tutorials/models/Qwen3-Dense.md
