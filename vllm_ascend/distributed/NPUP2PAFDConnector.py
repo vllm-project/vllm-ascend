@@ -226,12 +226,12 @@ class NPUP2PAFDConnector(AFDConnectorBase):
 
             if tensor.is_cpu:
                 # CPU tensor uses metadata_group
-                work = torch.distributed.isend(
+                work = torch.distributed.send(
                     tensor, dst=process_group.ranks[dst], group=metadata_group
                 )
             else:
                 # GPU tensor uses device_group
-                work = torch.distributed.isend(
+                work = torch.distributed.send(
                     tensor, dst=process_group.ranks[dst], group=group
                 )
             work_list.append(work)
@@ -281,12 +281,12 @@ class NPUP2PAFDConnector(AFDConnectorBase):
                 # Asynchronously receive tensor
                 if tensor.is_cpu:
                     # CPU tensor uses metadata_group
-                    work = torch.distributed.irecv(
+                    work = torch.distributed.recv(
                         tensor, src=process_group.ranks[src], group=metadata_group
                     )
                 else:
                     # GPU tensor uses device_group
-                    work = torch.distributed.irecv(
+                    work = torch.distributed.recv(
                         tensor, src=process_group.ranks[src], group=group
                     )
                 work_list.append(work)
