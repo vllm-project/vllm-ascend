@@ -229,15 +229,28 @@ def update_conv1d_graph_params(
                     # Mark every input row as -1 so the task is a state no-op.
                     new_cache_indices = (-1,) * cap_x_dim0
                 elif branch == "non_spec_decode":
-                    non_sdq_host, non_sd_cidx_host = get_causal_conv1d_update_host_args(meta)
-                    new_query_start_loc, new_cache_indices, _ = _pad_conv1d_host_args_to_capture(
-                        non_sdq_host,
-                        non_sd_cidx_host,
-                        (),
-                        cap_x_dim0=cap_x_dim0,
-                        q_per_seq=q_per_seq,
-                        with_num_accepted=False,
-                    )
+                    # Mirror the spec branch above: the captured graph may
+                    # contain a non-spec-decode conv1d task even when this
+                    # replay's batch has no runtime non-spec decode. That
+                    # happens when spec-decode (MTP) sequences are present: the
+                    # builder folds the plain decodes into prefills and sets
+                    # num_decodes to 0, so `non_spec_decode_fallback_meta` is
+                    # None. Fetching host args off the missing meta then raises
+                    # "Expected attn_metadata.non_spec_decode_fallback_meta..."
+                    # and kills the engine. Make the task a state no-op
+                    # (cache_indices = -1) instead, exactly like the spec case.
+                    if getattr(meta, "non_spec_decode_fallback_meta", None) is None:
+                        new_cache_indices = (-1,) * cap_x_dim0
+                    else:
+                        non_sdq_host, non_sd_cidx_host = get_causal_conv1d_update_host_args(meta)
+                        new_query_start_loc, new_cache_indices, _ = _pad_conv1d_host_args_to_capture(
+                            non_sdq_host,
+                            non_sd_cidx_host,
+                            (),
+                            cap_x_dim0=cap_x_dim0,
+                            q_per_seq=q_per_seq,
+                            with_num_accepted=False,
+                        )
                     new_num_accepted = ()
 
             torch.npu.graph_task_update_begin(update_stream, handle)
