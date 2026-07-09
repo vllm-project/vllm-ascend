@@ -113,15 +113,6 @@ msgstr ""
 msgid "The markdown formatted result is as follows:"
 msgstr "Markdown 格式的结果如下："
 
-msgid ""
-"| dataset | version | metric | mode | vllm-api-general-chat |\n"
-"| --- | --- | --- | --- | --- |\n"
-"| gsm8k | 7cd45e | accuracy | gen | 94.77 |"
-msgstr ""
-"| dataset | version | metric | mode | vllm-api-general-chat |\n"
-"| --- | --- | --- | --- | --- |\n"
-"| gsm8k | 7cd45e | accuracy | gen | 94.77 |"
-
 msgid "## Performance"
 msgstr "## 性能"
 
@@ -161,3 +152,6 @@ msgstr "大约几分钟后，即可获得性能评估结果。"
 
 msgid "output:"
 msgstr "输出："
+
+msgid "| dataset | version | metric | mode | vllm-api-general-chat |"
+msgstr "| 数据集 | 版本 | 指标 | 模式 | vllm-api-general-chat |"

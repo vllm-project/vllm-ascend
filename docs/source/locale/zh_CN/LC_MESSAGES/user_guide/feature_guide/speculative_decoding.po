@@ -45,31 +45,6 @@ msgstr ""
 msgid "The following speculative decoding methods are supported:"
 msgstr "支持以下推测解码方法："
 
-msgid ""
-"| Method | Description |\n"
-"| ------ | ----------- |\n"
-"| `ngram` | Match n-grams from the prompt |\n"
-"| `suffix` | Suffix-based pattern matching (requires Arctic Inference) |\n"
-"| `medusa` | Medusa heads embedded in the target model |\n"
-"| `eagle` | EAGLE-based draft model |\n"
-"| `eagle3` | EAGLE-3 based draft model |\n"
-"| `mtp` | Multi-Token Prediction with shared embedding head |\n"
-"| `dflash` | Draft-and-Flash with cross-attention |\n"
-"| `draft_model` | Generic external draft LLM |\n"
-"| `extract_hidden_states` | Extract hidden states for EAGLE training |"
-msgstr ""
-"| 方法 | 描述 |\n"
-"| ------ | ----------- |\n"
-"| `ngram` | 从提示中匹配 n-gram |\n"
-"| `suffix` | 基于后缀的模式匹配（需要 Arctic Inference） |\n"
-"| `medusa` | 嵌入在目标模型中的 Medusa 头 |\n"
-"| `eagle` | 基于 EAGLE 的草稿模型 |\n"
-"| `eagle3` | 基于 EAGLE-3 的草稿模型 |\n"
-"| `mtp` | 使用共享嵌入头的多令牌预测 |\n"
-"| `dflash` | 带交叉注意力的草稿与闪存 |\n"
-"| `draft_model` | 通用外部草稿 LLM |\n"
-"| `extract_hidden_states` | 提取隐藏状态用于 EAGLE 训练 |"
-
 msgid "## Common Configuration"
 msgstr "## 通用配置"
 
@@ -361,3 +336,34 @@ msgid ""
 "the cumulative acceptance from Block Verify is combined with the entropy-"
 "adjusted threshold from Entropy Verify."
 msgstr "这两个功能可以独立或同时启用。同时使用时，块验证的累积接受率将与熵验证的熵调整阈值相结合。"
+
+msgid "| Method | Description |"
+msgstr "| 方法 | 描述 |"
+
+msgid "| `ngram` | Match n-grams from the prompt |"
+msgstr "| `ngram` | 从提示中匹配 n-gram |"
+
+msgid ""
+"| `suffix` | Suffix-based pattern matching (requires Arctic Inference) |"
+msgstr "| `suffix` | 基于后缀的模式匹配（需要 Arctic Inference） |"
+
+msgid "| `medusa` | Medusa heads embedded in the target model |"
+msgstr "| `medusa` | 嵌入在目标模型中的 Medusa 头 |"
+
+msgid "| `eagle` | EAGLE-based draft model |"
+msgstr "| `eagle` | 基于 EAGLE 的草稿模型 |"
+
+msgid "| `eagle3` | EAGLE-3 based draft model |"
+msgstr "| `eagle3` | 基于 EAGLE-3 的草稿模型 |"
+
+msgid "| `mtp` | Multi-Token Prediction with shared embedding head |"
+msgstr "| `mtp` | 使用共享嵌入头的多令牌预测 |"
+
+msgid "| `dflash` | Draft-and-Flash with cross-attention |"
+msgstr "| `dflash` | 带交叉注意力的 Draft-and-Flash |"
+
+msgid "| `draft_model` | Generic external draft LLM |"
+msgstr "| `draft_model` | 通用外部草稿 LLM |"
+
+msgid "| `extract_hidden_states` | Extract hidden states for EAGLE training |"
+msgstr "| `extract_hidden_states` | 提取隐藏状态用于 EAGLE 训练 |"

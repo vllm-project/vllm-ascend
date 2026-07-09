@@ -152,17 +152,6 @@ msgstr ""
 "与此范围重叠，可能会发生间歇性端口冲突。为避免此问题，请根据下表配置 `kv_port`："
 
 msgid ""
-"| NPUs per Node | Reserved Port Range | Recommended kv_port |\n"
-"|---------------|---------------------|---------------------|\n"
-"| 8             | 20000 - 27999       | >= 28000            |\n"
-"| 16            | 20000 - 35999       | >= 36000            |"
-msgstr ""
-"| 每节点 NPU 数量 | 保留端口范围 | 推荐 kv_port |\n"
-"|---------------|---------------------|---------------------|\n"
-"| 8             | 20000 - 27999       | >= 28000            |\n"
-"| 16            | 20000 - 35999       | >= 36000            |"
-
-msgid ""
 "If you occasionally see `zmq.error.ZMQError: Address already in use` during "
 "startup, it may be caused by kv_port conflicting with randomly allocated "
 "AscendDirectTransport ports. Increase your kv_port value to avoid the "
@@ -673,25 +662,6 @@ msgid "=== \"Non-layerwise\""
 msgstr "=== \"非分层\""
 
 msgid ""
-"|Parameter  | meaning |\n"
-"| --- | --- |\n"
-"| --port | Proxy service Port |\n"
-"| --host | Proxy service Host IP|\n"
-"| --prefiller-hosts | Hosts of prefiller nodes |\n"
-"| --prefiller-ports | Ports of prefiller nodes |\n"
-"| --decoder-hosts | Hosts of decoder nodes |\n"
-"| --decoder-ports | Ports of decoder nodes |"
-msgstr ""
-"|参数  | 含义 |\n"
-"| --- | --- |\n"
-"| --port | 代理服务端口 |\n"
-"| --host | 代理服务主机 IP|\n"
-"| --prefiller-hosts | 预填充节点的主机 |\n"
-"| --prefiller-ports | 预填充节点的端口 |\n"
-"| --decoder-hosts | 解码器节点的主机 |\n"
-"| --decoder-ports | 解码器节点的端口 |"
-
-msgid ""
 "You can get the proxy program in the repository's examples, "
 "[load\\_balance\\_proxy\\_server\\_example.py](https://github.com/vllm-"
 "project/vllm-"
@@ -768,3 +738,27 @@ msgstr "确保环境中存在 hccn.conf 文件。如果使用 Docker，请将其
 
 msgid "3. Get NPU IP Addresses"
 msgstr "3. 获取 NPU IP 地址"
+
+msgid "| NPUs per Node | Reserved Port Range | Recommended kv_port |"
+msgstr "| 每节点NPU数 | 预留端口范围 | 推荐kv_port |"
+
+msgid "|Parameter  | meaning |"
+msgstr "| 参数 | 含义 |"
+
+msgid "| --port | Proxy service Port |"
+msgstr "| --port | 代理服务端口 |"
+
+msgid "| --host | Proxy service Host IP|"
+msgstr "| --host | 代理服务主机IP |"
+
+msgid "| --prefiller-hosts | Hosts of prefiller nodes |"
+msgstr "| --prefiller-hosts | 预填充节点主机 |"
+
+msgid "| --prefiller-ports | Ports of prefiller nodes |"
+msgstr "| --prefiller-ports | 预填充节点端口 |"
+
+msgid "| --decoder-hosts | Hosts of decoder nodes |"
+msgstr "| --decoder-hosts | 解码器节点主机 |"
+
+msgid "| --decoder-ports | Ports of decoder nodes |"
+msgstr "| --decoder-ports | 解码器节点端口 |"

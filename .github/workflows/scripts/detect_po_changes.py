@@ -77,6 +77,10 @@ def _is_translatable_paragraph(paragraph: str) -> bool:
     if TABLE_ROW_RE.match(text) and _is_table_data_row(text):
         return False
 
+    # Multi-line table blocks are handled by _flush_paragraph() during
+    # extraction — they are split at the separator line, keeping only
+    # header rows for translation.
+
     # Count characters that typically appear in natural language.
     alpha = sum(1 for c in text if c.isalpha())
     if alpha == 0:
@@ -122,7 +126,9 @@ def _is_table_data_row(row: str) -> bool:
             has_data_cell = True
             continue
         if __import__("re").match(r"^\[.*\]\(.*\)$", cell):
-            has_data_cell = True
+            # Link-only cells (e.g. feature names with docs links,
+            # GitHub usernames) are structural — they are neither prose
+            # nor pure data.  Skip them and let other cells decide.
             continue
         # Pure-text cell with a sentence (period/question/exclamation)
         # means this is a prose row, not a data row.
@@ -130,6 +136,45 @@ def _is_table_data_row(row: str) -> bool:
             return False
 
     return has_data_cell
+
+
+def _flush_paragraph(current: list[str], paragraphs: list[str]) -> None:
+    """Flush *current* accumulated lines into *paragraphs*.
+
+    If the paragraph is a multi-line table block (every line is a
+    ``|...|`` table row and there's a separator line like ``|:---:|``),
+    the block is split at the separator: header rows are kept, data rows
+    are discarded.
+    """
+    para = "\n".join(current).strip()
+    if not para:
+        current.clear()
+        return
+
+    # Check if this is a multi-line table block.
+    lines = para.split("\n")
+    if len(lines) > 1 and all(TABLE_ROW_RE.match(line.strip()) for line in lines):
+        sep_re = __import__("re").compile(r"^\|[\s:-]+\|")
+        for i, line in enumerate(lines):
+            if sep_re.match(line.strip()):
+                # Keep header rows (before separator).
+                if i > 0:
+                    header = "\n".join(lines[:i])
+                    if _is_translatable_paragraph(header):
+                        paragraphs.append(header)
+                # Treat each data row (after separator) as an individual
+                # paragraph and let _is_translatable_paragraph decide
+                # whether it contains natural language worth translating.
+                for data_line in lines[i + 1 :]:
+                    if _is_translatable_paragraph(data_line):
+                        paragraphs.append(data_line)
+                current.clear()
+                return
+        # No separator found — fall through to normal handling.
+
+    if _is_translatable_paragraph(para):
+        paragraphs.append(para)
+    current.clear()
 
 
 def _extract_paragraphs(content: str) -> list[str]:
@@ -196,9 +241,7 @@ def _extract_paragraphs(content: str) -> list[str]:
         # --- Blank line → paragraph boundary ---
         if not stripped:
             if current:
-                para = "\n".join(current).strip()
-                if _is_translatable_paragraph(para):
-                    paragraphs.append(para)
+                _flush_paragraph(current, paragraphs)
                 current = []
             continue
 
@@ -208,9 +251,7 @@ def _extract_paragraphs(content: str) -> list[str]:
 
     # Flush final paragraph.
     if current:
-        para = "\n".join(current).strip()
-        if _is_translatable_paragraph(para):
-            paragraphs.append(para)
+        _flush_paragraph(current, paragraphs)
 
     return paragraphs
 
@@ -257,11 +298,11 @@ def _write_po_from_paragraphs(po_path: Path, rel: str, paragraphs: list[str], dr
     body_entries = "\n\n".join(_po_entry_block(p) for p in paragraphs)
     if dry_run:
         print(f"  [DRY-RUN] Would force-regenerate: {po_path} ({len(paragraphs)} entries)")
-        return True
+        return {"has_new_or_modified": True, "has_empty": True}
     po_path.parent.mkdir(parents=True, exist_ok=True)
     po_path.write_text(header + body_entries + "\n", encoding="utf-8")
     print(f"  Force-regenerated: {po_path} ({len(paragraphs)} entries)")
-    return True
+    return {"has_new_or_modified": True, "has_empty": True}
 
 
 def _po_entry_block(msgid: str) -> str:
@@ -318,18 +359,17 @@ def _dedup_po_entries(po: POFile) -> int:
     return removed
 
 
-def process_file(source_path: Path, dry_run: bool = False, force: bool = False) -> bool:
+def process_file(source_path: Path, dry_run: bool = False, force: bool = False) -> dict | None:
     """Create or update the .po file for *source_path*.
 
     If *force* is True, the entire .po file is regenerated from the source
     markdown, discarding any existing translations.  Otherwise only new
     paragraphs are appended and existing translations are preserved.
 
-    Returns True if the .po file was created or modified and contains
-    at least one untranslated entry.
+    Returns a dict with info about the changes, or None if no changes needed.
     """
     if not source_path.exists():
-        return False
+        return None
 
     rel = source_path.relative_to(SOURCE_DIR)
     po_path = LOCALE_DIR / rel.with_suffix(".po")
@@ -338,7 +378,7 @@ def process_file(source_path: Path, dry_run: bool = False, force: bool = False) 
     paragraphs = _extract_paragraphs(content)
 
     if not paragraphs:
-        return False
+        return None
 
     if force and po_path.exists():
         return _write_po_from_paragraphs(po_path, str(rel), paragraphs, dry_run)
@@ -350,7 +390,7 @@ def process_file(source_path: Path, dry_run: bool = False, force: bool = False) 
     po = pofile(str(po_path))
 
     # Deduplicate existing entries — keep only the first occurrence of each
-    # msgid; mark duplicates as obsolete.  Without this step, repeated
+    # msgid; remove duplicates.  Without this step, repeated
     # invocations on files that already contain duplicate msgid entries
     # (e.g. from prior force rebuilds or buggy incremental runs) would
     # keep appending more copies.
@@ -411,28 +451,44 @@ def process_file(source_path: Path, dry_run: bool = False, force: bool = False) 
             po.append(_build_po_entry(para))
             new_count += 1
 
-    # Mark paragraphs that no longer exist in source as obsolete.
+    # Remove paragraphs that no longer exist in source.
     # Any entry still in entries_by_msgid is not in the new paragraphs list.
     for old_entry in entries_by_msgid.values():
-        old_entry.obsolete = True
+        po.remove(old_entry)
         removed_count += 1
 
     change_count = new_count + modified_count + removed_count + dedup_removed
     if change_count == 0:
-        return _has_empty_msgstr(po)
+        if _has_empty_msgstr(po):
+            untranslated = sum(1 for e in po if e.msgid and not e.msgstr)
+            if dry_run:
+                print(f"  [DRY-RUN] {po_path}")
+                print(f"            -> {untranslated} untranslated (no structural changes)")
+            else:
+                print(f"  Untranslated: {po_path}")
+                print(f"                -> {untranslated} untranslated (no structural changes)")
+            return {"has_new_or_modified": False, "has_empty": True}
+        return None
+
+    # Classify the reason this file needs attention.
+    reasons: list[str] = []
+    untranslated = sum(1 for e in po if e.msgid and not e.msgstr)
+    if new_count:
+        reasons.append(f"{new_count} new paragraph(s) to translate")
+    if modified_count:
+        reasons.append(f"{modified_count} paragraph(s) modified (re-translation needed)")
+    if untranslated and not new_count and not modified_count:
+        reasons.append(f"{untranslated} untranslated")
+    if removed_count:
+        reasons.append(f"{removed_count} obsolete (source paragraph removed)")
+    if dedup_removed:
+        reasons.append(f"{dedup_removed} duplicate(s) cleaned")
+    reason_str = "; ".join(reasons) if reasons else "structural changes"
 
     if dry_run:
-        parts = []
-        if dedup_removed:
-            parts.append(f"dedup {dedup_removed}")
-        if new_count:
-            parts.append(f"+{new_count} new")
-        if modified_count:
-            parts.append(f"~{modified_count} modified")
-        if removed_count:
-            parts.append(f"-{removed_count} removed")
-        print(f"  [DRY-RUN] Would update: {po_path} ({', '.join(parts)})")
-        return True
+        print(f"  [DRY-RUN] {po_path}")
+        print(f"            -> {reason_str}")
+        return {"has_new_or_modified": new_count > 0 or modified_count > 0, "has_empty": untranslated > 0}
 
     po.save(str(po_path))
     # Work around polib 1.2.0 unstable header serialization (the bare
@@ -442,17 +498,9 @@ def process_file(source_path: Path, dry_run: bool = False, force: bool = False) 
     # deterministic.
     po2 = pofile(str(po_path))
     po2.save(str(po_path))
-    parts = []
-    if dedup_removed:
-        parts.append(f"dedup {dedup_removed}")
-    if new_count:
-        parts.append(f"+{new_count} new")
-    if modified_count:
-        parts.append(f"~{modified_count} modified")
-    if removed_count:
-        parts.append(f"-{removed_count} removed")
-    print(f"  Updated: {po_path} ({', '.join(parts)})")
-    return True
+    print(f"  Updated: {po_path}")
+    print(f"           -> {reason_str}")
+    return {"has_new_or_modified": new_count > 0 or modified_count > 0, "has_empty": untranslated > 0}
 
 
 def _find_similar_entry(new_para: str, entries: dict[str, POEntry]) -> str | None:
@@ -473,8 +521,8 @@ def _find_similar_entry(new_para: str, entries: dict[str, POEntry]) -> str | Non
 
 
 def _po_has_msgid(po: POFile, msgid: str) -> bool:
-    """Return True if *po* contains an entry with the given *msgid* (non-obsolete)."""
-    return any(entry.msgid == msgid and not entry.obsolete for entry in po)
+    """Return True if *po* contains an entry with the given *msgid*."""
+    return any(entry.msgid == msgid for entry in po)
 
 
 def _first_significant_line(text: str) -> str:
@@ -491,7 +539,7 @@ def _first_significant_line(text: str) -> str:
 
 def _has_empty_msgstr(po: POFile) -> bool:
     """Return True if *po* contains at least one entry with an empty msgstr."""
-    return any(entry.msgid and not entry.msgstr for entry in po if not entry.obsolete)
+    return any(entry.msgid and not entry.msgstr for entry in po)
 
 
 def main() -> int:
@@ -530,14 +578,39 @@ def main() -> int:
         print("--force enabled: regenerating ALL .po files from scratch")
 
     needs_translation: list[str] = []
+    # Classify files by why they need translation.
+    files_with_new: list[str] = []  # has untranslated new/modified paragraphs
+    files_obsolete_only: list[str] = []  # only obsolete entries removed, no untranslated
+    files_existing_empty: list[str] = []  # no structural changes but has pre-existing empty entries
+
     for source_path in en_files:
         try:
-            if process_file(source_path, dry_run=args.dry_run, force=args.force):
+            info = process_file(source_path, dry_run=args.dry_run, force=args.force)
+            if info:
                 rel = _relative_to_source(source_path)
                 po_rel = str(LOCALE_DIR / Path(rel).with_suffix(".po"))
-                needs_translation.append(po_rel)
+                if info.get("has_new_or_modified") or info.get("has_empty"):
+                    needs_translation.append(po_rel)
+                if info.get("has_new_or_modified"):
+                    files_with_new.append(po_rel)
+                elif info.get("has_empty"):
+                    files_existing_empty.append(po_rel)
+                else:
+                    files_obsolete_only.append(po_rel)
         except Exception as exc:
             print(f"  ERROR processing {source_path}: {exc}", file=sys.stderr)
+
+    # Print summary.
+    print(f"\n{'─' * 60}")
+    print(f"  Scanned: {len(en_files)} English markdown files")
+    print(f"  Files with changes: {len(needs_translation)}")
+    if files_with_new:
+        print(f"    Need translation (new/modified paragraphs): {len(files_with_new)}")
+    if files_existing_empty:
+        print(f"    Have pre-existing untranslated entries:     {len(files_existing_empty)}")
+    if files_obsolete_only:
+        print(f"    Obsolete cleanup only (no translation needed): {len(files_obsolete_only)}")
+    print(f"{'─' * 60}")
 
     # Write output JSON.
     result = {

@@ -363,23 +363,6 @@ msgstr "## 3 前提条件"
 msgid "### 3.1 Model Weight"
 msgstr "### 3.1 模型权重"
 
-msgid ""
-"| Model | Description | Recommended Hardware | Source |\n"
-"|-------|-------------|---------------------|--------|\n"
-"| `MiniMax-M2.7-w8a8-QuaRot` | M2.7 W8A8 quantized version | 1× Atlas 800 A3 (64G × 16) or 1× Atlas 800I A2 (64G × 8) | [MiniMax-M2.7-w8a8-QuaRot](https://www.modelscope.ai/models/vllm-ascend/MiniMax-M2.7-w8a8-QuaRot) |\n"
-"| `MiniMax-M2.5-w8a8-QuaRot` | M2.5 W8A8 quantized version | 1× Atlas 800 A3 (64G × 16) or 1× Atlas 800I A2 (64G × 8) | [MiniMax-M2.5-w8a8-QuaRot](https://modelscope.cn/models/Eco-Tech/MiniMax-M2.5-w8a8-QuaRot) |\n"
-"| `MiniMax-M2.7-w8a8c8-QuaRot` | M2.7 W8A8C8 quantized version | 1× Atlas 800 A3 (64G × 16) or 1× Atlas 800I A2 (64G × 8) | [MiniMax-M2.7-w8a8c8-QuaRot](https://www.modelscope.ai/models/vllm-ascend/MiniMax-M2.7-w8a8c8-QuaRot) |\n"
-"| `Eagle3` (M2.7) | M2.7 speculative decoding head model | Matches the base model node count | [MiniMax-M2.7-eagle-model](https://modelscope.cn/models/Eco-Tech/MiniMax-M2.7-eagle-model-short) |\n"
-"| `Eagle3` (M2.5) | M2.5 speculative decoding head model | Matches the base model node count | [MiniMax-M2.5-eagle-model](https://modelscope.cn/models/vllm-ascend/MiniMax-M2.5-eagle-model-0318) |"
-msgstr ""
-"| 模型 | 描述 | 推荐硬件 | 来源 |\n"
-"|-------|-------------|---------------------|--------|\n"
-"| `MiniMax-M2.7-w8a8-QuaRot` | M2.7 W8A8 量化版本 | 1× Atlas 800 A3 (64G × 16) 或 1× Atlas 800I A2 (64G × 8) | [MiniMax-M2.7-w8a8-QuaRot](https://www.modelscope.ai/models/vllm-ascend/MiniMax-M2.7-w8a8-QuaRot) |\n"
-"| `MiniMax-M2.5-w8a8-QuaRot` | M2.5 W8A8 量化版本 | 1× Atlas 800 A3 (64G × 16) 或 1× Atlas 800I A2 (64G × 8) | [MiniMax-M2.5-w8a8-QuaRot](https://modelscope.cn/models/Eco-Tech/MiniMax-M2.5-w8a8-QuaRot) |\n"
-"| `MiniMax-M2.7-w8a8c8-QuaRot` | M2.7 W8A8C8 量化版本 | 1× Atlas 800 A3 (64G × 16) 或 1× Atlas 800I A2 (64G × 8) | [MiniMax-M2.7-w8a8c8-QuaRot](https://www.modelscope.ai/models/vllm-ascend/MiniMax-M2.7-w8a8c8-QuaRot) |\n"
-"| `Eagle3` (M2.7) | M2.7 投机解码头模型 | 与基础模型节点数匹配 | [MiniMax-M2.7-eagle-model](https://modelscope.cn/models/Eco-Tech/MiniMax-M2.7-eagle-model-short) |\n"
-"| `Eagle3` (M2.5) | M2.5 投机解码头模型 | 与基础模型节点数匹配 | [MiniMax-M2.5-eagle-model](https://modelscope.cn/models/vllm-ascend/MiniMax-M2.5-eagle-model-0318) |"
-
 msgid "### 3.2 Verify Multi-node Communication (Optional)"
 msgstr "### 3.2 验证多节点通信（可选）"
 
@@ -497,21 +480,6 @@ msgid "### 9.1 Recommended Configurations"
 msgstr "### 9.1 推荐配置"
 
 msgid ""
-"| Scenario | Input/Output | Deployment | NPUs | P Config | D Config | Max Batched Tokens | Max Num Seqs (P/D) | Max Model Len | EAGLE3 | FUSED_MC2 | FlashComm1 | Async Scheduling |\n"
-"|----------|-------------|------------|------|----------|----------|-------------------|----------------|---------------|--------|-----------|------------|------------------|\n"
-"| Short Seq High Throughput | 3.5K → 1.5K | 1P2D PD separation | 24 (A3) | DP8TP2EP16 | DP32TP1EP32 | 16384 | 128 / 128 | 32k | 3 | On | On | On |\n"
-"| Short Seq Low Latency | 3.5K → 1.5K | 1P2D PD separation | 24 (A3) | DP4TP4EP16 | DP8TP4EP32 | 16384 | 128 / 128 | 32k | 3 | On | On | On |\n"
-"| Long Seq High Throughput | 128K → 1K <br>（90% cache hit） | 1P1D PD separation | 16 (A3) | DP2TP8EP16 | DP2TP8EP16 | 16384 | 64 / 16 | 200k | 3 | On | On | On |\n"
-"| Long Seq Low Latency | 128K → 1K <br>（90% cache hit） | 1P2D PD separation | 24 (A3) | DP2TP8EP16 | DP4TP8EP32 | 16384 | 64 / 16 | 200k | 3 | On | On | On |"
-msgstr ""
-"| 场景 | 输入/输出 | 部署方式 | NPUs | P 配置 | D 配置 | 最大批处理 Tokens | 最大序列数 (P/D) | 最大模型长度 | EAGLE3 | FUSED_MC2 | FlashComm1 | 异步调度 |\n"
-"|----------|-------------|------------|------|----------|----------|-------------------|----------------|---------------|--------|-----------|------------|------------------|\n"
-"| 短序列高吞吐 | 3.5K → 1.5K | 1P2D PD 分离 | 24 (A3) | DP8TP2EP16 | DP32TP1EP32 | 16384 | 128 / 128 | 32k | 3 | 开启 | 开启 | 开启 |\n"
-"| 短序列低延迟 | 3.5K → 1.5K | 1P2D PD 分离 | 24 (A3) | DP4TP4EP16 | DP8TP4EP32 | 16384 | 128 / 128 | 32k | 3 | 开启 | 开启 | 开启 |\n"
-"| 长序列高吞吐 | 128K → 1K <br>（90% 缓存命中） | 1P1D PD 分离 | 16 (A3) | DP2TP8EP16 | DP2TP8EP16 | 16384 | 64 / 16 | 200k | 3 | 开启 | 开启 | 开启 |\n"
-"| 长序列低延迟 | 128K → 1K <br>（90% 缓存命中） | 1P2D PD 分离 | 24 (A3) | DP2TP8EP16 | DP4TP8EP32 | 16384 | 64 / 16 | 200k | 3 | 开启 | 开启 | 开启 |"
-
-msgid ""
 "> **Note**: The prefix cache hit rate for short-sequence tests is 0%; for "
 "long-sequence tests it is 90%. Adjust `max-num-seqs`, `max-model-len`, and "
 "`max-num-batched-tokens` based on your actual workload."
@@ -531,38 +499,8 @@ msgstr "#### 9.2.2 模型特定优化"
 msgid "##### Optimizations Enabled by Default"
 msgstr "##### 默认启用的优化"
 
-msgid ""
-"| Optimization Technique | Technical Principle | Performance Benefit |\n"
-"| ---------------------- | ------------------- | ------------------- |\n"
-"| FullGraph Optimization | Captures and replays the entire decoding graph at once using `compilation_config={\"cudagraph_mode\":\"FULL_DECODE_ONLY\"}` | Significantly reduces scheduling latency, stabilizes multi-device performance |\n"
-"| CPU Binding | Uses `--additional-config '{\"enable_cpu_binding\":true}'` to bind CPU cores | Reduces cross-core scheduling overhead, improving decode latency stability |\n"
-"| Multi-thread Weight Loading | Uses `--model-loader-extra-config '{\"enable_multithread_load\":true}'` for parallel weight loading | Reduces model loading time |"
-msgstr ""
-"| 优化技术 | 技术原理 | 性能收益 |\n"
-"| ---------------------- | ------------------- | ------------------- |\n"
-"| FullGraph 优化 | 通过 `compilation_config={\"cudagraph_mode\":\"FULL_DECODE_ONLY\"}` 一次性捕获并重放整个解码图 | 显著降低调度延迟，稳定多设备性能 |\n"
-"| CPU 绑定 | 使用 `--additional-config '{\"enable_cpu_binding\":true}'` 绑定 CPU 核心 | 减少跨核心调度开销，提升解码延迟稳定性 |\n"
-"| 多线程权重加载 | 使用 `--model-loader-extra-config '{\"enable_multithread_load\":true}'` 并行加载权重 | 减少模型加载时间 |"
-
 msgid "##### Optimizations That Require Explicit Enabling"
 msgstr "##### 需要显式启用的优化"
-
-msgid ""
-"| Optimization Technique | Applicable Scenarios | Enablement Method | Technical Principle | Precautions |\n"
-"| ---------------------- | -------------------- | ----------------- | ------------------- | ----------- |\n"
-"| FlashComm v1 | High-concurrency, TP scenarios | `--additional-config '{\"enable_flashcomm1\": true}'` | Decomposes traditional Allreduce into Reduce-Scatter and All-Gather | Threshold protection: only takes effect when the actual number of tokens exceeds the threshold |\n"
-"| Fused MC2 | TP ≥ 4 scenarios | `--additional-config '{\"enable_fused_mc2\": true}'` | Fuses multiple communication and computation operations | Recommended for A3; not applicable for A2 |\n"
-"| Balanced Scheduling | High DP scenarios | `export VLLM_ASCEND_BALANCE_SCHEDULING=1` | Enhances scheduling capacity between prefill and decode | Currently disabled by default (`0`). Set to `1` only when concurrency ≈ DP × max-num-seqs. Disable for long-context scenarios |\n"
-"| EAGLE3 Speculative Decoding | All scenarios | `--speculative_config '{\"method\": \"eagle3\", \"model\": \"/path/to/Eagle3/\", \"num_speculative_tokens\": 3}'` | Uses a draft model to predict future tokens | 1–3 tokens for long context; 3 tokens for short context |\n"
-"| jemalloc Preload | All scenarios | `export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2` | Replaces default memory allocator to reduce fragmentation | Ensure jemalloc is installed in the container |"
-msgstr ""
-"| 优化技术 | 适用场景 | 启用方法 | 技术原理 | 注意事项 |\n"
-"| ---------------------- | -------------------- | ----------------- | ------------------- | ----------- |\n"
-"| FlashComm v1 | 高并发、TP 场景 | `--additional-config '{\"enable_flashcomm1\": true}'` | 将传统 Allreduce 分解为 Reduce-Scatter 和 All-Gather | 阈值保护：仅当实际 token 数超过阈值时生效 |\n"
-"| Fused MC2 | TP ≥ 4 场景 | `--additional-config '{\"enable_fused_mc2\": true}'` | 融合多个通信和计算操作 | 推荐用于 A3；不适用于 A2 |\n"
-"| 均衡调度 | 高 DP 场景 | `export VLLM_ASCEND_BALANCE_SCHEDULING=1` | 增强 prefill 和 decode 之间的调度能力 | 当前默认关闭（`0`）。仅在并发数 ≈ DP × max-num-seqs 时设置为 `1`。长上下文场景请关闭 |\n"
-"| EAGLE3 投机解码 | 所有场景 | `--speculative_config '{\"method\": \"eagle3\", \"model\": \"/path/to/Eagle3/\", \"num_speculative_tokens\": 3}'` | 使用草稿模型预测未来 token | 长上下文使用 1–3 个 token；短上下文使用 3 个 token |\n"
-"| jemalloc 预加载 | 所有场景 | `export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2` | 替换默认内存分配器以减少碎片 | 确保容器中已安装 jemalloc |"
 
 msgid "## 10 FAQ"
 msgstr "## 10 常见问题"
@@ -608,543 +546,160 @@ msgid ""
 " startup command:"
 msgstr "- 如果需要使用 `curl` 和工具调用进行测试，请在启动命令中添加以下内容："
 
-#~ msgid "MiniMax-M2"
-#~ msgstr "MiniMax-M2"
-
-#~ msgid "1 Introduction"
-#~ msgstr "1 引言"
-
-#~ msgid "2 Supported Features"
-#~ msgstr "2 支持特性"
-
-#~ msgid "3 Prerequisites"
-#~ msgstr "3 前提条件"
-
-#~ msgid "3.1 Model Weight"
-#~ msgstr "3.1 模型权重"
-
-#~ msgid "Model"
-#~ msgstr "模型"
-
-#~ msgid "Description"
-#~ msgstr "描述"
-
-#~ msgid "Recommended Hardware"
-#~ msgstr "推荐硬件"
-
-#~ msgid "Source"
-#~ msgstr "来源"
-
-#~ msgid "`MiniMax-M2.7-w8a8-QuaRot`"
-#~ msgstr "`MiniMax-M2.7-w8a8-QuaRot`"
-
-#~ msgid "M2.7 W8A8 quantized version"
-#~ msgstr "M2.7 W8A8量化版本"
-
-#~ msgid "1× Atlas 800 A3 (64G × 16) or 1× Atlas 800I A2 (64G × 8)"
-#~ msgstr "1× Atlas 800 A3 (64G × 16) 或 1× Atlas 800I A2 (64G × 8)"
-
-#~ msgid ""
-#~ "[MiniMax-M2.7-w8a8-QuaRot](https://www.modelscope.ai/models/vllm-"
-#~ "ascend/MiniMax-M2.7-w8a8-QuaRot)"
-#~ msgstr ""
-#~ "[MiniMax-M2.7-w8a8-QuaRot](https://www.modelscope.ai/models/vllm-"
-#~ "ascend/MiniMax-M2.7-w8a8-QuaRot)"
-
-#~ msgid "`MiniMax-M2.5-w8a8-QuaRot`"
-#~ msgstr "`MiniMax-M2.5-w8a8-QuaRot`"
-
-#~ msgid "M2.5 W8A8 quantized version"
-#~ msgstr "M2.5 W8A8量化版本"
-
-#~ msgid ""
-#~ "[MiniMax-M2.5-w8a8-QuaRot](https://modelscope.cn/models/Eco-"
-#~ "Tech/MiniMax-M2.5-w8a8-QuaRot)"
-#~ msgstr ""
-#~ "[MiniMax-M2.5-w8a8-QuaRot](https://modelscope.cn/models/Eco-"
-#~ "Tech/MiniMax-M2.5-w8a8-QuaRot)"
-
-#~ msgid "`MiniMax-M2.7-w8a8c8-QuaRot`"
-#~ msgstr "`MiniMax-M2.7-w8a8c8-QuaRot`"
-
-#~ msgid "M2.7 W8A8C8 quantized version"
-#~ msgstr "M2.7 W8A8C8量化版本"
-
-#~ msgid ""
-#~ "[MiniMax-M2.7-w8a8c8-QuaRot](https://www.modelscope.ai/models/vllm-"
-#~ "ascend/MiniMax-M2.7-w8a8c8-QuaRot)"
-#~ msgstr ""
-#~ "[MiniMax-M2.7-w8a8c8-QuaRot](https://www.modelscope.ai/models/vllm-"
-#~ "ascend/MiniMax-M2.7-w8a8c8-QuaRot)"
-
-#~ msgid "`Eagle3` (M2.7)"
-#~ msgstr "`Eagle3` (M2.7)"
-
-#~ msgid "M2.7 speculative decoding head model"
-#~ msgstr "M2.7推测解码头模型"
-
-#~ msgid "Matches the base model node count"
-#~ msgstr "与基础模型节点数匹配"
-
-#~ msgid ""
-#~ "[MiniMax-M2.7-eagle-model](https://modelscope.cn/models/Eco-"
-#~ "Tech/MiniMax-M2.7-eagle-model-short)"
-#~ msgstr ""
-#~ "[MiniMax-M2.7-eagle-model](https://modelscope.cn/models/Eco-"
-#~ "Tech/MiniMax-M2.7-eagle-model-short)"
-
-#~ msgid "`Eagle3` (M2.5)"
-#~ msgstr "`Eagle3` (M2.5)"
-
-#~ msgid "M2.5 speculative decoding head model"
-#~ msgstr "M2.5推测解码头模型"
-
-#~ msgid ""
-#~ "[MiniMax-M2.5-eagle-model](https://modelscope.cn/models/vllm-"
-#~ "ascend/MiniMax-M2.5-eagle-model-0318)"
-#~ msgstr ""
-#~ "[MiniMax-M2.5-eagle-model](https://modelscope.cn/models/vllm-"
-#~ "ascend/MiniMax-M2.5-eagle-model-0318)"
-
-#~ msgid "3.2 Verify Multi-node Communication (Optional)"
-#~ msgstr "3.2 验证多节点通信（可选）"
-
-#~ msgid "4 Installation"
-#~ msgstr "4 安装"
-
-#~ msgid "4.1 Docker Image Installation"
-#~ msgstr "4.1 Docker镜像安装"
-
-#~ msgid "4.2 Source Code Installation"
-#~ msgstr "4.2 源码安装"
-
-#~ msgid "5 Online Service Deployment"
-#~ msgstr "5 在线服务部署"
-
-#~ msgid "5.1 Single-Node Online Deployment"
-#~ msgstr "5.1 单节点在线部署"
-
-#~ msgid "A3 (single node)"
-#~ msgstr "A3（单节点）"
-
-#~ msgid ""
-#~ "If you only care about short-context low latency, you can set `--max-model-"
-#~ "len 32768`, `--tensor-parallel-size 4`, and `--data-parallel-size 4`."
-#~ msgstr ""
-#~ "如果只关注短上下文低延迟，可以设置`--max-model-len 32768`、`--tensor-parallel-size 4`和`--data-"
-#~ "parallel-size 4`。"
-
-#~ msgid "`minimax_m2_append_think` keeps `<think>...</think>` inside `content`."
-#~ msgstr "`minimax_m2_append_think`将`<think>...</think>`保留在`content`内部。"
-
-#~ msgid ""
-#~ "If you mainly rely on the reasoning semantics of `/v1/responses`, it is "
-#~ "recommended to use `--reasoning-parser minimax_m2` instead."
-#~ msgstr "如果主要依赖`/v1/responses`的推理语义，建议改用`--reasoning-parser minimax_m2`。"
-
-#~ msgid ""
-#~ "To achieve better performance on long-context scenarios (e.g., 128k or 64k),"
-#~ " we recommend the following adjustments:"
-#~ msgstr "为在长上下文场景（如128k或64k）中获得更好性能，建议进行以下调整："
-
-#~ msgid ""
-#~ "**Note**: The above parameters are validated in a specific test environment "
-#~ "for reference only. Please adjust `--max-model-len`, `--max-num-seqs`, "
-#~ "`--max-num-batched-tokens`, and `--gpu-memory-utilization` based on your "
-#~ "actual input/output length, concurrency, and hardware configuration."
-#~ msgstr ""
-#~ "**注意**：上述参数在特定测试环境中验证，仅供参考。请根据实际输入/输出长度、并发数和硬件配置调整`--max-model-len`、`--max-"
-#~ "num-seqs`、`--max-num-batched-tokens`和`--gpu-memory-utilization`。"
-
-#~ msgid ""
-#~ "If you need to test with `curl` and tool calling, add the following to the "
-#~ "startup command:"
-#~ msgstr "如果需要使用`curl`和工具调用进行测试，请在启动命令中添加以下内容："
-
-#~ msgid "A2 (single node)"
-#~ msgstr "A2（单节点）"
-
-#~ msgid "5.2 Multi-Node PD Separation Deployment"
-#~ msgstr "5.2 多节点PD分离部署"
-
-#~ msgid "Request Forwarding"
-#~ msgstr "请求转发"
-
-#~ msgid "6 Functional Verification"
-#~ msgstr "6 功能验证"
-
-#~ msgid ""
-#~ "`<node_ip>`: The IP address of the node where the server is running (e.g., "
-#~ "localhost for single-node)."
-#~ msgstr "`<node_ip>`: 运行服务器的节点IP地址（例如，单节点时为localhost）。"
-
-#~ msgid ""
-#~ "`<port>`: The port number specified in the server startup command (e.g., "
-#~ "`8000`)."
-#~ msgstr "`<port>`: 服务器启动命令中指定的端口号（例如`8000`）。"
-
-#~ msgid "Using curl"
-#~ msgstr "使用curl"
-
-#~ msgid "Using OpenAI Python Client"
-#~ msgstr "使用OpenAI Python客户端"
-
-#~ msgid "Tool Calling Verification"
-#~ msgstr "工具调用验证"
-
-#~ msgid "7 Accuracy Evaluation"
-#~ msgstr "7 精度评估"
-
-#~ msgid ""
-#~ "**Note**: Post-processing parameters (e.g., `max_tokens`, `temperature`, "
-#~ "`stop` tokens) should match those defined in the model weight's "
-#~ "`generation_config.json`. The recommended maximum output length for GPQA-"
-#~ "diamond and AIME2025 is 64k (65536 tokens)."
-#~ msgstr ""
-#~ "**注意**: 后处理参数（例如`max_tokens`、`temperature`、`stop` "
-#~ "tokens）应与模型权重的`generation_config.json`中定义的参数匹配。GPQA-"
-#~ "diamond和AIME2025的推荐最大输出长度为64k（65536 tokens）。"
-
-#~ msgid "7.1 Using AISBench"
-#~ msgstr "7.1 使用AISBench"
-
-#~ msgid "7.2 Using Language Model Evaluation Harness"
-#~ msgstr "7.2 使用Language Model Evaluation Harness"
-
-#~ msgid ""
-#~ "For `lm_eval` installation, please refer to [Using "
-#~ "lm_eval](../../developer_guide/evaluation/using_lm_eval.md)."
-#~ msgstr ""
-#~ "关于`lm_eval`的安装，请参考[使用lm_eval](../../developer_guide/evaluation/using_lm_eval.md)。"
-
-#~ msgid "Run `lm_eval` to execute the accuracy evaluation:"
-#~ msgstr "运行`lm_eval`执行精度评估："
-
-#~ msgid "8 Performance Evaluation"
-#~ msgstr "8 性能评估"
-
-#~ msgid "8.1 Using AISBench"
-#~ msgstr "8.1 使用AISBench"
-
-#~ msgid "8.2 Using vLLM Benchmark"
-#~ msgstr "8.2 使用vLLM Benchmark"
-
-#~ msgid "9 Performance Tuning"
-#~ msgstr "9 性能调优"
-
-#~ msgid ""
-#~ "**Note**: The following configurations are validated in specific test "
-#~ "environments and are for reference only. The optimal configuration depends "
-#~ "on factors such as maximum input/output length, prefix cache hit rate, "
-#~ "precision requirements, and deployment machine ratios. It is recommended to "
-#~ "refer to Section 9.2 for tuning based on actual conditions."
-#~ msgstr ""
-#~ "**注意**: "
-#~ "以下配置在特定测试环境中验证，仅供参考。最佳配置取决于最大输入/输出长度、前缀缓存命中率、精度要求和部署机器比例等因素。建议根据实际情况参考第9.2节进行调优。"
-
-#~ msgid "9.1 Recommended Configurations"
-#~ msgstr "9.1 推荐配置"
-
-#~ msgid "Scenario"
-#~ msgstr "场景"
-
-#~ msgid "Input/Output"
-#~ msgstr "输入/输出"
-
-#~ msgid "Deployment"
-#~ msgstr "部署"
-
-#~ msgid "NPUs"
-#~ msgstr "NPUs"
-
-#~ msgid "P Config"
-#~ msgstr "P配置"
-
-#~ msgid "D Config"
-#~ msgstr "D配置"
-
-#~ msgid "Max Batched Tokens"
-#~ msgstr "最大批处理Tokens"
-
-#~ msgid "Max Num Seqs (P/D)"
-#~ msgstr "最大序列数 (P/D)"
-
-#~ msgid "Max Model Len"
-#~ msgstr "最大模型长度"
-
-#~ msgid "EAGLE3"
-#~ msgstr "EAGLE3"
-
-#~ msgid "FUSED_MC2"
-#~ msgstr "FUSED_MC2"
-
-#~ msgid "FlashComm1"
-#~ msgstr "FlashComm1"
-
-#~ msgid "Async Scheduling"
-#~ msgstr "异步调度"
-
-#~ msgid "Short Seq High Throughput"
-#~ msgstr "短序列高吞吐"
-
-#~ msgid "3.5K → 1.5K"
-#~ msgstr "3.5K → 1.5K"
-
-#~ msgid "1P2D PD separation"
-#~ msgstr "1P2D PD分离"
-
-#~ msgid "24 (A3)"
-#~ msgstr "24 (A3)"
-
-#~ msgid "DP8TP2EP16"
-#~ msgstr "DP8TP2EP16"
-
-#~ msgid "DP32TP1EP32"
-#~ msgstr "DP32TP1EP32"
-
-#~ msgid "16384"
-#~ msgstr "16384"
-
-#~ msgid "128 / 128"
-#~ msgstr "128 / 128"
-
-#~ msgid "32k"
-#~ msgstr "32k"
-
-#~ msgid "3"
-#~ msgstr "3"
-
-#~ msgid "On"
-#~ msgstr "开启"
-
-#~ msgid "Short Seq Low Latency"
-#~ msgstr "短序列低延迟"
-
-#~ msgid "DP4TP4EP16"
-#~ msgstr "DP4TP4EP16"
-
-#~ msgid "DP8TP4EP32"
-#~ msgstr "DP8TP4EP32"
-
-#~ msgid "Long Seq High Throughput"
-#~ msgstr "长序列高吞吐"
-
-#, python-format
-#~ msgid "128K → 1K <br>（90% cache hit）"
-#~ msgstr "128K → 1K <br>（90%缓存命中）"
-
-#~ msgid "1P1D PD separation"
-#~ msgstr "1P1D PD分离"
-
-#~ msgid "16 (A3)"
-#~ msgstr "16 (A3)"
-
-#~ msgid "DP2TP8EP16"
-#~ msgstr "DP2TP8EP16"
-
-#~ msgid "64 / 16"
-#~ msgstr "64 / 16"
-
-#~ msgid "200k"
-#~ msgstr "200k"
-
-#~ msgid "Long Seq Low Latency"
-#~ msgstr "长序列低延迟"
-
-#~ msgid "DP4TP8EP32"
-#~ msgstr "DP4TP8EP32"
-
-#~ msgid ""
-#~ "**Note**: The prefix cache hit rate for short-sequence tests is 0%; for "
-#~ "long-sequence tests it is 90%. Adjust `max-num-seqs`, `max-model-len`, and "
-#~ "`max-num-batched-tokens` based on your actual workload."
-#~ msgstr ""
-#~ "**注意**: 短序列测试的前缀缓存命中率为0%；长序列测试为90%。根据实际工作负载调整`max-num-seqs`、`max-model-"
-#~ "len`和`max-num-batched-tokens`。"
-
-#~ msgid "9.2 Tuning Guidelines"
-#~ msgstr "9.2 调优指南"
-
-#~ msgid "9.2.1 General Tuning Reference"
-#~ msgstr "9.2.1 通用调优参考"
-
-#~ msgid "9.2.2 Model-Specific Optimizations"
-#~ msgstr "9.2.2 模型特定优化"
-
-#~ msgid "Optimizations Enabled by Default"
-#~ msgstr "默认启用的优化"
-
-#~ msgid "Optimization Technique"
-#~ msgstr "优化技术"
-
-#~ msgid "Technical Principle"
-#~ msgstr "技术原理"
-
-#~ msgid "Performance Benefit"
-#~ msgstr "性能收益"
-
-#~ msgid "FullGraph Optimization"
-#~ msgstr "全图优化"
-
-#, python-brace-format
-#~ msgid ""
-#~ "Captures and replays the entire decoding graph at once using "
-#~ "`compilation_config={\"cudagraph_mode\":\"FULL_DECODE_ONLY\"}`"
-#~ msgstr "通过`compilation_config={\"cudagraph_mode\":\"FULL_DECODE_ONLY\"}`一次性捕获并重放整个解码图"
-
-#~ msgid ""
-#~ "Significantly reduces scheduling latency, stabilizes multi-device "
-#~ "performance"
-#~ msgstr "显著降低调度延迟，稳定多设备性能"
-
-#~ msgid "CPU Binding"
-#~ msgstr "CPU绑定"
-
-#, python-brace-format
-#~ msgid ""
-#~ "Uses `--additional-config '{\"enable_cpu_binding\":true}'` to bind CPU cores"
-#~ msgstr "使用`--additional-config '{\"enable_cpu_binding\":true}'`绑定CPU核心"
-
-#~ msgid ""
-#~ "Reduces cross-core scheduling overhead, improving decode latency stability"
-#~ msgstr "减少跨核心调度开销，提升解码延迟稳定性"
-
-#~ msgid "Multi-thread Weight Loading"
-#~ msgstr "多线程权重加载"
-
-#, python-brace-format
-#~ msgid ""
-#~ "Uses `--model-loader-extra-config '{\"enable_multithread_load\":true}'` for "
-#~ "parallel weight loading"
-#~ msgstr ""
-#~ "使用`--model-loader-extra-config '{\"enable_multithread_load\":true}'`进行并行权重加载"
-
-#~ msgid "Reduces model loading time"
-#~ msgstr "减少模型加载时间"
-
-#~ msgid "Optimizations That Require Explicit Enabling"
-#~ msgstr "需要显式启用的优化"
-
-#~ msgid "Applicable Scenarios"
-#~ msgstr "适用场景"
-
-#~ msgid "Enablement Method"
-#~ msgstr "启用方法"
-
-#~ msgid "Precautions"
-#~ msgstr "注意事项"
-
-#~ msgid "FlashComm v1"
-#~ msgstr "FlashComm v1"
-
-#~ msgid "High-concurrency, TP scenarios"
-#~ msgstr "高并发、TP场景"
-
-#, python-brace-format
-#~ msgid "`--additional-config '{\"enable_flashcomm1\": true}'`"
-#~ msgstr "`--additional-config '{\"enable_flashcomm1\": true}'`"
-
-#~ msgid "Decomposes traditional Allreduce into Reduce-Scatter and All-Gather"
-#~ msgstr "将传统Allreduce分解为Reduce-Scatter和All-Gather"
-
-#~ msgid ""
-#~ "Threshold protection: only takes effect when the actual number of tokens "
-#~ "exceeds the threshold"
-#~ msgstr "阈值保护：仅在实际token数超过阈值时生效"
-
-#~ msgid "Fused MC2"
-#~ msgstr "融合MC2"
-
-#~ msgid "TP ≥ 4 scenarios"
-#~ msgstr "TP ≥ 4场景"
-
-#, python-brace-format
-#~ msgid "`--additional-config '{\"enable_fused_mc2\": true}'`"
-#~ msgstr "`--additional-config '{\"enable_fused_mc2\": true}'`"
-
-#~ msgid "Fuses multiple communication and computation operations"
-#~ msgstr "融合多个通信和计算操作"
-
-#~ msgid "Recommended for A3; not applicable for A2"
-#~ msgstr "推荐用于A3；不适用于A2"
-
-#~ msgid "Balanced Scheduling"
-#~ msgstr "均衡调度"
-
-#~ msgid "High DP scenarios"
-#~ msgstr "高DP场景"
-
-#~ msgid "`export VLLM_ASCEND_BALANCE_SCHEDULING=1`"
-#~ msgstr "`export VLLM_ASCEND_BALANCE_SCHEDULING=1`"
-
-#~ msgid "Enhances scheduling capacity between prefill and decode"
-#~ msgstr "增强prefill和decode之间的调度能力"
-
-#~ msgid ""
-#~ "Currently disabled by default (`0`). Set to `1` only when concurrency ≈ DP ×"
-#~ " max-num-seqs. Disable for long-context scenarios"
-#~ msgstr "当前默认禁用(`0`)。仅在并发数≈DP×max-num-seqs时设为`1`。长上下文场景禁用"
-
-#~ msgid "EAGLE3 Speculative Decoding"
-#~ msgstr "EAGLE3推测解码"
-
-#~ msgid "All scenarios"
-#~ msgstr "所有场景"
-
-#, python-brace-format
-#~ msgid ""
-#~ "`--speculative_config '{\"method\": \"eagle3\", \"model\": "
-#~ "\"/path/to/Eagle3/\", \"num_speculative_tokens\": 3}'`"
-#~ msgstr ""
-#~ "`--speculative_config '{\"method\": \"eagle3\", \"model\": "
-#~ "\"/path/to/Eagle3/\", \"num_speculative_tokens\": 3}'`"
-
-#~ msgid "Uses a draft model to predict future tokens"
-#~ msgstr "使用草稿模型预测未来token"
-
-#~ msgid "1–3 tokens for long context; 3 tokens for short context"
-#~ msgstr "长上下文1-3个token；短上下文3个token"
-
-#~ msgid "jemalloc Preload"
-#~ msgstr "jemalloc预加载"
-
-#~ msgid "`export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2`"
-#~ msgstr "`export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2`"
-
-#~ msgid "Replaces default memory allocator to reduce fragmentation"
-#~ msgstr "替换默认内存分配器以减少碎片化"
-
-#~ msgid "Ensure jemalloc is installed in the container"
-#~ msgstr "确保容器中已安装jemalloc"
-
-#~ msgid "10 FAQ"
-#~ msgstr "10 常见问题"
-
-#~ msgid "**Q: Does C8 quantization support EAGLE3 speculative decoding?**"
-#~ msgstr "**问：C8量化是否支持EAGLE3推测解码？**"
-
-#~ msgid ""
-#~ "**Q: Which `--reasoning-parser` is recommended for tool calling tasks?**"
-#~ msgstr "**问：工具调用任务推荐使用哪个`--reasoning-parser`？**"
-
-#~ msgid ""
-#~ "**Q: Why is the `reasoning` field often empty after using "
-#~ "`minimax_m2_append_think`?**"
-#~ msgstr "**问：使用`minimax_m2_append_think`后，为什么`reasoning`字段经常为空？**"
-
-#~ msgid ""
-#~ "**Q: Startup fails with HCCL port conflicts (address already bound). What "
-#~ "should I do?**"
-#~ msgstr "**问：启动时出现HCCL端口冲突(address already bound)，该怎么办？**"
-
-#~ msgid "**Q: How to handle OOM or unstable startup?**"
-#~ msgstr "**问：如何处理OOM或不稳定的启动？**"
-
-#~ msgid "**Q: How should I choose `--reasoning-parser`?**"
-#~ msgstr "**问：如何选择`--reasoning-parser`？**"
-
-#~ msgid "**Q: Which ports must be accessible?**"
-#~ msgstr "**问：哪些端口必须可访问？**"
-
-#~ msgid "!!! note"
-#~ msgstr ""
+msgid "| Model | Description | Recommended Hardware | Source |"
+msgstr "| 模型 | 描述 | 推荐硬件 | 来源 |"
+
+msgid ""
+"| Scenario | Input/Output | Deployment | NPUs | P Config | D Config | Max "
+"Batched Tokens | Max Num Seqs (P/D) | Max Model Len | EAGLE3 | FUSED_MC2 | "
+"FlashComm1 | Async Scheduling |"
+msgstr ""
+"| 场景 | 输入/输出 | 部署 | NPU | P配置 | D配置 | 最大批量Token数 | 最大序列数(P/D) | 最大模型长度 | "
+"EAGLE3 | FUSED_MC2 | FlashComm1 | 异步调度 |"
+
+msgid "| Optimization Technique | Technical Principle | Performance Benefit |"
+msgstr "| 优化技术 | 技术原理 | 性能收益 |"
+
+msgid ""
+"| Optimization Technique | Applicable Scenarios | Enablement Method | "
+"Technical Principle | Precautions |"
+msgstr "| 优化技术 | 适用场景 | 启用方法 | 技术原理 | 注意事项 |"
+
+msgid ""
+"| `MiniMax-M2.7-w8a8-QuaRot` | M2.7 W8A8 quantized version | 1× Atlas 800 A3"
+" (64G × 16) or 1× Atlas 800I A2 (64G × 8) | "
+"[MiniMax-M2.7-w8a8-QuaRot](https://www.modelscope.ai/models/vllm-"
+"ascend/MiniMax-M2.7-w8a8-QuaRot) |"
+msgstr ""
+"| `MiniMax-M2.7-w8a8-QuaRot` | M2.7 W8A8量化版本 | 1× Atlas 800 A3 (64G × 16) 或 "
+"1× Atlas 800I A2 (64G × 8) | "
+"[MiniMax-M2.7-w8a8-QuaRot](https://www.modelscope.ai/models/vllm-"
+"ascend/MiniMax-M2.7-w8a8-QuaRot) |"
+
+msgid ""
+"| `MiniMax-M2.5-w8a8-QuaRot` | M2.5 W8A8 quantized version | 1× Atlas 800 A3"
+" (64G × 16) or 1× Atlas 800I A2 (64G × 8) | "
+"[MiniMax-M2.5-w8a8-QuaRot](https://modelscope.cn/models/Eco-"
+"Tech/MiniMax-M2.5-w8a8-QuaRot) |"
+msgstr ""
+"| `MiniMax-M2.5-w8a8-QuaRot` | M2.5 W8A8量化版本 | 1× Atlas 800 A3 (64G × 16) 或 "
+"1× Atlas 800I A2 (64G × 8) | "
+"[MiniMax-M2.5-w8a8-QuaRot](https://modelscope.cn/models/Eco-"
+"Tech/MiniMax-M2.5-w8a8-QuaRot) |"
+
+msgid ""
+"| `MiniMax-M2.7-w8a8c8-QuaRot` | M2.7 W8A8C8 quantized version | 1× Atlas "
+"800 A3 (64G × 16) or 1× Atlas 800I A2 (64G × 8) | "
+"[MiniMax-M2.7-w8a8c8-QuaRot](https://www.modelscope.ai/models/vllm-"
+"ascend/MiniMax-M2.7-w8a8c8-QuaRot) |"
+msgstr ""
+"| `MiniMax-M2.7-w8a8c8-QuaRot` | M2.7 W8A8C8量化版本 | 1× Atlas 800 A3 (64G × "
+"16) 或 1× Atlas 800I A2 (64G × 8) | "
+"[MiniMax-M2.7-w8a8c8-QuaRot](https://www.modelscope.ai/models/vllm-"
+"ascend/MiniMax-M2.7-w8a8c8-QuaRot) |"
+
+msgid ""
+"| `Eagle3` (M2.7) | M2.7 speculative decoding head model | Matches the base "
+"model node count | [MiniMax-M2.7-eagle-"
+"model](https://modelscope.cn/models/Eco-Tech/MiniMax-M2.7-eagle-model-short)"
+" |"
+msgstr ""
+"| `Eagle3` (M2.7) | M2.7推测解码头模型 | 与基础模型节点数匹配 | [MiniMax-M2.7-eagle-"
+"model](https://modelscope.cn/models/Eco-Tech/MiniMax-M2.7-eagle-model-short)"
+" |"
+
+msgid ""
+"| `Eagle3` (M2.5) | M2.5 speculative decoding head model | Matches the base "
+"model node count | [MiniMax-M2.5-eagle-"
+"model](https://modelscope.cn/models/vllm-ascend/MiniMax-M2.5-eagle-"
+"model-0318) |"
+msgstr ""
+"| `Eagle3` (M2.5) | M2.5推测解码头模型 | 与基础模型节点数匹配 | [MiniMax-M2.5-eagle-"
+"model](https://modelscope.cn/models/vllm-ascend/MiniMax-M2.5-eagle-"
+"model-0318) |"
+
+msgid ""
+"| Short Seq High Throughput | 3.5K → 1.5K | 1P2D PD separation | 24 (A3) | "
+"DP8TP2EP16 | DP32TP1EP32 | 16384 | 128 / 128 | 32k | 3 | On | On | On |"
+msgstr ""
+"| 短序列高吞吐 | 3.5K → 1.5K | 1P2D PD分离 | 24 (A3) | DP8TP2EP16 | DP32TP1EP32 | "
+"16384 | 128 / 128 | 32k | 3 | 开启 | 开启 | 开启 |"
+
+msgid ""
+"| Short Seq Low Latency | 3.5K → 1.5K | 1P2D PD separation | 24 (A3) | "
+"DP4TP4EP16 | DP8TP4EP32 | 16384 | 128 / 128 | 32k | 3 | On | On | On |"
+msgstr ""
+"| 短序列低延迟 | 3.5K → 1.5K | 1P2D PD分离 | 24 (A3) | DP4TP4EP16 | DP8TP4EP32 | "
+"16384 | 128 / 128 | 32k | 3 | 开启 | 开启 | 开启 |"
+
+msgid ""
+"| FullGraph Optimization | Captures and replays the entire decoding graph at"
+" once using `compilation_config={\"cudagraph_mode\":\"FULL_DECODE_ONLY\"}` |"
+" Significantly reduces scheduling latency, stabilizes multi-device "
+"performance |"
+msgstr ""
+"| 全图优化 | 使用 `compilation_config={\"cudagraph_mode\":\"FULL_DECODE_ONLY\"}` "
+"一次性捕获并重放整个解码图 | 显著降低调度延迟，稳定多设备性能 |"
+
+msgid ""
+"| CPU Binding | Uses `--additional-config '{\"enable_cpu_binding\":true}'` "
+"to bind CPU cores | Reduces cross-core scheduling overhead, improving decode"
+" latency stability |"
+msgstr ""
+"| CPU绑定 | 使用 `--additional-config '{\"enable_cpu_binding\":true}'` 绑定CPU核心 |"
+" 减少跨核心调度开销，提升解码延迟稳定性 |"
+
+msgid ""
+"| Multi-thread Weight Loading | Uses `--model-loader-extra-config "
+"'{\"enable_multithread_load\":true}'` for parallel weight loading | Reduces "
+"model loading time |"
+msgstr ""
+"| 多线程权重加载 | 使用 `--model-loader-extra-config "
+"'{\"enable_multithread_load\":true}'` 进行并行权重加载 | 减少模型加载时间 |"
+
+msgid ""
+"| FlashComm v1 | High-concurrency, TP scenarios | `--additional-config "
+"'{\"enable_flashcomm1\": true}'` | Decomposes traditional Allreduce into "
+"Reduce-Scatter and All-Gather | Threshold protection: only takes effect when"
+" the actual number of tokens exceeds the threshold |"
+msgstr ""
+"| FlashComm v1 | 高并发、TP场景 | `--additional-config '{\"enable_flashcomm1\": "
+"true}'` | 将传统Allreduce分解为Reduce-Scatter和All-Gather | 阈值保护：仅在实际token数超过阈值时生效 "
+"|"
+
+msgid ""
+"| Fused MC2 | TP ≥ 4 scenarios | `--additional-config "
+"'{\"enable_fused_mc2\": true}'` | Fuses multiple communication and "
+"computation operations | Recommended for A3; not applicable for A2 |"
+msgstr ""
+"| 融合MC2 | TP ≥ 4场景 | `--additional-config '{\"enable_fused_mc2\": true}'` | "
+"融合多个通信和计算操作 | 推荐用于A3；不适用于A2 |"
+
+msgid ""
+"| Balanced Scheduling | High DP scenarios | `export "
+"VLLM_ASCEND_BALANCE_SCHEDULING=1` | Enhances scheduling capacity between "
+"prefill and decode | Currently disabled by default (`0`). Set to `1` only "
+"when concurrency ≈ DP × max-num-seqs. Disable for long-context scenarios |"
+msgstr ""
+"| 均衡调度 | 高DP场景 | `export VLLM_ASCEND_BALANCE_SCHEDULING=1` | "
+"增强prefill和decode之间的调度能力 | 当前默认关闭（`0`）。仅在并发数 ≈ DP × max-num-seqs "
+"时设置为`1`。长上下文场景请关闭 |"
+
+msgid ""
+"| EAGLE3 Speculative Decoding | All scenarios | `--speculative_config "
+"'{\"method\": \"eagle3\", \"model\": \"/path/to/Eagle3/\", "
+"\"num_speculative_tokens\": 3}'` | Uses a draft model to predict future "
+"tokens | 1–3 tokens for long context; 3 tokens for short context |"
+msgstr ""
+"| EAGLE3推测解码 | 所有场景 | `--speculative_config '{\"method\": \"eagle3\", "
+"\"model\": \"/path/to/Eagle3/\", \"num_speculative_tokens\": 3}'` | "
+"使用草稿模型预测未来token | 长上下文1-3个token；短上下文3个token |"
+
+msgid ""
+"| jemalloc Preload | All scenarios | `export "
+"LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2` | Replaces default "
+"memory allocator to reduce fragmentation | Ensure jemalloc is installed in "
+"the container |"
+msgstr ""
+"| jemalloc预加载 | 所有场景 | `export LD_PRELOAD=/usr/lib/aarch64-linux-"
+"gnu/libjemalloc.so.2` | 替换默认内存分配器以减少碎片 | 确保容器中已安装jemalloc |"

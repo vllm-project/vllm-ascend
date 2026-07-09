@@ -146,21 +146,20 @@ msgstr ""
 "project/vllm-"
 "ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)"
 
-msgid ""
-"|Parameter  | Meaning |\n"
-"| --- | --- |\n"
-"| --port | Port of proxy |\n"
-"| --prefiller-port | All ports of prefill |\n"
-"| --decoder-ports | All ports of decoder |"
-msgstr ""
-"|参数  | 含义 |\n"
-"| --- | --- |\n"
-"| --port | 代理端口 |\n"
-"| --prefiller-port | 预填充的所有端口 |\n"
-"| --decoder-ports | 解码器的所有端口 |"
-
 msgid "## Verification"
 msgstr "## 验证"
 
 msgid "Check service health using the proxy server endpoint."
 msgstr "使用代理服务器端点检查服务健康状态。"
+
+msgid "|Parameter  | Meaning |"
+msgstr "|参数 | 含义 |"
+
+msgid "| --port | Port of proxy |"
+msgstr "| --port | 代理端口 |"
+
+msgid "| --prefiller-port | All ports of prefill |"
+msgstr "| --prefiller-port | 预填充的所有端口 |"
+
+msgid "| --decoder-ports | All ports of decoder |"
+msgstr "| --decoder-ports | 解码器的所有端口 |"

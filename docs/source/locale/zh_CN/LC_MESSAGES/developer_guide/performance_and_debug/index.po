@@ -20,7 +20,4 @@ msgstr ""
 "Generated-By: Babel 2.17.0\n"
 
 msgid "# Performance and Debug"
-msgstr ""
-
-#~ msgid "Performance and Debug"
-#~ msgstr "性能与调试"
+msgstr "# 性能与调试"
