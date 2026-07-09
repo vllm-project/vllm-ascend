@@ -450,11 +450,11 @@ class NPUModelRunner(GPUModelRunner):
             self.positions = torch.zeros(
                 max_buffer_num_tokens, dtype=torch.int64, device=self.device)
             
-        # sfa_dcp with replicate k
-        self.sfa_dcp_replicate_k = self.use_sparse and (self.vllm_config.additional_config or {}).get(
-            "sfa_dcp_replicate_k", False
+        # sfa_dcp with replicated indexer
+        self.sfa_dcp_replicated_indexer = self.use_sparse and (self.vllm_config.additional_config or {}).get(
+            "sfa_dcp_replicated_indexer", False
         )
-        if self.sfa_dcp_replicate_k:
+        if self.sfa_dcp_replicated_indexer:
             assert self.pcp_size == 1 and \
             self.dcp_size == self.parallel_config.tensor_parallel_size
             if self.use_sparse_c8_indexer and get_ascend_device_type() == AscendDeviceType.A5:
@@ -3253,7 +3253,7 @@ class NPUModelRunner(GPUModelRunner):
                 slot_mapping = blk_table.slot_mapping.gpu[:maybe_pcp_full_tokens]
                 self.cpu_slot_mapping = blk_table.slot_mapping.cpu[:maybe_pcp_full_tokens]
                 blk_table_tensor = blk_table.get_device_tensor()[:num_reqs_padded]          
-                if self.sfa_dcp_replicate_k:
+                if self.sfa_dcp_replicated_indexer:
                     block_table_no_cp = blk_table.get_device_tensor_no_cp()[:num_reqs_padded]
                     slot_mapping_no_cp = blk_table.slot_mapping_no_cp.gpu[:maybe_pcp_full_tokens]
                 # Fill unused with -1. Needed for reshape_and_cache in full cuda
@@ -3377,7 +3377,7 @@ class NPUModelRunner(GPUModelRunner):
                     block_size=attn_group.kv_cache_spec.block_size,
                 )
 
-            if self.sfa_dcp_replicate_k:
+            if self.sfa_dcp_replicated_indexer:
                 extra_attn_metadata_args = dict(
                     block_table_no_cp=block_table_no_cp_gid_0,
                     slot_mapping_no_cp=slot_mapping_no_cp_gid_0,
@@ -4726,7 +4726,7 @@ class NPUModelRunner(GPUModelRunner):
 
                     if self.use_sparse and has_indexer_cache:
                         dsa_k_cache_shape = (
-                            num_blocks * current_kv_cache_spec.sfa_dcp_replicate_k_size,
+                            num_blocks * current_kv_cache_spec.sfa_dcp_replicated_indexer_size,
                             current_kv_cache_spec.block_size,
                             current_kv_cache_spec.num_kv_heads,
                             self.model_config.hf_text_config.index_head_dim,
@@ -4736,7 +4736,7 @@ class NPUModelRunner(GPUModelRunner):
                             dsa_k_cache = raw_dsa_k_tensor.view(self.c8_k_cache_dtype).view(dsa_k_cache_shape)
                             # dsa_k_scale
                             dsa_k_scale_cache_shape = (
-                                num_blocks * current_kv_cache_spec.sfa_dcp_replicate_k_size,
+                                num_blocks * current_kv_cache_spec.sfa_dcp_replicated_indexer_size,
                                 current_kv_cache_spec.block_size,
                                 current_kv_cache_spec.num_kv_heads,
                                 1,
@@ -5037,7 +5037,7 @@ class NPUModelRunner(GPUModelRunner):
                             self.model_config.hf_text_config.qk_rope_head_dim,
                             0,
                         )
-                    if not self.sfa_dcp_replicate_k:
+                    if not self.sfa_dcp_replicated_indexer:
                         kv_cache_spec[layer_name] = AscendMLAAttentionSpec(
                             block_size=self.block_size,
                             num_kv_heads=1,
@@ -5056,7 +5056,7 @@ class NPUModelRunner(GPUModelRunner):
                             dtype=self.kv_cache_dtype,
                             cache_dtype_str=self.vllm_config.cache_config.cache_dtype,
                             cache_sparse_c8=self.ascend_config.is_sparse_c8_layer(layer_name),
-                            sfa_dcp_replicate_k_size=self.dcp_size,
+                            sfa_dcp_replicated_indexer_size=self.dcp_size,
                         )
                 elif spec := attn_module.get_kv_cache_spec(self.vllm_config):
                     if getattr(attn_module.impl, "fa_quant_layer", False):

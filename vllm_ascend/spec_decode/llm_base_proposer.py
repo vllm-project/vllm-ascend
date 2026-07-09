@@ -551,7 +551,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         num_input_tokens: int,
         slot_mapping_no_cp: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
-        if not getattr(self.runner, "sfa_dcp_replicate_k", False):
+        if not getattr(self.runner, "sfa_dcp_replicated_indexer", False):
             return {}
 
         blk_table = self.runner.input_batch.block_table[0]
@@ -929,7 +929,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         slot_mapping_lens = common_attn_metadata.slot_mapping.shape[0]
         self.slot_mapping_group[0][:slot_mapping_lens].copy_(common_attn_metadata.slot_mapping)
         self.slot_mapping_group[0][slot_mapping_lens:].fill_(-1)
-        if getattr(self.runner, "sfa_dcp_replicate_k", False):
+        if getattr(self.runner, "sfa_dcp_replicated_indexer", False):
             slot_mapping_no_cp = self.runner.input_batch.block_table[0].slot_mapping_no_cp.gpu[:slot_mapping_lens]
             self.slot_mapping_no_cp_group[0][:slot_mapping_lens].copy_(slot_mapping_no_cp)
             self.slot_mapping_no_cp_group[0][slot_mapping_lens:].fill_(-1)
@@ -1784,7 +1784,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             slot_mapping = mtp_slot_mapping[slot_indices]
             self.slot_mapping_group[draft_index][: batch_size * self.pcp_size] = slot_mapping
             self.slot_mapping_group[draft_index][batch_size * self.pcp_size :].fill_(PADDING_SLOT_ID)
-            if getattr(self.runner, "sfa_dcp_replicate_k", False):
+            if getattr(self.runner, "sfa_dcp_replicated_indexer", False):
                 assert mtp_slot_mapping_no_cp is not None, "SFA DCP MTP requires no-CP MTP slot mapping."
                 slot_mapping_no_cp = mtp_slot_mapping_no_cp[slot_indices]
                 self.slot_mapping_no_cp_group[draft_index][: batch_size * self.pcp_size] = slot_mapping_no_cp

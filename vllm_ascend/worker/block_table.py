@@ -307,7 +307,7 @@ class BlockTable:
         for block_id in block_ids:
             # CP block ids are 0-based block-group ids. Each CP block group
             # maps to a contiguous no-CP physical block range, matching
-            # Mooncake's SFA replicate-K block expansion.
+            # Mooncake's SFA replicated indexer block expansion.
             start_block = int(block_id) * total_cp_world_size
             expanded_blocks.extend(range(start_block, start_block + total_cp_world_size))
         return np.array(expanded_blocks, dtype=np.int32)

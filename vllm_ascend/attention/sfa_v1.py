@@ -29,7 +29,7 @@ from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     ascend_chunked_prefill_workspace_size,
     enable_cp,
-    enable_dcp_replicate_k,
+    enable_sfa_dcp_replicated_indexer,
     maybe_save_kv_layer_to_connector,
     trans_rope_weight,
     transdata,
@@ -111,10 +111,10 @@ class AscendSFABackend(AttentionBackend):
 
     @staticmethod
     def get_builder_cls():
-        if enable_dcp_replicate_k():
+        if enable_sfa_dcp_replicated_indexer():
             from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadataBuilder
 
-            return  AscendSFADCPMetadataBuilder
+            return AscendSFADCPMetadataBuilder
         if enable_cp():
             from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFACPMetadataBuilder
 
@@ -133,7 +133,7 @@ class AscendSFABackend(AttentionBackend):
 
     @staticmethod
     def get_impl_cls() -> type["AscendSFAImpl"]:
-        if enable_dcp_replicate_k():
+        if enable_sfa_dcp_replicated_indexer():
             from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPImpl
 
             return AscendSFADCPImpl
@@ -1334,7 +1334,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         else:
             actual_seq_lengths_query = attn_metadata.cum_query_lens
             actual_seq_lengths_key = attn_metadata.seq_lens
-        # DCP replicate-k stores LI cache with the full/no-CP metadata, while
+        # DCP replicated indexer stores LI cache with the full/no-CP metadata, while
         # SFA KV remains stored with the DCP-sharded slot mapping.
         slot_mapping_sfa = (
             attn_metadata.dcp_context.slot_mapping

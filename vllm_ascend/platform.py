@@ -717,14 +717,14 @@ class NPUPlatform(Platform):
             and model_config.hf_text_config is not None
             and hasattr(model_config.hf_text_config, "index_topk")
         )
-        sfa_dcp_replicate_k = use_sparse and (vllm_config.additional_config or {}).get(
-            "sfa_dcp_replicate_k", False
+        sfa_dcp_replicated_indexer = use_sparse and (vllm_config.additional_config or {}).get(
+            "sfa_dcp_replicated_indexer", False
         )
         if (
             vllm_config.kv_transfer_config is not None
             and cache_config.block_size != parallel_config.cp_kv_cache_interleave_size
             and cp_size > 1
-            and not sfa_dcp_replicate_k
+            and not sfa_dcp_replicated_indexer
         ):
             raise AssertionError(
                 f"cp_kv_cache_interleave_size({parallel_config.cp_kv_cache_interleave_size}) "
@@ -733,9 +733,9 @@ class NPUPlatform(Platform):
             )
 
         if use_sparse and cp_size > 1 and parallel_config.cp_kv_cache_interleave_size != cache_config.block_size:
-            if sfa_dcp_replicate_k:
+            if sfa_dcp_replicated_indexer:
                 logger.warning_once(
-                    "SFA DCP replicate-k is running with "
+                    "SFA DCP replicated indexer is running with "
                     f"cp_kv_cache_interleave_size({parallel_config.cp_kv_cache_interleave_size})"
                     f" != block_size({cache_config.block_size}). "
                     "Keep the configured cp_kv_cache_interleave_size."
