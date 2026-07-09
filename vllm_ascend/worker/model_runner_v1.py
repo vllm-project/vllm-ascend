@@ -3975,11 +3975,7 @@ class NPUModelRunner(GPUModelRunner):
 
         self.debugger.step(**kwargs)
 
-    def initialize_kv_cache(
-        self,
-        kv_cache_config: KVCacheConfig,
-        is_profiling: bool = False,
-    ) -> None:
+    def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
         Initialize KV cache based on `kv_cache_config`.
         Args:
@@ -3993,7 +3989,7 @@ class NPUModelRunner(GPUModelRunner):
         self.may_add_encoder_only_layers_to_kv_cache_config()
         self.maybe_add_kv_sharing_layers_to_kv_cache_groups(kv_cache_config)
         # NOTE(cmq): initialize_attn_backend must before using self.attn_groups
-        self.initialize_attn_backend(kv_cache_config, is_profiling=is_profiling)
+        self.initialize_attn_backend(kv_cache_config)
         self.use_hybrid_blocks = len(self.attn_groups) > 1
         # NOTE: Currently, we determine whether we need `num_accepted_tokens` through `MambaSpec`.
         self.need_accepted_tokens = any(
@@ -4019,7 +4015,7 @@ class NPUModelRunner(GPUModelRunner):
                 self.kernel_block_sizes, list) else self.kernel_block_sizes)
             self.drafter.initialize_attn_backend(kv_cache_config, block_size)
 
-        if has_kv_transfer_group() and not is_profiling:
+        if has_kv_transfer_group():
             get_kv_transfer_group().register_kv_caches(kv_caches)
 
         if self.model_config.enable_return_routed_experts:
@@ -4889,11 +4885,7 @@ class NPUModelRunner(GPUModelRunner):
                 cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
             )
 
-    def initialize_attn_backend(
-        self,
-        kv_cache_config: KVCacheConfig,
-        is_profiling: bool = False,
-    ) -> None:
+    def initialize_attn_backend(self, kv_cache_config: KVCacheConfig) -> None:
         """
         Initialize the attention backends and attention metadata builders.
         """
@@ -4958,7 +4950,6 @@ class NPUModelRunner(GPUModelRunner):
         self._check_and_update_cudagraph_mode(
             attention_backend_list,
             kv_cache_config.kv_cache_groups,
-            is_profiling=is_profiling,
         )
 
         for i, attn_backend_map in enumerate(attention_backend_maps):
@@ -5109,7 +5100,6 @@ class NPUModelRunner(GPUModelRunner):
         self,
         attention_backends: list[set[type[AttentionBackend]]],
         kv_cache_groups: list[KVCacheGroupSpec],
-        is_profiling: bool = False,
     ) -> None:
         min_cg_support = AttentionCGSupport.ALWAYS
         min_cg_attn_backend = None
@@ -5135,7 +5125,6 @@ class NPUModelRunner(GPUModelRunner):
                     tensor_parallel_size=self.parallel_config.tensor_parallel_size,
                     kv_cache_config=self.kv_cache_config,
                     max_num_reqs=self.max_num_reqs,
-                    is_profiling=is_profiling,
                 )
             else:
                 cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
@@ -5146,7 +5135,6 @@ class NPUModelRunner(GPUModelRunner):
                     tensor_parallel_size=self.parallel_config.tensor_parallel_size,
                     kv_cache_config=self.kv_cache_config,
                     max_num_reqs=self.max_num_reqs,
-                    is_profiling=is_profiling,
                 )
             self.cudagraph_dispatcher.initialize_cudagraph_keys(
                 cudagraph_mode, self.uniform_decode_query_len
