@@ -1072,11 +1072,8 @@ class NPUWorker(WorkerBase):
             return
 
         # self.model_runner.initialize_afd_connector()
-
+        dp_metadata_list, is_graph_capturing, is_warmup = (self.model_runner.connector.recv_dp_metadata_list())
         if self.model_runner.use_aclgraph:
-            dp_metadata_list, is_graph_capturing, is_warmup = (
-                self.model_runner.connector.recv_dp_metadata_list()
-            )
             logger.info(
                 "FFN received dp_metadata_list for capture: "
                 "is_graph_capturing=%s, is_warmup=%s",
@@ -1084,6 +1081,7 @@ class NPUWorker(WorkerBase):
             )
             self.model_runner.capture_model(dp_metadata_list=dp_metadata_list)
         else:
+            self.model_runner._warmup_model(dp_metadata_list=dp_metadata_list, aclgraph_runtime_mode=CUDAGraphMode.NONE)
             logger.info(
                 "Eager mode (use_aclgraph=False), skip recv_dp_metadata_list "
                 "and capture_model; worker loop will recv in execute_model")

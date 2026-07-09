@@ -197,7 +197,7 @@ class NPUFFNModelRunner(NPUModelRunner, GPUFFNModelRunner):
         #     # Capture mode: capture a single graph based on dp_metadata_list.
         #     self._capture_model(dp_metadata_list=dp_metadata_list)
         logger.info("FFN warmup, dp_metadata_list=%s", dp_metadata_list)
-        self._warmup_model(dp_metadata_list=dp_metadata_list)
+        self._warmup_model(dp_metadata_list=dp_metadata_list, aclgraph_runtime_mode=CUDAGraphMode.FULL)
         logger.info("FFN warmup completed, dp_metadata_list=%s", dp_metadata_list)
         # dp_metadata_list, _, _ = (self.connector.recv_dp_metadata_list())
         # self._capture_model(dp_metadata_list=dp_metadata_list)
@@ -236,25 +236,40 @@ class NPUFFNModelRunner(NPUModelRunner, GPUFFNModelRunner):
             for stage_idx, meta in sorted(dp_metadata_list.items())
         )
 
-    def _warmup_model(self, dp_metadata_list: dict = None) -> None:
-        """执行warmup，只运行forward不capture graph
+    def _warmup_model(self, dp_metadata_list: dict = None, aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE) -> None:
+        """执行warmup
 
         Args:
-            is_ubatch: 是否为ubatch模式
             dp_metadata_list: 从Attention侧接收的dp_metadata列表
+            aclgraph_runtime_mode: 指定CUDA Graph运行模式，默认为FULL
         """
         dp_metadata_key = self._get_dp_metadata_key(dp_metadata_list)
 
-        # self._dummy_run(aclgraph_runtime_mode=CUDAGraphMode.NONE,
-        #                 uniform_decode=True,
-        #                 dp_metadata_list=dp_metadata_list,
-        #                 dp_metadata_key=dp_metadata_key)
-
-        self._dummy_run(aclgraph_runtime_mode=CUDAGraphMode.FULL,
+        self._dummy_run(aclgraph_runtime_mode=aclgraph_runtime_mode,
                         uniform_decode=True,
                         dp_metadata_list=dp_metadata_list,
                         dp_metadata_key=dp_metadata_key)
         logger.info("FFN warmup for dp_metadata_key=%s", dp_metadata_key)
+
+    # def _warmup_model(self, dp_metadata_list: dict = None) -> None:
+    #     """执行warmup，只运行forward不capture graph
+
+    #     Args:
+    #         is_ubatch: 是否为ubatch模式
+    #         dp_metadata_list: 从Attention侧接收的dp_metadata列表
+    #     """
+    #     dp_metadata_key = self._get_dp_metadata_key(dp_metadata_list)
+
+    #     # self._dummy_run(aclgraph_runtime_mode=CUDAGraphMode.NONE,
+    #     #                 uniform_decode=True,
+    #     #                 dp_metadata_list=dp_metadata_list,
+    #     #                 dp_metadata_key=dp_metadata_key)
+
+    #     self._dummy_run(aclgraph_runtime_mode=CUDAGraphMode.FULL,
+    #                     uniform_decode=True,
+    #                     dp_metadata_list=dp_metadata_list,
+    #                     dp_metadata_key=dp_metadata_key)
+    #     logger.info("FFN warmup for dp_metadata_key=%s", dp_metadata_key)
 
     def _capture_model(self, dp_metadata_list: dict = None):
         """Internal capture implementation - capture a single graph based on
