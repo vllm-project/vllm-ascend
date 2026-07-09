@@ -44,6 +44,7 @@ jobs:
       dispatch_a2: ${{ steps.resolve.outputs.dispatch_a2 }}
       dispatch_a3: ${{ steps.resolve.outputs.dispatch_a3 }}
       vllm_ascend_ref: ${{ steps.resolve.outputs.vllm_ascend_ref }}
+      aop_enabled: ${{ steps.resolve.outputs.aop_enabled }}
       command: ${{ steps.resolve.outputs.command }}
     steps:
       - name: Install system dependencies
@@ -113,7 +114,7 @@ jobs:
           PR_URL: ${{ github.event.client_payload.github.payload.issue.pull_request.url }}
         run: |
           # Derive command type from repository_dispatch action (e.g. nightly-command -> nightly)
-          COMMAND='${{ github.event.repository_dispatch.action }}'
+          COMMAND='${{ github.event.action }}'
           COMMAND="${COMMAND%-command}"
           echo "command=$COMMAND" >> "$GITHUB_OUTPUT"
 
@@ -127,6 +128,7 @@ jobs:
 
           BRANCH="main"
           TEST_CASES=""
+          AOP_ENABLED="false"
           NEXT_IS_BRANCH=0
           for WORD in $ALL_ARGS; do
             if [ "$NEXT_IS_BRANCH" = "1" ]; then
@@ -134,6 +136,8 @@ jobs:
               NEXT_IS_BRANCH=0
             elif [ "$WORD" = "--branch" ]; then
               NEXT_IS_BRANCH=1
+            elif [ "$WORD" = "--aop_enabled" ]; then
+              AOP_ENABLED="true"
             else
               if [ -z "$TEST_CASES" ]; then
                 TEST_CASES="$WORD"
@@ -151,32 +155,40 @@ jobs:
           fi
 
 
-          echo "test_cases=$TEST_CASES" >> "$GITHUB_OUTPUT"
-          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+          {
+            echo "test_cases=$TEST_CASES"
+            echo "branch=$BRANCH"
+            echo "aop_enabled=$AOP_ENABLED"
+          } >> "$GITHUB_OUTPUT"
 
-          HEAD_REPO=$(gh api "$PR_URL" --jq '.head.repo.full_name')
           PR_SHA=$(gh api "$PR_URL" --jq '.head.sha')
+          PR_NUMBER=$(gh api "$PR_URL" --jq '.number')
           echo "vllm_ascend_ref=$PR_SHA" >> "$GITHUB_OUTPUT"
 
           if [ "$TEST_CASES" = "all" ]; then
-            echo "dispatch_a2=true" >> "$GITHUB_OUTPUT"
-            echo "dispatch_a3=true" >> "$GITHUB_OUTPUT"
+            {
+              echo "dispatch_a2=true"
+              echo "dispatch_a3=true"
+            } >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          # Fetch the matching test matrix from the exact PR commit (not branch HEAD,
-          # to match vllm_ascend_ref). Nightly reads nightly_config.yaml; weekly reads
-          # weekly_config.yaml. resolve_nightly_tests.py picks the non-empty one.
+          # Fetch the matching test matrix from the PR head ref via pull/<num>/head,
+          # which is accessible through the base repo without fork access permission.
+          # Nightly reads nightly_config.yaml; weekly reads weekly_config.yaml.
+          # resolve_nightly_tests.py picks the non-empty one.
+          REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
           case "$COMMAND" in
             nightly)
-              NIGHTLY_MATRIX=$(gh api "repos/$HEAD_REPO/contents/.github/workflows/configs/nightly_config.yaml?ref=$PR_SHA" --jq '.content' 2>/dev/null || echo "")
+              NIGHTLY_MATRIX=$(gh api "repos/$REPO/contents/.github/workflows/configs/nightly_config.yaml?ref=pull/$PR_NUMBER/head" --jq '.content' 2>/dev/null || echo "")
               ;;
             weekly)
-              WEEKLY_MATRIX=$(gh api "repos/$HEAD_REPO/contents/.github/workflows/configs/weekly_config.yaml?ref=$PR_SHA" --jq '.content' 2>/dev/null || echo "")
+              WEEKLY_MATRIX=$(gh api "repos/$REPO/contents/.github/workflows/configs/weekly_config.yaml?ref=pull/$PR_NUMBER/head" --jq '.content' 2>/dev/null || echo "")
               ;;
           esac
           export NIGHTLY_MATRIX
           export WEEKLY_MATRIX
+          export TEST_CASES
 
           python3 .github/workflows/scripts/resolve_nightly_tests.py --mode=dispatch
 
@@ -213,7 +225,8 @@ jobs:
             -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
             -f request_id="$REQUEST_ID" \
             -f skip_build_image=true \
-            -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}'
+            -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
+            -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}'
           sleep 8
           A2_RUN_ID=$(gh api "repos/$REPO/actions/workflows/schedule_nightly_test_a2.yaml/runs?per_page=1" \
             --jq '.workflow_runs[0].id')
@@ -253,7 +266,8 @@ jobs:
             -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
             -f request_id="$REQUEST_ID" \
             -f skip_build_image=true \
-            -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}'
+            -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
+            -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}'
           sleep 8
           A3_RUN_ID=$(gh api "repos/$REPO/actions/workflows/schedule_nightly_test_a3.yaml/runs?per_page=1" \
             --jq '.workflow_runs[0].id')
@@ -293,7 +307,8 @@ jobs:
             -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
             -f request_id="$REQUEST_ID" \
             -f skip_build_image=true \
-            -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}'
+            -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
+            -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}'
           sleep 8
           A2_RUN_ID=$(gh api "repos/$REPO/actions/workflows/schedule_weekly_test_a2.yaml/runs?per_page=1" \
             --jq '.workflow_runs[0].id')
@@ -333,7 +348,8 @@ jobs:
             -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
             -f request_id="$REQUEST_ID" \
             -f skip_build_image=true \
-            -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}'
+            -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
+            -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}'
           sleep 8
           A3_RUN_ID=$(gh api "repos/$REPO/actions/workflows/schedule_weekly_test_a3.yaml/runs?per_page=1" \
             --jq '.workflow_runs[0].id')

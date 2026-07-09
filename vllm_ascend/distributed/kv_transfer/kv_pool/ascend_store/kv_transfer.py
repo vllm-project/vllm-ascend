@@ -88,7 +88,8 @@ class KVTransferThread(threading.Thread):
                 self._handle_request(request_data)
             except Exception as e:
                 logger.error(
-                    "Error in KVCacheTransferThread. type=%s, error=%s. Check thread state and request processing.",
+                    "Error in KVCacheTransferThread(%s). type=%s, error=%s. Check thread state and request processing.",
+                    self.name,
                     type(e).__name__,
                     e,
                 )
@@ -250,6 +251,33 @@ class KVTransferThread(threading.Thread):
         except TypeError:
             return self.token_database.decode_adaptor_prefill_pp(keys, addrs, sizes)
 
+    def _store_mask(self, req_meta: ReqMeta) -> tuple[list[bool], ...] | None:
+        store_mask = getattr(self.token_database, "store_mask", None)
+        if store_mask is None:
+            return None
+        try:
+            return store_mask(req_meta.token_len_chunk, req_meta.num_prompt_tokens)
+        except AssertionError as exc:
+            logger.debug("Skip AscendStore store mask for unaligned request %s: %s", req_meta.req_id, exc)
+            return None
+
+    def _load_mask(self, req_meta: ReqMeta, token_len: int) -> tuple[list[bool], ...] | None:
+        load_mask = getattr(self.token_database, "load_mask", None)
+        if load_mask is None:
+            return None
+        return load_mask(req_meta.block_hashes, token_len)
+
+    def _mask_allows_chunk(
+        self,
+        masks: tuple[list[bool], ...] | None,
+        group_id: int,
+        start: int,
+    ) -> bool:
+        mask_allows_chunk = getattr(self.token_database, "mask_allows_chunk", None)
+        if mask_allows_chunk is None:
+            return True
+        return mask_allows_chunk(masks, group_id, start)
+
 
 class KVCacheStoreSendingThread(KVTransferThread):
     def __init__(
@@ -312,6 +340,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 self.request_queue.task_done()
                 return
 
+            store_masks = self._store_mask(req_meta)
             for group_id in req_meta.kv_cache_group_ids or [0]:
                 starts = []
                 ends = []
@@ -328,6 +357,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     kv_cache_group_id=group_id,
                     skip_null_blocks=self._skip_null_blocks(req_meta, group_id),
                 ):
+                    if not self._mask_allows_chunk(store_masks, group_id, start):
+                        continue
                     starts.append(start)
                     ends.append(end)
                     keys.append(key)
@@ -463,6 +494,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         key_list = []
         block_id_list: list[int] = []
         group_ids = req_meta.kv_cache_group_ids or [0]
+        load_masks = self._load_mask(req_meta, token_len)
         for group_id in group_ids:
             block_ids = req_meta.block_ids_by_group[group_id]
             group_block_size = self._get_block_size(group_id)
@@ -479,6 +511,8 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 kv_cache_group_id=group_id,
                 skip_null_blocks=self._skip_null_blocks(req_meta, group_id),
             ):
+                if not self._mask_allows_chunk(load_masks, group_id, start):
+                    continue
                 addr, size, block_id = self._prepare_value(
                     start,
                     end,

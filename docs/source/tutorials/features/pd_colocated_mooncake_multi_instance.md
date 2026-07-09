@@ -80,7 +80,7 @@ Start a Docker container on each node.
 
 ```bash
 # Update the vllm-ascend image
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 export NAME=vllm-ascend
 
 # Run the container using the defined variables
@@ -121,7 +121,7 @@ Moonshot AI. Installation and compilation guide:
 First, obtain the Mooncake project using the following command:
 
 ```bash
-git clone -b v0.3.11.post1 --depth 1 https://github.com/kvcache-ai/Mooncake.git
+git clone -b v0.3.9 --depth 1 https://github.com/kvcache-ai/Mooncake.git
 cd Mooncake
 git submodule update --init --recursive
 ```

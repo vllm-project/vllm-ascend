@@ -21,15 +21,16 @@ The comment itself triggers the workflow — no label is required.
 | `/nightly` | Run **all** nightly tests |
 | `/nightly all` | Run **all** nightly tests (same as above) |
 | `/nightly test1 test2 ...` | Run only the **named** tests |
+| `/nightly <tests> --aop_enabled` | Run named tests with AOP bisect / classify enabled |
 
-:::{note}
-Only repository **Contributors** (Triage role) and **Maintainers** (Write role) can
-trigger the `/nightly` command. If you do not have this permission, ask a maintainer
-to post the comment for you. You can find the list of maintainers and contributors in
-the project's [Governance](../../community/governance.md) page or by checking the
-[CODEOWNERS](https://github.com/vllm-project/vllm-ascend/blob/main/.github/CODEOWNERS)
-file.
-:::
+!!! note
+
+    Only repository **Contributors** (Triage role) and **Maintainers** (Write role) can
+    trigger the `/nightly` command. If you do not have this permission, ask a maintainer
+    to post the comment for you. You can find the list of maintainers and contributors in
+    the project's [Governance](../../community/governance.md) page or by checking the
+    [CODEOWNERS](https://github.com/vllm-project/vllm-ascend/blob/main/.github/CODEOWNERS)
+    file.
 
 ### 2. Wait for results
 
@@ -145,7 +146,6 @@ The `pr-accuracy-group-*` entries only run on `/nightly` (PR-triggered) runs;
 | `multi-node-qwen3-dp` | Qwen3-235B-A22B, 2-node DP |
 | `multi-node-qwenw8a8-2node-eplb` | Qwen3-235B-W8A8 with EPLB, 2-node |
 | `multi-node-dpsk3.2-2node` | DeepSeek-V3.2-W8A8, 2-node |
-| `multi-node-qwen3-dp-mooncake-layerwise` | Qwen3-235B-A22B with Mooncake layerwise, 2-node |
 | `multi-node-qwenw8a8-2node-longseq` | Qwen3-235B-W8A8 long sequence, 2-node |
 | `multi-node-qwen-disagg-pd` | Qwen3-235B disaggregated PD, 2-node |
 | `multi-node-qwen-vl-disagg-pd` | Qwen3-VL-235B disaggregated PD, 2-node |
@@ -184,12 +184,12 @@ The `pr-accuracy-group-*` entries only run on `/nightly` (PR-triggered) runs;
 | `Qwen3-30B-QuaRot` | Qwen3-30B QuaRot + eagle3 |
 | `Qwen3-32B-QuaRot` | Qwen3-32B QuaRot + eagle3 |
 
-:::{warning}
-The A3 resource pool has a maximum concurrency of **5×16 NPUs**. Multi-node tests
-run with `max-parallel: 2` to avoid resource exhaustion. Running `/nightly all` on
-A3 will queue a large number of jobs — prefer targeting specific test names when
-possible.
-:::
+!!! warning
+
+    The A3 resource pool has a maximum concurrency of **5×16 NPUs**. Multi-node tests
+    run with `max-parallel: 2` to avoid resource exhaustion. Running `/nightly all` on
+    A3 will queue a large number of jobs — prefer targeting specific test names when
+    possible.
 
 ## Examples
 
@@ -226,6 +226,22 @@ Run a single accuracy model (only that model from a group):
 Re-trigger after fixing an issue: just push a new commit. The `synchronize` event
 re-runs the workflow and picks up the existing `/nightly` comment automatically — no
 need to post a new comment.
+
+## AOP Hooks (Bisect)
+
+Add `--aop_enabled` to any `/nightly` command to enable the AOP pipeline:
+
+```text
+/nightly all --aop_enabled
+```
+
+When enabled, the workflow will:
+
+1. **Capture** the test result (pass / fail).
+2. **Classify** the failure as environmental (network, infra) or code-related.
+3. **Bisect** genuine code failures to pinpoint the offending commit.
+
+This is useful for automated root-cause analysis of nightly regressions.
 
 ## Adding a New Test Case — Worked Example
 

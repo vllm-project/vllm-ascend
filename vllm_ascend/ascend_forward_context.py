@@ -203,14 +203,17 @@ def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len)
     global _mc2_tokens_capacity
     if _mc2_tokens_capacity is not None:
         return
-    if vllm_config.compilation_config.cudagraph_capture_sizes:
+    if get_ascend_config().enable_prefill_mc2:
+        max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+    elif vllm_config.compilation_config.cudagraph_capture_sizes:
         max_num_tokens = vllm_config.compilation_config.max_cudagraph_capture_size
     else:
-        # NOTE: To save memory, we cap the max number of tokens to 512.
-        max_num_tokens = min(max_num_reqs * uniform_decode_query_len, 512)
+        max_num_tokens = max_num_reqs * uniform_decode_query_len
     tp_size = vllm_config.parallel_config.tensor_parallel_size
     # Use integer arithmetic for ceiling division.
     num_tokens_per_tp_rank = (max_num_tokens + tp_size - 1) // tp_size
+    # NOTE: To save memory, we cap the max number of tokens to 512.
+    num_tokens_per_tp_rank = min(num_tokens_per_tp_rank, 512)
     _mc2_tokens_capacity = num_tokens_per_tp_rank * tp_size
 
 
@@ -232,6 +235,69 @@ def set_mc2_mask(vllm_config, device):
 
 def get_mc2_mask():
     return _reserved_mc2_mask
+
+
+def _select_a2_moe_comm_method(
+    num_tokens: int,
+    vllm_config: VllmConfig,
+    mc2_tokens_capacity: int,
+) -> MoECommType:
+    num_experts = vllm_config.model_config.get_num_experts()
+    ep_world_size = (
+        vllm_config.parallel_config.world_size_across_dp // vllm_config.parallel_config.pipeline_parallel_size
+    )
+    num_experts_per_device = num_experts // ep_world_size
+    if num_experts_per_device <= 24 and ep_world_size >= 16 and num_tokens <= mc2_tokens_capacity:
+        return MoECommType.MC2
+    return MoECommType.ALLGATHER
+
+
+def _select_a3_moe_comm_method(
+    num_tokens: int,
+    vllm_config: VllmConfig,
+    quant_type: str | None,
+    mc2_tokens_capacity: int,
+    enable_fused_mc2: int,
+) -> MoECommType:
+    # TODO: drop the EP-size guard when dispatch_ffn_combine supports larger EP sizes
+    # TODO: drop speculative method guard when dispatch_gmm_combine_decode supports w16a16
+    dispatch_ffn_combine_enable = get_ep_group().world_size <= 32
+    if num_tokens <= mc2_tokens_capacity:
+        fused_decode_enable = enable_fused_mc2
+        if enable_fused_mc2 == 1:
+            fused_decode_enable = enable_fused_mc2 and dispatch_ffn_combine_enable
+        elif enable_fused_mc2 == 2:
+            fused_decode_enable = (
+                enable_fused_mc2
+                and speculative_enable_dispatch_gmm_combine_decode(vllm_config)
+                and quant_type == "w8a8_dynamic"
+            )
+        return MoECommType.FUSED_MC2 if fused_decode_enable else MoECommType.MC2
+
+    fused_prefill_enable = enable_fused_mc2
+    if enable_fused_mc2 == 1:
+        fused_prefill_enable = enable_fused_mc2 and dispatch_ffn_combine_enable
+    elif enable_fused_mc2 == 2:
+        fused_prefill_enable = False
+    return MoECommType.FUSED_MC2 if fused_prefill_enable else MoECommType.ALLTOALL
+
+
+def _select_a5_moe_comm_method(
+    num_tokens: int,
+    vllm_config: VllmConfig,
+    mc2_tokens_capacity: int,
+) -> MoECommType:
+    num_experts_per_tok = getattr(
+        vllm_config.model_config.hf_text_config,
+        "num_experts_per_tok",
+        getattr(vllm_config.model_config.hf_text_config, "top_k_experts", 1),
+    )
+    world_size = vllm_config.parallel_config.world_size_across_dp
+    if num_tokens <= mc2_tokens_capacity and world_size > 1:
+        return MoECommType.MC2
+    if world_size <= num_experts_per_tok:
+        return MoECommType.ALLGATHER
+    return MoECommType.ALLTOALL
 
 
 def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_model=False) -> MoECommType | None:
@@ -263,6 +329,7 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
     """
     if not is_moe_model(vllm_config):
         return None
+
     mc2_tokens_capacity = get_mc2_tokens_capacity()
     soc_version = get_ascend_device_type()
     quant_type = getattr(
@@ -273,55 +340,21 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
 
     if not vllm_config.parallel_config.enable_expert_parallel or get_ep_group().world_size == 1:
         moe_comm_type = MoECommType.ALLGATHER
-    elif soc_version in {AscendDeviceType.A2}:
-        num_experts = vllm_config.model_config.get_num_experts()
-        ep_world_size = (
-            vllm_config.parallel_config.world_size_across_dp // vllm_config.parallel_config.pipeline_parallel_size
+    elif soc_version == AscendDeviceType.A2:
+        moe_comm_type = _select_a2_moe_comm_method(num_tokens, vllm_config, mc2_tokens_capacity)
+    elif soc_version == AscendDeviceType.A3:
+        moe_comm_type = _select_a3_moe_comm_method(
+            num_tokens,
+            vllm_config,
+            quant_type,
+            mc2_tokens_capacity,
+            get_ascend_config().enable_fused_mc2,
         )
-        num_experts_per_device = num_experts // ep_world_size
-        if num_experts_per_device <= 24 and ep_world_size >= 16 and num_tokens <= mc2_tokens_capacity:
-            moe_comm_type = MoECommType.MC2
-        else:
-            moe_comm_type = MoECommType.ALLGATHER
-
-    elif soc_version in {AscendDeviceType.A3}:
-        # TODO: drop the EP-size guard when dispatch_ffn_combine supports larger EP sizes
-        # TODO: drop speculative method guard when dispatch_gmm_combine_decode supports w16a16
-        fused_mc2_enable = get_ascend_config().enable_fused_mc2
-        dispatch_ffn_combine_enable = get_ep_group().world_size <= 32
-        if num_tokens <= mc2_tokens_capacity:
-            fused_decode_enable = fused_mc2_enable
-            if fused_mc2_enable == 1:
-                fused_decode_enable = fused_mc2_enable and dispatch_ffn_combine_enable
-            elif fused_mc2_enable == 2:
-                fused_decode_enable = (
-                    fused_mc2_enable
-                    and speculative_enable_dispatch_gmm_combine_decode(vllm_config)
-                    and quant_type == "w8a8_dynamic"
-                )
-            moe_comm_type = MoECommType.FUSED_MC2 if fused_decode_enable else MoECommType.MC2
-        else:
-            fused_prefill_enable = fused_mc2_enable
-            if fused_mc2_enable == 1:
-                fused_prefill_enable = fused_mc2_enable and dispatch_ffn_combine_enable
-            elif fused_mc2_enable == 2:
-                fused_prefill_enable = False
-            moe_comm_type = MoECommType.FUSED_MC2 if fused_prefill_enable else MoECommType.ALLTOALL
-    elif soc_version in {AscendDeviceType._310P}:
+    elif soc_version == AscendDeviceType.A5:
+        moe_comm_type = _select_a5_moe_comm_method(num_tokens, vllm_config, mc2_tokens_capacity)
+    elif soc_version == AscendDeviceType._310P:
         moe_comm_type = MoECommType.ALLGATHER
-    elif soc_version in {AscendDeviceType.A5}:
-        num_experts_per_tok = getattr(
-            vllm_config.model_config.hf_text_config,
-            "num_experts_per_tok",
-            getattr(vllm_config.model_config.hf_text_config, "top_k_experts", 1),
-        )
-        world_size = vllm_config.parallel_config.world_size_across_dp
-        if num_tokens <= mc2_tokens_capacity and world_size > 1:
-            moe_comm_type = MoECommType.MC2
-        elif world_size <= num_experts_per_tok:
-            moe_comm_type = MoECommType.ALLGATHER
-        else:
-            moe_comm_type = MoECommType.ALLTOALL
+
     else:
         raise ValueError(f"Unsupported soc_version: {soc_version}")
     logger.debug(
