@@ -67,6 +67,48 @@ def _copy_mamba_state(src: torch.Tensor, dst: torch.Tensor) -> None:
         dst.copy_(src.clone())
 
 
+def _copy_num_accepted_tokens_for_postprocess(
+    *,
+    num_reqs: int,
+    num_accepted_tokens_gpu: torch.Tensor,
+    num_accepted_tokens_cpu_tensor: torch.Tensor,
+    input_batch: GPUInputBatch,
+) -> None:
+    """Materialize accepted-token counts without a second sync D2H copy.
+
+    The MTP proposer already copies the same valid sampled-token counts to a
+    CPU buffer on a side stream before draft-model execution. In steady state
+    the event is complete by the time Mamba postprocess needs the counts, so
+    reusing it avoids enqueueing a fresh GPU->CPU copy on the critical
+    postprocess path.
+    """
+    cached_counts_cpu = getattr(input_batch, "_ascend_valid_sampled_token_count_cpu", None)
+    cached_event = getattr(input_batch, "_ascend_valid_sampled_token_count_event", None)
+    cached_size = getattr(input_batch, "_ascend_valid_sampled_token_count_size", 0)
+    cached_version = getattr(input_batch, "_ascend_valid_sampled_token_count_version", None)
+    consumed_version = getattr(
+        input_batch, "_ascend_valid_sampled_token_count_consumed_version", None
+    )
+
+    if (
+        cached_counts_cpu is not None
+        and cached_event is not None
+        and cached_version is not None
+        and cached_version != consumed_version
+        and cached_size >= num_reqs
+    ):
+        cached_event.synchronize()
+        num_accepted_tokens_cpu_tensor[:num_reqs].copy_(cached_counts_cpu[:num_reqs])
+        setattr(
+            input_batch,
+            "_ascend_valid_sampled_token_count_consumed_version",
+            cached_version,
+        )
+        return
+
+    num_accepted_tokens_cpu_tensor[:num_reqs].copy_(num_accepted_tokens_gpu[:num_reqs])
+
+
 def _get_tensor_copy_pairs(copy_bufs: mamba_utils.MambaCopyBuffers) -> list[tuple[torch.Tensor, torch.Tensor]]:
     if copy_bufs.offset == 0 or not hasattr(copy_bufs, "_tensor_copy_pairs"):
         copy_bufs._tensor_copy_pairs = []
@@ -157,7 +199,12 @@ def _postprocess_mamba_align_gpu_cpu_fallback(
     # counts, then only overwrites entries where src and dest are the same
     # block. Preserve that default so the next preprocess keeps the right
     # accept_token_bias when multiple draft tokens were accepted.
-    num_accepted_tokens_cpu_tensor[:num_reqs].copy_(num_accepted_tokens_gpu[:num_reqs])
+    _copy_num_accepted_tokens_for_postprocess(
+        num_reqs=num_reqs,
+        num_accepted_tokens_gpu=num_accepted_tokens_gpu,
+        num_accepted_tokens_cpu_tensor=num_accepted_tokens_cpu_tensor,
+        input_batch=input_batch,
+    )
     num_accepted_tokens = input_batch.num_accepted_tokens_cpu
     for i in range(num_reqs):
         num_tokens_running_state = num_computed_tokens[i] + num_scheduled_tokens[i] - num_draft_tokens[i]

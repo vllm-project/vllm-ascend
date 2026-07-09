@@ -1672,6 +1672,31 @@ class NPUModelRunner(GPUModelRunner):
             counts_cpu[: counts.shape[0]].copy_(counts, non_blocking=True)
             self.valid_sampled_token_count_event.record()
 
+        # 310P Mamba align fallback needs the same accepted-token counts in
+        # _postprocess_mamba_align_gpu_cpu_fallback. Reuse this already
+        # scheduled async D2H copy there instead of issuing another blocking
+        # device->host copy on the postprocess path.
+        cached_count_version = (
+            getattr(self, "_ascend_valid_sampled_token_count_version", 0) + 1
+        )
+        self._ascend_valid_sampled_token_count_version = cached_count_version
+        setattr(self.input_batch, "_ascend_valid_sampled_token_count_cpu", counts_cpu)
+        setattr(
+            self.input_batch,
+            "_ascend_valid_sampled_token_count_event",
+            self.valid_sampled_token_count_event,
+        )
+        setattr(
+            self.input_batch,
+            "_ascend_valid_sampled_token_count_size",
+            counts.shape[0],
+        )
+        setattr(
+            self.input_batch,
+            "_ascend_valid_sampled_token_count_version",
+            cached_count_version,
+        )
+
         if self.use_async_spec_decode:
             # Stash for GPU-side correction in _prepare_inputs.
             self.valid_sampled_token_count_gpu = valid_sampled_tokens_count # type: ignore[no-redef]
