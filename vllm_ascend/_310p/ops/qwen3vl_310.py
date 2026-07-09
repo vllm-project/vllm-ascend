@@ -18,7 +18,7 @@
 import torch
 
 
-# 310P: non_blocking H2D copy in rot_pos_emb can race with subsequent indexing.
+# 310P RC: non_blocking H2D copy in rot_pos_emb can race with subsequent indexing.
 def rot_pos_emb_310(self, grid_thw: list[list[int]]):
     max_grid_size = max(max(h, w) for _, h, w in grid_thw)
     pos_ids = [
