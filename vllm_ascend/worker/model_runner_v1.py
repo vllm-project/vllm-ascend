@@ -3079,7 +3079,6 @@ class NPUModelRunner(GPUModelRunner):
         force_uniform_decode: bool | None = None,
         force_has_lora: bool | None = None,
         force_num_active_loras: int | None = None,
-        valid_cudagraph_modes: set[CUDAGraphMode] | None = None,
         num_encoder_reqs: int = 0,
     ) -> tuple[CUDAGraphMode, BatchDescriptor, bool, torch.Tensor | None, CUDAGraphStat | None]:
         num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
@@ -3117,11 +3116,7 @@ class NPUModelRunner(GPUModelRunner):
                 num_active_loras=num_active_loras,
             )
 
-        cudagraph_mode, batch_descriptor = dispatch_cudagraph(
-            num_tokens_padded,
-            use_cascade_attn or has_encoder_output,
-            valid_modes=valid_cudagraph_modes,
-        )
+        cudagraph_mode, batch_descriptor = dispatch_cudagraph(num_tokens_padded, use_cascade_attn or has_encoder_output)
         num_tokens_padded = batch_descriptor.num_tokens
         if enable_sp(self.vllm_config):
             assert batch_descriptor.num_tokens % self.vllm_config.parallel_config.tensor_parallel_size == 0, (
@@ -3145,10 +3140,10 @@ class NPUModelRunner(GPUModelRunner):
                 dp_rank = self.parallel_config.data_parallel_rank
                 num_tokens_padded = int(num_tokens_across_dp[dp_rank].item())
                 # Re-dispatch with DP padding
-                synced_valid_modes = {synced_cudagraph_mode}
-                if valid_cudagraph_modes is not None:
-                    synced_valid_modes &= valid_cudagraph_modes
-                cudagraph_mode, batch_descriptor = dispatch_cudagraph(num_tokens_padded, valid_modes=synced_valid_modes)
+                cudagraph_mode, batch_descriptor = dispatch_cudagraph(
+                    num_tokens_padded,
+                    valid_modes={synced_cudagraph_mode},
+                )
                 # Assert to make sure the agreed upon token count is correct otherwise
                 # num_tokens_across_dp will no-longer be valid
                 assert batch_descriptor.num_tokens == num_tokens_padded
@@ -3569,11 +3564,6 @@ class NPUModelRunner(GPUModelRunner):
         self.query_lens = torch.from_numpy(num_scheduled_tokens)
         num_tokens_unpadded = int(num_scheduled_tokens.sum())
         num_sampled_tokens = np.ones(num_reqs, dtype=np.int32)
-        valid_cudagraph_modes = (
-            {cudagraph_runtime_mode}
-            if cudagraph_runtime_mode is not None and cudagraph_runtime_mode != CUDAGraphMode.NONE
-            else None
-        )
         _cudagraph_mode, batch_desc, _, num_tokens_across_dp, _ = self._determine_batch_execution_and_padding(
             num_tokens=num_tokens_unpadded,
             num_reqs=num_reqs,
@@ -3592,7 +3582,6 @@ class NPUModelRunner(GPUModelRunner):
             # LoRA state when determining the batch descriptor for capture
             force_has_lora=num_active_loras > 0,
             force_num_active_loras=num_active_loras,
-            valid_cudagraph_modes=valid_cudagraph_modes,
         )
         if self.use_cp:
             self.pcp_manager.init_batch_info(
