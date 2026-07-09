@@ -60,6 +60,7 @@ from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_dfx import (
     MooncakeDFXEvent,
     MooncakeDFXRecord,
     MooncakeFailureReason,
+    MooncakePDState,
     is_mooncake_transfer_dfx_enabled,
     mooncake_transfer_dfx,
 )
@@ -184,11 +185,23 @@ class KVCacheTaskTracker:
 
     def add_req_to_process(self, request_id: str):
         self.reqs_to_process.add(request_id)
+        mooncake_transfer_dfx.update_state(
+            request_id,
+            MooncakePDState.SCHEDULED,
+            role="kv_transfer",
+            details={"tracker": "add_req_to_process"},
+        )
 
     def add_not_transfer_request(self, request_id: str):
         with self.done_task_lock:
             self.finished_requests.add(request_id)
             self.reqs_to_process.discard(request_id)
+        mooncake_transfer_dfx.update_state(
+            request_id,
+            MooncakePDState.FINISHED,
+            role="kv_producer",
+            details={"tracker": "add_not_transfer_request"},
+        )
 
     def update_done_task_count(self, request_id: str):
         with self.done_task_lock:
@@ -196,6 +209,12 @@ class KVCacheTaskTracker:
                 self.finished_requests.add(request_id)
                 self.reqs_to_process.discard(request_id)
                 self.delayed_free_requests.pop(request_id, None)
+                mooncake_transfer_dfx.update_state(
+                    request_id,
+                    MooncakePDState.FINISHED,
+                    role="kv_transfer",
+                    details={"tracker": "update_done_task_count"},
+                )
             else:
                 logger.warning(
                     "MooncakeConnector finish req not in reqs to process. "
@@ -223,6 +242,12 @@ class KVCacheTaskTracker:
         with self.done_task_lock:
             if request_id in self.reqs_to_process:
                 self.delayed_free_requests[request_id] = delay_start_time
+                mooncake_transfer_dfx.update_state(
+                    request_id,
+                    MooncakePDState.DELAYED_FREE,
+                    role="kv_producer",
+                    details={"delay_start_time": delay_start_time},
+                )
 
     def _retrieve_expired_requests(self):
         """Retrieve all expired delayed requests."""
@@ -243,6 +268,7 @@ class KVCacheTaskTracker:
                     request_id,
                     envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT,
                 )
+                mooncake_transfer_dfx.update_state(request_id, MooncakePDState.FORCE_FREED, role="kv_producer")
             else:
                 break
         return expired_requests
@@ -364,6 +390,12 @@ class KVCacheSendingThread(threading.Thread):
 
                 msg = decoder.decode(payload[0])
                 if msg[0] == GET_META_MSG:
+                    mooncake_transfer_dfx.dump_metadata(
+                        label="send_agent_metadata",
+                        metadata=self.metadata,
+                        role="kv_producer",
+                        extra={"encoded_size_bytes": size_in_bytes},
+                    )
                     sock.send_multipart((identity, b"", encoded_data))
                 elif msg[0] == GET_KV_CACHE_CHECKSUM_MSG:
                     checksum_request = msg[1]
@@ -413,6 +445,12 @@ class KVCacheSendingThread(threading.Thread):
                     logger.debug("Got DONE_RECVING_MSG for request %s", msg[1])
                     request_id = msg[1]
                     remote_port_send_num = msg[2]
+                    mooncake_transfer_dfx.update_state(
+                        request_id,
+                        MooncakePDState.REMOTE_RELEASED,
+                        role="kv_producer",
+                        details={"remote_port_send_num": remote_port_send_num},
+                    )
                     if remote_port_send_num:
                         if request_id not in self.port_send_num:
                             self.port_send_num[request_id] = 0
@@ -429,6 +467,14 @@ class KVCacheSendingThread(threading.Thread):
                         try:
                             # Send ACK to the sender.
                             sock.send_multipart((identity, b"", b"ACK"), flags=zmq.NOBLOCK)  # type: ignore
+                            mooncake_transfer_dfx.record(
+                                MooncakeDFXRecord(
+                                    event=MooncakeDFXEvent.LIFECYCLE,
+                                    request_id=request_id,
+                                    role="kv_producer",
+                                    details={"message": "done_recving_ack_sent"},
+                                )
+                            )
                             break
                         except zmq.Again:  # type: ignore
                             # If the socket is not ready, retry sending.
@@ -437,12 +483,20 @@ class KVCacheSendingThread(threading.Thread):
                 else:
                     logger.error(
                         "Connection listener received unexpected message type. "
-                        "Expected: GET_META_MSG, GET_KV_CACHE_CHECKSUM_MSG or DONE_RECVING_MSG. "
+                        "Expected: GET_META_MSG or DONE_RECVING_MSG. "
                         "Actual: %s. "
                         "Full message: %s. "
                         "Check: Verify message protocol implementation.",
                         msg[0] if msg else "empty",
                         msg,
+                    )
+                    mooncake_transfer_dfx.record(
+                        MooncakeDFXRecord(
+                            event=MooncakeDFXEvent.FAILURE,
+                            role="kv_producer",
+                            reason=MooncakeFailureReason.UNEXPECTED_MESSAGE.value,
+                            details={"message": msg},
+                        )
                     )
             except Exception as e:
                 logger.error(
@@ -614,6 +668,29 @@ class KVCacheRecvingThread(threading.Thread):
             "remote_block_size": remote_block_size,
         }
         logger.debug("Adding request %s to the queue.Trans info:%s", request_id, trans_info)
+        flat_local_block_ids = [block_id for group_block_ids in local_block_ids for block_id in group_block_ids]
+        flat_remote_block_ids = [block_id for group_block_ids in remote_block_ids for block_id in group_block_ids]
+        mooncake_transfer_dfx.validate_block_mapping(
+            request_id=request_id,
+            remote_request_id=remote_request_id,
+            role="kv_consumer",
+            local_block_ids=flat_local_block_ids,
+            remote_block_ids=flat_remote_block_ids,
+        )
+        mooncake_transfer_dfx.update_state(
+            request_id,
+            MooncakePDState.RECV_QUEUED,
+            remote_request_id=remote_request_id,
+            role="kv_consumer",
+            details={
+                "remote_engine_id": remote_engine_id,
+                "remote_host": remote_host,
+                "remote_handshake_port": remote_handshake_port,
+                "num_computed_tokens": num_computed_tokens,
+                "group_pulls": [pull.__dict__ for pull in group_pulls],
+                "all_task_done": all_task_done,
+            },
+        )
         self.request_queue.put(trans_info)
 
     def get_and_clear_finished_requests(self) -> set[str]:
@@ -740,6 +817,16 @@ class KVCacheRecvingThread(threading.Thread):
             if transfer_failed:
                 self._mark_failed_recv_request(request_id, req_meta["local_block_ids"])
                 logger.warning("Skipping KV cache transfer for request. remote_request_id=%s. ", remote_request_id)
+                mooncake_transfer_dfx.record(
+                    MooncakeDFXRecord(
+                        event=MooncakeDFXEvent.FAILURE,
+                        request_id=request_id,
+                        remote_request_id=remote_request_id,
+                        role="kv_consumer",
+                        reason=MooncakeFailureReason.TRANSFER_ENGINE_ERROR.value,
+                        details={"message": "skip_after_previous_transfer_failure"},
+                    )
+                )
             else:
                 try:
                     logger.debug("Starting to transfer KV cache for request %s.", remote_request_id)
@@ -749,6 +836,13 @@ class KVCacheRecvingThread(threading.Thread):
                     transfer_failed = True
                     self._mark_failed_recv_request(request_id, req_meta["local_block_ids"])
                     logger.exception("Failed to transfer KV cache for request %s: %s", remote_request_id, e)
+                    mooncake_transfer_dfx.update_state(
+                        request_id,
+                        MooncakePDState.TRANSFER_FAILED,
+                        remote_request_id=remote_request_id,
+                        role="kv_consumer",
+                        details={"error": str(e)},
+                    )
         finally:
             if self._mark_request_task_done(request_id, all_task_done):
                 self.task_tracker.update_done_task_count(request_id)
@@ -958,6 +1052,19 @@ class KVCacheRecvingThread(threading.Thread):
             dst_list,
             length_list,
         )
+        mooncake_transfer_dfx.record_transfer_plan(
+            request_id=req_meta["request_id"],
+            remote_request_id=remote_request_id,
+            session_id=session_id,
+            src_list=src_list,
+            dst_list=dst_list,
+            length_list=length_list,
+            role="kv_consumer",
+            extra={
+                "num_checksum_groups": len(checksum_transfer_groups),
+                "num_local_blocks": num_local_blocks,
+            },
+        )
         source_checksum_infos: dict[int, dict[str, Any] | None] = {}
         for checksum_group_idx, checksum_group in enumerate(checksum_transfer_groups):
             source_checksum_infos[checksum_group_idx] = self._get_remote_kv_cache_checksum(
@@ -973,14 +1080,31 @@ class KVCacheRecvingThread(threading.Thread):
                     "inner_offset": checksum_group["inner_offset"],
                 },
             )
-        ret = self.engine.batch_transfer_sync_read(session_id, src_list, dst_list, length_list)
-        if ret < 0:
-            logger.error(
-                "Mooncake transfer failed for request. remote_request_id=%s, ret=%d. ",
-                req_meta["remote_request_id"],
-                ret,
-            )
-            raise RuntimeError(f"Mooncake transfer failed, ret: {ret}")
+        with mooncake_transfer_dfx.transfer_span(
+            request_id=req_meta["request_id"],
+            remote_request_id=remote_request_id,
+            session_id=session_id,
+            role="kv_consumer",
+            details={"transfer_count": len(length_list), "num_local_blocks": num_local_blocks},
+        ):
+            ret = self.engine.batch_transfer_sync_read(session_id, src_list, dst_list, length_list)
+            if ret < 0:
+                logger.error(
+                    "Mooncake transfer failed for request. remote_request_id=%s, ret=%d. ",
+                    req_meta["remote_request_id"],
+                    ret,
+                )
+                mooncake_transfer_dfx.record(
+                    MooncakeDFXRecord(
+                        event=MooncakeDFXEvent.FAILURE,
+                        request_id=req_meta["request_id"],
+                        remote_request_id=remote_request_id,
+                        role="kv_consumer",
+                        reason=MooncakeFailureReason.TRANSFER_ENGINE_ERROR.value,
+                        details={"ret": ret, "session_id": session_id},
+                    )
+                )
+                raise RuntimeError(f"Mooncake transfer failed, ret: {ret}")
 
         for checksum_group_idx, checksum_group in enumerate(checksum_transfer_groups):
             group_kv_caches = self._get_group_kv_caches(
@@ -1438,6 +1562,13 @@ class KVCacheRecvingThread(threading.Thread):
             ensure_zmq_send(sock, self.encoder.encode((GET_META_MSG, "")), f"{remote_host}:{remote_handshake_port}")
             metadata_bytes = ensure_zmq_recv(sock, f"{remote_host}:{remote_handshake_port}")
             agent_meta = self.decoder.decode(metadata_bytes)
+            mooncake_transfer_dfx.validate_agent_metadata(metadata=agent_meta, role="kv_consumer")
+            mooncake_transfer_dfx.dump_metadata(
+                label="recv_agent_metadata",
+                metadata=agent_meta,
+                role="kv_consumer",
+                extra={"remote_host": remote_host, "remote_handshake_port": remote_handshake_port},
+            )
             engine_id = agent_meta.engine_id
             assert engine_id != self.local_engine_id, (
                 f"Conflict engine id {engine_id} with local engine id {self.local_engine_id}."
@@ -1454,6 +1585,18 @@ class KVCacheRecvingThread(threading.Thread):
                 self.remote_te_port[engine_id][remote_handshake_port] = agent_meta.te_rpc_port
                 self.remote_block_size_scale[engine_id][remote_handshake_port] = agent_meta.block_size_scale
                 self.remote_block_stride_per_addr[engine_id][remote_handshake_port] = agent_meta.block_strides
+            mooncake_transfer_dfx.record(
+                MooncakeDFXRecord(
+                    event=MooncakeDFXEvent.LIFECYCLE,
+                    role="kv_consumer",
+                    state=MooncakePDState.METADATA_RECEIVED,
+                    details={
+                        "engine_id": engine_id,
+                        "remote_host": remote_host,
+                        "remote_handshake_port": remote_handshake_port,
+                    },
+                )
+            )
         except Exception:
             if isinstance(sock, zmq.Socket):  # type: ignore
                 sock.close()
@@ -1480,7 +1623,7 @@ class KVCacheRecvingThread(threading.Thread):
             sock = self._get_remote_socket(remote_host, remote_handshake_port)
             data = self.encoder.encode((GET_KV_CACHE_CHECKSUM_MSG, checksum_request))
             ensure_zmq_send(sock, data, f"{remote_host}:{remote_handshake_port}")
-            checksum_bytes = ensure_zmq_recv(sock, f"{remote_host}:{remote_handshake_port}")
+            checksum_bytes = ensure_zmq_recv(sock, self.remote_poller, f"{remote_host}:{remote_handshake_port}")
             checksum_response = msgspec.msgpack.decode(checksum_bytes)
             checksum = checksum_response.get("checksum") if isinstance(checksum_response, dict) else checksum_response
             samples = checksum_response.get("samples", []) if isinstance(checksum_response, dict) else []
@@ -1544,6 +1687,12 @@ class KVCacheRecvingThread(threading.Thread):
         logger.debug(
             "Sending done recving signal for request %s to %s:%d", request_id, remote_host, remote_handshake_port
         )
+        mooncake_transfer_dfx.update_state(
+            request_id,
+            MooncakePDState.DONE_RECVING_SENT,
+            role="kv_consumer",
+            details={"remote_host": remote_host, "remote_handshake_port": remote_handshake_port},
+        )
         sock: zmq.Socket | None = None  # type: ignore
         try:
             sock = self._get_remote_socket(remote_host, remote_handshake_port)
@@ -1559,12 +1708,36 @@ class KVCacheRecvingThread(threading.Thread):
                     remote_host,
                     remote_handshake_port,
                 )
+                mooncake_transfer_dfx.record(
+                    MooncakeDFXRecord(
+                        event=MooncakeDFXEvent.FAILURE,
+                        request_id=request_id,
+                        role="kv_consumer",
+                        reason=MooncakeFailureReason.SOCKET_ERROR.value,
+                        details={"response": resp.decode("utf-8", errors="replace")},
+                    )
+                )
                 raise RuntimeError(f"Failed to receive ACK, resp: {resp.decode('utf-8')}")
+            mooncake_transfer_dfx.update_state(
+                request_id,
+                MooncakePDState.DONE_RECVING_ACKED,
+                role="kv_consumer",
+                details={"remote_host": remote_host, "remote_handshake_port": remote_handshake_port},
+            )
         except RuntimeError as e:
             if isinstance(sock, zmq.Socket):  # type: ignore
                 sock.close()
                 sock = None
                 logger.warning("Unexpected error occurred in socket. error=%s. ", e)
+                mooncake_transfer_dfx.record(
+                    MooncakeDFXRecord(
+                        event=MooncakeDFXEvent.FAILURE,
+                        request_id=request_id,
+                        role="kv_consumer",
+                        reason=MooncakeFailureReason.SOCKET_ERROR.value,
+                        details={"error": str(e)},
+                    )
+                )
         finally:
             if sock is not None:
                 self._return_remote_socket(sock, remote_host, remote_handshake_port)
@@ -1634,6 +1807,19 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
             remote_multi_nodes_meta_mapping=kv_transfer_params.get("remote_multi_nodes_meta_mapping", {}),
             num_prompt_blocks=kv_transfer_params.get("num_prompt_blocks", 0),
             remote_block_size=kv_transfer_params.get("remote_block_size", 0),
+        )
+        mooncake_transfer_dfx.update_state(
+            request_id,
+            MooncakePDState.RECV_QUEUED,
+            remote_request_id=kv_transfer_params["remote_request_id"],
+            role="kv_consumer",
+            details={
+                "num_external_tokens": num_external_tokens,
+                "num_computed_tokens": kv_transfer_params.get("num_computed_tokens", 0),
+                "remote_engine_id": kv_transfer_params["remote_engine_id"],
+                "remote_host": kv_transfer_params["remote_host"],
+                "remote_port": kv_transfer_params["remote_port"],
+            },
         )
 
 
@@ -1940,6 +2126,18 @@ class MooncakeConnectorScheduler:
             actual = self._state_prefill_token_count(len(token_ids))
             params["num_computed_tokens"] = num_computed_tokens
             count = max(actual - num_computed_tokens, 0)
+            mooncake_transfer_dfx.update_state(
+                request.request_id,
+                MooncakePDState.SCHEDULED,
+                remote_request_id=params.get("remote_request_id"),
+                role="kv_consumer",
+                details={
+                    "num_computed_tokens": num_computed_tokens,
+                    "num_external_tokens": count,
+                    "prompt_tokens": actual,
+                    "async_load": count > 0,
+                },
+            )
             if count > 0:
                 return count, True
 
@@ -1964,6 +2162,20 @@ class MooncakeConnectorScheduler:
                 if all(p in params for p in ("remote_engine_id", "remote_host", "remote_port", "remote_request_id")):
                     local_block_ids = blocks.get_unhashed_block_ids_all_groups() if num_external_tokens > 0 else []
                     # Get unhashed blocks to pull from remote.
+                    if num_external_tokens > 0:
+                        mooncake_transfer_dfx.validate_block_mapping(
+                            request_id=request.request_id,
+                            remote_request_id=params["remote_request_id"],
+                            role="kv_consumer",
+                            local_block_ids=[
+                                block_id for group_block_ids in local_block_ids for block_id in group_block_ids
+                            ],
+                            remote_block_ids=[
+                                block_id
+                                for group_block_ids in params["remote_block_ids"]
+                                for block_id in group_block_ids
+                            ],
+                        )
                     self._reqs_need_recv[request.request_id] = (request, local_block_ids, num_external_tokens)
                 else:
                     logger.warning("Got invalid KVTransferParams. params=%s. ", params)
@@ -2030,6 +2242,16 @@ class MooncakeConnectorScheduler:
         if delay_free_blocks:
             logger.info("Delaying free of %d blocks for request %s", sum(computed_block_lens), request.request_id)
             self._reqs_need_send[request.request_id] = time.time()
+        mooncake_transfer_dfx.update_state(
+            request.request_id,
+            MooncakePDState.PREFILL_FINISHED,
+            role="kv_producer",
+            details={
+                "delay_free_blocks": delay_free_blocks,
+                "computed_block_lens": computed_block_lens,
+                "status": str(request.status),
+            },
+        )
 
         return delay_free_blocks, dict(
             do_remote_prefill=True,
@@ -2513,6 +2735,20 @@ class MooncakeConnectorWorker:
             handshake_port=self.handshake_port,
         )
         self.xfer_handshake_metadata = metadata
+        mooncake_transfer_dfx.validate_agent_metadata(
+            metadata=metadata,
+            role=self.kv_role,
+        )
+        mooncake_transfer_dfx.dump_metadata(
+            label="register_kv_caches",
+            metadata=metadata,
+            role=self.kv_role,
+            extra={
+                "registered_ptr_count": len(register_regions.ptrs),
+                "registered_total_bytes": sum(register_regions.lengths),
+                "has_mamba_group": has_mamba_group,
+            },
+        )
 
         ready_event = threading.Event()
         if self.kv_role == "kv_producer":
@@ -3380,6 +3616,18 @@ class MooncakeConnectorWorker:
 
     def start_load_kv(self, metadata: MooncakeConnectorMetadata):
         """Start loading KV blocks from remote engine."""
+        mooncake_transfer_dfx.record(
+            MooncakeDFXRecord(
+                event=MooncakeDFXEvent.LIFECYCLE,
+                role=self.kv_role,
+                details={
+                    "message": "start_load_kv",
+                    "requests": list(metadata.requests),
+                    "requests_to_send": list(metadata.requests_to_send),
+                    "reqs_in_batch": list(metadata.reqs_in_batch),
+                },
+            )
+        )
         for req_id in metadata.reqs_in_batch:
             if self.kv_send_thread is not None:
                 self.kv_send_thread.task_tracker.add_req_to_process(req_id)
