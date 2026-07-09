@@ -648,16 +648,24 @@ class NPUPlatform(Platform):
         if ascend_config.recompute_scheduler_enable:
             kv_transfer_config = vllm_config.kv_transfer_config
             kv_role = getattr(kv_transfer_config, "kv_role", None)
-            if kv_transfer_config is None or kv_role != "kv_consumer":
+            if kv_role == "kv_producer":
+                logger.warning(
+                    "recompute_scheduler_enable is ignored on PD-disaggregated P nodes "
+                    "(kv_role='kv_producer') and will be deprecated on P nodes in a future release. "
+                    "Please remove it from P-node configs and keep it only on PD-disaggregated D nodes "
+                    "(kv_role='kv_consumer')."
+                )
+                ascend_config.recompute_scheduler_enable = False
+            elif kv_transfer_config is None or kv_role != "kv_consumer":
                 raise ValueError(
                     "recompute_scheduler_enable can only be enabled on PD-disaggregated D nodes "
                     f"(kv_role='kv_consumer', but got kv_role={kv_role!r}), and is not supported in PD-mixed mode."
                 )
+            else:
+                from vllm_ascend.core.recompute_scheduler import RecomputeSchedulerConfig
 
-            from vllm_ascend.core.recompute_scheduler import RecomputeSchedulerConfig
-
-            recompute_scheduler_config = RecomputeSchedulerConfig.initialize_from_config(vllm_config)
-            vllm_config.scheduler_config = recompute_scheduler_config
+                recompute_scheduler_config = RecomputeSchedulerConfig.initialize_from_config(vllm_config)
+                vllm_config.scheduler_config = recompute_scheduler_config
 
         # Extend original scheduler_config to use SchedulerDynamicBatch.
         if ascend_config.SLO_limits_for_dynamic_batch != -1:
