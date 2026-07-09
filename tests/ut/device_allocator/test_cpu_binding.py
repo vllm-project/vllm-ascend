@@ -629,7 +629,10 @@ class TestCpuBindingSupplemental(unittest.TestCase):
             0,
         )
 
-        with patch.object(cpu_alloc, "bind") as mock_bind:
+        with (
+            patch.object(cpu_alloc, "bind") as mock_bind,
+            patch("vllm_ascend.cpu_binding.logger.info") as mock_logger_info,
+        ):
             cpu_alloc.bind_uvb_poll_window_threads()
 
         self.assertEqual(cpu_alloc.uvb_cpu_pool, [1, 2, 3])
@@ -639,6 +642,11 @@ class TestCpuBindingSupplemental(unittest.TestCase):
                 call("101", [1, 2, 3], False),
                 call("201", [1, 2, 3], False),
             ],
+        )
+        mock_logger_info.assert_called_once_with(
+            "[cpu_bind_ascend_950] uvb_poll_window_thread tids=[%s] cpus=[%s]",
+            "101 201",
+            "1 2 3",
         )
 
     @patch("vllm_ascend.cpu_binding.execute_command")
@@ -658,10 +666,10 @@ class TestCpuBindingSupplemental(unittest.TestCase):
             cpu_alloc.bind_uvb_poll_window_threads()
         mock_bind.assert_not_called()
 
-    @patch("vllm_ascend.cpu_binding.logger.info")
+    @patch("vllm_ascend.cpu_binding.logger.warning")
     @patch("vllm_ascend.cpu_binding.execute_command", return_value=("100 101 ? 00:00:01 worker_thread", 0))
     def test_bind_uvb_poll_window_threads_logs_pid_host_when_thread_missing(
-        self, _mock_execute_command, mock_logger_info
+        self, _mock_execute_command, mock_logger_warning
     ):
         cpu_alloc = make_cpu_alloc()
         cpu_alloc.numa_to_cpu_map = {0: [0, 1]}
@@ -669,7 +677,7 @@ class TestCpuBindingSupplemental(unittest.TestCase):
 
         cpu_alloc.bind_uvb_poll_window_threads()
 
-        self.assertIn("--pid=host", mock_logger_info.call_args[0][0])
+        self.assertIn("--pid=host", mock_logger_warning.call_args[0][0])
 
     @patch("vllm_ascend.cpu_binding.logger.warning")
     @patch(
@@ -874,8 +882,9 @@ class TestCpuBindingSupplemental(unittest.TestCase):
         with patch.object(cpu_alloc, "get_ascend_950_cluster_size", return_value=16):
             self.assertFalse(cpu_alloc.build_ascend_950_cpu_pools())
 
+    @patch("vllm_ascend.cpu_binding.get_ascend_device_type", return_value=AscendDeviceType.A2)
     @patch("vllm_ascend.cpu_binding.logger.info")
-    def test_print_plan_handles_empty_release_assignment(self, mock_logger_info):
+    def test_print_plan_handles_empty_release_assignment(self, mock_logger_info, _mock_get_device_type):
         cpu_alloc = make_cpu_alloc()
         cpu_alloc.device_info.running_npu_list = [1]
         cpu_alloc.rank_id = 0
@@ -887,8 +896,29 @@ class TestCpuBindingSupplemental(unittest.TestCase):
 
         self.assertEqual(mock_logger_info.call_count, 2)
 
+    @patch("vllm_ascend.cpu_binding.get_ascend_device_type", return_value=AscendDeviceType.A5)
     @patch("vllm_ascend.cpu_binding.logger.info")
-    def test_print_plan_handles_non_empty_release_assignment(self, mock_logger_info):
+    def test_print_plan_uses_ascend_950_worker_log(self, mock_logger_info, _mock_get_device_type):
+        cpu_alloc = make_cpu_alloc()
+        cpu_alloc.device_info.running_npu_list = [1]
+        cpu_alloc.rank_id = 0
+        cpu_alloc.assign_main = {1: [2, 3]}
+        cpu_alloc.assign_acl = {1: []}
+        cpu_alloc.assign_rel = {1: []}
+
+        cpu_alloc.print_plan()
+
+        self.assertEqual(
+            mock_logger_info.call_args_list,
+            [
+                call("The CPU allocation plan is as follows:"),
+                call("Ascend 950 NPU%s: worker=[%s]", 1, "2 3"),
+            ],
+        )
+
+    @patch("vllm_ascend.cpu_binding.get_ascend_device_type", return_value=AscendDeviceType.A2)
+    @patch("vllm_ascend.cpu_binding.logger.info")
+    def test_print_plan_handles_non_empty_release_assignment(self, mock_logger_info, _mock_get_device_type):
         cpu_alloc = make_cpu_alloc()
         cpu_alloc.device_info.running_npu_list = [1]
         cpu_alloc.rank_id = 0
