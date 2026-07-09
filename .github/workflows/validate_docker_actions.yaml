@@ -19,6 +19,18 @@ name: 'Validate: Docker Actions on Self-Hosted'
 
 on:
   workflow_dispatch:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+    branches:
+      - main
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/validate_docker_actions.yaml'
 
 defaults:
   run:
