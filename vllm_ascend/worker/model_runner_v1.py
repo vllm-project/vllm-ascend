@@ -3657,7 +3657,7 @@ class NPUModelRunner(GPUModelRunner):
                         self.afd_connector.send_dp_metadata_list(
                             dp_metadata_list,
                             is_graph_capturing=is_graph_capturing,
-                            is_warmup=False)
+                            is_warmup=True)
                         logger.info(
                             "afd_connector.rank in dummy_run send_dp_metadata_list is %s, "
                             "is_graph_capturing: %s",

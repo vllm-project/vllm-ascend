@@ -358,12 +358,7 @@ class NPUP2PAFDConnector(AFDConnectorBase):
             process_group=self.a2e_group,
             all_gather_group=None,
         )
-        # Asynchronously receive independent metadata. The attention side may
-        # send None (NPUP2P connector does not rely on AFDConnectorMetadata for
-        # routing), so guard the handle assignment to stay symmetric with
-        # send_attn_output's `if metadata is not None` check. When metadata is
-        # None we must wait for the irecv works to complete here, since the
-        # caller (FFN _ffn_forward) consumes hidden_states immediately.
+
         metadata = self.a2e_group.recv_object(src)
         if metadata is not None:
             metadata.recv_handle_list = work_list
@@ -372,9 +367,6 @@ class NPUP2PAFDConnector(AFDConnectorBase):
                 work.wait()
 
         if self.backend == "hccl":
-            # Gate computation is always on the FFN side. input_ids is needed
-            # for tid2eid (logical→physical expert mapping) inside select_experts.
-            # Set it on forward_context so the non-AFD MoE path can read it.
             recv_input_ids = intermediate_tensors["input_ids"]
             if recv_input_ids is not None:
                 get_forward_context().input_ids = recv_input_ids
