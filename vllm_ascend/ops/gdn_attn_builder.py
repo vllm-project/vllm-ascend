@@ -157,7 +157,7 @@ def _build_non_spec_chunked_prefill_metadata(
     )
 
 
-def _compact_empty_segments(cu_seqlens_host, initial_state):
+def _compact_empty_segments(cu_seqlens_host, initial_state, device=None):
     """Drop zero-length segments so AscendC fwd_h/fwd_o indexing lines up.
 
     ``chunk_indices_chunk64`` already carries COMPACT (non-empty) segment ranks
@@ -175,6 +175,9 @@ def _compact_empty_segments(cu_seqlens_host, initial_state):
     layout via ``keep_meta`` (empty segments keep their initial state).
     No-op when there are no empty segments (rank0 / non-PCP / uniform batch
     never have them).
+
+    When *device* is given, ``keep_meta`` is moved to that device so that
+    callers can index NPU tensors without an extra host→device sync.
     """
     if cu_seqlens_host is None:
         return None, initial_state, None
@@ -182,6 +185,8 @@ def _compact_empty_segments(cu_seqlens_host, initial_state):
     keep = (cu[1:] - cu[:-1]) > 0
     if bool(keep.all()):
         return cu_seqlens_host, initial_state, None
+    if device is not None:
+        keep = keep.to(device)
     cu_kern = torch.cat([cu[:1], cu[1:][keep]]).tolist()
     st_kern = initial_state[keep] if initial_state is not None else None
     return cu_kern, st_kern, keep
@@ -201,7 +206,9 @@ def _build_chunked_prefill_metadata(
     )
     # Pre-compute compact cu_seqlens for AscendC kernels so each layer
     # can reuse them instead of calling _compact_empty_segments again.
-    cu_seqlens_kern, _, keep_meta = _compact_empty_segments(cu_seqlens_host, None)
+    cu_seqlens_kern, _, keep_meta = _compact_empty_segments(
+        cu_seqlens_host, None, device=tensors["chunk_indices_chunk64"].device
+    )
     if keep_meta is None:
         cu_seqlens_kern = None
     else:

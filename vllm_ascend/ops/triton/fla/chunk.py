@@ -111,12 +111,16 @@ def chunk_gated_delta_rule_fwd(
         cu_seqlens_kern = cu_seqlens_host if prebuilt_meta.cu_seqlens_kern is None else prebuilt_meta.cu_seqlens_kern
         keep_meta = prebuilt_meta.keep_meta
         initial_state_kern = (
-            initial_state[keep_meta.to(initial_state.device)]
+            initial_state[keep_meta]
             if initial_state is not None and keep_meta is not None
             else initial_state
         )
     else:
-        cu_seqlens_kern, initial_state_kern, keep_meta = _compact_empty_segments(cu_seqlens_host, initial_state)
+        cu_seqlens_kern, initial_state_kern, keep_meta = _compact_empty_segments(
+            cu_seqlens_host,
+            initial_state,
+            device=initial_state.device if initial_state is not None else None,
+        )
     h, v_new, final_state = torch.ops._C_ascend.chunk_gated_delta_rule_fwd_h(
         k_ascendc,
         w_ascendc,
