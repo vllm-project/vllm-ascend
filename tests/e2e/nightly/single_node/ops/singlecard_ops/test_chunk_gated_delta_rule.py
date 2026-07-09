@@ -23,6 +23,7 @@ from vllm_ascend.utils import enable_custom_op
 enable_custom_op()
 
 SEED = 42
+CHUNK_SIZE = 64
 
 
 # ---------------------------------------------------------------------------
@@ -55,8 +56,7 @@ def _stage1_chunk(query, key, value, g, beta, scale):
     g_cum = g.cumsum(dim=-1)
     g_cum_exp = g_cum.exp()
 
-    lower = torch.tril(torch.ones(C, C, dtype=torch.bool, device=device),
-                       diagonal=-1)
+    lower = torch.tril(torch.ones(C, C, dtype=torch.bool, device=device), diagonal=-1)
     attn = ((g_cum[:, None] - g_cum[None, :]) * lower).exp() * lower
 
     attn_1 = kkt * attn
@@ -68,8 +68,7 @@ def _stage1_chunk(query, key, value, g, beta, scale):
     attn_1 = attn_1 + torch.eye(C, dtype=attn_1.dtype, device=attn_1.device)
 
     kg = key.float() * (g_cum[-1, None] - g_cum).exp()[..., None]
-    k_cumdecay = (beta.unsqueeze(-1).float() * g_cum_exp[:, None]) * (
-        -1) * key.float()
+    k_cumdecay = (beta.unsqueeze(-1).float() * g_cum_exp[:, None]) * (-1) * key.float()
 
     v_beta = value.float() * beta.unsqueeze(-1).float()
     q_prime = query.float() * scale * g_cum_exp[:, None]
@@ -77,8 +76,7 @@ def _stage1_chunk(query, key, value, g, beta, scale):
     v_inner = attn_1 @ v_beta
     k_cumdecay = attn_1 @ k_cumdecay
 
-    return (g_cum, k_cumdecay.to(torch.bfloat16), v_inner,
-            q_prime.to(torch.bfloat16), kg.to(torch.bfloat16), qkt)
+    return (g_cum, k_cumdecay.to(torch.bfloat16), v_inner, q_prime.to(torch.bfloat16), kg.to(torch.bfloat16), qkt)
 
 
 def _stage1(query, key, value, g, beta, scale, C):
@@ -93,18 +91,12 @@ def _stage1(query, key, value, g, beta, scale, C):
 
     padded_seq_len = (S + C - 1) // C * C
 
-    g_cum = torch.zeros((Nv, padded_seq_len),
-                        dtype=torch.float32, device=device)
-    k_cumdecay = torch.zeros((Nv, padded_seq_len, Dk),
-                             dtype=torch.bfloat16, device=device)
-    v_inner = torch.zeros((Nv, padded_seq_len, Dv),
-                          dtype=torch.float32, device=device)
-    q_prime = torch.zeros((Nv, padded_seq_len, Dk),
-                          dtype=torch.bfloat16, device=device)
-    kg = torch.zeros((Nv, padded_seq_len, Dk),
-                     dtype=torch.bfloat16, device=device)
-    qkt = torch.zeros((Nv, padded_seq_len, C),
-                      dtype=torch.float32, device=device)
+    g_cum = torch.zeros((Nv, padded_seq_len), dtype=torch.float32, device=device)
+    k_cumdecay = torch.zeros((Nv, padded_seq_len, Dk), dtype=torch.bfloat16, device=device)
+    v_inner = torch.zeros((Nv, padded_seq_len, Dv), dtype=torch.float32, device=device)
+    q_prime = torch.zeros((Nv, padded_seq_len, Dk), dtype=torch.bfloat16, device=device)
+    kg = torch.zeros((Nv, padded_seq_len, Dk), dtype=torch.bfloat16, device=device)
+    qkt = torch.zeros((Nv, padded_seq_len, C), dtype=torch.float32, device=device)
 
     loop_range = range(0, padded_seq_len, C)
     for nid in range(Nv):
@@ -115,8 +107,7 @@ def _stage1(query, key, value, g, beta, scale, C):
             g_chunk = _get_chunk(g[:, nid], C, idx)
             beta_chunk = _get_chunk(beta[:, nid], C, idx)
 
-            (g_cum_c, k_cumdecay_c, v_inner_c,
-             qg_c, kg_c, qkt_c) = _stage1_chunk(
+            (g_cum_c, k_cumdecay_c, v_inner_c, qg_c, kg_c, qkt_c) = _stage1_chunk(
                 q_chunk, k_chunk, v_chunk, g_chunk, beta_chunk, scale)
 
             g_cum[nid, idx:idx + C] = g_cum_c
@@ -137,8 +128,7 @@ def _stage2_chunk(q_prime, v_inner, g_cum, k_cumdecay, state, kg):
     v_prime = k_cumdecay.float() @ bf16_state.float().transpose(0, 1)
     v_new = v_inner + v_prime
 
-    state_out = (v_new.transpose(0, 1).to(torch.bfloat16).float()
-                 @ kg.float())
+    state_out = (v_new.transpose(0, 1).to(torch.bfloat16).float() @ kg.float())
     state_old = state.float() * g_cum.exp()[-1]
     state_old = state_old + state_out
 
@@ -148,10 +138,8 @@ def _stage2_chunk(q_prime, v_inner, g_cum, k_cumdecay, state, kg):
 def _stage2(q_prime, v_inner, g_cum, k_cumdecay, state, kg, C):
     """Stage2 outer loop: sequential chunk traversal for state updates."""
     Nv, Sp, Dv = v_inner.shape
-    attn_inter = torch.zeros((Nv, Sp, Dv),
-                             dtype=torch.float32, device=q_prime.device)
-    v_new = torch.zeros((Nv, Sp, Dv),
-                        dtype=torch.bfloat16, device=q_prime.device)
+    attn_inter = torch.zeros((Nv, Sp, Dv), dtype=torch.float32, device=q_prime.device)
+    v_new = torch.zeros((Nv, Sp, Dv), dtype=torch.bfloat16, device=q_prime.device)
     final_state = torch.empty_like(state).to(torch.float32)
 
     for nid in range(Nv):
@@ -163,7 +151,8 @@ def _stage2(q_prime, v_inner, g_cum, k_cumdecay, state, kg, C):
                 g_cum[nid, idx:idx + C],
                 k_cumdecay[nid, idx:idx + C, :],
                 cur_state,
-                kg[nid, idx:idx + C, :])
+                kg[nid, idx:idx + C, :],
+            )
             attn_inter[nid, idx:idx + C, :] = attn_inter_c
             v_new[nid, idx:idx + C, :] = v_new_c
         final_state[nid, ...] = cur_state
@@ -174,22 +163,16 @@ def _stage3_chunk(qkt, value, scale, g_cum, attn_inter, v_new):
     """Stage3: merge inter-chunk and intra-chunk attention for final output."""
     device = value.device
     C = value.shape[0]
-    lower = torch.tril(torch.ones(C, C, dtype=torch.bool, device=device),
-                       diagonal=0)
-    masked_qkt = (qkt.float() * scale
-                  * ((g_cum[:, None] - g_cum[None, :]) * lower).exp()
-                  * lower.float())
-    attn_inner = (masked_qkt.to(torch.bfloat16).float()
-                  @ v_new.to(torch.bfloat16).float())
+    lower = torch.tril(torch.ones(C, C, dtype=torch.bool, device=device), diagonal=0)
+    masked_qkt = (qkt.float() * scale * ((g_cum[:, None] - g_cum[None, :]) * lower).exp() * lower.float())
+    attn_inner = (masked_qkt.to(torch.bfloat16).float() @ v_new.to(torch.bfloat16).float())
     return (attn_inter + attn_inner).to(torch.bfloat16)
 
 
 def _stage3(qkt, value, scale, g_cum, attn_inter, v_new, C):
     """Stage3 outer loop: per-head per-chunk output assembly."""
     Nv, Sp, Dv = attn_inter.shape
-    S = value.shape[0]
-    attn_out = torch.empty((Sp, Nv, Dv),
-                           dtype=torch.bfloat16, device=value.device)
+    attn_out = torch.empty((Sp, Nv, Dv), dtype=torch.bfloat16, device=value.device)
 
     for nid in range(Nv):
         for idx in range(0, Sp, C):
@@ -199,12 +182,12 @@ def _stage3(qkt, value, scale, g_cum, attn_inter, v_new, C):
                 scale,
                 g_cum[nid, idx:idx + C],
                 attn_inter[nid, idx:idx + C, :],
-                v_new[nid, idx:idx + C, :])
+                v_new[nid, idx:idx + C, :],
+            )
     return attn_out
 
 
-def golden_chunk_gated_delta_rule(query, key, value, beta, scale,
-                                  initial_state, actual_seq_lengths, g=None):
+def golden_chunk_gated_delta_rule(query, key, value, beta, scale, initial_state, actual_seq_lengths, g=None):
     """Full 3-stage chunked gated delta rule golden reference (CPU, pure PyTorch).
 
     Args:
@@ -220,10 +203,10 @@ def golden_chunk_gated_delta_rule(query, key, value, beta, scale,
     Returns:
         (output [T, Nv, Dv] BF16, final_state [B, Nv, Dv, Dk] FP32)
     """
-    T, Nk, Dk = query.shape
+    T = query.shape[0]
     B, Nv, Dv, _ = initial_state.shape
     device = query.device
-    C = 64
+    C = CHUNK_SIZE
 
     if g is None:
         g = torch.zeros((T, Nv), dtype=torch.float32, device=device)
@@ -237,15 +220,12 @@ def golden_chunk_gated_delta_rule(query, key, value, beta, scale,
         end = start + S
 
         g_cum, k_cum_decay, v_inner, q_prime, kg, qkt = _stage1(
-            query[start:end], key[start:end], value[start:end],
-            g[start:end], beta[start:end], scale, C)
+            query[start:end], key[start:end], value[start:end], g[start:end], beta[start:end], scale, C)
 
-        cur_state, attn_inter, v_new = _stage2(
-            q_prime, v_inner, g_cum, k_cum_decay, cur_state, kg, C)
+        cur_state, attn_inter, v_new = _stage2(q_prime, v_inner, g_cum, k_cum_decay, cur_state, kg, C)
         final_state[bid] = cur_state
 
-        attn_out_padded = _stage3(
-            qkt, value[start:end], scale, g_cum, attn_inter, v_new, C)
+        attn_out_padded = _stage3(qkt, value[start:end], scale, g_cum, attn_inter, v_new, C)
         attn_out[start:end, ...] = attn_out_padded[:S]
         start = end
 
@@ -317,31 +297,24 @@ def _cleanup():
 def test_chunk_gated_delta_rule_basic(batch_size, seqlen, headnum):
     nk, nv = headnum
     dk, dv = 128, 128
-    q, k, v, g, beta, scale, initial_state, seq_lengths = _make_inputs(
-        batch_size, seqlen, nk, nv, dk, dv)
+    q, k, v, g, beta, scale, initial_state, seq_lengths = _make_inputs(batch_size, seqlen, nk, nv, dk, dv)
 
-    ref_out, ref_state = golden_chunk_gated_delta_rule(
-        q, k, v, beta, scale, initial_state, seq_lengths, g)
+    ref_out, ref_state = golden_chunk_gated_delta_rule(q, k, v, beta, scale, initial_state, seq_lengths, g)
 
-    npu_out, npu_state = _npu_op_exec(
-        q, k, v, beta, initial_state, seq_lengths, g, scale)
+    npu_out, npu_state = _npu_op_exec(q, k, v, beta, initial_state, seq_lengths, g, scale)
 
     _assert_close(npu_out, ref_out)
     _assert_close(npu_state, ref_state)
     _cleanup()
 
 
-
 def test_chunk_gated_delta_rule_base_case():
     """Baseline case matching original golden: (1, 1536, 8, 24, 128, 128)."""
-    q, k, v, g, beta, scale, initial_state, seq_lengths = _make_inputs(
-        1, 1536, 8, 24, 128, 128)
+    q, k, v, g, beta, scale, initial_state, seq_lengths = _make_inputs(1, 1536, 8, 24, 128, 128)
 
-    ref_out, ref_state = golden_chunk_gated_delta_rule(
-        q, k, v, beta, scale, initial_state, seq_lengths, g)
+    ref_out, ref_state = golden_chunk_gated_delta_rule(q, k, v, beta, scale, initial_state, seq_lengths, g)
 
-    npu_out, npu_state = _npu_op_exec(
-        q, k, v, beta, initial_state, seq_lengths, g, scale)
+    npu_out, npu_state = _npu_op_exec(q, k, v, beta, initial_state, seq_lengths, g, scale)
 
     _assert_close(npu_out, ref_out)
     _assert_close(npu_state, ref_state)

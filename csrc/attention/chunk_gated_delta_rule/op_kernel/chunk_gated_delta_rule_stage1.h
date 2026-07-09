@@ -61,7 +61,7 @@ struct GDRStageOneInitParams {
     GlobalTensor<bfloat16_t> value;     // (T, Nv, Dv)
     GlobalTensor<bfloat16_t> beta;      // (T, Nv)
     GlobalTensor<float> g;              // (T, Nv)
-    // ouput
+    // output
     GlobalTensor<float> gCumExp;        // (Nv, cg_len)
     GlobalTensor<bfloat16_t> kCumdecay;      // (Nv, cg_len, Dk)
     GlobalTensor<float> vInner;              // (Nv, cg_len, Dv)  改为 float32 高精度落盘
