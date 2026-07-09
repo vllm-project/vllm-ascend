@@ -32,9 +32,21 @@
 `test-download.sh` 会对每个下载源分别测试「走代理」和「不走代理」两种情况：
 
 | 下载源 | URL | 说明 |
-|---|---|---|
-| GitHub Releases | `https://github.com/moby/buildkit/releases/download/v0.29.0/buildkit-v0.29.0.linux-arm64.tar.gz` | 已知在走代理时不稳定 |
+|---|---|---|---|
+| GitHub Releases | `https://github.com/moby/buildkit/releases/download/v0.29.0/buildkit-v0.29.0.linux-arm64.tar.gz` | 直连速度极慢（~20KB/s），走 squid 代理行为已修复（之前有 URL 重写 bug） |
+| gh-proxy 镜像 | `https://gh-proxy.test.osinfra.cn/https://github.com/moby/buildkit/releases/download/v0.29.0/buildkit-v0.29.0.linux-arm64.tar.gz` | smart-git-proxy 部署在 gy006 集群，HTTP 层反向代理 GitHub；85MB 下载 1-3s（27-81MB/s） |
 | Gitee Releases | `https://gitee.com/mirrors/buildkit/releases/download/v0.29.0/buildkit-v0.29.0.linux-arm64.tar.gz`（如无该 release，退化为 `https://gitee.com` 首页连通性测试） | 用于对比，确认问题是否只存在于 GitHub 域名 |
+
+## 已验证结果（2026-07-09 gy006 集群）
+
+| 测试 | 结果 | 详情 |
+|---|---|---|
+| github-no-proxy | FAIL (28, 超时) | 60s 只下载 1MB/85MB，~18KB/s |
+| github-via-proxy | FAIL (28, 超时) | squid URL 重写 bug **已修复**（Location 不再畸形），同样 60s 只下载 ~500KB |
+| **gh-proxy-no-proxy** | **OK** | **85MB in 3s, 27MB/s** |
+| **gh-proxy-via-proxy** | **OK** | **85MB in 1s, 81MB/s**（squid 缓存命中加速） |
+| gitee-homepage-no-proxy | OK | 642KB in 2s |
+| gitee-homepage-via-proxy | OK | 642KB in 2s
 
 ## 如何运行
 

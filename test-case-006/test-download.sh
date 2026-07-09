@@ -21,6 +21,7 @@ MAX_REDIRS="${MAX_REDIRS:-10}"
 GITHUB_URL="https://github.com/moby/buildkit/releases/download/v0.29.0/buildkit-v0.29.0.linux-arm64.tar.gz"
 GITEE_URL="https://gitee.com/mirrors/buildkit/releases/download/v0.29.0/buildkit-v0.29.0.linux-arm64.tar.gz"
 GITEE_FALLBACK_URL="https://gitee.com"
+GH_PROXY_URL="https://gh-proxy.test.osinfra.cn/https://github.com/moby/buildkit/releases/download/v0.29.0/buildkit-v0.29.0.linux-arm64.tar.gz"
 
 RESULT_SUMMARY=""
 
@@ -110,6 +111,12 @@ run_case "gitee-via-proxy" "$GITEE_URL" "yes" /tmp/gitee-via-proxy.tar.gz
 # 额外测一次首页连通性作为兜底，避免因为 URL 本身 404 而误判为代理问题。
 run_case "gitee-homepage-no-proxy"   "$GITEE_FALLBACK_URL" "no"  /tmp/gitee-home-no-proxy.html
 run_case "gitee-homepage-via-proxy" "$GITEE_FALLBACK_URL" "yes" /tmp/gitee-home-via-proxy.html
+
+# gh-proxy（smart-git-proxy 部署在 gy006 集群）：HTTP 层 GitHub 镜像。
+# 把 GitHub Release 原 URL 拼在 gh-proxy 域名后面，proxypass 到 GitHub。
+# 对比不经过/经过 squid 代理访问 gh-proxy 的速度差异。
+run_case "gh-proxy-no-proxy"    "$GH_PROXY_URL" "no"  /tmp/gh-proxy-no-proxy.tar.gz
+run_case "gh-proxy-via-proxy"  "$GH_PROXY_URL" "yes" /tmp/gh-proxy-via-proxy.tar.gz
 
 echo ""
 echo "########################################################"
