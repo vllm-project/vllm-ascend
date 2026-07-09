@@ -129,6 +129,7 @@ class NPUFFNModelRunner(NPUModelRunner, GPUFFNModelRunner):
             dp_metadata_list: dp_metadata列表，包含每个stage的token数量信息
         """
         try:
+            logger.info("execute_model, dp_metadata_list is %s", dp_metadata_list)
             if dp_metadata_list is None and self.connector is not None:
                 dp_metadata_list, _, _ = (
                     self.connector.recv_dp_metadata_list()
@@ -198,9 +199,9 @@ class NPUFFNModelRunner(NPUModelRunner, GPUFFNModelRunner):
         logger.info("FFN warmup, dp_metadata_list=%s", dp_metadata_list)
         self._warmup_model(dp_metadata_list=dp_metadata_list)
         logger.info("FFN warmup completed, dp_metadata_list=%s", dp_metadata_list)
-        dp_metadata_list, _, _ = (self.connector.recv_dp_metadata_list())
+        # dp_metadata_list, _, _ = (self.connector.recv_dp_metadata_list())
         # self._capture_model(dp_metadata_list=dp_metadata_list)
-        logger.info("FFN capture completed, dp_metadata_list=%s", dp_metadata_list)
+        # logger.info("FFN capture completed, dp_metadata_list=%s", dp_metadata_list)
 
         set_cudagraph_capturing_enabled(False)
 
@@ -244,7 +245,12 @@ class NPUFFNModelRunner(NPUModelRunner, GPUFFNModelRunner):
         """
         dp_metadata_key = self._get_dp_metadata_key(dp_metadata_list)
 
-        self._dummy_run(aclgraph_runtime_mode=CUDAGraphMode.NONE,
+        # self._dummy_run(aclgraph_runtime_mode=CUDAGraphMode.NONE,
+        #                 uniform_decode=True,
+        #                 dp_metadata_list=dp_metadata_list,
+        #                 dp_metadata_key=dp_metadata_key)
+
+        self._dummy_run(aclgraph_runtime_mode=CUDAGraphMode.FULL,
                         uniform_decode=True,
                         dp_metadata_list=dp_metadata_list,
                         dp_metadata_key=dp_metadata_key)
