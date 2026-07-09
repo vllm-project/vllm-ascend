@@ -150,7 +150,6 @@ class NPUModelRunner310(NPUModelRunner):
         force_uniform_decode: bool | None = None,
         force_has_lora: bool | None = None,
         force_num_active_loras: int | None = None,
-        valid_cudagraph_modes: set[CUDAGraphMode] | None = None,
         num_encoder_reqs: int = 0,
     ):
         if self.attn_state in (AscendAttentionState.ChunkedPrefill, AscendAttentionState.PrefillCacheHit):
@@ -189,7 +188,6 @@ class NPUModelRunner310(NPUModelRunner):
             force_uniform_decode=force_uniform_decode,
             force_has_lora=force_has_lora,
             force_num_active_loras=force_num_active_loras,
-            valid_cudagraph_modes=valid_cudagraph_modes,
             num_encoder_reqs=num_encoder_reqs,
         )
 
