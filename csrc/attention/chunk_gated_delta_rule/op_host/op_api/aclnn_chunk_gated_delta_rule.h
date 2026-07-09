@@ -22,13 +22,13 @@ extern "C" {
  * @param [in]  query:            BF16, [T, Nk, Dk].
  * @param [in]  key:              BF16, [T, Nk, Dk].
  * @param [in]  value:            BF16, [T, Nv, Dv].
- * @param [in]  beta:             BF16, [T, Nk, Dk].
- * @param [in]  initialState:     FLOAT, [B, Nk, Dk, Dv].
- * @param [in]  actualSeqLengths: INT32, [B+1].
+ * @param [in]  beta:             BF16, [T, Nv].
+ * @param [in]  initialState:     FLOAT, [B, Nv, Dv, Dk].
+ * @param [in]  actualSeqLengths: INT32, [B].
  * @param [in]  g:                FLOAT (optional).
  * @param [in]  scaleValue:       FLOAT.
  * @param [out] out:              BF16, [T, Nv, Dv].
- * @param [out] finalState:       FLOAT, [B, Nk, Dk, Dv].
+ * @param [out] finalState:       FLOAT, [B, Nv, Dv, Dk].
  * @param [out] workspaceSize:    required workspace bytes on device.
  * @param [out] executor:         op executor handle.
  * @return aclnnStatus
