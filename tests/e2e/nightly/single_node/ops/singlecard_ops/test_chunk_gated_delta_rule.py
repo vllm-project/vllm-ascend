@@ -111,12 +111,12 @@ def _stage1(query, key, value, g, beta, scale, C):
                 q_chunk, k_chunk, v_chunk, g_chunk, beta_chunk, scale
             )
 
-            g_cum[nid, idx: idx + C] = g_cum_c
-            k_cumdecay[nid, idx: idx + C, :] = k_cumdecay_c
-            v_inner[nid, idx: idx + C, :] = v_inner_c
-            q_prime[nid, idx: idx + C, :] = qg_c
-            kg[nid, idx: idx + C, :] = kg_c
-            qkt[nid, idx: idx + C, :] = qkt_c
+            g_cum[nid, idx : idx + C] = g_cum_c
+            k_cumdecay[nid, idx : idx + C, :] = k_cumdecay_c
+            v_inner[nid, idx : idx + C, :] = v_inner_c
+            q_prime[nid, idx : idx + C, :] = qg_c
+            kg[nid, idx : idx + C, :] = kg_c
+            qkt[nid, idx : idx + C, :] = qkt_c
 
     return g_cum, k_cumdecay, v_inner, q_prime, kg, qkt
 

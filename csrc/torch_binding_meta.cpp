@@ -598,27 +598,6 @@ at::Tensor npu_recurrent_gated_delta_rule_meta(
     return output;
 }
 
-std::tuple<at::Tensor, at::Tensor> npu_fused_gdn_gating_meta(
-    const at::Tensor& A_log,
-    const at::Tensor& a,
-    const at::Tensor& b,
-    const at::Tensor& dt_bias,
-    double beta,
-    double threshold)
-{
-    (void)beta;
-    (void)threshold;
-    int64_t batch = a.size(0);
-    int64_t num_heads = a.size(1);
-
-    at::Tensor g = at::empty_symint(
-        {1, batch, num_heads}, a.options().dtype(c10::kFloat));
-    at::Tensor beta_output = at::empty_symint(
-        {1, batch, num_heads}, b.options());
-
-    return std::make_tuple(g, beta_output);
-}
-
 std::tuple<at::Tensor, at::Tensor> npu_chunk_gated_delta_rule_meta(
     const at::Tensor& query,
     const at::Tensor& key,
@@ -1662,8 +1641,6 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
      // store_kv_block
     ops.impl("store_kv_block_pre", &vllm_ascend::meta::store_kv_block_metadata);
     ops.impl("store_kv_block", &vllm_ascend::meta::store_kv_block);
-    // npu_fused_gdn_gating
-    ops.impl("npu_fused_gdn_gating", &vllm_ascend::meta::npu_fused_gdn_gating_meta);
 
     // npu_chunk_gated_delta_rule
     ops.impl("npu_chunk_gated_delta_rule", &vllm_ascend::meta::npu_chunk_gated_delta_rule_meta);

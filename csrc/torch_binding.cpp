@@ -49,7 +49,6 @@
 #include "attention/recurrent_gated_delta_rule_v310/recurrent_gated_delta_rule_310_torch_adpt.h"
 #include "attention/store_kv_block/store_kv_block_torch_adpt.h"
 #include "attention/store_kv_block_metadata/store_kv_block_metadata_torch_adpt.cpp"
-#include "attention/fused_gdn_gating/fused_gdn_gating_torch_adpt.h"
 #include "attention/chunk_gated_delta_rule/chunk_gated_delta_rule_torch_adpt.h"
 #include <c10/core/Device.h>
 #include <c10/core/Scalar.h>
@@ -2749,15 +2748,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "store_kv_block(Tensor key_in, Tensor key_cache_in, Tensor group_len, Tensor group_key_idx,Tensor group_key_cache_idx, int block_size=0) -> ()"
     );
     ops.impl("store_kv_block", torch::kPrivateUse1, &vllm_ascend::store_kv_block);
-    // Fused GDN gating.
-    ops.def(
-        "npu_fused_gdn_gating(Tensor A_log, "
-        "                     Tensor a, "
-        "                     Tensor b, "
-        "                     Tensor dt_bias, "
-        "                     float beta=1.0, "
-        "                     float threshold=20.0) -> (Tensor g, Tensor beta_output)");
-    ops.impl("npu_fused_gdn_gating", torch::kPrivateUse1, &vllm_ascend::npu_fused_gdn_gating);
 
     // ChunkGatedDeltaRule (fused chunk-level GDN prefill operator)
     ops.def(
