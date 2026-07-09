@@ -12,17 +12,78 @@ jobs:
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
     steps:
-      - name: Test - short name in NO_PROXY
+      - name: Setup context
+        run: |
+          mkdir -p /tmp/ctx
+          cat > /tmp/ctx/Dockerfile <<'DOCKERFILE'
+          FROM quay.io/ascend/cann:9.0.0-910b-openeuler24.03-py3.12
+          RUN echo cache-probe > /tmp/cache-probe-marker
+          DOCKERFILE
+
+      - name: Round 1 (expect cache MISS)
         run: |
           set -e
           export NO_PROXY="localhost,127.0.0.1,buildkitd-service.buildkitd,.svc.cluster.local,.cluster.local"
           export no_proxy="${NO_PROXY}"
-          echo "BUILDKITD_ADDR=${BUILDKITD_ADDR}"
-          echo "NO_PROXY=${NO_PROXY}"
+          echo "=== Round 1: fresh pull, expect MISS ==="
+          T0=$(date +%s)
           buildctl \
             --addr "${BUILDKITD_ADDR}" \
             --tlscacert "${DOCKER_CONFIG}/ca.pem" \
             --tlscert  "${DOCKER_CONFIG}/cert.pem" \
             --tlskey   "${DOCKER_CONFIG}/key.pem" \
-            debug workers 2>&1
-          echo "SUCCESS"
+            build \
+            --frontend dockerfile.v0 \
+            --local context=/tmp/ctx \
+            --local dockerfile=/tmp/ctx \
+            --no-cache \
+            --output type=image,name=test-torch-npu-cache:round1,push=false
+          T1=$(date +%s)
+          ROUND1_S=$((T1-T0))
+          echo "round1_s=${ROUND1_S}"
+          echo "ROUND1_S=${ROUND1_S}" >> "${GITHUB_ENV}"
+
+      - name: Prune buildkitd local cache
+        run: |
+          export NO_PROXY="localhost,127.0.0.1,buildkitd-service.buildkitd,.svc.cluster.local,.cluster.local"
+          export no_proxy="${NO_PROXY}"
+          buildctl \
+            --addr "${BUILDKITD_ADDR}" \
+            --tlscacert "${DOCKER_CONFIG}/ca.pem" \
+            --tlscert  "${DOCKER_CONFIG}/cert.pem" \
+            --tlskey   "${DOCKER_CONFIG}/key.pem" \
+            prune --all \
+            || true
+
+      - name: Round 2 (expect cache HIT)
+        run: |
+          set -e
+          export NO_PROXY="localhost,127.0.0.1,buildkitd-service.buildkitd,.svc.cluster.local,.cluster.local"
+          export no_proxy="${NO_PROXY}"
+          echo "=== Round 2: warm cache, expect HIT ==="
+          T0=$(date +%s)
+          buildctl \
+            --addr "${BUILDKITD_ADDR}" \
+            --tlscacert "${DOCKER_CONFIG}/ca.pem" \
+            --tlscert  "${DOCKER_CONFIG}/cert.pem" \
+            --tlskey   "${DOCKER_CONFIG}/key.pem" \
+            build \
+            --frontend dockerfile.v0 \
+            --local context=/tmp/ctx \
+            --local dockerfile=/tmp/ctx \
+            --no-cache \
+            --output type=image,name=test-torch-npu-cache:round2,push=false
+          T1=$(date +%s)
+          ROUND2_S=$((T1-T0))
+          echo "round2_s=${ROUND2_S}"
+
+          if [ "${ROUND1_S}" -gt 0 ]; then
+            DELTA_PCT=$(( (ROUND1_S - ROUND2_S) * 100 / ROUND1_S ))
+            echo "delta=${DELTA_PCT}% faster on round 2"
+          fi
+
+      - name: Summary
+        run: |
+          echo "=== BuildKit Cache Test Summary ==="
+          echo "round1_s=${ROUND1_S}"
+          echo "✅ Both rounds completed"
