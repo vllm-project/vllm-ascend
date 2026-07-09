@@ -79,31 +79,20 @@ from vllm import LLM
 model = LLM(
     model="BAAI/bge-reranker-v2-m3",
     runner="pooling",
+    trust_remote_code=True,
+    enforce_eager=True,
 )
 
 if __name__ == "__main__":
-    query = "What is the capital of China?"
+    query = "What is the capital of France?"
 
     documents = [
-        "The capital of China is Beijing.",
-        "Gravity is a force that attracts two bodies towards each other.",
+        "Paris is the capital of France.",
+        "France is in Europe.",
+        "Berlin is in Germany.",
     ]
 
-    # 1-to-N scoring: one query against multiple documents
     outputs = model.score(query, documents)
-
-    print([output.outputs.score for output in outputs])
-
-    # N-to-N scoring: pairwise scoring
-    queries = [
-        "What is the capital of France?",
-        "What is the capital of Germany?",
-    ]
-    docs = [
-        "The capital of France is Paris.",
-        "The capital of Germany is Berlin.",
-    ]
-    outputs = model.score(queries, docs)
 
     print([output.outputs.score for output in outputs])
 ```
@@ -111,8 +100,7 @@ if __name__ == "__main__":
 If you run this script successfully, you will see scores printed to the console, similar to:
 
 ```bash
-[0.9995, 1.2e-06]
-[0.9998, 0.9997]
+[0.9998, 0.0577, 0.00043]
 ```
 
 ## Performance
