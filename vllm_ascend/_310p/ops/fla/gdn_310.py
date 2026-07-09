@@ -53,7 +53,8 @@ def _copy_device_tensor_to_int64_buffer(
 ) -> None:
     if tensor.numel() == 0:
         return
-    buffer[: tensor.numel()].copy_(tensor.reshape(-1), non_blocking=True)
+    tensor_int64 = _as_int64_device_view(tensor)
+    buffer[: tensor.numel()].copy_(tensor_int64.reshape(-1), non_blocking=True)
 
 
 def _as_int64_device_view(tensor: torch.Tensor) -> torch.Tensor:
