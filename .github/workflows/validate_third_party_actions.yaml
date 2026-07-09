@@ -20,6 +20,15 @@ name: 'Validate: Third-Party Actions on Self-Hosted'
 on:
   workflow_dispatch:
   pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+    branches:
+      - main
+  push:
+    branches:
+      - main
     paths:
       - '.github/workflows/validate_third_party_actions.yaml'
 
