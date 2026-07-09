@@ -244,12 +244,9 @@ def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len)
     tp_size = vllm_config.parallel_config.tensor_parallel_size
     # FIX(mega all-route): raise routing capacity so prefill also selects FUSED_MC2 (mega),
     # capped at 512 (MegaMoe BS<=512). Serve sets max_num_batched_tokens<=512.
-    try:
-        from vllm_ascend.ascend_config import get_ascend_config as _gac
-        if _gac().enable_fused_mc2 == 2:
-            max_num_tokens = min(max(max_num_tokens, int(vllm_config.scheduler_config.max_num_batched_tokens)), 512)
-    except Exception:
-        pass
+    if get_ascend_config().enable_fused_mc2 == 2:
+        max_num_tokens = min(max(max_num_tokens, int(vllm_config.scheduler_config.max_num_batched_tokens)), 512)
+
     # Use integer arithmetic for ceiling division.
     num_tokens_per_tp_rank = (max_num_tokens + tp_size - 1) // tp_size
     _mc2_tokens_capacity = num_tokens_per_tp_rank * tp_size
