@@ -187,7 +187,7 @@ jobs:
           } >> "${GITHUB_OUTPUT}"
 
 
-build_and_release_code:
+  build_and_release_code:
     name: release code
     runs-on: linux-amd64-cpu-8-hk
     strategy:
@@ -233,11 +233,7 @@ build_and_release_code:
           name: vllm-ascend-src
           path: dist/*
 
-    #   - name: Release
-    #     if: ${{ github.event_name == 'push' }}
-    #     run: |
-    #       python3 -m twine upload dist/* -u __token__ -p ${{ secrets.PYPI_TOKEN }}
-
+          
 #schedule_nightly_test_a3.yaml 测试 linux-aarch64-a3-0
 
   parse-trigger:
@@ -272,7 +268,8 @@ build_and_release_code:
             core.setOutput('run', 'false');
             core.setOutput('filter', '');
 
-  # use linux-aarch64-a3-0 better but cant use actions/setup-python@v5
+
+
   setup-vars:
     name: Export global env vars as job outputs
     needs: parse-trigger
