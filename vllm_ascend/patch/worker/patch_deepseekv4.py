@@ -302,6 +302,7 @@ def compute_attn_output(
     Runs ``hc_pre -> input_layernorm -> self_attn -> hc_post`` and returns the
     attention output that will be sent to the FFN worker.
     """
+    logger.info("compute_attn_output, hidden_states=%s", hidden_states.shape)
     layer_idx = getattr(self, "layer_idx", -1)
     residual = hidden_states.clone()
     hidden_states, post, comb = self.hc_pre(
