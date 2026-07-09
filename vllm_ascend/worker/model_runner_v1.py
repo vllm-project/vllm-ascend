@@ -5085,9 +5085,9 @@ class NPUModelRunner(GPUModelRunner):
                 min_cg_support,
                 min_cg_attn_backend,
                 self.uniform_decode_query_len,
-                self.parallel_config.tensor_parallel_size,
-                self.kv_cache_config,
-                self.max_num_reqs,
+                tensor_parallel_size=self.parallel_config.tensor_parallel_size,
+                kv_cache_config=self.kv_cache_config,
+                max_num_reqs=self.max_num_reqs,
             )
             self.cudagraph_dispatcher.initialize_cudagraph_keys(
                 cudagraph_mode, self.uniform_decode_query_len

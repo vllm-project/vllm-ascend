@@ -35,7 +35,12 @@ if vllm_version_is("0.23.0"):
     import vllm_ascend.patch.platform.patch_glm47_tool_call_parser  # noqa
     import vllm_ascend.patch.platform.patch_minimax_m2_tool_call_parser  # noqa
     import vllm_ascend.patch.platform.patch_minimax_usage_accounting  # noqa
-import vllm_ascend.patch.platform.patch_deepseek_v4_tool_call_parser  # noqa
+
+    # Upstream main deleted vllm.tool_parsers.deepseekv4_tool_parser and
+    # replaced DeepSeekV4ToolParser with an engine-based adapter
+    # (DeepSeekV4EngineToolParser). The Ascend streaming-parser workaround
+    # only applies to the pre-refactor 0.23.0 class.
+    import vllm_ascend.patch.platform.patch_deepseek_v4_tool_call_parser  # noqa
 import vllm_ascend.patch.platform.patch_weight_transfer_engine  # noqa
 import vllm_ascend.patch.platform.patch_torch_accelerator  # noqa
 import vllm_ascend.patch.platform.patch_tool_choice_none_content  # noqa
