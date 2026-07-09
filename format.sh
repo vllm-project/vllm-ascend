@@ -19,6 +19,31 @@
 # Adapted from https://github.com/vllm-project/vllm/tree/main/tools
 #
 
+show_help() {
+    cat <<'EOF'
+Usage: bash format.sh [changed|all|ci]
+
+Modes:
+  changed  Run pre-commit on files changed in the working tree. This is the
+           default and is intended for fast local iteration.
+  all      Run pre-commit on every tracked file with local hook stages.
+  ci       Run pre-commit on every tracked file, including manual CI hooks.
+
+Examples:
+  bash format.sh
+  bash format.sh changed
+  bash format.sh all
+  bash format.sh ci
+EOF
+}
+
+case "${1:-changed}" in
+    -h|--help|help)
+        show_help
+        exit 0
+        ;;
+esac
+
 check_command() {
     if ! command -v "$1" &> /dev/null; then
         echo "❓❓$1 is not installed, please run:"
@@ -37,8 +62,32 @@ check_command pre-commit
 
 # TODO: cleanup SC exclude
 export SHELLCHECK_OPTS="--exclude=SC2046,SC2006,SC2086"
-if [[ "$1" != 'ci' ]]; then
-    pre-commit run --all-files
-else
-    pre-commit run --all-files --hook-stage manual
-fi
+case "${1:-changed}" in
+    changed)
+        mapfile -t changed_files < <(
+            {
+                git diff --name-only --diff-filter=ACMR --cached
+                git diff --name-only --diff-filter=ACMR
+                git ls-files --others --exclude-standard
+            } | sort -u
+        )
+
+        if [[ ${#changed_files[@]} -eq 0 ]]; then
+            echo "No changed files to format."
+            exit 0
+        fi
+
+        pre-commit run --files "${changed_files[@]}"
+        ;;
+    all)
+        pre-commit run --all-files
+        ;;
+    ci)
+        pre-commit run --all-files --hook-stage manual
+        ;;
+    *)
+        echo "Unknown format mode: $1" >&2
+        show_help >&2
+        exit 2
+        ;;
+esac
