@@ -371,6 +371,9 @@ class CpuAlloc:
                 " ".join(map(str, self.uvb_cpu_pool)),
             )
 
+    # TODO: Drop the vLLM Ascend implementation for Ascend 950 CPU binding and
+    # switch to the CANN affinity tool once that tool is visible in external
+    # commercial releases.
     def build_ascend_950_cpu_pools(self) -> bool:
         if not self.device_info.npu_affinity:
             logger.warning("[cpu_bind_ascend_950] NPU topo affinity not found. action: skip worker CPU binding.")
