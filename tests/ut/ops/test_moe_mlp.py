@@ -319,8 +319,8 @@ def _mock_w8a8_gelu_compute(gate_up, *, gmm2_out=None, capture_quant=False):
 
     with (
         stream_patch,
-        patch("torch_npu.npu_grouped_matmul", return_value=[gate_up]) as mock_gmm,
-        patch("torch_npu.npu_dynamic_quant", side_effect=_dynamic_quant) as mock_dq,
+        patch("torch_npu.npu_grouped_matmul", return_value=[gate_up], create=True) as mock_gmm,
+        patch("torch_npu.npu_dynamic_quant", side_effect=_dynamic_quant, create=True) as mock_dq,
         patch.object(
             DeviceOperator,
             "npu_grouped_matmul_gmm2",
@@ -444,8 +444,8 @@ class TestQuantApplyMlpGeluPath(_GeluPathBase):
         stream_patch, evt = _patch_npu_stream()
         with (
             stream_patch,
-            patch("torch_npu.npu_grouped_matmul", side_effect=[[gate_up], [gmm2_out]]) as mock_gmm,
-            patch("torch_npu.npu_dynamic_quant") as mock_dq,
+            patch("torch_npu.npu_grouped_matmul", side_effect=[[gate_up], [gmm2_out]], create=True) as mock_gmm,
+            patch("torch_npu.npu_dynamic_quant", create=True) as mock_dq,
             patch.object(DeviceOperator, "npu_grouped_matmul_gmm2") as mock_gmm2,
             patch(f"{MOE_MLP}.dispose_tensor"),
         ):
@@ -509,7 +509,7 @@ class TestQuantApplyMlpGeluPath(_GeluPathBase):
 
     def test_gelu_path_does_not_call_swiglu_op(self):
         """GELU path must use torch.gelu, never the SwiGLU NPU op."""
-        with _mock_w8a8_gelu_compute(torch.zeros(1, 8)), patch("torch_npu.npu_swiglu") as mock_swiglu:
+        with _mock_w8a8_gelu_compute(torch.zeros(1, 8)), patch("torch_npu.npu_swiglu", create=True) as mock_swiglu:
             quant_apply_mlp(**self._common_w8a8_kwargs(activation=MoEActivation.GELU_TANH))
         mock_swiglu.assert_not_called()
 
@@ -557,7 +557,7 @@ class TestQuantApplyMlpNoGeluImpact(_GeluPathBase):
             _mock_w8a8_gelu_compute(torch.zeros(1, 8)),
             patch(f"{MOE_MLP}._EXTRA_CTX") as mock_ctx,
             patch(f"{MOE_MLP}.HAS_TRITON", False),
-            patch("torch_npu.npu_swiglu", return_value=torch.zeros(1, 4)) as mock_swiglu,
+            patch("torch_npu.npu_swiglu", return_value=torch.zeros(1, 4), create=True) as mock_swiglu,
             patch("torch.nn.functional.gelu") as mock_gelu,
         ):
             mock_ctx.moe_comm_type = -1  # not MoECommType.MC2
