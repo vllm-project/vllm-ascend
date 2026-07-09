@@ -64,7 +64,16 @@ check_command pre-commit
 export SHELLCHECK_OPTS="--exclude=SC2046,SC2006,SC2086"
 case "${1:-changed}" in
     changed)
-        mapfile -t changed_files < <(
+        check_command git
+        if ! git rev-parse --is-inside-work-tree &> /dev/null; then
+            echo "Error: not inside a git work tree." >&2
+            exit 1
+        fi
+
+        changed_files=()
+        while IFS= read -r line; do
+            changed_files+=("$line")
+        done < <(
             {
                 git diff --name-only --diff-filter=ACMR --cached
                 git diff --name-only --diff-filter=ACMR
