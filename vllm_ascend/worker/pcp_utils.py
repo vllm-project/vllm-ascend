@@ -990,6 +990,8 @@ class PCPManager:
             torch.from_numpy(token_indices_pcp_full),
             out=self.input_ids_pcp_full.cpu[:total_num_scheduled_tokens_pcp_full],
         )
+        self.input_ids_pcp_full.copy_to_gpu(total_num_scheduled_tokens_pcp_full)
+        self.query_start_loc_pcp_full.copy_to_gpu()
         if self.use_async_scheduling:
             self._update_input_ids_pcp_full_ids(
                 input_batch,
@@ -999,8 +1001,6 @@ class PCPManager:
                 cu_num_tokens_pcp_full,
                 num_spec_tokens,
             )
-        self.query_start_loc_pcp_full.copy_to_gpu()
-        self.input_ids_pcp_full.copy_to_gpu(total_num_scheduled_tokens_pcp_full)
         self.cu_num_tokens_pcp_full = cu_num_tokens_pcp_full
 
         if self.use_async_scheduling and precomputed_positions_np is None:
@@ -1032,9 +1032,9 @@ class PCPManager:
             mtp_slot_ori = input_batch.block_table.block_tables[0].slot_mapping.cpu[:num_tokens_mtp]
             unpad_mask = np.repeat(False, num_tokens_mtp_pad)
             unpad_mask[:: self.pcp_world_size] = True
-            mtp_slot_pad = torch.full([num_tokens_mtp_pad], -1, dtype=torch.int32)
-            mtp_slot_pad[unpad_mask] = mtp_slot_ori
-            self.mtp_slot_pad = mtp_slot_pad.to(self.device, non_blocking=True)
+            self.mtp_slot_pad = torch.full([num_tokens_mtp_pad], -1, dtype=torch.int32, pin_memory=True)
+            self.mtp_slot_pad[unpad_mask] = mtp_slot_ori
+            self.mtp_slot_pad = self.mtp_slot_pad.to(self.device, non_blocking=True)
 
     def _update_input_ids_pcp_full_ids(
         self,
@@ -1095,10 +1095,10 @@ class PCPManager:
         # Upload the index tensors asynchronously so the scatter can be non-blocking.
         sampled_tokens_index_tensor = torch.tensor(sample_flattened_indices, dtype=torch.int64)
         prev_common_req_indices_tensor = torch.tensor(prev_common_req_indices, dtype=torch.int64)
-        self.input_ids_pcp_full.cpu.scatter_(
+        self.input_ids_pcp_full.gpu.scatter_(
             dim=0,
             index=sampled_tokens_index_tensor,
-            src=input_batch.prev_sampled_token_ids[prev_common_req_indices_tensor, 0].cpu(),
+            src=input_batch.prev_sampled_token_ids[prev_common_req_indices_tensor, 0],
         )
 
         # Scatter the draft tokens after the sampled tokens are scattered.
@@ -1113,10 +1113,10 @@ class PCPManager:
         # so convert draft_token_ids to torch.int32 here.
         draft_token_ids = draft_token_ids.to(dtype=torch.int32)
 
-        self.input_ids_pcp_full.cpu.scatter_(
+        self.input_ids_pcp_full.gpu.scatter_(
             dim=0,
             index=draft_tokens_index_tensor,
-            src=draft_token_ids.flatten()[prev_draft_token_indices_tensor].cpu(),
+            src=draft_token_ids.flatten()[prev_draft_token_indices_tensor],
         )
 
     def _get_cp_local_seq_lens(
