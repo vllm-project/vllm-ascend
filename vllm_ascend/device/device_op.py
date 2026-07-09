@@ -439,7 +439,7 @@ class BaseDeviceAdaptor:
         rope_cos = rope_cos.view(rope_cos.shape[0], rope_cos.shape[-1])
         rope_sin = rope_sin.view(rope_sin.shape[0], rope_sin.shape[-1])
 
-        packed_kv_cache = sfa_impl.use_sparse_c8
+        packed_kv_cache = getattr(sfa_impl, "use_sparse_c8_sfa", False)
         if packed_kv_cache:
             assert sfa_impl.sfa_qsfa_kr_cache_dummy is not None
             kr_cache = sfa_impl.sfa_qsfa_kr_cache_dummy
@@ -553,18 +553,18 @@ class BaseDeviceAdaptor:
         attn_metadata,
         actual_seq_lengths_query: torch.Tensor,
         actual_seq_lengths_key: torch.Tensor,
-        use_sparse_c8: bool,
+        use_sparse_c8_indexer: bool,
         use_torch_npu_lightning_indexer: bool,
     ) -> torch.Tensor:
         # DSV3.2 currently has graph compilation issues when using torch_npu.npu.lightning_indexer.
         # So two branches are maintained temporarily.
         # TODO: torch.ops._C_ascend.npu_lightning_indexer needs to be removed.
-        packed_kv_cache = getattr(sfa_impl, "use_sparse_c8", False)
+        packed_kv_cache = getattr(sfa_impl, "use_sparse_c8_sfa", False)
         indexer_cache_idx = 1 if packed_kv_cache else 2
         indexer_scale_cache_idx = 2 if packed_kv_cache else 3
 
-        if sfa_impl.use_sparse_c8:
-            assert len(kv_cache) == 3
+        if use_sparse_c8_indexer:
+            assert len(kv_cache) == (3 if packed_kv_cache else 4)
             assert q_li_scale is not None
             assert q_li_shape_ori is not None
             weights = weights.to(torch.float16)
@@ -626,7 +626,12 @@ class BaseDeviceAdaptor:
         block_table = attn_metadata.block_table
         kv = kv_cache[0]
 
-        use_kv_quant_sparse_attention = getattr(sfa_impl, "use_sparse_c8", False) or kv.dtype in (
+        # The kv-quant sparse attention op only accepts packed quantized KV.
+        # Do not route by the feature flag alone: tests and fallback paths may
+        # pass a normal BF16/FP16 KV cache even when the mocked impl exposes a
+        # truthy attribute.
+        use_kv_quant_sparse_attention = kv.dtype in (
+            torch.int8,
             torch.float8_e4m3fn,
             torch.float8_e5m2,
         )
@@ -1672,7 +1677,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         sin = sin.view(cos_shape[0], 1, cos_shape[-1])
 
         decode_k_nope = kv_cache[0]
-        use_c8 = getattr(sfa_impl, "use_sparse_c8", False)
+        use_c8 = getattr(sfa_impl, "use_sparse_c8_sfa", False)
         kr_cache = (
             torch.zeros(0, 0, decode_k_nope.shape[-2], cos_shape[-1], dtype=torch.bfloat16, device=decode_k_nope.device)
             if use_c8
@@ -1745,20 +1750,24 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         attn_metadata,
         actual_seq_lengths_query: torch.Tensor,
         actual_seq_lengths_key: torch.Tensor,
-        use_sparse_c8: bool,
+        use_sparse_c8_indexer: bool,
         use_torch_npu_lightning_indexer: bool,
     ) -> torch.Tensor:
-        if use_sparse_c8:
-            assert len(kv_cache) == 3
+        packed_kv_cache = getattr(sfa_impl, "use_sparse_c8_sfa", False)
+        indexer_cache_idx = 1 if packed_kv_cache else 2
+        indexer_scale_cache_idx = 2 if packed_kv_cache else 3
+
+        if use_sparse_c8_indexer:
+            assert len(kv_cache) == (3 if packed_kv_cache else 4)
             assert q_li_shape_ori is not None
 
             if q_li_scale is not None:
                 q_li_scale = q_li_scale.view(q_li_shape_ori[:-1])
-                key_dequant_scale = kv_cache[2].squeeze(2)
+                key_dequant_scale = kv_cache[indexer_scale_cache_idx].squeeze(2)
 
                 topk_indices = torch_npu.npu_quant_lightning_indexer(
                     query=q_li.view(q_li_shape_ori),
-                    key=kv_cache[1],
+                    key=kv_cache[indexer_cache_idx],
                     weights=weights,
                     query_dequant_scale=q_li_scale,
                     key_dequant_scale=key_dequant_scale,
@@ -1775,7 +1784,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             else:
                 topk_indices, _ = torch_npu.npu_lightning_indexer(
                     query=q_li.view(q_li_shape_ori),
-                    key=kv_cache[1],
+                    key=kv_cache[indexer_cache_idx],
                     weights=weights,
                     actual_seq_lengths_query=actual_seq_lengths_query,
                     actual_seq_lengths_key=actual_seq_lengths_key,
@@ -1788,7 +1797,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         else:
             topk_indices, _ = torch_npu.npu_lightning_indexer(
                 query=q_li,
-                key=kv_cache[2],
+                key=kv_cache[indexer_cache_idx],
                 weights=weights,
                 actual_seq_lengths_query=actual_seq_lengths_query,
                 actual_seq_lengths_key=actual_seq_lengths_key,
