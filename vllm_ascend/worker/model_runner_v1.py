@@ -3554,6 +3554,9 @@ class NPUModelRunner(GPUModelRunner):
                 for_cudagraph_capture=is_graph_capturing,
                 num_scheduled_tokens_np=num_scheduled_tokens,
             )
+            for kv_cache_gid in range(len(self.kv_cache_config.kv_cache_groups)):
+                blk_table = self.input_batch.block_table[kv_cache_gid]
+                blk_table.slot_mapping.gpu.fill_(-1)
 
         with self.maybe_dummy_run_with_lora(
             self.lora_config,
