@@ -104,6 +104,9 @@ class MooncakeAgentMetadata(msgspec.Struct, omit_defaults=True, dict=True):
     block_strides: list[list[int]]
     local_ip: str = ""
     handshake_port: int = 0
+    tp_size: int = 1
+    dp_size: int = 1
+    pp_size: int = 1
 
 
 @dataclass
@@ -269,6 +272,8 @@ class KVCacheSendingThread(threading.Thread):
         self.kv_caches = kv_caches
         self.pcp_rank = pcp_rank
         self.port_send_num: dict[str, int] = {}
+        self._remote_decode_tp_size: int = 1
+        self._remote_decode_dp_size: int = 1
 
         self.task_tracker = KVCacheTaskTracker()
 
@@ -361,6 +366,10 @@ class KVCacheSendingThread(threading.Thread):
                     logger.debug("Got DONE_RECVING_MSG for request %s", msg[1])
                     request_id = msg[1]
                     remote_port_send_num = msg[2]
+                    if len(msg) >= 4 and msg[3]:
+                        self._remote_decode_tp_size = msg[3]
+                    if len(msg) >= 5 and msg[4]:
+                        self._remote_decode_dp_size = msg[4]
                     if remote_port_send_num:
                         if request_id not in self.port_send_num:
                             self.port_send_num[request_id] = 0
@@ -462,6 +471,8 @@ class KVCacheRecvingThread(threading.Thread):
         self.remote_block_stride_per_addr: dict[str, dict[int, list[list[int]]]] = SizedDict()
         self.remote_kv_group2layeridx: dict[str, dict[int, dict[int, tuple[dict[str, Any], list[int]]]]] = SizedDict()
         self.remote_metadata_lock = threading.Lock()
+        self.remote_tp_size: dict[str, dict[int, int]] = SizedDict()
+        self.remote_dp_size: dict[str, dict[int, int]] = SizedDict()
 
         self.request_queue: queue.Queue[Any] = queue.Queue()
         self.executor = ThreadPoolExecutor(max_workers=32)
@@ -1289,6 +1300,8 @@ class KVCacheRecvingThread(threading.Thread):
                 self.remote_te_port[engine_id][remote_handshake_port] = agent_meta.te_rpc_port
                 self.remote_block_size_scale[engine_id][remote_handshake_port] = agent_meta.block_size_scale
                 self.remote_block_stride_per_addr[engine_id][remote_handshake_port] = agent_meta.block_strides
+                self.remote_tp_size[engine_id][remote_handshake_port] = agent_meta.tp_size
+                self.remote_dp_size[engine_id][remote_handshake_port] = agent_meta.dp_size
         except Exception:
             if isinstance(sock, zmq.Socket):  # type: ignore
                 sock.close()
@@ -1312,7 +1325,9 @@ class KVCacheRecvingThread(threading.Thread):
         sock: zmq.Socket | None = None  # type: ignore
         try:
             sock = self._get_remote_socket(remote_host, remote_handshake_port)
-            data_bytes = self.encoder.encode((DONE_RECVING_MSG, request_id, remote_port_send_num))
+            data_bytes = self.encoder.encode(
+                (DONE_RECVING_MSG, request_id, remote_port_send_num, self.tp_size, self.dp_size)
+            )
             ensure_zmq_send(sock, data_bytes, f"{remote_host}:{remote_handshake_port}")
             resp = ensure_zmq_recv(sock, f"{remote_host}:{remote_handshake_port}")
             if logger.isEnabledFor(logging.DEBUG):
@@ -1861,13 +1876,7 @@ class MooncakeConnectorWorker:
     """Implementation of Worker side methods"""
 
     def __init__(self, vllm_config: VllmConfig, engine_id: str, kv_cache_config: KVCacheConfig):
-        self._get_prefill_decode_size(vllm_config)
         os.environ["ASCEND_TRANSFER_TIMEOUT"] = str(get_transfer_timeout_value())
-        if self._prefill_tp_size < self._decode_tp_size:
-            raise ValueError(
-                f"prefill_tp_size: {self._prefill_tp_size} must be greater than"
-                f" or equal to the decode_tp_size: {self._decode_tp_size}"
-            )
 
         # Metadata.
         self.vllm_config = vllm_config
@@ -1892,6 +1901,9 @@ class MooncakeConnectorWorker:
 
         self.max_device_id = self.tp_size * self.dp_size * self.pcp_size * self.pp_size
         self.kv_role = vllm_config.kv_transfer_config.kv_role
+        # Resolve prefill/decode parallel sizes after self.kv_role is known,
+        # since _resolve_parallel_sizes branches on kv_role.
+        self._resolve_parallel_sizes(vllm_config)
         self.num_key_value_heads = self.vllm_config.model_config.hf_text_config.num_key_value_heads
 
         # kv cache config
@@ -1947,27 +1959,73 @@ class MooncakeConnectorWorker:
         self.local_remote_block_port_mapping: dict[str, list[list[int]] | None] = {}
         self.remote_port_send_num: dict[str, dict[int, RemotePortInfo]] = {}
 
-    def _get_prefill_decode_size(self, vllm_config: VllmConfig):
-        # get prefill tp and dp size from extra config
-        prefill_parallel_config: dict[str, Any] = vllm_config.kv_transfer_config.get_from_extra_config("prefill", {})
+    def _resolve_parallel_sizes(self, vllm_config: VllmConfig):
+        """Resolve prefill/decode parallel sizes from config or discovery.
 
-        assert "tp_size" in prefill_parallel_config
-        self._prefill_tp_size = prefill_parallel_config["tp_size"]
+        Own (local) sizes are read from parallel_config.
+        Remote sizes are read from kv_connector_extra_config if present,
+        otherwise default to 1 and are resolved lazily when the first
+        remote metadata exchange completes (see _get_remote_metadata).
+        """
+        parallel_config = vllm_config.parallel_config
+        is_producer = self.kv_role == "kv_producer"
 
-        assert "dp_size" in prefill_parallel_config
-        self._prefill_dp_size = prefill_parallel_config["dp_size"]
-        # get prefill pp size from extra config
-        self._prefill_pp_size = prefill_parallel_config.get("pp_size", 1)
-        # get decode tp and dp size from extra config
-        decode_parallel_config: dict[str, Any] = vllm_config.kv_transfer_config.get_from_extra_config("decode", {})
-        assert "tp_size" in decode_parallel_config
-        self._decode_tp_size = decode_parallel_config["tp_size"]
-        assert "dp_size" in decode_parallel_config
-        self._decode_dp_size = decode_parallel_config["dp_size"]
-        # get prefill pp size from extra config
-        self._decode_pp_size = decode_parallel_config.get("pp_size", 1)
-        assert self._decode_pp_size == 1, "decode pp size must be 1"
-        self._prefill_pp_layer_partition = prefill_parallel_config.get("pp_layer_partition")
+        # Own sizes: directly from parallel_config (always available)
+        if is_producer:
+            self._prefill_tp_size = parallel_config.tensor_parallel_size
+            self._prefill_dp_size = parallel_config.data_parallel_size
+        else:
+            self._decode_tp_size = parallel_config.tensor_parallel_size
+            self._decode_dp_size = parallel_config.data_parallel_size
+
+        # Remote sizes: try extra_config first, fallback to lazy discovery
+        extra = vllm_config.kv_transfer_config.kv_connector_extra_config
+        prefill_extra = extra.get("prefill", {})
+        decode_extra = extra.get("decode", {})
+
+        if is_producer:
+            self._decode_tp_size = decode_extra.get("tp_size", 1)
+            self._decode_dp_size = decode_extra.get("dp_size", 1)
+            self._remote_sizes_resolved = bool(decode_extra)
+        else:
+            self._prefill_tp_size = prefill_extra.get("tp_size", 1)
+            self._prefill_dp_size = prefill_extra.get("dp_size", 1)
+            self._remote_sizes_resolved = bool(prefill_extra)
+
+        self._prefill_pp_size = prefill_extra.get("pp_size", 1)
+        self._decode_pp_size = decode_extra.get("pp_size", 1)
+        self._prefill_pp_layer_partition = prefill_extra.get("pp_layer_partition")
+
+        if self._remote_sizes_resolved and self._prefill_tp_size < self._decode_tp_size:
+            raise ValueError(
+                f"prefill_tp_size: {self._prefill_tp_size} must be greater than"
+                f" or equal to the decode_tp_size: {self._decode_tp_size}"
+            )
+
+    def _update_remote_sizes_from_metadata(self, meta: ReqMeta | None = None):
+        """Lazily update remote topology sizes from discovered metadata.
+
+        On the producer (P) side: read D's tp_size from the
+        KVCacheSendingThread which extracts it from DONE_RECVING_MSG.
+        On the consumer (D) side: read P's tp_size from the per-request
+        ``meta.remote_ptp_size`` (populated by the prefiller and forwarded
+        by the proxy), avoiding any dependency on the ZMQ metadata cache
+        being populated before the first request is routed.
+        """
+        if self._remote_sizes_resolved:
+            return
+        is_producer = self.kv_role == "kv_producer"
+
+        if is_producer and self.kv_send_thread is not None:
+            remote_tp = self.kv_send_thread._remote_decode_tp_size
+            if remote_tp > 1:
+                self._decode_tp_size = remote_tp
+                self._decode_dp_size = self.kv_send_thread._remote_decode_dp_size
+                self._remote_sizes_resolved = True
+        elif not is_producer and meta is not None and meta.remote_ptp_size is not None:
+            self._prefill_tp_size = meta.remote_ptp_size
+            # dp_size has no per-request channel; keep default/extra_config value.
+            self._remote_sizes_resolved = True
 
     @staticmethod
     def _serialize_kv_group_spec(
@@ -2276,6 +2334,9 @@ class MooncakeConnectorWorker:
             block_strides=self.block_stride_per_addr,
             local_ip=get_ip(),
             handshake_port=self.handshake_port,
+            tp_size=self.tp_size,
+            dp_size=self.dp_size,
+            pp_size=self.pp_size,
         )
         self.xfer_handshake_metadata = metadata
 
@@ -3158,6 +3219,7 @@ class MooncakeConnectorWorker:
                 self.kv_recv_thread.task_tracker.add_req_to_process(req_id)
 
         for req_id, meta in metadata.requests.items():
+            self._update_remote_sizes_from_metadata(meta)
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug(
                     "start_load_kv for request %s from remote engine %s. "
