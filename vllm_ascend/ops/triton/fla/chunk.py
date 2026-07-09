@@ -142,8 +142,9 @@ def chunk_gated_delta_rule_fwd(
         updated_state = final_state.new_empty(get_pcp_group().world_size, *final_state.shape)
         updated_state[0, ...] = all_final_state[0]
         for i in range(1, get_pcp_group().world_size):
+            # correct_i = all_final_state[i] + Φ_i · (correct_{i-1} - s0) = Φ_i · correct_{i-1} + p_i
             updated_final_state = all_final_state[i] + torch.matmul(
-                all_final_h_update[i, ...], updated_state[i - 1, ...]
+                all_final_h_update[i, ...], updated_state[i - 1, ...] - initial_state
             )
             updated_state[i, ...] = updated_final_state
 
