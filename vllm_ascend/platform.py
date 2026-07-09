@@ -567,14 +567,8 @@ class NPUPlatform(Platform):
             and compilation_config.cudagraph_mode in (CUDAGraphMode.FULL, CUDAGraphMode.FULL_DECODE_ONLY)
         ):
             logger.warning(
-                "Gemma4 MTP with num_speculative_tokens=%d on A2/A3 graph mode "
-                "(%s): pos1/pos2 acceptance will collapse because the head_dim=512 "
-                "global-attention layers route to the decode paged-attention kernel "
-                "during graph replay, which misreads the K+1 verify query tokens. "
-                "Recommend num_speculative_tokens=1 (observed 80%% acceptance, "
-                "36.9 tok/s on 910B4). K>1 works correctly under eager mode.",
-                _spec.num_speculative_tokens,
-                compilation_config.cudagraph_mode.name,
+                "Gemma4 MTP on A2/A3 graph mode: recommend num_speculative_tokens=1 "
+                "(K>1 has low pos1/pos2 acceptance here).",
             )
 
         # Encoder-decoder models currently only support PIECEWISE mode
