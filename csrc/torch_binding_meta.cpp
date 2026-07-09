@@ -345,6 +345,86 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_sparse_flash_attention_meta(
     at::Tensor softmax_sum = at::empty(softmax_size, query.options().dtype(at::kFloat));
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(output, softmax_max, softmax_sum);
 }
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_kv_quant_sparse_flash_attention_meta(
+    const at::Tensor &query,
+    const at::Tensor &key,
+    const at::Tensor &value,
+    const at::Tensor &sparse_indices,
+    double scale_value,
+    int64_t key_quant_mode,
+    int64_t value_quant_mode,
+    const c10::optional<at::Tensor> &key_dequant_scale,
+    const c10::optional<at::Tensor> &value_dequant_scale,
+    const c10::optional<at::Tensor> &block_table,
+    const c10::optional<at::Tensor> &actual_seq_lengths_query,
+    const c10::optional<at::Tensor> &actual_seq_lengths_kv,
+    int64_t sparse_block_size,
+    c10::string_view layout_query,
+    c10::string_view layout_kv,
+    int64_t sparse_mode,
+    int64_t pre_tokens,
+    int64_t next_tokens,
+    int64_t attention_mode,
+    int64_t quant_scale_repo_mode,
+    int64_t tile_size,
+    int64_t rope_head_dim,
+    bool return_softmax_lse)
+{
+    constexpr int64_t SIZE = 8;
+    constexpr int64_t DIM_0 = 0;
+    constexpr int64_t DIM_1 = 1;
+    constexpr int64_t DIM_2 = 2;
+    constexpr int64_t DIM_3 = 3;
+    constexpr int64_t DIM_4 = 4;
+
+    std::string layout_query_str = std::string(layout_query);
+    std::string layout_kv_str = std::string(layout_kv);
+    TORCH_CHECK(layout_query_str == "BSND" || layout_query_str == "TND",
+                "The layout of query only support BSND and TND, but got ",
+                layout_query_str);
+    for (size_t i = 0; i < query.sizes().size(); i++) {
+        TORCH_CHECK(query.size(i) > 0, "All values within query's shape should be greater "
+                                       "than 0, but shape[", i, "] is ", query.size(i));
+    }
+
+    at::SmallVector<int64_t, SIZE> output_size;
+    if (layout_query_str == "BSND") {
+        TORCH_CHECK(query.dim() == DIM_4,
+                    "When the layout of query is BSND, the query dimension must be 4, but got ",
+                    query.dim());
+        output_size = {query.size(DIM_0), query.size(DIM_1), query.size(DIM_2),
+                       query.size(DIM_3) - rope_head_dim};
+    } else {
+        TORCH_CHECK(query.dim() == DIM_3,
+                    "When the layout of query is TND, the query dimension must be 3, but got ",
+                    query.dim());
+        output_size = {query.size(DIM_0), query.size(DIM_1),
+                       query.size(DIM_2) - rope_head_dim};
+    }
+
+    at::Tensor output = at::empty(output_size, query.options().dtype(query.dtype()));
+    at::SmallVector<int64_t, SIZE> softmax_size;
+    if (return_softmax_lse) {
+        if (query.dim() == DIM_3) {
+            const int64_t kv_head_dim =
+                layout_kv_str == "PA_BSND" ? key.size(DIM_2) : key.size(DIM_1);
+            softmax_size = {kv_head_dim, query.size(DIM_0),
+                            query.size(DIM_1) / kv_head_dim};
+        } else {
+            softmax_size = {
+                query.size(DIM_0), key.size(DIM_2), query.size(DIM_1),
+                query.size(DIM_2) / key.size(DIM_2)};
+        }
+    } else {
+        softmax_size = {0};
+    }
+
+    at::Tensor softmax_max = at::empty(softmax_size, query.options().dtype(at::kFloat));
+    at::Tensor softmax_sum = at::empty(softmax_size, query.options().dtype(at::kFloat));
+    return std::tuple<at::Tensor, at::Tensor, at::Tensor>(output, softmax_max, softmax_sum);
+}
+
 std::tuple<at::Tensor, at::Tensor> matmul_allreduce_add_rmsnorm_meta(
     const at::Tensor &x1,
     const at::Tensor &x2,
@@ -1729,6 +1809,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_lightning_indexer", &vllm_ascend::meta::npu_lightning_indexer_meta);
     // Sparse flash attention
     ops.impl("npu_sparse_flash_attention", &vllm_ascend::meta::npu_sparse_flash_attention_meta);
+    ops.impl("npu_kv_quant_sparse_flash_attention",
+             &vllm_ascend::meta::npu_kv_quant_sparse_flash_attention_meta);
     // MoE dispatch-ffn-combine
     ops.impl("dispatch_ffn_combine", &vllm_ascend::meta::dispatch_ffn_combine_meta);
     // matmul allreduce add rmsnorm
