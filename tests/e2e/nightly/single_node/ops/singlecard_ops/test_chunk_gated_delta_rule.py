@@ -214,7 +214,7 @@ def golden_chunk_gated_delta_rule(query, key, value, beta, scale,
         beta:               (T, Nv), BF16
         scale:              float
         initial_state:      (B, Nv, Dv, Dk), FP32
-        actual_seq_lengths: (B,), INT32 — per-batch sequence lengths
+        actual_seq_lengths: (B,), INT32 - per-batch sequence lengths
         g:                  (T, Nv), FP32 or None
 
     Returns:
