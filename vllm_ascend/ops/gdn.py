@@ -92,6 +92,10 @@ def get_causal_conv1d_update_host_args(attn_metadata) -> tuple[tuple[int, ...], 
             to_int64_tuple(causal_conv1d_meta.cache_indices_cpu),
         )
 
+    # A captured non-spec decode graph task can be replayed for a runtime
+    # single-token prefill batch. In that case decode fallback metadata is not
+    # attached, so reuse the prebuilt CPU-side prefill metadata instead of
+    # reading runtime NPU tensors and forcing device-to-host synchronization.
     fallback_meta = getattr(attn_metadata, "non_spec_prefill_fallback_meta", None)
     if fallback_meta is not None:
         causal_conv1d_meta = fallback_meta.causal_conv1d
