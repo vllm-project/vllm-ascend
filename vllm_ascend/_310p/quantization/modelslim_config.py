@@ -34,9 +34,9 @@ from vllm_ascend._310p.quantization.methods.registry import (
 )
 from vllm_ascend.quantization.method_adapters import AscendFusedMoEMethod, AscendLinearMethod
 from vllm_ascend.quantization.modelslim_config import (
+    UPDATED_PACKED_MODULES_MAPPING,
     AscendModelSlimConfig,
     get_quant_type_for_layer,
-    packed_modules_model_mapping,
 )
 from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, vllm_version_is
 
@@ -54,10 +54,9 @@ def _is_fused_moe_layer(layer: torch.nn.Module) -> bool:
 
 
 def create_scheme_for_layer(
-    quant_description: dict[str, Any],
+    quant_type: str,
     prefix: str,
     layer_type: str,
-    packed_modules_mapping: dict[str, Any] | None = None,
 ):
     """Create a quantization scheme instance for a layer.
 
@@ -71,8 +70,6 @@ def create_scheme_for_layer(
         An instance of the appropriate quantization scheme class.
     """
     logger.info_once("Using vLLM Ascend ModelSlim quantization.")
-    quant_type = get_quant_type_for_layer(quant_description, prefix, layer_type, packed_modules_mapping)
-
     if quant_type is None:
         err_msg = f"Could not determine quantization type for layer {prefix} (layer_type={layer_type})."
         logger.error(err_msg)
@@ -107,39 +104,40 @@ class AscendModelSlimConfig310(AscendModelSlimConfig):
         vllm_config = get_current_vllm_config()
         model_type = vllm_config.model_config.hf_config.model_type
 
-        if model_type in packed_modules_model_mapping:
-            self.packed_modules_mapping = packed_modules_model_mapping[model_type]
+        # Only update packed_modules_mapping if the upstream model definition not satisfies our scenario.
+        if model_type in UPDATED_PACKED_MODULES_MAPPING:
+            self.packed_modules_mapping.update(UPDATED_PACKED_MODULES_MAPPING[model_type])
+        self._discover_experts_mapping()
 
         prefix = self.quant_prefix_mapper(model_type, prefix)
+        quant_type = get_quant_type_for_layer(self.quant_description, prefix, self.packed_modules_mapping)
 
         if isinstance(layer, LinearBase):
-            packed = getattr(self, "packed_modules_mapping", {})
-            if self.is_layer_skipped_ascend(prefix, packed):
+            if quant_type is None:
                 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 
                 logger.debug("Select AscendUnquantizedLinearMethod for %s (layer=%s)", prefix, "LinearBase")
                 return AscendUnquantizedLinearMethod()
 
-            scheme = create_scheme_for_layer(
-                quant_description=self.quant_description,
-                prefix=prefix,
-                layer_type="linear",
-                packed_modules_mapping=packed,
-            )
+            scheme = create_scheme_for_layer(quant_type, prefix, "linear")
             logger.debug("Select AscendLinearMethod for %s (layer=%s)", prefix, "LinearBase")
             return AscendLinearMethod(scheme)
 
         elif _is_fused_moe_layer(layer):
-            if self.is_layer_skipped_ascend(prefix, self.packed_modules_mapping):
+            if quant_type is None:
                 from vllm_ascend._310p.fused_moe.fused_moe import AscendUnquantizedFusedMoEMethod310
 
                 logger.debug("Select AscendUnquantizedFusedMoEMethod310 for %s (layer=%s)", prefix, "FusedMoE")
                 return AscendUnquantizedFusedMoEMethod310(layer.moe_config)
-            scheme = create_scheme_for_layer(self.quant_description, prefix, "moe", self.packed_modules_mapping)
+            scheme = create_scheme_for_layer(quant_type, prefix, "moe")
             logger.debug("Select AscendFusedMoEMethod for %s (layer=%s)", prefix, "FusedMoE")
             return AscendFusedMoEMethod(scheme, layer.moe_config)
 
         elif isinstance(layer, VocabParallelEmbedding):
+            if quant_type is not None:
+                raise NotImplementedError(
+                    f"Quantization type {quant_type} for VocabParallelEmbedding is not supported on 310P."
+                )
             from vllm_ascend._310p.ops.vocab_parallel_embedding import AscendUnquantizedEmbeddingMethod310
 
             logger.debug(
