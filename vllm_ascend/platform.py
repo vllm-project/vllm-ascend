@@ -155,40 +155,25 @@ def _get_v2_model_runner_unsupported_features(vllm_config: VllmConfig) -> list[s
     if vllm_config.parallel_config.prefill_context_parallel_size > 1:
         unsupported.append("prefill context parallelism")
 
+    if vllm_config.parallel_config.decode_context_parallel_size > 1:
+        unsupported.append("decode context parallelism")
+
     from vllm.config.compilation import CompilationMode  # noqa: E402
 
     if vllm_config.compilation_config.mode == CompilationMode.STOCK_TORCH_COMPILE:
         unsupported.append("stock torch.compile")
 
-    if vllm_config.compilation_config.pass_config.enable_sp and vllm_config.parallel_config.tensor_parallel_size > 1:
+    if enable_sp(vllm_config) and vllm_config.parallel_config.tensor_parallel_size > 1:
         unsupported.append("sequence parallelism")
 
-    if (
-        vllm_config.parallel_config.distributed_executor_backend == "external_launcher"
-        and vllm_config.parallel_config.pipeline_parallel_size > 1
-    ):
-        unsupported.append("pipeline parallelism with external_launcher")
+    if vllm_config.parallel_config.pipeline_parallel_size > 1:
+        unsupported.append("pipeline parallelism")
+
+    if vllm_config.parallel_config.data_parallel_size > 1:
+        unsupported.append("data parallelism")
 
     if speculative_config is not None:
-        if speculative_config.method in ("ngram", "ngram_gpu"):
-            unsupported.append("ngram/ngram_gpu speculative decoding")
-        elif speculative_config.method not in (
-            "eagle",
-            "eagle3",
-            "mtp",
-            "dflash",
-            "dspark",
-        ):
-            unsupported.append(f"speculative method '{speculative_config.method}'")
-
-        if speculative_config.uses_dynamic_speculative_decoding():
-            unsupported.append("dynamic speculative decoding")
-
-        if speculative_config.parallel_drafting and speculative_config.method not in ("dflash", "dspark"):
-            unsupported.append("parallel drafting for EAGLE speculative decoding")
-
-        if speculative_config.method == "eagle3" and vllm_config.parallel_config.pipeline_parallel_size > 1:
-            unsupported.append("EAGLE3 with pipeline parallelism")
+        unsupported.append("spec decode")
 
     if vllm_config.parallel_config.enable_dbo:
         unsupported.append("dual batch overlap")
@@ -231,12 +216,6 @@ def _use_v2_model_runner(vllm_config: VllmConfig) -> bool:
     use_v2_model_runner = envs_vllm.VLLM_USE_V2_MODEL_RUNNER
     if use_v2_model_runner is not None:
         return use_v2_model_runner
-
-    if vllm_config.speculative_config is not None and vllm_config.speculative_config.method == "dspark":
-        return True
-
-    if vllm_config.model_config is not None and vllm_config.model_config.is_diffusion:
-        return True
 
     if not _is_default_v2_model_runner_model(vllm_config):
         return False
