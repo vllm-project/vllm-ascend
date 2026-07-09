@@ -30,6 +30,7 @@ from vllm.v1.metrics.reader import Counter, Vector
 from tests.e2e.conftest import VllmRunner, cleanup_dist_env_and_memory
 
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+os.environ["HF_HUB_OFFLINE"] = "0"
 
 MODELS = ["stepfun-ai/Step-3.5-Flash", "stepfun-ai/Step-3.7-Flash"]
 
