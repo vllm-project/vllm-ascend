@@ -15,18 +15,24 @@
 # This file is a part of the vllm-ascend project.
 #
 
-# This workflow related to the resources atlas 800 310P
-# We will not limit the concurrency of jobs on 310P
+# This workflow related to the resources atlas 310P
+# **Please note**: current 310P resource pool's maximum allowed concurrency is 5*16 NPUs
+# We will limit the concurrency of jobs on 310P to avoid the risk of insufficient resources
 name: Weekly-310P
 
 on:
+  schedule:
+      # Run test at 00:00 Beijing time (UTC+8) every Sunday
+      - cron: "0 16 * * 6"
   workflow_dispatch:
     inputs:
       vllm_ascend_branch:
         description: 'Branch to test'
         required: true
         default: 'main'
-        type: string
+        type: choice
+        options:
+          - main
       test_cases:
         description: 'Test cases to run (comma-separated, e.g., "test_custom_op,qwen3-32b,accuracy-group" or "all" for all tests)'
         required: false
@@ -60,7 +66,6 @@ defaults:
   run:
     shell: bash -el {0}
 
-# only cancel in-progress runs of the same workflow
 concurrency:
   group: ascend-weekly-${{ github.ref }}-310p${{ inputs.request_id && format('-{0}', inputs.request_id) || '' }}
   cancel-in-progress: true
@@ -69,7 +74,6 @@ env:
   # Single source of truth for all shared variables across jobs.
   # NOTE: GitHub Actions does not support env context in reusable workflow `with:` inputs,
   # so these values are exported as job outputs via the `setup-vars` job below.
-  CANN_IMAGE: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-910b-ubuntu22.04-py3.12'
   ASCEND_LOG_PREFIX: '/root/.cache/ascend-logs'
 
 jobs:
@@ -77,7 +81,7 @@ jobs:
     name: Parse trigger and determine test scope
     if: >-
       github.event_name == 'workflow_dispatch'
-    runs-on: linux-aarch64-310p-4
+    runs-on: ubuntu-latest
     outputs:
       run: ${{ steps.parse.outputs.run }}
       filter: ${{ steps.parse.outputs.filter }}
@@ -109,18 +113,15 @@ jobs:
   setup-vars:
     name: Export global env vars as job outputs
     needs: parse-trigger
-    runs-on: linux-aarch64-310p-4
+    runs-on: ubuntu-latest
     outputs:
-      cann_image: ${{ steps.export.outputs.cann_image }}
       ascend_log_prefix: ${{ steps.export.outputs.ascend_log_prefix }}
       vllm_ascend_branches: ${{ steps.export.outputs.vllm_ascend_branches }}
-      nightly_matrix: ${{ steps.set-matrix.outputs.nightly_matrix }}
-      pr_only_matrix: ${{ steps.set-matrix.outputs.pr_only_matrix }}
+      single_node: ${{ steps.set-matrix.outputs.single_node }}
     steps:
       - id: export
         run: |
           {
-            echo "cann_image=${{ env.CANN_IMAGE }}"
             echo "ascend_log_prefix=${{ env.ASCEND_LOG_PREFIX }}"
             input_branch="${{ inputs.vllm_ascend_branch }}"
             normalized=$(echo "$input_branch" | tr '/' '-')
@@ -147,7 +148,7 @@ jobs:
         id: set-matrix
         env:
           MATRIX_FILE: ${{ github.event_name == 'workflow_dispatch' && inputs.vllm_ascend_ref != '' && './pr/.github/workflows/configs/weekly_config.yaml' || '.github/workflows/configs/weekly_config.yaml' }}
-          MATRIX_OUTPUTS: '{"nightly_matrix":"310p.accuracy.nightly","pr_only_matrix":"310p.accuracy.pr_only"}'
+          MATRIX_OUTPUTS: '{"single_node":"310p.single_node.test_config"}'
         run: |
           python3 -m pip install pyyaml -q
           python3 .github/workflows/scripts/resolve_nightly_tests.py --mode=matrix
@@ -159,7 +160,9 @@ jobs:
     strategy:
       matrix:
         vllm_ascend_branch: >-
-          ${{ fromJSON(format('["{0}"]', inputs.vllm_ascend_branch)) }}
+          ${{ github.event_name == 'workflow_dispatch'
+              && fromJSON(format('["{0}"]', inputs.vllm_ascend_branch))
+              || fromJSON('["main"]') }}
     uses: ./.github/workflows/_nightly_image_build.yaml
     with:
       target: 310p
@@ -169,25 +172,29 @@ jobs:
       HW_TOKEN: ${{ secrets.HW_TOKEN }}
       GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
 
-  single-node-accuracy-tests:
+  single-node-tests:
+    name: single-node
     needs: [setup-vars, parse-trigger, build-image]
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&
-      needs.setup-vars.outputs.nightly_matrix != '[]' &&
       (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
     strategy:
       fail-fast: false
+      max-parallel: 7
       matrix:
         vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
-        test_config: ${{ fromJson(needs.setup-vars.outputs.nightly_matrix) }}
-    uses: ./.github/workflows/_e2e_nightly_single_node_models.yaml
+        test_config: ${{ fromJson(needs.setup-vars.outputs.single_node) }}
+    uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
       runner: ${{ matrix.test_config.os }}
-      model_list: ${{ toJson(matrix.test_config.model_list) }}
-      model_filter: ${{ needs.parse-trigger.outputs.filter }}
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-310p'
-      is_run: >-
+      tests: ${{ matrix.test_config.tests }}
+      config_file_path: ${{ matrix.test_config.config_file_path }}
+      config_base_path: tests/e2e/weekly/single_node/configs/
+      name: ${{ matrix.test_config.name }}
+      testcase_timeout: 600
+      should_run: >-
         ${{
           needs.parse-trigger.outputs.run == 'true' && (
             needs.parse-trigger.outputs.filter == 'all' ||
@@ -196,60 +203,21 @@ jobs:
         }}
       request_id: ${{ inputs.request_id || '' }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
-      upload: false
-
-  single-node-accuracy-tests-pr-only:
-    needs: [setup-vars, parse-trigger, build-image]
-    if: >-
-      always() &&
-      needs.parse-trigger.outputs.run == 'true' &&
-      needs.parse-trigger.outputs.filter != 'all' &&
-      needs.setup-vars.outputs.pr_only_matrix != '[]' &&
-      (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
-    strategy:
-      fail-fast: false
-      matrix:
-        vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
-        test_config: ${{ fromJson(needs.setup-vars.outputs.pr_only_matrix) }}
-    uses: ./.github/workflows/_e2e_nightly_single_node_models.yaml
-    with:
-      runner: ${{ matrix.test_config.os }}
-      model_list: ${{ toJson(matrix.test_config.model_list) }}
-      model_filter: ${{ needs.parse-trigger.outputs.filter }}
-      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-310p'
-      is_run: >-
-        ${{
-          needs.parse-trigger.outputs.run == 'true' &&
-          needs.parse-trigger.outputs.filter != 'all' &&
-          contains(needs.parse-trigger.outputs.filter, format(',{0},', matrix.test_config.name))
-        }}
-      request_id: ${{ inputs.request_id || '' }}
-      vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
-      upload: false
-
-  clear-pre-logs:
-    needs: [parse-trigger]
-    runs-on: linux-aarch64-310p-4
-    steps:
-      - name: Clear pre-logs on pvc
-        run: |
-          # Clear logs generated before the test to avoid confusion
-          rm -rf "${ASCEND_LOG_PREFIX:?}"/* || true
 
   merge-benchmark-artifacts:
     name: Merge benchmark artifacts into weekly-310p.zip
-    needs: [parse-trigger]
+    needs: [parse-trigger, single-node-tests]
     if: >-
       always() &&
       github.event_name == 'workflow_dispatch' &&
       needs.parse-trigger.result == 'success'
-    runs-on: linux-aarch64-310p-4
+    runs-on: ubuntu-latest
     steps:
       - name: Merge all benchmark result artifacts
         continue-on-error: true
         uses: actions/upload-artifact/merge@v7
         with:
-          name: weekly-310P
+          name: weekly-310p
           pattern: nightly-test-benchmark-results-*
           compression-level: 0
           delete-merged: true
