@@ -12,78 +12,14 @@ jobs:
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
     steps:
-      - name: Setup context
+      - name: Dump client ca.pem full content
         run: |
-          mkdir -p /tmp/ctx
-          cat > /tmp/ctx/Dockerfile <<'DOCKERFILE'
-          FROM quay.io/ascend/cann:9.0.0-910b-openeuler24.03-py3.12
-          RUN echo cache-probe > /tmp/cache-probe-marker
-          DOCKERFILE
-
-      - name: Python TLS - verify chain
-        run: |
-          echo "=== Python: verify WITHOUT cafile (system trust store only) ==="
-          python3 -c "
-          import ssl, socket
-          ctx = ssl.create_default_context()
-          ctx.load_cert_chain('${DOCKER_CONFIG}/cert.pem', '${DOCKER_CONFIG}/key.pem')
-          try:
-              with socket.create_connection(('buildkitd-service.buildkitd', 1234), timeout=10) as sock:
-                  with ctx.wrap_socket(sock, server_hostname='buildkitd-service.buildkitd') as ssock:
-                      print('OK:', ssock.version(), ssock.getpeercert()['subject'])
-          except Exception as e:
-              print('FAIL:', type(e).__name__, str(e)[:200])
-          "
+          echo "=== Full client ca.pem ==="
+          cat "${DOCKER_CONFIG}/ca.pem"
+          echo "=== END ==="
           echo ""
-          echo "=== Python: verify WITH cafile (client ca only) ==="
-          python3 -c "
-          import ssl, socket
-          ctx = ssl.create_default_context(cafile='${DOCKER_CONFIG}/ca.pem')
-          ctx.load_cert_chain('${DOCKER_CONFIG}/cert.pem', '${DOCKER_CONFIG}/key.pem')
-          try:
-              with socket.create_connection(('buildkitd-service.buildkitd', 1234), timeout=10) as sock:
-                  with ctx.wrap_socket(sock, server_hostname='buildkitd-service.buildkitd') as ssock:
-                      print('OK:', ssock.version(), ssock.getpeercert()['subject'])
-          except Exception as e:
-              print('FAIL:', type(e).__name__, str(e)[:200])
-          "
-
-      - name: buildctl test A - no TLS flags
-        run: |
-          set +e
-          buildctl --addr "${BUILDKITD_ADDR}" debug workers 2>&1
-          echo "exit=$?"
-        continue-on-error: true
-
-      - name: buildctl test B - tlscacert only
-        run: |
-          set +e
-          buildctl \
-            --addr "${BUILDKITD_ADDR}" \
-            --tlscacert "${DOCKER_CONFIG}/ca.pem" \
-            debug workers 2>&1
-          echo "exit=$?"
-        continue-on-error: true
-
-      - name: buildctl test C - tlscacert + client cert
-        run: |
-          set +e
-          buildctl \
-            --addr "${BUILDKITD_ADDR}" \
-            --tlscacert "${DOCKER_CONFIG}/ca.pem" \
-            --tlscert  "${DOCKER_CONFIG}/cert.pem" \
-            --tlskey   "${DOCKER_CONFIG}/key.pem" \
-            debug workers 2>&1
-          echo "exit=$?"
-        continue-on-error: true
-
-      - name: buildctl test D - client cert, no ca (rely on system)
-        run: |
-          set +e
-          buildctl \
-            --addr "${BUILDKITD_ADDR}" \
-            --tlscert "${DOCKER_CONFIG}/cert.pem" \
-            --tlskey  "${DOCKER_CONFIG}/key.pem" \
-            debug workers 2>&1
-          echo "exit=$?"
-        continue-on-error: true
+          echo "=== byte count ==="
+          wc -c "${DOCKER_CONFIG}/ca.pem"
+          echo ""
+          echo "=== cert details if openssl available ==="
+          openssl x509 -in "${DOCKER_CONFIG}/ca.pem" -noout -subject -issuer -serial -fingerprint -sha256 2>&1 || echo "openssl not available"
