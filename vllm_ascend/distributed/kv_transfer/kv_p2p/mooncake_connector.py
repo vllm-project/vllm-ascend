@@ -56,6 +56,13 @@ from vllm.v1.request import RequestStatus
 
 from vllm_ascend import envs as ascend_envs
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
+from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_dfx import (
+    MooncakeDFXEvent,
+    MooncakeDFXRecord,
+    MooncakeFailureReason,
+    is_mooncake_transfer_dfx_enabled,
+    mooncake_transfer_dfx,
+)
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
     RegisterRegions,
@@ -79,6 +86,7 @@ if TYPE_CHECKING:
 
 GET_META_MSG = b"get_meta_msg"
 DONE_RECVING_MSG = b"done_recving_msg"
+GET_KV_CACHE_CHECKSUM_MSG = b"get_kv_cache_checksum_msg"
 
 
 # A busy peer can otherwise keep a global executor worker forever when the
@@ -357,6 +365,50 @@ class KVCacheSendingThread(threading.Thread):
                 msg = decoder.decode(payload[0])
                 if msg[0] == GET_META_MSG:
                     sock.send_multipart((identity, b"", encoded_data))
+                elif msg[0] == GET_KV_CACHE_CHECKSUM_MSG:
+                    checksum_request = msg[1]
+                    request_id = checksum_request.get("request_id")
+                    remote_request_id = checksum_request.get("remote_request_id")
+                    layer_names = checksum_request.get("layer_names", [])
+                    selected_kv_caches = {
+                        layer_name: self.kv_caches[layer_name]
+                        for layer_name in layer_names
+                        if layer_name in self.kv_caches
+                    }
+                    try:
+                        checksum = mooncake_transfer_dfx.compute_kv_cache_checksum(
+                            kv_caches=selected_kv_caches,
+                            block_groups=checksum_request["block_groups"],
+                            tp_num_need_pulls=checksum_request["tp_num_need_pulls"],
+                            inner_offset=checksum_request["inner_offset"],
+                            block_lens=[],
+                        )
+                        samples = mooncake_transfer_dfx.sample_kv_cache_blocks(
+                            kv_caches=selected_kv_caches,
+                            block_groups=checksum_request["block_groups"],
+                            tp_num_need_pulls=checksum_request["tp_num_need_pulls"],
+                            inner_offset=checksum_request["inner_offset"],
+                            block_lens=[],
+                        )
+                    except Exception as err:
+                        logger.exception(
+                            "Failed to compute Mooncake source KV checksum for request %s: %s",
+                            remote_request_id,
+                            err,
+                        )
+                        checksum = {"error": str(err)}
+                        samples = []
+                        mooncake_transfer_dfx.record(
+                            MooncakeDFXRecord(
+                                event=MooncakeDFXEvent.FAILURE,
+                                request_id=request_id,
+                                remote_request_id=remote_request_id,
+                                role="kv_producer",
+                                reason=MooncakeFailureReason.KV_CONTENT_CHECKSUM_ERROR.value,
+                                details={"error": str(err), "layer_names": layer_names},
+                            )
+                        )
+                    sock.send_multipart((identity, b"", encoder.encode({"checksum": checksum, "samples": samples})))
                 elif msg[0] == DONE_RECVING_MSG:
                     logger.debug("Got DONE_RECVING_MSG for request %s", msg[1])
                     request_id = msg[1]
@@ -385,7 +437,7 @@ class KVCacheSendingThread(threading.Thread):
                 else:
                     logger.error(
                         "Connection listener received unexpected message type. "
-                        "Expected: GET_META_MSG or DONE_RECVING_MSG. "
+                        "Expected: GET_META_MSG, GET_KV_CACHE_CHECKSUM_MSG or DONE_RECVING_MSG. "
                         "Actual: %s. "
                         "Full message: %s. "
                         "Check: Verify message protocol implementation.",
@@ -762,6 +814,7 @@ class KVCacheRecvingThread(threading.Thread):
         dst_list: list[int] = []
         length_list: list[int] = []
         attention_group_reformat_block_ids: list[tuple[tuple[int, list[list[int]], int, list[int]], bool]] = []
+        checksum_transfer_groups: list[dict[str, Any]] = []
 
         def pp_layer_indices(layer_indices: list[int], prefill_pp_rank: int) -> list[int]:
             first_layer_index, end_layer_index = self.pp_layer_indices[prefill_pp_rank]
@@ -803,6 +856,19 @@ class KVCacheRecvingThread(threading.Thread):
                         is_group_transfer_end,
                     )
                 )
+                if is_mooncake_transfer_dfx_enabled():
+                    group_kv_caches = self._get_group_kv_caches(group_idx, layer_indices)
+                    checksum_transfer_groups.append(
+                        {
+                            "group_idx": group_idx,
+                            "layer_indices": layer_indices,
+                            "layer_names": list(group_kv_caches.keys()),
+                            "grouped_local_block_ids": grouped_local_block_ids,
+                            "grouped_remote_block_ids": grouped_remote_block_ids,
+                            "tp_num_need_pulls": tp_num_need_pulls,
+                            "inner_offset": inner_offset,
+                        }
+                    )
             else:
                 # When Prefix Caching is enabled on both P and D nodes, num_block should not be forced to match,
                 # as the D-node requires dynamic allocation based on its specific cache hit rate.
@@ -892,6 +958,21 @@ class KVCacheRecvingThread(threading.Thread):
             dst_list,
             length_list,
         )
+        source_checksum_infos: dict[int, dict[str, Any] | None] = {}
+        for checksum_group_idx, checksum_group in enumerate(checksum_transfer_groups):
+            source_checksum_infos[checksum_group_idx] = self._get_remote_kv_cache_checksum(
+                remote_host,
+                remote_handshake_port,
+                {
+                    "request_id": req_meta["request_id"],
+                    "remote_request_id": remote_request_id,
+                    "group_idx": checksum_group["group_idx"],
+                    "layer_names": checksum_group["layer_names"],
+                    "block_groups": checksum_group["grouped_remote_block_ids"],
+                    "tp_num_need_pulls": checksum_group["tp_num_need_pulls"],
+                    "inner_offset": checksum_group["inner_offset"],
+                },
+            )
         ret = self.engine.batch_transfer_sync_read(session_id, src_list, dst_list, length_list)
         if ret < 0:
             logger.error(
@@ -900,6 +981,90 @@ class KVCacheRecvingThread(threading.Thread):
                 ret,
             )
             raise RuntimeError(f"Mooncake transfer failed, ret: {ret}")
+
+        for checksum_group_idx, checksum_group in enumerate(checksum_transfer_groups):
+            group_kv_caches = self._get_group_kv_caches(
+                checksum_group["group_idx"],
+                checksum_group["layer_indices"],
+            )
+            source_checksum_info = source_checksum_infos.get(checksum_group_idx)
+            source_checksum = source_checksum_info.get("checksum") if source_checksum_info is not None else None
+            source_samples = source_checksum_info.get("samples", []) if source_checksum_info is not None else []
+            try:
+                target_checksum = mooncake_transfer_dfx.compute_kv_cache_checksum(
+                    kv_caches=group_kv_caches,
+                    block_groups=checksum_group["grouped_local_block_ids"],
+                    tp_num_need_pulls=checksum_group["tp_num_need_pulls"],
+                    inner_offset=checksum_group["inner_offset"],
+                    block_lens=[],
+                )
+            except Exception as err:
+                logger.exception(
+                    "Failed to compute Mooncake target KV checksum for request %s group %s: %s",
+                    remote_request_id,
+                    checksum_group["group_idx"],
+                    err,
+                )
+                target_checksum = {"error": str(err)}
+                mooncake_transfer_dfx.record(
+                    MooncakeDFXRecord(
+                        event=MooncakeDFXEvent.FAILURE,
+                        request_id=req_meta["request_id"],
+                        remote_request_id=remote_request_id,
+                        role="kv_consumer",
+                        reason=MooncakeFailureReason.KV_CONTENT_CHECKSUM_ERROR.value,
+                        details={"error": str(err), "group_idx": checksum_group["group_idx"]},
+                    )
+                )
+            checksum_match = (
+                source_checksum is not None
+                and target_checksum is not None
+                and source_checksum.get("algorithm") == target_checksum.get("algorithm")
+                and source_checksum.get("digest") == target_checksum.get("digest")
+                and source_checksum.get("bytes") == target_checksum.get("bytes")
+                and source_checksum.get("segments") == target_checksum.get("segments")
+            )
+            target_samples = []
+            if not checksum_match:
+                try:
+                    target_samples = mooncake_transfer_dfx.sample_kv_cache_blocks(
+                        kv_caches=group_kv_caches,
+                        block_groups=checksum_group["grouped_local_block_ids"],
+                        tp_num_need_pulls=checksum_group["tp_num_need_pulls"],
+                        inner_offset=checksum_group["inner_offset"],
+                        block_lens=[],
+                    )
+                except Exception as err:
+                    logger.exception(
+                        "Failed to sample Mooncake target KV cache for request %s group %s: %s",
+                        remote_request_id,
+                        checksum_group["group_idx"],
+                        err,
+                    )
+                    mooncake_transfer_dfx.record(
+                        MooncakeDFXRecord(
+                            event=MooncakeDFXEvent.FAILURE,
+                            request_id=req_meta["request_id"],
+                            remote_request_id=remote_request_id,
+                            role="kv_consumer",
+                            reason=MooncakeFailureReason.KV_CONTENT_CHECKSUM_ERROR.value,
+                            details={
+                                "error": str(err),
+                                "group_idx": checksum_group["group_idx"],
+                                "phase": "target_sample",
+                            },
+                        )
+                    )
+            mooncake_transfer_dfx.record_kv_content_check(
+                request_id=req_meta["request_id"],
+                remote_request_id=remote_request_id,
+                role="kv_consumer",
+                source_checksum=source_checksum,
+                target_checksum=target_checksum,
+                source_samples=source_samples,
+                target_samples=target_samples,
+                extra={"session_id": session_id, "group_idx": checksum_group["group_idx"]},
+            )
 
         req_end_time = time.perf_counter()
         req_transfer_elapsed = (req_end_time - req_start_time) * 1000
@@ -1298,6 +1463,76 @@ class KVCacheRecvingThread(threading.Thread):
             if sock is not None:
                 self._return_remote_socket(sock, remote_host, remote_handshake_port)
                 logger.debug("Returned socket to pool for %s:%d", remote_host, remote_handshake_port)
+
+    def _get_remote_kv_cache_checksum(
+        self,
+        remote_host: str,
+        remote_handshake_port: int,
+        checksum_request: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        if not is_mooncake_transfer_dfx_enabled():
+            return None
+
+        sock: zmq.Socket | None = None  # type: ignore
+        request_id = checksum_request.get("request_id")
+        remote_request_id = checksum_request.get("remote_request_id")
+        try:
+            sock = self._get_remote_socket(remote_host, remote_handshake_port)
+            data = self.encoder.encode((GET_KV_CACHE_CHECKSUM_MSG, checksum_request))
+            ensure_zmq_send(sock, data, f"{remote_host}:{remote_handshake_port}")
+            checksum_bytes = ensure_zmq_recv(sock, f"{remote_host}:{remote_handshake_port}")
+            checksum_response = msgspec.msgpack.decode(checksum_bytes)
+            checksum = checksum_response.get("checksum") if isinstance(checksum_response, dict) else checksum_response
+            samples = checksum_response.get("samples", []) if isinstance(checksum_response, dict) else []
+            if isinstance(checksum, dict) and "error" not in checksum:
+                mooncake_transfer_dfx.record(
+                    MooncakeDFXRecord(
+                        event=MooncakeDFXEvent.KV_CONTENT_CHECK,
+                        request_id=request_id,
+                        remote_request_id=remote_request_id,
+                        role="kv_consumer",
+                        details={
+                            "phase": "source_checksum_received",
+                            "source_checksum": checksum,
+                            "source_sample_count": len(samples),
+                            "group_idx": checksum_request.get("group_idx"),
+                        },
+                    )
+                )
+                return {"checksum": checksum, "samples": samples}
+            mooncake_transfer_dfx.record(
+                MooncakeDFXRecord(
+                    event=MooncakeDFXEvent.FAILURE,
+                    request_id=request_id,
+                    remote_request_id=remote_request_id,
+                    role="kv_consumer",
+                    reason=MooncakeFailureReason.KV_CONTENT_CHECKSUM_ERROR.value,
+                    details={"checksum_response": checksum_response},
+                )
+            )
+        except Exception as err:
+            logger.warning(
+                "Failed to get Mooncake source KV checksum for request %s from %s:%d: %s",
+                remote_request_id,
+                remote_host,
+                remote_handshake_port,
+                err,
+            )
+            mooncake_transfer_dfx.record(
+                MooncakeDFXRecord(
+                    event=MooncakeDFXEvent.FAILURE,
+                    request_id=request_id,
+                    remote_request_id=remote_request_id,
+                    role="kv_consumer",
+                    reason=MooncakeFailureReason.KV_CONTENT_CHECKSUM_ERROR.value,
+                    details={"error": str(err), "group_idx": checksum_request.get("group_idx")},
+                )
+            )
+        finally:
+            if sock is not None:
+                self._return_remote_socket(sock, remote_host, remote_handshake_port)
+                logger.debug("Returned socket to pool for %s:%d", remote_host, remote_handshake_port)
+        return None
 
     def _send_done_recv_signal(
         self,
