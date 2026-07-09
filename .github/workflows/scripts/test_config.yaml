@@ -99,7 +99,7 @@
   source_file_dependencies:
     - vllm_ascend/attention/sfa_v1.py
   tests:
-    - tests/ut/attention/a2/test_sfa_v1.py
+    - tests/ut/attention/test_sfa_v1.py
     - tests/ut/attention/a2/test_sfa_v1_precision.py
     - tests/e2e/pull_request/four_card/test_deepseek_v3_2_w8a8_pruning.py
 
@@ -759,17 +759,17 @@ estimated_times:
   tests/e2e/pull_request/four_card/test_qwen3_5.py: 730
   tests/e2e/pull_request/four_card/test_qwen3_next.py: 1040
   tests/e2e/pull_request/four_card/test_graph_mode.py: 510
-  tests/ut/attention/a2/test_attention_cp.py: 40
+  tests/ut/attention/test_attention_cp.py: 40
   tests/ut/attention/a2/test_attention_cp_precision.py: 30
-  tests/ut/attention/a2/test_attention_v1.py: 30
+  tests/ut/attention/test_attention_v1.py: 30
   tests/ut/attention/a2/test_attention_v1_precision.py: 450
-  tests/ut/attention/a2/test_common_cp.py: 30
-  tests/ut/attention/a2/test_mla_cp.py: 40
+  tests/ut/attention/test_common_cp.py: 30
+  tests/ut/attention/test_mla_cp.py: 40
   tests/ut/attention/a2/test_mla_cp_precision.py: 30
   tests/ut/attention/a2/test_mla_precision.py: 160
-  tests/ut/attention/a2/test_mla_v1.py: 60
+  tests/ut/attention/test_mla_v1.py: 60
   tests/ut/attention/a2/test_sfa_cp_precision.py: 130
-  tests/ut/attention/a2/test_sfa_v1.py: 30
+  tests/ut/attention/test_sfa_v1.py: 30
   tests/ut/attention/a2/test_sfa_v1_precision.py: 130
   tests/ut/compilation/a2/test_acl_graph.py: 40
   tests/ut/device_allocator/a2/test_find_loaded_library.py: 30
