@@ -248,7 +248,7 @@ run_tests_with_log() {
             echo "Worker: signalling ready at ${coord}/worker_ready_${LWS_WORKER_INDEX}"
             echo "Worker: joining bisect as worker node (index ${LWS_WORKER_INDEX})..."
             cd "$WORKSPACE/vllm-ascend"
-            python -m tests.e2e.nightly.bisect.auto_bisect \
+            python -m tools.bisect.auto_bisect \
                 --scene multi_node \
                 --config-yaml "${CONFIG_YAML_PATH}" \
                 --bad-commit HEAD \
@@ -418,7 +418,7 @@ aop_pipeline() {
 
     cd "$WORKSPACE/vllm-ascend"
     local bisect_rc=0
-    python -m tests.e2e.nightly.bisect.auto_bisect \
+    python -m tools.bisect.auto_bisect \
         --scene multi_node \
         --config-yaml "${CONFIG_YAML_PATH}" \
         --bad-commit HEAD \
