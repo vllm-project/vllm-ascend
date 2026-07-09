@@ -135,42 +135,44 @@ msgstr ""
 "VL-Dense.html#offline-inference)。"
 
 msgid "# Qwen3-VL-30B-A3B-Instruct"
-msgstr ""
+msgstr "# Qwen3-VL-30B-A3B-Instruct"
 
 msgid "## Introduction"
-msgstr ""
+msgstr "## 简介"
 
 msgid "## Supported Features"
-msgstr ""
+msgstr "## 支持的功能"
 
 msgid ""
 "- Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.\n"
 "- Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration."
 msgstr ""
+"- 请参考[支持的功能](../../user_guide/support_matrix/supported_models.md)获取模型支持的功能矩阵。\n"
+"- 请参考[功能指南](../../user_guide/feature_guide/index.md)获取功能的配置方法。"
 
 msgid "## Environment Preparation"
-msgstr ""
+msgstr "## 环境准备"
 
 msgid "### Prepare Model Weights"
-msgstr ""
+msgstr "### 准备模型权重"
 
 msgid "### Installation"
-msgstr ""
+msgstr "### 安装"
 
 msgid "## Deployment"
-msgstr ""
+msgstr "## 部署"
 
 msgid "### Online Serving"
-msgstr ""
+msgstr "### 在线服务"
 
 msgid "=== \"Image Inputs\""
-msgstr ""
+msgstr "=== \"图片输入\""
 
 msgid "=== \"Video Inputs\""
-msgstr ""
+msgstr "=== \"视频输入\""
 
 msgid "### Offline Inference"
-msgstr ""
+msgstr "### 离线推理"
 
 #~ msgid "Qwen3-VL-30B-A3B-Instruct"
 #~ msgstr "Qwen3-VL-30B-A3B-Instruct"

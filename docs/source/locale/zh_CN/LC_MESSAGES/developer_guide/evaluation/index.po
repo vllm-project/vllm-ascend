@@ -20,7 +20,7 @@ msgstr ""
 "Generated-By: Babel 2.17.0\n"
 
 msgid "# Accuracy"
-msgstr ""
+msgstr "# 精度"
 
 #~ msgid "Accuracy"
 #~ msgstr "准确性"
