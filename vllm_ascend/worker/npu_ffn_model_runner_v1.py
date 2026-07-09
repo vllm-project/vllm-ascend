@@ -176,31 +176,25 @@ class NPUFFNModelRunner(NPUModelRunner, GPUFFNModelRunner):
         """Capture ACL graphs for FFN operations.
 
         Args:
-            dp_metadata_list: dp_metadata list received from the attention side
-            is_warmup: warmup mode (only forward, no graph capture)
-            is_attn_graph_capturing: whether the attention side is capturing
-                (used for synchronization)
+            dp_metadata_list: 从Attention侧接收的dp_metadata列表
+            is_warmup: 是否为warmup模式（只执行forward，不capture graph）
+            is_attn_graph_capturing: Attention侧是否正在capture（用于同步）
         """
         if not self.use_aclgraph:
             return 0
+        logger.debug("Starting ACL graph capture for FFN operations, "
+                     "is_warmup=%s", is_warmup)
         start_time = time.perf_counter()
         start_free_npu_memory = torch.npu.mem_get_info()[0]
 
         set_cudagraph_capturing_enabled(True)
-        # if is_warmup:
-        #     # Warmup mode: only run forward, don't capture graph.
-        #     self._warmup_model(dp_metadata_list=dp_metadata_list)
-        #     logger.info("FFN warmup completed, dp_metadata_list=%s", dp_metadata_list)
-        # else:
-        #     # Capture mode: capture a single graph based on dp_metadata_list.
-        #     self._capture_model(dp_metadata_list=dp_metadata_list)
-        logger.info("capture_model pre, dp_metadata_list=%s", dp_metadata_list)
-        self._warmup_model(dp_metadata_list=dp_metadata_list, aclgraph_runtime_mode=CUDAGraphMode.FULL)
-        logger.info("capture_model post")
-        # dp_metadata_list, _, _ = (self.connector.recv_dp_metadata_list())
-        # self._capture_model(dp_metadata_list=dp_metadata_list)
-        # logger.info("FFN capture completed, dp_metadata_list=%s", dp_metadata_list)
-
+        if is_warmup:
+            # Warmup模式：只执行forward，不capture graph
+            self._warmup_model(dp_metadata_list=dp_metadata_list)
+            logger.info("FFN warmup completed, dp_metadata_list=%s", dp_metadata_list)
+        else:
+            # 正式Capture模式：根据dp_metadata_list捕获单个graph
+            self._capture_model(dp_metadata_list=dp_metadata_list)
         set_cudagraph_capturing_enabled(False)
 
         end_time = time.perf_counter()
@@ -234,40 +228,21 @@ class NPUFFNModelRunner(NPUModelRunner, GPUFFNModelRunner):
             for stage_idx, meta in sorted(dp_metadata_list.items())
         )
 
-    def _warmup_model(self, dp_metadata_list: dict = None, aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE) -> None:
-        """执行warmup
+    def _warmup_model(self, dp_metadata_list: dict = None) -> None:
+        """执行warmup，只运行forward不capture graph
 
         Args:
+            is_ubatch: 是否为ubatch模式
             dp_metadata_list: 从Attention侧接收的dp_metadata列表
-            aclgraph_runtime_mode: 指定CUDA Graph运行模式，默认为FULL
         """
+        # Warmup只执行eager模式的forward，根据dp_metadata_list确定num_tokens
         dp_metadata_key = self._get_dp_metadata_key(dp_metadata_list)
 
-        self._dummy_run(aclgraph_runtime_mode=aclgraph_runtime_mode,
+        self._dummy_run(aclgraph_runtime_mode=CUDAGraphMode.NONE,
                         uniform_decode=True,
                         dp_metadata_list=dp_metadata_list,
                         dp_metadata_key=dp_metadata_key)
-        logger.info("FFN warmup for dp_metadata_key=%s", dp_metadata_key)
-
-    # def _warmup_model(self, dp_metadata_list: dict = None) -> None:
-    #     """执行warmup，只运行forward不capture graph
-
-    #     Args:
-    #         is_ubatch: 是否为ubatch模式
-    #         dp_metadata_list: 从Attention侧接收的dp_metadata列表
-    #     """
-    #     dp_metadata_key = self._get_dp_metadata_key(dp_metadata_list)
-
-    #     # self._dummy_run(aclgraph_runtime_mode=CUDAGraphMode.NONE,
-    #     #                 uniform_decode=True,
-    #     #                 dp_metadata_list=dp_metadata_list,
-    #     #                 dp_metadata_key=dp_metadata_key)
-
-    #     self._dummy_run(aclgraph_runtime_mode=CUDAGraphMode.FULL,
-    #                     uniform_decode=True,
-    #                     dp_metadata_list=dp_metadata_list,
-    #                     dp_metadata_key=dp_metadata_key)
-    #     logger.info("FFN warmup for dp_metadata_key=%s", dp_metadata_key)
+        logger.debug("FFN warmup for dp_metadata_key=%s", dp_metadata_key)
 
     def _capture_model(self, dp_metadata_list: dict = None):
         """Internal capture implementation - capture a single graph based on
