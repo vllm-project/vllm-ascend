@@ -270,19 +270,6 @@ jobs:
           python3 -m pip install pyyaml -q
           python3 .github/workflows/scripts/resolve_nightly_tests.py --mode=matrix
 
-     - name: Create test artifact content
-        run: |
-          mkdir -p /tmp/validate-artifact
-          echo "runner=linux-aarch64-a3-0" > /tmp/validate-artifact/info.txt
-          echo "arch=$(uname -m)" >> /tmp/validate-artifact/info.txt
-          echo "python=$(python3 --version)" >> /tmp/validate-artifact/info.txt
-          echo "timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> /tmp/validate-artifact/info.txt
 
-     - name: Upload artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: validate-basic-linux-aarch64-a3-0
-          path: /tmp/validate-artifact/
-          retention-days: 1
 
 
