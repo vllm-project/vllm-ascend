@@ -585,6 +585,11 @@ class AscendFusedMoE(FusedMoE):
                 # Execute activation concurrently with gmm2.
 
                 maybe_wait_event(fused_moe_evts.before_gmm2)
+                clamp_limit = fused_moe_evts.swiglu_limit or 0.0
+                group_index = None
+                if clamp_limit <= 0.0:
+                    group_index = torch.empty((1,), dtype=torch.int64, device=hidden_states.device)
+                    group_index.fill_(hidden_states.shape[0])
                 quantized_x, swiglu_out_scale = torch.ops._C_ascend.npu_dequant_swiglu_quant(
                     x=hidden_states,
                     weight_scale=self._shared_experts.gate_up_proj.weight_scale_fp32,
@@ -592,11 +597,11 @@ class AscendFusedMoE(FusedMoE):
                     bias=None,
                     quant_scale=None,
                     quant_offset=None,
-                    group_index=None,
+                    group_index=group_index,
                     activate_left=True,
                     quant_mode=1,
                     swiglu_mode=1,
-                    clamp_limit=fused_moe_evts.swiglu_limit,
+                    clamp_limit=clamp_limit,
                 )
                 # Execute the down projection concurrently with the combine
                 # communication.
