@@ -56,6 +56,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     cache_sparse_c8: bool = False
     c8_k_cache_dtype: torch.dtype = field(default_factory=_get_c8_k_cache_dtype)
     c8_k_scale_cache_dtype: torch.dtype = field(default_factory=_get_c8_k_scale_cache_dtype)
+    sfa_dcp_replicate_k_size: int = 1
 
     @property
     def page_size_bytes(self) -> int:

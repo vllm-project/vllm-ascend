@@ -449,6 +449,18 @@ class NPUModelRunner(GPUModelRunner):
             self.positions = torch.zeros(
                 max_buffer_num_tokens, dtype=torch.int64, device=self.device)
             
+        # sfa_dcp with replicate k
+        self.sfa_dcp_replicate_k = True and self.use_sparse
+        if self.sfa_dcp_replicate_k:
+            assert self.pcp_size == 1 and \
+            self.dcp_size == self.parallel_config.tensor_parallel_size and \
+            self.use_sparse_c8_indexer == False
+            self.sparse_head_dim = (
+                self.model_config.hf_text_config.kv_lora_rank,
+                self.model_config.hf_text_config.qk_rope_head_dim,
+                self.model_config.hf_text_config.index_head_dim * self.dcp_size,
+            )
+            
         # Create a CPU numpy buffer for positions computation when
         # self.positions is a plain tensor (non-CpuGpuBuffer case).
         self._positions_cpu_buf = torch.zeros(
@@ -4687,7 +4699,7 @@ class NPUModelRunner(GPUModelRunner):
 
                     if self.use_sparse and has_indexer_cache:
                         dsa_k_cache_shape = (
-                            num_blocks,
+                            num_blocks * current_kv_cache_spec.sfa_dcp_replicate_k_size,
                             current_kv_cache_spec.block_size,
                             current_kv_cache_spec.num_kv_heads,
                             self.model_config.hf_text_config.index_head_dim,
@@ -4998,15 +5010,27 @@ class NPUModelRunner(GPUModelRunner):
                             self.model_config.hf_text_config.qk_rope_head_dim,
                             0,
                         )
-                    kv_cache_spec[layer_name] = AscendMLAAttentionSpec(
-                        block_size=self.block_size,
-                        num_kv_heads=1,
-                        head_size=sum(sparse_head_dim),
-                        sparse_head_dim=sparse_head_dim,
-                        dtype=self.kv_cache_dtype,
-                        cache_dtype_str=self.vllm_config.cache_config.cache_dtype,
-                        cache_sparse_c8=has_indexer and self.ascend_config.is_sparse_c8_layer(layer_name),
-                    )
+                    if not self.sfa_dcp_replicate_k:
+                        kv_cache_spec[layer_name] = AscendMLAAttentionSpec(
+                            block_size=self.block_size,
+                            num_kv_heads=1,
+                            head_size=sum(sparse_head_dim),
+                            sparse_head_dim=self.sparse_head_dim,
+                            dtype=self.kv_cache_dtype,
+                            cache_dtype_str=self.vllm_config.cache_config.cache_dtype,
+                            cache_sparse_c8=self.ascend_config.is_sparse_c8_layer(layer_name),
+                        )
+                    else:
+                        kv_cache_spec[layer_name] = AscendMLAAttentionSpec(
+                            block_size=self.block_size,
+                            num_kv_heads=1,
+                            head_size=sum(sparse_head_dim),
+                            sparse_head_dim=self.sparse_head_dim,
+                            dtype=self.kv_cache_dtype,
+                            cache_dtype_str=self.vllm_config.cache_config.cache_dtype,
+                            cache_sparse_c8=self.ascend_config.is_sparse_c8_layer(layer_name),
+                            sfa_dcp_replicate_k_size=self.dcp_size,
+                        )
                 elif spec := attn_module.get_kv_cache_spec(self.vllm_config):
                     if getattr(attn_module.impl, "fa_quant_layer", False):
                         head_size = attn_module.head_size + attn_module.qk_rope_head_dim
