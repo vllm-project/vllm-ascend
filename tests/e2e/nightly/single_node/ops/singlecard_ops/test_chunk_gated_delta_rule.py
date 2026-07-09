@@ -17,12 +17,8 @@ import gc
 import pytest
 import torch
 import torch.nn.functional as F
-import torch_npu
 
 from vllm_ascend.utils import enable_custom_op
-
-torch.npu.config.allow_internal_format = False
-torch_npu.npu.set_compile_mode(jit_compile=False)
 
 enable_custom_op()
 
@@ -30,11 +26,12 @@ SEED = 42
 
 
 # ---------------------------------------------------------------------------
-# Golden reference helpers (verbatim from test_chunk_gated_delta_rule_float.py)
+# Golden reference helpers
 # ---------------------------------------------------------------------------
 
 
 def _get_chunk(tensor, C, start):
+    """Extract a chunk of size C from tensor along dim-0, zero-padding if needed."""
     S = tensor.shape[0]
     end = start + C
     if end <= S:
@@ -46,6 +43,7 @@ def _get_chunk(tensor, C, start):
 
 
 def _stage1_chunk(query, key, value, g, beta, scale):
+    """Stage1: intra-chunk preprocessing via (I+L)^{-1} for gated delta rule."""
     device = query.device
     C = query.shape[0]
 
@@ -84,6 +82,7 @@ def _stage1_chunk(query, key, value, g, beta, scale):
 
 
 def _stage1(query, key, value, g, beta, scale, C):
+    """Stage1 outer loop: split by head and chunk, call _stage1_chunk."""
     S, Nk, Dk = query.shape
     _, Nv, Dv = value.shape
     device = query.device
@@ -131,6 +130,7 @@ def _stage1(query, key, value, g, beta, scale, C):
 
 
 def _stage2_chunk(q_prime, v_inner, g_cum, k_cumdecay, state, kg):
+    """Stage2: sequential inter-chunk state propagation."""
     bf16_state = state.to(torch.bfloat16)
 
     attn_inter = q_prime.float() @ bf16_state.float().transpose(0, 1)
@@ -146,6 +146,7 @@ def _stage2_chunk(q_prime, v_inner, g_cum, k_cumdecay, state, kg):
 
 
 def _stage2(q_prime, v_inner, g_cum, k_cumdecay, state, kg, C):
+    """Stage2 outer loop: sequential chunk traversal for state updates."""
     Nv, Sp, Dv = v_inner.shape
     attn_inter = torch.zeros((Nv, Sp, Dv),
                              dtype=torch.float32, device=q_prime.device)
@@ -170,9 +171,9 @@ def _stage2(q_prime, v_inner, g_cum, k_cumdecay, state, kg, C):
 
 
 def _stage3_chunk(qkt, value, scale, g_cum, attn_inter, v_new):
+    """Stage3: merge inter-chunk and intra-chunk attention for final output."""
     device = value.device
     C = value.shape[0]
-    core_attn_out = torch.zeros_like(value).to(torch.bfloat16)
     lower = torch.tril(torch.ones(C, C, dtype=torch.bool, device=device),
                        diagonal=0)
     masked_qkt = (qkt.float() * scale
@@ -180,35 +181,45 @@ def _stage3_chunk(qkt, value, scale, g_cum, attn_inter, v_new):
                   * lower.float())
     attn_inner = (masked_qkt.to(torch.bfloat16).float()
                   @ v_new.to(torch.bfloat16).float())
-    core_attn_out = (attn_inter + attn_inner).to(torch.bfloat16)
-    return core_attn_out
+    return (attn_inter + attn_inner).to(torch.bfloat16)
 
 
 def _stage3(qkt, value, scale, g_cum, attn_inter, v_new, C):
+    """Stage3 outer loop: per-head per-chunk output assembly."""
     Nv, Sp, Dv = attn_inter.shape
     S = value.shape[0]
-    assert Sp == (S + C - 1) // C * C
-
     attn_out = torch.empty((Sp, Nv, Dv),
                            dtype=torch.bfloat16, device=value.device)
 
     for nid in range(Nv):
         for idx in range(0, Sp, C):
-            v_chunk = _get_chunk(value[:, nid, :], C, idx)
-            g_cum_chunk = g_cum[nid, idx:idx + C]
-            attn_inter_chunk = attn_inter[nid, idx:idx + C, :]
-            v_new_chunk = v_new[nid, idx:idx + C, :]
-            qkt_chunk = qkt[nid, idx:idx + C, :]
-            attn_out_chunk = _stage3_chunk(
-                qkt_chunk, v_chunk, scale, g_cum_chunk,
-                attn_inter_chunk, v_new_chunk)
-            attn_out[idx:idx + C, nid, ...] = attn_out_chunk
-
+            attn_out[idx:idx + C, nid, ...] = _stage3_chunk(
+                qkt[nid, idx:idx + C, :],
+                _get_chunk(value[:, nid, :], C, idx),
+                scale,
+                g_cum[nid, idx:idx + C],
+                attn_inter[nid, idx:idx + C, :],
+                v_new[nid, idx:idx + C, :])
     return attn_out
 
 
-def _golden_benchmark(query, key, value, beta, scale,
-                      initial_state, actual_seq_lengths, g=None):
+def golden_chunk_gated_delta_rule(query, key, value, beta, scale,
+                                  initial_state, actual_seq_lengths, g=None):
+    """Full 3-stage chunked gated delta rule golden reference (CPU, pure PyTorch).
+
+    Args:
+        query:              (T, Nk, Dk), BF16
+        key:                (T, Nk, Dk), BF16
+        value:              (T, Nv, Dv), BF16
+        beta:               (T, Nv), BF16
+        scale:              float
+        initial_state:      (B, Nv, Dv, Dk), FP32
+        actual_seq_lengths: (B,), INT32 — per-batch sequence lengths
+        g:                  (T, Nv), FP32 or None
+
+    Returns:
+        (output [T, Nv, Dv] BF16, final_state [B, Nv, Dv, Dk] FP32)
+    """
     T, Nk, Dk = query.shape
     B, Nv, Dv, _ = initial_state.shape
     device = query.device
@@ -242,117 +253,96 @@ def _golden_benchmark(query, key, value, beta, scale,
 
 
 # ---------------------------------------------------------------------------
-# Diagnostics
-# ---------------------------------------------------------------------------
-
-
-def _print_compare(name, npu_tensor, golden_tensor, topk=5):
-    npu = npu_tensor.detach().float().cpu()
-    golden = golden_tensor.detach().float().cpu()
-    diff = (npu - golden).abs()
-    flat_diff = diff.flatten()
-    flat_npu = npu.flatten()
-    flat_golden = golden.flatten()
-
-    max_idx = int(torch.argmax(flat_diff))
-    print(f"\n========== compare {name} ==========")
-    print(f"shape: npu={tuple(npu.shape)}, golden={tuple(golden.shape)}")
-    print(f"abs_err: max={flat_diff[max_idx].item():.6e}, "
-          f"mean={flat_diff.mean().item():.6e}, min={flat_diff.min().item():.6e}")
-    print(f"max_err_idx={max_idx}")
-    print(f"  npu[{max_idx}]    = {flat_npu[max_idx].item():.6e}")
-    print(f"  golden[{max_idx}] = {flat_golden[max_idx].item():.6e}")
-
-    topk = min(topk, flat_diff.numel())
-    topk_vals, topk_idx = torch.topk(flat_diff, k=topk)
-    print(f"top-{topk} abs_err:")
-    for rank, (idx, err) in enumerate(
-            zip(topk_idx.tolist(), topk_vals.tolist()), start=1):
-        print(f"  #{rank} idx={idx}, err={err:.6e}, "
-              f"npu={flat_npu[idx].item():.6e}, "
-              f"golden={flat_golden[idx].item():.6e}")
-
-
-# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 
-def _execute_case(batch_size, seqlen, nk, nv, dk, dv, dtype=torch.bfloat16):
-    """Match the original golden test pattern exactly: generate on NPU,
-    run NPU op, then copy to CPU for golden reference comparison."""
-    torch.manual_seed(SEED)
-    device = "npu:0"
+def _make_inputs(batch_size, seqlen, nk, nv, dk, dv, seed=SEED):
+    """Build random tensors on CPU for both golden and NPU execution."""
+    torch.manual_seed(seed)
+    dtype = torch.bfloat16
 
     T = batch_size * seqlen
-    q = torch.rand((T, nk, dk), dtype=dtype, device=device)
-    k = torch.rand((T, nk, dk), dtype=dtype, device=device)
-    v = torch.rand((T, nv, dv), dtype=dtype, device=device)
-    g = torch.rand((T, nv), dtype=torch.float32, device=device) * -1.0
-    beta = torch.rand((T, nv), dtype=dtype, device=device)
-    q = F.normalize(q, p=2, dim=-1)
-    k = F.normalize(k, p=2, dim=-1)
-    scale = 1 / (dk ** 0.5)
-    initial_state = torch.rand(
-        (batch_size, nv, dv, dk), dtype=torch.float32, device=device)
-    actual_seq_lengths = torch.tensor(
-        [seqlen] * batch_size, dtype=torch.int32, device=device)
+    q = F.normalize(torch.rand((T, nk, dk)), p=2, dim=-1).to(dtype)
+    k = F.normalize(torch.rand((T, nk, dk)), p=2, dim=-1).to(dtype)
+    v = torch.rand((T, nv, dv), dtype=dtype)
+    g = torch.rand((T, nv), dtype=torch.float32) * -1.0
+    beta = torch.rand((T, nv), dtype=dtype)
+    scale = 1.0 / (dk ** 0.5)
+    initial_state = torch.rand((batch_size, nv, dv, dk), dtype=torch.float32)
+    seq_lengths = torch.tensor([seqlen] * batch_size, dtype=torch.int32)
 
+    return q, k, v, g, beta, scale, initial_state, seq_lengths
+
+
+def _npu_op_exec(q, k, v, beta, initial_state, seq_lengths, g, scale):
+    """Execute npu_chunk_gated_delta_rule on NPU and return CPU tensors."""
     o_npu, state_npu = torch.ops._C_ascend.npu_chunk_gated_delta_rule(
-        query=q,
-        key=k,
-        value=v,
-        beta=beta,
-        initial_state=initial_state,
-        actual_seq_lengths=actual_seq_lengths,
-        g=g,
+        query=q.npu(),
+        key=k.npu(),
+        value=v.npu(),
+        beta=beta.npu(),
+        initial_state=initial_state.npu(),
+        actual_seq_lengths=seq_lengths.npu(),
+        g=g.npu(),
         scale=float(scale),
     )
-    o_npu = o_npu.cpu().to(torch.float32)
-    state_npu = state_npu.cpu().to(torch.float32)
+    return o_npu.cpu(), state_npu.cpu()
 
-    o_golden, state_golden = _golden_benchmark(
-        q.cpu().to(dtype),
-        k.cpu().to(dtype),
-        v.cpu().to(dtype),
-        beta.cpu().to(dtype),
-        scale,
-        initial_state.cpu().to(torch.float32),
-        actual_seq_lengths.cpu(),
-        g.cpu(),
+
+def _assert_close(actual, expected, rtol=3e-3, atol=1e-2):
+    torch.testing.assert_close(
+        actual.to(torch.float32),
+        expected.to(torch.float32),
+        rtol=rtol,
+        atol=atol,
+        equal_nan=True,
     )
-    o_golden = o_golden.to(torch.float32)
-    state_golden = state_golden.to(torch.float32)
 
-    _print_compare("output", o_npu, o_golden)
-    _print_compare("state", state_npu, state_golden)
 
-    torch.testing.assert_close(
-        o_npu, o_golden, rtol=3e-3, atol=1e-2, equal_nan=True)
-    torch.testing.assert_close(
-        state_npu, state_golden, rtol=3e-3, atol=1e-2, equal_nan=True)
-
+def _cleanup():
     gc.collect()
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()
 
 
 # ---------------------------------------------------------------------------
-# Tests
+# Tests: core correctness
 # ---------------------------------------------------------------------------
 
 
-def test_chunk_gated_delta_rule_single_batch():
-    _execute_case(1, 128, 16, 16, 128, 128)
+@pytest.mark.parametrize("batch_size", [1, 2, 4])
+@pytest.mark.parametrize("seqlen", [64, 128, 256, 512, 768, 1024, 1536])
+@pytest.mark.parametrize("headnum", [(8, 24)])
+def test_chunk_gated_delta_rule_basic(batch_size, seqlen, headnum):
+    nk, nv = headnum
+    dk, dv = 128, 128
+    q, k, v, g, beta, scale, initial_state, seq_lengths = _make_inputs(
+        batch_size, seqlen, nk, nv, dk, dv)
+
+    ref_out, ref_state = golden_chunk_gated_delta_rule(
+        q, k, v, beta, scale, initial_state, seq_lengths, g)
+
+    npu_out, npu_state = _npu_op_exec(
+        q, k, v, beta, initial_state, seq_lengths, g, scale)
+
+    _assert_close(npu_out, ref_out)
+    _assert_close(npu_state, ref_state)
+    _cleanup()
 
 
-# def test_chunk_gated_delta_rule_multi_batch():
-#     _execute_case(4, 256, 16, 16, 128, 128)
 
+def test_chunk_gated_delta_rule_base_case():
+    """Baseline case matching original golden: (1, 1536, 8, 24, 128, 128)."""
+    q, k, v, g, beta, scale, initial_state, seq_lengths = _make_inputs(
+        1, 1536, 8, 24, 128, 128)
 
-# def test_chunk_gated_delta_rule_head_num_differ():
-#     _execute_case(2, 128, 16, 32, 128, 128)
+    ref_out, ref_state = golden_chunk_gated_delta_rule(
+        q, k, v, beta, scale, initial_state, seq_lengths, g)
 
+    npu_out, npu_state = _npu_op_exec(
+        q, k, v, beta, initial_state, seq_lengths, g, scale)
 
-# def test_chunk_gated_delta_rule_base_case():
-#     _execute_case(1, 1536, 8, 24, 128, 128)
+    _assert_close(npu_out, ref_out)
+    _assert_close(npu_state, ref_state)
+    _cleanup()
