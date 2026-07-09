@@ -185,9 +185,11 @@ def _compact_empty_segments(cu_seqlens_host, initial_state, device=None):
     keep = (cu[1:] - cu[:-1]) > 0
     if bool(keep.all()):
         return cu_seqlens_host, initial_state, None
+    # Compute compact cu_seqlens while keep is still on CPU (cu is CPU-only).
+    cu_kern = torch.cat([cu[:1], cu[1:][keep]]).tolist()
+    # Move keep to device only for indexing device-side tensors.
     if device is not None:
         keep = keep.to(device)
-    cu_kern = torch.cat([cu[:1], cu[1:][keep]]).tolist()
     st_kern = initial_state[keep] if initial_state is not None else None
     return cu_kern, st_kern, keep
 
