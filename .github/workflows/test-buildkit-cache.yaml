@@ -31,5 +31,6 @@ jobs:
             --tlscacert "${DOCKER_CONFIG}/ca.pem" \
             --tlscert  "${DOCKER_CONFIG}/cert.pem" \
             --tlskey   "${DOCKER_CONFIG}/key.pem" \
+            --tlsservername buildkitd-service.buildkitd \
             debug workers 2>&1
           echo "SUCCESS"
