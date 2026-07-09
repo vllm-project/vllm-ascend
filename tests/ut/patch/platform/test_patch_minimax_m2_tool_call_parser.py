@@ -108,6 +108,17 @@ def test_plain_content_before_tool_call_is_preserved():
     assert len(parser.prev_tool_call_arr) == 1
 
 
+def test_plain_content_before_partial_tool_call_omits_tool_calls_payload():
+    parser = MinimaxM2ToolParser(FakeTokenizer())
+    results = _feed(parser, ["Let me check. <minimax:tool_call>"])
+
+    assert len(results) == 1
+    assert results[0].content == "Let me check. "
+    assert results[0].tool_calls == []
+    assert "tool_calls" not in results[0].model_dump(exclude_unset=True)
+    assert "tool_calls" not in results[0].model_dump_json(exclude_unset=True)
+
+
 def test_streaming_emits_tool_name_before_argument_fragments():
     parser = MinimaxM2ToolParser(FakeTokenizer())
     results = _feed(
@@ -128,11 +139,11 @@ def test_streaming_emits_tool_name_before_argument_fragments():
     assert _collect_content(results) == "Let me check. "
     assert tool_deltas[0].function.name == "get_weather"
     assert tool_deltas[0].function.arguments is None
-    assert argument_fragments == ['{"city":"Sea', 'ttle"', "}"]
+    assert argument_fragments == ['{"city":"Seattle"', "}"]
     assert "".join(argument_fragments) == '{"city":"Seattle"}'
 
 
-def test_streaming_partial_arguments_before_invoke_closes():
+def test_streaming_waits_for_parameter_close_before_arguments():
     parser = MinimaxM2ToolParser(FakeTokenizer())
     results = _feed(
         parser,
@@ -147,8 +158,80 @@ def test_streaming_partial_arguments_before_invoke_closes():
 
     assert tool_deltas[0].function.name == "get_weather"
     assert tool_deltas[0].function.arguments is None
-    assert tool_deltas[1].function.arguments == '{"city":"Sea'
+    assert len(tool_deltas) == 1
     assert parser.prev_tool_call_arr == []
+
+
+def test_parameter_end_tag_token_pieces_not_streamed_as_arguments():
+    parser = MinimaxM2ToolParser(
+        FakeTokenizer(),
+        tools=[
+            ChatCompletionToolsParam(
+                function=FunctionDefinition(
+                    name="write_file",
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "content": {"type": "string"},
+                            "path": {"type": "string"},
+                        },
+                    },
+                ),
+            )
+        ],
+    )
+
+    results = _feed(
+        parser,
+        [
+            ("", [TC_START_ID]),
+            "\n",
+            "<",
+            "invoke",
+            " name",
+            '="',
+            "write",
+            "_file",
+            '">\n',
+            "<",
+            "parameter",
+            " name",
+            '="',
+            "path",
+            '">',
+            "a",
+            ".txt",
+            "</",
+            "parameter",
+            ">\n",
+            "<",
+            "parameter",
+            " name",
+            '="',
+            "content",
+            '">',
+            "123",
+            "</",
+            "parameter",
+            ">\n",
+            "</",
+            "invoke",
+            ">\n",
+            ("", [TC_END_ID]),
+            ("", [EOS_ID]),
+        ],
+    )
+
+    args = _collect_tool_calls(results)[0]["arguments"]
+
+    assert "</parameter" not in args
+    assert json.loads(args) == {"path": "a.txt", "content": "123"}
+    assert parser.prev_tool_call_arr == [
+        {
+            "name": "write_file",
+            "arguments": {"path": "a.txt", "content": "123"},
+        }
+    ]
 
 
 def test_complete_single_chunk_still_reconstructs_tool_call():
