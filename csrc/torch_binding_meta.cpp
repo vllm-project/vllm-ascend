@@ -326,11 +326,21 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_sparse_flash_attention_meta(
     c10::SymDimVector softmax_size;
     if (return_softmax_lse) {
         if (query.dim() == DIM_3) {
-            softmax_size = {key.sym_size(DIM_1), query.sym_size(DIM_0), query.sym_size(DIM_1) / key.sym_size(DIM_1)};
+            const auto layout_kv_str = std::string(layout_kv);
+            const auto kv_head_num =
+                layout_kv_str == "PA_BSND" ? key.size(DIM_2) : key.size(DIM_1);
+            softmax_size = {
+                kv_head_num,
+                query.size(DIM_0),
+                query.size(DIM_1) / kv_head_num,
+            };
         } else {
             softmax_size = {
-                query.sym_size(DIM_0), key.sym_size(DIM_2), query.sym_size(DIM_1),
-                query.sym_size(DIM_2) / key.sym_size(DIM_2)};
+                query.size(DIM_0),
+                key.size(DIM_2),
+                query.size(DIM_1),
+                query.size(DIM_2) / key.size(DIM_2),
+            };
         }
     } else {
         softmax_size = {c10::SymInt(0)};
