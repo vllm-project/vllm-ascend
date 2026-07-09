@@ -14,8 +14,6 @@ from vllm.v1.structured_output import StructuredOutputManager
 _BACKEND_ATTR = "_vllm_ascend_structured_output_backend"
 _ORIGINAL_GRAMMAR_INIT_ATTR = "_vllm_ascend_original_grammar_init"
 _ORIGINAL_VALIDATE_ATTR = "_vllm_ascend_original_validate_structured_outputs"
-_PATCHED_MANAGER_ATTR = "_vllm_ascend_backend_guard_patched"
-_PATCHED_SAMPLING_PARAMS_ATTR = "_vllm_ascend_backend_validation_guard_patched"
 
 
 def _request_backend(request: Any) -> str | None:
@@ -76,9 +74,6 @@ def _structured_outputs_config_from_call(
 
 
 def _patch_sampling_params_validation() -> None:
-    if getattr(SamplingParams, _PATCHED_SAMPLING_PARAMS_ATTR, False):
-        return
-
     original_validate = SamplingParams._validate_structured_outputs
     validate_signature = signature(original_validate)
     setattr(SamplingParams, _ORIGINAL_VALIDATE_ATTR, original_validate)
@@ -107,13 +102,9 @@ def _patch_sampling_params_validation() -> None:
         return result
 
     SamplingParams._validate_structured_outputs = _validate_structured_outputs
-    setattr(SamplingParams, _PATCHED_SAMPLING_PARAMS_ATTR, True)
 
 
 def _patch_structured_output_manager() -> None:
-    if getattr(StructuredOutputManager, _PATCHED_MANAGER_ATTR, False):
-        return
-
     original_grammar_init = StructuredOutputManager.grammar_init
     setattr(StructuredOutputManager, _ORIGINAL_GRAMMAR_INIT_ATTR, original_grammar_init)
 
@@ -137,7 +128,6 @@ def _patch_structured_output_manager() -> None:
         return result
 
     StructuredOutputManager.grammar_init = grammar_init
-    setattr(StructuredOutputManager, _PATCHED_MANAGER_ATTR, True)
 
 
 _patch_sampling_params_validation()
