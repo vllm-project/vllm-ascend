@@ -179,6 +179,7 @@ class TestColumnParallelOpDispatch(unittest.TestCase):
             patch("vllm_ascend.ops.linear_op.enable_dsa_cp", return_value=False),
             patch("vllm_ascend.ops.linear_op.enable_sp", return_value=False),
             patch("vllm_ascend.ops.linear_op.is_moe_layer", return_value=False),
+            patch("vllm_ascend.ops.linear_op.flashcomm2_oshard_manager.flashcomm2_oshard_enable", return_value=False),
         ]
         for p in self._patches:
             p.start()
@@ -218,6 +219,8 @@ class TestRowParallelOpDispatch(unittest.TestCase):
             patch("vllm_ascend.ops.linear_op.enable_dsa_cp_with_layer_shard", return_value=False),
             patch("vllm_ascend.ops.linear_op.enable_sp", return_value=False),
             patch("vllm_ascend.ops.linear_op.is_moe_layer", return_value=False),
+            patch("vllm_ascend.ops.linear_op.matmul_allreduce_enable", return_value=False),
+            patch("vllm_ascend.ops.linear_op.flashcomm2_enable", return_value=False),
         ]
         for p in self._patches:
             p.start()
