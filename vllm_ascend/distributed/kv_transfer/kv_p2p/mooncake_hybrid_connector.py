@@ -376,6 +376,7 @@ class KVCacheRecvingThread(threading.Thread):
         self,
         tp_rank: int,
         tp_size: int,
+        dp_size: int,
         _prefill_pp_size: int,
         engine: TransferEngine,
         local_engine_id: str,
@@ -398,6 +399,7 @@ class KVCacheRecvingThread(threading.Thread):
         super().__init__(daemon=True, name="KVCacheRecvingThread")
         self.tp_rank = tp_rank
         self.tp_size = tp_size
+        self.dp_size = dp_size
         self._prefill_pp_size = _prefill_pp_size
         self.local_engine_id = local_engine_id
         self.local_handshake_port = local_handshake_port
@@ -1765,6 +1767,7 @@ class MooncakeConnectorWorker:
             self.kv_recv_thread = KVCacheRecvingThread(
                 self.tp_rank,
                 self.tp_size,
+                self.dp_size,
                 self._prefill_pp_size,
                 self.engine,
                 self.engine_id,
