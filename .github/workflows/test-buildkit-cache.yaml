@@ -12,14 +12,38 @@ jobs:
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
     steps:
-      - name: Dump client ca.pem full content
+      - name: Setup context
         run: |
-          echo "=== Full client ca.pem ==="
-          cat "${DOCKER_CONFIG}/ca.pem"
-          echo "=== END ==="
-          echo ""
-          echo "=== byte count ==="
-          wc -c "${DOCKER_CONFIG}/ca.pem"
-          echo ""
-          echo "=== cert details if openssl available ==="
-          openssl x509 -in "${DOCKER_CONFIG}/ca.pem" -noout -subject -issuer -serial -fingerprint -sha256 2>&1 || echo "openssl not available"
+          mkdir -p /tmp/ctx
+          cat > /tmp/ctx/Dockerfile <<'DOCKERFILE'
+          FROM quay.io/ascend/cann:9.0.0-910b-openeuler24.03-py3.12
+          RUN echo cache-probe > /tmp/cache-probe-marker
+          DOCKERFILE
+
+      - name: buildctl with gRPC debug
+        run: |
+          set +e
+          export GRPC_GO_LOG_SEVERITY_LEVEL=info
+          export GRPC_GO_LOG_VERBOSITY_LEVEL=99
+          export GODEBUG=x509sha1=1
+          buildctl \
+            --addr "${BUILDKITD_ADDR}" \
+            --tlscacert "${DOCKER_CONFIG}/ca.pem" \
+            --tlscert  "${DOCKER_CONFIG}/cert.pem" \
+            --tlskey   "${DOCKER_CONFIG}/key.pem" \
+            debug workers 2>&1
+          echo "exit=$?"
+        continue-on-error: true
+
+      - name: buildctl test - add tlsservername
+        run: |
+          set +e
+          buildctl \
+            --addr "${BUILDKITD_ADDR}" \
+            --tlscacert "${DOCKER_CONFIG}/ca.pem" \
+            --tlscert  "${DOCKER_CONFIG}/cert.pem" \
+            --tlskey   "${DOCKER_CONFIG}/key.pem" \
+            --tlsservername buildkitd-service.buildkitd \
+            debug workers 2>&1
+          echo "exit=$?"
+        continue-on-error: true
