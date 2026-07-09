@@ -869,7 +869,7 @@ Refer to [DeepSeek-V3.2 Usage Guide](https://docs.vllm.ai/projects/recipes/en/la
 
 ## 10 Performance Tuning
 
-**Notice:** `max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario. For other settings, please refer to the [Deployment](#deployment) chapter.
+**Notice:** `max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario. For other settings, please refer to the deployment examples in [Chapter 5](#5-online-service-deployment).
 
 ## 11 FAQ
 
@@ -881,4 +881,4 @@ Refer to [DeepSeek-V3.2 Usage Guide](https://docs.vllm.ai/projects/recipes/en/la
 
 - **Q: How to configure the model weight path correctly?**
 
-  A: The model weight path in the deployment commands (e.g., `/root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot`) should be adjusted to your actual download path. Refer to the [Model Weight](#model-weight) section for details.
+  A: The model weight path in the deployment commands (e.g., `/root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot`) should be adjusted to your actual download path. Refer to the [Model Weight](#31-model-weight) section for details.
