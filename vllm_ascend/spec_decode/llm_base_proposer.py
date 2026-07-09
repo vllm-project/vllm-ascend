@@ -55,7 +55,12 @@ from vllm_ascend.distributed.parallel_state import get_lmhead_tp_group
 from vllm_ascend.models.llama_eagle3_vwn import Eagle3VwnLlamaForCausalLM
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
-from vllm_ascend.utils import enable_sp, lmhead_tp_enable, shared_expert_dp_enabled
+from vllm_ascend.utils import enable_sp, lmhead_tp_enable, shared_expert_dp_enabled, vllm_version_is
+
+if not vllm_version_is("0.23.0"):
+    from vllm.model_executor.models.qwen3_dspark import Qwen3DSparkForCausalLM
+else:
+    Qwen3DSparkForCausalLM = None
 
 
 @contextmanager
@@ -760,12 +765,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         if token_indices_to_sample is None:
             token_indices_to_sample = common_attn_metadata.query_start_loc[1:] - 1
 
-        if self.method in ("eagle3", "dflash"):
+        if self.method in ("eagle3", "dflash", "dspark"):
             assert isinstance(
                 self.get_model(),
                 (
                     Eagle3LlamaForCausalLM,
                     DFlashQwen3ForCausalLM,
+                    Qwen3DSparkForCausalLM,
                     Eagle3VwnLlamaForCausalLM,
                     Eagle3DeepseekV2ForCausalLM,
                 ),
@@ -1082,7 +1088,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         return draft_token_ids
 
     def compute_draft_token_ids(self, hidden_states: torch.Tensor):
-        if self.method in ("eagle3", "dflash"):
+        if self.method in ("eagle3", "dflash", "dspark"):
             logits = self.model.logits_processor(self.model.lm_head, hidden_states)
             if not hasattr(self.model, "draft_id_to_target_id") or self.model.draft_id_to_target_id is None:
                 return greedy_sample(logits)
@@ -1113,7 +1119,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         model_input_ids = self.input_ids[:num_input_tokens]
         model_positions = self._get_positions(num_input_tokens)
 
-        if self.method == "dflash":
+        if self.method == "dflash" or self.method == "dspark":
             model_kwargs = self.build_model_inputs_first_pass(num_input_tokens)
         else:
             model_kwargs = {
@@ -1224,21 +1230,39 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     )
                 draft_token_ids = logits.argmax(dim=-1)
         else:
-            logits = self.model.compute_logits(sample_hidden_states)
-            if lmhead_tp_enable():
-                logits, token_indices_to_sample = self._align_tensor_and_indices(
-                    logits,
-                    num_indices,
-                    token_indices_to_sample,
-                    ori_token_indices_to_sample,
-                    is_logits=True,
-                )
-            draft_token_ids = logits.argmax(dim=-1)
+            if self.method == "dspark":
+                # Dspark speculation requires autoregressive applications of MarkovHead and ConfidenceHead.
+                # The MarkovHead performs bias correction on logits.
+                # The ConfidenceHead predicts the expected acceptance length of tokens(Not yet achieved).
+                raw_logits = self.model.compute_logits(last_hidden_states)
+                logits = raw_logits.view(-1, self.num_speculative_tokens, raw_logits.shape[-1])
+                num_blk = logits.shape[0]
+                draft_token_ids = self._dspark_draft_buffer[:num_blk]
+                draft_token_ids[:, 0].copy_(self._dspark_seed_buffer[:num_blk])
+                for idx in range(self.num_speculative_tokens):
+                    markov_emb = self.model.markov_embed(draft_token_ids[:, idx])
+                    logits_bias = self.model.markov_bias(markov_emb)
+                    logits[:, idx].add_(logits_bias)
+                    draft_token_ids[:, idx + 1].copy_(logits[:, idx].argmax(dim=-1))
+            else:
+                logits = self.model.compute_logits(sample_hidden_states)
+                if lmhead_tp_enable():
+                    logits, token_indices_to_sample = self._align_tensor_and_indices(
+                        logits,
+                        num_indices,
+                        token_indices_to_sample,
+                        ori_token_indices_to_sample,
+                        is_logits=True,
+                    )
+                draft_token_ids = logits.argmax(dim=-1)
 
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1 or self.parallel_drafting:
-            # [batch_size, 1]
-            return draft_token_ids.view(-1, self.num_speculative_tokens)
+            if self.method == "dspark":
+                return draft_token_ids[:, 1:]
+            else:
+                # [batch_size, 1]
+                return draft_token_ids.view(-1, self.num_speculative_tokens)
 
         if self.pcp_size * self.dcp_size > 1 and is_prefill:
             draft_token_ids_list = []
@@ -1360,7 +1384,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
             sample_hidden_states = last_hidden_states[token_indices_to_sample]
             if get_ascend_config().enable_reduce_sample:
-                if self.method in ("eagle3", "dflash", "mtp"):
+                if self.method in ("eagle3", "dflash", "dspark", "mtp"):
                     draft_token_ids = self.compute_draft_token_ids(sample_hidden_states)
                     if lmhead_tp_enable() and num_indices < draft_token_ids.shape[0]:
                         draft_token_ids = draft_token_ids[:num_indices]
@@ -1616,7 +1640,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             hf_config = getattr(draft_model_config, "hf_config", None)
             architectures = getattr(hf_config, "architectures", []) or []
             return "DeepSeekMTPModel" in architectures
-        return self.method not in ("mtp", "draft_model", "dflash")
+        return self.method not in ("mtp", "draft_model", "dflash", "dspark")
 
     def attn_update_stack_num_spec_norm(
         self,
