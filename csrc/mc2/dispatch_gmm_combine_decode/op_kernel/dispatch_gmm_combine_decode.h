@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2025 Huawei Technologies Co., Ltd.
  * This file is a part of the CANN Open Software.
  * Licensed under CANN Open Software License Agreement Version 1.0 (the "License").
@@ -32,6 +32,7 @@
 
 #include "dispatch_gmm_combine_decode_tiling.h"
 #include "dispatch_gmm_combine_decode_base.h"
+#include "moe_distribute_base.h"
 
 using namespace Catlass;
 
@@ -285,7 +286,7 @@ private:
     uint32_t topK_{0};
 
     AscendC::TPipe *tpipe_{nullptr};
-    __gm__ HcclOpResParam *winContext_{nullptr};
+    __gm__ HcclOpResParamCustom *winContext_{nullptr};
     const DispatchGmmCombineDecodeTilingData *tilingData_;
 };
 
@@ -302,7 +303,7 @@ __aicore__ inline void DispatchGmmCombineDecode<TemplateMC2TypeFunc>::Init(
 {
     tpipe_ = pipe;
     blockDim_ = AscendC::GetBlockNum();
-    winContext_ = (__gm__ HcclOpResParam *)AscendC::GetHcclContext<AscendC::HCCL_GROUP_ID_0>();
+    winContext_ = (__gm__ HcclOpResParamCustom *)AscendC::GetHcclContext<AscendC::HCCL_GROUP_ID_0>();
 
     gmSmoothScales_ = expert_smooth_scales;  // not used now
     gmX_ = x;                                // input token
@@ -438,3 +439,4 @@ __aicore__ inline void DispatchGmmCombineDecode<TemplateMC2TypeFunc>::Process()
                                layoutOutput, gmWorkspace, &combiner);
 }
 #endif  // DISPATCH_GMM_COMBINE_DECODE_H
+

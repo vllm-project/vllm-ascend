@@ -1,4 +1,4 @@
-#ifndef NOTIFY_DISPATCH_H
+﻿#ifndef NOTIFY_DISPATCH_H
 #define NOTIFY_DISPATCH_H
 
 #include <climits>
@@ -7,6 +7,7 @@
 #include "kernel/comm_args.h"
 #include "kernel/data_copy.h"
 #include "kernel/sync_collectives.h"
+#include "kernel/moe_distribute_base.h"
 #include "kernel/moe_distribute_base.h"
 
 using namespace AscendC;
@@ -279,7 +280,7 @@ private:
     uint16_t *rootRanks;
     GM_ADDR scale;
     GM_ADDR shareAddrs[CAM_MAX_RANK_SIZE];  // List of shared memory addresses
-    __gm__ HcclOpResParam *winContext_[COMM_NUM]{nullptr, nullptr};
+    __gm__ HcclOpResParamCustom *winContext_[COMM_NUM]{nullptr, nullptr};
     Hccl<HCCL_SERVER_TYPE_AICPU> hccl_;
     GlobalTensor<GM_ADDR> peerMemsAddrGm_;
     GlobalTensor<int64_t> dfx;
@@ -311,13 +312,13 @@ __aicore__ inline GM_ADDR NotifyDispatch<T>::GetWindAddrByRankId(const int32_t r
     if (curRankId == rankId) {
         return (GM_ADDR)(winContext_[ctxIdx]->localWindowsIn) + rankId * OPT_RANK_OFFSET;
     }
-    return (GM_ADDR)(((HcclRankRelationResV2 *)(winContext_[ctxIdx]->remoteRes[rankId].nextDevicePtr))->windowsIn) +
+    return (GM_ADDR)(((HcclRankRelationResV2Custom *)(winContext_[ctxIdx]->remoteRes[rankId].nextDevicePtr))->windowsIn) +
             rankId * OPT_RANK_OFFSET;
 #else
     if (curRankId == rankId) {
         return (GM_ADDR)(winContext_[ctxIdx]->localWindowsIn);
     }
-    return (GM_ADDR)(((HcclRankRelationResV2 *)(winContext_[ctxIdx]->remoteRes[rankId].nextDevicePtr))->windowsIn);
+    return (GM_ADDR)(((HcclRankRelationResV2Custom *)(winContext_[ctxIdx]->remoteRes[rankId].nextDevicePtr))->windowsIn);
 #endif
 }
 
@@ -357,7 +358,7 @@ FORCE_INLINE_AICORE void NotifyDispatch<T>::InitSmallFullMesh(KERNELS_ARGS_FUN_A
     blockNum = GetBlockNum();
     uint8_t ctxIdx;
 
-    winContext_[COMM_EP_IDX] = (__gm__ HcclOpResParam *)AscendC::GetHcclContext<HCCL_GROUP_ID_0>();
+    winContext_[COMM_EP_IDX] = (__gm__ HcclOpResParamCustom *)AscendC::GetHcclContext<HCCL_GROUP_ID_0>();
     this->magic = GetMagicValue();
     ctxIdx = COMM_EP_IDX;
 
@@ -493,3 +494,4 @@ FORCE_INLINE_AICORE void NotifyDispatch<T>::SetWaitEvent(event_t eventId)
 }
 
 #endif  // NOTIFY_DISPATCH_H
+

@@ -129,7 +129,7 @@ struct HDCommunicateParams {
     uint32_t flag{ 0 };
 };
 
-struct HcclRankRelationResV2 {
+struct HcclRankRelationResV2Custom {
     uint32_t remoteUsrRankId;
     uint32_t remoteWorldRank;
     uint64_t windowsIn;
@@ -138,7 +138,7 @@ struct HcclRankRelationResV2 {
     ListCommon nextTagRes;
 };
 
-struct HcclOpResParam {
+struct HcclOpResParamCustom {
     // 本地资源
     HcclMC2WorkSpace mc2WorkSpace;
     uint32_t localUsrRankId; // usrrankid

@@ -1,10 +1,11 @@
-#ifndef MOE_DISPATCH_NORMAL_H
+﻿#ifndef MOE_DISPATCH_NORMAL_H
 #define MOE_DISPATCH_NORMAL_H
 
 #include "kernel_operator.h"
 #include "kernel_tiling/kernel_tiling.h"
 #include "utils/moe_distribute_base.h"
 #include "moe_dispatch_normal_tiling.h"
+#include "utils/moe_distribute_base.h"
 
 namespace MoeDispatchNormalImpl {
 constexpr uint8_t BUFFER_NUM = 2;
@@ -59,7 +60,7 @@ private:
         if (curRankId == rankId) {
             return (GM_ADDR)(winContext_[ctxIdx]->localWindowsIn) + winDataSizeOffset + COMBINE_STATE_WIN_OFFSET;
         }
-        return (GM_ADDR)(((HcclRankRelationResV2 *)(winContext_[ctxIdx]->remoteRes[rankId].nextDevicePtr))->windowsIn) +
+        return (GM_ADDR)(((HcclRankRelationResV2Custom *)(winContext_[ctxIdx]->remoteRes[rankId].nextDevicePtr))->windowsIn) +
                winDataSizeOffset + COMBINE_STATE_WIN_OFFSET;
     }
 
@@ -69,7 +70,7 @@ private:
         if (curRankId == rankId) {
             return (GM_ADDR)(winContext_[ctxIdx]->localWindowsExp) + dataState * WIN_STATE_OFFSET;
         }
-        return (GM_ADDR)(((HcclRankRelationResV2 *)(winContext_[ctxIdx]->remoteRes[rankId].nextDevicePtr))
+        return (GM_ADDR)(((HcclRankRelationResV2Custom *)(winContext_[ctxIdx]->remoteRes[rankId].nextDevicePtr))
                              ->windowsExp) +
                dataState * WIN_STATE_OFFSET;
     }
@@ -143,7 +144,7 @@ private:
     TQue<QuePosition::VECIN, 1> xInQueue;
     TQue<QuePosition::VECOUT, 1> xOutQueue;
 
-    __gm__ HcclOpResParam *winContext_[COMM_NUM]{nullptr, nullptr};
+    __gm__ HcclOpResParamCustom *winContext_[COMM_NUM]{nullptr, nullptr};
 
     DataCopyExtParams hCommuCopyOutParams;
 };
@@ -156,8 +157,8 @@ __aicore__ inline void MoeDispatchNormal<CamTypeFunc>::Init(GM_ADDR x, GM_ADDR e
     tpipe_ = pipe;
     blockIdx = GetBlockIdx();
 
-    winContext_[COMM_EP_IDX] = (__gm__ HcclOpResParam *)AscendC::GetHcclContext<HCCL_GROUP_ID_0>();
-    winContext_[COMM_TP_IDX] = (__gm__ HcclOpResParam *)AscendC::GetHcclContext<1>();
+    winContext_[COMM_EP_IDX] = (__gm__ HcclOpResParamCustom *)AscendC::GetHcclContext<HCCL_GROUP_ID_0>();
+    winContext_[COMM_TP_IDX] = (__gm__ HcclOpResParamCustom *)AscendC::GetHcclContext<1>();
 
     GlobalTensor<int32_t> selfDataStatusTensor;
     GM_ADDR statusDataSpaceGm = (GM_ADDR)(winContext_[COMM_EP_IDX]->localWindowsExp);

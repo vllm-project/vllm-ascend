@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2025 Huawei Technologies Co., Ltd.
  * This file is a part of the CANN Open Software.
  * Licensed under CANN Open Software License Agreement Version 1.0 (the "License").
@@ -15,6 +15,7 @@
 #include "kernel_tiling/kernel_tiling.h"
 #include "../../dispatch_gmm_combine_decode_base.h"
 #include "../../dispatch_gmm_combine_decode_tiling.h"
+#include "../../moe_distribute_base.h"
 
 namespace MoeDistributeCombineImpl {
 constexpr uint8_t BUFFER_NUM = 2;  // multi-buf
@@ -52,7 +53,7 @@ struct CombineCalcInfo {
     uint32_t moeSendNum_;
     bool isShardExpert_;
     GM_ADDR epSendCount_;
-    __gm__ HcclOpResParam *epWinContext_;
+    __gm__ HcclOpResParamCustom *epWinContext_;
     uint64_t winDataSizeOffset_;
 };
 
@@ -98,13 +99,13 @@ private:
         if (domain == EP_DOMAIN) {
             return (GM_ADDR)((epRankId_ == rankId)
                                  ? epWinContext_->localWindowsIn
-                                 : ((HcclRankRelationResV2 *)(epWinContext_->remoteRes[rankId].nextDevicePtr))
+                                 : ((HcclRankRelationResV2Custom *)(epWinContext_->remoteRes[rankId].nextDevicePtr))
                                        ->windowsIn) +
                    winDataSizeOffset_ + expertLocalId * expertPerSizeOnWin_ + rankId * OPT_RANK_OFFSET;
         } else {
             return (GM_ADDR)((tpRankId_ == rankId)
                                  ? tpWinContext_->localWindowsIn
-                                 : ((HcclRankRelationResV2 *)(tpWinContext_->remoteRes[rankId].nextDevicePtr))
+                                 : ((HcclRankRelationResV2Custom *)(tpWinContext_->remoteRes[rankId].nextDevicePtr))
                                        ->windowsIn) +
                    winDataSizeOffset_ + rankId * OPT_RANK_OFFSET;
         }
@@ -115,13 +116,13 @@ private:
         if (domain == EP_DOMAIN) {
             return (GM_ADDR)((epRankId_ == rankId)
                                  ? epWinContext_->localWindowsExp
-                                 : ((HcclRankRelationResV2 *)(epWinContext_->remoteRes[rankId].nextDevicePtr))
+                                 : ((HcclRankRelationResV2Custom *)(epWinContext_->remoteRes[rankId].nextDevicePtr))
                                        ->windowsExp) +
                    dataState_ * WIN_STATE_OFFSET;
         } else {
             return (GM_ADDR)((tpRankId_ == rankId)
                                  ? tpWinContext_->localWindowsExp
-                                 : ((HcclRankRelationResV2 *)(tpWinContext_->remoteRes[rankId].nextDevicePtr))
+                                 : ((HcclRankRelationResV2Custom *)(tpWinContext_->remoteRes[rankId].nextDevicePtr))
                                        ->windowsExp) +
                    dataState_ * WIN_STATE_OFFSET;
         }
@@ -188,8 +189,8 @@ private:
     uint32_t firstTpTokenEndIdx_{0};
     uint32_t firstTpTokenEndOffset_{0};
     uint32_t endTok_{0};
-    __gm__ HcclOpResParam *epWinContext_{nullptr};
-    __gm__ HcclOpResParam *tpWinContext_{nullptr};
+    __gm__ HcclOpResParamCustom *epWinContext_{nullptr};
+    __gm__ HcclOpResParamCustom *tpWinContext_{nullptr};
     uint32_t epDataOffsetOnWin_{0};
     uint32_t tpDataOffsetOnWin_{0};
     uint32_t epStateOffsetOnWin_{0};
@@ -244,7 +245,7 @@ __aicore__ inline void CamMoeDistributeCombine<TemplateMC2TypeFunc>::Init(
     coreIdx_ = GetBlockIdx();
     epRankId_ = tilingData->disGmmDeqSwigluQuantGmmDeqComInfo.epRankId;
     auto contextGM0 = AscendC::GetHcclContext<HCCL_GROUP_ID_0>();
-    epWinContext_ = (__gm__ HcclOpResParam *)contextGM0;
+    epWinContext_ = (__gm__ HcclOpResParamCustom *)contextGM0;
     GlobalTensor<int32_t> selfDataStatusTensor;
     GM_ADDR statusDataSpaceGm = (GM_ADDR)epWinContext_->localWindowsExp;
     selfDataStatusTensor.SetGlobalBuffer((__gm__ int32_t *)(statusDataSpaceGm + STATE_WIN_OFFSET));
@@ -844,3 +845,4 @@ __aicore__ inline void CamMoeDistributeCombine<TemplateMC2TypeFunc>::ReducePermu
 }  // namespace MoeDistributeCombineImpl
 
 #endif  // CAM_MOE_DISTRIBUTE_COMBINE_IMPL_H
+

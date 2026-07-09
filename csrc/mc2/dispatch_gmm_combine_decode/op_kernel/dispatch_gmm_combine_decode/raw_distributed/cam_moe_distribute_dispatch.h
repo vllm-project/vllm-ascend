@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2025 Huawei Technologies Co., Ltd.
  * This file is a part of the CANN Open Software.
  * Licensed under CANN Open Software License Agreement Version 1.0 (the "License").
@@ -16,6 +16,7 @@
 #include "kernel_tiling/kernel_tiling.h"
 #include "../../dispatch_gmm_combine_decode_base.h"
 #include "../../dispatch_gmm_combine_decode_tiling.h"
+#include "../../moe_distribute_base.h"
 
 namespace MoeDistributeDispatchImpl {
 constexpr uint8_t BUFFER_NUM = 2;
@@ -86,7 +87,7 @@ private:
         if (curRankId == rankId) {
             return (GM_ADDR)(winContext_[ctxIdx]->localWindowsIn) + winDataSizeOffset_ + rankId * OPT_RANK_OFFSET;
         }
-        return (GM_ADDR)(((HcclRankRelationResV2 *)(winContext_[ctxIdx]->remoteRes[rankId].nextDevicePtr))->windowsIn) +
+        return (GM_ADDR)(((HcclRankRelationResV2Custom *)(winContext_[ctxIdx]->remoteRes[rankId].nextDevicePtr))->windowsIn) +
                winDataSizeOffset_ + rankId * OPT_RANK_OFFSET;
     }
 
@@ -96,7 +97,7 @@ private:
         if (curRankId == rankId) {
             return (GM_ADDR)(winContext_[ctxIdx]->localWindowsExp) + dataState_ * WIN_STATE_OFFSET;
         }
-        return (GM_ADDR)(((HcclRankRelationResV2 *)(winContext_[ctxIdx]->remoteRes[rankId].nextDevicePtr))
+        return (GM_ADDR)(((HcclRankRelationResV2Custom *)(winContext_[ctxIdx]->remoteRes[rankId].nextDevicePtr))
                              ->windowsExp) +
                dataState_ * WIN_STATE_OFFSET;
     }
@@ -208,7 +209,7 @@ private:
     uint32_t gatherCount_{0};
     uint32_t expertTokenNumsType_{1};
     uint32_t preCnt_{0};
-    __gm__ HcclOpResParam *winContext_[COMM_NUM]{nullptr, nullptr};
+    __gm__ HcclOpResParamCustom *winContext_[COMM_NUM]{nullptr, nullptr};
     // loop optimization
     TBuf<> sendTableIdsBuf_;
     LocalTensor<countType> tableLocalTensor_;
@@ -231,8 +232,8 @@ __aicore__ inline void CamMoeDistributeDispatch<TemplateDispatchTypeFunc>::Init(
     GlobalTensor<int32_t> selfDataStatusTensor;
     GM_ADDR statusDataSpaceGm;
 
-    winContext_[COMM_EP_IDX] = (__gm__ HcclOpResParam *)AscendC::GetHcclContext<HCCL_GROUP_ID_0>();
-    winContext_[COMM_TP_IDX] = (__gm__ HcclOpResParam *)AscendC::GetHcclContext<1>();
+    winContext_[COMM_EP_IDX] = (__gm__ HcclOpResParamCustom *)AscendC::GetHcclContext<HCCL_GROUP_ID_0>();
+    winContext_[COMM_TP_IDX] = (__gm__ HcclOpResParamCustom *)AscendC::GetHcclContext<1>();
 
     statusDataSpaceGm = (GM_ADDR)(winContext_[COMM_EP_IDX]->localWindowsExp);
     selfDataStatusTensor.SetGlobalBuffer((__gm__ int32_t *)(statusDataSpaceGm + STATE_WIN_OFFSET));
@@ -356,8 +357,8 @@ __aicore__ inline void CamMoeDistributeDispatch<TemplateDispatchTypeFunc>::Init(
     maxSize_ = maxSize_ > bsKAlign256 ? maxSize_ : bsKAlign256;
     tpipe_->InitBuffer(gatherMaskTBuf_, maxSize_);
     if constexpr (DynamicQuant || StaticQuant) {
-        dstExpBuf_ = receiveDataCastFloatBuf_;  // 内存复用
-        subExpBuf_ = smoothScalesBuf_;          // 内存复用
+        dstExpBuf_ = receiveDataCastFloatBuf_;  // 鍐呭瓨澶嶇敤
+        subExpBuf_ = smoothScalesBuf_;          // 鍐呭瓨澶嶇敤
     } else {
         tpipe_->InitBuffer(dstExpBuf_, maxSize_);             // BS * K * 4 = 32K
         tpipe_->InitBuffer(subExpBuf_, maxSize_);             // BS * K * 4 = 32K
@@ -395,7 +396,7 @@ __aicore__ inline void CamMoeDistributeDispatch<TemplateDispatchTypeFunc>::Quant
 template <TemplateDispatchTypeClass>
 __aicore__ inline void CamMoeDistributeDispatch<TemplateDispatchTypeFunc>::TokenActiveMaskCal()
 {
-    // 搬运x_active_mask, 当前仅用于计算有效token总数
+    // 鎼繍x_active_mask, 褰撳墠浠呯敤浜庤绠楁湁鏁坱oken鎬绘暟
     LocalTensor<half> maskTmpTensor;
     LocalTensor<half> sumOutTensor;
     LocalTensor<bool> maskInputTensor;
@@ -1122,3 +1123,4 @@ __aicore__ inline void CamMoeDistributeDispatch<TemplateDispatchTypeFunc>::Proce
 
 }  // namespace MoeDistributeDispatchImpl
 #endif  // CAM_MOE_DISTRIBUTE_DISPATCH_H
+

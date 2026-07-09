@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2025 Huawei Technologies Co., Ltd.
  * This file is a part of the CANN Open Software.
  * Licensed under CANN Open Software License Agreement Version 1.0 (the "License").
@@ -21,6 +21,7 @@
 #include "catlass/epilogue/tile/tile_copy.hpp"
 
 #include "../../../dispatch_gmm_combine_decode_base.h"
+#include "../../../moe_distribute_base.h"
 
 constexpr uint32_t STATE_OFFSET = 512;
 constexpr uint64_t WIN_STATE_OFFSET = 512 * 1024;
@@ -48,12 +49,12 @@ constexpr uint32_t QUANT_SPACE_FACTOR = 176 * 1024 / 11;  // up to 176KB for qua
 #define GET_WIND_STATE_ADDR_BY_RANK_ID(rankId)                                                                    \
     (((epRankId == rankId)                                                                                        \
           ? ((GM_ADDR)(winContext_->localWindowsExp))                                                             \
-          : ((GM_ADDR)(((HcclRankRelationResV2 *)(winContext_->remoteRes[rankId].nextDevicePtr))->windowsExp))) + \
+          : ((GM_ADDR)(((HcclRankRelationResV2Custom *)(winContext_->remoteRes[rankId].nextDevicePtr))->windowsExp))) + \
      dataState * WIN_STATE_OFFSET)
 #define GET_WIND_ADDR_BY_RANK_ID(rankId)                                                                         \
     (((epRankId == rankId)                                                                                       \
           ? ((GM_ADDR)(winContext_->localWindowsIn))                                                             \
-          : ((GM_ADDR)(((HcclRankRelationResV2 *)(winContext_->remoteRes[rankId].nextDevicePtr))->windowsIn))) + \
+          : ((GM_ADDR)(((HcclRankRelationResV2Custom *)(winContext_->remoteRes[rankId].nextDevicePtr))->windowsIn))) + \
      winDataSizeOffset + rankId * OPT_RANK_OFFSET)
 #define TOKEN_FLAG_1 (0x55555555)
 #define TOKEN_FLAG_2 (0x33333333)
@@ -509,7 +510,7 @@ public:
             recvCoreNum = aiCoreGroupNum;
         }
         uint32_t coreNumPerGroup = recvCoreNum / localExpertNum;
-        winContext_ = (__gm__ HcclOpResParam *)AscendC::GetHcclContext<AscendC::HCCL_GROUP_ID_0>();
+        winContext_ = (__gm__ HcclOpResParamCustom *)AscendC::GetHcclContext<AscendC::HCCL_GROUP_ID_0>();
 
         // state of cv flag
         statusDataSpaceGm = (GM_ADDR)(winContext_->localWindowsExp);
@@ -1434,7 +1435,7 @@ public:
 
         stateOffset = STATE_OFFSET;
         expertPerSizeOnWin = maxAxisBs * tokenLength * sizeof(XType);
-        winContext_ = (__gm__ HcclOpResParam *)AscendC::GetHcclContext<AscendC::HCCL_GROUP_ID_0>();
+        winContext_ = (__gm__ HcclOpResParamCustom *)AscendC::GetHcclContext<AscendC::HCCL_GROUP_ID_0>();
         statusDataSpaceGm = (GM_ADDR)(winContext_->localWindowsExp);
     }
 
@@ -1680,7 +1681,7 @@ private:
     float sumTarget{0.0};
 
     // memory info
-    __gm__ HcclOpResParam *winContext_;
+    __gm__ HcclOpResParamCustom *winContext_;
     GM_ADDR statusDataSpaceGm;
     uint32_t stateOffset{0};
     uint64_t expertPerSizeOnWin{0};
@@ -2058,3 +2059,4 @@ private:
 };
 
 }  // namespace Catlass::Gemm::Kernel
+

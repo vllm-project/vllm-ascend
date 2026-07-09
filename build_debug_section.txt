@@ -1,0 +1,15 @@
+﻿        echo "depdendency catlass is missing, try to fetch it..."
+        if ! git submodule update --init --recursive; then
+            echo "fetch failed"
+            exit 1
+        fi
+    fi
+    # NOTE: HCCL header (moe_distribute_base.h) 涓嶅鍒躲€?    # CANN 9.1.0+ 閫氳繃鑷韩 include 璺緞鎻愪緵锛堜綅浜?AscendC::HcclContextDef 鍛藉悕绌洪棿锛夈€?    # 鏈湴 moe_distribute_base.h 鏂囦欢淇濈暀 HcclOpResParamCustom锛堢敤浜?dispatch_ffn_combine锛夈€?    # 鍏朵粬绠楀瓙浠?kernel_operator.h + using namespace 鑾峰彇 HcclOpResParam銆?
+    CUSTOM_OPS_ARRAY=(
+        "grouped_matmul_swiglu_quant_clamp"
+        "grouped_matmul_swiglu_quant_weight_nz_tensor_list"
+        "notify_dispatch" "dispatch_ffn_combine"
+        "dispatch_gmm_combine_decode" "moe_combine_normal"
+        "moe_dispatch_normal" "dispatch_layout"
+        "sparse_flash_attention" "lightning_indexer"
+        "add_rms_norm_bias" "moe_init_routing_custom"

@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2025 Huawei Technologies Co., Ltd.
  * This file is a part of the CANN Open Software.
  * Licensed under CANN Open Software License Agreement Version 1.0 (the "License").
@@ -491,7 +491,7 @@ public:
     {
         return (GM_ADDR)((calcInfo.epRankId_ == rankId)
                              ? calcInfo.epWinContext_->localWindowsIn
-                             : ((HcclRankRelationResV2 *)(calcInfo.epWinContext_->remoteRes[rankId].nextDevicePtr))
+                             : ((HcclRankRelationResV2Custom *)(calcInfo.epWinContext_->remoteRes[rankId].nextDevicePtr))
                                    ->windowsIn) +
                calcInfo.winDataSizeOffset_ + expertLocalId * calcInfo.expertPerSizeOnWin_ + rankId * OPT_RANK_OFFSET;
     }

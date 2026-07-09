@@ -1,10 +1,11 @@
-#ifndef MOE_COMBINE_NORMAL_H
+﻿#ifndef MOE_COMBINE_NORMAL_H
 #define MOE_COMBINE_NORMAL_H
 
 #include "kernel_operator.h"
 #include "kernel_tiling/kernel_tiling.h"
 #include "utils/moe_distribute_base.h"
 #include "moe_combine_normal_tiling.h"
+#include "utils/moe_distribute_base.h"
 
 namespace MoeCombineNormalImpl {
 constexpr uint32_t RANK_ID_OFFSET_IN_SRC_INFO = 0U;
@@ -58,7 +59,7 @@ private:
         if (epRankId_ == rankId) {
             bufferAddr = (GM_ADDR)epWinContext_->localWindowsIn;
         } else {
-            bufferAddr = (GM_ADDR)((HcclRankRelationResV2 *)epWinContext_->remoteRes[rankId].nextDevicePtr)->windowsIn;
+            bufferAddr = (GM_ADDR)((HcclRankRelationResV2Custom *)epWinContext_->remoteRes[rankId].nextDevicePtr)->windowsIn;
         }
         return (GM_ADDR)(bufferAddr + winDataSizeOffset_);
     }
@@ -83,8 +84,8 @@ private:
         endIdx = startIdx + perCoreNum;
     }
 
-    __gm__ HcclOpResParam *epWinContext_{nullptr};
-    __gm__ HcclOpResParam *tpWinContext_{nullptr};
+    __gm__ HcclOpResParamCustom *epWinContext_{nullptr};
+    __gm__ HcclOpResParamCustom *tpWinContext_{nullptr};
     uint32_t axisBS_{0};
     uint32_t axisH_{0};
     uint32_t axisK_{0};
@@ -128,7 +129,7 @@ template <TemplateMC2TypeClass>
 __aicore__ inline void MoeCombineNormal<TemplateMC2TypeFunc>::InitMagic()
 {
     auto contextGM0 = AscendC::GetHcclContext<HCCL_GROUP_ID_0>();
-    epWinContext_ = (__gm__ HcclOpResParam*)contextGM0;
+    epWinContext_ = (__gm__ HcclOpResParamCustom*)contextGM0;
 
     GlobalTensor<int32_t> selfMagicTensor;
     selfMagicTensor.SetGlobalBuffer((__gm__ int32_t*)((GM_ADDR)epWinContext_->localWindowsExp + MAGIC_WIN_OFFSET +
@@ -375,3 +376,4 @@ __aicore__ inline void MoeCombineNormal<TemplateMC2TypeFunc>::Process()
 
 } // MoeCombineNormalImpl
 #endif // MOE_COMBINE_IMPL_H
+
