@@ -124,22 +124,9 @@ msgstr "1. 克隆并安装 vLLM："
 msgid "2. Clone and install the vLLM-Ascend repository:"
 msgstr "2. 克隆并安装 vLLM-Ascend 仓库："
 
-msgid "**Installation Verification:**"
-msgstr "**安装验证：**"
-
-msgid ""
-"Expected result: The version information for both packages is displayed, "
-"confirming a successful installation."
-msgstr "预期结果：显示两个包的版本信息，确认安装成功。"
-
 msgid ""
 "If deploying a multi-node environment, set up the environment on each node."
 msgstr "如果部署多节点环境，请在每个节点上配置环境。"
-
-msgid ""
-"For more details, please refer to the [Installation "
-"Guide](../../installation.md)."
-msgstr "更多详情，请参考[安装指南](../../installation.md)。"
 
 msgid "## 5 Online Service Deployment"
 msgstr "## 5 在线服务部署"
@@ -358,13 +345,6 @@ msgid ""
 msgstr "预期结果：显示两个包的版本信息，确认安装成功。"
 
 msgid ""
-"If deploying a multi-node environment, set up the environment on each node."
-msgstr "如果部署多节点环境，请在每个节点上设置环境。"
-
-msgid ""
 "For more details, please refer to the [Installation "
 "Guide](../../installation.md)."
 msgstr "更多详情，请参考[安装指南](../../installation.md)。"
-
-msgid "### Using AISBench"
-msgstr "### 使用AISBench"

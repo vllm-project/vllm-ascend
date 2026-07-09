@@ -432,15 +432,3 @@ msgid ""
 "See [Section 4.2](#42-source-code-installation) for details."
 msgstr ""
 "答：您可能需要卸载 `triton-ascend` 以避免依赖冲突。详见[第 4.2 节](#42-source-code-installation)。"
-
-msgid "=== \"A2 series\""
-msgstr "=== \"A2系列\""
-
-msgid "=== \"Atlas 300 inference products\""
-msgstr "=== \"Atlas 300推理产品\""
-
-msgid "=== \"A2 series\""
-msgstr "=== \"A2系列\""
-
-msgid "=== \"Atlas 300 inference products\""
-msgstr "=== \"Atlas 300推理产品\""

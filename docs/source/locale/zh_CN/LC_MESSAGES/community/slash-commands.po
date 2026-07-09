@@ -191,9 +191,6 @@ msgid ""
 "revert targets the same base branch the original PR was merged into."
 msgstr "通过创建一个新 PR 来撤销已合并 PR 的更改。回退的目标是原始 PR 合并到的同一个基础分支。"
 
-msgid "**Usage:**"
-msgstr "**用法：**"
-
 msgid ""
 "| Syntax | Description |\n"
 "|---|---|\n"
@@ -227,9 +224,6 @@ msgid ""
 "Re-run all failed workflow runs on the current PR commit. Useful when CI "
 "jobs failed due to infrastructure issues."
 msgstr "重新运行当前 PR 提交上所有失败的工作流运行。当 CI 作业因基础设施问题而失败时非常有用。"
-
-msgid "**Examples:**"
-msgstr "**示例：**"
 
 msgid "## Behavior"
 msgstr "## 行为"
@@ -289,15 +283,6 @@ msgid ""
 msgstr ""
 "权限通过 GitHub API (`repos/{owner}/{repo}/collaborators/{user}/permission`) "
 "进行验证。"
-
-msgid "**Examples:**"
-msgstr "**示例：**"
-
-msgid "**Usage:**"
-msgstr "**用法：**"
-
-msgid "**Examples:**"
-msgstr "**示例：**"
 
 msgid "**Usage:**"
 msgstr "**用法：**"

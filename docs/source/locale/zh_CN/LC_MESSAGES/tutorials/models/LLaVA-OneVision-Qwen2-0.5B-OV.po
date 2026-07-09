@@ -154,7 +154,3 @@ msgstr ""
 "| dataset | platform | metric | value |\n"
 "|----- | ----- | ----- | ----- |\n"
 "| ceval-valid | A2 | acc,none | 0.42 |"
-
-msgid ""
-"If the request succeeds, you can see a response similar to the following:"
-msgstr "如果请求成功，您将看到类似如下的响应："

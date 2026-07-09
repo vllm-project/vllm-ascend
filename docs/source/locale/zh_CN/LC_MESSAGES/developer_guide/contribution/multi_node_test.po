@@ -143,3 +143,170 @@ msgstr "请参考<https://lws.sigs.k8s.io/docs/installation/>"
 
 msgid "- Step 2. Deploy the following yaml file `lws.yaml` as needed"
 msgstr "- 步骤2. 根据需要部署以下yaml文件`lws.yaml`"
+
+msgid "Verify the status of the pods:"
+msgstr "验证 Pod 的状态："
+
+msgid "Should get an output similar to this:"
+msgstr "应得到类似如下的输出："
+
+msgid "Verify that the distributed inference works:"
+msgstr "验证分布式推理是否正常工作："
+
+msgid "Should get something similar to this:"
+msgstr "应得到类似如下的结果："
+
+msgid "### 2. Test without Kubernetes"
+msgstr "### 2. 不使用 Kubernetes 进行测试"
+
+msgid ""
+"The same `tests/e2e/nightly/multi_node/scripts/run.sh` entrypoint can be used\n"
+"on prepared bare-metal or container hosts. Without LWS, set the values that\n"
+"Kubernetes normally injects yourself:"
+msgstr ""
+"相同的 `tests/e2e/nightly/multi_node/scripts/run.sh` 入口点可以在准备好的裸机或容器主机上使用。\n"
+"在没有 LWS 的情况下，自行设置 Kubernetes 通常注入的值："
+
+msgid ""
+"- `cluster_hosts` in the config yaml, using IPs reachable from every node.\n"
+"- `LWS_WORKER_INDEX` on each node, starting from `0`.\n"
+"- `CONFIG_YAML_PATH` as the config file name and `CONFIG_BASE_PATH` as the\n"
+"  config directory."
+msgstr ""
+"- 配置文件 yaml 中的 `cluster_hosts`，使用每个节点均可访问的 IP。\n"
+"- 每个节点上的 `LWS_WORKER_INDEX`，从 `0` 开始。\n"
+"- `CONFIG_YAML_PATH` 作为配置文件名，`CONFIG_BASE_PATH` 作为配置目录。"
+
+msgid ""
+"Use the host NIC IPs that can reach each other, for example addresses shown by\n"
+"`ip addr` or `ifconfig` on the active network interface. Do not use per-host\n"
+"Docker bridge addresses such as `172.17.0.1`, because each host has its own\n"
+"local bridge."
+msgstr ""
+"使用可以互相访问的主机网卡 IP，例如通过 `ip addr` 或 `ifconfig` 在活动网络接口上显示的地址。\n"
+"不要使用每个主机的 Docker 桥接地址，例如 `172.17.0.1`，因为每个主机都有自己的本地桥接。"
+
+msgid ""
+"Local `cluster_hosts` edits should be removed before submitting a PR unless the\n"
+"hosts are part of a committed test environment."
+msgstr "在提交 PR 之前，应移除本地的 `cluster_hosts` 编辑，除非这些主机是已提交测试环境的一部分。"
+
+msgid "#### 2.1 Internal DP local run"
+msgstr "#### 2.1 内部 DP 本地运行"
+
+msgid "##### 2.1.1 Add cluster hosts"
+msgstr "##### 2.1.1 添加集群主机"
+
+msgid "Edit the internal DP config you want to run, for example:"
+msgstr "编辑你想要运行的内部 DP 配置，例如："
+
+msgid ""
+"Add `cluster_hosts` as a top-level field, for example near `num_nodes` and\n"
+"`npu_per_node`:"
+msgstr "将 `cluster_hosts` 添加为顶级字段，例如放在 `num_nodes` 和 `npu_per_node` 附近："
+
+msgid "##### 2.1.2 Prepare the environment"
+msgstr "##### 2.1.2 准备环境"
+
+msgid "Install vllm-ascend development dependencies on every cluster host:"
+msgstr "在每个集群主机上安装 vllm-ascend 开发依赖："
+
+msgid ""
+"Install AISBench on the first host, which is the node with\n"
+"`LWS_WORKER_INDEX=0`:"
+msgstr "在第一个主机（即 `LWS_WORKER_INDEX=0` 的节点）上安装 AISBench："
+
+msgid ""
+"If your local image already contains the model, benchmark data, Ascend runtime,\n"
+"and AISBench, you only need the run-time exports in the next step."
+msgstr "如果你的本地镜像已经包含了模型、基准数据、Ascend 运行时和 AISBench，你只需要下一步中的运行时导出。"
+
+msgid "##### 2.1.3 Start each node"
+msgstr "##### 2.1.3 启动每个节点"
+
+msgid ""
+"Run the script on each node separately. Start worker nodes first, then start\n"
+"node 0."
+msgstr "在每个节点上分别运行脚本。先启动工作节点，然后启动节点 0。"
+
+msgid "On node 1:"
+msgstr "在节点 1 上："
+
+msgid "On node 0:"
+msgstr "在节点 0 上："
+
+msgid ""
+"Internal DP logs are mainly printed to the terminal running `run.sh`. When\n"
+"`LOG_PREFIX` is set, the shared script also backs up Ascend logs to:"
+msgstr ""
+"内部 DP 日志主要打印到运行 `run.sh` 的终端。当设置了 `LOG_PREFIX` 时，共享脚本还会将 Ascend 日志备份到："
+
+msgid "#### 2.2 External DP local run"
+msgstr "#### 2.2 外部 DP 本地运行"
+
+msgid "##### 2.2.1 Add cluster hosts"
+msgstr "##### 2.2.1 添加集群主机"
+
+msgid "Edit the external DP config you want to run. For example:"
+msgstr "编辑你想要运行的外部 DP 配置。例如："
+
+msgid "##### 2.2.2 Prepare the environment"
+msgstr "##### 2.2.2 准备环境"
+
+msgid "Install AISBench on node 0:"
+msgstr "在节点 0 上安装 AISBench："
+
+msgid "##### 2.2.3 Start each node"
+msgstr "##### 2.2.3 启动每个节点"
+
+msgid ""
+"External DP uses the same shared `run.sh`. Set `CONFIG_BASE_PATH` to the\n"
+"external DP config directory so the script chooses\n"
+"`external_dp/scripts/test_external_dp.py`."
+msgstr ""
+"外部 DP 使用相同的共享 `run.sh`。将 `CONFIG_BASE_PATH` 设置为外部 DP 配置目录，以便脚本选择 "
+"`external_dp/scripts/test_external_dp.py`。"
+
+msgid ""
+"Then start non-master nodes first, and start node 0 last. The following example\n"
+"uses `GLM5_1-W8A8-EP-external.yaml`, which is a 4-node disaggregated prefill\n"
+"case."
+msgstr ""
+"然后先启动非主节点，最后启动节点 0。以下示例使用 `GLM5_1-W8A8-EP-external.yaml`，这是一个 4 节点分离式预填充案例。"
+
+msgid "On node 1, node 2, and node 3, set the matching `LWS_WORKER_INDEX`:"
+msgstr "在节点 1、节点 2 和节点 3 上，设置匹配的 `LWS_WORKER_INDEX`："
+
+msgid ""
+"For `GLM5_1-W8A8-EP-external.yaml`, node 0 and node 1 start prefiller ranks,\n"
+"node 2 and node 3 start decoder ranks, and node 0 also starts the proxy and\n"
+"benchmark."
+msgstr ""
+"对于 `GLM5_1-W8A8-EP-external.yaml`，节点 0 和节点 1 启动预填充器 rank，节点 2 和节点 3 启动解码器 "
+"rank，节点 0 还启动代理和基准测试。"
+
+msgid "##### 2.2.4 Read logs while the test is running"
+msgstr "##### 2.2.4 在测试运行时读取日志"
+
+msgid ""
+"The terminal running `run.sh` prints pytest orchestration logs. For external DP,\n"
+"AISBench output is also printed on node 0, while rank and proxy stdout/stderr\n"
+"are written to `EXTERNAL_DP_LOG_DIR`. The default layout is:"
+msgstr ""
+"运行 `run.sh` 的终端会打印 pytest 编排日志。对于外部 DP，AISBench 输出也会打印在节点 0 上，而 rank 和代理的 "
+"stdout/stderr 则写入 `EXTERNAL_DP_LOG_DIR`。默认布局为："
+
+msgid ""
+"The first line of each rank log records the exact command and environment used\n"
+"to start that rank. `proxy.log` exists only on the configured proxy node,\n"
+"usually node 0."
+msgstr ""
+"每个 rank 日志的第一行记录了用于启动该 rank 的确切命令和环境。`proxy.log` 仅存在于配置的代理节点上，通常是节点 0。"
+
+msgid "Use a separate log directory when running multiple local experiments:"
+msgstr "在运行多个本地实验时，使用单独的日志目录："
+
+msgid ""
+"To watch logs in real time, run these commands in another terminal on the\n"
+"corresponding node:"
+msgstr "要实时查看日志，请在相应节点上的另一个终端中运行以下命令："

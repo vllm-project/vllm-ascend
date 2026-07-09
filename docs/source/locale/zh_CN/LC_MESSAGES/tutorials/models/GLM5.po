@@ -119,9 +119,6 @@ msgstr "### 4.1 Docker 镜像安装"
 msgid "You can use our official docker image to run GLM-5/5.1 directly."
 msgstr "您可以直接使用我们的官方 Docker 镜像来运行 GLM-5/5.1。"
 
-msgid "Start the docker image on your each node."
-msgstr "在每个节点上启动 Docker 镜像。"
-
 msgid ""
 "To verify the successful installation of the environment, please refer to "
 "[installation](../../installation.md)."
@@ -167,9 +164,6 @@ msgid ""
 "- Quantized model `glm-5-w4a8` can be deployed on 1 Atlas 800 A2 (64G × 8) ."
 msgstr "- 量化模型 `glm-5-w4a8` 可部署在 1 台 Atlas 800 A2（64G × 8）上。"
 
-msgid "Run the following script to execute online inference."
-msgstr "运行以下脚本执行在线推理。"
-
 msgid ""
 "**Notice:**\n"
 "The parameters are explained as follows:"
@@ -197,16 +191,10 @@ msgid ""
 "Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md)."
 msgstr "常见问题提示：如果遇到问题，请参考[常见问题解答](../../faqs.md)。"
 
-msgid "=== \"A3 series\""
-msgstr "=== \"A3 系列\""
-
 msgid ""
 "- `glm-5-bf16` and `glm-5.1-bf16`: require at least 2 Atlas 800 A3 (64G × "
 "16)."
 msgstr "- `glm-5-bf16` 和 `glm-5.1-bf16`：至少需要 2 台 Atlas 800 A3（64G × 16）。"
-
-msgid "=== \"A2 series\""
-msgstr "=== \"A2 系列\""
 
 msgid ""
 "- For bf16 weight, use this script on each node to enable [Multi Token "
@@ -217,15 +205,6 @@ msgstr ""
 
 msgid "- `glm-5-w8a8`: require 2 Atlas 800 A3 (64G × 16)."
 msgstr "- `glm-5-w8a8`：需要 2 台 Atlas 800 A3（64G × 16）。"
-
-msgid "Run the following scripts on two nodes respectively."
-msgstr "分别在两个节点上运行以下脚本。"
-
-msgid "**node 0**"
-msgstr "**节点 0**"
-
-msgid "**node 1**"
-msgstr "**节点 1**"
 
 msgid "### 5.3 Prefill-Decode Disaggregation"
 msgstr "### 5.3 预填充-解码分离"
@@ -262,21 +241,6 @@ msgstr "准备工作完成后，可以在每个节点上使用以下命令启动
 
 msgid "1. Prefill node 0"
 msgstr "1. 预填充节点 0"
-
-msgid "2. Prefill node 1"
-msgstr "2. 预填充节点 1"
-
-msgid "3. Decode node 0"
-msgstr "3. 解码节点 0"
-
-msgid "4. Decode node 1"
-msgstr "4. 解码节点 1"
-
-msgid "5. Decode node 2"
-msgstr "5. 解码节点 2"
-
-msgid "6. Decode node 3"
-msgstr "6. 解码节点 3"
 
 msgid "### 5.4 Request Forwarding"
 msgstr "### 5.4 请求转发"
@@ -440,45 +404,14 @@ msgstr "答：请在 vLLM 启动命令中添加以下配置"
 msgid "Start the docker image on your each node."
 msgstr "在每个节点上启动 Docker 镜像。"
 
-msgid ""
-"If you want to deploy multi-node environment, you need to set up environment"
-" on each node."
-msgstr "如果要部署多节点环境，需要在每个节点上配置环境。"
-
-msgid "=== \"A3 series\""
-msgstr "=== \"A3 系列\""
-
 msgid "Run the following script to execute online inference."
 msgstr "运行以下脚本执行在线推理。"
-
-msgid "=== \"A2 series\""
-msgstr "=== \"A2 系列\""
-
-msgid "Run the following script to execute online inference."
-msgstr "运行以下脚本执行在线推理。"
-
-msgid ""
-"Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md)."
-msgstr "常见问题提示：如果遇到问题，请参考[常见问题](../../faqs.md)。"
-
-msgid ""
-"Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md)."
-msgstr "常见问题提示：如果遇到问题，请参考[常见问题](../../faqs.md)。"
 
 msgid "=== \"A3 series\""
 msgstr "=== \"A3 系列\""
 
 msgid "=== \"A2 series\""
 msgstr "=== \"A2 系列\""
-
-msgid "Run the following scripts on two nodes respectively."
-msgstr "分别在两个节点上运行以下脚本。"
-
-msgid "**node 0**"
-msgstr "**节点 0**"
-
-msgid "**node 1**"
-msgstr "**节点 1**"
 
 msgid "Run the following scripts on two nodes respectively."
 msgstr "分别在两个节点上运行以下脚本。"

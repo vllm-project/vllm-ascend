@@ -72,24 +72,10 @@ msgstr "6. 检查 NPU TLS 配置"
 msgid "=== \"A2\""
 msgstr "=== \"A2\""
 
-msgid "1. Single Node Verification:"
-msgstr "1. 单节点验证："
-
 msgid ""
 "Execute the following commands on each node in sequence. The results must "
 "all be `success` and the status must be `UP`:"
 msgstr "在每个节点上依次执行以下命令。结果必须全部为 `success`，状态必须为 `UP`："
-
-msgid "2. Check NPU HCCN Configuration:"
-msgstr "2. 检查 NPU HCCN 配置："
-
-msgid ""
-"Ensure that the hccn.conf file exists in the environment. If using Docker, "
-"mount it into the container."
-msgstr "确保环境中存在 hccn.conf 文件。如果使用 Docker，请将其挂载到容器中。"
-
-msgid "3. Get NPU IP Addresses"
-msgstr "3. 获取 NPU IP 地址"
 
 msgid "4. Cross-Node PING Test"
 msgstr "4. 跨节点 PING 测试"
@@ -769,18 +755,8 @@ msgstr "## 验证"
 msgid "Check service health using the proxy server endpoint."
 msgstr "使用代理服务器端点检查服务健康状态。"
 
-msgid ""
-"Execute the following commands on each node in sequence. The results must "
-"all be `success` and the status must be `UP`:"
-msgstr "依次在每个节点上执行以下命令，结果必须全部为 `success`，且状态必须为 `UP`："
-
 msgid "1. Single Node Verification:"
 msgstr "1. 单节点验证："
-
-msgid ""
-"Execute the following commands on each node in sequence. The results must "
-"all be `success` and the status must be `UP`:"
-msgstr "依次在每个节点上执行以下命令，结果必须全部为 `success`，且状态必须为 `UP`："
 
 msgid "2. Check NPU HCCN Configuration:"
 msgstr "2. 检查 NPU HCCN 配置："

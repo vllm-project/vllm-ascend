@@ -168,9 +168,6 @@ msgstr ""
 "| Qwen3-Omni-30B-A3B-Thinking    | 🔵            |                                                                      ||A2/A3|||||||✅||✅|||||||[Qwen3-Omni-30B-A3B-Thinking](../../tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md)|\n"
 "| Kimi-K2.5/Kimi-K2.6    | ✅            |                                                                      ||A2/A3||✅|✅||✅|✅|✅||✅|✅|✅|✅|✅|262144||[Kimi-K2.5](../../tutorials/models/Kimi-K2.5.md)/[Kimi-K2.6](../../tutorials/models/Kimi-K2.6.md)|"
 
-msgid "#### Extended Compatible Models"
-msgstr "#### 扩展兼容模型"
-
 msgid ""
 "| Model                          | Support       | Note                                                                 | Supported Hardware |\n"
 "|--------------------------------|---------------|----------------------------------------------------------------------|--------------------|\n"
@@ -217,12 +214,6 @@ msgstr ""
 "| InternVL2.0/2.5/3.0<br>InternVideo2.5/Mono-InternVL | ❌ | [2064](https://github.com/vllm-project/vllm-ascend/issues/2064) |  |\n"
 "| Whisper                        | ❌            | [2262](https://github.com/vllm-project/vllm-ascend/issues/2262)      |       |\n"
 "| Ultravox                       | 🟡            | 需要测试                                                            |       |"
-
-msgid "### Generative Models"
-msgstr "### 生成式模型"
-
-msgid "#### Core Supported Models"
-msgstr "#### 核心支持模型"
 
 msgid "#### Extended Compatible Models"
 msgstr "#### 扩展兼容模型"

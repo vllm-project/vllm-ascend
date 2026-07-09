@@ -187,9 +187,6 @@ msgstr "1. 克隆并安装 vLLM："
 msgid "2. Clone and install the vLLM-Ascend repository:"
 msgstr "2. 克隆并安装 vLLM-Ascend 仓库："
 
-msgid "**Installation Verification:**"
-msgstr "**安装验证：**"
-
 msgid ""
 "Expected result: The version information for both packages is displayed, "
 "confirming a successful installation."
@@ -492,15 +489,6 @@ msgstr "**低时延配置：**"
 msgid "**High Throughput Configuration:**"
 msgstr "**高吞吐配置：**"
 
-msgid ""
-"- `request_rate`: 0\n"
-"    - `batch_size`: 32\n"
-"    - Input/Output length: 2048/2048 or 3500/1500"
-msgstr ""
-"- `request_rate`: 0\n"
-"    - `batch_size`: 32\n"
-"    - 输入/输出长度：2048/2048 或 3500/1500"
-
 msgid "**Long Context Configuration:**"
 msgstr "**长上下文配置：**"
 
@@ -540,12 +528,6 @@ msgstr ""
 msgid "**Installation Verification:**"
 msgstr "**安装验证：**"
 
-msgid "### Using AISBench"
-msgstr "### 使用 AISBench"
-
-msgid "Example AISBench settings for this configuration:"
-msgstr "此配置的 AISBench 设置示例："
-
 msgid ""
 "- `request_rate`: 0\n"
 "    - `batch_size`: 32\n"
@@ -554,6 +536,3 @@ msgstr ""
 "- `request_rate`: 0\n"
 "    - `batch_size`: 32\n"
 "    - 输入/输出长度：2048/2048 或 3500/1500"
-
-msgid "Example AISBench settings for this configuration:"
-msgstr "此配置的 AISBench 设置示例："

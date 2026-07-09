@@ -71,9 +71,6 @@ msgstr "### 在线服务"
 msgid "### Offline Inference"
 msgstr "### 离线推理"
 
-msgid "Default behavior:"
-msgstr "默认行为："
-
 msgid "Disable CPU binding:"
 msgstr "禁用 CPU 绑定："
 
@@ -174,6 +171,3 @@ msgstr ""
 
 msgid "Default behavior:"
 msgstr "默认行为："
-
-msgid "Disable CPU binding:"
-msgstr "禁用CPU绑定："

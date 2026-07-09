@@ -301,6 +301,3 @@ msgid ""
 msgstr ""
 "答：首先减少`--max-num-seqs`和`--max-model-len`。如有必要，降低并发和负载测试压力（例如`max-"
 "concurrency` / `num-prompts`）。"
-
-msgid "### Using AISBench"
-msgstr "### 使用AISBench"

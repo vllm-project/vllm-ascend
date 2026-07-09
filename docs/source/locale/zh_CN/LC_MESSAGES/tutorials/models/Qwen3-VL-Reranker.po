@@ -158,8 +158,3 @@ msgid ""
 "After about several minutes, you can get the performance evaluation result. "
 "With this tutorial, the performance result is:"
 msgstr "大约几分钟后，您将获得性能评估结果。按照本教程，性能结果如下："
-
-msgid ""
-"If you run this script successfully, you will see a list of scores printed "
-"to the console, similar to this:"
-msgstr "如果成功运行此脚本，您将在控制台看到类似如下的分数列表："

@@ -261,6 +261,3 @@ msgstr ""
 
 msgid "### Using AISBench"
 msgstr "### 使用 AISBench"
-
-msgid "### Using AISBench"
-msgstr "### 使用 AISBench"

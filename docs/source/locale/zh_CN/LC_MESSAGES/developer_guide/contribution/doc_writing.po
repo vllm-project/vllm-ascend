@@ -271,9 +271,6 @@ msgstr ""
 "每个被引用的节点会展开为 `dp_size_local` 个主机和端口条目。\n"
 "代理本身运行在 `${NODE_0_IP}:1999` 上。"
 
-msgid "Write the doc block like this:"
-msgstr "请按如下方式编写文档块："
-
 msgid ""
 ":block_name: glm_external_dp_proxy\n"
 ":converter_tag: external_dp_proxy\n"
@@ -282,13 +279,6 @@ msgstr ""
 ":block_name: glm_external_dp_proxy\n"
 ":converter_tag: external_dp_proxy\n"
 ":test_case_path: tests/e2e/nightly/multi_node/external_dp/config/your_model.yaml"
-
-msgid ""
-"set -eux\n"
-"{{ generated }}"
-msgstr ""
-"set -eux\n"
-"{{ generated }}"
 
 msgid "Generated shell script:"
 msgstr "生成的 Shell 脚本："
@@ -395,32 +385,3 @@ msgid ""
 msgstr ""
 "set -eux\n"
 "{{ generated }}"
-
-msgid "Write the doc block like this:"
-msgstr "请按如下方式编写文档块："
-
-msgid "Write the doc block like this:"
-msgstr "请按如下方式编写文档块："
-
-msgid ""
-"set -eux\n"
-"{{ generated }}"
-msgstr ""
-"set -eux\n"
-"{{ generated }}"
-
-msgid "Generated shell script:"
-msgstr "生成的Shell脚本："
-
-msgid "Write the doc block like this:"
-msgstr "请按如下方式编写文档块："
-
-msgid ""
-"set -eux\n"
-"{{ generated }}"
-msgstr ""
-"set -eux\n"
-"{{ generated }}"
-
-msgid "Generated shell script:"
-msgstr "生成的Shell脚本："

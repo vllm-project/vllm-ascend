@@ -236,6 +236,3 @@ msgid ""
 msgstr ""
 "- 模型配置支持 262,144 个 token，但本指南仅验证了 32,768 个 token 的服务。更大的上下文需要单独进行容量验证。\n"
 "- 正式的 AISBench 精度结果待定，应在实际基准测试运行后添加。"
-
-msgid "### Using AISBench"
-msgstr "### 使用AISBench"

@@ -345,12 +345,6 @@ msgstr ""
 msgid "Install Xlite first:"
 msgstr "首先安装 Xlite："
 
-msgid "Offline example:"
-msgstr "离线示例："
-
-msgid "Online example:"
-msgstr "在线示例："
-
 msgid ""
 "For more details about Xlite, see the [Xlite "
 "README](https://atomgit.com/openeuler/GVirt/blob/master/xlite/README.md)."
@@ -418,18 +412,6 @@ msgstr ""
 "- [Npugraph_ex 指南](https://www.hiascend.com/document/detail/zh/Pytorch/2600/modthirdparty/torchairuseguide/docs/zh/overview.md)\n"
 "- [Npugraph_ex RFC](https://github.com/vllm-project/vllm-ascend/issues/4715)\n"
 "- [ACL 图开发者指南](../../developer_guide/Design_Documents/ACL_Graph.md)"
-
-msgid "Offline example:"
-msgstr "离线示例："
-
-msgid "Online example:"
-msgstr "在线示例："
-
-msgid "Offline example:"
-msgstr "离线示例："
-
-msgid "Online example:"
-msgstr "在线示例："
 
 msgid "Offline example:"
 msgstr "离线示例："

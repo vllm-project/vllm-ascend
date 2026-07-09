@@ -361,18 +361,3 @@ msgid ""
 "the cumulative acceptance from Block Verify is combined with the entropy-"
 "adjusted threshold from Entropy Verify."
 msgstr "这两个功能可以独立或同时启用。同时使用时，块验证的累积接受率将与熵验证的熵调整阈值相结合。"
-
-msgid "- Offline inference"
-msgstr ""
-
-msgid "- Offline inference"
-msgstr ""
-
-msgid "- Offline inference"
-msgstr ""
-
-msgid "- Online inference"
-msgstr ""
-
-msgid "- Offline inference"
-msgstr ""
