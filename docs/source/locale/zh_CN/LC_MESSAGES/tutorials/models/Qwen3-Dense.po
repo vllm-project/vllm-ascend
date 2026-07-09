@@ -327,11 +327,6 @@ msgstr ""
 "performance-evaluation) 了解详细信息。"
 
 msgid ""
-"The following is an example configuration for the accuracy evaluation config"
-" file:"
-msgstr "以下是精度评估配置文件的示例配置："
-
-msgid ""
 "**Run the performance evaluation using the GSM8K dataset as an example:**"
 msgstr "**以 GSM8K 数据集为例运行性能评估：**"
 
@@ -452,9 +447,6 @@ msgstr ""
 "有关常见的环境、安装和通用参数问题，请参考 [vLLM-Ascend "
 "常见问题](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)。本节仅涵盖 Qwen3 "
 "Dense 模型的特定问题。"
-
-msgid "### Using AISBench"
-msgstr "### 使用AISBench"
 
 msgid ""
 "The following is an example configuration for the accuracy evaluation config"

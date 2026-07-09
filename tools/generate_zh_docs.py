@@ -19,8 +19,8 @@ SOURCE_DIR = Path("docs/source")
 LOCALE_DIR = SOURCE_DIR / "locale" / "zh_CN" / "LC_MESSAGES"
 ZH_DIR = SOURCE_DIR / "zh"
 
-FENCE_RE = re.compile(r"^(`{3,}|~{3,})", re.MULTILINE)
-INLINE_CODE_RE = re.compile(r"`[^`]+`")
+FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})[^\n]*$", re.MULTILINE)
+INLINE_CODE_RE = re.compile(r"`[^`\n]+`")
 URL_RE = re.compile(r"https?://\S+")
 LINK_TARGET_RE = re.compile(r"\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
 
@@ -58,27 +58,31 @@ def _split_by_code_blocks(content: str) -> list:
 
     pos = 0
     in_code = False
-    fence_marker = None
+    fence_char = None  # e.g. '`' or '~'
 
     for match in fence_matches:
-        marker = match.group(1)
+        marker = match.group(1).strip()
+        # Extract the info string (everything after the fence markers)
+        full = match.group(0).strip()
+        info = full[len(marker) :].strip()
         fence_start = match.start()
 
         if not in_code:
             if fence_start > pos:
                 segments.append((content[pos:fence_start], False))
-            # Include the fence line itself (e.g. `` ```bash ``) as part
-            # of the code segment so it is not lost.
             pos = fence_start
             in_code = True
-            fence_marker = marker[0]
+            fence_char = marker[0]
         else:
-            if marker[0] == fence_marker:
-                # Include the closing fence line in the code segment.
+            # A closing fence must use the same character and have an empty
+            # info string (bare ```).  In CommonMark, a fence with an info
+            # string (e.g. ```bash) is always an opening fence, never a
+            # closing one.  A bare ``` can close any same-character fence.
+            if marker[0] == fence_char and not info:
                 segments.append((content[pos : match.end()], True))
                 pos = match.end()
                 in_code = False
-                fence_marker = None
+                fence_char = None
 
     if pos < len(content):
         segments.append((content[pos:], in_code))
@@ -139,7 +143,15 @@ def apply_translations(content: str, translations: dict) -> str:
         translated = seg_text
         for msgid, msgstr in sorted_items:
             if msgid.strip() and msgstr.strip():
+                before = translated
                 translated = translated.replace(msgid, msgstr)
+                # For single-line msgids that do not start with whitespace,
+                # also try matching indented versions.  The .po extraction
+                # strips leading whitespace, but source documents often
+                # indent prose inside notes, lists, etc.
+                if translated == before and "\n" not in msgid and not msgid[0].isspace():
+                    for indent in ("    ", "        ", "            "):
+                        translated = translated.replace(indent + msgid, indent + msgstr)
 
         # Phase 2 — protect spans on both the original and the translated
         # text.  Where the original had a protected span (URL, inline

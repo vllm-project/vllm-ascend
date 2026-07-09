@@ -186,3 +186,21 @@ msgid ""
 "* For the PD disaggregation part, refer to the limitations of PD "
 "decomposition"
 msgstr "* 对于 PD 分离部分，请参考 PD 分解的限制"
+
+msgid "## Usage"
+msgstr ""
+
+msgid ""
+"The current reference pathway is **ExampleConnector**.\n"
+"The ready-to-run scripts below show the workflow:"
+msgstr ""
+
+msgid ""
+"1 Encoder instance + 1 PD instance:\n"
+"`examples/online_serving/disaggregated_encoder/disagg_1e1pd/`"
+msgstr ""
+
+msgid ""
+"1 Encoder instance + 1 Prefill instance + 1 Decode instance:\n"
+"`examples/online_serving/disaggregated_encoder/disagg_1e1p1d/`"
+msgstr ""

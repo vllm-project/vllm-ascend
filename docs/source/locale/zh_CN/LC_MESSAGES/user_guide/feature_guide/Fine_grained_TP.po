@@ -167,3 +167,28 @@ msgid ""
 msgstr ""
 "细粒度 TP 在 PD 分离的 **decode 实例**中**最为有效**，因为模型通常以全 DP "
 "模式部署。在此设置下，对权重较大的层进行分片可以减少冗余存储和内存压力。"
+
+msgid "## Benefits of Fine-grained TP"
+msgstr ""
+
+msgid ""
+"Fine-Grained Tensor Parallelism delivers two primary performance advantages "
+"through targeted weight sharding:"
+msgstr ""
+
+msgid ""
+"- **Reduced Per-Device Memory Footprint**:  \n"
+"  Fine-grained TP shards large weight matrices (e.g., LM Head, o_proj) across devices, lowering peak memory usage and enabling larger batches or deployment on memory-limited hardware—without quantization."
+msgstr ""
+
+msgid ""
+"- **Faster Memory Access in GEMMs**:  \n"
+"  In decode-heavy workloads, GEMM performance is often memory-bound. Weight sharding reduces per-device weight fetch volume, cutting DRAM traffic and improving bandwidth efficiency—especially for latency-sensitive layers like LM Head and o_proj."
+msgstr ""
+
+msgid ""
+"Together, these effects allow practitioners to better balance memory, "
+"communication, and compute—particularly in high-concurrency serving "
+"scenarios—while maintaining compatibility with standard dense transformer "
+"models."
+msgstr ""

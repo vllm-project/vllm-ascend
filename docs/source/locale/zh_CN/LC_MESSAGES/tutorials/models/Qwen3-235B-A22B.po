@@ -298,14 +298,6 @@ msgstr ""
 "- [vLLM Serving Arguments 文档](https://docs.vllm.com.cn/en/latest/cli/serve/?h=block+size#arguments) — vLLM serve 命令的更多参数详情。\n"
 "    - [环境变量](../../user_guide/configuration/env_vars.md) — Ascend 特定的环境变量（`HCCL_*` 等）。"
 
-msgid "**Service Verification:**"
-msgstr "**服务验证：**"
-
-msgid ""
-"If the service starts successfully, the following startup log will be "
-"displayed:"
-msgstr "如果服务启动成功，将显示以下启动日志："
-
 msgid "## 6 Functional Verification"
 msgstr "## 6 功能验证"
 
@@ -346,9 +338,6 @@ msgstr ""
 msgid "## 8 Performance Evaluation"
 msgstr "## 8 性能评估"
 
-msgid "### Using AISBench"
-msgstr "### 使用 AISBench"
-
 msgid ""
 "For setup details, including installation, dataset download, and "
 "configuration, please refer to [Using "
@@ -358,11 +347,6 @@ msgstr ""
 "有关安装、数据集下载和配置等设置详情，请参考[使用 "
 "AISBench](../../developer_guide/evaluation/using_ais_bench.md#execute-"
 "performance-evaluation) 了解详细信息。"
-
-msgid ""
-"The following is an example configuration for the accuracy evaluation config"
-" file:"
-msgstr "以下是精度评估配置文件的示例配置："
 
 msgid ""
 "**Run the performance evaluation using the GSM8K dataset as an example:**"
@@ -581,13 +565,6 @@ msgid ""
 msgstr ""
 "上下文并行（CP）将单个请求的 KV 缓存拆分到多个 NPU 上，适用于单节点上的长上下文场景。PD 分离将 Prefill 和 Decode "
 "分布到不同节点，适用于处理大量并发请求的高吞吐量服务。"
-
-msgid ""
-"- [vLLM Serving Arguments documentation](https://docs.vllm.com.cn/en/latest/cli/serve/?h=block+size#arguments) — Additional parameter details for vLLM serve commands.\n"
-"    - [Environment Variables](../../user_guide/configuration/env_vars.md) — Ascend-specific environment variables (`HCCL_*`, etc.)."
-msgstr ""
-"- [vLLM 服务参数文档](https://docs.vllm.com.cn/en/latest/cli/serve/?h=block+size#arguments) — vLLM serve 命令的附加参数详情。\n"
-"    - [环境变量](../../user_guide/configuration/env_vars.md) — Ascend 专用环境变量（`HCCL_*` 等）。"
 
 msgid "**Service Verification:**"
 msgstr "**服务验证：**"

@@ -43,10 +43,6 @@ msgstr "=== \"单卡\""
 msgid "=== \"Multi cards\""
 msgstr "=== \"多卡\""
 
-msgid ""
-"After starting the container, you should install the required packages:"
-msgstr "启动容器后，您需要安装所需的软件包："
-
 msgid "## Running tests"
 msgstr "## 运行测试"
 
@@ -93,20 +89,11 @@ msgstr "这将重现端到端测试的行为。"
 msgid "#### Nightly-triggered E2E test"
 msgstr "#### 夜间触发的端到端测试"
 
-msgid "You can run tests with `pytest` as well. Typical examples:"
-msgstr "您也可以使用 `pytest` 运行测试。典型示例如下："
-
 msgid "=== \"Local (CPU)\""
 msgstr "=== \"本地 (CPU)\""
 
 msgid "You can't run the E2E test on CPUs."
 msgstr "您无法在 CPU 上运行端到端测试。"
-
-msgid "=== \"Single-card\""
-msgstr "=== \"单卡\""
-
-msgid "=== \"Multi-card\""
-msgstr "=== \"多卡\""
 
 msgid ""
 "For running nightly single-node model test cases locally, refer to the "
@@ -190,26 +177,8 @@ msgid ""
 "After starting the container, you should install the required packages:"
 msgstr "启动容器后，您需要安装所需的软件包："
 
-msgid "=== \"Local (CPU)\""
-msgstr "=== \"本地（CPU）\""
-
-msgid "=== \"Local (CPU)\""
-msgstr "=== \"本地（CPU）\""
-
-msgid "=== \"Single-card\""
-msgstr "=== \"单卡\""
-
-msgid "=== \"Multi-card\""
-msgstr "=== \"多卡\""
-
 msgid "You can run tests with `pytest` as well. Typical examples:"
 msgstr "您也可以使用 `pytest` 运行测试。典型示例如下："
-
-msgid "=== \"Local (CPU)\""
-msgstr "=== \"本地（CPU）\""
-
-msgid "You can't run the E2E test on CPUs."
-msgstr "无法在CPU上运行端到端测试。"
 
 msgid "=== \"Single-card\""
 msgstr "=== \"单卡\""

@@ -194,9 +194,6 @@ msgstr "=== \"节点 0\""
 msgid "=== \"Node 1\""
 msgstr "=== \"节点 1\""
 
-msgid "Startup Command:"
-msgstr "启动命令："
-
 msgid ""
 "- `--data-parallel-size`: total number of data parallel ranks across all nodes. In this example, `4` means the model is split across 4 DP ranks total (2 per node).\n"
 "- `--data-parallel-size-local`: number of data parallel ranks running on the current node. In this example, each node runs 2 DP ranks.\n"
@@ -220,9 +217,6 @@ msgid ""
 "troubleshooting."
 msgstr ""
 "常见问题提示：如果遇到问题，请参考[公共常见问题解答](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)进行故障排除。"
-
-msgid "Service Verification:"
-msgstr "服务验证："
 
 msgid ""
 "The service returns HTTP 200 OK. The JSON response contains the `choices` "
@@ -320,9 +314,6 @@ msgstr "=== \"节点 0(Decode)\""
 msgid "=== \"Node 1(Decode)\""
 msgstr "=== \"节点 1(Decode)\""
 
-msgid "Key Parameter Descriptions:"
-msgstr "关键参数说明："
-
 msgid ""
 "- `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the communication optimization function on the prefill nodes.\n"
 "- `VLLM_ASCEND_ENABLE_MLAPO=1`: enables the fusion operator, which can significantly improve performance but consumes more NPU memory. In the Prefill-Decode (PD) separation scenario, enable MLAPO only on decode nodes.\n"
@@ -404,9 +395,6 @@ msgstr "## 6 功能验证"
 msgid ""
 "Once your server is started, you can query the model with input prompts:"
 msgstr "服务器启动后，您可以使用输入提示词查询模型："
-
-msgid "Expected Result:"
-msgstr "预期结果："
 
 msgid ""
 "The service returns HTTP 200 OK. The JSON response contains the `choices` "
@@ -601,40 +589,14 @@ msgid ""
 "tp8`."
 msgstr "答：对于单节点部署，我们推荐使用`dp4 tp4`而非`dp2 tp8`。"
 
-msgid "Start the docker image on your each node."
-msgstr "在每个节点上启动 Docker 镜像。"
-
 msgid "Startup Command:"
 msgstr "启动命令："
-
-msgid "Startup Command:"
-msgstr "启动命令："
-
-msgid "Key Parameter Descriptions:"
-msgstr "关键参数说明："
-
-msgid ""
-"Common Issues Tip: If you encounter issues, please refer to the [Public "
-"FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for "
-"troubleshooting."
-msgstr ""
-"常见问题提示：如果遇到问题，请参考[公共 "
-"FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) 进行故障排除。"
 
 msgid "Service Verification:"
 msgstr "服务验证："
 
-msgid "Expected Result:"
-msgstr "预期结果："
-
 msgid "Key Parameter Descriptions:"
 msgstr "关键参数说明："
 
 msgid "Expected Result:"
 msgstr "预期结果："
-
-msgid "Expected Result:"
-msgstr "预期结果："
-
-msgid "### Using AISBench"
-msgstr "### 使用 AISBench"

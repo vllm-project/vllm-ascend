@@ -241,3 +241,37 @@ msgstr ""
 "- RFork 权重传输不支持 `additional_config.layer_sharding`。如果 `--load-format rfork` 与 `layer_sharding` 一起使用，RFork 传输将被绕过，模型将通过默认模型加载器加载。\n"
 "- RFork 权重传输不支持动态 EPLB，因为专家权重和放置位置可能在种子服务启动后发生变化。如果 `eplb_config.dynamic_eplb` 或 `eplb_config.expert_map_record_path` 启用了动态 EPLB，RFork 传输将被绕过，模型将通过默认模型加载器加载。\n"
 "- 示例 [`rfork_planner.py`](https://github.com/vllm-project/vllm-ascend/blob/main/examples/rfork/rfork_planner.py) 仅是一个简单的模拟实现。如果您需要更强的调度、容量管理或生产级可用性行为，请基于 RFork 种子协议实现您自己的规划器。"
+
+msgid "## Overview"
+msgstr ""
+
+msgid ""
+"RFork is a warm-start weight loading path for vLLM Ascend. Instead of always"
+" reading model weights from storage, a new instance can request a compatible"
+" **seed** instance from an external planner, then pull weights directly from"
+" that seed through `YuanRong TransferEngine`."
+msgstr ""
+
+msgid "The RFork loading flow in the current implementation is:"
+msgstr ""
+
+msgid ""
+"1. vLLM starts with `--load-format rfork`.\n"
+"2. RFork builds a **seed key** from the model identity and deployment topology.\n"
+"3. RFork asks the planner for an available seed matching that key.\n"
+"4. If a seed is returned, the new instance initializes the model structure on its local NPU, registers local weight memory, fetches the remote transfer-engine metadata from the seed, and performs batch weight transfer into local parameter buffers.\n"
+"5. If no seed is available, or any step fails, RFork cleans up and falls back to the default loader.\n"
+"6. After the instance finishes loading, it starts a local seed service and periodically reports heartbeat to the planner, so later instances can reuse it."
+msgstr ""
+
+msgid "## Flowchart"
+msgstr ""
+
+msgid "## Application Scenarios"
+msgstr ""
+
+msgid ""
+"- **Scale-out after a first successful load**: The first instance may still load from storage, but later instances with the same deployment identity can reuse it as a seed and shorten startup time.\n"
+"- **Elastic serving clusters**: Because RFork asks a planner for available seeds, it fits clusters where instances are created and reclaimed dynamically.\n"
+"- **Topology-sensitive deployments**: RFork encodes `kv_role`, `node_rank`, optional `pp_rank`, `tp_rank`, optional `ep_rank`, and optional `draft` role into the seed key, so only topology-compatible instances are matched together."
+msgstr ""

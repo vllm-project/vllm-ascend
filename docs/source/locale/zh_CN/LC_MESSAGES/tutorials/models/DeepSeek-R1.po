@@ -112,9 +112,6 @@ msgstr "=== \"A3 系列\""
 msgid "=== \"A2 series\""
 msgstr "=== \"A2 系列\""
 
-msgid "Start the docker image on your each node."
-msgstr "在每个节点上启动 Docker 镜像。"
-
 msgid ""
 "After a successful docker run, you can verify the running container service "
 "by executing the `docker ps` command."
@@ -182,12 +179,6 @@ msgstr "=== \"节点 0\""
 msgid "=== \"Node 1\""
 msgstr "=== \"节点 1\""
 
-msgid "Startup Command:"
-msgstr "启动命令："
-
-msgid "Key Parameter Descriptions:"
-msgstr "关键参数说明："
-
 msgid ""
 "- `--data-parallel-size`: total number of data parallel ranks across all nodes. In this example, `4` means the model is split across 4 DP ranks total (2 per node).\n"
 "- `--data-parallel-size-local`: number of data parallel ranks running on the current node. In this example, each node runs 2 DP ranks.\n"
@@ -212,12 +203,6 @@ msgid ""
 msgstr ""
 "常见问题提示：如果遇到问题，请参考[公共 "
 "FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) 进行故障排除。"
-
-msgid "Service Verification:"
-msgstr "服务验证："
-
-msgid "Expected Result:"
-msgstr "预期结果："
 
 msgid ""
 "The service returns HTTP 200 OK. The JSON response contains the `choices` "
@@ -289,9 +274,6 @@ msgstr "3. 执行后，您可以获得结果。"
 msgid "## 8 Performance Evaluation"
 msgstr "## 8 性能评估"
 
-msgid "### Using AISBench"
-msgstr "### 使用 AISBench"
-
 msgid ""
 "Refer to [Using AISBench for performance "
 "evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-"
@@ -360,19 +342,8 @@ msgstr "在每个节点上启动 Docker 镜像。"
 msgid "Startup Command:"
 msgstr "启动命令："
 
-msgid "Startup Command:"
-msgstr "启动命令："
-
 msgid "Key Parameter Descriptions:"
 msgstr "关键参数说明："
-
-msgid ""
-"Common Issues Tip: If you encounter issues, please refer to the [Public "
-"FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for "
-"troubleshooting."
-msgstr ""
-"常见问题提示：如遇问题，请参考[公共 "
-"FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) 进行故障排查。"
 
 msgid "Service Verification:"
 msgstr "服务验证："
@@ -382,11 +353,3 @@ msgstr "预期结果："
 
 msgid "### Using AISBench"
 msgstr "### 使用 AISBench"
-
-msgid ""
-"We recommend using DeepSeek-V3.1 for deployment: "
-"[DeepSeek-V3.1](./DeepSeek-V3.1.md)."
-msgstr "我们推荐使用 DeepSeek-V3.1 进行部署：[DeepSeek-V3.1](./DeepSeek-V3.1.md)。"
-
-msgid "This solution has been tested and demonstrates excellent performance."
-msgstr "该方案已通过测试，表现出卓越的性能。"

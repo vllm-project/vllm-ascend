@@ -339,18 +339,3 @@ msgid ""
 msgstr ""
 "答：首先减小`--max-num-seqs`和`--max-model-len`。如有必要，降低并发度和负载测试压力（例如`max-"
 "concurrency` / `num-prompts`）。"
-
-msgid "1. Prefill node 0"
-msgstr "1. 预填充节点 0"
-
-msgid "2. Prefill node 1"
-msgstr "2. 预填充节点 1"
-
-msgid "3. Decode node 0"
-msgstr "3. 解码节点 0"
-
-msgid "4. Decode node 1"
-msgstr "4. 解码节点 1"
-
-msgid "### Using AISBench"
-msgstr "### 使用 AISBench"

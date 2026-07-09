@@ -248,9 +248,6 @@ msgstr ""
 msgid "- DeepSeek-V3.1-W8A8:"
 msgstr "- DeepSeek-V3.1-W8A8："
 
-msgid "- DeepSeek-V3.1-W8A8:"
-msgstr "- DeepSeek-V3.1-W8A8："
-
 #~ msgid "Dynamic Chunked Pipeline Parallel"
 #~ msgstr "动态分块流水线并行"
 

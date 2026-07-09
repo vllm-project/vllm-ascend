@@ -289,6 +289,33 @@ msgid ""
 "- Dumps are too large: Start with a `statistics` task to locate abnormal tensors, then narrow the scope with `scope`/`list`/`tensor_list`, `filters`, `token_range`, etc."
 msgstr ""
 
+msgid "## Appendix"
+msgstr ""
+
+msgid "### dump.json file description"
+msgstr ""
+
+msgid "#### L0 level"
+msgstr ""
+
+msgid ""
+"- `Module.conv2.Conv2d.forward.0`: Forward data of the module. `input_args` "
+"represents positional inputs, `input_kwargs` represents keyword inputs, "
+"`output` stores forward outputs, and `parameters` stores weights/biases."
+msgstr ""
+
+msgid "#### L1 level"
+msgstr ""
+
+msgid ""
+"- `Functional.relu.0.forward`: Forward data of the API. `input_args` are "
+"positional inputs, `input_kwargs` are keyword inputs, and `output` stores "
+"the forward outputs."
+msgstr ""
+
+msgid "#### mix level"
+msgstr ""
+
 #~ msgid "MSProbe Debugging Guide"
 #~ msgstr "MSProbe 调试指南"
 

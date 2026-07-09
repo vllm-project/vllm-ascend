@@ -130,9 +130,6 @@ msgid ""
 msgstr ""
 "- 量化模型 `InternVL3_5-241B-A28B-w8a8` 可以部署在 1 个 Atlas 800 A3 (64G × 16) 上。"
 
-msgid "Run the following script to execute online inference."
-msgstr "运行以下脚本执行在线推理。"
-
 msgid ""
 "Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md)."
 msgstr "常见问题提示：如果遇到问题，请参考[常见问题解答](../../faqs.md)。"
@@ -219,7 +216,3 @@ msgstr "- 常见问题提示：如果遇到问题，请参考[常见问题解答
 
 msgid "Run the following script to execute online inference."
 msgstr "运行以下脚本执行在线推理。"
-
-msgid ""
-"Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md)."
-msgstr "常见问题提示：如果遇到问题，请参考[常见问题](../../faqs.md)。"

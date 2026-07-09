@@ -104,3 +104,40 @@ msgstr ""
 "- 如果使用 Netloader，**每个工作进程**必须绑定一个监听端口。该端口可由用户指定或随机分配。如果由用户指定，请确保其可用。  \n"
 "- Netloader 需要额外的片上内存来建立 HCCL 连接（即 `HCCL_BUFFERSIZE`，默认约 200 MB）。用户应预留足够的容量（例如通过 `--gpu-memory-utilization`）。  \n"
 "- 建议设置 `VLLM_SLEEP_WHEN_IDLE=1` 以缓解连接/传输不稳定或缓慢的问题。相关信息：[vLLM Issue #16660](https://github.com/vllm-project/vllm/issues/16660)，[vLLM PR #16226](https://github.com/vllm-project/vllm/pull/16226)。"
+
+msgid "## Overview"
+msgstr ""
+
+msgid ""
+"Netloader leverages high-bandwidth peer-to-peer (P2P) transfers between NPU "
+"cards to load model weights. It is implemented as a plugin (via the "
+"`register_model_loader` API added in vLLM 0.10). The workflow is:"
+msgstr ""
+
+msgid ""
+"1. A **server** preloads a model.  \n"
+"2. A new **client** instance requests weight transfer.  \n"
+"3. After validating that the model and partitioning match, the client uses HCCL collective communication (send/recv) to receive weights in the same order as stored in the model."
+msgstr ""
+
+msgid ""
+"The server runs alongside normal inference tasks via sub-threads and via "
+"`stateless_init_torch_distributed_process_group` in vLLM. The client thus "
+"takes over weight initialization without needing to load from storage."
+msgstr ""
+
+msgid "### Flowchart"
+msgstr ""
+
+msgid "### Timing Diagram"
+msgstr ""
+
+msgid "### Application Scenarios"
+msgstr ""
+
+msgid ""
+"- **Reduce startup latency**: By reusing already loaded weights and transferring them directly between NPU cards, Netloader cuts down model loading time versus conventional remote/local pull strategies.  \n"
+"- **Relieve network & storage load**: Avoid repeated downloads of weight files from remote repositories, thus reducing pressure on central storage and network traffic.  \n"
+"- **Improve resource utilization & lower cost**: Faster loading allows less reliance on standby compute nodes; resources can be scaled up/down more flexibly.  \n"
+"- **Enhance business continuity & high availability**: In failure recovery, new instances can quickly take over without long downtime, improving system reliability and user experience."
+msgstr ""

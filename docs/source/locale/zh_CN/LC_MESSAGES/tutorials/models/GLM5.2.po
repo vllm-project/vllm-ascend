@@ -274,16 +274,6 @@ msgid ""
 msgstr ""
 "对于此 8 节点 A2 布局的请求转发，请在下面的请求转发命令中使用 4 个预填充主机（每个 1 个端点）和 4 个解码器主机（每个 2 个端点）。"
 
-msgid ""
-"To set up request forwarding, run the following script on any machine. You "
-"can get the proxy program in the repository's examples: "
-"[load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-"
-"ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)"
-msgstr ""
-"要设置请求转发，请在任意机器上运行以下脚本。您可以在仓库的示例中获取代理程序：[load_balance_proxy_server_example.py](https://github.com/vllm-"
-"project/vllm-"
-"ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)"
-
 msgid "**Notice:**"
 msgstr "**注意：**"
 
@@ -338,9 +328,6 @@ msgstr "尚未测试。"
 msgid "## Performance"
 msgstr "## 性能"
 
-msgid "### Using AISBench"
-msgstr "### 使用 AISBench"
-
 msgid ""
 "Refer to [Using AISBench for performance "
 "evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-"
@@ -374,27 +361,6 @@ msgstr "- **问：如何为 GLM-5.2 启用函数调用？**"
 
 msgid "A: Please add following configurations in vLLM startup command"
 msgstr "答：请在 vLLM 启动命令中添加以下配置"
-
-msgid "=== \"A3 series\""
-msgstr "=== \"A3 系列\""
-
-msgid "=== \"A2 series\""
-msgstr "=== \"A2 系列\""
-
-msgid "**node 0**"
-msgstr "**节点 0**"
-
-msgid "**node 1**"
-msgstr "**节点 1**"
-
-msgid "2. Prefill node 1"
-msgstr "2. 预填充节点 1"
-
-msgid "3. Decode node 0"
-msgstr "3. 解码节点 0"
-
-msgid "4. Decode node 1"
-msgstr "4. 解码节点 1"
 
 msgid ""
 "To set up request forwarding, run the following script on any machine. You "

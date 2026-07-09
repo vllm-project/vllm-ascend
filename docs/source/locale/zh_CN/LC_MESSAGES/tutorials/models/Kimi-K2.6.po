@@ -300,9 +300,6 @@ msgstr "=== \"节点0(Decode)\""
 msgid "=== \"Node 1(Decode)\""
 msgstr "=== \"节点1(Decode)\""
 
-msgid "Key Parameter Descriptions:"
-msgstr "关键参数说明："
-
 msgid ""
 "- `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the communication optimization function on the prefill nodes.\n"
 "- `VLLM_ASCEND_ENABLE_MLAPO=1`: enables the fusion operator, which can significantly improve performance but consumes more NPU memory. In the Prefill-Decode (PD) separation scenario, enable MLAPO only on decode nodes.\n"
@@ -362,9 +359,6 @@ msgid ""
 "Once your server is started, you can query the model with input prompts:"
 msgstr "服务器启动后，您可以使用输入提示查询模型："
 
-msgid "Expected Result:"
-msgstr "预期结果："
-
 msgid ""
 "The service returns HTTP 200 OK. The JSON response contains the `choices` "
 "field with the generated text, along with usage statistics:"
@@ -402,9 +396,6 @@ msgstr ""
 
 msgid "## 8 Performance Evaluation"
 msgstr "## 8 性能评估"
-
-msgid "### Using AISBench"
-msgstr "### 使用 AISBench"
 
 msgid ""
 "Refer to [Using AISBench for performance "
@@ -571,14 +562,8 @@ msgstr ""
 "答：要使用 tool_calls 功能，请确保您的 transformers 版本为 4.57.6 或更低。如果 vllm-ascend 已升级到 "
 "v0.21 或更高版本，则此要求不再适用。"
 
-msgid "Start the docker image on your each node."
-msgstr "在每个节点上启动 Docker 镜像。"
-
 msgid "Key Parameter Descriptions:"
 msgstr "关键参数说明："
-
-msgid "Expected Result:"
-msgstr "预期结果："
 
 msgid "Expected Result:"
 msgstr "预期结果："

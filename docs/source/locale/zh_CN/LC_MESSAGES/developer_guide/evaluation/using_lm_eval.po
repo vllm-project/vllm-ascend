@@ -63,21 +63,6 @@ msgstr "您可以在单个 NPU 上运行 Docker 容器："
 msgid "### 2. Run GSM8K using lm-eval for accuracy testing"
 msgstr "### 2. 使用 lm-eval 运行 GSM8K 进行精度测试"
 
-msgid "Install lm-eval in the container:"
-msgstr "在容器中安装 lm-eval："
-
-msgid ""
-"The Docker container is launched with `VLLM_USE_MODELSCOPE=True`, which may\n"
-"    cause lm-eval to download datasets from ModelScope instead of HuggingFace.\n"
-"    Setting `USE_MODELSCOPE_HUB=0` disables this behavior so that lm-eval can\n"
-"    fetch datasets from HuggingFace correctly."
-msgstr ""
-"Docker 容器启动时设置了 `VLLM_USE_MODELSCOPE=True`，这可能导致 lm-eval 从 ModelScope 而非 HuggingFace 下载数据集。\n"
-"    设置 `USE_MODELSCOPE_HUB=0` 可禁用此行为，使 lm-eval 能够正确地从 HuggingFace 获取数据集。"
-
-msgid "Run the following command:"
-msgstr "运行以下命令："
-
 msgid "After 1 to 2 minutes, the output is shown below:"
 msgstr "1 到 2 分钟后，输出如下所示："
 

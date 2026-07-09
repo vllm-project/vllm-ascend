@@ -128,9 +128,6 @@ msgstr "## 性能"
 msgid "### Using AISBench"
 msgstr "### 使用 AISBench"
 
-msgid "output:"
-msgstr "输出："
-
 msgid "### Using vLLM Benchmark"
 msgstr "### 使用 vLLM Benchmark"
 

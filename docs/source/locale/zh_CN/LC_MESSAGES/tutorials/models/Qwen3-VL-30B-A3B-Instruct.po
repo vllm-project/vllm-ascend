@@ -172,35 +172,6 @@ msgstr ""
 msgid "### Offline Inference"
 msgstr ""
 
-msgid ""
-"Run the following command inside the container to start the vLLM server on "
-"multi-NPU:"
-msgstr ""
-
-msgid ""
-"vllm-ascend supports Expert Parallelism (EP) via `--enable-expert-parallel`,"
-" which allows experts in MoE models to be deployed on separate GPUs for "
-"better throughput."
-msgstr ""
-
-msgid ""
-"You can set `--max-model-len` to preserve memory. By default the model's "
-"context length is 262K, but `--max-model-len 128000` is good for most "
-"scenarios."
-msgstr ""
-
-msgid ""
-"Once your server is started, you can query the model with input prompts:"
-msgstr ""
-
-msgid ""
-"If you query the server successfully, you can see the info shown below "
-"(client):"
-msgstr ""
-
-msgid "Logs of the vllm server:"
-msgstr ""
-
 #~ msgid "Qwen3-VL-30B-A3B-Instruct"
 #~ msgstr "Qwen3-VL-30B-A3B-Instruct"
 

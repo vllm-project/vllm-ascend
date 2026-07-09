@@ -210,3 +210,21 @@ msgid ""
 msgstr ""
 "- 在非对称 TP 配置中，仅支持 P 节点 TP 度数高于 D 节点且 P 的 TP 数量是 D 的 TP 数量的整数倍的情况（即 P_tp > "
 "D_tp 且 P_tp % D_tp = 0）。"
+
+msgid "## Usage"
+msgstr ""
+
+msgid ""
+"vLLM Ascend currently supports two types of connectors for handling KV cache"
+" management:"
+msgstr ""
+
+msgid ""
+"- **MooncakeConnector**: D nodes pull KV cache from P nodes.\n"
+"- **MooncakeLayerwiseConnector**: P nodes push KV cache to D nodes in a layered manner."
+msgstr ""
+
+msgid ""
+"For step-by-step deployment and configuration, refer to the following guide:  \n"
+"[https://docs.vllm.ai/projects/ascend/en/latest/tutorials/features/pd_disaggregation_mooncake_multi_node.html](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/features/pd_disaggregation_mooncake_multi_node.html)"
+msgstr ""

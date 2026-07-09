@@ -283,20 +283,3 @@ msgid ""
 "some requests before conducting performance tests to achieve the best end-"
 "to-end throughput."
 msgstr "由于某些NPU算子的计算需要多轮预热才能达到最佳性能，我们建议在进行性能测试前，先用一些请求预热服务，以获得最佳的端到端吞吐量。"
-
-msgid "1. Single Node Verification:"
-msgstr ""
-
-msgid ""
-"Execute the following commands on each node in sequence. The results must "
-"all be `success` and the status must be `UP`:"
-msgstr ""
-
-msgid "2. Get NPU IP Addresses"
-msgstr ""
-
-msgid "=== \"Prefiller node\""
-msgstr ""
-
-msgid "=== \"Decoder node\""
-msgstr ""

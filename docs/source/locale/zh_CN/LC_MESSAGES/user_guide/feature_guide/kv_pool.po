@@ -468,9 +468,6 @@ msgstr "启动 MetaService 服务。"
 msgid "### PD Disaggregation Scenario"
 msgstr "### PD 分离场景"
 
-msgid "#### 1. Run `prefill` Node and `decode` Node"
-msgstr "#### 1. 运行 `prefill` 节点和 `decode` 节点"
-
 msgid ""
 "Using `MultiConnector` to simultaneously utilize both `MooncakeConnectorV1` "
 "and `AscendStoreConnector`. `MooncakeConnectorV1` performs kv_transfer, "
@@ -483,16 +480,10 @@ msgstr ""
 msgid "**run_prefill.sh/run_decode.sh:**"
 msgstr "**run_prefill.sh/run_decode.sh：**"
 
-msgid "#### 2. Start proxy_server"
-msgstr "#### 2. 启动 proxy_server"
-
 msgid ""
 "Refer to [Start proxy_server](#2-start-proxy_server) in the MooncakeStore "
 "deployment section."
 msgstr "请参考 MooncakeStore 部署章节中的 [启动 proxy_server](#2-start-proxy_server)。"
-
-msgid "#### 3. Run Inference"
-msgstr "#### 3. 运行推理"
 
 msgid ""
 "Refer to [Run Inference](#3-run-inference) in the MooncakeStore deployment "
@@ -501,12 +492,6 @@ msgstr "请参考 MooncakeStore 部署章节中的 [运行推理](#3-run-inferen
 
 msgid "### PD-Mixed Scenario"
 msgstr "### PD 混合场景"
-
-msgid "#### 1. Run Mixed Deployment Script"
-msgstr "#### 1. 运行混合部署脚本"
-
-msgid "#### 800I A2/800T A2/800I A3/800T A3 Series"
-msgstr "#### 800I A2/800T A2/800I A3/800T A3 系列"
 
 msgid "**Run_pd_mix.sh:**"
 msgstr "**Run_pd_mix.sh：**"
@@ -633,9 +618,6 @@ msgstr ""
 msgid "To stop the worker:"
 msgstr "停止工作进程："
 
-msgid "### Environment Variable Configuration"
-msgstr "### 环境变量配置"
-
 msgid ""
 "Set the following environment variables on each node before starting vLLM:"
 msgstr "在启动 vLLM 之前，在每个节点上设置以下环境变量："
@@ -740,9 +722,6 @@ msgstr ""
 "  ASCII 键会被保留。更长的键或包含不支持字符的键会被重写为最多 1024 个字符并附加\n"
 "  哈希后缀，因此在调试后端存储时不要依赖原始键字符串。\n"
 "* 元戎不需要额外的缓冲区预注册步骤。后端在构建 blob 列表时直接使用设备指针。"
-
-msgid "#### [2. Run Inference](#2-run-inference)"
-msgstr "#### [2. 运行推理](#2-run-inference)"
 
 msgid "## FAQ"
 msgstr "## 常见问题"
@@ -1008,15 +987,6 @@ msgstr "简短问题："
 
 msgid "Long question:"
 msgstr "详细问题："
-
-msgid "Short question:"
-msgstr "简短问题："
-
-msgid "Long question:"
-msgstr "详细问题："
-
-msgid "### PD Disaggregation Scenario"
-msgstr "### PD分离场景"
 
 msgid "#### 1. Run `prefill` Node and `decode` Node"
 msgstr "#### 1. 运行 `prefill` 节点和 `decode` 节点"

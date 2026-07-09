@@ -169,17 +169,8 @@ msgstr ""
 "量化模型 `DeepSeek-V4-Pro-w4a8-mtp` 至少需要 2 个 Atlas 800 A3（128G × 8）节点或 4 个 Atlas"
 " 800 A2（64G × 8）节点。请分别在每个节点上运行以下脚本。"
 
-msgid "=== \"A2 series\""
-msgstr "=== \"A2 系列\""
-
 msgid "**Node1-Node3**"
 msgstr "**节点1-节点3**"
-
-msgid "=== \"A3 series\""
-msgstr "=== \"A3 系列\""
-
-msgid "**Node0**"
-msgstr "**节点0**"
 
 msgid "**Node1**"
 msgstr "**节点1**"
@@ -293,20 +284,11 @@ msgstr "本节展示了在Atlas 800 A2（64G × 8）多节点环境下，以1P1D
 msgid "Before you start, please:"
 msgstr "开始前，请："
 
-msgid "1. Prepare the script `launch_online_dp.py` on each node."
-msgstr "1. 在每个节点上准备脚本 `launch_online_dp.py`。"
-
-msgid "2. Prepare the script `run_dp_template.sh` on each node."
-msgstr "2. 在每个节点上准备脚本 `run_dp_template.sh`。"
-
 msgid "1. Prefill node (4 P nodes share the same script)"
 msgstr "1. Prefill节点（4个P节点共享同一脚本）"
 
 msgid "2. Decode node (4 D nodes share the same script)"
 msgstr "2. Decode节点（4个D节点共享同一脚本）"
-
-msgid "3. Start the server with the following command on each node."
-msgstr "3. 在每个节点上使用以下命令启动服务器。"
 
 msgid "1. Prefill node 0"
 msgstr "1. Prefill节点0"
@@ -342,9 +324,6 @@ msgid ""
 msgstr ""
 "请参考[Prefill-Decode分离 "
 "(Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md)部署P-D分离代理。"
-
-msgid "Key Parameter Descriptions:"
-msgstr "关键参数说明："
 
 msgid ""
 "- `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the communication optimization function on the prefill nodes.\n"
@@ -394,9 +373,6 @@ msgid ""
 " port number of the proxy node."
 msgstr "在<node0_ip>:<port>中，使用主节点的IP地址和端口号。如果主备节点分离，请使用代理节点的IP地址和端口号。"
 
-msgid "Expected Result:"
-msgstr "预期结果："
-
 msgid ""
 "The service returns HTTP 200 OK with a JSON response containing the "
 "`choices` field."
@@ -430,9 +406,6 @@ msgstr ""
 
 msgid "## 8 Performance Evaluation"
 msgstr "## 8 性能评估"
-
-msgid "### Using AISBench"
-msgstr "### 使用 AISBench"
 
 msgid ""
 "Refer to [Using AISBench for performance "
@@ -559,9 +532,6 @@ msgstr ""
 "常见环境、安装和通用参数问题，请参考[公共 "
 "FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)；本章仅涵盖模型特定问题。"
 
-msgid "Start the docker image on each node."
-msgstr "在每个节点上启动 Docker 镜像。"
-
 msgid "=== \"A2 series\""
 msgstr "=== \"A2 系列\""
 
@@ -570,15 +540,6 @@ msgstr "=== \"A3 系列\""
 
 msgid "**Node0**"
 msgstr "**节点0**"
-
-msgid "1. Prefill node 0"
-msgstr "1. 预填充节点0"
-
-msgid "2. Prefill node 1"
-msgstr "2. 预填充节点1"
-
-msgid "Before you start, please:"
-msgstr "开始之前，请："
 
 msgid "1. Prepare the script `launch_online_dp.py` on each node."
 msgstr "1. 在每个节点上准备脚本 `launch_online_dp.py`。"
@@ -589,34 +550,11 @@ msgstr "2. 在每个节点上准备脚本 `run_dp_template.sh`。"
 msgid "3. Start the server with the following command on each node."
 msgstr "3. 在每个节点上使用以下命令启动服务器。"
 
-msgid "1. Prefill node 0"
-msgstr "1. 预填充节点0"
-
-msgid "2. Prefill node 1"
-msgstr "2. 预填充节点1"
-
-msgid "4. Deploy the P-D disaggregation proxy."
-msgstr "4. 部署 P-D 分离代理。"
-
-msgid ""
-"Refer to [Prefill-Decode Disaggregation "
-"(Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md) to deploy "
-"the P-D disaggregation proxy."
-msgstr ""
-"请参考 [预填充-解码分离 "
-"(Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md) 来部署 P-D "
-"分离代理。"
-
 msgid "Key Parameter Descriptions:"
 msgstr "关键参数说明："
 
 msgid "Expected Result:"
 msgstr "预期结果："
-
-msgid ""
-"The service returns HTTP 200 OK with a JSON response containing the "
-"`choices` field."
-msgstr "服务返回 HTTP 200 OK，JSON 响应中包含 `choices` 字段。"
 
 msgid "### Using AISBench"
 msgstr "### 使用 AISBench"

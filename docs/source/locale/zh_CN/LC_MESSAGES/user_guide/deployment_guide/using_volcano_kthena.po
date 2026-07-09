@@ -152,9 +152,6 @@ msgstr ""
 msgid "Create ModelServer with the command below:"
 msgstr "使用以下命令创建 ModelServer："
 
-msgid "or"
-msgstr "或"
-
 msgid "### 2.4 ModelRoute: User-Facing Endpoint"
 msgstr "### 2.4 ModelRoute：面向用户的端点"
 
@@ -214,3 +211,23 @@ msgstr "更多高级功能，请参考 [Kthena 网站](https://kthena.volcano.sh
 
 msgid "or"
 msgstr "或"
+
+msgid "## 1. What is Prefill–Decode Disaggregation?"
+msgstr ""
+
+msgid "Large language model inference naturally splits into two phases:"
+msgstr ""
+
+msgid ""
+"- **Prefill**\n"
+"    - Processes input tokens and builds the key–value (KV) cache.\n"
+"    - Batch-friendly, high-throughput, well-suited to parallel NPU execution.\n"
+"- **Decode**\n"
+"    - Consumes the KV cache to generate output tokens.\n"
+"    - Latency-sensitive, memory-intensive, more sequential."
+msgstr ""
+
+msgid ""
+"From the client's perspective, this still looks like a single Chat / "
+"Completions endpoint."
+msgstr ""

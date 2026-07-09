@@ -111,9 +111,6 @@ msgstr ""
 "根据您的机器类型选择镜像，并在节点上启动 Docker 镜像，请参考[使用 Docker](../../installation.md#set-up-"
 "using-docker)。"
 
-msgid "Start the docker image on each node."
-msgstr "在每个节点上启动 Docker 镜像。"
-
 msgid ""
 "After a successful docker run, you can verify the running container service "
 "by executing the `docker ps` command."
@@ -163,12 +160,6 @@ msgid ""
 msgstr ""
 "单节点部署在同一节点内完成 Prefill 和 Decode。量化模型 `DeepSeek-V4-Flash-w8a8-mtp` 可部署在 1 个 "
 "Atlas 800 A3（128G × 8）或 1 个 Atlas 800 A2（64G × 8）节点上。"
-
-msgid "=== \"A2 series\""
-msgstr "=== \"A2 系列\""
-
-msgid "=== \"A3 series\""
-msgstr "=== \"A3 系列\""
 
 msgid "Run the following script to execute online inference."
 msgstr "运行以下脚本执行在线推理。"
@@ -292,12 +283,6 @@ msgstr ""
 msgid "Before you start, please:"
 msgstr "开始前，请："
 
-msgid "1. Prepare the script `launch_online_dp.py` on each node."
-msgstr "1. 在每个节点上准备脚本 `launch_online_dp.py`。"
-
-msgid "2. Prepare the script `run_dp_template.sh` on each node."
-msgstr "2. 在每个节点上准备脚本 `run_dp_template.sh`。"
-
 msgid "1. Prefill node (4 P nodes share the same script)"
 msgstr "1. Prefill节点（4个P节点共享同一脚本）"
 
@@ -312,9 +297,6 @@ msgstr ""
 
 msgid "2. Decode node (4 D nodes share the same script)"
 msgstr "2. Decode节点（4个D节点共享同一脚本）"
-
-msgid "3. Start the server with the following command on each node."
-msgstr "3. 在每个节点上使用以下命令启动服务器。"
 
 msgid "1. Prefill node"
 msgstr "1. Prefill节点"
@@ -347,9 +329,6 @@ msgstr ""
 "该代理同样参考 [Prefill-"
 "Decode分离（Deepseek）](../features/pd_disaggregation_mooncake_multi_node.md) "
 "实现。"
-
-msgid "Key Parameter Descriptions:"
-msgstr "关键参数说明："
 
 msgid ""
 "- `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the communication optimization function on the prefill nodes.\n"
@@ -409,9 +388,6 @@ msgid ""
 "node. If the primary and standby nodes are separated, use the IP address and"
 " port number of the proxy node."
 msgstr "在<node0_ip>:<port>中，使用主节点的IP地址和端口号。如果主备节点分离，请使用代理节点的IP地址和端口号。"
-
-msgid "Expected Result:"
-msgstr "预期结果："
 
 msgid ""
 "The service returns HTTP 200 OK with a JSON response containing the "
@@ -583,18 +559,6 @@ msgstr "=== \"A2 系列\""
 msgid "=== \"A3 series\""
 msgstr "=== \"A3 系列\""
 
-msgid "Run the following script to execute online inference."
-msgstr "运行以下脚本以执行在线推理。"
-
-msgid "1. Prefill node"
-msgstr "1. 预填充节点"
-
-msgid "2. Decode node"
-msgstr "2. 解码节点"
-
-msgid "Before you start, please:"
-msgstr "开始之前，请："
-
 msgid "1. Prepare the script `launch_online_dp.py` on each node."
 msgstr "1. 在每个节点上准备脚本 `launch_online_dp.py`。"
 
@@ -604,25 +568,8 @@ msgstr "2. 在每个节点上准备脚本 `run_dp_template.sh`。"
 msgid "3. Start the server with the following command on each node."
 msgstr "3. 在每个节点上使用以下命令启动服务器。"
 
-msgid "1. Prefill node"
-msgstr "1. 预填充节点"
-
-msgid "2. Decode node"
-msgstr "2. 解码节点"
-
-msgid "4. Deploy the P-D disaggregation proxy."
-msgstr "4. 部署 P-D 分离代理。"
-
 msgid "Key Parameter Descriptions:"
 msgstr "关键参数说明："
 
 msgid "Expected Result:"
 msgstr "预期结果："
-
-msgid ""
-"The service returns HTTP 200 OK with a JSON response containing the "
-"`choices` field."
-msgstr "服务返回 HTTP 200 OK，JSON 响应中包含 `choices` 字段。"
-
-msgid "### Using AISBench"
-msgstr "### 使用 AISBench"

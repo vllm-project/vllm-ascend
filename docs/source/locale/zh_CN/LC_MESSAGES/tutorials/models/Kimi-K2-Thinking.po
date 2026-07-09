@@ -89,9 +89,6 @@ msgid ""
 "the container status:"
 msgstr "容器启动后，在主机上运行以下命令验证容器状态："
 
-msgid "Expected Status:"
-msgstr "预期状态："
-
 msgid ""
 "Run the following command in the container to verify that Ascend devices are"
 " visible:"
@@ -512,12 +509,6 @@ msgid ""
 msgstr ""
 "- **问：使用 `model: \"Kimi-K2-Thinking\"` 请求时，API返回 `{\"error\":\"Model not "
 "found\"}` 或 `404`？**"
-
-msgid "Expected Status:"
-msgstr "预期状态："
-
-msgid "Expected Status:"
-msgstr "预期状态："
 
 msgid "Expected Status:"
 msgstr "预期状态："

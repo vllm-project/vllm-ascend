@@ -564,18 +564,6 @@ msgid ""
 " startup command:"
 msgstr ""
 
-msgid ""
-"> **Note**: The above parameters are validated in a specific test "
-"environment for reference only. Please adjust `--max-model-len`, `--max-num-"
-"seqs`, `--max-num-batched-tokens`, and `--gpu-memory-utilization` based on "
-"your actual input/output length, concurrency, and hardware configuration."
-msgstr ""
-
-msgid ""
-"- If you need to test with `curl` and tool calling, add the following to the"
-" startup command:"
-msgstr ""
-
 #~ msgid "MiniMax-M2"
 #~ msgstr "MiniMax-M2"
 

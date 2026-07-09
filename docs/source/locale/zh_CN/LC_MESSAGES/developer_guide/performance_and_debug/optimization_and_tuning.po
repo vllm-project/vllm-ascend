@@ -228,15 +228,9 @@ msgstr ""
 msgid "#### 4.4 Increase Scheduler Migration Cost"
 msgstr "#### 4.4 增加调度器迁移成本"
 
-msgid "Purpose"
-msgstr "目的"
-
 msgid ""
 "- Increases the cost for the scheduler to migrate tasks between CPU cores"
 msgstr "- 增加调度器在 CPU 核心之间迁移任务的成本"
-
-msgid "Benefits"
-msgstr "优势"
 
 msgid ""
 "- Reduces frequent thread migration\n"
@@ -258,18 +252,6 @@ msgstr ""
 "- 单位：纳秒 (ns)\n"
 "- 典型推荐范围：50000–100000\n"
 "- 值越高，线程越倾向于停留在同一 CPU 核心上"
-
-msgid "Purpose"
-msgstr "目的"
-
-msgid "Benefits"
-msgstr "优势"
-
-msgid "Purpose"
-msgstr "目的"
-
-msgid "Benefits"
-msgstr "优势"
 
 msgid "Purpose"
 msgstr "目的"

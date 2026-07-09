@@ -147,6 +147,7 @@ def _extract_paragraphs(content: str) -> list[str]:
     in_code = False
     fence_marker = ""
     frontmatter_started = False
+    any_content_seen = False
 
     current: list[str] = []
 
@@ -154,7 +155,11 @@ def _extract_paragraphs(content: str) -> list[str]:
         stripped = line.strip()
 
         # --- Frontmatter ---
-        if stripped == FRONTMATTER_DELIM and not frontmatter_started:
+        # Frontmatter ``---`` delimiters are only valid when they appear at the
+        # very beginning of the file (before any other content).  A ``---`` that
+        # appears after prose has already been encountered is a horizontal rule,
+        # not a frontmatter delimiter.
+        if stripped == FRONTMATTER_DELIM and not any_content_seen and not frontmatter_started:
             frontmatter_started = True
             in_frontmatter = True
             continue
@@ -198,6 +203,7 @@ def _extract_paragraphs(content: str) -> list[str]:
             continue
 
         # --- Prose line ---
+        any_content_seen = True
         current.append(line)
 
     # Flush final paragraph.
@@ -348,7 +354,7 @@ def process_file(source_path: Path, dry_run: bool = False, force: bool = False) 
     # invocations on files that already contain duplicate msgid entries
     # (e.g. from prior force rebuilds or buggy incremental runs) would
     # keep appending more copies.
-    _dedup_po_entries(po)
+    dedup_removed = _dedup_po_entries(po)
 
     entries_by_msgid: dict[str, POEntry] = {}
     for entry in po:
@@ -369,13 +375,26 @@ def process_file(source_path: Path, dry_run: bool = False, force: bool = False) 
     for para in paragraphs:
         remaining = para_counts.get(para, 0)
         if para in entries_by_msgid and remaining > 0:
+            # This paragraph already has a translated entry in the PO —
+            # consume it and keep the translation intact.
             del entries_by_msgid[para]
             para_counts[para] = remaining - 1
             continue
         # If the source has more occurrences of *para* than the PO has
-        # entries, we need to create additional entries.
+        # entries, we need to create additional entries.  However, if the
+        # first occurrence already consumed the sole PO entry for this
+        # msgid, the remaining occurrences should NOT create new empty
+        # entries — that would overwrite the existing translation.
+        # gettext only allows one entry per msgid anyway, so skip
+        # additional occurrences of already-matched paragraphs.
         if remaining > 0:
             para_counts[para] = remaining - 1
+            # Check whether a PO entry for this msgid already exists (it
+            # may have been consumed by an earlier occurrence above, or it
+            # may simply not exist).  If it exists anywhere in the PO,
+            # reuse it; otherwise create a new entry.
+            if _po_has_msgid(po, para):
+                continue
             po.append(_build_po_entry(para))
             new_count += 1
             continue
@@ -398,12 +417,14 @@ def process_file(source_path: Path, dry_run: bool = False, force: bool = False) 
         old_entry.obsolete = True
         removed_count += 1
 
-    change_count = new_count + modified_count + removed_count
+    change_count = new_count + modified_count + removed_count + dedup_removed
     if change_count == 0:
         return _has_empty_msgstr(po)
 
     if dry_run:
         parts = []
+        if dedup_removed:
+            parts.append(f"dedup {dedup_removed}")
         if new_count:
             parts.append(f"+{new_count} new")
         if modified_count:
@@ -422,6 +443,8 @@ def process_file(source_path: Path, dry_run: bool = False, force: bool = False) 
     po2 = pofile(str(po_path))
     po2.save(str(po_path))
     parts = []
+    if dedup_removed:
+        parts.append(f"dedup {dedup_removed}")
     if new_count:
         parts.append(f"+{new_count} new")
     if modified_count:
@@ -447,6 +470,11 @@ def _find_similar_entry(new_para: str, entries: dict[str, POEntry]) -> str | Non
         if _first_significant_line(msgid) == new_first:
             return msgid
     return None
+
+
+def _po_has_msgid(po: POFile, msgid: str) -> bool:
+    """Return True if *po* contains an entry with the given *msgid* (non-obsolete)."""
+    return any(entry.msgid == msgid and not entry.obsolete for entry in po)
 
 
 def _first_significant_line(text: str) -> str:

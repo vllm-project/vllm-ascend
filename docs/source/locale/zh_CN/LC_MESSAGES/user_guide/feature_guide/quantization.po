@@ -109,12 +109,6 @@ msgstr ""
 "[LLM-Compressor](https://github.com/vllm-project/llm-compressor) "
 "是一个统一的压缩模型库，用于加速 vLLM 推理。"
 
-msgid "#### Installation"
-msgstr "#### 安装"
-
-msgid "#### Model Quantization"
-msgstr "#### 模型量化"
-
 msgid "`LLM-Compressor` provides various quantization scheme examples."
 msgstr "`LLM-Compressor` 提供了多种量化方案示例。"
 

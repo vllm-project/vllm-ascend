@@ -214,29 +214,8 @@ msgid ""
 msgstr ""
 "`Qwen3.5-27B` 和 `Qwen3.6-27B` 共享相同的 MTP 头部设计，因此 `qwen3_5_mtp` 推测解码方法可以用于两者。"
 
-msgid ""
-":::::{tab-set}\n"
-":sync-group: qwen-startup"
-msgstr ""
-":::::{tab-set}\n"
-":sync-group: qwen-startup"
-
-msgid ""
-"::::{tab-item} Qwen3.5-27B-w8a8\n"
-":sync: qwen35-w8a8"
-msgstr ""
-"::::{tab-item} Qwen3.5-27B-w8a8\n"
-":sync: qwen35-w8a8"
-
 msgid "Startup Command:"
 msgstr "启动命令："
-
-msgid ""
-"::::{tab-item} Qwen3.6-27B-w8a8\n"
-":sync: qwen36-w8a8"
-msgstr ""
-"::::{tab-item} Qwen3.6-27B-w8a8\n"
-":sync: qwen36-w8a8"
 
 msgid "Startup Command (supports up to 262144 context length):"
 msgstr "启动命令（支持最长 262144 上下文长度）："
@@ -399,9 +378,6 @@ msgstr ""
 "project/vllm-"
 "ascend/blob/main/examples/external_online_dp/run_dp_template.sh)。"
 
-msgid "Key Parameter Descriptions:"
-msgstr "关键参数说明："
-
 msgid ""
 "- `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the Allreduce communication optimization on prefill nodes, which reduces the communication overhead of long-context prefill.\n"
 "- `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the KV Cache of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, enable this configuration only on decode nodes.\n"
@@ -492,11 +468,6 @@ msgid "**Chat Completions API:**"
 msgstr "**Chat Completions API：**"
 
 msgid ""
-"> **Note**: For `Qwen3.6-27B`, set `\"model\": \"qwen3.6\"` in the request "
-"body."
-msgstr "> **注意**：对于 `Qwen3.6-27B`，请在请求体中设置 `\"model\": \"qwen3.6\"`。"
-
-msgid ""
 "Expected Result: The service returns HTTP 200 OK. The JSON response contains"
 " the `choices` field with generated text. Example output for the completions"
 " API (content truncated for brevity):"
@@ -560,9 +531,6 @@ msgstr ""
 
 msgid "## 8 Performance Evaluation"
 msgstr "## 8 性能评估"
-
-msgid "### Using AISBench"
-msgstr "### 使用 AISBench"
 
 msgid ""
 "Refer to [Using AISBench for performance "
@@ -693,9 +661,6 @@ msgstr ""
 "常见环境、安装及通用参数问题，请参考[vLLM-Ascend "
 "公共常见问题](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)。"
 
-msgid "Start the docker image on your each node."
-msgstr ""
-
 msgid "Key Parameter Descriptions:"
 msgstr "关键参数说明："
 
@@ -706,3 +671,30 @@ msgstr "> **注意**：对于 `Qwen3.6-27B`，请在请求体中设置 `\"model\
 
 msgid "### Using AISBench"
 msgstr "### 使用 AISBench"
+
+msgid "=== \"Qwen3.5-27B-w8a8\""
+msgstr ""
+
+msgid "=== \"Qwen3.6-27B-w8a8\""
+msgstr ""
+
+#~ msgid ""
+#~ ":::::{tab-set}\n"
+#~ ":sync-group: qwen-startup"
+#~ msgstr ""
+#~ ":::::{tab-set}\n"
+#~ ":sync-group: qwen-startup"
+
+#~ msgid ""
+#~ "::::{tab-item} Qwen3.5-27B-w8a8\n"
+#~ ":sync: qwen35-w8a8"
+#~ msgstr ""
+#~ "::::{tab-item} Qwen3.5-27B-w8a8\n"
+#~ ":sync: qwen35-w8a8"
+
+#~ msgid ""
+#~ "::::{tab-item} Qwen3.6-27B-w8a8\n"
+#~ ":sync: qwen36-w8a8"
+#~ msgstr ""
+#~ "::::{tab-item} Qwen3.6-27B-w8a8\n"
+#~ ":sync: qwen36-w8a8"

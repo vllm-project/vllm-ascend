@@ -219,6 +219,3 @@ msgid ""
 "For more details about model capabilities and best practices, refer to the "
 "official Mixtral documentation and vllm-ascend user guide."
 msgstr "有关模型能力和最佳实践的更多详情，请参考官方 Mixtral 文档和 vllm-ascend 用户指南。"
-
-msgid "### Using AISBench"
-msgstr "### 使用AISBench"

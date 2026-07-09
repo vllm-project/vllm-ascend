@@ -357,3 +357,99 @@ msgid ""
 "If the custom handler fails to import, the system will automatically fall "
 "back to the default timer mode."
 msgstr "如果自定义处理器导入失败，系统将自动回退到默认的计时器模式。"
+
+msgid "## Ascend PyTorch Profiler"
+msgstr ""
+
+msgid "### 0. Installation and Configuration"
+msgstr ""
+
+msgid ""
+"No additional packages need to be installed; it can be enabled through "
+"command-line configuration. Currently, vLLM enables **python stack** by "
+"default, which can significantly inflate the collected performance data. If "
+"you do not wish to collect **python stack**, you can disable it using "
+"`torch_profiler_with_stack=false`."
+msgstr ""
+
+msgid "### 1. Preparation for Collection"
+msgstr ""
+
+msgid ""
+"Start the online service and set the `--profiler-config` parameter to "
+"control the path for saving performance files. After the parameter is set, "
+"the collection function is enabled."
+msgstr ""
+
+msgid ""
+"> Note:**January 19, 2026: The vLLM mainline has deprecated the "
+"VLLM_TORCH_PROFILER_DIR environment variable.**[Related "
+"PR](https://github.com/vllm-project/vllm-ascend/pull/5928)  When using the "
+"vLLM Ascend mainline code to collect profiler data, remember to use the "
+"`--profiler-config` (online) parameter or the `profiler_config` (offline) "
+"parameter."
+msgstr ""
+
+msgid "### 2. Start Collection"
+msgstr ""
+
+msgid ""
+"Performance collection is controlled by sending API requests. You can start "
+"collection after stabilizing the actual business data and collect profiling "
+"for a few seconds before stopping; or you can start collection first, then "
+"send business requests, and finally stop."
+msgstr ""
+
+msgid "Send the following request to start the profiling service:"
+msgstr ""
+
+msgid "Send the following request to stop the profiling service:"
+msgstr ""
+
+msgid ""
+"Send requests according to your actual business data. After sending the "
+"requests, stop the profiling service, and the data will be automatically "
+"saved to the previously configured path:"
+msgstr ""
+
+msgid "### 4. Analyze Data"
+msgstr ""
+
+msgid ""
+"Navigate to the `./vllm_profile` directory and locate the generated "
+"`*ascend_pt` folder. This folder needs to be analyzed before profiling data "
+"can be examined."
+msgstr ""
+
+msgid ""
+"After analysis, the `*ascend_pt` directory will contain many files, with the"
+" main analysis focus being the `ASCEND_PROFILER_OUTPUT` folder. This "
+"directory will include the following files:"
+msgstr ""
+
+msgid "- `analysis.db`: Performance data in database format"
+msgstr ""
+
+msgid "- `api_statistic.csv`: API call statistics"
+msgstr ""
+
+msgid "- `ascend_pytorch_profiler_0.db`: Performance data in database format"
+msgstr ""
+
+msgid "- `kernel_details.csv`: Kernel-level related data"
+msgstr ""
+
+msgid "- `operator_details.csv`: Operator-level related data"
+msgstr ""
+
+msgid "- `op_statistic.csv`: Operator utilization data"
+msgstr ""
+
+msgid "- `step_trace_time.csv`: Scheduling data"
+msgstr ""
+
+msgid ""
+"- `trace_view.json`: Chrome tracing format data, can be opened with "
+"[MindStudio "
+"Insight](https://www.hiascend.com/document/detail/zh/mindstudio/81RC1/GUI_baseddevelopmenttool/msascendinsightug/Insight_userguide_0002.html)"
+msgstr ""
