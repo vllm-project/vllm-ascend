@@ -40,16 +40,6 @@ if [ -z "${MR_THIRD_ID}" ]; then
 fi
 echo "Using current PR number as MR_THIRD_ID: ${MR_THIRD_ID}"
 
-# Global config
-# API_PREFIX="https://174e1b821a8446f38998a67186ba766e.apic.cn-southwest-2.huaweicloudapis.com/aurogon_service"
-# MR_THIRD_ID=826
-# NETWORK_ZONE=gitcode
-# PROJECT_PATH=Ascend/MindIE-LLM
-# BIND_ID_API2=16
-# PAGE_CURR=1
-# PAGE_SIZE=100
-
-# APIG auth 硬编码，无需外部传入环境变量
 X_APIG_APPCODE="2a934292a6ab4dc08b99d6304794a25443f724c21ab64082a7c168450e4bb883"
 APP_KEY="88df727ac9bb4d058c0e81bee9852c24"
 APP_SECRET="b049f8c7cc73485ca9912d1acd8b6e79"
@@ -90,7 +80,6 @@ while [ ${retry_cnt} -lt ${MAX_RETRY} ]; do
     break
 done
 
-# 重试耗尽仍失败
 if [[ ${retry_cnt} -ge ${MAX_RETRY} ]];then
     echo "ERROR: save mr api max retry reach, resp:${SAVE_MR_RET}"
     exit 10
@@ -112,7 +101,6 @@ fi
 # Api2 case recommend
 echo -e '\n===== Call case recommend api ====='
 curl_ret2=0
-# 使用printf生成合法标准JSON
 CASE_JSON=$(printf '{"current":%d,"size":%d,"bindId":%d,"bindType":"version","requirementList":"%s","requirementType":"MR","all":true}' \
 "${PAGE_CURR}" "${PAGE_SIZE}" "${BIND_ID_API2}" "${REQ_ID}")
 
@@ -131,7 +119,6 @@ if [[ ${curl_ret2} -ne 0 ]];then
     exit 13
 fi
 
-# 可选：增加业务code判断，和第一个接口逻辑对齐
 BUS_SUCCESS2=$(echo "${CASE_RET}" | grep -o '"success":[a-z]*' | cut -d: -f2)
 BUS_CODE2=$(echo "${CASE_RET}" | grep -o '"code":[0-9]*' | cut -d: -f2)
 if [[ "${BUS_SUCCESS2}" != "true" ]];then
@@ -142,7 +129,6 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYTEST_LIST_FILE="${SCRIPT_DIR}/recommended_pytest_paths.txt"
 
-# Api2 成功后：提取 name 并直接转换
 CASE_RET="${CASE_RET}" python3 <<'PY' > "${PYTEST_LIST_FILE}"
 import json
 import os
@@ -153,7 +139,6 @@ def name_to_pytest_target(name: str) -> str:
     if not name:
         return ""
 
-    # 情况2: file--testcase → file.py::testcase
     if "--" in name:
         file_part, test_func = name.split("--", 1)
         file_path = file_part.replace("__", "/")
@@ -161,7 +146,6 @@ def name_to_pytest_target(name: str) -> str:
             file_path += ".py"
         return f"{file_path}::{test_func}"
 
-    # 情况1: 纯文件 → file.py
     file_path = name.replace("__", "/")
     if not file_path.endswith(".py"):
         file_path += ".py"
