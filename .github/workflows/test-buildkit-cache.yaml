@@ -1,0 +1,84 @@
+name: test-buildkit-cache
+
+on:
+  workflow_dispatch:
+
+env:
+  BUILDKITD_ADDR: tcp://buildkitd-service.buildkitd:1234
+
+jobs:
+  cache-test:
+    runs-on: linux-aarch64-cpu-2-buildkit-gy006
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
+    steps:
+      - name: Setup context
+        run: |
+          mkdir -p /tmp/ctx
+          cat > /tmp/ctx/Dockerfile <<'DOCKERFILE'
+          FROM quay.io/ascend/cann:9.0.0-910b-openeuler24.03-py3.12
+          RUN echo cache-probe > /tmp/cache-probe-marker
+          DOCKERFILE
+
+          buildctl --version
+
+      - name: Round 1 (expect cache MISS)
+        run: |
+          set -e
+          echo "=== Round 1: fresh pull, expect MISS in registry-proxy log ==="
+          T0=$(date +%s)
+          buildctl build \
+            --addr "${BUILDKITD_ADDR}" \
+            --tlscacert "${DOCKER_CONFIG}/ca.pem" \
+            --tlscert  "${DOCKER_CONFIG}/cert.pem" \
+            --tlskey   "${DOCKER_CONFIG}/key.pem" \
+            --frontend dockerfile.v0 \
+            --local context=/tmp/ctx \
+            --local dockerfile=/tmp/ctx \
+            --no-cache \
+            --output type=image,name=test-torch-npu-cache:round1,push=false
+          T1=$(date +%s)
+          ROUND1_S=$((T1-T0))
+          echo "round1_s=${ROUND1_S}"
+          echo "ROUND1_S=${ROUND1_S}" >> "${GITHUB_ENV}"
+
+      - name: Prune buildkitd local cache
+        run: |
+          buildctl prune --all \
+            --addr "${BUILDKITD_ADDR}" \
+            --tlscacert "${DOCKER_CONFIG}/ca.pem" \
+            --tlscert  "${DOCKER_CONFIG}/cert.pem" \
+            --tlskey   "${DOCKER_CONFIG}/key.pem" \
+            || true
+
+      - name: Round 2 (expect cache HIT)
+        run: |
+          set -e
+          echo "=== Round 2: warm cache from round 1, expect HIT in registry-proxy log ==="
+          T0=$(date +%s)
+          buildctl build \
+            --addr "${BUILDKITD_ADDR}" \
+            --tlscacert "${DOCKER_CONFIG}/ca.pem" \
+            --tlscert  "${DOCKER_CONFIG}/cert.pem" \
+            --tlskey   "${DOCKER_CONFIG}/key.pem" \
+            --frontend dockerfile.v0 \
+            --local context=/tmp/ctx \
+            --local dockerfile=/tmp/ctx \
+            --no-cache \
+            --output type=image,name=test-torch-npu-cache:round2,push=false
+          T1=$(date +%s)
+          ROUND2_S=$((T1-T0))
+          echo "round2_s=${ROUND2_S}"
+
+          if [ "${ROUND1_S}" -gt 0 ]; then
+            DELTA_PCT=$(( (ROUND1_S - ROUND2_S) * 100 / ROUND1_S ))
+            echo "delta=${DELTA_PCT}% faster on round 2"
+          fi
+
+      - name: Summary
+        run: |
+          echo "=== BuildKit Cache Test Summary ==="
+          echo "Round 1 (cold): ${ROUND1_S}s"
+          echo "Round 2 (warm): see previous step for round2_s"
+          echo "Verify HIT/MISS against rpardini/squid logs per Step 3.3."
+          echo "✅ Both rounds completed"
