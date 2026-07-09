@@ -47,6 +47,15 @@ def _copy_host_tuple_to_int64_buffer(
     buffer[:num_elements].copy_(cpu_values, non_blocking=True)
 
 
+def _copy_device_tensor_to_int64_buffer(
+    buffer: torch.Tensor,
+    tensor: torch.Tensor,
+) -> None:
+    if tensor.numel() == 0:
+        return
+    buffer[: tensor.numel()].copy_(tensor.reshape(-1), non_blocking=True)
+
+
 def _as_int64_device_view(tensor: torch.Tensor) -> torch.Tensor:
     if tensor.dtype == torch.int64:
         return tensor
@@ -656,17 +665,40 @@ def update_conv1d_graph_params_310p(
                 continue
 
             cap_x_dim0 = int(mixed_qkv.size(0))
-            qsl_host, cidx_host, num_accepted_host = _get_spec_causal_conv1d_update_host_args_310p(meta)
-            new_query_start_loc, new_cache_indices, new_num_accepted = (
-                _pad_spec_conv1d_host_args_shape_consistent_dummy_310p(
-                    qsl_host,
-                    cidx_host,
-                    num_accepted_host,
-                    cap_x_dim0=cap_x_dim0,
-                    q_per_seq=q_per_seq,
-                )
+            num_spec_decodes = meta.num_spec_decodes
+            if num_spec_decodes <= 0:
+                continue
+
+            _copy_device_tensor_to_int64_buffer(
+                qsl_dev,
+                meta.spec_query_start_loc[: num_spec_decodes + 1],
             )
-            _copy_host_tuple_to_int64_buffer(qsl_dev, new_query_start_loc)
-            _copy_host_tuple_to_int64_buffer(cidx_dev, new_cache_indices)
+            _copy_device_tensor_to_int64_buffer(
+                cidx_dev,
+                meta.spec_state_indices_tensor[:, 0][:num_spec_decodes],
+            )
             if nat_dev is not None:
-                _copy_host_tuple_to_int64_buffer(nat_dev, new_num_accepted)
+                _copy_device_tensor_to_int64_buffer(
+                    nat_dev,
+                    meta.num_accepted_tokens[:num_spec_decodes],
+                )
+
+            pad_tokens = cap_x_dim0 - int(meta.num_spec_decode_tokens)
+            if pad_tokens <= 0 or q_per_seq <= 0:
+                continue
+
+            query_tail = []
+            next_qsl = int(meta.num_spec_decode_tokens)
+            full_pad_seqs, remainder = divmod(pad_tokens, q_per_seq)
+            for _ in range(full_pad_seqs):
+                next_qsl += q_per_seq
+                query_tail.append(next_qsl)
+            if remainder > 0:
+                query_tail.append(cap_x_dim0)
+
+            tail_start = num_spec_decodes + 1
+            _copy_host_tuple_to_int64_buffer(qsl_dev[tail_start:], tuple(query_tail))
+            tail_len = len(query_tail)
+            _copy_host_tuple_to_int64_buffer(cidx_dev[num_spec_decodes:], (PAD_SLOT_ID,) * tail_len)
+            if nat_dev is not None:
+                _copy_host_tuple_to_int64_buffer(nat_dev[num_spec_decodes:], (0,) * tail_len)
