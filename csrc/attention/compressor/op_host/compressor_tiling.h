@@ -55,6 +55,8 @@ constexpr uint32_t STATE_BLOCK_TABLE_INPUT_INDEX = 8;
 constexpr uint32_t CU_SEQ_LEN_INPUT_INDEX = 9;
 constexpr uint32_t SEQ_USED_INPUT_INDEX = 10;
 constexpr uint32_t START_POS_INPUT_INDEX = 11;
+constexpr uint32_t SLOT_MAPPING_INPUT_INDEX = 12;
+constexpr uint32_t PAGED_KV_CACHE_INPUT_INDEX = 13;
 
 // ATTR
 constexpr uint32_t ROPE_HEAD_DIM_ATTR_INDEX = 0;
@@ -64,6 +66,7 @@ constexpr uint32_t NORM_EPS_ATTR_INDEX = 3;
 constexpr uint32_t ROTARY_MODE_ATTR_INDEX = 4;
 constexpr uint32_t CACHE_MODE_ATTR_INDEX = 5;
 constexpr uint32_t STATE_CACHE_STRIDE_DIM0_ATTR_INDEX = 6;
+constexpr uint32_t SCATTER_BLOCK_SIZE_ATTR_INDEX = 7;
 
 // OUTPUT
 constexpr uint32_t CMP_KV_OUTPUT_INDEX = 0;
@@ -260,6 +263,8 @@ struct CompressorContext {
     OptionalParaInfo cuSeqlens;
     OptionalParaInfo seqUsed;
     OptionalParaInfo startPos;
+    OptionalParaInfo slotMapping;
+    OptionalParaInfo pagedKvCache;
     RequiredParaInfo cmpKv;
 
     const int *ropeHeadDim;
@@ -269,6 +274,7 @@ struct CompressorContext {
     const int *rotaryMode;
     const int *cacheMode;
     const int *stride;
+    const int *scatterBlockSize;
     TemplateId templateId;
 
     ge::DataType dtype = ge::DT_BF16;

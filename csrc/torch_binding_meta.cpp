@@ -784,8 +784,12 @@ compressor_meta(const at::Tensor &x, const at::Tensor &wkv, const at::Tensor &wg
                 const at::Tensor &ape, const at::Tensor &norm_weight, const at::Tensor &rope_sin,
                 const at::Tensor &rope_cos, const c10::optional<at::Tensor> &state_block_table,
                 const c10::optional<at::Tensor> &cu_seqlens, const c10::optional<at::Tensor> &seqused,
-                const c10::optional<at::Tensor> &start_pos, int64_t rope_head_dim, int64_t cmp_ratio, int64_t coff,
-                double norm_eps, int64_t rotary_mode, int64_t cache_mode)
+                const c10::optional<at::Tensor> &start_pos,
+                const c10::optional<at::Tensor> &slot_mapping,
+                const c10::optional<at::Tensor> &paged_kv_cache,
+                int64_t rope_head_dim, int64_t cmp_ratio, int64_t coff,
+                double norm_eps, int64_t rotary_mode, int64_t cache_mode,
+                int64_t block_size)
 {
     // construct the output tensor
     auto x_dim = x.dim();

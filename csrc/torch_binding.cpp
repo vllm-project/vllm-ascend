@@ -1149,8 +1149,12 @@ std::tuple<at::Tensor> compressor(const at::Tensor &x, const at::Tensor &wkv, co
                                   const at::Tensor &rope_sin, const at::Tensor &rope_cos,
                                   const c10::optional<at::Tensor> &state_block_table,
                                   const c10::optional<at::Tensor> &cu_seqlens, const c10::optional<at::Tensor> &seqused,
-                                  const c10::optional<at::Tensor> &start_pos, int64_t rope_head_dim, int64_t cmp_ratio,
-                                  int64_t coff, double norm_eps, int64_t rotary_mode, int64_t cache_mode)
+                                  const c10::optional<at::Tensor> &start_pos,
+                                  const c10::optional<at::Tensor> &slot_mapping,
+                                  const c10::optional<at::Tensor> &paged_kv_cache,
+                                  int64_t rope_head_dim, int64_t cmp_ratio,
+                                  int64_t coff, double norm_eps, int64_t rotary_mode, int64_t cache_mode,
+                                  int64_t block_size)
 {
     constexpr int CONTINUOUS = 1;
     constexpr int32_t DIM_1 = 1;
@@ -1184,8 +1188,9 @@ std::tuple<at::Tensor> compressor(const at::Tensor &x, const at::Tensor &wkv, co
     int64_t state_cache_stride_dim0 = state_cache.stride(0);
 
     EXEC_NPU_CMD(aclnnCompressor, x, wkv, wgate, state_cache, ape, norm_weight, rope_sin, rope_cos,
-                    state_block_table, cu_seqlens, seqused, start_pos, rope_head_dim, cmp_ratio, coff, norm_eps,
-                    rotary_mode, cache_mode, state_cache_stride_dim0, cmp_kv);
+                    state_block_table, cu_seqlens, seqused, start_pos, slot_mapping, paged_kv_cache,
+                    rope_head_dim, cmp_ratio, coff, norm_eps,
+                    rotary_mode, cache_mode, state_cache_stride_dim0, block_size, cmp_kv);
 
     return std::tuple<at::Tensor>(cmp_kv);
 }
@@ -2607,10 +2612,12 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
             "Tensor x, Tensor wkv, Tensor wgate, "
             "Tensor(a!) state_cache, Tensor ape, Tensor norm_weight, "
             "Tensor rope_sin, Tensor rope_cos, "
-            "Tensor? state_block_table, Tensor? cu_seqlens, "
-            "Tensor? seqused, Tensor? start_pos, "
-            "int rope_head_dim, int cmp_ratio, int coff, "
-            "float norm_eps, int rotary_mode, int cache_mode"
+            "Tensor? state_block_table=None, Tensor? cu_seqlens=None, "
+            "Tensor? seqused=None, Tensor? start_pos=None, "
+            "Tensor? slot_mapping=None, Tensor(a!)? paged_kv_cache=None, "
+            "int rope_head_dim=64, int cmp_ratio=4, int coff=1, "
+            "float norm_eps=1e-6, int rotary_mode=1, int cache_mode=1, "
+            "int block_size=0"
         ") -> Tensor"
         );
     ops.impl("compressor", torch::kPrivateUse1, &vllm_ascend::compressor);

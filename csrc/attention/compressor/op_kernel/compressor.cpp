@@ -24,7 +24,7 @@ using namespace Compressor;
     do {                                                                                                               \
         templateClass<COMPType<__VA_ARGS__>> op(&pipe, tilingData);                                                    \
         op.Init(x, wKv, wGate, stateCache, ape, normWeight, ropeSin, ropeCos, stateBlockTable,  \
-                cuSeqlens, seqUsed, startPos, cmpKvOut, workspace);                                                    \
+                cuSeqlens, seqUsed, startPos, slotMapping, pagedKvCache, cmpKvOut, workspace);                          \
         op.Process();                                                                                                  \
     } while (0)
 
@@ -42,6 +42,8 @@ __global__ __aicore__ void compressor(
     __gm__ uint8_t *cuSeqlens,
     __gm__ uint8_t *seqUsed,
     __gm__ uint8_t *startPos,
+    __gm__ uint8_t *slotMapping,
+    __gm__ uint8_t *pagedKvCache,
     __gm__ uint8_t *cmpKvOut,
     __gm__ uint8_t *stateCacheOut,
     __gm__ uint8_t *workspace,

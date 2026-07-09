@@ -70,6 +70,10 @@ void CompressorTiling::ConvertOptionalParams(gert::TilingContext &context, Compr
     compressorContext.seqUsed.shape = context.GetOptionalInputShape(SEQ_USED_INPUT_INDEX);
     compressorContext.startPos.desc = context.GetOptionalInputDesc(START_POS_INPUT_INDEX);
     compressorContext.startPos.shape = context.GetOptionalInputShape(START_POS_INPUT_INDEX);
+    compressorContext.slotMapping.desc = context.GetOptionalInputDesc(SLOT_MAPPING_INPUT_INDEX);
+    compressorContext.slotMapping.shape = context.GetOptionalInputShape(SLOT_MAPPING_INPUT_INDEX);
+    compressorContext.pagedKvCache.desc = context.GetOptionalInputDesc(PAGED_KV_CACHE_INPUT_INDEX);
+    compressorContext.pagedKvCache.shape = context.GetOptionalInputShape(PAGED_KV_CACHE_INPUT_INDEX);
 }
 
 ge::graphStatus CompressorTiling::ConvertContext(gert::TilingContext &context, CompressorContext &compressorContext)
@@ -97,6 +101,7 @@ ge::graphStatus CompressorTiling::ConvertContext(gert::TilingContext &context, C
     compressorContext.rotaryMode = attrs->GetAttrPointer<int>(ROTARY_MODE_ATTR_INDEX);
     compressorContext.cacheMode = attrs->GetAttrPointer<int>(CACHE_MODE_ATTR_INDEX);
     compressorContext.stride = attrs->GetAttrPointer<int>(STATE_CACHE_STRIDE_DIM0_ATTR_INDEX);
+    compressorContext.scatterBlockSize = attrs->GetAttrPointer<int>(SCATTER_BLOCK_SIZE_ATTR_INDEX);
 
     OP_CHECK_IF(context.GetWorkspaceSizes(1) == nullptr,
                OPS_REPORT_VECTOR_INNER_ERR(context.GetNodeName(), "workSpaceSize got from ge is nullptr"),
@@ -169,6 +174,8 @@ ge::graphStatus CompressorTiling::SetPageAttentionInfo()
         pageAttentionParams_->maxBlockNumPerBatch =
             context_->stateBlockTable.shape->GetStorageShape().GetDim(COMPRESSOR_DIM_INDEX_1);
     }
+    pageAttentionParams_->scatterBlockSize =
+        (context_->scatterBlockSize != nullptr) ? static_cast<uint32_t>(*context_->scatterBlockSize) : 0;
 
     return ge::GRAPH_SUCCESS;
 }
