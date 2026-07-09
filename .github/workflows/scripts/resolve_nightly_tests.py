@@ -7,7 +7,7 @@ import subprocess
 try:
     import yaml
 except ImportError:
-    subprocess.check_call(["pip3", "install", "pyyaml", "-q", "--user"])
+    subprocess.check_call(["pip3", "install", "pyyaml", "-q"])
     import yaml
 
 

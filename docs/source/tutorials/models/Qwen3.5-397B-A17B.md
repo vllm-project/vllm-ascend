@@ -14,9 +14,9 @@ Refer to [supported features](../../user_guide/support_matrix/supported_models.m
 
 Refer to [feature guide](../../user_guide/feature_guide/index.md) to get feature configuration details.
 
-:::{note}
-The support matrix records the maximum verified capability for this model. The startup examples in this document use practical validation settings for online serving and performance testing. Adjust `--max-model-len`, `--max-num-seqs`, and `--max-num-batched-tokens` based on your service workload and available KV cache.
-:::
+!!! note
+
+    The support matrix records the maximum verified capability for this model. The startup examples in this document use practical validation settings for online serving and performance testing. Adjust `--max-model-len`, `--max-num-seqs`, and `--max-num-batched-tokens` based on your service workload and available KV cache.
 
 ## 3 Prerequisites
 
@@ -35,18 +35,17 @@ If you want to deploy the model in a multi-node environment, verify the communic
 
 ### 4.1 Docker Image Installation
 
-Select an image based on your machine type. For example, use `quay.io/ascend/vllm-ascend:|vllm_ascend_version|` for Atlas 800 A2 and `quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3` for Atlas 800 A3.
+Select an image based on your machine type. For example, use `quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}` for Atlas 800 A2 and `quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3` for Atlas 800 A3.
 
 Refer to [using docker](../../installation.md#set-up-using-docker) for the complete installation guide.
 
-```{code-block} bash
-:substitutions:
+```bash
 
 # Update --device according to your device.
 # Atlas A2: /dev/davinci[0-7]
 # Atlas A3: /dev/davinci[0-15]
 # Download the model weight to /root/.cache in advance.
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 export NAME=vllm-ascend
 
 docker run --rm \
@@ -354,7 +353,7 @@ vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
   --quantization ascend \
   --no-disable-hybrid-kv-cache-manager \
   --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
-  --additional-config '{"recompute_scheduler_enable": true, "enable_cpu_binding": true, "enable_fused_mc2":1}' \
+  --additional-config '{"enable_cpu_binding": true, "enable_fused_mc2":1}' \
   --gpu-memory-utilization 0.9 \
   --enforce-eager \
   --kv-transfer-config \
@@ -547,7 +546,7 @@ Common Issues Tip: If decode node 1 cannot join decode node 0, check that `--hea
 - Decode uses `--data-parallel-size 16`, `--data-parallel-size-local 8`, and `--tensor-parallel-size 2`. Decode node 0 starts from DP rank 0 and decode node 1 starts from DP rank 8.
 - `--data-parallel-address` and `--data-parallel-rpc-port` define the DP control plane. For decode nodes, the address must point to decode node 0.
 - `--max-num-batched-tokens` is larger on the prefill node and smaller on decode nodes because prefill is prompt-token intensive while decode is latency sensitive.
-- `recompute_scheduler_enable` sends requests back to the prefill side to recompute KV cache when decode KV cache is insufficient. Enable it on both prefill and decode nodes in PD mode.
+- `recompute_scheduler_enable` sends requests back to the prefill side to recompute KV cache when decode KV cache is insufficient. Enable it only on decode nodes in PD mode.
 - `--kv-transfer-config` sets the Mooncake connector. `kv_role` is `kv_producer` on prefill and `kv_consumer` on decode.
 - `kv_connector_extra_config.prefill.dp_size/tp_size` and `decode.dp_size/tp_size` must match the actual global DP and TP layout.
 - `--no-enable-prefix-caching` disables prefix caching. For PD disaggregation, the D-node prefix-cache known issue is tracked in [#7944](https://github.com/vllm-project/vllm-ascend/issues/7944).
@@ -701,7 +700,7 @@ Recommended tuning order:
 | FlashComm1 | `--additional-config '{"enable_flashcomm1": true}'` | Reduces communication overhead in large TP and high-concurrency scenarios. | May not help low-concurrency workloads. |
 | Fused MC2 | `--additional-config '{"enable_fused_mc2": 1}'` | Enables MoE fused operators to improve MoE prefill/decode efficiency. | If accuracy or performance regresses in multi-DP large-token scenarios, disable it and compare. |
 | Shared expert overlap | `--additional-config '{"multistream_overlap_shared_expert": true}'` | Overlaps shared expert computation in MoE workloads. | Recommended for MP throughput scenarios. |
-| Recompute scheduler | `--additional-config '{"recompute_scheduler_enable": true}'` | Recomputes KV through prefill when decode KV cache is insufficient in PD mode. | Only valid when `kv_role` is `kv_producer` or `kv_consumer`. |
+| Recompute scheduler | `--additional-config '{"recompute_scheduler_enable": true}'` | Recomputes KV through prefill when decode KV cache is insufficient in PD mode. | Only valid on decode nodes where `kv_role` is `kv_consumer`. |
 | CPU binding | `--additional-config '{"enable_cpu_binding": true}'` | Improves CPU affinity and reduces scheduling jitter on ARM servers. | Enabled by default in many configurations, but explicitly setting it keeps the recipe clear. |
 
 ## 10 FAQ

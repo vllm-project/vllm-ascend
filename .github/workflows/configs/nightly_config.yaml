@@ -164,6 +164,9 @@ a3:
       - name: MiniMax-M3-W8A8-A3
         os: linux-aarch64-a3-16
         config_file_path: MiniMax-M3-W8A8-A3.yaml
+      - name: qwen3-vl-235b-a22b-instruct-w8a8
+        os: linux-aarch64-a3-16
+        config_file_path: Qwen3-VL-235B-A22B-Instruct-W8A8.yaml
   multi_card:
     test_config:
       # pytest-driven tests

@@ -419,6 +419,9 @@ def unquant_apply_mlp(
     swiglu_limit: float = 0.0,
     swiglu_alpha: float = 1.0,
     swiglu_beta: float = 0.0,
+    lora_context=None,
+    expanded_row_idx: torch.Tensor | None = None,
+    topk_ids: torch.Tensor | None = None,
 ) -> torch.Tensor:
     if need_trans:
         w1 = w1.transpose(1, 2)
@@ -433,6 +436,23 @@ def unquant_apply_mlp(
         group_type=0,
         group_list=group_list,
     )[0]
+
+    lora_routing = None
+    if lora_context is not None:
+        if expanded_row_idx is None or topk_ids is None:
+            raise AssertionError(
+                "MoE LoRA requires expanded_row_idx and topk_ids metadata, "
+                "which are only available in AllGather communication mode."
+            )
+        from vllm_ascend.lora.fused_moe import moe_lora_apply_w2, moe_lora_apply_w13
+
+        lora_routing = moe_lora_apply_w13(
+            lora_context,
+            gate_up_out=gate_up_out,
+            hidden_states=hidden_states,
+            expanded_row_idx=expanded_row_idx,
+            topk_ids=topk_ids,
+        )
 
     act_name = getattr(activation, "value", activation)
 
@@ -474,6 +494,13 @@ def unquant_apply_mlp(
         group_type=0,
         group_list=group_list,
     )[0]
+    if lora_routing is not None:
+        moe_lora_apply_w2(
+            lora_context,
+            down_out=hidden_states,
+            silu_out=gate_up_out,
+            lora_routing=lora_routing,
+        )
     return hidden_states, None
 
 
@@ -520,6 +547,9 @@ def unified_apply_mlp(*, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
             swiglu_limit=swiglu_limit,
             swiglu_alpha=swiglu_alpha,
             swiglu_beta=swiglu_beta,
+            lora_context=mlp_compute_input.lora_context,
+            expanded_row_idx=mlp_compute_input.expanded_row_idx,
+            topk_ids=mlp_compute_input.topk_ids,
         )
 
     assert w1_scale is not None and w2_scale is not None
@@ -535,8 +565,10 @@ def unified_apply_mlp(*, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
         mxfp = mlp_compute_input.quant.mxfp
         assert mxfp is not None, "mlp_compute_input.quant.mxfp is required when quant_type is MXFP8."
         act_quant_type = mxfp.act_quant_type or act_quant_type
+        if mxfp_quant_dtype == QuantType.W4A16MXFP4:
+            act_quant_type = mxfp.act_quant_type
         weight_quant_type = mxfp.weight_quant_type or weight_quant_type
-        if mxfp_quant_dtype == QuantType.W4A8MXFP:
+        if mxfp_quant_dtype in [QuantType.W4A8MXFP, QuantType.W4A16MXFP4]:
             weight_quant_type = mxfp.weight_quant_type
         scale_type = mxfp.scale_dtype
         per_token_scale_type = mxfp.per_token_scale_dtype

@@ -274,6 +274,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 swiglu_limit=layer.swiglu_limit,
                 swiglu_alpha=getattr(layer, "swiglu_alpha", 1.0),
                 swiglu_beta=getattr(layer, "swiglu_beta", 0.0),
+                lora_context=getattr(layer, "_ascend_moe_lora_context", None),
             )
         )
         if zero_expert_num > 0 and zero_expert_type is not None:

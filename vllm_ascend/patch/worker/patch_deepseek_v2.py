@@ -23,6 +23,29 @@ from vllm.model_executor.models.deepseek_v2 import (
 )
 from vllm.model_executor.models.utils import extract_layer_index
 
+from vllm_ascend.utils import vllm_version_is
+
+
+def _should_skip_indexer_init(
+    config: DeepseekV2Config | DeepseekV3Config,
+    prefix: str,
+    skip_topk: bool,
+) -> bool:
+    if not skip_topk:
+        return False
+
+    layer_id = extract_layer_index(prefix)
+    num_hidden_layers = getattr(config, "num_hidden_layers", None)
+    if num_hidden_layers is not None and layer_id >= num_hidden_layers:
+        return False
+
+    # GLM-5.2 describes checkpoint-level shared indexers explicitly. Runtime
+    # IndexCache overrides on GLM-5.1 only skip top-k computation; its
+    # checkpoint still contains an Indexer for every layer.
+    indexer_types = getattr(config, "indexer_types", None)
+    indexer_type = indexer_types[layer_id] if indexer_types is not None and layer_id < len(indexer_types) else None
+    return isinstance(indexer_type, str) and indexer_type.lower() == "shared"
+
 
 def _deepseek_v2_mla_attention_init(
     self,
@@ -41,6 +64,7 @@ def _deepseek_v2_mla_attention_init(
     prefix: str = "",
     topk_indices_buffer: torch.Tensor | None = None,
     input_size: int | None = None,
+    reduce_results: bool = True,
 ) -> None:
     # 这里不能使用 super().__init__()，因为当前函数定义在原类之外，
     # 最后通过赋值的方式替换 DeepseekV2MLAAttention.__init__。
@@ -124,6 +148,7 @@ def _deepseek_v2_mla_attention_init(
         self.num_heads * self.v_head_dim,
         self.hidden_size,
         bias=False,
+        reduce_results=reduce_results,
         quant_config=quant_config,
         prefix=f"{prefix}.o_proj",
     )
@@ -161,10 +186,8 @@ def _deepseek_v2_mla_attention_init(
 
     # IndexCache config.
     #
-    # PR #45895 的关键修改是：
-    # 1. 在创建 Indexer 前先计算当前层是否 skip_topk；
-    # 2. skip_topk 的 backbone 层不创建 Indexer；
-    # 3. MTP/nextn 层即使命中 skip pattern，也必须创建完整 Indexer。
+    # skip_topk controls top-k reuse. Indexer initialization is skipped only
+    # when the checkpoint marks this layer as sharing another layer's Indexer.
     _skip_topk = False
     _index_topk_freq = getattr(
         config,
@@ -196,19 +219,8 @@ def _deepseek_v2_mla_attention_init(
     elif 0 <= layer_id < len(_index_topk_pattern):
         _skip_topk = _index_topk_pattern[layer_id] == "S"
 
-    # Skip pattern only governs backbone layers.
-    #
-    # MTP/nextn layers must always build a complete Indexer. The MTP
-    # implementation computes top-k indices at draft step 0, then changes
-    # skip_topk dynamically during the remaining speculative iterations.
-    _num_hidden_layers = getattr(
-        config,
-        "num_hidden_layers",
-        None,
-    )
-    is_mtp_layer = _num_hidden_layers is not None and layer_id >= _num_hidden_layers
-
-    if self.is_v32 and (not _skip_topk or is_mtp_layer):
+    skip_indexer_init = _should_skip_indexer_init(config, prefix, _skip_topk)
+    if self.is_v32 and not skip_indexer_init:
         self.indexer_rope_emb = get_rope(
             qk_rope_head_dim,
             max_position=max_position_embeddings,
@@ -269,3 +281,78 @@ def _deepseek_v2_mla_attention_init(
 
 
 DeepseekV2MLAAttention.__init__ = _deepseek_v2_mla_attention_init
+
+
+if not vllm_version_is("0.23.0"):
+    from itertools import islice
+
+    from vllm.distributed import get_pp_group, tensor_model_parallel_all_gather
+    from vllm.model_executor.models.deepseek_v2 import (
+        DeepseekV2Model,
+        _get_llama_4_scaling,
+    )
+    from vllm.sequence import IntermediateTensors
+
+    def _patched_forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
+        if get_pp_group().is_first_rank:
+            if inputs_embeds is not None:
+                hidden_states = inputs_embeds
+            else:
+                if input_ids is None:
+                    raise ValueError("Either input_ids or inputs_embeds must be provided to DeepseekV2Model.forward")
+                hidden_states = self.embed_input_ids(input_ids)
+            residual = None
+        else:
+            assert intermediate_tensors is not None
+            hidden_states = intermediate_tensors["hidden_states"]
+            residual = intermediate_tensors["residual"]
+
+        llama_4_scaling_config = getattr(self.config, "llama_4_scaling", None)
+        llama_4_scaling: torch.Tensor | None
+        if llama_4_scaling_config is not None:
+            llama_4_scaling = _get_llama_4_scaling(
+                original_max_position_embeddings=llama_4_scaling_config["original_max_position_embeddings"],
+                scaling_beta=llama_4_scaling_config["beta"],
+                positions=positions,
+            )
+        else:
+            llama_4_scaling = None
+
+        aux_hidden_states = []
+        for idx, layer in enumerate(
+            islice(self.layers, self.start_layer, self.end_layer),
+            start=self.start_layer,
+        ):
+            if idx in self.aux_hidden_state_layers:
+                aux_hidden_state = hidden_states + residual
+                if aux_hidden_state.shape[0] != positions.shape[0]:
+                    aux_hidden_state = tensor_model_parallel_all_gather(aux_hidden_state, 0)
+                    aux_hidden_state = aux_hidden_state[: positions.shape[0]]
+                aux_hidden_states.append(aux_hidden_state)
+            hidden_states, residual = layer(positions, hidden_states, residual, llama_4_scaling)
+
+        if not get_pp_group().is_last_rank:
+            return IntermediateTensors({"hidden_states": hidden_states, "residual": residual})
+
+        if hidden_states.shape[0] != positions.shape[0]:
+            combined_states = torch.cat([hidden_states, residual], dim=-1)
+            combined_states = tensor_model_parallel_all_gather(combined_states, 0)
+            combined_states = combined_states[: positions.shape[0]]
+            hidden_states, residual = combined_states.split([self.hidden_size, self.hidden_size], dim=-1)
+            residual = residual.contiguous()
+
+        if self.end_layer in self.aux_hidden_state_layers:
+            aux_hidden_states.append(hidden_states + residual)
+
+        hidden_states, _ = self.norm(hidden_states, residual)
+        if len(aux_hidden_states) > 0:
+            return hidden_states, aux_hidden_states
+        return hidden_states
+
+    DeepseekV2Model.forward = _patched_forward
