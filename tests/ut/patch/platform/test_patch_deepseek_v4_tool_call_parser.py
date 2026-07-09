@@ -1,14 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
-from importlib.util import find_spec
 from unittest.mock import MagicMock
 
 import pytest
 
-if find_spec("vllm.tool_parsers.deepseekv4_tool_parser") is None:
+from vllm_ascend.utils import vllm_version_is
+
+if not vllm_version_is("0.23.0"):
     pytest.skip(
-        "upstream vLLM removed deepseekv4_tool_parser",
+        "DeepSeekV4ToolParser compatibility patch only applies to vLLM 0.23.0",
         allow_module_level=True,
     )
 
