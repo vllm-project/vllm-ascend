@@ -335,7 +335,10 @@ class NPUFFNModelRunner(NPUModelRunner, GPUFFNModelRunner):
         assert aclgraph_runtime_mode is None or aclgraph_runtime_mode in {
             CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL
         }
+        logger.info("aclgraph_runtime_mode is %s", aclgraph_runtime_mode)
         if aclgraph_runtime_mode == CUDAGraphMode.FULL:
+            logger.info("start capture aclgraph for dp_metadata_key=%s",
+                        dp_metadata_key)
             # Create and capture the graph.
             aclgraph = torch.npu.NPUGraph()
             with torch.npu.graph(aclgraph, pool=self.graph_pool):
