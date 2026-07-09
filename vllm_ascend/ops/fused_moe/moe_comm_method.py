@@ -140,27 +140,6 @@ def _infer_intermediate_hidden(weight1: torch.Tensor, weight2: torch.Tensor, hid
         return combined_intermediate // 2
     return combined_intermediate
 
-
-_CANN_MEGA_MOE_SUPPORTED_ACTIVATIONS = {"silu", "swiglu"}
-
-
-def _normalize_cann_activation(activation) -> str:
-    # ``MoEFusedExpertsInput.activation`` is typed ``str`` (default "silu"),
-    # but historically some call sites pass an enum-style object; preserve
-    # the ``getattr(..., "value", ...)`` shim for compatibility.
-    activation_value = getattr(activation, "value", activation)
-    if activation_value is None:
-        return "swiglu"
-    activation_value = str(activation_value).lower()
-    if activation_value in _CANN_MEGA_MOE_SUPPORTED_ACTIVATIONS:
-        return "swiglu"
-    raise ValueError(
-        f"CANN MegaMoe only supports {sorted(_CANN_MEGA_MOE_SUPPORTED_ACTIVATIONS)} "
-        f"activations; got {activation!r}. Disable enable_fused_mc2 (set to 0) or "
-        f"avoid running CANN MegaMoe with this activation."
-    )
-
-
 def _get_cann_mega_moe_quant_settings(quant_type: QuantType) -> tuple[int, int | None, int | None]:
     # Returns (dispatch_quant_mode, dispatch_quant_out_dtype, weight_type).
     # The current custom op package still requires explicit INT4 for W4A8
@@ -615,7 +594,6 @@ class FusedMC2CommImpl(MoECommMethod):
             l1_bias=l1_bias,
             l2_bias=l2_bias,
             x_active_mask=x_active_mask,
-            activation=_normalize_cann_activation(fused_experts_input.activation),
             activation_clamp=activation_clamp,
             weight1_type=weight_type,
             weight2_type=weight_type,
