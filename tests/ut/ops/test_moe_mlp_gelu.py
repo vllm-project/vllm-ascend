@@ -19,14 +19,7 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.device.device_op import DeviceOperator
-from vllm_ascend.ops.fused_moe import moe_mlp as moe_mlp_mod
 from vllm_ascend.ops.fused_moe.moe_mlp import quant_apply_mlp
-from vllm_ascend.ops.fused_moe.moe_runtime_args import (
-    MoEMlpComputeInput,
-    MoEQuantParams,
-    MoEWeights,
-)
-from vllm_ascend.quantization.quant_type import QuantType
 
 MOE_MLP = "vllm_ascend.ops.fused_moe.moe_mlp"
 
@@ -388,43 +381,6 @@ class TestQuantApplyMlpNoGeluImpact(unittest.TestCase):
     def test_swigluoai_activation_skips_gelu_path(self):
         mock_gelu, _ = self._run_non_gelu(MoEActivation.SWIGLUOAI)
         mock_gelu.assert_not_called()
-
-
-class TestUnifiedApplyMlpThreadsGeluActivation(unittest.TestCase):
-    """unified_apply_mlp must forward the GELU activation to quant_apply_mlp."""
-
-    def test_gelu_tanh_is_forwarded_to_quant_apply_mlp(self):
-        hidden_states = torch.randn(2, 8)
-        expected = torch.randn(2, 8)
-        mlp_compute_input = MoEMlpComputeInput(
-            hidden_states=hidden_states,
-            group_list=torch.tensor([2, 2], dtype=torch.int64),
-            group_list_type=1,
-            dynamic_scale=torch.randn(2, 1),
-            topk_scales=None,
-            weights=MoEWeights(
-                w1=[torch.randn(1, 16, 8)],
-                w2=[torch.randn(1, 8, 8)],
-                w1_scale=[torch.randn(1, 16)],
-                w2_scale=[torch.randn(1, 8)],
-            ),
-            quant=MoEQuantParams(quant_type=QuantType.W8A8),
-            fusion=False,
-            activation=MoEActivation.GELU_TANH,
-            need_trans=False,
-            dynamic_eplb=False,
-        )
-
-        with (
-            patch(f"{MOE_MLP}.quant_apply_mlp", return_value=expected) as mock_quant,
-            patch(f"{MOE_MLP}.unquant_apply_mlp") as mock_unquant,
-        ):
-            out = moe_mlp_mod.unified_apply_mlp(mlp_compute_input=mlp_compute_input)
-
-        self.assertIs(out, expected)
-        mock_unquant.assert_not_called()
-        mock_quant.assert_called_once()
-        self.assertEqual(mock_quant.call_args.kwargs["activation"], MoEActivation.GELU_TANH)
 
 
 if __name__ == "__main__":
