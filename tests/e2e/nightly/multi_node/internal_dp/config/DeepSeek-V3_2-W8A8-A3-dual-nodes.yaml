@@ -13,6 +13,7 @@ env_common: &env_common
   VLLM_ASCEND_ENABLE_MLAPO: 1
   VLLM_ASCEND_ENABLE_FLASHCOMM1: 1
   ASCEND_A3_EBA_ENABLE: 1
+  VLLM_ENGINE_READY_TIMEOUT_S: 3000
 
 # TODO: need to identify why TP and mtp+1 divisibility rules break on dual-node case
 

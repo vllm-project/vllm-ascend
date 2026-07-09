@@ -35,12 +35,8 @@ class XliteModelRunner(NPUModelRunner):
         super().load_model()
         self.model = self.xlite_model = XliteWrapper(self.model, self.vllm_config, device=self.device)
 
-    def initialize_kv_cache(
-        self,
-        kv_cache_config: KVCacheConfig,
-        is_profiling: bool = False,
-    ) -> None:
-        super().initialize_kv_cache(kv_cache_config, is_profiling=is_profiling)
+    def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
+        super().initialize_kv_cache(kv_cache_config)
         self.xlite_model.register_kv_caches(self.kv_caches)
 
     def _should_build_dummy_attn_metadata(
