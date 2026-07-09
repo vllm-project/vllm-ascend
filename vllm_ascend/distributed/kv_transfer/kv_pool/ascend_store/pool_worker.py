@@ -568,7 +568,6 @@ class KVPoolWorker:
 
     def wait_for_save(self, connector_metadata: AscendConnectorMetadata):
         current_event = None
-        has_save_request = False
         for request in connector_metadata.requests:
             can_save = request.can_save
             if can_save is None or not can_save:
@@ -587,16 +586,11 @@ class KVPoolWorker:
             self.kv_send_thread.add_stored_request(  # type: ignore[union-attr]
                 request.req_id
             )
+            # Keep store async; delay-free protects these blocks until
+            # get_finished() observes kv_send_thread completion.
             self.kv_send_thread.add_request(  # type: ignore[union-attr]
                 request,
             )
-            has_save_request = True
-
-        if has_save_request:
-            # vLLM expects wait_for_save() to make stores visible before the
-            # request is reported as finished. Without this barrier a following
-            # identical prompt can lookup before Mooncake put() has completed.
-            self.kv_send_thread.request_queue.join()  # type: ignore[union-attr]
 
     def retrieve_layer(
         self,

@@ -80,6 +80,7 @@ class KVTransferThread(threading.Thread):
         self.m_store.set_device()
         self.ready_event.set()
         while True:
+            request_data = None
             try:
                 request_data = self.request_queue.get()
                 if request_data is None:
@@ -88,9 +89,14 @@ class KVTransferThread(threading.Thread):
                     continue
                 self._handle_request(request_data)
             except Exception as e:
+                if request_data is not None:
+                    self._handle_request_exception(request_data)
                 logger.error("Error in KVCacheTransferThread: %s", e)
 
     def _handle_request(self, req_meta: Any):
+        pass
+
+    def _handle_request_exception(self, request_data: Any):
         pass
 
     def lookup(
@@ -240,6 +246,15 @@ class KVCacheStoreSendingThread(KVTransferThread):
         with self.done_task_lock:
             if req_id in self.stored_requests:
                 del self.stored_requests[req_id]
+
+    def _handle_request_exception(self, request_data: Any):
+        req_id = getattr(request_data, "req_id", None)
+        if req_id is not None:
+            with self.done_task_lock:
+                tracked_request = req_id in self.stored_requests
+            if tracked_request:
+                self.dec_stored_request(req_id)
+        self.request_queue.task_done()
 
     def _handle_request(self, req_meta: ReqMeta):
         token_len = req_meta.token_len_chunk
