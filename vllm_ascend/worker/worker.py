@@ -510,8 +510,23 @@ class NPUWorker(WorkerBase):
         # in ray scenario. see https://github.com/vllm-project/vllm/pull/26845
         # for more details
         self.device = self._init_device()
-        # Initialize workspace manager
-        num_ubatches = 1
+        # Initialize workspace manager.
+        # Align the workspace concurrency with the configured ubatch
+        # parallelism: when ubatch overlap is enabled (num_ubatches >= 2) the
+        # prefill path runs N model forwards concurrently on N NPU streams, so
+        # any shared workspace buffer they allocate must be sized for N
+        # concurrent users or the streams will alias the same buffer. Read
+        # Read directly from additional_config here (instead of get_ascend_config())
+        # because init_device may run before the AscendConfig singleton is
+        # initialized, and the vllm_config is always available on the worker.
+        # Clamp to the supported range (1 or 2) to stay consistent with the
+        # assertion in AscendConfig: values > 2 are rejected there, so a stray
+        # config must not silently inflate the workspace concurrency here.
+        additional_config = self.vllm_config.additional_config or {}
+        num_ubatches = max(1, int(additional_config.get("num_ubatches", 1)))
+        assert num_ubatches in (1, 2), (
+            f"num_ubatches must be 1 or 2, got {num_ubatches}."
+        )
         init_workspace_manager(self.device, num_ubatches)
         # Init ModelRunner here, so that we have access to self.device.
         if self.use_v2_model_runner:

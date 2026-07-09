@@ -30,6 +30,7 @@ from vllm.model_executor.layers.rotary_embedding import (
 )
 from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 from vllm.triton_utils import HAS_TRITON
+from vllm_ascend.worker.ubatch_utils import get_ubatch_runtime_manager
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.platform import NPUPlatform
@@ -148,7 +149,17 @@ def update_cos_sin(positions):
 
 
 def get_cos_and_sin_slice():
-    return _cos_slice, _sin_slice
+    rt = get_ubatch_runtime_manager()
+    # Read the token slice bound to the *current worker thread* (set by
+    # UBatchRuntimeManager.exec on entry) instead of the shared curr_batch
+    # cursor. The cursor is mutated by the peer worker thread on every
+    # switch_curr_batch(), so reading it here would race and apply the wrong
+    # ubatch's cos/sin under overlap (F1). Falls back to the whole-table
+    # slice when ubatch is disabled or the caller is not on a worker thread.
+    token_slice = rt.get_current_token_slice()
+    if token_slice is None:
+        return _cos_slice, _sin_slice
+    return _cos[:, token_slice], _sin[:, token_slice]
 
 
 def rope_forward_oot(
