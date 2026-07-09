@@ -40,7 +40,6 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-from vllm_ascend.attention.fia_tensor_dump import dump_fia_inputs
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.context_parallel.common_cp import AscendMetadataForDecode, AscendMetadataForPrefill
 from vllm_ascend.attention.kvcomp_attn.attention_utils import (
@@ -62,7 +61,6 @@ from vllm_ascend.compilation.acl_graph import (
     update_graph_params_workspaces,
 )
 from vllm_ascend.device.device_op import DeviceOperator
-from vllm_ascend.debug_tensor_dump import layer_idx_from_name
 from vllm_ascend.ops.flashcomm2_oshard_manager import flashcomm2_oshard_manager
 from vllm_ascend.utils import weak_ref_tensors
 from vllm_ascend.worker.kvcomp_utils import KVCompMetaData
@@ -70,10 +68,6 @@ from vllm_ascend.worker.kvcomp_utils import KVCompMetaData
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
 _ATTN_KEYS_BUFFER = None
-
-
-def _dump_fia_inputs(tag: str, *, layer_idx: int | None, **kwargs) -> None:
-    dump_fia_inputs(tag, layer_idx=layer_idx, **kwargs)
 
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
@@ -152,23 +146,6 @@ class AscendAttentionState(Enum):
     DecodeOnly = 2
     ChunkedPrefill = 3
     SpecDecoding = 4
-
-
-def _dump_fia_decode_inputs(
-    tag: str,
-    *,
-    layer_idx: int | None,
-    attn_metadata: "AscendMetadata",
-    **kwargs,
-) -> None:
-    if attn_metadata.attn_state != AscendAttentionState.DecodeOnly:
-        return
-    _dump_fia_inputs(
-        f"decode_{tag}",
-        layer_idx=layer_idx,
-        attn_state=attn_metadata.attn_state.name,
-        **kwargs,
-    )
 
 
 @dataclass
@@ -784,27 +761,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
             else:
                 update_graph_params_workspaces(num_tokens, workspace)
 
-        _dump_fia_decode_inputs(
-            "full_graph_v1",
-            layer_idx=self.layerIndex,
-            attn_metadata=attn_metadata,
-            query=query,
-            key=key,
-            value=value,
-            atten_mask=attn_mask,
-            block_table=block_table,
-            input_layout=input_layout,
-            block_size=block_size,
-            actual_seq_lengths=actual_seq_lengths_q,
-            actual_seq_lengths_kv=actual_seq_lengths_kv,
-            num_key_value_heads=self.num_kv_heads,
-            num_heads=self.num_heads,
-            scale=self.scale,
-            sparse_mode=sparse_mode,
-            pre_tokens=pre_tokens,
-            next_tokens=next_tokens,
-        )
-
         # Handle graph capturing mode
         stream = torch_npu.npu.current_stream()
 
@@ -912,28 +868,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 update_draft_graph_params_workspaces(num_tokens, workspace)
             else:
                 update_graph_params_workspaces(num_tokens, workspace)
-
-        _dump_fia_decode_inputs(
-            "full_graph_v2",
-            layer_idx=self.layerIndex,
-            attn_metadata=attn_metadata,
-            query=query,
-            key=key,
-            value=value,
-            atten_mask=attn_metadata.attn_mask,
-            block_table=block_table,
-            input_layout="TND",
-            block_size=block_size,
-            actual_seq_qlen=actual_seq_lengths_q,
-            actual_seq_kvlen=actual_seq_lengths_kv,
-            num_key_value_heads=self.num_kv_heads,
-            num_query_heads=self.num_heads,
-            sparse_mode=4 if self.sliding_window is not None else 3,
-            pre_tokens=self.sliding_window if self.sliding_window is not None else SWA_INT_MAX,
-            next_tokens=0,
-            softmax_scale=self.scale,
-            learnable_sink=self.sinks,
-        )
 
         # Handle graph capturing mode
         stream = torch_npu.npu.current_stream()
@@ -1147,26 +1081,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
         ):
             key = key[:num_tokens]
             value = value[:num_tokens]
-        _dump_fia_decode_inputs(
-            "forward",
-            layer_idx=self.layerIndex,
-            attn_metadata=attn_metadata,
-            query=query,
-            key=key,
-            value=value,
-            atten_mask=attn_metadata.attn_mask,
-            block_table=block_table,
-            input_layout="TND",
-            block_size=block_size,
-            actual_seq_lengths=attn_metadata.actual_seq_lengths_q,
-            actual_seq_lengths_kv=actual_seq_lengths_kv,
-            num_key_value_heads=self.num_kv_heads,
-            num_heads=self.num_heads,
-            scale=self.scale,
-            causal=attn_metadata.causal,
-            sliding_window=self.sliding_window,
-            sinks=self.sinks,
-        )
         # Get workspace from cache or calculate it if not present.
         if self.sinks is not None:
             actual_seq_qlen = attn_metadata.actual_seq_lengths_q
@@ -1386,9 +1300,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
             shape = [num_tokens, num_heads * head_size]
         """
         assert output is not None, "Output tensor must be provided."
-        layer_idx = layer_idx_from_name(getattr(layer, "layer_name", None))
-        if layer_idx is not None:
-            self.layerIndex = layer_idx
+        if self.enable_hamming_sparse:
+            self.layerIndex = int(layer.layer_name.split(".")[2])
 
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError("fused output quantization is not yet supported for AscendAttentionBackendImpl")

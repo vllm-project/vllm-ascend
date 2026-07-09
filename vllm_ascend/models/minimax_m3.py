@@ -28,9 +28,6 @@ from collections.abc import Iterable, Mapping, Sequence
 from itertools import islice
 from typing import Any
 
-from vllm_ascend.minimax_m3_tensor_dump import (
-    dump_minimax_m3_tensor_point as dump_tensor_point,
-)
 import torch
 from torch import nn
 from transformers import BatchFeature, PretrainedConfig
@@ -39,9 +36,9 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import (
-    get_tensor_model_parallel_rank,
     get_pp_group,
     get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_reduce,
 )
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.attention import Attention
@@ -125,7 +122,7 @@ def _is_minimax_m3_text_only() -> bool:
     if value:
         return value.lower() not in ("1", "true", "yes", "on")
     return False
-_DECODE_ITEMS = 0
+
 
 def _sparse_attention_layer_ids(config: PretrainedConfig) -> set[int]:
     cfg = getattr(config, "sparse_attention_config", None)
@@ -135,6 +132,17 @@ def _sparse_attention_layer_ids(config: PretrainedConfig) -> set[int]:
     if freq is None:
         return set()
     return {i for i, f in enumerate(freq) if f != 0}
+
+
+def _is_moe_layer(config: PretrainedConfig, layer_idx: int) -> bool:
+    moe_layer_freq = getattr(config, "moe_layer_freq", None)
+    return moe_layer_freq[layer_idx] != 0 if moe_layer_freq is not None else True
+
+
+def _deferred_tp_all_reduce(hidden_states: torch.Tensor) -> torch.Tensor:
+    if get_tensor_model_parallel_world_size() == 1:
+        return hidden_states
+    return tensor_model_parallel_all_reduce(hidden_states)
 
 
 def _get_text_config(vllm_config: VllmConfig) -> PretrainedConfig:
@@ -344,7 +352,7 @@ class MiniMaxM3Attention(nn.Module):
         super().__init__()
         self.hidden_size = hidden_size
         self.layer_name = f"{prefix}.attn"
-        self.layer_idx = int(prefix.split(sep=".")[-2])
+
         tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = num_heads
         assert self.total_num_heads % tp_size == 0
@@ -380,6 +388,7 @@ class MiniMaxM3Attention(nn.Module):
             hidden_size,
             bias=False,
             quant_config=quant_config,
+            reduce_results=False,
             prefix=f"{prefix}.o_proj",
         )
 
@@ -424,17 +433,13 @@ class MiniMaxM3Attention(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        # logger.error(f"[MiniMax Attention {self.layer_idx}] >>>>>>>>>>  attention input {hidden_states.to(torch.float).norm(p=1)}, shape is {hidden_states.shape}<<<<<<<<<<<<<<<<<<")
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self._qk_norm(q, k)
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
-        # if get_tensor_model_parallel_rank() == 0:
-        #     logger.error(f"[MiniMax GQA after self_attn {self.layer_idx}] >>>>>>>>>> attention  output  {attn_output.to(torch.float).norm(p=1)}, shape is {attn_output.shape}<<<<<<<<<<<<<<<<<<")
+        
         output, _ = self.o_proj(attn_output)
-        # if get_tensor_model_parallel_rank() == 0:
-        #     logger.error(f"[MiniMax GQA after o_proj {self.layer_idx}] >>>>>>>>>> attention output  {output.to(torch.float).norm(p=1)}, shape is {output.shape}<<<<<<<<<<<<<<<<<<")
         return output
 
 
@@ -444,6 +449,7 @@ class MiniMaxM3DecoderLayer(nn.Module):
         config: PretrainedConfig,
         prefix: str,
         model_config: ModelConfig,
+        pipeline_parallel_size: int,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
     ) -> None:
@@ -492,30 +498,32 @@ class MiniMaxM3DecoderLayer(nn.Module):
         else:
             self.self_attn = MiniMaxM3Attention(**attn_kwargs)
 
-        moe_layer_freq = getattr(config, "moe_layer_freq", None)
         # ``is_layer_sparse`` here means "this layer's MLP is a sparse MoE",
         # not anything about attention sparsity. The name is kept (instead of
         # the clearer ``is_layer_moe``) to match the convention used by the
         # rest of sglang -- ``OperationsStrategy``, ``LayerScatterModes``,
         # ``LayerCommunicator``, ``gpt_oss``, ``falcon_h1`` etc all access
         # ``layer.is_layer_sparse``.
-        self.is_layer_sparse = (
-            moe_layer_freq[layer_idx] != 0 if moe_layer_freq is not None else True
+        self.is_layer_sparse = _is_moe_layer(config, layer_idx)
+        self.defer_input_allreduce = (
+            layer_idx > 0
+            and not _is_moe_layer(config, layer_idx - 1)
+            and pipeline_parallel_size == 1
         )
 
-        
         if self.is_layer_sparse:
             self.block_sparse_moe = MiniMaxM3MoE(
                 config=config,
                 quant_config=quant_config,
                 prefix=f"{prefix}.block_sparse_moe",
-            )  
+            )
         else:
             self.mlp = MiniMaxM3MLP(
                 config=config,
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
                 intermediate_size=config.dense_intermediate_size,
+                reduce_results=pipeline_parallel_size > 1,
             )
         self.input_layernorm = GemmaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = GemmaRMSNorm(
@@ -528,44 +536,28 @@ class MiniMaxM3DecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
     ) -> torch.Tensor:
-        global _DECODE_ITEMS
         # Self Attention
-        # logger.error(f"[MiniMax Decode Layer {self.layer_idx}] >>>>>>>>>>  decode layer input {hidden_states.to(torch.float).norm(p=1)} , shape is {hidden_states.shape}<<<<<<<<<<<<<<<<<<")
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
+            if self.defer_input_allreduce:
+                hidden_states = _deferred_tp_all_reduce(hidden_states)
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
-        if get_tensor_model_parallel_rank() == 0:
-            logger.error(f"[MiniMax Decode Layer {self.layer_idx} Item {_DECODE_ITEMS}] >>>>>>>>>>  decode attention  after input_layernorm {hidden_states.to(torch.float).norm(p=1)} , shape is {hidden_states.shape}<<<<<<<<<<<<<<<<<< ")
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
         )
-        
-        # Fully Connected
-        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
-        if get_tensor_model_parallel_rank() == 0:
-            logger.error(f"[MiniMax Decode Layer {self.layer_idx} Item {_DECODE_ITEMS}] >>>>>>>>>>  decode attention after post_layernorm {hidden_states.to(torch.float).norm(p=1)} , shape is {hidden_states.shape}<<<<<<<<<<<<<<<<<<")
 
-        if get_tensor_model_parallel_rank() == 0 and _DECODE_ITEMS == 3 and self.layer_idx == 59:
-                pt_name = f"/home/z00946994/scripts/dump_tensor/layer_{self.layer_idx}_iterm_{_DECODE_ITEMS}_rank_0_mlp_input.pt"
-                torch.save(hidden_states, pt_name)
+        # Fully Connected
+        hidden_states = _deferred_tp_all_reduce(hidden_states)
+        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+
         if self.is_layer_sparse:
             hidden_states = self.block_sparse_moe(hidden_states)
-            if get_tensor_model_parallel_rank() == 0:
-                logger.error(f"[MiniMax Decode Layer {self.layer_idx} Item {_DECODE_ITEMS}] >>>>>>>>>>  decode MOE {hidden_states.to(torch.float).norm(p=1)} , shape is {hidden_states.shape}<<<<<<<<<<<<<<<<<<")
-            if get_tensor_model_parallel_rank() == 0 and _DECODE_ITEMS == 3 and self.layer_idx == 59:
-                pt_name = f"/home/z00946994/scripts/dump_tensor/layer_{self.layer_idx}_iterm_{_DECODE_ITEMS}_rank_0_moe_output.pt"
-                torch.save(hidden_states, pt_name)
         else:
             hidden_states = self.mlp(hidden_states)
-            if get_tensor_model_parallel_rank() == 0:
-                logger.error(f"[MiniMax Decode Layer {self.layer_idx} Item {_DECODE_ITEMS}] >>>>>>>>>>  decode MLP {hidden_states.to(torch.float).norm(p=1)} , shape is {hidden_states.shape}<<<<<<<<<<<<<<<<<<")
-            if get_tensor_model_parallel_rank() == 0 and _DECODE_ITEMS == 3 and self.layer_idx == 1:
-                pt_name = f"/home/z00946994/scripts/dump_tensor/layer_{self.layer_idx}_iterm_{_DECODE_ITEMS}_rank_0_mlp_output.pt"
-                torch.save(hidden_states, pt_name)
-        # logger.error(f"[MiniMax Decode Layer {self.layer_idx}] >>>>>>>>>>  decode after ffn {hidden_states.to(torch.float).norm(p=1)} , shape is {hidden_states.shape}<<<<<<<<<<<<<<<<<<")
+
         return hidden_states, residual
 
 
@@ -606,10 +598,16 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
                 config,
                 prefix,
                 model_config=model_config,
+                pipeline_parallel_size=vllm_config.parallel_config.pipeline_parallel_size,
                 cache_config=cache_config,
                 quant_config=quant_config,
             ),
             prefix=f"{prefix}.layers",
+        )
+        self.defer_final_allreduce = (
+            self.end_layer > 0
+            and not _is_moe_layer(config, self.end_layer - 1)
+            and vllm_config.parallel_config.pipeline_parallel_size == 1
         )
 
         if get_pp_group().is_last_rank:
@@ -630,9 +628,6 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
-        global _DECODE_ITEMS
-        if get_tensor_model_parallel_rank() == 0:
-            logger.error(f"[MiniMax Modeling Item {_DECODE_ITEMS}] >>>>>>>>>>  modeling input_ids {input_ids}<<<<<<<<<<<<<<<<<<")
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -643,13 +638,11 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
-        if get_tensor_model_parallel_rank() == 0:
-            logger.error(f"[MiniMax Modeling Item {_DECODE_ITEMS}] >>>>>>>>>>  modeling embedding output  {hidden_states.to(torch.float).norm(p=1)}, shape is {hidden_states.shape}<<<<<<<<<<<<<<<<<<")
+
         aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
         for idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer)
         ):
-            layer_idx = self.start_layer + idx
             hidden_states, residual = layer(positions, hidden_states, residual)
             self._maybe_add_hidden_state(
                 aux_hidden_states, idx + 1, hidden_states, residual
@@ -659,12 +652,13 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
             )
+        if self.defer_final_allreduce:
+            hidden_states = _deferred_tp_all_reduce(hidden_states)
         hidden_states, _ = self.norm(hidden_states, residual)
 
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
-        if get_tensor_model_parallel_rank() == 0:
-            logger.error(f"[MiniMax Modeling Item {_DECODE_ITEMS}] >>>>>>>>>>  modeling  output  {hidden_states.to(torch.float).norm(p=1)}, shape is {hidden_states.shape}<<<<<<<<<<<<<<<<<<")
+
         return hidden_states
 
     def _set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
@@ -917,26 +911,16 @@ class MiniMaxM3SparseForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEa
         inputs_embeds: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor | IntermediateTensors:
-        global _DECODE_ITEMS
         hidden_states = self.model(
             input_ids, positions, intermediate_tensors, inputs_embeds
         )
-        _DECODE_ITEMS += 1
         return hidden_states
 
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
-        global _DECODE_ITEMS
-        if get_tensor_model_parallel_rank() == 0:
-            logger.error(f"[MiniMax Decode Layer Item {_DECODE_ITEMS}] >>>>>>>>>>  logits input {hidden_states.to(torch.float).norm(p=1)} , shape is {hidden_states.shape}<<<<<<<<<<<<<<<<<< ")
         logits = self.logits_processor(self.lm_head, hidden_states)
-        if get_tensor_model_parallel_rank() == 0:
-            logger.error(f"[MiniMax Decode Layer Item {_DECODE_ITEMS}] >>>>>>>>>>  logits output {logits.to(torch.float).norm(p=1)} , shape is {logits.shape}<<<<<<<<<<<<<<<<<< ")
-        if get_tensor_model_parallel_rank() == 0 and _DECODE_ITEMS == 3:
-                pt_name = f"/home/z00946994/scripts/dump_tensor/iterm_{_DECODE_ITEMS}_rank_0_logits_output.pt"
-                torch.save(logits, pt_name)
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
