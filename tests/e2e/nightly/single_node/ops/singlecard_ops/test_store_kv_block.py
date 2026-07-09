@@ -94,7 +94,7 @@ def test_scatter(num_tokens, num_head, block_size, num_blocks, count):
     key_expect = cal_scatternd(key, key_cache, slot_mapping_npu, block_size)
     N = 101
     for i in range(N):
-        torch_npu.npu_scatter_nd_update_(key_cache, slot_mapping_npu, key)
+        torch.ops._C_ascend.npu_scatter_nd_update(key_cache, slot_mapping_npu, key)
     torch.testing.assert_close(key_expect, key_cache, atol=0.001, rtol=0.1)
 
 

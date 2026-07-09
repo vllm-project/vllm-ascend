@@ -1518,7 +1518,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                             dim=-1,
                         )
                     elif self.use_a5_sparse_c8_indexer:
-                        torch_npu.npu_scatter_nd_update_(
+                        torch.ops._C_ascend.npu_scatter_nd_update(
                             kv_cache[0].view(-1, fused_kv_no_split.shape[-1]),
                             slot_mapping[: attn_metadata.num_actual_tokens].view(-1, 1),
                             fused_kv_no_split[: attn_metadata.num_actual_tokens],
@@ -1569,7 +1569,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                     attn_metadata.block_size,
                 )
             else:
-                torch_npu.npu_scatter_nd_update_(
+                torch.ops._C_ascend.npu_scatter_nd_update(
                     kv_cache[dsa_k_cache_idx].view(-1, k_li.shape[-1]),
                     slot_mapping.view(-1, 1),
                     k_li.view(-1, k_li.shape[-1]),
@@ -1590,7 +1590,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                             attn_metadata.block_size,
                         )
                     else:
-                        torch_npu.npu_scatter_nd_update_(
+                        torch.ops._C_ascend.npu_scatter_nd_update(
                             kv_cache[dsa_k_scale_cache_idx].view(-1, k_li_scale.shape[-1]),
                             slot_mapping.view(-1, 1),
                             k_li_scale.view(-1, k_li_scale.shape[-1]),
