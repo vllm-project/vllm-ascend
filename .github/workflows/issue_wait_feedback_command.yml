@@ -1,0 +1,52 @@
+name: Handle /wait-feedback Command
+
+on:
+  repository_dispatch:
+    types: [wait-feedback-command]
+
+permissions:
+  issues: write
+
+jobs:
+  wait-feedback:
+    name: Add wait-feedback label
+    runs-on: linux-amd64-cpu-2-hk
+    steps:
+      - name: Check user authorization
+        id: auth
+        run: |
+          ACTOR='${{ github.event.client_payload.github.payload.comment.user.login }}'
+          ALLOWED_USERS="bowgneo lilinsiman SOMEONEUNSEEN ZT-AIA Dawn952 earthmanylf LoganJane Tflowers-0129 evakang777"
+
+          if echo "$ALLOWED_USERS" | grep -qw "$ACTOR"; then
+            echo "authorized=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::User $ACTOR is not authorized to trigger /wait-feedback."
+            echo "authorized=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Post unauthorized comment
+        if: steps.auth.outputs.authorized == 'false'
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
+          comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
+          body: |
+            [Bot]: wait-feedback command failed: you do not have permission. Only authorized users can trigger /wait-feedback.
+          reactions: confused
+
+      - name: Fail if unauthorized
+        if: steps.auth.outputs.authorized == 'false'
+        run: exit 1
+
+      - name: Add wait-feedback label
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.client_payload.github.payload.issue.number,
+              labels: ['wait-feedback']
+            })
