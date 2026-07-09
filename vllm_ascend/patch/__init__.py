@@ -383,11 +383,14 @@
 #    How:
 #       Monkey-patch `DeepSeekV4ToolParser` stream parsing to emit tool-call
 #       metadata in the first delta and stream argument fragments incrementally.
+#       Only registered on vLLM 0.23.0: upstream main removed
+#       `deepseekv4_tool_parser.DeepSeekV4ToolParser` in favor of the
+#       `ParserEngine`-based `DeepSeekV4EngineToolParser`, which streams
+#       incrementally natively, so the workaround is guarded to 0.23.0.
 #    Related PR (if no, explain why):
 #       Upstream vLLM main behavior as of current runtime.
 #    Future Plan:
-#       Remove this patch if upstream streaming behavior is updated to satisfy the
-#       same DeepSeek DSML incrementality contract.
+#       Remove this patch once vLLM 0.23.0 is no longer supported.
 #
 # ** 12a. File: platform/patch_minimax_m2_tool_call_parser.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
