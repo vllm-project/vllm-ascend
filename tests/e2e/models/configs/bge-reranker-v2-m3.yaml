@@ -1,0 +1,21 @@
+model_name: "BAAI/bge-reranker-v2-m3"
+model_type: "vllm-reranker"
+hardware: "Atlas A2 Series"
+
+serve:
+  tensor_parallel_size: 1
+  dtype: auto
+  max_model_len: 8192
+  gpu_memory_utilization: 0.9
+  trust_remote_code: false
+
+tasks:
+  - name: "msmarco_reranker"
+    dataset: "mteb/msmarco"
+    split: "test"
+    metrics:
+      - name: "ndcg_at_10"
+        value: 0.85
+
+limit: 100
+batch_size: 8
