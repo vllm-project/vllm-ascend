@@ -277,6 +277,9 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 w1_scale_bias=w1_scale_bias,
                 w2_scale_bias=w2_scale_bias,
                 swiglu_limit=layer.swiglu_limit,
+                # Per-layer MoE LoRA state, set once by AscendFusedMoEWithLoRA
+                # when an adapter wraps this layer; None for non-LoRA layers.
+                lora_context=getattr(layer, "_ascend_moe_lora_context", None),
             )
         )
         if zero_expert_num > 0 and zero_expert_type is not None:
@@ -575,6 +578,9 @@ else:
         ) -> torch.Tensor:
             states = torch.ops.vllm.maybe_all_reduce_tensor_model_parallel(states)
             return states[..., :trunc_size]
+
+        def set_lora_context(self, lora_context):
+            self.routed_experts._ascend_moe_lora_context = lora_context
 
         def no_shared_forward_impl(  # type: ignore[override]
             self, hidden_states: torch.Tensor, router_logits: torch.Tensor, return_with_event: bool = False

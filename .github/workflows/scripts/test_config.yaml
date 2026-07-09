@@ -677,6 +677,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/lora/test_ilama_lora.py: 150
   tests/e2e/pull_request/one_card/lora/test_llama32_lora.py: 410
   tests/e2e/pull_request/one_card/lora/test_lora_with_spec_decode.py: 660
+  tests/e2e/pull_request/one_card/lora/test_olmoe_lora.py: 400
   tests/e2e/pull_request/one_card/lora/test_qwen35_densemodel_lora.py: 340
   tests/e2e/pull_request/one_card/lora/test_qwen3_multi_loras.py: 220
   tests/e2e/pull_request/one_card/lora/test_qwen3_reranker_lora.py: 370
@@ -715,6 +716,7 @@ estimated_times:
   tests/e2e/pull_request/two_card/aclgraph/test_aclgraph_capture_replay.py: 20
   tests/e2e/pull_request/two_card/lora/test_ilama_lora_tp2.py: 140
   tests/e2e/pull_request/two_card/lora/test_llama32_lora_tp2.py: 550
+  tests/e2e/pull_request/two_card/lora/test_qwen3moe_lora_tp.py: 600
   tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py: 800
   tests/e2e/pull_request/two_card/test_data_parallel.py: 480
   tests/e2e/pull_request/two_card/test_deepseek_multistream_moe.py: 150
