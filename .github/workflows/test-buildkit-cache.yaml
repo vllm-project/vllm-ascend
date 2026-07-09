@@ -19,78 +19,42 @@ jobs:
           FROM quay.io/ascend/cann:9.0.0-910b-openeuler24.03-py3.12
           RUN echo cache-probe > /tmp/cache-probe-marker
           DOCKERFILE
-          buildctl --version
-          python3 --version 2>&1 || python --version 2>&1 || echo "no python"
 
-      - name: TLS chain diagnostics
+      - name: Test with buildctl v0.24.0 (matching server)
         run: |
           set -e
-          echo "=== Client CA ==="
-          sha256sum "${DOCKER_CONFIG}/ca.pem"
-          echo "=== Client Cert ==="
-          sha256sum "${DOCKER_CONFIG}/cert.pem"
-          echo "=== Client Key ==="
-          sha256sum "${DOCKER_CONFIG}/key.pem"
-          echo ""
+          echo "=== Download buildctl v0.24.0 (matching buildkitd server) ==="
+          mkdir -p /tmp/buildctl-v0.24
+          curl -fsSL "https://gh-proxy.test.osinfra.cn/https://github.com/moby/buildkit/releases/download/v0.24.0/buildkit-v0.24.0.linux-arm64.tar.gz" -o /tmp/buildctl.tar.gz
+          tar -xzf /tmp/buildctl.tar.gz -C /tmp/buildctl-v0.24
+          /tmp/buildctl-v0.24/bin/buildctl --version
 
-          echo "=== Resolve buildkitd address ==="
-          python3 -c "
-          import socket
-          addr = 'buildkitd-service.buildkitd'
-          ips = socket.getaddrinfo(addr, 1234)
-          for ip in ips:
-              print(ip)
-          "
-
-          echo "=== Python TLS test ==="
-          python3 -c "
-          import ssl, socket
-
-          ctx = ssl.create_default_context(cafile='${DOCKER_CONFIG}/ca.pem')
-          ctx.load_cert_chain(
-              certfile='${DOCKER_CONFIG}/cert.pem',
-              keyfile='${DOCKER_CONFIG}/key.pem',
-          )
-          ctx.check_hostname = True
-
-          try:
-              with socket.create_connection(('buildkitd-service.buildkitd', 1234), timeout=10) as sock:
-                  with ctx.wrap_socket(sock, server_hostname='buildkitd-service.buildkitd') as ssock:
-                      print('TLS version:', ssock.version())
-                      print('Server cert CN:', ssock.getpeercert()['subject'])
-                      print('OK: TLS handshake successful')
-          except Exception as e:
-              print('TLS ERROR:', type(e).__name__, str(e))
-          " 2>&1
-
-      - name: Test buildctl with SSL_CERT_FILE
-        run: |
-          set +e
-          export SSL_CERT_FILE="${DOCKER_CONFIG}/ca.pem"
-          buildctl \
+          echo "=== Test connectivity ==="
+          /tmp/buildctl-v0.24/bin/buildctl \
             --addr "${BUILDKITD_ADDR}" \
+            --tlscacert "${DOCKER_CONFIG}/ca.pem" \
             --tlscert  "${DOCKER_CONFIG}/cert.pem" \
             --tlskey   "${DOCKER_CONFIG}/key.pem" \
             debug workers 2>&1
           echo "exit=$?"
-        continue-on-error: true
 
-      - name: Round 1 (expect cache MISS)
-        if: false
+      - name: Alternative - no client cert, CA only
         run: |
-          set -e
-          echo "=== Round 1: fresh pull, expect MISS in registry-proxy log ==="
-          T0=$(date +%s)
+          set +e
+          echo "=== Test buildctl v0.29.0 without client cert (server auth only) ==="
           buildctl \
             --addr "${BUILDKITD_ADDR}" \
-            --tlscert  "${DOCKER_CONFIG}/cert.pem" \
-            --tlskey   "${DOCKER_CONFIG}/key.pem" \
-            build \
-            --frontend dockerfile.v0 \
-            --local context=/tmp/ctx \
-            --local dockerfile=/tmp/ctx \
-            --no-cache \
-            --output type=image,name=test-torch-npu-cache:round1,push=false
-          T1=$(date +%s)
-          ROUND1_S=$((T1-T0))
-          echo "round1_s=${ROUND1_S}"
+            --tlscacert "${DOCKER_CONFIG}/ca.pem" \
+            debug workers 2>&1
+          echo "exit=$?"
+        continue-on-error: true
+
+      - name: Alternative - no TLS flags at all
+        run: |
+          set +e
+          echo "=== Test buildctl v0.29.0 with no TLS flags ==="
+          buildctl \
+            --addr "${BUILDKITD_ADDR}" \
+            debug workers 2>&1
+          echo "exit=$?"
+        continue-on-error: true
