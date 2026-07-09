@@ -20,12 +20,14 @@
 #include "mega_moe_tiling.h"
 #include "kernel_math_util.h"
 #include "mega_moe_workspace_info.h"
+#include "adv_api/hcomm/hcomm.h"
 
 struct Mc2MoeContext {
-    uint32_t epRankId;
-    uint32_t epRankSize;
-    uint64_t winSize;
-    uint64_t epHcclBuffer[1024];
+    uint32_t epRankId = 0;
+    uint32_t rankSizePerServer = 0;
+    uint64_t kfcContextAddr = 0; // 通信API所需的地址
+    uint64_t epHcclBuffer[HCCL_MAX_RANK_SIZE] = {};
+    uint64_t hcommHandle[HCCL_MAX_RANK_SIZE] = {};   // 支持ROCE或者URMA
 };
 
 struct GMMAddrInfo {
@@ -43,9 +45,11 @@ struct PeermemInfo {
     GM_ADDR rankSyncInWorldPtr;
     GM_ADDR maskRecvPtr;             // 源卡算好的 send-mask 接收区, 布局 [localExpert][srcRank]
     GM_ADDR quantTokenScalePtr;      // 量化结果，包括data+scale
+    GM_ADDR dispatchRecivePtr;       // dispatch 1级通信区,
     GM_ADDR combineSendPtr;
     __aicore__ inline PeermemInfo() = default;
-    __aicore__ inline PeermemInfo(GM_ADDR base, const MegaMoeTilingData *tilingData, uint32_t elemsPerByte = 1)
+    __aicore__ inline PeermemInfo(GM_ADDR base, const MegaMoeTilingData *tilingData, uint32_t elemsPerByte = 1,
+                                  uint32_t serverNum = 1)
     {
         rankSyncInWorldPtr = base;
         int64_t offset = PEERMEM_DATA_OFFSET;
@@ -62,15 +66,35 @@ struct PeermemInfo {
         offset += Ops::Base::CeilAlign(
             (int64_t)tilingData->expertPerRank * tilingData->epWorldSize * maskSlotSize, (int64_t)ALIGN_512);
 
-        quantTokenScalePtr = base + offset;
-        uint32_t mxScaleNum = Ops::Base::CeilDiv(tilingData->h, static_cast<uint32_t>(ALIGN_32));
-        uint32_t dataBytes = Ops::Base::CeilAlign(tilingData->h / elemsPerByte,
-            static_cast<uint32_t>(ALIGN_256)) * sizeof(int8_t);
-        uint32_t scaleBytes = mxScaleNum * sizeof(int8_t);
-        uint32_t tokenBytes = Ops::Base::CeilAlign(dataBytes + scaleBytes, static_cast<uint32_t>(ALIGN_32));
-        offset += Ops::Base::CeilAlign((int64_t)(tilingData->bs * tokenBytes * sizeof(int8_t)), (int64_t)ALIGN_512);
+        if (tilingData->topoType == TOPO_TYPE_MTE) {
+            quantTokenScalePtr = base + offset;
+            uint32_t mxScaleNum = Ops::Base::CeilDiv(tilingData->h, static_cast<uint32_t>(ALIGN_32));
+            uint32_t dataBytes = Ops::Base::CeilAlign(tilingData->h / elemsPerByte,
+                static_cast<uint32_t>(ALIGN_256)) * sizeof(int8_t);
+            uint32_t scaleBytes = mxScaleNum * sizeof(int8_t);
+            uint32_t tokenBytes = Ops::Base::CeilAlign(dataBytes + scaleBytes, static_cast<uint32_t>(ALIGN_32));
+            offset += Ops::Base::CeilAlign(
+                static_cast<int64_t>(tilingData->bs * tokenBytes * sizeof(int8_t)), (int64_t)ALIGN_512);
+        } else {
+            dispatchRecivePtr = base + offset;
+            uint32_t mxScaleNum = Ops::Base::CeilDiv(tilingData->h, static_cast<uint32_t>(ALIGN_32));
+            uint32_t dataBytes = Ops::Base::CeilAlign(tilingData->h / elemsPerByte,
+                static_cast<uint32_t>(ALIGN_256)) * sizeof(int8_t);
+            uint32_t scaleBytes = mxScaleNum * sizeof(int8_t);
+            uint32_t tokenBytes = Ops::Base::CeilAlign(static_cast<int64_t>(Ops::Base::CeilAlign(dataBytes + scaleBytes,
+                static_cast<uint32_t>(ALIGN_32)) + ALIGN_32), static_cast<int64_t>(ALIGN_512));
+            offset += Ops::Base::CeilAlign(
+                static_cast<int64_t>(tilingData->bs * tokenBytes * sizeof(int8_t)) *
+                static_cast<int64_t>(serverNum), (int64_t)ALIGN_512);
+        }
         combineSendPtr = base + offset;
     }
+};
+
+struct CombineCommParams {
+    uint32_t rankId;
+    Hcomm<COMM_PROTOCOL_UBC_CTP> *hcomm;
+    __gm__ Mc2MoeContext* mc2Context;
 };
 
 struct Params {
@@ -86,6 +110,7 @@ struct Params {
     WorkspaceInfo workspaceInfo;
     PeermemInfo peermemInfo;
     MegaMoeTilingData *tilingData;
+    CombineCommParams combineCommParams;
 };
 
 enum class AddrUpdateMode : int32_t {
@@ -173,6 +198,13 @@ __aicore__ inline void GmSignalWaitBarrier(__gm__ int32_t *sig_addr, int32_t cmp
         }
     } while (true);
 }
+
+__aicore__ inline uint64_t GetUrmaCommHandle(__gm__ Mc2MoeContext* mc2Context_, uint32_t rankId, uint32_t epRankId)
+{
+    uint32_t index = rankId > epRankId ? rankId - 1 : rankId;
+    return mc2Context_->hcommHandle[index];
+}
+
 
 inline GM_ADDR winRankAddr_[HCCL_MAX_RANK_SIZE];
 __aicore__ inline GM_ADDR GetRankWinAddrWithOffset(uint32_t rankId, uint64_t offset)

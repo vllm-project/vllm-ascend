@@ -2437,7 +2437,8 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "             int max_recv_token_num=0, int dispatch_quant_mode=0, int combine_quant_mode=0,"
         "             str comm_alg=\"\", int num_max_tokens_per_rank=0, str activation=\"swiglu\","
         "             float? activation_clamp=None, int? dispatch_quant_out_dtype=None,"
-        "             int? weight1_type=None, int? weight2_type=None)"
+        "             int? weight1_type=None, int? weight2_type=None,"
+        "             int? topo_type=None, int? rank_num_per_server=None)"
         "             -> (Tensor y, Tensor expert_token_nums)"
     );
     ops.impl("npu_mega_moe", torch::kPrivateUse1, &vllm_ascend::npu_mega_moe);
@@ -2956,6 +2957,8 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         .def(torch::init<const std::string&, int64_t, const std::string&>())
         .def("create_context", &vllm_ascend::CommContextManager::create_context)
         .def("update_group", &vllm_ascend::CommContextManager::update_group)
-        .def_property("ccl_buffer_size", &vllm_ascend::CommContextManager::ccl_buffer_size);
+        .def_property("ccl_buffer_size", &vllm_ascend::CommContextManager::ccl_buffer_size)
+        .def_property("topo_type", &vllm_ascend::CommContextManager::topo_type)
+        .def_property("rank_num_per_server", &vllm_ascend::CommContextManager::rank_num_per_server);
 }
 #endif

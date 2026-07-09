@@ -267,7 +267,9 @@ std::tuple<at::Tensor, at::Tensor> npu_mega_moe_meta(
     c10::optional<double> activation_clamp,
     c10::optional<int64_t> dispatch_quant_out_dtype,
     c10::optional<int64_t> weight1_type,
-    c10::optional<int64_t> weight2_type)
+    c10::optional<int64_t> weight2_type,
+    c10::optional<int64_t> topo_type,
+    c10::optional<int64_t> rank_num_per_server)
 {
     auto x_shape = x.sizes();
     int64_t bs = x_shape[0];

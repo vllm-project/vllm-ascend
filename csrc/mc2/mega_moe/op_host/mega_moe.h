@@ -54,6 +54,8 @@ struct MegaMoeConfig {
     uint32_t attrTransposeWeight1Index = 12U;
     uint32_t attrTransposeWeight2Index = 13U;
     uint32_t attrWeight1InterleaveIndex = 14U;
+    uint32_t attrTopoTypeIndex = 15U;
+    uint32_t attrRankNumPerServerIndex = 16U;
     bool isMc2Context = false;
 };
 

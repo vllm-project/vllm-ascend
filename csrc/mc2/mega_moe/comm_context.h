@@ -27,6 +27,12 @@ namespace vllm_ascend {
 // ======================== Backend mode enum ========================
 enum class BackendMode : uint8_t { UNINITIALIZED, KFC, CHANNEL };
 
+// ======================== Topology type enum ========================
+enum class TopoType : uint32_t {
+    INTRA_SUPER_NODE = 0,   // intra-super-node (default)
+    CROSS_SUPER_NODE = 1,   // cross-super-node
+};
+
 // ======================== Communication context struct ========================
 // This struct is serialized into an int32 NPU tensor and passed to the
 // aclnnMegaMoe operator as the "context" input.
@@ -71,6 +77,12 @@ public:
     // The size of the HCCL communication buffer in bytes.
     int64_t ccl_buffer_size() const { return cclBufferSize_; }
 
+    // Topology type: INTRA_SUPER_NODE (0) or CROSS_SUPER_NODE (1).
+    int64_t topo_type() const { return static_cast<int64_t>(topoType_); }
+
+    // Number of ranks per server (default 2).
+    int64_t rank_num_per_server() const { return rankNumPerServer_; }
+
 private:
     static int64_t context_tensor_size();
 
@@ -82,6 +94,8 @@ private:
     std::string backend_;
     BackendMode mode_;
     int64_t cclBufferSize_ = 0;
+    TopoType topoType_ = TopoType::INTRA_SUPER_NODE;
+    int64_t rankNumPerServer_ = 2;
 };
 
 // ======================== SoC name utility ========================

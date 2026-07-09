@@ -15,6 +15,15 @@
 
 #include "register/op_def_registry.h"
 
+#if __has_include("version/asc_devkit_version.h")
+#include "version/asc_devkit_version.h"
+#if ASC_DEVKIT_MAJOR > 9 || (ASC_DEVKIT_MAJOR == 9 && ASC_DEVKIT_MINOR > 0)
+#define ENABLE_FORMAT_NZ_C0_32
+#endif
+#else
+#define ENABLE_FORMAT_NZ_C0_32
+#endif
+
 namespace ops {
 class MegaMoe : public OpDef {
 public:
@@ -26,7 +35,8 @@ public:
         .AutoContiguous();
     this->Input("x")
         .ParamType(REQUIRED)
-        .DataTypeList({ge::DT_BF16, ge::DT_FLOAT16, ge::DT_FLOAT8_E5M2, ge::DT_FLOAT8_E4M3FN})
+        .DataTypeList({ge::DT_BF16, ge::DT_FLOAT16, ge::DT_FLOAT8_E5M2, ge::DT_FLOAT8_E4M3FN,
+                        ge::DT_HIFLOAT8, ge::DT_FLOAT4_E2M1, ge::DT_FLOAT4_E1M2})
         .FormatList({ge::FORMAT_ND})
         .AutoContiguous();
     this->Input("topk_ids")
@@ -41,12 +51,48 @@ public:
         .AutoContiguous();
     this->Input("weight1")
         .ParamType(DYNAMIC)
-        .DataType({ge::DT_FLOAT8_E5M2, ge::DT_FLOAT8_E4M3FN})
-        .Format({ge::FORMAT_ND, ge::FORMAT_ND});
+        .DataType({ge::DT_BF16, ge::DT_FLOAT16,               // fp16/bf16
+                   ge::DT_INT8, ge::DT_INT4,                  // int8/int4
+                   ge::DT_FLOAT8_E5M2,                        // fp8_e5m2
+                   ge::DT_FLOAT8_E4M3FN, ge::DT_FLOAT8_E4M3FN,// fp8_e4m3fn (ND/NZ)
+                   ge::DT_HIFLOAT8,                           // hifp8
+                   ge::DT_FLOAT4_E2M1, ge::DT_FLOAT4_E1M2,     // fp4_e2m1 / fp4_e1m2 (ND)
+#ifdef ENABLE_FORMAT_NZ_C0_32
+                   ge::DT_FLOAT4_E2M1, ge::DT_FLOAT4_E2M1      // fp4_e2m1 (NZ / NZ_C0_32)
+#endif
+                   })
+        .Format({ge::FORMAT_ND, ge::FORMAT_ND,                  // ND for fp16/bf16
+                 ge::FORMAT_FRACTAL_NZ, ge::FORMAT_FRACTAL_NZ,  // NZ for int8/int4
+                 ge::FORMAT_ND,                                 // ND for fp8_e5m2
+                 ge::FORMAT_ND, ge::FORMAT_FRACTAL_NZ,          // ND/NZ for fp8_e4m3fn
+                 ge::FORMAT_ND,                                 // ND for hifp8
+                 ge::FORMAT_ND, ge::FORMAT_ND,                  // ND for fp4_e2m1 / fp4_e1m2
+#ifdef ENABLE_FORMAT_NZ_C0_32
+                 ge::FORMAT_FRACTAL_NZ, ge::FORMAT_FRACTAL_NZ_C0_32 // NZ / NZ_C0_32 for fp4_e2m1
+#endif
+                 });
     this->Input("weight2")
         .ParamType(DYNAMIC)
-        .DataType({ge::DT_FLOAT8_E5M2, ge::DT_FLOAT8_E4M3FN})
-        .Format({ge::FORMAT_ND, ge::FORMAT_ND});
+        .DataType({ge::DT_BF16, ge::DT_FLOAT16,               // fp16/bf16
+                   ge::DT_INT8, ge::DT_INT4,                  // int8/int4
+                   ge::DT_FLOAT8_E5M2,                        // fp8_e5m2
+                   ge::DT_FLOAT8_E4M3FN, ge::DT_FLOAT8_E4M3FN,// fp8_e4m3fn (ND/NZ)
+                   ge::DT_HIFLOAT8,                           // hifp8
+                   ge::DT_FLOAT4_E2M1, ge::DT_FLOAT4_E1M2,     // fp4_e2m1 / fp4_e1m2 (ND)
+#ifdef ENABLE_FORMAT_NZ_C0_32
+                   ge::DT_FLOAT4_E2M1, ge::DT_FLOAT4_E2M1      // fp4_e2m1 (NZ_C0_32 / NZ_C0_32)
+#endif
+                   })
+        .Format({ge::FORMAT_ND, ge::FORMAT_ND,                  // ND for fp16/bf16
+                 ge::FORMAT_FRACTAL_NZ, ge::FORMAT_FRACTAL_NZ,  // NZ for int8/int4
+                 ge::FORMAT_ND,                                 // ND for fp8_e5m2
+                 ge::FORMAT_ND, ge::FORMAT_FRACTAL_NZ,          // ND/NZ for fp8_e4m3fn
+                 ge::FORMAT_ND,                                 // ND for hifp8
+                 ge::FORMAT_ND, ge::FORMAT_ND,                  // ND for fp4_e2m1 / fp4_e1m2
+#ifdef ENABLE_FORMAT_NZ_C0_32
+                 ge::FORMAT_FRACTAL_NZ_C0_32, ge::FORMAT_FRACTAL_NZ_C0_32 // NZ_C0_32 / NZ_C0_32 for fp4_e2m1
+#endif
+                 });
     this->Input("weight_scales1")
         .ParamType(DYNAMIC)
         .DataTypeList({ge::DT_FLOAT, ge::DT_FLOAT8_E8M0})
@@ -102,6 +148,8 @@ public:
     this->Attr("transpose_weight1").AttrType(OPTIONAL).Bool(false);
     this->Attr("transpose_weight2").AttrType(OPTIONAL).Bool(false);
     this->Attr("weight1_interleave").AttrType(OPTIONAL).Int(0);
+    this->Attr("topo_type").AttrType(OPTIONAL).Int(0);
+    this->Attr("rank_num_per_server").AttrType(OPTIONAL).Int(2);
 
     OpAICoreConfig aicore_config;
     aicore_config.DynamicCompileStaticFlag(true)

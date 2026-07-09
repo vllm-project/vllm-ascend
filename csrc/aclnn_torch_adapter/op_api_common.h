@@ -77,6 +77,62 @@ typedef struct {
     aclDataType dtype;
 } TensorListWrapper;
 
+constexpr int64_t FP4_IN_INT8 = 2;
+constexpr int64_t PENULTIMATE_DIM = 2;
+
+inline bool Is4BitDtype(const aclDataType acl_data_type) {
+  return acl_data_type == ACL_FLOAT4_E2M1 || acl_data_type == ACL_INT4;
+}
+
+inline aclFormat GetReal4BitFormat(const aclFormat format) {
+  // torch_npu exposes packed 4-bit tensors through byte storage. Convert its
+  // storage format metadata to the logical 4-bit format expected by ACLNN.
+  TORCH_CHECK(format == ACL_FORMAT_FRACTAL_NZ_C0_16 || format == ACL_FORMAT_FRACTAL_NZ,
+              "Unsupported packed 4-bit format: ", static_cast<int64_t>(format));
+  return format == ACL_FORMAT_FRACTAL_NZ_C0_16 ? ACL_FORMAT_FRACTAL_NZ_C0_32 : ACL_FORMAT_FRACTAL_NZ;
+}
+
+inline c10::SmallVector<int64_t, 5> ToSmallVector(const c10::IntArrayRef values) {
+  c10::SmallVector<int64_t, 5> result;
+  for (const int64_t value : values) {
+    result.push_back(value);
+  }
+  return result;
+}
+
+inline void CollectB4ShapeInfo(const at::Tensor& at_tensor, c10::SmallVector<int64_t, 5>& wrapper_stride,
+                               c10::SmallVector<int64_t, 5>& wrapper_shape) {
+  const int64_t dim_num = at_tensor.dim();
+  if (dim_num == 1) {
+    wrapper_shape[0] *= FP4_IN_INT8;
+    return;
+  }
+
+  TORCH_CHECK(dim_num > 1, "Unsupported tensor size for 4-bit dtype.");
+  const int64_t last_dim = dim_num - 1;
+  const int64_t penultimate_dim = dim_num - PENULTIMATE_DIM;
+
+  if (wrapper_stride[last_dim] == 1 && wrapper_stride[penultimate_dim] == 1) {
+    if (wrapper_shape[penultimate_dim] == 1) {
+      wrapper_stride[last_dim] *= FP4_IN_INT8;
+      wrapper_shape[penultimate_dim] *= FP4_IN_INT8;
+    } else if (wrapper_shape[last_dim] == 1) {
+      wrapper_stride[penultimate_dim] *= FP4_IN_INT8;
+      wrapper_shape[last_dim] *= FP4_IN_INT8;
+    }
+  } else if (wrapper_stride[last_dim] == 1) {
+    wrapper_stride[penultimate_dim] *= FP4_IN_INT8;
+    wrapper_shape[last_dim] *= FP4_IN_INT8;
+  } else if (wrapper_stride[penultimate_dim] == 1) {
+    wrapper_stride[last_dim] *= FP4_IN_INT8;
+    wrapper_shape[penultimate_dim] *= FP4_IN_INT8;
+  }
+
+  for (int64_t i = 0; i < penultimate_dim; ++i) {
+    wrapper_stride[i] *= FP4_IN_INT8;
+  }
+}
+
 constexpr int kHashBufSize = 8192;
 constexpr int kHashBufMaxSize = kHashBufSize + 1024;
 extern thread_local char g_hashBuf[kHashBufSize];
@@ -456,16 +512,18 @@ inline aclTensor *ConvertType(const TensorWrapper &tensor_wrapper) {
   }
 
   aclDataType acl_data_type = tensor_wrapper.dtype;
-  TORCH_CHECK(acl_data_type != ACL_DT_UNDEFINED,
-              "TensorWrapper: aclDataType must not be ACL_DT_UNDEFINED")
+  TORCH_CHECK(acl_data_type != ACL_DT_UNDEFINED, "TensorWrapper: aclDataType must not be ACL_DT_UNDEFINED")
 
   c10::SmallVector<int64_t, 5> storageDims;
+  auto wrapperStride = ToSmallVector(at_tensor.strides());
+  auto wrapperShape = ToSmallVector(at_tensor.sizes());
   auto itemsize = at_tensor.itemsize();
   TORCH_CHECK(itemsize != 0, "When ConvertType, tensor item size cannot be zero.");
 
   const auto dimNum = at_tensor.sizes().size();
   aclFormat format = ACL_FORMAT_ND;
-  if (!IsOpInputBaseFormat(at_tensor)) {
+  const bool isBaseFormat = IsOpInputBaseFormat(at_tensor);
+  if (!isBaseFormat) {
     format = vllm_ascend::NPUBridge::GetNpuStorageImpl(at_tensor)->npu_desc_.npu_format_;
     if (acl_data_type != ACL_STRING) {
       storageDims = vllm_ascend::NPUBridge::GetNpuStorageImpl(at_tensor)->npu_desc_.storage_sizes_;
@@ -489,11 +547,18 @@ inline aclTensor *ConvertType(const TensorWrapper &tensor_wrapper) {
     }
   }
 
-  auto acl_tensor = aclCreateTensor(
-      at_tensor.sizes().data(), at_tensor.sizes().size(), acl_data_type,
-      at_tensor.strides().data(), at_tensor.storage_offset(), format,
-      storageDims.data(), storageDims.size(),
-      const_cast<void *>(at_tensor.storage().data()));
+  if (acl_data_type != ACL_STRING && Is4BitDtype(acl_data_type)) {
+    TORCH_CHECK(!storageDims.empty(), "Storage shape is empty for packed 4-bit tensor.");
+    CollectB4ShapeInfo(at_tensor, wrapperStride, wrapperShape);
+    storageDims.back() *= FP4_IN_INT8;
+    if (!isBaseFormat) {
+      format = GetReal4BitFormat(format);
+    }
+  }
+
+  auto acl_tensor = aclCreateTensor(wrapperShape.data(), wrapperShape.size(), acl_data_type, wrapperStride.data(),
+                                    at_tensor.storage_offset(), format, storageDims.data(), storageDims.size(),
+                                    const_cast<void*>(at_tensor.storage().data()));
   return acl_tensor;
 }
 
