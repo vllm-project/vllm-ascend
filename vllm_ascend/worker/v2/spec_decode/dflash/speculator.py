@@ -206,4 +206,5 @@ def _prepare_dflash_inputs_kernel_ascend(
         for i in range(q_pad_start, max_num_tokens):
             tl.store(out_query_slot_mapping_ptr + i, PAD_SLOT_ID)
 
+
 vllm_dflash_speculator._prepare_dflash_inputs_kernel = _prepare_dflash_inputs_kernel_ascend

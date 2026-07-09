@@ -19,6 +19,8 @@
 import torch
 from vllm.config import VllmConfig
 
+from vllm_ascend.utils import vllm_version_is
+
 
 def init_speculator(
     vllm_config: VllmConfig,
@@ -36,6 +38,8 @@ def init_speculator(
 
         return AscendDSparkSpeculator(vllm_config, device)
     if speculative_config.use_dflash():
+        if vllm_version_is("0.23.0"):
+            raise NotImplementedError("DFlash speculator is not supported on vLLM 0.23.0.")
         from vllm_ascend.worker.v2.spec_decode.dflash.speculator import (
             AscendDFlashSpeculator,
         )
