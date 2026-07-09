@@ -22,7 +22,7 @@ import logging
 import math
 import sys
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from collections.abc import Callable
 from contextlib import contextmanager, nullcontext
 from copy import copy, deepcopy
@@ -604,6 +604,9 @@ class NPUModelRunner(GPUModelRunner):
         self.tmp_encoder_cache: dict[str, torch.Tensor] = {}
         self.cpu_encoder_cache: dict[str, torch.Tensor] = {}
         self.cached: dict[str, set[str]] = {}
+        self._pending_encoder_cache_copies: deque[
+            tuple[torch.Tensor, torch.npu.Event]
+        ] = deque()
 
     @property
     def use_cp(self) -> bool:
@@ -879,9 +882,15 @@ class NPUModelRunner(GPUModelRunner):
                 if mm_hash in self.tmp_encoder_cache:
                     del self.tmp_encoder_cache[mm_hash]
 
+
     def _async_process_scheduler_output(self, scheduler_output: "SchedulerOutput") -> None:
+        self._clear_finished_encoder_cache_copies()
         ec_manager_metadata = getattr(scheduler_output, "ec_manager_metadata", None)
-        assert ec_manager_metadata is not None, "SchedulerOutput.ec_manager_metadata is None, ec cache scheduling metadata missing"
+        if ec_manager_metadata is None:
+            for mm_hash in scheduler_output.free_encoder_mm_hashes:
+                self.encoder_cache.pop(mm_hash, None)
+            return
+
         # Free the cached encoder outputs.
         promoting_mm_hashes = ec_manager_metadata.promoting_mm_hashes
         cpu_get_encoder_mm_hashes = ec_manager_metadata.cpu_get_encoder_mm_hashes
@@ -891,19 +900,14 @@ class NPUModelRunner(GPUModelRunner):
             if value is None and mm_hash not in promoting_mm_hashes:
                 self.cpu_encoder_cache.pop(mm_hash, None)
 
-        # 处理晋升列表
         for mm_hash in promoting_mm_hashes:
             cpu_value = self.cpu_encoder_cache.get(mm_hash, None)
             if cpu_value is None:
                 continue
 
-            staging = cpu_value.pin_memory()
-            npu_value = staging.detach().to(self.device, non_blocking=True)
-            # �?staging 的生命周期绑定到 NPU stream
-            # npu_value.record_stream(torch.npu.current_stream())
-
-            self.encoder_cache[mm_hash] = npu_value
-            del staging
+            self.encoder_cache[mm_hash] = self._copy_cpu_encoder_cache_to_device(
+                cpu_value
+            )
 
         for mm_hash in cpu_get_encoder_mm_hashes:
             if mm_hash in self.encoder_cache or mm_hash in self.tmp_encoder_cache:
@@ -911,12 +915,9 @@ class NPUModelRunner(GPUModelRunner):
             cpu_value = self.cpu_encoder_cache.get(mm_hash, None)
             if cpu_value is None:
                 continue
-            staging = cpu_value.pin_memory()
-            npu_value = staging.detach().to(self.device, non_blocking=True)
-            # 保证拷贝完成�?staging 不会被释�?
-            # npu_value.record_stream(torch.npu.current_stream())
-            self.tmp_encoder_cache[mm_hash] = npu_value
-            del staging
+            self.tmp_encoder_cache[mm_hash] = self._copy_cpu_encoder_cache_to_device(
+                cpu_value
+            )
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         """Update the cached states and the persistent batch with the scheduler
@@ -1189,6 +1190,59 @@ class NPUModelRunner(GPUModelRunner):
         # Refresh batch metadata with any pending updates.
         self.input_batch.refresh_metadata()
 
+    def _get_encoder_output_from_cache(self, mm_hash: str) -> torch.Tensor | None:
+        encoder_output = self.encoder_cache.get(mm_hash, None)
+        if encoder_output is not None:
+            return encoder_output
+
+        encoder_output = self.tmp_encoder_cache.get(mm_hash, None)
+        if encoder_output is not None:
+            return encoder_output
+
+        if not get_score_encoder_cache_config(self.vllm_config).enabled:
+            return None
+
+        cpu_value = self.cpu_encoder_cache.get(mm_hash, None)
+        if cpu_value is None:
+            return None
+
+        # The score encoder cache scheduler asks the worker to stage CPU cache
+        # hits into a device cache before gather.  Keep a defensive synchronous
+        # fallback here so a stale worker-side temporary entry cannot turn a
+        # scheduler CPU-cache hit into an engine-fatal cache miss.
+        encoder_output = self._copy_cpu_encoder_cache_to_device(
+            cpu_value, non_blocking=False
+        )
+        self.tmp_encoder_cache[mm_hash] = encoder_output
+        return encoder_output
+
+    def _clear_finished_encoder_cache_copies(self) -> None:
+        while (
+            self._pending_encoder_cache_copies
+            and self._pending_encoder_cache_copies[0][1].query()
+        ):
+            self._pending_encoder_cache_copies.popleft()
+
+    def _copy_cpu_encoder_cache_to_device(
+        self,
+        cpu_value: torch.Tensor,
+        *,
+        non_blocking: bool = True,
+    ) -> torch.Tensor:
+        if not non_blocking:
+            return cpu_value.to(self.device, non_blocking=False)
+
+        self._clear_finished_encoder_cache_copies()
+        source = cpu_value if cpu_value.is_pinned() else cpu_value.pin_memory()
+        npu_value = torch.empty_like(source, device=self.device)
+        npu_value.copy_(source, non_blocking=True)
+
+        copy_done = torch.npu.Event()
+        copy_done.record(torch.npu.current_stream())
+        self._pending_encoder_cache_copies.append((source, copy_done))
+        npu_value.record_stream(torch.npu.current_stream())
+        return npu_value
+
     def _execute_mm_encoder(
         self, scheduler_output: "SchedulerOutput"
     ) -> list[torch.Tensor]:
@@ -1263,8 +1317,11 @@ class NPUModelRunner(GPUModelRunner):
             encoder_outputs.extend(curr_group_outputs)
 
         ec_manager_metadata = getattr(scheduler_output, "ec_manager_metadata", None)
-        assert ec_manager_metadata is not None, "SchedulerOutput.ec_manager_metadata is None, ec cache scheduling metadata missing"
-        promoting_mm_hashes = ec_manager_metadata.promoting_mm_hashes
+        promoting_mm_hashes = (
+            ec_manager_metadata.promoting_mm_hashes
+            if ec_manager_metadata is not None
+            else []
+        )
 
         # Cache the encoder outputs by mm_hash
         for (mm_hash, pos_info), output in zip(mm_hashes_pos, encoder_outputs):
@@ -1277,12 +1334,12 @@ class NPUModelRunner(GPUModelRunner):
                 staging.copy_(output.detach(), non_blocking=True)
                 self.cpu_encoder_cache[mm_hash] = staging
 
+                # If the entry is marked for promotion and not marked for eviction,
+                # keep it in the device (NPU) cache as well.
                 if (
                     mm_hash in promoting_mm_hashes and
                     mm_hash not in scheduler_output.free_encoder_mm_hashes
                 ):
-                    # 如果还在晋升列表，且不在淘汰列表，还要放入npu�?
-                    # 1.首次进入，放cpu  2.命中cpu，不晋升 3.命中cpu，晋�?4.由于别人晋升被淘�?
                     self.encoder_cache[mm_hash] = output
                 else:
                     self.tmp_encoder_cache[mm_hash] = output
@@ -1293,107 +1350,6 @@ class NPUModelRunner(GPUModelRunner):
             self.maybe_save_ec_to_connector(self.encoder_cache, mm_hash)
 
         return encoder_outputs
-
-
-    def _gather_mm_embeddings(
-        self,
-        scheduler_output: "SchedulerOutput",
-        shift_computed_tokens: int = 0,
-    ) -> tuple[list[torch.Tensor], torch.Tensor]:
-        total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
-
-        mm_embeds = list[torch.Tensor]()
-        is_mm_embed = self.is_mm_embed.cpu
-        is_mm_embed[:total_num_scheduled_tokens] = False
-
-        req_start_idx = 0
-        should_sync_mrope_positions = False
-        should_sync_xdrope_positions = False
-
-        for req_id in self.input_batch.req_ids:
-            mm_embeds_req: list[torch.Tensor] = []
-
-            num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
-            req_state = self.requests[req_id]
-            num_computed_tokens = req_state.num_computed_tokens + shift_computed_tokens
-
-            for mm_feature in req_state.mm_features:
-                pos_info = mm_feature.mm_position
-                start_pos = pos_info.offset
-                num_encoder_tokens = pos_info.length
-
-                # The encoder output is needed if the two ranges overlap:
-                # [num_computed_tokens,
-                #  num_computed_tokens + num_scheduled_tokens) and
-                # [start_pos, start_pos + num_encoder_tokens)
-                if start_pos >= num_computed_tokens + num_scheduled_tokens:
-                    # The encoder output is not needed in this step.
-                    break
-                if start_pos + num_encoder_tokens <= num_computed_tokens:
-                    # The encoder output is already processed and stored
-                    # in the decoder's KV cache.
-                    continue
-
-                start_idx = max(num_computed_tokens - start_pos, 0)
-                end_idx = min(
-                    num_computed_tokens - start_pos + num_scheduled_tokens,
-                    num_encoder_tokens,
-                )
-                assert start_idx < end_idx
-                curr_embeds_start, curr_embeds_end = (
-                    pos_info.get_embeds_indices_in_range(start_idx, end_idx)
-                )
-                # If there are no embeddings in the current range, we skip
-                # gathering the embeddings.
-                if curr_embeds_start == curr_embeds_end:
-                    continue
-
-                mm_hash = mm_feature.identifier
-                encoder_output = self.encoder_cache.get(mm_hash, None)
-                if encoder_output is None:
-                    encoder_output = self.tmp_encoder_cache.get(mm_hash, None)
-                assert encoder_output is not None, f"Encoder cache miss for {mm_hash}"
-
-                if (is_embed := pos_info.is_embed) is not None:
-                    is_embed = is_embed[start_idx:end_idx]
-                    mm_embeds_item = encoder_output[curr_embeds_start:curr_embeds_end]
-                else:
-                    mm_embeds_item = encoder_output[start_idx:end_idx]
-
-                req_start_pos = req_start_idx + start_pos - num_computed_tokens
-                is_mm_embed[req_start_pos + start_idx : req_start_pos + end_idx] = (
-                    True if is_embed is None else is_embed
-                )
-                mm_embeds_req.append(mm_embeds_item)
-
-            if self.is_multimodal_pruning_enabled and self.uses_mrope:
-                assert req_state.mrope_positions is not None
-                should_sync_mrope_positions = True
-                mm_embeds_req, new_mrope_positions, new_delta = (
-                    self.model.recompute_mrope_positions(
-                        input_ids=req_state.prompt_token_ids,
-                        multimodal_embeddings=mm_embeds_req,
-                        mrope_positions=req_state.mrope_positions,
-                        num_computed_tokens=req_state.num_computed_tokens,
-                    )
-                )
-                req_state.mrope_positions.copy_(new_mrope_positions)
-                req_state.mrope_position_delta = new_delta
-
-            mm_embeds.extend(mm_embeds_req)
-            req_start_idx += num_scheduled_tokens
-
-        is_mm_embed = self.is_mm_embed.copy_to_gpu(total_num_scheduled_tokens)
-
-        if should_sync_mrope_positions:
-            self._calc_mrope_positions(scheduler_output)
-            self.mrope_positions.copy_to_gpu(total_num_scheduled_tokens)
-
-        if should_sync_xdrope_positions:
-            self._calc_xdrope_positions(scheduler_output)
-            self.xdrope_positions.copy_to_gpu(total_num_scheduled_tokens)
-
-        return mm_embeds, is_mm_embed
 
     def _prepare_inputs(
         self,
@@ -2328,7 +2284,7 @@ class NPUModelRunner(GPUModelRunner):
         elif isinstance(self.drafter, AscendNgramProposerNPU):
             batch_size = min(self.input_batch.num_reqs, self.token_ids_gpu_tensor.shape[0])
 
-            # prepare sampled_token_ids tensor（list �?padded tensor�?
+            # prepare sampled_token_ids tensor (list → padded tensor)
             sampled_token_ids = valid_sampled_token_ids
             if isinstance(sampled_token_ids, list):
                 max_len = max((len(sublist) for sublist in sampled_token_ids), default=0)
@@ -2355,7 +2311,7 @@ class NPUModelRunner(GPUModelRunner):
                 k=self.drafter.k,
             )
 
-            # only async scheduling, set prev_sampled_token_ids�?
+            # only async scheduling, set prev_sampled_token_ids,
             if self.use_async_scheduling:
                 self.input_batch.prev_sampled_token_ids = next_token_ids.unsqueeze(1)
 
