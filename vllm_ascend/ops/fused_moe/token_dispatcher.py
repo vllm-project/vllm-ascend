@@ -278,7 +278,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         # - A5 MXFP communication uses quant_mode=4 only for MXFP8 currently.
         if comm_quant_mode is not None:
             quant_mode = comm_quant_mode
-        elif quant_type == QuantType.MXFP8:
+        elif quant_type == QuantType.W8A8MXFP:
             quant_mode = 4
         else:
             quant_mode = 0
@@ -356,7 +356,7 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
         #  MXFP4 keeps dispatch unquantized in AllGather path, and quantizes again inside the MLP path.
         with_quant = (
             token_dispatch_input.quant.dispatch_with_quant
-            and token_dispatch_input.quant.quant_type != QuantType.W8A8FP8
+            and token_dispatch_input.quant.quant_type != QuantType.W8A8FP
         )
         is_mxfp = token_dispatch_input.quant.is_mxfp
         hidden_states = token_dispatch_input.hidden_states
@@ -373,7 +373,7 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
         # Fuse the first dynamic quant of moe_mlp into initrouting when
         # dispatch_with_quant is on but got a None dynamic_scale.
         if with_quant and dynamic_scale is None:
-            if quant_type == QuantType.MXFP4:
+            if quant_type == QuantType.W4A4MXFP:
                 quant_mode = 9
             else:
                 quant_mode = 3 if is_mxfp else 1
