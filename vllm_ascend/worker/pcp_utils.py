@@ -1505,18 +1505,24 @@ class PCPManager:
         cp_size = self.pcp_world_size * self.dcp_world_size
         assert cp_size > 1, "cp_size must be greater than 1"
 
+        interleave_size = self.vllm_config.parallel_config.cp_kv_cache_interleave_size
+
         q_lens = torch.tensor(decode_num_scheduled_tokens[: self.num_decode_reqs], dtype=torch.int32)
         global_histories = torch.tensor(decode_num_computed_tokens, dtype=torch.int32)
         total_lens = global_histories + q_lens
         context_lens = total_lens - q_lens
 
-        max_indices = total_lens - 1
-        valid = max_indices >= cp_rank
+        # Interleave-aware per-rank KV length:
+        # base = L // I // W * I, remainder = L - base * W,
+        # local = base + clip(remainder - rank * I, 0, I)
+        base_k = total_lens // interleave_size // cp_size * interleave_size
+        remainder_k = total_lens - base_k * cp_size
+        k_lens = base_k + torch.clamp(remainder_k - cp_rank * interleave_size, 0, interleave_size)
+        valid = k_lens > 0
 
         if not valid.any():
             return self.dcp_mtp_attn_mask.cpu[: self.num_decode_reqs]
 
-        k_lens = torch.div(max_indices - cp_rank, cp_size, rounding_mode="floor") + 1
         k_lens = torch.where(valid, k_lens, torch.zeros_like(k_lens))
 
         mtp_attn_mask = self.dcp_mtp_attn_mask.cpu[: self.num_decode_reqs]
@@ -1536,7 +1542,14 @@ class PCPManager:
         valid_q = valid[:, None] & (q_indices[None, :] < q_lens[:, None])
         valid_k = valid[:, None] & (k_indices[None, :] < k_lens[:, None])
 
-        k_upper = (context_lens[:, None] + q_indices - cp_rank) // cp_size
+        # Interleave-aware k_upper: for query token at global position P,
+        # the number of rank-cp_rank KV tokens before P (exclusive upper bound).
+        positions = context_lens[:, None] + q_indices[None, :]  # [num_decode_reqs, max_q]
+        base_q = positions // interleave_size // cp_size * interleave_size
+        remainder_q = positions - base_q * cp_size
+        local_q = base_q + torch.clamp(remainder_q - cp_rank * interleave_size, 0, interleave_size)
+        k_upper = local_q - 1  # inclusive upper KV index
+
         k_upper_expanded = k_upper[:, :, None]  # [num_decode_reqs, max_q, 1]
         k_idx_expanded = k_indices[None, None, :]  # [1, 1, max_k]
         full_mask = (k_idx_expanded > k_upper_expanded) & (k_upper_expanded >= 0)
