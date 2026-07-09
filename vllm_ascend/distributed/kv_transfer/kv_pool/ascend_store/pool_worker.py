@@ -753,6 +753,7 @@ class KVPoolWorker:
 
     def get_and_clear_finished_requests(self, finished_req_ids, meta: AscendConnectorMetadata) -> set[str]:
         finished_sending = set()
+        pending_finished_req_ids = set()
         for req_id in meta.preempted_req_ids:
             self.kv_send_thread.delete_finished_stored_request(  # type: ignore[union-attr]
                 req_id
@@ -783,6 +784,20 @@ class KVPoolWorker:
                 )
             elif req_remain_jobs is not None:
                 self.finished_store_req.add(req_id)
+                pending_finished_req_ids.add(req_id)
+
+        if pending_finished_req_ids:
+            self.kv_send_thread.request_queue.join()  # type: ignore[union-attr]
+            for req_id in pending_finished_req_ids:
+                req_remain_jobs = self.kv_send_thread.stored_requests.get(  # type: ignore[union-attr]
+                    req_id
+                )
+                if req_remain_jobs == 0:
+                    self.finished_store_req.discard(req_id)
+                    finished_sending.add(req_id)
+                    self.kv_send_thread.delete_finished_stored_request(  # type: ignore[union-attr]
+                        req_id
+                    )
 
         return finished_sending
 
