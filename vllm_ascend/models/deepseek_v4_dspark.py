@@ -591,8 +591,6 @@ class DeepSeekV4DSparkMTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
                 break
             else:
                 if ".experts." in name:
-                    if "weight_scale" in name and loaded_weight.dtype == torch.float8_e8m0fnu:
-                        loaded_weight = loaded_weight.view(torch.uint8)
                     for param_name, weight_name, expert_id, expert_shard_id in expert_mapping:
                         if weight_name not in name:
                             continue
