@@ -66,6 +66,9 @@ class TestAscendConfig(TestBase):
         ascend_config = init_ascend_config(test_vllm_config)
         self.assertFalse(ascend_config.multistream_overlap_shared_expert)
         self.assertFalse(ascend_config.enable_kv_nz)
+        # ubatch settings default to disabled / 2048.
+        self.assertEqual(ascend_config.num_ubatches, 1)
+        self.assertEqual(ascend_config.ubatch_trigger_threshold, 2048)
 
         ascend_compilation_config = ascend_config.ascend_compilation_config
         self.assertTrue(ascend_compilation_config.fuse_norm_quant)
@@ -88,10 +91,14 @@ class TestAscendConfig(TestBase):
             "eplb_config": {"num_redundant_experts": 2},
             "refresh": True,
             "enable_kv_nz": False,
+            "num_ubatches": 2,
+            "ubatch_trigger_threshold": 4096,
         }
         ascend_config = init_ascend_config(test_vllm_config)
         self.assertEqual(ascend_config.eplb_config.num_redundant_experts, 2)
         self.assertTrue(ascend_config.multistream_overlap_shared_expert)
+        self.assertEqual(ascend_config.num_ubatches, 2)
+        self.assertEqual(ascend_config.ubatch_trigger_threshold, 4096)
 
         ascend_compilation_config = ascend_config.ascend_compilation_config
         self.assertFalse(ascend_compilation_config.fuse_norm_quant)

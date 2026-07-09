@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 import torch
+from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec, KVCacheTensor
 
@@ -365,6 +366,207 @@ class TestCorrectOptimisticSeqLensCpu(unittest.TestCase):
         runner.valid_sampled_token_count_event = None
         with self.assertRaises(AssertionError):
             runner._correct_optimistic_seq_lens_cpu(1)
+
+
+class TestSyncBatchAcrossDp(unittest.TestCase):
+    """Tests for NPUModelRunner._sync_batch_across_dp ubatch voting logic.
+
+    The function runs an all_reduce of a (4, dp_size) tensor across DP ranks
+    and uses it to reach a unanimous ubatch decision. We mock the reduce to a
+    pure-Python per-rank-column placement so the per-rank inputs we set up are
+    combined the way a real collective would, then assert the returned
+    should_ubatch flag and the padded-token tensor.
+    """
+
+    def _build_runner(self, dp_size: int, dp_rank: int, tp_size: int = 1):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.dp_size = dp_size
+        runner.dp_rank = dp_rank
+        runner.vllm_config = MagicMock()
+        runner.vllm_config.parallel_config.tensor_parallel_size = tp_size
+        runner.ascend_config = MagicMock()
+        runner.ascend_config.dp_allreduce_on_npu = False
+        return runner
+
+    def _install_reduce(self, mock_dist, rank_values: list[list[int]]):
+        """Emulate a real SUM all_reduce on the per-rank column encoding.
+   
+           ``rank_values[r]`` is the [padded, cg_mode, real, ub_flag] that rank r
+           would locally contribute. The function uses a per-rank column encoding:
+           rank r writes its values into column r only, leaving the other columns
+           zero. Under a real SUM all_reduce each column therefore still holds that
+           rank's own value after the reduce (no other rank writes to it), so we
+           scatter each rank's contribution into its own column rather than
+           summing across ranks and replicating the sum (which would corrupt the
+           unanimous-vote check by making every column carry the same value).
+        """
+        contributions = np.array(rank_values, dtype=np.int32)  # (dp_size, 4)
+
+        def fake_reduce(tensor, group=None):
+            # tensor is (4, dp_size); the function only sets this rank's
+            # column. A real SUM all_reduce leaves each column holding the
+            # value its owning rank wrote (since only one rank writes per
+            # column). Replicate that outcome here.
+            for r, values in enumerate(rank_values):
+                for row in range(4):
+                    tensor[row][r] = contributions[r][row]
+
+        mock_dist.all_reduce.side_effect = fake_reduce
+
+    @patch("vllm_ascend.worker.model_runner_v1.dist")
+    @patch("vllm_ascend.worker.model_runner_v1.should_skip_allreduce_across_dp_group", return_value=False)
+    @patch("vllm_ascend.worker.model_runner_v1.enable_sp_by_pass", return_value=False)
+    @patch("vllm_ascend.worker.model_runner_v1.enable_sp", return_value=False)
+    def test_unanimous_large_batch_enables_ubatch(
+        self, mock_enable_sp, mock_enable_sp_bypass, mock_skip_ar, mock_dist
+    ):
+        from vllm_ascend.ascend_config import clear_ascend_config, init_ascend_config
+
+        # num_ubatches=2, threshold=2048; both ranks want ubatch, batch is large.
+        # Initialise the real AscendConfig + runtime manager singleton so that
+        # should_enable_ubatch() (called inside _sync_batch_across_dp) sees
+        # num_ubatches > 1 and the configured threshold.
+        clear_ascend_config()
+        cfg = VllmConfig()
+        cfg.additional_config = {
+            "num_ubatches": 2,
+            "ubatch_trigger_threshold": 2048,
+            "refresh": True,
+        }
+        init_ascend_config(cfg)
+        import vllm_ascend.worker.ubatch_utils as uu
+        uu._UBATCH_RUNTIME_MANAGER = None
+        self.addCleanup(clear_ascend_config)
+        self.addCleanup(setattr, uu, "_UBATCH_RUNTIME_MANAGER", None)
+
+        runner = self._build_runner(dp_size=2, dp_rank=0)
+
+        # Each rank: padded=3000, cg_mode=0(NONE), real=3000, ub_flag=1
+        rank_values = [[3000, 0, 3000, 1], [3000, 0, 3000, 1]]
+        self._install_reduce(mock_dist, rank_values)
+
+        with patch("vllm_ascend.worker.model_runner_v1.get_dp_group") as mock_g:
+            mock_g.return_value.cpu_group = object()
+            should_ubatch, num_tokens_across_dp, cg_mode = runner._sync_batch_across_dp(
+                num_tokens=3000,
+                num_tokens_padded=3000,
+                cudagraph_mode=CUDAGraphMode.NONE,
+                allow_dp_padding=False,
+                should_ubatch=True,
+            )
+
+        self.assertTrue(should_ubatch)
+        self.assertIsNotNone(num_tokens_across_dp)
+        self.assertEqual(num_tokens_across_dp.tolist(), [3000, 3000])
+
+    @patch("vllm_ascend.worker.model_runner_v1.dist")
+    @patch("vllm_ascend.worker.model_runner_v1.should_skip_allreduce_across_dp_group", return_value=False)
+    @patch("vllm_ascend.worker.model_runner_v1.enable_sp_by_pass", return_value=False)
+    @patch("vllm_ascend.worker.model_runner_v1.enable_sp", return_value=False)
+    def test_one_rank_disagreeing_disables_ubatch(
+        self, mock_enable_sp, mock_enable_sp_bypass, mock_skip_ar, mock_dist
+    ):
+        # Rank 0 wants ubatch (flag=1), rank 1 does not (flag=0). The vote must
+        # be unanimous, so ubatch is disabled even though the batch is large.
+        # NOTE: AscendConfig must be initialised with num_ubatches=2 here.
+        # Without it, should_enable_ubatch() short-circuits to False because
+        # num_ubatches==1, so the assertion would pass regardless of whether
+        # the unanimous-vote logic is correct — making the test vacuous.
+        from vllm_ascend.ascend_config import clear_ascend_config, init_ascend_config
+
+        clear_ascend_config()
+        cfg = VllmConfig()
+        cfg.additional_config = {
+            "num_ubatches": 2,
+            "ubatch_trigger_threshold": 2048,
+            "refresh": True,
+        }
+        init_ascend_config(cfg)
+        import vllm_ascend.worker.ubatch_utils as uu
+        uu._UBATCH_RUNTIME_MANAGER = None
+        self.addCleanup(clear_ascend_config)
+        self.addCleanup(setattr, uu, "_UBATCH_RUNTIME_MANAGER", None)
+
+        runner = self._build_runner(dp_size=2, dp_rank=0)
+
+        rank_values = [[3000, 0, 3000, 1], [3000, 0, 3000, 0]]
+        self._install_reduce(mock_dist, rank_values)
+
+        with patch("vllm_ascend.worker.model_runner_v1.get_dp_group") as mock_g:
+            mock_g.return_value.cpu_group = object()
+            should_ubatch, _, _ = runner._sync_batch_across_dp(
+                num_tokens=3000,
+                num_tokens_padded=3000,
+                cudagraph_mode=CUDAGraphMode.NONE,
+                allow_dp_padding=False,
+                should_ubatch=True,
+            )
+
+        self.assertFalse(should_ubatch)
+
+    def test_dp_size_1_passes_should_ubatch_through(self):
+        # With dp_size==1 there is no all_reduce; the input flag is returned as-is.
+        runner = self._build_runner(dp_size=1, dp_rank=0)
+        should_ubatch, num_tokens_across_dp, cg_mode = runner._sync_batch_across_dp(
+            num_tokens=5000,
+            num_tokens_padded=5000,
+            cudagraph_mode=CUDAGraphMode.FULL,
+            allow_dp_padding=False,
+            should_ubatch=True,
+        )
+        self.assertTrue(should_ubatch)
+        self.assertIsNone(num_tokens_across_dp)
+        self.assertEqual(cg_mode, CUDAGraphMode.FULL)
+
+
+class TestUbatchBlockedReason(unittest.TestCase):
+    """Tests for NPUModelRunner._ubatch_blocked_reason defensive gate.
+
+    Verifies that PCP, DSA, and unpatched DeepStack models are blocked, while a
+    patched DeepStack model (or a plain MoE model) is allowed through.
+    """
+
+    def _build_runner(self, pcp_size: int = 1, use_sparse: bool = False):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.pcp_size = pcp_size
+        runner.use_sparse = use_sparse
+        runner.model = SimpleNamespace()
+        return runner
+
+    def test_pcp_blocked(self):
+        runner = self._build_runner(pcp_size=2)
+        reason = runner._ubatch_blocked_reason()
+        self.assertIsNotNone(reason)
+        self.assertIn("PCP", reason)
+
+    def test_dsa_blocked(self):
+        runner = self._build_runner(use_sparse=True)
+        reason = runner._ubatch_blocked_reason()
+        self.assertIsNotNone(reason)
+        self.assertIn("DSA", reason)
+
+    def test_unpatched_deepstack_blocked(self):
+        runner = self._build_runner()
+        runner.model.use_deepstack = True
+        runner.model.deepstack_input_embeds = object()  # buffer present
+        # _ubatch_deepstack_patched absent -> not patched
+        if hasattr(runner.model, "_ubatch_deepstack_patched"):
+            del runner.model._ubatch_deepstack_patched
+        reason = runner._ubatch_blocked_reason()
+        self.assertIsNotNone(reason)
+        self.assertIn("DeepStack", reason)
+
+    def test_patched_deepstack_allowed(self):
+        runner = self._build_runner()
+        runner.model.use_deepstack = True
+        runner.model.deepstack_input_embeds = object()
+        runner.model._ubatch_deepstack_patched = True  # patch marker lifts gate
+        self.assertIsNone(runner._ubatch_blocked_reason())
+
+    def test_plain_moe_model_allowed(self):
+        runner = self._build_runner()
+        # No deepstack, no DSA, no PCP -> safe to enable ubatch.
+        self.assertIsNone(runner._ubatch_blocked_reason())
 
 
 if __name__ == "__main__":
