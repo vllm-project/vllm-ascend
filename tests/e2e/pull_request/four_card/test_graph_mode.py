@@ -31,6 +31,13 @@ from tests.e2e.pull_request.utils import PROMPTS_LONG, PROMPTS_SHORT
 QWEN3 = "Qwen/Qwen3-0.6B"
 DEEPSEEK_V2_LITE = "vllm-ascend/DeepSeek-V2-Lite-W8A8"
 
+os.environ.update(
+    {
+        "HCCL_DETERMINISTIC": "true",
+        "CLOSE_MATMUL_K_SHIFT": "1",
+    }
+)
+
 QWEN3_PROMPTS_SHORT_BASELINE = [
     {
         "token_ids": [444, 2210, 13, 358, 2776, 264, 220, 17, 17, 4666, 6284, 5458, 504, 5616, 13, 358],

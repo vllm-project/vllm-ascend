@@ -17,6 +17,7 @@
 #
 
 import json
+import os
 
 import openai
 import pytest
@@ -28,6 +29,13 @@ from vllm_ascend.utils import vllm_version_is
 pytestmark = pytest.mark.skipif(
     not vllm_version_is("0.23.0"),
     reason="broken on main, fix me.",
+)
+
+os.environ.update(
+    {
+        "HCCL_DETERMINISTIC": "true",
+        "CLOSE_MATMUL_K_SHIFT": "1",
+    }
 )
 
 
