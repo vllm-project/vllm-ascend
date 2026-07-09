@@ -86,9 +86,9 @@ jobs:
           - tag: amd64
             runner: linux-amd64-cpu-32-hk
             continue_on_error: false
-          # - tag: arm64
-          #   runner: linux-arm64-cpu-32-hk
-          #   continue_on_error: true
+          - tag: arm64
+            runner: linux-arm64-cpu-32-hk
+            continue_on_error: false
     steps:
       - name: Download and verify crane
         run: |
@@ -532,3 +532,4 @@ jobs:
           echo "Digests: $DIGESTS"
           echo "Creating multi-arch manifest tag: $TAG"
           /tmp/crane index append -t "$TAG" $DIGESTS
+
