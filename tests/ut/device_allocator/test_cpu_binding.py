@@ -40,6 +40,7 @@ def make_cpu_alloc(rank_id=0):
     cpu_alloc.assign_main = {}
     cpu_alloc.assign_acl = {}
     cpu_alloc.assign_rel = {}
+    cpu_alloc.uvb_cpu_pool = []
     return cpu_alloc
 
 
