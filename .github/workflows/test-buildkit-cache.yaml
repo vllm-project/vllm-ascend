@@ -20,28 +20,44 @@ jobs:
           RUN echo cache-probe > /tmp/cache-probe-marker
           DOCKERFILE
 
-      - name: Test with buildctl v0.24.0 (matching server)
+      - name: Python TLS - verify chain
         run: |
-          set -e
-          echo "=== Download buildctl v0.24.0 (matching buildkitd server) ==="
-          mkdir -p /tmp/buildctl-v0.24
-          curl -fsSL "https://gh-proxy.test.osinfra.cn/https://github.com/moby/buildkit/releases/download/v0.24.0/buildkit-v0.24.0.linux-arm64.tar.gz" -o /tmp/buildctl.tar.gz
-          tar -xzf /tmp/buildctl.tar.gz -C /tmp/buildctl-v0.24
-          /tmp/buildctl-v0.24/bin/buildctl --version
+          echo "=== Python: verify WITHOUT cafile (system trust store only) ==="
+          python3 -c "
+          import ssl, socket
+          ctx = ssl.create_default_context()
+          ctx.load_cert_chain('${DOCKER_CONFIG}/cert.pem', '${DOCKER_CONFIG}/key.pem')
+          try:
+              with socket.create_connection(('buildkitd-service.buildkitd', 1234), timeout=10) as sock:
+                  with ctx.wrap_socket(sock, server_hostname='buildkitd-service.buildkitd') as ssock:
+                      print('OK:', ssock.version(), ssock.getpeercert()['subject'])
+          except Exception as e:
+              print('FAIL:', type(e).__name__, str(e)[:200])
+          "
+          echo ""
+          echo "=== Python: verify WITH cafile (client ca only) ==="
+          python3 -c "
+          import ssl, socket
+          ctx = ssl.create_default_context(cafile='${DOCKER_CONFIG}/ca.pem')
+          ctx.load_cert_chain('${DOCKER_CONFIG}/cert.pem', '${DOCKER_CONFIG}/key.pem')
+          try:
+              with socket.create_connection(('buildkitd-service.buildkitd', 1234), timeout=10) as sock:
+                  with ctx.wrap_socket(sock, server_hostname='buildkitd-service.buildkitd') as ssock:
+                      print('OK:', ssock.version(), ssock.getpeercert()['subject'])
+          except Exception as e:
+              print('FAIL:', type(e).__name__, str(e)[:200])
+          "
 
-          echo "=== Test connectivity ==="
-          /tmp/buildctl-v0.24/bin/buildctl \
-            --addr "${BUILDKITD_ADDR}" \
-            --tlscacert "${DOCKER_CONFIG}/ca.pem" \
-            --tlscert  "${DOCKER_CONFIG}/cert.pem" \
-            --tlskey   "${DOCKER_CONFIG}/key.pem" \
-            debug workers 2>&1
-          echo "exit=$?"
-
-      - name: Alternative - no client cert, CA only
+      - name: buildctl test A - no TLS flags
         run: |
           set +e
-          echo "=== Test buildctl v0.29.0 without client cert (server auth only) ==="
+          buildctl --addr "${BUILDKITD_ADDR}" debug workers 2>&1
+          echo "exit=$?"
+        continue-on-error: true
+
+      - name: buildctl test B - tlscacert only
+        run: |
+          set +e
           buildctl \
             --addr "${BUILDKITD_ADDR}" \
             --tlscacert "${DOCKER_CONFIG}/ca.pem" \
@@ -49,12 +65,25 @@ jobs:
           echo "exit=$?"
         continue-on-error: true
 
-      - name: Alternative - no TLS flags at all
+      - name: buildctl test C - tlscacert + client cert
         run: |
           set +e
-          echo "=== Test buildctl v0.29.0 with no TLS flags ==="
           buildctl \
             --addr "${BUILDKITD_ADDR}" \
+            --tlscacert "${DOCKER_CONFIG}/ca.pem" \
+            --tlscert  "${DOCKER_CONFIG}/cert.pem" \
+            --tlskey   "${DOCKER_CONFIG}/key.pem" \
+            debug workers 2>&1
+          echo "exit=$?"
+        continue-on-error: true
+
+      - name: buildctl test D - client cert, no ca (rely on system)
+        run: |
+          set +e
+          buildctl \
+            --addr "${BUILDKITD_ADDR}" \
+            --tlscert "${DOCKER_CONFIG}/cert.pem" \
+            --tlskey  "${DOCKER_CONFIG}/key.pem" \
             debug workers 2>&1
           echo "exit=$?"
         continue-on-error: true
