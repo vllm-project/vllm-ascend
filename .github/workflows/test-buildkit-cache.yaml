@@ -21,6 +21,47 @@ jobs:
           DOCKERFILE
 
           buildctl --version
+          echo "DOCKER_CONFIG=${DOCKER_CONFIG}"
+          echo "HOME=${HOME}"
+
+      - name: Discover TLS certs
+        run: |
+          echo "=== DOCKER_CONFIG: ${DOCKER_CONFIG} ==="
+          if [ -d "${DOCKER_CONFIG}" ]; then
+            ls -la "${DOCKER_CONFIG}/"
+            echo "--- ca.pem ---"
+            head -2 "${DOCKER_CONFIG}/ca.pem" 2>/dev/null || echo "NOT FOUND"
+          fi
+
+          for d in /home/user/.docker /root/.docker /etc/docker /etc/buildkit; do
+            echo "=== ${d} ==="
+            if [ -d "${d}" ]; then
+              ls -la "${d}/" 2>/dev/null || echo "(no read)"
+            else
+              echo "NOT FOUND"
+            fi
+          done
+
+          echo "=== BUILKITD_ADDR=${BUILDKITD_ADDR} ==="
+
+      - name: Try connect to buildkitd (no TLS)
+        run: |
+          set +e
+          buildctl --addr "${BUILDKITD_ADDR}" debug workers 2>&1
+          echo "exit=$?"
+        continue-on-error: true
+
+      - name: Try connect to buildkitd (with DOCKER_CONFIG TLS)
+        run: |
+          set +e
+          buildctl \
+            --addr "${BUILDKITD_ADDR}" \
+            --tlscacert "${DOCKER_CONFIG}/ca.pem" \
+            --tlscert  "${DOCKER_CONFIG}/cert.pem" \
+            --tlskey   "${DOCKER_CONFIG}/key.pem" \
+            debug workers 2>&1
+          echo "exit=$?"
+        continue-on-error: true
 
       - name: Round 1 (expect cache MISS)
         run: |
