@@ -813,10 +813,6 @@ class ScoreEncoderCacheConfig:
 
         # Whether to enable the score-based encoder cache management policy
         self.enabled = score_encoder_cache_config.get("enabled", False)
-        if self.enabled:
-            vllm_config.scheduler_config.scheduler_cls = (
-                "vllm_ascend.core.sched.npu_scheduler.NPUScheduler"
-            )
 
         # Maximum number of encoder cache slots available on the CPU side
         self.cpu_cache_slots = score_encoder_cache_config.get("cpu_cache_slots", 100000)
