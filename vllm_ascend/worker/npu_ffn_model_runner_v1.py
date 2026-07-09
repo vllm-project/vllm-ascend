@@ -198,6 +198,7 @@ class NPUFFNModelRunner(NPUModelRunner, GPUFFNModelRunner):
         logger.info("FFN warmup, dp_metadata_list=%s", dp_metadata_list)
         self._warmup_model(dp_metadata_list=dp_metadata_list)
         logger.info("FFN warmup completed, dp_metadata_list=%s", dp_metadata_list)
+        dp_metadata_list, _, _ = (self.connector.recv_dp_metadata_list())
         self._capture_model(dp_metadata_list=dp_metadata_list)
         logger.info("FFN capture completed, dp_metadata_list=%s", dp_metadata_list)
 
