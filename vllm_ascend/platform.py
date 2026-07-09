@@ -416,34 +416,6 @@ class NPUPlatform(Platform):
                 f"({decode_context_parallel_size})."
             )
 
-    @staticmethod
-    def _is_mtp_speculative_config(speculative_config: Any | None) -> bool:
-        if speculative_config is None:
-            return False
-
-        method = getattr(speculative_config, "method", None)
-        return method is not None and "mtp" in str(method).lower()
-
-    @classmethod
-    def _validate_pd_pp_mtp_config(cls, vllm_config: VllmConfig) -> None:
-        speculative_config = getattr(vllm_config, "speculative_config", None)
-        if not cls._is_mtp_speculative_config(speculative_config):
-            return
-
-        parallel_config = vllm_config.parallel_config
-        if getattr(parallel_config, "pipeline_parallel_size", 1) <= 1:
-            return
-
-        kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
-        if kv_transfer_config is not None and getattr(kv_transfer_config, "kv_role", None) == "kv_producer":
-            return
-
-        raise ValueError(
-            "PP+MTP is only supported on PD-disaggregated P nodes "
-            "(kv_role='kv_producer'). D nodes must use "
-            "pipeline_parallel_size=1 and may combine data parallelism with MTP."
-        )
-
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         from vllm_ascend.quantization.utils import maybe_auto_detect_quantization
@@ -465,7 +437,6 @@ class NPUPlatform(Platform):
         cls._validate_layer_sharding_config(vllm_config)
         cls._validate_draft_decode_context_parallel_config(vllm_config)
         cls._validate_parallel_config(vllm_config)
-        cls._validate_pd_pp_mtp_config(vllm_config)
 
         # initialize ascend config from vllm additional_config
         cls._fix_incompatible_config(vllm_config)
@@ -677,16 +648,24 @@ class NPUPlatform(Platform):
         if ascend_config.recompute_scheduler_enable:
             kv_transfer_config = vllm_config.kv_transfer_config
             kv_role = getattr(kv_transfer_config, "kv_role", None)
-            if kv_transfer_config is None or kv_role != "kv_consumer":
+            if kv_role == "kv_producer":
+                logger.warning(
+                    "recompute_scheduler_enable is ignored on PD-disaggregated P nodes "
+                    "(kv_role='kv_producer') and will be deprecated on P nodes in a future release. "
+                    "Please remove it from P-node configs and keep it only on PD-disaggregated D nodes "
+                    "(kv_role='kv_consumer')."
+                )
+                ascend_config.recompute_scheduler_enable = False
+            elif kv_transfer_config is None or kv_role != "kv_consumer":
                 raise ValueError(
                     "recompute_scheduler_enable can only be enabled on PD-disaggregated D nodes "
                     f"(kv_role='kv_consumer', but got kv_role={kv_role!r}), and is not supported in PD-mixed mode."
                 )
+            else:
+                from vllm_ascend.core.recompute_scheduler import RecomputeSchedulerConfig
 
-            from vllm_ascend.core.recompute_scheduler import RecomputeSchedulerConfig
-
-            recompute_scheduler_config = RecomputeSchedulerConfig.initialize_from_config(vllm_config)
-            vllm_config.scheduler_config = recompute_scheduler_config
+                recompute_scheduler_config = RecomputeSchedulerConfig.initialize_from_config(vllm_config)
+                vllm_config.scheduler_config = recompute_scheduler_config
 
         # Extend original scheduler_config to use SchedulerDynamicBatch.
         if ascend_config.SLO_limits_for_dynamic_batch != -1:

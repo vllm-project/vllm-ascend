@@ -48,6 +48,7 @@ Select an image based on your machine type and start the docker image on your no
         --name vllm-ascend \
         --shm-size=512g \
         --net=host \
+        --privileged=true \
         --device /dev/davinci0 \
         --device /dev/davinci1 \
         --device /dev/davinci2 \
@@ -89,6 +90,7 @@ Select an image based on your machine type and start the docker image on your no
         --name vllm-ascend \
         --shm-size=512g \
         --net=host \
+        --privileged=true \
         --device /dev/davinci0 \
         --device /dev/davinci1 \
         --device /dev/davinci2 \
@@ -386,6 +388,7 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
       --data-parallel-start-rank 1 \
       --data-parallel-address $node0_ip \
       --data-parallel-rpc-port 13399 \
+      --headless \
       --tensor-parallel-size 16 \
       --enable-expert-parallel \
       --quantization ascend \
