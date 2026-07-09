@@ -23,7 +23,6 @@ import json
 from collections import deque
 from collections.abc import Sequence
 from contextlib import suppress
-from importlib import import_module
 from typing import Any
 
 import regex as re
@@ -45,7 +44,7 @@ if not vllm_version_is("0.23.0"):
         "newer vLLM versions use the upstream DeepSeekV4 engine parser."
     )
 
-DeepSeekV4ToolParser = import_module("vllm.tool_parsers.deepseekv4_tool_parser").DeepSeekV4ToolParser
+from vllm.tool_parsers.deepseekv4_tool_parser import DeepSeekV4ToolParser  # type: ignore[import-not-found]
 
 ESCAPED_ARGUMENTS_PARAM_NAME = "__vllm_param_arguments__"
 
