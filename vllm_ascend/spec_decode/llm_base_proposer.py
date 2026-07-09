@@ -286,24 +286,29 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.enable_enpu = self.runner.enable_enpu
         self.use_eagle = self.runner.use_eagle
         # Sliding window attention for draft model
-        draft_window_size = getattr(self.speculative_config, "draft_window_size", None)
-        if draft_window_size is None and self.vllm_config.additional_config:
-            draft_window_size = self.vllm_config.additional_config.get("draft_window_size")
-        if isinstance(draft_window_size, int):
-            self.draft_window_size: int | None = int(draft_window_size)
-            self.block_size = self.runner.block_size
-            self.window_blocks = (self.draft_window_size + self.block_size - 1) // self.block_size
-            # max needed blocks is window_blocks + 1 because tokens_to_cover can be
-            # up to W + B (when start_tokens is just inside a new block boundary)
-            self.max_window_blocks = self.window_blocks + 1
-            self._sliding_window_full_block_table: torch.Tensor | None = None
-            self._sliding_window_block_table_clone = torch.zeros(
-                (self.runner.max_num_reqs, self.max_window_blocks),
-                dtype=torch.int32,
-                device=self.device,
-            )
+        self.draft_window_size = getattr(self.speculative_config, "draft_window_size", None)
+        if self.draft_window_size is None and self.vllm_config.additional_config:
+            self.draft_window_size = self.vllm_config.additional_config.get("draft_window_size")
         else:
             self.draft_window_size = None
+
+        # Sliding-window draft attention adapter. Reuse ``self.draft_window_size``
+        # resolved above (speculative_config -> additional_config -> None, all
+        # None-guarded). Do NOT re-read additional_config here: it is None in the
+        # proposers used by unit tests, and the unguarded ``.get()`` would crash.
+        if self.draft_window_size is not None:
+            # EAGLE3: seq_lens at apply time is context-only, so the window end
+            # must cover the K draft positions beyond it -> future_offset = K.
+            # DFlash: set_inputs_first_pass already bakes the query stretch
+            # (bonus + mask) into seq_lens -> future_offset = 0.
+            future_offset = 0 if self.method == "dflash" else self.num_speculative_tokens
+            self.sliding_window = SlidingWindowAdapter(
+                self.draft_window_size,
+                self.runner.block_size,
+                self.runner.max_num_reqs,
+                future_offset,
+                self.device,
+            )
 
     def _raise_if_padded_drafter_batch_disabled_and_full_graph_enabled(self):
         if (
@@ -315,18 +320,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 "Speculative Decoding with cudagraph mode containing full cudagraphs only "
                 "supports padded drafter batch. Please unset "
                 "disable_padded_drafter_batch in the speculative_config."
-            )
-
-        # Sliding window attention for draft model (encapsulated in the adapter).
-        self.draft_window_size = self.vllm_config.additional_config.get("draft_window_size")
-        if self.draft_window_size is not None:
-            # initialize sliding window adapter
-            self.sliding_window = SlidingWindowAdapter(
-                self.draft_window_size,
-                self.runner.block_size,
-                self.runner.max_num_reqs,
-                self.num_speculative_tokens,
-                self.device,
             )
 
     def _get_model(self) -> nn.Module:

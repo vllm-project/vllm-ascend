@@ -191,7 +191,7 @@ class TestSlidingWindowAdapter:
         yield
 
     def test_apply_window(self):
-        K, W, B  = 3, 64, 16
+        K, W, B = 3, 64, 16
         max_num_reqs = 16
         block_table_tensor = torch.randint(1, 1000, (max_num_reqs, 20), dtype=torch.int32)
 
