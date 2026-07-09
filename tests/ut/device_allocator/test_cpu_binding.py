@@ -1186,8 +1186,12 @@ class TestCpuBindingSupplemental(unittest.TestCase):
         cpu_alloc = make_cpu_alloc()
         calls = []
 
+        def build_cpu_pools() -> bool:
+            calls.append("build_cpu_pools")
+            return True
+
         with (
-            patch.object(cpu_alloc, "build_cpu_pools", side_effect=lambda: calls.append("build_cpu_pools") or True),
+            patch.object(cpu_alloc, "build_cpu_pools", side_effect=build_cpu_pools),
             patch.object(cpu_alloc, "allocate", side_effect=lambda: calls.append("allocate")),
             patch.object(cpu_alloc, "print_plan", side_effect=lambda: calls.append("print_plan")),
             patch.object(cpu_alloc, "bind_threads", side_effect=lambda: calls.append("bind_threads")),
@@ -1201,8 +1205,12 @@ class TestCpuBindingSupplemental(unittest.TestCase):
         cpu_alloc = make_cpu_alloc()
         calls = []
 
+        def build_cpu_pools() -> bool:
+            calls.append("build_cpu_pools")
+            return False
+
         with (
-            patch.object(cpu_alloc, "build_cpu_pools", side_effect=lambda: calls.append("build_cpu_pools") or False),
+            patch.object(cpu_alloc, "build_cpu_pools", side_effect=build_cpu_pools),
             patch.object(cpu_alloc, "allocate", side_effect=lambda: calls.append("allocate")),
             patch.object(cpu_alloc, "print_plan", side_effect=lambda: calls.append("print_plan")),
             patch.object(cpu_alloc, "bind_threads", side_effect=lambda: calls.append("bind_threads")),
