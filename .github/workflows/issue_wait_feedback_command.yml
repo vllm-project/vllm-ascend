@@ -16,7 +16,7 @@ jobs:
         id: auth
         run: |
           ACTOR='${{ github.event.client_payload.github.payload.comment.user.login }}'
-          ALLOWED_USERS="Tian-Fantasea"
+          ALLOWED_USERS="bowgneo lilinsiman SOMEONEUNSEEN ZT-AIA Dawn952 earthmanylf LoganJane Tflowers-0129 evakang777"
 
           if echo "$ALLOWED_USERS" | grep -qw "$ACTOR"; then
             echo "authorized=true" >> "$GITHUB_OUTPUT"
