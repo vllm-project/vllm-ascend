@@ -980,11 +980,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 if ori_seq_len_cpu is not None:
                     ori_seq_len_cpu = ori_seq_len_cpu[:batch_size].clone()
                 slot_idx_base = (
-                    query_start_loc_pcp_full[:num_decode_reqs].to(torch.int64) * self.pcp_size
+                    query_start_loc_pcp_full[:num_decode_reqs] * self.pcp_size
                     + torch.arange(num_decode_reqs, device=self.device, dtype=torch.int64)
                     * (self.num_speculative_tokens - 1)
                     * self.pcp_size
-                    + (num_accept_tokens.to(torch.int64) - 1) * self.pcp_size
+                    + (num_accept_tokens - 1) * self.pcp_size
                 )
                 slot_indices = (
                     slot_idx_base[:, None]
@@ -1452,8 +1452,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         target_hidden_states_d = target_hidden_states_d_padded[:num_tokens_d]
                     else:
                         # Keep decode unpadding indices on device to avoid a host index list.
-                        decode_req_starts = query_start_loc_pcp_full[:num_decode_reqs].to(torch.int64)
-                        decode_query_lens = query_lens_d_device.to(torch.int64)
+                        decode_req_starts = query_start_loc_pcp_full[:num_decode_reqs]
+                        decode_query_lens = query_lens_d_device
                         decode_padded_starts = decode_req_starts * self.pcp_size
                         decode_req_starts_per_token = torch.repeat_interleave(
                             decode_req_starts,
@@ -1465,7 +1465,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                             decode_query_lens,
                             output_size=num_tokens_d,
                         )
-                        decode_offsets = self.arange[:num_tokens_d].to(torch.int64) - decode_req_starts_per_token
+                        decode_offsets = self.arange[:num_tokens_d] - decode_req_starts_per_token
                         decode_hidden_state_indices = decode_padded_starts_per_token + decode_offsets
                         target_hidden_states_d = target_hidden_states_d_padded[decode_hidden_state_indices]
                 else:
