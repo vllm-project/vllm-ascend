@@ -323,7 +323,7 @@ class NPUModelRunner310(NPUModelRunner):
                 self.prev_num_draft_tokens.gpu,
                 cpu_values,
             )
-            # D2H 阻塞拷贝，刷新 input_batch.num_computed_tokens_cpu 的底层内存
+            # Make sure D2H is synchronized.
             self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs].copy_(
                 self.num_computed_tokens[:num_reqs], non_blocking=False
             )
