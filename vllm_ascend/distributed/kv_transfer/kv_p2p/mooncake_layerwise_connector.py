@@ -1231,56 +1231,119 @@ class MooncakeLayerwiseConnectorWorker:
         if kv_cfg is None or not (kv_cfg.is_kv_producer or kv_cfg.is_kv_consumer):
             return
 
-        # [snapshot] Release the KV memory regions on the OLD engine before it is
-        # torn down. reset()->__del__ only does closeSegment + engine_.reset() and
-        # never explicitly unregisters the externally-registered KV cache, so the
-        # stale HCCL one-sided MR / memHandle from before the snapshot is left
-        # behind. The rebuilt engine then re-registers on top of that stale native
-        # MR state and produces an invalid memHandle at connect time (103900/103902).
         old_engine = getattr(self, "engine", None)
+
+        # A. 先摘掉所有对旧 TE 的引用，避免析构被拖后
+        self.engine = None
+        if self.kv_send_layer_thread is not None:
+            self.kv_send_layer_thread.engine = None
+        
+        # B. 旧 TE 上先 unregister 全部已知 region（必须在 reset/析构前）
         if old_engine is not None:
+            ptrs = []
             if self._registered_regions is not None:
-                for ptr in self._registered_regions.ptrs:
-                    try:
-                        old_engine.unregister_memory(ptr)
-                    except Exception as e:
-                        logger.warning("[snapshot][rebuild] unregister region %s failed: %s", hex(ptr), e)
+                ptrs.extend(self._registered_regions.ptrs)
             for tensor in (self.k_buffer, self.v_buffer):
                 if tensor is not None:
-                    try:
-                        old_engine.unregister_memory(tensor.data_ptr())
-                    except Exception as e:
-                        logger.warning("[snapshot][rebuild] unregister kv_buffer failed: %s", e)
-
+                    ptrs.append(tensor.data_ptr())
+            for ptr in dict.fromkeys(ptrs):  # dedup, keep order
+                try:
+                    old_engine.unregister_memory(ptr)
+                except Exception as e:
+                    logger.warning(
+                        "[snapshot][rebuild] unregister %s failed: %s", hex(ptr), e
+                    )
+        
+        # C. 同步销毁旧 TE（引用归零 + gc.collect），确保 ADXL Finalize / Deregister 完成
+        #    注意：这里不要先 get_transfer_engine / register
         global_te.reset()
+        import gc
+        gc.collect()
+
+        # D. 旧 TE 彻底死后，再创建新 TE
         self.engine = global_te.get_transfer_engine(local_ip, device_name=None)
         self.te_rpc_port = self.engine.get_rpc_port()
 
+        # E. 再重新 register
         if self._registered_regions is not None:
-            global_te.register_buffer(self._registered_regions.ptrs, self._registered_regions.lengths)
+            global_te.register_buffer(
+                self._registered_regions.ptrs, self._registered_regions.lengths
+            )
         else:
-            logger.warning("[snapshot][rebuild] no cached register regions; KV memory not re-registered")
+            logger.warning(
+                "[snapshot][rebuild] no cached register regions; KV memory not re-registered"
+            )
 
         for tensor in (self.k_buffer, self.v_buffer):
             if tensor is not None:
-                ret = self.engine.register_memory(tensor.data_ptr(), tensor.numel() * tensor.element_size())
+                ret = self.engine.register_memory(
+                    tensor.data_ptr(), tensor.numel() * tensor.element_size()
+                )
                 if ret != 0:
-                    raise RuntimeError("Mooncake kv_buffer re-registration failed after snapshot restore.")
+                    raise RuntimeError(
+                        "Mooncake kv_buffer re-registration failed after snapshot restore."
+                    )
 
-        # [snapshot] producer: the send thread caches its own engine handle at
-        # construction time. After global_te.reset() that cached handle points at
-        # the destroyed pre-snapshot engine, so re-point it at the rebuilt engine.
-        # The send thread itself is not torn down/recreated here (unlike recv).
+        # F. 把 send thread 指到新 engine
         if self.kv_send_layer_thread is not None:
             self.kv_send_layer_thread.engine = self.engine
 
+        # G. consumer：再重启 recv thread（逻辑可保持 PR 现有实现）
+        if not kv_cfg.is_kv_consumer or self.kv_recv_layer_thread is None:
+            return
+        
+
+
+        # # [snapshot] Release the KV memory regions on the OLD engine before it is
+        # # torn down. reset()->__del__ only does closeSegment + engine_.reset() and
+        # # never explicitly unregisters the externally-registered KV cache, so the
+        # # stale HCCL one-sided MR / memHandle from before the snapshot is left
+        # # behind. The rebuilt engine then re-registers on top of that stale native
+        # # MR state and produces an invalid memHandle at connect time (103900/103902).
+        # old_engine = getattr(self, "engine", None)
+        # if old_engine is not None:
+        #     if self._registered_regions is not None:
+        #         for ptr in self._registered_regions.ptrs:
+        #             try:
+        #                 old_engine.unregister_memory(ptr)
+        #             except Exception as e:
+        #                 logger.warning("[snapshot][rebuild] unregister region %s failed: %s", hex(ptr), e)
+        #     for tensor in (self.k_buffer, self.v_buffer):
+        #         if tensor is not None:
+        #             try:
+        #                 old_engine.unregister_memory(tensor.data_ptr())
+        #             except Exception as e:
+        #                 logger.warning("[snapshot][rebuild] unregister kv_buffer failed: %s", e)
+
+        # global_te.reset()
+        # self.engine = global_te.get_transfer_engine(local_ip, device_name=None)
+        # self.te_rpc_port = self.engine.get_rpc_port()
+
+        # if self._registered_regions is not None:
+        #     global_te.register_buffer(self._registered_regions.ptrs, self._registered_regions.lengths)
+        # else:
+        #     logger.warning("[snapshot][rebuild] no cached register regions; KV memory not re-registered")
+
+        # for tensor in (self.k_buffer, self.v_buffer):
+        #     if tensor is not None:
+        #         ret = self.engine.register_memory(tensor.data_ptr(), tensor.numel() * tensor.element_size())
+        #         if ret != 0:
+        #             raise RuntimeError("Mooncake kv_buffer re-registration failed after snapshot restore.")
+
+        # # [snapshot] producer: the send thread caches its own engine handle at
+        # # construction time. After global_te.reset() that cached handle points at
+        # # the destroyed pre-snapshot engine, so re-point it at the rebuilt engine.
+        # # The send thread itself is not torn down/recreated here (unlike recv).
+        # if self.kv_send_layer_thread is not None:
+        #     self.kv_send_layer_thread.engine = self.engine
+
         # Consumer side: restart the recv thread so its ROUTER socket rebinds on
         # the new pod IP.
-        if not kv_cfg.is_kv_consumer:
-            return
+        # if not kv_cfg.is_kv_consumer:
+        #     return
 
-        if self.kv_recv_layer_thread is None:
-            return
+        # if self.kv_recv_layer_thread is None:
+        #     return
 
         old_recv = self.kv_recv_layer_thread
         old_recv.stop()
