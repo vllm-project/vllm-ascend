@@ -68,6 +68,7 @@ from vllm_ascend.compilation.acl_graph import (
     update_graph_params_workspaces,
 )
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.utils import FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
 from vllm_ascend.ops.flashcomm2_oshard_manager import flashcomm2_oshard_manager
 from vllm_ascend.utils import weak_ref_tensors
 from vllm_ascend.worker.kvcomp_utils import KVCompMetaData
@@ -1268,6 +1269,21 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # runner v2, there is not capturing attribute in forward_context,
         # just use getattr to avoid attribute error.
         if _EXTRA_CTX.capturing:
+            # FIA TND does not support head_dim=512 (Gemma4 global attention).
+            # During graph capture the eager device-adaptor fallback
+            # (npu_large_head_prefill_attention) is bypassed, and the
+            # forward_impl PA routing requires attn_state==DecodeOnly which
+            # excludes MTP's SpecDecoding capture step.  Route 512-dim
+            # non-sliding layers to the paged-attention graph path here,
+            # mirroring using_paged_attention(head_size=512) in forward_impl.
+            # KV-sharing draft 512 layers are intercepted earlier by
+            # maybe_kv_share_prefill and never reach here.
+            if (
+                self.head_size == FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
+                and self.sliding_window is None
+                and not _EXTRA_CTX.is_draft_model
+            ):
+                return self.full_graph_pa(query, attn_metadata, output)
             if self.sinks is not None:
                 attn_output, num_tokens = self.full_graph_fia_v2(query, key, value, attn_metadata, output)
                 output[:num_tokens] = attn_output[:num_tokens]
