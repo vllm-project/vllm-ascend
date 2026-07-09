@@ -162,6 +162,21 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
         assert all(isinstance(spec, MLAAttentionSpec) for spec in specs), (
             "All attention layers in the same KV cache group must be MLAAttentionSpec."
         )
+        layout_set = {
+            (
+                spec.block_size,
+                spec.num_kv_heads,
+                spec.head_size,
+                spec.scale_dim,
+                spec.scale_dtype,
+                spec.sparse_head_dim,
+                spec.dtype,
+            )
+            for spec in specs
+        }
+        assert len(layout_set) == 1, (
+            "All attention layers in the same KV cache group must use the same KV cache layout."
+        )
         cache_dtype_str_set = set(spec.cache_dtype_str for spec in specs)
         assert len(cache_dtype_str_set) == 1, (
             "All attention layers in the same KV cache group must use the same quantization method."
