@@ -48,19 +48,26 @@ def test_step3p5_mtp_acceptance_tp8(model_name):
 
     max_tokens = 1024
 
-    with VllmRunner(
-        model_name,
-        tensor_parallel_size=4,
-        max_model_len=8192,
-        gpu_memory_utilization=0.8,
-        distributed_executor_backend="mp",
-        disable_log_stats=False,
-        speculative_config={
-            "method": "mtp",
-            "num_speculative_tokens": 3,
-        },
-        compilation_config=CompilationConfig(cudagraph_mode="FULL_DECODE_ONLY", cudagraph_capture_sizes=[20]),
-    ) as spec_vllm_model:
+    try:
+        spec_vllm_model = VllmRunner(
+            model_name,
+            tensor_parallel_size=4,
+            max_model_len=8192,
+            gpu_memory_utilization=0.8,
+            distributed_executor_backend="mp",
+            disable_log_stats=False,
+            speculative_config={
+                "method": "mtp",
+                "num_speculative_tokens": 3,
+            },
+            compilation_config=CompilationConfig(cudagraph_mode="FULL_DECODE_ONLY", cudagraph_capture_sizes=[20]),
+        )
+    except ValueError as e:
+        if "outgoing traffic has been disabled" in str(e):
+            pytest.skip(f"Model {model_name} not cached and download disabled: {e}")
+        raise
+
+    with spec_vllm_model:
         _ = spec_vllm_model.generate_greedy(example_prompts, max_tokens)
         metrics = spec_vllm_model.model.get_metrics()
 
