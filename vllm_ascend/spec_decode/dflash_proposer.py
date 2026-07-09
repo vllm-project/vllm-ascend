@@ -73,6 +73,7 @@ class AscendDflashProposer(AscendEagleProposer):
         long_seq_metadata=None,
         num_prefill_reqs=0,
         num_decode_reqs=0,
+        main_logits_indices: torch.Tensor | None = None,
     ) -> tuple[int, torch.Tensor, CommonAttentionMetadata, tuple[Any, Any] | None]:
         # DFlash cross-attention: context K/V from target hidden states,
         # Q from query embeddings (bonus + mask tokens).

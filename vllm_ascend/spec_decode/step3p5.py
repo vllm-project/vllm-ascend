@@ -344,6 +344,7 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
         scheduler_output: SchedulerOutput = None,
         num_scheduled_tokens: int = 0,
         num_rejected_tokens_gpu: torch.Tensor | None = None,
+        main_logits_indices: torch.Tensor | None = None,
     ) -> torch.Tensor:
         self._last_draft_probs = None
         batch_size = common_attn_metadata.batch_size()
@@ -363,6 +364,7 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
             long_seq_metadata=long_seq_metadata,
             num_prefill_reqs=num_prefill_reqs,
             num_decode_reqs=num_decode_reqs,
+            main_logits_indices=main_logits_indices,
         )
         if self.pcp_size * self.dcp_size > 1:
             assert long_seq_args is not None
