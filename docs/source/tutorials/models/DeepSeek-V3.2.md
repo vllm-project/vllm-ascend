@@ -4,7 +4,7 @@
 
 DeepSeek-V3.2 is a sparse attention model. The main architecture is similar to DeepSeek-V3.1, but with a sparse attention mechanism, which is designed to explore and validate optimizations for training and inference efficiency in long-context scenarios.
 
-The `DeepSeek-V3.2` model is first supported in `vllm-ascend:v0.13.0rc1`, and all **v0.13.0rc1 and later versions** can run stably. To use the latest features (e.g., PD separation, MTP), it is recommended to use v0.13.0rc1 or a later version.
+The `DeepSeek-V3.2` model is first supported in `vllm-ascend:v0.13.0rc1`, and all **v0.13.0rc1 and later versions** can run stably. To use the latest features (e.g., PD separation, MTP), it is recommended to use the latest release candidate or official version.
 
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, accuracy and performance evaluation.
 
@@ -861,15 +861,17 @@ export VLLM_USE_MODELSCOPE=True
 vllm bench serve --model /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot  --dataset-name random --random-input 200 --num-prompts 200 --request-rate 1 --save-result --result-dir ./
 ```
 
-## 9 Performance Tuning
+## 9 Function call
 
 The function call feature is supported from v0.13.0rc1 on. Please use the latest version.
 
 Refer to [DeepSeek-V3.2 Usage Guide](https://docs.vllm.ai/projects/recipes/en/latest/DeepSeek/DeepSeek-V3_2.html#tool-calling-example) for details.
 
+## 10 Performance Tuning
+
 **Notice:** `max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario. For other settings, please refer to the [Deployment](#deployment) chapter.
 
-## 10 FAQ
+## 11 FAQ
 
 - Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
 
