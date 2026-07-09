@@ -2,11 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from contextlib import contextmanager
 from typing import Any
 
 import torch
-import vllm.v1.worker.gpu.spec_decode.dflash.speculator as vllm_dflash_speculator
 from vllm.config import VllmConfig
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.input_batch import InputBatch
@@ -54,7 +52,7 @@ class AscendDFlashSpeculator(DFlashSpeculator):
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         is_profile: bool = False,
     ) -> torch.Tensor:
-        with build_attn_metadata_wrapper(), ascend_dflash_inputs_wrapper():
+        with build_attn_metadata_wrapper():
             return super().propose(
                 input_batch,
                 attn_metadata,
@@ -205,13 +203,3 @@ def _prepare_dflash_inputs_kernel_ascend(
         q_pad_start = num_reqs * num_query_per_req
         for i in range(q_pad_start, max_num_tokens):
             tl.store(out_query_slot_mapping_ptr + i, PAD_SLOT_ID)
-
-
-@contextmanager
-def ascend_dflash_inputs_wrapper():
-    original = vllm_dflash_speculator._prepare_dflash_inputs_kernel
-    try:
-        vllm_dflash_speculator._prepare_dflash_inputs_kernel = _prepare_dflash_inputs_kernel_ascend
-        yield
-    finally:
-        vllm_dflash_speculator._prepare_dflash_inputs_kernel = original

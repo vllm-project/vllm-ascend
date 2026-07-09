@@ -26,9 +26,6 @@ from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
 )
 
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
-from vllm_ascend.worker.v2.spec_decode.dflash.speculator import (
-    ascend_dflash_inputs_wrapper,
-)
 
 
 class AscendDSparkSpeculator(DSparkSpeculator):
@@ -65,7 +62,7 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         is_profile: bool = False,
     ) -> torch.Tensor:
-        with build_attn_metadata_wrapper(), ascend_dflash_inputs_wrapper():
+        with build_attn_metadata_wrapper():
             return super().propose(
                 input_batch,
                 attn_metadata,
