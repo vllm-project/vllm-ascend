@@ -39,7 +39,7 @@ class PrefillEagleAclGraphManager(PrefillSpeculatorCudaGraphManager):
         device: torch.device,
         cudagraph_mode: CUDAGraphMode,
         decode_query_len: int,
-        speculator: Any,
+        speculator: Any = None,
     ):
         super().__init__(vllm_config, device, cudagraph_mode, decode_query_len)
 
@@ -128,7 +128,7 @@ class DecodeEagleAclGraphManager(DecodeSpeculatorCudaGraphManager):
         device: torch.device,
         cudagraph_mode: CUDAGraphMode,
         decode_query_len: int,
-        speculator: Any,
+        speculator: Any = None,
     ):
         super().__init__(vllm_config, device, cudagraph_mode, decode_query_len)
 

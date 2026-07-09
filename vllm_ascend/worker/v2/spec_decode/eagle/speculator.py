@@ -22,7 +22,6 @@ from copy import copy
 from typing import Any, cast
 
 import torch
-import vllm
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -32,17 +31,11 @@ from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import AttentionStatePair, BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.model_states.interface import ModelState
-from vllm.v1.worker.gpu.spec_decode.autoregressive import (  # type: ignore[import-not-found]
-    speculator as vllm_speculator_module,  # type: ignore[import-not-found]
-)
 from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
+from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
 from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
-from vllm_ascend.worker.v2.spec_decode.eagle.aclgraph import DecodeEagleAclGraphManager, PrefillEagleAclGraphManager
-
-_BUILD_ATTN_METADATA_MODULE = vllm.v1.worker.gpu.spec_decode.speculator
 
 logger = logging.getLogger(__name__)
 
@@ -82,8 +75,12 @@ class AscendEagleSpeculator(EagleSpeculator):
         self.input_batch: InputBatch | None = None
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
-        with graph_manager_wrapper(self):
-            super().init_cudagraph_manager(cudagraph_mode)
+        super().init_cudagraph_manager(cudagraph_mode)
+        # The Ascend graph managers are patched onto the upstream module and
+        # created by super().init_cudagraph_manager without a speculator ref.
+        # They need this speculator to update full-graph params, so set it here.
+        self.prefill_cudagraph_manager.speculator = self
+        self.decode_cudagraph_manager.speculator = self
 
     def propose(
         self,
@@ -376,17 +373,6 @@ class AscendEagleSpeculator(EagleSpeculator):
         return seq_lens_cpu
 
 
-@contextmanager
-def build_attn_metadata_wrapper():
-    """Context manager to override attention metadata building for Ascend NPUs."""
-    original_func = _BUILD_ATTN_METADATA_MODULE.build_attn_metadata
-    try:
-        _BUILD_ATTN_METADATA_MODULE.build_attn_metadata = build_attn_metadata
-        yield
-    finally:
-        _BUILD_ATTN_METADATA_MODULE.build_attn_metadata = original_func
-
-
 # TODO Remove this patch when cann fix the gather bug.
 # NOTE(Ronald1995): torch.gather will pollute the cache such as self.input_buffers.positions
 # the bug is reported to huawei CANN team, but not fixed yet.
@@ -410,34 +396,3 @@ def torch_gather_wrapper():
         yield
     finally:
         torch.gather = original_gather
-
-
-@contextmanager
-def graph_manager_wrapper(speculator):
-    """Context manager to override graph manager."""
-
-    def prefill_factory(
-        vllm_config: VllmConfig,
-        device: torch.device,
-        cudagraph_mode: CUDAGraphMode,
-        decode_query_len: int,
-    ):
-        return PrefillEagleAclGraphManager(vllm_config, device, cudagraph_mode, decode_query_len, speculator)
-
-    def decode_factory(
-        vllm_config: VllmConfig,
-        device: torch.device,
-        cudagraph_mode: CUDAGraphMode,
-        decode_query_len: int,
-    ):
-        return DecodeEagleAclGraphManager(vllm_config, device, cudagraph_mode, decode_query_len, speculator)
-
-    original_prefill = vllm_speculator_module.PrefillSpeculatorCudaGraphManager
-    original_decode = vllm_speculator_module.DecodeSpeculatorCudaGraphManager
-    try:
-        vllm_speculator_module.PrefillSpeculatorCudaGraphManager = prefill_factory
-        vllm_speculator_module.DecodeSpeculatorCudaGraphManager = decode_factory
-        yield
-    finally:
-        vllm_speculator_module.PrefillSpeculatorCudaGraphManager = original_prefill
-        vllm_speculator_module.DecodeSpeculatorCudaGraphManager = original_decode
