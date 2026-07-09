@@ -184,6 +184,9 @@ class DecodeEagleAclGraphManager(DecodeSpeculatorCudaGraphManager):
             return fwd, attn_state
 
         with communicator_switch(), model_capture_wrapper(self.speculator, self.is_draft_model_prefill):
+            # Skip DecodeSpeculatorCudaGraphManager.capture (which builds its own
+            # create_forward_fn) and call CudaGraphManager.capture directly, so that
+            # our Ascend-specific create_forward_fn above is the one that gets used
             super(DecodeSpeculatorCudaGraphManager, self).capture(create_forward_fn, progress_bar_desc)
 
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:

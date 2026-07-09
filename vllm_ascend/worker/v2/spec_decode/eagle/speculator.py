@@ -287,6 +287,7 @@ class AscendEagleSpeculator(EagleSpeculator):
             causal,
         )
         if attn_metadata is not None:
+            # Ascend-specific: force DecodeOnly attention state for the draft model.
             for metadata in attn_metadata.values():
                 metadata.attn_state = AscendAttentionState.DecodeOnly
         return attn_metadata
