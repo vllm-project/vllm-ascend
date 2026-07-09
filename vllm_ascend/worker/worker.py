@@ -1075,32 +1075,32 @@ class NPUWorker(WorkerBase):
         dp_metadata_list, is_graph_capturing, is_warmup = (self.model_runner.connector.recv_dp_metadata_list())
         if self.model_runner.use_aclgraph:
             logger.info(
-                "FFN received dp_metadata_list for capture: "
+                "start_ffn_server_loop use_aclgraph pre: "
                 "is_graph_capturing=%s, is_warmup=%s",
                 is_graph_capturing, is_warmup,
             )
             self.model_runner.capture_model(dp_metadata_list=dp_metadata_list)
+            logger.info("start_ffn_server_loop use_aclgraph post")
         else:
+            logger.info("start_ffn_server_loop eager pre")
             self.model_runner._warmup_model(dp_metadata_list=dp_metadata_list, aclgraph_runtime_mode=CUDAGraphMode.NONE)
-            logger.info(
-                "Eager mode (use_aclgraph=False), skip recv_dp_metadata_list "
-                "and capture_model; worker loop will recv in execute_model")
+            logger.info("start_ffn_server_loop eager post")
 
         self._ffn_shutdown_event = threading.Event()
 
         def ffn_worker_loop():
             # Set NPU device for this thread (thread-local context)
             torch.npu.set_device(self.device)
-            logger.info("FFN worker loop started")
-
+            logger.info("ffn_worker_loop started")
             try:
                 while not self._ffn_shutdown_event.is_set():
                     dp_metadata_list, is_graph_capturing, is_warmup = (self.model_runner.connector.recv_dp_metadata_list())
-                    logger.info(f"execute_model dp_metadata_list:{dp_metadata_list} is_graph_capturing:{is_graph_capturing} is_warmup:{is_warmup}")
+                    logger.info(f"ffn_worker_loop execute_model pre:{dp_metadata_list} is_graph_capturing:{is_graph_capturing} is_warmup:{is_warmup}")
                     self.model_runner.execute_model(
                         scheduler_output=None,
                         dp_metadata_list=dp_metadata_list,
                     )
+                    logger.info(f"ffn_worker_loop execute_model post")
                     torch.npu.synchronize()
             except Exception as e:
                 logger.error("FFN worker loop error: %s", e)
