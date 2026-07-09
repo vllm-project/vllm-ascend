@@ -72,6 +72,16 @@ class PCPManager:
         self.dcp_world_rank = dcp_rank
         self.speculative_config = vllm_config.speculative_config
         self.decode_threshold = 1 + (self.speculative_config.num_speculative_tokens if self.speculative_config else 0)
+        self.pcp_spec_token_offsets = torch.arange(
+            max(self.decode_threshold - 1, 1),
+            dtype=torch.int64,
+            device=device,
+        )
+        self.pcp_req_offsets = torch.arange(
+            max_num_reqs,
+            dtype=torch.int64,
+            device=device,
+        )
         self.mtp_slot_pad: torch.Tensor | None = None
         self.vllm_config = vllm_config
         self.pd_decode_recompute_scheduler_enabled = is_pd_decode_recompute_scheduler_enabled(vllm_config)
@@ -952,6 +962,7 @@ class PCPManager:
         scheduler_output=None,
         num_spec_tokens=None,
         precomputed_positions_np=None,
+        prev_positions: torch.Tensor | None = None,
     ):
         """
         While pcp > 1, model inputs (input_ids, position, etc.) are split across pcp group,
@@ -1000,6 +1011,7 @@ class PCPManager:
                 total_num_scheduled_tokens,
                 cu_num_tokens_pcp_full,
                 num_spec_tokens,
+                prev_positions,
             )
         self.cu_num_tokens_pcp_full = cu_num_tokens_pcp_full
 
@@ -1044,6 +1056,7 @@ class PCPManager:
         total_num_scheduled_tokens: int,
         cu_num_tokens: np.ndarray,
         num_spec_tokens: int,
+        prev_positions: torch.Tensor | None = None,
     ) -> None:
         """Prepare the input IDs for the current batch.
 
@@ -1052,6 +1065,82 @@ class PCPManager:
         GPU need to be copied into the corresponding slots into input_ids."""
 
         if input_batch.prev_sampled_token_ids is None or input_batch.prev_req_id_to_index is None:
+            return
+
+        if prev_positions is not None:
+            num_reqs = self.num_reqs
+            query_start_loc = self.query_start_loc_pcp_full.gpu[: num_reqs + 1]
+            query_lens = query_start_loc[1:] - query_start_loc[:-1]
+            is_decode_req = self.pcp_req_offsets[:num_reqs] < self.num_decode_reqs
+            draft_lens = torch.where(
+                is_decode_req,
+                torch.clamp(query_lens - 1, min=0),
+                torch.zeros_like(query_lens),
+            )
+
+            sample_indices = (query_start_loc[1:] - 1 - draft_lens).to(torch.int64)
+            prev_positions = prev_positions[:num_reqs].to(torch.int64)
+            common_mask = prev_positions >= 0
+            safe_prev_positions = prev_positions.clamp(min=0)
+
+            sampled_src = input_batch.prev_sampled_token_ids[safe_prev_positions, 0]
+            sampled_src = sampled_src.to(dtype=self.input_ids_pcp_full.gpu.dtype)
+            sampled_src = torch.where(
+                common_mask,
+                sampled_src,
+                self.input_ids_pcp_full.gpu[sample_indices],
+            )
+            self.input_ids_pcp_full.gpu.scatter_(
+                dim=0,
+                index=sample_indices,
+                src=sampled_src,
+            )
+
+            if draft_token_ids is None or not num_spec_tokens:
+                return
+
+            assert isinstance(draft_token_ids, torch.Tensor)
+            if num_spec_tokens > self.pcp_spec_token_offsets.numel():
+                spec_offsets = torch.arange(
+                    num_spec_tokens,
+                    dtype=torch.int64,
+                    device=self.device,
+                )
+            else:
+                spec_offsets = self.pcp_spec_token_offsets[:num_spec_tokens]
+            spec_offsets = spec_offsets.unsqueeze(0)
+            draft_lens = torch.clamp(
+                draft_lens.to(torch.int64),
+                max=num_spec_tokens,
+            )
+            spec_mask = (
+                common_mask.unsqueeze(1)
+                & (spec_offsets < draft_lens.unsqueeze(1))
+            )
+            sample_indices_2d = sample_indices.unsqueeze(1)
+            spec_dst = sample_indices_2d + 1 + spec_offsets
+            safe_dst = torch.where(
+                spec_mask,
+                spec_dst,
+                sample_indices_2d.expand(-1, num_spec_tokens),
+            )
+            spec_src_indices = (
+                safe_prev_positions.unsqueeze(1) * num_spec_tokens
+                + spec_offsets
+            )
+
+            draft_token_ids = draft_token_ids.to(dtype=torch.int32)
+            spec_src = draft_token_ids.flatten()[spec_src_indices]
+            spec_src = torch.where(
+                spec_mask,
+                spec_src,
+                self.input_ids_pcp_full.gpu[safe_dst],
+            )
+            self.input_ids_pcp_full.gpu.scatter_(
+                dim=0,
+                index=safe_dst.reshape(-1),
+                src=spec_src.reshape(-1),
+            )
             return
 
         # Async scheduling case, where some decode requests from the previous

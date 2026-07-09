@@ -874,6 +874,19 @@ class NPUModelRunner(GPUModelRunner):
                 self.input_batch.num_prompt_tokens,
             )
 
+        # Build prev_positions before PCP prepares full-layout spec inputs so
+        # PCP can repair async sampled/draft ids with device-side index math.
+        prev_req_id_to_index = self.input_batch.prev_req_id_to_index
+        self._compute_prev_positions(num_reqs)
+        prev_positions_gpu = None
+        if (
+            self.use_async_scheduling
+            and self.input_batch.prev_sampled_token_ids is not None
+            and prev_req_id_to_index
+        ):
+            self.prev_positions.copy_to_gpu(num_reqs)
+            prev_positions_gpu = self.prev_positions.gpu[:num_reqs]
+
         # for pcp, prefill mtp should use origin scheduleroutput ,
         if self.speculative_config and self.use_cp:
             self.pcp_manager.generate_pcp_mtp_input(
@@ -888,6 +901,7 @@ class NPUModelRunner(GPUModelRunner):
                 self._draft_token_ids,  # type: ignore[has-type]
                 scheduler_output,
                 self.num_spec_tokens,
+                prev_positions=prev_positions_gpu,
             )
 
         if self.pcp_size > 1:
@@ -1007,11 +1021,6 @@ class NPUModelRunner(GPUModelRunner):
         )
         self.optimistic_seq_lens_cpu[num_reqs:].fill_(0)
 
-        # Build prev_positions mapping: current pos -> prev pos (-1 if new).
-        # Used for gathering from previous iteration's GPU tensors.
-        prev_req_id_to_index = self.input_batch.prev_req_id_to_index
-        self._compute_prev_positions(num_reqs)
-
         # Fill unused with -1. Needed for reshape_and_cache in attention_cp
         self.query_start_loc.gpu[num_reqs + 1 :].fill_(-1)
 
@@ -1110,7 +1119,8 @@ class NPUModelRunner(GPUModelRunner):
             and self.valid_sampled_token_count_gpu is not None # type: ignore[has-type]
             and prev_req_id_to_index
         ):
-            self.prev_positions.copy_to_gpu(num_reqs)
+            if prev_positions_gpu is None:
+                self.prev_positions.copy_to_gpu(num_reqs)
             self.prev_num_draft_tokens.copy_to_gpu()
             update_num_computed_tokens_for_batch_change(
                 self.num_computed_tokens,
@@ -1247,6 +1257,7 @@ class NPUModelRunner(GPUModelRunner):
                 scheduler_output,
                 self.num_spec_tokens,
                 precomputed_positions_np=positions_full,
+                prev_positions=prev_positions_gpu,
             )
 
         # In async spec decode mode, optimistic_seq_lens_cpu assumes all
