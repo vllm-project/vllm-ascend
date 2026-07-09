@@ -1146,33 +1146,30 @@ class NPUModelRunner(GPUModelRunner):
         num_scheduled_tokens_gpu = self.num_scheduled_tokens.gpu[:num_reqs]
 
         # Rebuild CP/spec inputs after async accepted-token correction.
-        has_decode_req = bool(np.any(
-            self.input_batch.num_computed_tokens_cpu[:num_reqs]
-            >= self.input_batch.num_prompt_tokens[:num_reqs]
-        ))
         should_rebuild_async_inputs = (
             self.use_cp
             and self.use_async_spec_decode
             and self.valid_sampled_token_count_gpu is not None # type: ignore[has-type]
             and prev_req_id_to_index
-            and has_decode_req
+            and self.pcp_manager.num_decode_reqs > 0
         )
         base_num_computed_tokens_np = None
         if should_rebuild_async_inputs:
-            # Async spec decode corrects num_computed_tokens on device.
-            # Rebuild CPU-side inputs from the corrected positions.
-            corrected_num_computed_tokens_np = (
-                self.num_computed_tokens[:num_reqs].cpu().numpy()
-            )
-
-            # Mixed batch: only decode requests use async-corrected lengths.
-            # Prefill requests keep CPU-side prompt progress.
+            # Rebuild CPU-side inputs from async-corrected decode lengths. The
+            # valid counts were already copied on a side stream in the previous
+            # step, so avoid pulling num_computed_tokens back from the device.
             base_num_computed_tokens_np = (
                 self.input_batch.num_computed_tokens_cpu[:num_reqs].copy()
             )
-            num_decode_reqs = self.pcp_manager.num_decode_reqs
-            base_num_computed_tokens_np[:num_decode_reqs] = (
-                corrected_num_computed_tokens_np[:num_decode_reqs]
+            assert self.valid_sampled_token_count_event is not None
+            assert self.valid_sampled_token_count_cpu is not None
+            self.valid_sampled_token_count_event.synchronize()
+            correct_optimistic_seq_lens_cpu(
+                base_num_computed_tokens_np,
+                self.prev_positions.np,
+                self.prev_num_draft_tokens.np,
+                self.valid_sampled_token_count_cpu.numpy(),
+                num_reqs,
             )
 
             position_offsets = (
