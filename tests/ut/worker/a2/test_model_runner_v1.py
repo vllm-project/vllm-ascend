@@ -149,13 +149,17 @@ class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
         return runner
 
     @patch("vllm_ascend.worker.model_runner_v1.get_ascend_config")
+    @patch("vllm_ascend.worker.model_runner_v1.reduce_sample_enabled")
     @patch("vllm_ascend.worker.model_runner_v1.lmhead_tp_enable")
-    def test_sample_updates_output_token_ids_before_sampler(self, mock_lmhead_tp_enable, mock_get_ascend_config):
+    def test_sample_updates_output_token_ids_before_sampler(
+        self, mock_lmhead_tp_enable, mock_get_ascend_config, mock_reduce_sample_enabled
+    ):
         """Verify output_token_ids are updated before sampler is called"""
         mock_lmhead_tp_enable.return_value = False
         mock_ascend_config = MagicMock()
         mock_ascend_config.enable_reduce_sample = False
         mock_get_ascend_config.return_value = mock_ascend_config
+        mock_reduce_sample_enabled.return_value = False
 
         # Build input batch with historical sampled tokens
         input_batch = MagicMock()

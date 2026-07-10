@@ -365,9 +365,6 @@ class TestEagleProposerLoadModel(TestBase):
         self.vllm_config.additional_config = None
         init_ascend_config(self.vllm_config)
 
-        # Mock get_ascend_config to return a properly configured mock
-        self.mock_get_ascend_config = patch("vllm_ascend.utils.get_ascend_config")
-        mock_config = self.mock_get_ascend_config.start()
         mock_ascend_config = MagicMock()
         mock_ascend_config.enable_flashcomm2_parallel_size = 0
         mock_ascend_config.enable_context_parallel = False
@@ -378,7 +375,6 @@ class TestEagleProposerLoadModel(TestBase):
         mock_ascend_config.enable_fused_mc2 = 0
         mock_ascend_config.msmonitor_use_daemon = False
         mock_ascend_config.enable_transpose_kv_cache_by_block = True
-        mock_config.return_value = mock_ascend_config
 
         self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET)
         self.mock_cpugpubuffer.start()
@@ -393,7 +389,6 @@ class TestEagleProposerLoadModel(TestBase):
         self.proposer.parallel_drafting = False
 
     def tearDown(self):
-        self.mock_get_ascend_config.stop()
         self.mock_cpugpubuffer.stop()
         self.mock_supports_multimodal_inputs.stop()
         # Clear the current vllm config
@@ -527,9 +522,6 @@ class TestEagleProposerDummyRun(TestBase):
         self.vllm_config.additional_config = None
         init_ascend_config(self.vllm_config)
 
-        # Mock get_ascend_config to return a properly configured mock
-        self.mock_get_ascend_config = patch("vllm_ascend.utils.get_ascend_config")
-        mock_config = self.mock_get_ascend_config.start()
         mock_ascend_config = MagicMock()
         mock_ascend_config.enable_flashcomm2_parallel_size = 0
         mock_ascend_config.enable_context_parallel = False
@@ -540,7 +532,6 @@ class TestEagleProposerDummyRun(TestBase):
         mock_ascend_config.enable_fused_mc2 = 0
         mock_ascend_config.msmonitor_use_daemon = False
         mock_ascend_config.enable_transpose_kv_cache_by_block = True
-        mock_config.return_value = mock_ascend_config
 
         self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET)
         self.mock_cpugpubuffer.start()
@@ -568,7 +559,6 @@ class TestEagleProposerDummyRun(TestBase):
         self.proposer.update_stream = MagicMock()
 
     def tearDown(self):
-        self.mock_get_ascend_config.stop()
         self.mock_cpugpubuffer.stop()
         self.mock_supports_multimodal_inputs.stop()
         self.mock_tp_world_size.stop()
@@ -962,8 +952,6 @@ class TestEagleProposerPropose:
         self.check_mock()
 
         clear_ascend_config()
-        self.mock_get_ascend_config = patch("vllm_ascend.utils.get_ascend_config")
-        mock_get_ascend_config = self.mock_get_ascend_config.start()
         mock_ascend_config = MagicMock()
         mock_ascend_config.enable_flashcomm2_parallel_size = 0
         mock_ascend_config.enable_context_parallel = False
@@ -974,7 +962,6 @@ class TestEagleProposerPropose:
         mock_ascend_config.enable_fused_mc2 = 0
         mock_ascend_config.msmonitor_use_daemon = False
         mock_ascend_config.enable_transpose_kv_cache_by_block = True
-        mock_get_ascend_config.return_value = mock_ascend_config
 
         self.vllm_config = MagicMock(spec=VllmConfig)
         self.vllm_config.use_v2_model_runner = False
@@ -1054,7 +1041,6 @@ class TestEagleProposerPropose:
         self.mock_supports_multimodal_inputs.stop()
         self.mock_tp_world_size.stop()
         self.mock_dp_group.stop()
-        self.mock_get_ascend_config.stop()
         # Clear the current vllm config
         set_current_vllm_config(None)
         clear_ascend_config()
@@ -2582,7 +2568,6 @@ class TestRunMergedDraft(TestBase):
         mock_ascend_config.enable_reduce_sample = True
         with (
             patch.object(llm_base_proposer, "lmhead_tp_enable", return_value=False),
-            patch.object(llm_base_proposer, "get_ascend_config", return_value=mock_ascend_config),
             patch.object(llm_base_proposer, "get_forward_context", return_value=forward_context),
         ):
             draft_token_ids = self.proposer._run_merged_draft(
@@ -2644,11 +2629,9 @@ class TestRunMergedDraft(TestBase):
             }
         )
 
-        mock_ascend_config = MagicMock()
-        mock_ascend_config.enable_reduce_sample = False
         with (
+            patch.object(llm_base_proposer, "reduce_sample_enabled", return_value=False),
             patch.object(llm_base_proposer, "lmhead_tp_enable", return_value=False),
-            patch.object(llm_base_proposer, "get_ascend_config", return_value=mock_ascend_config),
         ):
             draft_token_ids = self.proposer._run_merged_draft(
                 num_input_tokens=12,
@@ -2699,11 +2682,9 @@ class TestRunMergedDraft(TestBase):
         forward_context.attn_metadata = None
         multi_steps_attn_metadata = [MagicMock(), MagicMock(), MagicMock()]
 
-        mock_ascend_config = MagicMock()
-        mock_ascend_config.enable_reduce_sample = False
         with (
+            patch.object(llm_base_proposer, "reduce_sample_enabled", return_value=False),
             patch.object(llm_base_proposer, "lmhead_tp_enable", return_value=True),
-            patch.object(llm_base_proposer, "get_ascend_config", return_value=mock_ascend_config),
             patch.object(llm_base_proposer, "get_forward_context", return_value=forward_context),
         ):
             draft_token_ids = self.proposer._run_merged_draft(
@@ -2758,8 +2739,6 @@ class TestRunMergedDraft(TestBase):
             (1, False, torch.tensor([1, 3], dtype=torch.int64), (2, 1)),
             (2, True, torch.tensor([0, 1, 2, 3], dtype=torch.int64), (2, 2)),
         ]
-        mock_ascend_config = MagicMock()
-        mock_ascend_config.enable_reduce_sample = False
         for num_speculative_tokens, parallel_drafting, token_indices_to_sample, expected_shape in test_cases:
             with self.subTest(num_speculative_tokens=num_speculative_tokens, parallel_drafting=parallel_drafting):
                 self.proposer.method = "eagle3"
@@ -2771,8 +2750,8 @@ class TestRunMergedDraft(TestBase):
                 self.proposer.positions[:4] = torch.tensor([17, 18, 19, 20], dtype=torch.int64)
 
                 with (
+                    patch.object(llm_base_proposer, "reduce_sample_enabled", return_value=False),
                     patch.object(llm_base_proposer, "lmhead_tp_enable", return_value=False),
-                    patch.object(llm_base_proposer, "get_ascend_config", return_value=mock_ascend_config),
                 ):
                     draft_token_ids = self.proposer._run_merged_draft(
                         num_input_tokens=4,
