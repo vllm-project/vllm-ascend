@@ -171,13 +171,15 @@ def rope_forward_oot(
     # block sized BLOCK_SIZE_HEAD * pad_rope_dim.  For Gemma4 global head
     # (rope_dim >= 512) the tile exceeds the Ascend A2 uniform-buffer budget
     # (1572864 bits) and BiShengHIR compilation fails with "ub overflow".
-    _use_triton = HAS_TRITON
-    # Gemma4 MTP only: fall back to CANN native op for large rope_dim.
-    # Other models keep the original HAS_TRITON path unchanged.
-    _spec = getattr(get_current_vllm_config(), "speculative_config", None)
-    _is_gemma4_mtp = _spec is not None and getattr(_spec, "use_gemma4_mtp", lambda: False)()
-    if _is_gemma4_mtp and rotary_dim >= 512:
-        _use_triton = False
+    # The triton RoPE kernel tiles a basic block of BLOCK_SIZE_HEAD *
+    # pad_rope_dim.  For rope_dim >= 512 the tile exceeds the Ascend A2
+    # uniform-buffer budget (1572864 bits) and BiShengHIR compilation fails
+    # with "ub overflow".  Fall back to the CANN native op for large
+    # rope_dim; smaller dims keep the triton path.  This is a generic
+    # kernel limitation, NOT Gemma4-specific — gate on rotary_dim alone so
+    # it applies to target AND draft (a config-based gate would miss the
+    # draft forward, whose current config has no speculative_config).
+    _use_triton = HAS_TRITON and rotary_dim < 512
     if _use_triton:
         num_tokens = query.shape[0]
         query, key = rope_forward_triton(
@@ -257,13 +259,14 @@ class AscendRotaryEmbedding(RotaryEmbedding):
         if is_neox_style_override is not None:
             is_neox_style = is_neox_style_override
         # Gemma4 MTP Q-only attention passes key=None (K/V come from the
-        # target's KV cache).  Route to the Gemma4-specific Q-only RoPE helper
-        # instead of the shared op (which requires a real key).  Explicitly
-        # gated on Gemma4 MTP so a key=None from any other model falls through
-        # to the normal path.  See gemma4_proposer.gemma4_q_only_rope.
-        _spec = getattr(get_current_vllm_config(), "speculative_config", None)
-        _is_gemma4_mtp = _spec is not None and getattr(_spec, "use_gemma4_mtp", lambda: False)()
-        if _is_gemma4_mtp and key is None:
+        # target's KV cache).  key is None is the sole signal: only Gemma4
+        # MTP ever calls RoPE without a key, so this gate is implicitly
+        # Gemma4-only.  Do NOT add a get_current_vllm_config() gate here —
+        # during draft forward the current config is the draft model's config,
+        # which has no speculative_config, so a config-based gate would
+        # wrongly fall through and skip Q-only RoPE (regresses pos1/pos2).
+        # See gemma4_proposer.gemma4_q_only_rope.
+        if key is None:
             from vllm_ascend.spec_decode.gemma4_proposer import gemma4_q_only_rope
 
             q = gemma4_q_only_rope(
