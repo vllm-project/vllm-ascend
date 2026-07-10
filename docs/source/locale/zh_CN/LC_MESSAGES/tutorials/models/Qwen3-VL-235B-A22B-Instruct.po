@@ -235,15 +235,6 @@ msgstr ""
 "2. 执行后，您将获得结果，以下是 `vllm-ascend:0.11.0rc2` 中 `Qwen3-VL-235B-A22B-Instruct` "
 "的结果，仅供参考。"
 
-msgid ""
-"| dataset  | version | metric   | mode | vllm-api-general-chat |\n"
-"| -------- | ------- | -------- | ---- | --------------------- |\n"
-"| aime2024 | -       | accuracy | gen  |             93        |"
-msgstr ""
-"| dataset  | version | metric   | mode | vllm-api-general-chat |\n"
-"| -------- | ------- | -------- | ---- | --------------------- |\n"
-"| aime2024 | -       | accuracy | gen  |             93        |"
-
 msgid "## Performance"
 msgstr "## 性能"
 
@@ -290,3 +281,6 @@ msgstr "以 `serve` 为例。按如下方式运行代码。"
 msgid ""
 "After about several minutes, you can get the performance evaluation result."
 msgstr "大约几分钟后，您将获得性能评估结果。"
+
+msgid "| dataset  | version | metric   | mode | vllm-api-general-chat |"
+msgstr "| 数据集 | 版本 | 指标 | 模式 | vllm-api-general-chat |"

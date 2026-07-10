@@ -133,15 +133,6 @@ msgid ""
 msgstr ""
 "详情请参阅[使用 AISBench](../../developer_guide/evaluation/using_ais_bench.md)。"
 
-msgid ""
-"| dataset | accuracy |\n"
-"|---------|----------|\n"
-"| gsm8k   | 95.83    |"
-msgstr ""
-"| dataset | accuracy |\n"
-"|---------|----------|\n"
-"| gsm8k   | 95.83    |"
-
 msgid "## Performance Benchmark"
 msgstr "## 性能基准测试"
 
@@ -166,44 +157,41 @@ msgstr ""
 msgid "**Fixed-length requests, concurrency=1**:"
 msgstr "**固定长度请求，并发数=1**："
 
-msgid ""
-"| Configuration | CPP <br> (Dynamic Chunk, <br> chunksize=32k) | PP <br>(Static Chunk, <br> chunksize=32k) |\n"
-"    | ----------------------------- | ------------------------- | ------------------------- |\n"
-"    | Input length  128k    | TTFT: 22.5s | TTFT: 27.0s |"
-msgstr ""
-"| Configuration | CPP <br> (Dynamic Chunk, <br> chunksize=32k) | PP <br>(Static Chunk, <br> chunksize=32k) |\n"
-"    | ----------------------------- | ------------------------- | ------------------------- |\n"
-"    | Input length  128k    | TTFT: 22.5s | TTFT: 27.0s |"
-
 msgid "- Qwen3-235B:"
 msgstr "- Qwen3-235B："
-
-msgid ""
-"| Configuration | CPP <br> (Dynamic Chunk, <br> chunksize=32k) | PP <br>(Static Chunk, <br> chunksize=32k) |\n"
-"    | ----------------------------- | ------------------------- | ------------------------- |\n"
-"    | Input length  256k    | TTFT: 53.5s | TTFT: 61.4s |"
-msgstr ""
-"| Configuration | CPP <br> (Dynamic Chunk, <br> chunksize=32k) | PP <br>(Static Chunk, <br> chunksize=32k) |\n"
-"    | ----------------------------- | ------------------------- | ------------------------- |\n"
-"    | Input length  256k    | TTFT: 53.5s | TTFT: 61.4s |"
 
 msgid "**Variable-length requests, concurrency=4**:"
 msgstr "**可变长度请求，并发数=4**："
 
-msgid ""
-"| Configuration | 4k~64k Input, mean=32k, std=32k <br> prefix hit rate=99% |\n"
-"    | ----------------------------- | ------------------------- |\n"
-"    |  CPP2TP8   | Input throughput: 22424 tps/card |\n"
-"    |  DP2TP8   | Input throughput: 16150 tps/card |\n"
-"    |  PCP2TP8   | Input throughput: 18197 tps/card |\n"
-"    |  TP16   | Input throughput: 18875 tps/card |"
-msgstr ""
-"| Configuration | 4k~64k Input, mean=32k, std=32k <br> prefix hit rate=99% |\n"
-"    | ----------------------------- | ------------------------- |\n"
-"    |  CPP2TP8   | Input throughput: 22424 tps/card |\n"
-"    |  DP2TP8   | Input throughput: 16150 tps/card |\n"
-"    |  PCP2TP8   | Input throughput: 18197 tps/card |\n"
-"    |  TP16   | Input throughput: 18875 tps/card |"
-
 msgid "- DeepSeek-V3.1-W8A8:"
 msgstr "- DeepSeek-V3.1-W8A8："
+
+msgid "| dataset | accuracy |"
+msgstr "| 数据集 | 准确率 |"
+
+msgid ""
+"| Configuration | CPP <br> (Dynamic Chunk, <br> chunksize=32k) | PP "
+"<br>(Static Chunk, <br> chunksize=32k) |"
+msgstr "| 配置 | CPP <br> (动态分块, <br> 块大小=32k) | PP <br>(静态分块, <br> 块大小=32k) |"
+
+msgid ""
+"| Configuration | 4k~64k Input, mean=32k, std=32k <br> prefix hit rate=99% |"
+msgstr "| 配置 | 4k~64k 输入, 均值=32k, 标准差=32k <br> 前缀命中率=99% |"
+
+msgid "    | Input length  128k    | TTFT: 22.5s | TTFT: 27.0s |"
+msgstr "    | 输入长度 128k    | TTFT: 22.5秒 | TTFT: 27.0秒 |"
+
+msgid "    | Input length  256k    | TTFT: 53.5s | TTFT: 61.4s |"
+msgstr "    | 输入长度 256k    | TTFT: 53.5秒 | TTFT: 61.4秒 |"
+
+msgid "    |  CPP2TP8   | Input throughput: 22424 tps/card |"
+msgstr "    |  CPP2TP8   | 输入吞吐量: 22424 tps/卡 |"
+
+msgid "    |  DP2TP8   | Input throughput: 16150 tps/card |"
+msgstr "    |  DP2TP8   | 输入吞吐量: 16150 tps/卡 |"
+
+msgid "    |  PCP2TP8   | Input throughput: 18197 tps/card |"
+msgstr "    |  PCP2TP8   | 输入吞吐量: 18197 tps/卡 |"
+
+msgid "    |  TP16   | Input throughput: 18875 tps/card |"
+msgstr "    |  TP16   | 输入吞吐量: 18875 tps/卡 |"
