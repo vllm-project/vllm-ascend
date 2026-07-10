@@ -61,11 +61,21 @@ class VllmEplbAdaptor:
             for name in self.expert_weight_names:
                 complete_name = "model.layers." + str(self.num_dense_layers) + ".mlp.experts." + name
                 expert_tensor = self.param_dict[complete_name][0]
-                buffer_tensor = torch.empty_like(expert_tensor)
+                if name in self.nz_weight_names:
+                    # NZ weight is transferred as a whole-tensor ND detile (batch_isend_irecv
+                    # can't carry NZ); the per-expert ND slice has the NZ slice's dims swapped,
+                    # i.e. (H/2, 2I) -> (2I, H/2). copy_ writes it back into the NZ weight.
+                    nd_shape = expert_tensor.transpose(0, 1).shape
+                    buffer_tensor = torch.empty(nd_shape, dtype=expert_tensor.dtype, device=expert_tensor.device)
+                else:
+                    buffer_tensor = torch.empty_like(expert_tensor)
                 self.buffer_tensor_list[buffer_id].append(buffer_tensor)
 
     def init_expert_param_per_layer(self):
         self.param_dict = dict()
+        # Expert weights stored in an internal ACL format (FRACTAL_NZ) that batch_isend_irecv
+        # cannot transfer; they are sent as ND and copy_-ed back into the NZ weight.
+        self.nz_weight_names: set[str] = set()
         if self.model.quant_config is not None:
             quant_type = self.model.model.layers[self.num_dense_layers].mlp.experts.quant_type
             if quant_type == QuantType.W8A8:
@@ -91,13 +101,16 @@ class VllmEplbAdaptor:
                     "w2_scale_bias_list",
                 ]
 
-            elif quant_type in (QuantType.MXFP4, QuantType.MXFP8):
+            elif quant_type in (QuantType.MXFP4, QuantType.MXFP8, QuantType.W4A8MXFP):
                 self.expert_weight_names = [
                     "w13_weight",
                     "w2_weight",
                     "w13_weight_scale",
                     "w2_weight_scale",
                 ]
+                if quant_type == QuantType.W4A8MXFP:
+                    # w13_weight/w2_weight are FRACTAL_NZ (mxfp C0_16); weight_scale stays ND.
+                    self.nz_weight_names = {"w13_weight", "w2_weight"}
             else:
                 raise ValueError(f"EPLB not support {quant_type}")
         else:
@@ -149,10 +162,18 @@ class VllmEplbAdaptor:
         self.expert_map_per_layer_cpu[layer_id].copy_(updated_expert_map)
 
     def do_update_expert_weight(self, layer_id, local_expert_to_replace, buffer_tensor_id):
-        for expert_tensor, buffer_tensor in zip(
-            self.expert_param_per_layer[layer_id][local_expert_to_replace], self.buffer_tensor_list[buffer_tensor_id]
+        for name, expert_tensor, buffer_tensor in zip(
+            self.expert_weight_names,
+            self.expert_param_per_layer[layer_id][local_expert_to_replace],
+            self.buffer_tensor_list[buffer_tensor_id],
         ):
-            expert_tensor.copy_(buffer_tensor)
+            if name in self.nz_weight_names:
+                # buffer is the ND detile (dims swapped); copy_ it back through the transpose
+                # into the NZ weight slice. copy_ (ND->NZ) is in-place, so the weight's storage /
+                # data_ptr is preserved and a captured aclgraph stays valid.
+                expert_tensor.transpose(0, 1).copy_(buffer_tensor)
+            else:
+                expert_tensor.copy_(buffer_tensor)
             logger.debug("Expert tensor shape is :%s", expert_tensor.shape)
 
     def do_update_log2phy_map(self, layer_id, updated_log2phy_map):
