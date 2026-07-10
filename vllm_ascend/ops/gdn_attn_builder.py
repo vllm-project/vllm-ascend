@@ -118,8 +118,6 @@ def _build_actual_seq_lengths(
 
 def _build_non_spec_chunked_prefill_metadata(
     builder,
-<<<<<<< HEAD
-=======
     cu_seqlens: torch.Tensor,
     tensors: dict[str, torch.Tensor],
 ) -> None:
@@ -198,7 +196,6 @@ def _build_chunked_prefill_metadata(
     builder,
     tensors: dict[str, torch.Tensor],
     *,
->>>>>>> f8a89b37f (fix bug)
     cu_seqlens_cpu: torch.Tensor,
     device: torch.device,
 ) -> GDNChunkedPrefillMetadata:
