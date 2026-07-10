@@ -329,7 +329,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_sparse_flash_attention_meta(
     }
 
     at::Tensor output = at::empty(output_size, query.options().dtype(query.dtype()));
-    at::SmallVector<int64_t, SIZE> softmax_size;
+    at::SmallVector<c10::SymInt, SIZE> softmax_size;
     if (return_softmax_lse) {
         if (query.dim() == DIM_3) {
             const auto layout_kv_str = std::string(layout_kv);
