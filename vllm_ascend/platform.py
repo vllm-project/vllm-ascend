@@ -416,34 +416,6 @@ class NPUPlatform(Platform):
                 f"({decode_context_parallel_size})."
             )
 
-    @staticmethod
-    def _is_mtp_speculative_config(speculative_config: Any | None) -> bool:
-        if speculative_config is None:
-            return False
-
-        method = getattr(speculative_config, "method", None)
-        return method is not None and "mtp" in str(method).lower()
-
-    @classmethod
-    def _validate_pd_pp_mtp_config(cls, vllm_config: VllmConfig) -> None:
-        speculative_config = getattr(vllm_config, "speculative_config", None)
-        if not cls._is_mtp_speculative_config(speculative_config):
-            return
-
-        parallel_config = vllm_config.parallel_config
-        if getattr(parallel_config, "pipeline_parallel_size", 1) <= 1:
-            return
-
-        kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
-        if kv_transfer_config is not None and getattr(kv_transfer_config, "kv_role", None) == "kv_producer":
-            return
-
-        raise ValueError(
-            "PP+MTP is only supported on PD-disaggregated P nodes "
-            "(kv_role='kv_producer'). D nodes must use "
-            "pipeline_parallel_size=1 and may combine data parallelism with MTP."
-        )
-
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         from vllm_ascend.quantization.utils import maybe_auto_detect_quantization
@@ -465,7 +437,6 @@ class NPUPlatform(Platform):
         cls._validate_layer_sharding_config(vllm_config)
         cls._validate_draft_decode_context_parallel_config(vllm_config)
         cls._validate_parallel_config(vllm_config)
-        cls._validate_pd_pp_mtp_config(vllm_config)
 
         # initialize ascend config from vllm additional_config
         cls._fix_incompatible_config(vllm_config)
@@ -513,8 +484,8 @@ class NPUPlatform(Platform):
         from vllm.config.compilation import CUDAGraphMode
 
         if ascend_config.xlite_graph_config.enabled:
-            if ascend_config.xlite_graph_config.full_mode:
-                logger.info("ACLGraph is disabled under xlite full mode")
+            if ascend_config.xlite_graph_config.full_mode and vllm_config.speculative_config is None:
+                logger.info("ACLGraph has been disabled when speculation is disabled in xlite full mode")
                 enforce_eager = True
                 model_config.enforce_eager = True
                 compilation_config.cudagraph_mode = CUDAGraphMode.NONE
@@ -674,22 +645,59 @@ class NPUPlatform(Platform):
 
         cls._validate_kv_load_failure_policy(vllm_config)
 
+        short_request_first_config = ascend_config.short_request_first_config
+        enable_short_request_first = short_request_first_config.enabled
+        short_request_first_supported_policy = vllm_config.scheduler_config.policy == "fcfs"
+        if enable_short_request_first and not short_request_first_supported_policy:
+            logger.warning_once(
+                "ShortRequestFirst scheduling currently supports only FCFS scheduler policy; "
+                "current policy=%s. The default waiting queue will be used.",
+                vllm_config.scheduler_config.policy,
+            )
+
         if ascend_config.recompute_scheduler_enable:
             kv_transfer_config = vllm_config.kv_transfer_config
             kv_role = getattr(kv_transfer_config, "kv_role", None)
-            if kv_transfer_config is None or kv_role == "kv_both":
-                raise ValueError(
-                    "recompute_scheduler_enable can only be enabled in PD-disaggregated mode "
-                    "(kv_role='kv_producer' or 'kv_consumer'), and is not supported in PD-mixed mode."
+            if kv_role == "kv_producer":
+                logger.warning(
+                    "recompute_scheduler_enable is ignored on PD-disaggregated P nodes "
+                    "(kv_role='kv_producer') and will be deprecated on P nodes in a future release. "
+                    "Please remove it from P-node configs and keep it only on PD-disaggregated D nodes "
+                    "(kv_role='kv_consumer')."
                 )
+                ascend_config.recompute_scheduler_enable = False
+            elif kv_transfer_config is None or kv_role != "kv_consumer":
+                raise ValueError(
+                    "recompute_scheduler_enable can only be enabled on PD-disaggregated D nodes "
+                    f"(kv_role='kv_consumer', but got kv_role={kv_role!r}), and is not supported in PD-mixed mode."
+                )
+            else:
+                from vllm_ascend.core.recompute_scheduler import RecomputeSchedulerConfig
 
-            from vllm_ascend.core.recompute_scheduler import RecomputeSchedulerConfig
-
-            recompute_scheduler_config = RecomputeSchedulerConfig.initialize_from_config(vllm_config)
-            vllm_config.scheduler_config = recompute_scheduler_config
+                recompute_scheduler_config = RecomputeSchedulerConfig.initialize_from_config(vllm_config)
+                vllm_config.scheduler_config = recompute_scheduler_config
+                if enable_short_request_first:
+                    logger.info(
+                        "Ascend ShortRequestFirst scheduler selected through recompute "
+                        "scheduler: scheduler_cls=%s, policy=%s, threshold=%d, long_max_wait_ms=%.3f",
+                        vllm_config.scheduler_config.scheduler_cls,
+                        vllm_config.scheduler_config.policy,
+                        short_request_first_config.threshold,
+                        short_request_first_config.long_max_wait_ms,
+                    )
+        elif enable_short_request_first:
+            logger.warning_once(
+                "ShortRequestFirst scheduling requires recompute_scheduler_enable=true "
+                "in additional_config. ShortRequestFirst scheduling will not be activated.",
+            )
 
         # Extend original scheduler_config to use SchedulerDynamicBatch.
         if ascend_config.SLO_limits_for_dynamic_batch != -1:
+            if enable_short_request_first:
+                logger.warning_once(
+                    "ShortRequestFirst scheduling is ignored because "
+                    "SLO_limits_for_dynamic_batch selects SchedulerDynamicBatch."
+                )
             vllm_config.scheduler_config.scheduler_cls = (
                 "vllm_ascend.core.scheduler_dynamic_batch.SchedulerDynamicBatch"
             )
@@ -937,7 +945,7 @@ class NPUPlatform(Platform):
         # compared to v1, v2's forward context lacks some fields, such as:
         # is_first_layer, prefetch_mlp_gate_up_proj, prefetch_mlp_gate_down_proj,
         # prefetch_mlp_enabled, model_instance, is_draft_model.
-        if not envs_vllm.VLLM_USE_V2_MODEL_RUNNER:
+        if not vllm_config.use_v2_model_runner:
             return {}
 
         # is_draft_model will be removed later, so we set it to False temporarily.

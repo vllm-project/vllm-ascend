@@ -116,6 +116,11 @@ def chunk_gated_delta_rule_fwd(
     )
 
     if get_pcp_group().world_size > 1:
+        # When integrating mtp, since `mix_qkv` has been split, `num_decode`
+        # cannot be directly obtained from the metadata and needs to be recalculated.
+        actual_num_decodes = getattr(prebuilt_meta, "num_decodes", None)
+        if actual_num_decodes is None:
+            actual_num_decodes = num_decodes
         h_update = chunk_gated_delta_rule_fwd_hupdate(
             k=k,
             w=w,
@@ -125,7 +130,7 @@ def chunk_gated_delta_rule_fwd(
             chunk_indices=chunk_indices_chunk64,
             chunk_offsets=chunk_offsets_chunk64,
             update_chunk_offsets=update_chunk_offsets_chunk64,
-            num_decodes=num_decodes,
+            num_decodes=actual_num_decodes,
         )
         all_final_state = get_pcp_group().all_gather(final_state.unsqueeze(0), 0)
         final_chunk_indices = final_chunk_indices_chunk64
@@ -137,8 +142,9 @@ def chunk_gated_delta_rule_fwd(
         updated_state = final_state.new_empty(get_pcp_group().world_size, *final_state.shape)
         updated_state[0, ...] = all_final_state[0]
         for i in range(1, get_pcp_group().world_size):
+            # correct_i = all_final_state[i] + Φ_i · (correct_{i-1} - s0) = Φ_i · correct_{i-1} + p_i
             updated_final_state = all_final_state[i] + torch.matmul(
-                all_final_h_update[i, ...], updated_state[i - 1, ...]
+                all_final_h_update[i, ...], updated_state[i - 1, ...] - initial_state
             )
             updated_state[i, ...] = updated_final_state
 
