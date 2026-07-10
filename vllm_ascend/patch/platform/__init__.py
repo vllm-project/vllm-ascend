@@ -35,7 +35,12 @@ if vllm_version_is("0.23.0"):
     import vllm_ascend.patch.platform.patch_glm47_tool_call_parser  # noqa
     import vllm_ascend.patch.platform.patch_minimax_m2_tool_call_parser  # noqa
     import vllm_ascend.patch.platform.patch_minimax_usage_accounting  # noqa
-import vllm_ascend.patch.platform.patch_deepseek_v4_tool_call_parser  # noqa
+
+    # DeepSeek V4/V3.2 tool parsers were ported to the new streaming parser
+    # engine framework upstream, deleting vllm.tool_parsers.deepseekv4_tool_parser
+    # (DeepSeekV4ToolParser) that this backport patch monkey-patches. Only load
+    # it on the release version where that module still exists.
+    import vllm_ascend.patch.platform.patch_deepseek_v4_tool_call_parser  # noqa
 import vllm_ascend.patch.platform.patch_weight_transfer_engine  # noqa
 import vllm_ascend.patch.platform.patch_torch_accelerator  # noqa
 import vllm_ascend.patch.platform.patch_tool_choice_none_content  # noqa

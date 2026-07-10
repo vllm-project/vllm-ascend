@@ -386,8 +386,10 @@
 #    Related PR (if no, explain why):
 #       Upstream vLLM main behavior as of current runtime.
 #    Future Plan:
-#       Remove this patch if upstream streaming behavior is updated to satisfy the
-#       same DeepSeek DSML incrementality contract.
+#       Only loaded on the vLLM 0.23.0 release. Upstream ported DeepSeek V4/V3.2
+#       to the new streaming parser engine framework (deleting
+#       deepseekv4_tool_parser.py), so the patch import is version-guarded in
+#       patch/platform/__init__.py. Remove it once 0.23.0 is no longer supported.
 #
 # ** 12a. File: platform/patch_minimax_m2_tool_call_parser.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
