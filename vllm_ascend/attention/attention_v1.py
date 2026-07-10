@@ -454,14 +454,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
         use_layer_aware_replay = needs_layer_aware_fia_graph_replay()
         if using_paged_attention(num_tokens, vllm_config):
             # Paged Attention update logic
-            # TODO: This path zips forward_context.attn_metadata directly against
-            # attn_params without the type-filter / block-wise replication used in
-            # the FIA path below. If paged attention (opt-in via pa_shape_list +
-            # FULL_DECODE_ONLY) is ever combined with LoRA specialization,
-            # graph_param_count becomes a multiple of the layer count and the zip
-            # truncation would leave the trailing captured ops un-updated. Mirror
-            # the replication in the ``else`` branch if that combination is
-            # supported.
             if _EXTRA_CTX.is_draft_model:
                 if _EXTRA_CTX.is_draft_model_prefill:
                     graph_params = get_draft_graph_prefill_params()
@@ -530,13 +522,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 graph_params = get_graph_params()
                 attn_metadata = forward_context.attn_metadata
                 attn_keys = list(attn_metadata.keys())
-            # For Qwen3-next, since the kv_cache_config has already categorized
-            # linear_attn and self_attn, the attn_metadata is first arranged with
-            # self_attn followed by linear_attn. Therefore, using zip directly
-            # filters out the update operations for linear_attn.
-            # TODO: We use a new variable `attn_keys` to ensure the loop count is
-            # correct after get by `zip` because of the new structure of the attn_metadata
-            # when running with the merged full eagle-graph. Should check it with Qwen3-next.
             num_layers = len(attn_keys)
             if num_layers == 0:
                 return
@@ -642,12 +627,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 attn_metadata = forward_context.attn_metadata
                 # Only standard (FIA) attention layers have captured graph
                 # params here; linear/GDN layers (GDNAttentionMetadata) are
-                # updated separately by update_conv1d_graph_params. Filter them
-                # out by metadata type so a captured FIA op is never paired with
-                # a GDN layer's metadata (which has no ``seq_lens_list``). The
-                # previous "zip truncation" filter relied on
-                # graph_param_count == num_self_attn_layers, which breaks under
-                # cudagraph_specialize_lora (see replication below).
+                # updated separately by update_conv1d_graph_params. So we filter by `seq_lens_list`
                 attn_keys = [k for k in attn_metadata if hasattr(attn_metadata[k], "seq_lens_list")]
                 if not use_layer_aware_replay:
                     # In some speculative methods (such as DFlash), the order of
