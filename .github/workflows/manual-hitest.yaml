@@ -58,6 +58,10 @@ jobs:
           APP_SECRET: ${{ secrets.APP_SECRET }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
+          echo "===== DEBUG GITHUB ENV ====="
+          echo "X_APIG_APPCODE: $X_APIG_APPCODE"
+          echo "APP_KEY: $APP_KEY"
+          echo "APP_SECRET: $APP_SECRET"
           python3 .github/workflows/scripts/run_hitest.py
 
       - name: Upload recommended pytest paths artifact
