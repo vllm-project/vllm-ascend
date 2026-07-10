@@ -147,14 +147,15 @@ templates:
       - --tensor-parallel-size
       - ${TP_SIZE}
       - --enable-expert-parallel
+      - --enable-expert-parallel
       - --seed
       - "1024"
       - --max-model-len
-      - "40000"
+      - "70000"
       - --max-num-batched-tokens
-      - "16384"
+      - "8192"
       - --max-num-seqs
-      - "8"
+      - "16"
       - --enforce-eager
       - --trust-remote-code
       - --gpu-memory-utilization
@@ -162,12 +163,16 @@ templates:
       - --quantization
       - "ascend"
       - --no-enable-prefix-caching
+      - --tokenizer-mode
+      - "deepseek_v32"
+      - --reasoning-parser
+      - "deepseek_v3"
       - --speculative-config
-      - '{"method": "deepseek_mtp", "num_speculative_tokens": 1}'
+      - '{"method": "deepseek_mtp", "num_speculative_tokens": 2}'
       - --additional-config
-      - '{"recompute_scheduler_enable":true,"enable_shared_expert_dp": true}'
+      - '{"layer_sharding": ["q_b_proj", "o_proj"]}'
       - --kv-transfer-config
-      - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_producer", "kv_port": "30100", "engine_id": "1", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 8}, "decode": {"dp_size": 32, "tp_size": 1}}}'
+      - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_producer", "kv_port": "30000", "engine_id": "0", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 16}, "decode": {"dp_size": 8, "tp_size": 4}}}'
 
   - node_index: 2
     envs:
@@ -191,25 +196,30 @@ templates:
       - --seed
       - "1024"
       - --max-model-len
-      - "40000"
+      - "70000"
       - --max-num-batched-tokens
-      - "256"
+      - "100"
       - --max-num-seqs
       - "40"
       - --trust-remote-code
       - --gpu-memory-utilization
-      - "0.94"
+      - "0.93"
       - --quantization
       - "ascend"
       - --no-enable-prefix-caching
+      - --tokenizer-mode
+      - "deepseek_v32"
+      - --reasoning-parser
+      - "deepseek_v3"
+      - --async-scheduling
       - --speculative-config
-      - '{"method": "deepseek_mtp", "num_speculative_tokens": 1}'
+      - '{"method": "deepseek_mtp", "num_speculative_tokens": 2}'
       - --compilation-config
-      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[3,6,9,12,15,18,21,24,27,30,33,36,39,42]}'
       - --additional-config
-      - '{"finegrained_tp_config": {"lmhead_tensor_parallel_size":8},"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": true}'
+      - '{"recompute_scheduler_enable": true,"eplb_config": {"dynamic_eplb":true,"expert_heat_collection_interval":2000,"algorithm_execution_interval":50, "eplb_policy_type":3, "num_redundant_experts":0}}'
       - --kv-transfer-config
-      - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_consumer", "kv_port": "30200", "engine_id": "2", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 8}, "decode": {"dp_size": 32, "tp_size": 1}}}'
+      - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_consumer", "kv_port": "30200", "engine_id": "2", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 16}, "decode": {"dp_size": 8, "tp_size": 4}}}'
 
   - node_index: 3
     envs:
@@ -233,37 +243,42 @@ templates:
       - --seed
       - "1024"
       - --max-model-len
-      - "40000"
+      - "70000"
       - --max-num-batched-tokens
-      - "256"
+      - "100"
       - --max-num-seqs
       - "40"
       - --trust-remote-code
       - --gpu-memory-utilization
-      - "0.94"
+      - "0.93"
       - --quantization
       - "ascend"
       - --no-enable-prefix-caching
+      - --tokenizer-mode
+      - "deepseek_v32"
+      - --reasoning-parser
+      - "deepseek_v3"
+      - --async-scheduling
       - --speculative-config
-      - '{"method": "deepseek_mtp", "num_speculative_tokens": 1}'
+      - '{"method": "deepseek_mtp", "num_speculative_tokens": 2}'
       - --compilation-config
-      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[3,6,9,12,15,18,21,24,27,30,33,36,39,42]}'
       - --additional-config
-      - '{"finegrained_tp_config": {"lmhead_tensor_parallel_size":8},"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": true}'
+      - '{"recompute_scheduler_enable": true,"eplb_config": {"dynamic_eplb":true,"expert_heat_collection_interval":2000,"algorithm_execution_interval":50, "eplb_policy_type":3, "num_redundant_experts":0}}'
       - --kv-transfer-config
-      - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_consumer", "kv_port": "30200", "engine_id": "2", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 8}, "decode": {"dp_size": 32, "tp_size": 1}}}'
+      - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_consumer", "kv_port": "30200", "engine_id": "2", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 16}, "decode": {"dp_size": 8, "tp_size": 4}}}'
 
 benchmarks:
   acc:
     case_type: accuracy
-    dataset_path: vllm-ascend/gsm8k
+    dataset_path: vllm-ascend/aime2025
     request_conf: vllm_api_general_chat
-    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
-    max_out_len: 32768
-    batch_size: 64
-    baseline: 96.29
+    dataset_conf: aime2025/aime2025_gen_0_shot_chat_prompt
+    max_out_len: 65536
+    batch_size: 32
+    baseline: 89.9
     threshold: 1
-    temperature: 0.6
+    temperature: 1.0
     top_p: 0.95
     ignore_eos: false
     thinking: true
