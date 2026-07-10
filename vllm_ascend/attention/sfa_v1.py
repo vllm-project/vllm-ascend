@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, NamedTuple, TypeVar
 
 import scipy  # type: ignore
 import torch
@@ -18,6 +18,7 @@ from vllm.v1.attention.backend import (
     MLAAttentionImpl,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.worker.utils import select_common_block_size
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
@@ -58,6 +59,7 @@ from vllm_ascend.utils import (
     enable_dsa_cp,
     enable_dsa_cp_with_layer_shard,
     enable_dsa_cp_with_o_proj_tp,
+    enable_sfa_dcp_replicated_indexer,
     enable_sp,
     get_ascend_device_type,
     get_weight_prefetch_method,
@@ -76,6 +78,20 @@ O_PROJ_ACLNN_INPUT_PARAMS = (
     "aclnn_input_scale_reciprocal",
     "aclnn_input_offset",
 )
+
+
+class DCPQueryGatherContext(NamedTuple):
+    """State needed to finish the async fused DCP query all-gather."""
+
+    # The gathered fused query tensor: cat([ql_nope, q_pe], dim=-1).
+    gathered: torch.Tensor
+    # Async all-gather work handle. None means the gather completed synchronously.
+    handle: torch.distributed.Work | None
+    # Permutation that restores the original dimension order after dim>0 gather.
+    restore_perm: tuple[int, ...] | None
+    # Last-dimension sizes used to split the fused query back into ql_nope/q_pe.
+    ql_nope_dim: int
+    q_pe_dim: int
 
 
 def _get_indexer_types(configs: tuple[Any, ...]) -> Any | None:
@@ -114,6 +130,10 @@ class AscendSFABackend(AttentionBackend):
 
     @staticmethod
     def get_builder_cls():
+        if enable_sfa_dcp_replicated_indexer():
+            from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadataBuilder
+
+            return AscendSFADCPMetadataBuilder
         if enable_cp():
             from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFACPMetadataBuilder
 
@@ -132,6 +152,10 @@ class AscendSFABackend(AttentionBackend):
 
     @staticmethod
     def get_impl_cls() -> type["AscendSFAImpl"]:
+        if enable_sfa_dcp_replicated_indexer():
+            from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPImpl
+
+            return AscendSFADCPImpl
         if enable_cp():
             from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFACPImpl
 
@@ -141,6 +165,14 @@ class AscendSFABackend(AttentionBackend):
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int]:
         return [128]
+
+
+@dataclass
+class DCPContext:
+    slot_mapping: torch.Tensor
+    block_table: torch.Tensor
+    seq_lens: torch.Tensor
+    query_gather_context: DCPQueryGatherContext | None = None
 
 
 @dataclass
@@ -186,6 +218,7 @@ class AscendSFAMetadata:
     attn_mask: torch.Tensor = None
     # chunked prefill by default if no attn_states passed
     attn_state: AscendAttentionState = AscendAttentionState.ChunkedPrefill
+    dcp_context: DCPContext | None = None
     dsa_cp_context: DSACPContext | None = None
     reshape_cache_event: torch.npu.Event = None
     sfa_cp_metadata: AscendPCPMetadata | None = None
@@ -226,6 +259,8 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         )
 
         self.block_size = vllm_config.cache_config.block_size
+        # Match the logical block size selected for BlockTable.
+        self.kernel_block_size = select_common_block_size(kv_cache_spec.block_size, [AscendSFABackend])
         self.max_blocks = (vllm_config.model_config.max_model_len + self.block_size - 1) // self.block_size
 
         self.speculative_config = vllm_config.speculative_config
@@ -280,6 +315,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
         fast_build: bool = False,
+        **kwargs,
     ) -> AscendSFAMetadata:
         # common_prefix_len / fast_build are unused; kept for API compatibility.
         return self._build(common_attn_metadata, draft_index=None)
@@ -305,7 +341,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
         input_positions = common_attn_metadata.positions[:num_input_tokens].long()
 
-        block_size = 128
+        block_size = self.kernel_block_size
         if get_ascend_config().c8_enable_reshape_optim:
             slot_mapping_cpu = common_attn_metadata.slot_mapping_cpu[:num_input_tokens]
 
@@ -1293,6 +1329,14 @@ class AscendSFAImpl(MLAAttentionImpl):
             actual_seq_lengths_key,
         )
 
+    def _record_dcp_query_gather_context(
+        self,
+        ql_nope: torch.Tensor,
+        q_pe: torch.Tensor,
+        attn_metadata: M,
+    ) -> None:
+        return
+
     def forward(
         self,
         layer_name,
@@ -1323,6 +1367,13 @@ class AscendSFAImpl(MLAAttentionImpl):
         else:
             actual_seq_lengths_query = attn_metadata.cum_query_lens
             actual_seq_lengths_key = attn_metadata.seq_lens
+        # DCP replicated indexer stores LI cache with the full/no-CP metadata, while
+        # SFA KV remains stored with the DCP-sharded slot mapping.
+        slot_mapping_sfa = (
+            attn_metadata.dcp_context.slot_mapping
+            if attn_metadata.dcp_context is not None
+            else attn_metadata.slot_mapping
+        )
 
         # Inputs and outputs may be padded for CUDA graphs
         num_input_tokens = attn_metadata.num_input_tokens
@@ -1398,7 +1449,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                     kv_no_split, cos, sin, kv_cache, slot_mapping_cp, attn_metadata
                 )
             else:
-                k_pe, k_nope = self.exec_kv(kv_no_split, cos, sin, kv_cache, slot_mapping, attn_metadata)
+                k_pe, k_nope = self.exec_kv(kv_no_split, cos, sin, kv_cache, slot_mapping_sfa, attn_metadata)
 
             if self.enable_dsa_cp:
                 assert k_pe is not None
@@ -1486,6 +1537,7 @@ class AscendSFAImpl(MLAAttentionImpl):
 
             ql_nope, q_pe = self._q_proj_and_k_up_proj(q_c)
             q_pe = self.rope_single(q_pe, cos, sin)
+            self._record_dcp_query_gather_context(ql_nope, q_pe, attn_metadata)
 
             if self.enable_dsa_cp:
                 if kv_ag_handle is not None:
@@ -1525,7 +1577,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                     elif self.use_a5_sparse_c8_indexer:
                         torch_npu.npu_scatter_nd_update_(
                             kv_cache[0].view(-1, fused_kv_no_split.shape[-1]),
-                            slot_mapping[: attn_metadata.num_actual_tokens].view(-1, 1),
+                            slot_mapping_sfa[: attn_metadata.num_actual_tokens].view(-1, 1),
                             fused_kv_no_split[: attn_metadata.num_actual_tokens],
                         )
                         k_pe = None
@@ -1545,7 +1597,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                             value=k_pe[: attn_metadata.num_actual_tokens],
                             key_cache=kv_cache[0],
                             value_cache=kv_cache[1],
-                            slot_mapping=slot_mapping[: attn_metadata.num_actual_tokens],
+                            slot_mapping=slot_mapping_sfa[: attn_metadata.num_actual_tokens],
                         )
 
             if self.has_indexer:
@@ -1625,7 +1677,13 @@ class AscendSFAImpl(MLAAttentionImpl):
                 self._update_indexcache_topk_indices(topk_indices)
 
         attn_output = self._execute_sparse_flash_attention_process(
-            ql_nope, q_pe, kv_cache, topk_indices, attn_metadata, actual_seq_lengths_query, actual_seq_lengths_key
+            ql_nope,
+            q_pe,
+            kv_cache,
+            topk_indices,
+            attn_metadata,
+            actual_seq_lengths_query,
+            actual_seq_lengths_key,
         )
 
         attn_output = self._v_up_proj(attn_output)

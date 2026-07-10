@@ -72,6 +72,7 @@ class PCPManager:
         self.dcp_world_rank = dcp_rank
         self.speculative_config = vllm_config.speculative_config
         self.decode_threshold = 1 + (self.speculative_config.num_speculative_tokens if self.speculative_config else 0)
+        self.mtp_slot_pad: torch.Tensor | None = None
         self.vllm_config = vllm_config
         self.pd_decode_recompute_scheduler_enabled = is_pd_decode_recompute_scheduler_enabled(vllm_config)
         self.max_num_tokens = self.vllm_config.scheduler_config.max_num_batched_tokens
@@ -1131,7 +1132,11 @@ class PCPManager:
         num_requests = seq_lens.size(0)
         total_world_size = pcp_world_size * dcp_world_size
         seq_lens_tiled = seq_lens.unsqueeze(-1).repeat(1, total_world_size)
-        rank_offsets = torch.arange(total_world_size, dtype=torch.int32).unsqueeze(0).repeat(num_requests, 1)
+        rank_offsets = (
+            torch.arange(total_world_size, dtype=seq_lens.dtype, device=seq_lens.device)
+            .unsqueeze(0)
+            .repeat(num_requests, 1)
+        )
         base = seq_lens_tiled // cp_kv_cache_interleave_size // total_world_size * cp_kv_cache_interleave_size
         remainder = seq_lens_tiled - base * total_world_size
         remainder = torch.clip(

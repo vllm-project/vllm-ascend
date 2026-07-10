@@ -142,7 +142,7 @@ class TestAscendSFACPMetadataBuilder(TestBase):
         return vllm_config
 
     def _build_builder(self, pcp_size=2, dcp_size=2):
-        kv_cache_spec = MagicMock()
+        kv_cache_spec = MagicMock(block_size=128)
         layer_names = ["layer1", "layer2"]
         vllm_config = self._make_vllm_config()
         device = torch.device("cpu")
