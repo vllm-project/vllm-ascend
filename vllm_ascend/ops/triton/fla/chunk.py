@@ -16,6 +16,8 @@ from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fla.ops.utils import SUPPRESS_LEVEL
 
+from vllm_ascend.ops.gdn_attn_builder import _compact_empty_segments
+
 from .chunk_delta_h import chunk_gated_delta_rule_fwd_h  # noqa: F401
 from .chunk_delta_hupdate import chunk_gated_delta_rule_fwd_hupdate
 from .chunk_o import chunk_fwd_o  # noqa: F401
@@ -25,37 +27,6 @@ from .l2norm import l2norm_fwd
 from .solve_tril import solve_tril
 from .utils import input_guard, prepare_final_chunk_indices
 from .wy_fast import recompute_w_u_fwd
-
-
-def _compact_empty_segments(cu_seqlens_host, initial_state):
-    """Drop zero-length segments so AscendC fwd_h/fwd_o indexing lines up.
-
-    ``chunk_indices_chunk64`` already carries COMPACT (non-empty) segment ranks
-    (see gdn_attn_builder._fill_chunk_indices_cpu), but the kernels index
-    ``gmSeqlen`` (= cu_seqlens) and ``initial_state`` by that same rank. An empty
-    segment left in cu_seqlens -- which PCP rank>0 produces for requests whose
-    context does not reach this rank -- therefore miss-indexes: chunk_fwd_o reads
-    ``batchTokens == 0`` and, on that segment's last chunk, ``blockTokens`` underflows
-    (uint32) -> MTE write OOB -> runtime 507015. This is the root cause of the
-    "concurrent mixed-batch only, rank>0 only" PCP crash: a single request never
-    yields an empty segment in the middle, but a mixed-length batch on rank>0 does.
-
-    Returns ``(cu_seqlens_kern, initial_state_kern, keep_meta)``: cu_seqlens /
-    initial_state with empty segments removed, plus the bool keep-mask (None when
-    nothing was removed). ``chunk_indices_chunk64`` is unchanged (already compact);
-    the compacted ``final_state`` must be scattered back to the full layout via
-    ``keep_meta`` (empty segments keep their initial state). No-op when there are no
-    empty segments (rank0 / non-PCP / uniform batch never have them).
-    """
-    if cu_seqlens_host is None:
-        return None, initial_state, None
-    cu = torch.tensor(cu_seqlens_host, dtype=torch.int64)
-    keep = (cu[1:] - cu[:-1]) > 0
-    if bool(keep.all()):
-        return cu_seqlens_host, initial_state, None
-    cu_kern = torch.cat([cu[:1], cu[1:][keep]]).tolist()
-    st_kern = initial_state[keep] if initial_state is not None else None
-    return cu_kern, st_kern, keep
 
 
 def chunk_gated_delta_rule_fwd(
