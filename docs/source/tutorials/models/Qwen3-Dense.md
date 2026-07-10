@@ -53,13 +53,6 @@ You can use the official all-in-one Docker image for Qwen3 Dense models.
 
 === "A3 series"
 
-    **Docker Pull:**
-
-    ```bash
-
-    docker pull quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
-    ```
-
     **Docker Run:**
 
     ```bash
@@ -105,13 +98,6 @@ You can use the official all-in-one Docker image for Qwen3 Dense models.
         If you are on a shared machine, map only the chips you need (e.g., `/dev/davinci[0-7]` for NPU 0-3).
 
 === "A2 series"
-
-    **Docker Pull:**
-
-    ```bash
-
-    docker pull quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
-    ```
 
     **Docker Run:**
 
