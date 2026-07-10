@@ -61,7 +61,7 @@ class TestAscendW8A8FP8FusedMoEMethod(TestBase):
     def test_quant_type_is_w8a8fp8(self):
         from vllm_ascend.quantization.quant_type import QuantType
 
-        self.assertEqual(self.quant_method.quant_type, QuantType.W8A8FP8)
+        self.assertEqual(self.quant_method.quant_type, QuantType.W8A8FP)
 
     def test_get_weight_dtype_is_float8_e4m3fn(self):
         param_dict = self.quant_method.get_weight(
