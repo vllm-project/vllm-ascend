@@ -171,11 +171,13 @@ def rope_forward_oot(
     # block sized BLOCK_SIZE_HEAD * pad_rope_dim.  For Gemma4 global head
     # (rope_dim >= 512) the tile exceeds the Ascend A2 uniform-buffer budget
     # (1572864 bits) and BiShengHIR compilation fails with "ub overflow".
-    # Fall back to the CANN native op only for Gemma4 large rope_dim; other
-    # models keep the original HAS_TRITON path unchanged.
+    _use_triton = HAS_TRITON
+    # Gemma4 MTP only: fall back to CANN native op for large rope_dim.
+    # Other models keep the original HAS_TRITON path unchanged.
     _spec = getattr(get_current_vllm_config(), "speculative_config", None)
     _is_gemma4_mtp = _spec is not None and getattr(_spec, "use_gemma4_mtp", lambda: False)()
-    _use_triton = HAS_TRITON and (not _is_gemma4_mtp or rotary_dim < 512)
+    if _is_gemma4_mtp and rotary_dim >= 512:
+        _use_triton = False
     if _use_triton:
         num_tokens = query.shape[0]
         query, key = rope_forward_triton(
