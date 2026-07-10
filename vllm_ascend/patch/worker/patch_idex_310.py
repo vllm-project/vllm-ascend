@@ -35,9 +35,14 @@ QwenGatedDeltaNetAttention.get_state_dtype = AscendGatedDeltaNetAttention310.get
 QwenGatedDeltaNetAttention.get_attn_backend = AscendGatedDeltaNetAttention310.get_attn_backend
 
 if is_rc_device():
+    from vllm.model_executor.models.qwen3_vl import Qwen3_VisionTransformer
     from vllm.v1.attention.backends.gdn_attn import GDNAttentionBackend
 
     from vllm_ascend._310p.ops.gdn_attn_builder_310 import GDNAttentionMetadataBuilder310
+    from vllm_ascend._310p.ops.qwen3vl_310 import rot_pos_emb_310
+
+    # 310P RC: use blocking H2D in rot_pos_emb to avoid race with subsequent indexing.
+    Qwen3_VisionTransformer.rot_pos_emb = rot_pos_emb_310  # type: ignore[method-assign]
 
     # Qwen3.5 on 310P RC uses upstream GDNAttentionBackend via MambaBase.get_attn_backend().
     GDNAttentionBackend.get_builder_cls = staticmethod(  # type: ignore[method-assign]
