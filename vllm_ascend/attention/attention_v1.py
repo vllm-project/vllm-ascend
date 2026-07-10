@@ -1462,6 +1462,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 attn_metadata.reshape_cache_event = torch.npu.Event()
             if self.key_cache is None:
                 self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
+            if self.kv_sharing_target_layer_name is not None:
+                # KV-sharing target layers consume another layer's cache.
+                # Writing their dummy/current K/V would overwrite shared slots.
+                if self.is_kv_producer:
+                    attn_metadata.reshape_cache_event.record()
+                return query, key, value, output
             slots = attn_metadata.slot_mapping
             encoder_decoder = self.attn_type == AttentionType.ENCODER_DECODER
             DeviceOperator.reshape_and_cache(
@@ -1988,6 +1994,11 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
                 attn_metadata.reshape_cache_event = torch.npu.Event()
             if self.key_cache is None:
                 self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
+            if self.kv_sharing_target_layer_name is not None:
+                # C8/NZ cache writes follow the same KV-sharing rule.
+                if self.is_kv_producer:
+                    attn_metadata.reshape_cache_event.record()
+                return query, key, value, output
             slots = attn_metadata.slot_mapping
 
             encoder_decoder = self.attn_type == AttentionType.ENCODER_DECODER
