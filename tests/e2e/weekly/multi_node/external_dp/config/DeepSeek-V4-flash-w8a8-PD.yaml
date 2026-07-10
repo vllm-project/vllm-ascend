@@ -1,0 +1,224 @@
+test_name: "DeepSeek-V4-Flash-w8a8-PD"
+model: "Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp"
+num_nodes: 2
+npu_per_node: 16
+
+routing:
+  type: "disaggregated_prefill"
+  groups:
+    prefiller: [0]
+    decoder: [1]
+
+config:
+  - node_index: 0
+    port_start: 7100
+    dp_rpc_port: 12321
+    dp_size: 4
+    dp_size_local: 4
+    dp_rank_start: 0
+    tp_size: 4
+    dp_address: "${NODE_0_IP}"
+
+  - node_index: 1
+    port_start: 7100
+    dp_rpc_port: 12321
+    dp_size: 16
+    dp_size_local: 16
+    dp_rank_start: 0
+    tp_size: 1
+    dp_address: "${NODE_1_IP}"
+
+env_common: &env_common
+  VLLM_USE_MODELSCOPE: "true"
+  SERVER_PORT: "${PORT}"
+  ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
+  VLLM_ENGINE_READY_TIMEOUT_S: "7200"
+  VLLM_RPC_TIMEOUT: "3600"
+  VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "30000"
+  HCCL_EXEC_TIMEOUT: "2000"
+  HCCL_CONNECT_TIMEOUT: "1200"
+  HCCL_OP_EXPANSION_MODE: "AIV"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  OMP_PROC_BIND: "false"
+  OMP_NUM_THREADS: "1"
+  TASK_QUEUE_ENABLE: "1"
+  HCCL_BUFFSIZE: "2560"
+
+templates:
+  - node_index: 0
+    envs:
+      <<: *env_common
+      VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
+      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+    server_cmd_template:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - $SERVER_PORT
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --enable-expert-parallel
+      - --seed
+      - "1024"
+      - --max-model-len
+      - "1048576"
+      - --max-num-batched-tokens
+      - "8192"
+      - --max-num-seqs
+      - "16"
+      - --no-disable-hybrid-kv-cache-manager
+      - --model-loader-extra-config
+      - '{"enable_multithread_load": "true", "num_threads": 128}'
+      - --safetensors-load-strategy
+      - "prefetch"
+      - --speculative-config
+      - '{"num_speculative_tokens": 1,"method": "mtp","enforce_eager": true}'
+      - --trust-remote-code
+      - --block-size
+      - "128"
+      - --tokenizer-mode
+      - "deepseek_v4"
+      - --tool-call-parser
+      - "deepseek_v4"
+      - --enable-auto-tool-choice
+      - --reasoning-parser
+      - "deepseek_v4"
+      - --gpu-memory-utilization
+      - "0.9"
+      - --quantization
+      - "ascend"
+      - --enforce-eager
+      - --additional-config
+      - '{"enable_cpu_binding": "True", "enable_shared_expert_dp": true, "enable_dsa_cp": true}'
+      - --kv-transfer-config
+      - '{"kv_connector": "MooncakeHybridConnector",
+        "kv_role": "kv_producer",
+        "kv_port": "30000",
+        "engine_id": "0",
+        "kv_connector_extra_config": {
+                    "prefill": {
+                            "dp_size": 4,
+                            "tp_size": 4
+                    },
+                    "decode": {
+                            "dp_size": 16,
+                            "tp_size": 1
+                    }
+            }
+        }'
+
+  - node_index: 1
+    envs:
+      <<: *env_common
+      VLLM_ASCEND_APPLY_DSV4_PATCH: "1"
+    server_cmd_template:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - $SERVER_PORT
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --enable-expert-parallel
+      - --seed
+      - "1024"
+      - --max-model-len
+      - "1048576"
+      - --max-num-batched-tokens
+      - "120"
+      - --max-num-seqs
+      - "60"
+      - --async-scheduling
+      - --block-size
+      - "128"
+      - --no-enable-prefix-caching
+      - --no-disable-hybrid-kv-cache-manager
+      - --safetensors-load-strategy
+      - "prefetch"
+      - --model-loader-extra-config
+      - '{"enable_multithread_load": "true", "num_threads": 128}'
+      - --trust-remote-code
+      - --tokenizer-mode
+      - "deepseek_v4"
+      - --tool-call-parser
+      - "deepseek_v4"
+      - --enable-auto-tool-choice
+      - --reasoning-parser
+      - "deepseek_v4"
+      - --gpu-memory-utilization
+      - "0.9"
+      - --quantization
+      - "ascend"
+      - --speculative-config
+      - '{"num_speculative_tokens": 1,"method": "mtp","enforce_eager": true}'
+      - --compilation-config
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      - --additional-config
+      - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable":true}'
+      - --kv-transfer-config
+      - '{"kv_connector": "MooncakeHybridConnector",
+        "kv_role": "kv_consumer",
+        "kv_port": "30100",
+        "engine_id": "1",
+        "kv_connector_extra_config": {
+                    "prefill": {
+                            "dp_size": 4,
+                            "tp_size": 4
+                    },
+                    "decode": {
+                            "dp_size": 16,
+                            "tp_size": 1
+                    }
+            }
+        }'
+
+benchmarks:
+      acc_aime2025:
+         case_type: accuracy
+         dataset_path: vllm-ascend/aime2025
+         request_conf: vllm_api_general_chat
+         dataset_conf: aime2025/aime2025_gen_0_shot_chat_prompt
+         max_out_len: 131072
+         batch_size: 32
+         baseline: 90
+         threshold: 10
+         temperature: 1.0
+         top_p: 1.0
+         thinking: "true"
+      perf:
+        case_type: performance
+        dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs1200_deepseek
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 256
+        max_out_len: 1024
+        batch_size: 64
+        request_rate: 5.9
+        baseline: 19.3
+        threshold: 0.97
+      perf_2:
+        case_type: performance
+        dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs1200_deepseek
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 1024
+        max_out_len: 1024
+        batch_size: 256
+        request_rate: 5.9
+        baseline: 19.2
+        threshold: 0.97
