@@ -288,6 +288,8 @@ def _index_block_score_kernel(
     for i in tl.range(0, hi, BLOCK_SIZE_K):
         blk = i // BLOCK_SIZE_K
         page = tl.load(bt_row + blk).to(tl.int64)
+        valid_page = page >= 0
+        safe_page = tl.maximum(page, 0)
         pos = i + off_k
         # index-K for this page: [BLOCK_SIZE_D, BLOCK_SIZE_K] (transposed)
         # we don't need masked load for K, because KV cache ensures
@@ -295,16 +297,20 @@ def _index_block_score_kernel(
         # for tokens beyond seqlen, they will be masked in qk later.
         k = tl.load(
             ik_cache_ptr
-            + page * stride_ik_blk
+            + safe_page * stride_ik_blk
             + off_k[None, :] * stride_ik_pos
             + off_d[:, None] * stride_ik_d,
+            mask=valid_page,
+            other=0.0,
         )
         qk = tl.dot(q, k) * sm_scale_log2e
+        qk = tl.where(valid_page, qk, float("-inf"))
         # apply causal mask as needed
         if q_start < i + BLOCK_SIZE_K:
             qk = tl.where(off_q[:, None] >= pos[None, :], qk, float("-inf"))
         # one sparse block per K-tile -> max over the 128 positions
         score = tl.max(qk, axis=1)  # [BLOCK_SIZE_Q]
+        score = tl.where(valid_page, score, -1e30)
         s_ptrs = (
             score_ptr
             + pid_h * stride_s_h
@@ -635,13 +641,17 @@ def _decode_index_score_kernel(
 
     for blk in tl.range(chunk_start_block, chunk_end_block):
         page = tl.load(bt_row + blk).to(tl.int64)
+        valid_page = page >= 0
+        safe_page = tl.maximum(page, 0)
         pos = blk * BLOCK_SIZE_K + off_k
         pos_mask = pos < kv_len
         k = tl.load(
             ik_cache_ptr
-            + page * stride_ik_blk
+            + safe_page * stride_ik_blk
             + off_k[:, None] * stride_ik_pos
             + off_d * stride_ik_d,
+            mask=valid_page,
+            other=0.0,
         )  # [N, D]
 
         kq = tl.dot(k, q) * sm_scale_log2e  # [N, H]
@@ -650,7 +660,8 @@ def _decode_index_score_kernel(
 
         is_init = blk < init_blocks
         is_local = (blk >= local_start) & (blk < num_blocks)
-        score = tl.where(is_local, 1e29, tl.where(is_init, 1e30, score))
+        score = tl.where(valid_page, score, -1e30)
+        score = tl.where(is_local & valid_page, 1e29, tl.where(is_init & valid_page, 1e30, score))
         tl.store(
             score_ptr
             + tl.arange(0, num_idx_heads) * stride_s_h
@@ -848,17 +859,21 @@ def _gqa_sparse_fwd_kernel(
         for _ in range(real_topk):
             blk = tl.load(t_ptr_j).to(tl.int32)
             t_ptr_j = t_ptr_j + stride_tk
-            c = blk * BLOCK_SIZE_K
-            page = tl.load(bt_row + blk).to(tl.int64)
+            valid_blk = blk >= 0
+            safe_blk = tl.maximum(blk, 0)
+            c = safe_blk * BLOCK_SIZE_K
+            page = tl.load(bt_row + safe_blk, mask=valid_blk, other=-1).to(tl.int64)
+            valid_page = valid_blk & (page >= 0)
+            safe_page = tl.maximum(page, 0)
             pos = c + off_n
-            pos_mask = pos < seq_len
+            pos_mask = (pos < seq_len) & valid_page
             k = tl.load(
                 k_cache_ptr
-                + page * stride_k_blk
+                + safe_page * stride_k_blk
                 + off_n[None, :] * stride_k_pos
                 + pid_kh * stride_k_h
                 + off_d[:, None] * stride_k_d,
-                mask=d_mask[:, None] & pos_mask[None, :],
+                mask=d_mask[:, None],
                 other=0.0,
             )
             if USE_FP8:
@@ -868,26 +883,35 @@ def _gqa_sparse_fwd_kernel(
             qk += tl.where(off_q[:, None, :] >= c, 0, float("-inf"))
             qk = tl.reshape(qk, BLOCK_SIZE_QH, BLOCK_SIZE_K)
             qk += tl.dot(q, k) * sm_scale_log2e
-            qk += tl.where(pos_mask[None, :], 0, float("-inf"))
+            qk = tl.where(pos_mask[None, :], qk, float("-inf"))
             m_ij = tl.maximum(m_i, tl.max(qk, axis=1))
+            active_i = m_ij > float("-inf")
             p = tl.exp2(qk - m_ij[:, None])
+            p = tl.where(active_i[:, None], p, 0.0)
             l_ij = tl.sum(p, axis=1)
-            acc_o = acc_o * tl.exp2(m_i - m_ij)[:, None]
+            acc_scale = tl.where(active_i, tl.exp2(m_i - m_ij), tl.zeros_like(m_i))
+            acc_o = acc_o * acc_scale[:, None]
             v = tl.load(
                 v_cache_ptr
-                + page * stride_v_blk
+                + safe_page * stride_v_blk
                 + off_n[:, None] * stride_v_pos
                 + pid_kh * stride_v_h
                 + off_d[None, :] * stride_v_d,
-                mask=pos_mask[:, None] & d_mask[None, :],
+                mask=d_mask[None, :],
                 other=0.0,
             )
             if USE_FP8:
                 v = v.to(q.dtype)
             acc_o += tl.dot(p.to(v.dtype), v)
             m_i = m_ij
-            lse_i = m_ij + tl.log2(tl.exp2(lse_i - m_ij) + l_ij)
-        acc_o = acc_o * tl.exp2(m_i - lse_i)[:, None]
+            lse_next = m_ij + tl.log2(tl.exp2(lse_i - m_ij) + l_ij)
+            lse_i = tl.where(active_i, lse_next, lse_i)
+        has_lse = lse_i > float("-inf")
+        acc_o = tl.where(
+            has_lse[:, None],
+            acc_o * tl.exp2(m_i - lse_i)[:, None],
+            tl.zeros_like(acc_o),
+        )
         acc_o = tl.reshape(acc_o, BLOCK_SIZE_Q, BLOCK_SIZE_H, BLOCK_SIZE_D)
         o_ptrs = tl.make_block_ptr(
             base=o_ptr + q_start * stride_on + pid_h * stride_oh,
@@ -927,6 +951,7 @@ def _gqa_sparse_decode_kernel(
     lse_ptr,  # partial lse (log2): [NUM_TOPK_CHUNKS, total_q, num_heads]
     block_table_ptr,  # [num_reqs, max_blocks]
     seq_lens,  # [num_reqs]
+    max_blocks,
     total_q,
     gqa_group_size,
     head_dim,
@@ -971,10 +996,6 @@ def _gqa_sparse_decode_kernel(
     req_id = pid_b // decode_query_len
     q_offset = pid_b - req_id * decode_query_len
     pid_h = pid_kh * gqa_group_size
-    chunk_size_topk = (max_topk + NUM_TOPK_CHUNKS - 1) // NUM_TOPK_CHUNKS
-    chunk_start_topk = pid_c * chunk_size_topk
-    chunk_end_compiletime = chunk_start_topk + chunk_size_topk
-
     if USE_PDL:
         tl.extra.cuda.gdc_wait()
 
@@ -983,18 +1004,51 @@ def _gqa_sparse_decode_kernel(
     # Full-CG padding uses zero-length request rows. Clamp to an empty
     # attention range instead of letting padded rows produce negative lengths.
     kv_len = tl.maximum(query_pos + 1, 0)
+    num_valid_blocks = (kv_len + BLOCK_SIZE_K - 1) // BLOCK_SIZE_K
 
-    # number of valid (non-padded) selected blocks for this query token
-    off_t = tl.arange(0, BLOCK_SIZE_T)
     idx_base = t_ptr + pid_kh * stride_th + pid_b * stride_tn
-    topk_idx = tl.load(idx_base + off_t * stride_tk, mask=off_t < max_topk, other=-1)
-    real_topk = tl.sum((topk_idx >= 0).to(tl.int32), axis=0)
-    chunk_end_topk = tl.minimum(chunk_end_compiletime, real_topk)
+    off_t = tl.arange(0, BLOCK_SIZE_T)
+    topk_idx = tl.load(
+        idx_base + off_t * stride_tk,
+        mask=off_t < max_topk,
+        other=-1,
+    )
+    topk_valid_blk = (
+        (topk_idx >= 0)
+        & (topk_idx < num_valid_blocks)
+        & (topk_idx < max_blocks)
+    )
+    valid_topk = (off_t < max_topk) & topk_valid_blk
+    # Keep all positions up to the last valid selected block. This skips only
+    # a trailing invalid suffix; the hot loop still has PR33 per-block guards,
+    # so interleaved invalid entries remain precision-safe.
+    real_topk = tl.max(tl.where(valid_topk, off_t + 1, 0), axis=0)
+    chunk_size_topk = tl.maximum(
+        1,
+        (real_topk + NUM_TOPK_CHUNKS - 1) // NUM_TOPK_CHUNKS,
+    )
+    chunk_start_topk = pid_c * chunk_size_topk
+    chunk_end_topk = tl.minimum(chunk_start_topk + chunk_size_topk, real_topk)
 
     off_n = tl.arange(0, BLOCK_SIZE_K)
     off_d = tl.arange(0, BLOCK_SIZE_D)
     d_mask = off_d < head_dim
     bt_row = block_table_ptr + req_id * stride_bt_b
+
+    if chunk_start_topk >= chunk_end_topk:
+        lse_ptrs = tl.make_block_ptr(
+            base=lse_ptr + pid_c * stride_l_c + pid_b * stride_l_b + pid_h * stride_l_h,
+            shape=(gqa_group_size,),
+            strides=(stride_l_h,),
+            offsets=(0,),
+            block_shape=(BLOCK_SIZE_H,),
+            order=(0,),
+        )
+        empty_lse = tl.full((BLOCK_SIZE_H,), float("-inf"), dtype=tl.float32)
+        tl.store(lse_ptrs, empty_lse, boundary_check=(0,))
+        if USE_PDL:
+            tl.extra.cuda.gdc_launch_dependents()
+        return
 
     m_i = tl.full((BLOCK_SIZE_H,), float("-inf"), dtype=tl.float32)
     lse_i = tl.full((BLOCK_SIZE_H,), float("-inf"), dtype=tl.float32)
@@ -1012,43 +1066,50 @@ def _gqa_sparse_decode_kernel(
     cur_idx_ptr = idx_base + chunk_start_topk * stride_tk
     for _ in tl.range(chunk_start_topk, chunk_end_topk):
         blk = tl.load(cur_idx_ptr).to(tl.int32)
-        cur_idx_ptr = cur_idx_ptr + stride_tk
-        c = blk * BLOCK_SIZE_K
-        page = tl.load(bt_row + blk).to(tl.int64)
+        cur_idx_ptr += stride_tk
+        valid_blk = (blk >= 0) & (blk < num_valid_blocks) & (blk < max_blocks)
+        safe_blk = tl.minimum(tl.maximum(blk, 0), max_blocks - 1)
+        c = safe_blk * BLOCK_SIZE_K
+        page = tl.load(bt_row + safe_blk, mask=valid_blk, other=-1).to(tl.int64)
+        valid_page = valid_blk & (page >= 0)
+        safe_page = tl.maximum(page, 0)
         pos = c + off_n
-        pos_mask = pos < kv_len
+        pos_mask = (pos < kv_len) & valid_page
         k = tl.load(
             k_cache_ptr
-            + page * stride_k_blk
+            + safe_page * stride_k_blk
             + off_n[None, :] * stride_k_pos
             + pid_kh * stride_k_h
             + off_d[:, None] * stride_k_d,
-            mask=d_mask[:, None] & pos_mask[None, :],
+            mask=d_mask[:, None],
             other=0.0,
         )
         if USE_FP8:
             k = k.to(q.dtype)
-        qk = tl.zeros((BLOCK_SIZE_H, BLOCK_SIZE_K), dtype=tl.float32)
-        qk += tl.where(pos_mask[None, :], 0, float("-inf"))
-        qk += tl.dot(q, k) * sm_scale_log2e
+        qk = tl.dot(q, k) * sm_scale_log2e
+        qk = tl.where(pos_mask[None, :], qk, float("-inf"))
         m_ij = tl.maximum(m_i, tl.max(qk, axis=1))
+        active_i = m_ij > float("-inf")
         p = tl.exp2(qk - m_ij[:, None])
+        p = tl.where(active_i[:, None], p, 0.0)
         l_ij = tl.sum(p, axis=1)
-        acc_o = acc_o * tl.exp2(m_i - m_ij)[:, None]
+        acc_scale = tl.where(active_i, tl.exp2(m_i - m_ij), tl.zeros_like(m_i))
+        acc_o = acc_o * acc_scale[:, None]
         v = tl.load(
             v_cache_ptr
-            + page * stride_v_blk
+            + safe_page * stride_v_blk
             + off_n[:, None] * stride_v_pos
             + pid_kh * stride_v_h
             + off_d[None, :] * stride_v_d,
-            mask=pos_mask[:, None] & d_mask[None, :],
+            mask=d_mask[None, :],
             other=0.0,
         )
         if USE_FP8:
             v = v.to(q.dtype)
         acc_o += tl.dot(p.to(v.dtype), v)
         m_i = m_ij
-        lse_i = m_ij + tl.log2(tl.exp2(lse_i - m_ij) + l_ij)
+        lse_next = m_ij + tl.log2(tl.exp2(lse_i - m_ij) + l_ij)
+        lse_i = tl.where(active_i, lse_next, lse_i)
 
     if USE_PDL:
         tl.extra.cuda.gdc_launch_dependents()
@@ -1109,21 +1170,26 @@ def _merge_topk_attn_out_kernel(
 
     off_c = tl.arange(0, NUM_TOPK_CHUNKS)
     off_d = tl.arange(0, BLOCK_SIZE_D)
-    o_ptrs = tl.make_block_ptr(
-        base=o_ptr + pid_b * stride_o_b + pid_h * stride_o_h,
-        shape=(NUM_TOPK_CHUNKS, head_dim),
-        strides=(stride_o_c, stride_o_d),
-        offsets=(0, 0),
-        block_shape=(NUM_TOPK_CHUNKS, BLOCK_SIZE_D),
-        order=(1, 0),
-    )
     lse_ptrs = lse_ptr + pid_b * stride_l_b + pid_h * stride_l_h + off_c * stride_l_c
-    o = tl.load(o_ptrs, boundary_check=(0, 1), padding_option="zero")
     lse = tl.load(lse_ptrs)  # empty chunks contribute -inf -> weight 0
+    valid_chunk = lse > float("-inf")
+    o = tl.load(
+        o_ptr
+        + off_c[:, None] * stride_o_c
+        + pid_b * stride_o_b
+        + pid_h * stride_o_h
+        + off_d[None, :] * stride_o_d,
+        mask=valid_chunk[:, None] & (off_d[None, :] < head_dim),
+        other=0.0,
+    )
     lse_max = tl.max(lse, axis=0)
-    weights = tl.exp2(lse - lse_max)
-    weights = weights / tl.sum(weights, axis=0)
-    o_merged = tl.sum(o * weights[:, None], axis=0)
+    has_lse = lse_max > float("-inf")
+    safe_lse_max = tl.where(has_lse, lse_max, 0.0)
+    weights = tl.where(lse > float("-inf"), tl.exp2(lse - safe_lse_max), 0.0)
+    denom = tl.sum(weights, axis=0)
+    denom_safe = tl.where(denom > 0.0, denom, 1.0)
+    o_merged = tl.sum(o * weights[:, None], axis=0) / denom_safe
+    o_merged = tl.where(has_lse, o_merged, tl.zeros((BLOCK_SIZE_D,), dtype=tl.float32))
     out_ptrs = (
         out_ptr + pid_b * stride_out_n + pid_h * stride_out_h + off_d * stride_out_d
     )
@@ -1366,8 +1432,11 @@ def minimax_m3_index_decode(
         device=idx_q.device,
     )
 
+    # On Ascend, over-splitting the decode score pass is dominated by scalar
+    # scheduling and many empty programs. Keep a small split-K count and let
+    # each program score multiple 128-token blocks with q reused in UB.
     target_grid = 4096
-    max_num_kv_chunks = 256
+    max_num_kv_chunks = 8
     target = max(
         1,
         min(
@@ -1559,12 +1628,26 @@ def minimax_m3_sparse_attn_decode(
     # launch_pdl was specified but unrecognised"). Only pass it when PDL is
     # actually supported -- on ROCm use_pdl is always False, so it's omitted.
     pdl_launch = {"launch_pdl": True} if use_pdl else {}
-    # split-K over the selected blocks; chunk count is shape-constant (cuda graph).
-    TARGET_GRID = 256
-    target = max(1, min(max_topk, TARGET_GRID // max(1, total_q * num_kv_heads)))
+    # split-K over the selected blocks; keep enough programs for small decode
+    # batches without regressing long-context sparse decode.
+    TARGET_GRID = 64
+    MAX_TOPK_CHUNKS = 4
+    target = max(
+        1,
+        min(
+            max_topk,
+            MAX_TOPK_CHUNKS,
+            TARGET_GRID // max(1, total_q * num_kv_heads),
+        ),
+    )
     num_topk_chunks = 1 << (target.bit_length() - 1)
     o_partial = torch.empty(
-        num_topk_chunks, total_q, num_heads, head_dim, dtype=q.dtype, device=q.device
+        num_topk_chunks,
+        total_q,
+        num_heads,
+        head_dim,
+        dtype=q.dtype,
+        device=q.device,
     )
     lse_partial = torch.empty(
         num_topk_chunks, total_q, num_heads, dtype=torch.float32, device=q.device
@@ -1579,6 +1662,7 @@ def minimax_m3_sparse_attn_decode(
         lse_partial,
         block_table,
         seq_lens,
+        block_table.shape[-1],
         total_q,
         gqa_group_size,
         head_dim,
@@ -1614,6 +1698,7 @@ def minimax_m3_sparse_attn_decode(
         **_sparse_attn_num_stages_kwarg(),
         **pdl_launch,
     )
+
     merge_grid = (total_q, num_heads)
     _merge_topk_attn_out_kernel[merge_grid](
         o_partial,
