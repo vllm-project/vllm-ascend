@@ -105,11 +105,11 @@ templates:
       - --seed
       - "1024"
       - --max-model-len
-      - "40000"
+      - "70000"
       - --max-num-batched-tokens
-      - "16384"
+      - "8192"
       - --max-num-seqs
-      - "8"
+      - "16"
       - --enforce-eager
       - --trust-remote-code
       - --gpu-memory-utilization
@@ -117,12 +117,16 @@ templates:
       - --quantization
       - "ascend"
       - --no-enable-prefix-caching
+      - --tokenizer-mode
+      - "deepseek_v32"
+      - --reasoning-parser
+      - "deepseek_v3"
       - --speculative-config
-      - '{"method": "deepseek_mtp", "num_speculative_tokens": 1}'
+      - '{"method": "deepseek_mtp", "num_speculative_tokens": 2}'
       - --additional-config
-      - '{"recompute_scheduler_enable":true,"enable_shared_expert_dp": true}'
+      - '{"layer_sharding": ["q_b_proj", "o_proj"]}'
       - --kv-transfer-config
-      - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_producer", "kv_port": "30000", "engine_id": "0", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 8}, "decode": {"dp_size": 32, "tp_size": 1}}}'
+      - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_producer", "kv_port": "30000", "engine_id": "0", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 16}, "decode": {"dp_size": 8, "tp_size": 4}}}'
 
   - node_index: 1
     envs:
