@@ -5329,8 +5329,10 @@ def _torch_cuda_wrapper():
         torch.cuda.mem_get_info = _StreamPlaceholder
         raise RuntimeError(f"NPUModelRunner init failed, error is {e}")
     finally:
-        # if anything goes wrong, just patch it with a placeholder
-        torch.cuda.Event = _EventPlaceholder
+        # Async model-runner outputs are created after runner initialization.
+        # Keep the CUDA compatibility entry point backed by a real NPU event so
+        # their non-blocking device-to-host copies retain synchronization.
+        torch.cuda.Event = torch.npu.Event
         torch.cuda.Stream = torch.cuda.Stream
         torch.cuda.default_stream = torch.npu.default_stream
         torch.cuda.current_stream = torch.npu.current_stream

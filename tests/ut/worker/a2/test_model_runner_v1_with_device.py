@@ -3,6 +3,7 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
+import torch
 from vllm.config import (
     CacheConfig,
     CUDAGraphMode,
@@ -23,13 +24,25 @@ from vllm.v1.kv_cache_interface import (
 )
 
 import vllm_ascend.compilation.acl_graph as acl_graph
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+from vllm_ascend.worker.model_runner_v1 import NPUModelRunner, _torch_cuda_wrapper
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
 BLOCK_SIZE = 128
 NUM_BLOCKS = 10
 DEVICE_TYPE = current_platform.device_type
 FAKE_WEIGHT_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "_fake_weight")
+
+
+def test_torch_cuda_wrapper_preserves_real_npu_event():
+    with _torch_cuda_wrapper():
+        assert torch.cuda.Event is torch.npu.Event
+
+    # Runtime async outputs construct their events after runner initialization.
+    assert torch.cuda.Event is torch.npu.Event
+    event = torch.cuda.Event(blocking=True)
+    event.record()
+    event.synchronize()
+    assert event.query()
 
 
 def initialize_kv_cache(runner: NPUModelRunner):
