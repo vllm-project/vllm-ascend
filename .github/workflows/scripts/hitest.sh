@@ -48,6 +48,11 @@ echo "Using current PR number as MR_THIRD_ID: ${MR_THIRD_ID}"
 X_APIG_APPCODE="${AUROGON_APPCODE:-}"
 APP_KEY="${AUROGON_APPKEY:-}"
 APP_SECRET="${AUROGON_APPSECRET:-}"
+# 密钥为空直接报错退出，打印清晰日志
+if [[ -z "${X_APIG_APPCODE}" || -z "${APP_KEY}" || -z "${APP_SECRET}" ]]; then
+    echo "ERROR: 缺失AUROGON鉴权密钥环境变量 AUROGON_APPCODE / AUROGON_APPKEY / AUROGON_APPSECRET"
+    exit 1
+fi
 
 # Api1 save mr with retry
 MAX_RETRY=3
