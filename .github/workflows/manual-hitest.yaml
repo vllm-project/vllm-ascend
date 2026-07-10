@@ -18,7 +18,7 @@
 name: Hitest
 
 on:
-  pull_request:
+  pull_request_target:
     types:
       - opened      # 新建PR（提PR）
       - synchronize # PR推送新commit、push更新分支
