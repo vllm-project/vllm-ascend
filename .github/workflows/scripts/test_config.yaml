@@ -521,7 +521,8 @@
   base: spec_decode_base
   source_file_dependencies:
     - vllm_ascend/spec_decode/step3p5.py
-  tests: []
+  tests:
+    - tests/e2e/pull_request/four_card/spec_decode/test_mtp_step3p5.py
 
 # Worker
 - name: worker_v1
@@ -751,6 +752,7 @@ estimated_times:
   tests/e2e/pull_request/four_card/context_parallel/test_accuracy.py: 1930
   tests/e2e/pull_request/four_card/context_parallel/test_prefix_caching_cp.py: 140
   tests/e2e/pull_request/four_card/spec_decode/test_mtp_qwen3_next.py: 460
+  tests/e2e/pull_request/four_card/spec_decode/test_mtp_step3p5.py: 400
   tests/e2e/pull_request/four_card/test_data_parallel_tp2.py: 30
   tests/e2e/pull_request/four_card/test_deepseek_v3_2_w8a8_pruning.py: 360
   tests/e2e/pull_request/four_card/test_deepseek_v4.py: 970
