@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
+from vllm.config import set_current_vllm_config
 from vllm.distributed.parallel_state import GroupCoordinator
 
 from tests.ut.attention.utils import patch_distributed_groups
@@ -31,6 +32,9 @@ class TestAscendSFABackend(TestBase):
         mock_parallel_config.prefill_context_parallel_size = 1
         mock_parallel_config.decode_context_parallel_size = 1
         self.mock_config.parallel_config = mock_parallel_config
+        self.mock_config.model_config = MagicMock(spec=[])
+        self.config_context = set_current_vllm_config(self.mock_config)
+        self.config_context.__enter__()
 
         self.utils_patcher = patch("vllm_ascend.attention.utils.get_current_vllm_config", return_value=self.mock_config)
         self.utils_patcher.start()
@@ -38,6 +42,10 @@ class TestAscendSFABackend(TestBase):
         from vllm_ascend.attention.utils import enable_cp
 
         enable_cp.cache_clear()
+
+    def tearDown(self):
+        self.utils_patcher.stop()
+        self.config_context.__exit__(None, None, None)
 
     def test_get_name(self):
         self.assertEqual(AscendSFABackend.get_name(), "ASCEND_SFA")
@@ -302,9 +310,11 @@ class TestAscendSFAMetadataBuilder(TestBase):
     @patch_distributed_groups(dcp_size=2, pcp_size=2, needs_mocks=False)
     def test_ascend_sfa_metadata_builder_default(self):
         kv_cache_spec = MagicMock()
+        kv_cache_spec.block_size = 128
         layer_names = ["layer1", "layer2"]
         vllm_config = MagicMock()
         vllm_config.cache_config.block_size = 16
+        vllm_config.scheduler_config.max_num_seqs = 16
         vllm_config.model_config.max_model_len = 1024
         vllm_config.model_config.get_head_size.return_value = 64
         vllm_config.model_config.dtype = torch.float16
@@ -339,9 +349,11 @@ class TestAscendSFAMetadataBuilder(TestBase):
 
         mock_get_current_vllm_config.return_value = cfg
         kv_cache_spec = MagicMock()
+        kv_cache_spec.block_size = 128
         layer_names = ["layer1", "layer2"]
         vllm_config = MagicMock()
         vllm_config.cache_config.block_size = 16
+        vllm_config.scheduler_config.max_num_seqs = 16
         vllm_config.model_config.max_model_len = 1024
         vllm_config.model_config.get_head_size.return_value = 64
         vllm_config.model_config.dtype = torch.float16
@@ -396,9 +408,11 @@ class TestAscendSFAMetadataBuilder(TestBase):
         mock_get_current_vllm_config.return_value = cfg
 
         kv_cache_spec = MagicMock()
+        kv_cache_spec.block_size = 128
         layer_names = ["layer1", "layer2"]
         vllm_config = MagicMock()
         vllm_config.cache_config.block_size = 16
+        vllm_config.scheduler_config.max_num_seqs = 16
         vllm_config.model_config.max_model_len = 1024
         vllm_config.model_config.get_head_size.return_value = 64
         vllm_config.model_config.dtype = torch.float16
@@ -454,9 +468,11 @@ class TestAscendSFAMetadataBuilder(TestBase):
 
         mock_get_current_vllm_config.return_value = cfg
         kv_cache_spec = MagicMock()
+        kv_cache_spec.block_size = 128
         layer_names = ["layer1", "layer2"]
         vllm_config = MagicMock()
         vllm_config.cache_config.block_size = 16
+        vllm_config.scheduler_config.max_num_seqs = 16
         vllm_config.model_config.max_model_len = 1024
         vllm_config.model_config.get_head_size.return_value = 64
         vllm_config.model_config.dtype = torch.float16

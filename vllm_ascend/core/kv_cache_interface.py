@@ -61,6 +61,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     cache_sparse_c8: bool = False
     c8_k_cache_dtype: torch.dtype = field(default_factory=_get_c8_k_cache_dtype)
     c8_k_scale_cache_dtype: torch.dtype = field(default_factory=_get_c8_k_scale_cache_dtype)
+    sfa_dcp_replicated_indexer_size: int = 1
 
     @property
     def page_size_bytes(self) -> int:
@@ -75,7 +76,11 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             ckv_bytes = num_heads_per_page * ckv_head_dim * get_dtype_size(self.c8_k_cache_dtype)
             qli_bytes = num_heads_per_page * index_head_dim * get_dtype_size(self.c8_k_cache_dtype)
             qli_scale_bytes = (
-                num_heads_per_page * get_dtype_size(self.c8_k_scale_cache_dtype) if index_head_dim > 0 else 0
+                num_heads_per_page
+                * self.sfa_dcp_replicated_indexer_size
+                * get_dtype_size(self.c8_k_scale_cache_dtype)
+                if index_head_dim > 0
+                else 0
             )
             return ckv_bytes + qli_bytes + qli_scale_bytes
 
@@ -114,7 +119,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
                 )
 
             qli_virtual = index_k_head_dim * get_dtype_size(self.c8_k_cache_dtype)
-            scale_virtual = get_dtype_size(self.c8_k_scale_cache_dtype)
+            scale_virtual = self.sfa_dcp_replicated_indexer_size * get_dtype_size(self.c8_k_scale_cache_dtype)
             total_virtual_head_dim = ckv_virtual + qli_virtual + scale_virtual
 
             return (
@@ -162,6 +167,10 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             "All attention layers in the same KV cache group must use the same sparse C8 setting."
         )
 
+        sfa_dcp_replicated_indexer_size_set = set(spec.sfa_dcp_replicated_indexer_size for spec in specs)
+        assert len(sfa_dcp_replicated_indexer_size_set) == 1, (
+            "All attention layers in the same KV cache group must use the same SFA DCP replicated indexer size."
+        )
         return cls(
             block_size=specs[0].block_size,
             num_kv_heads=specs[0].num_kv_heads,
@@ -172,6 +181,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             dtype=specs[0].dtype,
             cache_dtype_str=cache_dtype_str_set.pop(),
             cache_sparse_c8=specs[0].cache_sparse_c8,
+            sfa_dcp_replicated_indexer_size=sfa_dcp_replicated_indexer_size_set.pop(),
         )
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
