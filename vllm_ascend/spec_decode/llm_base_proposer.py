@@ -720,7 +720,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             if forward_context is not None:
                 forward_context.moe_layer_index = 0
 
-            self._sync_wait_target_events()
+            # Gemma4 MTP: draft 读 target 的 KV cache，需等 target 异步 KV 写完成。
+            # 非 Gemma4 模型 _sync_wait_target_events 是 no-op，这里门控跳过调用。
+            if self._is_gemma4_mtp:
+                self._sync_wait_target_events()
             self._runnable(
                 num_input_tokens=num_tokens,
                 batch_size=batch_size,
@@ -743,6 +746,15 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     ) -> None:
         if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
             self._update_full_graph_params(forward_context, num_input_tokens, multi_steps_attn_metadata)
+
+    @property
+    def _is_gemma4_mtp(self) -> bool:
+        """True only for Gemma4 MTP. Gates Gemma4-only hooks in the shared
+        base so other draft proposers hit no extra work on the hot path."""
+        return (
+            self.speculative_config is not None
+            and getattr(self.speculative_config, "use_gemma4_mtp", lambda: False)()
+        )
 
     def _sync_wait_target_events(self) -> None:
         """Wait for NPU events recorded after target forward completes.
@@ -1094,7 +1106,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 "is_prefill": is_prefill_batch,
             }
             run_draft = partial(self._runnable, **model_inputs)
-            self._sync_wait_target_events()
+            # Gemma4 MTP: 同上，等 target KV 写完成。
+            if self._is_gemma4_mtp:
+                self._sync_wait_target_events()
 
             if self.enable_enpu:
                 self._update_full_graph_params_if_needed(forward_context, num_input_tokens, multi_steps_attn_metadata)
