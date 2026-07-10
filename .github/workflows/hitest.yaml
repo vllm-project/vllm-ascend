@@ -18,15 +18,6 @@
 name: Hitest
 
 on:
-  pull_request:
-    types:
-      - opened
-      - synchronize
-      - reopened
-    branches:
-      - 'main'
-      - '*-dev'
-      - 'releases/v*'
   workflow_dispatch:
 
 defaults:
