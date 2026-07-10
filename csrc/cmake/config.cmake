@@ -30,7 +30,12 @@ else()
     set(ASCEND_CANN_PACKAGE_PATH  "/usr/local/Ascend/latest")
 endif ()
 message(STATUS "ASCEND_CANN_PACKAGE_PATH=${ASCEND_CANN_PACKAGE_PATH}")
+set(VLLM_ASCEND_CANN_ARCH_PKG_INC
+    "${ASCEND_CANN_PACKAGE_PATH}/${CMAKE_SYSTEM_PROCESSOR}-linux/pkg_inc")
 
+if(NOT EXISTS "${VLLM_ASCEND_CANN_ARCH_PKG_INC}")
+    set(VLLM_ASCEND_CANN_ARCH_PKG_INC "")
+endif()
 # Detect A5-compatible SoC enum support from the CANN headers we are compiling against.
 set(_saved_CMAKE_REQUIRED_INCLUDES "${CMAKE_REQUIRED_INCLUDES}")
 set(CMAKE_REQUIRED_INCLUDES
@@ -38,6 +43,7 @@ set(CMAKE_REQUIRED_INCLUDES
         ${ASCEND_CANN_PACKAGE_PATH}/include/external
         ${ASCEND_CANN_PACKAGE_PATH}/include/experiment/platform
         ${ASCEND_CANN_PACKAGE_PATH}/include/experiment/runtime
+        ${VLLM_ASCEND_CANN_ARCH_PKG_INC}
 )
 
 check_cxx_source_compiles([[
