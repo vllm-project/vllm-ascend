@@ -16,7 +16,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-
+import logging
 from contextlib import contextmanager
 from copy import copy
 from typing import Any, cast
@@ -28,22 +28,16 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
+from vllm.v1.worker.gpu.cudagraph_utils import AttentionStatePair, BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.model_states.interface import ModelState
-from vllm.v1.worker.gpu.spec_decode.autoregressive import (  # type: ignore[import-not-found]
-    speculator as vllm_speculator_module,  # type: ignore[import-not-found]
-)
-from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (  # type: ignore[import-not-found]
-    PrefillSpeculatorCudaGraphManager,
-)
-from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator  # type: ignore[import-not-found]
+from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
 from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
-from vllm_ascend.worker.v2.spec_decode.eagle.aclgraph import PrefillEagleAclGraphManager
 
-_PREFILL_CUDAGRAPH_MANAGER_CLS = PrefillSpeculatorCudaGraphManager
+logger = logging.getLogger(__name__)
 
 
 class AscendEagleSpeculator(EagleSpeculator):
@@ -81,8 +75,12 @@ class AscendEagleSpeculator(EagleSpeculator):
         self.input_batch: InputBatch | None = None
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
-        with graph_manager_wrapper(self):
-            super().init_cudagraph_manager(cudagraph_mode)
+        super().init_cudagraph_manager(cudagraph_mode)
+        # The Ascend graph managers are patched onto the upstream module and
+        # created by super().init_cudagraph_manager without a speculator ref.
+        # They need this speculator to update full-graph params, so set it here.
+        self.prefill_cudagraph_manager.speculator = self
+        self.decode_cudagraph_manager.speculator = self
 
     def propose(
         self,
@@ -165,26 +163,44 @@ class AscendEagleSpeculator(EagleSpeculator):
 
         self.attn_backends = attn_backends
 
-    def _generate_draft(
+    def capture(
         self,
-        num_reqs: int,
-        num_tokens_padded: int,
-        attn_metadata: dict[str, Any] | None,
-        slot_mappings: dict[str, torch.Tensor] | None,
-        num_tokens_across_dp: torch.Tensor | None,
-        cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+        attn_states: dict[BatchExecutionDescriptor, AttentionStatePair],
     ) -> None:
-        """Override AutoRegressiveSpeculator._generate_draft for Ascend NPUs."""
-        self._ascend_prepare_decode_draft(attn_metadata, num_reqs)
-        super()._generate_draft(
-            num_reqs,
-            num_tokens_padded,
-            attn_metadata,
-            slot_mappings,
-            num_tokens_across_dp,
-            cudagraph_runtime_mode,
+        logger.info("Capturing model for speculator...")
+        # Reset indices to zeros to prevent stale values from prior
+        # dummy runs to cause out-of-bounds indexing during capture.
+        self.last_token_indices.zero_()
+
+        # Capture the prefill routine (model forward + compute_logits +
+        # sample).
+        # For FULL graphs, the entire routine is recorded as one graph.
+        # For PIECEWISE, only the model's compiled regions are captured
+        # and the rest (compute_logits, gumbel_sample) runs eagerly.
+        assert self.prefill_cudagraph_manager is not None
+        if self.prefill_cudagraph_manager.use_breakable_cg:
+            self.prefill_cudagraph_manager.init_breakable_cg_runner(self.model)
+        self.prefill_cudagraph_manager.capture(
+            self._prefill,
+            attn_states,
+            progress_bar_desc="Capturing prefill CUDA graphs",
         )
-        self._increment_decode_attn_metadata(attn_metadata)
+
+        if self.num_speculative_steps == 1:
+            return
+
+        # Capture all decode draft generation steps as a single graph.
+        assert self.decode_cudagraph_manager is not None
+        with build_attn_metadata_wrapper():
+            self.decode_cudagraph_manager.capture(
+                self._multi_step_decode,
+                self.model_state,
+                self.input_buffers,
+                self.block_tables,
+                self.attn_groups,
+                self.kv_cache_config,
+                progress_bar_desc="Capturing decode CUDA graphs",
+            )
 
     @torch.inference_mode()
     def _run_model(
@@ -208,6 +224,71 @@ class AscendEagleSpeculator(EagleSpeculator):
         self._ascend_update_seq_lens(attn_metadata)
         return last_hidden_states, hidden_states
 
+    def _generate_draft(
+        self,
+        num_reqs: int,
+        num_tokens_padded: int,
+        attn_metadata: dict[str, Any] | None,
+        slot_mappings: dict[str, torch.Tensor] | None,
+        num_tokens_across_dp: torch.Tensor | None,
+        cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+    ) -> None:
+        """Thin override: delegate to upstream single-step ``_generate_draft``,
+        then apply Ascend-specific attention-metadata updates required by the
+        FIA operator."""
+        super()._generate_draft(
+            num_reqs,
+            num_tokens_padded,
+            attn_metadata,
+            slot_mappings,
+            num_tokens_across_dp,
+            cudagraph_runtime_mode,
+        )
+        if attn_metadata is not None:
+            self._update_decode_attn_metadata(attn_metadata, 1, num_reqs)
+
+    def _multi_step_decode(
+        self,
+        num_reqs: int,
+        skip_attn: bool,
+        batch_desc: BatchExecutionDescriptor,
+        num_tokens_across_dp: torch.Tensor | None,
+    ) -> None:
+        """Minimal override to handle the merged multi-step graph in FULL mode.
+
+        In FULL mode the captured graph already contains all speculative
+        steps, so ``run_fullgraph`` is called once instead of once per
+        step.  For PIECEWISE / NONE modes we delegate to the upstream
+        ``_multi_step_decode`` which iterates over steps and calls
+        ``_generate_draft`` per step.
+        """
+        if batch_desc.cg_mode == CUDAGraphMode.FULL:
+            assert self.decode_cudagraph_manager is not None
+            self.decode_cudagraph_manager.run_fullgraph(batch_desc)
+            return
+        super()._multi_step_decode(num_reqs, skip_attn, batch_desc, num_tokens_across_dp)
+
+    def _build_draft_attn_metadata(
+        self,
+        num_reqs: int,
+        num_reqs_padded: int,
+        num_tokens_padded: int,
+        num_query_per_req: int = 1,
+        causal: bool = True,
+    ) -> dict[str, Any] | None:
+        attn_metadata = super()._build_draft_attn_metadata(
+            num_reqs,
+            num_reqs_padded,
+            num_tokens_padded,
+            num_query_per_req,
+            causal,
+        )
+        if attn_metadata is not None:
+            # Ascend-specific: force DecodeOnly attention state for the draft model.
+            for metadata in attn_metadata.values():
+                metadata.attn_state = AscendAttentionState.DecodeOnly
+        return attn_metadata
+
     def build_draft_attn_metadatas(self, num_reqs_padded, is_draft_model_prefill):
         """Build draft_attn_metadatas for partial-merged draft graph."""
         attn_metadata = self.model_state.attn_metadata
@@ -227,29 +308,11 @@ class AscendEagleSpeculator(EagleSpeculator):
 
         return draft_attn_metadatas
 
-    def _ascend_prepare_decode_draft(self, attn_metadata: dict[str, Any] | None, num_reqs: int) -> None:
-        self._init_decode_attn_metadata(attn_metadata, num_reqs)
-        self._increment_decode_attn_metadata(attn_metadata)
-
     def _ascend_update_seq_lens(self, attn_metadata: dict[str, Any] | None) -> None:
         if attn_metadata is not None:
             for attn_meta in attn_metadata.values():
                 attn_meta.seq_lens = attn_meta.seq_lens + 1
                 attn_meta.seq_len_list = attn_meta.seq_lens.tolist()
-
-    def _init_decode_attn_metadata(self, attn_metadata: dict[str, Any] | None, num_reqs: int):
-        """Initialize attention metadata for decode phase on Ascend NPUs."""
-        if attn_metadata is None:
-            return
-
-        attn_state = AscendAttentionState.DecodeOnly
-        seq_lens_cpu = self._get_seq_lens_cpu()[:num_reqs]
-
-        # attn_metadata is build in vllm's super class.
-        # We need to update attn_state for each layer's metadata.
-        for metadata in attn_metadata.values():
-            metadata.attn_state = attn_state
-            metadata.seq_lens_cpu = seq_lens_cpu
 
     def _init_decode_draft_attn_metadatas(self, attn_metadata: dict[str, Any] | None, num_reqs_padded: int):
         """Initialize attention metadata for decode phase in graph mode on Ascend NPUs."""
@@ -271,11 +334,6 @@ class AscendEagleSpeculator(EagleSpeculator):
             draft_attn_metadatas.append(per_step_attn_metadata)
 
         return draft_attn_metadatas
-
-    def _increment_decode_attn_metadata(self, attn_metadata: dict[str, Any] | None):
-        """Increment attention metadata for decode phase on Ascend NPUs."""
-        # in eager mode, attn_metadata's seq_lens_cpu and input_buffers's seq_lens_cpu shares the memory
-        self._update_decode_attn_metadata(attn_metadata, 1)
 
     def _update_decode_attn_metadata(
         self, attn_metadata: dict[str, Any] | None, step: int, num_reqs: int | None = None
@@ -338,20 +396,3 @@ def torch_gather_wrapper():
         yield
     finally:
         torch.gather = original_gather
-
-
-@contextmanager
-def graph_manager_wrapper(speculator):
-    """Context manager to override graph manager."""
-    original_graph_manager = _PREFILL_CUDAGRAPH_MANAGER_CLS
-
-    def factory(vllm_config: VllmConfig, device: torch.device, cudagraph_mode: CUDAGraphMode, decode_query_len: int):
-        return PrefillEagleAclGraphManager(vllm_config, device, cudagraph_mode, decode_query_len, speculator)
-
-    manager_attr = "PrefillSpeculatorCudaGraphManager"
-
-    try:
-        setattr(vllm_speculator_module, manager_attr, factory)
-        yield
-    finally:
-        setattr(vllm_speculator_module, manager_attr, original_graph_manager)
