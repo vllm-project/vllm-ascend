@@ -29,15 +29,6 @@ if TYPE_CHECKING:
     from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 
 
-def _select_admission_token_budget(
-    max_in_flight_tokens: int | None,
-    max_num_batched_tokens: int | None,
-) -> int | None:
-    if vllm_version_is("0.23.0"):
-        return max_num_batched_tokens if max_num_batched_tokens is not None else max_in_flight_tokens
-    return max_in_flight_tokens if max_in_flight_tokens is not None else max_num_batched_tokens
-
-
 class CompressAttentionManager(FullAttentionManager):
     def __init__(self, kv_cache_spec: "AscendMLAAttentionSpec", block_pool: BlockPool, **kwargs) -> None:
         super().__init__(kv_cache_spec, block_pool, **kwargs)
@@ -297,7 +288,7 @@ def get_manager_for_kv_cache_spec(
         # and ``full_sequence_must_fit`` admission reserves the full
         # ``max_model_len`` worth of blocks per request, exhausting the pool
         # at cc>=2 on DSv4 (see vLLM issue #40863).
-        token_budget = _select_admission_token_budget(max_in_flight_tokens, max_num_batched_tokens)
+        token_budget = max_num_batched_tokens if vllm_version_is("0.23.0") else max_in_flight_tokens
         if token_budget is not None and max_model_len is not None:
             if vllm_version_is("0.23.0"):
                 kwargs["max_admission_blocks_per_request"] = kv_cache_spec.max_admission_blocks_per_request(
