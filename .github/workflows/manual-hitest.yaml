@@ -18,6 +18,15 @@
 name: Hitest
 
 on:
+  pull_request:
+    types:
+      - opened      # 新建PR（提PR）
+      - synchronize # PR推送新commit、push更新分支
+      - reopened    # PR关闭后重新打开
+    branches:
+      - 'main'
+      - '*-dev'
+      - 'releases/v*'
   workflow_dispatch:
   workflow_call:
 
