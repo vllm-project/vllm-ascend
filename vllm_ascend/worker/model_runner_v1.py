@@ -3166,6 +3166,7 @@ class NPUModelRunner(GPUModelRunner):
         logits_indices: torch.Tensor | None = None,
         use_spec_decode: bool = False,
         for_cudagraph_capture: bool = False,
+        is_dummy_run: bool = False,
         num_scheduled_tokens: dict[str, int] | None = None,
         num_scheduled_tokens_np: np.ndarray | None = None,
         cascade_attn_prefix_lens: list[list[int]] | None = None,
@@ -3247,8 +3248,16 @@ class NPUModelRunner(GPUModelRunner):
                 # Fill unused with -1. Needed for reshape_and_cache in full cuda
                 # graph mode. `blk_table_tensor` -1 to match mamba PAD_SLOT_ID
                 if self.pcp_size == 1:
-                    slot_mapping[num_tokens:num_tokens_padded].fill_(-1)
-                    blk_table_tensor[num_reqs:num_reqs_padded].fill_(0)
+                    if self.use_compress and is_dummy_run:
+                        # Do not remove this initialization. During compress dummy
+                        # runs, slot mappings and block tables may contain invalid
+                        # values because _prepare_inputs() is skipped. Reset them to
+                        # zero to avoid NPU hangs.
+                        slot_mapping[:num_tokens_padded].fill_(0)
+                        blk_table_tensor[:num_reqs_padded].fill_(0)
+                    else:
+                        slot_mapping[num_tokens:num_tokens_padded].fill_(-1)
+                        blk_table_tensor[num_reqs:num_reqs_padded].fill_(0)
             if self.pcp_size > 1:
                 slot_mapping = self.pcp_manager.get_padded_slot_mapping(
                     num_tokens,
@@ -3669,6 +3678,7 @@ class NPUModelRunner(GPUModelRunner):
                 max_query_len=max_query_len,
                 ubatch_slices=ubatch_slices_padded if pad_attn else ubatch_slices,
                 for_cudagraph_capture=is_graph_capturing,
+                is_dummy_run=True,
                 num_scheduled_tokens_np=num_scheduled_tokens,
             )
 
