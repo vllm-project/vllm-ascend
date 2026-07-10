@@ -58,6 +58,7 @@ export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
 vllm serve Qwen/Qwen3-30B-A3B \
     --host 0.0.0.0 \
     --port 13700 \
+    --served-model-name "qwen" \
     --tensor-parallel-size 2 \
     --pipeline-parallel-size 2 \
     --enforce-eager \
@@ -104,6 +105,7 @@ export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
 vllm serve Qwen/Qwen3-30B-A3B \
     --host 0.0.0.0 \
     --port 13701 \
+    --served-model-name "qwen" \
     --data-parallel-size 2 \
     --tensor-parallel-size 2 \
     --enable-prefix-caching \
@@ -131,14 +133,60 @@ vllm serve Qwen/Qwen3-30B-A3B \
     }'
 ```
 
+::::{tab-item} Example Proxy for Deployment
+
+Run a proxy server on the same node with the prefiller service instance. You can get the proxy program in the repository's examples: [load\_balance\_proxy\_server\_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
+
+```shell
+python load_balance_proxy_server_example.py \
+    --host <PROXY_IP> \
+    --port 8080 \
+    --prefiller-hosts <PREFILL_MACHINE_IP> \
+    --prefiller-port 13700 \
+    --decoder-hosts <DECODE_MACHINE_IP> \
+    --decoder-ports 13701
+```
+
+| Parameter | Meaning |
+| --- | --- |
+| --port | Port of proxy |
+| --prefiller-port | All ports of prefill |
+| --decoder-ports | All ports of decoder |
+
+::::
+
+::::{tab-item} Verification
+
+Check service health using the proxy server endpoint.
+
+```shell
+curl http://<PROXY_IP>:8080/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+        "model": "qwen",
+        "messages": [
+        {
+            "role": "system",
+            "content": "You are a useful AI assistant."
+        },
+        {
+            "role": "user",
+            "content": "Question: Janet'\''s ducks lay 16 eggs per day. She eats three for breakfast and bakes muffins with four. She sells the remainder for $2 each. How much does she make?\nAnswer:"
+        }
+        ],
+        "max_completion_tokens": 100,
+        "temperature": 0
+    }'
+```
+
 ::::
 
 :::::
 
 > **Key points for PD disaggregation with CPP:**
 >
-> - CPP (`profiling_chunk_config.enabled`, `--enable-chunked-prefill`, `--pipeline-parallel-size > 1`) is configured **only on the P node**.
-> - The D node runs without chunked prefill and without pipeline parallelism — it focuses on low-latency token-by-token decoding.
+> - CPP (`profiling_chunk_config.enabled`, `--pipeline-parallel-size > 1`) is configured **only on the P node**.
+> - The D node runs without pipeline parallelism — it focuses on low-latency token-by-token decoding.
 > - For complete PD disaggregation setup instructions (environment verification, Mooncake installation, proxy deployment), see:
 >     - [PD Disaggregation Single Node](../../tutorials/features/pd_disaggregation_mooncake_single_node.md)
 >     - [PD Disaggregation Multi Node](../../tutorials/features/pd_disaggregation_mooncake_multi_node.md)
