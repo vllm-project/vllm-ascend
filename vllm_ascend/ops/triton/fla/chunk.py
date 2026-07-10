@@ -16,6 +16,8 @@ from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fla.ops.utils import SUPPRESS_LEVEL
 
+from vllm_ascend.ops.gdn_attn_builder import _compact_empty_segments
+
 from .chunk_delta_h import chunk_gated_delta_rule_fwd_h  # noqa: F401
 from .chunk_delta_hupdate import chunk_gated_delta_rule_fwd_hupdate
 from .chunk_o import chunk_fwd_o  # noqa: F401
@@ -99,21 +101,46 @@ def chunk_gated_delta_rule_fwd(
         cu_seqlens_host = tuple(cu_seqlens.tolist())
     if chunk_indices_chunk64_host is None and chunk_indices is not None:
         chunk_indices_chunk64_host = tuple(chunk_indices.flatten().tolist())
+    # Compact zero-length segments for the AscendC kernels (see
+    # _compact_empty_segments).  chunk_indices_chunk64 is already compact-
+    # ranked and is reused as-is; only cu_seqlens / initial_state need
+    # compacting.
+    if prebuilt_meta is not None and hasattr(prebuilt_meta, "keep_meta"):
+        cu_seqlens_kern = cu_seqlens_host if prebuilt_meta.cu_seqlens_kern is None else prebuilt_meta.cu_seqlens_kern
+        keep_meta = prebuilt_meta.keep_meta
+        initial_state_kern = (
+            initial_state[keep_meta]
+            if initial_state is not None and keep_meta is not None
+            else initial_state
+        )
+    else:
+        cu_seqlens_kern, initial_state_kern, keep_meta = _compact_empty_segments(
+            cu_seqlens_host,
+            initial_state,
+            device=initial_state.device if initial_state is not None else None,
+        )
     h, v_new, final_state = torch.ops._C_ascend.chunk_gated_delta_rule_fwd_h(
         k_ascendc,
         w_ascendc,
         u_ascendc,
         g=g_ascendc,
         gk=None,
-        initial_state=initial_state,
+        initial_state=initial_state_kern,
         output_final_state=True,
         chunk_size=64,
         save_new_value=True,
-        cu_seqlens=cu_seqlens_host,
+        cu_seqlens=cu_seqlens_kern,
         chunk_indices=chunk_indices_chunk64_host,
         use_exp2=False,
         transpose_state_layout=False,
     )
+    if keep_meta is not None:
+        # Scatter the compacted final_state back to the original [N, H, K, V]
+        # layout the PCP state recursion expects; empty segments keep their
+        # initial state.
+        _fs_full = initial_state.clone()
+        _fs_full[keep_meta] = final_state
+        final_state = _fs_full
 
     if get_pcp_group().world_size > 1:
         # When integrating mtp, since `mix_qkv` has been split, `num_decode`
