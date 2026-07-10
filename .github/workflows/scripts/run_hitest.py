@@ -12,12 +12,17 @@ def run_hitest_script() -> tuple[int, str, str]:
     if not os.path.exists(shell_script_path):
         raise FileNotFoundError(f"hitest.sh not found at: {shell_script_path}")
     os.chmod(shell_script_path, 0o755)
+    
+    env = os.environ.copy()
+    env["AUROGON_APPCODE"] = os.environ.get("AUROGON_APPCODE", "")
+    env["AUROGON_APPKEY"] = os.environ.get("AUROGON_APPKEY", "")
+    env["AUROGON_APPSECRET"] = os.environ.get("AUROGON_APPSECRET", "")
 
     proc = subprocess.run(
         ["/bin/bash", "-el", shell_script_path],
         capture_output=True,
         text=True,
-        env=os.environ.copy(),
+        env=env,
     )
     return proc.returncode, proc.stdout, proc.stderr
 
