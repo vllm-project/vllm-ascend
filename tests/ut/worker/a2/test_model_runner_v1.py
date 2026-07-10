@@ -351,10 +351,17 @@ class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
             sampled_token_ids,
         )
 
+    @patch("vllm_ascend.worker.model_runner_v1.get_pp_group")
     @patch("vllm_ascend.worker.model_runner_v1.get_ascend_config")
     @patch("vllm_ascend.worker.model_runner_v1.lmhead_tp_enable")
-    def test_sample_passes_draft_logits_to_rejection_sampler(self, mock_lmhead_tp_enable, mock_get_ascend_config):
+    def test_sample_passes_draft_logits_to_rejection_sampler(
+        self,
+        mock_lmhead_tp_enable,
+        mock_get_ascend_config,
+        mock_get_pp_group,
+    ):
         mock_lmhead_tp_enable.return_value = False
+        mock_get_pp_group.return_value.world_size = 1
         mock_ascend_config = MagicMock()
         mock_ascend_config.enable_reduce_sample = False
         mock_get_ascend_config.return_value = mock_ascend_config

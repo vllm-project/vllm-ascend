@@ -77,7 +77,7 @@ def test_dspark_dsa_decode_metadata_uses_noncausal_window(monkeypatch):
     monkeypatch.setattr(
         dsa_v1,
         "get_cos_and_sin_dsa",
-        lambda positions, use_cache=False: (
+        lambda positions, use_cache=False, draft_index=None: (
             torch.zeros(positions.numel(), 1),
             torch.zeros(positions.numel(), 1),
         ),
@@ -90,6 +90,7 @@ def test_dspark_dsa_decode_metadata_uses_noncausal_window(monkeypatch):
         model_config=vllm_config.model_config,
         vllm_config=vllm_config,
         spec_slot_mapping=[torch.arange(5, dtype=torch.int32)],
+        spec_sas_metadata=[torch.zeros(1024, dtype=torch.int32)],
         block_size=64,
         seqused_q=torch.empty(0, dtype=torch.int32),
         _zero_i32=torch.tensor([0], dtype=torch.int32),
@@ -133,7 +134,7 @@ def test_dspark_dsa_metadata_uses_token_to_req_indices(monkeypatch):
     monkeypatch.setattr(
         dsa_v1,
         "get_cos_and_sin_dsa",
-        lambda positions, use_cache=False: (
+        lambda positions, use_cache=False, draft_index=None: (
             torch.zeros(positions.numel(), 1),
             torch.zeros(positions.numel(), 1),
         ),
@@ -171,6 +172,7 @@ def test_dspark_dsa_metadata_uses_token_to_req_indices(monkeypatch):
         model_config=vllm_config.model_config,
         vllm_config=vllm_config,
         spec_slot_mapping=[torch.arange(4, dtype=torch.int32)],
+        spec_sas_metadata=[torch.zeros(1024, dtype=torch.int32)],
         block_size=64,
         cu_seqlens_ori_kv=torch.empty(0, dtype=torch.int32),
         cu_seqlens_cmp_kv=torch.empty(0, dtype=torch.int32),
@@ -206,7 +208,7 @@ def test_dspark_dsa_prefill_metadata_slices_slot_mapping_from_token_start(monkey
     monkeypatch.setattr(
         dsa_v1,
         "get_cos_and_sin_dsa",
-        lambda positions, use_cache=False: (
+        lambda positions, use_cache=False, draft_index=None: (
             torch.zeros(positions.numel(), 1),
             torch.zeros(positions.numel(), 1),
         ),
@@ -291,7 +293,7 @@ def test_dspark_dsa_cp_req_metadata_uses_noncausal_window(monkeypatch):
     monkeypatch.setattr(
         dsa_cp,
         "get_cos_and_sin_dsa",
-        lambda positions, use_cache=False: (
+        lambda positions, use_cache=False, draft_index=None: (
             torch.zeros(positions.numel(), 1),
             torch.zeros(positions.numel(), 1),
         ),
