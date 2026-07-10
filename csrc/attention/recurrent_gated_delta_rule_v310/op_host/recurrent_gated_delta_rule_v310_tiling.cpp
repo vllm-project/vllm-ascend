@@ -279,7 +279,7 @@ void RecurrentGatedDeltaRuleV310Tiling::FillTilingShapeData(const gert::Shape &q
     tilingData_.nv = valueShape.GetDim(DIM_1);
     tilingData_.dv = valueShape.GetDim(DIM_2);
     tilingData_.sBlockNum = stateShape.GetDim(DIM_0);
-    tilingData_.b = cuSeqlensShape.GetDim(DIM_0);
+    tilingData_.b = cuSeqlensShape.GetDim(DIM_0) - 1;
 }
 
 ge::graphStatus RecurrentGatedDeltaRuleV310Tiling::CheckShapeValueRangeAndRule()

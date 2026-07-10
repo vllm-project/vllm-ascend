@@ -13,7 +13,7 @@ from vllm.v1.kv_cache_interface import MambaSpec
 
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.ops import gdn_attn_builder as ascend_gdn_attn_builder
-from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
+from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention, AscendQwenGatedDeltaNetAttention
 from vllm_ascend.ops.gdn_attn_builder import (
     AscendGDNAttentionBackend,
     AscendGDNAttentionMetadataBuilder,
@@ -297,6 +297,15 @@ def test_ascend_gdn_attention_uses_ascend_backend():
     assert AscendGDNAttentionBackend.get_builder_cls() is AscendGDNAttentionMetadataBuilder
 
 
+def test_qwen_gdn_uses_oot_ascend_layer():
+    from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import QwenGatedDeltaNetAttention
+
+    assert issubclass(AscendQwenGatedDeltaNetAttention, QwenGatedDeltaNetAttention)
+    assert AscendQwenGatedDeltaNetAttention.forward is AscendGatedDeltaNetAttention.forward
+    assert AscendQwenGatedDeltaNetAttention._forward_core is AscendGatedDeltaNetAttention._forward_core
+    assert AscendQwenGatedDeltaNetAttention.get_attn_backend is AscendGatedDeltaNetAttention.get_attn_backend
+
+
 def test_sequence_index_buffers_cover_spec_decode_when_cudagraph_disabled():
     builder = _make_builder(
         device=torch.device("cpu"),
@@ -437,11 +446,35 @@ def test_non_spec_prefill_metadata_uses_prefill_tail_for_chunk_metadata(
     assert torch.equal(_cache_index_first_column(conv1d_meta.cache_indices), torch.tensor([0, 1, 2], dtype=torch.int32))
     assert torch.equal(conv1d_meta.initial_state_mode, torch.tensor([True, True, True]))
     assert prefill_metadata.chunk.num_decodes == 0
+    assert prefill_metadata.chunk.prefill_seq_offset == 0
     _assert_chunk_meta_matches_runtime(
         builder,
         prefill_metadata.chunk,
         attn_metadata.prefill_query_start_loc,
     )
+
+
+def test_chunk_metadata_precomputes_pcp_sequence_offset_on_host():
+    parallel_config = SimpleNamespace(tensor_parallel_size=1)
+    model_config = SimpleNamespace(
+        hf_text_config=None,
+        get_num_attention_heads=lambda _: 8,
+    )
+    builder = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            model_config=model_config,
+            parallel_config=parallel_config,
+        )
+    )
+
+    chunk_metadata = ascend_gdn_attn_builder._build_non_spec_chunked_prefill_metadata(
+        builder,
+        torch.tensor([0, 1, 2, 6], dtype=torch.int32),
+        torch.device("cpu"),
+    )
+
+    assert chunk_metadata.num_decodes == 0
+    assert chunk_metadata.prefill_seq_offset == 2
 
 
 def test_spec_conv1d_args_use_device_cache_and_accepted_tokens():
@@ -571,6 +604,10 @@ def test_full_graph_spec_actual_seq_lengths_use_padded_builder_buffer():
         attn_metadata.spec_decode_metadata.actual_seq_lengths,
         torch.tensor([0, 4, 4, 0, 0], dtype=torch.int32),
     )
+    assert torch.equal(
+        attn_metadata.num_accepted_tokens,
+        torch.tensor([2, 4, 1, 1], dtype=torch.int32),
+    )
 
 
 def test_full_graph_non_spec_actual_seq_lengths_use_padded_builder_buffer():
@@ -596,7 +633,7 @@ def test_full_graph_non_spec_actual_seq_lengths_use_padded_builder_buffer():
 
     assert torch.equal(
         attn_metadata.non_spec_query_start_loc,
-        torch.tensor([0, 1, 2, 2, 2], dtype=torch.int32),
+        torch.tensor([0, 1, 2], dtype=torch.int32),
     )
     assert (
         attn_metadata.non_spec_decode_metadata.actual_seq_lengths.data_ptr()
@@ -604,7 +641,7 @@ def test_full_graph_non_spec_actual_seq_lengths_use_padded_builder_buffer():
     )
     assert torch.equal(
         attn_metadata.non_spec_decode_metadata.actual_seq_lengths,
-        torch.tensor([0, 1, 1, 0, 0], dtype=torch.int32),
+        torch.tensor([0, 1, 1], dtype=torch.int32),
     )
 
 

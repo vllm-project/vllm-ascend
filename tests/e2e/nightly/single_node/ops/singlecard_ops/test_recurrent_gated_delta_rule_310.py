@@ -39,7 +39,7 @@ def npu_recurrent_gated_delta_rule_310(
 
 
 def golden_recurrent_gated_delta_rule(
-    query, key, value, state, beta, scale, actual_seq_lengths, ssm_state_indices, g, num_accepted_tokens
+    query, key, value, state, beta, scale, sequence_lengths, ssm_state_indices, g, num_accepted_tokens
 ):
     q = query.to(torch.float32)
     k = key.to(torch.float32)
@@ -56,7 +56,9 @@ def golden_recurrent_gated_delta_rule(
     q = q * scale
 
     seq_start = 0
-    for i in range(len(actual_seq_lengths)):
+    for i in range(len(sequence_lengths)):
+        if sequence_lengths[i] <= 0:
+            continue
         if num_accepted_tokens is None:
             init_state = initial_state[ssm_state_indices[seq_start]]
         else:
@@ -64,7 +66,7 @@ def golden_recurrent_gated_delta_rule(
 
         for head_id in range(n_heads_v):
             S = init_state[head_id]
-            for slot_id in range(seq_start, seq_start + actual_seq_lengths[i]):
+            for slot_id in range(seq_start, seq_start + sequence_lengths[i]):
                 q_i = q[slot_id][head_id // (n_heads_v // n_heads_k)]
                 k_i = k[slot_id][head_id // (n_heads_v // n_heads_k)]
                 v_i = v[slot_id][head_id]
@@ -77,7 +79,7 @@ def golden_recurrent_gated_delta_rule(
                 S = S + S_
                 initial_state[ssm_state_indices[slot_id]][head_id] = S
                 o[slot_id][head_id] = (S * q_i.unsqueeze(-2)).sum(dim=-1)
-        seq_start += actual_seq_lengths[i]
+        seq_start += sequence_lengths[i]
 
     return o.to(query.dtype), initial_state.to(query.dtype)
 
@@ -92,8 +94,9 @@ def test_fused_recurrent_gated_delta_rule_310(batch_size, mtp, headnum, headdim_
     enable_custom_op()
     dtype = torch.float16
     headnum_k, headnum_v = headnum
-    actual_seq_lengths = torch.ones(batch_size, dtype=torch.int32) * mtp
-    T = int(torch.sum(actual_seq_lengths))
+    sequence_lengths = torch.ones(batch_size, dtype=torch.int32) * mtp
+    actual_seq_lengths = torch.cat([torch.zeros(1, dtype=torch.int32), sequence_lengths])
+    T = int(torch.sum(sequence_lengths))
     state = torch.rand((T, headnum_v, headdim_v, headdim_k)).to(dtype)
     query = torch.nn.functional.normalize(torch.rand((T, headnum_k, headdim_k)), p=2, dim=-1).to(dtype)
     key = torch.nn.functional.normalize(torch.rand((T, headnum_k, headdim_k)), p=2, dim=-1).to(dtype)
@@ -105,7 +108,7 @@ def test_fused_recurrent_gated_delta_rule_310(batch_size, mtp, headnum, headdim_
     scale = headdim_k**-0.5
 
     out_golden, state_golden = golden_recurrent_gated_delta_rule(
-        query, key, value, state, beta, scale, actual_seq_lengths, ssm_state_indices, g, num_accepted_tokens
+        query, key, value, state, beta, scale, sequence_lengths, ssm_state_indices, g, num_accepted_tokens
     )
     out_golden = out_golden.to(torch.float32)
     state_golden = state_golden.to(torch.float32)

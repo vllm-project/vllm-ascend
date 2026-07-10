@@ -106,6 +106,8 @@ def golden(query, key, value, state, beta, scale, seq_lens, indices, g, nat):
     q = q * scale
     seq_start = 0
     for i in range(len(seq_lens)):
+        if seq_lens[i] <= 0:
+            continue
         init_idx = indices[seq_start + nat[i] - 1] if nat is not None else indices[seq_start]
         for head in range(nv):
             s = S[init_idx][head].clone()
@@ -124,21 +126,22 @@ def golden(query, key, value, state, beta, scale, seq_lens, indices, g, nat):
 
 
 @pytest.mark.parametrize(
-    "batch_size,mtp,nk,nv,dk,dv,num_slots",
+    "sequence_lengths,nk,nv,dk,dv,num_slots",
     [
-        (1, 1, 8, 16, 128, 128, 444),
-        (2, 2, 8, 16, 128, 128, 444),
-        (4, 2, 4, 4, 64, 64, 32),
+        ((1,), 8, 16, 128, 128, 444),
+        ((2, 2), 8, 16, 128, 128, 444),
+        ((2, 0, 1), 4, 4, 64, 64, 32),
     ],
 )
-def test_recurrent_gated_delta_rule_v310(batch_size, mtp, nk, nv, dk, dv, num_slots):
+def test_recurrent_gated_delta_rule_v310(sequence_lengths, nk, nv, dk, dv, num_slots):
     torch.manual_seed(42)
     scale = dk**-0.5
-    seq_lens = torch.ones(batch_size, dtype=torch.int32) * mtp
+    seq_lens = torch.tensor(sequence_lengths, dtype=torch.int32)
+    actual_seq_lengths = torch.cat([torch.zeros(1, dtype=torch.int32), seq_lens])
     T = int(seq_lens.sum())
     state = torch.rand(num_slots, nv, dv, dk, dtype=torch.float16)
     indices = torch.randperm(num_slots, dtype=torch.int32)[:T]
-    nat = torch.ones(batch_size, dtype=torch.int32)
+    nat = torch.where(seq_lens > 0, torch.ones_like(seq_lens), torch.zeros_like(seq_lens))
     query = torch.nn.functional.normalize(torch.randn(T, nk, dk), dim=-1).to(torch.float16)
     key = torch.nn.functional.normalize(torch.randn(T, nk, dk), dim=-1).to(torch.float16)
     value = torch.randn(T, nv, dv, dtype=torch.float16)
@@ -154,7 +157,7 @@ def test_recurrent_gated_delta_rule_v310(batch_size, mtp, nk, nv, dk, dv, num_sl
         value.npu(),
         beta.npu(),
         state_npu,
-        seq_lens.npu(),
+        actual_seq_lengths.npu(),
         indices.npu(),
         g.npu(),
         nat.npu(),

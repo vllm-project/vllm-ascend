@@ -62,6 +62,7 @@ class GDNChunkedPrefillMetadata:
     chunk_indices_large_block: torch.Tensor
     block_indices_cumsum: torch.Tensor
     num_decodes: int = 0
+    prefill_seq_offset: int = 0
 
 
 @dataclass
@@ -138,8 +139,12 @@ def _build_non_spec_chunked_prefill_metadata(
     )
     block_indices_cumsum = prepare_chunk_indices(cu_seqlens_cpu, cumsum_chunk_size)
 
+    cu_seqlens_host = tuple(cu_seqlens_cpu.to(torch.int64).reshape(-1).tolist())
+    sequence_lengths = tuple(end - start for start, end in zip(cu_seqlens_host, cu_seqlens_host[1:]))
+    prefill_seq_offset = sum(1 for seq_len in sequence_lengths if 0 < seq_len <= 1)
+
     return GDNChunkedPrefillMetadata(
-        cu_seqlens_host=tuple(cu_seqlens_cpu.to(torch.int64).reshape(-1).tolist()),
+        cu_seqlens_host=cu_seqlens_host,
         chunk_indices_chunk64_host=tuple(chunk_indices_chunk64.to(torch.int64).reshape(-1).tolist()),
         chunk_indices_chunk64=chunk_indices_chunk64.to(device=device, non_blocking=True),
         chunk_offsets_chunk64=chunk_offsets_chunk64.to(device=device, non_blocking=True),
@@ -147,6 +152,7 @@ def _build_non_spec_chunked_prefill_metadata(
         final_chunk_indices_chunk64=final_chunk_indices_chunk64.to(device=device, non_blocking=True),
         chunk_indices_large_block=chunk_indices_large_block.to(device=device, non_blocking=True),
         block_indices_cumsum=block_indices_cumsum.to(device=device, non_blocking=True),
+        prefill_seq_offset=prefill_seq_offset,
     )
 
 
@@ -600,7 +606,9 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             f"num_decodes: {num_decodes}, num_spec_decodes: {num_spec_decodes}"
         )
 
-        batch_size = m.num_actual_tokens
+        # GDN state and sequence metadata is indexed by request, while
+        # num_actual_tokens can be token-padded for full graph replay.
+        batch_size = m.num_reqs
 
         if (
             self.use_full_cuda_graph
@@ -610,25 +618,19 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             and num_spec_decode_tokens <= self.decode_cudagraph_max_bs
         ):
             assert spec_sequence_masks is not None
-            # Spec decode has multiple tokens per request. Keep the metadata
-            # passed to conv1d/recurrent kernels at request granularity; padding
-            # it to the token count makes the conv1d update kernel treat every
-            # token as an independent decode sequence.
-            spec_batch_size = m.num_reqs
-
-            self.spec_state_indices_tensor[spec_batch_size:].fill_(NULL_BLOCK_ID)
+            self.spec_state_indices_tensor[batch_size:].fill_(NULL_BLOCK_ID)
             self.spec_state_indices_tensor[:num_spec_decodes].copy_(
                 spec_state_indices_tensor,
                 non_blocking=True,
             )
-            spec_state_indices_tensor = self.spec_state_indices_tensor[:spec_batch_size]
+            spec_state_indices_tensor = self.spec_state_indices_tensor[:batch_size]
             spec_state_indices_tensor[num_spec_decodes:].fill_(NULL_BLOCK_ID)
 
             self.spec_sequence_masks[:num_spec_decodes].copy_(
                 spec_sequence_masks[:num_spec_decodes],
                 non_blocking=True,
             )
-            spec_sequence_masks = self.spec_sequence_masks[:spec_batch_size]
+            spec_sequence_masks = self.spec_sequence_masks[:batch_size]
             spec_sequence_masks[num_spec_decodes:].fill_(False)
 
             assert non_spec_token_indx is not None and spec_token_indx is not None
@@ -649,14 +651,14 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                 non_blocking=True,
             )
             spec_num_query_tokens = spec_query_start_loc[-1]  # type: ignore
-            spec_query_start_loc = self.spec_query_start_loc[: spec_batch_size + 1]
+            spec_query_start_loc = self.spec_query_start_loc[: batch_size + 1]
             spec_query_start_loc[num_spec_decodes + 1 :].fill_(spec_num_query_tokens)
 
             self.num_accepted_tokens[:num_spec_decodes].copy_(
                 num_accepted_tokens,
                 non_blocking=True,
             )
-            num_accepted_tokens = self.num_accepted_tokens[:spec_batch_size]
+            num_accepted_tokens = self.num_accepted_tokens[:batch_size]
             num_accepted_tokens[num_spec_decodes:].fill_(1)
 
         if (

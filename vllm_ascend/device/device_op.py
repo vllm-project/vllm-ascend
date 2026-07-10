@@ -21,6 +21,7 @@ import torch
 import torch.nn.functional as F
 import torch_npu
 from vllm.triton_utils import HAS_TRITON
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
 from vllm_ascend.device import utils as device_utils
 from vllm_ascend.device.mxfp_compat import (
@@ -805,6 +806,70 @@ class BaseDeviceAdaptor:
     def npu_gemma_rms_norm(x, weight, variance_epsilon):
         x, _ = torch.ops._C_ascend.npu_gemma_rms_norm(x, weight, variance_epsilon)
         return x
+
+    @staticmethod
+    def gdn_causal_conv1d(
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        conv_state: torch.Tensor,
+        bias: torch.Tensor | None,
+        query_start_loc: torch.Tensor | None,
+        cache_indices: torch.Tensor,
+        initial_state_mode: torch.Tensor | None,
+        num_accepted_tokens: torch.Tensor | None,
+        activation_mode: int,
+        run_mode: int,
+    ) -> torch.Tensor:
+        """Run GDN causal convolution using a backend-neutral contract."""
+        output = torch.empty_like(x)
+        torch.ops._C_ascend.npu_causal_conv1d_custom(
+            output,
+            x,
+            weight,
+            conv_state=conv_state,
+            bias_opt=bias,
+            query_start_loc_opt=query_start_loc,
+            cache_indices_opt=cache_indices,
+            initial_state_mode_opt=initial_state_mode,
+            num_accepted_tokens_opt=num_accepted_tokens,
+            activation_mode=activation_mode,
+            pad_slot_id=PAD_SLOT_ID,
+            run_mode=run_mode,
+        )
+        return output
+
+    @staticmethod
+    def gdn_recurrent_decode(
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        g: torch.Tensor | None,
+        beta: torch.Tensor | None,
+        state: torch.Tensor,
+        actual_seq_lengths: torch.Tensor,
+        state_indices: torch.Tensor,
+        num_accepted_tokens: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Run normalized recurrent GDN decode and preserve the input rank."""
+        from vllm.model_executor.layers.fla.ops.l2norm import l2norm_fwd
+
+        if beta is None:
+            raise RuntimeError("GDN recurrent decode requires beta.")
+        query = l2norm_fwd(query)
+        key = l2norm_fwd(key)
+        accepted_tokens = None if num_accepted_tokens is None else num_accepted_tokens.to(torch.int32)
+        return torch.ops._C_ascend.npu_recurrent_gated_delta_rule(
+            query=query.squeeze(0),
+            key=key.squeeze(0),
+            value=value.squeeze(0),
+            g=None if g is None else g.squeeze(0),
+            beta=beta.squeeze(0),
+            state=state,
+            scale=key.shape[-1] ** -0.5,
+            actual_seq_lengths=actual_seq_lengths,
+            ssm_state_indices=state_indices,
+            num_accepted_tokens=accepted_tokens,
+        ).unsqueeze(0)
 
     @staticmethod
     def fused_gdn_gating(A_log: torch.Tensor, a: torch.Tensor, b: torch.Tensor, dt_bias: torch.Tensor):
@@ -1813,6 +1878,135 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
 
 
 class Ascend310PDeviceAdaptor(BaseDeviceAdaptor):
+    @staticmethod
+    def gdn_causal_conv1d(
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        conv_state: torch.Tensor,
+        bias: torch.Tensor | None,
+        query_start_loc: torch.Tensor | None,
+        cache_indices: torch.Tensor,
+        initial_state_mode: torch.Tensor | None,
+        num_accepted_tokens: torch.Tensor | None,
+        activation_mode: int,
+        run_mode: int,
+    ) -> torch.Tensor:
+        return torch.ops._C_ascend.npu_causal_conv1d_310(
+            x,
+            weight,
+            bias=bias,
+            conv_states=conv_state,
+            query_start_loc=query_start_loc,
+            cache_indices=cache_indices,
+            initial_state_mode=initial_state_mode,
+            num_accepted_tokens=num_accepted_tokens,
+            activation_mode=activation_mode,
+            pad_slot_id=PAD_SLOT_ID,
+            run_mode=run_mode,
+        )
+
+    @staticmethod
+    def _flatten_gdn_state_indices(
+        state_indices: torch.Tensor,
+        actual_seq_lengths: torch.Tensor,
+        total_tokens: int,
+    ) -> torch.Tensor:
+        from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+
+        if state_indices.ndim == 1:
+            return state_indices[:total_tokens].to(torch.int32).contiguous()
+
+        seq_lens = actual_seq_lengths[1:]
+        num_seqs = seq_lens.shape[0]
+        state_indices = state_indices[:num_seqs]
+
+        # Uniform spec-decode ACL graph uses fixed q_len per request; reshape
+        # avoids NPU masked_select which breaks stream capture.
+        if _EXTRA_CTX.capturing or (seq_lens.numel() > 0 and torch.all(seq_lens == seq_lens[0])):
+            q_per_seq = state_indices.shape[1]
+            flat = state_indices[:, :q_per_seq].reshape(-1)
+            return flat[:total_tokens].to(torch.int32).contiguous()
+
+        # Eager variable-length batches compact on CPU, then copy back async.
+        state_indices_cpu = state_indices.cpu()
+        seq_lens_cpu = seq_lens.cpu()
+        q_per_seq = state_indices_cpu.shape[1]
+        positions = torch.arange(q_per_seq)
+        valid = positions.unsqueeze(0) < seq_lens_cpu.unsqueeze(1)
+        flat_cpu = state_indices_cpu.masked_select(valid).to(torch.int32).contiguous()[:total_tokens]
+        if not flat_cpu.is_pinned:
+            flat_cpu = flat_cpu.pin_memory()
+        flat_device = torch.empty(flat_cpu.numel(), dtype=torch.int32, device=state_indices.device)
+        flat_device.copy_(flat_cpu, non_blocking=True)
+        return flat_device.contiguous()
+
+    @staticmethod
+    def _mask_gdn_accepted_tokens(
+        num_accepted_tokens: torch.Tensor,
+        actual_seq_lengths: torch.Tensor,
+    ) -> torch.Tensor:
+        sequence_lengths = actual_seq_lengths[1:]
+        accepted_tokens = num_accepted_tokens[: sequence_lengths.shape[0]].to(torch.int32).contiguous()
+        return torch.where(
+            sequence_lengths > 0,
+            accepted_tokens,
+            torch.zeros_like(accepted_tokens),
+        ).contiguous()
+
+    @classmethod
+    def gdn_recurrent_decode(
+        cls,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        g: torch.Tensor | None,
+        beta: torch.Tensor | None,
+        state: torch.Tensor,
+        actual_seq_lengths: torch.Tensor,
+        state_indices: torch.Tensor,
+        num_accepted_tokens: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        from vllm_ascend._310p.ops.fla.l2norm import l2norm_310p
+
+        if beta is None:
+            raise RuntimeError("GDN recurrent decode requires beta.")
+        query = l2norm_310p(query)
+        key = l2norm_310p(key)
+        total_tokens = value.shape[1]
+        actual_seq_lengths = actual_seq_lengths.to(torch.int32).contiguous()
+        flat_state_indices = cls._flatten_gdn_state_indices(
+            state_indices,
+            actual_seq_lengths,
+            total_tokens,
+        )
+        flat_state_indices = torch.clamp_min(flat_state_indices, 0).contiguous()
+        accepted_tokens = None
+        if num_accepted_tokens is not None:
+            accepted_tokens = cls._mask_gdn_accepted_tokens(
+                num_accepted_tokens,
+                actual_seq_lengths,
+            )
+
+        return torch.ops._C_ascend.npu_recurrent_gated_delta_rule_310(
+            query=query.squeeze(0).to(torch.float16).contiguous(),
+            key=key.squeeze(0).to(torch.float16).contiguous(),
+            value=value.squeeze(0).to(torch.float16).contiguous(),
+            g=None if g is None else g.squeeze(0).to(torch.float32).contiguous(),
+            gk=None,
+            beta=beta.squeeze(0).to(torch.float16).contiguous(),
+            state=state,
+            actual_seq_lengths=actual_seq_lengths,
+            ssm_state_indices=flat_state_indices,
+            num_accepted_tokens=accepted_tokens,
+            scale_value=key.shape[-1] ** -0.5,
+        ).unsqueeze(0)
+
+    @staticmethod
+    def fused_gdn_gating(A_log: torch.Tensor, a: torch.Tensor, b: torch.Tensor, dt_bias: torch.Tensor):
+        from vllm_ascend._310p.ops.fla.fused_gdn_gating import fused_gdn_gating_pytorch
+
+        return fused_gdn_gating_pytorch(A_log, a, b, dt_bias)
+
     @staticmethod
     def index_fill(
         tensor: torch.Tensor,
