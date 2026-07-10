@@ -492,8 +492,6 @@ def test_dspark_precompute_context_kv_selects_prefix_mapped_slot_mappings(monkey
 
 def test_dspark_precompute_context_kv_skips_private_cache_for_standard_dsa(monkeypatch):
     monkeypatch.delenv("VLLM_ASCEND_DSPARK_USE_PRIVATE_CACHE", raising=False)
-    monkeypatch.delenv("VLLM_ASCEND_DSPARK_ATTENTION_DIFF_PATH", raising=False)
-    monkeypatch.delenv("VLLM_ASCEND_DSPARK_KV_DIFF_PATH", raising=False)
 
     calls = []
     shared_kv = torch.ones(2, 1, 4)
@@ -505,7 +503,6 @@ def test_dspark_precompute_context_kv_skips_private_cache_for_standard_dsa(monke
         _project_shared_kv=lambda _main_x, _positions: shared_kv,
         _expand_private_kv=fail_expand,
         _store_standard_swa_kv=lambda kv, mapping: calls.append((kv, mapping)),
-        _maybe_dump_standard_kv_write_trace=lambda *_args: None,
     )
     positions = torch.tensor([4, 5], dtype=torch.int32)
     slot_mapping = torch.tensor([40, 41], dtype=torch.int32)
@@ -532,7 +529,6 @@ def test_dspark_precompute_context_kv_keeps_private_cache_fallback(monkeypatch):
         _project_shared_kv=lambda _main_x, _positions: shared_kv,
         _expand_private_kv=lambda kv: expand_calls.append(kv) or (private_k, private_v),
         _store_standard_swa_kv=lambda *_args: None,
-        _maybe_dump_standard_kv_write_trace=lambda *_args: None,
         _ensure_dspark_cache=lambda *_args: None,
         _dspark_cache_capacity=8,
         _dspark_max_request_slots=2,

@@ -1,8 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import json
-import os
-import time
 from dataclasses import replace
 
 import torch
@@ -34,312 +31,6 @@ from vllm_ascend.ops.triton.reject_sample import (
 )
 from vllm_ascend.sample.penalties import apply_all_penalties
 from vllm_ascend.sample.sampler import apply_top_k_top_p
-
-
-def _dspark_accept_debug_path() -> str | None:
-    return os.getenv("VLLM_ASCEND_DSPARK_ACCEPT_DEBUG_PATH") or None
-
-
-def _dspark_accept_debug_int(name: str, default: int) -> int:
-    try:
-        return max(0, int(os.getenv(name, str(default))))
-    except ValueError:
-        return default
-
-
-def _tensor_list(tensor: torch.Tensor | None) -> list:
-    if tensor is None:
-        return []
-    return tensor.detach().cpu().tolist()
-
-
-def _topk_records(
-    row: torch.Tensor | None,
-    k: int,
-    indices: torch.Tensor | None = None,
-) -> list[dict[str, float | int]]:
-    if row is None or row.numel() == 0 or k <= 0:
-        return []
-    k = min(k, row.numel())
-    values, local_indices = torch.topk(row.detach().float().cpu(), k)
-    if indices is None:
-        token_ids = local_indices
-    else:
-        token_ids = indices.detach().cpu().gather(0, local_indices)
-    return [
-        {"token_id": int(token_id), "value": float(value)}
-        for token_id, value in zip(token_ids.tolist(), values.tolist())
-    ]
-
-
-def _token_rank(row: torch.Tensor | None, token_id: int, indices: torch.Tensor | None = None) -> int | None:
-    if row is None or token_id < 0:
-        return None
-    row_cpu = row.detach().float().cpu()
-    if indices is not None:
-        indices_cpu = indices.detach().cpu()
-        matches = (indices_cpu == token_id).nonzero(as_tuple=True)[0]
-        if matches.numel() == 0:
-            return None
-        local_id = int(matches[0])
-    elif token_id >= row_cpu.numel():
-        return None
-    else:
-        local_id = token_id
-    return int((row_cpu > row_cpu[local_id]).sum().item() + 1)
-
-
-def _token_logprob(row: torch.Tensor | None, token_id: int, indices: torch.Tensor | None = None) -> float | None:
-    if row is None or token_id < 0:
-        return None
-    row_cpu = row.detach().float().cpu()
-    if indices is not None:
-        indices_cpu = indices.detach().cpu()
-        matches = (indices_cpu == token_id).nonzero(as_tuple=True)[0]
-        if matches.numel() == 0:
-            return None
-        local_id = int(matches[0])
-    elif token_id >= row_cpu.numel():
-        return None
-    else:
-        local_id = token_id
-    logprobs = row_cpu - row_cpu.logsumexp(dim=-1)
-    return float(logprobs[local_id])
-
-
-def _token_value(row: torch.Tensor | None, token_id: int | None, indices: torch.Tensor | None = None) -> float | None:
-    if row is None or token_id is None or token_id < 0:
-        return None
-    row_cpu = row.detach().float().cpu()
-    if indices is not None:
-        indices_cpu = indices.detach().cpu()
-        matches = (indices_cpu == token_id).nonzero(as_tuple=True)[0]
-        if matches.numel() == 0:
-            return None
-        local_id = int(matches[0])
-    elif token_id >= row_cpu.numel():
-        return None
-    else:
-        local_id = token_id
-    return float(row_cpu[local_id])
-
-
-def _token_margin_top1_minus(
-    row: torch.Tensor | None,
-    token_id: int | None,
-    indices: torch.Tensor | None = None,
-) -> float | None:
-    value = _token_value(row, token_id, indices)
-    if value is None or row is None:
-        return None
-    row_cpu = row.detach().float().cpu()
-    return float(row_cpu.max().item() - value)
-
-
-def _component_scalar(
-    components: dict[str, torch.Tensor] | None,
-    name: str,
-    flat_idx: int,
-) -> int | float | None:
-    if components is None:
-        return None
-    tensor = components.get(name)
-    if tensor is None or flat_idx >= tensor.shape[0]:
-        return None
-    value = tensor[flat_idx].detach().cpu()
-    if not value.numel():
-        return None
-    scalar = value.item()
-    if isinstance(scalar, float):
-        return float(scalar)
-    return int(scalar)
-
-
-def _component_topk_records(
-    components: dict[str, torch.Tensor] | None,
-    prefix: str,
-    flat_idx: int,
-) -> list[dict[str, float | int]]:
-    if components is None:
-        return []
-    ids = components.get(f"{prefix}_top_ids")
-    values = components.get(f"{prefix}_top_values")
-    if ids is None or values is None or flat_idx >= ids.shape[0] or flat_idx >= values.shape[0]:
-        return []
-    ids_cpu = ids[flat_idx].detach().cpu().flatten()
-    values_cpu = values[flat_idx].detach().float().cpu().flatten()
-    return [
-        {"token_id": int(token_id), "value": float(value)}
-        for token_id, value in zip(ids_cpu.tolist(), values_cpu.tolist())
-    ]
-
-
-def _draft_component_record(
-    components: dict[str, torch.Tensor] | None,
-    flat_idx: int,
-    target_token: int | None = None,
-    final_row: torch.Tensor | None = None,
-) -> dict[str, object] | None:
-    if components is None:
-        return None
-    record: dict[str, object] = {}
-    for name in (
-        "prev_token_ids",
-        "base_logit_at_draft",
-        "markov_bias_at_draft",
-        "final_logit_at_draft",
-        "base_rank_of_draft",
-        "markov_bias_rank_of_draft",
-        "final_rank_of_draft",
-    ):
-        value = _component_scalar(components, name, flat_idx)
-        if value is not None:
-            record[name] = value
-    for prefix in ("base", "markov_bias", "final"):
-        topk = _component_topk_records(components, prefix, flat_idx)
-        if topk:
-            record[f"{prefix}_topk"] = topk
-    if target_token is not None:
-        for prefix in ("base", "markov_bias"):
-            rows = components.get(f"{prefix}_logits")
-            if rows is None or flat_idx >= rows.shape[0]:
-                continue
-            row = rows[flat_idx]
-            record[f"{prefix}_logit_at_target_argmax"] = _token_value(row, target_token)
-            record[f"{prefix}_rank_of_target_argmax"] = _token_rank(row, target_token)
-            record[f"{prefix}_margin_top1_minus_target_argmax"] = _token_margin_top1_minus(row, target_token)
-        if final_row is not None:
-            record["final_logit_at_target_argmax"] = _token_value(final_row, target_token)
-            record["final_rank_of_target_argmax"] = _token_rank(final_row, target_token)
-            record["final_margin_top1_minus_target_argmax"] = _token_margin_top1_minus(final_row, target_token)
-    return record or None
-
-
-def _dump_dspark_accept_debug(
-    *,
-    path_name: str,
-    draft_token_ids: torch.Tensor,
-    num_draft_tokens: list[int],
-    cu_num_draft_tokens: torch.Tensor,
-    target_logits: torch.Tensor,
-    target_indices: torch.Tensor | None,
-    output_token_ids: torch.Tensor,
-    sampling_metadata: SamplingMetadata,
-    target_argmax: torch.Tensor | None = None,
-    draft_logits: torch.Tensor | None = None,
-    draft_probs: torch.Tensor | None = None,
-    draft_logit_components: dict[str, torch.Tensor] | None = None,
-) -> None:
-    debug_path = _dspark_accept_debug_path()
-    if debug_path is None:
-        return
-
-    max_reqs = _dspark_accept_debug_int("VLLM_ASCEND_DSPARK_ACCEPT_DEBUG_MAX_REQS", 4)
-    max_positions = _dspark_accept_debug_int("VLLM_ASCEND_DSPARK_ACCEPT_DEBUG_MAX_POSITIONS", 8)
-    top_k = _dspark_accept_debug_int("VLLM_ASCEND_DSPARK_ACCEPT_DEBUG_TOPK", 5)
-
-    try:
-        os.makedirs(os.path.dirname(debug_path) or ".", exist_ok=True)
-        draft_tokens_cpu = draft_token_ids.detach().cpu()
-        output_tokens_cpu = output_token_ids.detach().cpu()
-        cu_cpu = cu_num_draft_tokens.detach().cpu()
-        target_argmax_cpu = target_argmax.detach().cpu() if target_argmax is not None else None
-
-        record: dict[str, object] = {
-            "pid": os.getpid(),
-            "time_ns": time.time_ns(),
-            "path": path_name,
-            "batch_size": len(num_draft_tokens),
-            "max_spec_len": int(output_token_ids.shape[1] - 1),
-            "num_draft_tokens": [int(v) for v in num_draft_tokens],
-            "cu_num_draft_tokens": _tensor_list(cu_num_draft_tokens),
-            "all_greedy": bool(sampling_metadata.all_greedy),
-            "all_random": bool(sampling_metadata.all_random),
-            "has_target_indices": target_indices is not None,
-            "has_draft_logits": draft_logits is not None,
-            "has_draft_probs": draft_probs is not None,
-            "requests": [],
-        }
-
-        requests = []
-        start = 0
-        for req_idx, num_draft in enumerate(num_draft_tokens[:max_reqs]):
-            end = int(cu_cpu[req_idx].item()) if req_idx < cu_cpu.numel() else start + int(num_draft)
-            positions = []
-            accepted_prefix = 0
-            for prefix_pos in range(min(int(num_draft), output_tokens_cpu.shape[1])):
-                flat_idx = start + prefix_pos
-                if flat_idx >= draft_tokens_cpu.numel():
-                    break
-                if int(output_tokens_cpu[req_idx, prefix_pos].item()) != int(draft_tokens_cpu[flat_idx].item()):
-                    break
-                accepted_prefix += 1
-            for pos in range(min(int(num_draft), max_positions)):
-                flat_idx = start + pos
-                draft_token = int(draft_tokens_cpu[flat_idx].item())
-                output_token = int(output_tokens_cpu[req_idx, pos].item())
-                output_matches_draft = output_token == draft_token
-
-                target_row = target_logits[flat_idx] if flat_idx < target_logits.shape[0] else None
-                target_index_row = target_indices[flat_idx] if target_indices is not None else None
-                draft_row = (
-                    draft_logits[flat_idx] if draft_logits is not None and flat_idx < draft_logits.shape[0] else None
-                )
-                draft_row_is_logits = draft_row is not None
-                if draft_row is None and draft_probs is not None and flat_idx < draft_probs.shape[0]:
-                    draft_row = draft_probs[flat_idx].clamp_min(torch.finfo(torch.float32).tiny).log()
-                target_token = (
-                    int(target_argmax_cpu[flat_idx].item())
-                    if target_argmax_cpu is not None and flat_idx < target_argmax_cpu.numel()
-                    else None
-                )
-
-                position_record = {
-                    "pos": pos,
-                    "flat_index": flat_idx,
-                    "draft_token": draft_token,
-                    "output_token": output_token,
-                    "output_matches_draft": output_matches_draft,
-                    "target_argmax": target_token,
-                    "target_rank_of_draft": _token_rank(target_row, draft_token, target_index_row),
-                    "target_logprob_draft": _token_logprob(target_row, draft_token, target_index_row),
-                    "draft_logprob_draft": _token_logprob(draft_row, draft_token),
-                    "draft_rank_of_target_argmax": _token_rank(draft_row, target_token)
-                    if target_token is not None
-                    else None,
-                    "draft_logprob_target_argmax": _token_logprob(draft_row, target_token)
-                    if target_token is not None
-                    else None,
-                    "draft_margin_top1_minus_target_argmax": _token_margin_top1_minus(draft_row, target_token),
-                    "target_topk": _topk_records(target_row, top_k, target_index_row),
-                    "draft_topk": _topk_records(draft_row, top_k),
-                    "draft_components": _draft_component_record(
-                        draft_logit_components,
-                        flat_idx,
-                        target_token=target_token,
-                        final_row=draft_row if draft_row_is_logits else None,
-                    ),
-                }
-                if draft_row_is_logits:
-                    position_record["draft_logit_target_argmax"] = _token_value(draft_row, target_token)
-                positions.append(position_record)
-
-            requests.append(
-                {
-                    "req_index": req_idx,
-                    "draft_tokens": _tensor_list(draft_tokens_cpu[start:end]),
-                    "output_tokens": _tensor_list(output_tokens_cpu[req_idx]),
-                    "output_matches_draft_prefix_len": accepted_prefix,
-                    "positions": positions,
-                }
-            )
-            start = end
-        record["requests"] = requests
-
-        with open(debug_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
-    except Exception:
-        logger.exception("[sample/rejection_sampler] Failed to write DSpark acceptance debug artifact.")
 
 
 class AscendRejectionSampler(RejectionSampler):
@@ -461,7 +152,6 @@ class AscendRejectionSampler(RejectionSampler):
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
         draft_logits: torch.Tensor | None = None,
-        draft_logit_components: dict[str, torch.Tensor] | None = None,
     ) -> SamplerOutput:
         """
         Args:
@@ -543,7 +233,6 @@ class AscendRejectionSampler(RejectionSampler):
             sampling_metadata,
             ori_target_logits=raw_target_logits,
             draft_logits=draft_logits,
-            draft_logit_components=draft_logit_components,
         )
 
         logprobs_tensors = None
@@ -672,7 +361,6 @@ def rejection_sample(
     synthetic_conditional_rates: torch.Tensor | None = None,
     ori_target_logits: torch.Tensor | None = None,
     draft_logits: torch.Tensor | None = None,
-    draft_logit_components: dict[str, torch.Tensor] | None = None,
 ) -> torch.Tensor:
     """
     Rejection sampling for speculative decoding in distributed setting.
@@ -753,8 +441,6 @@ def rejection_sample(
         is_greedy = sampling_metadata.temperature == GREEDY_TEMPERATURE
     if HAS_TRITON:
         grid, block_size = cal_grid_and_block_size(batch_size)
-    target_argmax_for_debug = None
-
     if using_block_verify or using_entropy_verify:
         logger.info_once(
             "RejectionSampler config: block_verify=%s, entropy_verify=%s, "
@@ -776,8 +462,6 @@ def rejection_sample(
             target_argmax = greedy_sample(target_logits)
         else:
             target_argmax = target_logits.argmax(dim=-1).view(-1)
-        target_argmax_for_debug = target_argmax
-
         if HAS_TRITON:
             rejection_greedy_sample_with_triton(
                 output_token_ids,
@@ -811,20 +495,6 @@ def rejection_sample(
                     is_greedy,
                 )
         if sampling_metadata.all_greedy:
-            _dump_dspark_accept_debug(
-                path_name="greedy",
-                draft_token_ids=draft_token_ids,
-                num_draft_tokens=num_draft_tokens,
-                cu_num_draft_tokens=cu_num_draft_tokens,
-                target_logits=target_logits,
-                target_indices=target_indices,
-                output_token_ids=output_token_ids,
-                sampling_metadata=sampling_metadata,
-                target_argmax=target_argmax_for_debug,
-                draft_logits=draft_logits,
-                draft_probs=draft_probs,
-                draft_logit_components=draft_logit_components,
-            )
             return output_token_ids
 
     if (
@@ -853,20 +523,6 @@ def rejection_sample(
             max_spec_len,
             num_draft_tokens,
             sampling_metadata.generators,
-        )
-        _dump_dspark_accept_debug(
-            path_name="logits_native",
-            draft_token_ids=draft_token_ids,
-            num_draft_tokens=num_draft_tokens,
-            cu_num_draft_tokens=cu_num_draft_tokens,
-            target_logits=target_logits,
-            target_indices=target_indices,
-            output_token_ids=output_token_ids,
-            sampling_metadata=sampling_metadata,
-            target_argmax=target_argmax_for_debug,
-            draft_logits=draft_logits,
-            draft_probs=draft_probs,
-            draft_logit_components=draft_logit_components,
         )
         return output_token_ids
 
@@ -1162,20 +818,6 @@ def rejection_sample(
                     ori_target_probs=ori_target_probs,
                 )
 
-    _dump_dspark_accept_debug(
-        path_name="probability_space",
-        draft_token_ids=draft_token_ids,
-        num_draft_tokens=num_draft_tokens,
-        cu_num_draft_tokens=cu_num_draft_tokens,
-        target_logits=target_logits,
-        target_indices=target_indices,
-        output_token_ids=output_token_ids,
-        sampling_metadata=sampling_metadata,
-        target_argmax=target_argmax_for_debug,
-        draft_logits=draft_logits,
-        draft_probs=draft_probs,
-        draft_logit_components=draft_logit_components,
-    )
     return output_token_ids
 
 

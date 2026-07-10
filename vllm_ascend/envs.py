@@ -116,33 +116,6 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Force DSpark attention to use PTA reference paths instead of custom/SAS
     # fast paths.
     "VLLM_ASCEND_DSPARK_USE_PTA_REF": lambda: bool(int(os.getenv("VLLM_ASCEND_DSPARK_USE_PTA_REF", "0"))),
-    # Whether to print DSpark rejection debug information.
-    "VLLM_ASCEND_DSPARK_REJECT_DEBUG": lambda: bool(int(os.getenv("VLLM_ASCEND_DSPARK_REJECT_DEBUG", "0"))),
-    # Optional JSONL path for DSpark standard-cache attention diff diagnostics.
-    "VLLM_ASCEND_DSPARK_ATTENTION_DIFF_PATH": lambda: os.getenv("VLLM_ASCEND_DSPARK_ATTENTION_DIFF_PATH", None),
-    # Maximum attention diff records written per DSpark attention layer.
-    "VLLM_ASCEND_DSPARK_ATTENTION_DIFF_MAX_RECORDS": lambda: int(
-        os.getenv("VLLM_ASCEND_DSPARK_ATTENTION_DIFF_MAX_RECORDS", "16")
-    ),
-    # Optional JSONL path for DSpark standard-cache KV diff diagnostics.
-    "VLLM_ASCEND_DSPARK_KV_DIFF_PATH": lambda: os.getenv("VLLM_ASCEND_DSPARK_KV_DIFF_PATH", None),
-    # Maximum KV diff records written per DSpark attention layer.
-    "VLLM_ASCEND_DSPARK_KV_DIFF_MAX_RECORDS": lambda: int(os.getenv("VLLM_ASCEND_DSPARK_KV_DIFF_MAX_RECORDS", "16")),
-    # Optional JSONL path for DSpark standard-cache KV write tracing.
-    "VLLM_ASCEND_DSPARK_KV_WRITE_TRACE_PATH": lambda: os.getenv("VLLM_ASCEND_DSPARK_KV_WRITE_TRACE_PATH", None),
-    # Maximum KV write trace records written per DSpark attention layer.
-    "VLLM_ASCEND_DSPARK_KV_WRITE_TRACE_MAX_RECORDS": lambda: int(
-        os.getenv("VLLM_ASCEND_DSPARK_KV_WRITE_TRACE_MAX_RECORDS", "16")
-    ),
-    # Optional JSONL path for DSpark proposer stage timing diagnostics.
-    "VLLM_ASCEND_DSPARK_PERF_TRACE_PATH": lambda: os.getenv("VLLM_ASCEND_DSPARK_PERF_TRACE_PATH", None),
-    # Maximum proposer timing records written per worker process.
-    "VLLM_ASCEND_DSPARK_PERF_TRACE_MAX_RECORDS": lambda: int(
-        os.getenv("VLLM_ASCEND_DSPARK_PERF_TRACE_MAX_RECORDS", "256")
-    ),
-    # Synchronize NPU before/after each timed DSpark stage. This is intrusive
-    # but gives more meaningful timings for diagnosis runs.
-    "VLLM_ASCEND_DSPARK_PERF_TRACE_SYNC": lambda: bool(int(os.getenv("VLLM_ASCEND_DSPARK_PERF_TRACE_SYNC", "1"))),
 }
 
 # end-env-vars-definition

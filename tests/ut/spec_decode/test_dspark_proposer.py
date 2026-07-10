@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import json
 from dataclasses import dataclass
 from types import SimpleNamespace
 
@@ -13,37 +12,6 @@ import vllm_ascend.spec_decode.dspark_proposer as dspark_proposer_module
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.spec_decode.dspark_proposer import AscendDSparkProposer
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
-
-
-def test_dspark_perf_record_writes_jsonl(monkeypatch, tmp_path):
-    path = tmp_path / "dspark_perf.jsonl"
-    monkeypatch.setenv("VLLM_ASCEND_DSPARK_PERF_TRACE_PATH", str(path))
-    monkeypatch.setenv("VLLM_ASCEND_DSPARK_PERF_TRACE_MAX_RECORDS", "1")
-    monkeypatch.setenv("VLLM_ASCEND_DSPARK_PERF_TRACE_SYNC", "0")
-
-    proposer = SimpleNamespace(device=torch.device("cpu"), _dspark_perf_trace_records=0)
-    start_ns = dspark_proposer_module.time.perf_counter_ns()
-    AscendDSparkProposer._write_dspark_perf_record(
-        proposer,
-        "stage_a",
-        start_ns,
-        num_tokens=2,
-    )
-    AscendDSparkProposer._write_dspark_perf_record(
-        proposer,
-        "stage_b",
-        start_ns,
-        num_tokens=3,
-    )
-
-    lines = path.read_text(encoding="utf-8").splitlines()
-    assert len(lines) == 1
-    record = json.loads(lines[0])
-    assert record["stage"] == "stage_a"
-    assert record["num_tokens"] == 2
-    assert record["elapsed_ms"] >= 0
-    assert proposer._dspark_perf_trace_records == 1
 
 
 def test_dspark_draft_cudagraph_keys_use_dspark_query_len(monkeypatch):
@@ -261,7 +229,6 @@ def test_dspark_sample_sequential_uses_previous_draft_token(monkeypatch):
         torch.tensor([[2, 3, 4], [4, 0, 1]], dtype=torch.int64),
     )
     assert proposer._dspark_last_draft_logits is None
-    assert proposer._dspark_last_draft_logit_components is None
 
 
 def test_dspark_sample_sequential_full_vocab_greedy_uses_direct_argmax(monkeypatch):
@@ -332,55 +299,6 @@ def test_dspark_sample_sequential_reduce_sample_uses_tp_greedy(monkeypatch):
 
     assert len(calls) == 1
     torch.testing.assert_close(draft_tokens, torch.tensor([[3]], dtype=torch.int64))
-
-
-def test_dspark_sample_sequential_caches_greedy_logits_for_accept_debug(monkeypatch):
-    monkeypatch.setenv("VLLM_ASCEND_DSPARK_ACCEPT_DEBUG_PATH", "/tmp/dspark_accept_debug.jsonl")
-    monkeypatch.setenv("VLLM_ASCEND_DSPARK_ACCEPT_DEBUG_TOPK", "2")
-    monkeypatch.setenv("VLLM_ASCEND_DSPARK_ACCEPT_DEBUG_FULL_COMPONENTS", "1")
-    monkeypatch.setattr(
-        dspark_proposer_module,
-        "greedy_sample",
-        lambda logits: logits.argmax(dim=-1),
-    )
-    proposer = SimpleNamespace(
-        num_speculative_tokens=2,
-        model=_FakeDSparkModel(),
-        _dspark_seed_buffer=torch.tensor([1], dtype=torch.int64),
-        _dspark_draft_buffer=torch.zeros((1, 2), dtype=torch.int64),
-        _dspark_last_draft_logits=None,
-        _dspark_last_draft_probs=None,
-        _dspark_last_draft_logit_components=None,
-    )
-    head_hidden = torch.zeros((2, 5), dtype=torch.float32)
-
-    AscendDSparkProposer._sample_sequential(
-        proposer,
-        num_reqs=1,
-        head_hidden=head_hidden,
-        token_indices_to_sample=torch.arange(2, dtype=torch.int32),
-    )
-
-    assert proposer._dspark_last_draft_logits.shape == (1, 2, 5)
-    assert proposer._dspark_last_draft_logits.is_contiguous()
-    components = proposer._dspark_last_draft_logit_components
-    assert components is not None
-    torch.testing.assert_close(components["prev_token_ids"], torch.tensor([[1, 2]], dtype=torch.int64))
-    torch.testing.assert_close(components["base_logit_at_draft"], torch.zeros((1, 2), dtype=torch.float32))
-    torch.testing.assert_close(components["markov_bias_at_draft"], torch.full((1, 2), 10.0))
-    torch.testing.assert_close(components["final_logit_at_draft"], torch.full((1, 2), 10.0))
-    torch.testing.assert_close(components["base_rank_of_draft"], torch.ones((1, 2), dtype=torch.int32))
-    torch.testing.assert_close(components["markov_bias_rank_of_draft"], torch.ones((1, 2), dtype=torch.int32))
-    torch.testing.assert_close(components["final_rank_of_draft"], torch.ones((1, 2), dtype=torch.int32))
-    assert components["final_top_ids"].shape == (1, 2, 2)
-    torch.testing.assert_close(components["final_top_ids"][0, :, 0], torch.tensor([2, 3], dtype=torch.int64))
-    torch.testing.assert_close(components["final_top_values"][0, :, 0], torch.full((2,), 10.0))
-    assert components["base_logits"].shape == (1, 2, 5)
-    assert components["markov_bias_logits"].shape == (1, 2, 5)
-    torch.testing.assert_close(components["base_logits"], torch.zeros((1, 2, 5), dtype=torch.float32))
-    take_components = AscendDSparkProposer.take_last_draft_logit_components.__get__(proposer)
-    assert take_components() is components
-    assert proposer._dspark_last_draft_logit_components is None
 
 
 def test_dspark_sample_sequential_caches_probabilistic_draft_distribution(monkeypatch):
@@ -465,7 +383,6 @@ def test_dspark_sample_sequential_caches_probabilistic_draft_distribution(monkey
     assert proposer._dspark_last_draft_logits.shape == (2, 2, 5)
     assert proposer._dspark_last_draft_logits.is_contiguous()
     assert proposer._dspark_last_draft_probs is None
-    assert proposer._dspark_last_draft_logit_components is None
     assert len(calls) == 2
     torch.testing.assert_close(
         calls[0]["expanded_idx_mapping"],
@@ -509,37 +426,6 @@ def test_dspark_sample_sequential_caches_probabilistic_draft_distribution(monkey
             ],
             dtype=torch.float32,
         ),
-    )
-
-
-def test_dspark_runner_flattens_draft_logit_components_by_req_id():
-    runner = SimpleNamespace(
-        input_batch=SimpleNamespace(req_ids=["req-b", "req-a"]),
-        _draft_logit_components={
-            "prev_token_ids": torch.tensor([[10, 11], [20, 21]], dtype=torch.int64),
-            "final_top_ids": torch.tensor(
-                [
-                    [[100, 101], [110, 111]],
-                    [[200, 201], [210, 211]],
-                ],
-                dtype=torch.int64,
-            ),
-        },
-        _draft_logit_components_req_ids=["req-a", "req-b"],
-    )
-    runner._get_spec_decode_draft_distribution = NPUModelRunner._get_spec_decode_draft_distribution.__get__(runner)
-    runner._get_spec_decode_draft_logit_components = NPUModelRunner._get_spec_decode_draft_logit_components.__get__(
-        runner
-    )
-    metadata = SimpleNamespace(num_draft_tokens=[2, 1])
-
-    components = runner._get_spec_decode_draft_logit_components(metadata)
-
-    assert components is not None
-    torch.testing.assert_close(components["prev_token_ids"], torch.tensor([20, 21, 10], dtype=torch.int64))
-    torch.testing.assert_close(
-        components["final_top_ids"],
-        torch.tensor([[200, 201], [210, 211], [100, 101]], dtype=torch.int64),
     )
 
 
@@ -2685,7 +2571,12 @@ def test_dspark_profile_dummy_skips_inner_compile_before_draft_cache_init(monkey
     monkeypatch.setattr(dspark_proposer_module, "set_ascend_forward_context", fake_set_ascend_forward_context)
     monkeypatch.setattr(dspark_proposer_module, "get_forward_context", fake_get_forward_context)
 
-    def sync_metadata_across_dp(num_tokens, is_draft_model, cudagraph_mode=dspark_proposer_module.CUDAGraphMode.NONE, allow_dp_padding=False):
+    def sync_metadata_across_dp(
+        num_tokens,
+        is_draft_model,
+        cudagraph_mode=dspark_proposer_module.CUDAGraphMode.NONE,
+        allow_dp_padding=False,
+    ):
         del is_draft_model, cudagraph_mode, allow_dp_padding
         return num_tokens, torch.tensor([num_tokens], dtype=torch.int32), dspark_proposer_module.CUDAGraphMode.NONE
 
@@ -3089,7 +2980,6 @@ def test_dspark_propose_runs_padded_graph_reqs_and_slices_result(monkeypatch):
         _dspark_token_to_req_indices_buffer=torch.zeros(10, dtype=torch.int32),
         _dspark_last_draft_logits=None,
         _dspark_last_draft_probs=None,
-        _dspark_last_draft_logit_components=None,
     )
     common_attn_metadata = SimpleNamespace(
         num_reqs=1,
@@ -3122,9 +3012,6 @@ def test_dspark_propose_runs_padded_graph_reqs_and_slices_result(monkeypatch):
         del head_hidden, token_indices_to_sample, sampling_metadata
         sample_calls.append(num_reqs)
         proposer._dspark_last_draft_logits = torch.arange(30, dtype=torch.float32).view(2, 5, 3)
-        proposer._dspark_last_draft_logit_components = {
-            "final_top_ids": torch.arange(20, dtype=torch.int64).view(2, 5, 2),
-        }
         return torch.tensor([[7, 8, 9, 10, 11], [70, 80, 90, 100, 110]], dtype=torch.int64)
 
     proposer._runnable = fake_runnable
@@ -3158,7 +3045,6 @@ def test_dspark_propose_runs_padded_graph_reqs_and_slices_result(monkeypatch):
     assert context_calls[0][2]["num_tokens"] == 10
     assert context_calls[0][2]["num_actual_tokens"] == 10
     assert proposer._dspark_last_draft_logits.shape == (1, 5, 3)
-    assert proposer._dspark_last_draft_logit_components["final_top_ids"].shape == (1, 5, 2)
 
 
 def test_dspark_dsa_impl_exposes_graph_param_update_hook():

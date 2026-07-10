@@ -1,11 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import json
-import os
-import time
-from collections.abc import Callable
 from collections import defaultdict
+from collections.abc import Callable
 from copy import copy
 from dataclasses import replace
 from typing import Any
@@ -17,9 +14,9 @@ from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend import envs
@@ -33,60 +30,8 @@ from vllm_ascend.spec_decode.llm_base_proposer import greedy_sample
 from vllm_ascend.worker.v2.sample.gumbel import gumbel_sample
 
 
-def _dspark_reject_debug_enabled() -> bool:
-    return envs.VLLM_ASCEND_DSPARK_REJECT_DEBUG
-
-
 def _dspark_standard_dsa_enabled() -> bool:
     return not envs.VLLM_ASCEND_DSPARK_USE_PRIVATE_CACHE
-
-
-def _dspark_accept_debug_enabled() -> bool:
-    return bool(os.getenv("VLLM_ASCEND_DSPARK_ACCEPT_DEBUG_PATH"))
-
-
-def _dspark_accept_debug_topk() -> int:
-    try:
-        return max(0, int(os.getenv("VLLM_ASCEND_DSPARK_ACCEPT_DEBUG_TOPK", "5")))
-    except ValueError:
-        return 5
-
-
-def _dspark_accept_debug_full_components() -> bool:
-    return os.getenv("VLLM_ASCEND_DSPARK_ACCEPT_DEBUG_FULL_COMPONENTS") == "1"
-
-
-def _dspark_perf_trace_path() -> str | None:
-    return envs.VLLM_ASCEND_DSPARK_PERF_TRACE_PATH
-
-
-def _dspark_perf_trace_max_records() -> int:
-    return envs.VLLM_ASCEND_DSPARK_PERF_TRACE_MAX_RECORDS
-
-
-def _dspark_perf_trace_sync_enabled() -> bool:
-    return envs.VLLM_ASCEND_DSPARK_PERF_TRACE_SYNC
-
-
-def _dspark_perf_sync(device: torch.device | str | None = None) -> None:
-    if not _dspark_perf_trace_sync_enabled() or not hasattr(torch, "npu"):
-        return
-    if device is not None and torch.device(device).type != "npu":
-        return
-    try:
-        torch.npu.synchronize()
-    except RuntimeError:
-        return
-
-
-def _dspark_perf_start(device: torch.device | str | None = None) -> int:
-    _dspark_perf_sync(device)
-    return time.perf_counter_ns()
-
-
-def _debug_tensor_head(name: str, tensor: torch.Tensor, limit: int = 16) -> str:
-    flat = tensor.detach().flatten()
-    return f"{name}={flat[:limit].cpu().tolist()}"
 
 
 def _dspark_reduce_sample_enabled() -> bool:
@@ -122,7 +67,6 @@ class AscendDSparkProposer(AscendDflashProposer):
         self._dspark_probabilistic = vllm_config.speculative_config.draft_sample_method == "probabilistic"
         self._dspark_last_draft_logits: torch.Tensor | None = None
         self._dspark_last_draft_probs: torch.Tensor | None = None
-        self._dspark_last_draft_logit_components: dict[str, torch.Tensor] | None = None
         dspark_target_layer_ids = getattr(draft_hf_config, "dspark_target_layer_ids", None)
         if dspark_target_layer_ids:
             self.hidden_size = vllm_config.speculative_config.draft_model_config.get_hidden_size() * len(
@@ -260,7 +204,6 @@ class AscendDSparkProposer(AscendDflashProposer):
             self._dspark_max_request_slots,
             dtype=torch.int32,
         )
-        self._dspark_perf_trace_records = 0
         self._dspark_enable_draft_aclgraph = False
         self._dspark_graph_runnable_uses_buffers = False
         self._dspark_graph_model_inputs: dict[str, Any] | None = None
@@ -337,88 +280,6 @@ class AscendDSparkProposer(AscendDflashProposer):
                     sizes.add(size)
         return sorted(sizes)
 
-    def _write_dspark_perf_record(
-        self,
-        stage: str,
-        start_ns: int,
-        **kwargs: Any,
-    ) -> None:
-        path = _dspark_perf_trace_path()
-        if not path:
-            return
-        records = int(getattr(self, "_dspark_perf_trace_records", 0))
-        if records >= _dspark_perf_trace_max_records():
-            return
-
-        _dspark_perf_sync(getattr(self, "device", None))
-        elapsed_ms = (time.perf_counter_ns() - start_ns) / 1_000_000.0
-        record = {
-            "pid": os.getpid(),
-            "rank": os.getenv("RANK"),
-            "local_rank": os.getenv("LOCAL_RANK"),
-            "stage": stage,
-            "elapsed_ms": elapsed_ms,
-        }
-        record.update(kwargs)
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=True) + "\n")
-        self._dspark_perf_trace_records = records + 1
-
-    @staticmethod
-    def _trace_tensor_snapshot(value: torch.Tensor, limit: int = 8) -> dict[str, Any]:
-        flat = value.detach().flatten()
-        return {
-            "shape": [int(dim) for dim in value.shape],
-            "dtype": str(value.dtype),
-            "device": str(value.device),
-            "ptr": int(value.data_ptr()),
-            "head": flat[:limit].to(device="cpu").tolist(),
-        }
-
-    @classmethod
-    def _trace_value_snapshot(cls, value: Any, limit: int = 8) -> Any:
-        if isinstance(value, torch.Tensor):
-            return cls._trace_tensor_snapshot(value, limit)
-        if isinstance(value, tuple):
-            return [cls._trace_value_snapshot(item, limit) for item in value]
-        if isinstance(value, list):
-            return [cls._trace_value_snapshot(item, limit) for item in value]
-        return None
-
-    def _trace_model_inputs(
-        self,
-        model_inputs: dict[str, Any],
-        *,
-        num_tokens: int,
-        num_input_tokens: int,
-        actual_num_reqs: int,
-        model_num_reqs: int,
-        aclgraph_runtime_mode: CUDAGraphMode,
-    ) -> None:
-        if not _dspark_perf_trace_path():
-            return
-        self._write_dspark_perf_record(
-            "draft_model_inputs",
-            _dspark_perf_start(getattr(self, "device", None)),
-            num_tokens=int(num_tokens),
-            num_input_tokens=int(num_input_tokens),
-            actual_num_reqs=int(actual_num_reqs),
-            model_num_reqs=int(model_num_reqs),
-            aclgraph_runtime_mode=str(aclgraph_runtime_mode),
-            input_ids=AscendDSparkProposer._trace_value_snapshot(model_inputs.get("input_ids")),
-            positions=AscendDSparkProposer._trace_value_snapshot(model_inputs.get("positions")),
-            request_slots=AscendDSparkProposer._trace_value_snapshot(model_inputs.get("request_slots")),
-            slot_mapping=AscendDSparkProposer._trace_value_snapshot(model_inputs.get("slot_mapping")),
-            block_table=AscendDSparkProposer._trace_value_snapshot(model_inputs.get("block_table")),
-            dspark_query_start_loc=AscendDSparkProposer._trace_value_snapshot(
-                model_inputs.get("dspark_query_start_loc")
-            ),
-            dspark_seq_lens=AscendDSparkProposer._trace_value_snapshot(model_inputs.get("dspark_seq_lens")),
-            dspark_token_to_req_indices=AscendDSparkProposer._trace_value_snapshot(
-                model_inputs.get("dspark_token_to_req_indices")
-            ),
-        )
-
     def load_model(self, model: torch.nn.Module) -> None:
         use_cuda_graph = self.use_cuda_graph
         if use_cuda_graph:
@@ -474,11 +335,6 @@ class AscendDSparkProposer(AscendDflashProposer):
         draft_probs = self._dspark_last_draft_probs
         self._dspark_last_draft_probs = None
         return draft_probs
-
-    def take_last_draft_logit_components(self) -> dict[str, torch.Tensor] | None:
-        draft_logit_components = self._dspark_last_draft_logit_components
-        self._dspark_last_draft_logit_components = None
-        return draft_logit_components
 
     def _get_draft_sampling_temperature(
         self,
@@ -1605,15 +1461,6 @@ class AscendDSparkProposer(AscendDflashProposer):
             if sample_token_count:
                 model_inputs = AscendDSparkProposer.build_model_inputs_first_pass(self, num_input_tokens)
                 AscendDSparkProposer._precompute_context_kv_first_pass(self)
-                AscendDSparkProposer._trace_model_inputs(
-                    self,
-                    model_inputs,
-                    num_tokens=num_query_total,
-                    num_input_tokens=num_input_tokens,
-                    actual_num_reqs=num_reqs,
-                    model_num_reqs=num_reqs,
-                    aclgraph_runtime_mode=aclgraph_runtime_mode,
-                )
                 if profile_without_draft_attn:
                     run_model = AscendDSparkProposer._run_dspark_model.__get__(self)
                 else:
@@ -1685,17 +1532,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         self,
         **model_inputs: Any,
     ) -> torch.Tensor:
-        perf_enabled = bool(_dspark_perf_trace_path())
-        stage_start_ns = _dspark_perf_start(getattr(self, "device", None)) if perf_enabled else 0
-        hidden_states = self.model(**model_inputs)
-        if perf_enabled:
-            input_ids = model_inputs.get("input_ids")
-            self._write_dspark_perf_record(
-                "draft_model_forward_inner",
-                stage_start_ns,
-                num_input_tokens=int(input_ids.shape[0]) if isinstance(input_ids, torch.Tensor) else None,
-            )
-        return hidden_states
+        return self.model(**model_inputs)
 
     def _run_dspark_model_from_graph_buffers(self) -> torch.Tensor:
         model_inputs = getattr(self, "_dspark_graph_model_inputs", None)
@@ -1735,64 +1572,15 @@ class AscendDSparkProposer(AscendDflashProposer):
             and not sampling_metadata.all_greedy
         )
 
-        capture_draft_logits = use_probabilistic or _dspark_accept_debug_enabled()
-        capture_components = _dspark_accept_debug_enabled()
-        capture_full_components = capture_components and _dspark_accept_debug_full_components()
         draft_logits = None
-        if capture_draft_logits:
+        if use_probabilistic:
             draft_logits = torch.empty(
                 (num_reqs, block_size, vocab_size),
                 dtype=torch.float32,
                 device=base_logits.device,
             )
-        component_top_k = min(_dspark_accept_debug_topk(), vocab_size) if capture_components else 0
-        component_debug: dict[str, torch.Tensor] | None = None
-        if capture_components:
-            component_debug = {
-                "prev_token_ids": torch.empty((num_reqs, block_size), dtype=torch.int64, device=base_logits.device),
-                "base_logit_at_draft": torch.empty(
-                    (num_reqs, block_size), dtype=torch.float32, device=base_logits.device
-                ),
-                "markov_bias_at_draft": torch.empty(
-                    (num_reqs, block_size), dtype=torch.float32, device=base_logits.device
-                ),
-                "final_logit_at_draft": torch.empty(
-                    (num_reqs, block_size), dtype=torch.float32, device=base_logits.device
-                ),
-                "base_rank_of_draft": torch.empty((num_reqs, block_size), dtype=torch.int32, device=base_logits.device),
-                "markov_bias_rank_of_draft": torch.empty(
-                    (num_reqs, block_size), dtype=torch.int32, device=base_logits.device
-                ),
-                "final_rank_of_draft": torch.empty(
-                    (num_reqs, block_size), dtype=torch.int32, device=base_logits.device
-                ),
-            }
-            if component_top_k > 0:
-                for prefix in ("base", "markov_bias", "final"):
-                    component_debug[f"{prefix}_top_ids"] = torch.empty(
-                        (num_reqs, block_size, component_top_k),
-                        dtype=torch.int64,
-                        device=base_logits.device,
-                    )
-                    component_debug[f"{prefix}_top_values"] = torch.empty(
-                        (num_reqs, block_size, component_top_k),
-                        dtype=torch.float32,
-                        device=base_logits.device,
-                    )
-            if capture_full_components:
-                component_debug["base_logits"] = torch.empty(
-                    (num_reqs, block_size, vocab_size),
-                    dtype=torch.float32,
-                    device=base_logits.device,
-                )
-                component_debug["markov_bias_logits"] = torch.empty(
-                    (num_reqs, block_size, vocab_size),
-                    dtype=torch.float32,
-                    device=base_logits.device,
-                )
         self._dspark_last_draft_logits = None
         self._dspark_last_draft_probs = None
-        self._dspark_last_draft_logit_components = None
 
         prev_ids = self._dspark_seed_buffer[:num_reqs]
         gumbel_positions = None
@@ -1818,47 +1606,12 @@ class AscendDSparkProposer(AscendDflashProposer):
                     gumbel_positions[:, idx],
                 )
             else:
-                if draft_logits is not None:
-                    draft_logits[:, idx, :] = logits.float()
                 draft_ids = _dspark_greedy_sample(logits)
-            if component_debug is not None:
-                draft_idx = draft_ids.to(device=base_logits.device, dtype=torch.long).unsqueeze(-1)
-                component_debug["prev_token_ids"][:, idx].copy_(prev_ids)
-                component_debug["base_logit_at_draft"][:, idx].copy_(base_row.gather(1, draft_idx).squeeze(-1).float())
-                component_debug["markov_bias_at_draft"][:, idx].copy_(
-                    markov_bias.gather(1, draft_idx).squeeze(-1).float()
-                )
-                component_debug["final_logit_at_draft"][:, idx].copy_(logits.gather(1, draft_idx).squeeze(-1).float())
-                component_debug["base_rank_of_draft"][:, idx].copy_(
-                    (base_row > base_row.gather(1, draft_idx)).sum(dim=-1).to(torch.int32) + 1
-                )
-                component_debug["markov_bias_rank_of_draft"][:, idx].copy_(
-                    (markov_bias > markov_bias.gather(1, draft_idx)).sum(dim=-1).to(torch.int32) + 1
-                )
-                component_debug["final_rank_of_draft"][:, idx].copy_(
-                    (logits > logits.gather(1, draft_idx)).sum(dim=-1).to(torch.int32) + 1
-                )
-                if component_top_k > 0:
-                    for prefix, row in (
-                        ("base", base_row),
-                        ("markov_bias", markov_bias),
-                        ("final", logits),
-                    ):
-                        top_values, top_ids = torch.topk(row.float(), component_top_k, dim=-1)
-                        component_debug[f"{prefix}_top_ids"][:, idx, :].copy_(top_ids)
-                        component_debug[f"{prefix}_top_values"][:, idx, :].copy_(top_values)
-                if capture_full_components:
-                    component_debug["base_logits"][:, idx, :].copy_(base_row.float())
-                    component_debug["markov_bias_logits"][:, idx, :].copy_(markov_bias.float())
             self._dspark_draft_buffer[:num_reqs, idx].copy_(draft_ids)
             prev_ids = self._dspark_draft_buffer[:num_reqs, idx]
         if draft_logits is not None:
             assert draft_logits is not None
             self._dspark_last_draft_logits = draft_logits.contiguous()
-        if component_debug is not None:
-            self._dspark_last_draft_logit_components = {
-                name: value.contiguous() for name, value in component_debug.items()
-            }
         return self._dspark_draft_buffer[:num_reqs, :block_size]
 
     def _propose(
@@ -1887,9 +1640,6 @@ class AscendDSparkProposer(AscendDflashProposer):
             num_scheduled_tokens,
         )
 
-        perf_enabled = bool(_dspark_perf_trace_path())
-        total_start_ns = _dspark_perf_start(getattr(self, "device", None)) if perf_enabled else 0
-        stage_start_ns = total_start_ns
         num_tokens, token_indices_to_sample, _, _ = self.set_inputs_first_pass(
             target_token_ids=target_token_ids,
             next_token_ids=next_token_ids,
@@ -1905,13 +1655,6 @@ class AscendDSparkProposer(AscendDflashProposer):
         )
         assert self.runner is not None
         actual_num_reqs = common_attn_metadata.num_reqs
-        if perf_enabled:
-            self._write_dspark_perf_record(
-                "set_inputs_first_pass",
-                stage_start_ns,
-                num_tokens=int(num_tokens),
-                actual_num_reqs=int(actual_num_reqs),
-            )
         AscendDSparkProposer._reset_dspark_request_slots(self)
 
         input_batch = getattr(self.runner, "input_batch", None)
@@ -1923,7 +1666,6 @@ class AscendDSparkProposer(AscendDflashProposer):
         # speculative uniform-decode keys padded to the runner's decode length.
         uniform_decode = True
         use_cuda_graph = getattr(self, "use_cuda_graph", False)
-        stage_start_ns = _dspark_perf_start(getattr(self, "device", None)) if perf_enabled else 0
         if use_cuda_graph:
             aclgraph_runtime_mode, batch_descriptor = AscendDSparkProposer._draft_cudagraph_dispatcher(self).dispatch(
                 num_tokens=num_tokens,
@@ -1971,19 +1713,7 @@ class AscendDSparkProposer(AscendDflashProposer):
             # keep metadata rows for those blocks so replay cannot reuse stale
             # qsl/seq_lens/block-table rows from capture or a previous step.
             model_num_reqs = max(actual_num_reqs, graph_num_reqs)
-        if perf_enabled:
-            self._write_dspark_perf_record(
-                "graph_dispatch_sync",
-                stage_start_ns,
-                num_tokens=int(num_tokens),
-                num_input_tokens=int(num_input_tokens),
-                actual_num_reqs=int(actual_num_reqs),
-                model_num_reqs=int(model_num_reqs),
-                use_cuda_graph=bool(use_cuda_graph),
-                aclgraph_runtime_mode=str(aclgraph_runtime_mode),
-            )
 
-        stage_start_ns = _dspark_perf_start(getattr(self, "device", None)) if perf_enabled else 0
         AscendDSparkProposer._copy_dspark_query_metadata(
             self,
             common_attn_metadata.query_start_loc,
@@ -2020,36 +1750,14 @@ class AscendDSparkProposer(AscendDflashProposer):
                 actual_num_reqs,
                 model_num_reqs,
             )
-        if perf_enabled:
-            self._write_dspark_perf_record(
-                "prepare_query_metadata",
-                stage_start_ns,
-                num_tokens=int(num_tokens),
-                num_input_tokens=int(num_input_tokens),
-                actual_num_reqs=int(actual_num_reqs),
-                model_num_reqs=int(model_num_reqs),
-                standard_dsa=bool(_dspark_standard_dsa_enabled()),
-            )
 
-        stage_start_ns = _dspark_perf_start(getattr(self, "device", None)) if perf_enabled else 0
         metadata_num_tokens = num_input_tokens if aclgraph_runtime_mode == CUDAGraphMode.FULL else num_tokens
         multi_steps_attn_metadata = (
             self._build_standard_dsa_attn_metadata(common_attn_metadata, num_input_tokens, metadata_num_tokens)
             if _dspark_standard_dsa_enabled()
             else []
         )
-        if perf_enabled:
-            self._write_dspark_perf_record(
-                "build_standard_dsa_metadata",
-                stage_start_ns,
-                num_tokens=int(num_tokens),
-                num_input_tokens=int(num_input_tokens),
-                actual_num_reqs=int(actual_num_reqs),
-                model_num_reqs=int(model_num_reqs),
-                metadata_maps=len(multi_steps_attn_metadata),
-            )
 
-        stage_start_ns = _dspark_perf_start(getattr(self, "device", None)) if perf_enabled else 0
         token_indices_to_sample_len = model_num_reqs * block_size
         token_indices_buffer = getattr(self, "token_indices_to_sample", None)
         if (
@@ -2087,23 +1795,8 @@ class AscendDSparkProposer(AscendDflashProposer):
                     (token_indices_to_sample[:actual_sample_count], pad_indices),
                     dim=0,
                 )
-        if perf_enabled:
-            self._write_dspark_perf_record(
-                "prepare_sample_indices",
-                stage_start_ns,
-                num_tokens=int(num_tokens),
-                num_input_tokens=int(num_input_tokens),
-                token_indices_to_sample_len=int(token_indices_to_sample_len),
-            )
 
-        stage_start_ns = _dspark_perf_start(getattr(self, "device", None)) if perf_enabled else 0
         AscendDSparkProposer._precompute_context_kv_first_pass(self)
-        if perf_enabled:
-            self._write_dspark_perf_record(
-                "context_kv_precompute",
-                stage_start_ns,
-                num_context=int(getattr(self, "_dflash_num_context", 0)),
-            )
 
         with set_ascend_forward_context(
             multi_steps_attn_metadata[0] if multi_steps_attn_metadata else None,
@@ -2120,7 +1813,6 @@ class AscendDSparkProposer(AscendDflashProposer):
             if forward_context is not None:
                 forward_context.moe_layer_index = 0
 
-            num_context = getattr(self, "_dflash_num_context", 0)
             run_model = getattr(self, "_runnable", None)
             if run_model is None:
                 run_model = AscendDSparkProposer._run_dspark_model.__get__(self)
@@ -2130,56 +1822,15 @@ class AscendDSparkProposer(AscendDflashProposer):
                 and not _EXTRA_CTX.capturing
                 and getattr(self, "draft_attn_groups", [])
             ):
-                stage_start_ns = _dspark_perf_start(getattr(self, "device", None)) if perf_enabled else 0
                 self._update_full_graph_params(forward_context, num_input_tokens, multi_steps_attn_metadata)
-                if perf_enabled:
-                    self._write_dspark_perf_record(
-                        "update_full_graph_params",
-                        stage_start_ns,
-                        num_tokens=int(num_tokens),
-                        num_input_tokens=int(num_input_tokens),
-                        actual_num_reqs=int(actual_num_reqs),
-                        model_num_reqs=int(model_num_reqs),
-                    )
-            stage_start_ns = _dspark_perf_start(getattr(self, "device", None)) if perf_enabled else 0
             model_inputs = AscendDSparkProposer.build_model_inputs_first_pass(self, model_num_tokens)
-            AscendDSparkProposer._trace_model_inputs(
-                self,
-                model_inputs,
-                num_tokens=num_tokens,
-                num_input_tokens=num_input_tokens,
-                actual_num_reqs=actual_num_reqs,
-                model_num_reqs=model_num_reqs,
-                aclgraph_runtime_mode=getattr(forward_context, "cudagraph_runtime_mode", CUDAGraphMode.NONE),
-            )
             hidden_states = AscendDSparkProposer._run_prepared_dspark_model(self, run_model, model_inputs)
-            if perf_enabled:
-                self._write_dspark_perf_record(
-                    "draft_model_forward",
-                    stage_start_ns,
-                    num_tokens=int(num_tokens),
-                    num_input_tokens=int(num_input_tokens),
-                    actual_num_reqs=int(actual_num_reqs),
-                    model_num_reqs=int(model_num_reqs),
-                    model_num_tokens=int(model_num_tokens),
-                    aclgraph_runtime_mode=str(getattr(forward_context, "cudagraph_runtime_mode", CUDAGraphMode.NONE)),
-                )
-            stage_start_ns = _dspark_perf_start(getattr(self, "device", None)) if perf_enabled else 0
             draft_token_ids = self._sample_sequential(
                 model_num_reqs,
                 hidden_states,
                 runnable_token_indices,
                 sampling_metadata,
             )
-            if perf_enabled:
-                self._write_dspark_perf_record(
-                    "sample_sequential",
-                    stage_start_ns,
-                    num_tokens=int(num_tokens),
-                    num_input_tokens=int(num_input_tokens),
-                    actual_num_reqs=int(actual_num_reqs),
-                    model_num_reqs=int(model_num_reqs),
-                )
             if model_num_reqs != actual_num_reqs:
                 draft_token_ids = draft_token_ids[:actual_num_reqs]
                 last_draft_logits = getattr(self, "_dspark_last_draft_logits", None)
@@ -2188,30 +1839,4 @@ class AscendDSparkProposer(AscendDflashProposer):
                 last_draft_probs = getattr(self, "_dspark_last_draft_probs", None)
                 if isinstance(last_draft_probs, torch.Tensor):
                     self._dspark_last_draft_probs = last_draft_probs[:actual_num_reqs].contiguous()
-                last_logit_components = getattr(self, "_dspark_last_draft_logit_components", None)
-                if isinstance(last_logit_components, dict):
-                    self._dspark_last_draft_logit_components = {
-                        name: value[:actual_num_reqs].contiguous() for name, value in last_logit_components.items()
-                    }
-            if _dspark_reject_debug_enabled():
-                print(
-                    "[dspark-propose-debug] "
-                    f"num_tokens={num_tokens} "
-                    f"num_context={num_context} "
-                    f"{_debug_tensor_head('input_ids', self.input_ids[:num_tokens])} "
-                    f"{_debug_tensor_head('positions', self.positions[:num_tokens])} "
-                    f"{_debug_tensor_head('target_positions', target_positions)} "
-                    f"{_debug_tensor_head('next_token_ids', next_token_ids)} "
-                    f"{_debug_tensor_head('draft_token_ids', draft_token_ids)}",
-                    flush=True,
-                )
-        if perf_enabled:
-            self._write_dspark_perf_record(
-                "propose_total",
-                total_start_ns,
-                num_tokens=int(num_tokens),
-                num_input_tokens=int(num_input_tokens),
-                actual_num_reqs=int(actual_num_reqs),
-                model_num_reqs=int(model_num_reqs),
-            )
         return draft_token_ids
