@@ -61,7 +61,6 @@ from vllm_ascend.attention.utils import (
     split_decodes_and_prefills,
     update_paged_attention_graph_param,
     using_paged_attention,
-    _is_gemma4_mtp,
 )
 from vllm_ascend.compilation.acl_graph import (
     get_draft_graph_params,
@@ -1271,9 +1270,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # runner v2, there is not capturing attribute in forward_context,
         # just use getattr to avoid attribute error.
         if _EXTRA_CTX.capturing:
-            # Gemma4 MTP: head_dim=512 global attention 层在图捕获时 FIA TND
-            # 不支持，路由到 PagedAttention（A5 由 helper 内 is_950 门控跳过）。
-            if _is_gemma4_mtp() and maybe_route_512_capture(self, attn_metadata):
+            # head_dim=512 global attention 层（Gemma4）在图捕获时 FIA TND 不支
+            # 持，路由到 PagedAttention。helper 内部已按 head_size==512 自门控
+            # （A5 由 is_950 跳过），无需外层 Gemma4 门控。不能用 _is_gemma4_mtp()
+            # ——draft forward 时 _EXTRA_CTX.vllm_config 是 draft config，没有
+            # speculative_config，门控会误判 False。
+            if maybe_route_512_capture(self, attn_metadata):
                 return self.full_graph_pa(query, attn_metadata, output)
             if self.sinks is not None:
                 attn_output, num_tokens = self.full_graph_fia_v2(query, key, value, attn_metadata, output)
@@ -1472,9 +1474,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 attn_metadata.reshape_cache_event = torch.npu.Event()
             if self.key_cache is None:
                 self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
-            # Gemma4 MTP: KV-sharing target 层复用 producer 的 cache，跳过
-            # reshape_and_cache 以免覆写共享 KV 槽。
-            if _is_gemma4_mtp() and maybe_skip_reshape_for_kv_share(self, attn_metadata):
+            # KV-sharing target 层复用 producer 的 cache，跳过 reshape_and_cache
+            # 以免覆写共享 KV 槽。helper 内部按 kv_sharing_target_layer_name 自门
+            # 控，非 KV-sharing 层返回 False。不用 _is_gemma4_mtp()（见上）。
+            if maybe_skip_reshape_for_kv_share(self, attn_metadata):
                 if self.is_kv_producer:
                     attn_metadata.reshape_cache_event.record()
                 return query, key, value, output
@@ -1489,9 +1492,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 # see: https://github.com/vllm-project/vllm/blob/ce88756b967c2c5006746a424c15dd59a284ed8c/vllm/model_executor/layers/attention/cross_attention.py#L117
                 slot_mapping=slots[: attn_metadata.num_actual_tokens] if not encoder_decoder else slots.to(torch.int32),
             )
-            # Gemma4 MTP: 通知 KV-transfer connector KV 已写入（无 connector 时 no-op）。
-            if _is_gemma4_mtp():
-                notify_kv_cache_written()
+            # 通知 KV-transfer connector KV 已写入。无 connector 时 no-op
+            # （Gemma4 MTP 用 in-process KV-sharing，无 connector）。不用
+            # _is_gemma4_mtp() 门控（见上，draft forward 误判）。
+            notify_kv_cache_written()
             if self.is_kv_producer:
                 attn_metadata.reshape_cache_event.record()
         return query, key, value, output
@@ -1506,15 +1510,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output: torch.Tensor,
     ):
         num_tokens = query.shape[0]
-        # Gemma4 MTP: KV-sharing draft 层从 target 层 paged cache 读 K/V（PyTorch
-        # SDPA），FIA 处理不了 Q 长 != KV 长的 cross-attention。非 KV-sharing 层
-        # 返回 None 走正常路径。
-        if _is_gemma4_mtp():
-            _kv_share_out = maybe_kv_share_prefill(
-                self, query, key, value, kv_cache, attn_metadata, output,
-            )
-            if _kv_share_out is not None:
-                return _kv_share_out
+        # KV-sharing draft 层从 target 层 paged cache 读 K/V（PyTorch SDPA），
+        # FIA 处理不了 Q 长 != KV 长的 cross-attention。helper 内部按
+        # kv_sharing_target_layer_name 自门控，非 KV-sharing 层返回 None 走正常
+        # 路径。不用 _is_gemma4_mtp() 门控（见上，draft forward 误判）。
+        _kv_share_out = maybe_kv_share_prefill(
+            self, query, key, value, kv_cache, attn_metadata, output,
+        )
+        if _kv_share_out is not None:
+            return _kv_share_out
         if (
             attn_metadata.attn_state == AscendAttentionState.DecodeOnly
             and self.sliding_window is None
@@ -1577,11 +1581,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
 
         output_padded = None
-        # Gemma4 MTP: Q-only draft KV-sharing 层只读不写，跳过 reshape_and_cache
-        # 以免把 dummy K/V 写回共享 cache。
-        if key is not None and value is not None and not (
-            _is_gemma4_mtp() and should_skip_draft_kv_write(self)
-        ):
+        # Q-only draft KV-sharing 层只读不写，跳过 reshape_and_cache 以免把
+        # dummy K/V 写回共享 cache。helper 内部按 kv_sharing_target_layer_name
+        # + is_draft_model 自门控。不用 _is_gemma4_mtp()（见上，draft forward 误判）。
+        if key is not None and value is not None and not should_skip_draft_kv_write(self):
             output_padded = output
             query, key, value, output_padded = self.reshape_and_cache(
                 query, key, value, kv_cache, attn_metadata, output
