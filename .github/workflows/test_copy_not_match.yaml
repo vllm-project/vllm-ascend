@@ -1,0 +1,142 @@
+name: 'TEST copy not match'
+
+on:
+  workflow_call:
+    secrets:
+      HW_OBS_AK:
+        required: true  # 声明该密钥为必填
+        description: "Huawei OBS Access Key"
+      HW_OBS_SK:
+        required: true
+        description: "Huawei OBS Secret Key"
+    inputs:
+      vllm:
+        required: true
+        type: string
+      runner:
+        required: true
+        type: string
+      image:
+        required: true
+        type: string
+      type:
+        required: true
+        type: string
+      contains_310:
+        required: true
+        type: boolean
+
+jobs:
+  e2e-2-cards:
+    name: multicard-2
+    runs-on: linux-aarch64-a2b3-test-0
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-a3-ubuntu22.04-py3.11
+      env:
+        VLLM_LOGGING_LEVEL: ERROR
+        VLLM_USE_MODELSCOPE: True
+        HCCL_BUFFSIZE: 1024
+        HF_HUB_OFFLINE: 1
+    steps:
+      - name: Check npu and CANN info
+        run: |
+          npu-smi info
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+
+      - name: Config mirrors
+        run: |
+          sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
+          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
+          apt-get update -y
+          apt install git -y
+
+      - name: Checkout vllm-project/vllm-ascend repo
+        uses: actions/checkout@v7.0.0
+
+      - name: Install system dependencies
+        run: |
+          apt-get -y install `cat packages.txt`
+          apt-get -y install gcc g++ cmake libnuma-dev clang-15
+
+          update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
+          update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
+          mkdir -p /root/.cache/vllm-ascend/Qwen/
+          mkdir -p /root/.cache/modelscope/hub/models/Qwen/
+          start_time=$(date +%s)
+          cp -r /shared-data/vllm-ascend/Qwen/Qwen3-30B-A3B /root/.cache/modelscope/hub/models/Qwen/
+          end_time=$(date +%s)
+          duration=$((end_time - start_time))
+          echo "模型copy结束时间：$(date +'%Y-%m-%d %H:%M:%S')"
+
+      - name: Install sccache (if not pre-installed)
+        env:
+          # 👇 指定你的 OBS bucket（必须用 virtual-hosted 域名！）
+          SCCACHE_BUCKET: obs-guiiyang1-ascend-test
+          SCCACHE_ENDPOINT: https://obs.cn-southwest-2.myhuaweicloud.com
+          AWS_ACCESS_KEY_ID: ${{ secrets.HW_OBS_AK }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.HW_OBS_SK }}
+          SCCACHE_REGION: cn-southwest-2
+          SCCACHE_S3_ENABLE_VIRTUAL_HOST_STYLE: true
+          SCCACHE_LOG: debug
+        run: |
+          FILENAME="sccache-v0.13.0-aarch64-unknown-linux-musl.tar.gz"
+          CACHE_DIR="/shared-data/sccache"
+          if [ -f "$CACHE_DIR/$FILENAME" ]; then
+            echo "Found cached sccache package successfully"
+          else
+            echo "sccache package not found in cache. Downloading..."
+            mkdir -p "$CACHE_DIR"
+            apt update && apt install -y curl
+            curl --connect-timeout 30 --retry 3 -L https://github.com/mozilla/sccache/releases/download/v0.13.0/sccache-v0.13.0-aarch64-unknown-linux-musl.tar.gz -o "$CACHE_DIR/$FILENAME"
+          fi
+          mkdir -p /tmp/sccache
+          tar -xzf "$CACHE_DIR/$FILENAME" -C /tmp/sccache
+          mv /tmp/sccache/sccache-v0.13.0-aarch64-unknown-linux-musl/sccache /usr/local/bin/
+          chmod +x /usr/local/bin/sccache
+          sccache --start-server
+          sccache --show-stats
+
+      - name: Cache dependencies
+        uses: runs-on/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+          key: ascend-${{ runner.os }}-pip-vllm-${{ hashFiles('**/requirements-dev.txt', './vllm-empty/pyproject.toml', './vllm-empty/requirements/**/*.txt') }}
+          restore-keys: |
+            ascend-${{ runner.os }}-pip-vllm-
+        env:
+          # 👇 指定你的 OBS bucket（必须用 virtual-hosted 域名！）
+          RUNS_ON_S3_BUCKET_CACHE: obs-guiiyang1-ascend-test
+          RUNS_ON_S3_BUCKET_ENDPOINT: https://obs.cn-southwest-2.myhuaweicloud.com
+          AWS_ACCESS_KEY_ID: ${{ secrets.HW_OBS_AK }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.HW_OBS_SK }}
+          AWS_REGION: cn-southwest-2
+
+      - name: Checkout vllm-project/vllm repo
+        uses: actions/checkout@v7.0.0
+        with:
+          repository: vllm-project/vllm
+          ref: ${{ inputs.vllm }}
+          path: ./vllm-empty
+          fetch-depth: 1
+
+      - name: Install vllm-project/vllm from source
+        working-directory: ./vllm-empty
+        run: |
+          VLLM_TARGET_DEVICE=empty pip install -e .
+
+      - name: Install vllm-project/vllm-ascend
+        env:
+          PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+        run: |
+          pip install -r requirements-dev.txt
+          pip install -v -e .
+
+      - name: Run vllm-project/vllm-ascend test (full)
+        env:
+          VLLM_WORKER_MULTIPROC_METHOD: spawn
+        if: ${{ inputs.type == 'full' }}
+        run: |
+          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_offline_weight_load.py
+          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_qwen3_moe_sp_tp2
