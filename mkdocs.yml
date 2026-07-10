@@ -317,6 +317,8 @@ nav:
     - User Stories:
         - community/user_stories/index.md
         - community/user_stories/llamafactory.md
+    - Testing Contributions:
+        - community/testing/README.md
 
 # ---- Watch ----
 watch:
