@@ -193,6 +193,18 @@ class BlockTable:
                 positions = torch.from_numpy(positions)
             self._compute_pcp_dcp_slot_mapping(req_indices, positions)
         else:
+            if isinstance(req_indices, torch.Tensor):
+                if req_indices.device.type != "cpu":
+                    raise ValueError(
+                        "Device tensor inputs are only supported for CP draft slot mapping."
+                    )
+                req_indices = req_indices.numpy()
+            if isinstance(positions, torch.Tensor):
+                if positions.device.type != "cpu":
+                    raise ValueError(
+                        "Device tensor inputs are only supported for CP draft slot mapping."
+                    )
+                positions = positions.numpy()
             assert self.kernel_sizes is not None
             assert self.block_size == self.kernel_sizes[0]
             # IMPORTANT: In hybrid mode, positions are in logical block space,
@@ -208,22 +220,13 @@ class BlockTable:
             )
 
             block_offsets = positions % self.block_size
-            if isinstance(req_indices, torch.Tensor) and req_indices.device.type != "cpu":
-                block_numbers = self.block_table.gpu.flatten()[block_table_indices]
-                self.slot_mapping.gpu[: req_indices.shape[0]] = (
-                    block_numbers * self.block_size + block_offsets
-                )
-            else:
-                if isinstance(req_indices, torch.Tensor):
-                    block_table_indices = block_table_indices.numpy()
-                    block_offsets = block_offsets.numpy()
-                block_numbers = self.block_table.np.ravel()[block_table_indices]
-                np.add(
-                    block_numbers * self.block_size,
-                    block_offsets,
-                    out=self.slot_mapping.np[: req_indices.shape[0]],
-                )
-                self.slot_mapping.copy_to_gpu(req_indices.shape[0])
+            block_numbers = self.block_table.np.ravel()[block_table_indices]
+            np.add(
+                block_numbers * self.block_size,
+                block_offsets,
+                out=self.slot_mapping.np[: req_indices.shape[0]],
+            )
+            self.slot_mapping.copy_to_gpu(req_indices.shape[0])
 
     def _compute_pcp_dcp_slot_mapping(
         self,
