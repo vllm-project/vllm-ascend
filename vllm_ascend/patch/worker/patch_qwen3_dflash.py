@@ -52,7 +52,11 @@ def precompute_and_store_context_kv(
 
     # --- Per-layer cache insert ---
     all_k_final = all_k_flat.view(L, num_ctx, nkv, hd)
+    per_layer = isinstance(context_slot_mapping, (list, tuple))
     for i in range(L):
+        slot_mapping = context_slot_mapping[i] if per_layer else context_slot_mapping
+        if slot_mapping is None:
+            continue
         attn = self._attn_layers[i]
         kv_cache = attn.kv_cache
         attn.impl.do_kv_cache_update(
@@ -60,7 +64,7 @@ def precompute_and_store_context_kv(
             all_k_final[i],
             all_v[i],
             kv_cache,
-            context_slot_mapping,
+            slot_mapping,
         )
 
 

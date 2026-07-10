@@ -238,17 +238,6 @@ msgid ""
 msgstr ""
 "2. 执行后，您可以获得结果，以下是 `vllm-ascend:0.13.0` 中 `DeepSeek-R1-W8A8` 的结果，仅供参考。"
 
-msgid ""
-"| dataset | version | metric | mode | vllm-api-general-chat |\n"
-"    |----- | ----- | ----- | ----- | -----|\n"
-"    | aime2024dataset | - | accuracy | gen | 80.00 |\n"
-"    | gpqadataset | - | accuracy | gen | 72.22 |"
-msgstr ""
-"| dataset | version | metric | mode | vllm-api-general-chat |\n"
-"    |----- | ----- | ----- | ----- | -----|\n"
-"    | aime2024dataset | - | accuracy | gen | 80.00 |\n"
-"    | gpqadataset | - | accuracy | gen | 72.22 |"
-
 msgid "### Using Language Model Evaluation Harness"
 msgstr "### 使用语言模型评估工具"
 
@@ -353,3 +342,6 @@ msgstr "预期结果："
 
 msgid "### Using AISBench"
 msgstr "### 使用 AISBench"
+
+msgid "| dataset | version | metric | mode | vllm-api-general-chat |"
+msgstr "| 数据集 | 版本 | 指标 | 模式 | vllm-api-general-chat |"
