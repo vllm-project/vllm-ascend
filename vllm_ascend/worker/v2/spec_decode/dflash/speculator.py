@@ -7,6 +7,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from copy import copy
 import torch
 from vllm.config import VllmConfig
+from vllm.config.compilation import CUDAGraphMode
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import (
@@ -19,6 +20,25 @@ from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
 class AscendDFlashSpeculator(DFlashSpeculator):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
+
+    def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
+        from vllm_ascend.worker.v2.spec_decode.dflash.aclgraph import (
+            DFlashAclGraphManager,
+        )
+
+        if cudagraph_mode.decode_mode() == CUDAGraphMode.FULL:
+            cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
+        else:
+            cudagraph_mode = CUDAGraphMode.NONE
+
+        self.query_cudagraph_manager = DFlashAclGraphManager(
+            self.vllm_config,
+            self.device,
+            cudagraph_mode,
+            decode_query_len=self.num_query_per_req,
+            speculator=self,
+            causal=self.dflash_causal,
+        )
 
     def set_attn(
         self,
