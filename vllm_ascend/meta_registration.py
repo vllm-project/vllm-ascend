@@ -48,6 +48,10 @@ def register_meta_if_necessary(ns: str, op_name: str, fn, overload: str = ""):
     if overload != "":
         op_name = op_name + "." + overload
     schema_to_find = ns + "::" + op_name
+    try:
+        torch._C._dispatch_find_schema_or_throw(schema_to_find, "")
+    except RuntimeError:
+        return
     meta_impl_list = torch._C._dispatch_get_registrations_for_dispatch_key("Meta")
     if schema_to_find in meta_impl_list:
         return
