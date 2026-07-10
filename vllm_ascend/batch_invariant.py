@@ -84,6 +84,9 @@ def override_envs_for_invariance():
     os.environ["HCCL_DETERMINISTIC"] = "strict"
     os.environ["LCCL_DETERMINISTIC"] = "1"
 
+    # Enable deterministic computation for operators. Some operators on Ascend A5
+    # do not have deterministic mode enabled by default and must be explicitly set.
+    torch.use_deterministic_algorithms(True, warn_only=True)
 
 _batch_invariant_LIB = None
 
