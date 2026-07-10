@@ -44,7 +44,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Checkout vllm-project/vllm repo
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7
         with:
           repository: vllm-project/vllm
           ref: ${{ inputs.vllm || '1f486d96a17303ce8db8e02be39545b2be338446' }}
