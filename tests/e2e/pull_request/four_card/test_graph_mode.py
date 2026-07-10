@@ -27,7 +27,6 @@ from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.conftest import cleanup_dist_env_and_memory, wait_until_npu_memory_free
 from tests.e2e.pull_request.utils import PROMPTS_LONG, PROMPTS_SHORT
-from vllm_ascend.utils import get_ascend_specific_device_type
 
 QWEN3 = "Qwen/Qwen3-0.6B"
 DEEPSEEK_V2_LITE = "vllm-ascend/DeepSeek-V2-Lite-W8A8"
@@ -466,8 +465,28 @@ _SAMPLING_PARAMS = SamplingParams(
 
 
 def get_case_by_specific_device():
-    specific_device = get_ascend_specific_device_type()
-    if specific_device == "Ascend910_9362":
+    # Detect NPU device name in an isolated spawn subprocess to avoid
+    # triggering torch_npu initialization in the main process, which would
+    # break forked multiprocessing subprocesses that use NPU later.
+    def _probe(q: multiprocessing.Queue) -> None:
+        try:
+            import torch
+
+            q.put(torch.npu.get_device_properties().name)
+        except Exception:
+            q.put("")
+
+    ctx = multiprocessing.get_context("spawn")
+    q: multiprocessing.Queue[str] = ctx.Queue()
+    p = ctx.Process(target=_probe, args=(q,))
+    p.start()
+    p.join(timeout=10)
+    try:
+        device_name = q.get_nowait()
+    except queue.Empty:
+        device_name = ""
+
+    if "9362" in device_name:
         return [CASE_QWEN_ACLGRAPH, CASE_DS_ACLGRAPH_A3_9362, CASE_DS_ACLGRAPH_ENPU_A3_9362]
     return [CASE_QWEN_ACLGRAPH, CASE_DS_ACLGRAPH, CASE_DS_ACLGRAPH_ENPU]
 
@@ -633,8 +652,6 @@ def _run_worker_process(
                         else None,
                     }
                 )
-            print("------------------------------------------")
-            print(extracted)
             return extracted
 
         result_data = {
