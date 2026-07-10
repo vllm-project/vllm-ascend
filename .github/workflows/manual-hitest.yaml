@@ -18,15 +18,15 @@
 name: Hitest
 
 on:
-  pull_request_target:
-    types:
-      - opened      # 新建PR（提PR）
-      - synchronize # PR推送新commit、push更新分支
-      - reopened    # PR关闭后重新打开
-    branches:
-      - 'main'
-      - '*-dev'
-      - 'releases/v*'
+  # pull_request_target:
+  #   types:
+  #     - opened      # 新建PR（提PR）
+  #     - synchronize # PR推送新commit、push更新分支
+  #     - reopened    # PR关闭后重新打开
+  #   branches:
+  #     - 'main'
+  #     - '*-dev'
+  #     - 'releases/v*'
   workflow_dispatch:
   workflow_call:
 
@@ -56,7 +56,7 @@ jobs:
           X_APIG_APPCODE: ${{ secrets.X_APIG_APPCODE }}
           APP_KEY: ${{ secrets.APP_KEY }}
           APP_SECRET: ${{ secrets.APP_SECRET }}
-          PR_NUMBER: ${{ github.event.number }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           echo "===== DEBUG GITHUB ENV ====="
           echo "X_APIG_APPCODE: $X_APIG_APPCODE"
