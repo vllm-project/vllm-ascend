@@ -3,7 +3,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from typing import Any
-
+from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from copy import copy
 import torch
 from vllm.config import VllmConfig
 from vllm.triton_utils import tl, triton
@@ -32,6 +33,84 @@ class AscendDFlashSpeculator(DFlashSpeculator):
             dtype=torch.int32,
             device=self.device,
         )
+        
+    def build_draft_attn_metadatas(self, num_reqs_padded, is_draft_model_prefill):
+        """Build draft_attn_metadatas for partial-merged draft graph."""
+        attn_metadata = self.model_state.attn_metadata
+        attn_metadata = {
+            name: metadata for name, metadata in attn_metadata.items() if name in self.draft_attn_layer_names
+        }
+
+        if is_draft_model_prefill:
+            return [attn_metadata]
+
+        draft_attn_metadatas = self._init_decode_draft_attn_metadatas(attn_metadata, num_reqs_padded)
+
+        for i, per_step_attn_metadata in enumerate(draft_attn_metadatas):
+            step = i + 1
+            assert self.input_batch is not None
+            self._update_decode_attn_metadata(per_step_attn_metadata, step, self.input_batch.num_reqs)
+
+        return draft_attn_metadatas
+    
+    def _init_decode_draft_attn_metadatas(self, attn_metadata: dict[str, Any] | None, num_reqs_padded: int):
+        """Initialize attention metadata for decode phase in graph mode on Ascend NPUs."""
+        if attn_metadata is None:
+            return
+
+        attn_state = AscendAttentionState.DecodeOnly
+
+        draft_attn_metadatas = []
+        # attn_metadata is build in vllm's super class.
+        # We need to update attn_state for each layer's metadata.
+        for seq_lens_cpu in self.input_buffers.draft_seq_lens_cpus:
+            per_step_attn_metadata = {k: copy(v) for k, v in attn_metadata.items()}
+
+            seq_lens_cpu = seq_lens_cpu[:num_reqs_padded]
+            for metadata in per_step_attn_metadata.values():
+                metadata.attn_state = attn_state
+                metadata.seq_lens_cpu = seq_lens_cpu
+            draft_attn_metadatas.append(per_step_attn_metadata)
+
+        return draft_attn_metadatas
+    
+    def _update_decode_attn_metadata(
+        self, attn_metadata: dict[str, Any] | None, step: int, num_reqs: int | None = None
+    ):
+        """Update attention metadata for decode phase on Ascend NPUs."""
+        if attn_metadata is None:
+            return
+
+        num_reqs_padded = next(iter(attn_metadata.values())).seq_lens_cpu.shape[0]
+        seq_lens_cpu = self._get_seq_lens_cpu()[:num_reqs_padded]
+        if num_reqs is None:
+            num_reqs = num_reqs_padded
+        next_seq_lens_cpu = self._calc_next_seq_lens_cpu(seq_lens_cpu, num_reqs, num_reqs_padded, step)
+
+        query_lens_list = [i for i in range(1, num_reqs_padded + 1)]
+        seq_lens_list = next_seq_lens_cpu.tolist()
+        # attn_metadata is build in vllm's super class.
+        # We need to update attn_state for each layer's metadata.
+        for metadata in attn_metadata.values():
+            metadata.actual_seq_lengths_q = query_lens_list
+            metadata.seq_lens_cpu.copy_(next_seq_lens_cpu)
+            metadata.seq_lens_list = seq_lens_list
+
+    def _calc_next_seq_lens_cpu(self, seq_lens_cpu, num_reqs, num_reqs_padded, step):
+        # NOTE(drslark) to achieve fully alignment with vllm, `num_rejected` should be subtracted from `seq_lens`
+        # to avoid extra sync overhead, `v2` is currently aligned with NPU `v1` only
+
+        # follows the logic in `prepare_eagle_decode` and `update_eagle_inputs`
+        next_seqs_cpu = torch.clamp(seq_lens_cpu[:num_reqs_padded] + step, max=self.max_model_len)
+        next_seqs_cpu[num_reqs:].fill_(0)
+        return next_seqs_cpu
+
+    def _get_seq_lens_cpu(self) -> torch.Tensor:
+        """Get seq_lens_cpu from input_batch."""
+        assert self.input_batch is not None
+        seq_lens_cpu = torch.from_numpy(self.input_batch.seq_lens_np)
+        return seq_lens_cpu
+    
 
     def propose(
         self,

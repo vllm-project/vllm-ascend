@@ -22,6 +22,7 @@ from vllm_ascend.compilation.acl_graph import (
     set_draft_graph_prefill_params,
     update_full_graph_params
 )
+from vllm.v1.worker.gpu.spec_decode.dflash.cudagraph import DFlashCudaGraphManager
 class DFlashAclGraphManager(DFlashCudaGraphManager):
     def __init__(
         self,
@@ -78,7 +79,7 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
 
         # 这块代码是做什么的呢？
         draft_attn_metadatas = self.speculator.build_draft_attn_metadatas(desc.num_reqs, self.is_draft_model_prefill)
-
+ 
         ret = super().run_fullgraph(desc)
 
         positions = self.speculator.input_buffers.positions[:num_tokens]
@@ -103,6 +104,8 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
             _EXTRA_CTX.is_draft_model_prefill = self.is_draft_model_prefill
 
             forward_context = get_forward_context()
+            
+            # 这块代码含义
             update_full_graph_params(
                 # FIXME(Ronald1995): support hybrid attn backend
                 list(self.speculator.attn_backends.values())[0],
@@ -115,6 +118,11 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
                 draft_attn_metadatas=draft_attn_metadatas,
             )
         return ret
+    
+
+    
+DFlashCudaGraphManager = DFlashAclGraphManager
+
     
         
         
