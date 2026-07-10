@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
 from collections.abc import Callable
-from contextlib import contextmanager
 from typing import Any
 
 import torch
@@ -28,7 +27,7 @@ from vllm_ascend.compilation.acl_graph import (
 )
 from vllm_ascend.worker.v2.aclgraph_utils import ModelWithContext
 from vllm_ascend.worker.v2.utils import communicator_switch
-
+from vllm_ascend.worker.v2.aclgraph_utils import model_capture_wrapper
 
 class PrefillEagleAclGraphManager(PrefillSpeculatorCudaGraphManager):
     """AclGraphManager for Eagle speculative decoding."""
@@ -235,11 +234,4 @@ class DecodeEagleAclGraphManager(DecodeSpeculatorCudaGraphManager):
         return ret
 
 
-@contextmanager
-def model_capture_wrapper(speculator, is_draft_model_prefill):
-    """Context manager to override speculator's model for speculator capturing."""
-    try:
-        speculator.model = ModelWithContext(speculator.model, True, is_draft_model_prefill)
-        yield
-    finally:
-        speculator.model = speculator.model.get_original_model()
+

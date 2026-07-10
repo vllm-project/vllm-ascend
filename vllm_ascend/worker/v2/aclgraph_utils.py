@@ -18,6 +18,7 @@
 #
 from collections.abc import Callable
 from typing import Any
+from contextlib import contextmanager
 
 import torch
 import torch.nn as nn
@@ -32,7 +33,6 @@ from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor, ModelCu
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.utils import AttentionGroup
-
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.compilation.acl_graph import set_graph_params, update_full_graph_params
 from vllm_ascend.worker.v2.utils import communicator_switch
@@ -161,3 +161,13 @@ class ModelWithContext(nn.Module):
     def compute_logits(self, hidden_states: torch.Tensor):
         # draft model has `compute_logits`, which is not in ModelWithContext
         return self.original_model.compute_logits(hidden_states)
+    
+
+@contextmanager
+def model_capture_wrapper(speculator, is_draft_model_prefill):
+    """Context manager to override speculator's model for speculator capturing."""
+    try:
+        speculator.model = ModelWithContext(speculator.model, True, is_draft_model_prefill)
+        yield
+    finally:
+        speculator.model = speculator.model.get_original_model()
