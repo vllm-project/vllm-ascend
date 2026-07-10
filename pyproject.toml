@@ -89,3 +89,6 @@ logger-objects = ["vllm.logger.logger"]
 
 [tool.ruff.format]
 docstring-code-format = true
+
+[tool.pytest.ini_options]
+tmnet_api_key = "com_126_vllm_ascend_ioG6wjS1tli8zZIRKnqLKgOo6wKv3QyPSAB75zssiXY3KH8S8eHkaqJAnpF2xwWp"

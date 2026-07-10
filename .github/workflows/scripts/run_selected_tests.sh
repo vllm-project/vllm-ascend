@@ -123,7 +123,8 @@ run_pytest_target() {
     python -m coverage run --rcfile="${project_root}/tests/coveragerc" -m pytest -sv --color=yes "${target}" 2>&1 | tee "${log_file}"
   else
     set +e
-    pytest -sv --color=yes "${target}" 2>&1 | tee "${log_file}"
+    # pytest -sv --color=yes "${target}" 2>&1 | tee "${log_file}"
+    python -m coverage run --rcfile="${project_root}/tests/coveragerc" -m pytest --tmnet -sv --color=yes "${target}" 2>&1 | tee "${log_file}"
   fi
   local status=${PIPESTATUS[0]}
   set -e
