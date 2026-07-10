@@ -25,3 +25,4 @@ xlite==0.1.0rc11.dev210
 uc-manager
 ninja
 coverage
+pytest-testmon
