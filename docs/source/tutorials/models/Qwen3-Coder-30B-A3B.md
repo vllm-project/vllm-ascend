@@ -46,7 +46,7 @@ If the W8A8 quantized weights are not available for direct download, you can obt
 
 You can use the official all-in-one Docker image for Qwen3 MoE models.
 
-=== "Atlas 800I A3"
+=== "A3 series"
 
     **Docker Pull:**
 
@@ -97,7 +97,7 @@ You can use the official all-in-one Docker image for Qwen3 MoE models.
         A3 has 8 NPUs with dual-die design (16 chips total: `/dev/davinci[0-15]`).
         If you are on a shared machine, map only the chips you need (e.g., `/dev/davinci[0-7]` for NPU 0-3).
 
-=== "Atlas 800I A2"
+=== "A2 series"
 
     **Docker Pull:**
 
