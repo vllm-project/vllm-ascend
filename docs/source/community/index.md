@@ -16,3 +16,7 @@ Welcome to the vLLM Ascend community! This section covers governance, contributi
 ## User Stories
 
 - **[User Stories](user_stories/index.md)** — Case studies from the community
+
+## Testing Contributions
+
+- **[Community Testing Contributions](testing/README.md)** — Community testing task deliverables and guides
