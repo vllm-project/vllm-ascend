@@ -20,12 +20,15 @@ jobs:
           RUN echo cache-probe > /tmp/cache-probe-marker
           DOCKERFILE
 
-      - name: Round 1 (expect cache MISS)
+          echo "=== DOCKER_CONFIG ==="
+          cat "${DOCKER_CONFIG}/config.json" 2>/dev/null | python3 -m json.tool 2>/dev/null || cat "${DOCKER_CONFIG}/config.json" 2>/dev/null || echo "no config.json"
+
+      - name: Round 1 - build only (no push, cold)
         run: |
           set -e
           export NO_PROXY="localhost,127.0.0.1,buildkitd-service.buildkitd,.svc.cluster.local,.cluster.local"
           export no_proxy="${NO_PROXY}"
-          echo "=== Round 1: fresh pull, expect MISS ==="
+          echo "=== Round 1: build+pull, cold ==="
           T0=$(date +%s)
           buildctl \
             --addr "${BUILDKITD_ADDR}" \
@@ -37,7 +40,7 @@ jobs:
             --local context=/tmp/ctx \
             --local dockerfile=/tmp/ctx \
             --no-cache \
-            --output type=image,name=test-torch-npu-cache:round1,push=false
+            --output type=image,name=quay.io/atlas-ci/vllm-atlas-temp:buildctl-cache-test,push=true
           T1=$(date +%s)
           ROUND1_S=$((T1-T0))
           echo "round1_s=${ROUND1_S}"
@@ -55,12 +58,12 @@ jobs:
             prune --all \
             || true
 
-      - name: Round 2 (expect cache HIT)
+      - name: Round 2 - build+pull (warm cache)
         run: |
           set -e
           export NO_PROXY="localhost,127.0.0.1,buildkitd-service.buildkitd,.svc.cluster.local,.cluster.local"
           export no_proxy="${NO_PROXY}"
-          echo "=== Round 2: warm cache, expect HIT ==="
+          echo "=== Round 2: build+pull, warm ==="
           T0=$(date +%s)
           buildctl \
             --addr "${BUILDKITD_ADDR}" \
@@ -72,7 +75,7 @@ jobs:
             --local context=/tmp/ctx \
             --local dockerfile=/tmp/ctx \
             --no-cache \
-            --output type=image,name=test-torch-npu-cache:round2,push=false
+            --output type=image,name=quay.io/atlas-ci/vllm-atlas-temp:buildctl-cache-test,push=true
           T1=$(date +%s)
           ROUND2_S=$((T1-T0))
           echo "round2_s=${ROUND2_S}"
@@ -86,4 +89,4 @@ jobs:
         run: |
           echo "=== BuildKit Cache Test Summary ==="
           echo "round1_s=${ROUND1_S}"
-          echo "✅ Both rounds completed"
+          echo "✅ Both rounds completed with push to quay.io/atlas-ci/vllm-atlas-temp:buildctl-cache-test"
