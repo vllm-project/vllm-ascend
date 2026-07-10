@@ -42,7 +42,7 @@ def test_content_accepts_streaming_request(api_client):
 )
 def test_content_accepts_or_rejects_implementation_dependent_boundaries(api_client, message):
     response = completion_request.send_chat_request(api_client, messages=[message])
-    assertion.assert_status_code_200_or_400(response)
+    assertion.assert_success_or_validation_error(response)
 
 
 @pytest.mark.parametrize(

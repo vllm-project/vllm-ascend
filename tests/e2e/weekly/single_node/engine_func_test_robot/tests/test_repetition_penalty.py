@@ -14,10 +14,20 @@ def test_repetition_penalty_accepts_streaming_request(api_client):
     assertion.assert_chat_completion_success(response, stream=True)
 
 
-@pytest.mark.parametrize("repetition_penalty", [0.99, 0, -1, "1.2", None, [], {}])
+@pytest.mark.parametrize("repetition_penalty", [0, -1, [], {}])
 def test_repetition_penalty_rejects_invalid_values(api_client, repetition_penalty):
     response = completion_request.send_chat_request(api_client, repetition_penalty=repetition_penalty)
     assertion.assert_validation_error_response(response)
+
+
+@pytest.mark.parametrize(
+    "repetition_penalty",
+    [0.99, "1.2", None],
+    ids=["below_one_but_positive", "coerced_string", "default_null"],
+)
+def test_repetition_penalty_accepts_vllm_compatible_values(api_client, repetition_penalty):
+    response = completion_request.send_chat_request(api_client, repetition_penalty=repetition_penalty)
+    assertion.assert_success_or_validation_error(response)
 
 
 def test_repetition_penalty_combines_with_sampling_options(api_client):

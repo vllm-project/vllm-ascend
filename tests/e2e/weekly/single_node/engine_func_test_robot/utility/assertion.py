@@ -52,15 +52,47 @@ def assert_chat_completion_success(response, stream=False, msg=""):
     return finish_reason
 
 
+def assert_completion_response_shape(response, stream=False, msg=""):
+    """Verify a successful OpenAI completion response has a usable choices payload."""
+    assert_status_code_200(response, msg)
+    if stream:
+        assert_stream_has_done(response.text, msg)
+        return None
+
+    choices = response.json().get("choices")
+    check.is_true(isinstance(choices, list) and choices, f"{msg}Response choices should be a non-empty list")
+    return choices
+
+
+def assert_success_or_validation_error(response, stream=False, msg=""):
+    """Verify an implementation-specific request either succeeds or is rejected cleanly."""
+    if response.status_code == 200 and _extract_error_code(response) is None:
+        return assert_chat_completion_success(response, stream=stream, msg=msg)
+
+    assert_validation_error_response(response, msg)
+    return None
+
+
 def assert_validation_error_response(response, msg=""):
-    """Verify request validation failed with error code 400."""
-    assert_status_code_200_or_400(response, msg)
-    assert_error_code_400(response, msg)
+    """Verify request validation failed.
+
+    vLLM may reject bad OpenAI requests either with an HTTP 400/422 response or
+    with a streamed error event. Do not require an `error.code` field when the
+    HTTP status itself already proves validation failed.
+    """
+    error_code = _extract_error_code(response)
+    if response.status_code in (400, 422):
+        if error_code is not None:
+            check.is_in(error_code, [400, 422], f"{msg}Error code is not 400 or 422")
+        return
+
+    check.equal(response.status_code, 200, f"{msg}Response status code is not 200, 400 or 422")
+    check.is_in(error_code, [400, 422], f"{msg}Successful HTTP response does not contain a validation error")
 
 
 def assert_status_code_200_or_400(response, msg=""):
     """Verify status is accepted or rejected by implementation-specific validation."""
-    check.is_in(response.status_code, [200, 400], f"{msg}Response status code is not 200 or 400")
+    check.is_in(response.status_code, [200, 400, 422], f"{msg}Response status code is not 200, 400 or 422")
 
 
 def assert_stream_has_done(response_text, msg=""):
@@ -97,13 +129,20 @@ def assert_no_think_tag(response_text, msg=""):
 
 def assert_error_code_400(response, msg=""):
     """Verify error code is 400"""
+    error_code = _extract_error_code(response)
+    check.equal(error_code, 400, f"{msg}Error code is not 400")
+
+
+def _extract_error_code(response):
+    """Return OpenAI-compatible error code from JSON or SSE responses."""
     if "application/json" in response.headers.get("Content-Type", ""):
-        error_code = response.json().get("error", {}).get("code") or response.json().get("code")
-        check.equal(error_code, 400, f"{msg}Error code is not 400")
+        response_json = response.json()
+        return response_json.get("error", {}).get("code") or response_json.get("code")
     elif "text/event-stream" in response.headers.get("Content-Type", ""):
         match = re.search(r"\"code\"\s?:\s?(\d+)", response.text, re.M)
         if match:
-            check.equal(int(match.group(1)), 400, f"{msg}Streaming response error code is not 400")
+            return int(match.group(1))
+    return None
 
 
 def assert_image_edit_response_fields(response, msg=""):

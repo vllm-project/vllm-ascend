@@ -1,0 +1,300 @@
+test_name: "multi-node-kimi-k2.6-w4a8-pd"
+model: "/mnt/weight/kimi-k2.6-w4a8"
+num_nodes: 4
+npu_per_node: 16
+
+routing:
+  type: "disaggregated_prefill"
+  groups:
+    prefiller: [0, 1]
+    decoder: [2, 3]
+
+config:
+  - node_index: 0
+    port_start: 7100
+    dp_rpc_port: 12321
+    dp_size: 4
+    dp_size_local: 4
+    dp_rank_start: 0
+    tp_size: 4
+    dp_address: "${NODE_0_IP}"
+
+  - node_index: 1
+    port_start: 7100
+    dp_rpc_port: 12321
+    dp_size: 4
+    dp_size_local: 4
+    dp_rank_start: 0
+    tp_size: 4
+    dp_address: "${NODE_1_IP}"
+
+  - node_index: 2
+    port_start: 7100
+    dp_rpc_port: 12321
+    dp_size: 8
+    dp_size_local: 4
+    dp_rank_start: 0
+    tp_size: 4
+    dp_address: "${NODE_2_IP}"
+
+  - node_index: 3
+    port_start: 7100
+    dp_rpc_port: 12321
+    dp_size: 8
+    dp_size_local: 4
+    dp_rank_start: 4
+    tp_size: 4
+    dp_address: "${NODE_2_IP}"
+
+env_common: &env_common
+  SERVER_PORT: "${PORT}"
+  VLLM_RPC_TIMEOUT: "3600000"
+  VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "30000"
+  HCCL_EXEC_TIMEOUT: "204"
+  HCCL_CONNECT_TIMEOUT: "120"
+  HCCL_IF_IP: "${LOCAL_IP}"
+  OMP_PROC_BIND: "false"
+  OMP_NUM_THREADS: "1"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  TASK_QUEUE_ENABLE: "1"
+  HCCL_OP_EXPANSION_MODE: "AIV"
+  ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
+  VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
+  LD_LIBRARY_PATH: "/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH"
+  LD_PRELOAD: "/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD"
+  ftp_proxy: ""
+  https_proxy: ""
+  http_proxy: ""
+  DRAFT_MODEL: "/mnt/weight/kimi_k2.5_dflash"
+  EAGLE_MODEL: "/mnt/weight/k2.6_eagle"
+
+env_prefill: &env_prefill
+  <<: *env_common
+  GLOO_SOCKET_IFNAME: "enp210s0f0"
+  TP_SOCKET_IFNAME: "enp210s0f0"
+  HCCL_SOCKET_IFNAME: "enp210s0f0"
+  HCCL_BUFFSIZE: "1536"
+  VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+
+env_prefill_node_1: &env_prefill_node_1
+  <<: *env_prefill
+  GLOO_SOCKET_IFNAME: "enp209s0f0"
+  TP_SOCKET_IFNAME: "enp209s0f0"
+  HCCL_SOCKET_IFNAME: "enp209s0f0"
+
+env_decode: &env_decode
+  <<: *env_common
+  GLOO_SOCKET_IFNAME: "enp210s0f0"
+  TP_SOCKET_IFNAME: "enp210s0f0"
+  HCCL_SOCKET_IFNAME: "enp210s0f0"
+  VLLM_ASCEND_ENABLE_MLAPO: "1"
+  HCCL_BUFFSIZE: "800"
+  ASCEND_BUFFER_POOL: "4:8"
+
+templates:
+  - node_index: 0
+    envs:
+      <<: *env_prefill
+    server_cmd_template:
+      - --tool-call-parser
+      - "kimi_k2"
+      - --reasoning-parser
+      - "kimi_k2"
+      - --allowed-local-media-path
+      - "/"
+      - --host
+      - "0.0.0.0"
+      - --port
+      - $SERVER_PORT
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --enable-expert-parallel
+      - --seed
+      - "1024"
+      - --served-model-name
+      - "kimi_k26"
+      - --max-model-len
+      - "133120"
+      - --max-num-batched-tokens
+      - "16384"
+      - --max-num-seqs
+      - "1"
+      - --enforce-eager
+      - --trust-remote-code
+      - --gpu-memory-utilization
+      - "0.92"
+      - --no-enable-prefix-caching
+      - --quantization
+      - "ascend"
+      - --additional-config
+      - '{"recompute_scheduler_enable": true, "enable_shared_expert_dp": true}'
+      - --kv-transfer-config
+      - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_producer", "kv_port": "30000", "engine_id": "0", "kv_connector_extra_config": {"use_ascend_direct": true, "prefill": {"dp_size": 4, "tp_size": 4}, "decode": {"dp_size": 8, "tp_size": 4}}}'
+
+  - node_index: 1
+    envs:
+      <<: *env_prefill_node_1
+    server_cmd_template:
+      - --tool-call-parser
+      - "kimi_k2"
+      - --reasoning-parser
+      - "kimi_k2"
+      - --allowed-local-media-path
+      - "/"
+      - --host
+      - "0.0.0.0"
+      - --port
+      - $SERVER_PORT
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --enable-expert-parallel
+      - --seed
+      - "1024"
+      - --served-model-name
+      - "kimi_k26"
+      - --max-model-len
+      - "133120"
+      - --max-num-batched-tokens
+      - "16384"
+      - --max-num-seqs
+      - "1"
+      - --enforce-eager
+      - --trust-remote-code
+      - --gpu-memory-utilization
+      - "0.92"
+      - --no-enable-prefix-caching
+      - --quantization
+      - "ascend"
+      - --additional-config
+      - '{"recompute_scheduler_enable": true, "enable_shared_expert_dp": true}'
+      - --kv-transfer-config
+      - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_producer", "kv_port": "30100", "engine_id": "1", "kv_connector_extra_config": {"use_ascend_direct": true, "prefill": {"dp_size": 4, "tp_size": 4}, "decode": {"dp_size": 8, "tp_size": 4}}}'
+
+  - node_index: 2
+    envs:
+      <<: *env_decode
+    server_cmd_template:
+      - --tool-call-parser
+      - "kimi_k2"
+      - --reasoning-parser
+      - "kimi_k2"
+      - --allowed-local-media-path
+      - "/"
+      - --host
+      - "0.0.0.0"
+      - --port
+      - $SERVER_PORT
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --enable-expert-parallel
+      - --seed
+      - "1024"
+      - --served-model-name
+      - "kimi_k26"
+      - --max-model-len
+      - "133720"
+      - --max-num-batched-tokens
+      - "32"
+      - --max-num-seqs
+      - "8"
+      - --trust-remote-code
+      - --gpu-memory-utilization
+      - "0.91"
+      - --quantization
+      - "ascend"
+      - --no-enable-prefix-caching
+      - --speculative-config
+      - '{"method": "eagle3", "model": "/mnt/weight/k2.6_eagle", "num_speculative_tokens": 3}'
+      - --compilation-config
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      - --additional-config
+      - '{"recompute_scheduler_enable": true, "multistream_overlap_shared_expert": true}'
+      - --kv-transfer-config
+      - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_consumer", "kv_port": "30200", "engine_id": "2", "kv_connector_extra_config": {"use_ascend_direct": true, "prefill": {"dp_size": 4, "tp_size": 4}, "decode": {"dp_size": 8, "tp_size": 4}}}'
+
+  - node_index: 3
+    envs:
+      <<: *env_decode
+    server_cmd_template:
+      - --tool-call-parser
+      - "kimi_k2"
+      - --reasoning-parser
+      - "kimi_k2"
+      - --allowed-local-media-path
+      - "/"
+      - --host
+      - "0.0.0.0"
+      - --port
+      - $SERVER_PORT
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --enable-expert-parallel
+      - --seed
+      - "1024"
+      - --served-model-name
+      - "kimi_k26"
+      - --max-model-len
+      - "133720"
+      - --max-num-batched-tokens
+      - "32"
+      - --max-num-seqs
+      - "8"
+      - --trust-remote-code
+      - --gpu-memory-utilization
+      - "0.91"
+      - --quantization
+      - "ascend"
+      - --no-enable-prefix-caching
+      - --speculative-config
+      - '{"method": "eagle3", "model": "/mnt/weight/k2.6_eagle", "num_speculative_tokens": 3}'
+      - --compilation-config
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      - --additional-config
+      - '{"recompute_scheduler_enable": true, "multistream_overlap_shared_expert": true}'
+      - --kv-transfer-config
+      - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_consumer", "kv_port": "30200", "engine_id": "2", "kv_connector_extra_config": {"use_ascend_direct": true, "prefill": {"dp_size": 4, "tp_size": 4}, "decode": {"dp_size": 8, "tp_size": 4}}}'
+
+benchmarks:
+  perf:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs1000_kimi
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 512
+    max_out_len: 1024
+    batch_size: 128
+    request_rate: 3
+    baseline: 1
+    threshold: 0.95

@@ -43,6 +43,9 @@ def _response_error_code(response):
 
 
 def _assert_request_id_response(response, request_id, stream, allow_400):
+    if allow_400 and response.status_code != 200:
+        assertion.assert_validation_error_response(response)
+        return
     if allow_400 and _response_error_code(response) == 400:
         return
 

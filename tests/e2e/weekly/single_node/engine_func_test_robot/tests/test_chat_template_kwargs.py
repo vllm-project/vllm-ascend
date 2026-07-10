@@ -69,7 +69,7 @@ def test_chat_template_kwargs_rejects_invalid_top_level_types(api_client, chat_t
 )
 def test_chat_template_kwargs_accepts_or_rejects_boundary_objects(api_client, chat_template_kwargs):
     response = completion_request.send_chat_request(api_client, chat_template_kwargs=chat_template_kwargs)
-    assertion.assert_status_code_200_or_400(response)
+    assertion.assert_success_or_validation_error(response)
 
 
 @pytest.mark.parametrize("enabled", [True, False], ids=["enabled", "disabled"])
@@ -81,7 +81,7 @@ def test_chat_template_kwargs_qwen_enable_thinking(api_client, request, enabled)
     response = completion_request.send_chat_request(
         api_client, chat_template_kwargs={"enable_thinking": enabled}, max_tokens=512
     )
-    assertion.assert_status_code_200(response)
+    assertion.assert_completion_response_shape(response)
     if _should_check_think_tag(request):
         response_text = response.content.decode("utf-8")
         if enabled:
@@ -99,7 +99,7 @@ def test_chat_template_kwargs_deepseek_thinking(api_client, request, enabled):
     response = completion_request.send_chat_request(
         api_client, chat_template_kwargs={"thinking": enabled}, max_tokens=512
     )
-    assertion.assert_status_code_200(response)
+    assertion.assert_completion_response_shape(response)
     if _should_check_think_tag(request):
         response_text = response.content.decode("utf-8")
         if enabled:
@@ -139,4 +139,4 @@ def test_chat_template_kwargs_thinking_accepts_or_rejects_model_specific_boundar
     response = completion_request.send_chat_request(
         api_client, chat_template_kwargs=chat_template_kwargs, max_tokens=512
     )
-    assertion.assert_status_code_200_or_400(response)
+    assertion.assert_success_or_validation_error(response)

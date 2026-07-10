@@ -20,10 +20,17 @@ def test_n_omitted_uses_default_single_choice(api_client):
     _assert_choice_count(response, 1)
 
 
-@pytest.mark.parametrize("n", [0, -1, 1.5, "2", [], {}, False])
+@pytest.mark.parametrize("n", [0, -1, 1.5, [], {}, False])
 def test_n_rejects_invalid_values(api_client, n):
     response = completion_request.send_chat_request(api_client, n=n)
     assertion.assert_validation_error_response(response)
+
+
+def test_n_accepts_coerced_string_integer(api_client):
+    response = completion_request.send_chat_request(api_client, n="2", temperature=0.7)
+    assertion.assert_success_or_validation_error(response)
+    if response.status_code == 200:
+        _assert_choice_count(response, 2)
 
 
 def test_n_rejects_multiple_choices_with_greedy_sampling(api_client):

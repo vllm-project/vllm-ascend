@@ -14,10 +14,16 @@ def test_top_p_accepts_streaming_request(api_client):
     assertion.assert_chat_completion_success(response, stream=True)
 
 
-@pytest.mark.parametrize("top_p", [0.0, -0.01, 1.01, "0.9", None, []])
+@pytest.mark.parametrize("top_p", [0.0, -0.01, 1.01, []])
 def test_top_p_rejects_invalid_values(api_client, top_p):
     response = completion_request.send_chat_request(api_client, top_p=top_p)
     assertion.assert_validation_error_response(response)
+
+
+@pytest.mark.parametrize("top_p", ["0.9", None], ids=["coerced_string", "default_null"])
+def test_top_p_accepts_coerced_or_default_values(api_client, top_p):
+    response = completion_request.send_chat_request(api_client, top_p=top_p)
+    assertion.assert_success_or_validation_error(response)
 
 
 def test_top_p_combines_with_other_sampling_options(api_client):

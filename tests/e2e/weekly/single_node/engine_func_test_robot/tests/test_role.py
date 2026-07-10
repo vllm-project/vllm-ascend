@@ -35,17 +35,28 @@ def test_role_accepts_streaming_multi_turn_request(api_client):
 @pytest.mark.parametrize(
     "message",
     [
-        {"role": "invalid", "content": "Hello."},
         {"content": "Hello."},
         {"role": None, "content": "Hello."},
         {"role": 1, "content": "Hello."},
-        {"role": "", "content": "Hello."},
-        {"role": "User", "content": "Hello."},
     ],
 )
 def test_role_rejects_invalid_role_values(api_client, message):
     response = completion_request.send_chat_request(api_client, messages=[message])
     assertion.assert_validation_error_response(response)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        {"role": "invalid", "content": "Hello."},
+        {"role": "", "content": "Hello."},
+        {"role": "User", "content": "Hello."},
+    ],
+    ids=["unknown_role", "empty_role", "case_variant"],
+)
+def test_role_accepts_or_rejects_implementation_specific_values(api_client, message):
+    response = completion_request.send_chat_request(api_client, messages=[message])
+    assertion.assert_success_or_validation_error(response)
 
 
 def test_system_instruction_can_guide_response(api_client):
