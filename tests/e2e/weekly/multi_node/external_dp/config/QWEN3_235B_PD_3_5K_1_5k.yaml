@@ -198,7 +198,7 @@ benchmarks:
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
     num_prompts: 760
-    max_out_len: 1024
+    max_out_len: 1500
     batch_size: 190
     request_rate: 0
     baseline: 3583.8747
