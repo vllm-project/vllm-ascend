@@ -1050,6 +1050,21 @@ class NPUWorker(WorkerBase):
             logger.error("query NPU card %s fail: %s", self.local_rank, e)
         return
 
+    def save_sharded_state(
+        self,
+        path: str,
+        pattern: str | None = None,
+        max_size: int | None = None,
+    ) -> None:
+        from vllm.model_executor.model_loader import ShardedStateLoader
+
+        ShardedStateLoader.save_model(
+            self.model_runner.model,
+            path,
+            pattern=pattern,
+            max_size=max_size,
+        )
+
 
 def parse_text_output(output) -> None:
     lines = output.strip().split("\n")
