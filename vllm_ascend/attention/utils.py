@@ -875,11 +875,7 @@ def maybe_route_512_capture(impl, attn_metadata) -> bool:
     A5 gate: on A5 (950) full_graph_pa segfaults in atb::_npu_paged_attention
     during capture for this layer; A5's original path (full_graph_fia) works.
     This fix targets A2/A3 (910B4) where FIA TND raises error 561002.
-
-    Explicitly scoped to Gemma4 MTP so other models are unaffected.
     """
-    if not _is_gemma4_mtp():
-        return False
     from vllm_ascend.ascend_forward_context import _EXTRA_CTX
     from vllm_ascend.utils import is_950
     return (
@@ -898,10 +894,5 @@ def maybe_skip_reshape_for_kv_share(impl, attn_metadata) -> bool:
     before attention reads it.  When True the caller must still record the
     producer's reshape_cache_event (if this layer is a producer) and return
     early.
-
-    Explicitly scoped to Gemma4 MTP so other KV-sharing models (e.g. MLA)
-    keep the upstream reshape_and_cache behavior.
     """
-    if not _is_gemma4_mtp():
-        return False
     return getattr(impl, 'kv_sharing_target_layer_name', None) is not None
