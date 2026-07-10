@@ -58,6 +58,7 @@ permissions:
   contents: read
   pull-requests: read
   issues: read
+  statuses: write
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -248,14 +249,28 @@ jobs:
             contains(needs.parse-trigger.outputs.filter, format(',{0},', matrix.test_config.name))
           )
         }}
+      send_ready_signal: true
     secrets:
       KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
       OBS_ACCESS_KEY_ID: ${{ secrets.OBS_ACCESS_KEY_ID }}
       OBS_SECRET_ACCESS_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
 
+  double-node-pods-started:
+    name: Wait for all double-node pods launched
+    needs: [setup-vars, parse-trigger, build-image, multi-node-tests]
+    if: >-
+      always() &&
+      needs.parse-trigger.outputs.run == 'true' &&
+      (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
+    uses: ./.github/workflows/_nightly_wait_for_pods_ready.yaml
+    with:
+      matrix_json: ${{ needs.setup-vars.outputs.double_node }}
+      filter: ${{ needs.parse-trigger.outputs.filter }}
+      context_prefix: 'double-node-pods-ready'
+
   single-node-tests:
     name: single-node
-    needs: [setup-vars, parse-trigger, build-image, double-node-tests]
+    needs: [setup-vars, parse-trigger, build-image, double-node-pods-started]
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&
@@ -285,7 +300,7 @@ jobs:
 
   multi-card-tests:
     name: single-node
-    needs: [setup-vars, parse-trigger, build-image, double-node-tests]
+    needs: [setup-vars, parse-trigger, build-image, double-node-pods-started]
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&
