@@ -115,9 +115,8 @@ In addition, if you don't want to use the docker image as above, you can also bu
 
 ## 5 Online Service Deployment
 
-:::{note}
+**Notice:**
 In this tutorial, we suppose you downloaded the model weight to `/root/.cache/`. Feel free to change it to your own path.
-:::
 
 ### 5.1 Single-node Deployment
 
