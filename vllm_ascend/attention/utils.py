@@ -7,11 +7,13 @@ import torch.nn.functional as F
 import torch_npu
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group, is_v1_kv_transfer_group
-from vllm.utils.math_utils import cdiv
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 
-from vllm_ascend.device.utils import FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
+from vllm_ascend.device.utils import (
+    FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE,
+    _gather_paged_kv_to_dense,
+)
 from vllm_ascend.utils import (
     AscendDeviceType,
     get_ascend_config,
@@ -601,19 +603,21 @@ def _forward_shared_kv_prefill_attention(
     """
     num_tokens = attn_metadata.actual_seq_lengths_q[-1]
     q = query[:num_tokens]  # [T, H, D]
-    k = shared_key           # [S, Hkv, D]
-    v = shared_value         # [S, Hkv, D]
+    k = shared_key  # [S, Hkv, D]
+    v = shared_value  # [S, Hkv, D]
 
     # Create causal cross-attention mask.  Query position i can attend
     # to KV positions [0, kv_len - q_len + i].  For sliding-window
     # layers, additionally restrict to the last `sliding_window` tokens.
     S = k.shape[0]
     offset = S - num_tokens
-    mask = torch.ones(num_tokens, S, dtype=q.dtype, device=q.device) * float('-inf')
+    mask = torch.ones(num_tokens, S, dtype=q.dtype, device=q.device) * float("-inf")
     for i in range(num_tokens):
-        window_start = max(0, i + offset - impl.sliding_window + 1) \
-            if impl.sliding_window is not None and S > impl.sliding_window \
+        window_start = (
+            max(0, i + offset - impl.sliding_window + 1)
+            if impl.sliding_window is not None and impl.sliding_window < S
             else 0
+        )
         causal_end = i + offset + 1
         mask[i, window_start:causal_end] = 0
     attn_mask = mask
@@ -627,12 +631,14 @@ def _forward_shared_kv_prefill_attention(
         v = v.repeat_interleave(n_rep, dim=1)  # [S, Hkv, D] -> [S, Hq, D]
 
     # Always use 4D format [B, H, L, D] for Ascend NPU.
-    q_4d = q.unsqueeze(0).transpose(1, 2)   # [T, H, D] -> [1, H, T, D]
-    k_4d = k.unsqueeze(0).transpose(1, 2)   # [S, H, D] -> [1, H, S, D]
-    v_4d = v.unsqueeze(0).transpose(1, 2)   # [S, H, D] -> [1, H, S, D]
+    q_4d = q.unsqueeze(0).transpose(1, 2)  # [T, H, D] -> [1, H, T, D]
+    k_4d = k.unsqueeze(0).transpose(1, 2)  # [S, H, D] -> [1, H, S, D]
+    v_4d = v.unsqueeze(0).transpose(1, 2)  # [S, H, D] -> [1, H, S, D]
     attn_mask = attn_mask.unsqueeze(0).unsqueeze(0)  # [T, S] -> [1, 1, T, S]
     attn_output = F.scaled_dot_product_attention(
-        q_4d, k_4d, v_4d,
+        q_4d,
+        k_4d,
+        v_4d,
         attn_mask=attn_mask,
         scale=impl.scale,
     )  # [1, H, T, D]
@@ -640,35 +646,6 @@ def _forward_shared_kv_prefill_attention(
 
     output[:num_tokens] = attn_output
     return output
-
-
-def _gather_paged_kv_to_dense(
-    impl,
-    key_cache: torch.Tensor,
-    value_cache: torch.Tensor,
-    block_table: torch.Tensor,
-    seq_lens: list,
-) -> tuple:
-    block_size = key_cache.shape[1]
-    seq_lens_tensor = torch.tensor(seq_lens, dtype=torch.long, device=key_cache.device)
-    max_seq_len = int(seq_lens_tensor.max().item())
-    num_blocks = cdiv(max_seq_len, block_size)
-    block_table_sliced = block_table[: len(seq_lens), :num_blocks].long()
-
-    flat_block_ids = block_table_sliced.reshape(-1)
-    max_tokens_padded = num_blocks * block_size
-    dense_shape = (
-        len(seq_lens),
-        max_tokens_padded,
-        impl.num_kv_heads,
-        impl.head_size,
-    )
-    gathered_key = key_cache.index_select(0, flat_block_ids).reshape(dense_shape)
-    gathered_value = value_cache.index_select(0, flat_block_ids).reshape(dense_shape)
-
-    positions = torch.arange(max_tokens_padded, dtype=torch.long, device=key_cache.device)
-    valid_mask = positions.unsqueeze(0) < seq_lens_tensor.unsqueeze(1)
-    return gathered_key[valid_mask].contiguous(), gathered_value[valid_mask].contiguous()
 
 
 def _get_current_token_shared_kv(
@@ -701,7 +678,7 @@ def _get_shared_kv_from_block_table(
     model's own (empty) cache.  We must swap to the target layer's
     cache via _kv_share_target_impl, mirroring the PA path fix.
     """
-    _tgt_impl = getattr(impl, '_kv_share_target_impl', None)
+    _tgt_impl = getattr(impl, "_kv_share_target_impl", None)
     if _tgt_impl is not None and _tgt_impl.key_cache is not None:
         read_kc = _tgt_impl.key_cache
         read_vc = _tgt_impl.value_cache
@@ -718,8 +695,8 @@ def _get_shared_kv_from_block_table(
     # reads from the wrong pool.  Route each layer to its per-group block_table
     # via _kv_share_gid (set by _store_gids_on_impls) + _per_group_bt_ref
     # (the {gid: block_table} dict set by set_per_group_block_table).
-    _my_gid = getattr(impl, '_kv_share_gid', None)
-    _per_group_bt = getattr(impl, '_per_group_bt_ref', None)
+    _my_gid = getattr(impl, "_kv_share_gid", None)
+    _per_group_bt = getattr(impl, "_per_group_bt_ref", None)
     _routed_bt = None
     if _my_gid is not None and _per_group_bt is not None and _my_gid in _per_group_bt:
         _routed_bt = _per_group_bt[_my_gid]
@@ -730,18 +707,28 @@ def _get_shared_kv_from_block_table(
 
     try:
         dense_key, dense_value = _gather_paged_kv_to_dense(
-            impl, read_kc, read_vc, block_table, seq_lens,
+            read_kc,
+            read_vc,
+            block_table,
+            seq_lens,
+            impl.num_kv_heads,
+            impl.head_size,
         )
         # Zero-value fallback: if the routed block_table gave all-zero KV
         # (wrong pool), try the other groups' block_tables.  Reverse
         # iteration prefers the global-attention group (highest gid).
         _k_mean = dense_key.float().mean().item()
-        _per_group_bt = getattr(impl, '_per_group_bt_ref', None)
+        _per_group_bt = getattr(impl, "_per_group_bt_ref", None)
         if abs(_k_mean) < 1e-6 and _per_group_bt is not None and len(_per_group_bt) > 0:
             for _gid, _bt in reversed(list(_per_group_bt.items())):
                 try:
                     _dk, _dv = _gather_paged_kv_to_dense(
-                        impl, read_kc, read_vc, _bt, seq_lens,
+                        read_kc,
+                        read_vc,
+                        _bt,
+                        seq_lens,
+                        impl.num_kv_heads,
+                        impl.head_size,
                     )
                     _km = _dk.float().mean().item()
                     if abs(_km) > 1e-6:
@@ -774,8 +761,8 @@ def maybe_kv_share_prefill(
     Also initialises impl.key_cache / impl.value_cache from the kv_cache
     tuple for KV-sharing layers (they do not own a private cache).
     """
-    from vllm_ascend.attention.attention_v1 import AscendAttentionState
     from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+    from vllm_ascend.attention.attention_v1 import AscendAttentionState
 
     # Ensure self.key_cache / self.value_cache are initialised from the
     # kv_cache tuple BEFORE the shared-KV lookup, otherwise they will be
@@ -793,7 +780,8 @@ def maybe_kv_share_prefill(
         and key is not None
         and value is not None
         and query.shape[0] == key.shape[0]
-        and attn_metadata.attn_state in (
+        and attn_metadata.attn_state
+        in (
             AscendAttentionState.PrefillNoCache,
             AscendAttentionState.ChunkedPrefill,
             AscendAttentionState.SpecDecoding,
@@ -805,9 +793,8 @@ def maybe_kv_share_prefill(
     # For SpecDecoding / draft-model layers, slot_mapping points to
     # empty/wrong positions (draft layers do not write KV).  Skip the
     # slot-based lookup and go straight to the block-table gather.
-    if (
-        attn_metadata.attn_state != AscendAttentionState.SpecDecoding
-        and not getattr(_EXTRA_CTX, 'is_draft_model', False)
+    if attn_metadata.attn_state != AscendAttentionState.SpecDecoding and not getattr(
+        _EXTRA_CTX, "is_draft_model", False
     ):
         shared_key, shared_value = _get_current_token_shared_kv(impl, attn_metadata)
     else:
@@ -820,7 +807,12 @@ def maybe_kv_share_prefill(
         return None
 
     return _forward_shared_kv_prefill_attention(
-        impl, query, shared_key, shared_value, attn_metadata, output,
+        impl,
+        query,
+        shared_key,
+        shared_value,
+        attn_metadata,
+        output,
     )
 
 
@@ -834,28 +826,9 @@ def should_skip_draft_kv_write(impl) -> bool:
     Skip the write for draft KV-shared layers — they only READ.
     """
     from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-    return (
-        getattr(impl, 'kv_sharing_target_layer_name', None) is not None
-        and getattr(_EXTRA_CTX, 'is_draft_model', False)
-    )
 
-
-def _is_gemma4_mtp() -> bool:
-    """True only when the running model is Gemma4 MTP.
-
-    Explicit gate so the 512-capture routing and KV-share reshape skip added
-    for Gemma4 MTP are no-ops for every other model, keeping the attention
-    hot path untouched upstream.
-    """
-    from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-    vllm_config = getattr(_EXTRA_CTX, "vllm_config", None)
-    if vllm_config is None:
-        return False
-    _spec = getattr(vllm_config, "speculative_config", None)
-    return (
-        _spec is not None
-        and hasattr(_spec, "use_gemma4_mtp")
-        and _spec.use_gemma4_mtp()
+    return getattr(impl, "kv_sharing_target_layer_name", None) is not None and getattr(
+        _EXTRA_CTX, "is_draft_model", False
     )
 
 
@@ -878,10 +851,11 @@ def maybe_route_512_capture(impl, attn_metadata) -> bool:
     """
     from vllm_ascend.ascend_forward_context import _EXTRA_CTX
     from vllm_ascend.utils import is_950
+
     return (
-        getattr(impl, 'head_size', None) == FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
-        and getattr(impl, 'sliding_window', None) is None
-        and not getattr(_EXTRA_CTX, 'is_draft_model', False)
+        getattr(impl, "head_size", None) == FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
+        and getattr(impl, "sliding_window", None) is None
+        and not getattr(_EXTRA_CTX, "is_draft_model", False)
         and not is_950()
     )
 
@@ -895,4 +869,4 @@ def maybe_skip_reshape_for_kv_share(impl, attn_metadata) -> bool:
     producer's reshape_cache_event (if this layer is a producer) and return
     early.
     """
-    return getattr(impl, 'kv_sharing_target_layer_name', None) is not None
+    return getattr(impl, "kv_sharing_target_layer_name", None) is not None

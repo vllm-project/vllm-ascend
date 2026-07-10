@@ -269,9 +269,7 @@ class AscendRotaryEmbedding(RotaryEmbedding):
         if key is None:
             from vllm_ascend.spec_decode.gemma4_proposer import gemma4_q_only_rope
 
-            q = gemma4_q_only_rope(
-                positions, query, self.cos_sin_cache, self.head_size, self.rotary_dim, is_neox_style
-            )
+            q = gemma4_q_only_rope(positions, query, self.cos_sin_cache, self.head_size, self.rotary_dim, is_neox_style)
             return q, None
         is_draft_model = _EXTRA_CTX.is_draft_model if is_forward_context_available() else False
         flash_comm_v1_enabled = _EXTRA_CTX.flash_comm_v1_enabled if is_forward_context_available() else False

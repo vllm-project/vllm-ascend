@@ -752,8 +752,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         """True only for Gemma4 MTP. Gates Gemma4-only hooks in the shared
         base so other draft proposers hit no extra work on the hot path."""
         return (
-            self.speculative_config is not None
-            and getattr(self.speculative_config, "use_gemma4_mtp", lambda: False)()
+            self.speculative_config is not None and getattr(self.speculative_config, "use_gemma4_mtp", lambda: False)()
         )
 
     def _sync_wait_target_events(self) -> None:

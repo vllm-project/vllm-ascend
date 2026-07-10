@@ -64,16 +64,12 @@ def gemma4_q_only_rope(
         q_pass = query[..., rotary_dim:]
         q_rot = q_rot.contiguous().view(num_tokens, -1)
         k_dummy = torch.empty_like(q_rot)
-        torch_npu._npu_rotary_embedding(
-            positions, q_rot, k_dummy, rotary_dim, cos_sin_cache, is_neox_style
-        )
+        torch_npu._npu_rotary_embedding(positions, q_rot, k_dummy, rotary_dim, cos_sin_cache, is_neox_style)
         q_rot = q_rot.view(num_tokens, -1, rotary_dim)
         return torch.cat((q_rot, q_pass), dim=-1).flatten(-2, -1)
     query = query.contiguous().view(num_tokens, -1)
     k_dummy = torch.empty_like(query)
-    torch_npu._npu_rotary_embedding(
-        positions, query, k_dummy, head_size, cos_sin_cache, is_neox_style
-    )
+    torch_npu._npu_rotary_embedding(positions, query, k_dummy, head_size, cos_sin_cache, is_neox_style)
     return query.view(num_tokens, -1, head_size).flatten(-2, -1)
 
 

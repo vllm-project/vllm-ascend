@@ -1272,8 +1272,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if _EXTRA_CTX.capturing:
             # head_dim=512 global attention 层（Gemma4）在图捕获时 FIA TND 不支
             # 持，路由到 PagedAttention。helper 内部已按 head_size==512 自门控
-            # （A5 由 is_950 跳过），无需外层 Gemma4 门控。不能用 _is_gemma4_mtp()
-            # ——draft forward 时 _EXTRA_CTX.vllm_config 是 draft config，没有
+            # （A5 由 is_950 跳过），无需外层 Gemma4 门控。不能用 config-based
+            # gate——draft forward 时 _EXTRA_CTX.vllm_config 是 draft config，没有
             # speculative_config，门控会误判 False。
             if maybe_route_512_capture(self, attn_metadata):
                 return self.full_graph_pa(query, attn_metadata, output)
@@ -1476,7 +1476,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
             # KV-sharing target 层复用 producer 的 cache，跳过 reshape_and_cache
             # 以免覆写共享 KV 槽。helper 内部按 kv_sharing_target_layer_name 自门
-            # 控，非 KV-sharing 层返回 False。不用 _is_gemma4_mtp()（见上）。
+            # 控，非 KV-sharing 层返回 False。不用 config-based gate（见上）。
             if maybe_skip_reshape_for_kv_share(self, attn_metadata):
                 if self.is_kv_producer:
                     attn_metadata.reshape_cache_event.record()
@@ -1494,7 +1494,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             )
             # 通知 KV-transfer connector KV 已写入。无 connector 时 no-op
             # （Gemma4 MTP 用 in-process KV-sharing，无 connector）。不用
-            # _is_gemma4_mtp() 门控（见上，draft forward 误判）。
+            # config-based gate 门控（见上，draft forward 误判）。
             notify_kv_cache_written()
             if self.is_kv_producer:
                 attn_metadata.reshape_cache_event.record()
@@ -1513,9 +1513,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # KV-sharing draft 层从 target 层 paged cache 读 K/V（PyTorch SDPA），
         # FIA 处理不了 Q 长 != KV 长的 cross-attention。helper 内部按
         # kv_sharing_target_layer_name 自门控，非 KV-sharing 层返回 None 走正常
-        # 路径。不用 _is_gemma4_mtp() 门控（见上，draft forward 误判）。
+        # 路径。不用 config-based gate 门控（见上，draft forward 误判）。
         _kv_share_out = maybe_kv_share_prefill(
-            self, query, key, value, kv_cache, attn_metadata, output,
+            self,
+            query,
+            key,
+            value,
+            kv_cache,
+            attn_metadata,
+            output,
         )
         if _kv_share_out is not None:
             return _kv_share_out
@@ -1583,7 +1589,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output_padded = None
         # Q-only draft KV-sharing 层只读不写，跳过 reshape_and_cache 以免把
         # dummy K/V 写回共享 cache。helper 内部按 kv_sharing_target_layer_name
-        # + is_draft_model 自门控。不用 _is_gemma4_mtp()（见上，draft forward 误判）。
+        # + is_draft_model 自门控。不用 config-based gate（见上，draft forward 误判）。
         if key is not None and value is not None and not should_skip_draft_kv_write(self):
             output_padded = output
             query, key, value, output_padded = self.reshape_and_cache(
