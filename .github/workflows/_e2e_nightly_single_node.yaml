@@ -64,11 +64,6 @@ on:
         default: 120
         type: string
         description: test case execution timeout period,default:120 minutes
-      aop_single_enabled:
-        required: false
-        type: boolean
-        default: false
-        description: enable AOP hooks (capture / classify / skip-or-process)
     secrets:
       OBS_ACCESS_KEY_ID:
         required: false

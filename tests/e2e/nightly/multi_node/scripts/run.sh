@@ -181,7 +181,6 @@ install_aisbench() {
     BENCH_DIR="$WORKSPACE/vllm-ascend/benchmark"
 
     cp -r /tmp/aisbench-backup "$BENCH_DIR"
-    cp /tmp/_build_info_backup.py /vllm-workspace/vllm-ascend/vllm_ascend/_build_info.py 2>/dev/null || true
 
     cd "$BENCH_DIR"
     pip install -e . \
