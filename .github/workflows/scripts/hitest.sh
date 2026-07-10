@@ -40,13 +40,13 @@ if [ -z "${MR_THIRD_ID}" ]; then
 fi
 echo "Using current PR number as MR_THIRD_ID: ${MR_THIRD_ID}"
 
-env:
-  X_APIG_APPCODE: ${{ secrets.AUROGON_APPCODE }}
-  APP_KEY: ${{ secrets.AUROGON_APPKEY }}
-  APP_SECRET: ${{ secrets.AUROGON_APPSECRET }}
-# X_APIG_APPCODE=${{ secrets.AUROGON_APPCODE }}
-# APP_KEY=${{ secrets.AUROGON_APPKEY }}
-# APP_SECRET=${{ secrets.AUROGON_APPSECRET }}
+# env:
+#   X_APIG_APPCODE: ${{ secrets.AUROGON_APPCODE }}
+#   APP_KEY: ${{ secrets.AUROGON_APPKEY }}
+#   APP_SECRET: ${{ secrets.AUROGON_APPSECRET }}
+X_APIG_APPCODE="X_APIG_APPCODE"
+APP_KEY="APP_KEY"
+APP_SECRET="APP_SECRET"
 
 # Api1 save mr with retry
 MAX_RETRY=3
