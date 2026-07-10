@@ -12,7 +12,6 @@ import torch.nn.functional as F
 import vllm.distributed.parallel_state as _ps  # type: ignore[import-not-found]
 from vllm.config import CompilationMode, CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
 from vllm.distributed.parallel_state import (
-    get_pcp_group,
     get_pp_group,
     get_tp_group,
     get_world_group,
@@ -46,10 +45,8 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadataBuilder
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper, update_full_graph_params
-from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.parallel_state import get_lmhead_tp_group
 from vllm_ascend.models.llama_eagle3_vwn import Eagle3VwnLlamaForCausalLM
@@ -787,7 +784,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         )
         if self.pcp_size * self.dcp_size > 1:
             assert long_seq_args is not None
-            query_lens_d, ori_token_indices_to_sample = long_seq_args
+            _, ori_token_indices_to_sample = long_seq_args
         assert self.runner is not None
 
         has_lora = len(self.runner.input_batch.lora_id_to_lora_request) > 0
@@ -863,16 +860,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 )
 
             if self.pcp_size > 1:
-                pcp_allgather_restore_idx = (
+                self.runner.pcp_manager.mask_spec_decode_restore_idx_for_graph(
                     common_attn_metadata.prefill_context_parallel_metadata.pcp_allgather_restore_idx
                 )
-                index = torch.arange(pcp_allgather_restore_idx.shape[0], device=pcp_allgather_restore_idx.device)
-                mask = (index % (self.pcp_size * self.decode_threshold)) >= self.decode_threshold
-                pcp_allgather_restore_idx[mask] = 0
-                self.runner.pcp_manager.pcp_allgather_restore_idx.gpu[: pcp_allgather_restore_idx.shape[0]] = (
-                    pcp_allgather_restore_idx
-                )
-                self.runner.pcp_manager.pcp_allgather_restore_idx.gpu[pcp_allgather_restore_idx.shape[0] :] = 0
         else:
             num_reqs_padded = common_attn_metadata.num_reqs
             # In the below scenario, padding has been applied by _pad_query_start_loc_for_fia in the model runner.
@@ -956,85 +946,53 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         metadata_has_prefill = bool(getattr(attn_metadata_i, "num_prefills", 0))
         is_prefill_batch = num_prefill_reqs > 0 or metadata_has_prefill
+        pcp_mtp_inputs = None
+        draft_cp_kwargs = {
+            "ori_seq_len": None,
+            "ori_seq_len_cpu": None,
+            "slot_indices": None,
+            "mtp_slot_mapping": None,
+        }
         if self.pcp_size * self.dcp_size > 1:
-            is_decode_only_batch = num_decode_reqs > 0 and not is_prefill_batch
-            if self.num_speculative_tokens > 1 and is_decode_only_batch:
-                # For pcp/dcp, tokens are split across different cp ranks,
-                # so we can not simply update slot_mapping by += 1.
-                # Instead, we pre-allocate mtp slot_mapping in model_runner
-                # (_generate_pcp_mtp_input), and use updated slot_indices
-                # to get corresponding slot_mapping in each step.
-                query_start_loc_pcp_full = self.runner.pcp_manager.query_start_loc_pcp_full.gpu
-                cu_num_tokens_pcp_full = query_start_loc_pcp_full[1 : num_decode_reqs + 1]
-                query_lens_d_device = (
-                    query_start_loc_pcp_full[1 : num_decode_reqs + 1]
-                    - query_start_loc_pcp_full[:num_decode_reqs]
+            pcp_mtp_inputs = self.runner.pcp_manager.prepare_spec_decode_mtp_drafting_inputs(
+                common_attn_metadata=common_attn_metadata,
+                attn_metadata=attn_metadata_i,
+                ori_token_indices_to_sample=ori_token_indices_to_sample,
+                batch_size=batch_size,
+                num_decode_reqs=num_decode_reqs,
+                is_prefill_batch=is_prefill_batch,
+                num_speculative_tokens=self.num_speculative_tokens,
+            )
+            if pcp_mtp_inputs is not None:
+                draft_cp_kwargs.update(
+                    ori_seq_len=pcp_mtp_inputs.seq_lens,
+                    ori_seq_len_cpu=pcp_mtp_inputs.seq_lens_cpu,
+                    slot_indices=pcp_mtp_inputs.slot_indices,
+                    mtp_slot_mapping=pcp_mtp_inputs.slot_mapping,
                 )
-                num_reject_tokens = cu_num_tokens_pcp_full - ori_token_indices_to_sample - 1
-                num_accept_tokens = query_lens_d_device - num_reject_tokens
-                ori_seq_len = getattr(attn_metadata_i, "seq_lens", None)
-                ori_seq_len_cpu = getattr(attn_metadata_i, "seq_lens_cpu", None)
-                if ori_seq_len is None:
-                    ori_seq_len = ori_seq_len_cpu
-                ori_seq_len = ori_seq_len[:batch_size].clone()
-                if ori_seq_len_cpu is not None:
-                    ori_seq_len_cpu = ori_seq_len_cpu[:batch_size].clone()
-                slot_idx_base = (
-                    query_start_loc_pcp_full[:num_decode_reqs] * self.pcp_size
-                    + torch.arange(num_decode_reqs, device=self.device, dtype=torch.int64)
-                    * (self.num_speculative_tokens - 1)
-                    * self.pcp_size
-                    + (num_accept_tokens - 1) * self.pcp_size
-                )
-                slot_indices = (
-                    slot_idx_base[:, None]
-                    + self.cp_slot_offsets[: self.pcp_size].to(slot_idx_base.device)
-                ).reshape(-1)
-                mtp_slot_mapping = self.runner.pcp_manager.mtp_slot_pad
 
-                common_attn_metadata.block_table_tensor = common_attn_metadata.block_table_tensor[:batch_size]
-
-                # Copy the old attn_metadata and update
-                if not self.parallel_drafting:
-                    for draft_index in range(1, self.num_speculative_tokens):
-                        per_layer_attn_metadata = dict()
-                        for attn_group in self.draft_attn_groups:
-                            common_attn_metadata, attn_metadata = self.attn_update_stack_num_spec_norm(
-                                draft_index,
-                                attn_metadata,
-                                common_attn_metadata,
-                                batch_size,
-                                num_input_tokens,
-                                used_update_positions,
-                                aclgraph_runtime_mode,
-                                ori_seq_len,
-                                ori_seq_len_cpu,
-                                slot_indices,
-                                mtp_slot_mapping,
-                                attn_group=attn_group,
-                            )
-                            for layer_name in self.attn_layer_names:
-                                per_layer_attn_metadata[layer_name] = attn_metadata
-                        multi_steps_attn_metadata.append(per_layer_attn_metadata)
-        else:
+        should_update_next_steps = not self.parallel_drafting and (
+            self.pcp_size * self.dcp_size == 1 or pcp_mtp_inputs is not None
+        )
+        if should_update_next_steps:
             # Copy the old attn_metadata and update
-            if not self.parallel_drafting:
-                for draft_index in range(1, self.num_speculative_tokens):
-                    per_layer_attn_metadata = dict()
-                    for attn_group in self.draft_attn_groups:
-                        common_attn_metadata, attn_metadata = self.attn_update_stack_num_spec_norm(
-                            draft_index,
-                            attn_metadata,
-                            common_attn_metadata,
-                            batch_size,
-                            num_input_tokens,
-                            used_update_positions,
-                            aclgraph_runtime_mode,
-                            attn_group=attn_group,
-                        )
-                        for layer_name in self.attn_layer_names:
-                            per_layer_attn_metadata[layer_name] = attn_metadata
-                    multi_steps_attn_metadata.append(per_layer_attn_metadata)
+            for draft_index in range(1, self.num_speculative_tokens):
+                per_layer_attn_metadata = dict()
+                for attn_group in self.draft_attn_groups:
+                    common_attn_metadata, attn_metadata = self.attn_update_stack_num_spec_norm(
+                        draft_index,
+                        attn_metadata,
+                        common_attn_metadata,
+                        batch_size,
+                        num_input_tokens,
+                        used_update_positions,
+                        aclgraph_runtime_mode,
+                        **draft_cp_kwargs,
+                        attn_group=attn_group,
+                    )
+                    for layer_name in self.attn_layer_names:
+                        per_layer_attn_metadata[layer_name] = attn_metadata
+                multi_steps_attn_metadata.append(per_layer_attn_metadata)
 
         token_indices_to_sample_len = token_indices_to_sample.shape[0]
         self.token_indices_to_sample[:token_indices_to_sample_len].copy_(token_indices_to_sample)
@@ -1163,30 +1121,18 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         if self.pcp_size > 1:
             # remove graph padding before all_gather
-            hidden_states = hidden_states[:num_input_tokens]
-            if self.runner.pcp_manager.pcp_use_hybrid_attn:
-                hidden_states = self.runner.pcp_manager.get_restore_hidden_states(hidden_states)
-            else:
-                hidden_states = get_pcp_group().all_gather(hidden_states, 0)
-                hidden_states = torch.index_select(
-                    hidden_states,
-                    0,
-                    self.runner.pcp_manager.pcp_allgather_restore_idx.gpu[: num_input_tokens * self.pcp_size],
-                )
+            hidden_states = self.runner.pcp_manager.get_restore_hidden_states(
+                hidden_states,
+                num_input_tokens=num_input_tokens,
+            )
             if self.method == "mtp":
                 last_hidden_states = hidden_states
             else:
                 # eagle and eagle3 need allgather last_hidden_states.
-                last_hidden_states = last_hidden_states[:num_input_tokens]
-                if self.runner.pcp_manager.pcp_use_hybrid_attn:
-                    last_hidden_states = self.runner.pcp_manager.get_restore_hidden_states(last_hidden_states)
-                else:
-                    last_hidden_states = get_pcp_group().all_gather(last_hidden_states, 0)
-                    last_hidden_states = torch.index_select(
-                        last_hidden_states,
-                        0,
-                        self.runner.pcp_manager.pcp_allgather_restore_idx.gpu[: num_input_tokens * self.pcp_size],
-                    )
+                last_hidden_states = self.runner.pcp_manager.get_restore_hidden_states(
+                    last_hidden_states,
+                    num_input_tokens=num_input_tokens,
+                )
 
         if lmhead_tp_enable():
             token_indices_to_sample = nn.functional.pad(
@@ -1439,35 +1385,17 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 # prefill input_ids: add padding and pcp split
                 # prefill target_hidden_states: pcp split
                 assert query_lens_d is not None
-                assert query_lens_d_device is not None
                 num_tokens_d = self.runner.pcp_manager.num_decode_tokens
                 num_tokens_d_padded = num_tokens_d * self.pcp_size
                 input_ids_d = self.input_ids[:num_tokens_d]
                 input_ids_p = self.input_ids[num_tokens_d:num_tokens]
                 target_hidden_states_d_padded = target_hidden_states[:num_tokens_d_padded]
                 if num_tokens_d:
-                    if self.runner.pcp_manager.pcp_use_hybrid_attn:
-                        # Hybrid PCP restores decode hidden states rank-major:
-                        # [rank0 all decode tokens, rank1 all decode tokens, ...].
-                        target_hidden_states_d = target_hidden_states_d_padded[:num_tokens_d]
-                    else:
-                        # Keep decode unpadding indices on device to avoid a host index list.
-                        decode_req_starts = query_start_loc_pcp_full[:num_decode_reqs]
-                        decode_query_lens = query_lens_d_device
-                        decode_padded_starts = decode_req_starts * self.pcp_size
-                        decode_req_starts_per_token = torch.repeat_interleave(
-                            decode_req_starts,
-                            decode_query_lens,
-                            output_size=num_tokens_d,
-                        )
-                        decode_padded_starts_per_token = torch.repeat_interleave(
-                            decode_padded_starts,
-                            decode_query_lens,
-                            output_size=num_tokens_d,
-                        )
-                        decode_offsets = self.arange[:num_tokens_d] - decode_req_starts_per_token
-                        decode_hidden_state_indices = decode_padded_starts_per_token + decode_offsets
-                        target_hidden_states_d = target_hidden_states_d_padded[decode_hidden_state_indices]
+                    target_hidden_states_d = self.runner.pcp_manager.get_spec_decode_decode_hidden_states(
+                        target_hidden_states_d_padded,
+                        num_decode_reqs,
+                        num_tokens_d,
+                    )
                 else:
                     target_hidden_states_d = target_hidden_states_d_padded
                 target_hidden_states_p = target_hidden_states[num_tokens_d_padded:]
@@ -1742,17 +1670,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         if self.pcp_size * self.dcp_size > 1:
             kv_cache_spec = getattr(attn_group, "kv_cache_spec", self.draft_attn_groups[0].kv_cache_spec)
-            seq_len_for_cp_metadata = ori_seq_len
-            if not isinstance(kv_cache_spec, AscendMLAAttentionSpec) and ori_seq_len_cpu is not None:
-                # Non-MLA CP metadata is numpy-backed, so keep this path on CPU.
-                seq_len_for_cp_metadata = ori_seq_len_cpu
-            num_computed_tokens_of_pcp_dcp = self.runner.pcp_manager._get_cp_local_seq_lens(
-                seq_len_for_cp_metadata + draft_index + 1,
-                self.pcp_size,
-                self.dcp_size,
-                self.runner.parallel_config.cp_kv_cache_interleave_size,
-            )
-            cp_seq_len = num_computed_tokens_of_pcp_dcp[:, self.pcp_rank, self.dcp_rank]
             # update slot_mapping
             slot_indices += self.pcp_size
             slot_mapping = mtp_slot_mapping[slot_indices]
@@ -1817,22 +1734,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         )
 
         if self.pcp_size * self.dcp_size > 1:
-            if isinstance(attn_metadata_builder, AscendSFADCPMetadataBuilder):
-                assert attn_metadata.dcp_context is not None
-                dcp_seq_lens = attn_metadata.dcp_context.seq_lens
-                sfa_cp_seq_len = cp_seq_len.to(
-                    device=dcp_seq_lens.device,
-                    dtype=dcp_seq_lens.dtype,
-                    non_blocking=True,
-                )
-                dcp_seq_lens[: sfa_cp_seq_len.shape[0]].copy_(sfa_cp_seq_len, non_blocking=True)
-                dcp_seq_lens[sfa_cp_seq_len.shape[0] :].fill_(0)
-            else:
-                kv_cache_spec = self.draft_attn_groups[0].kv_cache_spec
-                if isinstance(kv_cache_spec, AscendMLAAttentionSpec):
-                    attn_metadata.decode.cp_seq_len = cp_seq_len
-                else:
-                    attn_metadata.decode_meta.num_computed_tokens_of_pcp_dcp = num_computed_tokens_of_pcp_dcp.numpy()
+            self.runner.pcp_manager.update_spec_decode_drafting_cp_metadata(
+                attn_metadata=attn_metadata,
+                kv_cache_spec=kv_cache_spec,
+                seq_lens=ori_seq_len,
+                draft_index=draft_index,
+                seq_lens_cpu=ori_seq_len_cpu,
+                attn_metadata_builder=attn_metadata_builder,
+            )
 
         return common_attn_metadata, attn_metadata
 

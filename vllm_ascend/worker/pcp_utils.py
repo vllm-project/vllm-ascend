@@ -20,6 +20,7 @@
 import copy
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass
 from itertools import accumulate
 from typing import TYPE_CHECKING, Any
 
@@ -36,6 +37,16 @@ from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
+
+
+@dataclass(frozen=True)
+class PCPSpecDecodeMTPInputs:
+    """Device-side PCP state needed by proposer MTP draft steps."""
+
+    seq_lens: torch.Tensor
+    seq_lens_cpu: torch.Tensor | None
+    slot_indices: torch.Tensor
+    slot_mapping: torch.Tensor
 
 
 class PCPManager:
@@ -79,6 +90,11 @@ class PCPManager:
         )
         self.pcp_req_offsets = torch.arange(
             max_num_reqs,
+            dtype=torch.int64,
+            device=device,
+        )
+        self.pcp_rank_offsets = torch.arange(
+            pcp_world_size,
             dtype=torch.int64,
             device=device,
         )
@@ -920,14 +936,24 @@ class PCPManager:
     def get_restore_hidden_states(
         self,
         hidden_states: torch.Tensor,
-    ):
-        # NOTE we must `slice` hidden_states because pcp_allgather_restore_idx
-        # ignores the padding from CUDA Graph.
+        num_input_tokens: int | None = None,
+    ) -> torch.Tensor:
+        """Gather PCP hidden states and restore the original token order.
+
+        ``num_input_tokens`` is explicit for spec decode, where draft graph
+        padding can differ from the main-model PCP scheduled-token length.
+        Main-model callers omit it and use the PCP metadata length.
+        """
         from vllm.distributed.parallel_state import get_pcp_group
 
         if not self.pcp_use_hybrid_attn:
+            local_num_tokens = (
+                num_input_tokens
+                if num_input_tokens is not None
+                else self.num_actual_tokens_pcp_padded // self.pcp_world_size
+            )
             hidden_states = get_pcp_group().all_gather(
-                hidden_states[: self.num_actual_tokens_pcp_padded // self.pcp_world_size],
+                hidden_states[:local_num_tokens],
                 0,
             )
             restore_idx = self.pcp_allgather_restore_idx.gpu[: hidden_states.shape[0]]
@@ -937,6 +963,8 @@ class PCPManager:
                 restore_idx,
             )
         else:
+            if num_input_tokens is not None:
+                hidden_states = hidden_states[:num_input_tokens]
             if hidden_states.shape[0] == self.total_num_scheduled_tokens and self.pcp_padded_tokens_fla > 0:
                 hidden_states = F.pad(
                     hidden_states, pad=(0, 0, 0, self.pcp_padded_tokens_fla), mode="constant", value=0
@@ -947,6 +975,126 @@ class PCPManager:
             hidden_states = get_pcp_group().all_gather(hidden_states.contiguous(), dim=0)
             restore_idx = self.pcp_enter_fa_restore_idx[: hidden_states.shape[0] - self.total_pcp_padding_tokens_fla]
             return torch.index_select(hidden_states, 0, restore_idx)
+
+    def mask_spec_decode_restore_idx_for_graph(
+        self,
+        pcp_allgather_restore_idx: torch.Tensor,
+    ) -> None:
+        """Mask graph-only PCP restore slots used by padded draft batches."""
+        index = torch.arange(
+            pcp_allgather_restore_idx.shape[0],
+            dtype=torch.int64,
+            device=pcp_allgather_restore_idx.device,
+        )
+        mask = (index % (self.pcp_world_size * self.decode_threshold)) >= self.decode_threshold
+        pcp_allgather_restore_idx[mask] = 0
+        restore_len = pcp_allgather_restore_idx.shape[0]
+        self.pcp_allgather_restore_idx.gpu[:restore_len].copy_(pcp_allgather_restore_idx)
+        self.pcp_allgather_restore_idx.gpu[restore_len:].fill_(0)
+
+    def get_spec_decode_decode_hidden_states(
+        self,
+        target_hidden_states_d_padded: torch.Tensor,
+        num_decode_reqs: int,
+        num_decode_tokens: int | None = None,
+    ) -> torch.Tensor:
+        """Remove PCP decode padding from target hidden states for proposer input."""
+        if num_decode_tokens is None:
+            num_decode_tokens = self.num_decode_tokens
+        if num_decode_tokens == 0:
+            return target_hidden_states_d_padded
+        if self.pcp_use_hybrid_attn:
+            return target_hidden_states_d_padded[:num_decode_tokens]
+
+        query_start_loc = self.query_start_loc_pcp_full.gpu[: num_decode_reqs + 1]
+        decode_req_starts = query_start_loc[:num_decode_reqs].to(torch.int64)
+        decode_query_lens = (
+            query_start_loc[1 : num_decode_reqs + 1] - query_start_loc[:num_decode_reqs]
+        ).to(torch.int64)
+        decode_padded_starts = decode_req_starts * self.pcp_world_size
+        decode_req_starts_per_token = torch.repeat_interleave(
+            decode_req_starts,
+            decode_query_lens,
+            output_size=num_decode_tokens,
+        )
+        decode_padded_starts_per_token = torch.repeat_interleave(
+            decode_padded_starts,
+            decode_query_lens,
+            output_size=num_decode_tokens,
+        )
+        decode_offsets = (
+            torch.arange(
+                num_decode_tokens,
+                dtype=torch.int64,
+                device=target_hidden_states_d_padded.device,
+            )
+            - decode_req_starts_per_token
+        )
+        decode_hidden_state_indices = decode_padded_starts_per_token + decode_offsets
+        return target_hidden_states_d_padded[decode_hidden_state_indices]
+
+    def _get_spec_decode_mtp_slot_inputs(
+        self,
+        ori_token_indices_to_sample: torch.Tensor,
+        num_decode_reqs: int,
+        num_speculative_tokens: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Build device-side PCP slot indices for decode-only MTP draft steps."""
+        assert self.mtp_slot_pad is not None
+        query_start_loc = self.query_start_loc_pcp_full.gpu[: num_decode_reqs + 1]
+        decode_req_starts = query_start_loc[:num_decode_reqs].to(torch.int64)
+        cu_num_tokens = query_start_loc[1 : num_decode_reqs + 1].to(torch.int64)
+        query_lens = cu_num_tokens - decode_req_starts
+        num_reject_tokens = cu_num_tokens - ori_token_indices_to_sample.to(torch.int64) - 1
+        num_accept_tokens = query_lens - num_reject_tokens
+        slot_idx_base = (
+            decode_req_starts * self.pcp_world_size
+            + self.pcp_req_offsets[:num_decode_reqs]
+            * (num_speculative_tokens - 1)
+            * self.pcp_world_size
+            + (num_accept_tokens - 1) * self.pcp_world_size
+        )
+        slot_indices = (slot_idx_base[:, None] + self.pcp_rank_offsets[: self.pcp_world_size]).reshape(-1)
+        return slot_indices, self.mtp_slot_pad
+
+    def prepare_spec_decode_mtp_drafting_inputs(
+        self,
+        common_attn_metadata: Any,
+        attn_metadata: Any,
+        ori_token_indices_to_sample: torch.Tensor | None,
+        batch_size: int,
+        num_decode_reqs: int,
+        is_prefill_batch: bool,
+        num_speculative_tokens: int,
+    ) -> PCPSpecDecodeMTPInputs | None:
+        """Prepare CP-specific inputs for decode-only MTP draft metadata."""
+        is_decode_only_batch = num_decode_reqs > 0 and not is_prefill_batch
+        if num_speculative_tokens <= 1 or not is_decode_only_batch:
+            return None
+
+        assert ori_token_indices_to_sample is not None
+        slot_indices, slot_mapping = self._get_spec_decode_mtp_slot_inputs(
+            ori_token_indices_to_sample,
+            num_decode_reqs,
+            num_speculative_tokens,
+        )
+
+        seq_lens = getattr(attn_metadata, "seq_lens", None)
+        seq_lens_cpu = getattr(attn_metadata, "seq_lens_cpu", None)
+        if seq_lens is None:
+            assert seq_lens_cpu is not None
+            seq_lens = seq_lens_cpu
+        seq_lens = seq_lens[:batch_size].clone()
+        if seq_lens_cpu is not None:
+            seq_lens_cpu = seq_lens_cpu[:batch_size].clone()
+
+        common_attn_metadata.block_table_tensor = common_attn_metadata.block_table_tensor[:batch_size]
+        return PCPSpecDecodeMTPInputs(
+            seq_lens=seq_lens,
+            seq_lens_cpu=seq_lens_cpu,
+            slot_indices=slot_indices,
+            slot_mapping=slot_mapping,
+        )
 
     def generate_pcp_mtp_input(
         self,
@@ -1239,6 +1387,60 @@ class PCPManager:
         )
         dcp_local_seq_lens = (base + remainder).reshape([-1, pcp_world_size, dcp_world_size])
         return dcp_local_seq_lens
+
+    @staticmethod
+    def _is_mla_kv_cache_spec(kv_cache_spec: Any) -> bool:
+        from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+
+        return isinstance(kv_cache_spec, AscendMLAAttentionSpec)
+
+    @staticmethod
+    def _is_sfa_dcp_metadata_builder(attn_metadata_builder: Any | None) -> bool:
+        if attn_metadata_builder is None:
+            return False
+        from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadataBuilder
+
+        return isinstance(attn_metadata_builder, AscendSFADCPMetadataBuilder)
+
+    def update_spec_decode_drafting_cp_metadata(
+        self,
+        attn_metadata: Any,
+        kv_cache_spec: Any,
+        seq_lens: torch.Tensor,
+        draft_index: int,
+        seq_lens_cpu: torch.Tensor | None = None,
+        attn_metadata_builder: Any | None = None,
+    ) -> None:
+        """Update per-draft-step CP seq-len metadata after metadata build."""
+        is_mla = self._is_mla_kv_cache_spec(kv_cache_spec)
+        is_sfa_dcp = self._is_sfa_dcp_metadata_builder(attn_metadata_builder)
+        seq_lens_for_cp = seq_lens
+        if not is_mla and seq_lens_cpu is not None:
+            seq_lens_for_cp = seq_lens_cpu
+
+        num_computed_tokens_of_pcp_dcp = self._get_cp_local_seq_lens(
+            seq_lens_for_cp + draft_index + 1,
+            self.pcp_world_size,
+            self.dcp_world_size,
+            self.vllm_config.parallel_config.cp_kv_cache_interleave_size,
+        )
+        cp_seq_len = num_computed_tokens_of_pcp_dcp[:, self.pcp_world_rank, self.dcp_world_rank]
+
+        if is_sfa_dcp:
+            dcp_context = attn_metadata.dcp_context
+            assert dcp_context is not None
+            dcp_seq_lens = dcp_context.seq_lens
+            sfa_cp_seq_len = cp_seq_len.to(
+                device=dcp_seq_lens.device,
+                dtype=dcp_seq_lens.dtype,
+                non_blocking=True,
+            )
+            dcp_seq_lens[: sfa_cp_seq_len.shape[0]].copy_(sfa_cp_seq_len, non_blocking=True)
+            dcp_seq_lens[sfa_cp_seq_len.shape[0] :].fill_(0)
+        elif is_mla:
+            attn_metadata.decode.cp_seq_len = cp_seq_len
+        else:
+            attn_metadata.decode_meta.num_computed_tokens_of_pcp_dcp = num_computed_tokens_of_pcp_dcp.numpy()
 
     def generate_pcp_metadata(
         self,
