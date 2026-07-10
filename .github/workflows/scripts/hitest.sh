@@ -27,8 +27,7 @@ fi
 
 # Global config
 API_PREFIX="https://174e1b821a8446f38998a67186ba766e.apic.cn-southwest-2.huaweicloudapis.com/aurogon_service"
-# MR_THIRD_ID="${PR_NUMBER:-}"
-MR_THIRD_ID=9270
+MR_THIRD_ID="${PR_NUMBER:-}"
 NETWORK_ZONE=github
 PROJECT_PATH=vllm-project/vllm-ascend
 BIND_ID_API2=11
