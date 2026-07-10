@@ -56,7 +56,7 @@ jobs:
           X_APIG_APPCODE: ${{ secrets.X_APIG_APPCODE }}
           APP_KEY: ${{ secrets.APP_KEY }}
           APP_SECRET: ${{ secrets.APP_SECRET }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_NUMBER: ${{ github.event.number }}
         run: |
           echo "===== DEBUG GITHUB ENV ====="
           echo "X_APIG_APPCODE: $X_APIG_APPCODE"
