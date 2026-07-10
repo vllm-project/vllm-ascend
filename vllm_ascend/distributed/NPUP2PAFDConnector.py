@@ -538,6 +538,7 @@ class NPUP2PAFDConnector(AFDConnectorBase):
         data,
         is_graph_capturing: bool = False,
         is_warmup: bool = False,
+        cudagraph_mode: CUDAGraphMode = CUDAGraphMode.NONE,
     ):
         """Send dp_metadata_list to the corresponding FFN ranks.
 
@@ -545,8 +546,9 @@ class NPUP2PAFDConnector(AFDConnectorBase):
             data: dp_metadata_list dict
             is_graph_capturing: whether in graph capture stage
             is_warmup: whether in warmup stage
+            cudagraph_mode: cudagraph mode
         """
-        send_data = (data, is_graph_capturing, is_warmup)
+        send_data = (data, is_graph_capturing, is_warmup, cudagraph_mode)
 
         for dst in self.dst_list:
             object_bytes = pickle.dumps(send_data)
@@ -567,8 +569,8 @@ class NPUP2PAFDConnector(AFDConnectorBase):
                                        device="npu")
 
             logger.info(
-                "send_dp_metadata_list dst:%s is_graph_capturing:%s is_warmup:%s",
-                dst, is_graph_capturing, is_warmup)
+                "send_dp_metadata_list dst:%s is_graph_capturing:%s is_warmup:%s cudagraph_mode:%s",
+                dst, is_graph_capturing, is_warmup, cudagraph_mode)
 
             torch.distributed.send(size_tensor, dst=dst, group=self.p2p_pg)
             torch.distributed.send(object_tensor_npu, dst=dst, group=self.p2p_pg)
@@ -577,7 +579,7 @@ class NPUP2PAFDConnector(AFDConnectorBase):
         """Receive dp_metadata_list.
 
         Returns:
-            tuple: (data, is_graph_capturing, is_warmup)
+            tuple: (data, is_graph_capturing, is_warmup, cudagraph_mode)
         """
         src = self.p2p_rank % self.min_size + self.ffn_size
 
@@ -593,17 +595,18 @@ class NPUP2PAFDConnector(AFDConnectorBase):
         object_tensor_cpu = object_tensor_npu.cpu()
         obj = pickle.loads(object_tensor_cpu.numpy().tobytes())
 
-        if len(obj) == 3:
-            data, is_graph_capturing, is_warmup = obj
+        if len(obj) == 4:
+            data, is_graph_capturing, is_warmup, cudagraph_mode = obj
         else:
             # Backward compatibility with old format
             data, is_graph_capturing = obj
             is_warmup = False
+            cudagraph_mode = CUDAGraphMode.NONE
 
-        logger.info("recv_dp_metadata_list is_graph_capturing:%s is_warmup:%s",
-                     is_graph_capturing, is_warmup)
+        logger.info("recv_dp_metadata_list is_graph_capturing:%s is_warmup:%s cudagraph_mode:%s",
+                     is_graph_capturing, is_warmup, cudagraph_mode)
 
-        return data, is_graph_capturing, is_warmup
+        return data, is_graph_capturing, is_warmup, cudagraph_mode
 
     def update_state_from_dp_metadata(
         self,

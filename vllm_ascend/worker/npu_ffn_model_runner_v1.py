@@ -120,23 +120,25 @@ class NPUFFNModelRunner(NPUModelRunner, GPUFFNModelRunner):
 
     @torch.inference_mode()
     def execute_model(self, scheduler_output=None, intermediate_tensors=None,
-                     dp_metadata_list: dict | None = None):
+                     dp_metadata_list: dict | None = None,
+                     cudagraph_mode: CUDAGraphMode = CUDAGraphMode.NONE):
         """Execute FFN computation for a single request
 
         Args:
             scheduler_output: 调度器输出（FFN侧通常为None）
             intermediate_tensors: 中间张量（FFN侧通常为None）
             dp_metadata_list: dp_metadata列表，包含每个stage的token数量信息
+            cudagraph_mode: cudagraph模式，用于指定是否使用cudagraph进行推理
         """
         try:
             logger.info("execute_model pre, dp_metadata_list is %s", dp_metadata_list)
             if dp_metadata_list is None and self.connector is not None:
-                dp_metadata_list, _, _ = (
+                dp_metadata_list, _, _, _ = (
                     self.connector.recv_dp_metadata_list()
                 )
             is_ubatch = dp_metadata_list is not None and len(dp_metadata_list) > 1
 
-            if self.use_aclgraph:
+            if cudagraph_mode == CUDAGraphMode.FULL:
                 logger.info("execute_model aclgraph pre")
                 # Look up the captured graph by dp_metadata_key.
                 dp_metadata_key = self._get_dp_metadata_key(dp_metadata_list)
@@ -172,7 +174,8 @@ class NPUFFNModelRunner(NPUModelRunner, GPUFFNModelRunner):
     def capture_model(self,
                       dp_metadata_list: Optional[dict] = None,
                       is_warmup: bool = False,
-                      is_attn_graph_capturing: bool = True) -> int:
+                      is_attn_graph_capturing: bool = True,
+                      cudagraph_mode: CUDAGraphMode = CUDAGraphMode.NONE) -> int:
         """Capture ACL graphs for FFN operations.
 
         Args:
@@ -188,7 +191,7 @@ class NPUFFNModelRunner(NPUModelRunner, GPUFFNModelRunner):
         start_free_npu_memory = torch.npu.mem_get_info()[0]
 
         set_cudagraph_capturing_enabled(True)
-        if not is_attn_graph_capturing:
+        if cudagraph_mode == CUDAGraphMode.NONE:
             # Warmup模式：只执行forward，不capture graph
             self._warmup_model(dp_metadata_list=dp_metadata_list)
             logger.info("FFN warmup completed")
