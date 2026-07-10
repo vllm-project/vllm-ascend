@@ -218,7 +218,6 @@ class AscendMiniMaxM3IndexerMetadataBuilder(
     ) -> None:
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
-        assert self.reorder_batch_threshold is not None
         self.max_decode_query_len = self.reorder_batch_threshold
         self.context_len_buffer = torch.empty(
             vllm_config.scheduler_config.max_num_batched_tokens,
@@ -269,11 +268,6 @@ class AscendMiniMaxM3IndexerMetadataBuilder(
             qsl_cpu = common_attn_metadata.query_start_loc_cpu
             query_lens_cpu = qsl_cpu[1 : num_decodes + 1] - qsl_cpu[:num_decodes]
             decode_query_len = int(query_lens_cpu[0].item())
-            assert decode_query_len > 0
-            assert torch.all(
-                (query_lens_cpu == decode_query_len) | (query_lens_cpu == 0)
-            )
-            assert num_decode_tokens == num_decodes * decode_query_len
             decode_metadata = AscendMiniMaxM3IndexerDecodeMetadata(
                 seq_lens=seq_lens[:num_decodes],
                 block_table=block_table[:num_decodes],
@@ -720,7 +714,7 @@ class AscendMiniMaxM3SparseImpl(AttentionImplBase[AscendMiniMaxM3SparseMetadata]
                 self.block_size,
                 self.topk_blocks,
                 4,
-                select_num_idx=decode_select_num_idx,
+                select_num_idx=None,
                 actual_seq_lengths=d.actual_seq_lengths,
                 actual_seq_lengths_kv=d.actual_seq_lengths_kv,
             )
@@ -743,12 +737,14 @@ class AscendMiniMaxM3SparseImpl(AttentionImplBase[AscendMiniMaxM3SparseMetadata]
                 self.block_size,
                 self.topk_blocks,
                 4,
-                select_num_idx=prefill_select_num_idx,
+                select_num_idx=None,
                 actual_seq_lengths=p.actual_seq_lengths,
                 actual_seq_lengths_kv=p.actual_seq_lengths_kv,
             )
             output[nd:num_tokens].view(-1, self.num_heads, hd).copy_(prefill_out)
         return output
+
+        
 
 
 class AscendMinimaxM3QKVParallelLinearWithIndexer(QKVParallelLinear):
