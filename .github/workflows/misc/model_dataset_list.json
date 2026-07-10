@@ -328,6 +328,8 @@
       "vllm-ascend/SuperGLUE",
       "vllm-ascend/ceval",
       "vllm-ascend/GSM8K-in512-bs100-qwen3",
-      "vllm-ascend/GSM8K_in131072_bs100_deepseek"
+      "vllm-ascend/GSM8K_in131072_bs100_deepseek",
+      "vllm-ascend/GSM8K-in3500-bs2800-deepseek",
+      "vllm-ascend/GSM8K-in3500-bs2800-qwen3"
     ]
   }
