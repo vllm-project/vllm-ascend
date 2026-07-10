@@ -454,6 +454,14 @@ class AscendAttentionBackendImpl(AttentionImpl):
         use_layer_aware_replay = needs_layer_aware_fia_graph_replay()
         if using_paged_attention(num_tokens, vllm_config):
             # Paged Attention update logic
+            # TODO: This path zips forward_context.attn_metadata directly against
+            # attn_params without the type-filter / block-wise replication used in
+            # the FIA path below. If paged attention (opt-in via pa_shape_list +
+            # FULL_DECODE_ONLY) is ever combined with LoRA specialization,
+            # graph_param_count becomes a multiple of the layer count and the zip
+            # truncation would leave the trailing captured ops un-updated. Mirror
+            # the replication in the ``else`` branch if that combination is
+            # supported.
             if _EXTRA_CTX.is_draft_model:
                 if _EXTRA_CTX.is_draft_model_prefill:
                     graph_params = get_draft_graph_prefill_params()
@@ -550,6 +558,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 # stored layer name in each op param to resolve the exact
                 # metadata entry during replay.
                 attn_keys = [attn_keys[index % num_layers] for index in range(graph_param_count)]
+            # TODO: The sink FIA path lacks the type-filter and the
+            # ``graph_param_count % num_layers == 0`` block-wise replication added
+            # to the non-sink ``else`` branch below. A model that has learnable
+            # sinks and also enables LoRA specialization would hit the same
+            # stale-metadata bug; mirror those two fixes here if that combination
+            # is supported.
             attn_count = 0
             with torch.npu.stream(update_stream):
                 for key, param, handle, event in zip(

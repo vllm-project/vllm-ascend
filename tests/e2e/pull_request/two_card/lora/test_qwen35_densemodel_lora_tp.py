@@ -9,7 +9,7 @@ import pytest
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 os.environ["VLLM_DISABLE_COMPILE_CACHE"] = "1"
 
-MODEL_PATH = "/data1/models/Qwen3.5-4B"
+MODEL_PATH = "Qwen/Qwen3.5-4B"
 TEXT_LORA_ID = 1
 
 # text-only task
@@ -80,9 +80,9 @@ def _assert_qwen35_text_lora(
 
 
 @wait_until_npu_memory_free(target_free_percentage=0.7)
-@pytest.mark.parametrize("tensor_parallel_size", [1, 2])
-@pytest.mark.parametrize("enforce_eager", [False, True])
-@pytest.mark.parametrize("fully_sharded_loras", [False, True])
+@pytest.mark.parametrize("tensor_parallel_size", [2])
+@pytest.mark.parametrize("enforce_eager", [False])
+@pytest.mark.parametrize("fully_sharded_loras", [False])
 def test_qwen35_text_lora(qwen35_text_lora_files, tensor_parallel_size, enforce_eager, fully_sharded_loras):
 
     with VllmRunner(

@@ -98,9 +98,7 @@ def patch_mcp_apply_non_fully_sharded():
     def _patched_mcp_apply(x, bias, layer):
         if getattr(layer.lora_config, "fully_sharded_loras", False):
             return orig_mcp_apply(x, bias, layer)
-        # Non fully-sharded: lora_a is replicated, so the rank-dim all-gather
-        # would duplicate the already-full-rank buffer. Make it a no-op for the
-        # duration of this call.
+        
         cpl.tensor_model_parallel_all_gather = lambda buf, *a, **k: buf
         try:
             return orig_mcp_apply(x, bias, layer)
