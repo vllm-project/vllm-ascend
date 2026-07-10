@@ -54,7 +54,6 @@ from vllm_ascend.distributed.parallel_state import get_lmhead_tp_group
 from vllm_ascend.models.llama_eagle3_vwn import Eagle3VwnLlamaForCausalLM
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
-from vllm_ascend.ops.rotary_embedding import update_cos_sin
 from vllm_ascend.utils import enable_sp, lmhead_tp_enable, shared_expert_dp_enabled
 
 
@@ -1319,9 +1318,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             model_hidden_states = self.hidden_states[:input_batch_size]
 
             model_hidden_states, model_positions = self.maybe_pad_and_reduce(model_hidden_states, model_positions)
-
-            # Align position cache for multi-step drafting to ensure cross-device compatibility:
-            update_cos_sin(model_positions)
 
             forward_context.attn_metadata = (
                 multi_steps_attn_metadata[draft_index + 1] if multi_steps_attn_metadata else None

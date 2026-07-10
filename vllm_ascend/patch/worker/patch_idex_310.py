@@ -21,6 +21,10 @@ vllm.model_executor.layers.fla.ops.index.prepare_chunk_offsets = prepare_chunk_o
 AscendSpecDecodeBaseProposer.set_inputs_first_pass = (  # type: ignore[method-assign]
     AscendSpecDecodeBaseProposer310.set_inputs_first_pass
 )
+AscendSpecDecodeBaseProposer._run_merged_draft = (  # type: ignore[method-assign]
+    AscendSpecDecodeBaseProposer310._run_merged_draft
+)
+
 # Patch _warmup_prefill_kernels to no-op on 310P: triton.next_power_of_2 does
 # not exist in the triton version used on 310P CI, and NPU does not use these
 # CUDA warmup kernel anyway.

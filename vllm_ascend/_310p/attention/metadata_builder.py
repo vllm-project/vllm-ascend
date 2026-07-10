@@ -135,10 +135,7 @@ class AscendAttentionMetadataBuilder310(AscendAttentionMetadataBuilder):
 
         # Bind device-side views for in-place graph replay updates.
         attn_metadata.seq_lens = common_attn_metadata.seq_lens[:num_reqs]
-        attn_metadata.seq_lens_list = attn_metadata.seq_lens.tolist()
         attn_metadata.query_start_loc = common_attn_metadata.query_start_loc[: num_reqs + 1]
-        attn_metadata.actual_seq_lengths_q = (query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]).tolist()
-        attn_metadata.is_spec = False
 
         if is_compressed_mask_supported():
             attn_metadata.attn_mask = AttentionMaskBuilder310.get_compressed_splitfuse_mask(self.device)
