@@ -46,6 +46,7 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadataBuilder
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper, update_full_graph_params
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
@@ -631,7 +632,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 common_attn_metadata = self.shallow_copy_metadata(common_attn_metadata)
                 extra_attn_metadata_args: dict = {}
                 if self.use_compress:
-                    extra_attn_metadata_args = dict(
+                    extra_attn_metadata_args.update(
                         prefill_ratio_to_sas_metadata=dict(),
                         decode_ratio_to_sas_metadata=dict(),
                         common_ratio_to_sas_metadata=dict(),
@@ -952,8 +953,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         else:
             common_attn_metadata.block_table_tensor = common_attn_metadata.block_table_tensor.clone()
 
+        metadata_has_prefill = bool(getattr(attn_metadata_i, "num_prefills", 0))
+        is_prefill_batch = num_prefill_reqs > 0 or metadata_has_prefill
         if self.pcp_size * self.dcp_size > 1:
-            if self.num_speculative_tokens > 1 and not attn_metadata_i.num_prefills:
+            is_decode_only_batch = num_decode_reqs > 0 and not is_prefill_batch
+            if self.num_speculative_tokens > 1 and is_decode_only_batch:
                 # For pcp/dcp, tokens are split across different cp ranks,
                 # so we can not simply update slot_mapping by += 1.
                 # Instead, we pre-allocate mtp slot_mapping in model_runner
@@ -1063,7 +1067,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 "inputs_embeds": inputs_embeds,
                 "multi_steps_attn_metadata": multi_steps_attn_metadata,
                 "num_tokens": num_tokens,
-                "is_prefill": attn_metadata_i.num_prefills,
+                "is_prefill": is_prefill_batch,
             }
             run_draft = partial(self._runnable, **model_inputs)
 
@@ -1736,6 +1740,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             slot_indices += self.pcp_size
             slot_mapping = mtp_slot_mapping[slot_indices]
             self.slot_mapping_group[draft_index][: batch_size * self.pcp_size] = slot_mapping
+            self.slot_mapping_group[draft_index][batch_size * self.pcp_size :].fill_(PADDING_SLOT_ID)
             common_attn_metadata.slot_mapping = self.slot_mapping_group[draft_index]
         else:
             # NOTE: In vllm, `block_size = attn_metadata_builder.kv_cache_spec.block_size`.
@@ -1795,11 +1800,22 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         )
 
         if self.pcp_size * self.dcp_size > 1:
-            kv_cache_spec = self.draft_attn_groups[0].kv_cache_spec
-            if isinstance(kv_cache_spec, AscendMLAAttentionSpec):
-                attn_metadata.decode.cp_seq_len = cp_seq_len
+            if isinstance(attn_metadata_builder, AscendSFADCPMetadataBuilder):
+                assert attn_metadata.dcp_context is not None
+                dcp_seq_lens = attn_metadata.dcp_context.seq_lens
+                sfa_cp_seq_len = cp_seq_len.to(
+                    device=dcp_seq_lens.device,
+                    dtype=dcp_seq_lens.dtype,
+                    non_blocking=True,
+                )
+                dcp_seq_lens[: sfa_cp_seq_len.shape[0]].copy_(sfa_cp_seq_len, non_blocking=True)
+                dcp_seq_lens[sfa_cp_seq_len.shape[0] :].fill_(0)
             else:
-                attn_metadata.decode_meta.num_computed_tokens_of_pcp_dcp = num_computed_tokens_of_pcp_dcp.numpy()
+                kv_cache_spec = self.draft_attn_groups[0].kv_cache_spec
+                if isinstance(kv_cache_spec, AscendMLAAttentionSpec):
+                    attn_metadata.decode.cp_seq_len = cp_seq_len
+                else:
+                    attn_metadata.decode_meta.num_computed_tokens_of_pcp_dcp = num_computed_tokens_of_pcp_dcp.numpy()
 
         return common_attn_metadata, attn_metadata
 
