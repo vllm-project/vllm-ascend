@@ -549,6 +549,29 @@ def test_get_cp_local_seq_lens(
     assert torch.equal(ret, target)
 
 
+def test_get_cp_local_seq_lens_preserves_input_dtype_and_device():
+    vllm_config = MagicMock()
+    vllm_config.model_config = MagicMock()
+    vllm_config.speculative_config.num_speculative_tokens = 0
+    pcp_manager = PCPManager(pcp_world_size=2,
+                             pcp_rank=0,
+                             dcp_world_size=2,
+                             dcp_rank=0,
+                             max_buffer_num_tokens=10000,
+                             max_num_reqs=1000,
+                             device="cpu",
+                             vllm_config=vllm_config,
+                             use_async_scheduling=False,
+                             pin_memory=False)
+    seq_lens = torch.empty((2, ), dtype=torch.int64, device="meta")
+
+    ret = pcp_manager._get_cp_local_seq_lens(seq_lens, 2, 2, 128)
+
+    assert ret.shape == (2, 2, 2)
+    assert ret.dtype == seq_lens.dtype
+    assert ret.device == seq_lens.device
+
+
 # yapf: disable
 @pytest.mark.parametrize(
     "req_ids, num_computed_tokens," \

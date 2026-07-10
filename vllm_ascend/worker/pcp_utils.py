@@ -84,6 +84,7 @@ class PCPManager:
         self.dcp_world_rank = dcp_rank
         self.speculative_config = vllm_config.speculative_config
         self.decode_threshold = 1 + (self.speculative_config.num_speculative_tokens if self.speculative_config else 0)
+        self.mtp_slot_pad: torch.Tensor | None = None
         self.vllm_config = vllm_config
         self.pd_decode_recompute_scheduler_enabled = is_pd_decode_recompute_scheduler_enabled(vllm_config)
         self.max_num_tokens = self.vllm_config.scheduler_config.max_num_batched_tokens
