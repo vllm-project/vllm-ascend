@@ -720,8 +720,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             if forward_context is not None:
                 forward_context.moe_layer_index = 0
 
-            # Gemma4 MTP: draft 读 target 的 KV cache，需等 target 异步 KV 写完成。
-            # 非 Gemma4 模型 _sync_wait_target_events 是 no-op，这里门控跳过调用。
+            # Gemma4 MTP: the draft reads the target's KV cache, so it must wait
+            # for the target's async KV write to finish. For non-Gemma4 models
+            # _sync_wait_target_events is a no-op; this gate skips the call.
             if self._is_gemma4_mtp:
                 self._sync_wait_target_events()
             self._runnable(
@@ -1105,7 +1106,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 "is_prefill": is_prefill_batch,
             }
             run_draft = partial(self._runnable, **model_inputs)
-            # Gemma4 MTP: 同上，等 target KV 写完成。
+            # Gemma4 MTP: same as above, wait for the target KV write to finish.
             if self._is_gemma4_mtp:
                 self._sync_wait_target_events()
 
