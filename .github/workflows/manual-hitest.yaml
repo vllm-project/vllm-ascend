@@ -53,9 +53,9 @@ jobs:
       - name: Execute hitest entry
         env:
           AUROGON_API_PREFIX: https://174e1b821a8446f38998a67186ba766e.apic.cn-southwest-2.huaweicloudapis.com/aurogon_service
-          X_APIG_APPCODE: ${{ secrets.AUROGON_APPCODE }}
-          APP_KEY: ${{ secrets.AUROGON_APPKEY }}
-          APP_SECRET: ${{ secrets.AUROGON_APPSECRET }}
+          X_APIG_APPCODE: ${{ secrets.X_APIG_APPCODE }}
+          APP_KEY: ${{ secrets.APP_KEY }}
+          APP_SECRET: ${{ secrets.APP_SECRET }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           python3 .github/workflows/scripts/run_hitest.py
