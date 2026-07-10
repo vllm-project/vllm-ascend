@@ -1359,7 +1359,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
 
         o_proj_full_handles = self._maybe_all_gather_o_proj_full_weight(full_gather_wo_a_enabled)
 
-        kv = self.wkv(hidden_states_local)
+        kv = self.wkv(hidden_states_local)[:hidden_states_cache.shape[0]]
         kv = self.kv_norm(kv)
         kv = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(kv, need_gather_q_kv)
 
