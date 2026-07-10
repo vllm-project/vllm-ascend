@@ -188,14 +188,22 @@ class NPUFFNModelRunner(NPUModelRunner, GPUFFNModelRunner):
         start_free_npu_memory = torch.npu.mem_get_info()[0]
 
         set_cudagraph_capturing_enabled(True)
-        if cudagraph_mode == CUDAGraphMode.NONE:
-            # Warmup模式：只执行forward，不capture graph
-            logger.info("FFN warmup eager start")
-            self._warmup_model(dp_metadata_list=dp_metadata_list)
-        else:
-            # 正式Capture模式：根据dp_metadata_list捕获单个graph
+        if cudagraph_mode == CUDAGraphMode.FULL and is_attn_graph_capturing:
+            # Full graph capture mode：根据dp_metadata_list捕获单个graph
             logger.info("FFN warmup capture start")
             self._capture_model(dp_metadata_list=dp_metadata_list)
+        else:
+            # Eager mode for non-ubatch or no aclgraph.
+            logger.info("FFN warmup eager start")
+            self._warmup_model(dp_metadata_list=dp_metadata_list)
+        # if cudagraph_mode == CUDAGraphMode.NONE:
+        #     # Warmup模式：只执行forward，不capture graph
+        #     logger.info("FFN warmup eager start")
+        #     self._warmup_model(dp_metadata_list=dp_metadata_list)
+        # else:
+        #     # 正式Capture模式：根据dp_metadata_list捕获单个graph
+        #     logger.info("FFN warmup capture start")
+        #     self._capture_model(dp_metadata_list=dp_metadata_list)
             
         set_cudagraph_capturing_enabled(False)
 
