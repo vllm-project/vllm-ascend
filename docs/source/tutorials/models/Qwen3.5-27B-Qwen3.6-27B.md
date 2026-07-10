@@ -146,99 +146,89 @@ Single-node deployment completes both Prefill and Decode within the same node, s
 
 Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwen3_5_mtp` speculative decoding method can be used for both.
 
-:::::{tab-set}
-:sync-group: qwen-startup
+=== "Qwen3.5-27B-w8a8"
 
-::::{tab-item} Qwen3.5-27B-w8a8
-:sync: qwen35-w8a8
+    Startup Command:
 
-Startup Command:
+    ```bash
+    #!/bin/sh
+    # Load model from ModelScope to speed up download
+    export VLLM_USE_MODELSCOPE=True
+    # To reduce memory fragmentation and avoid out of memory
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    # Size of the shared buffer (in MB) used by HCCL for NPU-to-NPU collective communication
+    export HCCL_BUFFSIZE=512
+    # Whether OpenMP threads are bound to specific CPU cores
+    export OMP_PROC_BIND=false
+    # Number of OpenMP threads available for parallel regions
+    export OMP_NUM_THREADS=1
+    # Enables the Ascend task queue for asynchronous operator dispatch
+    export TASK_QUEUE_ENABLE=1
 
-```bash
-#!/bin/sh
-# Load model from ModelScope to speed up download
-export VLLM_USE_MODELSCOPE=True
-# To reduce memory fragmentation and avoid out of memory
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-# Size of the shared buffer (in MB) used by HCCL for NPU-to-NPU collective communication
-export HCCL_BUFFSIZE=512
-# Whether OpenMP threads are bound to specific CPU cores
-export OMP_PROC_BIND=false
-# Number of OpenMP threads available for parallel regions
-export OMP_NUM_THREADS=1
-# Enables the Ascend task queue for asynchronous operator dispatch
-export TASK_QUEUE_ENABLE=1
+    # Model weight path; can be a ModelScope model id (e.g., Eco-Tech/Qwen3.5-27B-w8a8-mtp) or a local directory path
+    export MODEL_PATH=Eco-Tech/Qwen3.5-27B-w8a8-mtp
 
-# Model weight path; can be a ModelScope model id (e.g., Eco-Tech/Qwen3.5-27B-w8a8-mtp) or a local directory path
-export MODEL_PATH=Eco-Tech/Qwen3.5-27B-w8a8-mtp
+    vllm serve $MODEL_PATH \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --data-parallel-size 1 \
+    --tensor-parallel-size 2 \
+    --seed 1024 \
+    --quantization ascend \
+    --served-model-name qwen3.5 \
+    --max-num-seqs 32 \
+    --max-model-len 133000 \
+    --max-num-batched-tokens 8096 \
+    --trust-remote-code \
+    --gpu-memory-utilization 0.90 \
+    --no-enable-prefix-caching \
+    --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
+    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+    --additional-config '{"enable_cpu_binding":true}' \
+    --async-scheduling
+    ```
 
-vllm serve $MODEL_PATH \
---host 0.0.0.0 \
---port 8000 \
---data-parallel-size 1 \
---tensor-parallel-size 2 \
---seed 1024 \
---quantization ascend \
---served-model-name qwen3.5 \
---max-num-seqs 32 \
---max-model-len 133000 \
---max-num-batched-tokens 8096 \
---trust-remote-code \
---gpu-memory-utilization 0.90 \
---no-enable-prefix-caching \
---speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
---compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
---additional-config '{"enable_cpu_binding":true}' \
---async-scheduling
-```
+=== "Qwen3.6-27B-w8a8"
 
-::::
+    Startup Command (supports up to 262144 context length):
 
-::::{tab-item} Qwen3.6-27B-w8a8
-:sync: qwen36-w8a8
+    ```bash
+    #!/bin/sh
+    # Load model from ModelScope to speed up download
+    export VLLM_USE_MODELSCOPE=True
+    # To reduce memory fragmentation and avoid out of memory
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    # Size of the shared buffer (in MB) used by HCCL for NPU-to-NPU collective communication
+    export HCCL_BUFFSIZE=512
+    # Whether OpenMP threads are bound to specific CPU cores
+    export OMP_PROC_BIND=false
+    # Number of OpenMP threads available for parallel regions
+    export OMP_NUM_THREADS=1
+    # Enables the Ascend task queue for asynchronous operator dispatch
+    export TASK_QUEUE_ENABLE=1
 
-Startup Command (supports up to 262144 context length):
+    # Model weight path; can be a ModelScope model id (e.g., Eco-Tech/Qwen3.6-27B-w8a8) or a local directory path
+    export MODEL_PATH=Eco-Tech/Qwen3.6-27B-w8a8
 
-```bash
-#!/bin/sh
-# Load model from ModelScope to speed up download
-export VLLM_USE_MODELSCOPE=True
-# To reduce memory fragmentation and avoid out of memory
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-# Size of the shared buffer (in MB) used by HCCL for NPU-to-NPU collective communication
-export HCCL_BUFFSIZE=512
-# Whether OpenMP threads are bound to specific CPU cores
-export OMP_PROC_BIND=false
-# Number of OpenMP threads available for parallel regions
-export OMP_NUM_THREADS=1
-# Enables the Ascend task queue for asynchronous operator dispatch
-export TASK_QUEUE_ENABLE=1
-
-# Model weight path; can be a ModelScope model id (e.g., Eco-Tech/Qwen3.6-27B-w8a8) or a local directory path
-export MODEL_PATH=Eco-Tech/Qwen3.6-27B-w8a8
-
-vllm serve $MODEL_PATH \
---host 0.0.0.0 \
---port 8000 \
---data-parallel-size 1 \
---tensor-parallel-size 2 \
---seed 1024 \
---quantization ascend \
---served-model-name qwen3.6 \
---max-num-seqs 32 \
---max-model-len 262144 \
---max-num-batched-tokens 8096 \
---trust-remote-code \
---gpu-memory-utilization 0.90 \
---no-enable-prefix-caching \
---speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
---compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
---additional-config '{"enable_cpu_binding":true}' \
---async-scheduling
-```
-
-::::
-:::::
+    vllm serve $MODEL_PATH \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --data-parallel-size 1 \
+    --tensor-parallel-size 2 \
+    --seed 1024 \
+    --quantization ascend \
+    --served-model-name qwen3.6 \
+    --max-num-seqs 32 \
+    --max-model-len 262144 \
+    --max-num-batched-tokens 8096 \
+    --trust-remote-code \
+    --gpu-memory-utilization 0.90 \
+    --no-enable-prefix-caching \
+    --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
+    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+    --additional-config '{"enable_cpu_binding":true}' \
+    --async-scheduling
+    ```
 
 Key Parameter Descriptions:
 

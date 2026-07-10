@@ -41,6 +41,7 @@ from vllm_ascend.ascend_config import WeightPrefetchConfig, get_ascend_config
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.v1.kv_cache_interface import AttentionSpec
 else:
     VllmConfig = None
 
@@ -108,6 +109,31 @@ def get_dsv4_compress_ratio(config: Any, layer_idx: int) -> int:
     if compress_ratios is None or layer_idx >= len(compress_ratios):
         return 0
     return compress_ratios[layer_idx]
+
+
+def model_uses_sfa_sparse(model_config: Any | None) -> bool:
+    hf_text_config = getattr(model_config, "hf_text_config", None)
+    hf_config = getattr(model_config, "hf_config", None)
+    return (
+        hf_text_config is not None
+        and hasattr(hf_text_config, "index_topk")
+        and not hasattr(hf_text_config, "compress_ratios")
+        and not hasattr(hf_config, "compress_ratios")
+    )
+
+
+def enable_sfa_dcp_replicated_indexer(vllm_config: VllmConfig | None = None) -> bool:
+    if vllm_config is None:
+        from vllm.config import get_current_vllm_config
+
+        vllm_config = get_current_vllm_config()
+
+    parallel_config = vllm_config.parallel_config
+    return (
+        model_uses_sfa_sparse(vllm_config.model_config)
+        and parallel_config.decode_context_parallel_size > 1
+        and parallel_config.prefill_context_parallel_size == 1
+    )
 
 
 def clear_enable_sp():
@@ -1691,6 +1717,11 @@ def kv_cache_spec_uses_sparse_c8(kv_cache_spec) -> bool:
     from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 
     return isinstance(kv_cache_spec, AscendMLAAttentionSpec) and bool(getattr(kv_cache_spec, "cache_sparse_c8", False))
+
+
+def sparse_kv_cache_has_indexer(kv_cache_spec: AttentionSpec) -> bool:
+    sparse_head_dim = getattr(kv_cache_spec, "sparse_head_dim", None)
+    return sparse_head_dim is not None and len(sparse_head_dim) == 3 and sparse_head_dim[2] > 0
 
 
 def is_hidden_state_cache_spec(spec) -> bool:

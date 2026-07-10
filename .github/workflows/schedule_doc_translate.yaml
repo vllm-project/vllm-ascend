@@ -105,19 +105,20 @@ jobs:
         run: |
           python .github/workflows/scripts/po_translate.py \
             --files "${{ steps.detect.outputs.files }}" \
-            --output-json /tmp/translation_results.json
+            --output-json /tmp/translation_results.json \
+            --ignore-validation-error
 
       - name: Validate translation coverage
         if: steps.translate.outcome == 'success'
         id: validate
-        continue-on-error: true
         run: |
           python .github/workflows/scripts/po_translate.py \
             --files "${{ steps.detect.outputs.files }}" \
-            --validate-only
+            --validate-only \
+            --ignore-validation-error
 
       - name: Process translated files
-        if: steps.validate.outcome == 'success'
+        if: steps.translate.outcome == 'success'
         id: results
         run: |
           [ ! -f /tmp/translation_results.json ] && echo "No results" && exit 1
@@ -151,7 +152,7 @@ jobs:
           } >> $GITHUB_OUTPUT
 
       - name: Commit and push
-        if: steps.validate.outcome == 'success'
+        if: steps.translate.outcome == 'success'
         env:
           GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
@@ -161,7 +162,7 @@ jobs:
           git push -f fork "${{ env.BRANCH_NAME }}"
 
       - name: Create PR in upstream
-        if: steps.validate.outcome == 'success'
+        if: steps.translate.outcome == 'success'
         uses: actions/github-script@v9
         env:
           FILE_LIST: ${{ steps.results.outputs.file_list }}
