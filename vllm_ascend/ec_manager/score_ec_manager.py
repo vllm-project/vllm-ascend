@@ -201,6 +201,7 @@ class ScoreEncoderCacheManager(EncoderCacheManager):
             ent.freq += 1
             ent.clock = self.max_clock
 
+        self.request_cached_ids.setdefault(request.request_id, set()).add(input_id)
         return True
 
     def on_request(self):
@@ -302,23 +303,28 @@ class ScoreEncoderCacheManager(EncoderCacheManager):
         self.cpu_cache[mm_hash] = cache_entry
 
         self.cached[mm_hash].add(request_id)
+        self.request_cached_ids.setdefault(request_id, set()).add(input_id)
 
     def free_encoder_input(self, request: Request, input_id: int) -> None:
         req_id = request.request_id
         mm_hash = request.mm_features[input_id].identifier
+        if req_id in self.request_cached_ids:
+            self.request_cached_ids[req_id].discard(input_id)
+            if not self.request_cached_ids[req_id]:
+                del self.request_cached_ids[req_id]
+
         # The mm_hash not in cache or the req_id set is empty
         if not self.cached.get(mm_hash, None):
             return
         self.cached[mm_hash].discard(req_id)
         if self.cached[mm_hash]:
             return
-        num_encoder_embeds = request.get_num_encoder_embeds(input_id)
-        if mm_hash in self.cpu_cache:
+        if mm_hash in self.cpu_cache and mm_hash not in self.cpu_freeable:
             self.cpu_freeable[mm_hash] = self.cpu_cache[mm_hash]
-            self.cpu_num_freeable_slots += num_encoder_embeds
-        if mm_hash in self.npu_cache:
+            self.cpu_num_freeable_slots += self.cpu_cache[mm_hash].num_embeds
+        if mm_hash in self.npu_cache and mm_hash not in self.npu_freeable:
             self.npu_freeable[mm_hash] = self.npu_cache[mm_hash]
-            self.npu_num_freeable_slots += num_encoder_embeds
+            self.npu_num_freeable_slots += self.npu_cache[mm_hash].num_embeds
 
     def get_manager_metadata(self) -> "ScoreEncoderCacheManagerMetadata":
         promoting = self.promoting
@@ -408,6 +414,7 @@ class ScoreEncoderCacheManager(EncoderCacheManager):
         Called when model weights are updated to invalidate stale embeddings.
         """
         self.cached.clear()
+        self.request_cached_ids.clear()
         self.freeable.clear()
         self.freed.clear()
         self.promoting.clear()
