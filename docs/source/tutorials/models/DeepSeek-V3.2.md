@@ -119,7 +119,7 @@ In addition, if you don't want to use the docker image as above, you can also bu
 In this tutorial, we suppose you downloaded the model weight to `/root/.cache/`. Feel free to change it to your own path.
 :::
 
-### Single-node Deployment
+### 5.1 Single-node Deployment
 
 - Quantized model `DeepSeek-V3.2-w8a8` can be deployed on 1 Atlas 800 A3 (64G × 16).
 
@@ -167,7 +167,7 @@ Run the following scripts on two nodes respectively.
 
 === "A3 series"
 
-**Node0**
+    **Node0**
 
     ```shell
     # this obtained through ifconfig
