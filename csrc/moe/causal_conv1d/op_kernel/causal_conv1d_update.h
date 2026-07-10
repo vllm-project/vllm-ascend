@@ -31,9 +31,27 @@ public:
         this->weightGm.SetGlobalBuffer(reinterpret_cast<__gm__ T *>(weight));
         this->biasGm.SetGlobalBuffer(reinterpret_cast<__gm__ T *>(bias));
         this->convStatesGm.SetGlobalBuffer(reinterpret_cast<__gm__ T *>(convStates));
-        this->queryStartLocGm.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t *>(queryStartLoc));
-        this->cacheIndicesGm.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t *>(cacheIndices));
-        this->numAcceptedTokensGm.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t *>(numAcceptedTokens));
+        if (tilingData->hasQueryStartLoc != 0) {
+            if (tilingData->queryStartLocUseInt64 != 0) {
+                this->queryStartLocGmInt64.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t *>(queryStartLoc));
+            } else {
+                this->queryStartLocGmInt32.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(queryStartLoc));
+            }
+        }
+        if (tilingData->hasCacheIndices != 0) {
+            if (tilingData->cacheIndicesUseInt64 != 0) {
+                this->cacheIndicesGmInt64.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t *>(cacheIndices));
+            } else {
+                this->cacheIndicesGmInt32.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(cacheIndices));
+            }
+        }
+        if (tilingData->hasNumAcceptedTokens != 0) {
+            if (tilingData->numAcceptedTokensUseInt64 != 0) {
+                this->numAcceptedTokensGmInt64.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t *>(numAcceptedTokens));
+            } else {
+                this->numAcceptedTokensGmInt32.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(numAcceptedTokens));
+            }
+        }
         this->yGm.SetGlobalBuffer(reinterpret_cast<__gm__ T *>(y));
         this->InitSharedBuffersAndEvents();
     }
