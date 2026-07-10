@@ -1329,9 +1329,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             # cast to int32 is crucial when eagle model is compiled.
             # tensor.argmax() returns int64 by default.
             input_ids = draft_token_ids_tensor[draft_index]
-            # TLI: draft_token_ids_tensor holds target-vocab ids (mapped in
-            # _sample_draft_token_ids); map back to draft-vocab space before re-feeding
-            # the draft model.
+            # if use_heterogeneous_vocab is True, use TLI: draft_token_ids_tensor holds
+            # target-vocab ids (mapped in _sample_draft_token_ids);
+            # map back to draft-vocab space before re-feeding the draft model.
+            # otherwise, no changes of input_ids.
             input_ids = self._to_draft_vocab(input_ids)
             positions += 1
 
@@ -1465,6 +1466,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             num_tokens = target_token_ids.shape[0]
             # TLI: the draft model consumes ids in draft-vocab space; map the
             # target-vocab context/next tokens before filling the input buffer.
+            # No-op when heterogeneous vocab is disabled
             shifted_ids = self._to_draft_vocab(target_token_ids[1:])
             mapped_next_token_ids = self._to_draft_vocab(next_token_ids)
             # Shift the input ids by one token.
