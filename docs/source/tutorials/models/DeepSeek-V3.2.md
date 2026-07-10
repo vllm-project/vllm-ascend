@@ -388,7 +388,7 @@ We'd like to show the deployment guide of `DeepSeek-V3.2` on multi-node environm
 
 Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
 
-- `DeepSeek-V3.1-w8a8-mtp-QuaRot 1P1D Layerwise` require 4 Atlas 800 A3 (64G × 16).
+- `DeepSeek-V3.2-w8a8-mtp-QuaRot 1P1D Layerwise` require 4 Atlas 800 A3 (64G × 16).
 
 To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to deploy a `launch_online_dp.py` script and a `run_dp_template.sh` script on each node and deploy a `proxy.sh` script on prefill master node to forward requests.
 
