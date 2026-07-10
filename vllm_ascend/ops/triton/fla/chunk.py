@@ -121,6 +121,7 @@ def chunk_gated_delta_rule_fwd(
         actual_num_decodes = getattr(prebuilt_meta, "num_decodes", None)
         if actual_num_decodes is None:
             actual_num_decodes = num_decodes
+        prefill_seq_offset = getattr(prebuilt_meta, "prefill_seq_offset", actual_num_decodes)
         h_update = chunk_gated_delta_rule_fwd_hupdate(
             k=k,
             w=w,
@@ -157,10 +158,7 @@ def chunk_gated_delta_rule_fwd(
 
         if get_pcp_group().rank_in_group > 0:
             rerun_initial_state = initial_state.clone()
-            if cu_seqlens is not None:
-                _ns_lens = cu_seqlens[1:] - cu_seqlens[:-1]
-                prefill_seq_offset = int(((_ns_lens > 0) & (_ns_lens <= 1)).sum().item())
-            else:
+            if prebuilt_meta is None:
                 prefill_seq_offset = num_decodes
             prefill_slice = slice(prefill_seq_offset, final_state.shape[0])
             rerun_initial_state[prefill_slice] = updated_h_state[prefill_slice]

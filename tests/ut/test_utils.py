@@ -22,7 +22,6 @@ import torch
 
 from tests.ut.base import TestBase
 from vllm_ascend import utils
-from vllm_ascend.utils import REGISTERED_ASCEND_OPS
 
 
 class TestUtils(TestBase):
@@ -303,22 +302,34 @@ class TestUtils(TestBase):
             self.assertTrue(utils.is_drafter_moe_model(vllm_config))
 
     @mock.patch("vllm.model_executor.custom_op.CustomOp")
+    @mock.patch("vllm.model_executor.custom_op.PluggableLayer")
     @mock.patch("vllm_ascend.ops.activation.AscendQuickGELU")
     @mock.patch("vllm_ascend.ops.activation.AscendSiluAndMul")
     @mock.patch("vllm_ascend.ops.layernorm.AscendRMSNorm")
     def test_register_ascend_customop(
-        self, mock_ascend_rmsnorm, mock_ascend_silu_and_mul, mock_ascend_quick_gelu, mock_customop
+        self,
+        mock_ascend_rmsnorm,
+        mock_ascend_silu_and_mul,
+        mock_ascend_quick_gelu,
+        mock_pluggable_layer,
+        mock_customop,
     ):
         utils._ASCEND_CUSTOMOP_IS_REIGISTERED = False
 
         # ascend custom op is not registered
         utils.register_ascend_customop()
-        self.assertEqual(mock_customop.register_oot.call_count, len(REGISTERED_ASCEND_OPS))
+        self.assertEqual(mock_pluggable_layer.register_oot.call_count, 2)
+        self.assertEqual(
+            {call.kwargs["name"] for call in mock_pluggable_layer.register_oot.call_args_list},
+            {"GatedDeltaNetAttention", "QwenGatedDeltaNetAttention"},
+        )
+        self.assertEqual(mock_customop.register_oot.call_count, len(utils.REGISTERED_ASCEND_OPS) - 2)
         self.assertTrue(utils._ASCEND_CUSTOMOP_IS_REIGISTERED)
 
         # ascend custom op is already registered
         utils.register_ascend_customop()
-        self.assertEqual(mock_customop.register_oot.call_count, len(REGISTERED_ASCEND_OPS))
+        self.assertEqual(mock_pluggable_layer.register_oot.call_count, 2)
+        self.assertEqual(mock_customop.register_oot.call_count, len(utils.REGISTERED_ASCEND_OPS) - 2)
 
     @mock.patch("torch_npu.npu_format_cast")
     def test_maybe_trans_nz(self, mock_npu_format_cast):

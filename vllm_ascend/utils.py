@@ -696,7 +696,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     global _ASCEND_CUSTOMOP_IS_REIGISTERED
     if _ASCEND_CUSTOMOP_IS_REIGISTERED:
         return
-    from vllm.model_executor.custom_op import CustomOp
+    from vllm.model_executor.custom_op import CustomOp, PluggableLayer
 
     from vllm_ascend.ops.activation import (
         AscendQuickGELU,
@@ -705,7 +705,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     )
     from vllm_ascend.ops.bailing_moe_linear_attn import AscendBailingMoELinearAttention
     from vllm_ascend.ops.conv import AscendConv3dLayer
-    from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
+    from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention, AscendQwenGatedDeltaNetAttention
     from vllm_ascend.ops.layernorm import AscendGemmaRMSNorm, AscendRMSNorm, AscendRMSNormGated
     from vllm_ascend.ops.linear import (
         AscendColumnParallelLinear,
@@ -758,6 +758,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "RelPosAttention": AscendRelPosAttention,
         "CustomQwen2Decoder": AscendCustomQwen2Decoder,
         "GatedDeltaNetAttention": AscendGatedDeltaNetAttention,
+        "QwenGatedDeltaNetAttention": AscendQwenGatedDeltaNetAttention,
         "BailingMoELinearAttention": AscendBailingMoELinearAttention,
     }
     if vllm_version_is("0.23.0"):
@@ -781,7 +782,10 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     if is_310p():
         from vllm_ascend._310p.ops.activation import AscendSiluAndMul310
         from vllm_ascend._310p.ops.conv import AscendConv3dLayer310
-        from vllm_ascend._310p.ops.fla.gdn_310 import AscendGatedDeltaNetAttention310
+        from vllm_ascend._310p.ops.fla.gdn_310 import (
+            AscendGatedDeltaNetAttention310,
+            AscendQwenGatedDeltaNetAttention310,
+        )
         from vllm_ascend._310p.ops.layernorm import (
             AscendGemmaRMSNorm310,
             AscendRMSNorm310,
@@ -806,6 +810,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
                 "MMEncoderAttention": AscendMMEncoderAttention310,
                 "Conv3dLayer": AscendConv3dLayer310,
                 "GatedDeltaNetAttention": AscendGatedDeltaNetAttention310,
+                "QwenGatedDeltaNetAttention": AscendQwenGatedDeltaNetAttention310,
                 "MRotaryEmbedding": AscendMRotaryEmbedding310,
             }
         )
@@ -814,8 +819,15 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
 
             REGISTERED_ASCEND_OPS["FusedMoE"] = AscendFusedMoE310
 
+    pluggable_layer_names = {
+        "GatedDeltaNetAttention",
+        "QwenGatedDeltaNetAttention",
+    }
     for name, op_cls in REGISTERED_ASCEND_OPS.items():
-        CustomOp.register_oot(_decorated_op_cls=op_cls, name=name)
+        if name in pluggable_layer_names:
+            PluggableLayer.register_oot(_decorated_layer_cls=op_cls, name=name)
+        else:
+            CustomOp.register_oot(_decorated_op_cls=op_cls, name=name)
 
     # NOTE: Keep this at last to ensure all custom actions are registered
     _ASCEND_CUSTOMOP_IS_REIGISTERED = True

@@ -23,7 +23,7 @@ extern "C" {
  * @param [in] value: float16
  * @param [in] beta: float16
  * @param [in] state: float16
- * @param [in] actualSeqLengths: int32
+ * @param [in] actualSeqLengths: int32, [start_offset, seq_len_0, ..., seq_len_n]
  * @param [in] ssmStateIndices: int32
  * @param [in] g: float32
  * @param [in] gk: float32

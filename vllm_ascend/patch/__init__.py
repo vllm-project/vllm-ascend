@@ -785,14 +785,15 @@
 #
 # ** 17. File: worker/patch_qwen3_5.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.models.qwen3_5.Qwen3_5GatedDeltaNet._forward_core`
+#   1. Qwen3.5 decoder, full-attention, and MTP forward compatibility
 #    Why:
-#       The class Qwen3_5GatedDeltaNet reuse the `_forward_core` method of Qwen3NextGatedDeltaNet,
-#       but the ascendC ops of Qwen3NextGatedDeltaNet do not support ssm_state with float32 format.
+#       These forward paths require Ascend-specific tensor layouts and MTP pipeline behavior.
 #    How：
-#       patch Qwen3_5GatedDeltaNet._forward_core to use triton ops like `fused_recurrent_gated_delta_rule`.
+#       Patch only the model forward methods that do not expose an out-of-tree replacement hook.
 #    Future Plan:
-#       Remove this patch when all ops in _forward_core support both Qwen3_5 and Qwen3Next.
+#       Remove these patches as upstream exposes stable model-level extension points.
+#    Note:
+#       Qwen GDN itself is registered through PluggableLayer and is no longer patched here.
 #
 # ** 17a. File: worker/patch_idex_310.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -809,20 +810,6 @@
 #       GatherV2 corruption from persistent drafter input buffers.
 #    How:
 #       Reuse the 310P proposer implementation for the first-pass input shift.
-#
-#   3. `vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn.QwenGatedDeltaNetAttention`
-#    Why:
-#       Qwen GDN needs 310P-specific state helpers, forward core, state dtype,
-#       and attention backend/builder wiring.
-#    How:
-#       Patch Qwen GDN methods to use Ascend GDN implementations and the 310P
-#       GDN attention backend. RC devices also route upstream GDNAttentionBackend
-#       to the 310P metadata builder.
-#    Related PR (if no, explain why):
-#       No, 310P custom operator and backend behavior are vllm-ascend specific.
-#    Future Plan:
-#       Remove this patch when upstream exposes stable hooks for 310P GDN
-#       chunk metadata, spec-decode input layout, and backend selection.
 #
 # ** 18. File: worker/patch_cudagraph.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

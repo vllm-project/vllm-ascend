@@ -372,6 +372,7 @@ def test_chunk_gated_delta_rule_fwd_pcp_chaining_subtracts_initial_state(
             "final_chunk_indices_chunk64": torch.tensor([0], dtype=torch.int32),
             "chunk_indices_large_block": None,
             "num_decodes": 0,
+            "prefill_seq_offset": 0,
         },
     )()
 

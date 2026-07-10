@@ -282,7 +282,8 @@ public:
     __aicore__ inline void ComputeAvgload()
     {
         uint64_t realT = 0;
-        for (uint64_t batch_i = 0; batch_i < B_; batch_i++) {
+        // Match the common recurrent operator layout: [start_offset, seq_len_0, ..., seq_len_n].
+        for (uint64_t batch_i = 1; batch_i < B_ + 1; batch_i++) {
             realT += cuSeqlensGm_.GetValue(batch_i);
         }
         avgload = Ceil(realT * NV_, GetBlockNum());
@@ -291,9 +292,9 @@ public:
     __aicore__ inline void Process()
     {
         ComputeAvgload();
-        int32_t seq1 = 0;
+        int32_t seq1 = cuSeqlensGm_.GetValue(0);
         for (uint64_t batch_i = 0; batch_i < B_; batch_i++) {
-            int32_t seqLen = cuSeqlensGm_.GetValue(batch_i);
+            int32_t seqLen = cuSeqlensGm_.GetValue(batch_i + 1);
             if (seqLen <= 0) {
                 continue;
             }
