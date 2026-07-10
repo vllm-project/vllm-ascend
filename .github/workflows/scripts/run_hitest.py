@@ -12,9 +12,7 @@ def run_hitest_script() -> tuple[int, str, str]:
     if not os.path.exists(shell_script_path):
         raise FileNotFoundError(f"hitest.sh not found at: {shell_script_path}")
     os.chmod(shell_script_path, 0o755)
-    
     env = os.environ.copy()
-    
     # 在 run_hitest_script 函数 env=os.environ.copy() 后加
     print("DEBUG X_APIG_APPCODE:", env.get("X_APIG_APPCODE"))
     print("DEBUG APP_KEY:", env.get("APP_KEY"))
