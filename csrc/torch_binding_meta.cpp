@@ -352,8 +352,10 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_sparse_flash_attention_meta(
         softmax_size = {0};
     }
 
-    at::Tensor softmax_max = at::empty(softmax_size, query.options().dtype(at::kFloat));
-    at::Tensor softmax_sum = at::empty(softmax_size, query.options().dtype(at::kFloat));
+    at::Tensor softmax_max = at::empty_symint(
+        c10::SymIntArrayRef(softmax_size), query.options().dtype(at::kFloat));
+    at::Tensor softmax_sum = at::empty_symint(
+        c10::SymIntArrayRef(softmax_size), query.options().dtype(at::kFloat));
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(output, softmax_max, softmax_sum);
 }
 std::tuple<at::Tensor, at::Tensor> matmul_allreduce_add_rmsnorm_meta(
