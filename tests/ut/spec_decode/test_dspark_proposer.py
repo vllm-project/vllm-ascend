@@ -1118,6 +1118,16 @@ def test_dspark_standard_dsa_refreshes_query_slot_mapping_after_graph_padding(mo
     assert proposer._dspark_query_slot_mappings_by_layer["draft.swa"] is proposer._slot_mapping_buffer
 
 
+def test_dspark_cache_block_size_falls_back_when_kernel_size_is_unset():
+    proposer = SimpleNamespace(
+        draft_attn_groups=[],
+        kernel_block_size=None,
+        num_speculative_tokens=5,
+    )
+
+    assert AscendDSparkProposer._cache_block_size_for_gid(proposer, 0) == 5
+
+
 def test_dspark_standard_dsa_block_table_uses_max_model_len_capacity(monkeypatch):
     monkeypatch.delenv("VLLM_ASCEND_DSPARK_USE_PRIVATE_CACHE", raising=False)
 
@@ -2645,12 +2655,16 @@ def test_dspark_load_model_wraps_dspark_forward_when_graph_enabled(monkeypatch):
         del model
         base_seen_use_cuda_graph.append(self.use_cuda_graph)
 
+    def make_stream():
+        streams.append("stream")
+        return "stream"
+
     monkeypatch.setattr(dspark_proposer_module.AscendDflashProposer, "load_model", fake_base_load_model)
     monkeypatch.setattr(dspark_proposer_module, "ACLGraphWrapper", FakeACLGraphWrapper)
     monkeypatch.setattr(
         dspark_proposer_module.torch,
         "npu",
-        SimpleNamespace(Stream=lambda: streams.append("stream") or "stream"),
+        SimpleNamespace(Stream=make_stream),
         raising=False,
     )
     monkeypatch.setattr(

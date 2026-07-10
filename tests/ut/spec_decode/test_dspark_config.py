@@ -525,9 +525,14 @@ def test_dspark_precompute_context_kv_keeps_private_cache_fallback(monkeypatch):
     private_k = torch.full((2, 1, 4), 2.0)
     private_v = torch.full((2, 1, 4), 3.0)
     expand_calls = []
+
+    def expand_private_kv(kv):
+        expand_calls.append(kv)
+        return private_k, private_v
+
     attention = SimpleNamespace(
         _project_shared_kv=lambda _main_x, _positions: shared_kv,
-        _expand_private_kv=lambda kv: expand_calls.append(kv) or (private_k, private_v),
+        _expand_private_kv=expand_private_kv,
         _store_standard_swa_kv=lambda *_args: None,
         _ensure_dspark_cache=lambda *_args: None,
         _dspark_cache_capacity=8,

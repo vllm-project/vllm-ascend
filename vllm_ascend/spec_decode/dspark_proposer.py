@@ -946,7 +946,10 @@ class AscendDSparkProposer(AscendDflashProposer):
         for attn_group in getattr(self, "draft_attn_groups", []):
             if attn_group.kv_cache_group_id == gid:
                 return int(attn_group.kv_cache_spec.block_size)
-        return int(getattr(self, "kernel_block_size", self.num_speculative_tokens))
+        block_size = getattr(self, "kernel_block_size", None)
+        if block_size is None:
+            block_size = self.num_speculative_tokens
+        return int(block_size)
 
     def _refresh_query_slot_mappings_from_block_tables(
         self,
