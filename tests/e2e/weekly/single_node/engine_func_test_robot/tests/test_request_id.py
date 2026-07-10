@@ -1,8 +1,8 @@
-import re
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
+import regex as re
 
 from tests.e2e.weekly.single_node.engine_func_test_robot.utility import assertion, completion_request
 
