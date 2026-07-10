@@ -145,9 +145,7 @@ def test_npu_solve_tri_all_devices(device_id, layout, shape, dtype):
     x = _make_strict_lower_triangular(shape, layout, dtype=dtype)
     expected = _solve_tri_golden(x, layout)
 
-    actual = torch.ops._C_ascend.npu_solve_tri(
-        x.to(f"npu:{device_id}"), layout=layout
-    ).cpu()
+    actual = torch.ops._C_ascend.npu_solve_tri(x.to(f"npu:{device_id}"), layout=layout).cpu()
     torch.npu.synchronize(device_id)
 
     np.testing.assert_allclose(
@@ -172,7 +170,5 @@ def test_npu_solve_tri_stress(device_id):
     shape = (1, 16, 256, 128)
     for i in range(50):
         x = _make_strict_lower_triangular(shape, "bhtd", dtype=torch.bfloat16)
-        actual = torch.ops._C_ascend.npu_solve_tri(
-            x.to(f"npu:{device_id}"), layout="bhtd"
-        )
+        torch.ops._C_ascend.npu_solve_tri(x.to(f"npu:{device_id}"), layout="bhtd")
     torch.npu.synchronize(device_id)

@@ -314,9 +314,7 @@ class cmake_build_ext(build_ext):
         # add CMAKE_INSTALL_PATH
         cmake_args += [f"-DCMAKE_INSTALL_PREFIX={install_path}"]
 
-        torch_cmake_path = os.path.join(
-            get_paths()["purelib"], "torch", "share", "cmake"
-        )
+        torch_cmake_path = os.path.join(get_paths()["purelib"], "torch", "share", "cmake")
         cmake_prefix_paths = ";".join([pybind11_cmake_path, torch_cmake_path])
         cmake_args += [f"-DCMAKE_PREFIX_PATH={cmake_prefix_paths}"]
 
