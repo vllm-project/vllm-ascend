@@ -108,15 +108,6 @@ msgstr ""
 msgid "## Supported Scenarios"
 msgstr "## 支持场景"
 
-msgid ""
-"|         | Eager | Graph | Prefix <br> Cache | Chunked <br> Prefill |\n"
-"| ------- | ----- | ----- | ------ | ------ |\n"
-"| **CPP** | ✅    | ✅     | ✅      | ✅       |"
-msgstr ""
-"|         | Eager | Graph | Prefix <br> Cache | Chunked <br> Prefill |\n"
-"| ------- | ----- | ----- | ------ | ------ |\n"
-"| **CPP** | ✅    | ✅     | ✅      | ✅       |"
-
 msgid "## How to Enable"
 msgstr "## 启用方法"
 
@@ -128,23 +119,6 @@ msgstr "### 离线推理"
 
 msgid "## Configuration Parameters"
 msgstr "## 配置参数"
-
-msgid ""
-"| Parameter | Type | Default | Description |\n"
-"|-----------|------|---------|-------------|\n"
-"| `enabled` | bool | False | Enable/disable Dynamic Chunked Pipeline Parallel |\n"
-"| `smooth_factor` | float | 1.0 | Smoothing factor (0 < x ≤ 1.0). Higher values trust dynamic prediction more |\n"
-"| `min_chunk` | int | 4096 | Minimum chunk size for dynamic calculation |\n"
-"| `need_timing` | bool | True | Enable/disable Online Calibration |\n"
-"| `max_fit_chunk` | int | 30 | Number of chunk-time data for Online Calibration |"
-msgstr ""
-"| 参数 | 类型 | 默认值 | 描述 |\n"
-"|-----------|------|---------|-------------|\n"
-"| `enabled` | bool | False | 启用/禁用动态分块流水线并行 |\n"
-"| `smooth_factor` | float | 1.0 | 平滑因子（0 < x ≤ 1.0）。值越高越信任动态预测 |\n"
-"| `min_chunk` | int | 4096 | 动态计算的最小分块大小 |\n"
-"| `need_timing` | bool | True | 启用/禁用在线校准 |\n"
-"| `max_fit_chunk` | int | 30 | 在线校准使用的分块时间数据数量 |"
 
 msgid "### Parameter Tuning"
 msgstr "### 参数调优"
@@ -168,17 +142,6 @@ msgstr "## 推荐设置"
 msgid "### max-num-batched-tokens"
 msgstr "### max-num-batched-tokens"
 
-msgid ""
-"| Sequence Length | `max-num-batched-tokens` |\n"
-"|-----------------|--------------------------|\n"
-"| 64k             | 20480                    |\n"
-"| 128k            | 32768                    |"
-msgstr ""
-"| 序列长度 | `max-num-batched-tokens` |\n"
-"|-----------------|--------------------------|\n"
-"| 64k             | 20480                    |\n"
-"| 128k            | 32768                    |"
-
 msgid "### Online Calibration"
 msgstr "### 在线校准"
 
@@ -195,41 +158,8 @@ msgstr "2. 运行在线校准："
 msgid "## Performance"
 msgstr "## 性能"
 
-msgid ""
-"| Configuration | CPP <br> (Dynamic Chunk, <br> chunksize=32k) | PP <br>(Static Chunk, <br> chunksize=32k) |\n"
-"    | ----------------------------- | ------------------------- | ------------------------- |\n"
-"    | Input length  128k    | TTFT: 22.5s | TTFT: 27.0s |"
-msgstr ""
-"| 配置 | CPP <br> (动态分块, <br> 分块大小=32k) | PP <br>(静态分块, <br> 分块大小=32k) |\n"
-"    | ----------------------------- | ------------------------- | ------------------------- |\n"
-"    | 输入长度 128k    | TTFT: 22.5s | TTFT: 27.0s |"
-
 msgid "- Qwen3-235B:"
 msgstr "- Qwen3-235B："
-
-msgid ""
-"| Configuration | CPP <br> (Dynamic Chunk, <br> chunksize=32k) | PP <br>(Static Chunk, <br> chunksize=32k) |\n"
-"    | ----------------------------- | ------------------------- | ------------------------- |\n"
-"    | Input length  256k    | TTFT: 53.5s | TTFT: 61.4s |"
-msgstr ""
-"| 配置 | CPP <br> (动态分块, <br> 分块大小=32k) | PP <br>(静态分块, <br> 分块大小=32k) |\n"
-"    | ----------------------------- | ------------------------- | ------------------------- |\n"
-"    | 输入长度 256k    | TTFT: 53.5s | TTFT: 61.4s |"
-
-msgid ""
-"| Configuration | 4k~64k Input, mean=32k, std=32k <br> prefix hit rate=99% |\n"
-"    | ----------------------------- | ------------------------- |\n"
-"    |  CPP2TP8   | Input throughput: 22424 tps/card |\n"
-"    |  DP2TP8   | Input throughput: 16150 tps/card |\n"
-"    |  PCP2TP8   | Input throughput: 18197 tps/card |\n"
-"    |  TP16   | Input throughput: 18875 tps/card |"
-msgstr ""
-"| 配置 | 4k~64k 输入, 均值=32k, 标准差=32k <br> 前缀命中率=99% |\n"
-"    | ----------------------------- | ------------------------- |\n"
-"    |  CPP2TP8   | 输入吞吐量: 22424 tps/卡 |\n"
-"    |  DP2TP8   | 输入吞吐量: 16150 tps/卡 |\n"
-"    |  PCP2TP8   | 输入吞吐量: 18197 tps/卡 |\n"
-"    |  TP16   | 输入吞吐量: 18875 tps/卡 |"
 
 msgid "## Constraints"
 msgstr "## 约束条件"
@@ -248,263 +178,49 @@ msgstr ""
 msgid "- DeepSeek-V3.1-W8A8:"
 msgstr "- DeepSeek-V3.1-W8A8："
 
-#~ msgid "Dynamic Chunked Pipeline Parallel"
-#~ msgstr "动态分块流水线并行"
+msgid "| Parameter | Type | Default | Description |"
+msgstr "| 参数 | 类型 | 默认值 | 描述 |"
 
-#~ msgid "Overview"
-#~ msgstr "概述"
+msgid "| Sequence Length | `max-num-batched-tokens` |"
+msgstr "| 序列长度 | `max-num-batched-tokens` |"
 
-#~ msgid "When to Use"
-#~ msgstr "使用场景"
+msgid ""
+"| Configuration | CPP <br> (Dynamic Chunk, <br> chunksize=32k) | PP "
+"<br>(Static Chunk, <br> chunksize=32k) |"
+msgstr ""
+"| 配置 | CPP <br> (动态分块, <br> 分块大小=32k) | PP <br>(静态分块, <br> 分块大小=32k) |"
 
-#~ msgid ""
-#~ "**Variable-length sequence serving**: PP does not introduce degradation on "
-#~ "short sequences, and gains benefits through dynamic chunks on long "
-#~ "sequences."
-#~ msgstr "**变长序列服务**：PP对短序列不会引入性能退化，并通过长序列的动态分块获得收益。"
+msgid ""
+"| Configuration | 4k~64k Input, mean=32k, std=32k <br> prefix hit rate=99% |"
+msgstr "| 配置 | 4k~64k 输入, 均值=32k, 标准差=32k <br> 前缀命中率=99% |"
 
-#~ msgid ""
-#~ "**Ultra-long sequence inference**: For sequences exceeding single-machine "
-#~ "memory capacity (e.g., 1M tokens), dynamic chunking significantly reduces "
-#~ "pipeline idle time."
-#~ msgstr "**超长序列推理**：对于超出单机内存容量的序列（如1M tokens），动态分块可显著减少流水线空闲时间。"
+msgid ""
+"| `enabled` | bool | False | Enable/disable Dynamic Chunked Pipeline "
+"Parallel |"
+msgstr "| `enabled` | bool | False | 启用/禁用动态分块流水线并行 |"
 
-#~ msgid "Supported Scenarios"
-#~ msgstr "支持场景"
+msgid ""
+"| `smooth_factor` | float | 1.0 | Smoothing factor (0 < x ≤ 1.0). Higher "
+"values trust dynamic prediction more |"
+msgstr "| `smooth_factor` | float | 1.0 | 平滑因子（0 < x ≤ 1.0）。值越大，越信任动态预测结果 |"
 
-#~ msgid "Eager"
-#~ msgstr "Eager"
+msgid "| `need_timing` | bool | True | Enable/disable Online Calibration |"
+msgstr "| `need_timing` | bool | True | 启用/禁用在线校准 |"
 
-#~ msgid "Graph"
-#~ msgstr "Graph"
+msgid "    | Input length  128k    | TTFT: 22.5s | TTFT: 27.0s |"
+msgstr "    | 输入长度 128k    | TTFT: 22.5s | TTFT: 27.0s |"
 
-#~ msgid "Prefix <br> Cache"
-#~ msgstr "前缀<br>缓存"
+msgid "    | Input length  256k    | TTFT: 53.5s | TTFT: 61.4s |"
+msgstr "    | 输入长度 256k    | TTFT: 53.5s | TTFT: 61.4s |"
 
-#~ msgid "Chunked <br> Prefill"
-#~ msgstr "分块<br>预填充"
+msgid "    |  CPP2TP8   | Input throughput: 22424 tps/card |"
+msgstr "    |  CPP2TP8   | 输入吞吐量：22424 tps/卡 |"
 
-#~ msgid "**CPP**"
-#~ msgstr "**CPP**"
+msgid "    |  DP2TP8   | Input throughput: 16150 tps/card |"
+msgstr "    |  DP2TP8   | 输入吞吐量：16150 tps/卡 |"
 
-#~ msgid "✅"
-#~ msgstr "✅"
+msgid "    |  PCP2TP8   | Input throughput: 18197 tps/card |"
+msgstr "    |  PCP2TP8   | 输入吞吐量：18197 tps/卡 |"
 
-#~ msgid "How to Enable"
-#~ msgstr "启用方法"
-
-#~ msgid "Online Serving"
-#~ msgstr "在线服务"
-
-#~ msgid "Offline Inference"
-#~ msgstr "离线推理"
-
-#~ msgid "Configuration Parameters"
-#~ msgstr "配置参数"
-
-#~ msgid "Parameter"
-#~ msgstr "参数"
-
-#~ msgid "Type"
-#~ msgstr "类型"
-
-#~ msgid "Default"
-#~ msgstr "默认值"
-
-#~ msgid "Description"
-#~ msgstr "描述"
-
-#~ msgid "`enabled`"
-#~ msgstr "`enabled`"
-
-#~ msgid "bool"
-#~ msgstr "bool"
-
-#~ msgid "False"
-#~ msgstr "False"
-
-#~ msgid "Enable/disable Dynamic Chunked Pipeline Parallel"
-#~ msgstr "启用/禁用动态分块流水线并行"
-
-#~ msgid "`smooth_factor`"
-#~ msgstr "`smooth_factor`"
-
-#~ msgid "float"
-#~ msgstr "float"
-
-#~ msgid "1.0"
-#~ msgstr "1.0"
-
-#~ msgid ""
-#~ "Smoothing factor (0 < x ≤ 1.0). Higher values trust dynamic prediction more"
-#~ msgstr "平滑因子（0 < x ≤ 1.0），值越大越信任动态预测"
-
-#~ msgid "`min_chunk`"
-#~ msgstr "`min_chunk`"
-
-#~ msgid "int"
-#~ msgstr "int"
-
-#~ msgid "4096"
-#~ msgstr "4096"
-
-#~ msgid "Minimum chunk size for dynamic calculation"
-#~ msgstr "动态计算的最小分块大小"
-
-#~ msgid "`need_timing`"
-#~ msgstr "`need_timing`"
-
-#~ msgid "True"
-#~ msgstr "True"
-
-#~ msgid "Enable/disable Online Calibration"
-#~ msgstr "启用/禁用在线校准"
-
-#~ msgid "`max_fit_chunk`"
-#~ msgstr "`max_fit_chunk`"
-
-#~ msgid "30"
-#~ msgstr "30"
-
-#~ msgid "Number of chunk-time data for Online Calibration"
-#~ msgstr "在线校准的分块时间数据数量"
-
-#~ msgid "Parameter Tuning"
-#~ msgstr "参数调优"
-
-#~ msgid "`smooth_factor`: Controls trust level in dynamic prediction"
-#~ msgstr "`smooth_factor`：控制对动态预测的信任程度"
-
-#~ msgid "`1.0`: Strictly follow model prediction"
-#~ msgstr "`1.0`：严格遵循模型预测"
-
-#~ msgid "`0.6~0.85`: Balance dynamic adjustment and scheduling overhead"
-#~ msgstr "`0.6~0.85`：平衡动态调整与调度开销"
-
-#~ msgid "`0.0`: No dynamic adjustment (degrades to fixed chunking)"
-#~ msgstr "`0.0`：无动态调整（退化为固定分块）"
-
-#~ msgid ""
-#~ "`min_chunk`: Generally doesn't need adjustment. Should be smaller than `max-"
-#~ "num-batched-tokens`"
-#~ msgstr "`min_chunk`：通常无需调整，应小于`max-num-batched-tokens`"
-
-#~ msgid "Recommended Settings"
-#~ msgstr "推荐设置"
-
-#~ msgid "max-num-batched-tokens"
-#~ msgstr "max-num-batched-tokens"
-
-#~ msgid "Sequence Length"
-#~ msgstr "序列长度"
-
-#~ msgid "`max-num-batched-tokens`"
-#~ msgstr "`max-num-batched-tokens`"
-
-#~ msgid "64k"
-#~ msgstr "64k"
-
-#~ msgid "20480"
-#~ msgstr "20480"
-
-#~ msgid "128k"
-#~ msgstr "128k"
-
-#~ msgid "32768"
-#~ msgstr "32768"
-
-#~ msgid "Online Calibration"
-#~ msgstr "在线校准"
-
-#~ msgid ""
-#~ "Modify "
-#~ "`<YOUR_AISBENCH_PATH>/benchmark/ais_bench/datasets/synthetic/synthetic_config.py`:"
-#~ msgstr ""
-#~ "修改`<YOUR_AISBENCH_PATH>/benchmark/ais_bench/datasets/synthetic/synthetic_config.py`："
-
-#~ msgid "Run for online calibration:"
-#~ msgstr "运行在线校准："
-
-#~ msgid "Performance"
-#~ msgstr "性能"
-
-#~ msgid "DeepSeek-V3.1-W8A8:"
-#~ msgstr "DeepSeek-V3.1-W8A8："
-
-#~ msgid "Configuration"
-#~ msgstr "配置"
-
-#~ msgid "CPP <br> (Dynamic Chunk, <br> chunksize=32k)"
-#~ msgstr "CPP <br>（动态分块，<br>分块大小=32k）"
-
-#~ msgid "PP <br>(Static Chunk, <br> chunksize=32k)"
-#~ msgstr "PP <br>（静态分块，<br>分块大小=32k）"
-
-#~ msgid "Input length  128k"
-#~ msgstr "输入长度 128k"
-
-#~ msgid "TTFT: 22.5s"
-#~ msgstr "TTFT：22.5s"
-
-#~ msgid "TTFT: 27.0s"
-#~ msgstr "TTFT：27.0s"
-
-#~ msgid "Qwen3-235B:"
-#~ msgstr "Qwen3-235B："
-
-#~ msgid "Input length  256k"
-#~ msgstr "输入长度 256k"
-
-#~ msgid "TTFT: 53.5s"
-#~ msgstr "TTFT：53.5s"
-
-#~ msgid "TTFT: 61.4s"
-#~ msgstr "TTFT：61.4s"
-
-#~ msgid "4k~64k Input, mean=32k, std=32k <br> prefix hit rate=99%"
-#~ msgstr "4k~64k输入，均值=32k，标准差=32k <br>前缀命中率=99%"
-
-#~ msgid "CPP2TP8"
-#~ msgstr "CPP2TP8"
-
-#~ msgid "Input throughput: 22424 tps/card"
-#~ msgstr "输入吞吐量：22424 tps/卡"
-
-#~ msgid "DP2TP8"
-#~ msgstr "DP2TP8"
-
-#~ msgid "Input throughput: 16150 tps/card"
-#~ msgstr "输入吞吐量：16150 tps/卡"
-
-#~ msgid "PCP2TP8"
-#~ msgstr "PCP2TP8"
-
-#~ msgid "Input throughput: 18197 tps/card"
-#~ msgstr "输入吞吐量：18197 tps/卡"
-
-#~ msgid "TP16"
-#~ msgstr "TP16"
-
-#~ msgid "Input throughput: 18875 tps/card"
-#~ msgstr "输入吞吐量：18875 tps/卡"
-
-#~ msgid "Constraints"
-#~ msgstr "约束条件"
-
-#~ msgid "**Pipeline Parallelism Required**: `--pipeline-parallel-size > 1`"
-#~ msgstr "**需要流水线并行**：`--pipeline-parallel-size > 1`"
-
-#~ msgid "**Chunked Prefill Required**: `--enable-chunked-prefill`"
-#~ msgstr "**需要分块预填充**：`--enable-chunked-prefill`"
-
-#~ msgid ""
-#~ "**Incompatible with Balance Scheduling**: Cannot enable "
-#~ "`VLLM_ASCEND_BALANCE_SCHEDULING`"
-#~ msgstr "**与均衡调度不兼容**：无法启用`VLLM_ASCEND_BALANCE_SCHEDULING`"
-
-#~ msgid ""
-#~ "**Startup Overhead**: Profiling adds ~64 forward passes (tens of seconds)"
-#~ msgstr "**启动开销**：性能分析增加约64次前向传播（数十秒）"
-
-#~ msgid "!!! note"
-#~ msgstr ""
+msgid "    |  TP16   | Input throughput: 18875 tps/card |"
+msgstr "    |  TP16   | 输入吞吐量：18875 tps/卡 |"

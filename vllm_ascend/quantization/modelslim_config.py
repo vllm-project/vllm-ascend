@@ -193,6 +193,30 @@ packed_modules_model_mapping: dict[str, dict[str, list[str]]] = {
         ],
         "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
     },
+    "gemma4": {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+        "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+    },
+    "gemma4_text": {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+        "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+    },
     "glm4_moe_lite": {
         "gate_up_proj": ["gate_proj", "up_proj"],
         "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
@@ -337,6 +361,16 @@ QUANT_MODEL_SUBSTR_MAPPINGS = {
     "step3p5_mtp": {
         ".mtp_block.": ".",
     },
+    # Gemma4 MoE renames ".experts." to ".moe.experts." in the vLLM module tree
+    # (gemma4.py weight mapper), but the ModelSlim quant description keeps the
+    # original ".experts." naming. Strip the ".moe" infix so the quant lookup
+    # matches the on-disk keys.
+    "gemma4": {
+        ".moe.experts": ".experts",
+    },
+    "gemma4_text": {
+        ".moe.experts": ".experts",
+    },
 }
 
 
@@ -351,6 +385,19 @@ def get_packed_modules_mapping(model_type: str) -> dict[str, list[str]]:
         Returns empty dict if model_type is not found.
     """
     return packed_modules_model_mapping.get(model_type, {})
+
+
+def _is_missing_v_shard(shard_key: str, quant_description: Mapping[str, Any]) -> bool:
+    """Return whether the missing shard is Gemma4's replicated v_proj.
+
+    k_eq_v layers do not have a dedicated v_proj entry because v_proj is
+    replicated from k_proj at load time. Keep q_proj/k_proj mandatory so other
+    malformed packed quant descriptions still fail as before.
+    """
+    if not shard_key.endswith(".v_proj.weight"):
+        return False
+    shard_prefix = shard_key[: -len("v_proj.weight")]
+    return f"{shard_prefix}q_proj.weight" in quant_description and f"{shard_prefix}k_proj.weight" in quant_description
 
 
 def get_linear_quant_type(
@@ -373,7 +420,12 @@ def get_linear_quant_type(
             prefix.replace(proj_name, shard_proj_name) for shard_proj_name in packed_modules_mapping[proj_name]
         ]
         for shard_prefix in shard_prefixes:
-            shard_quant_type = quant_description[shard_prefix + ".weight"]
+            shard_key = shard_prefix + ".weight"
+            # Only Gemma4 k_eq_v is allowed to omit v_proj; other missing
+            # shards fall through to the original dictionary lookup below.
+            if shard_key not in quant_description and _is_missing_v_shard(shard_key, quant_description):
+                continue
+            shard_quant_type = quant_description[shard_key]
 
             if quant_type is None:
                 quant_type = shard_quant_type
@@ -679,7 +731,12 @@ class AscendModelSlimConfig(QuantizationConfig):
 
             is_skipped = None
             for shard_prefix in shard_prefixes:
-                is_shard_skipped = self.quant_description[shard_prefix + ".weight"] == "FLOAT"
+                shard_key = shard_prefix + ".weight"
+                # Preserve the original failure behavior except for the known
+                # k_eq_v case where v_proj is replicated from k_proj.
+                if shard_key not in self.quant_description and _is_missing_v_shard(shard_key, self.quant_description):
+                    continue
+                is_shard_skipped = self.quant_description[shard_key] == "FLOAT"
 
                 if is_skipped is None:
                     is_skipped = is_shard_skipped
