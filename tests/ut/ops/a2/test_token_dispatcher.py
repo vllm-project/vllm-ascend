@@ -61,7 +61,7 @@ def build_token_dispatch_input_fixture(
     mc2_mask: torch.Tensor | None = None,
 ) -> MoETokenDispatchInput:
     mxfp_spec = None
-    if quant_type in (QuantType.MXFP8, QuantType.MXFP4):
+    if quant_type in (QuantType.W8A8MXFP, QuantType.W4A4MXFP):
         mxfp_spec = MoEMxfpParams(act_quant_type=act_quant_type)
     return MoETokenDispatchInput(
         hidden_states=hidden_states,
@@ -350,7 +350,7 @@ class TestTokenDispatcherWithMC2(TestBase):
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             expert_map=expert_map,
-            quant_type=QuantType.MXFP8,
+            quant_type=QuantType.W8A8MXFP,
             act_quant_type=torch.float8_e4m3fn,
         )
 
@@ -372,7 +372,7 @@ class TestTokenDispatcherWithMC2(TestBase):
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             expert_map=expert_map,
-            quant_type=QuantType.MXFP4,
+            quant_type=QuantType.W4A4MXFP,
             act_quant_type=MXFP4_TEST_DTYPE,
         )
         kwargs = self.dispatcher.get_dispatch_mc2_kwargs(token_dispatch_input)
@@ -414,8 +414,8 @@ def test_allgather_token_dispatch_quant_mode_without_dynamic_scale():
     )
 
     cases = (
-        (QuantType.MXFP8, torch.float8_e4m3fn, 3),
-        (QuantType.MXFP4, MXFP4_TEST_DTYPE, 9),
+        (QuantType.W8A8MXFP, torch.float8_e4m3fn, 3),
+        (QuantType.W4A4MXFP, MXFP4_TEST_DTYPE, 9),
     )
     for quant_type, act_quant_type, expected_quant_mode in cases:
         token_dispatch_input = build_token_dispatch_input_fixture(

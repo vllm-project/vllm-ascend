@@ -120,7 +120,7 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
     """FusedMoe method for Ascend W4A4_MXFP4."""
 
     model_dtype = None
-    quant_type: QuantType = QuantType.MXFP4
+    quant_type: QuantType = QuantType.W4A4MXFP
 
     def __init__(self):
         ensure_mxfp4_moe_available("W4A4_MXFP4 MoE quantization")

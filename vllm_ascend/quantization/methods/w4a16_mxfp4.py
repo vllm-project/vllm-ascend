@@ -56,7 +56,7 @@ def unpack_uint8_to_fp4_return_float32(packed: torch.Tensor) -> torch.Tensor:
 class AscendW4A16MXFP4FusedMoEMethod(AscendMoEScheme):
     """FusedMoE method for Ascend W4A16_MXFP4."""
 
-    quant_type: QuantType = QuantType.W4A16MXFP4
+    quant_type: QuantType = QuantType.W4A16MXFP
 
     def __init__(self) -> None:
         ensure_mxfp4_moe_available("W4A16_MXFP4 MoE quantization")
