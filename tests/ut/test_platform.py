@@ -521,10 +521,17 @@ class TestNPUPlatform(TestBase):
         with (
             pytest.raises(ValueError, match=r"recompute_scheduler_enable.*PD-disaggregated.*PD-mixed"),
             patch.object(platform.NPUPlatform, "_fix_incompatible_config"),
+            patch.object(platform.logger, "info_once") as mock_info,
         ):
             self.platform.check_and_update_config(vllm_config)
 
         mock_init_recompute.assert_not_called()
+        enabled_logs = [
+            call
+            for call in mock_info.call_args_list
+            if call.args and "Ascend recompute scheduler enabled" in call.args[0]
+        ]
+        self.assertEqual(enabled_logs, [])
 
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
     @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
@@ -589,6 +596,7 @@ class TestNPUPlatform(TestBase):
             patch.object(platform.NPUPlatform, "_fix_incompatible_config"),
             patch.object(platform, "check_kv_extra_config"),
             patch.object(platform.logger, "warning") as mock_warning,
+            patch.object(platform.logger, "info_once") as mock_info,
         ):
             self.platform.check_and_update_config(vllm_config)
 
@@ -600,6 +608,12 @@ class TestNPUPlatform(TestBase):
             "recompute_scheduler_enable is ignored on PD-disaggregated P nodes",
             mock_warning.call_args.args[0],
         )
+        enabled_logs = [
+            call
+            for call in mock_info.call_args_list
+            if call.args and "Ascend recompute scheduler enabled" in call.args[0]
+        ]
+        self.assertEqual(enabled_logs, [])
 
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
     @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
@@ -614,6 +628,9 @@ class TestNPUPlatform(TestBase):
         mock_init_ascend.return_value = mock_ascend_config
 
         recompute_scheduler_config = MagicMock()
+        recompute_scheduler_config.scheduler_cls = "vllm_ascend.core.recompute_scheduler.AsyncRecomputeScheduler"
+        recompute_scheduler_config.async_scheduling = True
+        recompute_scheduler_config.policy = "fcfs"
         mock_init_recompute.return_value = recompute_scheduler_config
 
         vllm_config = TestNPUPlatform.mock_vllm_config()
@@ -633,11 +650,28 @@ class TestNPUPlatform(TestBase):
         with (
             patch.object(platform.NPUPlatform, "_fix_incompatible_config"),
             patch.object(platform, "check_kv_extra_config"),
+            patch.object(platform.logger, "info_once") as mock_info,
         ):
             self.platform.check_and_update_config(vllm_config)
 
         mock_init_recompute.assert_called_once_with(vllm_config)
         self.assertIs(vllm_config.scheduler_config, recompute_scheduler_config)
+        enabled_logs = [
+            call
+            for call in mock_info.call_args_list
+            if call.args and "Ascend recompute scheduler enabled" in call.args[0]
+        ]
+        self.assertEqual(len(enabled_logs), 1)
+        self.assertEqual(
+            enabled_logs[0].args,
+            (
+                "Ascend recompute scheduler enabled: scheduler_cls=%s, async_scheduling=%s, policy=%s, kv_role=%s",
+                "vllm_ascend.core.recompute_scheduler.AsyncRecomputeScheduler",
+                True,
+                "fcfs",
+                "kv_consumer",
+            ),
+        )
 
     def test_validate_kv_load_failure_policy_rejects_hybrid_recompute(self):
         vllm_config = TestNPUPlatform.mock_vllm_config()

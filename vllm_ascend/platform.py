@@ -655,6 +655,8 @@ class NPUPlatform(Platform):
                 vllm_config.scheduler_config.policy,
             )
 
+        recompute_scheduler_cls = None
+        recompute_scheduler_kv_role = None
         if ascend_config.recompute_scheduler_enable:
             kv_transfer_config = vllm_config.kv_transfer_config
             kv_role = getattr(kv_transfer_config, "kv_role", None)
@@ -676,6 +678,8 @@ class NPUPlatform(Platform):
 
                 recompute_scheduler_config = RecomputeSchedulerConfig.initialize_from_config(vllm_config)
                 vllm_config.scheduler_config = recompute_scheduler_config
+                recompute_scheduler_cls = recompute_scheduler_config.scheduler_cls
+                recompute_scheduler_kv_role = kv_role
                 if enable_short_request_first:
                     logger.info(
                         "Ascend ShortRequestFirst scheduler selected through recompute "
@@ -710,6 +714,18 @@ class NPUPlatform(Platform):
                 "vllm_ascend.core.scheduler_profiling_chunk.ProfilingChunkScheduler"
             )
             import vllm_ascend.patch.platform.patch_profiling_chunk  # noqa
+
+        if (
+            recompute_scheduler_cls is not None
+            and vllm_config.scheduler_config.scheduler_cls == recompute_scheduler_cls
+        ):
+            logger.info_once(
+                "Ascend recompute scheduler enabled: scheduler_cls=%s, async_scheduling=%s, policy=%s, kv_role=%s",
+                recompute_scheduler_cls,
+                vllm_config.scheduler_config.async_scheduling,
+                vllm_config.scheduler_config.policy,
+                recompute_scheduler_kv_role,
+            )
 
         cp_size = parallel_config.decode_context_parallel_size * parallel_config.prefill_context_parallel_size
         if (
