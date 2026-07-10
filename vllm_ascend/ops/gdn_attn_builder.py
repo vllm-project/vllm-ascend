@@ -170,9 +170,7 @@ def _build_non_spec_chunked_prefill_metadata(
     cu_seqlens_host = tuple(cu_seqlens_cpu.to(torch.int64).reshape(-1).tolist())
     # Pre-compute compact cu_seqlens for AscendC kernels so each layer
     # can reuse them instead of calling _compact_empty_segments again.
-    cu_seqlens_kern, _, keep_meta = _compact_empty_segments(
-        cu_seqlens_host, None, device=device
-    )
+    cu_seqlens_kern, _, keep_meta = _compact_empty_segments(cu_seqlens_host, None, device=device)
     if keep_meta is None:
         cu_seqlens_kern = None
     else:
