@@ -1146,6 +1146,12 @@ class AscendDSparkProposer(AscendDflashProposer):
             if has_num_rejected:
                 assert rejected_tokens_cpu is not None
                 valid_ctx_end -= int(rejected_tokens_cpu[req_idx])
+            if valid_ctx_end <= ctx_start:
+                raise ValueError(
+                    "DSpark padded speculative input must retain at least one "
+                    f"valid token for request {req_idx}: "
+                    f"ctx_start={ctx_start}, valid_ctx_end={valid_ctx_end}"
+                )
             last_pos = target_positions[valid_ctx_end - 1]
             out_start = req_idx * block_size
             out_end = out_start + block_size

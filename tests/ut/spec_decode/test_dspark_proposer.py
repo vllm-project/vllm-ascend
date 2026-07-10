@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 import torch
 from vllm.v1.worker.utils import AttentionGroup
 
@@ -1300,7 +1301,7 @@ def test_dspark_standard_dsa_keeps_per_layer_block_tables(monkeypatch):
     )
 
 
-def test_dspark_set_inputs_first_pass_stores_rejected_context_tokens(monkeypatch):
+def test_dspark_set_inputs_first_pass_handles_rejected_context_tokens(monkeypatch):
     monkeypatch.setenv("VLLM_ASCEND_DSPARK_USE_PRIVATE_CACHE", "1")
     device = torch.device("cpu")
     block_size = 3
@@ -1410,6 +1411,18 @@ def test_dspark_set_inputs_first_pass_stores_rejected_context_tokens(monkeypatch
         torch.arange(200, 208, dtype=torch.int32),
     )
     assert proposer._dflash_num_context == 8
+
+    with pytest.raises(ValueError, match="must retain at least one valid token"):
+        AscendDSparkProposer.set_inputs_first_pass(
+            proposer,
+            target_token_ids=torch.arange(8, dtype=torch.int64),
+            next_token_ids=next_token_ids,
+            target_positions=target_positions,
+            target_hidden_states=target_hidden_states,
+            token_indices_to_sample=None,
+            cad=cad,
+            num_rejected_tokens_gpu=torch.tensor([4, 2], dtype=torch.int32),
+        )
 
 
 def test_dspark_build_model_inputs_first_pass_returns_query_slot_mapping():

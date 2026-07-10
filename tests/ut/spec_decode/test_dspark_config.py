@@ -146,6 +146,15 @@ def test_dspark_fp8_qdq_helpers_return_input_when_disabled():
     assert _maybe_fp8_e4m3fn_qdq(out, apply_fp8_qdq=False, block_size=128) is out
 
 
+def test_dspark_fp8_qdq_rejects_incompatible_block_size():
+    with pytest.raises(ValueError, match="last_dim=65, block_size=64"):
+        _maybe_fp8_qdq_nope_dims(
+            torch.randn(2, 65),
+            nope_head_dim=65,
+            apply_fp8_qdq=True,
+        )
+
+
 def test_dspark_markov_head_w2_uses_model_default_dtype(monkeypatch):
     captured = {}
 

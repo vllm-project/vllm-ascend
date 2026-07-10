@@ -489,7 +489,11 @@ def _fp8_e4m3fn_qdq(x: torch.Tensor, block_size: int) -> torch.Tensor:
 
     orig_shape = x.shape
     last_dim = orig_shape[-1]
-    assert last_dim % block_size == 0
+    if last_dim % block_size != 0:
+        raise ValueError(
+            "DSpark FP8 QDQ requires the last dimension to be divisible by "
+            f"the block size, but got last_dim={last_dim}, block_size={block_size}"
+        )
     x_view = x.float().reshape(-1, last_dim)
     blocks = x_view.reshape(-1, last_dim // block_size, block_size)
     amax = blocks.abs().amax(dim=-1, keepdim=True).clamp_min(1e-4)
