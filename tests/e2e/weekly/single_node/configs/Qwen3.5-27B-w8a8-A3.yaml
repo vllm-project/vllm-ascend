@@ -140,7 +140,7 @@ test_cases:
         max_out_len: 512
         batch_size: 14
         request_rate: 0
-        baseline: 232.94
+        baseline: 197.00
         threshold: 0.97
   - name: "Qwen3.5-27B-w8a8-in64k-16-4"
     model: "Eco-Tech/Qwen3.5-27B-w8a8-mtp"
@@ -230,7 +230,7 @@ test_cases:
         max_out_len: 1024
         batch_size: 12
         request_rate: 0
-        baseline: 204.44
+        baseline: 195.87
         threshold: 0.97
   - name: "Qwen3.5-27B-w8a8-in128k-28-7"
     model: "Eco-Tech/Qwen3.5-27B-w8a8-mtp"
