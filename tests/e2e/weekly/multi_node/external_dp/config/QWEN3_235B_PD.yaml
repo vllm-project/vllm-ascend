@@ -1,0 +1,207 @@
+test_name: "QWEN3_235B_PD"
+model: "vllm-ascend/Qwen3-235B-A22B-w8a8"
+num_nodes: 3
+npu_per_node: 16
+
+routing:
+  type: "disaggregated_prefill"
+  groups:
+    prefiller: [ 0 ]
+    decoder: [ 1, 2 ]
+
+config:
+  - node_index: 0
+    port_start: 7100
+    dp_rpc_port: 12321
+    dp_size: 1
+    dp_size_local: 1
+    dp_rank_start: 0
+    tp_size: 16
+    dp_address: "${NODE_0_IP}"
+
+  - node_index: 1
+    port_start: 7100
+    dp_rpc_port: 12321
+    dp_size: 32
+    dp_size_local: 16
+    dp_rank_start: 0
+    tp_size: 1
+    dp_address: "${NODE_1_IP}"
+
+  - node_index: 2
+    port_start: 7100
+    dp_rpc_port: 12321
+    dp_size: 32
+    dp_size_local: 16
+    dp_rank_start: 16
+    tp_size: 1
+    dp_address: "${NODE_1_IP}"
+
+env_common: &env_common
+  SERVER_PORT: "${PORT}"
+  VLLM_RPC_TIMEOUT: "3600000"
+  VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "30000"
+  HCCL_EXEC_TIMEOUT: "204"
+  HCCL_CONNECT_TIMEOUT: "400"
+  HCCL_ENTRY_LOG_ENABLE: 1
+  LD_PRELOAD: "/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD"
+  OMP_PROC_BIND: "false"
+  OMP_NUM_THREADS: "10"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  VLLM_ASCEND_ENABLE_MLAPO: "1"
+  TASK_QUEUE_ENABLE: "1"
+  HCCL_OP_EXPANSION_MODE: "AIV"
+  VLLM_USE_V1: "1"
+  ASCEND_BUFFER_POOL: "4:8"
+  LD_LIBRARY_PATH: "/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH"
+
+
+env_prefill: &env_prefill
+  <<: *env_common
+  ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15"
+  HCCL_BUFFSIZE: "256"
+
+env_decode: &env_decode
+  <<: *env_common
+  DISABLE_L2_CACHE: "1"
+  ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
+  VLLM_TORCH_PROFILER_WITH_STACK: 0
+  EXPERT_MAP_RECORD: "true"
+  DYNAMIC_EPLB: "true"
+  HCCL_BUFFSIZE: "1024"
+
+templates:
+  - node_index: 0
+    envs:
+      <<: *env_prefill
+    server_cmd_template:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "7100"
+      - --data-parallel-size
+      - "1"
+      - --data-parallel-rpc-port
+      - --data-parallel-address
+      - "12321"
+      - --tensor-parallel-size
+      - "16"
+      - --enable-expert-parallel
+      - --seed
+      - "1024"
+      - --max-model-len
+      - "36864"
+      - --max-num-batched-tokens
+      - "16384"
+      - --max-num-seqs
+      - "8"
+      - --enforce-eager
+      - --trust-remote-code
+      - --gpu-memory-utilization
+      - "0.9"
+      - --quantization
+      - "ascend"
+      - --no-enable-prefix-caching
+      - --additional-config
+      - '{"ascend_scheduler_config":{"enabled":true,"enable_chunked_prefill":true}}'
+      - --kv-transfer-config
+      - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_producer", "kv_port": "30000", "engine_id": "0", "kv_connector_extra_config": {"prefill": {"dp_size": 1, "tp_size": 16}, "decode": {"dp_size": 32, "tp_size": 1}}}'
+
+  - node_index: 1
+    envs:
+      <<: *env_prefill
+    server_cmd_template:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - $SERVER_PORT
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --enable-expert-parallel
+      - --seed
+      - "1024"
+      - --max-model-len
+      - "40000"
+      - --max-num-batched-tokens
+      - "256"
+      - --max-num-seqs
+      - "40"
+      - --trust-remote-code
+      - --gpu-memory-utilization
+      - "0.94"
+      - --quantization
+      - "ascend"
+      - --no-enable-prefix-caching
+      - --speculative-config
+      - '{"method": "deepseek_mtp", "num_speculative_tokens": 1}'
+      - --compilation-config
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      - --additional-config
+      - '{"finegrained_tp_config": {"lmhead_tensor_parallel_size":8},"dynamic_eplb":true,"num_iterations_eplb_update":4000,"num_wait_worker_iterations":200,"init_redundancy_expert":0,"gate_eplb":false}'
+      - --kv-transfer-config
+      - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_consumer", "kv_port": "30200", "engine_id": "2", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 8}, "decode": {"dp_size": 32, "tp_size": 1}}}'
+
+  - node_index: 2
+    envs:
+      <<: *env_decode
+    server_cmd_template:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - $SERVER_PORT
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --enable-expert-parallel
+      - --seed
+      - "1024"
+      - --max-model-len
+      - "40000"
+      - --max-num-batched-tokens
+      - "256"
+      - --max-num-seqs
+      - "40"
+      - --trust-remote-code
+      - --gpu-memory-utilization
+      - "0.94"
+      - --quantization
+      - "ascend"
+      - --no-enable-prefix-caching
+      - --speculative-config
+      - '{"method": "deepseek_mtp", "num_speculative_tokens": 1}'
+      - --compilation-config
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      - --additional-config
+      - '{"finegrained_tp_config": {"lmhead_tensor_parallel_size":8},"dynamic_eplb":true,"num_iterations_eplb_update":4000,"num_wait_worker_iterations":200,"init_redundancy_expert":0,"gate_eplb":false}'
+      - --kv-transfer-config
+      - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_consumer", "kv_port": "30200", "engine_id": "2", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 8}, "decode": {"dp_size": 32, "tp_size": 1}}}'
+
+benchmarks:
+  acc:
+    case_type: accuracy
+    dataset_path: vllm-ascend/gsm8k
+    request_conf: vllm_api_general_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
+    max_out_len: 32768
+    batch_size: 64
+    baseline: 96.74
+    threshold: 1
+    temperature: 0.6
+    top_p: 0.95
+    ignore_eos: false
+    thinking: true
