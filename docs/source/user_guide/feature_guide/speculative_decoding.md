@@ -19,7 +19,7 @@ The following speculative decoding methods are supported:
 | `eagle` | EAGLE-based draft model |
 | `eagle3` | EAGLE-3 based draft model |
 | `mtp` | Multi-Token Prediction with shared embedding head |
-| `dflash` | Draft-and-Flash with cross-attention |
+| `dflash` | Block diffusion-based parallel draft model |
 | `draft_model` | Generic external draft LLM |
 | `extract_hidden_states` | Extract hidden states for EAGLE training |
 
