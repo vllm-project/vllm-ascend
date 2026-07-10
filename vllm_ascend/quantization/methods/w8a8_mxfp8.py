@@ -193,10 +193,10 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
 
 @register_scheme("W8A8_MXFP8", "moe")
 class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
-    """FusedMoe method for Ascend W8A8_DYNAMIC."""
+    """FusedMoe method for Ascend W8A8_MXFP8."""
 
     model_dtype = None
-    quant_type: QuantType = QuantType.MXFP8
+    quant_type: QuantType = QuantType.W8A8MXFP
 
     def __init__(self):
         ensure_mxfp8_moe_available("W8A8_MXFP8 MoE quantization")
