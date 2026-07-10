@@ -39,7 +39,7 @@ a3:
       - name: DeepSeek_V3.1T_MTP1_128K_1K_PD
         config_file_path: DeepSeek_V3.1T_MTP1_128K_1K_PD.yaml
         size: 4
-      - name: multi-node-deepseek-v3.1t-mtp3-acc
+      - name: DeepSeek_V3.1T_MTP1_PD
         config_file_path: DeepSeek_V3.1T_MTP1_PD.yaml
         size: 4
   double_node:
