@@ -1,5 +1,5 @@
 test_name: "QWEN3_235B_PD"
-model: "vllm-ascend/Qwen3-235B-A22B-w8a8"
+model: "vllm-ascend/Qwen3-235B-A22B-W8A8"
 num_nodes: 3
 npu_per_node: 16
 
