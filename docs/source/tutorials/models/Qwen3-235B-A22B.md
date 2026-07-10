@@ -73,18 +73,16 @@ If you need to deploy a multi-node environment, verify the multi-node communicat
 
 You can use the official all-in-one Docker image for Qwen3 MoE models.
 
-**Docker Pull:**
-
-```bash
-
-docker pull quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
-```
-
-**Docker Run:**
-
-Start the docker image on your each node.
-
 === "A3 series"
+
+    **Docker Pull:**
+
+    ```bash
+
+    docker pull quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
+    ```
+
+    **Docker Run:**
 
     ```bash
 
@@ -129,6 +127,15 @@ Start the docker image on your each node.
         If you are on a shared machine, map only the chips you need (e.g., `/dev/davinci[0-7]` for NPU 0-3).
 
 === "A2 series"
+
+    **Docker Pull:**
+
+    ```bash
+
+    docker pull quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
+    ```
+
+    **Docker Run:**
 
     ```bash
 
