@@ -28,3 +28,4 @@ vllm serve /workspace/shared_assets/GeekCamp/Infer/Model/zouchangjiang/Qwen3.5-2
 --additional-config '{"enable_cpu_binding":true}' \
 --async-scheduling
 <img width="1363" height="516" alt="image" src="https://github.com/user-attachments/assets/32751cfa-f784-4504-996c-e036b21e56e4" />
+<img width="1441" height="578" alt="image" src="https://github.com/user-attachments/assets/b540ef19-0513-4147-a0df-ef602343af92" />
