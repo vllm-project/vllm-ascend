@@ -123,21 +123,6 @@ msgstr "### 功能"
 msgid "UCM currently provides the following capabilities:"
 msgstr "UCM 目前提供以下功能："
 
-msgid ""
-"| Capability | Description |\n"
-"|------------|-------------|\n"
-"| **Prefix Cache** | Persistent KV cache storage with support for NFS Store, 3FS Store, and Pipeline Store |\n"
-"| **Sparse Attention** | Training-free sparse attention methods including GSA (Graph-based Sparse Attention) and CacheBlend for long-context acceleration |\n"
-"| **PD Disaggregation** | Prefill-Decode disaggregation with multiple modes: P2P, Centralized PD, NPGD, and xPYD |\n"
-"| **ReRoPE** | Support for Rotary Position Embedding extensions |"
-msgstr ""
-"| 功能 | 描述 |\n"
-"|------------|-------------|\n"
-"| **前缀缓存** | 持久化 KV 缓存存储，支持 NFS 存储、3FS 存储和流水线存储 |\n"
-"| **稀疏注意力** | 无需训练的稀疏注意力方法，包括 GSA（基于图的稀疏注意力）和 CacheBlend，用于长上下文加速 |\n"
-"| **PD 分离** | 预填充-解码分离，支持多种模式：P2P、集中式 PD、NPGD 和 xPYD |\n"
-"| **ReRoPE** | 支持旋转位置嵌入扩展 |"
-
 msgid "**Supported Platforms:**"
 msgstr "**支持的平台：**"
 
@@ -207,17 +192,6 @@ msgstr "### PD 分离场景"
 
 msgid "UCM supports two types of PD disaggregation architectures:"
 msgstr "UCM 支持两种类型的 PD 分离架构："
-
-msgid ""
-"| Type | KV Transfer Method | Characteristics |\n"
-"|------|-------------------|-----------------|\n"
-"| **Centralized PD** | Via unified storage backend (NFS/3FS) | Simple architecture, complete decoupling, stateless instances |\n"
-"| **Distributed PD (P2P)** | Direct transfer via Mooncake + UCM prefix cache | Lower latency, suitable for homogeneous P/D nodes |"
-msgstr ""
-"| 类型 | KV 传输方式 | 特点 |\n"
-"|------|-------------------|-----------------|\n"
-"| **集中式 PD** | 通过统一存储后端（NFS/3FS） | 架构简单、完全解耦、无状态实例 |\n"
-"| **分布式 PD（P2P）** | 通过 Mooncake + UCM 前缀缓存直接传输 | 延迟更低，适用于同构 P/D 节点 |"
 
 msgid "#### Centralized PD Disaggregation"
 msgstr "#### 集中式 PD 分离"
@@ -572,19 +546,6 @@ msgstr "**测试命令：**"
 msgid "**Test Scenarios:**"
 msgstr "**测试场景：**"
 
-msgid ""
-"| Scenario | Description |\n"
-"|----------|-------------|\n"
-"| **Recalculation** | Baseline without UCM, HBM prefix cache disabled (full recomputation) |\n"
-"| **HBM PC** | Without UCM, HBM prefix cache enabled |\n"
-"| **UCM PC** | With UCM prefix cache enabled |"
-msgstr ""
-"| 场景 | 描述 |\n"
-"|----------|-------------|\n"
-"| **重新计算** | 无 UCM 的基线，HBM 前缀缓存禁用（完全重新计算） |\n"
-"| **HBM PC** | 无 UCM，HBM 前缀缓存启用 |\n"
-"| **UCM PC** | UCM 前缀缓存启用 |"
-
 msgid "**Performance Results:**"
 msgstr "**性能结果：**"
 
@@ -749,3 +710,52 @@ msgstr "关键配置参数："
 
 msgid "**Step 4: Run Load Balancing Service**"
 msgstr "**步骤 4：运行负载均衡服务**"
+
+msgid "| Capability | Description |"
+msgstr "| 能力 | 描述 |"
+
+msgid "| Type | KV Transfer Method | Characteristics |"
+msgstr "| 类型 | KV传输方式 | 特性 |"
+
+msgid "| Scenario | Description |"
+msgstr "| 场景 | 描述 |"
+
+msgid ""
+"| **Prefix Cache** | Persistent KV cache storage with support for NFS Store,"
+" 3FS Store, and Pipeline Store |"
+msgstr "| **前缀缓存** | 持久化KV缓存存储，支持NFS存储、3FS存储和流水线存储 |"
+
+msgid ""
+"| **Sparse Attention** | Training-free sparse attention methods including "
+"GSA (Graph-based Sparse Attention) and CacheBlend for long-context "
+"acceleration |"
+msgstr "| **稀疏注意力** | 免训练的稀疏注意力方法，包括GSA（基于图的稀疏注意力）和CacheBlend，用于长上下文加速 |"
+
+msgid ""
+"| **PD Disaggregation** | Prefill-Decode disaggregation with multiple modes:"
+" P2P, Centralized PD, NPGD, and xPYD |"
+msgstr "| **PD分离** | 预填充-解码分离，支持多种模式：P2P、集中式PD、NPGD和xPYD |"
+
+msgid "| **ReRoPE** | Support for Rotary Position Embedding extensions |"
+msgstr "| **ReRoPE** | 支持旋转位置编码扩展 |"
+
+msgid ""
+"| **Centralized PD** | Via unified storage backend (NFS/3FS) | Simple "
+"architecture, complete decoupling, stateless instances |"
+msgstr "| **集中式PD** | 通过统一存储后端（NFS/3FS）| 架构简单、完全解耦、无状态实例 |"
+
+msgid ""
+"| **Distributed PD (P2P)** | Direct transfer via Mooncake + UCM prefix cache"
+" | Lower latency, suitable for homogeneous P/D nodes |"
+msgstr "| **分布式PD（P2P）** | 通过Mooncake + UCM前缀缓存直接传输 | 低延迟，适用于同构P/D节点 |"
+
+msgid ""
+"| **Recalculation** | Baseline without UCM, HBM prefix cache disabled (full "
+"recomputation) |"
+msgstr "| **重新计算** | 无UCM的基线，禁用HBM前缀缓存（完全重新计算）|"
+
+msgid "| **HBM PC** | Without UCM, HBM prefix cache enabled |"
+msgstr "| **HBM PC** | 无UCM，启用HBM前缀缓存 |"
+
+msgid "| **UCM PC** | With UCM prefix cache enabled |"
+msgstr "| **UCM PC** | 启用UCM前缀缓存 |"

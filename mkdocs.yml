@@ -252,6 +252,7 @@ nav:
         - user_guide/feature_guide/rfork.md
         - user_guide/feature_guide/dynamic_batch.md
         - user_guide/feature_guide/epd_disaggregation.md
+        - user_guide/feature_guide/short_request_first.md
         - user_guide/feature_guide/kv_pool.md
         - user_guide/feature_guide/kv_cache_cpu_offload.md
         - user_guide/feature_guide/external_dp.md
@@ -293,6 +294,7 @@ nav:
         - developer_guide/Design_Documents/add_custom_aclnn_op.md
         - developer_guide/Design_Documents/context_parallel.md
         - developer_guide/Design_Documents/moe_comm_method.md
+        - developer_guide/Design_Documents/balance_schedule_refactor.md
         - developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md
         - developer_guide/Design_Documents/quantization.md
         - developer_guide/Design_Documents/npugraph_ex.md
