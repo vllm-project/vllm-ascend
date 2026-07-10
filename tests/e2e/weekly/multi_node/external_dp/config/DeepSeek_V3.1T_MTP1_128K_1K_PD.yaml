@@ -1,5 +1,5 @@
 test_name: "DeepSeek_V3.1T_MTP1_128K_1K_PD"
-model: "BaojunZhou/DeepSeek-V3.1-Terminus-w8a8-QuaRot"
+model: "Eco-Tech/DeepSeek-V3.1-Terminus-w8a8-mtp-QuaRot"
 num_nodes: 4
 npu_per_node: 16
 
