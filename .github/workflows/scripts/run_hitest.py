@@ -14,9 +14,9 @@ def run_hitest_script() -> tuple[int, str, str]:
     os.chmod(shell_script_path, 0o755)
     
     env = os.environ.copy()
-    env["AUROGON_APPCODE"] = os.environ.get("AUROGON_APPCODE", "")
-    env["AUROGON_APPKEY"] = os.environ.get("AUROGON_APPKEY", "")
-    env["AUROGON_APPSECRET"] = os.environ.get("AUROGON_APPSECRET", "")
+    env["X_APIG_APPCODE"] = os.environ.get("X_APIG_APPCODE", "")
+    env["APP_KEY"] = os.environ.get("APP_KEY", "")
+    env["APP_SECRET"] = os.environ.get("APP_SECRET", "")
 
     proc = subprocess.run(
         ["/bin/bash", "-el", shell_script_path],
