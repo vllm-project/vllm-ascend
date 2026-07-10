@@ -464,21 +464,23 @@ _SAMPLING_PARAMS = SamplingParams(
 )
 
 
+def _probe_npu_device_name(q: multiprocessing.Queue) -> None:
+    """Entry point for the detection subprocess — must be module-level for pickling."""
+    try:
+        import torch
+
+        q.put(torch.npu.get_device_properties().name)
+    except Exception:
+        q.put("")
+
+
 def get_case_by_specific_device():
     # Detect NPU device name in an isolated spawn subprocess to avoid
     # triggering torch_npu initialization in the main process, which would
     # break forked multiprocessing subprocesses that use NPU later.
-    def _probe(q: multiprocessing.Queue) -> None:
-        try:
-            import torch
-
-            q.put(torch.npu.get_device_properties().name)
-        except Exception:
-            q.put("")
-
     ctx = multiprocessing.get_context("spawn")
     q: multiprocessing.Queue[str] = ctx.Queue()
-    p = ctx.Process(target=_probe, args=(q,))
+    p = ctx.Process(target=_probe_npu_device_name, args=(q,))
     p.start()
     p.join(timeout=10)
     try:
