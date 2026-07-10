@@ -1,7 +1,6 @@
 import pytest
 
-from tests.e2e.weekly.single_node.engine_func_test_robot.utility import assertion
-from tests.e2e.weekly.single_node.engine_func_test_robot.utility import image_helper
+from tests.e2e.weekly.single_node.engine_func_test_robot.utility import assertion, image_helper
 
 
 def _generation_request(**overrides):

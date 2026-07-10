@@ -8,9 +8,7 @@ from tests.e2e.weekly.single_node.engine_func_test_robot.utility import assertio
 IMAGE_EDIT_URI = "/v1/images/edits"
 IMAGE_EDIT_MODEL = "qwen_image_edit_2511"
 PROMPT = "Convert this image to watercolor style."
-ONE_PIXEL_PNG = (
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
-)
+ONE_PIXEL_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
 
 
 @pytest.fixture(scope="module")

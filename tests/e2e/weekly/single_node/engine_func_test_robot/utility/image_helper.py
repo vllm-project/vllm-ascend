@@ -25,9 +25,7 @@ def get_all_test_images() -> list:
     if not IMAGES_DIR.exists():
         return []
     return [
-        str(path)
-        for path in sorted(IMAGES_DIR.iterdir())
-        if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS
+        str(path) for path in sorted(IMAGES_DIR.iterdir()) if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS
     ]
 
 
