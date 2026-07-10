@@ -122,22 +122,18 @@ def test_egale_spec_decoding(
         runner.model.generate(prompts, sampling_params)
         metrics = runner.model.get_metrics()
 
-    num_drafts = 0
-    acceptance_counts = [0] * num_speculative_tokens
-    for metric in metrics:
-        if metric.name == "vllm:spec_decode_num_drafts":
-            assert isinstance(metric, Counter)
-            num_drafts += metric.value
-        elif metric.name == "vllm:spec_decode_num_accepted_tokens_per_pos":
-            assert isinstance(metric, Vector)
-            for pos in range(len(metric.values)):
-                acceptance_counts[pos] += metric.values[pos]
-
-    print("-" * 60)
-    for i in range(num_speculative_tokens):
-        rate = acceptance_counts[i] / num_drafts if num_drafts > 0 else 0
-        print(f"acceptance at token {i}: {rate:.4f}")
-    print("-" * 60)
+    acceptance_per_pos = calculate_acceptance_per_pos(
+        metrics,
+        num_speculative_tokens,
+        Counter,
+        Vector,
+    )
+    golden = [0.43, 0.13, 0.05]
+    match = all(abs(a - b) < 0.1 for a, b in zip(acceptance_per_pos, golden))
+    if not match:
+        print(f"acceptance_per_pos: {acceptance_per_pos}")
+        print(f"golden: {golden}")
+    assert match
 
 
 @pytest.mark.parametrize("model", DFLASH_MAIN_MODEL)
