@@ -20,7 +20,4 @@ msgstr ""
 "Generated-By: Babel 2.17.0\n"
 
 msgid "# Deployment Guide"
-msgstr ""
-
-#~ msgid "Deployment Guide"
-#~ msgstr "部署指南"
+msgstr "# 部署指南"
