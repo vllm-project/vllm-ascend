@@ -47,6 +47,26 @@ def install_hunyuan_vl_processor_compat() -> bool:
     image_module.__all__ = ["HunYuanVLImageProcessor", "smart_resize"]  # type: ignore[attr-defined]
     sys.modules[image_module_name] = image_module
 
+    # vLLM #47872 removed its bundled Hunyuan processor modules but left the
+    # lazy registry pointing at those paths. Redirect only the stale entries;
+    # preserve a future upstream replacement or an intentionally removed key.
+    import vllm.transformers_utils.processors as vllm_processors
+
+    class_to_module = vllm_processors._CLASS_TO_MODULE
+    registry_redirects = {
+        "HunYuanVLProcessor": (
+            "vllm.transformers_utils.processors.hunyuan_vl",
+            "vllm_ascend.patch.transformers_compat.hunyuan_vl",
+        ),
+        "HunYuanVLImageProcessor": (
+            "vllm.transformers_utils.processors.hunyuan_vl_image",
+            "vllm_ascend.patch.transformers_compat.hunyuan_vl_image",
+        ),
+    }
+    for class_name, (legacy_module, compat_module) in registry_redirects.items():
+        if class_to_module.get(class_name) == legacy_module:
+            class_to_module[class_name] = compat_module
+
     parent_module.HunYuanVLProcessor = HunYuanVLProcessor  # type: ignore[attr-defined]
     parent_module.image_processing_hunyuan_vl = image_module  # type: ignore[attr-defined]
 

@@ -13,6 +13,8 @@ def test_tag_does_not_install_hunyuan_compat(monkeypatch):
 
 
 def test_main_installs_hunyuan_compat(monkeypatch):
+    import vllm.transformers_utils.processors as vllm_processors
+
     from vllm_ascend.patch import transformers_compat
 
     monkeypatch.setattr(compat, "vllm_version_is", lambda _version: False)
@@ -32,6 +34,16 @@ def test_main_installs_hunyuan_compat(monkeypatch):
     monkeypatch.setitem(sys.modules, parent_name, parent_module)
     monkeypatch.setitem(sys.modules, image_module_name, ModuleType(image_module_name))
 
+    class_to_module = vllm_processors._CLASS_TO_MODULE
+    processor_key = "HunYuanVLProcessor"
+    image_processor_key = "HunYuanVLImageProcessor"
+    processor_legacy_module = "vllm.transformers_utils.processors.hunyuan_vl"
+    image_processor_legacy_module = "vllm.transformers_utils.processors.hunyuan_vl_image"
+    processor_compat_module = "vllm_ascend.patch.transformers_compat.hunyuan_vl"
+    image_processor_compat_module = "vllm_ascend.patch.transformers_compat.hunyuan_vl_image"
+    monkeypatch.setitem(class_to_module, processor_key, processor_legacy_module)
+    monkeypatch.setitem(class_to_module, image_processor_key, image_processor_legacy_module)
+
     assert compat.install_hunyuan_vl_processor_compat()
 
     from transformers import HunYuanVLProcessor
@@ -43,6 +55,22 @@ def test_main_installs_hunyuan_compat(monkeypatch):
     assert HunYuanVLProcessor is transformers_compat.HunYuanVLProcessor
     assert HunYuanVLImageProcessor is transformers_compat.HunYuanVLImageProcessor
     assert smart_resize is transformers_compat.smart_resize
+
+    # Exercise vLLM's real __getattr__ -> importlib lazy registry path.
+    assert getattr(vllm_processors, processor_key) is transformers_compat.HunYuanVLProcessor
+    assert getattr(vllm_processors, image_processor_key) is transformers_compat.HunYuanVLImageProcessor
+    assert class_to_module[processor_key] == processor_compat_module
+    assert class_to_module[image_processor_key] == image_processor_compat_module
+
+    # Do not overwrite a future upstream implementation or recreate a key that
+    # upstream deliberately removed.
+    monkeypatch.delattr(transformers, "HunYuanVLProcessor")
+    monkeypatch.setitem(class_to_module, processor_key, "upstream.hunyuan_processor")
+    monkeypatch.delitem(class_to_module, image_processor_key)
+
+    assert compat.install_hunyuan_vl_processor_compat()
+    assert class_to_module[processor_key] == "upstream.hunyuan_processor"
+    assert image_processor_key not in class_to_module
 
 
 def test_compat_processor_preserves_0706_call_protocol(monkeypatch):
