@@ -70,7 +70,6 @@ while [ ${retry_cnt} -lt ${MAX_RETRY} ]; do
 
     BUS_SUCCESS=$(echo "${SAVE_MR_RET}" | grep -o '"success":[a-z]*' | cut -d: -f2)
     BUS_CODE=$(echo "${SAVE_MR_RET}" | grep -o '"code":[0-9]*' | cut -d: -f2)
-    # 500服务器繁忙则重试
     if [[ "${BUS_CODE}" == "500" ]];then
         retry_cnt=$((retry_cnt+1))
         echo "WARN: server busy code 500, retry ${retry_cnt}/${MAX_RETRY}"
@@ -173,8 +172,6 @@ if not targets:
     print("INFO: case recommend returned no targets, writing empty list", file=sys.stderr)
 else:
     print("\n".join(targets))
-
-print("\n".join(targets))
 PY
 
 if [ $? -ne 0 ]; then
