@@ -1,10 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
-"""Correctness tests for MiniMax M3 sparse-attention Triton kernels on Ascend.
+"""Correctness tests for MiniMax M3 sparse-attention kernels on Ascend.
 
-Covers ``msa_m3_triton`` index top-k and block-sparse attention operators.
+Covers ``msa_m3_triton`` index top-k operators, ``msa_m3_npu`` block-sparse
+attention (``npu_sparse_attention_score``), and optionally compares against the
+Triton sparse-attention reference.
+
+Default sparse-attention backend is Triton. Select the NPU op with::
+
+    pytest tests/ut/attention/test_minimax_m3_sparse_attn.py --msa-m3-sparse-backend=torch_npu
+
 Test cases are adapted from
-``reference/vllm_cp/tests/kernels/attention/test_minimax_m3.py``.
+``reference/vllm_cp/tests/kernels/attention/test_minimax_m3.py`` and
+``csrc/attention/sparse_attention_score/tests/test_bf16.py``.
 """
 
 from __future__ import annotations
@@ -13,17 +21,22 @@ import os
 import random
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Literal
 
 import pytest
 import torch
 
+from vllm_ascend.attention.msa_m3_npu import (
+    minimax_m3_sparse_attn,
+    minimax_m3_sparse_attn_decode,
+)
 from vllm_ascend.attention.msa_m3_triton import (
     SPARSE_BLOCK_SIZE,
     minimax_m3_index_decode,
     minimax_m3_index_score,
     minimax_m3_index_topk,
-    minimax_m3_sparse_attn,
-    minimax_m3_sparse_attn_decode,
+    minimax_m3_sparse_attn as minimax_m3_sparse_attn_triton,
+    minimax_m3_sparse_attn_decode as minimax_m3_sparse_attn_decode_triton,
 )
 
 NPU_AVAILABLE = hasattr(torch, "npu") and torch.npu.is_available()
@@ -47,6 +60,8 @@ TOPK = 16
 SM_SCALE = HEAD_DIM**-0.5
 _SPARSE_MEAN_ATOL = 2.5e-4
 _SPARSE_MAX_ATOL = 1.7e-2
+SparseAttnBackend = Literal["triton", "torch_npu"]
+_NPU_SPARSE_OP_REGISTERED = False
 # MiniMax-M3 production sparse_attention_config (w8a8 checkpoint).
 PRODUCTION_SPARSE_TOPK = 16
 PRODUCTION_INDEX_HEAD_DIM = 128
@@ -84,10 +99,153 @@ def _topk_select_width(topk: int) -> int:
     return max(TOPK_SELECTION_TILE, _topk_compute_width(topk))
 
 
+@pytest.fixture(scope="session")
+def msa_m3_sparse_backend(request: pytest.FixtureRequest) -> SparseAttnBackend:
+    backend: SparseAttnBackend = request.config.getoption("--msa-m3-sparse-backend")
+    if backend == "torch_npu":
+        if not NPU_AVAILABLE:
+            pytest.skip("torch_npu sparse backend requires NPU.")
+        _ensure_npu_sparse_attention_score_op()
+    return backend
+
+
+@pytest.fixture
+def msa_m3_sparse_backend_triton_only(
+    msa_m3_sparse_backend: SparseAttnBackend,
+) -> SparseAttnBackend:
+    if msa_m3_sparse_backend != "triton":
+        pytest.skip("index / boundary tests only run with triton backend.")
+    return msa_m3_sparse_backend
+
+
 @pytest.fixture
 def should_do_global_cleanup_after_test() -> bool:
     # vLLM cleanup calls torch.accelerator.empty_cache(), invalid on NPU.
     return False
+
+
+def _ensure_npu_sparse_attention_score_op() -> None:
+    """Ensure ``torch.ops._C_ascend.npu_sparse_attention_score`` is available."""
+    global _NPU_SPARSE_OP_REGISTERED
+    if _NPU_SPARSE_OP_REGISTERED:
+        return
+
+    from vllm_ascend.utils import bootstrap_custom_op_env, enable_custom_op
+
+    bootstrap_custom_op_env(include_vendor_lib=True)
+    if not enable_custom_op():
+        pytest.skip("vllm-ascend custom ops are disabled in this build.")
+
+    torch.npu.set_device(0)
+    torch.npu.synchronize()
+
+    try:
+        _ = torch.ops._C_ascend.npu_sparse_attention_score
+    except AttributeError:
+        pytest.skip(
+            "torch.ops._C_ascend.npu_sparse_attention_score is not available. "
+            "Rebuild with: pip install -v --no-build-isolation -e ."
+        )
+
+    _NPU_SPARSE_OP_REGISTERED = True
+
+
+def _sparse_tolerances(_backend: SparseAttnBackend) -> tuple[float, float]:
+    return _SPARSE_MEAN_ATOL, _SPARSE_MAX_ATOL
+
+
+def _run_prefill_sparse_attention(
+    backend: SparseAttnBackend,
+    *,
+    q: torch.Tensor,
+    kv_cache: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+    kv_cache_fused: torch.Tensor,
+    topk_idx: torch.Tensor,
+    block_table: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    seq_lens: torch.Tensor,
+    q_lens_t: torch.Tensor,
+    prefix_lens: torch.Tensor,
+    max_seqlen_q: int,
+    num_kv_heads: int,
+    sm_scale: float,
+    output: torch.Tensor,
+) -> None:
+    del kv_cache_fused, q_lens_t
+    if backend == "triton":
+        minimax_m3_sparse_attn_triton(
+            q,
+            kv_cache,
+            topk_idx,
+            block_table,
+            cu_seqlens,
+            seq_lens,
+            prefix_lens,
+            max_seqlen_q,
+            num_kv_heads,
+            sm_scale,
+            output,
+        )
+        return
+
+    minimax_m3_sparse_attn(
+        q,
+        kv_cache,
+        topk_idx,
+        block_table,
+        cu_seqlens,
+        seq_lens,
+        prefix_lens,
+        max_seqlen_q,
+        num_kv_heads,
+        sm_scale,
+        output,
+        block_size=BLOCK_SIZE,
+    )
+
+
+def _run_decode_sparse_attention(
+    backend: SparseAttnBackend,
+    *,
+    q: torch.Tensor,
+    kv_cache: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+    kv_cache_fused: torch.Tensor,
+    topk_idx: torch.Tensor,
+    block_table: torch.Tensor,
+    seq_lens: torch.Tensor,
+    num_kv_heads: int,
+    sm_scale: float,
+    output: torch.Tensor,
+    decode_query_len: int,
+    active_batch: int,
+) -> None:
+    del kv_cache_fused, active_batch
+    if backend == "triton":
+        minimax_m3_sparse_attn_decode_triton(
+            q,
+            kv_cache,
+            topk_idx,
+            block_table,
+            seq_lens,
+            num_kv_heads,
+            sm_scale,
+            output,
+            decode_query_len,
+        )
+        return
+
+    minimax_m3_sparse_attn_decode(
+        q,
+        kv_cache,
+        topk_idx,
+        block_table,
+        seq_lens,
+        num_kv_heads,
+        sm_scale,
+        output,
+        decode_query_len,
+        block_size=BLOCK_SIZE,
+    )
 
 
 def _synchronize() -> None:
@@ -200,7 +358,10 @@ def _assert_topk_indices_equal_unordered(
 
 
 @pytest.mark.parametrize("index_layout", ["3d"])
-def test_prefill_index_topk_correctness(index_layout: str) -> None:
+def test_prefill_index_topk_correctness(
+    msa_m3_sparse_backend_triton_only: SparseAttnBackend,
+    index_layout: str,
+) -> None:
     topk = 6
     init_blocks = 0
     local_blocks = 1
@@ -268,6 +429,7 @@ def test_prefill_index_topk_correctness(index_layout: str) -> None:
 @pytest.mark.parametrize("index_layout", ["3d"])
 @pytest.mark.parametrize("num_reqs", [1, 2])
 def test_prefill_index_topk_production_shape(
+    msa_m3_sparse_backend_triton_only: SparseAttnBackend,
     index_layout: str,
     num_reqs: int,
 ) -> None:
@@ -358,6 +520,7 @@ def test_prefill_index_topk_production_shape(
 
 @pytest.mark.parametrize("index_layout", ["3d"])
 def test_prefill_index_topk_production_long_sequence(
+    msa_m3_sparse_backend_triton_only: SparseAttnBackend,
     index_layout: str,
 ) -> None:
     """Prefill index top-k at online max context length.
@@ -434,6 +597,7 @@ def test_prefill_index_topk_production_long_sequence(
 @pytest.mark.parametrize("decode_query_len", [1, 4])
 @pytest.mark.parametrize("num_padded_reqs", [0, 2])
 def test_decode_index_topk_correctness(
+    msa_m3_sparse_backend_triton_only: SparseAttnBackend,
     index_layout: str,
     decode_query_len: int,
     num_padded_reqs: int,
@@ -506,6 +670,7 @@ def test_decode_index_topk_correctness(
 @pytest.mark.parametrize("decode_query_len", [1, PRODUCTION_MTP_DECODE_QUERY_LEN])
 @pytest.mark.parametrize("num_reqs", [1, 2])
 def test_decode_index_topk_production_cudagraph_shape(
+    msa_m3_sparse_backend_triton_only: SparseAttnBackend,
     index_layout: str,
     decode_query_len: int,
     num_reqs: int,
@@ -580,13 +745,19 @@ def test_decode_index_topk_production_cudagraph_shape(
 # ---------------------------------------------------------------------------
 
 
-def _assert_sparse_close(actual: torch.Tensor, expected: torch.Tensor) -> None:
+def _assert_sparse_close(
+    actual: torch.Tensor,
+    expected: torch.Tensor,
+    *,
+    backend: SparseAttnBackend = "triton",
+) -> None:
+    mean_atol, max_atol = _sparse_tolerances(backend)
     error = (actual.float() - expected.float()).abs()
-    assert error.mean().item() < _SPARSE_MEAN_ATOL, (
-        f"mean error {error.mean().item():.6g} >= {_SPARSE_MEAN_ATOL}"
+    assert error.mean().item() < mean_atol, (
+        f"mean error {error.mean().item():.6g} >= {mean_atol} (backend={backend})"
     )
-    assert error.max().item() < _SPARSE_MAX_ATOL, (
-        f"max error {error.max().item():.6g} >= {_SPARSE_MAX_ATOL}"
+    assert error.max().item() < max_atol, (
+        f"max error {error.max().item():.6g} >= {max_atol} (backend={backend})"
     )
 
 
@@ -768,6 +939,7 @@ def _build_decode_inputs(
     ],
 )
 def test_prefill_sparse_attention_correctness(
+    msa_m3_sparse_backend: SparseAttnBackend,
     q_lens: tuple[int, ...],
     kv_lens: tuple[int, ...],
 ) -> None:
@@ -802,18 +974,21 @@ def test_prefill_sparse_attention_correctness(
     topk_idx = _build_prefill_topk_idx(q_lens_t, prefix_lens, total_q)
 
     actual = torch.empty_like(q)
-    minimax_m3_sparse_attn(
-        q,
-        kv_cache,
-        topk_idx,
-        block_table,
-        cu_seqlens,
-        seq_lens,
-        prefix_lens,
-        max_seqlen_q,
-        NUM_KV_HEADS,
-        SM_SCALE,
-        actual,
+    _run_prefill_sparse_attention(
+        msa_m3_sparse_backend,
+        q=q,
+        kv_cache=kv_cache,
+        kv_cache_fused=kv_cache_fused,
+        topk_idx=topk_idx,
+        block_table=block_table,
+        cu_seqlens=cu_seqlens,
+        seq_lens=seq_lens,
+        q_lens_t=q_lens_t,
+        prefix_lens=prefix_lens,
+        max_seqlen_q=max_seqlen_q,
+        num_kv_heads=NUM_KV_HEADS,
+        sm_scale=SM_SCALE,
+        output=actual,
     )
     _synchronize()
 
@@ -826,7 +1001,7 @@ def test_prefill_sparse_attention_correctness(
         seq_lens,
         prefix_lens,
     )
-    _assert_sparse_close(actual, expected)
+    _assert_sparse_close(actual, expected, backend=msa_m3_sparse_backend)
 
 
 @pytest.mark.parametrize(
@@ -837,6 +1012,7 @@ def test_prefill_sparse_attention_correctness(
     ],
 )
 def test_prefill_sparse_attention_production_long_sequence(
+    msa_m3_sparse_backend: SparseAttnBackend,
     tensor_parallel_size: int,
     num_q_heads: int,
 ) -> None:
@@ -880,18 +1056,21 @@ def test_prefill_sparse_attention_production_long_sequence(
     )
 
     actual = torch.empty_like(q)
-    minimax_m3_sparse_attn(
-        q,
-        kv_cache,
-        topk_idx,
-        block_table,
-        cu_seqlens,
-        seq_lens,
-        prefix_lens,
-        q_len,
-        num_kv_heads,
-        sm_scale,
-        actual,
+    _run_prefill_sparse_attention(
+        msa_m3_sparse_backend,
+        q=q,
+        kv_cache=kv_cache,
+        kv_cache_fused=kv_cache_fused,
+        topk_idx=topk_idx,
+        block_table=block_table,
+        cu_seqlens=cu_seqlens,
+        seq_lens=seq_lens,
+        q_lens_t=q_lens_t,
+        prefix_lens=prefix_lens,
+        max_seqlen_q=q_len,
+        num_kv_heads=num_kv_heads,
+        sm_scale=sm_scale,
+        output=actual,
     )
     _synchronize()
 
@@ -907,7 +1086,7 @@ def test_prefill_sparse_attention_production_long_sequence(
         num_kv_heads=num_kv_heads,
         sm_scale=sm_scale,
     )
-    _assert_sparse_close(actual, expected)
+    _assert_sparse_close(actual, expected, backend=msa_m3_sparse_backend)
 
 
 @pytest.mark.parametrize(
@@ -919,6 +1098,7 @@ def test_prefill_sparse_attention_production_long_sequence(
 )
 @pytest.mark.parametrize("num_reqs", [1, 2])
 def test_prefill_sparse_attention_production_shape(
+    msa_m3_sparse_backend: SparseAttnBackend,
     tensor_parallel_size: int,
     num_q_heads: int,
     num_reqs: int,
@@ -972,18 +1152,21 @@ def test_prefill_sparse_attention_production_shape(
     )
 
     actual = torch.empty_like(q)
-    minimax_m3_sparse_attn(
-        q,
-        kv_cache,
-        topk_idx,
-        block_table,
-        cu_seqlens,
-        seq_lens,
-        prefix_lens,
-        max_seqlen_q,
-        num_kv_heads,
-        sm_scale,
-        actual,
+    _run_prefill_sparse_attention(
+        msa_m3_sparse_backend,
+        q=q,
+        kv_cache=kv_cache,
+        kv_cache_fused=kv_cache_fused,
+        topk_idx=topk_idx,
+        block_table=block_table,
+        cu_seqlens=cu_seqlens,
+        seq_lens=seq_lens,
+        q_lens_t=q_lens_t,
+        prefix_lens=prefix_lens,
+        max_seqlen_q=max_seqlen_q,
+        num_kv_heads=num_kv_heads,
+        sm_scale=sm_scale,
+        output=actual,
     )
     _synchronize()
 
@@ -999,7 +1182,7 @@ def test_prefill_sparse_attention_production_shape(
         num_kv_heads=num_kv_heads,
         sm_scale=sm_scale,
     )
-    _assert_sparse_close(actual, expected)
+    _assert_sparse_close(actual, expected, backend=msa_m3_sparse_backend)
 
 
 @pytest.mark.parametrize(
@@ -1009,6 +1192,7 @@ def test_prefill_sparse_attention_production_shape(
 @pytest.mark.parametrize("decode_query_len", [1, 4])
 @pytest.mark.parametrize("num_padded_reqs", [0, 2])
 def test_decode_sparse_attention_correctness(
+    msa_m3_sparse_backend: SparseAttnBackend,
     seq_lens_list: tuple[int, ...],
     decode_query_len: int,
     num_padded_reqs: int,
@@ -1021,20 +1205,23 @@ def test_decode_sparse_attention_correctness(
     kv_cache = _main_kv_cache_for_kernel(kv_cache_fused)
 
     actual = torch.empty_like(q)
-    minimax_m3_sparse_attn_decode(
-        q,
-        kv_cache,
-        topk_idx,
-        block_table,
-        seq_lens,
-        NUM_KV_HEADS,
-        SM_SCALE,
-        actual,
-        decode_query_len,
+    active_batch = len(seq_lens_list)
+    _run_decode_sparse_attention(
+        msa_m3_sparse_backend,
+        q=q,
+        kv_cache=kv_cache,
+        kv_cache_fused=kv_cache_fused,
+        topk_idx=topk_idx,
+        block_table=block_table,
+        seq_lens=seq_lens,
+        num_kv_heads=NUM_KV_HEADS,
+        sm_scale=SM_SCALE,
+        output=actual,
+        decode_query_len=decode_query_len,
+        active_batch=active_batch,
     )
     _synchronize()
 
-    active_batch = len(seq_lens_list)
     active_tokens = active_batch * decode_query_len
     q_lens_t = torch.full(
         (active_batch,), decode_query_len, device=DEVICE, dtype=torch.int32
@@ -1050,7 +1237,9 @@ def test_decode_sparse_attention_correctness(
         active_seq_lens,
         prefix_lens,
     )
-    _assert_sparse_close(actual[:active_tokens], expected)
+    _assert_sparse_close(
+        actual[:active_tokens], expected, backend=msa_m3_sparse_backend
+    )
 
 
 @pytest.mark.parametrize(
@@ -1063,6 +1252,7 @@ def test_decode_sparse_attention_correctness(
 @pytest.mark.parametrize("decode_query_len", [1, PRODUCTION_MTP_DECODE_QUERY_LEN])
 @pytest.mark.parametrize("num_reqs", [1, 2])
 def test_decode_sparse_attention_production_shape(
+    msa_m3_sparse_backend: SparseAttnBackend,
     tensor_parallel_size: int,
     num_q_heads: int,
     decode_query_len: int,
@@ -1091,20 +1281,23 @@ def test_decode_sparse_attention_production_shape(
     kv_cache = _main_kv_cache_for_kernel(kv_cache_fused)
 
     actual = torch.empty_like(q)
-    minimax_m3_sparse_attn_decode(
-        q,
-        kv_cache,
-        topk_idx,
-        block_table,
-        seq_lens,
-        num_kv_heads,
-        sm_scale,
-        actual,
-        decode_query_len,
+    active_batch = len(seq_lens_list)
+    _run_decode_sparse_attention(
+        msa_m3_sparse_backend,
+        q=q,
+        kv_cache=kv_cache,
+        kv_cache_fused=kv_cache_fused,
+        topk_idx=topk_idx,
+        block_table=block_table,
+        seq_lens=seq_lens,
+        num_kv_heads=num_kv_heads,
+        sm_scale=sm_scale,
+        output=actual,
+        decode_query_len=decode_query_len,
+        active_batch=active_batch,
     )
     _synchronize()
 
-    active_batch = len(seq_lens_list)
     active_tokens = active_batch * decode_query_len
     q_lens_t = torch.full(
         (active_batch,), decode_query_len, device=DEVICE, dtype=torch.int32
@@ -1123,7 +1316,9 @@ def test_decode_sparse_attention_production_shape(
         num_kv_heads=num_kv_heads,
         sm_scale=sm_scale,
     )
-    _assert_sparse_close(actual[:active_tokens], expected)
+    _assert_sparse_close(
+        actual[:active_tokens], expected, backend=msa_m3_sparse_backend
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1607,7 +1802,7 @@ def _run_decode_boundary_case(
     )
 
     actual = torch.empty_like(q)
-    minimax_m3_sparse_attn_decode(
+    minimax_m3_sparse_attn_decode_triton(
         q,
         kv_cache,
         topk_idx,
@@ -1642,6 +1837,7 @@ def _run_decode_boundary_case(
     ids=[plan[0] for plan in _decode_boundary_fixed_plans()],
 )
 def test_decode_sparse_attention_boundary_fixed_cases(
+    msa_m3_sparse_backend_triton_only: SparseAttnBackend,
     case_index: int,
     name: str,
     geometry: _DecodeBoundaryGeometry,
@@ -1666,7 +1862,9 @@ def test_decode_sparse_attention_boundary_fixed_cases(
     )
 
 
-def test_decode_sparse_attention_boundary_random_cases() -> None:
+def test_decode_sparse_attention_boundary_random_cases(
+    msa_m3_sparse_backend_triton_only: SparseAttnBackend,
+) -> None:
     """Seeded random decode boundary cases around block-size edges."""
     plans = [
         _random_decode_boundary_plan(
@@ -1689,7 +1887,9 @@ def test_decode_sparse_attention_boundary_random_cases() -> None:
         )
 
 
-def test_decode_sparse_attention_boundary_repeatable() -> None:
+def test_decode_sparse_attention_boundary_repeatable(
+    msa_m3_sparse_backend_triton_only: SparseAttnBackend,
+) -> None:
     """Repeated eager launches for the historical future-then-visible failure shape.
 
     Selected block 1 precedes valid block 0 while seq_len is exactly one page.
@@ -1731,7 +1931,7 @@ def test_decode_sparse_attention_boundary_repeatable() -> None:
     first: torch.Tensor | None = None
     for launch_id in range(_DECODE_BOUNDARY_REPEAT_LAUNCHES):
         actual = torch.empty_like(q)
-        minimax_m3_sparse_attn_decode(
+        minimax_m3_sparse_attn_decode_triton(
             q,
             kv_cache,
             topk_idx,

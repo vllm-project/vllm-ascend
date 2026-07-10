@@ -44,6 +44,7 @@
 #include "moe/moe_gating_top_k/moe_gating_top_k_torch_adpt.h"
 #include "moe/moe_init_routing_custom/moe_init_routing_custom_torch_adpt.h"
 #include "attention/sparse_flash_attention/sparse_flash_attention_torch_adpt.h"
+#include "attention/sparse_attention_score/sparse_attention_score_torch_adpt.h"
 #include "attention/lightning_indexer_quant/lightning_indexer_quant_torch_adpt.h"
 #include "attention/ngram_spec_decode/ngram_spec_decode_torch_adpt.h"
 #include "moe/causal_conv1d_v310/causal_conv1d_310_torch_adpt.h"
@@ -2417,6 +2418,21 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                           bool return_softmax_lse=False) -> (Tensor attention_out, Tensor softmax_max, Tensor softmax_sum)"
     );
     ops.impl("npu_sparse_flash_attention", torch::kPrivateUse1, &vllm_ascend::npu_sparse_flash_attention);
+
+    ops.def(
+        "npu_sparse_attention_score("
+        "Tensor query, Tensor key, Tensor value, Tensor select_idx, "
+        "Tensor block_table, *, "
+        "Tensor? select_num_idx=None, "
+        "Tensor? q_dequant_scale=None, Tensor? k_dequant_scale=None, "
+        "Tensor? v_dequant_scale=None, "
+        "Tensor? actual_seq_lengths=None, Tensor? actual_seq_lengths_kv=None, "
+        "str q_input_layout=\"TND\", str kv_input_layout=\"BNSD\", "
+        "int num_key_value_heads=1, float scale_value=1.0, "
+        "int block_size=128, int top_k=16, int inner_precise=0) -> Tensor"
+    );
+    ops.impl("npu_sparse_attention_score", torch::kPrivateUse1,
+             &vllm_ascend::npu_sparse_attention_score);
 
     ops.def(
         "dispatch_ffn_combine(Tensor x, Tensor[] weight1, Tensor[] weight2, Tensor expert_idx,"

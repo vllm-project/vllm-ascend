@@ -43,13 +43,14 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     get_kv_quant_mode,
 )
+from vllm_ascend.attention.msa_m3_npu import (
+    minimax_m3_sparse_attn,
+    minimax_m3_sparse_attn_decode,
+)
 from vllm_ascend.attention.msa_m3_triton import (
-    SPARSE_BLOCK_SIZE,
     minimax_m3_index_decode,
     minimax_m3_index_score,
     minimax_m3_index_topk,
-    minimax_m3_sparse_attn,
-    minimax_m3_sparse_attn_decode,
 )
 from vllm_ascend.ops.linear import AscendColumnParallelLinear
 from vllm_ascend.ops.linear_op import get_parallel_op
@@ -626,6 +627,7 @@ class AscendMiniMaxM3SparseImpl(AttentionImplBase[AscendMiniMaxM3SparseMetadata]
                 self.scale,
                 out[:nd],
                 d.decode_query_len,
+                block_size=self.block_size,
             )
 
         if main_md.num_prefills > 0:
@@ -643,6 +645,7 @@ class AscendMiniMaxM3SparseImpl(AttentionImplBase[AscendMiniMaxM3SparseMetadata]
                 self.num_kv_heads,
                 self.scale,
                 out[nd:],
+                block_size=self.block_size,
             )
         return output
 
@@ -1162,7 +1165,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         global _SPARSE_ATTN_LOGGED
         if not _SPARSE_ATTN_LOGGED:
             logger.warning(
-                "MiniMax M3 sparse attention enabled "
+                "MiniMax M3 sparse attention enabled via npu_sparse_attention_score "
                 "(topk_blocks=%d, block_size=%d)",
                 sparse_cfg["sparse_topk_blocks"],
                 sparse_cfg["sparse_block_size"],
