@@ -475,10 +475,16 @@ def _probe_npu_device_name(q: multiprocessing.Queue) -> None:
 
 
 def get_case_by_specific_device():
-    # Detect NPU device name in an isolated spawn subprocess to avoid
-    # triggering torch_npu initialization in the main process, which would
+    # Detect NPU device name in an isolated fork subprocess to avoid
+    # triggering torch.npu initialization in the main process, which would
     # break forked multiprocessing subprocesses that use NPU later.
-    ctx = multiprocessing.get_context("spawn")
+    # Use "fork" instead of "spawn" because we are called during module
+    # import (pytest parametrize evaluation), and spawn would trigger
+    # _check_not_importing_main() since the main module is not fully loaded.
+    # Fork is safe here: the main process has never touched torch.npu, so
+    # the forked child starts clean, imports torch.npu to read the device
+    # name, and exits immediately.
+    ctx = multiprocessing.get_context("fork")
     q: multiprocessing.Queue[str] = ctx.Queue()
     p = ctx.Process(target=_probe_npu_device_name, args=(q,))
     p.start()
