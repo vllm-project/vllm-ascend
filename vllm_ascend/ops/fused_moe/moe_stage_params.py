@@ -74,7 +74,7 @@ class MoEQuantParams:
 
     @property
     def is_w4a4_mxfp(self) -> bool:
-        return self.quant_type == QuantType.MXFP4
+        return self.quant_type == QuantType.W4A4MXFP
 
     @property
     def is_int_quant(self) -> bool:
