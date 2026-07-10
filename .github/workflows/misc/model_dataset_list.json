@@ -284,7 +284,7 @@
       "Eco-Tech/Qwen3-8B-w8a8sc-310-vllm/TP1/Qwen3-8B-w8a8sc-310-vllm-tp1",
       "Eco-Tech/Qwen3-14B-w8a8sc-310-vllm/TP1/Qwen3-14B-w8a8sc-310-vllm-tp1",
       "Eco-Tech/Qwen3-32B-w8a8sc-310-vllm/TP4/Qwen3-32B-w8a8sc-310-vllm-tp4",
-      "BaojunZhou/DeepSeek-V3.1-Terminus-w8a8-QuaRot"
+      "Eco-Tech/DeepSeek-V3.1-Terminus-w8a8-mtp-QuaRot"
     ],
     "datasets": [
       "vllm-ascend/GSM8K-in1024-bs210",
