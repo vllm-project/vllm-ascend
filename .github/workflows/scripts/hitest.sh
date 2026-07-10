@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-MIN_FREE_GB=3 
+MIN_FREE_GB=3
 
 get_free_gb() {
     local free_kb
@@ -40,13 +40,13 @@ if [ -z "${MR_THIRD_ID}" ]; then
 fi
 echo "Using current PR number as MR_THIRD_ID: ${MR_THIRD_ID}"
 
-# env:
-#   X_APIG_APPCODE: ${{ secrets.AUROGON_APPCODE }}
-#   APP_KEY: ${{ secrets.AUROGON_APPKEY }}
-#   APP_SECRET: ${{ secrets.AUROGON_APPSECRET }}
-X_APIG_APPCODE=${{ secrets.AUROGON_APPCODE }}
-APP_KEY=${{ secrets.AUROGON_APPKEY }}
-APP_SECRET=${{ secrets.AUROGON_APPSECRET }}
+env:
+  X_APIG_APPCODE: ${{ secrets.AUROGON_APPCODE }}
+  APP_KEY: ${{ secrets.AUROGON_APPKEY }}
+  APP_SECRET: ${{ secrets.AUROGON_APPSECRET }}
+# X_APIG_APPCODE=${{ secrets.AUROGON_APPCODE }}
+# APP_KEY=${{ secrets.AUROGON_APPKEY }}
+# APP_SECRET=${{ secrets.AUROGON_APPSECRET }}
 
 # Api1 save mr with retry
 MAX_RETRY=3
