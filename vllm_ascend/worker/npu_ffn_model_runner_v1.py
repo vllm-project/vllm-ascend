@@ -191,10 +191,11 @@ class NPUFFNModelRunner(NPUModelRunner, GPUFFNModelRunner):
         if not is_attn_graph_capturing:
             # Warmup模式：只执行forward，不capture graph
             self._warmup_model(dp_metadata_list=dp_metadata_list)
-            logger.info("FFN warmup completed, dp_metadata_list=%s", dp_metadata_list)
+            logger.info("FFN warmup completed")
         else:
             # 正式Capture模式：根据dp_metadata_list捕获单个graph
             self._capture_model(dp_metadata_list=dp_metadata_list)
+            logger.info("FFN capture completed")
         set_cudagraph_capturing_enabled(False)
 
         end_time = time.perf_counter()
@@ -202,9 +203,6 @@ class NPUFFNModelRunner(NPUModelRunner, GPUFFNModelRunner):
         elapsed_time = end_time - start_time
         npu_graph_size = start_free_npu_memory - end_free_npu_memory
         # This usually takes 5~20 seconds.
-        logger.info("Graph capturing finished in %.0f secs, took %.2f GiB",
-                    elapsed_time, npu_graph_size / (1 << 30))
-
         return npu_graph_size
 
     def _get_dp_metadata_key(self, dp_metadata_list: dict) -> tuple:

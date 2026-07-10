@@ -148,10 +148,10 @@ class NPUP2PAFDConnector(AFDConnectorBase):
             while dst < self.ffn_size:
                 self.dst_list.append(dst)
                 dst += self.min_size
-        logger.info(
-            f"[p2p] world_rank={self.rank}, p2p_rank={self.p2p_rank}, "
-            f"min_size={self.min_size}, dst_list={self.dst_list}, "
-            f"npu p2p connector initialized")
+        # logger.info(
+        #     f"[p2p] world_rank={self.rank}, p2p_rank={self.p2p_rank}, "
+        #     f"min_size={self.min_size}, dst_list={self.dst_list}, "
+        #     f"npu p2p connector initialized")
 
         default_pg_switcher = DefaultProcessGroupSwitcher(
             _get_default_group(), afd_pg)
@@ -213,7 +213,7 @@ class NPUP2PAFDConnector(AFDConnectorBase):
 
         # Send metadata first (synchronously, as metadata is small and on CPU)
         process_group.send_object(metadata_list, dst=dst)
-        logger.info(f"[p2p] _send_tensor_dict_async send_object success, metadata_list={metadata_list}")
+        # logger.info(f"[p2p] _send_tensor_dict_async send_object success, metadata_list={metadata_list}")
 
         work_list = []
         group = process_group.device_group
@@ -235,7 +235,7 @@ class NPUP2PAFDConnector(AFDConnectorBase):
                     tensor, dst=process_group.ranks[dst], group=group
                 )
             work_list.append(work)
-        logger.info(f"[p2p] _send_tensor_dict_async send success")
+        # logger.info(f"[p2p] _send_tensor_dict_async send success")
 
         return work_list
 
@@ -263,7 +263,7 @@ class NPUP2PAFDConnector(AFDConnectorBase):
         # Receive metadata first synchronously (need to know tensor shape and type)
         recv_metadata_list = process_group.recv_object(src=src)
 
-        logger.info(f"[p2p] _recv_tensor_dict_async recv_object success, metadata_list={recv_metadata_list}")
+        # logger.info(f"[p2p] _recv_tensor_dict_async recv_object success, metadata_list={recv_metadata_list}")
 
         # Create empty tensor dictionary and work list
         tensor_dict: dict[str, Any] = {}
@@ -297,7 +297,7 @@ class NPUP2PAFDConnector(AFDConnectorBase):
             else:
                 # Non-tensor values are added directly
                 tensor_dict[key] = value
-        logger.info(f"[p2p] _recv_tensor_dict_async recv success")
+        # logger.info(f"[p2p] _recv_tensor_dict_async recv success")
         return tensor_dict, work_list
 
     def configure_metadata(self, metadata: Optional["AFDConnectorMetadata"],
