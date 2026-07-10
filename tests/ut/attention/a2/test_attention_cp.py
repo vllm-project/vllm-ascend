@@ -198,8 +198,8 @@ class TestAscendAttentionCPImpl(TestBase):
         self.assertEqual(result_lse.shape[1], self.impl.num_heads)
         self.assertEqual(result_lse.shape[2], 1)
 
-    @patch("torch_npu.atb.npu_paged_cache_load")
-    def test_load_kv_for_chunk(self, mock_npu_paged_cache_load):
+    @patch("torch_npu.npu_gather_pa_kv_cache")
+    def test_load_kv_for_chunk(self, mock_npu_gather_pa_kv_cache):
         block_num = 100
         block_size = 128
         num_heads = 1
@@ -227,9 +227,9 @@ class TestAscendAttentionCPImpl(TestBase):
         self.assertEqual(value.shape[2], head_size)
 
     @patch("torch_npu.Event", create=True)
-    @patch("torch_npu._npu_reshape_and_cache")
+    @patch("torch_npu.npu_scatter_pa_kv_cache")
     @patch_distributed_groups(dcp_size=2, pcp_size=2, needs_mocks=False)
-    def test_reshape_and_cache(self, mock_event_class, mock_npu_reshape_and_cache):
+    def test_reshape_and_cache(self, mock_event_class, mock_npu_scatter_pa_kv_cache):
         num_tokens = 4
         block_num = 100
         block_size = 128
