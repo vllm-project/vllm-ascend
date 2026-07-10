@@ -9,11 +9,11 @@
 - 已知可以通过精度用例的 vLLM 边界：`ba22152096b2484faa3579624a253d54804d876d`。
 - `ba221520` 是 `ab7961a` 的祖先；待适配区间为 `(ba221520, ab7961a]`，共 155 个上游提交。
 - 当前已证明会触发问题的上游修改均处于该区间：
-  - `vllm#47668` / `07f9baf7564b42ba7218ce9167bfcc4128028473`：多个运行期事件从 `torch.Event` 恢复为 `torch.cuda.Event`，覆盖 MRV2、spec decode、LoRA、multi-stream、offload 等路径。
-  - `vllm#47081` / `d3e69fd6714e9d1bb6e8e4f03157090dc32e7960`：MRV1/MRV2 异步输出事件改为 `torch.cuda.Event(blocking=True)`。
-  - `vllm#47408` / `5d23ca47ab597d9...`：MoE `routed_scaling_factor` 语义发生变化，暴露下游 native fallback 重复缩放问题。
-  - `vllm#41359` / `dd944845777b303000a2e153707382cf03383e26`，以及 `vllm#47872` / `51e5372f3d8...`：Transformers/tokenizer/Hunyuan processor 契约变化。
-  - `vllm#47970` / `e7b3853...`：DeepSeek-V2 router dtype 行为变化，只作为 Event/MoE 修复后的残差候选。
+    - `vllm#47668` / `07f9baf7564b42ba7218ce9167bfcc4128028473`：多个运行期事件从 `torch.Event` 恢复为 `torch.cuda.Event`，覆盖 MRV2、spec decode、LoRA、multi-stream、offload 等路径。
+    - `vllm#47081` / `d3e69fd6714e9d1bb6e8e4f03157090dc32e7960`：MRV1/MRV2 异步输出事件改为 `torch.cuda.Event(blocking=True)`。
+    - `vllm#47408` / `5d23ca47ab597d9...`：MoE `routed_scaling_factor` 语义发生变化，暴露下游 native fallback 重复缩放问题。
+    - `vllm#41359` / `dd944845777b303000a2e153707382cf03383e26`，以及 `vllm#47872` / `51e5372f3d8...`：Transformers/tokenizer/Hunyuan processor 契约变化。
+    - `vllm#47970` / `e7b3853...`：DeepSeek-V2 router dtype 行为变化，只作为 Event/MoE 修复后的残差候选。
 - 准确归属：不是所有错误都表示上游实现本身错误；主要是该区间内上游接口/语义变化进入了下游原有 patch 的不完整语义路径。
 
 ## 2. 当前依赖策略
@@ -22,8 +22,8 @@
 - 目的：先单独收敛精度、异步 Event、MoE scaling 等问题，避免 Transformers 升级同时改变 tokenizer、guided decoding 和多模态 processor 行为，造成归因混杂。
 - 当前安装过程存在“vLLM 安装 5.13.0，vllm-ascend 随后降回 5.5.4”的状态，这是已知版本契约差异，但本轮不得顺手升级。
 - 在 Event 修复后若只剩 guided decoding/Hunyuan 相关失败：
-  - guided decoding 的 Transformers 兼容残差单独记录，留到依赖升级阶段处理；
-  - Hunyuan 如必须先清理 CI，只允许使用独立兼容提交修复 vLLM lazy registry，不得与精度修复混合。
+    - guided decoding 的 Transformers 兼容残差单独记录，留到依赖升级阶段处理；
+    - Hunyuan 如必须先清理 CI，只允许使用独立兼容提交修复 vLLM lazy registry，不得与精度修复混合。
 
 ## 3. 已提取失败矩阵
 
@@ -134,10 +134,11 @@
 - 已识别 Hunyuan lazy registry、MoE scaling double-apply 和 CPU offload baseline helper 为独立问题。
 - 已在本地 PR head 上完成 MRV1 Event-only 最小实现：`_torch_cuda_wrapper()` 退出后保持 `torch.cuda.Event = torch.npu.Event`，未修改 async 开关、golden、阈值或 Transformers 版本。
 - 已创建本地修复提交 `b88020cb`（`Fix NPU event lifetime for async outputs`，含 Signed-off-by）：
-  - CPU lifecycle UT 使用隔离的 fake torch 验证 wrapper 退出后仍保留 NPU Event，并透传 `blocking=True`；
-  - A2 回归测试使用真实 NPU Event 执行 `record/synchronize/query`，防止再次退化为 placeholder。
+    - CPU lifecycle UT 使用隔离的 fake torch 验证 wrapper 退出后仍保留 NPU Event，并透传 `blocking=True`；
+    - A2 回归测试使用真实 NPU Event 执行 `record/synchronize/query`，防止再次退化为 placeholder。
 - 本地验证已完成：Ruff 0.14.0 check/format、Python `py_compile`、`git diff --check` 均通过。
 - 本交接记录随修复提交一次性发布；首轮新 CI 以发布后的 PR head 为准。本机无 NPU，硬件 A/B/精度验证由该轮 CI 完成。
+- 首次发布后的 run `29117216392` 只执行到 `markdownlint --fix`：上述二级列表被自动改为 4 空格缩进，因 hook 修改了工作树而失败；其余 pre-commit hook 全部通过，尚未进入硬件用例。
 - 记录快照时，run `29088445112` 中 A3 4-card part 2/3 与 part 3/3 曾处于运行中；后续观察必须以最新终态为准，不沿用旧状态推断。
 
 ## 8. 后续每小时 CI 观察项
