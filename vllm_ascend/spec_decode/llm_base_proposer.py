@@ -42,6 +42,7 @@ from vllm.v1.spec_decode.utils import (
 )
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
+import vllm_ascend.envs as envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
@@ -938,59 +939,88 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # Copy the old attn_metadata and update
         attn_metadata_i = per_layer_attn_metadata[self.attn_layer_names[0]]
 
-        # Clone the data so that when calculating the data at position 2 and position 3
-        # in the merged graph, it does not affect position 1
-        # FIXME(lilinsiman)
-        if self.pcp_size * self.dcp_size > 1 and self.use_cuda_graph:
-            assert self.block_table_tensor_clone is not None, "block_table_tensor_clone is not init"
-            self.block_table_tensor_clone[: common_attn_metadata.block_table_tensor.shape[0]] = (
-                common_attn_metadata.block_table_tensor
-            )
-            common_attn_metadata.block_table_tensor = self.block_table_tensor_clone[
-                : common_attn_metadata.block_table_tensor.shape[0]
-            ]
-        else:
-            common_attn_metadata.block_table_tensor = common_attn_metadata.block_table_tensor.clone()
-
-        if self.pcp_size * self.dcp_size > 1:
-            if self.num_speculative_tokens > 1 and not attn_metadata_i.num_prefills:
-                # For pcp/dcp, tokens are split across different cp ranks,
-                # so we can not simply update slot_mapping by += 1.
-                # Instead, we pre-allocate mtp slot_mapping in model_runner
-                # (_generate_pcp_mtp_input), and use updated slot_indices
-                # to get corresponding slot_mapping in each step.
-                num_reject_tokens = (
-                    torch.tensor(self.runner.pcp_manager.cu_num_tokens_pcp_full, dtype=torch.int32).to(self.device)
-                    - ori_token_indices_to_sample
-                    - 1
+        # When prefill exists in the request and the switch PREFILL_SKIP_MULTI_STEP is turned on,
+        # the construction logic of multi_steps_attn_metadata will be omitted.
+        # This mode is temporarily unsupported for dp > 1
+        skip_multi_step = envs.PREFILL_SKIP_MULTI_STEP and attn_metadata_i.num_prefills and self.runner.dp_size == 1
+        if not skip_multi_step:
+            # Clone the data so that when calculating the data at position 2 and position 3
+            # in the merged graph, it does not affect position 1
+            # FIXME(lilinsiman)
+            if self.pcp_size * self.dcp_size > 1 and self.use_cuda_graph:
+                assert self.block_table_tensor_clone is not None, "block_table_tensor_clone is not init"
+                self.block_table_tensor_clone[: common_attn_metadata.block_table_tensor.shape[0]] = (
+                    common_attn_metadata.block_table_tensor
                 )
-                num_accept_tokens = query_lens_d.to(self.device) - num_reject_tokens
-                ori_seq_len = attn_metadata_i.seq_lens_cpu[:batch_size].clone()
-                mtp_slot_mapping = self.runner.pcp_manager.mtp_slot_pad
+                common_attn_metadata.block_table_tensor = self.block_table_tensor_clone[
+                    : common_attn_metadata.block_table_tensor.shape[0]
+                ]
+            else:
+                common_attn_metadata.block_table_tensor = common_attn_metadata.block_table_tensor.clone()
 
-                # slot_mapping index base offset:
-                # scheduled tokens + pre-allocated mtp tokens + accepted tokens
-                slot_idx_base = (
-                    torch.cat(
-                        [
-                            torch.tensor([0], dtype=torch.int32, device=self.device),
-                            (torch.cumsum(query_lens_d, dim=0)[:-1] * self.pcp_size).to(self.device),
-                        ]
+            if self.pcp_size * self.dcp_size > 1:
+                if self.num_speculative_tokens > 1 and not attn_metadata_i.num_prefills:
+                    # For pcp/dcp, tokens are split across different cp ranks,
+                    # so we can not simply update slot_mapping by += 1.
+                    # Instead, we pre-allocate mtp slot_mapping in model_runner
+                    # (_generate_pcp_mtp_input), and use updated slot_indices
+                    # to get corresponding slot_mapping in each step.
+                    num_reject_tokens = (
+                        torch.tensor(self.runner.pcp_manager.cu_num_tokens_pcp_full, dtype=torch.int32).to(self.device)
+                        - ori_token_indices_to_sample
+                        - 1
                     )
-                    + torch.arange(num_decode_reqs, device=self.device)
-                    * (self.num_speculative_tokens - 1)
-                    * self.pcp_size
-                    + (num_accept_tokens - 1) * self.pcp_size
-                )
-                slot_indices_list = []
-                for req_id in range(num_decode_reqs):
-                    slot_indices_list.append(
-                        torch.arange(slot_idx_base[req_id], slot_idx_base[req_id] + self.pcp_size, device=self.device)
+                    num_accept_tokens = query_lens_d.to(self.device) - num_reject_tokens
+                    ori_seq_len = attn_metadata_i.seq_lens_cpu[:batch_size].clone()
+                    mtp_slot_mapping = self.runner.pcp_manager.mtp_slot_pad
+
+                    # slot_mapping index base offset:
+                    # scheduled tokens + pre-allocated mtp tokens + accepted tokens
+                    slot_idx_base = (
+                        torch.cat(
+                            [
+                                torch.tensor([0], dtype=torch.int32, device=self.device),
+                                (torch.cumsum(query_lens_d, dim=0)[:-1] * self.pcp_size).to(self.device),
+                            ]
+                        )
+                        + torch.arange(num_decode_reqs, device=self.device)
+                        * (self.num_speculative_tokens - 1)
+                        * self.pcp_size
+                        + (num_accept_tokens - 1) * self.pcp_size
                     )
-                slot_indices = torch.cat(slot_indices_list, dim=0)
+                    slot_indices_list = []
+                    for req_id in range(num_decode_reqs):
+                        slot_indices_list.append(
+                            torch.arange(
+                                slot_idx_base[req_id], slot_idx_base[req_id] + self.pcp_size, device=self.device
+                            )
+                        )
+                    slot_indices = torch.cat(slot_indices_list, dim=0)
 
-                common_attn_metadata.block_table_tensor = common_attn_metadata.block_table_tensor[:batch_size]
+                    common_attn_metadata.block_table_tensor = common_attn_metadata.block_table_tensor[:batch_size]
 
+                    # Copy the old attn_metadata and update
+                    if not self.parallel_drafting:
+                        for draft_index in range(1, self.num_speculative_tokens):
+                            per_layer_attn_metadata = dict()
+                            for attn_group in self.draft_attn_groups:
+                                common_attn_metadata, attn_metadata = self.attn_update_stack_num_spec_norm(
+                                    draft_index,
+                                    attn_metadata,
+                                    common_attn_metadata,
+                                    batch_size,
+                                    num_input_tokens,
+                                    used_update_positions,
+                                    aclgraph_runtime_mode,
+                                    ori_seq_len,
+                                    slot_indices,
+                                    mtp_slot_mapping,
+                                    attn_group=attn_group,
+                                )
+                                for layer_name in self.attn_layer_names:
+                                    per_layer_attn_metadata[layer_name] = attn_metadata
+                            multi_steps_attn_metadata.append(per_layer_attn_metadata)
+            else:
                 # Copy the old attn_metadata and update
                 if not self.parallel_drafting:
                     for draft_index in range(1, self.num_speculative_tokens):
@@ -1004,33 +1034,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                                 num_input_tokens,
                                 used_update_positions,
                                 aclgraph_runtime_mode,
-                                ori_seq_len,
-                                slot_indices,
-                                mtp_slot_mapping,
                                 attn_group=attn_group,
                             )
                             for layer_name in self.attn_layer_names:
                                 per_layer_attn_metadata[layer_name] = attn_metadata
                         multi_steps_attn_metadata.append(per_layer_attn_metadata)
-        else:
-            # Copy the old attn_metadata and update
-            if not self.parallel_drafting:
-                for draft_index in range(1, self.num_speculative_tokens):
-                    per_layer_attn_metadata = dict()
-                    for attn_group in self.draft_attn_groups:
-                        common_attn_metadata, attn_metadata = self.attn_update_stack_num_spec_norm(
-                            draft_index,
-                            attn_metadata,
-                            common_attn_metadata,
-                            batch_size,
-                            num_input_tokens,
-                            used_update_positions,
-                            aclgraph_runtime_mode,
-                            attn_group=attn_group,
-                        )
-                        for layer_name in self.attn_layer_names:
-                            per_layer_attn_metadata[layer_name] = attn_metadata
-                    multi_steps_attn_metadata.append(per_layer_attn_metadata)
 
         token_indices_to_sample_len = token_indices_to_sample.shape[0]
         self.token_indices_to_sample[:token_indices_to_sample_len].copy_(token_indices_to_sample)
@@ -1253,6 +1261,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             (self.num_speculative_tokens, *draft_token_ids.shape), dtype=draft_token_ids.dtype, device=self.device
         )
         draft_token_ids_tensor[0] = draft_token_ids
+
+        # If the request contains prefill and PREFILL_SKIP_MULTI_STEP is enabled, skip multi step
+        if envs.PREFILL_SKIP_MULTI_STEP and is_prefill and self.runner.dp_size == 1:
+            return draft_token_ids_tensor.swapaxes(0, 1)
+
         if self.uses_mrope:
             positions = self.mrope_positions[:, token_indices_to_sample]
         else:
