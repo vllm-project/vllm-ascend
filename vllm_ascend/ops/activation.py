@@ -72,6 +72,20 @@ class AscendSwigluStepAndMul:
         if limit is None:
             raise ValueError("SwigluStepAndMul requires limit to be set.")
 
+        # Triton fused path: 1D-grid row-loop kernel that fuses
+        # silu + clamp + mul into a single launch (see
+        # vllm_ascend/ops/triton/activation/swiglustep.py). Numerically
+        # equivalent to forward_native below.
+        from vllm.triton_utils import HAS_TRITON
+
+        if HAS_TRITON:
+            from vllm_ascend.ops.triton.activation.swiglustep import (
+                swiglustep_forward_triton,
+            )
+
+            return swiglustep_forward_triton(x, limit)
+
+        # Fallback when triton is unavailable: vllm's native silu+clamp+mul.
         class MinimalSwigluStepAndMul:
             def __init__(self):
                 self.limit = limit

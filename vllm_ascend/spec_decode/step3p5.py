@@ -400,6 +400,7 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
 
         if aclgraph_runtime_mode == CUDAGraphMode.FULL:
             num_reqs_padded = self.runner._pad_query_start_loc_for_fia(
+                self.runner.query_start_loc,
                 num_input_tokens,
                 batch_descriptor.num_reqs if batch_descriptor.num_reqs is not None else common_attn_metadata.num_reqs,
                 common_attn_metadata.num_reqs,
