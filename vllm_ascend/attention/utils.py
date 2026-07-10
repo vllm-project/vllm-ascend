@@ -145,15 +145,18 @@ def ascend_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
 
 
 def using_paged_attention(runtime_shape: int, vllm_config: VllmConfig, head_size: int | None = None) -> bool:
-    if vllm_config.speculative_config is not None:
-        return False
     if get_ascend_device_type() == AscendDeviceType.A5:
         return False
+    # A2/A3 FIA (TND) does not support head_dim=512 (Gemma4 global attention):
+    # 512 层 decode 必须走 PagedAttention，即使开启 MTP 也不能改走 FIA
+    # （FIA TND 对 512 语义/数值错误，会让 MTP pos0 接受率从 80% 跌到 60%）。
     # TODO: Remove this fallback when A2/A3 FIA TND supports Gemma4's
-    # 512-dim global attention heads. Decode can use PA directly; prefill is
-    # handled by the device adaptor.
+    # 512-dim global attention heads. Prefill is handled by the device adaptor.
     if head_size == FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE:
         return True
+    # 非 512 层：MTP 下保持 PA 关闭（原行为）。
+    if vllm_config.speculative_config is not None:
+        return False
     from vllm.config.compilation import CUDAGraphMode
 
     cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
