@@ -15,7 +15,8 @@
 # This file is a part of the vllm-ascend project.
 #
 
-# Cartesian product: 2 arch × 2 os × 3 chip_type = 12 jobs
+# 3 chip_type variants (a2 / a3 / 310p) — all ARM64 + Ubuntu.
+# Only ARM64 is needed since NPU test runners are all linux-aarch64-*.
 name: 'Cache csrc Build Artifacts'
 on:
   push:
@@ -48,62 +49,61 @@ env:
 
 jobs:
   build-cache:
-    name: build-${{ matrix.arch }}-${{ matrix.chip_type }}-${{ matrix.os }}-cache
+    name: build-${{ matrix.chip_type }}-${{ matrix.runner }}-${{ matrix.os }}-cache
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        arch:
-          - X64
-          - ARM64
-        os:
-          - ubuntu
-          - openeuler
+        runner:
+          - linux-arm64-cpu-16
+          - linux-amd64-cpu-16-hk
         chip_type:
           - a2
           - a3
           - 310p
+        os:
+          - ubuntu
+          - openeuler
 
         include:
-          # arch → runner
-          - arch: X64
-            runner: linux-amd64-cpu-16-hk
-          - arch: ARM64
-            runner: linux-arm64-cpu-16
-
-          # chip_type → soc_version
+          # chip_type x os → image + soc_version
           - chip_type: a2
+            os: ubuntu
+            image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-910b-ubuntu22.04-py3.12
             soc_version: ascend910b1
+
           - chip_type: a3
+            os: ubuntu
+            image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-ubuntu22.04-py3.12
             soc_version: ascend910_9391
+
           - chip_type: 310p
+            os: ubuntu
+            image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.1.0-beta.1-310p-ubuntu22.04-py3.12
             soc_version: ascend310p1
 
-          # os × chip_type → image
-          - os: ubuntu
-            chip_type: a2
-            image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-910b-ubuntu22.04-py3.12
-          - os: ubuntu
-            chip_type: a3
-            image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-ubuntu22.04-py3.12
-          - os: ubuntu
-            chip_type: 310p
-            image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.1.0-beta.1-310p-ubuntu22.04-py3.12
-          - os: openeuler
-            chip_type: a2
+          - chip_type: a2
+            os: openeuler
             image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-910b-openeuler24.03-py3.12
-          - os: openeuler
-            chip_type: a3
+            soc_version: ascend910b1
+
+          - chip_type: a3
+            os: openeuler
             image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-openeuler24.03-py3.12
-          - os: openeuler
-            chip_type: 310p
+            soc_version: ascend910_9391
+
+          - chip_type: 310p
+            os: openeuler
             image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.1.0-beta.1-310p-openeuler24.03-py3.12
+            soc_version: ascend310p1
 
     container:
       image: ${{ matrix.image }}
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
 
       - name: Config mirrors (ubuntu)
         if: matrix.os == 'ubuntu'
@@ -118,9 +118,9 @@ jobs:
       - name: Config mirrors (openeuler)
         if: matrix.os == 'openeuler'
         run: |
+          sed -Ei 's@https?://[^/]+/(openeuler|centos|fedora)@http://cache-service.nginx-pypi-cache.svc.cluster.local:8081/\1@g' /etc/yum.repos.d/*.repo
           pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
           pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
-          sed -Ei 's@https?://[^/]+/(openeuler|centos|fedora)@http://cache-service.nginx-pypi-cache.svc.cluster.local:8081/\1@g' /etc/yum.repos.d/*.repo
           yum install -y git zstd
           git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
 
@@ -136,7 +136,7 @@ jobs:
       - name: Install system dependencies (openeuler)
         if: matrix.os == 'openeuler'
         run: |
-          yum install -y gcc gcc-c++ cmake numactl-devel clang patch zstd
+          yum install -y python3-pip net-tools jemalloc numactl patch clang 
           pip install uv
 
       - name: Get image tag
@@ -153,6 +153,16 @@ jobs:
             -type f -not -path '*/.*' | sort | xargs sha256sum | sha256sum | awk '{print $1}')
           echo "CSRC_HASH=$CSRC_HASH" >> $GITHUB_OUTPUT
 
+      - name: Get architecture
+        id: get_arch
+        run: |
+          ARCH=$(uname -m)
+          case "$ARCH" in
+            x86_64) echo "arch=X64" >> $GITHUB_OUTPUT ;;
+            aarch64) echo "arch=ARM64" >> $GITHUB_OUTPUT ;;
+            *) echo "arch=$ARCH" >> $GITHUB_OUTPUT ;;
+          esac
+
       - name: Cache vllm-ascend csrc
         id: cache-csrc
         uses: runs-on/cache@v5
@@ -162,7 +172,7 @@ jobs:
             vllm_ascend/*.so
             vllm_ascend/lib
             vllm_ascend/include
-          key: vllm-ascend-build-v1-${{ matrix.arch }}-${{ steps.get_image_tag.outputs.IMAGE_TAG }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+          key: vllm-ascend-build-v1-${{ steps.get_arch.outputs.arch }}-${{ steps.get_image_tag.outputs.IMAGE_TAG }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
       - name: Install vllm-ascend
         if: steps.cache-csrc.outputs.cache-hit != 'true'
@@ -174,6 +184,10 @@ jobs:
           source /usr/local/Ascend/nnal/atb/set_env.sh
           arch=$(uname -i)
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/${arch}-linux/devlib
+          
+          if [ "${{ runner.arch }}" = "X64" ]; then
+            export UV_EXTRA_INDEX_URL="${UV_EXTRA_INDEX_URL} https://download.pytorch.org/whl/cpu/"
+          fi
 
           pip install uc-manager
           # NOTE: indexes (ascend repo for triton-ascend + pytorch cpu whl) come from

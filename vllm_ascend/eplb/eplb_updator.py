@@ -19,6 +19,7 @@ import numpy
 import torch
 import torch.distributed as dist
 import vllm.envs as envs
+from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import logger
 from vllm.v1.utils import record_function_or_nullcontext
 
@@ -39,6 +40,7 @@ class EplbUpdator:
         self.comm_group = get_dynamic_eplb_group()
 
     def set_adaptor(self, adaptor: VllmEplbAdaptor):
+        self.pp_rank = get_pp_group().rank_in_group
         self.adaptor = adaptor
         self.num_moe_layers = self.adaptor.num_moe_layers
         local_load = self.adaptor.get_rank_expert_workload()
@@ -59,6 +61,7 @@ class EplbUpdator:
                 self.num_expert_load_gather = self.expert_heat_collection_interval
                 self.periodic_load_gather = False
         except Exception:
+            logger.debug("[eplb/updator] VLLM_ALLOW_EXPERT_LOAD_COLLECTING unavailable in current vllm version.")
             self.num_expert_load_gather = self.expert_heat_collection_interval
             self.periodic_load_gather = False
 
@@ -71,17 +74,18 @@ class EplbUpdator:
 
         self.process = process
 
-        logger.info("[ModelRunner] Launched EPLB process (pid=%s)", self.process.pid)
+        logger.info("[eplb/updator] Launched EPLB subprocess, pid=%s", self.process.pid)
 
     def update_iteration(self):
         self.cur_iterations += 1
         if self.cur_iterations == (
             self.expert_heat_collection_interval + self.algorithm_execution_interval + self.num_moe_layers
         ):
+            logger.debug("[eplb/updator] Full EPLB cycle completed, clearing moe loads and resetting iteration counter")
             if self.expert_map_record_path is not None:
                 self.adaptor._export_tensor_to_file(self.shared_dict["expert_maps"], self.expert_map_record_path)
 
-            self.adaptor.model.clear_all_moe_loads()
+            self.adaptor.clear_all_moe_loads()
             self.cur_iterations = 0
 
     def get_update_info_flag(self):
@@ -115,14 +119,14 @@ class EplbUpdator:
                     expert_send_info,
                     expert_recv_info,
                     updated_expert_map_this_rank,
-                    layer_id + self.adaptor.num_dense_layers,
+                    layer_id,
                 )
 
                 # set asynchronous stream for d2d expert weight update
                 self.reqs = []
                 self.eplb_loader.asyn_expert_weight_transfer(self.reqs)
 
-    def forward_end(self):
+    def forward_end(self, eplb_heat_collection_status: bool = True):
         if self.wakeup_eplb_worker_flag():
             with record_function_or_nullcontext("EPLB gather moe load"):
                 self.compute_and_set_moe_load()
@@ -131,7 +135,12 @@ class EplbUpdator:
         if self.update_expert_weight_flag() and self.expert_map_record_path is None:
             self.eplb_loader.update_expert_map_and_weight(self.reqs)
 
-        self.update_iteration()
+        # One circle of eplb update includes expert_heat_collection_interval + algorithm_execution_interval
+        # + num_moe_layers (for weight update). In expert_heat_collection stage, we only update the counter
+        # when eplb_heat_collection_status is True. In later stages, the counter is always updated.
+        # TODO(Angazenn): Decouple algorithm execution && weight update with heat collection iterations.
+        if self.cur_iterations >= self.expert_heat_collection_interval - 1 or eplb_heat_collection_status:
+            self.update_iteration()
 
     def compute_and_set_moe_load(self):
         local_load = self.adaptor.get_rank_expert_workload().unsqueeze(1)
@@ -141,32 +150,37 @@ class EplbUpdator:
             moe_load = moe_load.permute(2, 0, 1, 3)
 
         self.shared_dict["moe_load"] = moe_load
-        logger.debug("[ModelRunner] Updated shared_dict['moe_load'] shape=%s", moe_load.shape)
+        logger.debug("[eplb/updator] Updated shared_dict['moe_load'] shape=%s", moe_load.shape)
 
         return moe_load
 
     def warm_up_eplb(self):
+        logger.info("[eplb/updator] Starting EPLB warm-up, rank=%s, world_size=%s", self.rank_id, self.world_size)
         self.shared_dict["expert_maps"] = self.adaptor.get_global_expert_map()
         self.compute_and_set_moe_load()
 
         src_tensor = torch.empty((1,), device=self.device)
 
         comm_op_list = []
+        reqs = []
 
-        for dst_rank in range(self.world_size):
-            if dst_rank == self.rank_id:
+        for dst_rank in range(self.comm_group.world_size):
+            if dst_rank == self.comm_group.rank_in_group:
                 continue
-            comm_op_list.append(dist.P2POp(dist.isend, src_tensor, dst_rank, group=self.comm_group.device_group))
+            global_dst = self.comm_group.ranks[dst_rank]
+            comm_op_list.append(dist.P2POp(dist.isend, src_tensor, global_dst, group=self.comm_group.device_group))
 
-        for src_rank in range(self.world_size):
-            if src_rank == self.rank_id:
+        for src_rank in range(self.comm_group.world_size):
+            if src_rank == self.comm_group.rank_in_group:
                 continue
-            comm_op_list.append(dist.P2POp(dist.irecv, src_tensor, src_rank, group=self.comm_group.device_group))
+            global_src = self.comm_group.ranks[src_rank]
+            comm_op_list.append(dist.P2POp(dist.irecv, src_tensor, global_src, group=self.comm_group.device_group))
         if comm_op_list:
             reqs = dist.batch_isend_irecv(comm_op_list)
 
         for req in reqs:
             req.wait()
+        logger.info("[eplb/updator] EPLB warm-up completed")
 
     def shutdown(self):
         """
@@ -175,4 +189,4 @@ class EplbUpdator:
         if self.process.is_alive():
             self.process.terminate()
             self.process.join()
-            logger.info("[ModelRunner] EPLB process terminated")
+            logger.info("[eplb/updator] EPLB subprocess terminated")

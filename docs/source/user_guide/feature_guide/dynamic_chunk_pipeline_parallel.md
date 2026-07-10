@@ -1,8 +1,8 @@
 # Dynamic Chunked Pipeline Parallel
 
-:::{note}
-For design details and mathematical models, see [Design Document](../../developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md). For deployment tutorial, see [Dynamic Chunked Pipeline Parallel Tutorial](../../tutorials/features/dynamic_chunked_pipeline_parallel.md).
-:::
+!!! note
+
+    For design details and mathematical models, see [Design Document](../../developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md). For deployment tutorial, see [Dynamic Chunked Pipeline Parallel Tutorial](../../tutorials/features/dynamic_chunked_pipeline_parallel.md).
 
 ## Overview
 
@@ -52,6 +52,7 @@ llm = LLM(
 | `smooth_factor` | float | 1.0 | Smoothing factor (0 < x ≤ 1.0). Higher values trust dynamic prediction more |
 | `min_chunk` | int | 4096 | Minimum chunk size for dynamic calculation |
 | `need_timing` | bool | True | Enable/disable Online Calibration |
+| `max_fit_chunk` | int | 30 | Number of chunk-time data for Online Calibration |
 
 ### Parameter Tuning
 
@@ -65,7 +66,7 @@ llm = LLM(
 
 ### max-num-batched-tokens
 
-**Notably, the TTFT of CPP is very sensitive to `max-num-batched-tokens` (considered the initial chunksize for dynamic solving).** Because if it is too large, it will introduce significant computational voids, and if it is too small, it will lead to a decrease in operator efficiency. To leave enough room for dynamic adjustments, we recommend that the longer the sequence being processed, the larger the `max-num-batched-tokens` should be set. Recommended values:
+**Notably, the TTFT of CPP is very sensitive to `max-num-batched-tokens` (considered the initial chunksize for dynamic solving).** Because if it is too large, it will introduce significant computational waste, and if it is too small, it will lead to a decrease in operator efficiency. To leave enough room for dynamic adjustments, we recommend that the longer the sequence being processed, the larger the `max-num-batched-tokens` should be set. Recommended values:
 
 | Sequence Length | `max-num-batched-tokens` |
 |-----------------|--------------------------|

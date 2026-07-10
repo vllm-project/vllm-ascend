@@ -14,7 +14,7 @@ from vllm_ascend.patch.platform import (
 )
 
 
-def test_remaining_args_delta_omits_metadata_by_default():
+def test_remaining_args_delta_preserves_metadata_by_default():
     original_delta = DeltaMessage(
         tool_calls=[
             DeltaToolCall(
@@ -37,14 +37,44 @@ def test_remaining_args_delta_omits_metadata_by_default():
 
     tc = result.tool_calls[0]
     assert tc.index == 0
-    assert tc.id is None
-    assert tc.type is None
-    assert tc.function.name is None
+    assert tc.id == "call_current"
+    assert tc.type == "function"
+    assert tc.function.name == "current_name"
     assert tc.function.arguments == "]}"
     serialized = tc.model_dump(exclude_unset=True)
-    assert "id" not in serialized
-    assert "type" not in serialized
-    assert "name" not in serialized["function"]
+    assert serialized["id"] == "call_current"
+    assert serialized["type"] == "function"
+    assert serialized["function"]["name"] == "current_name"
+
+
+def test_empty_remaining_args_delta_keeps_original_delta():
+    original_delta = DeltaMessage(
+        tool_calls=[
+            DeltaToolCall(
+                index=0,
+                id="call_current",
+                type="function",
+                function=DeltaFunctionCall(
+                    name="current_name",
+                    arguments="",
+                ),
+            ),
+            DeltaToolCall(
+                index=0,
+                function=DeltaFunctionCall(arguments="{}"),
+            ),
+        ]
+    )
+
+    result = OpenAIServingChat._create_remaining_args_delta(
+        original_delta,
+        "",
+        0,
+    )
+
+    assert result is original_delta
+    assert result.tool_calls[0].function.name == "current_name"
+    assert result.tool_calls[1].function.arguments == "{}"
 
 
 def test_remaining_args_delta_uses_explicit_fallback_metadata():

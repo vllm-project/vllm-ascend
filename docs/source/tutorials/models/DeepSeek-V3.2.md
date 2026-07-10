@@ -16,8 +16,8 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### Model Weight
 
-- `DeepSeek-V3.2-Exp-W8A8`(Quantized version): require 1 Atlas 800 A3 (64G × 16) node or 2 Atlas 800 A2 (64G × 8) nodes. [Download model weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-Exp-W8A8)
-- `DeepSeek-V3.2-w8a8`(Quantized version): require 1 Atlas 800 A3 (64G × 16) node or 2 Atlas 800 A2 (64G × 8) nodes. [Download model weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-W8A8/)
+- `DeepSeek-V3.2-Exp-W8A8` (Quantized version): requires **1 Atlas 800 A3 (64G × 16) node** or **2 Atlas 800 A2 (64G × 8) nodes**. [Download model weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-Exp-W8A8)
+- `DeepSeek-V3.2-w8a8` (Quantized version): requires **1 Atlas 800 A3 (64G × 16) node** or **2 Atlas 800 A2 (64G × 8) nodes**. [Download model weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-W8A8/)
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
@@ -29,88 +29,77 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
 You can use our official docker image to run `DeepSeek-V3.2` directly.
 
-:::::{tab-set}
-:sync-group: install
+=== "A3 series"
 
-::::{tab-item} A3 series
-:sync: A3
+    Start the docker image on your each node.
 
-Start the docker image on your each node.
+    ```bash
 
-```{code-block} bash
-   :substitutions:
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
+    docker run --rm \
+        --name vllm-ascend \
+        --shm-size=1g \
+        --net=host \
+        --device /dev/davinci0 \
+        --device /dev/davinci1 \
+        --device /dev/davinci2 \
+        --device /dev/davinci3 \
+        --device /dev/davinci4 \
+        --device /dev/davinci5 \
+        --device /dev/davinci6 \
+        --device /dev/davinci7 \
+        --device /dev/davinci8 \
+        --device /dev/davinci9 \
+        --device /dev/davinci10 \
+        --device /dev/davinci11 \
+        --device /dev/davinci12 \
+        --device /dev/davinci13 \
+        --device /dev/davinci14 \
+        --device /dev/davinci15 \
+        --device /dev/davinci_manager \
+        --device /dev/devmm_svm \
+        --device /dev/hisi_hdc \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v /root/.cache:/root/.cache \
+        -it $IMAGE bash
+    ```
 
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
-docker run --rm \
-    --name vllm-ascend \
-    --shm-size=1g \
-    --net=host \
-    --device /dev/davinci0 \
-    --device /dev/davinci1 \
-    --device /dev/davinci2 \
-    --device /dev/davinci3 \
-    --device /dev/davinci4 \
-    --device /dev/davinci5 \
-    --device /dev/davinci6 \
-    --device /dev/davinci7 \
-    --device /dev/davinci8 \
-    --device /dev/davinci9 \
-    --device /dev/davinci10 \
-    --device /dev/davinci11 \
-    --device /dev/davinci12 \
-    --device /dev/davinci13 \
-    --device /dev/davinci14 \
-    --device /dev/davinci15 \
-    --device /dev/davinci_manager \
-    --device /dev/devmm_svm \
-    --device /dev/hisi_hdc \
-    -v /usr/local/dcmi:/usr/local/dcmi \
-    -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
-    -v /root/.cache:/root/.cache \
-    -it $IMAGE bash
-```
+=== "A2 series"
 
-::::
-::::{tab-item} A2 series
-:sync: A2
+    Start the docker image on your each node.
 
-Start the docker image on your each node.
+    ```bash
 
-```{code-block} bash
-   :substitutions:
-
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
-docker run --rm \
-    --name vllm-ascend \
-    --shm-size=1g \
-    --net=host \
-    --device /dev/davinci0 \
-    --device /dev/davinci1 \
-    --device /dev/davinci2 \
-    --device /dev/davinci3 \
-    --device /dev/davinci4 \
-    --device /dev/davinci5 \
-    --device /dev/davinci6 \
-    --device /dev/davinci7 \
-    --device /dev/davinci_manager \
-    --device /dev/devmm_svm \
-    --device /dev/hisi_hdc \
-    -v /usr/local/dcmi:/usr/local/dcmi \
-    -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
-    -v /root/.cache:/root/.cache \
-    -it $IMAGE bash
-```
-
-::::
-:::::
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
+    docker run --rm \
+        --name vllm-ascend \
+        --shm-size=1g \
+        --net=host \
+        --device /dev/davinci0 \
+        --device /dev/davinci1 \
+        --device /dev/davinci2 \
+        --device /dev/davinci3 \
+        --device /dev/davinci4 \
+        --device /dev/davinci5 \
+        --device /dev/davinci6 \
+        --device /dev/davinci7 \
+        --device /dev/davinci_manager \
+        --device /dev/devmm_svm \
+        --device /dev/hisi_hdc \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v /root/.cache:/root/.cache \
+        -it $IMAGE bash
+    ```
 
 In addition, if you don't want to use the docker image as above, you can also build all from source:
 
@@ -120,9 +109,9 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 ## Deployment
 
-:::{note}
-In this tutorial, we suppose you downloaded the model weight to `/root/.cache/`. Feel free to change it to your own path.
-:::
+!!! note
+
+    In this tutorial, we suppose you downloaded the model weight to `/root/.cache/`. Feel free to change it to your own path.
 
 ### Single-node Deployment
 
@@ -166,222 +155,209 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
 
 Run the following scripts on two nodes respectively.
 
-:::::{tab-set}
-:sync-group: install
+=== "A3 series"
 
-::::{tab-item} A3 series
-:sync: A3
+    **Node0**
 
-**Node0**
+    ```bash
+    # this obtained through ifconfig
+    # nic_name is the network interface name corresponding to local_ip of the current node
+    nic_name="xxx"
+    local_ip="xxx"
 
-```{code-block} bash
-   :substitutions:
-# this obtained through ifconfig
-# nic_name is the network interface name corresponding to local_ip of the current node
-nic_name="xxx"
-local_ip="xxx"
+    # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
+    node0_ip="xxxx"
 
-# The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
-node0_ip="xxxx"
+    export HCCL_OP_EXPANSION_MODE="AIV"
 
-export HCCL_OP_EXPANSION_MODE="AIV"
+    export HCCL_IF_IP=$local_ip
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export TP_SOCKET_IFNAME=$nic_name
+    export HCCL_SOCKET_IFNAME=$nic_name
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=10
+    export VLLM_USE_V1=1
+    export HCCL_BUFFSIZE=200
+    export VLLM_ASCEND_ENABLE_MLAPO=1
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=10
-export VLLM_USE_V1=1
-export HCCL_BUFFSIZE=200
-export VLLM_ASCEND_ENABLE_MLAPO=1
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
+    --host 0.0.0.0 \
+    --port 8077 \
+    --data-parallel-size 2 \
+    --data-parallel-size-local 1 \
+    --data-parallel-address $node0_ip \
+    --data-parallel-rpc-port 12890 \
+    --tensor-parallel-size 16 \
+    --quantization ascend \
+    --seed 1024 \
+    --served-model-name deepseek_v3_2 \
+    --enable-expert-parallel \
+    --max-num-seqs 16 \
+    --max-model-len 8192 \
+    --max-num-batched-tokens 4096 \
+    --trust-remote-code \
+    --no-enable-prefix-caching \
+    --gpu-memory-utilization 0.92 \
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+    --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
+    ```
 
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
---host 0.0.0.0 \
---port 8077 \
---data-parallel-size 2 \
---data-parallel-size-local 1 \
---data-parallel-address $node0_ip \
---data-parallel-rpc-port 12890 \
---tensor-parallel-size 16 \
---quantization ascend \
---seed 1024 \
---served-model-name deepseek_v3_2 \
---enable-expert-parallel \
---max-num-seqs 16 \
---max-model-len 8192 \
---max-num-batched-tokens 4096 \
---trust-remote-code \
---no-enable-prefix-caching \
---gpu-memory-utilization 0.92 \
---compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
-```
+    **Node1**
 
-**Node1**
+    ```bash
+    # this obtained through ifconfig
+    # nic_name is the network interface name corresponding to local_ip of the current node
+    nic_name="xxx"
+    local_ip="xxx"
 
-```{code-block} bash
-   :substitutions:
-# this obtained through ifconfig
-# nic_name is the network interface name corresponding to local_ip of the current node
-nic_name="xxx"
-local_ip="xxx"
+    # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
+    node0_ip="xxxx"
 
-# The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
-node0_ip="xxxx"
+    export HCCL_OP_EXPANSION_MODE="AIV"
 
-export HCCL_OP_EXPANSION_MODE="AIV"
+    export HCCL_IF_IP=$local_ip
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export TP_SOCKET_IFNAME=$nic_name
+    export HCCL_SOCKET_IFNAME=$nic_name
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=10
+    export VLLM_USE_V1=1
+    export HCCL_BUFFSIZE=200
+    export VLLM_ASCEND_ENABLE_MLAPO=1
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=10
-export VLLM_USE_V1=1
-export HCCL_BUFFSIZE=200
-export VLLM_ASCEND_ENABLE_MLAPO=1
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
+    --host 0.0.0.0 \
+    --port 8077 \
+    --headless \
+    --data-parallel-size 2 \
+    --data-parallel-size-local 1 \
+    --data-parallel-start-rank 1 \
+    --data-parallel-address $node0_ip \
+    --data-parallel-rpc-port 12890 \
+    --tensor-parallel-size 16 \
+    --quantization ascend \
+    --seed 1024 \
+    --served-model-name deepseek_v3_2 \
+    --enable-expert-parallel \
+    --max-num-seqs 16 \
+    --max-model-len 8192 \
+    --max-num-batched-tokens 4096 \
+    --trust-remote-code \
+    --no-enable-prefix-caching \
+    --gpu-memory-utilization 0.92 \
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+    --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
+    ```
 
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
---host 0.0.0.0 \
---port 8077 \
---headless \
---data-parallel-size 2 \
---data-parallel-size-local 1 \
---data-parallel-start-rank 1 \
---data-parallel-address $node0_ip \
---data-parallel-rpc-port 12890 \
---tensor-parallel-size 16 \
---quantization ascend \
---seed 1024 \
---served-model-name deepseek_v3_2 \
---enable-expert-parallel \
---max-num-seqs 16 \
---max-model-len 8192 \
---max-num-batched-tokens 4096 \
---trust-remote-code \
---no-enable-prefix-caching \
---gpu-memory-utilization 0.92 \
---compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
-```
+=== "A2 series"
 
-::::
-::::{tab-item} A2 series
-:sync: A2
+    **Node0**
 
-**Node0**
+    ```bash
+    # this obtained through ifconfig
+    # nic_name is the network interface name corresponding to local_ip of the current node
+    nic_name="xxx"
+    local_ip="xxx"
 
-```{code-block} bash
-   :substitutions:
-# this obtained through ifconfig
-# nic_name is the network interface name corresponding to local_ip of the current node
-nic_name="xxx"
-local_ip="xxx"
+    # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
+    node0_ip="xxxx"
 
-# The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
-node0_ip="xxxx"
+    export HCCL_OP_EXPANSION_MODE="AIV"
 
-export HCCL_OP_EXPANSION_MODE="AIV"
+    export HCCL_IF_IP=$local_ip
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export TP_SOCKET_IFNAME=$nic_name
+    export HCCL_SOCKET_IFNAME=$nic_name
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=100
+    export VLLM_USE_V1=1
+    export HCCL_BUFFSIZE=200
+    export VLLM_ASCEND_ENABLE_MLAPO=1
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+    export HCCL_CONNECT_TIMEOUT=120
+    export HCCL_INTRA_PCIE_ENABLE=1
+    export HCCL_INTRA_ROCE_ENABLE=0
 
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=100
-export VLLM_USE_V1=1
-export HCCL_BUFFSIZE=200
-export VLLM_ASCEND_ENABLE_MLAPO=1
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-export HCCL_CONNECT_TIMEOUT=120
-export HCCL_INTRA_PCIE_ENABLE=1
-export HCCL_INTRA_ROCE_ENABLE=0
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
+    --host 0.0.0.0 \
+    --port 8077 \
+    --data-parallel-size 2 \
+    --data-parallel-size-local 1 \
+    --data-parallel-address $node0_ip \
+    --data-parallel-rpc-port 13389 \
+    --tensor-parallel-size 8 \
+    --quantization ascend \
+    --seed 1024 \
+    --served-model-name deepseek_v3_2 \
+    --enable-expert-parallel \
+    --max-num-seqs 16 \
+    --max-model-len 8192 \
+    --max-num-batched-tokens 4096 \
+    --trust-remote-code \
+    --no-enable-prefix-caching \
+    --gpu-memory-utilization 0.92 \
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[8, 16, 24, 32, 40, 48]}' \
+    --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
 
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
---host 0.0.0.0 \
---port 8077 \
---data-parallel-size 2 \
---data-parallel-size-local 1 \
---data-parallel-address $node0_ip \
---data-parallel-rpc-port 13389 \
---tensor-parallel-size 8 \
---quantization ascend \
---seed 1024 \
---served-model-name deepseek_v3_2 \
---enable-expert-parallel \
---max-num-seqs 16 \
---max-model-len 8192 \
---max-num-batched-tokens 4096 \
---trust-remote-code \
---no-enable-prefix-caching \
---gpu-memory-utilization 0.92 \
---compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[8, 16, 24, 32, 40, 48]}' \
---speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
+    ```
 
-```
+    **Node1**
 
-**Node1**
+    ```bash
+    # this obtained through ifconfig
+    # nic_name is the network interface name corresponding to local_ip of the current node
+    nic_name="xxx"
+    local_ip="xxx"
 
-```{code-block} bash
-   :substitutions:
-# this obtained through ifconfig
-# nic_name is the network interface name corresponding to local_ip of the current node
-nic_name="xxx"
-local_ip="xxx"
+    # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
+    node0_ip="xxxx"
 
-# The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
-node0_ip="xxxx"
+    export HCCL_OP_EXPANSION_MODE="AIV"
 
-export HCCL_OP_EXPANSION_MODE="AIV"
+    export HCCL_IF_IP=$local_ip
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export TP_SOCKET_IFNAME=$nic_name
+    export HCCL_SOCKET_IFNAME=$nic_name
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=100
+    export VLLM_USE_V1=1
+    export HCCL_BUFFSIZE=200
+    export VLLM_ASCEND_ENABLE_MLAPO=1
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+    export HCCL_CONNECT_TIMEOUT=120
+    export HCCL_INTRA_PCIE_ENABLE=1
+    export HCCL_INTRA_ROCE_ENABLE=0
 
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=100
-export VLLM_USE_V1=1
-export HCCL_BUFFSIZE=200
-export VLLM_ASCEND_ENABLE_MLAPO=1
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-export HCCL_CONNECT_TIMEOUT=120
-export HCCL_INTRA_PCIE_ENABLE=1
-export HCCL_INTRA_ROCE_ENABLE=0
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
+    --host 0.0.0.0 \
+    --port 8077 \
+    --headless \
+    --data-parallel-size 2 \
+    --data-parallel-size-local 1 \
+    --data-parallel-start-rank 1 \
+    --data-parallel-address $node0_ip \
+    --data-parallel-rpc-port 13389 \
+    --tensor-parallel-size 8 \
+    --quantization ascend \
+    --seed 1024 \
+    --served-model-name deepseek_v3_2 \
+    --enable-expert-parallel \
+    --max-num-seqs 16 \
+    --max-model-len 8192 \
+    --max-num-batched-tokens 4096 \
+    --trust-remote-code \
+    --no-enable-prefix-caching \
+    --gpu-memory-utilization 0.92 \
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[8, 16, 24, 32, 40, 48]}' \
+    --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
 
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
---host 0.0.0.0 \
---port 8077 \
---headless \
---data-parallel-size 2 \
---data-parallel-size-local 1 \
---data-parallel-start-rank 1 \
---data-parallel-address $node0_ip \
---data-parallel-rpc-port 13389 \
---tensor-parallel-size 8 \
---quantization ascend \
---seed 1024 \
---served-model-name deepseek_v3_2 \
---enable-expert-parallel \
---max-num-seqs 16 \
---max-model-len 8192 \
---max-num-batched-tokens 4096 \
---trust-remote-code \
---no-enable-prefix-caching \
---gpu-memory-utilization 0.92 \
---compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[8, 16, 24, 32, 40, 48]}' \
---speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
-
-```
-
-::::
-:::::
+    ```
 
 ### Prefill-Decode Disaggregation
 
@@ -524,7 +500,6 @@ Before you start, please
 
         export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
-
         vllm serve /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot \
             --host 0.0.0.0 \
             --port $2 \
@@ -598,7 +573,6 @@ Before you start, please
 
         export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
-
         vllm serve /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot \
             --host 0.0.0.0 \
             --port $2 \
@@ -662,7 +636,6 @@ Before you start, please
         export VLLM_USE_V1=1
         export HCCL_BUFFSIZE=256
 
-
         export ASCEND_AGGREGATE_ENABLE=1
         export ASCEND_TRANSPORT_PRINT=1
         export ACL_OP_INIT_MODE=1
@@ -673,7 +646,6 @@ Before you start, please
         export TASK_QUEUE_ENABLE=1
 
         export ASCEND_RT_VISIBLE_DEVICES=$1
-
 
         vllm serve /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot \
             --host 0.0.0.0 \
@@ -748,7 +720,6 @@ Before you start, please
         export TASK_QUEUE_ENABLE=1
 
         export ASCEND_RT_VISIBLE_DEVICES=$1
-
 
         vllm serve /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot \
             --host 0.0.0.0 \
@@ -860,8 +831,8 @@ Once your server is started, you can query the model with input prompts:
 
 **Note**:
 
-- `<node0_ip>`: The IP address of the node where the server is running (e.g., localhost).
-- `<port>`: The port number specified in the server startup command (e.g., 8000).
+- `<node0_ip>`: The IP address of the node where the server is running (e.g., localhost). For PD-separated deployment, use the host IP of the node where the proxy script resides.
+- `<port>`: The port number specified in the server startup command (e.g., 8000). For PD-separated deployment, use the port configured in the proxy script.
 
 ```shell
 curl http://<node0_ip>:<port>/v1/completions \
@@ -872,6 +843,12 @@ curl http://<node0_ip>:<port>/v1/completions \
         "max_completion_tokens": 50,
         "temperature": 0
     }'
+```
+
+**Expected Result**:
+
+```json
+{"id":"019eab54ead036b23e53f3a709e09289","object":"chat.completion","created":1780990929,"model":"deepseek_v3.2","choices":[{"index":0,"message":{"role":"assistant","content":"The future of AI is **not a single destination, but a complex, multi-faceted trajectory** that will reshape nearly every aspect of human society, technology, and our understanding of intelligence itself. It can be understood through several interconnected lenses:\n\n### "},"finish_reason":"length"}],"usage":{"prompt_tokens":9,"completion_tokens":50,"total_tokens":59,"completion_tokens_details":{"reasoning_tokens":0},"prompt_tokens_details":{"cached_tokens":0},"prompt_cache_hit_tokens":0,"prompt_cache_miss_tokens":9},"system_fingerprint":""}
 ```
 
 ## Accuracy Evaluation

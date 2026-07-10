@@ -130,7 +130,8 @@ class MoECommMethod(ABC):
             torch.bfloat16,
             torch.int8,
             torch.float8_e4m3fn,
-        ]
+            torch.uint8,
+        ], f"Unsupported hidden_states dtype: {fused_experts_input.hidden_states.dtype}"
 
         moe_comm_method = _EXTRA_CTX.moe_comm_method
         assert moe_comm_method is not None, "Missing communication context"
@@ -290,10 +291,6 @@ class FusedMC2CommImpl(MoECommMethod):
             "w1_scale and w2_scale cannot be None for FusedMC2CommImpl."
         )
 
-        assert not (
-            fused_experts_input.weights.w1_scale_bias is None or fused_experts_input.weights.w2_scale_bias is None
-        ), "w1_scale_bias and w2_scale_bias cannot be None for FusedMC2CommImpl."
-
         assert isinstance(self.token_dispatcher, TokenDispatcherWithMC2), (
             "token_dispatcher must be an instance of TokenDispatcherWithMC2."
         )
@@ -305,6 +302,10 @@ class FusedMC2CommImpl(MoECommMethod):
 
         expert_tokens = None
         if get_ascend_config().enable_fused_mc2 == 1:
+            assert not (
+                fused_experts_input.weights.w1_scale_bias is None or fused_experts_input.weights.w2_scale_bias is None
+            ), "w1_scale_bias and w2_scale_bias cannot be None when enable_fused_mc2=1."
+
             out = torch.empty_like(fused_experts_input.hidden_states)
             torch.ops._C_ascend.dispatch_ffn_combine(  # type: ignore
                 x=fused_experts_input.hidden_states,
@@ -317,7 +318,7 @@ class FusedMC2CommImpl(MoECommMethod):
                 bias2=fused_experts_input.weights.w2_scale_bias,
                 probs=fused_experts_input.topk_weights.to(torch.float32),
                 group=self.token_dispatcher.moe_all_to_all_group_name,
-                max_output_size=131072,
+                max_output_size=get_ascend_config().mega_moe_max_tokens,
                 swiglu_limit=fused_experts_input.swiglu_limit,
                 x_active_mask=fused_experts_input.routing.mc2_mask,
                 out=out,

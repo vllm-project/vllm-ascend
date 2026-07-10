@@ -35,6 +35,12 @@ from .utils import find_free_port, is_valid_path_prefix
 
 DRAFT_PORT_OFFSET = 10000
 
+try:
+    # Older vLLM versions may not expose the current-config accessor.
+    from vllm.config import get_current_vllm_config
+except ImportError:
+    get_current_vllm_config = None
+
 
 @register_model_loader("netloader")
 class ModelNetLoaderElastic(BaseModelLoader):
@@ -62,6 +68,12 @@ class ModelNetLoaderElastic(BaseModelLoader):
 
         # Try to read config file at first
         extra = load_config.model_loader_extra_config
+
+        if extra is not None and not isinstance(extra, dict):
+            err_msg = "NetLoader requires --model-loader-extra-config to be a JSON object."
+            logger.error(err_msg)
+            raise RuntimeError(err_msg)
+
         if extra and "CONFIG_FILE" in extra:
             try:
                 logger.info("Reading configs in file %s ...", load_config.model_loader_extra_config["CONFIG_FILE"])
@@ -130,6 +142,61 @@ class ModelNetLoaderElastic(BaseModelLoader):
         """Check whether the model_config corresponds to a draft model for speculative decoding."""
         return getattr(model_config, "runner_type", None) == "draft"
 
+    @staticmethod
+    def _sync_target_netloader_before_draft(vllm_config: VllmConfig) -> None:
+        if getattr(vllm_config, "speculative_config", None) is None:
+            return
+        if not torch.distributed.is_available() or not torch.distributed.is_initialized():
+            return
+
+        logger.info("Waiting for all target netloader ranks before loading draft model")
+        barrier_start = time.perf_counter()
+        torch.distributed.barrier()
+        logger.info(
+            "Target netloader barrier before draft model time: %s",
+            time.perf_counter() - barrier_start,
+        )
+
+    @staticmethod
+    def _get_static_forward_context(vllm_config: VllmConfig):
+        compilation_config = getattr(vllm_config, "compilation_config", None)
+        static_forward_context = getattr(compilation_config, "static_forward_context", None)
+        if static_forward_context is None or not hasattr(static_forward_context, "clear"):
+            return None
+        return static_forward_context
+
+    @staticmethod
+    def _clear_static_forward_context(vllm_config: VllmConfig) -> None:
+        """Clear static layer registrations before rebuilding the model on fallback."""
+        candidates = [("vllm_config", vllm_config)]
+        if get_current_vllm_config is not None:
+            try:
+                candidates.append(("current_vllm_config", get_current_vllm_config()))
+            except Exception as e:
+                logger.debug("Failed to get current vLLM config while clearing static context: %s", e)
+
+        cleared_contexts = []
+        seen_context_ids = set()
+        for source, config in candidates:
+            static_forward_context = ModelNetLoaderElastic._get_static_forward_context(config)
+            if static_forward_context is None:
+                continue
+
+            context_id = id(static_forward_context)
+            if context_id in seen_context_ids:
+                continue
+            seen_context_ids.add(context_id)
+
+            try:
+                context_size = str(len(static_forward_context))
+            except TypeError:
+                context_size = "unknown"
+            static_forward_context.clear()
+            cleared_contexts.append(f"{source}:{context_size}")
+
+        if cleared_contexts:
+            logger.info("Cleared static_forward_context before fallback: %s", cleared_contexts)
+
     def load_model(self, vllm_config: VllmConfig, model_config: ModelConfig, prefix: str = "") -> nn.Module:
         """
         Loads the model using the specified configuration.
@@ -178,7 +245,8 @@ class ModelNetLoaderElastic(BaseModelLoader):
         else:
             target_device = torch.device(device_config.device)
 
-            vllm_config_backup = deepcopy(vllm_config)
+            _quant_config = getattr(vllm_config, "quant_config", None)
+            _quant_config = deepcopy(_quant_config) if _quant_config is not None else None
             model_config_backup = deepcopy(model_config)
 
             with set_default_torch_dtype(model_config.dtype):
@@ -220,7 +288,8 @@ class ModelNetLoaderElastic(BaseModelLoader):
                 if model is None:
                     logger.warning("Netloader elastic loading fails, use load format DefaultModelLoader")
 
-                    vllm_config = vllm_config_backup
+                    if hasattr(vllm_config, "quant_config"):
+                        vllm_config.quant_config = _quant_config
                     model_config = model_config_backup
 
                     del model
@@ -231,6 +300,9 @@ class ModelNetLoaderElastic(BaseModelLoader):
                     elif device_config.device_type == "cuda":
                         logger.info("Empty CUDA cache")
                         torch.cuda.empty_cache()
+
+                    # Clear registrations from the failed initialize_model
+                    self._clear_static_forward_context(vllm_config)
 
                     model, need_process_weights_after_loading = self.revert_to_default(
                         model_config, vllm_config, device_config, prefix
@@ -285,6 +357,7 @@ class ModelNetLoaderElastic(BaseModelLoader):
                         logger.error("Unknown error: %s", e)
 
                 try:
+                    server_int8_cache = "hbm" if is_draft and self.int8_cache != "no" else self.int8_cache
                     elastic_server = ElasticServer(
                         driver_ip,
                         listen_port,
@@ -293,7 +366,7 @@ class ModelNetLoaderElastic(BaseModelLoader):
                         model_config.model,
                         parallel_config.tensor_parallel_size,
                         parallel_config.pipeline_parallel_size,
-                        self.int8_cache,
+                        server_int8_cache,
                         self.int8_cache_name,
                         group_name=group_name,
                     )
@@ -313,9 +386,12 @@ class ModelNetLoaderElastic(BaseModelLoader):
         if need_process_weights_after_loading:
             process_weights_after_loading(model, model_config, torch.device(device_config.device))
 
+        if not is_draft:
+            self._sync_target_netloader_before_draft(vllm_config)
+
         if model is None:
             logger.error("NetLoader elastic loads model fails")
-            return None
+            raise RuntimeError("NetLoader elastic loads model fails")
 
         return model.eval()
 

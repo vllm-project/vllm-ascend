@@ -18,28 +18,41 @@
 
 
 import torch
-import torch.nn.functional as F
 from vllm.forward_context import get_forward_context
+from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
 from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
-
-from vllm_ascend.utils import enable_sp, vllm_version_is
-
-if vllm_version_is("0.21.0"):
-    from vllm.model_executor.layers.mamba.gdn_linear_attn import (  # type: ignore[import-not-found]
-        GatedDeltaNetAttention,
-    )
-else:
-    from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
-from vllm_ascend._310p.ops.fla.chunk_gated_delta_rule import chunk_gated_delta_rule_pytorch
+from vllm_ascend._310p.ops.fla.chunk_gated_delta_rule import chunk_gated_delta_rule_310
 from vllm_ascend._310p.ops.fla.fused_gdn_gating import fused_gdn_gating_pytorch
+from vllm_ascend._310p.ops.fla.l2norm import l2norm_310p
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.utils import maybe_save_kv_layer_to_connector
+from vllm_ascend.utils import enable_sp
 
 
-def _l2norm(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
-    return F.normalize(x.to(torch.float32), p=2, dim=-1, eps=eps).to(x.dtype)
+def _zero_padded_tokens(
+    tensor: torch.Tensor,
+    valid_tokens: torch.Tensor,
+    token_dim: int,
+) -> torch.Tensor:
+    if tensor.numel() == 0:
+        return tensor
+
+    token_count = tensor.shape[token_dim]
+    if token_count == 0:
+        return tensor
+
+    positions = torch.arange(
+        token_count,
+        device=tensor.device,
+        dtype=valid_tokens.dtype,
+    )
+    valid_mask = positions < valid_tokens.to(device=tensor.device)
+    mask_shape = [1] * tensor.ndim
+    mask_shape[token_dim] = token_count
+    return tensor * valid_mask.reshape(mask_shape).to(dtype=tensor.dtype)
 
 
 def _flatten_state_indices(
@@ -50,15 +63,41 @@ def _flatten_state_indices(
     if ssm_state_indices.ndim == 1:
         return ssm_state_indices[:total_tokens].to(torch.int32).contiguous()
 
-    seq_lens = cu_seqlens[1:] - cu_seqlens[:-1]
-    ssm_state_indices = ssm_state_indices[: seq_lens.shape[0]]
-    positions = torch.arange(
-        ssm_state_indices.shape[1],
-        device=ssm_state_indices.device,
-        dtype=seq_lens.dtype,
-    )
-    valid = positions.unsqueeze(0) < seq_lens.unsqueeze(1)
-    return ssm_state_indices.masked_select(valid)[:total_tokens].to(torch.int32).contiguous()
+    num_seqs = (cu_seqlens[1:] - cu_seqlens[:-1]).shape[0]
+    seq_lens = cu_seqlens[1 : num_seqs + 1] - cu_seqlens[:num_seqs]
+    ssm_state_indices = ssm_state_indices[:num_seqs]
+
+    # Uniform spec-decode ACL graph uses fixed q_len per request; reshape avoids
+    # NPU masked_select which breaks stream capture (aclnnMaskedSelect / 107027).
+    if _EXTRA_CTX.capturing or (seq_lens.numel() > 0 and torch.all(seq_lens == seq_lens[0])):
+        q_per_seq = ssm_state_indices.shape[1]
+        flat = ssm_state_indices[:, :q_per_seq].reshape(-1)
+        return flat[:total_tokens].to(torch.int32).contiguous()
+
+    # Eager mixed batches with variable seq_lens: compact on CPU, copy back async.
+    ssm_cpu = ssm_state_indices.cpu()
+    seq_lens_cpu = seq_lens.cpu()
+    q_per_seq = ssm_cpu.shape[1]
+    positions = torch.arange(q_per_seq)
+    valid = positions.unsqueeze(0) < seq_lens_cpu.unsqueeze(1)
+    flat_cpu = ssm_cpu.masked_select(valid).to(torch.int32).contiguous()[:total_tokens]
+    if not flat_cpu.is_pinned:
+        flat_cpu = flat_cpu.pin_memory()
+    flat_dev = torch.empty(flat_cpu.numel(), dtype=torch.int32, device=ssm_state_indices.device)
+    flat_dev.copy_(flat_cpu, non_blocking=True)
+    return flat_dev.contiguous()
+
+
+def _mask_padded_recurrent_accepted_tokens(
+    num_accepted_tokens: torch.Tensor,
+    actual_seq_lengths: torch.Tensor,
+) -> torch.Tensor:
+    accepted_tokens = num_accepted_tokens[: actual_seq_lengths.shape[0]].to(torch.int32).contiguous()
+    return torch.where(
+        actual_seq_lengths > 0,
+        accepted_tokens,
+        torch.zeros_like(accepted_tokens),
+    ).contiguous()
 
 
 def npu_recurrent_gated_delta_rule_310(
@@ -74,15 +113,22 @@ def npu_recurrent_gated_delta_rule_310(
     use_qk_l2norm_in_kernel: bool = True,
 ) -> torch.Tensor:
     if use_qk_l2norm_in_kernel:
-        q = _l2norm(q)
-        k = _l2norm(k)
+        q = l2norm_310p(q)
+        k = l2norm_310p(k)
 
     total_tokens = v.shape[1]
     flat_state_indices = _flatten_state_indices(ssm_state_indices, cu_seqlens, total_tokens)
     actual_seq_lengths = (cu_seqlens[1:] - cu_seqlens[:-1]).to(torch.int32).contiguous()
+    flat_state_indices = torch.clamp_min(
+        flat_state_indices,
+        0,
+    ).contiguous()
     accepted_tokens = None
     if num_accepted_tokens is not None:
-        accepted_tokens = num_accepted_tokens[: actual_seq_lengths.shape[0]].to(torch.int32).contiguous()
+        accepted_tokens = _mask_padded_recurrent_accepted_tokens(
+            num_accepted_tokens,
+            actual_seq_lengths,
+        )
 
     out = torch.ops._C_ascend.npu_recurrent_gated_delta_rule_310(
         query=q.squeeze(0).to(torch.float16).contiguous(),
@@ -108,8 +154,42 @@ def _310p_get_state_dtype(self) -> tuple[torch.dtype, torch.dtype]:
 _original_get_state_dtype = GatedDeltaNetAttention.get_state_dtype
 
 
+def _merge_spec_and_non_spec_outputs_310(
+    core_attn_out: torch.Tensor,
+    num_actual_tokens: int,
+    spec_token_indx: torch.Tensor,
+    non_spec_token_indx: torch.Tensor,
+    core_attn_out_spec: torch.Tensor,
+    core_attn_out_non_spec: torch.Tensor,
+) -> None:
+    """Merge spec/non-spec GDN outputs back into the batch layout.
+
+    Avoid NPU ``index_copy_`` (IndexPutV2) which fails on some layouts; use
+    direct indexing instead. Validate lengths so mixed prefill+spec batches
+    do not pass mismatched tensors from spec ops.
+    """
+    spec_out = core_attn_out_spec.squeeze(0)
+    non_spec_out = core_attn_out_non_spec.squeeze(0)
+    n_spec = spec_token_indx.numel()
+    n_non_spec = non_spec_token_indx.numel()
+    if spec_out.shape[0] != n_spec:
+        raise RuntimeError(f"GDN spec output length {spec_out.shape[0]} != spec_token_indx {n_spec}")
+    if non_spec_out.shape[0] != n_non_spec:
+        raise RuntimeError(f"GDN non-spec output length {non_spec_out.shape[0]} != non_spec_token_indx {n_non_spec}")
+    out = core_attn_out[:num_actual_tokens]
+    out[spec_token_indx] = spec_out
+    out[non_spec_token_indx] = non_spec_out
+
+
 class AscendGatedDeltaNetAttention310(GatedDeltaNetAttention):
     get_state_dtype = _310p_get_state_dtype
+
+    def get_attn_backend(self):
+        from vllm_ascend._310p.ops.gdn_attn_builder_310 import (
+            AscendGDNAttentionBackend310,
+        )
+
+        return AscendGDNAttentionBackend310
 
     def _forward_core(
         self,
@@ -148,7 +228,6 @@ class AscendGatedDeltaNetAttention310(GatedDeltaNetAttention):
         conv_state = self_kv_cache[0]
         ssm_state = self_kv_cache[1]
         num_actual_tokens = attn_metadata.num_actual_tokens
-        num_accepted_tokens = attn_metadata.num_accepted_tokens
 
         if not enable_sp():
             mixed_qkv = mixed_qkv[:num_actual_tokens]
@@ -171,15 +250,27 @@ class AscendGatedDeltaNetAttention310(GatedDeltaNetAttention):
 
         # 1.1: Process the multi-query part
         if spec_sequence_masks is not None:
+            spec_causal_conv1d_meta = attn_metadata.spec_decode_metadata.spec_causal_conv1d
+            spec_query_start_loc_device = spec_causal_conv1d_meta.query_start_loc
+            uniform_spec_only = attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0
+            # The final entry remains the runtime token count even when
+            # graph metadata includes padded requests.
+            spec_valid_tokens = spec_query_start_loc_device[-1]
+            if uniform_spec_only:
+                mixed_qkv_spec = _zero_padded_tokens(
+                    mixed_qkv_spec,
+                    spec_valid_tokens,
+                    token_dim=0,
+                )
             mixed_qkv_spec = torch.ops._C_ascend.npu_causal_conv1d_310(
                 mixed_qkv_spec,
                 conv_weights,
                 bias=self.conv1d.bias,
                 conv_states=conv_state,
-                query_start_loc=spec_query_start_loc.to(torch.int64),
-                cache_indices=spec_state_indices_tensor[:, 0][: attn_metadata.num_spec_decodes].to(torch.int64),
+                query_start_loc=spec_query_start_loc_device,
+                cache_indices=spec_causal_conv1d_meta.cache_indices,
                 initial_state_mode=None,
-                num_accepted_tokens=num_accepted_tokens.to(torch.int64),
+                num_accepted_tokens=spec_causal_conv1d_meta.num_accepted_tokens,
                 activation_mode=activation_num,
                 pad_slot_id=PAD_SLOT_ID,
                 run_mode=1,
@@ -193,9 +284,9 @@ class AscendGatedDeltaNetAttention310(GatedDeltaNetAttention):
                     conv_weights,
                     bias=self.conv1d.bias,
                     conv_states=conv_state,
-                    query_start_loc=non_spec_query_start_loc.to(torch.int64),
-                    cache_indices=non_spec_state_indices_tensor.to(torch.int64),
-                    initial_state_mode=has_initial_state.to(torch.int64),
+                    query_start_loc=non_spec_query_start_loc,
+                    cache_indices=non_spec_state_indices_tensor,
+                    initial_state_mode=has_initial_state,
                     num_accepted_tokens=None,
                     activation_mode=activation_num,
                     pad_slot_id=PAD_SLOT_ID,
@@ -208,7 +299,7 @@ class AscendGatedDeltaNetAttention310(GatedDeltaNetAttention):
                 bias=self.conv1d.bias,
                 conv_states=conv_state,
                 query_start_loc=None,
-                cache_indices=non_spec_state_indices_tensor[: attn_metadata.num_actual_tokens].to(torch.int64),
+                cache_indices=non_spec_state_indices_tensor[: attn_metadata.num_actual_tokens],
                 initial_state_mode=None,
                 num_accepted_tokens=None,
                 activation_mode=activation_num,
@@ -252,7 +343,7 @@ class AscendGatedDeltaNetAttention310(GatedDeltaNetAttention):
                     state=ssm_state,
                     cu_seqlens=spec_query_start_loc[: attn_metadata.num_spec_decodes + 1],
                     ssm_state_indices=spec_state_indices_tensor,
-                    num_accepted_tokens=num_accepted_tokens,
+                    num_accepted_tokens=spec_causal_conv1d_meta.num_accepted_tokens,
                     use_qk_l2norm_in_kernel=True,
                 )
             else:
@@ -265,7 +356,7 @@ class AscendGatedDeltaNetAttention310(GatedDeltaNetAttention):
                 (
                     core_attn_out_non_spec,
                     last_recurrent_state,
-                ) = chunk_gated_delta_rule_pytorch(
+                ) = chunk_gated_delta_rule_310(
                     q=query_non_spec,
                     k=key_non_spec,
                     v=value_non_spec,
@@ -309,17 +400,14 @@ class AscendGatedDeltaNetAttention310(GatedDeltaNetAttention):
             )
         # 3. Merge core attention output
         if spec_sequence_masks is not None and core_attn_out_non_spec is not None:
-            merged_out = torch.empty(
-                (1, num_actual_tokens, *core_attn_out_spec.shape[2:]),
-                dtype=core_attn_out_non_spec.dtype,
-                device=core_attn_out_non_spec.device,
+            _merge_spec_and_non_spec_outputs_310(
+                core_attn_out,
+                num_actual_tokens,
+                spec_token_indx,
+                non_spec_token_indx,
+                core_attn_out_spec,
+                core_attn_out_non_spec,
             )
-            merged_out.index_copy_(1, spec_token_indx, core_attn_out_spec)
-            merged_out.index_copy_(1, non_spec_token_indx, core_attn_out_non_spec)
-            if not enable_sp():
-                core_attn_out[:num_actual_tokens] = merged_out.squeeze(0)
-            else:
-                core_attn_out[:num_actual_tokens] = merged_out.squeeze(0)[:num_actual_tokens]
         elif spec_sequence_masks is not None:
             if not enable_sp():
                 core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)
@@ -330,4 +418,12 @@ class AscendGatedDeltaNetAttention310(GatedDeltaNetAttention):
                 core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
             else:
                 core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)[:num_actual_tokens]
+        if spec_sequence_masks is not None and uniform_spec_only:
+            core_attn_out.copy_(
+                _zero_padded_tokens(
+                    core_attn_out,
+                    spec_valid_tokens,
+                    token_dim=0,
+                )
+            )
         maybe_save_kv_layer_to_connector("", [])

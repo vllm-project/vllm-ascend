@@ -95,8 +95,11 @@ class WeightPrefetchMethod:
         if not forward_context or _EXTRA_CTX.model_instance is None:
             return
 
-        # layer_idx is subtracted by 1 because layer_idx was incremented by 1 at layernorm.
-        weight = _EXTRA_CTX.model_instance.model.layers[_EXTRA_CTX.layer_idx - 1].mlp.experts.w13_weight  # type: ignore  # type: ignore
+        weight = self._get_moe_gate_up_prefetch_weight()
+        if weight is None:
+            self.moe.is_active_this_forward = False
+            return
+
         weight_size = weight.data.element_size() * weight.data.numel() * self.moe.prefetch_ratio.get(prefix, 0)
         torch.ops.vllm.prefetch_preprocess(weight=weight, start_flag=None, max_weight_size=int(weight_size))
 
@@ -105,6 +108,27 @@ class WeightPrefetchMethod:
             return
 
         torch.ops.vllm.prefetch_postprocess(stop_flag)
+
+    def _get_moe_gate_up_prefetch_weight(self) -> torch.Tensor | None:
+        layer_idx = _EXTRA_CTX.layer_idx
+        model_instance = _EXTRA_CTX.model_instance
+        if layer_idx is None or layer_idx <= 0 or model_instance is None:
+            return None
+
+        # layer_idx is subtracted by 1 because it was incremented by 1 at layernorm.
+        layer = model_instance.model.layers[layer_idx - 1]
+        experts = None
+        if hasattr(layer, "mlp") and hasattr(layer.mlp, "experts"):
+            experts = layer.mlp.experts
+        elif hasattr(layer, "moe") and hasattr(layer.moe, "experts"):
+            experts = layer.moe.experts
+        elif hasattr(layer, "block_sparse_moe") and hasattr(layer.block_sparse_moe, "experts"):
+            experts = layer.block_sparse_moe.experts
+
+        if experts is None:
+            return None
+
+        return getattr(experts, "w13_weight", None)
 
     # x_dependency only eager mode can pass None
     def maybe_prefetch_mlp_weight_preprocess(

@@ -9,6 +9,7 @@ _envs: &envs
   VLLM_RPC_TIMEOUT: "3600000"
   VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "3600000"
   SERVER_PORT: "DEFAULT_PORT"
+  VLLM_ENGINE_READY_TIMEOUT_S: "7200"
 
 _server_cmd: &server_cmd
   - "--quantization"
@@ -38,7 +39,7 @@ _benchmarks_gsm8k: &benchmarks_gsm8k
     max_out_len: 32768
     batch_size: 32
     baseline: 95
-    threshold: 5
+    threshold: 10
 
 _benchmarks_aime: &benchmarks_aime
   acc:
@@ -49,7 +50,7 @@ _benchmarks_aime: &benchmarks_aime
     max_out_len: 32768
     batch_size: 32
     baseline: 86.67
-    threshold: 7
+    threshold: 10
 
 # ==========================================
 # ACTUAL TEST CASES

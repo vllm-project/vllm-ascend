@@ -56,12 +56,22 @@ class _FakeQ:
     def npu(self):
         return self
 
-    def exponential_(self):
-        self.default_exponential_called = True
+    def exponential_(self, generator=None):
+        if generator is None:
+            self.default_exponential_called = True
         return self
 
     def __getitem__(self, idx):
         return self.rows[idx]
+
+    def __setitem__(self, idx, value):
+        self.rows[idx] = value
+
+
+def _empty_like_side_effect(q_instances, template):
+    if isinstance(template, _FakeRow):
+        return _FakeRow()
+    return next(q_instances)
 
 
 class _FakeCPUGenerator:
@@ -90,6 +100,7 @@ class TestSampler310pStandalone(unittest.TestCase):
 
         fake_q_first = _FakeQ(batch_size=2)
         fake_q_second = _FakeQ(batch_size=2)
+        q_instances = iter([fake_q_first, fake_q_second])
 
         npu_stream = MagicMock()
         generator = MagicMock()
@@ -100,7 +111,11 @@ class TestSampler310pStandalone(unittest.TestCase):
         with (
             patch.object(sampler_310p, "npu_stream_switch", return_value=nullcontext()),
             patch.object(sampler_310p, "global_stream", return_value=MagicMock()),
-            patch.object(sampler_310p.torch, "empty_like", side_effect=[fake_q_first, fake_q_second]),
+            patch.object(
+                sampler_310p.torch,
+                "empty_like",
+                side_effect=lambda template: _empty_like_side_effect(q_instances, template),
+            ),
             patch.object(sampler_310p.torch, "Generator", side_effect=_FakeCPUGenerator) as gen_ctor,
             patch.object(
                 sampler_310p.torch,
@@ -131,6 +146,7 @@ class TestSampler310pStandalone(unittest.TestCase):
         probs.view.return_value = torch.tensor([1])
 
         fake_q = _FakeQ(batch_size=1)
+        q_instances = iter([fake_q])
         npu_stream = MagicMock()
         generator = MagicMock()
         generator.get_state.side_effect = RuntimeError("state read failed")
@@ -144,7 +160,11 @@ class TestSampler310pStandalone(unittest.TestCase):
         with (
             patch.object(sampler_310p, "npu_stream_switch", return_value=nullcontext()),
             patch.object(sampler_310p, "global_stream", return_value=MagicMock()),
-            patch.object(sampler_310p.torch, "empty_like", return_value=fake_q),
+            patch.object(
+                sampler_310p.torch,
+                "empty_like",
+                side_effect=lambda template: _empty_like_side_effect(q_instances, template),
+            ),
             patch.object(sampler_310p.torch, "Generator", side_effect=_FailSetStateCPUGenerator),
             patch.object(
                 sampler_310p.torch,
@@ -171,6 +191,7 @@ class TestSampler310pStandalone(unittest.TestCase):
 
         fake_q_first = _FakeQ(batch_size=1)
         fake_q_second = _FakeQ(batch_size=1)
+        q_instances = iter([fake_q_first, fake_q_second])
         npu_stream = MagicMock()
 
         generator_first = MagicMock()
@@ -184,7 +205,11 @@ class TestSampler310pStandalone(unittest.TestCase):
         with (
             patch.object(sampler_310p, "npu_stream_switch", return_value=nullcontext()),
             patch.object(sampler_310p, "global_stream", return_value=MagicMock()),
-            patch.object(sampler_310p.torch, "empty_like", side_effect=[fake_q_first, fake_q_second]),
+            patch.object(
+                sampler_310p.torch,
+                "empty_like",
+                side_effect=lambda template: _empty_like_side_effect(q_instances, template),
+            ),
             patch.object(sampler_310p.torch, "Generator", side_effect=_FakeCPUGenerator) as gen_ctor,
             patch.object(
                 sampler_310p.torch,

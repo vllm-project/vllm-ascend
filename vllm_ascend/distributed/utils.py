@@ -1,10 +1,21 @@
 import torch
 import torch.distributed as dist
+from vllm.distributed import get_dcp_group
 from vllm.distributed.parallel_state import GroupCoordinator, get_dp_group
 from vllm.forward_context import get_forward_context
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.distributed.parallel_state import get_fc3_quant_x_group
+
+
+def get_decode_context_model_parallel_world_size() -> int:
+    """Return DCP world size (v0.21.0 helper removed on vLLM main)."""
+    return get_dcp_group().world_size
+
+
+def get_decode_context_model_parallel_rank() -> int:
+    """Return DCP rank within group (v0.21.0 helper removed on vLLM main)."""
+    return get_dcp_group().rank_in_group
 
 
 def fc3_all_gather_and_maybe_unpad_impl(

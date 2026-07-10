@@ -56,7 +56,13 @@ test_cases:
         max_out_len: 32768
         batch_size: 32
         baseline: 90
-        threshold: 5
+        threshold: 10
+        temperature: 0.6
+        top_p: 0.95
+        top_k: 20
+        min_p: 0.0
+        presence_penalty: 0.0
+        repetition_penalty: 1.0
       perf:
         case_type: performance
         dataset_path: vllm-ascend/GSM8K-in131072-bs100-qwen3

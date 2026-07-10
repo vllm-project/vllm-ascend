@@ -1,0 +1,46 @@
+# ==========================================
+# ACTUAL TEST CASES
+# ==========================================
+
+test_cases:
+  - name: "qwen3-32b"
+    model: "Eco-Tech/Qwen3-32B-w8a8sc-310-vllm/TP4/Qwen3-32B-w8a8sc-310-vllm-tp4"
+    envs:
+      SERVER_PORT: "DEFAULT_PORT"
+    server_cmd:
+      - "--port"
+      - "$SERVER_PORT"
+      - "--tensor-parallel-size"
+      - "4"
+      - "--gpu-memory-utilization"
+      - "0.8"
+      - "--max-num-seqs"
+      - "32"
+      - "--dtype"
+      - "float16"
+      - "--quantization"
+      - "ascend"
+      - "--max-model-len"
+      - "20480"
+      - "--no-enable-prefix-caching"
+      - "--load_format"
+      - "sharded_state"
+      - "--compilation-config"
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[8,32]}'
+      - "--additional-config"
+      - '{"ascend_compilation_config":{"enable_npugraph_ex":false, "fuse_norm_quant": false}}'
+      - "--default-chat-template-kwargs"
+      - '{"enable_thinking": false}'
+
+    benchmarks:
+      perf:
+        case_type: performance
+        dataset_path: vllm-ascend/GSM8K-in512-bs100-qwen3
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 32
+        max_out_len: 512
+        batch_size: 8
+        request_rate: 0
+        baseline: 105.26
+        threshold: 0.95

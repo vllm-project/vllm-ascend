@@ -16,6 +16,7 @@
 #ifndef OP_API_COMMON_ADAPTER
 #define OP_API_COMMON_ADAPTER
 
+#include <fstream>
 #include <torch/types.h>
 #include <ATen/Tensor.h>
 #include <acl/acl_base.h>
@@ -155,6 +156,106 @@ bool IsOpInputBaseFormat(const at::Tensor &tensor)
         (format == ACL_FORMAT_NCDHW);
 }
 
+static std::vector<std::string> split_str(std::string s, const std::string &del)
+{
+    int end = s.find(del);
+    std::vector<std::string> path_list;
+    while (end != -1) {
+        path_list.push_back(s.substr(0, end));
+        s.erase(s.begin(), s.begin() + end + 1);
+        end = s.find(del);
+    }
+    path_list.push_back(s);
+    return path_list;
+}
+
+static bool is_file_exist(const std::string &path)
+{
+    if (path.empty() || path.size() > PATH_MAX) {
+        return false;
+    }
+    return (access(path.c_str(), F_OK) == 0) ? true : false;
+}
+
+inline  std::string real_path(const std::string &path)
+{
+    if (path.empty() || path.size() > PATH_MAX) {
+        return "";
+    }
+    char realPath[PATH_MAX] = {0};
+    if (realpath(path.c_str(), realPath) == nullptr) {
+        return "";
+    }
+    return std::string(realPath);
+}
+
+inline std::vector<std::string> get_custom_lib_path()
+{
+    char *ascend_custom_opppath = std::getenv("ASCEND_CUSTOM_OPP_PATH");
+    std::vector<std::string> custom_lib_path_list;
+
+    if (ascend_custom_opppath == nullptr) {
+        return std::vector<std::string>();
+    }
+
+    std::string ascend_custom_opppath_str(ascend_custom_opppath);
+    // split string with ":"
+    custom_lib_path_list = split_str(ascend_custom_opppath_str, ":");
+    if (custom_lib_path_list.empty()) {
+        return std::vector<std::string>();
+    }
+    for (auto &it : custom_lib_path_list) {
+        it = it + "/op_api/lib/";
+    }
+
+    return custom_lib_path_list;
+}
+
+inline std::vector<std::string> get_default_custom_lib_path()
+{
+    char *ascend_opp_path = std::getenv("ASCEND_OPP_PATH");
+    std::vector<std::string> default_vendors_list;
+
+    if (ascend_opp_path == nullptr) {
+        return std::vector<std::string>();
+    }
+
+    std::string vendors_path(ascend_opp_path);
+    vendors_path = vendors_path + "/vendors";
+    std::string vendors_config_file = real_path(vendors_path + "/config.ini");
+    if (vendors_config_file.empty()) {
+        return std::vector<std::string>();
+    }
+
+    if (!is_file_exist(vendors_config_file)) {
+        return std::vector<std::string>();
+    }
+
+    std::ifstream ifs(vendors_config_file);
+    std::string line;
+    while (std::getline(ifs, line)) {
+        if (line.find("load_priority=") == 0) {
+            break;
+        }
+    }
+    std::string head = "load_priority=";
+    line.erase(0, head.length());
+
+    // split string with ","
+    default_vendors_list = split_str(line, ",");
+    if (default_vendors_list.empty()) {
+        return std::vector<std::string>();
+    }
+    for (auto &it : default_vendors_list) {
+        it = real_path(vendors_path + "/" + it + "/op_api/lib/");
+    }
+
+    return default_vendors_list;
+}
+
+const std::vector<std::string> g_custom_lib_path = get_custom_lib_path();
+const std::vector<std::string> g_default_custom_lib_path = get_default_custom_lib_path();
+
 inline const char *GetOpApiLibName(void) { return "libopapi.so"; }
 
 inline const char *GetCustOpApiLibName(void) { return "libcust_opapi.so"; }
@@ -170,21 +271,47 @@ inline void *GetOpApiLibHandler(const char *libName) {
   return handler;
 }
 
-inline void *GetOpApiFuncAddr(const char *apiName) {
-  static auto custOpApiHandler = GetOpApiLibHandler(GetCustOpApiLibName());
-  if (custOpApiHandler != nullptr) {
-    auto funcAddr =
-        GetOpApiFuncAddrInLib(custOpApiHandler, GetCustOpApiLibName(), apiName);
-    if (funcAddr != nullptr) {
-      return funcAddr;
+inline void *GetOpApiFuncAddr(const char *apiName)
+{
+    if (!g_custom_lib_path.empty()) {
+        for (auto &it : g_custom_lib_path) {
+            auto cust_opapi_lib = real_path(it + "/" + GetCustOpApiLibName());
+            if (cust_opapi_lib.empty()) {
+                continue;
+            }
+            auto custOpApiHandler = GetOpApiLibHandler(cust_opapi_lib.c_str());
+            if (custOpApiHandler != nullptr) {
+                auto funcAddr =
+                    GetOpApiFuncAddrInLib(custOpApiHandler, GetCustOpApiLibName(), apiName);
+                if (funcAddr != nullptr) {
+                    return funcAddr;
+                }
+            }
+        }
     }
-  }
 
-  static auto opApiHandler = GetOpApiLibHandler(GetOpApiLibName());
-  if (opApiHandler == nullptr) {
-    return nullptr;
-  }
-  return GetOpApiFuncAddrInLib(opApiHandler, GetOpApiLibName(), apiName);
+    if (!g_default_custom_lib_path.empty()) {
+        for (auto &it : g_default_custom_lib_path) {
+            auto default_cust_opapi_lib = real_path(it + "/" + GetCustOpApiLibName());
+            if (default_cust_opapi_lib.empty()) {
+                continue;
+            }
+            auto custOpApiHandler = GetOpApiLibHandler(default_cust_opapi_lib.c_str());
+            if (custOpApiHandler != nullptr) {
+                auto funcAddr =
+                    GetOpApiFuncAddrInLib(custOpApiHandler, GetCustOpApiLibName(), apiName);
+                if (funcAddr != nullptr) {
+                    return funcAddr;
+                }
+            }
+        }
+    }
+
+    static auto opApiHandler = GetOpApiLibHandler(GetOpApiLibName());
+    if (opApiHandler == nullptr) {
+        return nullptr;
+    }
+    return GetOpApiFuncAddrInLib(opApiHandler, GetOpApiLibName(), apiName);
 }
 
 inline c10::Scalar ConvertTensorToScalar(const at::Tensor &tensor) {

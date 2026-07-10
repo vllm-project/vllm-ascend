@@ -57,6 +57,7 @@ from vllm.distributed import (
     tensor_model_parallel_reduce_scatter,
 )
 from vllm.distributed.parallel_state import get_tp_group
+from vllm.logger import logger
 from vllm.model_executor.models.utils import extract_layer_index
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -218,6 +219,39 @@ class MLPRowParallelOp(CustomRowParallelOp):
 
         output_bias = self.bias if self.skip_bias_add else None
         return output, output_bias
+
+
+class DSV4OProjColumnParallelOp(CustomColumnParallelOp):
+    @property
+    def comm_group(self):
+        return get_otp_group()
+
+    def apply_impl(
+        self,
+        input_: torch.Tensor,
+    ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
+        bias = self.bias if not self.skip_bias_add else None
+        assert self.quant_method is not None
+        output_parallel = self.quant_method.apply(self.layer, input_, bias)
+        output_bias = self.bias if self.skip_bias_add else None
+        return output_parallel, output_bias
+
+
+class DSV4OProjRowParallelOp(CustomRowParallelOp):
+    @property
+    def comm_group(self):
+        return get_otp_group()
+
+    def apply_impl(
+        self,
+        input_: torch.Tensor,
+    ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
+        input_parallel = self.get_input_parallel(input_)
+        bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
+        assert self.quant_method is not None
+        output_parallel = self.quant_method.apply(self.layer, input_parallel, bias=bias_)
+        output_bias = self.bias if self.skip_bias_add else None
+        return output_parallel, output_bias
 
 
 class OProjRowParallelOp(CustomRowParallelOp):
@@ -505,6 +539,10 @@ class SequenceRowParallelOp(CustomRowParallelOp):
         except AssertionError:
             flash_comm_v1_enabled = False
             mmrs_fusion = False
+            logger.debug(
+                "matmul_and_reduce: _EXTRA_CTX access failed (profile_run?), "
+                "using defaults: flash_comm_v1=False, mmrs_fusion=False",
+            )
 
         x = input_parallel
 
@@ -627,16 +665,26 @@ class ShardedCPColumnParallelOp(CustomColumnParallelOp):
 
 def _get_column_parallel_op(
     prefix, layer
-) -> MLPColumnParallelOp | SequenceColumnParallelOp | ShardedCPColumnParallelOp | Flashcomm2OshardQKVParallelOp | None:
+) -> (
+    MLPColumnParallelOp
+    | DSV4OProjColumnParallelOp
+    | SequenceColumnParallelOp
+    | ShardedCPColumnParallelOp
+    | Flashcomm2OshardQKVParallelOp
+    | None
+):
     if enable_dsa_cp() and ("q_b_proj" in prefix or "kv_b_proj" in prefix):
         return ShardedCPColumnParallelOp(layer)
+    if "wo_a" in prefix and oproj_tp_enable():
+        return DSV4OProjColumnParallelOp(layer)
     if "gate_up_proj" in prefix and mlp_tp_enable() and not is_moe_layer(prefix):
         return MLPColumnParallelOp(layer)
     if flashcomm2_oshard_manager.flashcomm2_oshard_enable():
         if any(p in prefix for p in ("qkv_proj", "conv1d", "query_key_value")):
             return Flashcomm2OshardQKVParallelOp(layer)
     if enable_sp():
-        if "shared_expert" in prefix:
+        # "share_expert" added for Step3p5
+        if "shared_expert" in prefix or "share_expert" in prefix:
             return None
         sp_column_prefix = [
             "gate_up_proj",  # first MLP of most LLMs
@@ -644,9 +692,10 @@ def _get_column_parallel_op(
             "qkv_proj",  # qkv linear of most LLMs
             "conv1d",  # gated deltanet of Qwen3 Next
             "query_key_value",  # qkv linear of Bailing
+            "g_proj",  # attention gate projection of Step3p5
         ]
         for a_prefix in sp_column_prefix:
-            if a_prefix in prefix:
+            if a_prefix in prefix and "vision_model" not in prefix:
                 return SequenceColumnParallelOp(layer)
 
     return None
@@ -657,12 +706,15 @@ def _get_row_parallel_op(
 ) -> (
     MLPRowParallelOp
     | OProjRowParallelOp
+    | DSV4OProjRowParallelOp
     | Flashcomm2OProjRowParallelOp
     | MatmulAllreduceRowParallelOp
     | SequenceRowParallelOp
     | ShardedCPRowParallelOp
     | None
 ):
+    if "wo_b" in prefix and oproj_tp_enable():
+        return DSV4OProjRowParallelOp(layer)
     if enable_dsa_cp_with_layer_shard() and "o_proj" in prefix:
         return ShardedCPRowParallelOp(layer)
     if "down_proj" in prefix and mlp_tp_enable() and not is_moe_layer(prefix):
@@ -673,9 +725,11 @@ def _get_row_parallel_op(
         return MatmulAllreduceRowParallelOp(layer)
     if flashcomm2_enable():
         if "o_proj" in prefix or "out_proj" in prefix:
-            return Flashcomm2OProjRowParallelOp(layer)
+            if "vision_model" not in prefix:
+                return Flashcomm2OProjRowParallelOp(layer)
     if enable_sp():
-        if "shared_expert" in prefix:
+        # "share_expert" added for Step3p5
+        if "shared_expert" in prefix or "share_expert" in prefix:
             return None
         sp_row_prefixes = [
             "o_proj",  # attn output linear of most LLMs
@@ -685,7 +739,7 @@ def _get_row_parallel_op(
             "wo_b",  # attn output linear of v4
         ]
         for a_prefix in sp_row_prefixes:
-            if a_prefix in prefix:
+            if a_prefix in prefix and "vision_model" not in prefix:
                 return SequenceRowParallelOp(layer)
 
     return None
@@ -696,13 +750,16 @@ def get_parallel_op(disable_tp, prefix, layer, direct):
         disable_tp
         or ("shared_experts" in prefix and shared_expert_dp_enabled())
         or ("shared_expert" in prefix and shared_expert_dp_enabled())
+        or ("share_expert" in prefix and shared_expert_dp_enabled())  # "share_expert" added for Step3p5
     ):
         return None, 0, 1
     custom_op: (
         MLPColumnParallelOp
+        | DSV4OProjColumnParallelOp
         | SequenceColumnParallelOp
         | MLPRowParallelOp
         | OProjRowParallelOp
+        | DSV4OProjRowParallelOp
         | Flashcomm2OProjRowParallelOp
         | Flashcomm2OshardQKVParallelOp
         | MatmulAllreduceRowParallelOp
@@ -718,6 +775,14 @@ def get_parallel_op(disable_tp, prefix, layer, direct):
         custom_op = _get_column_parallel_op(prefix, layer)
 
     if custom_op is not None:
+        logger.debug(
+            "get_parallel_op: prefix=%s, direct=%s -> %s (tp_rank=%d, tp_size=%d)",
+            prefix,
+            direct,
+            type(custom_op).__name__,
+            custom_op.tp_rank,
+            custom_op.tp_size,
+        )
         return custom_op, custom_op.tp_rank, custom_op.tp_size
 
     return None, get_tp_group().rank_in_group, get_tp_group().world_size

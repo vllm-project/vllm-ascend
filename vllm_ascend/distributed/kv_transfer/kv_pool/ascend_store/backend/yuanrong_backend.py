@@ -11,6 +11,7 @@ from vllm.logger import logger
 from vllm.utils.network_utils import split_host_port
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.backend import Backend
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 
 def _iter_slices(total: int, batch_size: int):
@@ -39,7 +40,7 @@ class YuanrongConfig:
 
 
 class YuanrongHelper:
-    _DS_KEY_MAX_LEN = 255
+    _DS_KEY_MAX_LEN = 1024
     _DS_KEY_ALLOWED_PATTERN = re.compile(r"^[a-zA-Z0-9\-_!@#%\^\*\(\)\+\=\:;]+$")
     _DS_KEY_INVALID_CHAR_PATTERN = re.compile(r"[^a-zA-Z0-9\-_!@#%\^\*\(\)\+\=\:;]")
     _DS_KEY_HASH_SUFFIX_LEN = 16
@@ -114,6 +115,9 @@ class YuanrongBackend(Backend):
             enable_remote_h2d=self.config.enable_remote_h2d,
         )
         self._hetero_client.init()
+        self._is_a2 = get_ascend_device_type() in {AscendDeviceType.A2}
+        self._registered_buffers: tuple[list[int], list[int]] | None = None
+        self._buffers_registered = False
 
     def _ensure_device_ready(self):
         if self._helper._device_id is None:
@@ -126,9 +130,19 @@ class YuanrongBackend(Backend):
         self._helper._device_id = int(torch.npu.current_device())
 
     def register_buffer(self, ptrs: list[int], lengths: list[int]):
-        # Yuanrong APIs consume device pointers directly when building blob
-        # lists. No explicit pre-registration is required.
-        self._ensure_device_ready()
+        self._registered_buffers = (list(ptrs), list(lengths))
+        self._register_buffers_if_needed()
+
+    def _register_buffers_if_needed(self):
+        if self._is_a2:
+            return
+        if not self.config.enable_remote_h2d:
+            return
+        if self._registered_buffers is None or self._buffers_registered:
+            return
+        ptrs, lengths = self._registered_buffers
+        self._hetero_client.pre_register_device_memory(ptrs, lengths)  # type: ignore[union-attr]
+        self._buffers_registered = True
 
     def exists(self, keys: list[str]) -> list[int]:
         if len(keys) == 0:
@@ -152,12 +166,14 @@ class YuanrongBackend(Backend):
             )
             return [0] * len(keys)
 
-    def get(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
+    def get(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]) -> list[int] | None:
         if len(keys) == 0:
-            return
+            return []
+        failed_keys_for_log = keys
         try:
             self._ensure_device_ready()
             keys = self._helper.normalize_keys(keys)
+            failed_keys_for_log = keys
             blob_lists = self._helper.make_blob_lists(addrs, sizes)
             failed_keys: list[str] = []
             if len(keys) <= self._DS_MAX_BATCH_KEYS:
@@ -166,6 +182,7 @@ class YuanrongBackend(Backend):
                 )
             else:
                 for start, end in _iter_slices(len(keys), self._DS_MAX_BATCH_KEYS):
+                    failed_keys_for_log = keys[start:end]
                     failed_keys.extend(
                         self._hetero_client.mget_h2d(  # type: ignore[union-attr]
                             keys[start:end], blob_lists[start:end], 0
@@ -173,24 +190,35 @@ class YuanrongBackend(Backend):
                     )
             if failed_keys:
                 logger.error(
-                    "Failed to get keys. failed_count=%d, sample_keys=%s. Check key existence and memory state.",
+                    "Failed to get %d keys out of %d. Check key existence and memory state.",
                     len(failed_keys),
-                    failed_keys[:10],
+                    len(keys),
                 )
+                logger.debug("Failed to get key details. failed_keys=%s", failed_keys)
+            failed_set = set(failed_keys)
+            return [1 if k in failed_set else 0 for k in keys]
         except Exception as exc:
             logger.error(
-                "Failed to get keys. keys_count=%d, type=%s, error=%s. Check network and yuanrong service.",
+                "Failed to get %d keys out of %d. Check network and yuanrong service.",
+                len(failed_keys_for_log),
                 len(keys),
+            )
+            logger.debug(
+                "Failed to get key details. keys=%s, type=%s, error=%s",
+                failed_keys_for_log,
                 type(exc).__name__,
                 exc,
             )
+            return None
 
     def put(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
         if len(keys) == 0:
             return
+        failed_keys_for_log = keys
         try:
             self._ensure_device_ready()
             keys = self._helper.normalize_keys(keys)
+            failed_keys_for_log = keys
             blob_lists = self._helper.make_blob_lists(addrs, sizes)
             if len(keys) <= self._DS_MAX_BATCH_KEYS:
                 self._hetero_client.mset_d2h(  # type: ignore[union-attr]
@@ -198,13 +226,19 @@ class YuanrongBackend(Backend):
                 )
             else:
                 for start, end in _iter_slices(len(keys), self._DS_MAX_BATCH_KEYS):
+                    failed_keys_for_log = keys[start:end]
                     self._hetero_client.mset_d2h(  # type: ignore[union-attr]
                         keys[start:end], blob_lists[start:end], self._ds_set_param
                     )
         except Exception as exc:
             logger.error(
-                "Failed to put keys. keys_count=%d, type=%s, error=%s. Check network and yuanrong service.",
+                "Failed to put %d keys out of %d. Check network and yuanrong service.",
+                len(failed_keys_for_log),
                 len(keys),
+            )
+            logger.debug(
+                "Failed to put key details. keys=%s, type=%s, error=%s",
+                failed_keys_for_log,
                 type(exc).__name__,
                 exc,
             )

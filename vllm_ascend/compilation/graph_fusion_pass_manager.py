@@ -66,7 +66,7 @@ class GraphFusionPassManager:
 
             self.passes.append(MatmulAllReduceAddRMSNormPass(config))
 
-        if self.ascend_compilation_config.get("fuse_muls_add", True):
+        if self.ascend_compilation_config.get("fuse_muls_add", True) and not is_310p():
             from .passes.muls_add_pass import MulsAddFusionPass
 
             self.passes.append(MulsAddFusionPass(config))

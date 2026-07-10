@@ -25,10 +25,19 @@ class TestNPUPlatform(TestBase):
         mock_vllm_config.model_config = MagicMock()
         mock_vllm_config.model_config.is_hybrid = False
         mock_vllm_config.model_config.is_encoder_decoder = False
+        mock_vllm_config.device_config = MagicMock()
+        mock_vllm_config.device_config.device_type = "npu"
         mock_vllm_config.parallel_config = MagicMock()
+        mock_vllm_config.parallel_config.data_parallel_size = 1
+        mock_vllm_config.parallel_config.prefill_context_parallel_size = 1
+        mock_vllm_config.parallel_config.tensor_parallel_size = 1
+        mock_vllm_config.parallel_config.pipeline_parallel_size = 1
+        mock_vllm_config.parallel_config.context_parallel_size = 1
+        mock_vllm_config.parallel_config.decode_context_parallel_size = 1
         mock_vllm_config.cache_config = MagicMock()
         mock_vllm_config.scheduler_config = MagicMock()
         mock_vllm_config.scheduler_config.max_num_seqs = None
+        mock_vllm_config.scheduler_config.policy = "fcfs"
         mock_vllm_config.speculative_config = None
         mock_vllm_config.additional_config = {}
         mock_vllm_config.compilation_config.pass_config.enable_sp = False
@@ -49,6 +58,7 @@ class TestNPUPlatform(TestBase):
         mock_ascend_config.enable_flashcomm1 = False
         mock_ascend_config.SLO_limits_for_dynamic_batch = -1
         mock_ascend_config.enable_shared_expert_dp = False
+        mock_ascend_config.short_request_first_config.enabled = False
         mock_ascend_config.update_compile_ranges_split_points = MagicMock()
         return mock_ascend_config
 
@@ -514,6 +524,8 @@ class TestNPUPlatform(TestBase):
         ):
             self.platform.check_and_update_config(vllm_config)
 
+        mock_init_recompute.assert_not_called()
+
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
     @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
     @patch("vllm_ascend.ascend_config.init_ascend_config")
@@ -544,6 +556,88 @@ class TestNPUPlatform(TestBase):
             patch.object(platform, "check_kv_extra_config"),
         ):
             self.platform.check_and_update_config(vllm_config)
+
+        mock_init_recompute.assert_not_called()
+
+    @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
+    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
+    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
+    def test_check_and_update_config_recompute_scheduler_warns_and_disables_kv_producer(
+        self, mock_init_recompute, mock_init_ascend, mock_soc_version, mock_auto_detect
+    ):
+        mock_ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
+        mock_ascend_config.recompute_scheduler_enable = True
+        mock_ascend_config.profiling_chunk_config.enabled = False
+        mock_init_ascend.return_value = mock_ascend_config
+
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.kv_transfer_config = MagicMock(kv_role="kv_producer", engine_id="engine0")
+        vllm_config.parallel_config.decode_context_parallel_size = 1
+        vllm_config.parallel_config.prefill_context_parallel_size = 1
+        vllm_config.parallel_config.tensor_parallel_size = 1
+        scheduler_config = MagicMock()
+        vllm_config.scheduler_config = scheduler_config
+        mock_init_recompute.return_value = MagicMock()
+
+        from vllm_ascend import platform
+
+        importlib.reload(platform)
+        self.platform = platform.NPUPlatform()
+
+        with (
+            patch.object(platform.NPUPlatform, "_fix_incompatible_config"),
+            patch.object(platform, "check_kv_extra_config"),
+            patch.object(platform.logger, "warning") as mock_warning,
+        ):
+            self.platform.check_and_update_config(vllm_config)
+
+        mock_init_recompute.assert_not_called()
+        self.assertFalse(mock_ascend_config.recompute_scheduler_enable)
+        self.assertIs(vllm_config.scheduler_config, scheduler_config)
+        mock_warning.assert_called_once()
+        self.assertIn(
+            "recompute_scheduler_enable is ignored on PD-disaggregated P nodes",
+            mock_warning.call_args.args[0],
+        )
+
+    @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
+    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
+    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
+    def test_check_and_update_config_recompute_scheduler_accepts_kv_consumer(
+        self, mock_init_recompute, mock_init_ascend, mock_soc_version, mock_auto_detect
+    ):
+        mock_ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
+        mock_ascend_config.recompute_scheduler_enable = True
+        mock_ascend_config.profiling_chunk_config.enabled = False
+        mock_init_ascend.return_value = mock_ascend_config
+
+        recompute_scheduler_config = MagicMock()
+        mock_init_recompute.return_value = recompute_scheduler_config
+
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.kv_transfer_config = MagicMock(kv_role="kv_consumer", engine_id="engine0")
+        vllm_config.parallel_config.decode_context_parallel_size = 1
+        vllm_config.parallel_config.prefill_context_parallel_size = 1
+        vllm_config.parallel_config.tensor_parallel_size = 1
+        vllm_config.parallel_config.cp_kv_cache_interleave_size = 1
+        vllm_config.cache_config.block_size = 1
+        vllm_config.scheduler_config = MagicMock()
+
+        from vllm_ascend import platform
+
+        importlib.reload(platform)
+        self.platform = platform.NPUPlatform()
+
+        with (
+            patch.object(platform.NPUPlatform, "_fix_incompatible_config"),
+            patch.object(platform, "check_kv_extra_config"),
+        ):
+            self.platform.check_and_update_config(vllm_config)
+
+        mock_init_recompute.assert_called_once_with(vllm_config)
+        self.assertIs(vllm_config.scheduler_config, recompute_scheduler_config)
 
     def test_validate_kv_load_failure_policy_rejects_hybrid_recompute(self):
         vllm_config = TestNPUPlatform.mock_vllm_config()
@@ -667,6 +761,35 @@ class TestNPUPlatform(TestBase):
 
         with pytest.raises(ValueError, match="layer_sharding can only be enabled in PD-disaggregated's P node"):
             self.platform._validate_layer_sharding_config(vllm_config)
+
+    def test_validate_parallel_config_rejects_pcp_plus_dp(self):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.parallel_config.data_parallel_size = 2
+        vllm_config.parallel_config.prefill_context_parallel_size = 2
+
+        with pytest.raises(ValueError, match="PCP \(Prefill Context Parallelism\) and DP \(Data Parallelism\)"):
+            self.platform._validate_parallel_config(vllm_config)
+
+    def test_validate_parallel_config_accepts_dp_only(self):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.parallel_config.data_parallel_size = 2
+        vllm_config.parallel_config.prefill_context_parallel_size = 1
+
+        self.platform._validate_parallel_config(vllm_config)
+
+    def test_validate_parallel_config_accepts_pcp_only(self):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.parallel_config.data_parallel_size = 1
+        vllm_config.parallel_config.prefill_context_parallel_size = 2
+
+        self.platform._validate_parallel_config(vllm_config)
+
+    def test_validate_parallel_config_accepts_neither(self):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.parallel_config.data_parallel_size = 1
+        vllm_config.parallel_config.prefill_context_parallel_size = 1
+
+        self.platform._validate_parallel_config(vllm_config)
 
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
     @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)

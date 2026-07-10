@@ -58,12 +58,14 @@ class AscendRequestState(RequestState):
         prompt_len,
         all_token_ids,
         num_computed_tokens,
+        max_tokens=None,
     ):
         super().add_request(
             req_id,
             prompt_len,
             all_token_ids,
             num_computed_tokens,
+            max_tokens=max_tokens,
         )
         req_idx = self.req_id_to_index[req_id]
         self.num_computed_tokens_cpu[req_idx] = num_computed_tokens

@@ -1,4 +1,5 @@
 import contextlib
+import importlib.util
 import os
 import sys
 import threading
@@ -13,6 +14,17 @@ import zmq
 fake_engine = types.ModuleType("mooncake.engine")
 fake_engine.TransferEngine = MagicMock()  # type: ignore[attr-defined]
 sys.modules["mooncake.engine"] = fake_engine
+fake_torch_npu = types.ModuleType("torch_npu")
+fake_torch_npu.__spec__ = importlib.util.spec_from_loader("torch_npu", loader=None)
+fake_torch_npu.npu = MagicMock()  # type: ignore[attr-defined]
+fake_torch_npu.npu.current_device = MagicMock(return_value=0)  # type: ignore[attr-defined]
+fake_torch_npu.npu.Stream = MagicMock  # type: ignore[attr-defined]
+fake_torch_npu.npu_fusion_attention = MagicMock()  # type: ignore[attr-defined]
+sys.modules.setdefault("torch_npu", fake_torch_npu)
+torch.npu = fake_torch_npu.npu  # type: ignore[attr-defined]
+fake_uvloop = types.ModuleType("uvloop")
+fake_uvloop.__spec__ = importlib.util.spec_from_loader("uvloop", loader=None)
+sys.modules.setdefault("uvloop", fake_uvloop)
 
 # Clean up stale mock modules installed by other test files
 # (e.g., ascend_store/_mock_deps.py) that replace real kv_transfer
@@ -603,12 +615,16 @@ class MockRequest:
     def __init__(self, request_id, prompt_token_ids=None, kv_transfer_params=None, status=None):
         self.request_id = request_id
         self.prompt_token_ids = prompt_token_ids or [1, 2, 3, 4]
+        self.prompt_embeds = None
         self.kv_transfer_params = kv_transfer_params or {}
         self.status = status or "running"
         self.output_token_ids = [101, 102]
         self.num_computed_tokens = 0
+        self.num_prompt_tokens = len(self.prompt_token_ids)
+        self.max_tokens = 16
 
         self.all_token_ids = list(self.prompt_token_ids)
+        self._all_token_ids = list(self.prompt_token_ids)
 
 
 class TestMooncakeLayerwiseConnectorMetadata(unittest.TestCase):
@@ -655,6 +671,29 @@ class TestMooncakeLayerwiseConnectorSchedulerMatchedTokens(unittest.TestCase):
         self.assertEqual(tokens, 4)
         self.assertTrue(async_flag)
 
+    def test_get_num_new_matched_tokens_hybrid_excludes_last_token(self):
+        self.scheduler.need_truncate = True
+        request = MockRequest("req1", prompt_token_ids=list(range(17)), kv_transfer_params={"do_remote_prefill": True})
+
+        tokens, async_flag = self.scheduler.get_num_new_matched_tokens(request, 0)
+
+        self.assertEqual(tokens, 16)
+        self.assertTrue(async_flag)
+
+    def test_get_num_new_matched_tokens_hybrid_truncates_prefill_request(self):
+        self.scheduler.need_truncate = True
+        request = MockRequest("req1", prompt_token_ids=list(range(4)), kv_transfer_params={"do_remote_decode": True})
+
+        tokens, async_flag = self.scheduler.get_num_new_matched_tokens(request, 0)
+
+        self.assertEqual(tokens, 0)
+        self.assertFalse(async_flag)
+        self.assertEqual(request.prompt_token_ids, [0, 1, 2])
+        self.assertEqual(request._all_token_ids, [0, 1, 2])
+        self.assertEqual(request.num_prompt_tokens, 3)
+        self.assertEqual(request.max_tokens, 1)
+        self.assertTrue(request.kv_transfer_params["_p_side_truncated"])
+
     def test_build_connector_meta(self):
         self.scheduler.vllm_config.kv_transfer_config.is_kv_consumer = True
         request = MockRequest("req1")
@@ -674,6 +713,21 @@ class TestMooncakeLayerwiseConnectorSchedulerMatchedTokens(unittest.TestCase):
         self.assertEqual(meta.requests["req1"].local_block_ids, [[4, 5, 6]])
         self.assertEqual(meta.requests["req1"].remote_block_ids, [[1, 2, 3]])
         self.assertEqual(len(self.scheduler._reqs_need_recv), 0)
+
+    def test_update_state_after_alloc_hybrid_trims_remote_block_with_only_last_token(self):
+        self.scheduler.need_truncate = True
+        request = MockRequest(
+            "req1",
+            prompt_token_ids=list(range(17)),
+            kv_transfer_params={"do_remote_prefill": True, "metaserver": "http://meta"},
+        )
+        blocks = _MockBlocks(unhashed=[], block_ids_tuple=([4, 5],))
+        self.scheduler.executor.submit = MagicMock()
+
+        self.scheduler.update_state_after_alloc(request, blocks, num_external_tokens=16)
+
+        _, kwargs = self.scheduler.executor.submit.call_args
+        self.assertEqual(kwargs["message"]["remote_block_ids"], ([4],))
 
 
 class _MockBlocks:

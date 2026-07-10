@@ -40,6 +40,10 @@ on:
     paths:
       # If we are changing the doctest we should do a PR test
       - '.github/workflows/labeled_doctest.yaml'
+      # Version variables are sourced from mkdocs.yml 'extra:' and
+      # re-exported via the docs/source/conf.py shim. Trigger the
+      # workflow whenever either file changes.
+      - 'mkdocs.yml'
       - 'docs/source/conf.py'
       - 'tests/e2e/doctests/**'
       - 'tests/e2e/common.sh'
@@ -61,7 +65,7 @@ concurrency:
 jobs:
   setup-matrix:
     name: Setup test matrix
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu-4-hk
     outputs:
       matrix: ${{ steps.set_matrix_pr.outputs.matrix || steps.set_matrix_doc.outputs.matrix }}
     steps:
@@ -69,7 +73,7 @@ jobs:
       # from this checkout instead of resolving a Read the Docs version.
       - name: Checkout current source
         if: github.event_name == 'pull_request'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: matrix-src
 
@@ -239,7 +243,7 @@ jobs:
       # setup-matrix decides whether this is a PR ref or an RTD identifier, so
       # the test job can use the same checkout step for both trigger types.
       - name: Checkout doctest source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: ${{ matrix.doc_repository }}
           ref: ${{ matrix.doc_ref }}

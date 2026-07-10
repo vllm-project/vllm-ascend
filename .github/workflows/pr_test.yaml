@@ -50,6 +50,8 @@ jobs:
       has_tests: ${{ steps.scope.outputs.has_tests || steps.noop.outputs.has_tests }}
       test_groups: ${{ steps.scope.outputs.test_groups || steps.noop.outputs.test_groups }}
       matched_modules: ${{ steps.scope.outputs.matched_modules || steps.noop.outputs.matched_modules }}
+      main_commit: ${{ steps.vllm.outputs.main_commit }}
+      release_tag: ${{ steps.vllm.outputs.release_tag }}
     steps:
       - name: Validate PR title prefix
         run: |
@@ -79,9 +81,27 @@ jobs:
           echo "✓ PR title prefix is valid"
 
       - name: Checkout vllm-project/vllm-ascend repo
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
+
+      - name: Read verified vLLM refs
+        id: vllm
+        run: |
+          main_commit="$(tr -d '[:space:]' < .github/vllm-main-verified.commit)"
+          release_tag="$(tr -d '[:space:]' < .github/vllm-release-tag.commit)"
+          [[ "${main_commit}" =~ ^[0-9a-f]{7,40}$ ]] || {
+            echo "::error file=.github/vllm-main-verified.commit::invalid vLLM main commit: ${main_commit}"
+            exit 1
+          }
+          [[ "${release_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-].*)?$ ]] || {
+            echo "::error file=.github/vllm-release-tag.commit::invalid vLLM release tag: ${release_tag}"
+            exit 1
+          }
+          {
+            echo "main_commit=${main_commit}"
+            echo "release_tag=${release_tag}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: cp problem matchers
         run: |
@@ -94,11 +114,11 @@ jobs:
       - run: echo "::add-matcher::$RUNNER_TEMP/mypy.json"
 
       - name: Checkout vllm-project/vllm repo
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           repository: vllm-project/vllm
           path: ./vllm-empty
-          ref: 9090368b650896bf5fc990c921df7eb4c20355a5
+          ref: ${{ steps.vllm.outputs.main_commit }}
 
       - uses: dorny/paths-filter@v4
         id: filter
@@ -115,7 +135,12 @@ jobs:
               - 'requirements.txt'
               - 'pyproject.toml'
               - 'cmake/**'
-              - '.github/**'
+              - '.github/workflows/pr_test.yaml'
+              - '.github/workflows/_selected_tests.yaml'
+              - '.github/workflows/scripts/select_tests.py'
+              - '.github/workflows/scripts/run_selected_tests.sh'
+              - '.github/workflows/scripts/test_config.yaml'
+              - '.github/workflows/scripts/runner_label.json'
               - 'tests/**'
               - 'tools/**'
               - 'CMakeLists.txt'
@@ -136,6 +161,7 @@ jobs:
 
       - name: Run pre-commit
         env:
+          PRE_COMMIT_HOME: /tmp/pre-commit-cache
           PRE_COMMIT_COLOR: always
           FORCE_COLOR: "1"
           TERM: xterm-256color
@@ -185,9 +211,46 @@ jobs:
     if: ${{ needs.lint-and-select-tests.outputs.has_tests == 'true' && contains(github.event.pull_request.labels.*.name, 'ready') }}
     strategy:
       matrix:
-        vllm_version: [9090368b650896bf5fc990c921df7eb4c20355a5, v0.21.0]
+        vllm_version:
+          - ${{ needs.lint-and-select-tests.outputs.main_commit }}
+          - ${{ needs.lint-and-select-tests.outputs.release_tag }}
     uses: ./.github/workflows/_selected_tests.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
       ref: ${{ github.event.pull_request.head.sha }}
+      base_ref: ${{ github.base_ref }}
       test_groups: ${{ needs.lint-and-select-tests.outputs.test_groups }}
+
+  # Summary gate job — use this single, stable name as the required status check
+  # in GitHub branch protection rules instead of tracking individual matrix job names.
+  ci-gate:
+    needs: [lint-and-select-tests, run-selected-tests]
+    if: ${{ always() && contains(github.event.pull_request.labels.*.name, 'ready') }}
+    runs-on: linux-amd64-cpu-2-hk
+    steps:
+      - name: Check all required jobs
+        run: |
+          set -euo pipefail
+
+          LINT_RESULT="${{ needs.lint-and-select-tests.result }}"
+          HAS_TESTS="${{ needs.lint-and-select-tests.outputs.has_tests }}"
+
+          echo "=== CI Gate Summary ==="
+          echo "lint-and-select-tests: ${LINT_RESULT}"
+          echo "has_tests: ${HAS_TESTS}"
+
+          if [ "${LINT_RESULT}" != "success" ] && [ "${LINT_RESULT}" != "skipped" ]; then
+            echo "::error::lint-and-select-tests did not succeed (result: ${LINT_RESULT})"
+            exit 1
+          fi
+
+          if [ "${HAS_TESTS}" = "true" ]; then
+            TESTS_RESULT="${{ needs.run-selected-tests.result }}"
+            echo "run-selected-tests: ${TESTS_RESULT}"
+            if [ "${TESTS_RESULT}" != "success" ]; then
+              echo "::error::run-selected-tests did not succeed (result: ${TESTS_RESULT})"
+              exit 1
+            fi
+          fi
+
+          echo "=== CI Gate: PASSED ==="

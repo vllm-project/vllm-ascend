@@ -1,5 +1,6 @@
 import argparse
 import json
+import multiprocessing
 import os
 import subprocess
 import sys
@@ -10,6 +11,8 @@ from pathlib import Path
 
 import tabulate
 import yaml
+
+multiprocessing.set_start_method("spawn", force=True)
 
 _CONFIG_UPSTREAM = Path(__file__).parent / "upstream_config.yaml"
 

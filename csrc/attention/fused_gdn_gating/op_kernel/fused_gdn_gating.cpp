@@ -27,11 +27,27 @@ fused_gdn_gating(GM_ADDR a_log, GM_ADDR a, GM_ADDR b, GM_ADDR dt_bias,
     TPipe pipe;
 
     if (TILING_KEY_IS(1)) {
-        KernelFusedGdnGating<bfloat16_t> op;
+        KernelFusedGdnGating<bfloat16_t, float> op;
         op.Init(a_log, a, b, dt_bias, g, beta_output, &tilingData, &pipe);
         op.Process();
     } else if (TILING_KEY_IS(2)) {
-        KernelFusedGdnGating<half> op;
+        KernelFusedGdnGating<half, float> op;
+        op.Init(a_log, a, b, dt_bias, g, beta_output, &tilingData, &pipe);
+        op.Process();
+    } else if (TILING_KEY_IS(3)) {
+        KernelFusedGdnGating<bfloat16_t, bfloat16_t> op;
+        op.Init(a_log, a, b, dt_bias, g, beta_output, &tilingData, &pipe);
+        op.Process();
+    } else if (TILING_KEY_IS(4)) {
+        KernelFusedGdnGating<half, bfloat16_t> op;
+        op.Init(a_log, a, b, dt_bias, g, beta_output, &tilingData, &pipe);
+        op.Process();
+    } else if (TILING_KEY_IS(5)) {
+        KernelFusedGdnGating<bfloat16_t, half> op;
+        op.Init(a_log, a, b, dt_bias, g, beta_output, &tilingData, &pipe);
+        op.Process();
+    } else if (TILING_KEY_IS(6)) {
+        KernelFusedGdnGating<half, half> op;
         op.Init(a_log, a, b, dt_bias, g, beta_output, &tilingData, &pipe);
         op.Process();
     }

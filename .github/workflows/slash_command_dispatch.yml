@@ -1,4 +1,4 @@
-#
+﻿﻿#
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -23,7 +23,8 @@ on:
 
 jobs:
   slashCommandDispatch:
-    runs-on: ubuntu-latest
+    if: (github.event.issue.pull_request != null || startsWith(github.event.comment.body, '/wait-feedback')) && github.event.comment.user.type == 'User'
+    runs-on: linux-amd64-cpu-2-hk
     steps:
       - name: Slash Command Dispatch
         uses: peter-evans/slash-command-dispatch@v5
@@ -34,6 +35,10 @@ jobs:
             e2e
             rerun
             nightly
+            cherry-pick
+            revert
+            weekly
+            wait-feedback
           permission: none
           issue-type: both
           dispatch-type: repository
@@ -52,6 +57,26 @@ jobs:
               {
                 "command": "nightly",
                 "permission": "none",
-                "issue_type": "both"
+                "issue_type": "pull-request"
+              },
+              {
+                "command": "cherry-pick",
+                "permission": "none",
+                "issue_type": "pull-request"
+              },
+              {
+                "command": "revert",
+                "permission": "none",
+                "issue_type": "pull-request"
+              },
+              {
+                "command": "weekly",
+                "permission": "none",
+                "issue_type": "pull-request"
+              },
+              {
+                "command": "wait-feedback",
+                "permission": "none",
+                "issue_type": "issue"
               }
             ]

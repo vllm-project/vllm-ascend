@@ -17,7 +17,13 @@
 
 import torch
 import torch_npu
-from vllm.model_executor.layers.activation import QuickGELU, SiluAndMul, SiluAndMulWithClamp, SwigluOAIAndMul
+from vllm.model_executor.layers.activation import (
+    QuickGELU,
+    SiluAndMul,
+    SiluAndMulWithClamp,
+    SwigluOAIAndMul,
+    SwigluStepAndMul,
+)
 
 from vllm_ascend.utils import get_weight_prefetch_method
 
@@ -59,3 +65,30 @@ class AscendSwigluOAIAndMul:
 
         layer = MinimalSwigluOAIAndMul()
         return SwigluOAIAndMul.forward_native(layer, x)
+
+
+class AscendSwigluStepAndMul:
+    def swiglustep_forward(x: torch.Tensor, limit: float = 7.0) -> torch.Tensor:
+        if limit is None:
+            raise ValueError("SwigluStepAndMul requires limit to be set.")
+
+        # Triton fused path: 1D-grid row-loop kernel that fuses
+        # silu + clamp + mul into a single launch (see
+        # vllm_ascend/ops/triton/activation/swiglustep.py). Numerically
+        # equivalent to forward_native below.
+        from vllm.triton_utils import HAS_TRITON
+
+        if HAS_TRITON:
+            from vllm_ascend.ops.triton.activation.swiglustep import (
+                swiglustep_forward_triton,
+            )
+
+            return swiglustep_forward_triton(x, limit)
+
+        # Fallback when triton is unavailable: vllm's native silu+clamp+mul.
+        class MinimalSwigluStepAndMul:
+            def __init__(self):
+                self.limit = limit
+
+        layer = MinimalSwigluStepAndMul()
+        return SwigluStepAndMul.forward_native(layer, x)

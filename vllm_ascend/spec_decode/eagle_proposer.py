@@ -8,12 +8,5 @@ from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBasePropos
 
 
 class AscendEagleProposer(EagleProposer, AscendSpecDecodeBaseProposer):
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        device: torch.device,
-        runner=None,
-    ):
-        AscendSpecDecodeBaseProposer.__init__(
-            self, vllm_config, device, pass_hidden_states_to_model=True, runner=runner
-        )
+    def __init__(self, vllm_config: VllmConfig, device: torch.device, runner=None):
+        AscendSpecDecodeBaseProposer.__init__(self, vllm_config, device, True, runner=runner)

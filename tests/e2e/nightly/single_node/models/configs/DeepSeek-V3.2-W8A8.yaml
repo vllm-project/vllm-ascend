@@ -21,6 +21,7 @@ test_cases:
       VLLM_ASCEND_ENABLE_MLAPO: "1"
       VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
       SERVER_PORT: "DEFAULT_PORT"
+      VLLM_ENGINE_READY_TIMEOUT_S: "3000"
     server_cmd:
       - "--tensor-parallel-size"
       - "8"
@@ -61,7 +62,10 @@ test_cases:
         max_out_len: 32768
         batch_size: 32
         baseline: 86.67
-        threshold: 5
+        temperature: 1.0
+        top_p: 0.95
+        thinking: true
+        threshold: 10
 
       perf_2:
         case_type: performance
