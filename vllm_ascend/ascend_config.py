@@ -276,7 +276,6 @@ class AscendConfig:
 
         self.enable_sparse_c8 = additional_config.get("enable_sparse_c8", False) and use_sparse
         self.c8_enable_reshape_optim = self.enable_sparse_c8 and additional_config.get("c8_enable_reshape_optim", False)
-        self._check_sfa_dcp_replicated_indexer(vllm_config)
         quant_config = getattr(vllm_config, "quant_config", None)
         self._sparse_c8_layer_ids, self._sparse_c8_layer_names = self._parse_sparse_c8_layers_from_quant_config(
             quant_config
@@ -364,34 +363,6 @@ class AscendConfig:
             "Mooncake transfer would reinterpret bf16 bytes as int8. Please disable C8 KV cache quantization "
             "or use MooncakeLayerwiseConnector, which quantizes KV cache before transfer."
         )
-
-    def _check_sfa_dcp_replicated_indexer(self, vllm_config: "VllmConfig") -> None:
-        from vllm_ascend.utils import enable_sfa_dcp_replicated_indexer
-
-        if not enable_sfa_dcp_replicated_indexer(vllm_config):
-            return
-        parallel_config = vllm_config.parallel_config
-        pcp_size = parallel_config.prefill_context_parallel_size
-        dcp_size = parallel_config.decode_context_parallel_size
-        tp_size = parallel_config.tensor_parallel_size
-        if pcp_size != 1 or dcp_size != tp_size:
-            raise ValueError(
-                "SFA DCP replicated indexer requires pcp_size == 1 and "
-                "dcp_size == tensor_parallel_size, but got "
-                f"pcp_size={pcp_size}, dcp_size={dcp_size}, "
-                f"tensor_parallel_size={tp_size}."
-            )
-
-        if not self.enable_sparse_c8:
-            return
-
-        from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
-
-        if get_ascend_device_type() == AscendDeviceType.A5:
-            raise NotImplementedError(
-                "SFA DCP with sparse C8 LightningIndexer cache is not supported on A5 yet. "
-                "A5 uses the fused CKV quant sparse attention path, which needs a separate DCP LSE merge."
-            )
 
     def _check_mix_placement(self):
         if self.mix_placement:

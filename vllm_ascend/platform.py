@@ -716,14 +716,19 @@ class NPUPlatform(Platform):
         cp_size = parallel_config.decode_context_parallel_size * parallel_config.prefill_context_parallel_size
         use_sparse = model_uses_sfa_sparse(model_config)
         sfa_dcp_replicated_indexer = enable_sfa_dcp_replicated_indexer(vllm_config)
-        if (
-            sfa_dcp_replicated_indexer
-            and parallel_config.decode_context_parallel_size != parallel_config.tensor_parallel_size
-        ):
-            raise AssertionError(
-                f"DCP for SFA is only supported when dcp_size({parallel_config.decode_context_parallel_size}) "
-                f"== tp_size({parallel_config.tensor_parallel_size})."
-            )
+        if sfa_dcp_replicated_indexer:
+            if parallel_config.decode_context_parallel_size != parallel_config.tensor_parallel_size:
+                raise AssertionError(
+                    f"DCP for SFA is only supported when dcp_size({parallel_config.decode_context_parallel_size}) "
+                    f"== tp_size({parallel_config.tensor_parallel_size})."
+                )
+            enable_sparse_c8 = vllm_config.additional_config.get("enable_sparse_c8", False) and use_sparse
+            if enable_sparse_c8 and get_ascend_device_type() == AscendDeviceType.A5:
+                raise NotImplementedError(
+                    "SFA DCP with sparse C8 LightningIndexer cache is not supported on A5 yet. "
+                    "A5 uses the fused CKV quant sparse attention path, which needs a separate DCP LSE merge."
+                )
+
         if (
             vllm_config.kv_transfer_config is not None
             and cache_config.block_size != parallel_config.cp_kv_cache_interleave_size
@@ -735,15 +740,19 @@ class NPUPlatform(Platform):
                 "needs to be equal if use pcp or dcp > 1 in P/D disaggregate and kv pool scenario."
             )
 
-        if use_sparse and cp_size > 1 and parallel_config.cp_kv_cache_interleave_size != cache_config.block_size:
-            if not sfa_dcp_replicated_indexer:
-                logger.warning_once(
-                    "The current SFA's PCP implementation requires "
-                    f"cp_kv_cache_interleave_size({parallel_config.cp_kv_cache_interleave_size})"
-                    f" == block_size({cache_config.block_size}). "
-                    f"Override cp_kv_cache_interleave_size to {cache_config.block_size}."
-                )
-                vllm_config.parallel_config.cp_kv_cache_interleave_size = cache_config.block_size
+        if (
+            use_sparse
+            and cp_size > 1
+            and parallel_config.cp_kv_cache_interleave_size != cache_config.block_size
+            and not sfa_dcp_replicated_indexer
+        ):
+            logger.warning_once(
+                "The current SFA's PCP implementation requires "
+                f"cp_kv_cache_interleave_size({parallel_config.cp_kv_cache_interleave_size})"
+                f" == block_size({cache_config.block_size}). "
+                f"Override cp_kv_cache_interleave_size to {cache_config.block_size}."
+            )
+            vllm_config.parallel_config.cp_kv_cache_interleave_size = cache_config.block_size
 
         if enable_sp(vllm_config):
             assert vllm_config.parallel_config.tensor_parallel_size > 1, (
