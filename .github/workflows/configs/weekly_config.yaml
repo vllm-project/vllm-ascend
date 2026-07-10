@@ -36,6 +36,9 @@ a3:
       - name: kimi-k2_5-w4a8-ep-16k-1k-TPOT50
         config_file_path: Kimi-K2.5-W4A8-16k-1k-TPOT50.yaml
         size: 4
+      - name: DeepSeek-V4-flash-w8a8-PD
+        config_file_path: DeepSeek-V4-flash-w8a8-PD.yaml
+        size: 2
   double_node:
     test_config:
       - name: DeepSeek-V3_2-W8A8-EP_weekly
