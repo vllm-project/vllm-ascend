@@ -253,10 +253,13 @@ class AscendRotaryEmbedding(RotaryEmbedding):
         if is_neox_style_override is not None:
             is_neox_style = is_neox_style_override
         # Gemma4 MTP Q-only attention passes key=None (K/V come from the
-        # target's KV cache).  This is the only model that does so; route it
-        # to the Gemma4-specific Q-only RoPE helper instead of the shared op
-        # (which requires a real key).  See gemma4_proposer.gemma4_q_only_rope.
-        if key is None:
+        # target's KV cache).  Route to the Gemma4-specific Q-only RoPE helper
+        # instead of the shared op (which requires a real key).  Explicitly
+        # gated on Gemma4 MTP so a key=None from any other model falls through
+        # to the normal path.  See gemma4_proposer.gemma4_q_only_rope.
+        _spec = getattr(get_current_vllm_config(), "speculative_config", None)
+        _is_gemma4_mtp = _spec is not None and getattr(_spec, "use_gemma4_mtp", lambda: False)()
+        if _is_gemma4_mtp and key is None:
             from vllm_ascend.spec_decode.gemma4_proposer import gemma4_q_only_rope
 
             q = gemma4_q_only_rope(
