@@ -40,113 +40,97 @@ If you need to deploy a multi-node environment, verify the multi-node communicat
 
 You can use the official all-in-one Docker image. For the available image tags and published versions, refer to [Using Docker](../../installation.md#set-up-using-docker).
 
-:::::{tab-set}
-:sync-group: hardware
+=== "Atlas 800I A3"
 
-::::{tab-item} Atlas 800 A3
-:sync: a3
+    **Docker Pull:**
 
-**Docker Pull:**
+    ```bash
 
-```{code-block} bash
-   :substitutions:
+    docker pull quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
+    ```
 
-docker pull quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
-```
+    **Docker Run:**
 
-**Docker Run:**
+    ```bash
 
-```{code-block} bash
-   :substitutions:
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
 
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
+    docker run \
+        --name vllm-ascend-env \
+        --ipc host \
+        --net host \
+        --device /dev/davinci0 \
+        --device /dev/davinci1 \
+        --device /dev/davinci2 \
+        --device /dev/davinci3 \
+        --device /dev/davinci4 \
+        --device /dev/davinci5 \
+        --device /dev/davinci6 \
+        --device /dev/davinci7 \
+        --device /dev/davinci8 \
+        --device /dev/davinci9 \
+        --device /dev/davinci10 \
+        --device /dev/davinci11 \
+        --device /dev/davinci12 \
+        --device /dev/davinci13 \
+        --device /dev/davinci14 \
+        --device /dev/davinci15 \
+        --device /dev/davinci_manager \
+        --device /dev/devmm_svm \
+        --device /dev/hisi_hdc \
+        -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v /usr/local/sbin:/usr/local/sbin \
+        -it -d $IMAGE bash
+    ```
 
-docker run \
-    --name vllm-ascend-env \
-    --ipc host \
-    --net host \
-    --device /dev/davinci0 \
-    --device /dev/davinci1 \
-    --device /dev/davinci2 \
-    --device /dev/davinci3 \
-    --device /dev/davinci4 \
-    --device /dev/davinci5 \
-    --device /dev/davinci6 \
-    --device /dev/davinci7 \
-    --device /dev/davinci8 \
-    --device /dev/davinci9 \
-    --device /dev/davinci10 \
-    --device /dev/davinci11 \
-    --device /dev/davinci12 \
-    --device /dev/davinci13 \
-    --device /dev/davinci14 \
-    --device /dev/davinci15 \
-    --device /dev/davinci_manager \
-    --device /dev/devmm_svm \
-    --device /dev/hisi_hdc \
-    -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
-    -v /usr/local/dcmi:/usr/local/dcmi \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
-    -v /usr/local/sbin:/usr/local/sbin \
-    -it -d $IMAGE bash
-```
+    !!! note
 
-:::{note}
-A3 has 16 NPUs with dual-die design (`/dev/davinci[0-15]`).
-If you are on a shared machine, map only the chips you need (e.g., `/dev/davinci[0-7]` for NPU 0-3).
-:::
+        A3 has 16 NPUs with dual-die design (`/dev/davinci[0-15]`).
+        If you are on a shared machine, map only the chips you need (e.g., `/dev/davinci[0-7]` for NPU 0-3).
 
-::::
+=== "Atlas 800I A2"
 
-::::{tab-item} Atlas 800I A2
-:sync: a2
+    **Docker Pull:**
 
-**Docker Pull:**
+    ```bash
 
-```{code-block} bash
-   :substitutions:
+    docker pull quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
+    ```
 
-docker pull quay.io/ascend/vllm-ascend:|vllm_ascend_version|
-```
+    **Docker Run:**
 
-**Docker Run:**
+    ```bash
 
-```{code-block} bash
-   :substitutions:
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+    docker run \
+        --name vllm-ascend-env \
+        --ipc host \
+        --net host \
+        --device /dev/davinci0 \
+        --device /dev/davinci1 \
+        --device /dev/davinci2 \
+        --device /dev/davinci3 \
+        --device /dev/davinci4 \
+        --device /dev/davinci5 \
+        --device /dev/davinci6 \
+        --device /dev/davinci7 \
+        --device /dev/davinci_manager \
+        --device /dev/devmm_svm \
+        --device /dev/hisi_hdc \
+        -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v /usr/local/sbin:/usr/local/sbin \
+        -it -d $IMAGE bash
+    ```
 
-docker run \
-    --name vllm-ascend-env \
-    --ipc host \
-    --net host \
-    --device /dev/davinci0 \
-    --device /dev/davinci1 \
-    --device /dev/davinci2 \
-    --device /dev/davinci3 \
-    --device /dev/davinci4 \
-    --device /dev/davinci5 \
-    --device /dev/davinci6 \
-    --device /dev/davinci7 \
-    --device /dev/davinci_manager \
-    --device /dev/devmm_svm \
-    --device /dev/hisi_hdc \
-    -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
-    -v /usr/local/dcmi:/usr/local/dcmi \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
-    -v /usr/local/sbin:/usr/local/sbin \
-    -it -d $IMAGE bash
-```
-
-::::
-
-:::::
-
-:::{tip}
-The mounts above are the minimum required for NPU driver access. Add additional `-v` mounts (e.g., model weight paths, datasets) as needed for your environment.
-:::
+!!! tip
+    The mounts above are the minimum required for NPU driver access. Add additional `-v` mounts (e.g., model weight paths, datasets) as needed for your environment.
 
 The default workdir is `/workspace`. vLLM and vLLM-Ascend are installed as Python packages in site-packages.
 
