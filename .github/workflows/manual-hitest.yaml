@@ -49,12 +49,6 @@ jobs:
           APP_SECRET: ${{ secrets.AUROGON_APPSECRET }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          echo "====DEBUG ENV START===="
-          echo "AUROGON_API_PREFIX=$AUROGON_API_PREFIX"
-          echo "X_APIG_APPCODE length: ${#X_APIG_APPCODE}"
-          echo "APP_KEY length: ${#APP_KEY}"
-          echo "APP_SECRET length: ${#APP_SECRET}"
-          echo "====DEBUG ENV END===="
           python3 .github/workflows/scripts/run_hitest.py
 
       - name: Upload recommended pytest paths artifact
