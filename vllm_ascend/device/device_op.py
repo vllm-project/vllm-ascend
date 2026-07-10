@@ -1051,7 +1051,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                 quant_mode=2,
                 clamp_value=swiglu_limit,
             )
-        elif mxfp_quant_dtype == QuantType.W4A16MXFP4:
+        elif mxfp_quant_dtype == QuantType.W4A16MXFP:
             hidden_states = torch_npu.npu_grouped_matmul(
                 x=[x],
                 weight=[weight],
@@ -1177,7 +1177,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         gmm2_weight = weight if isinstance(weight, list) else [weight]
         gmm2_scale = weight_scale if isinstance(weight_scale, list) else [weight_scale]
 
-        if mxfp_quant_dtype == QuantType.W4A16MXFP4:
+        if mxfp_quant_dtype == QuantType.W4A16MXFP:
             return torch_npu.npu_grouped_matmul(
                 x=[hidden_states],
                 weight=gmm2_weight,

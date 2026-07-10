@@ -35,6 +35,7 @@ import vllm_ascend.patch.platform.patch_glm_tool_call_streaming  # noqa
 import vllm_ascend.patch.platform.patch_glm47_tool_call_parser  # noqa
 import vllm_ascend.patch.platform.patch_minimax_m2_tool_call_parser  # noqa
 import vllm_ascend.patch.platform.patch_deepseek_v4_tool_call_parser  # noqa
+import vllm_ascend.patch.platform.patch_structured_output  # noqa
 import vllm_ascend.patch.platform.patch_weight_transfer_engine  # noqa
 import vllm_ascend.patch.platform.patch_torch_accelerator  # noqa
 import vllm_ascend.patch.platform.patch_tool_choice_none_content  # noqa

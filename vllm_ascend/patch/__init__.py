@@ -407,6 +407,28 @@
 #       Remove this patch once the supported vLLM version contains the upstream
 #       MiniMax-M2 incremental tool-call streaming fix.
 #
+# ** 12b. File: platform/patch_structured_output.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.sampling_params.SamplingParams._validate_structured_outputs`
+#      `vllm.v1.structured_output.StructuredOutputManager.grammar_init`
+#    Why:
+#       V1 structured outputs use one engine-level backend, while `backend=auto`
+#       resolves the backend per request. After one request initializes
+#       `xgrammar`, a later request that resolves to `guidance` can still reach
+#       the initialized `xgrammar` backend and crash during grammar compilation.
+#    How:
+#       Record the first resolved backend on the structured-output config and
+#       reject later requests that resolve to a different backend. Also guard
+#       `grammar_init` so requests that bypass API-side validation fail before
+#       backend grammar compilation.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/issues/43920
+#       https://github.com/vllm-project/vllm/pull/44401
+#    Future Plan:
+#       Remove this patch once upstream vLLM either enforces backend consistency
+#       before grammar compilation or safely handles mixed-backend grammar
+#       failures without killing the engine.
+#
 # ** 12c. File: platform/patch_minimax_m3_tool_call_parser.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.tool_parsers abstract (MiniMax M3 tool parser registration)
