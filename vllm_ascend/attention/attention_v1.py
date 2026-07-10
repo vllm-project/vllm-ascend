@@ -522,6 +522,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 graph_params = get_graph_params()
                 attn_metadata = forward_context.attn_metadata
                 attn_keys = list(attn_metadata.keys())
+            # For Qwen3-next, since the kv_cache_config has already categorized
+            # linear_attn and self_attn, the attn_metadata is first arranged with
+            # self_attn followed by linear_attn. Therefore, using zip directly
+            # filters out the update operations for linear_attn.
+            # TODO: We use a new variable `attn_keys` to ensure the loop count is
+            # correct after get by `zip` because of the new structure of the attn_metadata
+            # when running with the merged full eagle-graph. Should check it with Qwen3-next.
             num_layers = len(attn_keys)
             if num_layers == 0:
                 return
