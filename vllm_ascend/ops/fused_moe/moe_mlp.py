@@ -113,6 +113,9 @@ def quant_apply_mlp(
 ) -> torch.Tensor:
     input_hidden_dtype = hidden_states.dtype
     use_gmm_swiglu_quant_fusion = use_mxfp_quant or (fusion and not dynamic_eplb)
+    # GELU can't use the fused SwiGLU+quant ops below; fall back to the
+    # non-fused GMM -> GELU -> (re)quant -> GMM2 path for GELU activations.
+    is_gelu_activation = activation in (MoEActivation.GELU, MoEActivation.GELU_TANH)
 
     if use_mxfp_quant:
         ensure_mxfp8_moe_available("MXFP MoE MLP path")
@@ -152,7 +155,7 @@ def quant_apply_mlp(
     if weight_prefetch_method:
         weight_prefetch_method.maybe_prefetch_moe_weight_postprocess(hidden_states)
     is_mc2 = _EXTRA_CTX.moe_comm_type == MoECommType.MC2
-    if w1_scale_bias is None and w1_offset is None and is_mc2:
+    if w1_scale_bias is None and w1_offset is None and is_mc2 and not is_gelu_activation:
         if _custom_gmm_swiglu_enabled(fusion, dynamic_eplb) and not use_mxfp_quant:
             # gmm1: gate_up_proj & act_fn: swiglu
             hidden_states, swiglu_out_scale, _ = torch.ops._C_ascend.grouped_matmul_swiglu_quant_weight_nz_tensor_list(
@@ -244,6 +247,10 @@ def quant_apply_mlp(
         # act_fn: swiglu
         if activation == MoEActivation.SWIGLUSTEP:
             hidden_states = AscendSwigluStepAndMul.swiglustep_forward(hidden_states, limit=swiglu_limit or 7.0)
+        elif is_gelu_activation:
+            gate, up = hidden_states.chunk(2, dim=-1)
+            approximate = "tanh" if activation == MoEActivation.GELU_TANH else "none"
+            hidden_states = torch.nn.functional.gelu(gate, approximate=approximate) * up
         else:
             hidden_states = torch_npu.npu_swiglu(hidden_states)
         before_gmm2_evt = torch.npu.current_stream().record_event()
@@ -269,7 +276,12 @@ def quant_apply_mlp(
             # TODO w4a8 scene: dynamic acquisition of dtype in the future
             _output_dtype = torch.bfloat16
 
-        if use_w4a8_per_channel_gmm_swiglu and enable_custom_op() and activation != MoEActivation.SWIGLUSTEP:
+        if (
+            use_w4a8_per_channel_gmm_swiglu
+            and enable_custom_op()
+            and activation != MoEActivation.SWIGLUSTEP
+            and not is_gelu_activation
+        ):
             hidden_states, swiglu_out_scale = torch.ops._C_ascend.grouped_matmul_swiglu_quant_v2(
                 x=hidden_states,
                 weight=w1,
@@ -281,7 +293,7 @@ def quant_apply_mlp(
                 group_list_type=group_list_type,
                 swiglu_limit=swiglu_limit,
             )
-        elif _custom_gmm_swiglu_enabled(fusion, dynamic_eplb) and not use_mxfp_quant:
+        elif _custom_gmm_swiglu_enabled(fusion, dynamic_eplb) and not use_mxfp_quant and not is_gelu_activation:
             # gmm1: gate_up_proj & act_fn: swiglu
             hidden_states, swiglu_out_scale, _ = torch.ops._C_ascend.grouped_matmul_swiglu_quant_weight_nz_tensor_list(
                 x=hidden_states,
@@ -292,7 +304,7 @@ def quant_apply_mlp(
                 bias=bias1,
                 swiglu_limit=swiglu_limit,
             )
-        elif use_gmm_swiglu_quant_fusion and activation != MoEActivation.SWIGLUSTEP:
+        elif use_gmm_swiglu_quant_fusion and activation != MoEActivation.SWIGLUSTEP and not is_gelu_activation:
             hidden_states, swiglu_out_scale, _ = DeviceOperator.npu_grouped_matmul_swiglu_quant(
                 x=hidden_states,
                 weight=_require_single_tensor_for_swiglu_quant(w1, name="w1"),
@@ -328,6 +340,11 @@ def quant_apply_mlp(
             # act_fn: swiglu
             if activation == MoEActivation.SWIGLUSTEP:
                 hidden_states = AscendSwigluStepAndMul.swiglustep_forward(hidden_states, limit=swiglu_limit or 7.0)
+                hidden_states, swiglu_out_scale = torch_npu.npu_dynamic_quant(hidden_states)
+            elif is_gelu_activation:
+                gate, up = hidden_states.chunk(2, dim=-1)
+                approximate = "tanh" if activation == MoEActivation.GELU_TANH else "none"
+                hidden_states = torch.nn.functional.gelu(gate, approximate=approximate) * up
                 hidden_states, swiglu_out_scale = torch_npu.npu_dynamic_quant(hidden_states)
             elif HAS_TRITON:
                 from vllm_ascend.ops.triton.activation.swiglu_quant import swiglu_quant
