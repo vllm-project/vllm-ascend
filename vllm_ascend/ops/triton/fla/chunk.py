@@ -81,16 +81,16 @@ def recompute_w_u_fwd(
     chunk_size = A.shape[-1]
     chunk_indices = _prepare_chunk_indices_if_needed(cu_seqlens, chunk_indices, chunk_size)
     w, u = torch.ops._C_ascend.npu_recompute_wu_fwd(
-        k,
-        v,
-        beta,
-        A,
-        g_cumsum,
+        k.transpose(1, 2).contiguous(),
+        v.transpose(1, 2).contiguous(),
+        beta.to(g_cumsum.dtype).transpose(1, 2).contiguous(),
+        A.transpose(1, 2).contiguous(),
+        g_cumsum.transpose(1, 2).contiguous(),
         cu_seqlens=_as_host_tuple(cu_seqlens),
         chunk_indices=_as_host_tuple(chunk_indices),
         chunk_size=chunk_size,
     )
-    return w, u
+    return w.transpose(1, 2).contiguous(), u.transpose(1, 2).contiguous()
 
 
 def chunk_gated_delta_rule_fwd_h(
@@ -109,10 +109,10 @@ def chunk_gated_delta_rule_fwd_h(
     del chunk_offsets
     chunk_indices = _prepare_chunk_indices_if_needed(cu_seqlens, chunk_indices, chunk_size)
     h, v_new, final_state = torch.ops._C_ascend.chunk_gated_delta_rule_fwd_h(
-        k,
-        w,
-        u,
-        g=g,
+        k.to(torch.bfloat16).transpose(1, 2).contiguous(),
+        w.to(torch.bfloat16).transpose(1, 2).contiguous(),
+        u.to(torch.bfloat16).transpose(1, 2).contiguous(),
+        g=None if g is None else g.transpose(1, 2).contiguous(),
         gk=None,
         initial_state=initial_state,
         output_final_state=output_final_state,
@@ -123,7 +123,7 @@ def chunk_gated_delta_rule_fwd_h(
         use_exp2=False,
         transpose_state_layout=False,
     )
-    return h, v_new, final_state
+    return h.transpose(1, 2).contiguous(), v_new.transpose(1, 2).contiguous(), final_state
 
 
 def chunk_fwd_o(
@@ -141,20 +141,21 @@ def chunk_fwd_o(
     if scale is None:
         scale = k.shape[-1] ** -0.5
     chunk_indices = _prepare_chunk_indices_if_needed(cu_seqlens, None, chunk_size)
+    h_for_kernel = h.transpose(1, 2).contiguous() if h.dim() == 5 else h
     out = torch.ops._C_ascend.chunk_fwd_o(
-        q,
-        k,
-        v,
-        h,
+        q.to(torch.bfloat16).transpose(1, 2).contiguous(),
+        k.to(torch.bfloat16).transpose(1, 2).contiguous(),
+        v.transpose(1, 2).contiguous(),
+        h_for_kernel,
         scale,
-        g=g,
+        g=None if g is None else g.transpose(1, 2).contiguous(),
         g_gamma=None,
         cu_seqlens=_as_host_tuple(cu_seqlens),
         chunk_indices=_as_host_tuple(chunk_indices),
         chunk_size=chunk_size,
         transpose_state_layout=False,
     )
-    return out
+    return out.transpose(1, 2).contiguous()
 
 
 def chunk_gated_delta_rule_fwd(
@@ -216,23 +217,20 @@ def chunk_gated_delta_rule_fwd(
         chunk_indices_bt=chunk_indices_chunk64_host,
         output_dtype=k.dtype,
     )
-    g_hf = g.transpose(1, 2).contiguous()
-    beta_hf = beta.float().transpose(1, 2).contiguous()
-    A_hf = A.transpose(1, 2).contiguous()
     w, u = recompute_w_u_fwd(
         k=k,
         v=v,
-        beta=beta_hf,
-        A=A_hf,
-        g_cumsum=g_hf,
+        beta=beta,
+        A=A,
+        g_cumsum=g,
         cu_seqlens=cu_seqlens_host,
         chunk_indices=chunk_indices_chunk64_host,
     )
 
     k_ascendc = k.to(torch.bfloat16).transpose(1, 2).contiguous()
-    w_ascendc = w.to(torch.bfloat16).contiguous()
-    u_ascendc = u.to(torch.bfloat16).contiguous()
-    g_ascendc = g_hf.contiguous()
+    w_ascendc = w.to(torch.bfloat16).transpose(1, 2).contiguous()
+    u_ascendc = u.to(torch.bfloat16).transpose(1, 2).contiguous()
+    g_ascendc = g.transpose(1, 2).contiguous()
     q_ascendc = q.to(torch.bfloat16).transpose(1, 2).contiguous()
 
     h, v_new, final_state = torch.ops._C_ascend.chunk_gated_delta_rule_fwd_h(
@@ -259,8 +257,8 @@ def chunk_gated_delta_rule_fwd(
             actual_num_decodes = num_decodes
         h_update = chunk_gated_delta_rule_fwd_hupdate(
             k=k,
-            w=w.transpose(1, 2).contiguous(),
-            u=u.transpose(1, 2).contiguous(),
+            w=w,
+            u=u,
             g=g,
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices_chunk64,
@@ -301,16 +299,18 @@ def chunk_gated_delta_rule_fwd(
             prefill_slice = slice(prefill_seq_offset, final_state.shape[0])
             rerun_initial_state[prefill_slice] = updated_h_state[prefill_slice]
             h, v_new, _ = chunk_gated_delta_rule_fwd_h(
-                k=k_ascendc,
-                w=w_ascendc,
-                u=u_ascendc,
-                g=g_ascendc,
+                k=k,
+                w=w,
+                u=u,
+                g=g,
                 initial_state=rerun_initial_state,
                 output_final_state=True,
                 cu_seqlens=cu_seqlens,
                 chunk_indices=chunk_indices_chunk64,
                 chunk_offsets=chunk_offsets_chunk64,
             )
+            h = h.transpose(1, 2).contiguous()
+            v_new = v_new.transpose(1, 2).contiguous()
 
     o_ascendc = torch.ops._C_ascend.chunk_fwd_o(
         q_ascendc,
@@ -333,7 +333,7 @@ def chunk_gated_delta_rule_fwd(
     if SUPPRESS_LEVEL < 3:
         return g, o, A, final_state, None, None, None
     elif SUPPRESS_LEVEL >= 3:
-        return g, o, A, final_state, w.transpose(1, 2).contiguous(), h, v_new
+        return g, o, A, final_state, w, h, v_new
 
 
 class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
