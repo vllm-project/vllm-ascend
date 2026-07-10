@@ -838,3 +838,70 @@ def should_skip_draft_kv_write(impl) -> bool:
         getattr(impl, 'kv_sharing_target_layer_name', None) is not None
         and getattr(_EXTRA_CTX, 'is_draft_model', False)
     )
+
+
+def _is_gemma4_mtp() -> bool:
+    """True only when the running model is Gemma4 MTP.
+
+    Explicit gate so the 512-capture routing and KV-share reshape skip added
+    for Gemma4 MTP are no-ops for every other model, keeping the attention
+    hot path untouched upstream.
+    """
+    from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+    vllm_config = getattr(_EXTRA_CTX, "vllm_config", None)
+    if vllm_config is None:
+        return False
+    _spec = getattr(vllm_config, "speculative_config", None)
+    return (
+        _spec is not None
+        and hasattr(_spec, "use_gemma4_mtp")
+        and _spec.use_gemma4_mtp()
+    )
+
+
+def maybe_route_512_capture(impl, attn_metadata) -> bool:
+    """True if a head_dim=512 non-sliding layer should route to PagedAttention
+    during graph capture.
+
+    FIA TND does not support head_dim=512 (Gemma4 global attention).  During
+    graph capture the eager device-adaptor fallback
+    (npu_large_head_prefill_attention) is bypassed, and forward_impl's PA
+    routing requires attn_state==DecodeOnly which excludes MTP's SpecDecoding
+    capture step.  Route 512-dim non-sliding layers to the paged-attention
+    graph path here, mirroring using_paged_attention(head_size=512) in
+    forward_impl.  KV-sharing draft 512 layers are intercepted earlier by
+    maybe_kv_share_prefill and never reach here.
+
+    A5 gate: on A5 (950) full_graph_pa segfaults in atb::_npu_paged_attention
+    during capture for this layer; A5's original path (full_graph_fia) works.
+    This fix targets A2/A3 (910B4) where FIA TND raises error 561002.
+
+    Explicitly scoped to Gemma4 MTP so other models are unaffected.
+    """
+    if not _is_gemma4_mtp():
+        return False
+    from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+    from vllm_ascend.utils import is_950
+    return (
+        getattr(impl, 'head_size', None) == FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
+        and getattr(impl, 'sliding_window', None) is None
+        and not getattr(_EXTRA_CTX, 'is_draft_model', False)
+        and not is_950()
+    )
+
+
+def maybe_skip_reshape_for_kv_share(impl, attn_metadata) -> bool:
+    """True if reshape_and_cache should be skipped for a KV-sharing target layer.
+
+    KV-sharing target layers (e.g. Gemma4 MTP draft) consume the producer
+    layer's cache.  Re-caching here would overwrite the shared KV slots
+    before attention reads it.  When True the caller must still record the
+    producer's reshape_cache_event (if this layer is a producer) and return
+    early.
+
+    Explicitly scoped to Gemma4 MTP so other KV-sharing models (e.g. MLA)
+    keep the upstream reshape_and_cache behavior.
+    """
+    if not _is_gemma4_mtp():
+        return False
+    return getattr(impl, 'kv_sharing_target_layer_name', None) is not None

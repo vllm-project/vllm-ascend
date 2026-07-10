@@ -53,6 +53,8 @@ from vllm_ascend.attention.utils import (
     cache_graph_workspace,
     enable_cp,
     maybe_kv_share_prefill,
+    maybe_route_512_capture,
+    maybe_skip_reshape_for_kv_share,
     needs_layer_aware_fia_graph_replay,
     notify_kv_cache_written,
     should_skip_draft_kv_write,
@@ -68,9 +70,8 @@ from vllm_ascend.compilation.acl_graph import (
     update_graph_params_workspaces,
 )
 from vllm_ascend.device.device_op import DeviceOperator
-from vllm_ascend.device.utils import FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
 from vllm_ascend.ops.flashcomm2_oshard_manager import flashcomm2_oshard_manager
-from vllm_ascend.utils import is_950, weak_ref_tensors
+from vllm_ascend.utils import weak_ref_tensors
 from vllm_ascend.worker.kvcomp_utils import KVCompMetaData
 
 # default max value of sliding window size
@@ -1269,27 +1270,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # runner v2, there is not capturing attribute in forward_context,
         # just use getattr to avoid attribute error.
         if _EXTRA_CTX.capturing:
-            # FIA TND does not support head_dim=512 (Gemma4 global attention).
-            # During graph capture the eager device-adaptor fallback
-            # (npu_large_head_prefill_attention) is bypassed, and the
-            # forward_impl PA routing requires attn_state==DecodeOnly which
-            # excludes MTP's SpecDecoding capture step.  Route 512-dim
-            # non-sliding layers to the paged-attention graph path here,
-            # mirroring using_paged_attention(head_size=512) in forward_impl.
-            # KV-sharing draft 512 layers are intercepted earlier by
-            # maybe_kv_share_prefill and never reach here.
-            #
-            # A5 gate: on A5 (950) full_graph_pa segfaults in
-            # atb::_npu_paged_attention during capture for this layer; A5's
-            # original path (full_graph_fia below) works.  This fix targets
-            # A2/A3 (910B4) where FIA TND raises error 561002.  See commit
-            # 32a8647e for the A2/A3 root cause.
-            if (
-                self.head_size == FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
-                and self.sliding_window is None
-                and not _EXTRA_CTX.is_draft_model
-                and not is_950()
-            ):
+            if maybe_route_512_capture(self, attn_metadata):
                 return self.full_graph_pa(query, attn_metadata, output)
             if self.sinks is not None:
                 attn_output, num_tokens = self.full_graph_fia_v2(query, key, value, attn_metadata, output)
@@ -1488,10 +1469,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 attn_metadata.reshape_cache_event = torch.npu.Event()
             if self.key_cache is None:
                 self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
-            if self.kv_sharing_target_layer_name is not None:
-                # KV-sharing target layers (e.g. Gemma4 MTP draft) consume
-                # the producer layer's cache.  Re-caching here would overwrite
-                # the shared KV slots before attention reads it.
+            if maybe_skip_reshape_for_kv_share(self, attn_metadata):
                 if self.is_kv_producer:
                     attn_metadata.reshape_cache_event.record()
                 return query, key, value, output
