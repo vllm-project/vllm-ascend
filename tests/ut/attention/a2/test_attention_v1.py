@@ -393,11 +393,11 @@ class TestAscendAttentionBackendImpl(TestBase):
 
         assert output.shape == (10, 8 * 64)
 
-    @patch("torch_npu._npu_reshape_and_cache")
+    @patch("torch_npu.npu_scatter_pa_kv_cache")
     @patch("torch_npu.npu_fused_infer_attention_score")
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     def test_forward_fused_infer_attention(
-        self, mock_get_forward_context, mock_npu_fused_infer_attention_score, mock_npu_reshape_and_cache
+        self, mock_get_forward_context, mock_npu_fused_infer_attention_score, mock_npu_scatter_pa_kv_cache
     ):
         """Test forward pass in PrefillCacheHit state"""
         query = torch.randn(10, 8, 64)
@@ -428,10 +428,10 @@ class TestAscendAttentionBackendImpl(TestBase):
 
     @patch("vllm_ascend.attention.attention_v1.using_paged_attention")
     @patch("torch_npu._npu_paged_attention")
-    @patch("torch_npu._npu_reshape_and_cache")
+    @patch("torch_npu.npu_scatter_pa_kv_cache")
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     def test_forward_paged_attention(
-        self, mock_get_forward_context, mock_npu_reshape_and_cache, mock_paged_attention, mock_using_paged_attention
+        self, mock_get_forward_context, mock_npu_scatter_pa_kv_cache, mock_paged_attention, mock_using_paged_attention
     ):
         """Test forward pass in DecodeOnly state"""
         query = torch.randn(4, 8 * 64)
@@ -460,9 +460,9 @@ class TestAscendAttentionBackendImpl(TestBase):
 
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     @patch("torch_npu.npu_fused_infer_attention_score")
-    @patch("torch_npu._npu_reshape_and_cache")
+    @patch("torch_npu.npu_scatter_pa_kv_cache")
     def test_forward_decode_only_swa(
-        self, mock_npu_reshape_and_cache, mock_fused_infer_attention_score, mock_get_forward_context
+        self, mock_npu_scatter_pa_kv_cache, mock_fused_infer_attention_score, mock_get_forward_context
     ):
         """Test forward pass in DecodeOnly state"""
         query = torch.randn(10, 8 * 64)
@@ -491,9 +491,9 @@ class TestAscendAttentionBackendImpl(TestBase):
 
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     @patch("torch_npu.npu_fused_infer_attention_score_v2")
-    @patch("torch_npu._npu_reshape_and_cache")
+    @patch("torch_npu.npu_scatter_pa_kv_cache")
     def test_forward_decode_only_swa_sink(
-        self, mock_npu_reshape_and_cache, mock_fused_infer_attention_score, mock_get_forward_context
+        self, mock_npu_scatter_pa_kv_cache, mock_fused_infer_attention_score, mock_get_forward_context
     ):
         """Test forward pass in DecodeOnly state"""
         query = torch.randn(10, 8 * 64)
@@ -523,10 +523,10 @@ class TestAscendAttentionBackendImpl(TestBase):
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     @patch("torch_npu._npu_paged_attention")
     @patch("torch_npu.npu_fused_infer_attention_score")
-    @patch("torch_npu._npu_reshape_and_cache")
+    @patch("torch_npu.npu_scatter_pa_kv_cache")
     def test_forward_decode_only_swa_seq_len_mismatch(
         self,
-        mock_npu_reshape_and_cache,
+        mock_npu_scatter_pa_kv_cache,
         mock_fused_infer_attention_score,
         mock_paged_attention,
         mock_get_forward_context,
