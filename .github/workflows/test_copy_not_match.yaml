@@ -25,6 +25,7 @@ on:
       contains_310:
         required: true
         type: boolean
+  workflow_dispatch:
 
 jobs:
   e2e-2-cards:
@@ -117,7 +118,7 @@ jobs:
         uses: actions/checkout@v7.0.0
         with:
           repository: vllm-project/vllm
-          ref: ${{ inputs.vllm }}
+          ref: ${{ inputs.vllm || '1f486d96a17303ce8db8e02be39545b2be338446' }}
           path: ./vllm-empty
           fetch-depth: 1
 
@@ -136,7 +137,7 @@ jobs:
       - name: Run vllm-project/vllm-ascend test (full)
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
-        if: ${{ inputs.type == 'full' }}
+        if: ${{ (inputs.type || 'full') == 'full' }}
         run: |
           pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_offline_weight_load.py
           pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_qwen3_moe_sp_tp2
