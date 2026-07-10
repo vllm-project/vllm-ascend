@@ -36,6 +36,12 @@ a3:
       - name: kimi-k2_5-w4a8-ep-16k-1k-TPOT50
         config_file_path: Kimi-K2.5-W4A8-16k-1k-TPOT50.yaml
         size: 4
+      - name: DeepSeek_V3.1T_MTP1_128K_1K_PD
+        config_file_path: DeepSeek_V3.1T_MTP1_128K_1K_PD.yaml
+        size: 4
+      - name: multi-node-deepseek-v3.1t-mtp3-acc
+        config_file_path: DeepSeek_V3.1T_MTP1_PD.yaml
+        size: 4
   double_node:
     test_config:
       - name: DeepSeek-V3_2-W8A8-EP_weekly
