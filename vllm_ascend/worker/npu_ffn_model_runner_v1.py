@@ -190,11 +190,23 @@ class NPUFFNModelRunner(NPUModelRunner, GPUFFNModelRunner):
         set_cudagraph_capturing_enabled(True)
         if cudagraph_mode == CUDAGraphMode.FULL and is_attn_graph_capturing:
             # Full graph capture mode：根据dp_metadata_list捕获单个graph
-            logger.info("FFN warmup capture start")
+            logger.info("FFN warmup capture start, dp_metadata_list is %s", dp_metadata_list)
             self._capture_model(dp_metadata_list=dp_metadata_list)
+        elif cudagraph_mode == CUDAGraphMode.FULL and not is_attn_graph_capturing:
+            logger.info("FFN warmup replay start, dp_metadata_list is %s", dp_metadata_list)
+            # Look up the captured graph by dp_metadata_key.
+            dp_metadata_key = self._get_dp_metadata_key(dp_metadata_list)
+            acl_graph_info = self._acl_graphs.get(dp_metadata_key)
+            if acl_graph_info is not None:
+                graph = acl_graph_info['graph']
+                graph.replay()
+                self.replay_cnt += 1
+                logger.info(
+                    "warmup ffn replay, replay_cnt is %s, dp_metadata_key=%s",
+                    self.replay_cnt, dp_metadata_key)
         else:
             # Eager mode for non-ubatch or no aclgraph.
-            logger.info("FFN warmup eager start")
+            logger.info("FFN warmup eager start, dp_metadata_list is %s", dp_metadata_list)
             self._warmup_model(dp_metadata_list=dp_metadata_list)
         # if cudagraph_mode == CUDAGraphMode.NONE:
         #     # Warmup模式：只执行forward，不capture graph
