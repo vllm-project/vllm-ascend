@@ -30,6 +30,7 @@ import torch.nn.functional as F
 from vllm.config import VllmConfig
 from vllm.logger import logger
 from vllm.utils import length_from_prompt_token_ids_or_embeds
+from vllm.utils.math_utils import cdiv
 from vllm.v1.utils import CpuGpuBuffer
 
 from vllm_ascend.utils import is_pd_decode_recompute_scheduler_enabled
@@ -47,6 +48,18 @@ class PCPSpecDecodeMTPInputs:
     seq_lens_cpu: torch.Tensor | None
     slot_indices: torch.Tensor
     slot_mapping: torch.Tensor
+
+
+@dataclass(frozen=True)
+class PCPSpecDecodeFirstPassInputs:
+    """PCP-adjusted inputs for the first speculative draft pass."""
+
+    num_tokens: int
+    input_ids: torch.Tensor
+    target_positions: torch.Tensor
+    target_hidden_states: torch.Tensor
+    token_indices_to_sample: torch.Tensor
+    long_seq_args: tuple[torch.Tensor | None, torch.Tensor | None] | None
 
 
 class PCPManager:
@@ -1032,6 +1045,239 @@ class PCPManager:
         )
         decode_hidden_state_indices = decode_padded_starts_per_token + decode_offsets
         return target_hidden_states_d_padded[decode_hidden_state_indices]
+
+    def prepare_spec_decode_first_pass_inputs(
+        self,
+        input_ids: torch.Tensor,
+        target_positions: torch.Tensor,
+        target_hidden_states: torch.Tensor,
+        token_indices_to_sample: torch.Tensor,
+        common_attn_metadata: Any,
+        long_seq_metadata: Any | None,
+        req_scheduled_tokens: dict[str, int] | None,
+        req_ids: list[str],
+        logits_indices: torch.Tensor,
+        num_tokens: int,
+        num_prefill_reqs: int,
+        num_decode_reqs: int,
+        uses_mrope: bool,
+    ) -> PCPSpecDecodeFirstPassInputs:
+        """Prepare CP-adjusted proposer inputs for the first draft pass."""
+        long_seq_args: tuple[torch.Tensor | None, torch.Tensor | None] | None = None
+        if self.pcp_world_size * self.dcp_world_size <= 1:
+            return PCPSpecDecodeFirstPassInputs(
+                num_tokens=num_tokens,
+                input_ids=input_ids,
+                target_positions=target_positions,
+                target_hidden_states=target_hidden_states,
+                token_indices_to_sample=token_indices_to_sample,
+                long_seq_args=long_seq_args,
+            )
+
+        assert long_seq_metadata is not None
+        common_attn_metadata.prefill_context_parallel_metadata = long_seq_metadata
+        ori_token_indices_to_sample = token_indices_to_sample.clone()
+        query_lens_d = self.query_lens_pcp_full.cpu[:num_decode_reqs]
+        long_seq_args = (query_lens_d, ori_token_indices_to_sample)
+
+        if self.pcp_world_size <= 1:
+            return PCPSpecDecodeFirstPassInputs(
+                num_tokens=num_tokens,
+                input_ids=input_ids,
+                target_positions=target_positions,
+                target_hidden_states=target_hidden_states,
+                token_indices_to_sample=token_indices_to_sample,
+                long_seq_args=long_seq_args,
+            )
+
+        num_tokens_d = self.num_decode_tokens
+        num_tokens_d_padded = num_tokens_d * self.pcp_world_size
+        input_ids_d = input_ids[:num_tokens_d]
+        input_ids_p = input_ids[num_tokens_d:num_tokens]
+        target_hidden_states_d_padded = target_hidden_states[:num_tokens_d_padded]
+        if num_tokens_d:
+            target_hidden_states_d = self.get_spec_decode_decode_hidden_states(
+                target_hidden_states_d_padded,
+                num_decode_reqs,
+                num_tokens_d,
+            )
+        else:
+            target_hidden_states_d = target_hidden_states_d_padded
+        target_hidden_states_p = target_hidden_states[num_tokens_d_padded:]
+
+        req_scheduled_tokens_p: dict[str, int] = {}
+        if num_prefill_reqs:
+            assert req_scheduled_tokens is not None
+            num_reqs = num_decode_reqs + num_prefill_reqs
+            for i, req_id in enumerate(req_ids[:num_reqs]):
+                if i >= num_decode_reqs:
+                    req_scheduled_tokens_p[req_id] = req_scheduled_tokens[req_id]
+
+        (
+            num_tokens_p,
+            input_ids_p,
+            target_hidden_states_p,
+            max_query_len_p,
+            seq_lens_p,
+            cu_num_tokens_p,
+        ) = self._split_spec_decode_pcp_prefill_input(
+            req_scheduled_tokens_p,
+            input_ids_p,
+            target_hidden_states_p,
+        )
+        num_tokens = num_tokens_d + num_tokens_p
+        if uses_mrope:
+            target_positions = target_positions[:, :num_tokens]
+        else:
+            target_positions = target_positions[:num_tokens]
+        input_ids = torch.cat([input_ids_d, input_ids_p], dim=0)
+        target_hidden_states = torch.cat([target_hidden_states_d, target_hidden_states_p], dim=0)
+
+        if num_decode_reqs:
+            token_indices_to_sample[:num_decode_reqs] = logits_indices[
+                token_indices_to_sample[:num_decode_reqs]
+            ]
+        if num_prefill_reqs:
+            token_indices_to_sample[-num_prefill_reqs:] = logits_indices[-num_prefill_reqs:]
+            common_attn_metadata.num_actual_tokens = num_tokens
+            common_attn_metadata.max_query_len = max(self.decode_threshold, max_query_len_p)
+            common_attn_metadata.seq_lens[-num_prefill_reqs:] = seq_lens_p
+            if common_attn_metadata.seq_lens_cpu is not None:
+                common_attn_metadata.seq_lens_cpu[-num_prefill_reqs:] = seq_lens_p
+            if common_attn_metadata._seq_lens_cpu is not None:
+                common_attn_metadata._seq_lens_cpu[-num_prefill_reqs:] = seq_lens_p
+            query_start_loc_p = (
+                cu_num_tokens_p[1:]
+                + common_attn_metadata.query_start_loc_cpu[num_decode_reqs].item()
+            )
+            common_attn_metadata.query_start_loc[-num_prefill_reqs:] = query_start_loc_p
+            common_attn_metadata.query_start_loc_cpu[-num_prefill_reqs:] = query_start_loc_p
+
+        return PCPSpecDecodeFirstPassInputs(
+            num_tokens=num_tokens,
+            input_ids=input_ids,
+            target_positions=target_positions,
+            target_hidden_states=target_hidden_states,
+            token_indices_to_sample=token_indices_to_sample,
+            long_seq_args=long_seq_args,
+        )
+
+    def _split_spec_decode_pcp_prefill_input(
+        self,
+        req_scheduled_tokens: dict[str, int],
+        input_ids: torch.Tensor,
+        target_hidden_states: torch.Tensor,
+    ) -> tuple[int, torch.Tensor, torch.Tensor, int, torch.Tensor, torch.Tensor]:
+        """
+        Split prefill input_ids and target_hidden_states in the PCP group.
+
+        The target hidden states already include PCP padding; this method
+        selects only the local PCP rank's prefill tokens and returns the
+        attention metadata fields affected by that split.
+        """
+        if len(req_scheduled_tokens) == 0:
+            return (
+                0,
+                input_ids.new_zeros((0,)),
+                target_hidden_states.new_zeros((0, target_hidden_states.size(1))),
+                0,
+                torch.zeros((0,), dtype=torch.int32),
+                torch.tensor([0], dtype=torch.int32),
+            )
+
+        if self.pcp_use_hybrid_attn:
+            return self._split_spec_decode_pcp_prefill_input_hybrid(
+                req_scheduled_tokens,
+                input_ids,
+                target_hidden_states,
+            )
+
+        def _pcp_pad_and_split(num_tokens: int) -> tuple[list[int], int, int]:
+            num_pcp_padded_scheduled_tokens = (
+                cdiv(num_tokens, 2 * self.pcp_world_size) * 2 * self.pcp_world_size
+            )
+            pcp_pad = num_pcp_padded_scheduled_tokens - num_tokens
+            chunk_size = num_pcp_padded_scheduled_tokens // (2 * self.pcp_world_size)
+
+            req_position_cp: list[int] = []
+            req_position_cp.extend(
+                self.full_indices[
+                    self.pcp_world_rank * chunk_size : (self.pcp_world_rank + 1) * chunk_size
+                ]
+            )
+            req_position_cp.extend(
+                self.full_indices[
+                    num_pcp_padded_scheduled_tokens
+                    - (self.pcp_world_rank + 1) * chunk_size : num_pcp_padded_scheduled_tokens
+                    - self.pcp_world_rank * chunk_size
+                ]
+            )
+
+            return req_position_cp, num_pcp_padded_scheduled_tokens, pcp_pad
+
+        num_pcp_scheduled_tokens = []
+        ori_start_index = 0
+        pad_start_index = 0
+        pcp_split_input_ids_list = []
+        pcp_split_hidden_states_list = []
+        for ori_num_tokens in req_scheduled_tokens.values():
+            req_position_pcp, num_pcp_padded_scheduled_tokens, num_pcp_pad = _pcp_pad_and_split(ori_num_tokens)
+            actual_num_tokens = len(req_position_pcp)
+            num_pcp_scheduled_tokens.append(actual_num_tokens)
+            pad_input_ids = F.pad(
+                input_ids[ori_start_index : ori_start_index + ori_num_tokens],
+                (0, num_pcp_pad),
+            )
+            ori_start_index += ori_num_tokens
+            pcp_chunk_indices = [pad_start_index + pos for pos in req_position_pcp]
+            pcp_split_input_ids = pad_input_ids[req_position_pcp]
+            pcp_split_hidden_states = target_hidden_states[pcp_chunk_indices]
+            pcp_split_input_ids_list.append(pcp_split_input_ids)
+            pcp_split_hidden_states_list.append(pcp_split_hidden_states)
+            pad_start_index += num_pcp_padded_scheduled_tokens
+        num_tokens = sum(num_pcp_scheduled_tokens)
+        input_ids = torch.cat(pcp_split_input_ids_list)
+        target_hidden_states = torch.cat(pcp_split_hidden_states_list, dim=0)
+        max_query_len = max(num_pcp_scheduled_tokens)
+        seq_lens = torch.tensor(num_pcp_scheduled_tokens, dtype=torch.int32)
+        cu_num_tokens = torch.tensor(np.insert(np.cumsum(np.array(num_pcp_scheduled_tokens)), 0, 0))
+        return num_tokens, input_ids, target_hidden_states, max_query_len, seq_lens, cu_num_tokens
+
+    def _split_spec_decode_pcp_prefill_input_hybrid(
+        self,
+        req_scheduled_tokens: dict[str, int],
+        input_ids: torch.Tensor,
+        target_hidden_states: torch.Tensor,
+    ) -> tuple[int, torch.Tensor, torch.Tensor, int, torch.Tensor, torch.Tensor]:
+        """Linear-split prefill inputs for hybrid-attention PCP models."""
+        num_pcp_scheduled_tokens = []
+        global_offset = 0
+        pcp_split_input_ids_list = []
+        pcp_split_hidden_states_list = []
+        for ori_num_tokens in req_scheduled_tokens.values():
+            padded_tokens = cdiv(ori_num_tokens, 2 * self.pcp_world_size) * 2 * self.pcp_world_size
+            pcp_tokens = padded_tokens // self.pcp_world_size
+            num_pads = padded_tokens - ori_num_tokens
+            rank_start = self.pcp_world_rank * pcp_tokens
+            num_pcp_scheduled_tokens.append(pcp_tokens)
+
+            req_input_ids = input_ids[global_offset : global_offset + ori_num_tokens]
+            if num_pads > 0:
+                req_input_ids = F.pad(req_input_ids, (0, num_pads))
+            pcp_split_input_ids_list.append(req_input_ids[rank_start : rank_start + pcp_tokens])
+
+            req_hidden = target_hidden_states[global_offset : global_offset + ori_num_tokens]
+            if num_pads > 0:
+                req_hidden = F.pad(req_hidden, (0, 0, 0, num_pads))
+            pcp_split_hidden_states_list.append(req_hidden[rank_start : rank_start + pcp_tokens])
+            global_offset += ori_num_tokens
+        num_tokens = sum(num_pcp_scheduled_tokens)
+        input_ids = torch.cat(pcp_split_input_ids_list)
+        target_hidden_states = torch.cat(pcp_split_hidden_states_list, dim=0)
+        max_query_len = max(num_pcp_scheduled_tokens)
+        seq_lens = torch.tensor(num_pcp_scheduled_tokens, dtype=torch.int32)
+        cu_num_tokens = torch.tensor(np.insert(np.cumsum(np.array(num_pcp_scheduled_tokens)), 0, 0))
+        return num_tokens, input_ids, target_hidden_states, max_query_len, seq_lens, cu_num_tokens
 
     def _get_spec_decode_mtp_slot_inputs(
         self,
