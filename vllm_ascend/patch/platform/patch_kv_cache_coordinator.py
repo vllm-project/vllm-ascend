@@ -21,6 +21,7 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     SingleTypeKVCacheManager,
+    SlidingWindowManager,
 )
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -145,6 +146,15 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 for g in kv_cache_config.kv_cache_groups
             ), "block_size must be divisible by hash_block_size"
         self.verify_and_split_kv_cache_groups()
+
+        # Align the WRITE-path mask granularity (reachable_block_mask) with the
+        # READ-path hit granularity (find_longest_cache_hit) so SlidingWindowManager
+        # only caches blocks that land on a boundary where future cache hits can
+        # actually be matched.
+        # TODO (Csrayz): Consider unified all single_type_managers to simplify logic.
+        for mgr in self.single_type_managers:
+            if isinstance(mgr, SlidingWindowManager):
+                mgr.scheduler_block_size = self.lcm_block_size
 
         self.use_eagle = use_eagle
 

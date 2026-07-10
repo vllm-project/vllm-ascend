@@ -7,6 +7,9 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.single_type_kv_cache_manager import (
+    SlidingWindowManager,
+)
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -14,6 +17,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheTensor,
     MambaSpec,
     MLAAttentionSpec,
+    SlidingWindowMLASpec,
     UniformTypeKVCacheSpecs,
 )
 
@@ -421,3 +425,50 @@ def test_ascend_mamba_manager_uses_logical_block_size_with_prefix_caching() -> N
     manager = AscendMambaManager(**manager_kwargs)
 
     assert manager.block_size == mamba_spec.block_size
+
+
+def test_swa_reachable_block_mask_sparse_with_lcm_alignment() -> None:
+    """Regression: when ``scheduler_block_size`` is aligned to ``lcm_block_size``
+    (instead of the raw-block-size LCM), ``SlidingWindowManager.reachable_block_mask``
+    must produce a sparse mask rather than returning ``None``.
+
+    Before the fix, ``alignment_tokens`` was the LCM of raw block_sizes (e.g. 32),
+    making ``need >= per_segment`` always true for Ascend's SWA configuration and
+    the mask returned ``None`` (cache everything). After the fix the alignment is
+    ``lcm_block_size`` (e.g. 4096), which is large enough that only the tail
+    blocks within each segment need caching.
+    """
+    spec = SlidingWindowMLASpec(
+        block_size=32,  # Ascend SWA block_size (--block-size 32)
+        num_kv_heads=1,
+        head_size=512,
+        dtype=torch.float32,
+        sliding_window=128,  # DeepSeek V4 window
+        compress_ratio=1,
+    )
+    alignment_tokens = 4096  # lcm_block_size
+
+    mask = SlidingWindowManager.reachable_block_mask(
+        start_block=0,
+        end_block=256,  # 256 × 32 = 8192 tokens (2 × alignment_tokens)
+        alignment_tokens=alignment_tokens,
+        kv_cache_spec=spec,
+        use_eagle=False,
+        retention_interval=None,
+        num_prompt_tokens=None,
+    )
+
+    # Must produce a sparse mask, not None.
+    assert mask is not None, "should produce sparse mask with lcm alignment"
+
+    true_blocks = sum(mask)
+
+    # need = cdiv(window−1, block_size) = cdiv(127, 32) = 4
+    # per_segment = alignment_tokens // block_size = 4096 // 32 = 128
+    # Each 128-block segment caches the last 4 blocks (= 0 % sparse padding).
+    total_blocks = len(mask)
+    expected = 4 * (total_blocks // 128)
+    assert true_blocks == expected, (
+        f"expected {expected} cached blocks ({4}/{128} per segment), got {true_blocks}/{total_blocks}"
+    )
+    assert true_blocks > 0 and true_blocks < total_blocks, f"mask should be sparse, got {true_blocks}/{total_blocks}"
