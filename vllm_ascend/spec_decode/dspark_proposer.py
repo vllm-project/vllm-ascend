@@ -213,8 +213,7 @@ class AscendDSparkProposer(AscendDflashProposer):
             self._dspark_enable_draft_aclgraph = True
         elif self.use_cuda_graph:
             logger.warning_once(
-                "[spec_decode/dspark] DSpark drafter ACLGraph requires FULL graph mode; "
-                "running the drafter eager."
+                "[spec_decode/dspark] DSpark drafter ACLGraph requires FULL graph mode; running the drafter eager."
             )
             self.use_cuda_graph = False
 
@@ -249,11 +248,9 @@ class AscendDSparkProposer(AscendDflashProposer):
         self.cudagraph_dispatcher = CudagraphDispatcher(draft_vllm_config)
         self.cudagraph_dispatcher.uniform_decode_query_len = query_len
         self.cudagraph_dispatcher.initialize_cudagraph_keys(dispatcher_mode, query_len)
-        self._dspark_draft_capture_sizes = sorted({
-            desc.num_tokens
-            for _, descs in self.cudagraph_dispatcher.get_capture_descs()
-            for desc in descs
-        })
+        self._dspark_draft_capture_sizes = sorted(
+            {desc.num_tokens for _, descs in self.cudagraph_dispatcher.get_capture_descs() for desc in descs}
+        )
 
     def get_cudagraph_capture_sizes(self) -> list[int]:
         return list(getattr(self, "_dspark_draft_capture_sizes", []))
@@ -1263,9 +1260,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         lora_requests = getattr(input_batch, "lora_id_to_lora_request", {})
         has_lora = len(lora_requests) > 0
         profile_without_draft_attn = (
-            is_profile
-            and _dspark_standard_dsa_enabled()
-            and not getattr(self, "draft_attn_groups", [])
+            is_profile and _dspark_standard_dsa_enabled() and not getattr(self, "draft_attn_groups", [])
         )
         use_cuda_graph = (
             getattr(self, "use_cuda_graph", False)
@@ -1545,9 +1540,8 @@ class AscendDSparkProposer(AscendDflashProposer):
         run_model: Callable[..., torch.Tensor],
         model_inputs: dict[str, Any],
     ) -> torch.Tensor:
-        if (
-            getattr(self, "_dspark_graph_runnable_uses_buffers", False)
-            and run_model is getattr(self, "_runnable", None)
+        if getattr(self, "_dspark_graph_runnable_uses_buffers", False) and run_model is getattr(
+            self, "_runnable", None
         ):
             self._dspark_graph_model_inputs = model_inputs
             return run_model()

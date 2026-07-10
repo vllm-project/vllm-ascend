@@ -589,6 +589,7 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         )
         self._dspark_cache_capacity = cache_capacity
         self._dspark_max_request_slots = max_request_slots
+
     def _ensure_dspark_cache(self, length: int, like: torch.Tensor) -> None:
         del like
         if length > self._dspark_cache_capacity:
