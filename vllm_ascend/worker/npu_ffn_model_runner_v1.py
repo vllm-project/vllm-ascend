@@ -131,7 +131,6 @@ class NPUFFNModelRunner(NPUModelRunner, GPUFFNModelRunner):
             cudagraph_mode: cudagraph模式，用于指定是否使用cudagraph进行推理
         """
         try:
-            logger.info("execute_model pre, dp_metadata_list is %s", dp_metadata_list)
             if dp_metadata_list is None and self.connector is not None:
                 dp_metadata_list, _, _, _ = (
                     self.connector.recv_dp_metadata_list()
@@ -139,7 +138,7 @@ class NPUFFNModelRunner(NPUModelRunner, GPUFFNModelRunner):
             is_ubatch = dp_metadata_list is not None and len(dp_metadata_list) > 1
 
             if cudagraph_mode == CUDAGraphMode.FULL:
-                logger.info("execute_model aclgraph pre")
+                logger.info("execute_model aclgraph pre, dp_metadata_list is %s", dp_metadata_list)
                 # Look up the captured graph by dp_metadata_key.
                 dp_metadata_key = self._get_dp_metadata_key(dp_metadata_list)
                 acl_graph_info = self._acl_graphs.get(dp_metadata_key)
@@ -160,7 +159,7 @@ class NPUFFNModelRunner(NPUModelRunner, GPUFFNModelRunner):
                         dp_metadata_list=dp_metadata_list)
             else:
                 # Eager mode for non-ubatch or no aclgraph.
-                logger.info("execute_model eager pre")
+                logger.info("execute_model eager pre, dp_metadata_list is %s", dp_metadata_list)
                 self._ffn_forward(
                     aclgraph_runtime_mode=CUDAGraphMode.NONE,
                     dp_metadata_list=dp_metadata_list)
@@ -185,20 +184,19 @@ class NPUFFNModelRunner(NPUModelRunner, GPUFFNModelRunner):
         """
         if not self.use_aclgraph:
             return 0
-        logger.debug("Starting ACL graph capture for FFN operations, "
-                     "is_warmup=%s", is_warmup)
         start_time = time.perf_counter()
         start_free_npu_memory = torch.npu.mem_get_info()[0]
 
         set_cudagraph_capturing_enabled(True)
         if cudagraph_mode == CUDAGraphMode.NONE:
             # Warmup模式：只执行forward，不capture graph
+            logger.info("FFN warmup eager start")
             self._warmup_model(dp_metadata_list=dp_metadata_list)
-            logger.info("FFN warmup completed")
         else:
             # 正式Capture模式：根据dp_metadata_list捕获单个graph
+            logger.info("FFN warmup capture start")
             self._capture_model(dp_metadata_list=dp_metadata_list)
-            logger.info("FFN capture completed")
+            
         set_cudagraph_capturing_enabled(False)
 
         end_time = time.perf_counter()
@@ -243,7 +241,6 @@ class NPUFFNModelRunner(NPUModelRunner, GPUFFNModelRunner):
                         uniform_decode=True,
                         dp_metadata_list=dp_metadata_list,
                         dp_metadata_key=dp_metadata_key)
-        logger.debug("FFN warmup for dp_metadata_key=%s", dp_metadata_key)
 
     def _capture_model(self, dp_metadata_list: dict = None):
         """Internal capture implementation - capture a single graph based on
@@ -297,8 +294,8 @@ class NPUFFNModelRunner(NPUModelRunner, GPUFFNModelRunner):
             dp_metadata_key: dp_metadata的key，用于存储graph
         """
         assert cudagraph_runtime_mode != CUDAGraphMode.NONE
-        logger.info("Capturing ACL graph for dp_metadata_key=%s",
-                    dp_metadata_key)
+        # logger.info("Capturing ACL graph for dp_metadata_key=%s",
+        #             dp_metadata_key)
 
         # 直接capture，不做warmup（warmup由Attention侧控制）
         self._dummy_run(aclgraph_runtime_mode=cudagraph_runtime_mode,
@@ -324,13 +321,11 @@ class NPUFFNModelRunner(NPUModelRunner, GPUFFNModelRunner):
         """
 
         is_ubatch = dp_metadata_list is not None and len(dp_metadata_list) > 1
-        logger.info("_dummy_run pre")
 
         # Only support eager mode and piecewise graph now.
         assert aclgraph_runtime_mode is None or aclgraph_runtime_mode in {
             CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL
         }
-        logger.info("_dummy_run aclgraph_runtime_mode is %s", aclgraph_runtime_mode)
         if aclgraph_runtime_mode == CUDAGraphMode.FULL:
             # Create and capture the graph.
             aclgraph = torch.npu.NPUGraph()
@@ -350,7 +345,7 @@ class NPUFFNModelRunner(NPUModelRunner, GPUFFNModelRunner):
             self._ffn_forward(aclgraph_runtime_mode=aclgraph_runtime_mode,
                               dp_metadata_list=dp_metadata_list)
             logger.info("_dummy_run eager post")
-        logger.info("self.dummy_run_call_cnt is %s", self.dummy_run_call_cnt)
+        # logger.info("self.dummy_run_call_cnt is %s", self.dummy_run_call_cnt)
         self.dummy_run_call_cnt += 1
 
     # TODO: to adapt m2nAFDConnector for deepseek w9a8 quantization.
@@ -426,7 +421,7 @@ class NPUFFNModelRunner(NPUModelRunner, GPUFFNModelRunner):
         is_ubatch = dp_metadata_list is not None and len(dp_metadata_list) > 1
         num_ubatches = self.parallel_config.num_ubatches if is_ubatch else 1
         rank_ffn_output = None
-        logger.info("_ffn_forward pre max_num_tokens:%s", self.max_num_tokens)
+        # logger.info("_ffn_forward pre max_num_tokens:%s", self.max_num_tokens)
 
         ffn_multistream_enable = self.ffn_multistream_capable and num_ubatches > 1
 
@@ -464,7 +459,7 @@ class NPUFFNModelRunner(NPUModelRunner, GPUFFNModelRunner):
                     recv_output = self.connector.recv_attn_output(metadata=afd_connector_data, ubatch_idx=ubatch_idx)
                     if hasattr(self.connector, "update_metadata") and afd_connector_data is not None:
                         self.connector.update_metadata(afd_connector_data, recv_output)
-                    logger.info('_ffn_forward recv_attn_output success, layer id is %s, recv_output:%s', layer_idx, recv_output.hidden_states.shape)
+                    # logger.info('_ffn_forward recv_attn_output success, layer id is %s, recv_output:%s', layer_idx, recv_output.hidden_states.shape)
 
                     hidden_states = recv_output.hidden_states
                     dynamic_scales = recv_output.dynamic_scales
@@ -497,7 +492,7 @@ class NPUFFNModelRunner(NPUModelRunner, GPUFFNModelRunner):
                         comm_event=self.ffn_comm_events[ubatch_idx] if layer_multistream else None)
                     if layer_multistream:
                         ffn_event_recorded[ubatch_idx] = True
-                    logger.info('_ffn_forward send_ffn_output success, layer id is %s', layer_idx)
+                    # logger.info('_ffn_forward send_ffn_output success, layer id is %s', layer_idx)
 
             if ffn_multistream_enable:
                 curr_stream = torch.npu.current_stream()
