@@ -188,7 +188,7 @@ class NPUFFNModelRunner(NPUModelRunner, GPUFFNModelRunner):
         start_free_npu_memory = torch.npu.mem_get_info()[0]
 
         set_cudagraph_capturing_enabled(True)
-        if is_warmup:
+        if not is_attn_graph_capturing:
             # Warmup模式：只执行forward，不capture graph
             self._warmup_model(dp_metadata_list=dp_metadata_list)
             logger.info("FFN warmup completed, dp_metadata_list=%s", dp_metadata_list)
