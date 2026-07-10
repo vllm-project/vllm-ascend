@@ -16,21 +16,3 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-import torch
-from vllm.config import VllmConfig
-
-
-def init_speculator(
-    vllm_config: VllmConfig,
-    device: torch.device,
-):
-    """Override GPU init_speculator for Ascend NPUs.
-    Use AscendEagleSpeculator when eagle is used.
-    """
-    speculative_config = vllm_config.speculative_config
-    assert speculative_config is not None
-    if speculative_config.use_eagle():
-        from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
-
-        return AscendEagleSpeculator(vllm_config, device)
-    raise NotImplementedError(f"{speculative_config.method} is not supported yet.")

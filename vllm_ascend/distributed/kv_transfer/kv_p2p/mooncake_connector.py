@@ -11,7 +11,7 @@ import struct
 import threading
 import time
 from collections import OrderedDict, defaultdict, deque
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypedDict
@@ -103,6 +103,7 @@ class MooncakeAgentMetadata(msgspec.Struct, omit_defaults=True, dict=True):
     block_lens: list[list[int]]
     block_strides: list[list[int]]
     local_ip: str = ""
+    handshake_port: int = 0
 
 
 @dataclass
@@ -257,6 +258,7 @@ class KVCacheSendingThread(threading.Thread):
         self.tp_rank = tp_rank
         self.prefill_tp_size = prefill_tp_size
         self.pp_rank = get_pp_group().rank_in_group
+        self.pcp_size = get_pcp_group().world_size
         self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
         self.tp_size = get_tensor_model_parallel_world_size()
         self.local_engine_id = local_engine_id
@@ -291,7 +293,7 @@ class KVCacheSendingThread(threading.Thread):
             # to have a unique port. This hack to keeps us moving. We will
             # switch when moving to etcd or where we have a single ZMQ socket in
             # the scheduler.
-            device_index = self.pp_rank * self.tp_size + self.tp_rank + self.pcp_rank * self.prefill_tp_size
+            device_index = (self.pp_rank * self.pcp_size + self.pcp_rank) * self.tp_size + self.tp_rank
             handshake_port = self.side_channel_port + device_index
             path = make_zmq_path("tcp", self.side_channel_host, handshake_port)
             logger.info(
@@ -363,7 +365,7 @@ class KVCacheSendingThread(threading.Thread):
                         if request_id not in self.port_send_num:
                             self.port_send_num[request_id] = 0
                         self.port_send_num[request_id] += 1
-                        device_index = self.pp_rank * self.tp_size + self.tp_rank + self.pcp_rank * self.prefill_tp_size
+                        device_index = (self.pp_rank * self.pcp_size + self.pcp_rank) * self.tp_size + self.tp_rank
                         handshake_port = self.side_channel_port + device_index
                         if self.port_send_num[request_id] >= remote_port_send_num[handshake_port]["num"]:
                             self.task_tracker.update_done_task_count(request_id)
@@ -1499,7 +1501,9 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_worker is not None
         return self.connector_worker.xfer_handshake_metadata
 
-    def set_xfer_handshake_metadata(self, metadata: dict[int, KVConnectorHandshakeMetadata]) -> None:
+    def set_xfer_handshake_metadata(
+        self, metadata: Mapping[int | tuple[int, ...], KVConnectorHandshakeMetadata]
+    ) -> None:
         """
         Set the KV connector handshake metadata for this connector.
 
@@ -1510,13 +1514,10 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         self.connector_scheduler.set_xfer_handshake_metadata(metadata)
 
     def set_xfer_handshake_metadata_pp_aware(
-        self, metadata: dict[tuple[int, int], KVConnectorHandshakeMetadata]
+        self, metadata: Mapping[int | tuple[int, ...], KVConnectorHandshakeMetadata]
     ) -> None:
-        tp_size = max(tp_rank for (_, tp_rank) in metadata) + 1
-        flat_metadata: dict[int, KVConnectorHandshakeMetadata] = {
-            pp_rank * tp_size + tp_rank: meta for (pp_rank, tp_rank), meta in metadata.items()
-        }
-        self.set_xfer_handshake_metadata(flat_metadata)
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.set_xfer_handshake_metadata_from_workers(metadata)
 
 
 class MooncakeConnectorScheduler:
@@ -1812,18 +1813,48 @@ class MooncakeConnectorScheduler:
             remote_block_size=self.block_size,
         )
 
-    def set_xfer_handshake_metadata(self, metadata: dict[int, KVConnectorHandshakeMetadata]) -> None:
-        """
-        Set the KV connector handshake metadata for this connector.
+    def _port_offset_from_handshake_metadata(
+        self,
+        rank_metadata: KVConnectorHandshakeMetadata,
+        metadata_key: int | tuple[int, ...],
+    ) -> int:
+        kv_port = self.vllm_config.kv_transfer_config.kv_port
+        handshake_port = getattr(rank_metadata, "handshake_port", 0)
+        if handshake_port > 0:
+            return handshake_port - kv_port
+        if isinstance(metadata_key, int):
+            return metadata_key
+        raise ValueError(f"Mooncake handshake metadata missing handshake_port for worker key {metadata_key}")
 
-        Args:
-            metadata (dict): the handshake metadata to set.
-        """
-        for local_rank, rank_metadata in metadata.items():
-            self.multi_nodes_meta_mapping[str(local_rank)] = {
+    def set_xfer_handshake_metadata_from_workers(
+        self,
+        metadata: Mapping[int | tuple[int, ...], KVConnectorHandshakeMetadata],
+    ) -> None:
+        """Build host mapping for one DP group that may span multiple nodes."""
+        if not metadata:
+            return
+
+        updated_mapping: dict[str, dict[str, Any]] = {}
+        for metadata_key, rank_metadata in metadata.items():
+            port_offset = self._port_offset_from_handshake_metadata(rank_metadata, metadata_key)
+            updated_mapping[str(port_offset)] = {
                 "host": rank_metadata.local_ip,
                 "engine_id": rank_metadata.engine_id,
             }
+
+        self.multi_nodes_meta_mapping.update(updated_mapping)
+        logger.info(
+            "MooncakeConnector set_xfer_handshake_metadata: worker_count=%d, updated=%s, multi_nodes_meta_mapping=%s",
+            len(metadata),
+            updated_mapping,
+            self.multi_nodes_meta_mapping,
+        )
+
+    def set_xfer_handshake_metadata(
+        self, metadata: Mapping[int | tuple[int, ...], KVConnectorHandshakeMetadata]
+    ) -> None:
+        """Legacy int-keyed entry point (port offset keys)."""
+        self.set_xfer_handshake_metadata_from_workers(metadata)
 
 
 class MooncakeConnectorWorker:
@@ -1887,7 +1918,7 @@ class MooncakeConnectorWorker:
             * vllm_config.parallel_config.pipeline_parallel_size
             * self.pcp_size
         )
-        device_index = (self.pp_rank + self.pcp_rank) * self.tp_size + self.tp_rank
+        device_index = (self.pp_rank * self.pcp_size + self.pcp_rank) * self.tp_size + self.tp_rank
         self.handshake_port = self.side_channel_port + device_index
         self.sockets: dict = {}
         device_name = str(torch.npu.current_device()) if self.pp_size > 1 else None
@@ -2244,6 +2275,7 @@ class MooncakeConnectorWorker:
             block_lens=self.block_len_per_addr,
             block_strides=self.block_stride_per_addr,
             local_ip=get_ip(),
+            handshake_port=self.handshake_port,
         )
         self.xfer_handshake_metadata = metadata
 
@@ -2402,6 +2434,10 @@ class MooncakeConnectorWorker:
                     break
         return compress_ratio
 
+    @staticmethod
+    def _get_kv_cache_group_id(group_idx: int, group_spec: dict[str, Any]) -> int:
+        return group_spec.get("kv_cache_group_id", group_idx)
+
     def _get_kernel_block_ids(self, layer_indices, meta, group_idx, group_spec):
         """No-CP per-group block ids at kernel granularity: (local, remote).
 
@@ -2410,8 +2446,9 @@ class MooncakeConnectorWorker:
         kernels (already on D, located via num_computed_tokens), and trims both lists
         to the shorter one so remote/local stay aligned.
         """
+        kv_cache_group_id = self._get_kv_cache_group_id(group_idx, group_spec)
         if group_spec["kv_cache_spec_type"] == "MambaSpec":
-            return list(meta.local_block_ids[group_idx]), list(meta.remote_block_ids[group_idx])
+            return list(meta.local_block_ids[kv_cache_group_id]), list(meta.remote_block_ids[kv_cache_group_id])
 
         remote_block_size = meta.remote_block_size or self.block_size
 
@@ -2423,8 +2460,8 @@ class MooncakeConnectorWorker:
         )
 
         remote_scale = remote_block_size // kernel_size
-        kernel_local = self._expand_block_ids(list(meta.local_block_ids[group_idx]), local_scale)
-        kernel_remote = self._expand_block_ids(list(meta.remote_block_ids[group_idx]), remote_scale)
+        kernel_local = self._expand_block_ids(list(meta.local_block_ids[kv_cache_group_id]), local_scale)
+        kernel_remote = self._expand_block_ids(list(meta.remote_block_ids[kv_cache_group_id]), remote_scale)
         # Skip prefix-cached remote kernels (D-side already holds them). The token size of one
         # remote kernel is kernel_size * compress_ratio, so the number to skip is
         # num_computed_tokens // (kernel_size * compress_ratio).
@@ -2519,14 +2556,15 @@ class MooncakeConnectorWorker:
             remote_handshake_port_list = [[x + meta.remote_port for x in chosen_rank_list]]
             # No CP: expand logical blocks into kernel blocks here so the transfer
             # stage consumes kernel-level ids directly (chunk_starts no longer needed).
-            local_block_ids: list = []
-            remote_block_ids: list = []
+            local_block_ids: list[list[int]] = [[] for _ in meta.local_block_ids]
+            remote_block_ids: list[list[int]] = [[] for _ in meta.remote_block_ids]
             for group_idx, (group_spec, layer_indices) in self.kv_group2layeridx.items():
                 local_kernel_block_ids, remote_kernel_block_ids = self._get_kernel_block_ids(
                     layer_indices, meta, group_idx, group_spec
                 )
-                local_block_ids.append(local_kernel_block_ids)
-                remote_block_ids.append(remote_kernel_block_ids)
+                kv_cache_group_id = self._get_kv_cache_group_id(group_idx, group_spec)
+                local_block_ids[kv_cache_group_id] = local_kernel_block_ids
+                remote_block_ids[kv_cache_group_id] = remote_kernel_block_ids
             local_block_ids_list = [tuple(local_block_ids) for _ in remote_handshake_port_list]
             remote_block_ids_list = [tuple(remote_block_ids) for _ in remote_handshake_port_list]
             return (
@@ -2634,13 +2672,21 @@ class MooncakeConnectorWorker:
             local_remote_block_port_mappings: dict[int, list[list[int]]],
         ) -> dict[int, RemotePortInfo]:
             remote_port_send_num: dict[int, RemotePortInfo] = {}
-            for port in range(prefill_tp_size * meta.remote_pcp_size):
-                remote_host_info = meta.remote_multi_nodes_meta_mapping.get(str(port), None)
+            port_offsets: set[int] = set(range(prefill_tp_size * meta.remote_pcp_size))
+            for key in meta.remote_multi_nodes_meta_mapping:
+                port_offsets.add(int(key))
+            for remote_port_head_list in local_remote_block_port_mappings.values():
+                for remote_port_list in remote_port_head_list:
+                    for remote_port in remote_port_list:
+                        port_offsets.add(remote_port - meta.remote_port)
+
+            for port_offset in port_offsets:
+                remote_host_info = meta.remote_multi_nodes_meta_mapping.get(str(port_offset), None)
                 if remote_host_info is None:
                     remote_host = meta.remote_host
                 else:
                     remote_host = remote_host_info["host"]
-                remote_port_send_num[meta.remote_port + port] = {"num": 0, "host": remote_host}
+                remote_port_send_num[meta.remote_port + port_offset] = {"num": 0, "host": remote_host}
 
             for remote_port_head_list in local_remote_block_port_mappings.values():
                 for remote_port_list in remote_port_head_list:

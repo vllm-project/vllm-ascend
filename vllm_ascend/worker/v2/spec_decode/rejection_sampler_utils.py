@@ -19,11 +19,25 @@
 
 import torch
 from vllm.triton_utils import tl, triton
-from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
-    _compute_block_stats_kernel,
-    _compute_global_lse,
-    _insert_resampled_kernel,
-)
+
+from vllm_ascend.utils import vllm_version_is
+
+if not vllm_version_is("0.23.0"):
+    from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
+        _compute_global_logsumexp as _compute_global_lse,
+    )
+    from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
+        _compute_local_logits_stats_kernel as _compute_block_stats_kernel,
+    )
+    from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
+        _insert_resampled_kernel,
+    )
+else:
+    from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
+        _compute_block_stats_kernel,
+        _compute_global_lse,
+        _insert_resampled_kernel,
+    )
 
 
 @triton.jit
@@ -337,6 +351,10 @@ def rejection_sample(
     # [num_speculative_steps]
     synthetic_conditional_rates: torch.Tensor | None = None,
     use_fp64: bool = False,
+    # TODO: refactor speculative decoding functionality in a future PR.
+    # `use_block_verification` is accepted but not yet implemented on NPU;
+    # wire it up when the block verification path is supported.
+    use_block_verification: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if use_fp64:
         raise NotImplementedError("FP64 rejection sampling is not supported on NPU.")

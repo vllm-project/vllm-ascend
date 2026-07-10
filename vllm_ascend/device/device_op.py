@@ -22,6 +22,7 @@ import torch.nn.functional as F
 import torch_npu
 from vllm.triton_utils import HAS_TRITON
 
+from vllm_ascend.device import utils as device_utils
 from vllm_ascend.device.mxfp_compat import (
     FLOAT8_E8M0FNU_DTYPE,
     QUANT_DTYPES,
@@ -49,6 +50,54 @@ class BaseDeviceAdaptor:
             key=key, value=value, key_cache=key_cache, value_cache=value_cache, slot_indices=slot_mapping
         )
 
+    @classmethod
+    def npu_fused_infer_attention_score(
+        cls,
+        query: torch.Tensor,
+        key: torch.Tensor | None,
+        value: torch.Tensor | None,
+        attn_metadata: Any,
+        *,
+        key_cache: torch.Tensor | None,
+        value_cache: torch.Tensor | None,
+        current_key: torch.Tensor,
+        current_value: torch.Tensor,
+        num_heads: int,
+        num_key_value_heads: int,
+        head_size: int,
+        scale: float,
+        is_prefill_no_cache: bool,
+        **kwargs,
+    ):
+        # TODO: Remove this fallback when A2/A3 FIA TND supports Gemma4's
+        # 512-dim global attention heads. The FIA path slices/replaces
+        # query/key/value before this wrapper, so large-head prefill fallback
+        # must use the original current-token K/V.
+        if head_size == device_utils.FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE:
+            return device_utils.npu_large_head_prefill_attention(
+                query,
+                current_key,
+                current_value,
+                attn_metadata,
+                key_cache=key_cache,
+                value_cache=value_cache,
+                num_heads=num_heads,
+                num_kv_heads=num_key_value_heads,
+                head_size=head_size,
+                scale=scale,
+                is_prefill_no_cache=is_prefill_no_cache,
+            )
+
+        return torch_npu.npu_fused_infer_attention_score(
+            query=query,
+            key=key,
+            value=value,
+            num_key_value_heads=num_key_value_heads,
+            num_heads=num_heads,
+            scale=scale,
+            **kwargs,
+        )
+
     @staticmethod
     def npu_moe_init_routing(
         hidden_states,
@@ -61,6 +110,7 @@ class BaseDeviceAdaptor:
         expert_tokens_num_flag: bool = True,
         active_expert_range=None,
         quant_mode: int = -1,
+        act_quant_type: torch.dtype | None = None,
     ):
         return torch.ops._C_ascend.npu_moe_init_routing_custom(
             hidden_states,
@@ -818,6 +868,35 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             cache_mode="Norm",
         )
 
+    @classmethod
+    def npu_fused_infer_attention_score(
+        cls,
+        query: torch.Tensor,
+        key: torch.Tensor | None,
+        value: torch.Tensor | None,
+        attn_metadata: Any,
+        *,
+        key_cache: torch.Tensor | None,
+        value_cache: torch.Tensor | None,
+        current_key: torch.Tensor,
+        current_value: torch.Tensor,
+        num_heads: int,
+        num_key_value_heads: int,
+        head_size: int,
+        scale: float,
+        is_prefill_no_cache: bool,
+        **kwargs,
+    ):
+        return torch_npu.npu_fused_infer_attention_score(
+            query=query,
+            key=key,
+            value=value,
+            num_key_value_heads=num_key_value_heads,
+            num_heads=num_heads,
+            scale=scale,
+            **kwargs,
+        )
+
     @staticmethod
     def npu_moe_init_routing(
         hidden_states,
@@ -830,7 +909,9 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         expert_tokens_num_flag: bool = True,
         active_expert_range=None,
         quant_mode: int = -1,
+        act_quant_type: torch.dtype | None = None,
     ):
+        input_dtype = act_quant_type or hidden_states.dtype
         return torch_npu.npu_moe_init_routing_v2(
             hidden_states,
             topk_ids,
@@ -841,6 +922,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             expert_tokens_num_flag=expert_tokens_num_flag,
             active_expert_range=active_expert_range,
             quant_mode=quant_mode,
+            x_dtype=input_dtype if input_dtype in QUANT_DTYPES else None,
         )
 
     @staticmethod

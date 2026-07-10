@@ -27,6 +27,7 @@ import logging
 import multiprocessing
 import os
 import shlex
+import signal
 import subprocess
 import sys
 import threading
@@ -227,18 +228,23 @@ class MooncakeLauncher:
         mooncake_ld_path = "/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:"
         os.environ["LD_LIBRARY_PATH"] = mooncake_ld_path + curr_ld_path
         env = os.environ.copy()
-        self.process = subprocess.Popen(cmd, env=env)
+        self.process = subprocess.Popen(cmd, env=env, start_new_session=True)
         return self
 
     def __exit__(self, exc_type, exc, tb):
         if not self.process:
             return
         logger.info("Stopping mooncake server...")
-        self.process.terminate()
         try:
+            pgid = os.getpgid(self.process.pid)
+            os.killpg(pgid, signal.SIGTERM)
             self.process.wait(timeout=5)
         except subprocess.TimeoutExpired:
-            self.process.kill()
+            logger.warning("Mooncake server did not stop gracefully, force killing...")
+            os.killpg(pgid, signal.SIGKILL)
+            self.process.wait(timeout=5)
+        except ProcessLookupError:
+            pass
 
 
 class RemoteOpenAIServer:
@@ -871,6 +877,24 @@ def _run_vllm_runner_dp_worker(conn, llm_kwargs: dict[str, Any], dp_rank: int, d
         os.environ["VLLM_DP_MASTER_IP"] = "127.0.0.1"
         os.environ["VLLM_DP_MASTER_PORT"] = str(master_port)
         os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+
+        from vllm_ascend.utils import vllm_version_is
+
+        if not vllm_version_is("0.23.0"):
+            import torch
+
+            visible = os.environ.get("ASCEND_RT_VISIBLE_DEVICES", "")
+            full_device_ids: list[str] = [d for d in visible.split(",") if d]
+            if not full_device_ids:
+                full_device_ids = [str(i) for i in range(torch.npu.device_count())]
+
+            if llm_kwargs.get("distributed_executor_backend") == "ray":
+                devs = full_device_ids
+                chunk = max(len(devs) // dp_size, 1)
+                start = dp_rank * chunk
+                os.environ["ASCEND_RT_VISIBLE_DEVICES"] = ",".join(devs[start : start + chunk])
+            else:
+                llm_kwargs["device_ids"] = full_device_ids
 
         llm = LLM(**llm_kwargs)
         conn.send({"status": "ready", "rank": dp_rank})
@@ -1875,6 +1899,16 @@ def llama32_lora_files():
 @pytest.fixture(scope="session")
 def qwen35_text_lora_files():
     return snapshot_download(repo_id="vllm-ascend/qwen35-4b-text-only-sql-lora")
+
+
+@pytest.fixture(scope="session")
+def qwen3moe_lora_files():
+    return snapshot_download(repo_id="vllm-ascend/qwen3-moe-text2sql-spider")
+
+
+@pytest.fixture(scope="session")
+def olmoe_lora_files():
+    return snapshot_download(repo_id="vllm-ascend/olmoe-instruct-text2sql-spider")
 
 
 def qwen_prompt(questions: list[str]) -> list[str]:
