@@ -46,15 +46,16 @@ If the W8A8 quantized weights are not available for direct download, you can obt
 
 You can use the official all-in-one Docker image for Qwen3 MoE models.
 
-**Docker Pull:**
-
-```bash
-docker pull quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
-```
-
-**Docker Run:**
-
 === "Atlas 800I A3"
+
+    **Docker Pull:**
+
+    ```bash
+
+    docker pull quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
+    ```
+
+    **Docker Run:**
 
     ```bash
 
@@ -97,6 +98,15 @@ docker pull quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
         If you are on a shared machine, map only the chips you need (e.g., `/dev/davinci[0-7]` for NPU 0-3).
 
 === "Atlas 800I A2"
+
+    **Docker Pull:**
+
+    ```bash
+
+    docker pull quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
+    ```
+
+    **Docker Run:**
 
     ```bash
 
