@@ -171,6 +171,9 @@ class AscendPrefillContextParallelMetadata:
     # when entering from linear-attention to attention
     pcp_enter_fa_restore_idx: torch.Tensor = None
 
+    # restore the original FA padded layout without boolean-mask scatter
+    pcp_fa_padding_restore_idx: torch.Tensor = None
+
     # scatter the full sequence across all pcp ranks
     # when exiting from attention to linear-attention
     pcp_exit_fa_scatter_idx: torch.Tensor = None
