@@ -221,6 +221,7 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
                 pcp_fa_query_idx=common_long_seq_metadata.pcp_fa_query_idx,
                 pcp_padded_tokens_fla=common_long_seq_metadata.pcp_padded_tokens_fla,
                 pcp_enter_fa_restore_idx=common_long_seq_metadata.pcp_enter_fa_restore_idx,
+                pcp_fa_padding_restore_idx=common_long_seq_metadata.pcp_fa_padding_restore_idx,
                 max_num_tokens_across_pcp=common_long_seq_metadata.max_num_tokens_across_pcp,
                 total_num_scheduled_tokens=common_long_seq_metadata.total_num_scheduled_tokens,
             )
@@ -894,18 +895,18 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             attn_metadata.prefill.pcp_metadata.pcp_enter_fa_restore_idx if attn_metadata.prefill.pcp_metadata else None
         )
         actual_qkv = torch.index_select(all_qkv, 0, pcp_enter_fa_restore_idx)
-        qkv_fa_padding_workspace = query.new_empty(
-            (num_actual_tokens_pcp_padded, (self.num_heads + 2 * self.num_kv_heads) * self.head_size)
-        )
-
         decode_offset = attn_metadata.num_decode_tokens * self.pcp_size
-        qkv_fa_padding_workspace[:decode_offset] = actual_qkv[:decode_offset]
-
-        pcp_unpad_mask = attn_metadata.prefill.pcp_metadata.pcp_unpad_mask[
-            attn_metadata.num_decode_tokens * self.pcp_size :
-        ]
-        qkv_fa_padding_workspace[decode_offset:][pcp_unpad_mask] = actual_qkv[decode_offset:]
-        qkv_fa_padding_workspace[decode_offset:][~pcp_unpad_mask] = 0
+        pcp_fa_padding_restore_idx = attn_metadata.prefill.pcp_metadata.pcp_fa_padding_restore_idx
+        if actual_qkv.shape[0] == num_actual_tokens_pcp_padded:
+            qkv_fa_padding_workspace = actual_qkv[:num_actual_tokens_pcp_padded]
+        else:
+            assert pcp_fa_padding_restore_idx is not None
+            actual_qkv_with_zero = F.pad(actual_qkv, pad=(0, 0, 0, 1), mode="constant", value=0)
+            qkv_fa_padding_workspace = torch.index_select(
+                actual_qkv_with_zero,
+                0,
+                pcp_fa_padding_restore_idx,
+            )
 
         q, k, v = qkv_fa_padding_workspace.split(
             [

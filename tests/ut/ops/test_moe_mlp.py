@@ -146,8 +146,8 @@ class TestUnifiedApplyMlpRequest(unittest.TestCase):
 
     def test_request_quant_path(self):
         for quant_type, mxfp_dtype in (
-            (QuantType.MXFP8, torch.float8_e4m3fn),
-            (QuantType.MXFP4, MXFP4_TEST_DTYPE),
+            (QuantType.W8A8MXFP, torch.float8_e4m3fn),
+            (QuantType.W4A4MXFP, MXFP4_TEST_DTYPE),
         ):
             with self.subTest(quant_type=quant_type):
                 hidden_states = torch.randn(2, 8)
