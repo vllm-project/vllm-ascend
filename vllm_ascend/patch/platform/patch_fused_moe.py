@@ -27,7 +27,10 @@
 #   2. from vllm_ascend import ops
 #   3. model loading  ->  deepseek_v2 imported  ->  gets patched FusedMoE  ✓
 
+from contextlib import contextmanager
+
 import vllm.model_executor.layers.fused_moe as _fused_moe_pkg
+import vllm.model_executor.layers.fused_moe.config as _fused_moe_config
 import vllm.model_executor.layers.fused_moe.layer as _fused_moe_layer
 
 from vllm_ascend.utils import is_310p
@@ -38,7 +41,42 @@ _original_FusedMoE = _fused_moe_layer.FusedMoE
 if is_310p():
     from vllm_ascend._310p.fused_moe.fused_moe import AscendMoERunner310 as _DefaultAscendMoERunner
 else:
-    from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner as _DefaultAscendMoERunner
+    from vllm_ascend.ops.fused_moe.fused_moe import (
+        AscendMoERunner as _DefaultAscendMoERunner,
+    )
+
+
+@contextmanager
+def _allow_nongated_moe_constructor_on_ascend():
+    # vLLM gates non-gated MoE construction by backend. Ascend provides its own
+    # execution path, so bypass only the constructor capability check.
+    platform = _fused_moe_config.current_platform
+    original_is_cuda_alike = platform.is_cuda_alike
+    platform.is_cuda_alike = lambda: True
+    try:
+        yield
+    finally:
+        platform.is_cuda_alike = original_is_cuda_alike
+
+
+def _is_nongated_moe_kwargs(kwargs):
+    if "is_act_and_mul" in kwargs:
+        return not kwargs["is_act_and_mul"]
+
+    activation = kwargs.get("activation")
+    if activation is None:
+        return False
+
+    is_gated = getattr(activation, "is_gated", None)
+    if is_gated is not None:
+        return not is_gated
+
+    try:
+        from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+
+        return not MoEActivation.from_str(activation).is_gated
+    except (ImportError, AttributeError, ValueError):
+        return False
 
 
 def _ascend_FusedMoE(*args, runner_cls=None, runner_args=None, **kwargs):
@@ -51,6 +89,9 @@ def _ascend_FusedMoE(*args, runner_cls=None, runner_args=None, **kwargs):
     if tid2eid is not None:
         runner_args = dict(runner_args) if runner_args is not None else {}
         runner_args["tid2eid"] = tid2eid
+    if _is_nongated_moe_kwargs(kwargs):
+        with _allow_nongated_moe_constructor_on_ascend():
+            return _original_FusedMoE(*args, runner_cls=runner_cls, runner_args=runner_args, **kwargs)
     return _original_FusedMoE(*args, runner_cls=runner_cls, runner_args=runner_args, **kwargs)
 
 

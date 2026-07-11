@@ -169,6 +169,20 @@ class _Gate(nn.Module):
         return torch.zeros((*hidden_states.shape[:-1], 1), dtype=hidden_states.dtype), None
 
 
+def test_shared_experts_part1_supports_up_proj_without_gate_up_proj():
+    runner = AscendMoERunner.__new__(AscendMoERunner)
+    nn.Module.__init__(runner)
+    hidden_states = torch.tensor([[1.0, -1.0]])
+    up_out = torch.tensor([[2.0, -2.0]])
+    shared_experts = SimpleNamespace(up_proj=MagicMock(return_value=(up_out, None)))
+    runner._shared_experts = shared_experts
+
+    output = runner._shared_experts_part1(hidden_states)
+
+    torch.testing.assert_close(output, up_out)
+    shared_experts.up_proj.assert_called_once_with(hidden_states)
+
+
 @pytest.mark.parametrize("with_gate", [False, True])
 def test_shared_experts_part2_applies_optional_gate(with_gate):
     runner = AscendMoERunner.__new__(AscendMoERunner)
@@ -195,6 +209,7 @@ def test_shared_forward_impl_returns_current_runner_contract(monkeypatch, has_sh
     nn.Module.__init__(runner)
     runner._shared_experts = object() if has_shared_experts else None
     hidden_states = torch.randn(2, 4)
+    shared_experts_input = torch.randn(2, 6)
     router_logits = torch.randn(2, 3)
     routed_out = torch.randn(2, 4)
     shared_out = torch.randn(2, 4)
@@ -212,7 +227,7 @@ def test_shared_forward_impl_returns_current_runner_contract(monkeypatch, has_sh
     monkeypatch.setattr(AscendMoERunner, "is_internal_router", property(lambda _: False))
     monkeypatch.setattr(fused_moe_module.torch.npu, "current_stream", lambda: current_stream)
 
-    result = runner.shared_forward_impl(hidden_states, router_logits)
+    result = runner.shared_forward_impl(hidden_states, router_logits, shared_experts_input)
 
     runner.no_shared_forward_impl.assert_called_once_with(
         hidden_states,
@@ -223,6 +238,7 @@ def test_shared_forward_impl_returns_current_runner_contract(monkeypatch, has_sh
         assert result[0] is shared_out
         assert result[1] is routed_out
         runner._forward_shared_experts.assert_called_once()
+        assert runner._forward_shared_experts.call_args.args[0] is shared_experts_input
     else:
         assert result is routed_out
         runner._forward_shared_experts.assert_not_called()

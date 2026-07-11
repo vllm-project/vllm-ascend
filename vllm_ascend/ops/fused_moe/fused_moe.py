@@ -472,7 +472,11 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         )
 
     def _shared_experts_part1(self, hidden_states: torch.Tensor):
-        shared_gate_up, _ = self._shared_experts.gate_up_proj(hidden_states)  # type: ignore
+        assert self._shared_experts is not None
+        shared_up_proj = getattr(self._shared_experts, "gate_up_proj", None)
+        if shared_up_proj is None:
+            shared_up_proj = self._shared_experts.up_proj
+        shared_gate_up, _ = shared_up_proj(hidden_states)  # type: ignore
         return shared_gate_up
 
     def _shared_experts_part2(self, hidden_states: torch.Tensor, shared_gate_up: torch.Tensor):
@@ -636,7 +640,8 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             return routed_out
 
     def _forward_shared_experts(self, hidden_states: torch.Tensor, fused_moe_evts: FusedMoEEvents):
-        if self._shared_experts is None:
+        shared_experts = self._shared_experts
+        if shared_experts is None:
             return None
 
         def maybe_wait_event(evt: torch.npu.Event | None):
@@ -645,10 +650,16 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
 
         with npu_stream_switch(shared_experts_calculation_stream(), enabled=self.multistream_overlap_shared_expert):
             # Only used for int quantization
-            has_quantized_shared = hasattr(self._shared_experts.gate_up_proj, "weight_scale") and hasattr(
-                self._shared_experts.down_proj, "weight_scale"
+            shared_up_proj = getattr(shared_experts, "gate_up_proj", None)
+            if shared_up_proj is None:
+                shared_up_proj = getattr(shared_experts, "up_proj", None)
+            has_quantized_shared = (
+                shared_up_proj is not None
+                and hasattr(shared_up_proj, "weight_scale")
+                and hasattr(shared_experts.down_proj, "weight_scale")
             )
             if has_quantized_shared and self.quant_type in (QuantType.W8A8, QuantType.W4A8):
+                assert shared_up_proj is not None
                 original_dtype = hidden_states.dtype
                 # Execute dynamic quant concurrently with MoE gate.
                 torch.npu.current_stream().wait_event(fused_moe_evts.before_routed_experts)
@@ -658,8 +669,8 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 maybe_wait_event(fused_moe_evts.after_routed_experts)
                 hidden_states = torch_npu.npu_quant_matmul(
                     quantized_x,
-                    self._shared_experts.gate_up_proj.weight,
-                    self._shared_experts.gate_up_proj.weight_scale,
+                    shared_up_proj.weight,
+                    shared_up_proj.weight_scale,
                     pertoken_scale=None,
                     bias=None,
                     output_dtype=torch.int32,
@@ -669,7 +680,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 maybe_wait_event(fused_moe_evts.before_gmm2)
                 quantized_x, swiglu_out_scale = torch.ops._C_ascend.npu_dequant_swiglu_quant(
                     x=hidden_states,
-                    weight_scale=self._shared_experts.gate_up_proj.weight_scale_fp32,
+                    weight_scale=shared_up_proj.weight_scale_fp32,
                     activation_scale=pertoken_scale,
                     bias=None,
                     quant_scale=None,
@@ -685,13 +696,14 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 maybe_wait_event(fused_moe_evts.before_combine)
                 shared_out = torch_npu.npu_quant_matmul(
                     quantized_x,
-                    self._shared_experts.down_proj.weight,
-                    self._shared_experts.down_proj.weight_scale,
+                    shared_experts.down_proj.weight,
+                    shared_experts.down_proj.weight_scale,
                     pertoken_scale=swiglu_out_scale,
                     bias=None,
                     output_dtype=original_dtype,
                 )
             elif has_quantized_shared and self.quant_type == QuantType.W4A8MXFP:
+                assert shared_up_proj is not None
                 original_dtype = hidden_states.dtype
                 # Execute dynamic quant concurrently with MoE gate.
                 torch.npu.current_stream().wait_event(fused_moe_evts.before_routed_experts)
@@ -701,7 +713,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 # Execute the gate projection and activation concurrently with the
                 # dispatch communication.
                 maybe_wait_event(fused_moe_evts.before_dispatch)
-                hidden_states = self._shared_experts.gate_up_proj((quantized_x, pertoken_scale))[0]
+                hidden_states = shared_up_proj((quantized_x, pertoken_scale))[0]
                 # Execute activation concurrently with gmm2.
                 maybe_wait_event(fused_moe_evts.before_gmm2)
                 quantized_x, swiglu_out_scale, _ = torch.ops._C_ascend.npu_swiglu_group_quant(
@@ -715,7 +727,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 # Execute the down projection concurrently with the combine
                 # communication.
                 maybe_wait_event(fused_moe_evts.before_combine)
-                shared_out = self._shared_experts.down_proj((quantized_x, swiglu_out_scale))[0]
+                shared_out = shared_experts.down_proj((quantized_x, swiglu_out_scale))[0]
             else:
                 # Ensure the shared experts wait for hidden_states to be ready.
                 torch.npu.current_stream().wait_event(fused_moe_evts.before_routed_experts)
@@ -744,8 +756,12 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         return shared_out
 
     def shared_forward_impl(  # type: ignore[override]
-        self, hidden_states: torch.Tensor, router_logits: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        shared_experts_input: torch.Tensor | None = None,
     ):
+        shared_experts_input = shared_experts_input if shared_experts_input is not None else hidden_states
         if self.is_internal_router:
             gate = self.gate
             assert gate is not None
@@ -753,7 +769,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             # increase with extra hidden states. We also assume that all gate
             # linear is unquantized so that we the weight is pre-casted in
             # process_weights_after_loading of AscendUnquantizedLinearMethod.
-            hidden_states_fp32 = hidden_states.float()
+            hidden_states_fp32 = shared_experts_input.float()
             before_routed_experts = torch.npu.current_stream().record_event()
             router_logits = F.linear(hidden_states_fp32, gate.weight_fp32)
             after_routed_experts = torch.npu.current_stream().record_event()
@@ -772,7 +788,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             return routed_out
 
         shared_out = self._forward_shared_experts(
-            hidden_states,
+            shared_experts_input,
             FusedMoEEvents(
                 after_routed_experts=after_routed_experts,
                 before_routed_experts=before_routed_experts,
@@ -795,4 +811,4 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             if self.shared_experts is None:
                 return self.no_shared_forward_impl(hidden_states, router_logits)
             else:
-                return self.shared_forward_impl(hidden_states, router_logits)
+                return self.shared_forward_impl(hidden_states, router_logits, shared_experts_input)
