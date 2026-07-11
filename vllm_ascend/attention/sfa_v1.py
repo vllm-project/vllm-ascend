@@ -407,27 +407,28 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
                 actual_seq_lengths_key = self.actual_seq_lengths_key
 
             num_segs = cum_query_lens.shape[0]
-            last_token = 0
-            cum = 0
-            for i in range(0, num_segs):
-                global_start = last_token
-                global_end = cum_query_lens[i].item()
-                last_token = global_end
 
-                req_local_start = max(global_start, local_start)
-                req_local_end = min(global_end, local_end_with_pad)
-                num_local_tokens = req_local_end - req_local_start
+            # Vectorized per-request local query/key lengths for this rank's
+            # [local_start, local_end_with_pad) slice. Replaces a Python loop
+            # that did 2 .item() NPU->CPU syncs per request (2 * num_reqs
+            # syncs/step); now fully on-device with zero syncs.
+            # global_start[i] = 0 for i==0, else cum_query_lens[i-1]
+            global_start = common_attn_metadata.query_start_loc[:num_segs]
+            global_end = cum_query_lens
 
-                if num_local_tokens > 0:
-                    cum += num_local_tokens
-                    actual_seq_lengths_query[i] = cum
+            # Clip each request's [global_start, global_end) to the local range.
+            # num_local_tokens may be < 0 when the request falls entirely
+            # outside [local_start, local_end_with_pad); clamp before cumsum.
+            req_local_start = global_start.clamp(min=local_start)
+            req_local_end = global_end.clamp(max=local_end_with_pad)
+            num_local_tokens = req_local_end - req_local_start
 
-                    offset = global_end - req_local_end
-                    actual_seq_lengths_key[i] = seq_lens[i].item() - offset
-                else:
-                    actual_seq_lengths_query[i] = cum
-                    actual_seq_lengths_key[i] = 0
+            local_query_lens = torch.cumsum(num_local_tokens.clamp(min=0), dim=0)
+            offset = global_end - req_local_end  # request tokens on later ranks
+            local_key_lens = torch.where(num_local_tokens > 0, seq_lens - offset, 0)
 
+            actual_seq_lengths_query[:num_segs] = local_query_lens
+            actual_seq_lengths_key[:num_segs] = local_key_lens
             actual_seq_lengths_query = actual_seq_lengths_query[:num_reqs]
             actual_seq_lengths_key = actual_seq_lengths_key[:num_reqs]
 
