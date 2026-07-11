@@ -43,7 +43,7 @@ deployment:
       --enable-chunked-prefill
       --enable-prefix-caching
       --async-scheduling
-      --additional-config '{"enable_npugraph_ex": true,"fuse_muls_add":true,"multistream_overlap_shared_expert":true}'
+      --additional-config '{"fuse_muls_add":true,"multistream_overlap_shared_expert":true}'
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
       --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
   -
@@ -71,7 +71,7 @@ deployment:
       --enable-chunked-prefill
       --enable-prefix-caching
       --async-scheduling
-      --additional-config '{"enable_npugraph_ex": true,"fuse_muls_add":true,"multistream_overlap_shared_expert":true}'
+      --additional-config '{"fuse_muls_add":true,"multistream_overlap_shared_expert":true}'
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
       --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
 benchmarks:
