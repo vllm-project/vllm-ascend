@@ -13,7 +13,7 @@ config:
   - node_index: 0
     port_start: 7100
     dp_rpc_port: 12321
-    dp_size: 2
+    dp_size: 4
     dp_size_local: 2
     dp_rank_start: 0
     tp_size: 8
@@ -22,9 +22,9 @@ config:
   - node_index: 1
     port_start: 7100
     dp_rpc_port: 12321
-    dp_size: 2
+    dp_size: 4
     dp_size_local: 2
-    dp_rank_start: 0
+    dp_rank_start: 2
     tp_size: 8
     dp_address: "${NODE_0_IP}"
 
