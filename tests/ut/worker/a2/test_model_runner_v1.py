@@ -7,6 +7,8 @@ import torch
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec, KVCacheTensor
 
+from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+from vllm_ascend.utils import AscendDeviceType
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 
@@ -26,6 +28,9 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         runner.vllm_config.kv_transfer_config = None
         runner.model_config = MagicMock()
         runner.model_config.use_mla = True
+        runner.model_config.hf_text_config = SimpleNamespace(index_head_dim=128)
+        runner.c8_k_cache_dtype = torch.int8
+        runner.c8_k_scale_cache_dtype = torch.float16
         backend = MagicMock()
         backend.get_kv_cache_shape.side_effect = lambda num_blocks, block_size, num_kv_heads, head_size: (
             2,
@@ -137,6 +142,92 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
 
         self.assertEqual(raw_k_cache.numel(), 2 * 16 * 512 * 2)
         self.assertEqual(raw_v_cache.numel(), 2 * 16 * 64 * 2)
+
+    @patch("vllm_ascend.worker.model_runner_v1.get_ascend_device_type", return_value=AscendDeviceType.A3)
+    def test_sparse_c8_replicated_indexer_allocates_aligned_cache(self, _mock_device_type):
+        runner = self._build_runner()
+        runner.use_sparse = True
+        runner.attn_backend.get_kv_cache_shape.side_effect = (
+            lambda num_blocks, block_size, num_kv_heads, head_size: (
+                num_blocks,
+                block_size,
+                num_kv_heads,
+                head_size,
+            )
+        )
+        layer_name = "model.layers.1.self_attn.attn"
+        runner._get_attention_kv_cache_dims = lambda _layer_name, _spec: (512, 0)
+        spec = AscendMLAAttentionSpec(
+            block_size=16,
+            num_kv_heads=1,
+            head_size=640,
+            sparse_head_dim=(512, 0, 128),
+            dtype=torch.bfloat16,
+            cache_dtype_str="auto",
+            cache_sparse_c8=True,
+            c8_k_cache_dtype=torch.int8,
+            c8_k_scale_cache_dtype=torch.float16,
+            sfa_dcp_replicated_indexer_size=4,
+        )
+        num_blocks = 2
+        kv_cache_config = KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=[
+                KVCacheTensor(
+                    size=spec.page_size_bytes * num_blocks,
+                    shared_by=[layer_name],
+                )
+            ],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    layer_names=[layer_name],
+                    kv_cache_spec=spec,
+                )
+            ],
+        )
+
+        raw_caches = runner._allocate_kv_cache_tensors(kv_cache_config)
+        raw_k_cache, raw_indexer_cache, raw_indexer_scale_cache = raw_caches[layer_name]
+
+        self.assertEqual(raw_k_cache.numel(), num_blocks * 16 * 512)
+        self.assertEqual(raw_indexer_cache.numel(), num_blocks * 4 * 16 * 128)
+        self.assertEqual(raw_indexer_scale_cache.numel(), num_blocks * 4 * 16 * 2)
+
+        runner._kv_cache_spec_attn_group_iterator = lambda: [
+            SimpleNamespace(
+                kv_cache_spec=spec,
+                backend=runner.attn_backend,
+                layer_names=[layer_name],
+            )
+        ]
+        kv_caches = runner._reshape_kv_cache_tensors(kv_cache_config, raw_caches)
+        k_cache, indexer_cache, indexer_scale_cache = kv_caches[layer_name]
+
+        self.assertEqual(k_cache.shape, (num_blocks, 16, 1, 512))
+        self.assertEqual(indexer_cache.shape, (num_blocks * 4, 16, 1, 128))
+        self.assertEqual(indexer_scale_cache.shape, (num_blocks * 4, 16, 1, 1))
+
+    def test_sparse_replicated_indexer_page_size_includes_replicas(self):
+        spec = AscendMLAAttentionSpec(
+            block_size=16,
+            num_kv_heads=1,
+            head_size=704,
+            sparse_head_dim=(512, 64, 128),
+            dtype=torch.bfloat16,
+            cache_dtype_str="auto",
+            sfa_dcp_replicated_indexer_size=4,
+        )
+
+        self.assertEqual(spec.page_size_bytes, 16 * (512 + 64 + 128 * 4) * 2)
+        self.assertEqual(
+            spec.sparse_kv_cache_ratio,
+            (
+                (512 + 64 + 128 * 4) / 512,
+                (512 + 64 + 128 * 4) / 64,
+                (512 + 64 + 128 * 4) / (128 * 4),
+                None,
+            ),
+        )
 
 
 class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
