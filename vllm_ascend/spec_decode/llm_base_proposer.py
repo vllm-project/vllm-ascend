@@ -3,7 +3,7 @@ import copy
 from collections.abc import Callable
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from functools import partial
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import torch
@@ -554,6 +554,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             num_tokens_across_dp,
             _,
         ) = self.runner._sync_metadata_across_dp(num_tokens, is_draft_model=True)
+        pcp_manager = getattr(self.runner, "pcp_manager", None)
 
         multi_steps_attn_metadata = []
         if not self.use_cuda_graph:
@@ -609,9 +610,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 is_prefilling=torch.zeros(num_reqs, dtype=torch.bool),
                 max_seq_len=0,
             )
-            if self.pcp_size * self.dcp_size > 1:
+            if pcp_manager is not None:
                 # update long_seq related params and flatten block_table
-                common_attn_metadata.prefill_context_parallel_metadata = self.runner.pcp_manager.long_seq_metadata
+                common_attn_metadata.prefill_context_parallel_metadata = pcp_manager.long_seq_metadata
 
             assert len(self.draft_attn_groups) > 0
             builder = self.draft_attn_groups[0].get_metadata_builder()
@@ -773,10 +774,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             num_prefill_reqs=num_prefill_reqs,
             num_decode_reqs=num_decode_reqs,
         )
-        if self.pcp_size * self.dcp_size > 1:
+        assert self.runner is not None
+        pcp_manager = getattr(self.runner, "pcp_manager", None)
+        if pcp_manager is not None:
             assert long_seq_args is not None
             _, ori_token_indices_to_sample = long_seq_args
-        assert self.runner is not None
 
         has_lora = len(self.runner.input_batch.lora_id_to_lora_request) > 0
         uniform_decode = target_model_batch_desc.uniform
@@ -850,8 +852,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     common_attn_metadata.num_computed_tokens_cpu, num_reqs_padded
                 )
 
-            if self.pcp_size > 1:
-                self.runner.pcp_manager.mask_spec_decode_restore_idx_for_graph(
+            if pcp_manager is not None and self.pcp_size > 1:
+                pcp_manager.mask_spec_decode_restore_idx_for_graph(
                     common_attn_metadata.prefill_context_parallel_metadata.pcp_allgather_restore_idx
                 )
         else:
@@ -944,8 +946,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             "slot_indices": None,
             "mtp_slot_mapping": None,
         }
-        if self.pcp_size * self.dcp_size > 1:
-            pcp_mtp_inputs = self.runner.pcp_manager.prepare_spec_decode_mtp_drafting_inputs(
+        if pcp_manager is not None:
+            pcp_mtp_inputs = pcp_manager.prepare_spec_decode_mtp_drafting_inputs(
                 common_attn_metadata=common_attn_metadata,
                 attn_metadata=attn_metadata_i,
                 ori_token_indices_to_sample=ori_token_indices_to_sample,
@@ -1018,7 +1020,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 "num_tokens": num_tokens,
                 "is_prefill": is_prefill_batch,
             }
-            run_draft = partial(self._runnable, **model_inputs)
+            runnable = cast(Callable[..., Any], self._runnable)
+            run_draft: Callable[[], Any] = partial(runnable, **model_inputs)
 
             if self.enable_enpu:
                 self._update_full_graph_params_if_needed(forward_context, num_input_tokens, multi_steps_attn_metadata)
@@ -1110,9 +1113,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             else:
                 ori_token_indices_to_sample = None
 
-        if self.pcp_size > 1:
+        pcp_manager = getattr(self.runner, "pcp_manager", None)
+        if pcp_manager is not None and self.pcp_size > 1:
             # remove graph padding before all_gather
-            hidden_states = self.runner.pcp_manager.get_restore_hidden_states(
+            hidden_states = pcp_manager.get_restore_hidden_states(
                 hidden_states,
                 num_input_tokens=num_input_tokens,
             )
@@ -1120,7 +1124,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 last_hidden_states = hidden_states
             else:
                 # eagle and eagle3 need allgather last_hidden_states.
-                last_hidden_states = self.runner.pcp_manager.get_restore_hidden_states(
+                last_hidden_states = pcp_manager.get_restore_hidden_states(
                     last_hidden_states,
                     num_input_tokens=num_input_tokens,
                 )
@@ -1355,26 +1359,30 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             self.input_ids[token_indices_to_sample] = next_token_ids
 
             assert self.runner is not None
-            first_pass_inputs = self.runner.pcp_manager.prepare_spec_decode_first_pass_inputs(
-                input_ids=self.input_ids[:num_tokens],
-                target_positions=target_positions,
-                target_hidden_states=target_hidden_states,
-                token_indices_to_sample=token_indices_to_sample,
-                common_attn_metadata=cad,
-                long_seq_metadata=long_seq_metadata,
-                req_scheduled_tokens=req_scheduled_tokens,
-                req_ids=self.runner.input_batch.req_ids,
-                logits_indices=self.runner.logits_indices,
-                num_tokens=num_tokens,
-                num_prefill_reqs=num_prefill_reqs,
-                num_decode_reqs=num_decode_reqs,
-                uses_mrope=self.uses_mrope,
-            )
-            num_tokens = first_pass_inputs.num_tokens
-            target_positions = first_pass_inputs.target_positions
-            target_hidden_states = first_pass_inputs.target_hidden_states
-            token_indices_to_sample = first_pass_inputs.token_indices_to_sample
-            self.input_ids[:num_tokens].copy_(first_pass_inputs.input_ids)
+            pcp_manager = getattr(self.runner, "pcp_manager", None)
+            long_seq_args = None
+            if pcp_manager is not None:
+                first_pass_inputs = pcp_manager.prepare_spec_decode_first_pass_inputs(
+                    input_ids=self.input_ids[:num_tokens],
+                    target_positions=target_positions,
+                    target_hidden_states=target_hidden_states,
+                    token_indices_to_sample=token_indices_to_sample,
+                    common_attn_metadata=cad,
+                    long_seq_metadata=long_seq_metadata,
+                    req_scheduled_tokens=req_scheduled_tokens,
+                    req_ids=self.runner.input_batch.req_ids,
+                    logits_indices=self.runner.logits_indices,
+                    num_tokens=num_tokens,
+                    num_prefill_reqs=num_prefill_reqs,
+                    num_decode_reqs=num_decode_reqs,
+                    uses_mrope=self.uses_mrope,
+                )
+                num_tokens = first_pass_inputs.num_tokens
+                target_positions = first_pass_inputs.target_positions
+                target_hidden_states = first_pass_inputs.target_hidden_states
+                token_indices_to_sample = first_pass_inputs.token_indices_to_sample
+                self.input_ids[:num_tokens].copy_(first_pass_inputs.input_ids)
+                long_seq_args = first_pass_inputs.long_seq_args
 
             # copy inputs to buffer for cudagraph
             if self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim == 0:
@@ -1383,7 +1391,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             self._set_positions(num_tokens, target_positions)
             self.hidden_states[:num_tokens] = target_hidden_states.view(num_tokens, -1)
 
-            return num_tokens, token_indices_to_sample, cad, first_pass_inputs.long_seq_args
+            return num_tokens, token_indices_to_sample, cad, long_seq_args
         else:
             assert self.is_rejected_token_mask is not None
             assert self.is_masked_token_mask is not None
@@ -1612,7 +1620,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         else:
             common_attn_metadata.positions[:batch_size].copy_(clamped_positions)
 
-        if self.pcp_size * self.dcp_size > 1:
+        pcp_manager = getattr(self.runner, "pcp_manager", None)
+        if pcp_manager is not None:
             kv_cache_spec = getattr(attn_group, "kv_cache_spec", self.draft_attn_groups[0].kv_cache_spec)
             # update slot_mapping
             slot_indices += self.pcp_size
@@ -1677,8 +1686,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             **extra_attn_metadata_args,
         )
 
-        if self.pcp_size * self.dcp_size > 1:
-            self.runner.pcp_manager.update_spec_decode_drafting_cp_metadata(
+        if pcp_manager is not None:
+            pcp_manager.update_spec_decode_drafting_cp_metadata(
                 attn_metadata=attn_metadata,
                 kv_cache_spec=kv_cache_spec,
                 seq_lens=ori_seq_len,
