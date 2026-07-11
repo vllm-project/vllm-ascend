@@ -168,7 +168,7 @@ from vllm_ascend.utils import (
     vllm_version_is,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
-from vllm_ascend.worker.pcp_utils import PCPManager
+from vllm_ascend.worker.pcp_utils import PCPAsyncSpecDecodeRebuildResult, PCPManager
 from vllm_ascend.worker.utils import AscendKVBlockZeroer
 
 from vllm_ascend.ascend_forward_context import (  # isort: skip
@@ -1147,39 +1147,46 @@ class NPUModelRunner(GPUModelRunner):
         self.num_scheduled_tokens.copy_to_gpu(num_reqs)
         num_scheduled_tokens_gpu = self.num_scheduled_tokens.gpu[:num_reqs]
 
-        cp_async_rebuild = self.pcp_manager.rebuild_async_spec_decode_inputs(
-            use_async_spec_decode=self.use_async_spec_decode,
-            valid_sampled_token_count_gpu=valid_sampled_token_count_gpu,
-            prev_req_id_to_index=prev_req_id_to_index,
-            prev_positions_gpu=prev_positions_gpu,
-            with_prefill=with_prefill,
-            enable_prompt_embeds=self.enable_prompt_embeds,
-            has_req_prompt_embeds=bool(self.input_batch.req_prompt_embeds),
-            supports_mm_inputs=self.supports_mm_inputs,
-            num_reqs=num_reqs,
-            total_num_scheduled_tokens=total_num_scheduled_tokens,
-            req_indices=req_indices,
-            req_indices_gpu=req_indices_gpu,
-            position_pcp=position_pcp if self.pcp_size > 1 else None,
-            query_pos_gpu=self.query_pos.gpu,
-            query_pos_np=self.query_pos.np,
-            positions=self.positions,
-            positions_np=positions_np,
-            num_computed_tokens=self.num_computed_tokens,
-            num_computed_tokens_cpu=self.input_batch.num_computed_tokens_cpu,
-            prev_positions_np=self.prev_positions.np,
-            prev_num_draft_tokens_np=self.prev_num_draft_tokens.np,
-            valid_sampled_token_count_event=self.valid_sampled_token_count_event,
-            valid_sampled_token_count_cpu=self.valid_sampled_token_count_cpu,
-            input_batch=self.input_batch,
-            input_ids=self.input_ids,
-            scheduler_output=scheduler_output,
-            arange_np=self.arange_np,
-            cu_num_tokens=cu_num_tokens,
-            draft_token_ids=self._draft_token_ids,  # type: ignore[has-type]
-            num_spec_tokens=self.num_spec_tokens,
-            prepare_input_ids=self._prepare_input_ids,
-        )
+        pcp_manager = getattr(self, "pcp_manager", None)
+        if pcp_manager is not None:
+            cp_async_rebuild = pcp_manager.rebuild_async_spec_decode_inputs(
+                use_async_spec_decode=self.use_async_spec_decode,
+                valid_sampled_token_count_gpu=valid_sampled_token_count_gpu,
+                prev_req_id_to_index=prev_req_id_to_index,
+                prev_positions_gpu=prev_positions_gpu,
+                with_prefill=with_prefill,
+                enable_prompt_embeds=self.enable_prompt_embeds,
+                has_req_prompt_embeds=bool(self.input_batch.req_prompt_embeds),
+                supports_mm_inputs=self.supports_mm_inputs,
+                num_reqs=num_reqs,
+                total_num_scheduled_tokens=total_num_scheduled_tokens,
+                req_indices=req_indices,
+                req_indices_gpu=req_indices_gpu,
+                position_pcp=position_pcp if self.pcp_size > 1 else None,
+                query_pos_gpu=self.query_pos.gpu,
+                query_pos_np=self.query_pos.np,
+                positions=self.positions,
+                positions_np=positions_np,
+                num_computed_tokens=self.num_computed_tokens,
+                num_computed_tokens_cpu=self.input_batch.num_computed_tokens_cpu,
+                prev_positions_np=self.prev_positions.np,
+                prev_num_draft_tokens_np=self.prev_num_draft_tokens.np,
+                valid_sampled_token_count_event=self.valid_sampled_token_count_event,
+                valid_sampled_token_count_cpu=self.valid_sampled_token_count_cpu,
+                input_batch=self.input_batch,
+                input_ids=self.input_ids,
+                scheduler_output=scheduler_output,
+                arange_np=self.arange_np,
+                cu_num_tokens=cu_num_tokens,
+                draft_token_ids=self._draft_token_ids,  # type: ignore[has-type]
+                num_spec_tokens=self.num_spec_tokens,
+                prepare_input_ids=self._prepare_input_ids,
+            )
+        else:
+            cp_async_rebuild = PCPAsyncSpecDecodeRebuildResult(
+                rebuilt=False,
+                positions_ready_on_device=False,
+            )
 
         if cp_async_rebuild.positions_ready_on_device:
             pass
