@@ -588,6 +588,7 @@ class NPUModelRunner(GPUModelRunner):
         self.query_lens: torch.Tensor | None = None
         self.cpu_slot_mapping = None
         self.sampling_done_event: torch.npu.Event | None = None
+        self.valid_sampled_token_count_gpu: torch.Tensor | None = None
 
         # self.cudagraph_batch_sizes sorts in ascending order.
         if (
@@ -1183,13 +1184,14 @@ class NPUModelRunner(GPUModelRunner):
         # CPU values are optimistic (all drafts accepted). The kernel
         # corrects on GPU using the previous step's
         # valid_sampled_token_count_gpu. Otherwise, just copy from CPU.
+        valid_sampled_token_count_gpu = self.valid_sampled_token_count_gpu
         if self.use_async_spec_decode:
             computed_token_tensor_cpu = self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs].to(
                 device=self.device, non_blocking=True
             )
         if (
             self.use_async_spec_decode
-            and self.valid_sampled_token_count_gpu is not None # type: ignore[has-type]
+            and valid_sampled_token_count_gpu is not None
             and prev_req_id_to_index
         ):
             if prev_positions_gpu is None:
@@ -1199,7 +1201,7 @@ class NPUModelRunner(GPUModelRunner):
                 self.num_computed_tokens,
                 self.num_accepted_tokens.gpu[:num_reqs],
                 self.prev_positions.gpu[:num_reqs],
-                self.valid_sampled_token_count_gpu, # type: ignore[has-type]
+                valid_sampled_token_count_gpu,
                 self.prev_num_draft_tokens.gpu,
                 computed_token_tensor_cpu,
             )
@@ -1220,7 +1222,7 @@ class NPUModelRunner(GPUModelRunner):
 
         cp_async_rebuild = self.pcp_manager.rebuild_async_spec_decode_inputs(
             use_async_spec_decode=self.use_async_spec_decode,
-            valid_sampled_token_count_gpu=self.valid_sampled_token_count_gpu,
+            valid_sampled_token_count_gpu=valid_sampled_token_count_gpu,
             prev_req_id_to_index=prev_req_id_to_index,
             prev_positions_gpu=prev_positions_gpu,
             with_prefill=with_prefill,
@@ -1283,7 +1285,7 @@ class NPUModelRunner(GPUModelRunner):
         # Mirrors update_num_computed_tokens_for_batch_change on the GPU side.
         async_spec_decode_active = (
             self.use_async_spec_decode
-            and self.valid_sampled_token_count_gpu is not None  # type: ignore[has-type]
+            and valid_sampled_token_count_gpu is not None
             and prev_req_id_to_index
         )
         if self._needs_seq_lens_cpu_sync and async_spec_decode_active:
@@ -2479,7 +2481,7 @@ class NPUModelRunner(GPUModelRunner):
             assert self.sampling_done_event is not None
             self.sampling_done_event.record()
 
-        self.valid_sampled_token_count_gpu: torch.Tensor | None = None # type: ignore[no-redef]
+        self.valid_sampled_token_count_gpu = None
 
         def propose_draft_token_ids(sampled_token_ids):
             assert spec_decode_common_attn_metadata is not None
