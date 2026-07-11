@@ -1163,35 +1163,24 @@ class AscendSFADCPImpl(AscendSFAImpl):
             topk_indices = self.dcp_group.all_gather(topk_indices.contiguous(), dim=0)
         topk_indices = self._remap_sparse_indices(topk_indices)
         ql_nope, q_pe = self._finish_all_gather_query_for_dcp(query_gather_context)
-        kv = kv_cache[0]
-        key_rope = kv_cache[1]
-        sfa_output, softmax_max, softmax_sum = torch.ops._C_ascend.npu_sparse_flash_attention(
-            query=ql_nope,
-            key=kv,
-            value=kv,
-            sparse_indices=topk_indices,
-            scale_value=self.scale,
-            sparse_block_size=1,
-            block_table=attn_metadata.dcp_context.block_table,
-            actual_seq_lengths_query=actual_seq_lengths_query,
-            actual_seq_lengths_kv=attn_metadata.dcp_context.seq_lens,
-            query_rope=q_pe,
-            key_rope=key_rope,
-            layout_query="TND",
-            layout_kv="PA_BSND",
+        sfa_output, softmax_lse = DeviceOperator.execute_sparse_flash_attention_process(
+            self,
+            ql_nope,
+            q_pe,
+            kv_cache,
+            topk_indices,
+            attn_metadata,
+            actual_seq_lengths_query,
+            dcp_context.seq_lens,
+            block_table=dcp_context.block_table,
             # The replicated-view indexer already applies the causal visibility rule.
             # After DCP remaps topk indices to local KV positions, local KV
             # length no longer shares the same coordinate system as global
             # query length, so SFA must not apply its right-down causal crop.
             sparse_mode=0,
-            attention_mode=2,
-            return_softmax_lse=True,
+            return_lse=True,
         )
         output_dtype = sfa_output.dtype
-        # SFA returns softmax max/sum separately. Convert them to LSE so the
-        # existing CP merge helper can combine local-KV partial outputs.
-        softmax_lse = softmax_max.to(torch.float32) + torch.log(softmax_sum.to(torch.float32))
-        softmax_lse = softmax_lse.permute(1, 0, 2).reshape(softmax_lse.shape[1], -1, 1)
         if self.enable_dsa_cp:
             output = self._merge_dsa_cp_dcp_outputs(sfa_output, softmax_lse)
             assert attn_metadata.dsa_cp_context is not None, "DSA-CP DCP output selection requires dsa_cp_context."
