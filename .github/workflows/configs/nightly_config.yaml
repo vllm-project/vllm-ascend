@@ -24,6 +24,12 @@ a2:
       - name: Qwen3.5-397B-A17B-w4a8-mtp
         os: linux-aarch64-a2b3-8
         config_file_path: Qwen3.5-397B-A17B-w4a8-mtp-A2.yaml
+      - name: gemma4
+        os: linux-aarch64-a2b3-4
+        config_file_path: Gemma4.yaml
+      - name: gemma4-31b-dense
+        os: linux-aarch64-a2b3-4
+        config_file_path: Gemma4-31B-Dense.yaml
   multi_node:
     test_config:
       - name: multi-node-qwen3-235b-dp
@@ -161,12 +167,6 @@ a3:
       - name: qwen3-vl-235b-a22b-instruct-w8a8
         os: linux-aarch64-a3-16
         config_file_path: Qwen3-VL-235B-A22B-Instruct-W8A8.yaml
-      - name: gemma4
-        os: linux-aarch64-a3-4
-        config_file_path: Gemma4.yaml
-      - name: gemma4-31b-dense
-        os: linux-aarch64-a3-4
-        config_file_path: Gemma4-31B-Dense.yaml
   multi_card:
     test_config:
       # pytest-driven tests

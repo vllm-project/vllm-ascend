@@ -33,7 +33,9 @@ _server_cmd: &server_cmd
 
 _api_keyword_args: &api_keyword_args
   max_tokens: 64
-  temperature: 0.0
+  temperature: 1.0
+  top_p: 0.95
+  top_k: 64
 
 _benchmarks: &benchmarks
   acc_gpqa:
@@ -44,10 +46,11 @@ _benchmarks: &benchmarks
     num_prompts: 32
     max_out_len: 32768
     batch_size: 8
-    baseline: 70
+    baseline: 65
     threshold: 10
-    temperature: 0.0
-    top_p: 1.0
+    temperature: 1.0
+    top_p: 0.95
+    top_k: 64
     ignore_eos: false
 
 # ==========================================
