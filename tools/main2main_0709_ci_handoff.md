@@ -4,7 +4,7 @@
 
 ## 1. 分析基线与已确认范围
 
-- 下游 PR：`vllm-project/vllm-ascend#11709`，当前分析 head 为 `838f1aa8b81a65668a9b4566e6c8a70613900655`。
+- 下游 PR：`vllm-project/vllm-ascend#11709`，本轮残差分析基于远端 head `696323578a10e1f58c7c17c30a3e1e1ecdc715a1`；本地保留其上的 fixup 提交 `177eef18`。
 - 当前目标 vLLM commit：`ab7961a14a59be9a0170f1654315d5c2be44c015`。
 - 已知可以通过精度用例的 vLLM 边界：`ba22152096b2484faa3579624a253d54804d876d`。
 - `ba221520` 是 `ab7961a` 的祖先；待适配区间为 `(ba221520, ab7961a]`，共 155 个上游提交。
@@ -140,6 +140,24 @@
 - 本交接记录随修复提交一次性发布；首轮新 CI 以发布后的 PR head 为准。本机无 NPU，硬件 A/B/精度验证由该轮 CI 完成。
 - 首次发布后的 run `29117216392` 只执行到 `markdownlint --fix`：上述二级列表被自动改为 4 空格缩进，因 hook 修改了工作树而失败；其余 pre-commit hook 全部通过，尚未进入硬件用例。
 - 记录快照时，run `29088445112` 中 A3 4-card part 2/3 与 part 3/3 曾处于运行中；后续观察必须以最新终态为准，不沿用旧状态推断。
+
+### 7.1 2026-07-11 最后两项失败的根因与修复
+
+对比 PR #11510 全绿 run `29025366717` 与 PR #11709 run `29130818640` 后，最后两项失败已分别闭环；二者都不是通过修改 golden、放宽阈值或关闭 async scheduling 规避。
+
+1. **MRV2 DSpark acceptance 确定性回归**
+    - #11510 使用 vLLM `ba221520` 时通过；#11709 升级到 `ab7961a` 后，多次得到相同的低 acceptance 数组，因此不是随机精度波动。
+    - 引入点是上游 `vllm#47914` / `0d12618e98ff2d21d36081e0e9b4eb23573b6d38`：`build_attn_metadata()` 的 `causal` 从单一 `bool` 扩展为按 KV cache group 配置的 `Mapping[int, bool]`。
+    - DSpark 传入 `{0: False}` 表示第 0 组 non-causal；Ascend override 仍将整个非空 mapping 写入 `AscendCommonAttentionMetadata.causal`，后续布尔判断把它当成 `True`，错误选择 causal sparse mode。
+    - 修复 `vllm_ascend/worker/v2/attn_utils.py`：逐 KV cache group 解析 `causal`，mapping 缺失的组按上游语义默认 `True`，传给 metadata 的始终是标量布尔值。
+    - 新增 `tests/ut/worker/test_attn_utils.py`，验证 `{0: False}` 被解析为 `[False, True]`，同时覆盖显式 non-causal 与缺失组默认值。
+2. **v0.23.0 hidden-state 文件读取竞态**
+    - release anchor 始终是 vLLM `0fc695fc6d1d82e9a5ac6835ac8e4e1c83703665`，commit 没有漂移；该失败可以受时序影响偶发通过，但不是 runner 基础设施错误。
+    - 上游 `vllm#37374` / `4e2eba28beec9972445c338e8ad2080b3cab3246` 引入异步 D2H 与后台写盘，并提供带文件锁的 `load_hidden_states()` / `cleanup_hidden_states()` 消费协议。
+    - 下游 `vllm-ascend#10459` / `801a6b41d29d23399bd8c9ebc2ea8883e2beefae` 为 v0.23.0 保留了直接 `exists + safe_open` 的读取分支，没有等待后台 writer；本 PR 的真实 NPU Event 修复 `b88020cb` 纠正 D2H 时序后，稳定暴露了既有写盘竞态。
+    - 修复 `tests/e2e/pull_request/one_card/spec_decode/test_extract_hidden_states.py`：v0.23.0 与 main 统一使用 connector 的带锁加载和清理 helper，并用 `finally` 保证断言结束后清理文件；不增加 sleep 或轮询。
+
+本地已完成 manual-stage pre-commit（含 Ruff、codespell、typos、markdownlint 和仓库自定义检查）及 `git diff --check`。本机 Python 未安装 torch 且没有 NPU，CPU 回归单测、硬件精度与竞态闭环仍由推送后的 CI 验收；v0.23.0 应重点连续复跑 `hybrid_dummy_eager`，main 应重点复跑 DSpark Qwen3-8B acceptance。
 
 ## 8. 后续每小时 CI 观察项
 
