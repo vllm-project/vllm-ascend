@@ -396,6 +396,36 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         self.assertEqual(indexer_scale_cache.shape, (2, 16, 1, 1))
         self.assertEqual(indexer_scale_cache.dtype, torch.float16)
 
+    @patch("vllm_ascend.worker.model_runner_v1.has_kv_transfer_group", return_value=False)
+    @patch("vllm_ascend.worker.model_runner_v1.initialize_mamba_ssu_backend")
+    def test_initialize_kv_cache_initializes_mamba_ssu_backend(
+        self,
+        mock_initialize_mamba_ssu_backend,
+        mock_has_kv_transfer_group,
+    ):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        mamba_config = object()
+        runner.vllm_config = SimpleNamespace(kv_transfer_config=None, mamba_config=mamba_config)
+        runner.model_config = SimpleNamespace(enable_return_routed_experts=False)
+        runner.speculative_config = None
+        runner.may_add_encoder_only_layers_to_kv_cache_config = MagicMock()
+        runner.maybe_add_kv_sharing_layers_to_kv_cache_groups = MagicMock()
+        runner.initialize_attn_backend = MagicMock()
+        runner.attn_groups = []
+        runner.may_reinitialize_input_batch = MagicMock()
+        runner.initialize_kv_cache_tensors = MagicMock(return_value={})
+
+        kv_cache_config = KVCacheConfig(
+            num_blocks=0,
+            kv_cache_tensors=[],
+            kv_cache_groups=[],
+        )
+
+        runner.initialize_kv_cache(kv_cache_config)
+
+        mock_initialize_mamba_ssu_backend.assert_called_once_with(mamba_config, kv_cache_config)
+        mock_has_kv_transfer_group.assert_called_once()
+
 
 class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
     def _build_runner(self):
