@@ -837,7 +837,6 @@ class AscendSFADCPMetadataBuilder(AscendSFAMetadataBuilder):
 
         common_attn_metadata.slot_mapping = slot_mapping_replicated_view
         common_attn_metadata.block_table_tensor = block_table_replicated_view
-        common_attn_metadata.slot_mapping_cpu = slot_mapping_replicated_view_cpu
         try:
             metadata = build_metadata()
         finally:

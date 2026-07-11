@@ -115,10 +115,6 @@ def test_myops(num_tokens, num_head, block_size, num_blocks, count):
 
     slot_list_np = np.array(slot_list)
     slot_mapping_npu = torch.from_numpy(slot_list_np).to(torch.int32).npu()
-    # slot_mapping_cpu = slot_mapping_npu.to("cpu",non_blocking=True)
-    # num_draft_tensor = slot_mapping_npu.to("cpu", non_blocking=True)
-    slot_mapping_cpu = torch.empty_like(slot_mapping_npu, device="cpu").pin_memory()
-    slot_mapping_cpu.copy_(slot_mapping_npu, non_blocking=True)
 
     # key = torch.rand((num_tokens, num_head,head_size_k), dtype=torch.float16)
     key = torch.randint(low=0, high=128, size=(num_tokens, head_size_k), dtype=torch.int8)
