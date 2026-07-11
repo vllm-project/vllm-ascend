@@ -454,10 +454,10 @@ class TestAscendSFAMetadataBuilder(TestBase):
     @patch("vllm_ascend.attention.sfa_v1.get_current_vllm_config")
     @patch("vllm_ascend.attention.sfa_v1.get_cos_and_sin_mla")
     @patch("vllm_ascend.attention.sfa_v1.enable_dsa_cp", return_value=False)
-    @patch("torch.ops._C_ascend.store_kv_block_pre", create=True)
+    @patch("torch.ops._C_ascend.store_kv_block_metadata", create=True)
     def test_ascend_sfa_metadata_builder_build_with_c8_reshape_optim(
         self,
-        mock_store_kv_block_pre,
+        mock_store_kv_block_metadata,
         mock_enable_dsa_cp,
         mock_get_cos_and_sin_mla,
         mock_get_current_vllm_config,
