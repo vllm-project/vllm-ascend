@@ -236,7 +236,7 @@ vllm serve your_model_path \
     --gpu-memory-utilization 0.9 \
     --quantization ascend \
     --compilation-config '{"cudagraph_capture_sizes": [64]}' \
-    --additional-config '{"enable_flashcomm1": true}'
+    --additional-config '{"enable_flashcomm1": true, "ascend_compilation_config": {"fuse_norm_quant": false}}'
 ```
 
 Atlas 800I A2/A3：
