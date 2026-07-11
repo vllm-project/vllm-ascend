@@ -1030,9 +1030,9 @@ class PCPManager:
 
         query_start_loc = self.query_start_loc_pcp_full.gpu[: num_decode_reqs + 1]
         decode_req_starts = query_start_loc[:num_decode_reqs].to(torch.int64)
-        decode_query_lens = (
-            query_start_loc[1 : num_decode_reqs + 1] - query_start_loc[:num_decode_reqs]
-        ).to(torch.int64)
+        decode_query_lens = (query_start_loc[1 : num_decode_reqs + 1] - query_start_loc[:num_decode_reqs]).to(
+            torch.int64
+        )
         decode_padded_starts = decode_req_starts * self.pcp_world_size
         decode_req_starts_per_token = torch.repeat_interleave(
             decode_req_starts,
@@ -1143,9 +1143,7 @@ class PCPManager:
         target_hidden_states = torch.cat([target_hidden_states_d, target_hidden_states_p], dim=0)
 
         if num_decode_reqs:
-            token_indices_to_sample[:num_decode_reqs] = logits_indices[
-                token_indices_to_sample[:num_decode_reqs]
-            ]
+            token_indices_to_sample[:num_decode_reqs] = logits_indices[token_indices_to_sample[:num_decode_reqs]]
         if num_prefill_reqs:
             token_indices_to_sample[-num_prefill_reqs:] = logits_indices[-num_prefill_reqs:]
             common_attn_metadata.num_actual_tokens = num_tokens
@@ -1155,10 +1153,7 @@ class PCPManager:
                 common_attn_metadata.seq_lens_cpu[-num_prefill_reqs:] = seq_lens_p
             if common_attn_metadata._seq_lens_cpu is not None:
                 common_attn_metadata._seq_lens_cpu[-num_prefill_reqs:] = seq_lens_p
-            query_start_loc_p = (
-                cu_num_tokens_p[1:]
-                + common_attn_metadata.query_start_loc_cpu[num_decode_reqs].item()
-            )
+            query_start_loc_p = cu_num_tokens_p[1:] + common_attn_metadata.query_start_loc_cpu[num_decode_reqs].item()
             common_attn_metadata.query_start_loc[-num_prefill_reqs:] = query_start_loc_p
             common_attn_metadata.query_start_loc_cpu[-num_prefill_reqs:] = query_start_loc_p
 
@@ -1202,17 +1197,13 @@ class PCPManager:
             )
 
         def _pcp_pad_and_split(num_tokens: int) -> tuple[list[int], int, int]:
-            num_pcp_padded_scheduled_tokens = (
-                cdiv(num_tokens, 2 * self.pcp_world_size) * 2 * self.pcp_world_size
-            )
+            num_pcp_padded_scheduled_tokens = cdiv(num_tokens, 2 * self.pcp_world_size) * 2 * self.pcp_world_size
             pcp_pad = num_pcp_padded_scheduled_tokens - num_tokens
             chunk_size = num_pcp_padded_scheduled_tokens // (2 * self.pcp_world_size)
 
             req_position_cp: list[int] = []
             req_position_cp.extend(
-                self.full_indices[
-                    self.pcp_world_rank * chunk_size : (self.pcp_world_rank + 1) * chunk_size
-                ]
+                self.full_indices[self.pcp_world_rank * chunk_size : (self.pcp_world_rank + 1) * chunk_size]
             )
             req_position_cp.extend(
                 self.full_indices[
@@ -1304,9 +1295,7 @@ class PCPManager:
         num_accept_tokens = query_lens - num_reject_tokens
         slot_idx_base = (
             decode_req_starts * self.pcp_world_size
-            + self.pcp_req_offsets[:num_decode_reqs]
-            * (num_speculative_tokens - 1)
-            * self.pcp_world_size
+            + self.pcp_req_offsets[:num_decode_reqs] * (num_speculative_tokens - 1) * self.pcp_world_size
             + (num_accept_tokens - 1) * self.pcp_world_size
         )
         slot_indices = (slot_idx_base[:, None] + self.pcp_rank_offsets[: self.pcp_world_size]).reshape(-1)
@@ -1410,28 +1399,23 @@ class PCPManager:
         if can_rebuild_on_device:
             if self.pcp_world_size > 1:
                 assert position_pcp is not None
-                position_offsets_gpu = torch.from_numpy(
-                    position_pcp[:total_num_scheduled_tokens]
-                ).pin_memory().to(
-                    dtype=torch.int64,
-                    device=self.device,
-                    non_blocking=True,
+                position_offsets_gpu = (
+                    torch.from_numpy(position_pcp[:total_num_scheduled_tokens])
+                    .pin_memory()
+                    .to(
+                        dtype=torch.int64,
+                        device=self.device,
+                        non_blocking=True,
+                    )
                 )
             else:
-                position_offsets_gpu = query_pos_gpu[:total_num_scheduled_tokens].to(
-                    torch.int64
-                )
-            positions_gpu = (
-                num_computed_tokens[req_indices_gpu].to(torch.int64)
-                + position_offsets_gpu
-            )
+                position_offsets_gpu = query_pos_gpu[:total_num_scheduled_tokens].to(torch.int64)
+            positions_gpu = num_computed_tokens[req_indices_gpu].to(torch.int64) + position_offsets_gpu
             positions[:total_num_scheduled_tokens].copy_(positions_gpu)
 
             num_tokens_full = self.async_rebuild_num_tokens_full
             query_start_loc_full = self.query_start_loc_pcp_full.gpu[: num_reqs + 1]
-            query_lens_full = (
-                query_start_loc_full[1:] - query_start_loc_full[:-1]
-            ).to(torch.int64)
+            query_lens_full = (query_start_loc_full[1:] - query_start_loc_full[:-1]).to(torch.int64)
             req_indices_full_gpu = torch.repeat_interleave(
                 self.pcp_req_offsets[:num_reqs],
                 query_lens_full,
@@ -1477,22 +1461,15 @@ class PCPManager:
                     device=self.device,
                 )
                 positions_mtp = (
-                    num_computed_tokens[req_indices_mtp].to(torch.int64)
-                    + mtp_offsets
-                    - mtp_start_loc[req_indices_mtp]
+                    num_computed_tokens[req_indices_mtp].to(torch.int64) + mtp_offsets - mtp_start_loc[req_indices_mtp]
                 )
                 input_batch.block_table.compute_slot_mapping_draft(
                     req_indices_mtp,
                     positions_mtp,
                 )
-                mtp_slot_ori = input_batch.block_table.block_tables[0].slot_mapping.gpu[
-                    :num_tokens_mtp
-                ]
+                mtp_slot_ori = input_batch.block_table.block_tables[0].slot_mapping.gpu[:num_tokens_mtp]
                 num_tokens_mtp_pad = num_tokens_mtp * self.pcp_world_size
-                if (
-                    self.mtp_slot_pad is None
-                    or self.mtp_slot_pad.numel() < num_tokens_mtp_pad
-                ):
+                if self.mtp_slot_pad is None or self.mtp_slot_pad.numel() < num_tokens_mtp_pad:
                     self.mtp_slot_pad = torch.empty(
                         num_tokens_mtp_pad,
                         dtype=torch.int32,
@@ -1530,10 +1507,7 @@ class PCPManager:
             out=positions_np,
         )
 
-        token_indices = (
-            positions_np[:total_num_scheduled_tokens]
-            + req_indices * input_batch.token_ids_cpu.shape[1]
-        )
+        token_indices = positions_np[:total_num_scheduled_tokens] + req_indices * input_batch.token_ids_cpu.shape[1]
         torch.index_select(
             input_batch.token_ids_cpu_tensor.flatten(),
             0,
@@ -1571,9 +1545,9 @@ class PCPManager:
                 dtype=torch.int32,
                 device=self.device,
             )
-            pre_pcp_query_start_loc[1 : num_reqs + 1] = torch.from_numpy(
-                cu_num_tokens_full
-            ).to(dtype=torch.int32, device=self.device)
+            pre_pcp_query_start_loc[1 : num_reqs + 1] = torch.from_numpy(cu_num_tokens_full).to(
+                dtype=torch.int32, device=self.device
+            )
 
             input_batch.block_table.compute_slot_mapping(
                 num_reqs,
@@ -1767,10 +1741,7 @@ class PCPManager:
                 draft_lens.to(torch.int64),
                 max=num_spec_tokens,
             )
-            spec_mask = (
-                common_mask.unsqueeze(1)
-                & (spec_offsets < draft_lens.unsqueeze(1))
-            )
+            spec_mask = common_mask.unsqueeze(1) & (spec_offsets < draft_lens.unsqueeze(1))
             sample_indices_2d = sample_indices.unsqueeze(1)
             spec_dst = sample_indices_2d + 1 + spec_offsets
             safe_dst = torch.where(
@@ -1778,10 +1749,7 @@ class PCPManager:
                 spec_dst,
                 sample_indices_2d.expand(-1, num_spec_tokens),
             )
-            spec_src_indices = (
-                safe_prev_positions.unsqueeze(1) * num_spec_tokens
-                + spec_offsets
-            )
+            spec_src_indices = safe_prev_positions.unsqueeze(1) * num_spec_tokens + spec_offsets
 
             draft_token_ids = draft_token_ids.to(dtype=torch.int32)
             spec_src = draft_token_ids.flatten()[spec_src_indices]
