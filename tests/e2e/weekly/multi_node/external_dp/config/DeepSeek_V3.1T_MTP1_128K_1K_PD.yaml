@@ -63,7 +63,6 @@ env_common: &env_common
   ASCEND_BUFFER_POOL: "4:8"
   LD_LIBRARY_PATH: "/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH"
 
-
 env_prefill: &env_prefill
   <<: *env_common
   HCCL_BUFFSIZE: "256"

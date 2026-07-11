@@ -67,7 +67,8 @@ env_common: &env_common
   LD_LIBRARY_PATH: "/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH"
   VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
   VLLM_NIXL_ABORT_REQUEST_TIMEOUT: "300000"
-  
+
+
 env_prefill: &env_prefill
   <<: *env_common
   HCCL_BUFFSIZE: "360"

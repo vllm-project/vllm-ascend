@@ -62,7 +62,6 @@ env_common: &env_common
   TASK_QUEUE_ENABLE: 1
   HCCL_OP_EXPANSION_MODE: "AIV"
   VLLM_USE_V1: "1"
-#  ASCEND_RT_VISIBLE_DEVICES: "$1"
   ASCEND_BUFFER_POOL: "4:8"
   LD_LIBRARY_PATH: "/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH"
 
