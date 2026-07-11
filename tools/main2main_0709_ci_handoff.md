@@ -159,6 +159,12 @@
 
 本地已完成 manual-stage pre-commit（含 Ruff、codespell、typos、markdownlint 和仓库自定义检查）及 `git diff --check`。本机 Python 未安装 torch 且没有 NPU，CPU 回归单测、硬件精度与竞态闭环仍由推送后的 CI 验收；v0.23.0 应重点连续复跑 `hybrid_dummy_eager`，main 应重点复跑 DSpark Qwen3-8B acceptance。
 
+### 7.2 2026-07-11 v0.23.0 CPU UT 收集失败
+
+- 推送 `66c2ebb0` 后，main CPU UT 已通过；v0.23.0 CPU job `86510109431` 在收集新增的 `tests/ut/worker/test_attn_utils.py` 时失败。
+- traceback 为 `AttributeError: module 'vllm.v1.worker.gpu' has no attribute 'spec_decode'`。v0.23.0 虽包含 `gpu/spec_decode/speculator.py`，但本项目已明确禁用该版本的全部 V2 patch，release 只使用 V1，因此不会加载 V2 import 链。
+- 这是 main-only V2 回归测试缺少版本门控，不是 DSpark causal 修复在 main 上失效。修复是在导入 `attn_utils` 前对 v0.23.0 执行模块级 skip；main lane 继续执行完整 `[False, True]` 回归断言，不扩大 v0.23.0 的生产支持范围。
+
 ## 8. 后续每小时 CI 观察项
 
 每小时只记录变化；无变化时记录“无新增终态”，不要重复粘贴整份日志。

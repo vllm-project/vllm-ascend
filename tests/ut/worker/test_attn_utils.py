@@ -2,9 +2,18 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import numpy as np
+import pytest
 import torch
 
-from vllm_ascend.worker.v2 import attn_utils
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.23.0"):
+    pytest.skip(
+        "v2 model runner patches are not supported on vLLM 0.23.0",
+        allow_module_level=True,
+    )
+
+from vllm_ascend.worker.v2 import attn_utils  # noqa: E402
 
 
 def test_build_attn_metadata_resolves_causal_per_kv_cache_group(monkeypatch):
