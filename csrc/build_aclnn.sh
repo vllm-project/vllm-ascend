@@ -96,7 +96,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
     setup_catlass_dependency
 
     CUSTOM_OPS_ARRAY=(
-        "scatter_nd_update_v2"
+        "scatter_nd_update"
         "moe_grouped_matmul"
         "grouped_matmul_swiglu_quant_weight_nz_tensor_list"
         "lightning_indexer"
@@ -146,7 +146,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
     setup_catlass_dependency
 
     CUSTOM_OPS_ARRAY=(
-        "scatter_nd_update_v2"
+        "scatter_nd_update"
         "grouped_matmul_swiglu_quant_weight_nz_tensor_list"
         "lightning_indexer"
         "sparse_flash_attention"
@@ -198,6 +198,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
     setup_catlass_dependency
 
     CUSTOM_OPS_ARRAY=(
+        "scatter_nd_update"
         "moe_gating_top_k_hash"
         "indexer_compress_epilog"
         "inplace_partial_rotary_mul"
