@@ -454,10 +454,12 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
 
         if get_ascend_config().c8_enable_reshape_optim:
             torch.ops._C_ascend.store_kv_block_metadata(
-                slot_mapping, common_attn_metadata.group_len, common_attn_metadata.group_key_idx, 
-                common_attn_metadata.group_key_cache_idx, block_size
+                slot_mapping,
+                common_attn_metadata.group_len,
+                common_attn_metadata.group_key_idx,
+                common_attn_metadata.group_key_cache_idx,
+                block_size,
             )
-
 
         return self.metadata_cls(  # type: ignore
             num_input_tokens=common_attn_metadata.num_input_tokens,

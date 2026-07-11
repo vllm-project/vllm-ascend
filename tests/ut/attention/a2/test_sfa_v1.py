@@ -486,7 +486,6 @@ class TestAscendSFAMetadataBuilder(TestBase):
             kv_cache_spec=kv_cache_spec, layer_names=layer_names, vllm_config=vllm_config, device=device
         )
 
-
         common_attn_metadata = MagicMock()
         common_attn_metadata.num_reqs = 10
         common_attn_metadata.num_actual_tokens = 100
