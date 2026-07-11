@@ -1184,12 +1184,12 @@ class KVCacheRecvingThread(threading.Thread):
         # Process each layer in the KV cache
         for _, (k_cache_layer, v_cache_layer) in kv_caches.items():
             # Load cache data into buffers
-            torch_npu.atb.npu_paged_cache_load(
+            torch_npu.npu_gather_pa_kv_cache(
                 k_cache_layer,
                 v_cache_layer,
                 block_table,
                 block_len_tensor,
-                seq_starts=seq_start_tensor,
+                seq_offset=seq_start_tensor,
                 key=k_buffer,
                 value=v_buffer,
             )
@@ -1241,8 +1241,13 @@ class KVCacheRecvingThread(threading.Thread):
         v_buffer = _transpose_kv_cache_between_head(v_buffer)
 
         # Reshape and cache the processed buffers
-        torch_npu._npu_reshape_and_cache(
-            key=k_buffer, value=v_buffer, key_cache=k_cache_layer, value_cache=v_cache_layer, slot_indices=slot_mapping
+        torch_npu.npu_scatter_pa_kv_cache(
+            key=k_buffer,
+            value=v_buffer,
+            key_cache=k_cache_layer,
+            value_cache=v_cache_layer,
+            slot_mapping=slot_mapping,
+            cache_mode="Norm",
         )
 
     def _nz_kv_cache(
@@ -2434,6 +2439,10 @@ class MooncakeConnectorWorker:
                     break
         return compress_ratio
 
+    @staticmethod
+    def _get_kv_cache_group_id(group_idx: int, group_spec: dict[str, Any]) -> int:
+        return group_spec.get("kv_cache_group_id", group_idx)
+
     def _get_kernel_block_ids(self, layer_indices, meta, group_idx, group_spec):
         """No-CP per-group block ids at kernel granularity: (local, remote).
 
@@ -2442,8 +2451,9 @@ class MooncakeConnectorWorker:
         kernels (already on D, located via num_computed_tokens), and trims both lists
         to the shorter one so remote/local stay aligned.
         """
+        kv_cache_group_id = self._get_kv_cache_group_id(group_idx, group_spec)
         if group_spec["kv_cache_spec_type"] == "MambaSpec":
-            return list(meta.local_block_ids[group_idx]), list(meta.remote_block_ids[group_idx])
+            return list(meta.local_block_ids[kv_cache_group_id]), list(meta.remote_block_ids[kv_cache_group_id])
 
         remote_block_size = meta.remote_block_size or self.block_size
 
@@ -2455,8 +2465,8 @@ class MooncakeConnectorWorker:
         )
 
         remote_scale = remote_block_size // kernel_size
-        kernel_local = self._expand_block_ids(list(meta.local_block_ids[group_idx]), local_scale)
-        kernel_remote = self._expand_block_ids(list(meta.remote_block_ids[group_idx]), remote_scale)
+        kernel_local = self._expand_block_ids(list(meta.local_block_ids[kv_cache_group_id]), local_scale)
+        kernel_remote = self._expand_block_ids(list(meta.remote_block_ids[kv_cache_group_id]), remote_scale)
         # Skip prefix-cached remote kernels (D-side already holds them). The token size of one
         # remote kernel is kernel_size * compress_ratio, so the number to skip is
         # num_computed_tokens // (kernel_size * compress_ratio).
@@ -2551,14 +2561,15 @@ class MooncakeConnectorWorker:
             remote_handshake_port_list = [[x + meta.remote_port for x in chosen_rank_list]]
             # No CP: expand logical blocks into kernel blocks here so the transfer
             # stage consumes kernel-level ids directly (chunk_starts no longer needed).
-            local_block_ids: list = []
-            remote_block_ids: list = []
+            local_block_ids: list[list[int]] = [[] for _ in meta.local_block_ids]
+            remote_block_ids: list[list[int]] = [[] for _ in meta.remote_block_ids]
             for group_idx, (group_spec, layer_indices) in self.kv_group2layeridx.items():
                 local_kernel_block_ids, remote_kernel_block_ids = self._get_kernel_block_ids(
                     layer_indices, meta, group_idx, group_spec
                 )
-                local_block_ids.append(local_kernel_block_ids)
-                remote_block_ids.append(remote_kernel_block_ids)
+                kv_cache_group_id = self._get_kv_cache_group_id(group_idx, group_spec)
+                local_block_ids[kv_cache_group_id] = local_kernel_block_ids
+                remote_block_ids[kv_cache_group_id] = remote_kernel_block_ids
             local_block_ids_list = [tuple(local_block_ids) for _ in remote_handshake_port_list]
             remote_block_ids_list = [tuple(remote_block_ids) for _ in remote_handshake_port_list]
             return (

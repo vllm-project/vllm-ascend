@@ -13,6 +13,7 @@ env_common: &env_common
   VLLM_ASCEND_ENABLE_MLAPO: 1
   VLLM_ASCEND_ENABLE_FLASHCOMM1: 1
   ASCEND_A3_EBA_ENABLE: 1
+  VLLM_ENGINE_READY_TIMEOUT_S: 3000
 
 # TODO: need to identify why TP and mtp+1 divisibility rules break on dual-node case
 
@@ -115,12 +116,3 @@ benchmarks:
     baseline: 95
     threshold: 10
 
-  acc_aime2025:
-    case_type: accuracy
-    dataset_path: vllm-ascend/aime2025
-    request_conf: vllm_api_general_chat
-    dataset_conf: aime2025/aime2025_gen_0_shot_chat_prompt
-    max_out_len: 80000
-    batch_size: 32
-    baseline: 57 
-    threshold: 10

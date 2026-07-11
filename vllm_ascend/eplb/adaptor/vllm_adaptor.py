@@ -27,7 +27,7 @@ from vllm_ascend.quantization.quant_type import QuantType
 
 EPLB_EXPERT_WEIGHT_NAMES = {
     (QuantType.NONE, False): ("w13_weight", "w2_weight"),
-    (QuantType.NONE, True): ("w13_weight", "w2_weight"),
+    (QuantType.NONE, True): ("w13_weight_list", "w2_weight_list"),
     (QuantType.W8A8, False): (
         "w13_weight_list",
         "w2_weight_list",
@@ -50,10 +50,10 @@ EPLB_EXPERT_WEIGHT_NAMES = {
         "w13_scale_bias_list",
         "w2_scale_bias_list",
     ),
-    (QuantType.MXFP4, False): ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale"),
-    (QuantType.MXFP4, True): ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale"),
-    (QuantType.MXFP8, False): ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale"),
-    (QuantType.MXFP8, True): ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale"),
+    (QuantType.W4A4MXFP, False): ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale"),
+    (QuantType.W4A4MXFP, True): ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale"),
+    (QuantType.W8A8MXFP, False): ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale"),
+    (QuantType.W8A8MXFP, True): ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale"),
 }
 
 

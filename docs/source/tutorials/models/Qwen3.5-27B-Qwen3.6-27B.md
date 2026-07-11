@@ -146,75 +146,89 @@ Single-node deployment completes both Prefill and Decode within the same node, s
 
 Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwen3_5_mtp` speculative decoding method can be used for both.
 
-**Qwen3.5-27B-w8a8**
+=== "Qwen3.5-27B-w8a8"
 
-Startup Command:
+    Startup Command:
 
-```bash
-#!/bin/sh
-# Load model from ModelScope to speed up download
-export VLLM_USE_MODELSCOPE=True
-# To reduce memory fragmentation and avoid out of memory
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export HCCL_BUFFSIZE=512
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
-export TASK_QUEUE_ENABLE=1
+    ```bash
+    #!/bin/sh
+    # Load model from ModelScope to speed up download
+    export VLLM_USE_MODELSCOPE=True
+    # To reduce memory fragmentation and avoid out of memory
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    # Size of the shared buffer (in MB) used by HCCL for NPU-to-NPU collective communication
+    export HCCL_BUFFSIZE=512
+    # Whether OpenMP threads are bound to specific CPU cores
+    export OMP_PROC_BIND=false
+    # Number of OpenMP threads available for parallel regions
+    export OMP_NUM_THREADS=1
+    # Enables the Ascend task queue for asynchronous operator dispatch
+    export TASK_QUEUE_ENABLE=1
 
-vllm serve Eco-Tech/Qwen3.5-27B-w8a8-mtp \
---host 0.0.0.0 \
---port 8000 \
---data-parallel-size 1 \
---tensor-parallel-size 2 \
---seed 1024 \
---quantization ascend \
---served-model-name qwen3.5 \
---max-num-seqs 32 \
---max-model-len 133000 \
---max-num-batched-tokens 8096 \
---trust-remote-code \
---gpu-memory-utilization 0.90 \
---no-enable-prefix-caching \
---speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
---compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
---additional-config '{"enable_cpu_binding":true}' \
---async-scheduling
-```
+    # Model weight path; can be a ModelScope model id (e.g., Eco-Tech/Qwen3.5-27B-w8a8-mtp) or a local directory path
+    export MODEL_PATH=Eco-Tech/Qwen3.5-27B-w8a8-mtp
 
-**Qwen3.6-27B-w8a8**
+    vllm serve $MODEL_PATH \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --data-parallel-size 1 \
+    --tensor-parallel-size 2 \
+    --seed 1024 \
+    --quantization ascend \
+    --served-model-name qwen3.5 \
+    --max-num-seqs 32 \
+    --max-model-len 133000 \
+    --max-num-batched-tokens 8096 \
+    --trust-remote-code \
+    --gpu-memory-utilization 0.90 \
+    --no-enable-prefix-caching \
+    --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
+    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+    --additional-config '{"enable_cpu_binding":true}' \
+    --async-scheduling
+    ```
 
-Startup Command (supports up to 262144 context length):
+=== "Qwen3.6-27B-w8a8"
 
-```bash
-#!/bin/sh
-# Load model from ModelScope to speed up download
-export VLLM_USE_MODELSCOPE=True
-# To reduce memory fragmentation and avoid out of memory
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export HCCL_BUFFSIZE=512
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
-export TASK_QUEUE_ENABLE=1
+    Startup Command (supports up to 262144 context length):
 
-vllm serve Eco-Tech/Qwen3.6-27B-w8a8 \
---host 0.0.0.0 \
---port 8000 \
---data-parallel-size 1 \
---tensor-parallel-size 2 \
---seed 1024 \
---quantization ascend \
---served-model-name qwen3.6 \
---max-num-seqs 32 \
---max-model-len 262144 \
---max-num-batched-tokens 8096 \
---trust-remote-code \
---gpu-memory-utilization 0.90 \
---no-enable-prefix-caching \
---speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
---compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
---additional-config '{"enable_cpu_binding":true}' \
---async-scheduling
-```
+    ```bash
+    #!/bin/sh
+    # Load model from ModelScope to speed up download
+    export VLLM_USE_MODELSCOPE=True
+    # To reduce memory fragmentation and avoid out of memory
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    # Size of the shared buffer (in MB) used by HCCL for NPU-to-NPU collective communication
+    export HCCL_BUFFSIZE=512
+    # Whether OpenMP threads are bound to specific CPU cores
+    export OMP_PROC_BIND=false
+    # Number of OpenMP threads available for parallel regions
+    export OMP_NUM_THREADS=1
+    # Enables the Ascend task queue for asynchronous operator dispatch
+    export TASK_QUEUE_ENABLE=1
+
+    # Model weight path; can be a ModelScope model id (e.g., Eco-Tech/Qwen3.6-27B-w8a8) or a local directory path
+    export MODEL_PATH=Eco-Tech/Qwen3.6-27B-w8a8
+
+    vllm serve $MODEL_PATH \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --data-parallel-size 1 \
+    --tensor-parallel-size 2 \
+    --seed 1024 \
+    --quantization ascend \
+    --served-model-name qwen3.6 \
+    --max-num-seqs 32 \
+    --max-model-len 262144 \
+    --max-num-batched-tokens 8096 \
+    --trust-remote-code \
+    --gpu-memory-utilization 0.90 \
+    --no-enable-prefix-caching \
+    --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
+    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+    --additional-config '{"enable_cpu_binding":true}' \
+    --async-scheduling
+    ```
 
 Key Parameter Descriptions:
 
@@ -561,6 +575,43 @@ Here are two accuracy evaluation methods.
 1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
 
 2. After execution, you can get the result. Here is the result of `Qwen3.5-27B-w8a8` in `vllm-ascend:v0.17.0rc1` for reference only. The accuracy result of `Qwen3.6-27B-w8a8` can be obtained in the same way and is not listed here.
+
+**Accuracy Evaluation Config File:**
+
+```bash
+# Example configuration: benchmarks/ais_bench/benchmark/configs/models/vllm_api/vllm_api_general_chat.py
+from ais_bench.benchmark.models import VLLMCustomAPIChat
+from ais_bench.benchmark.utils.model_postprocessors import extract_non_reasoning_content
+
+models = [
+    dict(
+        attr="service",
+        type=VLLMCustomAPIChat,
+        abbr="vllm-api-general-chat",
+        path="your_model_path",
+        model="qwen3.5",
+        request_rate=0,
+        retry=2,
+        host_ip="127.0.0.1",
+        host_port=8000,
+        max_out_len=32768,
+        batch_size=32,
+        trust_remote_code=False,
+        generation_kwargs=dict(
+            temperature=1.0,
+            top_p=0.95,
+            top_k=20,
+            min_p=0.0,
+            presence_penalty=1.5,
+            repetition_penalty=1.0,
+            ignore_eos=False,
+        ),
+        pred_postprocessor=dict(type=extract_non_reasoning_content)
+    )
+]
+```
+
+> For `Qwen3.6-27B-w8a8`, change `model` to `qwen3.6` and `path` to the corresponding model weight path.
 
 | dataset | version | metric | mode | vllm-api-general-chat |
 |----- | ----- | ----- | ----- | -----|

@@ -269,7 +269,76 @@
 #
 # ** 10b. File: platform/patch_pp_mtp.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.config.model.ModelConfig.verify_with_parallel_config`
+#   1. `vllm.v1.outputs.ModelRunnerOutput`
+#    Why:
+#       PP + MTP mixed deployment needs the model runner to return the draft
+#       tokens produced for the same scheduler output. Upstream output objects
+#       do not carry `spec_token_ids` on all supported vLLM revisions.
+#    How：
+#       Add a backward-compatible `spec_token_ids` field to `ModelRunnerOutput`
+#       and `EMPTY_MODEL_RUNNER_OUTPUT` when the field is missing.
+#    Related PR (if no, explain why):
+#       Backport of local vLLM PP+MTP branch changes.
+#    Future Plan:
+#       Remove this patch once the supported vLLM version carries PP-safe
+#       speculative token metadata in `ModelRunnerOutput`.
+#
+#   2. `vllm.v1.engine.core.EngineCore.post_step`
+#    Why:
+#       With PP batch queue, synchronous scheduling can schedule the next batch
+#       before the previous model output is consumed. Calling `post_step` in that
+#       window updates `request.spec_token_ids` from live request state that may
+#       already belong to the newer schedule step.
+#    How：
+#       In PP + MTP + batch queue + sync scheduling, skip `post_step` after model
+#       execution and let scheduler output processing perform the spec token
+#       writeback from the corresponding `ModelRunnerOutput`.
+#    Related PR (if no, explain why):
+#       Backport of local vLLM PP+MTP branch changes.
+#    Future Plan:
+#       Remove this patch when upstream makes spec token writeback output-owned
+#       for PP batch queue.
+#
+#   3. `vllm.v1.core.sched.scheduler.Scheduler._update_after_schedule`
+#      `vllm.v1.core.sched.scheduler.Scheduler.update_from_output`
+#    Why:
+#       PP async scheduling must not schedule the same decode request again
+#       before the previous output has written sampled/spec tokens back. Without
+#       this request-level in-flight fence, the next step may use stale sampled
+#       tokens and produce incorrect target-model output. Intermediate prefill
+#       chunks do not depend on sampled/spec writeback and should remain
+#       schedulable to keep the PP pipeline filled.
+#    How：
+#       After scheduling, set a temporary decode fence for final prefill/decode
+#       chunks in PP IPC mode. Release the fence in `update_from_output` after
+#       the matching output is processed. For PP + MTP, also filter zero-token
+#       placeholder requests before delegating to upstream scheduler accounting,
+#       then write `request.spec_token_ids` from `model_runner_output.spec_token_ids`.
+#    Related PR (if no, explain why):
+#       Backport of local vLLM PP+MTP branch changes.
+#    Future Plan:
+#       Remove this patch once upstream supports request-level PP async fences
+#       and output-owned spec token writeback.
+#
+#   4. `vllm.v1.core.sched.scheduler.Scheduler._make_cached_request_data`
+#    Why:
+#       Upstream PP async scheduling relies on direct PP-rank GPU broadcast for
+#       sampled-token handoff and omits `new_token_ids` from cached request data.
+#       vLLM Ascend routes PP sampled-token handoff through scheduler IPC, so
+#       non-last PP ranks need the previous sampled token in both sync and async
+#       scheduling. This also avoids copying draft tokens as confirmed tokens in
+#       PP + MTP mixed deployment.
+#    How：
+#       Temporarily build cached request data with sync-PP semantics in PP IPC
+#       mode, then fill the last confirmed output token for requests whose
+#       clamped upstream slice is empty.
+#    Related PR (if no, explain why):
+#       Backport of local vLLM PP+MTP branch changes.
+#    Future Plan:
+#       Remove this patch once upstream provides a scheduler-owned PP sampled
+#       token handoff path that works for both sync and async scheduling.
+#
+#   5. `vllm.config.model.ModelConfig.verify_with_parallel_config`
 #    Why:
 #       Local Eagle/MTP drafters are loaded on the last PP stage rather than
 #       partitioned across all PP ranks. Upstream `ModelConfig.verify_with_parallel_config`
@@ -337,6 +406,28 @@
 #    Future Plan:
 #       Remove this patch once the supported vLLM version contains the upstream
 #       MiniMax-M2 incremental tool-call streaming fix.
+#
+# ** 12b. File: platform/patch_structured_output.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.sampling_params.SamplingParams._validate_structured_outputs`
+#      `vllm.v1.structured_output.StructuredOutputManager.grammar_init`
+#    Why:
+#       V1 structured outputs use one engine-level backend, while `backend=auto`
+#       resolves the backend per request. After one request initializes
+#       `xgrammar`, a later request that resolves to `guidance` can still reach
+#       the initialized `xgrammar` backend and crash during grammar compilation.
+#    How:
+#       Record the first resolved backend on the structured-output config and
+#       reject later requests that resolve to a different backend. Also guard
+#       `grammar_init` so requests that bypass API-side validation fail before
+#       backend grammar compilation.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/issues/43920
+#       https://github.com/vllm-project/vllm/pull/44401
+#    Future Plan:
+#       Remove this patch once upstream vLLM either enforces backend consistency
+#       before grammar compilation or safely handles mixed-backend grammar
+#       failures without killing the engine.
 #
 # ** 13. File: platform/patch_camem_allocator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -702,6 +793,36 @@
 #       patch Qwen3_5GatedDeltaNet._forward_core to use triton ops like `fused_recurrent_gated_delta_rule`.
 #    Future Plan:
 #       Remove this patch when all ops in _forward_core support both Qwen3_5 and Qwen3Next.
+#
+# ** 17a. File: worker/patch_idex_310.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.layers.fla.ops.index.prepare_chunk_indices`
+#      `vllm.model_executor.layers.fla.ops.index.prepare_chunk_offsets`
+#    Why:
+#       310P uses Ascend-friendly chunk index helpers for Qwen GDN prefill.
+#    How:
+#       Replace upstream FLA chunk index helper functions with 310P implementations.
+#
+#   2. `vllm_ascend.spec_decode.llm_base_proposer.AscendSpecDecodeBaseProposer.set_inputs_first_pass`
+#    Why:
+#       310P needs to protect the tail slot during MTP input_ids shift to avoid
+#       GatherV2 corruption from persistent drafter input buffers.
+#    How:
+#       Reuse the 310P proposer implementation for the first-pass input shift.
+#
+#   3. `vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn.QwenGatedDeltaNetAttention`
+#    Why:
+#       Qwen GDN needs 310P-specific state helpers, forward core, state dtype,
+#       and attention backend/builder wiring.
+#    How:
+#       Patch Qwen GDN methods to use Ascend GDN implementations and the 310P
+#       GDN attention backend. RC devices also route upstream GDNAttentionBackend
+#       to the 310P metadata builder.
+#    Related PR (if no, explain why):
+#       No, 310P custom operator and backend behavior are vllm-ascend specific.
+#    Future Plan:
+#       Remove this patch when upstream exposes stable hooks for 310P GDN
+#       chunk metadata, spec-decode input layout, and backend selection.
 #
 # ** 18. File: worker/patch_cudagraph.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

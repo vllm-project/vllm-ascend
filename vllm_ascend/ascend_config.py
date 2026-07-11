@@ -159,6 +159,9 @@ class AscendConfig:
                 "collectives need uniform num_tokens across DP ranks, which is "
                 "only guaranteed when the recompute scheduler is enabled."
             )
+        self.short_request_first_config = ShortRequestFirstConfig(
+            additional_config.get("short_request_first_config", {})
+        )
         self.enable_cpu_binding = additional_config.get("enable_cpu_binding", True)
         self.enable_sleep_mode_extra_cleanup = additional_config.get("enable_sleep_mode_extra_cleanup", False)
         self.multistream_dsv4_dsa_overlap = additional_config.get("multistream_dsv4_dsa_overlap", True)
@@ -256,11 +259,9 @@ class AscendConfig:
             bool(additional_config.get("enable_async_exponential", False)) and not envs.VLLM_BATCH_INVARIANT
         )
 
-        use_sparse = (
-            vllm_config.model_config is not None
-            and hasattr(vllm_config.model_config, "hf_text_config")
-            and hasattr(vllm_config.model_config.hf_text_config, "index_topk")
-        )
+        from vllm_ascend.utils import model_uses_sfa_sparse
+
+        use_sparse = model_uses_sfa_sparse(vllm_config.model_config)
 
         self.enable_kv_nz = additional_config.get("enable_kv_nz", False)
         if self.enable_kv_nz:
@@ -294,8 +295,8 @@ class AscendConfig:
         # are dropped and skipped from computation, degrading accuracy.
         # Do not set this too large: workspace memory scales linearly with this value, which matters
         # especially under long-context scenarios where the operator should not hold too much memory.
-        # Default 65536.
-        self.mega_moe_max_tokens = additional_config.get("mega_moe_max_tokens", 65536)
+        # Default 131072.
+        self.mega_moe_max_tokens = additional_config.get("mega_moe_max_tokens", 131072)
         if not isinstance(self.mega_moe_max_tokens, int):
             raise ValueError(
                 f"mega_moe_max_tokens must be an integer, got {type(self.mega_moe_max_tokens).__name__}: "
@@ -853,6 +854,35 @@ class EplbConfig:
 
         logger.info("Dynamic EPLB is %s", self.config["dynamic_eplb"])
         logger.info("The number of redundant experts is %s", self.config["num_redundant_experts"])
+
+
+class ShortRequestFirstConfig:
+    """Configuration object for ``additional_config["short_request_first_config"]``."""
+
+    _defaults = {
+        "enabled": False,
+        "threshold": 256,
+        "long_max_wait_ms": 0.0,
+    }
+
+    def __init__(self, user_config: dict | None = None):
+        user_config = user_config or {}
+        unknown = set(user_config) - set(self._defaults)
+        if unknown:
+            raise ValueError(f"Unknown short_request_first_config keys: {sorted(unknown)}")
+
+        source = user_config
+
+        self.enabled = bool(source.get("enabled", self._defaults["enabled"]))
+        self.threshold = int(source.get("threshold", self._defaults["threshold"]))
+        self.long_max_wait_ms = float(source.get("long_max_wait_ms", self._defaults["long_max_wait_ms"]))
+        self._validate_config()
+
+    def _validate_config(self):
+        if self.threshold < 0:
+            raise ValueError(f"short_request_first_config.threshold must be a non-negative int; got {self.threshold}")
+        if self.long_max_wait_ms < 0:
+            raise ValueError(f"short_request_first_config.long_max_wait_ms must be >= 0; got {self.long_max_wait_ms}")
 
 
 _ASCEND_CONFIG: AscendConfig | None = None

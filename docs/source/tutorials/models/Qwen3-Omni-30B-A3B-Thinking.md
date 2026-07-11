@@ -345,7 +345,7 @@ Expected result: HTTP 200 with a JSON response containing the `choices` field wi
 
 As an example, take the `gsm8k` `omnibench` `bbh` dataset as a test dataset, and run accuracy evaluation of `Qwen3-Omni-30B-A3B-Thinking` in online mode.
 
-1. Refer to [Using evalscope](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/evaluation/using_evalscope.html#install-evalscope-using-pip) for `evalscope`installation.
+1. Refer to [Using evalscope](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/evaluation/using_evalscope.html#2-install-evalscope-using-pip) for `evalscope`installation.
 2. Run `evalscope` to execute the accuracy evaluation.
 
     ```bash
