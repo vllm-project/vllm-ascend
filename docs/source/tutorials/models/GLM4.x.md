@@ -1,6 +1,6 @@
 # GLM-4.5/4.6/4.7
 
-## Introduction
+## 1 Introduction
 
 GLM-4.x series models use a Mixture-of-Experts (MoE) architecture and are foundational models specifically designed for agent applications.
 
@@ -8,15 +8,15 @@ The `GLM-4.5` model is first supported in `vllm-ascend:v0.10.0rc1`.
 
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, accuracy and performance evaluation.
 
-## Supported Features
+## 2 Supported Features
 
 Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
 Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
-## Environment Preparation
+## 3 Prerequisites
 
-### Model Weight
+### 3.1 Model Weight
 
 - `GLM-4.5`(BF16 version): [Download model weight](https://www.modelscope.cn/models/ZhipuAI/GLM-4.5).
 - `GLM-4.6`(BF16 version): [Download model weight](https://www.modelscope.cn/models/ZhipuAI/GLM-4.6).
@@ -28,7 +28,7 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
-### Installation
+## 4 Installation
 
 You can use our official docker image to run `GLM-4.x` directly.
 
@@ -110,9 +110,9 @@ In addition, if you don't want to use the docker image as above, you can also bu
 
 If you want to deploy multi-node environment, you need to set up environment on each node.
 
-## Deployment
+## 5 Online Service Deployment
 
-### Single-node Deployment
+### 5.1 Single-node Deployment
 
 - In low-latency scenarios, we recommend a single-machine deployment.
 - Quantized model `glm4.7_w8a8_with_float_mtp` can be deployed on 1 Atlas 800 A3 (64G × 16) or 1 Atlas 800 A2 (64G × 8).
@@ -152,11 +152,11 @@ The parameters are explained as follows:
 - `fusion_ops_gmmswigluquant` The performance of the GmmSwigluQuant fusion operator tends to degrade when the total number of NPUs is ≤ 16.
 - `VLLM_ASCEND_ENABLE_FLASHCOMM1` Due to the FD feature of the FIA operator being invalidated by padding data introduced by this feature, we recommend disabling the `flashcomm1` feature for long-sequence (≥16k) and low-concurrency (≤8 batch size) scenarios.For long-sequence and high-concurrency scenarios, you may enable this feature to achieve improved Prefill performance.
 
-### Multi-node Deployment
+### 5.2 Multi-node Deployment
 
 While the previous documentation advises against multi-node deployment on the Atlas 800 A2 (64G × 8) platform, this configuration can still be implemented for the GLM-4.x model if required. To proceed with a dual-node setup, execute the following scripts on each respective node.
 
-**Node 0**
+=== "Node 0"
 
 ```shell
 #!/bin/sh
@@ -204,7 +204,7 @@ vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
   --additional-config '{"enable_shared_expert_dp": true, "ascend_fusion_config": {"fusion_ops_gmmswigluquant": false}}'
 ```
 
-**Node 1**
+=== "Node 1"
 
 ```shell
 #!/bin/sh
@@ -254,7 +254,7 @@ vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
   --additional-config '{"enable_shared_expert_dp": true, "ascend_fusion_config": {"fusion_ops_gmmswigluquant": false}}'
 ```
 
-### Prefill-Decode Disaggregation
+### 5.3 Prefill-Decode Disaggregation
 
 We'd like to show the deployment guide of `GLM-4.7` on multi-node environment with 2P1D for better performance.
 
@@ -365,7 +365,7 @@ Before you start, please
 
 2. prepare the script `run_dp_template.sh` on each node.
 
-    1. Prefill node 0
+=== "Prefill node 0"
 
         ```shell
         nic_name="xxxx" # change to your own nic name
@@ -427,7 +427,7 @@ Before you start, please
 
         ```
 
-    2. Prefill node 1
+=== "Prefill node 1"
 
         ```shell
         nic_name="xxxx" # change to your own nic name
@@ -488,7 +488,7 @@ Before you start, please
             }' 2>&1
         ```
 
-    3. Decode node 0
+=== "Decode node 0"
 
         ```shell
         nic_name="xxxx" # change to your own nic name
@@ -556,7 +556,7 @@ Before you start, please
             }'
         ```
 
-    4. Decode node 1
+=== "Decode node 1"
 
         ```shell
         nic_name="xxxx" # change to your own nic name
@@ -626,35 +626,35 @@ Before you start, please
 
 Once the preparation is done, you can start the server with the following command on each node:
 
-1. Prefill node 0
+=== "Prefill node 0"
 
     ```shell
     # change ip to your own
     python launch_online_dp.py --dp-size 2 --tp-size 8 --dp-size-local 2 --dp-rank-start 0 --dp-address $node_p0_ip --dp-rpc-port 12880 --vllm-start-port 9300
     ```
 
-2. Prefill node 1
+=== "Prefill node 1"
 
     ```shell
     # change ip to your own
     python launch_online_dp.py --dp-size 2 --tp-size 8 --dp-size-local 2 --dp-rank-start 0 --dp-address $node_p1_ip --dp-rpc-port 12880 --vllm-start-port 9300
     ```
 
-3. Decode node 0
+=== "Decode node 0"
 
     ```shell
     # change ip to your own
     python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 4 --dp-rank-start 0 --dp-address $node_d0_ip --dp-rpc-port 12778 --vllm-start-port 9300
     ```
 
-4. Decode node 1
+=== "Decode node 1"
 
     ```shell
     # change ip to your own
     python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 4 --dp-rank-start 4 --dp-address $node_d0_ip --dp-rpc-port 12778 --vllm-start-port 9300
     ```
 
-### Request Forwarding
+### 5.4 Request Forwarding
 
 To set up request forwarding, run the following script on any machine. You can get the proxy program in the repository's examples: [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
 
@@ -685,7 +685,7 @@ python load_balance_proxy_server_example.py \
       9300 9301 9302 9303
 ```
 
-## Functional Verification
+## 6 Functional Verification
 
 Once your server is started, you can query the model with input prompts:
 
@@ -706,7 +706,7 @@ curl -H "Accept: application/json" \
     }' http://<node0_ip>:<port>/v1/chat/completions
 ```
 
-## Accuracy Evaluation
+## 7 Accuracy Evaluation
 
 Here are two accuracy evaluation methods.
 
@@ -725,7 +725,7 @@ Here are two accuracy evaluation methods.
 
 Not tested yet.
 
-## Performance
+## 8 Performance Evaluation
 
 ### Using AISBench
 
@@ -767,7 +767,7 @@ vllm bench serve \
 
 After about several minutes, you can get the performance evaluation result.
 
-## Best Practices
+## 9 Performance Tuning
 
 In this chapter, we recommend best practices for three scenarios:
 
@@ -778,7 +778,7 @@ In this chapter, we recommend best practices for three scenarios:
 **Notice:**
 `max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario. For other settings, please refer to the **[Deployment](#deployment)** chapter.
 
-## FAQ
+## 10 FAQ
 
 - **Q: Startup fails with HCCL port conflicts (address already bound). What should I do?**
 
