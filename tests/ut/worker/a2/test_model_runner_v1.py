@@ -15,7 +15,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         runner = NPUModelRunner.__new__(NPUModelRunner)
         runner.device = torch.device("cpu")
         runner.use_sparse = False
-        runner.use_sparse_c8_indexer = False
+        runner.use_sparse_c8 = False
         runner.use_compress = False
         runner.use_hybrid_blocks = False
         runner.hybrid_with_attn_and_mamba = False
@@ -101,7 +101,6 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         runner.kv_cache_dtype = torch.bfloat16
         runner.shared_kv_cache_layers = {}
         runner.ascend_config = MagicMock()
-        runner.ascend_config.is_sparse_c8_layer.return_value = False
         runner.model_config.hf_text_config = SimpleNamespace(
             kv_lora_rank=512,
             qk_rope_head_dim=64,
@@ -110,7 +109,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
 
         attn_module = MLAAttention.__new__(MLAAttention)
         torch.nn.Module.__init__(attn_module)
-        attn_module.impl = SimpleNamespace(has_indexer=False)
+        attn_module.impl = SimpleNamespace(has_indexer=False, use_sparse_c8=False)
         layer_name = "model.layers.1.self_attn.attn"
         mock_get_layers.return_value = {layer_name: attn_module}
 
