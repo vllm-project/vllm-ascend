@@ -21,9 +21,9 @@
 name: Weekly-A3
 
 on:
-#   schedule:
-#       # Run test at 00:00 Beijing time (UTC+8) every Sunday
-#       - cron: "0 16 * * 6"
+  schedule:
+      # Run test at 10:00 Beijing time (UTC+8) every Sunday
+      - cron: "0 2 * * 0"
   workflow_dispatch:
     inputs:
       vllm_ascend_branch:
@@ -188,7 +188,7 @@ jobs:
       (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
     strategy:
       fail-fast: false
-      max-parallel: 3
+      max-parallel: 2
       matrix:
         vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
         test_config: ${{ fromJson(needs.setup-vars.outputs.multi_node) }}
