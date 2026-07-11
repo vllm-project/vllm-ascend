@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group, is_v1_kv_transfer_group
 from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 
 from vllm_ascend.device.utils import FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
@@ -17,6 +18,22 @@ from vllm_ascend.utils import (
     is_pd_decode_recompute_scheduler_enabled,
 )
 from vllm_ascend.worker.kvcomp_utils import KVCompMetaData
+
+SFA_QSFA_TILE_SIZE = 128
+
+
+def get_sfa_qsfa_packed_head_dim(
+    kv_lora_rank: int,
+    qk_rope_head_dim: int,
+    tile_size: int = SFA_QSFA_TILE_SIZE,
+) -> int:
+    if kv_lora_rank % tile_size != 0:
+        raise ValueError(
+            f"kv_lora_rank must be divisible by tile_size for SFA QSFA packed cache, "
+            f"got {kv_lora_rank=} and {tile_size=}."
+        )
+    scale_metadata_bytes = (kv_lora_rank // tile_size) * get_dtype_size(torch.float32)
+    return kv_lora_rank + qk_rope_head_dim * get_dtype_size(torch.bfloat16) + scale_metadata_bytes
 
 
 def cache_graph_workspace(
