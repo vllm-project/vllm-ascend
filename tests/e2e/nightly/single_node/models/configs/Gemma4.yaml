@@ -2,7 +2,7 @@
 # Shared Configurations
 # ==========================================
 
-_model: &model "vllm-ascend/Gemma4-26B-MoE"
+_model: &model "google/gemma-4-26B-A4B-it"
 
 _envs: &envs
   VLLM_USE_MODELSCOPE: "true"
