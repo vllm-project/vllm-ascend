@@ -259,11 +259,9 @@ class AscendConfig:
             bool(additional_config.get("enable_async_exponential", False)) and not envs.VLLM_BATCH_INVARIANT
         )
 
-        use_sparse = (
-            vllm_config.model_config is not None
-            and hasattr(vllm_config.model_config, "hf_text_config")
-            and hasattr(vllm_config.model_config.hf_text_config, "index_topk")
-        )
+        from vllm_ascend.utils import model_uses_sfa_sparse
+
+        use_sparse = model_uses_sfa_sparse(vllm_config.model_config)
 
         self.enable_kv_nz = additional_config.get("enable_kv_nz", False)
         if self.enable_kv_nz:

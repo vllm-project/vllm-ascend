@@ -104,21 +104,36 @@ def test_egale_spec_decoding(
         "The capital of France is",
         "The future of AI is",
     ]
-
+    num_speculative_tokens = 3
     sampling_params = SamplingParams(max_tokens=max_tokens, temperature=0.0)
     with VllmRunner(
         model,
         max_model_len=1024,
         enforce_eager=enforce_eager,
+        disable_log_stats=False,
         async_scheduling=True,
         speculative_config={
             "model": eagle_model,
             "method": "eagle",
-            "num_speculative_tokens": 3,
+            "num_speculative_tokens": num_speculative_tokens,
         },
         compilation_config=compilation_config,
     ) as runner:
         runner.model.generate(prompts, sampling_params)
+        metrics = runner.model.get_metrics()
+
+    acceptance_per_pos = calculate_acceptance_per_pos(
+        metrics,
+        num_speculative_tokens,
+        Counter,
+        Vector,
+    )
+    golden = [0.43, 0.13, 0.05]
+    match = all(abs(a - b) < 0.1 for a, b in zip(acceptance_per_pos, golden))
+    if not match:
+        print(f"acceptance_per_pos: {acceptance_per_pos}")
+        print(f"golden: {golden}")
+    assert match
 
 
 @pytest.mark.parametrize("model", DFLASH_MAIN_MODEL)
