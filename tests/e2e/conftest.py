@@ -57,6 +57,9 @@ from vllm.platforms import current_platform
 from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.network_utils import get_open_port
 
+from tests.e2e.coverage_taxonomy import (
+    validate_coverage_marker,
+)
 from tests.e2e.model_utils import TokensTextLogprobs, TokensTextLogprobsPromptLogprobs
 from tests.e2e.nightly.multi_node.internal_dp.scripts.multi_node_config import DisaggregatedPrefillCfg, NodeInfo
 from vllm_ascend.ascend_config import clear_ascend_config
@@ -1952,3 +1955,40 @@ def vl_config(request):
     if "skip" in config:
         pytest.skip(config["skip"])
     return config
+
+
+# ---------------------------------------------------------------------------
+# E2E coverage marker enforcement
+# ---------------------------------------------------------------------------
+# Values used in @pytest.mark.e2e_coverage(...) must come from the shared
+# taxonomy in tests/e2e/coverage_taxonomy.py. This hook enforces that at
+# collection time so a typo / invented value fails loudly and locally
+# (pytest reports an ERROR for that item). Unmarked tests are NOT enforced
+# here — the migration to e2e_coverage is still in progress, so tests
+# without the marker are allowed during the transition.
+#
+# The CI LINT job additionally fails on out-of-taxonomy values via
+# .github/workflows/scripts/coverage.py; this hook is the local, fast
+# feedback path for developers running pytest directly.
+def pytest_collection_modifyitems(config, items):
+    for item in items:
+        marker = item.get_closest_marker("e2e_coverage")
+        if marker is None:
+            continue  # migration period: unmarked tests are allowed
+
+        # marker.kwargs: {dim: raw_str}  (e.g. {"arch": "dense",
+        # "feature": "lora,mtp"}). split_multi turns each value into its
+        # constituent tokens; validate_coverage_marker checks every token
+        # against the taxonomy and reports missing required dims.
+        raw_coverage = {dim: str(val) for dim, val in marker.kwargs.items()}
+        problems = validate_coverage_marker(raw_coverage)
+        if not problems:
+            continue
+
+        loc = item.nodeid
+        detail = "; ".join(problems)
+        raise pytest.CollectError(
+            f"\n[e2e_coverage marker invalid] {loc}\n  {detail}\n"
+            "  Values must come from tests/e2e/coverage_taxonomy.py "
+            "(ALLOWED_VALUES). Fix the marker or update the taxonomy."
+        )
