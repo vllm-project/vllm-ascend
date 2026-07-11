@@ -164,6 +164,9 @@ a3:
       - name: gemma4
         os: linux-aarch64-a3-4
         config_file_path: Gemma4.yaml
+      - name: gemma4-31b-dense
+        os: linux-aarch64-a3-4
+        config_file_path: Gemma4-31B-Dense.yaml
   multi_card:
     test_config:
       # pytest-driven tests
