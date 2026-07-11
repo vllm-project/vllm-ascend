@@ -934,6 +934,13 @@ def test_hybrid_padded_slot_mapping_uses_independent_kv_group_buffers():
     assert pcp_manager.pcp_padded_slot_mapping_list[0][:12].tolist() == expected_group0
 
 
+def _local_kv_len(seq_len: int, cp_rank: int, cp_size: int, interleave_size: int) -> int:
+    """Per-rank KV length for the first ``seq_len`` global positions [0, seq_len)."""
+    base = seq_len // interleave_size // cp_size * interleave_size
+    remainder = seq_len - base * cp_size
+    return base + max(0, min(remainder - cp_rank * interleave_size, interleave_size))
+
+
 def _ref_mtp_mask_lens(
     history_len: int,
     num_scheduled: int,
@@ -943,23 +950,17 @@ def _ref_mtp_mask_lens(
 ) -> tuple[int, list[int]]:
     """Reference: compute per-rank KV length and k_upper per query position.
 
-    Follows the same interleave-aware formulas as
-    ``generate_mtp_attention_mask_for_decode``.
+    ``k_upper`` is the inclusive local index of KV tokens with global
+    ``pos <= P`` on this rank (standard causal, including self).
     """
     total_len = history_len + num_scheduled
-    # Per-rank KV length
-    base_k = total_len // interleave_size // cp_size * interleave_size
-    remainder_k = total_len - base_k * cp_size
-    k_lens = base_k + max(0, min(remainder_k - cp_rank * interleave_size, interleave_size))
+    k_lens = _local_kv_len(total_len, cp_rank, cp_size, interleave_size)
 
     context_len = history_len
     k_uppers: list[int] = []
     for qi in range(num_scheduled):
-        pos = context_len + qi
-        base_q = pos // interleave_size // cp_size * interleave_size
-        remainder_q = pos - base_q * cp_size
-        local_q = base_q + max(0, min(remainder_q - cp_rank * interleave_size, interleave_size))
-        k_upper = local_q - 1
+        inclusive_len = context_len + qi + 1
+        k_upper = _local_kv_len(inclusive_len, cp_rank, cp_size, interleave_size) - 1
         k_uppers.append(k_upper)
 
     return k_lens, k_uppers
@@ -1081,6 +1082,61 @@ def test_generate_mtp_attention_mask_for_decode(
         f"ref_k_lens={ref_k_lens}, ref_k_uppers={ref_k_uppers}\n"
         f"Expected:\n{ref_mask.int()}\nGot:\n{actual_mask.int()}"
     )
+
+
+@pytest.mark.parametrize(
+    "dcp_world_size, dcp_rank, history_len, num_scheduled",
+    [
+        (2, 0, 5, 4),
+        (2, 1, 5, 4),
+        (2, 0, 200, 3),
+        (2, 1, 200, 3),
+        (4, 0, 100, 5),
+        (4, 3, 100, 5),
+    ],
+)
+def test_mtp_mask_interleave1_matches_legacy_inclusive_formula(
+    dcp_world_size: int,
+    dcp_rank: int,
+    history_len: int,
+    num_scheduled: int,
+):
+    """For interleave_size=1, k_upper must match the pre-#11492 inclusive formula."""
+    _, k_uppers = _ref_mtp_mask_lens(
+        history_len, num_scheduled, dcp_rank, dcp_world_size, interleave_size=1
+    )
+    for qi, k_upper in enumerate(k_uppers):
+        pos = history_len + qi
+        legacy = (pos - dcp_rank) // dcp_world_size
+        assert k_upper == legacy, (
+            f"pos={pos}, rank={dcp_rank}: got k_upper={k_upper}, legacy={legacy}"
+        )
+
+    pcp_manager = _make_pcp_manager(
+        pcp_world_size=1,
+        dcp_world_size=dcp_world_size,
+        dcp_rank=dcp_rank,
+        cp_kv_cache_interleave_size=1,
+        num_speculative_tokens=num_scheduled - 1,
+    )
+    num_scheduled_tokens = np.array([num_scheduled], dtype=np.int32)
+    num_computed_tokens = np.array([history_len], dtype=np.int32)
+    num_prompt_tokens = np.array([history_len], dtype=np.int32)
+    pcp_manager.init_batch_info(
+        num_scheduled_tokens,
+        num_reqs=1,
+        num_computed_tokens=num_computed_tokens,
+        num_prompt_tokens=num_prompt_tokens,
+    )
+    result = pcp_manager.generate_mtp_attention_mask_for_decode(
+        decode_num_computed_tokens=[history_len],
+        decode_num_scheduled_tokens=num_scheduled_tokens,
+    )
+    ref_k_lens, ref_k_uppers = _ref_mtp_mask_lens(
+        history_len, num_scheduled, dcp_rank, dcp_world_size, interleave_size=1
+    )
+    ref_mask = _build_ref_mask(num_scheduled, ref_k_lens, ref_k_uppers)
+    assert torch.equal(result[0, :num_scheduled, :ref_k_lens], ref_mask)
 
 
 def test_remap_mrope_positions_for_pcp_uses_local_positions():
