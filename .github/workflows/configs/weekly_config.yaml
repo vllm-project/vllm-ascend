@@ -51,8 +51,20 @@ a3:
       - name: DeepSeek_V3.1T_MTP1_3_5K_1_5K_PD
         config_file_path: DeepSeek_V3.1T_MTP1_3_5K_1_5K_PD.yaml‎
         size: 4
+      - name: DeepSeek_V3.1T_layerwise_PD
+        config_file_path: DeepSeek_V3.1T_layerwise_PD.yaml‎
+        size: 4
+      - name: DeepSeek_V3.2T_MTP2_PD
+        config_file_path: DeepSeek_V3.2T_MTP2_PD.yaml‎
+        size: 4
+      - name: DeepSeek_V3.2T_MTP3_PD
+        config_file_path: DeepSeek_V3.2T_MTP3_PD.yaml
+        size: 4
       - name: QWEN3_235B_PD_3_5K_1_5k
         config_file_path: QWEN3_235B_PD_3_5K_1_5k.yaml‎
+        size: 3
+      - name: QWEN3_235B_PD
+        config_file_path: QWEN3_235B_PD.yaml
         size: 3
   double_node:
     test_config:
