@@ -18,10 +18,12 @@
 #
 
 from collections.abc import Sequence
+from contextlib import contextmanager
 from typing import Any
 
 import numpy as np
 import torch
+import vllm
 from vllm.config import VllmConfig, get_current_vllm_config, get_layers_from_vllm_config
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention.mla_attention import MLAAttention
@@ -434,6 +436,7 @@ def _reshape_kv_cache_v2(
     cache_dtype: str,
     kernel_block_sizes: list[int],
     shared_kv_cache_layers: dict[str, str],
+    kv_cache_config: "KVCacheConfig | None" = None,
 ) -> dict[str, tuple[torch.Tensor, torch.Tensor]]:
     vllm_config = get_current_vllm_config()
     is_kv_consumer = (
@@ -501,3 +504,17 @@ def _reshape_kv_cache_v2(
         kv_caches[layer_name] = kv_caches[target_layer_name]
 
     return kv_caches
+
+
+_BUILD_ATTN_METADATA_MODULE = vllm.v1.worker.gpu.spec_decode.speculator
+
+
+@contextmanager
+def build_attn_metadata_wrapper():
+    """Context manager to override attention metadata building for Ascend NPUs."""
+    original_func = _BUILD_ATTN_METADATA_MODULE.build_attn_metadata
+    try:
+        _BUILD_ATTN_METADATA_MODULE.build_attn_metadata = build_attn_metadata
+        yield
+    finally:
+        _BUILD_ATTN_METADATA_MODULE.build_attn_metadata = original_func

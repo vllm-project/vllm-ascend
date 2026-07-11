@@ -12,6 +12,7 @@ class RopeGlobalState:
     def __init__(self):
         self.full_rope_cache: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
         self.runtime_buffer: dict[str, dict[str, tuple[torch.Tensor, torch.Tensor]]] = {}
+        self.spec_runtime_buffer: dict[str, dict[str, tuple[torch.Tensor, torch.Tensor]]] = {}
         self.layer_info: dict[str, tuple[str, list[str]]] = {}
         self.registry_summary: dict[str, set] = {}
 
@@ -58,7 +59,11 @@ class RopeDataProxy:
             return layer_result
 
 
-def get_cos_and_sin_dsa(positions: torch.Tensor | dict[str, torch.Tensor], use_cache: bool = False):
+def get_cos_and_sin_dsa(
+    positions: torch.Tensor | dict[str, torch.Tensor],
+    use_cache: bool = False,
+    draft_index: int | None = None,
+):
     if isinstance(positions, torch.Tensor):
         pos_map = {"default": positions}
     else:
@@ -81,7 +86,11 @@ def get_cos_and_sin_dsa(positions: torch.Tensor | dict[str, torch.Tensor], use_c
             curr_sin = full_rope_sin[pos_tensor]
 
             if use_cache:
-                group_buffers = _ROPE_STATE.runtime_buffer.get(config_key, {}).get(group_name)
+                group_buffers = (
+                    _ROPE_STATE.runtime_buffer.get(config_key, {}).get(group_name)
+                    if draft_index is None
+                    else _ROPE_STATE.spec_runtime_buffer.get(config_key, {}).get(group_name)
+                )
 
                 if group_buffers is None:
                     continue
@@ -89,10 +98,18 @@ def get_cos_and_sin_dsa(positions: torch.Tensor | dict[str, torch.Tensor], use_c
                 buf_cos, buf_sin = group_buffers
                 num_tokens = pos_tensor.size(0)
 
-                buf_cos[:num_tokens].copy_(curr_cos)
-                buf_sin[:num_tokens].copy_(curr_sin)
+                if draft_index is None:
+                    buf_cos[:num_tokens].copy_(curr_cos)
+                    buf_sin[:num_tokens].copy_(curr_sin)
 
-                batch_result[config_key][group_name] = (buf_cos[:num_tokens], buf_sin[:num_tokens])
+                    batch_result[config_key][group_name] = (buf_cos[:num_tokens], buf_sin[:num_tokens])
+                else:
+                    buf_cos[draft_index - 1][:num_tokens].copy_(curr_cos)
+                    buf_sin[draft_index - 1][:num_tokens].copy_(curr_sin)
+                    batch_result[config_key][group_name] = (
+                        buf_cos[draft_index - 1][:num_tokens],
+                        buf_sin[draft_index - 1][:num_tokens],
+                    )
             else:
                 batch_result[config_key][group_name] = (curr_cos, curr_sin)
 
@@ -171,8 +188,17 @@ class ComplexExpRotaryEmbedding(nn.Module):
 
             _ROPE_STATE.full_rope_cache[config_key] = (cos.unsqueeze(1).unsqueeze(1), sin.unsqueeze(1).unsqueeze(1))
 
+        use_eagle = (
+            vllm_config is not None
+            and vllm_config.speculative_config is not None
+            and vllm_config.speculative_config.use_eagle()
+        )
+        num_speculative_tokens = vllm_config.speculative_config.num_speculative_tokens if use_eagle else None
+
         if config_key not in _ROPE_STATE.runtime_buffer:
             _ROPE_STATE.runtime_buffer[config_key] = {}
+            if num_speculative_tokens is not None:
+                _ROPE_STATE.spec_runtime_buffer[config_key] = {}
 
         target_device = current_platform.device_type
         max_batch_size = vllm_config.scheduler_config.max_num_batched_tokens
@@ -181,6 +207,16 @@ class ComplexExpRotaryEmbedding(nn.Module):
                 buf_cos = torch.ones(max_batch_size, 1, 1, rotary_dim, dtype=torch.float32, device=target_device)
                 buf_sin = torch.zeros(max_batch_size, 1, 1, rotary_dim, dtype=torch.float32, device=target_device)
                 _ROPE_STATE.runtime_buffer[config_key][grp] = (buf_cos, buf_sin)
+                if num_speculative_tokens is not None:
+                    buf_cos = [
+                        torch.ones(max_batch_size, 1, 1, rotary_dim, dtype=torch.float32, device=target_device)
+                        for _ in range(num_speculative_tokens)
+                    ]
+                    buf_sin = [
+                        torch.zeros(max_batch_size, 1, 1, rotary_dim, dtype=torch.float32, device=target_device)
+                        for _ in range(num_speculative_tokens)
+                    ]
+                    _ROPE_STATE.spec_runtime_buffer[config_key][grp] = (buf_cos, buf_sin)
 
     @staticmethod
     def precompute_freqs_cis(dim, seqlen, original_seq_len, base, factor, beta_fast, beta_slow):

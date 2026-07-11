@@ -21,11 +21,13 @@ import contextlib
 import copy
 import functools
 import gc
+import hashlib
 import json
 import logging
 import multiprocessing
 import os
 import shlex
+import signal
 import subprocess
 import sys
 import threading
@@ -55,6 +57,9 @@ from vllm.platforms import current_platform
 from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.network_utils import get_open_port
 
+from tests.e2e.coverage_taxonomy import (
+    validate_coverage_marker,
+)
 from tests.e2e.model_utils import TokensTextLogprobs, TokensTextLogprobsPromptLogprobs
 from tests.e2e.nightly.multi_node.internal_dp.scripts.multi_node_config import DisaggregatedPrefillCfg, NodeInfo
 from vllm_ascend.ascend_config import clear_ascend_config
@@ -186,6 +191,15 @@ def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
         torch.npu.reset_peak_memory_stats()
 
 
+class ModelName:
+    """Global model name enumeration class."""
+
+    QWEN3_06B = "Qwen/Qwen3-0.6B"
+    QWEN3_8B = "Qwen/Qwen3-8B"
+    QWEN3_30B_A3B = "Qwen/Qwen3-30B-A3B"
+    DEEPSEEK = "vllm-ascend/DeepSeek-V2-Lite-W8A8"
+
+
 class MooncakeLauncher:
     def __init__(
         self,
@@ -217,18 +231,23 @@ class MooncakeLauncher:
         mooncake_ld_path = "/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:"
         os.environ["LD_LIBRARY_PATH"] = mooncake_ld_path + curr_ld_path
         env = os.environ.copy()
-        self.process = subprocess.Popen(cmd, env=env)
+        self.process = subprocess.Popen(cmd, env=env, start_new_session=True)
         return self
 
     def __exit__(self, exc_type, exc, tb):
         if not self.process:
             return
         logger.info("Stopping mooncake server...")
-        self.process.terminate()
         try:
+            pgid = os.getpgid(self.process.pid)
+            os.killpg(pgid, signal.SIGTERM)
             self.process.wait(timeout=5)
         except subprocess.TimeoutExpired:
-            self.process.kill()
+            logger.warning("Mooncake server did not stop gracefully, force killing...")
+            os.killpg(pgid, signal.SIGKILL)
+            self.process.wait(timeout=5)
+        except ProcessLookupError:
+            pass
 
 
 class RemoteOpenAIServer:
@@ -862,6 +881,24 @@ def _run_vllm_runner_dp_worker(conn, llm_kwargs: dict[str, Any], dp_rank: int, d
         os.environ["VLLM_DP_MASTER_PORT"] = str(master_port)
         os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
+        from vllm_ascend.utils import vllm_version_is
+
+        if not vllm_version_is("0.23.0"):
+            import torch
+
+            visible = os.environ.get("ASCEND_RT_VISIBLE_DEVICES", "")
+            full_device_ids: list[str] = [d for d in visible.split(",") if d]
+            if not full_device_ids:
+                full_device_ids = [str(i) for i in range(torch.npu.device_count())]
+
+            if llm_kwargs.get("distributed_executor_backend") == "ray":
+                devs = full_device_ids
+                chunk = max(len(devs) // dp_size, 1)
+                start = dp_rank * chunk
+                os.environ["ASCEND_RT_VISIBLE_DEVICES"] = ",".join(devs[start : start + chunk])
+            else:
+                llm_kwargs["device_ids"] = full_device_ids
+
         llm = LLM(**llm_kwargs)
         conn.send({"status": "ready", "rank": dp_rank})
 
@@ -1134,6 +1171,215 @@ class VllmRunner:
         del self.model
         clear_ascend_config()
         cleanup_dist_env_and_memory()
+
+
+class ModelCache:
+    """Model cache management class"""
+
+    def __init__(self):
+        self._cache: dict[str, VllmRunner] = {}
+
+    def close(self):
+        """Properly closing all resources (including terminating child processes)"""
+        if hasattr(self, "model") and self.model is not None:
+            try:
+                if hasattr(self.model, "llm_engine"):
+                    self.model.llm_engine.shutdown()
+
+                del self.model
+
+                import torch
+
+                torch.npu.empty_cache()
+
+                print("[INFO] VllmRunner closed successfully")
+            except Exception as e:
+                print(f"[WARNING] Error closing VllmRunner: {e}")
+
+    def _get_available_npu_memory(self) -> float:
+        """Obtain NPU Available Memory (GiB)"""
+        import torch
+
+        free, _ = torch.npu.mem_get_info()
+        return free / (1024**3)
+
+    def _wait_for_memory(self, required_gib: float, timeout_seconds: int = 30) -> bool:
+        """Wait until there is sufficient available memory."""
+        import time
+
+        start_time = time.time()
+        while time.time() - start_time < timeout_seconds:
+            available = self._get_available_npu_memory()
+            if available >= required_gib:
+                return True
+
+            print(f"[INFO] Waiting for NPU memory... Available: {available:.2f} GiB, Required: {required_gib:.2f} GiB")
+            time.sleep(2)
+
+        return False
+
+    def get_cache_key(self, model_config: dict[str, Any]) -> str:
+        """Generating a unique cache key.
+
+        Args:
+            model_config: Model Configuration Dictionary
+
+        Returns:
+            str: The only cache key
+        """
+        sorted_config = {k: v for k, v in sorted(model_config.items())}
+        config_str = json.dumps(sorted_config, sort_keys=True)
+        return hashlib.md5(config_str.encode()).hexdigest()
+
+    def get_or_create(self, model_config: dict[str, Any]) -> "VllmRunner":
+        """Obtain or create a model instance
+
+        Args:
+            model_config: Model Configuration
+
+        Returns:
+            VllmRunner: Model Instance
+        """
+        """Obtain or create a model instance (with full memory management)"""
+
+        cache_key = self.get_cache_key(model_config)
+
+        if cache_key in self._cache:
+            print(f"[INFO] Reusing cached model instance for: {model_config['model_name']}")
+            return self._cache[cache_key]
+
+        gpu_memory_utilization = model_config.get("gpu_memory_utilization", 0.9)
+        free_memory_bytes, total_memory_bytes = torch.npu.mem_get_info()
+        gib = 1024**3
+        available_memory_gib = free_memory_bytes / gib
+        required_memory_gib = (total_memory_bytes / gib) * gpu_memory_utilization
+
+        print(
+            f"[DEBUG] Creating new model - Available: {available_memory_gib:.2f} GiB, "
+            f"Required: {required_memory_gib:.2f} GiB"
+        )
+
+        if available_memory_gib < required_memory_gib:
+            print("[WARNING] Insufficient memory! Cleaning oldest cache entries...")
+
+            self.clear()
+
+            wait_count = 0
+            max_wait = 10
+
+            while available_memory_gib < required_memory_gib and wait_count < max_wait:
+                time.sleep(3)
+                free_memory_bytes, _ = torch.npu.mem_get_info()
+                available_memory_gib = free_memory_bytes / (1024**3)
+                print(f"[INFO] Waiting for memory... Available: {available_memory_gib:.2f} GiB")
+                wait_count += 1
+
+            if available_memory_gib < required_memory_gib:
+                raise RuntimeError(
+                    f"Failed to get enough NPU memory! "
+                    f"Available: {available_memory_gib:.2f} GiB, "
+                    f"Required: {required_memory_gib:.2f} GiB."
+                )
+        if cache_key not in self._cache:
+            runner = VllmRunner(
+                model_name=model_config["model_name"],
+                quantization=model_config.get("quantization"),
+                max_model_len=model_config.get("max_model_len", 1024),
+                dtype=model_config.get("dtype", "bfloat16"),
+                gpu_memory_utilization=model_config.get("gpu_memory_utilization", 0.9),
+                enable_prefix_caching=model_config.get("enable_prefix_caching", False),
+                max_num_seqs=model_config.get("max_num_seqs", 64),
+                tensor_parallel_size=model_config.get("tensor_parallel_size", 1),
+                distributed_executor_backend=model_config.get("distributed_executor_backend", "mp"),
+                compilation_config=model_config.get(
+                    "compilation_config",
+                    {"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1, 32, 64]},
+                ),
+                **model_config.get("extra_kwargs", {}),
+            )
+            self._cache[cache_key] = runner
+            print(f"Created new model instance for: {model_config['model_name']}")
+        else:
+            print(f"Reusing existing model instance for: {model_config['model_name']}")
+        return self._cache[cache_key]
+
+    def clear(self):
+        """Clearing All Cached Model Instances"""
+        import gc
+
+        for cache_key in list(self._cache.keys()):
+            runner = self._cache[cache_key]
+
+            try:
+                if hasattr(runner, "model"):
+                    del runner.model
+                del self._cache[cache_key]
+                del runner
+
+            except Exception as e:
+                print(f"[WARNING] Error clearing runner {cache_key}: {e}")
+
+        gc.collect()
+        torch.npu.empty_cache()
+        time.sleep(3)
+
+        self._cache.clear()
+        print("[INFO] Model cache cleared")
+
+
+model_cache = ModelCache()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def cleanup_model_cache():
+    """Clearing the Model Cache After the Test Session Ends"""
+    yield
+    model_cache.clear()
+
+
+@pytest.fixture(scope="function")
+def vllm_runner(request):
+    """Obtain or create a model instance based on the model configuration.
+
+    Args:
+        request: pytest request object
+
+    Yields:
+        VllmRunner: Model Instance
+    """
+
+    print(f"[DEBUG] Test name: {request.node.name}")
+    print(f"[DEBUG] All markers on test: {list(request.node.iter_markers())}")
+
+    model_marker = request.node.get_closest_marker("model")
+
+    if model_marker is None:
+        raise ValueError("Test must have @pytest.mark.model decorator")
+
+    model_config = model_marker.kwargs
+    print(f"[DEBUG] Final model_config: {model_config}")
+
+    if model_marker:
+        model_config = model_marker.kwargs
+    else:
+        model_config = {
+            "model_name": "Qwen/Qwen3-0.6B",
+            "quantization": None,
+            "max_model_len": 1024,
+            "dtype": "auto",
+            "gpu_memory_utilization": 0.9,
+            "enable_prefix_caching": False,
+        }
+
+    print(f"[DEBUG] vllm_runner fixture - model_config: {model_config}")
+
+    try:
+        runner = model_cache.get_or_create(model_config)
+    except Exception as e:
+        print(f"[ERROR] Failed to create model instance with config: {model_config}")
+        print(f"[ERROR] Exception: {type(e).__name__}: {e}")
+        raise
+    yield runner
 
 
 class DPVllmRunner(VllmRunner):
@@ -1658,6 +1904,16 @@ def qwen35_text_lora_files():
     return snapshot_download(repo_id="vllm-ascend/qwen35-4b-text-only-sql-lora")
 
 
+@pytest.fixture(scope="session")
+def qwen3moe_lora_files():
+    return snapshot_download(repo_id="vllm-ascend/qwen3-moe-text2sql-spider")
+
+
+@pytest.fixture(scope="session")
+def olmoe_lora_files():
+    return snapshot_download(repo_id="vllm-ascend/olmoe-instruct-text2sql-spider")
+
+
 def qwen_prompt(questions: list[str]) -> list[str]:
     placeholder = "<|image_pad|>"
     return [
@@ -1699,3 +1955,40 @@ def vl_config(request):
     if "skip" in config:
         pytest.skip(config["skip"])
     return config
+
+
+# ---------------------------------------------------------------------------
+# E2E coverage marker enforcement
+# ---------------------------------------------------------------------------
+# Values used in @pytest.mark.e2e_coverage(...) must come from the shared
+# taxonomy in tests/e2e/coverage_taxonomy.py. This hook enforces that at
+# collection time so a typo / invented value fails loudly and locally
+# (pytest reports an ERROR for that item). Unmarked tests are NOT enforced
+# here — the migration to e2e_coverage is still in progress, so tests
+# without the marker are allowed during the transition.
+#
+# The CI LINT job additionally fails on out-of-taxonomy values via
+# .github/workflows/scripts/coverage.py; this hook is the local, fast
+# feedback path for developers running pytest directly.
+def pytest_collection_modifyitems(config, items):
+    for item in items:
+        marker = item.get_closest_marker("e2e_coverage")
+        if marker is None:
+            continue  # migration period: unmarked tests are allowed
+
+        # marker.kwargs: {dim: raw_str}  (e.g. {"arch": "dense",
+        # "feature": "lora,mtp"}). split_multi turns each value into its
+        # constituent tokens; validate_coverage_marker checks every token
+        # against the taxonomy and reports missing required dims.
+        raw_coverage = {dim: str(val) for dim, val in marker.kwargs.items()}
+        problems = validate_coverage_marker(raw_coverage)
+        if not problems:
+            continue
+
+        loc = item.nodeid
+        detail = "; ".join(problems)
+        raise pytest.CollectError(
+            f"\n[e2e_coverage marker invalid] {loc}\n  {detail}\n"
+            "  Values must come from tests/e2e/coverage_taxonomy.py "
+            "(ALLOWED_VALUES). Fix the marker or update the taxonomy."
+        )

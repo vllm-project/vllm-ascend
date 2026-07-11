@@ -331,7 +331,6 @@ class TestAscendMLAMetadataBuilder(TestBase):
         mock_vllm_config.model_config.hf_text_config.qk_rope_head_dim = 64
         mock_vllm_config.cache_config.block_size = 16
         mock_vllm_config.scheduler_config.max_num_seqs = 4
-        mock_vllm_config.scheduler_config.decode_max_num_seqs = 4
         mock_vllm_config.scheduler_config.enable_chunked_prefill = False
         mock_device = "cpu"
 
@@ -352,7 +351,6 @@ class TestAscendMLAMetadataBuilder(TestBase):
         mock_vllm_config.model_config.hf_text_config.qk_rope_head_dim = 64
         mock_vllm_config.cache_config.block_size = 16
         mock_vllm_config.scheduler_config.max_num_seqs = 4
-        mock_vllm_config.scheduler_config.decode_max_num_seqs = 4
         mock_vllm_config.scheduler_config.enable_chunked_prefill = False
         mock_device = "cpu"
 
@@ -384,7 +382,6 @@ class TestAscendMLAMetadataBuilder(TestBase):
         mock_vllm_config.model_config.hf_text_config.qk_rope_head_dim = 64
         mock_vllm_config.cache_config.block_size = 16
         mock_vllm_config.scheduler_config.max_num_seqs = 4
-        mock_vllm_config.scheduler_config.decode_max_num_seqs = 4
         mock_vllm_config.scheduler_config.chunked_prefill_enabled = False
         mock_vllm_config.scheduler_config.enable_chunked_prefill = False
         mock_device = "cpu"
@@ -424,7 +421,6 @@ class TestAscendMLAMetadataBuilder(TestBase):
         mock_vllm_config.model_config.hf_text_config.qk_rope_head_dim = 64
         mock_vllm_config.cache_config.block_size = 16
         mock_vllm_config.scheduler_config.max_num_seqs = 4
-        mock_vllm_config.scheduler_config.decode_max_num_seqs = 4
         mock_vllm_config.scheduler_config.enable_chunked_prefill = False
         mock_device = "cpu"
 
@@ -477,7 +473,6 @@ class TestAscendMLAMetadataBuilder(TestBase):
         mock_vllm_config.model_config.hf_text_config.qk_rope_head_dim = 64
         mock_vllm_config.cache_config.block_size = 16
         mock_vllm_config.scheduler_config.max_num_seqs = 4
-        mock_vllm_config.scheduler_config.decode_max_num_seqs = 4
         mock_vllm_config.scheduler_config.enable_chunked_prefill = False
         mock_device = "cpu"
 
@@ -498,7 +493,6 @@ class TestAscendMLAMetadataBuilder(TestBase):
         mock_vllm_config.model_config.hf_text_config.qk_rope_head_dim = 64
         mock_vllm_config.cache_config.block_size = 16
         mock_vllm_config.scheduler_config.max_num_seqs = 4
-        mock_vllm_config.scheduler_config.decode_max_num_seqs = 4
         mock_vllm_config.scheduler_config.chunked_prefill_enabled = False
         mock_vllm_config.scheduler_config.enable_chunked_prefill = False
         mock_device = "cpu"
@@ -520,7 +514,6 @@ class TestAscendMLAMetadataBuilder(TestBase):
         mock_vllm_config.model_config.hf_text_config.qk_rope_head_dim = 64
         mock_vllm_config.cache_config.block_size = 16
         mock_vllm_config.scheduler_config.max_num_seqs = 4
-        mock_vllm_config.scheduler_config.decode_max_num_seqs = 4
         mock_vllm_config.scheduler_config.chunked_prefill_enabled = False
         mock_vllm_config.scheduler_config.enable_chunked_prefill = False
         mock_device = "cpu"
@@ -547,7 +540,6 @@ class TestAscendMLAMetadataBuilder(TestBase):
         mock_vllm_config.model_config.hf_text_config.qk_rope_head_dim = 64
         mock_vllm_config.cache_config.block_size = 16
         mock_vllm_config.scheduler_config.max_num_seqs = 4
-        mock_vllm_config.scheduler_config.decode_max_num_seqs = 4
         mock_vllm_config.scheduler_config.chunked_prefill_enabled = False
         mock_vllm_config.scheduler_config.enable_chunked_prefill = False
         mock_device = "cpu"
@@ -1903,7 +1895,7 @@ class TestAscendMLAImpl(TestBase):
         self.assertTrue(torch.equal(prefix_out, out))
         self.assertTrue(torch.equal(prefix_lse, lse))
 
-    @patch("torch_npu.atb.npu_paged_cache_load")
+    @patch("torch_npu.npu_gather_pa_kv_cache")
     @patch("torch_npu.npu_attention_update")
     @patch("torch_npu.npu_fused_infer_attention_score")
     def test_compute_prefill_context(self, mock_fia, mock_update, mock_load):
@@ -1951,7 +1943,7 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(out.shape, prefix_out.shape)
 
     @patch("vllm_ascend.attention.mla_v1.get_current_vllm_config")
-    @patch("torch_npu.atb.npu_paged_cache_load")
+    @patch("torch_npu.npu_gather_pa_kv_cache")
     @patch("torch_npu.npu_attention_update")
     @patch("torch_npu.npu_fused_infer_attention_score")
     def test_compute_prefill_context_non_power_of_two_heads(
