@@ -128,7 +128,7 @@ def quant_apply_mlp(
     if w1_offset is not None:
         unquantized_hidden_states = hidden_states
         quantized_hidden_states = None
-    elif mxfp_quant_dtype == QuantType.W4A16MXFP4:
+    elif mxfp_quant_dtype == QuantType.W4A16MXFP:
         quantized_hidden_states = None
         pertoken_scale = None
     elif dynamic_scale is None:
@@ -530,12 +530,12 @@ def unified_apply_mlp(*, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
 
     if use_mxfp_quant:
         mxfp = mlp_compute_input.quant.mxfp
-        assert mxfp is not None, "mlp_compute_input.quant.mxfp is required when quant_type is MXFP8."
+        assert mxfp is not None, "mlp_compute_input.quant.mxfp is required when quant_type is W8A8MXFP."
         act_quant_type = mxfp.act_quant_type or act_quant_type
-        if mxfp_quant_dtype == QuantType.W4A16MXFP4:
+        if mxfp_quant_dtype == QuantType.W4A16MXFP:
             act_quant_type = mxfp.act_quant_type
         weight_quant_type = mxfp.weight_quant_type or weight_quant_type
-        if mxfp_quant_dtype in [QuantType.W4A8MXFP, QuantType.W4A16MXFP4]:
+        if mxfp_quant_dtype in [QuantType.W4A8MXFP, QuantType.W4A16MXFP]:
             weight_quant_type = mxfp.weight_quant_type
         scale_type = mxfp.scale_dtype
         per_token_scale_type = mxfp.per_token_scale_dtype

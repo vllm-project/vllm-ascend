@@ -72,6 +72,7 @@ class PCPManager:
         self.dcp_world_rank = dcp_rank
         self.speculative_config = vllm_config.speculative_config
         self.decode_threshold = 1 + (self.speculative_config.num_speculative_tokens if self.speculative_config else 0)
+        self.mtp_slot_pad: torch.Tensor | None = None
         self.vllm_config = vllm_config
         self.pd_decode_recompute_scheduler_enabled = is_pd_decode_recompute_scheduler_enabled(vllm_config)
         self.max_num_tokens = self.vllm_config.scheduler_config.max_num_batched_tokens
@@ -135,6 +136,11 @@ class PCPManager:
         self.pcp_enter_fa_restore_idx = torch.zeros(
             self.max_num_tokens + 2 * self.pcp_world_size * self.max_num_reqs, dtype=torch.int32, device=self.device
         )
+        self.pcp_fa_padding_restore_idx = torch.zeros(
+            self.max_num_tokens * self.pcp_world_size + 2 * self.pcp_world_size * self.max_num_reqs,
+            dtype=torch.int32,
+            device=self.device,
+        )
         self.pcp_use_hybrid_attn = self.vllm_config.model_config.hf_config.model_type in (
             "qwen3_next",
             "qwen3_5",
@@ -176,6 +182,41 @@ class PCPManager:
             self.use_async_scheduling,
             self.pcp_use_hybrid_attn,
         )
+
+    @staticmethod
+    def _build_fa_padding_restore_idx(
+        pcp_unpad_mask: np.ndarray,
+        decode_offset: int,
+        actual_qkv_len: int,
+    ) -> np.ndarray | None:
+        target_len = pcp_unpad_mask.shape[0]
+        if actual_qkv_len > target_len:
+            raise ValueError(f"actual_qkv_len ({actual_qkv_len}) must not exceed FA padded length ({target_len}).")
+        if actual_qkv_len == target_len:
+            return None
+        if decode_offset > target_len or actual_qkv_len < decode_offset:
+            raise ValueError(
+                f"Invalid PCP restore layout: decode_offset={decode_offset}, "
+                f"actual_qkv_len={actual_qkv_len}, target_len={target_len}."
+            )
+
+        restore_idx = np.empty(target_len, dtype=np.int32)
+        restore_idx[:decode_offset] = np.arange(decode_offset, dtype=np.int32)
+
+        prefill_unpad_mask = pcp_unpad_mask[decode_offset:]
+        prefill_real_tokens = int(prefill_unpad_mask.sum())
+        expected_actual_qkv_len = decode_offset + prefill_real_tokens
+        if expected_actual_qkv_len != actual_qkv_len:
+            raise ValueError(f"PCP unpad mask expects {expected_actual_qkv_len} QKV rows, but got {actual_qkv_len}.")
+
+        prefill_restore_idx = restore_idx[decode_offset:]
+        prefill_restore_idx.fill(actual_qkv_len)
+        prefill_restore_idx[prefill_unpad_mask] = np.arange(
+            decode_offset,
+            actual_qkv_len,
+            dtype=np.int32,
+        )
+        return restore_idx
 
     def _get_cumsum_and_arange(
         self,
@@ -821,6 +862,17 @@ class PCPManager:
             self.pcp_enter_fa_restore_idx[: pcp_enter_fa_restore_idx.shape[0]].copy_(
                 pcp_enter_fa_restore_idx.long(), non_blocking=True
             )
+            pcp_unpad_mask = self.pcp_unpad_mask_cpu[: self.pcp_padded_tokens_length]
+            pcp_fa_padding_restore_idx = self._build_fa_padding_restore_idx(
+                pcp_unpad_mask,
+                self.num_decode_tokens * self.pcp_world_size,
+                pcp_enter_fa_restore_idx.shape[0],
+            )
+            if pcp_fa_padding_restore_idx is not None:
+                self.pcp_fa_padding_restore_idx[: pcp_fa_padding_restore_idx.shape[0]].copy_(
+                    torch.from_numpy(pcp_fa_padding_restore_idx),
+                    non_blocking=True,
+                )
 
             if self.num_reqs > self.num_decode_reqs:
                 all_positions_prefill = [
@@ -1131,7 +1183,11 @@ class PCPManager:
         num_requests = seq_lens.size(0)
         total_world_size = pcp_world_size * dcp_world_size
         seq_lens_tiled = seq_lens.unsqueeze(-1).repeat(1, total_world_size)
-        rank_offsets = torch.arange(total_world_size, dtype=torch.int32).unsqueeze(0).repeat(num_requests, 1)
+        rank_offsets = (
+            torch.arange(total_world_size, dtype=seq_lens.dtype, device=seq_lens.device)
+            .unsqueeze(0)
+            .repeat(num_requests, 1)
+        )
         base = seq_lens_tiled // cp_kv_cache_interleave_size // total_world_size * cp_kv_cache_interleave_size
         remainder = seq_lens_tiled - base * total_world_size
         remainder = torch.clip(
@@ -1310,18 +1366,27 @@ class PCPManager:
                     long_seq_metadata.pcp_fa_query_idx = self.pcp_fa_query_idx[
                         : num_actual_tokens_pcp_padded // self.pcp_world_size - self.num_decode_tokens
                     ]
-                    long_seq_metadata.pcp_enter_fa_restore_idx = self.pcp_enter_fa_restore_idx[
-                        : pcp_unpad_mask.sum() + self.num_decode_tokens * (self.pcp_world_size - 1)
-                    ]
+                    actual_qkv_len = int(pcp_unpad_mask.sum()) + self.num_decode_tokens * (self.pcp_world_size - 1)
+                    long_seq_metadata.pcp_enter_fa_restore_idx = self.pcp_enter_fa_restore_idx[:actual_qkv_len]
+                    if actual_qkv_len < num_actual_tokens_pcp_padded:
+                        long_seq_metadata.pcp_fa_padding_restore_idx = self.pcp_fa_padding_restore_idx[
+                            :num_actual_tokens_pcp_padded
+                        ]
+                    else:
+                        long_seq_metadata.pcp_fa_padding_restore_idx = None
                     if logger.isEnabledFor(logging.DEBUG):
                         logger.debug(
                             "[PCP][DFX] long_seq_metadata reorder idx: "
                             "pcp_allgather_restore_idx=%s, "
                             "pcp_exit_fa_scatter_idx=%s, "
-                            "pcp_enter_fa_restore_idx=%s",
+                            "pcp_enter_fa_restore_idx=%s, "
+                            "pcp_fa_padding_restore_idx=%s",
                             long_seq_metadata.pcp_allgather_restore_idx.detach().cpu().tolist(),
                             long_seq_metadata.pcp_exit_fa_scatter_idx.detach().cpu().tolist(),
                             long_seq_metadata.pcp_enter_fa_restore_idx.detach().cpu().tolist(),
+                            long_seq_metadata.pcp_fa_padding_restore_idx.detach().cpu().tolist()
+                            if long_seq_metadata.pcp_fa_padding_restore_idx is not None
+                            else None,
                         )
                     long_seq_metadata.max_num_tokens_across_pcp = self.max_num_tokens_across_pcp
                     long_seq_metadata.total_num_scheduled_tokens = self.total_num_scheduled_tokens
