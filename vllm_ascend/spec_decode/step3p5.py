@@ -270,7 +270,6 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
                 actual_seq_lengths_q=self.runner.actual_seq_lengths_q,
                 block_table_tensor=self.runner.input_batch.block_table[0].get_device_tensor()[:num_reqs],
                 slot_mapping=self.runner.input_batch.block_table[0].slot_mapping.gpu,
-                slot_mapping_cpu=self.runner.input_batch.block_table[0].slot_mapping.cpu,
                 positions=self.runner.positions,
                 attn_state=self.runner.attn_state,
                 decode_token_per_req=self.runner.decode_token_per_req,

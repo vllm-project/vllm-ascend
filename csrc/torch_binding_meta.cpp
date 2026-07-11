@@ -1660,18 +1660,15 @@ at::Tensor chunk_fwd_o_meta(
     return o;
 }
 
-std::tuple<at::Tensor, at::Tensor, at::Tensor> store_kv_block_pre(
+void store_kv_block_metadata(
     const at::Tensor &slot_mapping_npu,
-    at::IntArrayRef slot_mapping_list,
+    const at::Tensor &group_len,
+    const at::Tensor &group_key_idx,
+    const at::Tensor &group_key_cache_idx,
     int64_t block_size)
-{
-    auto s_size = slot_mapping_npu.sizes();
-    at::Tensor group_len = at::empty({s_size[0]}, slot_mapping_npu.options());
-    at::Tensor group_key_idx = at::empty({s_size[0]}, slot_mapping_npu.options());
-    at::Tensor group_key_cache_idx = at::empty({s_size[0]}, slot_mapping_npu.options());
-    return std::tuple<at::Tensor, at::Tensor, at::Tensor>(group_len, group_key_idx, group_key_cache_idx);
-
-}
+ {
+    return;
+ }
 
 void store_kv_block(
     const at::Tensor &key_in,
@@ -1799,7 +1796,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     // chunk_fwd_o
     ops.impl("chunk_fwd_o", &vllm_ascend::meta::chunk_fwd_o_meta);
      // store_kv_block
-    ops.impl("store_kv_block_pre", &vllm_ascend::meta::store_kv_block_pre);
+    ops.impl("store_kv_block_pre", &vllm_ascend::meta::store_kv_block_metadata);
     ops.impl("store_kv_block", &vllm_ascend::meta::store_kv_block);
     // npu_fused_gdn_gating
     ops.impl("npu_fused_gdn_gating", &vllm_ascend::meta::npu_fused_gdn_gating_meta);
