@@ -1752,7 +1752,9 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         if kv_cache is not None and self.has_indexer:
             assert k_li is not None
-            use_indexer_reshape_optim = self.is_kv_producer and get_ascend_config().c8_enable_reshape_optim and not _EXTRA_CTX.is_draft_model
+            use_indexer_reshape_optim = (
+                self.is_kv_producer and get_ascend_config().c8_enable_reshape_optim and not _EXTRA_CTX.is_draft_model
+            )
             if self.use_sparse_c8_sfa:
                 dsa_k_cache_idx = 1
                 dsa_k_scale_cache_idx = 2
@@ -1778,7 +1780,6 @@ class AscendSFAImpl(MLAAttentionImpl):
             if self.use_sparse_c8_indexer:
                 assert len(kv_cache) == (3 if self.use_sparse_c8_sfa else 4)
                 if k_li_scale is not None:
-
                     if use_indexer_reshape_optim:
                         torch.ops._C_ascend.store_kv_block(
                             k_li_scale,
