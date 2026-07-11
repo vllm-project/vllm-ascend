@@ -345,8 +345,6 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         input_positions = common_attn_metadata.positions[:num_input_tokens].long()
 
         block_size = self.kernel_block_size
-        if get_ascend_config().c8_enable_reshape_optim:
-            slot_mapping_cpu = common_attn_metadata.slot_mapping_cpu[:num_input_tokens]
 
         cum_query_lens = common_attn_metadata.query_start_loc[1 : num_reqs + 1]
         seq_lens = common_attn_metadata.seq_lens[:num_reqs]
@@ -451,9 +449,8 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             )
 
         if get_ascend_config().c8_enable_reshape_optim:
-            slot_mapping_list = slot_mapping_cpu.tolist()
-            group_len, group_key_idx, group_key_cache_idx = torch.ops._C_ascend.store_kv_block_pre(
-                slot_mapping, slot_mapping_list, block_size
+            group_len, group_key_idx, group_key_cache_idx = torch.ops._C_ascend.store_kv_block_metadata(
+                slot_mapping, block_size
             )
         else:
             group_len, group_key_idx, group_key_cache_idx = None, None, None
@@ -1755,7 +1752,9 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         if kv_cache is not None and self.has_indexer:
             assert k_li is not None
-            use_indexer_reshape_optim = self.is_kv_producer and get_ascend_config().c8_enable_reshape_optim
+            use_indexer_reshape_optim = (
+                self.is_kv_producer and get_ascend_config().c8_enable_reshape_optim and not _EXTRA_CTX.is_draft_model
+            )
             if self.use_sparse_c8_sfa:
                 dsa_k_cache_idx = 1
                 dsa_k_scale_cache_idx = 2
