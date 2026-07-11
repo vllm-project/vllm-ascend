@@ -1608,10 +1608,14 @@ class PCPManager:
         valid_k = valid[:, None] & (k_indices[None, :] < k_lens[:, None])
 
         # Interleave-aware k_upper: for query token at global position P,
-        # the number of rank-cp_rank KV tokens before P (exclusive upper bound).
+        # count local KV tokens with global pos <= P (inclusive causal), then
+        # convert to an inclusive local index. Using P (exclusive) here would
+        # drop the query's own KV when it lives on this rank and can also make
+        # k_upper < 0, which disables masking for that row.
         positions = context_lens[:, None] + q_indices[None, :]  # [num_decode_reqs, max_q]
-        base_q = positions // interleave_size // cp_size * interleave_size
-        remainder_q = positions - base_q * cp_size
+        inclusive_positions = positions + 1
+        base_q = inclusive_positions // interleave_size // cp_size * interleave_size
+        remainder_q = inclusive_positions - base_q * cp_size
         local_q = base_q + torch.clamp(remainder_q - cp_rank * interleave_size, 0, interleave_size)
         k_upper = local_q - 1  # inclusive upper KV index
 
