@@ -1778,6 +1778,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             if self.use_sparse_c8_indexer:
                 assert len(kv_cache) == (3 if self.use_sparse_c8_sfa else 4)
                 if k_li_scale is not None:
+
                     if use_indexer_reshape_optim:
                         torch.ops._C_ascend.store_kv_block(
                             k_li_scale,
