@@ -655,6 +655,28 @@ class RMSNormDynamicMXQuantSPPattern(BasePattern):
         return replacement
 
 
+def _model_uses_w4a4_quant(vllm_config: VllmConfig | None) -> bool:
+    """Check whether the model uses W4A4 int4 quantization for any layer.
+
+    W4A4 int4 schemes (e.g. W4A4_DYNAMIC, W4A4_FLATQUANT_DYNAMIC)
+    are incompatible with the fuse_norm_quant optimization,
+    so callers use this to disable that fusion.
+    """
+    if vllm_config is None:
+        return False
+    quant_config = getattr(vllm_config, "quant_config", None)
+    if quant_config is None:
+        return False
+    quant_description = getattr(quant_config, "quant_description", None)
+    if not quant_description:
+        return False
+    w4a4_int4_schemes = ["W4A4_DYNAMIC", "W4A4_FLATQUANT_DYNAMIC"]
+    return any(
+        isinstance(quant_type, str) and quant_type in w4a4_int4_schemes
+        for quant_type in quant_description.values()
+    )
+
+
 class AddRMSNormQuantFusionPass(VllmInductorPass):
     """
     A pass for fusing AddRMSNorm and W8A8 quantization operations on Ascend.
@@ -667,6 +689,14 @@ class AddRMSNormQuantFusionPass(VllmInductorPass):
         dtype = vllm_config.model_config.dtype
         if dtype not in (torch.bfloat16, torch.float16):
             logger.debug("Quant fusion not enabled: unsupported dtype %s", dtype)
+            return
+
+        if _model_uses_w4a4_quant(vllm_config):
+            logger.debug(
+                "Quant fusion not enabled: the model contains "
+                "W4A4 quantized weights, which are incompatible with the "
+                "norm-quant fusion pass."
+            )
             return
 
         dynamic_mx_quant_fusion_available = is_add_rms_norm_dynamic_mx_quant_fusion_available()
