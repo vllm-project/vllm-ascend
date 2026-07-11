@@ -48,6 +48,12 @@ from vllm.model_executor.models.utils import (
     process_eagle_weight,
 )
 
+from vllm_ascend.models.dspark_quarot import (
+    load_quarot_rotation,
+    resolve_quarot_rotation_path,
+    transform_fc_weight_for_quarot,
+)
+
 logger = init_logger(__name__)
 
 
@@ -817,6 +823,21 @@ class DSparkQwen3ForCausalLM(DFlashQwen3ForCausalLM):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
+        target_model_config = (
+            getattr(
+                vllm_config.speculative_config,
+                "target_model_config",
+                None,
+            )
+            or vllm_config.model_config
+        )
+        target_model_path = getattr(target_model_config, "model", "")
+        self._quarot_rotation_path = resolve_quarot_rotation_path(target_model_path)
+        if self._quarot_rotation_path is not None:
+            logger.info(
+                "[spec_decode/dspark] detected target QuaRot rotation: %s",
+                self._quarot_rotation_path,
+            )
         markov_rank = int(
             getattr(
                 self.config,
@@ -933,10 +954,29 @@ class DSparkQwen3ForCausalLM(DFlashQwen3ForCausalLM):
         model_weights = {}
         includes_draft_id_mapping = False
         includes_embed_tokens = False
+        rotation = None
+        transformed_quarot_fc = False
         for name, loaded_weight in weights:
             assert "mask_hidden" not in name, (
                 "DSpark should use mask_token_id to embed the padding hidden state"
             )
+            if name == "fc.weight" and self._quarot_rotation_path is not None:
+                if rotation is None:
+                    rotation = load_quarot_rotation(self._quarot_rotation_path)
+                loaded_weight = transform_fc_weight_for_quarot(
+                    loaded_weight,
+                    rotation,
+                    target_device=self.model.fc.weight.device,
+                )
+                transformed_quarot_fc = True
+                logger.info(
+                    "[spec_decode/dspark] transformed fc.weight for QuaRot: "
+                    "rotation=%s fc_shape=%s blocks=%d device=%s",
+                    self._quarot_rotation_path,
+                    tuple(loaded_weight.shape),
+                    loaded_weight.shape[1] // rotation.shape[0],
+                    loaded_weight.device,
+                )
             if "t2d" in name:
                 continue
             if "d2t" in name:
@@ -950,6 +990,12 @@ class DSparkQwen3ForCausalLM(DFlashQwen3ForCausalLM):
                 includes_embed_tokens = True
             model_weights[name] = loaded_weight
             process_eagle_weight(self, name)
+
+        if self._quarot_rotation_path is not None and not transformed_quarot_fc:
+            raise ValueError(
+                "Target model uses QuaRot, but the DSpark checkpoint did not "
+                "provide fc.weight for the required load-time transformation"
+            )
 
         skip_substrs = []
         if not includes_draft_id_mapping:
