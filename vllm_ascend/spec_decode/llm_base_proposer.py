@@ -27,7 +27,6 @@ from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
 from vllm.triton_utils import HAS_TRITON, triton
-from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -53,7 +52,6 @@ from vllm_ascend.models.llama_eagle3_vwn import Eagle3VwnLlamaForCausalLM
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 from vllm_ascend.utils import enable_sp, lmhead_tp_enable, shared_expert_dp_enabled
-from vllm_ascend.worker.pcp_utils import PCPManager
 
 
 @contextmanager
@@ -504,18 +502,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 enable_enpu=self.enable_enpu,
             )
 
-    def _get_pcp_manager(self) -> PCPManager | None:
-        pcp_manager = getattr(self.runner, "pcp_manager", None)
-        return pcp_manager if isinstance(pcp_manager, PCPManager) else None
-
-    def _pcp_use_hybrid_attn(self) -> bool:
-        pcp_manager = self._get_pcp_manager()
-        if pcp_manager is not None:
-            return pcp_manager.pcp_use_hybrid_attn
-        maybe_pcp_manager = getattr(self.runner, "pcp_manager", None)
-        value = getattr(maybe_pcp_manager, "pcp_use_hybrid_attn", False)
-        return value if isinstance(value, bool) else False
-
     def _maybe_share_topk_indices(self, target_language_model: nn.Module) -> None:
         if hasattr(target_language_model.model, "topk_indices_buffer"):
             if hasattr(self.model.model, "topk_indices_buffer"):
@@ -568,7 +554,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             num_tokens_across_dp,
             _,
         ) = self.runner._sync_metadata_across_dp(num_tokens, is_draft_model=True)
-        pcp_manager = self._get_pcp_manager()
+        pcp_manager = getattr(self.runner, "pcp_manager", None)
 
         multi_steps_attn_metadata = []
         if not self.use_cuda_graph:
@@ -789,7 +775,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             num_decode_reqs=num_decode_reqs,
         )
         assert self.runner is not None
-        pcp_manager = self._get_pcp_manager()
+        pcp_manager = getattr(self.runner, "pcp_manager", None)
         if pcp_manager is not None:
             assert long_seq_args is not None
             _, ori_token_indices_to_sample = long_seq_args
@@ -1127,7 +1113,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             else:
                 ori_token_indices_to_sample = None
 
-        pcp_manager = self._get_pcp_manager()
+        pcp_manager = getattr(self.runner, "pcp_manager", None)
         if pcp_manager is not None and self.pcp_size > 1:
             # remove graph padding before all_gather
             hidden_states = pcp_manager.get_restore_hidden_states(
@@ -1373,8 +1359,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             self.input_ids[token_indices_to_sample] = next_token_ids
 
             assert self.runner is not None
-            pcp_manager = self._get_pcp_manager()
-            long_seq_args = (None, None)
+            pcp_manager = getattr(self.runner, "pcp_manager", None)
+            long_seq_args = None
             if pcp_manager is not None:
                 first_pass_inputs = pcp_manager.prepare_spec_decode_first_pass_inputs(
                     input_ids=self.input_ids[:num_tokens],
@@ -1397,24 +1383,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 token_indices_to_sample = first_pass_inputs.token_indices_to_sample
                 self.input_ids[:num_tokens].copy_(first_pass_inputs.input_ids)
                 long_seq_args = first_pass_inputs.long_seq_args
-            elif self.pcp_size * self.dcp_size > 1:
-                (
-                    num_tokens,
-                    target_positions,
-                    target_hidden_states,
-                    token_indices_to_sample,
-                    long_seq_args,
-                ) = self._prepare_spec_decode_first_pass_inputs_without_manager(
-                    num_tokens=num_tokens,
-                    target_positions=target_positions,
-                    target_hidden_states=target_hidden_states,
-                    token_indices_to_sample=token_indices_to_sample,
-                    cad=cad,
-                    long_seq_metadata=long_seq_metadata,
-                    req_scheduled_tokens=req_scheduled_tokens,
-                    num_prefill_reqs=num_prefill_reqs,
-                    num_decode_reqs=num_decode_reqs,
-                )
 
             # copy inputs to buffer for cudagraph
             if self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim == 0:
@@ -1652,7 +1620,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         else:
             common_attn_metadata.positions[:batch_size].copy_(clamped_positions)
 
-        pcp_manager = self._get_pcp_manager()
+        pcp_manager = getattr(self.runner, "pcp_manager", None)
         if pcp_manager is not None:
             kv_cache_spec = getattr(attn_group, "kv_cache_spec", self.draft_attn_groups[0].kv_cache_spec)
             # update slot_mapping
@@ -2010,245 +1978,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         )
 
         return spec_common_attn_metadata, token_indices, token_indices_to_sample, num_rejected_tokens_gpu
-
-    def _prepare_spec_decode_first_pass_inputs_without_manager(
-        self,
-        num_tokens: int,
-        target_positions: torch.Tensor,
-        target_hidden_states: torch.Tensor,
-        token_indices_to_sample: torch.Tensor,
-        cad: CommonAttentionMetadata,
-        long_seq_metadata: Any | None,
-        req_scheduled_tokens: dict[str, int] | None,
-        num_prefill_reqs: int,
-        num_decode_reqs: int,
-    ) -> tuple[int, torch.Tensor, torch.Tensor, torch.Tensor, tuple[Any, Any]]:
-        assert self.runner is not None
-        assert long_seq_metadata is not None
-        cad.prefill_context_parallel_metadata = long_seq_metadata
-
-        ori_token_indices_to_sample = token_indices_to_sample.clone()
-        query_lens_d = self.runner.query_lens[:num_decode_reqs]
-        long_seq_args = (query_lens_d, ori_token_indices_to_sample)
-        if self.pcp_size <= 1:
-            return (
-                num_tokens,
-                target_positions,
-                target_hidden_states,
-                token_indices_to_sample,
-                long_seq_args,
-            )
-
-        num_tokens_d = int(query_lens_d.sum().item()) if num_decode_reqs else 0
-        num_tokens_d_padded = num_tokens_d * self.pcp_size
-        input_ids_d = self.input_ids[:num_tokens_d]
-        input_ids_p = self.input_ids[num_tokens_d:num_tokens]
-        target_hidden_states_d_padded = target_hidden_states[:num_tokens_d_padded]
-        if num_tokens_d:
-            target_hidden_states_d = self._get_spec_decode_decode_hidden_states_without_manager(
-                target_hidden_states_d_padded,
-                query_lens_d,
-                num_tokens_d,
-            )
-        else:
-            target_hidden_states_d = target_hidden_states_d_padded
-        target_hidden_states_p = target_hidden_states[num_tokens_d_padded:]
-
-        req_scheduled_tokens_p: dict[str, int] = {}
-        if num_prefill_reqs:
-            assert req_scheduled_tokens is not None
-            num_reqs = num_decode_reqs + num_prefill_reqs
-            for i, req_id in enumerate(self.runner.input_batch.req_ids[:num_reqs]):
-                if i >= num_decode_reqs:
-                    req_scheduled_tokens_p[req_id] = req_scheduled_tokens[req_id]
-
-        (
-            num_tokens_p,
-            input_ids_p,
-            target_hidden_states_p,
-            max_query_len_p,
-            seq_lens_p,
-            cu_num_tokens_p,
-        ) = self._split_pcp_input(
-            req_scheduled_tokens_p,
-            input_ids_p,
-            target_hidden_states_p,
-        )
-        num_tokens = num_tokens_d + num_tokens_p
-        if self.uses_mrope:
-            target_positions = target_positions[:, :num_tokens]
-        else:
-            target_positions = target_positions[:num_tokens]
-        self.input_ids[:num_tokens].copy_(torch.cat([input_ids_d, input_ids_p], dim=0))
-        target_hidden_states = torch.cat([target_hidden_states_d, target_hidden_states_p], dim=0)
-
-        if num_decode_reqs:
-            token_indices_to_sample[:num_decode_reqs] = self.runner.logits_indices[
-                token_indices_to_sample[:num_decode_reqs]
-            ]
-        if num_prefill_reqs:
-            token_indices_to_sample[-num_prefill_reqs:] = self.runner.logits_indices[-num_prefill_reqs:]
-            cad.num_actual_tokens = num_tokens
-            cad.max_query_len = max(self.decode_threshold, max_query_len_p)
-            seq_lens_p_device = seq_lens_p.to(cad.seq_lens.device, non_blocking=True)
-            cad.seq_lens[-num_prefill_reqs:] = seq_lens_p_device
-            if cad.seq_lens_cpu is not None:
-                cad.seq_lens_cpu[-num_prefill_reqs:] = seq_lens_p
-            if cad._seq_lens_cpu is not None:
-                cad._seq_lens_cpu[-num_prefill_reqs:] = seq_lens_p
-            query_start_loc_p_cpu = cu_num_tokens_p[1:] + cad.query_start_loc_cpu[num_decode_reqs].item()
-            query_start_loc_p = query_start_loc_p_cpu.to(cad.query_start_loc.device, non_blocking=True)
-            cad.query_start_loc[-num_prefill_reqs:] = query_start_loc_p
-            cad.query_start_loc_cpu[-num_prefill_reqs:] = query_start_loc_p_cpu
-
-        return (
-            num_tokens,
-            target_positions,
-            target_hidden_states,
-            token_indices_to_sample,
-            long_seq_args,
-        )
-
-    def _get_spec_decode_decode_hidden_states_without_manager(
-        self,
-        target_hidden_states_d_padded: torch.Tensor,
-        query_lens_d: torch.Tensor,
-        num_decode_tokens: int,
-    ) -> torch.Tensor:
-        if num_decode_tokens == 0:
-            return target_hidden_states_d_padded
-        if self._pcp_use_hybrid_attn():
-            return target_hidden_states_d_padded[:num_decode_tokens]
-
-        device = target_hidden_states_d_padded.device
-        decode_query_lens = query_lens_d.to(device=device, dtype=torch.int64)
-        query_start_loc = torch.zeros(
-            decode_query_lens.shape[0] + 1,
-            dtype=torch.int64,
-            device=device,
-        )
-        query_start_loc[1:] = torch.cumsum(decode_query_lens, dim=0)
-        decode_req_starts = query_start_loc[:-1]
-        decode_padded_starts = decode_req_starts * self.pcp_size
-        decode_req_starts_per_token = torch.repeat_interleave(
-            decode_req_starts,
-            decode_query_lens,
-            output_size=num_decode_tokens,
-        )
-        decode_padded_starts_per_token = torch.repeat_interleave(
-            decode_padded_starts,
-            decode_query_lens,
-            output_size=num_decode_tokens,
-        )
-        decode_offsets = (
-            torch.arange(
-                num_decode_tokens,
-                dtype=torch.int64,
-                device=device,
-            )
-            - decode_req_starts_per_token
-        )
-        decode_hidden_state_indices = decode_padded_starts_per_token + decode_offsets
-        return target_hidden_states_d_padded[decode_hidden_state_indices]
-
-    def _split_pcp_input(
-        self,
-        req_scheduled_tokens: dict[str, int],
-        input_ids: torch.Tensor,
-        target_hidden_states: torch.Tensor,
-    ) -> tuple[int, torch.Tensor, torch.Tensor, int, torch.Tensor, torch.Tensor]:
-        """
-        Split prefill input_ids and target_hidden_states in the PCP group.
-        """
-        if len(req_scheduled_tokens) == 0:
-            return (
-                0,
-                input_ids.new_zeros((0,)),
-                target_hidden_states.new_zeros((0, target_hidden_states.size(1))),
-                0,
-                torch.zeros((0,), dtype=torch.int32),
-                torch.tensor([0], dtype=torch.int32),
-            )
-
-        if self._pcp_use_hybrid_attn():
-            return self._split_pcp_input_hybrid(req_scheduled_tokens, input_ids, target_hidden_states)
-
-        def _pcp_pad_and_split(num_tokens: int) -> tuple[list[int], int, int]:
-            num_pcp_padded_scheduled_tokens = cdiv(num_tokens, 2 * self.pcp_size) * 2 * self.pcp_size
-            pcp_pad = num_pcp_padded_scheduled_tokens - num_tokens
-            chunk_size = num_pcp_padded_scheduled_tokens // (2 * self.pcp_size)
-
-            req_position_cp: list[int] = []
-            req_position_cp.extend(self.full_indices[self.pcp_rank * chunk_size : (self.pcp_rank + 1) * chunk_size])
-            req_position_cp.extend(
-                self.full_indices[
-                    num_pcp_padded_scheduled_tokens - (self.pcp_rank + 1) * chunk_size : num_pcp_padded_scheduled_tokens
-                    - self.pcp_rank * chunk_size
-                ]
-            )
-
-            return req_position_cp, num_pcp_padded_scheduled_tokens, pcp_pad
-
-        num_pcp_scheduled_tokens = []
-        ori_start_index = 0
-        pad_start_index = 0
-        pcp_split_input_ids_list = []
-        pcp_split_hidden_states_list = []
-        for ori_num_tokens in req_scheduled_tokens.values():
-            req_position_pcp, num_pcp_padded_scheduled_tokens, num_pcp_pad = _pcp_pad_and_split(ori_num_tokens)
-            actual_num_tokens = len(req_position_pcp)
-            num_pcp_scheduled_tokens.append(actual_num_tokens)
-            pad_input_ids = F.pad(input_ids[ori_start_index : ori_start_index + ori_num_tokens], (0, num_pcp_pad))
-            ori_start_index += ori_num_tokens
-            pcp_chunk_indices = [pad_start_index + pos for pos in req_position_pcp]
-            pcp_split_input_ids = pad_input_ids[req_position_pcp]
-            pcp_split_hidden_states = target_hidden_states[pcp_chunk_indices]
-            pcp_split_input_ids_list.append(pcp_split_input_ids)
-            pcp_split_hidden_states_list.append(pcp_split_hidden_states)
-            pad_start_index += num_pcp_padded_scheduled_tokens
-        num_tokens = sum(num_pcp_scheduled_tokens)
-        input_ids = torch.cat(pcp_split_input_ids_list)
-        target_hidden_states = torch.cat(pcp_split_hidden_states_list, dim=0)
-        max_query_len = max(num_pcp_scheduled_tokens)
-        seq_lens = torch.tensor(num_pcp_scheduled_tokens, dtype=torch.int32)
-        cu_num_tokens = torch.tensor(np.insert(np.cumsum(np.array(num_pcp_scheduled_tokens)), 0, 0))
-        return num_tokens, input_ids, target_hidden_states, max_query_len, seq_lens, cu_num_tokens
-
-    def _split_pcp_input_hybrid(
-        self,
-        req_scheduled_tokens: dict[str, int],
-        input_ids: torch.Tensor,
-        target_hidden_states: torch.Tensor,
-    ) -> tuple[int, torch.Tensor, torch.Tensor, int, torch.Tensor, torch.Tensor]:
-        """Linear-split prefill inputs for hybrid-attention PCP models."""
-        num_pcp_scheduled_tokens = []
-        global_offset = 0
-        pcp_split_input_ids_list = []
-        pcp_split_hidden_states_list = []
-        for ori_num_tokens in req_scheduled_tokens.values():
-            padded_tokens = cdiv(ori_num_tokens, 2 * self.pcp_size) * 2 * self.pcp_size
-            pcp_tokens = padded_tokens // self.pcp_size
-            num_pads = padded_tokens - ori_num_tokens
-            rank_start = self.pcp_rank * pcp_tokens
-            num_pcp_scheduled_tokens.append(pcp_tokens)
-
-            req_input_ids = input_ids[global_offset : global_offset + ori_num_tokens]
-            if num_pads > 0:
-                req_input_ids = F.pad(req_input_ids, (0, num_pads))
-            pcp_split_input_ids_list.append(req_input_ids[rank_start : rank_start + pcp_tokens])
-
-            req_hidden = target_hidden_states[global_offset : global_offset + ori_num_tokens]
-            if num_pads > 0:
-                req_hidden = F.pad(req_hidden, (0, 0, 0, num_pads))
-            pcp_split_hidden_states_list.append(req_hidden[rank_start : rank_start + pcp_tokens])
-            global_offset += ori_num_tokens
-        num_tokens = sum(num_pcp_scheduled_tokens)
-        input_ids = torch.cat(pcp_split_input_ids_list)
-        target_hidden_states = torch.cat(pcp_split_hidden_states_list, dim=0)
-        max_query_len = max(num_pcp_scheduled_tokens)
-        seq_lens = torch.tensor(num_pcp_scheduled_tokens, dtype=torch.int32)
-        cu_num_tokens = torch.tensor(np.insert(np.cumsum(np.array(num_pcp_scheduled_tokens)), 0, 0))
-        return num_tokens, input_ids, target_hidden_states, max_query_len, seq_lens, cu_num_tokens
 
     # update full-graph params for one spec token
     def _update_full_graph_params(self, forward_context, num_tokens, draft_attn_metadatas=None):
