@@ -672,8 +672,7 @@ def _model_uses_w4a4_quant(vllm_config: VllmConfig | None) -> bool:
         return False
     w4a4_int4_schemes = ["W4A4_DYNAMIC", "W4A4_FLATQUANT_DYNAMIC"]
     return any(
-        isinstance(quant_type, str) and quant_type in w4a4_int4_schemes
-        for quant_type in quant_description.values()
+        isinstance(quant_type, str) and quant_type in w4a4_int4_schemes for quant_type in quant_description.values()
     )
 
 
