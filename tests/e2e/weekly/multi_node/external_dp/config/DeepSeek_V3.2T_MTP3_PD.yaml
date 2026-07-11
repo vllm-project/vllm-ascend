@@ -1,4 +1,4 @@
-test_name: "DeepSeek_V3.2T_MTP1_PD"
+test_name: "DeepSeek_V3.2T_MTP3_PD"
 model: "vllm-ascend/DeepSeek-V3.2-W8A8"
 num_nodes: 4
 npu_per_node: 16
@@ -13,7 +13,7 @@ config:
   - node_index: 0
     port_start: 7100
     dp_rpc_port: 12321
-    dp_size: 2
+    dp_size: 4
     dp_size_local: 2
     dp_rank_start: 0
     tp_size: 8
@@ -22,9 +22,9 @@ config:
   - node_index: 1
     port_start: 7100
     dp_rpc_port: 12321
-    dp_size: 2
+    dp_size: 4
     dp_size_local: 2
-    dp_rank_start: 0
+    dp_rank_start: 2
     tp_size: 8
     dp_address: "${NODE_0_IP}"
 
@@ -54,25 +54,31 @@ env_common: &env_common
   VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "30000"
   HCCL_EXEC_TIMEOUT: "204"
   HCCL_CONNECT_TIMEOUT: "400"
-  LD_PRELOAD: "/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD"
   OMP_PROC_BIND: "false"
   OMP_NUM_THREADS: "10"
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
-  VLLM_ASCEND_ENABLE_MLAPO: "1"
   TASK_QUEUE_ENABLE: 1
   HCCL_OP_EXPANSION_MODE: "AIV"
   VLLM_USE_V1: "1"
+  ASCEND_TRANSPORT_PRINT: "1"
+  ACL_OP_INIT_MODE: "1"
+  ASCEND_A3_ENABLE: "1"
   ASCEND_BUFFER_POOL: "4:8"
   LD_LIBRARY_PATH: "/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH"
-
-
+  VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
+  VLLM_NIXL_ABORT_REQUEST_TIMEOUT: "300000"
+  
 env_prefill: &env_prefill
   <<: *env_common
-  HCCL_BUFFSIZE: "256"
+  HCCL_BUFFSIZE: "360"
+  VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
 
 env_decode: &env_decode
   <<: *env_common
   HCCL_BUFFSIZE: "1200"
+  TASK_QUEUE_ENABLE: "1"
+  VLLM_ASCEND_ENABLE_MLAPO: "1"
+  DYNAMIC_EPLB: "true"
 
 templates:
   - node_index: 0
@@ -97,24 +103,28 @@ templates:
       - --seed
       - "1024"
       - --max-model-len
-      - "40000"
+      - "8000"
       - --max-num-batched-tokens
-      - "16384"
+      - "8192"
       - --max-num-seqs
-      - "8"
+      - "16"
       - --enforce-eager
       - --trust-remote-code
       - --gpu-memory-utilization
-      - "0.9"
+      - "0.92"
       - --quantization
       - "ascend"
       - --no-enable-prefix-caching
+      - --tokenizer-mode
+      - "deepseek_v32"
+      - --reasoning-parser
+      - "deepseek_v3"
       - --speculative-config
-      - '{"method": "deepseek_mtp", "num_speculative_tokens": 1}'
+      - '{"method": "deepseek_mtp", "num_speculative_tokens": 3}'
       - --additional-config
-      - '{"recompute_scheduler_enable":true,"enable_shared_expert_dp": true}'
+      - '{"layer_sharding": ["q_b_proj", "o_proj"]}'
       - --kv-transfer-config
-      - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_producer", "kv_port": "30000", "engine_id": "0", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 8}, "decode": {"dp_size": 32, "tp_size": 1}}}'
+      - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_producer", "kv_port": "30000", "engine_id": "0", "kv_connector_extra_config": {"prefill": {"dp_size": 4, "tp_size": 8}, "decode": {"dp_size": 8, "tp_size": 4}}}'
 
   - node_index: 1
     envs:
@@ -138,24 +148,28 @@ templates:
       - --seed
       - "1024"
       - --max-model-len
-      - "40000"
+      - "8000"
       - --max-num-batched-tokens
-      - "16384"
+      - "8192"
       - --max-num-seqs
-      - "8"
+      - "16"
       - --enforce-eager
       - --trust-remote-code
       - --gpu-memory-utilization
-      - "0.9"
+      - "0.92"
       - --quantization
       - "ascend"
       - --no-enable-prefix-caching
+      - --tokenizer-mode
+      - "deepseek_v32"
+      - --reasoning-parser
+      - "deepseek_v3"
       - --speculative-config
-      - '{"method": "deepseek_mtp", "num_speculative_tokens": 1}'
+      - '{"method": "deepseek_mtp", "num_speculative_tokens": 3}'
       - --additional-config
-      - '{"recompute_scheduler_enable":true,"enable_shared_expert_dp": true}'
+      - '{"layer_sharding": ["q_b_proj", "o_proj"]}'
       - --kv-transfer-config
-      - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_producer", "kv_port": "30100", "engine_id": "1", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 8}, "decode": {"dp_size": 32, "tp_size": 1}}}'
+      - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_producer", "kv_port": "30000", "engine_id": "0", "kv_connector_extra_config": {"prefill": {"dp_size": 4, "tp_size": 8}, "decode": {"dp_size": 8, "tp_size": 4}}}'
 
   - node_index: 2
     envs:
@@ -179,25 +193,30 @@ templates:
       - --seed
       - "1024"
       - --max-model-len
-      - "40000"
+      - "8000"
       - --max-num-batched-tokens
-      - "256"
+      - "100"
       - --max-num-seqs
       - "40"
       - --trust-remote-code
       - --gpu-memory-utilization
-      - "0.94"
+      - "0.92"
       - --quantization
       - "ascend"
       - --no-enable-prefix-caching
+      - --tokenizer-mode
+      - "deepseek_v32"
+      - --reasoning-parser
+      - "deepseek_v3"
+      - --async-scheduling
       - --speculative-config
-      - '{"method": "deepseek_mtp", "num_speculative_tokens": 1}'
+      - '{"method": "deepseek_mtp", "num_speculative_tokens": 3}'
       - --compilation-config
-      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4,8,12,16,20,24,28,32,36,40,44,48,52,56,60,64]}'
       - --additional-config
-      - '{"finegrained_tp_config": {"lmhead_tensor_parallel_size":8},"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": true}'
+      - '{"recompute_scheduler_enable": true,"eplb_config": {"dynamic_eplb":true,"expert_heat_collection_interval":2000,"algorithm_execution_interval":50, "eplb_policy_type":3, "num_redundant_experts":0}}'
       - --kv-transfer-config
-      - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_consumer", "kv_port": "30200", "engine_id": "2", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 8}, "decode": {"dp_size": 32, "tp_size": 1}}}'
+      - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_consumer", "kv_port": "30200", "engine_id": "2", "kv_connector_extra_config": {"prefill": {"dp_size": 4, "tp_size": 8}, "decode": {"dp_size": 8, "tp_size": 4}}}'
 
   - node_index: 3
     envs:
@@ -221,37 +240,40 @@ templates:
       - --seed
       - "1024"
       - --max-model-len
-      - "40000"
+      - "8000"
       - --max-num-batched-tokens
-      - "256"
+      - "100"
       - --max-num-seqs
       - "40"
       - --trust-remote-code
       - --gpu-memory-utilization
-      - "0.94"
+      - "0.92"
       - --quantization
       - "ascend"
       - --no-enable-prefix-caching
+      - --tokenizer-mode
+      - "deepseek_v32"
+      - --reasoning-parser
+      - "deepseek_v3"
+      - --async-scheduling
       - --speculative-config
-      - '{"method": "deepseek_mtp", "num_speculative_tokens": 1}'
+      - '{"method": "deepseek_mtp", "num_speculative_tokens": 3}'
       - --compilation-config
-      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4,8,12,16,20,24,28,32,36,40,44,48,52,56,60,64]}'
       - --additional-config
-      - '{"finegrained_tp_config": {"lmhead_tensor_parallel_size":8},"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": true}'
+      - '{"recompute_scheduler_enable": true,"eplb_config": {"dynamic_eplb":true,"expert_heat_collection_interval":2000,"algorithm_execution_interval":50, "eplb_policy_type":3, "num_redundant_experts":0}}'
       - --kv-transfer-config
-      - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_consumer", "kv_port": "30200", "engine_id": "2", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 8}, "decode": {"dp_size": 32, "tp_size": 1}}}'
+      - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_consumer", "kv_port": "30200", "engine_id": "2", "kv_connector_extra_config": {"prefill": {"dp_size": 4, "tp_size": 8}, "decode": {"dp_size": 8, "tp_size": 4}}}'
 
 benchmarks:
-  acc:
-    case_type: accuracy
-    dataset_path: vllm-ascend/gsm8k
-    request_conf: vllm_api_general_chat
-    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
-    max_out_len: 32768
-    batch_size: 64
-    baseline: 96.29
-    threshold: 1
-    temperature: 0.6
-    top_p: 0.95
-    ignore_eos: false
-    thinking: true
+  perf_1:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_in2048_bs4000_deepseek3_2
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 128
+    max_out_len: 2048
+    batch_size: 32
+    request_rate: 0
+    baseline: 1460.4861
+    threshold: 0.97
