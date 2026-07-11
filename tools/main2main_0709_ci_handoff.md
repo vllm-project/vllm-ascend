@@ -252,7 +252,9 @@
 
 - `m2m-0709` 已回到全绿节点 `1a56e8eb`，并由独立提交 `39b657be` 仅将 `.github/vllm-main-verified.commit` 更新为 `e5588e49bc2642670116664a7fc4096e27adb179`。
 - 除本交接文档外，当前分支没有预先带回 `(ab7961a, e5588e49]` 的生产适配或新增测试。
-- 首轮 CI 的目的，是直接暴露升级导致的编译、收集、UT、E2E 和精度问题，而不是证明备份分支中的全部修改都必要。
+- 为进一步收敛 PR，已移出 3 个新增 UT 文件 `test_hunyuan_vl_processor_compat.py`、`test_attn_utils.py`、`test_model_runner_v1_wrapper.py`，以及 `test_model_runner_v1_with_device.py` 中新增的 Event 看护函数；对应生产修复继续保留。上述测试均完整保存在远程 `codex/m2m-0710-adaptation-tests`。
+- head `1b38000a` 的 run `29150404067` 在清理前已通过 lint、mypy、coverage 配置和测试选择，main/tag CPU 与硬件矩阵已启动；该 run 会被清理后的新 head 取代，不作为最终结果。
+- 新一轮 CI 的目的，是直接暴露升级导致的编译、收集、UT、E2E 和精度问题，而不是证明备份分支中的全部修改都必要。
 
 #### CI 优先策略
 
