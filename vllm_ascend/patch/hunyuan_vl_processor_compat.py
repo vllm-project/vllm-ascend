@@ -9,6 +9,8 @@ from functools import partial
 from types import ModuleType
 from typing import Any, cast
 
+from transformers import HunYuanVLProcessor
+
 from vllm_ascend.utils import vllm_version_is
 
 _STALE_PROCESSOR_MODULES = {
@@ -16,10 +18,70 @@ _STALE_PROCESSOR_MODULES = {
     "HunYuanVLImageProcessor": "vllm.transformers_utils.processors.hunyuan_vl_image",
 }
 
+_HUNYUAN_VL_EXTRA_SPECIAL_TOKENS = {
+    "image_start_token": "<｜hy_place▁holder▁no▁100｜>",
+    "image_end_token": "<｜hy_place▁holder▁no▁101｜>",
+    "image_token": "<｜hy_place▁holder▁no▁102｜>",
+}
+_HUNYUAN_VL_SPECIAL_TOKENS = {
+    **_HUNYUAN_VL_EXTRA_SPECIAL_TOKENS,
+    "pad_token": "<｜hy_▁pad▁｜>",
+}
+_HUNYUAN_VL_SPECIAL_TOKEN_IDS = {
+    "image_start_token": 120118,
+    "image_end_token": 120119,
+    "image_token": 120120,
+    "pad_token": 120002,
+}
+
+
+def _register_hunyuan_tokenizer_special_tokens(tokenizer: Any) -> None:
+    """Restore the named-token schema required by Transformers 5.13."""
+    missing_tokens = {
+        name: token
+        for name, token in _HUNYUAN_VL_EXTRA_SPECIAL_TOKENS.items()
+        if tokenizer is not None and getattr(tokenizer, name, None) is None
+    }
+    if missing_tokens:
+        tokenizer._set_model_specific_special_tokens(special_tokens=missing_tokens)
+
+    actual_tokens = {
+        name: (getattr(tokenizer, name, None), getattr(tokenizer, f"{name}_id", None))
+        for name in _HUNYUAN_VL_SPECIAL_TOKENS
+    }
+    expected_tokens = {
+        name: (token, _HUNYUAN_VL_SPECIAL_TOKEN_IDS[name]) for name, token in _HUNYUAN_VL_SPECIAL_TOKENS.items()
+    }
+    if actual_tokens != expected_tokens:
+        raise ValueError(
+            "HunyuanVL tokenizer special-token schema does not match the model vocabulary: "
+            f"expected {expected_tokens!r}, got {actual_tokens!r}"
+        )
+
+
+class _HunYuanVLProcessorCompat(HunYuanVLProcessor):
+    """Native processor with the legacy HunyuanOCR token schema restored."""
+
+    def __init__(
+        self,
+        image_processor: Any = None,
+        tokenizer: Any = None,
+        chat_template: Any = None,
+        cat_extra_token: bool = True,
+        **kwargs: Any,
+    ) -> None:
+        _register_hunyuan_tokenizer_special_tokens(tokenizer)
+        super().__init__(
+            image_processor=image_processor,
+            tokenizer=tokenizer,
+            chat_template=chat_template,
+            cat_extra_token=cat_extra_token,
+            **kwargs,
+        )
+
 
 def _import_v023_hunyuan_vision() -> Any:
     """Import v0.23's model with the native processors from vLLM PR #47872."""
-    from transformers import HunYuanVLProcessor
     from transformers.models.hunyuan_vl.image_processing_hunyuan_vl import (
         HunYuanVLImageProcessor,
         smart_resize,
@@ -99,14 +161,19 @@ def _remove_stale_registry_entries() -> bool:
     return bool(entries_to_remove)
 
 
-def _patch_v023_processor_methods(hunyuan_vision: Any) -> None:
-    """Backport the Transformers 5.13 call protocol from vLLM PR #47872."""
-    from transformers import HunYuanVLProcessor
+def _patch_hunyuan_processor_loader(hunyuan_vision: Any) -> None:
+    """Use the native processor with the complete Hunyuan tokenizer schema."""
 
     def get_hf_processor(self: Any, **kwargs: object) -> Any:
         kwargs.pop("use_fast", None)
         kwargs.setdefault("backend", "pil")
-        return self.ctx.get_hf_processor(HunYuanVLProcessor, **kwargs)
+        return self.ctx.get_hf_processor(_HunYuanVLProcessorCompat, **kwargs)
+
+    hunyuan_vision.HunYuanVLProcessingInfo.get_hf_processor = get_hf_processor
+
+
+def _patch_v023_processor_methods(hunyuan_vision: Any) -> None:
+    """Backport the Transformers 5.13 call protocol from vLLM PR #47872."""
 
     def call_hf_processor(
         self: Any,
@@ -127,7 +194,6 @@ def _patch_v023_processor_methods(hunyuan_vision: Any) -> None:
             dict(**mm_kwargs, **tok_kwargs),
         )
 
-    hunyuan_vision.HunYuanVLProcessingInfo.get_hf_processor = get_hf_processor
     hunyuan_vision.HunYuanVLMultiModalProcessor._call_hf_processor = call_hf_processor
 
 
@@ -180,6 +246,7 @@ def install_hunyuan_vl_processor_compat() -> None:
     if vllm_version_is("0.23.0"):
         v023_hunyuan_vision = _import_v023_hunyuan_vision()
         _remove_stale_registry_entries()
+        _patch_hunyuan_processor_loader(v023_hunyuan_vision)
         _patch_v023_processor_methods(v023_hunyuan_vision)
         _patch_prompt_updates(v023_hunyuan_vision)
         return
@@ -188,4 +255,5 @@ def install_hunyuan_vl_processor_compat() -> None:
         return
     from vllm.model_executor.models import hunyuan_vision as main_hunyuan_vision
 
+    _patch_hunyuan_processor_loader(main_hunyuan_vision)
     _patch_prompt_updates(main_hunyuan_vision)

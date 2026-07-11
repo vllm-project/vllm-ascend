@@ -11,7 +11,6 @@ import vllm_ascend.patch.hunyuan_vl_processor_compat as compat
 
 
 def test_v023_imports_native_processors_without_persistent_aliases(monkeypatch):
-    import transformers
     import transformers.models.hunyuan_vl.image_processing_hunyuan_vl as native_image
     import vllm.transformers_utils.processors as vllm_processors
 
@@ -45,7 +44,7 @@ def test_v023_imports_native_processors_without_persistent_aliases(monkeypatch):
         vars(vllm_processors)["hunyuan_vl_image"] = sys.modules[image_module_name]
         return hunyuan_vision
 
-    monkeypatch.setattr(transformers, "HunYuanVLProcessor", FakeProcessor)
+    monkeypatch.setattr(compat, "HunYuanVLProcessor", FakeProcessor)
     monkeypatch.setattr(native_image, "HunYuanVLImageProcessor", FakeImageProcessor)
     monkeypatch.setattr(native_image, "smart_resize", fake_smart_resize)
     monkeypatch.setattr(compat.importlib, "import_module", import_hunyuan_vision)
@@ -59,7 +58,6 @@ def test_v023_imports_native_processors_without_persistent_aliases(monkeypatch):
 
 
 def test_v023_restores_aliases_after_import_error(monkeypatch):
-    import transformers
     import transformers.models.hunyuan_vl.image_processing_hunyuan_vl as native_image
 
     class FakeProcessor:
@@ -75,7 +73,7 @@ def test_v023_restores_aliases_after_import_error(monkeypatch):
         image_module_name: sys.modules.get(image_module_name),
     }
 
-    monkeypatch.setattr(transformers, "HunYuanVLProcessor", FakeProcessor)
+    monkeypatch.setattr(compat, "HunYuanVLProcessor", FakeProcessor)
     monkeypatch.setattr(native_image, "HunYuanVLImageProcessor", FakeImageProcessor)
 
     def fail_import(_name: str) -> ModuleType:
@@ -105,6 +103,9 @@ def test_installer_runs_v023_backports_in_order(monkeypatch):
     def patch_processor(module: Any) -> None:
         calls.append(("processor", module))
 
+    def patch_loader(module: Any) -> None:
+        calls.append(("loader", module))
+
     def patch_prompt(module: Any) -> None:
         calls.append(("prompt", module))
 
@@ -118,6 +119,11 @@ def test_installer_runs_v023_backports_in_order(monkeypatch):
         compat,
         "_remove_stale_registry_entries",
         clean_registry,
+    )
+    monkeypatch.setattr(
+        compat,
+        "_patch_hunyuan_processor_loader",
+        patch_loader,
     )
     monkeypatch.setattr(
         compat,
@@ -135,6 +141,7 @@ def test_installer_runs_v023_backports_in_order(monkeypatch):
     assert calls == [
         "import",
         "registry",
+        ("loader", hunyuan_vision),
         ("processor", hunyuan_vision),
         ("prompt", hunyuan_vision),
     ]
@@ -153,6 +160,9 @@ def test_installer_cleans_main_registry_before_model_patch(monkeypatch):
     def patch_prompt(module: Any) -> None:
         calls.append(("prompt", module))
 
+    def patch_loader(module: Any) -> None:
+        calls.append(("loader", module))
+
     monkeypatch.setattr(compat, "vllm_version_is", lambda _version: False)
     monkeypatch.setattr(
         compat,
@@ -162,21 +172,93 @@ def test_installer_cleans_main_registry_before_model_patch(monkeypatch):
     monkeypatch.setattr(vllm_models, "hunyuan_vision", hunyuan_vision, raising=False)
     monkeypatch.setattr(
         compat,
+        "_patch_hunyuan_processor_loader",
+        patch_loader,
+    )
+    monkeypatch.setattr(
+        compat,
         "_patch_prompt_updates",
         patch_prompt,
     )
 
     compat.install_hunyuan_vl_processor_compat()
 
-    assert calls == ["registry", ("prompt", hunyuan_vision)]
+    assert calls == [
+        "registry",
+        ("loader", hunyuan_vision),
+        ("prompt", hunyuan_vision),
+    ]
+
+
+def test_registers_hunyuan_tokenizer_schema_without_changing_ids():
+    class FakeTokenizer:
+        pad_token = compat._HUNYUAN_VL_SPECIAL_TOKENS["pad_token"]
+        pad_token_id = compat._HUNYUAN_VL_SPECIAL_TOKEN_IDS["pad_token"]
+
+        def __init__(self) -> None:
+            self.registrations: list[dict[str, str]] = []
+
+        def _set_model_specific_special_tokens(self, special_tokens: dict[str, str]) -> None:
+            self.registrations.append(special_tokens)
+            for name, token in special_tokens.items():
+                setattr(self, name, token)
+                setattr(self, f"{name}_id", compat._HUNYUAN_VL_SPECIAL_TOKEN_IDS[name])
+
+    tokenizer = FakeTokenizer()
+
+    compat._register_hunyuan_tokenizer_special_tokens(tokenizer)
+    compat._register_hunyuan_tokenizer_special_tokens(tokenizer)
+
+    assert tokenizer.registrations == [compat._HUNYUAN_VL_EXTRA_SPECIAL_TOKENS]
+
+
+def test_rejects_hunyuan_token_id_mismatch():
+    tokenizer = SimpleNamespace(
+        **compat._HUNYUAN_VL_SPECIAL_TOKENS,
+        **{f"{name}_id": token_id for name, token_id in compat._HUNYUAN_VL_SPECIAL_TOKEN_IDS.items()},
+    )
+    tokenizer.image_token_id = 1
+
+    with pytest.raises(ValueError, match="does not match the model vocabulary"):
+        compat._register_hunyuan_tokenizer_special_tokens(tokenizer)
+
+
+def test_compat_processor_registers_schema_before_native_init(monkeypatch):
+    tokenizer = object()
+    calls: list[tuple[Any, ...]] = []
+
+    monkeypatch.setattr(
+        compat,
+        "_register_hunyuan_tokenizer_special_tokens",
+        lambda value: calls.append(("register", value)),
+    )
+
+    def native_init(
+        self: Any,
+        image_processor: Any = None,
+        tokenizer: Any = None,
+        chat_template: Any = None,
+        cat_extra_token: bool = True,
+        **kwargs: Any,
+    ) -> None:
+        calls.append(("native", tokenizer, cat_extra_token, kwargs))
+
+    monkeypatch.setattr(compat.HunYuanVLProcessor, "__init__", native_init)
+
+    compat._HunYuanVLProcessorCompat(
+        image_processor=object(),
+        tokenizer=tokenizer,
+        cat_extra_token=False,
+        custom=True,
+    )
+
+    assert calls == [
+        ("register", tokenizer),
+        ("native", tokenizer, False, {"custom": True}),
+    ]
 
 
 def test_v023_backports_native_processor_call_protocol(monkeypatch):
-    import transformers
-
-    class FakeNativeProcessor:
-        pass
-
     class FakeProcessingInfo:
         pass
 
@@ -187,7 +269,7 @@ def test_v023_backports_native_processor_call_protocol(monkeypatch):
         HunYuanVLProcessingInfo=FakeProcessingInfo,
         HunYuanVLMultiModalProcessor=FakeMultiModalProcessor,
     )
-    monkeypatch.setattr(transformers, "HunYuanVLProcessor", FakeNativeProcessor)
+    compat._patch_hunyuan_processor_loader(hunyuan_vision)
     compat._patch_v023_processor_methods(hunyuan_vision)
 
     processor_args: list[tuple[Any, dict[str, Any]]] = []
@@ -203,7 +285,12 @@ def test_v023_backports_native_processor_call_protocol(monkeypatch):
 
     get_hf_processor(processing_info, use_fast=True, min_pixels=128)
 
-    assert processor_args == [(FakeNativeProcessor, {"min_pixels": 128, "backend": "pil"})]
+    assert processor_args == [
+        (
+            compat._HunYuanVLProcessorCompat,
+            {"min_pixels": 128, "backend": "pil"},
+        )
+    ]
 
     calls: list[tuple[Any, dict[str, Any], dict[str, Any]]] = []
     hf_processor = SimpleNamespace(
