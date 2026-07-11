@@ -506,7 +506,7 @@ class TestAscendSFAMetadataBuilder(TestBase):
         mock_group_len = torch.tensor([1, 2, 3])
         mock_group_key_idx = torch.tensor([0, 1, 2])
         mock_group_key_cache_idx = torch.tensor([4, 5, 6])
-        mock_store_kv_block_pre.return_value = (mock_group_len, mock_group_key_idx, mock_group_key_cache_idx)
+        mock_store_kv_block_metadata.return_value = (mock_group_len, mock_group_key_idx, mock_group_key_cache_idx)
 
         with patch("vllm_ascend.attention.sfa_v1.get_ascend_config") as mock_get_ascend_config:
             mock_ascend_config = MagicMock()
@@ -522,8 +522,8 @@ class TestAscendSFAMetadataBuilder(TestBase):
         assert metadata.num_actual_tokens == common_attn_metadata.num_actual_tokens
         assert metadata.slot_mapping.shape == (100, 4, 1024)
 
-        mock_store_kv_block_pre.assert_called_once()
-        actual_args, _ = mock_store_kv_block_pre.call_args
+        mock_store_kv_block_metadata.assert_called_once()
+        actual_args, _ = mock_store_kv_block_metadata.call_args
         assert torch.equal(actual_args[0], common_attn_metadata.slot_mapping)
         assert actual_args[1] == 128
 
