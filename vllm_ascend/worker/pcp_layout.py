@@ -67,6 +67,7 @@ class PCPHybridLayout:
     num_padded_scheduled_tokens: np.ndarray
     positions_linear: np.ndarray
     pcp_enter_fa_restore_idx: torch.Tensor
+    pcp_fa_padding_restore_idx: torch.Tensor | None
     pcp_exit_fa_scatter_idx: torch.Tensor | None
     pcp_fa_query_idx: torch.Tensor | None
     pcp_padded_tokens_fla: int
@@ -75,6 +76,41 @@ class PCPHybridLayout:
     pcp_tokens_padded: np.ndarray
     num_scheduled_tokens_padded: np.ndarray
     total_num_scheduled_tokens: int
+
+
+def build_fa_padding_restore_idx(
+    pcp_unpad_mask: np.ndarray,
+    decode_offset: int,
+    actual_qkv_len: int,
+) -> np.ndarray | None:
+    target_len = pcp_unpad_mask.shape[0]
+    if actual_qkv_len > target_len:
+        raise ValueError(f"actual_qkv_len ({actual_qkv_len}) must not exceed FA padded length ({target_len}).")
+    if actual_qkv_len == target_len:
+        return None
+    if decode_offset > target_len or actual_qkv_len < decode_offset:
+        raise ValueError(
+            f"Invalid PCP restore layout: decode_offset={decode_offset}, "
+            f"actual_qkv_len={actual_qkv_len}, target_len={target_len}."
+        )
+
+    restore_idx = np.empty(target_len, dtype=np.int32)
+    restore_idx[:decode_offset] = np.arange(decode_offset, dtype=np.int32)
+
+    prefill_unpad_mask = pcp_unpad_mask[decode_offset:]
+    prefill_real_tokens = int(prefill_unpad_mask.sum())
+    expected_actual_qkv_len = decode_offset + prefill_real_tokens
+    if expected_actual_qkv_len != actual_qkv_len:
+        raise ValueError(f"PCP unpad mask expects {expected_actual_qkv_len} QKV rows, but got {actual_qkv_len}.")
+
+    prefill_restore_idx = restore_idx[decode_offset:]
+    prefill_restore_idx.fill(actual_qkv_len)
+    prefill_restore_idx[prefill_unpad_mask] = np.arange(
+        decode_offset,
+        actual_qkv_len,
+        dtype=np.int32,
+    )
+    return restore_idx
 
 
 def build_common_pcp_layout(
@@ -228,6 +264,13 @@ def build_hybrid_fa_layout(
     else:
         pcp_enter_fa_restore_idx = torch.empty(0, dtype=torch.int64)
 
+    padding_restore_idx = build_fa_padding_restore_idx(
+        common_layout.pcp_unpad_mask[: common_layout.pcp_padded_tokens_length],
+        num_decode_tokens * pcp_world_size,
+        pcp_enter_fa_restore_idx.shape[0],
+    )
+    pcp_fa_padding_restore_idx = torch.from_numpy(padding_restore_idx) if padding_restore_idx is not None else None
+
     pcp_exit_fa_scatter_idx = None
     pcp_fa_query_idx = None
     if num_reqs > num_decode_reqs:
@@ -260,6 +303,7 @@ def build_hybrid_fa_layout(
         num_padded_scheduled_tokens=num_padded_scheduled_tokens,
         positions_linear=positions_linear,
         pcp_enter_fa_restore_idx=pcp_enter_fa_restore_idx,
+        pcp_fa_padding_restore_idx=pcp_fa_padding_restore_idx,
         pcp_exit_fa_scatter_idx=pcp_exit_fa_scatter_idx,
         pcp_fa_query_idx=pcp_fa_query_idx,
         pcp_padded_tokens_fla=int(pcp_padded_tokens_fla),

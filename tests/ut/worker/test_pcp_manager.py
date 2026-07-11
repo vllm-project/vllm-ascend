@@ -834,6 +834,9 @@ def test_hybrid_update_tokens_records_fa_reorder_indices():
     assert pcp_manager.pcp_enter_fa_restore_idx[:8].tolist() == [
         0, 1, 5, 2, 3, 4, 6, 7
     ]
+    assert pcp_manager.pcp_fa_padding_restore_idx[:12].tolist() == [
+        0, 1, 2, 8, 3, 4, 5, 6, 7, 8, 8, 8
+    ]
     assert pcp_manager.pcp_exit_fa_scatter_idx.gpu[:8].tolist() == [
         0, 6, 2, 3, 8, 0, 0, 0
     ]
@@ -857,6 +860,9 @@ def test_hybrid_update_tokens_records_fa_reorder_indices():
     assert metadata.num_actual_tokens_pcp_padded == 12
     assert metadata.pcp_enter_fa_restore_idx.tolist() == [
         0, 1, 5, 2, 3, 4, 6, 7
+    ]
+    assert metadata.pcp_fa_padding_restore_idx.tolist() == [
+        0, 1, 2, 8, 3, 4, 5, 6, 7, 8, 8, 8
     ]
     assert metadata.pcp_exit_fa_scatter_idx.tolist() == [
         0, 6, 2, 3, 8, 0, 0, 0

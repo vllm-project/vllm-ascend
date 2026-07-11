@@ -148,6 +148,11 @@ class PCPManager:
         self.pcp_enter_fa_restore_idx = torch.zeros(
             self.max_num_tokens + 2 * self.pcp_world_size * self.max_num_reqs, dtype=torch.int32, device=self.device
         )
+        self.pcp_fa_padding_restore_idx = torch.zeros(
+            self.max_num_tokens * self.pcp_world_size + 2 * self.pcp_world_size * self.max_num_reqs,
+            dtype=torch.int32,
+            device=self.device,
+        )
         self.pcp_use_hybrid_attn = self.vllm_config.model_config.hf_config.model_type in (
             "qwen3_next",
             "qwen3_5",
@@ -667,6 +672,10 @@ class PCPManager:
             self.pcp_enter_fa_restore_idx[: hybrid_layout.pcp_enter_fa_restore_idx.shape[0]].copy_(
                 hybrid_layout.pcp_enter_fa_restore_idx.long(), non_blocking=True
             )
+            if hybrid_layout.pcp_fa_padding_restore_idx is not None:
+                self.pcp_fa_padding_restore_idx[: hybrid_layout.pcp_fa_padding_restore_idx.shape[0]].copy_(
+                    hybrid_layout.pcp_fa_padding_restore_idx, non_blocking=True
+                )
             if hybrid_layout.pcp_exit_fa_scatter_idx is not None:
                 self.pcp_exit_fa_scatter_idx.gpu[: hybrid_layout.pcp_exit_fa_scatter_idx.shape[0]].copy_(
                     hybrid_layout.pcp_exit_fa_scatter_idx.long(), non_blocking=True
@@ -993,18 +1002,27 @@ class PCPManager:
         long_seq_metadata.pcp_fa_query_idx = self.pcp_fa_query_idx[
             : num_actual_tokens_pcp_padded // self.pcp_world_size - self.num_decode_tokens
         ]
-        long_seq_metadata.pcp_enter_fa_restore_idx = self.pcp_enter_fa_restore_idx[
-            : pcp_unpad_mask.sum() + self.num_decode_tokens * (self.pcp_world_size - 1)
-        ]
+        actual_qkv_len = int(pcp_unpad_mask.sum()) + self.num_decode_tokens * (self.pcp_world_size - 1)
+        long_seq_metadata.pcp_enter_fa_restore_idx = self.pcp_enter_fa_restore_idx[:actual_qkv_len]
+        if actual_qkv_len < num_actual_tokens_pcp_padded:
+            long_seq_metadata.pcp_fa_padding_restore_idx = self.pcp_fa_padding_restore_idx[
+                :num_actual_tokens_pcp_padded
+            ]
+        else:
+            long_seq_metadata.pcp_fa_padding_restore_idx = None
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
                 "[PCP][DFX] long_seq_metadata reorder idx: "
                 "pcp_allgather_restore_idx=%s, "
                 "pcp_exit_fa_scatter_idx=%s, "
-                "pcp_enter_fa_restore_idx=%s",
+                "pcp_enter_fa_restore_idx=%s, "
+                "pcp_fa_padding_restore_idx=%s",
                 long_seq_metadata.pcp_allgather_restore_idx.detach().cpu().tolist(),
                 long_seq_metadata.pcp_exit_fa_scatter_idx.detach().cpu().tolist(),
                 long_seq_metadata.pcp_enter_fa_restore_idx.detach().cpu().tolist(),
+                long_seq_metadata.pcp_fa_padding_restore_idx.detach().cpu().tolist()
+                if long_seq_metadata.pcp_fa_padding_restore_idx is not None
+                else None,
             )
         long_seq_metadata.max_num_tokens_across_pcp = self.max_num_tokens_across_pcp
         long_seq_metadata.total_num_scheduled_tokens = self.total_num_scheduled_tokens

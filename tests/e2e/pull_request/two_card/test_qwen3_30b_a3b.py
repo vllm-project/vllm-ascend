@@ -31,6 +31,16 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+@pytest.mark.e2e_model("Qwen/Qwen3-30B-A3B")
+@pytest.mark.e2e_coverage(
+    arch="moe",
+    feature="eplb,dynamic_eplb",
+    parallel="TP,EP",
+    deploy="pd_mix",
+    hardware="A3",
+    quantization="BF16",
+    graph_mode="full_decode_only",
+)
 @wait_until_npu_memory_free()
 def test_moe_tp_ep_eplb_full_decode_only():
     """Verify MoE serving with TP, EP, EPLB, and full decode only."""

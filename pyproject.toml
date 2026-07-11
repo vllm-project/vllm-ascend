@@ -89,3 +89,9 @@ logger-objects = ["vllm.logger.logger"]
 
 [tool.ruff.format]
 docstring-code-format = true
+
+[tool.pytest.ini_options]
+markers = [
+    "e2e_model: E2E test model identifier(s)",
+    "e2e_coverage: E2E test coverage dimensions (arch, feature, parallel, deploy, hardware, quantization, graph_mode)",
+]
