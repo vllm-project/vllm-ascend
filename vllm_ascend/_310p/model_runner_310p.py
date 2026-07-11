@@ -303,11 +303,7 @@ class NPUModelRunner310(NPUModelRunner):
         prev_req_id_to_index = self.input_batch.prev_req_id_to_index
         self._compute_prev_positions(num_reqs)
         prev_positions_gpu = None
-        if (
-            self.use_async_scheduling
-            and self.input_batch.prev_sampled_token_ids is not None
-            and prev_req_id_to_index
-        ):
+        if self.use_async_scheduling and self.input_batch.prev_sampled_token_ids is not None and prev_req_id_to_index:
             self.prev_positions.copy_to_gpu(num_reqs)
             prev_positions_gpu = self.prev_positions.gpu[:num_reqs]
 

@@ -195,15 +195,11 @@ class BlockTable:
         else:
             if isinstance(req_indices, torch.Tensor):
                 if req_indices.device.type != "cpu":
-                    raise ValueError(
-                        "Device tensor inputs are only supported for CP draft slot mapping."
-                    )
+                    raise ValueError("Device tensor inputs are only supported for CP draft slot mapping.")
                 req_indices = req_indices.numpy()
             if isinstance(positions, torch.Tensor):
                 if positions.device.type != "cpu":
-                    raise ValueError(
-                        "Device tensor inputs are only supported for CP draft slot mapping."
-                    )
+                    raise ValueError("Device tensor inputs are only supported for CP draft slot mapping.")
                 positions = positions.numpy()
             assert self.kernel_sizes is not None
             assert self.block_size == self.kernel_sizes[0]
