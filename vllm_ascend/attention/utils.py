@@ -255,6 +255,7 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     group_key_idx: torch.Tensor = None
     group_key_cache_idx: torch.Tensor = None
     
+
     # TODO: Remove it when vLLM no longer uses this function.
     def unpadded(self, num_actual_tokens: int, num_actual_reqs: int) -> "AscendCommonAttentionMetadata":
         # This only use to eagle now. It will be use to enforce_eager in future.
