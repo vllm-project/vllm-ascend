@@ -1712,7 +1712,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> store_kv_block_metadata(
  {
     // AICPU kernel writes INT32 outputs sized to slot_mapping length and
     // zero-fills unused entries.
-    c10::SymDimVector slot_mapping_shape = slot_mapping_npu.sym_sizes();
+    c10::SymDimVector slot_mapping_shape(slot_mapping_npu.sym_sizes());
     auto opts = slot_mapping_npu.options().dtype(at::kInt);
     at::Tensor group_len = at::empty_symint(slot_mapping_shape, opts);
     at::Tensor group_key_idx = at::empty_symint(slot_mapping_shape, opts);
