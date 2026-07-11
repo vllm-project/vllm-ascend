@@ -51,9 +51,6 @@ a3:
       - name: DeepSeek_V3.1T_layerwise_PD
         config_file_path: DeepSeek_V3.1T_layerwise_PD.yaml‎
         size: 4
-      - name: DeepSeek_V3.1T_layerwise_PD
-        config_file_path: DeepSeek_V3.1T_layerwise_PD.yaml‎
-        size: 4
       - name: DeepSeek_V3.2T_MTP2_PD
         config_file_path: DeepSeek_V3.2T_MTP2_PD.yaml‎
         size: 4
