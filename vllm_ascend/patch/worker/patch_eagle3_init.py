@@ -44,6 +44,7 @@ import logging
 import torch
 import torch.nn as nn
 from vllm.model_executor.models import deepseek_eagle3, llama_eagle3
+from vllm.model_executor.models.utils import maybe_prefix
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +60,7 @@ def _patched_eagle3_llama_init(self, *, vllm_config, prefix: str = ""):
     self.config.target_layer_count = target_layer_num
     self.model = llama_eagle3.LlamaModel(
         vllm_config=vllm_config,
-        prefix=llama_eagle3.maybe_prefix(prefix, "model"),
+        prefix=maybe_prefix(prefix, "model"),
         start_layer_id=target_layer_num,
     )
 
@@ -68,7 +69,7 @@ def _patched_eagle3_llama_init(self, *, vllm_config, prefix: str = ""):
         self.config.draft_vocab_size,
         self.config.hidden_size,
         quant_config=llama_eagle3.get_draft_quant_config(vllm_config),
-        prefix=llama_eagle3.maybe_prefix(prefix, "lm_head"),
+        prefix=maybe_prefix(prefix, "lm_head"),
     )
     self.logits_processor = llama_eagle3.LogitsProcessor(self.config.draft_vocab_size, scale=logit_scale)
     self.draft_id_to_target_id = nn.Parameter(
@@ -100,7 +101,7 @@ def _patched_eagle3_deepseek_v2_init(self, *, vllm_config, prefix: str = ""):
 
     self.model = deepseek_eagle3.DeepseekV2Eagle3Model(
         vllm_config=vllm_config,
-        prefix=deepseek_eagle3.maybe_prefix(prefix, "model"),
+        prefix=maybe_prefix(prefix, "model"),
         start_layer_id=target_layer_num,
     )
 
@@ -108,7 +109,7 @@ def _patched_eagle3_deepseek_v2_init(self, *, vllm_config, prefix: str = ""):
     self.lm_head = deepseek_eagle3.ParallelLMHead(
         self.config.draft_vocab_size,
         self.config.hidden_size,
-        prefix=deepseek_eagle3.maybe_prefix(prefix, "lm_head"),
+        prefix=maybe_prefix(prefix, "lm_head"),
     )
     self.logits_processor = deepseek_eagle3.LogitsProcessor(self.config.draft_vocab_size, scale=logit_scale)
     self.draft_id_to_target_id = nn.Parameter(
