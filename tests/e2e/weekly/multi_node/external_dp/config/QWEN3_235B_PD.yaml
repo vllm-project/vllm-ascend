@@ -188,7 +188,7 @@ templates:
       - --additional-config
       - '{"finegrained_tp_config": {"lmhead_tensor_parallel_size":8},"dynamic_eplb":true,"num_iterations_eplb_update":4000,"num_wait_worker_iterations":200,"init_redundancy_expert":0,"gate_eplb":false}'
       - --kv-transfer-config
-      - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_consumer", "kv_port": "30200", "engine_id": "2", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 8}, "decode": {"dp_size": 32, "tp_size": 1}}}'
+      - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_consumer", "kv_port": "30200", "engine_id": "3", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 8}, "decode": {"dp_size": 32, "tp_size": 1}}}'
 
 benchmarks:
   acc:
