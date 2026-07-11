@@ -41,7 +41,6 @@ from vllm_ascend.ascend_config import WeightPrefetchConfig, get_ascend_config
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.v1.kv_cache_interface import AttentionSpec
 else:
     VllmConfig = None
 
@@ -1719,11 +1718,6 @@ def kv_cache_spec_uses_sparse_c8(kv_cache_spec) -> bool:
     from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 
     return isinstance(kv_cache_spec, AscendMLAAttentionSpec) and bool(getattr(kv_cache_spec, "cache_sparse_c8", False))
-
-
-def sparse_kv_cache_has_indexer(kv_cache_spec: AttentionSpec) -> bool:
-    sparse_head_dim = getattr(kv_cache_spec, "sparse_head_dim", None)
-    return sparse_head_dim is not None and len(sparse_head_dim) == 3 and sparse_head_dim[2] > 0
 
 
 def is_hidden_state_cache_spec(spec) -> bool:
