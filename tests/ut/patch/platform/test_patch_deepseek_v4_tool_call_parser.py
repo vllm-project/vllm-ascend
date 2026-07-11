@@ -1,12 +1,31 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import importlib
 import json
 from unittest.mock import MagicMock
 
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-from vllm.tool_parsers.deepseekv4_tool_parser import DeepSeekV4ToolParser
+import pytest
 
-from vllm_ascend.patch.platform import patch_deepseek_v4_tool_call_parser
+from vllm_ascend.utils import vllm_version_is
+
+if not vllm_version_is("0.23.0"):
+    pytest.skip(
+        "upstream vLLM migrated DeepSeek V4 tool parsing to the parser engine "
+        "and removed vllm.tool_parsers.deepseekv4_tool_parser",
+        allow_module_level=True,
+    )
+
+from vllm.entrypoints.openai.chat_completion.protocol import (  # noqa: E402
+    ChatCompletionRequest,
+)
+
+from vllm_ascend.patch.platform import (  # noqa: E402
+    patch_deepseek_v4_tool_call_parser,
+)
+
+# Imported dynamically because vllm.tool_parsers.deepseekv4_tool_parser only
+# exists on the 0.23.0 release; upstream main removed it (guarded above).
+DeepSeekV4ToolParser = importlib.import_module("vllm.tool_parsers.deepseekv4_tool_parser").DeepSeekV4ToolParser
 
 MOCK_TOKENIZER = MagicMock()
 MOCK_TOKENIZER.get_vocab.return_value = {}
