@@ -1,4 +1,4 @@
-test_name: "DeepSeek_V3.2T_MTP1_PD"
+test_name: "DeepSeek_V3.2T_MTP2_PD"
 model: "vllm-ascend/DeepSeek-V3.2-W8A8"
 num_nodes: 4
 npu_per_node: 16
