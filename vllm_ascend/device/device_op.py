@@ -46,8 +46,13 @@ else:
 class BaseDeviceAdaptor:
     @classmethod
     def reshape_and_cache(cls, key, value, key_cache, value_cache, slot_mapping):
-        torch_npu._npu_reshape_and_cache(
-            key=key, value=value, key_cache=key_cache, value_cache=value_cache, slot_indices=slot_mapping
+        torch_npu.npu_scatter_pa_kv_cache(
+            key=key.contiguous(),
+            value=value.contiguous(),
+            key_cache=key_cache,
+            value_cache=value_cache,
+            slot_mapping=slot_mapping.contiguous(),
+            cache_mode="Norm",
         )
 
     @classmethod
@@ -261,12 +266,12 @@ class BaseDeviceAdaptor:
 
     @staticmethod
     def kv_cache_load(cache_kv_c, cache_k_pe, block_table, context_seq_len_npu, seq_starts, key, value):
-        torch_npu.atb.npu_paged_cache_load(
+        torch_npu.npu_gather_pa_kv_cache(
             cache_kv_c,
             cache_k_pe,
             block_table,
-            context_seq_len_npu,
-            seq_starts=seq_starts,
+            context_seq_len_npu.contiguous(),
+            seq_offset=seq_starts,
             key=key,
             value=value,
         )
@@ -858,17 +863,6 @@ class BaseDeviceAdaptor:
 
 class A5DeviceAdaptor(BaseDeviceAdaptor):
     @classmethod
-    def reshape_and_cache(cls, key, value, key_cache, value_cache, slot_mapping):
-        torch_npu.npu_scatter_pa_kv_cache(
-            key=key.contiguous(),
-            value=value.contiguous(),
-            key_cache=key_cache,
-            value_cache=value_cache,
-            slot_mapping=slot_mapping.contiguous(),
-            cache_mode="Norm",
-        )
-
-    @classmethod
     def npu_fused_infer_attention_score(
         cls,
         query: torch.Tensor,
@@ -1051,7 +1045,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                 quant_mode=2,
                 clamp_value=swiglu_limit,
             )
-        elif mxfp_quant_dtype == QuantType.W4A16MXFP4:
+        elif mxfp_quant_dtype == QuantType.W4A16MXFP:
             hidden_states = torch_npu.npu_grouped_matmul(
                 x=[x],
                 weight=[weight],
@@ -1177,7 +1171,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         gmm2_weight = weight if isinstance(weight, list) else [weight]
         gmm2_scale = weight_scale if isinstance(weight_scale, list) else [weight_scale]
 
-        if mxfp_quant_dtype == QuantType.W4A16MXFP4:
+        if mxfp_quant_dtype == QuantType.W4A16MXFP:
             return torch_npu.npu_grouped_matmul(
                 x=[hidden_states],
                 weight=gmm2_weight,
@@ -1813,6 +1807,16 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
 
 
 class Ascend310PDeviceAdaptor(BaseDeviceAdaptor):
+    @classmethod
+    def reshape_and_cache(cls, key, value, key_cache, value_cache, slot_mapping):
+        torch_npu._npu_reshape_and_cache(
+            key=key,
+            value=value,
+            key_cache=key_cache,
+            value_cache=value_cache,
+            slot_indices=slot_mapping,
+        )
+
     @staticmethod
     def index_fill(
         tensor: torch.Tensor,

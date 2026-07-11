@@ -695,7 +695,7 @@ def _get_column_parallel_op(
             "g_proj",  # attention gate projection of Step3p5
         ]
         for a_prefix in sp_column_prefix:
-            if a_prefix in prefix:
+            if a_prefix in prefix and "vision_model" not in prefix:
                 return SequenceColumnParallelOp(layer)
 
     return None
@@ -725,7 +725,8 @@ def _get_row_parallel_op(
         return MatmulAllreduceRowParallelOp(layer)
     if flashcomm2_enable():
         if "o_proj" in prefix or "out_proj" in prefix:
-            return Flashcomm2OProjRowParallelOp(layer)
+            if "vision_model" not in prefix:
+                return Flashcomm2OProjRowParallelOp(layer)
     if enable_sp():
         # "share_expert" added for Step3p5
         if "shared_expert" in prefix or "share_expert" in prefix:
@@ -738,7 +739,7 @@ def _get_row_parallel_op(
             "wo_b",  # attn output linear of v4
         ]
         for a_prefix in sp_row_prefixes:
-            if a_prefix in prefix:
+            if a_prefix in prefix and "vision_model" not in prefix:
                 return SequenceRowParallelOp(layer)
 
     return None
