@@ -239,9 +239,6 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     positions: torch.Tensor = None
     positions_cpu: torch.Tensor = None
 
-    # CPU tensor of slot mapping for host-side operations.
-    slot_mapping_cpu: torch.Tensor = None
-
     # Current attention state (e.g., ChunkedPrefill, DecodeOnly).
     attn_state: Any = None
 
@@ -254,7 +251,10 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     # Metadata for Prefill Context Parallelism (PCP) operations.
     prefill_context_parallel_metadata: AscendPrefillContextParallelMetadata | None = None
     kvcomp_metadata: KVCompMetaData | None = None
-
+    group_len: torch.Tensor = None
+    group_key_idx: torch.Tensor = None
+    group_key_cache_idx: torch.Tensor = None
+    
     # TODO: Remove it when vLLM no longer uses this function.
     def unpadded(self, num_actual_tokens: int, num_actual_reqs: int) -> "AscendCommonAttentionMetadata":
         # This only use to eagle now. It will be use to enforce_eager in future.
@@ -277,7 +277,6 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             # This is really strange since vLLM slices them as well
             block_table_tensor=self.block_table_tensor,
             slot_mapping=self.slot_mapping,
-            slot_mapping_cpu=self.slot_mapping_cpu,
             causal=self.causal,
             actual_seq_lengths_q=self.actual_seq_lengths_q[:num_actual_tokens],
             positions=self.positions,
@@ -307,6 +306,9 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             encoder_seq_lens_cpu=_slice_reqs(self.encoder_seq_lens_cpu),
             logits_indices_padded=self.logits_indices_padded,
             num_logits_indices=self.num_logits_indices,
+            group_len = self.group_len,
+            group_key_idx = self.group_key_idx,
+            group_key_cache_idx = self.group_key_cache_idx,
         )
 
 
