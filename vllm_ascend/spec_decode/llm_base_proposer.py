@@ -612,13 +612,15 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 ],
                 # This is used to hold a position.
                 slot_mapping=self.runner.input_batch.block_table[self.kv_cache_gid].slot_mapping.gpu,
-                slot_mapping_cpu=self.runner.input_batch.block_table[self.kv_cache_gid].slot_mapping.cpu,
                 positions=self.runner.positions,
                 positions_cpu=self.runner._dsa_positions_cpu_buf if self.use_compress else None,
                 attn_state=self.runner.attn_state,
                 decode_token_per_req=self.runner.decode_token_per_req,
                 is_prefilling=torch.zeros(num_reqs, dtype=torch.bool),
                 max_seq_len=0,
+                group_len=self.runner.group_len.gpu[:num_reqs],
+                group_key_idx=self.runner.group_key_idx.gpu[:num_reqs],
+                group_key_cache_idx=self.runner.group_key_cache_idx.gpu[:num_reqs],
             )
             if self.pcp_size * self.dcp_size > 1:
                 # update long_seq related params and flatten block_table
@@ -1993,7 +1995,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             max_query_len=new_query_len_per_req.max().item(),
             block_table_tensor=common_attn_metadata.block_table_tensor,
             slot_mapping=common_attn_metadata.slot_mapping,
-            slot_mapping_cpu=common_attn_metadata.slot_mapping_cpu,
             actual_seq_lengths_q=self.runner.actual_seq_lengths_q,
             positions=common_attn_metadata.positions[token_indices],
             positions_cpu=common_attn_metadata.positions_cpu[token_indices]
@@ -2003,6 +2004,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             decode_token_per_req=self.runner.decode_token_per_req,
             is_prefilling=common_attn_metadata.is_prefilling,
             max_seq_len=0,
+            group_len=common_attn_metadata.group_len,
+            group_key_idx=common_attn_metadata.group_key_idx,
+            group_key_cache_idx=common_attn_metadata.group_key_cache_idx,
         )
         return spec_common_attn_metadata, token_indices
 
@@ -2086,7 +2090,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             actual_seq_lengths_q=self.runner.actual_seq_lengths_q,
             block_table_tensor=common_attn_metadata.block_table_tensor,
             slot_mapping=common_attn_metadata.slot_mapping,
-            slot_mapping_cpu=common_attn_metadata.slot_mapping_cpu,
             positions=common_attn_metadata.positions,
             positions_cpu=common_attn_metadata.positions_cpu,
             attn_state=self.runner.attn_state,
@@ -2096,6 +2099,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             seq_lens=common_attn_metadata.seq_lens,
             is_prefilling=common_attn_metadata.is_prefilling,
             max_seq_len=0,
+            group_len=common_attn_metadata.group_len,
+            group_key_idx=common_attn_metadata.group_key_idx,
+            group_key_cache_idx=common_attn_metadata.group_key_cache_idx,
         )
 
         return spec_common_attn_metadata, token_indices, token_indices_to_sample, num_rejected_tokens_gpu
