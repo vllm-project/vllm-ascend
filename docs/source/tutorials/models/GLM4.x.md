@@ -776,7 +776,7 @@ In this chapter, we recommend best practices for three scenarios:
 - High-throughput: For short sequences with high throughput: we also recommend setting `dp2 tp8`
 
 **Notice:**
-`max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario. For other settings, please refer to the **[Deployment](#deployment)** chapter.
+`max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario. For other settings, please refer to the **[Online Service Deployment](#5-online-service-deployment)** chapter.
 
 ## 10 FAQ
 
