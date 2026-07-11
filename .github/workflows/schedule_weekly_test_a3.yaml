@@ -21,9 +21,9 @@
 name: Weekly-A3
 
 on:
-#   schedule:
-#       # Run test at 00:00 Beijing time (UTC+8) every Sunday
-#       - cron: "0 16 * * 6"
+  schedule:
+      # Run test at 10:00 Beijing time (UTC+8) every Sunday
+      - cron: "0 2 * * 0"
   workflow_dispatch:
     inputs:
       vllm_ascend_branch:
