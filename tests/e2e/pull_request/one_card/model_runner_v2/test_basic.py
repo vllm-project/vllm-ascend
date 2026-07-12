@@ -186,6 +186,10 @@ def test_dflash_spec_decoding(
     assert match
 
 
+@pytest.mark.skipif(
+    vllm_version_is("0.24.0"),
+    reason="DSpark requires vLLM #46995, which is not in v0.24.0.",
+)
 @pytest.mark.parametrize("model", DSPARK_MAIN_MODEL)
 @pytest.mark.parametrize("dspark_model", DSPARK_MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
