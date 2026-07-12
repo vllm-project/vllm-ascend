@@ -171,11 +171,16 @@ class AscendGemma4Proposer(_VllmGemma4Proposer, AscendSpecDecodeBaseProposer):
 
         per_group_attn_metadata: list[object] = []
         per_layer_attn_metadata: dict[str, object] = {}
+        # Slice to the actual batch size to match the upstream Gemma4Proposer
+        # behavior: stored block tables may be padded (num_reqs_padded) from
+        # the target forward pass, while the drafter runs on the unpadded
+        # batch. Without this slice, padded rows leak into draft metadata.
+        batch_size = common_attn_metadata.batch_size()
         for attn_group in self.draft_attn_groups:
             gid = attn_group.kv_cache_group_id
             if gid in self._per_group_block_tables:
                 cm = copy(common_attn_metadata)
-                cm.block_table_tensor = self._per_group_block_tables[gid]
+                cm.block_table_tensor = self._per_group_block_tables[gid][:batch_size]
             else:
                 cm = common_attn_metadata
             attn_metadata = attn_group.get_metadata_builder().build_for_drafting(
