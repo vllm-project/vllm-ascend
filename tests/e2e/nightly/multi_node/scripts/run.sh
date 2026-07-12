@@ -405,6 +405,7 @@ aop_pipeline() {
     echo "  Coord dir   : ${coord}"
 
     # Wait for all workers to signal ready
+    # test
     echo "  Waiting for workers..."
     for i in $(seq 1 30); do
         local ready_count=0
