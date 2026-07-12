@@ -607,20 +607,32 @@ def _forward_shared_kv_prefill_attention(
     k = shared_key  # [S, Hkv, D]
     v = shared_value  # [S, Hkv, D]
 
-    # Create causal cross-attention mask.  Query position i can attend
-    # to KV positions [0, kv_len - q_len + i].  For sliding-window
-    # layers, additionally restrict to the last `sliding_window` tokens.
+    # Build a block-diagonal causal mask that respects per-request
+    # boundaries.  The flattened [num_tokens, S] batch concatenates
+    # requests; a single global causal mask would let row i of request r
+    # attend to KV columns belonging to request r' < r (cross-request
+    # leak).  We use seq_lens_list (per-request lengths, Q len == KV len
+    # for MTP draft prefill) to mask each request to its own KV block.
     S = k.shape[0]
-    offset = S - num_tokens
-    mask = torch.ones(num_tokens, S, dtype=q.dtype, device=q.device) * float("-inf")
-    for i in range(num_tokens):
-        window_start = (
-            max(0, i + offset - impl.sliding_window + 1)
-            if impl.sliding_window is not None and impl.sliding_window < S
-            else 0
-        )
-        causal_end = i + offset + 1
-        mask[i, window_start:causal_end] = 0
+    seq_lens = attn_metadata.seq_lens_list or [num_tokens]
+    mask = torch.full((num_tokens, S), float("-inf"), dtype=q.dtype, device=q.device)
+    q_off = 0
+    kv_off = 0
+    for req_len in seq_lens:
+        if req_len <= 0:
+            continue
+        # Within this request's block: query row j (0-indexed in the
+        # block) attends to KV columns [0, j] (causal), restricted to the
+        # sliding window if configured.
+        for j in range(req_len):
+            window_start = (
+                max(0, j - impl.sliding_window + 1)
+                if impl.sliding_window is not None and impl.sliding_window < req_len
+                else 0
+            )
+            mask[q_off + j, kv_off + window_start : kv_off + j + 1] = 0
+        q_off += req_len
+        kv_off += req_len
     attn_mask = mask
 
     # Handle GQA: expand KV heads to match Q heads.
@@ -696,6 +708,12 @@ def _get_shared_kv_from_block_table(
     # reads from the wrong pool.  Route each layer to its per-group block_table
     # via _kv_share_gid (set by _store_gids_on_impls) + _per_group_bt_ref
     # (the {gid: block_table} dict set by set_per_group_block_table).
+    # Per-group block-table routing: draft layers share KV with target
+    # layers that may be in DIFFERENT KV cache groups.  attn_metadata.block_tables
+    # is the common (gid=0) table; using it for layers whose target is in gid!=0
+    # reads from the wrong pool.  Route each layer to its per-group block_table
+    # via _kv_share_gid (set by _store_gids_on_impls) + _per_group_bt_ref
+    # (the {gid: block_table} dict set by set_per_group_block_table).
     _my_gid = getattr(impl, "_kv_share_gid", None)
     _per_group_bt = getattr(impl, "_per_group_bt_ref", None)
     _routed_bt = None
@@ -706,40 +724,22 @@ def _get_shared_kv_from_block_table(
     if block_table is None or not seq_lens:
         return None, None
 
-    try:
-        dense_key, dense_value = _gather_paged_kv_to_dense(
-            read_kc,
-            read_vc,
-            block_table,
-            seq_lens,
-            impl.num_kv_heads,
-            impl.head_size,
-        )
-        # Zero-value fallback: if the routed block_table gave all-zero KV
-        # (wrong pool), try the other groups' block_tables.  Reverse
-        # iteration prefers the global-attention group (highest gid).
-        _k_mean = dense_key.float().mean().item()
-        _per_group_bt = getattr(impl, "_per_group_bt_ref", None)
-        if abs(_k_mean) < 1e-6 and _per_group_bt is not None and len(_per_group_bt) > 0:
-            for _gid, _bt in reversed(list(_per_group_bt.items())):
-                try:
-                    _dk, _dv = _gather_paged_kv_to_dense(
-                        read_kc,
-                        read_vc,
-                        _bt,
-                        seq_lens,
-                        impl.num_kv_heads,
-                        impl.head_size,
-                    )
-                    _km = _dk.float().mean().item()
-                    if abs(_km) > 1e-6:
-                        dense_key, dense_value = _dk, _dv
-                        break
-                except Exception:
-                    continue
-        return dense_key, dense_value
-    except Exception:
-        return None, None
+    # Explicit gid -> block_table routing above is the intended path.  We
+    # deliberately do NOT probe other groups' block tables by reading KV
+    # tensor means: that would force an NPU->CPU sync (.item()) on the
+    # attention hot path, use a data-dependent zero/non-zero heuristic,
+    # and a broad `except Exception` that hides real routing/shape bugs.
+    # If the routed block table is wrong, fail loudly so the routing is
+    # fixed at the source rather than masked here.
+    dense_key, dense_value = _gather_paged_kv_to_dense(
+        read_kc,
+        read_vc,
+        block_table,
+        seq_lens,
+        impl.num_kv_heads,
+        impl.head_size,
+    )
+    return dense_key, dense_value
 
 
 def maybe_kv_share_prefill(
