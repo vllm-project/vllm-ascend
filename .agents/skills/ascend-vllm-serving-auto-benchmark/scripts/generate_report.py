@@ -107,22 +107,8 @@ def _parse_evalscope_summary_txt(summary_path: Path) -> list[ConcurrencyResult]:
     return results
 
 
-def _parse_evalscope_jsonl(jsonl_path: Path) -> list[ConcurrencyResult]:
-    """Parse evalscope result JSONL into ConcurrencyResult list."""
-    if not jsonl_path.exists():
-        return []
-
-    records: list[dict] = []
-    with open(jsonl_path) as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                records.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-
+def _parse_records(records: list[dict]) -> list[ConcurrencyResult]:
+    """Normalize evalscope records into ConcurrencyResult entries."""
     results: list[ConcurrencyResult] = []
     for rec in records:
         stats = rec.get("stats", rec)
@@ -173,6 +159,50 @@ def _parse_evalscope_jsonl(jsonl_path: Path) -> list[ConcurrencyResult]:
     return results
 
 
+def _parse_evalscope_jsonl(jsonl_path: Path) -> list[ConcurrencyResult]:
+    """Parse evalscope result JSONL into ConcurrencyResult list."""
+    if not jsonl_path.exists():
+        return []
+
+    records: list[dict] = []
+    with open(jsonl_path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+
+    return _parse_records(records)
+
+
+def _parse_evalscope_json(json_path: Path) -> list[ConcurrencyResult]:
+    """Parse evalscope JSON output into ConcurrencyResult list."""
+    if not json_path.exists():
+        return []
+
+    try:
+        data = json.loads(json_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return []
+
+    records: list[dict] = []
+    if isinstance(data, list):
+        records = [item for item in data if isinstance(item, dict)]
+    elif isinstance(data, dict):
+        for key in ("results", "records", "data"):
+            nested = data.get(key)
+            if isinstance(nested, list):
+                records = [item for item in nested if isinstance(item, dict)]
+                break
+        else:
+            records = [data]
+
+    return _parse_records(records)
+
+
 def _parse_evalscope_output_dir(results_dir: Path) -> list[ConcurrencyResult]:
     """Try multiple evalscope output formats."""
     # Try JSONL first
@@ -184,14 +214,9 @@ def _parse_evalscope_output_dir(results_dir: Path) -> list[ConcurrencyResult]:
     # Try JSON
     for pattern in ("*.json",):
         for p in results_dir.glob(pattern):
-            try:
-                data = json.loads(p.read_text())
-                if isinstance(data, list):
-                    for item in data:
-                        if "concurrency" in item or "parallel" in item:
-                            pass  # handled by jsonl parser above
-            except (json.JSONDecodeError, OSError):
-                pass
+            results = _parse_evalscope_json(p)
+            if results:
+                return results
     return []
 
 

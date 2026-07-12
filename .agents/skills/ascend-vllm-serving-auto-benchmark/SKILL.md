@@ -1,173 +1,138 @@
+---
+name: ascend-vllm-serving-auto-benchmark
+description: "Benchmark vLLM-Ascend serving on Ascend 910C, validate YAML configs, launch the server, run evalscope perf, and generate Markdown/CSV reports."
+disable-model-invocation: true
+---
+
 # ascend-vllm-serving-auto-benchmark
 
-Automated benchmark skill for vLLM-Ascend serving on Huawei Ascend 910C NPU. Launches vLLM serving, runs evalscope perf stress tests, and produces a complete Markdown/CSV performance report.
+## What this skill is for
 
-## When to invoke
+Use this skill when the user wants a reproducible serving benchmark for `vllm-ascend` on Ascend 910C:
 
-Use this skill when the user wants to:
-- Benchmark LLM serving performance on Ascend 910C NPU
-- Compare performance across different model configurations or parallelism settings
-- Generate a reproducible performance report for vllm-ascend
+- LLM serving performance benchmark / pressure test
+- compare TP / PP / model config variants
+- generate a report that can be attached to a PR, issue, or tuning note
 
-Trigger phrases: "benchmark", "pressure test", "性能测试", "压测", "ascend benchmark", "vllm-ascend serving 性能"
+Trigger phrases: `benchmark`, `pressure test`, `性能测试`, `压测`, `ascend benchmark`, `vllm-ascend serving 性能`
 
-## Prerequisites
+## Read order
 
-Before running, the system must have:
+1. Read this file first.
+2. If the user provides a YAML config, validate it with `scripts/validate_configs.py`.
+3. Run `scripts/run_benchmark.sh`.
+4. If report parsing looks wrong, inspect `scripts/generate_report.py`.
 
-1. **Hardware**: Huawei Ascend 910C NPU (Atlas 800T A2 or Atlas 800I A2/A3 series)
-2. **CANN**: >= 8.1.0 (recommend 9.0.0)
-3. **torch-npu**: matched to your PyTorch version
-4. **vllm-ascend**: installed (`pip install vllm-ascend` or from source)
-5. **evalscope[perf]**: installed (`pip install evalscope[perf] -U`)
-6. **Model weights**: downloaded locally or accessible via HuggingFace/ModelScope path
+## Required inputs
 
-## Inputs the user must supply
+| Parameter | Required | Notes |
+|-----------|----------|-------|
+| `model_path` | Yes, unless `config_file` provides it | Local path or model ID |
+| `model_name` | Yes, unless `config_file` provides it | Used in serving API and reports |
+| `config_file` | No | One of `configs/*.yaml` or a compatible YAML file |
 
-| Parameter | Required | Description |
-|-----------|----------|-------------|
-| `model_path` | Yes | Local path or HuggingFace/ModelScope model ID |
-| `model_name` | Yes | Short name for the model (used in reports and API) |
-| `tensor_parallel_size` | No | Number of NPU cards (default: 1 for 910C single card) |
-| `pipeline_parallel_size` | No | Pipeline parallel size (default: 1) |
-| `max_model_len` | No | Max context length (default: 8192) |
-| `dtype` | No | Weight dtype: `float16`, `bfloat16`, `auto` (default: `float16`) |
-| `quantization` | No | Quantization method: `w8a8`, `w4a16`, `None` (default: None) |
-| `port` | No | Server port (default: 5000) |
-| `parallel_levels` | No | Concurrency levels to test (default: `1 4 8 16 32 64`) |
-| `requests_per_level` | No | Requests per concurrency level (default: `10 40 80 160 320 640`) |
-| `input_tokens` | No | Input token length (default: 1024) |
-| `output_tokens` | No | Output token length (default: 512) |
-| `config_file` | No | Path to a YAML config file from `configs/` directory |
+Common optional inputs:
+
+- `tensor_parallel_size`
+- `pipeline_parallel_size`
+- `max_model_len`
+- `dtype`
+- `quantization`
+- `port`
+- `parallel_levels`
+- `requests_per_level`
+- `input_tokens`
+- `output_tokens`
+- `output_dir`
+
+## Preconditions
+
+Before running:
+
+1. Confirm the target machine is really an Ascend benchmark environment.
+2. Check `vllm-ascend`, `torch-npu`, and `evalscope[perf]` are installed.
+3. Confirm the model path exists or the model ID is accessible.
+4. Confirm the chosen port is free before server start.
 
 ## Workflow
 
-This skill runs in **five phases**:
+The implementation lives in `scripts/run_benchmark.sh` and should be used as the default execution path.
 
-### Phase 1 — Environment & Config Validation
-- Detect available NPU devices via `npu-smi info`
-- Validate model path exists
-- Validate config file if provided (via `scripts/validate_configs.py`)
-- Check evalscope and vllm-ascend installations
+### Phase 1: validate inputs and environment
 
-### Phase 2 — Launch vLLM-Ascend Server
-Start the serving endpoint:
-```bash
-ASCEND_RT_VISIBLE_DEVICES=0,1,...  \
-python -m vllm.entrypoints.openai.api_server \
-  --model <model_path> \
-  --served-model-name <model_name> \
-  --tensor-parallel-size <tp> \
-  --pipeline-parallel-size <pp> \
-  --max-model-len <max_len> \
-  --dtype <dtype> \
-  --port <port> \
-  --trust-remote-code
+- Run `npu-smi info`
+- Validate YAML via `scripts/validate_configs.py` when `config_file` is provided
+- Detect `vllm-ascend` and `evalscope`
+
+### Phase 2: launch vLLM-Ascend
+
+- Start exactly one serving process for this benchmark
+- Apply every `server.env` entry from YAML configs, not only a hand-picked subset
+- Preserve explicit CLI overrides such as `--npu-devices`, `--no-aclgraph`, and `--no-nz`
+
+### Phase 3: warm up
+
+- Default warm-up: 20 requests at `c=1`
+- Warm-up is a normal benchmark precondition and should happen before the measured run unless the user explicitly skips it
+
+### Phase 4: main evalscope benchmark
+
+- Keep concurrency levels and request counts fixed within a run
+- Prefer the current evalscope output directory flag when available
+- If the installed evalscope does not support an output flag, run it from the intended artifact directory instead of writing results into an ambiguous cwd
+
+### Phase 5: report generation
+
+Generate:
+
+- `benchmark_report.md`
+- `benchmark_results.csv`
+
+`scripts/generate_report.py` must handle both JSONL and JSON evalscope outputs.
+
+## Config rules
+
+YAML configs under `configs/` are the source of model-specific defaults.
+
+- `server.env` is authoritative for environment variables
+- `model.*`, `server.*`, `workload.*`, `benchmark.*`, and `sla.*` must stay consistent with `scripts/validate_configs.py`
+- CLI arguments may override config values for the current run
+
+## Failure handling
+
+- If server startup fails, surface the failure clearly and keep `server.log`
+- Do not silently skip report generation because a JSON file used a different shape than JSONL
+- Do not mix results from different NPU types in one report
+- Always record the exact server command and evalscope command used for the run
+
+## Output contract
+
+The final output directory should contain at least:
+
+```text
+<output_dir>/
+├── benchmark_report.md
+├── benchmark_results.csv
+├── evalscope_results/
+├── npu_info.txt
+├── server.log
+├── server_cmd.txt
+└── evalscope_cmd.txt
 ```
 
-Wait for server readiness by polling `/health` endpoint (max 300s).
+## Quick start
 
-### Phase 3 — Warm-up
-Run 20 warm-up requests at concurrency=1 before measuring:
-```bash
-evalscope perf \
-  --parallel 1 \
-  --number 20 \
-  --model <model_name> \
-  --url http://127.0.0.1:<port>/v1/chat/completions \
-  --api openai \
-  --dataset random \
-  --max-tokens <output_tokens> \
-  --min-tokens <output_tokens> \
-  --min-prompt-length <input_tokens> \
-  --max-prompt-length <input_tokens> \
-  --tokenizer-path <model_path>
-```
-
-### Phase 4 — Stress Test (evalscope perf)
-Run the main benchmark across all concurrency levels:
-```bash
-evalscope perf \
-  --parallel <parallel_levels> \
-  --number <requests_per_level> \
-  --model <model_name> \
-  --url http://127.0.0.1:<port>/v1/chat/completions \
-  --api openai \
-  --stream \
-  --dataset random \
-  --max-tokens <output_tokens> \
-  --min-tokens <output_tokens> \
-  --min-prompt-length <input_tokens> \
-  --max-prompt-length <input_tokens> \
-  --tokenizer-path <model_path>
-```
-
-Results are saved to `outputs/<timestamp>/<model_name>/`.
-
-### Phase 5 — Report Generation
-Call `scripts/generate_report.py` to produce:
-- `benchmark_report.md` — full Markdown report with tables and charts description
-- `benchmark_results.csv` — raw metrics for spreadsheet import
-
-## Output report structure
-
-The generated `benchmark_report.md` includes:
-
-1. **Environment Summary** — Hardware (NPU model, count), CANN version, vllm-ascend version, evalscope version
-2. **Model Configuration** — model path, TP/PP size, dtype, quantization, max_model_len
-3. **Workload Specification** — input/output token lengths, dataset type, request distribution
-4. **Performance Overview Table** — per-concurrency: RPS, success rate, throughput (tokens/s)
-5. **Latency Distribution Table** — per-concurrency: avg/P50/P90/P99 latency, TTFT, TPOT
-6. **Best Configuration Summary** — peak throughput point, best TTFT point, recommended concurrency
-7. **Fairness & Reproducibility** — exact server command, evalscope command, git commit hashes
-
-## Constraints & fairness rules
-
-- Always restart the server between different TP/PP configurations; never reuse a warm server across configs
-- Warm up before every measurement run
-- Record exact vllm-ascend git commit: `git -C $(pip show vllm-ascend | grep Location | awk '{print $2}')/vllm_ascend rev-parse HEAD`
-- Report NPU utilization if `npu-smi` is available
-- All concurrency levels must use identical model weights and tokenizer
-- Never compare results from different NPU types in the same report
-
-## Config files
-
-YAML configs in `configs/` encode model-specific defaults. The user can pass `--config_file configs/qwen2.5-7b-instruct.yaml` to skip specifying individual flags. See `configs/qwen2.5-7b-instruct.yaml` for the format.
-
-## Example invocations
-
-**Quick single-card benchmark:**
-```
+```text
 /ascend-vllm-serving-auto-benchmark
-model_path=/data/models/Qwen2.5-7B-Instruct
-model_name=Qwen2.5-7B-Instruct
+config_file=.agents/skills/ascend-vllm-serving-auto-benchmark/configs/qwen3-32b.yaml
 ```
 
-**Multi-card benchmark with custom config:**
-```
+```text
 /ascend-vllm-serving-auto-benchmark
-config_file=configs/deepseek-r1-7b.yaml
+model_path=/data/models/Qwen3.5-27B
+model_name=Qwen3.5-27B
 tensor_parallel_size=2
-```
-
-**Full custom benchmark:**
-```
-/ascend-vllm-serving-auto-benchmark
-model_path=/data/models/Qwen2.5-72B-Instruct
-model_name=Qwen2.5-72B-Instruct
-tensor_parallel_size=8
-max_model_len=16384
 dtype=bfloat16
-parallel_levels="1 8 16 32 64 128"
-requests_per_level="10 80 160 320 640 1280"
-input_tokens=2048
-output_tokens=1024
+parallel_levels="1 4 8 16 32 64"
+requests_per_level="10 40 80 160 320 640"
 ```
-
-## Handling failures
-
-- **Server fails to start**: Check CANN env vars (`source /usr/local/Ascend/ascend-toolkit/set_env.sh`), NPU visibility (`npu-smi info`), and available NPU memory
-- **OOM on NPU**: Reduce `--max-model-len` or increase `--tensor-parallel-size`
-- **evalscope not found**: Run `pip install evalscope[perf] -U`
-- **Low throughput / high latency**: Check if ACLGraph is enabled (`VLLM_ASCEND_ENABLE_ACLGRAPH=1`), ensure no CPU-NPU sync bottlenecks
-- **All requests fail**: Verify server health at `curl http://127.0.0.1:<port>/health`
