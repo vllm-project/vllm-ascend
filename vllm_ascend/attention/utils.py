@@ -611,28 +611,46 @@ def _forward_shared_kv_prefill_attention(
     # boundaries.  The flattened [num_tokens, S] batch concatenates
     # requests; a single global causal mask would let row i of request r
     # attend to KV columns belonging to request r' < r (cross-request
-    # leak).  We use seq_lens_list (per-request lengths, Q len == KV len
-    # for MTP draft prefill) to mask each request to its own KV block.
+    # leak).
+    #
+    # Per-request Q lengths come from actual_seq_lengths_q (cumulative,
+    # so diff to get per-request).  Per-request KV lengths come from
+    # seq_lens_list.  Q and KV lengths differ for cross-attention (MTP
+    # draft decode: Q=1 new token, KV=full sequence), so we must track
+    # them independently.
     S = k.shape[0]
-    seq_lens = attn_metadata.seq_lens_list or [num_tokens]
+    cum_q = attn_metadata.actual_seq_lengths_q
+    if cum_q and len(cum_q) > 1:
+        q_lens = [cum_q[i] - cum_q[i - 1] for i in range(1, len(cum_q))]
+    else:
+        q_lens = [num_tokens]
+    kv_lens = attn_metadata.seq_lens_list or [S]
+    # Pair Q and KV lengths per request; if counts mismatch (padding),
+    # zip stops at the shorter — both lists should have the same number
+    # of real requests.
     mask = torch.full((num_tokens, S), float("-inf"), dtype=q.dtype, device=q.device)
     q_off = 0
     kv_off = 0
-    for req_len in seq_lens:
-        if req_len <= 0:
+    for q_len, kv_len in zip(q_lens, kv_lens):
+        if q_len <= 0 or kv_len <= 0:
+            q_off += q_len
+            kv_off += kv_len
             continue
-        # Within this request's block: query row j (0-indexed in the
-        # block) attends to KV columns [0, j] (causal), restricted to the
-        # sliding window if configured.
-        for j in range(req_len):
+        # Query row j (0-indexed in this request's Q block) is the
+        # (kv_len - q_len + j)-th token of the full sequence.  It attends
+        # to KV columns [0, kv_len - q_len + j] (causal), restricted to
+        # the sliding window if configured.
+        offset = kv_len - q_len
+        for j in range(q_len):
+            causal_pos = offset + j  # position in the full sequence
             window_start = (
-                max(0, j - impl.sliding_window + 1)
-                if impl.sliding_window is not None and impl.sliding_window < req_len
+                max(0, causal_pos - impl.sliding_window + 1)
+                if impl.sliding_window is not None and impl.sliding_window < kv_len
                 else 0
             )
-            mask[q_off + j, kv_off + window_start : kv_off + j + 1] = 0
-        q_off += req_len
-        kv_off += req_len
+            mask[q_off + j, kv_off + window_start : kv_off + causal_pos + 1] = 0
+        q_off += q_len
+        kv_off += kv_len
     attn_mask = mask
 
     # Handle GQA: expand KV heads to match Q heads.
