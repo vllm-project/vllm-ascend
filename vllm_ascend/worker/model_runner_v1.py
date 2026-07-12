@@ -5146,14 +5146,25 @@ class NPUModelRunner(GPUModelRunner):
                     min_cg_attn_backend = attn_backend.__name__
 
         with update_pass_config(self):
-            cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
-                min_cg_support,
-                min_cg_attn_backend,
-                self.uniform_decode_query_len,
-                self.parallel_config.tensor_parallel_size,
-                self.kv_cache_config,
-                self.max_num_reqs,
-            )
+            if vllm_version_is("0.23.0"):
+                cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
+                    min_cg_support,
+                    min_cg_attn_backend,
+                    self.uniform_decode_query_len,
+                    self.parallel_config.tensor_parallel_size,
+                    self.kv_cache_config,
+                    self.max_num_reqs,
+                )
+            else:
+                cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
+                    min_cg_support,
+                    min_cg_attn_backend,
+                    self.uniform_decode_query_len,
+                    use_v2_model_runner=False,
+                    tensor_parallel_size=self.parallel_config.tensor_parallel_size,
+                    kv_cache_config=self.kv_cache_config,
+                    max_num_reqs=self.max_num_reqs,
+                )
             self.cudagraph_dispatcher.initialize_cudagraph_keys(
                 cudagraph_mode, self.uniform_decode_query_len
             )

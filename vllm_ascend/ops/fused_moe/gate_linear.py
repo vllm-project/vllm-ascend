@@ -21,6 +21,8 @@ import torch
 from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
 from vllm.model_executor.layers.linear import ReplicatedLinear
 
+from vllm_ascend.utils import vllm_version_is
+
 
 class AscendGateLinear(GateLinear):
     """Ascend replacement for vLLM GateLinear.
@@ -41,15 +43,24 @@ class AscendGateLinear(GateLinear):
         force_fp32_compute: bool = False,
         prefix: str = "",
     ):
-        super().__init__(
-            input_size=input_size,
-            output_size=output_size,
-            bias=bias,
-            params_dtype=torch.float32,
-            out_dtype=out_dtype,
-            force_fp32_compute=True,
-            prefix=prefix,
-        )
+        if vllm_version_is("0.23.0"):
+            super().__init__(
+                input_size=input_size,
+                output_size=output_size,
+                bias=bias,
+                params_dtype=torch.float32,
+                out_dtype=out_dtype,
+                force_fp32_compute=True,
+                prefix=prefix,
+            )
+        else:
+            super().__init__(
+                input_size=input_size,
+                output_size=output_size,
+                bias=bias,
+                out_dtype=out_dtype,
+                prefix=prefix,
+            )
 
     def forward(self, x: torch.Tensor):
         # TODO: Remove this workaround after upgrading to a vLLM version that
