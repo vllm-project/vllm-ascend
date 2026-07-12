@@ -1076,20 +1076,33 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.ctkv_scale = torch.tensor([1], dtype=act_dtype, device=device)
         self.q_nope_scale = torch.tensor([1], dtype=act_dtype, device=device)
 
-        # On KV consumers (decode-only) MLAPO uses the transformed weights built above;
-        # the original fused_qkv_a_proj/q_proj weights and quant params are no longer
-        # referenced, so drop them to save memory.
+        # On KV consumers (decode-only) the MLAPO decode fast path uses only the
+        # transformed weights built above; the original fused_qkv_a_proj/q_proj
+        # weights and quant params are not referenced by that fast path.
+        # Offload them to CPU (instead of freeing to None) so that NPU memory is
+        # still saved during normal decode, but they can be lazily restored in
+        # _mla_preprocess when D has to local-prefill (recompute) -- e.g. when a
+        # request arrives without valid remote KV (incorrectly parametrized
+        # kv_transfer_params, see issue #11882). Freeing to None crashed the
+        # worker with UndefinedTensorImpl in that case.
         if (
             self.vllm_config.kv_transfer_config is not None
             and self.vllm_config.kv_transfer_config.is_kv_consumer
             and self.vllm_config.scheduler_config.max_num_batched_tokens <= MLAPO_MAX_SUPPORTED_TOKENS
         ):
-            self.fused_qkv_a_proj.weight = None  # type: ignore[union-attr]
-            self.fused_qkv_a_proj.deq_scale = None  # type: ignore[union-attr]
-            self.fused_qkv_a_proj.quant_bias = None  # type: ignore[union-attr]
-            self.q_proj.weight = None
-            self.q_proj.deq_scale = None
-            self.q_proj.quant_bias = None
+            # weight/deq_scale are nn.Parameter and quant_bias may be None on
+            # non-zero tp ranks, so rebind .data in place (assigning a plain
+            # Tensor to a Parameter slot would raise TypeError) and skip None.
+            for _layer in (self.fused_qkv_a_proj, self.q_proj):
+                for _name in ("weight", "deq_scale", "quant_bias"):
+                    _t = getattr(_layer, _name, None)
+                    if _t is None:
+                        continue
+                    if isinstance(_t, torch.nn.Parameter):
+                        _t.data = _t.data.cpu()
+                    else:
+                        setattr(_layer, _name, _t.cpu())
+            self._prefill_weights_offloaded = True
             torch.npu.empty_cache()
 
     def _process_weights_for_fused_mlapo_a5(self, act_dtype: torch.dtype):
@@ -1647,6 +1660,24 @@ class AscendMLAImpl(MLAAttentionImpl):
         )
 
     def _mla_preprocess(self, layer_name, hidden_states, kv_cache, attn_metadata, need_gather_q_kv):
+        # Lazily restore the original prefill weights to NPU if they were offloaded
+        # to CPU by _process_weights_for_fused_mlapo. _mla_preprocess is only reached
+        # when D must local-prefill (recompute) or when the MLAPO decode fast path
+        # does not apply (e.g. num_prefills > 0) -- exactly when fused_qkv_a_proj and
+        # q_proj are needed again. Restored once per layer; afterwards the weights
+        # stay on NPU.
+        if getattr(self, "_prefill_weights_offloaded", False):
+            device = hidden_states.device
+            for _layer in (self.fused_qkv_a_proj, self.q_proj):
+                for _name in ("weight", "deq_scale", "quant_bias"):
+                    _t = getattr(_layer, _name, None)
+                    if _t is None:
+                        continue
+                    if isinstance(_t, torch.nn.Parameter):
+                        _t.data = _t.data.to(device)
+                    else:
+                        setattr(_layer, _name, _t.to(device))
+            self._prefill_weights_offloaded = False
         # MLA Preprocess:
         # 1. Perform fused_qkv_a_proj and q_a_layernorm to obtain q_c and kv_no_split
         # or
