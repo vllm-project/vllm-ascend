@@ -1810,9 +1810,12 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     # approximately less than 100 streams
     CP_ADDITIONAL_STREAM_NUM = 100
 
-    # Store original configuration and temporarily clear it
+    # Keep the original capture sizes untouched unless we actually need to
+    # sample a smaller subset below. Previously this cleared the field to
+    # None up front, which lost the original sizes on the early-return and
+    # no-sampling fall-through paths (see review by Alex-stack-hub).
     compilation_config = vllm_config.compilation_config
-    original_sizes, compilation_config.cudagraph_capture_sizes = (compilation_config.cudagraph_capture_sizes, None)
+    original_sizes = compilation_config.cudagraph_capture_sizes
 
     # Calculate parallel configuration factor
     if not vllm_config.model_config:
