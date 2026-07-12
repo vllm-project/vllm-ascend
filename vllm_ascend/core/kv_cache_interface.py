@@ -74,7 +74,12 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             assert qk_rope_head_dim == 0
 
             ckv_bytes = num_heads_per_page * ckv_head_dim * get_dtype_size(self.c8_k_cache_dtype)
-            qli_bytes = num_heads_per_page * index_head_dim * get_dtype_size(self.c8_k_cache_dtype)
+            qli_bytes = (
+                num_heads_per_page
+                * index_head_dim
+                * self.sfa_dcp_replicated_indexer_size
+                * get_dtype_size(self.c8_k_cache_dtype)
+            )
             qli_scale_bytes = (
                 num_heads_per_page * self.sfa_dcp_replicated_indexer_size * get_dtype_size(self.c8_k_scale_cache_dtype)
                 if index_head_dim > 0
@@ -116,7 +121,11 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
                     None,  # kv_cache[3] does not exist for Sparse C8
                 )
 
-            qli_virtual = index_k_head_dim * get_dtype_size(self.c8_k_cache_dtype)
+            qli_virtual = (
+                index_k_head_dim
+                * self.sfa_dcp_replicated_indexer_size
+                * get_dtype_size(self.c8_k_cache_dtype)
+            )
             scale_virtual = self.sfa_dcp_replicated_indexer_size * get_dtype_size(self.c8_k_scale_cache_dtype)
             total_virtual_head_dim = ckv_virtual + qli_virtual + scale_virtual
 
