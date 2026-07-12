@@ -1096,7 +1096,6 @@ class TestAscendSFACPImpl(TestBase):
         self.assertIsNotNone(result)
         self.assertEqual(result.shape[0], 5)
 
-
     @patch_distributed_groups(dcp_size=1, pcp_size=1, needs_mocks=False)
     def test_execute_sparse_flash_attention_process_decode_and_prefill_no_pcp(self):
         self.impl.pcp_size = 1
@@ -1489,11 +1488,14 @@ class TestAscendSFACPImpl(TestBase):
 
 
 class TestAscendSFADCPImpl(TestBase):
-    def test_execute_sparse_flash_attention_process_uses_device_operator_lse(self):
+    def test_execute_sparse_flash_attention_process_uses_c8_device_operator_lse(self):
         impl = AscendSFADCPImpl.__new__(AscendSFADCPImpl)
         impl.dcp_group = MagicMock()
         impl.dcp_size = 2
         impl.enable_dsa_cp = False
+        impl.use_sparse_c8_sfa = True
+        impl.qk_rope_head_dim = 4
+        impl.sfa_qsfa_tile_size = 128
         impl._remap_sparse_indices = MagicMock(side_effect=lambda x: x)
         merged_output = torch.randn(2, 2, 8)
         impl._merge_dcp_outputs = MagicMock(return_value=merged_output)
@@ -1501,10 +1503,7 @@ class TestAscendSFADCPImpl(TestBase):
         ql_nope = torch.randn(2, 2, 8)
         q_pe = torch.randn(2, 2, 4)
         impl._finish_all_gather_query_for_dcp = MagicMock(side_effect=lambda _ctx: (ql_nope, q_pe))
-        kv_cache = (
-            torch.randn(4, 1, 1, 8),
-            torch.randn(4, 1, 1, 4),
-        )
+        kv_cache = (torch.empty(4, 1, 1, 16, dtype=torch.int8),)
         topk_indices = torch.zeros(2, 1, dtype=torch.int32)
         actual_seq_lengths_query = torch.tensor([2], dtype=torch.int32)
         actual_seq_lengths_key = torch.tensor([4], dtype=torch.int32)
@@ -1538,6 +1537,9 @@ class TestAscendSFADCPImpl(TestBase):
         self.assertIs(result, merged_output)
         call_args = mock_execute_sfa.call_args.args
         call_kwargs = mock_execute_sfa.call_args.kwargs
+        self.assertTrue(call_args[0].use_sparse_c8_sfa)
+        self.assertEqual(len(call_args[3]), 1)
+        self.assertEqual(call_args[3][0].dtype, torch.int8)
         self.assertIs(call_args[7], dcp_seq_lens)
         self.assertIs(call_kwargs["block_table"], dcp_block_table)
         self.assertEqual(call_kwargs["sparse_mode"], 0)

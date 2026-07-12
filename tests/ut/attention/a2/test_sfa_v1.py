@@ -155,15 +155,18 @@ class TestAscendSFADeviceOperator(TestBase):
         softmax_max = torch.ones(1, 3, 4)
         softmax_sum = torch.full((1, 3, 4), 3.0)
 
-        with patch.object(
-            torch.ops._C_ascend,
-            "npu_kv_quant_sparse_flash_attention",
-            create=True,
-            return_value=(attn_output, softmax_max, softmax_sum),
-        ) as mock_qsfa, patch(
-            "vllm_ascend.device.device_op.torch_npu.npu_kv_quant_sparse_flash_attention",
-            create=True,
-            side_effect=AssertionError("C8 SFA with LSE must use the custom op"),
+        with (
+            patch.object(
+                torch.ops._C_ascend,
+                "npu_kv_quant_sparse_flash_attention",
+                create=True,
+                return_value=(attn_output, softmax_max, softmax_sum),
+            ) as mock_qsfa,
+            patch(
+                "vllm_ascend.device.device_op.torch_npu.npu_kv_quant_sparse_flash_attention",
+                create=True,
+                side_effect=AssertionError("C8 SFA with LSE must use the custom op"),
+            ),
         ):
             output, softmax_lse = DeviceOperator.execute_sparse_flash_attention_process(
                 impl,
