@@ -3123,19 +3123,27 @@ class MooncakeConnectorWorker:
         return num_d_block_heads // num_p_block_heads
 
     def _get_attention_group_num_key_value_heads(self, group_spec: dict[str, Any]) -> int:
+        def to_global_num_heads(local_num_heads: int) -> int:
+            if "MLA" in group_spec.get("kv_cache_spec_type", ""):
+                return local_num_heads
+            # FullAttentionSpec stores the rank-local head count after TP
+            # sharding. Recover the global count so P and D derive the same
+            # pull mapping when their TP sizes differ.
+            return min(local_num_heads * self.tp_size, self.num_key_value_heads)
+
         kv_cache_spec = group_spec.get("kv_cache_spec", {})
         if isinstance(kv_cache_spec, dict):
             for key in ("num_kv_heads", "num_key_value_heads"):
                 num_key_value_heads = kv_cache_spec.get(key)
                 if isinstance(num_key_value_heads, int):
-                    return num_key_value_heads
+                    return to_global_num_heads(num_key_value_heads)
             for spec in kv_cache_spec.values():
                 if not isinstance(spec, dict):
                     continue
                 for key in ("num_kv_heads", "num_key_value_heads"):
                     num_key_value_heads = spec.get(key)
                     if isinstance(num_key_value_heads, int):
-                        return num_key_value_heads
+                        return to_global_num_heads(num_key_value_heads)
         return self.num_key_value_heads
 
     def _get_attention_group_remote_rank(
