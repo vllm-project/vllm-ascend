@@ -22,7 +22,6 @@ Qwen3-Next.md
 Qwen3-Omni-30B-A3B-Thinking.md
 Qwen3.5-27B.md
 Qwen3.5-397B-A17B.md
-Qwen3.6-35B-A3B.md
 DeepSeek-V3.1.md
 DeepSeek-V3.2.md
 DeepSeek-V4-Flash.md
@@ -38,6 +37,7 @@ MiniMax-M2.5.md
 Hunyuan-A13B-Instruct.md
 Hy3-preview.md
 Minitron-8B-Base.md
+Phi-4-mini-instruct.md
 LLaVA-OneVision-Qwen2-0.5B-OV.md
 gpt-oss-120b.md
 Mixtral-8x7B-Instruct-v0.1.md
