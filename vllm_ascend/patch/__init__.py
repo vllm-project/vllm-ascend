@@ -1138,3 +1138,22 @@
 #       runner and can rely on upstream's default enablement heuristics
 #       (model architecture, Triton, feature checks) without crashes or
 #       degraded functionality.
+#
+# ** 31. File: platform/patch_modelscope_hub_api.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.transformers_utils.utils.modelscope_list_repo_files`
+#    Why:
+#       Modelscope v1.38.0 refactored its Hub layer, delegating to
+#       modelscope-hub as a compat shim. LegacyHubApi.get_model_files()
+#       no longer accepts the `revision` parameter, which breaks
+#       vLLM's list_repo_files() when VLLM_USE_MODELSCOPE is True.
+#    How:
+#       Monkey-patch modelscope_list_repo_files() to detect whether
+#       get_model_files() accepts `revision` via inspect.signature()
+#       at import time, and conditionally pass the argument.
+#    Related PR (if no, explain why):
+#       No upstream PR yet. This is a vllm-ascend workaround until
+#       upstream vLLM supports modelscope>=1.38.
+#    Future Plan:
+#       Remove this patch when upstream vLLM adapts its ModelScope
+#       integration for the modelscope-hub compat API.
