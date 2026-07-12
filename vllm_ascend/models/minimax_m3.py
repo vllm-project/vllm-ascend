@@ -38,7 +38,6 @@ from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
-    tensor_model_parallel_all_reduce,
 )
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.attention import Attention
@@ -142,7 +141,7 @@ def _is_moe_layer(config: PretrainedConfig, layer_idx: int) -> bool:
 def _deferred_tp_all_reduce(hidden_states: torch.Tensor) -> torch.Tensor:
     if get_tensor_model_parallel_world_size() == 1:
         return hidden_states
-    return tensor_model_parallel_all_reduce(hidden_states)
+    return torch.ops.vllm.maybe_pad_and_reduce(hidden_states)
 
 
 def _get_text_config(vllm_config: VllmConfig) -> PretrainedConfig:
