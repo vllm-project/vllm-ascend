@@ -299,6 +299,46 @@ class TestKVCacheSendingThread(unittest.TestCase):
 
 
 class TestMooncakeTransferGroups(unittest.TestCase):
+    def test_attention_group_heads_are_globalized_for_unequal_pd_tp(self):
+        decode_worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+        decode_worker.tp_size = 2
+        decode_worker.num_key_value_heads = 8
+        mla_group = {
+            "kv_cache_spec_type": "AscendMLAAttentionSpec",
+            "kv_cache_spec": {"num_kv_heads": 1},
+        }
+        full_attention_decode_group = {
+            "kv_cache_spec_type": "FullAttentionSpec",
+            "kv_cache_spec": {"num_kv_heads": 4},
+        }
+
+        self.assertEqual(decode_worker._get_attention_group_num_key_value_heads(mla_group), 1)
+        self.assertEqual(
+            decode_worker._get_attention_group_num_key_value_heads(full_attention_decode_group),
+            8,
+        )
+        self.assertEqual(
+            decode_worker._get_attention_group_num_need_pulls_for_decode_tp(full_attention_decode_group, 8, 2),
+            4,
+        )
+
+        prefill_worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+        prefill_worker.tp_size = 8
+        prefill_worker.num_key_value_heads = 8
+        full_attention_prefill_group = {
+            "kv_cache_spec_type": "FullAttentionSpec",
+            "kv_cache_spec": {"num_kv_heads": 1},
+        }
+
+        self.assertEqual(
+            prefill_worker._get_attention_group_num_key_value_heads(full_attention_prefill_group),
+            8,
+        )
+        self.assertEqual(
+            prefill_worker._get_attention_group_num_need_pulls_for_decode_tp(full_attention_prefill_group, 8, 2),
+            4,
+        )
+
     def test_build_kv_group2layeridx_splits_uniform_group_by_kv_heads(self):
         mla_spec = FullAttentionSpec(
             block_size=16,
@@ -323,6 +363,8 @@ class TestMooncakeTransferGroups(unittest.TestCase):
 
         worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
         worker.vllm_config = MockVllmConfig()
+        worker.tp_size = 1
+        worker.num_key_value_heads = 8
         worker.total_layers = 32
         worker.kv_cache_config = MockKVCacheConfig(
             kv_cache_groups=[
