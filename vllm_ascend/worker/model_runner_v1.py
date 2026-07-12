@@ -2436,19 +2436,21 @@ class NPUModelRunner(GPUModelRunner):
         # Only Gemma4 MTP reads the target KV cache and waits on this event;
         # gate the record side on the drafter type so Eagle/DFlash/Medusa/
         # Ngram drafts don't pay the per-step event record + attr assign cost.
-        _is_gemma4_drafter = False
-        if hasattr(self, 'drafter') and self.drafter is not None:
+        if (
+            _target_is_fdo
+            and getattr(self, "drafter", None) is not None
+        ):
             from vllm_ascend.spec_decode.gemma4_proposer import (
                 AscendGemma4Proposer,
             )
-            _is_gemma4_drafter = isinstance(self.drafter, AscendGemma4Proposer)
-        if _target_is_fdo and _is_gemma4_drafter:
-            # Reuse a single event across steps instead of allocating one per
-            # forward on the hot path, to avoid NPU event resource pressure.
-            if not hasattr(self, "_target_done_event"):
-                self._target_done_event = torch.npu.Event()
-            self._target_done_event.record()
-            self.drafter._target_done_event = self._target_done_event
+            if isinstance(self.drafter, AscendGemma4Proposer):
+                # Reuse a single event across steps instead of allocating one
+                # per forward on the hot path, to avoid NPU event resource
+                # pressure.
+                if not hasattr(self, "_target_done_event"):
+                    self._target_done_event = torch.npu.Event()
+                self._target_done_event.record()
+                self.drafter._target_done_event = self._target_done_event
         with record_function_or_nullcontext("post process"):
             aux_hidden_states = None
             if self.use_aux_hidden_state_outputs:
