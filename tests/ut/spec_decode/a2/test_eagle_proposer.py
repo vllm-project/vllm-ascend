@@ -4023,6 +4023,8 @@ class TestEagleProposerSetInputsFirstPass:
         )
 
         proposer.parallel_drafting_token_id = -2
+        assert proposer.parallel_drafting_hidden_state_tensor is not None
+        proposer.parallel_drafting_hidden_state_tensor.zero_()
         parallel_drafting_hs = proposer.parallel_drafting_hidden_state_tensor
 
         mock_kv_cache_spec = MagicMock()
