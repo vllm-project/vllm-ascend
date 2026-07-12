@@ -454,6 +454,32 @@ else:
             # so only real MoE layers on this rank are registered.
             VllmEplbAdaptor.register_layer(self)
 
+        @property
+        def local_num_experts(self) -> int:
+            """Number of physical experts managed by this EPLB layer."""
+            return self.moe_config.num_local_experts
+
+        @property
+        def ep_rank(self) -> int:
+            return self.moe_config.ep_rank
+
+        def update_expert_map(self, new_expert_map: torch.Tensor) -> None:
+            """Update both the runner and routed-expert map references."""
+            self._expert_map = new_expert_map
+            self.routed_experts.expert_map_manager._expert_map = new_expert_map
+
+        def get_log2phy_map(self) -> torch.Tensor | None:
+            return self.log2phy
+
+        def clear_moe_load(self) -> None:
+            self.moe_load.zero_()
+            if self.multi_stage:
+                self.load_counter.zero_()
+
+        def get_eplb_parameter(self, name: str):
+            """Return an expert parameter from the refactored weight owner."""
+            return getattr(self.routed_experts, name)
+
         def _validate_shared_expert_consistency(self):
             """Validate that split shared expert computation matches integrated computation."""
             test_input = (

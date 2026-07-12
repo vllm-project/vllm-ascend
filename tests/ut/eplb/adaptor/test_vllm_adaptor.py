@@ -1,4 +1,5 @@
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -101,6 +102,41 @@ class TestVllmAdaptor(unittest.TestCase):
         self.assertEqual(adaptor.num_moe_layers, 1)
         self.assertEqual(adaptor.num_local_experts, 4)
         self.assertEqual(adaptor.ep_rank, 0)
+
+    @patch("torch.empty_like", return_value=torch.zeros(16, 32))
+    @patch("vllm_ascend.eplb.adaptor.vllm_adaptor.get_ascend_config")
+    def test_refactored_runner_reads_weights_from_routed_experts(self, mock_get_config, mock_empty_like):
+        mock_get_config.return_value = SimpleNamespace(enable_fused_mc2=1)
+        VllmEplbAdaptor._registered_moe_layers = []
+
+        class RefactoredRunner(SimpleNamespace):
+            def get_eplb_parameter(self, name):
+                return getattr(self.routed_experts, name)
+
+        w13_weight_list = [torch.randn(2, 2) for _ in range(2)]
+        w2_weight_list = [torch.randn(2, 2) for _ in range(2)]
+        runner = RefactoredRunner(
+            local_num_experts=2,
+            ep_rank=0,
+            quant_type=QuantType.NONE,
+            routed_experts=SimpleNamespace(
+                w13_weight_list=w13_weight_list,
+                w2_weight_list=w2_weight_list,
+            ),
+            moe_load=torch.zeros(2),
+            global_expert_map=torch.arange(8).reshape(2, 4),
+            get_log2phy_map=MagicMock(return_value=torch.arange(4)),
+        )
+        VllmEplbAdaptor.register_layer(runner)
+
+        model = MagicMock()
+        model.quant_config = None
+        model.config.first_k_dense_replace = 0
+        del model.language_model
+        adaptor = VllmEplbAdaptor(model)
+
+        self.assertIs(adaptor.expert_param_per_layer[0][0][0], w13_weight_list[0])
+        self.assertIs(adaptor.expert_param_per_layer[0][0][1], w2_weight_list[0])
 
     @patch("vllm_ascend.eplb.adaptor.vllm_adaptor.get_ascend_config")
     def test_init_mixed_quant_type_per_layer(self, mock_get_config):
