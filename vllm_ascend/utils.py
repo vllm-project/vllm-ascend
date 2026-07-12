@@ -582,6 +582,13 @@ def _patch_get_config_hf_overrides():
 
     from vllm.config.model import ModelConfig as _ModelConfig
 
+    # Idempotency guard: if adapt_patch() is called more than once (e.g.
+    # reload or repeated registration), don't re-wrap __post_init__ — a
+    # double wrap would capture the already-patched function as _orig and
+    # apply hf_overrides twice.
+    if getattr(_ModelConfig.__post_init__, "_ascend_hf_overrides_patched", False):
+        return
+
     _orig_post_init = _ModelConfig.__post_init__
 
     def _patched_post_init(self, *args, **kwargs):
@@ -602,6 +609,7 @@ def _patch_get_config_hf_overrides():
             self._architecture = arch
         return result
 
+    _patched_post_init._ascend_hf_overrides_patched = True  # type: ignore[attr-defined]
     _ModelConfig.__post_init__ = _patched_post_init
     _logger.info("vllm_ascend: patched ModelConfig.__post_init__ for hf_config_override fix")
 
