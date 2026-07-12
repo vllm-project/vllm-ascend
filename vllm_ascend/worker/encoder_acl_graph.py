@@ -19,7 +19,6 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from enum import Enum
 from typing import Any
 
 import torch
@@ -88,10 +87,7 @@ class EncoderForwardContext:
 
     token_budget: int | None = None
     capturing: bool = False
-    capture_layer_cursor: int = 0
     cu_seqlens_cpu: torch.Tensor | None = None
-    cu_window_seqlens_cpu: torch.Tensor | None = None
-    sequence_lengths_cpu: torch.Tensor | None = None
 
 
 _context = EncoderForwardContext()
@@ -107,8 +103,6 @@ def _reset_encoder_forward_context() -> None:
     _context.token_budget = None
     _context.capturing = False
     _context.cu_seqlens_cpu = None
-    _context.cu_window_seqlens_cpu = None
-    _context.sequence_lengths_cpu = None
 
 
 @contextmanager
@@ -117,8 +111,6 @@ def set_encoder_forward_context(
     capturing: bool,
     *,
     cu_seqlens_cpu: torch.Tensor | None = None,
-    cu_window_seqlens_cpu: torch.Tensor | None = None,
-    sequence_lengths_cpu: torch.Tensor | None = None,
 ):
     """Enter encoder graph replay (FIA host args): callers must pass lengths each time.
 
@@ -129,9 +121,6 @@ def set_encoder_forward_context(
     _context.token_budget = token_budget
     _context.capturing = capturing
     _context.cu_seqlens_cpu = cu_seqlens_cpu
-    _context.cu_window_seqlens_cpu = cu_window_seqlens_cpu
-    _context.sequence_lengths_cpu = sequence_lengths_cpu
-    _context.capture_layer_cursor = 0
     try:
         yield _context
     finally:
@@ -139,91 +128,37 @@ def set_encoder_forward_context(
 
 
 # ---------------------------------------------------------------------------
-# Shared FIA actual_seq_lengths helpers (eager / capture / replay)
+# FIA actual_seq_lengths (cu_seqlens -> list[int])
 # ---------------------------------------------------------------------------
 
 
-def _align_fia_endpoints_to_num_tokens(endpoints: list[int], num_tokens: int) -> list[int]:
-    """Common post-process for both length formats before FIA ``actual_seq_lengths``.
+def maybe_compute_actual_seq_lengths(
+    num_query_tokens: int,
+    cu_seqlens: torch.Tensor,
+) -> tuple[list[int], list[int]]:
+    """Align FIA ``actual_seq_lengths`` for eager, capture, and replay from ``cu_seqlens``.
 
-    CUMULATIVE and PER_SEQUENCE helpers only perform format conversion; this function
-    is the sole place that trims padding, clamps to the token budget, enforces
-    monotonicity, and ensures the terminal endpoint equals ``num_tokens``.
+    Converts the cumulative device tensor to host ``list[int]`` in one step, drops the
+    leading zero format marker, and ensures the terminal endpoint equals ``num_query_tokens``.
     """
-    # 1. Trim trailing zeros (prefix-sum budget padding).
-    trimmed = list(endpoints)
-    while trimmed and trimmed[-1] == 0:
-        trimmed.pop()
-    endpoints = trimmed
+    flat = cu_seqlens.detach().cpu().view(-1).tolist()
+    actual = flat[1:] if flat else flat
 
-    # 2. Empty token budget.
-    if num_tokens <= 0:
-        return [0]
+    if num_query_tokens <= 0:
+        return [0], [0]
 
-    # 3. Filter non-positive, clamp at num_tokens, enforce strict monotonicity.
     filtered: list[int] = []
-    for end in endpoints:
+    for end in actual:
         if end <= 0:
             continue
-        if end > num_tokens:
+        if end > num_query_tokens:
             break
         if not filtered or end > filtered[-1]:
             filtered.append(end)
 
-    # 4. Ensure terminal endpoint equals num_tokens.
-    if not filtered or filtered[-1] != num_tokens:
-        filtered.append(num_tokens)
-    return filtered
-
-
-def _cumulative_buffer_to_fia_endpoints(buffer: torch.Tensor) -> list[int]:
-    """Convert a cumulative-length buffer to raw FIA endpoint list (format only).
-
-    Input is ``cu_seqlens`` / ``cu_window_seqlens`` style: leading 0 is a format
-    marker, not a sequence boundary. Output may contain trailing padding zeros and
-    need not end at the token budget — callers run ``_align_fia_endpoints_to_num_tokens``.
-    """
-    flat = buffer.detach().cpu().view(-1).tolist()
-    return flat[1:] if flat else flat
-
-
-def _per_sequence_lengths_to_fia_endpoints(buffer: torch.Tensor) -> list[int]:
-    """Convert a per-sequence length buffer to raw cumulative endpoints (format only).
-
-    Zero slots denote unused batch padding and are excluded before cumsum. Output
-    need not end at the token budget — callers run ``_align_fia_endpoints_to_num_tokens``.
-    """
-    valid = buffer.detach().cpu().view(-1)
-    valid = valid[valid != 0]
-    return valid.cumsum(dim=0).to(torch.int64).tolist()
-
-
-class FIALengthFormat(Enum):
-    CUMULATIVE = "cumulative"
-    PER_SEQUENCE = "per_sequence"
-
-
-@dataclass(frozen=True)
-class FIAActualSeqLengthsInput:
-    """Host-side encoder metadata buffer and its layout format for FIA ``actual_seq_lengths``."""
-
-    format: FIALengthFormat
-    buffer: torch.Tensor
-
-
-def build_fia_actual_seq_lengths(
-    *,
-    num_query_tokens: int,
-    length_input: FIAActualSeqLengthsInput,
-) -> tuple[list[int], list[int]]:
-    """Build aligned FIA ``actual_seq_lengths`` for eager, capture, and replay."""
-    if length_input.format is FIALengthFormat.PER_SEQUENCE:
-        actual = _per_sequence_lengths_to_fia_endpoints(length_input.buffer)
-    else:
-        actual = _cumulative_buffer_to_fia_endpoints(length_input.buffer)
-
-    aligned = _align_fia_endpoints_to_num_tokens(actual, num_query_tokens)
-    return aligned, aligned
+    if not filtered or filtered[-1] != num_query_tokens:
+        filtered.append(num_query_tokens)
+    return filtered, filtered
 
 
 # ---------------------------------------------------------------------------
@@ -231,59 +166,11 @@ def build_fia_actual_seq_lengths(
 # ---------------------------------------------------------------------------
 
 
-def _maybe_compute_actual_seq_lengths(
-    *,
-    num_query_tokens: int,
-    uses_seq_len_host: bool,
-    vit_layer_idx: int,
-    fullatt_block_indexes: set[int] | frozenset[int] | None,
-) -> tuple[list[int], list[int]]:
-    context = get_encoder_forward_context()
-    if uses_seq_len_host:
-        if context.sequence_lengths_cpu is None:
-            raise RuntimeError("context.sequence_lengths_cpu is None during encoder replay.")
-        length_input = FIAActualSeqLengthsInput(
-            FIALengthFormat.PER_SEQUENCE,
-            buffer=context.sequence_lengths_cpu,
-        )
-    elif fullatt_block_indexes is not None:
-        if vit_layer_idx in fullatt_block_indexes:
-            if context.cu_seqlens_cpu is None:
-                raise RuntimeError("context.cu_seqlens_cpu is None during encoder replay.")
-            length_input = FIAActualSeqLengthsInput(
-                FIALengthFormat.CUMULATIVE,
-                buffer=context.cu_seqlens_cpu,
-            )
-        else:
-            if context.cu_window_seqlens_cpu is None:
-                raise RuntimeError("context.cu_window_seqlens_cpu is None during encoder replay.")
-            length_input = FIAActualSeqLengthsInput(
-                FIALengthFormat.CUMULATIVE,
-                buffer=context.cu_window_seqlens_cpu,
-            )
-    else:
-        if context.cu_seqlens_cpu is None:
-            raise RuntimeError("context.cu_seqlens_cpu is None during encoder replay.")
-        length_input = FIAActualSeqLengthsInput(
-            FIALengthFormat.CUMULATIVE,
-            buffer=context.cu_seqlens_cpu,
-        )
-    return build_fia_actual_seq_lengths(
-        num_query_tokens=num_query_tokens,
-        length_input=length_input,
-    )
-
-
 def update_encoder_graph_params(
     update_stream: torch.npu.Stream,
     token_budget: int,
-    *,
-    fullatt_block_indexes: set[int] | frozenset[int] | None = None,
 ) -> None:
     """Re-bind fused infer attention host tensors inside the encoder NPUGraph (parallel to LLM path).
-
-    Qwen2.5-VL: layers listed in ``fullatt_block_indexes`` use ``cu_seqlens`` host endpoints;
-    others use ``cu_window_seqlens``. Those layouts are **not** baked at capture — only here.
 
     This deliberately bypasses :class:`AttentionBackend` — ViT attention is not registered there — but reuses
     the same ``graph_task_update_{begin,end}`` + ``ExternalEvent`` ordering pattern as
@@ -315,8 +202,6 @@ def update_encoder_graph_params(
                 block_table,
                 attn_mask,
                 block_size,
-                uses_sequence_lengths_host,
-                vit_layer_idx,
                 num_kv_heads,
                 num_heads,
                 scale,
@@ -325,11 +210,11 @@ def update_encoder_graph_params(
             ) = packed
 
             num_query_tokens = query.shape[0]
-            actual_seq_lengths_q, actual_seq_lengths_kv = _maybe_compute_actual_seq_lengths(
+            cu_seqlens_cpu = get_encoder_forward_context().cu_seqlens_cpu
+
+            actual_seq_lengths_q, actual_seq_lengths_kv = maybe_compute_actual_seq_lengths(
                 num_query_tokens=num_query_tokens,
-                uses_seq_len_host=uses_sequence_lengths_host,
-                vit_layer_idx=vit_layer_idx,
-                fullatt_block_indexes=fullatt_block_indexes,
+                cu_seqlens=cu_seqlens_cpu,
             )
 
             torch.npu.graph_task_update_begin(update_stream, handle)
@@ -364,9 +249,6 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
         super().__init__(*args, **kwargs)
         self.graph_pool = current_platform.get_global_graph_pool()
         self.update_stream: torch.npu.Stream | None = None
-        visual = getattr(self.model, "visual", None)
-        fa_raw = getattr(visual, "fullatt_block_indexes", None) if visual is not None else None
-        self.fullatt = frozenset(fa_raw) if fa_raw is not None else None
 
     def capture(self, graph_pool: Any | None = None):
         encoder_graph_pool = graph_pool if graph_pool is not None else self.graph_pool
@@ -413,8 +295,10 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
             output_buffer = torch.empty_like(output)
 
         graph = torch.npu.NPUGraph()
+        cu_seqlens = values.get("cu_seqlens")
+        cu_seqlens_cpu = None if cu_seqlens is None else cu_seqlens.cpu()
         with (
-            set_encoder_forward_context(token_budget, True),
+            set_encoder_forward_context(token_budget, True, cu_seqlens_cpu),
             torch.inference_mode(),
             torch.npu.graph(graph, self.graph_pool),
         ):
@@ -483,13 +367,8 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
                 padding_logic = self.config.padding_logics.get(key, self._copy_padded_buffer)
                 padding_logic(buf, src)
 
-        meta = graph_meta.input_buffers
-        cu_seqlens = meta.get("cu_seqlens")
+        cu_seqlens = graph_meta.input_buffers.get("cu_seqlens")
         cu_seqlens_cpu = None if cu_seqlens is None else cu_seqlens.cpu()
-        cu_window_seqlens = meta.get("cu_window_seqlens")
-        cu_window_seqlens_cpu = None if cu_window_seqlens is None else cu_window_seqlens.cpu()
-        seq_lens = meta.get("sequence_lengths")
-        seq_lens_cpu = None if seq_lens is None else seq_lens.cpu()
 
         update_stream = self.update_stream
         if update_stream is None:
@@ -501,10 +380,8 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
             token_budget,
             False,
             cu_seqlens_cpu=cu_seqlens_cpu,
-            cu_window_seqlens_cpu=cu_window_seqlens_cpu,
-            sequence_lengths_cpu=seq_lens_cpu,
         ):
-            update_encoder_graph_params(update_stream, token_budget, fullatt_block_indexes=self.fullatt)
+            update_encoder_graph_params(update_stream, token_budget)
 
         self.graph_hits += num_items
         return graph_meta.output_buffer

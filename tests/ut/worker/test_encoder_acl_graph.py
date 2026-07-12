@@ -21,13 +21,9 @@ from vllm.config import CompilationConfig, VllmConfig
 from vllm_ascend.worker import encoder_acl_graph
 from vllm_ascend.worker.encoder_acl_graph import (
     EncoderAclGraphManager,
-    FIAActualSeqLengthsInput,
-    FIALengthFormat,
-    _align_fia_endpoints_to_num_tokens,
-    _maybe_compute_actual_seq_lengths,
-    build_fia_actual_seq_lengths,
     get_encoder_forward_context,
     get_encoder_graph_params,
+    maybe_compute_actual_seq_lengths,
     set_encoder_graph_params,
     update_encoder_graph_params,
 )
@@ -46,75 +42,40 @@ def _reset_state():
 
 
 @pytest.mark.parametrize(
-    "lengths, num_tokens, expected",
+    "cu_seqlens, num_tokens, expected",
     [
-        ([4, 8, 0], 8, [4, 8]),
-        ([4, 16], 8, [4, 8]),
-        ([], 8, [8]),
+        (torch.tensor([0, 4, 8], dtype=torch.int32), 8, [4, 8]),
+        (torch.tensor([0, 4, 16], dtype=torch.int32), 8, [4, 8]),
+        (torch.tensor([0], dtype=torch.int32), 8, [8]),
+        (torch.tensor([0, 4, 8], dtype=torch.int32), 0, [0]),
     ],
 )
-def test_align_fia_endpoints_to_num_tokens(lengths, num_tokens, expected):
-    assert _align_fia_endpoints_to_num_tokens(lengths, num_tokens) == expected
-
-
-@pytest.mark.parametrize(
-    "length_format, buffer, expected_q, expected_kv",
-    [
-        (
-            FIALengthFormat.CUMULATIVE,
-            torch.tensor([0, 4, 8, 0, 0], dtype=torch.int32),
-            [4, 8],
-            [4, 8],
-        ),
-        (
-            FIALengthFormat.PER_SEQUENCE,
-            torch.tensor([4, 4], dtype=torch.int64),
-            [4, 8],
-            [4, 8],
-        ),
-    ],
-)
-def test_build_fia_actual_seq_lengths(length_format, buffer, expected_q, expected_kv):
-    length_input = FIAActualSeqLengthsInput(length_format, buffer=buffer)
-    actual_q, actual_kv = build_fia_actual_seq_lengths(
-        num_query_tokens=8,
-        length_input=length_input,
+def test_maybe_compute_actual_seq_lengths(cu_seqlens, num_tokens, expected):
+    actual_q, actual_kv = maybe_compute_actual_seq_lengths(
+        num_query_tokens=num_tokens,
+        cu_seqlens=cu_seqlens,
     )
-    assert actual_q == expected_q
-    assert actual_kv == expected_kv
+    assert actual_q == expected
+    assert actual_kv == expected
 
 
-def test_fullatt_block_indexes_routing():
-    ctx = get_encoder_forward_context()
-    ctx.cu_seqlens_cpu = torch.tensor([0, 4, 8], dtype=torch.int32)
-    ctx.cu_window_seqlens_cpu = torch.tensor([0, 2, 6], dtype=torch.int32)
-    ctx.sequence_lengths_cpu = torch.tensor([3, 7], dtype=torch.int64)
+def test_replay_compute_actual_seq_lengths_from_cu_seqlens():
+    cu_seqlens_cpu = torch.tensor([0, 4, 8], dtype=torch.int32)
 
-    full_q, _ = _maybe_compute_actual_seq_lengths(
+    actual_q, actual_kv = maybe_compute_actual_seq_lengths(
         num_query_tokens=8,
-        uses_seq_len_host=False,
-        vit_layer_idx=0,
-        fullatt_block_indexes=frozenset({0, 2}),
+        cu_seqlens=cu_seqlens_cpu,
     )
-    window_q, _ = _maybe_compute_actual_seq_lengths(
-        num_query_tokens=8,
-        uses_seq_len_host=False,
-        vit_layer_idx=1,
-        fullatt_block_indexes=frozenset({0, 2}),
-    )
-    assert full_q == [4, 8]
-    assert window_q == [2, 6, 8]
-
-    seq_q, _ = _maybe_compute_actual_seq_lengths(
-        num_query_tokens=8,
-        uses_seq_len_host=True,
-        vit_layer_idx=0,
-        fullatt_block_indexes=frozenset({0, 2}),
-    )
-    assert seq_q == [3, 8]
+    assert actual_q == [4, 8]
+    assert actual_kv == [4, 8]
 
 
-def test_update_encoder_graph_params_routes_host_lengths():
+def test_replay_missing_cu_seqlens_raises():
+    with pytest.raises(TypeError):
+        maybe_compute_actual_seq_lengths(num_query_tokens=8)
+
+
+def test_update_encoder_graph_params_uses_cu_seqlens():
     set_encoder_graph_params([2048])
     params = get_encoder_graph_params()
     query = MagicMock()
@@ -126,8 +87,6 @@ def test_update_encoder_graph_params_routes_host_lengths():
         None,
         None,
         128,
-        False,
-        0,
         4,
         4,
         0.125,
@@ -157,11 +116,7 @@ def test_update_encoder_graph_params_routes_host_lengths():
             fake_fia,
         ),
     ):
-        update_encoder_graph_params(
-            MagicMock(),
-            2048,
-            fullatt_block_indexes=frozenset({0}),
-        )
+        update_encoder_graph_params(MagicMock(), 2048)
 
     assert captured["actual_seq_lengths"] == [4, 8]
 
@@ -179,11 +134,14 @@ def _make_manager():
 
     model = MagicMock()
     model.get_encoder_cudagraph_config.return_value = MagicMock(
-        input_key_by_modality={"image": "pixel_values"},
+        modalities=["image"],
         buffer_keys=["cu_seqlens"],
+        out_hidden_size=64,
+        enable_dual_path_graph=False,
+        padding_logics={},
+        max_frames_per_video=1,
     )
     model.get_encoder_cudagraph_budget_range.return_value = (64, 2048)
-    model.visual = None
     return EncoderAclGraphManager(vllm_config, "npu", "bfloat16", model), model
 
 
@@ -208,17 +166,20 @@ def test_manager_uses_npu_graph_in_capture_budget_graph():
     mgr, model = _make_manager()
     mgr.max_batch_size = 2
     mgr.max_frames_per_batch = 0
+    capture_values = {"cu_seqlens": torch.zeros(3, dtype=torch.int32)}
     model.prepare_encoder_cudagraph_capture_inputs.return_value = MagicMock(
-        mm_kwargs={"pixel_values": torch.zeros(2, 3, 224, 224)},
-        buffers={"cu_seqlens": torch.zeros(3, dtype=torch.int32)},
+        values=capture_values,
     )
     model.encoder_cudagraph_forward.return_value = torch.zeros(2, 64)
 
     fake_graph = MagicMock()
     with (
+        patch(
+            "vllm_ascend.worker.encoder_acl_graph.vllm_version_is",
+            return_value=False,
+        ),
         patch("vllm_ascend.worker.encoder_acl_graph.torch.npu.NPUGraph", return_value=fake_graph),
         patch("vllm_ascend.worker.encoder_acl_graph.torch.npu.graph"),
-        patch("vllm_ascend.worker.encoder_acl_graph.set_encoder_forward_context"),
         patch(
             "vllm_ascend.worker.encoder_acl_graph.weak_ref_tensors",
             side_effect=lambda tensors: tensors,
@@ -226,5 +187,6 @@ def test_manager_uses_npu_graph_in_capture_budget_graph():
     ):
         mgr._capture_budget_graph(2048)
 
-    assert 2048 in mgr.budget_graphs
-    assert mgr.budget_graphs[2048].graph is fake_graph
+    graph_meta = mgr.budget_graphs["default"][2048]
+    assert graph_meta.graph is fake_graph
+    assert graph_meta.input_buffers is capture_values

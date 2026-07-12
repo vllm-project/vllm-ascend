@@ -16,6 +16,7 @@ from vllm_ascend.worker import encoder_acl_graph
 from vllm_ascend.worker.encoder_acl_graph import (
     get_encoder_forward_context,
     get_encoder_graph_params,
+    maybe_compute_actual_seq_lengths,
     set_encoder_graph_params,
 )
 
@@ -186,27 +187,11 @@ class TestAscendMMEncoderAttentionEager(FIAMockMixin):
         self.assertEqual(self.captured["block_size"], FIA_BLOCK_SIZE)
         self.assertEqual(self.captured["scale"], layer.scale)
 
-    def test_maybe_compute_actual_seq_lengths_from_sequence_lengths(self):
-        layer = self._make_layer()
-        actual_q, actual_kv = layer._maybe_compute_actual_seq_lengths(
+    def test_maybe_compute_actual_seq_lengths_from_cu_seqlens(self):
+        cu_seqlens = torch.tensor([0, 4, 8], dtype=torch.int32)
+        actual_q, actual_kv = maybe_compute_actual_seq_lengths(
             num_query_tokens=8,
-            bsz=2,
-            q_len=4,
-            cu_seqlens=None,
-            sequence_lengths=torch.tensor([4, 4], dtype=torch.int64),
-        )
-        self.assertEqual(actual_q, [4, 8])
-        self.assertEqual(actual_kv, [4, 8])
-
-    def test_maybe_compute_actual_seq_lengths_aligns_padded_cu_seqlens(self):
-        layer = self._make_layer()
-        cu_seqlens = torch.tensor([0, 4, 8, 0, 0], dtype=torch.int32)
-        actual_q, actual_kv = layer._maybe_compute_actual_seq_lengths(
-            num_query_tokens=8,
-            bsz=2,
-            q_len=4,
             cu_seqlens=cu_seqlens,
-            sequence_lengths=None,
         )
         self.assertEqual(actual_q, [4, 8])
         self.assertEqual(actual_kv, [4, 8])
@@ -255,7 +240,6 @@ class TestAscendMMEncoderAttentionCapture(FIAMockMixin):
         ctx = get_encoder_forward_context()
         ctx.capturing = True
         ctx.token_budget = 2048
-        ctx.capture_layer_cursor = 0
 
         bsz, q_len = 2, 4
         query = torch.randn(bsz, q_len, layer.num_heads, 72, dtype=torch.bfloat16)
@@ -269,28 +253,23 @@ class TestAscendMMEncoderAttentionCapture(FIAMockMixin):
         self.assertIsNotNone(params)
         self.assertEqual(len(params.attn_params[2048]), 1)
         self.assertEqual(len(params.handles[2048]), 1)
-        self.assertFalse(params.attn_params[2048][0][6])
-        self.assertEqual(params.attn_params[2048][0][10], layer.scale)
+        self.assertEqual(params.attn_params[2048][0][8], layer.scale)
         self.assertEqual(self.captured["mode"], "out")
         self.assertEqual(self.captured["softmax_lse"].numel(), 1)
         self.mock_graph_begin.assert_called_once()
         self.mock_graph_end.assert_called_once()
 
-    def test_capture_uses_sequence_lengths_host(self):
+    def test_capture_none_cu_seqlens_uses_cpu_arange(self):
         layer = self._make_layer(num_heads=4, num_kv_heads=4, head_size=72)
         ctx = get_encoder_forward_context()
         ctx.capturing = True
         ctx.token_budget = 2048
 
-        seq_lens = [3, 5]
-        sequence_lengths = torch.tensor(seq_lens, dtype=torch.int64)
-        query = torch.randn(2, 5, layer.num_heads, 72, dtype=torch.bfloat16)
+        bsz, q_len = 2, 4
+        query = torch.randn(bsz, q_len, layer.num_heads, 72, dtype=torch.bfloat16)
         key = torch.randn_like(query)
         value = torch.randn_like(query)
 
-        layer.forward_oot(query, key, value, sequence_lengths=sequence_lengths)
+        layer.forward_oot(query, key, value, cu_seqlens=None)
 
-        params = get_encoder_graph_params()
-        self.assertIsNotNone(params)
-        self.assertTrue(params.attn_params[2048][0][6])
-        self.assertEqual(self.captured["actual_seq_lengths"], [3, 8, 10])
+        self.assertEqual(self.captured["actual_seq_lengths"], [4, 8])
