@@ -62,6 +62,9 @@ class GDNChunkedPrefillMetadata:
     chunk_indices_large_block: torch.Tensor
     block_indices_cumsum: torch.Tensor
     num_decodes: int = 0
+    _buffer_slot: object | None = None
+    cu_seqlens_kern: tuple[int, ...] | None = None
+    keep_meta: torch.Tensor | None = None
 
 
 @dataclass
@@ -115,9 +118,121 @@ def _build_actual_seq_lengths(
 
 def _build_non_spec_chunked_prefill_metadata(
     builder,
+    cu_seqlens: torch.Tensor,
+    tensors: dict[str, torch.Tensor],
+) -> None:
+    seq_lens = None
+    validate_inputs = True
+    if cu_seqlens.device.type == "npu":
+        _validate_cu_seqlens(cu_seqlens, builder._ascend_gdn_chunk_size)
+        assert builder._ascend_gdn_large_block_size > 0
+        assert builder._ascend_gdn_cumsum_block_size > 0
+        seq_lens = _build_seq_lens(cu_seqlens)
+        validate_inputs = False
+    build_chunk_meta_device(
+        cu_seqlens=cu_seqlens,
+        chunk_size=builder._ascend_gdn_chunk_size,
+        out_chunk_indices=tensors["chunk_indices_chunk64"],
+        out_chunk_offsets=tensors["chunk_offsets_chunk64"],
+        out_update_chunk_offsets=tensors["update_chunk_offsets_chunk64"],
+        out_final_chunk_indices=tensors["final_chunk_indices_chunk64"],
+        seq_lens=seq_lens,
+        validate_inputs=validate_inputs,
+    )
+    build_chunk_meta_device(
+        cu_seqlens=cu_seqlens,
+        chunk_size=builder._ascend_gdn_large_block_size,
+        out_chunk_indices=tensors["chunk_indices_large_block"],
+        seq_lens=seq_lens,
+        validate_inputs=validate_inputs,
+    )
+    build_chunk_meta_device(
+        cu_seqlens=cu_seqlens,
+        chunk_size=builder._ascend_gdn_cumsum_block_size,
+        out_chunk_indices=tensors["block_indices_cumsum"],
+        seq_lens=seq_lens,
+        validate_inputs=validate_inputs,
+    )
+
+
+def _compact_empty_segments(cu_seqlens_host, initial_state, device=None):
+    """Drop zero-length segments so AscendC fwd_h/fwd_o indexing lines up.
+
+    ``chunk_indices_chunk64`` already carries COMPACT (non-empty) segment ranks
+    (see _fill_chunk_indices_cpu), but the kernels index ``gmSeqlen``
+    (= cu_seqlens) and ``initial_state`` by that same rank. An empty segment
+    left in cu_seqlens -- which PCP rank>0 produces for requests whose context
+    does not reach this rank -- therefore miss-indexes: chunk_fwd_o reads
+    ``batchTokens == 0`` and, on that segment's last chunk, ``blockTokens``
+    underflows (uint32) -> MTE write OOB -> runtime 507015.
+
+    Returns ``(cu_seqlens_kern, initial_state_kern, keep_meta)``: cu_seqlens /
+    initial_state with empty segments removed, plus the bool keep-mask (None
+    when nothing was removed). ``chunk_indices_chunk64`` is unchanged (already
+    compact); the compacted ``final_state`` must be scattered back to the full
+    layout via ``keep_meta`` (empty segments keep their initial state).
+    No-op when there are no empty segments (rank0 / non-PCP / uniform batch
+    never have them).
+
+    When *device* is given, ``keep_meta`` is moved to that device so that
+    callers can index NPU tensors without an extra host→device sync.
+    """
+    if cu_seqlens_host is None:
+        return None, initial_state, None
+    cu = torch.tensor(cu_seqlens_host, dtype=torch.int64)
+    keep = (cu[1:] - cu[:-1]) > 0
+    if bool(keep.all()):
+        return cu_seqlens_host, initial_state, None
+    # Compute compact cu_seqlens while keep is still on CPU (cu is CPU-only).
+    cu_kern = torch.cat([cu[:1], cu[1:][keep]]).tolist()
+    # Move keep to device only for indexing device-side tensors.
+    if device is not None:
+        keep = keep.to(device)
+    st_kern = initial_state[keep] if initial_state is not None else None
+    return cu_kern, st_kern, keep
+
+
+def _build_chunked_prefill_metadata(
+    builder,
+    tensors: dict[str, torch.Tensor],
+    *,
     cu_seqlens_cpu: torch.Tensor,
     device: torch.device,
 ) -> GDNChunkedPrefillMetadata:
+    cu_seqlens_host = tuple(cu_seqlens_cpu.to(torch.int64).tolist())
+    num_decodes = sum(
+        1 for i in range(len(cu_seqlens_host) - 1) if 0 < cu_seqlens_host[i + 1] - cu_seqlens_host[i] <= 1
+    )
+    # Pre-compute compact cu_seqlens for AscendC kernels so each layer
+    # can reuse them instead of calling _compact_empty_segments again.
+    cu_seqlens_kern, _, keep_meta = _compact_empty_segments(
+        cu_seqlens_host, None, device=tensors["chunk_indices_chunk64"].device
+    )
+    if keep_meta is None:
+        cu_seqlens_kern = None
+    else:
+        cu_seqlens_kern = tuple(cu_seqlens_kern)
+    return GDNChunkedPrefillMetadata(
+        cu_seqlens_cpu=cu_seqlens_cpu,
+        cu_seqlens_host=cu_seqlens_host,
+        chunk_indices_chunk64_host=_build_chunk_indices_host(
+            cu_seqlens_cpu,
+            builder._ascend_gdn_chunk_size,
+        ),
+        chunk_indices_chunk64=tensors["chunk_indices_chunk64"],
+        chunk_offsets_chunk64=tensors["chunk_offsets_chunk64"],
+        update_chunk_offsets_chunk64=tensors["update_chunk_offsets_chunk64"],
+        final_chunk_indices_chunk64=tensors["final_chunk_indices_chunk64"],
+        chunk_indices_large_block=tensors["chunk_indices_large_block"],
+        block_indices_cumsum=tensors["block_indices_cumsum"],
+        num_decodes=num_decodes,
+        _buffer_slot=slot,
+        cu_seqlens_kern=cu_seqlens_kern,
+        keep_meta=keep_meta,
+    )
+
+
+def _get_gdn_num_heads(builder) -> int:
     hf_text_config = getattr(builder.vllm_config.model_config, "hf_text_config", None)
     if hf_text_config is not None and hasattr(hf_text_config, "linear_num_value_heads"):
         gdn_num_heads = (
