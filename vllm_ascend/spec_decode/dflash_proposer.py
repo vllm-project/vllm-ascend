@@ -1,8 +1,10 @@
+import os
 from typing import Any
 
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
@@ -10,6 +12,8 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.ops.triton.spec_decode.utils import copy_and_expand_dflash_inputs_kernel_single_grid
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
+
+logger = init_logger(__name__)
 
 
 class AscendDflashProposer(AscendEagleProposer):
@@ -60,6 +64,163 @@ class AscendDflashProposer(AscendEagleProposer):
 
         self.parallel_drafting_hidden_state_tensor = None
 
+    def _use_dspark_block_contract(self) -> bool:
+        spec_config = self.vllm_config.speculative_config
+        draft_model_config = getattr(spec_config, "draft_model_config", None)
+        hf_config = getattr(draft_model_config, "hf_config", None)
+        if hf_config is None:
+            return False
+        architectures = getattr(hf_config, "architectures", []) or []
+        if "DSparkDraftModel" in architectures:
+            return True
+        if getattr(hf_config, "speculators_model_type", None) == "dspark":
+            return True
+        dflash_config = getattr(hf_config, "dflash_config", None) or {}
+        return dflash_config.get("source_speculators_model_type") == "dspark"
+
+    def _set_dspark_inputs_first_pass(
+        self,
+        target_token_ids: torch.Tensor,
+        next_token_ids: torch.Tensor,
+        target_positions: torch.Tensor,
+        target_hidden_states: torch.Tensor,
+        cad: CommonAttentionMetadata,
+        num_rejected_tokens_gpu: torch.Tensor | None,
+    ) -> tuple[int, torch.Tensor, CommonAttentionMetadata, tuple[Any, Any] | None]:
+        batch_size = cad.num_reqs
+        num_context = target_token_ids.shape[0]
+        num_query_per_req = 1 + self.num_speculative_tokens
+        num_query_total = batch_size * num_query_per_req
+
+        self._dflash_num_context = num_context
+        self._dflash_hidden_states[:num_context] = target_hidden_states
+
+        token_indices_to_sample = torch.empty(
+            batch_size * self.num_speculative_tokens,
+            dtype=torch.int32,
+            device=self.device,
+        )
+
+        self.input_ids[:num_query_total].fill_(self.parallel_drafting_token_id)
+        self.positions[:num_query_total].zero_()
+        self._slot_mapping_buffer[:num_query_total].fill_(-1)
+        self._context_positions_buffer[:num_context].fill_(-1)
+        self._context_slot_mapping_buffer[:num_context].fill_(-1)
+
+        old_query_start_loc = cad.query_start_loc
+        old_block_table = cad.block_table_tensor
+        block_stride = old_block_table.stride(0)
+        cache_block_size = self.kernel_block_size
+        has_num_rejected = num_rejected_tokens_gpu is not None
+        new_seq_lens = torch.empty(batch_size, dtype=torch.int32, device=self.device)
+        step_offsets = self.arange_dflash[:num_query_per_req].to(torch.int32)
+        sample_offsets = self.arange_dflash[: self.num_speculative_tokens].to(torch.int32)
+
+        if target_positions.dim() != 1:
+            raise NotImplementedError("DSpark DFlash proposer only supports 1-D positions")
+
+        for req_idx in range(batch_size):
+            ctx_start = int(old_query_start_loc[req_idx].item())
+            ctx_end = int(old_query_start_loc[req_idx + 1].item())
+            valid_ctx_end = ctx_end
+            if has_num_rejected:
+                rejected = int(num_rejected_tokens_gpu[req_idx].item())
+                valid_ctx_end = max(ctx_start, ctx_end - rejected)
+
+            if ctx_end > ctx_start:
+                ctx_slice = slice(ctx_start, ctx_end)
+                ctx_positions = target_positions[ctx_slice].to(torch.int32)
+                self._context_positions_buffer[ctx_slice].copy_(ctx_positions)
+
+                valid_count = max(0, valid_ctx_end - ctx_start)
+                if valid_count > 0:
+                    valid_positions = ctx_positions[:valid_count].long()
+                    ctx_block_nums = torch.clamp(
+                        valid_positions // cache_block_size,
+                        min=0,
+                        max=block_stride - 1,
+                    )
+                    ctx_block_ids = old_block_table[req_idx, ctx_block_nums]
+                    ctx_slots = ctx_block_ids.to(torch.int32) * cache_block_size + (
+                        valid_positions.to(torch.int32) % cache_block_size
+                    )
+                    self._context_slot_mapping_buffer[
+                        ctx_start:valid_ctx_end
+                    ].copy_(ctx_slots)
+
+            last_pos_idx = max(ctx_start, valid_ctx_end - 1)
+            last_valid_pos = target_positions[last_pos_idx].to(torch.int32)
+            query_base = req_idx * num_query_per_req
+            query_slice = slice(query_base, query_base + num_query_per_req)
+            query_positions = last_valid_pos + 1 + step_offsets
+
+            self.positions[query_slice].copy_(query_positions)
+            self.input_ids[query_base] = next_token_ids[req_idx].to(self.input_ids.dtype)
+            sample_base = req_idx * self.num_speculative_tokens
+            token_indices_to_sample[
+                sample_base : sample_base + self.num_speculative_tokens
+            ].copy_(query_base + 1 + sample_offsets)
+
+            q_block_nums = torch.clamp(
+                query_positions.long() // cache_block_size,
+                min=0,
+                max=block_stride - 1,
+            )
+            q_block_ids = old_block_table[req_idx, q_block_nums]
+            q_slots = q_block_ids.to(torch.int32) * cache_block_size + (
+                query_positions.to(torch.int32) % cache_block_size
+            )
+            self._slot_mapping_buffer[query_slice].copy_(q_slots)
+            new_seq_lens[req_idx] = query_positions[-1] + 1
+
+        query_slot_mapping = self._slot_mapping_buffer[:num_query_total]
+        new_query_start_loc = self.arange_dflash[: batch_size + 1] * num_query_per_req
+
+        cad.query_start_loc = new_query_start_loc
+        cad.seq_lens = new_seq_lens
+        cad.query_start_loc_cpu = (
+            torch.from_numpy(self.token_arange_np[: batch_size + 1]).clone() * num_query_per_req
+        ).to(torch.int32)
+        if getattr(cad, "_seq_lens_cpu", None) is not None:
+            cad._seq_lens_cpu = new_seq_lens.detach().cpu()
+        if getattr(cad, "seq_lens_cpu", None) is not None:
+            cad.seq_lens_cpu = new_seq_lens.detach().cpu()
+
+        if hasattr(cad, "actual_seq_lengths_q"):
+            cad.actual_seq_lengths_q = [num_query_per_req] * batch_size
+        if hasattr(cad, "decode_token_per_req"):
+            cad.decode_token_per_req = num_query_per_req
+
+        cad.num_actual_tokens = num_query_total
+        cad.max_query_len = num_query_per_req
+        cad.max_seq_len = int(new_seq_lens.max().item()) if batch_size else 0
+        cad.positions = self.positions[:num_query_total]
+        if getattr(cad, "positions_cpu", None) is not None:
+            cad.positions_cpu = cad.positions.detach().cpu()
+        cad.slot_mapping = query_slot_mapping
+        cad.causal = False
+        cad.attn_mask = None
+        cad.attn_state = AscendAttentionState.ChunkedPrefill
+
+        if os.getenv("DSPARK_LOGITS_DEBUG", "0").lower() in ("1", "true", "yes", "on"):
+            debug_count = getattr(self, "_dspark_prepared_input_debug_count", 0)
+            if debug_count < 4 and batch_size > 0:
+                self._dspark_prepared_input_debug_count = debug_count + 1
+                logger.warning(
+                    "[spec_decode/dspark] prepared input debug #%d: "
+                    "input_ids=%s positions=%s seq_lens=%s query_slots=%s "
+                    "context_positions_tail=%s context_slots_tail=%s",
+                    debug_count + 1,
+                    self.input_ids[:num_query_total].detach().cpu().tolist(),
+                    self.positions[:num_query_total].detach().cpu().tolist(),
+                    new_seq_lens.detach().cpu().tolist(),
+                    query_slot_mapping.detach().cpu().tolist(),
+                    self._context_positions_buffer[:num_context][-8:].detach().cpu().tolist(),
+                    self._context_slot_mapping_buffer[:num_context][-8:].detach().cpu().tolist(),
+                )
+
+        return num_query_total, token_indices_to_sample, cad, None
+
     def set_inputs_first_pass(
         self,
         target_token_ids: torch.Tensor,
@@ -78,6 +239,16 @@ class AscendDflashProposer(AscendEagleProposer):
         # Q from query embeddings (bonus + mask tokens).
         batch_size = cad.num_reqs
         num_context = target_token_ids.shape[0]
+        use_dspark = self._use_dspark_block_contract()
+        if use_dspark:
+            return self._set_dspark_inputs_first_pass(
+                target_token_ids=target_token_ids,
+                next_token_ids=next_token_ids,
+                target_positions=target_positions,
+                target_hidden_states=target_hidden_states,
+                cad=cad,
+                num_rejected_tokens_gpu=num_rejected_tokens_gpu,
+            )
         num_query_per_req = 1 + self.num_speculative_tokens
         num_query_total = batch_size * num_query_per_req
 
@@ -120,7 +291,6 @@ class AscendDflashProposer(AscendEagleProposer):
             batch_size=batch_size,
             HAS_NUM_REJECTED=has_num_rejected,
         )
-
         query_slot_mapping = self._slot_mapping_buffer[:num_query_total]
         new_query_start_loc = self.arange_dflash[: batch_size + 1] * num_query_per_req
 
