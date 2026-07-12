@@ -5,7 +5,6 @@ from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import pytest
-import torch
 
 import vllm_ascend.patch.hunyuan_vl_processor_compat as compat
 
@@ -106,9 +105,6 @@ def test_installer_runs_v023_backports_in_order(monkeypatch):
     def patch_loader(module: Any) -> None:
         calls.append(("loader", module))
 
-    def patch_prompt(module: Any) -> None:
-        calls.append(("prompt", module))
-
     monkeypatch.setattr(compat, "vllm_version_is", lambda version: version == "0.23.0")
     monkeypatch.setattr(
         compat,
@@ -130,12 +126,6 @@ def test_installer_runs_v023_backports_in_order(monkeypatch):
         "_patch_v023_processor_methods",
         patch_processor,
     )
-    monkeypatch.setattr(
-        compat,
-        "_patch_prompt_updates",
-        patch_prompt,
-    )
-
     compat.install_hunyuan_vl_processor_compat()
 
     assert calls == [
@@ -143,22 +133,26 @@ def test_installer_runs_v023_backports_in_order(monkeypatch):
         "registry",
         ("loader", hunyuan_vision),
         ("processor", hunyuan_vision),
-        ("prompt", hunyuan_vision),
     ]
 
 
 def test_installer_cleans_main_registry_before_model_patch(monkeypatch):
     import vllm.model_executor.models as vllm_models
 
-    hunyuan_vision = object()
+    def native_get_prompt_updates(*_args: Any, **_kwargs: Any) -> str:
+        return "native"
+
+    class FakeMultiModalProcessor:
+        _get_prompt_updates = native_get_prompt_updates
+
+    hunyuan_vision = SimpleNamespace(
+        HunYuanVLMultiModalProcessor=FakeMultiModalProcessor,
+    )
     calls: list[Any] = []
 
     def clean_registry() -> bool:
         calls.append("registry")
         return True
-
-    def patch_prompt(module: Any) -> None:
-        calls.append(("prompt", module))
 
     def patch_loader(module: Any) -> None:
         calls.append(("loader", module))
@@ -175,19 +169,13 @@ def test_installer_cleans_main_registry_before_model_patch(monkeypatch):
         "_patch_hunyuan_processor_loader",
         patch_loader,
     )
-    monkeypatch.setattr(
-        compat,
-        "_patch_prompt_updates",
-        patch_prompt,
-    )
-
     compat.install_hunyuan_vl_processor_compat()
 
     assert calls == [
         "registry",
         ("loader", hunyuan_vision),
-        ("prompt", hunyuan_vision),
     ]
+    assert FakeMultiModalProcessor._get_prompt_updates is native_get_prompt_updates
 
 
 def test_registers_hunyuan_tokenizer_schema_without_changing_ids():
@@ -327,6 +315,19 @@ def test_v023_backports_native_processor_call_protocol(monkeypatch):
     )
     assert calls[0][1]["text"] == ("before<image_start><image><image_end>after")
 
+    wrapped_prompt = "before<image_start><image><image_end>after"
+    assert (
+        call_processor(
+            processor,
+            wrapped_prompt,
+            {"images": [object()]},
+            {},
+            {},
+        )
+        == "processed"
+    )
+    assert calls[1][1]["text"] == wrapped_prompt
+
 
 def test_main_removes_only_stale_registry_entries(monkeypatch):
     import vllm.transformers_utils.processors as vllm_processors
@@ -362,40 +363,26 @@ def test_main_rejects_unexpected_registry_replacement(monkeypatch):
     assert registry == {"HunYuanVLProcessor": "future.hunyuan_vl"}
 
 
-def test_main_prompt_update_preserves_wrappers_and_embedding_mask():
+def test_installer_preserves_native_prompt_update_protocol(monkeypatch):
+    def native_get_prompt_updates(*_args: Any, **_kwargs: Any) -> str:
+        return "native"
+
     class FakeMultiModalProcessor:
-        pass
+        _get_prompt_updates = native_get_prompt_updates
 
     hunyuan_vision = SimpleNamespace(
         HunYuanVLMultiModalProcessor=FakeMultiModalProcessor,
     )
-    compat._patch_prompt_updates(hunyuan_vision)
-
-    hf_processor = SimpleNamespace(
-        image_token_id=11,
-        image_start_token_id=12,
-        image_end_token_id=13,
+    monkeypatch.setattr(compat, "vllm_version_is", lambda version: version == "0.23.0")
+    monkeypatch.setattr(
+        compat,
+        "_import_v023_hunyuan_vision",
+        lambda: hunyuan_vision,
     )
-    image_processor = SimpleNamespace(merge_size=2)
-    info = SimpleNamespace(
-        get_hf_processor=lambda **_kwargs: hf_processor,
-        get_image_processor=lambda **_kwargs: image_processor,
-    )
-    processor = SimpleNamespace(info=info)
-    out_mm_kwargs = {
-        "image": [
-            {
-                "image_grid_thw": SimpleNamespace(
-                    data=torch.tensor([1, 4, 6]),
-                )
-            }
-        ]
-    }
+    monkeypatch.setattr(compat, "_remove_stale_registry_entries", lambda: True)
+    monkeypatch.setattr(compat, "_patch_hunyuan_processor_loader", lambda _module: None)
+    monkeypatch.setattr(compat, "_patch_v023_processor_methods", lambda _module: None)
 
-    get_prompt_updates = vars(FakeMultiModalProcessor)["_get_prompt_updates"]
-    updates = get_prompt_updates(processor, None, {}, out_mm_kwargs)
-    details = updates[0].replacement(0)
+    compat.install_hunyuan_vl_processor_compat()
 
-    assert details.full == [12] + [11] * 10 + [13]
-    assert details.is_embed is not None
-    assert details.is_embed(None, details.full).tolist() == [False] + [True] * 10 + [False]
+    assert FakeMultiModalProcessor._get_prompt_updates is native_get_prompt_updates

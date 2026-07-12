@@ -5,7 +5,6 @@ from __future__ import annotations
 import importlib
 import sys
 from collections.abc import Mapping
-from functools import partial
 from types import ModuleType
 from typing import Any, cast
 
@@ -197,58 +196,16 @@ def _patch_v023_processor_methods(hunyuan_vision: Any) -> None:
     hunyuan_vision.HunYuanVLMultiModalProcessor._call_hf_processor = call_hf_processor
 
 
-def _patch_prompt_updates(hunyuan_vision: Any) -> None:
-    """Backport the complete Hunyuan image placeholder from vLLM PR #47867."""
-    import torch
-    from vllm.multimodal.processing import PromptReplacement, PromptUpdateDetails
-
-    def get_prompt_updates(
-        self: Any,
-        mm_items: Any,
-        hf_processor_mm_kwargs: Mapping[str, Any],
-        out_mm_kwargs: Any,
-    ) -> list[Any]:
-        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-        image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
-        token_ids = {
-            "image": hf_processor.image_token_id,
-            "image_start": hf_processor.image_start_token_id,
-            "image_end": hf_processor.image_end_token_id,
-        }
-        merge_size = image_processor.merge_size
-
-        def get_replacement_hunyuan_vl(item_idx: int, modality: str) -> Any:
-            out_item = out_mm_kwargs[modality][item_idx]
-            grid_thw = out_item[f"{modality}_grid_thw"].data
-            assert isinstance(grid_thw, torch.Tensor)
-
-            _, grid_h, grid_w = grid_thw
-            num_tokens = (int(grid_h) // merge_size) * (int(grid_w) // merge_size + 1) + 2
-            tokens = (
-                [token_ids[f"{modality}_start"]] + [token_ids[modality]] * num_tokens + [token_ids[f"{modality}_end"]]
-            )
-            return PromptUpdateDetails.select_token_id(tokens, token_ids[modality])
-
-        return [
-            PromptReplacement(
-                modality=modality,
-                target=[token_ids[modality]],
-                replacement=partial(get_replacement_hunyuan_vl, modality=modality),
-            )
-            for modality in ("image",)
-        ]
-
-    hunyuan_vision.HunYuanVLMultiModalProcessor._get_prompt_updates = get_prompt_updates
-
-
 def install_hunyuan_vl_processor_compat() -> None:
     """Align both supported vLLM refs with Transformers 5.13 Hunyuan APIs."""
+    # Keep each target's native, image-token-only prompt replacement. The
+    # cached processor path applies it inside an existing start/image/end
+    # wrapper; using a full-wrapper replacement here would duplicate wrappers.
     if vllm_version_is("0.23.0"):
         v023_hunyuan_vision = _import_v023_hunyuan_vision()
         _remove_stale_registry_entries()
         _patch_hunyuan_processor_loader(v023_hunyuan_vision)
         _patch_v023_processor_methods(v023_hunyuan_vision)
-        _patch_prompt_updates(v023_hunyuan_vision)
         return
 
     if not _remove_stale_registry_entries():
@@ -256,4 +213,3 @@ def install_hunyuan_vl_processor_compat() -> None:
     from vllm.model_executor.models import hunyuan_vision as main_hunyuan_vision
 
     _patch_hunyuan_processor_loader(main_hunyuan_vision)
-    _patch_prompt_updates(main_hunyuan_vision)
