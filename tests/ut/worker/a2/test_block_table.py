@@ -201,6 +201,28 @@ class TestBlockTableComputeSlotMapping(TestBase):
             dcp_world_size=1, pcp_world_size=1, cp_kv_cache_interleave_size=1, test_configs=test_configs
         )
 
+    def test_compute_slot_mapping_cpu_dcp1_pcp1_interleave1(self):
+        block_table = self.create_block_table(
+            dcp_world_size=1,
+            dcp_rank=0,
+            pcp_world_size=1,
+            pcp_rank=0,
+            cp_kv_cache_interleave_size=1,
+        )
+        self.setup_block_table_data(block_table, num_reqs=2)
+
+        req_indices = np.array([0, 0, 1, 1], dtype=np.int32)
+        positions = np.array([0, 129, 0, 130], dtype=np.int64)
+
+        block_table.compute_slot_mapping_cpu(req_indices, positions)
+        block_table.commit_slot_mapping(len(positions))
+
+        expected_result = np.array([0, 129, 512, 642], dtype=np.int32)
+        np.testing.assert_array_equal(
+            block_table.slot_mapping.np[: len(positions)],
+            expected_result,
+        )
+
     def test_compute_slot_mapping_dcp4_pcp2_interleave1(self):
         """Test compute_slot_mapping with DCP=4, PCP=2, interleave_size=1
 

@@ -1087,9 +1087,23 @@ class NPUModelRunner(GPUModelRunner):
         self.discard_request_mask.np[:num_reqs] = discard_requests_mask
         self.discard_request_mask.copy_to_gpu(num_reqs)
 
+        use_legacy_small_decode_path = (
+            attn_state == AscendAttentionState.DecodeOnly
+            and num_reqs == 1
+            and total_num_scheduled_tokens <= 4
+            and self.pcp_size == 1
+            and self.dcp_size == 1
+            and not self.use_async_spec_decode
+            and not self.use_compress
+            and not self.need_accepted_tokens
+            and not scheduler_output.scheduled_spec_decode_tokens
+        )
+
         # Sync num_accepted_tokens from CPU (set by
         # _update_states_after_model_execute for hybrid models).
-        if self.num_accepted_tokens_event is not None:
+        if use_legacy_small_decode_path:
+            pass
+        elif self.num_accepted_tokens_event is not None:
             self.num_accepted_tokens_event.synchronize()
             # Async mode: condense() reordered indices, use prev_positions mapping
             if self.use_async_scheduling and prev_req_id_to_index:
@@ -1146,11 +1160,14 @@ class NPUModelRunner(GPUModelRunner):
                 non_blocking=True,
             )
 
-        self.req_indices.np[:total_num_scheduled_tokens] = req_indices
-        self.req_indices.copy_to_gpu(total_num_scheduled_tokens)
-        req_indices_gpu = self.req_indices.gpu[:total_num_scheduled_tokens]
+        if use_legacy_small_decode_path:
+            req_indices_gpu = None
+        else:
+            self.req_indices.np[:total_num_scheduled_tokens] = req_indices
+            self.req_indices.copy_to_gpu(total_num_scheduled_tokens)
+            req_indices_gpu = self.req_indices.gpu[:total_num_scheduled_tokens]
 
-        self.query_pos.copy_to_gpu(total_num_scheduled_tokens)
+            self.query_pos.copy_to_gpu(total_num_scheduled_tokens)
         self.num_scheduled_tokens.np[:num_reqs] = num_scheduled_tokens
         self.num_scheduled_tokens.copy_to_gpu(num_reqs)
         num_scheduled_tokens_gpu = self.num_scheduled_tokens.gpu[:num_reqs]
@@ -1196,7 +1213,13 @@ class NPUModelRunner(GPUModelRunner):
                 positions_ready_on_device=False,
             )
 
-        if cp_async_rebuild.positions_ready_on_device:
+        if use_legacy_small_decode_path:
+            # Reuse the pre-#7640 CPU-computed positions for tiny decode.
+            self.positions[:total_num_scheduled_tokens].copy_(
+                self._positions_cpu_buf[:total_num_scheduled_tokens],
+                non_blocking=True,
+            )
+        elif cp_async_rebuild.positions_ready_on_device:
             pass
         elif self.pcp_size > 1 or cp_async_rebuild.rebuilt:
             # PCP and async rebuild both compute the correct positions on CPU.
@@ -1209,6 +1232,7 @@ class NPUModelRunner(GPUModelRunner):
                 non_blocking=True,
             )
         else:
+            assert req_indices_gpu is not None
             self.positions[:total_num_scheduled_tokens] = (
                 self.num_computed_tokens[req_indices_gpu].to(torch.int64)
                 + self.query_pos.gpu[:total_num_scheduled_tokens]
@@ -1236,13 +1260,23 @@ class NPUModelRunner(GPUModelRunner):
         # For non-PCP, compute slot_mapping on GPU. PCP slot_mapping was
         # already computed on GPU before PCP split the positions.
         if self.pcp_size <= 1:
-            self.input_batch.block_table.compute_slot_mapping(
-                num_reqs,
-                self.query_start_loc.gpu[: num_reqs + 1],
-                self.positions[:total_num_scheduled_tokens],
-            )
+            if use_legacy_small_decode_path:
+                self.input_batch.block_table.compute_slot_mapping_cpu(
+                    req_indices,
+                    positions_np[:total_num_scheduled_tokens],
+                )
+                self.input_batch.block_table.commit_slot_mapping(
+                    total_num_scheduled_tokens
+                )
+            else:
+                self.input_batch.block_table.compute_slot_mapping(
+                    num_reqs,
+                    self.query_start_loc.gpu[: num_reqs + 1],
+                    self.positions[:total_num_scheduled_tokens],
+                )
 
         if self.use_async_spec_decode and (self.uses_mrope or self.uses_xdrope_dim > 0):
+            assert req_indices_gpu is not None
             drift = self.num_computed_tokens[req_indices_gpu].to(
                 torch.int64
             ) - computed_token_tensor_cpu[req_indices_gpu]

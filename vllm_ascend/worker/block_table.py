@@ -174,6 +174,36 @@ class BlockTable:
                 BLOCK_SIZE=1024,
             )
 
+    def compute_slot_mapping_cpu(
+        self,
+        req_indices: np.ndarray,
+        positions: np.ndarray,
+    ) -> None:
+        # #7640 moved this to an NPU kernel. Keep the pre-#7640 CPU path for
+        # tiny decode batches where kernel launch overhead dominates.
+        if self.dcp_world_size * self.pcp_world_size > 1:
+            self._compute_pcp_dcp_slot_mapping(
+                torch.from_numpy(req_indices),
+                torch.from_numpy(positions),
+            )
+        else:
+            assert self.kernel_sizes is not None
+            assert self.block_size == self.kernel_sizes[0]
+            logical_block_idx = positions // self.block_size
+            block_table_indices = (
+                req_indices
+                * self.max_num_blocks_per_req
+                * self.blocks_per_phys_block
+                + logical_block_idx
+            )
+            block_numbers = self.block_table.np.ravel()[block_table_indices]
+            block_offsets = positions % self.block_size
+            np.add(
+                block_numbers * self.block_size,
+                block_offsets,
+                out=self.slot_mapping.np[: req_indices.shape[0]],
+            )
+
     def compute_slot_mapping_draft(
         self,
         req_indices: np.ndarray | torch.Tensor,
@@ -273,6 +303,9 @@ class BlockTable:
 
     def commit_block_table(self, num_reqs: int) -> None:
         self.block_table.copy_to_gpu(num_reqs)
+
+    def commit_slot_mapping(self, num_tokens: int) -> None:
+        self.slot_mapping.copy_to_gpu(num_tokens)
 
     def clear(self) -> None:
         self.block_table.fill_(0)
@@ -426,6 +459,16 @@ class MultiGroupBlockTable:
             else:
                 block_table.compute_slot_mapping(num_reqs, query_start_loc, positions)
 
+    def compute_slot_mapping_cpu(
+        self,
+        req_indices: np.ndarray,
+        positions: np.ndarray,
+    ) -> None:
+        for block_table in self.block_tables:
+            if block_table.is_mamba_group:
+                continue
+            block_table.compute_slot_mapping_cpu(req_indices, positions)
+
     def compute_slot_mapping_draft(
         self,
         req_indices: np.ndarray | torch.Tensor,
@@ -444,6 +487,12 @@ class MultiGroupBlockTable:
     def commit_block_table(self, num_reqs: int) -> None:
         for block_table in self.block_tables:
             block_table.commit_block_table(num_reqs)
+
+    def commit_slot_mapping(self, num_tokens: int) -> None:
+        for block_table in self.block_tables:
+            if block_table.is_mamba_group:
+                continue
+            block_table.commit_slot_mapping(num_tokens)
 
     def clear(self) -> None:
         for block_table in self.block_tables:
