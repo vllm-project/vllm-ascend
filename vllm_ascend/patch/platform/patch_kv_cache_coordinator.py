@@ -31,6 +31,7 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.core.single_type_kv_cache_manager import get_manager_for_kv_cache_spec
+from vllm_ascend.utils import vllm_version_is
 
 USE_MULTI_GROUPS_KV_CACHE = True
 
@@ -454,17 +455,22 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
 def get_kv_cache_coordinator(
     kv_cache_config: KVCacheConfig,
     max_model_len: int,
-    max_num_batched_tokens: int,
-    use_eagle: bool,
-    enable_caching: bool,
-    enable_kv_cache_events: bool,
-    dcp_world_size: int,
-    pcp_world_size: int,
-    hash_block_size: int,
+    max_num_batched_tokens: int = 0,
+    use_eagle: bool = False,
+    enable_caching: bool = True,
+    enable_kv_cache_events: bool = False,
+    dcp_world_size: int = 1,
+    pcp_world_size: int = 1,
+    hash_block_size: int = 0,
     scheduler_block_size: int | None = None,
     eagle_attn_layer_names: list[str] | None = None,
     metrics_collector: KVCacheMetricsCollector | None = None,
+    # Upstream renamed max_num_batched_tokens to max_in_flight_tokens; accept
+    # whichever kwarg the caller (KVCacheManager on main vs 0.23.0) passes.
+    max_in_flight_tokens: int = 0,
 ) -> KVCacheCoordinator:
+    _budget = max_num_batched_tokens or max_in_flight_tokens
+
     if _is_deepseek_v4_kv_cache_config(kv_cache_config):
         return AscendHybridKVCacheCoordinator(
             kv_cache_config,
@@ -477,7 +483,7 @@ def get_kv_cache_coordinator(
             hash_block_size=hash_block_size,
             eagle_attn_layer_names=eagle_attn_layer_names,
             metrics_collector=metrics_collector,
-            max_num_batched_tokens=max_num_batched_tokens,
+            max_num_batched_tokens=_budget,
             scheduler_block_size=scheduler_block_size,
         )
 
@@ -485,7 +491,6 @@ def get_kv_cache_coordinator(
         orig_kwargs = dict(
             kv_cache_config=kv_cache_config,
             max_model_len=max_model_len,
-            max_num_batched_tokens=max_num_batched_tokens,
             use_eagle=use_eagle,
             enable_caching=enable_caching,
             enable_kv_cache_events=enable_kv_cache_events,
@@ -495,6 +500,11 @@ def get_kv_cache_coordinator(
             metrics_collector=metrics_collector,
         )
         orig_kwargs["scheduler_block_size"] = scheduler_block_size
+        # Pass the budget under the version-appropriate keyword name.
+        if vllm_version_is("0.23.0"):
+            orig_kwargs["max_num_batched_tokens"] = _budget
+        else:
+            orig_kwargs["max_in_flight_tokens"] = _budget
         return _orig_get_kv_cache_coordinator(**orig_kwargs)
 
     return AscendHybridKVCacheCoordinator(
@@ -508,7 +518,7 @@ def get_kv_cache_coordinator(
         hash_block_size=hash_block_size,
         eagle_attn_layer_names=eagle_attn_layer_names,
         metrics_collector=metrics_collector,
-        max_num_batched_tokens=max_num_batched_tokens,
+        max_num_batched_tokens=_budget,
         scheduler_block_size=scheduler_block_size,
     )
 

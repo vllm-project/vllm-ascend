@@ -286,9 +286,12 @@ def get_manager_for_kv_cache_spec(
         # ``max_model_len`` worth of blocks per request, exhausting the pool
         # at cc>=2 on DSv4 (see vLLM issue #40863).
         if max_num_batched_tokens is not None and max_model_len is not None:
+            # Upstream renamed the first arg of max_admission_blocks_per_request
+            # from `max_num_batched_tokens` to `max_in_flight_tokens`; pass it
+            # positionally so the same call works on both versions.
             kwargs["max_admission_blocks_per_request"] = kv_cache_spec.max_admission_blocks_per_request(
-                max_num_batched_tokens=max_num_batched_tokens,
-                max_model_len=max_model_len,
+                max_num_batched_tokens,
+                max_model_len,
             )
     manager = manager_class(kv_cache_spec, **kwargs)
     return manager
