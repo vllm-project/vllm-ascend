@@ -125,6 +125,120 @@ def prune_capture_sizes_for_950(vllm_config):
     )
 
 
+DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
+    {
+        "Qwen2MoeForCausalLM",
+    }
+)
+
+
+def _is_default_v2_model_runner_model(vllm_config: VllmConfig) -> bool:
+    model_config = vllm_config.model_config
+    if model_config is None:
+        return False
+
+    if model_config.runner_type != "generate":
+        return False
+
+    if getattr(model_config, "is_hybrid", False):
+        return False
+
+    if getattr(model_config, "is_attention_free", False):
+        return False
+    architectures = getattr(model_config, "architectures", [])
+    return any(arch in DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES for arch in architectures) or not model_config.is_moe
+
+
+def _get_v2_model_runner_unsupported_features(vllm_config: VllmConfig) -> list[str]:
+    unsupported: list[str] = []
+    model_config = vllm_config.model_config
+    speculative_config = vllm_config.speculative_config
+
+    if vllm_config.parallel_config.prefill_context_parallel_size > 1:
+        unsupported.append("prefill context parallelism")
+
+    if vllm_config.parallel_config.decode_context_parallel_size > 1:
+        unsupported.append("decode context parallelism")
+
+    from vllm.config.compilation import CompilationMode  # noqa: E402
+
+    if vllm_config.compilation_config.mode == CompilationMode.STOCK_TORCH_COMPILE:
+        unsupported.append("stock torch.compile")
+
+    if enable_sp(vllm_config) and vllm_config.parallel_config.tensor_parallel_size > 1:
+        unsupported.append("sequence parallelism")
+
+    if vllm_config.parallel_config.pipeline_parallel_size > 1:
+        unsupported.append("pipeline parallelism")
+
+    if vllm_config.parallel_config.data_parallel_size > 1:
+        unsupported.append("data parallelism")
+
+    if speculative_config is not None:
+        unsupported.append("spec decode")
+
+    if vllm_config.parallel_config.enable_dbo:
+        unsupported.append("dual batch overlap")
+
+    if vllm_config.parallel_config.enable_elastic_ep:
+        unsupported.append("elastic expert parallelism")
+
+    if model_config is not None and model_config.enable_return_routed_experts:
+        unsupported.append("routed experts capture")
+
+    has_logitsproc_plugins = False
+    if model_config is not None:
+        from importlib.metadata import entry_points
+
+        has_logitsproc_plugins = bool(entry_points(group="vllm.logits_processors"))
+
+    if model_config is not None and (model_config.logits_processors or has_logitsproc_plugins):
+        unsupported.append("custom logits processors")
+
+    if model_config is not None and model_config.enable_prompt_embeds:
+        unsupported.append("prompt embeds")
+
+    if (
+        model_config is not None
+        and model_config.runner_type == "generate"
+        and model_config.logprobs_mode in ("raw_logits", "processed_logits")
+    ):
+        unsupported.append(f"logprobs mode '{model_config.logprobs_mode}'")
+
+    if vllm_config.cache_config.kv_sharing_fast_prefill:
+        unsupported.append("KV sharing fast prefill")
+
+    if vllm_config.ec_transfer_config is not None:
+        unsupported.append("EC transfer")
+
+    return unsupported
+
+
+def _use_v2_model_runner(vllm_config: VllmConfig) -> bool:
+    use_v2_model_runner = envs_vllm.VLLM_USE_V2_MODEL_RUNNER
+    if use_v2_model_runner is not None:
+        return use_v2_model_runner
+
+    if not _is_default_v2_model_runner_model(vllm_config):
+        return False
+
+    from vllm.triton_utils import HAS_TRITON  # noqa: E402
+
+    if not HAS_TRITON:
+        logger.warning_once("Model Runner V2 requires Triton; using the V1 model runner instead.")
+        return False
+
+    unsupported = _get_v2_model_runner_unsupported_features(vllm_config)
+    if unsupported:
+        logger.warning_once(
+            "Model Runner V2 does not yet support %s; using the V1 model runner instead.",
+            ", ".join(unsupported),
+        )
+        return False
+
+    return True
+
+
 class NPUPlatform(Platform):
     _enum = PlatformEnum.OOT
     device_name: str = "npu"
@@ -182,7 +296,6 @@ class NPUPlatform(Platform):
 
     @classmethod
     def pre_register_and_update(cls, parser: FlexibleArgumentParser | None = None) -> None:
-        # Adapt the global patch here.
         from vllm_ascend.utils import adapt_patch
 
         adapt_patch(is_global_patch=True)
@@ -420,6 +533,10 @@ class NPUPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+        from vllm.config.vllm import VllmConfig as VllmConfig
+
+        VllmConfig.use_v2_model_runner = property(_use_v2_model_runner)
+
         from vllm_ascend.quantization.utils import maybe_auto_detect_quantization
 
         device_config = getattr(vllm_config, "device_config", None)
