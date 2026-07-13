@@ -114,6 +114,35 @@ def test_pp_ipc_runtime_patch_skips_pd_prefill_node():
     assert _use_pp_ipc_runtime_patch(vllm_config, use_pp=True) is False
 
 
+@pytest.mark.parametrize(
+    ("has_speculative_config", "is_last_rank", "broadcast_pp_output", "expected"),
+    [
+        (False, False, False, False),
+        (False, True, True, False),
+        (True, False, False, False),
+        (True, True, False, True),
+        (True, False, True, True),
+    ],
+)
+def test_pp_mtp_defers_kv_connector_only_on_ranks_that_run_draft(
+    monkeypatch,
+    has_speculative_config,
+    is_last_rank,
+    broadcast_pp_output,
+    expected,
+):
+    monkeypatch.setattr(
+        "vllm_ascend.worker.model_runner_v1.get_pp_group",
+        lambda: SimpleNamespace(is_last_rank=is_last_rank),
+    )
+
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.speculative_config = object() if has_speculative_config else None
+    runner.broadcast_pp_output = broadcast_pp_output
+
+    assert runner._should_defer_kv_connector_finalize() is expected
+
+
 @pytest.mark.parametrize("async_scheduling", [False, True])
 def test_pp_ipc_cached_request_data_carries_confirmed_token_for_sync_and_async(
     async_scheduling,
