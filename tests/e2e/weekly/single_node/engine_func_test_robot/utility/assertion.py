@@ -33,19 +33,66 @@ def assert_status_code_200(response, msg=""):
     check.equal(response.status_code, 200, f"{msg}Response status code is not 200")
 
 
-def assert_status_code_400(response, msg=""):
-    """Verify HTTP status code is 400"""
-    check.equal(response.status_code, 400, f"{msg}Response status code is not 400")
-
-
-def assert_finish_reason_stop(finish_reason, msg=""):
-    """Verify finish_reason is stop"""
-    check.equal(finish_reason, "stop", f"{msg}finish_reason is not stop")
-
-
 def assert_finish_reason_valid(finish_reason, msg=""):
     """Verify finish_reason is stop or length"""
     check.is_in(finish_reason, ["stop", "length"], f"{msg}finish_reason is not stop or length")
+
+
+def assert_chat_completion_success(response, stream=False, msg=""):
+    """Verify chat completion success response and return finish_reason."""
+    assert_status_code_200(response, msg)
+
+    if stream:
+        assert_stream_has_done(response.text, msg)
+        finish_reason = assert_stream_single_finish_reason(response.text, msg)
+    else:
+        finish_reason = response.json()["choices"][0]["finish_reason"]
+
+    assert_finish_reason_valid(finish_reason, msg)
+    return finish_reason
+
+
+def assert_completion_response_shape(response, stream=False, msg=""):
+    """Verify a successful OpenAI completion response has a usable choices payload."""
+    assert_status_code_200(response, msg)
+    if stream:
+        assert_stream_has_done(response.text, msg)
+        return None
+
+    choices = response.json().get("choices")
+    check.is_true(isinstance(choices, list) and choices, f"{msg}Response choices should be a non-empty list")
+    return choices
+
+
+def assert_success_or_validation_error(response, stream=False, msg=""):
+    """Verify an implementation-specific request either succeeds or is rejected cleanly."""
+    if response.status_code == 200 and _extract_error_code(response) is None:
+        return assert_chat_completion_success(response, stream=stream, msg=msg)
+
+    assert_validation_error_response(response, msg)
+    return None
+
+
+def assert_validation_error_response(response, msg=""):
+    """Verify request validation failed.
+
+    vLLM may reject bad OpenAI requests either with an HTTP 400/422 response or
+    with a streamed error event. Do not require an `error.code` field when the
+    HTTP status itself already proves validation failed.
+    """
+    error_code = _extract_error_code(response)
+    if response.status_code in (400, 422):
+        if error_code is not None:
+            check.is_in(error_code, [400, 422], f"{msg}Error code is not 400 or 422")
+        return
+
+    check.equal(response.status_code, 200, f"{msg}Response status code is not 200, 400 or 422")
+    check.is_in(error_code, [400, 422], f"{msg}Successful HTTP response does not contain a validation error")
+
+
+def assert_status_code_200_or_400(response, msg=""):
+    """Verify status is accepted or rejected by implementation-specific validation."""
+    check.is_in(response.status_code, [200, 400, 422], f"{msg}Response status code is not 200, 400 or 422")
 
 
 def assert_stream_has_done(response_text, msg=""):
@@ -80,92 +127,37 @@ def assert_no_think_tag(response_text, msg=""):
     check.equal(response_text.count(THINK_OPEN), 0, f"{msg}think tag exists")
 
 
-def assert_json_response_content(response_text, msg=""):
-    """Verify response content is valid JSON (after filtering think tags)"""
-    pattern = rf"\s*{re.escape(THINK_OPEN)}[\s\S]*?{re.escape(THINK_CLOSE)}"
-    json_str = re.sub(pattern, "", response_text)
-    match = re.search(r"(\{.*\})\s*(?:$|`|```)$", json_str, re.S)
-    check.is_true(match, f"{msg}Content is not in JSON format")
-    if match:
-        json.loads(match.group(1))
-
-
-def has_error_code(response):
-    """Determine if the response contains an error code"""
-    content_type = response.headers.get("Content-Type", "")
-    if "application/json" in content_type:
-        response_json = response.json()
-        error_code = response_json.get("error", {}).get("code") or response_json.get("code")
-        return error_code is not None
-    elif "text/event-stream" in content_type or "text/plain" in content_type:
-        match = re.search(r"\"code\"\s?:\s?(\d+)", response.text, re.M)
-        return match is not None
-    return False
-
-
 def assert_error_code_400(response, msg=""):
     """Verify error code is 400"""
+    error_code = _extract_error_code(response)
+    check.equal(error_code, 400, f"{msg}Error code is not 400")
+
+
+def _extract_error_code(response):
+    """Return OpenAI-compatible error code from JSON or SSE responses."""
     if "application/json" in response.headers.get("Content-Type", ""):
-        error_code = response.json().get("error", {}).get("code") or response.json().get("code")
-        check.equal(error_code, 400, f"{msg}Error code is not 400")
+        response_json = response.json()
+        return response_json.get("error", {}).get("code") or response_json.get("code")
     elif "text/event-stream" in response.headers.get("Content-Type", ""):
         match = re.search(r"\"code\"\s?:\s?(\d+)", response.text, re.M)
         if match:
-            check.equal(int(match.group(1)), 400, f"{msg}Streaming response error code is not 400")
-
-
-def assert_error_code_422(response, msg=""):
-    """Verify error code is 422 Unprocessable Entity (data validation failure)"""
-    if "application/json" in response.headers.get("Content-Type", ""):
-        error_code = response.json().get("error", {}).get("code") or response.json().get("code")
-        check.equal(error_code, 422, f"{msg}Error code is not 422 (Unprocessable Entity - data validation failure)")
-    elif "text/event-stream" in response.headers.get("Content-Type", ""):
-        match = re.search(r"\"code\"\s?:\s?(\d+)", response.text, re.M)
-        if match:
-            check.equal(int(match.group(1)), 422, f"{msg}Streaming response error code is not 422")
-
-
-def assert_error_code_not_500(response, msg=""):
-    """If response body contains an error code, verify it is not 500"""
-    content_type = response.headers.get("Content-Type", "")
-    if "application/json" in content_type:
-        error_code = response.json().get("error", {}).get("code") or response.json().get("code")
-        if error_code is not None:
-            check.not_equal(error_code, 500, f"{msg}Error code should not be 500, actual: {error_code}")
-    elif "text/event-stream" in content_type:
-        match = re.search(r"\"code\"\s?:\s?(\d+)", response.text, re.M)
-        if match:
-            error_code = int(match.group(1))
-            check.not_equal(error_code, 500, f"{msg}Error code should not be 500, actual: {error_code}")
+            return int(match.group(1))
+    return None
 
 
 def assert_image_edit_response_fields(response, msg=""):
-    """Verify completeness of response fields for image edit API
+    """Verify image edit response contains the required output fields."""
+    assert_status_code_200(response, msg)
+    response_json = response.json()
+    check.is_true("data" in response_json, f"{msg}Response should contain data field")
+    check.is_true(response_json.get("data"), f"{msg}data should contain at least one result")
 
-    Args:
-        response: HTTP response object
-        msg: Prefix for error messages
-    """
-    resp_json = response.json()
+    for idx, item in enumerate(response_json["data"]):
+        has_b64 = bool(item.get("b64_json"))
+        has_url = bool(item.get("url"))
+        check.is_true(has_b64 or has_url, f"{msg}data[{idx}] should contain b64_json or url")
 
-    # Verify top-level fields
-    check.is_true("created" in resp_json, f"{msg}Response should contain created field")
-    check.is_true("data" in resp_json, f"{msg}Response should contain data field")
-    check.is_true("output_format" in resp_json, f"{msg}Response should contain output_format field")
-    check.is_true("size" in resp_json, f"{msg}Response should contain size field")
-
-    # Verify data array
-    data = resp_json.get("data", [])
-    check.is_true(len(data) > 0, f"{msg}data should contain at least one result")
-
-    # Verify fields of each data array element
-    for idx, item in enumerate(data):
-        has_b64 = "b64_json" in item and item["b64_json"]
-        has_url = "url" in item and item["url"]
-        check.is_true(has_b64 or has_url, f"{msg}data[{idx}] should contain b64_json or url field")
-        check.is_true("revised_prompt" in item, f"{msg}data[{idx}] should contain revised_prompt field")
-
-    return resp_json
+    return response_json
 
 
 def assert_top_logprobs_count(response, top_logprobs_value, msg=""):

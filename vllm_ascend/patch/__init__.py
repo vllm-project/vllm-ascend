@@ -1138,3 +1138,38 @@
 #       runner and can rely on upstream's default enablement heuristics
 #       (model architecture, Triton, feature checks) without crashes or
 #       degraded functionality.
+#
+# ** 31. File: worker/patch_qwen3_dspark.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.spec_decode.llm_base_proposer.SpecDecodeBaseProposer`
+#    Why:
+#       The config.json of the open-source dspark contains two types of
+#       "mask_token_id" with different variable names and indentation.
+#       Currently, the vllm community has only added support for deepseek,
+#       but not for the qwen/glm series. In model_runner_v1, since the
+#       initialization of vllm/eagle_proposer is performed first, followed
+#       by the initialization of vllm-ascend/llm_base_proposer, this
+#       modification cannot be implemented in vllm-ascend/llm_base_proposer.
+#    How:
+#       Override the `SpecDecodeBaseProposer._init_parallel_drafting_params`
+#       method and add the reading of the `dspark config.json` for `qwen/glm`
+#    Future Plan:
+#       Remove this patch once vllm-ascend fully supports the v2 model
+#       runner.
+#
+# ** 32. File: worker/patch_step3p5.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.step3p5.Step3p5Attention.forward`
+#    Why:
+#       Add split_qkv_rmsnorm_rope support for step3.5/3.7. This model can't use
+#       fusion pass to enable this op because of 2 reasons: 1) Step uses
+#       Gemmanorm instead of normal norm, so existing fusion pass can't be
+#       matched. 2) Step has 2 kinds of attention layer (full attention and
+#       sliding window attention), each has different number of q_head. Right
+#       now, torch.compile will use same pattern to match different attention
+#       layer so there will be shape mismatch in split op.
+#    How:
+#       Monkey-patch Step3p5Attention.forward to enable split_qkv_rmsnorm_rope.
+#    Future Plan:
+#       Remove this patch once torch.compile fully supports matching pattern from
+#       op's params.
