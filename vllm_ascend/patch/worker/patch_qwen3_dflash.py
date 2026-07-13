@@ -70,7 +70,7 @@ def precompute_and_store_context_kv(
 
 DFlashQwen3Model.precompute_and_store_context_kv = precompute_and_store_context_kv
 
-if not vllm_version_is("0.23.0"):
+if not (vllm_version_is("0.23.0") or vllm_version_is("0.24.0")):
     _orig_read_mask_embedding = DFlashQwen3ForCausalLM._read_mask_embedding
 
     def _patched_read_mask_embedding(self):
