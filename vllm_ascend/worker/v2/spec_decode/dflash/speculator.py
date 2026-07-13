@@ -71,7 +71,6 @@ class AscendDFlashSpeculator(DFlashSpeculator):
             dtype=torch.int32,
             device=self.device,
         )
-        # 这个地方好好看看
         # npu needs attn_backends to update full graph params in run_fullgraph.
         attn_backends: dict[str, type[AttentionBackend]] = {}
         active_layer_names = self.draft_attn_layer_names
@@ -87,17 +86,6 @@ class AscendDFlashSpeculator(DFlashSpeculator):
                 attn_backends[layer_name] = attn_layers[layer_name].get_attn_backend()
 
         self.attn_backends = attn_backends
-        
-    # def build_draft_attn_metadatas(self, num_reqs_padded, is_draft_model_prefill):
-    #     """Build draft_attn_metadatas for the parallel-drafting draft graph."""
-    #     attn_metadata = self.model_state.attn_metadata
-    #     attn_metadata = {
-    #         name: metadata for name, metadata in attn_metadata.items() if name in self.draft_attn_layer_names
-    #     }
-    #     # DFlash computes all speculative tokens in a single parallel forward pass,
-    #     # so there is only one prefill-style draft attention metadata (no per-step
-    #     # decode metadata like Eagle).
-    #     return [attn_metadata]
     
     def build_draft_attn_metadatas(self, num_reqs_padded, is_draft_model_prefill):
         num_tokens_padded = num_reqs_padded * self.num_query_per_req
