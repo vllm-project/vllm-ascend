@@ -2694,7 +2694,10 @@ class MooncakeConnectorWorker:
                     remote_host = meta.remote_host
                 else:
                     remote_host = remote_host_info["host"]
-                remote_port_send_num[self._compute_remote_handshake_port(port_offset, meta)] = {"num": 0, "host": remote_host}
+                remote_port_send_num[self._compute_remote_handshake_port(port_offset, meta)] = {
+                    "num": 0,
+                    "host": remote_host,
+                }
 
             for remote_port_head_list in local_remote_block_port_mappings.values():
                 for remote_port_list in remote_port_head_list:
