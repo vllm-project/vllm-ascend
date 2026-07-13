@@ -166,6 +166,7 @@ class AscendConfig:
         self.enable_sleep_mode_extra_cleanup = additional_config.get("enable_sleep_mode_extra_cleanup", False)
         self.multistream_dsv4_dsa_overlap = additional_config.get("multistream_dsv4_dsa_overlap", True)
         self.enable_prefill_mc2 = bool(additional_config.get("enable_prefill_mc2", False))
+        self.enable_attention_pd_split = bool(additional_config.get("enable_attention_pd_split", False))
 
         self.enable_matmul_allreduce = self._get_config_value(
             additional_config,
