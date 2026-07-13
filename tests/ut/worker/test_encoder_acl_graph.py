@@ -5,6 +5,7 @@ import pytest
 import torch
 from vllm.config import CompilationConfig, VllmConfig
 
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker import encoder_acl_graph
 from vllm_ascend.worker.encoder_acl_graph import (
     EncoderAclGraphManager,
