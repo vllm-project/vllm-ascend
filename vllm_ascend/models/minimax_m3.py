@@ -99,7 +99,7 @@ from vllm.model_executor.models.utils import (
 from vllm.model_executor.models.vision import run_dp_sharded_mrope_vision_model
 
 from vllm_ascend.attention.msa_m3 import MiniMaxM3SparseAttention
-from vllm_ascend.models.minimax_m3_vit import MiniMaxVLVisionModel
+from vllm_ascend.models.minimax_m3_vllm_vision import MiniMaxVLVisionModel
 
 
 logger = init_logger(__name__)
@@ -267,17 +267,16 @@ class MiniMaxM3MoE(nn.Module):
             hidden_size=config.hidden_size,
             intermediate_size=config.intermediate_size,
             renormalize=True,
-            activation="swigluoai",
+            activation="swigluoai_uninterleave",
             swiglu_limit=config.swiglu_limit,
+            swiglu_alpha=config.swiglu_alpha,
+            swiglu_beta=getattr(config, "swiglu_beta", 1.0),
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
             router_logits_dtype=self.gate.out_dtype,
             routed_scaling_factor=self.routed_scaling_factor,
             apply_routed_scale_to_output=True,
         )
-        self.experts.swiglu_alpha = config.swiglu_alpha
-        self.experts.swiglu_beta = getattr(config, "swiglu_beta", 1.0)
-        self.experts.swigluoai_uninterleave = True
 
     @staticmethod
     def ebias_weight_loader(param: nn.Parameter, loaded_weight: torch.Tensor) -> None:

@@ -5,8 +5,6 @@ from vllm.model_executor.models.qwen3_dflash import (
     DFlashQwen3Model,
 )
 
-from vllm_ascend.utils import vllm_version_is
-
 
 def precompute_and_store_context_kv(
     self,
@@ -70,7 +68,9 @@ def precompute_and_store_context_kv(
 
 DFlashQwen3Model.precompute_and_store_context_kv = precompute_and_store_context_kv
 
-if not vllm_version_is("0.23.0"):
+# This helper was added after the vLLM v0.24 release. Only patch revisions
+# that expose it; older releases do not download a separate mask embedding.
+if hasattr(DFlashQwen3ForCausalLM, "_read_mask_embedding"):
     _orig_read_mask_embedding = DFlashQwen3ForCausalLM._read_mask_embedding
 
     def _patched_read_mask_embedding(self):
