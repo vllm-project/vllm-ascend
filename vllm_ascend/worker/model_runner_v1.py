@@ -3408,7 +3408,7 @@ class NPUModelRunner(GPUModelRunner):
         profile_seq_lens: int | None = None,
         profile_cpp: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        logger.info("dummy_run, num_tokens=%s, with_prefill=%s, cudagraph_runtime_mode=%s, is_graph_capturing=%s", num_tokens, with_prefill, cudagraph_runtime_mode, is_graph_capturing)
+        # logger.info("dummy_run, num_tokens=%s, with_prefill=%s, cudagraph_runtime_mode=%s, is_graph_capturing=%s", num_tokens, with_prefill, cudagraph_runtime_mode, is_graph_capturing)
         # only support eager mode and piecewise graph now
         assert cudagraph_runtime_mode is None or cudagraph_runtime_mode.valid_runtime_modes()
         # If cudagraph_mode.decode_mode() == FULL and

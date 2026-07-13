@@ -1120,7 +1120,7 @@ class NPUWorker(WorkerBase):
                         is_warmup,
                         cudagraph_mode,
                     ) = self.model_runner.connector.recv_dp_metadata_list()
-                    logger.info(f"jcz dp_metadata_list:{dp_metadata_list} is_attn_graph_capturing:{is_attn_graph_capturing} is_warmup:{is_warmup} cudagraph_mode:{cudagraph_mode}")
+                    # logger.info(f"jcz dp_metadata_list:{dp_metadata_list} is_attn_graph_capturing:{is_attn_graph_capturing} is_warmup:{is_warmup} cudagraph_mode:{cudagraph_mode}")
                     # if is_attn_graph_capturing or (is_warmup and not self.model_config.enforce_eager):
                     if is_warmup and not self.model_config.enforce_eager:
                         # Capture模式：根据metadata执行warmup或capture
