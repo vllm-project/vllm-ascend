@@ -142,6 +142,21 @@ def _is_glm_model(model_config) -> bool:
     return "glm" in str(model_type).lower()
 
 
+def _is_dspark_draft_model(model_config) -> bool:
+    if model_config is None:
+        return False
+    hf_config = getattr(model_config, "hf_config", None)
+    if hf_config is None:
+        return False
+    architectures = getattr(hf_config, "architectures", []) or []
+    if "DSparkDraftModel" in architectures:
+        return True
+    if getattr(hf_config, "speculators_model_type", None) == "dspark":
+        return True
+    dflash_config = getattr(hf_config, "dflash_config", None) or {}
+    return dflash_config.get("source_speculators_model_type") == "dspark"
+
+
 class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     _runnable: ACLGraphWrapper | Callable
 
@@ -216,14 +231,15 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.use_cuda_graph = self.runner._use_aclgraph() and not self.speculative_config.enforce_eager
         self._raise_if_padded_drafter_batch_disabled_and_full_graph_enabled()
 
-        # GLM series models: speculative decoding does not yet support running
-        # the draft model in graph mode. Force the draft model to always use
-        # eager mode. This is equivalent to the user adding
-        # `"enforce_eager": true` to the `--speculative-config`, and keeps
-        # the target model's graph-mode setting untouched.
-        # TODO(lilinsiman): Remove this code segment after future versions of the GLM
-        # series models support graph input for speculative inference.
-        if _is_glm_model(self.vllm_config.model_config):
+        # Preserve the upstream GLM force-eager default. Validated DSpark paths
+        # can opt into draft graph capture explicitly while other GLM draft
+        # methods remain protected.
+        enable_glm_dspark_draft_graph = (
+            _is_dspark_draft_model(draft_model_config)
+            and os.getenv("VLLM_ASCEND_ENABLE_GLM_DSPARK_DRAFT_GRAPH", "0").lower()
+            in ("1", "true", "yes", "on")
+        )
+        if _is_glm_model(self.vllm_config.model_config) and not enable_glm_dspark_draft_graph:
             if self.use_cuda_graph:
                 logger.warning(
                     "GLM series models with speculative decoding currently do "
@@ -233,6 +249,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     "speculative decoding will be added in a future release. "
                 )
             self.use_cuda_graph = False
+        elif enable_glm_dspark_draft_graph and self.use_cuda_graph:
+            logger.warning(
+                "VLLM_ASCEND_ENABLE_GLM_DSPARK_DRAFT_GRAPH is enabled; "
+                "attempting experimental ACL graph capture for the DSpark "
+                "draft model."
+            )
 
         # TODO: Remove it when the bug of fx-graph is solved
         self.maybe_eager_context: AbstractContextManager[Any] = nullcontext()

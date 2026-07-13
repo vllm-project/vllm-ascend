@@ -596,15 +596,14 @@ class DFlashQwen3Model(nn.Module):
 
         # --- Per-layer cache insert ---
         all_k_final = all_k_flat.view(L, num_ctx, nkv, hd)
-        if context_slot_mapping.ndim == 1:
-            valid_context = context_slot_mapping >= 0
-        else:
-            valid_context = (context_slot_mapping >= 0).all(dim=-1)
-
         if (
             os.getenv("DSPARK_LOGITS_DEBUG", "0").lower() in ("1", "true", "yes", "on")
             and getattr(self, "_dspark_context_kv_debug_count", 0) < 4
         ):
+            if context_slot_mapping.ndim == 1:
+                valid_context = context_slot_mapping >= 0
+            else:
+                valid_context = (context_slot_mapping >= 0).all(dim=-1)
             self._dspark_context_kv_debug_count = (
                 getattr(self, "_dspark_context_kv_debug_count", 0) + 1
             )
@@ -617,16 +616,17 @@ class DFlashQwen3Model(nn.Module):
                 context_slot_mapping[-8:].detach().cpu().tolist(),
             )
 
-        context_slot_mapping = context_slot_mapping[valid_context].to(torch.int32).contiguous()
-        if context_slot_mapping.numel() == 0:
-            return
+        # Keep the cache-update inputs fixed-shape for ACL graph capture.
+        # DeviceOperator.reshape_and_cache treats negative slot ids as padding,
+        # matching the upstream DFlash graph path.
+        context_slot_mapping = context_slot_mapping.to(torch.int32).contiguous()
         for i in range(L):
             attn = self._attn_layers[i]
             kv_cache = attn.kv_cache
             attn.impl.do_kv_cache_update(
                 attn,
-                all_k_final[i][valid_context].contiguous(),
-                all_v[i][valid_context].contiguous(),
+                all_k_final[i].contiguous(),
+                all_v[i].contiguous(),
                 kv_cache,
                 context_slot_mapping,
             )
