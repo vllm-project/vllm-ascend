@@ -116,7 +116,7 @@ class HCCLWeightTransferEngine(WeightTransferEngine[HCCLWeightTransferInitInfo, 
     init_info_cls = HCCLWeightTransferInitInfo
     update_info_cls = HCCLWeightTransferUpdateInfo
 
-    if vllm_version_is("0.23.0"):
+    if vllm_version_is("0.23.0") or vllm_version_is("0.24.0"):
 
         def __init__(
             self,
@@ -139,7 +139,7 @@ class HCCLWeightTransferEngine(WeightTransferEngine[HCCLWeightTransferInitInfo, 
             super().__init__(config, vllm_config, device, model)
             self.model_update_group: PyHcclCommunicator | None = None  # type: ignore[no-redef]
 
-    if not vllm_version_is("0.23.0"):
+    if not (vllm_version_is("0.23.0") or vllm_version_is("0.24.0")):
 
         def start_weight_update(self) -> None:
             from vllm.model_executor.model_loader.reload import (
