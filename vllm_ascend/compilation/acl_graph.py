@@ -21,6 +21,7 @@ from vllm.logger import logger
 from vllm.platforms import current_platform
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+import vllm_ascend.envs as envs_ascend
 
 from ..utils import weak_ref_tensors
 
@@ -114,7 +115,41 @@ class ACLGraphWrapper:
         self.concrete_aclgraph_entries: dict[BatchDescriptor, ACLGraphEntry] = {}
         self.enable_enpu = enable_enpu
         self.use_eagle = use_eagle
+        # Fine-grained replay-sync (VLLM_ASCEND_FINE_GRAIN_REPLAY_SYNC): per
+        # batch_descriptor double-buffered replay-done events + step counter.
+        # After each replay, the slot for the current step is recorded on
+        # current_stream. The NEXT step's update waits the PREVIOUS step's
+        # replay-done event on update_stream. Double-buffering avoids a single
+        # reused event being overwritten before its wait is consumed.
+        #
+        # State machine (two slots so update[i] waits replay[i-1], NOT replay[i]):
+        #   _fg_pending_wait_event : the event the CURRENT step's update should
+        #                            wait = the PREVIOUS step's replay event.
+        #   _fg_just_recorded      : the event the CURRENT step's replay just
+        #                            recorded; promoted to pending at the start
+        #                            of the NEXT step's __call__.
+        # __call__ order: promote just_recorded -> pending; replay; record new.
+        self._fg_replay_events: dict[BatchDescriptor, list[torch.npu.Event]] = {}
+        self._fg_replay_step: dict[BatchDescriptor, int] = {}
+        self._fg_pending_wait_event: torch.npu.Event | None = None
+        self._fg_just_recorded: torch.npu.Event | None = None
         _acl_graph_wrappers.add(self)
+
+    def _fg_get_slots(self, batch_descriptor: BatchDescriptor) -> list[torch.npu.Event]:
+        slots = self._fg_replay_events.get(batch_descriptor)
+        if slots is None:
+            slots = [torch.npu.Event() for _ in range(2)]
+            self._fg_replay_events[batch_descriptor] = slots
+            self._fg_replay_step[batch_descriptor] = 0
+        return slots
+
+    def consume_fg_pending_wait_event(self) -> torch.npu.Event | None:
+        """Return (and clear) the replay-done event the next update must wait
+        on. Called by the model_runner right before issuing the graph-param
+        update on update_stream."""
+        ev = self._fg_pending_wait_event
+        self._fg_pending_wait_event = None
+        return ev
 
     def __getattr__(self, key: str):
         # allow accessing the attributes of the runnable.
@@ -261,9 +296,25 @@ class ACLGraphWrapper:
         # When FULL + EAGLE draft (merge path), replay does not need this barrier.
         is_draft_eagle = _EXTRA_CTX.is_draft_model and self.use_eagle
         need_sync = self.runtime_mode == CUDAGraphMode.FULL and not is_draft_eagle
-        if not self.enable_enpu and need_sync:
+        fg_sync = envs_ascend.VLLM_ASCEND_FINE_GRAIN_REPLAY_SYNC
+        if fg_sync and need_sync:
+            # Promote the PREVIOUS step's just-recorded replay event to be the
+            # one THIS step's update will wait. This makes update[i] wait
+            # replay[i-1] (cross-iteration), never replay[i] (same-iteration,
+            # which would deadlock the ExternalEvent value-rendezvous).
+            self._fg_pending_wait_event = self._fg_just_recorded
+            self._fg_just_recorded = None
+        elif not self.enable_enpu and need_sync:
             torch.npu.current_stream().synchronize()
         entry.aclgraph.replay()
+        if fg_sync and need_sync:
+            # Record a replay-done marker on current_stream (double-buffered,
+            # cycled per step). It becomes the NEXT step's pending-wait event.
+            slots = self._fg_get_slots(batch_descriptor)
+            step = self._fg_replay_step[batch_descriptor]
+            slots[step % 2].record(torch.npu.current_stream())
+            self._fg_replay_step[batch_descriptor] = step + 1
+            self._fg_just_recorded = slots[step % 2]
         return entry.output
 
 
