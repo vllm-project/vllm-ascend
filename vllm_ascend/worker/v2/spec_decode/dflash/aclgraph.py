@@ -11,7 +11,6 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm_ascend.worker.v2.utils import communicator_switch
 from vllm_ascend.worker.v2.aclgraph_utils import model_capture_wrapper
 from vllm.v1.worker.gpu.cudagraph_utils import (  # type: ignore[import-not-found]
-    AttentionStatePair,
     BatchExecutionDescriptor,
 )
 from vllm.forward_context import get_forward_context, set_forward_context
@@ -46,10 +45,7 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         # `prefill` graph and `decodes` graph are different, `decode_query_len` can be used to distinguish them
         self.is_draft_model_prefill = decode_query_len > 1
         if super().needs_capture():
-            if self.is_draft_model_prefill:
-                set_draft_graph_prefill_params(self.capture_sizes)
-            else:
-                set_draft_graph_params(self.capture_sizes)
+            set_draft_graph_prefill_params(self.capture_sizes)
 
     def capture(
         self,
@@ -62,7 +58,7 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         progress_bar_desc: str = "Capturing CUDA graphs",
     ) -> None:
         """Capture ACL graphs for Eagle."""
-        with communicator_switch(), model_capture_wrapper(self.speculator, self.is_draft_model_prefill):
+        with communicator_switch(), model_capture_wrapper(self.speculator, True):
             super().capture(
                 forward_fn,
                 input_buffers,
@@ -77,10 +73,10 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         """Override run_fullgraph to update full graph params in run_fullgraph."""
         num_tokens = desc.num_tokens
 
-        # 这块代码是做什么的呢？
-        draft_attn_metadatas = self.speculator.build_draft_attn_metadatas(desc.num_reqs, self.is_draft_model_prefill)
- 
+        draft_attn_metadatas = self.speculator.build_draft_attn_metadatas(desc.num_reqs, True)
+
         ret = super().run_fullgraph(desc)
+        logger.info("DFlash run_fullgraph: graph replay done")
 
         positions = self.speculator.input_buffers.positions[:num_tokens]
 
@@ -101,7 +97,7 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
             _EXTRA_CTX.is_draft_model = True
 
             # decide to run `prefill` graph or `decodes` graph
-            _EXTRA_CTX.is_draft_model_prefill = self.is_draft_model_prefill
+            _EXTRA_CTX.is_draft_model_prefill = True
 
             forward_context = get_forward_context()
             
@@ -117,4 +113,5 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
                 positions.shape[0],
                 draft_attn_metadatas=draft_attn_metadatas,
             )
+        logger.info("DFlash run_fullgraph done: num_tokens=%s", num_tokens)
         return ret
