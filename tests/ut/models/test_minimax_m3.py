@@ -3,14 +3,20 @@
 
 from __future__ import annotations
 
+import inspect
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 import torch
+import vllm
 from torch import nn
 from transformers import PretrainedConfig
 
 from vllm_ascend.models.minimax_m3 import (
     MiniMaxM3Attention,
+    MiniMaxM3MoE,
+    MiniMaxVLVisionModel,
     _get_rope_parameters,
     _sparse_attention_layer_ids,
 )
@@ -79,6 +85,62 @@ def _make_attention() -> MiniMaxM3Attention:
 
 
 class TestMiniMaxM3Modeling(unittest.TestCase):
+
+    def test_vision_tower_uses_vllm_common_implementation(self) -> None:
+        source_file = inspect.getsourcefile(MiniMaxVLVisionModel)
+        self.assertIsNotNone(source_file)
+        self.assertIsNotNone(vllm.__file__)
+        expected_source = (
+            Path(vllm.__file__).resolve().parent
+            / "models"
+            / "minimax_m3"
+            / "common"
+            / "vision_tower.py"
+        )
+        self.assertTrue(Path(source_file).samefile(expected_source))
+
+    def test_moe_passes_swigluoai_config_during_construction(self) -> None:
+        config = PretrainedConfig(
+            hidden_size=64,
+            intermediate_size=32,
+            num_local_experts=8,
+            num_experts_per_tok=2,
+            scoring_func="sigmoid",
+            n_shared_experts=1,
+            use_routing_bias=False,
+            routed_scaling_factor=1.0,
+            swiglu_limit=7.0,
+            swiglu_alpha=1.702,
+            swiglu_beta=1.0,
+        )
+        gate = nn.Identity()
+        gate.out_dtype = torch.float32
+
+        with (
+            patch(
+                "vllm_ascend.models.minimax_m3."
+                "get_tensor_model_parallel_world_size",
+                return_value=1,
+            ),
+            patch(
+                "vllm_ascend.models.minimax_m3.MiniMaxM3MLP",
+                return_value=nn.Identity(),
+            ),
+            patch(
+                "vllm_ascend.models.minimax_m3.GateLinear",
+                return_value=gate,
+            ),
+            patch(
+                "vllm_ascend.models.minimax_m3.FusedMoE",
+                return_value=nn.Identity(),
+            ) as fused_moe,
+        ):
+            MiniMaxM3MoE(config=config, prefix="model.layers.0.block_sparse_moe")
+
+        kwargs = fused_moe.call_args.kwargs
+        self.assertEqual(kwargs["activation"], "swigluoai_uninterleave")
+        self.assertEqual(kwargs["swiglu_alpha"], config.swiglu_alpha)
+        self.assertEqual(kwargs["swiglu_beta"], config.swiglu_beta)
 
     def test_attention_makes_value_states_contiguous(self) -> None:
         attention = _make_attention()
