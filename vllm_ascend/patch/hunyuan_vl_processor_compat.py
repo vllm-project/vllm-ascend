@@ -80,7 +80,7 @@ class _HunYuanVLProcessorCompat(HunYuanVLProcessor):
 
 
 def _import_v023_hunyuan_vision() -> Any:
-    """Import v0.23's model with the native processors from vLLM PR #47872."""
+    """Import a bundled release model with native processors from vLLM PR #47872."""
     from transformers.models.hunyuan_vl.image_processing_hunyuan_vl import (
         HunYuanVLImageProcessor,
         smart_resize,
@@ -201,7 +201,7 @@ def install_hunyuan_vl_processor_compat() -> None:
     # Keep each target's native, image-token-only prompt replacement. The
     # cached processor path applies it inside an existing start/image/end
     # wrapper; using a full-wrapper replacement here would duplicate wrappers.
-    if vllm_version_is("0.23.0"):
+    if vllm_version_is("0.23.0") or vllm_version_is("0.24.0"):
         v023_hunyuan_vision = _import_v023_hunyuan_vision()
         _remove_stale_registry_entries()
         _patch_hunyuan_processor_loader(v023_hunyuan_vision)
