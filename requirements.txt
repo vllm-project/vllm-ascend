@@ -14,7 +14,7 @@ psutil
 setuptools>=64
 setuptools-scm>=8
 torch==2.10.0
-torch-npu==2.10.0
+torch-npu==2.10.0.post2
 torchvision==0.25.0
 torchaudio==2.10.0
 triton-ascend==3.2.1
