@@ -55,6 +55,7 @@ from vllm_ascend.distributed.parallel_state import get_lmhead_tp_group
 from vllm_ascend.models.llama_eagle3_vwn import Eagle3VwnLlamaForCausalLM
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
+from vllm_ascend.spec_decode.utils import SlidingWindowAdapter
 from vllm_ascend.utils import enable_sp, lmhead_tp_enable, shared_expert_dp_enabled, vllm_version_is
 
 if not vllm_version_is("0.23.0"):
@@ -284,6 +285,30 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.token_arange_np = np.arange(self.max_num_tokens + 1, dtype=np.int32)
         self.enable_enpu = self.runner.enable_enpu
         self.use_eagle = self.runner.use_eagle
+        # Sliding window attention for draft model
+        self.draft_window_size = getattr(self.speculative_config, "draft_window_size", None)
+        if self.draft_window_size is None and self.vllm_config.additional_config:
+            self.draft_window_size = self.vllm_config.additional_config.get("draft_window_size")
+        else:
+            self.draft_window_size = None
+
+        # Sliding-window draft attention adapter. Reuse ``self.draft_window_size``
+        # resolved above (speculative_config -> additional_config -> None, all
+        # None-guarded). Do NOT re-read additional_config here: it is None in the
+        # proposers used by unit tests, and the unguarded ``.get()`` would crash.
+        if self.draft_window_size is not None:
+            # EAGLE3: seq_lens at apply time is context-only, so the window end
+            # must cover the K draft positions beyond it -> future_offset = K.
+            # DFlash: set_inputs_first_pass already bakes the query stretch
+            # (bonus + mask) into seq_lens -> future_offset = 0.
+            future_offset = 0 if self.method == "dflash" else self.num_speculative_tokens
+            self.sliding_window = SlidingWindowAdapter(
+                self.draft_window_size,
+                self.runner.block_size,
+                self.runner.max_num_reqs,
+                future_offset,
+                self.device,
+            )
 
     def _raise_if_padded_drafter_batch_disabled_and_full_graph_enabled(self):
         if (
@@ -888,6 +913,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 common_attn_metadata.block_table_tensor = self._adjust_tensor(
                     common_attn_metadata.block_table_tensor, num_reqs_padded
                 )
+
+        if self.draft_window_size is not None:
+            # Save original seq_lens and apply sliding window before any CP adjustments.
+            # Guarded so the clone is skipped when the window is disabled.
+            self.sliding_window.apply(common_attn_metadata)
 
         if self.supports_mm_inputs:
             mm_embeds, is_mm_embed = mm_embed_inputs or (None, None)
@@ -1777,11 +1807,19 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 block_size = 128
 
             # Compute the slot mapping.
+            # When sliding window is enabled, block_table_tensor may be cropped
+            # for attention, but slot mapping needs the full block table to
+            # address the absolute KV cache positions.
+            if self.draft_window_size is not None:
+                block_table_for_slot = self.sliding_window.full_block_table
+            else:
+                block_table_for_slot = old_common_metadata.block_table_tensor
+
             if self.uses_mrope:
                 block_numbers = clamped_positions[0] // block_size
             else:
                 block_numbers = clamped_positions // block_size
-            block_ids = old_common_metadata.block_table_tensor.gather(dim=1, index=block_numbers.view(-1, 1))
+            block_ids = block_table_for_slot.gather(dim=1, index=block_numbers.view(-1, 1))
             block_ids = block_ids.view(-1)
             if self.uses_mrope:
                 slot_mapping = block_ids * block_size + clamped_positions[0] % block_size
