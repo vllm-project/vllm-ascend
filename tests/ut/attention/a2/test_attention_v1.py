@@ -10,6 +10,7 @@ from vllm_ascend.attention.attention_v1 import (
     AscendAttentionBackendImpl,
     AscendAttentionMetadataBuilder,
     AscendAttentionState,
+    AscendC8AttentionBackendImpl,
 )
 from vllm_ascend.attention.kvcomp_attn.attention_utils import get_kvcomp_decode_params, reshape_and_cache_kvcomp
 from vllm_ascend.attention.utils import (
@@ -288,6 +289,42 @@ class TestAscendAttentionBackendImpl(TestBase):
             attn_type=self.attention_type.DECODER,
             kv_sharing_target_layer_name=None,
         )
+
+    def test_shared_kv_prefill_requires_block_tables(self):
+        self.impl.uses_shared_kv_cache = True
+        self.impl.kv_sharing_target_layer_name = "model.layers.0.self_attn.attn"
+        self.impl.key_cache = torch.empty(1, 16, 8, 64)
+        self.impl.value_cache = torch.empty(1, 16, 8, 64)
+        metadata = self.attn_metadata
+        metadata.attn_state = AscendAttentionState.PrefillNoCache
+        metadata.block_tables = None
+        key = torch.empty(1, 8, 64)
+        value = torch.empty(1, 8, 64)
+
+        with self.assertRaisesRegex(RuntimeError, "Shared KV cache consumers require block_tables"):
+            self.impl._get_fia_params(key, value, metadata)
+
+    @patch("vllm_ascend.attention.attention_v1.torch_npu.npu_scatter_pa_kv_cache")
+    def test_c8_shared_kv_consumer_does_not_update_cache(self, mock_scatter_cache):
+        impl = AscendC8AttentionBackendImpl.__new__(AscendC8AttentionBackendImpl)
+        impl.uses_shared_kv_cache = True
+        impl.key_cache = None
+        impl.value_cache = None
+        query = torch.empty(1, 8, 64)
+        key = torch.empty(1, 8, 64, dtype=torch.int8)
+        value = torch.empty(1, 8, 64, dtype=torch.int8)
+        output = torch.empty_like(query)
+        kv_cache = (torch.empty(1, 16, 8, 64), torch.empty(1, 16, 8, 64))
+
+        result = impl._reshape_and_cache(query, key, value, kv_cache, self.attn_metadata, output)
+
+        mock_scatter_cache.assert_not_called()
+        self.assertIs(impl.key_cache, kv_cache[0])
+        self.assertIs(impl.value_cache, kv_cache[1])
+        self.assertIs(result[0], query)
+        self.assertIs(result[1], key)
+        self.assertIs(result[2], value)
+        self.assertIs(result[3], output)
 
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     def test_large_head_prefill_uses_device_operator_fallback(self, mock_get_forward_context):
@@ -837,3 +874,24 @@ class TestAscendAttentionBackendImpl(TestBase):
         self.assertEqual(mock_paged_attention.call_args.kwargs["context_lens"], current_seq_lens)
         mock_graph_task_update_begin.assert_called_once()
         mock_graph_task_update_end.assert_called_once()
+
+
+class TestAscendAttentionBshFallback(TestBase):
+    def test_pack_and_unpack_tnd_to_bsh(self):
+        tensor = torch.arange(24, dtype=torch.float32).view(6, 2, 2)
+        packed = AscendAttentionBackendImpl._pack_tnd_to_bsh(tensor, [2, 4])
+        self.assertEqual(tuple(packed.shape), (2, 4, 4))
+        self.assertTrue(torch.equal(packed[0, :2], tensor[:2].reshape(2, 4)))
+        self.assertTrue(torch.equal(packed[1, :4], tensor[2:].reshape(4, 4)))
+
+        unpacked = AscendAttentionBackendImpl._unpack_bsh_to_tnd(packed, [2, 4], 2, 2)
+        self.assertTrue(torch.equal(unpacked, tensor))
+
+    def test_use_bsh_attention_for_large_head_size(self):
+        impl = AscendAttentionBackendImpl.__new__(AscendAttentionBackendImpl)
+        impl.head_size = 512
+        impl.sinks = None
+        self.assertTrue(impl._use_bsh_attention())
+
+        impl.head_size = 256
+        self.assertFalse(impl._use_bsh_attention())

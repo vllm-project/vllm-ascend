@@ -1,0 +1,33 @@
+# Gemma4-E4B-it accuracy config for Atlas A2.
+# Chat template injects <bos> + <|turn> markers required by this checkpoint.
+# For HF hub use: google/gemma-4-E4B-it
+model_name: "/data/models/gemma4-E4B-it"
+model_type: "vllm"
+hardware: "Atlas A2 Series"
+
+serve:
+  tensor_parallel_size: 1
+  dtype: bfloat16
+  max_model_len: 4096
+  gpu_memory_utilization: 0.7
+  trust_remote_code: false
+  # Ascend FIA TND does not support global_head_dim=512; keep eager until
+  # ACLGraph + BSH path is fully validated for Gemma4.
+  enforce_eager: true
+  # E4B-it is verbose; default lm_eval max_gen_toks=256 truncates answers.
+  max_gen_toks: 1024
+
+tasks:
+- name: "gsm8k"
+  metrics:
+  # Measured on Ascend full gsm8k, enforce_eager, bf16, chat template on,
+  # max_gen_toks=1024 (default 256 truncates verbose E4B answers).
+  - name: "exact_match,strict-match"
+    value: 0.8863
+  - name: "exact_match,flexible-extract"
+    value: 0.8886
+
+num_fewshot: 5
+apply_chat_template: true
+fewshot_as_multiturn: true
+batch_size: "auto"
