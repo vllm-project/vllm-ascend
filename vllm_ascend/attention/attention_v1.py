@@ -689,6 +689,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         attn_count = attn_count + 1
                         if not metadata.causal:
                             sparse_mode = 0
+                            attn_mask = None
                     else:
                         metadata_key = layer_name if layer_name is not None and layer_name in attn_metadata else key
                         seq_lens = attn_metadata[metadata_key].seq_lens_list
@@ -783,6 +784,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
         input_layout = "TND"
         attn_mask = attn_metadata.attn_mask
         sparse_mode = 4 if self.sliding_window else 3 if attn_metadata.causal else 0
+        if attn_mask is not None and sparse_mode not in (3, 4):
+            attn_mask = None
         pre_tokens = self.sliding_window or SWA_INT_MAX
         next_tokens = 0 if self.sliding_window else SWA_INT_MAX
 

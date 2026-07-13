@@ -80,6 +80,7 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         draft_attn_metadatas = self.speculator.build_draft_attn_metadatas(desc.num_reqs)
 
         ret = super().run_fullgraph(desc)
+        logger.info("DFlash run_fullgraph: graph replay done")
 
         positions = self.speculator.input_buffers.positions[:num_tokens]
 
@@ -114,4 +115,5 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
                 positions.shape[0],
                 draft_attn_metadatas=draft_attn_metadatas,
             )
+        logger.info("DFlash run_fullgraph done: num_tokens=%s", num_tokens)
         return ret
