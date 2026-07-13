@@ -628,7 +628,9 @@ class AscendSFAImpl(MLAAttentionImpl):
                 self.sfa_qsfa_tile_size,
             )
         # PD decode consumers with sparse C8 use mla_prolog_v3 to write the packed KV cache.
-        self.enable_sfa_prolog_v3 = self.is_kv_consumer and self.use_sparse_c8_sfa
+        self.enable_sfa_prolog_v3 = (
+            self.is_kv_consumer and self.use_sparse_c8_sfa and get_ascend_device_type() != AscendDeviceType.A5
+        )
         self.enable_mlapo = ascend_config.enable_mlapo and not (
             self.enable_sfa_prolog_v3 or (self.use_sparse_c8_sfa and get_ascend_device_type() != AscendDeviceType.A5)
         )
