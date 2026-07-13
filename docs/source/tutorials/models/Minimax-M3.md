@@ -60,7 +60,11 @@ It is recommended to place the model weight in a shared cache directory.
 - Step 3: Update vLLM
   ```
   cd /vllm-workspace/vllm
-  git checkout v0.23.0
+  git checkout v0.24.0
+
+  # Install _rust_tool_parser for the Rust frontend.
+  pip install setuptools-rust
+  ./build_rust.sh
   ```
 
 - Step 4: Update vLLM Ascend
