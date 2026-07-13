@@ -307,7 +307,7 @@ class DeepseekV4DSparkModel(nn.Module):
             {
                 str(self.mtp_start_layer_idx + idx): DeepseekV4DSparkDecoderLayer(
                     vllm_config,
-                    prefix=maybe_prefix(prefix, f"layers.{self.mtp_start_layer_idx + idx}"),
+                    prefix=f"mtp.{idx}",
                 )
                 for idx in range(self.num_dspark_layers)
             }
@@ -446,16 +446,13 @@ class DeepseekV4DSparkModel(nn.Module):
 
 @support_torch_compile
 class DeepSeekV4DSparkMTP(nn.Module, DeepseekV2MixtureOfExperts):
-    # DSpark draft embed/head are aliases of the target model, matching
-    # upstream vLLM's DSparkDeepseekV4ForCausalLM contract.
-    has_own_embed_tokens = False
-    has_own_lm_head = False
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         assert vllm_config.speculative_config is not None
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
         self.quant_config = _draft_quant_config(vllm_config)
+        self.has_own_embed_tokens = self.quant_config is not None
+        self.has_own_lm_head = self.quant_config is not None
         self.model = DeepseekV4DSparkModel(
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "model"),
@@ -557,18 +554,14 @@ class DeepSeekV4DSparkMTP(nn.Module, DeepseekV2MixtureOfExperts):
         last_layer_idx = start_layer_idx + self.model.num_dspark_layers - 1
 
         for name, loaded_weight in weights:
-            if name == "embed.weight":
-                if envs.DSPARK_WEIGHT_DIR:
-                    loaded_weight = load_file(f"{envs.DSPARK_WEIGHT_DIR}/embed.safetensors")["embed.weight"]
+            if name == "embed.weight" and not self.has_own_embed_tokens:
                 embed_name = "model.embed_tokens.weight"
                 param = params_dict[embed_name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
                 loaded_params.add(embed_name)
                 continue
-            if name == "head.weight":
-                if envs.DSPARK_WEIGHT_DIR:
-                    loaded_weight = load_file(f"{envs.DSPARK_WEIGHT_DIR}/lmhead.safetensors")["head.weight"]
+            if name == "head.weight" and not self.has_own_lm_head:
                 head_name = "lm_head.weight"
                 param = params_dict[head_name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
@@ -678,6 +671,10 @@ class DeepSeekV4DSparkMTP(nn.Module, DeepseekV2MixtureOfExperts):
         return loaded_params
 
     def _remap_dspark_name(self, name: str) -> str | None:
+        if name == "mtp.0.embed.weight":
+            return "model.embed_tokens.weight"
+        if name == "mtp.2.head.weight":
+            return "lm_head.weight"
         match = re.match(r"mtp\.(\d+)\.(.*)", name)
         if match is None:
             return None

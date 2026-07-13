@@ -404,9 +404,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         we share the target model's embedding layers with the draft model to save
         memory.
         """
-        # hack temporarily, specially for dspark now
-        if self.speculative_config.use_dspark():
-            return
         if get_pp_group().world_size == 1:
             if hasattr(target_language_model.model, "embed_tokens"):
                 target_embed_tokens = target_language_model.model.embed_tokens
@@ -417,9 +414,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             # If pp>1, the weights of mtp and the main model's embedding are not on the same device.
             # check if mtp model use main model's embedding and LMhead
             share_embeddings = False
-            if hasattr(self.model, "has_own_embed_tokens"):
+            if self.method in ("eagle", "eagle3"):
                 # EAGLE model
-                if not self.model.has_own_embed_tokens:
+                if not getattr(self.model, "has_own_embed_tokens", True):
                     share_embeddings = True
                     logger.info(
                         "[spec_decode/base] Detected EAGLE model without its own"
@@ -448,6 +445,20 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         " embed_tokens weights. Keeping separate embedding weights"
                         " from the target model."
                     )
+            elif self.method == "dspark":
+                if not getattr(self.model, "has_own_embed_tokens", True):
+                    share_embeddings = True
+                    logger.info(
+                        "[spec_decode/base] Detected DSpark model without its own"
+                        " embed_tokens in the checkpoint. Sharing target model"
+                        " embedding weights with the draft model."
+                    )
+                else:
+                    logger.info(
+                        "[spec_decode/base] Detected DSpark model with distinct"
+                        " embed_tokens weights. Keeping separate embedding weights"
+                        " from the target model."
+                    )
             else:
                 # MTP model
                 share_embeddings = not self.use_compress
@@ -471,8 +482,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     def _maybe_share_lm_head(self, model: nn.Module) -> None:
         # some model definition do not define lm_head explicitly
         # and reuse embed_tokens for lm_head, e.g., CohereForCausalLM
-        # hack temporarily, specially for dspark now
-        if self.method in ("eagle", "dflash") and not self.speculative_config.use_dspark():
+        if self.method in ("eagle", "dflash", "dspark"):
             # For DFlash drafters trained with a reduced draft vocabulary, the
             # draft model ships its own lm_head of shape [draft_vocab_size,
             # hidden] whose rows map to a trained subset of the target vocab via
@@ -480,14 +490,19 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             # target lm_head ([target_vocab_size, hidden]) makes the draft emit
             # logits over the wrong vocabulary, so the verifier rejects almost
             # every speculative token. Keep the draft's own lm_head in that case.
-            draft_has_own_lm_head = (
-                self.method == "dflash" and getattr(self.model, "draft_id_to_target_id", None) is not None
+            draft_has_own_lm_head = (getattr(self.model, "draft_id_to_target_id", None) is not None) or (
+                getattr(self.model, "has_own_lm_head", True)
             )
-            if draft_has_own_lm_head:
+            if draft_has_own_lm_head and self.method == "dflash":
                 logger.info(
                     "[spec_decode/base] DFlash draft uses d2t vocab remapping;"
                     " keeping the draft's own lm_head instead of sharing the target"
                     " lm_head."
+                )
+            elif draft_has_own_lm_head and self.method == "dspark":
+                logger.info(
+                    "[spec_decode/base] Detected DSpark model with distinct lm_head weights."
+                    " Keeping separate lm_head weights from the target model."
                 )
             else:
                 logger.info("[spec_decode/base] Loading EAGLE/DFLASH LM head weights from the target model.")
