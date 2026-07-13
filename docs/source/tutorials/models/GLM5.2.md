@@ -136,7 +136,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
 --gpu-memory-utilization 0.95 \
 --quantization ascend \
 --async-scheduling \
---additional-config '{"fuse_muls_add":true,"multistream_overlap_shared_expert":true}' \
+--additional-config '{"multistream_overlap_shared_expert":true}' \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
 
@@ -202,7 +202,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     --enable-prefix-caching \
     --async-scheduling \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"fuse_muls_add":true,"multistream_overlap_shared_expert":true}' \
+    --additional-config '{"multistream_overlap_shared_expert":true}' \
     --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}'
     ```
 
@@ -253,7 +253,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     --enable-prefix-caching \
     --async-scheduling \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"fuse_muls_add":true,"multistream_overlap_shared_expert":true}' \
+    --additional-config '{"multistream_overlap_shared_expert":true}' \
     --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}'
     ```
 
@@ -312,7 +312,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     --safetensors-load-strategy 'prefetch' \
     --block-size 128 \
     --async-scheduling \
-    --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true}' \
+    --additional-config '{"multistream_overlap_shared_expert": true}' \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}'
     ```
@@ -369,7 +369,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     --safetensors-load-strategy 'prefetch' \
     --block-size 128 \
     --async-scheduling \
-    --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true}' \
+    --additional-config '{"multistream_overlap_shared_expert": true}' \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}'
     ```
@@ -430,7 +430,7 @@ vllm serve <MODEL_PATH> \
   --enable-chunked-prefill \
   --no-enable-prefix-caching \
   --async-scheduling \
-  --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true}' \
+  --additional-config '{"multistream_overlap_shared_expert": true}' \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
   --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}'
 ```
@@ -489,7 +489,7 @@ vllm serve <MODEL_PATH> \
   --enable-chunked-prefill \
   --no-enable-prefix-caching \
   --async-scheduling \
-  --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true}' \
+  --additional-config '{"multistream_overlap_shared_expert": true}' \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
   --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}'
 ```
@@ -649,7 +649,7 @@ Before you start, please
             --served-model-name glm-52 \
             --max-model-len 135000 \
             --speculative-config '{"num_speculative_tokens": 5, "method":"deepseek_mtp", "enforce_eager": true}' \
-            --additional-config '{"enable_sparse_c8":false,"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_dsa_cp": true}' \
+            --additional-config '{"enable_sparse_c8":false,"multistream_overlap_shared_expert": true, "enable_dsa_cp": true}' \
             --max-num-batched-tokens 4096 \
             --trust-remote-code \
             --max-num-seqs 64 \
@@ -719,7 +719,7 @@ Before you start, please
             --served-model-name glm-52 \
             --max-model-len 135000 \
             --speculative-config '{"num_speculative_tokens": 5, "method":"deepseek_mtp", "enforce_eager": true}' \
-            --additional-config '{"enable_sparse_c8":false,"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_dsa_cp": true}' \
+            --additional-config '{"enable_sparse_c8":false, "multistream_overlap_shared_expert": true, "enable_dsa_cp": true}' \
             --max-num-batched-tokens 4096 \
             --trust-remote-code \
             --max-num-seqs 64 \
@@ -791,7 +791,7 @@ Before you start, please
             --max-num-batched-tokens 164 \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
             --speculative-config '{"num_speculative_tokens": 5, "method":"deepseek_mtp", "enforce_eager": true}' \
-            --additional-config '{"enable_sparse_c8":false,"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true}' \
+            --additional-config '{"enable_sparse_c8":false, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true}' \
             --trust-remote-code \
             --max-num-seqs 48 \
             --gpu-memory-utilization 0.92 \
@@ -861,7 +861,7 @@ Before you start, please
             --max-num-batched-tokens 164 \
             --speculative-config '{"num_speculative_tokens": 5, "method":"deepseek_mtp", "enforce_eager": true}' \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-            --additional-config '{"enable_sparse_c8":false,"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true}' \
+            --additional-config '{"enable_sparse_c8":false,"multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true}' \
             --trust-remote-code \
             --max-num-seqs 48 \
             --gpu-memory-utilization 0.92 \
@@ -1025,7 +1025,6 @@ vllm serve <MODEL_PATH> \
   --additional-config \
   '{
     "enable_sparse_c8": false,
-    "fuse_muls_add": true,
     "multistream_overlap_shared_expert": true,
     "enable_dsa_cp": true
   }' \
@@ -1108,7 +1107,6 @@ vllm serve <MODEL_PATH> \
   --additional-config \
   '{
     "enable_sparse_c8": false,
-    "fuse_muls_add": true,
     "multistream_overlap_shared_expert": true,
     "recompute_scheduler_enable": true
   }' \

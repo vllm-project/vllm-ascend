@@ -962,6 +962,8 @@ def is_drafter_moe_model(vllm_config: VllmConfig):
             return _IS_DRAFTER_MOE_MODEL
         if "Eagle3DeepseekV2ForCausalLM" in model_configs["architectures"]:
             _IS_DRAFTER_MOE_MODEL = False
+        if "Step3p5MTP" in model_configs["architectures"]:
+            _IS_DRAFTER_MOE_MODEL = False
     return _IS_DRAFTER_MOE_MODEL
 
 
