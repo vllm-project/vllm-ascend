@@ -420,9 +420,9 @@ class TestAscendAttentionBackendImpl(TestBase):
         self, mock_get_forward_context, mock_npu_scatter_pa_kv_cache, mock_fused_infer_attention_score
     ):
         """Test forward pass in DecodeOnly state"""
-        query = torch.randn(4, 8 * 64)
-        key = torch.randn(4, 8 * 64)
-        value = torch.randn(4, 8 * 64)
+        query = torch.randn(4, 8, 64)
+        key = torch.randn(4, 8, 64)
+        value = torch.randn(4, 8, 64)
         kv_cache = torch.empty(2, 5, 128, 8, 64)
         output = torch.empty_like(query)
 
@@ -442,7 +442,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         output = self.impl.forward(layer, query, key, value, kv_cache, metadata, output)
 
         mock_fused_infer_attention_score.assert_called_once()
-        assert output.shape == (4, 8 * 64)
+        assert output.shape == (4, 8, 64)
 
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     @patch("torch_npu.npu_fused_infer_attention_score")
