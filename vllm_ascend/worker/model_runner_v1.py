@@ -5010,7 +5010,7 @@ class NPUModelRunner(GPUModelRunner):
                     min_cg_attn_backend = attn_backend.__name__
 
         with update_pass_config(self):
-            if vllm_version_is("0.23.0"):
+            if vllm_version_is("0.23.0") or vllm_version_is("0.24.0"):
                 cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
                     min_cg_support=min_cg_support,
                     min_cg_attn_backend=min_cg_attn_backend,
