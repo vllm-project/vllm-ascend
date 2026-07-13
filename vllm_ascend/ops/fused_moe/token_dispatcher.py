@@ -61,6 +61,10 @@ def _get_expert_token_nums_type(token_dispatch_input: MoETokenDispatchInput) -> 
     return EXPERT_TOKEN_NUMS_TYPE_CUMSUM
 
 
+def _is_mxfp4_quant_type(quant_type: QuantType) -> bool:
+    return getattr(quant_type, "name", None) in {"W4A4MXFP"}
+
+
 class MoETokenDispatcher(ABC, Generic[TMoECombineMetadata]):
     def __init__(self, **kwargs) -> None:
         """
@@ -352,27 +356,29 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
         self,
         token_dispatch_input: MoETokenDispatchInput,
     ):
-        # TODO: After AllGather MXFP4 communication quantization thorough verification, remove this judgment.
-        #  MXFP4 keeps dispatch unquantized in AllGather path, and quantizes again inside the MLP path.
-        with_quant = (
-            token_dispatch_input.quant.dispatch_with_quant and token_dispatch_input.quant.quant_type != QuantType.W8A8FP
-        )
+        quant_type = token_dispatch_input.quant.quant_type
+        dynamic_scale = token_dispatch_input.routing.pertoken_scale
+        unquantized_mxfp4_dispatch = _is_mxfp4_quant_type(quant_type) and dynamic_scale is None
+        # Without prepare-stage scales, MXFP4 stays unquantized in dispatch and
+        # is quantized again inside the MLP path.
+        with_quant = token_dispatch_input.quant.dispatch_with_quant and quant_type != QuantType.W8A8FP
+        with_quant = with_quant and not unquantized_mxfp4_dispatch
         is_mxfp = token_dispatch_input.quant.is_mxfp
         hidden_states = token_dispatch_input.hidden_states
         topk_weights = token_dispatch_input.topk_weights
         topk_ids = token_dispatch_input.topk_ids
         expert_map = token_dispatch_input.routing.expert_map
-        dynamic_scale = token_dispatch_input.routing.pertoken_scale
-        quant_type = token_dispatch_input.quant.quant_type
         act_quant_type = (
-            token_dispatch_input.quant.mxfp.act_quant_type if token_dispatch_input.quant.mxfp is not None else None
+            token_dispatch_input.quant.mxfp.act_quant_type
+            if token_dispatch_input.quant.mxfp is not None and not unquantized_mxfp4_dispatch
+            else None
         )
         global_redundant_expert_num = token_dispatch_input.routing.global_redundant_expert_num
         restore_shape = hidden_states.shape
         # Fuse the first dynamic quant of moe_mlp into initrouting when
         # dispatch_with_quant is on but got a None dynamic_scale.
         if with_quant and dynamic_scale is None:
-            if quant_type == QuantType.W4A4MXFP:
+            if _is_mxfp4_quant_type(quant_type):
                 quant_mode = 9
             else:
                 quant_mode = 3 if is_mxfp else 1
