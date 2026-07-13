@@ -21,7 +21,9 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+import torch
 from vllm.config import CUDAGraphMode
+from vllm.v1.spec_decode.vocab_mapping import VocabMapping
 
 from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
 
@@ -110,3 +112,106 @@ class TestDisablePaddedDrafterBatchWithFullGraph:
         )
 
         proposer._raise_if_padded_drafter_batch_disabled_and_full_graph_enabled()
+
+
+class _FakeTokenizer:
+    """Minimal tokenizer for building a real ``VocabMapping`` in tests.
+
+    ``encode`` returns ``[]`` so ``VocabMapping`` falls back to its default
+    space-prefix set; the toy tokens carry no prefix, so normalization is the
+    identity and ``get_vocab`` defines the intersection directly.
+    """
+
+    def __init__(self, vocab: dict[str, int], unk_token_id: int):
+        self._vocab = vocab
+        self._id_to_token = {i: t for t, i in vocab.items()}
+        self.unk_token_id = unk_token_id
+
+    def get_vocab(self) -> dict[str, int]:
+        return dict(self._vocab)
+
+    def encode(self, text, add_special_tokens=False):  # noqa: ARG002
+        return []
+
+    def convert_ids_to_tokens(self, idx):
+        return self._id_to_token.get(idx, "")
+
+
+class TestHeterogeneousVocabTLI:
+    """TLI (vllm#38174) helpers on ``AscendSpecDecodeBaseProposer``.
+
+    Target vocab ``{a, b, c, x, <unk_t>}`` and draft vocab
+    ``{a, b, c, y, <unk_d>}`` share the intersection ``{a, b, c}`` (ids 0, 1, 2
+    in both). Draft id 3 (``y``) and target id 3 (``x``) sit outside it.
+    """
+
+    @staticmethod
+    def _make_vocab_mapping() -> VocabMapping:
+        target = _FakeTokenizer({"a": 0, "b": 1, "c": 2, "x": 3, "<unk_t>": 4}, unk_token_id=4)
+        draft = _FakeTokenizer({"a": 0, "b": 1, "c": 2, "y": 3, "<unk_d>": 4}, unk_token_id=4)
+        return VocabMapping(
+            target_tokenizer=target,
+            draft_tokenizer=draft,
+            target_vocab_size=5,
+            draft_vocab_size=5,
+            device="cpu",
+        )
+
+    @staticmethod
+    def _make_proposer(*, use_heterogeneous_vocab, vocab_mapping) -> AscendSpecDecodeBaseProposer:
+        """Bypass ``__init__`` and set only the attrs the helpers read.
+
+        ``use_heterogeneous_vocab=None`` leaves the attribute unset, exercising
+        the ``getattr(self, "use_heterogeneous_vocab", False)`` guard.
+        """
+        proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
+        if use_heterogeneous_vocab is not None:
+            proposer.use_heterogeneous_vocab = use_heterogeneous_vocab
+        proposer.vocab_mapping = vocab_mapping
+        return proposer
+
+    def test_vocab_mapping_intersection(self):
+        vm = self._make_vocab_mapping()
+        assert vm.intersection_size == 3
+        assert vm.intersection_mask_draft.tolist() == [True, True, True, False, False]
+
+    def test_sample_constrains_to_intersection_and_maps_to_target(self):
+        """Raw argmax lands on a non-intersection id (3); after constraining, the
+        helper must pick the best *intersection* id and return it in target space."""
+        proposer = self._make_proposer(
+            use_heterogeneous_vocab=True,
+            vocab_mapping=self._make_vocab_mapping(),
+        )
+        # Draft id 3 ("y", outside the intersection) has the highest logit.
+        logits = torch.tensor([[0.1, 0.2, 0.3, 9.0, 8.0]])
+        out = proposer._sample_draft_token_ids(logits)
+        # id 3 is masked to -inf -> best intersection id is 2 ("c") -> target id 2.
+        assert out.tolist() == [2]
+
+    def test_to_draft_vocab_maps_and_falls_back_to_unk(self):
+        proposer = self._make_proposer(
+            use_heterogeneous_vocab=True,
+            vocab_mapping=self._make_vocab_mapping(),
+        )
+        # target ids 0, 1 are shared; 3 ("x") is out of intersection -> draft unk (4).
+        out = proposer._to_draft_vocab(torch.tensor([0, 1, 3]))
+        assert out.tolist() == [0, 1, 4]
+
+    def test_helpers_are_noop_when_flag_disabled(self):
+        proposer = self._make_proposer(
+            use_heterogeneous_vocab=False,
+            vocab_mapping=self._make_vocab_mapping(),
+        )
+        logits = torch.tensor([[0.1, 0.2, 0.3, 9.0, 8.0]])
+        # Plain argmax, no constraint -> id 3.
+        assert proposer._sample_draft_token_ids(logits).tolist() == [3]
+        # Passthrough.
+        assert proposer._to_draft_vocab(torch.tensor([0, 1, 3])).tolist() == [0, 1, 3]
+
+    def test_helpers_are_noop_when_flag_attr_missing(self):
+        """Non-draft_model proposers never set ``use_heterogeneous_vocab``; the
+        ``getattr(..., False)`` guard must keep them on the plain path."""
+        proposer = self._make_proposer(use_heterogeneous_vocab=None, vocab_mapping=None)
+        logits = torch.tensor([[0.1, 0.2, 0.3, 9.0, 8.0]])
+        assert proposer._sample_draft_token_ids(logits).tolist() == [3]
+        assert proposer._to_draft_vocab(torch.tensor([0, 1, 3])).tolist() == [0, 1, 3]
