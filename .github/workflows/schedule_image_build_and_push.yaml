@@ -100,10 +100,10 @@ jobs:
             suffix: ""
             image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-910b-ubuntu22.04-py3.12
 
-          - name: A2 openeuler
-            dockerfile: Dockerfile.openEuler
-            suffix: "openeuler"
-            image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-910b-openeuler24.03-py3.12
+          # - name: A2 openeuler
+          #   dockerfile: Dockerfile.openEuler
+          #   suffix: "openeuler"
+          #   image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-910b-openeuler24.03-py3.12
 
           - name: A3 Ubuntu
             dockerfile: Dockerfile.a3

@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-FROM quay.io/ascend/cann:9.1.0-beta.1-310p-ubuntu22.04-py3.12
+FROM swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.1.0-beta.1-310p-ubuntu22.04-py3.12
 
 ARG APT_CACHE_HOST=""
 ARG UV_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
