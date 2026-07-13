@@ -706,23 +706,8 @@ class BatchJobSchedConfig:
         # Enable batch-job-aware scheduler
         self.enabled: bool = config.get("enabled", False)
 
-        # EWMA smoothing factor for decode length prediction
-        self.ewma_alpha: float = float(config.get("ewma_alpha", 0.3))
-
-        # Fallback predicted decode length when no samples exist
-        self.cold_start_default_decode: int = int(config.get("cold_start_default_decode", 128))
-
-        # Minimum samples needed to switch from shrinkage to pure EWMA
-        self.cold_start_min_samples: int = int(config.get("cold_start_min_samples", 3))
-
-        # Bayesian prior weight during cold-start shrinkage
-        self.cold_start_prior_weight: float = float(config.get("cold_start_prior_weight", 2.0))
-
         # Maximum number of tracked jobs (0 = unlimited)
         self.max_jobs: int = int(config.get("max_jobs", 20))
-
-        # Maximum samples per job for decode length estimation (0 = unlimited)
-        self.max_samples_per_job: int = int(config.get("max_samples_per_job", 10))
 
         # Extra block margin added to the reserve as safety buffer
         self.reserve_margin_blocks: int = int(config.get("reserve_margin_blocks", 2))
@@ -740,45 +725,15 @@ class BatchJobSchedConfig:
 
     def _validate(self) -> None:
         """Validate the validity of configuration parameters."""
-        if not (0 < self.ewma_alpha <= 1.0):
-            raise ValueError(
-                f"batch_job_sched_config.ewma_alpha must be in (0, 1], "
-                f"got {self.ewma_alpha}"
-            )
-        if self.cold_start_default_decode <= 0:
-            raise ValueError(
-                f"batch_job_sched_config.cold_start_default_decode must be positive, "
-                f"got {self.cold_start_default_decode}"
-            )
-        if self.cold_start_min_samples < 0:
-            raise ValueError(
-                f"batch_job_sched_config.cold_start_min_samples must be non-negative, "
-                f"got {self.cold_start_min_samples}"
-            )
-        if self.cold_start_prior_weight <= 0:
-            raise ValueError(
-                f"batch_job_sched_config.cold_start_prior_weight must be positive, "
-                f"got {self.cold_start_prior_weight}"
-            )
         if self.max_jobs < 0:
-            raise ValueError(
-                f"batch_job_sched_config.max_jobs must be non-negative, "
-                f"got {self.max_jobs}"
-            )
-        if self.max_samples_per_job < 0:
-            raise ValueError(
-                f"batch_job_sched_config.max_samples_per_job must be non-negative, "
-                f"got {self.max_samples_per_job}"
-            )
+            raise ValueError(f"batch_job_sched_config.max_jobs must be non-negative, got {self.max_jobs}")
         if self.reserve_margin_blocks < 0:
             raise ValueError(
-                f"batch_job_sched_config.reserve_margin_blocks must be non-negative, "
-                f"got {self.reserve_margin_blocks}"
+                f"batch_job_sched_config.reserve_margin_blocks must be non-negative, got {self.reserve_margin_blocks}"
             )
         if self.reserve_max_blocks <= 0:
             raise ValueError(
-                f"batch_job_sched_config.reserve_max_blocks must be positive, "
-                f"got {self.reserve_max_blocks}"
+                f"batch_job_sched_config.reserve_max_blocks must be positive, got {self.reserve_max_blocks}"
             )
         if self.low_available_tokens_threshold <= 0:
             raise ValueError(

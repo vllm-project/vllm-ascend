@@ -69,16 +69,13 @@ class TestJobStat(TestBase):
     def test_initial_values(self):
         stat = _JobStat()
         self.assertEqual(stat.sample_count, 0)
-        self.assertEqual(stat.cumulative_sum, 0)
         self.assertEqual(stat.ewma_average, 0.0)
 
     def test_after_observations(self):
         stat = _JobStat()
         stat.sample_count = 3
-        stat.cumulative_sum = 350
         stat.ewma_average = 116.5
         self.assertEqual(stat.sample_count, 3)
-        self.assertEqual(stat.cumulative_sum, 350)
         self.assertEqual(stat.ewma_average, 116.5)
 
 
@@ -140,7 +137,7 @@ class TestJobNameParser(TestBase):
 
 
 class TestJobDecodeEstimator(TestBase):
-    """EWMA + Bayesian cold‑start decode length estimator tests."""
+    """EWMA decode length estimator tests."""
 
     def setUp(self):
         super().setUp()
@@ -149,54 +146,44 @@ class TestJobDecodeEstimator(TestBase):
 
     def test_predict_no_samples_returns_default(self):
         result = self.estimator.predict("unknown_job")
-        self.assertEqual(result, self.config.cold_start_default_decode)
+        self.assertEqual(result, JobDecodeEstimator._COLD_START_DEFAULT_DECODE)
 
     def test_observe_creates_job_stat_on_first_call(self):
         self.estimator.observe("job1", 100)
         self.assertIn("job1", self.estimator._job_stats)
         self.assertEqual(self.estimator._job_stats["job1"].sample_count, 1)
-        self.assertEqual(self.estimator._job_stats["job1"].cumulative_sum, 100)
+        # After first observation, EWMA is set to the observed value
         self.assertEqual(self.estimator._job_stats["job1"].ewma_average, 100.0)
 
-    def test_cold_start_predict_uses_prior_shrinkage(self):
-        """With samples < cold_start_min_samples, Bayesian shrinkage is used."""
-        cfg = BatchJobSchedConfig({
-            "cold_start_default_decode": 128,
-            "cold_start_prior_weight": 2.0,
-            "cold_start_min_samples": 3,
-        })
-        estimator = JobDecodeEstimator(cfg)
-        estimator.observe("job1", 100)
-        estimator.observe("job1", 150)
-        # L_pred = (2.0 * 128 + 250) / (2.0 + 2) = 506 / 4 = 126.5 ≈ 126
-        result = estimator.predict("job1")
-        self.assertEqual(result, 126)
-
-    def test_stable_phase_predict_uses_ewma(self):
-        """When samples >= cold_start_min_samples, pure EWMA is used."""
-        cfg = BatchJobSchedConfig({
-            "cold_start_min_samples": 2,
-            "ewma_alpha": 0.3,
-        })
-        estimator = JobDecodeEstimator(cfg)
+    def test_cold_start_predict_uses_ewma(self):
+        """With samples < _COLD_START_MIN_SAMPLES, pure EWMA is used."""
+        estimator = JobDecodeEstimator(BatchJobSchedConfig())
         # n=1: EWMA = 100
         estimator.observe("job1", 100)
-        # n=2: EWMA = 0.3 * 150 + 0.7 * 100 = 115
+        # n=2: EWMA = 0.1 * 150 + 0.9 * 100 = 105
         estimator.observe("job1", 150)
         result = estimator.predict("job1")
-        self.assertEqual(result, 115)
+        self.assertEqual(result, 105)
+
+    def test_stable_phase_predict_uses_ewma(self):
+        """When samples >= _COLD_START_MIN_SAMPLES, pure EWMA is used."""
+        estimator = JobDecodeEstimator(BatchJobSchedConfig())
+        # n=1: EWMA = 100
+        estimator.observe("job1", 100)
+        # n=2: EWMA = 0.1 * 150 + 0.9 * 100 = 105
+        estimator.observe("job1", 150)
+        # n=3: EWMA = 0.1 * 120 + 0.9 * 105 = 106.5
+        estimator.observe("job1", 120)
+        result = estimator.predict("job1")
+        self.assertEqual(result, 106)
 
     def test_ewma_convergence(self):
-        """EWMA with alpha=1.0 should track the latest observation exactly."""
-        cfg = BatchJobSchedConfig({
-            "cold_start_min_samples": 1,
-            "ewma_alpha": 1.0,
-        })
-        estimator = JobDecodeEstimator(cfg)
-        estimator.observe("job1", 100)
-        estimator.observe("job1", 200)
+        """EWMA with α=0.1 converges to the steady value after many observations."""
+        estimator = JobDecodeEstimator(BatchJobSchedConfig())
+        for _ in range(50):
+            estimator.observe("job1", 100)
         result = estimator.predict("job1")
-        self.assertEqual(result, 200)
+        self.assertEqual(result, 100)
 
     def test_observe_max_jobs_exceeded_raises(self):
         cfg = BatchJobSchedConfig({"max_jobs": 2})
@@ -215,30 +202,15 @@ class TestJobDecodeEstimator(TestBase):
         self.assertEqual(len(estimator._job_stats), 50)
 
     def test_observe_max_samples_per_job_stops_updating(self):
-        cfg = BatchJobSchedConfig({
-            "max_samples_per_job": 2,
-            "cold_start_min_samples": 2,
-        })
-        estimator = JobDecodeEstimator(cfg)
-        estimator.observe("job1", 100)
-        estimator.observe("job1", 200)
-        # Third call should be skipped
+        """When sample_count reaches _MAX_SAMPLES_PER_JOB, further updates are skipped."""
+        # _MAX_SAMPLES_PER_JOB = 10
+        estimator = JobDecodeEstimator(BatchJobSchedConfig())
+        for i in range(10):
+            estimator.observe("job1", 100)
+        # 11th call should be skipped, EWMA stays at 100.0
         estimator.observe("job1", 300)
         stat = estimator._job_stats["job1"]
-        self.assertEqual(stat.sample_count, 2)
-        self.assertEqual(stat.cumulative_sum, 300)  # sum of first two
-        self.assertEqual(stat.ewma_average, 130.0)  # EWMA of second obs
-
-    def test_observe_zero_max_samples_disables_all_updates(self):
-        cfg = BatchJobSchedConfig({
-            "max_samples_per_job": 0,
-            "cold_start_min_samples": 0,
-        })
-        estimator = JobDecodeEstimator(cfg)
-        estimator.observe("job1", 100)
-        stat = estimator._job_stats["job1"]
-        self.assertEqual(stat.sample_count, 1)  # 0 means unlimited, not disabled
-        self.assertEqual(stat.cumulative_sum, 100)
+        self.assertEqual(stat.sample_count, 10)
         self.assertEqual(stat.ewma_average, 100.0)
 
     def test_get_stats_returns_human_readable_dict(self):
@@ -247,8 +219,7 @@ class TestJobDecodeEstimator(TestBase):
         stats = self.estimator.get_stats()
         self.assertIn("job1", stats)
         self.assertEqual(stats["job1"]["sample_count"], 2)
-        self.assertEqual(stats["job1"]["cumulative_sum"], 250)
-        self.assertIsInstance(stats["job1"]["ewma_average"], float)
+        self.assertEqual(stats["job1"]["ewma_average"], 105.0)
 
     def test_get_stats_empty(self):
         stats = self.estimator.get_stats()
@@ -262,11 +233,16 @@ class TestJobDecodeEstimator(TestBase):
         short_pred = self.estimator.predict("short_job")
         self.assertGreater(long_pred, short_pred)
 
-    def test_observe_updates_cumulative_sum_correctly(self):
+    def test_observe_updates_ewma_average_correctly(self):
         self.estimator.observe("job1", 10)
+        # n=1: EWMA = 10.0
+        self.assertEqual(self.estimator._job_stats["job1"].ewma_average, 10.0)
         self.estimator.observe("job1", 20)
+        # n=2: EWMA = 0.1 * 20 + 0.9 * 10 = 11.0
+        self.assertEqual(self.estimator._job_stats["job1"].ewma_average, 11.0)
         self.estimator.observe("job1", 30)
-        self.assertEqual(self.estimator._job_stats["job1"].cumulative_sum, 60)
+        # n=3: EWMA = 0.1 * 30 + 0.9 * 11.0 = 12.9
+        self.assertAlmostEqual(self.estimator._job_stats["job1"].ewma_average, 12.9)
 
 
 # ===================================================================
@@ -529,7 +505,6 @@ class TestBatchJobAwareRequestQueue(TestBase):
     def setUp(self):
         super().setUp()
         self.config = BatchJobSchedConfig({
-            "cold_start_min_samples": 2,
             "short_decode_token_threshold": 32,
             "low_available_tokens_threshold": 4096,
             "max_jobs": 20,
@@ -596,7 +571,8 @@ class TestBatchJobAwareRequestQueue(TestBase):
         self.assertIn(req.request_id, self.queue._cold_start_reqs["job1"])
 
     def test_add_request_beyond_cold_start_requests_not_tracked(self):
-        cfg = BatchJobSchedConfig({"cold_start_min_samples": 1})
+        """With _COLD_START_MIN_SAMPLES=3, only first 3 requests are cold-start tracked."""
+        cfg = BatchJobSchedConfig()
         with patch(
             "vllm.v1.core.sched.request_queue.RequestQueue.__init__",
             MagicMock(return_value=None),
@@ -608,17 +584,17 @@ class TestBatchJobAwareRequestQueue(TestBase):
                 self.job_name_parser,
                 cfg,
             )
-        # First request -> cold start tracked
-        r1 = self._make_request("r1#job_name[job1]#")
-        queue.add_request(r1)
-        self.assertIn("job1", queue._cold_start_reqs)
-        self.assertIn(r1.request_id, queue._cold_start_reqs["job1"])
-        # Second request -> exceeds min_samples, not tracked
-        r2 = self._make_request("r2#job_name[job1]#")
-        queue.add_request(r2)
-        # With cold_start_min_samples=1, only the first request ID is tracked
+        # First 3 requests -> cold start tracked
+        for i in range(3):
+            r = self._make_request(f"r{i}#job_name[job1]#")
+            queue.add_request(r)
+            self.assertIn("job1", queue._cold_start_reqs)
+            self.assertIn(r.request_id, queue._cold_start_reqs["job1"])
+        # 4th request -> exceeds _COLD_START_MIN_SAMPLES, not tracked
+        r4 = self._make_request("r4#job_name[job1]#")
+        queue.add_request(r4)
         self.assertIn("job1", queue._cold_start_reqs)  # job key remains
-        self.assertNotIn(r2.request_id, queue._cold_start_reqs["job1"])
+        self.assertNotIn(r4.request_id, queue._cold_start_reqs["job1"])
 
     def test_remove_request_decreases_length(self):
         req = self._make_request("r1#job_name[job1]#")
@@ -699,9 +675,8 @@ class TestBatchJobAwareRequestQueue(TestBase):
         self.assertIn(result, [r1, r2])
 
     def test_collect_job_decode_info_separates_long_short(self):
-        # Observe enough samples for short_job to enter stable phase,
-        # otherwise cold-start shrinkage (prior_weight=2.0) pulls the
-        # prediction toward default_decode=128, misclassifying it as long.
+        # long_job: 1 sample → EWMA = 100.0 → > 32 (long)
+        # short_job: 2 samples → both 10 → EWMA = 10.0 → <= 32 (short)
         self.job_decode_estimator.observe("long_job", 100)
         self.job_decode_estimator.observe("short_job", 10)
         self.job_decode_estimator.observe("short_job", 10)

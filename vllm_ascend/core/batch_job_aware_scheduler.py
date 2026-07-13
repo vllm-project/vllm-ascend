@@ -18,7 +18,7 @@ Inherits from the base ``Scheduler`` and replaces the waiting queue with
 a custom queue that:
 
 1. Groups requests by **job name** (extracted from ``#job_name[${JOB_NAME}]#``
-   prefix), estimates decode length per job via **EWMA + cold-start shrinkage**.
+   prefix), estimates decode length per job via **EWMA**.
 2. Predicts next-step **KV block needs** for running requests (reserve),
    uses **reserve-aware budget** to suppress preemption.
 3. Each job has its own **RequestBucket** for efficient request management,
@@ -85,31 +85,49 @@ class JobNameParser:
 class _JobStat:
     """Per‑job running statistics."""
 
-    __slots__ = ("sample_count", "cumulative_sum", "ewma_average")
+    __slots__ = ("sample_count", "ewma_average")
 
     def __init__(self) -> None:
         self.sample_count: int = 0
-        self.cumulative_sum: int = 0
+        # a sensible value before any observation has been recorded.
         self.ewma_average: float = 0.0
 
 
 class JobDecodeEstimator:
-    """Per‑job decode‑length estimator with EWMA and Bayesian cold‑start.
+    """Per‑job decode‑length estimator with EWMA.
 
-    This estimator uses a two-phase approach for predicting decode lengths:
+    This estimator uses EWMA (Exponentially Weighted Moving Average) for
+    predicting decode lengths. When no samples exist for a job, it returns
+    a cold-start default value. Once the first sample is observed, the
+    EWMA average is set to that value and refined with each new sample.
 
-    **Phase 1: Cold-Start Phase (samples < cold_start_min_samples)**
-        Uses Bayesian prior shrinkage to combine prior knowledge with observed data.
-        This provides stable predictions when few samples are available.
+    EWMA Formula:
+        EWMA_t = α * x_t + (1 - α) * EWMA_{t-1}
 
-    **Phase 2: Stable Phase (samples >= cold_start_min_samples)**
-        Uses pure EWMA (Exponentially Weighted Moving Average) for prediction.
-        EWMA gives more weight to recent observations while still considering
-        historical data.
+        Where:
+            - EWMA_t: New EWMA average at time t
+            - α: Smoothing factor (_EWMA_ALPHA = 0.1), 0 < α <= 1
+            - x_t: Current observation (decode_len)
+            - EWMA_{t-1}: Previous EWMA average
 
-    The transition between phases ensures smooth adaptation from cold-start
-    to stable estimation, avoiding prediction volatility in early stages.
+    Properties of EWMA:
+        1. **Weight decay**: Older observations have exponentially decreasing
+           influence. The weight of observation x_{t-k} is α(1-α)^k.
+        2. **Effective window size**: The "half-life" of observations is
+           approximately ln(0.5)/ln(1-α). With α=0.1, half-life ≈ 6.58 samples.
+        3. **Initialization**: For the first sample (n=1), EWMA is simply
+           set to the observed value: EWMA_1 = x_1
+        4. **Sensitivity control**:
+           - Higher α (e.g., 0.3): More responsive to recent changes
+           - Lower α (e.g., 0.1): More stable, slower to adapt
     """
+
+    # Fallback predicted decode length when no samples exist.
+    _COLD_START_DEFAULT_DECODE: int = 128
+    # EWMA smoothing factor (0 < α <= 1).
+    _EWMA_ALPHA: float = 0.1
+    # Maximum samples per job for decode length estimation.
+    _MAX_SAMPLES_PER_JOB: int = 10
 
     def __init__(self, config: BatchJobSchedConfig) -> None:
         self._config = config
@@ -118,70 +136,15 @@ class JobDecodeEstimator:
     def predict(self, job_name: str) -> int:
         """Return the predicted decode length for *job*."""
         job_stat = self._job_stats.get(job_name)
-
-        if job_stat is None or job_stat.sample_count == 0:
-            return self._config.cold_start_default_decode
-
-        if job_stat.sample_count < self._config.cold_start_min_samples:
-            return self._predict_by_prior(job_stat)
-
+        if job_stat is None:
+            return self._COLD_START_DEFAULT_DECODE
         return int(job_stat.ewma_average)
-
-    def _predict_by_prior(self, job_stat: _JobStat) -> int:
-        """Predict decode length using Bayesian prior shrinkage.
-
-        Formula:
-            L_pred = (w_prior * L_default + Σl_i) / (w_prior + n)
-
-        Example:
-            With w_prior = 2.0, L_default = 128, and observed lengths [100, 150]:
-            - n = 2, Σl_i = 250
-            - L_pred = (2.0 * 128 + 250) / (2.0 + 2) = 506 / 4 = 126.5 ≈ 126
-
-        Args:
-            job_stat: The job statistics containing sample count and cumulative sum.
-
-        Returns:
-            Predicted decode length as an integer.
-        """
-        prior_weight = self._config.cold_start_prior_weight
-        default_decode = self._config.cold_start_default_decode
-        return int((prior_weight * default_decode + job_stat.cumulative_sum) / (prior_weight + job_stat.sample_count))
 
     def observe(self, job_name: str, decode_len: int) -> None:
         """Record one decode‑length observation for *job*.
 
         This method updates the job statistics using the EWMA (Exponentially
         Weighted Moving Average) formula for online learning.
-
-        EWMA Formula:
-            EWMA_t = α * x_t + (1 - α) * EWMA_{t-1}
-
-            Where:
-                - EWMA_t: New EWMA average at time t
-                - α: Smoothing factor (ewma_alpha), 0 < α <= 1
-                - x_t: Current observation (decode_len)
-                - EWMA_{t-1}: Previous EWMA average
-
-        Properties of EWMA:
-            1. **Weight decay**: Older observations have exponentially decreasing
-               influence. The weight of observation x_{t-k} is α(1-α)^k.
-
-            2. **Effective window size**: The "half-life" of observations is
-               approximately ln(0.5)/ln(1-α). With α=0.3, half-life ≈ 1.94 samples.
-
-            3. **Initialization**: For the first sample (n=1), EWMA is simply
-               set to the observed value: EWMA_1 = x_1
-
-            4. **Sensitivity control**:
-               - Higher α (e.g., 0.5): More responsive to recent changes
-               - Lower α (e.g., 0.1): More stable, slower to adapt
-
-        Example:
-            With α = 0.3 and observations [100, 150, 120]:
-            - EWMA_1 = 100 (initialization)
-            - EWMA_2 = 0.3 * 150 + 0.7 * 100 = 45 + 70 = 115
-            - EWMA_3 = 0.3 * 120 + 0.7 * 115 = 36 + 80.5 = 116.5
 
         Args:
             job_name: The name of the job to record observation for.
@@ -200,24 +163,20 @@ class JobDecodeEstimator:
             self._job_stats[job_name] = job_stat
 
         # Skip update when max samples reached for performance
-        if 0 < self._config.max_samples_per_job <= job_stat.sample_count:
+        if job_stat.sample_count >= self._MAX_SAMPLES_PER_JOB:
             return
 
         job_stat.sample_count += 1
-        job_stat.cumulative_sum += decode_len
         if job_stat.sample_count == 1:
             job_stat.ewma_average = float(decode_len)
         else:
-            job_stat.ewma_average = (
-                self._config.ewma_alpha * decode_len + (1 - self._config.ewma_alpha) * job_stat.ewma_average
-            )
+            job_stat.ewma_average = self._EWMA_ALPHA * decode_len + (1 - self._EWMA_ALPHA) * job_stat.ewma_average
 
     def get_stats(self) -> dict[str, dict[str, int | float]]:
         """Return human‑readable statistics for all tracked jobs."""
         return {
             job: {
                 "sample_count": s.sample_count,
-                "cumulative_sum": s.cumulative_sum,
                 "ewma_average": round(s.ewma_average, 1),
             }
             for job, s in self._job_stats.items()
@@ -433,6 +392,9 @@ class BatchJobAwareRequestQueue(RequestQueue):
         - Short jobs: sorted by decode length ascending (shortest first)
     """
 
+    # Minimum samples needed to exit cold-start scheduling priority.
+    _COLD_START_MIN_SAMPLES: int = 3
+
     def __init__(
         self,
         scheduler: Scheduler,
@@ -526,7 +488,7 @@ class BatchJobAwareRequestQueue(RequestQueue):
             self._job_req_count[job_name] = 0
         self._job_req_count[job_name] += 1
 
-        if self._job_req_count[job_name] <= self._config.cold_start_min_samples:
+        if self._job_req_count[job_name] <= self._COLD_START_MIN_SAMPLES:
             if job_name not in self._cold_start_reqs:
                 self._cold_start_reqs[job_name] = set()
             self._cold_start_reqs[job_name].add(request.request_id)

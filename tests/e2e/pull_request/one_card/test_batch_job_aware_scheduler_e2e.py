@@ -173,10 +173,11 @@ def test_batch_job_aware_scheduler_with_custom_config(max_tokens: int) -> None:
         additional_config={
             "batch_job_sched_config": {
                 "enabled": True,
-                "ewma_alpha": 0.4,
-                "cold_start_default_decode": 64,
-                "cold_start_min_samples": 2,
                 "max_jobs": 10,
+                "reserve_margin_blocks": 4,
+                "reserve_max_blocks": 12,
+                "low_available_tokens_threshold": 2048,
+                "short_decode_token_threshold": 32
             },
         },
         max_model_len=2048,

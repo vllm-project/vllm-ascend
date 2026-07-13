@@ -70,6 +70,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `finegrained_tp_config`             | dict | `{}`    | Configuration options for module tensor parallelism                                                       |
 | `ascend_compilation_config`         | dict | `{}`    | Configuration options for ascend compilation                                                              |
 | `eplb_config`                       | dict | `{}`    | Configuration options for eplb |
+| `batch_job_sched_config`            | dict | `{}`    | Configuration options for the batch-job-aware scheduler. See [Batch-Job-Aware Scheduler](../feature_guide/batch_job_aware_scheduler.md) for details. |
 | `refresh`                           | bool | `false` | Whether to refresh global Ascend configuration content. This is usually used by rlhf or ut/e2e test case. |
 | `dump_config`                       | dict | `None`  | Inline msprobe dump configuration. vLLM-Ascend will materialize it to a temporary JSON file and pass that file to the debugger. |
 | `dump_config_path`                  | str  | `None`  | Configuration file path for msprobe dump (compatible legacy option).                                      |
@@ -144,6 +145,17 @@ The details of each configuration option are as follows:
 | `num_redundant_experts`          | int | `0`    | Specify redundant experts during initialization. |
 | `eplb_policy_type`               | int | `1`    | EPLB balancing policy: `0`=Random, `1`=DefaultEplb (open-source algorithm), `2`=SwiftBalanceEplb (optimized for low-bandwidth), `3`=FlashLB (statistical method with sliding windows). |
 | `eplb_heat_collection_stage`      | str | `"all"`| Stage to collect EPLB heat: `"prefill"` collects only during prefill, `"decode"` collects only during decode, `"all"` collects during both stages. In PD colocation scenarios, prefill and decode requests may produce different expert workloads. Selectively collecting heat on one stage can reduce expert imbalance more effectively. |
+
+**batch_job_sched_config**
+
+| Name | Type | Default | Description |
+| ---- | ---- | ------- | ----------- |
+| `enabled` | bool | `false` | Enable the batch-job-aware scheduler. |
+| `max_jobs` | int | `20` | Maximum number of tracked jobs. `0` means unlimited. |
+| `reserve_margin_blocks` | int | `2` | Extra block margin added to the KV cache reserve as safety buffer. |
+| `reserve_max_blocks` | int | `8` | Maximum number of blocks that can be reserved. |
+| `low_available_tokens_threshold` | int | `4096` | Threshold for prioritising long vs short decode jobs. When available tokens > threshold, long decode jobs are prioritised; when ≤ threshold, short decode jobs are prioritised. |
+| `short_decode_token_threshold` | int | `32` | Threshold for classifying a job as "short decode". |
 
 **profiling_chunk_config**
 
