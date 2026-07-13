@@ -507,14 +507,16 @@ class FusedMC2CommImpl(MoECommMethod):
         weight_scales1 = [t.squeeze(0) if (t.dim() == 2 and t.shape[0] == 1) else t for t in weight_scales1]
         weight_scales2 = [t.squeeze(0) if (t.dim() == 2 and t.shape[0] == 1) else t for t in weight_scales2]
 
-        self._init_mega_moe_symm_buffer(
-            fused_experts_input,
-            topk_ids,
-            weight1,
-            weight2,
-            dispatch_quant_mode,
-            dispatch_quant_out_dtype,
-        )
+        if self._mega_moe_symm_buffer is None:
+            self._init_mega_moe_symm_buffer(
+                fused_experts_input,
+                topk_ids,
+                weight1,
+                weight2,
+                dispatch_quant_mode,
+                dispatch_quant_out_dtype,
+            )
+            
         activation_clamp = fused_experts_input.swiglu_limit if fused_experts_input.swiglu_limit > 0 else None
         x_active_mask = None
         if self.token_dispatcher.global_bs == 0 and fused_experts_input.routing.mc2_mask is not None:
