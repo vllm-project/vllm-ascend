@@ -160,6 +160,30 @@ jobs:
           pip install uc-manager
           uv pip install -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu
 
+      - name: Configure Huawei Cloud Credentials
+        id: hwcloud-creds
+        uses: ascend-gha-runners/configure-hwcloud-credentials@v1
+        with:
+          region: ap-southeast-1
+          audience: hw-vllm-ascend-audience
+          idp-id: github-vllm-ascend
+
+      - name: Set OBS cache configuration
+        if: steps.hwcloud-creds.outputs.success == 'true'
+        run: |
+          echo "RUNS_ON_S3_BUCKET_CACHE=ascend-ci-cache-hk" >> $GITHUB_ENV
+          echo "RUNS_ON_S3_BUCKET_ENDPOINT=obs.ap-southeast-1.myhuaweicloud.com" >> $GITHUB_ENV
+          echo "AWS_S3_FORCE_PATH_STYLE=true" >> $GITHUB_ENV
+          echo "RUNS_ON_RUNNER_NAME=" >> $GITHUB_ENV
+
+      - name: Cache pre-commit
+        uses: runs-on/cache@v5
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-${{ hashFiles('.pre-commit-config.yaml') }}
+          restore-keys: |
+            pre-commit-
+
       - name: Run pre-commit
         env:
           PRE_COMMIT_COLOR: always
