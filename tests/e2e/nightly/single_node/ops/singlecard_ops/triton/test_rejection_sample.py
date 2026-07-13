@@ -232,7 +232,6 @@ def test_sample_recovered_tokens_kernel():
     torch.npu.reset_peak_memory_stats()
 
 
-# @pytest.mark.skip("Probabilistic failure, need zengtian after fix")
 @pytest.mark.parametrize("max_spec_len", [1, 2, 3])
 @pytest.mark.parametrize("vocab_size", [1024])
 @pytest.mark.parametrize("batch_size", [1, 256, 512, 1024])
@@ -355,7 +354,7 @@ IS_GREEDY = torch.zeros(BATCH_SIZE, dtype=torch.bool, device=DEVICE)
 IS_GREEDY[4] = True
 
 
-# @pytest.mark.skip(reason="Probabilistic failure, #TODO: tracking issue 9852")
+
 @pytest.mark.parametrize("cu_num_draft_tokens", [CU_NUM_DRAFT_TOKENS])
 @pytest.mark.parametrize("draft_token_ids", [DRAFT_TOKEN_IDS])
 @pytest.mark.parametrize("draft_probs", [DRAFT_PROBS])
