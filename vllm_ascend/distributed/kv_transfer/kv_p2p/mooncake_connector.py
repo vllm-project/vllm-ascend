@@ -49,6 +49,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     MambaSpec,
+    MLAAttentionSpec,
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
@@ -1980,6 +1981,7 @@ class MooncakeConnectorWorker:
         layer_names: list[str] | None = None,
         kv_cache_spec: Any | None = None,
         kv_cache_group_id: int | None = None,
+        total_num_kv_heads: int | None = None,
     ) -> dict[str, Any]:
         def to_msgpackable(value: Any) -> Any:
             if value is None or isinstance(value, (str, int, float, bool)):
@@ -2010,6 +2012,8 @@ class MooncakeConnectorWorker:
         if num_key_value_heads is not None:
             serialized_kv_cache_spec["num_kv_heads"] = num_key_value_heads
             serialized_kv_cache_spec["num_key_value_heads"] = num_key_value_heads
+        if total_num_kv_heads is not None:
+            serialized_kv_cache_spec["total_num_kv_heads"] = total_num_kv_heads
 
         serialized = {
             "layer_names": layer_names,
@@ -2035,11 +2039,34 @@ class MooncakeConnectorWorker:
         return None
 
     @classmethod
-    def _get_kv_transfer_spec_key(cls, spec: Any) -> tuple[str, int | None]:
+    def _get_kv_transfer_spec_key(
+        cls,
+        spec: Any,
+        total_num_kv_heads: int | None,
+    ) -> tuple[str, int | None, int | None]:
         # TODO: Extand this key with KV cache layout fields (for example num_dims)
         # if a future model has layers with the same number of kv heads but incompatiible
         # cache shapes.
-        return (type(spec).__name__, cls._get_spec_num_key_value_heads(spec))
+        return (
+            type(spec).__name__,
+            cls._get_spec_num_key_value_heads(spec),
+            total_num_kv_heads,
+        )
+
+    def _get_spec_total_num_kv_heads(self, spec: Any, layer_idx: int) -> int | None:
+        local_num_kv_heads = self._get_spec_num_key_value_heads(spec)
+        if local_num_kv_heads is None or isinstance(spec, MLAAttentionSpec):
+            return local_num_kv_heads
+
+        model_config = self.vllm_config.model_config
+        speculative_config = self.vllm_config.speculative_config
+        if (
+            layer_idx >= self.total_layers
+            and speculative_config is not None
+            and speculative_config.draft_model_config is not None
+        ):
+            model_config = speculative_config.draft_model_config
+        return model_config.get_total_num_kv_heads()
 
     def _build_kv_group2layeridx(self) -> dict[int, tuple[dict[str, Any], list[int]]]:
         from vllm.v1.worker.utils import extract_layer_index
@@ -2068,52 +2095,54 @@ class MooncakeConnectorWorker:
                 assigned_indices.add(layer_idx)
                 layer_entries.append((layer_name, layer_idx))
 
-            if isinstance(group_spec.kv_cache_spec, UniformTypeKVCacheSpecs):
-                spec_groups: OrderedDict[tuple[str, int | None], list[tuple[str, int]]] = OrderedDict()
-                for layer_name, layer_idx in layer_entries:
-                    layer_spec = group_spec.kv_cache_spec.kv_cache_specs[layer_name]
-                    spec_key = self._get_kv_transfer_spec_key(layer_spec)
-                    spec_groups.setdefault(spec_key, []).append((layer_name, layer_idx))
+            spec_groups: OrderedDict[
+                tuple[str, int | None, int | None],
+                list[tuple[str, int, Any, int | None]],
+            ] = OrderedDict()
+            for layer_name, layer_idx in layer_entries:
+                kv_cache_spec = group_spec.kv_cache_spec
+                if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+                    kv_cache_spec = kv_cache_spec.kv_cache_specs[layer_name]
+                total_num_kv_heads = self._get_spec_total_num_kv_heads(kv_cache_spec, layer_idx)
+                spec_key = self._get_kv_transfer_spec_key(kv_cache_spec, total_num_kv_heads)
+                spec_groups.setdefault(spec_key, []).append((layer_name, layer_idx, kv_cache_spec, total_num_kv_heads))
 
-                if len(spec_groups) > 1:
-                    logger.info(
-                        "Split KV cache manager group %d into %d Mooncake transfer groups by KV spec: %s",
-                        kv_cache_group_id,
-                        len(spec_groups),
-                        list(spec_groups),
-                    )
+            if len(spec_groups) > 1:
+                logger.info(
+                    "Split KV cache manager group %d into %d Mooncake transfer groups by KV spec: %s",
+                    kv_cache_group_id,
+                    len(spec_groups),
+                    list(spec_groups),
+                )
 
-                for entries in spec_groups.values():
-                    layer_names = [layer_name for layer_name, _ in entries]
-                    layer_indices = [layer_idx for _, layer_idx in entries]
-                    kv_cache_spec = group_spec.kv_cache_spec.kv_cache_specs[layer_names[0]]
-                    kv_group2layeridx[transfer_group_id] = (
-                        self._serialize_kv_group_spec(
-                            group_spec,
-                            layer_names=layer_names,
-                            kv_cache_spec=kv_cache_spec,
-                            kv_cache_group_id=kv_cache_group_id,
-                        ),
-                        layer_indices,
-                    )
-                    transfer_group_id += 1
-                continue
-
-            layer_names = [layer_name for layer_name, _ in layer_entries]
-            layer_indices = [layer_idx for _, layer_idx in layer_entries]
-            kv_group2layeridx[transfer_group_id] = (
-                self._serialize_kv_group_spec(
-                    group_spec,
-                    layer_names=layer_names,
-                    kv_cache_group_id=kv_cache_group_id,
-                ),
-                layer_indices,
-            )
-            transfer_group_id += 1
+            for entries in spec_groups.values():
+                layer_names = [layer_name for layer_name, _, _, _ in entries]
+                layer_indices = [layer_idx for _, layer_idx, _, _ in entries]
+                kv_cache_spec = entries[0][2]
+                total_num_kv_heads = entries[0][3]
+                kv_group2layeridx[transfer_group_id] = (
+                    self._serialize_kv_group_spec(
+                        group_spec,
+                        layer_names=layer_names,
+                        kv_cache_spec=kv_cache_spec,
+                        kv_cache_group_id=kv_cache_group_id,
+                        total_num_kv_heads=total_num_kv_heads,
+                    ),
+                    layer_indices,
+                )
+                transfer_group_id += 1
         return kv_group2layeridx
 
     def _has_mamba_group(self) -> bool:
         return any(group_spec["kv_cache_spec_type"] == "MambaSpec" for group_spec, _ in self.kv_group2layeridx.values())
+
+    def _requires_group_aware_attention_transfer(self) -> bool:
+        total_num_kv_heads = {
+            self._get_attention_group_num_key_value_heads(group_spec)
+            for group_spec, layer_indices in self.kv_group2layeridx.values()
+            if layer_indices and group_spec["kv_cache_spec_type"] != "MambaSpec"
+        }
+        return len(total_num_kv_heads) > 1
 
     @staticmethod
     def _as_kv_cache_tuple(kv_cache_tuple: Any) -> list[torch.Tensor]:
@@ -2203,6 +2232,7 @@ class MooncakeConnectorWorker:
         # Maps each KV cache group to its serialized group spec and physical
         # layer indices: {group_id: (group_spec, [layer_idx0, layer_idx1, ...])}.
         self.kv_group2layeridx = self._build_kv_group2layeridx()
+        self._is_hma_required = self._is_hma_required or self._requires_group_aware_attention_transfer()
         has_mamba_group = self._has_mamba_group()
         layer_name_to_idx = {
             layer_name: layer_idx
@@ -3123,27 +3153,19 @@ class MooncakeConnectorWorker:
         return num_d_block_heads // num_p_block_heads
 
     def _get_attention_group_num_key_value_heads(self, group_spec: dict[str, Any]) -> int:
-        def to_global_num_heads(local_num_heads: int) -> int:
-            if "MLA" in group_spec.get("kv_cache_spec_type", ""):
-                return local_num_heads
-            # FullAttentionSpec stores the rank-local head count after TP
-            # sharding. Recover the global count so P and D derive the same
-            # pull mapping when their TP sizes differ.
-            return min(local_num_heads * self.tp_size, self.num_key_value_heads)
-
         kv_cache_spec = group_spec.get("kv_cache_spec", {})
         if isinstance(kv_cache_spec, dict):
-            for key in ("num_kv_heads", "num_key_value_heads"):
+            for key in ("total_num_kv_heads", "num_kv_heads", "num_key_value_heads"):
                 num_key_value_heads = kv_cache_spec.get(key)
                 if isinstance(num_key_value_heads, int):
-                    return to_global_num_heads(num_key_value_heads)
+                    return num_key_value_heads
             for spec in kv_cache_spec.values():
                 if not isinstance(spec, dict):
                     continue
-                for key in ("num_kv_heads", "num_key_value_heads"):
+                for key in ("total_num_kv_heads", "num_kv_heads", "num_key_value_heads"):
                     num_key_value_heads = spec.get(key)
                     if isinstance(num_key_value_heads, int):
-                        return to_global_num_heads(num_key_value_heads)
+                        return num_key_value_heads
         return self.num_key_value_heads
 
     def _get_attention_group_remote_rank(
