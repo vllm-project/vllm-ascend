@@ -47,6 +47,7 @@ from vllm_ascend.ops.fused_moe.token_dispatcher import (
     TokenDispatcherWithMC2,
 )
 from vllm_ascend.quantization.quant_type import QuantType
+from cann_ops_transformer.ops import get_symm_buffer_for_mega_moe, mega_moe
 
 _MoECommMethods: dict[MoECommType | None, MoECommMethod] = {}
 
@@ -387,19 +388,12 @@ class FusedMC2CommImpl(MoECommMethod):
 
     def __init__(self, moe_config):
         super().__init__(moe_config)
-        self._cann_mega_moe_ops = None
-        self._cann_symm_buffers = {}
+        self._mega_moe_symm_buffer = None
         enable_fused_mc2 = get_ascend_config().enable_fused_mc2
         if enable_fused_mc2 == _DISPATCH_FFN_COMBINE_MODE:
             self.expert_token_nums = torch.zeros([self.moe_config.num_local_experts], dtype=torch.int32, device="npu")
         else:
             self.expert_token_nums = None
-        # Fail fast at startup if MegaMoe is selected but CANN 9.1 is not
-        # installed. Without this, the first forward — which may not happen
-        # for tens of seconds during model load — raises an opaque
-        # ImportError deep inside the comm method.
-        if enable_fused_mc2 == _CANN_MEGA_MOE_FUSED_MC2_MODE:
-            self._load_cann_mega_moe_ops()
 
     def pad_and_split_input_ids(self, input_ids):
         return self.prepare_finalize.pad_and_split_input_ids(input_ids)  # type: ignore[attr-defined]
@@ -410,19 +404,7 @@ class FusedMC2CommImpl(MoECommMethod):
     def _get_prepare_finalize(self):
         return PrepareAndFinalizeWithMC2(self.moe_config)
 
-    def _load_cann_mega_moe_ops(self):
-        if self._cann_mega_moe_ops is None:
-            try:
-                module = importlib.import_module(_CANN_MEGA_MOE_MODULE_NAME)
-            except Exception as exc:
-                raise RuntimeError(
-                    "Failed to import CANN 9.1 official MegaMoe. Source "
-                    "/usr/local/Ascend/cann-9.1.0/set_env.sh before starting vLLM."
-                ) from exc
-            self._cann_mega_moe_ops = (module.get_symm_buffer_for_mega_moe, module.mega_moe)
-        return self._cann_mega_moe_ops
-
-    def _get_cann_symm_buffer(
+    def _init_mega_moe_symm_buffer(
         self,
         fused_experts_input: MoEFusedExpertsInput,
         topk_ids: torch.Tensor,
@@ -431,7 +413,6 @@ class FusedMC2CommImpl(MoECommMethod):
         dispatch_quant_mode: int,
         dispatch_quant_out_dtype: int | None,
     ):
-        get_symm_buffer_for_mega_moe, _ = self._load_cann_mega_moe_ops()
         # FusedMC2CommImpl always builds a TokenDispatcherWithMC2 (see
         # setup_moe_comm_method), which is where global_bs / ep_world_size live.
         # Assert it so mypy resolves those attributes off the base dispatcher.
@@ -475,42 +456,25 @@ class FusedMC2CommImpl(MoECommMethod):
             1,
             num_max_tokens_per_rank * int(self.token_dispatcher.ep_world_size) * min(num_topk, expert_per_rank),
         )
-        key = (
-            id(group),
+
+        logger.info(
+            "CANN MegaMoe sym-buffer alloc (must match across all EP ranks): "
+            "ep_rank=%s ep_world=%s global_bs=%s",
+            getattr(self.token_dispatcher, "ep_rank_id", "?"),
+            getattr(self.token_dispatcher, "ep_world_size", "?"),
+            self.token_dispatcher.global_bs,
+        )
+        self._mega_moe_symm_buffer = get_symm_buffer_for_mega_moe(
+            group,
             num_experts,
             num_max_tokens_per_rank,
-            max_recv_token_num,
             num_topk,
             hidden,
             intermediate_hidden,
-            dispatch_quant_mode,
-            dispatch_quant_out_dtype,
+            max_recv_token_num=max_recv_token_num,
+            dispatch_quant_mode=dispatch_quant_mode,
+            dispatch_quant_out_dtype=dispatch_quant_out_dtype,
         )
-        if key not in self._cann_symm_buffers:
-            # Diagnostic: every EP rank must print an identical key here and
-            # reach this collective together. If a PD / dummy-batch run ever
-            # desyncs (HCCL 507057), compare these lines across ranks to see
-            # which field diverged or which rank never reached the collective.
-            logger.info(
-                "CANN MegaMoe sym-buffer alloc (must match across all EP ranks): "
-                "ep_rank=%s ep_world=%s global_bs=%s key=%s",
-                getattr(self.token_dispatcher, "ep_rank_id", "?"),
-                getattr(self.token_dispatcher, "ep_world_size", "?"),
-                self.token_dispatcher.global_bs,
-                key[1:],  # drop id(group) (rank-local python id, not comparable)
-            )
-            self._cann_symm_buffers[key] = get_symm_buffer_for_mega_moe(
-                group,
-                num_experts,
-                num_max_tokens_per_rank,
-                num_topk,
-                hidden,
-                intermediate_hidden,
-                max_recv_token_num=max_recv_token_num,
-                dispatch_quant_mode=dispatch_quant_mode,
-                dispatch_quant_out_dtype=dispatch_quant_out_dtype,
-            )
-        return self._cann_symm_buffers[key]
 
     def _apply_cann_mega_moe(
         self,
@@ -523,7 +487,6 @@ class FusedMC2CommImpl(MoECommMethod):
         # branch); assert the subtype so mypy resolves it off the base class.
         assert isinstance(self.token_dispatcher, TokenDispatcherWithMC2)
 
-        _, mega_moe = self._load_cann_mega_moe_ops()
         dispatch_quant_mode, dispatch_quant_out_dtype, weight_type = _get_cann_mega_moe_quant_settings(
             fused_experts_input.quant.quant_type
         )
@@ -543,7 +506,8 @@ class FusedMC2CommImpl(MoECommMethod):
         # [1, N] per-channel case to avoid flattening genuine per-group scales.
         weight_scales1 = [t.squeeze(0) if (t.dim() == 2 and t.shape[0] == 1) else t for t in weight_scales1]
         weight_scales2 = [t.squeeze(0) if (t.dim() == 2 and t.shape[0] == 1) else t for t in weight_scales2]
-        sym_buffer = self._get_cann_symm_buffer(
+
+        self._init_mega_moe_symm_buffer(
             fused_experts_input,
             topk_ids,
             weight1,
@@ -588,7 +552,7 @@ class FusedMC2CommImpl(MoECommMethod):
             fused_experts_input.topk_weights.to(torch.float32),
             weight1,
             weight2,
-            sym_buffer,
+            self._mega_moe_symm_buffer,
             l1_weights_sf=weight_scales1,
             l2_weights_sf=weight_scales2,
             l1_bias=l1_bias,
