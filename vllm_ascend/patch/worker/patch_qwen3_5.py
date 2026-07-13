@@ -207,3 +207,64 @@ else:
     _GDN_PATCH_TARGET.forward = AscendGatedDeltaNetAttention.forward
     _GDN_PATCH_TARGET._forward_core = AscendGatedDeltaNetAttention._forward_core
     _GDN_PATCH_TARGET._warmup_prefill_kernels = AscendGatedDeltaNetAttention._warmup_prefill_kernels
+
+
+# Enable EVS (multimodal pruning) for Qwen3.5.
+# TO-DO: Remove after upstream vLLM supports EVS for Qwen3.5
+
+import functools
+
+from vllm.model_executor.models.qwen3_5 import (
+    Qwen3_5ForConditionalGeneration,
+    Qwen3_5MoeForConditionalGeneration,
+)
+from vllm.tokenizers.registry import cached_tokenizer_from_config
+
+# supports_multimodal_pruning = False -> True
+Qwen3_5ForConditionalGeneration.supports_multimodal_pruning = True
+
+# Delete recompute_mrope_positions stub (inherits from parent)
+try:
+    del Qwen3_5ForConditionalGeneration.recompute_mrope_positions
+except AttributeError:
+    pass
+
+# config stuff used by EVS
+def _inject_evs_attrs(self, vllm_config):
+    self.is_multimodal_pruning_enabled = (
+        self.multimodal_config.is_multimodal_pruning_enabled()
+    )
+    self.video_pruning_rate = self.multimodal_config.video_pruning_rate
+    self._tokenizer = cached_tokenizer_from_config(vllm_config.model_config)
+
+    config = vllm_config.model_config.hf_config
+    self.use_deepstack = hasattr(config.vision_config, "deepstack_visual_indexes")
+    self.deepstack_num_level = (
+        len(config.vision_config.deepstack_visual_indexes)
+        if self.use_deepstack
+        else 0
+    )
+    self.visual_dim = config.vision_config.out_hidden_size
+    self.multiscale_dim = self.visual_dim * self.deepstack_num_level
+
+# wrap __init__ on both classes to inject the config stuff
+# MoE class patched separately as it does not inherit init from dense
+
+_orig_qwen35_init = Qwen3_5ForConditionalGeneration.__init__
+
+@functools.wraps(_orig_qwen35_init)
+def _patched_qwen35_init(self, *, vllm_config, prefix="model"):
+    _orig_qwen35_init(self, vllm_config=vllm_config, prefix=prefix)
+    _inject_evs_attrs(self, vllm_config)
+
+Qwen3_5ForConditionalGeneration.__init__ = _patched_qwen35_init
+
+_orig_qwen35_moe_init = Qwen3_5MoeForConditionalGeneration.__init__
+
+@functools.wraps(_orig_qwen35_moe_init)
+def _patched_qwen35_moe_init(self, *, vllm_config, prefix="model"):
+    _orig_qwen35_moe_init(self, vllm_config=vllm_config, prefix=prefix)
+    _inject_evs_attrs(self, vllm_config)
+
+
+Qwen3_5MoeForConditionalGeneration.__init__ = _patched_qwen35_moe_init
