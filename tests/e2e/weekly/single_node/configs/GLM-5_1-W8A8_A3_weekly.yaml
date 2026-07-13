@@ -29,7 +29,7 @@ _server_cmd: &server_cmd
   - "ascend"
   - "--enable-chunked-prefill"
   - "--additional-config"
-  - '{"enable_npugraph_ex": true,"fuse_muls_add":true,"multistream_overlap_shared_expert":true}'
+  - '{"fuse_muls_add":true,"multistream_overlap_shared_expert":true}'
   - "--compilation-config"
   - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
   - "--speculative-config"

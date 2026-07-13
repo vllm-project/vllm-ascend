@@ -270,7 +270,6 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
                 actual_seq_lengths_q=self.runner.actual_seq_lengths_q,
                 block_table_tensor=self.runner.input_batch.block_table[0].get_device_tensor()[:num_reqs],
                 slot_mapping=self.runner.input_batch.block_table[0].slot_mapping.gpu,
-                slot_mapping_cpu=self.runner.input_batch.block_table[0].slot_mapping.cpu,
                 positions=self.runner.positions,
                 attn_state=self.runner.attn_state,
                 decode_token_per_req=self.runner.decode_token_per_req,
@@ -400,6 +399,7 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
 
         if aclgraph_runtime_mode == CUDAGraphMode.FULL:
             num_reqs_padded = self.runner._pad_query_start_loc_for_fia(
+                self.runner.query_start_loc,
                 num_input_tokens,
                 batch_descriptor.num_reqs if batch_descriptor.num_reqs is not None else common_attn_metadata.num_reqs,
                 common_attn_metadata.num_reqs,

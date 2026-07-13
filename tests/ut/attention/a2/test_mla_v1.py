@@ -1895,7 +1895,7 @@ class TestAscendMLAImpl(TestBase):
         self.assertTrue(torch.equal(prefix_out, out))
         self.assertTrue(torch.equal(prefix_lse, lse))
 
-    @patch("torch_npu.atb.npu_paged_cache_load")
+    @patch("torch_npu.npu_gather_pa_kv_cache")
     @patch("torch_npu.npu_attention_update")
     @patch("torch_npu.npu_fused_infer_attention_score")
     def test_compute_prefill_context(self, mock_fia, mock_update, mock_load):
@@ -1943,7 +1943,7 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(out.shape, prefix_out.shape)
 
     @patch("vllm_ascend.attention.mla_v1.get_current_vllm_config")
-    @patch("torch_npu.atb.npu_paged_cache_load")
+    @patch("torch_npu.npu_gather_pa_kv_cache")
     @patch("torch_npu.npu_attention_update")
     @patch("torch_npu.npu_fused_infer_attention_score")
     def test_compute_prefill_context_non_power_of_two_heads(

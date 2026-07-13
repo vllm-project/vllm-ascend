@@ -368,9 +368,6 @@ msgid ""
 "instead, we directly present the final result."
 msgstr "在步骤 2 中，我们不再提供解释或进行计算，而是直接给出最终结果。"
 
-msgid "#### Obtain inputs"
-msgstr "#### 获取输入"
-
 msgid "Scheduled token of each request: `{'0': 1, '1': 1, '2': 3}`"
 msgstr "每个请求调度的 token：`{'0': 1, '1': 1, '2': 3}`"
 
@@ -397,9 +394,6 @@ msgid ""
 msgstr ""
 "3. `token indices`：`[3, 14, 29, 30, 31]`\n"
 "4. `Input IDs`：`[T_0_3, T_1_2, T_3_5, T_3_6, T_3_7]`"
-
-msgid "#### Build inputs attention metadata"
-msgstr "#### 构建输入注意力元数据"
 
 msgid ""
 "We allocate the blocks `7` and `8` to `request_1` and `request_2` "

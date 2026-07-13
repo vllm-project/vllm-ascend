@@ -407,6 +407,28 @@
 #       Remove this patch once the supported vLLM version contains the upstream
 #       MiniMax-M2 incremental tool-call streaming fix.
 #
+# ** 12b. File: platform/patch_structured_output.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.sampling_params.SamplingParams._validate_structured_outputs`
+#      `vllm.v1.structured_output.StructuredOutputManager.grammar_init`
+#    Why:
+#       V1 structured outputs use one engine-level backend, while `backend=auto`
+#       resolves the backend per request. After one request initializes
+#       `xgrammar`, a later request that resolves to `guidance` can still reach
+#       the initialized `xgrammar` backend and crash during grammar compilation.
+#    How:
+#       Record the first resolved backend on the structured-output config and
+#       reject later requests that resolve to a different backend. Also guard
+#       `grammar_init` so requests that bypass API-side validation fail before
+#       backend grammar compilation.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/issues/43920
+#       https://github.com/vllm-project/vllm/pull/44401
+#    Future Plan:
+#       Remove this patch once upstream vLLM either enforces backend consistency
+#       before grammar compilation or safely handles mixed-backend grammar
+#       failures without killing the engine.
+#
 # ** 13. File: platform/patch_camem_allocator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.model.is_cumem_allocator_available`
@@ -772,6 +794,36 @@
 #    Future Plan:
 #       Remove this patch when all ops in _forward_core support both Qwen3_5 and Qwen3Next.
 #
+# ** 17a. File: worker/patch_idex_310.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.layers.fla.ops.index.prepare_chunk_indices`
+#      `vllm.model_executor.layers.fla.ops.index.prepare_chunk_offsets`
+#    Why:
+#       310P uses Ascend-friendly chunk index helpers for Qwen GDN prefill.
+#    How:
+#       Replace upstream FLA chunk index helper functions with 310P implementations.
+#
+#   2. `vllm_ascend.spec_decode.llm_base_proposer.AscendSpecDecodeBaseProposer.set_inputs_first_pass`
+#    Why:
+#       310P needs to protect the tail slot during MTP input_ids shift to avoid
+#       GatherV2 corruption from persistent drafter input buffers.
+#    How:
+#       Reuse the 310P proposer implementation for the first-pass input shift.
+#
+#   3. `vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn.QwenGatedDeltaNetAttention`
+#    Why:
+#       Qwen GDN needs 310P-specific state helpers, forward core, state dtype,
+#       and attention backend/builder wiring.
+#    How:
+#       Patch Qwen GDN methods to use Ascend GDN implementations and the 310P
+#       GDN attention backend. RC devices also route upstream GDNAttentionBackend
+#       to the 310P metadata builder.
+#    Related PR (if no, explain why):
+#       No, 310P custom operator and backend behavior are vllm-ascend specific.
+#    Future Plan:
+#       Remove this patch when upstream exposes stable hooks for 310P GDN
+#       chunk metadata, spec-decode input layout, and backend selection.
+#
 # ** 18. File: worker/patch_cudagraph.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.cudagraph_dispatcher.CudagraphDispatcher._create_padded_batch_descriptor`
@@ -1086,3 +1138,38 @@
 #       runner and can rely on upstream's default enablement heuristics
 #       (model architecture, Triton, feature checks) without crashes or
 #       degraded functionality.
+#
+# ** 31. File: worker/patch_qwen3_dspark.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.spec_decode.llm_base_proposer.SpecDecodeBaseProposer`
+#    Why:
+#       The config.json of the open-source dspark contains two types of
+#       "mask_token_id" with different variable names and indentation.
+#       Currently, the vllm community has only added support for deepseek,
+#       but not for the qwen/glm series. In model_runner_v1, since the
+#       initialization of vllm/eagle_proposer is performed first, followed
+#       by the initialization of vllm-ascend/llm_base_proposer, this
+#       modification cannot be implemented in vllm-ascend/llm_base_proposer.
+#    How:
+#       Override the `SpecDecodeBaseProposer._init_parallel_drafting_params`
+#       method and add the reading of the `dspark config.json` for `qwen/glm`
+#    Future Plan:
+#       Remove this patch once vllm-ascend fully supports the v2 model
+#       runner.
+#
+# ** 32. File: worker/patch_step3p5.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.step3p5.Step3p5Attention.forward`
+#    Why:
+#       Add split_qkv_rmsnorm_rope support for step3.5/3.7. This model can't use
+#       fusion pass to enable this op because of 2 reasons: 1) Step uses
+#       Gemmanorm instead of normal norm, so existing fusion pass can't be
+#       matched. 2) Step has 2 kinds of attention layer (full attention and
+#       sliding window attention), each has different number of q_head. Right
+#       now, torch.compile will use same pattern to match different attention
+#       layer so there will be shape mismatch in split op.
+#    How:
+#       Monkey-patch Step3p5Attention.forward to enable split_qkv_rmsnorm_rope.
+#    Future Plan:
+#       Remove this patch once torch.compile fully supports matching pattern from
+#       op's params.

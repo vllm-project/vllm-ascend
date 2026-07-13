@@ -38,6 +38,7 @@ class AscendPCPMetadata:
     pcp_fa_query_idx: torch.Tensor = None
     pcp_padded_tokens_fla: int = 0
     pcp_enter_fa_restore_idx: torch.Tensor = None
+    pcp_fa_padding_restore_idx: torch.Tensor = None
     block_table_cp: torch.Tensor = None
     valid_block_ids: torch.Tensor = None
     prefill_q_cum_seqlens: torch.Tensor = None
