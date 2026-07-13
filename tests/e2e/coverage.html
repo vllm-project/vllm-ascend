@@ -1,0 +1,786 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>E2E Test Coverage Report</title>
+<style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+           background: #f5f7fa; color: #1a1a2e; line-height: 1.6; }
+    .container { max-width: 1600px; margin: 0 auto; padding: 20px; }
+    h1 { font-size: 1.8rem; margin-bottom: 8px; color: #0f0f23; }
+    h2 { font-size: 1.25rem; margin: 24px 0 12px; color: #0f0f23;
+         border-bottom: 2px solid #e2e8f0; padding-bottom: 6px; }
+    .subtitle { color: #666; margin-bottom: 24px; }
+
+    /* Summary cards */
+    .summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+                    gap: 12px; margin-bottom: 24px; }
+    .summary-card { background: #fff; border-radius: 10px; padding: 16px 20px;
+                    box-shadow: 0 1px 4px rgba(0,0,0,.08); text-align: center; }
+    .summary-card .num { font-size: 2rem; font-weight: 700; color: #2563eb; }
+    .summary-card .label { font-size: .8rem; color: #666; margin-top: 4px; }
+    /* Progress card spans two columns */
+    .summary-card.progress-card { grid-column: span 2; text-align: left; }
+    .summary-card.progress-card .num { font-size: 1.6rem; }
+    .summary-card.progress-card .label { margin-top: 2px; }
+    .summary-card.progress-card .num span { font-size: 1rem; color: #888; }
+    .progress-track { height: 14px; background: #e5e7eb; border-radius: 7px;
+                      overflow: hidden; margin: 10px 0 4px; }
+    .progress-fill { height: 100%; border-radius: 7px; background: #2563eb;
+                     transition: width .4s; }
+    .progress-fill.low { background: #ef4444; }
+    .progress-fill.medium { background: #f59e0b; }
+    .progress-sub { font-size: .78rem; color: #888; }
+
+    /* N-dimensional cross-coverage explorer */
+    .explorer-section { background: #fff; border-radius: 10px; padding: 16px 20px;
+                        margin-bottom: 16px; box-shadow: 0 1px 4px rgba(0,0,0,.08); }
+    .explorer-section h3 { font-size: 1rem; margin-bottom: 4px; color: #333; }
+    .explorer-section .section-hint { font-size: .8rem; color: #888; margin-bottom: 12px; }
+    .dim-checkboxes { display: flex; flex-wrap: wrap; gap: 8px 16px; margin-bottom: 12px; }
+    .dim-checkboxes label { font-size: .85rem; display: flex; align-items: center;
+                            gap: 4px; cursor: pointer; padding: 4px 10px;
+                            border: 1px solid #d1d5db; border-radius: 6px; background: #fff; }
+    .dim-checkboxes label:hover { background: #f1f5f9; }
+    .dim-checkboxes input { margin: 0; }
+    .dim-checkboxes label.checked { background: #dbeafe; border-color: #2563eb; color: #1e40af; font-weight: 600; }
+    .explorer-controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+    .explorer-controls button { padding: 5px 12px; border: 1px solid #2563eb; background: #2563eb;
+            color: #fff; border-radius: 6px; cursor: pointer; font-size: .82rem; }
+    .explorer-controls button:hover { background: #1d4ed8; }
+    .explorer-controls button.ghost { background: #fff; color: #2563eb; }
+    .explorer-controls button.ghost:hover { background: #eff6ff; }
+    .explorer-controls label.zero-cov-toggle {
+        font-size: .82rem; display: flex; align-items: center; gap: 4px;
+        cursor: pointer; border: 1px solid #d1d5db; border-radius: 6px;
+        padding: 4px 10px; background: #fff;
+    }
+    .explorer-summary { font-size: .82rem; color: #666; margin-left: auto; }
+    .combo-table { width: 100%; border-collapse: collapse; font-size: .82rem; }
+    .combo-table th { background: #f1f5f9; text-align: left; padding: 6px 10px;
+                      font-weight: 600; white-space: nowrap; border-bottom: 1px solid #e2e8f0; }
+    .combo-table td { padding: 4px 10px; border-bottom: 1px solid #f1f5f9; vertical-align: top; }
+    .combo-table tr.zero td { color: #cbd5e1; background: #fafbfc; }
+    .combo-table tr.zero td .combo-val { color: #cbd5e1; }
+    .combo-table tr.zero td .combo-count { background: #fee2e2; color: #991b1b; }
+    .combo-table tr:hover td { background: #f8fafc; }
+    .combo-table tr.zero:hover td { background: #f5f5f5; }
+    .combo-count { display: inline-block; min-width: 24px; text-align: center;
+                   padding: 1px 7px; border-radius: 10px; font-weight: 600;
+                   font-size: .78rem; background: #dbeafe; color: #1e40af; cursor: pointer; }
+    .combo-val { font-family: 'SF Mono', Menlo, Consolas, monospace; font-size: .8rem; }
+    .combo-tests { font-size: .72rem; color: #888; margin-top: 2px; }
+    .combo-table-wrapper { max-height: 520px; overflow: auto; border: 1px solid #e5e7eb;
+                           border-radius: 6px; }
+    #explorer-pager { padding: 8px 10px; }
+    #explorer-pager button { padding: 5px 12px; border: 1px solid #2563eb;
+            background: #2563eb; color: #fff; border-radius: 6px; cursor: pointer; font-size: .82rem; }
+    #explorer-pager button:hover { background: #1d4ed8; }
+
+    /* Toolbar */
+    .toolbar { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; align-items: center; }
+    .toolbar select, .toolbar input { padding: 6px 10px; border: 1px solid #d1d5db;
+            border-radius: 6px; font-size: .85rem; background: #fff; }
+    .toolbar input[type="text"] { flex: 1; min-width: 200px; }
+    .toolbar button { padding: 6px 14px; border: 1px solid #2563eb; background: #2563eb;
+            color: #fff; border-radius: 6px; cursor: pointer; font-size: .85rem; }
+    .toolbar button:hover { background: #1d4ed8; }
+
+    /* Table */
+    .card-group { margin-bottom: 20px; }
+    .card-group summary { font-size: 1.1rem; font-weight: 600; cursor: pointer;
+            padding: 8px 12px; background: #e8ecf1; border-radius: 8px; }
+    .card-group summary:hover { background: #dde2e9; }
+    .table-wrapper { overflow-x: auto; margin-top: 8px; }
+    table { width: 100%; border-collapse: collapse; font-size: .82rem; }
+    th { background: #f1f5f9; text-align: left; padding: 8px 10px; font-weight: 600;
+         white-space: nowrap; cursor: pointer; user-select: none; position: sticky; top: 0; }
+    th:hover { background: #e2e8f0; }
+    td { padding: 6px 10px; border-bottom: 1px solid #f1f5f9; vertical-align: top; }
+    tr:hover td { background: #f8fafc; }
+    tr.unmarked-row td { color: #9ca3af; font-style: italic; }
+    tr.unmarked-row:hover td { background: #f9fafb; }
+    .tag { display: inline-block; padding: 1px 6px; margin: 1px 2px; border-radius: 4px;
+           font-size: .75rem; font-weight: 500; }
+    .tag-arch { background: #dbeafe; color: #1e40af; }
+    .tag-feature { background: #fce7f3; color: #9d174d; }
+    .tag-parallel { background: #d1fae5; color: #065f46; }
+    .tag-deploy { background: #fef3c7; color: #92400e; }
+    .tag-hardware { background: #ede9fe; color: #5b21b6; }
+    .tag-quant { background: #fee2e2; color: #991b1b; }
+    .tag-graph { background: #e0f2fe; color: #075985; }
+    .tag-model { background: #f0fdf4; color: #166534; }
+    .badge-card { display: inline-block; padding: 2px 8px; border-radius: 12px;
+                  font-size: .7rem; font-weight: 700; }
+    .badge-1 { background: #dbeafe; color: #1e40af; }
+    .badge-2 { background: #fef3c7; color: #92400e; }
+    .badge-4 { background: #fce7f3; color: #9d174d; }
+
+    .hidden { display: none; }
+    .no-results { text-align: center; padding: 40px; color: #999; }
+    .count-info { font-size: .85rem; color: #666; padding: 8px 0; }
+    .missing-warn { background: #fef2f2; border: 1px solid #fecaca; color: #991b1b;
+                    border-radius: 8px; padding: 12px 16px; margin-bottom: 16px; font-size: .85rem; }
+    .missing-warn summary { cursor: pointer; font-weight: 600; background: none; padding: 0; }
+    .missing-warn ul { margin: 8px 0 0 20px; }
+    </style>
+</head>
+<body>
+<div class="container">
+
+<h1>🔬 E2E Test Coverage Report</h1>
+<p class="subtitle">Generated from <code>tests/e2e/pull_request/</code> —
+146 test functions across 1-card, 2-card, and 4-card configurations.</p>
+
+<div class="summary-grid">
+    <div class="summary-card"><div class="num">146</div><div class="label">Total Tests</div></div>
+    <div class="summary-card progress-card">
+        <div class="num">9 <span>/ 146</span></div>
+        <div class="label">Marked Tests (6%)</div>
+        <div class="progress-track"><div class="progress-fill low" style="width:6%"></div></div>
+        <div class="progress-sub">137 tests still unmarked · target 100%</div>
+    </div>
+    <div class="summary-card"><div class="num">86</div>
+    <div class="label">1-Card Tests</div></div>
+    <div class="summary-card"><div class="num">34</div>
+    <div class="label">2-Card Tests</div></div>
+    <div class="summary-card"><div class="num">26</div>
+    <div class="label">4-Card Tests</div></div>
+</div>
+
+
+
+<h2>🧩 Cross-Coverage Explorer</h2>
+<div class="explorer-section">
+        <h3>🧩 Cross-Coverage Explorer</h3>
+        <p class="section-hint">Pick any N dimensions to enumerate the full cross product and
+        see which combinations are covered. Click a count to filter the test matrix.
+        Multi-value dimensions (feature, parallel) count a test once per distinct
+        value-set it declares. Toggle <b>Show zero-coverage</b> to page through the
+        not-covered combinations (semantically invalid combos, declared in
+        <code>coverage_taxonomy.py</code>, are excluded from both views).</p>
+        <div class="dim-checkboxes"><label><input type="checkbox" value="arch">Architecture</label><label><input type="checkbox" value="feature">Feature</label><label><input type="checkbox" value="parallel">Parallel</label><label><input type="checkbox" value="deploy">Deploy</label><label><input type="checkbox" value="hardware">Hardware</label><label><input type="checkbox" value="quantization">Quantization</label><label><input type="checkbox" value="graph_mode">Graph Mode</label></div>
+        <div class="explorer-controls">
+            <button class="ghost" onclick="selectExplorerPreset('arch_quant_graph')">arch × quant × graph</button><button class="ghost" onclick="selectExplorerPreset('arch_feature_hw')">arch × feature × hw</button><button class="ghost" onclick="selectExplorerPreset('feature_par_graph')">feature × parallel × graph</button><button class="ghost" onclick="selectExplorerPreset('all')">All dimensions</button>
+            <label class="zero-cov-toggle">
+                <input type="checkbox" id="show-zero-coverage" onchange="toggleZeroCoverage()"> Show zero-coverage
+            </label>
+            <span class="explorer-summary" id="explorer-summary"></span>
+        </div>
+        <div class="combo-table-wrapper"><div id="explorer-table"></div></div>
+    </div>
+
+<h2>Test Matrix</h2>
+
+<div class="toolbar">
+    <input type="text" id="search-box" placeholder="🔍 Search test name, model, or any tag...">
+    <select id="filter-card">
+        <option value="">All Cards</option>
+        <option value="1">1-Card</option>
+        <option value="2">2-Card</option>
+        <option value="4">4-Card</option>
+    </select>
+    <select id="filter-type">
+        <option value="">All Architectures</option>
+        <option value="classification">classification</option><option value="dense">dense</option><option value="embedding">embedding</option><option value="mamba_ssm">mamba_ssm</option><option value="moe">moe</option><option value="multimodal">multimodal</option><option value="reranker">reranker</option>
+    </select>
+    <select id="filter-graph">
+        <option value="">All Graph Modes</option>
+        <option value="aclgraph">aclgraph</option><option value="eager">eager</option><option value="full_and_piecewise">full_and_piecewise</option><option value="full_decode_only">full_decode_only</option><option value="full_graph">full_graph</option><option value="piecewise">piecewise</option><option value="xlite_decode_only">xlite_decode_only</option><option value="xlite_full">xlite_full</option>
+    </select>
+    <label style="font-size:.85rem;display:flex;align-items:center;gap:4px;cursor:pointer">
+        <input type="checkbox" id="show-unmarked"> Show unmarked
+    </label>
+    <button onclick="exportCSV()">📥 Export CSV</button>
+</div>
+
+<div id="count-info" class="count-info"></div>
+<div id="table-container"></div>
+
+</div>
+<script>
+    let DATA = [{"filepath": "four_card/_310p/test_dense_model_310p.py", "test_name": "test_qwen3_dense_tp2_fp16", "card_count": 4, "models": [], "coverage": {}}, {"filepath": "four_card/_310p/test_dense_model_310p.py", "test_name": "test_qwen3_dense_tp4_w8a8", "card_count": 4, "models": [], "coverage": {}}, {"filepath": "four_card/_310p/test_moe_model_310p.py", "test_name": "test_qwen3_5_moe_tp4_fp16", "card_count": 4, "models": [], "coverage": {}}, {"filepath": "four_card/_310p/test_moe_model_310p.py", "test_name": "test_qwen3_moe_tp2_w8a8", "card_count": 4, "models": [], "coverage": {}}, {"filepath": "four_card/_310p/test_vl_model_310p.py", "test_name": "test_qwen3_vl_8b_tp2_fp16", "card_count": 4, "models": [], "coverage": {}}, {"filepath": "four_card/context_parallel/test_accuracy.py", "test_name": "test_dsv2_lite_parallel_config_accuracy", "card_count": 4, "models": [], "coverage": {}}, {"filepath": "four_card/context_parallel/test_accuracy.py", "test_name": "test_models_pcp_dcp_full_feature_accuracy", "card_count": 4, "models": [], "coverage": {}}, {"filepath": "four_card/context_parallel/test_accuracy.py", "test_name": "test_qwen3_vl_multimodal_pcp_accuracy_guard", "card_count": 4, "models": [], "coverage": {}}, {"filepath": "four_card/context_parallel/test_prefix_caching_cp.py", "test_name": "test_dsv2_lite_prefix_cache_with_pcp", "card_count": 4, "models": [], "coverage": {}}, {"filepath": "four_card/spec_decode/test_mtp_qwen3_next.py", "test_name": "test_qwen3_next_mtp_acceptance_tp4", "card_count": 4, "models": [], "coverage": {}}, {"filepath": "four_card/spec_decode/test_mtp_step3p5.py", "test_name": "test_step3p5_mtp_acceptance_tp8", "card_count": 4, "models": [], "coverage": {}}, {"filepath": "four_card/test_data_parallel_tp2.py", "test_name": "test_qwen3_inference_dp2_tp2", "card_count": 4, "models": [], "coverage": {}}, {"filepath": "four_card/test_deepseek_v3_2_w8a8_pruning.py", "test_name": "test_moe_w8a8_tp_pp_ep_full_decode_only", "card_count": 4, "models": [], "coverage": {}}, {"filepath": "four_card/test_deepseek_v3_2_w8a8_pruning.py", "test_name": "test_pd_disaggregation_w8a8_sfa_dsa_full_decode_only", "card_count": 4, "models": [], "coverage": {}}, {"filepath": "four_card/test_deepseek_v4.py", "test_name": "test_deepseek_v4_w4a8_tp4_basic_greedy", "card_count": 4, "models": ["gdydems/DeepSeek-V4-Flash-w4a8-mtp"], "coverage": {"arch": ["moe"], "feature": ["mtp", "flashcomm1"], "parallel": ["TP", "EP"], "deploy": ["pd_mix"], "hardware": ["A3"], "quantization": ["W4A8"], "graph_mode": ["full_decode_only"]}}, {"filepath": "four_card/test_deepseek_v4.py", "test_name": "test_deepseek_v4_w4a8_tp4_index_cache_freq4", "card_count": 4, "models": ["gdydems/DeepSeek-V4-Flash-w4a8-mtp"], "coverage": {"arch": ["moe"], "feature": ["dsa_cp"], "parallel": ["TP", "EP"], "deploy": ["pd_mix"], "hardware": ["A3"], "quantization": ["W4A8"], "graph_mode": ["full_decode_only"]}}, {"filepath": "four_card/test_graph_mode.py", "test_name": "test_aclgraph", "card_count": 4, "models": [], "coverage": {}}, {"filepath": "four_card/test_pipeline_parallel.py", "test_name": "test_models_pp2_dp2", "card_count": 4, "models": [], "coverage": {}}, {"filepath": "four_card/test_pipeline_parallel.py", "test_name": "test_models_pp2_pcp2", "card_count": 4, "models": [], "coverage": {}}, {"filepath": "four_card/test_pipeline_parallel.py", "test_name": "test_models_pp2_tp2", "card_count": 4, "models": [], "coverage": {}}, {"filepath": "four_card/test_profiling_chunk_performance.py", "test_name": "test_profiling_chunk_ttft_performance", "card_count": 4, "models": [], "coverage": {}}, {"filepath": "four_card/test_qwen3_5.py", "test_name": "test_qwen3_5_27b_distributed_mp_tp4", "card_count": 4, "models": [], "coverage": {}}, {"filepath": "four_card/test_qwen3_5.py", "test_name": "test_qwen3_5_35b_distributed_mp_tp4_full_decode_only_mtp3_flashcomm", "card_count": 4, "models": [], "coverage": {}}, {"filepath": "four_card/test_qwen3_next.py", "test_name": "test_qwen3_next_distributed_mp_full_decode_only_tp4", "card_count": 4, "models": [], "coverage": {}}, {"filepath": "four_card/test_qwen3_next.py", "test_name": "test_qwen3_next_distributed_mp_graph_mode_tp4", "card_count": 4, "models": [], "coverage": {}}, {"filepath": "four_card/test_qwen3_next.py", "test_name": "test_qwen3_next_w8a8dynamic_distributed_mp_flash_comm_tp4", "card_count": 4, "models": [], "coverage": {}}, {"filepath": "one_card/_310p/test_classification_310p.py", "test_name": "test_qwen_pooling_classify_correctness", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/_310p/test_dense_model_310p.py", "test_name": "test_qwen3_5_dense_prefix_mamba_cache_tp1_fp16", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/_310p/test_dense_model_310p.py", "test_name": "test_qwen3_5_dense_tp1_fp16_aclgraph", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/_310p/test_dense_model_310p.py", "test_name": "test_qwen3_dense_tp1_w8a8_aclgraph", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/_310p/test_embedding_310p.py", "test_name": "test_bge_m3_correctness", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/_310p/test_embedding_310p.py", "test_name": "test_embed_models_correctness", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/_310p/test_scoring_310p.py", "test_name": "test_cross_encoder_score_1_to_1", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/_310p/test_scoring_310p.py", "test_name": "test_cross_encoder_score_1_to_N", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/_310p/test_scoring_310p.py", "test_name": "test_cross_encoder_score_N_to_N", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/_310p/test_spec_decode_mtp_310p.py", "test_name": "test_qwen3_5_mtp_tp1_eager", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/_310p/test_vl_model_310p.py", "test_name": "test_qwen3_vl_8b_tp1_fp16", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/compile/test_graphex_norm_quant_fusion.py", "test_name": "test_rmsnorm_quant_fusion", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/compile/test_graphex_qknorm_rope_fusion.py", "test_name": "test_rmsnorm_quant_fusion", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/compile/test_norm_quant_fusion.py", "test_name": "test_rmsnorm_quant_fusion", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/lora/test_ilama_lora.py", "test_name": "test_ilama_lora", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/lora/test_llama32_lora.py", "test_name": "test_llama_lora", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/lora/test_lora_with_spec_decode.py", "test_name": "test_batch_inference_correctness", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/lora/test_olmoe_lora.py", "test_name": "test_olmoe_lora", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/lora/test_qwen35_densemodel_lora.py", "test_name": "test_qwen35_text_lora", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/lora/test_qwen3_multi_loras.py", "test_name": "test_multi_loras_with_tp_sync", "card_count": 1, "models": ["Qwen/Qwen3-0.6B"], "coverage": {"arch": ["dense"], "feature": ["lora", "multi_lora", "runtime_lora"], "parallel": ["TP"], "deploy": ["pd_mix"], "hardware": ["A2"], "quantization": ["BF16"], "graph_mode": ["eager"]}}, {"filepath": "one_card/lora/test_qwen3_reranker_lora.py", "test_name": "test_reranker_models_lora", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/model_runner_v2/test_basic.py", "test_name": "test_dflash_spec_decoding", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/model_runner_v2/test_basic.py", "test_name": "test_dspark_spec_decoding", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/model_runner_v2/test_basic.py", "test_name": "test_egale_spec_decoding", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/model_runner_v2/test_basic.py", "test_name": "test_qwen3_dense_eager_mode", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/model_runner_v2/test_basic.py", "test_name": "test_qwen3_dense_graph_mode", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/model_runner_v2/test_uva.py", "test_name": "test_qwen3_dense_eager_mode", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/pooling/test_classification.py", "test_name": "test_qwen_pooling_classify_correctness", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/pooling/test_embedding.py", "test_name": "test_bge_m3_correctness", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/pooling/test_embedding.py", "test_name": "test_causal_embed_models_using_prefix_caching_correctness", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/pooling/test_embedding.py", "test_name": "test_embed_models_correctness", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/pooling/test_scoring.py", "test_name": "test_cross_encoder_score_1_to_1", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/pooling/test_scoring.py", "test_name": "test_cross_encoder_score_1_to_N", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/pooling/test_scoring.py", "test_name": "test_cross_encoder_score_N_to_N", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/pooling/test_scoring.py", "test_name": "test_embedding_score_1_to_1", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/pooling/test_scoring.py", "test_name": "test_embedding_score_1_to_N", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/pooling/test_scoring.py", "test_name": "test_embedding_score_N_to_N", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/spec_decode/test_dflash.py", "test_name": "test_dflash_acceptance", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/spec_decode/test_draft_parallel.py", "test_name": "test_parallel_drafting_acceptance", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/spec_decode/test_eagle.py", "test_name": "test_qwen3_vl_eagle", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/spec_decode/test_eagle.py", "test_name": "test_qwen_eagle3_acceptance", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/spec_decode/test_extract_hidden_states.py", "test_name": "test_extract_hidden_states", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/spec_decode/test_mtp_eagle_correctness.py", "test_name": "test_deepseek_mtp", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/spec_decode/test_ngram.py", "test_name": "test_ngram", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/spec_decode/test_ngram_npu.py", "test_name": "test_ngram_npu_async_acceptance", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/spec_decode/test_suffix.py", "test_name": "test_suffix_acceptance", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/test_attention_fa3.py", "test_name": "test_fa3_vs_fia_logprobs", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/test_attention_fa3.py", "test_name": "test_fa3_vs_fia_mixed_lengths", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/test_attention_fa3.py", "test_name": "test_fa3_vs_fia_single_prompt", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/test_attention_fa3.py", "test_name": "test_fa3_vs_fia_with_chunkprefill", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/test_batch_invariant.py", "test_name": "test_logprobs_bitwise_batch_invariance_bs1_vs_bsN", "card_count": 1, "models": ["Qwen/Qwen3-0.6B"], "coverage": {"arch": ["dense"], "feature": ["batch_invariant", "logprobs"], "parallel": ["TP"], "deploy": ["pd_mix"], "hardware": ["A2"], "quantization": ["BF16"], "graph_mode": ["piecewise"]}}, {"filepath": "one_card/test_batch_invariant.py", "test_name": "test_logprobs_without_batch_invariance_should_fail", "card_count": 1, "models": ["Qwen/Qwen3-0.6B"], "coverage": {"arch": ["dense"], "feature": ["batch_invariant", "logprobs"], "parallel": ["TP"], "deploy": ["pd_mix"], "hardware": ["A2"], "quantization": ["BF16"], "graph_mode": ["piecewise"]}}, {"filepath": "one_card/test_batch_invariant.py", "test_name": "test_simple_generation", "card_count": 1, "models": ["Qwen/Qwen3-0.6B"], "coverage": {"arch": ["dense"], "feature": ["batch_invariant", "logprobs"], "parallel": ["TP"], "deploy": ["pd_mix"], "hardware": ["A2"], "quantization": ["BF16"], "graph_mode": ["piecewise"]}}, {"filepath": "one_card/test_batch_invariant.py", "test_name": "test_v1_generation_is_deterministic_across_batch_sizes_with_needle", "card_count": 1, "models": ["Qwen/Qwen3-0.6B"], "coverage": {"arch": ["dense"], "feature": ["batch_invariant", "logprobs"], "parallel": ["TP"], "deploy": ["pd_mix"], "hardware": ["A2"], "quantization": ["BF16"], "graph_mode": ["piecewise"]}}, {"filepath": "one_card/test_camem.py", "test_name": "test_end_to_end", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/test_completion_with_prompt_embeds.py", "test_name": "test_mixed_prompt_embeds_and_text", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/test_cpu_offloading.py", "test_name": "test_cpu_offloading", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/test_cpu_weight_offload.py", "test_name": "test_prefetch_offload_aclgraph", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/test_cpu_weight_offload.py", "test_name": "test_prefetch_offload_eager", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/test_cpu_weight_offload.py", "test_name": "test_prefetch_offload_selective_params", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/test_cpu_weight_offload.py", "test_name": "test_uva_offload_functional_call", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/test_guided_decoding.py", "test_name": "test_guided_auto_rejects_mixed_structured_output_backends", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/test_guided_decoding.py", "test_name": "test_guided_json_completion_guidance", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/test_guided_decoding.py", "test_name": "test_guided_json_completion_outlines", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/test_guided_decoding.py", "test_name": "test_guided_json_completion_xgrammar", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/test_guided_decoding.py", "test_name": "test_guided_regex_guidance", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/test_guided_decoding.py", "test_name": "test_guided_regex_xgrammar", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/test_minicpm.py", "test_name": "test_minicpm", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/test_multi_instance.py", "test_name": "test_two_instances_on_single_card", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/test_multistream_overlap_shared_expert.py", "test_name": "test_models_with_multistream_overlap_shared_expert", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/test_npu_ipc_weight_transfer.py", "test_name": "test_npu_ipc_weight_transfer_updates_server_weights", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/test_qwen3_0_6b.py", "test_name": "test_dense_default_full_and_piecewise_graph", "card_count": 1, "models": ["Qwen/Qwen3-0.6B"], "coverage": {"arch": ["dense"], "feature": [], "parallel": ["TP"], "deploy": ["pd_mix"], "hardware": ["A2"], "quantization": ["BF16"], "graph_mode": ["full_and_piecewise"]}}, {"filepath": "one_card/test_qwen3_5_0_8b.py", "test_name": "test_mamba_ssm_multimodal_reasoning_mtp_full_decode_only", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/test_qwen3_8b_w8a8.py", "test_name": "test_dense_w8a8_eagle3_full_graph", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/test_qwen3_embedding_0_6b.py", "test_name": "test_embedding_full_decode_only", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/test_sampler.py", "test_name": "test_qwen3_exponential_overlap", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/test_sampler.py", "test_name": "test_qwen3_prompt_logprobs", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/test_sampler.py", "test_name": "test_qwen3_topk", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/test_simple_cpu_offload.py", "test_name": "test_simple_cpu_offload_accuracy", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/test_simple_cpu_offload.py", "test_name": "test_simple_cpu_offload_no_crash_on_repeat", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/test_vlm.py", "test_name": "test_multimodal_audio", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/test_vlm.py", "test_name": "test_multimodal_vl", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/test_vlm.py", "test_name": "test_multimodal_vl_language_model_only", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/test_vlm.py", "test_name": "test_whisper", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/test_xlite.py", "test_name": "test_models_with_xlite_decode_only", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "one_card/test_xlite.py", "test_name": "test_models_with_xlite_full_mode", "card_count": 1, "models": [], "coverage": {}}, {"filepath": "two_card/aclgraph/test_aclgraph_capture_replay.py", "test_name": "test_models_aclgraph_capture_replay_metrics_dp2", "card_count": 2, "models": [], "coverage": {}}, {"filepath": "two_card/lora/test_ilama_lora_tp2.py", "test_name": "test_ilama_lora_tp2", "card_count": 2, "models": [], "coverage": {}}, {"filepath": "two_card/lora/test_llama32_lora_tp2.py", "test_name": "test_llama_lora_tp2", "card_count": 2, "models": [], "coverage": {}}, {"filepath": "two_card/lora/test_qwen3moe_lora_tp.py", "test_name": "test_qwen3moe_lora", "card_count": 2, "models": [], "coverage": {}}, {"filepath": "two_card/spec_decode/test_spec_decode.py", "test_name": "test_eagle3_sp_acceptance", "card_count": 2, "models": [], "coverage": {}}, {"filepath": "two_card/spec_decode/test_spec_decode.py", "test_name": "test_p_eagle_acceptance", "card_count": 2, "models": [], "coverage": {}}, {"filepath": "two_card/spec_decode/test_spec_decode.py", "test_name": "test_qwen3_eagle3_pcp2_tp1", "card_count": 2, "models": [], "coverage": {}}, {"filepath": "two_card/spec_decode/test_spec_decode.py", "test_name": "test_qwen3_vwn_eagle3_tp2", "card_count": 2, "models": [], "coverage": {}}, {"filepath": "two_card/test_data_parallel.py", "test_name": "test_qwen3_inference_dp2", "card_count": 2, "models": [], "coverage": {}}, {"filepath": "two_card/test_deepseek_multistream_moe.py", "test_name": "test_deepseek_multistream_moe_tp2", "card_count": 2, "models": [], "coverage": {}}, {"filepath": "two_card/test_disaggregated_encoder.py", "test_name": "test_models", "card_count": 2, "models": [], "coverage": {}}, {"filepath": "two_card/test_external_launcher.py", "test_name": "test_qwen3_external_launcher_with_matmul_allreduce", "card_count": 2, "models": [], "coverage": {}}, {"filepath": "two_card/test_external_launcher.py", "test_name": "test_qwen3_external_launcher_with_sleepmode", "card_count": 2, "models": [], "coverage": {}}, {"filepath": "two_card/test_external_launcher.py", "test_name": "test_qwen3_external_launcher_with_sleepmode_level2", "card_count": 2, "models": [], "coverage": {}}, {"filepath": "two_card/test_external_launcher.py", "test_name": "test_qwen3_moe_external_launcher_ep_tp2", "card_count": 2, "models": [], "coverage": {}}, {"filepath": "two_card/test_flashcomm_distributed.py", "test_name": "test_deepseek_v2_lite_fc1_tp2", "card_count": 2, "models": [], "coverage": {}}, {"filepath": "two_card/test_flashcomm_distributed.py", "test_name": "test_qwen3_dense_fc1_tp2", "card_count": 2, "models": [], "coverage": {}}, {"filepath": "two_card/test_flashcomm_distributed.py", "test_name": "test_qwen3_dense_prefetch_mlp_weight_tp2", "card_count": 2, "models": [], "coverage": {}}, {"filepath": "two_card/test_flashcomm_distributed.py", "test_name": "test_qwen3_moe_fc2_oshard_tp2", "card_count": 2, "models": [], "coverage": {}}, {"filepath": "two_card/test_gpt_oss_distributed.py", "test_name": "test_gpt_oss_distributed_tp2", "card_count": 2, "models": [], "coverage": {}}, {"filepath": "two_card/test_hccl_weight_transfer.py", "test_name": "test_hccl_weight_transfer_updates_server_weights", "card_count": 2, "models": [], "coverage": {}}, {"filepath": "two_card/test_moe_routing_replay.py", "test_name": "test_qwen3_moe_routing_replay", "card_count": 2, "models": [], "coverage": {}}, {"filepath": "two_card/test_offline_weight_load.py", "test_name": "test_qwen3_offline_load_and_sleepmode_tp2", "card_count": 2, "models": [], "coverage": {}}, {"filepath": "two_card/test_prefix_caching.py", "test_name": "test_models_prefix_cache_tp2", "card_count": 2, "models": [], "coverage": {}}, {"filepath": "two_card/test_qwen3_30b_a3b.py", "test_name": "test_moe_tp_ep_eplb_full_decode_only", "card_count": 2, "models": ["Qwen/Qwen3-30B-A3B"], "coverage": {"arch": ["moe"], "feature": ["eplb", "dynamic_eplb"], "parallel": ["TP", "EP"], "deploy": ["pd_mix"], "hardware": ["A3"], "quantization": ["BF16"], "graph_mode": ["full_decode_only"]}}, {"filepath": "two_card/test_qwen3_5_35b_a3b_w8a8.py", "test_name": "test_qwen3_5_35b_a3b_w8a8_tp2_without_ep", "card_count": 2, "models": [], "coverage": {}}, {"filepath": "two_card/test_qwen3_6_27b_fia.py", "test_name": "test_qwen3_6_27b_multimodel_fia_acl_graph", "card_count": 2, "models": [], "coverage": {}}, {"filepath": "two_card/test_qwen3_6_27b_fia.py", "test_name": "test_qwen3_6_27b_multimodel_fia_eager", "card_count": 2, "models": [], "coverage": {}}, {"filepath": "two_card/test_qwen3_moe_eplb.py", "test_name": "test_qwen3_moe_w8a8_distributed_tp2_ep_dynamic_eplb", "card_count": 2, "models": [], "coverage": {}}, {"filepath": "two_card/test_qwen3_performance.py", "test_name": "test_models", "card_count": 2, "models": [], "coverage": {}}, {"filepath": "two_card/test_qwen3_vl_30b_a3b_instruct.py", "test_name": "test_multimodal_reasoning_pp_full_decode_only", "card_count": 2, "models": [], "coverage": {}}, {"filepath": "two_card/test_sequence_parallelism_moe.py", "test_name": "test_sequence_parallelism_moe_patterns", "card_count": 2, "models": [], "coverage": {}}, {"filepath": "two_card/test_shared_expert_dp.py", "test_name": "test_deepseek_v2_lite_enable_shared_expert_dp_tp2", "card_count": 2, "models": [], "coverage": {}}, {"filepath": "two_card/test_sp_pass.py", "test_name": "test_qwen3_vl_sp_tp2", "card_count": 2, "models": [], "coverage": {}}];
+    const CARD_MAP = {1: '1-Card', 2: '2-Card', 4: '4-Card'};
+    const TAG_CLASS = {
+        arch: 'tag-arch', feature: 'tag-feature', parallel: 'tag-parallel',
+        deploy: 'tag-deploy', hardware: 'tag-hardware',
+        quantization: 'tag-quant', graph_mode: 'tag-graph'
+    };
+    const DIM_ORDER = ["arch", "feature", "parallel", "deploy", "hardware", "quantization", "graph_mode"];
+
+    let currentSort = {col: null, asc: true};
+
+    function buildTags(vals, cls) {
+        if (!vals || !vals.length) return '';
+        return vals.map(v => `<span class="tag ${cls}">${v}</span>`).join('');
+    }
+
+    function cardBadge(n) {
+        return `<span class="badge-card badge-${n}">${CARD_MAP[n]}</span>`;
+    }
+
+    function renderTable(records) {
+        const groups = {1: [], 2: [], 4: []};
+        for (const r of records) {
+            const c = r.card_count || 1;
+            (groups[c] = groups[c] || []).push(r);
+        }
+
+        const container = document.getElementById('table-container');
+        const countInfo = document.getElementById('count-info');
+        countInfo.textContent = `Showing ${records.length} of ${DATA.length} tests`;
+
+        if (records.length === 0) {
+            container.innerHTML = '<div class="no-results">No matching tests</div>';
+            return;
+        }
+
+        let html = '';
+        for (const card of [1, 2, 4]) {
+            const items = groups[card];
+            if (!items || !items.length) continue;
+            html += `<div class="card-group">
+                <details open>
+                    <summary>${CARD_MAP[card]} Tests (${items.length})</summary>
+                    <div class="table-wrapper">
+                        <table>
+                            <thead><tr>
+                                <th onclick="sortTable('filepath')">File</th>
+                                <th onclick="sortTable('test_name')" style="min-width:220px">Test</th>
+                                <th>Models</th>
+                                <th>Arch</th>
+                                <th>Features</th>
+                                <th>Parallel</th>
+                                <th>Deploy</th>
+                                <th>HW</th>
+                                <th>Quant</th>
+                                <th>Graph</th>
+                            </tr></thead>
+                            <tbody>`;
+            for (const r of items) {
+                const cov = r.coverage || {};
+                const isMarked = Object.values(cov).some(arr => arr && arr.length > 0);
+                const rowCls = isMarked ? '' : ' class="unmarked-row"';
+                html += `<tr${rowCls}>
+                    <td style="white-space:nowrap;font-size:.78rem">${r.filepath}</td>
+                    <td style="font-size:.8rem">${r.test_name}</td>
+                    <td>${buildTags(r.models, 'tag-model')}</td>
+                    <td>${buildTags(cov.arch, 'tag-arch')}</td>
+                    <td>${buildTags(cov.feature, 'tag-feature')}</td>
+                    <td>${buildTags(cov.parallel, 'tag-parallel')}</td>
+                    <td>${buildTags(cov.deploy, 'tag-deploy')}</td>
+                    <td>${buildTags(cov.hardware, 'tag-hardware')}</td>
+                    <td>${buildTags(cov.quantization, 'tag-quant')}</td>
+                    <td>${buildTags(cov.graph_mode, 'tag-graph')}</td>
+                </tr>`;
+            }
+            html += '</tbody></table></div></details></div>';
+        }
+        container.innerHTML = html;
+    }
+
+    function filter() {
+        const search = (document.getElementById('search-box').value || '').toLowerCase();
+        const filterCard = document.getElementById('filter-card').value;
+        const filterType = document.getElementById('filter-type').value;
+        const filterGraph = document.getElementById('filter-graph').value;
+        const showUnmarked = document.getElementById('show-unmarked').checked;
+
+        let filtered = DATA;
+        if (search) {
+            filtered = filtered.filter(r =>
+                r.filepath.toLowerCase().includes(search) ||
+                r.test_name.toLowerCase().includes(search) ||
+                (r.models || []).some(m => m.toLowerCase().includes(search)) ||
+                Object.values(r.coverage || {}).flat().some(v => v.toLowerCase().includes(search))
+            );
+        }
+        if (filterCard) {
+            const c = parseInt(filterCard);
+            filtered = filtered.filter(r => r.card_count === c);
+        }
+        if (filterType) {
+            filtered = filtered.filter(r =>
+                (r.coverage || {}).arch && r.coverage.arch.includes(filterType)
+            );
+        }
+        if (filterGraph) {
+            filtered = filtered.filter(r =>
+                (r.coverage || {}).graph_mode && r.coverage.graph_mode.includes(filterGraph)
+            );
+        }
+        if (!showUnmarked) {
+            filtered = filtered.filter(r => {
+                const cov = r.coverage || {};
+                return Object.values(cov).some(arr => arr && arr.length > 0);
+            });
+        }
+        // Combination filter (set by clicking an explorer combo count)
+        if (window._hmFilter) {
+            filtered = filtered.filter(r => {
+                const cov = r.coverage || {};
+                for (const [dim, val] of Object.entries(window._hmFilter)) {
+                    const arr = cov[dim];
+                    if (!arr || !arr.includes(val)) return false;
+                }
+                return true;
+            });
+        }
+        renderTable(filtered);
+        // Show the active combination filter with a clear link, or fall back
+        // to the explorer's coverage summary.
+        const statusEl = document.getElementById('explorer-summary');
+        if (window._hmFilter) {
+            const parts = Object.entries(window._hmFilter).map(([d,v]) => `${d}=${v}`);
+            statusEl.innerHTML = `Filtering: ${parts.join(' AND ')} ` +
+                `<a href="#" onclick="window._hmFilter=null;filter();return false;" style="color:#2563eb">✕ clear</a>`;
+        } else {
+            renderExplorerSummary();
+        }
+    }
+
+    function sortTable(col) {
+        if (currentSort.col === col) {
+            currentSort.asc = !currentSort.asc;
+        } else {
+            currentSort.col = col;
+            currentSort.asc = true;
+        }
+        const dir = currentSort.asc ? 1 : -1;
+        DATA = [...DATA].sort((a, b) => {
+            const va = a[col] || '';
+            const vb = b[col] || '';
+            return va.localeCompare(vb) * dir;
+        });
+        filter();
+    }
+
+    function exportCSV() {
+        let csv = 'File,Test,Card,Models,Arch,Feature,Parallel,Deploy,Hardware,Quantization,GraphMode\n';
+        for (const r of DATA) {
+            const cov = r.coverage || {};
+            csv += [
+                r.filepath, r.test_name, r.card_count,
+                (r.models || []).join(';'),
+                (cov.arch || []).join(';'),
+                (cov.feature || []).join(';'),
+                (cov.parallel || []).join(';'),
+                (cov.deploy || []).join(';'),
+                (cov.hardware || []).join(';'),
+                (cov.quantization || []).join(';'),
+                (cov.graph_mode || []).join(';'),
+            ].join(',') + '\n';
+        }
+        const blob = new Blob([csv], {type: 'text/csv'});
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'e2e_coverage.csv';
+        a.click();
+        URL.revokeObjectURL(url);
+    }
+
+    // Shared taxonomy (injected by _render_javascript) + coverage-set helper
+    // used by the N-dim explorer.
+    const ALLOWED = {"arch": ["classification", "dense", "embedding", "mamba_ssm", "moe", "multimodal", "reranker"], "feature": ["aclgraph", "batch_invariant", "chunked_prefill", "classification_api", "compile_fusion", "cpu_offloading", "cpu_weight_offload", "dsa_cp", "dynamic_eplb", "eagle3", "eplb", "fa3", "fia_comparison", "flashcomm1", "fully_sharded_lora", "guided_decoding", "logprobs", "long_sequence", "lora", "mixed_lengths", "mo_routing_replay", "mtp", "multi_instance", "multi_lora", "multistream_moe", "pooling", "prefix_caching", "profiling", "prompt_embeds", "runtime_lora", "score_api", "sfa_dsa", "sleep_wake", "spec_decode", "weight_transfer", "xlite"], "parallel": ["DCP", "DP", "EP", "PCP", "PP", "SP", "TP"], "deploy": ["epd", "pd_disaggregation", "pd_mix"], "hardware": ["310P", "A2", "A3", "A5"], "quantization": ["BF16", "FP16", "W4A8", "W8A8", "W8A8_dynamic"], "graph_mode": ["aclgraph", "eager", "full_and_piecewise", "full_decode_only", "full_graph", "piecewise", "xlite_decode_only", "xlite_full"]};
+    const DIM_LABELS_JS = {"arch": "Architecture", "feature": "Feature", "parallel": "Parallel", "deploy": "Deploy", "hardware": "Hardware", "quantization": "Quantization", "graph_mode": "Graph Mode"};
+    const INVALID = [];
+
+    function getCoverageSet(r, dim) {
+        const cov = r.coverage || {};
+        const vals = cov[dim];
+        return (vals && vals.length) ? new Set(vals) : new Set();
+    }
+
+    // Pagination state for the cross-coverage table. Covered combos can be
+    // numerous for wide selections, so rows are rendered a page at a time.
+    let explorerPage = 0;
+    const EXPLORER_PAGE_SIZE = 50;
+    // When true the explorer enumerates NOT-covered (zero-coverage) combos
+    // instead of covered ones. Zero-coverage combos are produced on demand by
+    // scanning the taxonomy Cartesian product (mixed-radix) and skipping
+    // covered + invalid combos — never materialized in full.
+    let explorerShowZero = false;
+    const ZERO_SCAN_CAP = 200000;
+
+    // Build the full value list for a dim. Every dimension enumerates from
+    // the taxonomy (ALLOWED) — multi-value dims like feature are enumerated
+    // by their single constituent values (lora, mtp, ...), and a test that
+    // declares feature="lora,mtp" matches BOTH the "lora" and "mtp" cells.
+    // This keeps the explorer consistent with the per-dimension bars and the
+    // 2-D heatmap, which all split multi-value markers into single tokens.
+    function explorerValuesFor(dim) {
+        return ALLOWED[dim] || [];
+    }
+
+    function selectedExplorerDims() {
+        return [...document.querySelectorAll('.dim-checkboxes input:checked')]
+            .map(cb => cb.value);
+    }
+
+    // Cartesian product helper
+    function cartesian(arrs) {
+        let out = [[]];
+        for (const arr of arrs) {
+            const next = [];
+            for (const combo of out) {
+                for (const v of arr) next.push([...combo, v]);
+            }
+            out = next;
+        }
+        return out;
+    }
+
+    // True iff the combo (array aligned with dims) is excluded by an
+    // INVALID_COMBOS rule. A rule is only evaluated when every dim it names is
+    // currently in dims — otherwise the rule is skipped (it can't be decided
+    // for a partial view and would over-prune).
+    function isInvalidCombo(combo, dims) {
+        const map = {};
+        for (let j = 0; j < dims.length; j++) map[dims[j]] = combo[j];
+        return INVALID.some(rule => {
+            for (const d in rule) if (!(d in map)) return false;
+            for (const d in rule) if (map[d] !== rule[d]) return false;
+            return true;
+        });
+    }
+
+    // Mixed-radix decode: index i -> combo. dims[0] is the least-significant
+    // digit. Lets the zero-coverage scan jump to any offset without
+    // materializing prior combos.
+    function decodeCombo(idx, dims) {
+        const combo = [];
+        let rem = idx;
+        for (let j = 0; j < dims.length; j++) {
+            const list = ALLOWED[dims[j]] || [];
+            combo[j] = list[rem % list.length];
+            rem = Math.floor(rem / list.length);
+        }
+        return combo;
+    }
+
+    function totalCombos(dims) {
+        let t = 1;
+        for (const d of dims) t *= (ALLOWED[d] || []).length;
+        return t;
+    }
+
+    // Scan the Cartesian product starting at startScanIdx, collecting combos
+    // that are neither covered nor invalid, up to pageSize rows. Returns the
+    // rows, the next scan offset, and exhaustion/scan-cap flags. Bounded by
+    // ZERO_SCAN_CAP so a page never scans unboundedly even when invalid rules
+    // prune most of the space.
+    function collectZeroPage(dims, coveredSet, startScanIdx, pageSize) {
+        const total = totalCombos(dims);
+        const rows = [];
+        let i = startScanIdx, scanned = 0;
+        while (i < total && rows.length < pageSize && scanned < ZERO_SCAN_CAP) {
+            const combo = decodeCombo(i, dims);
+            const key = combo.join(String.fromCharCode(1));
+            if (!coveredSet.has(key) && !isInvalidCombo(combo, dims)) rows.push(combo);
+            i++; scanned++;
+        }
+        return {
+            rows, nextScanIdx: i, exhausted: i >= total,
+            scanCapped: scanned >= ZERO_SCAN_CAP && rows.length < pageSize,
+        };
+    }
+
+    // Compute only the combinations that are actually covered by at least
+    // one test. This iterates DATA once and, per test, takes the Cartesian
+    // product of THAT test's declared value-sets (intersected with the
+    // taxonomy) — bounded by the tests' small per-dim value counts, never by
+    // the taxonomy's full product (which is 846,720 for all 7 dims). Invalid
+    // combos are skipped so a test that only covers an invalid combo does not
+    // inflate coveredCount. Zero-coverage combos are not materialized here.
+    function computeCoveredCombos(dims) {
+        const map = new Map();   // key -> { combo, count, tests }
+        const coveredSet = new Set();
+        let totalCount = 1;
+        for (const d of dims) totalCount *= (ALLOWED[d] || []).length;
+        for (const r of DATA) {
+            const sets = dims.map(d => {
+                const vals = (r.coverage || {})[d];
+                const allowed = ALLOWED[d] || [];
+                return (vals && vals.length) ? vals.filter(v => allowed.includes(v)) : [];
+            });
+            if (sets.some(s => s.length === 0)) continue;
+            let combos = [[]];
+            for (const s of sets) {
+                const next = [];
+                for (const c of combos) for (const v of s) next.push([...c, v]);
+                combos = next;
+            }
+            for (const combo of combos) {
+                if (isInvalidCombo(combo, dims)) continue;
+                // U+0001 delimiter — taxonomy tokens never contain it, so no
+                // collision between e.g. ("a|b","c") and ("a","b|c").
+                const key = combo.join(String.fromCharCode(1));
+                let entry = map.get(key);
+                if (!entry) { entry = { combo, count: 0, tests: [] }; map.set(key, entry); }
+                entry.count++;
+                entry.tests.push(r);
+                coveredSet.add(key);
+            }
+        }
+        const covered = [...map.values()];
+        const coveredCount = covered.length;
+        return { covered, coveredCount, coveredSet, totalCount };
+    }
+
+    function renderExplorerSummary() {
+        // Show the covered-combo count for the currently selected dims.
+        // Deliberately does NOT report a total/zero-coverage count: computing
+        // the valid total requires enumerating the taxonomy Cartesian product
+        // (846,720 for all 7 dims) minus invalid combos — too expensive. The
+        // concrete zero-coverage list is produced on demand via the
+        // "Show zero-coverage" toggle, which paginates that scan.
+        const dims = selectedExplorerDims();
+        const summary = document.getElementById('explorer-summary');
+        if (dims.length < 2) { summary.textContent = ''; return; }
+        const { coveredCount } = computeCoveredCombos(dims);
+        summary.innerHTML = `<b>${coveredCount}</b> covered combinations` +
+            (coveredCount === 0 ? ' — none for this selection' : '');
+    }
+
+    function renderExplorer() {
+        const dims = selectedExplorerDims();
+        const container = document.getElementById('explorer-table');
+        const summary = document.getElementById('explorer-summary');
+
+        // Reset pagination on every re-render (toggle / preset / clear /
+        // zero-coverage switch).
+        explorerPage = 0;
+
+        if (dims.length < 2) {
+            container.innerHTML = '<div style="color:#999;padding:12px">'
+                + 'Select at least 2 dimensions to compute cross-coverage.</div>';
+            summary.textContent = '';
+            return;
+        }
+
+        const { covered, coveredCount, coveredSet, totalCount } = computeCoveredCombos(dims);
+
+        // Only overwrite the summary line when no combination filter is active
+        // — otherwise filter() owns it to show the "✕ clear" link.
+        if (!window._hmFilter) {
+            summary.innerHTML = `<b>${coveredCount}</b> covered combinations` +
+                (coveredCount === 0 ? ' — none for this selection' : '');
+        }
+
+        // Sort covered combos: count desc, then by combo values (asc). Only
+        // covered combos are sorted/rows — zero-coverage is enumerated on demand.
+        covered.sort((a, b) => {
+            if (b.count !== a.count) return b.count - a.count;
+            return a.combo.join('|').localeCompare(b.combo.join('|'));
+        });
+
+        // Shared state for the pagination renderers. zeroScanIdx is the
+        // cursor for the zero-coverage scan (Load more resumes from it).
+        window._explorerState = { covered, coveredSet, dims, totalCount, coveredCount, zeroScanIdx: 0 };
+        container.innerHTML = '';
+        renderExplorerPage();
+    }
+
+    // Render one page of the cross-coverage table. On page 0 it builds the
+    // table skeleton (a single '#' column — see bug fix below); subsequent
+    // pages just append rows via renderExplorerRows. In zero-coverage mode it
+    // scans the taxonomy product on demand for not-covered combos.
+    function renderExplorerPage() {
+        const state = window._explorerState;
+        if (!state) return;
+        const { dims } = state;
+        const container = document.getElementById('explorer-table');
+
+        if (explorerPage === 0) {
+            // Header: ONE '#' column total (previously one per dim, all
+            // showing the identical per-combo count — pure redundancy).
+            let html = '<table class="combo-table"><thead><tr>';
+            for (const d of dims) html += `<th>${DIM_LABELS_JS[d]}</th>`;
+            html += '<th>#</th>';
+            html += '<th style="min-width:200px">Tests</th></tr></thead><tbody></tbody></table>';
+            html += '<div id="explorer-pager"></div>';
+            container.innerHTML = html;
+        }
+
+        if (explorerShowZero) {
+            const { coveredSet, dims: d2 } = state;
+            const scanFrom = explorerPage === 0 ? 0 : state.zeroScanIdx;
+            const { rows, nextScanIdx, exhausted, scanCapped } =
+                collectZeroPage(d2, coveredSet, scanFrom, EXPLORER_PAGE_SIZE);
+            state.zeroScanIdx = nextScanIdx;
+            renderZeroRows(rows, d2);
+            renderZeroPager(rows.length, exhausted, scanCapped, nextScanIdx, state.totalCount);
+        } else {
+            const start = explorerPage * EXPLORER_PAGE_SIZE;
+            const end = Math.min(start + EXPLORER_PAGE_SIZE, state.covered.length);
+            renderExplorerRows(start, end);
+            renderExplorerPager(end);
+        }
+    }
+
+    // Append rows [start, end) of the covered-combos table.
+    function renderExplorerRows(start, end) {
+        const state = window._explorerState;
+        if (!state) return;
+        const { covered, dims } = state;
+        const tbody = document.querySelector('#explorer-table tbody');
+        if (!tbody) return;
+        let html = '';
+        for (let i = start; i < end; i++) {
+            const { combo, count, tests } = covered[i];
+            const comboJson = JSON.stringify(combo).replace(/'/g, "&#39;");
+            const dimsJson = JSON.stringify(dims);
+            html += `<tr data-combo='${comboJson}' data-dims='${dimsJson}'>`;
+            for (let j = 0; j < dims.length; j++) {
+                const val = combo[j] || '<span style="color:#cbd5e1">(empty)</span>';
+                html += `<td><span class="combo-val">${val}</span></td>`;
+            }
+            // ONE count cell per row (after all dim columns).
+            html += `<td><span class="combo-count">${count}</span></td>`;
+            const testStr = tests.slice(0, 5).map(t => t.test_name).join(', ') +
+                (tests.length > 5 ? ` … (+${tests.length - 5})` : '');
+            html += `<td><div class="combo-tests">${testStr || '—'}</div></td></tr>`;
+        }
+        if (start === 0) tbody.innerHTML = html;
+        else tbody.insertAdjacentHTML('beforeend', html);
+    }
+
+    // Append zero-coverage rows. These are display-only (no data-combo, so the
+    // delegated click handler ignores them) and rendered greyed via tr.zero.
+    function renderZeroRows(rows, dims) {
+        const tbody = document.querySelector('#explorer-table tbody');
+        if (!tbody) return;
+        let html = '';
+        for (const combo of rows) {
+            html += `<tr class="zero">`;
+            for (let j = 0; j < dims.length; j++) {
+                const val = combo[j] || '<span style="color:#cbd5e1">(empty)</span>';
+                html += `<td><span class="combo-val">${val}</span></td>`;
+            }
+            html += `<td><span class="combo-count">0</span></td>`;
+            html += `<td><div class="combo-tests">—</div></td></tr>`;
+        }
+        if (window._explorerState && explorerPage === 0) tbody.innerHTML = html;
+        else tbody.insertAdjacentHTML('beforeend', html);
+    }
+
+    // Render/refresh the "Load more" pager below the table (covered mode).
+    function renderExplorerPager(renderedCount) {
+        const state = window._explorerState;
+        if (!state) return;
+        const total = state.covered.length;
+        const pager = document.getElementById('explorer-pager');
+        if (!pager) return;
+        if (renderedCount >= total) {
+            pager.innerHTML = `<span style="color:#999;font-size:.78rem;padding:6px 10px">` +
+                `Showing all ${total} covered combinations</span>`;
+            return;
+        }
+        pager.innerHTML = `<button class="ghost" id="explorer-load-more" style="margin:8px 0">` +
+            `Load more (showing ${renderedCount} of ${total})</button>`;
+        document.getElementById('explorer-load-more').addEventListener('click', () => {
+            explorerPage++;
+            const start = explorerPage * EXPLORER_PAGE_SIZE;
+            const end = Math.min(start + EXPLORER_PAGE_SIZE, state.covered.length);
+            renderExplorerRows(start, end);
+            renderExplorerPager(end);
+        });
+    }
+
+    // Pager for zero-coverage mode. Shows progress across the taxonomy
+    // product (scanned / total) and a Load-more that resumes the scan.
+    function renderZeroPager(rowsLen, exhausted, scanCapped, scannedIdx, totalCombos) {
+        const pager = document.getElementById('explorer-pager');
+        if (!pager) return;
+        if (exhausted) {
+            pager.innerHTML = `<span style="color:#999;font-size:.78rem;padding:6px 10px">` +
+                `End of zero-coverage combinations (scanned all ${totalCombos})</span>`;
+            return;
+        }
+        if (scanCapped) {
+            pager.innerHTML = `<span style="color:#b45309;font-size:.78rem;padding:6px 10px">` +
+                `Scan limit (${ZERO_SCAN_CAP}) reached this page — narrow the selection ` +
+                `or add INVALID_COMBOS rules to prune more.</span>`;
+            return;
+        }
+        pager.innerHTML = `<button class="ghost" id="explorer-load-more" style="margin:8px 0">` +
+            `Load more zero-coverage (scanned ${scannedIdx} / ${totalCombos})</button>`;
+        document.getElementById('explorer-load-more').addEventListener('click', () => {
+            explorerPage++;
+            renderExplorerPage();
+        });
+    }
+
+    function toggleExplorerDim(cb) {
+        cb.closest('label').classList.toggle('checked', cb.checked);
+        renderExplorer();
+    }
+
+    function selectExplorerPreset(name) {
+        const presets = {
+            arch_quant_graph: ['arch', 'quantization', 'graph_mode'],
+            arch_feature_hw: ['arch', 'feature', 'hardware'],
+            feature_par_graph: ['feature', 'parallel', 'graph_mode'],
+            all: DIM_ORDER,
+        };
+        const target = presets[name] || [];
+        document.querySelectorAll('.dim-checkboxes input').forEach(cb => {
+            cb.checked = target.includes(cb.value);
+            cb.closest('label').classList.toggle('checked', cb.checked);
+        });
+        renderExplorer();
+    }
+
+    // Toggle between covered and zero-coverage enumeration. renderExplorer
+    // resets the page/scan cursor, so flipping is always a clean restart.
+    function toggleZeroCoverage() {
+        explorerShowZero = document.getElementById('show-zero-coverage').checked;
+        renderExplorer();
+    }
+
+    document.addEventListener('DOMContentLoaded', () => {
+        filter();
+        document.getElementById('search-box').addEventListener('input', () => {
+            window._hmFilter = null;
+            filter();
+        });
+        document.getElementById('filter-card').addEventListener('change', filter);
+        document.getElementById('filter-type').addEventListener('change', filter);
+        document.getElementById('filter-graph').addEventListener('change', filter);
+        document.getElementById('show-unmarked').addEventListener('change', filter);
+        // N-dim explorer: default to arch x quantization x graph_mode
+        ['arch', 'quantization', 'graph_mode'].forEach(d => {
+            const cb = document.querySelector(`.dim-checkboxes input[value="${d}"]`);
+            if (cb) { cb.checked = true; cb.closest('label').classList.add('checked'); }
+        });
+        renderExplorer();
+        document.querySelectorAll('.dim-checkboxes input').forEach(cb =>
+            cb.addEventListener('change', () => toggleExplorerDim(cb)));
+        // Delegated click on any covered combo's count -> filter the test
+        // matrix to that exact combo. Registered once here (not per render)
+        // so it survives pagination row replacement. Zero-coverage rows carry
+        // no data-combo (display-only) and are skipped.
+        document.getElementById('explorer-table').addEventListener('click', (e) => {
+            const el = e.target.closest('.combo-count');
+            if (!el) return;
+            const tr = el.closest('tr');
+            if (!tr || !tr.dataset.combo) return;
+            const combo = JSON.parse(tr.dataset.combo);
+            const dimsList = JSON.parse(tr.dataset.dims);
+            document.getElementById('search-box').value = '';
+            window._hmFilter = {};
+            for (let k = 0; k < dimsList.length; k++) {
+                const v = combo[k];
+                if (v) window._hmFilter[dimsList[k]] = v;
+            }
+            document.getElementById('show-unmarked').checked = false;
+            filter();
+            document.getElementById('table-container').scrollIntoView({behavior: 'smooth', block: 'start'});
+        });
+    });
+</script>
+</body>
+</html>
