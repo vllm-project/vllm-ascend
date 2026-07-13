@@ -41,18 +41,9 @@ if [ -z "${MR_THIRD_ID}" ]; then
 fi
 echo "Using current PR number as MR_THIRD_ID: ${MR_THIRD_ID}"
 
-# env:
-#   X_APIG_APPCODE: ${{ secrets.AUROGON_APPCODE }}
-#   APP_KEY: ${{ secrets.AUROGON_APPKEY }}
-#   APP_SECRET: ${{ secrets.AUROGON_APPSECRET }}
 X_APIG_APPCODE="${X_APIG_APPCODE:-}"
 APP_KEY="${APP_KEY:-}"
 APP_SECRET="${APP_SECRET:-}"
-# 密钥为空直接报错退出，打印清晰日志
-if [[ -z "${X_APIG_APPCODE}" || -z "${APP_KEY}" || -z "${APP_SECRET}" ]]; then
-    echo "ERROR: 缺失AUROGON鉴权密钥环境变量 AUROGON_APPCODE / AUROGON_APPKEY / AUROGON_APPSECRET"
-    exit 1
-fi
 
 # Api1 save mr with retry
 MAX_RETRY=3
@@ -128,8 +119,8 @@ if [[ ${curl_ret2} -ne 0 ]];then
     exit 13
 fi
 
-BUS_SUCCESS2=$(echo "${CASE_RET}" | grep -o '"success":[a-z]*' | cut -d: -f2)
-BUS_CODE2=$(echo "${CASE_RET}" | grep -o '"code":[0-9]*' | cut -d: -f2)
+BUS_SUCCESS2=$(jq -r '.success' <<<"${CASE_RET}")
+BUS_CODE2=$(jq -r '.code' <<<"${CASE_RET}")
 if [[ "${BUS_SUCCESS2}" != "true" ]];then
     echo "ERROR: case recommend api business fail, code:${BUS_CODE2}, resp:${CASE_RET}"
     exit 15
