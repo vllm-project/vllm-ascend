@@ -1,0 +1,166 @@
+test_name: "multi-node-dsv4-flash-offload"
+model: "Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp"
+num_nodes: 2
+npu_per_node: 16
+special_dependencies:
+  transformers: "5.9.0"
+
+env_common: &env_common
+  VLLM_USE_MODELSCOPE: true
+  OMP_PROC_BIND: false
+  OMP_NUM_THREADS: 1
+  PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+  HCCL_OP_EXPANSION_MODE: "AIV"
+  HCCL_EXEC_TIMEOUT: 204
+  VLLM_RPC_TIMEOUT: 3600000
+  VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: 30000
+  VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT: 3600
+  TASK_QUEUE_ENABLE: 1
+  SERVER_PORT: 8080
+
+disaggregated_prefill:
+  enabled: true
+  prefiller_host_index: [0]
+  decoder_host_index: [1]
+
+deployment:
+  -
+    envs:
+      <<: *env_common
+      HCCL_BUFFSIZE: 2560
+      HCCL_CONNECT_TIMEOUT: 120
+      VLLM_ASCEND_ENABLE_FLASHCOMM1: 1
+    server_cmd: >
+      vllm serve "Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp"
+      --host 0.0.0.0
+      --port $SERVER_PORT
+      --data-parallel-size 2
+      --data-parallel-size-local 2
+      --data-parallel-start-rank 0
+      --data-parallel-address $LOCAL_IP
+      --data-parallel-rpc-port 13389
+      --tensor-parallel-size 8
+      --enable-expert-parallel
+      --seed 1024
+      --served-model-name dsv4
+      --max-model-len 80000
+      --max-num-batched-tokens 8192
+      --max-num-seqs 16
+      --no-disable-hybrid-kv-cache-manager
+      --model-loader-extra-config '{"enable_multithread_load": "true", "num_threads": 128}'
+      --no-enable-prefix-caching
+      --safetensors-load-strategy prefetch
+      --speculative-config '{"num_speculative_tokens": 1, "method": "mtp", "enforce_eager": true}'
+      --trust-remote-code
+      --block-size 128
+      --tokenizer-mode deepseek_v4
+      --tool-call-parser deepseek_v4
+      --enable-auto-tool-choice
+      --reasoning-parser deepseek_v4
+      --gpu-memory-utilization 0.9
+      --quantization ascend
+      --enforce-eager
+      --additional-config '{"enable_cpu_binding": true}'
+      --kv-transfer-config
+      '{"kv_connector": "MooncakeHybridConnector",
+      "kv_role": "kv_producer",
+      "kv_port": "30000",
+      "kv_connector_extra_config": {
+                "prefill": {
+                        "dp_size": 2,
+                        "tp_size": 8
+                },
+                "decode": {
+                        "dp_size": 2,
+                        "tp_size": 8
+                }
+          }
+      }'
+
+  -
+    envs:
+      <<: *env_common
+      HCCL_BUFFSIZE: 1024
+      HCCL_CONNECT_TIMEOUT: 1200
+    server_cmd: >
+      vllm serve "Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp"
+      --host 0.0.0.0
+      --port $SERVER_PORT
+      --data-parallel-size 2
+      --data-parallel-size-local 2
+      --data-parallel-start-rank 0
+      --data-parallel-address $LOCAL_IP
+      --data-parallel-rpc-port 13389
+      --tensor-parallel-size 8
+      --enable-expert-parallel
+      --seed 1024
+      --served-model-name dsv4
+      --max-model-len 80000
+      --max-num-batched-tokens 64
+      --max-num-seqs 32
+      --async-scheduling
+      --block-size 128
+      --no-disable-hybrid-kv-cache-manager
+      --no-enable-prefix-caching
+      --safetensors-load-strategy prefetch
+      --trust-remote-code
+      --tokenizer-mode deepseek_v4
+      --model-loader-extra-config '{"enable_multithread_load": "true", "num_threads": 128}'
+      --tool-call-parser deepseek_v4
+      --enable-auto-tool-choice
+      --reasoning-parser deepseek_v4
+      --gpu-memory-utilization 0.67
+      --quantization ascend
+      --speculative-config '{"num_speculative_tokens": 1, "method": "mtp", "enforce_eager": true}'
+      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      --kv-transfer-config
+      '{"kv_connector": "MultiConnector",
+      "kv_role": "kv_consumer",
+      "kv_connector_extra_config": {
+        "connectors": [
+          {
+            "kv_connector": "MooncakeHybridConnector",
+            "kv_role": "kv_consumer",
+            "kv_port": "30100",
+            "kv_connector_extra_config": {
+              "prefill": {
+                "dp_size": 2,
+                "tp_size": 8
+              },
+              "decode": {
+                "dp_size": 2,
+                "tp_size": 8
+              }
+            }
+          },
+          {
+            "kv_connector": "RecomputeCPUOffloadConnector",
+            "kv_role": "kv_consumer",
+            "kv_connector_extra_config": {
+              "cpu_bytes_to_use_per_rank": 8589934592,
+              "enable_offload_prefix_caching": false
+            }
+          }
+        ]
+      }}'
+      --additional-config
+      '{"ascend_compilation_config": {
+          "enable_npugraph_ex": true,
+          "enable_static_kernel": false
+        },
+        "enable_cpu_binding": true,
+        "multistream_overlap_shared_expert": true,
+        "recompute_scheduler_enable": true
+      }'
+
+benchmarks:
+  acc-gpqa:
+    case_type: accuracy
+    dataset_path: vllm-ascend/gpqa
+    request_conf: vllm_api_general_chat
+    dataset_conf: gpqa/gpqa_gen_0_shot_cot_chat_prompt
+    max_out_len: 65536
+    batch_size: 64
+    baseline: 86.36
+    threshold: 5
+    thinking: true
