@@ -10,7 +10,7 @@ This document is validated and written based on **vLLM-Ascend v0.21.0rc1**. The 
 
 !!! note
 
-PaddleOCR-VL-1.5 is the iterative upgraded version of PaddleOCR-VL. If you intend to deploy the PaddleOCR-VL-1.5 model, please refer to the official [ModelZoo tutorial](https://gitcode.com/Ascend/ModelZoo-PyTorch/tree/master/ACL_PyTorch/built-in/ocr/PaddleOCR-VL-1.5).
+PaddleOCR-VL-1.5 is the upgraded version of PaddleOCR-VL. If you intend to deploy the PaddleOCR-VL-1.5 model, please refer to the official [ModelZoo tutorial](https://gitcode.com/Ascend/ModelZoo-PyTorch/tree/master/ACL_PyTorch/built-in/ocr/PaddleOCR-VL-1.5).
 
 ## 2 Supported Features
 
