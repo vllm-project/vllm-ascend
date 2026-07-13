@@ -21,7 +21,6 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.utils import select_common_block_size
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.common_cp import AscendPCPMetadata
@@ -40,12 +39,6 @@ from vllm_ascend.attention.utils import (
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.mxfp_compat import FLOAT8_E8M0FNU_DTYPE
 from vllm_ascend.distributed.utils import all_gather_async
-from vllm_ascend.ops.layer_shard_linear import (
-    is_hidden_layer,
-    post_process_after_loading_for_shard_weight_series,
-    reach_layer_for_shard_weight_series,
-    register_all_layers_to_shard_weight_series,
-)
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.triton.rope import rope_forward_triton_siso
 from vllm_ascend.quantization.methods import (
@@ -60,7 +53,6 @@ from vllm_ascend.utils import (
     _round_up,
     dispose_layer,
     enable_dsa_cp,
-    enable_dsa_cp_with_layer_shard,
     enable_dsa_cp_with_o_proj_tp,
     enable_sfa_dcp_replicated_indexer,
     enable_sp,
@@ -639,9 +631,6 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.enable_dsa_cp = enable_dsa_cp()
         self.enable_sp = enable_sp()
 
-        # Enable layer sharding via DSA-CP on the P node in the PD-disaggregated setup.
-        self.enable_dsa_cp_with_layer_shard = enable_dsa_cp_with_layer_shard()
-
         # SFA DSA-CP mixed deployments keep o_proj in the existing TP layout.
         # Decode can use the TP-sharded o_proj directly after an activation
         # all-to-all, while prefill/mixed batches temporarily gather the TP
@@ -652,17 +641,6 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         if self.enable_dsa_cp:
             self.local_num_heads = self.num_heads * self.tp_size
-            if self.enable_dsa_cp_with_layer_shard:
-                self.layer_sharding_kwargs = []
-                for layer_name in get_ascend_config().layer_sharding or []:
-                    if layer_name in kwargs:
-                        self.layer_sharding_kwargs.append(kwargs[layer_name])
-                    else:
-                        logger.warning_once(
-                            f"Layer '{layer_name}' not found in kwargs, skipping sharding. "
-                            f"Check layer_sharding config and model layer names."
-                        )
-                register_all_layers_to_shard_weight_series(self.layer_sharding_kwargs)
 
     @staticmethod
     def update_graph_params(
@@ -718,11 +696,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         # Dispose kv_b_proj since it is replaced by W_UV and W_UK_T to save memory
         dispose_layer(self.kv_b_proj)
         if self.enable_dsa_cp:
-            if self.enable_dsa_cp_with_layer_shard:
-                for layer in self.layer_sharding_kwargs or []:
-                    if is_hidden_layer(layer):
-                        post_process_after_loading_for_shard_weight_series(layer)
-            elif self.enable_dsa_cp_with_o_proj_tp:
+            if self.enable_dsa_cp_with_o_proj_tp:
                 self._init_o_proj_tp_full_params()
 
         if self.enable_sfa_prolog_v3:
@@ -1491,10 +1465,6 @@ class AscendSFAImpl(MLAAttentionImpl):
         assert output is not None, "Output tensor must be provided."
         if attn_metadata is None:
             # Profiling run.
-            if self.enable_dsa_cp_with_layer_shard and not _EXTRA_CTX.in_profile_run:
-                for layer in self.layer_sharding_kwargs or []:
-                    if is_hidden_layer(layer):
-                        reach_layer_for_shard_weight_series(layer)
             return output.fill_(0)
 
         cos = attn_metadata.cos
@@ -1642,7 +1612,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             if self.enable_dsa_cp:
                 assert k_pe is not None
                 assert k_nope is not None
-                async_op = self.enable_dsa_cp_with_layer_shard or full_gather_o_proj_enabled
+                async_op = full_gather_o_proj_enabled
                 # support all_gather kv async for communication calculation overlap
                 if self.use_sparse_c8_sfa:
                     assert knope_scale is not None
@@ -1690,11 +1660,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 if kv_ag_handle is not None:
                     kv_ag_handle.wait()
 
-                if self.enable_dsa_cp_with_layer_shard:
-                    for layer in self.layer_sharding_kwargs or []:
-                        if is_hidden_layer(layer):
-                            reach_layer_for_shard_weight_series(layer)
-                elif full_gather_o_proj_enabled:
+                if full_gather_o_proj_enabled:
                     _, o_proj_full_handle = all_gather_async(
                         self.o_proj_tp_weight_gather_input,
                         get_tp_group(),

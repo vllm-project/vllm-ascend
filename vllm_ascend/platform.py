@@ -335,17 +335,6 @@ class NPUPlatform(Platform):
         torch.npu.set_device(device)
 
     @classmethod
-    def _validate_layer_sharding_config(cls, vllm_config: VllmConfig) -> None:
-        additional_config = vllm_config.additional_config or {}
-        layer_sharding = additional_config.get("layer_sharding") or []
-        if not layer_sharding:
-            return
-
-        kv_transfer_config = vllm_config.kv_transfer_config
-        if kv_transfer_config is None or kv_transfer_config.kv_role != "kv_producer":
-            raise ValueError("additional_config.layer_sharding can only be enabled in PD-disaggregated's P node.")
-
-    @classmethod
     def _validate_parallel_config(cls, vllm_config: VllmConfig) -> None:
         parallel_config = vllm_config.parallel_config
         if parallel_config.data_parallel_size > 1 and parallel_config.prefill_context_parallel_size > 1:
@@ -436,7 +425,6 @@ class NPUPlatform(Platform):
 
         maybe_auto_detect_quantization(vllm_config)
 
-        cls._validate_layer_sharding_config(vllm_config)
         cls._validate_draft_decode_context_parallel_config(vllm_config)
         cls._validate_parallel_config(vllm_config)
 

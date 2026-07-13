@@ -193,7 +193,6 @@ TITLES = {
     "user_guide/feature_guide/kv_cache_cpu_offload.md": {"en": "KV Cache CPU Offload", "zh": "KV Cache CPU 卸载"},
     "user_guide/feature_guide/kv_pool.md": {"en": "KV Pool", "zh": "KV 池"},
     "user_guide/feature_guide/large_scale_ep.md": {"en": "Large Scale EP", "zh": "大规模 EP"},
-    "user_guide/feature_guide/layer_sharding.md": {"en": "Layer Sharding", "zh": "层分片"},
     "user_guide/feature_guide/lmcache_ascend_deployment.md": {
         "en": "LMCache Ascend Deployment",
         "zh": "LMCache Ascend 部署",
