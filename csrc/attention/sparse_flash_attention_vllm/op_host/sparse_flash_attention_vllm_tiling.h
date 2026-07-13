@@ -9,11 +9,11 @@
  */
 
 /*!
- * \file sparse_flash_attention_tiling.h
+ * \file sparse_flash_attention_vllm_tiling.h
  * \brief
  */
-#ifndef SPARSE_FLASH_ATTENTION_TILING_H
-#define SPARSE_FLASH_ATTENTION_TILING_H
+#ifndef SPARSE_FLASH_ATTENTION_VLLM_TILING_H
+#define SPARSE_FLASH_ATTENTION_VLLM_TILING_H
 
 #include <sstream>
 #include <graph/utils/type_utils.h>
@@ -203,7 +203,7 @@ TILING_DATA_FIELD_DEF_STRUCT(SparseFlashAttentionSingleCoreParamsMla, singleCore
 TILING_DATA_FIELD_DEF_STRUCT(SparseFlashAttentionSingleCoreTensorSizeMla, singleCoreTensorSize);
 TILING_DATA_FIELD_DEF_STRUCT(SparseFlashAttentionInnerSplitParams, innerSplitParams);
 END_TILING_DATA_DEF
-REGISTER_TILING_DATA_CLASS(SparseFlashAttention, SparseFlashAttentionTilingDataMla)
+REGISTER_TILING_DATA_CLASS(SparseFlashAttentionVllm, SparseFlashAttentionTilingDataMla)
 
 template <typename T> inline T Align(T num, T rnd)
 {
@@ -636,4 +636,4 @@ public:
     gert::Shape keyRopeShape_{};
 };
 } // namespace optiling
-#endif // SPARSE_FLASH_ATTENTION_TILING_H
+#endif // SPARSE_FLASH_ATTENTION_VLLM_TILING_H

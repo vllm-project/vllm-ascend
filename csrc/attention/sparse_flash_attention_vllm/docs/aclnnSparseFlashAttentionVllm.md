@@ -1,4 +1,4 @@
-# aclnnSparseFlashAttention
+# aclnnSparseFlashAttentionVllm
 
 [📄 查看源码](https://gitcode.com/cann/ops-transformer/tree/master/attention/sparse_flash_attention)
 
@@ -12,7 +12,7 @@
 
 ## 功能说明
 
-- 接口功能：sparse_flash_attention（SFA）是针对大序列长度推理场景的高效注意力计算模块，该模块通过“只计算关键部分”大幅减少计算量，然而会引入大量的离散访存，造成数据搬运时间增加，进而影响整体性能。
+- 接口功能：sparse_flash_attention_vllm（SFA）是针对大序列长度推理场景的高效注意力计算模块，该模块通过“只计算关键部分”大幅减少计算量，然而会引入大量的离散访存，造成数据搬运时间增加，进而影响整体性能。
 
 - 计算公式：
 
@@ -24,10 +24,10 @@ $$
 
 ## 函数原型
 
-每个算子分为[两段式接口](../../../docs/zh/context/两段式接口.md)，必须先调用“aclnnSparseFlashAttentionGetWorkspaceSize”接口获取计算所需workspace大小以及包含了算子计算流程的执行器，再调用“aclnnSparseFlashAttention”接口执行计算。
+每个算子分为[两段式接口](../../../docs/zh/context/两段式接口.md)，必须先调用“aclnnSparseFlashAttentionVllmGetWorkspaceSize”接口获取计算所需workspace大小以及包含了算子计算流程的执行器，再调用“aclnnSparseFlashAttentionVllm”接口执行计算。
 
 ```Cpp
-aclnnStatus aclnnSparseFlashAttentionGetWorkspaceSize(
+aclnnStatus aclnnSparseFlashAttentionVllmGetWorkspaceSize(
     const aclTensor     *query,
     const aclTensor     *key,
     const aclTensor     *value, 
@@ -54,14 +54,14 @@ aclnnStatus aclnnSparseFlashAttentionGetWorkspaceSize(
 ```
 
 ```Cpp
-aclnnStatus aclnnSparseFlashAttention(
+aclnnStatus aclnnSparseFlashAttentionVllm(
     void             *workspace, 
     uint64_t          workspaceSize, 
     aclOpExecutor    *executor, 
     const aclrtStream stream)
 ```
 
-## aclnnSparseFlashAttentionGetWorkspaceSize
+## aclnnSparseFlashAttentionVllmGetWorkspaceSize
 
 - **参数说明：**
 
@@ -452,7 +452,7 @@ aclnnStatus aclnnSparseFlashAttention(
         </tbody>
     </table>
 
-## aclnnSparseFlashAttention
+## aclnnSparseFlashAttentionVllm
 
 - **参数说明：**
 
@@ -476,7 +476,7 @@ aclnnStatus aclnnSparseFlashAttention(
     <tr>
       <td>workspaceSize</td>
       <td>输入</td>
-      <td>在Device侧申请的workspace大小，由第一段接口aclnnSparseFlashAttentionGetWorkspaceSize获取。</td>
+      <td>在Device侧申请的workspace大小，由第一段接口aclnnSparseFlashAttentionVllmGetWorkspaceSize获取。</td>
     </tr>
     <tr>
       <td>executor</td>
@@ -497,7 +497,7 @@ aclnnStatus aclnnSparseFlashAttention(
 
 ## 约束说明
 
-- 确定性计算：aclnnSparseFlashAttention默认确定性实现。
+- 确定性计算：aclnnSparseFlashAttentionVllm默认确定性实现。
 - 该接口支持推理场景下使用。
 - N1支持1~64和128。
 - block_size为一个block的token数，block_size取值为16的倍数，且最大支持1024。
@@ -535,7 +535,7 @@ aclnnStatus aclnnSparseFlashAttention(
 #include <cstring>
 #include "securec.h"
 #include "acl/acl.h"
-#include "aclnnop/aclnn_sparse_flash_attention.h"
+#include "aclnnop/aclnn_sparse_flash_attention_vllm.h"
 
 using namespace std;
 
@@ -746,11 +746,11 @@ int ExecuteSparseFlashAttention(TensorResources& resources, aclrtStream stream,
     bool returnSoftmaxLse = false;
     aclOpExecutor* executor;
 
-    int ret = aclnnSparseFlashAttentionGetWorkspaceSize(resources.queryTensor, resources.keyTensor, resources.valueTensor, resources.sparseIndicesTensor, nullptr, nullptr, nullptr, resources.queryRopeTensor, resources.keyRopeTensor,
+    int ret = aclnnSparseFlashAttentionVllmGetWorkspaceSize(resources.queryTensor, resources.keyTensor, resources.valueTensor, resources.sparseIndicesTensor, nullptr, nullptr, nullptr, resources.queryRopeTensor, resources.keyRopeTensor,
                                                     scaleValue, sparseBlockSize, layoutQuery, layoutKv, sparseMode, preTokens,
                                                     nextTokens, attentionMode, returnSoftmaxLse, resources.attentionOutTensor, resources.softmaxMaxTensor, resources.softmaxSumTensor, workspaceSize, &executor);
     if (!CHECK_RET(ret == ACL_SUCCESS)) {
-        LOG_PRINT("aclnnSparseFlashAttentionGetWorkspaceSize failed. ERROR: %d\n", ret);
+        LOG_PRINT("aclnnSparseFlashAttentionVllmGetWorkspaceSize failed. ERROR: %d\n", ret);
         return ret;
     }
 
@@ -762,9 +762,9 @@ int ExecuteSparseFlashAttention(TensorResources& resources, aclrtStream stream,
         }
     }
 
-    ret = aclnnSparseFlashAttention(*workspaceAddr, *workspaceSize, executor, stream);
+    ret = aclnnSparseFlashAttentionVllm(*workspaceAddr, *workspaceSize, executor, stream);
     if (!CHECK_RET(ret == ACL_SUCCESS)) {
-        LOG_PRINT("aclnnSparseFlashAttention failed. ERROR: %d\n", ret);
+        LOG_PRINT("aclnnSparseFlashAttentionVllm failed. ERROR: %d\n", ret);
         return ret;
     }
 
