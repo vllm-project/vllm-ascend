@@ -140,8 +140,7 @@ def _rope_forward_oot(
         self.cos_sin_cache = self.cos_sin_cache.to(query.dtype)
 
     # This flag should set to True when doing drafting.
-    global _ROPE_310P_UPDATE_FLAG
-    if _ROPE_310P_UPDATE_FLAG:
+    if getattr(self, "_is_drafting_update_enabled", False):
         update_cos_sin(positions)
 
     cos, sin = get_cos_and_sin_slice()
@@ -261,6 +260,13 @@ def prepare_mrope_cos_sin_slices_from_runner(runner: Any, positions: torch.Tenso
 
 
 class AscendRotaryEmbedding310(AscendRotaryEmbedding):
+
+    _is_drafting_update_enabled: bool = False
+
+    @classmethod
+    def set_rope_position_flag_310p(cls, state: bool):
+        cls._is_drafting_update_enabled = state
+
     def forward_oot(
         self,
         positions: torch.Tensor,
