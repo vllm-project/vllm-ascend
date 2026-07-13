@@ -5,6 +5,8 @@ from types import SimpleNamespace
 import pytest
 from vllm.config.model import ModelConfig
 
+from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+
 
 def test_model_config_validates_local_mtp_drafter_as_single_pp_rank(monkeypatch):
     fake_registry = SimpleNamespace(
@@ -55,3 +57,32 @@ def test_model_config_keeps_target_model_pp_validation(monkeypatch):
 
     with pytest.raises(NotImplementedError):
         ModelConfig.verify_with_parallel_config(model_config, parallel_config)
+
+
+@pytest.mark.parametrize(
+    ("has_speculative_config", "is_last_rank", "broadcast_pp_output", "expected"),
+    [
+        (False, False, False, False),
+        (False, True, True, False),
+        (True, False, False, False),
+        (True, True, False, True),
+        (True, False, True, True),
+    ],
+)
+def test_pp_mtp_defers_kv_connector_only_on_ranks_that_run_draft(
+    monkeypatch,
+    has_speculative_config,
+    is_last_rank,
+    broadcast_pp_output,
+    expected,
+):
+    monkeypatch.setattr(
+        "vllm_ascend.worker.model_runner_v1.get_pp_group",
+        lambda: SimpleNamespace(is_last_rank=is_last_rank),
+    )
+
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.speculative_config = object() if has_speculative_config else None
+    runner.broadcast_pp_output = broadcast_pp_output
+
+    assert runner._should_defer_kv_connector_finalize() is expected

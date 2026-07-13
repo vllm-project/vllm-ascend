@@ -725,6 +725,16 @@ class NPUModelRunner(GPUModelRunner):
             return self.model.unwrap()
         return self.model
 
+    def _should_defer_kv_connector_finalize(self) -> bool:
+        if self.speculative_config is None:
+            return False
+
+        pp = get_pp_group()
+        # Non-last PP ranks return their intermediate tensors without running
+        # the draft model. Finalize their connector after the target forward so
+        # every PP rank stores its local layers in the external KV pool.
+        return pp.is_last_rank or self.broadcast_pp_output
+
     def _update_states(self, scheduler_output: "SchedulerOutput") -> Callable | None:
         # Temporary rewind guard for KV-load-failure recompute.
         # This can be removed after the upstream fix is merged.
@@ -2237,7 +2247,7 @@ class NPUModelRunner(GPUModelRunner):
         has_encoder_input = self.model_config.is_encoder_decoder and num_encoder_reqs > 0
 
         # Run forward pass
-        clear_kv_metadata = self.speculative_config is None
+        defer_kv_connector_finalize = self._should_defer_kv_connector_finalize()
         with (
             record_function_or_nullcontext("forward"),
             set_ascend_forward_context(
@@ -2258,7 +2268,7 @@ class NPUModelRunner(GPUModelRunner):
             self.maybe_get_kv_connector_output(
                 scheduler_output,
                 **(
-                    {"defer_finalize": not clear_kv_metadata}
+                    {"defer_finalize": defer_kv_connector_finalize}
                 ),
             ) as kv_connector_output,
         ):
