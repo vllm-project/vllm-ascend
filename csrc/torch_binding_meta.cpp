@@ -236,7 +236,8 @@ std::tuple<at::Tensor&, at::Tensor&> dispatch_ffn_combine_meta(
     at::Tensor& out,
     at::Tensor& expert_token_nums,
     const c10::optional<at::Tensor> &x_active_mask,
-    double swiglu_limit
+    double swiglu_limit,
+    double swiglu_alpha
 ) {
     return {out, expert_token_nums};
 }

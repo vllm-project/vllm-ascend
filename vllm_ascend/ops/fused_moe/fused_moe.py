@@ -245,6 +245,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 w1_scale_bias=w1_scale_bias,
                 w2_scale_bias=w2_scale_bias,
                 swiglu_limit=layer.swiglu_limit,
+                swiglu_alpha=layer.swiglu_alpha,
             )
         )
         if zero_expert_num > 0 and zero_expert_type is not None:
@@ -391,7 +392,7 @@ class AscendFusedMoE(FusedMoE):
             )
 
         # flashcommon3 gate stream
-        self.multistream_overlap_gate = ascend_config.multistream_overlap_gate
+        self.multistream_overlap_gate = False
         if self.multistream_overlap_gate and AscendFusedMoE.gate_stream is None:
             AscendFusedMoE.gate_stream = torch.npu.Stream()
         if self.multistream_overlap_gate:
@@ -444,7 +445,14 @@ class AscendFusedMoE(FusedMoE):
         self.moe_config.num_experts = self.global_num_experts
         self.moe_config.num_local_experts = self.local_num_experts
         self.moe_config.global_redundant_expert_num = self.global_redundant_expert_num
-        self.swiglu_limit = getattr(self.vllm_config.model_config.hf_config, "swiglu_limit", 0)
+        _hf_cfg = self.vllm_config.model_config.hf_config
+        # SwigluOAI(M3): when activation=swigluoai, default alpha=1.702/limit=7.0 (absent from config.json);
+        # Other models default to 0 -> standard swiglu, bit-compatible
+        _is_oai = getattr(self, "activation", "") == "swigluoai"
+        self.swiglu_limit = float(getattr(_hf_cfg, "swiglu_limit", 7.0 if _is_oai else 0))
+        self.swiglu_alpha = float(getattr(_hf_cfg, "swiglu_alpha", 1.702 if _is_oai else 0.0))
+        logger.info_once("[fused_moe/layer] SwigluOAI: activation=%s alpha=%s limit=%s",
+                         getattr(self, "activation", "?"), self.swiglu_alpha, self.swiglu_limit)
 
         moe_quant_params = {
             "num_experts": self.local_num_experts,

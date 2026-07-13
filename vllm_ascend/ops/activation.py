@@ -52,10 +52,7 @@ class AscendSiluAndMulWithClamp(SiluAndMulWithClamp):
 
 class AscendSwigluOAIAndMul:
     def swiglu_oai_forward(x: torch.Tensor, alpha: float = 1.702, limit: float = 7.0) -> torch.Tensor:
-        class MinimalSwigluOAIAndMul:
-            def __init__(self):
-                self.alpha = alpha
-                self.limit = limit
-
-        layer = MinimalSwigluOAIAndMul()
-        return SwigluOAIAndMul.forward_native(layer, x)
+        d = x.shape[-1] // 2
+        gate = x[..., :d].clamp(max=limit)
+        up = x[..., d:].clamp(min=-limit, max=limit)
+        return (up + 1) * gate * torch.sigmoid(gate * alpha)

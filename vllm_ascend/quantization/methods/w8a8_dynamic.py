@@ -344,6 +344,7 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
                 w1_scale_bias=w1_scale_bias,
                 w2_scale_bias=w2_scale_bias,
                 swiglu_limit=layer.swiglu_limit,
+                swiglu_alpha=layer.swiglu_alpha,
             )
         )
         if zero_expert_num > 0 and zero_expert_type is not None:

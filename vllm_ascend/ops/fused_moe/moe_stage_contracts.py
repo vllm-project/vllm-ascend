@@ -69,6 +69,7 @@ class MoEFusedExpertsInput:
     need_trans: bool = False
     dynamic_eplb: bool = False
     swiglu_limit: float = 0.0
+    swiglu_alpha: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
