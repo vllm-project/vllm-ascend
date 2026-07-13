@@ -67,6 +67,7 @@ For detailed information on supported models, please refer to [supported models]
     - vLLM (the same version as vllm-ascend)
 
 ## Accessing Ascend NPU
+
 If you need to access Ascend NPU computing resources for development or testing, please visit the [HiDevLab - Online Development](https://hidevlab.huawei.com/online-develop-intro) page on the Huawei HiDevLab platform to apply for and use them.
 
 ## Getting Started
