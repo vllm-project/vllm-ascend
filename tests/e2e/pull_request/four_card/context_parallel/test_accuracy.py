@@ -102,7 +102,7 @@ DSV3_2_GOLDEN_BACKUPS = (
 
 DSV3_2_DCP_GOLDEN = [
     "The capital of France isoint054 Rund compasses",
-    "Hello, my name is Tom, I am" + "ERIC slicpacelikeabra",
+    "Hello, my name is Tom, I am" + "ERIC slicpacelike挂",
     "The president of United States isoint054 Rund959arki",
 ]
 
