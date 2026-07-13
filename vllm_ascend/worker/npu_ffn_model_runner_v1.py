@@ -138,7 +138,7 @@ class NPUFFNModelRunner(NPUModelRunner, GPUFFNModelRunner):
             is_ubatch = dp_metadata_list is not None and len(dp_metadata_list) > 1
 
             if cudagraph_mode == CUDAGraphMode.FULL:
-                logger.info("execute_model aclgraph pre, dp_metadata_list is %s", dp_metadata_list)
+                # logger.info("execute_model aclgraph pre, dp_metadata_list is %s", dp_metadata_list)
                 # Look up the captured graph by dp_metadata_key.
                 dp_metadata_key = self._get_dp_metadata_key(dp_metadata_list)
                 acl_graph_info = self._acl_graphs.get(dp_metadata_key)
@@ -146,9 +146,9 @@ class NPUFFNModelRunner(NPUModelRunner, GPUFFNModelRunner):
                     graph = acl_graph_info['graph']
                     graph.replay()
                     self.replay_cnt += 1
-                    logger.info(
-                        "ffn replay, replay_cnt is %s, dp_metadata_key=%s",
-                        self.replay_cnt, dp_metadata_key)
+                    # logger.info(
+                    #     "ffn replay, replay_cnt is %s, dp_metadata_key=%s",
+                    #     self.replay_cnt, dp_metadata_key)
                 else:
                     # Fallback to eager mode when no matching graph found.
                     logger.warning(
@@ -159,7 +159,7 @@ class NPUFFNModelRunner(NPUModelRunner, GPUFFNModelRunner):
                         dp_metadata_list=dp_metadata_list)
             else:
                 # Eager mode for non-ubatch or no aclgraph.
-                logger.info("execute_model eager pre, dp_metadata_list is %s", dp_metadata_list)
+                # logger.info("execute_model eager pre, dp_metadata_list is %s", dp_metadata_list)
                 self._ffn_forward(
                     aclgraph_runtime_mode=CUDAGraphMode.NONE,
                     dp_metadata_list=dp_metadata_list)
@@ -190,10 +190,10 @@ class NPUFFNModelRunner(NPUModelRunner, GPUFFNModelRunner):
         set_cudagraph_capturing_enabled(True)
         if cudagraph_mode == CUDAGraphMode.FULL and is_attn_graph_capturing:
             # Full graph capture mode：根据dp_metadata_list捕获单个graph
-            logger.info("FFN warmup capture start, dp_metadata_list is %s", dp_metadata_list)
+            # logger.info("FFN warmup capture start, dp_metadata_list is %s", dp_metadata_list)
             self._capture_model(dp_metadata_list=dp_metadata_list)
         elif cudagraph_mode == CUDAGraphMode.FULL and not is_attn_graph_capturing:
-            logger.info("FFN warmup replay start, dp_metadata_list is %s", dp_metadata_list)
+            # logger.info("FFN warmup replay start, dp_metadata_list is %s", dp_metadata_list)
             # Look up the captured graph by dp_metadata_key.
             dp_metadata_key = self._get_dp_metadata_key(dp_metadata_list)
             acl_graph_info = self._acl_graphs.get(dp_metadata_key)
@@ -201,12 +201,12 @@ class NPUFFNModelRunner(NPUModelRunner, GPUFFNModelRunner):
                 graph = acl_graph_info['graph']
                 graph.replay()
                 self.replay_cnt += 1
-                logger.info(
-                    "warmup ffn replay, replay_cnt is %s, dp_metadata_key=%s",
-                    self.replay_cnt, dp_metadata_key)
+                # logger.info(
+                #     "warmup ffn replay, replay_cnt is %s, dp_metadata_key=%s",
+                #     self.replay_cnt, dp_metadata_key)
         else:
             # Eager mode for non-ubatch or no aclgraph.
-            logger.info("FFN warmup eager start, dp_metadata_list is %s", dp_metadata_list)
+            # logger.info("FFN warmup eager start, dp_metadata_list is %s", dp_metadata_list)
             self._warmup_model(dp_metadata_list=dp_metadata_list)
         # if cudagraph_mode == CUDAGraphMode.NONE:
         #     # Warmup模式：只执行forward，不capture graph
@@ -360,12 +360,11 @@ class NPUFFNModelRunner(NPUModelRunner, GPUFFNModelRunner):
                 'input_hidden_states': output,
                 'output': output
             }
-            logger.info("_dummy_run graph post, dp_metadata_key=%s", dp_metadata_key)
+            # logger.info("_dummy_run graph post, dp_metadata_key=%s", dp_metadata_key)
         else:
             self._ffn_forward(aclgraph_runtime_mode=aclgraph_runtime_mode,
                               dp_metadata_list=dp_metadata_list)
-            logger.info("_dummy_run eager post")
-        # logger.info("self.dummy_run_call_cnt is %s", self.dummy_run_call_cnt)
+            # logger.info("_dummy_run eager post")
         self.dummy_run_call_cnt += 1
 
     # TODO: to adapt m2nAFDConnector for deepseek w9a8 quantization.

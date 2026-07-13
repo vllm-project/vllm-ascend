@@ -2359,12 +2359,12 @@ class NPUModelRunner(GPUModelRunner):
                         dp_metadata_list,
                         is_warmup=False,
                         cudagraph_mode=cudagraph_mode)
-                    logger.info(
-                        "afd_connector.rank send_dp_metadata_list is %s, "
-                        "is_warmup: %s, "
-                        "cudagraph_mode: %s, "
-                        "ubatch_slices: %s",
-                        dp_metadata_list, False, cudagraph_mode, ubatch_slices)
+                    # logger.info(
+                    #     "afd_connector.rank send_dp_metadata_list is %s, "
+                    #     "is_warmup: %s, "
+                    #     "cudagraph_mode: %s, "
+                    #     "ubatch_slices: %s",
+                    #     dp_metadata_list, False, cudagraph_mode, ubatch_slices)
                 dist.barrier(group=get_dp_group().cpu_group)
             if self.cache_config.mamba_cache_mode == "align":
                 mamba_utils.do_mamba_copy_block(preprocess_bufs)
@@ -3663,12 +3663,12 @@ class NPUModelRunner(GPUModelRunner):
                             is_graph_capturing=is_graph_capturing,
                             is_warmup=True,
                             cudagraph_mode=cudagraph_runtime_mode)
-                        logger.info(
-                            "afd_connector.rank in dummy_run send_dp_metadata_list is %s, "
-                            "is_graph_capturing: %s, "
-                            "cudagraph_mode: %s, "
-                            "ubatch_slices: %s",
-                            dp_metadata_list, is_graph_capturing, cudagraph_runtime_mode, ubatch_slices)
+                        # logger.info(
+                        #     "afd_connector.rank in dummy_run send_dp_metadata_list is %s, "
+                        #     "is_graph_capturing: %s, "
+                        #     "cudagraph_mode: %s, "
+                        #     "ubatch_slices: %s",
+                        #     dp_metadata_list, is_graph_capturing, cudagraph_runtime_mode, ubatch_slices)
                     dist.barrier(group=get_dp_group().cpu_group)
                 outputs = self._model_forward(
                     num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds

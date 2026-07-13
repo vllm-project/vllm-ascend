@@ -568,9 +568,9 @@ class NPUP2PAFDConnector(AFDConnectorBase):
                                        dtype=torch.long,
                                        device="npu")
 
-            logger.info(
-                "send_dp_metadata_list dst:%s is_graph_capturing:%s is_warmup:%s cudagraph_mode:%s",
-                dst, is_graph_capturing, is_warmup, cudagraph_mode)
+            # logger.info(
+            #     "send_dp_metadata_list dst:%s is_graph_capturing:%s is_warmup:%s cudagraph_mode:%s",
+            #     dst, is_graph_capturing, is_warmup, cudagraph_mode)
 
             torch.distributed.send(size_tensor, dst=dst, group=self.p2p_pg)
             torch.distributed.send(object_tensor_npu, dst=dst, group=self.p2p_pg)
@@ -603,8 +603,8 @@ class NPUP2PAFDConnector(AFDConnectorBase):
             is_warmup = False
             cudagraph_mode = CUDAGraphMode.NONE
 
-        logger.info("recv_dp_metadata_list is_graph_capturing:%s is_warmup:%s cudagraph_mode:%s",
-                     is_graph_capturing, is_warmup, cudagraph_mode)
+        # logger.info("recv_dp_metadata_list is_graph_capturing:%s is_warmup:%s cudagraph_mode:%s",
+        #              is_graph_capturing, is_warmup, cudagraph_mode)
 
         return data, is_graph_capturing, is_warmup, cudagraph_mode
 
