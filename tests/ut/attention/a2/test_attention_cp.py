@@ -271,6 +271,23 @@ class TestAscendAttentionCPImpl(TestBase):
         self.assertEqual(value.shape[1], num_heads)
         self.assertEqual(value.shape[2], head_size)
 
+    @patch("vllm_ascend.attention.context_parallel.attention_cp.DeviceOperator.reshape_and_cache")
+    def test_shared_kv_consumer_does_not_update_cache(self, mock_reshape_and_cache):
+        self.impl.uses_shared_kv_cache = True
+        query = torch.empty(1, 8, 64)
+        key = torch.empty(1, 8, 64)
+        value = torch.empty(1, 8, 64)
+        output = torch.empty(1, 8 * 64)
+        kv_cache = (torch.empty(1, 16, 8, 64), torch.empty(1, 16, 8, 64))
+
+        result = self.impl.reshape_and_cache(query, key, value, kv_cache, self.attn_metadata, output)
+
+        mock_reshape_and_cache.assert_not_called()
+        self.assertIs(result[0], query)
+        self.assertIs(result[1], key)
+        self.assertIs(result[2], value)
+        self.assertIs(result[3], output)
+
 
 class TestUpdateNpuAttnOutLse(TestBase):
     @patch_distributed_groups(needs_mocks=False)

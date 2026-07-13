@@ -806,6 +806,12 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         attn_metadata: AscendMetadata,
         output: torch.Tensor,
     ):
+        # The model runner aliases a shared consumer to its producer's cache.
+        # Context-parallel consumers must not overwrite that cache with their
+        # layer-local K/V tensors.
+        if self.uses_shared_kv_cache:
+            return query, key, value, output
+
         num_decode_tokens = attn_metadata.num_decode_tokens
         has_decode = attn_metadata.num_decodes > 0
         has_prefill = attn_metadata.num_prefills > 0

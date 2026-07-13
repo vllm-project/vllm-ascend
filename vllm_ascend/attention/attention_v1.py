@@ -71,6 +71,10 @@ from vllm_ascend.worker.kvcomp_utils import KVCompMetaData
 
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
+# Ascend FIA TND layout only supports a limited set of head sizes (64/128/192).
+# Models such as Gemma4 use global_head_dim=512 on full-attention layers and
+# must route through the BSH layout instead.
+BSH_FALLBACK_HEAD_SIZES = (512,)
 _ATTN_KEYS_BUFFER = None
 
 
@@ -423,6 +427,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.alibi_slopes = alibi_slopes
         self.attn_type = attn_type
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
+        self.uses_shared_kv_cache = kv_sharing_target_layer_name is not None
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
@@ -449,6 +454,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # KV-sharing layers replay with the target layer's metadata instead of
         # their own module name, matching vLLM's shared KV-cache ownership.
         return self.kv_sharing_target_layer_name or layer_name
+
+    def _use_bsh_attention(self) -> bool:
+        return self.head_size in BSH_FALLBACK_HEAD_SIZES and self.sinks is None
 
     @staticmethod
     def update_graph_params(
@@ -1192,10 +1200,30 @@ class AscendAttentionBackendImpl(AttentionImpl):
             graph_params.handles[num_tokens].append(handle)
             return output
 
+    def _load_paged_kv_for_fia(
+        self,
+        attn_metadata: AscendMetadata,
+    ) -> tuple[torch.Tensor, torch.Tensor, int, torch.Tensor, list[int]]:
+        num_block, block_size, _, _ = self.key_cache.shape  # type: ignore
+        key = self.key_cache.view(num_block, block_size, -1)  # type: ignore
+        value = self.value_cache.view(num_block, block_size, -1)  # type: ignore
+        batch_size = attn_metadata.seq_lens.shape[0]
+        block_table = attn_metadata.block_tables[:batch_size, :]
+        actual_seq_lengths_kv = attn_metadata.seq_lens_list
+        return key, value, block_size, block_table, actual_seq_lengths_kv
+
     def _get_fia_params(self, key: torch.Tensor, value: torch.Tensor, attn_metadata: AscendMetadata, kv_cache=None):
-        # PrefillNoCache doesn't need key_cache, but other modes do
-        # Only initialize/require cache for modes that actually use it
-        if attn_metadata.attn_state != AscendAttentionState.PrefillNoCache:
+        # PrefillNoCache normally uses the local float K/V tensors. KV-sharing
+        # consumers are the exception: their local K/V are intentionally
+        # invalid, so they must read the producer's paged cache (FlashInfer-
+        # compatible). For BSH fallback layers (e.g. Gemma4 head_dim=512),
+        # prefer dense K/V on PrefillNoCache unless this is a shared consumer,
+        # because FIA BSH + page attention requires block_size % 128 == 0.
+        use_paged_kv_on_prefill = self.uses_shared_kv_cache and self.attn_type != AttentionType.ENCODER_DECODER
+        uses_paged_kv_cache = (
+            attn_metadata.attn_state != AscendAttentionState.PrefillNoCache or use_paged_kv_on_prefill
+        )
+        if uses_paged_kv_cache:
             # Initialize cache from kv_cache if not already set (for DecodeOnly mode)
             if self.key_cache is None and kv_cache is not None:
                 if (
@@ -1213,11 +1241,21 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 )
 
         if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
-            block_size = 128
-            block_table = None
-            actual_seq_lengths_kv = attn_metadata.actual_seq_lengths_q
-            if self.attn_type == AttentionType.ENCODER_DECODER:
-                actual_seq_lengths_kv = torch.cumsum(attn_metadata.seq_lens, dim=0).tolist()
+            if use_paged_kv_on_prefill:
+                if attn_metadata.block_tables is None:
+                    raise RuntimeError(
+                        "Shared KV cache consumers require block_tables during PrefillNoCache; "
+                        f"cannot read KV cache from target layer {self.kv_sharing_target_layer_name!r}."
+                    )
+                key, value, block_size, block_table, actual_seq_lengths_kv = self._load_paged_kv_for_fia(
+                    attn_metadata
+                )
+            else:
+                block_size = 128
+                block_table = None
+                actual_seq_lengths_kv = attn_metadata.actual_seq_lengths_q
+                if self.attn_type == AttentionType.ENCODER_DECODER:
+                    actual_seq_lengths_kv = torch.cumsum(attn_metadata.seq_lens, dim=0).tolist()
         elif attn_metadata.attn_state == AscendAttentionState.PrefillCacheHit:
             batch_size = attn_metadata.seq_lens.shape[0]
             block_table = attn_metadata.block_tables[:batch_size, :]
@@ -1252,6 +1290,111 @@ class AscendAttentionBackendImpl(AttentionImpl):
             actual_seq_lengths_kv = attn_metadata.seq_lens_list
         return key, value, block_size, block_table, actual_seq_lengths_kv
 
+    @staticmethod
+    def _cumulative_to_seq_lengths(cumulative_lengths: list[int]) -> list[int]:
+        previous_length = 0
+        seq_lengths = []
+        for cumulative_length in cumulative_lengths:
+            seq_lengths.append(cumulative_length - previous_length)
+            previous_length = cumulative_length
+        return seq_lengths
+
+    @staticmethod
+    def _pack_tnd_to_bsh(tensor: torch.Tensor, seq_lengths: list[int]) -> torch.Tensor:
+        if not seq_lengths or any(seq_len <= 0 for seq_len in seq_lengths):
+            raise ValueError(f"BSH fallback requires positive sequence lengths, got {seq_lengths}")
+        if sum(seq_lengths) != tensor.shape[0]:
+            raise ValueError(
+                "BSH fallback sequence lengths do not match the packed token count: "
+                f"sum(seq_lengths)={sum(seq_lengths)}, num_tokens={tensor.shape[0]}"
+            )
+        batch_size = len(seq_lengths)
+        max_seq_len = max(seq_lengths)
+        hidden_size = tensor.shape[-2] * tensor.shape[-1]
+        tensor = tensor.reshape(tensor.shape[0], hidden_size)
+
+        if all(seq_len == max_seq_len for seq_len in seq_lengths):
+            return tensor.view(batch_size, max_seq_len, hidden_size)
+
+        padded = tensor.new_zeros(batch_size, max_seq_len, hidden_size)
+        token_offset = 0
+        for batch_idx, seq_len in enumerate(seq_lengths):
+            padded[batch_idx, :seq_len] = tensor[token_offset : token_offset + seq_len]
+            token_offset += seq_len
+        return padded
+
+    @staticmethod
+    def _unpack_bsh_to_tnd(
+        tensor: torch.Tensor,
+        seq_lengths: list[int],
+        num_heads: int,
+        head_size: int,
+    ) -> torch.Tensor:
+        if all(seq_len == tensor.shape[1] for seq_len in seq_lengths):
+            return tensor.view(-1, num_heads, head_size)
+        return torch.cat(
+            [tensor[batch_idx, :seq_len] for batch_idx, seq_len in enumerate(seq_lengths)],
+            dim=0,
+        ).view(-1, num_heads, head_size)
+
+    def _forward_fused_infer_attention_bsh(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attn_metadata: AscendMetadata,
+        block_size: int,
+        block_table: torch.Tensor | None,
+        actual_seq_lengths_kv: list[int],
+    ) -> torch.Tensor:
+        query_seq_lengths = self._cumulative_to_seq_lengths(attn_metadata.actual_seq_lengths_q)
+        query = self._pack_tnd_to_bsh(query, query_seq_lengths)
+
+        if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache and block_table is None:
+            kv_seq_lengths = self._cumulative_to_seq_lengths(actual_seq_lengths_kv)
+            key = self._pack_tnd_to_bsh(key, kv_seq_lengths)
+            value = self._pack_tnd_to_bsh(value, kv_seq_lengths)
+            actual_seq_lengths_kv = kv_seq_lengths
+
+        extra_args = {}
+        sparse_mode = 0
+        # Decode and single-token prefill have no future tokens to mask. Avoid
+        # passing the TND square mask in these cases because BSH interprets it
+        # as a BS2 mask and validates it against the actual batch/KV lengths.
+        single_token_attention = all(seq_len == 1 for seq_len in query_seq_lengths) and all(
+            seq_len == 1 for seq_len in actual_seq_lengths_kv
+        )
+        if (
+            attn_metadata.causal
+            and attn_metadata.attn_state != AscendAttentionState.DecodeOnly
+            and not single_token_attention
+        ):
+            extra_args["atten_mask"] = attn_metadata.attn_mask
+            sparse_mode = 3
+        if block_table is not None:
+            extra_args["block_table"] = block_table
+            extra_args["block_size"] = block_size
+
+        attn_output, _ = torch_npu.npu_fused_infer_attention_score(
+            query=query,
+            key=key,
+            value=value,
+            input_layout="BSH",
+            actual_seq_lengths=query_seq_lengths,
+            actual_seq_lengths_kv=actual_seq_lengths_kv,
+            num_key_value_heads=self.num_kv_heads,
+            num_heads=self.num_heads,
+            scale=self.scale,
+            sparse_mode=sparse_mode,
+            **extra_args,
+        )
+        return self._unpack_bsh_to_tnd(
+            attn_output,
+            query_seq_lengths,
+            self.num_heads,
+            self.head_size,
+        )
+
     def forward_fused_infer_attention(
         self,
         query: torch.Tensor,
@@ -1264,7 +1407,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # we inherit ForwardContext in model runner v2, when enable model
         # runner v2, there is not capturing attribute in forward_context,
         # just use getattr to avoid attribute error.
-        if _EXTRA_CTX.capturing:
+        if _EXTRA_CTX.capturing and not self.uses_shared_kv_cache:
             if self.sinks is not None:
                 attn_output, num_tokens = self.full_graph_fia_v2(query, key, value, attn_metadata, output)
                 output[:num_tokens] = attn_output[:num_tokens]
@@ -1289,11 +1432,21 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if (
             attn_metadata.attn_state == AscendAttentionState.PrefillNoCache
             and self.attn_type != AttentionType.ENCODER_DECODER
+            and block_table is None
         ):
             key = key[:num_tokens]
             value = value[:num_tokens]
-        # Get workspace from cache or calculate it if not present.
-        if self.sinks is not None:
+        if self._use_bsh_attention():
+            attn_output = self._forward_fused_infer_attention_bsh(
+                query,
+                key,
+                value,
+                attn_metadata,
+                block_size,
+                block_table,
+                actual_seq_lengths_kv,
+            )
+        elif self.sinks is not None:
             actual_seq_qlen = attn_metadata.actual_seq_lengths_q
             if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
                 actual_seq_qlen = torch.tensor([1] * len(attn_metadata.seq_lens_list), dtype=torch.int32).cumsum(dim=0)
@@ -1434,7 +1587,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         kv_cache: list[torch.Tensor],
         slot_mapping: torch.Tensor,
     ) -> None:
-        if self.attn_type in (AttentionType.ENCODER_ONLY):
+        if self.attn_type in (AttentionType.ENCODER_ONLY) or self.uses_shared_kv_cache:
             return
 
         if self.key_cache is None:
@@ -1457,6 +1610,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
         attn_metadata: AscendMetadata,
         output: torch.Tensor,
     ):
+        # The model runner binds a shared consumer to its producer's cache.
+        # Only the producer may write that cache; consumers read it as-is.
+        if self.uses_shared_kv_cache:
+            return query, key, value, output
         if len(kv_cache) > 1:
             if self.is_kv_producer:
                 attn_metadata.reshape_cache_event = torch.npu.Event()
@@ -1492,6 +1649,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             attn_metadata.attn_state == AscendAttentionState.DecodeOnly
             and self.sliding_window is None
             and using_paged_attention(num_tokens, self.vllm_config, self.head_size)
+            and not self._use_bsh_attention()
         ):
             output = self.forward_paged_attention(query, attn_metadata, output)
         else:
@@ -1614,7 +1772,7 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
                 output[:num_tokens] = attn_output[:num_tokens]
                 return output
             if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
-                if _EXTRA_CTX.capturing:
+                if _EXTRA_CTX.capturing and not self.uses_shared_kv_cache:
                     attn_output, num_tokens = self.full_graph_fia(query, key, value, attn_metadata, output, layer)
                     output[:num_tokens] = attn_output[:num_tokens]
                     return output
@@ -1658,7 +1816,7 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
                     attn_output = self._forward_encoder_attention(query, key, value, attn_metadata, output)
                     output[:num_tokens] = attn_output[:num_tokens]
                     return output
-                if _EXTRA_CTX.capturing:
+                if _EXTRA_CTX.capturing and not self.uses_shared_kv_cache:
                     attn_output, num_tokens = self.full_graph_fia(query, key, value, attn_metadata, output, layer)
                     output[:num_tokens] = attn_output[:num_tokens]
                     return output
@@ -1875,7 +2033,12 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
                     all_new_prefill = False
                     break
 
-            if all_new_prefill and float_key is not None and float_value is not None:
+            if (
+                all_new_prefill
+                and float_key is not None
+                and float_value is not None
+                and not self.uses_shared_kv_cache
+            ):
                 prefill_k = float_key[num_decode_tokens:num_tokens]
                 prefill_v = float_value[num_decode_tokens:num_tokens]
                 prefill_seq_kvlen = prefill_seq_qlen
@@ -1936,6 +2099,7 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
         if (
             attn_metadata.attn_state == AscendAttentionState.PrefillNoCache
             and self.attn_type != AttentionType.ENCODER_DECODER
+            and block_table is None
         ):
             key = key[:num_tokens]
             value = value[:num_tokens]
@@ -1983,6 +2147,11 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
         attn_metadata: AscendMetadata,
         output: torch.Tensor,
     ):
+        if self.uses_shared_kv_cache:
+            if len(kv_cache) > 1 and self.key_cache is None:
+                self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
+            return query, key, value, output
+
         if len(kv_cache) > 1:
             if self.is_kv_producer:
                 attn_metadata.reshape_cache_event = torch.npu.Event()
