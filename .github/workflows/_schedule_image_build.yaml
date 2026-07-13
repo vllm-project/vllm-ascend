@@ -335,7 +335,9 @@ jobs:
             --local dockerfile="$DOCKERFILE_DIR"
             --opt filename="$DOCKERFILE_NAME"
             --opt platform=${{ matrix.arch }}
-            --opt build-arg:PIP_INDEX_URL=https://pypi.org/simple
+            --opt build-arg:APT_CACHE_HOST=cache-service.nginx-pypi-cache.svc.cluster.local:8081
+            --opt build-arg:UV_INDEX_URL=http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+            --opt "build-arg:UV_EXTRA_INDEX_URL=https://repo.huaweicloud.com/ascend/repos/pypi http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu/"
             --opt build-arg:COMPILE_CUSTOM_KERNELS=${{ steps.cache-csrc.outputs.cache-hit == 'true' && '0' || '1' }}
             --opt build-arg:VLLM_COMMIT=${{ inputs.vllm_commit }}
             --opt build-arg:BUILDKIT_INLINE_CACHE=1
