@@ -8,6 +8,10 @@ This document provides a detailed workflow for the complete deployment and verif
 
 This document is validated and written based on **vLLM-Ascend v0.21.0rc1**. The current model (PaddleOCR-VL) is supported in this version. It is recommended to use this version or another updated official version for deployment.
 
+!!! note
+
+PaddleOCR-VL-1.5 is the iterative upgraded version of PaddleOCR-VL. If you intend to deploy the PaddleOCR-VL-1.5 model, please refer to the official [ModelZoo tutorial](https://gitcode.com/Ascend/ModelZoo-PyTorch/tree/master/ACL_PyTorch/built-in/ocr/PaddleOCR-VL-1.5).
+
 ## 2 Supported Features
 
 Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
