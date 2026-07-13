@@ -684,7 +684,7 @@ class NPUWorker(WorkerBase):
                 WeightTransferEngineFactory,
             )
 
-            if vllm_version_is("0.23.0"):
+            if vllm_version_is("0.23.0") or vllm_version_is("0.24.0"):
                 self.weight_transfer_engine = WeightTransferEngineFactory.create_engine(
                     self.vllm_config.weight_transfer_config,
                     self.vllm_config.parallel_config,
