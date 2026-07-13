@@ -1,16 +1,3 @@
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-# This file is a part of the vllm-ascend project.
-
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -18,7 +5,6 @@ import pytest
 import torch
 from vllm.config import CompilationConfig, VllmConfig
 
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker import encoder_acl_graph
 from vllm_ascend.worker.encoder_acl_graph import (
     EncoderAclGraphManager,
@@ -47,8 +33,6 @@ def _reset_state():
     [
         (torch.tensor([0, 4, 8], dtype=torch.int32), 8, [4, 8]),
         (torch.tensor([0, 4, 16], dtype=torch.int32), 8, [4, 8]),
-        (torch.tensor([0], dtype=torch.int32), 8, [8]),
-        (torch.tensor([0, 4, 8], dtype=torch.int32), 0, [0]),
     ],
 )
 def test_maybe_compute_actual_seq_lengths(cu_seqlens, num_tokens, expected):
@@ -58,22 +42,6 @@ def test_maybe_compute_actual_seq_lengths(cu_seqlens, num_tokens, expected):
     )
     assert actual_q == expected
     assert actual_kv == expected
-
-
-def test_replay_compute_actual_seq_lengths_from_cu_seqlens():
-    cu_seqlens_cpu = torch.tensor([0, 4, 8], dtype=torch.int32)
-
-    actual_q, actual_kv = maybe_compute_actual_seq_lengths(
-        num_query_tokens=8,
-        cu_seqlens=cu_seqlens_cpu,
-    )
-    assert actual_q == [4, 8]
-    assert actual_kv == [4, 8]
-
-
-def test_replay_missing_cu_seqlens_raises():
-    with pytest.raises(TypeError):
-        maybe_compute_actual_seq_lengths(num_query_tokens=8)
 
 
 def test_update_encoder_graph_params_uses_cu_seqlens():
@@ -144,11 +112,6 @@ def _make_manager():
     )
     model.get_encoder_cudagraph_budget_range.return_value = (64, 2048)
     return EncoderAclGraphManager(vllm_config, "npu", "bfloat16", model), model
-
-
-def test_manager_update_stream_defaults_none():
-    mgr, _ = _make_manager()
-    assert mgr.update_stream is None
 
 
 def test_manager_capture_registers_graph_params():

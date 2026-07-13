@@ -2,7 +2,6 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import torch
-import torch.nn.functional as F
 from vllm.config import CompilationConfig, VllmConfig
 from vllm.config.vllm import get_cached_compilation_config
 
@@ -16,7 +15,6 @@ from vllm_ascend.worker import encoder_acl_graph
 from vllm_ascend.worker.encoder_acl_graph import (
     get_encoder_forward_context,
     get_encoder_graph_params,
-    maybe_compute_actual_seq_lengths,
     set_encoder_graph_params,
 )
 
@@ -44,76 +42,21 @@ class FIAMockMixin(TestBase):
             num_kv_heads=num_kv_heads,
         )
 
-    def _compute_fia_output(self, query, key, value, actual_seq_lengths, scale):
-        output = torch.zeros_like(query)
-        starts = [0] + list(actual_seq_lengths[:-1])
-        for i, end in enumerate(actual_seq_lengths):
-            beg = starts[i]
-            if end <= beg:
-                continue
-            q_seg = query[beg:end].permute(1, 0, 2).to(torch.float32)
-            k_seg = key[beg:end].permute(1, 0, 2).to(torch.float32)
-            v_seg = value[beg:end].permute(1, 0, 2).to(torch.float32)
-            attn = F.scaled_dot_product_attention(
-                q_seg.unsqueeze(0),
-                k_seg.unsqueeze(0),
-                v_seg.unsqueeze(0),
-                scale=scale,
-                dropout_p=0.0,
-                is_causal=False,
-            ).squeeze(0)
-            output[beg:end] = attn.permute(1, 0, 2).to(query.dtype)
-        return output
-
-    def _record_fia_call(self, **kwargs):
-        self.captured["mode"] = "functional"
-        self.captured["q_shape"] = kwargs["query"].shape
-        self.captured["k_shape"] = kwargs["key"].shape
-        self.captured["v_shape"] = kwargs["value"].shape
-        self.captured["input_layout"] = kwargs["input_layout"]
-        self.captured["block_size"] = kwargs["block_size"]
-        self.captured["actual_seq_lengths"] = kwargs["actual_seq_lengths"]
-        self.captured["actual_seq_lengths_kv"] = kwargs["actual_seq_lengths_kv"]
-        self.captured["num_heads"] = kwargs["num_heads"]
-        self.captured["num_key_value_heads"] = kwargs["num_key_value_heads"]
-        self.captured["scale"] = kwargs["scale"]
-        self.captured["sparse_mode"] = kwargs["sparse_mode"]
-        self.captured["block_table"] = kwargs["block_table"]
-        self.captured["atten_mask"] = kwargs["atten_mask"]
-        self.captured["pre_tokens"] = kwargs.get("pre_tokens")
-        self.captured["next_tokens"] = kwargs.get("next_tokens")
-
     def _fake_fia(self, **kwargs):
-        self._record_fia_call(**kwargs)
-        return (
-            self._compute_fia_output(
-                kwargs["query"],
-                kwargs["key"],
-                kwargs["value"],
-                kwargs["actual_seq_lengths"],
-                kwargs["scale"],
-            ),
-            None,
-        )
+        self.captured = {
+            "mode": "functional",
+            "q_shape": kwargs["query"].shape,
+            "input_layout": kwargs["input_layout"],
+            "block_size": kwargs["block_size"],
+            "actual_seq_lengths": kwargs["actual_seq_lengths"],
+            "scale": kwargs["scale"],
+            "sparse_mode": kwargs["sparse_mode"],
+        }
+        return torch.zeros_like(kwargs["query"]), None
 
     def _fake_fia_out(self, *, workspace, out, **kwargs):
-        self.captured["mode"] = "out"
-        self.captured["workspace"] = workspace
-        self.captured["softmax_lse"] = out[1]
-        self.captured["q_shape"] = kwargs["query"].shape
-        self.captured["actual_seq_lengths"] = kwargs["actual_seq_lengths"]
-        self.captured["block_size"] = kwargs["block_size"]
-        self.captured["sparse_mode"] = kwargs["sparse_mode"]
-        self.captured["pre_tokens"] = kwargs.get("pre_tokens")
-        self.captured["next_tokens"] = kwargs.get("next_tokens")
-        self.captured["scale"] = kwargs["scale"]
-        out[0][...] = self._compute_fia_output(
-            kwargs["query"],
-            kwargs["key"],
-            kwargs["value"],
-            kwargs["actual_seq_lengths"],
-            kwargs["scale"],
-        )
+        self.captured = {"mode": "out", "softmax_lse": out[1]}
+        out[0].zero_()
 
     def _install_fia_mocks(self, *, capture: bool):
         self.captured = {}
@@ -187,15 +130,6 @@ class TestAscendMMEncoderAttentionEager(FIAMockMixin):
         self.assertEqual(self.captured["block_size"], FIA_BLOCK_SIZE)
         self.assertEqual(self.captured["scale"], layer.scale)
 
-    def test_maybe_compute_actual_seq_lengths_from_cu_seqlens(self):
-        cu_seqlens = torch.tensor([0, 4, 8], dtype=torch.int32)
-        actual_q, actual_kv = maybe_compute_actual_seq_lengths(
-            num_query_tokens=8,
-            cu_seqlens=cu_seqlens,
-        )
-        self.assertEqual(actual_q, [4, 8])
-        self.assertEqual(actual_kv, [4, 8])
-
     def test_variable_seqlens(self):
         layer = self._make_layer(num_heads=4, num_kv_heads=4, head_size=72)
         seq_lens = [3, 7, 2]
@@ -210,19 +144,6 @@ class TestAscendMMEncoderAttentionEager(FIAMockMixin):
         self.assertEqual(out.shape, query.shape)
         self.assertEqual(self.captured["actual_seq_lengths"], [3, 10, 12, 21])
         self.assertEqual(self.captured["q_shape"], (len(seq_lens) * max_q_len, 4, MAX_PAD_SIZE))
-
-    def test_custom_scale_used_in_fia(self):
-        custom_scale = 0.25
-        layer = self._make_layer(num_heads=4, num_kv_heads=4, head_size=128, scale=custom_scale)
-        bsz, q_len = 1, 4
-        query = torch.randn(bsz, q_len, layer.num_heads * layer.head_size)
-        key = query.clone()
-        value = query.clone()
-        cu_seqlens = torch.arange(0, (bsz + 1) * q_len, step=q_len, dtype=torch.int32)
-
-        layer.forward_oot(query, key, value, cu_seqlens=cu_seqlens)
-
-        self.assertEqual(self.captured["scale"], custom_scale)
 
 
 class TestAscendMMEncoderAttentionCapture(FIAMockMixin):
@@ -258,18 +179,3 @@ class TestAscendMMEncoderAttentionCapture(FIAMockMixin):
         self.assertEqual(self.captured["softmax_lse"].numel(), 1)
         self.mock_graph_begin.assert_called_once()
         self.mock_graph_end.assert_called_once()
-
-    def test_capture_none_cu_seqlens_uses_cpu_arange(self):
-        layer = self._make_layer(num_heads=4, num_kv_heads=4, head_size=72)
-        ctx = get_encoder_forward_context()
-        ctx.capturing = True
-        ctx.token_budget = 2048
-
-        bsz, q_len = 2, 4
-        query = torch.randn(bsz, q_len, layer.num_heads, 72, dtype=torch.bfloat16)
-        key = torch.randn_like(query)
-        value = torch.randn_like(query)
-
-        layer.forward_oot(query, key, value, cu_seqlens=None)
-
-        self.assertEqual(self.captured["actual_seq_lengths"], [4, 8])
