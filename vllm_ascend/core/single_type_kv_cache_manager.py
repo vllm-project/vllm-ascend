@@ -288,9 +288,10 @@ def get_manager_for_kv_cache_spec(
         # and ``full_sequence_must_fit`` admission reserves the full
         # ``max_model_len`` worth of blocks per request, exhausting the pool
         # at cc>=2 on DSv4 (see vLLM issue #40863).
-        token_budget = max_num_batched_tokens if vllm_version_is("0.23.0") else max_in_flight_tokens
+        uses_release_kv_api = vllm_version_is("0.23.0") or vllm_version_is("0.24.0")
+        token_budget = max_num_batched_tokens if uses_release_kv_api else max_in_flight_tokens
         if token_budget is not None and max_model_len is not None:
-            if vllm_version_is("0.23.0"):
+            if uses_release_kv_api:
                 kwargs["max_admission_blocks_per_request"] = kv_cache_spec.max_admission_blocks_per_request(
                     max_num_batched_tokens=token_budget,
                     max_model_len=max_model_len,
