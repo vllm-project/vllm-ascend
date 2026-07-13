@@ -158,13 +158,10 @@ class NPUModelRunner310(NPUModelRunner):
             force_eager = True
 
         # Spec decoding graph replay is only valid for uniform spec-decode batches (q_len = 1 + K).
-        if (
-            self.speculative_config is not None
-            and (
-                self.attn_state != AscendAttentionState.SpecDecoding
-                or max_num_scheduled_tokens != self.uniform_decode_query_len
-                or num_tokens != max_num_scheduled_tokens * num_reqs
-            )
+        if self.speculative_config is not None and (
+            self.attn_state != AscendAttentionState.SpecDecoding
+            or max_num_scheduled_tokens != self.uniform_decode_query_len
+            or num_tokens != max_num_scheduled_tokens * num_reqs
         ):
             force_eager = True
 
@@ -306,7 +303,7 @@ class NPUModelRunner310(NPUModelRunner):
                 self.num_accepted_tokens.gpu.fill_(1)
 
         need_async_num_computed_update = (
-                self.use_async_spec_decode and self.valid_sampled_token_count_gpu is not None and prev_req_id_to_index
+            self.use_async_spec_decode and self.valid_sampled_token_count_gpu is not None and prev_req_id_to_index
         )
 
         if need_async_num_computed_update:
@@ -630,10 +627,10 @@ class NPUModelRunner310(NPUModelRunner):
         temporary_context = self.temporary_modify_uniform_decode_query_len() if uniform_decode else nullcontext()
         # All the spec decoding cases has to run splitfuse op on 310P.
         is_spec_graph_capture = (
-                uniform_decode
-                and not is_profile
-                and self.speculative_config is not None
-                and not self.vllm_config.model_config.use_mla
+            uniform_decode
+            and not is_profile
+            and self.speculative_config is not None
+            and not self.vllm_config.model_config.use_mla
         )
         with temporary_context:
             self._spec_dummy_capture = is_spec_graph_capture

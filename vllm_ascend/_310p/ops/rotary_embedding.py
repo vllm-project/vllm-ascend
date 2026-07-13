@@ -25,8 +25,7 @@ from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 from vllm.model_executor.layers.rotary_embedding.mrope import apply_interleaved_rope
 
-from vllm_ascend.ops.rotary_embedding import AscendRotaryEmbedding, get_cos_and_sin_slice
-from vllm_ascend.ops.rotary_embedding import update_cos_sin
+from vllm_ascend.ops.rotary_embedding import AscendRotaryEmbedding, get_cos_and_sin_slice, update_cos_sin
 
 # Filled once per model forward in NPUModelRunner310._model_forward; read by every MRoPE layer.
 _mrope_cos_slice: torch.Tensor | None = None

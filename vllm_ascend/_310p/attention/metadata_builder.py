@@ -19,8 +19,8 @@ from typing import Any
 
 import torch
 from vllm.config import VllmConfig
-from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.attention.backend import CommonAttentionMetadata
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend._310p.attention.attention_mask import (
     AttentionMaskBuilder310,
@@ -86,14 +86,11 @@ class AscendAttentionMetadataBuilder310(AscendAttentionMetadataBuilder):
             self._query_lens_cpu_buffer = torch.empty(max_num_seqs, dtype=torch.int32, device="cpu", pin_memory=True)
 
     def _fill_query_lens_cpu(
-        self,
-        num_reqs: int,
-        query_start_loc_cpu: torch.Tensor,
-        is_drafting: bool = False
+        self, num_reqs: int, query_start_loc_cpu: torch.Tensor, is_drafting: bool = False
     ) -> torch.Tensor:
         """Pinned CPU per-request query lengths for ATB splitfuse (host qLensTensor)."""
         if self._query_lens_cpu_buffer is None:
-            return (query_start_loc_cpu[1: num_reqs + 1] - query_start_loc_cpu[:num_reqs]).contiguous()
+            return (query_start_loc_cpu[1 : num_reqs + 1] - query_start_loc_cpu[:num_reqs]).contiguous()
         if is_drafting:
             # We are using the same buffer for multi step drafting,
             # so we have to clone the buffer or the q lens of step 0
@@ -102,7 +99,7 @@ class AscendAttentionMetadataBuilder310(AscendAttentionMetadataBuilder):
         else:
             buffer = self._query_lens_cpu_buffer[:num_reqs]
         torch.sub(
-            query_start_loc_cpu[1: num_reqs + 1],
+            query_start_loc_cpu[1 : num_reqs + 1],
             query_start_loc_cpu[:num_reqs],
             out=buffer,
         )
@@ -149,8 +146,5 @@ class AscendAttentionMetadataBuilder310(AscendAttentionMetadataBuilder):
     ):
         # override build_for_drafting for passing status.
         return self.build(
-            common_prefix_len=0,
-            common_attn_metadata=common_attn_metadata,
-            fast_build=True,
-            is_drafting=True
+            common_prefix_len=0, common_attn_metadata=common_attn_metadata, fast_build=True, is_drafting=True
         )
