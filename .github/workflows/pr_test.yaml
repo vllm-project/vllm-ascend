@@ -162,7 +162,7 @@ jobs:
 
       - name: Configure Huawei Cloud Credentials
         id: hwcloud-creds
-        uses: ascend-gha-runners/configure-hwcloud-credentials@v1
+        uses: ascend-gha-runners/configure-hwcloud-credentials@3be5794f565c38f9719ef1f6bec28351c929be3c
         with:
           region: ap-southeast-1
           audience: hw-vllm-ascend-audience
