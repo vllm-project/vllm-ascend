@@ -18,15 +18,6 @@
 name: Hitest
 
 on:
-  # pull_request_target:
-  #   types:
-  #     - opened      # 新建PR（提PR）
-  #     - synchronize # PR推送新commit、push更新分支
-  #     - reopened    # PR关闭后重新打开
-  #   branches:
-  #     - 'main'
-  #     - '*-dev'
-  #     - 'releases/v*'
   workflow_dispatch:
   workflow_call:
 
@@ -58,10 +49,6 @@ jobs:
           APP_SECRET: ${{ secrets.APP_SECRET }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          echo "===== DEBUG GITHUB ENV ====="
-          echo "X_APIG_APPCODE: $X_APIG_APPCODE"
-          echo "APP_KEY: $APP_KEY"
-          echo "APP_SECRET: $APP_SECRET"
           python3 .github/workflows/scripts/run_hitest.py
 
       - name: Upload recommended pytest paths artifact
