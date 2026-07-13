@@ -24,7 +24,7 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.common_cp import AscendPCPMetadata
-from vllm_ascend.attention.mla_v1 import MAX_O_PROJ_PREFETCH_SIZE, MLAPO_MAX_SUPPORTED_TOKENS
+from vllm_ascend.attention.mla_v1 import MLAPO_MAX_SUPPORTED_TOKENS
 from vllm_ascend.attention.utils import (
     SFA_QSFA_TILE_SIZE,
     AscendCommonAttentionMetadata,
@@ -57,7 +57,6 @@ from vllm_ascend.utils import (
     enable_sfa_dcp_replicated_indexer,
     enable_sp,
     get_ascend_device_type,
-    get_weight_prefetch_method,
     maybe_trans_nz,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
@@ -1615,10 +1614,6 @@ class AscendSFAImpl(MLAAttentionImpl):
         # native
         else:
             assert self.fused_qkv_a_proj is not None, "q lora is required for DSA."
-            weight_prefetch_method = get_weight_prefetch_method()
-            weight_prefetch_method.maybe_prefetch_mla_or_sla_weight_in_current_stream(
-                inputs=self.fused_qkv_a_proj.weight, dependency=hidden_states
-            )
             if self.enable_sp and not self.enable_dsa_cp:
                 hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
                     hidden_states.contiguous(), need_gather_q_kv
@@ -1859,13 +1854,6 @@ class AscendSFAImpl(MLAAttentionImpl):
         )
 
         attn_output = self._v_up_proj(attn_output)
-        weight_prefetch_method = get_weight_prefetch_method()
-        weight_prefetch_method.maybe_prefetch_mla_or_sla_weight_in_current_stream(
-            inputs=self.o_proj.weight,
-            dependency=attn_output,
-            max_size=MAX_O_PROJ_PREFETCH_SIZE,
-            linear_layer=self.o_proj,
-        )
 
         if self.enable_dsa_cp_with_o_proj_tp:
             # SFA DSA-CP mixed mode keeps o_proj weight sharded in the TP domain:
