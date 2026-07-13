@@ -49,7 +49,7 @@ permissions:
 jobs:
   lint-and-select-tests:
     if: ${{ github.event.action != 'labeled' || github.event.label.name == 'ready' }}
-    runs-on: linux-amd64-cpu-8-hk
+    runs-on: linux-amd64-cpu-test-8-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
     outputs:
