@@ -38,21 +38,11 @@ from vllm_ascend.ops.fused_moe.token_dispatcher import (  # isort: skip
     TokenDispatcherWithAll2AllV,
     TokenDispatcherWithAllGather,
     TokenDispatcherWithMC2,
-    _is_mxfp4_quant_type,
 )
 from vllm_ascend.ops.fused_moe.moe_stage_params import MoEMxfpParams
 from vllm_ascend.quantization.quant_type import QuantType
 
 MXFP4_TEST_DTYPE = getattr(torch, "float4_e2m1fn_x2", torch.float16)
-
-
-class _LegacyQuantType:
-    name = "MXFP4"
-
-
-def test_mxfp4_quant_type_detection_accepts_current_and_legacy_names():
-    assert _is_mxfp4_quant_type(QuantType.W4A4MXFP)
-    assert _is_mxfp4_quant_type(_LegacyQuantType())
 
 
 def build_token_dispatch_input_fixture(
