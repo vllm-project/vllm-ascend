@@ -260,7 +260,6 @@ def prepare_mrope_cos_sin_slices_from_runner(runner: Any, positions: torch.Tenso
 
 
 class AscendRotaryEmbedding310(AscendRotaryEmbedding):
-
     _is_drafting_update_enabled: bool = False
 
     @classmethod
