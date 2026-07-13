@@ -101,9 +101,10 @@ from vllm.v1.worker.ubatch_utils import (
 )
 from vllm.v1.worker.utils import AttentionGroup, select_common_block_size
 
+import vllm_ascend.envs as envs_ascend
+
 # yapf: enable
 from vllm_ascend.ascend_config import get_ascend_config
-import vllm_ascend.envs as envs_ascend
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
 from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadataBuilder

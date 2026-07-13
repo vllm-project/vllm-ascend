@@ -122,8 +122,7 @@ env_variables: dict[str, Callable[[], Any]] = {
     # device side WITHOUT blocking the host and WITHOUT touching the same-step
     # update[i]/replay[i] value-rendezvous (which must stay concurrent, see
     # optimization-record doc 12.3.1). Default 0 = baseline barrier.
-    "VLLM_ASCEND_FINE_GRAIN_REPLAY_SYNC": lambda: bool(
-        int(os.getenv("VLLM_ASCEND_FINE_GRAIN_REPLAY_SYNC", "0"))),
+    "VLLM_ASCEND_FINE_GRAIN_REPLAY_SYNC": lambda: bool(int(os.getenv("VLLM_ASCEND_FINE_GRAIN_REPLAY_SYNC", "0"))),
 }
 
 # end-env-vars-definition
