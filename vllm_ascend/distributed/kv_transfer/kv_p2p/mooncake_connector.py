@@ -741,7 +741,7 @@ class KVCacheRecvingThread(threading.Thread):
         remote_block_ids: BlockIds = req_meta["remote_block_ids"]
         local_block_ids_replicate_k: BlockIds = req_meta.get("local_block_ids_replicate_k", tuple())
         remote_block_ids_replicate_k: BlockIds = req_meta.get("remote_block_ids_replicate_k", tuple())
-        has_replicate_k_blocks = bool(local_block_ids_replicate_k and remote_block_ids_replicate_k)
+        has_replicate_k_blocks = any(local_block_ids_replicate_k) and any(remote_block_ids_replicate_k)
         group_pulls: list[GroupPull] = req_meta["group_pulls"]
         remote_engine_id = req_meta["remote_engine_id"]
         remote_host = req_meta["remote_host"]
@@ -749,7 +749,7 @@ class KVCacheRecvingThread(threading.Thread):
         # Full prefix cache hit: do not need to read remote blocks, just notify
         # P worker that we have the blocks we need.
         num_local_blocks = sum(len(group_block_ids) for group_block_ids in local_block_ids)
-        if num_local_blocks == 0:
+        if num_local_blocks == 0 and not has_replicate_k_blocks:
             return
 
         # Check if we have the remote metadata cached.
@@ -772,6 +772,13 @@ class KVCacheRecvingThread(threading.Thread):
         dst_list: list[int] = []
         length_list: list[int] = []
         attention_group_reformat_block_ids: list[tuple[tuple[int, list[list[int]], int, list[int]], bool]] = []
+        grouped_remote_k_block_ids: list[list[int]] = []
+        grouped_local_k_block_ids: list[list[int]] = []
+        if self.enable_sfa_dcp_replicated_indexer and has_replicate_k_blocks:
+            grouped_remote_k_block_ids, grouped_local_k_block_ids = group_concurrent_contiguous(
+                remote_block_ids_replicate_k[0],
+                local_block_ids_replicate_k[0],
+            )
 
         def pp_layer_indices(layer_indices: list[int], prefill_pp_rank: int) -> list[int]:
             first_layer_index, end_layer_index = self.pp_layer_indices[prefill_pp_rank]
@@ -791,40 +798,38 @@ class KVCacheRecvingThread(threading.Thread):
             is_mamba_group = group_spec["kv_cache_spec_type"] == "MambaSpec"
             local_group_block_ids = local_block_ids[kv_cache_group_id]
             remote_group_block_ids = remote_block_ids[kv_cache_group_id]
-            if not local_group_block_ids:
+            has_group_blocks = bool(local_group_block_ids)
+            if not has_group_blocks and (is_mamba_group or not has_replicate_k_blocks):
                 continue
             if not is_mamba_group:
-                is_group_transfer_end = group_pull.is_group_transfer_end
-                # Block ids are already expanded to kernel granularity and truncated in
-                # _get_kv_split_metadata, so consume them directly here.
-                kernel_remote_block_ids = remote_group_block_ids
-                kernel_local_block_ids = local_group_block_ids
+                grouped_remote_block_ids: list[list[int]] = []
+                grouped_local_block_ids: list[list[int]] = []
+                if has_group_blocks:
+                    is_group_transfer_end = group_pull.is_group_transfer_end
+                    # Block ids are already expanded to kernel granularity and truncated in
+                    # _get_kv_split_metadata, so consume them directly here.
+                    kernel_remote_block_ids = remote_group_block_ids
+                    kernel_local_block_ids = local_group_block_ids
 
-                if tp_num_need_pulls == 1:
-                    grouped_remote_block_ids, grouped_local_block_ids = group_concurrent_contiguous(
-                        kernel_remote_block_ids, kernel_local_block_ids
+                    if tp_num_need_pulls == 1:
+                        grouped_remote_block_ids, grouped_local_block_ids = group_concurrent_contiguous(
+                            kernel_remote_block_ids, kernel_local_block_ids
+                        )
+                    else:
+                        grouped_remote_block_ids = [[block_id] for block_id in kernel_remote_block_ids]
+                        grouped_local_block_ids = [[block_id] for block_id in kernel_local_block_ids]
+                    attention_group_reformat_block_ids.append(
+                        (
+                            (group_idx, grouped_local_block_ids, tp_num_need_pulls, layer_indices),
+                            is_group_transfer_end,
+                        )
                     )
-                else:
-                    grouped_remote_block_ids = [[block_id] for block_id in kernel_remote_block_ids]
-                    grouped_local_block_ids = [[block_id] for block_id in kernel_local_block_ids]
-                attention_group_reformat_block_ids.append(
-                    (
-                        (group_idx, grouped_local_block_ids, tp_num_need_pulls, layer_indices),
-                        is_group_transfer_end,
-                    )
-                )
             else:
                 # When Prefix Caching is enabled on both P and D nodes, num_block should not be forced to match,
                 # as the D-node requires dynamic allocation based on its specific cache hit rate.
                 transfer_block_idx = len(remote_group_block_ids) - self.num_speculative_tokens - 1
                 grouped_remote_block_ids = [[remote_group_block_ids[transfer_block_idx]]]
                 grouped_local_block_ids = [[local_group_block_ids[0]]]
-
-            if self.enable_sfa_dcp_replicated_indexer and has_replicate_k_blocks:
-                grouped_remote_k_block_ids, grouped_local_k_block_ids = group_concurrent_contiguous(
-                    remote_block_ids_replicate_k[0],
-                    local_block_ids_replicate_k[0],
-                )
 
             if is_mamba_group:
                 for layer_idx in layer_indices:
@@ -878,6 +883,8 @@ class KVCacheRecvingThread(threading.Thread):
                         else:
                             continue
                     else:
+                        if not has_group_blocks:
+                            continue
                         transfer_remote_block_ids, transfer_local_block_ids = split_if_not_byte_contiguous(
                             grouped_remote_block_ids,
                             grouped_local_block_ids,
@@ -3220,30 +3227,6 @@ class MooncakeConnectorWorker:
             use_mla=num_key_value_heads == 1,
         )[self.tp_rank]
 
-    def _get_sfa_replicate_k_remote_handshake_port(
-        self,
-        meta: ReqMeta,
-    ) -> int | None:
-        if not self.enable_sfa_dcp_replicated_indexer:
-            return None
-        self._validate_sfa_replicated_indexer_remote_config(meta)
-        remote_cp_size = meta.remote_pcp_size * meta.remote_dcp_size
-        local_cp_size = self.pcp_size * self.dcp_size
-        if local_cp_size == 0 or remote_cp_size % local_cp_size != 0:
-            raise AssertionError(
-                f"SFA replicate-K expects remote cp size({remote_cp_size}) to be divisible by "
-                f"local cp size({local_cp_size})."
-            )
-        local_cp_rank = self.dcp_rank + self.pcp_rank * self.dcp_size
-        remote_cp_rank = local_cp_rank * (remote_cp_size // local_cp_size)
-        return meta.remote_port + remote_cp_rank
-
-    def _validate_sfa_replicated_indexer_remote_config(self, meta: ReqMeta) -> None:
-        if not self.enable_sfa_dcp_replicated_indexer:
-            return
-        prefill_tp_size = meta.remote_ptp_size if meta.remote_ptp_size is not None else self._prefill_tp_size
-        assert meta.remote_pcp_size == 1 and meta.remote_dcp_size == prefill_tp_size
-
     def _get_sfa_replicate_k_block_ids(
         self,
         meta: ReqMeta,
@@ -3281,7 +3264,6 @@ class MooncakeConnectorWorker:
 
         remote_blocks = list(meta.remote_block_ids[0])
         local_full_blocks = list((meta.local_full_block_ids or meta.local_block_ids)[0])
-        local_external_blocks = list(meta.local_block_ids[0])
         if not local_full_blocks:
             return tuple(), tuple()
 
@@ -3299,8 +3281,7 @@ class MooncakeConnectorWorker:
                 int(local_full_blocks[local_local_idx]) * local_cp_size + global_block_idx % local_cp_size
             )
 
-        max_external_blocks = min(num_external_blocks, len(local_external_blocks) * local_cp_size)
-        local_block_ids = local_block_ids[:max_external_blocks]
+        local_block_ids = local_block_ids[:num_external_blocks]
         remote_block_ids = remote_block_ids[: len(local_block_ids)]
         local_block_ids = local_block_ids[: len(remote_block_ids)]
 
@@ -3340,7 +3321,6 @@ class MooncakeConnectorWorker:
 
             remote_req_id = meta.remote_request_id
             prefill_tp_size: int = meta.remote_ptp_size if meta.remote_ptp_size is not None else self._prefill_tp_size
-            replicate_k_remote_port = self._get_sfa_replicate_k_remote_handshake_port(meta)
             (
                 local_block_ids_replicate_k,
                 remote_block_ids_replicate_k,
@@ -3351,20 +3331,11 @@ class MooncakeConnectorWorker:
                 local_block_ids_list,
                 remote_block_ids_list,
             ) = self._get_kv_split_metadata(remote_req_id, meta)
-            replicate_k_transfer_port = replicate_k_remote_port
             has_replicate_k_blocks = any(local_block_ids_replicate_k) and any(remote_block_ids_replicate_k)
-            if replicate_k_remote_port is not None and has_replicate_k_blocks:
-                remote_transfer_ports = [port for remote_ports in remote_handshake_port_list for port in remote_ports]
-                if replicate_k_remote_port not in remote_transfer_ports:
-                    replicate_k_transfer_port = remote_transfer_ports[0] if remote_transfer_ports else None
-                    if replicate_k_transfer_port is not None:
-                        logger.warning(
-                            "Mooncake SFA replicate-K remote port %s is not in normal KV transfer ports %s. "
-                            "Use existing remote port %s because K cache is replicated on P workers.",
-                            replicate_k_remote_port,
-                            remote_transfer_ports,
-                            replicate_k_transfer_port,
-                        )
+            remote_transfer_ports = [port for remote_ports in remote_handshake_port_list for port in remote_ports]
+            if has_replicate_k_blocks and not remote_transfer_ports:
+                raise AssertionError("SFA replicate-K requires at least one normal KV transfer port.")
+            replicate_k_transfer_port = remote_transfer_ports[0] if has_replicate_k_blocks else None
             group_pulls_list = self._get_group_pulls_metadata(
                 remote_req_id,
                 remote_handshake_port_list,
