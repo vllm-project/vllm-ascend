@@ -17,11 +17,12 @@
 #
 
 from typing import Any, cast
+
 import torch
 from vllm.config import VllmConfig, get_layers_from_vllm_config
-from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend
+from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
     DSparkSpeculator,
 )

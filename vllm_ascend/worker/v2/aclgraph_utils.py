@@ -20,6 +20,7 @@ from collections.abc import Callable
 from contextlib import contextmanager
 from typing import Any
 from contextlib import contextmanager
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -34,6 +35,7 @@ from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor, ModelCu
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.utils import AttentionGroup
+
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.compilation.acl_graph import set_graph_params, update_full_graph_params
 from vllm_ascend.worker.v2.utils import communicator_switch

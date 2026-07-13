@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 logger = logging.getLogger(__name__)
 
+
 class AscendDFlashSpeculator(DFlashSpeculator):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
@@ -100,11 +101,8 @@ class AscendDFlashSpeculator(DFlashSpeculator):
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         is_profile: bool = False,
     ) -> torch.Tensor:
-        num_reqs = input_batch.num_reqs if input_batch is not None else 0
-        logger.info("DFlash propose start: num_reqs=%s, dummy_run=%s, is_profile=%s",
-                     num_reqs, dummy_run, is_profile)
         with build_attn_metadata_wrapper():
-            result = super().propose(
+            return super().propose(
                 input_batch,
                 attn_metadata,
                 slot_mappings,
@@ -122,8 +120,6 @@ class AscendDFlashSpeculator(DFlashSpeculator):
                 mm_inputs,
                 is_profile=is_profile,
             )
-        logger.info("DFlash propose done: num_reqs=%s", num_reqs)
-        return result
 
 
 @triton.jit
