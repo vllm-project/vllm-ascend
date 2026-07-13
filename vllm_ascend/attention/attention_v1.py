@@ -49,10 +49,12 @@ from vllm_ascend.attention.kvcomp_attn.attention_utils import (
 )
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
+    PagedAttentionGraphParam,
     cache_graph_workspace,
     enable_cp,
     needs_layer_aware_fia_graph_replay,
     split_decodes_and_prefills,
+    update_paged_attention_graph_param,
     using_paged_attention,
 )
 from vllm_ascend.compilation.acl_graph import (
@@ -710,6 +712,26 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     handles,
                     events,
                 ):
+                    if isinstance(param, PagedAttentionGraphParam):
+                        if _EXTRA_CTX.is_draft_model:
+                            draft_step, key = draft_attn_key_steps[attn_count]
+                            block_table = attn_metadata[draft_step][key].block_tables
+                            seq_lens = attn_metadata[draft_step][key].seq_lens
+                            attn_count = attn_count + 1
+                        else:
+                            layer_name = param.layer_name
+                            metadata_key = layer_name if layer_name is not None and layer_name in attn_metadata else key
+                            block_table = attn_metadata[metadata_key].block_tables
+                            seq_lens = attn_metadata[metadata_key].seq_lens
+                        update_paged_attention_graph_param(
+                            update_stream,
+                            handle,
+                            event,
+                            param,
+                            block_table,
+                            seq_lens,
+                        )
+                        continue
                     (
                         query,
                         key_cache,
@@ -1137,16 +1159,19 @@ class AscendAttentionBackendImpl(AttentionImpl):
             event.reset(stream)
             graph_params.events[num_tokens].append(event)
             graph_params.attn_params[num_tokens].append(
-                (
-                    weak_ref_tensors(query),
-                    weak_ref_tensors(self.key_cache),
-                    weak_ref_tensors(self.value_cache),
-                    self.num_kv_heads,
-                    self.num_heads,
-                    self.scale,
-                    attn_metadata.block_tables,
-                    attn_metadata.seq_lens,
-                    weak_ref_tensors(output),
+                PagedAttentionGraphParam(
+                    (
+                        weak_ref_tensors(query),
+                        weak_ref_tensors(self.key_cache),
+                        weak_ref_tensors(self.value_cache),
+                        self.num_kv_heads,
+                        self.num_heads,
+                        self.scale,
+                        attn_metadata.block_tables,
+                        attn_metadata.seq_lens,
+                        weak_ref_tensors(output),
+                    ),
+                    self._graph_metadata_layer_name() if self._use_layer_aware_fia_graph_replay else None,
                 )
             )
 
@@ -1249,6 +1274,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 output[:num_tokens] = attn_output[:num_tokens]
                 return output
         passed_key = key
+        passed_value = value
         key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(
             key, value, attn_metadata, kv_cache
         )
@@ -1328,7 +1354,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     sparse_mode=4,
                 )
             else:
-                attn_output, _ = torch_npu.npu_fused_infer_attention_score(
+                attn_output, _ = DeviceOperator.npu_fused_infer_attention_score(
                     query=query,
                     key=key,
                     value=value,
@@ -1340,7 +1366,14 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     actual_seq_lengths_kv=actual_seq_lengths_kv,
                     num_key_value_heads=self.num_kv_heads,
                     num_heads=self.num_heads,
+                    head_size=self.head_size,
                     scale=self.scale,
+                    key_cache=self.key_cache,
+                    value_cache=self.value_cache,
+                    current_key=passed_key,
+                    current_value=passed_value,
+                    attn_metadata=attn_metadata,
+                    is_prefill_no_cache=attn_metadata.attn_state == AscendAttentionState.PrefillNoCache,
                     sparse_mode=3,
                 )
 
@@ -1454,10 +1487,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output: torch.Tensor,
     ):
         num_tokens = query.shape[0]
+
         if (
             attn_metadata.attn_state == AscendAttentionState.DecodeOnly
-            and using_paged_attention(num_tokens, self.vllm_config)
             and self.sliding_window is None
+            and using_paged_attention(num_tokens, self.vllm_config, self.head_size)
         ):
             output = self.forward_paged_attention(query, attn_metadata, output)
         else:

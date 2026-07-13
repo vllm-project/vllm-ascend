@@ -43,6 +43,7 @@ def test_mm_encoder_attention_310_forward_oot_with_padding():
     layer.head_size = 80
     layer.enable_pad = True
     layer.scale_value = layer.head_size**-0.5
+    layer.support_approximate_calculation = False
 
     bsz, q_len, kv_len = 2, 3, 3
     query = torch.randn(bsz, q_len, layer.num_heads, layer.head_size)
