@@ -68,13 +68,15 @@ class _GDNForwardWrapper(nn.Module):
         self.tp_size = 1
         self.head_v_dim = 2
         self.activation = None
-        self.A_log = torch.zeros(1)
-        self.dt_bias = torch.zeros(1)
+        self.register_buffer("A_log", torch.zeros(1))
+        self.register_buffer("dt_bias", torch.zeros(1))
+        self.register_buffer("conv_state", torch.zeros(1, 1, 2))
+        self.register_buffer("ssm_state", torch.zeros(1, 1, 2, 2))
         self.prefix = "layers.0.linear_attn"
-        self.kv_cache = (
-            torch.zeros(1, 1, 2),
-            torch.zeros(1, 1, 2, 2),
-        )
+
+    @property
+    def kv_cache(self):
+        return self.conv_state, self.ssm_state
 
     def rearrange_mixed_qkv(self, mixed_qkv: torch.Tensor | None):
         if mixed_qkv is None:
@@ -83,7 +85,7 @@ class _GDNForwardWrapper(nn.Module):
         return projected, projected, projected
 
 
-def _make_prefill_metadata() -> GDNAttentionMetadata:
+def _make_prefill_metadata(device: torch.device | str = "cpu") -> GDNAttentionMetadata:
     metadata = GDNAttentionMetadata(
         num_prefills=1,
         num_prefill_tokens=2,
@@ -92,16 +94,16 @@ def _make_prefill_metadata() -> GDNAttentionMetadata:
         num_spec_decodes=0,
         num_spec_decode_tokens=0,
         num_actual_tokens=2,
-        non_spec_state_indices_tensor=torch.tensor([0], dtype=torch.int32),
-        prefill_query_start_loc=torch.tensor([0, 2], dtype=torch.int32),
-        prefill_state_indices=torch.tensor([0], dtype=torch.int64),
-        prefill_has_initial_state=torch.tensor([True]),
+        non_spec_state_indices_tensor=torch.tensor([0], dtype=torch.int32, device=device),
+        prefill_query_start_loc=torch.tensor([0, 2], dtype=torch.int32, device=device),
+        prefill_state_indices=torch.tensor([0], dtype=torch.int64, device=device),
+        prefill_has_initial_state=torch.tensor([True], device=device),
     )
     metadata.non_spec_prefill_metadata = GDNPrefillMetadata(
         causal_conv1d=GDNCausalConv1dMetadata(
-            query_start_loc=torch.tensor([0, 2], dtype=torch.int32),
-            cache_indices=torch.tensor([0], dtype=torch.int32),
-            initial_state_mode=torch.tensor([1], dtype=torch.int32),
+            query_start_loc=torch.tensor([0, 2], dtype=torch.int32, device=device),
+            cache_indices=torch.tensor([0], dtype=torch.int32, device=device),
+            initial_state_mode=torch.tensor([1], dtype=torch.int32, device=device),
         ),
         chunk=Mock(),
     )
