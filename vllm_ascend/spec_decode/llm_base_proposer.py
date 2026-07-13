@@ -1100,7 +1100,30 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             return next_token + bias
         else:
             logits = self.model.compute_logits(hidden_states)
+            if getattr(self, "use_heterogeneous_vocab", False):
+                return self._sample_draft_token_ids(logits)
             return greedy_sample(logits)
+
+    def _sample_draft_token_ids(self, logits: torch.Tensor) -> torch.Tensor:
+        """TLI (vllm#38174) draft sampling for heterogeneous vocabularies.
+
+        Constrain draft logits to the target/draft vocab intersection, greedy
+        sample, then map the chosen draft-vocab id to its target-vocab id so
+        the verifier / rejection sampler sees target-space ids. Falls back to
+        plain argmax when heterogeneous vocab is disabled.
+        """
+        if getattr(self, "use_heterogeneous_vocab", False):
+            logits = self.vocab_mapping.constrain_draft_logits(logits)
+            draft_token_ids = logits.argmax(dim=-1)
+            return self.vocab_mapping.map_draft_to_target_ids(draft_token_ids)
+        return logits.argmax(dim=-1)
+
+    def _to_draft_vocab(self, ids: torch.Tensor) -> torch.Tensor:
+        """TLI: map target-vocab ids to draft-vocab space before feeding the
+        draft model. No-op when heterogeneous vocab is disabled."""
+        if getattr(self, "use_heterogeneous_vocab", False):
+            return self.vocab_mapping.map_target_to_draft_ids(ids)
+        return ids
 
     def _run_merged_draft(
         self,
@@ -1228,7 +1251,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         ori_token_indices_to_sample,
                         is_logits=True,
                     )
-                draft_token_ids = logits.argmax(dim=-1)
+                draft_token_ids = self._sample_draft_token_ids(logits)
         else:
             if self.method == "dspark":
                 # Dspark speculation requires autoregressive applications of MarkovHead and ConfidenceHead.
@@ -1254,7 +1277,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         ori_token_indices_to_sample,
                         is_logits=True,
                     )
-                draft_token_ids = logits.argmax(dim=-1)
+                draft_token_ids = self._sample_draft_token_ids(logits)
 
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1 or self.parallel_drafting:
@@ -1306,6 +1329,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             # cast to int32 is crucial when eagle model is compiled.
             # tensor.argmax() returns int64 by default.
             input_ids = draft_token_ids_tensor[draft_index]
+            # TLI: draft_token_ids_tensor holds target-vocab ids (mapped in
+            # _sample_draft_token_ids); map back to draft-vocab space before re-feeding
+            # the draft model.
+            input_ids = self._to_draft_vocab(input_ids)
             positions += 1
 
             # NOTE(woosuk): We should handle the case where the draft model
@@ -1398,13 +1425,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     if lmhead_tp_enable() and num_indices < logits.shape[0]:
                         logits = logits[:num_indices]
                         token_indices_to_sample = token_indices_to_sample[:num_indices]
-                    draft_token_ids = logits.argmax(dim=-1)
+                    draft_token_ids = self._sample_draft_token_ids(logits)
             else:
                 logits = self.model.compute_logits(sample_hidden_states)
                 if lmhead_tp_enable() and num_indices < logits.shape[0]:
                     logits = logits[:num_indices]
                     token_indices_to_sample = token_indices_to_sample[:num_indices]
-                draft_token_ids = logits.argmax(dim=-1)
+                draft_token_ids = self._sample_draft_token_ids(logits)
 
             # TODO(wenlong): get more than one token for tree attention
             hidden_states = hidden_states[:batch_size]
@@ -1436,12 +1463,16 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 token_indices_to_sample = cad.query_start_loc[1:] - 1
 
             num_tokens = target_token_ids.shape[0]
+            # TLI: the draft model consumes ids in draft-vocab space; map the
+            # target-vocab context/next tokens before filling the input buffer.
+            shifted_ids = self._to_draft_vocab(target_token_ids[1:])
+            mapped_next_token_ids = self._to_draft_vocab(next_token_ids)
             # Shift the input ids by one token.
             # E.g., [a1, b1, b2, c1, c2, c3] -> [b1, b2, c1, c2, c3, c3]
-            self.input_ids[: num_tokens - 1] = target_token_ids[1:]
+            self.input_ids[: num_tokens - 1] = shifted_ids
             # Replace the last token with the next token.
             # E.g., [b1, b2, c1, c2, c3, c3] -> [a2, b2, b3, c2, c3, c4]
-            self.input_ids[token_indices_to_sample] = next_token_ids
+            self.input_ids[token_indices_to_sample] = mapped_next_token_ids
 
             assert self.runner is not None
             # update pcp related params
