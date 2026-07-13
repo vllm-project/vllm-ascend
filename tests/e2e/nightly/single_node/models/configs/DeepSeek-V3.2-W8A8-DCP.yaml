@@ -65,7 +65,7 @@ test_cases:
       - "--compilation-config"
       - '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4, 16, 64, 128]}'
       - "--additional-config"
-      - '{"enable_dsa_cp": true, "ascend_compilation_config":{"enable_npugraph_ex": true, "enable_static_kernel": false}, "fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_mc2_hierarchy_comm": false, "enable_sparse_c8": true, "enable_cpu_binding": true, "recompute_scheduler_enable": false}'
+      - '{"enable_dsa_cp": true, "ascend_compilation_config":{"enable_npugraph_ex": true, "enable_static_kernel": false}, "multistream_overlap_shared_expert": true, "enable_mc2_hierarchy_comm": false, "enable_sparse_c8": true, "enable_cpu_binding": true, "recompute_scheduler_enable": false}'
       - "--speculative-config"
       - '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
     test_content: []
