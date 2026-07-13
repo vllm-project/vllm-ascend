@@ -167,7 +167,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
     --quantization ascend \
     --enable-chunked-prefill \
     --enable-prefix-caching \
-    --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true}' \
+    --additional-config '{"multistream_overlap_shared_expert": true}' \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}' 
     ```
@@ -202,7 +202,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
     --quantization ascend \
     --enable-chunked-prefill \
     --enable-prefix-caching \
-    --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true}' \
+    --additional-config '{"multistream_overlap_shared_expert": true}' \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}' 
     ```
@@ -241,7 +241,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
     --enable-chunked-prefill \
     --enable-prefix-caching \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true}' \
+    --additional-config '{"multistream_overlap_shared_expert": true}' \
     --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
     ```
 
@@ -398,7 +398,7 @@ Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
     --trust-remote-code \
     --gpu-memory-utilization 0.95 \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true}' \
+    --additional-config '{"multistream_overlap_shared_expert": true}' \
     --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
     ```
 
@@ -446,7 +446,7 @@ Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
     --trust-remote-code \
     --gpu-memory-utilization 0.95 \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true}' \
+    --additional-config '{"multistream_overlap_shared_expert": true}' \
     --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
     ```
 
@@ -557,7 +557,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
 --enable-chunked-prefill \
 --enable-prefix-caching \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true}' \
+--additional-config '{"multistream_overlap_shared_expert": true}' \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
 ```
 
@@ -608,7 +608,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
 --enable-chunked-prefill \
 --enable-prefix-caching \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true}' \
+--additional-config '{"multistream_overlap_shared_expert": true}' \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
 ```
 
@@ -772,7 +772,7 @@ Before you start, please
             --seed 1024 \
             --served-model-name glm-5 \
             --max-model-len 131072 \
-            --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true, "enable_dsa_cp": true}' \
+            --additional-config '{"multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true, "enable_dsa_cp": true}' \
             --max-num-batched-tokens 4096 \
             --trust-remote-code \
             --max-num-seqs 64 \
@@ -852,7 +852,7 @@ Before you start, please
             --seed 1024 \
             --served-model-name glm-5 \
             --max-model-len 131072 \
-            --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true, "enable_dsa_cp": true}' \
+            --additional-config '{"multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true, "enable_dsa_cp": true}' \
             --max-num-batched-tokens 4096 \
             --trust-remote-code \
             --max-num-seqs 64 \
@@ -936,7 +936,7 @@ Before you start, please
             --max-model-len 200000 \
             --max-num-batched-tokens 32 \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-            --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true}' \
+            --additional-config '{"multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true}' \
             --trust-remote-code \
             --max-num-seqs 8 \
             --gpu-memory-utilization 0.92 \
@@ -1016,7 +1016,7 @@ Before you start, please
              --max-model-len 200000 \
              --max-num-batched-tokens 32 \
              --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-             --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true}' \
+             --additional-config '{"multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true}' \
              --trust-remote-code \
              --max-num-seqs 8 \
              --gpu-memory-utilization 0.92 \
@@ -1096,7 +1096,7 @@ Before you start, please
              --max-model-len 200000 \
              --max-num-batched-tokens 32 \
              --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-             --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true}' \
+             --additional-config '{"multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true}' \
              --trust-remote-code \
              --max-num-seqs 8 \
              --gpu-memory-utilization 0.92 \
@@ -1176,7 +1176,7 @@ Before you start, please
              --max-model-len 200000 \
              --max-num-batched-tokens 32 \
              --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-             --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true}' \
+             --additional-config '{"multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true}' \
              --trust-remote-code \
              --max-num-seqs 8 \
              --gpu-memory-utilization 0.92 \
