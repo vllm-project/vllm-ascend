@@ -631,8 +631,16 @@ class AscendSFAImpl(MLAAttentionImpl):
                 self.qk_rope_head_dim,
                 self.sfa_qsfa_tile_size,
             )
-        # PD decode consumers with sparse C8 use mla_prolog_v3 to write the packed KV cache.
-        self.enable_sfa_prolog_v3 = self.is_kv_consumer and self.use_sparse_c8_sfa
+        # PD decode consumers with sparse C8 can use mla_prolog_v3 to write the packed KV cache.
+        # TODO: Re-enable after the community CANN baseline upgrades from 9.0 to 9.1.
+        # npu_mla_prolog_v3 depends on CANN 9.1 and is not available in the current community CANN 9.0.
+        sfa_prolog_v3_supported = False
+        self.enable_sfa_prolog_v3 = (
+            sfa_prolog_v3_supported
+            and self.is_kv_consumer
+            and self.use_sparse_c8_sfa
+            and get_ascend_device_type() != AscendDeviceType.A5
+        )
         self.enable_mlapo = ascend_config.enable_mlapo and not (
             self.enable_sfa_prolog_v3 or (self.use_sparse_c8_sfa and get_ascend_device_type() != AscendDeviceType.A5)
         )
