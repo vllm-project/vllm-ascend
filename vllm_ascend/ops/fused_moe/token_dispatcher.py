@@ -61,10 +61,6 @@ def _get_expert_token_nums_type(token_dispatch_input: MoETokenDispatchInput) -> 
     return EXPERT_TOKEN_NUMS_TYPE_CUMSUM
 
 
-def _is_mxfp4_quant_type(quant_type: QuantType) -> bool:
-    return getattr(quant_type, "name", None) in {"W4A4MXFP"}
-
-
 class MoETokenDispatcher(ABC, Generic[TMoECombineMetadata]):
     def __init__(self, **kwargs) -> None:
         """
@@ -358,7 +354,7 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
     ):
         quant_type = token_dispatch_input.quant.quant_type
         dynamic_scale = token_dispatch_input.routing.pertoken_scale
-        unquantized_mxfp4_dispatch = _is_mxfp4_quant_type(quant_type) and dynamic_scale is None
+        unquantized_mxfp4_dispatch = quant_type == QuantType.W4A4MXFP and dynamic_scale is None
         # Without prepare-stage scales, MXFP4 stays unquantized in dispatch and
         # is quantized again inside the MLP path.
         with_quant = token_dispatch_input.quant.dispatch_with_quant and quant_type != QuantType.W8A8FP
@@ -378,7 +374,7 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
         # Fuse the first dynamic quant of moe_mlp into initrouting when
         # dispatch_with_quant is on but got a None dynamic_scale.
         if with_quant and dynamic_scale is None:
-            if _is_mxfp4_quant_type(quant_type):
+            if quant_type == QuantType.W4A4MXFP:
                 quant_mode = 9
             else:
                 quant_mode = 3 if is_mxfp else 1
