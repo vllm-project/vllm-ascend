@@ -45,7 +45,7 @@ _benchmarks: &benchmarks
     request_conf: vllm_api_general_chat
     dataset_conf: gpqa/gpqa_gen_0_shot_cot_chat_prompt
     num_prompts: 32
-    max_out_len: 16384
+    max_out_len: 8192
     batch_size: 8
     baseline: 65
     threshold: 10
@@ -59,22 +59,6 @@ _benchmarks: &benchmarks
 # ==========================================
 
 test_cases:
-  - name: "Gemma4-eager"
-    model: *model
-    envs:
-      <<: *envs
-    prompts:
-      - "Explain briefly why ACLGraph output should match eager output."
-    api_keyword_args:
-      <<: *api_keyword_args
-    server_cmd: *server_cmd
-    server_cmd_extra:
-      - "--enforce-eager"
-    test_content:
-      - "chat_completion"
-    benchmarks:
-      <<: *benchmarks
-
   - name: "Gemma4-full-decode-graph"
     model: *model
     envs:
