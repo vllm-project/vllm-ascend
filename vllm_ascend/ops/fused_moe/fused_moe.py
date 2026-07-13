@@ -37,7 +37,6 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
-from vllm_ascend.flash_common3_context import get_flash_common3_context, set_flash_common3_context
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts, zero_experts_compute
 from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl, FusedExpertsResult, setup_moe_comm_method
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
@@ -304,7 +303,6 @@ else:
 
     class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         moe_counter = -1
-        gate_stream: torch.npu.Stream | None = None
 
         def __init__(
             self,
@@ -377,13 +375,7 @@ else:
             self._shared_experts = shared_experts
             has_shared_experts = self._shared_experts is not None
 
-            self.shared_multistream_overlap_gate = ascend_config.multistream_overlap_gate and has_shared_experts
             self.enable_npugraph_ex_static_kernel = ascend_config.ascend_compilation_config.enable_static_kernel
-
-            # flashcommon3 gate stream
-            self.multistream_overlap_gate = ascend_config.multistream_overlap_gate
-            if self.multistream_overlap_gate and AscendMoERunner.gate_stream is None:
-                AscendMoERunner.gate_stream = torch.npu.Stream()
 
             vllm_config = get_current_vllm_config()
 
@@ -577,48 +569,6 @@ else:
             # TODO: The community only considers load balancing when DP > 1.
             # This approach may overlook some extreme scenarios.
             enable_force_load_balance = _EXTRA_CTX.in_profile_run
-            forward_context = get_forward_context()
-            if self.multistream_overlap_gate:
-                fc3_context = get_flash_common3_context()
-                assert fc3_context is not None
-                assert AscendMoERunner.gate_stream is not None
-                AscendMoERunner.gate_stream.wait_stream(torch.npu.current_stream())
-                with npu_stream_switch(AscendMoERunner.gate_stream, enabled=self.multistream_overlap_gate):
-                    # share_expert
-                    assert fc3_context.shared_experts is not None
-                    shared_out = fc3_context.shared_experts(hidden_states)
-                    # NOTE: This is exactly the opposite of `maybe_all_reduce_tensor_model_parallel`
-                    moe_comm_type = _EXTRA_CTX.moe_comm_type
-                    if (
-                        moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2, MoECommType.FUSED_MC2}
-                        and not shared_expert_dp_enabled()
-                    ):
-                        shared_out = tensor_model_parallel_all_reduce(shared_out)
-                    set_flash_common3_context(shared_out=shared_out)
-                    input_ids = getattr(get_forward_context(), "input_ids", None)
-
-                    topk_weights, topk_ids = select_experts(
-                        hidden_states=hidden_states,
-                        router_logits=router_logits,
-                        top_k=self.top_k,
-                        use_grouped_topk=self.use_grouped_topk,
-                        renormalize=self.renormalize,
-                        topk_group=self.topk_group,
-                        num_expert_group=self.num_expert_group,
-                        custom_routing_function=self.custom_routing_function,
-                        scoring_func=self.scoring_func,
-                        routed_scaling_factor=self._original_routed_scaling_factor,
-                        e_score_correction_bias=self.e_score_correction_bias,
-                        num_experts=self.moe_config.num_experts,
-                        input_ids=input_ids,
-                        tid2eid=self.tid2eid,
-                    )
-
-                    if isinstance(_EXTRA_CTX.moe_comm_method, AllGatherCommImpl):
-                        topk_weights = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(topk_weights, True, True)
-                        topk_ids = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(topk_ids, True, True)
-
-                    set_flash_common3_context(topk_weights=topk_weights, topk_ids=topk_ids)
 
             prepare_output = _EXTRA_CTX.moe_comm_method.prepare(
                 hidden_states=hidden_states,
@@ -632,11 +582,6 @@ else:
             mc2_mask = prepare_output.mc2_mask
             padded_hidden_states_shape = prepare_output.padded_hidden_states_shape
             pertoken_scale = prepare_output.pertoken_scale
-
-            # Make sure the default stream waits for the gate stream to finish.
-            if self.multistream_overlap_gate:
-                assert AscendMoERunner.gate_stream is not None
-                torch.npu.current_stream().wait_stream(AscendMoERunner.gate_stream)
 
             # Matrix multiply.
             # apply() expects a RoutedExperts-like layer for weight access
@@ -815,9 +760,6 @@ else:
         def shared_forward_impl(  # type: ignore[override]
             self, hidden_states: torch.Tensor, router_logits: torch.Tensor
         ):
-            if self.shared_multistream_overlap_gate:
-                set_flash_common3_context(shared_experts=self._shared_experts)
-
             if self.is_internal_router:
                 gate = self.gate
                 assert gate is not None
@@ -843,22 +785,17 @@ else:
             if self._shared_experts is None:
                 return routed_out
 
-            if self.shared_multistream_overlap_gate:
-                fc3_context = get_flash_common3_context()
-                assert fc3_context is not None
-                shared_out = fc3_context.shared_out
-            else:
-                shared_out = self._forward_shared_experts(
-                    hidden_states,
-                    FusedMoEEvents(
-                        after_routed_experts=after_routed_experts,
-                        before_routed_experts=before_routed_experts,
-                        before_dispatch=fused_moe_results.before_dispatch_evt,
-                        before_gmm2=fused_moe_results.before_gmm2_evt,
-                        before_combine=fused_moe_results.before_combine_evt,
-                        swiglu_limit=fused_moe_results.swiglu_limit,
-                    ),
-                )
+            shared_out = self._forward_shared_experts(
+                hidden_states,
+                FusedMoEEvents(
+                    after_routed_experts=after_routed_experts,
+                    before_routed_experts=before_routed_experts,
+                    before_dispatch=fused_moe_results.before_dispatch_evt,
+                    before_gmm2=fused_moe_results.before_gmm2_evt,
+                    before_combine=fused_moe_results.before_combine_evt,
+                    swiglu_limit=fused_moe_results.swiglu_limit,
+                ),
+            )
             return shared_out, routed_out
 
         def _forward_impl(
