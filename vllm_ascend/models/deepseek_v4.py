@@ -912,7 +912,6 @@ class DeepseekV2DecoderLayer(nn.Module):
         config: DeepseekV2Config | None = None,
         topk_indices_buffer: torch.Tensor | None = None,
         is_draft_layer: bool = False,
-        attn_cls: type[nn.Module] | None = None,
     ) -> None:
         super().__init__()
 
@@ -930,8 +929,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         self.layer_idx = layer_idx
         self.norm_eps = config.rms_norm_eps
 
-        if attn_cls is None:
-            attn_cls = DeepseekV4Attention
+        attn_cls = DeepseekV4Attention
 
         self.self_attn = attn_cls(
             vllm_config=vllm_config,

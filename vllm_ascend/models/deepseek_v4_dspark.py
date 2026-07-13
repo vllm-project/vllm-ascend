@@ -52,52 +52,6 @@ if not vllm_version_is("0.23.0"):
     from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_mapping
 
 
-def _make_deepseek_v4_expert_params_mapping(
-    model: nn.Module,
-    num_experts: int,
-    num_redundant_experts: int = 0,
-) -> list[tuple[str, str, int, str]]:
-    if vllm_version_is("0.23.0"):
-        return FusedMoE.make_expert_params_mapping(
-            model,
-            ckpt_gate_proj_name="gate_proj",
-            ckpt_down_proj_name="down_proj",
-            ckpt_up_proj_name="up_proj",
-            num_experts=num_experts,
-            num_redundant_experts=num_redundant_experts,
-        )
-    return fused_moe_make_expert_params_mapping(
-        model,
-        ckpt_gate_proj_name="gate_proj",
-        ckpt_down_proj_name="down_proj",
-        ckpt_up_proj_name="up_proj",
-        num_experts=num_experts,
-        num_redundant_experts=num_redundant_experts,
-    )
-
-
-def _hc_head_torch(
-    x: torch.Tensor,
-    hc_fn: torch.Tensor,
-    hc_scale: torch.Tensor,
-    hc_base: torch.Tensor,
-    norm_eps: float,
-    hc_eps: float,
-) -> torch.Tensor:
-    shape, dtype = x.size(), x.dtype
-    x_flat = x.flatten(1).float()
-    rsqrt = torch.rsqrt(x_flat.square().mean(-1, keepdim=True) + norm_eps)
-    mixes = F.linear(x_flat, hc_fn) * rsqrt
-    pre = torch.sigmoid(mixes * hc_scale + hc_base) + hc_eps
-    y = torch.sum(pre.unsqueeze(-1) * x_flat.view(shape), dim=1)
-    return y.to(dtype)
-
-
-def _linear_output(layer: nn.Module, x: torch.Tensor) -> torch.Tensor:
-    out = layer(x)
-    return out[0] if isinstance(out, tuple) else out
-
-
 def _apply_dsv4_rope(
     rotary_emb: nn.Module,
     positions: torch.Tensor,
@@ -127,138 +81,6 @@ def _get_dspark_num_mtp_layers(config: PretrainedConfig) -> int:
     if num_layers is None:
         num_layers = getattr(config, "dspark_num_mtp_layers", 3)
     return int(num_layers or 3)
-
-
-class DeepseekV4DSparkAttention(DeepseekV4Attention):
-    """DSpark sliding-window attention with an internal eager context cache.
-
-    The draft attention reuses the target model's DSA path
-    (``self.dsa_attn`` -> ``AscendDSAImpl._forward_decode``) and only diverges
-    via the per-layer dspark attention metadata (non-causal visible slot list,
-    a.k.a. ``dspark_swa_indices``) built by the DSA metadata builder. The
-    eager projection of the target's context KV (``precompute_context_kv``) is
-    the only DSpark-specific code that stays here.
-    """
-
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        # Draft layers are SWA-only (no compressor/indexer); pin both the
-        # module and the DSA wrapper so _build_kv_cache skips the compress path.
-        self.compress_ratio = 1
-        self.dsa_attn.compress_ratio = 1
-
-    def _project_shared_kv(
-        self,
-        hidden_states: torch.Tensor,
-        positions: torch.Tensor,
-    ) -> torch.Tensor:
-        kv = self.kv_norm(_linear_output(self.wkv, hidden_states))
-        k_nope, k_pe = kv.split([self.nope_head_dim, self.rope_head_dim], dim=-1)
-        k_pe = _apply_dsv4_rope(self.rotary_emb, positions, k_pe.unsqueeze(1)).squeeze(1)
-        return torch.cat([k_nope, k_pe], dim=-1).view(-1, 1, self.head_dim).contiguous()
-
-    def _store_standard_swa_kv(
-        self,
-        shared_kv: torch.Tensor,
-        slot_mapping: torch.Tensor | None,
-    ) -> None:
-        if slot_mapping is None or slot_mapping.numel() == 0:
-            return
-
-        swa_cache_layer = self.dsa_attn.swa_cache_layer
-        swa_kv_cache = getattr(swa_cache_layer, "kv_cache", None)
-        if swa_kv_cache is None:
-            return
-        while isinstance(swa_kv_cache, (list, tuple)) and len(swa_kv_cache) == 1:
-            swa_kv_cache = swa_kv_cache[0]
-
-        from vllm_ascend.device.device_op import DeviceOperator
-
-        slot_mapping = slot_mapping.to(device=shared_kv.device, dtype=torch.int32)
-        valid = slot_mapping >= 0 if slot_mapping.ndim == 1 else torch.all(slot_mapping >= 0, dim=-1)
-        if not bool(torch.any(valid).item()):
-            return
-        if not bool(torch.all(valid).item()):
-            shared_kv = shared_kv[valid]
-            slot_mapping = slot_mapping[valid]
-        if slot_mapping.ndim == 1:
-            slot_mapping = DeviceOperator.format_dsa_slot_mapping(slot_mapping, swa_cache_layer.block_size)
-        DeviceOperator.dsa_kv_compress_scatter(swa_kv_cache, shared_kv, slot_mapping)
-
-    def precompute_context_kv(
-        self,
-        main_x: torch.Tensor,
-        positions: torch.Tensor,
-        context_slot_mapping: torch.Tensor | None = None,
-    ) -> None:
-        if positions.numel() == 0:
-            return
-        shared_kv = self._project_shared_kv(main_x, positions)
-        self._store_standard_swa_kv(shared_kv, context_slot_mapping)
-
-    def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor:
-        # Reuse the target model's DSA attention path. The per-layer dspark
-        # attention metadata (block_table / query_start_loc / seq_lens /
-        # token_to_req_indices / dspark_swa_indices) is resolved by the DSA
-        # backend from the forward context (keyed by swa_cache_layer.prefix),
-        # so forward() takes no attention kwargs -- matching
-        # DeepseekV4Attention.forward.
-        return self.dsa_attn(positions, hidden_states)
-
-
-class DeepseekV4DSparkDecoderLayer(DeepseekV2DecoderLayer):
-    def __init__(self, vllm_config: VllmConfig, prefix: str) -> None:
-        assert vllm_config.speculative_config is not None
-        config = vllm_config.speculative_config.draft_model_config.hf_config
-        super().__init__(
-            vllm_config=vllm_config,
-            prefix=prefix,
-            config=config,
-            topk_indices_buffer=None,
-            is_draft_layer=True,
-            attn_cls=DeepseekV4DSparkAttention,
-        )
-    def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
-        residual: torch.Tensor | None = None,
-        post_mix: torch.Tensor | None = None,
-        res_mix: torch.Tensor | None = None,
-        input_ids: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        # MHC pre/post reuse the upstream NPU fused ops ``npu_hc_pre_v2`` /
-        # ``npu_hc_post`` inherited from DeepseekV2DecoderLayer instead of the
-        # torch reference. The torch reference fused the previous step's post
-        # with the current step's pre into one call; here they are two NPU ops,
-        # numerically equivalent at the bf16 ulp level (the NPU op hardcodes the
-        # post alpha of 2.0; equivalence was verified against a torch reference
-        # before that reference was removed).
-        if residual is None:
-            residual = hidden_states
-            hidden_states, post_mix, res_mix = self.hc_pre(
-                hidden_states, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base
-            )
-        else:
-            assert post_mix is not None and res_mix is not None
-            residual = self.hc_post(hidden_states, residual, post_mix, res_mix)
-            hidden_states, post_mix, res_mix = self.hc_pre(
-                residual, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base
-            )
-        hidden_states = self.input_layernorm(hidden_states)
-        hidden_states = self.self_attn(positions, hidden_states)
-
-        residual = self.hc_post(hidden_states, residual, post_mix, res_mix)
-        hidden_states, post_mix, res_mix = self.hc_pre(
-            residual, self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base
-        )
-        hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states, input_ids)
-        return hidden_states, residual, post_mix, res_mix
 
 
 class DSparkMarkovHead(nn.Module):
@@ -305,9 +127,10 @@ class DeepseekV4DSparkModel(nn.Module):
         )
         self.layers = nn.ModuleDict(
             {
-                str(self.mtp_start_layer_idx + idx): DeepseekV4DSparkDecoderLayer(
+                str(self.mtp_start_layer_idx + idx): DeepseekV2DecoderLayer(
                     vllm_config,
                     prefix=f"mtp.{idx}",
+                    is_draft_layer=True,
                 )
                 for idx in range(self.num_dspark_layers)
             }
@@ -352,11 +175,54 @@ class DeepseekV4DSparkModel(nn.Module):
         last_layer.hc_head_base = self.hc_head_base
         last_layer.hc_head_scale = self.hc_head_scale
 
+        self.norm_eps = config.rms_norm_eps
+        self.hc_eps = config.hc_eps
+
     def get_draft_kv_cache_layer_names(self) -> list[str]:
         return [layer.self_attn.dsa_attn.swa_cache_layer.prefix for layer in self.layers.values()]
 
     def combine_hidden_states(self, aux_hidden_states: torch.Tensor) -> torch.Tensor:
-        return self.main_norm(_linear_output(self.main_proj, aux_hidden_states))
+        return self.main_norm(self.main_proj(aux_hidden_states))
+
+    def _project_shared_kv(
+        self,
+        hidden_states: torch.Tensor,
+        positions: torch.Tensor,
+        attn: type[nn.Module] | None = None,
+    ) -> torch.Tensor:
+        kv = attn.kv_norm(attn.wkv(hidden_states))
+        k_nope, k_pe = kv.split([attn.nope_head_dim, attn.rope_head_dim], dim=-1)
+        k_pe = _apply_dsv4_rope(attn.rotary_emb, positions, k_pe.unsqueeze(1)).squeeze(1)
+        return torch.cat([k_nope, k_pe], dim=-1).view(-1, 1, attn.head_dim).contiguous()
+
+    def _store_standard_swa_kv(
+        self,
+        shared_kv: torch.Tensor,
+        slot_mapping: torch.Tensor | None,
+        attn: type[nn.Module] | None = None,
+    ) -> None:
+        if slot_mapping is None or slot_mapping.numel() == 0:
+            return
+
+        swa_cache_layer = attn.dsa_attn.swa_cache_layer
+        swa_kv_cache = getattr(swa_cache_layer, "kv_cache", None)
+        if swa_kv_cache is None:
+            return
+        while isinstance(swa_kv_cache, (list, tuple)) and len(swa_kv_cache) == 1:
+            swa_kv_cache = swa_kv_cache[0]
+
+        from vllm_ascend.device.device_op import DeviceOperator
+
+        slot_mapping = slot_mapping.to(device=shared_kv.device, dtype=torch.int32)
+        valid = slot_mapping >= 0 if slot_mapping.ndim == 1 else torch.all(slot_mapping >= 0, dim=-1)
+        if not bool(torch.any(valid).item()):
+            return
+        if not bool(torch.all(valid).item()):
+            shared_kv = shared_kv[valid]
+            slot_mapping = slot_mapping[valid]
+        if slot_mapping.ndim == 1:
+            slot_mapping = DeviceOperator.format_dsa_slot_mapping(slot_mapping, swa_cache_layer.block_size)
+        DeviceOperator.dsa_kv_compress_scatter(swa_kv_cache, shared_kv, slot_mapping)
 
     def precompute_and_store_context_kv(
         self,
@@ -368,11 +234,11 @@ class DeepseekV4DSparkModel(nn.Module):
             return
         for layer_idx, layer in enumerate(self.layers.values()):
             layer_context_slot_mapping = None if context_slot_mapping is None else context_slot_mapping[layer_idx]
-            layer.self_attn.precompute_context_kv(
-                context_states,
-                context_positions,
-                context_slot_mapping=layer_context_slot_mapping,
-            )
+            if context_positions.numel() == 0:
+                return
+            attn = layer.self_attn
+            shared_kv = self._project_shared_kv(context_states, context_positions, attn)
+            self._store_standard_swa_kv(shared_kv, layer_context_slot_mapping, attn)
 
     def forward(
         self,
@@ -380,41 +246,20 @@ class DeepseekV4DSparkModel(nn.Module):
         positions: torch.Tensor,
     ) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids).unsqueeze(-2).repeat(1, self.hc_mult, 1)
-        residual = post_mix = res_mix = None
+        residual = None
         for layer in self.layers.values():
-            hidden_states, residual, post_mix, res_mix = layer(
-                positions=positions,
-                hidden_states=hidden_states,
-                residual=residual,
-                post_mix=post_mix,
-                res_mix=res_mix,
-                input_ids=input_ids,
-            )
-        head_hidden = self.compute_head_hidden(hidden_states, residual, post_mix, res_mix)
+            hidden_states, residual = layer(positions, hidden_states, residual, llama_4_scaling=None)
+        head_hidden = self.hc_head(hidden_states, self.hc_head_fn, self.hc_head_scale, self.hc_head_base)
         return head_hidden
 
-    def compute_head_hidden(
-        self,
-        hidden_states: torch.Tensor,
-        residual: torch.Tensor | None = None,
-        post_mix: torch.Tensor | None = None,
-        res_mix: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        if residual is not None and post_mix is not None and res_mix is not None:
-            # Final MHC post of the last decoder layer's output, reusing the
-            # inherited hc_post (DeepseekV2DecoderLayer.hc_post -> npu_hc_post).
-            last_layer = self.layers[str(self.mtp_start_layer_idx + self.num_dspark_layers - 1)]
-            hidden_states = last_layer.hc_post(hidden_states, residual, post_mix, res_mix)
-        if hidden_states.dim() == 2:
-            return hidden_states
-        return _hc_head_torch(
-            hidden_states,
-            self.hc_head_fn,
-            self.hc_head_scale,
-            self.hc_head_base,
-            self.config.rms_norm_eps,
-            self.config.hc_eps,
-        )
+    def hc_head(self, x: torch.Tensor, hc_fn: torch.Tensor, hc_scale: torch.Tensor, hc_base: torch.Tensor):
+        shape, dtype = x.size(), x.dtype
+        x = x.flatten(1).float()
+        rsqrt = torch.rsqrt(x.square().mean(-1, keepdim=True) + self.norm_eps)
+        mixes = torch.nn.functional.linear(x, hc_fn) * rsqrt
+        pre = torch.sigmoid(mixes * hc_scale + hc_base) + self.hc_eps
+        y = torch.sum(pre.unsqueeze(-1) * x.view(shape), dim=1)
+        return y.to(dtype)
 
     def markov_embed(self, token_ids: torch.Tensor) -> torch.Tensor:
         return self.markov_head.embed(token_ids)
@@ -428,13 +273,25 @@ class DeepseekV4DSparkModel(nn.Module):
         lm_head: ParallelLMHead,
         logits_processor: LogitsProcessor,
     ) -> torch.Tensor:
-        head_hidden = self.compute_head_hidden(hidden_states)
-        return logits_processor(lm_head, self.norm(head_hidden))
+        return logits_processor(lm_head, self.norm(hidden_states))
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-        return _make_deepseek_v4_expert_params_mapping(
+        if vllm_version_is("0.23.0"):
+            return FusedMoE.make_expert_params_mapping(
+                self,
+                ckpt_gate_proj_name="gate_proj",
+                ckpt_down_proj_name="down_proj",
+                ckpt_up_proj_name="up_proj",
+                num_experts=self.config.n_routed_experts,
+                num_redundant_experts=0,
+            )
+        return fused_moe_make_expert_params_mapping(
             self,
+            ckpt_gate_proj_name="gate_proj",
+            ckpt_down_proj_name="down_proj",
+            ckpt_up_proj_name="up_proj",
             num_experts=self.config.n_routed_experts,
+            num_redundant_experts=0,
         )
 
     def finalize_mega_moe_weights(self) -> None:
