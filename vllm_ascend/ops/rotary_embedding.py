@@ -283,6 +283,7 @@ class AscendYaRNRotaryEmbedding(YaRNScalingRotaryEmbedding):
         vllm_config = get_current_vllm_config()
         self.use_mtp = vllm_config.speculative_config and vllm_config.speculative_config.method == "mtp"
         _record_cos_sin_cache(self.cos_sin_cache)
+        _record_cos_and_sin_cache_interleaved(self.cos_sin_cache)
 
     def forward_oot(
         self,

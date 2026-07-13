@@ -66,6 +66,7 @@ class MoEFusedExpertsInput:
     routing: MoERoutingParams
     quant: MoEQuantParams
     activation: str = "silu"
+    gemm1_clamp_limit: float | None = None
     need_trans: bool = False
     dynamic_eplb: bool = False
     swiglu_limit: int = 0
@@ -138,6 +139,7 @@ class MoEMlpComputeInput:
     quant: MoEQuantParams
     fusion: bool
     activation: str = "silu"
+    gemm1_clamp_limit: float | None = None
     need_trans: bool = False
     dynamic_eplb: bool = False
     swiglu_limit: int = 0

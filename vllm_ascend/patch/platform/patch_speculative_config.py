@@ -95,6 +95,17 @@ def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
         n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
         hf_config.update({"n_predict": n_predict, "architectures": ["Qwen3NextMTP"]})
 
+    if initial_architecture == "BailingMoeV3ForCausalLM":
+        hf_config.model_type = "bailing_hybrid_v3_mtp"
+    if hf_config.model_type == "bailing_hybrid_v3_mtp":
+        n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+        hf_config.update(
+            {
+                "n_predict": n_predict,
+                "architectures": ["BailingMoeV3MTPModel"],
+            }
+        )
+
     if hf_config.model_type == "exaone_moe":
         hf_config.model_type = "exaone_moe_mtp"
     if hf_config.model_type == "exaone_moe_mtp":

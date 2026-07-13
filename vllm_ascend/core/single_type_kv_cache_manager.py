@@ -123,7 +123,7 @@ class CompressAttentionManager(FullAttentionManager):
                 cdiv(num_total_computed_tokens, self.block_size) - len(req_blocks)
             )
             req_blocks.extend(allocated_blocks)
-            if type(self.kv_cache_spec) is FullAttentionSpec:
+            if isinstance(self.kv_cache_spec, (FullAttentionSpec, MLAAttentionSpec)):
                 self.new_block_ids.extend(b.block_id for b in allocated_blocks)
 
     def allocate_new_blocks(self, request_id: str, num_tokens: int, num_tokens_main_model: int) -> list[KVCacheBlock]:
@@ -151,6 +151,8 @@ class CompressAttentionManager(FullAttentionManager):
         else:
             new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
             req_blocks.extend(new_blocks)
+            if isinstance(self.kv_cache_spec, (FullAttentionSpec, MLAAttentionSpec)):
+                self.new_block_ids.extend(b.block_id for b in new_blocks)
             return new_blocks
 
     def cache_blocks(self, request: Request, num_tokens: int) -> None:
