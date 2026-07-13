@@ -429,6 +429,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         metadata = self.attn_metadata
         metadata.attn_state = AscendAttentionState.DecodeOnly
         metadata.seq_lens = torch.tensor([4])
+        metadata.actual_seq_lengths_q = [4]
         metadata.block_tables = torch.zeros(1, 5, dtype=torch.long)
         metadata.num_actual_tokens = 4
         metadata.slot_mapping = torch.zeros(4, dtype=torch.long)
