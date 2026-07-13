@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, cast
 import logging
+from typing import Any, cast
+
 import torch
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.compilation import CUDAGraphMode
@@ -16,22 +17,13 @@ from vllm.v1.worker.gpu.spec_decode.dflash.speculator import (
 )
 
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
-from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
 
 logger = logging.getLogger(__name__)
+
 
 class AscendDFlashSpeculator(DFlashSpeculator):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
-
-        del self.input_buffers
-        # AscendInputBuffers has extra `seq_lens_cpu` attribute.
-        # so reinitialize input_buffers here.
-        self.input_buffers: AscendInputBuffers = AscendInputBuffers(
-            max_num_reqs=self.max_num_reqs,
-            max_num_tokens=self.max_num_tokens,
-            device=device,
-        )
 
         # we need to update full graph params in run_fullgraph,
         # so create a stream to update full graph params.
@@ -86,7 +78,7 @@ class AscendDFlashSpeculator(DFlashSpeculator):
                 attn_backends[layer_name] = attn_layers[layer_name].get_attn_backend()
 
         self.attn_backends = attn_backends
-    
+
     def build_draft_attn_metadatas(self, num_reqs_padded, is_draft_model_prefill):
         num_tokens_padded = num_reqs_padded * self.num_query_per_req
         with build_attn_metadata_wrapper():
@@ -117,11 +109,8 @@ class AscendDFlashSpeculator(DFlashSpeculator):
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         is_profile: bool = False,
     ) -> torch.Tensor:
-        num_reqs = input_batch.num_reqs if input_batch is not None else 0
-        logger.info("DFlash propose start: num_reqs=%s, dummy_run=%s, is_profile=%s",
-                     num_reqs, dummy_run, is_profile)
         with build_attn_metadata_wrapper():
-            result = super().propose(
+            return super().propose(
                 input_batch,
                 attn_metadata,
                 slot_mappings,
@@ -139,8 +128,6 @@ class AscendDFlashSpeculator(DFlashSpeculator):
                 mm_inputs,
                 is_profile=is_profile,
             )
-        logger.info("DFlash propose done: num_reqs=%s", num_reqs)
-        return result
 
 
 @triton.jit

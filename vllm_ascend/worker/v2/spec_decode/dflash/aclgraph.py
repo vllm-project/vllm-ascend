@@ -1,26 +1,28 @@
+from collections.abc import Callable
 from typing import Any
+
 import torch
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
-from vllm.v1.worker.gpu.spec_decode.dflash.cudagraph import DFlashCudaGraphManager
-from collections.abc import Callable
-from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
-from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.utils import AttentionGroup
+from vllm.forward_context import get_forward_context, set_forward_context
+from vllm.logger import logger
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm_ascend.worker.v2.utils import communicator_switch
-from vllm_ascend.worker.v2.aclgraph_utils import model_capture_wrapper
+from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import (  # type: ignore[import-not-found]
     BatchExecutionDescriptor,
 )
-from vllm.forward_context import get_forward_context, set_forward_context
-from vllm.logger import logger
+from vllm.v1.worker.gpu.input_batch import InputBuffers
+from vllm.v1.worker.gpu.spec_decode.dflash.cudagraph import DFlashCudaGraphManager
+from vllm.v1.worker.utils import AttentionGroup
+
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.compilation.acl_graph import (
-    set_draft_graph_params,
     set_draft_graph_prefill_params,
-    update_full_graph_params
+    update_full_graph_params,
 )
+from vllm_ascend.worker.v2.aclgraph_utils import model_capture_wrapper
+from vllm_ascend.worker.v2.utils import communicator_switch
+
 
 class DFlashAclGraphManager(DFlashCudaGraphManager):
     def __init__(
@@ -30,7 +32,7 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         cudagraph_mode: CUDAGraphMode,
         decode_query_len: int,
         speculator: Any,
-        causal: bool = False
+        causal: bool = False,
     ):
         super().__init__(vllm_config, device, cudagraph_mode, decode_query_len, causal)
 
@@ -40,10 +42,6 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         self.speculator = speculator
         # capture_sizes sorts in ascending order.
         self.capture_sizes = sorted(self.compilation_config.cudagraph_capture_sizes)
-        # vllm-ascend need to update draft graph params of attention backend.
-        # so we need to set draft graph params before capture full graph.
-        # `prefill` graph and `decodes` graph are different, `decode_query_len` can be used to distinguish them
-        self.is_draft_model_prefill = decode_query_len > 1
         if super().needs_capture():
             set_draft_graph_prefill_params(self.capture_sizes)
 
@@ -60,15 +58,9 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         """Capture ACL graphs for Eagle."""
         with communicator_switch(), model_capture_wrapper(self.speculator, True):
             super().capture(
-                forward_fn,
-                input_buffers,
-                block_tables,
-                attn_groups,
-                kv_cache_config,
-                max_model_len,
-                progress_bar_desc
+                forward_fn, input_buffers, block_tables, attn_groups, kv_cache_config, max_model_len, progress_bar_desc
             )
-        
+
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """Override run_fullgraph to update full graph params in run_fullgraph."""
         num_tokens = desc.num_tokens
@@ -83,7 +75,7 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         # refer to vllm.v1.worker.gpu.dp_utils.sync_cudagraph_and_dp_padding to
         # calculate num_tokens_across_dp.
         num_tokens_across_dp = torch.full([self.speculator.dp_size], num_tokens, device=self.device)
-        
+
         with set_forward_context(
             self.speculator.model_state.attn_metadata,
             self.vllm_config,
@@ -100,8 +92,7 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
             _EXTRA_CTX.is_draft_model_prefill = True
 
             forward_context = get_forward_context()
-            
-            # 这块代码含义
+
             update_full_graph_params(
                 # FIXME(Ronald1995): support hybrid attn backend
                 list(self.speculator.attn_backends.values())[0],

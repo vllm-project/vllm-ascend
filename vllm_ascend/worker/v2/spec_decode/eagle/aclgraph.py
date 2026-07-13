@@ -25,9 +25,9 @@ from vllm_ascend.compilation.acl_graph import (
     set_draft_graph_prefill_params,
     update_full_graph_params,
 )
-from vllm_ascend.worker.v2.aclgraph_utils import ModelWithContext
-from vllm_ascend.worker.v2.utils import communicator_switch
 from vllm_ascend.worker.v2.aclgraph_utils import model_capture_wrapper
+from vllm_ascend.worker.v2.utils import communicator_switch
+
 
 class PrefillEagleAclGraphManager(PrefillSpeculatorCudaGraphManager):
     """AclGraphManager for Eagle speculative decoding."""
@@ -232,6 +232,3 @@ class DecodeEagleAclGraphManager(DecodeSpeculatorCudaGraphManager):
                 draft_attn_metadatas=draft_attn_metadatas,
             )
         return ret
-
-
-
