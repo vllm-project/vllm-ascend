@@ -19,6 +19,8 @@
 import torch
 from vllm.config import VllmConfig
 
+from vllm_ascend.utils import vllm_version_is
+
 
 def init_speculator(
     vllm_config: VllmConfig,
@@ -29,7 +31,7 @@ def init_speculator(
     """
     speculative_config = vllm_config.speculative_config
     assert speculative_config is not None
-    if speculative_config.use_dspark():
+    if not (vllm_version_is("0.23.0") or vllm_version_is("0.24.0")) and speculative_config.use_dspark():
         from vllm_ascend.worker.v2.spec_decode.dspark.speculator import (
             AscendDSparkSpeculator,
         )
