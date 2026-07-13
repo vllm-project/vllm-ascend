@@ -124,7 +124,37 @@ def _patch_nvlm_multimodal_encode():
     VLLM_VLM.tok_batch_multimodal_encode = patched_tok_batch_multimodal_encode
 
 
+def _patch_nvlm_hf_prompt_update():
+    from vllm.model_executor.models.nvlm_d import NVLMMultiModalProcessor
+    from vllm.multimodal.processing.processor import BaseMultiModalProcessor
+
+    original_apply_hf_processor_main = BaseMultiModalProcessor._apply_hf_processor_main
+
+    def patched_apply_hf_processor_main(
+        self,
+        prompt,
+        mm_items,
+        hf_processor_mm_kwargs,
+        tokenization_kwargs,
+        *,
+        enable_hf_prompt_update,
+    ):
+        if isinstance(self, NVLMMultiModalProcessor):
+            enable_hf_prompt_update = False
+        return original_apply_hf_processor_main(
+            self,
+            prompt,
+            mm_items,
+            hf_processor_mm_kwargs,
+            tokenization_kwargs,
+            enable_hf_prompt_update=enable_hf_prompt_update,
+        )
+
+    BaseMultiModalProcessor._apply_hf_processor_main = patched_apply_hf_processor_main
+
+
 def pytest_configure(config):
     _patch_nvlm_config()
     _patch_nvlm_chat_template()
     _patch_nvlm_multimodal_encode()
+    _patch_nvlm_hf_prompt_update()
