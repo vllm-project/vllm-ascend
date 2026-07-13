@@ -550,12 +550,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 # stored layer name in each op param to resolve the exact
                 # metadata entry during replay.
                 attn_keys = [attn_keys[index % num_layers] for index in range(graph_param_count)]
-            # TODO: The sink FIA path lacks the type-filter and the
-            # ``graph_param_count % num_layers == 0`` block-wise replication added
-            # to the non-sink ``else`` branch below. A model that has learnable
-            # sinks and also enables LoRA specialization would hit the same
-            # stale-metadata bug; mirror those two fixes here if that combination
-            # is supported.
             attn_count = 0
             with torch.npu.stream(update_stream):
                 for key, param, handle, event in zip(
