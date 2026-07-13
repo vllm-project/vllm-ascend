@@ -236,7 +236,8 @@ class AscendDSparkProposer(AscendDflashProposer):
         num_prefill_reqs=0,
         num_decode_reqs=0,
     ) -> tuple[int, torch.Tensor, CommonAttentionMetadata, tuple[Any, Any] | None]:
-        del target_token_ids, token_indices_to_sample, req_scheduled_tokens, long_seq_metadata, num_prefill_reqs, num_decode_reqs
+        del target_token_ids, token_indices_to_sample, req_scheduled_tokens, long_seq_metadata
+        is_prefill = (num_decode_reqs == 0 and num_prefill_reqs > 0)
         batch_size = cad.num_reqs
         block_size = self.num_speculative_tokens
         num_query_total = batch_size * block_size
@@ -264,6 +265,8 @@ class AscendDSparkProposer(AscendDflashProposer):
                 self._context_slot_mapping_buffer[context_cursor:out_end] = cad.slot_mapping[ctx_start:valid_ctx_end]
             context_cursor = out_end
         self._dflash_num_context = context_cursor
+        if is_prefill:
+            return num_query_total, token_indices_to_sample, cad, None
         token_indices_to_sample = torch.arange(num_query_total, dtype=torch.int32, device=self.device)
         model_config = getattr(getattr(self, "vllm_config", None), "model_config", None)
         max_model_len = int(getattr(model_config, "max_model_len", 0) or 0)
@@ -452,6 +455,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         num_rejected_tokens_gpu: torch.Tensor | None = None,
     ) -> torch.Tensor:
         del target_model_batch_desc, mm_embed_inputs, scheduler_output, num_scheduled_tokens
+        is_prefill = (num_decode_reqs == 0 and num_prefill_reqs > 0)
         num_tokens, token_indices_to_sample, _, _ = self.set_inputs_first_pass(
             target_token_ids,
             next_token_ids,
@@ -481,15 +485,26 @@ class AscendDSparkProposer(AscendDflashProposer):
             forward_context = get_forward_context()
             if forward_context is not None:
                 forward_context.moe_layer_index = 0
-            model_inputs = self.build_model_inputs_first_pass(num_input_tokens)
-            hidden_states = self.model(**model_inputs)
-            draft_token_ids = self._sample_sequential(
-                common_attn_metadata.num_reqs,
-                hidden_states,
-                token_indices_to_sample,
-                sampling_metadata,
-            )
-            forward_context = get_forward_context()
-            if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and not _EXTRA_CTX.capturing:
-                self._update_full_graph_params(forward_context, num_tokens, [])
-        return draft_token_ids
+            if is_prefill:
+                self.model.precompute_and_store_context_kv(
+                    self._dflash_hidden_states[:self._dflash_num_context],
+                    self._context_positions_buffer[:self._dflash_num_context],
+                    self._context_slot_mapping_buffer[:self._dflash_num_context],
+                    self._context_request_slots_buffer[:self._dflash_num_context],
+                )
+                return common_attn_metadata.num_reqs.new_zeros(
+                    common_attn_metadata.num_reqs, 0, dtype=torch.long
+                )
+            else:
+                model_inputs = self.build_model_inputs_first_pass(num_input_tokens)
+                hidden_states = self.model(**model_inputs)
+                draft_token_ids = self._sample_sequential(
+                    common_attn_metadata.num_reqs,
+                    hidden_states,
+                    token_indices_to_sample,
+                    sampling_metadata,
+                )
+                forward_context = get_forward_context()
+                if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and not _EXTRA_CTX.capturing:
+                    self._update_full_graph_params(forward_context, num_tokens, [])
+                return draft_token_ids

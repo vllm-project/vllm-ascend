@@ -1928,6 +1928,8 @@ class NPUModelRunner(GPUModelRunner):
         draft_token_ids: torch.Tensor = self._draft_token_ids  # type: ignore[has-type]
         if not torch.is_tensor(draft_token_ids):
             return
+        if draft_token_ids.numel() == 0:
+            return
         assert self.draft_token_ids_event is not None
         assert self.draft_token_ids_copy_stream is not None
         assert self.draft_token_ids_cpu is not None
