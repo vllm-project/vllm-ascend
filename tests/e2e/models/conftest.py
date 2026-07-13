@@ -108,6 +108,23 @@ def _patch_nvlm_chat_template():
     VLLM_VLM.apply_chat_template = patched_apply_chat_template
 
 
+def _patch_nvlm_multimodal_encode():
+    from lm_eval.models.vllm_vlms import VLLM_VLM
+
+    original_tok_batch_multimodal_encode = VLLM_VLM.tok_batch_multimodal_encode
+
+    def patched_tok_batch_multimodal_encode(self, strings, images, *args, **kwargs):
+        if self.model_args.get("model") == "AI-ModelScope/NVLM-D-72B":
+            strings = [
+                re.sub(r"<image>[ \t]*(?:\r?\n)?", "<image>\n", text) if isinstance(text, str) else text
+                for text in strings
+            ]
+        return original_tok_batch_multimodal_encode(self, strings, images, *args, **kwargs)
+
+    VLLM_VLM.tok_batch_multimodal_encode = patched_tok_batch_multimodal_encode
+
+
 def pytest_configure(config):
     _patch_nvlm_config()
     _patch_nvlm_chat_template()
+    _patch_nvlm_multimodal_encode()
