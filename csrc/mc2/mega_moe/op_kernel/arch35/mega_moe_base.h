@@ -20,7 +20,7 @@
 #include "mega_moe_tiling.h"
 #include "kernel_math_util.h"
 #include "mega_moe_workspace_info.h"
-#include "adv_api/hcomm/hcomm.h"
+// #include "adv_api/hcomm/hcomm.h"
 
 struct Mc2MoeContext {
     uint32_t epRankId = 0;
@@ -91,11 +91,11 @@ struct PeermemInfo {
     }
 };
 
-struct CombineCommParams {
-    uint32_t rankId;
-    Hcomm<COMM_PROTOCOL_UBC_CTP> *hcomm;
-    __gm__ Mc2MoeContext* mc2Context;
-};
+// struct CombineCommParams {
+//     uint32_t rankId;
+//     Hcomm<COMM_PROTOCOL_UBC_CTP> *hcomm;
+//     __gm__ Mc2MoeContext* mc2Context;
+// };
 
 struct Params {
     GM_ADDR aGmAddr;
@@ -110,7 +110,7 @@ struct Params {
     WorkspaceInfo workspaceInfo;
     PeermemInfo peermemInfo;
     MegaMoeTilingData *tilingData;
-    CombineCommParams combineCommParams;
+    // CombineCommParams combineCommParams;
 };
 
 enum class AddrUpdateMode : int32_t {
