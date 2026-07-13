@@ -13,7 +13,7 @@ tasks:
 - name: "mmmu_val"
   metrics:
   - name: "acc,none"
-    value: 0.53
+    value: 0.3878
 
 num_fewshot: 0
 apply_chat_template: true
