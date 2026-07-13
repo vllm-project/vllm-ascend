@@ -4,7 +4,6 @@ import subprocess
 import textwrap
 from pathlib import Path
 
-
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
@@ -80,47 +79,55 @@ def test_generate_tuning_report_preserves_failure_verdicts_and_metric_direction(
     write_jsonl(
         baseline_dir / "results.jsonl",
         [
-            dump_json_line({
-                "concurrency": 1,
-                "stats": {
-                    "ttft": {"mean": 0.10},
-                    "tpot": {"mean": 0.03},
-                    "latency": {"mean": 0.50},
-                    "output_token_throughput": 100.0,
-                },
-            }),
-            dump_json_line({
-                "concurrency": 4,
-                "stats": {
-                    "ttft": {"mean": 0.20},
-                    "tpot": {"mean": 0.04},
-                    "latency": {"mean": 0.80},
-                    "output_token_throughput": 250.0,
-                },
-            }),
+            dump_json_line(
+                {
+                    "concurrency": 1,
+                    "stats": {
+                        "ttft": {"mean": 0.10},
+                        "tpot": {"mean": 0.03},
+                        "latency": {"mean": 0.50},
+                        "output_token_throughput": 100.0,
+                    },
+                }
+            ),
+            dump_json_line(
+                {
+                    "concurrency": 4,
+                    "stats": {
+                        "ttft": {"mean": 0.20},
+                        "tpot": {"mean": 0.04},
+                        "latency": {"mean": 0.80},
+                        "output_token_throughput": 250.0,
+                    },
+                }
+            ),
         ],
     )
     write_jsonl(
         iter_01_dir / "results.jsonl",
         [
-            dump_json_line({
-                "concurrency": 1,
-                "stats": {
-                    "ttft": {"mean": 0.08},
-                    "tpot": {"mean": 0.03},
-                    "latency": {"mean": 0.45},
-                    "output_token_throughput": 110.0,
-                },
-            }),
-            dump_json_line({
-                "concurrency": 4,
-                "stats": {
-                    "ttft": {"mean": 0.18},
-                    "tpot": {"mean": 0.04},
-                    "latency": {"mean": 0.75},
-                    "output_token_throughput": 260.0,
-                },
-            }),
+            dump_json_line(
+                {
+                    "concurrency": 1,
+                    "stats": {
+                        "ttft": {"mean": 0.08},
+                        "tpot": {"mean": 0.03},
+                        "latency": {"mean": 0.45},
+                        "output_token_throughput": 110.0,
+                    },
+                }
+            ),
+            dump_json_line(
+                {
+                    "concurrency": 4,
+                    "stats": {
+                        "ttft": {"mean": 0.18},
+                        "tpot": {"mean": 0.04},
+                        "latency": {"mean": 0.75},
+                        "output_token_throughput": 260.0,
+                    },
+                }
+            ),
         ],
     )
 
