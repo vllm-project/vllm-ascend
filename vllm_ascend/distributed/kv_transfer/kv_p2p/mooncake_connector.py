@@ -68,7 +68,7 @@ from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_rank,
     get_decode_context_model_parallel_world_size,
 )
-from vllm_ascend.utils import enable_custom_op
+from vllm_ascend.utils import enable_custom_op, enable_sfa_dcp_replicated_indexer
 
 # isort: off
 if TYPE_CHECKING:
@@ -124,6 +124,7 @@ class ReqMeta:
     remote_multi_nodes_meta_mapping: dict[str, dict[str, Any]]
     num_prompt_blocks: int
     remote_block_size: int
+    local_full_block_ids: BlockIds = tuple()
 
 
 @dataclass(frozen=True)
@@ -494,10 +495,7 @@ class KVCacheRecvingThread(threading.Thread):
             else 0
         )
         self.use_mla = self.model_config.is_deepseek_mla
-        self.use_sparse = hasattr(self.vllm_config.model_config.hf_text_config, "index_topk")
-        self.sfa_dcp_replicate_k = self.use_sparse and (self.vllm_config.additional_config or {}).get(
-            "sfa_dcp_replicate_k", False
-        )
+        self.enable_sfa_dcp_replicated_indexer = enable_sfa_dcp_replicated_indexer(self.vllm_config)
         self.is_hma_required = is_hma_required
         self.block_size = self.vllm_config.cache_config.block_size
         try:
@@ -743,6 +741,7 @@ class KVCacheRecvingThread(threading.Thread):
         remote_block_ids: BlockIds = req_meta["remote_block_ids"]
         local_block_ids_replicate_k: BlockIds = req_meta.get("local_block_ids_replicate_k", tuple())
         remote_block_ids_replicate_k: BlockIds = req_meta.get("remote_block_ids_replicate_k", tuple())
+        has_replicate_k_blocks = bool(local_block_ids_replicate_k and remote_block_ids_replicate_k)
         group_pulls: list[GroupPull] = req_meta["group_pulls"]
         remote_engine_id = req_meta["remote_engine_id"]
         remote_host = req_meta["remote_host"]
@@ -821,7 +820,7 @@ class KVCacheRecvingThread(threading.Thread):
                 grouped_remote_block_ids = [[remote_group_block_ids[transfer_block_idx]]]
                 grouped_local_block_ids = [[local_group_block_ids[0]]]
 
-            if self.sfa_dcp_replicate_k and local_block_ids_replicate_k:
+            if self.enable_sfa_dcp_replicated_indexer and has_replicate_k_blocks:
                 grouped_remote_k_block_ids, grouped_local_k_block_ids = group_concurrent_contiguous(
                     remote_block_ids_replicate_k[0],
                     local_block_ids_replicate_k[0],
@@ -872,8 +871,8 @@ class KVCacheRecvingThread(threading.Thread):
                     block_stride = self.block_stride_per_addr[layer_idx][cache_idx]
                     remote_block_stride = remote_block_stride_per_addr[layer_idx][cache_idx]
                     inner_block_len = block_len // tp_num_need_pulls
-                    if self.sfa_dcp_replicate_k and self.block_size_scale[layer_idx][cache_idx] > 1:
-                        if local_block_ids_replicate_k:
+                    if self.enable_sfa_dcp_replicated_indexer and self.block_size_scale[layer_idx][cache_idx] > 1:
+                        if has_replicate_k_blocks:
                             transfer_remote_block_ids = grouped_remote_k_block_ids
                             transfer_local_block_ids = grouped_local_k_block_ids
                         else:
@@ -1412,6 +1411,7 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
         local_block_ids: BlockIds,
         num_external_tokens: int,
         kv_transfer_params: dict[str, Any],
+        local_full_block_ids: BlockIds | None = None,
     ):
         self.requests[request_id] = ReqMeta(
             local_block_ids=local_block_ids,
@@ -1428,6 +1428,7 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
             remote_multi_nodes_meta_mapping=kv_transfer_params.get("remote_multi_nodes_meta_mapping", {}),
             num_prompt_blocks=kv_transfer_params.get("num_prompt_blocks", 0),
             remote_block_size=kv_transfer_params.get("remote_block_size", 0),
+            local_full_block_ids=local_full_block_ids or tuple(),
         )
 
 
@@ -1584,7 +1585,7 @@ class MooncakeConnectorScheduler:
         # Requests that need to start recv.
         # New requests are added by update_state_after_alloc in
         # the scheduler. Used to make metadata passed to Worker.
-        self._reqs_need_recv: dict[str, tuple[Request, BlockIds, int]] = {}
+        self._reqs_need_recv: dict[str, tuple[Request, BlockIds, BlockIds, int]] = {}
         self._reqs_need_send: dict[str, float] = {}
         self._reqs_in_batch: set[str] = set()
 
@@ -1648,11 +1649,15 @@ class MooncakeConnectorScheduler:
         assert len(block_ids) == len(self.group_transfer_info), "Number of KV cache groups must match"
 
         transfer_block_ids = []
+        cp_size = max(1, self.pcp_size * self.dcp_size)
         for blocks, group_info in zip(block_ids, self.group_transfer_info):
             if group_info.is_state_group:
                 transfer_block_ids.append(blocks)
             else:
-                num_prompt_blocks = cdiv(prompt_len, group_info.tokens_per_block)
+                # In context parallelism, each scheduler-visible block id is a
+                # CP-grouped/virtual block shared by all CP ranks. It therefore
+                # covers cp_size times the token span of one no-CP block.
+                num_prompt_blocks = cdiv(prompt_len, group_info.tokens_per_block * cp_size)
                 transfer_block_ids.append(blocks[:num_prompt_blocks])
         return tuple(transfer_block_ids)
 
@@ -1757,8 +1762,14 @@ class MooncakeConnectorScheduler:
             if params.get("remote_block_ids"):
                 if all(p in params for p in ("remote_engine_id", "remote_host", "remote_port", "remote_request_id")):
                     local_block_ids = blocks.get_unhashed_block_ids_all_groups() if num_external_tokens > 0 else []
+                    local_full_block_ids = blocks.get_block_ids() if num_external_tokens > 0 else tuple()
                     # Get unhashed blocks to pull from remote.
-                    self._reqs_need_recv[request.request_id] = (request, local_block_ids, num_external_tokens)
+                    self._reqs_need_recv[request.request_id] = (
+                        request,
+                        local_block_ids,
+                        local_full_block_ids,
+                        num_external_tokens,
+                    )
                 else:
                     logger.warning("Got invalid KVTransferParams. params=%s. ", params)
             else:
@@ -1773,7 +1784,7 @@ class MooncakeConnectorScheduler:
         meta = MooncakeConnectorMetadata()
 
         # Loop through scheduled reqs and convert to ReqMeta.
-        for req_id, (req, block_ids, num_external_tokens) in self._reqs_need_recv.items():
+        for req_id, (req, block_ids, full_block_ids, num_external_tokens) in self._reqs_need_recv.items():
             assert req.kv_transfer_params is not None
             # For the case where there are no remote blocks to pull
             # (block_ids is empty), we don't need to schedule
@@ -1781,6 +1792,7 @@ class MooncakeConnectorScheduler:
             meta.add_new_req(
                 request_id=req_id,
                 local_block_ids=block_ids,
+                local_full_block_ids=full_block_ids,
                 num_external_tokens=num_external_tokens,
                 kv_transfer_params=req.kv_transfer_params,
             )
@@ -2248,9 +2260,7 @@ class MooncakeConnectorWorker:
         """Register the KV Cache data."""
         self.use_mla = self.vllm_config.model_config.is_deepseek_mla
         self.use_sparse = hasattr(self.vllm_config.model_config.hf_text_config, "index_topk")
-        self.sfa_dcp_replicate_k = self.use_sparse and (self.vllm_config.additional_config or {}).get(
-            "sfa_dcp_replicate_k", False
-        )
+        self.enable_sfa_dcp_replicated_indexer = enable_sfa_dcp_replicated_indexer(self.vllm_config)
 
         self.num_blocks = self.kv_cache_config.num_blocks
         logger.info("num_blocks: %s", self.num_blocks)
@@ -3209,12 +3219,14 @@ class MooncakeConnectorWorker:
             tp_num_need_pulls=num_group_pulls,
             use_mla=num_key_value_heads == 1,
         )[self.tp_rank]
+
     def _get_sfa_replicate_k_remote_handshake_port(
         self,
         meta: ReqMeta,
     ) -> int | None:
-        if not self.sfa_dcp_replicate_k:
+        if not self.enable_sfa_dcp_replicated_indexer:
             return None
+        self._validate_sfa_replicated_indexer_remote_config(meta)
         remote_cp_size = meta.remote_pcp_size * meta.remote_dcp_size
         local_cp_size = self.pcp_size * self.dcp_size
         if local_cp_size == 0 or remote_cp_size % local_cp_size != 0:
@@ -3226,11 +3238,17 @@ class MooncakeConnectorWorker:
         remote_cp_rank = local_cp_rank * (remote_cp_size // local_cp_size)
         return meta.remote_port + remote_cp_rank
 
+    def _validate_sfa_replicated_indexer_remote_config(self, meta: ReqMeta) -> None:
+        if not self.enable_sfa_dcp_replicated_indexer:
+            return
+        prefill_tp_size = meta.remote_ptp_size if meta.remote_ptp_size is not None else self._prefill_tp_size
+        assert meta.remote_pcp_size == 1 and meta.remote_dcp_size == prefill_tp_size
+
     def _get_sfa_replicate_k_block_ids(
         self,
         meta: ReqMeta,
     ) -> tuple[BlockIds, BlockIds]:
-        if not self.sfa_dcp_replicate_k:
+        if not self.enable_sfa_dcp_replicated_indexer:
             return tuple(), tuple()
         if meta.num_external_tokens <= 0 or not meta.remote_block_ids or not meta.local_block_ids:
             return tuple(), tuple()
@@ -3258,43 +3276,48 @@ class MooncakeConnectorWorker:
                 f"must cover num_external_blocks_from_tokens({num_external_blocks_from_tokens})."
             )
 
-        def expand_cp_group_blocks(block_ids: list[int], cp_size: int) -> list[int]:
-            expanded_blocks: list[int] = []
-            for block_id in block_ids:
-                start_block = int(block_id) * cp_size
-                expanded_blocks.extend(range(start_block, start_block + cp_size))
-            return expanded_blocks
+        if num_prefix_cached_blocks > 0 and not meta.local_full_block_ids:
+            raise AssertionError("SFA replicate-K requires full local block ids when prefix cache is used.")
 
-        remote_expanded = expand_cp_group_blocks(list(meta.remote_block_ids[0]), remote_cp_size)
-        local_external_expanded = expand_cp_group_blocks(list(meta.local_block_ids[0]), local_cp_size)
-        local_external_expanded = local_external_expanded[:num_external_blocks]
-        local_full_expanded = [-1] * num_prefix_cached_blocks + local_external_expanded
+        remote_blocks = list(meta.remote_block_ids[0])
+        local_full_blocks = list((meta.local_full_block_ids or meta.local_block_ids)[0])
+        local_external_blocks = list(meta.local_block_ids[0])
+        if not local_full_blocks:
+            return tuple(), tuple()
 
-        # The expanded lists are already in no-CP block units, so the prefix
-        # offset is the original no-CP block count directly.
-        remote_start_idx = num_prefix_cached_blocks
-        remote_external_expanded = remote_expanded[remote_start_idx:]
-        remote_external_expanded = remote_external_expanded[: len(local_external_expanded)]
-        local_external_expanded = local_external_expanded[: len(remote_external_expanded)]
+        local_block_ids: list[int] = []
+        remote_block_ids: list[int] = []
+        for global_block_idx in range(num_prefix_cached_blocks, meta.num_prompt_blocks):
+            remote_local_idx = global_block_idx // remote_cp_size
+            local_local_idx = global_block_idx // local_cp_size
+            if remote_local_idx >= len(remote_blocks) or local_local_idx >= len(local_full_blocks):
+                break
+            remote_block_ids.append(
+                int(remote_blocks[remote_local_idx]) * remote_cp_size + global_block_idx % remote_cp_size
+            )
+            local_block_ids.append(
+                int(local_full_blocks[local_local_idx]) * local_cp_size + global_block_idx % local_cp_size
+            )
+
+        max_external_blocks = min(num_external_blocks, len(local_external_blocks) * local_cp_size)
+        local_block_ids = local_block_ids[:max_external_blocks]
+        remote_block_ids = remote_block_ids[: len(local_block_ids)]
+        local_block_ids = local_block_ids[: len(remote_block_ids)]
 
         logger.debug(
-            "Mooncake SFA replicate-K block ids prepared. remote_cp_size=%s local_cp_size=%s "
-            "num_prompt_blocks=%s num_computed_tokens=%s num_external_blocks=%s "
-            "num_external_blocks_from_tokens=%s num_prefix_cached_blocks=%s local_full_len=%s "
-            "local_external_len=%s remote_external_len=%s",
+            "Mooncake SFA replicate-K block ids prepared from aligned full blocks. "
+            "remote_cp_size=%s local_cp_size=%s num_prompt_blocks=%s num_computed_tokens=%s "
+            "num_external_blocks=%s local_len=%s remote_len=%s",
             remote_cp_size,
             local_cp_size,
             meta.num_prompt_blocks,
             meta.num_computed_tokens,
             num_external_blocks,
-            num_external_blocks_from_tokens,
-            num_prefix_cached_blocks,
-            len(local_full_expanded),
-            len(local_external_expanded),
-            len(remote_external_expanded),
+            len(local_block_ids),
+            len(remote_block_ids),
         )
 
-        return (local_external_expanded,), (remote_external_expanded,)
+        return (local_block_ids,), (remote_block_ids,)
 
     def start_load_kv(self, metadata: MooncakeConnectorMetadata):
         """Start loading KV blocks from remote engine."""

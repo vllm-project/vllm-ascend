@@ -137,9 +137,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
         return (
             self.head_size / self.sparse_head_dim[0],  # kv_cache[0]
             self.head_size / self.sparse_head_dim[1],  # kv_cache[1]
-            (
-                self.head_size / self.sparse_head_dim[2] if self.sparse_head_dim[2] > 0 else None
-            ),  # kv_cache[2]  # kv_cache[2]
+            (self.head_size / self.sparse_head_dim[2] if self.sparse_head_dim[2] > 0 else None),  # kv_cache[2]
             None,  # kv_cache[3] does not exist
         )
 
