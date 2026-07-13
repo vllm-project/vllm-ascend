@@ -561,11 +561,12 @@ class TestNPUPlatform(TestBase):
     @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
     @patch("vllm_ascend.ascend_config.init_ascend_config")
     @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
-    def test_check_and_update_config_recompute_scheduler_rejects_kv_producer(
+    def test_check_and_update_config_recompute_scheduler_warns_and_disables_kv_producer(
         self, mock_init_recompute, mock_init_ascend, mock_soc_version, mock_auto_detect
     ):
         mock_ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
         mock_ascend_config.recompute_scheduler_enable = True
+        mock_ascend_config.profiling_chunk_config.enabled = False
         mock_init_ascend.return_value = mock_ascend_config
 
         vllm_config = TestNPUPlatform.mock_vllm_config()
@@ -573,7 +574,8 @@ class TestNPUPlatform(TestBase):
         vllm_config.parallel_config.decode_context_parallel_size = 1
         vllm_config.parallel_config.prefill_context_parallel_size = 1
         vllm_config.parallel_config.tensor_parallel_size = 1
-        vllm_config.scheduler_config = MagicMock()
+        scheduler_config = MagicMock()
+        vllm_config.scheduler_config = scheduler_config
         mock_init_recompute.return_value = MagicMock()
 
         from vllm_ascend import platform
@@ -582,16 +584,20 @@ class TestNPUPlatform(TestBase):
         self.platform = platform.NPUPlatform()
 
         with (
-            pytest.raises(
-                ValueError,
-                match=r"recompute_scheduler_enable.*PD-disaggregated D nodes.*kv_role='kv_consumer'",
-            ),
             patch.object(platform.NPUPlatform, "_fix_incompatible_config"),
             patch.object(platform, "check_kv_extra_config"),
+            patch.object(platform.logger, "warning") as mock_warning,
         ):
             self.platform.check_and_update_config(vllm_config)
 
         mock_init_recompute.assert_not_called()
+        self.assertFalse(mock_ascend_config.recompute_scheduler_enable)
+        self.assertIs(vllm_config.scheduler_config, scheduler_config)
+        mock_warning.assert_called_once()
+        self.assertIn(
+            "recompute_scheduler_enable is ignored on PD-disaggregated P nodes",
+            mock_warning.call_args.args[0],
+        )
 
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
     @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)

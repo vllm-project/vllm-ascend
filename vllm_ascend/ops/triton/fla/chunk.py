@@ -142,8 +142,9 @@ def chunk_gated_delta_rule_fwd(
         updated_state = final_state.new_empty(get_pcp_group().world_size, *final_state.shape)
         updated_state[0, ...] = all_final_state[0]
         for i in range(1, get_pcp_group().world_size):
+            # correct_i = all_final_state[i] + Phi_i * (correct_{i-1} - s0)
             updated_final_state = all_final_state[i] + torch.matmul(
-                all_final_h_update[i, ...], updated_state[i - 1, ...]
+                all_final_h_update[i, ...], updated_state[i - 1, ...] - initial_state
             )
             updated_state[i, ...] = updated_final_state
 
@@ -156,11 +157,7 @@ def chunk_gated_delta_rule_fwd(
 
         if get_pcp_group().rank_in_group > 0:
             rerun_initial_state = initial_state.clone()
-            if cu_seqlens is not None:
-                _ns_lens = cu_seqlens[1:] - cu_seqlens[:-1]
-                prefill_seq_offset = int(((_ns_lens > 0) & (_ns_lens <= 1)).sum().item())
-            else:
-                prefill_seq_offset = num_decodes
+            prefill_seq_offset = actual_num_decodes
             prefill_slice = slice(prefill_seq_offset, final_state.shape[0])
             rerun_initial_state[prefill_slice] = updated_h_state[prefill_slice]
             h, v_new, _ = chunk_gated_delta_rule_fwd_h(

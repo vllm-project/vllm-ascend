@@ -44,9 +44,11 @@ from vllm_ascend.utils import (
     AscendDeviceType,
     bootstrap_custom_op_env,
     check_kv_extra_config,
+    enable_sfa_dcp_replicated_indexer,
     flashcomm2_enable,
     get_ascend_device_type,
     is_moe_model,
+    model_uses_sfa_sparse,
     refresh_block_size,
     update_cudagraph_capture_sizes,
     is_310p,
@@ -677,16 +679,24 @@ class NPUPlatform(Platform):
         if ascend_config.recompute_scheduler_enable:
             kv_transfer_config = vllm_config.kv_transfer_config
             kv_role = getattr(kv_transfer_config, "kv_role", None)
-            if kv_transfer_config is None or kv_role != "kv_consumer":
+            if kv_role == "kv_producer":
+                logger.warning(
+                    "recompute_scheduler_enable is ignored on PD-disaggregated P nodes "
+                    "(kv_role='kv_producer') and will be deprecated on P nodes in a future release. "
+                    "Please remove it from P-node configs and keep it only on PD-disaggregated D nodes "
+                    "(kv_role='kv_consumer')."
+                )
+                ascend_config.recompute_scheduler_enable = False
+            elif kv_transfer_config is None or kv_role != "kv_consumer":
                 raise ValueError(
                     "recompute_scheduler_enable can only be enabled on PD-disaggregated D nodes "
                     f"(kv_role='kv_consumer', but got kv_role={kv_role!r}), and is not supported in PD-mixed mode."
                 )
+            else:
+                from vllm_ascend.core.recompute_scheduler import RecomputeSchedulerConfig
 
-            from vllm_ascend.core.recompute_scheduler import RecomputeSchedulerConfig
-
-            recompute_scheduler_config = RecomputeSchedulerConfig.initialize_from_config(vllm_config)
-            vllm_config.scheduler_config = recompute_scheduler_config
+                recompute_scheduler_config = RecomputeSchedulerConfig.initialize_from_config(vllm_config)
+                vllm_config.scheduler_config = recompute_scheduler_config
 
         # Extend original scheduler_config to use SchedulerDynamicBatch.
         if ascend_config.SLO_limits_for_dynamic_batch != -1:
@@ -704,6 +714,21 @@ class NPUPlatform(Platform):
             import vllm_ascend.patch.platform.patch_profiling_chunk  # noqa
 
         cp_size = parallel_config.decode_context_parallel_size * parallel_config.prefill_context_parallel_size
+        use_sparse = model_uses_sfa_sparse(model_config)
+        sfa_dcp_replicated_indexer = enable_sfa_dcp_replicated_indexer(vllm_config)
+        if sfa_dcp_replicated_indexer:
+            if parallel_config.decode_context_parallel_size != parallel_config.tensor_parallel_size:
+                raise AssertionError(
+                    f"DCP for SFA is only supported when dcp_size({parallel_config.decode_context_parallel_size}) "
+                    f"== tp_size({parallel_config.tensor_parallel_size})."
+                )
+            enable_sparse_c8 = vllm_config.additional_config.get("enable_sparse_c8", False) and use_sparse
+            if enable_sparse_c8 and get_ascend_device_type() == AscendDeviceType.A5:
+                raise NotImplementedError(
+                    "SFA DCP with sparse C8 LightningIndexer cache is not supported on A5 yet. "
+                    "A5 uses the fused CKV quant sparse attention path, which needs a separate DCP LSE merge."
+                )
+
         if (
             vllm_config.kv_transfer_config is not None
             and cache_config.block_size != parallel_config.cp_kv_cache_interleave_size
@@ -715,14 +740,14 @@ class NPUPlatform(Platform):
                 "needs to be equal if use pcp or dcp > 1 in P/D disaggregate and kv pool scenario."
             )
 
-        use_sparse = (
-            model_config is not None
-            and model_config.hf_text_config is not None
-            and hasattr(model_config.hf_text_config, "index_topk")
-        )
-        if use_sparse and cp_size > 1 and parallel_config.cp_kv_cache_interleave_size != cache_config.block_size:
+        if (
+            use_sparse
+            and cp_size > 1
+            and parallel_config.cp_kv_cache_interleave_size != cache_config.block_size
+            and not sfa_dcp_replicated_indexer
+        ):
             logger.warning_once(
-                "The current SFA's PCP&DCP implementation requires"
+                "The current SFA's PCP implementation requires "
                 f"cp_kv_cache_interleave_size({parallel_config.cp_kv_cache_interleave_size})"
                 f" == block_size({cache_config.block_size}). "
                 f"Override cp_kv_cache_interleave_size to {cache_config.block_size}."

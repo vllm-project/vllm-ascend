@@ -338,6 +338,28 @@
 #       Remove this patch once the supported vLLM version contains the upstream
 #       MiniMax-M2 incremental tool-call streaming fix.
 #
+# ** 12b. File: platform/patch_structured_output.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.sampling_params.SamplingParams._validate_structured_outputs`
+#      `vllm.v1.structured_output.StructuredOutputManager.grammar_init`
+#    Why:
+#       V1 structured outputs use one engine-level backend, while `backend=auto`
+#       resolves the backend per request. After one request initializes
+#       `xgrammar`, a later request that resolves to `guidance` can still reach
+#       the initialized `xgrammar` backend and crash during grammar compilation.
+#    How:
+#       Record the first resolved backend on the structured-output config and
+#       reject later requests that resolve to a different backend. Also guard
+#       `grammar_init` so requests that bypass API-side validation fail before
+#       backend grammar compilation.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/issues/43920
+#       https://github.com/vllm-project/vllm/pull/44401
+#    Future Plan:
+#       Remove this patch once upstream vLLM either enforces backend consistency
+#       before grammar compilation or safely handles mixed-backend grammar
+#       failures without killing the engine.
+#
 # ** 13. File: platform/patch_camem_allocator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.model.is_cumem_allocator_available`
@@ -700,6 +722,36 @@
 #       patch Qwen3_5GatedDeltaNet._forward_core to use triton ops like `fused_recurrent_gated_delta_rule`.
 #    Future Plan:
 #       Remove this patch when all ops in _forward_core support both Qwen3_5 and Qwen3Next.
+#
+# ** 17a. File: worker/patch_idex_310.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.layers.fla.ops.index.prepare_chunk_indices`
+#      `vllm.model_executor.layers.fla.ops.index.prepare_chunk_offsets`
+#    Why:
+#       310P uses Ascend-friendly chunk index helpers for Qwen GDN prefill.
+#    How:
+#       Replace upstream FLA chunk index helper functions with 310P implementations.
+#
+#   2. `vllm_ascend.spec_decode.llm_base_proposer.AscendSpecDecodeBaseProposer.set_inputs_first_pass`
+#    Why:
+#       310P needs to protect the tail slot during MTP input_ids shift to avoid
+#       GatherV2 corruption from persistent drafter input buffers.
+#    How:
+#       Reuse the 310P proposer implementation for the first-pass input shift.
+#
+#   3. `vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn.QwenGatedDeltaNetAttention`
+#    Why:
+#       Qwen GDN needs 310P-specific state helpers, forward core, state dtype,
+#       and attention backend/builder wiring.
+#    How:
+#       Patch Qwen GDN methods to use Ascend GDN implementations and the 310P
+#       GDN attention backend. RC devices also route upstream GDNAttentionBackend
+#       to the 310P metadata builder.
+#    Related PR (if no, explain why):
+#       No, 310P custom operator and backend behavior are vllm-ascend specific.
+#    Future Plan:
+#       Remove this patch when upstream exposes stable hooks for 310P GDN
+#       chunk metadata, spec-decode input layout, and backend selection.
 #
 # ** 18. File: worker/patch_cudagraph.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
