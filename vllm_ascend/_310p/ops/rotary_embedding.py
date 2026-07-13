@@ -25,11 +25,18 @@ from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 from vllm.model_executor.layers.rotary_embedding.mrope import apply_interleaved_rope
 
-from vllm_ascend.ops.rotary_embedding import AscendRotaryEmbedding, get_cos_and_sin_slice
+from vllm_ascend.ops.rotary_embedding import AscendRotaryEmbedding, get_cos_and_sin_slice, update_cos_sin
 
 # Filled once per model forward in NPUModelRunner310._model_forward; read by every MRoPE layer.
 _mrope_cos_slice: torch.Tensor | None = None
 _mrope_sin_slice: torch.Tensor | None = None
+
+_ROPE_310P_UPDATE_FLAG = False
+
+
+def set_rope_position_flag_310p(state):
+    global _ROPE_310P_UPDATE_FLAG
+    _ROPE_310P_UPDATE_FLAG = state
 
 
 def _apply_rotary_mrope_torch(
@@ -131,6 +138,12 @@ def _rope_forward_oot(
         self.cos_sin_cache = self.cos_sin_cache.to(query.device)
     if self.cos_sin_cache.dtype != query.dtype:
         self.cos_sin_cache = self.cos_sin_cache.to(query.dtype)
+
+    # This flag should set to True when doing drafting.
+    global _ROPE_310P_UPDATE_FLAG
+    if _ROPE_310P_UPDATE_FLAG:
+        update_cos_sin(positions)
+
     cos, sin = get_cos_and_sin_slice()
     if offsets is not None:
         raise NotImplementedError("Batched rotary embedding is currently not supported on NPU.")
