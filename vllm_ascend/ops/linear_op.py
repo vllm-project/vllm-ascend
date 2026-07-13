@@ -736,7 +736,7 @@ def _get_row_parallel_op(
         if "o_proj" in prefix or "out_proj" in prefix:
             if "vision_model" not in prefix:
                 return Flashcomm2OProjRowParallelOp(layer)
-    if enable_sp() not _is_multimodal_encoder_prefix(prefix):
+    if enable_sp() and not _is_multimodal_encoder_prefix(prefix):
         # "share_expert" added for Step3p5
         if "shared_expert" in prefix or "share_expert" in prefix:
             return None
