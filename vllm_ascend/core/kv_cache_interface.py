@@ -122,9 +122,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
                 )
 
             qli_virtual = (
-                index_k_head_dim
-                * self.sfa_dcp_replicated_indexer_size
-                * get_dtype_size(self.c8_k_cache_dtype)
+                index_k_head_dim * self.sfa_dcp_replicated_indexer_size * get_dtype_size(self.c8_k_cache_dtype)
             )
             scale_virtual = self.sfa_dcp_replicated_indexer_size * get_dtype_size(self.c8_k_scale_cache_dtype)
             total_virtual_head_dim = ckv_virtual + qli_virtual + scale_virtual
