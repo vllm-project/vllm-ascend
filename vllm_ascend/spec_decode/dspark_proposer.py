@@ -2,17 +2,15 @@ from typing import Any
 
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig
-from vllm.forward_context import get_forward_context
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
+from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.ops.triton.spec_decode.utils import copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid
-from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
+from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
 
 
-class AscendDflashProposer(AscendEagleProposer):
+class AscendDsparkProposer(AscendDflashProposer):
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -25,40 +23,10 @@ class AscendDflashProposer(AscendEagleProposer):
             runner=runner,
         )
 
-        self.max_query_tokens = self.max_batch_size * (1 + self.num_speculative_tokens)
-        self.max_positions = self.max_num_tokens + self.max_query_tokens
-
-        self._context_slot_mapping_buffer = torch.zeros(
-            self.max_num_tokens,
-            dtype=torch.int32,
-            device=device,
-        )
-
-        self._slot_mapping_buffer = torch.zeros(
-            self.max_query_tokens,
-            dtype=torch.int32,
-            device=device,
-        )
-
-        self._context_positions_buffer = torch.zeros(
-            self.max_num_tokens,
-            dtype=torch.int32,
-            device=device,
-        )
-
-        self.positions = torch.zeros(
-            self.max_query_tokens,
-            dtype=torch.int32,
-            device=device,
-        )
-
-        self.arange_dflash = torch.arange(self.max_positions + 1, device=device, dtype=torch.int32)
-
-        self._dflash_hidden_states = torch.zeros(
-            (self.max_num_tokens, self.hidden_size), dtype=self.dtype, device=self.device
-        )
-
-        self.parallel_drafting_hidden_state_tensor = None
+        # Initialize and establish static address for graph mode
+        blk = 1 + self.num_speculative_tokens
+        self._dspark_seed_buffer = torch.zeros(self.max_batch_size, dtype=torch.int64, device=device)
+        self._dspark_draft_buffer = torch.zeros((self.max_batch_size, blk), dtype=torch.int64, device=device)
 
     def set_inputs_first_pass(
         self,
@@ -74,15 +42,25 @@ class AscendDflashProposer(AscendEagleProposer):
         num_prefill_reqs=0,
         num_decode_reqs=0,
     ) -> tuple[int, torch.Tensor, CommonAttentionMetadata, tuple[Any, Any] | None]:
-        # DFlash cross-attention: context K/V from target hidden states,
-        # Q from query embeddings (bonus + mask tokens).
+        # Dspark cross-attention: context K/V from target hidden states,
+        # Q from query embeddings (next token + mask tokens).
+
         batch_size = cad.num_reqs
-        num_context = target_token_ids.shape[0]
-        num_query_per_req = 1 + self.num_speculative_tokens
+
+        # Query length of a single request and the whole batch
+        num_query_per_req = self.num_speculative_tokens
         num_query_total = batch_size * num_query_per_req
 
+        # Newly added hidden_states, need to convert to KV Cache
+        num_context = target_token_ids.shape[0]
         self._dflash_num_context = num_context
         self._dflash_hidden_states[:num_context] = target_hidden_states
+
+        # The initial input token of markovHead is the next token
+        n = next_token_ids.shape[0]
+        self._dspark_seed_buffer[:n].copy_(next_token_ids)
+        if n < self._dspark_seed_buffer.shape[0]:
+            self._dspark_seed_buffer[n:].fill_(0)
 
         token_indices_to_sample = torch.empty(
             batch_size * self.num_speculative_tokens,
@@ -92,6 +70,7 @@ class AscendDflashProposer(AscendEagleProposer):
 
         has_num_rejected = num_rejected_tokens_gpu is not None
 
+        # Remove the rejected token to avoid polluting cross-attention
         copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid[1,](
             # Inputs
             next_token_ids_ptr=next_token_ids,
@@ -119,8 +98,10 @@ class AscendDflashProposer(AscendEagleProposer):
             total_input_tokens=num_context,
             batch_size=batch_size,
             HAS_NUM_REJECTED=has_num_rejected,
+            SAMPLE_FROM_ANCHOR=True,
         )
 
+        # Build attn_metadata
         query_slot_mapping = self._slot_mapping_buffer[:num_query_total]
         new_query_start_loc = self.arange_dflash[: batch_size + 1] * num_query_per_req
 
@@ -161,7 +142,12 @@ class AscendDflashProposer(AscendEagleProposer):
         is_profile=False,
         **kwargs,
     ) -> None:
-        num_query_tokens = min(num_tokens, self.max_query_tokens)
+        # Run dummy_run at full load: the query length of each request is self.num_speculative_tokens
+        # Unlike DFlash, where the query length is self.num_speculative_tokens + 1.
+        # Ensure that the maximum batch token is within the limit of self.max_query_tokens.
+        num_query_per_req = self.num_speculative_tokens
+        num_query_total = num_reqs * num_query_per_req
+        num_query_tokens = min(num_query_total if num_reqs > 0 else num_tokens, self.max_query_tokens)
 
         (
             num_input_tokens,
@@ -171,51 +157,14 @@ class AscendDflashProposer(AscendEagleProposer):
 
         if not self.use_cuda_graph:
             aclgraph_runtime_mode = CUDAGraphMode.NONE
-        num_query_per_req = 1 + self.num_speculative_tokens
-        num_query_total = num_reqs * num_query_per_req
 
         context_positions = self._context_positions_buffer[:num_input_tokens]
         context_states = self.hidden_states[:num_input_tokens]
 
-        multi_steps_attn_metadata = []
-        if aclgraph_runtime_mode == CUDAGraphMode.FULL and len(self.runner.attn_groups) > 0:
-            builder = self.draft_attn_groups[0].get_metadata_builder()
-            common_attn_metadata = AscendCommonAttentionMetadata(
-                query_start_loc=self.arange_dflash[: num_reqs + 1] * num_query_per_req,
-                query_start_loc_cpu=torch.from_numpy(self.token_arange_np[: num_reqs + 1]).clone() * num_query_per_req,
-                seq_lens_cpu=self.runner.optimistic_seq_lens_cpu,
-                seq_lens_cpu_upper_bound=self.runner.optimistic_seq_lens_cpu,
-                seq_lens=self.runner.seq_lens[:num_reqs],
-                num_reqs=num_reqs,
-                num_actual_tokens=num_query_tokens,
-                max_query_len=num_query_per_req,
-                max_seq_len=0,
-                slot_mapping=self._slot_mapping_buffer[:num_query_total],
-                attn_state=AscendAttentionState.ChunkedPrefill,
-                causal=False,
-                is_prefilling=torch.zeros(num_reqs, dtype=torch.bool),
-                block_table_tensor=self.runner.input_batch.block_table[self.kv_cache_gid].get_device_tensor()[
-                    :num_reqs
-                ],
-            )
-
-            attn_metadata_dflash = builder.build_for_graph_capture(
-                common_attn_metadata,
-                AscendAttentionState.ChunkedPrefill,
-            )
-
-            attn_metadata_dflash.attn_mask = None
-            attn_metadata_dflash.attn_state = AscendAttentionState.ChunkedPrefill
-
-            per_layer_attn_metadata = dict()
-            for layer_name in self.attn_layer_names:
-                per_layer_attn_metadata[layer_name] = attn_metadata_dflash
-            multi_steps_attn_metadata.append(per_layer_attn_metadata)
-
         self.token_indices_to_sample.fill_(0)
 
         with set_ascend_forward_context(
-            multi_steps_attn_metadata[0] if multi_steps_attn_metadata else None,
+            None,
             self.vllm_config,
             num_tokens=num_input_tokens,
             num_tokens_across_dp=num_tokens_across_dp,
@@ -224,7 +173,7 @@ class AscendDflashProposer(AscendEagleProposer):
             batch_descriptor=batch_descriptor,
             aclgraph_runtime_mode=aclgraph_runtime_mode,
             is_draft_model=True,
-            draft_attn_metadatas=multi_steps_attn_metadata,
+            draft_attn_metadatas=[],
         ):
             if is_profile:
                 self.model.precompute_and_store_context_kv(context_states, context_positions)
@@ -242,29 +191,6 @@ class AscendDflashProposer(AscendEagleProposer):
                     token_indices_to_sample=self.token_indices_to_sample[: num_reqs * self.num_speculative_tokens],
                     target_positions=self._get_positions(num_input_tokens),
                     inputs_embeds=None,
-                    multi_steps_attn_metadata=multi_steps_attn_metadata,
+                    multi_steps_attn_metadata=[],
                     num_tokens=num_input_tokens,
                 )
-
-            forward_context = get_forward_context()
-            if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and not _EXTRA_CTX.capturing:
-                self._update_full_graph_params(forward_context, num_tokens, multi_steps_attn_metadata)
-
-    def build_model_inputs_first_pass(
-        self,
-        num_input_tokens: int,
-    ) -> dict[str, Any]:
-        num_context = self._dflash_num_context
-
-        self.model.precompute_and_store_context_kv(
-            self._dflash_hidden_states[:num_context],
-            self._context_positions_buffer[:num_context],
-            self._context_slot_mapping_buffer[:num_context],
-        )
-
-        return dict(
-            input_ids=self.input_ids[:num_input_tokens], positions=self.positions[:num_input_tokens], inputs_embeds=None
-        )
-
-    def _raise_if_multimodal(self):
-        pass
