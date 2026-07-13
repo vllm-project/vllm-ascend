@@ -177,7 +177,6 @@ TITLES = {
     "user_guide/feature_guide/batch_invariance.md": {"en": "Batch Invariance", "zh": "批次不变性"},
     "user_guide/feature_guide/context_parallel.md": {"en": "Context Parallel", "zh": "上下文并行"},
     "user_guide/feature_guide/cpu_binding.md": {"en": "CPU Binding", "zh": "CPU 绑定"},
-    "user_guide/feature_guide/dynamic_batch.md": {"en": "Dynamic Batch", "zh": "动态批次"},
     "user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md": {
         "en": "Dynamic Chunk Pipeline Parallel",
         "zh": "动态分块流水线并行",
