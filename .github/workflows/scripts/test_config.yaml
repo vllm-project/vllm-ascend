@@ -501,6 +501,14 @@
   tests:
     - tests/e2e/pull_request/one_card/spec_decode/test_dflash.py
 
+- name: spec_decode_dspark
+  optional: false
+  base: spec_decode_base
+  source_file_dependencies:
+    - vllm_ascend/spec_decode/dspark_proposer.py
+  tests:
+    - tests/e2e/pull_request/one_card/spec_decode/test_dspark.py
+
 - name: spec_decode_extract_hidden_states
   optional: false
   base: spec_decode_base
@@ -696,6 +704,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/pooling/test_embedding.py: 510
   tests/e2e/pull_request/one_card/pooling/test_scoring.py: 670
   tests/e2e/pull_request/one_card/spec_decode/test_dflash.py: 350
+  tests/e2e/pull_request/one_card/spec_decode/test_dspark.py: 150
   tests/e2e/pull_request/one_card/spec_decode/test_draft_parallel.py: 230
   tests/e2e/pull_request/one_card/spec_decode/test_eagle.py: 470
   tests/e2e/pull_request/one_card/spec_decode/test_extract_hidden_states.py: 360
