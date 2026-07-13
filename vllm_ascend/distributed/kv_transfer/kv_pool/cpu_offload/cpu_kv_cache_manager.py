@@ -76,7 +76,7 @@ class CPUKVCacheManager:
             kv_cache_group_id=0,
             max_model_len=max_model_len,
         )
-        if vllm_version_is("0.23.0"):
+        if vllm_version_is("0.23.0") or vllm_version_is("0.24.0"):
             manager_kwargs["max_num_batched_tokens"] = max_model_len
         else:
             manager_kwargs["max_in_flight_tokens"] = max_model_len

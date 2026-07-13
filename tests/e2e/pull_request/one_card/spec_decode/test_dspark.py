@@ -11,8 +11,8 @@ from tests.e2e.pull_request.one_card.spec_decode.utils import BASELINES, DSPARK,
 from vllm_ascend.utils import vllm_version_is
 
 pytestmark = pytest.mark.skipif(
-    vllm_version_is("0.23.0"),
-    reason="The community has not yet incorporated the dspark feature in 0.23.0",
+    vllm_version_is("0.23.0") or vllm_version_is("0.24.0"),
+    reason="The community has not yet incorporated the DSpark feature in the release tags",
 )
 
 

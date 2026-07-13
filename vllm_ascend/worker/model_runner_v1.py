@@ -480,7 +480,7 @@ class NPUModelRunner(GPUModelRunner):
             if vllm_config.speculative_config
             else None
         )
-        if not vllm_version_is("0.23.0"):
+        if not (vllm_version_is("0.23.0") or vllm_version_is("0.24.0")):
             if vllm_config.speculative_config and vllm_config.speculative_config.use_dspark():
                 self.use_aux_hidden_state_outputs = True
         # When True, run update_full_graph_params before self.model (ENPU / graph capture order).
