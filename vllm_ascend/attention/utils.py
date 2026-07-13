@@ -8,6 +8,7 @@ import torch_npu
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group, is_v1_kv_transfer_group
 from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 
 from vllm_ascend.device.utils import FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
@@ -18,6 +19,22 @@ from vllm_ascend.utils import (
     is_pd_decode_recompute_scheduler_enabled,
 )
 from vllm_ascend.worker.kvcomp_utils import KVCompMetaData
+
+SFA_QSFA_TILE_SIZE = 128
+
+
+def get_sfa_qsfa_packed_head_dim(
+    kv_lora_rank: int,
+    qk_rope_head_dim: int,
+    tile_size: int = SFA_QSFA_TILE_SIZE,
+) -> int:
+    if kv_lora_rank % tile_size != 0:
+        raise ValueError(
+            f"kv_lora_rank must be divisible by tile_size for SFA QSFA packed cache, "
+            f"got {kv_lora_rank=} and {tile_size=}."
+        )
+    scale_metadata_bytes = (kv_lora_rank // tile_size) * get_dtype_size(torch.float32)
+    return kv_lora_rank + qk_rope_head_dim * get_dtype_size(torch.bfloat16) + scale_metadata_bytes
 
 
 @dataclass
@@ -230,6 +247,9 @@ class AscendPrefillContextParallelMetadata:
     # when entering from linear-attention to attention
     pcp_enter_fa_restore_idx: torch.Tensor = None
 
+    # restore the original FA padded layout without boolean-mask scatter
+    pcp_fa_padding_restore_idx: torch.Tensor = None
+
     # scatter the full sequence across all pcp ranks
     # when exiting from attention to linear-attention
     pcp_exit_fa_scatter_idx: torch.Tensor = None
@@ -281,9 +301,6 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     positions: torch.Tensor = None
     positions_cpu: torch.Tensor = None
 
-    # CPU tensor of slot mapping for host-side operations.
-    slot_mapping_cpu: torch.Tensor = None
-
     # Current attention state (e.g., ChunkedPrefill, DecodeOnly).
     attn_state: Any = None
 
@@ -296,6 +313,9 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     # Metadata for Prefill Context Parallelism (PCP) operations.
     prefill_context_parallel_metadata: AscendPrefillContextParallelMetadata | None = None
     kvcomp_metadata: KVCompMetaData | None = None
+    group_len: torch.Tensor = None
+    group_key_idx: torch.Tensor = None
+    group_key_cache_idx: torch.Tensor = None
 
     # TODO: Remove it when vLLM no longer uses this function.
     def unpadded(self, num_actual_tokens: int, num_actual_reqs: int) -> "AscendCommonAttentionMetadata":
@@ -319,7 +339,6 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             # This is really strange since vLLM slices them as well
             block_table_tensor=self.block_table_tensor,
             slot_mapping=self.slot_mapping,
-            slot_mapping_cpu=self.slot_mapping_cpu,
             causal=self.causal,
             actual_seq_lengths_q=self.actual_seq_lengths_q[:num_actual_tokens],
             positions=self.positions,
@@ -349,6 +368,9 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             encoder_seq_lens_cpu=_slice_reqs(self.encoder_seq_lens_cpu),
             logits_indices_padded=self.logits_indices_padded,
             num_logits_indices=self.num_logits_indices,
+            group_len=self.group_len,
+            group_key_idx=self.group_key_idx,
+            group_key_cache_idx=self.group_key_cache_idx,
         )
 
 

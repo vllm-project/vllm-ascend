@@ -309,7 +309,7 @@ def _mock_w8a8_gelu_compute(gate_up, *, gmm2_out=None, capture_quant=False):
     stream_patch, evt = _patch_npu_stream()
     captured = {}
 
-    def _dynamic_quant(x):
+    def _dynamic_quant(x, dst_type=None):
         if capture_quant:
             captured["x"] = x.detach().clone()
             scale = torch.ones(1, dtype=torch.float32)
