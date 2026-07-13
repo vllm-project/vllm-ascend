@@ -95,10 +95,13 @@ def _make_prefill_metadata(device: torch.device | str = "cpu") -> GDNAttentionMe
         num_spec_decode_tokens=0,
         num_actual_tokens=2,
         non_spec_state_indices_tensor=torch.tensor([0], dtype=torch.int32, device=device),
-        prefill_query_start_loc=torch.tensor([0, 2], dtype=torch.int32, device=device),
-        prefill_state_indices=torch.tensor([0], dtype=torch.int64, device=device),
-        prefill_has_initial_state=torch.tensor([True], device=device),
     )
+    # These fields are constructor arguments only in newer vLLM releases.
+    # Assigning them after construction also supports the older metadata class
+    # while exercising the same production GDN prefill path.
+    metadata.prefill_query_start_loc = torch.tensor([0, 2], dtype=torch.int32, device=device)
+    metadata.prefill_state_indices = torch.tensor([0], dtype=torch.int64, device=device)
+    metadata.prefill_has_initial_state = torch.tensor([True], device=device)
     metadata.non_spec_prefill_metadata = GDNPrefillMetadata(
         causal_conv1d=GDNCausalConv1dMetadata(
             query_start_loc=torch.tensor([0, 2], dtype=torch.int32, device=device),

@@ -17,6 +17,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import torch
+from torch._inductor import config as inductor_config
 from vllm.forward_context import ForwardContext, override_forward_context
 
 from tests.ut.ops.test_gdn_layerwise_kv import (
@@ -63,6 +64,7 @@ def test_npu_connector_observes_updated_gdn_state_after_compile():
     )
 
     with (
+        inductor_config.patch(compile_threads=1),
         override_forward_context(forward_context),
         patch("vllm_ascend.ops.gdn.get_pcp_group", return_value=SimpleNamespace(world_size=1)),
         patch("vllm_ascend.ops.gdn.DeviceOperator.fused_gdn_gating", return_value=gating),
@@ -72,6 +74,7 @@ def test_npu_connector_observes_updated_gdn_state_after_compile():
             torch.ops._C_ascend,
             "npu_causal_conv1d_custom",
             side_effect=causal_conv1d,
+            create=True,
         ),
         patch("vllm_ascend.attention.utils.has_kv_transfer_group", return_value=True),
         patch("vllm_ascend.attention.utils.is_v1_kv_transfer_group", return_value=True),
