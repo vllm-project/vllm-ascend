@@ -93,6 +93,16 @@ class AscendDflashProposer(AscendEagleProposer):
         num_query_total = batch_size * num_query_per_req
 
         self._dflash_num_context = num_context
+        if self.use_cuda_graph:
+            # The captured graph reads a fixed context slice matching its
+            # token descriptor. Clear the full decode capacity before copying
+            # live rows so shorter accepted windows cannot reuse old K/V input.
+            self._dflash_hidden_states[: self.max_query_tokens].zero_()
+            self._context_positions_buffer[: self.max_query_tokens].zero_()
+            self._context_slot_mapping_buffer[: self.max_query_tokens].fill_(-1)
+        else:
+            self._context_positions_buffer[:num_context].fill_(-1)
+            self._context_slot_mapping_buffer[:num_context].fill_(-1)
         self._dflash_hidden_states[:num_context] = target_hidden_states
 
         token_indices_to_sample = torch.empty(
@@ -101,12 +111,16 @@ class AscendDflashProposer(AscendEagleProposer):
             device=self.device,
         )
 
-        self.input_ids[:num_query_total].fill_(self.parallel_drafting_token_id)
-        self.positions[:num_query_total].zero_()
-        self._slot_mapping_buffer[:num_query_total].fill_(-1)
-        self._context_positions_buffer[:num_context].fill_(-1)
-        self._context_slot_mapping_buffer[:num_context].fill_(-1)
-
+        if self.use_cuda_graph:
+            # Graph dispatch can pad beyond the live query count. Initialize
+            # every graph-visible row so replay never consumes stale inputs.
+            self.input_ids.fill_(self.parallel_drafting_token_id)
+            self.positions.zero_()
+            self._slot_mapping_buffer.fill_(-1)
+        else:
+            self.input_ids[:num_query_total].fill_(self.parallel_drafting_token_id)
+            self.positions[:num_query_total].zero_()
+            self._slot_mapping_buffer[:num_query_total].fill_(-1)
         old_query_start_loc = cad.query_start_loc
         old_block_table = cad.block_table_tensor
         block_stride = old_block_table.stride(0)
@@ -425,6 +439,12 @@ class AscendDflashProposer(AscendEagleProposer):
         num_input_tokens: int,
     ) -> dict[str, Any]:
         num_context = self._dflash_num_context
+        forward_context = get_forward_context()
+        if (
+            self._use_dspark_block_contract()
+            and forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL
+        ):
+            num_context = num_input_tokens
 
         self.model.precompute_and_store_context_kv(
             self._dflash_hidden_states[:num_context],

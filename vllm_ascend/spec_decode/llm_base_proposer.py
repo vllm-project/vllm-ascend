@@ -1278,7 +1278,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     anchor_token_ids,
                     proposal_hidden_states,
                 )
-                debug_limit = int(os.getenv("DSPARK_DEBUG_PROPOSER", "4") or "0")
+                # Graph capture cannot execute the host synchronizations used
+                # by proposal debugging. Keep debugging opt-in for eager runs
+                # and disable it unconditionally for the graph path.
+                debug_limit = (
+                    0
+                    if self.use_cuda_graph
+                    else int(os.getenv("DSPARK_DEBUG_PROPOSER", "0") or "0")
+                )
                 debug_count = getattr(self, "_dspark_debug_proposer_count", 0)
                 if debug_count < debug_limit and batch_size > 0:
                     sample_positions = torch.index_select(
