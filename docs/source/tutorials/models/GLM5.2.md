@@ -150,7 +150,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
 --async-scheduling \
 --additional-config '{"fuse_muls_add":true,"multistream_overlap_shared_expert":true}' \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
+--speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
 
 ```
 
@@ -220,7 +220,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
 --async-scheduling \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
 --additional-config '{"fuse_muls_add":true,"multistream_overlap_shared_expert":true}' \
---speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp"}'
+--speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}'
 ```
 
 **node 1**
@@ -272,7 +272,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
 --async-scheduling \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
 --additional-config '{"fuse_muls_add":true,"multistream_overlap_shared_expert":true}' \
---speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp"}'
+--speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}'
 ```
 
 ::::
@@ -335,7 +335,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
 --async-scheduling \
 --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true}' \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp"}'
+--speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}'
 ```
 
 **node 1**
@@ -393,7 +393,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
 --async-scheduling \
 --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true}' \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp"}'
+--speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}'
 ```
 
 ::::
@@ -457,7 +457,7 @@ vllm serve <MODEL_PATH> \
   --async-scheduling \
   --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true}' \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-  --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp"}'
+  --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}'
 ```
 
 **Node 1** (headless, `--data-parallel-start-rank 1`):
@@ -516,7 +516,7 @@ vllm serve <MODEL_PATH> \
   --async-scheduling \
   --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true}' \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-  --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp"}'
+  --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}'
 ```
 
 Node 2 and Node 3 use the same script as Node 1, with `--data-parallel-start-rank` set to `2` and `3` respectively (and `node0_ip` pointing to Node 0).
@@ -673,7 +673,7 @@ Before you start, please
             --seed 1024 \
             --served-model-name glm-52 \
             --max-model-len 135000 \
-            --speculative-config '{"num_speculative_tokens": 5, "method":"deepseek_mtp"}' \
+            --speculative-config '{"num_speculative_tokens": 5, "method":"deepseek_mtp", "enforce_eager": true}' \
             --additional-config '{"enable_sparse_c8":false,"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_dsa_cp": true}' \
             --max-num-batched-tokens 4096 \
             --trust-remote-code \
@@ -743,7 +743,7 @@ Before you start, please
             --seed 1024 \
             --served-model-name glm-52 \
             --max-model-len 135000 \
-            --speculative-config '{"num_speculative_tokens": 5, "method":"deepseek_mtp"}' \
+            --speculative-config '{"num_speculative_tokens": 5, "method":"deepseek_mtp", "enforce_eager": true}' \
             --additional-config '{"enable_sparse_c8":false,"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_dsa_cp": true}' \
             --max-num-batched-tokens 4096 \
             --trust-remote-code \
@@ -815,7 +815,7 @@ Before you start, please
             --max-model-len 135000 \
             --max-num-batched-tokens 164 \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-            --speculative-config '{"num_speculative_tokens": 5, "method":"deepseek_mtp"}' \
+            --speculative-config '{"num_speculative_tokens": 5, "method":"deepseek_mtp", "enforce_eager": true}' \
             --additional-config '{"enable_sparse_c8":false,"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true}' \
             --trust-remote-code \
             --max-num-seqs 48 \
@@ -884,7 +884,7 @@ Before you start, please
             --served-model-name glm-52 \
             --max-model-len 135000 \
             --max-num-batched-tokens 164 \
-            --speculative-config '{"num_speculative_tokens": 5, "method":"deepseek_mtp"}' \
+            --speculative-config '{"num_speculative_tokens": 5, "method":"deepseek_mtp", "enforce_eager": true}' \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
             --additional-config '{"enable_sparse_c8":false,"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true}' \
             --trust-remote-code \
@@ -1054,7 +1054,7 @@ vllm serve <MODEL_PATH> \
     "multistream_overlap_shared_expert": true,
     "enable_dsa_cp": true
   }' \
-  --speculative-config '{"num_speculative_tokens": 3, "method":"deepseek_mtp"}'
+  --speculative-config '{"num_speculative_tokens": 3, "method":"deepseek_mtp", "enforce_eager": true}'
 ```
 
 `run_dp_template.sh` for the decode nodes:
@@ -1137,7 +1137,7 @@ vllm serve <MODEL_PATH> \
     "multistream_overlap_shared_expert": true,
     "recompute_scheduler_enable": true
   }' \
-  --speculative-config '{"num_speculative_tokens": 3, "method":"deepseek_mtp"}'
+  --speculative-config '{"num_speculative_tokens": 3, "method":"deepseek_mtp", "enforce_eager": true}'
 ```
 
 Once the preparation is done, start the server with the following commands:

@@ -185,7 +185,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a8 \
 --enable-prefix-caching \
 --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true}' \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}' 
+--speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' 
 ```
 
 - Quantized model `glm-5-w8a8` and `glm-5.1-w8a8` can be deployed on 1 Atlas 800 A3 (64G × 16) .
@@ -221,7 +221,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
 --enable-prefix-caching \
 --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true}' \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}' 
+--speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' 
 ```
 
 ::::
@@ -262,7 +262,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a8 \
 --enable-prefix-caching \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
 --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true}' \
---speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
+--speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
 ```
 
 ::::
@@ -331,7 +331,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-bf16 \
 --trust-remote-code \
 --gpu-memory-utilization 0.95 \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
+--speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
 ```
 
 **node 1**
@@ -378,7 +378,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-bf16 \
 --trust-remote-code \
 --gpu-memory-utilization 0.95 \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
+--speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
 ```
 
 ::::
@@ -431,7 +431,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a8 \
 --gpu-memory-utilization 0.95 \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
 --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true}' \
---speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
+--speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
 ```
 
 **node 1**
@@ -480,7 +480,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a8 \
 --gpu-memory-utilization 0.95 \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
 --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true}' \
---speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
+--speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
 ```
 
 ::::
@@ -601,7 +601,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
 --enable-prefix-caching \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
 --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true}' \
---speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
+--speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
 ```
 
 **node 1**
@@ -653,7 +653,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
 --enable-prefix-caching \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
 --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true}' \
---speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
+--speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
 ```
 
 ::::
@@ -811,7 +811,7 @@ Before you start, please
             --data-parallel-rpc-port $6 \
             --tensor-parallel-size $7 \
             --enable-expert-parallel \
-            --speculative-config '{"num_speculative_tokens": 3, "method":"deepseek_mtp"}' \
+            --speculative-config '{"num_speculative_tokens": 3, "method":"deepseek_mtp", "enforce_eager": true}' \
             --profiler-config \
             '{"profiler": "torch",
             "torch_profiler_dir": "./vllm_profile",
@@ -891,7 +891,7 @@ Before you start, please
             --data-parallel-rpc-port $6 \
             --tensor-parallel-size $7 \
             --enable-expert-parallel \
-            --speculative-config '{"num_speculative_tokens": 3, "method":"deepseek_mtp"}' \
+            --speculative-config '{"num_speculative_tokens": 3, "method":"deepseek_mtp", "enforce_eager": true}' \
             --profiler-config \
             '{"profiler": "torch",
             "torch_profiler_dir": "./vllm_profile",
@@ -973,7 +973,7 @@ Before you start, please
             --data-parallel-rpc-port $6 \
             --tensor-parallel-size $7 \
             --enable-expert-parallel \
-            --speculative-config '{"num_speculative_tokens": 3,  "method":"deepseek_mtp"}' \
+            --speculative-config '{"num_speculative_tokens": 3,  "method":"deepseek_mtp", "enforce_eager": true}' \
             --profiler-config \
             '{"profiler": "torch",
             "torch_profiler_dir": "./vllm_profile",
@@ -1053,7 +1053,7 @@ Before you start, please
              --data-parallel-rpc-port $6 \
              --tensor-parallel-size $7 \
              --enable-expert-parallel \
-             --speculative-config '{"num_speculative_tokens": 3,  "method":"deepseek_mtp"}' \
+             --speculative-config '{"num_speculative_tokens": 3,  "method":"deepseek_mtp", "enforce_eager": true}' \
              --profiler-config \
              '{"profiler": "torch",
              "torch_profiler_dir": "./vllm_profile",
@@ -1133,7 +1133,7 @@ Before you start, please
              --data-parallel-rpc-port $6 \
              --tensor-parallel-size $7 \
              --enable-expert-parallel \
-             --speculative-config '{"num_speculative_tokens": 3,  "method":"deepseek_mtp"}' \
+             --speculative-config '{"num_speculative_tokens": 3,  "method":"deepseek_mtp", "enforce_eager": true}' \
              --profiler-config \
              '{"profiler": "torch",
              "torch_profiler_dir": "./vllm_profile",
@@ -1213,7 +1213,7 @@ Before you start, please
              --data-parallel-rpc-port $6 \
              --tensor-parallel-size $7 \
              --enable-expert-parallel \
-             --speculative-config '{"num_speculative_tokens": 3,  "method":"deepseek_mtp"}' \
+             --speculative-config '{"num_speculative_tokens": 3,  "method":"deepseek_mtp", "enforce_eager": true}' \
              --profiler-config \
              '{"profiler": "torch",
              "torch_profiler_dir": "./vllm_profile",
