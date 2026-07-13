@@ -40,7 +40,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 
 | Model                         | Support   | Note                                                                 | Supported Hardware |
 |-------------------------------|-----------|----------------------------------------------------------------------|--------------------|
-| DeepSeek Distill (Qwen/Llama) | ✅        |                                                                      | A2/A3 |
+| DeepSeek Distill (Qwen/Llama) | ✅        | Verified ACLGRAPH coverage for Qwen-1.5B TP1, Llama-8B TP1, and Qwen-32B TP4 on 310P; Llama-70B remains unverified. [Tutorial](../../tutorials/models/DeepSeek-R1-Distill.md) | A2/A3/310P |
 | Qwen3-based                   | ✅        |                                                                      | A2/A3 |
 | Qwen2                         | ✅        |                                                                      | A2/A3 |
 | Qwen2.5                       | ✅        |                                                                      | A2/A3 |
