@@ -66,7 +66,11 @@ from vllm_ascend.compilation.acl_graph import (
 )
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.flashcomm2_oshard_manager import flashcomm2_oshard_manager
-from vllm_ascend.utils import weak_ref_tensors
+from vllm_ascend.utils import (
+    weak_ref_tensors,
+    AscendDeviceType,
+    get_ascend_device_type,
+)
 from vllm_ascend.worker.kvcomp_utils import KVCompMetaData
 
 # default max value of sliding window size
@@ -1292,6 +1296,18 @@ class AscendAttentionBackendImpl(AttentionImpl):
         ):
             key = key[:num_tokens]
             value = value[:num_tokens]
+        # split decode and prefill for ChunkedPrefill
+        if (
+            attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill
+            and attn_metadata.num_decode_tokens > 0
+            and attn_metadata.num_prefills > 0
+            and self.sinks is None
+            and get_ascend_device_type() in {AscendDeviceType.A5}
+        ):
+            return self._forward_split_decode_prefill(
+                query, key, value, block_size, block_table, actual_seq_lengths_kv, attn_metadata, output
+            )
+        
         # Get workspace from cache or calculate it if not present.
         if self.sinks is not None:
             actual_seq_qlen = attn_metadata.actual_seq_lengths_q
@@ -1380,6 +1396,88 @@ class AscendAttentionBackendImpl(AttentionImpl):
             attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
         output[:num_tokens] = attn_output[:num_tokens]
         return output
+
+    def _forward_split_decode_prefill(
+            self,
+            query: torch.Tensor,
+            key: torch.Tensor,
+            value: torch.Tensor,
+            block_size: int,
+            block_table: torch.Tensor,
+            actual_seq_lengths_kv,
+            attn_metadata: AscendMetadata,
+            output: torch.Tensor,
+        ) -> torch.Tensor:
+            """Split ChunkedPrefill into separate decode and prefill FIA calls.
+
+            Both decode and prefill use TND layout with paged KV cache.
+            """
+            num_decode_tokens = attn_metadata.num_decode_tokens
+            num_decodes = attn_metadata.num_decodes
+            actual_seq_qlen = attn_metadata.actual_seq_lengths_q
+            num_tokens = int(actual_seq_qlen[-1])
+            sparse_mode = 4 if self.sliding_window is not None else 3 if attn_metadata.causal else 0
+            
+            # Step 1: Decode part - TND layout with paged KV cache
+            if num_decode_tokens > 0:
+                decode_q = query[:num_decode_tokens]
+                decode_seq_qlen = list(range(1, num_decodes + 1))  # cumsum of [1,1,...,1]
+                attn_out, _ = torch_npu.npu_fused_infer_attention_score(
+                    query=decode_q,
+                    key=key,
+                    value=value,
+                    block_table=attn_metadata.block_tables[:num_decodes],
+                    input_layout="TND",
+                    block_size=block_size,
+                    actual_seq_lengths=decode_seq_qlen,
+                    actual_seq_lengths_kv=attn_metadata.seq_lens_list[:num_decodes],
+                    num_key_value_heads=self.num_kv_heads,
+                    num_heads=self.num_heads,
+                    scale=self.scale,
+                    sparse_mode=0,
+                )
+                output[:num_decode_tokens] = attn_out.view(num_decode_tokens, self.num_heads, self.head_size)
+            # Step 2: Prefill part - TND layout with paged KV cache
+            if attn_metadata.num_prefills > 0:
+                prefill_q = query[num_decode_tokens:num_tokens]
+
+                # Compute prefill-specific actual_seq_lengths (cumsum relative to prefill tokens)
+                prefill_seq_qlen = [
+                    actual_seq_qlen[i] - num_decode_tokens for i in range(num_decodes, len(actual_seq_qlen))
+                ]
+
+                # Prefill KV is in paged cache, use prefill requests' block_table
+                # When block_table is not None, FIA expects per-request seq_lens
+                # (not cumsum). cumsum is only needed when block_table=None (dense KV).
+                prefill_block_table = attn_metadata.block_tables[num_decodes:]
+                prefill_seq_kvlen = attn_metadata.seq_lens_list[num_decodes:]
+
+                extra_kwargs = {}
+                if self.sliding_window is not None:
+                    extra_kwargs["pre_tokens"] = self.sliding_window
+                    extra_kwargs["next_tokens"] = 0
+
+                attn_out, _ = torch_npu.npu_fused_infer_attention_score(
+                    query=prefill_q,
+                    key=key,
+                    value=value,
+                    atten_mask=attn_metadata.attn_mask,
+                    block_table=prefill_block_table,
+                    input_layout="TND",
+                    block_size=block_size,
+                    actual_seq_lengths=prefill_seq_qlen,
+                    actual_seq_lengths_kv=prefill_seq_kvlen,
+                    num_key_value_heads=self.num_kv_heads,
+                    num_heads=self.num_heads,
+                    scale=self.scale,
+                    sparse_mode=sparse_mode,
+                    **extra_kwargs,
+                )
+                n_prefill = num_tokens - num_decode_tokens
+                attn_out = attn_out.view(n_prefill, self.num_heads, self.head_size)
+                output[num_decode_tokens:num_tokens] = attn_out[:n_prefill]
+
+            return output
 
     def forward_paged_attention(
         self,
