@@ -61,6 +61,7 @@ from vllm_ascend.attention.utils import (
     split_decodes_and_prefills,
     update_paged_attention_graph_param,
     using_paged_attention,
+    expand_paged_kv_to_per_query,
 )
 from vllm_ascend.compilation.acl_graph import (
     get_draft_graph_params,
@@ -728,6 +729,16 @@ class AscendAttentionBackendImpl(AttentionImpl):
                             metadata_key = layer_name if layer_name is not None and layer_name in attn_metadata else key
                             block_table = attn_metadata[metadata_key].block_tables
                             seq_lens = attn_metadata[metadata_key].seq_lens
+                            # MTP verify: expand per-seq to per-query to match the
+                            # captured shapes (see expand_paged_kv_to_per_query).
+                            if (attn_metadata[metadata_key].attn_state == AscendAttentionState.SpecDecoding
+                                    and speculative_config is not None):
+                                _q = param.params[0]
+                                _num_tokens = _q.shape[0] if _q is not None else 0
+                                _k = speculative_config.num_speculative_tokens
+                                if _num_tokens == seq_lens.shape[0] * (_k + 1):
+                                    block_table, seq_lens = expand_paged_kv_to_per_query(
+                                        block_table, seq_lens, _k)
                         update_paged_attention_graph_param(
                             update_stream,
                             handle,
@@ -1140,6 +1151,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
         graph_params = get_graph_params()
         num_tokens = query.shape[0]
         if _EXTRA_CTX.capturing:
+            block_table = attn_metadata.block_tables
+            context_lens = attn_metadata.seq_lens
+            # MTP verify: expand per-seq to per-query (see expand_paged_kv_to_per_query).
+            if attn_metadata.attn_state == AscendAttentionState.SpecDecoding:
+                spec_cfg = self.vllm_config.speculative_config
+                if (spec_cfg is not None
+                        and num_tokens == context_lens.shape[0] * (spec_cfg.num_speculative_tokens + 1)):
+                    block_table, context_lens = expand_paged_kv_to_per_query(
+                        block_table, context_lens, spec_cfg.num_speculative_tokens)
             # Get workspace from cache or calculate it if not present.
             workspace = graph_params.workspaces.get(num_tokens)
             if workspace is None:
@@ -1150,8 +1170,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     num_kv_heads=self.num_kv_heads,
                     num_heads=self.num_heads,
                     scale_value=self.scale,
-                    block_table=attn_metadata.block_tables,
-                    context_lens=attn_metadata.seq_lens,
+                    block_table=block_table,
+                    context_lens=context_lens,
                     out=output,
                 )
                 update_graph_params_workspaces(num_tokens, workspace)
@@ -1172,8 +1192,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         self.num_kv_heads,
                         self.num_heads,
                         self.scale,
-                        attn_metadata.block_tables,
-                        attn_metadata.seq_lens,
+                        block_table,
+                        context_lens,
                         weak_ref_tensors(output),
                     ),
                     self._graph_metadata_layer_name() if self._use_layer_aware_fia_graph_replay else None,
@@ -1188,8 +1208,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 num_kv_heads=self.num_kv_heads,
                 num_heads=self.num_heads,
                 scale_value=self.scale,
-                block_table=attn_metadata.block_tables,
-                context_lens=attn_metadata.seq_lens,
+                block_table=block_table,
+                context_lens=context_lens,
                 out=output,
                 workspace=workspace,
             )
@@ -1402,6 +1422,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
     ) -> torch.Tensor:
         if _EXTRA_CTX.capturing:
             return self.full_graph_pa(query, attn_metadata, output)
+        block_table = attn_metadata.block_tables
+        context_lens = attn_metadata.seq_lens
+        # MTP verify: expand per-seq block_table/seq_lens to per-query so token0
+        # does not attend draft1's KV (future leak). See expand_paged_kv_to_per_query.
+        if attn_metadata.attn_state == AscendAttentionState.SpecDecoding:
+            spec_cfg = self.vllm_config.speculative_config
+            if spec_cfg is not None and query.shape[0] == context_lens.shape[0] * (spec_cfg.num_speculative_tokens + 1):
+                block_table, context_lens = expand_paged_kv_to_per_query(
+                    block_table, context_lens, spec_cfg.num_speculative_tokens)
         torch_npu._npu_paged_attention(
             query=query,
             key_cache=self.key_cache,
@@ -1409,8 +1438,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
             num_kv_heads=self.num_kv_heads,
             num_heads=self.num_heads,
             scale_value=self.scale,
-            block_table=attn_metadata.block_tables,
-            context_lens=attn_metadata.seq_lens,
+            block_table=block_table,
+            context_lens=context_lens,
             out=output,
         )
         return output
@@ -1529,11 +1558,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
         )
         if _kv_share_out is not None:
             return _kv_share_out
-        if (
-            attn_metadata.attn_state == AscendAttentionState.DecodeOnly
+        from vllm_ascend.utils import is_950
+        _pa_gate = (
+            attn_metadata.attn_state in (AscendAttentionState.DecodeOnly,
+                                         AscendAttentionState.SpecDecoding)
             and self.sliding_window is None
             and using_paged_attention(num_tokens, self.vllm_config, self.head_size)
-        ):
+            and not is_950()
+        )
+        if _pa_gate:
             output = self.forward_paged_attention(query, attn_metadata, output)
         else:
             output = self.forward_fused_infer_attention(query, key, value, attn_metadata, output, kv_cache)
