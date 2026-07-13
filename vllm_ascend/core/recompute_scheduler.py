@@ -50,6 +50,9 @@ from vllm.v1.sample.rejection_sampler import PLACEHOLDER_TOKEN_ID
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.utils import ConstantList, record_function_or_nullcontext
 
+from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.core.short_request_first_scheduler import ShortRequestFirstSchedulerMixin
+
 
 @dataclass
 class RecomputeSchedulerConfig(SchedulerConfig):
@@ -92,7 +95,7 @@ class RecomputeSchedulerOutput(SchedulerOutput):
     recomputed_reqs: list[RecomputeReqInfo] | None = None
 
 
-class RecomputeScheduler(Scheduler):
+class RecomputeScheduler(ShortRequestFirstSchedulerMixin, Scheduler):
     running: list[Request]
 
     def __init__(self, *args, **kwargs):
@@ -106,6 +109,26 @@ class RecomputeScheduler(Scheduler):
             and self.vllm_config.kv_transfer_config.is_kv_consumer
         )
         self.is_kv_producer = self.vllm_config.kv_transfer_config and self.vllm_config.kv_transfer_config.is_kv_producer
+        if get_ascend_config().short_request_first_config.enabled:
+            self._init_short_request_first_waiting_queue()
+
+    def _pop_waiting_request(
+        self,
+        request_queue,
+        count_with_short_request_first: bool,
+        *,
+        count_as_removal: bool = False,
+        skip_or_requeue_reason: str | None = None,
+    ) -> Request:
+        if count_with_short_request_first:
+            short_request_first_waiting = self._short_request_first_waiting_queue()
+            assert short_request_first_waiting is not None
+            return short_request_first_waiting.pop_request_from_queue(
+                request_queue,
+                count_as_removal=count_as_removal,
+                skip_or_requeue_reason=skip_or_requeue_reason,
+            )
+        return request_queue.pop_request()
 
     def add_request(self, request: Request) -> None:
         existing = self.requests.get(request.request_id)
@@ -198,6 +221,9 @@ class RecomputeScheduler(Scheduler):
 
         # For logging.
         scheduled_timestamp = time.monotonic()
+        short_request_first_waiting = self._short_request_first_waiting_queue()
+        if short_request_first_waiting is not None:
+            short_request_first_waiting.begin_step(self.max_num_scheduled_tokens)
 
         self.kv_cache_manager.new_step_starts()
 
@@ -219,6 +245,7 @@ class RecomputeScheduler(Scheduler):
                 # they are all rejected.
                 and request.num_computed_tokens + 2 - request.num_output_placeholders
                 >= request.num_prompt_tokens + request.max_tokens
+                or request.num_computed_tokens >= self.max_model_len
             ):
                 # Async scheduling: Avoid scheduling an extra step when we are sure that
                 # the previous step has reached request.max_tokens. We don't schedule
@@ -444,6 +471,13 @@ class RecomputeScheduler(Scheduler):
                 request_queue = self._select_waiting_queue_for_scheduling()
                 assert request_queue is not None
 
+                # skipped_waiting is not owned by ShortRequestFirstRequestQueue,
+                # so only route pops through it when the selected queue is one
+                # of its managed sub-queues.
+                count_with_short_request_first = (
+                    short_request_first_waiting is not None and short_request_first_waiting.owns_queue(request_queue)
+                )
+
                 request = request_queue.peek_request()
                 request_id = request.request_id
 
@@ -456,7 +490,12 @@ class RecomputeScheduler(Scheduler):
                             "[RecomputeScheduler] %s is still in WAITING_FOR_REMOTE_KVS state.",
                             request_id,
                         )
-                    request_queue.pop_request()
+                    self._pop_waiting_request(
+                        request_queue,
+                        count_with_short_request_first,
+                        count_as_removal=True,
+                        skip_or_requeue_reason="blocked_waiting_status",
+                    )
                     step_skipped_waiting.prepend_request(request)
                     continue
 
@@ -471,7 +510,12 @@ class RecomputeScheduler(Scheduler):
                     )
                 ):
                     # Scheduling would exceed max_loras, skip.
-                    request_queue.pop_request()
+                    self._pop_waiting_request(
+                        request_queue,
+                        count_with_short_request_first,
+                        count_as_removal=True,
+                        skip_or_requeue_reason="max_loras",
+                    )
                     step_skipped_waiting.prepend_request(request)
                     continue
 
@@ -484,6 +528,7 @@ class RecomputeScheduler(Scheduler):
                     # Get locally-cached tokens.
                     if (
                         self.connector is not None
+                        and not self.is_kv_producer
                         and self.has_mamba_layers
                         and isinstance(
                             self.kv_cache_manager.coordinator,
@@ -519,7 +564,12 @@ class RecomputeScheduler(Scheduler):
                             # The request cannot be scheduled because
                             # the KVConnector couldn't determine
                             # the number of matched tokens.
-                            request_queue.pop_request()
+                            self._pop_waiting_request(
+                                request_queue,
+                                count_with_short_request_first,
+                                count_as_removal=True,
+                                skip_or_requeue_reason="remote_kv_not_ready",
+                            )
                             step_skipped_waiting.prepend_request(request)
                             continue
                         num_external_computed_tokens = ext_tokens
@@ -652,7 +702,7 @@ class RecomputeScheduler(Scheduler):
                             preempted=request.num_preemptions > 0,
                         )
 
-                request = request_queue.pop_request()
+                request = self._pop_waiting_request(request_queue, count_with_short_request_first)
                 if load_kv_async:
                     # If loading async, allocate memory and put request
                     # into the WAITING_FOR_REMOTE_KV state.

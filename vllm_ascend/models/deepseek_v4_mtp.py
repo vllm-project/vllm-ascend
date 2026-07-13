@@ -23,7 +23,10 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.utils import enable_dsa_cp
+from vllm_ascend.utils import enable_dsa_cp, vllm_version_is
+
+if not vllm_version_is("0.23.0"):
+    from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_mapping
 
 from .deepseek_v4 import (
     DeepseekV2DecoderLayer,
@@ -257,15 +260,26 @@ class DeepSeekV4MTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
             ("gate_up_proj", "up_proj", 1),
         ]
 
-        expert_params_mapping = FusedMoE.make_expert_params_mapping(
-            model=self.model,
-            ckpt_gate_proj_name="gate_proj",
-            ckpt_down_proj_name="down_proj",
-            ckpt_up_proj_name="up_proj",
-            num_experts=self.config.n_routed_experts
-            + (self.config.n_shared_experts if rocm_aiter_moe_shared_expert_enabled else 0),
-            num_redundant_experts=self.num_redundant_experts,
-        )
+        if vllm_version_is("0.23.0"):
+            expert_params_mapping = FusedMoE.make_expert_params_mapping(
+                model=self.model,
+                ckpt_gate_proj_name="gate_proj",
+                ckpt_down_proj_name="down_proj",
+                ckpt_up_proj_name="up_proj",
+                num_experts=self.config.n_routed_experts
+                + (self.config.n_shared_experts if rocm_aiter_moe_shared_expert_enabled else 0),
+                num_redundant_experts=self.num_redundant_experts,
+            )
+        else:
+            expert_params_mapping = fused_moe_make_expert_params_mapping(
+                model=self.model,
+                ckpt_gate_proj_name="gate_proj",
+                ckpt_down_proj_name="down_proj",
+                ckpt_up_proj_name="up_proj",
+                num_experts=self.config.n_routed_experts
+                + (self.config.n_shared_experts if rocm_aiter_moe_shared_expert_enabled else 0),
+                num_redundant_experts=self.num_redundant_experts,
+            )
 
         tp_rank = get_tensor_model_parallel_rank()
         tp_size = get_tensor_model_parallel_world_size()

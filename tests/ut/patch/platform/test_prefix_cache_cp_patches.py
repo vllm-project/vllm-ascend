@@ -7,6 +7,9 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.single_type_kv_cache_manager import (
+    SlidingWindowManager,
+)
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -14,6 +17,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheTensor,
     MambaSpec,
     MLAAttentionSpec,
+    SlidingWindowMLASpec,
     UniformTypeKVCacheSpecs,
 )
 
@@ -304,6 +308,84 @@ def test_get_kv_cache_coordinator_uses_ascend_for_deepseek_v4(monkeypatch) -> No
     assert coordinator is sentinel
 
 
+class _FakeEagleManager:
+    def __init__(self) -> None:
+        self.use_eagle = False
+
+
+def test_verify_and_split_propagates_eagle_to_managers() -> None:
+    """Regression for DeepSeek-V4 prefix-cache hit rate 0% with MTP/EAGLE.
+
+    The eagle bit must reach each single-type manager: the SWA write path
+    (``cache_blocks`` -> ``reachable_block_mask``) keys the retained checkpoint
+    tail on ``manager.use_eagle``, while the read path
+    (``find_longest_cache_hit``) applies ``drop_eagle_block`` to the same
+    groups. If the manager keeps the default ``use_eagle=False`` the retained
+    tail is one block short of the eagle peek boundary, the SWA group never
+    hits, and the min-over-groups hybrid hit collapses to 0%.
+    """
+    kv_cache_config = _make_deepseek_v4_kv_cache_config()
+
+    coordinator = AscendHybridKVCacheCoordinator.__new__(AscendHybridKVCacheCoordinator)
+    coordinator.kv_cache_config = kv_cache_config
+    coordinator.dcp_world_size = 1
+    coordinator.pcp_world_size = 1
+    coordinator.enable_caching = True
+    # The c128 group (index 1) carries the EAGLE/MTP layers.
+    coordinator.eagle_group_ids = {1}
+
+    coordinator.single_type_managers = (_FakeEagleManager(), _FakeEagleManager())
+
+    coordinator.verify_and_split_kv_cache_groups()
+
+    assert coordinator.single_type_managers[1].use_eagle is True
+    assert coordinator.single_type_managers[0].use_eagle is False
+
+
+def test_verify_and_split_propagates_eagle_to_merged_spec_siblings() -> None:
+    """Upstream ``_annotate_eagle_groups_deepseek_v4`` flags only the single
+    group holding the MTP layer, but the read path merges same-spec groups and
+    applies ``drop_eagle_block`` to the whole merged group. So every sibling
+    sharing that spec must also get ``use_eagle=True`` on the write path, else
+    ``get_cached_block`` (which needs the block cached for *all* group ids)
+    misses and the hit collapses to 0%.
+    """
+    base_config = _make_deepseek_v4_kv_cache_config()
+    # Reuse the c128 spec object so the two c128 groups compare equal and merge
+    # into one attention group in verify_and_split.
+    c128_group_spec = base_config.kv_cache_groups[1].kv_cache_spec
+    kv_cache_config = KVCacheConfig(
+        num_blocks=base_config.num_blocks,
+        kv_cache_tensors=base_config.kv_cache_tensors,
+        kv_cache_groups=[
+            base_config.kv_cache_groups[0],  # c4   -> gid 0 (distinct spec)
+            base_config.kv_cache_groups[1],  # c128 -> gid 1
+            KVCacheGroupSpec(layer_names=["c128_attn_mtp"], kv_cache_spec=c128_group_spec),  # gid 2
+        ],
+    )
+
+    coordinator = AscendHybridKVCacheCoordinator.__new__(AscendHybridKVCacheCoordinator)
+    coordinator.kv_cache_config = kv_cache_config
+    coordinator.dcp_world_size = 1
+    coordinator.pcp_world_size = 1
+    coordinator.enable_caching = True
+    # Only the MTP sibling (gid 2) is flagged, exactly as upstream does.
+    coordinator.eagle_group_ids = {2}
+
+    coordinator.single_type_managers = (
+        _FakeEagleManager(),
+        _FakeEagleManager(),
+        _FakeEagleManager(),
+    )
+
+    coordinator.verify_and_split_kv_cache_groups()
+
+    # Both gid 1 and gid 2 share the c128 spec and merge, so both must be eagle.
+    assert coordinator.single_type_managers[1].use_eagle is True
+    assert coordinator.single_type_managers[2].use_eagle is True
+    assert coordinator.single_type_managers[0].use_eagle is False
+
+
 def test_deepseek_v4_detection_handles_non_mapping_nested_specs() -> None:
     kv_cache_spec = SimpleNamespace(
         kv_cache_specs=[
@@ -343,3 +425,50 @@ def test_ascend_mamba_manager_uses_logical_block_size_with_prefix_caching() -> N
     manager = AscendMambaManager(**manager_kwargs)
 
     assert manager.block_size == mamba_spec.block_size
+
+
+def test_swa_reachable_block_mask_sparse_with_lcm_alignment() -> None:
+    """Regression: when ``scheduler_block_size`` is aligned to ``lcm_block_size``
+    (instead of the raw-block-size LCM), ``SlidingWindowManager.reachable_block_mask``
+    must produce a sparse mask rather than returning ``None``.
+
+    Before the fix, ``alignment_tokens`` was the LCM of raw block_sizes (e.g. 32),
+    making ``need >= per_segment`` always true for Ascend's SWA configuration and
+    the mask returned ``None`` (cache everything). After the fix the alignment is
+    ``lcm_block_size`` (e.g. 4096), which is large enough that only the tail
+    blocks within each segment need caching.
+    """
+    spec = SlidingWindowMLASpec(
+        block_size=32,  # Ascend SWA block_size (--block-size 32)
+        num_kv_heads=1,
+        head_size=512,
+        dtype=torch.float32,
+        sliding_window=128,  # DeepSeek V4 window
+        compress_ratio=1,
+    )
+    alignment_tokens = 4096  # lcm_block_size
+
+    mask = SlidingWindowManager.reachable_block_mask(
+        start_block=0,
+        end_block=256,  # 256 × 32 = 8192 tokens (2 × alignment_tokens)
+        alignment_tokens=alignment_tokens,
+        kv_cache_spec=spec,
+        use_eagle=False,
+        retention_interval=None,
+        num_prompt_tokens=None,
+    )
+
+    # Must produce a sparse mask, not None.
+    assert mask is not None, "should produce sparse mask with lcm alignment"
+
+    true_blocks = sum(mask)
+
+    # need = cdiv(window−1, block_size) = cdiv(127, 32) = 4
+    # per_segment = alignment_tokens // block_size = 4096 // 32 = 128
+    # Each 128-block segment caches the last 4 blocks (= 0 % sparse padding).
+    total_blocks = len(mask)
+    expected = 4 * (total_blocks // 128)
+    assert true_blocks == expected, (
+        f"expected {expected} cached blocks ({4}/{128} per segment), got {true_blocks}/{total_blocks}"
+    )
+    assert true_blocks > 0 and true_blocks < total_blocks, f"mask should be sparse, got {true_blocks}/{total_blocks}"

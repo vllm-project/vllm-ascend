@@ -1,0 +1,110 @@
+#
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+name: Schedule Test Coverage
+
+on:
+  schedule:
+    - cron: "0 18 * * *"
+  workflow_dispatch:
+    inputs:
+      vllm_ascend_ref:
+        description: "vllm-ascend ref (branch, tag, or SHA)"
+        required: false
+        default: "main"
+        type: string
+
+# Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
+# declared as "shell: bash -el {0}" on steps that need to be properly activated.
+# It's used to activate ascend-toolkit environment variables.
+defaults:
+  run:
+    shell: bash -el {0}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  select-full-tests:
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    runs-on: linux-amd64-cpu-8-hk
+    container:
+      image: quay.io/ascend-ci/vllm-ascend:lint
+    outputs:
+      has_tests: ${{ steps.full-scope.outputs.has_tests }}
+      test_groups: ${{ steps.full-scope.outputs.test_groups }}
+      matched_modules: ${{ steps.full-scope.outputs.matched_modules }}
+      vllm_ascend_ref: ${{ steps.resolve-refs.outputs.vllm_ascend_ref }}
+      main_commit: ${{ steps.resolve-refs.outputs.main_commit }}
+      release_tag: ${{ steps.resolve-refs.outputs.release_tag }}
+    steps:
+      - name: Checkout vllm-project/vllm-ascend repo
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.vllm_ascend_ref || 'main' }}
+          fetch-depth: 0
+
+      - name: Resolve refs
+        id: resolve-refs
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "vllm_ascend_ref=${{ github.event.pull_request.head.sha }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "vllm_ascend_ref=${{ inputs.vllm_ascend_ref || 'main' }}" >> "$GITHUB_OUTPUT"
+          fi
+          main_commit="$(tr -d '[:space:]' < .github/vllm-main-verified.commit)"
+          release_tag="$(tr -d '[:space:]' < .github/vllm-release-tag.commit)"
+          [[ "${main_commit}" =~ ^[0-9a-f]{7,40}$ ]] || {
+            echo "::error file=.github/vllm-main-verified.commit::invalid vLLM main commit: ${main_commit}"
+            exit 1
+          }
+          [[ "${release_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-].*)?$ ]] || {
+            echo "::error file=.github/vllm-release-tag.commit::invalid vLLM release tag: ${release_tag}"
+            exit 1
+          }
+          {
+            echo "main_commit=${main_commit}"
+            echo "release_tag=${release_tag}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Select all tests
+        id: full-scope
+        run: |
+          pip install regex pyyaml
+          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
+          python3 .github/workflows/scripts/select_tests.py \
+            --changed-files vllm_ascend/dummy.py \
+            --run-all-modules
+
+  run-full-tests:
+    needs: select-full-tests
+    if: ${{ needs.select-full-tests.outputs.has_tests == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        vllm_version:
+          - ${{ needs.select-full-tests.outputs.release_tag }}
+    uses: ./.github/workflows/_selected_tests.yaml
+    with:
+      vllm: ${{ matrix.vllm_version }}
+      ref: ${{ needs.select-full-tests.outputs.vllm_ascend_ref }}
+      test_groups: ${{ needs.select-full-tests.outputs.test_groups }}
+      enable-coverage: true
+    secrets:
+      OBS_ACCESS_KEY_PRECISION: ${{ secrets.OBS_ACCESS_KEY_PRECISION }}
+      OBS_SECRET_ACCESS_KEY_PRECISION: ${{ secrets.OBS_SECRET_ACCESS_KEY_PRECISION }}

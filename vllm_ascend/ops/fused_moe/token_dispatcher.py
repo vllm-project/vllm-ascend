@@ -29,6 +29,7 @@ from vllm.config import get_current_vllm_config
 from vllm.distributed.parallel_state import get_ep_group
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_forward_context import get_mc2_tokens_capacity
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.comm_utils import async_all_to_all, gather_from_sequence_parallel_region
@@ -120,18 +121,9 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         # Here we need to calculate the global_bs = max_bs_per_rank * ep_world_size to execute
         # dispatch & combine operators with different input num_tokens per rank.
         vllm_config = get_current_vllm_config()
-        scheduler_config = vllm_config.scheduler_config
-        compilation_config = vllm_config.compilation_config
-        speculative_config = vllm_config.speculative_config
         tp_size = vllm_config.parallel_config.tensor_parallel_size
-        uniform_decode_query_len = 1 if not speculative_config else 1 + speculative_config.num_speculative_tokens
-        decode_max_num_seqs = getattr(scheduler_config, "decode_max_num_seqs", 0)
-        max_num_reqs = max(scheduler_config.max_num_seqs, decode_max_num_seqs)
-        if compilation_config.cudagraph_capture_sizes:
-            max_num_tokens = compilation_config.max_cudagraph_capture_size
-        else:
-            max_num_tokens = min(max_num_reqs * uniform_decode_query_len, 512)
-        num_tokens_per_tp_rank = (max_num_tokens + tp_size - 1) // tp_size
+        mc2_tokens_capacity = get_mc2_tokens_capacity()
+        num_tokens_per_tp_rank = mc2_tokens_capacity // tp_size
         _max_global_bs = num_tokens_per_tp_rank * self.ep_world_size
 
         # When allreduce across DP is not skipped, tokens are uniform across ranks:
@@ -283,10 +275,10 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
 
         assert expert_map is not None
         # NOTE: quant_mode differs by quant features:
-        # - A5 MXFP communication uses quant_mode=4 only for MXFP8 currently.
+        # - A5 MXFP communication uses quant_mode=4 only for W8A8MXFP currently.
         if comm_quant_mode is not None:
             quant_mode = comm_quant_mode
-        elif quant_type == QuantType.MXFP8:
+        elif quant_type == QuantType.W8A8MXFP:
             quant_mode = 4
         else:
             quant_mode = 0
@@ -363,9 +355,7 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
         # TODO: After AllGather MXFP4 communication quantization thorough verification, remove this judgment.
         #  MXFP4 keeps dispatch unquantized in AllGather path, and quantizes again inside the MLP path.
         with_quant = (
-            token_dispatch_input.quant.dispatch_with_quant
-            and token_dispatch_input.quant.quant_type != QuantType.MXFP4
-            and token_dispatch_input.quant.quant_type != QuantType.W8A8FP8
+            token_dispatch_input.quant.dispatch_with_quant and token_dispatch_input.quant.quant_type != QuantType.W8A8FP
         )
         is_mxfp = token_dispatch_input.quant.is_mxfp
         hidden_states = token_dispatch_input.hidden_states
@@ -373,12 +363,19 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
         topk_ids = token_dispatch_input.topk_ids
         expert_map = token_dispatch_input.routing.expert_map
         dynamic_scale = token_dispatch_input.routing.pertoken_scale
+        quant_type = token_dispatch_input.quant.quant_type
+        act_quant_type = (
+            token_dispatch_input.quant.mxfp.act_quant_type if token_dispatch_input.quant.mxfp is not None else None
+        )
         global_redundant_expert_num = token_dispatch_input.routing.global_redundant_expert_num
         restore_shape = hidden_states.shape
         # Fuse the first dynamic quant of moe_mlp into initrouting when
         # dispatch_with_quant is on but got a None dynamic_scale.
         if with_quant and dynamic_scale is None:
-            quant_mode = 3 if is_mxfp else 1
+            if quant_type == QuantType.W4A4MXFP:
+                quant_mode = 9
+            else:
+                quant_mode = 3 if is_mxfp else 1
         else:
             quant_mode = -1
 
@@ -409,6 +406,7 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
             expert_tokens_num_flag=True,
             active_expert_range=[first_expert_idx, last_expert_idx],
             quant_mode=quant_mode,
+            act_quant_type=act_quant_type,
         )
         expert_tokens = expert_tokens.to(torch.int64)
         group_list_type = 1  # `count` mode
@@ -426,9 +424,9 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
         )
 
     def token_combine(self, hidden_states, combine_metadata, bias=None):
-        final_hidden_states = torch_npu.npu_moe_token_unpermute(
+        final_hidden_states = DeviceOperator.npu_moe_token_unpermute(
             permuted_tokens=hidden_states,
-            sorted_indices=torch.abs(combine_metadata.expanded_row_idx),
+            sorted_indices=combine_metadata.expanded_row_idx,
             probs=combine_metadata.topk_weights,
         )
         if len(combine_metadata.restore_shape) == 3:
@@ -475,7 +473,10 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
         self,
         token_dispatch_input: MoETokenDispatchInput,
     ):
-        with_quant = token_dispatch_input.quant.is_int_quant or token_dispatch_input.quant.is_fp8
+        use_mxfp_quant = token_dispatch_input.quant.is_mxfp
+        with_quant = token_dispatch_input.quant.dispatch_with_quant
+        dst_type = token_dispatch_input.quant.get_dst_type
+        scale_type = token_dispatch_input.quant.get_scale_type
         hidden_states = token_dispatch_input.hidden_states
         topk_weights = token_dispatch_input.topk_weights
         topk_ids = token_dispatch_input.topk_ids
@@ -493,9 +494,8 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
 
         dynamic_scale_after_all2all = None
         if with_quant:
-            dst_type = torch.float8_e4m3fn if token_dispatch_input.quant.is_fp8 else torch.int8
-            permutated_local_input_tokens, dynamic_scale = torch_npu.npu_dynamic_quant(
-                permutated_local_input_tokens, dst_type=dst_type
+            permutated_local_input_tokens, dynamic_scale = DeviceOperator.npu_dynamic_quant(
+                permutated_local_input_tokens, act_quant_type=dst_type, use_mxfp_quant=use_mxfp_quant
             )
             _, dynamic_scale_after_all2all, permute2_ep_all_to_all_handle = async_all_to_all(
                 dynamic_scale, output_splits, input_splits, self.ep_group
@@ -516,6 +516,8 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
                 dynamic_scale_after_all2all,
                 global_input_tokens_local_experts_indices,
                 with_quant,
+                dst_type,
+                scale_type,
             )
         )
 
@@ -631,17 +633,44 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
         )
 
     def _dispatch_postprocess(
-        self, global_input_tokens, dynamic_scale_after_all2all, global_input_tokens_local_experts_indices, with_quant
+        self,
+        global_input_tokens,
+        dynamic_scale_after_all2all,
+        global_input_tokens_local_experts_indices,
+        with_quant,
+        dst_type,
+        scale_type,
     ):
         # Early return if no local experts or no tokens
         if self.num_local_experts <= 1:
             return global_input_tokens, dynamic_scale_after_all2all, None
 
-        # Handle quantized case
-        if with_quant:
-            assert global_input_tokens_local_experts_indices is not None, (
-                "global_input_tokens_local_experts_indices must be provided"
+        assert global_input_tokens_local_experts_indices is not None, (
+            "global_input_tokens_local_experts_indices must be provided"
+        )
+
+        if scale_type == torch.float8_e8m0fnu:
+            experts_indices_2d_copy = global_input_tokens_local_experts_indices.reshape(
+                global_input_tokens_local_experts_indices.shape[0], 1
             )
+            dynamic_scale_for_routing = dynamic_scale_after_all2all.view(torch.float8_e8m0fnu)
+            global_input_tokens, reversed_global_input_permutation_mapping, _, routed_scale = (
+                torch_npu.npu_moe_init_routing_v2(
+                    global_input_tokens,
+                    experts_indices_2d_copy,
+                    scale=dynamic_scale_for_routing,
+                    active_num=experts_indices_2d_copy.shape[0],
+                    expert_num=self.num_local_experts,
+                    expert_tokens_num_type=1,
+                    expert_tokens_num_flag=True,
+                    active_expert_range=[0, self.num_local_experts],
+                    x_dtype=dst_type,
+                )
+            )
+            dynamic_scale_after_all2all = routed_scale.view(torch.uint8)
+            experts_indices_2d_copy.untyped_storage().resize_(0)
+            return global_input_tokens, dynamic_scale_after_all2all, reversed_global_input_permutation_mapping
+        elif with_quant:
             dynamic_scale_after_all2all, _ = torch_npu.npu_moe_token_permute(
                 dynamic_scale_after_all2all.unsqueeze(-1), global_input_tokens_local_experts_indices
             )
