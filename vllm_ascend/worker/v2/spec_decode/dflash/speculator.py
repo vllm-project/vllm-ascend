@@ -2,12 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any
+from typing import Any, cast
 import logging
 import torch
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.compilation import CUDAGraphMode
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.triton_utils import tl, triton
+from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import (
     DFlashSpeculator,
@@ -69,16 +71,43 @@ class AscendDFlashSpeculator(DFlashSpeculator):
             dtype=torch.int32,
             device=self.device,
         )
+        # 这个地方好好看看
+        # npu needs attn_backends to update full graph params in run_fullgraph.
+        attn_backends: dict[str, type[AttentionBackend]] = {}
+        active_layer_names = self.draft_attn_layer_names
+        for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
+            layer_names = kv_cache_group_spec.layer_names
+            if active_layer_names is not None:
+                layer_names = list(active_layer_names.intersection(layer_names))
+
+            layer_type = cast(type[Any], AttentionLayerBase)
+            attn_layers = get_layers_from_vllm_config(self.vllm_config, layer_type, layer_names)
+
+            for layer_name in layer_names:
+                attn_backends[layer_name] = attn_layers[layer_name].get_attn_backend()
+
+        self.attn_backends = attn_backends
         
+    # def build_draft_attn_metadatas(self, num_reqs_padded, is_draft_model_prefill):
+    #     """Build draft_attn_metadatas for the parallel-drafting draft graph."""
+    #     attn_metadata = self.model_state.attn_metadata
+    #     attn_metadata = {
+    #         name: metadata for name, metadata in attn_metadata.items() if name in self.draft_attn_layer_names
+    #     }
+    #     # DFlash computes all speculative tokens in a single parallel forward pass,
+    #     # so there is only one prefill-style draft attention metadata (no per-step
+    #     # decode metadata like Eagle).
+    #     return [attn_metadata]
+    
     def build_draft_attn_metadatas(self, num_reqs_padded, is_draft_model_prefill):
-        """Build draft_attn_metadatas for the parallel-drafting draft graph."""
-        attn_metadata = self.model_state.attn_metadata
-        attn_metadata = {
-            name: metadata for name, metadata in attn_metadata.items() if name in self.draft_attn_layer_names
-        }
-        # DFlash computes all speculative tokens in a single parallel forward pass,
-        # so there is only one prefill-style draft attention metadata (no per-step
-        # decode metadata like Eagle).
+        num_tokens_padded = num_reqs_padded * self.num_query_per_req
+        with build_attn_metadata_wrapper():
+            attn_metadata = self._build_draft_attn_metadata(
+                num_reqs=num_reqs_padded,
+                num_reqs_padded=num_reqs_padded,
+                num_tokens_padded=num_tokens_padded,
+                causal=self.dflash_causal,
+            )
         return [attn_metadata]
 
     def propose(
