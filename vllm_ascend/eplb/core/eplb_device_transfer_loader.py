@@ -16,13 +16,11 @@
 #
 from enum import Enum
 
-import torch_npu
 import torch.distributed as dist
 from vllm.logger import logger
 from vllm.v1.utils import record_function_or_nullcontext
 
 from vllm_ascend.distributed.parallel_state import get_dynamic_eplb_group
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND
 
 
 class ExpertWeightUpdateState(Enum):
@@ -57,24 +55,12 @@ class D2DExpertWeightLoader:
 
         self.layer_id = layer_id
         self.comm_op_list = []
-        # NZ weights cannot be sent by batch_isend_irecv, and npu_format_cast only accepts the
-        # whole contiguous tensor (not a per-expert NZ slice). Detile the full packed weight
-        # NZ->ND once per layer, then slice ND per expert. Cached for the duration of this task.
-        nz_nd_by_name: dict = {}
         for send_info in expert_send_info:
             dst_rank, global_expert_id_to_send = send_info
             local_expert_id = self.eplb_adaptor.expert_map_per_layer_cpu[layer_id][global_expert_id_to_send].item()
-            for name, src_tensor in zip(
-                self.eplb_adaptor.expert_weight_names,
-                self.eplb_adaptor.expert_param_per_layer[layer_id][local_expert_id],
-            ):
-                if name in self.eplb_adaptor.nz_weight_names:
-                    if name not in nz_nd_by_name:
-                        packed = self.eplb_adaptor.param_dict[f"model.layers.{layer_id}.mlp.experts.{name}"]
-                        # packed is (E, H/2, 2I) transposed NZ; un-transpose to a contiguous NZ
-                        # block, then detile the whole tensor to ND -> (E, 2I, H/2).
-                        nz_nd_by_name[name] = torch_npu.npu_format_cast(packed.transpose(1, 2), ACL_FORMAT_FRACTAL_ND)
-                    src_tensor = nz_nd_by_name[name][local_expert_id]
+            # Each per-expert weight is a standalone, contiguous, storage_offset==0 tensor (NZ for
+            # W4A8MXFP, which batch_isend_irecv accepts directly), so send them as-is.
+            for src_tensor in self.eplb_adaptor.expert_param_per_layer[layer_id][local_expert_id]:
                 self.comm_op_list.append(
                     dist.P2POp(dist.isend, src_tensor, dst_rank, group=self.comm_group.device_group)
                 )

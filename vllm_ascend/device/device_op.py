@@ -921,11 +921,14 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
 
         # W4A8 mxfp
         if mxfp_quant_dtype == QuantType.W4A8MXFP:
+            # weight/scale may be a per-expert list (EPLB 单多单) or a single packed tensor (单单单).
+            weight_arg = weight if isinstance(weight, list) else [weight]
+            scale_arg = weight_scale if isinstance(weight_scale, list) else [weight_scale]
             hidden_states = torch_npu.npu_grouped_matmul(
                 x=[x],
-                weight=[weight],
+                weight=weight_arg,
                 scale=None,
-                antiquant_scale=[weight_scale],
+                antiquant_scale=scale_arg,
                 scale_dtype=None,
                 per_token_scale=[x_scale],
                 per_token_scale_dtype=torch.float8_e8m0fnu,
@@ -1052,20 +1055,20 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         )
         output_dtype = gmm2_kwargs.pop("output_dtype")
 
-        if isinstance(weight, list) and len(weight) != 1:
-            raise ValueError(f"w2 must have a single tensor in MXFP path, but got {len(weight)}.")
-        if isinstance(weight_scale, list) and len(weight_scale) != 1:
-            raise ValueError(f"w2_scale must have a single tensor in MXFP path, but got {len(weight_scale)}.")
+        is_w4a8mxfp = mxfp_quant_dtype == QuantType.W4A8MXFP
+        # W4A8MXFP supports a per-expert weight list (EPLB 单多单); other MXFP paths require a
+        # single tensor.
+        if not is_w4a8mxfp:
+            if isinstance(weight, list) and len(weight) != 1:
+                raise ValueError(f"w2 must have a single tensor in MXFP path, but got {len(weight)}.")
+            if isinstance(weight_scale, list) and len(weight_scale) != 1:
+                raise ValueError(f"w2_scale must have a single tensor in MXFP path, but got {len(weight_scale)}.")
         gmm2_weight = weight if isinstance(weight, list) else [weight]
         gmm2_scale = weight_scale if isinstance(weight_scale, list) else [weight_scale]
 
-        if mxfp_quant_dtype == QuantType.W4A8MXFP:
+        if is_w4a8mxfp:
             gmm2_scale = None  # type: ignore[assignment]
-            gmm2_kwargs.update({"antiquant_scale": [weight_scale]})
-
-        if mxfp_quant_dtype == QuantType.W4A8MXFP:
-            gmm2_scale = None  # type: ignore[assignment]
-            gmm2_kwargs.update({"antiquant_scale": [weight_scale]})
+            gmm2_kwargs.update({"antiquant_scale": weight_scale if isinstance(weight_scale, list) else [weight_scale]})
 
         return torch_npu.npu_grouped_matmul(
             x=[hidden_states],

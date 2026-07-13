@@ -105,7 +105,40 @@ class AscendW4A8MXFPDSDynamicFusedMoEMethod(AscendW4A8MXFPDynamicFusedMoEMethod)
         )
         return param_dict
 
+    @staticmethod
+    def _cast_weight_nz(nd_2d):
+        return torch_npu.npu_format_cast(
+            nd_2d, 29, customize_dtype=torch.float8_e4m3fn, input_dtype=torch_npu.float4_e2m1fn_x2
+        )
+
+    @staticmethod
+    def _process_scale_2d(scale_2d):
+        # scale_2d: (N, K_scale) e8m0 -> (K_scale/2, N, 2) uint8, matching the packed processing.
+        n, k = scale_2d.shape
+        return scale_2d.reshape(n, k // 2, 2).view(torch.uint8).transpose(-3, -2)
+
+    def _build_expert_lists(self, layer):
+        # EPLB List[Tensor] path: each expert is an INDEPENDENT tensor. The matmul accepts a
+        # per-expert NZ weight list only when each element is a standalone 4D-NZ tensor (a slice
+        # of the packed 3D-NZ keeps the packed 5D descriptor and is rejected), so build each
+        # expert from an offset-0 ND clone (see _cast_weight_nz).
+        num_experts = layer.w13_weight.shape[0]
+        w13_nd = layer.w13_weight.data.view(torch.uint8)
+        w2_nd = layer.w2_weight.data.view(torch.uint8)
+        layer.w13_weight_list = [self._cast_weight_nz(w13_nd[e].clone()) for e in range(num_experts)]
+        layer.w2_weight_list = [self._cast_weight_nz(w2_nd[e].clone()) for e in range(num_experts)]
+        layer.w13_weight_scale_list = [
+            self._process_scale_2d(layer.w13_weight_scale.data[e].clone()) for e in range(num_experts)
+        ]
+        layer.w2_weight_scale_list = [
+            self._process_scale_2d(layer.w2_weight_scale.data[e].clone()) for e in range(num_experts)
+        ]
+        del layer.w13_weight, layer.w2_weight, layer.w13_weight_scale, layer.w2_weight_scale
+
     def process_weights_after_loading(self, layer):
+        if self.dynamic_eplb:
+            self._build_expert_lists(layer)
+            return
         layer.w13_weight.data = torch_npu.npu_format_cast(
             layer.w13_weight.data.view(torch.uint8),
             29,

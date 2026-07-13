@@ -159,12 +159,19 @@ def quant_apply_mlp(
                 swiglu_limit=swiglu_limit,
             )
         elif use_gmm_swiglu_quant_fusion:
+            # With EPLB, mxfp weights are a per-expert list fed to the 单多单 matmul; otherwise a
+            # single packed tensor is required.
+            mxfp_expert_list = use_mxfp_quant and dynamic_eplb
+            w1_arg = w1 if mxfp_expert_list else _require_single_tensor_for_swiglu_quant(w1, name="w1")
+            w1_scale_arg = (
+                w1_scale if mxfp_expert_list else _require_single_tensor_for_swiglu_quant(w1_scale, name="w1_scale")
+            )
             # gmm1: gate_up_proj & act_fn: swiglu
             hidden_states, swiglu_out_scale, _ = DeviceOperator.npu_grouped_matmul_swiglu_quant(
                 x=hidden_states,
-                weight=_require_single_tensor_for_swiglu_quant(w1, name="w1"),
+                weight=w1_arg,
                 group_list=cumsum_group_list(group_list, group_list_type, 0),
-                weight_scale=_require_single_tensor_for_swiglu_quant(w1_scale, name="w1_scale"),
+                weight_scale=w1_scale_arg,
                 x_scale=pertoken_scale,
                 bias=None,
                 use_mxfp_quant=use_mxfp_quant,
@@ -285,11 +292,18 @@ def quant_apply_mlp(
                 swiglu_limit=swiglu_limit,
             )
         elif use_gmm_swiglu_quant_fusion:
+            # With EPLB, mxfp weights are a per-expert list fed to the 单多单 matmul; otherwise a
+            # single packed tensor is required.
+            mxfp_expert_list = use_mxfp_quant and dynamic_eplb
+            w1_arg = w1 if mxfp_expert_list else _require_single_tensor_for_swiglu_quant(w1, name="w1")
+            w1_scale_arg = (
+                w1_scale if mxfp_expert_list else _require_single_tensor_for_swiglu_quant(w1_scale, name="w1_scale")
+            )
             hidden_states, swiglu_out_scale, _ = DeviceOperator.npu_grouped_matmul_swiglu_quant(
                 x=hidden_states,
-                weight=_require_single_tensor_for_swiglu_quant(w1, name="w1"),
+                weight=w1_arg,
                 group_list=cumsum_group_list(group_list, group_list_type, 0),
-                weight_scale=_require_single_tensor_for_swiglu_quant(w1_scale, name="w1_scale"),
+                weight_scale=w1_scale_arg,
                 x_scale=pertoken_scale,
                 bias=bias1,
                 use_mxfp_quant=use_mxfp_quant,
