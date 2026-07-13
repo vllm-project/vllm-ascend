@@ -247,6 +247,55 @@ def test_indexer_metadata_builder(batch_spec: BatchSpec) -> None:
         assert metadata.prefill is not None
 
 
+def test_sparse_metadata_builder_fia_padded_dummy_request() -> None:
+    """FIA mixed-batch padding can append a dummy request beyond max_num_seqs."""
+    device = torch.device("cpu")
+    batch_size = 16
+    query_len = 128
+    batch_spec = BatchSpec(
+        seq_lens=[1024] * batch_size,
+        query_lens=[query_len] * batch_size,
+        name="prefill_only",
+    )
+    common = _create_common_attn_metadata(batch_spec, block_size=128, device=device)
+
+    padded_query_start_loc = torch.zeros(
+        batch_size + 2, dtype=torch.int32, device=device
+    )
+    padded_query_start_loc[: batch_size + 1] = common.query_start_loc
+    padded_query_start_loc[batch_size + 1] = common.query_start_loc[batch_size]
+    padded_query_start_loc_cpu = padded_query_start_loc.cpu()
+
+    padded_common = CommonAttentionMetadata(
+        query_start_loc=padded_query_start_loc,
+        query_start_loc_cpu=padded_query_start_loc_cpu,
+        seq_lens=common.seq_lens,
+        _seq_lens_cpu=common._seq_lens_cpu,
+        _num_computed_tokens_cpu=common._num_computed_tokens_cpu,
+        num_reqs=batch_size + 1,
+        num_actual_tokens=common.num_actual_tokens,
+        max_query_len=common.max_query_len,
+        max_seq_len=common.max_seq_len,
+        block_table_tensor=common.block_table_tensor,
+        slot_mapping=common.slot_mapping,
+        causal=True,
+    )
+
+    sparse_builder = _make_sparse_builder(device)
+    sparse_metadata = sparse_builder.build(0, padded_common)
+    assert sparse_metadata.num_prefills == batch_size
+    assert sparse_metadata.num_decodes == 0
+    assert sparse_metadata.prefill is not None
+    assert sparse_metadata.prefill.seq_lens.shape[0] == batch_size
+    assert sparse_metadata.prefill.context_lens.shape[0] == batch_size
+
+    indexer_builder = _make_indexer_builder(device)
+    indexer_metadata = indexer_builder.build(0, padded_common)
+    assert indexer_metadata.num_prefills == batch_size
+    assert indexer_metadata.prefill is not None
+    assert indexer_metadata.prefill.context_lens.shape[0] == batch_size
+
+
 def test_sparse_proj_quant_type_falls_back_to_language_model_prefix() -> None:
     quant_config = SimpleNamespace(
         quant_description={

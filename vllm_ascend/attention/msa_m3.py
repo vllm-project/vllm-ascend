@@ -62,6 +62,43 @@ logger = init_logger(__name__)
 _SPARSE_ATTN_LOGGED = False
 
 
+def _active_decode_num_reqs(
+    num_decodes: int,
+    num_decode_tokens: int,
+    decode_query_len: int,
+) -> int:
+    """Return the number of real decode requests, ignoring FIA/graph padding."""
+    if decode_query_len <= 0:
+        return 0
+    return min(num_decodes, num_decode_tokens // decode_query_len)
+
+
+def _active_prefill_num_reqs(
+    num_prefills: int,
+    num_prefill_tokens: int,
+    query_start_loc_cpu: torch.Tensor,
+    num_decodes: int,
+) -> int:
+    """Return real prefill requests, ignoring FIA/SP tail padding segments."""
+    if num_prefills <= 0 or num_prefill_tokens <= 0:
+        return 0
+    qsl_cpu = query_start_loc_cpu.detach().cpu()
+    num_reqs_fia = int(qsl_cpu.shape[0] - 1)
+    active = 0
+    tokens_accounted = 0
+    for i in range(num_decodes, min(num_reqs_fia, num_decodes + num_prefills)):
+        query_len = int(qsl_cpu[i + 1] - qsl_cpu[i])
+        if query_len <= 0:
+            continue
+        if tokens_accounted + query_len > num_prefill_tokens:
+            break
+        tokens_accounted += query_len
+        active += 1
+    if active > 0:
+        return active
+    return min(1, num_prefills)
+
+
 class AscendMiniMaxM3IndexerBackend(AttentionBackend):
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16, torch.float16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
@@ -207,11 +244,11 @@ class AscendMiniMaxM3IndexerMetadataBuilder(
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> AscendMiniMaxM3IndexerMetadata:
-        num_reqs = common_attn_metadata.num_reqs
         num_tokens = common_attn_metadata.num_actual_tokens
         query_start_loc = common_attn_metadata.query_start_loc
         seq_lens = common_attn_metadata.seq_lens
         block_table = common_attn_metadata.block_table_tensor
+        qsl_cpu = common_attn_metadata.query_start_loc_cpu
 
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(
@@ -221,32 +258,53 @@ class AscendMiniMaxM3IndexerMetadataBuilder(
             )
         )
 
-        context_lens = self.context_len_buffer[:num_reqs]
-        context_lens.copy_(
-            common_attn_metadata.compute_num_computed_tokens(), non_blocking=True
-        )
-
         prefill_metadata: AscendMiniMaxM3IndexerPrefillMetadata | None = None
+        active_prefills = 0
         if num_prefills > 0:
-            prefill_metadata = AscendMiniMaxM3IndexerPrefillMetadata(
-                cu_seqlens_q=(query_start_loc[num_decodes:] - num_decode_tokens).to(
-                    torch.int32
+            active_prefills = _active_prefill_num_reqs(
+                num_prefills, num_prefill_tokens, qsl_cpu, num_decodes
+            )
+            prefill_end = num_decodes + active_prefills
+            prefill_query_lens_cpu = (
+                qsl_cpu[num_decodes + 1 : prefill_end + 1]
+                - qsl_cpu[num_decodes:prefill_end]
+            )
+            prefill_context_lens = self.context_len_buffer[num_decodes:prefill_end]
+            prefill_context_lens.copy_(
+                (
+                    seq_lens[num_decodes:prefill_end].detach().cpu()
+                    - prefill_query_lens_cpu
+                ).to(
+                    device=self.context_len_buffer.device,
+                    dtype=torch.int32,
+                    non_blocking=True,
                 ),
-                seq_lens=seq_lens[num_decodes:],
-                context_lens=context_lens[num_decodes:],
-                block_table=block_table[num_decodes:],
+                non_blocking=True,
+            )
+            cu_seqlens_q = (
+                query_start_loc[num_decodes : prefill_end + 1] - num_decode_tokens
+            ).to(torch.int32)
+            prefill_metadata = AscendMiniMaxM3IndexerPrefillMetadata(
+                cu_seqlens_q=cu_seqlens_q,
+                seq_lens=seq_lens[num_decodes:prefill_end],
+                context_lens=prefill_context_lens,
+                block_table=block_table[num_decodes:prefill_end],
                 max_query_len=common_attn_metadata.max_query_len,
                 max_seq_len=common_attn_metadata.max_seq_len,
             )
 
         decode_metadata: AscendMiniMaxM3IndexerDecodeMetadata | None = None
+        active_decodes = 0
         if num_decodes > 0:
             qsl_cpu = common_attn_metadata.query_start_loc_cpu
             query_lens_cpu = qsl_cpu[1 : num_decodes + 1] - qsl_cpu[:num_decodes]
             decode_query_len = int(query_lens_cpu[0].item())
+            active_decodes = _active_decode_num_reqs(
+                num_decodes, num_decode_tokens, decode_query_len
+            )
             decode_metadata = AscendMiniMaxM3IndexerDecodeMetadata(
-                seq_lens=seq_lens[:num_decodes],
-                block_table=block_table[:num_decodes],
+                seq_lens=seq_lens[:active_decodes],
+                block_table=block_table[:active_decodes],
                 max_seq_len=common_attn_metadata.max_seq_len,
                 decode_query_len=decode_query_len,
             )
@@ -256,9 +314,9 @@ class AscendMiniMaxM3IndexerMetadataBuilder(
             max_seq_len=common_attn_metadata.max_seq_len,
             slot_mapping=common_attn_metadata.slot_mapping,
             num_actual_tokens=num_tokens,
-            num_decodes=num_decodes,
+            num_decodes=active_decodes,
             num_decode_tokens=num_decode_tokens,
-            num_prefills=num_prefills,
+            num_prefills=active_prefills,
             num_prefill_tokens=num_prefill_tokens,
             prefill=prefill_metadata,
             decode=decode_metadata,
@@ -509,11 +567,11 @@ class AscendMiniMaxM3SparseMetadataBuilder(
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> AscendMiniMaxM3SparseMetadata:
-        num_reqs = common_attn_metadata.num_reqs
         num_tokens = common_attn_metadata.num_actual_tokens
         query_start_loc = common_attn_metadata.query_start_loc
         seq_lens = common_attn_metadata.seq_lens
         block_table = common_attn_metadata.block_table_tensor
+        qsl_cpu = common_attn_metadata.query_start_loc_cpu
 
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(
@@ -523,39 +581,59 @@ class AscendMiniMaxM3SparseMetadataBuilder(
             )
         )
 
-        context_lens = self.context_len_buffer[:num_reqs]
-        context_lens.copy_(
-            common_attn_metadata.compute_num_computed_tokens(), non_blocking=True
-        )
-
         prefill_metadata: AscendMiniMaxM3SparsePrefillMetadata | None = None
+        active_prefills = 0
         if num_prefills > 0:
-            prefill_kv_lens = seq_lens[num_decodes:]
+            active_prefills = _active_prefill_num_reqs(
+                num_prefills, num_prefill_tokens, qsl_cpu, num_decodes
+            )
+            prefill_end = num_decodes + active_prefills
+            prefill_kv_lens = seq_lens[num_decodes:prefill_end]
             prefill_cu_seqlens_k = torch.empty(
-                num_prefills + 1, dtype=torch.int32, device=seq_lens.device
+                active_prefills + 1, dtype=torch.int32, device=seq_lens.device
             )
             prefill_cu_seqlens_k[0] = 0
             torch.cumsum(prefill_kv_lens, dim=0, out=prefill_cu_seqlens_k[1:])
-            prefill_metadata = AscendMiniMaxM3SparsePrefillMetadata(
-                cu_seqlens_q=(query_start_loc[num_decodes:] - num_decode_tokens).to(
-                    torch.int32
+            prefill_query_lens_cpu = (
+                qsl_cpu[num_decodes + 1 : prefill_end + 1]
+                - qsl_cpu[num_decodes:prefill_end]
+            )
+            prefill_context_lens = self.context_len_buffer[num_decodes:prefill_end]
+            prefill_context_lens.copy_(
+                (
+                    prefill_kv_lens.detach().cpu() - prefill_query_lens_cpu
+                ).to(
+                    device=self.context_len_buffer.device,
+                    dtype=torch.int32,
+                    non_blocking=True,
                 ),
+                non_blocking=True,
+            )
+            cu_seqlens_q = (
+                query_start_loc[num_decodes : prefill_end + 1] - num_decode_tokens
+            ).to(torch.int32)
+            prefill_metadata = AscendMiniMaxM3SparsePrefillMetadata(
+                cu_seqlens_q=cu_seqlens_q,
                 cu_seqlens_k=prefill_cu_seqlens_k,
                 seq_lens=prefill_kv_lens,
-                context_lens=context_lens[num_decodes:],
-                block_table=block_table[num_decodes:],
+                context_lens=prefill_context_lens,
+                block_table=block_table[num_decodes:prefill_end],
                 max_query_len=common_attn_metadata.max_query_len,
                 max_seq_len=common_attn_metadata.max_seq_len,
             )
 
         decode_metadata: AscendMiniMaxM3SparseDecodeMetadata | None = None
+        active_decodes = 0
         if num_decodes > 0:
             qsl_cpu = common_attn_metadata.query_start_loc_cpu
             query_lens_cpu = qsl_cpu[1 : num_decodes + 1] - qsl_cpu[:num_decodes]
             decode_query_len = int(query_lens_cpu[0].item())
+            active_decodes = _active_decode_num_reqs(
+                num_decodes, num_decode_tokens, decode_query_len
+            )
             decode_metadata = AscendMiniMaxM3SparseDecodeMetadata(
-                seq_lens=seq_lens[:num_decodes],
-                block_table=block_table[:num_decodes],
+                seq_lens=seq_lens[:active_decodes],
+                block_table=block_table[:active_decodes],
                 max_seq_len=common_attn_metadata.max_seq_len,
                 decode_query_len=decode_query_len,
             )
@@ -565,9 +643,9 @@ class AscendMiniMaxM3SparseMetadataBuilder(
             max_seq_len=common_attn_metadata.max_seq_len,
             slot_mapping=common_attn_metadata.slot_mapping,
             num_actual_tokens=num_tokens,
-            num_decodes=num_decodes,
+            num_decodes=active_decodes,
             num_decode_tokens=num_decode_tokens,
-            num_prefills=num_prefills,
+            num_prefills=active_prefills,
             num_prefill_tokens=num_prefill_tokens,
             prefill=prefill_metadata,
             decode=decode_metadata,
