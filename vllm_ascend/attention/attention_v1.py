@@ -847,6 +847,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         sparse_mode,
                         pre_tokens,
                         next_tokens,
+                        sliding_window,
                         c8_k_aq_scale,
                         c8_k_aq_offset,
                         c8_v_aq_scale,
@@ -875,7 +876,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         # Keep the captured block_tables tensor on this affected path.
                         # Non-SWA models preserve the original behavior and continue to refresh
                         # block_tables from attn_metadata.
-                        if not getattr(vllm_config.model_config.hf_text_config, "sliding_window", None):
+                        if not sliding_window:
                             block_tables = attn_metadata[metadata_key].block_tables
                     layer_count += 1
 
@@ -1048,6 +1049,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             sparse_mode,
             pre_tokens,
             next_tokens,
+            self.sliding_window,
         )
         if self.enable_c8_quant and layer is not None:
             attn_params = attn_params + (
