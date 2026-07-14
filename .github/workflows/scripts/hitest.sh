@@ -128,9 +128,6 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYTEST_LIST_FILE="${SCRIPT_DIR}/recommended_pytest_paths.txt"
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PYTEST_LIST_FILE="${SCRIPT_DIR}/recommended_pytest_paths.txt"
 TMP_CASE_JSON=$(mktemp)
 
 echo "${CASE_RET}" > "${TMP_CASE_JSON}"
@@ -157,16 +154,26 @@ def name_to_pytest_target(name: str) -> str:
     return file_path
 
 json_file = sys.argv[1]
-with open(json_file, "r", encoding="utf-8") as f:
-    case_ret = f.read()
-
-if not case_ret:
-    print("ERROR: CASE_RET file empty", file=sys.stderr)
+try:
+    with open(json_file, "r", encoding="utf-8") as f:
+        raw_text = f.read()
+except Exception as e:
+    print(f"ERROR read tmp json file: {e}", file=sys.stderr)
     sys.exit(1)
 
-resp = json.loads(case_ret)
-items = resp.get("data") or []
+if not raw_text.strip():
+    print("ERROR: CASE_RET temp file empty", file=sys.stderr)
+    sys.exit(1)
 
+# 捕获JSON解析异常，打印原始文本定位截断问题
+try:
+    resp = json.loads(raw_text)
+except Exception as e:
+    print(f"ERROR json parse failed: {e}", file=sys.stderr)
+    print(f"RAW JSON CONTENT: {raw_text[:2000]}", file=sys.stderr)
+    sys.exit(1)
+
+items = resp.get("data") or []
 seen = set()
 targets = []
 for item in items:
