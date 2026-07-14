@@ -129,9 +129,14 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYTEST_LIST_FILE="${SCRIPT_DIR}/recommended_pytest_paths.txt"
 
-CASE_RET="${CASE_RET}" python3 <<'PY' > "${PYTEST_LIST_FILE}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PYTEST_LIST_FILE="${SCRIPT_DIR}/recommended_pytest_paths.txt"
+TMP_CASE_JSON=$(mktemp)
+
+echo "${CASE_RET}" > "${TMP_CASE_JSON}"
+
+python3 <<'PY' "${TMP_CASE_JSON}" > "${PYTEST_LIST_FILE}"
 import json
-import os
 import sys
 
 def name_to_pytest_target(name: str) -> str:
@@ -151,9 +156,12 @@ def name_to_pytest_target(name: str) -> str:
         file_path += ".py"
     return file_path
 
-case_ret = os.environ.get("CASE_RET", "")
+json_file = sys.argv[1]
+with open(json_file, "r", encoding="utf-8") as f:
+    case_ret = f.read()
+
 if not case_ret:
-    print("ERROR: CASE_RET is empty", file=sys.stderr)
+    print("ERROR: CASE_RET file empty", file=sys.stderr)
     sys.exit(1)
 
 resp = json.loads(case_ret)
@@ -174,6 +182,8 @@ if not targets:
 else:
     print("\n".join(targets))
 PY
+
+rm -f "${TMP_CASE_JSON}"
 
 if [ $? -ne 0 ]; then
     echo "ERROR: failed to parse case recommend response"
