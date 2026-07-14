@@ -1181,7 +1181,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             # [batch_size, 1]
             return draft_token_ids.view(-1, self.num_speculative_tokens)
 
-        if self.pcp_size * self.dcp_size > 1 and is_prefill:
+        if self.pcp_size > 1 and is_prefill:
             draft_token_ids_list = []
             for _ in range(self.num_speculative_tokens):
                 draft_token_ids_list.append(draft_token_ids)
@@ -1364,7 +1364,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             pcp_manager = getattr(self.runner, "pcp_manager", None)
             long_seq_args = None
             if pcp_manager is not None:
-                first_pass_inputs = pcp_manager.prepare_spec_decode_first_pass_inputs(
+                first_pass_inputs = pcp_manager.prepare_spec_mtp_drafting_inputs(
                     input_ids=self.input_ids[:num_tokens],
                     target_positions=target_positions,
                     target_hidden_states=target_hidden_states,

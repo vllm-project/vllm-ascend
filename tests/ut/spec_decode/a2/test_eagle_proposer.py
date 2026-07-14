@@ -3922,7 +3922,7 @@ class TestEagleProposerSetInputsFirstPass:
                 long_seq_args=(expected_query_lens_d, expected_ori_token_indices_to_sample),
             )
 
-        pcp_manager.prepare_spec_decode_first_pass_inputs.side_effect = prepare_first_pass_inputs
+        pcp_manager.prepare_spec_mtp_drafting_inputs.side_effect = prepare_first_pass_inputs
 
         out_num_tokens, out_token_indices, out_cad, (query_lens_d, ori_token_indices_to_sample) = (
             proposer.set_inputs_first_pass(
@@ -3943,7 +3943,7 @@ class TestEagleProposerSetInputsFirstPass:
         # assert function computed outputs
         assert out_num_tokens == 9
         assert torch.equal(out_token_indices, expected_token_indices)
-        pcp_manager.prepare_spec_decode_first_pass_inputs.assert_called_once()
+        pcp_manager.prepare_spec_mtp_drafting_inputs.assert_called_once()
 
         # assert query_lens_d and ori_token_indices_to_sample
         assert torch.equal(query_lens_d, expected_query_lens_d)
