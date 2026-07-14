@@ -25,16 +25,17 @@ matching the LLM full-graph pattern in :mod:`vllm_ascend.attention.attention_v1`
 from __future__ import annotations
 
 import einops
+import numpy as np
 import torch
 import torch.nn.functional as F
 import torch_npu
 from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention  # type: ignore
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from vllm_ascend.utils import weak_ref_tensors
 from vllm_ascend.worker.encoder_acl_graph import (
     get_encoder_forward_context,
     get_encoder_graph_params,
-    maybe_compute_actual_seq_lengths,
     update_encoder_graph_workspace,
 )
 
@@ -72,6 +73,43 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         )
 
         self.enable_pad = self.head_size > MIN_PAD_SIZE and self.head_size < MAX_PAD_SIZE
+        self.scale_value = self.head_size**-0.5
+
+    @classmethod
+    def maybe_compute_seq_lens(
+        cls,
+        attn_backend: AttentionBackendEnum,
+        cu_seqlens: np.ndarray,
+        device: torch.device,
+    ) -> np.ndarray | None:
+        if cu_seqlens is None:
+            return None
+
+        seq_lens = cu_seqlens[1:] - cu_seqlens[:-1]
+        seq_lens = torch.from_numpy(seq_lens).to("cpu", non_blocking=True)
+
+        return seq_lens
+
+    def _maybe_compute_actual_seq_lengths(
+        self,
+        bsz: int,
+        q_len: int,
+        cu_seqlens: torch.Tensor | None,
+        sequence_lengths: torch.Tensor | None,
+    ) -> tuple[list[int], list[int]]:
+        """Build FIA ``actual_seq_lengths`` as cumulative host-side ``list[int]``."""
+        if sequence_lengths is not None:
+            seq_lens_cpu = sequence_lengths
+            if seq_lens_cpu.device.type != "cpu":
+                seq_lens_cpu = seq_lens_cpu.to("cpu")
+            actual = seq_lens_cpu.cumsum(0).to(torch.int64).tolist()
+        else:
+            cu = self._maybe_compute_cu_seqlens(bsz, q_len, cu_seqlens)
+            if cu.device.type != "cpu":
+                cu = cu.to("cpu")
+            actual = cu[1:].to(torch.int64).tolist()
+
+        return actual, actual
 
     def _reshape_qkv_to_3d(
         self,
@@ -97,6 +135,21 @@ class AscendMMEncoderAttention(MMEncoderAttention):
 
         return query, key, value
 
+    def _maybe_compute_cu_seqlens(
+        self,
+        bsz: int,
+        q_len: int,
+        cu_seqlens: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if cu_seqlens is not None:
+            return cu_seqlens
+
+        # If cu_seqlens is not provided, we create a default one assuming all sequences have the same length.
+        # This is used by models such as Hunyuan-OCR, which always pass None as cu_seqlens and rely on the operator to
+        # compute it internally.
+        cu_seqlens = torch.arange(0, (bsz + 1) * q_len, step=q_len, dtype=torch.int32, device="cpu")
+        return cu_seqlens
+
     def _maybe_pad_qkv(
         self,
         q: torch.Tensor,
@@ -111,21 +164,6 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         k = F.pad(k, (0, pad_len), mode="constant", value=0)
         v = F.pad(v, (0, pad_len), mode="constant", value=0)
         return q, k, v, origin_head_dim
-
-    def _maybe_compute_cu_seqlens(
-        self,
-        bsz: int,
-        q_len: int,
-        cu_seqlens: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        if cu_seqlens is not None and cu_seqlens.device.type == "cpu":
-            return cu_seqlens
-
-        # If cu_seqlens is not provided, we create a default one assuming all sequences have the same length.
-        # This is used by models such as Hunyuan-OCR, which always pass None as cu_seqlens and rely on the operator to
-        # compute it internally.
-        cu_seqlens = torch.arange(0, (bsz + 1) * q_len, step=q_len, dtype=torch.int32, device="cpu")
-        return cu_seqlens
 
     @staticmethod
     def _maybe_unpad_output(
@@ -172,7 +210,7 @@ class AscendMMEncoderAttention(MMEncoderAttention):
             actual_seq_lengths_kv=actual_seq_lengths_kv,
             num_key_value_heads=self.num_kv_heads,
             num_heads=self.num_heads,
-            scale=self.scale,
+            scale=self.scale_value,
             sparse_mode=0,
             pre_tokens=SWA_INT_MAX,
             next_tokens=SWA_INT_MAX,
@@ -197,14 +235,17 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         key: torch.Tensor,
         value: torch.Tensor,
         *,
-        cu_seqlens: torch.Tensor | None = None,
+        seq_lens: torch.Tensor,
+        cu_seqlens: torch.Tensor,
         is_reshaped: bool,
         bsz: int,
         q_len: int,
     ) -> torch.Tensor:
-        actual_seq_lengths_q, actual_seq_lengths_kv = maybe_compute_actual_seq_lengths(
-            num_query_tokens=query.shape[0],
-            cu_seqlens=self._maybe_compute_cu_seqlens(bsz, q_len, cu_seqlens),
+        actual_seq_lengths_q, actual_seq_lengths_kv = self._maybe_compute_actual_seq_lengths(  # TODO
+            bsz,
+            q_len,
+            cu_seqlens,
+            seq_lens,
         )
         q, k, v, origin_head_dim = self._maybe_pad_qkv(query, key, value)
         context_layer = self._run_vit_fia(q, k, v, actual_seq_lengths_q, actual_seq_lengths_kv)
@@ -222,10 +263,12 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         key: torch.Tensor,
         value: torch.Tensor,
         *,
-        cu_seqlens: torch.Tensor | None = None,
+        cu_seqlens: torch.Tensor | None,
+        sequence_lengths: torch.Tensor | None,
         is_reshaped: bool,
         bsz: int,
         q_len: int,
+        kv_len: int,
     ) -> torch.Tensor:
         context = get_encoder_forward_context()
         token_budget = context.token_budget
@@ -233,9 +276,11 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         if token_budget is None or params is None:
             raise RuntimeError("Encoder graph capture state was not initialized (missing token_budget).")
 
-        actual_seq_lengths_q, actual_seq_lengths_kv = maybe_compute_actual_seq_lengths(
-            num_query_tokens=query.shape[0],
-            cu_seqlens=self._maybe_compute_cu_seqlens(bsz, q_len, cu_seqlens),
+        actual_seq_lengths_q, actual_seq_lengths_kv = self._maybe_compute_actual_seq_lengths(
+            bsz,
+            q_len,
+            cu_seqlens,
+            sequence_lengths,
         )
         q, k, v, origin_head_dim = self._maybe_pad_qkv(query, key, value)
 
@@ -257,7 +302,7 @@ class AscendMMEncoderAttention(MMEncoderAttention):
                 num_key_value_heads=self.num_kv_heads,
                 num_heads=self.num_heads,
                 sparse_mode=0,
-                scale=self.scale,
+                scale=self.scale_value,
                 pre_tokens=SWA_INT_MAX,
                 next_tokens=SWA_INT_MAX,
             )
@@ -281,6 +326,9 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         )
         handle = torch.npu.graph_task_group_end(stream)
 
+        vit_layer_idx = context.capture_layer_cursor
+        context.capture_layer_cursor = vit_layer_idx + 1
+        uses_sequence_lengths_host = sequence_lengths is not None
         packed = (
             weak_ref_tensors(q),
             weak_ref_tensors(k),
@@ -288,9 +336,11 @@ class AscendMMEncoderAttention(MMEncoderAttention):
             None,
             None,
             FIA_BLOCK_SIZE,
+            uses_sequence_lengths_host,
+            vit_layer_idx,
             self.num_kv_heads,
             self.num_heads,
-            self.scale,
+            self.scale_value,
             weak_ref_tensors(out),
             weak_ref_tensors(softmax_lse),
         )
@@ -312,7 +362,7 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         key: torch.Tensor,
         value: torch.Tensor,
         cu_seqlens: torch.Tensor | None = None,
-        max_seqlen: torch.Tensor | None = None,
+        max_seqlen: torch.Tensor | None = None,  # Unused on Ascend (upstream API compat)
         sequence_lengths: torch.Tensor | None = None,
     ):
         bsz, q_len = query.size()[:2]
@@ -327,17 +377,13 @@ class AscendMMEncoderAttention(MMEncoderAttention):
                 k,
                 v,
                 cu_seqlens=cu_seqlens,
+                sequence_lengths=sequence_lengths,
                 is_reshaped=is_reshaped,
                 bsz=bsz,
                 q_len=q_len,
+                kv_len=kv_len,
             )
 
         return self._forward_eager_fia(
-            q,
-            k,
-            v,
-            cu_seqlens=cu_seqlens,
-            is_reshaped=is_reshaped,
-            bsz=bsz,
-            q_len=q_len,
+            q, k, v, seq_lens=sequence_lengths, cu_seqlens=cu_seqlens, is_reshaped=is_reshaped, bsz=bsz, q_len=q_len
         )
