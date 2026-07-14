@@ -20,6 +20,7 @@ name: Hitest
 on:
   workflow_dispatch:
   workflow_call:
+    inputs:
       X_APIG_APPCODE:
         type: string
         required: true
