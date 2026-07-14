@@ -59,8 +59,8 @@ class BaseDeviceAdaptor:
     def npu_fused_infer_attention_score(
         cls,
         query: torch.Tensor,
-        key: torch.Tensor | None,
-        value: torch.Tensor | None,
+        key: torch.Tensor,
+        value: torch.Tensor,
         attn_metadata: Any,
         *,
         key_cache: torch.Tensor | None,
@@ -1046,8 +1046,8 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
     def npu_fused_infer_attention_score(
         cls,
         query: torch.Tensor,
-        key: torch.Tensor | None,
-        value: torch.Tensor | None,
+        key: torch.Tensor,
+        value: torch.Tensor,
         attn_metadata: Any,
         *,
         key_cache: torch.Tensor | None,
