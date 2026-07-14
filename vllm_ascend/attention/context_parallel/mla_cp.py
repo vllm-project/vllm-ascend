@@ -588,10 +588,10 @@ class AscendMlaCPImpl(AscendMLAImpl):
 
         attn_out, attn_lse = torch.ops.npu.npu_fused_infer_attention_score(
             q_nope,
-            k_nope_attn,
-            value_attn,
+            k_nope_attn.contiguous(),
+            value_attn.contiguous(),
             query_rope=q_pe,
-            key_rope=k_pe_attn,
+            key_rope=k_pe_attn.contiguous(),
             num_heads=self.num_heads,
             num_key_value_heads=self.num_heads,
             input_layout="TND",
