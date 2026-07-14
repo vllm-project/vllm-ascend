@@ -208,7 +208,7 @@ class TestColumnParallelOpDispatch(unittest.TestCase):
 
 
 class TestRowParallelOpDispatch(unittest.TestCase):
-    """Tests for _get_row_parallel_op factory — share_expert."""
+    """Tests for _get_row_parallel_op — mtp_block, share_expert."""
 
     def setUp(self):
         self.mock_layer = MagicMock()
@@ -229,17 +229,30 @@ class TestRowParallelOpDispatch(unittest.TestCase):
         for p in self._patches:
             p.stop()
 
-    def _get_row_op(self, prefix: str):
+    def _op(self, prefix: str):
         from vllm_ascend.ops.linear_op import _get_row_parallel_op
 
         return _get_row_parallel_op(prefix, self.mock_layer)
+
+    def test_mtp_block_excluded_from_flashcomm2_oproj(self):
+        """No6: mtp_block prefix excluded from FlashComm2 o_proj."""
+        mock_op = MagicMock()
+        self._patches.append(patch("vllm_ascend.ops.linear_op.flashcomm2_enable", return_value=True))
+        self._patches.append(patch("vllm_ascend.ops.linear_op.Flashcomm2OProjRowParallelOp", return_value=mock_op))
+        for p in self._patches[-2:]:
+            p.start()
+        # Normal o_proj should use FlashComm2
+        result = self._op("model.layers.0.self_attn.o_proj")
+        self.assertIs(result, mock_op)
+        # But mtp_block.o_proj should NOT use FlashComm2
+        self.assertIsNone(self._op("model.mtp_block.self_attn.o_proj"))
 
     def test_share_expert_disabled_with_sp_row(self):
         """share_expert / shared_expert prefix → None when SP enabled."""
         self._patches.append(patch("vllm_ascend.ops.linear_op.enable_sp", return_value=True))
         self._patches[-1].start()
-        self.assertIsNone(self._get_row_op("model.layers.0.mlp.share_expert.down_proj"))
-        self.assertIsNone(self._get_row_op("model.layers.0.mlp.shared_expert.down_proj"))
+        self.assertIsNone(self._op("model.layers.0.mlp.share_expert.down_proj"))
+        self.assertIsNone(self._op("model.layers.0.mlp.shared_expert.down_proj"))
 
 
 class TestGetParallelOpShareExpert(unittest.TestCase):

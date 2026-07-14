@@ -357,7 +357,7 @@ class Flashcomm2OProjRowParallelOp(CustomRowParallelOp):
             chunked = x.view(chunk_num, batch_size_per_chunk, x.shape[1])
             if self.otp_size != 1:
                 chunked = chunked[self.group_indices]
-            send_buf = chunked.flatten(1, 2)
+            send_buf = chunked.flatten(1, 2).contiguous().view(-1)
 
             # all-to-all operation parameters
             all2all_tp_size = self.odp_size
@@ -724,7 +724,7 @@ def _get_row_parallel_op(
     if matmul_allreduce_enable():
         return MatmulAllreduceRowParallelOp(layer)
     if flashcomm2_enable():
-        if "o_proj" in prefix or "out_proj" in prefix:
+        if ("o_proj" in prefix or "out_proj" in prefix) and "mtp_block" not in prefix:
             if "vision_model" not in prefix:
                 return Flashcomm2OProjRowParallelOp(layer)
     if enable_sp():
