@@ -3,7 +3,7 @@ import copy
 from collections.abc import Callable
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from functools import partial
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import torch
@@ -491,7 +491,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     def _maybe_share_lm_head(self, model: nn.Module) -> None:
         # some model definition do not define lm_head explicitly
         # and reuse embed_tokens for lm_head, e.g., CohereForCausalLM
-        if self.method in ("eagle", "dflash"):
+        share_target_lm_head = (
+            self.method in ("eagle", "dflash") or getattr(self.model, "has_own_lm_head", True) is False
+        )
+        if share_target_lm_head:
             # For DFlash drafters trained with a reduced draft vocabulary, the
             # draft model ships its own lm_head of shape [draft_vocab_size,
             # hidden] whose rows map to a trained subset of the target vocab via
@@ -522,7 +525,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         " is not trained."
                     )
 
-        if self.method == "mtp" and self.vllm_config.model_config.is_deepseek_mla:
+        if (
+            self.method == "mtp"
+            and self.vllm_config.model_config.is_deepseek_mla
+            and getattr(self.model, "has_own_lm_head", True)
+        ):
             for _, layer_module in self.model.model.layers.items():
                 if torch.equal(layer_module.shared_head.head.weight, model.lm_head.weight):
                     layer_module.shared_head.head = model.lm_head
@@ -1107,7 +1114,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 "num_tokens": num_tokens,
                 "is_prefill": is_prefill_batch,
             }
-            run_draft = partial(self._runnable, **model_inputs)
+            runnable = cast(Callable[..., Any], self._runnable)
+            run_draft = partial(runnable, **model_inputs)
 
             if self.enable_enpu:
                 self._update_full_graph_params_if_needed(forward_context, num_input_tokens, multi_steps_attn_metadata)

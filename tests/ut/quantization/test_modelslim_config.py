@@ -1,6 +1,7 @@
 import json
 import os
 import tempfile
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -37,7 +38,7 @@ class TestAscendModelSlimConfig(TestBase):
             "shard2.weight": "FLOAT",
         }
         self.ascend_config = AscendModelSlimConfig(self.sample_config)
-        self.ascend_config.packed_modules_mapping = None
+        cast(Any, self.ascend_config).packed_modules_mapping = None
 
     def test_init(self):
         self.assertEqual(self.ascend_config.quant_description, self.sample_config)
@@ -417,6 +418,63 @@ class TestQuantPrefixMapper(TestBase):
                 self.assertEqual(prefix, "language_model.model.layers.0.experts")
                 self.assertEqual(get_linear_quant_type(quant_description, prefix, packed_mapping), "W8A8_DYNAMIC")
                 self.assertFalse(config.is_layer_skipped_ascend(prefix, packed_mapping))
+
+    def test_deepseek_v4_mtp_maps_expanded_runtime_layers_to_raw_quant_keys(self):
+        config = AscendModelSlimConfig(
+            {
+                "hc_head_fn": "FLOAT",
+                "mtp.0.attn.wq_a.weight": "W8A8_DYNAMIC",
+                "mtp.0.ffn.shared_experts.w1.weight": "W8A8_DYNAMIC",
+                "mtp.0.ffn.shared_experts.w3.weight": "W8A8_DYNAMIC",
+                "mtp.0.ffn.experts.0.w1.weight": "W4A8_DYNAMIC",
+                "mtp.0.ffn.experts.0.w2.weight": "W4A8_DYNAMIC",
+                "mtp.0.ffn.experts.0.w3.weight": "W4A8_DYNAMIC",
+            }
+        )
+        cases = {
+            "model.layers.43.self_attn.wq_a": "model.mtp.0.self_attn.wq_a",
+            "model.layers.43.mlp.shared_experts.gate_up_proj": ("model.mtp.0.mlp.shared_experts.gate_up_proj"),
+            "model.layers.43.mlp.experts": "model.mtp.0.mlp.experts",
+        }
+
+        for model_type in ("deepseek_v4", "deepseek_mtp"):
+            for prefix, expected in cases.items():
+                with self.subTest(model_type=model_type, prefix=prefix):
+                    self.assertEqual(
+                        config.quant_prefix_mapper(
+                            model_type,
+                            prefix,
+                            num_hidden_layers=43,
+                        ),
+                        expected,
+                    )
+
+    def test_deepseek_v4_mtp_direct_quant_key_takes_precedence(self):
+        config = AscendModelSlimConfig(
+            {
+                "model.layers.43.self_attn.wq_a.weight": "FLOAT",
+                "model.mtp.0.self_attn.wq_a.weight": "W8A8_DYNAMIC",
+            }
+        )
+
+        prefix = config.quant_prefix_mapper(
+            "deepseek_v4",
+            "model.layers.43.self_attn.wq_a",
+            num_hidden_layers=43,
+        )
+
+        self.assertEqual(prefix, "model.layers.43.self_attn.wq_a")
+
+    def test_deepseek_v4_mtp_missing_quant_key_keeps_runtime_prefix(self):
+        config = AscendModelSlimConfig({"model.layers.42.self_attn.wq_a.weight": "W8A8_DYNAMIC"})
+
+        prefix = config.quant_prefix_mapper(
+            "deepseek_mtp",
+            "model.layers.43.self_attn.wq_a",
+            num_hidden_layers=43,
+        )
+
+        self.assertEqual(prefix, "model.layers.43.self_attn.wq_a")
 
     def test_gemma4_packed_modules_mapping_covers_attention_mlp_and_moe(self):
         expected_mapping = {

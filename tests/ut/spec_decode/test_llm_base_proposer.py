@@ -110,3 +110,26 @@ class TestDisablePaddedDrafterBatchWithFullGraph:
         )
 
         proposer._raise_if_padded_drafter_batch_disabled_and_full_graph_enabled()
+
+
+def test_mtp_without_own_lm_head_shares_target_head():
+    proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
+    draft_head = object()
+    target_head = object()
+    proposer.method = "mtp"
+    proposer.model = SimpleNamespace(
+        has_own_lm_head=False,
+        lm_head=draft_head,
+        model=SimpleNamespace(layers={"43": SimpleNamespace()}),
+    )
+    proposer.vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(is_deepseek_mla=True),
+        compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE),
+    )
+    proposer.use_cuda_graph = False
+    proposer.use_eagle = False
+    proposer.enable_enpu = False
+
+    proposer._maybe_share_lm_head(SimpleNamespace(lm_head=target_head))
+
+    assert proposer.model.lm_head is target_head

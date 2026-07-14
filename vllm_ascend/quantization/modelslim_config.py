@@ -365,6 +365,8 @@ QUANT_MODEL_SUBSTR_MAPPINGS = {
     },
 }
 
+_DEEPSEEK_V4_MTP_LAYER_RE = re.compile(r"^model\.layers\.(\d+)\.(.+)$")
+
 
 def get_packed_modules_mapping(model_type: str) -> dict[str, list[str]]:
     """Get packed modules mapping for a model type.
@@ -607,7 +609,30 @@ class AscendModelSlimConfig(QuantizationConfig):
             )
         return f"{prefix}.weight" in self.quant_description
 
-    def quant_prefix_mapper(self, model_type: str, prefix: str) -> str:
+    def _map_deepseek_v4_mtp_prefix(
+        self,
+        prefix: str,
+        packed_modules_mapping: Mapping[str, list[str]],
+        num_hidden_layers: int | None,
+    ) -> str | None:
+        if num_hidden_layers is None:
+            return None
+        match = _DEEPSEEK_V4_MTP_LAYER_RE.match(prefix)
+        if match is None:
+            return None
+
+        mtp_layer_idx = int(match.group(1)) - num_hidden_layers
+        if mtp_layer_idx < 0:
+            return None
+        candidate = f"model.mtp.{mtp_layer_idx}.{match.group(2)}"
+        return candidate if self._has_quant_weight(candidate, packed_modules_mapping) else None
+
+    def quant_prefix_mapper(
+        self,
+        model_type: str,
+        prefix: str,
+        num_hidden_layers: int | None = None,
+    ) -> str:
         self.model_type = model_type
         # Some model paths, e.g. qwen3-vl and qwen3_5_moe MTP drafter,
         # initialize lm_head with prefix="lm_head", while the quant description
@@ -626,6 +651,17 @@ class AscendModelSlimConfig(QuantizationConfig):
                 orig_to_new_substr=substr_mapping or {},
             )
             prefix = hf_to_vllm_mapper._map_name(prefix)
+
+        if model_type in ("deepseek_v4", "deepseek_mtp"):
+            packed_modules_mapping = get_packed_modules_mapping(model_type)
+            if not self._has_quant_weight(prefix, packed_modules_mapping):
+                mtp_prefix = self._map_deepseek_v4_mtp_prefix(
+                    prefix,
+                    packed_modules_mapping,
+                    num_hidden_layers,
+                )
+                if mtp_prefix is not None:
+                    return mtp_prefix
 
         if model_type == "step3p5_mtp" and prefix.startswith("model.layers."):
             # Step3P5 MTP and newly generated Step3P7 W8A8 MTP checkpoints use
@@ -670,7 +706,11 @@ class AscendModelSlimConfig(QuantizationConfig):
             prefix = prefix.replace("self_attn", "attention")
         if model_type in packed_modules_model_mapping:
             self.packed_modules_mapping = packed_modules_model_mapping[model_type]
-        prefix = self.quant_prefix_mapper(model_type, prefix)
+        prefix = self.quant_prefix_mapper(
+            model_type,
+            prefix,
+            num_hidden_layers=getattr(vllm_config.model_config.hf_config, "num_hidden_layers", None),
+        )
 
         if isinstance(layer, LinearBase):
             if self.is_layer_skipped_ascend(prefix, self.packed_modules_mapping):

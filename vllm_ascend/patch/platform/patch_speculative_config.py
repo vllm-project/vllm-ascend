@@ -3,6 +3,8 @@ from typing import TYPE_CHECKING, Any
 from vllm.config.speculative import SpeculativeConfig
 from vllm.utils.import_utils import LazyLoader
 
+from vllm_ascend.models.deepseek_v4_draft import is_deepseek_v4_dspark_config
+
 if TYPE_CHECKING:
     import vllm.model_executor.layers.quantization as me_quant
     from transformers import PretrainedConfig
@@ -14,6 +16,16 @@ else:
 
 def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
     initial_architecture = hf_config.architectures[0]
+    if is_deepseek_v4_dspark_config(hf_config):
+        hf_config.model_type = "deepseek_mtp"
+        hf_config.update(
+            {
+                "ptd_token_id": getattr(hf_config, "dspark_noise_token_id", None),
+                "dspark_num_mtp_layers": getattr(hf_config, "dspark_num_mtp_layers", 3),
+                "architectures": ["DeepSeekV4DSparkMTPModel"],
+            }
+        )
+        return hf_config
     if hf_config.model_type in ("deepseek_v3", "deepseek_v32", "deepseek_v4", "glm_moe_dsa"):
         target_model_type = hf_config.model_type
         hf_config.model_type = "deepseek_mtp"
