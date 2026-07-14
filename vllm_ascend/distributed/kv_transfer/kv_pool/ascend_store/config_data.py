@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -14,6 +14,60 @@ from vllm.v1.core.sched.output import NewRequestData
 
 _GROUPED_BLOCK_HASH_DOMAIN = b"vllm-ascend-grouped-block-hash-v1\0"
 _GROUPED_BLOCK_HASH_LENGTH_PREFIX_BYTES = 4
+
+
+@dataclass(frozen=True)
+class TPMismatchInfo:
+    enabled: bool
+    peer_tp_size: int
+    effective_tp_size: int
+    local_heads_per_rank: int
+    effective_heads_per_rank: int
+    num_sub_keys: int
+
+
+def _as_positive_int(value: Any, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
+def infer_tp_mismatch_info(
+    kv_role: str,
+    extra_config: Mapping[str, Any] | object,
+    local_tp_size: int | object,
+    num_kv_heads: int | object,
+    use_mla: bool,
+    use_hybrid: bool = False,
+) -> TPMismatchInfo:
+    local_tp_size = _as_positive_int(local_tp_size, 1)
+    num_kv_heads = _as_positive_int(num_kv_heads, 1)
+    peer_tp_size = local_tp_size
+    if isinstance(extra_config, Mapping):
+        peer_key = "prefill_tp_size" if kv_role == "kv_consumer" else "decode_tp_size"
+        peer_tp_size = _as_positive_int(extra_config.get(peer_key, local_tp_size), local_tp_size)
+
+    effective_tp_size = max(local_tp_size, peer_tp_size)
+    enabled = (
+        peer_tp_size != local_tp_size
+        and not use_mla
+        and not use_hybrid
+        and num_kv_heads >= effective_tp_size
+        and num_kv_heads % effective_tp_size == 0
+    )
+    local_heads_per_rank = num_kv_heads // local_tp_size if local_tp_size <= num_kv_heads else 1
+    effective_heads_per_rank = num_kv_heads // effective_tp_size if enabled else local_heads_per_rank
+    num_sub_keys = local_heads_per_rank // effective_heads_per_rank if enabled else 1
+    return TPMismatchInfo(
+        enabled=enabled,
+        peer_tp_size=peer_tp_size,
+        effective_tp_size=effective_tp_size,
+        local_heads_per_rank=local_heads_per_rank,
+        effective_heads_per_rank=effective_heads_per_rank,
+        num_sub_keys=num_sub_keys,
+    )
 
 
 # Parameters related to the key
