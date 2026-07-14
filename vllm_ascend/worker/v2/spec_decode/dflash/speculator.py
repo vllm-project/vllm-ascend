@@ -7,13 +7,11 @@ from typing import Any
 import torch
 from vllm.config import VllmConfig
 from vllm.triton_utils import tl, triton
-from vllm.v1.attention.backends.utils import PAD_SLOT_ID
-from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
+from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import (
     DFlashSpeculator,
 )
 
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
 
 
@@ -28,19 +26,12 @@ class AscendDFlashSpeculator(DFlashSpeculator):
         block_tables: Any,
     ) -> None:
         super().set_attn(model_state, kv_cache_config, block_tables)
-        if vllm_version_is("0.24.0"):
-            self.context_slot_mapping = torch.zeros(
-                self.max_num_tokens,
-                dtype=torch.int32,
-                device=self.device,
-            )
-        else:
-            self._context_slot_mappings = torch.zeros(
-                len(self.draft_kv_cache_group_ids),
-                self.max_num_tokens,
-                dtype=torch.int32,
-                device=self.device,
-            )
+        self._context_slot_mappings = torch.zeros(
+            len(self.draft_kv_cache_group_ids),
+            self.max_num_tokens,
+            dtype=torch.int32,
+            device=self.device,
+        )
 
     def propose(
         self,
@@ -213,69 +204,3 @@ def _prepare_dflash_inputs_kernel_ascend(
         q_pad_start = num_reqs * num_query_per_req
         for i in range(q_pad_start, max_num_tokens):
             tl.store(out_query_slot_mapping_ptr + i, PAD_SLOT_ID)
-
-
-def prepare_dflash_inputs_ascend(
-    input_buffers: InputBuffers,
-    query_slot_mapping: torch.Tensor,
-    context_positions: torch.Tensor,
-    context_slot_mapping: torch.Tensor,
-    sample_indices: torch.Tensor,
-    sample_pos: torch.Tensor,
-    sample_idx_mapping: torch.Tensor,
-    input_batch: InputBatch,
-    num_sampled: torch.Tensor,
-    num_rejected: torch.Tensor,
-    last_sampled: torch.Tensor,
-    next_prefill_tokens: torch.Tensor,
-    block_table: torch.Tensor,
-    block_size: int,
-    parallel_drafting_token_id: int,
-    num_query_per_req: int,
-    num_speculative_steps: int,
-    max_num_reqs: int,
-    max_num_tokens: int,
-    max_model_len: int | None = None,
-    sample_from_anchor: bool = False,
-) -> None:
-    """Launch the Ascend kernel for the v0.24 DFlash caller."""
-    num_reqs = input_batch.num_reqs
-    assert num_reqs > 0
-    max_target_query_len = int(input_batch.num_scheduled_tokens.max())
-    max_tokens_per_req = max_target_query_len + num_query_per_req
-    block_size_triton = min(256, triton.next_power_of_2(max(1, max_tokens_per_req)))
-    num_blocks = triton.cdiv(max_tokens_per_req, block_size_triton)
-    if max_model_len is None:
-        # v0.24 did not clamp query positions in this kernel.
-        max_model_len = 2**31 - 1
-    _prepare_dflash_inputs_kernel_ascend[(num_reqs, num_blocks)](
-        input_buffers.input_ids,
-        input_buffers.positions,
-        input_buffers.query_start_loc,
-        input_buffers.seq_lens,
-        query_slot_mapping,
-        context_positions,
-        context_slot_mapping,
-        sample_indices,
-        sample_pos,
-        sample_idx_mapping,
-        input_batch.positions,
-        input_batch.query_start_loc,
-        input_batch.idx_mapping,
-        last_sampled,
-        next_prefill_tokens,
-        num_sampled,
-        num_rejected,
-        block_table,
-        block_table.stride(0),
-        parallel_drafting_token_id,
-        block_size,
-        num_query_per_req,
-        num_speculative_steps,
-        max_num_reqs,
-        max_num_tokens,
-        max_model_len,
-        SAMPLE_FROM_ANCHOR=sample_from_anchor,
-        PAD_SLOT_ID=PAD_SLOT_ID,
-        BLOCK_SIZE=block_size_triton,
-    )
