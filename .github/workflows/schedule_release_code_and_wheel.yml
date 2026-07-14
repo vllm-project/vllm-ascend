@@ -258,6 +258,87 @@ jobs:
           path: dist/
 
 
+  build_and_release_wheel_a5:
+    name: build and release wheel (A5)
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+        python-version: ["3.12"]
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: checkout vllm-ascend
+        if: ${{ github.event_name != 'workflow_dispatch' }}
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: checkout vllm-ascend ${{ inputs.tag }}
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          ref: ${{ inputs.tag }}
+
+      - name: Free up disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
+        with:
+          tool-cache: true
+          docker-images: false
+
+      - name: Build wheel
+        run: |
+          ls
+          docker build -f ./.github/workflows/dockerfiles/Dockerfile.buildwheel.a5 \
+          --build-arg PY_VERSION=${{ matrix.python-version }} \
+          -t wheel-a5:v1 .
+          docker run --rm \
+          -u "$(id -u):$(id -g)" \
+          -v "$(pwd):/outpwd" \
+          wheel-a5:v1 \
+          bash -c "cp -r /workspace/vllm-ascend/dist /outpwd"
+          ls dist
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Repair wheels with auditwheel
+        run: |
+          python3 -m pip install auditwheel patchelf
+          python3 .github/workflows/scripts/wheel/auto_exclude.py dist
+          ls dist
+
+      - name: Verify automatic platform tags
+        run: |
+          cd dist
+          for wheel in *.whl; do
+            echo "verification file: $wheel"
+            auditwheel show "$wheel"
+          done
+
+      - name: Generate variant wheels
+        env:
+          WHEEL_FILE: dist
+          PROJECT_TOML: .github/workflows/scripts/wheel/pyproject.toml
+          OUTPUT_DIR: dist/variants
+        run: |
+          pip install build git+https://github.com/wheelnext/variantlib.git --quiet
+          mkdir -p dist/variants
+          python3 .github/workflows/scripts/wheel/make_variant.py \
+            -c .github/workflows/scripts/wheel/config.json \
+            -l a5
+          echo "Generated variant wheels:"
+          ls dist/variants/
+
+      - name: Archive wheel
+        uses: actions/upload-artifact@v7
+        with:
+          name: vllm-ascend-a5-${{ matrix.os }}-py${{ matrix.python-version }}-wheel
+          path: dist/
+
+
   build_and_release_wheel_310p:
     name: build and release wheel (310P)
     strategy:
@@ -341,7 +422,7 @@ jobs:
 
   generate_and_upload_variant_index:
     name: generate and upload variant index
-    needs: [build_and_release_wheel, build_and_release_wheel_a3, build_and_release_wheel_310p]
+    needs: [build_and_release_wheel, build_and_release_wheel_a3, build_and_release_wheel_a5,build_and_release_wheel_310p]
     if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-24.04
     steps:
