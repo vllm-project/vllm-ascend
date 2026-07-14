@@ -130,6 +130,9 @@ from vllm_ascend.patch.worker.patch_draft_quarot import patch_load_weights
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.sample.sampler import AscendSampler
 from vllm_ascend.spec_decode import get_spec_decode_method
+from vllm_ascend.spec_decode.deepseek_v4_dspark_proposer import (
+    AscendDeepSeekV4DSparkProposer,
+)
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
 from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
 from vllm_ascend.spec_decode.dspark_proposer import AscendDsparkProposer
@@ -333,6 +336,7 @@ class NPUModelRunner(GPUModelRunner):
         self.max_num_reqs = self.scheduler_config.max_num_seqs
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
+        self._num_reqs_across_dp: torch.Tensor | None = None
 
         self.sampler = AscendSampler()
         self.attn_state: AscendAttentionState | None = None
@@ -714,9 +718,19 @@ class NPUModelRunner(GPUModelRunner):
         # FIXME: Restore the `or self.vllm_config.model_config.enforce_eager` here
         # immediately once the other two flags are no longer needed.
         if self.dp_size == 1:
+            if not is_draft_model:
+                self._num_reqs_across_dp = torch.tensor(
+                    [self.input_batch.num_reqs], device="cpu", dtype=torch.int32
+                )
             return num_tokens, None, cudagraph_mode
 
         if should_skip_allreduce_across_dp_group(self.vllm_config, is_draft_model):
+            if not is_draft_model:
+                self._num_reqs_across_dp = torch.tensor(
+                    [self.input_batch.num_reqs] * self.dp_size,
+                    device="cpu",
+                    dtype=torch.int32,
+                )
             num_tokens_after_padding = torch.tensor([num_tokens] * self.dp_size, device="cpu", dtype=torch.int32)
             return num_tokens, num_tokens_after_padding, cudagraph_mode
 
@@ -728,9 +742,11 @@ class NPUModelRunner(GPUModelRunner):
             if self.ascend_config.dp_allreduce_on_npu
             else ("cpu", get_dp_group().cpu_group)
         )
-        packed_tensor = torch.zeros(2, self.dp_size, device=device_str, dtype=torch.int32)
+        packed_tensor = torch.zeros(3, self.dp_size, device=device_str, dtype=torch.int32)
         packed_tensor[0][self.dp_rank] = num_tokens
         packed_tensor[1][self.dp_rank] = cudagraph_mode.value
+        if not is_draft_model:
+            packed_tensor[2][self.dp_rank] = self.input_batch.num_reqs
         dist.all_reduce(packed_tensor, group=group)
         if device_str == "npu":
             packed_tensor = packed_tensor.cpu()
@@ -739,9 +755,30 @@ class NPUModelRunner(GPUModelRunner):
         num_tokens_across_dp = packed_tensor[0, :]
         max_tokens_across_dp = int(num_tokens_across_dp.max().item())
         synced_cudagraph_mode = CUDAGraphMode(_post_process_cudagraph_mode(packed_tensor))
-
-        # Create a tensor for num_tokens_after_padding
-        if allow_dp_padding or is_draft_model:
+        if not is_draft_model:
+            self._num_reqs_across_dp = packed_tensor[2, :].cpu()
+        uneven_dspark_batch = (
+            not is_draft_model
+            and isinstance(
+                getattr(self, "drafter", None),
+                AscendDeepSeekV4DSparkProposer,
+            )
+            and not torch.equal(
+                num_tokens_across_dp,
+                num_tokens_across_dp[:1].expand_as(num_tokens_across_dp),
+            )
+        )
+        if (
+            uneven_dspark_batch
+            and synced_cudagraph_mode == CUDAGraphMode.PIECEWISE
+        ):
+            synced_cudagraph_mode = CUDAGraphMode.NONE
+        if (
+            synced_cudagraph_mode != CUDAGraphMode.NONE
+            or allow_dp_padding
+            or is_draft_model
+            or uneven_dspark_batch
+        ):
             num_tokens_after_padding = torch.tensor(
                 [max_tokens_across_dp] * self.dp_size, device="cpu", dtype=torch.int32
             )
@@ -855,6 +892,8 @@ class NPUModelRunner(GPUModelRunner):
         This function is only designed to satisfied the constraint that when the layout is TND,
         the first dimension of `hidden_states` must equal the last element of `actual_seq_lengths_q`.
         """
+        if self.use_compress and cudagraph_runtime_mode == CUDAGraphMode.NONE:
+            return num_reqs
         # TODO: need refactor later, related to vllm PR #34043 this pr delete func
         # relax_for_mixed_batch_cudagraphs, num_reqs no longer equals the actual number of requests.
         if cudagraph_runtime_mode == CUDAGraphMode.FULL and \
@@ -1813,7 +1852,13 @@ class NPUModelRunner(GPUModelRunner):
         num_draft_tokens = torch.empty_like(cu_num_draft_tokens)
         num_draft_tokens[:1] = cu_num_draft_tokens[:1]
         num_draft_tokens[1:] = cu_num_draft_tokens[1:] - cu_num_draft_tokens[:-1]
-        max_valid_width = num_draft_tokens[: sampled_token_ids.shape[0]] + 1
+        num_sampled_rows = sampled_token_ids.shape[0]
+        if num_draft_tokens.shape[0] < num_sampled_rows:
+            num_draft_tokens = nn.functional.pad(
+                num_draft_tokens,
+                (0, num_sampled_rows - num_draft_tokens.shape[0]),
+            )
+        max_valid_width = num_draft_tokens[:num_sampled_rows] + 1
         columns = torch.arange(
             sampled_token_ids.shape[1],
             device=sampled_token_ids.device,
@@ -2422,6 +2467,7 @@ class NPUModelRunner(GPUModelRunner):
 
                 if (
                     cudagraph_mode == CUDAGraphMode.FULL
+                    or num_tokens_padded != num_tokens_unpadded
                     or (enable_sp() and not self.model_config.use_mla)
                     and self.pcp_size * self.dcp_size == 1
                 ):
@@ -3225,8 +3271,7 @@ class NPUModelRunner(GPUModelRunner):
             _, num_tokens_across_dp, synced_cudagraph_mode = self._sync_metadata_across_dp(
                 num_tokens=num_tokens_padded,
                 cudagraph_mode=cudagraph_mode,
-                allow_dp_padding=((cudagraph_mode != CUDAGraphMode.NONE)
-                                  or enable_sp(self.vllm_config)
+                allow_dp_padding=(enable_sp(self.vllm_config)
                                   or oproj_tp_enable()
                                   or embedding_tp_enable()),
             )
@@ -3837,13 +3882,24 @@ class NPUModelRunner(GPUModelRunner):
                 if hasattr(self.drafter, "model") and hasattr(self.drafter.model, "compute_logits"):
                     return self.drafter.model.compute_logits(hidden_states[dummy_indices])
 
+            num_actual_tokens = num_tokens_padded
+            if (
+                isinstance(
+                    getattr(self, "drafter", None),
+                    AscendDeepSeekV4DSparkProposer,
+                )
+                and self._num_reqs_across_dp is not None
+                and int(self._num_reqs_across_dp[self.dp_rank].item()) == 0
+            ):
+                num_actual_tokens = 0
+
             with set_ascend_forward_context(
                 attn_metadata,
                 self.vllm_config,
                 num_tokens=num_tokens_padded,
                 num_tokens_across_dp=num_tokens_across_dp,
                 in_profile_run=is_profile,
-                num_actual_tokens=num_tokens_padded,
+                num_actual_tokens=num_actual_tokens,
                 aclgraph_runtime_mode=cudagraph_runtime_mode,
                 batch_descriptor=batch_desc,
                 model_instance=self.model,
@@ -3861,7 +3917,7 @@ class NPUModelRunner(GPUModelRunner):
             dummy_compute_logits(hidden_states)
 
             if self.drafter and not profile_cpp:
-                self.drafter.dummy_run(
+                drafter_dummy_run_kwargs: dict[str, Any] = dict(
                     num_tokens=num_tokens_padded,
                     with_prefill=with_prefill,
                     num_reqs=num_reqs_padded,
@@ -3872,6 +3928,9 @@ class NPUModelRunner(GPUModelRunner):
                     in_graph_capturing=not force_attention,
                     is_profile=is_profile,
                 )
+                if isinstance(self.drafter, AscendDeepSeekV4DSparkProposer):
+                    drafter_dummy_run_kwargs["is_graph_capturing"] = is_graph_capturing
+                self.drafter.dummy_run(**drafter_dummy_run_kwargs)
             if is_profile and self.dynamic_eplb:
                 self.eplb_updator.adaptor.clear_all_moe_loads()
             if not is_profile and self.dynamic_eplb:
@@ -5284,12 +5343,16 @@ class NPUModelRunner(GPUModelRunner):
             and self.drafter is not None
             and (
                 self.speculative_config.use_eagle()
+                or isinstance(self.drafter, AscendDeepSeekV4DSparkProposer)
                 or self.speculative_config.uses_extract_hidden_states()
             )
         ):
             assert isinstance(
                 self.drafter,
-                AscendEagleProposer | AscendDflashProposer | AscendExtractHiddenStatesProposer,
+                AscendEagleProposer
+                | AscendDflashProposer
+                | AscendDeepSeekV4DSparkProposer
+                | AscendExtractHiddenStatesProposer,
             )
             self.drafter.initialize_cudagraph_keys(cudagraph_mode)
 
@@ -5299,13 +5362,22 @@ class NPUModelRunner(GPUModelRunner):
             for _, descs in capture_descs
             for desc in descs
         })
+        draft_capture_sizes = capture_sizes
+        if self.speculative_config and self.drafter is not None:
+            get_draft_capture_sizes = getattr(
+                self.drafter, "get_cudagraph_capture_sizes", None
+            )
+            if get_draft_capture_sizes is not None:
+                draft_capture_sizes = sorted(
+                    set(capture_sizes).union(get_draft_capture_sizes())
+                )
 
         # NOTE: Since aclgraph_batch_sizes cannot be determined until here,
         # we set the graph params right before initializing the keys.
         if self.use_aclgraph:
             set_graph_params(capture_sizes)
             if self.speculative_config:
-                set_draft_graph_params(capture_sizes)
+                set_draft_graph_params(draft_capture_sizes)
 
     def capture_model(self) -> int:
         """Capture NPU graphs and return actual graph pool memory bytes consumed."""
