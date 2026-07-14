@@ -6,7 +6,7 @@ Qwen3.5-27B and Qwen3.6-27B are dense hybrid Mamba-Transformer language models i
 
 This document will demonstrate the main validation steps for the models, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, as well as accuracy and performance evaluation.
 
-It is **strongly recommended to use the latest release candidate (rc) version or the latest official version** of `vllm-ascend`. As a minimum-version requirement, `Qwen3.5-27B` is first supported in `vllm-ascend:v0.17.0rc1`, and `Qwen3.6-27B` is first supported in `vllm-ascend:v0.18.0rc1`.
+It is **strongly recommended to use the latest release candidate (rc) version or the latest official version** of `vllm-ascend`. As a minimum-version requirement, `Qwen3.5-27B` is first supported in `vllm-ascend:v0.17.0rc1`, and `Qwen3.6-27B` is first supported in `vllm-ascend:v0.18.0rc1`. Support for Atlas inference products starts from `vllm-ascend:v0.23.0rc1`.
 
 ## 2 Supported Features
 
@@ -40,7 +40,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
 
-It is **recommended to use the latest release candidate (rc) version or the latest official version** of the `vllm-ascend` image to ensure the best compatibility and access to the latest features. As a minimum-version requirement, use `vllm-ascend:v0.17.0rc1` (or a later version) for `Qwen3.5-27B`, and `vllm-ascend:v0.18.0rc1` (or a later version) for `Qwen3.6-27B`. For `Qwen3.6-27B` on Atlas 800 A3, please use the matching `v0.18.0rc1-a3` (or a later `-a3`) image.
+It is **recommended to use the latest release candidate (rc) version or the latest official version** of the `vllm-ascend` image to ensure the best compatibility and access to the latest features. As a minimum-version requirement, use `vllm-ascend:v0.17.0rc1` (or a later version) for `Qwen3.5-27B`, and `vllm-ascend:v0.18.0rc1` (or a later version) for `Qwen3.6-27B`. For `Qwen3.6-27B` on Atlas 800 A3, please use the matching `v0.18.0rc1-a3` (or a later `-a3`) image. For Atlas inference products, use `vllm-ascend:v0.23.0rc1-310p` (or a later `-310p`) image.
 
 === "A3 series"
 
@@ -87,6 +87,37 @@ It is **recommended to use the latest release candidate (rc) version or the late
 
     ```bash
     export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
+    docker run --rm \
+        --name vllm-ascend \
+        --shm-size=1g \
+        --net=host \
+        --device /dev/davinci0 \
+        --device /dev/davinci1 \
+        --device /dev/davinci2 \
+        --device /dev/davinci3 \
+        --device /dev/davinci4 \
+        --device /dev/davinci5 \
+        --device /dev/davinci6 \
+        --device /dev/davinci7 \
+        --device /dev/davinci_manager \
+        --device /dev/devmm_svm \
+        --device /dev/hisi_hdc \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v /root/.cache:/root/.cache \
+        -it $IMAGE bash
+    ```
+
+=== "Atlas inference products"
+
+    Start the docker image on your each node.
+
+    ```bash
+    export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p
     docker run --rm \
         --name vllm-ascend \
         --shm-size=1g \
@@ -230,6 +261,60 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
     --async-scheduling
     ```
 
+=== "Atlas inference products (Qwen3.5)"
+
+    Startup Command:
+
+    ```bash
+    #!/bin/sh
+    # Load model from ModelScope to speed up download
+    export VLLM_USE_MODELSCOPE=True
+
+    # Model weight path; can be a ModelScope model id or a local directory path
+    export MODEL_PATH=/home/data/Qwen3.5-27B-W8A8/
+
+    vllm serve $MODEL_PATH \
+    --host 127.0.0.1 \
+    --port 1025 \
+    --tensor-parallel-size 4 \
+    --served-model-name qwen3.5 \
+    --max-num-seqs 128 \
+    --max-model-len 16384 \
+    --trust-remote-code \
+    --gpu-memory-utilization 0.90 \
+    --mamba-ssm-cache-dtype float16 \
+    --speculative-config '{"method": "qwen3_5_mtp","num_speculative_tokens":1}' \
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,8]}' \
+    --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex": false}}'
+    ```
+
+=== "Atlas inference products (Qwen3.6)"
+
+    Startup Command:
+
+    ```bash
+    #!/bin/sh
+    # Load model from ModelScope to speed up download
+    export VLLM_USE_MODELSCOPE=True
+
+    # Model weight path; can be a ModelScope model id or a local directory path
+    export MODEL_PATH=/home/data/Qwen3.6-27B-W8A8/
+
+    vllm serve $MODEL_PATH \
+    --host 127.0.0.1 \
+    --port 1025 \
+    --tensor-parallel-size 4 \
+    --served-model-name qwen3.6 \
+    --max-num-seqs 128 \
+    --max-model-len 16384 \
+    --trust-remote-code \
+    --gpu-memory-utilization 0.90 \
+    --mamba-ssm-cache-dtype float16 \
+    --speculative-config '{"method": "qwen3_5_mtp","num_speculative_tokens":1}' \
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,8]}' \
+    --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex": false}}'
+    ```
+
 Key Parameter Descriptions:
 
 - `--data-parallel-size 1` and `--tensor-parallel-size 2` are common settings for data parallelism (DP) and tensor parallelism (TP) sizes.
@@ -243,9 +328,11 @@ Key Parameter Descriptions:
 - `--no-enable-prefix-caching` indicates that prefix caching is disabled. The current implementation of hybrid kv cache for Qwen3.5-27B / Qwen3.6-27B may result in a very large effective `block_size` when prefix caching is enabled (e.g., 2048), which means any prefix shorter than `block_size` will never be cached. If your workload has many short repeated prefixes, consider keeping prefix caching disabled. For related issues, see the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).
 - `--quantization ascend` indicates that quantization is used. To disable quantization, remove this option.
 - `--speculative-config` uses `qwen3_5_mtp` for both `Qwen3.5-27B` and `Qwen3.6-27B` because they share the same MTP head design.
+- `--mamba-ssm-cache-dtype` sets the data type of the Mamba SSM cache. On Atlas inference products, only `float16` is supported.
 - `--compilation-config` contains configurations related to the aclgraph graph mode. The most significant configurations are `"cudagraph_mode"` and `"cudagraph_capture_sizes"`, which have the following meanings:
     - `"cudagraph_mode"`: represents the specific graph mode. Currently, `"PIECEWISE"` and `"FULL_DECODE_ONLY"` are supported. The graph mode is mainly used to reduce the cost of operator dispatch. Currently, `"FULL_DECODE_ONLY"` is recommended.
-    - `"cudagraph_capture_sizes"`: represents different levels of graph modes. The default value is `[1, 2, 4, 8, 16, 24, 32, 40,..., --max-num-seqs]`. In the graph mode, the input for graphs at different levels is fixed, and inputs between levels are automatically padded to the next level. Currently, the default setting is recommended. Only in some scenarios is it necessary to set this separately to achieve optimal performance.
+    - `"cudagraph_capture_sizes"`: represents different levels of graph modes. The default value is `[1, 2, 4, 8, 16, 24, 32, 40,..., --max-num-seqs]`. In the graph mode, the input for graphs at different levels is fixed, and inputs between levels are automatically padded to the next level. Currently, the default setting is recommended. Only in some scenarios is it necessary to set this separately to achieve optimal performance. On Atlas inference products, when tensor parallelism (TP) is enabled, hardware event-id constraints allow at most two capture sizes (for example, `[1, 8]`).
+- `--additional-config` with `"ascend_compilation_config": {"enable_npugraph_ex": false}` is required on Atlas inference products because `enable_npugraph_ex` is not supported on this platform.
 
 Common Issues Tip: If you encounter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
 
@@ -682,6 +769,8 @@ After about several minutes, you can get the performance evaluation result.
 > **Note**: The following configurations are validated in specific test environments and are for reference only. The optimal configuration depends on factors such as maximum input/output length, prefix cache hit rate, precision requirements, and deployment machine ratios. It is recommended to refer to [Section 9.2](#92-tuning-guidelines) for tuning based on actual conditions.
 >
 > **Parallelism Strategy**: `Qwen3.5-27B-w8a8` and `Qwen3.6-27B-w8a8` are only ~30 GB and easily fit in a single NPU (64 GB HBM per NPU). Following the **DP-first** principle, **TP=2 is the recommended default** for most scenarios, and the remaining NPUs should be allocated to DP for parallel request batches. **TP=8 is only recommended for ultra-long context (256K+) scenarios**, where it shards the KV cache across 8 NPUs to maximize the available context window per rank. For `Qwen3.6-27B-w8a8`, you can also raise `--max-model-len` up to 262144 in the same TP/DP layout.
+>
+> **Atlas inference products**: Currently only the TP scenario is supported. Choose **TP=2** or **TP=4** according to the available devices. Configure `--max-model-len` and `--max-num-seqs` based on the actual workload; setting them too high may cause OOM.
 
 #### Table 1: Scenario Overview
 
