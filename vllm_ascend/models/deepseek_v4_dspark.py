@@ -14,8 +14,6 @@ from collections.abc import Iterable
 import regex as re
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from safetensors.torch import load_file
 from transformers import PretrainedConfig
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
@@ -35,18 +33,15 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.utils import PPMissingLayer, maybe_prefix
 
-from vllm_ascend import envs
 from vllm_ascend.models.deepseek_v4 import (
     DeepseekV2DecoderLayer,
     DeepseekV2MixtureOfExperts,
-    DeepseekV4Attention,
     DeepseekV4MoE,
 )
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
 from vllm_ascend.utils import vllm_version_is
 
 _EXPERT_SCALE_RE = re.compile(r"\.experts\.\d+\.(gate_proj|up_proj|down_proj)\.scale$")
-_LAYER_ID_RE = re.compile(r"model\.layers\.(\d+)\.")
 
 if not vllm_version_is("0.23.0"):
     from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_mapping
@@ -388,167 +383,140 @@ class DeepSeekV4DSparkMTP(nn.Module, DeepseekV2MixtureOfExperts):
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        """Load the ``mtp.{i}.*`` draft weights from the target checkpoint.
+
+        Non-MTP weights belong to the target model and are skipped, except for
+        standalone embedding/head weights used by the Ascend draft loader.
+        """
+        expert_mapping = self.model.get_expert_mapping()
+        expert_scale_suffix = (
+            ".weight_scale" if getattr(self.config, "expert_dtype", "fp4") == "fp4" else ".weight_scale_inv"
+        )
+
+        # (param_name, checkpoint shard name, shard_id) for non-expert
+        # stacked parameters. Ascend keeps wq_a and wkv as separate parameters.
         stacked_params_mapping = [
             ("mlp.gate_up_proj", "mlp.gate_proj", 0),
             ("mlp.gate_up_proj", "mlp.up_proj", 1),
             ("shared_experts.gate_up_proj", "shared_experts.gate_proj", 0),
             ("shared_experts.gate_up_proj", "shared_experts.up_proj", 1),
         ]
+
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
-        missing_mtp_params: set[str] = set()
 
         tp_size = get_tensor_model_parallel_world_size()
         tp_rank = get_tensor_model_parallel_rank()
-        heads_per_rank = self.config.num_attention_heads // tp_size
-        head_start = tp_rank * heads_per_rank
-        head_end = head_start + heads_per_rank
-        expert_mapping = self.model.get_expert_mapping()
-        expert_scale_suffix = (
-            ".weight_scale" if getattr(self.config, "expert_dtype", "fp4") == "fp4" else ".weight_scale_inv"
-        )
-        start_layer_idx = self.config.num_hidden_layers
-        last_layer_idx = start_layer_idx + self.model.num_dspark_layers - 1
+        n_local_head = self.config.num_attention_heads // tp_size
+        head_start = n_local_head * tp_rank
+        head_end = n_local_head * (tp_rank + 1)
 
         for name, loaded_weight in weights:
             if name == "embed.weight" and not self.has_own_embed_tokens:
-                embed_name = "model.embed_tokens.weight"
-                param = params_dict[embed_name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-                loaded_params.add(embed_name)
-                continue
-            if name == "head.weight" and not self.has_own_lm_head:
-                head_name = "lm_head.weight"
-                param = params_dict[head_name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-                loaded_params.add(head_name)
-                continue
-            mapped_name = self._remap_dspark_name(name)
-            if mapped_name is None:
-                continue
-            name = mapped_name
-            if name.startswith(f"model.layers.{last_layer_idx}.hc_head_"):
-                canonical_name = name.replace(f"model.layers.{last_layer_idx}.", "model.", 1)
-                if canonical_name in params_dict:
-                    name = canonical_name
+                name = "model.embed_tokens.weight"
+            elif name == "head.weight" and not self.has_own_lm_head:
+                name = "lm_head.weight"
+            else:
+                mapped_name = self._remap_dspark_name(name)
+                if mapped_name is None:
+                    continue
+                name = mapped_name
+
+            # Expert scale parameters use a dtype-specific suffix; other
+            # quantized parameters use Ascend's ``weight_scale`` convention.
             if name.endswith(".scale"):
                 suffix = expert_scale_suffix if _EXPERT_SCALE_RE.search(name) else ".weight_scale"
                 name = name.removesuffix(".scale") + suffix
-                if name not in params_dict:
-                    continue
+
+            # E8M0 expert scales must retain their raw exponent bytes.
+            if ".experts." in name:
+                if "weight_scale" in name and loaded_weight.dtype == torch.float8_e8m0fnu:
+                    loaded_weight = loaded_weight.view(torch.uint8)
+                for param_name, weight_name, expert_id, shard_id in expert_mapping:
+                    if weight_name not in name:
+                        continue
+                    name_mapped = name.replace(weight_name, param_name)
+                    param = params_dict[name_mapped]
+                    weight_loader = typing.cast(typing.Callable[..., bool], param.weight_loader)
+                    success = weight_loader(
+                        param,
+                        loaded_weight,
+                        name_mapped,
+                        shard_id=shard_id,
+                        expert_id=expert_id,
+                        return_success=True,
+                    )
+                    if success:
+                        loaded_params.add(name_mapped)
+                        break
+                continue
+
+            # Stacked rules only apply to decoder-layer weights. Head-stack
+            # parameters load directly through the fallback below.
+            is_layer_param = name.startswith("model.layers.")
             for param_name, weight_name, stacked_shard_id in stacked_params_mapping:
-                if ".experts." in name or f".{weight_name}." not in name:
+                if not is_layer_param or f".{weight_name}." not in name:
                     continue
-                mapped = name.replace(weight_name, param_name)
-                if mapped not in params_dict:
-                    missing_mtp_params.add(mapped)
-                    break
-                param = params_dict[mapped]
+                name = name.replace(weight_name, param_name)
+                param = params_dict[name]
                 param.weight_loader(param, loaded_weight, stacked_shard_id)
-                loaded_params.add(mapped)
+                loaded_params.add(name)
                 break
             else:
-                if ".experts." in name:
-                    matched_expert_mapping = False
-                    if "weight_scale" in name and loaded_weight.dtype == torch.float8_e8m0fnu:
-                        loaded_weight = loaded_weight.view(torch.uint8)
-                    for param_name, weight_name, expert_id, expert_shard_id in expert_mapping:
-                        if weight_name not in name:
-                            continue
-                        matched_expert_mapping = True
-                        mapped = name.replace(weight_name, param_name)
-                        if mapped not in params_dict:
-                            continue
-                        param = params_dict[mapped]
-                        weight_loader = typing.cast(typing.Callable[..., bool], param.weight_loader)
-                        success = weight_loader(
-                            param,
-                            loaded_weight,
-                            mapped,
-                            shard_id=expert_shard_id,
-                            expert_id=expert_id,
-                            return_success=True,
-                        )
-                        if success:
-                            loaded_params.add(mapped)
-                            break
-                    if not matched_expert_mapping:
-                        missing_mtp_params.add(name)
-                    continue
                 if "attn_sink" in name:
-                    if name not in params_dict:
-                        missing_mtp_params.add(name)
-                        continue
                     narrow = loaded_weight[head_start:head_end]
                     with torch.no_grad():
                         params_dict[name][: narrow.shape[0]].copy_(narrow)
                     loaded_params.add(name)
-                    continue
-                if name not in params_dict:
-                    missing_mtp_params.add(name)
                     continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
                 loaded_params.add(name)
 
-        if missing_mtp_params:
-            raise ValueError(
-                "DSpark speculative decoding checkpoint weights did not match model parameters: "
-                f"{sorted(missing_mtp_params)}"
-            )
-
-        loaded_layer_ids: set[int] = set()
-        for param_name in loaded_params:
-            match = _LAYER_ID_RE.search(param_name)
-            if match:
-                loaded_layer_ids.add(int(match.group(1)))
-        for layer_idx in range(start_layer_idx, start_layer_idx + self.model.num_dspark_layers):
-            if layer_idx not in loaded_layer_ids:
-                raise ValueError(f"DSpark speculative decoding layer {layer_idx} weights missing from checkpoint.")
-        required_params = {
-            f"model.layers.{start_layer_idx}.main_proj.weight",
-            f"model.layers.{start_layer_idx}.main_norm.weight",
-            f"model.layers.{last_layer_idx}.norm.weight",
-            "model.hc_head_fn",
-            "model.hc_head_base",
-            "model.hc_head_scale",
-            f"model.layers.{last_layer_idx}.markov_head.markov_w1.weight",
-            f"model.layers.{last_layer_idx}.markov_head.markov_w2.weight",
-        }
-        missing_required = sorted(required_params - loaded_params)
-        if missing_required:
-            raise ValueError(
-                f"DSpark speculative decoding required weights missing from checkpoint load: {missing_required}"
-            )
         self.model.finalize_mega_moe_weights()
         logger.info_once("DSpark draft model loaded: %d params", len(loaded_params))
         return loaded_params
 
     def _remap_dspark_name(self, name: str) -> str | None:
-        if name == "mtp.0.embed.weight":
-            return "model.embed_tokens.weight"
-        if name == "mtp.2.head.weight":
-            return "lm_head.weight"
-        match = re.match(r"mtp\.(\d+)\.(.*)", name)
-        if match is None:
+        m = re.match(r"mtp\.(\d+)\.(.*)", name)
+        if m is None:
             return None
-        stage_idx = int(match.group(1))
-        layer_idx = self.config.num_hidden_layers + stage_idx
-        rest = match.group(2)
+        stage = int(m.group(1))
+        rest = m.group(2)
+
         if rest.startswith("confidence_head."):
             return None
+
+        if stage == 0 and rest == "embed.weight":
+            return "model.embed_tokens.weight"
+        if stage == self.model.num_dspark_layers - 1 and rest == "head.weight":
+            return "lm_head.weight"
+        if rest.startswith(("hc_head_fn", "hc_head_base", "hc_head_scale")):
+            return f"model.{rest}"
+
+        first_layer_idx = self.config.num_hidden_layers
+        last_layer_idx = first_layer_idx + self.model.num_dspark_layers - 1
+        if rest.startswith(("main_proj.", "main_norm.")):
+            layer_idx = first_layer_idx
+        elif rest.startswith(("norm.", "markov_head.")):
+            layer_idx = last_layer_idx
+        else:
+            layer_idx = first_layer_idx + stage
         name = f"model.layers.{layer_idx}.{rest}"
-        name = name.replace(".attn.", ".self_attn.")
-        name = name.replace(".ffn_norm.", ".post_attention_layernorm.")
-        name = name.replace(".attn_norm.", ".input_layernorm.")
-        name = name.replace(".ffn.", ".mlp.")
-        name = name.replace(".w1.", ".gate_proj.")
-        name = name.replace(".w2.", ".down_proj.")
-        name = name.replace(".w3.", ".up_proj.")
-        name = name.replace(".mlp.gate.bias", ".mlp.gate.e_score_correction_bias")
+
+        replacements = (
+            (".attn.", ".self_attn."),
+            (".ffn_norm.", ".post_attention_layernorm."),
+            (".attn_norm.", ".input_layernorm."),
+            (".ffn.", ".mlp."),
+            (".w1.", ".gate_proj."),
+            (".w2.", ".down_proj."),
+            (".w3.", ".up_proj."),
+            (".mlp.gate.bias", ".mlp.gate.e_score_correction_bias"),
+        )
+        for checkpoint_name, param_name in replacements:
+            name = name.replace(checkpoint_name, param_name)
         return name
 
 
