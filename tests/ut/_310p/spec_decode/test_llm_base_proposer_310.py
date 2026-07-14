@@ -24,7 +24,6 @@ from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBasePropos
 
 
 class TestAscendSpecDecodeBaseProposer310(TestBase):
-
     def test_run_merged_draft_sets_rope_flag_before_call(self):
         flag_states = []
 
