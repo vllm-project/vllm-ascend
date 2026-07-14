@@ -1352,7 +1352,7 @@ class PCPManager:
         slot_indices = (slot_idx_base[:, None] + self.pcp_rank_offsets[: self.pcp_world_size]).reshape(-1)
         return slot_indices, self.mtp_slot_pad
 
-    def prepare_spec_decode_first_pass_inputs(
+    def prepare_spec_decode_mtp_drafting_inputs(
         self,
         common_attn_metadata: Any,
         attn_metadata: Any,
