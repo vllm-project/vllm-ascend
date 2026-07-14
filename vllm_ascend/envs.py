@@ -92,6 +92,29 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_ENABLE_NZ": lambda: int(os.getenv("VLLM_ASCEND_ENABLE_NZ", 1)),
     # Whether to anbale dynamic EPLB
     "DYNAMIC_EPLB": lambda: os.getenv("DYNAMIC_EPLB", "false").lower(),
+    # Whether to enable Virtual Pipeline Parallelism (VPP) support on the
+    # multiproc executor. Default: false (opt-in).
+    #
+    # When true (or any of DYNAMIC_EPLB / EXPERT_MAP_RECORD is true),
+    # ``patch_multiproc_executor`` is loaded; the installed
+    # ``AscendMultiprocExecutor._get_output_rank`` is VPP-aware and routes
+    # the ModelRunnerOutput to the correct global rank based on the V
+    # fold-back topology (see ``patch_multiproc_executor.py``).  When false
+    # and DYNAMIC_EPLB / EXPERT_MAP_RECORD are also false, the vLLM upstream
+    # ``MultiprocExecutor`` is used as-is with its hard-coded ``return 0``
+    # for ``_get_output_rank``.
+    #
+    # Note: other VPP-related patches (``patch_outputs`` /
+    # ``patch_scheduler_output`` / ``patch_scheduler`` / ``patch_vpp_core``)
+    # remain loaded unconditionally — they install the ``VppContinuationOutput``
+    # class and stamp ``batch_id`` on ``SchedulerOutput``
+    # regardless of this flag.  Disabling ENABLE_VPP while still passing
+    # ``virtual_pipeline_parallel_size: 2`` via ``--additional-config`` will
+    # therefore result in a half-enabled state: the engine core produces VPP
+    # metadata, but the executor does not route outputs to the correct PP
+    # rank.  Set ``ENABLE_VPP=true`` (or DYNAMIC_EPLB=true /
+    # EXPERT_MAP_RECORD=true) whenever ``virtual_pipeline_parallel_size`` > 1.
+    "ENABLE_VPP": lambda: os.getenv("ENABLE_VPP", "false").lower() in ("true", "1"),
     # Whether to enable fused MC2 (`dispatch_gmm_combine_decode` / `dispatch_ffn_combine`).
     # 0, or not set: default ALLTOALL and MC2 will be used.
     # 1: ALLTOALL and MC2 might be replaced by `dispatch_ffn_combine` operator.

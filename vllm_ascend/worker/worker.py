@@ -49,7 +49,7 @@ from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
-from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
+from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput, VppContinuationOutput
 from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.gpu_worker import AsyncIntermediateTensors
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
@@ -600,7 +600,7 @@ class NPUWorker(WorkerBase):
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
-    ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
+    ) -> ModelRunnerOutput | AsyncModelRunnerOutput | VppContinuationOutput | None:
         # enable msMonitor to monitor the performance of vllm-ascend
         if get_ascend_config().msmonitor_use_daemon:
             dp.step()
@@ -610,6 +610,24 @@ class NPUWorker(WorkerBase):
                 handle.wait()
             self._pp_send_work = []
 
+        vp_size = self._get_vpp_size()
+        if vp_size > 1:
+            return self._execute_model_vpp(scheduler_output, vp_size)
+        return self._execute_model_regular(scheduler_output)
+    
+    def _get_vpp_size(self) -> int:
+        if not hasattr(self, "_vpp_size_cached"):
+            try:
+                from vllm_ascend.ascend_config import get_ascend_config
+                self._vpp_size_cached = get_ascend_config().virtual_pipeline_parallel_size
+            except RuntimeError:
+                self._vpp_size_cached = 1
+        return self._vpp_size_cached
+
+    def _execute_model_regular(
+        self,
+        scheduler_output: "SchedulerOutput",
+    ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         if forward_pass and not get_pp_group().is_first_rank:
@@ -657,6 +675,43 @@ class NPUWorker(WorkerBase):
         # In case of PP with kv transfer, we need to pass through the
         # kv_connector_output
         if not kv_connector_output.finished_sending and not kv_connector_output.finished_recving:
+            return EMPTY_MODEL_RUNNER_OUTPUT
+        output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
+        output.kv_connector_output = kv_connector_output
+        return output
+
+    def _execute_model_vpp(
+        self,
+        scheduler_output: "SchedulerOutput",
+        vp_size: int,
+    ) -> ModelRunnerOutput | AsyncModelRunnerOutput | VppContinuationOutput | None:
+        """Execute model with VPP.
+
+        All per-stage VPP execution and P2P communication happen inside
+        model_runner.execute_model.
+        """
+        batch_id = getattr(scheduler_output, "batch_id", None)
+        if batch_id is None:
+            raise RuntimeError("VPP requires SchedulerOutput.batch_id")
+        output = self.model_runner.execute_model(
+            scheduler_output, None)
+        if isinstance(output, VppContinuationOutput):
+            return output
+        # if is_vpp_last_stage(pp_rank, pp_size, vp_stage, vp_size):
+        #     logger.info(f"output type, {type(output)}")
+        if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput, NoneType)):
+            return output
+        # logger.info(f"output type, {type(output)}")
+
+        # Non-final VPP rank: all P2P sends already done inside the model runner.
+        # Pass through kv_connector_output if any.
+        assert isinstance(output, IntermediateTensors)
+        kv_connector_output = output.kv_connector_output
+        if not kv_connector_output:
+            return None
+
+        if (not kv_connector_output.finished_sending
+                and not kv_connector_output.finished_recving):
             return EMPTY_MODEL_RUNNER_OUTPUT
         output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
         output.kv_connector_output = kv_connector_output

@@ -17,6 +17,8 @@
 # Adapted from vllm-project/vllm/vllm/worker/gpu_input_batch.py
 #
 
+from collections import deque
+
 import numpy as np
 import torch
 from vllm.lora.request import LoRARequest
@@ -26,9 +28,10 @@ from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.pool.metadata import PoolingStates
 from vllm.v1.sample.logits_processor import BatchUpdateBuilder, LogitsProcessors
 from vllm.v1.worker.gpu_input_batch import InputBatch
+from vllm.logger import logger
 
 from vllm_ascend.worker.block_table import MultiGroupBlockTable
-
+from datetime import datetime
 
 class NPUInputBatch(InputBatch):
     def __init__(
@@ -63,6 +66,10 @@ class NPUInputBatch(InputBatch):
         self.device = device
         self.pin_memory = pin_memory
         self.vocab_size = vocab_size
+        self._block_sizes = block_sizes.copy()
+        self._kernel_block_sizes = [sizes.copy() for sizes in kernel_block_sizes]
+        self._num_speculative_tokens = num_speculative_tokens
+        self._cp_kv_cache_interleave_size = cp_kv_cache_interleave_size
 
         self._req_ids: list[str | None] = []
         self.req_id_to_index: dict[str, int] = {}
@@ -237,3 +244,163 @@ class NPUInputBatch(InputBatch):
         # (e.g. penalties).
         self.sampled_token_ids_cpu: torch.Tensor | None = None
         self.async_copy_ready_event: torch.Event | None = None
+
+    # ------------------------------------------------------------------
+    # Object pool for VPP clone reuse -- avoids repeated torch.zeros alloc
+    # ------------------------------------------------------------------
+    _vpp_clone_pool: deque["NPUInputBatch"] = deque(maxlen=32)
+
+    @classmethod
+    def _acquire_for_clone(cls, **kwargs) -> "NPUInputBatch":
+        """Get an NPUInputBatch from the pool, or create a new one."""
+        if cls._vpp_clone_pool and len(cls._vpp_clone_pool) > 0:
+            inst = cls._vpp_clone_pool.popleft()
+            inst._reset_for_clone()
+            return inst
+        return cls(**kwargs)
+
+    def _reset_for_clone(self):
+        """Reset mutable state while keeping large tensor allocations alive."""
+        self._req_ids.clear()
+        self.req_id_to_index.clear()
+
+        # self.token_ids_cpu_tensor.zero_()
+        # self.token_ids_cpu.fill(0)
+        # self.is_token_ids_tensor.zero_()
+        # self.is_token_ids.fill(False)
+
+        self.num_tokens.fill(0)
+        self.num_tokens_no_spec.fill(0)
+        self.num_prompt_tokens.fill(0)
+        self.num_computed_tokens_cpu_tensor.zero_()
+        self.num_computed_tokens_cpu.fill(0)
+
+        self.temperature.zero_()
+        self.temperature_cpu_tensor.zero_()
+        self.greedy_reqs.clear()
+        self.random_reqs.clear()
+
+        self.top_p.zero_()
+        self.top_p_cpu_tensor.zero_()
+        self.top_p_reqs.clear()
+
+        self.top_k.zero_()
+        self.top_k_cpu_tensor.zero_()
+        self.top_k_reqs.clear()
+
+        self.spec_decode_unsupported_reqs.clear()
+
+        self.frequency_penalties.zero_()
+        self.frequency_penalties_cpu_tensor.zero_()
+        self.frequency_penalties_reqs.clear()
+
+        self.presence_penalties.zero_()
+        self.presence_penalties_cpu_tensor.zero_()
+        self.presence_penalties_reqs.clear()
+
+        self.repetition_penalties.zero_()
+        self.repetition_penalties_cpu_tensor.zero_()
+        self.repetition_penalties_reqs.clear()
+
+        self.num_accepted_tokens_cpu_tensor.fill_(1)
+
+        self.generators.clear()
+        self.num_logprobs.clear()
+
+        self.has_allowed_token_ids.clear()
+        self.allowed_token_ids_mask = None
+        self.allowed_token_ids_mask_cpu_tensor = None
+
+        self.bad_words_token_ids.clear()
+        self.logits_processing_needs_token_ids.fill(False)
+        self.req_output_token_ids = []
+        self.spec_token_ids = [[] for _ in range(self.max_num_reqs)]
+
+        self.prev_sampled_token_ids = None
+        self.prev_req_id_to_index = None
+        self.sampled_token_ids_cpu = None
+        self.async_copy_ready_event = None
+        self.sampling_metadata = self._make_sampling_metadata()
+
+    def release_to_pool(self):
+        """Return this instance to the pool for later reuse."""
+        NPUInputBatch._vpp_clone_pool.append(self)
+
+    def clone_for_vpp_sampling(self) -> "NPUInputBatch":
+        """Clone the sampling-visible batch state for a yielded VPP batch."""
+        clone = NPUInputBatch._acquire_for_clone(
+            max_num_reqs=self.max_num_reqs,
+            max_model_len=self.max_model_len,
+            max_num_batched_tokens=self.max_num_batched_tokens,
+            device=self.device,
+            pin_memory=self.pin_memory,
+            vocab_size=self.vocab_size,
+            block_sizes=self._block_sizes,
+            kernel_block_sizes=self._kernel_block_sizes,
+            logitsprocs=self.logitsprocs,
+            logitsprocs_need_output_token_ids=self.logitsprocs_need_output_token_ids,
+            is_spec_decode=self.is_spec_decode,
+            is_pooling_model=self.is_pooling_model,
+            num_speculative_tokens=self._num_speculative_tokens,
+            cp_kv_cache_interleave_size=self._cp_kv_cache_interleave_size,
+        )
+
+        clone._req_ids = self._req_ids.copy()
+        clone.req_id_to_index = self.req_id_to_index.copy()
+        clone.token_ids_cpu_tensor = self.token_ids_cpu_tensor
+        clone.token_ids_cpu = self.token_ids_cpu
+        clone.is_token_ids_tensor = self.is_token_ids_tensor
+        clone.is_token_ids = self.is_token_ids
+        clone.num_tokens = self.num_tokens.copy()
+        clone.num_tokens_no_spec = self.num_tokens_no_spec.copy()
+        clone.num_prompt_tokens = self.num_prompt_tokens.copy()
+        clone.num_computed_tokens_cpu_tensor.copy_(self.num_computed_tokens_cpu_tensor)
+
+        clone.temperature_cpu_tensor.copy_(self.temperature_cpu_tensor)
+        clone.greedy_reqs = self.greedy_reqs.copy()
+        clone.random_reqs = self.random_reqs.copy()
+
+        clone.top_p_cpu_tensor.copy_(self.top_p_cpu_tensor)
+        clone.top_p_reqs = self.top_p_reqs.copy()
+
+        clone.top_k_cpu_tensor.copy_(self.top_k_cpu_tensor)
+        clone.top_k_reqs = self.top_k_reqs.copy()
+
+        clone.spec_decode_unsupported_reqs = self.spec_decode_unsupported_reqs.copy()
+
+        clone.frequency_penalties_cpu_tensor.copy_(self.frequency_penalties_cpu_tensor)
+        clone.frequency_penalties_reqs = self.frequency_penalties_reqs.copy()
+
+        clone.presence_penalties_cpu_tensor.copy_(self.presence_penalties_cpu_tensor)
+        clone.presence_penalties_reqs = self.presence_penalties_reqs.copy()
+
+        clone.repetition_penalties_cpu_tensor.copy_(self.repetition_penalties_cpu_tensor)
+        clone.repetition_penalties_reqs = self.repetition_penalties_reqs.copy()
+
+        clone.num_accepted_tokens_cpu_tensor.copy_(self.num_accepted_tokens_cpu_tensor)
+
+        clone.generators = self.generators.copy()
+        clone.num_logprobs = self.num_logprobs.copy()
+
+        clone.has_allowed_token_ids = self.has_allowed_token_ids.copy()
+        if self.allowed_token_ids_mask_cpu_tensor is not None:
+            clone.allowed_token_ids_mask_cpu_tensor = self.allowed_token_ids_mask_cpu_tensor
+        if self.allowed_token_ids_mask is not None:
+            clone.allowed_token_ids_mask = self.allowed_token_ids_mask
+
+        clone.bad_words_token_ids = {
+            req_idx: [token_ids.copy() for token_ids in bad_words]
+            for req_idx, bad_words in self.bad_words_token_ids.items()
+        }
+        clone.logits_processing_needs_token_ids = self.logits_processing_needs_token_ids.copy()
+        clone.req_output_token_ids = self.req_output_token_ids.copy()
+        clone.spec_token_ids = [token_ids.copy() for token_ids in self.spec_token_ids]
+
+        clone.prev_sampled_token_ids = self.prev_sampled_token_ids
+        clone.prev_req_id_to_index = (
+            None if self.prev_req_id_to_index is None else self.prev_req_id_to_index.copy()
+        )
+        clone.sampled_token_ids_cpu = self.sampled_token_ids_cpu
+        clone.async_copy_ready_event = self.async_copy_ready_event
+        clone.sampling_metadata = clone._make_sampling_metadata()
+        return clone
