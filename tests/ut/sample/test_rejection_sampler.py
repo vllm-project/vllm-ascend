@@ -1,14 +1,24 @@
-from unittest.mock import patch
+import inspect
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 
 from tests.ut.base import TestBase
+from vllm_ascend.ops.triton.reject_sample import (
+    rejection_greedy_sample_triton,
+    rejection_greedy_sample_with_triton,
+)
 from vllm_ascend.sample.rejection_sampler import (
+    _residual_logprobs_from_logits,
     expand_batch_to_tokens,
     expand_pytorch,
     rejection_greedy_sample_pytorch,
     rejection_random_sample_block_verify_pytorch,
+    rejection_random_sample_logits_pytorch,
     rejection_random_sample_pytorch,
+    rejection_sample,
     sample_recovered_tokens_blockwise_pytorch,
     sample_recovered_tokens_pytorch,
 )
@@ -29,6 +39,196 @@ def mock_pin_memory(original_func):
 
 
 class TestAscendRejectionSampler(TestBase):
+    def test_greedy_triton_uses_safe_first_previous_cumsum_address(self):
+        source = inspect.getsource(rejection_greedy_sample_triton.fn)
+
+        assert "has_prev = offset > 0" in source
+        assert "prev_offset = tl.where(has_prev, offset - 1, 0)" in source
+        assert "cu_num_draft_tokens_ptr + prev_offset" in source
+        assert "mask=is_greedy_mask & has_prev" in source
+
+    @patch("vllm_ascend.ops.triton.reject_sample.rejection_greedy_sample_spec_len_1_triton")
+    @patch("vllm_ascend.ops.triton.reject_sample.rejection_greedy_sample_triton")
+    def test_spec_len_one_kernel_requires_configured_spec_len_one(self, mock_kernel, mock_spec_len_one_kernel):
+        tensors = [MagicMock() for _ in range(5)]
+        tensors[0].shape = (2, 6)
+
+        rejection_greedy_sample_with_triton(
+            tensors[0],
+            [1, 1],
+            tensors[1],
+            tensors[2],
+            tensors[3],
+            tensors[4],
+            None,
+            max_spec_len=5,
+            grid=2,
+            block_size=1,
+        )
+
+        mock_kernel.__getitem__.return_value.assert_called_once()
+        mock_spec_len_one_kernel.__getitem__.assert_not_called()
+
+    def test_residual_logprobs_match_probability_reference(self):
+        draft_probs = torch.tensor([[0.6, 0.3, 0.1]], dtype=torch.float32)
+        target_probs = torch.tensor([[0.2, 0.5, 0.3]], dtype=torch.float32)
+
+        target_logprobs, residual_logprobs = _residual_logprobs_from_logits(draft_probs.log(), target_probs.log())
+
+        torch.testing.assert_close(target_logprobs.exp(), target_probs)
+        torch.testing.assert_close(
+            residual_logprobs.exp(),
+            (target_probs - draft_probs).clamp_min(0),
+        )
+
+    def test_residual_logprobs_handle_masked_logits(self):
+        draft_logits = torch.tensor([[0.0, float("-inf"), float("-inf")]])
+        target_logits = torch.tensor([[0.0, -1.0, float("-inf")]])
+
+        _, residual_logprobs = _residual_logprobs_from_logits(draft_logits, target_logits)
+
+        assert torch.isfinite(residual_logprobs[0, 1])
+        assert torch.isneginf(residual_logprobs[0, 0])
+        assert torch.isneginf(residual_logprobs[0, 2])
+        assert not torch.isnan(residual_logprobs).any()
+
+    @patch(
+        "vllm_ascend.sample.rejection_sampler.sample_recovered_tokens_from_logits_pytorch",
+        return_value=torch.tensor([2, 1], dtype=torch.int32),
+    )
+    def test_logits_rejection_stops_at_first_rejected_token(self, _mock_recovered):
+        output_token_ids = torch.full((1, 3), PLACEHOLDER_TOKEN_ID, dtype=torch.int32)
+        draft_token_ids = torch.tensor([0, 0], dtype=torch.int32)
+        draft_logits = torch.tensor([[0.5, 0.4, 0.1], [0.8, 0.1, 0.1]]).log()
+        target_logits = torch.tensor([[0.7, 0.2, 0.1], [0.2, 0.1, 0.7]]).log()
+
+        rejection_random_sample_logits_pytorch(
+            output_token_ids,
+            torch.tensor([2], dtype=torch.int32),
+            draft_token_ids,
+            draft_logits,
+            target_logits,
+            torch.tensor([[9]], dtype=torch.int32),
+            torch.tensor([0.8, 0.5], dtype=torch.float64),
+            torch.tensor([False]),
+            max_spec_len=2,
+            num_draft_tokens=[2],
+            generators={},
+        )
+
+        assert output_token_ids.tolist() == [[0, 1, PLACEHOLDER_TOKEN_ID]]
+
+    def test_logits_rejection_adds_bonus_after_accepting_all(self):
+        output_token_ids = torch.full((1, 3), PLACEHOLDER_TOKEN_ID, dtype=torch.int32)
+        probs = torch.tensor([[0.6, 0.4], [0.3, 0.7]], dtype=torch.float32)
+
+        rejection_random_sample_logits_pytorch(
+            output_token_ids,
+            torch.tensor([2], dtype=torch.int32),
+            torch.tensor([0, 1], dtype=torch.int32),
+            probs.log(),
+            probs.log(),
+            torch.tensor([[9]], dtype=torch.int32),
+            torch.tensor([0.99, 0.99], dtype=torch.float64),
+            torch.tensor([False]),
+            max_spec_len=2,
+            num_draft_tokens=[2],
+            generators={},
+        )
+
+        assert output_token_ids.tolist() == [[0, 1, 9]]
+
+    def test_logits_rejection_zero_draft_returns_bonus(self):
+        output_token_ids = torch.full((1, 2), PLACEHOLDER_TOKEN_ID, dtype=torch.int32)
+
+        rejection_random_sample_logits_pytorch(
+            output_token_ids,
+            torch.tensor([0], dtype=torch.int32),
+            torch.empty(0, dtype=torch.int32),
+            torch.empty(0, 3),
+            torch.empty(0, 3),
+            torch.tensor([[7]], dtype=torch.int32),
+            torch.empty(0, dtype=torch.float64),
+            torch.tensor([False]),
+            max_spec_len=1,
+            num_draft_tokens=[0],
+            generators={},
+        )
+
+        assert output_token_ids.tolist() == [[7, PLACEHOLDER_TOKEN_ID]]
+
+    @patch(
+        "vllm_ascend.sample.rejection_sampler.sample_recovered_tokens_from_logits_pytorch",
+        return_value=torch.tensor([2], dtype=torch.int32),
+    )
+    @patch("vllm_ascend.sample.rejection_sampler.generate_uniform_probs")
+    @patch("vllm_ascend.sample.rejection_sampler.get_ascend_config")
+    @patch("vllm_ascend.sample.rejection_sampler.HAS_TRITON", False)
+    def test_rejection_sample_uses_logits_without_draft_probs(
+        self,
+        mock_ascend_config,
+        mock_uniform,
+        _mock_recovered,
+    ):
+        mock_ascend_config.return_value = SimpleNamespace(
+            enable_reduce_sample=False,
+            rejection_sampler_config=SimpleNamespace(
+                enable_block_verify=False,
+                enable_entropy_verify=False,
+                posterior_threshold=0.95,
+                posterior_alpha=0.4,
+            ),
+        )
+        mock_uniform.return_value = torch.tensor([0.5], dtype=torch.float64)
+        output = rejection_sample(
+            torch.tensor([0], dtype=torch.int32),
+            [1],
+            1,
+            torch.tensor([1], dtype=torch.int32),
+            None,
+            torch.tensor([[0.2, 0.1, 0.7]], dtype=torch.float32).log().contiguous(),
+            torch.tensor([[9]], dtype=torch.int32),
+            SimpleNamespace(
+                all_greedy=False,
+                all_random=True,
+                temperature=torch.tensor([1.0]),
+                generators={},
+            ),
+            draft_logits=torch.tensor([[0.8, 0.1, 0.1]], dtype=torch.float32).log().contiguous(),
+        )
+
+        assert output.tolist() == [[2, PLACEHOLDER_TOKEN_ID]]
+
+    @patch("vllm_ascend.sample.rejection_sampler.get_ascend_config")
+    @patch("vllm_ascend.sample.rejection_sampler.HAS_TRITON", False)
+    def test_rejection_sample_rejects_mismatched_logits_shape(self, mock_ascend_config):
+        mock_ascend_config.return_value = SimpleNamespace(
+            enable_reduce_sample=False,
+            rejection_sampler_config=SimpleNamespace(
+                enable_block_verify=False,
+                enable_entropy_verify=False,
+                posterior_threshold=0.95,
+                posterior_alpha=0.4,
+            ),
+        )
+        with pytest.raises(ValueError, match="must have the same shape"):
+            rejection_sample(
+                torch.tensor([0], dtype=torch.int32),
+                [1],
+                1,
+                torch.tensor([1], dtype=torch.int32),
+                None,
+                torch.zeros(1, 3),
+                torch.tensor([[9]], dtype=torch.int32),
+                SimpleNamespace(
+                    all_greedy=False,
+                    all_random=True,
+                    temperature=torch.tensor([1.0]),
+                    generators={},
+                ),
+                draft_logits=torch.zeros(1, 2),
+            )
+
     @patch("torch.arange", new=mock_pin_memory(torch.arange))
     @patch("torch.ones", new=mock_pin_memory(torch.ones))
     @patch("torch.full", new=mock_pin_memory(torch.full))

@@ -18,7 +18,38 @@
 from vllm.triton_utils import tl, triton
 
 
-@triton.jit(do_not_specialize=["num_reqs"])
+@triton.jit
+def prepare_next_token_padded_kernel(
+    sampled_token_ids_ptr,
+    backup_next_token_ids_ptr,
+    next_token_ids_ptr,
+    valid_sampled_tokens_count_ptr,
+    vocab_size,
+    num_sampled_tokens_per_req,
+    num_reqs,
+    stride_sampled_token_ids,
+    BLOCK_SIZE_TOKENS: tl.constexpr,
+):
+    req_idx = tl.program_id(axis=0)
+    if req_idx >= num_reqs:
+        return
+
+    token_offsets = tl.arange(0, BLOCK_SIZE_TOKENS)
+    token_mask = token_offsets < num_sampled_tokens_per_req
+    row_ptr = sampled_token_ids_ptr + req_idx * stride_sampled_token_ids
+    token_ids = tl.load(row_ptr + token_offsets, mask=token_mask, other=-1)
+    is_valid = (token_ids != -1) & (token_ids < vocab_size) & token_mask
+    valid_count = tl.sum(is_valid.to(tl.int32), axis=0)
+    last_valid_index = tl.max(tl.where(is_valid, token_offsets, -1), axis=0)
+    last_valid_token = tl.sum(tl.where(token_offsets == last_valid_index, token_ids, 0), axis=0)
+    backup_token = tl.load(backup_next_token_ids_ptr + req_idx)
+    next_token = tl.where(valid_count > 0, last_valid_token, backup_token)
+
+    tl.store(next_token_ids_ptr + req_idx, next_token)
+    tl.store(valid_sampled_tokens_count_ptr + req_idx, valid_count)
+
+
+@triton.jit
 def prepare_inputs_padded_kernel(
     cu_num_draft_tokens_ptr,  # [num_reqs]
     valid_sampled_tokens_count_ptr,  # [num_reqs]
@@ -26,43 +57,26 @@ def prepare_inputs_padded_kernel(
     token_indices_to_sample_ptr,  # [num_reqs] (output)
     num_rejected_tokens_gpu_ptr,
     num_reqs,  # tl.int32
-    BLOCK_SIZE: tl.constexpr,
 ):
-    pid = tl.program_id(axis=0)
-    num_programs = tl.num_programs(axis=0)
+    req_idx = tl.program_id(axis=0)
+    if req_idx >= num_reqs:
+        return
 
-    # Grid-Stride Loop:
-    block_start_step = num_programs * BLOCK_SIZE
+    cu_draft_curr = tl.load(cu_num_draft_tokens_ptr + req_idx)
+    if req_idx == 0:
+        num_draft_tokens = cu_draft_curr
+    else:
+        cu_draft_prev = tl.load(cu_num_draft_tokens_ptr + req_idx - 1)
+        num_draft_tokens = cu_draft_curr - cu_draft_prev
 
-    for block_start in tl.range(pid * BLOCK_SIZE, num_reqs, block_start_step):
-        offsets = block_start + tl.arange(0, BLOCK_SIZE)
-        mask = offsets < num_reqs
+    valid_count = tl.load(valid_sampled_tokens_count_ptr + req_idx)
+    num_rejected = num_draft_tokens + 1 - valid_count
+    num_rejected = tl.where(num_draft_tokens > 0, num_rejected, 0)
 
-        # Calculate num_draft_tokens from cu_num_draft_tokens, which is an inclusive
-        # cumulative sum (first entry is the first value, not zero).
-        cu_draft_curr = tl.load(cu_num_draft_tokens_ptr + offsets, mask=mask)
-
-        prev_indices = offsets - 1
-        has_prev = offsets > 0
-        cu_draft_prev = tl.load(
-            cu_num_draft_tokens_ptr + prev_indices,
-            mask=mask & has_prev,
-            other=0,
-        )
-
-        num_draft_tokens = tl.where(has_prev, cu_draft_curr - cu_draft_prev, cu_draft_curr)
-
-        valid_count = tl.load(valid_sampled_tokens_count_ptr + offsets, mask=mask)
-        num_rejected = num_draft_tokens + 1 - valid_count
-        num_rejected = tl.where(num_draft_tokens > 0, num_rejected, 0)
-
-        # query_start_loc[req_idx + 1] is the start position of the next request,
-        # which is one past the last token of this request.
-        q_last_tok_idx = tl.load(query_start_loc_gpu_ptr + offsets + 1, mask=mask) - 1
-
-        index_to_sample = q_last_tok_idx - num_rejected
-        tl.store(token_indices_to_sample_ptr + offsets, index_to_sample, mask=mask)
-        tl.store(num_rejected_tokens_gpu_ptr + offsets, num_rejected, mask=mask)
+    q_last_tok_idx = tl.load(query_start_loc_gpu_ptr + req_idx + 1) - 1
+    index_to_sample = q_last_tok_idx - num_rejected
+    tl.store(token_indices_to_sample_ptr + req_idx, index_to_sample)
+    tl.store(num_rejected_tokens_gpu_ptr + req_idx, num_rejected)
 
 
 @triton.jit

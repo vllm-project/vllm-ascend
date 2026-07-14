@@ -89,7 +89,7 @@ from vllm.v1.sample.rejection_sampler import PLACEHOLDER_TOKEN_ID, RejectionSamp
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer_gpu import copy_num_valid_draft_tokens
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
-from vllm.v1.utils import record_function_or_nullcontext
+from vllm.v1.utils import CpuGpuBuffer, record_function_or_nullcontext
 from vllm.v1.worker import mamba_utils
 from vllm.v1.worker.cp_utils import (
     get_total_cp_world_size,
@@ -577,6 +577,26 @@ class NPUModelRunner(GPUModelRunner):
             cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
         )
         self.num_draft_tokens = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
+        if self.speculative_config is not None:
+            self._spec_cu_num_draft_tokens = self._make_buffer(
+                self.max_num_reqs, dtype=torch.int32
+            )
+            self._spec_cu_num_sampled_tokens = self._make_buffer(
+                self.max_num_reqs, dtype=torch.int32
+            )
+            self._spec_logits_indices = self._make_buffer(
+                self.max_num_tokens, dtype=torch.int32
+            )
+            self._spec_target_logits_indices = self._make_buffer(
+                self.max_num_tokens, dtype=torch.int32
+            )
+            self._spec_bonus_logits_indices = self._make_buffer(
+                self.max_num_reqs, dtype=torch.int32
+            )
+            if self.pcp_size > 1:
+                self._spec_pcp_logits_indices = self._make_buffer(
+                    self.max_num_tokens, dtype=torch.int32
+                )
         # here we use int32
         self.sampled_token_ids_pinned_cpu = torch.empty(
             (self.max_num_reqs, 1),
@@ -592,6 +612,8 @@ class NPUModelRunner(GPUModelRunner):
         self.long_seq_metadata = None
         self.query_lens: torch.Tensor | None = None
         self.sampling_done_event: torch.npu.Event | None = None
+        self._draft_logits: torch.Tensor | None = None
+        self._draft_logits_req_ids: list[str | None] | None = None
 
         # self.cudagraph_batch_sizes sorts in ascending order.
         if (
@@ -1670,9 +1692,6 @@ class NPUModelRunner(GPUModelRunner):
                 cu_num_scheduled_tokens = cu_num_scheduled_tokens * self.pcp_size - num_pcp_pads
             logits_indices_pcp = np.repeat(cu_num_scheduled_tokens - num_sampled_tokens, num_sampled_tokens)
             logits_indices_pcp += self._arange_scratch[: cu_num_sampled_tokens[-1]]
-            logits_indices_pcp = torch.from_numpy(logits_indices_pcp).pin_memory().to(self.device, non_blocking=True)
-
-
 
         # Compute the bonus logits indices.
         bonus_logits_indices = cu_num_sampled_tokens - 1
@@ -1690,19 +1709,30 @@ class NPUModelRunner(GPUModelRunner):
         # [0, 1, 2, 5, 6, 9]
         target_logits_indices += arange
 
-        # TODO: Optimize the CPU -> NPU copy.
-        cu_num_draft_tokens = torch.from_numpy(cu_num_draft_tokens).pin_memory().to(self.device, non_blocking=True)
-        cu_num_sampled_tokens = torch.from_numpy(cu_num_sampled_tokens).pin_memory().to(self.device, non_blocking=True)
-        logits_indices = torch.from_numpy(logits_indices).pin_memory().to(self.device, non_blocking=True)
-        target_logits_indices = torch.from_numpy(target_logits_indices).pin_memory().to(self.device, non_blocking=True)
-        bonus_logits_indices = torch.from_numpy(bonus_logits_indices).pin_memory().to(self.device, non_blocking=True)
+        cu_num_draft_tokens = self._copy_spec_metadata_to_device(
+            cu_num_draft_tokens, self._spec_cu_num_draft_tokens
+        )
+        cu_num_sampled_tokens = self._copy_spec_metadata_to_device(
+            cu_num_sampled_tokens, self._spec_cu_num_sampled_tokens
+        )
+        logits_indices = self._copy_spec_metadata_to_device(
+            logits_indices, self._spec_logits_indices
+        )
+        target_logits_indices = self._copy_spec_metadata_to_device(
+            target_logits_indices, self._spec_target_logits_indices
+        )
+        bonus_logits_indices = self._copy_spec_metadata_to_device(
+            bonus_logits_indices, self._spec_bonus_logits_indices
+        )
 
         # Compute the draft token ids.
         # draft_token_indices:      [  1,   2,   3, 105, 106, 208]
         draft_token_ids = self.input_ids.gpu[logits_indices]
         draft_token_ids = draft_token_ids[target_logits_indices + 1]
         if self.pcp_size > 1:
-            logits_indices = logits_indices_pcp
+            logits_indices = self._copy_spec_metadata_to_device(
+                logits_indices_pcp, self._spec_pcp_logits_indices
+            )
         return SpecDecodeMetadata(
             draft_token_ids=draft_token_ids,
             num_draft_tokens=num_draft_tokens.tolist(),
@@ -1712,6 +1742,15 @@ class NPUModelRunner(GPUModelRunner):
             bonus_logits_indices=bonus_logits_indices,
             logits_indices=logits_indices,
         )
+
+    @staticmethod
+    def _copy_spec_metadata_to_device(
+        values: np.ndarray, buffer: CpuGpuBuffer
+    ) -> torch.Tensor:
+        num_values = values.shape[0]
+        buffer.np[:num_values] = values
+        buffer.copy_to_gpu(num_values)
+        return buffer.gpu[:num_values]
 
     def _correct_optimistic_seq_lens_cpu(self, num_reqs: int) -> None:
         """Correct ``optimistic_seq_lens_cpu`` for async spec-decode drift.
@@ -1762,6 +1801,30 @@ class NPUModelRunner(GPUModelRunner):
             # Stash for GPU-side correction in _prepare_inputs.
             self.valid_sampled_token_count_gpu = valid_sampled_tokens_count # type: ignore[no-redef]
         self.input_batch.prev_sampled_token_ids = next_token_ids.unsqueeze(1)
+
+    @staticmethod
+    def _mask_sampled_token_ids_to_scheduled_width(
+        sampled_token_ids: torch.Tensor,
+        spec_decode_metadata: SpecDecodeMetadata | None,
+    ) -> torch.Tensor:
+        if spec_decode_metadata is None:
+            return sampled_token_ids
+        cu_num_draft_tokens = spec_decode_metadata.cu_num_draft_tokens
+        num_draft_tokens = torch.empty_like(cu_num_draft_tokens)
+        num_draft_tokens[:1] = cu_num_draft_tokens[:1]
+        num_draft_tokens[1:] = cu_num_draft_tokens[1:] - cu_num_draft_tokens[:-1]
+        max_valid_width = num_draft_tokens[: sampled_token_ids.shape[0]] + 1
+        columns = torch.arange(
+            sampled_token_ids.shape[1],
+            device=sampled_token_ids.device,
+            dtype=max_valid_width.dtype,
+        )
+        valid_columns = columns.unsqueeze(0) < max_valid_width.unsqueeze(1)
+        return torch.where(
+            valid_columns,
+            sampled_token_ids,
+            sampled_token_ids.new_full((), -1),
+        )
 
     # TODO: Once the PCP features are complete, it will fully inherit the classes from the VLLM community.
     def propose_draft_token_ids(
@@ -1877,7 +1940,10 @@ class NPUModelRunner(GPUModelRunner):
                 )
             next_token_ids, valid_sampled_tokens_count = (
                 self.drafter.prepare_next_token_ids_padded(
-                    valid_sampled_token_ids,
+                    self._mask_sampled_token_ids_to_scheduled_width(
+                        valid_sampled_token_ids,
+                        spec_decode_metadata,
+                    ),
                     self.requests,
                     self.input_batch,
                     self.discard_request_indices.gpu,
@@ -1909,6 +1975,10 @@ class NPUModelRunner(GPUModelRunner):
                     "sampled_token_ids should be a torch.Tensor whenpadded-batch is enabled."
                 )
                 assert self.drafter is not None
+                sampled_token_ids = self._mask_sampled_token_ids_to_scheduled_width(
+                    sampled_token_ids,
+                    spec_decode_metadata,
+                )
                 next_token_ids, valid_sampled_tokens_count = self.drafter.prepare_next_token_ids_padded(
                     sampled_token_ids,
                     self.requests,
@@ -2021,10 +2091,37 @@ class NPUModelRunner(GPUModelRunner):
                 if draft_probs is not None:
                     self._draft_probs = draft_probs
                     self._draft_prob_req_ids = self.input_batch.req_ids.copy()
+            self._draft_logits = None
+            self._draft_logits_req_ids = None
+            take_draft_logits = getattr(self.drafter, "take_last_draft_logits", None)
+            if take_draft_logits is not None:
+                draft_logits = take_draft_logits()
+                if draft_logits is not None:
+                    self._draft_logits = draft_logits
+                    self._draft_logits_req_ids = list(
+                        self.input_batch.req_ids[: self.input_batch.num_reqs]
+                    )
         else:
             raise ValueError(f"Unknown speculative decoding method: {self.speculative_config.method}")
 
         return draft_token_ids
+
+    def _get_spec_decode_draft_logits(self, metadata: SpecDecodeMetadata) -> torch.Tensor | None:
+        if self._draft_logits is None or self._draft_logits_req_ids is None:
+            return None
+        req_id_to_idx = {req_id: idx for idx, req_id in enumerate(self._draft_logits_req_ids)}
+        logits = []
+        for req_idx, num_draft_tokens in enumerate(metadata.num_draft_tokens):
+            if num_draft_tokens == 0:
+                continue
+            req_id = self.input_batch.req_ids[req_idx]
+            draft_idx = req_id_to_idx.get(req_id)
+            if draft_idx is None:
+                raise ValueError(f"Missing DSpark draft logits for active request {req_id}")
+            if num_draft_tokens > self._draft_logits.shape[1]:
+                raise ValueError("DSpark draft logits are shorter than speculative metadata")
+            logits.append(self._draft_logits[draft_idx, :num_draft_tokens])
+        return torch.cat(logits).contiguous() if logits else None
 
     def _copy_draft_token_ids_to_cpu(
         self, scheduler_output: "SchedulerOutput", zeros_only: bool = False
@@ -2764,7 +2861,8 @@ class NPUModelRunner(GPUModelRunner):
         if self.input_batch.sampling_metadata.top_k is not None and get_ascend_config().enable_reduce_sample:
             max_topk = self.input_batch.top_k_cpu[self.input_batch.top_k_cpu < logits.shape[1]].max()
             self.rejection_sampler.prepare_sampling(max_topk)
-        draft_probs = (
+        draft_logits = self._get_spec_decode_draft_logits(spec_decode_metadata)
+        draft_probs = None if draft_logits is not None else (
             self._get_spec_decode_draft_probs(spec_decode_metadata)
             if get_pp_group().world_size > 1
             else None
@@ -2774,6 +2872,7 @@ class NPUModelRunner(GPUModelRunner):
             draft_probs,
             logits,
             sampling_metadata,
+            draft_logits=draft_logits,
         )
         return sampler_output
 
@@ -3429,12 +3528,10 @@ class NPUModelRunner(GPUModelRunner):
                 cm.block_table_tensor, cm.slot_mapping = _get_block_table_and_slot_mapping(
                     kv_cache_gid
                 )
-            if self.speculative_config and isinstance(self.drafter, AscendStep3p5MTPProposer):
-                # step3p5 MTP draft layers span multiple KV cache groups; capture
-                # each group's block table / slot mapping so the proposer can
-                # build per-step attention metadata for the active MTP layer.
-                self.drafter.set_per_group_attn_metadata(
-                    kv_cache_gid, cm.block_table_tensor, cm.slot_mapping)
+            if self.speculative_config and self.drafter is not None:
+                set_group_metadata = getattr(self.drafter, "set_per_group_attn_metadata", None)
+                if set_group_metadata is not None:
+                    set_group_metadata(kv_cache_gid, cm.block_table_tensor, cm.slot_mapping)
             if self.speculative_config and spec_decode_common_attn_metadata is None:
                 if isinstance(self.drafter, AscendEagleProposer | AscendDraftModelProposer | AscendDflashProposer 
                     | AscendDsparkProposer):
@@ -4006,15 +4103,18 @@ class NPUModelRunner(GPUModelRunner):
             and (
                 self.speculative_config.use_eagle()
                 or self.speculative_config.uses_draft_model()
+                or getattr(
+                    self.speculative_config.draft_model_config.hf_config,
+                    "dspark_block_size",
+                    0,
+                )
             )
         ):
             assert isinstance(
                 self.drafter,
                 AscendEagleProposer | AscendDflashProposer | AscendDsparkProposer | AscendDraftModelProposer,
             )
-            block_size = (self.kernel_block_sizes[0] if isinstance(
-                self.kernel_block_sizes, list) else self.kernel_block_sizes)
-            self.drafter.initialize_attn_backend(kv_cache_config, block_size)
+            self.drafter.initialize_attn_backend(kv_cache_config, self.kernel_block_sizes)
 
         if has_kv_transfer_group():
             get_kv_transfer_group().register_kv_caches(kv_caches)

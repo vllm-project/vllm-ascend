@@ -88,8 +88,14 @@ def rejection_greedy_sample_triton(
         is_greedy = tl.load(is_greedy_ptr + offset, mask=mask, other=0)
         is_greedy_mask = mask & (is_greedy != 0)
 
-    start_idx = tl.where(offset == 0, 0, tl.load(cu_num_draft_tokens_ptr + offset - 1, is_greedy_mask))
-    end_idx = tl.load(cu_num_draft_tokens_ptr + offset, is_greedy_mask)
+    has_prev = offset > 0
+    prev_offset = tl.where(has_prev, offset - 1, 0)
+    start_idx = tl.load(
+        cu_num_draft_tokens_ptr + prev_offset,
+        mask=is_greedy_mask & has_prev,
+        other=0,
+    )
+    end_idx = tl.load(cu_num_draft_tokens_ptr + offset, mask=is_greedy_mask, other=0)
     num_draft_tokens = end_idx - start_idx
 
     for pos in tl.range(0, BLOCK_SIZE):
@@ -454,7 +460,7 @@ def rejection_greedy_sample_with_triton(
 ):
     vec_len = output_token_ids.shape[0]
 
-    if min(num_draft_tokens) == 1 and max(num_draft_tokens) == 1 and is_greedy is None:
+    if max_spec_len == 1 and min(num_draft_tokens) == 1 and max(num_draft_tokens) == 1 and is_greedy is None:
         rejection_greedy_sample_spec_len_1_triton[(grid,)](
             output_token_ids,
             draft_token_ids,

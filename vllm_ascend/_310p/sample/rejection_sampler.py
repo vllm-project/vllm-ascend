@@ -50,9 +50,16 @@ class AscendRejectionSampler310(AscendRejectionSampler):
         draft_probs: torch.Tensor | None,
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
+        draft_logits: torch.Tensor | None = None,
     ) -> SamplerOutput:
         with _bind_sample_recovered_tokens(self.sample_recovered_tokens):
-            return super().forward(metadata, draft_probs, logits, sampling_metadata)
+            return super().forward(
+                metadata,
+                draft_probs,
+                logits,
+                sampling_metadata,
+                draft_logits=draft_logits,
+            )
 
     def sample_recovered_tokens(
         self,

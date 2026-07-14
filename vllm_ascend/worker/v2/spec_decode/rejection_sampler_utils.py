@@ -18,16 +18,43 @@
 # This file is a part of the vllm-ascend project.
 
 import torch
-from vllm.triton_utils import tl, triton
-from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
-    _compute_global_logsumexp as _compute_global_lse,
-)
-from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
-    _compute_local_logits_stats_kernel as _compute_block_stats_kernel,
-)
-from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
-    _insert_resampled_kernel,
-)
+from vllm.triton_utils import HAS_TRITON, tl, triton
+
+from vllm_ascend.utils import vllm_version_is
+
+if not vllm_version_is("0.23.0"):
+    from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
+        _compute_global_logsumexp as _compute_global_lse,
+    )
+    from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
+        _compute_local_logits_stats_kernel as _compute_block_stats_kernel,
+    )
+    from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
+        _insert_resampled_kernel,
+    )
+else:
+    from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
+        _compute_block_stats_kernel,
+        _compute_global_lse,
+        _insert_resampled_kernel,
+    )
+
+_TL_RAND_MIN = tl.constexpr(4.6566127342e-10) if HAS_TRITON else 4.6566127342e-10
+
+
+@triton.jit
+def _tl_log1p_neg(x):
+    return tl.where(
+        x < 0.01,
+        -x * (1.0 + x * (0.5 + x * (0.3333333333333333 + x * 0.25))),
+        tl.log(1.0 - x),
+    )
+
+
+@triton.jit
+def _npu_uniform(seed, pos):
+    uniform_seed = tl.randint(seed, pos.to(tl.int32))
+    return tl.maximum(tl.rand(uniform_seed, 0).to(tl.float32), _TL_RAND_MIN)
 
 
 @triton.jit
@@ -70,8 +97,8 @@ def _npu_gumbel_block_argmax(
         pos = tl.load(pos_ptr + token_idx).to(tl.int32)
         gumbel_seed = tl.randint(seed, pos)
         # NPU: use tl.rand (float32) instead of tl_rand64 (float64 not supported)
-        r = tl.rand(gumbel_seed, block).to(tl.float32)
-        gumbel_noise = -tl.log(-tl.log(r + 1e-20) + 1e-20)
+        r = tl.maximum(tl.rand(gumbel_seed, block).to(tl.float32), _TL_RAND_MIN)
+        gumbel_noise = -tl.log(-_tl_log1p_neg(r))
         logits = tl.where(mask, logits + gumbel_noise, float("-inf"))
 
     value, idx = tl.max(logits, axis=0, return_indices=True)
@@ -284,8 +311,7 @@ def _probabilistic_rejection_kernel(
                     PADDED_VOCAB_NUM_BLOCKS,
                 )
                 target_log_prob = target_logit - target_lse
-                # NPU does not support tl_rand64; always accept the draft token.
-                u = tl.full([], 0.0, dtype=tl.float32)
+                u = _npu_uniform(seed, tl.load(pos_ptr + logit_idx))
                 if HAS_DRAFT_LOGITS:
                     draft_logit = tl.load(
                         draft_logits_ptr

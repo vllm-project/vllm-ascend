@@ -18,6 +18,9 @@
 #
 
 
+from vllm_ascend.spec_decode.deepseek_v4_dspark_proposer import (
+    AscendDeepSeekV4DSparkProposer,
+)
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
 from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
 from vllm_ascend.spec_decode.dspark_proposer import AscendDsparkProposer
@@ -41,6 +44,12 @@ def get_spec_decode_method(method, vllm_config, device, runner):
         return AscendSuffixDecodingProposer(vllm_config, runner)
     elif method == "medusa":
         return AscendMedusaProposer(vllm_config, device)
+    elif method in ("mtp", "dspark") and getattr(
+        vllm_config.speculative_config.draft_model_config.hf_config,
+        "dspark_block_size",
+        False,
+    ):
+        return AscendDeepSeekV4DSparkProposer(vllm_config, device, runner)
     elif method in ("eagle", "eagle3", "mtp"):
         speculative_config = vllm_config.speculative_config
         if speculative_config is not None and speculative_config.use_step3p5_mtp():

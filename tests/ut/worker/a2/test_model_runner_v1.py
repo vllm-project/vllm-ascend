@@ -244,9 +244,15 @@ class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
 
     def test_mtp3_placeholder_metadata_is_preserved_before_sanitizing_forward(self):
         runner = self._build_runner()
+        runner.pin_memory = False
         runner.pcp_size = 1
         runner.arange_np = np.arange(8, dtype=np.int32)
         runner._arange_scratch = np.empty(8, dtype=np.int32)
+        runner._spec_cu_num_draft_tokens = runner._make_buffer(1, dtype=torch.int32)
+        runner._spec_cu_num_sampled_tokens = runner._make_buffer(1, dtype=torch.int32)
+        runner._spec_logits_indices = runner._make_buffer(4, dtype=torch.int32)
+        runner._spec_target_logits_indices = runner._make_buffer(3, dtype=torch.int32)
+        runner._spec_bonus_logits_indices = runner._make_buffer(1, dtype=torch.int32)
         runner.input_ids = SimpleNamespace(
             cpu=torch.tensor([11, -1, -1, -1], dtype=torch.int32),
             gpu=torch.tensor([11, -1, -1, -1], dtype=torch.int32),
@@ -268,6 +274,43 @@ class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
         self.assertEqual(spec_decode_metadata.draft_token_ids.tolist(), [-1, -1, -1])
         self.assertEqual(runner.input_ids.gpu.tolist(), [11, 0, 0, 0])
         self.assertEqual(runner.input_ids.cpu.tolist(), [11, -1, -1, -1])
+
+    def test_mask_sampled_token_ids_respects_scheduled_draft_width(self):
+        sampled_token_ids = torch.tensor(
+            [
+                [10, 11, 12, 13, 14, 999],
+                [20, 21, 22, 23, 24, 25],
+                [30, 777, 778, 779, 780, 781],
+            ],
+            dtype=torch.int64,
+        )
+        metadata = SimpleNamespace(
+            cu_num_draft_tokens=torch.tensor([4, 9, 9], dtype=torch.int32),
+        )
+
+        masked = NPUModelRunner._mask_sampled_token_ids_to_scheduled_width(
+            sampled_token_ids,
+            metadata,
+        )
+
+        torch.testing.assert_close(
+            masked,
+            torch.tensor(
+                [
+                    [10, 11, 12, 13, 14, -1],
+                    [20, 21, 22, 23, 24, 25],
+                    [30, -1, -1, -1, -1, -1],
+                ],
+                dtype=torch.int64,
+            ),
+        )
+        self.assertIs(
+            NPUModelRunner._mask_sampled_token_ids_to_scheduled_width(
+                sampled_token_ids,
+                None,
+            ),
+            sampled_token_ids,
+        )
 
 
 class TestNPUModelRunnerDebugger(unittest.TestCase):
@@ -441,6 +484,88 @@ class TestCorrectOptimisticSeqLensCpu(unittest.TestCase):
         runner.valid_sampled_token_count_event = None
         with self.assertRaises(AssertionError):
             runner._correct_optimistic_seq_lens_cpu(1)
+
+
+class TestNPUModelRunnerSpecDecodeMetadata(unittest.TestCase):
+    def _build_runner(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.device = torch.device("cpu")
+        runner.pin_memory = False
+        runner.pcp_size = 1
+        runner.arange_np = np.arange(32, dtype=np.int64)
+        runner._arange_scratch = np.empty(32, dtype=np.int64)
+        runner.input_ids = runner._make_buffer(32, dtype=torch.int32)
+        runner.input_ids.gpu.copy_(torch.arange(32, dtype=torch.int32))
+        runner._spec_cu_num_draft_tokens = runner._make_buffer(5, dtype=torch.int32)
+        runner._spec_cu_num_sampled_tokens = runner._make_buffer(5, dtype=torch.int32)
+        runner._spec_logits_indices = runner._make_buffer(32, dtype=torch.int32)
+        runner._spec_target_logits_indices = runner._make_buffer(32, dtype=torch.int32)
+        runner._spec_bonus_logits_indices = runner._make_buffer(5, dtype=torch.int32)
+        return runner
+
+    def test_calc_spec_decode_metadata_reuses_stable_buffers(self):
+        runner = self._build_runner()
+
+        metadata = runner._calc_spec_decode_metadata(
+            np.array([3, 0, 2, 0, 1], dtype=np.int32),
+            np.array([4, 14, 17, 27, 29], dtype=np.int32),
+            num_pcp_pads=None,
+        )
+
+        torch.testing.assert_close(
+            metadata.cu_num_draft_tokens,
+            torch.tensor([3, 3, 5, 5, 6], dtype=torch.int32),
+        )
+        torch.testing.assert_close(
+            metadata.cu_num_sampled_tokens,
+            torch.tensor([4, 5, 8, 9, 11], dtype=torch.int32),
+        )
+        torch.testing.assert_close(
+            metadata.logits_indices,
+            torch.tensor(
+                [0, 1, 2, 3, 13, 14, 15, 16, 26, 27, 28],
+                dtype=torch.int32,
+            ),
+        )
+        torch.testing.assert_close(
+            metadata.target_logits_indices,
+            torch.tensor([0, 1, 2, 5, 6, 9], dtype=torch.int32),
+        )
+        torch.testing.assert_close(
+            metadata.bonus_logits_indices,
+            torch.tensor([3, 4, 7, 8, 10], dtype=torch.int32),
+        )
+        torch.testing.assert_close(
+            metadata.draft_token_ids,
+            torch.tensor([1, 2, 3, 15, 16, 28], dtype=torch.int32),
+        )
+        self.assertEqual(
+            metadata.cu_num_draft_tokens.data_ptr(),
+            runner._spec_cu_num_draft_tokens.gpu.data_ptr(),
+        )
+
+        metadata = runner._calc_spec_decode_metadata(
+            np.array([1], dtype=np.int32),
+            np.array([2], dtype=np.int32),
+            num_pcp_pads=None,
+        )
+
+        torch.testing.assert_close(
+            metadata.cu_num_draft_tokens,
+            torch.tensor([1], dtype=torch.int32),
+        )
+        torch.testing.assert_close(
+            metadata.logits_indices,
+            torch.tensor([0, 1], dtype=torch.int32),
+        )
+        torch.testing.assert_close(
+            metadata.draft_token_ids,
+            torch.tensor([1], dtype=torch.int32),
+        )
+        self.assertEqual(
+            metadata.cu_num_draft_tokens.data_ptr(),
+            runner._spec_cu_num_draft_tokens.gpu.data_ptr(),
+        )
 
 
 if __name__ == "__main__":

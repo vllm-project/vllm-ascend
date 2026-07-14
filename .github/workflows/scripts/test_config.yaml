@@ -507,6 +507,7 @@
   optional: false
   base: spec_decode_base
   source_file_dependencies:
+    - vllm_ascend/spec_decode/deepseek_v4_dspark_proposer.py
     - vllm_ascend/spec_decode/dspark_proposer.py
   tests:
     - tests/e2e/pull_request/one_card/spec_decode/test_dspark.py
@@ -802,6 +803,7 @@ estimated_times:
   tests/ut/quantization/methods/a2/test_w8a8_dynamic.py: 40
   tests/ut/quantization/methods/a2/test_w8a8_static.py: 40
   tests/ut/sample/a2/test_gumbel_sampling.py: 80
+  tests/ut/sample/a2/test_probabilistic_rejection.py: 30
   tests/ut/spec_decode/a2/test_eagle_proposer.py: 50
   tests/ut/worker/a2/test_block_table.py: 30
   tests/ut/worker/a2/test_kvcomp_utils.py: 50
@@ -841,7 +843,6 @@ partition:
   a3_x2: 3
   a3_x4: 3
   cpu_x0: 1
-
 
 
 

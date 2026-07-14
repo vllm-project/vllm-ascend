@@ -18,11 +18,18 @@
 
 from __future__ import annotations
 
+import inspect
 from types import SimpleNamespace
 
 import pytest
+import torch
 from vllm.config import CUDAGraphMode
 
+import vllm_ascend.spec_decode.llm_base_proposer as proposer_module
+from vllm_ascend.ops.triton.spec_decode.utils import (
+    prepare_inputs_padded_kernel,
+    prepare_next_token_padded_kernel,
+)
 from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
 
 # CUDAGraphMode values whose ``has_full_cudagraphs()`` is True: FULL plus the
@@ -38,6 +45,67 @@ NON_FULL_CUDAGRAPH_MODES = [
     CUDAGraphMode.NONE,
     CUDAGraphMode.PIECEWISE,
 ]
+
+
+def test_prepare_inputs_padded_uses_one_program_per_request():
+    source = inspect.getsource(prepare_inputs_padded_kernel.fn)
+
+    assert "req_idx = tl.program_id(axis=0)" in source
+    assert "if req_idx == 0" in source
+    assert "cu_num_draft_tokens_ptr + req_idx - 1" in source
+    assert "tl.arange" not in source
+
+
+def test_prepare_next_token_padded_counts_int32_mask_values():
+    source = inspect.getsource(prepare_next_token_padded_kernel.fn)
+
+    assert "tl.sum(is_valid.to(tl.int32), axis=0)" in source
+
+
+def test_prepare_inputs_padded_ignores_graph_only_request_rows(monkeypatch):
+    monkeypatch.setattr(proposer_module, "HAS_TRITON", False)
+    proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
+    proposer.pcp_size = 1
+    proposer.arange = torch.arange(8, dtype=torch.int32)
+    proposer.runner = SimpleNamespace(
+        actual_seq_lengths_q=[3, 3],
+        attn_state=None,
+        decode_token_per_req=1,
+    )
+    metadata = SimpleNamespace(
+        query_start_loc=torch.tensor([0, 3, 6], dtype=torch.int32),
+        query_start_loc_cpu=torch.tensor([0, 3, 6], dtype=torch.int32),
+        seq_lens=torch.tensor([5, 0], dtype=torch.int32),
+        seq_lens_cpu=torch.tensor([5, 0], dtype=torch.int32),
+        _seq_lens_cpu=torch.tensor([5, 0], dtype=torch.int32),
+        seq_lens_cpu_upper_bound=torch.tensor([5, 0], dtype=torch.int32),
+        num_computed_tokens_cpu=None,
+        _num_computed_tokens_cpu=None,
+        num_reqs=2,
+        num_actual_tokens=3,
+        num_input_tokens=6,
+        block_table_tensor=None,
+        slot_mapping=torch.tensor([0, 1, 2, -1, -1, -1], dtype=torch.int32),
+        positions=torch.arange(6, dtype=torch.int32),
+        positions_cpu=None,
+        is_prefilling=None,
+        group_len=None,
+        group_key_idx=None,
+        group_key_cache_idx=None,
+    )
+    spec_metadata = SimpleNamespace(
+        cu_num_draft_tokens=torch.tensor([2], dtype=torch.int32),
+    )
+
+    _, token_indices, token_indices_to_sample, num_rejected = proposer.prepare_inputs_padded(
+        metadata,
+        spec_metadata,
+        torch.tensor([1], dtype=torch.int32),
+    )
+
+    assert token_indices.tolist() == [0, 1, 2, 3, 4, 5]
+    assert token_indices_to_sample.tolist() == [0]
+    assert num_rejected.tolist() == [2]
 
 
 class TestDisablePaddedDrafterBatchWithFullGraph:

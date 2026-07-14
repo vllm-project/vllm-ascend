@@ -2,11 +2,11 @@ import gc
 
 import pytest
 import torch
-from vllm.triton_utils import triton
 
-from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
-from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
-from vllm_ascend.spec_decode.llm_base_proposer import _PREPARE_INPUTS_BLOCK_SIZE as BLOCK_SIZE
+from vllm_ascend.ops.triton.spec_decode.utils import (
+    prepare_inputs_padded_kernel,
+    prepare_next_token_padded_kernel,
+)
 
 
 def prepare_inputs_padded_ref(
@@ -55,22 +55,53 @@ def test_prepare_inputs_padded(num_reqs):
     # Run Triton kernel
     out_tri = torch.empty(num_reqs, dtype=torch.int32, device=device)
     num_rejected_tokens = torch.empty(num_reqs, dtype=torch.int32, device=device)
-    num_blocks_needed = triton.cdiv(num_reqs, BLOCK_SIZE)
-    num_vector_core = get_vectorcore_num()
-    grid_size = min(num_blocks_needed, num_vector_core)
-    grid = (grid_size,)
-
-    prepare_inputs_padded_kernel[grid](
+    prepare_inputs_padded_kernel[(num_reqs,)](
         cu_num_draft_tokens,
         valid_sampled_tokens_count,
         query_start_loc,
         out_tri,
         num_rejected_tokens,
         num_reqs,
-        BLOCK_SIZE=BLOCK_SIZE,
     )
 
     torch.testing.assert_close(out_tri, out_ref)
     gc.collect()
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()
+
+
+def test_prepare_next_token_padded():
+    sampled_token_ids = torch.tensor(
+        [
+            [10, 11, 12, 13, 14, 15],
+            [20, 21, 22, -1, -1, -1],
+            [30, -1, -1, -1, -1, -1],
+            [-1, -1, -1, -1, -1, -1],
+        ],
+        dtype=torch.int32,
+        device="npu",
+    )
+    backup_token_ids = torch.tensor([40, 41, 42, 43], dtype=torch.int32, device="npu")
+    next_token_ids = torch.empty(4, dtype=torch.int32, device="npu")
+    valid_sampled_tokens_count = torch.empty(4, dtype=torch.int32, device="npu")
+
+    prepare_next_token_padded_kernel[(4,)](
+        sampled_token_ids,
+        backup_token_ids,
+        next_token_ids,
+        valid_sampled_tokens_count,
+        128000,
+        6,
+        4,
+        sampled_token_ids.stride(0),
+        BLOCK_SIZE_TOKENS=8,
+    )
+
+    torch.testing.assert_close(
+        next_token_ids,
+        torch.tensor([15, 22, 30, 43], dtype=torch.int32, device="npu"),
+    )
+    torch.testing.assert_close(
+        valid_sampled_tokens_count,
+        torch.tensor([6, 3, 1, 0], dtype=torch.int32, device="npu"),
+    )

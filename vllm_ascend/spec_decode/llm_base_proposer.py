@@ -53,8 +53,10 @@ from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.parallel_state import get_lmhead_tp_group
 from vllm_ascend.models.llama_eagle3_vwn import Eagle3VwnLlamaForCausalLM
-from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
-from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
+from vllm_ascend.ops.triton.spec_decode.utils import (
+    prepare_inputs_padded_kernel,
+    prepare_next_token_padded_kernel,
+)
 from vllm_ascend.spec_decode.utils import SlidingWindowAdapter
 from vllm_ascend.utils import enable_sp, lmhead_tp_enable, shared_expert_dp_enabled, vllm_version_is
 
@@ -79,10 +81,6 @@ def patch_tensor_parallel_group(tp_group):
     finally:
         _ps._TP_STATE_PATCHED = False
         _ps._TP = old_tp_group
-
-
-# Currently we will fix block size to a small one since `num_reqs` can't be too large
-_PREPARE_INPUTS_BLOCK_SIZE = 4
 
 
 # TODO: Remove it when the bug of fx-graph is solved
@@ -330,6 +328,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         from vllm.compilation.backends import set_model_tag
 
         draft_vllm_config = self._create_draft_vllm_config()
+        if self.speculative_config.enforce_eager:
+            draft_vllm_config.model_config.enforce_eager = True
+            draft_vllm_config.compilation_config.mode = CompilationMode.NONE
         draft_load_config = self.speculative_config.draft_load_config
         logger.info(
             "[spec_decode/base] Loading draft model: method=%s, load_format=%s, model=%s",
@@ -1929,27 +1930,37 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             -1,
         )
 
-        # Generate a mask for all valid tokens within those requests
-        valid_mask = (valid_sampled_token_ids_gpu != -1) & (valid_sampled_token_ids_gpu < gpu_input_batch.vocab_size)
-
-        # Count the number of valid tokens in each request
-        valid_sampled_tokens_count = valid_mask.sum(dim=1)
-
-        # Get the rightmost valid index per row
-        last_valid_indices = valid_sampled_tokens_count - 1
-        last_valid_indices_safe = torch.clamp(last_valid_indices, min=0)
-
-        # Get last valid token from each row
-        # (assume undefined state where there is no valid token)
-        selected_tokens = torch.gather(valid_sampled_token_ids_gpu, 1, last_valid_indices_safe.unsqueeze(1)).squeeze(1)
-
-        # Use last token if valid, pre-computed backup if not
-        batch_size = valid_sampled_token_ids_gpu.shape[0]
-        next_token_ids = torch.where(
-            last_valid_indices != -1,
-            selected_tokens,
-            self.backup_next_token_ids.gpu[:batch_size],
-        )
+        batch_size, num_sampled_tokens = valid_sampled_token_ids_gpu.shape
+        if HAS_TRITON:
+            next_token_ids = torch.empty(batch_size, dtype=torch.int32, device=sampled_token_ids.device)
+            valid_sampled_tokens_count = torch.empty_like(next_token_ids)
+            prepare_next_token_padded_kernel[(batch_size,)](
+                valid_sampled_token_ids_gpu,
+                self.backup_next_token_ids.gpu,
+                next_token_ids,
+                valid_sampled_tokens_count,
+                gpu_input_batch.vocab_size,
+                num_sampled_tokens,
+                batch_size,
+                valid_sampled_token_ids_gpu.stride(0),
+                BLOCK_SIZE_TOKENS=triton.next_power_of_2(num_sampled_tokens),
+            )
+        else:
+            valid_mask = (valid_sampled_token_ids_gpu != -1) & (
+                valid_sampled_token_ids_gpu < gpu_input_batch.vocab_size
+            )
+            valid_sampled_tokens_count = valid_mask.sum(dim=1).to(torch.int32)
+            last_valid_indices = valid_sampled_tokens_count - 1
+            selected_tokens = torch.gather(
+                valid_sampled_token_ids_gpu,
+                1,
+                last_valid_indices.clamp(min=0).unsqueeze(1),
+            ).squeeze(1)
+            next_token_ids = torch.where(
+                last_valid_indices >= 0,
+                selected_tokens,
+                self.backup_next_token_ids.gpu[:batch_size],
+            )
 
         return next_token_ids, valid_sampled_tokens_count
 
@@ -2094,25 +2105,19 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         used as padding and filtered out later by `token_indices_to_sample`.
         No blocking CPU operations should be introduced in this function.
         """
+        num_reqs = valid_sampled_tokens_count.shape[0]
         if HAS_TRITON:
-            num_reqs = common_attn_metadata.num_reqs
             device = valid_sampled_tokens_count.device
 
             token_indices_to_sample = torch.empty((num_reqs,), dtype=torch.int32, device=device)
             num_rejected_tokens_gpu = torch.empty((num_reqs,), dtype=torch.int32, device=device)
-            num_blocks_needed = triton.cdiv(num_reqs, _PREPARE_INPUTS_BLOCK_SIZE)
-            num_vector_core = get_vectorcore_num()
-            grid_size = min(num_blocks_needed, num_vector_core)
-            grid = (grid_size,)
-
-            prepare_inputs_padded_kernel[grid](
+            prepare_inputs_padded_kernel[(num_reqs,)](
                 spec_decode_metadata.cu_num_draft_tokens,
                 valid_sampled_tokens_count,
                 common_attn_metadata.query_start_loc,
                 token_indices_to_sample,
                 num_rejected_tokens_gpu,
                 num_reqs,
-                BLOCK_SIZE=_PREPARE_INPUTS_BLOCK_SIZE,
             )
         else:
             num_draft_tokens_gpu = torch.cat(
@@ -2128,7 +2133,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 torch.zeros_like(num_draft_tokens_gpu),
             )
 
-            token_indices_to_sample = common_attn_metadata.query_start_loc[1:] - 1 - num_rejected_tokens_gpu
+            token_indices_to_sample = (
+                common_attn_metadata.query_start_loc[1 : num_reqs + 1] - 1 - num_rejected_tokens_gpu
+            )
 
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
 
