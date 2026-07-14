@@ -507,7 +507,8 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     use_qk_l2norm_in_kernel=True,
                     skip_pcp_all_gather=skip_pcp_all_gather,
                 )
-                ssm_state[prefill_state_indices] = last_recurrent_state.transpose(-1, -2).contiguous().to(ssm_state.dtype)
+                ssm_state[prefill_state_indices] = (
+                    last_recurrent_state.transpose(-1, -2).contiguous().to(ssm_state.dtype))
                 if split_non_spec:
                     core_attn_out_non_spec = torch.cat(
                         [core_attn_out_decode, core_attn_out_non_spec],
