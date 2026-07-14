@@ -41,8 +41,10 @@ class TestAscendSpecDecodeBaseProposer310(TestBase):
             flag_states.append(AscendRotaryEmbedding310._is_drafting_update_enabled)
             return torch.zeros(num_tokens, dtype=torch.long)
 
-        with patch.object(AscendSpecDecodeBaseProposer, "_run_merged_draft", mock_original), \
-             patch("vllm_ascend._310p.spec_decode.llm_base_proposer_310._original_run_merged_draft", mock_original):
+        with (
+            patch.object(AscendSpecDecodeBaseProposer, "_run_merged_draft", mock_original),
+            patch("vllm_ascend._310p.spec_decode.llm_base_proposer_310._original_run_merged_draft", mock_original),
+        ):
             proposer = object.__new__(AscendSpecDecodeBaseProposer310)
             proposer._run_merged_draft(
                 num_input_tokens=4,
@@ -62,8 +64,10 @@ class TestAscendSpecDecodeBaseProposer310(TestBase):
         def mock_original(*args, **kwargs):
             raise RuntimeError("Test exception")
 
-        with patch.object(AscendSpecDecodeBaseProposer, "_run_merged_draft", mock_original), \
-             patch("vllm_ascend._310p.spec_decode.llm_base_proposer_310._original_run_merged_draft", mock_original):
+        with (
+            patch.object(AscendSpecDecodeBaseProposer, "_run_merged_draft", mock_original),
+            patch("vllm_ascend._310p.spec_decode.llm_base_proposer_310._original_run_merged_draft", mock_original),
+        ):
             proposer = object.__new__(AscendSpecDecodeBaseProposer310)
             with self.assertRaises(RuntimeError):
                 proposer._run_merged_draft(
