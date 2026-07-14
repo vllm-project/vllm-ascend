@@ -490,34 +490,33 @@ class FusedMC2CommImpl(MoECommMethod):
         dispatch_quant_mode, dispatch_quant_out_dtype, weight_type = _get_cann_mega_moe_quant_settings(
             fused_experts_input.quant.quant_type
         )
-
-        w1 = fused_experts_input.weights.w1
-        w2 = fused_experts_input.weights.w2
-        w1_scale = fused_experts_input.weights.w1_scale
-        w2_scale = fused_experts_input.weights.w2_scale
-
-        w1 = w1 if isinstance(w1, list) else [w1]
-        w2 = w1 if isinstance(w2, list) else [w2]
-        w1_scale = w1_scale if isinstance(w1_scale, list) else [w1_scale]
-        w2_scale = w2_scale if isinstance(w2_scale, list) else [w2_scale]
-
+        weight1 = _as_tensor_list(fused_experts_input.weights.w1, "w1")
+        weight2 = _as_tensor_list(fused_experts_input.weights.w2, "w2")
+        # A8W4-INT MegaMoe reads N from weight1.storageShape.lastDim treated as int8 (N = lastDim*2)
+        # and checks weight2.dim0 == N/2, so the weights MUST be int8-shaped (two int4 per byte), NOT
+        # the eight-int4-per-int32 packing (that makes the op read N four times too small and fail
+        # CheckWeight2Input). The op prototype also REQUIRES FRACTAL_NZ per expert. The W4A8 quant
+        # method therefore builds per-expert int8 + FRACTAL_NZ lists (cann_mega_moe_*_weight_list) and
+        # they are passed through as-is here. W8A8 weights are already int8 + FRACTAL_NZ, also as-is.
+        weight_scales1 = _as_tensor_list(fused_experts_input.weights.w1_scale, "w1_scale")
+        weight_scales2 = _as_tensor_list(fused_experts_input.weights.w2_scale, "w2_scale")
         # MegaMoe requires per-expert weight scales to be 1-D. The W4A8 method
         # squeezes w13 scales but leaves w2 scales as [1, hidden]; drop the
         # leading singleton dim so CheckWeightScaleInput passes. Guarded to the
         # [1, N] per-channel case to avoid flattening genuine per-group scales.
-        w1_scale = [t.squeeze(0) if (t.dim() == 2 and t.shape[0] == 1) else t for t in w1_scale]
-        w2_scale = [t.squeeze(0) if (t.dim() == 2 and t.shape[0] == 1) else t for t in w2_scale]
+        weight_scales1 = [t.squeeze(0) if (t.dim() == 2 and t.shape[0] == 1) else t for t in weight_scales1]
+        weight_scales2 = [t.squeeze(0) if (t.dim() == 2 and t.shape[0] == 1) else t for t in weight_scales2]
 
         if self._mega_moe_symm_buffer is None:
             self._init_mega_moe_symm_buffer(
                 fused_experts_input,
                 topk_ids,
-                w1,
-                w2,
+                weight1,
+                weight2,
                 dispatch_quant_mode,
                 dispatch_quant_out_dtype,
             )
-
+            
         activation_clamp = fused_experts_input.swiglu_limit if fused_experts_input.swiglu_limit > 0 else None
         x_active_mask = None
         if self.token_dispatcher.global_bs == 0 and fused_experts_input.routing.mc2_mask is not None:
@@ -553,11 +552,11 @@ class FusedMC2CommImpl(MoECommMethod):
             fused_experts_input.hidden_states,
             topk_ids.to(torch.int32),
             fused_experts_input.topk_weights.to(torch.float32),
-            w1,
-            w2,
+            weight1,
+            weight2,
             self._mega_moe_symm_buffer,
-            l1_weights_sf=w1_scale,
-            l2_weights_sf=w2_scale,
+            l1_weights_sf=weight_scales1,
+            l2_weights_sf=weight_scales2,
             l1_bias=l1_bias,
             l2_bias=l2_bias,
             x_active_mask=x_active_mask,

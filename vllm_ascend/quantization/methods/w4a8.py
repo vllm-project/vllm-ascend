@@ -823,9 +823,6 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
 
         if self.is_per_channel_weight:
             layer.w13_weight_scale.data = self.maybe_squeeze_per_channel_weight_scale(layer.w13_weight_scale.data)
-        # FIX(mega W4A8 ND all-route): keep weights as ND int8 when MegaMoe is on (skip trans_nz).
-        layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
-        layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
 
         if self.dynamic_eplb:
             layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
@@ -860,8 +857,6 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
             self._maybe_build_cann_mega_moe_lists(layer, layer.w13_weight.data, layer.w2_weight.data)
 
         else:
-            layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
-            layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
             layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
             layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
             layer.w13_weight.data = self.pack_to_int32(layer.w13_weight.data)
