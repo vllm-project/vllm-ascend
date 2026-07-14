@@ -142,11 +142,13 @@ def get_kvcomp_decode_params(
     return new_block_table, kvcomp_meta.seq_lens_from_hamming
 
 
-def is_enable_hamming_sparse():
+def is_enable_hamming_sparse(enable_c8_quant: bool) -> bool:
     vllm_config = get_current_vllm_config_or_none()
     if vllm_config is None:
         return False
     additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
     enable_hamming_sparse = additional_config.get("enable_hamming_sparse", False)
     enable_hamming_sparse = enable_hamming_sparse and not vllm_config.speculative_config
+    if enable_hamming_sparse:
+        assert not enable_c8_quant, "Hamming sparse attention does not support C8 KV cache quantization."
     return enable_hamming_sparse
