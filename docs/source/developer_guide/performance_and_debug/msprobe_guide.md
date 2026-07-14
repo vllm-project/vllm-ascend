@@ -31,8 +31,9 @@ If you need to dump cudagraph graphs, you need to install from source code:
    ```bash
    git clone https://gitcode.com/Ascend/msprobe.git
    cd msprobe
-   python3 setup.py bdist_wheel --include-mod=aclgraph_dump --no-check
-   pip install dist/*.whl
+   pip install uv
+   python3 build.py -e include-mod=aclgraph_dump -e no-check=true
+   pip install artifacts/mindstudio_probe*.whl
    ```
 
 ## 2. Collecting Data with `msprobe`
