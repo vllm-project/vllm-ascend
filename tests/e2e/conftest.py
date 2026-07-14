@@ -1924,7 +1924,9 @@ def qwen_prompt(questions: list[str]) -> list[str]:
 
 
 def hunyuan_prompt(questions: list[str]) -> list[str]:
-    placeholder = "<｜hy_place▁holder▁no▁100｜><｜hy_place▁holder▁no▁102｜><｜hy_place▁holder▁no▁101｜>"  # noqa: E501
+    # vLLM's Hunyuan prompt update adds the image start/end tokens around
+    # this placeholder. Supplying the wrapper here would duplicate it.
+    placeholder = "<｜hy_place▁holder▁no▁102｜>"
     return [f"<｜hy_begin▁of▁sentence｜>{placeholder}{question}<｜hy_User｜>" for question in questions]
 
 
