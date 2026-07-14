@@ -100,6 +100,7 @@ from vllm.v1.worker.gpu_model_runner import AsyncGPUModelRunnerOutput, GPUModelR
 from vllm.v1.worker.ubatch_utils import (
     UBatchSlices,
     maybe_create_ubatch_slices,
+    split_attn_metadata,
 )
 from vllm.v1.worker.utils import AttentionGroup, select_common_block_size
 
@@ -120,6 +121,7 @@ from vllm_ascend.compilation.acl_graph import (
     set_graph_params,
     update_full_graph_params,
 )
+from vllm_ascend.worker.npu_ubatch_wrapper import UBatchWrapper
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoader
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
@@ -772,7 +774,7 @@ class NPUModelRunner(GPUModelRunner):
 
     def get_model(self) -> nn.Module:
         # get raw model out of the aclgraph wrapper.
-        if isinstance(self.model, ACLGraphWrapper):
+        if isinstance(self.model, (ACLGraphWrapper, UBatchWrapper)):
             return self.model.unwrap()
         return self.model
 
@@ -2343,6 +2345,7 @@ class NPUModelRunner(GPUModelRunner):
                 input_ids=input_ids,
                 eplb_heat_collection_status=self.eplb_heat_collection_status if self.dynamic_eplb else False,
                 afd_metadata=afd_metadata,
+                ubatch_slices=ubatch_slices_padded,
                 afd_comm_stream=self.afd_comm_stream,
             ),
             self.maybe_get_kv_connector_output(
@@ -3350,10 +3353,20 @@ class NPUModelRunner(GPUModelRunner):
                 from vllm_ascend.attention.kvcomp_attn.attention_utils import build_kvcomp_metadata
                 build_kvcomp_metadata(self.kvcomp_meta_data, cm)
             for attn_gid in range(len(self.attn_groups[kv_cache_gid])):
-                _build_attn_group_metadata(
-                    kv_cache_gid, attn_gid, cm, num_reqs_actual,
-                    prefill_ratio_to_sas_metadata, decode_ratio_to_sas_metadata,
-                    common_ratio_to_sas_metadata)
+                if ubatch_slices is not None:
+                    for ubid, _cm in enumerate(
+                            split_attn_metadata(ubatch_slices, cm)):
+                        _build_attn_group_metadata(
+                            kv_cache_gid, attn_gid, _cm, num_reqs_actual,
+                            prefill_ratio_to_sas_metadata,
+                            decode_ratio_to_sas_metadata,
+                            common_ratio_to_sas_metadata, ubid=ubid)
+                else:
+                    _build_attn_group_metadata(
+                        kv_cache_gid, attn_gid, cm, num_reqs_actual,
+                        prefill_ratio_to_sas_metadata,
+                        decode_ratio_to_sas_metadata,
+                        common_ratio_to_sas_metadata)
         if self.is_mm_prefix_lm:
             req_doc_ranges = {}
             for req_id in self.input_batch.req_ids:
@@ -3462,7 +3475,7 @@ class NPUModelRunner(GPUModelRunner):
         self.query_lens = torch.from_numpy(num_scheduled_tokens)
         num_tokens_unpadded = int(num_scheduled_tokens.sum())
         num_sampled_tokens = np.ones(num_reqs, dtype=np.int32)
-        _cudagraph_mode, batch_desc, _, num_tokens_across_dp, _ = self._determine_batch_execution_and_padding(
+        _cudagraph_mode, batch_desc, should_ubatch, num_tokens_across_dp, _ = self._determine_batch_execution_and_padding(
             num_tokens=num_tokens_unpadded,
             num_reqs=num_reqs,
             num_scheduled_tokens_np=num_scheduled_tokens,
@@ -3506,8 +3519,13 @@ class NPUModelRunner(GPUModelRunner):
         if self.dynamic_eplb:
             self.update_eplb_heat_collection_status(num_tokens_padded)
         
-        # vllm-ascend does not support ubatch now
-        ubatch_slices, ubatch_slices_padded = None, None
+        ubatch_slices, ubatch_slices_padded = maybe_create_ubatch_slices(
+            should_ubatch,
+            num_scheduled_tokens,
+            num_tokens_padded,
+            num_reqs_padded,
+            self.parallel_config.num_ubatches,
+        )
         attn_metadata: PerLayerAttnMetadata | None = None
         # Build attention metadata for dummy_run
         if self._should_build_dummy_attn_metadata(force_attention, is_profile, cudagraph_runtime_mode):
@@ -3652,6 +3670,7 @@ class NPUModelRunner(GPUModelRunner):
                 input_ids=input_ids,
                 eplb_heat_collection_status=self.eplb_heat_collection_status if self.dynamic_eplb else False,
                 afd_metadata=afd_metadata,
+                ubatch_slices=ubatch_slices_padded,
                 afd_comm_stream=self.afd_comm_stream,
             ):
                 # Send dp_metadata_list to FFN side during dummy run so that
@@ -3816,7 +3835,8 @@ class NPUModelRunner(GPUModelRunner):
         get_offloader().post_init()
 
         # wrap the model with full graph wrapper if needed.
-        if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
+        if (self.compilation_config.cudagraph_mode.has_full_cudagraphs()
+                and not self.parallel_config.use_ubatching):
             self.update_stream: torch.npu.Stream = torch.npu.Stream()
             self.model = ACLGraphWrapper(
                 self.model,
@@ -3825,6 +3845,16 @@ class NPUModelRunner(GPUModelRunner):
                 use_eagle=self.use_eagle,
                 enable_enpu=self.enable_enpu,
             )
+        elif self.parallel_config.use_ubatching:
+            self.update_stream: torch.npu.Stream = torch.npu.Stream()
+            if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
+                self.model = UBatchWrapper(
+                    self.model, self.vllm_config,
+                    CUDAGraphMode.FULL, self.device)
+            else:
+                self.model = UBatchWrapper(
+                    self.model, self.vllm_config,
+                    CUDAGraphMode.NONE, self.device)
 
         if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
             self._start_dump_data()
@@ -4776,18 +4806,18 @@ class NPUModelRunner(GPUModelRunner):
             attn_backends_map: dict[AttentionBackend, list[str]], kv_cache_group_id: int
         ) -> list[AttentionGroup]:
             attn_groups: list[AttentionGroup] = []
+            num_metadata_builders = (
+                1 if not self.parallel_config.use_ubatching
+                else self.parallel_config.num_ubatches
+            )
             for (attn_backend, kv_cache_spec), layer_names in attn_backends_map.items():
-                attn_metadata_builders = []
-                attn_metadata_builders.append(
-                    attn_backend.get_builder_cls()(
-                        kv_cache_spec,
-                        layer_names,
-                        self.vllm_config,
-                        self.device,
-                    )
-                )
                 attn_group = AttentionGroup(
-                    attn_backend, layer_names, kv_cache_spec, kv_cache_group_id, attn_metadata_builders
+                    attn_backend, layer_names, kv_cache_spec, kv_cache_group_id
+                )
+                attn_group.create_metadata_builders(
+                    self.vllm_config,
+                    self.device,
+                    num_metadata_builders=num_metadata_builders,
                 )
                 attn_groups.append(attn_group)
             return attn_groups

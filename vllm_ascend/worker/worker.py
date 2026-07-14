@@ -456,8 +456,11 @@ class NPUWorker(WorkerBase):
         # in ray scenario. see https://github.com/vllm-project/vllm/pull/26845
         # for more details
         self.device = self._init_device()
-        # Initialize workspace manager
-        num_ubatches = 1
+        # Initialize workspace manager.
+        # Use the configured num_ubatches so that AFD ubatching can allocate
+        # per-ubatch workspace buffers. Defaults to 1 when ubatching is off.
+        num_ubatches = max(
+            1, getattr(self.vllm_config.parallel_config, "num_ubatches", 1))
         init_workspace_manager(self.device, num_ubatches)
         # Init ModelRunner here, so that we have access to self.device.
         if (

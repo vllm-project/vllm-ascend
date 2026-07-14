@@ -74,6 +74,7 @@ def set_ascend_forward_context(
     eplb_heat_collection_status: bool = False,
     afd_metadata: Optional[AFDMetadata] = None,
     afd_comm_stream: torch.npu.Stream = None,
+    ubatch_slices: Any = None,
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
@@ -88,6 +89,7 @@ def set_ascend_forward_context(
         "batch_descriptor": batch_descriptor,
         "skip_compiled": skip_compiled,
         "afd_metadata": afd_metadata,
+        "ubatch_slices": ubatch_slices,
     }
     with set_forward_context(**forward_context_kwargs):
         forward_context = get_forward_context()
