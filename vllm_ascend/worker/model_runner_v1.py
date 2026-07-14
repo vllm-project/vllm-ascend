@@ -168,7 +168,7 @@ from vllm_ascend.utils import (
     vllm_version_is,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
-from vllm_ascend.worker.pcp_utils import PCPManager
+from vllm_ascend.worker.pcp_utils import PCPAsyncSpecDecodeRebuildResult, PCPManager
 from vllm_ascend.worker.utils import AscendKVBlockZeroer
 
 from vllm_ascend.ascend_forward_context import (  # isort: skip
@@ -592,6 +592,7 @@ class NPUModelRunner(GPUModelRunner):
         self.long_seq_metadata = None
         self.query_lens: torch.Tensor | None = None
         self.sampling_done_event: torch.npu.Event | None = None
+        self.valid_sampled_token_count_gpu: torch.Tensor | None = None
 
         # self.cudagraph_batch_sizes sorts in ascending order.
         if (
@@ -952,6 +953,19 @@ class NPUModelRunner(GPUModelRunner):
                 self.input_batch.num_prompt_tokens,
             )
 
+        # Build prev_positions before PCP prepares full-layout spec inputs so
+        # PCP can repair async sampled/draft ids with device-side index math.
+        prev_req_id_to_index = self.input_batch.prev_req_id_to_index
+        self._compute_prev_positions(num_reqs)
+        prev_positions_gpu = None
+        if (
+            self.use_async_scheduling
+            and self.input_batch.prev_sampled_token_ids is not None
+            and prev_req_id_to_index
+        ):
+            self.prev_positions.copy_to_gpu(num_reqs)
+            prev_positions_gpu = self.prev_positions.gpu[:num_reqs]
+
         # for pcp, prefill mtp should use origin scheduleroutput ,
         if self.speculative_config and self.use_cp:
             self.pcp_manager.generate_pcp_mtp_input(
@@ -966,6 +980,7 @@ class NPUModelRunner(GPUModelRunner):
                 self._draft_token_ids,  # type: ignore[has-type]
                 scheduler_output,
                 self.num_spec_tokens,
+                prev_positions=prev_positions_gpu,
             )
 
         if self.pcp_size > 1:
@@ -1085,11 +1100,6 @@ class NPUModelRunner(GPUModelRunner):
         )
         self.optimistic_seq_lens_cpu[num_reqs:].fill_(0)
 
-        # Build prev_positions mapping: current pos -> prev pos (-1 if new).
-        # Used for gathering from previous iteration's GPU tensors.
-        prev_req_id_to_index = self.input_batch.prev_req_id_to_index
-        self._compute_prev_positions(num_reqs)
-
         # Fill unused with -1. Needed for reshape_and_cache in attention_cp
         self.query_start_loc.gpu[num_reqs + 1 :].fill_(-1)
 
@@ -1179,22 +1189,24 @@ class NPUModelRunner(GPUModelRunner):
         # CPU values are optimistic (all drafts accepted). The kernel
         # corrects on GPU using the previous step's
         # valid_sampled_token_count_gpu. Otherwise, just copy from CPU.
+        valid_sampled_token_count_gpu = self.valid_sampled_token_count_gpu
         if self.use_async_spec_decode:
             computed_token_tensor_cpu = self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs].to(
                 device=self.device, non_blocking=True
             )
         if (
             self.use_async_spec_decode
-            and self.valid_sampled_token_count_gpu is not None # type: ignore[has-type]
+            and valid_sampled_token_count_gpu is not None
             and prev_req_id_to_index
         ):
-            self.prev_positions.copy_to_gpu(num_reqs)
+            if prev_positions_gpu is None:
+                self.prev_positions.copy_to_gpu(num_reqs)
             self.prev_num_draft_tokens.copy_to_gpu()
             update_num_computed_tokens_for_batch_change(
                 self.num_computed_tokens,
                 self.num_accepted_tokens.gpu[:num_reqs],
                 self.prev_positions.gpu[:num_reqs],
-                self.valid_sampled_token_count_gpu, # type: ignore[has-type]
+                valid_sampled_token_count_gpu,
                 self.prev_num_draft_tokens.gpu,
                 computed_token_tensor_cpu,
             )
@@ -1213,54 +1225,50 @@ class NPUModelRunner(GPUModelRunner):
         self.num_scheduled_tokens.copy_to_gpu(num_reqs)
         num_scheduled_tokens_gpu = self.num_scheduled_tokens.gpu[:num_reqs]
 
-        # Rebuild CP/spec inputs after async accepted-token correction.
-        has_decode_req = bool(np.any(
-            self.input_batch.num_computed_tokens_cpu[:num_reqs]
-            >= self.input_batch.num_prompt_tokens[:num_reqs]
-        ))
-        should_rebuild_async_inputs = (
-            self.use_cp
-            and self.use_async_spec_decode
-            and self.valid_sampled_token_count_gpu is not None # type: ignore[has-type]
-            and prev_req_id_to_index
-            and has_decode_req
-        )
-        base_num_computed_tokens_np = None
-        if should_rebuild_async_inputs:
-            # Async spec decode corrects num_computed_tokens on device.
-            # Rebuild CPU-side inputs from the corrected positions.
-            corrected_num_computed_tokens_np = (
-                self.num_computed_tokens[:num_reqs].cpu().numpy()
+        pcp_manager = getattr(self, "pcp_manager", None)
+        if pcp_manager is not None:
+            cp_async_rebuild = pcp_manager.rebuild_async_spec_decode_inputs(
+                use_async_spec_decode=self.use_async_spec_decode,
+                valid_sampled_token_count_gpu=valid_sampled_token_count_gpu,
+                prev_req_id_to_index=prev_req_id_to_index,
+                prev_positions_gpu=prev_positions_gpu,
+                with_prefill=with_prefill,
+                enable_prompt_embeds=self.enable_prompt_embeds,
+                has_req_prompt_embeds=bool(self.input_batch.req_prompt_embeds),
+                supports_mm_inputs=self.supports_mm_inputs,
+                num_reqs=num_reqs,
+                total_num_scheduled_tokens=total_num_scheduled_tokens,
+                req_indices=req_indices,
+                req_indices_gpu=req_indices_gpu,
+                position_pcp=position_pcp if self.pcp_size > 1 else None,
+                query_pos_gpu=self.query_pos.gpu,
+                query_pos_np=self.query_pos.np,
+                positions=self.positions,
+                positions_np=positions_np,
+                num_computed_tokens=self.num_computed_tokens,
+                num_computed_tokens_cpu=self.input_batch.num_computed_tokens_cpu,
+                prev_positions_np=self.prev_positions.np,
+                prev_num_draft_tokens_np=self.prev_num_draft_tokens.np,
+                valid_sampled_token_count_event=self.valid_sampled_token_count_event,
+                valid_sampled_token_count_cpu=self.valid_sampled_token_count_cpu,
+                input_batch=self.input_batch,
+                input_ids=self.input_ids,
+                scheduler_output=scheduler_output,
+                arange_np=self.arange_np,
+                cu_num_tokens=cu_num_tokens,
+                draft_token_ids=self._draft_token_ids,  # type: ignore[has-type]
+                num_spec_tokens=self.num_spec_tokens,
+                prepare_input_ids=self._prepare_input_ids,
+            )
+        else:
+            cp_async_rebuild = PCPAsyncSpecDecodeRebuildResult(
+                rebuilt=False,
+                positions_ready_on_device=False,
             )
 
-            # Mixed batch: only decode requests use async-corrected lengths.
-            # Prefill requests keep CPU-side prompt progress.
-            base_num_computed_tokens_np = (
-                self.input_batch.num_computed_tokens_cpu[:num_reqs].copy()
-            )
-            num_decode_reqs = self.pcp_manager.num_decode_reqs
-            base_num_computed_tokens_np[:num_decode_reqs] = (
-                corrected_num_computed_tokens_np[:num_decode_reqs]
-            )
-
-            position_offsets = (
-                position_pcp
-                if self.pcp_size > 1
-                else self.query_pos.np
-            )
-
-            self._rebuild_input_ids_with_corrected_positions(
-                scheduler_output,
-                num_reqs,
-                total_num_scheduled_tokens,
-                req_indices,
-                position_offsets,
-                positions_np,
-                cu_num_tokens,
-                base_num_computed_tokens_np,
-            )
-
-        if self.pcp_size > 1 or should_rebuild_async_inputs:
+        if cp_async_rebuild.positions_ready_on_device:
+            pass
+        elif self.pcp_size > 1 or cp_async_rebuild.rebuilt:
             # PCP and async rebuild both compute the correct positions on CPU.
             # Copy positions_np to GPU so input_ids and positions stay aligned.
 
@@ -1281,52 +1289,6 @@ class NPUModelRunner(GPUModelRunner):
         )
         self.seq_lens[num_reqs:].fill_(0)
 
-        if should_rebuild_async_inputs:
-            req_indices_full = self.pcp_manager.async_rebuild_req_indices_full
-            cu_num_tokens_full = self.pcp_manager.async_rebuild_cu_num_tokens_full
-            num_tokens_full = self.pcp_manager.async_rebuild_num_tokens_full
-
-            assert base_num_computed_tokens_np is not None
-            base = base_num_computed_tokens_np
-
-            token_counts = np.diff(np.concatenate(([0], cu_num_tokens_full)))
-            token_starts = np.repeat(cu_num_tokens_full - token_counts, token_counts)
-            query_pos = self.arange_np[:num_tokens_full] - token_starts
-
-            positions_full = np.empty(num_tokens_full, dtype=np.int64)
-            np.add(base[req_indices_full], query_pos, out=positions_full)
-
-            if self.pcp_size > 1:
-                pre_pcp_query_start_loc = torch.zeros(
-                    num_reqs + 1,
-                    dtype=torch.int32,
-                    device=self.device,
-                )
-                pre_pcp_query_start_loc[1 : num_reqs + 1] = torch.from_numpy(
-                    cu_num_tokens_full
-                ).to(dtype=torch.int32, device=self.device)
-
-                self.input_batch.block_table.compute_slot_mapping(
-                    num_reqs,
-                    pre_pcp_query_start_loc,
-                    torch.from_numpy(positions_full).to(self.device),
-                )
-
-            self.pcp_manager.generate_pcp_mtp_input(
-                num_tokens_full,
-                scheduler_output.num_scheduled_tokens,
-                with_prefill,
-                self.input_batch,
-                self.arange_np,
-                req_indices_full,
-                positions_full,
-                cu_num_tokens_full,
-                self._draft_token_ids,  # type: ignore[has-type]
-                scheduler_output,
-                self.num_spec_tokens,
-                precomputed_positions_np=positions_full,
-            )
-
         # In async spec decode mode, optimistic_seq_lens_cpu assumes all
         # tokens from the previous speculative step were accepted. Correct it
         # on CPU using the valid-sampled-token counts that are already copied
@@ -1335,7 +1297,7 @@ class NPUModelRunner(GPUModelRunner):
         # Mirrors update_num_computed_tokens_for_batch_change on the GPU side.
         async_spec_decode_active = (
             self.use_async_spec_decode
-            and self.valid_sampled_token_count_gpu is not None  # type: ignore[has-type]
+            and valid_sampled_token_count_gpu is not None
             and prev_req_id_to_index
         )
         if self._needs_seq_lens_cpu_sync and async_spec_decode_active:
@@ -1435,45 +1397,6 @@ class NPUModelRunner(GPUModelRunner):
             logits_indices,
             spec_decode_metadata,
             total_num_scheduled_tokens,
-        )
-
-    def _rebuild_input_ids_with_corrected_positions(
-        self,
-        scheduler_output,
-        num_reqs,
-        total_num_scheduled_tokens,
-        req_indices,
-        position_offsets,
-        positions_np,
-        cu_num_tokens,
-        base_num_computed_tokens_np,
-    ) -> None:
-        # base_num_computed_tokens_np contains per-request starts:
-        # decode requests use async-corrected lengths, prefill requests use CPU lengths.
-        base = base_num_computed_tokens_np
-        np.add(
-            base[req_indices],
-            position_offsets[:total_num_scheduled_tokens],
-            out=positions_np,
-        )
-
-        token_indices = (
-            positions_np[:total_num_scheduled_tokens]
-            + req_indices * self.input_batch.token_ids_cpu.shape[1]
-        )
-        torch.index_select(
-            self.input_batch.token_ids_cpu_tensor.flatten(),
-            0,
-            torch.from_numpy(token_indices),
-            out=self.input_ids.cpu[:total_num_scheduled_tokens],
-        )
-
-        self.input_ids.copy_to_gpu(total_num_scheduled_tokens)
-        self._prepare_input_ids(
-            scheduler_output,
-            num_reqs,
-            total_num_scheduled_tokens,
-            cu_num_tokens,
         )
 
     def _preprocess(
@@ -2571,7 +2494,7 @@ class NPUModelRunner(GPUModelRunner):
             assert self.sampling_done_event is not None
             self.sampling_done_event.record()
 
-        self.valid_sampled_token_count_gpu: torch.Tensor | None = None # type: ignore[no-redef]
+        self.valid_sampled_token_count_gpu = None
 
         def propose_draft_token_ids(sampled_token_ids):
             assert spec_decode_common_attn_metadata is not None
