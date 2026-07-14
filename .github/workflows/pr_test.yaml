@@ -225,9 +225,11 @@ jobs:
   generate-hitest:
     name: Generate hitest recommendations
     needs: lint-and-select-tests
-    # if: ${{ needs.lint-and-select-tests.outputs.has_tests == 'true' }}
     uses: ./.github/workflows/manual-hitest.yaml
-    # secrets: inherit
+    with:
+      X_APIG_APPCODE: ${{ secrets.X_APIG_APPCODE }}
+      APP_KEY: ${{ secrets.APP_KEY }}
+      APP_SECRET: ${{ secrets.APP_SECRET }}
     secrets:
       X_APIG_APPCODE: ${{ secrets.X_APIG_APPCODE }}
       APP_KEY: ${{ secrets.APP_KEY }}
