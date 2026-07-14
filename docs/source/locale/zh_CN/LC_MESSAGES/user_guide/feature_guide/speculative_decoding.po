@@ -359,11 +359,11 @@ msgstr "| `eagle3` | 基于 EAGLE-3 的草稿模型 |"
 msgid "| `mtp` | Multi-Token Prediction with shared embedding head |"
 msgstr "| `mtp` | 使用共享嵌入头的多令牌预测 |"
 
-msgid "| `dflash` | Draft-and-Flash with cross-attention |"
-msgstr "| `dflash` | 带交叉注意力的 Draft-and-Flash |"
-
 msgid "| `draft_model` | Generic external draft LLM |"
 msgstr "| `draft_model` | 通用外部草稿 LLM |"
 
 msgid "| `extract_hidden_states` | Extract hidden states for EAGLE training |"
 msgstr "| `extract_hidden_states` | 提取隐藏状态用于 EAGLE 训练 |"
+
+msgid "| `dflash` | Block diffusion-based parallel draft model |"
+msgstr "| `dflash` | 基于块扩散的并行草稿模型 |"
