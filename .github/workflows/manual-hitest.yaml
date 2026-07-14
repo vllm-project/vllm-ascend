@@ -20,6 +20,13 @@ name: Hitest
 on:
   workflow_dispatch:
   workflow_call:
+    secrets:
+      X_APIG_APPCODE:
+        required: true
+      APP_KEY:
+        required: true
+      APP_SECRET:
+        required: true
     outputs:
       hitest_paths:
         description: 'Content of recommended_pytest_paths.txt (one path per line)'
