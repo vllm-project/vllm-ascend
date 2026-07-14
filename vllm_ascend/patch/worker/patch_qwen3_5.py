@@ -39,7 +39,7 @@ _GDN_PATCH_TARGET = _GDNBaseCls
 
 
 class AscendQwen3NextAttention(Qwen3NextAttention):
-    def forward(self, positions: torch.Tensor, output: torch.Tensor, hidden_states: torch.Tensor):
+    def forward(self, positions: torch.Tensor, hidden_states: torch.Tensor, output: torch.Tensor = None):
         qkv, _ = self.qkv_proj(hidden_states)
         if "qwen3_5" in self.config.model_type:
             cos_sin = self.rotary_emb.cos_sin_cache[positions]
@@ -84,7 +84,10 @@ class AscendQwen3NextAttention(Qwen3NextAttention):
             gate = torch.sigmoid(gate)
             attn_output = attn_output * gate
 
-        output[:], _ = self.o_proj(attn_output)
+        result, _ = self.o_proj(attn_output)
+        if output is not None:
+            output[:] = result
+        return result
 
 
 class AscendQwen3_5DecoderLayer(Qwen3_5DecoderLayer):

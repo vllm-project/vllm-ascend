@@ -67,7 +67,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        output: torch.Tensor,
+        output: torch.Tensor = None,
     ):
         """
         Forward pass with three parts:
@@ -142,7 +142,10 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         core_attn_out = self.norm(core_attn_out, z)
         core_attn_out = core_attn_out.reshape(z_shape_og)
         core_attn_out = rearrange(core_attn_out, "... h d -> ... (h d)")
-        output[:num_tokens], _ = self.out_proj(core_attn_out)
+        result, _ = self.out_proj(core_attn_out)
+        if output is not None:
+            output[:num_tokens] = result
+        return result
 
     def _forward_core(
         self,
