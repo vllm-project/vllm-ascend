@@ -184,6 +184,26 @@ class TestChunkedTokenDatabase(unittest.TestCase):
         self.assertEqual(result[0][2].chunk_hash, _expected_grouped_hash("a", "b").hex())
         self.assertEqual(len(result[0][2].chunk_hash), 64)
 
+    def test_process_token_key_strings_matches_process_tokens(self):
+        hashes = ["aaa", "bbb", "ccc"]
+        expected = [
+            (start, end, key.to_string(), key.chunk_hash_bytes)
+            for start, end, key in self.db.process_tokens(40, hashes)
+        ]
+        result = list(self.db.process_token_key_strings(40, hashes))
+        self.assertEqual(result, expected)
+
+    def test_process_token_key_strings_with_block_ids_matches_process_tokens(self):
+        db = ChunkedTokenDatabase([self.meta], block_size=[16], partitions=None, hash_block_size=8)
+        hashes = ["a", "b", "c", "d"]
+        block_ids = [5, 6]
+        expected = [
+            (start, end, key.to_string(), key.chunk_hash_bytes, block_id)
+            for start, end, key, block_id in db.process_tokens_with_block_ids(32, hashes, block_ids)
+        ]
+        result = list(db.process_token_key_strings_with_block_ids(32, hashes, block_ids))
+        self.assertEqual(result, expected)
+
     def test_get_block_hashes_rehashes_grouped_str_hashes(self):
         result = get_block_hashes(["a", "b", "c", "d"], group_block_size=32, hash_block_size=16)
         self.assertEqual(
