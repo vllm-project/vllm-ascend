@@ -413,28 +413,77 @@ def test_allgather_token_dispatch_quant_mode_without_dynamic_scale():
         torch.randn(6, 4),
     )
 
-    cases = (
-        (QuantType.W8A8MXFP, torch.float8_e4m3fn, 3),
-        (QuantType.W4A4MXFP, MXFP4_TEST_DTYPE, 9),
-    )
-    for quant_type, act_quant_type, expected_quant_mode in cases:
+    cases = [
+        {
+            "quant_type": QuantType.W8A8MXFP,
+            "act_quant_type": torch.float8_e4m3fn,
+            "expected_quant_mode": 3,
+            "expected_act_quant_type": torch.float8_e4m3fn,
+            "expect_dynamic_scale": True,
+        },
+        {
+            "quant_type": QuantType.W4A4MXFP,
+            "act_quant_type": MXFP4_TEST_DTYPE,
+            "expected_quant_mode": -1,
+            "expected_act_quant_type": None,
+            "expect_dynamic_scale": False,
+        },
+    ]
+    for case in cases:
         token_dispatch_input = build_token_dispatch_input_fixture(
             hidden_states=hidden_states,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            quant_type=quant_type,
-            act_quant_type=act_quant_type,
+            quant_type=case["quant_type"],
+            act_quant_type=case["act_quant_type"],
         )
 
         with patch(
             "vllm_ascend.ops.fused_moe.token_dispatcher.DeviceOperator.npu_moe_init_routing",
             return_value=init_routing_output,
         ) as mock_init_routing:
-            dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
+            output = dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
 
         init_kwargs = mock_init_routing.call_args.kwargs
-        assert init_kwargs["quant_mode"] == expected_quant_mode
-        assert init_kwargs["act_quant_type"] == act_quant_type
+        assert init_kwargs["quant_mode"] == case["expected_quant_mode"]
+        assert init_kwargs["act_quant_type"] == case["expected_act_quant_type"]
+        assert (output.dynamic_scale is not None) == case["expect_dynamic_scale"]
+
+
+def test_allgather_token_dispatch_mxfp4_keeps_prequantized_scale():
+    dispatcher = TokenDispatcherWithAllGather(top_k=2, num_experts=128)
+    hidden_states = torch.randn(3, 128)
+    topk_weights = torch.tensor([[0.7, 0.3], [0.6, 0.4], [0.5, 0.5]])
+    topk_ids = torch.tensor([[0, 1], [1, 2], [2, 3]], dtype=torch.int32)
+    pertoken_scale = torch.randn(3, 4)
+    returned_scale = torch.randn(6, 4)
+    init_routing_output = (
+        torch.randn(6, 128),
+        torch.tensor([0, 1, 2, 3, 4, 5], dtype=torch.int32),
+        torch.tensor([2, 2, 2], dtype=torch.int32),
+        returned_scale,
+    )
+
+    token_dispatch_input = build_token_dispatch_input_fixture(
+        hidden_states=hidden_states,
+        topk_weights=topk_weights,
+        topk_ids=topk_ids,
+        pertoken_scale=pertoken_scale,
+        quant_type=QuantType.W4A4MXFP,
+        act_quant_type=MXFP4_TEST_DTYPE,
+    )
+
+    with patch(
+        "vllm_ascend.ops.fused_moe.token_dispatcher.DeviceOperator.npu_moe_init_routing",
+        return_value=init_routing_output,
+    ) as mock_init_routing:
+        output = dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
+
+    init_kwargs = mock_init_routing.call_args.kwargs
+    assert init_kwargs["scale"] is pertoken_scale
+    assert init_kwargs["quant_mode"] == -1
+    assert init_kwargs["act_quant_type"] == MXFP4_TEST_DTYPE
+    assert output.dynamic_scale is returned_scale
 
 
 class TestTokenDispatcherWithAllGather(TestBase):
