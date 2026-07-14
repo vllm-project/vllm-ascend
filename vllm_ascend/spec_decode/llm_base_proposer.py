@@ -374,13 +374,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 else self.model.mask_hidden.view(self.hidden_size)
             )
 
-        logger.info(
-            "[spec_decode/base] Draft model loaded successfully: method=%s, num_draft_attn_layers=%d, block_size=%d",
-            self.method,
-            len(self._draft_attn_layer_names),
-            self.kernel_block_size if self.has_gdn else self.block_size,
-        )
-
     def _maybe_share_embeddings(self, target_language_model: nn.Module) -> None:
         """
         Some draft models may not have their own embedding layers, and some may
