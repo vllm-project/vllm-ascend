@@ -27,7 +27,7 @@ fi
 
 # Global config
 API_PREFIX="https://174e1b821a8446f38998a67186ba766e.apic.cn-southwest-2.huaweicloudapis.com/aurogon_service"
-# MR_THIRD_ID="${PR_NUMBER:-}"#
+# MR_THIRD_ID="${PR_NUMBER:-}"
 MR_THIRD_ID="9270"
 NETWORK_ZONE=github
 PROJECT_PATH=vllm-project/vllm-ascend
@@ -129,14 +129,9 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYTEST_LIST_FILE="${SCRIPT_DIR}/recommended_pytest_paths.txt"
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PYTEST_LIST_FILE="${SCRIPT_DIR}/recommended_pytest_paths.txt"
-TMP_CASE_JSON=$(mktemp)
-
-echo "${CASE_RET}" > "${TMP_CASE_JSON}"
-
-python3 - "${TMP_CASE_JSON}" <<'PY'> "${PYTEST_LIST_FILE}"
+CASE_RET="${CASE_RET}" python3 <<'PY' > "${PYTEST_LIST_FILE}"
 import json
+import os
 import sys
 
 def name_to_pytest_target(name: str) -> str:
@@ -156,16 +151,14 @@ def name_to_pytest_target(name: str) -> str:
         file_path += ".py"
     return file_path
 
-json_file = sys.argv[1]
-with open(json_file, "r", encoding="utf-8") as f:
-    case_ret = f.read()
-
+case_ret = os.environ.get("CASE_RET", "")
 if not case_ret:
-    print("ERROR: CASE_RET file empty", file=sys.stderr)
+    print("ERROR: CASE_RET is empty", file=sys.stderr)
     sys.exit(1)
 
 resp = json.loads(case_ret)
 items = resp.get("data") or []
+
 seen = set()
 targets = []
 for item in items:
@@ -181,8 +174,6 @@ if not targets:
 else:
     print("\n".join(targets))
 PY
-
-rm -f "${TMP_CASE_JSON}"
 
 if [ $? -ne 0 ]; then
     echo "ERROR: failed to parse case recommend response"
