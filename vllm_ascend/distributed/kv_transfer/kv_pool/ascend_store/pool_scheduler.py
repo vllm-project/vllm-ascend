@@ -31,6 +31,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     RequestTracker,
     get_cache_family_granularity,
     infer_group_cache_families,
+    infer_tp_mismatch_info,
     normalize_block_ids_by_group,
 )
 
@@ -119,6 +120,17 @@ class KVPoolScheduler:
         # {event_id, completed_woke_count}
         self.sending_events: dict[int, int] = {}
         self._expected_worker_count = vllm_config.parallel_config.world_size
+
+        use_mla = getattr(vllm_config.model_config, "use_mla", False)
+        tp_mismatch_info = infer_tp_mismatch_info(
+            self.kv_role,
+            vllm_config.kv_transfer_config.kv_connector_extra_config,
+            getattr(vllm_config.parallel_config, "tensor_parallel_size", 1),
+            vllm_config.model_config.get_total_num_kv_heads(),
+            use_mla if isinstance(use_mla, bool) else False,
+            use_hybrid=self.use_hybrid,
+        )
+        self.tp_mismatch = tp_mismatch_info.enabled
 
     def _infer_group_families(self) -> list[str]:
         kv_cache_groups = self.kv_cache_config.kv_cache_groups if self.kv_cache_config is not None else None
@@ -429,9 +441,11 @@ class KVPoolScheduler:
             for i, req_id in enumerate(cached_reqs.req_ids):
                 # resumed request
                 new_block_ids = cached_reqs.new_block_ids[i]
-                if not new_block_ids:
+                if not new_block_ids and not self.tp_mismatch:
                     continue
                 if req_id in self._preempted_req_ids:
+                    if not new_block_ids:
+                        continue
                     self._preempted_req_ids.discard(req_id)
                     load_spec = self.load_specs.pop(req_id, None)
                     request_tuple = self._unfinished_requests.get(req_id)
@@ -482,10 +496,12 @@ class KVPoolScheduler:
                         raise ValueError(
                             f"Request {req_id} is not in _unfinished_requests, but it is scheduled to be cached"
                         )
-                    num_computed_token = cached_reqs.num_computed_tokens[i]
-                    if num_computed_token >= len(request.prompt_token_ids):
-                        continue
-                    request_tracker.update(new_block_ids, request.num_computed_tokens)
+                    if not self.tp_mismatch:
+                        num_computed_token = cached_reqs.num_computed_tokens[i]
+                        if num_computed_token >= len(request.prompt_token_ids):
+                            continue
+                    if new_block_ids:
+                        request_tracker.update(new_block_ids, request.num_computed_tokens)
 
                     last_chunk_tokens_num = (
                         self._floor_to_cache_transfer_granularity(len(request.prompt_token_ids))
