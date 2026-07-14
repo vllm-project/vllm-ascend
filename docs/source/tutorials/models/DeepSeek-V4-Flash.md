@@ -143,6 +143,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
     export OMP_PROC_BIND=false
     export OMP_NUM_THREADS=10
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib/
     export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
     export HCCL_BUFFSIZE=1024
     export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
@@ -189,6 +190,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
     export OMP_PROC_BIND=false
     export OMP_NUM_THREADS=10
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib/
     export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
     export HCCL_BUFFSIZE=1024
     export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
@@ -415,6 +417,7 @@ Before you start, please:
         export TASK_QUEUE_ENABLE=1
         export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
         export HCCL_OP_EXPANSION_MODE="AIV"
+        export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib/
         export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
         export ASCEND_RT_VISIBLE_DEVICES=$1
 
@@ -471,6 +474,7 @@ Before you start, please:
         nic_name="xxxx" # change to your own nic name
         local_ip=xx.xx.xx.2 # change to your own ip
 
+        export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib/
         export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
         export HCCL_OP_EXPANSION_MODE="AIV"
         export TASK_QUEUE_ENABLE=1
@@ -650,6 +654,7 @@ Before you start, please:
         nic_name="xxxxxx" #eg."enp67s0f0np0"
         local_ip=`hostname -I|awk -F " " '{print$1}'`
 
+        export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib/
         export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
         export HCCL_OP_EXPANSION_MODE="AIV"
         export TASK_QUEUE_ENABLE=1
@@ -729,6 +734,7 @@ Before you start, please:
         nic_name="xxxxxx" #eg."enp67s0f0np0"
         local_ip=`hostname -I|awk -F " " '{print$1}'`
 
+        export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib/
         export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
         export HCCL_OP_EXPANSION_MODE="AIV"
         export TASK_QUEUE_ENABLE=1
