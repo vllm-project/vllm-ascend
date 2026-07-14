@@ -177,6 +177,14 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         b = b[:num_actual_tokens]
         a = a[:num_actual_tokens]
 
+        # When PCP splits a 1-token prefill chunk and one rank gets 0 tokens,
+        # the empty rank early-returns below and cannot participate in the
+        # all_gather collectives inside chunk_gated_delta_rule_fwd. This flag
+        # tells chunk_gated_delta_rule_fwd to skip its PCP all_gather block,
+        # avoiding deadlock. Set in the PCP conv1d block when an empty rank is
+        # detected.
+        skip_pcp_all_gather = False
+
         # 1. Convolution sequence transformation
         conv_weights = self.conv1d.weight.view(self.conv1d.weight.size(0), self.conv1d.weight.size(2))
         if spec_sequence_masks is not None:
@@ -231,37 +239,93 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     num_seqs = non_spec_query_start_loc.shape[0] - 1
                     prefill_seq_offset = max(0, num_seqs - attn_metadata.num_prefills)
                     prefill_cache_indices = non_spec_state_indices_tensor[prefill_seq_offset:]
-                    mixed_qkv_non_spec_T = mixed_qkv_non_spec.transpose(0, 1)
-                    last_width_prefill_x = extract_last_width(
-                        mixed_qkv_non_spec_T, non_spec_query_start_loc[prefill_seq_offset:], state_len
-                    )
                     pcp_rank = get_pcp_group().rank_in_group
+                    pcp_world_size = get_pcp_group().world_size
+                    # When PCP splits a 1-token prefill chunk across multiple
+                    # ranks, one rank gets 0 tokens. extract_last_width would
+                    # crash on the empty token dimension (IndexError: index is
+                    # out of bounds for dimension with size 0). Create a zero
+                    # dummy with the shape extract_last_width would produce so
+                    # all ranks can participate in all_gather (required to
+                    # avoid deadlock). The dummy is ignored: the state update
+                    # below pulls real data from the non-empty rank.
+                    #
+                    # Also check num_prefill_tokens: under concurrency a PCP
+                    # rank can have decode tokens but 0 prefill tokens. In that
+                    # case mixed_qkv_non_spec.shape[0] > 0 (decode tokens) but
+                    # the prefill segments are all empty, so extract_last_width
+                    # would still crash on the empty prefill ranges.
+                    num_prefill_tokens = (
+                        mixed_qkv_non_spec.shape[0] - attn_metadata.num_decode_tokens
+                    )
+                    if num_prefill_tokens == 0:
+                        last_width_prefill_x = torch.zeros(
+                            attn_metadata.num_prefills,
+                            mixed_qkv_non_spec.shape[1],
+                            state_len,
+                            device=mixed_qkv_non_spec.device,
+                            dtype=mixed_qkv_non_spec.dtype,
+                        )
+                    else:
+                        mixed_qkv_non_spec_T = mixed_qkv_non_spec.transpose(0, 1)
+                        last_width_prefill_x = extract_last_width(
+                            mixed_qkv_non_spec_T,
+                            non_spec_query_start_loc[prefill_seq_offset:],
+                            state_len,
+                        )
                     all_last_width_prefill_x = get_pcp_group().all_gather(
                         last_width_prefill_x.unsqueeze(0).contiguous(), 0
                     )
+                    # Determine the last rank with actual prefill tokens so the
+                    # final state update picks real data instead of dummy zeros
+                    # from an empty rank.  Check PREFILL tokens (not total
+                    # non-spec tokens which include decode tokens): under
+                    # concurrency a PCP rank can have decode tokens but 0
+                    # prefill tokens, and must be treated as empty so
+                    # skip_pcp_all_gather is set correctly.
+                    has_token_flag = torch.tensor(
+                        [1 if num_prefill_tokens > 0 else 0],
+                        device=mixed_qkv_non_spec.device,
+                        dtype=torch.int32,
+                    )
+                    all_has_token_flags = get_pcp_group().all_gather(
+                        has_token_flag.unsqueeze(0).contiguous(), 0
+                    ).view(-1)
+                    # If any PCP rank has 0 prefill tokens (e.g. PCP splits a
+                    # 1-token chunk), the empty rank will early-return before
+                    # chunk_gated_delta_rule. Tell chunk_gated_delta_rule_fwd
+                    # to skip its internal all_gather block to avoid deadlock.
+                    skip_pcp_all_gather = (all_has_token_flags == 0).any().item()
+                    rank_indices = torch.arange(
+                        pcp_world_size,
+                        device=mixed_qkv_non_spec.device,
+                        dtype=torch.int32,
+                    )
+                    last_non_empty_rank = (all_has_token_flags * rank_indices).argmax()
                     if pcp_rank > 0 and prefill_cache_indices.shape[0] > 0:
                         self_kv_cache[0][prefill_cache_indices, :state_len, :] = all_last_width_prefill_x[
                             pcp_rank - 1, ...
                         ].transpose(-1, -2)
-                    mixed_qkv_non_spec_output = torch.empty_like(mixed_qkv_non_spec)
-                    torch.ops._C_ascend.npu_causal_conv1d_custom(
-                        mixed_qkv_non_spec_output,
-                        mixed_qkv_non_spec,
-                        conv_weights_T,
-                        conv_state=self_kv_cache[0],
-                        bias_opt=self.conv1d.bias,
-                        query_start_loc_opt=query_start_loc_opt,
-                        cache_indices_opt=cache_indices_opt,
-                        initial_state_mode_opt=initial_state_mode_opt,
-                        num_accepted_tokens_opt=None,
-                        activation_mode=activation_num,
-                        pad_slot_id=PAD_SLOT_ID,
-                        run_mode=0,
-                    )
-                    mixed_qkv_non_spec = mixed_qkv_non_spec_output
+                    if mixed_qkv_non_spec.shape[0] > 0:
+                        mixed_qkv_non_spec_output = torch.empty_like(mixed_qkv_non_spec)
+                        torch.ops._C_ascend.npu_causal_conv1d_custom(
+                            mixed_qkv_non_spec_output,
+                            mixed_qkv_non_spec,
+                            conv_weights_T,
+                            conv_state=self_kv_cache[0],
+                            bias_opt=self.conv1d.bias,
+                            query_start_loc_opt=query_start_loc_opt,
+                            cache_indices_opt=cache_indices_opt,
+                            initial_state_mode_opt=initial_state_mode_opt,
+                            num_accepted_tokens_opt=None,
+                            activation_mode=activation_num,
+                            pad_slot_id=PAD_SLOT_ID,
+                            run_mode=0,
+                        )
+                        mixed_qkv_non_spec = mixed_qkv_non_spec_output
                     if prefill_cache_indices.shape[0] > 0:
                         self_kv_cache[0][prefill_cache_indices, :state_len, :] = all_last_width_prefill_x[
-                            -1, ...
+                            last_non_empty_rank, ...
                         ].transpose(-1, -2)
                 else:
                     conv_weights_T = conv_weights.transpose(0, 1)
@@ -304,6 +368,24 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             )
             mixed_qkv_non_spec = output_non_spec
         else:
+            mixed_qkv_non_spec = None
+
+        # On an empty PCP rank (0 tokens assigned to this rank), the PCP
+        # state sharing (all_gather) above has already completed — all
+        # ranks have participated, so no collective will deadlock. Skip
+        # all remaining computation: every NPU kernel (fused_gdn_gating,
+        # rearrange_mixed_qkv, chunk_gated_delta_rule, etc.) crashes on
+        # empty tensors (0-element tiling failure or ambiguous reshape),
+        # and there are no tokens to produce output for. core_attn_out[:0]
+        # is a no-op, so leaving it unwritten is safe.
+        if num_actual_tokens == 0:
+            return
+
+        # Defensive guard: convert any remaining empty tensors to None
+        # so rearrange_mixed_qkv doesn't crash on .view(1, 0, -1, dim).
+        if mixed_qkv_spec is not None and mixed_qkv_spec.numel() == 0:
+            mixed_qkv_spec = None
+        if mixed_qkv_non_spec is not None and mixed_qkv_non_spec.numel() == 0:
             mixed_qkv_non_spec = None
 
         query_spec, key_spec, value_spec = self.rearrange_mixed_qkv(mixed_qkv_spec)
@@ -381,7 +463,12 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             core_attn_out_decode = None
 
         # 2.3: Process the remaining part
-        if attn_metadata.num_prefills > 0:
+        # Guard: on an empty PCP rank (0 prefill tokens assigned to this
+        # rank), skip chunk_gated_delta_rule — it would crash on empty
+        # q/k/v. The ssm_state update is also skipped (no tokens to
+        # process). core_attn_out_non_spec stays None, handled by the
+        # merge step below.
+        if attn_metadata.num_prefills > 0 and num_actual_tokens > 0:
             prefill_query_start_loc = attn_metadata.prefill_query_start_loc
             prefill_state_indices = attn_metadata.prefill_state_indices
             prefill_has_initial_state = attn_metadata.prefill_has_initial_state
@@ -397,27 +484,40 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 g_non_spec = g_non_spec[:, num_decode_tokens:]
                 beta_non_spec = beta_non_spec[:, num_decode_tokens:]
 
-            initial_state = ssm_state[prefill_state_indices].transpose(-1, -2).contiguous()
-            clear_ssm_states(initial_state, prefill_has_initial_state)
-            (core_attn_out_non_spec, last_recurrent_state) = chunk_gated_delta_rule(
-                q=query_non_spec,
-                k=key_non_spec,
-                v=value_non_spec,
-                g=g_non_spec,
-                beta=beta_non_spec,
-                initial_state=initial_state,
-                output_final_state=True,
-                cu_seqlens=prefill_query_start_loc,
-                prebuilt_meta=attn_metadata.non_spec_prefill_metadata.chunk,
-                head_first=False,
-                use_qk_l2norm_in_kernel=True,
-            )
-            ssm_state[prefill_state_indices] = last_recurrent_state.transpose(-1, -2).contiguous().to(ssm_state.dtype)
-            if split_non_spec:
-                core_attn_out_non_spec = torch.cat(
-                    [core_attn_out_decode, core_attn_out_non_spec],
-                    dim=1,
+            # After split_non_spec strips decode tokens, an empty PCP rank
+            # (all prefill tokens assigned to another rank) has 0 prefill
+            # tokens. chunk_gated_delta_rule crashes on empty q/k/v
+            # (coreDim == 0 in chunk_local_cumsum). skip_pcp_all_gather is
+            # already set by the conv1d block's has_token_flag check, so
+            # rank 0 also skips the PCP all_gather — no deadlock.
+            if query_non_spec is not None and query_non_spec.shape[1] > 0:
+                initial_state = ssm_state[prefill_state_indices].transpose(-1, -2).contiguous()
+                clear_ssm_states(initial_state, prefill_has_initial_state)
+                (core_attn_out_non_spec, last_recurrent_state) = chunk_gated_delta_rule(
+                    q=query_non_spec,
+                    k=key_non_spec,
+                    v=value_non_spec,
+                    g=g_non_spec,
+                    beta=beta_non_spec,
+                    initial_state=initial_state,
+                    output_final_state=True,
+                    cu_seqlens=prefill_query_start_loc,
+                    prebuilt_meta=attn_metadata.non_spec_prefill_metadata.chunk,
+                    head_first=False,
+                    use_qk_l2norm_in_kernel=True,
+                    skip_pcp_all_gather=skip_pcp_all_gather,
                 )
+                ssm_state[prefill_state_indices] = last_recurrent_state.transpose(-1, -2).contiguous().to(ssm_state.dtype)
+                if split_non_spec:
+                    core_attn_out_non_spec = torch.cat(
+                        [core_attn_out_decode, core_attn_out_non_spec],
+                        dim=1,
+                    )
+            elif split_non_spec:
+                # 0 prefill tokens on this PCP rank; use decode output only
+                core_attn_out_non_spec = core_attn_out_decode
+            else:
+                core_attn_out_non_spec = None
         elif attn_metadata.num_decodes > 0:
             actual_seq_lengths = attn_metadata.non_spec_decode_metadata.actual_seq_lengths
             query_non_spec = l2norm_fwd(query_non_spec)
@@ -451,4 +551,5 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         elif spec_sequence_masks is not None:
             core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)
         else:
-            core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
+            if core_attn_out_non_spec is not None:
+                core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)

@@ -3078,10 +3078,22 @@ class NPUModelRunner(GPUModelRunner):
         num_encoder_reqs: int = 0,
     ) -> tuple[CUDAGraphMode, BatchDescriptor, bool, torch.Tensor | None, CUDAGraphStat | None]:
         num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
-        is_all_decode = np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] > 0)
+        # A request is truly decoding only once all prompt tokens are computed
+        # (num_computed_tokens >= num_prompt_tokens). Checking num_computed_tokens
+        # > 0 is insufficient: the trailing 1-token chunk of a chunked prefill
+        # also has num_computed_tokens > 0 but is still prefilling. Without this
+        # guard, that chunk is misclassified as uniform_decode and dispatched to
+        # the FULL graph path, which expects decode-only attn_metadata fields
+        # (e.g. non_spec_decode_fallback_meta / decode_meta) that are absent for
+        # prefill, crashing the worker. This applies with and without speculative
+        # decoding, so the speculative_config bypass is removed.
+        is_all_decode = np.all(
+            self.input_batch.num_computed_tokens_cpu[:num_reqs]
+            >= self.input_batch.num_prompt_tokens[:num_reqs]
+        )
         uniform_decode = (
             (
-                (is_all_decode if self.speculative_config else True)
+                    is_all_decode
                 and (max_num_scheduled_tokens == self.uniform_decode_query_len)
                 and (num_tokens == max_num_scheduled_tokens * num_reqs)
             )
