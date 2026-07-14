@@ -156,6 +156,7 @@ class BlockTable:
             req_indices = torch.repeat_interleave(
                 torch.arange(num_reqs, dtype=torch.int32, device=query_start_loc.device),
                 query_start_loc[1:] - query_start_loc[:-1],
+                output_size=num_tokens,
             )
             self._compute_pcp_dcp_slot_mapping(req_indices, positions)
         else:
@@ -186,7 +187,11 @@ class BlockTable:
                 **kernel_kwargs,
             )
 
-    def compute_slot_mapping_draft(self, req_indices: np.ndarray, positions: np.ndarray) -> None:
+    def compute_slot_mapping_draft(
+        self,
+        req_indices: np.ndarray | torch.Tensor,
+        positions: np.ndarray | torch.Tensor,
+    ) -> None:
         # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
         # -> [0, 0, K, K, K + 1, K + 1, K + 2, 2 * K, 2 * K, 2 * K + 1]
         # where K is the max_num_blocks_per_req and the block size is 2.
@@ -195,8 +200,20 @@ class BlockTable:
         # block_size.
 
         if self.dcp_world_size * self.pcp_world_size > 1:
-            self._compute_pcp_dcp_slot_mapping(torch.from_numpy(req_indices), torch.from_numpy(positions))
+            if not isinstance(req_indices, torch.Tensor):
+                req_indices = torch.from_numpy(req_indices)
+            if not isinstance(positions, torch.Tensor):
+                positions = torch.from_numpy(positions)
+            self._compute_pcp_dcp_slot_mapping(req_indices, positions)
         else:
+            if isinstance(req_indices, torch.Tensor):
+                if req_indices.device.type != "cpu":
+                    raise ValueError("Device tensor inputs are only supported for CP draft slot mapping.")
+                req_indices = req_indices.numpy()
+            if isinstance(positions, torch.Tensor):
+                if positions.device.type != "cpu":
+                    raise ValueError("Device tensor inputs are only supported for CP draft slot mapping.")
+                positions = positions.numpy()
             assert self.kernel_sizes is not None
             assert self.block_size == self.kernel_sizes[0]
             # IMPORTANT: In hybrid mode, positions are in logical block space,
@@ -211,9 +228,13 @@ class BlockTable:
                 req_indices * self.max_num_blocks_per_req * self.blocks_per_phys_block + logical_block_idx
             )
 
-            block_numbers = self.block_table.np.ravel()[block_table_indices]
             block_offsets = positions % self.block_size
-            np.add(block_numbers * self.block_size, block_offsets, out=self.slot_mapping.np[: req_indices.shape[0]])
+            block_numbers = self.block_table.np.ravel()[block_table_indices]
+            np.add(
+                block_numbers * self.block_size,
+                block_offsets,
+                out=self.slot_mapping.np[: req_indices.shape[0]],
+            )
             self.slot_mapping.copy_to_gpu(req_indices.shape[0])
 
     def _compute_pcp_dcp_slot_mapping(
@@ -420,8 +441,8 @@ class MultiGroupBlockTable:
 
     def compute_slot_mapping_draft(
         self,
-        req_indices: np.ndarray,
-        positions: np.ndarray,
+        req_indices: np.ndarray | torch.Tensor,
+        positions: np.ndarray | torch.Tensor,
         positions_compressed_list: list[np.ndarray] | None = None,
         req_indices_compressed_list: list[np.ndarray] | None = None,
     ) -> None:
