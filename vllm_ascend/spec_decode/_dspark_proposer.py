@@ -26,19 +26,6 @@ from vllm_ascend.ops.triton.spec_decode.utils import (
 )
 
 
-def _dspark_reduce_sample_enabled() -> bool:
-    try:
-        return bool(get_ascend_config().enable_reduce_sample)
-    except RuntimeError:
-        return False
-
-
-def _dspark_greedy_sample(logits: torch.Tensor) -> torch.Tensor:
-    if _dspark_reduce_sample_enabled():
-        return greedy_sample(logits)
-    return logits.argmax(dim=-1)
-
-
 class AscendDSparkProposer(AscendDflashProposer):
     """DSpark block proposer.
 
@@ -285,66 +272,6 @@ class AscendDSparkProposer(AscendDflashProposer):
             return block_table.get_device_tensor(batch_size)
         except TypeError:
             return block_table.get_device_tensor()
-
-    def _build_standard_dsa_attn_metadata(
-        self,
-        common_attn_metadata: CommonAttentionMetadata,
-        num_input_tokens: int,
-        num_actual_tokens: int,
-    ) -> list[dict[str, Any]]:
-        if not self.draft_attn_groups:
-            return []
-
-        if num_input_tokens > num_actual_tokens:
-            self.positions[num_actual_tokens:num_input_tokens].fill_(0)
-            self._slot_mapping_buffer[num_actual_tokens:num_input_tokens].fill_(-1)
-
-        base_cm = common_attn_metadata
-        base_cm.positions = self.positions[:num_input_tokens]
-        base_cm.slot_mapping = self._slot_mapping_buffer[:num_input_tokens]
-        base_cm.num_input_tokens = num_input_tokens
-        base_cm.num_actual_tokens = num_actual_tokens
-        base_cm.causal = False
-        base_cm.attn_state = AscendAttentionState.ChunkedPrefill
-        token_to_req_indices = getattr(self, "_dspark_token_to_req_indices_buffer", None)
-        if isinstance(token_to_req_indices, torch.Tensor):
-            base_cm.token_to_req_indices = token_to_req_indices[:num_input_tokens]
-
-        per_layer_attn_metadata: dict[str, Any] = {}
-        for attn_group in self.draft_attn_groups:
-            gid = attn_group.kv_cache_group_id
-            common_attn_metadata = copy(base_cm)
-            block_table = getattr(self, "_dspark_block_tables_by_gid", {}).get(gid)
-            if block_table is not None:
-                common_attn_metadata.block_table_tensor = block_table[: common_attn_metadata.num_reqs]
-            slot_mapping = getattr(self, "_dspark_query_slot_mappings_by_gid", {}).get(gid)
-            if slot_mapping is not None:
-                common_attn_metadata.slot_mapping = slot_mapping[:num_input_tokens]
-            attn_metadata = attn_group.get_metadata_builder().build_for_drafting(
-                common_attn_metadata,
-                draft_index=1,
-                block_size=attn_group.kv_cache_spec.block_size,
-            )
-            for layer_name in attn_group.layer_names:
-                per_layer_attn_metadata[layer_name] = attn_metadata
-        return [per_layer_attn_metadata]
-
-    def _pad_draft_query_buffers(
-        self,
-        num_actual_tokens: int,
-        num_input_tokens: int,
-    ) -> None:
-        if num_input_tokens <= num_actual_tokens:
-            return
-
-        self.input_ids[num_actual_tokens:num_input_tokens].fill_(self.parallel_drafting_token_id)
-        self.positions[num_actual_tokens:num_input_tokens].fill_(0)
-        self._slot_mapping_buffer[num_actual_tokens:num_input_tokens].fill_(-1)
-        token_to_req_indices = getattr(self, "_dspark_token_to_req_indices_buffer", None)
-        if isinstance(token_to_req_indices, torch.Tensor):
-            token_to_req_indices[num_actual_tokens:num_input_tokens].fill_(-1)
-        for buf in getattr(self, "_dspark_query_slot_mapping_buffers", {}).values():
-            buf[num_actual_tokens:num_input_tokens].fill_(-1)
 
     def _get_draft_block_table_for_gid(
         self,
@@ -697,113 +624,17 @@ class AscendDSparkProposer(AscendDflashProposer):
             ):
                 self._update_full_graph_params(forward_context, num_tokens, [])
 
-    def _sample_sequential(
+    def build_model_inputs_first_pass(
         self,
-        num_reqs: int,
-        head_hidden: torch.Tensor,
-        token_indices_to_sample: torch.Tensor,
-        sampling_metadata: SamplingMetadata | None = None,
-    ) -> torch.Tensor:
-        block_size = self.num_speculative_tokens
-        num_sample = num_reqs * block_size
-        sample_hidden_states = head_hidden[token_indices_to_sample[:num_sample]]
-        base_logits = self.model.compute_logits(sample_hidden_states)
-        vocab_size = base_logits.shape[-1]
-        base_logits = base_logits.view(num_reqs, block_size, vocab_size)
+        num_input_tokens: int,
+    ) -> dict[str, Any]:
+        num_context = self._dflash_num_context
 
-        prev_ids = self._markov_anchor_tokens[:num_reqs]
-        for idx in range(block_size):
-            markov_embed = self.model.markov_embed(prev_ids)
-            markov_bias = self.model.markov_bias(markov_embed)
-            logits = base_logits[:, idx, :] + markov_bias
-            draft_ids = _dspark_greedy_sample(logits)
-            self._markov_draft_tokens[:num_reqs, idx].copy_(draft_ids)
-            prev_ids = self._markov_draft_tokens[:num_reqs, idx]
-        return self._markov_draft_tokens[:num_reqs, :block_size]
-
-    def _propose(
-        self,
-        target_token_ids: torch.Tensor,
-        target_positions: torch.Tensor,
-        target_hidden_states: torch.Tensor,
-        next_token_ids: torch.Tensor,
-        token_indices_to_sample: torch.Tensor | None,
-        common_attn_metadata: CommonAttentionMetadata,
-        target_model_batch_desc: BatchDescriptor,
-        sampling_metadata: SamplingMetadata,
-        mm_embed_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
-        req_scheduled_tokens=None,
-        long_seq_metadata=None,
-        num_prefill_reqs=0,
-        num_decode_reqs=0,
-        scheduler_output: SchedulerOutput | None = None,
-        num_scheduled_tokens: int = 0,
-        num_rejected_tokens_gpu: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        del (
-            target_model_batch_desc,
-            mm_embed_inputs,
-            scheduler_output,
-            num_scheduled_tokens,
+        self.model.precompute_and_store_context_kv(
+            self._dflash_hidden_states[:num_context],
+            self._context_positions_buffer[:num_context],
+            self._context_slots,
         )
-
-        target_hidden_states = self.model.combine_hidden_states(target_hidden_states)
-
-        num_tokens, token_indices_to_sample, _, _ = self.set_inputs_first_pass(
-            target_token_ids=target_token_ids,
-            next_token_ids=next_token_ids,
-            target_positions=target_positions,
-            target_hidden_states=target_hidden_states,
-            token_indices_to_sample=token_indices_to_sample,
-            cad=common_attn_metadata,
-            num_rejected_tokens_gpu=num_rejected_tokens_gpu,
-            req_scheduled_tokens=req_scheduled_tokens,
-            long_seq_metadata=long_seq_metadata,
-            num_prefill_reqs=num_prefill_reqs,
-            num_decode_reqs=num_decode_reqs,
+        return dict(
+            input_ids=self.input_ids[:num_input_tokens], positions=self.positions[:num_input_tokens]
         )
-        assert self.runner is not None
-
-        (
-            num_input_tokens,
-            num_tokens_across_dp,
-            _,
-        ) = self.runner._sync_metadata_across_dp(num_tokens, is_draft_model=True)
-        multi_steps_attn_metadata = self._build_standard_dsa_attn_metadata(
-            common_attn_metadata, num_input_tokens, num_tokens
-        )
-        model_num_tokens = num_input_tokens
-        self._pad_draft_query_buffers(num_tokens, num_input_tokens)
-
-        with set_ascend_forward_context(
-            multi_steps_attn_metadata[0] if multi_steps_attn_metadata else None,
-            self.vllm_config,
-            num_tokens=num_input_tokens,
-            num_tokens_across_dp=num_tokens_across_dp,
-            num_actual_tokens=num_tokens,
-            batch_descriptor=None,
-            aclgraph_runtime_mode=CUDAGraphMode.NONE,
-            is_draft_model=True,
-            draft_attn_metadatas=multi_steps_attn_metadata,
-        ):
-            forward_context = get_forward_context()
-            if forward_context is not None:
-                forward_context.moe_layer_index = 0
-
-            num_context = self._dflash_num_context
-            self.model.precompute_and_store_context_kv(
-                self._dflash_hidden_states[:num_context],
-                self._context_positions_buffer[:num_context],
-                self._context_slots,
-            )
-            hidden_states = self.model(
-                input_ids=self.input_ids[:model_num_tokens],
-                positions=self.positions[:model_num_tokens],
-            )
-            draft_token_ids = self._sample_sequential(
-                common_attn_metadata.num_reqs,
-                hidden_states,
-                token_indices_to_sample,
-                sampling_metadata,
-            )
-        return draft_token_ids

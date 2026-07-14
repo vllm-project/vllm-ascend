@@ -27,6 +27,7 @@ from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
 from vllm.model_executor.models.qwen3_dspark import Qwen3DSparkForCausalLM
+from vllm_ascend.models.deepseek_v4_dspark import DSparkDeepseekV4ForCausalLM
 from vllm.triton_utils import HAS_TRITON, triton
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
@@ -126,6 +127,19 @@ def greedy_sample(logits: torch.Tensor) -> torch.Tensor:
     global_max_rank = gathered_logits.argmax(dim=-1)  # [B]
     target_argmax = gathered_global_idx.gather(dim=-1, index=global_max_rank.unsqueeze(-1)).squeeze(-1)  # [B]
     return target_argmax
+
+
+def _dspark_reduce_sample_enabled() -> bool:
+    try:
+        return bool(get_ascend_config().enable_reduce_sample)
+    except RuntimeError:
+        return False
+
+
+def _dspark_greedy_sample(logits: torch.Tensor) -> torch.Tensor:
+    if _dspark_reduce_sample_enabled():
+        return greedy_sample(logits)
+    return logits.argmax(dim=-1)
 
 
 # TODO(lilinsiman): Remove this code segment after future versions of the GLM
@@ -796,6 +810,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     Qwen3DSparkForCausalLM,
                     Eagle3VwnLlamaForCausalLM,
                     Eagle3DeepseekV2ForCausalLM,
+                    DSparkDeepseekV4ForCausalLM,
                 ),
             )
             target_hidden_states = self.model.combine_hidden_states(target_hidden_states)
@@ -937,34 +952,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         common_attn_metadata.query_start_loc = self.query_start_loc_group[0][: num_reqs_padded + 1]
 
         common_attn_metadata.num_input_tokens = num_input_tokens
-        # FIXME(woosuk): The below two ops cause synchronization. Optimize.
-        assert len(self.draft_attn_groups) > 0
-        builder = self.draft_attn_groups[0].get_metadata_builder()
-        extra_attn_metadata_args: dict = {}
-        if self.use_compress:
-            extra_attn_metadata_args = dict(
-                prefill_ratio_to_sas_metadata=dict(),
-                decode_ratio_to_sas_metadata=dict(),
-                common_ratio_to_sas_metadata=dict(),
-                block_size=self.draft_attn_groups[0].kv_cache_spec.block_size,
-            )
-        attn_metadata = builder.build(0, common_attn_metadata, self.runner.get_model(), **extra_attn_metadata_args)
 
-        if hasattr(attn_metadata, "causal") and not attn_metadata.causal:
-            attn_metadata.attn_mask = None
+        multi_steps_attn_metadata, attn_metadata_i = self.build_draft_attn_metadata(common_attn_metadata, num_input_tokens, num_tokens)
 
         if self.uses_mrope:
             used_update_positions = self.mrope_positions[:, token_indices_to_sample]
         else:
             used_update_positions = self.positions[token_indices_to_sample]
-        per_layer_attn_metadata = dict()
-        # The first step of speculative.
-        for layer_name in self.attn_layer_names:
-            per_layer_attn_metadata[layer_name] = attn_metadata
-        multi_steps_attn_metadata = [per_layer_attn_metadata]
-
-        # Copy the old attn_metadata and update
-        attn_metadata_i = per_layer_attn_metadata[self.attn_layer_names[0]]
 
         # Clone the data so that when calculating the data at position 2 and position 3
         # in the merged graph, it does not affect position 1
@@ -1207,19 +1201,26 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 draft_token_ids = logits.argmax(dim=-1)
         else:
             if self.method == "dspark":
-                # Dspark speculation requires autoregressive applications of MarkovHead and ConfidenceHead.
-                # The MarkovHead performs bias correction on logits.
-                # The ConfidenceHead predicts the expected acceptance length of tokens(Not yet achieved).
-                raw_logits = self.model.compute_logits(last_hidden_states)
-                logits = raw_logits.view(-1, self.num_speculative_tokens, raw_logits.shape[-1])
-                num_blk = logits.shape[0]
-                draft_token_ids = self._dspark_draft_buffer[:num_blk]
-                draft_token_ids[:, 0].copy_(self._dspark_seed_buffer[:num_blk])
-                for idx in range(self.num_speculative_tokens):
-                    markov_emb = self.model.markov_embed(draft_token_ids[:, idx])
-                    logits_bias = self.model.markov_bias(markov_emb)
-                    logits[:, idx].add_(logits_bias)
-                    draft_token_ids[:, idx + 1].copy_(logits[:, idx].argmax(dim=-1))
+                if hasattr(self, "_dspark_draft_buffer"):
+                    # Dspark speculation requires autoregressive applications of MarkovHead and ConfidenceHead.
+                    # The MarkovHead performs bias correction on logits.
+                    # The ConfidenceHead predicts the expected acceptance length of tokens(Not yet achieved).
+                    raw_logits = self.model.compute_logits(last_hidden_states)
+                    logits = raw_logits.view(-1, self.num_speculative_tokens, raw_logits.shape[-1])
+                    num_blk = logits.shape[0]
+                    draft_token_ids = self._dspark_draft_buffer[:num_blk]
+                    draft_token_ids[:, 0].copy_(self._dspark_seed_buffer[:num_blk])
+                    for idx in range(self.num_speculative_tokens):
+                        markov_emb = self.model.markov_embed(draft_token_ids[:, idx])
+                        logits_bias = self.model.markov_bias(markov_emb)
+                        logits[:, idx].add_(logits_bias)
+                        draft_token_ids[:, idx + 1].copy_(logits[:, idx].argmax(dim=-1))
+                else:
+                    draft_token_ids = self._sample_sequential(
+                        batch_size,
+                        hidden_states,
+                        token_indices_to_sample,
+                    )
             else:
                 logits = self.model.compute_logits(sample_hidden_states)
                 if lmhead_tp_enable():
@@ -1235,7 +1236,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1 or self.parallel_drafting:
             if self.method == "dspark":
-                return draft_token_ids[:, 1:]
+                if hasattr(self, "_dspark_draft_buffer"):
+                    return draft_token_ids[:, 1:]
+                else:
+                    return draft_token_ids
             else:
                 # [batch_size, 1]
                 return draft_token_ids.view(-1, self.num_speculative_tokens)
@@ -2163,3 +2167,121 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             token_indices_to_sample = ori_token_indices_to_sample
 
         return tensor, token_indices_to_sample
+
+    def build_draft_attn_metadata(
+        self,
+        common_attn_metadata,
+        num_input_tokens,
+        num_tokens,
+        ):
+        if self.method == 'dspark':
+            multi_steps_attn_metadata = self._build_standard_dsa_attn_metadata(
+            common_attn_metadata, num_input_tokens, num_tokens
+            )
+            self._pad_draft_query_buffers(num_tokens, num_input_tokens)
+            return multi_steps_attn_metadata, None
+        else:
+            # FIXME(woosuk): The below two ops cause synchronization. Optimize.
+            assert len(self.draft_attn_groups) > 0
+            builder = self.draft_attn_groups[0].get_metadata_builder()
+            extra_attn_metadata_args: dict = {}
+            if self.use_compress:
+                extra_attn_metadata_args = dict(
+                    prefill_ratio_to_sas_metadata=dict(),
+                    decode_ratio_to_sas_metadata=dict(),
+                    common_ratio_to_sas_metadata=dict(),
+                    block_size=self.draft_attn_groups[0].kv_cache_spec.block_size,
+                )
+            attn_metadata = builder.build(0, common_attn_metadata, self.runner.get_model(), **extra_attn_metadata_args)
+            if hasattr(attn_metadata, "causal") and not attn_metadata.causal:
+                attn_metadata.attn_mask = None
+            per_layer_attn_metadata = dict()
+            # The first step of speculative.
+            for layer_name in self.attn_layer_names:
+                per_layer_attn_metadata[layer_name] = attn_metadata
+            multi_steps_attn_metadata = [per_layer_attn_metadata]
+            # Copy the old attn_metadata and update
+            attn_metadata_i = per_layer_attn_metadata[self.attn_layer_names[0]]
+            return multi_steps_attn_metadata, attn_metadata_i
+
+    def _build_standard_dsa_attn_metadata(
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+        num_input_tokens: int,
+        num_actual_tokens: int,
+    ) -> list[dict[str, Any]]:
+        if not self.draft_attn_groups:
+            return []
+
+        if num_input_tokens > num_actual_tokens:
+            self.positions[num_actual_tokens:num_input_tokens].fill_(0)
+            self._slot_mapping_buffer[num_actual_tokens:num_input_tokens].fill_(-1)
+
+        base_cm = common_attn_metadata
+        base_cm.positions = self.positions[:num_input_tokens]
+        base_cm.slot_mapping = self._slot_mapping_buffer[:num_input_tokens]
+        base_cm.num_input_tokens = num_input_tokens
+        base_cm.num_actual_tokens = num_actual_tokens
+        base_cm.causal = False
+        base_cm.attn_state = AscendAttentionState.ChunkedPrefill
+        token_to_req_indices = getattr(self, "_dspark_token_to_req_indices_buffer", None)
+        if isinstance(token_to_req_indices, torch.Tensor):
+            base_cm.token_to_req_indices = token_to_req_indices[:num_input_tokens]
+
+        per_layer_attn_metadata: dict[str, Any] = {}
+        for attn_group in self.draft_attn_groups:
+            gid = attn_group.kv_cache_group_id
+            common_attn_metadata = copy.copy(base_cm)
+            block_table = getattr(self, "_dspark_block_tables_by_gid", {}).get(gid)
+            if block_table is not None:
+                common_attn_metadata.block_table_tensor = block_table[: common_attn_metadata.num_reqs]
+            slot_mapping = getattr(self, "_dspark_query_slot_mappings_by_gid", {}).get(gid)
+            if slot_mapping is not None:
+                common_attn_metadata.slot_mapping = slot_mapping[:num_input_tokens]
+            attn_metadata = attn_group.get_metadata_builder().build_for_drafting(
+                common_attn_metadata,
+                draft_index=1,
+                block_size=attn_group.kv_cache_spec.block_size,
+            )
+            for layer_name in attn_group.layer_names:
+                per_layer_attn_metadata[layer_name] = attn_metadata
+        return [per_layer_attn_metadata]
+
+    def _pad_draft_query_buffers(
+        self,
+        num_actual_tokens: int,
+        num_input_tokens: int,
+    ) -> None:
+        if num_input_tokens <= num_actual_tokens:
+            return
+        self.input_ids[num_actual_tokens:num_input_tokens].fill_(self.parallel_drafting_token_id)
+        self.positions[num_actual_tokens:num_input_tokens].fill_(0)
+        self._slot_mapping_buffer[num_actual_tokens:num_input_tokens].fill_(-1)
+        token_to_req_indices = getattr(self, "_dspark_token_to_req_indices_buffer", None)
+        if isinstance(token_to_req_indices, torch.Tensor):
+            token_to_req_indices[num_actual_tokens:num_input_tokens].fill_(-1)
+        for buf in getattr(self, "_dspark_query_slot_mapping_buffers", {}).values():
+            buf[num_actual_tokens:num_input_tokens].fill_(-1)
+
+    def _sample_sequential(
+        self,
+        num_reqs: int,
+        head_hidden: torch.Tensor,
+        token_indices_to_sample: torch.Tensor,
+    ) -> torch.Tensor:
+        block_size = self.num_speculative_tokens
+        num_sample = num_reqs * block_size
+        sample_hidden_states = head_hidden[token_indices_to_sample[:num_sample]]
+        base_logits = self.model.compute_logits(sample_hidden_states)
+        vocab_size = base_logits.shape[-1]
+        base_logits = base_logits.view(num_reqs, block_size, vocab_size)
+
+        prev_ids = self._markov_anchor_tokens[:num_reqs]
+        for idx in range(block_size):
+            markov_embed = self.model.markov_embed(prev_ids)
+            markov_bias = self.model.markov_bias(markov_embed)
+            logits = base_logits[:, idx, :] + markov_bias
+            draft_ids = _dspark_greedy_sample(logits)
+            self._markov_draft_tokens[:num_reqs, idx].copy_(draft_ids)
+            prev_ids = self._markov_draft_tokens[:num_reqs, idx]
+        return self._markov_draft_tokens[:num_reqs, :block_size]
