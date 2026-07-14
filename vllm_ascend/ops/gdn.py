@@ -305,9 +305,9 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                         device=mixed_qkv_non_spec.device,
                         dtype=torch.int32,
                     )
-                    all_has_any_token_flags = get_pcp_group().all_gather(
-                        has_any_token_flag.unsqueeze(0).contiguous(), 0
-                    ).view(-1)
+                    all_has_any_token_flags = (
+                        get_pcp_group().all_gather(has_any_token_flag.unsqueeze(0).contiguous(), 0).view(-1)
+                    )
                     can_sync_state = (all_has_any_token_flags > 0).all().item()
                     rank_indices = torch.arange(
                         pcp_world_size,
@@ -546,9 +546,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 gathered_state = get_pcp_group().all_gather(
                     ssm_state[prefill_state_indices].unsqueeze(0).contiguous(), 0
                 )
-                ssm_state[prefill_state_indices] = gathered_state[
-                    last_non_empty_rank
-                ].to(ssm_state.dtype)
+                ssm_state[prefill_state_indices] = gathered_state[last_non_empty_rank].to(ssm_state.dtype)
         elif attn_metadata.num_decodes > 0:
             actual_seq_lengths = attn_metadata.non_spec_decode_metadata.actual_seq_lengths
             query_non_spec = l2norm_fwd(query_non_spec)
