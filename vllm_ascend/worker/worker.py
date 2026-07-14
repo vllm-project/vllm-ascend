@@ -159,7 +159,7 @@ class NPUWorker(WorkerBase):
             WEIGHT_LOADER_V2_SUPPORTED.remove("UnquantizedLinearMethod")
 
         self.use_v2_model_runner = self.vllm_config.use_v2_model_runner
-        if self.use_v2_model_runner and (vllm_version_is("0.23.0") or vllm_version_is("0.24.0")):
+        if self.use_v2_model_runner and vllm_version_is("0.24.0"):
             logger.warning(
                 "VLLM_USE_V2_MODEL_RUNNER is supported only on the verified vLLM main commit; "
                 "falling back to the v1 model runner."
@@ -687,7 +687,7 @@ class NPUWorker(WorkerBase):
                 WeightTransferEngineFactory,
             )
 
-            if vllm_version_is("0.23.0") or vllm_version_is("0.24.0"):
+            if vllm_version_is("0.24.0"):
                 self.weight_transfer_engine = WeightTransferEngineFactory.create_engine(
                     self.vllm_config.weight_transfer_config,
                     self.vllm_config.parallel_config,

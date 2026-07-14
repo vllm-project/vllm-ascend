@@ -72,7 +72,7 @@ def test_init_accepts_model_argument():
 def test_init_passes_model_to_super():
     captured: dict = {}
 
-    if vllm_version_is("0.23.0") or vllm_version_is("0.24.0"):
+    if vllm_version_is("0.24.0"):
 
         def fake_init_v0(self, config, parallel_config, model=None):
             captured["args"] = (config, parallel_config, model)

@@ -19,13 +19,10 @@ from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.utils import is_310p, vllm_version_is
 
-# The v2 model runner tracks only the verified vLLM main commit. Fixed release
-# tags have diverged APIs and are intentionally kept on the v1 runner instead
-# of maintaining separate v2 compatibility paths.
-if vllm_version_is("0.23.0") or vllm_version_is("0.24.0"):
-    _V2_MODEL_RUNNER_SUPPORTED = False
-else:
-    _V2_MODEL_RUNNER_SUPPORTED = True
+# The v2 model runner tracks only the verified vLLM main commit. The v0.24.0
+# release has diverged APIs and is intentionally kept on the v1 runner instead
+# of maintaining a separate v2 compatibility path.
+_V2_MODEL_RUNNER_SUPPORTED = not vllm_version_is("0.24.0")
 
 if HAS_TRITON:
     import vllm_ascend.patch.worker.patch_triton

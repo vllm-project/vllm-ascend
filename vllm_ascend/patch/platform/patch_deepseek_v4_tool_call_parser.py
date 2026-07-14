@@ -38,9 +38,9 @@ from vllm.entrypoints.openai.engine.protocol import (
 
 from vllm_ascend.utils import vllm_version_is
 
-if not (vllm_version_is("0.23.0") or vllm_version_is("0.24.0")):
+if not vllm_version_is("0.24.0"):
     raise RuntimeError(
-        "patch_deepseek_v4_tool_call_parser is only for vLLM 0.23.0 and 0.24.0; "
+        "patch_deepseek_v4_tool_call_parser is only for vLLM 0.24.0; "
         "newer vLLM versions use the upstream DeepSeekV4 engine parser."
     )
 
