@@ -42,3 +42,13 @@ The symbols used have the following meanings:
 - <sup>3</sup> Layer sharding is only enabled on the prefill stage.
 - <sup>4</sup> Lmhead TP is only enabled in the pure dp scenarios.
 - <sup>5</sup> MLAPO is only supported on the decode stage.
+
+=== "310P"
+
+    310P-specific feature combinations will be added after the corresponding
+    hardware tests are completed.
+
+    | Feature Combination | Status | Notes |
+    | --- | --- | --- |
+    | `FULL_DECODE_ONLY` ACLGraph + Tensor Parallel | 🟡 | Verification details to be added. |
+    | W8A8SC Quantization + `FULL_DECODE_ONLY` ACLGraph | 🟡 | Verification details to be added. |

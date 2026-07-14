@@ -137,6 +137,13 @@ Start the docker image on your each node.
         -it $IMAGE bash
     ```
 
+=== "310P"
+
+    The 310P deployment flow will be added here. It will cover the validated
+    W8A8SC weights, tensor parallel configurations, context-length limits, and
+    startup parameters. For hardware prerequisites, see the
+    [310P hardware tutorial](../hardwares/310p.md).
+
 The default workdir is `/workspace`. vLLM and vLLM-Ascend are installed as Python packages in site-packages.
 
 Installation Verification:

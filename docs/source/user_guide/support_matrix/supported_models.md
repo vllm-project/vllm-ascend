@@ -36,6 +36,15 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 | MiniMax-M2.5/2.7                  | ✅        |                                                                      | ✅ | A2/A3/Ascend950 (Ascend950 experimental) |✅|✅|✅|❌|✅|✅|✅|🟡|✅|✅|✅|🟡|✅|200k|🟡| [MiniMax-M2](../../tutorials/models/MiniMax-M2.md) |
 | Qwen2.5-Math-RM-72B           | ✅        | vllm-rm, tensor_parallel_size=4, max_model_len=4096 | ✅ | A2 | ✅ | 🟡 | 🟡 | ❌ | 🟡 | ✅ | ✅ | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 4096 | 🟡 | [Qwen2.5-Math-RM-72B](../../tutorials/models/Qwen2.5-Math-RM-72B.md) |
 
+=== "310P"
+
+    The 310P model entries will be added here with verified weights, hardware
+    configurations, and deployment links.
+
+    | Model | Support | Note | Supported Hardware | Doc |
+    | --- | --- | --- | --- | --- |
+    | Qwen3-Dense | 🟡 | Deployment details to be added. | 310P | [Qwen3-Dense](../../tutorials/models/Qwen3-Dense.md) |
+
 #### Extended Compatible Models
 
 | Model                         | Support   | Note                                                                 | Supported Hardware |

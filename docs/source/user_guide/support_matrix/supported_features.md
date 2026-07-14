@@ -30,6 +30,18 @@ You can check the [support status of vLLM V1 Engine][v1_user_guide]. Below is th
 | Sleep Mode                    | 🟢 Functional    | Functional, see detailed note: [Sleep Mode][sleep_mode]                 |
 | Context Parallel              | 🟢 Functional    | Functional, see detailed note: [Context Parallel][context_parallel]     |
 
+=== "310P"
+
+    310P-specific feature status is being completed. Add the verified entries
+    here after the related deployment or test is available.
+
+    | Feature | Status | Next Step |
+    | --- | --- | --- |
+    | `FULL_DECODE_ONLY` ACLGraph | 🟡 | Verification details to be added. |
+    | Tensor Parallel | 🟡 | 310P-specific coverage to be added. |
+    | W8A8SC Quantization | 🟡 | Model deployment coverage to be added. |
+    | Chunked Prefill | 🟡 | Verification details to be added. |
+
 - 🟢 Functional: Fully operational, with ongoing optimizations.
 - 🔵 Experimental: Experimental support, interfaces and functions may change.
 - 🚧 WIP: Under active development, will be supported soon.
