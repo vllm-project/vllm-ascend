@@ -294,6 +294,21 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     # chunk_gated_delta_rule. Tell chunk_gated_delta_rule_fwd
                     # to skip its internal all_gather block to avoid deadlock.
                     skip_pcp_all_gather = (all_has_token_flags == 0).any().item()
+                    # Check if all ranks have num_actual_tokens > 0 (not
+                    # completely empty). If a rank is completely empty it
+                    # early-returns and cannot participate in the ssm_state
+                    # sync all_gather below. When can_sync_state is False,
+                    # we skip the sync to avoid deadlock (rare edge case:
+                    # 0 prefill + 0 decode tokens on a rank).
+                    has_any_token_flag = torch.tensor(
+                        [1 if num_actual_tokens > 0 else 0],
+                        device=mixed_qkv_non_spec.device,
+                        dtype=torch.int32,
+                    )
+                    all_has_any_token_flags = get_pcp_group().all_gather(
+                        has_any_token_flag.unsqueeze(0).contiguous(), 0
+                    ).view(-1)
+                    can_sync_state = (all_has_any_token_flags > 0).all().item()
                     rank_indices = torch.arange(
                         pcp_world_size,
                         device=mixed_qkv_non_spec.device,
@@ -518,6 +533,22 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 core_attn_out_non_spec = core_attn_out_decode
             else:
                 core_attn_out_non_spec = None
+
+            # When skip_pcp_all_gather=True, the all_gather inside
+            # chunk_gated_delta_rule_fwd was skipped to avoid deadlock.
+            # But the non-empty rank updated its ssm_state while the
+            # empty rank (0 prefill tokens) did not, causing state
+            # divergence. Synchronize ssm_state from last_non_empty_rank
+            # to all ranks so subsequent decode steps use the correct state.
+            # can_sync_state ensures no rank is completely empty (which
+            # would have early-returned and caused a deadlock here).
+            if skip_pcp_all_gather and can_sync_state:
+                gathered_state = get_pcp_group().all_gather(
+                    ssm_state[prefill_state_indices].unsqueeze(0).contiguous(), 0
+                )
+                ssm_state[prefill_state_indices] = gathered_state[
+                    last_non_empty_rank
+                ].to(ssm_state.dtype)
         elif attn_metadata.num_decodes > 0:
             actual_seq_lengths = attn_metadata.non_spec_decode_metadata.actual_seq_lengths
             query_non_spec = l2norm_fwd(query_non_spec)
