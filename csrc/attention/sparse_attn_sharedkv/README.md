@@ -30,7 +30,7 @@
 | q                     | 输入      | 对应公式中的$Q$。                                                     | BFLOAT16、FLOAT16  | ND |
 | ori\_kv               | 可选输入  | 对应公式中的$\tilde{K}和\tilde{V}$的一部分，为原始不经压缩的KV。          | BFLOAT16、FLOAT16 | ND |
 | cmp\_kv               | 可选输入  | 对应公式中的$\tilde{K}和\tilde{V}$的一部分，为经过压缩的KV。             | BFLOAT16、FLOAT16  | ND |
-| ori\_sparse\_indices  | 可选输入  | 代表离散取oriKvCache的索引。                                           | INT32              | ND |
+| ori\_sparse\_indices  | 可选输入  | 代表离散读取oriKvCache的物理slot索引，负数表示有效索引结束。             | INT32              | ND |
 | cmp\_sparse\_indices  | 可选输入  | 代表离散取cmpKvCache的索引。                                           | INT32              | ND |
 | ori\_block\_table     | 可选输入  | 表示PageAttention中oriKvCache存储使用的block映射表。                   | INT32               | ND |
 | cmp\_block\_table     | 可选输入  | 表示PageAttention中cmpKvCache存储使用的block映射表。                   | INT32               | ND |
@@ -57,17 +57,17 @@
 
 - 该接口支持推理场景下使用。
 - 该接口支持aclgraph模式。
-- 该接口当前支持三种计算场景：场景一，仅传入`ori_kv`时为Sliding Window Attention计算；场景二，传入`ori_kv`及`cmp_kv`时为Sliding Window Attention + Compressed Attention计算；场景三，传入`ori_kv`、`cmp_kv`及`cmp_sparse_indices`时为Sliding Window Attention + Sparse Compressed Attention计算。
+- 该接口当前支持四种计算场景：场景一，仅传入`ori_kv`时为Sliding Window Attention计算；场景二，传入`ori_kv`和`ori_sparse_indices`时按显式物理slot执行Sparse Sliding Window Attention计算；场景三，传入`ori_kv`及`cmp_kv`时为Sliding Window Attention + Compressed Attention计算；场景四，传入`ori_kv`、`cmp_kv`及`cmp_sparse_indices`时为Sliding Window Attention + Sparse Compressed Attention计算。
 
 - 当`layout_q`为TND时，功能使用限制如下：
     - `q`的shape需要为[T1,N1,D]，其中N1仅支持64。
-    - `ori_sparse_indices`的shape需要为[Q\_T, KV\_N, K1]，其中K1为对`ori_kv`一次离散选取的token数，K1仅支持512。
+    - `ori_sparse_indices`仅支持SWA模板和`PA_ND` KV layout，shape需要为[Q\_T, KV\_N, K1]，其中K1为对`ori_kv`一次离散选取的token数。K1必须为正数、128对齐且不超过2048；每行遇到第一个负数时停止读取。`ori_win_left`需要为metadata提供不小于有效索引数量的非负调度窗口，`ori_win_right`仅支持0。
     - `cmp_sparse_indices`的shape需要为[Q\_T, KV\_N, K2]，其中K2为对`cmp_kv`一次离散选取的token数，K2仅支持512。
     - `cu_seqlens_q`必须传入，输入维度为B+1，大小为参数中每个元素的值表示当前batch与之前所有batch的token数总和，即前缀和，因此后一个元素的值必须>=前一个元素的值。
 
 - 当`layout_q`为BSND时，功能使用限制如下：
     - `q`的shape需要为[B, Q\_S,N1,D]，其中N1仅支持64。
-    - `ori_sparse_indices`的shape需要为[B, Q\_S, KV\_N, K1]，其中K1为对`ori_kv`一次离散选取的token数，K1仅支持512。
+    - 当前不支持传入`ori_sparse_indices`。
     - `cmp_sparse_indices`的shape需要为[B, Q\_S, KV\_N, K2]，其中K2为对`cmp_kv`一次离散选取的token数，K2仅支持512。
 
 - PageAttention场景下，功能使用限制如下：
@@ -78,13 +78,45 @@
 - 目前暂不支持返回`softmax_lse`，`return_softmax_lse`仅支持输入False，返回值`softmax_lse`为无效值。
 - ori_mask_mode及cmp_mask_mode所表示的mask模式的详细介绍见[sparse_mode参数说明](../../../docs/zh/context/sparse_mode参数说明.md)。
 - 目前暂不支持指定`q`中参与运算的token数，因此设置`seqused_q`无效。
-- 目前暂不支持对`ori_kv`进行稀疏计算，因此设置`ori_sparse_indices`无效。
+- `ori_sparse_indices`中的非负值是`ori_kv`首两维展平后的物理slot编号，不再经过`ori_block_table`映射。
 - 目前所有输入不支持传入空tensor。
 - `q`、`ori_kv`、`cmp_kv`数据排布格式支持从多种维度解读，B（Batch）表示输入样本批量大小、S（Seq-Length）表示输入样本序列长度、H（Hidden-Size）表示隐藏层的大小、N（Head-Num）表示多头数、D（Head-Dim）表示hidden层最小的单元尺寸，且满足D=H/N、T表示所有Batch输入样本序列长度的累加和。
 - Q\_S和S1表示q shape中的S，S2表示ori_kv shape中的S，S3表示cmp_kv shape中的S；Q\_N和N1表示num\_q\_heads，KV\_N和N2表示num\_ori_kv\_heads和num\_cmp_kv\_heads；Q\_T和T1表示q shape中的输入样本序列长度的累加和。
 
 - 当`layout_kv`为BSND时，功能使用限制如下：
     - `ori_kv`和`cmp_kv`的layout都必须为BSND，ori_kv的shape为[B, S2, N2,D]，cmp_kv的shape为[B, S3, N2,D]。
+
+显式original-KV slot模式调用示例（`metadata`的构造方式与下方单算子示例相同）：
+
+```python
+ori_sparse_indices = torch.full(
+    (q.shape[0], ori_kv.shape[2], 128),
+    -1,
+    dtype=torch.int32,
+    device=q.device,
+)
+slots = torch.tensor([1, 19, 34, 17], dtype=torch.int32, device=q.device)
+ori_sparse_indices[:, 0, : slots.numel()] = slots
+
+attention_out, _ = torch.ops.custom.npu_sparse_attn_sharedkv(
+    q,
+    ori_kv=ori_kv,
+    ori_sparse_indices=ori_sparse_indices,
+    ori_block_table=ori_block_table,
+    cu_seqlens_q=cu_seqlens_q,
+    seqused_kv=seqused_kv,
+    sinks=sinks,
+    metadata=metadata,
+    softmax_scale=softmax_scale,
+    cmp_ratio=4,
+    ori_mask_mode=4,
+    cmp_mask_mode=3,
+    ori_win_left=127,
+    ori_win_right=0,
+    layout_q="TND",
+    layout_kv="PA_ND",
+)
+```
 
 ## Atlas A3 推理系列产品 调用说明
 

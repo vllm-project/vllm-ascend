@@ -146,7 +146,7 @@
     <tr>
       <td>ori_win_left</td>
       <td>可选属性</td>
-      <td>表示q和ori_kv计算中q对过去token计算的数量，仅支持默认值127。</td>
+      <td>表示q和ori_kv计算中q对过去token计算的数量，支持非负值，默认值为127。</td>
       <td>INT32</td>
       <td>-</td>
     </tr>

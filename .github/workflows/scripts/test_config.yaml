@@ -108,7 +108,9 @@
   base: attention_common
   source_file_dependencies:
     - vllm_ascend/attention/dsa_v1.py
+    - vllm_ascend/attention/dsa_window.py
   tests:
+    - tests/ut/spec_decode/test_dspark_dsa_metadata.py
     - tests/e2e/pull_request/four_card/test_deepseek_v4.py
 
 - name: attention_cp
@@ -839,7 +841,6 @@ partition:
   a3_x2: 3
   a3_x4: 3
   cpu_x0: 1
-
 
 
 
