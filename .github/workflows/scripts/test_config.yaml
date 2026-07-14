@@ -191,6 +191,7 @@
   tests:
     - tests/ut/core
     - tests/ut/test_compressed_prefix_cache.py
+    - tests/e2e/pull_request/one_card/test_batch_job_aware_scheduler_e2e.py
 
 # Device
 - name: device
@@ -728,9 +729,10 @@ estimated_times:
   tests/e2e/pull_request/one_card/test_qwen3_8b_w8a8.py: 350
   tests/e2e/pull_request/one_card/test_qwen3_embedding_0_6b.py: 170
   tests/e2e/pull_request/one_card/test_sampler.py: 300
-  tests/e2e/pull_request/one_card/test_simple_cpu_offload.py: 220
-  tests/e2e/pull_request/one_card/test_vlm.py: 820
-  tests/e2e/pull_request/one_card/test_xlite.py: 160
+  tests/e2e/pull_request/one_card/test_simple_cpu_offload.py: 210
+  tests/e2e/pull_request/one_card/test_vlm.py: 860
+  tests/e2e/pull_request/one_card/test_xlite.py: 150
+  tests/e2e/pull_request/one_card/test_batch_job_aware_scheduler_e2e.py: 263
   tests/e2e/pull_request/two_card/aclgraph/test_aclgraph_capture_replay.py: 20
   tests/e2e/pull_request/two_card/lora/test_ilama_lora_tp2.py: 160
   tests/e2e/pull_request/two_card/lora/test_llama32_lora_tp2.py: 510
