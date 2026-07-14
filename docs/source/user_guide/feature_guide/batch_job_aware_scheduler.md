@@ -24,7 +24,7 @@ The scheduler is implemented by extending the **waiting queue** with **dynamic p
 
 The scheduler identifies which job a request belongs to via a `#job_name[${JOB_NAME}]#` tag embedded in the request ID. For example:
 
-```
+```python
 request_id = "req_001#job_name[my_batch_job]#"
 ```
 
