@@ -264,8 +264,10 @@ class TestAscendAttentionMetadataBuilder310(TestBase):
         builder = object.__new__(AscendMetadataBuilder310Direct)
         builder._query_lens_cpu_buffer = torch.zeros(10, dtype=torch.int32, device="cpu")
         builder.device = torch.device("cpu")
-        from vllm_ascend._310p.attention.attention_mask import AttentionMaskBuilder310
         from vllm.v1.kv_cache_interface import AttentionSpec
+
+        from vllm_ascend._310p.attention.attention_mask import AttentionMaskBuilder310
+
         builder.attn_mask_builder = AttentionMaskBuilder310(torch.device("cpu"), 4096)
         builder.kv_cache_spec = AttentionSpec(
             block_size=128,

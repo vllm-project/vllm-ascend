@@ -26,12 +26,19 @@ from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBasePropos
 class TestAscendSpecDecodeBaseProposer310(TestBase):
 
     def test_run_merged_draft_sets_rope_flag_before_call(self):
-        from vllm_ascend._310p.spec_decode.llm_base_proposer_310 import _original_run_merged_draft
-        
         flag_states = []
         
-        def mock_original(self, num_input_tokens, batch_size, token_indices_to_sample, target_positions,
-                          inputs_embeds, multi_steps_attn_metadata, num_tokens, is_prefill=None):
+        def mock_original(
+            self,
+            num_input_tokens,
+            batch_size,
+            token_indices_to_sample,
+            target_positions,
+            inputs_embeds,
+            multi_steps_attn_metadata,
+            num_tokens,
+            is_prefill=None,
+        ):
             flag_states.append(AscendRotaryEmbedding310._is_drafting_update_enabled)
             return torch.zeros(num_tokens, dtype=torch.long)
 
