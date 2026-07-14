@@ -12,6 +12,7 @@ from vllm.forward_context import BatchDescriptor, get_forward_context, set_forwa
 from vllm.logger import logger
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.distributed.parallel_state import get_virtual_pipeline_parallel_rank
 from vllm_ascend.utils import (
     AscendDeviceType,
     enable_sp,
@@ -53,6 +54,42 @@ def override_mrv2_in_profile_run(enabled: bool):
 def get_mrv2_in_profile_run() -> bool:
     return _MRV2_IN_PROFILE_RUN.get()
 
+def _maybe_set_vpp_moe_layers(forward_context, model_instance: torch.nn.Module | None) -> None:
+    """Restrict fast MoE cold-start lookup to the current VPP stage.
+
+    Upstream fast_moe_cold_start stores a rank-local list of all MoE layer
+    names and then resolves custom-op calls by incrementing
+    ``forward_context.moe_layer_index``. Under VPP we enter a fresh forward
+    context for each virtual stage, so the counter resets to 0 every stage.
+    Without narrowing ``all_moe_layers`` to the current stage, vp1 will reuse
+    vp0's MoE layers on the same PP rank.
+    """
+
+    if forward_context.all_moe_layers is None or model_instance is None:
+        return
+
+    model = getattr(model_instance, "model", None)
+    model_layers = getattr(model, "layers", None)
+    vpp_layer_ranges = getattr(model_layers, "vpp_layer_ranges", None)
+    if vpp_layer_ranges is None or model_layers is None:
+        return
+
+    vp_stage = get_virtual_pipeline_parallel_rank()
+    if vp_stage >= len(vpp_layer_ranges):
+        return
+
+    start, end = vpp_layer_ranges[vp_stage]
+    stage_moe_layers: list[str] = []
+    for layer_idx in range(start, end):
+        layer = model_layers[layer_idx]
+        experts = getattr(getattr(layer, "mlp", None), "experts", None)
+        layer_name = getattr(experts, "layer_name", None)
+        if layer_name is not None:
+            stage_moe_layers.append(layer_name)
+
+    forward_context.all_moe_layers = stage_moe_layers
+    forward_context.moe_layer_index = 0
+
 
 @contextmanager
 def set_ascend_forward_context(
@@ -89,6 +126,7 @@ def set_ascend_forward_context(
     with set_forward_context(**forward_context_kwargs):
         forward_context = get_forward_context()
         forward_context.draft_attn_metadatas = draft_attn_metadatas
+        _maybe_set_vpp_moe_layers(forward_context, model_instance)
 
         forward_context.input_ids = input_ids
 

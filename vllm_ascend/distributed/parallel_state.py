@@ -26,6 +26,45 @@ _P_TP: GroupCoordinator | None = None
 
 _DYNAMIC_EPLB: GroupCoordinator | None = None
 
+# Virtual Pipeline Parallelism (VPP) state
+_VIRTUAL_PIPELINE_PARALLEL_SIZE: int = 1
+_VIRTUAL_PIPELINE_PARALLEL_RANK: int = 0
+# Construction-vs-runtime latch. Stays False from process start until the
+# first ``set_virtual_pipeline_parallel_rank`` call (i.e. until the VPP
+# schedule loop begins). While False, ``is_first_rank`` / ``is_last_rank``
+# return the *static* fold-back topology answer so that model ``__init__``
+# can place ``embed_tokens`` / ``norm`` / ``lm_head`` on the physical rank
+# that owns the first / last virtual stage. Flips True at the start of
+# execution and is reset only on teardown / re-init. See
+# ``patch_distributed.GroupCoordinatorPatch``.
+_VPP_RUNTIME_ACTIVE: bool = False
+
+
+def get_virtual_pipeline_parallel_size() -> int:
+    return _VIRTUAL_PIPELINE_PARALLEL_SIZE
+
+
+def get_virtual_pipeline_parallel_rank() -> int:
+    return _VIRTUAL_PIPELINE_PARALLEL_RANK
+
+
+def set_virtual_pipeline_parallel_rank(rank: int) -> None:
+    global _VIRTUAL_PIPELINE_PARALLEL_RANK, _VPP_RUNTIME_ACTIVE
+    _VIRTUAL_PIPELINE_PARALLEL_RANK = rank
+    # First call marks the end of model construction; from here on
+    # is_first_rank / is_last_rank must honor the live virtual stage.
+    _VPP_RUNTIME_ACTIVE = True
+
+
+def get_vpp_runtime_active() -> bool:
+    """Whether the VPP schedule loop has started.
+
+    Returns False during model construction (the latch has not been
+    flipped yet) and True once the first ``set_virtual_pipeline_parallel_rank``
+    call has been made by the execution loop.
+    """
+    return _VPP_RUNTIME_ACTIVE
+
 
 def init_ascend_model_parallel(
     parallel_config: ParallelConfig,
@@ -94,6 +133,14 @@ def init_ascend_model_parallel(
 
     global _MC2
     _MC2 = init_model_parallel_group(group_ranks, get_world_group().local_rank, backend, group_name="mc2")
+
+    # Cache the configured virtual pipeline parallel size so ``vpp_utils``
+    # can answer ``is_vpp_last_stage`` without re-reading the ascend config.
+    global _VIRTUAL_PIPELINE_PARALLEL_SIZE, _VPP_RUNTIME_ACTIVE
+    _VIRTUAL_PIPELINE_PARALLEL_SIZE = get_ascend_config().virtual_pipeline_parallel_size
+    # Begin each engine lifecycle in the construction phase so model
+    # __init__ sees the static fold-back topology through is_first/last_rank.
+    _VPP_RUNTIME_ACTIVE = False
 
     if get_ascend_config().eplb_config.dynamic_eplb:
         global _DYNAMIC_EPLB
@@ -339,6 +386,12 @@ def destroy_ascend_model_parallel():
     if _DYNAMIC_EPLB:
         _DYNAMIC_EPLB.destroy()
     _DYNAMIC_EPLB = None
+
+    global _VIRTUAL_PIPELINE_PARALLEL_SIZE, _VIRTUAL_PIPELINE_PARALLEL_RANK
+    global _VPP_RUNTIME_ACTIVE
+    _VIRTUAL_PIPELINE_PARALLEL_SIZE = 1
+    _VIRTUAL_PIPELINE_PARALLEL_RANK = 0
+    _VPP_RUNTIME_ACTIVE = False
 
 
 def get_global_rank(parallel_config: ParallelConfig | None = None) -> int:

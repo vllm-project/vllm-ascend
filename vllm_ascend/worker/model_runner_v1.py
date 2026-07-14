@@ -21,7 +21,7 @@ import logging
 import math
 import sys
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from collections.abc import Callable
 from contextlib import contextmanager, nullcontext
 from copy import copy, deepcopy
@@ -75,12 +75,14 @@ from vllm.v1.outputs import (
     EMPTY_MODEL_RUNNER_OUTPUT,
     AsyncModelRunnerOutput,
     ECConnectorOutput,
+    KVConnectorOutput,
     LogprobsLists,
     LogprobsTensors,
     ModelRunnerOutput,
     RoutedExpertsLists,
     RoutedExpertsTensors,
     SamplerOutput,
+    VppContinuationOutput,
     make_empty_encoder_model_runner_output,
 )
 from vllm.v1.sample.logits_processor import build_logitsprocs
@@ -182,6 +184,11 @@ from vllm_ascend.ascend_forward_context import (  # isort: skip
 
 from vllm.model_executor.models.interfaces import supports_multimodal_pruning
 
+from vllm_ascend.distributed.parallel_state import (
+    get_virtual_pipeline_parallel_rank,
+    get_virtual_pipeline_parallel_size,
+    set_virtual_pipeline_parallel_rank,
+)
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
 
 if TYPE_CHECKING:
@@ -190,7 +197,7 @@ if TYPE_CHECKING:
 else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
 
-
+from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.model_executor.layers.attention import Attention, MLAAttention
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSlidingWindowMLASpec
@@ -201,6 +208,16 @@ torch.npu.config.allow_internal_format = True
 AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 # list when ubatching is enabled
 PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
+
+def init_model_parallel_group(pp_group: GroupCoordinator, usage: str) -> GroupCoordinator:
+    return GroupCoordinator(
+        group_ranks=pp_group.group_ranks,
+        local_rank=pp_group.local_rank,
+        torch_distributed_backend=pp_group.torch_distributed_backend,
+        use_device_communicator=pp_group.use_device_communicator,
+        use_message_queue_broadcaster=pp_group.use_message_queue_broadcaster,
+        group_name=pp_group.unique_name + "_" + usage,
+    )
 
 @dataclass
 class GraphCaptureContext:
@@ -258,6 +275,53 @@ class ExecuteModelState(NamedTuple):
     ec_connector_output: "ECConnectorOutput | None"
     cudagraph_stats: CUDAGraphStat | None
     batch_desc: BatchDescriptor
+
+
+@dataclass
+class VppBatchContext:
+    batch_id: int
+    scheduler_output: "SchedulerOutput"
+    num_scheduled_tokens: int
+    num_scheduled_tokens_np: np.ndarray
+    max_num_scheduled_tokens: int
+    num_tokens_unpadded: int
+    num_tokens_padded: int
+    num_reqs: int
+    num_reqs_padded: int
+    logits_indices: torch.Tensor
+    spec_decode_metadata: SpecDecodeMetadata | None
+    spec_decode_common_attn_metadata: AscendCommonAttentionMetadata | None
+    attn_metadata: "PerLayerAttnMetadata"
+    batch_desc: BatchDescriptor
+    cudagraph_mode: CUDAGraphMode
+    num_tokens_across_dp: torch.Tensor | None
+    input_ids: torch.Tensor | None
+    inputs_embeds: torch.Tensor | None
+    positions: torch.Tensor
+    model_kwargs: dict[str, Any]
+    ec_connector_output: "ECConnectorOutput | None"
+    cudagraph_stats: CUDAGraphStat | None
+    has_encoder_input: bool
+    vp_size: int
+    input_batch_snapshot: NPUInputBatch
+    num_prompt_logprobs_snapshot: dict[str, int]
+    query_start_loc_cpu_snapshot: torch.Tensor
+    discard_request_indices_cpu_snapshot: torch.Tensor
+    num_discarded_requests_snapshot: int
+    next_vp_stage: int = 0
+    carry_intermediate_tensors: IntermediateTensors | None = None
+    pending_noop_cleanup: bool = False
+
+
+@dataclass
+class VppPendingSampleState:
+    execute_model_state: ExecuteModelState
+    kv_connector_output: "KVConnectorOutput | None"
+    input_batch: NPUInputBatch
+    num_prompt_logprobs: dict[str, int]
+    query_start_loc_cpu: torch.Tensor
+    discard_request_indices_cpu: torch.Tensor
+    num_discarded_requests: int
 
 
 class NPUModelRunner(GPUModelRunner):
@@ -612,6 +676,17 @@ class NPUModelRunner(GPUModelRunner):
                 block_size=self.block_size, device=self.device, vllm_config=self.vllm_config,
                 parallel_config=self.parallel_config, dtype=self.dtype)
 
+        # defined for virtual pipeline parallism(vpp) algorithm
+        self._vpp_contexts: dict[int, VppBatchContext] | None = None
+        self._vpp_pp_group_prev: GroupCoordinator | None = None
+        self._vpp_pp_group_next: GroupCoordinator | None = None
+        self._pending_vpp_sample_states: deque[VppPendingSampleState] | None = None
+        if self._get_vpp_size() > 1:
+            self._vpp_contexts = {}
+            self._vpp_pp_group_prev = get_pp_group()
+            self._vpp_pp_group_next = init_model_parallel_group(get_pp_group(), "next_pp_group")
+            self._pending_vpp_sample_states = deque()
+
     @property
     def use_cp(self) -> bool:
         return self.pcp_size * self.dcp_size > 1
@@ -621,6 +696,38 @@ class NPUModelRunner(GPUModelRunner):
 
     def _sync_device(self) -> None:
         torch.npu.synchronize()
+
+    def _is_vpp_last_or_pp_last(self) -> bool:
+        """Return True if this rank hosts the final output layer.
+
+        Under VPP the "last rank" depends on the fold-back topology, not
+        simply on ``get_pp_group().is_last_rank``.
+        """
+        if not hasattr(self, "_vpp_last_cached"):
+            try:
+                from vllm_ascend.ascend_config import get_ascend_config
+                vp_size = get_ascend_config().virtual_pipeline_parallel_size
+            except RuntimeError:
+                vp_size = 1
+            if vp_size <= 1:
+                self._vpp_last_cached = get_pp_group().is_last_rank
+            else:
+                from vllm_ascend.distributed.vpp_utils import is_vpp_last_stage
+                pp_rank = get_pp_group().rank_in_group
+                pp_size = get_pp_group().world_size
+                last_vp = vp_size - 1
+                self._vpp_last_cached = is_vpp_last_stage(pp_rank, pp_size, last_vp, vp_size)
+        return self._vpp_last_cached
+
+    def _get_vpp_size(self) -> int:
+        if not hasattr(self, "_vpp_size_cached"):
+            try:
+                from vllm_ascend.ascend_config import get_ascend_config
+                self._vpp_size_cached = (
+                    get_ascend_config().virtual_pipeline_parallel_size)
+            except RuntimeError:
+                self._vpp_size_cached = 1
+        return self._vpp_size_cached
 
     def _set_up_drafter(self):
         # Set up speculative decoding.
@@ -643,7 +750,7 @@ class NPUModelRunner(GPUModelRunner):
             spec_token_num = self.speculative_config.num_speculative_tokens
             assert spec_token_num > 0
             self.decode_token_per_req = 1 + spec_token_num
-            if get_pp_group().is_last_rank:
+            if self._is_vpp_last_or_pp_last():
                 self.drafter = self._get_drafter()
                 if self.speculative_config.method == "eagle3":
                     assert isinstance(self.drafter, AscendEagleProposer)
@@ -1143,7 +1250,6 @@ class NPUModelRunner(GPUModelRunner):
         self.num_discarded_requests = len(discard_request_indices)
         self.discard_request_indices.np[: self.num_discarded_requests] = discard_request_indices
         self.discard_request_indices.copy_to_gpu(self.num_discarded_requests)
-        
         self.discard_request_mask.np[:num_reqs] = discard_requests_mask
         self.discard_request_mask.copy_to_gpu(num_reqs)
 
@@ -1516,6 +1622,9 @@ class NPUModelRunner(GPUModelRunner):
             )
 
         try:
+            if self._get_vpp_size() > 1:
+                intermediate_tensors = IntermediateTensors({})
+
             return super()._preprocess(
                 scheduler_output, num_input_tokens, intermediate_tensors
             )
@@ -2079,7 +2188,7 @@ class NPUModelRunner(GPUModelRunner):
                 self._execution_start_time = time.perf_counter()
         if self.execute_model_state is not None:
             raise RuntimeError("State error: sample_tokens() must be called after execute_model() returns None.")
-       
+
         # If ngram_gpu is used, we need to copy the scheduler_output to avoid
         # the modification has influence on the scheduler_output in engine core process.
         # The replace is much faster than deepcopy.
@@ -2132,6 +2241,10 @@ class NPUModelRunner(GPUModelRunner):
             # allocated blocks that may reuse the same physical KV cache IDs.
             get_kv_transfer_group().handle_preemptions(kv_connector_metadata)
 
+        if self._get_vpp_size() > 1:
+            return self._execute_model_vpp_yield(
+                scheduler_output, intermediate_tensors
+            )
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         with record_function_or_nullcontext("prepare input"):
             with self.synchronize_input_prep():
@@ -2444,7 +2557,6 @@ class NPUModelRunner(GPUModelRunner):
                         self.pcp_manager.get_restore_hidden_states(aux_hidden_states_pcp)
                         for aux_hidden_states_pcp in aux_hidden_states
                     ]
-
             if not self.broadcast_pp_output:
                 # Common case.
                 if not get_pp_group().is_last_rank:
@@ -2511,16 +2623,640 @@ class NPUModelRunner(GPUModelRunner):
             deferred_state_corrections_fn()
         return None
 
+    def _execute_model_vpp_yield(
+        self,
+        scheduler_output: "SchedulerOutput",
+        intermediate_tensors: IntermediateTensors | None = None,
+    ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors | VppContinuationOutput | None:
+        batch_id = getattr(scheduler_output, "batch_id", None)
+        if batch_id is None:
+            raise RuntimeError("VPP requires SchedulerOutput.batch_id")
+
+        ctx = self._vpp_contexts.get(batch_id)
+        if ctx is None:
+            prepared = self._prepare_vpp_context(
+                scheduler_output, intermediate_tensors
+            )
+            if not isinstance(prepared, tuple):
+                return prepared
+            ctx, stage_intermediate_tensors = prepared
+            self._vpp_contexts[batch_id] = ctx
+        else:
+            if ctx.pending_noop_cleanup:
+                # Fold-point ranks in vp_size=2 may finish both local stages in
+                # the prior call and only need to participate in one final noop.
+                self._vpp_contexts.pop(batch_id, None)
+                return self._make_vpp_empty_output()
+            stage_intermediate_tensors = None
+
+        return self._run_vpp_stage(ctx, stage_intermediate_tensors)
+
+    def _make_vpp_empty_output(
+        self,
+        kv_connector_output: "KVConnectorOutput | None" = None,
+    ) -> ModelRunnerOutput:
+        output = copy(EMPTY_MODEL_RUNNER_OUTPUT)
+        output.kv_connector_output = kv_connector_output
+        return output
+
+    def _merge_vpp_kv_connector_output(
+        self,
+        accumulated: "KVConnectorOutput | None",
+        current: "KVConnectorOutput | None",
+    ) -> "KVConnectorOutput | None":
+        if current is None:
+            return accumulated
+        if accumulated is None:
+            return KVConnectorOutput(
+                finished_sending=set(current.finished_sending or ()) or None,
+                finished_recving=set(current.finished_recving or ()) or None,
+                kv_connector_stats=current.kv_connector_stats,
+                kv_cache_events=current.kv_cache_events,
+                invalid_block_ids=set(current.invalid_block_ids),
+                expected_finished_count=current.expected_finished_count,
+            )
+
+        if current.finished_sending:
+            accumulated.finished_sending = set(accumulated.finished_sending or ())
+            accumulated.finished_sending.update(current.finished_sending)
+        if current.finished_recving:
+            accumulated.finished_recving = set(accumulated.finished_recving or ())
+            accumulated.finished_recving.update(current.finished_recving)
+
+        if accumulated.kv_connector_stats is None:
+            accumulated.kv_connector_stats = current.kv_connector_stats
+        elif current.kv_connector_stats is not None:
+            accumulated.kv_connector_stats = (
+                accumulated.kv_connector_stats.aggregate(
+                    current.kv_connector_stats
+                )
+            )
+
+        if accumulated.kv_cache_events is None:
+            accumulated.kv_cache_events = current.kv_cache_events
+        elif current.kv_cache_events is not None:
+            accumulated.kv_cache_events.add_events(
+                current.kv_cache_events.get_all_events()
+            )
+            accumulated.kv_cache_events.increment_workers(1)
+
+        accumulated.invalid_block_ids.update(current.invalid_block_ids)
+        if current.expected_finished_count > 0:
+            accumulated.expected_finished_count = current.expected_finished_count
+        return accumulated
+
+    def _prepare_vpp_context(
+        self,
+        scheduler_output: "SchedulerOutput",
+        intermediate_tensors: IntermediateTensors | None,
+    ) -> tuple[VppBatchContext, IntermediateTensors | None] | ModelRunnerOutput | AsyncModelRunnerOutput | None:
+        if self._get_vpp_size() > 1:
+            set_virtual_pipeline_parallel_rank(0)
+        num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        with record_function_or_nullcontext("prepare input"):
+            with self.synchronize_input_prep():
+                # Update persistent batch states.
+                self._update_states(scheduler_output)
+
+                if has_ec_transfer() and get_ec_transfer().is_producer:
+                    with self.maybe_get_ec_connector_output(
+                        scheduler_output,
+                        encoder_cache=self.encoder_cache,
+                    ) as ec_connector_output:
+                        self._execute_mm_encoder(scheduler_output)
+                        return make_empty_encoder_model_runner_output(
+                            scheduler_output)
+
+                if not num_scheduled_tokens:
+                    if (
+                        self.parallel_config.distributed_executor_backend
+                        == "external_launcher"
+                        and self.parallel_config.data_parallel_size > 1
+                    ):
+                        self._dummy_run(1)
+                    if not has_kv_transfer_group():
+                        return EMPTY_MODEL_RUNNER_OUTPUT
+                    return self.kv_connector_no_forward(
+                        scheduler_output, self.vllm_config
+                    )
+                if self.cache_config.kv_sharing_fast_prefill:
+                    assert not self.num_prompt_logprobs, (
+                        "--kv-sharing-fast-prefill produces incorrect "
+                        "logprobs for prompt tokens, tokens, please disable "
+                        "it when the requests need prompt logprobs"
+                    )
+
+                num_reqs = self.input_batch.num_reqs
+                req_ids = self.input_batch.req_ids
+                tokens = [
+                    scheduler_output.num_scheduled_tokens[i]
+                    for i in req_ids
+                ]
+                num_scheduled_tokens_np = np.array(tokens, dtype=np.int32)
+                max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
+
+                (
+                    logits_indices,
+                    spec_decode_metadata,
+                    total_num_scheduled_tokens,
+                ) = self._prepare_inputs(
+                    scheduler_output,
+                    num_scheduled_tokens_np,
+                )
+
+                num_tokens_unpadded = (
+                    scheduler_output.total_num_scheduled_tokens
+                )
+                if self.pcp_size > 1:
+                    num_tokens_unpadded = (
+                        self.pcp_manager.total_num_sampled_tokens_pcp)
+                cascade_attn_prefix_lens = None
+                if (self.cascade_attn_enabled
+                        and not self.parallel_config.enable_dbo):
+                    cascade_attn_prefix_lens = (
+                        self._compute_cascade_attn_prefix_lens(
+                            num_scheduled_tokens_np,
+                            self.input_batch.num_computed_tokens_cpu[:num_reqs],
+                            scheduler_output.num_common_prefix_blocks,
+                        )
+                    )
+
+                (
+                    cudagraph_mode,
+                    batch_desc,
+                    should_ubatch,
+                    num_tokens_across_dp,
+                    cudagraph_stats,
+                ) = self._determine_batch_execution_and_padding(
+                    num_tokens=num_tokens_unpadded,
+                    num_reqs=num_reqs,
+                    num_scheduled_tokens_np=num_scheduled_tokens_np,
+                    max_num_scheduled_tokens=max_num_scheduled_tokens,
+                    use_cascade_attn=cascade_attn_prefix_lens is not None,
+                    num_encoder_reqs=len(
+                        scheduler_output.scheduled_encoder_inputs),
+                )
+
+                logger.debug(
+                    "Running batch with cudagraph_mode: %s, batch_descriptor: %s, "
+                    "should_ubatch: %s, num_tokens_across_dp: %s",
+                    cudagraph_mode,
+                    batch_desc,
+                    should_ubatch,
+                    num_tokens_across_dp,
+                )
+
+                num_tokens_padded = batch_desc.num_tokens
+                num_reqs_padded = (
+                    batch_desc.num_reqs
+                    if batch_desc.num_reqs is not None
+                    else num_reqs
+                )
+                ubatch_slices, ubatch_slices_padded = maybe_create_ubatch_slices(
+                    should_ubatch,
+                    num_scheduled_tokens_np,
+                    num_tokens_padded,
+                    num_reqs_padded,
+                    self.parallel_config.num_ubatches,
+                )
+
+                pad_attn = cudagraph_mode == CUDAGraphMode.FULL
+
+                use_spec_decode = (
+                    len(scheduler_output.scheduled_spec_decode_tokens) > 0
+                )
+                ubatch_slices_attn = (
+                    ubatch_slices_padded if pad_attn else ubatch_slices
+                )
+
+                if (
+                    cudagraph_mode == CUDAGraphMode.FULL
+                    or (enable_sp() and not self.model_config.use_mla)
+                    and self.pcp_size == 1
+                ):
+                    old_num_reqs_padded = num_reqs_padded
+                    num_reqs_padded = self._pad_query_start_loc_for_fia(
+                        self.query_start_loc,
+                        num_tokens_padded, num_reqs_padded, num_reqs)
+                    if enable_sp() and num_tokens_padded == num_tokens_unpadded:
+                        if num_reqs_padded > old_num_reqs_padded:
+                            num_reqs_padded = old_num_reqs_padded
+                            self.query_start_loc.np[num_reqs_padded + 1] = 0
+
+                (attn_metadata, spec_decode_common_attn_metadata) = (
+                    self._build_attention_metadata(
+                        num_tokens=num_tokens_unpadded
+                        if not (self.use_cp and
+                                self.pcp_manager.pcp_use_hybrid_attn)
+                        else total_num_scheduled_tokens,
+                        num_tokens_padded=num_tokens_padded,
+                        num_reqs=num_reqs,
+                        num_reqs_padded=num_reqs_padded,
+                        max_query_len=max_num_scheduled_tokens,
+                        ubatch_slices=ubatch_slices_attn,
+                        logits_indices=logits_indices,
+                        use_spec_decode=use_spec_decode,
+                        num_scheduled_tokens=scheduler_output.num_scheduled_tokens,
+                        num_scheduled_tokens_np=num_scheduled_tokens_np,
+                        cascade_attn_prefix_lens=cascade_attn_prefix_lens,
+                    )
+                )
+
+            (
+                input_ids,
+                inputs_embeds,
+                positions,
+                intermediate_tensors,
+                model_kwargs,
+                ec_connector_output,
+            ) = self._preprocess(
+                scheduler_output,
+                num_tokens_padded
+                if not (self.use_cp and self.pcp_manager.pcp_use_hybrid_attn)
+                else total_num_scheduled_tokens,
+                intermediate_tensors,
+            )
+
+            update_cos_sin(positions)
+
+        if self.dynamic_eplb:
+            with record_function_or_nullcontext("EPLB weight D2D"):
+                self.eplb_updator.forward_before()
+
+        if self.calculate_kv_scales:  # type: ignore[has-type]
+            cudagraph_mode = CUDAGraphMode.NONE
+            self.calculate_kv_scales = False  # type: ignore[has-type]
+        if self.debugger is not None:
+            dbg_cfg = getattr(self.debugger, "config", None)
+            dump_level = str(
+                getattr(dbg_cfg, "level", "L1")).upper() if dbg_cfg is not None else "L1"
+            if dump_level in ("L0", "MIX"):
+                self.debugger.start(model=self.model)
+            else:
+                self.debugger.start()
+        if self.ascend_config.enable_async_exponential:
+            self.sampler.do_async_exponential(
+                b_s=logits_indices.shape[0],
+                head_dim=self.model_config.get_vocab_size(),
+                generators=self.input_batch.sampling_metadata.generators,
+            )
+
+        num_encoder_reqs = len(scheduler_output.scheduled_encoder_inputs)
+        has_encoder_input = (
+            self.model_config.is_encoder_decoder and num_encoder_reqs > 0
+        )
+
+        # VPP: clone attn_metadata tensor views so each batch's ctx is
+        # independent. Under VPP, batches stay in-flight across yields; a later
+        # batch's _build_attention_metadata overwrites the worker's persistent
+        # buffers (slot_mapping / block_table / query_start_loc / seq_lens)
+        # that these metadata tensors view into. Without cloning, a batch
+        # resumed after a yield reads another batch's metadata and the NPU
+        # attention op (npu_fused_infer_attention_score*) faults with an aicore
+        # exception. Only tensors are cloned; NPU Events / non-tensors are left
+        # as-is (shared by reference is fine for them).
+        _seen = set()
+        def _clone(md):
+            if id(md) in _seen:
+                return
+            _seen.add(id(md))
+            fds = getattr(md, '__dataclass_fields__', None)
+            if fds is not None:
+                for fn in fds:
+                    v = getattr(md, fn, None)
+                    if isinstance(v, torch.Tensor):
+                        setattr(md, fn, v.clone())
+                    else:
+                        _clone(v)
+            elif isinstance(md, dict):
+                for v in md.values():
+                    _clone(v)
+            elif isinstance(md, list):
+                for v in md:
+                    _clone(v)
+        _clone(attn_metadata)
+
+        ctx = VppBatchContext(
+            batch_id=scheduler_output.batch_id,
+            scheduler_output=scheduler_output,
+            num_scheduled_tokens=num_scheduled_tokens,
+            num_scheduled_tokens_np=num_scheduled_tokens_np,
+            max_num_scheduled_tokens=max_num_scheduled_tokens,
+            num_tokens_unpadded=num_tokens_unpadded,
+            num_tokens_padded=num_tokens_padded,
+            num_reqs=num_reqs,
+            num_reqs_padded=num_reqs_padded,
+            logits_indices=logits_indices,
+            spec_decode_metadata=spec_decode_metadata,
+            spec_decode_common_attn_metadata=spec_decode_common_attn_metadata,
+            attn_metadata=attn_metadata,
+            batch_desc=batch_desc,
+            cudagraph_mode=cudagraph_mode,
+            num_tokens_across_dp=num_tokens_across_dp,
+            input_ids=input_ids,
+            inputs_embeds=inputs_embeds,
+            positions=positions,
+            model_kwargs=model_kwargs,
+            ec_connector_output=ec_connector_output,
+            cudagraph_stats=cudagraph_stats,
+            has_encoder_input=has_encoder_input,
+            vp_size=self._get_vpp_size(),
+            input_batch_snapshot=self.input_batch.clone_for_vpp_sampling(),
+            num_prompt_logprobs_snapshot=self.num_prompt_logprobs.copy(),
+            query_start_loc_cpu_snapshot=self.query_start_loc.cpu[: num_reqs_padded + 1].clone(),
+            discard_request_indices_cpu_snapshot=self.discard_request_indices.cpu[
+                : self.num_discarded_requests
+            ].clone(),
+            num_discarded_requests_snapshot=self.num_discarded_requests,
+        )
+        return ctx, intermediate_tensors
+
+    def _run_vpp_stage(
+        self,
+        ctx: VppBatchContext,
+        intermediate_tensors: IntermediateTensors | None,
+    ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors | VppContinuationOutput | None:
+        from vllm_ascend.distributed.vpp_utils import (
+            get_vpp_comm_info,
+            is_vpp_fold_point,
+            is_vpp_last_stage,
+        )
+
+        pp_rank = get_pp_group().rank_in_group
+        pp_size = get_pp_group().world_size
+        all_gather_group = get_tp_group() if not enable_sp() else None
+        aggregated_kv_connector_output = None
+        continued_across_fold_point = False
+
+        while ctx.next_vp_stage < ctx.vp_size:
+            vp_stage = ctx.next_vp_stage
+            set_virtual_pipeline_parallel_rank(vp_stage)
+
+            comm = get_vpp_comm_info(pp_rank, pp_size, vp_stage, ctx.vp_size)
+
+            if comm.need_recv:
+                # Check if the sender is a fold-point rank that sent via
+                # CPU Gloo (to avoid HCCL stream deadlock).
+                fold_recv = (
+                    vp_stage > 0
+                    and is_vpp_fold_point(
+                        comm.recv_src, pp_size, vp_stage - 1, ctx.vp_size
+                    )
+                )
+                if fold_recv:
+                    intermediate_tensors = IntermediateTensors(
+                        self._vpp_pp_group_next.recv_tensor_dict(
+                            src=comm.recv_src,
+                            all_gather_group=all_gather_group,
+                        )
+                    )
+                else:
+                    intermediate_tensors = IntermediateTensors(
+                        self._vpp_pp_group_prev.recv_tensor_dict(
+                            src=comm.recv_src,
+                            all_gather_group=all_gather_group,
+                        )
+                    )
+                intermediate_tensors = self.sync_and_slice_intermediate_tensors(
+                    ctx.num_tokens_padded, intermediate_tensors, True
+                )
+            elif vp_stage > 0:
+                intermediate_tensors = ctx.carry_intermediate_tensors
+
+            with (
+                record_function_or_nullcontext("forward"),
+                set_ascend_forward_context(
+                    ctx.attn_metadata,
+                    self.vllm_config,
+                    num_tokens=ctx.num_tokens_padded,
+                    num_tokens_across_dp=ctx.num_tokens_across_dp,
+                    aclgraph_runtime_mode=ctx.cudagraph_mode,
+                    batch_descriptor=ctx.batch_desc,
+                    num_actual_tokens=ctx.scheduler_output.total_num_scheduled_tokens,
+                    model_instance=self.model,
+                    max_tokens_across_pcp=0
+                    if self.pcp_size == 1
+                    else self.pcp_manager.max_num_tokens_across_pcp,
+                    skip_compiled=ctx.has_encoder_input,
+                ),
+                self.maybe_get_kv_connector_output(
+                    ctx.scheduler_output
+                ) as kv_connector_output,
+            ):
+                hidden_states = self._model_forward(
+                    ctx.num_tokens_padded,
+                    ctx.input_ids,
+                    ctx.positions,
+                    intermediate_tensors,
+                    ctx.inputs_embeds,
+                    **ctx.model_kwargs,
+                )
+
+            aggregated_kv_connector_output = self._merge_vpp_kv_connector_output(
+                aggregated_kv_connector_output,
+                kv_connector_output,
+            )
+            is_last = is_vpp_last_stage(
+                pp_rank, pp_size, vp_stage, ctx.vp_size
+            )
+            ctx.next_vp_stage += 1
+
+            if is_last:
+                self._vpp_contexts.pop(ctx.batch_id, None)
+                return self._postprocess_after_forward(
+                    ctx, hidden_states, aggregated_kv_connector_output
+                )
+
+            assert isinstance(hidden_states, IntermediateTensors)
+            if comm.need_send:
+                if continued_across_fold_point:
+                    # Fold-point send: route through CPU Gloo backend to
+                    # avoid HCCL stream deadlock.  HCCL serialises ops
+                    # within a process-group, so a fold-point isend whose
+                    # matching recv is in a later RPC call blocks all
+                    # subsequent HCCL recv ops for other batches.  Gloo
+                    # uses TCP buffering and does not have this issue.
+                    self._vpp_pp_group_next.send_tensor_dict(
+                        hidden_states.tensors,
+                        dst=comm.send_dst,
+                        all_gather_group=all_gather_group,
+                        is_async=True,
+                    )
+                else:
+                    self._vpp_pp_group_prev.send_tensor_dict(
+                        hidden_states.tensors,
+                        dst=comm.send_dst,
+                        all_gather_group=all_gather_group,
+                        is_async=True,
+                    )
+                ctx.carry_intermediate_tensors = None
+            else:
+                ctx.carry_intermediate_tensors = hidden_states
+
+            if (
+                ctx.vp_size % 2 == 0
+                and is_vpp_fold_point(pp_rank, pp_size, vp_stage, ctx.vp_size)
+            ):
+                # Keep fold-point stages back-to-back on the same rank so core
+                # only yields at real cross-rank boundaries.
+                continued_across_fold_point = True
+                intermediate_tensors = ctx.carry_intermediate_tensors
+                continue
+
+            if ctx.vp_size % 2 == 0 and ctx.next_vp_stage >= ctx.vp_size:
+                if continued_across_fold_point:
+                    ctx.pending_noop_cleanup = True
+                else:
+                    self._vpp_contexts.pop(ctx.batch_id, None)
+                return self._make_vpp_empty_output(
+                    aggregated_kv_connector_output
+                )
+
+            return VppContinuationOutput(
+                next_vp_stage=ctx.next_vp_stage,
+                kv_connector_output=aggregated_kv_connector_output,
+            )
+
+        self._vpp_contexts.pop(ctx.batch_id, None)
+        return self._make_vpp_empty_output(aggregated_kv_connector_output)
+
+    def _postprocess_after_forward(
+        self,
+        ctx: VppBatchContext,
+        hidden_states: torch.Tensor,
+        kv_connector_output: "KVConnectorOutput | None",
+    ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
+        aux_hidden_states = None
+        if self.use_aux_hidden_state_outputs:
+            hidden_states, aux_hidden_states = hidden_states
+        if self.pcp_size > 1:
+            hidden_states = self.pcp_manager.get_restore_hidden_states(
+                hidden_states)
+            if aux_hidden_states is not None:
+                aux_hidden_states = [
+                    self.pcp_manager.get_restore_hidden_states(
+                        aux_hidden_states_pcp)
+                    for aux_hidden_states_pcp in aux_hidden_states
+                ]
+        if not self.broadcast_pp_output:
+            # `hidden_states` here is always a regular `torch.Tensor`:
+            # this function is only called from `_run_vpp_stage` when
+            # `is_vpp_last_stage(...)` is True, and the last stage's
+            # `_model_forward` returns a tensor. `IntermediateTensors` /
+            # `VppContinuationOutput` are handled earlier in `_run_vpp_stage`
+            # before we ever reach this point.
+            if self.is_pooling_model:
+                output = self._pool(
+                    hidden_states,
+                    ctx.num_scheduled_tokens,
+                    ctx.num_scheduled_tokens_np,
+                    kv_connector_output,
+                )
+                output.kv_connector_output = kv_connector_output
+                if self.debugger is not None:
+                    self.debugger.stop()
+                    self.debugger.step()
+                return output
+            sample_hidden_states = hidden_states[ctx.logits_indices]
+            logits = self.model.compute_logits(sample_hidden_states)
+        else:
+            assert not self.is_pooling_model
+            # `hidden_states` is always a regular `torch.Tensor` here
+            # (see comment in the non-broadcast branch above). The legacy
+            # IntermediateTensors send path was dead under vllm-ascend's
+            # in-runner P2P implementation.
+            sample_hidden_states = hidden_states[ctx.logits_indices]
+            logits = self.model.compute_logits(sample_hidden_states)
+
+            model_output_broadcast_data: dict[str, Any] = {}
+            if logits is not None:
+                model_output_broadcast_data["logits"] = logits.contiguous()
+            broadcasted = get_pp_group().broadcast_tensor_dict(
+                model_output_broadcast_data,
+                # VPP fold-back moves the last virtual stage off the
+                # canonical last PP rank.
+                src=(0 if self._get_vpp_size() > 1
+                     and self._get_vpp_size() % 2 == 0
+                     else len(get_pp_group().ranks) - 1),
+            )
+            assert broadcasted is not None
+            logits = broadcasted["logits"]
+        self._pending_vpp_sample_states.append(
+            VppPendingSampleState(
+                execute_model_state=ExecuteModelState(
+                    ctx.scheduler_output,
+                    logits,
+                    ctx.spec_decode_metadata,
+                    ctx.spec_decode_common_attn_metadata,
+                    hidden_states,
+                    sample_hidden_states,
+                    aux_hidden_states,
+                    ctx.attn_metadata,
+                    ctx.positions,
+                    ctx.ec_connector_output,
+                    ctx.cudagraph_stats,
+                    ctx.batch_desc,
+                ),
+                kv_connector_output=kv_connector_output,
+                input_batch=ctx.input_batch_snapshot,
+                num_prompt_logprobs=ctx.num_prompt_logprobs_snapshot,
+                query_start_loc_cpu=ctx.query_start_loc_cpu_snapshot,
+                discard_request_indices_cpu=ctx.discard_request_indices_cpu_snapshot,
+                num_discarded_requests=ctx.num_discarded_requests_snapshot,
+            )
+        )
+        return None
+
+    @contextmanager
+    def _use_vpp_pending_sample_state(self, pending_state: VppPendingSampleState):
+        prev_input_batch = self.input_batch
+        prev_num_prompt_logprobs = self.num_prompt_logprobs
+        prev_num_discarded_requests = self.num_discarded_requests
+        prev_query_start_loc = self.query_start_loc.cpu[: pending_state.query_start_loc_cpu.shape[0]].clone()
+        prev_discard_request_indices = self.discard_request_indices.cpu[: prev_num_discarded_requests].clone()
+
+        self.input_batch = pending_state.input_batch
+        self.num_prompt_logprobs = pending_state.num_prompt_logprobs.copy()
+        self.query_start_loc.cpu[: pending_state.query_start_loc_cpu.shape[0]].copy_(pending_state.query_start_loc_cpu)
+        self.query_start_loc.copy_to_gpu(pending_state.query_start_loc_cpu.shape[0])
+        self.num_discarded_requests = pending_state.num_discarded_requests
+        if pending_state.num_discarded_requests > 0:
+            self.discard_request_indices.cpu[: pending_state.num_discarded_requests].copy_(
+                pending_state.discard_request_indices_cpu
+            )
+            self.discard_request_indices.copy_to_gpu(pending_state.num_discarded_requests)
+        try:
+            yield
+        finally:
+            self.input_batch = prev_input_batch
+            self.num_prompt_logprobs = prev_num_prompt_logprobs
+            self.query_start_loc.cpu[: prev_query_start_loc.shape[0]].copy_(prev_query_start_loc)
+            self.query_start_loc.copy_to_gpu(prev_query_start_loc.shape[0])
+            self.num_discarded_requests = prev_num_discarded_requests
+            if prev_num_discarded_requests > 0:
+                self.discard_request_indices.cpu[: prev_num_discarded_requests].copy_(prev_discard_request_indices)
+                self.discard_request_indices.copy_to_gpu(prev_num_discarded_requests)
+            # Release the snapshot back to the pool for reuse.
+            pending_state.input_batch.release_to_pool()
+
     @torch.inference_mode()
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors:
-        kv_connector_output = self.kv_connector_output
-        self.kv_connector_output = None
-        pp = get_pp_group()
-        use_pp_spec_decode = self.speculative_config is not None and pp.world_size > 1
+        pending_vpp_state = None
+        execute_model_state = self.execute_model_state
+        use_pp_spec_decode = False
+        if self._pending_vpp_sample_states:
+            pending_vpp_state = self._pending_vpp_sample_states.popleft()
+            kv_connector_output = pending_vpp_state.kv_connector_output
+            execute_model_state = pending_vpp_state.execute_model_state
+        else:
+            kv_connector_output = self.kv_connector_output
+            self.kv_connector_output = None
+            pp = get_pp_group()
+            use_pp_spec_decode = self.speculative_config is not None and pp.world_size > 1
 
-        if self.execute_model_state is None:
+        if execute_model_state is None:
             # Nothing to do (PP non-final rank case), output isn't used.
             if not kv_connector_output:
                 return None  # noqa
@@ -2533,61 +3269,84 @@ class NPUModelRunner(GPUModelRunner):
             output.kv_connector_output = kv_connector_output
             return output
 
-        # Unpack ephemeral state.
-        (
-            scheduler_output,
-            logits,
-            spec_decode_metadata,
-            spec_decode_common_attn_metadata,
-            hidden_states,
-            sample_hidden_states,
-            aux_hidden_states,
-            attn_metadata,
-            positions,
-            ec_connector_output,
-            cudagraph_stats,
-            batch_desc,
-        ) = self.execute_model_state
-        # Clear ephemeral state.
-        self.execute_model_state = None
-
-        # Apply structured output bitmasks if present.
-        if grammar_output is not None:
-            # here we are different from gpu_model_runner,
-            # the apply_grammar_bitmask uses torch.compile to optimize this,ascend does not support it now
-            logits_dtype = logits.dtype
-            logits = logits.to("cpu").float()
-            apply_grammar_bitmask(scheduler_output, grammar_output, self.input_batch, logits)
-            logits = logits.to(self.device).to(logits_dtype)
-
-        with record_function_or_nullcontext("sample_token"):
-            sampler_output = self._sample(logits, spec_decode_metadata)
-
-        if self.need_accepted_tokens:
-            if self.sampling_done_event is None:
-                self.sampling_done_event = torch.npu.Event()
-
-            assert self.sampling_done_event is not None
-            self.sampling_done_event.record()
-
-        self.valid_sampled_token_count_gpu: torch.Tensor | None = None # type: ignore[no-redef]
-
-        def propose_draft_token_ids(sampled_token_ids):
-            assert spec_decode_common_attn_metadata is not None
-            self._draft_token_ids = self.propose_draft_token_ids(
-                sampled_token_ids,
-                self.input_batch.sampling_metadata,
+        sample_context = (
+            self._use_vpp_pending_sample_state(pending_vpp_state)
+            if pending_vpp_state is not None
+            else nullcontext()
+        )
+        with sample_context:
+            # Unpack ephemeral state.
+            (
                 scheduler_output,
+                logits,
                 spec_decode_metadata,
                 spec_decode_common_attn_metadata,
-                positions,
-                scheduler_output.total_num_scheduled_tokens,
                 hidden_states,
-                aux_hidden_states,
                 sample_hidden_states,
+                aux_hidden_states,
+                attn_metadata,
+                positions,
+                ec_connector_output,
+                cudagraph_stats,
                 batch_desc,
+            ) = execute_model_state
+            # Clear ephemeral state.
+            if pending_vpp_state is None:
+                self.execute_model_state = None
+
+            # Apply structured output bitmasks if present.
+            if grammar_output is not None:
+                # here we are different from gpu_model_runner,
+                # the apply_grammar_bitmask uses torch.compile to optimize this,ascend does not support it now
+                logits_dtype = logits.dtype
+                logits = logits.to("cpu").float()
+                apply_grammar_bitmask(scheduler_output, grammar_output, self.input_batch, logits)
+                logits = logits.to(self.device).to(logits_dtype)
+
+            with record_function_or_nullcontext("sample_token"):
+                sampler_output = self._sample(logits, spec_decode_metadata)
+
+            if self.need_accepted_tokens:
+                if self.sampling_done_event is None:
+                    self.sampling_done_event = torch.npu.Event()
+
+                assert self.sampling_done_event is not None
+                self.sampling_done_event.record()
+
+            self.valid_sampled_token_count_gpu: torch.Tensor | None = None # type: ignore[no-redef]
+
+            def propose_draft_token_ids(sampled_token_ids):
+                assert spec_decode_common_attn_metadata is not None
+                self._draft_token_ids = self.propose_draft_token_ids(
+                    sampled_token_ids,
+                    self.input_batch.sampling_metadata,
+                    scheduler_output,
+                    spec_decode_metadata,
+                    spec_decode_common_attn_metadata,
+                    positions,
+                    scheduler_output.total_num_scheduled_tokens,
+                    hidden_states,
+                    aux_hidden_states,
+                    sample_hidden_states,
+                    batch_desc,
+                )
+                self._copy_draft_token_ids_to_cpu(scheduler_output)
+
+            (
+                logprobs_lists,
+                valid_sampled_token_ids,
+                prompt_logprobs_dict,
+                req_ids_output_copy,
+                req_id_to_index_output_copy,
+                invalid_req_indices,
+            ) = self._bookkeeping_sync(
+                scheduler_output,
+                sampler_output,
+                logits,
+                hidden_states,
+                scheduler_output.total_num_scheduled_tokens,
+                spec_decode_metadata,
             )
-            self._copy_draft_token_ids_to_cpu(scheduler_output)
 
         output_spec_token_ids = None
         use_padded_batch = False
@@ -2610,22 +3369,6 @@ class NPUModelRunner(GPUModelRunner):
                 with record_function_or_nullcontext("draft_token"):
                     propose_draft_token_ids(sampler_output.sampled_token_ids)
 
-        (
-            logprobs_lists,
-            valid_sampled_token_ids,
-            prompt_logprobs_dict,
-            req_ids_output_copy,
-            req_id_to_index_output_copy,
-            invalid_req_indices,
-        ) = self._bookkeeping_sync(
-            scheduler_output,
-            sampler_output,
-            logits,
-            hidden_states,
-            scheduler_output.total_num_scheduled_tokens,
-            spec_decode_metadata,
-        )
-
         with record_function_or_nullcontext("draft_token"):
             if self.speculative_config:
                 if not early_pp_padded_drafter:
@@ -2640,11 +3383,11 @@ class NPUModelRunner(GPUModelRunner):
                     # tokens on the CPU, so they are run after bookkeeping.
                     propose_draft_token_ids(valid_sampled_token_ids)
 
-            # vLLM v0.18 defers KV connector finalization during target-model
-            # forward when speculative decoding is enabled. Finalize here after
-            # draft model runs so KV pool save/put can complete.
-            if self.speculative_config is not None:
-                self.finalize_kv_connector()
+                # vLLM v0.18 defers KV connector finalization during target-model
+                # forward when speculative decoding is enabled. Finalize here after
+                # draft model runs so KV pool save/put can complete.
+                if self.speculative_config is not None:
+                    self.finalize_kv_connector()
 
             draft_token_ids = self._draft_token_ids if use_pp_spec_decode else None
             if draft_token_ids is not None:
@@ -2682,16 +3425,16 @@ class NPUModelRunner(GPUModelRunner):
         if self.dynamic_eplb:
             self.eplb_updator.forward_end(self.eplb_heat_collection_status)
 
-        self._finalize_dump_data()
+            self._finalize_dump_data()
 
-        if self.need_accepted_tokens:
-            assert self.sampling_done_event is not None
-            with (
-                record_function_or_nullcontext("async_state_update"),
-                torch.npu.stream(global_stream()),
-            ):
-                global_stream().wait_event(self.sampling_done_event)
-                self._update_states_after_model_execute(sampler_output.sampled_token_ids, scheduler_output)
+            if self.need_accepted_tokens:
+                assert self.sampling_done_event is not None
+                with (
+                    record_function_or_nullcontext("async_state_update"),
+                    torch.npu.stream(global_stream()),
+                ):
+                    global_stream().wait_event(self.sampling_done_event)
+                    self._update_states_after_model_execute(sampler_output.sampled_token_ids, scheduler_output)
 
         if not self.use_async_scheduling:
             if self.routed_experts_initialized:
@@ -2986,6 +3729,15 @@ class NPUModelRunner(GPUModelRunner):
             "inputs_embeds": inputs_embeds,
             **model_kwargs,
         }
+
+        # Virtual Pipeline Parallism: fix the start_layer and end_layer for 
+        # inner_model to the current virtual stage's slice.
+        if self._get_vpp_size() > 1:
+            inner_model = self.model.model
+            vpp_ranges = getattr(inner_model.layers, "vpp_layer_ranges", None)
+            if vpp_ranges is not None:
+                inner_model.start_layer, inner_model.end_layer = vpp_ranges[get_virtual_pipeline_parallel_rank()]
+
         run_model = partial(self.model, **model_inputs)
 
         if self.enable_enpu:
@@ -3003,6 +3755,7 @@ class NPUModelRunner(GPUModelRunner):
         if forward_context.flash_comm_v1_enabled and not isinstance(hidden_states, IntermediateTensors):
             hidden_states = self._all_gather_hidden_states_and_aux(hidden_states)
         return hidden_states
+
 
     def _pad_for_sequence_parallelism(self, num_scheduled_tokens: int) -> int:
         # Pad tokens to multiple of tensor_parallel_size when
@@ -3054,6 +3807,8 @@ class NPUModelRunner(GPUModelRunner):
         intermediate_tensors: IntermediateTensors | None,
         sync_self: bool,
     ) -> IntermediateTensors:
+        if self._get_vpp_size() > 1:
+            return None
         # vllm renamed sync_and_slice to sync_and_gather.
         # The Ascend override logic is identical: skip the upstream all_gather
         # (flashcomm1 does not scatter residual before PP send).
@@ -3514,6 +4269,11 @@ class NPUModelRunner(GPUModelRunner):
         profile_seq_lens: int | None = None,
         profile_cpp: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self._get_vpp_size() > 1:
+            # Dummy runs execute a single synthetic forward and must start from
+            # the first virtual stage instead of reusing the previous request's
+            # VPP stage.
+            set_virtual_pipeline_parallel_rank(0)
         # only support eager mode and piecewise graph now
         assert cudagraph_runtime_mode is None or cudagraph_runtime_mode.valid_runtime_modes()
         # If cudagraph_mode.decode_mode() == FULL and
@@ -3705,6 +4465,22 @@ class NPUModelRunner(GPUModelRunner):
 
             if get_pp_group().is_first_rank:
                 intermediate_tensors = None
+                # In VPP mode, rank 0 also processes non-first virtual stages
+                # that require intermediate_tensors during actual inference.
+                # Pre-allocate the buffer here so it is ready when needed.
+                if self.intermediate_tensors is None:
+                    if get_virtual_pipeline_parallel_size() > 1:
+                        max_actual_tokens = self.max_num_tokens
+                        if enable_sp():
+                            tp_size = get_tensor_model_parallel_world_size()
+                            max_actual_tokens = (self.max_num_tokens + tp_size - 1) // tp_size
+                        self.intermediate_tensors = (
+                            self.model.make_empty_intermediate_tensors(
+                                batch_size=max_actual_tokens,
+                                dtype=self.dtype,
+                                device=self.device,
+                            )
+                        )
             else:
                 # When PP and flashcomm1 are enabled, during dummy_run the estimated space should divide num_tokens by
                 # tp_size; otherwise, on non-first PP ranks it would effectively perform an extra all-gather, leading
@@ -3789,6 +4565,8 @@ class NPUModelRunner(GPUModelRunner):
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
+        if isinstance(hidden_states, IntermediateTensors):
+            return None
         output = None
 
         # For profile, have maximum num_reqs and that collectively have
