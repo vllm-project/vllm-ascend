@@ -46,6 +46,15 @@ X_APIG_APPCODE="${X_APIG_APPCODE:-}"
 APP_KEY="${APP_KEY:-}"
 APP_SECRET="${APP_SECRET:-}"
 
+miss=()
+[[ -z "${X_APIG_APPCODE}" ]] && miss+=("X_APIG_APPCODE")
+[[ -z "${APP_KEY}" ]] && miss+=("APP_KEY")
+[[ -z "${APP_SECRET}" ]] && miss+=("APP_SECRET")
+if [[ ${#miss[@]} -gt 0 ]]; then
+    echo "FATAL ERROR: Missing auth env vars: ${miss[*]}"
+    exit 98
+fi
+
 # Api1 save mr with retry
 MAX_RETRY=3
 retry_cnt=0
