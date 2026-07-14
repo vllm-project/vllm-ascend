@@ -42,7 +42,6 @@ deployment:
       --tensor-parallel-size 8
       --enable-expert-parallel
       --seed 1024
-      --served-model-name dsv4
       --max-model-len 80000
       --max-num-batched-tokens 8192
       --max-num-seqs 16
@@ -94,7 +93,6 @@ deployment:
       --tensor-parallel-size 8
       --enable-expert-parallel
       --seed 1024
-      --served-model-name dsv4
       --max-model-len 80000
       --max-num-batched-tokens 64
       --max-num-seqs 32
