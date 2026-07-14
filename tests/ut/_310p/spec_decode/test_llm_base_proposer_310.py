@@ -27,7 +27,7 @@ class TestAscendSpecDecodeBaseProposer310(TestBase):
 
     def test_run_merged_draft_sets_rope_flag_before_call(self):
         flag_states = []
-        
+
         def mock_original(
             self,
             num_input_tokens,
