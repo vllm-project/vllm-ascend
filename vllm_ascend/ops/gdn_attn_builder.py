@@ -705,22 +705,28 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             and num_spec_decodes == 0
             and num_decodes <= self.decode_cudagraph_max_bs
         ):
-            self.non_spec_state_indices_tensor[batch_size:].fill_(NULL_BLOCK_ID)
-            self.non_spec_state_indices_tensor[:num_decodes].copy_(
-                non_spec_state_indices_tensor,
+            # ``num_decodes`` includes CUDA-graph padding requests, while
+            # ``batch_size`` is the number of real one-token decode requests.
+            # Do not copy padded block-table rows into the graph input buffer:
+            # under PCP those rows are intentionally left uninitialized and
+            # can contain a valid state slot from a previous batch.
+            graph_batch_size = m.num_reqs
+            actual_num_decodes = min(batch_size, num_decodes)
+            self.non_spec_state_indices_tensor[actual_num_decodes:].fill_(NULL_BLOCK_ID)
+            self.non_spec_state_indices_tensor[:actual_num_decodes].copy_(
+                non_spec_state_indices_tensor[:actual_num_decodes],
                 non_blocking=True,
             )
-            non_spec_state_indices_tensor = self.non_spec_state_indices_tensor[:batch_size]
-            non_spec_state_indices_tensor[num_decodes:].fill_(NULL_BLOCK_ID)
+            non_spec_state_indices_tensor = self.non_spec_state_indices_tensor[:graph_batch_size]
             non_spec_conv1d_cache_indices = non_spec_state_indices_tensor
 
-            self.non_spec_query_start_loc[: num_decodes + 1].copy_(
-                non_spec_query_start_loc,
+            self.non_spec_query_start_loc[: actual_num_decodes + 1].copy_(
+                non_spec_query_start_loc[: actual_num_decodes + 1],
                 non_blocking=True,
             )
-            non_spec_num_query_tokens = non_spec_query_start_loc[-1]
-            non_spec_query_start_loc = self.non_spec_query_start_loc[: batch_size + 1]
-            non_spec_query_start_loc[num_decodes + 1 :].fill_(non_spec_num_query_tokens)
+            non_spec_num_query_tokens = non_spec_query_start_loc[actual_num_decodes]
+            non_spec_query_start_loc = self.non_spec_query_start_loc[: graph_batch_size + 1]
+            non_spec_query_start_loc[actual_num_decodes + 1 :].fill_(non_spec_num_query_tokens)
 
         attn_metadata = GDNAttentionMetadata(
             num_prefills=num_prefills,

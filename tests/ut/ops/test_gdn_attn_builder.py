@@ -573,10 +573,10 @@ def test_full_graph_spec_actual_seq_lengths_use_padded_builder_buffer():
     )
 
 
-def test_full_graph_non_spec_actual_seq_lengths_use_padded_builder_buffer():
+def test_full_graph_non_spec_metadata_nulls_padded_state_indices():
     batch_spec = BatchSpec(
-        seq_lens=[1, 1],
-        query_lens=[1, 1],
+        seq_lens=[1, 1, 0, 0],
+        query_lens=[1, 1, 0, 0],
         name="full_graph_padded_non_spec_actual_seq_lengths",
     )
     common_attn_metadata = create_common_attn_metadata(
@@ -584,7 +584,9 @@ def test_full_graph_non_spec_actual_seq_lengths_use_padded_builder_buffer():
         block_size=16,
         device=torch.device("cpu"),
     )
-    common_attn_metadata.num_actual_tokens = 4
+    # PCP leaves padded block-table rows untouched. Model the stale valid
+    # state slots that can remain there after the preceding decode batch.
+    common_attn_metadata.block_table_tensor[:, 0] = torch.tensor([10, 11, 98, 99])
     builder = _make_builder(
         device=torch.device("cpu"),
         num_heads=32,
@@ -597,6 +599,10 @@ def test_full_graph_non_spec_actual_seq_lengths_use_padded_builder_buffer():
     assert torch.equal(
         attn_metadata.non_spec_query_start_loc,
         torch.tensor([0, 1, 2, 2, 2], dtype=torch.int32),
+    )
+    assert torch.equal(
+        attn_metadata.non_spec_state_indices_tensor,
+        torch.tensor([10, 11, 0, 0], dtype=torch.int32),
     )
     assert (
         attn_metadata.non_spec_decode_metadata.actual_seq_lengths.data_ptr()
