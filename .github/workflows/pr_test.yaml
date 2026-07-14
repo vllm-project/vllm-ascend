@@ -223,17 +223,14 @@ jobs:
       test_groups: ${{ needs.lint-and-select-tests.outputs.test_groups }}
 
   generate-hitest:
-    name: Generate hitest recommendations
-    needs: lint-and-select-tests
-    uses: ./.github/workflows/manual-hitest.yaml
-    with:
-      X_APIG_APPCODE: ${{ secrets.X_APIG_APPCODE }}
-      APP_KEY: ${{ secrets.APP_KEY }}
-      APP_SECRET: ${{ secrets.APP_SECRET }}
-    secrets:
-      X_APIG_APPCODE: ${{ secrets.X_APIG_APPCODE }}
-      APP_KEY: ${{ secrets.APP_KEY }}
-      APP_SECRET: ${{ secrets.APP_SECRET }}
+      name: Generate hitest recommendations
+      needs: lint-and-select-tests
+      uses: ./.github/workflows/manual-hitest.yaml
+      with: {}
+      secrets:
+        X_APIG_APPCODE: ${{ secrets.X_APIG_APPCODE }}
+        APP_KEY: ${{ secrets.APP_KEY }}
+        APP_SECRET: ${{ secrets.APP_SECRET }}
 
   # Summary gate job — use this single, stable name as the required status check
   # in GitHub branch protection rules instead of tracking individual matrix job names.
