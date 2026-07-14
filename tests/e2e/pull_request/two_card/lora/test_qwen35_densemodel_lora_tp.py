@@ -97,7 +97,6 @@ def test_qwen35_text_lora(qwen35_text_lora_files, tensor_parallel_size, enforce_
         fully_sharded_loras=fully_sharded_loras,
         tensor_parallel_size=tensor_parallel_size,
     ) as vllm_runner:
-
         _assert_qwen35_text_lora(
             vllm_runner.model,
             qwen35_text_lora_files,
