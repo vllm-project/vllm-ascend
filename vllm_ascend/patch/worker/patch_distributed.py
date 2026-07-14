@@ -38,7 +38,7 @@ def _normalize_backend(backend: str | Backend) -> str:
 
 def _resolve_reuse_domain(group_name: str) -> str:
     group_base_name = group_name.split(":")[0]
-    if "eplb" in group_base_name or group_base_name == "mc2":
+    if "eplb" in group_base_name or group_base_name in ("mc2", "ccu_sched"):
         return group_base_name
     return "shared"
 

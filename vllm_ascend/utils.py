@@ -67,6 +67,7 @@ _ASCEND_CUSTOMOP_IS_REIGISTERED = False
 _DEFAULT_BUFFER_SIZE = 200
 _MIN_DP_BUFFER_SIZE = 50
 _DYNAMIC_EPLB_BUFFER_SIZE = 100
+_HCCL_OP_EXPANSION_MODE_CCU_SCHED = 6
 _IS_MOE_MODEL = None
 _IS_DRAFTER_MOE_MODEL = None
 _IS_VL_MODEL = None
@@ -78,7 +79,6 @@ _CUSTOM_OP_VENDOR_DIR = "custom_transformer"
 _CUSTOM_OP_BASE_DIR = (
     os.path.dirname(__file__) if os.path.isabs(__file__) else os.path.abspath(os.path.dirname(__file__))
 )
-
 
 def extract_dsv4_layer_index(config: Any, layer_name: str) -> int:
     """Extract DSV4 index for config per-layer arrays.
@@ -1116,6 +1116,7 @@ def get_hccl_config_for_pg_options(group_name: str) -> dict | None:
     hccl_config_map = {
         "dp": {"hccl_buffer_size": calculate_dp_buffer_size()},
         "dynamic_eplb": {"hccl_buffer_size": _DYNAMIC_EPLB_BUFFER_SIZE},
+        "ccu_sched": {"hccl_op_expansion_mode": _HCCL_OP_EXPANSION_MODE_CCU_SCHED},
     }
     return hccl_config_map.get(group_name, get_default_buffer_config())
 
