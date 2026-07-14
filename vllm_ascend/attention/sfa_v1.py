@@ -613,7 +613,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.use_sparse_c8_sfa = self.use_sparse_c8_indexer or (
             ascend_config.enable_sparse_c8 and not self.has_indexer and self.skip_topk
         )
-        if self.use_sparse_c8_sfa or self.use_sparse_c8_indexer:
+        if self.use_sparse_c8_sfa:
             if get_ascend_device_type() == AscendDeviceType.A5:
                 self.c8_k_cache_dtype = torch.float8_e4m3fn
                 self.c8_k_scale_cache_dtype = torch.float32
