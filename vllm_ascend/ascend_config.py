@@ -204,6 +204,45 @@ class AscendConfig:
             ascend_envs.VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK,
         )
 
+        # Virtual Pipeline Parallelism (VPP)
+        self.virtual_pipeline_parallel_size: int = additional_config.get(
+            "virtual_pipeline_parallel_size", 1)
+        vp_size = self.virtual_pipeline_parallel_size
+        pp_size = vllm_config.parallel_config.pipeline_parallel_size
+        self.vpp_layer_ranges: list[list[tuple[int, int]]] | None = None
+        if vp_size > 1:
+            if pp_size <= 1:
+                raise ValueError(
+                    "virtual_pipeline_parallel_size > 1 requires "
+                    "pipeline_parallel_size > 1.")
+            num_layers = vllm_config.model_config.hf_text_config.num_hidden_layers
+            raw_ranges = additional_config.get("vpp_layer_ranges", None)
+            if raw_ranges is not None:
+                from vllm_ascend.distributed.vpp_utils import validate_vpp_layer_ranges
+                self.vpp_layer_ranges = validate_vpp_layer_ranges(
+                    raw_ranges, num_layers, pp_size, vp_size)
+                logger.info(
+                    "VPP enabled with manual layer ranges: vp_size=%d, "
+                    "pp_size=%d, num_layers=%d, ranges=%s",
+                    vp_size, pp_size, num_layers, self.vpp_layer_ranges)
+            else:
+                total_chunks = pp_size * vp_size
+                base = num_layers // total_chunks
+                remainder = num_layers % total_chunks
+                if remainder > 0:
+                    logger.info(
+                        "VPP enabled (uneven): vp_size=%d, pp_size=%d, "
+                        "num_layers=%d, %d chunks get %d layers, "
+                        "%d chunks get %d layers",
+                        vp_size, pp_size, num_layers,
+                        remainder, base + 1,
+                        total_chunks - remainder, base)
+                else:
+                    logger.info(
+                        "VPP enabled: vp_size=%d, pp_size=%d, "
+                        "num_layers=%d, layers_per_chunk=%d",
+                        vp_size, pp_size, num_layers, base)
+
         self.pd_tp_ratio = 1
         self.pd_head_ratio = 1
         self.num_head_replica = 1

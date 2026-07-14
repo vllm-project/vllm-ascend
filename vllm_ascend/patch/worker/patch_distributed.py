@@ -15,21 +15,33 @@
 
 from __future__ import annotations
 
-import logging
+from collections import deque
+import pickle
 from functools import wraps
 from typing import Any, cast
 
 import torch
 import vllm
-from torch.distributed import Backend
-from vllm.distributed.parallel_state import GroupCoordinator, _get_unique_name, _register_group
+from torch import Tensor
+from torch.distributed import Backend, ProcessGroup, Work
+from vllm.distributed.parallel_state import (
+    GroupCoordinator,
+    _get_unique_name,
+    _register_group,
+    _split_tensor_dict,
+)
+from vllm.logger import logger
 
 from vllm_ascend.distributed.device_communicators.npu_communicator import NPUCommunicator
 from vllm_ascend.patch.worker._hccl_pg_registry import HcclPgKey, HcclPgRegistry, make_hccl_pg_key
 from vllm_ascend.utils import create_hccl_pg_options
+from vllm_ascend.distributed.parallel_state import (
+    get_virtual_pipeline_parallel_rank,
+    get_virtual_pipeline_parallel_size,
+    get_vpp_runtime_active,
+)
 
 _HCCL_PG_REGISTRY = HcclPgRegistry()
-logger = logging.getLogger(__name__)
 
 
 def _normalize_backend(backend: str | Backend) -> str:
@@ -107,10 +119,16 @@ class GroupCoordinatorPatch(GroupCoordinator):
         use_message_queue_broadcaster: bool = False,
         group_name: str | None = None,
     ):
+        # One entry per async send_tensor_dict call: (isend handles, retained
+        # source tensors). The tensor refs keep the source memory alive while
+        # the non-blocking sends are in flight, so it is neither freed nor
+        # overwritten before completion (cf. async-send data-corruption fix).
+        self._async_send_buff: deque[tuple[list[Work], list[Tensor]]] = deque()
         group_name = group_name or "anonymous"
         self.unique_name = _get_unique_name(group_name)
         _register_group(self)
 
+        self.group_ranks = group_ranks
         self.rank = torch.distributed.get_rank()
         self.local_rank = local_rank
         self.backend = _normalize_backend(torch_distributed_backend)
@@ -123,6 +141,12 @@ class GroupCoordinatorPatch(GroupCoordinator):
         self.device_group = None
         self.device = None
         self.use_custom_op_call = True
+
+        self.vpp_size = get_virtual_pipeline_parallel_size()
+        self.vpp_stage = get_virtual_pipeline_parallel_rank()
+
+        self.torch_distributed_backend = torch_distributed_backend
+        self.use_message_queue_broadcaster = use_message_queue_broadcaster
         self.use_cpu_custom_send_recv = False
         self.group_name = group_name
         self.group_ranks = group_ranks
@@ -263,6 +287,228 @@ class GroupCoordinatorPatch(GroupCoordinator):
         )
         assert self.device_communicator is not None, "device_communicator should be initialized when world_size > 1"
         return self.device_communicator.all_to_all(input_, scatter_dim, gather_dim, scatter_sizes, gather_sizes)
+
+    @property
+    def is_first_rank(self):
+        """Return whether the caller is the first process in the group.
+
+        Under VPP this is *phase-dependent*:
+
+        * Construction (``get_vpp_runtime_active()`` is False, i.e. before
+          the VPP schedule loop starts): return the **static** topology
+          answer -- the first virtual stage always starts at pp_rank 0 --
+          so model ``__init__`` places ``embed_tokens`` on the rank that
+          owns the first stage.
+        * Runtime (after the loop starts): return the **dynamic** answer
+          for the current virtual stage, used by ``forward`` to decide
+          whether to embed the input ids.
+        """
+        if get_virtual_pipeline_parallel_size() <= 1:
+            return self.rank == self.first_rank
+        if not get_vpp_runtime_active():
+            return self.rank_in_group == 0
+        return self.rank_in_group == 0 and get_virtual_pipeline_parallel_rank() == 0
+    
+    @property
+    def is_last_rank(self):
+        """Return whether the caller is the last process in the group.
+
+        Under VPP this is *phase-dependent*:
+
+        * Construction (``get_vpp_runtime_active()`` is False, i.e. before
+          the VPP schedule loop starts): return the **static** fold-back
+          topology answer -- which physical rank owns the very last
+          virtual stage -- so model ``__init__`` places ``norm`` /
+          ``lm_head`` on the correct rank. This is ``is_vpp_last_stage``
+          evaluated at ``vp_stage = vp_size - 1`` and does **not** depend
+          on the (still-zero) live virtual rank.
+        * Runtime (after the loop starts): return the **dynamic** answer
+          for the current virtual stage, used by ``forward`` to decide
+          whether to apply norm / emit logits.
+        """
+        vp_size = get_virtual_pipeline_parallel_size()
+        if vp_size <= 1:
+            return self.rank == self.last_rank
+        pp_rank = self.rank_in_group
+        pp_size = self.world_size
+        if not get_vpp_runtime_active():
+            return self.is_vpp_last_stage(
+                pp_rank=pp_rank, pp_size=pp_size,
+                vp_stage=vp_size - 1, vp_size=vp_size)
+        vp_stage = get_virtual_pipeline_parallel_rank()
+        return self.is_vpp_last_stage(
+            pp_rank=pp_rank, pp_size=pp_size,
+            vp_stage=vp_stage, vp_size=vp_size)
+    
+    def is_vpp_last_stage(
+        self,
+        pp_rank: int,
+        pp_size: int,
+        vp_stage: int,
+        vp_size: int,
+    ) -> bool:
+        """Whether this is the very last stage in the VPP pipeline.
+
+        For even vp_size the last sweep is backward, ending at rank 0.
+        For odd  vp_size the last sweep is forward,  ending at rank pp_size-1.
+        """
+        if vp_stage != vp_size - 1:
+            return False
+        if vp_size % 2 == 0:
+            return pp_rank == 0
+        else:
+            return pp_rank == pp_size - 1
+
+    def _release_completed_send_buff(self) -> None:
+        """Lazily drop async-send batches whose hccl sends have completed.
+
+        gloo ``Work.is_completed()`` is unreliable on this backend, so we gate
+        on the hccl handles only (``handles[2:]``, reliable) and ``wait()`` the
+        gloo metadata handles (``handles[:2]``) as a backstop before dropping.
+        The waited entry is old (its hccl already completed) so the wait is
+        ~instant and does NOT reintroduce the fold-point deadlock (that
+        deadlock comes from blocking on a *current* send; here we block on an
+        already-completed old one).
+        """
+        while self._async_send_buff:
+            handles = self._async_send_buff[0][0]
+            # handles[:2] = gloo metadata；handles[2:] = hccl tensor（is_completed 可靠）
+            hccl_handles = handles[2:]
+            if not hccl_handles or not all(
+                h.is_completed() for h in hccl_handles
+            ):
+                break   # 队首 hccl 尚未完成 → FIFO 后续更未完成，停止
+            popped = self._async_send_buff.popleft()
+            for h in popped[0][:2]:   # gloo metadata wait 兜底，确保已发出
+                h.wait()
+
+    def _wait_send_buff(self) -> None:
+        """Block until every in-flight async send has completed."""
+        while self._async_send_buff:
+            handles, _ = self._async_send_buff.popleft()
+            for handle in handles:
+                handle.wait()
+
+    def send_tensor_dict(
+        self,
+        tensor_dict: dict[str, Any],
+        dst: int | None = None,
+        all_gather_group: "GroupCoordinator | None" = None,
+        all_gather_tensors: dict[str, bool] | None = None,
+        is_async: bool = False,
+    ) -> dict[str, Any] | None:
+        """Send a tensor dict, optionally fully non-blocking (``is_async=True``).
+
+        ``isend_tensor_dict`` is overridden so the metadata is also posted with
+        ``isend`` (upstream sends it via a blocking ``send_object``). The VPP
+        stage schedule needs every point-to-point op non-blocking, otherwise a
+        fold-point send whose matching recv lives in a later iteration deadlocks
+        both ranks inside the metadata send.
+        """
+        if not is_async:
+            return super().send_tensor_dict(
+                tensor_dict,
+                dst=dst,
+                all_gather_group=all_gather_group,
+                all_gather_tensors=all_gather_tensors,
+            )
+        if not torch.distributed.is_initialized() or self.world_size == 1:
+            return tensor_dict
+        self.isend_tensor_dict(
+            tensor_dict,
+            dst=dst,
+            all_gather_group=all_gather_group,
+            all_gather_tensors=all_gather_tensors,
+        )
+        return None
+
+    def isend_tensor_dict(
+        self,
+        tensor_dict: dict[str, Any],
+        dst: int | None = None,
+        all_gather_group: "GroupCoordinator | None" = None,
+        all_gather_tensors: dict[str, bool] | None = None,
+    ) -> list:
+        """Non-blocking tensor-dict send: metadata and tensors both use isend.
+
+        Retains references to every source/metadata tensor in
+        ``_async_send_buff`` until the sends complete, so the memory is neither
+        freed nor overwritten while in flight.
+        """
+        if self.world_size <= 1:
+            return []
+        # Non-VPP (vp_size <= 1): fall back to upstream blocking isend so it
+        # pairs with the upstream irecv_tensor_dict on the peer rank. The async
+        # path below (non-blocking metadata isend + FIFO release) is only
+        # correct under the VPP stage schedule; under regular PP it deadlocks
+        # against the sync recv on the peer.
+        if get_virtual_pipeline_parallel_size() <= 1:
+            return super().isend_tensor_dict(
+                tensor_dict,
+                dst=dst,
+                all_gather_group=all_gather_group,
+                all_gather_tensors=all_gather_tensors,
+            )
+        if dst is None:
+            dst = (self.rank_in_group + 1) % self.world_size
+        assert dst < self.world_size, f"Invalid dst rank ({dst})"
+
+        self._release_completed_send_buff()
+        all_gather_size = 1 if all_gather_group is None else all_gather_group.world_size
+        all_gather_rank = (
+            0 if all_gather_group is None else all_gather_group.rank_in_group
+        )
+        group = self.device_group
+        metadata_group = self.cpu_group
+
+        metadata_list, tensor_list = _split_tensor_dict(tensor_dict)
+        # Non-blocking metadata send (the deadlock fix: upstream blocks here on
+        # send_object while the matching recv is posted in a later iteration).
+        handles, retained = self._isend_object(metadata_list, dst=dst)
+
+        tensor_keys = [k for k, v in tensor_dict.items() if isinstance(v, torch.Tensor)]
+        assert len(tensor_keys) == len(tensor_list)
+        for key, tensor in zip(tensor_keys, tensor_list):
+            if tensor.numel() == 0:
+                continue
+            if self._should_use_all_gather(
+                key, tensor.numel(), all_gather_group, all_gather_tensors
+            ):
+                tensor = tensor.reshape(all_gather_size, -1)[all_gather_rank]
+            comm_group = metadata_group if tensor.is_cpu else group
+            handle = torch.distributed.isend(
+                tensor, dst=self.ranks[dst], group=comm_group
+            )
+            if handle is not None:
+                handles.append(handle)
+            retained.append(tensor)
+
+        if handles:
+            self._async_send_buff.append((handles, retained))
+        return handles
+
+    def _isend_object(
+        self, obj: Any, dst: int
+    ) -> tuple[list, list[Tensor]]:
+        """Non-blocking send_object: isend the size + pickled object, retain refs."""
+        assert dst < self.world_size, f"Invalid dst rank ({dst})"
+        assert dst != self.rank_in_group, (
+            "Invalid destination rank. Destination rank is the same "
+            "as the current rank."
+        )
+        object_tensor = torch.frombuffer(pickle.dumps(obj), dtype=torch.uint8)
+        size_tensor = torch.tensor(
+            [object_tensor.numel()], dtype=torch.long, device="cpu"
+        )
+        retained = [size_tensor, object_tensor]
+        handles: list = []
+        for tensor in retained:
+            handle = torch.distributed.isend(
+                tensor, dst=self.ranks[dst], group=self.cpu_group
+            )
+            if handle is not None:
+                handles.append(handle)
+        return handles, retained
 
 
 vllm.distributed.parallel_state.GroupCoordinator = GroupCoordinatorPatch
