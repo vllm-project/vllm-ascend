@@ -1099,7 +1099,11 @@ class KVCacheRecvingThread(threading.Thread):
         if layer_indices is None:
             _, layer_indices = self.kv_group2layeridx[group_idx]
         layer_index_set = set(layer_indices)
-        num_attn_module = 2 if self.vllm_config.model_config.hf_text_config.model_type == "longcat_flash" else 1
+        num_attn_module = (
+            2
+            if self.vllm_config.model_config.hf_text_config.model_type in ("longcat_flash", "longcat_flash_ngram")
+            else 1
+        )
         from vllm.v1.worker.utils import extract_layer_index
 
         def layer_in_group(layer_name: str) -> bool:
@@ -2072,7 +2076,11 @@ class MooncakeConnectorWorker:
         from vllm.v1.worker.utils import extract_layer_index
 
         kv_group2layeridx: dict[int, tuple[dict[str, Any], list[int]]] = {}
-        num_attn_module = 2 if self.vllm_config.model_config.hf_text_config.model_type == "longcat_flash" else 1
+        num_attn_module = (
+            2
+            if self.vllm_config.model_config.hf_text_config.model_type in ("longcat_flash", "longcat_flash_ngram")
+            else 1
+        )
         next_mtp_layer_idx = self.total_layers
         transfer_group_id = 0
         for kv_cache_group_id, group_spec in enumerate(self.kv_cache_config.kv_cache_groups):

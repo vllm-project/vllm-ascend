@@ -201,6 +201,7 @@ _GDN_PATCH_TARGET.get_attn_backend = AscendGatedDeltaNetAttention.get_attn_backe
 if is_310p():
     from vllm_ascend._310p.ops.fla.gdn_310 import AscendGatedDeltaNetAttention310
 
+    _GDN_PATCH_TARGET.forward = AscendGatedDeltaNetAttention.forward
     _GDN_PATCH_TARGET._forward_core = AscendGatedDeltaNetAttention310._forward_core
     _GDN_PATCH_TARGET.get_state_dtype = AscendGatedDeltaNetAttention310.get_state_dtype
 else:
