@@ -43,6 +43,7 @@ from vllm.v1.spec_decode.utils import (
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend import envs
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -504,12 +505,16 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         _has_full = self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs()
         _is_gemma4_mtp = self.speculative_config is not None and self.speculative_config.use_gemma4_mtp()
-        # On Ascend, Gemma4 MTP draft runs in eager mode (FDO is not supported
-        # for the draft). Disable cuda graph only for Gemma4 MTP so other MTP
-        # models keep the upstream FULL-cudagraph draft wrapping below.
-        if _has_full and _is_gemma4_mtp and self.use_cuda_graph:
+        # On Ascend, Gemma4 MTP draft historically ran in eager mode (FDO was
+        # not supported for the draft). VLLM_ASCEND_GEMMA4_DRAFT_GRAPH=1 opts
+        # into dual-graph: draft is wrapped in ACLGraphWrapper(FULL) and routed
+        # to PA (head_dim=512) / FIA (head_dim=256) under graph instead of SDPA.
+        # Default 0 keeps the eager draft for safety; set to 0 to roll back.
+        _draft_graph_enabled = envs.VLLM_ASCEND_GEMMA4_DRAFT_GRAPH
+        if _has_full and _is_gemma4_mtp and self.use_cuda_graph and not _draft_graph_enabled:
             self.use_cuda_graph = False
-        # Other MTP drafts: keep the upstream ACLGraphWrapper(FULL) wrapping.
+        # Gemma4 MTP draft with dual-graph enabled, or other MTP drafts: keep
+        # the ACLGraphWrapper(FULL) wrapping.
         elif _has_full and self.use_cuda_graph:
             logger.info(
                 "[spec_decode/base] Wrapping draft model with ACLGraphWrapper:"
@@ -1110,12 +1115,26 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             if self._is_gemma4_mtp:
                 self._sync_wait_target_events()
 
+            # [STEP_DBG] total draft runnable wall-clock (eager forward or graph
+            # replay, depending on VLLM_ASCEND_GEMMA4_DRAFT_GRAPH). Outside the
+            # compiled fn so the timer is not stripped.
+            _step_dbg = envs.VLLM_STEP_DBG
+            if _step_dbg:
+                import time as _time
+                torch.npu.current_stream().synchronize()
+                _sd_t0 = _time.perf_counter()
             if self.enable_enpu:
                 self._update_full_graph_params_if_needed(forward_context, num_input_tokens, multi_steps_attn_metadata)
                 draft_token_ids = run_draft()
             else:
                 draft_token_ids = run_draft()
                 self._update_full_graph_params_if_needed(forward_context, num_input_tokens, multi_steps_attn_metadata)
+            if _step_dbg:
+                torch.npu.current_stream().synchronize()
+                _sd_ms = (_time.perf_counter() - _sd_t0) * 1000.0
+                print(f"[STEP_DBG] draft_runnable total={_sd_ms:.2f}ms "
+                      f"graph={int(envs.VLLM_ASCEND_GEMMA4_DRAFT_GRAPH)} "
+                      f"enpu={int(self.enable_enpu)}", flush=True)
         return draft_token_ids
 
     def compute_draft_token_ids(self, hidden_states: torch.Tensor):

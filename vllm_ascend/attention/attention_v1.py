@@ -1148,11 +1148,33 @@ class AscendAttentionBackendImpl(AttentionImpl):
         attn_metadata: AscendMetadata,
         output: torch.Tensor | None = None,
     ):
-        graph_params = get_graph_params()
+        # Draft model (Gemma4 MTP dual-graph) uses its own GraphParams bucket so
+        # capture/replay state is separate from the target's. Mirrors the
+        # is_draft_model branch in full_graph_fia (see :860-866).
+        if _EXTRA_CTX.is_draft_model:
+            graph_params = get_draft_graph_params()
+        else:
+            graph_params = get_graph_params()
         num_tokens = query.shape[0]
         if _EXTRA_CTX.capturing:
             block_table = attn_metadata.block_tables
             context_lens = attn_metadata.seq_lens
+            # Draft KV-sharing layers read K/V from the target's paged cache,
+            # not their own (empty) cache. Swap to the target impl's
+            # key/value_cache and route the per-group block_table, mirroring
+            # _get_shared_kv_from_block_table (utils.py:740-768). Without this
+            # PA reads the draft's empty cache → all-zero attention.
+            key_cache = self.key_cache
+            value_cache = self.value_cache
+            if _EXTRA_CTX.is_draft_model and self.kv_sharing_target_layer_name is not None:
+                _tgt_impl = getattr(self, "_kv_share_target_impl", None)
+                if _tgt_impl is not None and _tgt_impl.key_cache is not None:
+                    key_cache = _tgt_impl.key_cache
+                    value_cache = _tgt_impl.value_cache
+                _my_gid = getattr(self, "_kv_share_gid", None)
+                _per_group_bt = getattr(self, "_per_group_bt_ref", None)
+                if _my_gid is not None and _per_group_bt is not None and _my_gid in _per_group_bt:
+                    block_table = _per_group_bt[_my_gid]
             # MTP verify: expand per-seq to per-query (see expand_paged_kv_to_per_query).
             if attn_metadata.attn_state == AscendAttentionState.SpecDecoding:
                 spec_cfg = self.vllm_config.speculative_config
@@ -1165,8 +1187,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
             if workspace is None:
                 workspace = torch_npu._npu_paged_attention_get_workspace(
                     query=query,
-                    key_cache=self.key_cache,
-                    value_cache=self.value_cache,
+                    key_cache=key_cache,
+                    value_cache=value_cache,
                     num_kv_heads=self.num_kv_heads,
                     num_heads=self.num_heads,
                     scale_value=self.scale,
@@ -1187,8 +1209,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 PagedAttentionGraphParam(
                     (
                         weak_ref_tensors(query),
-                        weak_ref_tensors(self.key_cache),
-                        weak_ref_tensors(self.value_cache),
+                        weak_ref_tensors(key_cache),
+                        weak_ref_tensors(value_cache),
                         self.num_kv_heads,
                         self.num_heads,
                         self.scale,
@@ -1203,8 +1225,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
             torch.npu.graph_task_group_begin(stream)
             torch_npu._npu_paged_attention(
                 query=query,
-                key_cache=self.key_cache,
-                value_cache=self.value_cache,
+                key_cache=key_cache,
+                value_cache=value_cache,
                 num_kv_heads=self.num_kv_heads,
                 num_heads=self.num_heads,
                 scale_value=self.scale,

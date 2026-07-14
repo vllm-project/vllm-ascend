@@ -110,6 +110,19 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Enable Gemma4 MTP draft model to run in ACL graph (FULL) instead of eager.
+    # "1": draft is wrapped in ACLGraphWrapper(FULL) and captured/replayed
+    #      alongside the target graph (dual-graph). Draft attention routes to
+    #      PA (head_dim=512) / FIA (head_dim=256) under graph, not SDPA.
+    # "0" (default): draft stays eager (current behavior), target keeps FDO graph.
+    # One-shot rollback: set to 0 to restore eager draft without code changes.
+    "VLLM_ASCEND_GEMMA4_DRAFT_GRAPH": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_GEMMA4_DRAFT_GRAPH", "0"))
+    ),
+    # Print total draft runnable wall-clock per spec step ([STEP_DBG] draft_runnable
+    # total=...ms graph=... enpu=...). Covers eager forward (graph=0) and graph
+    # replay (graph=1) for direct comparison. "1" enable, "0" (default) silent.
+    "VLLM_STEP_DBG": lambda: bool(int(os.getenv("VLLM_STEP_DBG", "0"))),
 }
 
 # end-env-vars-definition
