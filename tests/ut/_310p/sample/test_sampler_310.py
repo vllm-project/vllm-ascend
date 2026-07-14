@@ -45,8 +45,11 @@ class _FakeRow:
 
 
 class _FakeQ:
+    """Stand-in for the CPU noise tensor threaded through fill_exponential_310p."""
+
     def __init__(self, batch_size):
         self.shape = (batch_size, 4)
+        self.device = "cpu"
         self.default_exponential_called = False
         self.rows = {idx: _FakeRow() for idx in range(batch_size)}
 
@@ -54,6 +57,12 @@ class _FakeQ:
         return self
 
     def npu(self):
+        return self
+
+    def to(self, *args, **kwargs):
+        return self
+
+    def copy_(self, other):
         return self
 
     def exponential_(self, generator=None):
@@ -66,12 +75,6 @@ class _FakeQ:
 
     def __setitem__(self, idx, value):
         self.rows[idx] = value
-
-
-def _empty_like_side_effect(q_instances, template):
-    if isinstance(template, _FakeRow):
-        return _FakeRow()
-    return next(q_instances)
 
 
 class _FakeCPUGenerator:
@@ -91,16 +94,10 @@ class TestSampler310pStandalone(unittest.TestCase):
     def tearDown(self):
         sampler_310p._CPU_GENERATOR_CACHE_310P.clear()
 
-    def test_random_sample_310p_reuse_cpu_generator_cache(self):
+    def test_fill_exponential_310p_reuse_cpu_generator_cache(self):
         sampler_310p._CPU_GENERATOR_CACHE_310P.clear()
-        probs = MagicMock()
-        probs.div_.return_value = probs
-        probs.argmax.return_value = probs
-        probs.view.return_value = torch.tensor([0])
-
         fake_q_first = _FakeQ(batch_size=2)
         fake_q_second = _FakeQ(batch_size=2)
-        q_instances = iter([fake_q_first, fake_q_second])
 
         npu_stream = MagicMock()
         generator = MagicMock()
@@ -111,23 +108,14 @@ class TestSampler310pStandalone(unittest.TestCase):
         with (
             patch.object(sampler_310p, "npu_stream_switch", return_value=nullcontext()),
             patch.object(sampler_310p, "global_stream", return_value=MagicMock()),
-            patch.object(
-                sampler_310p.torch,
-                "empty_like",
-                side_effect=lambda template: _empty_like_side_effect(q_instances, template),
-            ),
             patch.object(sampler_310p.torch, "Generator", side_effect=_FakeCPUGenerator) as gen_ctor,
-            patch.object(
-                sampler_310p.torch,
-                "npu",
-                ModuleType("torch.npu"),
-                create=True,
-            ),
+            patch.object(sampler_310p.torch, "npu", ModuleType("torch.npu"), create=True),
         ):
             sampler_310p.torch.npu.current_stream = MagicMock(return_value=npu_stream)
-            sampler_310p._random_sample_310p(probs, generators)
-            sampler_310p._random_sample_310p(probs, generators)
+            sampler_310p.fill_exponential_310p(fake_q_first, generators)
+            sampler_310p.fill_exponential_310p(fake_q_second, generators)
 
+        # second call reuses the cached CPU generator -> ctor only invoked once
         self.assertEqual(gen_ctor.call_count, 1)
         self.assertIn(1, sampler_310p._CPU_GENERATOR_CACHE_310P)
         cached_cpu_generator, source_generator_id = sampler_310p._CPU_GENERATOR_CACHE_310P[1]
@@ -138,15 +126,9 @@ class TestSampler310pStandalone(unittest.TestCase):
         self.assertIsNone(cached_cpu_generator.seed)
         self.assertEqual(npu_stream.wait_stream.call_count, 2)
 
-    def test_random_sample_310p_fallback_to_initial_seed_when_set_state_failed(self):
+    def test_fill_exponential_310p_fallback_to_initial_seed_when_set_state_failed(self):
         sampler_310p._CPU_GENERATOR_CACHE_310P.clear()
-        probs = MagicMock()
-        probs.div_.return_value = probs
-        probs.argmax.return_value = probs
-        probs.view.return_value = torch.tensor([1])
-
         fake_q = _FakeQ(batch_size=1)
-        q_instances = iter([fake_q])
         npu_stream = MagicMock()
         generator = MagicMock()
         generator.get_state.side_effect = RuntimeError("state read failed")
@@ -160,21 +142,11 @@ class TestSampler310pStandalone(unittest.TestCase):
         with (
             patch.object(sampler_310p, "npu_stream_switch", return_value=nullcontext()),
             patch.object(sampler_310p, "global_stream", return_value=MagicMock()),
-            patch.object(
-                sampler_310p.torch,
-                "empty_like",
-                side_effect=lambda template: _empty_like_side_effect(q_instances, template),
-            ),
             patch.object(sampler_310p.torch, "Generator", side_effect=_FailSetStateCPUGenerator),
-            patch.object(
-                sampler_310p.torch,
-                "npu",
-                ModuleType("torch.npu"),
-                create=True,
-            ),
+            patch.object(sampler_310p.torch, "npu", ModuleType("torch.npu"), create=True),
         ):
             sampler_310p.torch.npu.current_stream = MagicMock(return_value=npu_stream)
-            sampler_310p._random_sample_310p(probs, generators)
+            sampler_310p.fill_exponential_310p(fake_q, generators)
 
         cached_cpu_generator, source_generator_id = sampler_310p._CPU_GENERATOR_CACHE_310P[0]
         self.assertEqual(source_generator_id, id(generator))
@@ -182,16 +154,10 @@ class TestSampler310pStandalone(unittest.TestCase):
         self.assertIs(fake_q.rows[0].generators[0], cached_cpu_generator)
         self.assertEqual(npu_stream.wait_stream.call_count, 1)
 
-    def test_random_sample_310p_rebuild_cache_when_generator_identity_changes(self):
+    def test_fill_exponential_310p_rebuild_cache_when_generator_identity_changes(self):
         sampler_310p._CPU_GENERATOR_CACHE_310P.clear()
-        probs = MagicMock()
-        probs.div_.return_value = probs
-        probs.argmax.return_value = probs
-        probs.view.return_value = torch.tensor([0])
-
         fake_q_first = _FakeQ(batch_size=1)
         fake_q_second = _FakeQ(batch_size=1)
-        q_instances = iter([fake_q_first, fake_q_second])
         npu_stream = MagicMock()
 
         generator_first = MagicMock()
@@ -205,23 +171,14 @@ class TestSampler310pStandalone(unittest.TestCase):
         with (
             patch.object(sampler_310p, "npu_stream_switch", return_value=nullcontext()),
             patch.object(sampler_310p, "global_stream", return_value=MagicMock()),
-            patch.object(
-                sampler_310p.torch,
-                "empty_like",
-                side_effect=lambda template: _empty_like_side_effect(q_instances, template),
-            ),
             patch.object(sampler_310p.torch, "Generator", side_effect=_FakeCPUGenerator) as gen_ctor,
-            patch.object(
-                sampler_310p.torch,
-                "npu",
-                ModuleType("torch.npu"),
-                create=True,
-            ),
+            patch.object(sampler_310p.torch, "npu", ModuleType("torch.npu"), create=True),
         ):
             sampler_310p.torch.npu.current_stream = MagicMock(return_value=npu_stream)
-            sampler_310p._random_sample_310p(probs, {0: generator_first})
-            sampler_310p._random_sample_310p(probs, {0: generator_second})
+            sampler_310p.fill_exponential_310p(fake_q_first, {0: generator_first})
+            sampler_310p.fill_exponential_310p(fake_q_second, {0: generator_second})
 
+        # different source generator identity -> cache entry rebuilt
         self.assertEqual(gen_ctor.call_count, 2)
         first_cpu_generator = fake_q_first.rows[0].generators[0]
         second_cpu_generator = fake_q_second.rows[0].generators[0]
@@ -231,6 +188,26 @@ class TestSampler310pStandalone(unittest.TestCase):
         cached_cpu_generator, source_generator_id = sampler_310p._CPU_GENERATOR_CACHE_310P[0]
         self.assertIs(cached_cpu_generator, second_cpu_generator)
         self.assertEqual(source_generator_id, id(generator_second))
+
+    def test_random_sample_310p_uses_global_rng(self):
+        # The main-path sampler now draws exponential noise from the NPU global RNG
+        # (torch.rand_like) on the aux stream; it does NOT honor per-seq generators.
+        probs = torch.tensor([[0.1, 0.9], [0.8, 0.2]], dtype=torch.float32)
+        npu_stream = MagicMock()
+
+        with (
+            patch.object(sampler_310p, "npu_stream_switch", return_value=nullcontext()),
+            patch.object(sampler_310p, "global_stream", return_value=MagicMock()),
+            # uniform u=0.5 everywhere -> q is a positive constant -> argmax(probs/q)==argmax(probs)
+            patch.object(sampler_310p.torch, "rand_like", return_value=torch.full((2, 2), 0.5)),
+            patch.object(sampler_310p.torch, "npu", ModuleType("torch.npu"), create=True),
+        ):
+            sampler_310p.torch.npu.current_stream = MagicMock(return_value=npu_stream)
+            out = sampler_310p._random_sample_310p(probs.clone(), {})
+
+        self.assertTrue(torch.equal(out, torch.tensor([1, 0])))
+        # RNG runs on the aux stream; main stream waits on it exactly once
+        self.assertEqual(npu_stream.wait_stream.call_count, 1)
 
 
 if __name__ == "__main__":
