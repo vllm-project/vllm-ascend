@@ -116,9 +116,7 @@ def test_batch_job_aware_scheduler_with_async_scheduling(max_tokens: int) -> Non
 
 @pytest.mark.parametrize("max_tokens", [4])
 @pytest.mark.parametrize("chunked_prefill_token_size", [16])
-def test_batch_job_aware_scheduler_with_chunked_prefill(
-    max_tokens: int, chunked_prefill_token_size: int
-) -> None:
+def test_batch_job_aware_scheduler_with_chunked_prefill(max_tokens: int, chunked_prefill_token_size: int) -> None:
     """Test BatchJobAwareScheduler with chunked prefill enabled.
 
     Verify that BatchJobAwareScheduler works correctly with chunked prefill,
@@ -177,7 +175,7 @@ def test_batch_job_aware_scheduler_with_custom_config(max_tokens: int) -> None:
                 "reserve_margin_blocks": 4,
                 "reserve_max_blocks": 12,
                 "low_available_tokens_threshold": 2048,
-                "short_decode_token_threshold": 32
+                "short_decode_token_threshold": 32,
             },
         },
         max_model_len=2048,

@@ -21,15 +21,14 @@ from vllm.v1.request import Request
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_config import BatchJobSchedConfig
 from vllm_ascend.core.batch_job_aware_scheduler import (
-    _JobStat,
-    _cdiv,
     BatchJobAwareRequestQueue,
     JobDecodeEstimator,
     JobNameParser,
     RequestBucket,
     RunningBlockReserver,
+    _cdiv,
+    _JobStat,
 )
-
 
 # ===================================================================
 # _cdiv
@@ -256,6 +255,7 @@ class _MockRequest:
     Avoids importing the real ``Request`` which requires heavy vLLM
     initialisation.  Only exposes the attributes that RequestBucket uses.
     """
+
     def __init__(self, request_id: str, num_prompt_tokens: int):
         self.request_id = request_id
         self.num_prompt_tokens = num_prompt_tokens
@@ -383,10 +383,12 @@ class TestRunningBlockReserver(TestBase):
 
     def setUp(self):
         super().setUp()
-        self.config = BatchJobSchedConfig({
-            "reserve_margin_blocks": 2,
-            "reserve_max_blocks": 8,
-        })
+        self.config = BatchJobSchedConfig(
+            {
+                "reserve_margin_blocks": 2,
+                "reserve_max_blocks": 8,
+            }
+        )
 
         # Build a minimal mock scheduler
         self.mock_scheduler = MagicMock()
@@ -504,11 +506,13 @@ class TestBatchJobAwareRequestQueue(TestBase):
 
     def setUp(self):
         super().setUp()
-        self.config = BatchJobSchedConfig({
-            "short_decode_token_threshold": 32,
-            "low_available_tokens_threshold": 4096,
-            "max_jobs": 20,
-        })
+        self.config = BatchJobSchedConfig(
+            {
+                "short_decode_token_threshold": 32,
+                "low_available_tokens_threshold": 4096,
+                "max_jobs": 20,
+            }
+        )
 
         # Mock scheduler with minimal attributes
         self.mock_scheduler = MagicMock()
@@ -517,11 +521,7 @@ class TestBatchJobAwareRequestQueue(TestBase):
         self.mock_scheduler.num_lookahead_tokens = 0
         # Mock kv_cache_manager.block_pool.get_num_free_blocks
         type(self.mock_scheduler).kv_cache_manager = PropertyMock(
-            return_value=MagicMock(
-                block_pool=MagicMock(
-                    get_num_free_blocks=MagicMock(return_value=1000)
-                )
-            )
+            return_value=MagicMock(block_pool=MagicMock(get_num_free_blocks=MagicMock(return_value=1000)))
         )
 
         self.job_decode_estimator = JobDecodeEstimator(self.config)
@@ -624,20 +624,14 @@ class TestBatchJobAwareRequestQueue(TestBase):
         self.assertNotIn("job1", self.queue._cold_start_reqs)
 
     def test_remove_requests_removes_multiple(self):
-        reqs = [
-            self._make_request(f"r{i}#job_name[job1]#")
-            for i in range(3)
-        ]
+        reqs = [self._make_request(f"r{i}#job_name[job1]#") for i in range(3)]
         for r in reqs:
             self.queue.add_request(r)
         self.queue.remove_requests(reqs)
         self.assertEqual(len(self.queue), 0)
 
     def test_prepend_requests_adds_all(self):
-        reqs = [
-            self._make_request(f"r{i}#job_name[job1]#")
-            for i in range(3)
-        ]
+        reqs = [self._make_request(f"r{i}#job_name[job1]#") for i in range(3)]
         mock_queue = MagicMock()
         mock_queue.__iter__.return_value = iter(reqs)
         self.queue.prepend_requests(mock_queue)
@@ -735,22 +729,14 @@ class TestBatchJobAwareRequestQueue(TestBase):
 
     def test_admission_budget_zero_when_no_free_blocks(self):
         type(self.mock_scheduler).kv_cache_manager = PropertyMock(
-            return_value=MagicMock(
-                block_pool=MagicMock(
-                    get_num_free_blocks=MagicMock(return_value=0)
-                )
-            )
+            return_value=MagicMock(block_pool=MagicMock(get_num_free_blocks=MagicMock(return_value=0)))
         )
         budget = self.queue._admission_budget()
         self.assertEqual(budget, 0)
 
     def test_find_admittable_returns_none_with_zero_budget(self):
         type(self.mock_scheduler).kv_cache_manager = PropertyMock(
-            return_value=MagicMock(
-                block_pool=MagicMock(
-                    get_num_free_blocks=MagicMock(return_value=0)
-                )
-            )
+            return_value=MagicMock(block_pool=MagicMock(get_num_free_blocks=MagicMock(return_value=0)))
         )
         result = self.queue._find_admittable()
         self.assertIsNone(result)
@@ -781,4 +767,3 @@ class TestBatchJobAwareRequestQueue(TestBase):
         with self.assertRaises(RuntimeError) as ctx:
             queue.add_request(self._make_request("r2#job_name[job2]#"))
         self.assertIn("Maximum number of jobs", str(ctx.exception))
-
