@@ -47,7 +47,7 @@ from vllm_ascend.attention.msa_m3_npu import minimax_m3_sparse_attn
 from vllm_ascend.attention.msa_m3_triton import (
     minimax_m3_sparse_attn_decode,
 )
-from vllm_ascend.attention.minimax_triton_indexer import (
+from vllm_ascend.attention.shy_indexer import (
     minimax_m3_index_decode,
     minimax_m3_index_score,
     minimax_m3_index_topk,
@@ -384,8 +384,8 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
                 self.init_blocks,
                 self.local_blocks,
                 self.num_kv_heads,
-                self.scale,
                 d.decode_query_len,
+                sm_scale=self.scale,
             )
         if index_md.num_prefills > 0:
             p = index_md.prefill
