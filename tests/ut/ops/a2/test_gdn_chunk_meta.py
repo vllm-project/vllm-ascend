@@ -437,3 +437,176 @@ def test_chunk_gated_delta_rule_fwd_pcp_chaining_subtracts_initial_state(
     # Sequential: Φ_1·(Φ_0·s0 + p_0) + p_1
     expected = torch.matmul(phi_1, torch.matmul(phi_0, s0) + p_0) + p_1
     torch.testing.assert_close(final_state, expected, rtol=1e-4, atol=1e-4)
+
+
+def test_chunk_gated_delta_rule_fwd_skip_pcp_all_gather(monkeypatch: pytest.MonkeyPatch):
+    """Test skip_pcp_all_gather=True skips PCP all_gather block.
+
+    When skip_pcp_all_gather=True, the PCP all_gather block should be skipped
+    even when world_size > 1. This is used when PCP rank has 0 prefill tokens.
+    """
+    prebuilt_meta = type(
+        "PrebuiltMeta",
+        (),
+        {
+            "block_indices_cumsum": None,
+            "cu_seqlens_host": (0, 4, 7),
+            "chunk_indices_chunk64_host": (0, 0, 1, 0),
+            "chunk_indices_chunk64": torch.tensor([[0, 0], [1, 0]], dtype=torch.int32),
+            "chunk_offsets_chunk64": torch.tensor([0, 1, 2], dtype=torch.int32),
+            "update_chunk_offsets_chunk64": torch.tensor([0, 2, 4], dtype=torch.int32),
+            "final_chunk_indices_chunk64": torch.tensor([1, 3], dtype=torch.int32),
+            "chunk_indices_large_block": None,
+            "keep_meta": None,
+            "cu_seqlens_kern": None,
+        },
+    )()
+
+    q = _DummyTensor("q")
+    k = _DummyTensor("k")
+    v = _DummyTensor("v")
+    g = _DummyTensor("g")
+    beta = _DummyTensor("beta")
+    initial_state = _DummyTensor("initial_state")
+
+    all_gather_called = []
+
+    def run_case(world_size: int, skip_pcp_all_gather: bool):
+        group = type(
+            "Group",
+            (),
+            {
+                "world_size": world_size,
+                "rank_in_group": 0,
+                "all_gather": lambda self, value, dim: all_gather_called.append(True) or _GatherResult([_DummyTensor("g0"), _DummyTensor("g1")]),
+            },
+        )()
+
+        monkeypatch.setattr(chunk, "get_forward_context", lambda: type("Ctx", (), {"attn_metadata": None})())
+        monkeypatch.setattr(chunk, "get_pcp_group", lambda: group)
+        monkeypatch.setattr(chunk, "chunk_local_cumsum", lambda *args, **kwargs: _DummyTensor("g_cumsum"))
+        monkeypatch.setattr(chunk, "chunk_scaled_dot_kkt_fwd", lambda *args, **kwargs: _DummyTensor("A"))
+        monkeypatch.setattr(chunk, "solve_tril", lambda *args, **kwargs: _DummyTensor("A_solved"))
+        monkeypatch.setattr(chunk, "recompute_w_u_fwd", lambda *args, **kwargs: (_DummyTensor("w"), _DummyTensor("u")))
+        monkeypatch.setattr(
+            chunk,
+            "chunk_gated_delta_rule_fwd_h",
+            lambda *args, **kwargs: (_DummyTensor("h"), _DummyTensor("v_new"), _DummyTensor("final_state")),
+        )
+        monkeypatch.setattr(
+            chunk,
+            "chunk_gated_delta_rule_fwd_hupdate",
+            lambda *args, **kwargs: _DummyTensor("h_update"),
+        )
+        monkeypatch.setattr(
+            torch.ops._C_ascend,
+            "chunk_gated_delta_rule_fwd_h",
+            lambda *args, **kwargs: (_DummyTensor("h"), _DummyTensor("v_new"), _DummyTensor("final_state")),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            torch.ops._C_ascend,
+            "chunk_fwd_o",
+            lambda *args, **kwargs: _DummyTensor("o_ascend"),
+            raising=False,
+        )
+
+        chunk.chunk_gated_delta_rule_fwd(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            scale=1.0,
+            initial_state=initial_state,
+            output_final_state=False,
+            cu_seqlens=torch.tensor([0, 4, 7], dtype=torch.int32),
+            prebuilt_meta=prebuilt_meta,
+            skip_pcp_all_gather=skip_pcp_all_gather,
+        )
+
+    # Test 1: world_size=2, skip_pcp_all_gather=False → all_gather should be called
+    all_gather_called.clear()
+    run_case(2, False)
+    assert len(all_gather_called) > 0, "all_gather should be called when skip_pcp_all_gather=False"
+
+    # Test 2: world_size=2, skip_pcp_all_gather=True → all_gather should NOT be called
+    all_gather_called.clear()
+    run_case(2, True)
+    assert len(all_gather_called) == 0, "all_gather should NOT be called when skip_pcp_all_gather=True"
+
+
+def test_chunk_gated_delta_rule_fwd_uses_compact_cu_seqlens_kern(monkeypatch: pytest.MonkeyPatch):
+    """Test chunk_fwd_o uses cu_seqlens_kern (compact) instead of cu_seqlens_host.
+
+    When prebuilt_meta has cu_seqlens_kern (compressed version with empty segments
+    removed), chunk_fwd_o should use it to avoid indexing errors in AscendC kernels.
+    """
+    cu_seqlens_host = (0, 4, 4, 7)  # Has empty segment (4, 4)
+    cu_seqlens_kern = [0, 4, 7]  # Compressed version
+
+    prebuilt_meta = type(
+        "PrebuiltMeta",
+        (),
+        {
+            "block_indices_cumsum": None,
+            "cu_seqlens_host": cu_seqlens_host,
+            "cu_seqlens_kern": cu_seqlens_kern,
+            "chunk_indices_chunk64_host": (0, 0, 1, 0),
+            "chunk_indices_chunk64": torch.tensor([[0, 0], [1, 0]], dtype=torch.int32),
+            "chunk_offsets_chunk64": torch.tensor([0, 1, 2], dtype=torch.int32),
+            "update_chunk_offsets_chunk64": torch.tensor([0, 2, 4], dtype=torch.int32),
+            "final_chunk_indices_chunk64": torch.tensor([1, 3], dtype=torch.int32),
+            "chunk_indices_large_block": None,
+            "keep_meta": None,
+        },
+    )()
+
+    q = _DummyTensor("q")
+    k = _DummyTensor("k")
+    v = _DummyTensor("v")
+    g = _DummyTensor("g")
+    beta = _DummyTensor("beta")
+    initial_state = _DummyTensor("initial_state")
+
+    captured_cu_seqlens = []
+
+    monkeypatch.setattr(chunk, "get_forward_context", lambda: type("Ctx", (), {"attn_metadata": None})())
+    monkeypatch.setattr(
+        chunk,
+        "get_pcp_group",
+        lambda: type("Group", (), {"world_size": 1, "rank_in_group": 0})(),
+    )
+    monkeypatch.setattr(chunk, "chunk_local_cumsum", lambda *args, **kwargs: _DummyTensor("g_cumsum"))
+    monkeypatch.setattr(chunk, "chunk_scaled_dot_kkt_fwd", lambda *args, **kwargs: _DummyTensor("A"))
+    monkeypatch.setattr(chunk, "solve_tril", lambda *args, **kwargs: _DummyTensor("A_solved"))
+    monkeypatch.setattr(chunk, "recompute_w_u_fwd", lambda *args, **kwargs: (_DummyTensor("w"), _DummyTensor("u")))
+    monkeypatch.setattr(
+        torch.ops._C_ascend,
+        "chunk_gated_delta_rule_fwd_h",
+        lambda *args, **kwargs: (_DummyTensor("h"), _DummyTensor("v_new"), _DummyTensor("final_state")),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        torch.ops._C_ascend,
+        "chunk_fwd_o",
+        lambda *args, **kwargs: captured_cu_seqlens.append(kwargs["cu_seqlens"]) or _DummyTensor("o_ascend"),
+        raising=False,
+    )
+
+    chunk.chunk_gated_delta_rule_fwd(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        beta=beta,
+        scale=1.0,
+        initial_state=initial_state,
+        output_final_state=False,
+        cu_seqlens=torch.tensor([0, 4, 4, 7], dtype=torch.int32),
+        prebuilt_meta=prebuilt_meta,
+    )
+
+    # chunk_fwd_o should use cu_seqlens_kern (compressed), not cu_seqlens_host
+    assert len(captured_cu_seqlens) > 0, "chunk_fwd_o should be called"
+    assert captured_cu_seqlens[0] == cu_seqlens_kern, "chunk_fwd_o should use cu_seqlens_kern (compressed version)"
