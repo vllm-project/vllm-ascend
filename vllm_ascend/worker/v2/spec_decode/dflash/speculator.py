@@ -43,8 +43,16 @@ class AscendDFlashSpeculator(DFlashSpeculator):
         model_state: Any,
         kv_cache_config: Any,
         block_tables: Any,
+        target_input_buffers: Any,
+        target_attn_groups: Any,
     ) -> None:
-        super().set_attn(model_state, kv_cache_config, block_tables)
+        super().set_attn(
+            model_state,
+            kv_cache_config,
+            block_tables,
+            target_input_buffers,
+            target_attn_groups,
+        )
         self._context_slot_mappings = torch.zeros(
             len(self.draft_kv_cache_group_ids),
             self.max_num_tokens,
