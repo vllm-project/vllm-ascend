@@ -27,8 +27,8 @@ fi
 
 # Global config
 API_PREFIX="https://174e1b821a8446f38998a67186ba766e.apic.cn-southwest-2.huaweicloudapis.com/aurogon_service"
-# MR_THIRD_ID="${PR_NUMBER:-}"
 MR_THIRD_ID="9270"
+#MR_THIRD_ID="${PR_NUMBER:-}"
 NETWORK_ZONE=github
 PROJECT_PATH=vllm-project/vllm-ascend
 BIND_ID_API2=11
@@ -41,9 +41,9 @@ if [ -z "${MR_THIRD_ID}" ]; then
 fi
 echo "Using current PR number as MR_THIRD_ID: ${MR_THIRD_ID}"
 
-X_APIG_APPCODE="${X_APIG_APPCODE:-}"
-APP_KEY="${APP_KEY:-}"
-APP_SECRET="${APP_SECRET:-}"
+X_APIG_APPCODE="2a934292a6ab4dc08b99d6304794a25443f724c21ab64082a7c168450e4bb883"
+APP_KEY="88df727ac9bb4d058c0e81bee9852c24"
+APP_SECRET="b049f8c7cc73485ca9912d1acd8b6e79"
 
 # Api1 save mr with retry
 MAX_RETRY=3
