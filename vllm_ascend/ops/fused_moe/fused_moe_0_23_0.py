@@ -47,7 +47,6 @@ from vllm_ascend.ops.fused_moe.fused_moe import (
     init_eplb_config,
     logger,
     npu_stream_switch,
-    select_experts,
     setup_moe_comm_method,
     shared_expert_dp_enabled,
     shared_experts_calculation_stream,

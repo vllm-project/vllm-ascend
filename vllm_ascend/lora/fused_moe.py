@@ -80,6 +80,7 @@ def _assert_ascend_moe_lora_supported(base_layer: nn.Module) -> None:
             "like DeepSeek-V3 are not yet supported."
         )
 
+
 def _recover_moe_lora_routing(lora_context, expanded_row_idx, topk_ids):
     """Recover per-permuted-row (expert_id, lora_slot) for the dispatched rows.
 
