@@ -47,7 +47,7 @@ _benchmarks: &benchmarks
     num_prompts: 64
     max_out_len: 8192
     batch_size: 8
-    baseline: 68
+    baseline: 75
     threshold: 10
     temperature: 1.0
     top_p: 0.95
