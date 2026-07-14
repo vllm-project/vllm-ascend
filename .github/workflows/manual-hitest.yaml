@@ -20,6 +20,10 @@ name: Hitest
 on:
   workflow_dispatch:
   workflow_call:
+    outputs:
+      hitest_paths:
+        description: 'Content of recommended_pytest_paths.txt (one path per line)'
+        value: ${{ jobs.run-hitest.outputs.hitest_paths }}
 
 defaults:
   run:
@@ -32,6 +36,8 @@ concurrency:
 jobs:
   run-hitest:
     runs-on: linux-amd64-cpu-8-hk
+    outputs:
+      hitest_paths: ${{ steps.export-paths.outputs.hitest_paths }}
     steps:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v7
@@ -59,3 +65,18 @@ jobs:
           path: .github/workflows/scripts/recommended_pytest_paths.txt
           if-no-files-found: warn
           retention-days: 14
+
+      - name: Export hitest_paths output
+        id: export-paths
+        if: always()
+        run: |
+          FILE=".github/workflows/scripts/recommended_pytest_paths.txt"
+          if [ -f "$FILE" ]; then
+            {
+              echo "hitest_paths<<EOF"
+              cat "$FILE"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "hitest_paths=" >> "$GITHUB_OUTPUT"
+          fi
