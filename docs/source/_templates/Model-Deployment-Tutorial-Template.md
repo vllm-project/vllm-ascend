@@ -38,10 +38,10 @@ This section introduces the features supported by the model, including supported
 **Example 1: Feature Support List**
 
 | Model Name | Support Status | Remarks | BF16 | Supported Hardware | W8A8 | Chunked Prefill | Automatic Prefix Caching | LoRA | Speculative Decoding | Asynchronous Scheduling | Tensor Parallelism | Pipeline Parallelism | Expert Parallelism | Data Parallelism | Prefill-Decode Separation | Segmented ACL Graph Execution | Full ACL Graph Execution | Max Model Length | Documentation |
-| ------ | ---------- | ------ | ------ | ---------- | ------ | ------------ | -------------- | ------ | ---------- | ---------- | ---------- | ------------ | ---------- | ---------- | ------------------- | ----------- | ----------- | ------------- | ---------- |
-| DeepSeek V3/3.1 | ✅ |  | ✅ | Atlas 800I A2:<br>Minimum card requirement: xx | ✅ | ✅ | ✅ |  | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 240k | [DeepSeek-V3.1](../../tutorials/models/DeepSeek-V3.1.md) |
-| DeepSeek V3.2 | ✅ |  | ✅ | Atlas 800I A2:<br>Minimum card requirement: xx | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 160k | [DeepSeek-V3.2](../../tutorials/models/DeepSeek-V3.2.md) |
-| Qwen3 | ✅ |  | ✅ | Atlas 800I A2:<br>Minimum card requirement: xx | ✅ | ✅ | ✅ |  |  | ✅ | ✅ |  |  | ✅ |  | ✅ | ✅ | 128k | [Qwen3-Dense](../../tutorials/models/Qwen3-Dense.md) |
+| ------ | ---------- | ------ | ------ | ---------- | ------ | ------------ | -------------- | ------ | ---------- | ---------- | ---------- | ------------ | ---------- | ---------- | ------------------- | ----------- | ----------- | ---------- | ---- |
+| DeepSeek V3/3.1 | ✅ | | ✅ | Atlas 800I A2:<br>Minimum card requirement: xx | ✅ | ✅ | ✅ | | ✅ | | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 240k | [DeepSeek-V3.1](../../tutorials/models/DeepSeek-V3.1.md) |
+| DeepSeek V3.2 | ✅ | | ✅ | Atlas 800I A2:<br>Minimum card requirement: xx | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 160k | [DeepSeek-V3.2](../../tutorials/models/DeepSeek-V3.2.md) |
+| Qwen3 | ✅ | | ✅ | Atlas 800I A2:<br>Minimum card requirement: xx | ✅ | ✅ | ✅ | | | ✅ | ✅ | | | ✅ | | ✅ | ✅ | 128k  | [Qwen3-Dense](../../tutorials/models/Qwen3-Dense.md) |
 
 >**Note**: This is a simplified example. Please refer to the complete feature matrix for the full table.
 
