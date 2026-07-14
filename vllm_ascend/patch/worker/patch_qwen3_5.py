@@ -226,6 +226,7 @@ Qwen3_5ForConditionalGeneration.supports_multimodal_pruning = True
 # Delete recompute_mrope_positions stub (inherits from parent)
 del Qwen3_5ForConditionalGeneration.recompute_mrope_positions
 
+
 # config stuff used by EVS
 def _inject_evs_attrs(self, vllm_config):
     self.is_multimodal_pruning_enabled = self.multimodal_config.is_multimodal_pruning_enabled()
@@ -238,23 +239,28 @@ def _inject_evs_attrs(self, vllm_config):
     self.visual_dim = config.vision_config.out_hidden_size
     self.multiscale_dim = self.visual_dim * self.deepstack_num_level
 
+
 # wrap __init__ on both classes to inject the config stuff
 # MoE class patched separately as it does not inherit init from dense
 
 _orig_qwen35_init = Qwen3_5ForConditionalGeneration.__init__
+
 
 @functools.wraps(_orig_qwen35_init)
 def _patched_qwen35_init(self, *, vllm_config, prefix="model"):
     _orig_qwen35_init(self, vllm_config=vllm_config, prefix=prefix)
     _inject_evs_attrs(self, vllm_config)
 
+
 Qwen3_5ForConditionalGeneration.__init__ = _patched_qwen35_init
 
 _orig_qwen35_moe_init = Qwen3_5MoeForConditionalGeneration.__init__
+
 
 @functools.wraps(_orig_qwen35_moe_init)
 def _patched_qwen35_moe_init(self, *, vllm_config, prefix="model"):
     _orig_qwen35_moe_init(self, vllm_config=vllm_config, prefix=prefix)
     _inject_evs_attrs(self, vllm_config)
+
 
 Qwen3_5MoeForConditionalGeneration.__init__ = _patched_qwen35_moe_init
