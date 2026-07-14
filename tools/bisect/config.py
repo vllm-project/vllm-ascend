@@ -218,7 +218,7 @@ class BisectOptions:
     # ``done`` file on every leader exit path).
     release_file: str | None = None
     # Per-trial pytest timeout (seconds).
-    trial_timeout_s: float = 5400.0
+    trial_timeout_s: float = 7200.0
 
     @property
     def is_master(self) -> bool:
