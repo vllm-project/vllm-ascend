@@ -35,7 +35,16 @@ from vllm.entrypoints.openai.engine.protocol import (
     FunctionCall,
     ToolCall,
 )
-from vllm.tool_parsers.deepseekv4_tool_parser import DeepSeekV4ToolParser
+
+from vllm_ascend.utils import vllm_version_is
+
+if not vllm_version_is("0.23.0"):
+    raise RuntimeError(
+        "patch_deepseek_v4_tool_call_parser is only for vLLM 0.23.0; "
+        "newer vLLM versions use the upstream DeepSeekV4 engine parser."
+    )
+
+from vllm.tool_parsers.deepseekv4_tool_parser import DeepSeekV4ToolParser  # type: ignore[import-not-found]
 
 ESCAPED_ARGUMENTS_PARAM_NAME = "__vllm_param_arguments__"
 

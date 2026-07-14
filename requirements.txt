@@ -35,5 +35,5 @@ memfabric_hybrid
 memcache_hybrid
 
 arctic-inference==0.1.1
-transformers==5.5.4
+transformers==5.13.0
 fastapi<0.124.0

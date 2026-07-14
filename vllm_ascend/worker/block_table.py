@@ -8,6 +8,8 @@ from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.block_table import _compute_slot_mapping_kernel
 from vllm.v1.worker.cp_utils import get_total_cp_world_size
 
+from vllm_ascend.utils import vllm_version_is
+
 
 class BlockTable:
     def __init__(
@@ -157,6 +159,21 @@ class BlockTable:
             )
             self._compute_pcp_dcp_slot_mapping(req_indices, positions)
         else:
+            kernel_kwargs = {
+                "TOTAL_CP_WORLD_SIZE": total_cp_world_size,
+                "TOTAL_CP_RANK": total_cp_rank,
+                "CP_KV_CACHE_INTERLEAVE_SIZE": self.cp_kv_cache_interleave_size,
+                "PAD_ID": PAD_SLOT_ID,
+                "BLOCK_SIZE": 1024,
+            }
+            if not vllm_version_is("0.23.0"):
+                # vLLM #40996 split physical KV blocks into kernel blocks in
+                # the slot-mapping kernel. These are required constexprs on
+                # main; the v0.23.0 kernel does not accept them.
+                kernel_kwargs.update(
+                    KV_CACHE_BLOCK_SIZE=self.physical_block_size,
+                    BLOCKS_PER_KV_BLOCK=self.blocks_per_phys_block,
+                )
             _compute_slot_mapping_kernel[(num_reqs + 1,)](
                 num_tokens,
                 self.max_num_batched_tokens,
@@ -166,11 +183,7 @@ class BlockTable:
                 self.block_table.gpu.stride(0),
                 self.block_size,
                 self.slot_mapping.gpu,
-                TOTAL_CP_WORLD_SIZE=total_cp_world_size,
-                TOTAL_CP_RANK=total_cp_rank,
-                CP_KV_CACHE_INTERLEAVE_SIZE=self.cp_kv_cache_interleave_size,
-                PAD_ID=PAD_SLOT_ID,
-                BLOCK_SIZE=1024,
+                **kernel_kwargs,
             )
 
     def compute_slot_mapping_draft(self, req_indices: np.ndarray, positions: np.ndarray) -> None:

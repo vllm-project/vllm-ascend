@@ -10,6 +10,7 @@ from vllm.v1.metrics.stats import CachingMetrics, PrefixCacheStats
 from vllm.v1.request import Request
 
 from vllm_ascend.core.single_type_kv_cache_manager import get_manager_for_kv_cache_spec
+from vllm_ascend.utils import vllm_version_is
 
 
 class CPUCacheStats:
@@ -73,9 +74,12 @@ class CPUKVCacheManager:
             block_pool=self.block_pool,
             enable_caching=True,
             kv_cache_group_id=0,
-            max_num_batched_tokens=max_model_len,
             max_model_len=max_model_len,
         )
+        if vllm_version_is("0.23.0"):
+            manager_kwargs["max_num_batched_tokens"] = max_model_len
+        else:
+            manager_kwargs["max_in_flight_tokens"] = max_model_len
         manager_kwargs["scheduler_block_size"] = kv_cache_spec.block_size
         self.single_type_manager = get_manager_for_kv_cache_spec(**manager_kwargs)
         # Record kv block hashes, avoid redundant computation.
