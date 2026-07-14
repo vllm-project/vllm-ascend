@@ -2176,6 +2176,11 @@ class NPUModelRunner(GPUModelRunner):
                     num_reqs_padded,
                     self.parallel_config.num_ubatches,
                 )
+                logger.info(
+                    "ubatch_slices: %s, ubatch_slices_padded: %s",
+                    ubatch_slices,
+                    ubatch_slices_padded,
+                )
 
                 if self.dynamic_eplb:
                     self.update_eplb_heat_collection_status(num_tokens_padded)
@@ -2317,6 +2322,7 @@ class NPUModelRunner(GPUModelRunner):
         # Build AFD metadata (if AFD is enabled) so it can be threaded through
         # the forward context to model layers.
         afd_metadata = self._build_afd_metadata(ubatch_slices, num_tokens_unpadded)
+        logger.info("afd_metadata: %s", afd_metadata)
 
         # Run forward pass
         clear_kv_metadata = self.speculative_config is None
@@ -2351,6 +2357,7 @@ class NPUModelRunner(GPUModelRunner):
             # min_size attention ranks actually send (1-to-N mapping).
             if self.afd_config and self.afd_connector:
                 dp_metadata_list = self._build_afd_dp_metadata_list(ubatch_slices)
+                logger.info("dp_metadata_list: %s", dp_metadata_list)
                 self.afd_connector.update_state_from_dp_metadata(
                     dp_metadata_list, False)
                 if self.afd_connector.is_attn_top_min_size_rank(

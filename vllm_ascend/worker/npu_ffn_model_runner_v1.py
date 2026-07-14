@@ -438,7 +438,8 @@ class NPUFFNModelRunner(NPUModelRunner, GPUFFNModelRunner):
                      dp_metadata_list: dict | None = None):
         """Run FFN computation for graph capture or replay."""
         is_ubatch = dp_metadata_list is not None and len(dp_metadata_list) > 1
-        num_ubatches = self.parallel_config.num_ubatches if is_ubatch else 1
+        # num_ubatches = self.parallel_config.num_ubatches if is_ubatch else 1
+        num_ubatches = 3 if is_ubatch else 1
         rank_ffn_output = None
         # logger.info("_ffn_forward pre max_num_tokens:%s", self.max_num_tokens)
 
