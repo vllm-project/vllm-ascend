@@ -77,35 +77,25 @@ If multi-node deployment is required, please follow the [Verify Multi-node Commu
 - Provide specific installation steps and commands (parameters should be explained with meaning, value range, units, etc.).
 - **Version Number Writing Specification:** Prefer using placeholders (values are centrally configured). If a fixed value is used and it differs from the documented validation version, a comment MUST be added stating: "Please replace with your actual version."
 - Provide verification commands and expected status: guide users to check the installation result by executing commands (e.g., docker ps), specifying success criteria such as status codes or output characteristics.
-- When content involves multiple hardware series (e.g., A3/A2), the `tab-set` markup syntax must be used to present them in separate tabs,and the tabs should be arranged with the newest models first.
+- When multiple hardware series (e.g., A3/A2 series) are involved, the MkDocs tab syntax `=== "tab name"` must be used to present content in separate tabs, with tabs ordered by newer models first.
 
 ### 4.1 Docker Image Installation
 
 **Example:**
 
-:::::{tab-set}
-:sync-group: install
+=== "A3 series"
 
-::::{tab-item} A3 series
-:sync: A3
+    ```bash
+    export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+    docker run ...
+    ```
 
-```bash
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
-docker run ...
-```
+=== "A2 series"
 
-::::
-
-::::{tab-item} A2 series
-:sync: A2
-
-```bash
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
-docker run ...
-```
-
-::::
-:::::
+    ```bash
+    export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+    docker run ...
+    ```
 
 ### 4.2 Source Code Installation
 
@@ -120,8 +110,8 @@ docker run ...
 - Describe the architectural characteristics and applicable scenarios of single-node deployment.
 - Provide startup command templates and key parameter descriptions.
 - Provide service verification methods (e.g., curl commands) and expected results, specifying success indicators (e.g., 200 OK).
-- When content involves multiple hardware series (e.g., A3/A2), the `tab-set` markup syntax must be used to present them in separate tabs,and the tabs should be arranged with the newest models first.
 - Below the startup command, provide guidance on common issues; if already described in the public FAQ, a direct link may be provided.
+- When multiple hardware series (e.g., A3/A2 series) are involved, the MkDocs tab syntax `=== "tab name"` must be used to present content in separate tabs, with tabs ordered by newer models first.
 
 **Example:**
 
