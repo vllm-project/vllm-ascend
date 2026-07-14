@@ -116,8 +116,8 @@ bool SparseAttnSharedkvMetadataCpuKernel::CheckSingleParam()
         return false;
     }
     // ori_win_left 校验
-    if (winLeft_ != 127) {
-        KERNEL_LOG_ERROR("ori_win_left should only be 127, but got %ld", winLeft_);
+    if (winLeft_ < 0) {
+        KERNEL_LOG_ERROR("ori_win_left should be non-negative, but got %ld", winLeft_);
         return false;
     }
     // layout_q 校验

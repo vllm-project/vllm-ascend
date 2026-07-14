@@ -13,6 +13,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.attention.abstract import DSAAttentionImpl
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.dsa_window import build_dspark_swa_metadata_for_drafting
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, split_decodes_and_prefills
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.device_op import DeviceOperator
@@ -98,6 +99,10 @@ class AscendDSAReqMetadata:
     qli_metadata: torch.Tensor = None
     cu_cmp_seqlen_list: torch.Tensor = None
     attn_mask: torch.Tensor | None = None
+    ori_win_left: int | None = None
+    ori_win_right: int | None = None
+    dspark_swa_indices: torch.Tensor | None = None
+    dspark_swa_lens: torch.Tensor | None = None
 
 
 @dataclass
@@ -469,6 +474,21 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
         assert self.spec_slot_mapping is not None
         slot_mapping = self.spec_slot_mapping[draft_index - 1][: self.num_actual_tokens]
+        ori_win_left, ori_win_right, dspark_swa_indices, dspark_swa_lens = build_dspark_swa_metadata_for_drafting(
+            self.vllm_config,
+            common_attn_metadata,
+            self.spec_slot_mapping[draft_index - 1],
+            self.block_size,
+        )
+        if dspark_swa_indices is not None:
+            if dspark_swa_lens is None:
+                raise ValueError("DSpark SWA indices require matching lengths")
+            pad_tokens = num_tokens_pad - dspark_swa_indices.shape[0]
+            if pad_tokens > 0:
+                dspark_swa_indices = F.pad(dspark_swa_indices, (0, 0, 0, 0, 0, pad_tokens), value=-1)
+                dspark_swa_lens = F.pad(dspark_swa_lens, (0, pad_tokens), value=0)
+            dspark_swa_indices = dspark_swa_indices[local_start:local_end_with_pad]
+            dspark_swa_lens = dspark_swa_lens[local_start:local_end_with_pad]
 
         num_heads = self.model_config.hf_config.num_attention_heads
         metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op()
@@ -504,8 +524,8 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             batch_size=num_reqs,
             cmp_ratio=1,
             ori_mask_mode=4,
-            ori_win_left=self.model_config.hf_config.sliding_window - 1,
-            ori_win_right=0,
+            ori_win_left=ori_win_left,
+            ori_win_right=ori_win_right,
             layout_q="TND",
             layout_kv="PA_ND",
             has_ori_kv=True,
@@ -537,6 +557,10 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             sas_metadata=sas_metadata,
             qli_metadata=None,
             cu_cmp_seqlen_list=None,
+            ori_win_left=ori_win_left,
+            ori_win_right=ori_win_right,
+            dspark_swa_indices=dspark_swa_indices,
+            dspark_swa_lens=dspark_swa_lens,
         )
 
     def _num_compressor_metadata_rows(
@@ -1431,6 +1455,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
                 extra_attn_kwargs, cu_seqlens_ori_kv=local_seq_lengths_query
             )
 
+        ori_win_left = self.window_size - 1 if req_metadata.ori_win_left is None else req_metadata.ori_win_left
         common_attn_kwargs = dict(
             cu_seqlens_q=local_seq_lengths_query,
             seqused_kv=local_seq_lengths_key,
@@ -1438,14 +1463,15 @@ class AscendDSACPImpl(DSAAttentionImpl):
             softmax_scale=self.softmax_scale,
             cmp_ratio=max(self.compress_ratio, 1),
             ori_mask_mode=4,
-            ori_win_left=self.window_size - 1,
-            ori_win_right=0,
+            ori_win_left=ori_win_left,
+            ori_win_right=req_metadata.ori_win_right or 0,
             layout_q="TND",
             layout_kv="PA_ND",
             **extra_attn_kwargs,
         )
 
         if self.compress_ratio <= 1:
+            common_attn_kwargs["ori_sparse_indices"] = req_metadata.dspark_swa_indices
             attn_output = attn_op(
                 q,
                 ori_kv=swa_kv_cache,

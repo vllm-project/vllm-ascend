@@ -171,9 +171,6 @@ ge::graphStatus SASInfoParser::CheckRequiredParaExistence() const
 
 ge::graphStatus SASInfoParser::CheckUnrequiredParaExistence() const
 {
-    OP_CHECK_IF(opParamInfo_.oriSparseIndices.tensor != nullptr || opParamInfo_.oriSparseIndices.desc != nullptr,
-                OP_LOGE(opName_, "Currently, ori_sparse_indices must be a nullptr"),
-                return ge::GRAPH_FAILED);
     return ge::GRAPH_SUCCESS;
 }
 
@@ -404,6 +401,17 @@ uint32_t SASInfoParser::GetAxisNum(const gert::Shape &shape, const SASAxis &axis
     return HasAxis(axis, layout, shape) ? shape.GetDim(GetAxisIdx(axis, layout)) : invalidDimValue_;
 }
 
+uint32_t SASInfoParser::GetSparseIndexWidth(const gert::Shape &shape, const SASLayout &layout) const
+{
+    if (layout == SASLayout::TND && shape.GetDimNum() == DIM_NUM_THREE) {
+        return shape.GetDim(DIM_NUM_THREE - 1);
+    }
+    if (layout == SASLayout::BSND && shape.GetDimNum() == DIM_NUM_FOUR) {
+        return shape.GetDim(DIM_NUM_FOUR - 1);
+    }
+    return 0;
+}
+
 void SASInfoParser::SetSASShape()
 {
     qShape_ = opParamInfo_.q.shape->GetStorageShape();
@@ -414,6 +422,11 @@ void SASInfoParser::SetSASShape()
     }
     if (opParamInfo_.cmpKv.tensor != nullptr) {
         cmpKvShape_ = opParamInfo_.cmpKv.tensor->GetStorageShape();
+    }
+    if (opParamInfo_.oriSparseIndices.tensor != nullptr) {
+        oriSparseIndicesShape_ = opParamInfo_.oriSparseIndices.tensor->GetStorageShape();
+        hasOriSparseIndices_ = true;
+        oriSparseIndexWidth_ = GetSparseIndexWidth(oriSparseIndicesShape_, oriSparseIndicesLayout_);
     }
     if (perfMode_ == SASTemplateMode::SCFA_TEMPLATE_MODE)
     {
@@ -788,6 +801,8 @@ void SASInfoParser::GenerateInfo(SASTilingInfo &sasInfo)
             opParamInfo_.oriKv.tensor->GetStorageShape().GetDim(0) : 0;
     }
     sasInfo.sparseBlockSize = 1;
+    sasInfo.hasOriSparseIndices = hasOriSparseIndices_;
+    sasInfo.oriSparseIndexWidth = oriSparseIndexWidth_;
     sasInfo.oriBlockSize = oriBlockSize_;
     sasInfo.cmpBlockSize = cmpBlockSize_;
     sasInfo.blockTypeSize = sizeof(float);
@@ -893,6 +908,8 @@ void SASTilingCheck::Init()
     oriWinRight_ = sasInfo_.oriWinRight;
     kvLayout_ = sasInfo_.kvLayout;
     outLayout_ = sasInfo_.outLayout;
+    hasOriSparseIndices_ = sasInfo_.hasOriSparseIndices;
+    oriSparseIndexWidth_ = sasInfo_.oriSparseIndexWidth;
 }
 
 void SASTilingCheck::LogErrorDtypeSupport(const std::vector<ge::DataType> &expectDtypeList,
@@ -1064,6 +1081,52 @@ ge::graphStatus SASTilingCheck::CheckSingleParaKvHeadNums() const
     return ge::GRAPH_SUCCESS;
 }
 
+ge::graphStatus SASTilingCheck::CheckSingleParaOriSparseIndices() const
+{
+    if (!hasOriSparseIndices_) {
+        return ge::GRAPH_SUCCESS;
+    }
+    OP_CHECK_IF(sasInfo_.perfMode != SASTemplateMode::SWA_TEMPLATE_MODE,
+                OP_LOGE(opName_, "ori_sparse_indices is only supported with SWA template mode."),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(kvLayout_ != SASLayout::PA_ND,
+                OP_LOGE(opName_, "ori_sparse_indices is only supported with PA_ND kv layout."),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(qLayout_ != SASLayout::TND,
+                OP_LOGE(opName_, "ori_sparse_indices currently supports TND query layout only."),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(opParamInfo_.oriSparseIndices.tensor->GetStorageShape().GetShapeSize() == 0,
+                OP_LOGE(opName_, "ori_sparse_indices cannot be empty tensor."),
+                return ge::GRAPH_FAILED);
+
+    const std::vector<size_t> oriSparseIndicesDimNumList = {DIM_NUM_THREE};
+    if (ge::GRAPH_SUCCESS != CheckDtypeSupport(opParamInfo_.oriSparseIndices.desc, ORI_SPARSE_INDICES) ||
+        ge::GRAPH_SUCCESS != CheckLayoutSupport(oriSparseIndicesLayout_, ORI_SPARSE_INDICES) ||
+        ge::GRAPH_SUCCESS != CheckDimNumSupport(&opParamInfo_.oriSparseIndices.tensor->GetShape(),
+                                                oriSparseIndicesDimNumList, ORI_SPARSE_INDICES) ||
+        ge::GRAPH_SUCCESS != CheckDimNumInLayoutSupport(oriSparseIndicesLayout_,
+                                                        &opParamInfo_.oriSparseIndices.tensor->GetShape(),
+                                                        ORI_SPARSE_INDICES)) {
+        return ge::GRAPH_FAILED;
+    }
+
+    const gert::Shape &shape = opParamInfo_.oriSparseIndices.tensor->GetStorageShape();
+    OP_CHECK_IF(shape.GetDim(0) != s1Size_,
+                OP_LOGE(opName_, "ori_sparse_indices T(%ld) should equal query T(%u).", shape.GetDim(0), s1Size_),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(shape.GetDim(1) != n2Size_,
+                OP_LOGE(opName_, "ori_sparse_indices N2(%ld) should equal kv head num(%u).",
+                         shape.GetDim(1), n2Size_),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(oriSparseIndexWidth_ == 0 || oriSparseIndexWidth_ > SPARSE_LIMIT ||
+                    (oriSparseIndexWidth_ % 128U) != 0U,
+                OP_LOGE(opName_,
+                        "ori_sparse_indices K should be a positive 128-aligned value not greater than %u, got %u.",
+                        SPARSE_LIMIT, oriSparseIndexWidth_),
+                return ge::GRAPH_FAILED);
+    return ge::GRAPH_SUCCESS;
+}
+
 ge::graphStatus SASTilingCheck::CheckSingleParaCmpSparseIndices() const
 {
     if (sasInfo_.perfMode == optiling::SASTemplateMode::SCFA_TEMPLATE_MODE){
@@ -1230,6 +1293,7 @@ ge::graphStatus SASTilingCheck::CheckSinglePara() const
         ge::GRAPH_SUCCESS != CheckSingleParaCmpKv() ||
         ge::GRAPH_SUCCESS != CheckSingleParaNumHeads() ||
         ge::GRAPH_SUCCESS != CheckSingleParaKvHeadNums() ||
+        ge::GRAPH_SUCCESS != CheckSingleParaOriSparseIndices() ||
         ge::GRAPH_SUCCESS != CheckSingleParaCmpSparseIndices() ||
         ge::GRAPH_SUCCESS != CheckSingleParaOriBlockTable() ||
         ge::GRAPH_SUCCESS != CheckSingleParaCmpBlockTable() ||
@@ -1362,12 +1426,21 @@ ge::graphStatus SASTilingCheck::CheckFeatureShape() const
     OP_CHECK_IF(*opParamInfo_.cmpMaskMode != 3,
                 OP_LOGE(opName_, "cmp_mask_mode should be 3, but got %d", *opParamInfo_.cmpMaskMode),
                 return ge::GRAPH_FAILED);
-    OP_CHECK_IF(oriWinLeft_ != 127,
-                OP_LOGE(opName_, "ori_win_left should be 127, but got %d", oriWinLeft_),
-                return ge::GRAPH_FAILED);
-    OP_CHECK_IF(oriWinRight_ != 0,
-                OP_LOGE(opName_, "ori_win_right should be 0, but got %d", oriWinRight_),
-                return ge::GRAPH_FAILED);
+    if (hasOriSparseIndices_) {
+        OP_CHECK_IF(oriWinLeft_ < 0,
+                    OP_LOGE(opName_, "ori_win_left should be non-negative, but got %ld", oriWinLeft_),
+                    return ge::GRAPH_FAILED);
+        OP_CHECK_IF(oriWinRight_ != 0,
+                    OP_LOGE(opName_, "ori_win_right should be 0, but got %ld", oriWinRight_),
+                    return ge::GRAPH_FAILED);
+    } else {
+        OP_CHECK_IF(oriWinLeft_ != 127,
+                    OP_LOGE(opName_, "ori_win_left should be 127, but got %ld", oriWinLeft_),
+                    return ge::GRAPH_FAILED);
+        OP_CHECK_IF(oriWinRight_ != 0,
+                    OP_LOGE(opName_, "ori_win_right should be 0, but got %ld", oriWinRight_),
+                    return ge::GRAPH_FAILED);
+    }
     return ge::GRAPH_SUCCESS;
 }
 
@@ -1604,6 +1677,8 @@ ge::graphStatus SparseAttnSharedkvTiling::DoOpTiling(SASTilingInfo *tilingInfo)
     tilingData_.baseParams.set_oriWinLeft(tilingInfo->oriWinLeft);
     tilingData_.baseParams.set_oriWinRight(tilingInfo->oriWinRight);
     tilingData_.baseParams.set_sparseBlockSize(tilingInfo->sparseBlockSize);
+    tilingData_.baseParams.set_hasOriSparseIndices(tilingInfo->hasOriSparseIndices);
+    tilingData_.baseParams.set_oriSparseIndexWidth(tilingInfo->oriSparseIndexWidth);
     tilingData_.baseParams.set_returnSoftmaxLse(tilingInfo->returnSoftmaxLse);
 
     tilingData_.cmpParams.set_cmpMaxBlockNumPerBatch(tilingInfo->cmpMaxBlockNumPerBatch);
