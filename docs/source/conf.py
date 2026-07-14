@@ -1,3 +1,4 @@
+# "main_vllm_tag": "v0.23.0"
 """Documentation configuration shim.
 
 The legacy Sphinx ``conf.py`` exposed version variables as JSON when

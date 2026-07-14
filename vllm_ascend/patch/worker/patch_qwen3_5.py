@@ -33,13 +33,13 @@ from vllm.model_executor.models.qwen3_next import Qwen3NextAttention
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
-from vllm_ascend.utils import is_310p
+from vllm_ascend.utils import is_310p, vllm_version_is
 
 _GDN_PATCH_TARGET = _GDNBaseCls
 
 
 class AscendQwen3NextAttention(Qwen3NextAttention):
-    def forward(self, positions: torch.Tensor, output: torch.Tensor, hidden_states: torch.Tensor):
+    def forward(self, positions: torch.Tensor, hidden_states: torch.Tensor, output: torch.Tensor | None = None):
         qkv, _ = self.qkv_proj(hidden_states)
         if "qwen3_5" in self.config.model_type:
             cos_sin = self.rotary_emb.cos_sin_cache[positions]
@@ -84,7 +84,13 @@ class AscendQwen3NextAttention(Qwen3NextAttention):
             gate = torch.sigmoid(gate)
             attn_output = attn_output * gate
 
-        output[:], _ = self.o_proj(attn_output)
+        if vllm_version_is("v0.23.0"):
+            result, _ = self.o_proj(attn_output)
+            if output is not None:
+                output[:] = result
+            return result
+        else:
+            output[:], _ = self.o_proj(attn_output)
 
 
 class AscendQwen3_5DecoderLayer(Qwen3_5DecoderLayer):
