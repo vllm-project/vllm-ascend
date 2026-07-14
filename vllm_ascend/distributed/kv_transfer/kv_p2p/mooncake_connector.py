@@ -1883,11 +1883,13 @@ class MooncakeConnectorScheduler:
             return
 
         updated_mapping: dict[str, dict[str, Any]] = {}
+        kv_port = self.vllm_config.kv_transfer_config.kv_port
         for metadata_key, rank_metadata in metadata.items():
             port_offset = self._port_offset_from_handshake_metadata(rank_metadata, metadata_key)
             updated_mapping[str(port_offset)] = {
                 "host": rank_metadata.local_ip,
                 "engine_id": rank_metadata.engine_id,
+                "handshake_port": kv_port + port_offset,
             }
 
         self.multi_nodes_meta_mapping.update(updated_mapping)
@@ -2750,21 +2752,26 @@ class MooncakeConnectorWorker:
             local_remote_block_port_mappings: dict[int, list[list[int]]],
         ) -> dict[int, RemotePortInfo]:
             remote_port_send_num: dict[int, RemotePortInfo] = {}
-            port_offsets: set[int] = set(range(prefill_tp_size * meta.remote_pcp_size))
-            for key in meta.remote_multi_nodes_meta_mapping:
-                port_offsets.add(int(key))
+            remote_ports: set[int] = set(
+                range(meta.remote_port, meta.remote_port + prefill_tp_size * meta.remote_pcp_size)
+            )
+            kv_port = self.vllm_config.kv_transfer_config.kv_port
+            for key, remote_host_info in meta.remote_multi_nodes_meta_mapping.items():
+                remote_ports.add(int(remote_host_info.get("handshake_port", kv_port + int(key))))
             for remote_port_head_list in local_remote_block_port_mappings.values():
                 for remote_port_list in remote_port_head_list:
                     for remote_port in remote_port_list:
-                        port_offsets.add(remote_port - meta.remote_port)
+                        remote_ports.add(remote_port)
 
-            for port_offset in port_offsets:
-                remote_host_info = meta.remote_multi_nodes_meta_mapping.get(str(port_offset), None)
-                if remote_host_info is None:
-                    remote_host = meta.remote_host
-                else:
-                    remote_host = remote_host_info["host"]
-                remote_port_send_num[meta.remote_port + port_offset] = {"num": 0, "host": remote_host}
+            for remote_port in remote_ports:
+                remote_host, _ = self._get_remote_host_info_by_port(
+                    meta.remote_port,
+                    remote_port,
+                    meta.remote_host,
+                    meta.remote_engine_id,
+                    meta.remote_multi_nodes_meta_mapping,
+                )
+                remote_port_send_num[remote_port] = {"num": 0, "host": remote_host}
 
             for remote_port_head_list in local_remote_block_port_mappings.values():
                 for remote_port_list in remote_port_head_list:
@@ -3424,10 +3431,17 @@ class MooncakeConnectorWorker:
         remote_engine_id: str,
         remote_multi_nodes_meta_mapping: dict,
     ):
-        rank = str(remote_handshake_port - base_port)
-        if remote_multi_nodes_meta_mapping is None or remote_multi_nodes_meta_mapping.get(rank) is None:
+        if remote_multi_nodes_meta_mapping is None:
             return remote_host, remote_engine_id
-        info = remote_multi_nodes_meta_mapping[rank]
+
+        kv_port = self.vllm_config.kv_transfer_config.kv_port
+        rank = str(remote_handshake_port - kv_port)
+        info = remote_multi_nodes_meta_mapping.get(rank)
+        if info is None:
+            rank = str(remote_handshake_port - base_port)
+            info = remote_multi_nodes_meta_mapping.get(rank)
+        if info is None:
+            return remote_host, remote_engine_id
         return info.get("host", remote_host), info.get("engine_id", remote_engine_id)
 
     def _prefill_get_remote_rank(self, req_id: str) -> list[int]:
