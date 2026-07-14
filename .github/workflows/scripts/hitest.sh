@@ -1,4 +1,5 @@
 #!/bin/bash
+set -x
 set -euo pipefail
 
 MIN_FREE_GB=3
