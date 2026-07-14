@@ -1,0 +1,75 @@
+# ==========================================
+# Shared Configurations
+# ==========================================
+
+_model: &model "google/gemma-4-E2B-it"
+
+_envs: &envs
+  VLLM_USE_MODELSCOPE: "true"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  HCCL_OP_EXPANSION_MODE: "AIV"
+  HCCL_BUFFSIZE: "1024"
+  OMP_NUM_THREADS: "1"
+  TASK_QUEUE_ENABLE: "1"
+  SERVER_PORT: "DEFAULT_PORT"
+  VLLM_ENGINE_READY_TIMEOUT_S: "3000"
+  VLLM_RPC_TIMEOUT: "6000"
+
+_server_cmd: &server_cmd
+  - "--no-enable-prefix-caching"
+  - "--tensor-parallel-size"
+  - "1"
+  - "--port"
+  - "$SERVER_PORT"
+  - "--max-model-len"
+  - "32768"
+  - "--max-num-batched-tokens"
+  - "8192"
+  - "--max-num-seqs"
+  - "8"
+  - "--gpu-memory-utilization"
+  - "0.9"
+  - "--trust-remote-code"
+
+_api_keyword_args: &api_keyword_args
+  max_tokens: 64
+  temperature: 1.0
+  top_p: 0.95
+  top_k: 64
+
+_benchmarks: &benchmarks
+  acc_gpqa:
+    case_type: accuracy
+    dataset_path: vllm-ascend/gpqa
+    request_conf: vllm_api_general_chat
+    dataset_conf: gpqa/gpqa_gen_0_shot_cot_chat_prompt
+    max_out_len: 8192
+    batch_size: 8
+    baseline: 30
+    threshold: 5
+    temperature: 1.0
+    top_p: 0.95
+    top_k: 64
+    ignore_eos: false
+
+# ==========================================
+# ACTUAL TEST CASES
+# ==========================================
+
+test_cases:
+  - name: "Gemma4-E2B-full-decode-graph"
+    model: *model
+    envs:
+      <<: *envs
+    prompts:
+      - "Explain briefly why ACLGraph output should match eager output."
+    api_keyword_args:
+      <<: *api_keyword_args
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--compilation-config"
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,2,4,8]}'
+    test_content:
+      - "chat_completion"
+    benchmarks:
+      <<: *benchmarks
