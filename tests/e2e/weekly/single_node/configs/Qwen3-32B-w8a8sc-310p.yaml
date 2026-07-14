@@ -44,3 +44,14 @@ test_cases:
         request_rate: 0
         baseline: 105.26
         threshold: 0.95
+      acc:
+        case_type: accuracy
+        dataset_path: vllm-ascend/ceval
+        request_conf: vllm_api_general_chat
+        dataset_conf: ceval/ceval_gen_0_shot_cot_chat_prompt
+        max_out_len: 10240
+        batch_size: 32
+        baseline: 84.8
+        threshold: 1
+        temperature: 0
+        top_p: 0.95
