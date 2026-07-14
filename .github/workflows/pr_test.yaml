@@ -225,7 +225,7 @@ jobs:
   generate-hitest:
     name: Generate hitest recommendations
     needs: lint-and-select-tests
-    if: ${{ needs.lint-and-select-tests.outputs.has_tests == 'true' }}
+    # if: ${{ needs.lint-and-select-tests.outputs.has_tests == 'true' }}
     uses: ./.github/workflows/manual-hitest.yaml
     secrets: inherit
 
