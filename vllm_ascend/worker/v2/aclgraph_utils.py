@@ -39,6 +39,20 @@ from vllm_ascend.compilation.acl_graph import set_graph_params, update_full_grap
 from vllm_ascend.worker.v2.utils import communicator_switch
 
 
+def collect_captured_token_sizes(capture_descs: dict) -> list[int]:
+    """Collect the actual per-graph token counts that will be captured.
+
+    With speculative decoding under FULL_DECODE_ONLY, each raw
+    ``cudagraph_capture_size`` is rounded up to a multiple of
+    ``decode_query_len`` (see ``CudaGraphManager._init_candidates``), so the
+    real graph sizes differ from ``compilation_config.cudagraph_capture_sizes``.
+    The attention backend keys its per-size graph params (events/handles/...)
+    by these rounded token counts, so they must be derived from the actual
+    capture descriptors, not the raw config sizes.
+    """
+    return sorted({desc.num_tokens for descs in capture_descs.values() for desc in descs})
+
+
 class ModelAclGraphManager(ModelCudaGraphManager):
     """ACL Model Cuda Graph Manager for Ascend NPUs."""
 
@@ -62,8 +76,11 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         # when call `run_fullgraph` method in CudaGraphManager,
         # then we don't need to # copy `execute_model` method in `NPUModelRunner` class.
         self.model_runner = model_runner
-        # capture_sizes sorts in ascending order.
-        self.capture_sizes = sorted(self.compilation_config.cudagraph_capture_sizes)
+        # The attention backend keys its per-size graph params by the actual
+        # captured token counts (rounded up to decode_query_len when using
+        # speculative decoding), so derive them from the capture descriptors
+        # instead of the raw config sizes.
+        self.capture_sizes = collect_captured_token_sizes(self._capture_descs)
         # vllm-ascend need to update graph params of attention backend.
         # so we need to set graph params before capture full graph.
         if super().needs_capture():

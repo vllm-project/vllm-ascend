@@ -19,7 +19,7 @@ from vllm_ascend.compilation.acl_graph import (
     set_draft_graph_prefill_params,
     update_full_graph_params,
 )
-from vllm_ascend.worker.v2.aclgraph_utils import model_capture_wrapper
+from vllm_ascend.worker.v2.aclgraph_utils import collect_captured_token_sizes, model_capture_wrapper
 from vllm_ascend.worker.v2.utils import communicator_switch
 
 
@@ -37,8 +37,11 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         # It is set by AscendDFlashSpeculator.init_cudagraph_manager after creation,
         # because upstream's init_cudagraph_manager creates the manager without it.
         self.speculator = speculator
-        # capture_sizes sorts in ascending order.
-        self.capture_sizes = sorted(self.compilation_config.cudagraph_capture_sizes)
+        # The attention backend keys its per-size graph params by the actual
+        # captured token counts (rounded up to decode_query_len when using
+        # speculative decoding), so derive them from the capture descriptors
+        # instead of the raw config sizes.
+        self.capture_sizes = collect_captured_token_sizes(self._capture_descs)
         # DFlash's parallel drafting forward is always multi-query, so it always
         # takes the multi-query (prefill) attention path. Hence we reuse the draft
         # prefill params bucket here and never use the decode bucket, keeping

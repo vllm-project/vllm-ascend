@@ -25,7 +25,7 @@ from vllm_ascend.compilation.acl_graph import (
     set_draft_graph_prefill_params,
     update_full_graph_params,
 )
-from vllm_ascend.worker.v2.aclgraph_utils import model_capture_wrapper
+from vllm_ascend.worker.v2.aclgraph_utils import collect_captured_token_sizes, model_capture_wrapper
 from vllm_ascend.worker.v2.utils import communicator_switch
 
 
@@ -46,8 +46,11 @@ class PrefillEagleAclGraphManager(PrefillSpeculatorCudaGraphManager):
         # when call `run_fullgraph` method in CudaGraphManager,
         # then we don't need to # copy `propose` method in `AscendEagleSpeculator` class.
         self.speculator = speculator
-        # capture_sizes sorts in ascending order.
-        self.capture_sizes = sorted(self.compilation_config.cudagraph_capture_sizes)
+        # The attention backend keys its per-size graph params by the actual
+        # captured token counts (rounded up to decode_query_len when using
+        # speculative decoding), so derive them from the capture descriptors
+        # instead of the raw config sizes.
+        self.capture_sizes = collect_captured_token_sizes(self._capture_descs)
         # vllm-ascend need to update draft graph params of attention backend.
         # so we need to set draft graph params before capture full graph.
         # `prefill` graph and `decodes` graph are different, `decode_query_len` can be used to distinguish them
@@ -135,8 +138,11 @@ class DecodeEagleAclGraphManager(DecodeSpeculatorCudaGraphManager):
         # when call `run_fullgraph` method in CudaGraphManager,
         # then we don't need to # copy `propose` method in `AscendEagleSpeculator` class.
         self.speculator = speculator
-        # capture_sizes sorts in ascending order.
-        self.capture_sizes = sorted(self.compilation_config.cudagraph_capture_sizes)
+        # The attention backend keys its per-size graph params by the actual
+        # captured token counts (rounded up to decode_query_len when using
+        # speculative decoding), so derive them from the capture descriptors
+        # instead of the raw config sizes.
+        self.capture_sizes = collect_captured_token_sizes(self._capture_descs)
         # vllm-ascend need to update draft graph params of attention backend.
         # so we need to set draft graph params before capture full graph.
         # `prefill` graph and `decodes` graph are different, `decode_query_len` can be used to distinguish them
