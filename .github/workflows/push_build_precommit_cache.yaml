@@ -80,6 +80,10 @@ jobs:
           git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
           pip install pre-commit
 
+      - name: Clean stale pre-commit cache
+        if: steps.check-cache.outputs.cache-hit != 'true'
+        run: pre-commit clean
+
       - name: Run pre-commit (populate cache)
         if: steps.check-cache.outputs.cache-hit != 'true'
         env:
