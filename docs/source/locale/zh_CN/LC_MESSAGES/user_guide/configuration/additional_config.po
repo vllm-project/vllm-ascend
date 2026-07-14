@@ -437,22 +437,6 @@ msgid "Whether to enable npugraph_ex graph mode."
 msgstr "是否启用 npugraph_ex 图模式。"
 
 #: ../../source/user_guide/configuration/additional_config.md
-msgid "`pa_shape_list`"
-msgstr "`pa_shape_list`"
-
-#: ../../source/user_guide/configuration/additional_config.md
-msgid "list"
-msgstr "list"
-
-#: ../../source/user_guide/configuration/additional_config.md
-msgid "`[]`"
-msgstr "`[]`"
-
-#: ../../source/user_guide/configuration/additional_config.md
-msgid "The custom shape list of page attention ops."
-msgstr "页面注意力算子的自定义形状列表。"
-
-#: ../../source/user_guide/configuration/additional_config.md
 msgid "`enable_kv_nz`"
 msgstr "`enable_kv_nz`"
 
