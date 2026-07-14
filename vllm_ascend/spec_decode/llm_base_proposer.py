@@ -1364,7 +1364,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             pcp_manager = getattr(self.runner, "pcp_manager", None)
             long_seq_args = None
             if pcp_manager is not None:
-                first_pass_inputs = pcp_manager.prepare_spec_mtp_drafting_inputs(
+                first_pass_inputs = pcp_manager.prepare_spec_decode_first_pass_inputs(
                     input_ids=self.input_ids[:num_tokens],
                     target_positions=target_positions,
                     target_hidden_states=target_hidden_states,

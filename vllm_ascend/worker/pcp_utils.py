@@ -1330,29 +1330,29 @@ class PCPManager:
         cu_num_tokens = torch.tensor(np.insert(np.cumsum(np.array(num_pcp_scheduled_tokens)), 0, 0))
         return num_tokens, input_ids, target_hidden_states, max_query_len, seq_lens, cu_num_tokens
 
-    def _get_spec_mtp_slot_inputs(
+    def _get_spec_decode_mtp_slot_inputs(
         self,
         ori_token_indices_to_sample: torch.Tensor,
-        num_mtp_reqs: int,
+        num_reqs: int,
         num_speculative_tokens: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Build device-side CP slot indices for MTP draft requests."""
         assert self.mtp_slot_pad is not None
-        query_start_loc = self.query_start_loc_pcp_full.gpu[: num_mtp_reqs + 1]
-        req_starts = query_start_loc[:num_mtp_reqs].to(torch.int64)
-        cu_num_tokens = query_start_loc[1 : num_mtp_reqs + 1].to(torch.int64)
+        query_start_loc = self.query_start_loc_pcp_full.gpu[: num_reqs + 1]
+        req_starts = query_start_loc[:num_reqs].to(torch.int64)
+        cu_num_tokens = query_start_loc[1 : num_reqs + 1].to(torch.int64)
         query_lens = cu_num_tokens - req_starts
         num_reject_tokens = cu_num_tokens - ori_token_indices_to_sample.to(torch.int64) - 1
         num_accept_tokens = query_lens - num_reject_tokens
         slot_idx_base = (
             req_starts * self.pcp_world_size
-            + self.pcp_req_offsets[:num_mtp_reqs] * (num_speculative_tokens - 1) * self.pcp_world_size
+            + self.pcp_req_offsets[:num_reqs] * (num_speculative_tokens - 1) * self.pcp_world_size
             + (num_accept_tokens - 1) * self.pcp_world_size
         )
         slot_indices = (slot_idx_base[:, None] + self.pcp_rank_offsets[: self.pcp_world_size]).reshape(-1)
         return slot_indices, self.mtp_slot_pad
 
-    def prepare_spec_mtp_drafting_inputs(
+    def prepare_spec_decode_first_pass_inputs(
         self,
         common_attn_metadata: Any,
         attn_metadata: Any,
@@ -1373,10 +1373,10 @@ class PCPManager:
             return None
 
         assert ori_token_indices_to_sample is not None
-        num_mtp_reqs = batch_size if is_dcp_prefill_batch else num_decode_reqs
-        slot_indices, slot_mapping = self._get_spec_mtp_slot_inputs(
+        num_reqs = batch_size if is_dcp_prefill_batch else num_decode_reqs
+        slot_indices, slot_mapping = self._get_spec_decode_mtp_slot_inputs(
             ori_token_indices_to_sample,
-            num_mtp_reqs,
+            num_reqs,
             num_speculative_tokens,
         )
 
