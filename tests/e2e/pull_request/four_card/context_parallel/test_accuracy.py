@@ -131,7 +131,7 @@ class AccuracyCase:
 
 
 def _run_accuracy_case(case: AccuracyCase) -> None:
-    runner_cls = DPVllmRunner if case.runner_kwargs.get("data_parallel_size", 1) > 2 else VllmRunner
+    runner_cls = DPVllmRunner if case.runner_kwargs.get("data_parallel_size", 1) > 1 else VllmRunner
     with runner_cls(case.model, **case.runner_kwargs) as runner:
         outputs = runner.generate_greedy(list(case.prompts), case.max_tokens)
 
