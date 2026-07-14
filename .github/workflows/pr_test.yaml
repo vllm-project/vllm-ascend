@@ -226,7 +226,6 @@ jobs:
     name: Generate hitest recommendations
     needs: lint-and-select-tests
     uses: ./.github/workflows/manual-hitest.yaml
-    with: {}
     secrets: inherit
 
   # Summary gate job — use this single, stable name as the required status check
