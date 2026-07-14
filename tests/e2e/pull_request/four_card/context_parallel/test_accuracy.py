@@ -30,7 +30,7 @@ import pytest
 from PIL import Image
 from vllm import SamplingParams
 
-from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
+from tests.e2e.conftest import DPVllmRunner, VllmRunner, wait_until_npu_memory_free
 
 DEEPSEEK_V2_LITE = "vllm-ascend/DeepSeek-V2-Lite-W8A8"
 DEEPSEEK_MTP = "wemaster/deepseek_mtp_main_random_bf16"
@@ -131,7 +131,8 @@ class AccuracyCase:
 
 
 def _run_accuracy_case(case: AccuracyCase) -> None:
-    with VllmRunner(case.model, **case.runner_kwargs) as runner:
+    runner_cls = DPVllmRunner if case.runner_kwargs.get("data_parallel_size", 1) > 2 else VllmRunner
+    with runner_cls(case.model, **case.runner_kwargs) as runner:
         outputs = runner.generate_greedy(list(case.prompts), case.max_tokens)
 
     if isinstance(case.expected_outputs[0], str):

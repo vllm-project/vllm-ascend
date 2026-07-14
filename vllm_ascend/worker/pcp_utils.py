@@ -1364,11 +1364,7 @@ class PCPManager:
     ) -> PCPSpecDecodeMTPInputs | None:
         """Prepare CP MTP metadata for decode and DCP-prefill batches."""
         is_decode_only_batch = num_decode_reqs > 0 and not is_prefill_batch
-        is_dcp_prefill_batch = (
-            self.pcp_world_size == 1
-            and self.dcp_world_size > 1
-            and is_prefill_batch
-        )
+        is_dcp_prefill_batch = self.pcp_world_size == 1 and self.dcp_world_size > 1 and is_prefill_batch
         if num_speculative_tokens <= 1 or not (is_decode_only_batch or is_dcp_prefill_batch):
             return None
 
@@ -1708,11 +1704,7 @@ class PCPManager:
             self.async_rebuild_num_tokens_full = total_num_scheduled_tokens
 
         # For mtpx, pre-allocate mtp slot_mapping here
-        needs_dcp_prefill_slots = (
-            self.pcp_world_size == 1
-            and self.dcp_world_size > 1
-            and with_prefill
-        )
+        needs_dcp_prefill_slots = self.pcp_world_size == 1 and self.dcp_world_size > 1 and with_prefill
         if self.decode_threshold > 2 and (not with_prefill or needs_dcp_prefill_slots):
             num_tokens_ori = sum(list(num_scheduled_tokens.values()))
             num_tokens_mtp = num_tokens_ori + self.num_reqs * (self.decode_threshold - 2)
