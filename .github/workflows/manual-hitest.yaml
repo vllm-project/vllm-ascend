@@ -20,16 +20,6 @@ name: Hitest
 on:
   workflow_dispatch:
   workflow_call:
-    inputs:
-      X_APIG_APPCODE:
-        type: string
-        required: true
-      APP_KEY:
-        type: string
-        required: true
-      APP_SECRET:
-        type: string
-        required: true
     secrets:
       X_APIG_APPCODE:
         required: true
