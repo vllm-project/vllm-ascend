@@ -1180,11 +1180,11 @@
 #      and the vLLM processor lazy registry
 #    Why:
 #       The supported vLLM refs currently straddle the HunyuanVL processor
-#       migration. v0.23.0 and v0.24.0 still bundle the processor, while the
+#       migration. v0.24.0 still bundles the processor, while the
 #       verified main ref uses the Transformers-native processor but predates
 #       the full Transformers 5.13 registry and prompt-protocol cleanup.
 #    How:
-#       Preserve the bundled release processor protocol, translate its image
+#       Preserve the bundled v0.24.0 processor protocol, translate its image
 #       processor registration to Transformers 5.13, and complete the native
 #       processor registry, loader, and tokenizer schema on the main ref.
 #    Related PR:

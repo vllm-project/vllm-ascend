@@ -118,7 +118,7 @@ class NPUIPCWeightTransferEngine(WeightTransferEngine[NPUIPCWeightTransferInitIn
     init_info_cls = NPUIPCWeightTransferInitInfo
     update_info_cls = NPUIPCWeightTransferUpdateInfo
 
-    if vllm_version_is("0.23.0") or vllm_version_is("0.24.0"):
+    if vllm_version_is("0.24.0"):
 
         def __init__(
             self,
@@ -168,7 +168,7 @@ class NPUIPCWeightTransferEngine(WeightTransferEngine[NPUIPCWeightTransferInitIn
         """No initialization needed for NPU IPC backend."""
         pass
 
-    if not (vllm_version_is("0.23.0") or vllm_version_is("0.24.0")):
+    if not vllm_version_is("0.24.0"):
 
         def start_weight_update(self) -> None:
             """No-op for NPU IPC engine (no layerwise reloading)."""
