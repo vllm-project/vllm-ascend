@@ -24,6 +24,9 @@ from vllm_ascend._310p.attention.attention_v1 import (
     AscendAttentionMetadataBuilder310,
     AscendAttentionState,
 )
+from vllm_ascend._310p.attention.metadata_builder import (
+    AscendAttentionMetadataBuilder310 as AscendMetadataBuilder310Direct,
+)
 
 
 class TestAscendAttentionBackend310(TestBase):
@@ -222,3 +225,63 @@ class TestAscendAttentionBackendImpl310(TestBase):
 
         mock_chunked_prefill.assert_called_once_with(query, metadata, output)
         self.assertIs(result, output)
+
+
+class TestAscendAttentionMetadataBuilder310(TestBase):
+    def test_fill_query_lens_cpu_without_buffer(self):
+        builder = AscendMetadataBuilder310Direct.__new__(AscendMetadataBuilder310Direct)
+        builder._query_lens_cpu_buffer = None
+        query_start_loc_cpu = torch.tensor([0, 1, 5, 11, 20], dtype=torch.int32)
+        result = builder._fill_query_lens_cpu(num_reqs=3, query_start_loc_cpu=query_start_loc_cpu, is_drafting=False)
+        expected = torch.tensor([1, 4, 6], dtype=torch.int32)
+        torch.testing.assert_close(result, expected)
+
+    def test_fill_query_lens_cpu_with_buffer_not_drafting(self):
+        builder = AscendMetadataBuilder310Direct.__new__(AscendMetadataBuilder310Direct)
+        builder._query_lens_cpu_buffer = torch.zeros(10, dtype=torch.int32, device="cpu")
+        query_start_loc_cpu = torch.tensor([0, 1, 5, 11, 20], dtype=torch.int32)
+        result = builder._fill_query_lens_cpu(num_reqs=3, query_start_loc_cpu=query_start_loc_cpu, is_drafting=False)
+        expected = torch.tensor([1, 4, 6], dtype=torch.int32)
+        torch.testing.assert_close(result, expected)
+        assert result.data_ptr() == builder._query_lens_cpu_buffer[:3].data_ptr()
+
+    def test_fill_query_lens_cpu_with_buffer_is_drafting(self):
+        builder = AscendMetadataBuilder310Direct.__new__(AscendMetadataBuilder310Direct)
+        builder._query_lens_cpu_buffer = torch.zeros(10, dtype=torch.int32, device="cpu")
+        query_start_loc_cpu = torch.tensor([0, 1, 5, 11, 20], dtype=torch.int32)
+        result1 = builder._fill_query_lens_cpu(num_reqs=3, query_start_loc_cpu=query_start_loc_cpu, is_drafting=True)
+        result2 = builder._fill_query_lens_cpu(num_reqs=3, query_start_loc_cpu=query_start_loc_cpu, is_drafting=True)
+        expected = torch.tensor([1, 4, 6], dtype=torch.int32)
+        torch.testing.assert_close(result1, expected)
+        torch.testing.assert_close(result2, expected)
+        assert result1.data_ptr() != builder._query_lens_cpu_buffer[:3].data_ptr()
+        assert result2.data_ptr() != builder._query_lens_cpu_buffer[:3].data_ptr()
+
+    def test_build_for_drafting_calls_build_with_is_drafting_true(self):
+        builder = object.__new__(AscendMetadataBuilder310Direct)
+        builder._query_lens_cpu_buffer = torch.zeros(10, dtype=torch.int32, device="cpu")
+        builder.device = torch.device("cpu")
+        from vllm_ascend._310p.attention.attention_mask import AttentionMaskBuilder310
+        from vllm.v1.kv_cache_interface import AttentionSpec
+        builder.attn_mask_builder = AttentionMaskBuilder310(torch.device("cpu"), 4096)
+        builder.kv_cache_spec = AttentionSpec(
+            block_size=128,
+            num_kv_heads=2,
+            head_size=64,
+            dtype=torch.float16,
+        )
+        builder.layer_names = []
+        builder.vllm_config = MagicMock()
+        builder.vllm_config.model_config.max_model_len = 4096
+        builder.vllm_config.scheduler_config.max_num_seqs = 8
+
+        common_attn_metadata = MagicMock()
+        common_attn_metadata.num_reqs = 2
+        common_attn_metadata.query_start_loc = torch.tensor([0, 1, 3])
+        common_attn_metadata.query_start_loc_cpu = torch.tensor([0, 1, 3])
+        common_attn_metadata.seq_lens = torch.tensor([1, 2])
+
+        with patch.object(AscendMetadataBuilder310Direct.__bases__[0], "build", return_value=MagicMock()) as mock_build:
+            result = builder.build_for_drafting(common_attn_metadata=common_attn_metadata, draft_index=0)
+            mock_build.assert_called_once_with(0, common_attn_metadata, True)
+            assert result is not None
