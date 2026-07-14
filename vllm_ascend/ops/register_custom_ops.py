@@ -1,5 +1,6 @@
 import torch
 import torch.nn.functional as F
+import torch_npu
 from vllm.distributed import (
     get_dp_group,
     get_ep_group,
