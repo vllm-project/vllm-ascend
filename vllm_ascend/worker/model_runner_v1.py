@@ -4121,11 +4121,13 @@ class NPUModelRunner(GPUModelRunner):
             self.hybrid_with_attn_and_mamba = self.hybrid_with_attn_and_mamba or (use_mamba and use_attn)
             for idx in range(len(kv_cache_tensor.shared_by)):
                 layer_name = kv_cache_tensor.shared_by[idx]
-                # Single tensor path for: mamba, hybrid attn-mamba, or cache_only_layers
+                # Single tensor path for: mamba, hybrid attn-mamba, cache_only_layers,
+                # or MiniMax M3 key-only indexer side cache.
                 if (
                     "linear_attn" in layer_name
                     or self.hybrid_with_attn_and_mamba
                     or "cache_only_layers" in layer_name
+                    or ".index_cache" in layer_name
                     or is_hidden_state_cache_spec(layer_kv_cache_spec.get(layer_name))
                 ) and layer_name not in kv_cache_raw_tensors:
                     # for mamba linear attention, attn-linear hybrid, or cache_only_layers (extract_hidden_states)
@@ -4445,6 +4447,7 @@ class NPUModelRunner(GPUModelRunner):
                         sum_page_size_bytes = raw_k_tensor.numel()
                     elif (
                         "cache_only_layers" in layer_name
+                        or ".index_cache" in layer_name
                         or is_hidden_state_cache_spec(current_kv_cache_spec)
                     ):
                         # Single tensor for extract_hidden_states (no K/V split)

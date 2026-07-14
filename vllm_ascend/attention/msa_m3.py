@@ -40,6 +40,7 @@ from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     FullAttentionSpec,
     KVCacheSpec,
+    MLAAttentionSpec,
     get_kv_quant_mode,
 )
 from vllm_ascend.attention.msa_m3_triton import (
@@ -167,7 +168,8 @@ class AscendMiniMaxM3IndexerBackend(AttentionBackend):
         head_size: int,
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
-        return (2, num_blocks, block_size, num_kv_heads, head_size)
+        del num_kv_heads, cache_dtype_str
+        return (num_blocks, block_size, head_size)
 
     @staticmethod
     def get_kv_cache_stride_order(
@@ -175,7 +177,7 @@ class AscendMiniMaxM3IndexerBackend(AttentionBackend):
     ) -> tuple[int, ...]:
         if include_num_layers_dimension:
             raise NotImplementedError
-        return (0, 1, 2, 3, 4)
+        return (0, 1, 2)
 
 
 class AscendMiniMaxM3IndexerCache(nn.Module, AttentionLayerBase):
@@ -197,11 +199,11 @@ class AscendMiniMaxM3IndexerCache(nn.Module, AttentionLayerBase):
         compilation_config.static_forward_context[prefix] = self
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        return FullAttentionSpec(
+        # Key-only: MLAAttentionSpec budgets one vector/token (not 2x for K+V).
+        return MLAAttentionSpec(
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=1,
             head_size=self.head_dim,
-            head_size_v=self.head_dim,
             dtype=self.dtype,
         )
 
