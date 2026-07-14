@@ -122,6 +122,7 @@ def _maybe_pad_and_reduce_fake(x: torch.Tensor, is_ep_comm: bool = False) -> tor
     return x
 
 
+
 def _maybe_all_reduce_tensor_model_parallel_impl(final_hidden_states: torch.Tensor) -> torch.Tensor:
     moe_comm_type = _EXTRA_CTX.moe_comm_type
     if (
