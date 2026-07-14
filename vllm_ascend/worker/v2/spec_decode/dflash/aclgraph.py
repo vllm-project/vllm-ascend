@@ -16,7 +16,7 @@ from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.compilation.acl_graph import (
-    set_draft_graph_prefill_params,
+    set_draft_graph_params,
     update_full_graph_params,
 )
 from vllm_ascend.worker.v2.aclgraph_utils import collect_captured_token_sizes, model_capture_wrapper
@@ -42,12 +42,12 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         # speculative decoding), so derive them from the capture descriptors
         # instead of the raw config sizes.
         self.capture_sizes = collect_captured_token_sizes(self._capture_descs)
-        # DFlash's parallel drafting forward is always multi-query, so it always
-        # takes the multi-query (prefill) attention path. Hence we reuse the draft
-        # prefill params bucket here and never use the decode bucket, keeping
-        # capture and replay consistent (both set is_draft_model_prefill=True).
+        # DFlash's parallel drafting forward has its own dedicated draft graph
+        # path, independent of Eagle's prefill/decode split, so it always uses
+        # the default draft params bucket (is_draft_model_prefill stays False in
+        # both capture and replay to keep them consistent).
         if super().needs_capture():
-            set_draft_graph_prefill_params(self.capture_sizes)
+            set_draft_graph_params(self.capture_sizes)
 
     def capture(
         self,
@@ -61,7 +61,7 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         progress_bar_desc: str = "Capturing CUDA graphs",
     ) -> None:
         """Capture ACL graphs for DFlash."""
-        with communicator_switch(), model_capture_wrapper(self.speculator, True):
+        with communicator_switch(), model_capture_wrapper(self.speculator, False):
             super().capture(
                 forward_fn,
                 input_buffers,
@@ -99,7 +99,7 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
             # decide to update draft graph params
             _EXTRA_CTX.is_draft_model = True
 
-            _EXTRA_CTX.is_draft_model_prefill = True
+            _EXTRA_CTX.is_draft_model_prefill = False
 
             forward_context = get_forward_context()
 

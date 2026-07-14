@@ -147,7 +147,7 @@ def test_egale_spec_decoding(
             {"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [4, 8]},
             id="full_decode_only",
         ),
-        # pytest.param({}, id="default_full_and_piecewise"),
+        pytest.param({}, id="default_full_and_piecewise"),
     ],
 )
 @patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
