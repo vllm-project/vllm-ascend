@@ -373,7 +373,6 @@ else:
 
             ascend_config = get_ascend_config()
             self._shared_experts = shared_experts
-            has_shared_experts = self._shared_experts is not None
 
             self.enable_npugraph_ex_static_kernel = ascend_config.ascend_compilation_config.enable_static_kernel
 
