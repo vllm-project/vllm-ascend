@@ -26,8 +26,8 @@ from contextlib import suppress
 from typing import Any
 
 import regex as re
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest  # type: ignore[import-not-found]
+from vllm.entrypoints.openai.engine.protocol import (  # type: ignore[import-not-found]
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
@@ -35,7 +35,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     FunctionCall,
     ToolCall,
 )
-from vllm.tool_parsers.deepseekv4_tool_parser import DeepSeekV4ToolParser
+from vllm.tool_parsers.deepseekv4_tool_parser import DeepSeekV4ToolParser  # type: ignore[import-not-found]
 
 ESCAPED_ARGUMENTS_PARAM_NAME = "__vllm_param_arguments__"
 
