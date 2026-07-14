@@ -38,6 +38,7 @@ FULL_DECODE_GRAPH = {
     "cudagraph_capture_sizes": [MAX_NUM_SEQS],
 }
 
+
 COMMON_PROMPTS = [
     "The capital of France is",
     "Hello, my name is Tom, I am",
