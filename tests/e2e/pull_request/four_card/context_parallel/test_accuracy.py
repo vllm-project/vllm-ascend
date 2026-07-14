@@ -128,6 +128,7 @@ FULL_FEATURE_MODEL_CASES = [
             "compilation_config": FULL_DECODE_GRAPH,
             "additional_config": {
                 "enable_flashcomm1": True,
+                "enable_dsa_cp": True,
                 "enable_sparse_c8": True,
             },
             "speculative_config": {

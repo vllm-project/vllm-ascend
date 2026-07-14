@@ -86,18 +86,17 @@ O_PROJ_ACLNN_INPUT_PARAMS = (
 )
 
 
-class DCPQueryGatherContext(NamedTuple):
-    """State needed to finish the async fused DCP query all-gather."""
+class DCPGatherContext(NamedTuple):
+    """State needed to finish an async fused DCP all-gather."""
 
-    # The gathered fused query tensor: cat([ql_nope, q_pe], dim=-1).
+    # The gathered fused tensor.
     gathered: torch.Tensor
     # Async all-gather work handle. None means the gather completed synchronously.
     handle: torch.distributed.Work | None
     # Permutation that restores the original dimension order after dim>0 gather.
     restore_perm: tuple[int, ...] | None
-    # Last-dimension sizes used to split the fused query back into ql_nope/q_pe.
-    ql_nope_dim: int
-    q_pe_dim: int
+    # Last-dimension sizes used to split the fused tensor after gather.
+    split_sizes: tuple[int, ...]
 
 
 def _get_indexer_types(configs: tuple[Any, ...]) -> Any | None:
@@ -178,7 +177,9 @@ class DCPContext:
     slot_mapping: torch.Tensor
     block_table: torch.Tensor
     seq_lens: torch.Tensor
-    query_gather_context: DCPQueryGatherContext | None = None
+    kv_gather_block_ids: torch.Tensor | None = None
+    kv_gather_block_table: torch.Tensor | None = None
+    gather_context: DCPGatherContext | None = None
 
 
 @dataclass
@@ -1619,6 +1620,17 @@ class AscendSFAImpl(MLAAttentionImpl):
                 f"got {len(main_cache)} tensors for layer_name={self.layer_name}."
             )
         return (main_cache[0], main_cache[1], indexer_cache[0])
+    def _record_dcp_kv_gather_context(
+        self,
+        kv_cache: tuple[torch.Tensor, ...],
+        attn_metadata: M,
+    ) -> None:
+        """Start a DCP KV gather after this layer has populated its cache.
+
+        The base implementation deliberately does nothing. The replicated-indexer
+        DCP implementation overrides it for batches containing prefill requests.
+        """
+        return
 
     def forward(
         self,
@@ -1870,6 +1882,12 @@ class AscendSFAImpl(MLAAttentionImpl):
                             value_cache=kv_cache[1],
                             slot_mapping=slot_mapping_sfa[: attn_metadata.num_actual_tokens],
                         )
+
+            # DCP's prefill path may all-gather only the blocks referenced by
+            # this batch. It must start after the current layer's SFA KV write,
+            # but before the indexer/top-k work so communication can overlap it.
+            if kv_cache is not None:
+                self._record_dcp_kv_gather_context(kv_cache, attn_metadata)
 
             if self.has_indexer:
                 assert k_li is not None
