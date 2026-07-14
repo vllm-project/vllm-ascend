@@ -19,13 +19,10 @@ from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.utils import is_310p, vllm_version_is
 
-# The v2 model runner is intentionally NOT made compatible with the v0.23.0
-# release. vLLM v0.23.0 and the verified main commit are diverged, and the v2
-# worker patches target main-only APIs; rather than maintain a separate v0.23.0
-# compatibility path we keep v2 main-only. With v0.23.0 installed this flag is
-# False, so none of the patch_v2.* / routed-experts-capture patches below are
-# imported and the v2 worker stays dormant (the release uses the v1 runner).
-if vllm_version_is("0.23.0"):
+# The v2 model runner tracks only the verified vLLM main commit. Fixed release
+# tags have diverged APIs and are intentionally kept on the v1 runner instead
+# of maintaining separate v2 compatibility paths.
+if vllm_version_is("0.23.0") or vllm_version_is("0.24.0"):
     _V2_MODEL_RUNNER_SUPPORTED = False
 else:
     _V2_MODEL_RUNNER_SUPPORTED = True

@@ -27,8 +27,8 @@ from vllm_ascend.utils import vllm_version_is
 MODELS = ["Qwen/Qwen3-0.6B"]
 
 pytestmark = pytest.mark.skipif(
-    vllm_version_is("0.23.0"),
-    reason="v2 model runner patches not supported on v0.23.0",
+    vllm_version_is("0.23.0") or vllm_version_is("0.24.0"),
+    reason="v2 model runner patches are only supported on the verified vLLM main commit",
 )
 
 
