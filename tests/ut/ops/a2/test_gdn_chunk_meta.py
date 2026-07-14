@@ -472,15 +472,17 @@ def test_chunk_gated_delta_rule_fwd_skip_pcp_all_gather(monkeypatch: pytest.Monk
     all_gather_called = []
 
     def run_case(world_size: int, skip_pcp_all_gather: bool):
+        def _mock_all_gather(self, value, dim):
+            all_gather_called.append(True)
+            return _GatherResult([_DummyTensor("g0"), _DummyTensor("g1")])
+
         group = type(
             "Group",
             (),
             {
                 "world_size": world_size,
                 "rank_in_group": 0,
-                "all_gather": lambda self, value, dim: (
-                    all_gather_called.append(True) or _GatherResult([_DummyTensor("g0"), _DummyTensor("g1")])
-                ),
+                "all_gather": _mock_all_gather,
             },
         )()
 
@@ -589,10 +591,15 @@ def test_chunk_gated_delta_rule_fwd_uses_compact_cu_seqlens_kern(monkeypatch: py
         lambda *args, **kwargs: (_DummyTensor("h"), _DummyTensor("v_new"), _DummyTensor("final_state")),
         raising=False,
     )
+
+    def mock_chunk_fwd_o(*args, **kwargs):
+        captured_cu_seqlens.append(kwargs["cu_seqlens"])
+        return _DummyTensor("o_ascend")
+
     monkeypatch.setattr(
         torch.ops._C_ascend,
         "chunk_fwd_o",
-        lambda *args, **kwargs: captured_cu_seqlens.append(kwargs["cu_seqlens"]) or _DummyTensor("o_ascend"),
+        mock_chunk_fwd_o,
         raising=False,
     )
 
