@@ -615,6 +615,7 @@ class AscendModelSlimConfig(QuantizationConfig):
         aliases = [prefix]
         replacements = (
             ("model.language_model.model.", "model."),
+            ("model.language_model.model.", "language_model.model."),
             ("model.language_model.", ""),
             ("language_model.model.", "model."),
             ("language_model.", ""),
@@ -626,9 +627,14 @@ class AscendModelSlimConfig(QuantizationConfig):
 
         if prefix.startswith("model.layers."):
             aliases.append(prefix.replace("model.layers.", "model.language_model.model.layers.", 1))
+            aliases.append(prefix.replace("model.layers.", "language_model.model.layers.", 1))
+        if prefix.startswith("language_model.model.layers."):
+            aliases.append(prefix.replace("language_model.model.layers.", "model.layers.", 1))
+            aliases.append(prefix.replace("language_model.model.layers.", "layers.", 1))
         if prefix.startswith("layers."):
             aliases.append(prefix.replace("layers.", "model.layers.", 1))
             aliases.append(prefix.replace("layers.", "model.language_model.model.layers.", 1))
+            aliases.append(prefix.replace("layers.", "language_model.model.layers.", 1))
 
         return tuple(dict.fromkeys(aliases))
 
@@ -667,10 +673,15 @@ class AscendModelSlimConfig(QuantizationConfig):
                         return candidate
         if model_type in ("minimax", "minimax_m2", "minimax_m3", "minimax_m3_vl"):
             packed_modules_mapping = get_packed_modules_mapping(model_type)
-            if not self._has_quant_weight(prefix, packed_modules_mapping):
-                for candidate in self._minimax_quant_prefix_aliases(prefix):
+            arch_candidates = [prefix]
+            if ".mlp." in prefix:
+                arch_candidates.append(prefix.replace(".mlp.", ".block_sparse_moe."))
+
+            for arch_candidate in dict.fromkeys(arch_candidates):
+                for candidate in self._minimax_quant_prefix_aliases(arch_candidate):
                     if self._has_quant_weight(candidate, packed_modules_mapping):
-                        logger.debug("Resolved MiniMax quant prefix alias: %s -> %s", prefix, candidate)
+                        if candidate != prefix:
+                            logger.debug("Resolved MiniMax quant prefix alias: %s -> %s", prefix, candidate)
                         return candidate
         return prefix
 
@@ -768,8 +779,6 @@ class AscendModelSlimConfig(QuantizationConfig):
         model_type = vllm_config.model_config.hf_config.model_type
 
         if model_type in ["minimax", "minimax_m2", "minimax_m3", "minimax_m3_vl"]:
-            # Adapt to Minimax architecture: update layer names to MoE convention
-            prefix = prefix.replace(".mlp", ".block_sparse_moe")
             # Normalize the prefix by stripping specific expert indices (e.g., 'experts.0' -> 'experts')
             parts = prefix.split(".")
             if "experts" in parts and len(parts) > 2:
