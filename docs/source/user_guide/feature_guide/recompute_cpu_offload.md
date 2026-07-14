@@ -85,8 +85,7 @@ For typical A3 deployments with a large recompute-offload budget, set
 `--shm-size=1024g` when starting the container. The following snippet follows
 the Docker style used by the DeepSeek-V4-Flash tutorial:
 
-```{code-block} bash
-   :substitutions:
+```bash
 
 export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
 docker run --rm \
