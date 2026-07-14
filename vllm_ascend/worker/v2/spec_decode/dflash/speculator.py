@@ -32,23 +32,11 @@ class AscendDFlashSpeculator(DFlashSpeculator):
             self.update_stream: torch.npu.Stream = torch.npu.Stream()
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
-        from vllm_ascend.worker.v2.spec_decode.dflash.aclgraph import (
-            DFlashAclGraphManager,
-        )
-
-        if cudagraph_mode.decode_mode() == CUDAGraphMode.FULL:
-            cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
-        else:
-            cudagraph_mode = CUDAGraphMode.NONE
-
-        self.query_cudagraph_manager = DFlashAclGraphManager(
-            self.vllm_config,
-            self.device,
-            cudagraph_mode,
-            decode_query_len=self.num_query_per_req,
-            speculator=self,
-            causal=self.dflash_causal,
-        )
+        super().init_cudagraph_manager(cudagraph_mode)
+        # The Ascend graph manager is patched onto the upstream module and
+        # created by super().init_cudagraph_manager without a speculator ref.
+        # It needs this speculator to update full-graph params, so set it here.
+        self.query_cudagraph_manager.speculator = self
 
     def set_attn(
         self,
@@ -79,7 +67,7 @@ class AscendDFlashSpeculator(DFlashSpeculator):
 
         self.attn_backends = attn_backends
 
-    def build_draft_attn_metadatas(self, num_reqs_padded, is_draft_model_prefill):
+    def build_draft_attn_metadatas(self, num_reqs_padded):
         num_tokens_padded = num_reqs_padded * self.num_query_per_req
         with build_attn_metadata_wrapper():
             attn_metadata = self._build_draft_attn_metadata(

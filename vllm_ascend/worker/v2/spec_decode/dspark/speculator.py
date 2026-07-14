@@ -16,12 +16,10 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from typing import Any, cast
+from typing import Any
 
 import torch
-from vllm.config import VllmConfig, get_layers_from_vllm_config
-from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.v1.attention.backend import AttentionBackend
+from vllm.config import VllmConfig
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
     DSparkSpeculator,
@@ -44,20 +42,6 @@ class AscendDSparkSpeculator(DSparkSpeculator):
     ) -> None:
         super().set_attn(model_state, kv_cache_config, block_tables)
         self._context_slot_mappings = self._context_slot_mappings.to(torch.int32)  # type: ignore[has-type]
-        attn_backends: dict[str, type[AttentionBackend]] = {}
-        active_layer_names = self.draft_attn_layer_names
-        for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
-            layer_names = kv_cache_group_spec.layer_names
-            if active_layer_names is not None:
-                layer_names = list(active_layer_names.intersection(layer_names))
-
-            layer_type = cast(type[Any], AttentionLayerBase)
-            attn_layers = get_layers_from_vllm_config(self.vllm_config, layer_type, layer_names)
-
-            for layer_name in layer_names:
-                attn_backends[layer_name] = attn_layers[layer_name].get_attn_backend()
-
-        self.attn_backends = attn_backends
 
     def propose(
         self,

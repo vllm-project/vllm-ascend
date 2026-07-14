@@ -1,11 +1,10 @@
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
 import torch
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import get_forward_context, set_forward_context
-from vllm.logger import logger
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import (  # type: ignore[import-not-found]
@@ -31,17 +30,19 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         device: torch.device,
         cudagraph_mode: CUDAGraphMode,
         decode_query_len: int,
-        speculator: Any,
-        causal: bool = False,
+        speculator: Any = None,
     ):
-        super().__init__(vllm_config, device, cudagraph_mode, decode_query_len, causal)
+        super().__init__(vllm_config, device, cudagraph_mode, decode_query_len)
 
-        # set speculator attribute, so we can access attributes speculator
-        # when call `run_fullgraph` method in CudaGraphManager,
-        # then we don't need to # copy `propose` method in `AscendEagleSpeculator` class.
+        # It is set by AscendDFlashSpeculator.init_cudagraph_manager after creation,
+        # because upstream's init_cudagraph_manager creates the manager without it.
         self.speculator = speculator
         # capture_sizes sorts in ascending order.
         self.capture_sizes = sorted(self.compilation_config.cudagraph_capture_sizes)
+        # DFlash's parallel drafting forward is always multi-query, so it always
+        # takes the multi-query (prefill) attention path. Hence we reuse the draft
+        # prefill params bucket here and never use the decode bucket, keeping
+        # capture and replay consistent (both set is_draft_model_prefill=True).
         if super().needs_capture():
             set_draft_graph_prefill_params(self.capture_sizes)
 
@@ -53,22 +54,29 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
         max_model_len: int,
+        causal: bool | Mapping[int, bool],
         progress_bar_desc: str = "Capturing CUDA graphs",
     ) -> None:
-        """Capture ACL graphs for Eagle."""
+        """Capture ACL graphs for DFlash."""
         with communicator_switch(), model_capture_wrapper(self.speculator, True):
             super().capture(
-                forward_fn, input_buffers, block_tables, attn_groups, kv_cache_config, max_model_len, progress_bar_desc
+                forward_fn,
+                input_buffers,
+                block_tables,
+                attn_groups,
+                kv_cache_config,
+                max_model_len,
+                causal,
+                progress_bar_desc,
             )
 
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """Override run_fullgraph to update full graph params in run_fullgraph."""
         num_tokens = desc.num_tokens
 
-        draft_attn_metadatas = self.speculator.build_draft_attn_metadatas(desc.num_reqs, True)
+        draft_attn_metadatas = self.speculator.build_draft_attn_metadatas(desc.num_reqs)
 
         ret = super().run_fullgraph(desc)
-        logger.info("DFlash run_fullgraph: graph replay done")
 
         positions = self.speculator.input_buffers.positions[:num_tokens]
 
@@ -88,7 +96,6 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
             # decide to update draft graph params
             _EXTRA_CTX.is_draft_model = True
 
-            # decide to run `prefill` graph or `decodes` graph
             _EXTRA_CTX.is_draft_model_prefill = True
 
             forward_context = get_forward_context()
@@ -104,5 +111,4 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
                 positions.shape[0],
                 draft_attn_metadatas=draft_attn_metadatas,
             )
-        logger.info("DFlash run_fullgraph done: num_tokens=%s", num_tokens)
         return ret

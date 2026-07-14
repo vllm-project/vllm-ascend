@@ -16,7 +16,10 @@
 # This file is a part of the vllm-ascend project.
 #
 import vllm.v1.worker.gpu.spec_decode.dflash.cudagraph as cudagraph_module
+import vllm.v1.worker.gpu.spec_decode.dflash.speculator as speculator_module
 
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
+from vllm_ascend.worker.v2.spec_decode.dflash.aclgraph import DFlashAclGraphManager
 
 cudagraph_module.build_attn_metadata = build_attn_metadata
+speculator_module.DFlashCudaGraphManager = DFlashAclGraphManager
