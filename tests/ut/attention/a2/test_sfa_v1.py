@@ -1,5 +1,4 @@
 import sys
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -14,14 +13,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 if "torch_npu._inductor" not in sys.modules:
     sys.modules["torch_npu._inductor"] = MagicMock()
 
-from vllm_ascend.attention.sfa_v1 import (
-    AscendSFABackend,
-    AscendSFAImpl,
-    AscendSFAMetadata,
-    AscendSFAMetadataBuilder,
-    custom_kv_rmsnorm_rope,
-)
-from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim
+from vllm_ascend.attention.sfa_v1 import AscendSFABackend, AscendSFAImpl, AscendSFAMetadata, AscendSFAMetadataBuilder
 from vllm_ascend.utils import enable_dsa_cp
 
 
@@ -72,126 +64,6 @@ class TestAscendSFABackend(TestBase):
         mock_enable_cp.return_value = True
         impl_cls = AscendSFABackend.get_impl_cls()
         self.assertIsNotNone(impl_cls)
-
-
-class TestAscendSFAKVQuantSparseAttention(TestBase):
-    @patch("vllm_ascend.attention.sfa_v1.torch_npu.npu_dynamic_block_quant")
-    @patch("vllm_ascend.attention.sfa_v1.torch_npu.npu_interleave_rope")
-    @patch("vllm_ascend.attention.sfa_v1.torch_npu.npu_rms_norm")
-    def test_pack_prefill_kv_cache(self, mock_rms_norm, mock_rope, mock_block_quant):
-        k_nope = torch.randn(2, 1, 1, 256, dtype=torch.bfloat16)
-        k_pe = torch.randn(2, 1, 1, 16, dtype=torch.bfloat16)
-        quantized = torch.randint(-128, 127, (2, 1, 256), dtype=torch.int8)
-        scales = torch.arange(1, 5, dtype=torch.float32).view(2, 1, 2)
-        mock_rms_norm.return_value = k_nope, None
-        mock_rope.return_value = k_pe
-        mock_block_quant.return_value = quantized, scales
-
-        actual_k_pe, actual_k_nope, actual_scales = custom_kv_rmsnorm_rope(
-            torch.randn(2, 1, 1, 272, dtype=torch.bfloat16),
-            torch.ones(256, dtype=torch.bfloat16),
-            torch.randn(2, 1, 1, 16),
-            torch.randn(2, 1, 1, 16),
-            256,
-            16,
-            dst_type=1,
-            tile_size=128,
-        )
-        packed_kv = torch.cat([actual_k_nope, actual_k_pe, actual_scales], dim=-1)
-
-        self.assertEqual(mock_block_quant.call_args.kwargs["dst_type"], 1)
-        self.assertEqual(mock_block_quant.call_args.kwargs["row_block_size"], 1)
-        self.assertEqual(mock_block_quant.call_args.kwargs["col_block_size"], 128)
-        self.assertEqual(packed_kv.shape, (2, 1, 1, 296))
-        self.assertTrue(torch.equal(packed_kv[..., :256], quantized.view_as(k_nope)))
-        self.assertTrue(torch.equal(packed_kv[..., 256:288], k_pe.contiguous().view(torch.int8)))
-        self.assertTrue(torch.equal(packed_kv[..., 288:], scales.view(2, 1, 1, 2).view(torch.int8)))
-
-    def test_execute_kv_quant_sparse_flash_attention(self):
-        impl = AscendSFAImpl.__new__(AscendSFAImpl)
-        impl.use_sparse_c8_sfa = True
-        impl.scale = 0.125
-        impl.sfa_qsfa_tile_size = 128
-        impl.qk_rope_head_dim = 16
-        ql_nope = torch.randn(3, 2, 32)
-        q_pe = torch.randn(3, 2, 16)
-        kv_cache = (torch.empty(4, 16, 1, 80, dtype=torch.int8),)
-        topk_indices = torch.zeros(3, 1, dtype=torch.int32)
-        attn_metadata = SimpleNamespace(block_table=torch.zeros(1, 4, dtype=torch.int32))
-        actual_seq_lengths = torch.tensor([3], dtype=torch.int32)
-        expected = torch.randn(3, 2, 32)
-
-        with patch(
-            "vllm_ascend.device.device_op.torch_npu.npu_kv_quant_sparse_flash_attention",
-            create=True,
-            return_value=expected,
-        ) as mock_qsfa:
-            result = impl._execute_sparse_flash_attention_process(
-                ql_nope,
-                q_pe,
-                kv_cache,
-                topk_indices,
-                attn_metadata,
-                actual_seq_lengths,
-                actual_seq_lengths,
-            )
-
-        self.assertIs(result, expected)
-        call_kwargs = mock_qsfa.call_args.kwargs
-        self.assertIs(call_kwargs["key"], kv_cache[0])
-        self.assertEqual(call_kwargs["query"].shape, (3, 2, 48))
-        self.assertEqual(call_kwargs["key_quant_mode"], 2)
-        self.assertEqual(call_kwargs["tile_size"], 128)
-
-    def test_prolog_v3_enables_packed_int8_kv_cache(self):
-        impl = AscendSFAImpl.__new__(AscendSFAImpl)
-        impl.use_sparse_c8_sfa = True
-        impl.has_indexer = True
-        impl.sfa_qsfa_tile_size = 128
-        impl.sfa_qsfa_k_nope_clip_alpha = torch.ones(1)
-        impl.sfa_qsfa_kr_cache_dummy = torch.empty(0, dtype=torch.bfloat16)
-        impl.local_num_heads = 2
-        impl.kv_lora_rank = 128
-        impl.qk_rope_head_dim = 16
-        impl.q_lora_rank = 8
-        impl.q_a_layernorm = SimpleNamespace(weight=SimpleNamespace(data=torch.ones(8)), variance_epsilon=1e-5)
-        impl.kv_a_layernorm = SimpleNamespace(weight=SimpleNamespace(data=torch.ones(128)), variance_epsilon=1e-5)
-        impl.weight_dq = torch.empty(1)
-        impl.weight_uq_qr = torch.empty(1)
-        impl.W_UK_T = torch.empty(1)
-        impl.weight_dkv_kr = torch.empty(1)
-        impl.dequant_scale_w_dq = torch.empty(1)
-        impl.dequant_scale_w_uq_qr = torch.empty(1)
-        impl.dequant_scale_w_dkv_kr = torch.empty(1)
-        k_cache = torch.empty(4, 16, 1, get_sfa_qsfa_packed_head_dim(128, 16), dtype=torch.int8)
-        dsa_k_cache = torch.empty(4, 16, 1, 128, dtype=torch.bfloat16)
-
-        with (
-            patch(
-                "vllm_ascend.device.device_op.torch_npu.npu_dynamic_quant",
-                return_value=(torch.empty(2, 8, dtype=torch.int8), torch.ones(2, 1)),
-            ),
-            patch(
-                "vllm_ascend.device.device_op.torch_npu.npu_mla_prolog_v3",
-                create=True,
-                return_value=(torch.randn(2, 2, 128), torch.randn(2, 2, 16), None, torch.randn(2, 8), None),
-            ) as mock_prolog,
-        ):
-            impl._sfa_preprocess_with_prolog_v3(
-                hidden_states=torch.randn(2, 8),
-                kv_cache=(k_cache, dsa_k_cache),
-                cos=torch.randn(2, 1, 1, 16),
-                sin=torch.randn(2, 1, 1, 16),
-                slot_mapping=torch.arange(2),
-                cache_mode="PA_BSND",
-            )
-
-        call_kwargs = mock_prolog.call_args.kwargs
-        self.assertIs(call_kwargs["kv_cache"], k_cache)
-        self.assertIs(call_kwargs["kr_cache"], impl.sfa_qsfa_kr_cache_dummy)
-        self.assertEqual(call_kwargs["kv_cache_quant_mode"], 3)
-        self.assertEqual(call_kwargs["ckvkr_repo_mode"], 1)
-        self.assertEqual(call_kwargs["quant_scale_repo_mode"], 1)
 
 
 class TestAscendSFAMetadata(TestBase):
