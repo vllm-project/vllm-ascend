@@ -226,7 +226,10 @@ jobs:
     name: Generate hitest recommendations
     needs: lint-and-select-tests
     uses: ./.github/workflows/manual-hitest.yaml
-    secrets: inherit
+    secrets:
+      X_APIG_APPCODE: ${{ secrets.X_APIG_APPCODE }}
+      APP_KEY: ${{ secrets.APP_KEY }}
+      APP_SECRET: ${{ secrets.APP_SECRET }}
 
   # Summary gate job — use this single, stable name as the required status check
   # in GitHub branch protection rules instead of tracking individual matrix job names.
