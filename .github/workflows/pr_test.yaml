@@ -227,7 +227,11 @@ jobs:
     needs: lint-and-select-tests
     # if: ${{ needs.lint-and-select-tests.outputs.has_tests == 'true' }}
     uses: ./.github/workflows/manual-hitest.yaml
-    secrets: inherit
+    # secrets: inherit
+    secrets:
+      X_APIG_APPCODE: ${{ secrets.X_APIG_APPCODE }}
+      APP_KEY: ${{ secrets.APP_KEY }}
+      APP_SECRET: ${{ secrets.APP_SECRET }}
 
   # Summary gate job — use this single, stable name as the required status check
   # in GitHub branch protection rules instead of tracking individual matrix job names.
