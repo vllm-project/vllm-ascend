@@ -63,14 +63,6 @@ def _apply_dsv4_rope(
     return rotary_emb(x, cos_t, sin_t)
 
 
-def _draft_quant_config(vllm_config: VllmConfig):
-    assert vllm_config.speculative_config is not None
-    draft_config = vllm_config.speculative_config.draft_model_config.hf_config
-    if getattr(draft_config, "dspark_mtp_dequantized_to_bf16", False):
-        return None
-    return vllm_config.quant_config
-
-
 def _get_dspark_num_mtp_layers(config: PretrainedConfig) -> int:
     num_layers = getattr(config, "n_mtp_layers", None)
     if num_layers is None:
@@ -117,7 +109,7 @@ class DeepseekV4DSparkModel(nn.Module):
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
             config.hidden_size,
-            quant_config=_draft_quant_config(vllm_config),
+            quant_config=vllm_config.quant_config,
             prefix=maybe_prefix(prefix, "embed_tokens"),
         )
         self.layers = nn.ModuleDict(
@@ -297,14 +289,13 @@ class DeepseekV4DSparkModel(nn.Module):
 
 
 @support_torch_compile
-class DeepSeekV4DSparkMTP(nn.Module, DeepseekV2MixtureOfExperts):
+class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         assert vllm_config.speculative_config is not None
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
-        self.quant_config = _draft_quant_config(vllm_config)
-        self.has_own_embed_tokens = self.quant_config is not None
-        self.has_own_lm_head = self.quant_config is not None
+        self.has_own_embed_tokens = vllm_config.quant_config is not None
+        self.has_own_lm_head = vllm_config.quant_config is not None
         self.model = DeepseekV4DSparkModel(
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "model"),
@@ -518,6 +509,3 @@ class DeepSeekV4DSparkMTP(nn.Module, DeepseekV2MixtureOfExperts):
         for checkpoint_name, param_name in replacements:
             name = name.replace(checkpoint_name, param_name)
         return name
-
-
-DSparkDeepseekV4ForCausalLM = DeepSeekV4DSparkMTP
