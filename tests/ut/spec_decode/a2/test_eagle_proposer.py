@@ -2,6 +2,7 @@
 import inspect
 import unittest
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -21,6 +22,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
+from vllm_ascend.spec_decode.utils import SlidingWindowAdapter
 from vllm_ascend.utils import enable_custom_op
 
 enable_custom_op()
@@ -180,6 +182,37 @@ def test_prepare_inputs_padded_preserves_internal_seq_lens_cpu():
 
     assert spec_common_attn_metadata._seq_lens_cpu is internal_seq_lens_cpu
     assert spec_common_attn_metadata.seq_lens_cpu is None
+
+
+class TestSlidingWindowAdapter:
+    @pytest.fixture(autouse=True)
+    def _setup(self):
+        self.device = torch.device("cpu")
+        yield
+
+    def test_apply_window(self):
+        K, W, B = 3, 64, 16
+        max_num_reqs = 16
+        block_table_tensor = torch.randint(1, 1000, (max_num_reqs, 20), dtype=torch.int32)
+
+        adapter = SlidingWindowAdapter(W, B, max_num_reqs, K, self.device)
+        clone_ptr = adapter._block_table_clone.data_ptr()
+
+        cad = SimpleNamespace(
+            block_table_tensor=block_table_tensor,
+            seq_lens=torch.tensor([10, 60, 200, 64], dtype=torch.int32),
+            seq_lens_cpu=torch.tensor([10, 60, 200, 64], dtype=torch.int32),
+            _seq_lens_cpu=torch.tensor([10, 60, 200, 64], dtype=torch.int32),
+            seq_lens_cpu_upper_bound=None,
+        )
+        adapter.apply(cad)
+
+        # block_table rebinds to the pre-allocated clone (offset-0 view); full table saved
+        assert cad.block_table_tensor.data_ptr() == clone_ptr
+        assert adapter.full_block_table is block_table_tensor
+        clamped = torch.tensor([10, 60, 72, 64], dtype=torch.int32)
+        assert torch.equal(cad.seq_lens, clamped)
+        assert torch.equal(cad._seq_lens_cpu, clamped)
 
 
 class TestEagleProposerInitialization(TestBase):

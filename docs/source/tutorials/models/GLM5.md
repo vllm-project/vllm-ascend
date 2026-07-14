@@ -167,9 +167,9 @@ If you want to deploy multi-node environment, you need to set up environment on 
     --quantization ascend \
     --enable-chunked-prefill \
     --enable-prefix-caching \
-    --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true}' \
+    --additional-config '{"multistream_overlap_shared_expert": true}' \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}' 
+    --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' 
     ```
 
     - Quantized model `glm-5-w8a8` and `glm-5.1-w8a8` can be deployed on 1 Atlas 800 A3 (64G × 16) .
@@ -202,9 +202,9 @@ If you want to deploy multi-node environment, you need to set up environment on 
     --quantization ascend \
     --enable-chunked-prefill \
     --enable-prefix-caching \
-    --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true}' \
+    --additional-config '{"multistream_overlap_shared_expert": true}' \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}' 
+    --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' 
     ```
 
 === "A2 series"
@@ -241,8 +241,8 @@ If you want to deploy multi-node environment, you need to set up environment on 
     --enable-chunked-prefill \
     --enable-prefix-caching \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true}' \
-    --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
+    --additional-config '{"multistream_overlap_shared_expert": true}' \
+    --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
     ```
 
 **Notice:**
@@ -303,7 +303,7 @@ Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
     --trust-remote-code \
     --gpu-memory-utilization 0.95 \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
+    --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
     ```
 
     **node 1**
@@ -349,7 +349,7 @@ Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
     --trust-remote-code \
     --gpu-memory-utilization 0.95 \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
+    --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
     ```
 
 === "A2 series"
@@ -398,8 +398,8 @@ Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
     --trust-remote-code \
     --gpu-memory-utilization 0.95 \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true}' \
-    --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
+    --additional-config '{"multistream_overlap_shared_expert": true}' \
+    --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
     ```
 
     **node 1**
@@ -446,8 +446,8 @@ Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
     --trust-remote-code \
     --gpu-memory-utilization 0.95 \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true}' \
-    --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
+    --additional-config '{"multistream_overlap_shared_expert": true}' \
+    --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
     ```
 
 - For bf16 weight, use this script on each node to enable [Multi Token Prediction (MTP)](../../user_guide/feature_guide/speculative_decoding.md).
@@ -557,8 +557,8 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
 --enable-chunked-prefill \
 --enable-prefix-caching \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true}' \
---speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
+--additional-config '{"multistream_overlap_shared_expert": true}' \
+--speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
 ```
 
 **node 1**
@@ -608,8 +608,8 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
 --enable-chunked-prefill \
 --enable-prefix-caching \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true}' \
---speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
+--additional-config '{"multistream_overlap_shared_expert": true}' \
+--speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
 ```
 
 ### 5.3 Prefill-Decode Disaggregation
@@ -764,7 +764,7 @@ Before you start, please
             --data-parallel-rpc-port $6 \
             --tensor-parallel-size $7 \
             --enable-expert-parallel \
-            --speculative-config '{"num_speculative_tokens": 3, "method":"deepseek_mtp"}' \
+            --speculative-config '{"num_speculative_tokens": 3, "method":"deepseek_mtp", "enforce_eager": true}' \
             --profiler-config \
             '{"profiler": "torch",
             "torch_profiler_dir": "./vllm_profile",
@@ -772,7 +772,7 @@ Before you start, please
             --seed 1024 \
             --served-model-name glm-5 \
             --max-model-len 131072 \
-            --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true, "enable_dsa_cp": true}' \
+            --additional-config '{"multistream_overlap_shared_expert": true, "enable_dsa_cp": true}' \
             --max-num-batched-tokens 4096 \
             --trust-remote-code \
             --max-num-seqs 64 \
@@ -844,7 +844,7 @@ Before you start, please
             --data-parallel-rpc-port $6 \
             --tensor-parallel-size $7 \
             --enable-expert-parallel \
-            --speculative-config '{"num_speculative_tokens": 3, "method":"deepseek_mtp"}' \
+            --speculative-config '{"num_speculative_tokens": 3, "method":"deepseek_mtp", "enforce_eager": true}' \
             --profiler-config \
             '{"profiler": "torch",
             "torch_profiler_dir": "./vllm_profile",
@@ -852,7 +852,7 @@ Before you start, please
             --seed 1024 \
             --served-model-name glm-5 \
             --max-model-len 131072 \
-            --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true, "enable_dsa_cp": true}' \
+            --additional-config '{"multistream_overlap_shared_expert": true, "enable_dsa_cp": true}' \
             --max-num-batched-tokens 4096 \
             --trust-remote-code \
             --max-num-seqs 64 \
@@ -926,7 +926,7 @@ Before you start, please
             --data-parallel-rpc-port $6 \
             --tensor-parallel-size $7 \
             --enable-expert-parallel \
-            --speculative-config '{"num_speculative_tokens": 3,  "method":"deepseek_mtp"}' \
+            --speculative-config '{"num_speculative_tokens": 3,  "method":"deepseek_mtp", "enforce_eager": true}' \
             --profiler-config \
             '{"profiler": "torch",
             "torch_profiler_dir": "./vllm_profile",
@@ -936,7 +936,7 @@ Before you start, please
             --max-model-len 200000 \
             --max-num-batched-tokens 32 \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-            --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true}' \
+            --additional-config '{"multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true}' \
             --trust-remote-code \
             --max-num-seqs 8 \
             --gpu-memory-utilization 0.92 \
@@ -1006,7 +1006,7 @@ Before you start, please
              --data-parallel-rpc-port $6 \
              --tensor-parallel-size $7 \
              --enable-expert-parallel \
-             --speculative-config '{"num_speculative_tokens": 3,  "method":"deepseek_mtp"}' \
+             --speculative-config '{"num_speculative_tokens": 3,  "method":"deepseek_mtp", "enforce_eager": true}' \
              --profiler-config \
              '{"profiler": "torch",
              "torch_profiler_dir": "./vllm_profile",
@@ -1016,7 +1016,7 @@ Before you start, please
              --max-model-len 200000 \
              --max-num-batched-tokens 32 \
              --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-             --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true}' \
+             --additional-config '{"multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true}' \
              --trust-remote-code \
              --max-num-seqs 8 \
              --gpu-memory-utilization 0.92 \
@@ -1086,7 +1086,7 @@ Before you start, please
              --data-parallel-rpc-port $6 \
              --tensor-parallel-size $7 \
              --enable-expert-parallel \
-             --speculative-config '{"num_speculative_tokens": 3,  "method":"deepseek_mtp"}' \
+             --speculative-config '{"num_speculative_tokens": 3,  "method":"deepseek_mtp", "enforce_eager": true}' \
              --profiler-config \
              '{"profiler": "torch",
              "torch_profiler_dir": "./vllm_profile",
@@ -1096,7 +1096,7 @@ Before you start, please
              --max-model-len 200000 \
              --max-num-batched-tokens 32 \
              --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-             --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true}' \
+             --additional-config '{"multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true}' \
              --trust-remote-code \
              --max-num-seqs 8 \
              --gpu-memory-utilization 0.92 \
@@ -1166,7 +1166,7 @@ Before you start, please
              --data-parallel-rpc-port $6 \
              --tensor-parallel-size $7 \
              --enable-expert-parallel \
-             --speculative-config '{"num_speculative_tokens": 3,  "method":"deepseek_mtp"}' \
+             --speculative-config '{"num_speculative_tokens": 3,  "method":"deepseek_mtp", "enforce_eager": true}' \
              --profiler-config \
              '{"profiler": "torch",
              "torch_profiler_dir": "./vllm_profile",
@@ -1176,7 +1176,7 @@ Before you start, please
              --max-model-len 200000 \
              --max-num-batched-tokens 32 \
              --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-             --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true}' \
+             --additional-config '{"multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true}' \
              --trust-remote-code \
              --max-num-seqs 8 \
              --gpu-memory-utilization 0.92 \
