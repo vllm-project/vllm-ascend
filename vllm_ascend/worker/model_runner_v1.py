@@ -3736,9 +3736,15 @@ class NPUModelRunner(GPUModelRunner):
     def profile_run(self) -> None:
         self.eplb_warmup()
         mc2_tokens_capacity = get_mc2_tokens_capacity()
-        if self.max_num_tokens > mc2_tokens_capacity and select_moe_comm_method(
-            mc2_tokens_capacity, self.vllm_config
-        ) in {MoECommType.MC2, MoECommType.FUSED_MC2}:
+        # Skip MC2 warmup when LoRA + EP is enabled: the MC2 / FusedMC2
+        # paths do not support LoRA. AlltoAll is the
+        # only supported MoE comm backend for this combination.
+        if (
+            self.max_num_tokens > mc2_tokens_capacity
+            and select_moe_comm_method(
+                mc2_tokens_capacity, self.vllm_config
+            ) in {MoECommType.MC2, MoECommType.FUSED_MC2}
+        ):
             self._dummy_run(mc2_tokens_capacity, with_prefill=True, is_profile=True)
         origin_max_num_tokens = self.max_num_tokens
         # in the pcp scenario, the split sequence needs to be used for profile run

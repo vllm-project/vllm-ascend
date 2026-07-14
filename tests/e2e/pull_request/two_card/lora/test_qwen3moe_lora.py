@@ -50,10 +50,14 @@ def generate_and_test(llm: vllm.LLM, lora_path: str, lora_id: int) -> None:
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 
     for i in range(len(EXPECTED_LORA_OUTPUT)):
-        assert generated_texts[i].startswith(EXPECTED_LORA_OUTPUT[i])
+        # Case-insensitive comparison: EP and TP paths have different
+        # floating-point aggregation order (AlltoAll vs AllGather), which
+        # can flip adjacent logit values. SQL keywords may differ in case
+        # but are semantically equivalent.
+        assert generated_texts[i].lower().startswith(EXPECTED_LORA_OUTPUT[i].lower())
 
 
-def test_qwen3moe_lora(qwen3moe_lora_files):
+def test_qwen3moe_lora_tp(qwen3moe_lora_files):
     llm = vllm.LLM(
         MODEL_PATH,
         max_model_len=1024,
@@ -63,6 +67,22 @@ def test_qwen3moe_lora(qwen3moe_lora_files):
         trust_remote_code=True,
         enable_chunked_prefill=True,
         tensor_parallel_size=2,
+    )
+
+    generate_and_test(llm, qwen3moe_lora_files, lora_id=1)
+
+
+def test_qwen3moe_lora_ep(qwen3moe_lora_files):
+    llm = vllm.LLM(
+        MODEL_PATH,
+        max_model_len=1024,
+        enable_lora=True,
+        max_loras=4,
+        enforce_eager=True,
+        trust_remote_code=True,
+        enable_chunked_prefill=True,
+        tensor_parallel_size=2,
+        enable_expert_parallel=True,
     )
 
     generate_and_test(llm, qwen3moe_lora_files, lora_id=1)
