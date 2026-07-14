@@ -255,9 +255,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     # case mixed_qkv_non_spec.shape[0] > 0 (decode tokens) but
                     # the prefill segments are all empty, so extract_last_width
                     # would still crash on the empty prefill ranges.
-                    num_prefill_tokens = (
-                        mixed_qkv_non_spec.shape[0] - attn_metadata.num_decode_tokens
-                    )
+                    num_prefill_tokens = mixed_qkv_non_spec.shape[0] - attn_metadata.num_decode_tokens
                     if num_prefill_tokens == 0:
                         last_width_prefill_x = torch.zeros(
                             attn_metadata.num_prefills,
@@ -288,9 +286,9 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                         device=mixed_qkv_non_spec.device,
                         dtype=torch.int32,
                     )
-                    all_has_token_flags = get_pcp_group().all_gather(
-                        has_token_flag.unsqueeze(0).contiguous(), 0
-                    ).view(-1)
+                    all_has_token_flags = (
+                        get_pcp_group().all_gather(has_token_flag.unsqueeze(0).contiguous(), 0).view(-1)
+                    )
                     # If any PCP rank has 0 prefill tokens (e.g. PCP splits a
                     # 1-token chunk), the empty rank will early-return before
                     # chunk_gated_delta_rule. Tell chunk_gated_delta_rule_fwd
@@ -508,7 +506,8 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     skip_pcp_all_gather=skip_pcp_all_gather,
                 )
                 ssm_state[prefill_state_indices] = (
-                    last_recurrent_state.transpose(-1, -2).contiguous().to(ssm_state.dtype))
+                    last_recurrent_state.transpose(-1, -2).contiguous().to(ssm_state.dtype)
+                )
                 if split_non_spec:
                     core_attn_out_non_spec = torch.cat(
                         [core_attn_out_decode, core_attn_out_non_spec],

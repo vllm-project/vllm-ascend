@@ -478,8 +478,9 @@ def test_chunk_gated_delta_rule_fwd_skip_pcp_all_gather(monkeypatch: pytest.Monk
             {
                 "world_size": world_size,
                 "rank_in_group": 0,
-                "all_gather": lambda self, value, dim: all_gather_called.append(True) or
-                                                       _GatherResult([_DummyTensor("g0"), _DummyTensor("g1")]),
+                "all_gather": lambda self, value, dim: (
+                    all_gather_called.append(True) or _GatherResult([_DummyTensor("g0"), _DummyTensor("g1")])
+                ),
             },
         )()
 
