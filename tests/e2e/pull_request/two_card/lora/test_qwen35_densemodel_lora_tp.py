@@ -1,10 +1,11 @@
-import vllm
 import os
+
+import pytest
+import vllm
 from transformers import AutoTokenizer
 from vllm.lora.request import LoRARequest
 
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
-import pytest
 
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 os.environ["VLLM_DISABLE_COMPILE_CACHE"] = "1"
