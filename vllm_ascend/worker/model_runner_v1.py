@@ -111,7 +111,6 @@ from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     get_sfa_qsfa_packed_head_dim,
-    using_paged_attention,
 )
 
 # yapf conflicts with isort for this block
@@ -202,9 +201,6 @@ torch.npu.config.allow_internal_format = True
 AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 # list when ubatching is enabled
 PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
-
-SEQ_LEN_WITH_MAX_PA_WORKSPACE = 6144
-
 
 @dataclass
 class GraphCaptureContext:
@@ -3626,19 +3622,10 @@ class NPUModelRunner(GPUModelRunner):
                     self.attn_state = AscendAttentionState.SpecDecoding
                 else:
                     self.attn_state = AscendAttentionState.ChunkedPrefill
-            # The reason why we use a fixed seq_len rather than max_query_len is that
-            # _npu_paged_attention_get_workspace only returns max workspace with specific
-            # seq_lens. We use this seq_len only when capturing graph, and still use max_query_len
-            # in inference. This will be removed once npu_fused_infer_attention_score
-            # outperforms _npu_paged_attention on all cases.
             if profile_seq_lens is not None:
                 seq_lens = profile_seq_lens
             else:
-                seq_lens = (
-                    SEQ_LEN_WITH_MAX_PA_WORKSPACE
-                    if is_graph_capturing and using_paged_attention(num_tokens, self.vllm_config)
-                    else max_query_len
-                )  # type: ignore[assignment]
+                seq_lens = max_query_len
 
             self.optimistic_seq_lens_cpu[:num_reqs] = seq_lens
             self.optimistic_seq_lens_cpu[num_reqs:].fill_(0)
@@ -4979,7 +4966,10 @@ class NPUModelRunner(GPUModelRunner):
             attention_backend_maps.append(attn_backends[0])
             attention_backend_list.append(attn_backends[1])
 
-        self._check_and_update_cudagraph_mode(attention_backend_list, kv_cache_config.kv_cache_groups)
+        self._check_and_update_cudagraph_mode(
+            attention_backend_list,
+            kv_cache_config.kv_cache_groups,
+        )
 
         for i, attn_backend_map in enumerate(attention_backend_maps):
             self.attn_groups.append(create_attn_groups(attn_backend_map, i))
@@ -5165,14 +5155,25 @@ class NPUModelRunner(GPUModelRunner):
                     min_cg_attn_backend = attn_backend.__name__
 
         with update_pass_config(self):
-            cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
-                min_cg_support,
-                min_cg_attn_backend,
-                self.uniform_decode_query_len,
-                self.parallel_config.tensor_parallel_size,
-                self.kv_cache_config,
-                self.max_num_reqs,
-            )
+            if vllm_version_is("0.23.0"):
+                cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
+                    min_cg_support=min_cg_support,
+                    min_cg_attn_backend=min_cg_attn_backend,
+                    uniform_decode_query_len=self.uniform_decode_query_len,
+                    tensor_parallel_size=self.parallel_config.tensor_parallel_size,
+                    kv_cache_config=self.kv_cache_config,
+                    max_num_reqs=self.max_num_reqs,
+                )
+            else:
+                cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
+                    min_cg_support=min_cg_support,
+                    min_cg_attn_backend=min_cg_attn_backend,
+                    uniform_decode_query_len=self.uniform_decode_query_len,
+                    use_v2_model_runner=False,
+                    tensor_parallel_size=self.parallel_config.tensor_parallel_size,
+                    kv_cache_config=self.kv_cache_config,
+                    max_num_reqs=self.max_num_reqs,
+                )
             self.cudagraph_dispatcher.initialize_cudagraph_keys(
                 cudagraph_mode, self.uniform_decode_query_len
             )
@@ -5315,8 +5316,10 @@ def _torch_cuda_wrapper():
         torch.cuda.mem_get_info = _StreamPlaceholder
         raise RuntimeError(f"NPUModelRunner init failed, error is {e}")
     finally:
-        # if anything goes wrong, just patch it with a placeholder
-        torch.cuda.Event = _EventPlaceholder
+        # Async model-runner outputs are created after runner initialization.
+        # Keep the CUDA compatibility entry point backed by a real NPU event so
+        # their non-blocking device-to-host copies retain synchronization.
+        torch.cuda.Event = torch.npu.Event
         torch.cuda.Stream = torch.cuda.Stream
         torch.cuda.default_stream = torch.npu.default_stream
         torch.cuda.current_stream = torch.npu.current_stream

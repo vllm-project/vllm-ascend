@@ -1173,3 +1173,27 @@
 #    Future Plan:
 #       Remove this patch once torch.compile fully supports matching pattern from
 #       op's params.
+#
+# ** 33. File: hunyuan_vl_processor_compat.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.hunyuan_vision.HunYuanVLProcessingInfo.get_hf_processor`
+#      and the vLLM processor lazy registry
+#    Why:
+#       The supported vLLM refs currently straddle the HunyuanVL processor
+#       migration. v0.23.0 still bundles the processor, while the verified
+#       main ref uses the Transformers-native processor but predates the full
+#       Transformers 5.13 registry and prompt-protocol cleanup.
+#    How:
+#       Preserve the bundled v0.23.0 processor protocol, translate its image
+#       processor registration to Transformers 5.13, and complete the native
+#       processor registry, loader, and tokenizer schema on the main ref.
+#    Related PR:
+#       1. https://github.com/vllm-project/vllm/pull/47872
+#       2. https://github.com/vllm-project/vllm/pull/47867
+#    Future Plan:
+#       Remove this patch and delete the `install_hunyuan_vl_processor_compat()`
+#       call from `vllm_ascend/__init__.py` only after both supported vLLM refs
+#       contain `4a6440acefbd4d977620bdb6dfb7fb325cd9bda7` (vLLM PR #47867,
+#       merged into vLLM main at 2026-07-11 07:56:14 UTC), or an equivalent
+#       fix, and the supported HunyuanOCR tokenizer artifacts expose the named
+#       special-token schema required by Transformers 5.13.
