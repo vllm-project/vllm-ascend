@@ -33,15 +33,15 @@ try:
 except ImportError:
     Qwen3_5MultiTokenPredictor = None
     IntermediateTensors = None
+
+import functools
+
 from vllm.model_executor.models.qwen3_next import Qwen3NextAttention
+from vllm.tokenizers.registry import cached_tokenizer_from_config
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
 from vllm_ascend.utils import is_310p
-
-import functools
-
-from vllm.tokenizers.registry import cached_tokenizer_from_config
 
 _GDN_PATCH_TARGET = _GDNBaseCls
 
@@ -224,10 +224,7 @@ else:
 Qwen3_5ForConditionalGeneration.supports_multimodal_pruning = True
 
 # Delete recompute_mrope_positions stub (inherits from parent)
-try:
-    del Qwen3_5ForConditionalGeneration.recompute_mrope_positions
-except AttributeError:
-    pass
+del Qwen3_5ForConditionalGeneration.recompute_mrope_positions
 
 # config stuff used by EVS
 def _inject_evs_attrs(self, vllm_config):
