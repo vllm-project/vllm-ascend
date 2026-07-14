@@ -176,6 +176,33 @@ for key, val in sorted(_part.items()):
 part_broken = len(part_errors) > 0
 
 # ============================================================
+# 8. E2E marker coverage (values enforced; unmarked still transitional)
+# ============================================================
+_marker_unmarked: list[str] = []
+_marker_unknown_values: list[str] = []
+try:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+    from tests.e2e.generate_coverage_html import (  # type: ignore[import-not-found]
+        E2E_PR_ROOT as _E2E_PR_ROOT,
+    )
+    from tests.e2e.generate_coverage_html import (
+        _process_test_file,
+        _validate,
+    )
+
+    for fp in sorted(_E2E_PR_ROOT.rglob("test_*.py")):
+        records = _process_test_file(fp, root=_E2E_PR_ROOT)
+        for r in records:
+            if not r.has_coverage():
+                _marker_unmarked.append(f"{r.filepath}::{r.test_name}")
+        # Accumulate across all files (do NOT reassign — that would discard
+        # every file's warnings except the last one).
+        _marker_unknown_values.extend(_validate(records))
+except Exception:
+    _marker_unmarked = []
+    _marker_unknown_values = []
+
+# ============================================================
 # REPORT
 # ============================================================
 print("=" * 70)
@@ -250,6 +277,24 @@ if part_errors:
 else:
     print("    ✓ All partition keys valid and map to active runners")
 
+print("\n[8] E2E marker coverage (values enforced; unmarked still transitional):")
+if _marker_unmarked:
+    print(f"    ⚠ {len(_marker_unmarked)} test(s) without e2e_coverage marker:")
+    for p in _marker_unmarked[:20]:
+        print(f"      - {p}")
+    if len(_marker_unmarked) > 20:
+        print(f"      ... and {len(_marker_unmarked) - 20} more")
+else:
+    print("    ✓ All tests have e2e_coverage markers")
+if _marker_unknown_values:
+    print(f"    ✗ {len(_marker_unknown_values)} unknown marker value(s) — failing:")
+    for w in _marker_unknown_values[:10]:
+        print(f"      - {w}")
+    if len(_marker_unknown_values) > 10:
+        print(f"      ... and {len(_marker_unknown_values) - 10} more")
+else:
+    print("    ✓ All marker values are within the taxonomy")
+
 print("\n" + "=" * 70)
 
 has_errors = bool(
@@ -261,6 +306,10 @@ has_errors = bool(
     or cpu_ut_leaked
     or rm_errors
     or part_errors
+    # Out-of-taxonomy marker values are a hard CI failure — values must come
+    # from tests/e2e/coverage_taxonomy.py. Unmarked tests remain WARNING-only
+    # during the migration period.
+    or _marker_unknown_values
 )
 if has_errors:
     sys.exit(1)

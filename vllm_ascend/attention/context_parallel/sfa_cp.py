@@ -11,7 +11,6 @@ from vllm.triton_utils import HAS_TRITON
 from vllm.utils.math_utils import cdiv
 from vllm.v1.kv_cache_interface import AttentionSpec
 
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.common_cp import AscendPCPMetadata
 from vllm_ascend.attention.sfa_v1 import (
@@ -824,7 +823,6 @@ class AscendSFADCPMetadataBuilder(AscendSFAMetadataBuilder):
     ) -> AscendSFAMetadata:
         dcp_slot_mapping = common_attn_metadata.slot_mapping
         dcp_block_table = common_attn_metadata.block_table_tensor
-        dcp_slot_mapping_cpu = common_attn_metadata.slot_mapping_cpu
         num_reqs = common_attn_metadata.num_reqs
         num_input_tokens = common_attn_metadata.num_input_tokens
         block_table_replicated_view = self._build_block_table_replicated_view(
@@ -835,23 +833,14 @@ class AscendSFADCPMetadataBuilder(AscendSFAMetadataBuilder):
             common_attn_metadata,
             block_table_replicated_view,
         )
-        if get_ascend_config().c8_enable_reshape_optim:
-            slot_mapping_replicated_view_cpu = slot_mapping_replicated_view.to("cpu")
-        else:
-            # In the case of c8_enable_reshape_optim=False,
-            # the slot_mapping_cpu is not used in the kernel, so we can just use the original
-            # dcp_slot_mapping_cpu to avoid unnecessary data transfer.
-            slot_mapping_replicated_view_cpu = dcp_slot_mapping_cpu
 
         common_attn_metadata.slot_mapping = slot_mapping_replicated_view
         common_attn_metadata.block_table_tensor = block_table_replicated_view
-        common_attn_metadata.slot_mapping_cpu = slot_mapping_replicated_view_cpu
         try:
             metadata = build_metadata()
         finally:
             common_attn_metadata.slot_mapping = dcp_slot_mapping
             common_attn_metadata.block_table_tensor = dcp_block_table
-            common_attn_metadata.slot_mapping_cpu = dcp_slot_mapping_cpu
 
         dcp_local_seq_lens = common_attn_metadata.dcp_local_seq_lens
         if dcp_local_seq_lens is None:

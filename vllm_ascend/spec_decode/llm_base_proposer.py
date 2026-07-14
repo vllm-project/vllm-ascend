@@ -55,7 +55,13 @@ from vllm_ascend.distributed.parallel_state import get_lmhead_tp_group
 from vllm_ascend.models.llama_eagle3_vwn import Eagle3VwnLlamaForCausalLM
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
-from vllm_ascend.utils import enable_sp, lmhead_tp_enable, shared_expert_dp_enabled
+from vllm_ascend.spec_decode.utils import SlidingWindowAdapter
+from vllm_ascend.utils import enable_sp, lmhead_tp_enable, shared_expert_dp_enabled, vllm_version_is
+
+if not vllm_version_is("0.23.0"):
+    from vllm.model_executor.models.qwen3_dspark import Qwen3DSparkForCausalLM
+else:
+    Qwen3DSparkForCausalLM = None
 
 
 @contextmanager
@@ -279,6 +285,30 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.token_arange_np = np.arange(self.max_num_tokens + 1, dtype=np.int32)
         self.enable_enpu = self.runner.enable_enpu
         self.use_eagle = self.runner.use_eagle
+        # Sliding window attention for draft model
+        self.draft_window_size = getattr(self.speculative_config, "draft_window_size", None)
+        if self.draft_window_size is None and self.vllm_config.additional_config:
+            self.draft_window_size = self.vllm_config.additional_config.get("draft_window_size")
+        else:
+            self.draft_window_size = None
+
+        # Sliding-window draft attention adapter. Reuse ``self.draft_window_size``
+        # resolved above (speculative_config -> additional_config -> None, all
+        # None-guarded). Do NOT re-read additional_config here: it is None in the
+        # proposers used by unit tests, and the unguarded ``.get()`` would crash.
+        if self.draft_window_size is not None:
+            # EAGLE3: seq_lens at apply time is context-only, so the window end
+            # must cover the K draft positions beyond it -> future_offset = K.
+            # DFlash: set_inputs_first_pass already bakes the query stretch
+            # (bonus + mask) into seq_lens -> future_offset = 0.
+            future_offset = 0 if self.method == "dflash" else self.num_speculative_tokens
+            self.sliding_window = SlidingWindowAdapter(
+                self.draft_window_size,
+                self.runner.block_size,
+                self.runner.max_num_reqs,
+                future_offset,
+                self.device,
+            )
 
     def _raise_if_padded_drafter_batch_disabled_and_full_graph_enabled(self):
         if (
@@ -612,13 +642,15 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 ],
                 # This is used to hold a position.
                 slot_mapping=self.runner.input_batch.block_table[self.kv_cache_gid].slot_mapping.gpu,
-                slot_mapping_cpu=self.runner.input_batch.block_table[self.kv_cache_gid].slot_mapping.cpu,
                 positions=self.runner.positions,
                 positions_cpu=self.runner._dsa_positions_cpu_buf if self.use_compress else None,
                 attn_state=self.runner.attn_state,
                 decode_token_per_req=self.runner.decode_token_per_req,
                 is_prefilling=torch.zeros(num_reqs, dtype=torch.bool),
                 max_seq_len=0,
+                group_len=self.runner.group_len.gpu[:num_reqs],
+                group_key_idx=self.runner.group_key_idx.gpu[:num_reqs],
+                group_key_cache_idx=self.runner.group_key_cache_idx.gpu[:num_reqs],
             )
             if self.pcp_size * self.dcp_size > 1:
                 # update long_seq related params and flatten block_table
@@ -758,12 +790,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         if token_indices_to_sample is None:
             token_indices_to_sample = common_attn_metadata.query_start_loc[1:] - 1
 
-        if self.method in ("eagle3", "dflash"):
+        if self.method in ("eagle3", "dflash", "dspark"):
             assert isinstance(
                 self.get_model(),
                 (
                     Eagle3LlamaForCausalLM,
                     DFlashQwen3ForCausalLM,
+                    Qwen3DSparkForCausalLM,
                     Eagle3VwnLlamaForCausalLM,
                     Eagle3DeepseekV2ForCausalLM,
                 ),
@@ -880,6 +913,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 common_attn_metadata.block_table_tensor = self._adjust_tensor(
                     common_attn_metadata.block_table_tensor, num_reqs_padded
                 )
+
+        if self.draft_window_size is not None:
+            # Save original seq_lens and apply sliding window before any CP adjustments.
+            # Guarded so the clone is skipped when the window is disabled.
+            self.sliding_window.apply(common_attn_metadata)
 
         if self.supports_mm_inputs:
             mm_embeds, is_mm_embed = mm_embed_inputs or (None, None)
@@ -1080,7 +1118,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         return draft_token_ids
 
     def compute_draft_token_ids(self, hidden_states: torch.Tensor):
-        if self.method in ("eagle3", "dflash"):
+        if self.method in ("eagle3", "dflash", "dspark"):
             logits = self.model.logits_processor(self.model.lm_head, hidden_states)
             if not hasattr(self.model, "draft_id_to_target_id") or self.model.draft_id_to_target_id is None:
                 return greedy_sample(logits)
@@ -1111,7 +1149,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         model_input_ids = self.input_ids[:num_input_tokens]
         model_positions = self._get_positions(num_input_tokens)
 
-        if self.method == "dflash":
+        if self.method == "dflash" or self.method == "dspark":
             model_kwargs = self.build_model_inputs_first_pass(num_input_tokens)
         else:
             model_kwargs = {
@@ -1222,21 +1260,39 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     )
                 draft_token_ids = logits.argmax(dim=-1)
         else:
-            logits = self.model.compute_logits(sample_hidden_states)
-            if lmhead_tp_enable():
-                logits, token_indices_to_sample = self._align_tensor_and_indices(
-                    logits,
-                    num_indices,
-                    token_indices_to_sample,
-                    ori_token_indices_to_sample,
-                    is_logits=True,
-                )
-            draft_token_ids = logits.argmax(dim=-1)
+            if self.method == "dspark":
+                # Dspark speculation requires autoregressive applications of MarkovHead and ConfidenceHead.
+                # The MarkovHead performs bias correction on logits.
+                # The ConfidenceHead predicts the expected acceptance length of tokens(Not yet achieved).
+                raw_logits = self.model.compute_logits(last_hidden_states)
+                logits = raw_logits.view(-1, self.num_speculative_tokens, raw_logits.shape[-1])
+                num_blk = logits.shape[0]
+                draft_token_ids = self._dspark_draft_buffer[:num_blk]
+                draft_token_ids[:, 0].copy_(self._dspark_seed_buffer[:num_blk])
+                for idx in range(self.num_speculative_tokens):
+                    markov_emb = self.model.markov_embed(draft_token_ids[:, idx])
+                    logits_bias = self.model.markov_bias(markov_emb)
+                    logits[:, idx].add_(logits_bias)
+                    draft_token_ids[:, idx + 1].copy_(logits[:, idx].argmax(dim=-1))
+            else:
+                logits = self.model.compute_logits(sample_hidden_states)
+                if lmhead_tp_enable():
+                    logits, token_indices_to_sample = self._align_tensor_and_indices(
+                        logits,
+                        num_indices,
+                        token_indices_to_sample,
+                        ori_token_indices_to_sample,
+                        is_logits=True,
+                    )
+                draft_token_ids = logits.argmax(dim=-1)
 
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1 or self.parallel_drafting:
-            # [batch_size, 1]
-            return draft_token_ids.view(-1, self.num_speculative_tokens)
+            if self.method == "dspark":
+                return draft_token_ids[:, 1:]
+            else:
+                # [batch_size, 1]
+                return draft_token_ids.view(-1, self.num_speculative_tokens)
 
         if self.pcp_size * self.dcp_size > 1 and is_prefill:
             draft_token_ids_list = []
@@ -1358,7 +1414,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
             sample_hidden_states = last_hidden_states[token_indices_to_sample]
             if get_ascend_config().enable_reduce_sample:
-                if self.method in ("eagle3", "dflash", "mtp"):
+                if self.method in ("eagle3", "dflash", "dspark", "mtp"):
                     draft_token_ids = self.compute_draft_token_ids(sample_hidden_states)
                     if lmhead_tp_enable() and num_indices < draft_token_ids.shape[0]:
                         draft_token_ids = draft_token_ids[:num_indices]
@@ -1614,7 +1670,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             hf_config = getattr(draft_model_config, "hf_config", None)
             architectures = getattr(hf_config, "architectures", []) or []
             return "DeepSeekMTPModel" in architectures
-        return self.method not in ("mtp", "draft_model", "dflash")
+        return self.method not in ("mtp", "draft_model", "dflash", "dspark")
 
     def attn_update_stack_num_spec_norm(
         self,
@@ -1751,11 +1807,19 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 block_size = 128
 
             # Compute the slot mapping.
+            # When sliding window is enabled, block_table_tensor may be cropped
+            # for attention, but slot mapping needs the full block table to
+            # address the absolute KV cache positions.
+            if self.draft_window_size is not None:
+                block_table_for_slot = self.sliding_window.full_block_table
+            else:
+                block_table_for_slot = old_common_metadata.block_table_tensor
+
             if self.uses_mrope:
                 block_numbers = clamped_positions[0] // block_size
             else:
                 block_numbers = clamped_positions // block_size
-            block_ids = old_common_metadata.block_table_tensor.gather(dim=1, index=block_numbers.view(-1, 1))
+            block_ids = block_table_for_slot.gather(dim=1, index=block_numbers.view(-1, 1))
             block_ids = block_ids.view(-1)
             if self.uses_mrope:
                 slot_mapping = block_ids * block_size + clamped_positions[0] % block_size
@@ -1993,7 +2057,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             max_query_len=new_query_len_per_req.max().item(),
             block_table_tensor=common_attn_metadata.block_table_tensor,
             slot_mapping=common_attn_metadata.slot_mapping,
-            slot_mapping_cpu=common_attn_metadata.slot_mapping_cpu,
             actual_seq_lengths_q=self.runner.actual_seq_lengths_q,
             positions=common_attn_metadata.positions[token_indices],
             positions_cpu=common_attn_metadata.positions_cpu[token_indices]
@@ -2003,6 +2066,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             decode_token_per_req=self.runner.decode_token_per_req,
             is_prefilling=common_attn_metadata.is_prefilling,
             max_seq_len=0,
+            group_len=common_attn_metadata.group_len,
+            group_key_idx=common_attn_metadata.group_key_idx,
+            group_key_cache_idx=common_attn_metadata.group_key_cache_idx,
         )
         return spec_common_attn_metadata, token_indices
 
@@ -2086,7 +2152,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             actual_seq_lengths_q=self.runner.actual_seq_lengths_q,
             block_table_tensor=common_attn_metadata.block_table_tensor,
             slot_mapping=common_attn_metadata.slot_mapping,
-            slot_mapping_cpu=common_attn_metadata.slot_mapping_cpu,
             positions=common_attn_metadata.positions,
             positions_cpu=common_attn_metadata.positions_cpu,
             attn_state=self.runner.attn_state,
@@ -2096,6 +2161,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             seq_lens=common_attn_metadata.seq_lens,
             is_prefilling=common_attn_metadata.is_prefilling,
             max_seq_len=0,
+            group_len=common_attn_metadata.group_len,
+            group_key_idx=common_attn_metadata.group_key_idx,
+            group_key_cache_idx=common_attn_metadata.group_key_cache_idx,
         )
 
         return spec_common_attn_metadata, token_indices, token_indices_to_sample, num_rejected_tokens_gpu
