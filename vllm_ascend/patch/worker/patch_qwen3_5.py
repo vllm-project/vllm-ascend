@@ -220,5 +220,6 @@ if is_310p():
     _GDN_PATCH_TARGET.get_state_dtype = AscendGatedDeltaNetAttention310.get_state_dtype
 else:
     _GDN_PATCH_TARGET.forward = AscendGatedDeltaNetAttention.forward
+    _GDN_PATCH_TARGET._forward_ascend = AscendGatedDeltaNetAttention._forward_ascend
     _GDN_PATCH_TARGET._forward_core = AscendGatedDeltaNetAttention._forward_core
     _GDN_PATCH_TARGET._warmup_prefill_kernels = AscendGatedDeltaNetAttention._warmup_prefill_kernels
