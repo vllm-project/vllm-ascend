@@ -420,6 +420,7 @@ jobs:
 
 
   generate_and_upload_variant_index:
+    name: generate and upload variant index
     needs: [build_and_release_wheel, build_and_release_wheel_a3, build_and_release_wheel_a5,build_and_release_wheel_310p]
     if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-24.04
