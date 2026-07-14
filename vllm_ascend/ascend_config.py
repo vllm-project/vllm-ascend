@@ -236,11 +236,6 @@ class AscendConfig:
         from vllm_ascend.utils import get_flashcomm2_config_and_validate
 
         self.flashcomm2_oproj_tensor_parallel_size = get_flashcomm2_config_and_validate(self, vllm_config)
-        # We find that _npu_paged_attention still performs better than
-        # npu_fused_infer_attention_score in some cases. We allow to execute
-        # _npu_paged_attention in this cases. This should be removed once
-        # npu_fused_infer_attention_score performs better on all scenarios.
-        self.pa_shape_list = additional_config.get("pa_shape_list", [])
         # Weight NZ mode configuration.
         # 0: disabled, 1: only quant case enable nz (default), 2: BF16/FP16 also enable nz
         self.weight_nz_mode = self._get_config_value(
