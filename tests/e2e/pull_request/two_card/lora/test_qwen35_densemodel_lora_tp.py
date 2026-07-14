@@ -85,7 +85,6 @@ def _assert_qwen35_text_lora(
 @pytest.mark.parametrize("enforce_eager", [False, True])
 @pytest.mark.parametrize("fully_sharded_loras", [False, True])
 def test_qwen35_text_lora(qwen35_text_lora_files, tensor_parallel_size, enforce_eager, fully_sharded_loras):
-
     with VllmRunner(
         model_name=MODEL_PATH,
         max_model_len=4096,
