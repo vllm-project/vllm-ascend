@@ -184,6 +184,71 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         self._dspark_cache_positions[slots_long, cache_indices] = positions.to(torch.int32)
         self._dspark_cache_valid[slots_long, cache_indices] = True
 
+    def _dspark_sparse_attn(
+        self,
+        q: torch.Tensor,
+        kv: torch.Tensor,
+        topk_idxs: torch.Tensor,
+    ) -> torch.Tensor:
+        valid = topk_idxs >= 0
+        safe_topk = torch.where(valid, topk_idxs, torch.zeros_like(topk_idxs))
+        gather_idx = safe_topk.unsqueeze(-1).expand(-1, -1, -1, kv.shape[-1])
+        kv_for_gather = kv.unsqueeze(1).expand(-1, q.shape[1], -1, -1)
+        selected_kv = torch.gather(kv_for_gather, 2, gather_idx)
+
+        scores = (
+            torch.einsum("bshd,bskd->bshk", q.float(), selected_kv.float())
+            * float(self.scale)
+        )
+        scores = scores.masked_fill(~valid.unsqueeze(2), torch.finfo(scores.dtype).min)
+        sink_scores = self.attn_sink[: q.shape[2]].to(scores.dtype).view(1, 1, q.shape[2], 1)
+        scores_max = torch.maximum(scores.max(dim=-1, keepdim=True).values, sink_scores)
+        exp_scores = torch.exp(scores - scores_max)
+        denom = exp_scores.sum(dim=-1, keepdim=True) + torch.exp(sink_scores - scores_max)
+        weights = exp_scores / denom
+        return torch.einsum("bshk,bskd->bshd", weights.to(selected_kv.dtype), selected_kv).to(q.dtype)
+
+    def _dspark_attention_from_cache(
+        self,
+        q: torch.Tensor,
+        draft_kv: torch.Tensor,
+        draft_positions: torch.Tensor,
+        request_slots: torch.Tensor,
+    ) -> torch.Tensor:
+        batch_size, draft_len = q.shape[:2]
+        cache_positions = self._dspark_cache_positions
+        cache_valid = self._dspark_cache_valid
+
+        block_start = draft_positions[:, :1].to(torch.long)
+        context_end = block_start - 1
+        context_start = torch.clamp(context_end + 1 - self.window_size, min=0)
+        window_offsets = torch.arange(self.window_size, device=draft_kv.device, dtype=torch.long).view(1, -1)
+        ctx_positions = context_start + window_offsets
+        within_ctx = ctx_positions <= context_end
+        cache_indices = ctx_positions.remainder(self._dspark_cache_capacity)
+
+        slot_indices = request_slots[:, :1].to(device=draft_kv.device, dtype=torch.long).expand(-1, self.window_size)
+        cached_positions = cache_positions[slot_indices, cache_indices].to(torch.long)
+        cached_valid = cache_valid[slot_indices, cache_indices]
+        ctx_valid = within_ctx & cached_valid & (cached_positions == ctx_positions)
+        ctx_kv = self._dspark_kv_cache[slot_indices, cache_indices]
+
+        ctx_topk = (
+            torch.arange(self.window_size, device=draft_kv.device, dtype=torch.long)
+            .view(1, -1)
+            .expand(batch_size, -1)
+        )
+        draft_topk = (
+            self.window_size + torch.arange(draft_len, device=draft_kv.device, dtype=torch.long)
+        ).view(1, -1).expand(batch_size, -1)
+        topk = torch.cat([ctx_topk, draft_topk], dim=1)
+        topk_valid = torch.cat([ctx_valid, torch.ones_like(draft_topk, dtype=torch.bool)], dim=1)
+        topk = torch.where(topk_valid, topk, torch.full_like(topk, -1))
+        topk = topk.unsqueeze(1).expand(-1, draft_len, -1)
+
+        kv = torch.cat([ctx_kv, draft_kv], dim=1)
+        return self._dspark_sparse_attn(q, kv, topk)
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -206,32 +271,17 @@ class DeepseekV4DSparkAttention(DeepseekV4Attention):
         if request_slots is None:
             request_slots = torch.zeros_like(positions, dtype=torch.int32)
 
-        out = torch.empty_like(q)
-        pos_long = positions.to(torch.long)
-        slots_long = request_slots.to(torch.long)
-        for block_offset in range(0, positions.numel(), self.block_size):
-            block_end = min(block_offset + self.block_size, positions.numel())
-            block_pos = pos_long[block_offset:block_end]
-            block_start = int(block_pos.min().item())
-            context_end = block_start - 1
-            context_start = max(0, context_end + 1 - self.window_size)
-            request_slot = int(slots_long[block_offset].item())
-            ctx_positions = torch.arange(context_start, context_end + 1, dtype=torch.long, device=q.device)
-            if ctx_positions.numel() > 0:
-                cache_indices = ctx_positions % self._dspark_cache_capacity
-                cached_positions = self._dspark_cache_positions[request_slot, cache_indices].to(torch.long)
-                valid = self._dspark_cache_valid[request_slot, cache_indices] & (cached_positions == ctx_positions)
-                ctx_kv = self._dspark_kv_cache[request_slot, cache_indices][valid]
-            else:
-                ctx_kv = shared_kv.new_empty((0, shared_kv.shape[-1]))
-            packed_kv = torch.cat([ctx_kv, shared_kv[block_offset:block_end]], dim=0).contiguous()
-            op_out = _dspark_small_ops_attention(
-                q[block_offset:block_end].contiguous(),
-                packed_kv,
-                self.attn_sink,
-                float(self.scale),
+        if positions.numel() % self.block_size != 0:
+            raise ValueError(
+                f"DSpark decode requires a multiple of block_size tokens, got "
+                f"{positions.numel()} tokens for block_size={self.block_size}"
             )
-            out[block_offset:block_end] = op_out
+        batch_size = positions.numel() // self.block_size
+        q = q.view(batch_size, self.block_size, self.n_local_heads, self.head_dim)
+        draft_kv = shared_kv.view(batch_size, self.block_size, self.head_dim)
+        draft_positions = positions.view(batch_size, self.block_size)
+        request_slots = request_slots.view(batch_size, self.block_size)
+        out = self._dspark_attention_from_cache(q, draft_kv, draft_positions, request_slots).flatten(0, 1)
 
         out = _apply_dsv4_rope_tail(self.rotary_emb, positions, out, inverse=True)
         group_dim = self.n_local_heads * self.head_dim // self.n_local_groups

@@ -11,6 +11,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
+from vllm_ascend.compilation.acl_graph import ACLGraphWrapper
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
 from vllm_ascend.spec_decode.llm_base_proposer import greedy_sample
 from vllm_ascend.worker.v2.sample.gumbel import gumbel_sample
@@ -42,7 +43,6 @@ class AscendDSparkProposer(AscendDflashProposer):
             "ptd_token_id",
             getattr(draft_hf_config, "dspark_noise_token_id", 0),
         )
-        self.use_cuda_graph = False
         self.max_query_tokens = self.max_batch_size * self.num_speculative_tokens
         self.max_positions = self.max_num_tokens + self.max_query_tokens
         self.positions = torch.zeros(self.max_query_tokens, dtype=torch.int32, device=device)
@@ -64,9 +64,27 @@ class AscendDSparkProposer(AscendDflashProposer):
         self._dspark_last_confidence: torch.Tensor | None = None
         self._dspark_last_req_ids: list[str] | None = None
         self._dspark_probabilistic = vllm_config.speculative_config.draft_sample_method == "probabilistic"
+        self.use_cuda_graph = self.use_cuda_graph and not self._dspark_probabilistic
         self._dspark_confidence_threshold = float(getattr(draft_hf_config, "dspark_confidence_threshold", 0.0) or 0.0)
         if not 0.0 <= self._dspark_confidence_threshold <= 1.0:
             raise ValueError(f"dspark_confidence_threshold must be in [0.0, 1.0], got {self._dspark_confidence_threshold}")
+        self._runnable = self._run_dspark_draft
+
+    def load_model(self, model: torch.nn.Module) -> None:
+        super().load_model(model)
+        self._runnable = self._run_dspark_draft
+        if (
+            self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs()
+            and self.use_cuda_graph
+        ):
+            self.update_stream = torch.npu.Stream()
+            self._runnable = ACLGraphWrapper(
+                self._run_dspark_draft,
+                self.vllm_config,
+                runtime_mode=CUDAGraphMode.FULL,
+                use_eagle=self.use_eagle,
+                enable_enpu=self.enable_enpu,
+            )
 
     def take_last_draft_logits(self) -> torch.Tensor | None:
         draft_logits = self._dspark_last_draft_logits
@@ -155,6 +173,11 @@ class AscendDSparkProposer(AscendDflashProposer):
             num_query_total, is_draft_model=True
         )
         num_input_tokens = min(num_input_tokens, num_query_total)
+        if num_tokens_across_dp is not None:
+            dp_rank = self.vllm_config.parallel_config.data_parallel_rank
+            if num_tokens_across_dp[dp_rank] != num_input_tokens:
+                num_tokens_across_dp = num_tokens_across_dp.clone()
+                num_tokens_across_dp[dp_rank] = num_input_tokens
         self.input_ids[:num_input_tokens].fill_(self.parallel_drafting_token_id)
         self.positions[:num_input_tokens].copy_(self.arange_dspark[:num_input_tokens])
         self._request_slots_buffer[:num_input_tokens].zero_()
@@ -164,6 +187,16 @@ class AscendDSparkProposer(AscendDflashProposer):
         context_positions.copy_(self.arange_dspark[:num_context])
         context_request_slots = self._context_request_slots_buffer[:num_context]
         context_request_slots.zero_()
+        self._dflash_num_context = num_context
+        self._dflash_hidden_states[:num_context].copy_(self.hidden_states[:num_context])
+        if num_input_tokens % block_size != 0:
+            raise ValueError(
+                f"DSpark graph capture requires a multiple of block_size tokens, got "
+                f"{num_input_tokens} tokens for block_size={block_size}"
+            )
+        graph_batch_size = num_input_tokens // block_size
+        num_sample = graph_batch_size * block_size
+        self.token_indices_to_sample[:num_sample].copy_(self.arange_dspark[:num_sample])
 
         with set_ascend_forward_context(
             None,
@@ -177,26 +210,39 @@ class AscendDSparkProposer(AscendDflashProposer):
             is_draft_model=True,
             draft_attn_metadatas=[],
         ):
+            self._prepare_dspark_context_cache()
             if is_profile:
-                self.model.precompute_and_store_context_kv(
-                    self.hidden_states[:num_context],
-                    context_positions,
-                    self._context_slot_mapping_buffer[:num_context],
-                    context_request_slots,
+                forward_context = get_forward_context()
+                if forward_context is not None:
+                    forward_context.moe_layer_index = 0
+                self.model(
+                    input_ids=self.input_ids[:num_input_tokens],
+                    positions=self.positions[:num_input_tokens],
+                    inputs_embeds=None,
+                    request_slots=self._request_slots_buffer[:num_input_tokens],
+                    slot_mapping=self._slot_mapping_buffer[:num_input_tokens],
                 )
-            forward_context = get_forward_context()
-            if forward_context is not None:
-                forward_context.moe_layer_index = 0
-            self.model(
-                input_ids=self.input_ids[:num_input_tokens],
-                positions=self.positions[:num_input_tokens],
-                inputs_embeds=None,
-                request_slots=self._request_slots_buffer[:num_input_tokens],
-                slot_mapping=self._slot_mapping_buffer[:num_input_tokens],
-            )
+            else:
+                forward_context = get_forward_context()
+                if forward_context is not None:
+                    forward_context.moe_layer_index = 0
+                self._runnable(
+                    num_input_tokens=num_input_tokens,
+                    batch_size=graph_batch_size,
+                    token_indices_to_sample=self.token_indices_to_sample[:num_sample],
+                    target_positions=self.positions[:num_input_tokens],
+                    inputs_embeds=None,
+                    multi_steps_attn_metadata=[],
+                    num_tokens=num_input_tokens,
+                )
             forward_context = get_forward_context()
             if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and not _EXTRA_CTX.capturing:
                 self._update_full_graph_params(forward_context, num_input_tokens, [])
+
+    def _update_full_graph_params(self, forward_context, num_tokens, draft_attn_metadatas=None):
+        if not self.draft_attn_groups:
+            return
+        super()._update_full_graph_params(forward_context, num_tokens, draft_attn_metadatas)
 
     def _assign_request_slots(self, batch_size: int) -> list[int]:
         if self.runner is None or not hasattr(self.runner, "input_batch"):
@@ -324,16 +370,6 @@ class AscendDSparkProposer(AscendDflashProposer):
         return num_query_total, token_indices_to_sample, cad, None
 
     def build_model_inputs_first_pass(self, num_input_tokens: int) -> dict[str, Any]:
-        num_context = self._dflash_num_context
-        if self._dspark_slots_to_reset:
-            reset_slots = torch.tensor(self._dspark_slots_to_reset, dtype=torch.int32, device=self.device)
-            self.model.reset_request_slots(reset_slots)
-        self.model.precompute_and_store_context_kv(
-            self._dflash_hidden_states[:num_context],
-            self._context_positions_buffer[:num_context],
-            self._context_slot_mapping_buffer[:num_context],
-            self._context_request_slots_buffer[:num_context],
-        )
         return {
             "input_ids": self.input_ids[:num_input_tokens],
             "positions": self.positions[:num_input_tokens],
@@ -341,6 +377,31 @@ class AscendDSparkProposer(AscendDflashProposer):
             "request_slots": self._request_slots_buffer[:num_input_tokens],
             "slot_mapping": self._slot_mapping_buffer[:num_input_tokens],
         }
+
+    def _reset_pending_request_slots(self) -> None:
+        if not self._dspark_slots_to_reset:
+            return
+        reset_slots = torch.tensor(self._dspark_slots_to_reset, dtype=torch.int32, device=self.device)
+        self.model.reset_request_slots(reset_slots)
+        self._dspark_slots_to_reset = []
+
+    def _prepare_dspark_context_cache(self) -> None:
+        self._reset_pending_request_slots()
+        num_context = self._dflash_num_context
+        self.model.precompute_and_store_context_kv(
+            self._dflash_hidden_states[:num_context],
+            self._context_positions_buffer[:num_context],
+            self._context_slot_mapping_buffer[:num_context],
+            self._context_request_slots_buffer[:num_context],
+        )
+
+    def _pad_dspark_decode_inputs(self, num_tokens: int, num_input_tokens: int) -> None:
+        if num_input_tokens <= num_tokens:
+            return
+        self.input_ids[num_tokens:num_input_tokens].fill_(self.parallel_drafting_token_id)
+        self.positions[num_tokens:num_input_tokens].zero_()
+        self._request_slots_buffer[num_tokens:num_input_tokens].zero_()
+        self._slot_mapping_buffer[num_tokens:num_input_tokens].zero_()
 
     def _get_draft_idx_mapping(self, num_reqs: int, device: torch.device) -> torch.Tensor:
         return self._dspark_idx_mapping_buffer[:num_reqs].to(device=device, dtype=torch.int32).contiguous()
@@ -385,7 +446,14 @@ class AscendDSparkProposer(AscendDflashProposer):
             seeds[req_idx] = int(generator.initial_seed()) if generator is not None else base_seed + req_idx * 9973
         return seeds.to(device=device, dtype=torch.int64).contiguous()
 
-    def _sample_sequential(self, num_reqs: int, head_hidden: torch.Tensor, token_indices_to_sample: torch.Tensor, sampling_metadata: SamplingMetadata | None = None) -> torch.Tensor:
+    def _sample_sequential(
+        self,
+        num_reqs: int,
+        head_hidden: torch.Tensor,
+        token_indices_to_sample: torch.Tensor,
+        sampling_metadata: SamplingMetadata | None = None,
+        truncate_by_confidence: bool = True,
+    ) -> torch.Tensor:
         block_size = self.num_speculative_tokens
         num_sample = num_reqs * block_size
         sample_hidden_states = head_hidden[token_indices_to_sample[:num_sample]]
@@ -428,12 +496,59 @@ class AscendDSparkProposer(AscendDflashProposer):
             self._dspark_last_draft_logits = draft_logits.contiguous()
         confidence = self.model.confidence(head_hidden.view(num_reqs, block_size, -1), torch.stack(markov_embeds, dim=1))
         self._dspark_last_confidence = confidence
-        proposal_len = self._dspark_confident_prefix_length(confidence, block_size)
-        if use_probabilistic and proposal_len > 0:
+        proposal_len = block_size
+        if truncate_by_confidence:
+            proposal_len = self._dspark_confident_prefix_length(confidence, block_size)
+        if truncate_by_confidence and use_probabilistic and proposal_len > 0:
             assert draft_logits is not None
             self._dspark_last_draft_probs = draft_logits[:, :proposal_len, :].softmax(dim=-1, dtype=torch.float32).contiguous()
             self._dspark_last_req_ids = self._current_req_ids(num_reqs)
         return self._dspark_draft_buffer[:num_reqs, :proposal_len]
+
+    def _truncate_dspark_draft_tokens(
+        self,
+        draft_token_ids: torch.Tensor,
+        num_reqs: int,
+        sampling_metadata: SamplingMetadata | None,
+    ) -> torch.Tensor:
+        proposal_len = self._dspark_confident_prefix_length(
+            self._dspark_last_confidence,
+            self.num_speculative_tokens,
+        )
+        use_probabilistic = (
+            sampling_metadata is not None
+            and self._dspark_probabilistic
+            and not sampling_metadata.all_greedy
+        )
+        if use_probabilistic and proposal_len > 0:
+            assert self._dspark_last_draft_logits is not None
+            self._dspark_last_draft_probs = self._dspark_last_draft_logits[
+                :, :proposal_len, :
+            ].softmax(dim=-1, dtype=torch.float32).contiguous()
+            self._dspark_last_req_ids = self._current_req_ids(num_reqs)
+        return draft_token_ids[:num_reqs, :proposal_len]
+
+    def _run_dspark_draft(
+        self,
+        num_input_tokens: int,
+        batch_size: int,
+        token_indices_to_sample: torch.Tensor,
+        target_positions: torch.Tensor | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        multi_steps_attn_metadata: list[dict[str, Any]] | None = None,
+        num_tokens: int | None = None,
+        sampling_metadata: SamplingMetadata | None = None,
+    ) -> torch.Tensor:
+        del target_positions, inputs_embeds, multi_steps_attn_metadata, num_tokens
+        model_inputs = self.build_model_inputs_first_pass(num_input_tokens)
+        hidden_states = self.model(**model_inputs)
+        return self._sample_sequential(
+            batch_size,
+            hidden_states,
+            token_indices_to_sample,
+            sampling_metadata,
+            truncate_by_confidence=False,
+        )
 
     def _propose(
         self,
@@ -454,9 +569,9 @@ class AscendDSparkProposer(AscendDflashProposer):
         num_scheduled_tokens: int = 0,
         num_rejected_tokens_gpu: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        del target_model_batch_desc, mm_embed_inputs, scheduler_output, num_scheduled_tokens
+        del mm_embed_inputs, scheduler_output, num_scheduled_tokens
         is_prefill = (num_decode_reqs == 0 and num_prefill_reqs > 0)
-        num_tokens, token_indices_to_sample, _, _ = self.set_inputs_first_pass(
+        num_tokens, _, _, _ = self.set_inputs_first_pass(
             target_token_ids,
             next_token_ids,
             target_positions,
@@ -470,41 +585,87 @@ class AscendDSparkProposer(AscendDflashProposer):
             num_decode_reqs,
         )
         assert self.runner is not None
-        num_input_tokens, num_tokens_across_dp, _ = self.runner._sync_metadata_across_dp(num_tokens, is_draft_model=True)
+        actual_num_reqs = common_attn_metadata.num_reqs
+        block_size = self.num_speculative_tokens
+        use_cuda_graph = self.use_cuda_graph and not is_prefill
+        has_lora = len(self.runner.input_batch.lora_id_to_lora_request) > 0
+        uniform_decode = target_model_batch_desc.uniform
+        if use_cuda_graph:
+            _, batch_descriptor = self.runner.cudagraph_dispatcher.dispatch(
+                num_tokens=num_tokens,
+                uniform_decode=uniform_decode,
+                has_lora=has_lora,
+            )
+            num_input_tokens = batch_descriptor.num_tokens
+        else:
+            num_input_tokens = num_tokens
+
+        num_input_tokens, num_tokens_across_dp, _ = self.runner._sync_metadata_across_dp(
+            num_input_tokens,
+            is_draft_model=True,
+        )
+
+        if use_cuda_graph:
+            aclgraph_runtime_mode, batch_descriptor = self.runner.cudagraph_dispatcher.dispatch(
+                num_tokens=num_input_tokens,
+                uniform_decode=uniform_decode,
+                has_lora=has_lora,
+            )
+            num_input_tokens = batch_descriptor.num_tokens
+            self._pad_dspark_decode_inputs(num_tokens, num_input_tokens)
+            if num_input_tokens % block_size != 0:
+                dspark_padded = ((num_input_tokens + block_size - 1) // block_size) * block_size
+                self._pad_dspark_decode_inputs(num_input_tokens, dspark_padded)
+                if num_tokens_across_dp is not None:
+                    num_tokens_across_dp = num_tokens_across_dp.clone()
+                    num_tokens_across_dp[:] = dspark_padded
+                num_input_tokens = dspark_padded
+        else:
+            aclgraph_runtime_mode = CUDAGraphMode.NONE
+            batch_descriptor = None
+        graph_batch_size = num_input_tokens // block_size
+        num_sample = graph_batch_size * block_size
+        self.token_indices_to_sample[:num_sample].copy_(self.arange_dspark[:num_sample])
+
         with set_ascend_forward_context(
             None,
             self.vllm_config,
             num_tokens=num_input_tokens,
             num_tokens_across_dp=num_tokens_across_dp,
             num_actual_tokens=num_tokens,
-            batch_descriptor=None,
-            aclgraph_runtime_mode=CUDAGraphMode.NONE,
+            batch_descriptor=batch_descriptor,
+            aclgraph_runtime_mode=aclgraph_runtime_mode,
             is_draft_model=True,
             draft_attn_metadatas=[],
         ):
             forward_context = get_forward_context()
             if forward_context is not None:
                 forward_context.moe_layer_index = 0
+            self._prepare_dspark_context_cache()
             if is_prefill:
-                self.model.precompute_and_store_context_kv(
-                    self._dflash_hidden_states[:self._dflash_num_context],
-                    self._context_positions_buffer[:self._dflash_num_context],
-                    self._context_slot_mapping_buffer[:self._dflash_num_context],
-                    self._context_request_slots_buffer[:self._dflash_num_context],
-                )
                 return common_attn_metadata.num_reqs.new_zeros(
                     common_attn_metadata.num_reqs, 0, dtype=torch.long
                 )
             else:
-                model_inputs = self.build_model_inputs_first_pass(num_input_tokens)
-                hidden_states = self.model(**model_inputs)
-                draft_token_ids = self._sample_sequential(
-                    common_attn_metadata.num_reqs,
-                    hidden_states,
-                    token_indices_to_sample,
+                run_kwargs = dict(
+                    num_input_tokens=num_input_tokens,
+                    batch_size=graph_batch_size,
+                    token_indices_to_sample=self.token_indices_to_sample[:num_sample],
+                    target_positions=target_positions,
+                    inputs_embeds=None,
+                    multi_steps_attn_metadata=[],
+                    num_tokens=num_input_tokens,
+                    sampling_metadata=sampling_metadata,
+                )
+                if self.enable_enpu:
+                    self._update_full_graph_params_if_needed(forward_context, num_input_tokens, [])
+                    draft_token_ids = self._runnable(**run_kwargs)
+                else:
+                    draft_token_ids = self._runnable(**run_kwargs)
+                    self._update_full_graph_params_if_needed(forward_context, num_input_tokens, [])
+                draft_token_ids = self._truncate_dspark_draft_tokens(
+                    draft_token_ids,
+                    actual_num_reqs,
                     sampling_metadata,
                 )
-                forward_context = get_forward_context()
-                if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and not _EXTRA_CTX.capturing:
-                    self._update_full_graph_params(forward_context, num_tokens, [])
                 return draft_token_ids
