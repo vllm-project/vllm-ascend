@@ -55,14 +55,14 @@ import vllm_ascend.envs as envs_ascend
 
 
 def _assert_ascend_moe_lora_supported(base_layer: nn.Module) -> None:
-    # AlltoAll + EP + LoRA is supported (v2).
+    # AlltoAll + EP + LoRA is supported.
     # Other expert-parallel backends (MC2, FusedMC2) are NOT supported.
     if getattr(base_layer, "use_ep", False):
         from vllm_ascend.ascend_forward_context import MoECommType
         comm_type = getattr(base_layer, "moe_comm_type", None)
-        if comm_type not in (None, MoECommType.ALL_TO_ALL):
+        if comm_type not in (None, MoECommType.ALLTOALL):
             raise AssertionError(
-                "Ascend MoE LoRA v2 only supports AlltoAll EP. "
+                "Ascend MoE LoRA only supports AlltoAll EP. "
                 f"Got moe_comm_type={comm_type}. "
                 "Disable --enable-expert-parallel or use AlltoAll."
             )
@@ -129,7 +129,7 @@ def _recover_moe_lora_routing_all2all(
         expert_per_row: [num_dispatched_tokens] local expert id (0..E-1)
         lora_per_row:   [num_dispatched_tokens] lora adapter id (-1 = none)
     """
-    num_local_experts = lora_context.num_experts
+    num_local_experts = lora_context.local_num_experts
     group_list_l = group_list.to(torch.int64)
 
     # Build per-token expert IDs: [0]*n0 + [1]*n1 + ... + [E-1]*n_{E-1}
@@ -139,6 +139,7 @@ def _recover_moe_lora_routing_all2all(
     ).to(torch.long)
 
     lora_per_row = exchanged_lora_indices.to(torch.long)
+
     return expert_per_row, lora_per_row
 
 
@@ -150,6 +151,8 @@ def moe_lora_apply_w13(lora_context, *, gate_up_out, hidden_states, expanded_row
     """
     routing = _recover_moe_lora_routing(lora_context, expanded_row_idx, topk_ids)
     expert_per_row, lora_per_row = routing
+    if expert_per_row.numel() == 0:
+        return routing
     lora_context.punica_wrapper.add_lora_fused_moe(
         y=gate_up_out,
         x=hidden_states,
@@ -171,6 +174,11 @@ def moe_lora_apply_w13_all2all(lora_context, *, gate_up_out, hidden_states, lora
     from ``_recover_moe_lora_routing_all2all`` (AlltoAll path).
     """
     expert_per_row, lora_per_row = lora_routing
+    # EP rank may receive 0 dispatched tokens when all tokens route to
+    # experts on other ranks. Skip LoRA to avoid passing empty tensors
+    # to add_lora_fused_moe (which can trigger NPU kernel crashes).
+    if expert_per_row.numel() == 0:
+        return
     lora_context.punica_wrapper.add_lora_fused_moe(
         y=gate_up_out,
         x=hidden_states,
@@ -189,6 +197,10 @@ def moe_lora_apply_w2(lora_context, *, down_out, silu_out, lora_routing):
     is the activation output that fed the base down GMM.
     """
     expert_per_row, lora_per_row = lora_routing
+    # EP rank may receive 0 dispatched tokens; skip LoRA to avoid NPU
+    # kernel crashes with empty tensors.
+    if expert_per_row.numel() == 0:
+        return
     lora_context.punica_wrapper.add_lora_fused_moe(
         y=down_out,
         x=silu_out,
@@ -225,6 +237,10 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
         self._enable_aux_cuda_stream = envs.VLLM_LORA_ENABLE_DUAL_STREAM
         self.moe_config = base_layer.moe_config
         self._w13_slices = 2 if base_layer.moe_config.is_act_and_mul else 1
+        # Mirrors per-(lora_id) layout of `self.lora_a_stacked` (built in
+        # `create_lora_weights`) so `create_dummy_lora`'s n_slices fallback
+        # matches `lora_a_stacked` length under EP.
+        self.n_slices = base_layer.local_num_experts * (self._w13_slices + 1)
 
     # ------------------------------------------------------------------
     # Mapping
