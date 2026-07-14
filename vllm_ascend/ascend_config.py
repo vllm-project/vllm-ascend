@@ -579,6 +579,32 @@ class AscendConfig:
                 "MegaMoe is not supported for this model config; additional_config.enable_fused_mc2 will be set to 0."
             )
 
+        # Virtual Pipeline Parallelism (VPP)
+        self.virtual_pipeline_parallel_size: int = additional_config.get(
+            "virtual_pipeline_parallel_size", 1)
+        vp_size = self.virtual_pipeline_parallel_size
+        pp_size = vllm_config.parallel_config.pipeline_parallel_size
+        self.vpp_layer_ranges: list[list[tuple[int, int]]] | None = None
+        if vp_size > 1:
+            if pp_size < vp_size:
+                raise ValueError(
+                    "virtual_pipeline_parallel_size > 1 requires "
+                    "pipeline_parallel_size >= vp_size.")
+            if vp_size != 2:
+                raise ValueError(
+                    "currently virtual_pipeline_parallel requires vp_size == 2"
+                )
+            num_layers = vllm_config.model_config.hf_text_config.num_hidden_layers
+            raw_ranges = additional_config.get("vpp_layer_ranges", None)
+            if raw_ranges is not None:
+                from vllm_ascend.distributed.vpp_utils import validate_vpp_layer_ranges
+                self.vpp_layer_ranges = validate_vpp_layer_ranges(
+                    raw_ranges, num_layers, pp_size, vp_size)
+                logger.info(
+                    "VPP enabled with manual layer ranges: vp_size=%d, "
+                    "pp_size=%d, num_layers=%d, ranges=%s",
+                    vp_size, pp_size, num_layers, self.vpp_layer_ranges)
+
         # mlapo_keep_prefill_weights preconditions: the prefill weights are only
         # freed by MLAPO in the MLA attention path, so the keep switch is only
         # meaningful under those same conditions. Fail fast on a no-op / mistaken
