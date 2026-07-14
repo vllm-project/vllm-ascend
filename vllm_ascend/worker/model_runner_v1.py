@@ -3846,12 +3846,14 @@ class NPUModelRunner(GPUModelRunner):
                 enable_enpu=self.enable_enpu,
             )
         elif self.parallel_config.use_ubatching:
+            logger.info("use_ubatching: %s", self.parallel_config.use_ubatching)
             self.update_stream: torch.npu.Stream = torch.npu.Stream()
             if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
                 self.model = UBatchWrapper(
                     self.model, self.vllm_config,
                     CUDAGraphMode.FULL, self.device)
             else:
+                logger.info("eager use_ubatching: %s", self.parallel_config.use_ubatching)
                 self.model = UBatchWrapper(
                     self.model, self.vllm_config,
                     CUDAGraphMode.NONE, self.device)
