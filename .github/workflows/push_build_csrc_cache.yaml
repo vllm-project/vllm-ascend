@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-# 3 chip_type variants (a2 / a3 / 310p) — all ARM64 + Ubuntu.
+# 3 chip_type variants (a2 / a3 / a5 / 310p) — all ARM64 + Ubuntu.
 # Only ARM64 is needed since NPU test runners are all linux-aarch64-*.
 name: 'Cache csrc Build Artifacts'
 on:
@@ -60,6 +60,7 @@ jobs:
         chip_type:
           - a2
           - a3
+          - a5
           - 310p
         os:
           - ubuntu
@@ -77,6 +78,11 @@ jobs:
             image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-ubuntu22.04-py3.12
             soc_version: ascend910_9391
 
+          - chip_type: a5
+            os: ubuntu
+            image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-ubuntu22.04-py3.12
+            soc_version: ascend950dt_9582
+
           - chip_type: 310p
             os: ubuntu
             image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.1.0-beta.1-310p-ubuntu22.04-py3.12
@@ -91,7 +97,12 @@ jobs:
             os: openeuler
             image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-openeuler24.03-py3.12
             soc_version: ascend910_9391
-
+  
+          - chip_type: a5
+            os: openeuler
+            image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-openeuler24.03-py3.12
+            soc_version: ascend950dt_9582
+            
           - chip_type: 310p
             os: openeuler
             image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.1.0-beta.1-310p-openeuler24.03-py3.12
