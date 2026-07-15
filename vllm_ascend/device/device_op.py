@@ -1910,7 +1910,6 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         return results
 
 
-
 class Ascend310PDeviceAdaptor(BaseDeviceAdaptor):
     @classmethod
     def reshape_and_cache(cls, key, value, key_cache, value_cache, slot_mapping):
