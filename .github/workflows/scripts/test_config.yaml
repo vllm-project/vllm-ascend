@@ -608,7 +608,6 @@
     - vllm_ascend/ascend_forward_context.py
     - vllm_ascend/cpu_binding.py
     - vllm_ascend/envs.py
-    - vllm_ascend/flash_common3_context.py
     - vllm_ascend/logger.py
     - vllm_ascend/meta_registration.py
     - vllm_ascend/platform.py
@@ -621,7 +620,6 @@
     - tests/ut/test_cpu_binding.py
     - tests/ut/test_envs.py
     - tests/ut/test_logger.py
-    - tests/ut/test_flash_common3_context.py
     - tests/ut/test_meta_registration.py
     - tests/ut/test_profiling_config.py
     - tests/ut/test_utils.py

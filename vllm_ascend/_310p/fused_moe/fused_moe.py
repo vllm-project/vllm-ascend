@@ -187,8 +187,6 @@ if not vllm_version_is("0.23.0"):
                 routed_experts.quant_method = AscendUnquantizedFusedMoEMethod310(self.moe_config)
                 self.quant_type = self._get_quant_type()
 
-            self.multistream_overlap_gate = False
-            self.shared_multistream_overlap_gate = False
             self.multistream_overlap_shared_expert = False
             _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl310(self.moe_config)
 
