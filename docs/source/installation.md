@@ -6,7 +6,7 @@ This document describes how to install vllm-ascend manually.
 
 - OS: Linux
 - Python: >= 3.10, < 3.13
-- Hardware with Ascend NPUs. It's usually the Atlas 800 A2 series.
+- Hardware with supported Ascend NPUs, including Atlas A2 inference products, Atlas A3 inference products, Atlas inference products (Atlas 300I DUO), and Atlas 200I Pro.
 - Software:
 
     | Software      | Supported version                | Note                                      |
@@ -16,6 +16,10 @@ This document describes how to install vllm-ascend manually.
     | torch-npu     | == 2.10.0.post2                 | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
     | torch         | == 2.10.0                       | Required for torch-npu and vllm, No need to install manually, it will be auto installed in below steps |
     | NNAL          | == 9.0.1                        | Required for libatb.so, enables advanced tensor operations |
+
+!!! note "Atlas inference products"
+
+    Atlas inference products and Atlas 200I Pro require CANN 9.1.0 beta. The Atlas A2/A3 requirements in the table above remain unchanged.
 
 There are two installation methods:
 
@@ -203,6 +207,14 @@ Then you can install `vllm` and `vllm-ascend` from a **pre-built wheel** using o
 
     If you are building custom operators for Atlas A3, you should run `git submodule update --init --recursive` manually, or ensure your environment has internet access.
 
+    !!! note "Atlas inference products"
+
+        Atlas 300I DUO does not support `triton` or `triton-ascend`. Source installations can pull these packages as dependencies; remove them before running on Atlas inference products:
+
+        ```bash
+        pip uninstall -y triton-ascend triton
+        ```
+
 !!! note
 
     To build custom operators, gcc/g++ higher than 8 and C++17 or higher are required. If you are using `pip install -e .` and encounter a torch-npu version conflict, please install with `pip install --no-build-isolation -e .` to build on system env.
@@ -212,7 +224,7 @@ Then you can install `vllm` and `vllm-ascend` from a **pre-built wheel** using o
 
     - Atlas A2: `export SOC_VERSION=ascend910b1`
     - Atlas A3: `export SOC_VERSION=ascend910_9391`
-    - Atlas 300I: `export SOC_VERSION=ascend310p1`
+    - Atlas inference products / Atlas 200I Pro: `export SOC_VERSION=ascend310p1`
     - Ascend 950 Products: `export SOC_VERSION=<value starting with "ascend950">`
 
 !!! note
@@ -232,8 +244,8 @@ Supported images as following.
 | vllm-ascend:{{ vllm_ascend_version }}-openeuler | Atlas A2 | openEuler |
 | vllm-ascend:{{ vllm_ascend_version }}-a3 | Atlas A3 | Ubuntu |
 | vllm-ascend:{{ vllm_ascend_version }}-a3-openeuler | Atlas A3 | openEuler |
-| vllm-ascend:{{ vllm_ascend_version }}-310p | Atlas 300I | Ubuntu |
-| vllm-ascend:{{ vllm_ascend_version }}-310p-openeuler | Atlas 300I | openEuler |
+| vllm-ascend:{{ vllm_ascend_version }}-310p | Atlas inference products / Atlas 200I Pro | Ubuntu |
+| vllm-ascend:{{ vllm_ascend_version }}-310p-openeuler | Atlas inference products / Atlas 200I Pro | openEuler |
 
 ??? "Click here to see 'Build from Dockerfile'"
 
@@ -245,38 +257,98 @@ Supported images as following.
     docker build -t vllm-ascend-dev-image:latest -f ./Dockerfile .
     ```
 
-```bash
+=== "A2/A3"
 
-# Update --device according to your device (Atlas A2: /dev/davinci[0-7] Atlas A3:/dev/davinci[0-15]).
-# Update the vllm-ascend image according to your environment.
-# Note you should download the weight to /root/.cache in advance.
-export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
-docker run --rm \
-    --name vllm-ascend-env \
-    --shm-size=1g \
-    --net=host \
-    --device /dev/davinci0 \
-    --device /dev/davinci1 \
-    --device /dev/davinci2 \
-    --device /dev/davinci3 \
-    --device /dev/davinci4 \
-    --device /dev/davinci5 \
-    --device /dev/davinci6 \
-    --device /dev/davinci7 \
-    --device /dev/davinci_manager \
-    --device /dev/devmm_svm \
-    --device /dev/hisi_hdc \
-    -v /usr/local/dcmi:/usr/local/dcmi \
-    -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
-    -v /root/.cache:/root/.cache \
-    -it $IMAGE bash
-```
+    ```bash
 
-The default workdir is `/workspace`, vLLM and vLLM Ascend code are placed in `/vllm-workspace` and installed in [development mode](https://setuptools.pypa.io/en/latest/userguide/development_mode.html) (`pip install -e`) to help developers immediately make changes without requiring a new installation.
+    # Update --device according to your device (Atlas A2: /dev/davinci[0-7] Atlas A3:/dev/davinci[0-15]).
+    # Update the vllm-ascend image according to your environment.
+    # Note you should download the weight to /root/.cache in advance.
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
+    docker run --rm \
+        --name vllm-ascend-env \
+        --shm-size=1g \
+        --net=host \
+        --device /dev/davinci0 \
+        --device /dev/davinci1 \
+        --device /dev/davinci2 \
+        --device /dev/davinci3 \
+        --device /dev/davinci4 \
+        --device /dev/davinci5 \
+        --device /dev/davinci6 \
+        --device /dev/davinci7 \
+        --device /dev/davinci_manager \
+        --device /dev/devmm_svm \
+        --device /dev/hisi_hdc \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v /root/.cache:/root/.cache \
+        -it $IMAGE bash
+    ```
+
+    The default workdir is `/workspace`, vLLM and vLLM Ascend code are placed in `/vllm-workspace` and installed in [development mode](https://setuptools.pypa.io/en/latest/userguide/development_mode.html) (`pip install -e`) to help developers immediately make changes without requiring a new installation.
+
+=== "Atlas inference products"
+
+    Adjust `/dev/davinci0` to the NPU you want to use.
+
+    ```bash
+    export DEVICE=/dev/davinci0
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p
+
+    docker run --rm \
+        --name vllm-ascend \
+        --shm-size=1g \
+        --device $DEVICE \
+        --device /dev/davinci_manager \
+        --device /dev/devmm_svm \
+        --device /dev/hisi_hdc \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v /root/.cache:/root/.cache \
+        -p 8000:8000 \
+        -it $IMAGE bash
+    ```
+
+=== "Atlas 200I Pro"
+
+    Atlas 200I Pro requires additional device nodes, driver libraries, and configuration files so that `npu-smi` and other driver commands work inside the container. Adjust `/dev/davinci0` to the NPU you want to use.
+
+    ```bash
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p
+
+    docker run --rm \
+        --privileged \
+        --name vllm-ascend \
+        --shm-size=10g \
+        --device=/dev/davinci0:/dev/davinci0 \
+        --device=/dev/davinci_manager \
+        --device=/dev/ascend_manager \
+        --device=/dev/user_config \
+        -v /etc/sys_version.conf:/etc/sys_version.conf \
+        -v /etc/ld.so.conf.d/mind_so.conf:/etc/ld.so.conf.d/mind_so.conf \
+        -v /etc/hdcBasic.cfg:/etc/hdcBasic.cfg \
+        -v /var/dmp_daemon:/var/dmp_daemon \
+        -v /usr/lib64/libmmpa.so:/usr/lib64/libmmpa.so \
+        -v /usr/lib64/libcrypto.so.1.1:/usr/lib64/libcrypto.so.1.1 \
+        -v /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi \
+        -v /usr/lib64/libstackcore.so:/usr/lib64/libstackcore.so \
+        -v /usr/lib/aarch64-linux-gnu/libyaml-0.so.2:/usr/lib64/libyaml-0.so.2 \
+        -v /etc/slog.conf:/etc/slog.conf \
+        -v /var/slogd:/var/slogd \
+        -v /usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64 \
+        -v /usr/lib64/libtensorflow.so:/usr/lib64/libtensorflow.so \
+        -v /root/.cache:/root/.cache \
+        -p 8000:8000 \
+        -it $IMAGE bash
+    ```
 
 ## Extra information
 

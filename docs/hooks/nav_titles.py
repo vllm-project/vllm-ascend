@@ -110,7 +110,6 @@ TITLES = {
         "en": "Suffix Speculative Decoding",
         "zh": "后缀推测解码",
     },
-    "tutorials/hardwares/310p.md": {"en": "310P", "zh": "310P"},
     "tutorials/models/DeepSeek-R1.md": {"en": "DeepSeek-R1", "zh": "DeepSeek-R1"},
     "tutorials/models/DeepSeek-V3.1.md": {"en": "DeepSeek-V3.1", "zh": "DeepSeek-V3.1"},
     "tutorials/models/DeepSeek-V3.2.md": {"en": "DeepSeek-V3.2", "zh": "DeepSeek-V3.2"},
