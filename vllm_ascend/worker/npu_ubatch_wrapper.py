@@ -379,27 +379,6 @@ class UBatchWrapper(GPUUBatchWrapper):
 
         # If there's no ubatching, just run the runnable object
         if ubatch_slices is None:
-            # Populate the AFD metadata lists for the non-ubatch path so that
-            # the FFN side receives the full (unsliced) token information.
-            # if self.vllm_config.afd_config:
-            #     afd_metadata = self._make_afd_ubatch_metadata(
-            #         ubatch_slices=None,
-            #         attn_metadata=forward_context.attn_metadata,
-            #         input_ids=kwargs.get('input_ids'),
-            #         positions=kwargs['positions'],
-            #         inputs_embeds=kwargs['inputs_embeds'],
-            #         intermediate_tensors=kwargs['intermediate_tensors'],
-            #         dp_metadata=forward_context.dp_metadata,
-            #         afd_metadata=afd_metadata,
-            #     )
-            #     forward_context.afd_metadata = afd_metadata
-
-            # This is to account for the case where ubatching was aborted.
-            # When we capture full graphs we only capture one graph per shape,
-            # meaning that if we have a ubatched graph for the current
-            # num_tokens, we don't have a non-ubatched one. Without this
-            # check, the graph wrapper will try to capture a graph for this
-            # shape during a normal run.
             if cudagraph_runtime_mode is CUDAGraphMode.FULL:
                 assert batch_descriptor is not None
 
@@ -413,6 +392,7 @@ class UBatchWrapper(GPUUBatchWrapper):
         attn_metadata = forward_context.attn_metadata
         num_tokens = sum(ubatch_slice.num_tokens
                          for ubatch_slice in ubatch_slices)
+        logger.info('_call__ kwargs: %s', kwargs)
         input_ids = kwargs['input_ids']
         positions = kwargs['positions']
         intermediate_tensors = kwargs['intermediate_tensors']
@@ -455,6 +435,7 @@ class UBatchWrapper(GPUUBatchWrapper):
             aclgraph_metadata.aclgraph.replay()
             return aclgraph_metadata.outputs
         else:
+            logger.info('_call__ intermediate_tensors: %s', intermediate_tensors)
             ubatch_metadata = self._make_ubatch_metadata(
                 ubatch_slices=ubatch_slices,
                 attn_metadata=attn_metadata,
