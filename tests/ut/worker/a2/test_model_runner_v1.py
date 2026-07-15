@@ -401,13 +401,11 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         runner.use_sparse = True
         runner.model_config.hf_text_config = SimpleNamespace(index_head_dim=128)
         runner._get_attention_kv_cache_dims = lambda _layer_name, _spec: (512, 64)
-        runner.attn_backend.get_kv_cache_shape.side_effect = (
-            lambda num_blocks, block_size, num_kv_heads, head_size: (
-                num_blocks,
-                block_size,
-                num_kv_heads,
-                head_size,
-            )
+        runner.attn_backend.get_kv_cache_shape.side_effect = lambda num_blocks, block_size, num_kv_heads, head_size: (
+            num_blocks,
+            block_size,
+            num_kv_heads,
+            head_size,
         )
 
         layer_name = "model.layers.0.self_attn.attn"
