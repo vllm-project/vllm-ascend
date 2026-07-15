@@ -355,6 +355,10 @@ jobs:
           if: steps.coverage-completeness.outputs.has_missing == 'true'
           run: |
             pip install esdk-obs-python --quiet
+            mkdir -p previous-coverage
+            # The OBS SDK calls os.makedirs(dirname(downloadPath)); a bare
+            # filename yields dirname='' and crashes with FileNotFoundError,
+            # so always hand it an absolute path with a real directory.
             python3 - <<'EOF'
             import os
             from obs import ObsClient
@@ -364,19 +368,19 @@ jobs:
                 secret_access_key=os.environ['OBS_SECRET_KEY'],
                 server='https://obs.cn-north-4.myhuaweicloud.com'
             )
+            download_path = os.path.abspath('previous-coverage.tar')
             response = client.getObject(
                 'vllm-ascend',
                 'ci/precision-test/coverage.tar',
-                downloadPath='previous-coverage.tar',
+                downloadPath=download_path,
             )
             if response.status >= 300:
                 raise RuntimeError(
                     f'Failed to download previous coverage: '
                     f'{response.status} {response.errorMessage}'
                 )
-            print('Downloaded previous coverage data from OBS')
+            print(f'Downloaded previous coverage data from OBS -> {download_path}')
             EOF
-            mkdir -p previous-coverage
             tar xf previous-coverage.tar -C previous-coverage
 
         - name: Backfill missing coverage data
