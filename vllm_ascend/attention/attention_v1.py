@@ -62,7 +62,6 @@ from vllm_ascend.compilation.acl_graph import (
     update_graph_params_workspaces,
 )
 from vllm_ascend.device.device_op import DeviceOperator
-from vllm_ascend.ops.flashcomm2_oshard_manager import flashcomm2_oshard_manager
 from vllm_ascend.utils import weak_ref_tensors
 from vllm_ascend.worker.kvcomp_utils import KVCompMetaData
 
@@ -750,8 +749,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         super().process_weights_after_loading(act_dtype)
-        if flashcomm2_oshard_manager.flashcomm2_oshard_enable():
-            flashcomm2_oshard_manager.post_process_after_loading()
 
     def full_graph_fia(
         self,

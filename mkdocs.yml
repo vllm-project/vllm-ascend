@@ -250,7 +250,6 @@ nav:
         - user_guide/feature_guide/expert_parallelism_load_balancer.md
         - user_guide/feature_guide/netloader.md
         - user_guide/feature_guide/rfork.md
-        - user_guide/feature_guide/dynamic_batch.md
         - user_guide/feature_guide/epd_disaggregation.md
         - user_guide/feature_guide/short_request_first.md
         - user_guide/feature_guide/kv_pool.md
@@ -260,7 +259,6 @@ nav:
         - user_guide/feature_guide/large_scale_ep.md
         - user_guide/feature_guide/ucm_deployment.md
         - user_guide/feature_guide/Fine_grained_TP.md
-        - user_guide/feature_guide/layer_sharding.md
         - user_guide/feature_guide/speculative_decoding.md
         - user_guide/feature_guide/context_parallel.md
         - user_guide/feature_guide/weight_prefetch.md
