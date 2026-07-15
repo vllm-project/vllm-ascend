@@ -314,6 +314,10 @@ class KVPoolScheduler:
         for group_id in range(len(self.grouped_block_size)):
             effective_block_size = self._get_effective_group_block_size(group_id)
             group_block_hashes = get_block_hashes(block_hashes_to_check, effective_block_size, self.hash_block_size)
+            query_start_block = (
+                0 if self.use_layerwise else min(num_computed_tokens // effective_block_size, len(group_block_hashes))
+            )
+            group_block_hashes = group_block_hashes[query_start_block:]
             # Generate all-rank keys for each block hash
             keys_by_block = [
                 self._make_layerwise_gva_keys_for_hit_check(group_id, block_hash_to_str(bh))
@@ -344,7 +348,7 @@ class KVPoolScheduler:
                 else:
                     break
 
-            hits_per_group.append(num_hit_blocks * effective_block_size)
+            hits_per_group.append((query_start_block + num_hit_blocks) * effective_block_size)
 
         if not hits_per_group:
             logger.info(
