@@ -342,6 +342,53 @@ jobs:
             pattern: selected-test-coverage-*
             merge-multiple: true
 
+        - name: Check full coverage data completeness
+          id: coverage-completeness
+          env:
+            SELECTED_TEST_GROUPS: ${{ inputs.test_groups }}
+          run: |
+            python3 .github/workflows/scripts/assemble_coverage.py check \
+              --test-groups-json "${SELECTED_TEST_GROUPS}" \
+              --current-root all-coverage
+
+        - name: Download previous coverage data from OBS
+          if: steps.coverage-completeness.outputs.has_missing == 'true'
+          run: |
+            pip install esdk-obs-python --quiet
+            python3 - <<'EOF'
+            import os
+            from obs import ObsClient
+
+            client = ObsClient(
+                access_key_id=os.environ['OBS_ACCESS_KEY'],
+                secret_access_key=os.environ['OBS_SECRET_KEY'],
+                server='https://obs.cn-north-4.myhuaweicloud.com'
+            )
+            response = client.getObject(
+                'vllm-ascend',
+                'ci/precision-test/coverage.tar',
+                downloadPath='previous-coverage.tar',
+            )
+            if response.status >= 300:
+                raise RuntimeError(
+                    f'Failed to download previous coverage: '
+                    f'{response.status} {response.errorMessage}'
+                )
+            print('Downloaded previous coverage data from OBS')
+            EOF
+            mkdir -p previous-coverage
+            tar xf previous-coverage.tar -C previous-coverage
+
+        - name: Backfill missing coverage data
+          if: steps.coverage-completeness.outputs.has_missing == 'true'
+          env:
+            SELECTED_TEST_GROUPS: ${{ inputs.test_groups }}
+          run: |
+            python3 .github/workflows/scripts/assemble_coverage.py backfill \
+              --test-groups-json "${SELECTED_TEST_GROUPS}" \
+              --current-root all-coverage \
+              --previous-root previous-coverage
+
         - name: Debug - List downloaded coverage files
           run: |
             echo "=== all-coverage top level ==="
