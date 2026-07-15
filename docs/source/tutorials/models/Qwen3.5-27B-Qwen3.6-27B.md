@@ -261,34 +261,7 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
     --async-scheduling
     ```
 
-=== "Atlas inference products (Qwen3.5)"
-
-    Startup Command:
-
-    ```bash
-    #!/bin/sh
-    # Load model from ModelScope to speed up download
-    export VLLM_USE_MODELSCOPE=True
-
-    # Model weight path; can be a ModelScope model id or a local directory path
-    export MODEL_PATH=/home/data/Qwen3.5-27B-W8A8/
-
-    vllm serve $MODEL_PATH \
-    --host 127.0.0.1 \
-    --port 1025 \
-    --tensor-parallel-size 4 \
-    --served-model-name qwen3.5 \
-    --max-num-seqs 128 \
-    --max-model-len 16384 \
-    --trust-remote-code \
-    --gpu-memory-utilization 0.90 \
-    --mamba-ssm-cache-dtype float16 \
-    --speculative-config '{"method": "qwen3_5_mtp","num_speculative_tokens":1}' \
-    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,8]}' \
-    --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex": false}}'
-    ```
-
-=== "Atlas inference products (Qwen3.6)"
+=== "Atlas inference products"
 
     Startup Command:
 
