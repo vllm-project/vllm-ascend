@@ -1015,19 +1015,27 @@ class AscendSFADCPImpl(AscendSFAImpl):
         block_table = attn_metadata.dcp_context.kv_gather_block_table
         assert valid_block_ids is not None and block_table is not None
         kv = torch.index_select(kv_cache[0], 0, valid_block_ids)
-        if len(kv_cache) < 2:
-            raise RuntimeError("DCP SFA KV all-gather requires nope and rope KV caches.")
-        key_rope = torch.index_select(kv_cache[1], 0, valid_block_ids)
-        if kv.shape[:-1] != key_rope.shape[:-1] or kv.dtype != key_rope.dtype:
-            raise RuntimeError(
-                "Cannot fuse DCP KV gather for KV/nope and KV/rope caches with "
-                f"shapes {tuple(kv.shape)} / {tuple(key_rope.shape)} and dtypes {kv.dtype} / {key_rope.dtype}."
-            )
-        fused_kv = torch.cat([kv, key_rope], dim=-1).contiguous()
+        if self.use_sparse_c8_sfa:
+            # Sparse C8 stores nope, rope, and quantization data in one packed
+            # SFA KV cache. The remaining cache entries belong to the indexer
+            # and must not participate in the DCP SFA KV all-gather.
+            gather_input = kv.contiguous()
+            split_sizes = (kv.shape[-1],)
+        else:
+            if len(kv_cache) < 2:
+                raise RuntimeError("DCP SFA KV all-gather requires nope and rope KV caches.")
+            key_rope = torch.index_select(kv_cache[1], 0, valid_block_ids)
+            if kv.shape[:-1] != key_rope.shape[:-1] or kv.dtype != key_rope.dtype:
+                raise RuntimeError(
+                    "Cannot fuse DCP KV gather for KV/nope and KV/rope caches with "
+                    f"shapes {tuple(kv.shape)} / {tuple(key_rope.shape)} and dtypes {kv.dtype} / {key_rope.dtype}."
+                )
+            gather_input = torch.cat([kv, key_rope], dim=-1).contiguous()
+            split_sizes = (kv.shape[-1], key_rope.shape[-1])
         attn_metadata.dcp_context.gather_context = self._start_dcp_gather(
-            fused_kv,
+            gather_input,
             dim=0,
-            split_sizes=(kv.shape[-1], key_rope.shape[-1]),
+            split_sizes=split_sizes,
         )
 
     def _start_dcp_gather(
