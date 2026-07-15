@@ -27,11 +27,17 @@
 #   2. from vllm_ascend import ops
 #   3. model loading  ->  deepseek_v2 imported  ->  gets patched FusedMoE  ✓
 
+import sys
+
 from vllm_ascend.utils import is_310p, vllm_version_is
 
 if not vllm_version_is("0.23.0"):
+    import torch
     import vllm.model_executor.layers.fused_moe as _fused_moe_pkg
     import vllm.model_executor.layers.fused_moe.layer as _fused_moe_layer
+    from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
+        FusedTopKBiasRouter,
+    )
 
     # Capture the real original before fused_moe.py's module-level code runs.
     _original_FusedMoE = _fused_moe_layer.FusedMoE
@@ -40,6 +46,33 @@ if not vllm_version_is("0.23.0"):
         from vllm_ascend._310p.fused_moe.fused_moe import AscendMoERunner310 as _DefaultAscendMoERunner
     else:
         from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner as _DefaultAscendMoERunner
+    from vllm_ascend.ops.fused_moe.experts_selector import select_experts
+
+    def _ascend_compute_fused_topk_bias_routing(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        indices_type: torch.dtype | None,
+        *,
+        input_ids: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Use the Ascend gating op instead of vLLM's CUDA MoE kernel."""
+        return select_experts(
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+            top_k=self.top_k,
+            use_grouped_topk=False,
+            renormalize=self.renormalize,
+            scoring_func=self.scoring_func,
+            routed_scaling_factor=self.routed_scaling_factor,
+            e_score_correction_bias=self.e_score_correction_bias,
+            indices_type=indices_type,
+            input_ids=input_ids,
+        )
+
+    FusedTopKBiasRouter._compute_routing = (
+        _ascend_compute_fused_topk_bias_routing
+    )
 
     def _ascend_FusedMoE(*args, runner_cls=None, runner_args=None, **kwargs):
         if runner_cls is None:
@@ -55,3 +88,12 @@ if not vllm_version_is("0.23.0"):
 
     _fused_moe_layer.FusedMoE = _ascend_FusedMoE
     _fused_moe_pkg.FusedMoE = _ascend_FusedMoE
+
+    # The model-registry plugin can import vLLM's native MiniMax-M3 module
+    # before platform patches are applied. Refresh its captured factory so
+    # model construction still creates an AscendMoERunner.
+    _minimax_m3_module = sys.modules.get(
+        "vllm.models.minimax_m3.nvidia.model"
+    )
+    if _minimax_m3_module is not None:
+        _minimax_m3_module.FusedMoE = _ascend_FusedMoE
