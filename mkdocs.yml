@@ -188,7 +188,7 @@ nav:
         - tutorials/models/Qwen3-VL-Reranker.md
         - tutorials/models/Qwen3-Next.md
         - tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md
-        - tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md
+        - tutorials/models/Qwen3.5-Dense-Qwen3.6-Dense.md
         - tutorials/models/Qwen3.5-397B-A17B.md
         - tutorials/models/Qwen3.6-35B-A3B.md
         - tutorials/models/DeepSeek-V3.1.md
