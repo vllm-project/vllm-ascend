@@ -1200,6 +1200,237 @@ Some configurations for optimization are shown below:
 
 Please refer to the following python file for further explanation and restrictions of the environment variables above: [envs.py](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/envs.py)
 
+### 1M Context Configuration
+
+This section provides a usable starting configuration for serving `GLM-5.2` with a 1M context window, but it does not represent the best-performance configuration for all workloads. The examples target Atlas 800 A3 (64G x 16) and quantized GLM-5.2(W4A8C8) weights. Replace `<MODEL_PATH>`, IP addresses, ports, and NIC names with the actual values in your environment.
+
+| Mode | Hardware | Parallelism | Context | Notes |
+| ---- | -------- | ----------- | ------- | ----- |
+| Single-node co-located | 1 Atlas 800 A3 (64G x 16) | `DP1 PP1 TP16 PCP1 DCP16` | `1024000` | Prefill and decode run in one service. This is the simplest 1M context validation mode. |
+| 2P2D PD disaggregation | 2 prefiller A3 nodes + 2 decoder A3 nodes | Prefill `DP4 PP1 TP4 PCP1 DCP4`, Decode `DP4 PP1 TP4 PCP1 DCP4` | `1024000` | Prefill and decode are separated through Mooncake KV transfer and a proxy. Each node starts 2 local DP ranks. |
+
+#### Single-Node 1M Deployment
+
+Run the following script on one Atlas 800 A3 node.
+
+```shell
+export VLLM_ASCEND_ENABLE_NZ=1
+export HCCL_OP_EXPANSION_MODE="AIV"
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=20
+export HCCL_BUFFSIZE=768
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export VLLM_SERVER_DEV_MODE=1
+export VLLM_WORKER_MULTIPROC_METHOD=spawn
+
+# Required only when the HDK version supports fabric memory.
+export ASCEND_ENABLE_USE_FABRIC_MEM=1
+
+export TASK_QUEUE_ENABLE=1
+export CPU_AFFINITY_CONF=1
+
+# Optional. Requires root permission in the container.
+echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
+
+vllm serve <MODEL_PATH> \
+  --seed 1024 \
+  --host 0.0.0.0 \
+  --port 9000 \
+  --served-model-name glm-52 \
+  --max-model-len 1024000 \
+  --max-num-batched-tokens 16384 \
+  --gpu-memory-utilization 0.90 \
+  --api-server-count 1 \
+  --max-num-seqs 4 \
+  --data-parallel-size 1 \
+  --pipeline-parallel-size 1 \
+  --tensor-parallel-size 16 \
+  --prefill-context-parallel-size 1 \
+  --decode-context-parallel-size 16 \
+  --cp-kv-cache-interleave-size 128 \
+  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [4, 16]}' \
+  --additional-config '{"enable_flashcomm1": true, "enable_dsa_cp": true, "ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": false}, "fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_mc2_hierarchy_comm": false, "enable_sparse_c8": true, "enable_cpu_binding": true, "recompute_scheduler_enable": false}' \
+  --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
+  --quantization ascend \
+  --enable-expert-parallel \
+  --safetensors-load-strategy prefetch
+```
+
+#### PD Disaggregation 1M Deployment
+
+For PD disaggregation, start two prefiller nodes and two decoder nodes, then start the request forwarding proxy. The following example uses global `DP4 TP4 DCP4` on both the prefill and decode sides. Each node runs two local DP ranks (`--data-parallel-size-local 2`) with `TP4`, and the second node on each side joins with `--headless` and `--data-parallel-start-rank 2`.
+
+Run the prefiller on both prefiller nodes. For prefiller node 0, set `local_ip="<PREFILL_NODE0_IP>"`, `node_p0_ip="<PREFILL_NODE0_IP>"`, `data_parallel_start_rank=0`, and `server_role_args="--api-server-count 1"`. For prefiller node 1, set `local_ip="<PREFILL_NODE1_IP>"`, `node_p0_ip="<PREFILL_NODE0_IP>"`, `data_parallel_start_rank=2`, and `server_role_args="--headless"`.
+
+```shell
+nic_name="<NIC_NAME>"
+local_ip="<CURRENT_PREFILL_NODE_IP>"
+node_p0_ip="<PREFILL_NODE0_IP>"
+data_parallel_start_rank=0
+server_role_args="--api-server-count 1"
+
+export HCCL_IF_IP=$local_ip
+export GLOO_SOCKET_IFNAME=$nic_name
+export TP_SOCKET_IFNAME=$nic_name
+export HCCL_SOCKET_IFNAME=$nic_name
+
+export VLLM_ASCEND_ENABLE_NZ=1
+export HCCL_OP_EXPANSION_MODE="AIV"
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=20
+export HCCL_BUFFSIZE=768
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export VLLM_SERVER_DEV_MODE=1
+export VLLM_WORKER_MULTIPROC_METHOD=spawn
+export ASCEND_ENABLE_USE_FABRIC_MEM=1
+export TASK_QUEUE_ENABLE=1
+export CPU_AFFINITY_CONF=1
+export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
+# Each node uses 2 local DP ranks x TP4 = 8 NPUs. Change the list if needed.
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+
+vllm serve <MODEL_PATH> \
+  --seed 1024 \
+  --host 0.0.0.0 \
+  --port 9081 \
+  --served-model-name glm-52 \
+  --max-model-len 1024000 \
+  --max-num-batched-tokens 16384 \
+  --gpu-memory-utilization 0.90 \
+  ${server_role_args} \
+  --max-num-seqs 4 \
+  --data-parallel-size 4 \
+  --data-parallel-size-local 2 \
+  --data-parallel-start-rank $data_parallel_start_rank \
+  --data-parallel-address $node_p0_ip \
+  --data-parallel-rpc-port 16591 \
+  --pipeline-parallel-size 1 \
+  --tensor-parallel-size 4 \
+  --prefill-context-parallel-size 1 \
+  --decode-context-parallel-size 4 \
+  --cp-kv-cache-interleave-size 128 \
+  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [4, 16]}' \
+  --additional-config '{"enable_flashcomm1": true, "enable_dsa_cp": true, "ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": false}, "fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_mc2_hierarchy_comm": false, "enable_sparse_c8": true, "enable_cpu_binding": true, "recompute_scheduler_enable": false}' \
+  --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
+  --quantization ascend \
+  --enable-expert-parallel \
+  --safetensors-load-strategy prefetch \
+  --kv-transfer-config \
+  '{"kv_connector": "MooncakeConnectorV1",
+    "kv_role": "kv_producer",
+    "kv_port": "30000",
+    "engine_id": "0",
+    "kv_connector_extra_config": {
+      "use_ascend_direct": true,
+      "prefill": {
+        "dp_size": 4,
+        "tp_size": 4
+      },
+      "decode": {
+        "dp_size": 4,
+        "tp_size": 4
+      }
+    }
+  }'
+```
+
+Run the decoder on both decoder nodes. For decoder node 0, set `local_ip="<DECODE_NODE0_IP>"`, `node_d0_ip="<DECODE_NODE0_IP>"`, `data_parallel_start_rank=0`, and `server_role_args="--api-server-count 1"`. For decoder node 1, set `local_ip="<DECODE_NODE1_IP>"`, `node_d0_ip="<DECODE_NODE0_IP>"`, `data_parallel_start_rank=2`, and `server_role_args="--headless"`.
+
+```shell
+nic_name="<NIC_NAME>"
+local_ip="<CURRENT_DECODE_NODE_IP>"
+node_d0_ip="<DECODE_NODE0_IP>"
+data_parallel_start_rank=0
+server_role_args="--api-server-count 1"
+
+export HCCL_IF_IP=$local_ip
+export GLOO_SOCKET_IFNAME=$nic_name
+export TP_SOCKET_IFNAME=$nic_name
+export HCCL_SOCKET_IFNAME=$nic_name
+
+export VLLM_ASCEND_ENABLE_NZ=1
+export HCCL_OP_EXPANSION_MODE="AIV"
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=20
+export HCCL_BUFFSIZE=768
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export VLLM_SERVER_DEV_MODE=1
+export VLLM_WORKER_MULTIPROC_METHOD=spawn
+export ASCEND_ENABLE_USE_FABRIC_MEM=1
+export TASK_QUEUE_ENABLE=1
+export CPU_AFFINITY_CONF=1
+# Each node uses 2 local DP ranks x TP4 = 8 NPUs. Change the list if needed.
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+
+vllm serve <MODEL_PATH> \
+  --seed 1024 \
+  --host 0.0.0.0 \
+  --port 9900 \
+  --served-model-name glm-52 \
+  --max-model-len 1024000 \
+  --max-num-batched-tokens 16384 \
+  --gpu-memory-utilization 0.90 \
+  ${server_role_args} \
+  --max-num-seqs 4 \
+  --data-parallel-size 4 \
+  --data-parallel-size-local 2 \
+  --data-parallel-start-rank $data_parallel_start_rank \
+  --data-parallel-address $node_d0_ip \
+  --data-parallel-rpc-port 16600 \
+  --pipeline-parallel-size 1 \
+  --tensor-parallel-size 4 \
+  --prefill-context-parallel-size 1 \
+  --decode-context-parallel-size 4 \
+  --cp-kv-cache-interleave-size 128 \
+  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [4, 16]}' \
+  --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": false}, "fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_mc2_hierarchy_comm": false, "enable_sparse_c8": true, "enable_cpu_binding": true, "recompute_scheduler_enable": true}' \
+  --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
+  --quantization ascend \
+  --enable-expert-parallel \
+  --safetensors-load-strategy prefetch \
+  --kv-transfer-config \
+  '{"kv_connector": "MooncakeConnectorV1",
+    "kv_role": "kv_consumer",
+    "kv_port": "30100",
+    "engine_id": "1",
+    "kv_connector_extra_config": {
+      "use_ascend_direct": true,
+      "prefill": {
+        "dp_size": 4,
+        "tp_size": 4
+      },
+      "decode": {
+        "dp_size": 4,
+        "tp_size": 4
+      }
+    }
+  }'
+```
+
+Start the proxy after both services are ready:
+
+```shell
+unset http_proxy
+unset https_proxy
+
+python load_balance_proxy_server_example.py \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --prefiller-hosts <PREFILL_NODE0_IP> \
+  --prefiller-ports 9081 \
+  --decoder-hosts <DECODE_NODE0_IP> \
+  --decoder-ports 9900
+```
+
+For a scaled PD topology, keep `--max-model-len 1024000` and `--cp-kv-cache-interleave-size 128` as the 1M context baseline, then update `--data-parallel-size`, `--data-parallel-size-local`, `--data-parallel-start-rank`, `--tensor-parallel-size`, `--decode-context-parallel-size`, `--data-parallel-address`, `--data-parallel-rpc-port`, and the `kv_connector_extra_config` `dp_size`/`tp_size` fields consistently across all P/D nodes. When changing TP, update DCP to the same value.
+
+Key parameter notes:
+
+- `--max-model-len 1024000` enables the 1M context window.
+- `--decode-context-parallel-size` must always be equal to `--tensor-parallel-size` in this model architecture. The single-node example uses `TP16 DCP16`, and the PD example uses `TP4 DCP4`.
+
+
+
 ## Functional Verification
 
 Once your server is started, you can query the model with input prompts:
