@@ -301,11 +301,12 @@ class AscendDSparkProposer(AscendDflashProposer):
             valid_query_end = query_end
         valid_query_end = torch.maximum(query_start, valid_query_end)
 
-        num_context = target_token_ids.shape[0]
+        num_context = min(target_token_ids.shape[0], target_hidden_states.shape[0], target_positions.shape[0])
         self._dflash_num_context = num_context
         if num_context > 0:
             context_token_indices = self.arange_dspark[:num_context]
             context_req_indices = torch.searchsorted(query_end, context_token_indices, right=True).to(torch.long)
+            context_req_indices = torch.clamp(context_req_indices, max=batch_size - 1)
             valid_context_end = valid_query_end.index_select(0, context_req_indices)
             valid_context_mask = context_token_indices < valid_context_end
             invalid_context_position = torch.full_like(target_positions[:num_context], -1)
@@ -328,7 +329,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         token_indices_to_sample = torch.arange(num_query_total, dtype=torch.int32, device=self.device)
         model_config = getattr(getattr(self, "vllm_config", None), "model_config", None)
         max_model_len = int(getattr(model_config, "max_model_len", 0) or 0)
-        last_token_indices = torch.clamp(valid_query_end - 1, min=0).to(torch.long)
+        last_token_indices = torch.clamp(valid_query_end - 1, min=0, max=target_positions.shape[0] - 1).to(torch.long)
         last_positions = target_positions.index_select(0, last_token_indices).to(self.positions.dtype)
         draft_offsets = self.arange_dspark[:block_size].view(1, block_size)
         draft_positions = last_positions.view(batch_size, 1) + 1 + draft_offsets
