@@ -20,6 +20,9 @@
 name: Weekly-A2
 
 on:
+  schedule:
+      # Run test at 10:00 Beijing time (UTC+8) every Sunday
+      - cron: "0 2 * * 0"
   workflow_dispatch:
     inputs:
       vllm_ascend_branch:
@@ -74,7 +77,7 @@ env:
   # Single source of truth for all shared variables across jobs.
   # NOTE: GitHub Actions does not support env context in reusable workflow `with:` inputs,
   # so these values are exported as job outputs via the `setup-vars` job below.
-  CANN_IMAGE: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-910b-ubuntu22.04-py3.12'
+  CANN_IMAGE: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.1-910b-ubuntu22.04-py3.12'
   ASCEND_LOG_PREFIX: '/root/.cache/ascend-logs'
 
 jobs:

@@ -159,6 +159,8 @@ def test_chunk_gated_delta_rule_fwd_threads_prebuilt_chunk_offsets(
             "update_chunk_offsets_chunk64": update_chunk_offsets,
             "final_chunk_indices_chunk64": final_chunk_indices,
             "chunk_indices_large_block": None,
+            "keep_meta": None,
+            "cu_seqlens_kern": None,
         },
     )()
 
@@ -271,6 +273,8 @@ def test_chunk_gated_delta_rule_fwd_uses_prebuilt_metadata_without_runtime_tolis
             "update_chunk_offsets_chunk64": torch.tensor([0, 2, 4], dtype=torch.int32),
             "final_chunk_indices_chunk64": torch.tensor([1, 3], dtype=torch.int32),
             "chunk_indices_large_block": None,
+            "keep_meta": None,
+            "cu_seqlens_kern": None,
         },
     )()
 
@@ -372,6 +376,8 @@ def test_chunk_gated_delta_rule_fwd_pcp_chaining_subtracts_initial_state(
             "final_chunk_indices_chunk64": torch.tensor([0], dtype=torch.int32),
             "chunk_indices_large_block": None,
             "num_decodes": 0,
+            "keep_meta": None,
+            "cu_seqlens_kern": None,
         },
     )()
 

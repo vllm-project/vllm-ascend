@@ -77,7 +77,6 @@ from vllm_ascend.ops.fused_moe.moe_stage_params import (
     MoERoutingParams,
 )
 from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.utils import vllm_version_is
 
 
 def _build_mxfp_params(
@@ -151,7 +150,7 @@ def build_fused_experts_input(
     swiglu_beta: float = 0.0,
     lora_context=None,
 ) -> MoEFusedExpertsInput:
-    if not vllm_version_is("0.23.0") and swiglu_limit is None:
+    if swiglu_limit is None:
         swiglu_limit = 0.0
     assert swiglu_limit is not None
 

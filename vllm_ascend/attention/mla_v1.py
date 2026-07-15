@@ -44,12 +44,6 @@ from vllm_ascend.compilation.acl_graph import (
 )
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.device_op import DeviceOperator
-from vllm_ascend.ops.layer_shard_linear import (
-    is_hidden_layer,
-    post_process_after_loading_for_shard_weight_series,
-    reach_layer_for_shard_weight_series,
-    register_all_layers_to_shard_weight_series,
-)
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.quantization.methods.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
 from vllm_ascend.quantization.methods.w8a8_static import AscendW8A8LinearMethod
@@ -770,17 +764,6 @@ class AscendMLAImpl(MLAAttentionImpl):
             self.dtype = torch.float8_e4m3fn if get_ascend_device_type() == AscendDeviceType.A5 else torch.int8
         else:
             self.dtype = self.vllm_config.model_config.dtype
-        self.layer_sharding_kwargs = []
-        for layer_name in get_ascend_config().layer_sharding or []:
-            if layer_name in kwargs:
-                self.layer_sharding_kwargs.append(kwargs[layer_name])
-            else:
-                logger.warning_once(
-                    f"Layer '{layer_name}' not found in kwargs, skipping sharding. "
-                    f"Check layer_sharding config and model layer names."
-                )
-        register_all_layers_to_shard_weight_series(self.layer_sharding_kwargs)
-
         # For models whose num_heads is not a power of 2 (e.g., GLM-4.7-Flash
         # with 20 heads), ascend attention ops require padding heads to the
         # next power of 2.
@@ -991,10 +974,6 @@ class AscendMLAImpl(MLAAttentionImpl):
         else:
             # if mlapo, W_UK_T can't trans nz
             self.W_UK_T = maybe_trans_nz(self.W_UK_T)
-
-        for layer in self.layer_sharding_kwargs or []:
-            if is_hidden_layer(layer):
-                post_process_after_loading_for_shard_weight_series(layer)
 
     def _process_weights_for_fused_fa_quant(self):
         if get_ascend_device_type() == AscendDeviceType.A5:
@@ -1229,11 +1208,13 @@ class AscendMLAImpl(MLAAttentionImpl):
                 key = torch.cat((k_nope, k_pe), dim=-1)
             else:
                 common_kwargs["query_rope"] = q_pe
-                common_kwargs["key_rope"] = k_pe
+                common_kwargs["key_rope"] = k_pe.contiguous()
                 query = q_nope
                 key = k_nope
 
-            chunk_out, chunk_lse = torch_npu.npu_fused_infer_attention_score(query, key, v, **common_kwargs)
+            chunk_out, chunk_lse = torch_npu.npu_fused_infer_attention_score(
+                query, key.contiguous(), v.contiguous(), **common_kwargs
+            )
 
             if chunk_lse.dim() == 2:
                 chunk_lse = chunk_lse.transpose(0, 1).unsqueeze(-1)
@@ -1297,10 +1278,12 @@ class AscendMLAImpl(MLAAttentionImpl):
             key = torch.cat((k_nope, k_pe), dim=-1)
         else:
             common_kwargs["query_rope"] = q_pe
-            common_kwargs["key_rope"] = k_pe
+            common_kwargs["key_rope"] = k_pe.contiguous()
             query, key = q_nope, k_nope
 
-        attn_output, attn_lse = torch_npu.npu_fused_infer_attention_score(query, key, value, **common_kwargs)
+        attn_output, attn_lse = torch_npu.npu_fused_infer_attention_score(
+            query, key.contiguous(), value.contiguous(), **common_kwargs
+        )
 
         attn_output, attn_lse = self._compute_prefill_context(
             q_nope, q_pe, kv_c_and_k_pe_cache, self.qk_rope_head_dim, attn_metadata, attn_output, attn_lse
@@ -1675,10 +1658,6 @@ class AscendMLAImpl(MLAAttentionImpl):
         q_c = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(q_c.contiguous(), need_gather_q_kv)
         kv_no_split = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(kv_no_split.contiguous(), need_gather_q_kv)
 
-        for layer in self.layer_sharding_kwargs or []:
-            if is_hidden_layer(layer):
-                reach_layer_for_shard_weight_series(layer)
-
         decode_preprocess_res = None
         prefill_preprocess_res = None
         if has_prefill:
@@ -1732,9 +1711,6 @@ class AscendMLAImpl(MLAAttentionImpl):
         assert output is not None, "Output tensor must be provided."
         if attn_metadata is None:
             # Profiling run.
-            for layer in self.layer_sharding_kwargs or []:
-                if is_hidden_layer(layer):
-                    reach_layer_for_shard_weight_series(layer)
             return output.fill_(0)
 
         num_actual_tokens = self.get_num_actual_tokens(attn_metadata)
