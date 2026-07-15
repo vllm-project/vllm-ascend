@@ -19,7 +19,6 @@
 from __future__ import annotations
 
 import os
-from unittest.mock import patch
 
 import pytest
 from transformers import AutoTokenizer
@@ -63,7 +62,6 @@ BASELINES_SP = {
 
 
 @pytest.mark.skip(reason="skip test_eagle3_sp_acceptance")
-@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
 @pytest.mark.parametrize("method", ["eagle3"])
 @pytest.mark.parametrize("num_speculative_tokens", [3])
 @pytest.mark.parametrize("disable_padded_drafter_batch", [True, False])
@@ -142,6 +140,7 @@ def test_eagle3_sp_acceptance(
         speculative_config=speculative_config,
         compilation_config=compilation_config,
         async_scheduling=async_scheduling,
+        additional_config={"enable_flashcomm1": True},
     ) as llm:
         _ = llm.generate(prompts, sampling_params)
         metrics = llm.model.get_metrics()
@@ -337,7 +336,6 @@ def test_p_eagle_acceptance(
     assert match
 
 
-@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
 def test_qwen3_vwn_eagle3_tp2():
     """
     Test Qwen3-30B-A3B with VWN-Eagle3 speculative decoding acceptance rate.
@@ -402,6 +400,7 @@ def test_qwen3_vwn_eagle3_tp2():
         gpu_memory_utilization=0.92,
         speculative_config=speculative_config,
         enable_expert_parallel=True,
+        additional_config={"enable_flashcomm1": True},
     ) as llm:
         _ = llm.generate(prompts, sampling_params)
         metrics = llm.model.get_metrics()

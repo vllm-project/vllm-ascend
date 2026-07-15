@@ -194,7 +194,7 @@ class AscendFusedMoE(FusedMoE):
         self.shared_multistream_overlap_gate = ascend_config.multistream_overlap_gate and has_shared_experts
         if self.multistream_overlap_shared_expert:
             logger.info_once("[fused_moe/layer] Multistream overlap shared expert is enabled.")
-        if enable_sp() and has_shared_experts:
+        if enable_sp(getattr(ascend_config, "vllm_config", None)) and has_shared_experts:
             logger.info_once(
                 "[fused_moe/layer] Sequence parallelism is enabled, shared experts are replicated for best performance."
             )

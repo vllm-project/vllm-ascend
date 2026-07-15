@@ -23,7 +23,7 @@ import functools
 import json
 import math
 import os
-from contextlib import nullcontext
+from contextlib import nullcontext, suppress
 from enum import Enum
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any
@@ -71,6 +71,7 @@ _IS_MOE_MODEL = None
 _IS_DRAFTER_MOE_MODEL = None
 _IS_VL_MODEL = None
 _ENABLE_SP = None
+_ENABLE_SP_CONFIG_ID = None
 _HAS_LAYER_IDX = None
 _HAS_ROPE = None
 _ATNN_CALCULATION_STREAM = None
@@ -137,8 +138,9 @@ def enable_sfa_dcp_replicated_indexer(vllm_config: VllmConfig | None = None) -> 
 
 
 def clear_enable_sp():
-    global _ENABLE_SP
+    global _ENABLE_SP, _ENABLE_SP_CONFIG_ID
     _ENABLE_SP = None
+    _ENABLE_SP_CONFIG_ID = None
     enable_dsa_cp.cache_clear()
     enable_dsa_cp_with_layer_shard.cache_clear()
     enable_dsa_cp_with_o_proj_tp.cache_clear()
@@ -901,7 +903,7 @@ def enable_sp_by_pass():
 
 
 def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
-    global _ENABLE_SP
+    global _ENABLE_SP, _ENABLE_SP_CONFIG_ID
     if vllm_config is None:
         try:
             from vllm.config import get_current_vllm_config
@@ -910,17 +912,29 @@ def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
         except AssertionError:
             vllm_config = None
 
+    candidate_ascend_config = None
+    with suppress(RuntimeError):
+        candidate_ascend_config = get_ascend_config()
+
+    ascend_config = None
+    if vllm_config is None and candidate_ascend_config is not None:
+        ascend_config = candidate_ascend_config
+        vllm_config = getattr(candidate_ascend_config, "vllm_config", None)
+    elif candidate_ascend_config is not None and getattr(candidate_ascend_config, "vllm_config", None) is vllm_config:
+        ascend_config = candidate_ascend_config
+
+    config_id = id(vllm_config) if vllm_config is not None else None
     additional_config = getattr(vllm_config, "additional_config", None) if vllm_config is not None else None
     refresh = additional_config.get("refresh", False) if additional_config else False
 
-    if _ENABLE_SP is None or refresh:
+    if _ENABLE_SP is None or refresh or (config_id is not None and config_id != _ENABLE_SP_CONFIG_ID):
         if additional_config is not None and "enable_flashcomm1" in additional_config:
             _ENABLE_SP = bool(additional_config["enable_flashcomm1"])
+        elif ascend_config is not None:
+            _ENABLE_SP = ascend_config.enable_flashcomm1
         else:
-            try:
-                _ENABLE_SP = get_ascend_config().enable_flashcomm1
-            except RuntimeError:
-                _ENABLE_SP = envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1
+            _ENABLE_SP = envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1
+        _ENABLE_SP_CONFIG_ID = config_id
 
         if not _ENABLE_SP and enable_shared_expert_dp:
             _ENABLE_SP = True
@@ -1530,11 +1544,11 @@ def enable_dsa_cp() -> bool:
     if additional_config is not None and "enable_dsa_cp" in additional_config:
         dsa_cp_enable = bool(additional_config["enable_dsa_cp"])
 
-    if dsa_cp_enable and not enable_sp():
+    if dsa_cp_enable and not enable_sp(vllm_config=vllm_config):
         raise ValueError(
-            "DSA CP requires SP to be enabled. Please enable SP(set VLLM_ASCEND_ENABLE_FLASHCOMM1=1) to use DSA CP."
+            "DSA CP requires SP to be enabled. Please set additional_config.enable_flashcomm1=true to use DSA CP."
         )
-    return dsa_cp_enable and enable_sp()
+    return dsa_cp_enable and enable_sp(vllm_config=vllm_config)
 
 
 @lru_cache(maxsize=1)

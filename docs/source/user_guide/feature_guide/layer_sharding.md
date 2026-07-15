@@ -71,10 +71,10 @@ Layer Sharding can only be enabled in PD disaggregated's **P node**.
 **Example configuration:**
 
 ```bash
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 vllm serve \
   --model DeepSeek-V3.2 \
   --additional-config '{
+    "enable_flashcomm1": true,
     "layer_sharding": ["q_b_proj", "o_proj"]
   }'
 ```

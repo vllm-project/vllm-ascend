@@ -637,7 +637,7 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         # Effective in SFA when FlashComm is enabled.
         self.enable_dsa_cp = enable_dsa_cp()
-        self.enable_sp = enable_sp()
+        self.enable_sp = enable_sp(self.vllm_config)
 
         # Enable layer sharding via DSA-CP on the P node in the PD-disaggregated setup.
         self.enable_dsa_cp_with_layer_shard = enable_dsa_cp_with_layer_shard()
