@@ -87,7 +87,7 @@ def _assert_ascend_moe_lora_supported(base_layer: nn.Module) -> None:
         )
 
 
-def _recover_moe_lora_routing(lora_context, expanded_row_idx, topk_ids):
+def _recover_moe_lora_routing_allgather(lora_context, expanded_row_idx, topk_ids):
     """Recover per-permuted-row (expert_id, lora_slot) for the dispatched rows.
 
     npu_moe_init_routing semantics (verified empirically): ``expanded_row_idx``
@@ -144,35 +144,15 @@ def _recover_moe_lora_routing_all2all(
     return expert_per_row, lora_per_row
 
 
-def moe_lora_apply_w13(lora_context, *, gate_up_out, hidden_states, expanded_row_idx, topk_ids):
+def moe_lora_apply_w13(lora_context, *, gate_up_out, hidden_states, lora_routing):
     """Add the w13 LoRA delta into ``gate_up_out`` (in place), before activation.
 
-    Called from ``unquant_apply_mlp`` right after the base gate_up GMM. Returns
-    the recovered per-row routing so the w2 delta can reuse it.
-    """
-    routing = _recover_moe_lora_routing(lora_context, expanded_row_idx, topk_ids)
-    expert_per_row, lora_per_row = routing
-    if expert_per_row.numel() == 0:
-        return routing
-    lora_context.punica_wrapper.add_lora_fused_moe(
-        y=gate_up_out,
-        x=hidden_states,
-        lora_a_stacked=lora_context.w13_lora_a_stacked,
-        lora_b_stacked=lora_context.w13_lora_b_stacked,
-        expert_ids=expert_per_row,
-        adapter_enabled=lora_context.adapter_enabled,
-        token_lora_mapping=lora_per_row,
-    )
-    return routing
+    Called from ``unquant_apply_mlp`` right after the base gate_up GMM.
 
-
-def moe_lora_apply_w13_all2all(lora_context, *, gate_up_out, hidden_states, lora_routing):
-    """Add the w13 LoRA delta into ``gate_up_out`` (in place) for the all2all path.
-
-    Unlike ``moe_lora_apply_w13`` which computes per-row routing from
-    expanded_row_idx + topk_ids (AllGather path), this variant accepts a
-    pre-computed ``lora_routing`` tuple of (expert_per_row, lora_per_row)
-    from ``_recover_moe_lora_routing_all2all`` (AlltoAll path).
+    Args:
+        lora_routing: (expert_per_row, lora_per_row) pre-computed by the
+            caller via _recover_moe_lora_routing (AllGather) or
+            _recover_moe_lora_routing_all2all (AlltoAll).
     """
     expert_per_row, lora_per_row = lora_routing
     # EP rank may receive 0 dispatched tokens when all tokens route to

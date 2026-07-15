@@ -449,38 +449,22 @@ def unquant_apply_mlp(
     lora_routing = None
     if lora_context is not None:  # LoRA applied
         from vllm_ascend.lora.fused_moe import (
+            _recover_moe_lora_routing_all2all,
+            _recover_moe_lora_routing_allgather,
             moe_lora_apply_w2,
             moe_lora_apply_w13,
         )
 
         if expanded_row_idx is not None and topk_ids is not None:
             # AllGather path: use npu_moe_init_routing's expanded_row_idx.
-            lora_routing = moe_lora_apply_w13(
-                lora_context,
-                gate_up_out=gate_up_out,
-                hidden_states=hidden_states,
-                expanded_row_idx=expanded_row_idx,
-                topk_ids=topk_ids,
-            )
+            lora_routing = _recover_moe_lora_routing_allgather(lora_context, expanded_row_idx, topk_ids)
         elif exchanged_lora_indices is not None:
             # AlltoAll path: tokens already sorted by expert after exchange.
             # Build per-row (expert_id, lora_id) directly from group_list.
-            from vllm_ascend.lora.fused_moe import (
-                _recover_moe_lora_routing_all2all,
-                moe_lora_apply_w13_all2all,
-            )
-
             lora_routing = _recover_moe_lora_routing_all2all(
                 lora_context,
                 group_list=group_list,
                 exchanged_lora_indices=exchanged_lora_indices,
-            )
-            # Apply w13 LoRA delta using the all2all routing.
-            moe_lora_apply_w13_all2all(
-                lora_context,
-                gate_up_out=gate_up_out,
-                hidden_states=hidden_states,
-                lora_routing=lora_routing,
             )
         else:
             raise AssertionError(
@@ -488,6 +472,13 @@ def unquant_apply_mlp(
                 "(AllGather) or exchanged_lora_indices (AlltoAll). "
                 "Neither was provided."
             )
+
+        moe_lora_apply_w13(
+            lora_context,
+            gate_up_out=gate_up_out,
+            hidden_states=hidden_states,
+            lora_routing=lora_routing,
+        )
 
     if activation == MoEActivation.SWIGLUOAI:
         num_experts, _, hidden_size = w1.shape
