@@ -555,24 +555,49 @@ def test_logprobs_without_batch_invariance_should_fail(monkeypatch: pytest.Monke
         print(f"[BS=1] Prompt {idx} generated tokens: {token_ids}")
 
     # BS=N: run prompts in a batch and collect logprobs per step for each prompt.
-    print("\n" + "=" * 80)
-    print(f"STARTING BS={len(prompts)} RUN (all prompts batched)")
-    print("=" * 80 + "\n")
+    #
+    # VLLM_FORCE_INVARIANCE_FAIL is a verification switch: when set, the "BS=N"
+    # pass is replaced by per-prompt individual generation (identical to the
+    # BS=1 pass above), so BS=1 and BS=N are guaranteed to match. That forces
+    # the test into its `pytest.fail` branch, letting you confirm the
+    # difference-detection and failure-reporting logic actually fires. Leave
+    # it unset for the real (batched) run that expects divergence.
+    force_fail = os.getenv("VLLM_FORCE_INVARIANCE_FAIL", "0") == "1"
 
-    outs_batched = llm.generate(prompts, sp, use_tqdm=False)
-    assert len(outs_batched) == len(prompts)
     bsN_logprobs_per_prompt = []
     bsN_tokens_per_prompt = []
 
-    print(f"\n[BS={len(prompts)}] Processing batched outputs...")
-    for idx, o in enumerate(outs_batched):
-        tokens = o.outputs[0].token_ids if o.outputs else "N/A"
-        print(f"[BS={len(prompts)}] Prompt {idx} generated tokens: {tokens}")
-        step_logprobs, token_ids = _extract_step_logprobs(o)
-        if step_logprobs is None:
-            pytest.skip("Logits are not available on RequestOutput; enable logprobs return to run this test.")
-        bsN_logprobs_per_prompt.append(step_logprobs)
-        bsN_tokens_per_prompt.append(token_ids)
+    if force_fail:
+        print("\n" + "=" * 80)
+        print("FORCE-FAIL MODE: replaying BS=1 individually as BS=N to force the failure branch")
+        print("=" * 80 + "\n")
+        for idx, p in enumerate(prompts):
+            print(f"\n[BS=N-FORCE] Running prompt {idx}/{len(prompts)} - Preview: {p[:80]}...")
+            outs = llm.generate([p], sp, use_tqdm=False)
+            assert len(outs) == 1
+            step_logprobs, token_ids = _extract_step_logprobs(outs[0])
+            if step_logprobs is None:
+                pytest.skip("Logits are not available on RequestOutput; enable logprobs return to run this test.")
+            bsN_logprobs_per_prompt.append(step_logprobs)
+            bsN_tokens_per_prompt.append(token_ids)
+            print(f"[BS=N-FORCE] Prompt {idx} generated tokens: {token_ids}")
+    else:
+        print("\n" + "=" * 80)
+        print(f"STARTING BS={len(prompts)} RUN (all prompts batched)")
+        print("=" * 80 + "\n")
+
+        outs_batched = llm.generate(prompts, sp, use_tqdm=False)
+        assert len(outs_batched) == len(prompts)
+
+        print(f"\n[BS={len(prompts)}] Processing batched outputs...")
+        for idx, o in enumerate(outs_batched):
+            tokens = o.outputs[0].token_ids if o.outputs else "N/A"
+            print(f"[BS={len(prompts)}] Prompt {idx} generated tokens: {tokens}")
+            step_logprobs, token_ids = _extract_step_logprobs(o)
+            if step_logprobs is None:
+                pytest.skip("Logits are not available on RequestOutput; enable logprobs return to run this test.")
+            bsN_logprobs_per_prompt.append(step_logprobs)
+            bsN_tokens_per_prompt.append(token_ids)
 
     # Compare step-by-step logprobs for each prompt between BS=1 and BS=N runs.
     differences_found = []
@@ -676,6 +701,16 @@ def test_logprobs_without_batch_invariance_should_fail(monkeypatch: pytest.Monke
             f"This suggests batch invariance might not be necessary, "
             f"or the test needs more sensitive prompts."
         )
+        if force_fail:
+            fail_msg = (
+                f"✓ VERIFIED (force-fail mode): BS=1 and BS=N matched as "
+                f"expected because BS=N was replayed individually, so the "
+                f"failure branch fired correctly. All {len(prompts)} prompts "
+                f"matched -> pytest.fail triggered as designed."
+            )
+            print(fail_msg)
+            print(f"{'=' * 80}\n")
+            pytest.fail(fail_msg)
         print(fail_msg)
         print(f"{'=' * 80}\n")
         pytest.fail(fail_msg)
