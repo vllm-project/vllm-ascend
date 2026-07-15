@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 FAILED_SENTINEL = "FAILED"
+EXPECTED_SENTINEL = "EXPECTED"
 
 
 def coverage_key(target: str) -> str:
@@ -26,8 +27,25 @@ def coverage_key(target: str) -> str:
     return basename.replace("\\", "/").replace("/", "__").replace("::", "--")
 
 
-def expected_coverage_keys(test_groups: list[dict[str, Any]]) -> set[str]:
-    """Collect the coverage output keys expected from the selected test groups."""
+def expected_coverage_keys(
+    test_groups: list[dict[str, Any]],
+    coverage_root: Path | None = None,
+) -> set[str]:
+    """Collect the expected coverage keys.
+
+    Case-level coverage runners write an ``EXPECTED`` sentinel before running
+    each collected pytest nodeid. Prefer those keys when present. Falling back
+    to test groups keeps existing file-level coverage packages compatible.
+    """
+    if coverage_root is not None and coverage_root.exists():
+        case_keys = {
+            path.parent.name
+            for path in coverage_root.rglob(EXPECTED_SENTINEL)
+            if path.is_file()
+        }
+        if case_keys:
+            return case_keys
+
     keys: set[str] = set()
     for group in test_groups:
         if group.get("npu_type") == "cpu":
@@ -71,7 +89,7 @@ def missing_coverage_keys(test_groups: list[dict[str, Any]], coverage_root: Path
     """
     dirs_by_key, failed = _scan_coverage(coverage_root)
     usable = set(dirs_by_key) - failed
-    return sorted(expected_coverage_keys(test_groups) - usable)
+    return sorted(expected_coverage_keys(test_groups, coverage_root) - usable)
 
 
 def backfill_missing_coverage(

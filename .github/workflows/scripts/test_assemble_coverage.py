@@ -35,6 +35,13 @@ def _mark_failed(root: Path, key: str) -> Path:
     return path
 
 
+def _mark_expected(root: Path, key: str) -> Path:
+    path = root / key / assemble_coverage.EXPECTED_SENTINEL
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("", encoding="utf-8")
+    return path
+
+
 def test_expected_coverage_keys_match_runner_output_names():
     assert assemble_coverage.coverage_key("tests/e2e/test_a.py") == "tests__e2e__test_a"
     assert assemble_coverage.coverage_key("tests/e2e/test_b.py::test_one") == "tests__e2e__test_b.py--test_one"
@@ -43,6 +50,22 @@ def test_expected_coverage_keys_match_runner_output_names():
         "tests__e2e__test_b.py--test_one",
         "cpu-ut",
     }
+
+
+def test_expected_case_sentinels_override_file_level_test_groups(tmp_path):
+    case_a = "tests__e2e__test_a.py--test_one"
+    case_b = "tests__e2e__test_a.py--test_two[param]"
+    _mark_expected(tmp_path, case_a)
+    _mark_expected(tmp_path, case_b)
+    _write_coverage(tmp_path, case_a)
+
+    assert assemble_coverage.expected_coverage_keys(TEST_GROUPS, tmp_path) == {
+        case_a,
+        case_b,
+    }
+    assert assemble_coverage.missing_coverage_keys(TEST_GROUPS, tmp_path) == [
+        case_b
+    ]
 
 
 def test_missing_coverage_keys_support_nested_artifact_directories(tmp_path):
