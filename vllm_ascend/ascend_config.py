@@ -283,11 +283,6 @@ class AscendConfig:
         self.mix_placement = additional_config.get("mix_placement", False)
         self._check_mix_placement()
 
-        self.hamming_sparse = additional_config.get("hamming_sparse", {"enabled": False, "sparse_json_location": ""})
-        self.enable_hamming_sparse = self.hamming_sparse["enabled"]
-        self.sparse_json = self.hamming_sparse["sparse_json_location"]
-        self._check_enable_hamming_sparse()
-
         # Enable Block Verify and Entropy Verify in Rejection Sampler
         rejection_sampler_config = additional_config.get("rejection_sampler_config", {})
         self.rejection_sampler_config = RejectionSamplerConfig(rejection_sampler_config)
@@ -336,11 +331,6 @@ class AscendConfig:
         if self.mix_placement:
             if self.enable_shared_expert_dp or self.multistream_overlap_shared_expert:
                 raise ValueError("Mix placement is not supported with shared expert DP or multistream overlap.")
-
-    def _check_enable_hamming_sparse(self):
-        if self.enable_hamming_sparse:
-            if isinstance(self.sparse_json, str) and not os.path.isfile(self.sparse_json):
-                raise ValueError("Hamming sparse config json file doesn't exist.")
 
     @staticmethod
     def _materialize_dump_config_to_file(dump_config: dict[str, Any]) -> str:
