@@ -13,16 +13,18 @@
 # This file is a part of the vllm-ascend project.
 #
 import sys
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import torch
 
 from tests.ut.base import TestBase
+from vllm_ascend.attention.attention_v1 import AscendAttentionState
 
 if "torch_npu._inductor" not in sys.modules:
     sys.modules["torch_npu._inductor"] = MagicMock()
 
 from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
+from vllm_ascend.utils import AscendDeviceType
 
 
 class TestAscendSFAOProjTPParams(TestBase):
@@ -101,3 +103,70 @@ class TestAscendSFAOProjTPParams(TestBase):
         self.assertEqual(impl.o_proj.weight_scale_second.data_ptr(), original_scale_ptr)
         self.assertFalse(require_o_proj_forward)
         self.assertTrue(torch.equal(output, torch.ones(2, 4)))
+
+    @patch("vllm_ascend.attention.sfa_v1.maybe_save_kv_layer_to_connector")
+    @patch("vllm_ascend.attention.sfa_v1.wait_for_kv_layer_from_connector")
+    @patch("vllm_ascend.attention.sfa_v1.get_weight_prefetch_method")
+    @patch(
+        "vllm_ascend.attention.sfa_v1.get_ascend_device_type",
+        return_value=AscendDeviceType.A5,
+    )
+    def test_dsa_cp_full_o_proj_notifies_layerwise_connector_before_early_return(
+        self,
+        _mock_device_type,
+        mock_weight_prefetch,
+        _mock_wait_for_layer,
+        mock_save_layer,
+    ):
+        impl = AscendSFAImpl.__new__(AscendSFAImpl)
+        impl.enable_dsa_cp = False
+        impl.enable_dsa_cp_with_o_proj_tp = True
+        impl.enable_sfa_prolog_v3 = False
+        impl.enable_mlapo = True
+        impl.enable_sp = False
+        impl.has_indexer = False
+        impl.is_kv_producer = False
+        impl.skip_topk = True
+        impl.o_proj = MagicMock()
+        impl._sfa_preprocess_with_mlapo = MagicMock(
+            return_value=(
+                torch.zeros(1, 4),
+                torch.zeros(1, 1, 4),
+                torch.zeros(1, 1, 4),
+                torch.zeros(1, 4),
+            )
+        )
+        impl._get_indexcache_topk_indices = MagicMock(return_value=torch.zeros(1, 1, dtype=torch.int32))
+        impl._execute_sparse_flash_attention_process = MagicMock(return_value=torch.zeros(1, 1, 4))
+        impl._v_up_proj = MagicMock(return_value=torch.zeros(1, 4))
+
+        output = torch.empty(1, 4)
+        impl._handle_o_proj_weight_switch_and_forward = MagicMock(return_value=(output, False))
+        mock_weight_prefetch.return_value = MagicMock()
+        metadata = MagicMock()
+        metadata.cos = torch.zeros(1, 4)
+        metadata.sin = torch.zeros(1, 4)
+        metadata.slot_mapping = torch.zeros(1, dtype=torch.int32)
+        metadata.dcp_context = None
+        metadata.cum_query_lens = torch.tensor([0, 1], dtype=torch.int32)
+        metadata.seq_lens = torch.tensor([1], dtype=torch.int32)
+        metadata.num_input_tokens = 1
+        metadata.attn_state = AscendAttentionState.PrefillNoCache
+        kv_cache = (torch.empty(1), torch.empty(1))
+
+        with patch.object(
+            torch.ops.vllm,
+            "maybe_all_gather_and_maybe_unpad",
+            side_effect=lambda tensor, _need_gather: tensor,
+            create=True,
+        ):
+            result = impl.forward(
+                "model.layers.0.self_attn.attn",
+                torch.zeros(1, 4),
+                kv_cache,
+                metadata,
+                output=output,
+            )
+
+        self.assertIs(result, output)
+        mock_save_layer.assert_called_once_with("model.layers.0.self_attn.attn", list(kv_cache))

@@ -106,10 +106,11 @@ class TestLayerPoolKey(unittest.TestCase):
         self.assertNotEqual(hash(k1), hash(k2))
 
     def test_to_string_contains_layer_id(self):
-        meta = KeyMetadata("model", 0, 0, 0, 0)
+        meta = KeyMetadata("model", 0, 0, 0, 3)
         k = LayerPoolKey(meta, "h1", 5)
         s = k.to_string()
         self.assertIn("@layer_id:5", s)
+        self.assertIn("@pp_rank:3", s)
         self.assertIn("model", s)
         self.assertTrue(s.endswith("@h1"))
 
@@ -234,6 +235,37 @@ class TestChunkedTokenDatabase(unittest.TestCase):
         # layer_id=0, entries_per_layers=2 => group_addrs[0] and group_addrs[1]
         self.assertEqual(addr[0], 1000 + 5 * 160)
         self.assertEqual(addr[1], 2000 + 5 * 320)
+
+    def test_prepare_value_layer_uses_group_local_layer_and_explicit_block(self):
+        metadata = [
+            KeyMetadata("dsv4", 0, 0, 0, 0, kv_cache_group_id=0),
+            KeyMetadata("dsv4", 0, 0, 0, 0, kv_cache_group_id=1),
+        ]
+        db = ChunkedTokenDatabase(metadata, block_size=[16, 16], partitions=None)
+        db.set_group_buffers(
+            {
+                0: [1000],
+                1: [2000, 3000],
+            },
+            {
+                0: [160],
+                1: [160, 320],
+            },
+            group_num_layers={0: 1, 1: 2},
+        )
+
+        addr, size, block_id = db.prepare_value_layer(
+            0,
+            16,
+            [11],
+            layer_id=1,
+            kv_cache_group_id=1,
+            block_id=77,
+        )
+
+        self.assertEqual(block_id, 77)
+        self.assertEqual(addr, [3000 + 77 * 320])
+        self.assertEqual(size, [320])
 
     def test_decode_adaptor_prefill_pp_no_partitions(self):
         key, addr, size = self.db.decode_adaptor_prefill_pp(["k1"], [[1, 2]], [[10, 20]])

@@ -70,8 +70,6 @@ class KVPoolScheduler:
                     raise NotImplementedError(
                         "AscendStore hybrid linear-attention support currently requires mamba_cache_mode='align'."
                     )
-        if self.use_layerwise and len(self.kv_cache_group_ids) > 1:
-            raise NotImplementedError("AscendStore layerwise mode does not yet support hybrid KV cache groups.")
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         self.consumer_is_to_load = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "consumer_is_to_load", False
@@ -370,7 +368,7 @@ class KVPoolScheduler:
         Also, calling this function will reset the state of the connector.
         """
 
-        force_skip_save = self.kv_role == "kv_consumer" and not self.consumer_is_to_put
+        force_skip_save = self.kv_role == "kv_consumer" and (self.use_layerwise or not self.consumer_is_to_put)
 
         for finished_req_id in scheduler_output.finished_req_ids:
             self._request_trackers.pop(finished_req_id, None)
@@ -621,7 +619,7 @@ class KVPoolScheduler:
         Once a request is finished, determine whether request blocks
         should be freed now or will be sent asynchronously and freed later.
         """
-        if self.kv_role == "kv_consumer" and not self.consumer_is_to_put:
+        if self.kv_role == "kv_consumer" and (self.use_layerwise or not self.consumer_is_to_put):
             return False, None
         tracker = self._request_trackers.get(request.request_id)
         if tracker is not None and tracker.num_saved_tokens <= 0:
@@ -638,7 +636,7 @@ class KVPoolScheduler:
         block_ids: tuple[list[int], ...],
     ) -> tuple[bool, dict[str, Any] | None]:
         """HMA path for hybrid KV cache groups."""
-        if self.kv_role == "kv_consumer" and not self.consumer_is_to_put:
+        if self.kv_role == "kv_consumer" and (self.use_layerwise or not self.consumer_is_to_put):
             return False, None
         tracker = self._request_trackers.get(request.request_id)
         if tracker is not None and tracker.num_saved_tokens <= 0:

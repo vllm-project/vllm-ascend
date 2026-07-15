@@ -16,14 +16,24 @@
 #
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+# isort: off
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+    SlidingWindowSpec,
+    UniformTypeKVCacheSpecs,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import (
     KVPoolScheduler,
     LookupKeyClient,
     get_zmq_rpc_path_lookup,
 )
+# isort: on
 
 
 class TestGetZmqRpcPathLookup(unittest.TestCase):
@@ -62,6 +72,44 @@ class TestKVPoolScheduler(unittest.TestCase):
         config.parallel_config.decode_context_parallel_size = 1
         config.cache_config.block_size = block_size
         return config
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    def test_layerwise_accepts_dsv4_multi_group_cache(self, mock_client_cls):
+        config = self._make_config(block_size=16)
+        hf_config = SimpleNamespace(
+            model_type="deepseek_v4",
+            compress_ratios=[4, 128],
+            num_hidden_layers=2,
+        )
+        config.model_config.hf_text_config = hf_config
+        config.model_config.hf_config = hf_config
+        config.scheduler_config.disable_hybrid_kv_cache_manager = False
+        config.speculative_config = None
+        config.parallel_config.world_size = 1
+        config.cache_config.hash_block_size = 16
+        c4_spec = FullAttentionSpec(block_size=16, compress_ratio=4)
+        c128_spec = SlidingWindowSpec(block_size=16, sliding_window=2048, compress_ratio=128)
+        kv_cache_config = KVCacheConfig(
+            num_blocks=8,
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    layer_names=["model.layers.0.self_attn.attn"],
+                    kv_cache_spec=UniformTypeKVCacheSpecs(
+                        block_size=16,
+                        kv_cache_specs={"model.layers.0.self_attn.attn": c4_spec},
+                    ),
+                ),
+                KVCacheGroupSpec(
+                    layer_names=["model.layers.1.self_attn.attn"],
+                    kv_cache_spec=c128_spec,
+                ),
+            ],
+        )
+
+        scheduler = KVPoolScheduler(config, use_layerwise=True, kv_cache_config=kv_cache_config)
+
+        self.assertEqual(scheduler.kv_cache_group_ids, [0, 1])
+        self.assertEqual(scheduler.kv_cache_group_families, ["c4", "c128"])
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_get_num_new_matched_tokens_consumer_no_load(self, mock_client_cls):
@@ -248,10 +296,10 @@ class TestKVPoolScheduler(unittest.TestCase):
 
 
 class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
-    def _make_config(self, kv_role="kv_producer", block_size=16):
+    def _make_config(self, kv_role="kv_producer", block_size=16, extra_config=None):
         config = MagicMock()
         config.kv_transfer_config.kv_role = kv_role
-        config.kv_transfer_config.kv_connector_extra_config = {}
+        config.kv_transfer_config.kv_connector_extra_config = extra_config or {}
         config.kv_transfer_config.get_from_extra_config.return_value = True
         config.parallel_config.data_parallel_rank = 0
         config.parallel_config.prefill_context_parallel_size = 1
@@ -345,8 +393,40 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
         sched_output.scheduled_cached_reqs = MagicMock()
         sched_output.scheduled_cached_reqs.req_ids = []
 
-        _meta = scheduler.build_connector_meta(sched_output)
-        # Consumer with no consumer_is_to_put => force_skip_save
+        meta = scheduler.build_connector_meta(sched_output)
+        self.assertEqual(meta.requests, [])
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    def test_build_connector_meta_layerwise_consumer_never_saves(self, mock_client_cls):
+        config = self._make_config(
+            kv_role="kv_consumer",
+            extra_config={"consumer_is_to_put": True},
+        )
+        scheduler = KVPoolScheduler(config, use_layerwise=True)
+
+        request = MagicMock()
+        request.request_id = "r1"
+        request.prompt_token_ids = list(range(32))
+        scheduler.update_state_after_alloc(request, MagicMock(), 0)
+
+        new_req_data = MagicMock()
+        new_req_data.req_id = "r1"
+        new_req_data.num_computed_tokens = 0
+        new_req_data.block_ids = [0, 1]
+        new_req_data.prompt_token_ids = list(range(32))
+
+        sched_output = MagicMock()
+        sched_output.finished_req_ids = set()
+        sched_output.preempted_req_ids = set()
+        sched_output.scheduled_new_reqs = [new_req_data]
+        sched_output.num_scheduled_tokens = {"r1": 32}
+        sched_output.scheduled_cached_reqs = MagicMock()
+        sched_output.scheduled_cached_reqs.req_ids = []
+
+        meta = scheduler.build_connector_meta(sched_output)
+
+        self.assertEqual(meta.requests, [])
+        self.assertEqual(scheduler.request_finished(request, [0, 1]), (False, None))
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_build_connector_meta_preempted(self, mock_client_cls):
