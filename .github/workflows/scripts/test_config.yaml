@@ -617,6 +617,7 @@
     - setup.py
   tests:
     - tests/ut/test_ascend_config.py
+    - tests/ut/test_ascend_device_type.py
     - tests/ut/test_ascend_forward_context.py
     - tests/ut/test_cpu_binding.py
     - tests/ut/test_envs.py
