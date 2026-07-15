@@ -102,15 +102,6 @@ class AscendConfig:
             os.path.join(os.path.expanduser("~"), "ascend", "log", "vllm_ascend"),
         )
 
-        self.layer_sharding = additional_config.get("layer_sharding", None)
-        if self.layer_sharding:
-            logger.info_once(
-                "Linear layer sharding enabled with config: %s. "
-                "Note: This feature works optimally with FLASHCOMM2 and DSA-CP enabled; "
-                "using it without these features may result in significant performance degradation.",
-                str(self.layer_sharding),
-            )
-
         self.enable_shared_expert_dp = (
             additional_config.get("enable_shared_expert_dp", False)
             and vllm_config.parallel_config.enable_expert_parallel

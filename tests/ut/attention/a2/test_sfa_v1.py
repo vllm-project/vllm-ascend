@@ -270,7 +270,6 @@ class TestAscendSFAMetadataBuilder(TestBase):
         mock_ascend_config.c8_enable_reshape_optim = False
         mock_ascend_config.enable_mlapo = True
         mock_ascend_config.enable_shared_expert_dp = False
-        mock_ascend_config.layer_sharding = None
         self.ascend_config_patcher = patch(
             "vllm_ascend.attention.sfa_v1.get_ascend_config",
             return_value=mock_ascend_config,
