@@ -24,6 +24,7 @@ from vllm.distributed.kv_events import KVCacheEvent
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import (
     AscendStoreConnector,
     AscendStoreKVEvents,
+    LookupKeyServer,
 )
 
 # isort: on
@@ -80,6 +81,175 @@ class TestAscendStoreKVEvents(unittest.TestCase):
         self.assertIn("AscendStoreKVEvents", s)
 
 
+class TestLookupKeyServer(unittest.TestCase):
+    def _make_config(self):
+        config = MagicMock()
+        config.parallel_config.rank = 0
+        return config
+
+    def _make_server(
+        self,
+        mock_thread_cls,
+        mock_socket_factory,
+        mock_decoder_cls,
+        use_layerwise=False,
+        token_len=32,
+        group_ids=None,
+        hashes=None,
+    ):
+        fake_socket = MagicMock()
+        fake_socket.recv_multipart.return_value = [
+            token_len.to_bytes(4, byteorder="big"),
+            b"group-ids",
+            b"hash-0",
+            b"hash-1",
+        ]
+        mock_socket_factory.return_value = fake_socket
+
+        decoder = MagicMock()
+        decoder.decode.side_effect = [group_ids or [0], hashes or ["h0", "h1"]]
+        mock_decoder_cls.side_effect = [decoder, MagicMock()]
+
+        pool_worker = MagicMock()
+        pool_worker.lookup_scheduler.return_value = 32
+        server = LookupKeyServer(pool_worker, self._make_config(), use_layerwise=use_layerwise)
+        return server, pool_worker, fake_socket, mock_thread_cls.call_args.kwargs["target"]
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.MsgpackDecoder")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.threading.Thread")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.make_zmq_socket")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.zmq.Context")
+    @patch(
+        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.get_zmq_rpc_path_lookup",
+        return_value="ipc://lookup",
+    )
+    def test_lookup_key_server_starts_thread(
+        self,
+        mock_path,
+        mock_context,
+        mock_socket_factory,
+        mock_thread_cls,
+        mock_decoder_cls,
+    ):
+        server, _, fake_socket, target = self._make_server(mock_thread_cls, mock_socket_factory, mock_decoder_cls)
+
+        mock_context.assert_called_once()
+        mock_path.assert_called_once()
+        mock_socket_factory.assert_called_once()
+        self.assertIs(server.socket, fake_socket)
+        self.assertTrue(callable(target))
+        self.assertTrue(mock_thread_cls.call_args.kwargs["daemon"])
+        mock_thread_cls.return_value.start.assert_called_once()
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.MsgpackDecoder")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.threading.Thread")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.make_zmq_socket")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.zmq.Context")
+    @patch(
+        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.get_zmq_rpc_path_lookup",
+        return_value="ipc://lookup",
+    )
+    def test_lookup_key_server_processes_single_request(
+        self,
+        mock_path,
+        mock_context,
+        mock_socket_factory,
+        mock_thread_cls,
+        mock_decoder_cls,
+    ):
+        server, pool_worker, fake_socket, target = self._make_server(
+            mock_thread_cls,
+            mock_socket_factory,
+            mock_decoder_cls,
+            token_len=64,
+            group_ids=[0, 2],
+            hashes=["h0", "h1"],
+        )
+        fake_socket.send.side_effect = lambda response: setattr(server, "running", False)
+
+        target()
+
+        pool_worker.lookup_scheduler.assert_called_once_with(64, ["h0", "h1"], [0, 2], False)
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.MsgpackDecoder")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.threading.Thread")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.make_zmq_socket")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.zmq.Context")
+    @patch(
+        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.get_zmq_rpc_path_lookup",
+        return_value="ipc://lookup",
+    )
+    def test_lookup_key_server_sends_big_endian_response(
+        self,
+        mock_path,
+        mock_context,
+        mock_socket_factory,
+        mock_thread_cls,
+        mock_decoder_cls,
+    ):
+        server, pool_worker, fake_socket, target = self._make_server(
+            mock_thread_cls,
+            mock_socket_factory,
+            mock_decoder_cls,
+        )
+        pool_worker.lookup_scheduler.return_value = 513
+        fake_socket.send.side_effect = lambda response: setattr(server, "running", False)
+
+        target()
+
+        fake_socket.send.assert_called_once_with((513).to_bytes(4, "big"))
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.MsgpackDecoder")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.threading.Thread")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.make_zmq_socket")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.zmq.Context")
+    @patch(
+        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.get_zmq_rpc_path_lookup",
+        return_value="ipc://lookup",
+    )
+    def test_lookup_key_server_passes_use_layerwise_true(
+        self,
+        mock_path,
+        mock_context,
+        mock_socket_factory,
+        mock_thread_cls,
+        mock_decoder_cls,
+    ):
+        server, pool_worker, fake_socket, target = self._make_server(
+            mock_thread_cls,
+            mock_socket_factory,
+            mock_decoder_cls,
+            use_layerwise=True,
+        )
+        fake_socket.send.side_effect = lambda response: setattr(server, "running", False)
+
+        target()
+
+        self.assertTrue(pool_worker.lookup_scheduler.call_args.args[3])
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.MsgpackDecoder")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.threading.Thread")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.make_zmq_socket")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.zmq.Context")
+    @patch(
+        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.get_zmq_rpc_path_lookup",
+        return_value="ipc://lookup",
+    )
+    def test_lookup_key_server_close_closes_socket(
+        self,
+        mock_path,
+        mock_context,
+        mock_socket_factory,
+        mock_thread_cls,
+        mock_decoder_cls,
+    ):
+        server, _, fake_socket, _ = self._make_server(mock_thread_cls, mock_socket_factory, mock_decoder_cls)
+
+        server.close()
+
+        fake_socket.close.assert_called_once_with(linger=0)
+
+
 class TestAscendStoreConnector(unittest.TestCase):
     def _make_vllm_config(self, kv_role="kv_producer", extra_config=None):
         config = MagicMock()
@@ -88,6 +258,24 @@ class TestAscendStoreConnector(unittest.TestCase):
         config.kv_transfer_config.kv_connector_extra_config = extra_config or {}
         config.parallel_config.rank = 0
         return config
+
+    def _make_worker_connector(self, kv_role="kv_producer", extra_config=None):
+        from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+
+        return AscendStoreConnector(
+            vllm_config=self._make_vllm_config(kv_role=kv_role, extra_config=extra_config),
+            role=KVConnectorRole.WORKER,
+            kv_cache_config=None,
+        )
+
+    def test_requires_piecewise_for_cudagraph_true(self):
+        self.assertTrue(AscendStoreConnector.requires_piecewise_for_cudagraph({"use_layerwise": True}))
+
+    def test_requires_piecewise_for_cudagraph_default_false(self):
+        self.assertFalse(AscendStoreConnector.requires_piecewise_for_cudagraph({}))
+
+    def test_requires_piecewise_for_cudagraph_explicit_false(self):
+        self.assertFalse(AscendStoreConnector.requires_piecewise_for_cudagraph({"use_layerwise": False}))
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolScheduler")
     def test_init_scheduler_role(self, mock_scheduler_cls):
@@ -263,6 +451,113 @@ class TestAscendStoreConnector(unittest.TestCase):
         mock_worker.get_finished.return_value = ({"r1"}, {"r2"})
         done_s, done_r = connector.get_finished({"r1"})
         self.assertEqual(done_s, {"r1"})
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.LookupKeyServer")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolWorker")
+    def test_start_load_kv_layerwise_delegates_metadata(self, mock_worker_cls, mock_lookup_cls):
+        connector = self._make_worker_connector(extra_config={"use_layerwise": True})
+        metadata = MagicMock()
+        connector._get_connector_metadata = MagicMock(return_value=metadata)
+
+        connector.start_load_kv(MagicMock())
+
+        mock_worker_cls.return_value.start_load_kv.assert_called_once_with(metadata)
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.LookupKeyServer")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolWorker")
+    def test_wait_for_layer_load_layerwise_delegates(self, mock_worker_cls, mock_lookup_cls):
+        connector = self._make_worker_connector(extra_config={"use_layerwise": True})
+
+        connector.wait_for_layer_load("layer_0")
+
+        mock_worker_cls.return_value.wait_for_layer_load.assert_called_once_with()
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.LookupKeyServer")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolWorker")
+    def test_wait_for_save_kv_both_delegates_to_worker(self, mock_worker_cls, mock_lookup_cls):
+        connector = self._make_worker_connector(kv_role="kv_both", extra_config={"use_layerwise": False})
+        metadata = MagicMock()
+        connector._get_connector_metadata = MagicMock(return_value=metadata)
+
+        connector.wait_for_save()
+
+        mock_worker_cls.return_value.wait_for_save.assert_called_once_with(metadata)
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.LookupKeyServer")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolWorker")
+    def test_wait_for_save_consumer_to_put_delegates_to_worker(self, mock_worker_cls, mock_lookup_cls):
+        connector = self._make_worker_connector(
+            kv_role="kv_consumer",
+            extra_config={
+                "consumer_is_to_put": True,
+                "use_layerwise": False,
+            },
+        )
+        metadata = MagicMock()
+        connector._get_connector_metadata = MagicMock(return_value=metadata)
+
+        connector.wait_for_save()
+
+        mock_worker_cls.return_value.wait_for_save.assert_called_once_with(metadata)
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.LookupKeyServer")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolWorker")
+    def test_wait_for_save_layerwise_noop(self, mock_worker_cls, mock_lookup_cls):
+        connector = self._make_worker_connector(extra_config={"use_layerwise": True})
+        connector._get_connector_metadata = MagicMock()
+
+        connector.wait_for_save()
+
+        connector._get_connector_metadata.assert_not_called()
+        mock_worker_cls.return_value.wait_for_save.assert_not_called()
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.LookupKeyServer")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolWorker")
+    def test_save_kv_layer_kv_both_layerwise_delegates(self, mock_worker_cls, mock_lookup_cls):
+        connector = self._make_worker_connector(kv_role="kv_both", extra_config={"use_layerwise": True})
+        metadata = MagicMock()
+        connector._get_connector_metadata = MagicMock(return_value=metadata)
+
+        connector.save_kv_layer("layer_0", MagicMock(), MagicMock())
+
+        mock_worker_cls.return_value.save_kv_layer.assert_called_once_with(metadata)
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.LookupKeyServer")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolWorker")
+    def test_get_finished_kv_both_returns_worker_results(self, mock_worker_cls, mock_lookup_cls):
+        connector = self._make_worker_connector(kv_role="kv_both")
+        metadata = MagicMock()
+        finished = {"r0"}
+        connector._get_connector_metadata = MagicMock(return_value=metadata)
+        mock_worker_cls.return_value.get_finished.return_value = ({"sent"}, {"recv"})
+
+        result = connector.get_finished(finished)
+
+        self.assertEqual(result, ({"sent"}, {"recv"}))
+        mock_worker_cls.return_value.get_finished.assert_called_once_with(finished, metadata)
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.LookupKeyServer")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolWorker")
+    def test_get_block_ids_with_load_errors_delegates(self, mock_worker_cls, mock_lookup_cls):
+        connector = self._make_worker_connector()
+        mock_worker_cls.return_value.get_block_ids_with_load_errors.return_value = {3, 5}
+
+        result = connector.get_block_ids_with_load_errors()
+
+        self.assertEqual(result, {3, 5})
+        mock_worker_cls.return_value.get_block_ids_with_load_errors.assert_called_once_with()
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.LookupKeyServer")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolWorker")
+    def test_build_connector_worker_meta_delegates(self, mock_worker_cls, mock_lookup_cls):
+        connector = self._make_worker_connector()
+        worker_meta = MagicMock()
+        mock_worker_cls.return_value.build_connector_worker_meta.return_value = worker_meta
+
+        result = connector.build_connector_worker_meta()
+
+        self.assertIs(result, worker_meta)
+        mock_worker_cls.return_value.build_connector_worker_meta.assert_called_once_with()
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.LookupKeyServer")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolWorker")
