@@ -250,7 +250,6 @@ nav:
         - user_guide/feature_guide/expert_parallelism_load_balancer.md
         - user_guide/feature_guide/netloader.md
         - user_guide/feature_guide/rfork.md
-        - user_guide/feature_guide/dynamic_batch.md
         - user_guide/feature_guide/epd_disaggregation.md
         - user_guide/feature_guide/short_request_first.md
         - user_guide/feature_guide/kv_pool.md
