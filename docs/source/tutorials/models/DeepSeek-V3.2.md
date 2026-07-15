@@ -43,6 +43,7 @@ Start the docker image on your each node.
 export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
 docker run --rm \
     --name vllm-ascend \
+    --privileged=true \
     --shm-size=1g \
     --net=host \
     --device /dev/davinci0 \
