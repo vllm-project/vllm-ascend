@@ -42,14 +42,14 @@ if [ -z "${MR_THIRD_ID}" ]; then
 fi
 echo "Using current PR number as MR_THIRD_ID: ${MR_THIRD_ID}"
 
-HITEST_APIG_APPCODE="${HITEST_APIG_APPCODE:-}"
-HITEST_KEY="${HITEST_KEY:-}"
-HITEST_SECRET="${HITEST_SECRET:-}"
+hitest_apig_appcode="${hitest_apig_appcode:-}"
+hitest_key="${hitest_key:-}"
+hitest_secret="${hitest_secret:-}"
 
 miss=()
-[[ -z "${HITEST_APIG_APPCODE}" ]] && miss+=("HITEST_APIG_APPCODE")
-[[ -z "${HITEST_KEY}" ]] && miss+=("HITEST_KEY")
-[[ -z "${HITEST_SECRET}" ]] && miss+=("HITEST_SECRET")
+[[ -z "${hitest_apig_appcode}" ]] && miss+=("hitest_apig_appcode")
+[[ -z "${hitest_key}" ]] && miss+=("hitest_key")
+[[ -z "${hitest_secret}" ]] && miss+=("hitest_secret")
 if [[ ${#miss[@]} -gt 0 ]]; then
     echo "FATAL ERROR: Missing auth env vars: ${miss[*]}"
     exit 98
@@ -66,9 +66,9 @@ while [ ${retry_cnt} -lt ${MAX_RETRY} ]; do
     SAVE_MR_RET=$(curl -s --max-time 60 -X POST \
     -H "Accept:*/*" \
     -H "Content-Type:application/json" \
-    -H "X-Apig-AppCode: ${HITEST_APIG_APPCODE}" \
-    -H "AppKey: ${HITEST_KEY}" \
-    -H "AppSecret: ${HITEST_SECRET}" \
+    -H "X-Apig-AppCode: ${hitest_apig_appcode}" \
+    -H "AppKey: ${hitest_key}" \
+    -H "AppSecret: ${hitest_secret}" \
     -d "${JSON_BODY}" \
     "${API_PREFIX}/third-platform/save-mr") || curl_ret=$?
 
@@ -117,9 +117,9 @@ CASE_JSON=$(printf '{"current":%d,"size":%d,"bindId":%d,"bindType":"version","re
 CASE_RET=$(curl -s --max-time 60 -X POST \
 -H "Accept:*/*" \
 -H "Content-Type:application/json" \
--H "X-Apig-AppCode: ${HITEST_APIG_APPCODE}" \
--H "AppKey: ${HITEST_KEY}" \
--H "AppSecret: ${HITEST_SECRET}" \
+-H "X-Apig-AppCode: ${hitest_apig_appcode}" \
+-H "AppKey: ${hitest_key}" \
+-H "AppSecret: ${hitest_secret}" \
 -d "${CASE_JSON}" \
 "${API_PREFIX}/case_recommend/commend_by_mr") || curl_ret2=$?
 
