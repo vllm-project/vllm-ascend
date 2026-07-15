@@ -3795,6 +3795,7 @@ class NPUModelRunner(GPUModelRunner):
                     return
                 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
                 DefaultModelLoader._init_ep_weight_filter = mock_pass
+            logger.info("6666666666666666666666666666666666666")
             self.model: nn.Module = get_model(vllm_config=self.vllm_config)
             for name, _ in self.model.named_parameters():
                 # sinks is a kind of parameter in attention
@@ -3843,18 +3844,18 @@ class NPUModelRunner(GPUModelRunner):
                 use_eagle=self.use_eagle,
                 enable_enpu=self.enable_enpu,
             )
-        elif self.afd_config:
-            logger.info("use_ubatching11111111111111111")
-            self.update_stream: torch.npu.Stream = torch.npu.Stream()
-            if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
-                self.model = UBatchWrapper(
-                    self.model, self.vllm_config,
-                    CUDAGraphMode.FULL, self.device)
-            else:
-                logger.info("eager use_ubatching222222222222222222222222222: %s")
-                self.model = UBatchWrapper(
-                    self.model, self.vllm_config,
-                    CUDAGraphMode.NONE, self.device)
+        # elif self.afd_config:
+        #     logger.info("use_ubatching11111111111111111")
+        #     self.update_stream: torch.npu.Stream = torch.npu.Stream()
+        #     if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
+        #         self.model = UBatchWrapper(
+        #             self.model, self.vllm_config,
+        #             CUDAGraphMode.FULL, self.device)
+        #     else:
+        #         logger.info("eager use_ubatching222222222222222222222222222: %s")
+        #         self.model = UBatchWrapper(
+        #             self.model, self.vllm_config,
+        #             CUDAGraphMode.NONE, self.device)
 
         if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
             self._start_dump_data()
