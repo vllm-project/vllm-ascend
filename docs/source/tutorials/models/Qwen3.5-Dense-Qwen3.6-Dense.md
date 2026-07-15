@@ -1,8 +1,8 @@
-# Qwen3.5-27B/Qwen3.6-27B
+# Qwen3.5-Dense/Qwen3.6-Dense
 
 ## 1 Introduction
 
-Qwen3.5-27B and Qwen3.6-27B are dense hybrid Mamba-Transformer language models in the Qwen3.5/Qwen3.6 family, integrating breakthroughs in architectural efficiency, reinforcement learning scale, and global accessibility. They share the same hybrid attention design (GDN + full attention), so deployment on Ascend NPUs follows the same pattern for both models. They are suitable for general-purpose text generation tasks such as dialogue, content creation, and code generation running on Ascend NPUs.
+Qwen3.5-Dense and Qwen3.6-27B are dense hybrid Mamba-Transformer language models in the Qwen3.5/Qwen3.6 family, integrating breakthroughs in architectural efficiency, reinforcement learning scale, and global accessibility. They share the same hybrid attention design (GDN + full attention), so deployment on Ascend NPUs follows the same pattern for both models. They are suitable for general-purpose text generation tasks such as dialogue, content creation, and code generation running on Ascend NPUs.
 
 This document will demonstrate the main validation steps for the models, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, as well as accuracy and performance evaluation.
 
