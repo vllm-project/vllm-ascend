@@ -40,6 +40,7 @@ from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     FullAttentionSpec,
     KVCacheSpec,
+    MLAAttentionSpec,
     get_kv_quant_mode,
 )
 
@@ -137,7 +138,8 @@ class AscendMiniMaxM3IndexerBackend(AttentionBackend):
         head_size: int,
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
-        return (2, num_blocks, block_size, num_kv_heads, head_size)
+        del num_kv_heads, cache_dtype_str
+        return (num_blocks, block_size, head_size)
 
     @staticmethod
     def get_kv_cache_stride_order(
@@ -145,7 +147,7 @@ class AscendMiniMaxM3IndexerBackend(AttentionBackend):
     ) -> tuple[int, ...]:
         if include_num_layers_dimension:
             raise NotImplementedError
-        return (0, 1, 2, 3, 4)
+        return (0, 1, 2)
 
 
 class AscendMiniMaxM3IndexerCache(nn.Module, AttentionLayerBase):
@@ -167,11 +169,11 @@ class AscendMiniMaxM3IndexerCache(nn.Module, AttentionLayerBase):
         compilation_config.static_forward_context[prefix] = self
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        return FullAttentionSpec(
+        # Key-only: MLAAttentionSpec budgets one vector/token, not K+V.
+        return MLAAttentionSpec(
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=1,
             head_size=self.head_dim,
-            head_size_v=self.head_dim,
             dtype=self.dtype,
         )
 
@@ -1227,19 +1229,14 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
 
         idx_cache = self.indexer.index_cache.kv_cache
         if isinstance(idx_cache, (tuple, list)):
-            if len(idx_cache) >= 2:
-                idx_key_cache, idx_value_cache = idx_cache[0], idx_cache[1]
-            else:
-                idx_key_cache, idx_value_cache = idx_cache[0][0], idx_cache[0][1]
-        else:
-            idx_key_cache, idx_value_cache = idx_cache[0], idx_cache[1]
-        idx_insert = index_key[:num_tokens].view(-1, 1, self.idx_head_dim)
-        DeviceOperator.reshape_and_cache(
-            idx_insert,
-            idx_insert,
-            idx_key_cache,
-            idx_value_cache,
-            index_meta.slot_mapping[:num_tokens],
+            idx_cache = idx_cache[0]
+        flat = idx_cache.view(-1, self.idx_head_dim)
+        # ScatterNdUpdateV2 ignores indices outside the cache bounds, so graph
+        # padding slots set to -1 do not write into the last cache row.
+        torch.ops._C_ascend.npu_scatter_nd_update_v2(
+            flat,
+            index_meta.slot_mapping[:num_tokens].view(-1, 1),
+            index_key[:num_tokens].to(flat.dtype),
         )
 
     def _sparse_prepare(

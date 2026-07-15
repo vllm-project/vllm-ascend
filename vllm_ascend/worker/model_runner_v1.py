@@ -68,6 +68,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
+    MLAAttentionSpec,
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
@@ -4238,12 +4239,17 @@ class NPUModelRunner(GPUModelRunner):
             self.hybrid_with_attn_and_mamba = self.hybrid_with_attn_and_mamba or (use_mamba and use_attn)
             for idx in range(len(kv_cache_tensor.shared_by)):
                 layer_name = kv_cache_tensor.shared_by[idx]
-                # Single tensor path for: mamba, hybrid attn-mamba, or cache_only_layers
+                # Single tensor path for: mamba, hybrid attn-mamba, cache_only_layers,
+                # or MiniMax M3 key-only indexer side cache.
                 if (
                     "linear_attn" in layer_name
                     or self.hybrid_with_attn_and_mamba
                     or "cache_only_layers" in layer_name
                     or is_hidden_state_cache_spec(layer_kv_cache_spec.get(layer_name))
+                    or (
+                        layer_name.endswith(".index_cache")
+                        and isinstance(layer_kv_cache_spec.get(layer_name), MLAAttentionSpec)
+                    )
                 ) and layer_name not in kv_cache_raw_tensors:
                     # for mamba linear attention, attn-linear hybrid, or cache_only_layers (extract_hidden_states)
                     if self.vllm_config.kv_transfer_config is None:
@@ -4564,6 +4570,10 @@ class NPUModelRunner(GPUModelRunner):
                     elif (
                         "cache_only_layers" in layer_name
                         or is_hidden_state_cache_spec(current_kv_cache_spec)
+                        or (
+                            layer_name.endswith(".index_cache")
+                            and isinstance(current_kv_cache_spec, MLAAttentionSpec)
+                        )
                     ):
                         # Single tensor for extract_hidden_states (no K/V split)
                         raw_tensor = kv_cache_raw_tensors[layer_name]
