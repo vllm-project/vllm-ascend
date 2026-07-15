@@ -28,6 +28,7 @@ if not is_310p():
 else:
     import vllm_ascend.patch.platform.patch_mamba_config_310  # noqa
 import vllm_ascend.patch.platform.patch_minimax_m2_config  # noqa
+import vllm_ascend.patch_minimax_m3_model  # noqa
 import vllm_ascend.patch.platform.patch_glm_tool_call_streaming  # noqa
 
 # TODO: Remove these retained v0.23-only compatibility patches after

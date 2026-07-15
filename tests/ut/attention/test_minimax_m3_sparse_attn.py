@@ -35,7 +35,11 @@ from vllm_ascend.attention.msa_m3_triton import (
     minimax_m3_index_decode,
     minimax_m3_index_score,
     minimax_m3_index_topk,
+)
+from vllm_ascend.attention.msa_m3_triton import (
     minimax_m3_sparse_attn as minimax_m3_sparse_attn_triton,
+)
+from vllm_ascend.attention.msa_m3_triton import (
     minimax_m3_sparse_attn_decode as minimax_m3_sparse_attn_decode_triton,
 )
 
@@ -310,9 +314,7 @@ def _reference_index_topk(
     sm_scale: float,
 ) -> torch.Tensor:
     total_q, num_idx_heads, _ = idx_q.shape
-    out = torch.full(
-        (num_idx_heads, total_q, topk), -1, device=idx_q.device, dtype=torch.int32
-    )
+    out = torch.full((num_idx_heads, total_q, topk), -1, device=idx_q.device, dtype=torch.int32)
 
     q_start = 0
     for req_id, (q_len, seq_len, prefix_len) in enumerate(
@@ -377,9 +379,7 @@ def test_prefill_index_topk_correctness(
 
     cu_seqlens = torch.zeros(batch + 1, device=DEVICE, dtype=torch.int32)
     cu_seqlens[1:] = q_lens.cumsum(0)
-    block_table = torch.randperm(num_pages, device=DEVICE, dtype=torch.int32).reshape(
-        batch, max_blocks
-    )
+    block_table = torch.randperm(num_pages, device=DEVICE, dtype=torch.int32).reshape(batch, max_blocks)
     idx_q = torch.ones(q_lens.sum().item(), num_idx_heads, head_dim, device=DEVICE)
     index_kv_cache = _allocate_index_kv_cache(num_pages, head_dim, index_layout)
     for req_id in range(batch):
@@ -448,12 +448,8 @@ def test_prefill_index_topk_production_shape(
 
     topk_width = _topk_compute_width(topk)
     select_width = _topk_select_width(topk)
-    assert topk_width == 16, (
-        f"expected production prefill BLOCK_SIZE_T=16, got {topk_width}"
-    )
-    assert select_width == 128, (
-        f"expected production prefill BLOCK_SIZE_K=128, got {select_width}"
-    )
+    assert topk_width == 16, f"expected production prefill BLOCK_SIZE_T=16, got {topk_width}"
+    assert select_width == 128, f"expected production prefill BLOCK_SIZE_K=128, got {select_width}"
 
     if num_reqs == 1:
         q_lens = torch.tensor((64,), device=DEVICE, dtype=torch.int32)
@@ -469,9 +465,7 @@ def test_prefill_index_topk_production_shape(
 
     cu_seqlens = torch.zeros(batch + 1, device=DEVICE, dtype=torch.int32)
     cu_seqlens[1:] = q_lens.cumsum(0)
-    block_table = torch.randperm(num_pages, device=DEVICE, dtype=torch.int32).reshape(
-        batch, max_blocks
-    )
+    block_table = torch.randperm(num_pages, device=DEVICE, dtype=torch.int32).reshape(batch, max_blocks)
     idx_q = torch.randn(q_lens.sum().item(), num_idx_heads, head_dim, device=DEVICE)
     index_kv_cache = _allocate_index_kv_cache(num_pages, head_dim, index_layout)
     for req_id in range(batch):
@@ -546,9 +540,7 @@ def test_prefill_index_topk_production_long_sequence(
 
     cu_seqlens = torch.zeros(2, device=DEVICE, dtype=torch.int32)
     cu_seqlens[1] = q_len
-    block_table = torch.randperm(num_pages, device=DEVICE, dtype=torch.int32).reshape(
-        1, max_blocks
-    )
+    block_table = torch.randperm(num_pages, device=DEVICE, dtype=torch.int32).reshape(1, max_blocks)
     idx_q = torch.randn(q_len, num_idx_heads, head_dim, device=DEVICE)
     index_kv_cache = _allocate_index_kv_cache(num_pages, head_dim, index_layout)
     for block_id in range(max_blocks):
@@ -622,14 +614,10 @@ def test_decode_index_topk_correctness(
     max_blocks = (max_seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE
     num_pages = active_batch * max_blocks
 
-    active_block_table = torch.randperm(
-        num_pages, device=DEVICE, dtype=torch.int32
-    ).reshape(active_batch, max_blocks)
+    active_block_table = torch.randperm(num_pages, device=DEVICE, dtype=torch.int32).reshape(active_batch, max_blocks)
     block_table = torch.zeros(batch, max_blocks, device=DEVICE, dtype=torch.int32)
     block_table[:active_batch] = active_block_table
-    idx_q = torch.randn(
-        batch * decode_query_len, num_idx_heads, head_dim, device=DEVICE
-    )
+    idx_q = torch.randn(batch * decode_query_len, num_idx_heads, head_dim, device=DEVICE)
     index_kv_cache = torch.randn(
         *_allocate_index_kv_cache(num_pages, head_dim, index_layout).shape,
         device=DEVICE,
@@ -686,22 +674,14 @@ def test_decode_index_topk_production_cudagraph_shape(
     head_dim = PRODUCTION_INDEX_HEAD_DIM
     topk_width = _topk_compute_width(PRODUCTION_SPARSE_TOPK)
     select_width = _topk_select_width(PRODUCTION_SPARSE_TOPK)
-    assert topk_width == 16, (
-        f"expected production decode BLOCK_SIZE_T=16, got {topk_width}"
-    )
-    assert select_width == 128, (
-        f"expected production decode BLOCK_SIZE_K=128, got {select_width}"
-    )
+    assert topk_width == 16, f"expected production decode BLOCK_SIZE_T=16, got {topk_width}"
+    assert select_width == 128, f"expected production decode BLOCK_SIZE_K=128, got {select_width}"
 
-    seq_lens = torch.full(
-        (num_reqs,), 10240, device=DEVICE, dtype=torch.int32
-    )
+    seq_lens = torch.full((num_reqs,), 10240, device=DEVICE, dtype=torch.int32)
     max_seq_len = int(seq_lens.max().item())
     max_blocks = (max_seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE
     num_pages = num_reqs * max_blocks
-    block_table = torch.randperm(num_pages, device=DEVICE, dtype=torch.int32).reshape(
-        num_reqs, max_blocks
-    )
+    block_table = torch.randperm(num_pages, device=DEVICE, dtype=torch.int32).reshape(num_reqs, max_blocks)
     idx_q = torch.randn(total_q, num_idx_heads, head_dim, device=DEVICE)
     index_kv_cache = torch.randn(
         *_allocate_index_kv_cache(num_pages, head_dim, index_layout).shape,
@@ -753,12 +733,8 @@ def _assert_sparse_close(
 ) -> None:
     mean_atol, max_atol = _sparse_tolerances(backend)
     error = (actual.float() - expected.float()).abs()
-    assert error.mean().item() < mean_atol, (
-        f"mean error {error.mean().item():.6g} >= {mean_atol} (backend={backend})"
-    )
-    assert error.max().item() < max_atol, (
-        f"max error {error.max().item():.6g} >= {max_atol} (backend={backend})"
-    )
+    assert error.mean().item() < mean_atol, f"mean error {error.mean().item():.6g} >= {mean_atol} (backend={backend})"
+    assert error.max().item() < max_atol, f"max error {error.max().item():.6g} >= {max_atol} (backend={backend})"
 
 
 def _allocate_main_kv_cache_fused(
@@ -833,12 +809,8 @@ def _reference_sparse_attn(
             k_head = k_req[:, kv_head].T.expand(gqa_group_size, -1, -1).float()
             scores = torch.bmm(q_heads, k_head)
             scores = scores.transpose(0, 1) * sm_scale
-            probs = torch.softmax(
-                scores.masked_fill(~mask[:, None, :], -float("inf")), -1
-            )
-            out[q_start:q_end, head_start:head_end] = torch.einsum(
-                "qhk,kd->qhd", probs, v_req[:, kv_head]
-            )
+            probs = torch.softmax(scores.masked_fill(~mask[:, None, :], -float("inf")), -1)
+            out[q_start:q_end, head_start:head_end] = torch.einsum("qhk,kd->qhd", probs, v_req[:, kv_head])
         q_start += q_len
     return out.to(q.dtype)
 
@@ -851,16 +823,12 @@ def _build_prefill_topk_idx(
     num_kv_heads: int = NUM_KV_HEADS,
     topk: int = TOPK,
 ) -> torch.Tensor:
-    topk_idx = torch.full(
-        (num_kv_heads, total_q, topk), -1, device=DEVICE, dtype=torch.int32
-    )
+    topk_idx = torch.full((num_kv_heads, total_q, topk), -1, device=DEVICE, dtype=torch.int32)
     q_start = 0
     for q_len, prefix_len in zip(q_lens_t.tolist(), prefix_lens.tolist()):
         for local_q in range(q_len):
             current_block = (prefix_len + local_q) // BLOCK_SIZE
-            older_blocks = torch.randperm(
-                current_block, device=DEVICE, dtype=torch.int32
-            )
+            older_blocks = torch.randperm(current_block, device=DEVICE, dtype=torch.int32)
             selected = torch.cat(
                 [
                     torch.tensor([current_block], device=DEVICE, dtype=torch.int32),
@@ -891,9 +859,7 @@ def _build_decode_inputs(
     block_table = torch.zeros(batch, max_blocks, device=DEVICE, dtype=torch.int32)
     base_page = 0
     for req_id, num_req_pages in enumerate(pages_per_req):
-        block_table[req_id, :num_req_pages] = physical_pages[
-            base_page : base_page + num_req_pages
-        ]
+        block_table[req_id, :num_req_pages] = physical_pages[base_page : base_page + num_req_pages]
         base_page += num_req_pages
 
     seq_lens = torch.tensor(
@@ -901,9 +867,7 @@ def _build_decode_inputs(
         device=DEVICE,
         dtype=torch.int32,
     )
-    q = torch.randn(
-        batch * decode_query_len, num_q_heads, head_dim, device=DEVICE, dtype=DTYPE
-    )
+    q = torch.randn(batch * decode_query_len, num_q_heads, head_dim, device=DEVICE, dtype=DTYPE)
 
     topk_idx = torch.full(
         (num_kv_heads, batch * decode_query_len, topk),
@@ -916,9 +880,7 @@ def _build_decode_inputs(
         for local_q in range(decode_query_len):
             query_pos = seq_len - decode_query_len + local_q
             current_block = query_pos // BLOCK_SIZE
-            older_blocks = torch.randperm(
-                current_block, device=DEVICE, dtype=torch.int32
-            )
+            older_blocks = torch.randperm(current_block, device=DEVICE, dtype=torch.int32)
             selected = torch.cat(
                 [
                     torch.tensor([current_block], device=DEVICE, dtype=torch.int32),
@@ -955,9 +917,7 @@ def test_prefill_sparse_attention_correctness(
     block_table = torch.zeros(batch, max_blocks, device=DEVICE, dtype=torch.int32)
     base_page = 0
     for req_id, num_req_pages in enumerate(pages_per_req):
-        block_table[req_id, :num_req_pages] = physical_pages[
-            base_page : base_page + num_req_pages
-        ]
+        block_table[req_id, :num_req_pages] = physical_pages[base_page : base_page + num_req_pages]
         base_page += num_req_pages
 
     q_lens_t = torch.tensor(q_lens, device=DEVICE, dtype=torch.int32)
@@ -1032,9 +992,7 @@ def test_prefill_sparse_attention_production_long_sequence(
     batch = 1
     max_blocks = (kv_len + BLOCK_SIZE - 1) // BLOCK_SIZE
     num_pages = max_blocks
-    block_table = torch.randperm(num_pages, device=DEVICE, dtype=torch.int32).reshape(
-        1, max_blocks
-    )
+    block_table = torch.randperm(num_pages, device=DEVICE, dtype=torch.int32).reshape(1, max_blocks)
 
     q_lens_t = torch.tensor((q_len,), device=DEVICE, dtype=torch.int32)
     seq_lens = torch.tensor((kv_len,), device=DEVICE, dtype=torch.int32)
@@ -1043,9 +1001,7 @@ def test_prefill_sparse_attention_production_long_sequence(
     cu_seqlens[1] = q_len
 
     q = torch.randn(q_len, num_q_heads, head_dim, device=DEVICE, dtype=DTYPE)
-    kv_cache_fused = _allocate_main_kv_cache_fused(
-        num_pages, num_kv_heads=num_kv_heads, head_dim=head_dim
-    )
+    kv_cache_fused = _allocate_main_kv_cache_fused(num_pages, num_kv_heads=num_kv_heads, head_dim=head_dim)
     kv_cache = _main_kv_cache_for_kernel(kv_cache_fused)
     topk_idx = _build_prefill_topk_idx(
         q_lens_t,
@@ -1125,9 +1081,7 @@ def test_prefill_sparse_attention_production_shape(
     block_table = torch.zeros(batch, max_blocks, device=DEVICE, dtype=torch.int32)
     base_page = 0
     for req_id, num_req_pages in enumerate(pages_per_req):
-        block_table[req_id, :num_req_pages] = physical_pages[
-            base_page : base_page + num_req_pages
-        ]
+        block_table[req_id, :num_req_pages] = physical_pages[base_page : base_page + num_req_pages]
         base_page += num_req_pages
 
     q_lens_t = torch.tensor(q_lens, device=DEVICE, dtype=torch.int32)
@@ -1139,9 +1093,7 @@ def test_prefill_sparse_attention_production_shape(
     max_seqlen_q = max(q_lens)
 
     q = torch.randn(total_q, num_q_heads, head_dim, device=DEVICE, dtype=DTYPE)
-    kv_cache_fused = _allocate_main_kv_cache_fused(
-        num_pages, num_kv_heads=num_kv_heads, head_dim=head_dim
-    )
+    kv_cache_fused = _allocate_main_kv_cache_fused(num_pages, num_kv_heads=num_kv_heads, head_dim=head_dim)
     kv_cache = _main_kv_cache_for_kernel(kv_cache_fused)
     topk_idx = _build_prefill_topk_idx(
         q_lens_t,
@@ -1223,9 +1175,7 @@ def test_decode_sparse_attention_correctness(
     _synchronize()
 
     active_tokens = active_batch * decode_query_len
-    q_lens_t = torch.full(
-        (active_batch,), decode_query_len, device=DEVICE, dtype=torch.int32
-    )
+    q_lens_t = torch.full((active_batch,), decode_query_len, device=DEVICE, dtype=torch.int32)
     active_seq_lens = seq_lens[:active_batch]
     prefix_lens = active_seq_lens - q_lens_t
     expected = _reference_sparse_attn(
@@ -1237,9 +1187,7 @@ def test_decode_sparse_attention_correctness(
         active_seq_lens,
         prefix_lens,
     )
-    _assert_sparse_close(
-        actual[:active_tokens], expected, backend=msa_m3_sparse_backend
-    )
+    _assert_sparse_close(actual[:active_tokens], expected, backend=msa_m3_sparse_backend)
 
 
 @pytest.mark.parametrize(
@@ -1275,9 +1223,7 @@ def test_decode_sparse_attention_production_shape(
         head_dim=head_dim,
         topk=PRODUCTION_SPARSE_TOPK,
     )
-    kv_cache_fused = _allocate_main_kv_cache_fused(
-        num_pages, num_kv_heads=num_kv_heads, head_dim=head_dim
-    )
+    kv_cache_fused = _allocate_main_kv_cache_fused(num_pages, num_kv_heads=num_kv_heads, head_dim=head_dim)
     kv_cache = _main_kv_cache_for_kernel(kv_cache_fused)
 
     actual = torch.empty_like(q)
@@ -1299,9 +1245,7 @@ def test_decode_sparse_attention_production_shape(
     _synchronize()
 
     active_tokens = active_batch * decode_query_len
-    q_lens_t = torch.full(
-        (active_batch,), decode_query_len, device=DEVICE, dtype=torch.int32
-    )
+    q_lens_t = torch.full((active_batch,), decode_query_len, device=DEVICE, dtype=torch.int32)
     active_seq_lens = seq_lens[:active_batch]
     prefix_lens = active_seq_lens - q_lens_t
     expected = _reference_sparse_attn(
@@ -1316,9 +1260,7 @@ def test_decode_sparse_attention_production_shape(
         num_kv_heads=num_kv_heads,
         sm_scale=sm_scale,
     )
-    _assert_sparse_close(
-        actual[:active_tokens], expected, backend=msa_m3_sparse_backend
-    )
+    _assert_sparse_close(actual[:active_tokens], expected, backend=msa_m3_sparse_backend)
 
 
 # ---------------------------------------------------------------------------
@@ -1461,9 +1403,7 @@ def _make_shuffled_block_table(
     rng = random.Random(seed)
     pages = list(range(num_pages))
     rng.shuffle(pages)
-    rows = [
-        pages[req * max_blocks : (req + 1) * max_blocks] for req in range(batch)
-    ]
+    rows = [pages[req * max_blocks : (req + 1) * max_blocks] for req in range(batch)]
     return torch.tensor(rows, device=DEVICE, dtype=torch.int32), num_pages
 
 
@@ -1485,10 +1425,7 @@ def _make_boundary_kv_cache_fused(
         )
         * 0.25
     )
-    page_bias = (
-        torch.arange(num_pages, dtype=torch.float32).reshape(num_pages, 1, 1, 1)
-        * 0.015625
-    )
+    page_bias = torch.arange(num_pages, dtype=torch.float32).reshape(num_pages, 1, 1, 1) * 0.015625
     kv[:, 0] = kv[:, 0] + page_bias * 0.5
     kv[:, 1] = kv[:, 1] + page_bias
     return kv.to(device=DEVICE, dtype=dtype)
@@ -1705,9 +1642,7 @@ def _decode_boundary_length(round_id: int, *, max_tokens: int, rng: random.Rando
     return min(max(value, 0), max_tokens)
 
 
-def _decode_boundary_fixed_plans() -> list[
-    tuple[str, _DecodeBoundaryGeometry, tuple[int, ...], str, bool]
-]:
+def _decode_boundary_fixed_plans() -> list[tuple[str, _DecodeBoundaryGeometry, tuple[int, ...], str, bool]]:
     return [
         (
             "boundary_future_then_visible",
@@ -1831,9 +1766,7 @@ def _run_decode_boundary_case(
 
 @pytest.mark.parametrize(
     ("case_index", "name", "geometry", "seq_lens_list", "pattern", "noncontiguous_q"),
-    [
-        (index, *plan) for index, plan in enumerate(_decode_boundary_fixed_plans())
-    ],
+    [(index, *plan) for index, plan in enumerate(_decode_boundary_fixed_plans())],
     ids=[plan[0] for plan in _decode_boundary_fixed_plans()],
 )
 def test_decode_sparse_attention_boundary_fixed_cases(
@@ -1873,9 +1806,7 @@ def test_decode_sparse_attention_boundary_random_cases(
         )
         for round_id in range(_DECODE_BOUNDARY_RANDOM_ROUNDS)
     ]
-    for index, (name, geometry, seq_lens_list, pattern, noncontiguous_q) in enumerate(
-        plans
-    ):
+    for index, (name, geometry, seq_lens_list, pattern, noncontiguous_q) in enumerate(plans):
         seed = _DECODE_BOUNDARY_BASE_SEED + 30_000 + index * 271
         _run_decode_boundary_case(
             name=name,
@@ -1954,7 +1885,5 @@ def test_decode_sparse_attention_boundary_repeatable(
         delta = (actual.float() - first.float()).abs().max().item()
         if delta != 0.0:
             raise AssertionError(
-                f"{hint}; launch={launch_id}; output changed across eager launches; "
-                f"max_delta={delta:.6g}"
+                f"{hint}; launch={launch_id}; output changed across eager launches; max_delta={delta:.6g}"
             )
-

@@ -8,18 +8,14 @@ Covers: vllm_ascend/patch/platform/minimax/minimax_m3_reasoning_parser.py
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from typing import TYPE_CHECKING
-
-import pytest
-from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 
 from vllm_ascend.patch.platform.minimax.minimax_m3_reasoning_parser import (
     MiniMaxM3ReasoningParser,
 )
 
 if TYPE_CHECKING:
-    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+    pass
 
 
 # ---------------------------------------------------------------------------
@@ -85,6 +81,7 @@ class FakeTokenizer:
 # Helper — instantiate with fake tokenizer
 # ---------------------------------------------------------------------------
 
+
 def _make_parser(**kwargs) -> MiniMaxM3ReasoningParser:
     return MiniMaxM3ReasoningParser(FakeTokenizer(), **kwargs)
 
@@ -92,6 +89,7 @@ def _make_parser(**kwargs) -> MiniMaxM3ReasoningParser:
 # ===========================================================================
 # Non-streaming extract_reasoning
 # ===========================================================================
+
 
 class TestExtractReasoning:
     def test_plain_content_no_markers(self):
@@ -102,73 +100,55 @@ class TestExtractReasoning:
 
     def test_explicit_thinking_block(self):
         p = _make_parser()
-        reasoning, content = p.extract_reasoning(
-            "<mm:think>Let me think</mm:think>The answer", None
-        )
+        reasoning, content = p.extract_reasoning("<mm:think>Let me think</mm:think>The answer", None)
         assert reasoning == "Let me think"
         assert content == "The answer"
 
     def test_only_reasoning_no_closer(self):
         p = _make_parser()
-        reasoning, content = p.extract_reasoning(
-            "<mm:think>unfinished thought", None
-        )
+        reasoning, content = p.extract_reasoning("<mm:think>unfinished thought", None)
         assert reasoning == "unfinished thought"
         assert content is None
 
     def test_content_before_think_block(self):
         p = _make_parser()
-        reasoning, content = p.extract_reasoning(
-            "prefix<mm:think>reason</mm:think>suffix", None
-        )
+        reasoning, content = p.extract_reasoning("prefix<mm:think>reason</mm:think>suffix", None)
         assert reasoning == "reason"
         assert content == "prefixsuffix"
 
     def test_multiple_think_blocks(self):
         p = _make_parser()
-        reasoning, content = p.extract_reasoning(
-            "<mm:think>first</mm:think>text<mm:think>second</mm:think>tail", None
-        )
+        reasoning, content = p.extract_reasoning("<mm:think>first</mm:think>text<mm:think>second</mm:think>tail", None)
         assert reasoning == "first"
         assert content == "text<mm:think>second</mm:think>tail"
 
     def test_stray_closer_at_start(self):
         p = _make_parser()
-        reasoning, content = p.extract_reasoning(
-            "</mm:think>Hello world", None
-        )
+        reasoning, content = p.extract_reasoning("</mm:think>Hello world", None)
         assert reasoning is None
         assert content == "Hello world"
 
     def test_stray_closer_at_start_with_content(self):
         p = _make_parser()
-        reasoning, content = p.extract_reasoning(
-            "</mm:think>clean text", None
-        )
+        reasoning, content = p.extract_reasoning("</mm:think>clean text", None)
         assert reasoning is None
         assert content == "clean text"
 
     def test_thinking_mode_enabled_no_start_token(self):
         p = _make_parser(chat_template_kwargs={"thinking_mode": "enabled"})
-        reasoning, content = p.extract_reasoning(
-            "I am reasoning</mm:think>final answer", None
-        )
+        reasoning, content = p.extract_reasoning("I am reasoning</mm:think>final answer", None)
         assert reasoning == "I am reasoning"
         assert content == "final answer"
 
     def test_thinking_mode_enabled_no_end_token(self):
         p = _make_parser(chat_template_kwargs={"thinking_mode": "enabled"})
-        reasoning, content = p.extract_reasoning(
-            "I am reasoning without end", None
-        )
+        reasoning, content = p.extract_reasoning("I am reasoning without end", None)
         assert reasoning == "I am reasoning without end"
         assert content is None
 
     def test_thinking_mode_enabled_with_start_still_detected(self):
         p = _make_parser(chat_template_kwargs={"thinking_mode": "enabled"})
-        reasoning, content = p.extract_reasoning(
-            "<mm:think>explicit</mm:think>rest", None
-        )
+        reasoning, content = p.extract_reasoning("<mm:think>explicit</mm:think>rest", None)
         assert reasoning == "explicit"
         assert content == "rest"
 
@@ -182,6 +162,7 @@ class TestExtractReasoning:
 # ===========================================================================
 # Streaming extract_reasoning_streaming
 # ===========================================================================
+
 
 class TestExtractReasoningStreaming:
     def _feed(self, parser, chunks):
@@ -274,9 +255,12 @@ class TestExtractReasoningStreaming:
 
     def test_end_token_with_token_ids(self):
         p = _make_parser()
-        results = self._feed(p, [
-            ("<mm:think>r</mm:think>c", [START_ID, ord("r"), END_ID, ord("c")]),
-        ])
+        results = self._feed(
+            p,
+            [
+                ("<mm:think>r</mm:think>c", [START_ID, ord("r"), END_ID, ord("c")]),
+            ],
+        )
         reasoning = self._collect(results, "reasoning")
         content = self._collect(results, "content")
         assert "r" in reasoning
@@ -289,11 +273,14 @@ class TestExtractReasoningStreaming:
 
     def test_start_token_in_delta_ids_enabled(self):
         p = _make_parser(chat_template_kwargs={"thinking_mode": "enabled"})
-        results = self._feed(p, [
-            ("reasoning", []),
-            (" at end</mm:think>", [END_ID]),
-            (" content", []),
-        ])
+        results = self._feed(
+            p,
+            [
+                ("reasoning", []),
+                (" at end</mm:think>", [END_ID]),
+                (" content", []),
+            ],
+        )
         reasoning = self._collect(results, "reasoning")
         content = self._collect(results, "content")
         assert "reasoning" in reasoning
@@ -303,6 +290,7 @@ class TestExtractReasoningStreaming:
 # ===========================================================================
 # is_reasoning_end_streaming
 # ===========================================================================
+
 
 class TestIsReasoningEndStreaming:
     def test_end_id_in_delta_ids(self):
@@ -341,6 +329,7 @@ class TestIsReasoningEndStreaming:
 # extract_content_ids
 # ===========================================================================
 
+
 class TestExtractContentIds:
     def test_end_token_returns_suffix(self):
         p = _make_parser()
@@ -377,6 +366,7 @@ class TestExtractContentIds:
 # count_reasoning_tokens
 # ===========================================================================
 
+
 class TestCountReasoningTokens:
     def test_without_initial_in_reasoning(self):
         p = _make_parser()
@@ -397,14 +387,11 @@ class TestCountReasoningTokens:
     def test_initial_in_reasoning_nested_thinking(self):
         p = _make_parser(chat_template_kwargs={"thinking_mode": "enabled"})
         # nested: depth 1 -> START(2) -> END(1) -> END(0)
-        result = p.count_reasoning_tokens([
-            1, 2, START_ID, 3, 4, END_ID, 5, END_ID, 6, 7
-        ])
+        result = p.count_reasoning_tokens([1, 2, START_ID, 3, 4, END_ID, 5, END_ID, 6, 7])
         # depth=1: tokens 1,2 = 2
         # depth=2 (after START): tokens 3,4 = 2
         # depth=1 (after first END): token 5 = 1
         # depth=0 (after second END): tokens 6,7 = 0
-        total = 2 + 2 + 1
         assert result == 5
 
     def test_initial_in_reasoning_only_reasoning(self):

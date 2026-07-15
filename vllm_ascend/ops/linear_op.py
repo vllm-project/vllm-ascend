@@ -299,6 +299,7 @@ class OProjRowParallelOp(CustomRowParallelOp):
         self.input_is_parallel = self.layer.input_is_parallel
         self.input_size_per_partition = self.layer.input_size_per_partition
 
+
 def _is_multimodal_encoder_prefix(prefix: str) -> bool:
     multimodal_encoder_prefixes = (
         "vision_tower",
@@ -307,6 +308,7 @@ def _is_multimodal_encoder_prefix(prefix: str) -> bool:
         "patch_merge_mlp",
     )
     return any(part in prefix for part in multimodal_encoder_prefixes)
+
 
 class Flashcomm2OProjRowParallelOp(CustomRowParallelOp):
     def __init__(self, layer):

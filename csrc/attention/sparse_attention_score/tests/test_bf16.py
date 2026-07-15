@@ -9,7 +9,6 @@
 import importlib
 import importlib.util
 import math
-import os
 import sys
 from math import ceil
 from pathlib import Path
@@ -50,9 +49,7 @@ def _register_sparse_attention_score_op():
     candidate_dirs = [cache_base / "py311_npu" / "npu_sparse_attention_score"]
     if cache_base.is_dir():
         candidate_dirs.extend(
-            sub / "npu_sparse_attention_score"
-            for sub in cache_base.iterdir()
-            if "npu" in sub.name.lower()
+            sub / "npu_sparse_attention_score" for sub in cache_base.iterdir() if "npu" in sub.name.lower()
         )
 
     so_file = None
@@ -66,8 +63,9 @@ def _register_sparse_attention_score_op():
             break
 
     if so_file is None:
-        print("[INFO] Pre-compiled npu_sparse_attention_score .so not found; "
-              "OpBuilder will compile it on first NPU call.")
+        print(
+            "[INFO] Pre-compiled npu_sparse_attention_score .so not found; OpBuilder will compile it on first NPU call."
+        )
         return
 
     ext_spec = importlib.util.spec_from_file_location("npu_sparse_attention_score", so_file)
@@ -83,12 +81,11 @@ def _register_sparse_attention_score_op():
 _register_sparse_attention_score_op()
 
 
-def generate_block_index_with_causal(query_fp32, key_fp32, q_seqlen, kv_seqlen,
-                                     kv_heads, group_size, block_size=128, top_k=16):
+def generate_block_index_with_causal(
+    query_fp32, key_fp32, q_seqlen, kv_seqlen, kv_heads, group_size, block_size=128, top_k=16
+):
     his_seq_len = kv_seqlen - q_seqlen
     total_blocks = ceil(kv_seqlen / block_size)
-    head_dim = query_fp32.shape[-1]
-
     select_idx = torch.full((kv_heads, q_seqlen, top_k), -1, dtype=torch.int32)
     select_num_idx = torch.zeros((kv_heads, q_seqlen), dtype=torch.int32)
 
@@ -138,6 +135,7 @@ def generate_block_table(batch, max_blocks_per_batch, shuffle=True):
     all_physical_ids = list(range(total_physical))
     if shuffle:
         import random
+
         rng = random.Random(137)
         rng.shuffle(all_physical_ids)
     block_table = torch.zeros(batch, max_blocks_per_batch, dtype=torch.int32)
@@ -147,13 +145,12 @@ def generate_block_table(batch, max_blocks_per_batch, shuffle=True):
     return block_table
 
 
-def build_fp8_tensors_and_scales(query_fp32, key_fp32, value_fp32, block_table,
-                                 actual_seq_lengths, actual_seq_lengths_kv,
-                                 block_size):
+def build_fp8_tensors_and_scales(
+    query_fp32, key_fp32, value_fp32, block_table, actual_seq_lengths, actual_seq_lengths_kv, block_size
+):
     batch = len(actual_seq_lengths)
     q_heads = query_fp32.shape[1]
     kv_heads = key_fp32.shape[2]
-    head_dim = query_fp32.shape[2]
     max_q_seqlen = max(actual_seq_lengths)
     max_kv_blocks = block_table.shape[1]
     max_q_blocks = ceil(max_q_seqlen / block_size)
@@ -192,8 +189,7 @@ def build_fp8_tensors_and_scales(query_fp32, key_fp32, value_fp32, block_table,
             logical_q_block = (history_len + q_token) // block_size
             for head in range(q_heads):
                 scale = q_scales[batch_idx, head, logical_q_block, 0].item()
-                query_fp8[global_q, head, :] = _quantize_fp8(
-                    query_fp32[global_q, head, :], scale)
+                query_fp8[global_q, head, :] = _quantize_fp8(query_fp32[global_q, head, :], scale)
         q_offset += q_seqlen
 
     key_fp8 = key_fp32.to(FP8_DTYPE)
@@ -204,19 +200,24 @@ def build_fp8_tensors_and_scales(query_fp32, key_fp32, value_fp32, block_table,
             for kv_h in range(kv_heads):
                 ks = k_scales[batch_idx, kv_h, logical_id, 0].item()
                 vs = v_scales[batch_idx, kv_h, logical_id, 0].item()
-                key_fp8[physical_id, :, kv_h, :] = _quantize_fp8(
-                    key_fp32[physical_id, :, kv_h, :], ks)
-                value_fp8[physical_id, :, kv_h, :] = _quantize_fp8(
-                    value_fp32[physical_id, :, kv_h, :], vs)
+                key_fp8[physical_id, :, kv_h, :] = _quantize_fp8(key_fp32[physical_id, :, kv_h, :], ks)
+                value_fp8[physical_id, :, kv_h, :] = _quantize_fp8(value_fp32[physical_id, :, kv_h, :], vs)
 
     return query_fp8, key_fp8, value_fp8, q_scales, k_scales, v_scales
 
 
 def cpu_sparse_attention_score_fp32(
-    query, key, value, select_idx, block_table,
-    actual_seq_lengths, actual_seq_lengths_kv,
-    num_key_value_heads, select_num_idx=None,
-    block_size=128, scale_value=1.0,
+    query,
+    key,
+    value,
+    select_idx,
+    block_table,
+    actual_seq_lengths,
+    actual_seq_lengths_kv,
+    num_key_value_heads,
+    select_num_idx=None,
+    block_size=128,
+    scale_value=1.0,
 ):
     """FP32 golden: pure float32 online-softmax without any truncation."""
     select_idx_cpu = select_idx.to(torch.int64)
@@ -226,8 +227,6 @@ def cpu_sparse_attention_score_fp32(
     kv_heads = num_key_value_heads
     group_size = q_heads // kv_heads
     top_k = select_idx.shape[2]
-    batch = len(actual_seq_lengths)
-
     output = torch.zeros(total_q_tokens, q_heads, head_dim, dtype=torch.float32)
     q_offset = 0
     for batch_idx, q_seqlen in enumerate(actual_seq_lengths):
@@ -247,7 +246,7 @@ def cpu_sparse_attention_score_fp32(
                     continue
 
                 q_start = kv_head * group_size
-                q_group = query[global_q_token, q_start:q_start + group_size, :].float()
+                q_group = query[global_q_token, q_start : q_start + group_size, :].float()
 
                 last_max = torch.full((group_size,), -float("inf"), dtype=torch.float32)
                 last_sum = torch.zeros(group_size, dtype=torch.float32)
@@ -297,7 +296,7 @@ def cpu_sparse_attention_score_fp32(
 
                 if last_sum.max() > 0:
                     result = o_acc / last_sum.unsqueeze(1)
-                    output[global_q_token, q_start:q_start + group_size, :] = result
+                    output[global_q_token, q_start : q_start + group_size, :] = result
 
         q_offset += q_seqlen
 
@@ -327,11 +326,9 @@ def dual_golden_l1norm(actual, golden_high, golden_low, label):
     if l1_high_vs_low > 1e-12:
         l1_ratio = l1_actual_vs_low / l1_high_vs_low
     else:
-        l1_ratio = float('inf') if l1_actual_vs_low > 1e-12 else 0.0
+        l1_ratio = float("inf") if l1_actual_vs_low > 1e-12 else 0.0
 
-    cos_sim = torch.nn.functional.cosine_similarity(
-        actual_valid.unsqueeze(0), high_valid.unsqueeze(0)
-    ).item()
+    cos_sim = torch.nn.functional.cosine_similarity(actual_valid.unsqueeze(0), high_valid.unsqueeze(0)).item()
 
     print(f"  [{label}]")
     print(f"    L1norm(actual - golden_low)/L1norm(golden_low)  = {l1_actual_vs_low:.6f}")
@@ -340,16 +337,23 @@ def dual_golden_l1norm(actual, golden_high, golden_low, label):
     print(f"    L1 ratio (actual-low)/(high-low) = {l1_ratio:.6f}")
     print(f"    cosine_similarity(actual, golden_high) = {cos_sim:.8f}")
     if l1_ratio <= 1.0:
-        print(f"    PASS")
+        print("    PASS")
     else:
-        print(f"    WARNING: ratio > 1.0")
+        print("    WARNING: ratio > 1.0")
 
 
 def cpu_sparse_attention_score_bf16(
-    query, key, value, select_idx, block_table,
-    actual_seq_lengths, actual_seq_lengths_kv,
-    num_key_value_heads, select_num_idx=None,
-    block_size=128, scale_value=1.0,
+    query,
+    key,
+    value,
+    select_idx,
+    block_table,
+    actual_seq_lengths,
+    actual_seq_lengths_kv,
+    num_key_value_heads,
+    select_num_idx=None,
+    block_size=128,
+    scale_value=1.0,
 ):
     """BF16 golden: vectorized simulation of kernel online-softmax pipeline.
 
@@ -363,7 +367,6 @@ def cpu_sparse_attention_score_bf16(
     kv_heads = num_key_value_heads
     group_size = q_heads // kv_heads
     top_k = select_idx.shape[2]
-    batch = len(actual_seq_lengths)
     scale_bf16 = torch.tensor(scale_value, dtype=torch.bfloat16).item()
 
     output = torch.zeros(total_q_tokens, q_heads, head_dim, dtype=torch.bfloat16)
@@ -386,7 +389,7 @@ def cpu_sparse_attention_score_bf16(
 
                 # Q vectors for all heads in this group: [groupSize, D]
                 q_start = kv_head * group_size
-                q_group_bf16 = query[global_q_token, q_start:q_start + group_size, :]
+                q_group_bf16 = query[global_q_token, q_start : q_start + group_size, :]
 
                 last_max_fp32 = torch.full((group_size,), -float("inf"), dtype=torch.float32)
                 last_sum_fp32 = torch.zeros(group_size, dtype=torch.float32)
@@ -405,7 +408,7 @@ def cpu_sparse_attention_score_bf16(
 
                     physical_id = int(block_table_cpu[batch_idx, logical_id].item())
                     valid_len = effective_end - block_begin
-                    k_bf16 = key[physical_id, :valid_len, kv_head, :]    # [valid_len, D]
+                    k_bf16 = key[physical_id, :valid_len, kv_head, :]  # [valid_len, D]
                     v_bf16 = value[physical_id, :valid_len, kv_head, :]  # [valid_len, D]
 
                     # Step 1: QK: [groupSize, D] x [D, valid_len] -> [groupSize, valid_len]
@@ -454,7 +457,7 @@ def cpu_sparse_attention_score_bf16(
                 # Step 5: final divide + cast
                 if last_sum_fp32.max() > 0:
                     result_fp32 = o_acc_fp32 / last_sum_fp32.unsqueeze(1)
-                    output[global_q_token, q_start:q_start + group_size, :] = result_fp32.to(torch.bfloat16)
+                    output[global_q_token, q_start : q_start + group_size, :] = result_fp32.to(torch.bfloat16)
 
         q_offset += q_seqlen
 
@@ -462,11 +465,20 @@ def cpu_sparse_attention_score_bf16(
 
 
 def cpu_sparse_attention_score_fp8(
-    query_fp8, key_fp8, value_fp8, select_idx, block_table,
-    q_scales, k_scales, v_scales,
-    actual_seq_lengths, actual_seq_lengths_kv,
-    num_key_value_heads, select_num_idx=None,
-    block_size=128, scale_value=1.0,
+    query_fp8,
+    key_fp8,
+    value_fp8,
+    select_idx,
+    block_table,
+    q_scales,
+    k_scales,
+    v_scales,
+    actual_seq_lengths,
+    actual_seq_lengths_kv,
+    num_key_value_heads,
+    select_num_idx=None,
+    block_size=128,
+    scale_value=1.0,
 ):
     """FP8 golden: per-block dequant aligned with full-quant kernel indexing."""
     select_idx_cpu = select_idx.to(torch.int64)
@@ -476,8 +488,6 @@ def cpu_sparse_attention_score_fp8(
     kv_heads = num_key_value_heads
     group_size = q_heads // kv_heads
     top_k = select_idx.shape[2]
-    batch = len(actual_seq_lengths)
-
     output = torch.zeros(total_q_tokens, q_heads, head_dim, dtype=torch.float32)
 
     q_offset = 0
@@ -553,32 +563,31 @@ def cpu_sparse_attention_score_fp8(
 # BF16 Test Class
 # ---------------------------------------------------------------------------
 class TestNpuSparseAttentionScoreBf16(TestCase):
-    def make_case(self, q_seqlen=1, kv_seqlen=128, q_heads=1, kv_heads=1,
-                  head_dim=128, block_size=128, top_k=1, seed=42):
-        batch = 1
+    def make_case(
+        self, q_seqlen=1, kv_seqlen=128, q_heads=1, kv_heads=1, head_dim=128, block_size=128, top_k=1, seed=42
+    ):
         group_size = q_heads // kv_heads
         total_blocks = ceil(kv_seqlen / block_size)
         max_blocks_per_batch = total_blocks
+        batch = 1
         actual_seq_lengths = torch.tensor([q_seqlen] * batch, dtype=torch.int32)
         actual_seq_lengths_kv = torch.tensor([kv_seqlen] * batch, dtype=torch.int32)
 
         torch.manual_seed(seed)
         query_fp32 = torch.rand(q_seqlen, q_heads, head_dim, dtype=torch.float32) * 2 - 1
         total_physical_blocks = total_blocks * batch
-        key_fp32 = torch.rand(
-            total_physical_blocks, block_size, kv_heads, head_dim, dtype=torch.float32) * 2 - 1
-        value_fp32 = torch.rand(
-            total_physical_blocks, block_size, kv_heads, head_dim, dtype=torch.float32) * 2 - 1
+        key_fp32 = torch.rand(total_physical_blocks, block_size, kv_heads, head_dim, dtype=torch.float32) * 2 - 1
+        value_fp32 = torch.rand(total_physical_blocks, block_size, kv_heads, head_dim, dtype=torch.float32) * 2 - 1
 
         block_table = generate_block_table(batch, max_blocks_per_batch)
         key_logical = torch.zeros(total_blocks * block_size, kv_heads, head_dim, dtype=torch.float32)
         for logical_id in range(total_blocks):
             physical_id = int(block_table[0, logical_id].item())
-            key_logical[logical_id * block_size:(logical_id + 1) * block_size] = key_fp32[physical_id]
+            key_logical[logical_id * block_size : (logical_id + 1) * block_size] = key_fp32[physical_id]
         key_flat = key_logical[:kv_seqlen, :, :]
         select_idx, select_num_idx = generate_block_index_with_causal(
-            query_fp32, key_flat, q_seqlen, kv_seqlen,
-            kv_heads, group_size, block_size, top_k)
+            query_fp32, key_flat, q_seqlen, kv_seqlen, kv_heads, group_size, block_size, top_k
+        )
         scale_value = 1.0 / math.sqrt(head_dim)
 
         return (
@@ -596,9 +605,18 @@ class TestNpuSparseAttentionScoreBf16(TestCase):
             scale_value,
         )
 
-    def make_case_multi_batch(self, batch=2, q_seqlens=None, kv_seqlens=None,
-                              q_heads=8, kv_heads=2, head_dim=128, block_size=128,
-                              top_k=4, seed=42):
+    def make_case_multi_batch(
+        self,
+        batch=2,
+        q_seqlens=None,
+        kv_seqlens=None,
+        q_heads=8,
+        kv_heads=2,
+        head_dim=128,
+        block_size=128,
+        top_k=4,
+        seed=42,
+    ):
         """Generate multi-batch test case.
 
         Each batch can have different q_seqlen and kv_seqlen.
@@ -619,10 +637,8 @@ class TestNpuSparseAttentionScoreBf16(TestCase):
 
         torch.manual_seed(seed)
         query_fp32 = torch.rand(total_q_tokens, q_heads, head_dim, dtype=torch.float32) * 2 - 1
-        key_fp32 = torch.rand(
-            total_physical_blocks, block_size, kv_heads, head_dim, dtype=torch.float32) * 2 - 1
-        value_fp32 = torch.rand(
-            total_physical_blocks, block_size, kv_heads, head_dim, dtype=torch.float32) * 2 - 1
+        key_fp32 = torch.rand(total_physical_blocks, block_size, kv_heads, head_dim, dtype=torch.float32) * 2 - 1
+        value_fp32 = torch.rand(total_physical_blocks, block_size, kv_heads, head_dim, dtype=torch.float32) * 2 - 1
 
         block_table = generate_block_table(batch, max_blocks_per_batch)
 
@@ -637,20 +653,19 @@ class TestNpuSparseAttentionScoreBf16(TestCase):
             total_blocks_b = ceil(kv_seqlen_b / block_size)
 
             # Reconstruct logical key for this batch
-            key_logical_b = torch.zeros(
-                total_blocks_b * block_size, kv_heads, head_dim, dtype=torch.float32)
+            key_logical_b = torch.zeros(total_blocks_b * block_size, kv_heads, head_dim, dtype=torch.float32)
             for logical_id in range(total_blocks_b):
                 physical_id = int(block_table[b, logical_id].item())
-                key_logical_b[logical_id * block_size:(logical_id + 1) * block_size] = key_fp32[physical_id]
+                key_logical_b[logical_id * block_size : (logical_id + 1) * block_size] = key_fp32[physical_id]
             key_flat_b = key_logical_b[:kv_seqlen_b, :, :]
 
-            q_for_batch = query_fp32[q_offset:q_offset + q_seqlen_b, :, :]
+            q_for_batch = query_fp32[q_offset : q_offset + q_seqlen_b, :, :]
             batch_select_idx, batch_select_num = generate_block_index_with_causal(
-                q_for_batch, key_flat_b, q_seqlen_b, kv_seqlen_b,
-                kv_heads, group_size, block_size, top_k)
+                q_for_batch, key_flat_b, q_seqlen_b, kv_seqlen_b, kv_heads, group_size, block_size, top_k
+            )
 
-            select_idx[:, q_offset:q_offset + q_seqlen_b, :] = batch_select_idx
-            select_num_idx[:, q_offset:q_offset + q_seqlen_b] = batch_select_num
+            select_idx[:, q_offset : q_offset + q_seqlen_b, :] = batch_select_idx
+            select_num_idx[:, q_offset : q_offset + q_seqlen_b] = batch_select_num
             q_offset += q_seqlen_b
 
         scale_value = 1.0 / math.sqrt(head_dim)
@@ -678,14 +693,28 @@ class TestNpuSparseAttentionScoreBf16(TestCase):
         torch.npu.empty_cache()
         case_data = self.make_case_multi_batch(**kwargs)
         (
-            query, key, value, select_idx, block_table, select_num_idx,
-            actual_seq_lengths, actual_seq_lengths_kv,
-            kv_heads, block_size, top_k, scale_value,
+            query,
+            key,
+            value,
+            select_idx,
+            block_table,
+            select_num_idx,
+            actual_seq_lengths,
+            actual_seq_lengths_kv,
+            kv_heads,
+            block_size,
+            top_k,
+            scale_value,
         ) = case_data
 
         cpu_out = cpu_sparse_attention_score_bf16(
-            query, key, value, select_idx, block_table,
-            actual_seq_lengths.tolist(), actual_seq_lengths_kv.tolist(),
+            query,
+            key,
+            value,
+            select_idx,
+            block_table,
+            actual_seq_lengths.tolist(),
+            actual_seq_lengths_kv.tolist(),
             num_key_value_heads=kv_heads,
             select_num_idx=select_num_idx,
             block_size=block_size,
@@ -693,8 +722,13 @@ class TestNpuSparseAttentionScoreBf16(TestCase):
         )
 
         cpu_out_fp32 = cpu_sparse_attention_score_fp32(
-            query, key, value, select_idx, block_table,
-            actual_seq_lengths.tolist(), actual_seq_lengths_kv.tolist(),
+            query,
+            key,
+            value,
+            select_idx,
+            block_table,
+            actual_seq_lengths.tolist(),
+            actual_seq_lengths_kv.tolist(),
             num_key_value_heads=kv_heads,
             select_num_idx=select_num_idx,
             block_size=block_size,
@@ -702,7 +736,11 @@ class TestNpuSparseAttentionScoreBf16(TestCase):
         )
 
         npu_out = torch_npu.npu_sparse_attention_score(
-            query.npu(), key.npu(), value.npu(), select_idx.npu(), block_table.npu(),
+            query.npu(),
+            key.npu(),
+            value.npu(),
+            select_idx.npu(),
+            block_table.npu(),
             select_num_idx=select_num_idx.npu(),
             actual_seq_lengths=actual_seq_lengths.npu(),
             actual_seq_lengths_kv=actual_seq_lengths_kv.npu(),
@@ -726,44 +764,49 @@ class TestNpuSparseAttentionScoreBf16(TestCase):
     # --- Multi-batch tests ---
     def test_bf16_mb_2batch_same_seqlen(self):
         self._run_bf16_multi_batch_case(
-            batch=2, q_seqlens=[1, 1], kv_seqlens=[256, 256],
-            q_heads=8, kv_heads=2, top_k=2, seed=42)
+            batch=2, q_seqlens=[1, 1], kv_seqlens=[256, 256], q_heads=8, kv_heads=2, top_k=2, seed=42
+        )
 
     def test_bf16_mb_2batch_diff_kvseqlen(self):
         self._run_bf16_multi_batch_case(
-            batch=2, q_seqlens=[1, 1], kv_seqlens=[256, 512],
-            q_heads=8, kv_heads=2, top_k=2, seed=42)
+            batch=2, q_seqlens=[1, 1], kv_seqlens=[256, 512], q_heads=8, kv_heads=2, top_k=2, seed=42
+        )
 
     def test_bf16_mb_2batch_diff_qseqlen(self):
         self._run_bf16_multi_batch_case(
-            batch=2, q_seqlens=[1, 4], kv_seqlens=[512, 512],
-            q_heads=8, kv_heads=2, top_k=4, seed=100)
+            batch=2, q_seqlens=[1, 4], kv_seqlens=[512, 512], q_heads=8, kv_heads=2, top_k=4, seed=100
+        )
 
     def test_bf16_mb_4batch_decode(self):
         self._run_bf16_multi_batch_case(
-            batch=4, q_seqlens=[1, 1, 1, 1], kv_seqlens=[256, 512, 1024, 300],
-            q_heads=16, kv_heads=4, top_k=3, seed=42)
+            batch=4, q_seqlens=[1, 1, 1, 1], kv_seqlens=[256, 512, 1024, 300], q_heads=16, kv_heads=4, top_k=3, seed=42
+        )
 
     def test_bf16_mb_4batch_mixed(self):
         self._run_bf16_multi_batch_case(
-            batch=4, q_seqlens=[1, 2, 4, 1], kv_seqlens=[300, 500, 1000, 700],
-            q_heads=8, kv_heads=2, top_k=4, seed=7)
+            batch=4, q_seqlens=[1, 2, 4, 1], kv_seqlens=[300, 500, 1000, 700], q_heads=8, kv_heads=2, top_k=4, seed=7
+        )
 
     def test_bf16_mb_8batch_decode_large_kv(self):
         self._run_bf16_multi_batch_case(
-            batch=8, q_seqlens=[1]*8,
+            batch=8,
+            q_seqlens=[1] * 8,
             kv_seqlens=[256, 512, 1024, 2048, 333, 555, 777, 1500],
-            q_heads=16, kv_heads=4, top_k=5, seed=999)
+            q_heads=16,
+            kv_heads=4,
+            top_k=5,
+            seed=999,
+        )
 
     def test_bf16_mb_2batch_mha(self):
         self._run_bf16_multi_batch_case(
-            batch=2, q_seqlens=[1, 1], kv_seqlens=[256, 384],
-            q_heads=4, kv_heads=4, top_k=2, seed=42)
+            batch=2, q_seqlens=[1, 1], kv_seqlens=[256, 384], q_heads=4, kv_heads=4, top_k=2, seed=42
+        )
 
     def test_bf16_mb_4batch_gqa_large_group(self):
         self._run_bf16_multi_batch_case(
-            batch=4, q_seqlens=[1, 1, 1, 1], kv_seqlens=[512, 700, 900, 1024],
-            q_heads=32, kv_heads=4, top_k=4, seed=13)
+            batch=4, q_seqlens=[1, 1, 1, 1], kv_seqlens=[512, 700, 900, 1024], q_heads=32, kv_heads=4, top_k=4, seed=13
+        )
 
     def test_bf16_prefill_then_decode_q64_kv4(self):
         """Simulate P-D sequential execution: Prefill (qseqlen=132, kvseqlen=132)
@@ -774,7 +817,6 @@ class TestNpuSparseAttentionScoreBf16(TestCase):
         block_size = 128
         top_k = 16
         seed = 42
-        batch = 1
         group_size = q_heads // kv_heads
 
         # Shared KV cache: kvseqlen=133 needs ceil(133/128)=2 blocks
@@ -784,14 +826,11 @@ class TestNpuSparseAttentionScoreBf16(TestCase):
 
         torch.manual_seed(seed)
         # Generate full KV cache (2 blocks worth of data)
-        key_fp32 = torch.rand(
-            total_physical_blocks, block_size, kv_heads, head_dim,
-            dtype=torch.float32) * 2 - 1
-        value_fp32 = torch.rand(
-            total_physical_blocks, block_size, kv_heads, head_dim,
-            dtype=torch.float32) * 2 - 1
+        key_fp32 = torch.rand(total_physical_blocks, block_size, kv_heads, head_dim, dtype=torch.float32) * 2 - 1
+        value_fp32 = torch.rand(total_physical_blocks, block_size, kv_heads, head_dim, dtype=torch.float32) * 2 - 1
 
         import random
+
         rng = random.Random(seed)
         physical_ids = rng.sample(range(total_physical_blocks), total_blocks)
         block_table = torch.tensor([physical_ids], dtype=torch.int32)
@@ -808,32 +847,40 @@ class TestNpuSparseAttentionScoreBf16(TestCase):
         p_kv_seqlen = 132
 
         torch.manual_seed(seed + 1)
-        p_query_fp32 = torch.rand(p_q_seqlen, q_heads, head_dim,
-                                  dtype=torch.float32) * 2 - 1
+        p_query_fp32 = torch.rand(p_q_seqlen, q_heads, head_dim, dtype=torch.float32) * 2 - 1
         p_query = p_query_fp32.to(torch.bfloat16)
 
-        key_logical = torch.zeros(
-            total_blocks * block_size, kv_heads, head_dim, dtype=torch.float32)
+        key_logical = torch.zeros(total_blocks * block_size, kv_heads, head_dim, dtype=torch.float32)
         for lid in range(total_blocks):
             pid = int(block_table[0, lid].item())
-            key_logical[lid * block_size:(lid + 1) * block_size] = key_fp32[pid]
+            key_logical[lid * block_size : (lid + 1) * block_size] = key_fp32[pid]
         key_flat_p = key_logical[:p_kv_seqlen, :, :]
 
         p_select_idx, p_select_num_idx = generate_block_index_with_causal(
-            p_query_fp32, key_flat_p, p_q_seqlen, p_kv_seqlen,
-            kv_heads, group_size, block_size, top_k)
+            p_query_fp32, key_flat_p, p_q_seqlen, p_kv_seqlen, kv_heads, group_size, block_size, top_k
+        )
 
         p_cpu_bf16 = cpu_sparse_attention_score_bf16(
-            p_query, key, value, p_select_idx, block_table,
-            [p_q_seqlen], [p_kv_seqlen],
+            p_query,
+            key,
+            value,
+            p_select_idx,
+            block_table,
+            [p_q_seqlen],
+            [p_kv_seqlen],
             num_key_value_heads=kv_heads,
             select_num_idx=p_select_num_idx,
             block_size=block_size,
             scale_value=scale_value,
         )
         p_cpu_fp32 = cpu_sparse_attention_score_fp32(
-            p_query, key, value, p_select_idx, block_table,
-            [p_q_seqlen], [p_kv_seqlen],
+            p_query,
+            key,
+            value,
+            p_select_idx,
+            block_table,
+            [p_q_seqlen],
+            [p_kv_seqlen],
             num_key_value_heads=kv_heads,
             select_num_idx=p_select_num_idx,
             block_size=block_size,
@@ -841,8 +888,11 @@ class TestNpuSparseAttentionScoreBf16(TestCase):
         )
 
         p_npu_out = torch_npu.npu_sparse_attention_score(
-            p_query.npu(), key.npu(), value.npu(),
-            p_select_idx.npu(), block_table.npu(),
+            p_query.npu(),
+            key.npu(),
+            value.npu(),
+            p_select_idx.npu(),
+            block_table.npu(),
             select_num_idx=p_select_num_idx.npu(),
             actual_seq_lengths=torch.tensor([p_q_seqlen], dtype=torch.int32).npu(),
             actual_seq_lengths_kv=torch.tensor([p_kv_seqlen], dtype=torch.int32).npu(),
@@ -855,10 +905,8 @@ class TestNpuSparseAttentionScoreBf16(TestCase):
         p_npu_cpu = p_npu_out.cpu()
 
         p_diff = (p_npu_cpu.float() - p_cpu_bf16.float()).abs()
-        print(f"  [Prefill] max_diff={p_diff.max().item():.6f}, "
-              f"mean_diff={p_diff.mean().item():.6f}")
-        dual_golden_l1norm(p_npu_cpu, p_cpu_fp32, p_cpu_bf16,
-                           "Prefill NPU vs dual-golden")
+        print(f"  [Prefill] max_diff={p_diff.max().item():.6f}, mean_diff={p_diff.mean().item():.6f}")
+        dual_golden_l1norm(p_npu_cpu, p_cpu_fp32, p_cpu_bf16, "Prefill NPU vs dual-golden")
 
         # --- Phase 2: Decode (qseqlen=1, kvseqlen=133) ---
         print("\n" + "=" * 60)
@@ -868,26 +916,35 @@ class TestNpuSparseAttentionScoreBf16(TestCase):
         d_kv_seqlen = 133
 
         torch.manual_seed(seed + 2)
-        d_query_fp32 = torch.rand(d_q_seqlen, q_heads, head_dim,
-                                  dtype=torch.float32) * 2 - 1
+        d_query_fp32 = torch.rand(d_q_seqlen, q_heads, head_dim, dtype=torch.float32) * 2 - 1
         d_query = d_query_fp32.to(torch.bfloat16)
 
         key_flat_d = key_logical[:d_kv_seqlen, :, :]
         d_select_idx, d_select_num_idx = generate_block_index_with_causal(
-            d_query_fp32, key_flat_d, d_q_seqlen, d_kv_seqlen,
-            kv_heads, group_size, block_size, top_k)
+            d_query_fp32, key_flat_d, d_q_seqlen, d_kv_seqlen, kv_heads, group_size, block_size, top_k
+        )
 
         d_cpu_bf16 = cpu_sparse_attention_score_bf16(
-            d_query, key, value, d_select_idx, block_table,
-            [d_q_seqlen], [d_kv_seqlen],
+            d_query,
+            key,
+            value,
+            d_select_idx,
+            block_table,
+            [d_q_seqlen],
+            [d_kv_seqlen],
             num_key_value_heads=kv_heads,
             select_num_idx=d_select_num_idx,
             block_size=block_size,
             scale_value=scale_value,
         )
         d_cpu_fp32 = cpu_sparse_attention_score_fp32(
-            d_query, key, value, d_select_idx, block_table,
-            [d_q_seqlen], [d_kv_seqlen],
+            d_query,
+            key,
+            value,
+            d_select_idx,
+            block_table,
+            [d_q_seqlen],
+            [d_kv_seqlen],
             num_key_value_heads=kv_heads,
             select_num_idx=d_select_num_idx,
             block_size=block_size,
@@ -895,8 +952,11 @@ class TestNpuSparseAttentionScoreBf16(TestCase):
         )
 
         d_npu_out = torch_npu.npu_sparse_attention_score(
-            d_query.npu(), key.npu(), value.npu(),
-            d_select_idx.npu(), block_table.npu(),
+            d_query.npu(),
+            key.npu(),
+            value.npu(),
+            d_select_idx.npu(),
+            block_table.npu(),
             select_num_idx=d_select_num_idx.npu(),
             actual_seq_lengths=torch.tensor([d_q_seqlen], dtype=torch.int32).npu(),
             actual_seq_lengths_kv=torch.tensor([d_kv_seqlen], dtype=torch.int32).npu(),
@@ -909,20 +969,16 @@ class TestNpuSparseAttentionScoreBf16(TestCase):
         d_npu_cpu = d_npu_out.cpu()
 
         d_diff = (d_npu_cpu.float() - d_cpu_bf16.float()).abs()
-        print(f"  [Decode] max_diff={d_diff.max().item():.6f}, "
-              f"mean_diff={d_diff.mean().item():.6f}")
-        dual_golden_l1norm(d_npu_cpu, d_cpu_fp32, d_cpu_bf16,
-                           "Decode NPU vs dual-golden")
+        print(f"  [Decode] max_diff={d_diff.max().item():.6f}, mean_diff={d_diff.mean().item():.6f}")
+        dual_golden_l1norm(d_npu_cpu, d_cpu_fp32, d_cpu_bf16, "Decode NPU vs dual-golden")
 
         # Assert both phases pass
-        self.assertRtolEqual(p_cpu_bf16.float().numpy(),
-                             p_npu_cpu.float().numpy(), prec=7e-3)
-        self.assertRtolEqual(d_cpu_bf16.float().numpy(),
-                             d_npu_cpu.float().numpy(), prec=7e-3)
+        self.assertRtolEqual(p_cpu_bf16.float().numpy(), p_npu_cpu.float().numpy(), prec=7e-3)
+        self.assertRtolEqual(d_cpu_bf16.float().numpy(), d_npu_cpu.float().numpy(), prec=7e-3)
 
-    def _run_prefill_decode_case(self, p_q_seqlen, kv_seqlen, q_heads=64,
-                                 kv_heads=4, head_dim=128, block_size=128,
-                                 top_k=16, seed=42):
+    def _run_prefill_decode_case(
+        self, p_q_seqlen, kv_seqlen, q_heads=64, kv_heads=4, head_dim=128, block_size=128, top_k=16, seed=42
+    ):
         """Run Prefill then Decode with shared KV cache."""
         group_size = q_heads // kv_heads
         d_kv_seqlen = kv_seqlen + p_q_seqlen
@@ -930,14 +986,11 @@ class TestNpuSparseAttentionScoreBf16(TestCase):
         total_physical_blocks = total_blocks + 5
 
         torch.manual_seed(seed)
-        key_fp32 = torch.rand(
-            total_physical_blocks, block_size, kv_heads, head_dim,
-            dtype=torch.float32) * 2 - 1
-        value_fp32 = torch.rand(
-            total_physical_blocks, block_size, kv_heads, head_dim,
-            dtype=torch.float32) * 2 - 1
+        key_fp32 = torch.rand(total_physical_blocks, block_size, kv_heads, head_dim, dtype=torch.float32) * 2 - 1
+        value_fp32 = torch.rand(total_physical_blocks, block_size, kv_heads, head_dim, dtype=torch.float32) * 2 - 1
 
         import random
+
         rng = random.Random(seed)
         physical_ids = rng.sample(range(total_physical_blocks), total_blocks)
         block_table = torch.tensor([physical_ids], dtype=torch.int32)
@@ -946,87 +999,118 @@ class TestNpuSparseAttentionScoreBf16(TestCase):
         value = value_fp32.to(torch.bfloat16)
         scale_value = 1.0 / math.sqrt(head_dim)
 
-        key_logical = torch.zeros(
-            total_blocks * block_size, kv_heads, head_dim, dtype=torch.float32)
+        key_logical = torch.zeros(total_blocks * block_size, kv_heads, head_dim, dtype=torch.float32)
         for lid in range(total_blocks):
             pid = int(block_table[0, lid].item())
-            key_logical[lid * block_size:(lid + 1) * block_size] = key_fp32[pid]
+            key_logical[lid * block_size : (lid + 1) * block_size] = key_fp32[pid]
 
         # --- Prefill ---
         p_kv_seqlen = kv_seqlen + p_q_seqlen  # After prefill, all tokens visible
         torch.manual_seed(seed + 1)
-        p_query_fp32 = torch.rand(p_q_seqlen, q_heads, head_dim,
-                                  dtype=torch.float32) * 2 - 1
+        p_query_fp32 = torch.rand(p_q_seqlen, q_heads, head_dim, dtype=torch.float32) * 2 - 1
         p_query = p_query_fp32.to(torch.bfloat16)
 
         key_flat_p = key_logical[:p_kv_seqlen, :, :]
         p_select_idx, p_select_num_idx = generate_block_index_with_causal(
-            p_query_fp32, key_flat_p, p_q_seqlen, p_kv_seqlen,
-            kv_heads, group_size, block_size, top_k)
+            p_query_fp32, key_flat_p, p_q_seqlen, p_kv_seqlen, kv_heads, group_size, block_size, top_k
+        )
 
         p_cpu_bf16 = cpu_sparse_attention_score_bf16(
-            p_query, key, value, p_select_idx, block_table,
-            [p_q_seqlen], [p_kv_seqlen],
+            p_query,
+            key,
+            value,
+            p_select_idx,
+            block_table,
+            [p_q_seqlen],
+            [p_kv_seqlen],
             num_key_value_heads=kv_heads,
             select_num_idx=p_select_num_idx,
-            block_size=block_size, scale_value=scale_value,
+            block_size=block_size,
+            scale_value=scale_value,
         )
         p_cpu_fp32 = cpu_sparse_attention_score_fp32(
-            p_query, key, value, p_select_idx, block_table,
-            [p_q_seqlen], [p_kv_seqlen],
+            p_query,
+            key,
+            value,
+            p_select_idx,
+            block_table,
+            [p_q_seqlen],
+            [p_kv_seqlen],
             num_key_value_heads=kv_heads,
             select_num_idx=p_select_num_idx,
-            block_size=block_size, scale_value=scale_value,
+            block_size=block_size,
+            scale_value=scale_value,
         )
 
         p_npu_out = torch_npu.npu_sparse_attention_score(
-            p_query.npu(), key.npu(), value.npu(),
-            p_select_idx.npu(), block_table.npu(),
+            p_query.npu(),
+            key.npu(),
+            value.npu(),
+            p_select_idx.npu(),
+            block_table.npu(),
             select_num_idx=p_select_num_idx.npu(),
             actual_seq_lengths=torch.tensor([p_q_seqlen], dtype=torch.int32).npu(),
             actual_seq_lengths_kv=torch.tensor([p_kv_seqlen], dtype=torch.int32).npu(),
             num_key_value_heads=kv_heads,
             scale_value=scale_value,
-            block_size=block_size, top_k=top_k, inner_precise=4,
+            block_size=block_size,
+            top_k=top_k,
+            inner_precise=4,
         )
         p_npu_cpu = p_npu_out.cpu()
 
         # --- Decode ---
         d_q_seqlen = 1
         torch.manual_seed(seed + 2)
-        d_query_fp32 = torch.rand(d_q_seqlen, q_heads, head_dim,
-                                  dtype=torch.float32) * 2 - 1
+        d_query_fp32 = torch.rand(d_q_seqlen, q_heads, head_dim, dtype=torch.float32) * 2 - 1
         d_query = d_query_fp32.to(torch.bfloat16)
 
         key_flat_d = key_logical[:d_kv_seqlen, :, :]
         d_select_idx, d_select_num_idx = generate_block_index_with_causal(
-            d_query_fp32, key_flat_d, d_q_seqlen, d_kv_seqlen,
-            kv_heads, group_size, block_size, top_k)
+            d_query_fp32, key_flat_d, d_q_seqlen, d_kv_seqlen, kv_heads, group_size, block_size, top_k
+        )
 
         d_cpu_bf16 = cpu_sparse_attention_score_bf16(
-            d_query, key, value, d_select_idx, block_table,
-            [d_q_seqlen], [d_kv_seqlen],
+            d_query,
+            key,
+            value,
+            d_select_idx,
+            block_table,
+            [d_q_seqlen],
+            [d_kv_seqlen],
             num_key_value_heads=kv_heads,
             select_num_idx=d_select_num_idx,
-            block_size=block_size, scale_value=scale_value,
+            block_size=block_size,
+            scale_value=scale_value,
         )
         d_cpu_fp32 = cpu_sparse_attention_score_fp32(
-            d_query, key, value, d_select_idx, block_table,
-            [d_q_seqlen], [d_kv_seqlen],
+            d_query,
+            key,
+            value,
+            d_select_idx,
+            block_table,
+            [d_q_seqlen],
+            [d_kv_seqlen],
             num_key_value_heads=kv_heads,
             select_num_idx=d_select_num_idx,
-            block_size=block_size, scale_value=scale_value,
+            block_size=block_size,
+            scale_value=scale_value,
         )
 
         d_npu_out = torch_npu.npu_sparse_attention_score(
-            d_query.npu(), key.npu(), value.npu(),
-            d_select_idx.npu(), block_table.npu(),
+            d_query.npu(),
+            key.npu(),
+            value.npu(),
+            d_select_idx.npu(),
+            block_table.npu(),
             select_num_idx=d_select_num_idx.npu(),
             actual_seq_lengths=torch.tensor([d_q_seqlen], dtype=torch.int32).npu(),
             actual_seq_lengths_kv=torch.tensor([d_kv_seqlen], dtype=torch.int32).npu(),
             num_key_value_heads=kv_heads,
             scale_value=scale_value,
-            block_size=block_size, top_k=top_k, inner_precise=4,
+            block_size=block_size,
+            top_k=top_k,
+            inner_precise=4,
         )
         d_npu_cpu = d_npu_out.cpu()
 
@@ -1038,19 +1122,26 @@ class TestNpuSparseAttentionScoreBf16(TestCase):
         dual_golden_l1norm(p_npu_cpu, p_cpu_fp32, p_cpu_bf16, "Prefill NPU vs dual-golden")
         dual_golden_l1norm(d_npu_cpu, d_cpu_fp32, d_cpu_bf16, "Decode NPU vs dual-golden")
 
-        self.assertRtolEqual(p_cpu_bf16.float().numpy(),
-                             p_npu_cpu.float().numpy(), prec=7e-3)
-        self.assertRtolEqual(d_cpu_bf16.float().numpy(),
-                             d_npu_cpu.float().numpy(), prec=7e-3)
+        self.assertRtolEqual(p_cpu_bf16.float().numpy(), p_npu_cpu.float().numpy(), prec=7e-3)
+        self.assertRtolEqual(d_cpu_bf16.float().numpy(), d_npu_cpu.float().numpy(), prec=7e-3)
 
     def _run_bf16_case(self, **kwargs):
         torch.npu.synchronize()
         # torch.npu.empty_cache()
         case_data = self.make_case(**kwargs)
         (
-            query, key, value, select_idx, block_table, select_num_idx,
-            actual_seq_lengths, actual_seq_lengths_kv,
-            kv_heads, block_size, top_k, scale_value,
+            query,
+            key,
+            value,
+            select_idx,
+            block_table,
+            select_num_idx,
+            actual_seq_lengths,
+            actual_seq_lengths_kv,
+            kv_heads,
+            block_size,
+            top_k,
+            scale_value,
         ) = case_data
 
         print("=" * 60)
@@ -1070,12 +1161,17 @@ class TestNpuSparseAttentionScoreBf16(TestCase):
         print(f"  scale_value:            {scale_value}")
         print(f"  block_size:             {block_size}")
         print(f"  top_k:                  {top_k}")
-        print(f"  inner_precise:          4")
+        print("  inner_precise:          4")
         print("=" * 60)
 
         cpu_out = cpu_sparse_attention_score_bf16(
-            query, key, value, select_idx, block_table,
-            actual_seq_lengths.tolist(), actual_seq_lengths_kv.tolist(),
+            query,
+            key,
+            value,
+            select_idx,
+            block_table,
+            actual_seq_lengths.tolist(),
+            actual_seq_lengths_kv.tolist(),
             num_key_value_heads=kv_heads,
             select_num_idx=select_num_idx,
             block_size=block_size,
@@ -1083,8 +1179,13 @@ class TestNpuSparseAttentionScoreBf16(TestCase):
         )
 
         cpu_out_fp32 = cpu_sparse_attention_score_fp32(
-            query, key, value, select_idx, block_table,
-            actual_seq_lengths.tolist(), actual_seq_lengths_kv.tolist(),
+            query,
+            key,
+            value,
+            select_idx,
+            block_table,
+            actual_seq_lengths.tolist(),
+            actual_seq_lengths_kv.tolist(),
             num_key_value_heads=kv_heads,
             select_num_idx=select_num_idx,
             block_size=block_size,
@@ -1092,7 +1193,11 @@ class TestNpuSparseAttentionScoreBf16(TestCase):
         )
 
         npu_out = torch_npu.npu_sparse_attention_score(
-            query.npu(), key.npu(), value.npu(), select_idx.npu(), block_table.npu(),
+            query.npu(),
+            key.npu(),
+            value.npu(),
+            select_idx.npu(),
+            block_table.npu(),
             select_num_idx=select_num_idx.npu(),
             actual_seq_lengths=actual_seq_lengths.npu(),
             actual_seq_lengths_kv=actual_seq_lengths_kv.npu(),
@@ -1233,17 +1338,16 @@ _BF16_CASES = [
 
 def _make_bf16_test(q_seqlen, kv_seqlen, q_heads, kv_heads, top_k, seed):
     def test_fn(self):
-        self._run_bf16_case(q_seqlen=q_seqlen, kv_seqlen=kv_seqlen,
-                            q_heads=q_heads, kv_heads=kv_heads,
-                            top_k=top_k, seed=seed)
+        self._run_bf16_case(
+            q_seqlen=q_seqlen, kv_seqlen=kv_seqlen, q_heads=q_heads, kv_heads=kv_heads, top_k=top_k, seed=seed
+        )
+
     return test_fn
 
 
 for _i, (_qs, _kvs, _qh, _kvh, _tk, _sd) in enumerate(_BF16_CASES):
-    _name = (f"test_bf16_{_i:03d}_qs{_qs}_kv{_kvs}_qh{_qh}_kvh{_kvh}_"
-             f"top{_tk}_seed{_sd}")
-    setattr(TestNpuSparseAttentionScoreBf16, _name,
-            _make_bf16_test(_qs, _kvs, _qh, _kvh, _tk, _sd))
+    _name = f"test_bf16_{_i:03d}_qs{_qs}_kv{_kvs}_qh{_qh}_kvh{_kvh}_top{_tk}_seed{_sd}"
+    setattr(TestNpuSparseAttentionScoreBf16, _name, _make_bf16_test(_qs, _kvs, _qh, _kvh, _tk, _sd))
 
 
 # Large q_seqlen / kv_seqlen scenarios (1000 cases, programmatically generated)
@@ -1258,25 +1362,45 @@ def _generate_stress_cases(num_cases=1000):
       - seed: varied
     """
     import random
+
     rng = random.Random(20260609)
 
     q_seqlen_pool = [1, 1, 1, 1, 1, 2, 2, 4, 4, 8, 16, 32, 64]
     kv_seqlen_pool = [
-        128, 200, 256, 300, 333, 384, 400, 450, 500, 512,
-        555, 600, 640, 700, 750, 768, 800, 850, 900, 950, 1000,
+        128,
+        200,
+        256,
+        300,
+        333,
+        384,
+        400,
+        450,
+        500,
+        512,
+        555,
+        600,
+        640,
+        700,
+        750,
+        768,
+        800,
+        850,
+        900,
+        950,
+        1000,
     ]
 
     head_configs = [
         # (q_heads, kv_heads) — groupSize — GQA focused
-        (8, 2),    # GQA group=4
-        (8, 4),    # GQA group=2
-        (16, 2),   # GQA group=8
-        (16, 4),   # GQA group=4
-        (32, 4),   # GQA group=8
-        (32, 8),   # GQA group=4
-        (4, 1),    # GQA group=4
-        (8, 1),    # GQA group=8
-        (4, 2),    # GQA group=2
+        (8, 2),  # GQA group=4
+        (8, 4),  # GQA group=2
+        (16, 2),  # GQA group=8
+        (16, 4),  # GQA group=4
+        (32, 4),  # GQA group=8
+        (32, 8),  # GQA group=4
+        (4, 1),  # GQA group=4
+        (8, 1),  # GQA group=8
+        (4, 2),  # GQA group=2
         # MHA
         (4, 4),
         (8, 8),
@@ -1290,12 +1414,13 @@ def _generate_stress_cases(num_cases=1000):
             kv_seqlen = rng.choice(kv_seqlen_pool)
         q_heads, kv_heads = rng.choice(head_configs)
         from math import ceil
+
         total_blocks = ceil(kv_seqlen / 128)
         max_top_k = min(total_blocks, 8)
         if max_top_k < 2:
             continue
         else:
-            top_k = rng.randint(2, max_top_k) #修改，暂时不支持等于1
+            top_k = rng.randint(2, max_top_k)  # 修改，暂时不支持等于1
         seed = rng.randint(1, 99999)
         cases.append((q_seqlen, kv_seqlen, q_heads, kv_heads, top_k, seed))
     return cases
@@ -1306,43 +1431,70 @@ _BF16_LARGE_CASES = _generate_stress_cases(1000)
 
 def _make_bf16_large_test(q_seqlen, kv_seqlen, q_heads, kv_heads, top_k, seed):
     def test_fn(self):
-        self._run_bf16_case(q_seqlen=q_seqlen, kv_seqlen=kv_seqlen,
-                            q_heads=q_heads, kv_heads=kv_heads,
-                            top_k=top_k, seed=seed)
+        self._run_bf16_case(
+            q_seqlen=q_seqlen, kv_seqlen=kv_seqlen, q_heads=q_heads, kv_heads=kv_heads, top_k=top_k, seed=seed
+        )
+
     return test_fn
 
 
 for _i, (_qs, _kvs, _qh, _kvh, _tk, _sd) in enumerate(_BF16_LARGE_CASES):
-    _name = (f"test_bf16_large_{_i:03d}_qs{_qs}_kv{_kvs}_qh{_qh}_kvh{_kvh}_"
-             f"top{_tk}_seed{_sd}")
-    setattr(TestNpuSparseAttentionScoreBf16, _name,
-            _make_bf16_large_test(_qs, _kvs, _qh, _kvh, _tk, _sd))
+    _name = f"test_bf16_large_{_i:03d}_qs{_qs}_kv{_kvs}_qh{_qh}_kvh{_kvh}_top{_tk}_seed{_sd}"
+    setattr(TestNpuSparseAttentionScoreBf16, _name, _make_bf16_large_test(_qs, _kvs, _qh, _kvh, _tk, _sd))
 
 
 # Long-sequence stress cases (q_seqlen up to 128, kv_seqlen 1k~64k)
 def _generate_long_seq_cases(num_cases=200):
     """Generate cases with long kv_seqlen (1k~64k) and varied q_seqlen."""
     import random
+
     rng = random.Random(20260610)
 
     q_seqlen_pool = [1, 1, 1, 2, 4, 8, 16, 32, 64, 128]
     kv_seqlen_pool = [
-        1024, 1500, 2000, 2048, 2500, 3000, 3333, 4000, 4096,
-        5000, 5555, 6000, 7000, 7777, 8000, 8192, 9000, 10000,
-        12000, 14000, 16000, 16384, 20000, 24000, 30000, 32000,
-        32768, 40000, 50000, 60000, 65536,
+        1024,
+        1500,
+        2000,
+        2048,
+        2500,
+        3000,
+        3333,
+        4000,
+        4096,
+        5000,
+        5555,
+        6000,
+        7000,
+        7777,
+        8000,
+        8192,
+        9000,
+        10000,
+        12000,
+        14000,
+        16000,
+        16384,
+        20000,
+        24000,
+        30000,
+        32000,
+        32768,
+        40000,
+        50000,
+        60000,
+        65536,
     ]
 
     head_configs = [
-        (8, 2),    # GQA group=4
-        (16, 4),   # GQA group=4
-        (32, 4),   # GQA group=8
-        (16, 2),   # GQA group=8
-        (8, 1),    # GQA group=8
-        (4, 1),    # GQA group=4
-        (8, 4),    # GQA group=2
-        (8, 8),    # MHA
-        (4, 4),    # MHA
+        (8, 2),  # GQA group=4
+        (16, 4),  # GQA group=4
+        (32, 4),  # GQA group=8
+        (16, 2),  # GQA group=8
+        (8, 1),  # GQA group=8
+        (4, 1),  # GQA group=4
+        (8, 4),  # GQA group=2
+        (8, 8),  # MHA
+        (4, 4),  # MHA
     ]
 
     cases = []
@@ -1353,12 +1505,13 @@ def _generate_long_seq_cases(num_cases=200):
             kv_seqlen = rng.choice(kv_seqlen_pool)
         q_heads, kv_heads = rng.choice(head_configs)
         from math import ceil
+
         total_blocks = ceil(kv_seqlen / 128)
         max_top_k = min(total_blocks, 16)
         if max_top_k < 2:
             continue
         else:
-            top_k = rng.randint(1, max_top_k) #修改，暂时不支持等于1
+            top_k = rng.randint(1, max_top_k)  # 修改，暂时不支持等于1
         seed = rng.randint(1, 99999)
         cases.append((q_seqlen, kv_seqlen, q_heads, kv_heads, top_k, seed))
     return cases
@@ -1368,10 +1521,8 @@ _BF16_LONGSEQ_CASES = _generate_long_seq_cases(200)
 
 
 for _i, (_qs, _kvs, _qh, _kvh, _tk, _sd) in enumerate(_BF16_LONGSEQ_CASES):
-    _name = (f"test_bf16_longseq_{_i:03d}_qs{_qs}_kv{_kvs}_qh{_qh}_kvh{_kvh}_"
-             f"top{_tk}_seed{_sd}")
-    setattr(TestNpuSparseAttentionScoreBf16, _name,
-            _make_bf16_large_test(_qs, _kvs, _qh, _kvh, _tk, _sd))
+    _name = f"test_bf16_longseq_{_i:03d}_qs{_qs}_kv{_kvs}_qh{_qh}_kvh{_kvh}_top{_tk}_seed{_sd}"
+    setattr(TestNpuSparseAttentionScoreBf16, _name, _make_bf16_large_test(_qs, _kvs, _qh, _kvh, _tk, _sd))
 
 
 # 100-case Prefill+Decode sequential test matrix
@@ -1484,17 +1635,15 @@ _PD_CASES = [
 def _make_pd_test(p_q_seqlen, kv_seqlen, q_heads, kv_heads, top_k, seed):
     def test_fn(self):
         self._run_prefill_decode_case(
-            p_q_seqlen=p_q_seqlen, kv_seqlen=kv_seqlen,
-            q_heads=q_heads, kv_heads=kv_heads,
-            top_k=top_k, seed=seed)
+            p_q_seqlen=p_q_seqlen, kv_seqlen=kv_seqlen, q_heads=q_heads, kv_heads=kv_heads, top_k=top_k, seed=seed
+        )
+
     return test_fn
 
 
 for _i, (_pqs, _kvs, _qh, _kvh, _tk, _sd) in enumerate(_PD_CASES):
-    _name = (f"test_pd_{_i:03d}_pq{_pqs}_kv{_kvs}_qh{_qh}_kvh{_kvh}_"
-             f"top{_tk}_seed{_sd}")
-    setattr(TestNpuSparseAttentionScoreBf16, _name,
-            _make_pd_test(_pqs, _kvs, _qh, _kvh, _tk, _sd))
+    _name = f"test_pd_{_i:03d}_pq{_pqs}_kv{_kvs}_qh{_qh}_kvh{_kvh}_top{_tk}_seed{_sd}"
+    setattr(TestNpuSparseAttentionScoreBf16, _name, _make_pd_test(_pqs, _kvs, _qh, _kvh, _tk, _sd))
 
 
 # --- Custom standalone test: q_heads=64, kv_heads=4, qseqlen=132, kvseqlen=132, topk=16 ---
@@ -1507,24 +1656,21 @@ def _test_bf16_q64_kv4_seqlen132_topk16(self):
     block_size = 128
     top_k = 16
     seed = 42
-    batch = 1
     group_size = q_heads // kv_heads
     total_blocks = ceil(kv_seqlen / block_size)  # = 100
     # KV cache physical blocks >= total_blocks
     total_physical_blocks = total_blocks + 10  # extra headroom
-    max_blocks_per_batch = total_blocks
     actual_seq_lengths = torch.tensor([q_seqlen], dtype=torch.int32)
     actual_seq_lengths_kv = torch.tensor([kv_seqlen], dtype=torch.int32)
 
     torch.manual_seed(seed)
     query_fp32 = torch.rand(q_seqlen, q_heads, head_dim, dtype=torch.float32) * 2 - 1
-    key_fp32 = torch.rand(
-        total_physical_blocks, block_size, kv_heads, head_dim, dtype=torch.float32) * 2 - 1
-    value_fp32 = torch.rand(
-        total_physical_blocks, block_size, kv_heads, head_dim, dtype=torch.float32) * 2 - 1
+    key_fp32 = torch.rand(total_physical_blocks, block_size, kv_heads, head_dim, dtype=torch.float32) * 2 - 1
+    value_fp32 = torch.rand(total_physical_blocks, block_size, kv_heads, head_dim, dtype=torch.float32) * 2 - 1
 
     # block_table shape [batch, max_blocks_per_batch], random mapping into physical blocks
     import random
+
     rng = random.Random(seed)
     physical_ids = rng.sample(range(total_physical_blocks), total_blocks)
     block_table = torch.tensor([physical_ids], dtype=torch.int32)
@@ -1532,11 +1678,11 @@ def _test_bf16_q64_kv4_seqlen132_topk16(self):
     key_logical = torch.zeros(total_blocks * block_size, kv_heads, head_dim, dtype=torch.float32)
     for logical_id in range(total_blocks):
         physical_id = int(block_table[0, logical_id].item())
-        key_logical[logical_id * block_size:(logical_id + 1) * block_size] = key_fp32[physical_id]
+        key_logical[logical_id * block_size : (logical_id + 1) * block_size] = key_fp32[physical_id]
     key_flat = key_logical[:kv_seqlen, :, :]
     select_idx, select_num_idx = generate_block_index_with_causal(
-        query_fp32, key_flat, q_seqlen, kv_seqlen,
-        kv_heads, group_size, block_size, top_k)
+        query_fp32, key_flat, q_seqlen, kv_seqlen, kv_heads, group_size, block_size, top_k
+    )
     scale_value = 1.0 / math.sqrt(head_dim)
 
     query = query_fp32.to(torch.bfloat16)
@@ -1560,12 +1706,17 @@ def _test_bf16_q64_kv4_seqlen132_topk16(self):
     print(f"  scale_value:            {scale_value}")
     print(f"  block_size:             {block_size}")
     print(f"  top_k:                  {top_k}")
-    print(f"  inner_precise:          4")
+    print("  inner_precise:          4")
     print("=" * 60)
 
     cpu_out = cpu_sparse_attention_score_bf16(
-        query, key, value, select_idx, block_table,
-        actual_seq_lengths.tolist(), actual_seq_lengths_kv.tolist(),
+        query,
+        key,
+        value,
+        select_idx,
+        block_table,
+        actual_seq_lengths.tolist(),
+        actual_seq_lengths_kv.tolist(),
         num_key_value_heads=kv_heads,
         select_num_idx=select_num_idx,
         block_size=block_size,
@@ -1573,8 +1724,13 @@ def _test_bf16_q64_kv4_seqlen132_topk16(self):
     )
 
     cpu_out_fp32 = cpu_sparse_attention_score_fp32(
-        query, key, value, select_idx, block_table,
-        actual_seq_lengths.tolist(), actual_seq_lengths_kv.tolist(),
+        query,
+        key,
+        value,
+        select_idx,
+        block_table,
+        actual_seq_lengths.tolist(),
+        actual_seq_lengths_kv.tolist(),
         num_key_value_heads=kv_heads,
         select_num_idx=select_num_idx,
         block_size=block_size,
@@ -1582,7 +1738,11 @@ def _test_bf16_q64_kv4_seqlen132_topk16(self):
     )
 
     npu_out = torch_npu.npu_sparse_attention_score(
-        query.npu(), key.npu(), value.npu(), select_idx.npu(), block_table.npu(),
+        query.npu(),
+        key.npu(),
+        value.npu(),
+        select_idx.npu(),
+        block_table.npu(),
         select_num_idx=select_num_idx.npu(),
         actual_seq_lengths=actual_seq_lengths.npu(),
         actual_seq_lengths_kv=actual_seq_lengths_kv.npu(),
@@ -1603,8 +1763,8 @@ def _test_bf16_q64_kv4_seqlen132_topk16(self):
 
     self.assertRtolEqual(cpu_out.float().numpy(), npu_out_cpu.float().numpy(), prec=7e-3)
 
-setattr(TestNpuSparseAttentionScoreBf16, "test_bf16_q64_kv4_seqlen132_topk16",
-        _test_bf16_q64_kv4_seqlen132_topk16)
+
+TestNpuSparseAttentionScoreBf16.test_bf16_q64_kv4_seqlen132_topk16 = _test_bf16_q64_kv4_seqlen132_topk16
 
 
 # ---------------------------------------------------------------------------

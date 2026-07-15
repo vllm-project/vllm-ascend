@@ -25,10 +25,7 @@ def _split_main_kv_cache(
         else:
             raise ValueError(f"Unexpected main kv cache shape: {tuple(kv_cache.shape)}")
     if k_cache.ndim != 4 or v_cache.ndim != 4:
-        raise ValueError(
-            "Unexpected split main kv cache shapes: "
-            f"{tuple(k_cache.shape)}, {tuple(v_cache.shape)}"
-        )
+        raise ValueError(f"Unexpected split main kv cache shapes: {tuple(k_cache.shape)}, {tuple(v_cache.shape)}")
     return k_cache, v_cache
 
 
