@@ -35,6 +35,10 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
 from vllm_ascend.utils import is_310p, vllm_version_is
 
+_IS_VLLM_RELEASE = vllm_version_is("0.24.0")
+if not _IS_VLLM_RELEASE:
+    from vllm.model_executor.models.qwen3_next import _all_gather_hidden_and_residual
+
 _GDN_PATCH_TARGET = _GDNBaseCls
 
 
@@ -187,7 +191,8 @@ if Qwen3_5MultiTokenPredictor is not None:
         residual = None
 
         current_step_idx = spec_step_idx % self.num_mtp_layers
-        hidden_states, residual = self.layers[current_step_idx](
+        mtp_layer = self.layers[current_step_idx]
+        hidden_states, residual = mtp_layer(
             positions=positions,
             hidden_states=hidden_states,
             residual=residual,
@@ -201,13 +206,21 @@ if Qwen3_5MultiTokenPredictor is not None:
                 }
             )
 
+        if not _IS_VLLM_RELEASE and mtp_layer.use_attn_reduce_scatter_for_moe:
+            hidden_states, residual = _all_gather_hidden_and_residual(
+                hidden_states,
+                residual,
+                positions.shape[-1],
+                self.config.hidden_size,
+            )
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
     Qwen3_5MultiTokenPredictor.forward = qwen3_5_mtp_forward
 
 
-Qwen3_5DecoderLayer.forward = AscendQwen3_5DecoderLayer.forward
+if _IS_VLLM_RELEASE:
+    Qwen3_5DecoderLayer.forward = AscendQwen3_5DecoderLayer.forward
 Qwen3NextAttention.forward = AscendQwen3NextAttention.forward
 _GDN_PATCH_TARGET._split_ba_for_tp = AscendGatedDeltaNetAttention._split_ba_for_tp
 _GDN_PATCH_TARGET.get_state_shape = AscendGatedDeltaNetAttention.get_state_shape
