@@ -103,7 +103,12 @@ The following table lists additional configuration options available in vLLM Asc
 | `enable_dsa_cp`                     | bool | `False` | Whether to enable dsa_cp for DeepSeek V3.2, DeepSeek V4, and other models with the same architecture. This feature depends on FLASHCOMM1. Please ensure that FLASHCOMM1 is enabled before enabling this feature.|
 | `rejection_sampler_config`          | dict | `{}`    | Configuration options for rejection sampler (block verify and entropy verify). |
 | `multistream_dsv4_dsa_overlap`      | bool | `True`  | Whether to enable dsa multi-stream overlap for DeepSeek V4.  |
+<<<<<<< HEAD
 | `short_request_first_config`       | dict | `{}`    | Configuration options for ShortRequestFirst prefill scheduling on the PD prefill (P) node. Used with `recompute_scheduler_enable=true`. |
+=======
+| `num_ubatches`                      | int  | `1`    | Number of concurrent ubatches ("micro-batches") used to overlap MoE collective communication with dense compute (prefill only). `1` disables ubatch overlap entirely; `2` splits each scheduler step's token batch into 2 slices executed on 2 NPU streams. **Only `1` and `2` are supported** — values > 2 are rejected at config init (the lock-step handoff is a two-stream ping-pong by design). |
+| `ubatch_trigger_threshold`          | int  | `2048` | Minimum padded token count required to enable ubatch overlap for a given scheduler step. |
+>>>>>>> 0829da254 (docs(ubatch): add ubatch overlap feature guide and config reference)
 
 The details of each configuration option are as follows:
 

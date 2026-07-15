@@ -16,6 +16,7 @@
 #
 # ruff: noqa: E501
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from functools import wraps
 
@@ -45,12 +46,14 @@ from vllm_ascend.quantization.methods.base import get_moe_num_logical_experts
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_NZ,
+    keep_sync,
     maybe_trans_nz,
     npu_stream_switch,
     shared_expert_dp_enabled,
     shared_experts_calculation_stream,
     vllm_version_is,
 )
+from vllm_ascend.worker.ubatch_utils import get_ubatch_runtime_manager
 
 if vllm_version_is("0.23.0"):
     from vllm.model_executor.layers.fused_moe.layer import UnquantizedFusedMoEMethod
@@ -620,13 +623,18 @@ else:
 
                     set_flash_common3_context(topk_weights=topk_weights, topk_ids=topk_ids)
 
-            prepare_output = _EXTRA_CTX.moe_comm_method.prepare(
-                hidden_states=hidden_states,
-                router_logits=router_logits,
-                replace_allreduce=_EXTRA_CTX.flash_comm_v1_enabled,
-                enable_shared_expert_dp=self.enable_shared_expert_dp,
-                quant_type=self.quant_type,
-            )
+            rt = get_ubatch_runtime_manager()
+            # comm_section() returns a one-shot generator context manager, so a
+            # fresh instance is needed for each with-block. When ubatch is
+            # disabled, nullcontext() is a cheap no-op fast path.
+            with rt.comm_section() if rt.is_ubatch_running else nullcontext():
+                prepare_output = _EXTRA_CTX.moe_comm_method.prepare(
+                    hidden_states=hidden_states,
+                    router_logits=router_logits,
+                    replace_allreduce=_EXTRA_CTX.flash_comm_v1_enabled,
+                    enable_shared_expert_dp=self.enable_shared_expert_dp,
+                    quant_type=self.quant_type,
+                )
             hidden_states = prepare_output.hidden_states
             router_logits = prepare_output.router_logits
             mc2_mask = prepare_output.mc2_mask
@@ -686,11 +694,12 @@ else:
                 else:
                     self.moe_load.add_(local_load)
 
-            routed_out = _EXTRA_CTX.moe_comm_method.finalize(
-                hidden_states=fused_experts_results.routed_out,
-                reduce_results=isinstance(_EXTRA_CTX.moe_comm_method, AllGatherCommImpl),
-                padded_hidden_states_shape=padded_hidden_states_shape,
-            )
+            with rt.comm_section() if rt.is_ubatch_running else nullcontext():
+                routed_out = _EXTRA_CTX.moe_comm_method.finalize(
+                    hidden_states=fused_experts_results.routed_out,
+                    reduce_results=isinstance(_EXTRA_CTX.moe_comm_method, AllGatherCommImpl),
+                    padded_hidden_states_shape=padded_hidden_states_shape,
+                )
 
             if return_with_event:
                 return FusedMoEResult(
