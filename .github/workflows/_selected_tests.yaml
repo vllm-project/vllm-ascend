@@ -454,6 +454,16 @@ jobs:
               echo "TASK_NAME=${TASK_NAME}"
             } >> "${GITHUB_ENV}"
 
+        - name: Upload coverage package artifact
+          uses: actions/upload-artifact@v7
+          with:
+            name: coverage-package-${{ env.TASK_NAME }}
+            path: |
+              coverage.tar
+              coverage_version.txt
+            retention-days: 7
+            compression-level: 0
+
         - name: Upload coverage to OBS
           run: |
             pip install esdk-obs-python --quiet
