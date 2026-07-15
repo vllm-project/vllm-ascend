@@ -52,7 +52,7 @@ from vllm_ascend.models.llama_eagle3_vwn import Eagle3VwnLlamaForCausalLM
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 from vllm_ascend.spec_decode.utils import SlidingWindowAdapter
-from vllm_ascend.utils import enable_sp, lmhead_tp_enable, shared_expert_dp_enabled, vllm_version_is
+from vllm_ascend.utils import check_gdn_layer, enable_sp, lmhead_tp_enable, shared_expert_dp_enabled, vllm_version_is
 
 if not vllm_version_is("0.23.0"):
     from vllm.model_executor.models.qwen3_dspark import Qwen3DSparkForCausalLM
@@ -168,6 +168,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         self.use_async_scheduling = self.vllm_config.scheduler_config.async_scheduling
         self.use_compress = hasattr(self.vllm_config.model_config.hf_config, "compress_ratios")
+        self.has_gdn = check_gdn_layer(self.vllm_config)
         self.pass_hidden_states_to_model = pass_hidden_states_to_model
         self.decode_threshold = 1 + self.num_speculative_tokens
         self.query_start_loc = self.runner._make_buffer(self.runner.max_num_reqs + 2, dtype=torch.int32)
@@ -357,6 +358,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         self.attn_layer_names = list(sorted(self._draft_attn_layer_names))
         draft_attn_layers_dict = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase)
+        # initialized for mamba models
         self.kernel_block_size = (
             draft_attn_layers_dict[self.attn_layer_names[0]].get_attn_backend().get_supported_kernel_block_sizes()[0]
         )
@@ -401,13 +403,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 if self.eagle3_use_aux_hidden_state
                 else self.model.mask_hidden.view(self.hidden_size)
             )
-
-        logger.info(
-            "[spec_decode/base] Draft model loaded successfully: method=%s, num_draft_attn_layers=%d, block_size=%d",
-            self.method,
-            len(self._draft_attn_layer_names),
-            self.kernel_block_size,
-        )
 
     def _maybe_share_embeddings(self, target_language_model: nn.Module) -> None:
         """
@@ -1689,9 +1684,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             # NOTE: In vllm, `block_size = attn_metadata_builder.kv_cache_spec.block_size`.
             # However, in vllm-ascend, the above value can be multiple of `kernel_block_size`,
             # which is not correct for computing `slot_mapping` below.
-            block_size = self.kernel_block_size
-            if not isinstance(block_size, int) or self.use_compress:
-                block_size = 128
+            if self.has_gdn:
+                block_size = self.kernel_block_size
+            else:
+                block_size = self.block_size
 
             # Compute the slot mapping.
             # When sliding window is enabled, block_table_tensor may be cropped
