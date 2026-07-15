@@ -62,3 +62,13 @@ Typical examples:
 
 - If EP+graph is validated and requested/expected, it should be the default runbook path.
 - Eager mode should be documented as fallback/troubleshooting only.
+
+## 8) 310P multimodal lessons
+
+- Treat an explicit 310P or single-card target as the validation boundary; do not substitute A2/A3 multi-card defaults.
+- 310P does not support BF16. Use FP16 for floating-point validation; treat INT8/INT4 as separate quantized paths that need their own evidence.
+- Gate 310P workarounds from model config fields such as `model_type` and `architectures`; avoid shape, vocab, or hidden-size magic numbers.
+- Keep known-good NPU perf kernels and replace only the failing 310P path, especially for rel-pos attention, RoPE edge cases, and ND/NZ layout mismatches.
+- Validate ACLGraph with repeat image requests, mixed OCR/grounding requests, concurrency, long output, and short requests after long output; require `Replaying aclgraph` evidence and scan logs for engine death or AICore faults.
+- For replay-only failures, compare capture and replay shapes, strides, storage addresses, and alignment before changing model logic.
+- For single-card performance sweeps, report workload shape, prefix-cache hit/miss, max output tokens, streaming mode, active batch size, and graph-capture limits separately from throughput plateaus.

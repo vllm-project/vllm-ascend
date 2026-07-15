@@ -18,6 +18,15 @@
 _GLOBAL_PATCH_APPLIED = False
 
 
+def _ensure_tokenizer_patch():
+    from vllm.tokenizers.registry import _MODEL_TYPES_WITH_INCORRECT_TOKENIZER_CLASS
+
+    # DeepSeek-OCR2 advertises LlamaTokenizerFast, which normalizes OCR
+    # special tokens such as ``<｜▁pad▁｜>``. The generic tokenizers backend
+    # preserves the tokenizer.json ByteLevel output used by the model.
+    _MODEL_TYPES_WITH_INCORRECT_TOKENIZER_CLASS.add("deepseek_ocr2")
+
+
 def _ensure_global_patch():
     """Apply process-wide vLLM patches before engine-core initialization.
 
@@ -29,6 +38,8 @@ def _ensure_global_patch():
     if _GLOBAL_PATCH_APPLIED:
         return
 
+    _ensure_tokenizer_patch()
+
     from vllm_ascend.utils import adapt_patch
 
     adapt_patch(is_global_patch=True)
@@ -38,6 +49,7 @@ def _ensure_global_patch():
 def register():
     """Register the NPU platform."""
 
+    _ensure_tokenizer_patch()
     return "vllm_ascend.platform.NPUPlatform"
 
 

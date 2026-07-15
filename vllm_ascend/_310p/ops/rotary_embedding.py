@@ -127,6 +127,8 @@ def _rope_forward_oot(
     offsets: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     query_shape, key_shape = query.shape, key.shape
+    if self.rotary_dim == 0:
+        return query.view(query_shape), key.view(key_shape)
     if self.cos_sin_cache.device != query.device:
         self.cos_sin_cache = self.cos_sin_cache.to(query.device)
     if self.cos_sin_cache.dtype != query.dtype:
@@ -137,6 +139,11 @@ def _rope_forward_oot(
         update_cos_sin(positions)
 
     cos, sin = get_cos_and_sin_slice()
+    if cos is None or sin is None:
+        num_tokens = positions.shape[0]
+        cos_sin = self.cos_sin_cache.index_select(0, positions).view(num_tokens, 2, -1).repeat(1, 1, 2)
+        cos = cos_sin.chunk(2, dim=1)[0].contiguous().view(1, num_tokens, 1, -1)
+        sin = cos_sin.chunk(2, dim=1)[1].contiguous().view(1, num_tokens, 1, -1)
     if offsets is not None:
         raise NotImplementedError("Batched rotary embedding is currently not supported on NPU.")
     rotary_mode = "half" if is_neox_style else "interleave"

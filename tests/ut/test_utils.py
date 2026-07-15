@@ -34,6 +34,17 @@ class TestUtils(TestBase):
         importlib.reload(platform)
         utils.enable_dsa_cp_with_o_proj_tp.cache_clear()
 
+    def test_deepseek_ocr2_tokenizer_backend_patch(self):
+        from vllm.tokenizers import registry
+
+        import vllm_ascend
+
+        registry._MODEL_TYPES_WITH_INCORRECT_TOKENIZER_CLASS.discard("deepseek_ocr2")
+
+        vllm_ascend._ensure_tokenizer_patch()
+
+        self.assertIn("deepseek_ocr2", registry._MODEL_TYPES_WITH_INCORRECT_TOKENIZER_CLASS)
+
     def test_nd_to_nz_2d(self):
         # can be divided by 16
         input_tensor = torch.randn(32, 64)

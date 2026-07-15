@@ -296,6 +296,32 @@ def maybe_trans_nz(weight: torch.Tensor) -> torch.Tensor:
     return torch_npu.npu_format_cast(weight, ACL_FORMAT_FRACTAL_NZ)
 
 
+def is_deepseek_ocr2_310p_model(vllm_config: VllmConfig | None = None) -> bool:
+    try:
+        if not is_310p():
+            return False
+    except RuntimeError:
+        return False
+    if vllm_config is None:
+        try:
+            from vllm.config import get_current_vllm_config
+
+            vllm_config = get_current_vllm_config()
+        except (AssertionError, RuntimeError):
+            try:
+                vllm_config = get_ascend_config().vllm_config
+            except RuntimeError:
+                return False
+    model_config = getattr(vllm_config, "model_config", None)
+    hf_config = getattr(model_config, "hf_config", None)
+    if hf_config is None:
+        return False
+    if getattr(hf_config, "model_type", None) == "deepseek_ocr2":
+        return True
+    architectures = getattr(hf_config, "architectures", None) or ()
+    return "DeepseekOCR2ForCausalLM" in architectures
+
+
 def _round_up(x: int, align: int):
     # round up x to align, for example, if align is 16, x will be rounded up to 16, 32, 48, etc.
     # input: 15, 16 -> output: 16
@@ -765,7 +791,8 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
             vllm_config = get_current_vllm_config()
         except AssertionError:
             vllm_config = None
-    if vllm_config is not None and vllm_config.model_config.is_deepseek_mla:
+    model_config = getattr(vllm_config, "model_config", None)
+    if model_config is not None and (model_config.is_deepseek_mla or is_deepseek_ocr2_310p_model(vllm_config)):
         from vllm_ascend.ops.fused_moe.gate_linear import AscendGateLinear
 
         REGISTERED_ASCEND_OPS["GateLinear"] = AscendGateLinear

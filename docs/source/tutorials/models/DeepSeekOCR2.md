@@ -154,6 +154,33 @@ The parameters are explained as follows:
 - `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.
 - `--gpu-memory-utilization` represents the proportion of HBM that vLLM will use for actual inference. Its essential function is to calculate the available kv_cache size. During the warm-up phase (referred to as profile run in vLLM), vLLM records the peak GPU memory usage during an inference process with an input size of `--max-num-batched-tokens`. The available kv_cache size is then calculated as: `--gpu-memory-utilization` * HBM size - peak GPU memory usage. Therefore, the larger the value of `--gpu-memory-utilization`, the more kv_cache can be used. However, since the GPU memory usage during the warm-up phase may differ from that during actual inference (e.g., due to uneven EP load), setting `--gpu-memory-utilization` too high may lead to OOM (Out of Memory) issues during actual inference. The default value is `0.9`.
 
+#### Atlas 300I DUO (310P)
+
+`DeepSeek-OCR-2` can be deployed on 1 Atlas 300I DUO card. The verified 310P
+path uses FP16 and ACLGraph by default.
+
+```shell
+#!/bin/sh
+
+export VLLM_USE_V1=1
+export VLLM_ASCEND_ENABLE_NZ=0
+export TOKENIZERS_PARALLELISM=false
+export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
+
+vllm serve /root/.cache/DeepSeek-OCR-2 \
+    --served-model-name deepseekocr2 \
+    --trust-remote-code \
+    --dtype float16 \
+    --tensor-parallel-size 1 \
+    --port 8000 \
+    --max-num-seqs 4 \
+    --allowed-local-media-path /
+```
+
+On 310P, `--max-num-seqs 4` is the recommended single-card serving setting.
+`--max-model-len` is omitted because the model configuration already sets
+`max_position_embeddings` to 8192.
+
 ### 5.2 Multi-node Deployment
 
 Single-node deployment is recommended.
@@ -185,6 +212,33 @@ curl http://<node0_ip>:<port>/v1/completions \
     }'
 ```
 
+For the 310P OpenAI-compatible chat API, first check the model list:
+
+```bash
+curl http://127.0.0.1:8000/v1/models
+```
+
+Then send an image OCR request:
+
+```shell
+curl http://127.0.0.1:8000/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+        "model": "deepseekocr2",
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "<image>\nFree OCR. "},
+                {"type": "image_url", "image_url": {
+                    "url": "file:///root/.cache/DeepSeek-OCR-2/assets/fig1.png"
+                }}
+            ]
+        }],
+        "max_tokens": 160,
+        "temperature": 0
+    }'
+```
+
 ## 7 Accuracy Evaluation
 
 ### Using AISBench
@@ -194,9 +248,10 @@ curl http://<node0_ip>:<port>/v1/completions \
 2. After execution, you can get the result, here is the result of `DeepSeek-OCR-2` for reference only.
 
 | dataset | version | metric | mode | vllm-api-general-chat | note |
-|----- | ----- | ----- | ----- | -----| ----- |
+| ----- | ----- | ----- | ----- | ----- | ----- |
 | textvqa | - | accuracy | gen | 50.28 | 1 Atlas 800 A2 |
 | ominidocbench | - | accuracy | gen | 66.86 | 1 Atlas 800 A2 |
+| textvqa | - | accuracy | gen | 49.82 | Atlas 300I DUO (310P), 1 card |
 
 ## 8 Performance Evaluation
 
@@ -212,6 +267,37 @@ The performance result is:
 
 **Performance**: TTFT = 2s, TPOT = 200ms, Average performance of each card is 864 TPS (Token Per Second).
 
+### 310P Single-card Serving
+
+The following results were measured on a single Atlas 300I DUO card with real
+weights, FP16, ACLGraph enabled, async scheduling enabled, and prefix caching
+enabled, using the default model length 8192. Each row restarts the server with
+`--max-num-seqs` set to the active batch size. The test reuses the same image
+and prompt after warmup, so the numbers reflect the prefix-cache-hit decode
+path.
+
+| active batch size | HTTP success | cache-hit output throughput | average TPOT | average TTFT |
+| ---: | ---: | ---: | ---: | ---: |
+| 8 | 24 / 24 | 378.40 tok/s | 19.56 ms | 0.27s |
+| 16 | 48 / 48 | 851.14 tok/s | 16.39 ms | 0.39s |
+| 24 | 72 / 72 | 840.12 tok/s | 25.72 ms | 0.46s |
+| 32 | 96 / 96 | 1232.33 tok/s | 22.09 ms | 0.61s |
+| 48 | 144 / 144 | 1613.49 tok/s | 25.30 ms | 0.68s |
+| 64 | 192 / 192 | 1805.98 tok/s | 29.10 ms | 0.96s |
+
+For decode-heavy OCR requests that hit prefix cache, single-card throughput
+continued to improve through batch size 64. Batch size 64 showed higher TTFT and
+TPOT, so batch size 32 or 48 is a better latency/throughput tradeoff, while
+batch size 64 is useful when peak decode throughput is preferred.
+
+Batch sizes 72 and 80 did not reach request serving in the same default graph
+mode: ACLGraph capture failed during `aclnnTopk` / `TopKV2` capture. This is a
+graph-capture limit rather than an observed throughput plateau. The result
+suggests that prefill/decode separation inside one node can be useful for this
+workload, and that a decode-focused graph path such as full decode-only graph
+capture is a promising follow-up optimization. This tutorial validates only the
+default graph mode shown above.
+
 ## 9 Performance Tuning
 
 ### 9.1 Recommended Configurations
@@ -222,9 +308,9 @@ The performance result is:
 
 > `*Total NPUs` indicates the total number of NPUs used across all nodes. 1 node = 1 Atlas 800 A3 server (64G × 16 NPUs).
 
-|Scenario|Deployment Mode|*Total NPUs|Weight Version|Key Considerations|
-|--------|---------------|-----------|--------------|------------------|
-|Multimodal<br>(1080P)|Single-Node Mixed|16 (A3)|deepseekocr2|dp1 tp1 for high-resolution visual inputs|
+| Scenario | Deployment Mode | *Total NPUs | Weight Version | Key Considerations |
+| -------- | --------------- | ----------- | -------------- | ------------------ |
+| Multimodal<br>(1080P) | Single-Node Mixed | 16 (A3) | deepseekocr2 | dp1 tp1 for high-resolution visual inputs |
 
 ### 9.2 Tuning Guidelines
 
