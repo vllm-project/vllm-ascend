@@ -14,7 +14,7 @@
     * CANN >= 8.5.0
     * vLLM：main branch
     * vLLM-Ascend：main branch
-    * mooncake：>= 0.3.9
+    * mooncake：>= 0.3.11.post1
 
 ### KV Pool Parameter Description
 
@@ -63,58 +63,23 @@ export PYTHONHASHSEED=0
     * Install Mooncake
 
         Mooncake is the serving platform for Kimi, a leading LLM service provided by Moonshot AI.
-        Installation and Compilation Guide: <https://github.com/kvcache-ai/Mooncake?tab=readme-ov-file#build-and-use-binaries>.
-        First, we need to obtain the Mooncake project. Refer to the following command:
+        The Mooncake wheel requires glibc 2.35 or later. Check the installed glibc version before installation:
 
         ```shell
-        git clone -b v0.3.9 --depth 1 https://github.com/kvcache-ai/Mooncake.git
+        ldd --version
         ```
 
-        (Optional) Replace go install url if the network is poor
+        Install Mooncake with pip:
 
         ```shell
-        cd Mooncake
-        sed -i 's|https://go.dev/dl/|https://golang.google.cn/dl/|g' dependencies.sh
-        ```
-
-        Install mpi
-
-        ```shell
-        apt-get install mpich libmpich-dev -y
-        ```
-
-        Install the relevant dependencies. The installation of Go is not required.
-
-        ```shell
-        bash dependencies.sh -y
-        ```
-
-        Compile and install
-
-        ```shell
-        mkdir build
-        cd build
-        cmake .. -DUSE_ASCEND_DIRECT=ON
-        make -j
-        make install
-        ```
-
-        Set environment variables
-
-        **Note:**
-
-        * Adjust the Python path according to your specific Python installation
-        * Ensure `/usr/local/lib` and `/usr/local/lib64` are in your `LD_LIBRARY_PATH`
-
-        ```shell
-        export LD_LIBRARY_PATH=/usr/local/lib64/python3.12/site-packages/mooncake:$LD_LIBRARY_PATH
+        python3 -m pip install mooncake-transfer-engine-npu==0.3.11.post1 --extra-index-url https://mirrors.aliyun.com/pypi/web/simple
         ```
 
 ### Environment Variables Description
 
 | Hardware | Dependencies | Export Command | Description |
 | :--- | :--- | :--- | :--- |
-| 800 I/T A3 series | HDK >= 26.0<br>or HDK >= 25.5 with mooncake >= v0.3.11<br>CANN >= 9.0.0<br>LingQu Computing Network >= 1.5 | `export ASCEND_ENABLE_USE_FABRIC_MEM=1` | **Recommended**. Enables unified memory address direct transmission scheme. With SSD offload, see [Fabric memory size alignment](#122-fabric-memory-size-alignment-a3--ascend_enable_use_fabric_mem1) — memory sizes must be aligned to 1GB. |
+| 800 I/T A3 series | HDK >= 26.0<br>or HDK >= 25.5 with mooncake >= 0.3.11.post1<br>CANN >= 9.0.0<br>LingQu Computing Network >= 1.5 | `export ASCEND_ENABLE_USE_FABRIC_MEM=1` | **Recommended**. Enables unified memory address direct transmission scheme. With SSD offload, see [Fabric memory size alignment](#122-fabric-memory-size-alignment-a3--ascend_enable_use_fabric_mem1) — memory sizes must be aligned to 1GB. |
 | 800 I/T A3 series | If any dependency above is not met | `export ASCEND_BUFFER_POOL=4:8` | Configures the number and size of buffers on the NPU Device for aggregation and KV transfer (e.g., `4:8` means 4 buffers of 8MB). |
 | 800 I/T A2 series | HDK >= 25.5 is recommended | `export HCCL_INTRA_ROCE_ENABLE=1` | Required by direct transmission scheme on 800 I/T A2 series|
 
@@ -432,7 +397,7 @@ This is because HCCL one-sided communication connections are created lazily afte
 
 ### Enable MooncakeStore SSD Offload with Embedded Real Client Mode
 
-* Requires mooncake >= v0.3.11.
+* Requires mooncake >= 0.3.11.post1.
 
 #### Start the master
 
@@ -536,8 +501,14 @@ ock.mmc.local_service.dram.size = 1GB
 
 Starting the MetaService service.
 
+Run `pip show memcache_hybrid` and find the `Location` value in the output. Use that value as `{INSTALL_PATH}` below.
+
 ```shell
-export MMC_META_CONFIG_PATH=/usr/local/memcache_hybrid/latest/config/mmc-meta.conf
+pip show memcache_hybrid
+```
+
+```shell
+export MMC_META_CONFIG_PATH={INSTALL_PATH}/memcache_hybrid/config/mmc-meta.conf
 
 python -c "from memcache_hybrid import MetaService; MetaService.main()"
 ```
@@ -1031,7 +1002,7 @@ If client logs show `OffloadObjectHeartbeat failed, error code is SEGMENT_NOT_FO
 | Mitigation | Notes |
 | :--- | :--- |
 | **Temporary:** raise Master TTL | e.g. `mooncake_master ... --client_ttl=120`. Tune to your init/warmup window (often `60`–`120` is enough). Does not fix the root cause. |
-| **Recovery:** upgrade Mooncake | Versions **> v0.3.11** (main branch) can remount `LOCAL_DISK` and rescan metadata after `SEGMENT_NOT_FOUND`. This **recovers after** cleanup; it does **not** prevent expiry or in-flight request failures while metadata is gone. |
+| **Recovery:** upgrade Mooncake | Versions **>= 0.3.11.post1** (main branch) can remount `LOCAL_DISK` and rescan metadata after `SEGMENT_NOT_FOUND`. This **recovers after** cleanup; it does **not** prevent expiry or in-flight request failures while metadata is gone. |
 | **Root fix:** Mooncake Ping CPU affinity | Pin the storage Ping thread to a release/isolated CPU (Mooncake-side change). Optional vLLM-Ascend cooperation to pass the release CPU per rank. |
 
 Also restart Master together with vLLM to avoid stale `segment_already_exists` state when debugging restarts.
