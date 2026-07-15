@@ -613,39 +613,6 @@ class TestKVPoolSchedulerGetStoreLookupHitTokens(unittest.TestCase):
         self.assertEqual(result, 64)
 
 
-class TestKVPoolSchedulerStaticMethods(unittest.TestCase):
-    """Test static helper methods."""
-
-    def test_uses_hybrid_kv_cache_none(self):
-        self.assertFalse(KVPoolScheduler._uses_hybrid_kv_cache(MagicMock(), None))
-
-    def test_uses_hybrid_kv_cache_disabled(self):
-        vllm_config = MagicMock()
-        vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = True
-        kv_cache_config = MagicMock()
-        kv_cache_config.kv_cache_groups = [MagicMock()]
-        self.assertFalse(KVPoolScheduler._uses_hybrid_kv_cache(vllm_config, kv_cache_config))
-
-    def test_get_group_family_out_of_range(self):
-        self.assertEqual(KVPoolScheduler._get_group_family(None, ["a"], 5), "default")
-
-    def test_get_group_family_valid(self):
-        self.assertEqual(KVPoolScheduler._get_group_family(None, ["a", "b"], 1), "b")
-
-    def test_get_group_block_size_out_of_range(self):
-        scheduler_mock = MagicMock()
-        scheduler_mock.grouped_block_size = [16, 32]
-        # Call unbound
-        result = KVPoolScheduler._get_group_block_size(scheduler_mock, 5)
-        self.assertEqual(result, 16)
-
-    def test_get_group_block_size_valid(self):
-        scheduler_mock = MagicMock()
-        scheduler_mock.grouped_block_size = [16, 32]
-        result = KVPoolScheduler._get_group_block_size(scheduler_mock, 1)
-        self.assertEqual(result, 32)
-
-
 class TestKVPoolSchedulerFloorGranularity(unittest.TestCase):
     """Test _floor_to_cache_transfer_granularity."""
 

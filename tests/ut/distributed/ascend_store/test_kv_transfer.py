@@ -697,11 +697,13 @@ class TestKVTransferTpMismatchDispatch(unittest.TestCase):
         req = ReqMeta(
             req_id="r1", token_len_chunk=16, block_ids_by_group=[[0]], block_hashes=[b"h0"], current_event=None
         )
-        t.request_queue.put(req)
-        t._handle_request(req)
+        t.request_queue = MagicMock()
+        t.request_queue.get.side_effect = [req, KeyboardInterrupt]
+        with self.assertRaises(KeyboardInterrupt):
+            t.run()
         worker._load_kv_tp_mismatch.assert_not_called()
         self.assertEqual(t.get_and_clear_finished_requests(), {"r1"})
-        self.assertEqual(t.request_queue.unfinished_tasks, 0)
+        t.request_queue.task_done.assert_called_once_with()
 
     def test_recving_tp_mismatch_task_done_on_exception(self):
         worker = MagicMock()
@@ -714,10 +716,11 @@ class TestKVTransferTpMismatchDispatch(unittest.TestCase):
         req.load_spec = MagicMock()
         req.load_spec.token_len = 16
         req.load_spec.vllm_cached_tokens = 0
-        t.request_queue.put(req)
-        with self.assertRaises(RuntimeError):
-            t._handle_request(req)
-        self.assertEqual(t.request_queue.unfinished_tasks, 0)
+        t.request_queue = MagicMock()
+        t.request_queue.get.side_effect = [req, KeyboardInterrupt]
+        with self.assertRaises(KeyboardInterrupt):
+            t.run()
+        t.request_queue.task_done.assert_called_once_with()
 
 
 if __name__ == "__main__":

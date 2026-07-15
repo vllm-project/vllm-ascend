@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, cast
@@ -12,6 +13,7 @@ from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashList
 from vllm.v1.core.sched.output import NewRequestData
+from vllm.v1.kv_cache_interface import FullAttentionSpec, UniformTypeKVCacheSpecs
 
 from vllm_ascend.memcache_comm_fence import AttentionComputeStartGate
 
@@ -192,6 +194,64 @@ def infer_cache_family_ratio(cache_family: str | None) -> int:
 
 def get_cache_family_granularity(block_size: int, cache_family: str | None) -> int:
     return block_size * infer_cache_family_ratio(cache_family)
+
+
+@dataclass(frozen=True)
+class KVCacheLayout:
+    use_hybrid: bool
+    original_block_sizes: tuple[int, ...]
+    grouped_block_sizes: tuple[int, ...]
+    hash_block_size: int
+    lcm_block_size: int
+    transfer_granularity: int
+
+
+def infer_kv_cache_layout(
+    vllm_config: Any,
+    kv_cache_config: Any | None,
+    cache_families: Sequence[str],
+    cp_scale: int,
+) -> KVCacheLayout:
+    """Infer the shared scheduler/worker view of KV cache block layout."""
+    use_hybrid = (
+        kv_cache_config is not None
+        and not getattr(vllm_config.scheduler_config, "disable_hybrid_kv_cache_manager", False)
+        and len(kv_cache_config.kv_cache_groups) > 1
+        and any(not isinstance(group.kv_cache_spec, FullAttentionSpec) for group in kv_cache_config.kv_cache_groups)
+    )
+
+    if use_hybrid:
+        original_block_sizes = []
+        for group in kv_cache_config.kv_cache_groups:
+            spec = group.kv_cache_spec
+            if isinstance(spec, UniformTypeKVCacheSpecs):
+                spec = next(iter(spec.kv_cache_specs.values()))
+            original_block_sizes.append(spec.block_size)
+    else:
+        original_block_sizes = [vllm_config.cache_config.block_size]
+
+    grouped_block_sizes = [block_size * cp_scale for block_size in original_block_sizes]
+    requested_hash_block_size = vllm_config.cache_config.hash_block_size
+    if not isinstance(requested_hash_block_size, int):
+        requested_hash_block_size = min(original_block_sizes)
+    hash_block_size = requested_hash_block_size * cp_scale
+    for group_block_size in grouped_block_sizes:
+        assert group_block_size % hash_block_size == 0, "block_size must be divisible by hash_block_size"
+
+    lcm_block_size = math.lcm(*grouped_block_sizes)
+    granularities = [lcm_block_size]
+    for group_id, group_block_size in enumerate(grouped_block_sizes):
+        cache_family = cache_families[group_id] if group_id < len(cache_families) else "default"
+        granularities.append(get_cache_family_granularity(group_block_size, cache_family))
+
+    return KVCacheLayout(
+        use_hybrid=use_hybrid,
+        original_block_sizes=tuple(original_block_sizes),
+        grouped_block_sizes=tuple(grouped_block_sizes),
+        hash_block_size=hash_block_size,
+        lcm_block_size=lcm_block_size,
+        transfer_granularity=math.lcm(*granularities),
+    )
 
 
 def _get_layer_compress_ratio(
