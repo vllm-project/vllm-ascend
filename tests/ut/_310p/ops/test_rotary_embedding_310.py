@@ -20,7 +20,6 @@ from vllm_ascend._310p.ops.rotary_embedding import (
     AscendMRotaryEmbedding310,
     AscendRotaryEmbedding310,
     set_mrope_apply_rotary_slices,
-    set_rope_position_flag_310p,
 )
 
 
@@ -75,14 +74,6 @@ def test_set_mrope_apply_rotary_slices_reuses_buffer_address():
     second_ptr = rotary_310._mrope_cos_slice.data_ptr()
 
     assert first_ptr == second_ptr
-
-
-def test_set_rope_position_flag_310p_sets_global_flag():
-    rotary_310._ROPE_310P_UPDATE_FLAG = False
-    set_rope_position_flag_310p(True)
-    assert rotary_310._ROPE_310P_UPDATE_FLAG is True
-    set_rope_position_flag_310p(False)
-    assert rotary_310._ROPE_310P_UPDATE_FLAG is False
 
 
 def test_ascend_rotary_embedding_310_drafting_flag():
