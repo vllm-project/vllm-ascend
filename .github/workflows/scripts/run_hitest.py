@@ -11,7 +11,6 @@ def run_hitest_script() -> tuple[int, str, str]:
     if not os.path.exists(shell_script_path):
         raise FileNotFoundError(f"hitest.sh not found at: {shell_script_path}")
     os.chmod(shell_script_path, 0o755)
-    # 直接继承完整环境，不手动拷贝覆盖
     proc = subprocess.run(
         ["/bin/bash", "-el", shell_script_path],
         capture_output=True,
