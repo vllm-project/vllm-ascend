@@ -117,7 +117,7 @@ class BaseDeviceAdaptor:
         quant_mode: int = -1,
         act_quant_type: torch.dtype | None = None,
     ):
-        return torch.ops._C_ascend.npu_moe_init_routing_custom(
+        return torch_npu.npu_moe_init_routing_v2(
             hidden_states,
             topk_ids,
             scale=scale,
@@ -1025,12 +1025,6 @@ class BaseDeviceAdaptor:
         return results
 
     @staticmethod
-    def npu_moe_token_unpermute(permuted_tokens, sorted_indices, probs):
-        return torch_npu.npu_moe_token_unpermute(
-            permuted_tokens=permuted_tokens, sorted_indices=torch.abs(sorted_indices), probs=probs
-        )
-
-    @staticmethod
     def index_fill(
         tensor: torch.Tensor,
         dim: int,
@@ -1915,11 +1909,6 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         )
         return results
 
-    @staticmethod
-    def npu_moe_token_unpermute(permuted_tokens, sorted_indices, probs):
-        return torch_npu.npu_moe_token_unpermute(
-            permuted_tokens=permuted_tokens, sorted_indices=sorted_indices, probs=probs
-        )
 
 
 class Ascend310PDeviceAdaptor(BaseDeviceAdaptor):
