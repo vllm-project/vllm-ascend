@@ -3,67 +3,71 @@ on:
   workflow_call:
     inputs:
       suffix:
-        description: 'The tag subfix to use'
+        description: "The tag subfix to use"
         required: true
         type: string
       should_push:
-        description: 'Whether to push the image'
+        description: "Whether to push the image"
         required: false
         type: boolean
         default: False
       dockerfile:
-        description: 'The Dockerfile to use'
+        description: "The Dockerfile to use"
         required: false
         type: string
       quay_username:
-        description: 'Quay username for pushing images'
+        description: "Quay username for pushing images"
         required: false
         type: string
       quay_temp_username:
-        description: 'Quay username for pushing temp tag digests'
+        description: "Quay username for pushing temp tag digests"
         required: false
         type: string
       workflow_dispatch_tag:
-        description: 'The tag to use for workflow dispatch'
+        description: "The tag to use for workflow dispatch"
         required: false
         type: string
       branch_ref:
-        description: 'Branch/ref to check out for non-workflow_dispatch events'
+        description: "Branch/ref to check out for non-workflow_dispatch events"
         required: false
         type: string
-        default: 'main'
+        default: "main"
       schedule_tag_pattern:
-        description: 'Pattern used for the schedule Docker tag'
+        description: "Pattern used for the schedule Docker tag"
         required: false
         type: string
-        default: 'main'
+        default: "main"
       artifact_prefix:
-        description: 'Prefix for digest artifact names'
+        description: "Prefix for digest artifact names"
         required: false
         type: string
-        default: 'digests'
+        default: "digests"
       vllm_commit:
-        description: 'vLLM commit hash to checkout (used when set; mutually exclusive with tag/branch).'
+        description: "vLLM commit hash to checkout (used when set; mutually exclusive with tag/branch)."
         required: false
         type: string
-        default: ''
+        default: ""
       vllm_ascend_commit:
-        description: 'vllm-ascend commit hash to checkout (used when set; mutually exclusive with tag/branch).'
+        description: "vllm-ascend commit hash to checkout (used when set; mutually exclusive with tag/branch)."
         required: false
         type: string
-        default: ''
+        default: ""
       temp_only:
-        description: 'If true, push only to QUAY_TEMP_REPO and skip the merge-image job (no push to QUAY_REPO).'
+        description: "If true, push only to QUAY_TEMP_REPO and skip the merge-image job (no push to QUAY_REPO)."
         required: false
         type: boolean
         default: false
+      image:
+        description: "Container image to run the job in (from Dockerfile FROM)"
+        required: true
+        type: string
     secrets:
-        QUAY_PASSWORD:
-            description: 'Quay password for pushing images'
-            required: false
-        QUAY_TEMP_PASSWORD:
-            description: 'Quay password for pushing temp tag digests'
-            required: false
+      QUAY_PASSWORD:
+        description: "Quay password for pushing images"
+        required: false
+      QUAY_TEMP_PASSWORD:
+        description: "Quay password for pushing temp tag digests"
+        required: false
 
 env:
   QUAY_REPO: quay.io/ascend/vllm-ascend
@@ -71,232 +75,314 @@ env:
   CACHE_REPO: ghcr.io/vllm-project/vllm-ascend
 
 jobs:
+  # verify-crane:
+  #   name: verify crane (${{ matrix.tag }}, host)
+  #   runs-on: ${{ matrix.runner }}
+  #   continue-on-error: ${{ matrix.continue_on_error }}
+  #   strategy:
+  #     fail-fast: false
+  #     matrix:
+  #       include:
+  #         - tag: amd64
+  #           runner: linux-amd64-cpu-32-hk
+  #           continue_on_error: false
+  #         - tag: arm64
+  #           runner: linux-arm64-cpu-32-hk
+  #           continue_on_error: false
+  #   steps:
+  #     - name: Download and verify crane
+  #       run: |
+  #         set -e
+  #         ARCH=$(uname -m | sed 's/aarch64/arm64/')
+  #         CRANE_VERSION="v0.20.2"
+  #         curl -fsSL "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_${ARCH}.tar.gz" -o /tmp/crane.tar.gz
+  #         tar -xzf /tmp/crane.tar.gz -C /tmp crane
+  #         chmod +x /tmp/crane
+  #         echo "::notice::crane installed successfully"
+  #         /tmp/crane version
   build-push-digest:
     name: build
+    # needs: verify-crane
     runs-on: ${{ matrix.runner }}
     permissions:
       packages: write
       contents: read
 
     strategy:
+      fail-fast: false
       matrix:
         include:
           - arch: linux/amd64
-            runner: ubuntu-latest
+            runner: linux-amd64-cpu-32-hk
             tag: amd64
 
           - arch: linux/arm64
-            runner: ubuntu-22.04-arm
+            runner: linux-arm64-cpu-32-hk
             tag: arm64
-
+    container:
+      image: ${{ inputs.image }}
     steps:
+      - name: Validate inputs (workflow_dispatch only)
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        run: |
+          tag="${{ inputs.workflow_dispatch_tag }}"
+          branch="${{ inputs.branch_ref }}"
+          vllm_commit="${{ inputs.vllm_commit }}"
+          vllm_ascend_commit="${{ inputs.vllm_ascend_commit }}"
 
-    - name: Validate inputs (workflow_dispatch only)
-      if: ${{ github.event_name == 'workflow_dispatch' }}
-      run: |
-        tag="${{ inputs.workflow_dispatch_tag }}"
-        branch="${{ inputs.branch_ref }}"
-        vllm_commit="${{ inputs.vllm_commit }}"
-        vllm_ascend_commit="${{ inputs.vllm_ascend_commit }}"
-
-        commit_mode="false"
-        if [[ -n "$vllm_commit" || -n "$vllm_ascend_commit" ]]; then
-          if [[ -z "$vllm_commit" || -z "$vllm_ascend_commit" ]]; then
-            echo "Error: 'vllm_commit' and 'vllm_ascend_commit' must be specified together."
-            exit 1
-          fi
-          for c in "$vllm_commit" "$vllm_ascend_commit"; do
-            if ! echo "$c" | grep -Eq '^[0-9a-f]{7,40}$'; then
-              echo "Error: invalid commit format: $c (expected 7-40 hex chars)."
+          commit_mode="false"
+          if [[ -n "$vllm_commit" || -n "$vllm_ascend_commit" ]]; then
+            if [[ -z "$vllm_commit" || -z "$vllm_ascend_commit" ]]; then
+              echo "Error: 'vllm_commit' and 'vllm_ascend_commit' must be specified together."
               exit 1
             fi
-          done
-          commit_mode="true"
-        fi
-
-        if [[ "$commit_mode" == "true" ]]; then
-          if [[ -n "$tag" || -n "$branch" ]]; then
-            echo "Error: commit mode is mutually exclusive with 'tag'/'branch'."
-            exit 1
+            for c in "$vllm_commit" "$vllm_ascend_commit"; do
+              if ! echo "$c" | grep -Eq '^[0-9a-f]{7,40}$'; then
+                echo "Error: invalid commit format: $c (expected 7-40 hex chars)."
+                exit 1
+              fi
+            done
+            commit_mode="true"
           fi
-        else
-          if [[ -n "$tag" && -n "$branch" ]]; then
-            echo "Error: 'tag' and 'branch' are mutually exclusive. Please specify only one."
-            exit 1
+
+          if [[ "$commit_mode" == "true" ]]; then
+            if [[ -n "$tag" || -n "$branch" ]]; then
+              echo "Error: commit mode is mutually exclusive with 'tag'/'branch'."
+              exit 1
+            fi
+          else
+            if [[ -n "$tag" && -n "$branch" ]]; then
+              echo "Error: 'tag' and 'branch' are mutually exclusive. Please specify only one."
+              exit 1
+            fi
+            if [[ -z "$tag" && -z "$branch" ]]; then
+              echo "Error: Either 'tag', 'branch', or (vllm_commit + vllm_ascend_commit) must be specified."
+              exit 1
+            fi
           fi
-          if [[ -z "$tag" && -z "$branch" ]]; then
-            echo "Error: Either 'tag', 'branch', or (vllm_commit + vllm_ascend_commit) must be specified."
-            exit 1
+
+      - uses: actions/checkout@v7
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.vllm_ascend_commit != '' }}
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ inputs.vllm_ascend_commit }}
+
+      - uses: actions/checkout@v7
+        if: ${{ github.event_name != 'workflow_dispatch' }}
+        with:
+          submodules: recursive
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ inputs.branch_ref }}
+
+      - uses: actions/checkout@v7
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.workflow_dispatch_tag != '' }}
+        with:
+          submodules: recursive
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ inputs.workflow_dispatch_tag }}
+
+      - uses: actions/checkout@v7
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.workflow_dispatch_tag == '' && inputs.vllm_ascend_commit == '' }}
+        with:
+          submodules: recursive
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ inputs.branch_ref }}
+
+      - name: Compute cache tag
+        id: cache-tag
+        run: |
+          if [ -n "${{ inputs.suffix }}" ]; then
+            echo "value=buildcache-${{ inputs.suffix }}-${{ matrix.tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "value=buildcache-${{ matrix.tag }}" >> $GITHUB_OUTPUT
           fi
-        fi
 
-    - uses: actions/checkout@v7
-      if: ${{ github.event_name == 'workflow_dispatch' && inputs.vllm_ascend_commit != '' }}
-      with:
-        fetch-depth: 0
-        persist-credentials: false
-        ref: ${{ inputs.vllm_ascend_commit }}
+      - name: Get csrc hash
+        id: get_csrc_hash
+        run: |
+          CSRC_HASH=$(find ./csrc ./setup.py ./CMakeLists.txt ./cmake \
+          -type f -not -path '*/.*' | sort | xargs sha256sum | sha256sum | awk '{print $1}')
+          echo "CSRC_HASH=$CSRC_HASH" >> $GITHUB_OUTPUT
 
-    - uses: actions/checkout@v7
-      if: ${{ github.event_name != 'workflow_dispatch' }}
-      with:
-        submodules: recursive
-        fetch-depth: 0
-        persist-credentials: false
-        ref: ${{ inputs.branch_ref }}
+      - name: Get Dockerfile base image tag
+        id: get_base_image_tag
+        run: |
+          DOCKERFILE="${{ inputs.dockerfile || 'Dockerfile' }}"
+          BASE_IMAGE_TAG=$(grep -m1 '^FROM' "$DOCKERFILE" | awk -F: '{print $NF}')
+          echo "BASE_IMAGE_TAG=$BASE_IMAGE_TAG" >> $GITHUB_OUTPUT
 
-    - uses: actions/checkout@v7
-      if: ${{ github.event_name == 'workflow_dispatch' && inputs.workflow_dispatch_tag != '' }}
-      with:
-        submodules: recursive
-        fetch-depth: 0
-        persist-credentials: false
-        ref: ${{ inputs.workflow_dispatch_tag }}
+      - name: Get architecture
+        id: get_arch
+        run: |
+          ARCH=$(uname -m)
+          case "$ARCH" in
+            x86_64) echo "arch=X64" >> $GITHUB_OUTPUT ;;
+            aarch64) echo "arch=ARM64" >> $GITHUB_OUTPUT ;;
+            *) echo "arch=$ARCH" >> $GITHUB_OUTPUT ;;
+          esac
 
-    - uses: actions/checkout@v7
-      if: ${{ github.event_name == 'workflow_dispatch' && inputs.workflow_dispatch_tag == '' && inputs.vllm_ascend_commit == '' }}
-      with:
-        submodules: recursive
-        fetch-depth: 0
-        persist-credentials: false
-        ref: ${{ inputs.branch_ref }}
-
-    - name: Free up disk space
-      uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
-      with:
-        tool-cache: true
-        docker-images: false
-
-    - name: Publish - Login to Quay Temp (for pushing temp tag digest)
-      if: ${{ inputs.should_push }}
-      uses: docker/login-action@v4
-      with:
-        registry: quay.io
-        username: ${{ inputs.quay_temp_username }}
-        password: ${{ secrets.QUAY_TEMP_PASSWORD }}
-
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v4
-      with:
-        install: true
-        driver: docker-container
-        use: true
-
-    - name: Login to GitHub Container Registry (for cache)
-      uses: docker/login-action@v4
-      with:
-        registry: ghcr.io
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-
-    - name: Compute cache tag
-      id: cache-tag
-      run: |
-        if [ -n "${{ inputs.suffix }}" ]; then
-          echo "value=buildcache-${{ inputs.suffix }}-${{ matrix.tag }}" >> $GITHUB_OUTPUT
-        else
-          echo "value=buildcache-${{ matrix.tag }}" >> $GITHUB_OUTPUT
-        fi
-
-    - name: Get csrc hash
-      id: get_csrc_hash
-      run: |
-        CSRC_HASH=$(find ./csrc ./setup.py ./CMakeLists.txt ./cmake \
-        -type f -not -path '*/.*' | sort | xargs sha256sum | sha256sum | awk '{print $1}')
-        echo "CSRC_HASH=$CSRC_HASH" >> $GITHUB_OUTPUT
-
-    - name: Get Dockerfile base image tag
-      id: get_base_image_tag
-      run: |
-        DOCKERFILE="${{ inputs.dockerfile || 'Dockerfile' }}"
-        BASE_IMAGE_TAG=$(grep -m1 '^FROM' "$DOCKERFILE" | awk -F: '{print $NF}')
-        echo "BASE_IMAGE_TAG=$BASE_IMAGE_TAG" >> $GITHUB_OUTPUT
-        
-    - name: Get architecture
-      id: get_arch
-      run: |
-        ARCH=$(uname -m)
-        case "$ARCH" in
-          x86_64) echo "arch=X64" >> $GITHUB_OUTPUT ;;
-          aarch64) echo "arch=ARM64" >> $GITHUB_OUTPUT ;;
-          *) echo "arch=$ARCH" >> $GITHUB_OUTPUT ;;
-        esac
-
-    - name: Cache vllm-ascend csrc
-      id: cache-csrc
-      uses: runs-on/cache/restore@v5
-      with:
-        path: |
+      - name: Cache vllm-ascend csrc
+        id: cache-csrc
+        uses: runs-on/cache/restore@v5
+        with:
+          path: |
             vllm_ascend/_cann_ops_custom
             vllm_ascend/*.so
             vllm_ascend/lib
             vllm_ascend/include
-        key: vllm-ascend-build-v1-${{ steps.get_arch.outputs.arch }}-${{ steps.get_base_image_tag.outputs.BASE_IMAGE_TAG }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+          key: vllm-ascend-build-v1-${{ steps.get_arch.outputs.arch }}-${{ steps.get_base_image_tag.outputs.BASE_IMAGE_TAG }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
+      # - name: Prepare docker config
+      #   # if: ${{ inputs.should_push }}
+      #   env:
+      #     QUAY_TEMP_USERNAME: "atlas-ci+atlas_test_bot"
+      #     QUAY_TEMP_PASSWORD: "KUMHSMHBH165QQSBBJYRUD6P9M2ESMR7XH01LPKX4OA4NXLLX06JO9XVVKZ766Q2"
+      #   run: |
+      #     QUAY_AUTH=$(printf "%s:%s" "$QUAY_TEMP_USERNAME" "$QUAY_TEMP_PASSWORD" | base64 -w0)
+      #     GHCR_AUTH=$(printf "%s:%s" "${{ github.actor }}" "${{ secrets.GITHUB_TOKEN }}" | base64 -w0)
+      #     cat > "${DOCKER_CONFIG}/config.json <<EOF
+      #     {
+      #       "auths": {
+      #         "quay.io": { "auth": "${QUAY_AUTH}" },
+      #         "ghcr.io": { "auth": "${GHCR_AUTH}" }
+      #       }
+      #     }
+      #     EOF
 
-    - name: Build and push
-      uses: docker/build-push-action@v7
-      id: build
-      with:
-        platforms: ${{ matrix.arch }}
-        # use the current repo path as the build context, ensure .git is contained
-        context: .
-        file: ${{ inputs.dockerfile || 'Dockerfile' }}
-        # only trigger when tag, branch/main push
-        push: ${{ inputs.should_push }}
-        outputs: type=image,name=${{ env.QUAY_TEMP_REPO }},push-by-digest=true,name-canonical=true,push=${{ inputs.should_push }}
-        build-args: |
-          PIP_INDEX_URL=https://pypi.org/simple
-          COMPILE_CUSTOM_KERNELS=${{ steps.cache-csrc.outputs.cache-hit == 'true' && '0' || '1' }}
-          VLLM_COMMIT=${{ inputs.vllm_commit }}
-        provenance: false
-        # To speed up the build, we use registry cache. The cache tag is determined by the suffix and architecture, and shared across different workflow runs.
-        # For example, the cache tag for arm64 image with suffix "openeuler" will be "buildcache-openeuler-arm64".
-        # When a new image is built and pushed, the cache will also be updated in the registry, so that next build can benefit from it.
-        cache-from: type=registry,ref=${{ env.CACHE_REPO }}:${{ steps.cache-tag.outputs.value }}
-        cache-to: ${{ inputs.should_push && format('type=registry,ref={0}:{1},mode=max', env.CACHE_REPO, steps.cache-tag.outputs.value) || '' }}
+      - name: Install crane
+        run: |
+          # ARCH=$(uname -m | sed 's/aarch64/arm64/')
+          # CRANE_VERSION="v0.20.2"
+          # wget -S "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_${CRANE_VERSION#v}_Linux_${ARCH}.tar.gz" -O /tmp/crane.tar.gz
+          # tar -xzf /tmp/crane.tar.gz -C /tmp crane
+          # chmod +x /tmp/crane
+          CRANE_VERSION="v0.20.2"
+          ARCH=$(uname -m | sed 's/aarch64/arm64/')
+          OS="Linux"
+          DOWNLOAD_URL=$(curl -s https://api.github.com/repos/google/go-containerregistry/releases/tags/${CRANE_VERSION} \
+            | grep -oP '"browser_download_url": "\K[^"]+' \
+            | grep "${OS}_${ARCH}")
 
-    # Quay.io automatically cleans up untagged digests on a regular basis, with a cycle of approximately one hour. 
-    # Add temporary tags to digests to prevent them from being removed.
-    - name: Tag digest to prevent GC
-      if: ${{ inputs.should_push }}
-      run: |
-        SUFFIX=""
-        if [ -n "${{ inputs.suffix }}" ]; then
-          SUFFIX="-${{ inputs.suffix }}"
-        fi
-        if [ "${{ inputs.temp_only }}" = "true" ]; then
-          VLLM_SHORT=$(echo "${{ inputs.vllm_commit }}" | cut -c1-7)
-          ASCEND_SHORT=$(echo "${{ inputs.vllm_ascend_commit }}" | cut -c1-7)
-          TAG="vllm-ascend-${VLLM_SHORT}-${ASCEND_SHORT}${SUFFIX}-${{ matrix.tag }}-temp"
-        else
-          TAG="nightly-${{ inputs.schedule_tag_pattern }}${SUFFIX}-${{ matrix.tag }}-temp"
-        fi
-        echo "Creating temp tag: ${{ env.QUAY_TEMP_REPO }}:$TAG"
-        docker buildx imagetools create \
-          -t "${{ env.QUAY_TEMP_REPO }}:$TAG" \
-          "${{ env.QUAY_TEMP_REPO }}@${{ steps.build.outputs.digest }}"
+          if [ -z "$DOWNLOAD_URL" ]; then
+            echo "No asset found for ${OS}_${ARCH}"
+            exit 1
+          fi
+          wget -S "$DOWNLOAD_URL" -O /tmp/crane.tar.gz
+          tar -xzf /tmp/crane.tar.gz -C /tmp crane
+          chmod +x /tmp/crane
 
+      - name: Verify quay push credentials
+        env:
+          QUAY_TEMP_USERNAME: "atlas-ci+atlas_test_bot"
+          QUAY_TEMP_PASSWORD: "KUMHSMHBH165QQSBBJYRUD6P9M2ESMR7XH01LPKX4OA4NXLLX06JO9XVVKZ766Q2"
+        run: |
+          set +e
+          echo "== 1) crane auth login =="
+          /tmp/crane auth login quay.io -u "$QUAY_TEMP_USERNAME" -p "$QUAY_TEMP_PASSWORD"
+          echo "login rc=$?"
+          echo "== 2) write test: crane copy busybox -> throwaway tag =="
+          PROBE_TAG="quay.io/atlas-ci/vllm-atlas-temp:probe-$(date +%s)"
+          /tmp/crane copy busybox:latest "$PROBE_TAG"
+          echo "push rc=$?"
+          echo "== 3) cleanup probe =="
+          /tmp/crane delete "$PROBE_TAG" 2>/dev/null
+          echo "done"
 
-    - name: Export digest
-      run: |
-        mkdir -p ${{ runner.temp }}/digests
-        digest="${{ steps.build.outputs.digest }}"
-        touch "${{ runner.temp }}/digests/${digest#sha256:}"
+      - name: Build and push
+        shell: bash -e {0}
+        id: build
+        env:
+          QUAY_TEMP_USERNAME: "atlas-ci+atlas_test_bot"
+          QUAY_TEMP_PASSWORD: "KUMHSMHBH165QQSBBJYRUD6P9M2ESMR7XH01LPKX4OA4NXLLX06JO9XVVKZ766Q2"
+        run: |
+          # sleep 3600
+          # QUAY_AUTH=$(printf "%s:%s" "$QUAY_TEMP_USERNAME" "$QUAY_TEMP_PASSWORD" | base64 -w0)
+          # GHCR_AUTH=$(printf "%s:%s" "${{ github.actor }}" "${{ secrets.GITHUB_TOKEN }}" | base64 -w0)
+          # mkdir -p "${DOCKER_CONFIG}"
+          # printf '%s' "{\"auths\":{\"quay.io\":{\"auth\":\"${QUAY_AUTH}\"},\"ghcr.io\":{\"auth\":\"${GHCR_AUTH}\"}}}" > "${DOCKER_CONFIG}/config.json"
+          set -e
 
-    - name: Upload digest
-      uses: actions/upload-artifact@v7
-      with:
-        name: ${{ inputs.artifact_prefix }}-${{ inputs.suffix }}-${{ matrix.tag }}
-        path: ${{ runner.temp }}/digests/*
-        if-no-files-found: error
-        retention-days: 1
+          SUFFIX=""
+          if [ -n "${{ inputs.suffix }}" ]; then
+            SUFFIX="-${{ inputs.suffix }}"
+          fi
+          if [ "${{ inputs.temp_only }}" = "true" ]; then
+            VLLM_SHORT=$(echo "${{ inputs.vllm_commit }}" | cut -c1-7)
+            ASCEND_SHORT=$(echo "${{ inputs.vllm_ascend_commit }}" | cut -c1-7)
+            TEMP_TAG="vllm-ascend-${VLLM_SHORT}-${ASCEND_SHORT}${SUFFIX}-${{ matrix.tag }}-temp"
+          else
+            TEMP_TAG="nightly-${{ inputs.schedule_tag_pattern }}${SUFFIX}-${{ matrix.tag }}-temp"
+          fi
 
+          DOCKERFILE="${{ inputs.dockerfile || 'Dockerfile' }}"
+          DOCKERFILE_DIR=$(dirname "$DOCKERFILE")
+          DOCKERFILE_NAME=$(basename "$DOCKERFILE")
+          CACHE_REF="${{ env.CACHE_REPO }}:${{ steps.cache-tag.outputs.value }}"
+
+          ARGS=(
+            --addr="${BUILDKITD_ADDR}"
+            --tlscacert="${DOCKER_CONFIG}/ca.pem"
+            --tlscert="${DOCKER_CONFIG}/cert.pem"
+            --tlskey="${DOCKER_CONFIG}/key.pem"
+            build
+            --frontend dockerfile.v0
+            --local context=.
+            --local dockerfile="$DOCKERFILE_DIR"
+            --opt filename="$DOCKERFILE_NAME"
+            --opt platform=${{ matrix.arch }}
+            --opt build-arg:APT_CACHE_HOST=cache-service.nginx-pypi-cache.svc.cluster.local:8081
+            --opt build-arg:UV_INDEX_URL=http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+            --opt "build-arg:UV_EXTRA_INDEX_URL=https://repo.huaweicloud.com/ascend/repos/pypi http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu/"
+            --opt build-arg:COMPILE_CUSTOM_KERNELS=${{ steps.cache-csrc.outputs.cache-hit == 'true' && '0' || '1' }}
+            --opt build-arg:VLLM_COMMIT=${{ inputs.vllm_commit }}
+            --opt build-arg:BUILDKIT_INLINE_CACHE=1
+            --import-cache "type=registry,ref=${CACHE_REF}"
+            --progress=plain
+          )
+
+          if [ "true" = "true" ]; then
+            # ARGS+=(--secret "id=dockerconfig,src=/tmp/bk/config.json")
+            # ARGS+=(--registry-auth /tmp/bk/config.json)
+            # ARGS+=(--export-cache "type=registry,ref=${CACHE_REF},mode=max")
+            ARGS+=(--output "type=image,name=${{ env.QUAY_TEMP_REPO }}:${TEMP_TAG},push=true")
+          fi
+
+          buildctl "${ARGS[@]}"
+
+          if [ "true" = "true" ]; then
+            /tmp/crane auth login quay.io -u "$QUAY_TEMP_USERNAME" -p "$QUAY_TEMP_PASSWORD"
+            DIGEST=$(/tmp/crane digest "${{ env.QUAY_TEMP_REPO }}:${TEMP_TAG}")
+            echo "digest=${DIGEST}" >> $GITHUB_OUTPUT
+            echo "Image pushed: ${{ env.QUAY_TEMP_REPO }}:${TEMP_TAG} (${DIGEST})"
+          fi
+
+      - name: Export digest
+        # if: ${{ inputs.should_push }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/digests"
+          digest="${{ steps.build.outputs.digest }}"
+          touch "$RUNNER_TEMP/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ inputs.artifact_prefix }}-${{ inputs.suffix }}-${{ matrix.tag }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
 
   merge-image:
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu-32-hk
+    # container:
+    #   image: ${{ inputs.image }}
     needs: build-push-digest
-    if: ${{ inputs.should_push && !inputs.temp_only }}
+    # if: ${{ inputs.should_push && !inputs.temp_only }}
+    permissions:
+      contents: read
     steps:
       - name: Checkout branch
         uses: actions/checkout@v7
@@ -329,10 +415,6 @@ jobs:
       - name: Prepare suffix
         id: suffix
         run: |
-          # Prepend '-' to suffix so Docker metadata action can append it directly
-          # to the tag (e.g. suffix=310p-openeuler → SUFFIX=-310p-openeuler,
-          # resulting in tags like main-310p-openeuler).
-          # Leave SUFFIX empty when no suffix is provided (plain tags like main).
           if [ -n "${{ inputs.suffix }}" ]; then
             echo "SUFFIX=-${{ inputs.suffix }}" >> $GITHUB_ENV
           else
@@ -343,49 +425,46 @@ jobs:
         id: meta
         uses: docker/metadata-action@v6
         with:
-          # TODO(yikun): add more hub image and a note on release policy for container image
           images: |
-            ${{ env.QUAY_REPO }}
-          # Three trigger scenarios and resulting image tags:
-          # https://github.com/marketplace/actions/docker-metadata-action#typeref
-          #
-          # 1. Push tag (on: push tags: v*) → type=pep440
-          #    Only pep440-compliant tags are published:
-          #    - v0.16.0rc1       --> vllm-ascend:v0.16.0rc1[-suffix]
-          #    Non-pep440 tags are ignored.
-          #
-          # 2. Schedule (on: schedule) → type=schedule,pattern=main
-          #    Triggered by cron, always produces a fixed tag:
-          #    - (any schedule run) --> vllm-ascend:main[-suffix]
-          #
-          # 3. Manual (on: workflow_dispatch) → type=raw,value=inputs.workflow_dispatch_tag
-          #    Tag is determined by the user-selected input at dispatch time:
-          #    - inputs.tag=main       --> vllm-ascend:main[-suffix]
-          #    - inputs.tag=v0.16.0rc1 --> vllm-ascend:v0.16.0rc1[-suffix]
+            ${{ env.QUAY_TEMP_REPO }}
           tags: |
             type=pep440,pattern={{raw}},suffix=${{ env.SUFFIX }}
             type=schedule,pattern=${{ inputs.schedule_tag_pattern }},prefix=nightly-,suffix=${{ env.SUFFIX }}
             type=raw,value=${{ inputs.workflow_dispatch_tag }},enable=${{ github.event_name == 'workflow_dispatch' && inputs.workflow_dispatch_tag != '' }},suffix=${{ env.SUFFIX }}
             type=raw,value=${{ inputs.branch_ref }},enable=${{ github.event_name == 'workflow_dispatch' && inputs.workflow_dispatch_tag == '' }},prefix=nightly-,suffix=${{ env.SUFFIX }}
-          flavor:
-            latest=false
+          flavor: latest=false
 
-      - name: Login to Quay
-        uses: docker/login-action@v4
-        with:
-          registry: quay.io
-          username: ${{ inputs.quay_username }}
-          password: ${{ secrets.QUAY_PASSWORD }}
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+      - name: Install crane and login
+        env:
+          QUAY_USERNAME: "atlas-ci+atlas_test_bot"
+          QUAY_PASSWORD: "KUMHSMHBH165QQSBBJYRUD6P9M2ESMR7XH01LPKX4OA4NXLLX06JO9XVVKZ766Q2"
+        run: |
+          ARCH=$(uname -m | sed 's/aarch64/arm64/')
+          CRANE_VERSION="v0.20.2"
+          curl -fsSL "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_${ARCH}.tar.gz" -o /tmp/crane.tar.gz
+          tar -xzf /tmp/crane.tar.gz -C /tmp crane
+          chmod +x /tmp/crane
+          /tmp/crane auth login quay.io -u "$QUAY_USERNAME" -p "$QUAY_PASSWORD"
 
       - name: Merge and push multi-arch image
         env:
-          IMAGE: ${{ env.QUAY_TEMP_REPO }}
+          SRC_IMAGE: ${{ env.QUAY_TEMP_REPO }}
+          DST_IMAGE: ${{ env.QUAY_TEMP_REPO }}
           TAGS: ${{ steps.meta.outputs.tags }}
         run: |
-          DIGESTS=$(printf "$IMAGE@sha256:%s " $(ls ${{ runner.temp }}/digests))
+          set -e
+
+          for f in ${{ runner.temp }}/digests/*; do
+            hash=$(basename "$f")
+            echo "Copying ${SRC_IMAGE}@sha256:${hash} -> ${DST_IMAGE}"
+            /tmp/crane copy "${SRC_IMAGE}@sha256:${hash}" "${DST_IMAGE}:temp-${hash}"
+          done
+
+          DIGESTS=""
+          for f in ${{ runner.temp }}/digests/*; do
+            hash=$(basename "$f")
+            DIGESTS="$DIGESTS ${DST_IMAGE}@sha256:${hash}"
+          done
 
           echo "Digests: $DIGESTS"
           echo "Current tags:"
@@ -393,16 +472,18 @@ jobs:
 
           for tag in $TAGS; do
             echo "Creating tag $tag"
-            docker buildx imagetools create \
-              -t "$tag" \
-              $DIGESTS
+            /tmp/crane index append -t "$tag" $DIGESTS
           done
 
   merge-image-temp:
     name: merge-image-temp
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu-32-hk
+    # container:
+    #   image: ${{ inputs.image }}
     needs: build-push-digest
     if: ${{ inputs.should_push && inputs.temp_only }}
+    permissions:
+      contents: read
     steps:
       - name: Download arm64 digests
         uses: actions/download-artifact@v8
@@ -418,21 +499,23 @@ jobs:
           pattern: ${{ inputs.artifact_prefix }}-${{ inputs.suffix }}-amd64
           merge-multiple: true
 
-      - name: Login to Quay Temp
-        uses: docker/login-action@v4
-        with:
-          registry: quay.io
-          username: ${{ inputs.quay_temp_username }}
-          password: ${{ secrets.QUAY_TEMP_PASSWORD }}
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+      - name: Install crane and login
+        env:
+          QUAY_TEMP_USERNAME: "atlas-ci+atlas_test_bot"
+          QUAY_TEMP_PASSWORD: "KUMHSMHBH165QQSBBJYRUD6P9M2ESMR7XH01LPKX4OA4NXLLX06JO9XVVKZ766Q2"
+        run: |
+          ARCH=$(uname -m | sed 's/aarch64/arm64/')
+          CRANE_VERSION="v0.20.2"
+          curl -fsSL "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_${ARCH}.tar.gz" -o /tmp/crane.tar.gz
+          tar -xzf /tmp/crane.tar.gz -C /tmp crane
+          chmod +x /tmp/crane
+          /tmp/crane auth login quay.io -u "$QUAY_TEMP_USERNAME" -p "$QUAY_TEMP_PASSWORD"
 
       - name: Merge and push multi-arch manifest to QUAY_TEMP_REPO
         env:
           IMAGE: ${{ env.QUAY_TEMP_REPO }}
         run: |
-          set -euo pipefail
+          set -e
           SUFFIX=""
           if [ -n "${{ inputs.suffix }}" ]; then
             SUFFIX="-${{ inputs.suffix }}"
@@ -440,9 +523,14 @@ jobs:
           VLLM_SHORT=$(echo "${{ inputs.vllm_commit }}" | cut -c1-7)
           ASCEND_SHORT=$(echo "${{ inputs.vllm_ascend_commit }}" | cut -c1-7)
           TAG="${IMAGE}:vllm-ascend-${VLLM_SHORT}-${ASCEND_SHORT}${SUFFIX}"
-          DIGESTS=$(printf "$IMAGE@sha256:%s " $(ls ${{ runner.temp }}/digests))
+
+          DIGESTS=""
+          for f in ${{ runner.temp }}/digests/*; do
+            hash=$(basename "$f")
+            DIGESTS="$DIGESTS ${IMAGE}@sha256:${hash}"
+          done
+
           echo "Digests: $DIGESTS"
           echo "Creating multi-arch manifest tag: $TAG"
-          docker buildx imagetools create \
-            -t "$TAG" \
-            $DIGESTS
+          /tmp/crane index append -t "$TAG" $DIGESTS
+
