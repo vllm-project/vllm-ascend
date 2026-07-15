@@ -21,7 +21,6 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.utils import select_common_block_size
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.common_cp import AscendPCPMetadata
@@ -40,12 +39,6 @@ from vllm_ascend.attention.utils import (
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.mxfp_compat import FLOAT8_E8M0FNU_DTYPE
 from vllm_ascend.distributed.utils import all_gather_async
-from vllm_ascend.ops.layer_shard_linear import (
-    is_hidden_layer,
-    post_process_after_loading_for_shard_weight_series,
-    reach_layer_for_shard_weight_series,
-    register_all_layers_to_shard_weight_series,
-)
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.triton.rope import rope_forward_triton_siso
 from vllm_ascend.quantization.methods import (
@@ -60,7 +53,6 @@ from vllm_ascend.utils import (
     _round_up,
     dispose_layer,
     enable_dsa_cp,
-    enable_dsa_cp_with_layer_shard,
     enable_dsa_cp_with_o_proj_tp,
     enable_sfa_dcp_replicated_indexer,
     enable_sp,
@@ -345,8 +337,6 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         input_positions = common_attn_metadata.positions[:num_input_tokens].long()
 
         block_size = self.kernel_block_size
-        if get_ascend_config().c8_enable_reshape_optim:
-            slot_mapping_cpu = common_attn_metadata.slot_mapping_cpu[:num_input_tokens]
 
         cum_query_lens = common_attn_metadata.query_start_loc[1 : num_reqs + 1]
         seq_lens = common_attn_metadata.seq_lens[:num_reqs]
@@ -451,12 +441,13 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             )
 
         if get_ascend_config().c8_enable_reshape_optim:
-            slot_mapping_list = slot_mapping_cpu.tolist()
-            group_len, group_key_idx, group_key_cache_idx = torch.ops._C_ascend.store_kv_block_pre(
-                slot_mapping, slot_mapping_list, block_size
+            torch.ops._C_ascend.store_kv_block_metadata(
+                slot_mapping,
+                common_attn_metadata.group_len,
+                common_attn_metadata.group_key_idx,
+                common_attn_metadata.group_key_cache_idx,
+                block_size,
             )
-        else:
-            group_len, group_key_idx, group_key_cache_idx = None, None, None
 
         return self.metadata_cls(  # type: ignore
             num_input_tokens=common_attn_metadata.num_input_tokens,
@@ -473,9 +464,9 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             cos=cos[:num_input_tokens],
             dsa_cp_context=dsa_cp_context,
             block_size=block_size,
-            group_len=group_len,
-            group_key_idx=group_key_idx,
-            group_key_cache_idx=group_key_cache_idx,
+            group_len=common_attn_metadata.group_len,
+            group_key_idx=common_attn_metadata.group_key_idx,
+            group_key_cache_idx=common_attn_metadata.group_key_cache_idx,
         )
 
     def build_for_graph_capture(
@@ -610,11 +601,11 @@ class AscendSFAImpl(MLAAttentionImpl):
         # - C8 indexer cache for lightning indexer.
         # GLM5.2 can skip creating indexer on some layers, but these layers
         # still need the packed KV cache when sparse C8 is enabled.
-        self.use_sparse_c8_indexer = self.has_indexer and ascend_config.is_sparse_c8_layer(self.layer_name)
+        self.use_sparse_c8_indexer = self.has_indexer and ascend_config.is_sparse_c8_layer(self.indexer.k_cache.prefix)
         self.use_sparse_c8_sfa = self.use_sparse_c8_indexer or (
             ascend_config.enable_sparse_c8 and not self.has_indexer and self.skip_topk
         )
-        if self.use_sparse_c8_sfa or self.use_sparse_c8_indexer:
+        if self.use_sparse_c8_sfa:
             if get_ascend_device_type() == AscendDeviceType.A5:
                 self.c8_k_cache_dtype = torch.float8_e4m3fn
                 self.c8_k_scale_cache_dtype = torch.float32
@@ -629,7 +620,9 @@ class AscendSFAImpl(MLAAttentionImpl):
                 self.sfa_qsfa_tile_size,
             )
         # PD decode consumers with sparse C8 use mla_prolog_v3 to write the packed KV cache.
-        self.enable_sfa_prolog_v3 = self.is_kv_consumer and self.use_sparse_c8_sfa
+        self.enable_sfa_prolog_v3 = (
+            self.is_kv_consumer and self.use_sparse_c8_sfa and get_ascend_device_type() != AscendDeviceType.A5
+        )
         self.enable_mlapo = ascend_config.enable_mlapo and not (
             self.enable_sfa_prolog_v3 or (self.use_sparse_c8_sfa and get_ascend_device_type() != AscendDeviceType.A5)
         )
@@ -637,9 +630,6 @@ class AscendSFAImpl(MLAAttentionImpl):
         # Effective in SFA when FlashComm is enabled.
         self.enable_dsa_cp = enable_dsa_cp()
         self.enable_sp = enable_sp()
-
-        # Enable layer sharding via DSA-CP on the P node in the PD-disaggregated setup.
-        self.enable_dsa_cp_with_layer_shard = enable_dsa_cp_with_layer_shard()
 
         # SFA DSA-CP mixed deployments keep o_proj in the existing TP layout.
         # Decode can use the TP-sharded o_proj directly after an activation
@@ -651,17 +641,6 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         if self.enable_dsa_cp:
             self.local_num_heads = self.num_heads * self.tp_size
-            if self.enable_dsa_cp_with_layer_shard:
-                self.layer_sharding_kwargs = []
-                for layer_name in get_ascend_config().layer_sharding or []:
-                    if layer_name in kwargs:
-                        self.layer_sharding_kwargs.append(kwargs[layer_name])
-                    else:
-                        logger.warning_once(
-                            f"Layer '{layer_name}' not found in kwargs, skipping sharding. "
-                            f"Check layer_sharding config and model layer names."
-                        )
-                register_all_layers_to_shard_weight_series(self.layer_sharding_kwargs)
 
     @staticmethod
     def update_graph_params(
@@ -717,11 +696,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         # Dispose kv_b_proj since it is replaced by W_UV and W_UK_T to save memory
         dispose_layer(self.kv_b_proj)
         if self.enable_dsa_cp:
-            if self.enable_dsa_cp_with_layer_shard:
-                for layer in self.layer_sharding_kwargs or []:
-                    if is_hidden_layer(layer):
-                        post_process_after_loading_for_shard_weight_series(layer)
-            elif self.enable_dsa_cp_with_o_proj_tp:
+            if self.enable_dsa_cp_with_o_proj_tp:
                 self._init_o_proj_tp_full_params()
 
         if self.enable_sfa_prolog_v3:
@@ -1478,6 +1453,61 @@ class AscendSFAImpl(MLAAttentionImpl):
     ) -> None:
         return
 
+    def _compose_sfa_kv_cache(self, kv_cache) -> tuple[torch.Tensor, ...] | None:
+        """Compose split cache handles into the tuple expected by SFA kernels.
+
+        ``kv_cache`` contains only the main MLA cache owned by the attention
+        layer, while ``self.indexer.k_cache.kv_cache`` contains the cache owned
+        by the indexer layer. Their possible layouts are:
+
+        - non-C8:
+          main ``(k_cache, v_cache)`` + indexer ``(indexer_k_cache,)``
+          -> ``(k_cache, v_cache, indexer_k_cache)``
+        - Sparse C8:
+          main ``(packed_kv_cache,)`` +
+          indexer ``(indexer_k_cache, indexer_scale_cache)``
+          -> ``(packed_kv_cache, indexer_k_cache, indexer_scale_cache)``
+
+        Layers that reuse another layer's top-k indices have no local indexer;
+        for those layers, the main cache tuple is returned unchanged.
+        """
+        # TODO: Remove this recomposition once SFA kernels accept split
+        # main/indexer cache handles directly. The allocator now owns them as
+        # separate cache specs, while the current kernel path still expects the
+        # legacy combined tuple layout.
+        main_cache = kv_cache
+        if main_cache is None or not self.has_indexer:
+            return main_cache
+
+        indexer_cache = self.indexer.k_cache.kv_cache
+        if indexer_cache is None:
+            raise RuntimeError(f"SFA indexer cache is not initialized or bound. layer_name={self.layer_name}.")
+
+        if self.use_sparse_c8_indexer:
+            if len(indexer_cache) != 2:
+                raise RuntimeError(
+                    "Sparse C8 SFA indexer cache expects (k_cache, scale_cache), "
+                    f"got {len(indexer_cache)} tensors for layer_name={self.layer_name}."
+                )
+            if len(main_cache) != 1:
+                raise RuntimeError(
+                    "Sparse C8 SFA main cache expects one packed KV tensor, "
+                    f"got {len(main_cache)} tensors for layer_name={self.layer_name}."
+                )
+            return (main_cache[0], indexer_cache[0], indexer_cache[1])
+
+        if len(indexer_cache) != 1:
+            raise RuntimeError(
+                "SFA indexer cache expects one k_cache tensor, "
+                f"got {len(indexer_cache)} tensors for layer_name={self.layer_name}."
+            )
+        if len(main_cache) != 2:
+            raise RuntimeError(
+                "SFA main cache expects (k_cache, v_cache), "
+                f"got {len(main_cache)} tensors for layer_name={self.layer_name}."
+            )
+        return (main_cache[0], main_cache[1], indexer_cache[0])
+
     def forward(
         self,
         layer_name,
@@ -1490,11 +1520,11 @@ class AscendSFAImpl(MLAAttentionImpl):
         assert output is not None, "Output tensor must be provided."
         if attn_metadata is None:
             # Profiling run.
-            if self.enable_dsa_cp_with_layer_shard and not _EXTRA_CTX.in_profile_run:
-                for layer in self.layer_sharding_kwargs or []:
-                    if is_hidden_layer(layer):
-                        reach_layer_for_shard_weight_series(layer)
             return output.fill_(0)
+
+        composed_kv_cache = self._compose_sfa_kv_cache(kv_cache)
+        assert composed_kv_cache is not None
+        kv_cache = composed_kv_cache
 
         cos = attn_metadata.cos
         sin = attn_metadata.sin
@@ -1641,7 +1671,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             if self.enable_dsa_cp:
                 assert k_pe is not None
                 assert k_nope is not None
-                async_op = self.enable_dsa_cp_with_layer_shard or full_gather_o_proj_enabled
+                async_op = full_gather_o_proj_enabled
                 # support all_gather kv async for communication calculation overlap
                 if self.use_sparse_c8_sfa:
                     assert knope_scale is not None
@@ -1689,11 +1719,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 if kv_ag_handle is not None:
                     kv_ag_handle.wait()
 
-                if self.enable_dsa_cp_with_layer_shard:
-                    for layer in self.layer_sharding_kwargs or []:
-                        if is_hidden_layer(layer):
-                            reach_layer_for_shard_weight_series(layer)
-                elif full_gather_o_proj_enabled:
+                if full_gather_o_proj_enabled:
                     _, o_proj_full_handle = all_gather_async(
                         self.o_proj_tp_weight_gather_input,
                         get_tp_group(),
@@ -1755,7 +1781,6 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         if kv_cache is not None and self.has_indexer:
             assert k_li is not None
-            use_indexer_reshape_optim = self.is_kv_producer and get_ascend_config().c8_enable_reshape_optim
             if self.use_sparse_c8_sfa:
                 dsa_k_cache_idx = 1
                 dsa_k_scale_cache_idx = 2
@@ -1763,7 +1788,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 dsa_k_cache_idx = 2
                 dsa_k_scale_cache_idx = 3
 
-            if use_indexer_reshape_optim:
+            if get_ascend_config().c8_enable_reshape_optim:
                 torch.ops._C_ascend.store_kv_block(
                     k_li,
                     kv_cache[dsa_k_cache_idx],
@@ -1781,7 +1806,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             if self.use_sparse_c8_indexer:
                 assert len(kv_cache) == (3 if self.use_sparse_c8_sfa else 4)
                 if k_li_scale is not None:
-                    if use_indexer_reshape_optim:
+                    if get_ascend_config().c8_enable_reshape_optim:
                         torch.ops._C_ascend.store_kv_block(
                             k_li_scale,
                             kv_cache[dsa_k_scale_cache_idx],

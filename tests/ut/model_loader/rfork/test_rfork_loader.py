@@ -26,7 +26,6 @@ from vllm_ascend.model_loader.rfork.rfork_loader import (
     _get_rfork_worker_attr,
     _is_draft_model,
     _is_dynamic_eplb_enabled,
-    _is_layer_sharding_enabled,
     _make_fallback_load_config,
 )
 from vllm_ascend.model_loader.rfork.seed_protocol import get_local_seed_key
@@ -376,18 +375,6 @@ def test_rfork_fallback_load_config_copy_does_not_mutate_original():
     assert load_config.model_loader_extra_config == original_extra_config
 
 
-def test_rfork_detects_layer_sharding_config():
-    assert _is_layer_sharding_enabled(
-        SimpleNamespace(
-            additional_config={
-                "layer_sharding": ["o_proj"],
-            }
-        )
-    )
-    assert not _is_layer_sharding_enabled(SimpleNamespace(additional_config={}))
-    assert not _is_layer_sharding_enabled(SimpleNamespace(additional_config=None))
-
-
 def test_rfork_detects_dynamic_eplb_config():
     assert _is_dynamic_eplb_enabled(
         SimpleNamespace(
@@ -427,39 +414,6 @@ def test_rfork_detects_dynamic_eplb_config():
             additional_config=None,
         )
     )
-
-
-def test_rfork_layer_sharding_uses_default_loader(monkeypatch):
-    import vllm.model_executor.model_loader as model_loader
-
-    load_config = DummyLoadConfig({"model_url": "model", "model_deploy_strategy_name": "tp8"})
-    loader = RForkModelLoader(load_config)
-    model_config = SimpleNamespace(dtype=torch.float32, model="/models/test")
-    vllm_config = _vllm_config(model_config=model_config)
-    vllm_config.additional_config = {"layer_sharding": ["o_proj"]}
-
-    def fail_if_rfork_worker_is_created(*args, **kwargs):
-        raise AssertionError("RFork worker should not be initialized when layer_sharding is enabled.")
-
-    expected_model = SimpleNamespace()
-    captured = {}
-
-    def fake_get_model(**kwargs):
-        captured.update(kwargs)
-        return expected_model
-
-    monkeypatch.setattr(loader, "_ensure_rfork_worker", fail_if_rfork_worker_is_created)
-    monkeypatch.setattr(model_loader, "get_model", fake_get_model)
-
-    model = loader.load_model(vllm_config=vllm_config, model_config=model_config)
-
-    assert model is expected_model
-    assert captured["vllm_config"] is vllm_config
-    assert captured["model_config"] is model_config
-    assert captured["prefix"] == ""
-    assert captured["load_config"] is not load_config
-    assert captured["load_config"].load_format == "auto"
-    assert captured["load_config"].model_loader_extra_config == {}
 
 
 def test_rfork_dynamic_eplb_uses_default_loader(monkeypatch):
