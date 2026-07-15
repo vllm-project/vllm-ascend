@@ -212,6 +212,85 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         )
 
 
+class TestNPUModelRunnerAttentionMetadata(unittest.TestCase):
+    def test_store_kv_block_group_buffers_use_token_capacity(self):
+        num_tokens = 3
+        num_tokens_padded = 4
+        num_reqs = num_reqs_padded = 1
+
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.max_model_len = 1024
+        runner.pcp_size = 1
+        runner.use_cp = False
+        runner.use_async_spec_decode = False
+        runner.use_compress = False
+        runner.model_config = SimpleNamespace(enable_return_routed_experts=False)
+
+        slot_mapping = torch.tensor([126, 127, 128, 999], dtype=torch.int32)
+        block_table = SimpleNamespace(
+            slot_mapping=SimpleNamespace(gpu=slot_mapping),
+            get_device_tensor=lambda: torch.tensor([[0, 1]], dtype=torch.int32),
+        )
+        runner.kv_cache_config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=object())])
+        runner.input_batch = SimpleNamespace(
+            block_table=[block_table],
+            num_computed_tokens_cpu_tensor=torch.tensor([126], dtype=torch.int32),
+            num_prompt_tokens_cpu_tensor=torch.tensor([129], dtype=torch.int32),
+        )
+        query_start_loc = torch.tensor([0, num_tokens], dtype=torch.int32)
+        runner.query_start_loc = SimpleNamespace(
+            gpu=query_start_loc,
+            cpu=query_start_loc.clone(),
+        )
+        runner.seq_lens = torch.tensor([129], dtype=torch.int32)
+        runner.optimistic_seq_lens_cpu = torch.tensor([129], dtype=torch.int32)
+        runner.actual_seq_lengths_q = [num_tokens]
+        runner.positions = torch.arange(num_tokens_padded, dtype=torch.int32)
+        runner.attn_state = None
+        runner.decode_token_per_req = 1
+
+        backing_size = 8
+        runner.group_len = SimpleNamespace(gpu=torch.empty(backing_size, dtype=torch.int32))
+        runner.group_key_idx = SimpleNamespace(gpu=torch.empty(backing_size, dtype=torch.int32))
+        runner.group_key_cache_idx = SimpleNamespace(gpu=torch.empty(backing_size, dtype=torch.int32))
+
+        captured = {}
+
+        class MetadataCaptured(Exception):
+            pass
+
+        def capture_metadata(**kwargs):
+            captured.update(kwargs)
+            raise MetadataCaptured
+
+        with (
+            patch(
+                "vllm_ascend.worker.model_runner_v1.AscendCommonAttentionMetadata",
+                side_effect=capture_metadata,
+            ),
+            self.assertRaises(MetadataCaptured),
+        ):
+            runner._build_attention_metadata(
+                num_tokens=num_tokens,
+                num_reqs=num_reqs,
+                max_query_len=num_tokens,
+                num_tokens_padded=num_tokens_padded,
+                num_reqs_padded=num_reqs_padded,
+                for_cudagraph_capture=True,
+            )
+
+        self.assertEqual(captured["num_reqs"], num_reqs_padded)
+        self.assertEqual(captured["num_actual_tokens"], num_tokens)
+        self.assertEqual(captured["num_input_tokens"], num_tokens_padded)
+        self.assertEqual(captured["slot_mapping"].tolist(), [126, 127, 128, -1])
+
+        for name in ("group_len", "group_key_idx", "group_key_cache_idx"):
+            group_view = captured[name]
+            backing = getattr(runner, name).gpu
+            self.assertEqual(group_view.shape, (num_tokens_padded,))
+            self.assertEqual(group_view.data_ptr(), backing.data_ptr())
+
+
 class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
     def _build_runner(self):
         runner = NPUModelRunner.__new__(NPUModelRunner)

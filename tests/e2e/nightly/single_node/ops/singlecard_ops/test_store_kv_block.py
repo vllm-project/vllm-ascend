@@ -64,19 +64,18 @@ def test_scatter(num_tokens, num_head, block_size, num_blocks, count):
     torch.testing.assert_close(key_expect, key_cache, atol=0.001, rtol=0.1)
 
 
-@pytest.mark.parametrize("num_tokens", [52])  # 6398
+@pytest.mark.parametrize("num_tokens", [4])
 @pytest.mark.parametrize("num_head", [1])  # 512
-@pytest.mark.parametrize("block_size", [1])  # 128
-@pytest.mark.parametrize("num_blocks", [1773])  # 1599
+@pytest.mark.parametrize("block_size", [128])
+@pytest.mark.parametrize("num_blocks", [4])
 @pytest.mark.parametrize("count", [1])
-def test_myops(num_tokens, num_head, block_size, num_blocks, count):
+def test_store_kv_block_crosses_cache_block_boundary(num_tokens, num_head, block_size, num_blocks, count):
     head_size_k = 2
     key_cache = torch.randint(low=0, high=128, size=(num_blocks, block_size, num_head, head_size_k), dtype=torch.int8)
     key_cache_npu = key_cache.npu()
 
-    slot_list = []
-    for i in range(0, num_tokens):
-        slot_list.append(2 + i)
+    slot_list = [126, 127, 128, 129]
+    assert len(slot_list) == num_tokens
 
     slot_list_np = np.array(slot_list)
     slot_mapping_npu = torch.from_numpy(slot_list_np).to(torch.int32).npu()
@@ -97,8 +96,24 @@ def test_myops(num_tokens, num_head, block_size, num_blocks, count):
         key_npu, key_cache_npu, group_len, group_key_idx, group_key_cache_idx, block_size
     )
 
-    torch.testing.assert_close(key_expect, key_cache_npu, atol=0.001, rtol=0.1)
+    torch.testing.assert_close(key_expect, key_cache_npu, atol=0, rtol=0)
 
     gc.collect()
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()
+
+
+def test_store_kv_block_metadata_rejects_insufficient_capacity():
+    slot_mapping = torch.tensor([126, 127, 128], dtype=torch.int32).npu()
+    group_len = torch.empty(1, dtype=torch.int32).npu()
+    group_key_idx = torch.empty(1, dtype=torch.int32).npu()
+    group_key_cache_idx = torch.empty(1, dtype=torch.int32).npu()
+
+    with pytest.raises(RuntimeError, match="group buffer capacity must be at least slot_mapping size"):
+        torch.ops._C_ascend.store_kv_block_metadata(
+            slot_mapping,
+            group_len,
+            group_key_idx,
+            group_key_cache_idx,
+            128,
+        )

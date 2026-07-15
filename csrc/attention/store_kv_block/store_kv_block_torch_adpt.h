@@ -17,21 +17,24 @@
 
 #ifndef STORE_KV_BLOCK_TORCH_ADPT_H
 #define STORE_KV_BLOCK_TORCH_ADPT_H
-#include <climits>  
+#include <climits>
 namespace vllm_ascend {
 
 void store_kv_block(
     const at::Tensor &key_in,
-    const at::Tensor &key_cache_in,
+    at::Tensor &key_cache_in,
     const at::Tensor &group_len,
     const at::Tensor &group_key_idx,
     const at::Tensor &group_key_cache_idx,
     int64_t block_size)
 {
+    TORCH_CHECK(group_len.dim() == 1 && group_key_idx.dim() == 1 && group_key_cache_idx.dim() == 1,
+                "StoreKVBlock group buffers must be 1-D.");
+    TORCH_CHECK(group_len.numel() == group_key_idx.numel() && group_len.numel() == group_key_cache_idx.numel(),
+                "StoreKVBlock group buffers must have the same length.");
 
-    EXEC_NPU_CMD(aclnnStoreKVBlock, key_in, key_cache_in,group_len, group_key_idx, group_key_cache_idx, block_size);
-    
-} 
-
+    EXEC_NPU_CMD(aclnnStoreKVBlock, key_in, key_cache_in, group_len, group_key_idx, group_key_cache_idx, block_size);
 }
-#endif
+
+}  // namespace vllm_ascend
+#endif  // STORE_KV_BLOCK_TORCH_ADPT_H

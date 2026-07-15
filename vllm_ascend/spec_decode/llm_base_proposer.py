@@ -603,9 +603,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 decode_token_per_req=self.runner.decode_token_per_req,
                 is_prefilling=torch.zeros(num_reqs, dtype=torch.bool),
                 max_seq_len=0,
-                group_len=self.runner.group_len.gpu[:num_reqs],
-                group_key_idx=self.runner.group_key_idx.gpu[:num_reqs],
-                group_key_cache_idx=self.runner.group_key_cache_idx.gpu[:num_reqs],
+                group_len=self.runner.group_len.gpu[:num_tokens],
+                group_key_idx=self.runner.group_key_idx.gpu[:num_tokens],
+                group_key_cache_idx=self.runner.group_key_cache_idx.gpu[:num_tokens],
             )
             if pcp_manager is not None:
                 # update long_seq related params and flatten block_table

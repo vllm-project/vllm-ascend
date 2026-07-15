@@ -606,21 +606,26 @@ class TestAscendSFAMetadataBuilder(TestBase):
         )
 
         common_attn_metadata = MagicMock()
-        common_attn_metadata.num_reqs = 10
-        common_attn_metadata.num_actual_tokens = 100
-        common_attn_metadata.query_start_loc = torch.tensor([0, 10, 20, 30, 40, 50, 60, 70, 80, 90])
-        common_attn_metadata.query_start_loc_cpu = torch.tensor([0, 10, 20, 30, 40, 50, 60, 70, 80, 90])
-        common_attn_metadata.slot_mapping = torch.randn(100, 4, 1024)
-        common_attn_metadata.seq_lens_cpu = torch.tensor([2] * 10)
-        common_attn_metadata.positions = torch.randn(100)
+        common_attn_metadata.num_reqs = 1
+        common_attn_metadata.num_actual_tokens = 3
+        common_attn_metadata.query_start_loc = torch.tensor([0, 3])
+        common_attn_metadata.query_start_loc_cpu = torch.tensor([0, 3])
+        common_attn_metadata.slot_mapping = torch.tensor([126, 127, 128], dtype=torch.int32)
+        common_attn_metadata.seq_lens = torch.tensor([3], dtype=torch.int32)
+        common_attn_metadata.seq_lens_cpu = torch.tensor([3], dtype=torch.int32)
+        common_attn_metadata._seq_lens_cpu = None
+        common_attn_metadata.positions = torch.arange(3)
         common_attn_metadata.attn_mask = None
         common_attn_metadata.attn_state = AscendAttentionState.ChunkedPrefill
-        common_attn_metadata.block_table_tensor = torch.randn(100, 4)
+        common_attn_metadata.block_table_tensor = torch.zeros((1, 1), dtype=torch.int32)
         common_attn_metadata.cos = None
         common_attn_metadata.sin = None
-        common_attn_metadata.num_input_tokens = 100
+        common_attn_metadata.num_input_tokens = 3
+        common_attn_metadata.group_len = torch.empty(3, dtype=torch.int32)
+        common_attn_metadata.group_key_idx = torch.empty(3, dtype=torch.int32)
+        common_attn_metadata.group_key_cache_idx = torch.empty(3, dtype=torch.int32)
 
-        mock_get_cos_and_sin_mla.return_value = (torch.randn(100), torch.randn(100))
+        mock_get_cos_and_sin_mla.return_value = (torch.randn(3), torch.randn(3))
 
         with patch("vllm_ascend.attention.sfa_v1.get_ascend_config") as mock_get_ascend_config:
             mock_ascend_config = MagicMock()
@@ -634,14 +639,37 @@ class TestAscendSFAMetadataBuilder(TestBase):
 
         assert isinstance(metadata, AscendSFAMetadata)
         assert metadata.num_actual_tokens == common_attn_metadata.num_actual_tokens
-        assert metadata.slot_mapping.shape == (100, 4, 1024)
+        assert metadata.slot_mapping.tolist() == [126, 127, 128]
 
         store_kv_block_metadata.assert_called_once()
         actual_args, _ = store_kv_block_metadata.call_args
         assert torch.equal(actual_args[0], common_attn_metadata.slot_mapping)
+        assert actual_args[1].numel() == common_attn_metadata.slot_mapping.numel()
+        assert actual_args[2].numel() == common_attn_metadata.slot_mapping.numel()
+        assert actual_args[3].numel() == common_attn_metadata.slot_mapping.numel()
         assert actual_args[4] == 128
 
         assert metadata.block_size == 128
         assert metadata.group_len is actual_args[1]
         assert metadata.group_key_idx is actual_args[2]
         assert metadata.group_key_cache_idx is actual_args[3]
+
+    @patch("torch.ops._C_ascend.store_kv_block_metadata", create=True)
+    @patch("vllm_ascend.attention.sfa_v1.get_ascend_config")
+    def test_store_kv_block_metadata_rejects_request_sized_buffers(
+        self,
+        mock_get_ascend_config,
+        store_kv_block_metadata,
+    ):
+        mock_get_ascend_config.return_value.c8_enable_reshape_optim = True
+        builder = AscendSFAMetadataBuilder.__new__(AscendSFAMetadataBuilder)
+        common_attn_metadata = MagicMock()
+        common_attn_metadata.group_len = torch.empty(1, dtype=torch.int32)
+        common_attn_metadata.group_key_idx = torch.empty(1, dtype=torch.int32)
+        common_attn_metadata.group_key_cache_idx = torch.empty(1, dtype=torch.int32)
+        slot_mapping = torch.tensor([126, 127, 128], dtype=torch.int32)
+
+        with self.assertRaisesRegex(RuntimeError, "capacity=1, num_slots=3"):
+            builder._build_store_kv_block_metadata(slot_mapping, common_attn_metadata, block_size=128)
+
+        store_kv_block_metadata.assert_not_called()

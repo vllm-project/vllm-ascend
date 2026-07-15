@@ -72,11 +72,30 @@ bool StoreKvBlockMetadataCpuKernel::GenMetaData()
     int32_t *groupKeyIdxData = static_cast<int32_t *>(groupKeyIdx_->GetData());
     int32_t *groupKeyCacheIdxData = static_cast<int32_t *>(groupKeyCacheIdx_->GetData());
 
-    // total elements in slot_mapping (1-D tensor)
-    int64_t slotMappingLen = slotMapping_->GetTensorShape()->GetDimSize(0);
+    auto slotMappingShape = slotMapping_->GetTensorShape();
+    auto groupLenShape = groupLen_->GetTensorShape();
+    auto groupKeyIdxShape = groupKeyIdx_->GetTensorShape();
+    auto groupKeyCacheIdxShape = groupKeyCacheIdx_->GetTensorShape();
+    if (slotMappingShape == nullptr || groupLenShape == nullptr || groupKeyIdxShape == nullptr ||
+        groupKeyCacheIdxShape == nullptr) {
+        KERNEL_LOG_ERROR("input tensor shape is null");
+        return false;
+    }
 
-    // total capacity of output tensors (1-D, same shape as input)
-    int64_t outCapacity = groupLen_->GetTensorShape()->GetDimSize(0);
+    // The number of groups is at most the number of slot_mapping entries.
+    int64_t slotMappingLen = slotMappingShape->GetDimSize(0);
+    int64_t outCapacity = groupLenShape->GetDimSize(0);
+    int64_t groupKeyIdxCapacity = groupKeyIdxShape->GetDimSize(0);
+    int64_t groupKeyCacheIdxCapacity = groupKeyCacheIdxShape->GetDimSize(0);
+    if (outCapacity != groupKeyIdxCapacity || outCapacity != groupKeyCacheIdxCapacity ||
+        outCapacity < slotMappingLen) {
+        KERNEL_LOG_ERROR("invalid group buffer capacities: slot_mapping=%lld, group_len=%lld, "
+                         "group_key_idx=%lld, group_key_cache_idx=%lld",
+                         static_cast<long long>(slotMappingLen), static_cast<long long>(outCapacity),
+                         static_cast<long long>(groupKeyIdxCapacity),
+                         static_cast<long long>(groupKeyCacheIdxCapacity));
+        return false;
+    }
 
     int32_t idxSlotmap = 0;
     int32_t idxGroups = 0;
@@ -90,6 +109,12 @@ bool StoreKvBlockMetadataCpuKernel::GenMetaData()
         }
 
         int32_t blockId = cacheSlot / blockSize_;
+
+        if (idxGroups >= outCapacity) {
+            KERNEL_LOG_ERROR("group metadata capacity exceeded: index=%d, capacity=%lld",
+                             idxGroups, static_cast<long long>(outCapacity));
+            return false;
+        }
 
         // Record group start: source index and destination cache index
         groupKeyIdxData[idxGroups] = idxSlotmap;

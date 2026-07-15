@@ -2939,18 +2939,19 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     );
     ops.impl("chunk_fwd_o", torch::kPrivateUse1, &vllm_ascend::chunk_fwd_o);
 
-    //store_kv_block
-     ops.def(
-        "store_kv_block_metadata(Tensor slot_mapping_npu, Tensor group_len, Tensor group_key_idx, Tensor group_key_cache_idx, int block_size=0)"
-         "-> ()"
-     );
+    // store_kv_block
+    ops.def(
+        "store_kv_block_metadata(Tensor slot_mapping_npu, Tensor(a!) group_len, Tensor(b!) group_key_idx, "
+        "Tensor(c!) group_key_cache_idx, int block_size=0) -> ()"
+    );
     ops.impl("store_kv_block_metadata", torch::kPrivateUse1, &vllm_ascend::store_kv_block_metadata);
 
     ops.def(
-        "store_kv_block(Tensor key_in, Tensor key_cache_in, Tensor group_len, Tensor group_key_idx,Tensor group_key_cache_idx, int block_size=0) -> ()"
+        "store_kv_block(Tensor key_in, Tensor(a!) key_cache_in, Tensor group_len, Tensor group_key_idx, "
+        "Tensor group_key_cache_idx, int block_size=0) -> ()"
     );
     ops.impl("store_kv_block", torch::kPrivateUse1, &vllm_ascend::store_kv_block);
-    
+
     // Fused GDN gating.
     ops.def(
         "npu_fused_gdn_gating(Tensor A_log, "

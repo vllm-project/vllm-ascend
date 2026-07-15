@@ -335,6 +335,44 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
     ) -> AscendSFAMetadata:
         return self._build(common_attn_metadata, draft_index=draft_index)
 
+    def _build_store_kv_block_metadata(
+        self,
+        slot_mapping: torch.Tensor,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        block_size: int,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
+        if not get_ascend_config().c8_enable_reshape_optim:
+            return None, None, None
+
+        if slot_mapping.ndim != 1:
+            raise ValueError(f"slot_mapping must be 1-D, but got shape {tuple(slot_mapping.shape)}")
+
+        num_slots = slot_mapping.shape[0]
+        group_buffers = (
+            common_attn_metadata.group_len,
+            common_attn_metadata.group_key_idx,
+            common_attn_metadata.group_key_cache_idx,
+        )
+        group_names = ("group_len", "group_key_idx", "group_key_cache_idx")
+        for name, group_buffer in zip(group_names, group_buffers, strict=True):
+            if group_buffer is None or group_buffer.numel() < num_slots:
+                capacity = 0 if group_buffer is None else group_buffer.numel()
+                raise RuntimeError(
+                    f"{name} capacity must cover every slot_mapping entry: capacity={capacity}, num_slots={num_slots}"
+                )
+
+        group_len = common_attn_metadata.group_len[:num_slots]
+        group_key_idx = common_attn_metadata.group_key_idx[:num_slots]
+        group_key_cache_idx = common_attn_metadata.group_key_cache_idx[:num_slots]
+        torch.ops._C_ascend.store_kv_block_metadata(
+            slot_mapping,
+            group_len,
+            group_key_idx,
+            group_key_cache_idx,
+            block_size,
+        )
+        return group_len, group_key_idx, group_key_cache_idx
+
     def _build(
         self,
         common_attn_metadata: AscendCommonAttentionMetadata,
@@ -452,14 +490,11 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
                 actual_seq_lengths_key=actual_seq_lengths_key,
             )
 
-        if get_ascend_config().c8_enable_reshape_optim:
-            torch.ops._C_ascend.store_kv_block_metadata(
-                slot_mapping,
-                common_attn_metadata.group_len,
-                common_attn_metadata.group_key_idx,
-                common_attn_metadata.group_key_cache_idx,
-                block_size,
-            )
+        group_len, group_key_idx, group_key_cache_idx = self._build_store_kv_block_metadata(
+            slot_mapping,
+            common_attn_metadata,
+            block_size,
+        )
 
         return self.metadata_cls(  # type: ignore
             num_input_tokens=common_attn_metadata.num_input_tokens,
@@ -476,9 +511,9 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             cos=cos[:num_input_tokens],
             dsa_cp_context=dsa_cp_context,
             block_size=block_size,
-            group_len=common_attn_metadata.group_len,
-            group_key_idx=common_attn_metadata.group_key_idx,
-            group_key_cache_idx=common_attn_metadata.group_key_cache_idx,
+            group_len=group_len,
+            group_key_idx=group_key_idx,
+            group_key_cache_idx=group_key_cache_idx,
         )
 
     def build_for_graph_capture(
@@ -1767,6 +1802,13 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         if kv_cache is not None and self.has_indexer:
             assert k_li is not None
+            use_indexer_reshape_optim = (
+                self.is_kv_producer
+                and get_ascend_config().c8_enable_reshape_optim
+                and attn_metadata.group_len is not None
+                and attn_metadata.group_key_idx is not None
+                and attn_metadata.group_key_cache_idx is not None
+            )
             if self.use_sparse_c8_sfa:
                 dsa_k_cache_idx = 1
                 dsa_k_scale_cache_idx = 2
@@ -1774,7 +1816,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 dsa_k_cache_idx = 2
                 dsa_k_scale_cache_idx = 3
 
-            if get_ascend_config().c8_enable_reshape_optim:
+            if use_indexer_reshape_optim:
                 torch.ops._C_ascend.store_kv_block(
                     k_li,
                     kv_cache[dsa_k_cache_idx],
@@ -1792,7 +1834,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             if self.use_sparse_c8_indexer:
                 assert len(kv_cache) == (3 if self.use_sparse_c8_sfa else 4)
                 if k_li_scale is not None:
-                    if get_ascend_config().c8_enable_reshape_optim:
+                    if use_indexer_reshape_optim:
                         torch.ops._C_ascend.store_kv_block(
                             k_li_scale,
                             kv_cache[dsa_k_scale_cache_idx],

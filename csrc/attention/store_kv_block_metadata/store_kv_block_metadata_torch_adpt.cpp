@@ -28,13 +28,26 @@ namespace vllm_ascend {
 // by scanning for the first zero group_len entry.
 void store_kv_block_metadata(
     const at::Tensor &slot_mapping_npu,
-    const at::Tensor &group_len,
-    const at::Tensor &group_key_idx,
-    const at::Tensor &group_key_cache_idx,
+    at::Tensor &group_len,
+    at::Tensor &group_key_idx,
+    at::Tensor &group_key_cache_idx,
     int64_t block_size)
 {
     TORCH_CHECK(slot_mapping_npu.numel() > 0, "Tensor slot_mapping_npu is empty.");
     TORCH_CHECK(block_size > 0, "block_size must be positive, but got ", block_size);
+    TORCH_CHECK(slot_mapping_npu.dim() == 1, "slot_mapping_npu must be 1-D.");
+    TORCH_CHECK(group_len.dim() == 1 && group_key_idx.dim() == 1 && group_key_cache_idx.dim() == 1,
+                "StoreKvBlockMetadata group buffers must be 1-D.");
+    TORCH_CHECK(group_len.scalar_type() == at::kInt && group_key_idx.scalar_type() == at::kInt &&
+                    group_key_cache_idx.scalar_type() == at::kInt,
+                "StoreKvBlockMetadata group buffers must use int32 dtype.");
+    TORCH_CHECK(group_len.is_contiguous() && group_key_idx.is_contiguous() && group_key_cache_idx.is_contiguous(),
+                "StoreKvBlockMetadata group buffers must be contiguous.");
+    TORCH_CHECK(group_len.numel() == group_key_idx.numel() && group_len.numel() == group_key_cache_idx.numel(),
+                "StoreKvBlockMetadata group buffers must have the same capacity.");
+    TORCH_CHECK(group_len.numel() >= slot_mapping_npu.numel(),
+                "StoreKvBlockMetadata group buffer capacity must be at least slot_mapping size, but got capacity ",
+                group_len.numel(), " and slot_mapping size ", slot_mapping_npu.numel(), ".");
 
     EXEC_NPU_CMD(aclnnStoreKvBlockMetadata,
                  slot_mapping_npu,
