@@ -5,7 +5,6 @@ import pytest
 import torch
 from vllm.config import CompilationConfig, VllmConfig
 
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker import encoder_acl_graph
 from vllm_ascend.worker.encoder_acl_graph import (
     EncoderAclGraphManager,
@@ -182,9 +181,6 @@ def test_capture_budget_graph_npu():
     ):
         mgr._capture_budget_graph(2048)
 
-    if vllm_version_is("0.23.0"):
-        graph_meta = mgr.budget_graphs[2048]
-    else:
-        graph_meta = mgr._get_graph_set("default")[2048]
+    graph_meta = mgr._get_graph_set("default")[2048]
     assert graph_meta.graph is fake_graph
     assert graph_meta.input_buffers is capture_values
