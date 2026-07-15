@@ -386,6 +386,55 @@ def test_verify_and_split_propagates_eagle_to_merged_spec_siblings() -> None:
     assert coordinator.single_type_managers[0].use_eagle is False
 
 
+def test_mamba_eagle_lookup_does_not_expand_hybrid_hit() -> None:
+    """Mamba finders do not drop the EAGLE lookahead block.
+
+    The coordinator must therefore keep the Mamba lookup capped at the hit
+    length already established by full attention.
+    """
+    kv_cache_config = _make_hybrid_kv_cache_config()
+    full_spec = kv_cache_config.kv_cache_groups[0].kv_cache_spec
+    mamba_spec = kv_cache_config.kv_cache_groups[1].kv_cache_spec
+
+    class _FullHitManager:
+        @classmethod
+        def find_longest_cache_hit(cls, **kwargs):
+            return ([object(), object()],)
+
+    class _MambaHitManager:
+        lookup_max_lengths: list[int] = []
+
+        @classmethod
+        def find_longest_cache_hit(cls, **kwargs):
+            max_length = kwargs["max_length"]
+            cls.lookup_max_lengths.append(max_length)
+            block_size = kwargs["kv_cache_spec"].block_size
+            return ([object()] * (max_length // block_size),)
+
+    coordinator = AscendHybridKVCacheCoordinator.__new__(AscendHybridKVCacheCoordinator)
+    coordinator.kv_cache_config = kv_cache_config
+    coordinator.attention_groups = [
+        (full_spec, [0], _FullHitManager),
+        (mamba_spec, [1], _MambaHitManager),
+    ]
+    coordinator.eagle_attn_group_indices = {1}
+    coordinator.dcp_world_size = 1
+    coordinator.pcp_world_size = 1
+    coordinator.enable_caching = True
+    coordinator.hash_block_size = 16
+    coordinator.lcm_block_size = 16
+    coordinator.block_pool = MagicMock()
+
+    hit_blocks, hit_length = coordinator.find_longest_cache_hit(
+        block_hashes=[MagicMock(), MagicMock(), MagicMock()],
+        max_cache_hit_length=48,
+    )
+
+    assert _MambaHitManager.lookup_max_lengths == [32]
+    assert [len(blocks) for blocks in hit_blocks] == [2, 2]
+    assert hit_length == 32
+
+
 def test_deepseek_v4_detection_handles_non_mapping_nested_specs() -> None:
     kv_cache_spec = SimpleNamespace(
         kv_cache_specs=[
