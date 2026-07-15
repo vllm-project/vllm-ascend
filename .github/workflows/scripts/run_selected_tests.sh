@@ -127,6 +127,12 @@ run_pytest_target() {
   fi
   local status=${PIPESTATUS[0]}
   set -e
+  # When a target fails, mark its covdata dir so the downstream coverage
+  # assembler treats it as unusable and backfills from the OBS history
+  # instead of shipping the failed run's partial coverage.
+  if [ "${status}" -ne 0 ] && [ "${enable_coverage}" = "true" ]; then
+    echo "1" > "$(dirname "${COVERAGE_FILE}")/FAILED"
+  fi
   if [ "${record_timing}" = true ]; then
     local elapsed_ns=$(( $(date +%s%N) - start_time ))
     local elapsed=$(( elapsed_ns / 1000000000 )).$(( (elapsed_ns % 1000000000) / 100000000 ))
@@ -169,6 +175,9 @@ run_pytest_batch() {
   fi
   local status=${PIPESTATUS[0]}
   set -e
+  if [ "${status}" -ne 0 ] && [ "${enable_coverage}" = "true" ]; then
+    echo "1" > "$(dirname "${COVERAGE_FILE}")/FAILED"
+  fi
   if [ "${record_timing}" = true ]; then
     local elapsed_ns=$(( $(date +%s%N) - start_time ))
     local elapsed=$(( elapsed_ns / 1000000000 )).$(( (elapsed_ns % 1000000000) / 100000000 ))

@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Check and backfill per-test coverage data for full coverage runs."""
+"""Check and backfill per-test coverage data for full coverage runs.
+
+A test target is considered "available" only when its ``covdata/`` directory
+exists, contains files, and does NOT carry a ``FAILED`` sentinel. The runner
+(``run_selected_tests.sh``) writes that sentinel when a target fails, so a
+failed run's partial coverage is treated as unusable and replaced with the
+OBS historical coverage during backfill (rather than shipped as-is).
+"""
 
 from __future__ import annotations
 
@@ -9,6 +16,8 @@ import os
 import shutil
 from pathlib import Path
 from typing import Any
+
+FAILED_SENTINEL = "FAILED"
 
 
 def coverage_key(target: str) -> str:
@@ -29,21 +38,40 @@ def expected_coverage_keys(test_groups: list[dict[str, Any]]) -> set[str]:
     return keys
 
 
-def _coverage_dirs(root: Path) -> dict[str, list[Path]]:
-    result: dict[str, list[Path]] = {}
+def _scan_coverage(root: Path) -> tuple[dict[str, list[Path]], set[str]]:
+    """Return ``(dirs_by_key, failed_keys)`` found under *root*.
+
+    ``dirs_by_key`` maps each coverage key to its ``covdata`` directories that
+    contain at least one file. ``failed_keys`` holds keys whose ``covdata``
+    directory contains a ``FAILED`` sentinel.
+    """
+    dirs_by_key: dict[str, list[Path]] = {}
+    failed: set[str] = set()
     if not root.exists():
-        return result
+        return dirs_by_key, failed
     for covdata_dir in root.rglob("covdata"):
-        if not covdata_dir.is_dir() or not any(path.is_file() for path in covdata_dir.rglob("*")):
+        if not covdata_dir.is_dir():
             continue
-        result.setdefault(covdata_dir.parent.name, []).append(covdata_dir)
-    return result
+        files = [path for path in covdata_dir.rglob("*") if path.is_file()]
+        if not files:
+            continue
+        key = covdata_dir.parent.name
+        dirs_by_key.setdefault(key, []).append(covdata_dir)
+        if any(path.name == FAILED_SENTINEL for path in files):
+            failed.add(key)
+    return dirs_by_key, failed
 
 
 def missing_coverage_keys(test_groups: list[dict[str, Any]], coverage_root: Path) -> list[str]:
-    """Return expected test keys that have no collected coverage files."""
-    available = _coverage_dirs(coverage_root)
-    return sorted(expected_coverage_keys(test_groups) - available.keys())
+    """Return expected test keys that have no usable coverage files.
+
+    A key is unusable when it has no ``covdata`` directory at all OR when its
+    ``covdata`` directory carries a ``FAILED`` sentinel (the run failed, so its
+    partial coverage must be replaced from history).
+    """
+    dirs_by_key, failed = _scan_coverage(coverage_root)
+    usable = set(dirs_by_key) - failed
+    return sorted(expected_coverage_keys(test_groups) - usable)
 
 
 def backfill_missing_coverage(
@@ -51,15 +79,23 @@ def backfill_missing_coverage(
     current_root: Path,
     previous_root: Path,
 ) -> list[str]:
-    """Copy only missing per-test coverage directories from a previous package."""
+    """Replace missing/failed per-test coverage from a previous package.
+
+    For each missing key (absent or ``FAILED``), any existing ``covdata``
+    directory under *current_root* is wiped first so the failed run's partial
+    coverage (and its sentinel) is discarded, then the historical files are
+    copied in from *previous_root*.
+    """
     missing = missing_coverage_keys(test_groups, current_root)
-    previous = _coverage_dirs(previous_root)
+    previous_dirs, _ = _scan_coverage(previous_root)
 
     for key in missing:
-        sources = previous.get(key)
+        sources = previous_dirs.get(key)
         if not sources:
             continue
         destination = current_root / key / "covdata"
+        if destination.exists():
+            shutil.rmtree(destination)
         destination.mkdir(parents=True, exist_ok=True)
         for source in sources:
             for path in source.rglob("*"):
@@ -68,12 +104,6 @@ def backfill_missing_coverage(
                 relative_path = path.relative_to(source)
                 target = destination / relative_path
                 target.parent.mkdir(parents=True, exist_ok=True)
-                if target.exists():
-                    stem = target.name
-                    suffix = 1
-                    while target.exists():
-                        target = target.with_name(f"{stem}.historical-{suffix}")
-                        suffix += 1
                 shutil.copy2(path, target)
 
     return missing_coverage_keys(test_groups, current_root)
