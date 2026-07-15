@@ -246,6 +246,9 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
     """
+    group_len: torch.Tensor | None = None
+    group_key_idx: torch.Tensor | None = None
+    group_key_cache_idx: torch.Tensor | None = None
 
     def __init__(
         self,
@@ -298,6 +301,12 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         self.attn_mask_builder = AttentionMaskBuilder(self.device)
         self.rope_dim = self.model_config.hf_text_config.qk_rope_head_dim
         self.enable_dsa_cp = enable_dsa_cp()
+        # Persistent int32 buffers for store_kv_block_metadata inputs, sized to
+        # max_num_batched_tokens (matches model_runner_v1._make_buffer sizing).
+        max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        self.group_len = torch.zeros(max_num_batched_tokens, dtype=torch.int32, device=device)
+        self.group_key_idx = torch.zeros(max_num_batched_tokens, dtype=torch.int32, device=device)
+        self.group_key_cache_idx = torch.zeros(max_num_batched_tokens, dtype=torch.int32, device=device)
 
     @staticmethod
     def determine_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
@@ -455,9 +464,9 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         if get_ascend_config().c8_enable_reshape_optim:
             torch.ops._C_ascend.store_kv_block_metadata(
                 slot_mapping,
-                common_attn_metadata.group_len,
-                common_attn_metadata.group_key_idx,
-                common_attn_metadata.group_key_cache_idx,
+                self.group_len[:num_input_tokens],
+                self.group_key_idx[:num_input_tokens],
+                self.group_key_cache_idx[:num_input_tokens],
                 block_size,
             )
 
@@ -476,9 +485,9 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             cos=cos[:num_input_tokens],
             dsa_cp_context=dsa_cp_context,
             block_size=block_size,
-            group_len=common_attn_metadata.group_len,
-            group_key_idx=common_attn_metadata.group_key_idx,
-            group_key_cache_idx=common_attn_metadata.group_key_cache_idx,
+            group_len=self.group_len[:num_input_tokens],
+            group_key_idx=self.group_key_idx[:num_input_tokens],
+            group_key_cache_idx=self.group_key_cache_idx[:num_input_tokens],
         )
 
     def build_for_graph_capture(
