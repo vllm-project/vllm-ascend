@@ -234,9 +234,6 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     # Metadata for Prefill Context Parallelism (PCP) operations.
     prefill_context_parallel_metadata: AscendPrefillContextParallelMetadata | None = None
     kvcomp_metadata: KVCompMetaData | None = None
-    group_len: torch.Tensor = None
-    group_key_idx: torch.Tensor = None
-    group_key_cache_idx: torch.Tensor = None
 
     # TODO: Remove it when vLLM no longer uses this function.
     def unpadded(self, num_actual_tokens: int, num_actual_reqs: int) -> "AscendCommonAttentionMetadata":
@@ -289,9 +286,6 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             encoder_seq_lens_cpu=_slice_reqs(self.encoder_seq_lens_cpu),
             logits_indices_padded=self.logits_indices_padded,
             num_logits_indices=self.num_logits_indices,
-            group_len=self.group_len,
-            group_key_idx=self.group_key_idx,
-            group_key_cache_idx=self.group_key_cache_idx,
         )
 
 
