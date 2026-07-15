@@ -205,7 +205,7 @@ class CompressAttentionManager(FullAttentionManager):
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
         drop_eagle_block: bool = False,
-    ) -> tuple[list[KVCacheBlock], ...]:
+    ) -> tuple[list[KVCacheBlock], ...] | tuple[tuple[list[KVCacheBlock], ...], int]:
         eagle_drop = drop_eagle_block
         # assert isinstance(
         #     kv_cache_spec, Compress4AttentionSpec | Compress128AttentionSpec | C4IndexerSpec
@@ -217,7 +217,8 @@ class CompressAttentionManager(FullAttentionManager):
         if dcp_world_size * pcp_world_size > 1:
             block_size *= dcp_world_size * pcp_world_size
         logical_block_size = block_size * kv_cache_spec.compress_ratio
-        logical_block_hashes = BlockHashListWithBlockSize(block_hashes, block_size, logical_block_size)
+        hash_block_size = block_size if vllm_version_is("0.24.0") else block_pool.hash_block_size
+        logical_block_hashes = BlockHashListWithBlockSize(block_hashes, hash_block_size, logical_block_size)
         max_num_blocks = max_length // logical_block_size
         for block_hash in itertools.islice(logical_block_hashes, max_num_blocks):
             # block_hashes is a chain of block hashes. If a block hash is not
@@ -239,7 +240,10 @@ class CompressAttentionManager(FullAttentionManager):
         ):
             for computed in computed_blocks:
                 computed.pop()
-        return computed_blocks
+        hit_length = len(computed_blocks[0]) * logical_block_size
+        if vllm_version_is("0.24.0"):
+            return computed_blocks
+        return computed_blocks, hit_length
 
 
 def get_manager_for_kv_cache_spec(

@@ -148,8 +148,7 @@ def _patch_image_token_wrapping(hunyuan_vision: Any) -> None:
 
 def install_hunyuan_vl_processor_compat() -> None:
     """Align both supported vLLM refs with Transformers 5.13 Hunyuan APIs."""
-    if not _remove_stale_registry_entries():
-        return
+    _remove_stale_registry_entries()
     from vllm.model_executor.models import hunyuan_vision as main_hunyuan_vision
 
     _patch_hunyuan_processor_loader(main_hunyuan_vision)

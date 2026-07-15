@@ -14,6 +14,7 @@ from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashList
 from vllm.v1.core.sched.output import NewRequestData
 
 from vllm_ascend.memcache_comm_fence import AttentionComputeStartGate
+from vllm_ascend.utils import vllm_version_is
 
 _GROUPED_BLOCK_HASH_DOMAIN = b"vllm-ascend-grouped-block-hash-v1\0"
 _GROUPED_BLOCK_HASH_LENGTH_PREFIX_BYTES = 4
@@ -595,6 +596,13 @@ def get_block_hashes(
         return block_hashes
     assert group_block_size % hash_block_size == 0, "block_size must be divisible by hash_block_size"
     scale_factor = group_block_size // hash_block_size
+    if not vllm_version_is("0.24.0"):
+        # vLLM #46384 uses chained hashes; the last fine-grained hash already
+        # identifies the complete larger block.
+        return [
+            block_hashes[idx + scale_factor - 1]
+            for idx in range(0, len(block_hashes) // scale_factor * scale_factor, scale_factor)
+        ]
     return [
         _rehash_block_hash_group(block_hashes[idx : idx + scale_factor])
         for idx in range(0, len(block_hashes) // scale_factor * scale_factor, scale_factor)
