@@ -45,7 +45,7 @@ class MemcacheBackend(Backend):
             self.store = self._setup_store()
             self._store_initialized = True
 
-    def _ensure_initialized(self):
+    def ensure_initialized(self):
         if self._store_initialized:
             return
 
@@ -190,9 +190,9 @@ class MemcacheBackend(Backend):
             return None
 
     def put(self, key: list[str], addr: list[list[int]], size: list[list[int]]):
+        self.ensure_initialized()
+        assert self.store is not None
         try:
-            self._ensure_initialized()
-            assert self.store is not None
             res = self.store.batch_put_from_layers(key, addr, size, MmcDirect.COPY_L2G.value)
             failed_codes = [int(value) for value in res if value != 0]
             failed_count = len(failed_codes)
