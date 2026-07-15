@@ -139,6 +139,8 @@
       "facebook/opt-125m",
       "google/gemma-2-9b",
       "google/gemma-3n-E2B-it",
+      "google/gemma-4-26B-A4B-it",
+      "google/gemma-4-31B-it",
       "google/siglip2-base-patch16-224",
       "hmellor/Ilama-3.2-1B",
       "ibm-research/PowerMoE-3b",
