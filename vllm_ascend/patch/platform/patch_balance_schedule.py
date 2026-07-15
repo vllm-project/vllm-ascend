@@ -10,28 +10,15 @@ rank reaches that decision independently from the same gathered snapshot --
 there is no leader. See ``docs/.../balance_schedule_refactor.md`` for the
 design.
 
-The ``schedule()`` body is a verbatim copy of the **v0.23.0** release tag's
+The ``schedule()`` body is a verbatim copy of the **v0.24.0** release tag's
 ``Scheduler.schedule()`` (the production pin), plus exactly three balance
 deltas: (1) the disabled-path early return that delegates to ``super()``,
 (2) the ``balance_flag`` break inside the WAITING loop
 (``any-rank-at-cap => global freeze``), and (3) ``if request_queue is None:
 break`` in place of upstream's ``assert request_queue is not None`` (so a
-drained-rank schedule does not assert when balance defers admission).
-
-The **signature**, in contrast, must work across BOTH vllm versions that
-vllm-ascend CI runs simultaneously: the release tag v0.23.0 (whose engine
-calls ``schedule()`` with no args) and the main-verified commit 1f486d96
-(whose engine calls ``schedule(throttle_prefills)``). So the override carries
-``throttle_prefills`` with a default -- a deliberate superset of v0.23.0's
-``schedule(self)`` -- making it callable by both engines. On the disabled
-fast-path it then forwards ``throttle_prefills`` only when the installed
-``super().schedule`` actually accepts it, decided by introspecting the
-signature once at import (``_SUPER_SCHEDULE_HAS_THROTTLE``) rather than
-parsing a version string (a dev checkout's ``__version__`` is not a clean
-PEP 440 release and would make a ``vllm_version_is`` check raise). The body
-and the signature therefore deliberately target different things: the body
-tracks the stable release tag, the signature tracks the union of both
-engines' call shapes. See the design doc for the full rationale.
+drained-rank schedule does not assert when balance defers admission). Both
+supported vLLM refs expose ``schedule(throttle_prefills=False)``, so the
+disabled fast path forwards that argument directly.
 
 The engine-core side is NOT copied: ``BalanceDPEngineCoreProc`` hooks
 ``_has_global_unfinished_reqs`` (called every iteration by upstream's
@@ -69,7 +56,6 @@ balance scheduling is enabled (conditional activation, so balance does not
 touch configs that don't use it, e.g. PD-disaggregated recompute).
 """
 
-import inspect
 import time
 
 import torch
@@ -79,6 +65,7 @@ import vllm.v1.engine.core as _engine_core_mod
 from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorMetadata
 from vllm.logger import logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
+from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
@@ -90,19 +77,6 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
-
-# Whether the *installed* upstream ``Scheduler.schedule`` accepts the
-# ``throttle_prefills`` argument. vllm-ascend CI runs against TWO vllm
-# versions at once: the release tag v0.23.0 (``schedule(self)``, engine calls
-# ``schedule()``) and the main-verified commit 1f486d96 (``schedule(self,
-# throttle_prefills=False)``, engine calls ``schedule(throttle_prefills)``).
-# The override signature carries ``throttle_prefills`` (with a default) so it
-# is callable by BOTH engines; on the disabled path it must then forward the
-# arg only when the installed super() actually accepts it. Introspecting the
-# signature once at import (rather than parsing a version string) is robust to
-# both lanes -- including dev checkouts whose ``__version__`` is not a clean
-# PEP 440 release (which would make a ``vllm_version_is`` check raise).
-_SUPER_SCHEDULE_HAS_THROTTLE = "throttle_prefills" in inspect.signature(Scheduler.schedule).parameters
 
 
 def _balance_scheduling_enabled(vllm_config) -> bool:
@@ -175,12 +149,7 @@ class BalanceScheduler(Scheduler):
 
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         if not self._balance_enabled:
-            # Forward throttle_prefills only when the installed super() accepts
-            # it (main-verified); v0.23.0's super() does not. See
-            # _SUPER_SCHEDULE_HAS_THROTTLE for why this is signature-based.
-            if _SUPER_SCHEDULE_HAS_THROTTLE:
-                return super().schedule(throttle_prefills)
-            return super().schedule()
+            return super().schedule(throttle_prefills)
         self.current_step += 1
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
@@ -216,6 +185,12 @@ class BalanceScheduler(Scheduler):
 
         self.kv_cache_manager.new_step_starts()
 
+        # DP prefill balancing: on a throttled (non-cadence-aligned) step, defer
+        # all prefill compute unless saturated.
+        defer_prefills = (throttle_prefills and not self.prefill_capacity_bound) and any(
+            not r.is_prefill_chunk for r in self.running
+        )
+
         # First, schedule the RUNNING requests.
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
@@ -243,6 +218,12 @@ class BalanceScheduler(Scheduler):
                 req_index += 1
                 continue
 
+            if defer_prefills and request.is_prefill_chunk:
+                # DP prefill balancing: defer this in-progress prefill chunk to a
+                # cadence-aligned step; decodes still run to fill this step.
+                req_index += 1
+                continue
+
             num_new_tokens = (
                 request.num_tokens_with_spec + request.num_output_placeholders - request.num_computed_tokens
             )
@@ -252,7 +233,10 @@ class BalanceScheduler(Scheduler):
 
             # Make sure the input position does not exceed the max model len.
             # This is necessary when using spec decoding.
-            num_new_tokens = min(num_new_tokens, self.max_model_len - 1 - request.num_computed_tokens)
+            num_new_tokens = min(
+                num_new_tokens,
+                self.max_model_len - request.num_computed_tokens - self.num_sampled_tokens_per_step,
+            )
 
             # Schedule encoder inputs.
             encoder_inputs_to_schedule = None
@@ -286,7 +270,7 @@ class BalanceScheduler(Scheduler):
                 # 2. The encoder budget is exhausted.
                 # 3. The encoder cache is exhausted.
                 # 4. Insufficient budget for a block-aligned chunk in hybrid
-                #    models with mamba cache mode "align".
+                #    models with mamba cache mode \"align\".
                 # NOTE(woosuk): Here, by doing `continue` instead of `break`,
                 # we do not strictly follow the FCFS scheduling policy and
                 # allow the lower-priority requests to be scheduled.
@@ -398,11 +382,9 @@ class BalanceScheduler(Scheduler):
                 if len(self.running) == self.max_num_running_reqs:
                     break
 
-                # >>> balance-scheduling delta (the whole point of this patch) <<<
-                # If any DP rank was at the running cap at the end of the
-                # previous step, stop admitting new WAITING requests on this
-                # rank too, so load stays even across ranks
-                # (leader-at-cap => global freeze).
+                # Keep admission balanced across DP ranks: if any rank was at
+                # the running cap after the previous step, stop admitting new
+                # waiting requests on every rank.
                 if max(t.item() for t in self.balance_queue) == self.max_num_running_reqs:
                     break
 
@@ -444,13 +426,53 @@ class BalanceScheduler(Scheduler):
                 num_external_computed_tokens = 0
                 load_kv_async = False
                 connector_prefix_cache_queries, connector_prefix_cache_hits = 0, 0
+                num_uncached_common_prefix_tokens = 0
 
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
                     # Get locally-cached tokens.
-                    new_computed_blocks, num_new_local_computed_tokens = self.kv_cache_manager.get_computed_blocks(
-                        request
-                    )
+                    if (
+                        self.connector is not None
+                        and self.has_mamba_layers
+                        and isinstance(
+                            self.kv_cache_manager.coordinator,
+                            HybridKVCacheCoordinator,
+                        )
+                    ):
+                        computed, per_group_hits = self.kv_cache_manager.coordinator.find_longest_cache_hit_per_group(
+                            request.block_hashes,
+                            request.num_tokens - 1,
+                        )
+                        new_computed_blocks = self.kv_cache_manager.create_kv_cache_blocks(computed)
+                        # NOTE(ZhanqiuHu): For Mamba hybrid models,
+                        # num_new_local_computed_tokens should be the FA hit
+                        # length. This value is passed to the connector's
+                        # get_num_new_matched_tokens which computes:
+                        # external = total - local_computed.
+                        # Using the FA hit skips re-transferring FA blocks
+                        # already cached on D-side. The Mamba state (always
+                        # the last block) is transferred unconditionally by
+                        # _apply_prefix_caching in nixl/worker.py.
+                        num_new_local_computed_tokens = max(per_group_hits)
+                        if self.kv_cache_manager.log_stats:
+                            assert self.kv_cache_manager.prefix_cache_stats is not None
+                            self.kv_cache_manager.prefix_cache_stats.record(
+                                num_tokens=request.num_tokens,
+                                num_hits=num_new_local_computed_tokens,
+                                preempted=request.num_preemptions > 0,
+                            )
+                    else:
+                        new_computed_blocks, num_new_local_computed_tokens = self.kv_cache_manager.get_computed_blocks(
+                            request
+                        )
+
+                    # In case of hybrid models, obtain hint for Marconi-style APC logic
+                    if self.has_mamba_layers:
+                        num_uncached_common_prefix_tokens = getattr(
+                            self.kv_cache_manager.coordinator,
+                            "num_uncached_common_prefix_tokens",
+                            0,
+                        )
 
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:
@@ -508,6 +530,11 @@ class BalanceScheduler(Scheduler):
                     # KVTransfer: loading remote KV, do not allocate for new work.
                     assert num_external_computed_tokens > 0
                     num_new_tokens = 0
+                elif defer_prefills and request.num_computed_tokens == 0:
+                    # DP prefill balancing: async KV loads (the branch above) are
+                    # allowed to start even on throttled steps, but committing new
+                    # prefill compute is deferred to a cadence-aligned step.
+                    break
                 else:
                     # Number of tokens to be scheduled.
                     # We use `request.num_tokens` instead of
@@ -553,6 +580,7 @@ class BalanceScheduler(Scheduler):
                         num_new_tokens,
                         num_new_local_computed_tokens,
                         num_external_computed_tokens,
+                        num_uncached_common_prefix_tokens,
                     )
                     if num_new_tokens == 0:
                         break
@@ -589,6 +617,7 @@ class BalanceScheduler(Scheduler):
                     num_encoder_tokens=num_encoder_tokens,
                     full_sequence_must_fit=self.scheduler_reserve_full_isl,
                     reserved_blocks=reserved_blocks,
+                    has_scheduled_reqs=bool(self.running),
                 )
 
                 if new_blocks is None:
@@ -680,6 +709,11 @@ class BalanceScheduler(Scheduler):
             if step_skipped_waiting:
                 self.skipped_waiting.prepend_requests(step_skipped_waiting)
 
+            # DP prefill balancing: on a step that admitted prefills (release),
+            # record whether it was capacity-bound.
+            if not defer_prefills:
+                self.prefill_capacity_bound = bool(self.waiting)
+
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
         assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens
@@ -701,8 +735,8 @@ class BalanceScheduler(Scheduler):
 
         # Construct the scheduler output.
         if self.use_v2_model_runner:
-            scheduled_new_reqs = scheduled_new_reqs + scheduled_resumed_reqs
-            scheduled_resumed_reqs = []
+            scheduled_new_reqs.extend(scheduled_resumed_reqs)
+            scheduled_resumed_reqs.clear()
             new_reqs_data = [
                 NewRequestData.from_request(
                     req,
@@ -726,13 +760,19 @@ class BalanceScheduler(Scheduler):
                 req_to_new_blocks,
             )
 
-        # Record the request ids that were scheduled in this step.
-        self.prev_step_scheduled_req_ids.clear()
-        self.prev_step_scheduled_req_ids.update(num_scheduled_tokens.keys())
+        # Record the request ids that were scheduled in this step (MRV1-only).
+        if not self.use_v2_model_runner:
+            self.prev_step_scheduled_req_ids.clear()
+            self.prev_step_scheduled_req_ids.update(num_scheduled_tokens.keys())
 
         new_block_ids_to_zero = (
             (self.kv_cache_manager.take_new_block_ids() or None) if self.needs_kv_cache_zeroing else None
         )
+
+        # Dynamic speculative decoding: compute optimal K
+        num_spec_tokens_to_schedule = self.num_spec_tokens
+        if self.dynamic_sd_lookup is not None and len(num_scheduled_tokens) > 0:
+            num_spec_tokens_to_schedule = self.dynamic_sd_lookup[len(num_scheduled_tokens)]
 
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
@@ -750,6 +790,7 @@ class BalanceScheduler(Scheduler):
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
             new_block_ids_to_zero=new_block_ids_to_zero,
+            num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
@@ -764,6 +805,11 @@ class BalanceScheduler(Scheduler):
         if self.ec_connector is not None:
             ec_meta: ECConnectorMetadata = self.ec_connector.build_connector_meta(scheduler_output)
             scheduler_output.ec_connector_metadata = ec_meta
+
+        # Advance the fence only for non-empty steps (those that actually
+        # write KV and have their output processed later in update_from_output).
+        if self.defer_block_free and total_num_scheduled_tokens > 0:
+            self.sched_step_seq += 1
 
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)

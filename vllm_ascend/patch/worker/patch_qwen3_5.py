@@ -84,7 +84,7 @@ class AscendQwen3NextAttention(Qwen3NextAttention):
             gate = torch.sigmoid(gate)
             attn_output = attn_output * gate
 
-        if vllm_version_is("0.23.0"):
+        if vllm_version_is("0.24.0"):
             output[:], _ = self.o_proj(attn_output)
         else:
             out, _ = self.o_proj(attn_output)
@@ -105,7 +105,7 @@ class AscendQwen3_5DecoderLayer(Qwen3_5DecoderLayer):
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
-        if vllm_version_is("0.23.0"):
+        if vllm_version_is("0.24.0"):
             if self.layer_idx == 0 and _EXTRA_CTX.flash_comm_v1_enabled:
                 tp_size = get_tensor_model_parallel_world_size()
                 n_out = (hidden_states.shape[0] + tp_size - 1) // tp_size

@@ -3,12 +3,9 @@ import os
 import tempfile
 from unittest.mock import MagicMock, patch
 
-import pytest
 import torch
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.model_executor.layers.fused_moe import FusedMoE
-from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.linear import LinearBase
 
 from tests.ut.base import TestBase
@@ -19,7 +16,7 @@ from vllm_ascend.quantization.modelslim_config import (
     get_linear_quant_type,
     get_packed_modules_mapping,
 )
-from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, vllm_version_is
+from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD
 
 
 class TestAscendModelSlimConfig(TestBase):
@@ -158,41 +155,6 @@ class TestAscendModelSlimConfig(TestBase):
             from vllm_ascend.quantization.methods.kv_c8 import AscendC8KVCacheAttentionMethod
 
             self.assertIsInstance(args[0], AscendC8KVCacheAttentionMethod)
-
-    @pytest.mark.skipif(
-        not vllm_version_is("0.23.0"),
-        reason="Legacy FusedMoE quant method UT is only for vLLM 0.23.0.",
-    )
-    def test_get_quant_method_for_fused_moe(self):
-        fused_moe_layer = MagicMock(spec=FusedMoE)
-        fused_moe_layer.moe = MagicMock(spec=FusedMoEConfig)
-        fused_moe_layer.moe_config = MagicMock(spec=FusedMoEConfig)
-        mock_config = MagicMock()
-        mock_config.model_config.hf_config.model_type = None
-
-        # Test skipped layer
-        with (
-            patch.object(self.ascend_config, "is_layer_skipped_ascend", return_value=True),
-            patch("vllm_ascend.quantization.modelslim_config.get_current_vllm_config", return_value=mock_config),
-            patch(
-                "vllm_ascend.ops.fused_moe.fused_moe.AscendUnquantizedFusedMoEMethod", return_value=MagicMock()
-            ) as mock_ascend_moe,
-        ):
-            method = self.ascend_config.get_quant_method(fused_moe_layer, "moe_layer")
-            self.assertIs(method, mock_ascend_moe.return_value)
-
-        # Test quantized layer
-        mock_scheme = MagicMock()
-        with (
-            patch.object(self.ascend_config, "is_layer_skipped_ascend", return_value=False),
-            patch("vllm_ascend.quantization.modelslim_config.get_current_vllm_config", return_value=mock_config),
-            patch("vllm_ascend.quantization.modelslim_config.create_scheme_for_layer", return_value=mock_scheme),
-            patch(
-                "vllm_ascend.quantization.method_adapters.AscendFusedMoEMethod", return_value=MagicMock()
-            ) as mock_ascend_moe,
-        ):
-            method = self.ascend_config.get_quant_method(fused_moe_layer, "moe_layer")
-            self.assertIs(method, mock_ascend_moe.return_value)
 
     def test_is_layer_skipped_ascend(self):
         # Test non-fused layer that should be quantized
