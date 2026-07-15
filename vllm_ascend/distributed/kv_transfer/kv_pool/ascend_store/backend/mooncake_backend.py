@@ -41,6 +41,40 @@ def _mooncake_setup_supports_ssd_offload() -> bool:
         return "enable_ssd_offload" in doc
 
 
+@functools.lru_cache(maxsize=1)
+def _mooncake_exist_options_class() -> type | None:
+    """Return ``ExistOptions`` when the installed Mooncake exposes it."""
+    try:
+        from mooncake.store import ExistOptions  # type: ignore
+
+        options = ExistOptions()
+        if hasattr(options, "prefetch_to_memory"):
+            return ExistOptions
+    except Exception:
+        pass
+    return None
+
+
+@functools.lru_cache(maxsize=1)
+def _mooncake_is_exist_supports_prefetch() -> bool:
+    """True when installed Mooncake exposes ``ExistOptions`` for is_exist / batch_is_exist.
+
+    Mooncake RFC #2213 adds ``batch_is_exist(keys, ExistOptions(prefetch_to_memory=True))``
+    which triggers SSD-to-DRAM promotion for keys that only have a LOCAL_DISK replica.
+    The feature was proposed after v0.3.11, so it requires a newer build.
+    """
+    return _mooncake_exist_options_class() is not None
+
+
+def _build_exist_prefetch_options() -> Any:
+    exist_options_cls = _mooncake_exist_options_class()
+    if exist_options_cls is None:
+        raise RuntimeError("Mooncake ExistOptions is not available")
+    options = exist_options_cls()
+    options.prefetch_to_memory = True
+    return options
+
+
 def _ssd_setup_kwargs(config: "MooncakeStoreConfig") -> dict[str, object]:
     """Keyword args for store.setup(); empty on old Mooncake or when SSD is off."""
     if not config.enable_ssd_offload:
@@ -53,10 +87,27 @@ def _ssd_setup_kwargs(config: "MooncakeStoreConfig") -> dict[str, object]:
             "later (see Mooncake ssd-offload.md Step 3A), or set "
             "enable_ssd_offload to false."
         )
-    return {
+    kwargs: dict[str, object] = {
         "enable_ssd_offload": config.enable_ssd_offload,
         "ssd_offload_path": config.ssd_offload_path,
     }
+    # SSD prefetch throttle (memory-pressure backoff + per-key dedup). Only
+    # forward when the installed Mooncake build accepts these kwargs; older
+    # builds would reject unknown arguments. The throttle and the prefetch
+    # ExistOptions API ship together (same change set), so the ExistOptions
+    # probe doubles as the throttle-kwarg capability check — and it is more
+    # reliable than inspecting the pybind setup() signature. The throttle
+    # guards the holder side, so it is configured whenever SSD offload is on
+    # (a remote node may delegate prefetch to this node regardless of this
+    # node's own prefetch setting).
+    # Only forward throttle knobs that were explicitly set in mooncake.json.
+    # When unset (None) we omit them so Mooncake uses its own built-in defaults.
+    if _mooncake_is_exist_supports_prefetch():
+        if config.ssd_prefetch_cooldown_sec is not None:
+            kwargs["ssd_prefetch_cooldown_sec"] = config.ssd_prefetch_cooldown_sec
+        if config.ssd_prefetch_dedup_ttl_sec is not None:
+            kwargs["ssd_prefetch_dedup_ttl_sec"] = config.ssd_prefetch_dedup_ttl_sec
+    return kwargs
 
 
 class MooncakeBackend(Backend):
@@ -72,6 +123,8 @@ class MooncakeBackend(Backend):
         self._lazy_init = lazy_init and self._use_fabric_mem
         self._store_initialized = False
         self._store_init_lock = threading.Lock()
+        self._ssd_prefetch_enabled = False
+        self._exist_prefetch_options: Any | None = None
 
         if not self._lazy_init:
             self.store = self._setup_store()
@@ -155,7 +208,36 @@ class MooncakeBackend(Backend):
                 "Mooncake SSD offload enabled (Mode A): path=%s",
                 self.config.ssd_offload_path,
             )
+        self._ssd_prefetch_enabled = self._resolve_ssd_prefetch()
+        if self._ssd_prefetch_enabled:
+            self._exist_prefetch_options = _build_exist_prefetch_options()
         return store
+
+    def _resolve_ssd_prefetch(self) -> bool:
+        """Decide whether to pass ``ExistOptions(prefetch_to_memory=True)`` on exist queries.
+
+        Prefetch is only useful when SSD offload is active (keys can reside on
+        disk) and the installed Mooncake build exposes ``ExistOptions`` on
+        ``batch_is_exist`` / ``is_exist`` (RFC #2213).
+        """
+        if not self.config.enable_ssd_prefetch:
+            return False
+        if not self.config.enable_ssd_offload:
+            logger.warning(
+                "enable_ssd_prefetch is true but SSD offload is disabled; "
+                "prefetch has no effect without SSD offload."
+            )
+            return False
+        if not _mooncake_is_exist_supports_prefetch():
+            logger.warning(
+                "enable_ssd_prefetch is true, but the installed Mooncake does "
+                "not support ExistOptions on batch_is_exist / is_exist "
+                "(RFC #2213). Upgrade Mooncake to a version that implements "
+                "this feature. Prefetch will be disabled."
+            )
+            return False
+        logger.info("Mooncake SSD prefetch on exist enabled.")
+        return True
 
     def set_device(self):
         local_rank = get_world_group().local_rank
@@ -176,6 +258,8 @@ class MooncakeBackend(Backend):
             )
             return [0] * len(keys)
         assert self.store is not None
+        if self._ssd_prefetch_enabled and self._exist_prefetch_options is not None:
+            return self.store.batch_is_exist(keys, self._exist_prefetch_options)
         return self.store.batch_is_exist(keys)
 
     def put(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
@@ -276,6 +360,11 @@ class MooncakeStoreConfig:
     prefer_alloc_in_same_node: bool
     enable_ssd_offload: bool = False
     ssd_offload_path: str = ""
+    enable_ssd_prefetch: bool = False
+    # None means "not set in mooncake.json"; in that case we do NOT pass the
+    # value to store.setup() and let Mooncake fall back to its own defaults.
+    ssd_prefetch_cooldown_sec: int | None = None
+    ssd_prefetch_dedup_ttl_sec: int | None = None
 
     def __post_init__(self) -> None:
         if not self.enable_ssd_offload:
@@ -310,6 +399,17 @@ class MooncakeStoreConfig:
             prefer_alloc_in_same_node=config.get("prefer_alloc_in_same_node", True),
             enable_ssd_offload=bool(config.get("enable_ssd_offload", False)),
             ssd_offload_path=config.get("ssd_offload_path", ""),
+            enable_ssd_prefetch=bool(config.get("enable_ssd_prefetch", False)),
+            ssd_prefetch_cooldown_sec=(
+                int(config["ssd_prefetch_cooldown_sec"])
+                if config.get("ssd_prefetch_cooldown_sec") is not None
+                else None
+            ),
+            ssd_prefetch_dedup_ttl_sec=(
+                int(config["ssd_prefetch_dedup_ttl_sec"])
+                if config.get("ssd_prefetch_dedup_ttl_sec") is not None
+                else None
+            ),
         )
 
     @staticmethod
