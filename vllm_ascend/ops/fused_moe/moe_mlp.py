@@ -34,7 +34,6 @@ from vllm_ascend.utils import (
     dispose_tensor,
     enable_custom_op,
     get_ascend_device_type,
-    get_weight_prefetch_method,
 )
 
 ASCEND_DEVICE_TYPE = get_ascend_device_type()
@@ -152,9 +151,6 @@ def quant_apply_mlp(
     bias1, bias2 = None, None
     _output_dtype = w2_scale[0].dtype if isinstance(w2_scale, list) else w2_scale.dtype
 
-    weight_prefetch_method = get_weight_prefetch_method()
-    if weight_prefetch_method:
-        weight_prefetch_method.maybe_prefetch_moe_weight_postprocess(hidden_states)
     is_mc2 = _EXTRA_CTX.moe_comm_type == MoECommType.MC2
     if w1_scale_bias is None and w1_offset is None and is_mc2 and not is_gelu_activation:
         if _custom_gmm_swiglu_enabled(fusion, dynamic_eplb) and not use_mxfp_quant:

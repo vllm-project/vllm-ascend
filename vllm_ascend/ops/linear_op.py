@@ -72,7 +72,6 @@ from vllm_ascend.utils import (
     enable_sp,
     flashcomm2_enable,
     get_flashcomm2_reorgnized_batch_ids,
-    get_weight_prefetch_method,
     is_vl_model,
     matmul_allreduce_enable,
     mlp_tp_enable,
@@ -148,10 +147,6 @@ class CustomRowParallelOp(CustomLinearOp):
 
     def apply(self, input_):
         output, output_bias = self.apply_impl(input_)
-        weight_prefetch_method = get_weight_prefetch_method()
-        weight_prefetch_method.maybe_prefetch_mlp_weight_preprocess(
-            weight_prefetch_method.MLP_GATE_UP, output, self.prefix
-        )
 
         if not self.return_bias:
             return output

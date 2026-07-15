@@ -107,7 +107,6 @@ def mock_dist_env(mocker: MockerFixture):
 
     mock_moe_comm_method.finalize.side_effect = mock_finalize
     dp_metadata = MagicMock(num_tokens_across_dp_cpu=[5, 5])
-    mock_weight_prefetch_method = MagicMock()
     mock_forward_context_obj = MagicMock(
         moe_comm_method=mock_moe_comm_method,
         moe_comm_type=MoECommType.MC2,
@@ -143,10 +142,6 @@ def mock_dist_env(mocker: MockerFixture):
         patch("vllm_ascend.ops.fused_moe.moe_comm_method.MC2CommImpl._get_token_dispatcher", return_value=None),
         patch("vllm_ascend.ops.fused_moe.moe_comm_method.AlltoAllCommImpl._get_token_dispatcher", return_value=None),
         patch("vllm_ascend.ops.fused_moe.moe_comm_method.AllGatherCommImpl._get_token_dispatcher", return_value=None),
-        patch(
-            "vllm_ascend.ops.fused_moe.experts_selector.get_weight_prefetch_method",
-            return_value=mock_weight_prefetch_method,
-        ),
     ):
         yield {
             "mock_forward_context_obj": mock_forward_context_obj,
@@ -399,14 +394,10 @@ class TestExpertsSelector:
         assert (topk_ids >= 0).all()
         assert (topk_ids < num_experts).all()
 
-    @patch("vllm_ascend.ops.fused_moe.experts_selector.get_weight_prefetch_method")
     @patch("vllm_ascend.ops.fused_moe.experts_selector.check_npu_moe_gating_top_k", return_value=False)
-    def test_select_experts_native_softmax_matches_expected(self, _, mock_get_weight_prefetch_method):
+    def test_select_experts_native_softmax_matches_expected(self, _):
         hidden_states = torch.tensor([[1.0, 0.0, -1.0, 2.0], [0.5, 1.5, -0.5, 1.0]], dtype=torch.float32)
         router_logits = torch.tensor([[3.0, 1.0, 0.0, 2.0], [0.0, 4.0, 1.0, 2.0]], dtype=torch.float32)
-
-        prefetch_method = MagicMock()
-        mock_get_weight_prefetch_method.return_value = prefetch_method
 
         topk_weights, topk_ids = select_experts(
             hidden_states=hidden_states,
@@ -426,7 +417,6 @@ class TestExpertsSelector:
         expected_weights, expected_ids = expected_probs.topk(2, dim=-1)
         expected_weights = expected_weights / expected_weights.sum(dim=-1, keepdim=True)
 
-        prefetch_method.maybe_prefetch_moe_weight_preprocess.assert_called_once_with(hidden_states, "gate_up")
         torch.testing.assert_close(topk_weights, expected_weights.to(hidden_states.dtype))
         assert torch.equal(topk_ids, expected_ids.to(torch.int32))
 
@@ -459,9 +449,8 @@ class TestExpertsSelector:
         assert torch.equal(actual_ids, expected_ids)
         torch.testing.assert_close(actual_weights, expected_weights)
 
-    @patch("vllm_ascend.ops.fused_moe.experts_selector.get_weight_prefetch_method", return_value=MagicMock())
     @patch("vllm_ascend.ops.fused_moe.experts_selector.check_npu_moe_gating_top_k", return_value=False)
-    def test_select_experts_invalid_scoring_func_raises(self, _, __):
+    def test_select_experts_invalid_scoring_func_raises(self, _):
         hidden_states = torch.randn(2, 4)
         router_logits = torch.randn(2, 4)
 

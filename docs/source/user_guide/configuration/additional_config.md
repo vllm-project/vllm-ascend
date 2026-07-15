@@ -67,7 +67,6 @@ The following table lists additional configuration options available in vLLM Asc
 | Name                                | Type | Default | Description                                                                                               |
 |-------------------------------------|------|---------|-----------------------------------------------------------------------------------------------------------|
 | `xlite_graph_config`                | dict | `{}`    | Configuration options for Xlite graph mode                                                                |
-| `weight_prefetch_config`            | dict | `{}`    | Configuration options for weight prefetch                                                                 |
 | `finegrained_tp_config`             | dict | `{}`    | Configuration options for module tensor parallelism                                                       |
 | `ascend_compilation_config`         | dict | `{}`    | Configuration options for ascend compilation                                                              |
 | `eplb_config`                       | dict | `{}`    | Configuration options for eplb |
@@ -111,13 +110,6 @@ The details of each configuration option are as follows:
 | ---- | ---- | ------- | ----------- |
 | `enabled` | bool | `False` | Whether to enable Xlite graph mode. Currently only Llama, Qwen dense series models, and Qwen3-VL are supported. |
 | `full_mode` | bool | `False` | Whether to enable Xlite for both the prefill and decode stages. By default, Xlite is only enabled for the decode stage. |
-
-**weight_prefetch_config**
-
-| Name             | Type | Default                                                     | Description                        |
-|------------------|------|-------------------------------------------------------------|------------------------------------|
-| `enabled`        | bool | `False`                                                     | Whether to enable weight prefetch. |
-| `prefetch_ratio` | dict | `{"attn": {"qkv": 1.0, "o": 1.0}, "moe": {"gate_up": 0.8}, "mlp": { "gate_up": 1.0,  "down": 1.0}}` | Prefetch ratio of each weight.     |
 
 **finegrained_tp_config**
 
@@ -189,22 +181,6 @@ An example of additional configuration is as follows:
 
 ```python
 {
-    "weight_prefetch_config": {
-        "enabled": True,
-        "prefetch_ratio": {
-            "attn": {
-                "qkv": 1.0,
-                "o": 1.0,
-            },
-            "moe": {
-                "gate_up": 0.8
-            },
-            "mlp": {
-                "gate_up": 1.0,
-                "down": 1.0
-            }
-        },
-    },
     "finegrained_tp_config": {
         "lmhead_tensor_parallel_size": 8,
         "oproj_tensor_parallel_size": 8,

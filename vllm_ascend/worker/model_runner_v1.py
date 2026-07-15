@@ -162,7 +162,6 @@ from vllm_ascend.utils import (
     lmhead_tp_enable,
     oproj_tp_enable,
     set_potential_max_tokens,
-    set_weight_prefetch_method,
     should_skip_allreduce_across_dp_group,
     vllm_version_is,
 )
@@ -341,7 +340,6 @@ class NPUModelRunner(GPUModelRunner):
 
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
-        set_weight_prefetch_method(self.ascend_config.weight_prefetch_config)
 
         # Dump / PrecisionDebugger configuration now comes from AscendConfig
         dump_cfg = self.ascend_config.dump_config_path
