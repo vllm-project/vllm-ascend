@@ -189,6 +189,28 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             spec.page_size_bytes * num_blocks,
         )
 
+    def test_sparse_replicated_indexer_page_size_uses_expanded_storage_once(self):
+        spec = AscendMLAAttentionSpec(
+            block_size=16,
+            num_kv_heads=1,
+            head_size=1088,
+            sparse_head_dim=(512, 64, 128 * 4),
+            dtype=torch.bfloat16,
+            cache_dtype_str="auto",
+            sfa_dcp_replicated_indexer_size=4,
+        )
+
+        self.assertEqual(spec.page_size_bytes, 16 * (512 + 64 + 128 * 4) * 2)
+        self.assertEqual(
+            spec.sparse_kv_cache_ratio,
+            (
+                (512 + 64 + 128 * 4) / 512,
+                (512 + 64 + 128 * 4) / 64,
+                (512 + 64 + 128 * 4) / (128 * 4),
+                None,
+            ),
+        )
+
 
 class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
     def _build_runner(self):
