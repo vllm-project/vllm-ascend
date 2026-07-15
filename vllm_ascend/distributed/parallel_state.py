@@ -17,7 +17,6 @@ _EMBED_TP: GroupCoordinator | None = None
 # flashcomm specific groups
 _FLASHCOMM2_OTP: GroupCoordinator | None = None
 _FLASHCOMM2_ODP: GroupCoordinator | None = None
-_FC3_QUANT_X: GroupCoordinator | None = None
 
 _P_TP: GroupCoordinator | None = None
 
@@ -96,12 +95,6 @@ def init_ascend_model_parallel(
         global _DYNAMIC_EPLB
         _DYNAMIC_EPLB = init_model_parallel_group(
             group_ranks, get_world_group().local_rank, backend, group_name="dynamic_eplb"
-        )
-
-    if get_ascend_config().multistream_overlap_gate:
-        global _FC3_QUANT_X
-        _FC3_QUANT_X = init_model_parallel_group(
-            group_ranks, get_world_group().local_rank, backend, group_name="fc3_quant_x"
         )
 
     # Initialize fine-grained TP process groups on Ascend for four components:
@@ -229,11 +222,6 @@ def get_p_tp_group() -> GroupCoordinator:
     return _P_TP
 
 
-def get_fc3_quant_x_group() -> GroupCoordinator:
-    assert _FC3_QUANT_X is not None, "fc3 quant x group is not initialized"
-    return _FC3_QUANT_X
-
-
 def get_dynamic_eplb_group() -> GroupCoordinator:
     assert _DYNAMIC_EPLB is not None, "Dynamic eplb group is not initialized"
     return _DYNAMIC_EPLB
@@ -279,11 +267,6 @@ def destroy_ascend_model_parallel():
     if _FLASHCOMM2_ODP and get_ascend_config().flashcomm2_oproj_tensor_parallel_size != 1:
         _FLASHCOMM2_ODP.destroy()
         _FLASHCOMM2_ODP = None
-
-    global _FC3_QUANT_X
-    if _FC3_QUANT_X:
-        _FC3_QUANT_X.destroy()
-    _FC3_QUANT_X = None
 
     global _DYNAMIC_EPLB
     if _DYNAMIC_EPLB:

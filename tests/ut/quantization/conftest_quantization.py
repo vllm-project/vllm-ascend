@@ -122,12 +122,10 @@ def create_mock_vllm_config(
 
 
 def create_mock_ascend_config(
-    multistream_overlap_gate=False,
     dynamic_eplb=False,
     flashcomm2_oproj_tensor_parallel_size=1,
 ):
     mock_config = Mock()
-    mock_config.multistream_overlap_gate = multistream_overlap_gate
     mock_config.eplb_config = Mock(dynamic_eplb=dynamic_eplb)
     mock_config.flashcomm2_oproj_tensor_parallel_size = flashcomm2_oproj_tensor_parallel_size
     return mock_config
