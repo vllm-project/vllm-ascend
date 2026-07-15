@@ -562,18 +562,16 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
             w1_scale_bias = layer.w13_scale_bias_list
             w2_scale_bias = layer.w2_scale_bias_list
         elif cann_mega_moe_flag and hasattr(layer, "cann_mega_moe_w13_weight_list"):
-            # CANN MegaMoe requires per-expert tensor lists. The lists below are
-            # built once in process_weights_after_loading and share storage with
-            # the original packed-int32 layer.w13_weight / layer.w2_weight, so
-            # there's no extra memory cost. W4A8 carries real per-expert
-            # scale_bias correction terms, which are forwarded as MegaMoe l*_bias
-            # in _apply_cann_mega_moe.
             w1 = layer.cann_mega_moe_w13_weight_list
             w1_scale = layer.cann_mega_moe_w13_weight_scale_list
             w2 = layer.cann_mega_moe_w2_weight_list
             w2_scale = layer.cann_mega_moe_w2_weight_scale_list
-            w1_scale_bias = getattr(layer, "cann_mega_moe_w13_scale_bias_list", None)
-            w2_scale_bias = getattr(layer, "cann_mega_moe_w2_scale_bias_list", None)
+
+            def cast_bias_to_fp32(bias):
+                lst = bias if isinstance(bias, list) else [bias]
+                return [t if t.dtype == torch.float32 else t.to(torch.float32) for t in lst]
+            w1_scale_bias = cast_bias_to_fp32(layer.cann_mega_moe_w13_scale_bias_list)
+            w2_scale_bias = cast_bias_to_fp32(layer.cann_mega_moe_w2_scale_bias_list)
         else:
             w1 = [layer.w13_weight]
             w1_scale = [layer.w13_weight_scale]
@@ -762,21 +760,14 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
             mega_w13 = layer.w13_weight.data
         if mega_w2 is None:
             mega_w2 = layer.w2_weight.data
-        # FIX(mega W4A8 per-expert NZ): the op prototype REQUIRES FRACTAL_NZ for the weights (bare
-        # ND int8 => EZ1009 dtype/format mismatch). W4A8 also needs per-expert bias, so listLen must
-        # == E (bias listLen must match weight listLen, each bias 1-D). But casting the whole 3D
-        # tensor to NZ then unbind(dim=0) DROPS the NZ format tag on the 2D slices => op reads NZ
-        # bytes as ND => garbage. Resolution: unbind the ND int8 FIRST (contiguous, correct bytes),
-        # then cast EACH 2D slice to NZ individually so each carries its own NZ tag.
+        # the op prototype REQUIRES FRACTAL_NZ for the weights (bare ND int8 => EZ1009 dtype/format mismatch). 
+        # W4A8 also needs per-expert bias, so listLen must == E (bias listLen must match weight listLen, each bias 1-D).  
+        # unbind the ND int8 FIRST (contiguous, correct bytes), then cast EACH 2D slice to NZ individually so each carries its own NZ tag.
         import torch as _torch
 
         def _to_nz_list(nd_w, weight_param):
             # Per-expert NZ cast, then free the ND backing IMMEDIATELY (drop param ref) and return
             # the memory to the allocator, so peak stays ~1 layer over base instead of 2x whole layer.
-            # NOTE: s is a contiguous VIEW into the full (E,H,W) storage, so .contiguous() is a
-            # no-op and npu_format_cast would allocate output sized to the whole base tensor
-            # (~1 layer) per expert => OOM. .clone() detaches each slice into its own small
-            # storage so the NZ cast allocates only one expert's worth.
             lst = [maybe_trans_nz(s.clone()) for s in nd_w.unbind(dim=0)]
             weight_param.data = _torch.empty(0, dtype=nd_w.dtype, device=nd_w.device)
             try:
@@ -793,10 +784,13 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         del mega_w2
         layer.cann_mega_moe_w13_weight_scale_list = [t.reshape(-1) for t in layer.w13_weight_scale.data.unbind(dim=0)]
         layer.cann_mega_moe_w2_weight_scale_list = [t.reshape(-1) for t in layer.w2_weight_scale.data.unbind(dim=0)]
-        if hasattr(layer, "w13_scale_bias"):
-            layer.cann_mega_moe_w13_scale_bias_list = [t.reshape(-1) for t in layer.w13_scale_bias.data.unbind(dim=0)]
-        if hasattr(layer, "w2_scale_bias"):
-            layer.cann_mega_moe_w2_scale_bias_list = [t.reshape(-1) for t in layer.w2_scale_bias.data.unbind(dim=0)]
+        if not hasattr(layer, "w13_scale_bias"):
+                raise RuntimeError(
+                    "CANN 9.1 MegaMoe only support W4A8 INT on A2/A3 for weight with w1 scale bias and w2 scale bias."
+                    "Try to disable MegaMoe to avoid this error."
+                )
+        layer.cann_mega_moe_w13_scale_bias_list = [t.reshape(-1) for t in layer.w13_scale_bias.data.unbind(dim=0)]
+        layer.cann_mega_moe_w2_scale_bias_list = [t.reshape(-1) for t in layer.w2_scale_bias.data.unbind(dim=0)]
 
     def process_weights_after_loading_modelslim(self, layer):
         layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2).contiguous()
@@ -848,11 +842,6 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
             del layer.w13_scale_bias
             del layer.w2_scale_bias
         # keep weights as ND int8 when MegaMoe is on (skip trans_nz).
-        # FIX(mega W4A8 ND all-route): with MegaMoe on, keep ND int8 (NO trans_nz, NO int32).
-        # ND is contiguous -> per-expert unbind is safe and carries no format tag to lose, so
-        # the op reads bytes correctly. Every forward (profile/prefill/decode/drafter) routes
-        # to MegaMoe (see select_moe_comm_method); the standard NZ-int32 GMM path is unused, so
-        # no dual weight copy is needed.
         elif get_ascend_config().enable_fused_mc2 == 3:
             self._maybe_build_cann_mega_moe_lists(layer, layer.w13_weight.data, layer.w2_weight.data)
 

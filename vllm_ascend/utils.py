@@ -913,11 +913,6 @@ def is_drafter_moe_model(vllm_config: VllmConfig):
     return _IS_DRAFTER_MOE_MODEL
 
 
-# NOTE: Kept available as a public helper even though the
-# in-tree caller in ``ascend_forward_context.select_moe_comm_method``
-# was inlined into the new CANN MegaMoe gate. Downstream forks and
-# future paths that bring back a ``dispatch_gmm_combine_decode``-style
-# fused op should be able to reuse this draft-quant check verbatim.
 def speculative_enable_dispatch_gmm_combine_decode(vllm_config: VllmConfig) -> bool:
     """When draft contains MOE Arch and non-w8a8, disable dispatch_gmm_combine_decode."""
     if vllm_config.speculative_config is None:

@@ -58,58 +58,6 @@ _CANN_TORCH_FLOAT8_E4M3FN = 24
 _CANN_MEGA_MOE_QUANT_MODE_INT8 = 2
 _CANN_MEGA_MOE_QUANT_MODE_MX = 4
 
-def _as_tensor_list(value: torch.Tensor | list[torch.Tensor], name: str) -> list[torch.Tensor]:
-    if isinstance(value, list):
-        if not value:
-            raise ValueError(f"{name} cannot be an empty list for CANN MegaMoe.")
-        return value
-    return [value]
-
-
-def _as_optional_tensor_list(value: torch.Tensor | list[torch.Tensor] | None) -> list[torch.Tensor] | None:
-    if value is None:
-        return None
-    return _as_tensor_list(value, "optional CANN MegaMoe tensor list")
-
-
-def _pick_mega_moe_bias(
-    scale_bias: torch.Tensor | list[torch.Tensor] | None,
-    fallback_bias: torch.Tensor | list[torch.Tensor] | None,
-) -> list[torch.Tensor] | None:
-    """Pick the correct per-expert bias list to forward to CANN MegaMoe.
-
-    W4A8 emits a real per-expert ``w*_scale_bias`` list (the 8 * sum
-    correction term computed in AscendW4A8DynamicFusedMoEMethod) that must
-    be passed to MegaMoe as ``l*_bias``. The older ``dispatch_ffn_combine``
-    path (``enable_fused_mc2 == 1``) historically stuffed
-    ``w*_scale_bias`` with empty placeholder tensors so the C++ op's
-    positional signature was satisfied — MegaMoe does NOT tolerate that
-    placeholder, so empty entries are treated as "no bias" here.
-
-    Order of preference:
-        1. ``scale_bias`` if it is a non-empty list of real (numel > 0) tensors.
-        2. ``fallback_bias`` (the model's ``w*_bias``, rarely set for MoE).
-        3. ``None``.
-    """
-    if scale_bias is not None:
-        items = scale_bias if isinstance(scale_bias, list) else [scale_bias]
-        if items and not all(getattr(t, "numel", lambda: 0)() == 0 for t in items):
-            return list(items)
-    return _as_optional_tensor_list(fallback_bias)
-
-
-def _to_float32_bias_list(bias: list[torch.Tensor] | None) -> list[torch.Tensor] | None:
-    """Coerce l1_bias/l2_bias entries to FLOAT32 as required by CANN mega_moe.
-
-    The A8W4-INT precision-compensation biases (B1/B2) must be float32 per the
-    op interface doc. Skip the cast when a tensor is already float32 so no extra
-    kernel is launched in the common case.
-    """
-    if bias is None:
-        return None
-    return [t if t.dtype == torch.float32 else t.to(torch.float32) for t in bias]
-
-
 def _infer_intermediate_hidden(weight1: torch.Tensor, weight2: torch.Tensor, hidden: int) -> int:
     if weight2.dim() >= 2:
         if weight2.shape[-1] == hidden:
@@ -484,16 +432,20 @@ class FusedMC2CommImpl(MoECommMethod):
         dispatch_quant_mode, dispatch_quant_out_dtype, weight_type = _get_cann_mega_moe_quant_settings(
             fused_experts_input.quant.quant_type
         )
-        weight1 = _as_tensor_list(fused_experts_input.weights.w1, "w1")
-        weight2 = _as_tensor_list(fused_experts_input.weights.w2, "w2")
+
+        def to_list(x):
+            return x if isinstance(x, list) else [x]
+
+        weight1 = to_list(fused_experts_input.weights.w1)
+        weight2 = to_list(fused_experts_input.weights.w2)
         # A8W4-INT MegaMoe reads N from weight1.storageShape.lastDim treated as int8 (N = lastDim*2)
         # and checks weight2.dim0 == N/2, so the weights MUST be int8-shaped (two int4 per byte), NOT
         # the eight-int4-per-int32 packing (that makes the op read N four times too small and fail
         # CheckWeight2Input). The op prototype also REQUIRES FRACTAL_NZ per expert. The W4A8 quant
         # method therefore builds per-expert int8 + FRACTAL_NZ lists (cann_mega_moe_*_weight_list) and
         # they are passed through as-is here. W8A8 weights are already int8 + FRACTAL_NZ, also as-is.
-        weight_scales1 = _as_tensor_list(fused_experts_input.weights.w1_scale, "w1_scale")
-        weight_scales2 = _as_tensor_list(fused_experts_input.weights.w2_scale, "w2_scale")
+        weight_scales1 = to_list(fused_experts_input.weights.w1_scale)
+        weight_scales2 = to_list(fused_experts_input.weights.w2_scale)
         # MegaMoe requires per-expert weight scales to be 1-D. The W4A8 method
         # squeezes w13 scales but leaves w2 scales as [1, hidden]; drop the
         # leading singleton dim so CheckWeightScaleInput passes. Guarded to the
@@ -524,24 +476,10 @@ class FusedMC2CommImpl(MoECommMethod):
                 x_active_mask = raw_mask.contiguous()
             else:
                 x_active_mask = raw_mask.to(torch.int8).contiguous()
-        # A8W4-INT precision-compensation biases B1/B2 (l1_bias/l2_bias). The doc
-        # requires FLOAT32, ND, per-expert shapes (2*intermediate_hidden,) for B1
-        # and (hidden,) for B2 — which is exactly the ``8 * sum`` correction term
-        # the W4A8 quant method emits as w13_scale_bias / w2_scale_bias. Cast to
-        # float32 defensively so a non-fp32 scale_bias (e.g. from the modelslim
-        # new_quant_version transpose+sum path) still satisfies the op contract.
-        l1_bias = _to_float32_bias_list(
-            _pick_mega_moe_bias(
-                fused_experts_input.weights.w1_scale_bias,
-                fused_experts_input.weights.w1_bias,
-            )
-        )
-        l2_bias = _to_float32_bias_list(
-            _pick_mega_moe_bias(
-                fused_experts_input.weights.w2_scale_bias,
-                fused_experts_input.weights.w2_bias,
-            )
-        )
+        # A8W4-INT precision-compensation biases B1/B2 (l1_bias/l2_bias). 
+        l1_bias = fused_experts_input.weights.w1_scale_bias,
+        l2_bias = fused_experts_input.weights.w2_scale_bias,
+
         out, expert_tokens = mega_moe(
             fused_experts_input.hidden_states,
             topk_ids.to(torch.int32),
