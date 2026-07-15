@@ -283,9 +283,9 @@ class UBatchWrapper(GPUUBatchWrapper):
                 afd_metadata.intermediate_tensors_list.append(
                     sliced_intermediate_tensors
                 )
-                afd_metadata.attn_metadata_list.append(
-                    attn_metadata[i] if attn_metadata is not None else None
-                )
+                # afd_metadata.attn_metadata_list.append(
+                #     attn_metadata[i] if attn_metadata is not None else None
+                # )
                 afd_metadata.dp_metadata_list.append(ubatch_dp_metadata)
 
         return afd_metadata
