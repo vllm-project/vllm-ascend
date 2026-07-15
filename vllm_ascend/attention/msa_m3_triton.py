@@ -10,9 +10,6 @@ split cache layout does not need to be materialized into the GPU
 
 from __future__ import annotations
 
-import os
-from collections.abc import Sequence
-
 import torch
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -22,52 +19,9 @@ from vllm.utils.math_utils import round_up
 SPARSE_BLOCK_SIZE = 128
 SCORE_BLOCK_STRIDE_ALIGNMENT = 16
 
-# Prefill score-kernel configuration.
+# Index-score kernel configuration.
 PREFILL_SCORE_QUERY_TILE_SIZE = 96
 PREFILL_SCALAR_SCORE_BLOCK_TILE_SIZE = 32
-
-# Prefill score-finalization launch policy.
-PREFILL_FINALIZE_QUERY_TILE_CANDIDATES = (8, 16, 32, 64)
-PREFILL_FINALIZE_TARGET_PROGRAM_COUNT = 128
-PREFILL_FINALIZE_TAIL_TILE_SIZE = 16
-
-# Prefill invalid-index-mask launch policy.
-PREFILL_INVALID_MASK_QUERY_TILE_CANDIDATES = (1, 2, 4, 8, 16, 32, 64)
-PREFILL_INVALID_MASK_TARGET_PROGRAM_COUNT = 128
-PREFILL_INVALID_MASK_MAX_TILE_ELEMENTS = 2048
-
-# Decode score autotuning and auxiliary-kernel launch limits.
-DECODE_SCORE_MAX_PROGRAM_COUNT = 512
-DECODE_SCORE_CHUNK_CANDIDATES = (1, 2, 4, 8, 16, 32, 64, 128, 256)
-DECODE_SCORE_STAGE_CANDIDATES = (1, 2)
-DECODE_MASK_TARGET_PROGRAM_COUNT = 64
-DECODE_MASK_MAX_CHUNK_COUNT = 16
-DECODE_TAIL_FILL_TARGET_PROGRAM_COUNT = 64
-DECODE_TAIL_FILL_MAX_CHUNK_COUNT = 16
-DECODE_MASK_BLOCK_TILE_SIZE = 2048
-DECODE_TAIL_FILL_BLOCK_TILE_SIZE = 2048
-
-# Environment-variable names used only for explicit tuning/debug overrides.
-ENV_PREFILL_FINALIZE_QUERY_TILE = (
-    "VLLM_MINIMAX_M3_PREFILL_FINALIZE_BLOCK_Q"
-)
-ENV_PREFILL_FINALIZE_TARGET_PROGRAMS = (
-    "VLLM_MINIMAX_M3_PREFILL_FINALIZE_TARGET_PROGRAMS"
-)
-ENV_PREFILL_INVALID_MASK_QUERY_TILE = "VLLM_MINIMAX_M3_PREFILL_INVALID_BLOCK_Q"
-ENV_PREFILL_INVALID_MASK_TARGET_PROGRAMS = (
-    "VLLM_MINIMAX_M3_PREFILL_INVALID_TARGET_PROGRAMS"
-)
-ENV_PREFILL_INVALID_MASK_MAX_TILE_ELEMENTS = (
-    "VLLM_MINIMAX_M3_PREFILL_INVALID_MAX_TILE_ELEMENTS"
-)
-
-
-DECODE_SCORE_AUTOTUNE_CONFIGS = [
-    triton.Config({"num_kv_chunks": chunk_count}, num_stages=stage_count)
-    for chunk_count in DECODE_SCORE_CHUNK_CANDIDATES
-    for stage_count in DECODE_SCORE_STAGE_CANDIDATES
-]
 
 _FP8_DTYPES = (torch.float8_e4m3fn, torch.float8_e5m2)
 
@@ -125,50 +79,18 @@ def _sparse_attn_num_stages_kwarg() -> dict:
         _SPARSE_ATTN_NUM_STAGES_KWARG = kwarg
     return _SPARSE_ATTN_NUM_STAGES_KWARG
 
-def _read_positive_int_env(name: str, default: int) -> int:
-    """Returns a positive integer environment override."""
-    value = os.environ.get(name)
-    if value is None:
-        return default
-    try:
-        parsed_value = int(value)
-    except ValueError as exc:
-        raise ValueError(f"{name} must be a positive integer") from exc
-    if parsed_value <= 0:
-        raise ValueError(f"{name} must be a positive integer")
-    return parsed_value
 
-
-def _read_int_choice_env(
-    name: str,
-    choices: Sequence[int],
-) -> int | None:
-    """Returns an integer environment override restricted to ``choices``."""
-    value = os.environ.get(name)
-    if value is None:
-        return None
-    try:
-        parsed_value = int(value)
-    except ValueError as exc:
-        allowed_values = ", ".join(str(choice) for choice in choices)
-        raise ValueError(f"{name} must be one of {allowed_values}") from exc
-    if parsed_value not in choices:
-        allowed_values = ", ".join(str(choice) for choice in choices)
-        raise ValueError(f"{name} must be one of {allowed_values}")
-    return parsed_value
-
-
-def _prune_decode_score_autotune_configs(configs, named_args, **unused_kwargs):
-    """Limits decode split-K variants so the launch grid stays bounded."""
+def _prune_decode_score_configs(configs, named_args, **_):
+    """Keeps decode split-K launches within the configured program budget."""
     request_count = max(1, named_args["num_reqs"])
-    max_chunk_count = max(1, DECODE_SCORE_MAX_PROGRAM_COUNT // request_count)
-    max_chunk_count = 1 << (max_chunk_count.bit_length() - 1)
-    pruned_configs = [
+    chunk_limit = max(1, 512 // request_count)
+    chunk_limit = 1 << (chunk_limit.bit_length() - 1)
+    valid_configs = [
         config
         for config in configs
-        if config.kwargs["num_kv_chunks"] <= max_chunk_count
+        if config.kwargs["num_kv_chunks"] <= chunk_limit
     ]
-    return pruned_configs or configs[:1]
+    return valid_configs or configs[:1]
 
 # ---------------------------------------------------------------------------
 # Index block-score kernel (paged). score[h, token, block] = max over the
@@ -182,7 +104,7 @@ def _prune_decode_score_autotune_configs(configs, named_args, **unused_kwargs):
         "prefix_lengths_ptr",
     ]
 )
-def _prefill_index_block_score_kernel(
+def _prefill_index_score_kernel(
     query_ptr,
     index_key_cache_ptr,
     score_ptr,
@@ -408,7 +330,7 @@ def _prefill_index_block_score_kernel(
 # index heads. Causal-boundary blocks still use the original per-token path.
 # ---------------------------------------------------------------------------
 @triton.jit
-def _prefill_scalar_page_extrema_kernel(
+def _prefill_scalar_key_extrema_kernel(
     index_key_cache_ptr,
     page_extrema_ptr,
     page_count,
@@ -449,7 +371,7 @@ def _prefill_scalar_page_extrema_kernel(
         "prefix_lengths_ptr",
     ]
 )
-def _prefill_scalar_index_block_score_kernel(
+def _prefill_scalar_index_score_kernel(
     query_ptr,
     index_key_cache_ptr,
     page_extrema_ptr,
@@ -536,7 +458,7 @@ def _prefill_scalar_index_block_score_kernel(
 
     # Process several fully visible logical blocks per loop iteration. Each
     # logical block maps through block_table to a physical page whose extrema
-    # were computed once by _prefill_scalar_page_extrema_kernel.
+    # were computed once by _prefill_scalar_key_extrema_kernel.
     block_lane_offsets = tl.arange(0, BLOCK_SIZE_B)
     for block_tile_start in tl.range(0, full_block_count, BLOCK_SIZE_B):
         block_ids = block_tile_start + block_lane_offsets
@@ -627,9 +549,16 @@ def _prefill_scalar_index_block_score_kernel(
 # because decode only consumes block ordering.
 # ---------------------------------------------------------------------------
 @triton.autotune(
-    configs=DECODE_SCORE_AUTOTUNE_CONFIGS,
+    configs=[
+        triton.Config(
+            {"num_kv_chunks": chunk_count},
+            num_stages=stage_count,
+        )
+        for chunk_count in (1, 2, 4, 8, 16, 32, 64, 128, 256)
+        for stage_count in (1, 2)
+    ],
     key=["num_idx_heads", "BLOCK_SIZE_Q", "head_dim", "num_reqs"],
-    prune_configs_by={"early_config_prune": _prune_decode_score_autotune_configs},
+    prune_configs_by={"early_config_prune": _prune_decode_score_configs},
 )
 @triton.jit(do_not_specialize=["decode_query_len"])
 def _decode_index_score_kernel(
@@ -738,7 +667,7 @@ def _decode_index_score_kernel(
 # Split-K over max_block with a shape-constant chunk count (captured graph-safe).
 # ---------------------------------------------------------------------------
 @triton.jit(do_not_specialize=["decode_query_len", "max_block", "chunk_blocks"])
-def _decode_score_tail_fill_kernel(
+def _fill_decode_score_tail_kernel(
     score_ptr,  # [num_idx_heads, total_q, score_block_stride] fp32
     seq_lens,  # [num_reqs]
     block_size: tl.constexpr,  # sparse block size (128)
@@ -787,7 +716,7 @@ def _decode_score_tail_fill_kernel(
 # ---------------------------------------------------------------------------
 @triton.heuristics({"BLOCK_SIZE_T": lambda args: triton.next_power_of_2(args["topk"])})
 @triton.jit(do_not_specialize=["decode_query_len"])
-def _decode_topk_invalid_index_mask_kernel(
+def _mask_decode_topk_indices_kernel(
     ti_ptr,  # [num_idx_heads, total_q, topk] int32 in/out
     seq_lens,  # [num_reqs]
     block_size: tl.constexpr,  # sparse block size (128)
@@ -836,7 +765,7 @@ def _decode_topk_invalid_index_mask_kernel(
 # column vector and a row mask; no per-query dynamic scatter is used.
 # ---------------------------------------------------------------------------
 @triton.jit(do_not_specialize=["score_block_count"])
-def _prefill_score_finalize_kernel(
+def _prepare_prefill_topk_scores_kernel(
     score_ptr,
     query_start_offsets_ptr,
     prefix_lengths_ptr,
@@ -983,89 +912,11 @@ def _prefill_score_finalize_kernel(
         )
 
 
-def _choose_prefill_finalize_query_tile_size(
-    max_query_length: int,
-    batch_size: int,
-    index_head_count: int,
-) -> int:
-    """Chooses the query tile for prefill score finalization."""
-    override = _read_int_choice_env(
-        ENV_PREFILL_FINALIZE_QUERY_TILE,
-        PREFILL_FINALIZE_QUERY_TILE_CANDIDATES,
-    )
-    if override is not None:
-        return override
-
-    target_program_count = _read_positive_int_env(
-        ENV_PREFILL_FINALIZE_TARGET_PROGRAMS,
-        PREFILL_FINALIZE_TARGET_PROGRAM_COUNT,
-    )
-    total_query_rows = max(
-        1,
-        max_query_length * batch_size * index_head_count,
-    )
-    required_tile_size = triton.cdiv(
-        total_query_rows,
-        target_program_count,
-    )
-    for tile_size in PREFILL_FINALIZE_QUERY_TILE_CANDIDATES:
-        if required_tile_size <= tile_size:
-            return tile_size
-    return PREFILL_FINALIZE_QUERY_TILE_CANDIDATES[-1]
-
-
-def _choose_prefill_invalid_mask_query_tile_size(
-    max_query_length: int,
-    batch_size: int,
-    index_head_count: int,
-    topk: int,
-) -> int:
-    """Chooses a query tile while bounding the 2-D mask tile size."""
-    override = _read_int_choice_env(
-        ENV_PREFILL_INVALID_MASK_QUERY_TILE,
-        PREFILL_INVALID_MASK_QUERY_TILE_CANDIDATES,
-    )
-    if override is not None:
-        return override
-
-    target_program_count = _read_positive_int_env(
-        ENV_PREFILL_INVALID_MASK_TARGET_PROGRAMS,
-        PREFILL_INVALID_MASK_TARGET_PROGRAM_COUNT,
-    )
-    max_tile_elements = _read_positive_int_env(
-        ENV_PREFILL_INVALID_MASK_MAX_TILE_ELEMENTS,
-        PREFILL_INVALID_MASK_MAX_TILE_ELEMENTS,
-    )
-    total_query_rows = max(
-        1,
-        max_query_length * batch_size * index_head_count,
-    )
-    required_tile_size = triton.cdiv(
-        total_query_rows,
-        target_program_count,
-    )
-
-    desired_tile_size = PREFILL_INVALID_MASK_QUERY_TILE_CANDIDATES[-1]
-    for tile_size in PREFILL_INVALID_MASK_QUERY_TILE_CANDIDATES:
-        if required_tile_size <= tile_size:
-            desired_tile_size = tile_size
-            break
-
-    topk_tile_size = triton.next_power_of_2(max(1, topk))
-    max_query_tile_size = max(1, max_tile_elements // topk_tile_size)
-    bounded_tile_size = PREFILL_INVALID_MASK_QUERY_TILE_CANDIDATES[0]
-    for tile_size in PREFILL_INVALID_MASK_QUERY_TILE_CANDIDATES:
-        if tile_size > max_query_tile_size:
-            break
-        bounded_tile_size = tile_size
-    return min(desired_tile_size, bounded_tile_size)
-
-
 @triton.heuristics(
     {"BLOCK_SIZE_T": lambda args: triton.next_power_of_2(args["topk"])}
 )
 @triton.jit(do_not_specialize_on_alignment=["prefix_lengths_ptr"])
-def _prefill_topk_invalid_index_mask_kernel(
+def _mask_prefill_topk_indices_kernel(
     topk_indices_ptr,
     query_start_offsets_ptr,
     prefix_lengths_ptr,
@@ -1138,7 +989,7 @@ def _prefill_topk_invalid_index_mask_kernel(
 # over max_block with shape-constant chunk count (captured graph-safe).
 # ---------------------------------------------------------------------------
 @triton.jit(do_not_specialize=["decode_query_len", "max_block", "chunk_blocks"])
-def _decode_init_local_mask_kernel(
+def _prepare_decode_score_masks_kernel(
     init_mask_ptr,  # [total_q, score_block_stride] bool out
     local_mask_ptr,  # [total_q, score_block_stride] bool out
     seq_lens,  # [num_reqs] int32
@@ -1692,7 +1543,7 @@ def minimax_m3_index_score(
             dtype=torch.float32,
             device=index_kv_cache.device,
         )
-        _prefill_scalar_page_extrema_kernel[(page_count,)](
+        _prefill_scalar_key_extrema_kernel[(page_count,)](
             index_kv_cache,
             page_extrema,
             page_count,
@@ -1702,7 +1553,7 @@ def minimax_m3_index_score(
             page_extrema.stride(1),
             BLOCK_SIZE_K=SPARSE_BLOCK_SIZE,
         )
-        _prefill_scalar_index_block_score_kernel[score_grid](
+        _prefill_scalar_index_score_kernel[score_grid](
             idx_q,
             index_kv_cache,
             page_extrema,
@@ -1727,7 +1578,7 @@ def minimax_m3_index_score(
             BLOCK_SIZE_B=PREFILL_SCALAR_SCORE_BLOCK_TILE_SIZE,
         )
     else:
-        _prefill_index_block_score_kernel[score_grid](
+        _prefill_index_score_kernel[score_grid](
             idx_q,
             index_kv_cache,
             score,
@@ -1772,16 +1623,21 @@ def minimax_m3_index_topk(
     force_tile_size = triton.next_power_of_2(
         max(1, init_blocks, local_blocks)
     )
-    finalize_query_tile_size = _choose_prefill_finalize_query_tile_size(
-        max_query_len,
-        batch_size,
-        index_head_count,
+    total_query_rows = max(
+        1,
+        max_query_len * batch_size * index_head_count,
     )
+    required_query_tile_size = triton.cdiv(total_query_rows, 128)
+    base_query_tile_size = min(
+        64,
+        triton.next_power_of_2(required_query_tile_size),
+    )
+    finalize_query_tile_size = max(8, base_query_tile_size)
     finalize_grid = (
         triton.cdiv(max_query_len, finalize_query_tile_size),
         batch_size * index_head_count,
     )
-    _prefill_score_finalize_kernel[finalize_grid](
+    _prepare_prefill_topk_scores_kernel[finalize_grid](
         score,
         cu_seqlens_q,
         prefix_lens,
@@ -1795,7 +1651,7 @@ def minimax_m3_index_topk(
         sparse_block_size=SPARSE_BLOCK_SIZE,
         BLOCK_SIZE_Q=finalize_query_tile_size,
         BLOCK_SIZE_FORCE=force_tile_size,
-        BLOCK_SIZE_TAIL=PREFILL_FINALIZE_TAIL_TILE_SIZE,
+        BLOCK_SIZE_TAIL=16,
     )
 
     selected_count = min(topk, score_block_count)
@@ -1807,17 +1663,17 @@ def minimax_m3_index_topk(
     ).indices
     topk_indices = _copy_topk_indices(raw_indices, topk, out)
 
-    mask_query_tile_size = _choose_prefill_invalid_mask_query_tile_size(
-        max_query_len,
-        batch_size,
-        index_head_count,
-        topk,
+    topk_tile_size = triton.next_power_of_2(max(1, topk))
+    mask_tile_limit = max(1, 2048 // topk_tile_size)
+    mask_query_tile_size = min(
+        base_query_tile_size,
+        1 << (mask_tile_limit.bit_length() - 1),
     )
     mask_grid = (
         triton.cdiv(max_query_len, mask_query_tile_size),
         batch_size * index_head_count,
     )
-    _prefill_topk_invalid_index_mask_kernel[mask_grid](
+    _mask_prefill_topk_indices_kernel[mask_grid](
         topk_indices,
         cu_seqlens_q,
         prefix_lens,
@@ -1886,14 +1742,10 @@ def minimax_m3_index_decode(
     local_mask = torch.zeros_like(init_mask)
     mask_chunk_count = max(
         1,
-        min(
-            DECODE_MASK_MAX_CHUNK_COUNT,
-            DECODE_MASK_TARGET_PROGRAM_COUNT
-            // max(1, total_query_tokens),
-        ),
+        min(16, 64 // max(1, total_query_tokens)),
     )
     mask_chunk_blocks = triton.cdiv(max_block_count, mask_chunk_count)
-    _decode_init_local_mask_kernel[
+    _prepare_decode_score_masks_kernel[
         (total_query_tokens, mask_chunk_count)
     ](
         init_mask,
@@ -1907,7 +1759,7 @@ def minimax_m3_index_decode(
         local_blocks,
         init_mask.stride(0),
         init_mask.stride(1),
-        BLOCK_SIZE_K=DECODE_MASK_BLOCK_TILE_SIZE,
+        BLOCK_SIZE_K=2048,
     )
 
     use_pdl = current_platform.is_arch_support_pdl()
@@ -1952,13 +1804,12 @@ def minimax_m3_index_decode(
     tail_chunk_count = max(
         1,
         min(
-            DECODE_TAIL_FILL_MAX_CHUNK_COUNT,
-            DECODE_TAIL_FILL_TARGET_PROGRAM_COUNT
-            // max(1, total_query_tokens * index_head_count),
+            16,
+            64 // max(1, total_query_tokens * index_head_count),
         ),
     )
     tail_chunk_blocks = triton.cdiv(max_block_count, tail_chunk_count)
-    _decode_score_tail_fill_kernel[
+    _fill_decode_score_tail_kernel[
         (total_query_tokens, index_head_count, tail_chunk_count)
     ](
         score,
@@ -1970,7 +1821,7 @@ def minimax_m3_index_decode(
         score.stride(0),
         score.stride(1),
         score.stride(2),
-        BLOCK_SIZE_K=DECODE_TAIL_FILL_BLOCK_TILE_SIZE,
+        BLOCK_SIZE_K=2048,
     )
 
     selected_count = min(topk, max_block_count)
@@ -1982,7 +1833,7 @@ def minimax_m3_index_decode(
     ).indices
     topk_indices = _copy_topk_indices(raw_indices, topk, out)
 
-    _decode_topk_invalid_index_mask_kernel[
+    _mask_decode_topk_indices_kernel[
         (total_query_tokens, index_head_count)
     ](
         topk_indices,
