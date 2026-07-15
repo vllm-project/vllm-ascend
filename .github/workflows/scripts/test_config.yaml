@@ -97,8 +97,10 @@
   optional: false
   base: attention_common
   source_file_dependencies:
+    - vllm_ascend/attention/indexer.py
     - vllm_ascend/attention/sfa_v1.py
   tests:
+    - tests/ut/attention/test_indexer.py
     - tests/ut/attention/a2/test_sfa_v1.py
     - tests/ut/attention/a2/test_sfa_v1_precision.py
     - tests/e2e/pull_request/four_card/test_deepseek_v3_2_w8a8_pruning.py
