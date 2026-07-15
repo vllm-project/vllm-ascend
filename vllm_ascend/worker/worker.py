@@ -87,6 +87,16 @@ torch_non_c_binding_in_graph_functions_npu["torch.npu.stream"] = TorchInGraphFun
 torch._dynamo.trace_rules.torch_name_rule_map.append(torch_non_c_binding_in_graph_functions_npu)  # noqa: E402
 
 
+def _supports_v2_model_runner() -> bool:
+    if not vllm_version_is("0.23.0"):
+        return True
+    try:
+        from vllm.v1.worker.gpu.model_runner import GPUModelRunner  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
 class NPUWorker(WorkerBase):
     def __init__(
         self,

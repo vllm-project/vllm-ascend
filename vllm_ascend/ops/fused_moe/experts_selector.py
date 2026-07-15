@@ -68,18 +68,20 @@ def select_experts(
         topk_weights: router weights of shape (num_tokens, top_k).
         topk_ids: selected expert IDs of shape (num_tokens, top_k).
     """
+    gemma4_per_expert_scale = _get_gemma4_per_expert_scale(custom_routing_function)
     # prefetch w1_w3_proj.weight preprocess
     weight_prefetch_method = get_weight_prefetch_method()
     if weight_prefetch_method:
         weight_prefetch_method.maybe_prefetch_moe_weight_preprocess(hidden_states, "gate_up")
     is_support_npu_moe_gating_top_k = check_npu_moe_gating_top_k(
-        hidden_states=hidden_states,
+        router_logits=router_logits,
         top_k=top_k,
         renormalize=renormalize,
         topk_group=topk_group,
         num_expert_group=num_expert_group,
         scoring_func=scoring_func,
         custom_routing_function=custom_routing_function,
+        per_expert_scale=gemma4_per_expert_scale,
     )
 
     if is_support_npu_moe_gating_top_k:
@@ -96,6 +98,7 @@ def select_experts(
             routed_scaling_factor=routed_scaling_factor,
             tid2eid=tid2eid,
             input_ids=input_ids,
+            per_expert_scale=gemma4_per_expert_scale,
         )
     else:
         topk_weights, topk_ids = _native_select_experts(
@@ -136,34 +139,64 @@ def select_experts(
     return topk_weights, topk_ids
 
 
+def _get_gemma4_per_expert_scale(custom_routing_function: Callable | None) -> torch.Tensor | None:
+    """Return Gemma4 per-expert scale for its known routing closure.
+
+    Gemma4 routing is equivalent to softmax top-k with selected-weight
+    renormalization, followed by multiplying the selected experts by
+    ``per_expert_scale``. That lets us use the AscendC gating op and keep the
+    model-specific scale in Python. Other custom routing functions stay on the
+    native fallback for correctness.
+    """
+    if custom_routing_function is None:
+        return None
+
+    module = getattr(custom_routing_function, "__module__", "")
+    qualname = getattr(custom_routing_function, "__qualname__", "")
+    if module != "vllm.model_executor.models.gemma4" or "Gemma4MoE.__init__" not in qualname:
+        return None
+
+    closure = getattr(custom_routing_function, "__closure__", None)
+    if closure is None:
+        return None
+
+    for cell in closure:
+        try:
+            cell_value = cell.cell_contents
+        except ValueError:
+            continue
+        per_expert_scale = getattr(cell_value, "per_expert_scale", None)
+        if isinstance(per_expert_scale, torch.Tensor) and per_expert_scale.dim() == 1:
+            return per_expert_scale
+    return None
+
+
 def check_npu_moe_gating_top_k(
-    hidden_states: torch.Tensor,
+    router_logits: torch.Tensor,
     top_k: int,
     renormalize: bool,
     topk_group: int | None = None,
     num_expert_group: int | None = None,
     scoring_func: str = "softmax",
     custom_routing_function: Callable | None = None,
+    per_expert_scale: torch.Tensor | None = None,
 ):
     if scoring_func == "sigmoid" and not renormalize:  # sigmoid + renorm=0 is not supported in current branch
         return False
-    if custom_routing_function is not None:
+    if custom_routing_function is not None and per_expert_scale is None:
         return False
     if scoring_func != "softmax" and scoring_func != "sigmoid" and scoring_func != "sqrtsoftplus":
         return False
     topk_group = topk_group if topk_group is not None else 1
     num_expert_group = num_expert_group if num_expert_group is not None else 1
-    if not (
-        num_expert_group > 0
-        and hidden_states.shape[-1] % num_expert_group == 0
-        and hidden_states.shape[-1] // num_expert_group > 2
-    ):
+    num_experts = router_logits.shape[-1]
+    if not (num_expert_group > 0 and num_experts % num_expert_group == 0 and num_experts // num_expert_group > 2):
         return False
     if topk_group < 1 or topk_group > num_expert_group:
         return False
-    if top_k < 1 or top_k > (hidden_states.shape[-1] / (num_expert_group * topk_group)):
+    if top_k < 1 or top_k > (num_experts / (num_expert_group * topk_group)):
         return False
-    if topk_group * hidden_states.shape[-1] / num_expert_group < top_k:  # noqa: SIM103
+    if topk_group * num_experts / num_expert_group < top_k:  # noqa: SIM103
         return False
     return True
 
@@ -245,6 +278,7 @@ def _select_experts_with_fusion_ops(
     routed_scaling_factor=1.0,
     tid2eid=None,
     input_ids=None,
+    per_expert_scale: torch.Tensor | None = None,
 ):
     topk_group = topk_group if topk_group is not None else 1
     num_expert_group = num_expert_group if num_expert_group is not None else 1
@@ -305,6 +339,9 @@ def _select_experts_with_fusion_ops(
         eps=1e-20,
         bias_opt=e_score_correction_bias,
     )
+    if per_expert_scale is not None:
+        expert_scales = per_expert_scale[topk_ids].to(topk_weights.dtype)
+        topk_weights = topk_weights * expert_scales
 
     return topk_weights, topk_ids
 

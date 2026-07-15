@@ -67,6 +67,23 @@ def _sort_topk_by_ids(topk_weights: torch.Tensor, topk_ids: torch.Tensor) -> tup
     return sorted_weights, sorted_ids.to(torch.int32)
 
 
+class _Gemma4RoutingOwner:
+    def __init__(self, per_expert_scale: torch.Tensor):
+        self.per_expert_scale = per_expert_scale
+
+        def custom_routing_function(hidden_states, gating_output, topk, renormalize):
+            weights = gating_output.softmax(dim=-1)
+            topk_weights, topk_ids = weights.topk(topk, dim=-1)
+            if renormalize:
+                topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+            topk_weights = topk_weights * self.per_expert_scale[topk_ids]
+            return topk_weights, topk_ids.to(torch.int32)
+
+        custom_routing_function.__module__ = "vllm.model_executor.models.gemma4"
+        custom_routing_function.__qualname__ = "Gemma4MoE.__init__.<locals>.custom_routing_function"
+        self.custom_routing_function = custom_routing_function
+
+
 @pytest.fixture(autouse=True)
 def setup_vllm_config_mock(mocker: MockerFixture):
     mock_hf_config = MagicMock()
@@ -331,6 +348,72 @@ class TestExpertsSelector:
 
         assert topk_weights.shape == (num_tokens, 2)
         assert topk_ids.shape == (num_tokens, 2)
+
+    @patch("vllm_ascend.ops.fused_moe.experts_selector.get_weight_prefetch_method", return_value=MagicMock())
+    @patch("vllm_ascend.ops.fused_moe.experts_selector.DeviceOperator.moe_gating_top_k")
+    def test_select_experts_gemma4_custom_routing_uses_fused_topk(
+        self,
+        mock_moe_gating_top_k,
+        _,
+    ):
+        hidden_states = torch.randn(2, 4)
+        router_logits = torch.randn(2, 4)
+        per_expert_scale = torch.tensor([1.0, 2.0, 3.0, 4.0])
+        gemma4_routing = _Gemma4RoutingOwner(per_expert_scale).custom_routing_function
+        fused_weights = torch.tensor([[0.25, 0.75], [0.10, 0.90]], dtype=torch.float32)
+        fused_ids = torch.tensor([[1, 3], [0, 2]], dtype=torch.int32)
+        mock_moe_gating_top_k.return_value = (fused_weights, fused_ids, None)
+
+        topk_weights, topk_ids = select_experts(
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+            top_k=2,
+            use_grouped_topk=False,
+            renormalize=True,
+            topk_group=None,
+            num_expert_group=None,
+            custom_routing_function=gemma4_routing,
+            scoring_func="softmax",
+            e_score_correction_bias=None,
+            num_experts=4,
+        )
+
+        mock_moe_gating_top_k.assert_called_once()
+        expected_weights = fused_weights * per_expert_scale[fused_ids]
+        torch.testing.assert_close(topk_weights, expected_weights)
+        assert torch.equal(topk_ids, fused_ids)
+
+    @patch("vllm_ascend.ops.fused_moe.experts_selector.get_weight_prefetch_method", return_value=MagicMock())
+    @patch("vllm_ascend.ops.fused_moe.experts_selector.DeviceOperator.moe_gating_top_k")
+    def test_select_experts_other_custom_routing_stays_native(
+        self,
+        mock_moe_gating_top_k,
+        _,
+    ):
+        hidden_states = torch.randn(2, 4)
+        router_logits = torch.randn(2, 4)
+
+        def custom_routing(hidden_states, gating_output, topk, renormalize):
+            topk_weights, topk_ids = gating_output.softmax(dim=-1).topk(topk, dim=-1)
+            return topk_weights, topk_ids.to(torch.int32)
+
+        topk_weights, topk_ids = select_experts(
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+            top_k=2,
+            use_grouped_topk=False,
+            renormalize=True,
+            topk_group=None,
+            num_expert_group=None,
+            custom_routing_function=custom_routing,
+            scoring_func="softmax",
+            e_score_correction_bias=None,
+            num_experts=4,
+        )
+
+        mock_moe_gating_top_k.assert_not_called()
+        assert topk_weights.shape == (2, 2)
+        assert topk_ids.shape == (2, 2)
 
     def test_select_experts_weight_sum_range(self, mock_dist_env, mock_moe_env):
         num_tokens = 16

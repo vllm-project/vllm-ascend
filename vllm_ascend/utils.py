@@ -759,9 +759,10 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "BailingMoELinearAttention": AscendBailingMoELinearAttention,
     }
     if vllm_version_is("0.23.0"):
-        from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE
+        from vllm_ascend.ops.fused_moe import fused_moe
 
-        REGISTERED_ASCEND_OPS["FusedMoE"] = AscendFusedMoE
+        if hasattr(fused_moe, "AscendFusedMoE"):
+            REGISTERED_ASCEND_OPS["FusedMoE"] = fused_moe.AscendFusedMoE
 
     if vllm_config is None:
         try:
@@ -808,9 +809,10 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
             }
         )
         if vllm_version_is("0.23.0"):
-            from vllm_ascend._310p.fused_moe.fused_moe import AscendFusedMoE310
+            from vllm_ascend._310p.fused_moe import fused_moe as fused_moe_310
 
-            REGISTERED_ASCEND_OPS["FusedMoE"] = AscendFusedMoE310
+            if hasattr(fused_moe_310, "AscendFusedMoE310"):
+                REGISTERED_ASCEND_OPS["FusedMoE"] = fused_moe_310.AscendFusedMoE310
 
     for name, op_cls in REGISTERED_ASCEND_OPS.items():
         CustomOp.register_oot(_decorated_op_cls=op_cls, name=name)

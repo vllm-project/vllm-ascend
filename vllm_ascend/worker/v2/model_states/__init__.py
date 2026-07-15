@@ -29,6 +29,21 @@ def init_asecnd_model_state(
     encoder_cache: EncoderCache | None,
     device: torch.device,
 ):
+    # DiffusionGemma exposes a custom upstream ModelState for block-diffusion
+    # canvas denoising. Route only that known state to the Ascend-adapted
+    # implementation; other models keep the existing AscendModelState fallback.
+    get_state_cls = getattr(model, "get_model_state_cls", None)
+    if callable(get_state_cls):
+        state_cls = get_state_cls()
+        if state_cls is not None:
+            name = getattr(state_cls, "__name__", "")
+            if name == "DiffusionGemmaModelState":
+                from vllm_ascend.worker.v2.model_states.diffusion_gemma import (
+                    AscendDiffusionGemmaModelState,
+                )
+
+                return AscendDiffusionGemmaModelState(vllm_config, model, encoder_cache, device)
+
     from vllm_ascend.worker.v2.model_states.default import AscendModelState
 
     return AscendModelState(vllm_config, model, encoder_cache, device)

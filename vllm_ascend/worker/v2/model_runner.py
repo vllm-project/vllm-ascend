@@ -75,6 +75,26 @@ class NPUModelRunner(GPUModelRunner):
         with torch_cuda_wrapper():
             super().__init__(vllm_config, device)
 
+        # --- DiffusionGemma block-diffusion canvas wiring ---
+        # The decoder denoises a canvas of `canvas_length` tokens per step using
+        # spec-decode draft-token slots. This must happen before req_states and
+        # graph buffers are rebuilt below so draft/logit buffers can hold the
+        # full canvas.
+        self._is_diffusion_gemma = any("DiffusionGemma" in a for a in (vllm_config.model_config.architectures or []))
+        if self._is_diffusion_gemma:
+            hf_cfg = vllm_config.model_config.hf_config
+            canvas_length = getattr(hf_cfg, "canvas_length", None)
+            if canvas_length is None:
+                text_cfg = getattr(hf_cfg, "text_config", None)
+                canvas_length = getattr(text_cfg, "canvas_length", 256) if text_cfg else 256
+            self._canvas_length = int(canvas_length)
+            # The scheduler schedules canvas_length draft tokens, and the
+            # sampler writes the full canvas into draft_tokens[:, :canvas_length].
+            self.num_speculative_steps = self._canvas_length
+            self.uniform_decode_query_len = self._canvas_length
+            self.decode_query_len = self._canvas_length
+            self._configure_diffusion_gemma_cudagraph_sizes(vllm_config)
+
         # because we will override these attribute, delete these attribute to
         # make sure it's collected by python gc immediately.
         del self.req_states
@@ -123,7 +143,10 @@ class NPUModelRunner(GPUModelRunner):
         # is necessary for weight_prfetching function, and MoE communication optimization.
         set_weight_prefetch_method(self.ascend_config.weight_prefetch_config)
         # TODO: remove set_cos_and_sin (together with update_cos_sin) when mla can properly handle cos/sin internally
-        self.decode_query_len = self.num_speculative_steps + 1
+        if self._is_diffusion_gemma:
+            self.decode_query_len = self._canvas_length
+        else:
+            self.decode_query_len = self.num_speculative_steps + 1
         set_cos_and_sin(vllm_config, self.max_num_reqs, self.decode_query_len, self.dtype, self.device)
         set_mc2_tokens_capacity(vllm_config, self.max_num_reqs, self.decode_query_len)
         set_mc2_mask(vllm_config, self.device)
@@ -145,6 +168,37 @@ class NPUModelRunner(GPUModelRunner):
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         with graph_manager_wrapper(self):
             super().initialize_kv_cache(kv_cache_config)
+
+    def _configure_diffusion_gemma_cudagraph_sizes(
+        self,
+        vllm_config: VllmConfig,
+    ) -> None:
+        compilation_config = vllm_config.compilation_config
+        capture_sizes = compilation_config.cudagraph_capture_sizes
+        if not capture_sizes:
+            return
+
+        token_sizes = set()
+        for size in capture_sizes:
+            if size % self._canvas_length == 0:
+                num_reqs = size // self._canvas_length
+                if 1 <= num_reqs <= self.max_num_reqs:
+                    token_sizes.add(size)
+            elif 1 <= size <= self.max_num_reqs:
+                token_sizes.add(size * self._canvas_length)
+
+        if not token_sizes:
+            token_sizes.add(self.max_num_reqs * self._canvas_length)
+
+        compilation_config.cudagraph_capture_sizes = sorted(token_sizes)
+        required_max = max(token_sizes)
+        if compilation_config.max_cudagraph_capture_size is None:
+            compilation_config.max_cudagraph_capture_size = required_max
+        else:
+            compilation_config.max_cudagraph_capture_size = max(
+                compilation_config.max_cudagraph_capture_size,
+                required_max,
+            )
 
     @torch.inference_mode()
     def profile_run(self) -> None:
@@ -225,16 +279,17 @@ class NPUModelRunner(GPUModelRunner):
                 dtype=np.int32,
             )
             num_draft_tokens_per_req = num_draft_tokens_arr
+            num_bonus_tokens = self.model_state.num_new_sampled_tokens_per_step
             total_num_draft_tokens = int(num_draft_tokens_arr.sum())
-            total_num_logits = num_reqs + total_num_draft_tokens
+            total_num_logits = num_reqs * num_bonus_tokens + total_num_draft_tokens
 
-            num_logits = num_draft_tokens_arr + 1
+            num_logits = num_draft_tokens_arr + num_bonus_tokens
             cu_num_logits_np = np.empty(num_reqs + 1, dtype=np.int32)
             cu_num_logits_np[0] = 0
             np.cumsum(num_logits, out=cu_num_logits_np[1:])
             cu_num_logits = async_copy_to_gpu(cu_num_logits_np, device=self.device)
 
-            max_expand_len = self.num_speculative_steps + 1
+            max_expand_len = self.decode_query_len
             expanded_idx_mapping, expanded_local_pos = expand_idx_mapping(
                 idx_mapping, total_num_logits, cu_num_logits, max_expand_len
             )
@@ -306,6 +361,7 @@ class NPUModelRunner(GPUModelRunner):
             self.req_states.draft_tokens,
             cu_num_logits,
             total_num_logits,
+            self.model_state.num_new_sampled_tokens_per_step,
         )
 
         input_ids = self.input_buffers.input_ids[:num_tokens_after_padding]

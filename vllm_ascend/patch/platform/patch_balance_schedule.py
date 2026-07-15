@@ -155,6 +155,33 @@ class BalanceScheduler(Scheduler):
                 for _ in range(self.vllm_config.parallel_config.data_parallel_size)
             ]
 
+        # --- DiffusionGemma block-diffusion canvas wiring ---
+        # DiffusionGemma denoises a fixed-size canvas (canvas_length tokens) each
+        # decode step using the spec-decode draft-token infrastructure: the
+        # scheduler must schedule canvas_length "spec"/draft tokens per decode
+        # step so the runner produces canvas_length query positions and the
+        # diffusion sampler can denoise the whole canvas bidirectionally.
+        # The token values come from req_states.draft_tokens, written by the
+        # DiffusionGemma sampler; the scheduler only needs the placeholder count.
+        try:
+            archs = vllm_config.model_config.architectures
+        except Exception:
+            archs = []
+        if any("DiffusionGemma" in a for a in (archs or [])):
+            hf_cfg = vllm_config.model_config.hf_config
+            canvas_length = getattr(hf_cfg, "canvas_length", None)
+            if canvas_length is None:
+                text_cfg = getattr(hf_cfg, "text_config", None)
+                canvas_length = getattr(text_cfg, "canvas_length", 256) if text_cfg else 256
+            self.num_spec_tokens = int(canvas_length)
+            self.num_lookahead_tokens = int(canvas_length)
+            logger.info(
+                "DiffusionGemma: scheduling %d spec/draft tokens per decode step "
+                "(canvas_length=%d) for block-diffusion canvas denoising.",
+                self.num_spec_tokens,
+                int(canvas_length),
+            )
+
     def balance_gather(self):
         """All-gather per-rank running counts into ``self.balance_queue``.
 

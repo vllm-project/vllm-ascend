@@ -23,6 +23,7 @@ import torch_npu
 import vllm.envs as envs_vllm
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
+from vllm.forward_context import get_forward_context
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import (  # type: ignore
     AttentionBackend,
@@ -179,6 +180,7 @@ class AscendMetadata:
     seq_lens: torch.Tensor = None
     seq_lens_cpu: torch.Tensor = None
     seq_lens_list: list[int] = None  # type: ignore
+    seq_lens_device: torch.Tensor = None  # persistent device seq_lens
     actual_seq_lengths_q: list[int] = None  # type: ignore
 
     query_start_loc: torch.Tensor = None
@@ -202,6 +204,11 @@ class AscendMetadata:
     decode_meta: AscendMetadataForDecode | None = None
 
     causal: bool = True
+    # Per-request causal/bidirectional selector: [num_reqs] bool device tensor
+    # (True == causal/encoder phase, False == bidirectional/denoise phase). Set
+    # by DiffusionGemma canvas batching so a mixed batch is per-request correct;
+    # None falls back to the batch-wide scalar `causal` above.
+    causal_per_req: torch.Tensor = None
     # runner_type in model_config.
     model_runner_type: str = ""
     # prefill reshape_and_cache event
@@ -269,6 +276,32 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
     def reorder_batch(self, input_batch, scheduler_output: "SchedulerOutput") -> bool:
         return False
 
+    def _persist_seqlens(self, seq_lens):
+        # Keep seq_lens at a stable device address for ACL graph replay while
+        # still refreshing the values before each captured step.
+        if seq_lens is None:
+            return None
+        n = int(seq_lens.shape[0])
+        buf = getattr(self, "_seqlens_persist", None)
+        if buf is None or buf.shape[0] < n or buf.device != self.device:
+            cap = max(n, 1024)
+            self._seqlens_persist = torch.zeros(cap, dtype=torch.int64, device=self.device)
+            buf = self._seqlens_persist
+        buf[:n].copy_(seq_lens.to(device=self.device, dtype=torch.int64))
+        return buf[:n]
+
+    def _persist_causal_per_req(self, causal_per_req):
+        if causal_per_req is None:
+            return None
+        n = int(causal_per_req.shape[0])
+        buf = getattr(self, "_causal_per_req_persist", None)
+        if buf is None or buf.shape[0] < n or buf.device != self.device:
+            cap = max(n, 1024)
+            self._causal_per_req_persist = torch.zeros(cap, dtype=torch.bool, device=self.device)
+            buf = self._causal_per_req_persist
+        buf[:n].copy_(causal_per_req.to(device=self.device, dtype=torch.bool))
+        return buf[:n]
+
     def build(
         self,
         common_prefix_len: int,
@@ -304,8 +337,15 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
 
         attn_state = common_attn_metadata.attn_state
 
+        causal = common_attn_metadata.causal
+        causal_per_req = causal[:num_reqs] if torch.is_tensor(causal) else None
+        # Keep legacy scalar users on a real Python bool. DiffusionGemma's
+        # per-request phase is preserved separately in causal_per_req and
+        # consumed by the hd256/512 attention fallback path.
+        causal_scalar = True if causal_per_req is not None else bool(causal)
+
         # Get attn_mask from singleton AttentionMaskBuilder
-        attn_mask = self.attn_mask_builder.get_attention_mask(common_attn_metadata.causal, self.model_config)
+        attn_mask = self.attn_mask_builder.get_attention_mask(causal_scalar, self.model_config)
 
         # TODO: Yet another unnecessary H2D while we already have a query_start_loc on device
         query_start_loc = query_start_loc_cpu.pin_memory().to(self.device, non_blocking=True)
@@ -345,6 +385,16 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
                 ],
                 dim=0,
             )
+        if causal_per_req is not None and causal_per_req.shape[0] < num_reqs_fia:
+            causal_per_req = torch.cat(
+                [
+                    causal_per_req,
+                    causal_per_req.new_zeros(num_reqs_fia - causal_per_req.shape[0]),
+                ]
+            )
+        if block_table is not None:
+            block_table = block_table.to(device=self.device)
+        causal_per_req = self._persist_causal_per_req(causal_per_req)
 
         attn_metadata = AscendMetadata(
             num_actual_tokens=num_actual_tokens,
@@ -354,6 +404,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             seq_lens=seq_lens,
             seq_lens_cpu=seq_lens,
             seq_lens_list=seq_lens_list,
+            seq_lens_device=self._persist_seqlens(seq_lens),
             max_query_len=common_attn_metadata.max_query_len,
             actual_seq_lengths_q=actual_seq_lengths_q,
             slot_mapping=slot_mapping,
@@ -361,7 +412,8 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             attn_state=attn_state,
             num_prefills=num_prefills,
             num_decodes=num_decodes,
-            causal=common_attn_metadata.causal,
+            causal=causal_scalar,
+            causal_per_req=causal_per_req,
             model_runner_type=self.model_config.runner_type,
             kvcomp_metadata=common_attn_metadata.kvcomp_metadata,
         )
@@ -1114,6 +1166,211 @@ class AscendAttentionBackendImpl(AttentionImpl):
             actual_seq_lengths_kv = attn_metadata.seq_lens_list
         return key, value, block_size, block_table, actual_seq_lengths_kv
 
+    def _gather_kv_from_cache(self, block_table_row, kv_len):
+        """Gather contiguous [kv_len, num_kv_heads, head_size] K and V for one
+        request from the paged kv cache using its block_table row."""
+        # key_cache/value_cache shape: [num_blocks, block_size, num_kv_heads, head_size]
+        kc = self.key_cache
+        vc = self.value_cache
+        assert kc is not None
+        assert vc is not None
+        _num_blocks, block_size, nkv, hs = kc.shape
+        n_blocks_needed = (kv_len + block_size - 1) // block_size
+        blocks = block_table_row[:n_blocks_needed].to(torch.long)
+        k = kc.index_select(0, blocks).reshape(-1, nkv, hs)[:kv_len]
+        v = vc.index_select(0, blocks).reshape(-1, nkv, hs)[:kv_len]
+        return k, v
+
+    def _forward_fused_infer_attention_capturable(self, query, attn_metadata, output):
+        # Static-shape ACL-graph-capturable SDPA for head sizes outside the
+        # regular FIA TND fast path. q_len = canvas (uniform per req);
+        # bidirectional/causal via mask.
+        nH, nKV, hd = self.num_heads, self.num_kv_heads, self.head_size
+        kc, vc = self.key_cache, self.value_cache
+        assert kc is not None
+        assert vc is not None
+        bs = kc.shape[1]
+        bt = attn_metadata.block_tables
+        B, max_blocks = bt.shape
+        Smax = max_blocks * bs
+        nt = query.shape[0]
+        QL = nt // B
+        q = query.reshape(B, QL, nH, hd).permute(0, 2, 1, 3).contiguous()
+        idx = bt.reshape(-1).long()
+        kv = kc.index_select(0, idx).reshape(B, Smax, nKV, hd)
+        vv = vc.index_select(0, idx).reshape(B, Smax, nKV, hd)
+        k = kv.permute(0, 2, 1, 3).contiguous()
+        v = vv.permute(0, 2, 1, 3).contiguous()
+        seq = attn_metadata.seq_lens_device[:B].reshape(B, 1)
+        pc = getattr(self, "_pos_cache_cap", None)
+        if pc is None or pc.numel() < Smax or pc.device != query.device:
+            self._pos_cache_cap = torch.arange(Smax, device=query.device, dtype=torch.int64)
+            pc = self._pos_cache_cap
+        kpos = pc[:Smax].reshape(1, Smax)  # [1,Smax]
+        qar = pc[:QL].reshape(1, QL)  # [1,QL]
+        qpos = (seq - QL) + qar  # [B,QL] canvas at seq end
+        valid = kpos < seq  # [B,Smax]
+        qp = qpos.unsqueeze(-1)  # [B,QL,1]
+        kp = kpos.unsqueeze(1)  # [B?,1,Smax] -> broadcast
+        # Per-request causal selector, BRANCHLESS so ACL-graph replay honours the
+        # live per-request phase (no Python `if` frozen at capture time). Build
+        # both the causal and bidirectional allow masks, then torch.where per row.
+        cpr = attn_metadata.causal_per_req
+        if cpr is None:
+            causal_b = torch.full((B, 1, 1), bool(attn_metadata.causal), device=query.device, dtype=torch.bool)
+        else:
+            causal_b = cpr[:B].reshape(B, 1, 1)
+        if self.sliding_window is not None:
+            causal_allow = (kp <= qp) & ((qp - kp) < self.sliding_window)
+            bidir_allow = (qp - kp).abs() < self.sliding_window
+        else:
+            causal_allow = kp <= qp
+            bidir_allow = ~causal_b
+        allow = torch.where(causal_b, causal_allow, bidir_allow)  # [B,QL,Smax]
+        allow = allow & valid.unsqueeze(1)  # [B,QL,Smax]
+        atten_mask = (~allow).unsqueeze(1).contiguous()  # [B,1,QL,Smax], True == masked
+        out = torch_npu.npu_fused_infer_attention_score(
+            query=q,
+            key=k,
+            value=v,
+            num_heads=nH,
+            num_key_value_heads=nKV,
+            input_layout="BNSD",
+            scale=self.scale,
+            atten_mask=atten_mask,
+            sparse_mode=0,
+        )[0]
+        out = out.permute(0, 2, 1, 3).reshape(nt, nH, hd).to(query.dtype)
+        output[:nt] = out.reshape(nt, *output.shape[1:])[:nt]
+        return output
+
+    def _forward_manual_attention(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attn_metadata: AscendMetadata,
+        output: torch.Tensor,
+        kv_cache=None,
+    ):
+        """Per-request SDPA fallback for head sizes unsupported by FIA.
+
+        Handles encoder (causal, writes KV), decoder (bidirectional, reads KV),
+        and sliding-window layers. KV is read from the paged cache for
+        cache-backed states, or from the contiguous batch tensors for
+        PrefillNoCache.
+        """
+        _capturing = False
+        try:
+            _capturing = bool(getattr(get_forward_context(), "capturing", False)) or bool(_EXTRA_CTX.capturing)
+        except Exception:
+            _capturing = bool(_EXTRA_CTX.capturing)
+        if _capturing:
+            if self.key_cache is None and kv_cache is not None and len(kv_cache) >= 2:
+                self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
+            return self._forward_fused_infer_attention_capturable(query, attn_metadata, output)
+
+        # Ensure paged cache handles are set (DecodeOnly passes key=value=None).
+        if self.key_cache is None and kv_cache is not None and len(kv_cache) >= 2:
+            self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
+
+        state = attn_metadata.attn_state
+        prefill_no_cache = state == AscendAttentionState.PrefillNoCache
+        causal = bool(attn_metadata.causal)
+        # Per-request causal selector (DiffusionGemma canvas batching). When
+        # present, each request in the loop below uses its OWN phase instead of
+        # the batch-wide scalar `causal` (which is a coarse fallback only).
+        causal_vec = attn_metadata.causal_per_req
+        num_tokens = int(attn_metadata.actual_seq_lengths_q[-1])
+
+        # query: [T, num_heads, head_size]
+        query = query[:num_tokens]
+        nh = self.num_heads
+        nkv = self.num_kv_heads
+        hs = self.head_size
+        rep = nh // nkv
+        scale = self.scale
+
+        q_cum = attn_metadata.actual_seq_lengths_q  # cumulative q lengths
+        seq_lens_list = attn_metadata.seq_lens_list
+        num_reqs = len(q_cum)
+        block_tables = attn_metadata.block_tables
+
+        out = output[:num_tokens]
+        q_prev = 0
+        for i in range(num_reqs):
+            q_end = int(q_cum[i])
+            q_len = q_end - q_prev
+            if q_len <= 0:
+                q_prev = q_end
+                continue
+            kv_len = int(seq_lens_list[i]) if seq_lens_list is not None else q_len
+
+            # Per-request causal phase: encoder(commit)=causal, denoise=bidir.
+            # Fall back to the batch-wide scalar if no per-request tensor is set.
+            if causal_vec is not None:
+                causal_i = bool(causal_vec[i].item())
+            else:
+                causal_i = causal
+
+            if prefill_no_cache:
+                k_i = key[q_prev:q_end]
+                v_i = value[q_prev:q_end]
+                kv_len = q_len
+            else:
+                k_i, v_i = self._gather_kv_from_cache(block_tables[i], kv_len)
+
+            # BNSD layout for npu_fusion_attention (single fused kernel,
+            # supports head_dim<=512). q:[1,nh,q_len,hs], k/v:[1,nh,kv_len,hs]
+            q_i = query[q_prev:q_end].transpose(0, 1).unsqueeze(0).contiguous()
+            k_i = k_i.transpose(0, 1)  # [nkv, kv_len, hs]
+            v_i = v_i.transpose(0, 1)
+            if rep > 1:
+                k_i = k_i.repeat_interleave(rep, dim=0)
+                v_i = v_i.repeat_interleave(rep, dim=0)
+            k_i = k_i.unsqueeze(0).contiguous()
+            v_i = v_i.unsqueeze(0).contiguous()
+
+            # Build bool atten_mask [q_len, kv_len] where True == DISALLOWED.
+            # Query positions are the LAST q_len of the kv sequence
+            # (kv_len = past + current); offset aligns them.
+            atten_mask = None
+            if causal_i or self.sliding_window is not None:
+                offset = kv_len - q_len
+                qpos = torch.arange(q_len, device=q_i.device).unsqueeze(1) + offset
+                kpos = torch.arange(kv_len, device=q_i.device).unsqueeze(0)
+                if causal_i:
+                    # future tokens masked (causal)
+                    m = kpos > qpos
+                    if self.sliding_window is not None:
+                        # left sliding window
+                        m = m | (qpos - kpos >= self.sliding_window)
+                elif self.sliding_window is not None:
+                    # bidirectional + sliding: symmetric window, no causal mask
+                    m = (qpos - kpos).abs() >= self.sliding_window
+                if m.any():
+                    atten_mask = m
+            # bidirectional full attention (decoder denoise, non-sliding): None.
+
+            ctx = torch_npu.npu_fusion_attention(
+                q_i,
+                k_i,
+                v_i,
+                head_num=nh,
+                input_layout="BNSD",
+                scale=scale,
+                atten_mask=atten_mask,
+                sparse_mode=0,
+            )[0]  # [1, nh, q_len, hs]
+            ctx = ctx.squeeze(0).transpose(0, 1).contiguous().to(out.dtype)  # [q_len, nh, hs]
+            if out.dim() == 3:
+                out[q_prev:q_end] = ctx
+            else:
+                out[q_prev:q_end] = ctx.reshape(q_len, nh * hs)
+            q_prev = q_end
+
+        return output
+
     def forward_fused_infer_attention(
         self,
         query: torch.Tensor,
@@ -1123,6 +1380,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output: torch.Tensor,
         kv_cache=None,
     ):
+        # FIA supports head_size 64/128/192. Larger heads use a manual path
+        # that remains ACL-graph capturable during decode.
+        if self.head_size not in (64, 128, 192):
+            return self._forward_manual_attention(query, key, value, attn_metadata, output, kv_cache)
         # we inherit ForwardContext in model runner v2, when enable model
         # runner v2, there is not capturing attribute in forward_context,
         # just use getattr to avoid attribute error.

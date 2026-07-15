@@ -19,16 +19,34 @@ from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.utils import is_310p, vllm_version_is
 
-# The v2 model runner is intentionally NOT made compatible with the v0.23.0
-# release. vLLM v0.23.0 and the verified main commit are diverged, and the v2
-# worker patches target main-only APIs; rather than maintain a separate v0.23.0
-# compatibility path we keep v2 main-only. With v0.23.0 installed this flag is
-# False, so none of the patch_v2.* / routed-experts-capture patches below are
-# imported and the v2 worker stays dormant (the release uses the v1 runner).
-if vllm_version_is("0.23.0"):
-    _V2_MODEL_RUNNER_SUPPORTED = False
-else:
-    _V2_MODEL_RUNNER_SUPPORTED = True
+
+# vLLM main snapshots used by vllm-ascend CI may still report version 0.23.0.
+# Detect the main-only v2 worker APIs directly instead of relying on the
+# version string.
+def _supports_v2_model_runner() -> bool:
+    if not vllm_version_is("0.23.0"):
+        return True
+    try:
+        from vllm.v1.worker.gpu.model_runner import GPUModelRunner  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def _uses_legacy_fused_moe_layer() -> bool:
+    if not vllm_version_is("0.23.0"):
+        return False
+    try:
+        from inspect import isclass
+
+        from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+    except ImportError:
+        return True
+    return isclass(FusedMoE)
+
+
+_V2_MODEL_RUNNER_SUPPORTED = _supports_v2_model_runner()
+_USE_LEGACY_FUSED_MOE_LAYER = _uses_legacy_fused_moe_layer()
 
 if HAS_TRITON:
     import vllm_ascend.patch.worker.patch_triton
@@ -44,6 +62,7 @@ import vllm_ascend.patch.worker.patch_minimax_m2  # noqa
 import vllm_ascend.patch.worker.patch_minimax_m2_linear_attn  # noqa
 import vllm_ascend.patch.worker.patch_mamba_utils  # noqa
 import vllm_ascend.patch.worker.patch_qwen3_next_mtp  # noqa
+import vllm_ascend.patch.worker.patch_gemma4_router  # noqa
 import vllm_ascend.patch.worker.patch_step3p5  # noqa
 
 if not is_310p():
