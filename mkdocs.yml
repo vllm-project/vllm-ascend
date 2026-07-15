@@ -153,9 +153,9 @@ extra:
   vllm_ascend_version: v0.22.1rc1
   pip_vllm_ascend_version: 0.22.1rc1
   pip_vllm_version: 0.22.1
-  cann_image_tag: 9.0.0-910b-ubuntu22.04-py3.12
+  cann_image_tag: 9.0.1-910b-ubuntu22.04-py3.12
   main_python_version: ">= 3.10, < 3.13"
-  main_cann_version: "9.0.0"
+  main_cann_version: "9.0.1"
   main_pytorch_torch_npu_version: "2.10.0 / 2.10.0.post2"
   main_triton_ascend_version: "3.2.1"
   social:
