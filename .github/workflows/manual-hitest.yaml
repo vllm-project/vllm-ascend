@@ -36,10 +36,6 @@ defaults:
   run:
     shell: bash -el {0}
 
-# concurrency:
-#   group: ${{ github.workflow }}-${{ github.ref }}
-#   cancel-in-progress: true
-
 jobs:
   run-hitest:
     runs-on: linux-amd64-cpu-8-hk
@@ -62,10 +58,6 @@ jobs:
           HITEST_SECRET: ${{ secrets.HITEST_SECRET }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          echo "===== DEBUG GITHUB ENV ====="
-          echo "HITEST_APIG_APPCODE: $HITEST_APIG_APPCODE"
-          echo "HITEST_KEY: $HITEST_KEY"
-          echo "HITEST_SECRET: $HITEST_SECRET"
           python3 .github/workflows/scripts/run_hitest.py
 
       - name: Upload recommended pytest paths artifact
