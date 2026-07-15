@@ -79,12 +79,6 @@ def _assert_ascend_moe_lora_supported(base_layer: nn.Module) -> None:
             "Qwen3-30B-A3B-Thinking-2507 has no shared experts; models "
             "like DeepSeek-V3 are not yet supported."
         )
-    if getattr(base_layer, "multistream_overlap_gate", False):
-        raise AssertionError(
-            "multistream_overlap_gate=True interleaves quant_method.apply "
-            "calls on multiple streams; the MoE LoRA path has not been "
-            "validated under this overlap. Disable it for MoE LoRA."
-        )
 
 
 def _recover_moe_lora_routing(lora_context, expanded_row_idx, topk_ids):

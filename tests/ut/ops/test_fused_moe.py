@@ -736,7 +736,6 @@ class TestAscendFusedMoE:
     def test_forward_impl_prepare_apply_finalize(self, monkeypatch, return_with_event):
         layer = self._build_layer()
         layer.enable_npugraph_ex_static_kernel = True
-        layer.multistream_overlap_gate = False
         layer.enable_shared_expert_dp = False
         layer.quant_type = QuantType.NONE
         layer.top_k = 2
@@ -819,7 +818,6 @@ class TestAscendFusedMoE:
     def test_forward_impl_dynamic_eplb_multi_stage(self, monkeypatch):
         layer = self._build_layer()
         layer.enable_npugraph_ex_static_kernel = False
-        layer.multistream_overlap_gate = False
         layer.enable_shared_expert_dp = False
         layer.quant_type = QuantType.NONE
         layer.top_k = 1
@@ -923,7 +921,6 @@ class TestAscendFusedMoESharedExperts:
         if not hasattr(layer, "shared_forward_impl"):
             pytest.skip("Current AscendFusedMoE has no shared_forward_impl")
         layer.multistream_overlap_shared_expert = False
-        layer.shared_multistream_overlap_gate = False
         layer.use_overlapped = False
         layer._shared_experts = MagicMock() if has_shared_experts else None
         hidden_states = torch.randn(2, 4)
