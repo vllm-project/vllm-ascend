@@ -52,6 +52,7 @@ from vllm_ascend.attention.utils import (
     cache_graph_workspace,
     enable_cp,
     needs_layer_aware_fia_graph_replay,
+    notify_kv_cache_written,
     split_decodes_and_prefills,
 )
 from vllm_ascend.compilation.acl_graph import (
@@ -62,6 +63,7 @@ from vllm_ascend.compilation.acl_graph import (
     update_graph_params_workspaces,
 )
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.memcache_comm_fence import record_attention_compute_start
 from vllm_ascend.utils import weak_ref_tensors
 from vllm_ascend.worker.kvcomp_utils import KVCompMetaData
 
@@ -1299,8 +1301,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output: torch.Tensor,
     ):
         if len(kv_cache) > 1:
-            if self.is_kv_producer:
-                attn_metadata.reshape_cache_event = torch.npu.Event()
             if self.key_cache is None:
                 self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
             if self.kv_sharing_target_layer_name is not None:
@@ -1320,8 +1320,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 # see: https://github.com/vllm-project/vllm/blob/ce88756b967c2c5006746a424c15dd59a284ed8c/vllm/model_executor/layers/attention/cross_attention.py#L117
                 slot_mapping=slots[: attn_metadata.num_actual_tokens] if not encoder_decoder else slots.to(torch.int32),
             )
-            if self.is_kv_producer:
-                attn_metadata.reshape_cache_event.record()
+            notify_kv_cache_written()
         return query, key, value, output
 
     def forward_impl(
@@ -1333,7 +1332,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
         attn_metadata: AscendMetadata,
         output: torch.Tensor,
     ):
-        return self.forward_fused_infer_attention(query, key, value, attn_metadata, output, kv_cache)
+        record_attention_compute_start()
+        output = self.forward_fused_infer_attention(query, key, value, attn_metadata, output, kv_cache)
+        return output
 
     def forward(
         self,
@@ -1820,8 +1821,6 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
         output: torch.Tensor,
     ):
         if len(kv_cache) > 1:
-            if self.is_kv_producer:
-                attn_metadata.reshape_cache_event = torch.npu.Event()
             if self.key_cache is None:
                 self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
             if self.kv_sharing_target_layer_name is not None:
@@ -1846,6 +1845,5 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
                 slot_mapping=slots[: attn_metadata.num_actual_tokens] if not encoder_decoder else slots,
             )
 
-            if self.is_kv_producer:
-                attn_metadata.reshape_cache_event.record()
+            notify_kv_cache_written()
         return query, key, value, output

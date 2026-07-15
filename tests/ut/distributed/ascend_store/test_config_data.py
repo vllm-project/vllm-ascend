@@ -476,7 +476,15 @@ class TestReqMeta(unittest.TestCase):
             allocated_block_ids=[0, 1],
             num_saved_tokens=0,
         )
-        meta = ReqMeta.from_request_tracker(tracker, cache_transfer_granularity=16, original_block_size=8)
+        # Provide block_hashes (2 full blocks for token_len=32 / granularity=16)
+        # so the boundary_without_hash short-circuit does not zero out the save
+        # length and skip; this exercises the original_block_size propagation.
+        meta = ReqMeta.from_request_tracker(
+            tracker,
+            cache_transfer_granularity=16,
+            original_block_size=8,
+            block_hashes=[b"h0", b"h1"],
+        )
         self.assertIsNotNone(meta)
         self.assertEqual(meta.original_block_size, 8)
 
