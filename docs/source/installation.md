@@ -139,7 +139,7 @@ Then you can install `vllm` and `vllm-ascend` from a **pre-built wheel** using o
 
     # Install vllm-project/vllm-ascend.
     pip install \
-    --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi/variant https://mirrors.huaweicloud.com/ascend/repos/pypi  \
+    --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi/variant \
     vllm-ascend=={{ pip_vllm_ascend_version }}
 
     ```

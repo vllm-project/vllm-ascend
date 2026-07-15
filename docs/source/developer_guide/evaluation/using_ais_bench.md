@@ -150,7 +150,7 @@ You can choose one or multiple datasets to execute accuracy evaluation.
 
 #### Configuration
 
-Update the file `benchmark/ais_bench/benchmark/configs/models/vllm_api/vllm_api_general_chat.py`.
+Update the file `ais_bench/benchmark/configs/models/vllm_api/vllm_api_general_chat.py`.
 There are several arguments that you should update according to your environment.
 
 - `attr`: Identifier for the inference backend type, fixed as `service` (serving-based inference) or `local` (local model).

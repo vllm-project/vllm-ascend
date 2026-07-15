@@ -351,7 +351,7 @@ msgid ""
 "1. `launch_online_dp.py` is used to launch external dp vllm servers.\n"
 "    [launch_online_dp.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/launch_online_dp.py)"
 msgstr ""
-"1. `launch_online_dp.py`用于启动外部dp vllm服务器。\n"
+"1. `launch_online_dp.py`用于启动外部dp vllm服务。\n"
 "    [launch_online_dp.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/launch_online_dp.py)"
 
 msgid "Parameter descriptions:"

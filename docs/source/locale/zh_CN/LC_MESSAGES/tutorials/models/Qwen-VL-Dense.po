@@ -173,7 +173,7 @@ msgid "### 5.1 Single-Node Online Deployment"
 msgstr "### 5.1 单节点在线部署"
 
 msgid "Run docker container to start the vLLM server on single-NPU:"
-msgstr "运行docker容器以在单NPU上启动vLLM服务器："
+msgstr "运行docker容器以在单NPU上启动vLLM服务："
 
 msgid "Key Parameter Descriptions:"
 msgstr "关键参数说明："
