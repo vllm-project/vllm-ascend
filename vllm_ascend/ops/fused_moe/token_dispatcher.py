@@ -499,6 +499,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
         # The indices are permuted with the same mapping as tokens so they
         # stay aligned through the all_to_all exchange.
         exchanged_lora_indices = None
+        exchanged_lora_pending = None
         if split_lora_indices is not None:
             lora_dtype = split_lora_indices.dtype
             # Expand lora indices to match top_k expansion (each token
@@ -509,14 +510,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
             # All_to_all exchange: send lora indices to the expert-owning ranks.
             _, exchanged_lora, handle = async_all_to_all(permuted_lora, output_splits, input_splits, self.ep_group)
             handle.wait()
-
-            # Apply the second permute (sort by expert within the rank)
-            # if there are multiple local experts.
-            if self.num_local_experts > 1 and global_input_tokens_local_experts_indices is not None:
-                # The second permute for hidden_states happens in
-                # _dispatch_postprocess; we apply the same here.
-                exchanged_lora = exchanged_lora[global_input_tokens_local_experts_indices.to(torch.int64)]
-            exchanged_lora_indices = exchanged_lora.to(lora_dtype)
+            exchanged_lora_pending = exchanged_lora.to(lora_dtype)
 
         dynamic_scale_after_all2all = None
         if with_quant:
@@ -546,6 +540,15 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
                 scale_type,
             )
         )
+
+        # Apply the second LoRA permute (sort by local expert within the rank).
+        # if there are multiple local experts.
+        if (
+            self.num_local_experts > 1
+            and exchanged_lora_pending is not None
+            and reversed_global_input_permutation_mapping is not None
+        ):
+            exchanged_lora_indices = exchanged_lora_pending[reversed_global_input_permutation_mapping.to(torch.int64)]
 
         return MoETokenDispatchOutput(
             hidden_states=global_input_tokens,
