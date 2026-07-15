@@ -5,10 +5,12 @@ from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec, MambaSpec, UniformTypeKVCacheSpecs
 from vllm.v1.utils import CpuGpuBuffer
-from vllm.v1.worker.block_table import _compute_slot_mapping_kernel
 from vllm.v1.worker.cp_utils import get_total_cp_world_size
 
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.ops.triton.compute_slot_mapping import (
+    _compute_slot_mapping_kernel,
+    _next_power_of_2,
+)
 
 
 class BlockTable:
@@ -161,23 +163,22 @@ class BlockTable:
             self._compute_pcp_dcp_slot_mapping(req_indices, positions)
         else:
             kernel_kwargs = {
+                "KV_CACHE_BLOCK_SIZE": self.physical_block_size,
+                "BLOCKS_PER_KV_BLOCK": self.blocks_per_phys_block,
                 "TOTAL_CP_WORLD_SIZE": total_cp_world_size,
                 "TOTAL_CP_RANK": total_cp_rank,
                 "CP_KV_CACHE_INTERLEAVE_SIZE": self.cp_kv_cache_interleave_size,
                 "PAD_ID": PAD_SLOT_ID,
                 "BLOCK_SIZE": 1024,
+                "BLOCK_TABLE_WINDOW_SIZE": _next_power_of_2(cdiv(1024, self.block_size) + 1),
             }
-            if not vllm_version_is("0.25.1"):
-                # vLLM #40996 split physical KV blocks into kernel blocks in
-                # the slot-mapping kernel. These are required constexprs on
-                # main; the v0.25.1 kernel does not accept them.
-                kernel_kwargs.update(
-                    KV_CACHE_BLOCK_SIZE=self.physical_block_size,
-                    BLOCKS_PER_KV_BLOCK=self.blocks_per_phys_block,
-                )
-            _compute_slot_mapping_kernel[(num_reqs + 1,)](
+
+            num_pad_tokens = max(self.max_num_batched_tokens - num_tokens, 0)
+            num_pad_blocks = cdiv(num_pad_tokens, 1024)
+            _compute_slot_mapping_kernel[(num_reqs + num_pad_blocks,)](
                 num_tokens,
                 self.max_num_batched_tokens,
+                num_reqs,
                 query_start_loc,
                 positions,
                 self.block_table.gpu,
