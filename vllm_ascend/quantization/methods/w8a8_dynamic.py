@@ -307,15 +307,15 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
 
         moe_comm_method = _EXTRA_CTX.moe_comm_method
         enable_fused_mc2 = get_ascend_config().enable_fused_mc2
-        fused_scale_flag = _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2 and enable_fused_mc2 in (1, 2)
+        fused_scale_flag = _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2 and enable_fused_mc2 in (1, 3)
         fused_scale_bias_flag = fused_scale_flag and enable_fused_mc2 == 1
-        cann_mega_moe_flag = fused_scale_flag and enable_fused_mc2 == 2
+        cann_mega_moe_flag = fused_scale_flag and enable_fused_mc2 == 3
         if self.dynamic_eplb:
             w1 = layer.w13_weight_list
             w1_scale = layer.fused_w1_scale_list if fused_scale_flag else layer.w13_weight_scale_fp32_list
             w2 = layer.w2_weight_list
             w2_scale = layer.fused_w2_scale_list if fused_scale_flag else layer.w2_weight_scale_list
-        elif cann_mega_moe_flag and hasattr(layer, "cann_mega_moe_w13_weight_list"):
+        elif cann_mega_moe_flag:
             w1 = layer.cann_mega_moe_w13_weight_list
             w1_scale = layer.cann_mega_moe_fused_w1_scale_list
             w2 = layer.cann_mega_moe_w2_weight_list
@@ -370,12 +370,12 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         layer.w2_weight_scale.data = layer.w2_weight_scale.data.view(layer.w2_weight_scale.data.shape[0], -1)
         layer.w2_weight_offset.data = layer.w2_weight_offset.data.view(layer.w2_weight_offset.data.shape[0], -1)
 
-        enable_int_fused_mc2 = get_ascend_config().enable_fused_mc2 in (1, 2)
-        if enable_int_fused_mc2:
+        enable_int_fused_mc2 = get_ascend_config().enable_fused_mc2 in (1, 3)
+        if get_ascend_config().enable_fused_mc2 in (1, 3):
             layer.fused_w1_scale = scale_from_float_to_int64(layer.w13_weight_scale.data)
             layer.fused_w2_scale = scale_from_float_to_int64(layer.w2_weight_scale.data)
 
-        if get_ascend_config().enable_fused_mc2 == 2 and not self.dynamic_eplb:
+        if get_ascend_config().enable_fused_mc2 == 3 and not self.dynamic_eplb:
             layer.cann_mega_moe_w13_weight_list = list(layer.w13_weight.data.unbind(dim=0))
             layer.cann_mega_moe_w2_weight_list = list(layer.w2_weight.data.unbind(dim=0))
             layer.cann_mega_moe_fused_w1_scale_list = list(

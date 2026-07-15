@@ -58,11 +58,6 @@ _CANN_TORCH_FLOAT8_E4M3FN = 24
 _CANN_MEGA_MOE_QUANT_MODE_INT8 = 2
 _CANN_MEGA_MOE_QUANT_MODE_MX = 4
 
-_DISPATCH_FFN_COMBINE_MODE = 1
-_CANN_MEGA_MOE_FUSED_MC2_MODE = 2
-_CANN_MEGA_MOE_MODULE_NAME = "cann_ops_transformer.ops.mega_moe"
-
-
 def _as_tensor_list(value: torch.Tensor | list[torch.Tensor], name: str) -> list[torch.Tensor]:
     if isinstance(value, list):
         if not value:
@@ -389,8 +384,7 @@ class FusedMC2CommImpl(MoECommMethod):
     def __init__(self, moe_config):
         super().__init__(moe_config)
         self._mega_moe_symm_buffer = None
-        enable_fused_mc2 = get_ascend_config().enable_fused_mc2
-        if enable_fused_mc2 == _DISPATCH_FFN_COMBINE_MODE:
+        if get_ascend_config().enable_fused_mc2 == 1:
             self.expert_token_nums = torch.zeros([self.moe_config.num_local_experts], dtype=torch.int32, device="npu")
         else:
             self.expert_token_nums = None
@@ -596,7 +590,7 @@ class FusedMC2CommImpl(MoECommMethod):
             topk_ids = fused_experts_input.routing.log2phy[topk_ids]
 
         expert_tokens = None
-        if get_ascend_config().enable_fused_mc2 == _DISPATCH_FFN_COMBINE_MODE:
+        if get_ascend_config().enable_fused_mc2 == 1:
             assert not (
                 fused_experts_input.weights.w1_scale_bias is None or fused_experts_input.weights.w2_scale_bias is None
             ), "w1_scale_bias and w2_scale_bias cannot be None when enable_fused_mc2=1."
@@ -620,7 +614,24 @@ class FusedMC2CommImpl(MoECommMethod):
                 expert_token_nums=self.expert_token_nums,
             )
             expert_tokens = self.expert_token_nums
-        elif get_ascend_config().enable_fused_mc2 == _CANN_MEGA_MOE_FUSED_MC2_MODE:
+        elif get_ascend_config().enable_fused_mc2 == 2:
+            assert fused_experts_input.routing.expert_map is not None, "expert_map cannot be None."
+            out, expert_tokens = torch.ops._C_ascend.dispatch_gmm_combine_decode(  # type: ignore
+                x=fused_experts_input.hidden_states,
+                expert_ids=topk_ids,
+                gmm1_permuted_weight=fused_experts_input.weights.w1,
+                gmm1_permuted_weight_scale=fused_experts_input.weights.w1_scale,
+                gmm2_weight=fused_experts_input.weights.w2,
+                gmm2_weight_scale=fused_experts_input.weights.w2_scale,
+                expert_smooth_scales=None,
+                expert_scales=fused_experts_input.topk_weights.to(torch.float32),
+                group_ep=self.token_dispatcher.moe_all_to_all_group_name,
+                ep_rank_size=self.token_dispatcher.ep_world_size,
+                ep_rank_id=self.token_dispatcher.ep_rank_id,
+                moe_expert_num=self.moe_config.num_experts,
+                global_bs=self.token_dispatcher.global_bs,
+            )
+        elif get_ascend_config().enable_fused_mc2 == 3:
             out, expert_tokens = self._apply_cann_mega_moe(fused_experts_input, topk_ids)
         else:
             raise ValueError(f"Wrong value of {get_ascend_config().enable_fused_mc2=}")

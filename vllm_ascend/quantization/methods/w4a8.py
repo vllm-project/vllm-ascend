@@ -552,7 +552,7 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         topk_weights = topk_weights.to(x.dtype)
 
         cann_mega_moe_flag = (
-            _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2 and get_ascend_config().enable_fused_mc2 == 2
+            _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2 and get_ascend_config().enable_fused_mc2 == 3
         )
         if self.dynamic_eplb:
             w1 = [i.view(torch.int32) for i in layer.w13_weight_list]
@@ -738,7 +738,7 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         # FIX(mega W4A8 all-route): with MegaMoe on, keep ND int8 (skip trans_nz + pack_to_int32);
         # _maybe_build_cann_mega_moe_lists casts each expert slice to FRACTAL_NZ individually. See
         # the modelslim path below for the full rationale. Non-mega keeps the standard NZ-int32 form.
-        if get_ascend_config().enable_fused_mc2 == 2 and not self.dynamic_eplb:
+        if get_ascend_config().enable_fused_mc2 == 3 and not self.dynamic_eplb:
             self._maybe_build_cann_mega_moe_lists(layer, layer.w13_weight.data, layer.w2_weight.data)
         else:
             layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
@@ -756,7 +756,7 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         corresponding bias parameter exists (it does for W4A8; W8A8 dynamic
         has no scale_bias on this method's layers).
         """
-        if get_ascend_config().enable_fused_mc2 != 2 or self.dynamic_eplb:
+        if get_ascend_config().enable_fused_mc2 != 3 or self.dynamic_eplb:
             return
         if mega_w13 is None:
             mega_w13 = layer.w13_weight.data
@@ -852,8 +852,8 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         # ND is contiguous -> per-expert unbind is safe and carries no format tag to lose, so
         # the op reads bytes correctly. Every forward (profile/prefill/decode/drafter) routes
         # to MegaMoe (see select_moe_comm_method); the standard NZ-int32 GMM path is unused, so
-            # no dual weight copy is needed.
-        elif get_ascend_config().enable_fused_mc2 == 2:
+        # no dual weight copy is needed.
+        elif get_ascend_config().enable_fused_mc2 == 3:
             self._maybe_build_cann_mega_moe_lists(layer, layer.w13_weight.data, layer.w2_weight.data)
 
         else:

@@ -244,7 +244,7 @@ def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len)
     tp_size = vllm_config.parallel_config.tensor_parallel_size
     # FIX(mega all-route): raise routing capacity so prefill also selects FUSED_MC2 (mega),
     # capped at 512 (MegaMoe BS<=512). Serve sets max_num_batched_tokens<=512.
-    if get_ascend_config().enable_fused_mc2 == 2:
+    if get_ascend_config().enable_fused_mc2 == 3:
         max_num_tokens = min(max(max_num_tokens, int(vllm_config.scheduler_config.max_num_batched_tokens)), 512)
 
     # Use integer arithmetic for ceiling division.
@@ -335,7 +335,7 @@ def select_moe_comm_method(
         num_experts_per_device = num_experts // ep_world_size
 
         fused_mc2_eligible = (
-            fused_mc2_enable == 2 and fused_decode_guard and _cann_megamoe_supported_by_config(vllm_config, quant_type)
+            fused_mc2_enable == 3 and fused_decode_guard and _cann_megamoe_supported_by_config(vllm_config, quant_type)
         )
         # FIX(mega all-route): do NOT disable MegaMoe during profile_run. Weights are ND int8
         # only (no standard NZ-int32 path), so profiling must also exercise MegaMoe. Shapes match
@@ -352,29 +352,35 @@ def select_moe_comm_method(
     elif soc_version in {AscendDeviceType.A3}:
         # TODO: drop the EP-size guard when dispatch_ffn_combine supports larger EP sizes.
         fused_mc2_enable = get_ascend_config().enable_fused_mc2
-        fused_decode_guard = get_ep_group().world_size <= 32 and (not is_draft_model)
-        fused_mega_moe_supported = (
-            fused_mc2_enable == 2
-            and fused_decode_guard
-            and _cann_megamoe_supported_by_config(vllm_config, quant_type)
-        )
+        dispatch_ffn_combine_enable = get_ep_group().world_size <= 32
+        fused_decode_guard = dispatch_ffn_combine_enable and (not is_draft_model)
+
+        fused_small_batch_enable = False
         if num_tokens <= mc2_tokens_capacity:
             # Covers decode AND chunked-prefill chunks capped by mc2_tokens_capacity.
             # Only these small batches may enter MegaMoe.
             if fused_mc2_enable == 1:
-                fused_small_batch_enable = fused_decode_guard
+                fused_small_batch_enable = dispatch_ffn_combine_enable
             elif fused_mc2_enable == 2:
-                fused_small_batch_enable = fused_mega_moe_supported
-            else:
-                fused_small_batch_enable = False
+                fused_small_batch_enable = (
+                    speculative_enable_dispatch_gmm_combine_decode(vllm_config)
+                    and quant_type == "w8a8_dynamic"
+                )
+            elif fused_mc2_enable == 3:
+                fused_small_batch_enable = (
+                    dispatch_ffn_combine_enable 
+                    and (not is_draft_model)
+                    and _cann_megamoe_supported_by_config(vllm_config, quant_type)
+                )
+                
             moe_comm_type = MoECommType.FUSED_MC2 if fused_small_batch_enable else MoECommType.MC2
         else:
             # Large prefill (num_tokens > mc2_tokens_capacity) must NOT go directly to
             # CANN MegaMoe; keep the ALLTOALL fallback. It enters MegaMoe only after
             # chunked prefill produces <= mc2_tokens_capacity chunks (handled above).
-            if fused_mc2_enable == 1:
+            if fused_mc2_enable == 1 or fused_mc2_enable == 3:
                 fused_prefill_enable = fused_decode_guard
-            else:
+            elif fused_mc2_enable == 2:
                 fused_prefill_enable = False
             moe_comm_type = MoECommType.FUSED_MC2 if fused_prefill_enable else MoECommType.ALLTOALL
     elif soc_version in {AscendDeviceType._310P}:
