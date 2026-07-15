@@ -504,18 +504,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     layer_module.shared_head.head = model.lm_head
 
         _has_full = self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs()
-        _is_gemma4_mtp = self.speculative_config is not None and self.speculative_config.use_gemma4_mtp()
-        # On Ascend, Gemma4 MTP draft historically ran in eager mode (FDO was
-        # not supported for the draft). VLLM_ASCEND_GEMMA4_DRAFT_GRAPH=1 opts
-        # into dual-graph: draft is wrapped in ACLGraphWrapper(FULL) and routed
-        # to PA (head_dim=512) / FIA (head_dim=256) under graph instead of SDPA.
-        # Default 0 keeps the eager draft for safety; set to 0 to roll back.
-        _draft_graph_enabled = envs.VLLM_ASCEND_GEMMA4_DRAFT_GRAPH
-        if _has_full and _is_gemma4_mtp and self.use_cuda_graph and not _draft_graph_enabled:
-            self.use_cuda_graph = False
-        # Gemma4 MTP draft with dual-graph enabled, or other MTP drafts: keep
-        # the ACLGraphWrapper(FULL) wrapping.
-        elif _has_full and self.use_cuda_graph:
+        # Gemma4 MTP draft: draft follows the target's graph mode. When target
+        # uses FULL cudagraph, draft is also wrapped in ACLGraphWrapper(FULL)
+        # (dual-graph). Draft attention routes to PA (head_dim=512) / FIA
+        # (head_dim=256) under graph instead of SDPA.
+        if _has_full and self.use_cuda_graph:
             logger.info(
                 "[spec_decode/base] Wrapping draft model with ACLGraphWrapper:"
                 " runtime_mode=FULL, use_eagle=%s, enable_enpu=%s",
@@ -1116,9 +1109,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 self._sync_wait_target_events()
 
             # [STEP_DBG] total draft runnable wall-clock (eager forward or graph
-            # replay, depending on VLLM_ASCEND_GEMMA4_DRAFT_GRAPH). Outside the
-            # compiled fn so the timer is not stripped.
-            _step_dbg = envs.VLLM_STEP_DBG
+            # replay). Outside the compiled fn so the timer is not stripped.
+            # Rate-limited to _STEP_DBG_COUNT prints to avoid log flooding.
+            if not hasattr(self, "_step_dbg_count"):
+                self._step_dbg_count = 0
+            _step_dbg = envs.VLLM_STEP_DBG and self._step_dbg_count < 30
+            if envs.VLLM_STEP_DBG:
+                self._step_dbg_count += 1
             if _step_dbg:
                 import time as _time
                 torch.npu.current_stream().synchronize()
@@ -1133,7 +1130,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 torch.npu.current_stream().synchronize()
                 _sd_ms = (_time.perf_counter() - _sd_t0) * 1000.0
                 print(f"[STEP_DBG] draft_runnable total={_sd_ms:.2f}ms "
-                      f"graph={int(envs.VLLM_ASCEND_GEMMA4_DRAFT_GRAPH)} "
+                      f"graph={int(isinstance(self._runnable, ACLGraphWrapper))} "
                       f"enpu={int(self.enable_enpu)}", flush=True)
         return draft_token_ids
 

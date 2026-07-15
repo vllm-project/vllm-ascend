@@ -822,8 +822,8 @@ def maybe_kv_share_prefill(
     ):
         impl.key_cache, impl.value_cache = kv_cache[0], kv_cache[1]
 
-    # Dual-graph (VLLM_ASCEND_GEMMA4_DRAFT_GRAPH=1): under graph capture or
-    # FULL replay, draft KV-sharing layers must NOT take the SDPA path here.
+    # Dual-graph: under graph capture or FULL replay, draft KV-sharing layers
+    # must NOT take the SDPA path here.
     # SDPA gathers paged KV into a dense tensor using Python-side
     # seq_lens.tolist() (frozen at capture time) and builds the mask in Python,
     # which is incompatible with graph replay (upstream issue #48503 class).
