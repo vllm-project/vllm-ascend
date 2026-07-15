@@ -2961,6 +2961,77 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         self.assertIsNone(add_request_calls[1].kwargs["local_block_ids_replicate_k"])
         self.assertIsNone(add_request_calls[1].kwargs["remote_block_ids_replicate_k"])
 
+    def test_get_kv_split_metadata_dp1_remote_port_send_num_uses_absolute_ports(self):
+        self.vllm_config.kv_transfer_config.kv_port = 30000
+        self.vllm_config.model_config.is_deepseek_mla = True
+        self.vllm_config.kv_transfer_config.get_from_extra_config.side_effect = lambda k, d: {
+            "prefill": {"tp_size": 8, "dp_size": 2, "pp_size": 1},
+            "decode": {"tp_size": 4, "dp_size": 4, "pp_size": 1},
+        }.get(k, d)
+
+        worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
+        worker.use_mla = True
+        worker.pcp_size = 1
+        worker.dcp_size = 1
+        worker.tp_size = 4
+        worker.tp_rank = 0
+        worker.pcp_rank = 0
+        worker.dcp_rank = 0
+        worker.side_channel_port = 40000
+        worker.handshake_port = 40000
+        worker.local_remote_block_port_mapping = {}
+        worker.remote_port_send_num = {}
+        worker.block_size = 16
+        worker.num_key_value_heads = 1
+        worker.use_sparse = False
+        worker.block_size_scale = [[1]]
+        worker.kv_group2layeridx = {
+            0: (
+                {
+                    "kv_cache_spec_type": "FullAttentionSpec",
+                    "layer_names": ["model.layers.0.self_attn"],
+                },
+                [0],
+            )
+        }
+
+        remote_mapping = {
+            str(offset): {
+                "host": f"host-{offset}",
+                "engine_id": f"engine-{offset}",
+                "handshake_port": 30000 + offset,
+            }
+            for offset in range(8, 16)
+        }
+        meta = types.SimpleNamespace(
+            remote_pcp_size=1,
+            remote_dcp_size=8,
+            remote_ptp_size=8,
+            remote_port=30008,
+            remote_block_ids=(list(range(100, 103)),),
+            local_block_ids=(list(range(200, 224)),),
+            num_external_tokens=24 * worker.block_size,
+            num_prompt_blocks=24,
+            num_computed_tokens=0,
+            remote_engine_id="remote_engine",
+            remote_host="localhost",
+            remote_multi_nodes_meta_mapping=remote_mapping,
+            remote_block_size=16,
+        )
+
+        ports, _, _ = worker._get_kv_split_metadata("req_dp1", cast(ReqMeta, meta))
+        remote_port_send_num = worker.remote_port_send_num[meta.remote_engine_id]
+
+        self.assertEqual([port for shard in ports for port in shard], list(range(30008, 30016)))
+        self.assertEqual(set(remote_port_send_num), set(range(30008, 30016)))
+        self.assertNotIn(30016, remote_port_send_num)
+        self.assertEqual(remote_port_send_num[30008]["host"], "host-8")
+        self.assertEqual(remote_port_send_num[30015]["host"], "host-15")
+        self.assertEqual(
+            worker._get_remote_host_info_by_port(30008, 30015, "localhost", "remote_engine", remote_mapping),
+            ("host-15", "engine-15"),
+        )
+
     def test_get_sfa_replicated_indexer_block_ids_uses_full_blocks_for_prefix(self):
         worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
         worker.enable_sfa_dcp_replicated_indexer = True

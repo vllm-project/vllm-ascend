@@ -39,52 +39,6 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             * (self.head_size * get_dtype_size(self.dtype) + self.scale_dim * get_dtype_size(self.scale_dtype))
         )
 
-    @property
-    def sparse_kv_cache_ratio(self) -> tuple[float, float | None, float | None, float | None]:
-        """
-        Compute the relative byte share of each KV cache entry.
-
-        Returns:
-            A tuple containing the ratios for:
-            - kv_cache[0]
-            - kv_cache[1]
-            - kv_cache[2]
-            - kv_cache[3] (None if Sparse C8 is disabled or Sparse C8 on A5 device)
-        """
-
-        assert self.sparse_head_dim is not None
-
-        if self.cache_sparse_c8:
-            ckv_head_dim, qk_rope_head_dim, index_k_head_dim = self.sparse_head_dim
-            assert qk_rope_head_dim == 0
-
-            ckv_virtual = ckv_head_dim * get_dtype_size(self.c8_k_cache_dtype)
-            if index_k_head_dim == 0:
-                return (
-                    1.0,  # kv_cache[0]: ckv / packed_kv
-                    None,  # kv_cache[1] does not exist without indexer cache
-                    None,  # kv_cache[2] does not exist without indexer cache
-                    None,  # kv_cache[3] does not exist for Sparse C8
-                )
-
-            qli_virtual = index_k_head_dim * get_dtype_size(self.c8_k_cache_dtype)
-            scale_virtual = self.sfa_dcp_replicated_indexer_size * get_dtype_size(self.c8_k_scale_cache_dtype)
-            total_virtual_head_dim = ckv_virtual + qli_virtual + scale_virtual
-
-            return (
-                total_virtual_head_dim / ckv_virtual,  # kv_cache[0]: ckv / packed_kv
-                total_virtual_head_dim / qli_virtual,  # kv_cache[1]: qli
-                total_virtual_head_dim / scale_virtual,  # kv_cache[2]: qli_scale
-                None,  # kv_cache[3] does not exist for Sparse C8
-            )
-
-        return (
-            self.head_size / self.sparse_head_dim[0],  # kv_cache[0]
-            self.head_size / self.sparse_head_dim[1],  # kv_cache[1]
-            (self.head_size / self.sparse_head_dim[2] if self.sparse_head_dim[2] > 0 else None),  # kv_cache[2]
-            None,  # kv_cache[3] does not exist
-        )
-
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:
         assert all(isinstance(spec, MLAAttentionSpec) for spec in specs), (

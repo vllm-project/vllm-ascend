@@ -408,15 +408,6 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         )
 
         self.assertEqual(spec.page_size_bytes, 16 * (512 + 64 + 128 * 4) * 2)
-        self.assertEqual(
-            spec.sparse_kv_cache_ratio,
-            (
-                (512 + 64 + 128 * 4) / 512,
-                (512 + 64 + 128 * 4) / 64,
-                (512 + 64 + 128 * 4) / (128 * 4),
-                None,
-            ),
-        )
 
 
 class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
