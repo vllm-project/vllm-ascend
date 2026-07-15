@@ -455,7 +455,6 @@ def test_swa_reachable_block_mask_sparse_with_lcm_alignment() -> None:
         kv_cache_spec=spec,
         use_eagle=False,
         retention_interval=None,
-        num_prompt_tokens=None,
     )
 
     # Must produce a sparse mask, not None.
