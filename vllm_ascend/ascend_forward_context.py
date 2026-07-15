@@ -242,10 +242,6 @@ def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len)
         # NOTE: To save memory, we cap the max number of tokens to 512.
         max_num_tokens = min(max_num_reqs * uniform_decode_query_len, 512)
     tp_size = vllm_config.parallel_config.tensor_parallel_size
-    # FIX(mega all-route): raise routing capacity so prefill also selects FUSED_MC2 (mega),
-    # capped at 512 (MegaMoe BS<=512). Serve sets max_num_batched_tokens<=512.
-    if get_ascend_config().enable_fused_mc2 == 3:
-        max_num_tokens = min(max(max_num_tokens, int(vllm_config.scheduler_config.max_num_batched_tokens)), 512)
 
     # Use integer arithmetic for ceiling division.
     num_tokens_per_tp_rank = (max_num_tokens + tp_size - 1) // tp_size
@@ -375,13 +371,12 @@ def select_moe_comm_method(
                 
             moe_comm_type = MoECommType.FUSED_MC2 if fused_small_batch_enable else MoECommType.MC2
         else:
+            fused_prefill_enable = False
             # Large prefill (num_tokens > mc2_tokens_capacity) must NOT go directly to
             # CANN MegaMoe; keep the ALLTOALL fallback. It enters MegaMoe only after
             # chunked prefill produces <= mc2_tokens_capacity chunks (handled above).
             if fused_mc2_enable == 1 or fused_mc2_enable == 3:
                 fused_prefill_enable = fused_decode_guard
-            elif fused_mc2_enable == 2:
-                fused_prefill_enable = False
             moe_comm_type = MoECommType.FUSED_MC2 if fused_prefill_enable else MoECommType.ALLTOALL
     elif soc_version in {AscendDeviceType._310P}:
         moe_comm_type = MoECommType.ALLGATHER
