@@ -283,7 +283,6 @@ DSV2_PARALLEL_CASES = [
         max_tokens=10,
         runner_kwargs={
             **DSV2_COMMON_KWARGS,
-            "data_parallel_size": 2,
             "tensor_parallel_size": 2,
             "prefill_context_parallel_size": 1,
             "decode_context_parallel_size": 2,
@@ -383,6 +382,7 @@ FULL_FEATURE_MODEL_CASES = [
             "max_model_len": 1024,
             "max_num_seqs": MAX_NUM_SEQS,
             "max_num_batched_tokens": 1024,
+            "data_parallel_size": 2,
             "tensor_parallel_size": 2,
             "prefill_context_parallel_size": 1,
             "decode_context_parallel_size": 2,
