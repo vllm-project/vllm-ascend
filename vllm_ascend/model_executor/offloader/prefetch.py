@@ -15,7 +15,6 @@ from vllm.model_executor.offloader.prefetch import (
 from vllm.model_executor.offloader.prefetch import (
     PrefetchOffloader,
     StaticBufferPool,
-    _CpuParamOffloader,
 )
 from vllm.model_executor.offloader.prefetch import (
     _ModuleOffloader as VllmModuleOffloader,
@@ -115,47 +114,19 @@ class AscendPrefetchOffloader(PrefetchOffloader):
             vllm_prefetch._ModuleOffloader = original_module_offloader
 
     def post_init(self):
-        """Allocate Ascend NZ-aware static buffers and start initial prefetches."""
-        for offloader in self.module_offloaders:
-            offloader.sync_cpu_storage()
+        super().post_init()
 
-        param_infos: list[ParamInfo] = []
         device: torch.device | None = None
-
+        param_infos: list[ParamInfo] = []
         for offloader in self.module_offloaders:
             param_infos.extend(offloader.get_param_infos())
             if device is None:
                 device = offloader.device
-
         if device is None:
+            # No modules to offload
             return
 
-        self.buffer_pool = StaticBufferPool(
-            param_infos=param_infos,
-            slot_capacity=self.prefetch_step,
-            device=device,
-        )
-        # NOTE(wangjin) different from the base, but it is important
         _format_static_buffers_for_nz(self.buffer_pool, param_infos)
-
-        for idx, offloader in enumerate(self.module_offloaders):
-            slot_idx = idx % self.prefetch_step
-            offloader.assign_buffer_slot(self.buffer_pool, slot_idx)
-
-        for offloader in self.module_offloaders:
-            offloader.post_init()
-            self.total_offloaded_bytes += offloader.offloaded_bytes
-
-        logger.info_once(
-            f"[AscendPrefetchOffloader] Initialized {len(self.module_offloaders)} modules. "
-            f"Total NPU memory saved: {self.total_offloaded_bytes / 1e9:.4f} GB, "
-            f"Static buffer pool: {self.buffer_pool.total_bytes / 1e9:.4f} GB "
-            f"(group_size={self.group_size}, num_in_group={self.num_in_group}, "
-            f"prefetch_step={self.prefetch_step}, mode={self.mode})"
-        )
-
-        for i in range(min(self.prefetch_step, len(self.module_offloaders))):
-            self.module_offloaders[i].start_onload_to_static()
 
 
 class _ModuleOffloader(VllmModuleOffloader):
@@ -169,35 +140,13 @@ class _ModuleOffloader(VllmModuleOffloader):
         whitelist_param_names: list[str],
         layer_idx: int,
     ):
-        self.mode = mode
-        self.module = module
-        self.device = next(module.parameters()).device
-        self.copy_stream = copy_stream
-        self.layer_idx = layer_idx
-        self.offloaded_bytes = 0
-
-        self._copy_done_event = torch.cuda.Event()
-        self._event_valid_for_eager = False
-        self._prefetch_in_capture = False
-
-        assert self.device != torch.device("cpu"), (
-            "Module parameters should not already be on CPU (offloader handles CPU placement)"
+        super().__init__(
+            mode=mode,
+            module=module,
+            copy_stream=copy_stream,
+            whitelist_param_names=whitelist_param_names,
+            layer_idx=layer_idx,
         )
-
-        self._buffer_pool: StaticBufferPool | None = None
-        self._buffer_slot_idx: int = 0
-
-        param_dict = dict(self.module.named_parameters())
-        assert all(name in param_dict for name in whitelist_param_names), (
-            f"Whitelist params {whitelist_param_names} not found in module params {list(param_dict.keys())}"
-        )
-
-        if mode != "cpu":
-            raise ValueError(f"Unknown offload mode: {mode}")
-        self._param_offloaders = {
-            name: _CpuParamOffloader(module=module, param_name=name) for name in whitelist_param_names
-        }
-        # NOTE(wangjin) different from base
         self._wrap_process_weights_for_format_detection()
 
     def _capture_static_buffer_formats_from_npu_params(self) -> None:
