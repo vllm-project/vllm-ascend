@@ -143,7 +143,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         core_attn_out = self.norm(core_attn_out, z)
         core_attn_out = core_attn_out.reshape(z_shape_og)
         core_attn_out = rearrange(core_attn_out, "... h d -> ... (h d)")
-        if vllm_version_is("0.23.0"):
+        if vllm_version_is("0.24.0"):
             output[:num_tokens], _ = self.out_proj(core_attn_out)
         else:
             out, _ = self.out_proj(core_attn_out)
