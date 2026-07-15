@@ -996,6 +996,39 @@ class TestKVCacheStoreLayerSendingThread(unittest.TestCase):
                 self.assertTrue(thread.layer_save_finished_events[1].is_set())
                 self.assertEqual(thread.request_queue.unfinished_tasks, 0)
 
+    def test_empty_key_major_batch_finishes_without_copy_or_commit(self):
+        thread, store, started_keys = self._make_thread()
+        started_keys.clear()
+        request = ReqMeta(
+            req_id="r1",
+            block_ids=[1],
+            save_last_block_key=None,
+            is_last_chunk=True,
+        )
+
+        for layer_id in range(2):
+            task = LayerTransferTask(
+                layer_id=layer_id,
+                block_ranges=[
+                    LayerBlockRange(
+                        request,
+                        0,
+                        0,
+                        partial_block_index=0,
+                    )
+                ],
+                use_key_major_ranges=True,
+            )
+            task.shared_block_data = thread.build_shared_data(task)
+            self._run_task(thread, [task])
+
+        self.assertEqual(store.copy_put_calls, [])
+        self.assertEqual(store.commit_calls, [])
+        self.assertEqual(store.revoke_calls, [])
+        self.assertEqual(started_keys, set())
+        self.assertTrue(all(event.is_set() for event in thread.layer_save_finished_events))
+        self.assertEqual(thread.request_queue.unfinished_tasks, 0)
+
     def test_commit_failure_revokes_only_failed_key(self):
         thread, store, started_keys = self._make_thread(num_layers=1)
         store.commit_results = [[0, -1]]
@@ -1053,6 +1086,34 @@ class TestKVCacheStoreLayerSendingThread(unittest.TestCase):
                 self.assertTrue(thread.layer_save_finished_events[0].is_set())
                 self.assertEqual(dict(thread.stored_requests), {})
                 self.assertEqual(thread.get_and_clear_finished_requests(), {"r1"})
+
+    def test_control_revoke_runs_on_sending_thread_and_clears_trackers(self):
+        thread, store, started_keys = self._make_thread()
+        tracker = MooncakeSessionTracker()
+        tracker.register_put_keys("r1", [("key-1", 0)])
+        thread._session_tracker = tracker
+        store.revoke_results = [[0]]
+
+        thread.add_revoke_request(["key-1", "key-1"])
+        request = thread.request_queue.get_nowait()
+        thread._handle_request(request)
+
+        self.assertEqual(store.revoke_calls, [["key-1"]])
+        self.assertEqual(started_keys, {"key-2"})
+        self.assertEqual(tracker.prepare_load_entries("r1", []), [])
+        self.assertEqual(thread.request_queue.unfinished_tasks, 0)
+
+    def test_control_revoke_failure_still_clears_pending_key(self):
+        thread, store, started_keys = self._make_thread()
+        store.revoke_error = RuntimeError("revoke failed")
+
+        thread.add_revoke_request(["key-1"])
+        request = thread.request_queue.get_nowait()
+        thread._handle_request(request)
+
+        self.assertEqual(store.revoke_calls, [["key-1"]])
+        self.assertEqual(started_keys, {"key-2"})
+        self.assertEqual(thread.request_queue.unfinished_tasks, 0)
 
     def test_duplicate_save_key_is_written_and_committed_once(self):
         thread, store, _ = self._make_thread(num_layers=1)

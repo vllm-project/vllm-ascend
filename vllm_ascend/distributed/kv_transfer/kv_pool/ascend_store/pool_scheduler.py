@@ -41,7 +41,11 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     infer_cache_family_ratio,
     infer_group_cache_families,
     infer_tp_mismatch_info,
+    is_block_key_layerwise,
+    is_kv_save_role,
+    make_layerwise_block_key,
     normalize_block_ids_by_group,
+    validate_block_key_layerwise_topology,
 )
 
 
@@ -157,7 +161,13 @@ class KVPoolScheduler:
         logger.info("KV pool page_size_bytes: %d", page_size_bytes)
         backend_name = vllm_config.kv_transfer_config.kv_connector_extra_config.get("backend", "mooncake")
         self.backend_name = backend_name.lower()
-        self.use_gva_layerwise = self.use_layerwise and self.backend_name == "memcache"
+        self.use_block_key_layerwise = is_block_key_layerwise(self.use_layerwise, self.backend_name)
+        self.use_memcache_gva_layerwise = self.use_block_key_layerwise and self.backend_name == "memcache"
+        validate_block_key_layerwise_topology(
+            vllm_config.parallel_config,
+            self.backend_name,
+            self.use_block_key_layerwise,
+        )
         backend = backend_map.get(self.backend_name)
         if backend is None:
             raise ValueError(f"Unsupported KV pool backend: {backend_name}")
@@ -187,7 +197,7 @@ class KVPoolScheduler:
         self.model_name = model_config.model.split("/")[-1]
 
         # Keep this in sync with pool_worker.py because it affects GVA allocation size.
-        num_layer_keys = self.num_layers if self.use_gva_layerwise else 1
+        num_layer_keys = self.num_layers if self.use_memcache_gva_layerwise else 1
         keys_per_block_hash = self.pcp_size * self.dcp_size * (self.tp_size // self.put_step) * num_layer_keys
         self.keys_per_block_hash = keys_per_block_hash
 
@@ -379,6 +389,85 @@ class KVPoolScheduler:
         )
         return hit_tokens
 
+    def _get_mooncake_layerwise_hit_tokens(
+        self,
+        request: "Request",
+        token_len: int,
+        num_computed_tokens: int,
+    ) -> int:
+        num_blocks = token_len // self._block_size
+        block_hashes_to_check = request.block_hashes[:num_blocks]
+        # Validate the remote contiguous prefix from block 0. Actual transfers
+        # still start after vllm_cached_tokens, so locally cached blocks are not
+        # loaded again.
+        query_start_block = 0
+        block_hashes_to_query = block_hashes_to_check[query_start_block:]
+        if not block_hashes_to_query:
+            return 0
+        # Keys use head_or_tp_rank (= tp_rank // put_step).  Ranks in
+        # the same put_step group share one key (same KV cache for MLA latent).
+        # Only tp_size // put_step keys per block, not tp_size.
+        head_or_tp_ranks = self.tp_size // self.put_step
+        keys_by_block = [
+            [
+                make_layerwise_block_key(self.model_name, block_hash.hex(), head_or_tp_rank)
+                for head_or_tp_rank in range(head_or_tp_ranks)
+            ]
+            for block_hash in block_hashes_to_query
+        ]
+        all_keys = [key for block_keys in keys_by_block for key in block_keys]
+        logger.debug(
+            "[KVPOOL] hit_check req=%s query_blocks=%d head_or_tp_ranks=%d total_keys=%d",
+            request.request_id,
+            len(keys_by_block),
+            head_or_tp_ranks,
+            len(all_keys),
+        )
+        batch_results = self.store_scheduler.batch_is_exist(all_keys)
+
+        if len(batch_results) != len(all_keys):
+            raise RuntimeError(
+                "KV pool batch_is_exist returned unexpected number of results for "
+                f"request {request.request_id}: expected={len(all_keys)}, "
+                f"actual={len(batch_results)}"
+            )
+        if any(result not in (0, 1) for result in batch_results):
+            raise RuntimeError(
+                f"KV pool batch_is_exist failed for request {request.request_id}: states={batch_results}"
+            )
+        num_queried_hit_blocks = 0
+        offset = 0
+        for block_keys in keys_by_block:
+            block_results = batch_results[offset : offset + len(block_keys)]
+            offset += len(block_keys)
+            # Every saving rank must expose a COMPLETE Mooncake object.
+            if all(result == 1 for result in block_results):
+                num_queried_hit_blocks += 1
+                continue
+            break
+        num_hit_blocks = query_start_block + num_queried_hit_blocks
+        hit_sample = batch_results[: min(8, len(batch_results))]
+        logger.info(
+            "[KVPOOL] block_key_hit_check req=%s hit_blocks=%d/%d states_sample=%s",
+            request.request_id,
+            num_queried_hit_blocks,
+            len(keys_by_block),
+            hit_sample,
+        )
+        return num_hit_blocks * self._block_size
+
+    def _get_block_key_layerwise_hit_tokens(
+        self,
+        request: "Request",
+        token_len: int,
+        num_computed_tokens: int,
+    ) -> int:
+        if self.use_memcache_gva_layerwise:
+            return self._get_layerwise_gva_hit_tokens(request, token_len, num_computed_tokens)
+        if self.backend_name == "mooncake":
+            return self._get_mooncake_layerwise_hit_tokens(request, token_len, num_computed_tokens)
+        raise RuntimeError(f"Unsupported block-key layerwise backend: {self.backend_name}")
+
     def _infer_group_families(self) -> list[str]:
         kv_cache_groups = self.kv_cache_config.kv_cache_groups if self.kv_cache_config is not None else None
         return infer_group_cache_families(kv_cache_groups, self.compress_ratios, self.hf_config)
@@ -507,30 +596,28 @@ class KVPoolScheduler:
         if self.kv_role == "kv_consumer" and not self.consumer_is_to_load:
             return 0, False
 
-        if self.use_gva_layerwise:
-            token_len = len(request.prompt_token_ids)
-            num_external_hit_tokens = self._get_layerwise_gva_hit_tokens(request, token_len, num_computed_tokens)
+        if self._discard_partial_chunks:
+            token_len = self._floor_to_cache_transfer_granularity(len(request.prompt_token_ids))
         else:
-            if self._discard_partial_chunks:
-                token_len = self._floor_to_cache_transfer_granularity(len(request.prompt_token_ids))
-            else:
-                token_len = len(request.prompt_token_ids)
+            token_len = len(request.prompt_token_ids)
 
-            if token_len < self.cache_transfer_granularity:
-                return 0, False
+        if token_len < self.cache_transfer_granularity:
+            return 0, False
 
-            if self.use_layerwise:
-                num_external_hit_tokens = self._get_store_lookup_hit_tokens(
-                    request, token_len, num_computed_tokens, include_layers=True
-                )
-            else:
-                if self.client is None:
-                    self.client = LookupKeyClient(self.vllm_config)
-                num_external_hit_tokens = self.client.lookup(
-                    token_len,
-                    request.block_hashes,
-                    self.kv_cache_group_ids,
-                )
+        if self.use_block_key_layerwise:
+            num_external_hit_tokens = self._get_block_key_layerwise_hit_tokens(request, token_len, num_computed_tokens)
+        elif self.use_layerwise:
+            num_external_hit_tokens = self._get_store_lookup_hit_tokens(
+                request, token_len, num_computed_tokens, include_layers=True
+            )
+        else:
+            if self.client is None:
+                self.client = LookupKeyClient(self.vllm_config)
+            num_external_hit_tokens = self.client.lookup(
+                token_len,
+                request.block_hashes,
+                self.kv_cache_group_ids,
+            )
 
         if num_external_hit_tokens == 0:
             return 0, False
@@ -649,7 +736,7 @@ class KVPoolScheduler:
         num_blocks: int,
         has_last_block: bool,
     ) -> None:
-        if not self.use_gva_layerwise:
+        if not self.use_memcache_gva_layerwise:
             return
         # GVA allocation is moved to the worker side: each worker allocates
         # per-rank GVA via batch_alloc right before batch_copy, because memcache
@@ -826,7 +913,7 @@ class KVPoolScheduler:
         has_last_block = request_tracker.token_len % self._block_size != 0 or current_hash_count > len(
             request.block_hashes
         )
-        if self.use_gva_layerwise and (new_hash_count > 0 or has_last_block):
+        if self.use_memcache_gva_layerwise and (new_hash_count > 0 or has_last_block):
             # GVA allocation moved to worker side (per-rank batch_alloc);
             # scheduler only generates block keys here.
             keys, last_block_key = self.generate_keys(
@@ -903,7 +990,7 @@ class KVPoolScheduler:
         except the `kv_connector_metadata` field.
         Also, calling this function will reset the state of the connector.
         """
-        force_skip_save = self.kv_role == "kv_consumer" and not self.consumer_is_to_put
+        force_skip_save = not is_kv_save_role(self.kv_role, self.consumer_is_to_put)
 
         for finished_req_id in scheduler_output.finished_req_ids:
             self._request_trackers.pop(finished_req_id, None)
@@ -1032,7 +1119,7 @@ class KVPoolScheduler:
         Once a request is finished, determine whether request blocks
         should be freed now or will be sent asynchronously and freed later.
         """
-        if self.kv_role == "kv_consumer" and not self.consumer_is_to_put:
+        if not is_kv_save_role(self.kv_role, self.consumer_is_to_put):
             self._delayed_free_req_ids.discard(request.request_id)
             return False, None
         if self.use_layerwise:
@@ -1056,7 +1143,7 @@ class KVPoolScheduler:
         block_ids: tuple[list[int], ...],
     ) -> tuple[bool, dict[str, Any] | None]:
         """HMA path for hybrid KV cache groups."""
-        if self.kv_role == "kv_consumer" and not self.consumer_is_to_put:
+        if not is_kv_save_role(self.kv_role, self.consumer_is_to_put):
             self._delayed_free_req_ids.discard(request.request_id)
             return False, None
         if self.use_layerwise:

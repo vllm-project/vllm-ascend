@@ -88,7 +88,30 @@ class TestAscendStoreConnector(unittest.TestCase):
         config.kv_transfer_config.kv_connector = "AscendStoreConnector"
         config.kv_transfer_config.kv_connector_extra_config = extra_config or {}
         config.parallel_config.rank = 0
+        config.parallel_config.pipeline_parallel_size = 1
+        config.parallel_config.prefill_context_parallel_size = 1
+        config.parallel_config.decode_context_parallel_size = 1
         return config
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolScheduler")
+    def test_block_key_layerwise_backends_reject_non_tp_topology(self, mock_scheduler_cls):
+        from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+
+        for backend_name in ("mooncake", "memcache"):
+            for attribute in (
+                "pipeline_parallel_size",
+                "prefill_context_parallel_size",
+                "decode_context_parallel_size",
+            ):
+                with self.subTest(backend=backend_name, topology=attribute):
+                    config = self._make_vllm_config(
+                        extra_config={"use_layerwise": True, "backend": backend_name}
+                    )
+                    setattr(config.parallel_config, attribute, 2)
+
+                    with self.assertRaisesRegex(ValueError, rf"{backend_name}.*{attribute}=2"):
+                        AscendStoreConnector(config, KVConnectorRole.SCHEDULER, MagicMock())
+        mock_scheduler_cls.assert_not_called()
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolScheduler")
     def test_init_scheduler_role(self, mock_scheduler_cls):
@@ -305,7 +328,28 @@ class TestAscendStoreConnector(unittest.TestCase):
             kv_cache_config=None,
         )
         connector.save_kv_layer("layer_0", MagicMock(), MagicMock())
-        # Consumer should not save
+        mock_worker_cls.return_value.save_kv_layer.assert_not_called()
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.LookupKeyServer")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolWorker")
+    def test_save_kv_layer_consumer_to_put(self, mock_worker_cls, mock_lookup_cls):
+        config = self._make_vllm_config(
+            kv_role="kv_consumer",
+            extra_config={"use_layerwise": True, "consumer_is_to_put": True},
+        )
+        from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+
+        connector = AscendStoreConnector(
+            vllm_config=config,
+            role=KVConnectorRole.WORKER,
+            kv_cache_config=None,
+        )
+        metadata = MagicMock()
+        connector._get_connector_metadata = MagicMock(return_value=metadata)
+
+        connector.save_kv_layer("layer_0", MagicMock(), MagicMock())
+
+        mock_worker_cls.return_value.save_kv_layer.assert_called_once_with(metadata)
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.LookupKeyServer")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolWorker")
@@ -389,6 +433,9 @@ class TestAscendStoreConnectorLayerwise(unittest.TestCase):
             config.kv_transfer_config.kv_connector = "AscendStoreConnector"
             config.kv_transfer_config.kv_connector_extra_config = {"use_layerwise": True}
             config.parallel_config.rank = 0
+            config.parallel_config.pipeline_parallel_size = 1
+            config.parallel_config.prefill_context_parallel_size = 1
+            config.parallel_config.decode_context_parallel_size = 1
 
             connector = self.connector_mod.AscendStoreConnector(
                 vllm_config=config,
@@ -410,6 +457,9 @@ class TestAscendStoreConnectorLayerwise(unittest.TestCase):
             config.kv_transfer_config.kv_connector = "AscendStoreConnector"
             config.kv_transfer_config.kv_connector_extra_config = {"use_layerwise": True}
             config.parallel_config.rank = 0
+            config.parallel_config.pipeline_parallel_size = 1
+            config.parallel_config.prefill_context_parallel_size = 1
+            config.parallel_config.decode_context_parallel_size = 1
 
             connector = self.connector_mod.AscendStoreConnector(
                 vllm_config=config,
@@ -432,6 +482,9 @@ class TestAscendStoreConnectorLayerwise(unittest.TestCase):
             config.kv_transfer_config.kv_connector = "AscendStoreConnector"
             config.kv_transfer_config.kv_connector_extra_config = {"use_layerwise": True}
             config.parallel_config.rank = 0
+            config.parallel_config.pipeline_parallel_size = 1
+            config.parallel_config.prefill_context_parallel_size = 1
+            config.parallel_config.decode_context_parallel_size = 1
 
             connector = self.connector_mod.AscendStoreConnector(
                 vllm_config=config,

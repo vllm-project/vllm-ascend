@@ -32,6 +32,10 @@ def is_block_key_layerwise(use_layerwise: bool, backend_name: str) -> bool:
     return use_layerwise and backend_name.lower() in _BLOCK_KEY_LAYERWISE_BACKENDS
 
 
+def is_kv_save_role(kv_role: str, consumer_is_to_put: bool) -> bool:
+    return kv_role in ("kv_producer", "kv_both") or consumer_is_to_put
+
+
 def validate_block_key_layerwise_topology(
     parallel_config: Any,
     backend_name: str,
