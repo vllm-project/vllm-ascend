@@ -1403,8 +1403,6 @@ Key parameter notes:
 - `--max-model-len 1024000` enables the 1M context window.
 - `--decode-context-parallel-size` must always be equal to `--tensor-parallel-size` in this model architecture. The single-node example uses `TP16 DCP16`, and the PD example uses `TP4 DCP4`.
 
-
-
 ## Functional Verification
 
 Once your server is started, you can query the model with input prompts:
