@@ -15,24 +15,67 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import importlib
 import json
 import os
+import sys
 import tempfile
+import types
 import unittest
 from unittest.mock import MagicMock, patch
 
+import numpy as np
+
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.backend import Backend
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend import (
-    MooncakeStoreConfig,
-    _convert_to_bytes,
-    _parse_global_segment_size,
-    _ssd_setup_kwargs,
-)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.yuanrong_backend import (
     YuanrongConfig,
     YuanrongHelper,
 )
+
+_parallel_state = types.ModuleType("vllm_ascend.distributed.parallel_state")
+_parallel_state.get_global_rank = MagicMock(return_value=0)  # type: ignore[attr-defined]
+with patch.dict(sys.modules, {"vllm_ascend.distributed.parallel_state": _parallel_state}):
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
+        mooncake_backend as _mooncake_backend,
+    )
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend import (
+        MooncakeStoreConfig,
+        _convert_to_bytes,
+        _parse_global_segment_size,
+        _ssd_setup_kwargs,
+    )
+
+
+class _StrictLayerwiseStore:
+    def __init__(self):
+        self.batch_put_start = MagicMock(return_value=[0])
+        self.batch_put_from_multi_buffer_ranges = MagicMock(return_value=[64])
+        self.batch_put_end = MagicMock(return_value=[0])
+        self.batch_put_revoke = MagicMock(return_value=[0])
+        self.batch_get_start = MagicMock(return_value=[0])
+        self.batch_get_into_multi_buffer_ranges = MagicMock(return_value=[64])
+        self.batch_get_end = MagicMock(return_value=0)
+
+
+class _BackendDefaults(Backend):
+    def __init__(self, parallel_config):
+        self.parallel_config = parallel_config
+
+    def set_device(self):
+        pass
+
+    def register_buffer(self, ptrs, lengths):
+        pass
+
+    def exists(self, keys):
+        return [0] * len(keys)
+
+    def put(self, keys, addrs, sizes):
+        pass
+
+    def get(self, keys, addrs, sizes):
+        pass
 
 
 # =========================================================================
@@ -42,6 +85,12 @@ class TestBackendABC(unittest.TestCase):
     def test_cannot_instantiate(self):
         with self.assertRaises(TypeError):
             Backend(MagicMock())  # type: ignore[abstract]
+
+    def test_commit_and_revoke_default_to_successful_noops(self):
+        backend = _BackendDefaults(MagicMock())
+
+        self.assertEqual(backend.batch_commit(["k1", "k2"]), [0, 0])
+        self.assertEqual(backend.batch_revoke(["k1", "k2"]), [0, 0])
 
 
 def _make_mooncake_store_config(**overrides) -> MooncakeStoreConfig:
@@ -129,18 +178,18 @@ class TestMooncakeStoreConfig(unittest.TestCase):
     def _writable_ssd_path() -> str:
         return tempfile.mkdtemp(prefix="mooncake_ssd_ut_")
 
-    @patch(
-        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend."
-        "mooncake_backend._mooncake_setup_supports_ssd_offload",
+    @patch.object(
+        _mooncake_backend,
+        "_mooncake_setup_supports_ssd_offload",
         return_value=False,
     )
     def test_ssd_setup_kwargs_off_when_disabled(self, _mock_supports):
         cfg = _make_mooncake_store_config()
         self.assertEqual(_ssd_setup_kwargs(cfg), {})
 
-    @patch(
-        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend."
-        "mooncake_backend._mooncake_setup_supports_ssd_offload",
+    @patch.object(
+        _mooncake_backend,
+        "_mooncake_setup_supports_ssd_offload",
         return_value=False,
     )
     def test_ssd_setup_kwargs_raises_on_old_mooncake(self, _mock_supports):
@@ -153,9 +202,9 @@ class TestMooncakeStoreConfig(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             _ssd_setup_kwargs(cfg)
 
-    @patch(
-        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend."
-        "mooncake_backend._mooncake_setup_supports_ssd_offload",
+    @patch.object(
+        _mooncake_backend,
+        "_mooncake_setup_supports_ssd_offload",
         return_value=True,
     )
     def test_ssd_setup_kwargs_when_supported(self, _mock_supports):
@@ -395,14 +444,100 @@ class TestMooncakeBackendMethods(unittest.TestCase):
 
     def test_register_buffer(self):
         b = self._make_backend()
+        backend_module = sys.modules[type(b).__module__]
         with (
-            patch(
-                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend.global_te"
-            ) as mock_te,
-            patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend.get_ip"),
+            patch.object(backend_module, "global_te") as mock_te,
+            patch.object(backend_module, "get_ip"),
         ):
             b.register_buffer([100], [200])
             mock_te.register_buffer.assert_called_once()
+
+    def test_layerwise_methods_delegate(self):
+        b = self._make_backend()
+        b.store = _StrictLayerwiseStore()
+
+        self.assertTrue(hasattr(b, "batch_put_start"))
+        self.assertTrue(hasattr(b, "batch_get_start"))
+        self.assertTrue(hasattr(b, "batch_copy_put"))
+        self.assertTrue(hasattr(b, "batch_copy_get"))
+        self.assertTrue(hasattr(b, "batch_commit"))
+        self.assertTrue(hasattr(b, "batch_revoke"))
+        self.assertTrue(hasattr(b, "batch_get_end"))
+
+        self.assertEqual(b.batch_put_start(["k"], [64]), [0])
+        self.assertEqual(b.batch_get_start(["k"]), [0])
+        self.assertEqual(b.batch_copy_put(["k"], [[100]], [[64]], [[0]]), [64])
+        self.assertEqual(b.batch_copy_get(["k"], [[200]], [[64]], [[0]]), [64])
+        self.assertEqual(b.batch_commit(["k"]), [0])
+        self.assertEqual(b.batch_revoke(["k"]), [0])
+        self.assertEqual(b.batch_get_end(["k"]), 0)
+
+        b.store.batch_put_start.assert_called_once_with(["k"], [64])
+        b.store.batch_get_start.assert_called_once_with(["k"])
+        b.store.batch_put_from_multi_buffer_ranges.assert_called_once_with(
+            ["k"], [[100]], [[64]], [[0]]
+        )
+        b.store.batch_get_into_multi_buffer_ranges.assert_called_once_with(
+            ["k"], [[200]], [[64]], [[0]]
+        )
+        b.store.batch_put_end.assert_called_once_with(["k"])
+        b.store.batch_put_revoke.assert_called_once_with(["k"])
+        b.store.batch_get_end.assert_called_once_with(["k"])
+
+    def test_validate_layerwise_support_checks_every_client_method(self):
+        b = self._make_backend()
+        b.ensure_initialized = MagicMock()
+        b.store = _StrictLayerwiseStore()
+
+        self.assertTrue(hasattr(b, "validate_layerwise_support"))
+        self.assertIsNone(b.validate_layerwise_support())
+        b.ensure_initialized.assert_called_once_with()
+
+    def test_validate_layerwise_support_allows_ssd_offload(self):
+        b = self._make_backend()
+        b.ensure_initialized = MagicMock()
+        b.config.enable_ssd_offload = True
+        b.store = _StrictLayerwiseStore()
+
+        self.assertIsNone(b.validate_layerwise_support())
+
+    def test_validate_layerwise_support_reports_all_missing_methods(self):
+        b = self._make_backend()
+        b.ensure_initialized = MagicMock()
+        b.store = object()
+
+        self.assertTrue(hasattr(b, "validate_layerwise_support"))
+        with self.assertRaisesRegex(RuntimeError, "batch_put_start.*batch_get_end"):
+            b.validate_layerwise_support()
+
+    def test_layerwise_result_shape_guard_rejects_invalid_results(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import backend as backend_module
+
+        self.assertTrue(hasattr(backend_module, "BatchResultShapeError"))
+        self.assertTrue(hasattr(backend_module, "require_aligned_batch_results"))
+        guard = backend_module.require_aligned_batch_results
+        error = backend_module.BatchResultShapeError
+
+        self.assertEqual(guard("copy", ["k1", "k2"], [np.int64(64), 0]), [64, 0])
+        for invalid_results in (
+            [0],
+            [0, 0, 0],
+            None,
+            ["invalid"],
+            [1.5, 0],
+            ["0", 0],
+            [True, 0],
+            [np.float64(1.0), 0],
+            1,
+        ):
+            with self.subTest(results=invalid_results), self.assertRaises(error):
+                guard("copy", ["k1", "k2"], invalid_results)
+
+    def test_mock_dependencies_do_not_replace_parallel_state(self):
+        parallel_state = importlib.import_module("vllm_ascend.distributed.parallel_state")
+
+        self.assertTrue(hasattr(parallel_state, "_FLASHCOMM2_ODP"))
+        self.assertTrue(callable(parallel_state.get_global_rank))
 
 
 # =========================================================================
@@ -586,6 +721,18 @@ class TestMemcacheBackendMethods(unittest.TestCase):
         b._is_a2 = True
         b.register_buffer([100], [200])
         b.store.register_buffer.assert_called_once()
+
+    def test_batch_commit_is_explicit_noop(self):
+        b = self._make_backend()
+
+        self.assertIn("batch_commit", type(b).__dict__)
+        self.assertEqual(b.batch_commit(["k1", "k2"]), [0, 0])
+
+    def test_batch_revoke_is_explicit_noop(self):
+        b = self._make_backend()
+
+        self.assertIn("batch_revoke", type(b).__dict__)
+        self.assertEqual(b.batch_revoke(["k1", "k2"]), [0, 0])
 
     def test_get(self):
         b = self._make_backend()

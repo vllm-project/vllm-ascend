@@ -150,6 +150,14 @@ class MemcacheBackend(Backend):
         assert self.store is not None
         return self.store.batch_remove_lease(keys)
 
+    def batch_commit(self, keys: list[str]) -> list[int]:
+        # Memcache flat-GVA holes are readable without a separate publish step.
+        return [0] * len(keys)
+
+    def batch_revoke(self, keys: list[str]) -> list[int]:
+        # Failed holes require no explicit session cleanup in Memcache.
+        return [0] * len(keys)
+
     def get(self, key: list[str], addr: list[list[int]], size: list[list[int]]):
         if self._lazy_init and not self._store_initialized:
             logger.error(

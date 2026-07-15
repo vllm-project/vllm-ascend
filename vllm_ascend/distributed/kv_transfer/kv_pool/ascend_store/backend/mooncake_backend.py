@@ -16,12 +16,24 @@ from vllm.distributed.parallel_state import get_world_group
 from vllm.logger import logger
 from vllm.utils.network_utils import get_ip
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.backend import Backend
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.backend import (
+    Backend,
+    require_aligned_batch_results,
+)
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.parallel_state import get_global_rank
 
 DEFAULT_GLOBAL_SEGMENT_SIZE = 1073741824  # 1.0 GiB
 DEFAULT_LOCAL_BUFFER_SIZE = 1073741824  # 1.0 GiB
+MOONCAKE_LAYERWISE_CLIENT_METHODS = (
+    "batch_put_start",
+    "batch_put_from_multi_buffer_ranges",
+    "batch_put_end",
+    "batch_put_revoke",
+    "batch_get_start",
+    "batch_get_into_multi_buffer_ranges",
+    "batch_get_end",
+)
 
 
 @functools.lru_cache(maxsize=1)
@@ -185,6 +197,77 @@ class MooncakeBackend(Backend):
             return [0] * len(keys)
         assert self.store is not None
         return self.store.batch_is_exist(keys)
+
+    def validate_layerwise_support(self) -> None:
+        self.ensure_initialized()
+        missing_methods = [
+            method_name
+            for method_name in MOONCAKE_LAYERWISE_CLIENT_METHODS
+            if self.store is None or not callable(getattr(self.store, method_name, None))
+        ]
+        if missing_methods:
+            raise RuntimeError(
+                "Mooncake layerwise support requires client methods: " + ", ".join(missing_methods)
+            )
+
+    def _call_layerwise_batch(self, operation: str, keys: list[str], *args: object) -> list[int]:
+        self.ensure_initialized()
+        if self.store is None:
+            raise RuntimeError(f"Mooncake store is unavailable for {operation}")
+        method = getattr(self.store, operation, None)
+        if not callable(method):
+            raise RuntimeError(f"Mooncake client does not support {operation}")
+        return require_aligned_batch_results(operation, keys, method(*args))
+
+    def batch_put_start(self, keys: list[str], sizes: list[int]) -> list[int]:
+        return self._call_layerwise_batch("batch_put_start", keys, keys, sizes)
+
+    def batch_get_start(self, keys: list[str]) -> list[int]:
+        return self._call_layerwise_batch("batch_get_start", keys, keys)
+
+    def batch_copy_put(
+        self,
+        keys: list[str],
+        all_buffers: list[list[int]],
+        all_sizes: list[list[int]],
+        all_dst_offsets: list[list[int]],
+    ) -> list[int]:
+        return self._call_layerwise_batch(
+            "batch_put_from_multi_buffer_ranges",
+            keys,
+            keys,
+            all_buffers,
+            all_sizes,
+            all_dst_offsets,
+        )
+
+    def batch_copy_get(
+        self,
+        keys: list[str],
+        all_buffers: list[list[int]],
+        all_sizes: list[list[int]],
+        all_src_offsets: list[list[int]],
+    ) -> list[int]:
+        return self._call_layerwise_batch(
+            "batch_get_into_multi_buffer_ranges",
+            keys,
+            keys,
+            all_buffers,
+            all_sizes,
+            all_src_offsets,
+        )
+
+    def batch_commit(self, keys: list[str]) -> list[int]:
+        return self._call_layerwise_batch("batch_put_end", keys, keys)
+
+    def batch_revoke(self, keys: list[str]) -> list[int]:
+        return self._call_layerwise_batch("batch_put_revoke", keys, keys)
+
+    def batch_get_end(self, keys: list[str]) -> int:
+        self.ensure_initialized()
+        if self.store is None or not callable(getattr(self.store, "batch_get_end", None)):
+            raise RuntimeError("Mooncake client does not support batch_get_end")
+        return int(self.store.batch_get_end(keys))
 
     def put(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
         self.ensure_initialized()
