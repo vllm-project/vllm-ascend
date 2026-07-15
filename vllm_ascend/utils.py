@@ -758,11 +758,6 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "GatedDeltaNetAttention": AscendGatedDeltaNetAttention,
         "BailingMoELinearAttention": AscendBailingMoELinearAttention,
     }
-    if vllm_version_is("0.23.0"):
-        from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE
-
-        REGISTERED_ASCEND_OPS["FusedMoE"] = AscendFusedMoE
-
     if vllm_config is None:
         try:
             from vllm.config import get_current_vllm_config
@@ -807,11 +802,6 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
                 "MRotaryEmbedding": AscendMRotaryEmbedding310,
             }
         )
-        if vllm_version_is("0.23.0"):
-            from vllm_ascend._310p.fused_moe.fused_moe import AscendFusedMoE310
-
-            REGISTERED_ASCEND_OPS["FusedMoE"] = AscendFusedMoE310
-
     for name, op_cls in REGISTERED_ASCEND_OPS.items():
         CustomOp.register_oot(_decorated_op_cls=op_cls, name=name)
 

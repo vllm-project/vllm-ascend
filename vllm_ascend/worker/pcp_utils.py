@@ -1333,20 +1333,20 @@ class PCPManager:
     def _get_spec_decode_mtp_slot_inputs(
         self,
         ori_token_indices_to_sample: torch.Tensor,
-        num_decode_reqs: int,
+        num_reqs: int,
         num_speculative_tokens: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Build device-side PCP slot indices for decode-only MTP draft steps."""
+        """Build device-side CP slot indices for MTP draft requests."""
         assert self.mtp_slot_pad is not None
-        query_start_loc = self.query_start_loc_pcp_full.gpu[: num_decode_reqs + 1]
-        decode_req_starts = query_start_loc[:num_decode_reqs].to(torch.int64)
-        cu_num_tokens = query_start_loc[1 : num_decode_reqs + 1].to(torch.int64)
-        query_lens = cu_num_tokens - decode_req_starts
+        query_start_loc = self.query_start_loc_pcp_full.gpu[: num_reqs + 1]
+        req_starts = query_start_loc[:num_reqs].to(torch.int64)
+        cu_num_tokens = query_start_loc[1 : num_reqs + 1].to(torch.int64)
+        query_lens = cu_num_tokens - req_starts
         num_reject_tokens = cu_num_tokens - ori_token_indices_to_sample.to(torch.int64) - 1
         num_accept_tokens = query_lens - num_reject_tokens
         slot_idx_base = (
-            decode_req_starts * self.pcp_world_size
-            + self.pcp_req_offsets[:num_decode_reqs] * (num_speculative_tokens - 1) * self.pcp_world_size
+            req_starts * self.pcp_world_size
+            + self.pcp_req_offsets[:num_reqs] * (num_speculative_tokens - 1) * self.pcp_world_size
             + (num_accept_tokens - 1) * self.pcp_world_size
         )
         slot_indices = (slot_idx_base[:, None] + self.pcp_rank_offsets[: self.pcp_world_size]).reshape(-1)
@@ -1362,15 +1362,17 @@ class PCPManager:
         is_prefill_batch: bool,
         num_speculative_tokens: int,
     ) -> PCPSpecDecodeMTPInputs | None:
-        """Prepare CP-specific inputs for decode-only MTP draft metadata."""
+        """Prepare CP MTP metadata for decode and DCP-prefill batches."""
         is_decode_only_batch = num_decode_reqs > 0 and not is_prefill_batch
-        if num_speculative_tokens <= 1 or not is_decode_only_batch:
+        is_dcp_prefill_batch = self.pcp_world_size == 1 and self.dcp_world_size > 1 and is_prefill_batch
+        if num_speculative_tokens <= 1 or not (is_decode_only_batch or is_dcp_prefill_batch):
             return None
 
         assert ori_token_indices_to_sample is not None
+        num_reqs = batch_size if is_dcp_prefill_batch else num_decode_reqs
         slot_indices, slot_mapping = self._get_spec_decode_mtp_slot_inputs(
             ori_token_indices_to_sample,
-            num_decode_reqs,
+            num_reqs,
             num_speculative_tokens,
         )
 
@@ -1702,7 +1704,8 @@ class PCPManager:
             self.async_rebuild_num_tokens_full = total_num_scheduled_tokens
 
         # For mtpx, pre-allocate mtp slot_mapping here
-        if self.decode_threshold > 2 and not with_prefill:
+        needs_dcp_prefill_slots = self.pcp_world_size == 1 and self.dcp_world_size > 1 and with_prefill
+        if self.decode_threshold > 2 and (not with_prefill or needs_dcp_prefill_slots):
             num_tokens_ori = sum(list(num_scheduled_tokens.values()))
             num_tokens_mtp = num_tokens_ori + self.num_reqs * (self.decode_threshold - 2)
             num_tokens_mtp_pad = num_tokens_mtp * self.pcp_world_size
