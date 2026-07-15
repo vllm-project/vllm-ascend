@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-name: E2E-upstream
+name: E2E-upstream-schedule
 
 on:
   schedule:
