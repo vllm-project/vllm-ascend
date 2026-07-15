@@ -15,8 +15,6 @@
 # This file is a part of the vllm-ascend project.
 #
 # Todo: Once https://github.com/vllm-project/vllm/issues/22246 is merged in vllm. Remove this updator.
-import os
-
 import numpy
 import torch
 import torch.distributed as dist
@@ -161,7 +159,7 @@ class EplbUpdator:
         if self.shared_dict["expert_maps"] is None:
             self.shared_dict["expert_maps"] = global_expert_map
 
-        if os.environ.get("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH") == "1":
+        if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
             return
 
         self.compute_and_set_moe_load()

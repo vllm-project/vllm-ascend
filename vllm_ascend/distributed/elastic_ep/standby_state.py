@@ -50,31 +50,21 @@ def create_ascend_standby_groups(
     group_ranks = all_ranks.unbind(0)
     standby_ep_ranks = [x.tolist() for x in group_ranks]
 
-    _STANDBY_MC2 = _init_stateless_group(
-        standby_ep_ranks,
-        "mc2",
-        master_ip,
-        backend,
-        coord_store=coord_store,
-    )
-
-    if get_ascend_config().eplb_config.dynamic_eplb:
-        _STANDBY_DYNAMIC_EPLB = _init_stateless_group(
+    def _init(name: str):
+        return _init_stateless_group(
             standby_ep_ranks,
-            "dynamic_eplb",
+            name,
             master_ip,
             backend,
             coord_store=coord_store,
         )
 
-    if get_ascend_config().multistream_overlap_gate:
-        _STANDBY_FC3_QUANT_X = _init_stateless_group(
-            standby_ep_ranks,
-            "fc3_quant_x",
-            master_ip,
-            backend,
-            coord_store=coord_store,
-        )
+    config = get_ascend_config()
+    _STANDBY_MC2 = _init("mc2")
+    if config.eplb_config.dynamic_eplb:
+        _STANDBY_DYNAMIC_EPLB = _init("dynamic_eplb")
+    if config.multistream_overlap_gate:
+        _STANDBY_FC3_QUANT_X = _init("fc3_quant_x")
 
 
 def pop_ascend_standby_groups() -> dict:

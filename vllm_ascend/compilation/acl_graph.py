@@ -147,7 +147,7 @@ class ACLGraphWrapper:
 
     def clear_graphs(self) -> None:
         self.concrete_aclgraph_entries.clear()
-        self.graph_pool = _acl_graph_pool
+        self.graph_pool = ACLGraphWrapper.get_graph_pool()
 
     def __call__(self, *args, **kwargs):
         forward_context = get_forward_context()

@@ -15,7 +15,7 @@
 # limitations under the License.
 #
 # ruff: noqa: E501
-import os
+import vllm.envs as envs
 from collections.abc import Callable
 from copy import copy
 from dataclasses import dataclass, field
@@ -460,7 +460,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             self.num_iter = eplb_config.expert_heat_collection_interval
             self.moe_load = torch.zeros((self.num_iter, local_num_experts), dtype=torch.int32, device="npu")
 
-        if os.environ.get("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH") != "1":
+        if not envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
             setup_moe_comm_method(self.moe_config)
         if self.multistream_overlap_shared_expert:
             # Wrap the quant_method's process_weights_after_loading to validate that

@@ -32,7 +32,6 @@ def init_ascend_model_parallel(
         return
     assert torch.distributed.is_initialized()
     enable_elastic_ep = parallel_config.enable_elastic_ep
-    world_size = torch.distributed.get_world_size()
     global_tp_size = parallel_config.tensor_parallel_size
     global_dp_size = parallel_config.data_parallel_size
     global_pp_size = parallel_config.pipeline_parallel_size
@@ -71,18 +70,12 @@ def init_ascend_model_parallel(
     if pd_head_ratio > 1 and get_current_vllm_config().kv_transfer_config.is_kv_producer:
         num_head_replica = get_ascend_config().num_head_replica
         remote_tp_size = global_tp_size // pd_tp_ratio
+        ranks_base = local_all_ranks if enable_elastic_ep else all_ranks
         if num_head_replica <= 1:
-            if enable_elastic_ep:
-                group_ranks = local_all_ranks.view(-1, prefill_tensor_model_parallel_size).unbind(0)
-            else:
-                group_ranks = all_ranks.view(-1, prefill_tensor_model_parallel_size).unbind(0)
+            group_ranks = ranks_base.view(-1, prefill_tensor_model_parallel_size).unbind(0)
         else:
-            if enable_elastic_ep:
-                group_ranks = local_all_ranks.clone().view(global_pp_size * global_pcp_size, -1, num_head_replica)
-            else:
-                group_ranks = all_ranks.clone().view(
-                    global_dp_size * global_pp_size * global_pcp_size, -1, num_head_replica
-                )  # [DP_size, num_head, num_head_replica]
+            reshape_dim = global_pp_size * global_pcp_size if enable_elastic_ep else global_dp_size * global_pp_size * global_pcp_size
+            group_ranks = ranks_base.clone().view(reshape_dim, -1, num_head_replica)
             group_ranks = group_ranks.permute(0, 2, 1)
             group_ranks = group_ranks.reshape(-1, group_ranks.size(-1))  # [DP_size * num_head_replica, num_head]
             alltoall_group_size = group_ranks.size(-1) // remote_tp_size
@@ -109,32 +102,28 @@ def init_ascend_model_parallel(
     )
     group_ranks = [x.tolist() for x in group_ranks]
 
-    global _MC2
-    if enable_elastic_ep:
-        _MC2 = _init_stateless_group(
-            group_ranks,
-            "mc2",
-            parallel_config.data_parallel_master_ip,
-            backend,
-            coord_store=coord_store,
-        )
-    else:
-        _MC2 = init_model_parallel_group(group_ranks, get_world_group().local_rank, backend, group_name="mc2")
+    def _init_ep_like_group(group_name: str) -> GroupCoordinator:
+        """Create an EP-like communication group (mc2 / dynamic_eplb / fc3_quant_x).
 
-    if get_ascend_config().eplb_config.dynamic_eplb:
-        global _DYNAMIC_EPLB
+        When elastic EP is enabled, use stateless groups so new ranks can join
+        dynamically; otherwise use standard model parallel groups.
+        """
         if enable_elastic_ep:
-            _DYNAMIC_EPLB = _init_stateless_group(
+            return _init_stateless_group(
                 group_ranks,
-                "dynamic_eplb",
+                group_name,
                 parallel_config.data_parallel_master_ip,
                 backend,
                 coord_store=coord_store,
             )
-        else:
-            _DYNAMIC_EPLB = init_model_parallel_group(
-                group_ranks, get_world_group().local_rank, backend, group_name="dynamic_eplb"
-            )
+        return init_model_parallel_group(
+            group_ranks, get_world_group().local_rank, backend, group_name=group_name
+        )
+
+    global _MC2, _DYNAMIC_EPLB
+    _MC2 = _init_ep_like_group("mc2")
+    if get_ascend_config().eplb_config.dynamic_eplb:
+        _DYNAMIC_EPLB = _init_ep_like_group("dynamic_eplb")
 
     # Initialize fine-grained TP process groups on Ascend for four components:
     # 1. LM Head: output logits projection (`lmhead_tensor_parallel_size`)
@@ -203,6 +192,14 @@ def model_parallel_initialized():
 def get_mc2_group() -> GroupCoordinator:
     assert _MC2 is not None, "mc2 group is not initialized"
     return _MC2
+
+
+def get_group_name(group) -> str:
+    try:
+        backend = group.device_group._get_backend(torch.device("npu"))
+        return backend.get_hccl_comm_name(group.rank_in_group)
+    except (AttributeError, AssertionError):
+        return ""
 
 
 def get_mlp_tp_group() -> GroupCoordinator:
