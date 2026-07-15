@@ -603,6 +603,7 @@ class RequestTracker:
     # Full prompt length before chunk truncation, used by sparse retention masks.
     num_prompt_tokens: int | None = None
     block_gvas: list[int] = field(default_factory=list)
+    block_gvas_by_group: list[list[int]] = field(default_factory=list)
     gva_block_offset: int = 0
     last_block_gva: int | None = None
 
@@ -632,6 +633,7 @@ class RequestTracker:
         token_ids: list[int] | None = None,
         num_prompt_tokens: int | None = None,
         block_gvas: list[int] | None = None,
+        block_gvas_by_group: list[list[int]] | None = None,
         gva_block_offset: int = 0,
         last_block_gva: int | None = None,
         block_keys: list[str] | None = None,
@@ -655,6 +657,7 @@ class RequestTracker:
         self.token_ids = token_ids
         self.num_prompt_tokens = num_prompt_tokens
         self.block_gvas = [] if block_gvas is None else block_gvas
+        self.block_gvas_by_group = block_gvas_by_group if block_gvas_by_group is not None else []
         self.gva_block_offset = gva_block_offset
         self.last_block_gva = last_block_gva
         self.block_keys = [] if block_keys is None else block_keys
@@ -795,9 +798,12 @@ class ReqMeta:
         ends: list[int] | None = None,
         sizes_per_chunk: list[list[int]] | None = None,
         block_ids_np: np.ndarray | None = None,
+        block_ids_by_group_np: list[np.ndarray] | None = None,
         block_gvas_np: np.ndarray | None = None,
+        block_gvas_by_group_np: list[np.ndarray] | None = None,
         gva_block_offset: int = 0,
         load_block_gvas_np: np.ndarray | None = None,
+        load_block_gvas_by_group_np: list[np.ndarray] | None = None,
         load_gva_block_offset: int = 0,
     ) -> None:
         if token_len_chunk is None:
@@ -829,9 +835,12 @@ class ReqMeta:
         self.ends = ends
         self.sizes_per_chunk = sizes_per_chunk
         self.block_ids_np = block_ids_np
+        self.block_ids_by_group_np = block_ids_by_group_np
         self.block_gvas_np = block_gvas_np
+        self.block_gvas_by_group_np = block_gvas_by_group_np
         self.gva_block_offset = gva_block_offset
         self.load_block_gvas_np = load_block_gvas_np
+        self.load_block_gvas_by_group_np = load_block_gvas_by_group_np
         self.load_gva_block_offset = load_gva_block_offset
 
     @property
@@ -852,8 +861,11 @@ class ReqMeta:
     sizes_per_chunk: list[list[int]] | None = None
 
     block_ids_np: np.ndarray | None = None
+    block_ids_by_group_np: list[np.ndarray] | None = None
     block_gvas_np: np.ndarray | None = None
+    block_gvas_by_group_np: list[np.ndarray] | None = None
     gva_block_offset: int = 0
+    load_block_gvas_by_group_np: list[np.ndarray] | None = None
 
     @staticmethod
     def from_request_tracker(
@@ -943,7 +955,13 @@ class ReqMeta:
             last_block_gva=tracker.last_block_gva,
             partial_block_index=partial_block_index,
             block_ids_np=np.asarray(tracker.allocated_block_ids, dtype=np.int64),
+            block_ids_by_group_np=[np.asarray(ids, dtype=np.int64) for ids in tracker.allocated_block_ids_by_group]
+            if tracker.allocated_block_ids_by_group
+            else None,
             block_gvas_np=np.asarray(tracker.block_gvas, dtype=np.int64),
+            block_gvas_by_group_np=[np.asarray(gvas, dtype=np.int64) for gvas in tracker.block_gvas_by_group]
+            if hasattr(tracker, "block_gvas_by_group") and tracker.block_gvas_by_group
+            else None,
             gva_block_offset=tracker.gva_block_offset,
             kv_cache_group_ids=list(range(len(tracker.allocated_block_ids_by_group))),
             kv_cache_families_by_group=kv_cache_group_families,
@@ -1004,6 +1022,8 @@ class LayerTransferTask:
     layer_id: int
     block_ranges: list[LayerBlockRange]
     shared_block_data: SharedBlockData | None = None
+    group_id: int = 0
+    layer_idx_in_group: int = 0
     # Cache for KVCacheStoreKeyLayerSendingThread:
     # maps block_range index -> list of (start, end, key_all_layers)
     cached_process_tokens: dict[int, list[tuple[int, int, list]]] | None = None
