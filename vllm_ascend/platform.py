@@ -693,19 +693,6 @@ class NPUPlatform(Platform):
                 "in additional_config. ShortRequestFirst scheduling will not be activated.",
             )
 
-        # Extend original scheduler_config to use SchedulerDynamicBatch.
-        if ascend_config.SLO_limits_for_dynamic_batch != -1:
-            if enable_short_request_first:
-                logger.warning_once(
-                    "ShortRequestFirst scheduling is ignored because "
-                    "SLO_limits_for_dynamic_batch selects SchedulerDynamicBatch."
-                )
-            vllm_config.scheduler_config.scheduler_cls = (
-                "vllm_ascend.core.scheduler_dynamic_batch.SchedulerDynamicBatch"
-            )
-            vllm_config.scheduler_config.enable_chunked_prefill = True
-            vllm_config.scheduler_config.SLO_limits_for_dynamic_batch = ascend_config.SLO_limits_for_dynamic_batch
-
         # Use ProfilingChunkScheduler when profiling-based chunk sizing is on.
         if ascend_config.profiling_chunk_config.enabled:
             vllm_config.scheduler_config.scheduler_cls = (
