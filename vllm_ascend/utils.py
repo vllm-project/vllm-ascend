@@ -110,17 +110,67 @@ def get_dsv4_compress_ratio(config: Any, layer_idx: int) -> int:
     return compress_ratios[layer_idx]
 
 
+def model_uses_sfa_sparse(model_config: Any | None) -> bool:
+    hf_text_config = getattr(model_config, "hf_text_config", None)
+    hf_config = getattr(model_config, "hf_config", None)
+    return (
+        hf_text_config is not None
+        and hasattr(hf_text_config, "index_topk")
+        and not hasattr(hf_text_config, "compress_ratios")
+        and not hasattr(hf_config, "compress_ratios")
+    )
+
+
+def enable_sfa_dcp_replicated_indexer(vllm_config: VllmConfig | None = None) -> bool:
+    if vllm_config is None:
+        from vllm.config import get_current_vllm_config
+
+        vllm_config = get_current_vllm_config()
+
+    parallel_config = vllm_config.parallel_config
+    return (
+        model_uses_sfa_sparse(vllm_config.model_config)
+        and parallel_config.decode_context_parallel_size > 1
+        and parallel_config.prefill_context_parallel_size == 1
+    )
+
+
 def clear_enable_sp():
     global _ENABLE_SP
     _ENABLE_SP = None
     enable_dsa_cp.cache_clear()
-    enable_dsa_cp_with_layer_shard.cache_clear()
     enable_dsa_cp_with_o_proj_tp.cache_clear()
     _libc_getenv.cache_clear()
 
 
 def is_310p():
     return get_ascend_device_type() == AscendDeviceType._310P
+
+
+_IS_RC_DEVICE: bool | None = None
+
+
+def is_rc_device() -> bool:
+    """Return True if the 310P NPU runs in Root Complex (RC) mode.
+
+    RC mode (e.g. Atlas 200I Pro): host and NPU share memory. EP mode
+    (e.g. Atlas 300I DUO on PCIe): ``lspci`` output typically contains
+    ``accelerators``.
+    """
+    global _IS_RC_DEVICE
+    if not is_310p():
+        return False
+    if _IS_RC_DEVICE is not None:
+        return _IS_RC_DEVICE
+
+    try:
+        import subprocess
+
+        result = subprocess.run(["lspci"], capture_output=True, text=True, check=True)
+        _IS_RC_DEVICE = not any("accelerators" in line.strip() for line in result.stdout.splitlines())
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        _IS_RC_DEVICE = False
+    return _IS_RC_DEVICE
 
 
 def is_950():
@@ -912,6 +962,8 @@ def is_drafter_moe_model(vllm_config: VllmConfig):
             return _IS_DRAFTER_MOE_MODEL
         if "Eagle3DeepseekV2ForCausalLM" in model_configs["architectures"]:
             _IS_DRAFTER_MOE_MODEL = False
+        if "Step3p5MTP" in model_configs["architectures"]:
+            _IS_DRAFTER_MOE_MODEL = False
     return _IS_DRAFTER_MOE_MODEL
 
 
@@ -1131,8 +1183,6 @@ def _compute_potential_max_tokens(vllm_config) -> int:
     scheduler_config = vllm_config.scheduler_config
     speculative_config = vllm_config.speculative_config
     uniform_decode_query_len = 1 if not speculative_config else 1 + speculative_config.num_speculative_tokens
-    decode_max_num_seqs = getattr(scheduler_config, "decode_max_num_seqs", 0)
-    max_num_reqs = max(scheduler_config.max_num_seqs, decode_max_num_seqs)
 
     # Use max cudagraph capture size if available, otherwise the maximal uniform
     # decode token count.
@@ -1155,14 +1205,13 @@ def _compute_potential_max_tokens(vllm_config) -> int:
                 potential_max_tokens,
             )
     else:
-        potential_max_tokens = min(max_num_reqs * uniform_decode_query_len, 512)
+        potential_max_tokens = min(scheduler_config.max_num_seqs * uniform_decode_query_len, 512)
     return potential_max_tokens
 
 
 # potential_max_tokens is computed once in the model runner __init__ and reused by
 # both the skip-allreduce decision and the o_proj static-exchange buffer sizing, so
-# neither path recomputes it. Mirrors the _mc2_tokens_capacity set/get pattern in
-# ascend_forward_context.py.
+# neither path recomputes it.
 _potential_max_tokens: int | None = None
 
 
@@ -1243,13 +1292,6 @@ def flashcomm2_enable() -> bool:
     return config_val > 0
 
 
-def o_shard_enable() -> bool:
-    layer_sharding = get_ascend_config().layer_sharding
-    if layer_sharding is None:
-        return False
-    return "o_proj" in layer_sharding
-
-
 def get_flashcomm2_config_and_validate(ascend_config, vllm_config):
     flashcomm2_oproj_tp_size = ascend_config.enable_flashcomm2_parallel_size
     global_tp_size = vllm_config.parallel_config.tensor_parallel_size
@@ -1259,15 +1301,6 @@ def get_flashcomm2_config_and_validate(ascend_config, vllm_config):
 
     logger.info("Enable FLASHCOMM2 with flashcomm2_oproj_tensor_parallel_size = %s", flashcomm2_oproj_tp_size)
 
-    layer_sharding = ascend_config.layer_sharding or []
-    if layer_sharding:
-        if layer_sharding == ["o_proj"]:
-            logger.info_once("Enable FLASHCOMM2 with o_proj layer sharding for reduced memory consumption.")
-        else:
-            raise ValueError(
-                "FLASHCOMM2 only supports 'o_proj' as the sole layer sharding configuration! "
-                f"Found invalid layer_sharding: {layer_sharding}"
-            )
     if not ascend_config.enable_flashcomm1:
         logger.warning_once(
             "It is recommended to enable FLASHCOMM1 simultaneously when starting FLASHCOMM2 for optimal performance."
@@ -1486,20 +1519,6 @@ def enable_dsa_cp() -> bool:
             "DSA CP requires SP to be enabled. Please enable SP(set VLLM_ASCEND_ENABLE_FLASHCOMM1=1) to use DSA CP."
         )
     return dsa_cp_enable and enable_sp()
-
-
-@lru_cache(maxsize=1)
-def enable_dsa_cp_with_layer_shard() -> bool:
-    if not enable_dsa_cp():
-        return False
-    from vllm.config import get_current_vllm_config
-
-    vllm_config = get_current_vllm_config()
-    kv_transfer_config = vllm_config.kv_transfer_config
-    # Layer sharding broadcast only pays off when it can be hidden by the
-    # heavier prefill-stage compute, so enable it only on the P-side instance.
-    is_prefill_instance = kv_transfer_config is not None and kv_transfer_config.kv_role == "kv_producer"
-    return is_prefill_instance
 
 
 @lru_cache(maxsize=1)

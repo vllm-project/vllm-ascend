@@ -384,6 +384,7 @@ class TestAscendUnquantizedFusedMoEMethod:
     @pytest.mark.parametrize("enable_fused_mc2", [True, False])
     def test_process_weights_after_loading_transposes_and_formats(self, monkeypatch, enable_fused_mc2):
         method = AscendUnquantizedFusedMoEMethod.__new__(AscendUnquantizedFusedMoEMethod)
+        method.dynamic_eplb = False
         method._maybe_pad_weight = MagicMock(side_effect=lambda weight: weight)
         layer = self._build_layer()
         original_w13 = layer.w13_weight.detach().clone()
@@ -407,6 +408,36 @@ class TestAscendUnquantizedFusedMoEMethod:
         else:
             assert maybe_trans_nz.call_count == 2
             format_cast.assert_not_called()
+
+    def test_process_weights_after_loading_splits_dynamic_eplb_fused_mc2_weights(self, monkeypatch):
+        method = AscendUnquantizedFusedMoEMethod.__new__(AscendUnquantizedFusedMoEMethod)
+        method.dynamic_eplb = True
+        method._maybe_pad_weight = MagicMock(side_effect=lambda weight: weight)
+        layer = nn.Module()
+        layer.w13_weight = nn.Parameter(torch.randn(2, 3, 4))
+        layer.w2_weight = nn.Parameter(torch.randn(2, 4, 3))
+        expected_w13 = layer.w13_weight.detach().clone().transpose(1, 2).contiguous()
+        expected_w2 = layer.w2_weight.detach().clone().transpose(1, 2).contiguous()
+        format_cast = MagicMock(side_effect=lambda weight, _: weight)
+        empty_cache = MagicMock()
+
+        mock_ascend_config = MagicMock()
+        mock_ascend_config.enable_fused_mc2 = True
+        monkeypatch.setattr(fused_moe_module, "get_ascend_config", lambda: mock_ascend_config)
+        monkeypatch.setattr(fused_moe_module.torch_npu, "npu_format_cast", format_cast)
+        monkeypatch.setattr(fused_moe_module.torch, "npu", SimpleNamespace(empty_cache=empty_cache), raising=False)
+
+        method.process_weights_after_loading(layer)
+
+        assert "w13_weight" not in layer._parameters
+        assert "w2_weight" not in layer._parameters
+        assert len(layer.w13_weight_list) == 2
+        assert len(layer.w2_weight_list) == 2
+        torch.testing.assert_close(layer.w13_weight_list[0], expected_w13[0])
+        torch.testing.assert_close(layer.w2_weight_list[1], expected_w2[1])
+        assert layer.w13_weight_list[0].untyped_storage().data_ptr() != expected_w13[0].untyped_storage().data_ptr()
+        assert format_cast.call_count == 2
+        empty_cache.assert_called_once()
 
     @pytest.mark.parametrize("moe_comm_type", [MoECommType.MC2, MoECommType.FUSED_MC2])
     def test_apply_builds_fused_experts_input(self, monkeypatch, moe_comm_type):
@@ -459,11 +490,104 @@ class TestAscendUnquantizedFusedMoEMethod:
             assert fused_input.weights.w2[0] is layer.w2_weight
             assert isinstance(fused_input.weights.w1_scale, list)
             assert isinstance(fused_input.weights.w2_scale, list)
+            assert fused_input.weights.w1_scale[0].dtype == torch.int64
+            assert fused_input.weights.w2_scale[0].dtype == torch.int64
+            assert fused_input.weights.w1_scale_bias[0].dtype == torch.float32
+            assert fused_input.weights.w2_scale_bias[0].dtype == torch.float32
         else:
             assert fused_input.weights.w1 is layer.w13_weight
             assert fused_input.weights.w2 is layer.w2_weight
             assert fused_input.weights.w1_scale is None
             assert fused_input.weights.w2_scale is None
+
+    @pytest.mark.parametrize("moe_comm_type", [MoECommType.MC2, MoECommType.FUSED_MC2])
+    def test_apply_uses_weight_lists_when_dynamic_eplb_splits_weights(self, monkeypatch, moe_comm_type):
+        method = AscendUnquantizedFusedMoEMethod.__new__(AscendUnquantizedFusedMoEMethod)
+        method.moe = SimpleNamespace(has_bias=False)
+        method.dynamic_eplb = True
+        method.tid2eid = None
+        layer = self._build_layer(has_bias=False)
+        layer.w13_weight_list = [torch.randn(4, 6), torch.randn(4, 6)]
+        layer.w2_weight_list = [torch.randn(3, 4), torch.randn(3, 4)]
+        hidden_states = torch.randn(2, 4, dtype=torch.float16)
+        topk_weights = torch.ones(2, 2, dtype=torch.float32)
+        topk_ids = torch.tensor([[0, 1], [1, 0]], dtype=torch.int64)
+        moe_comm_method = MagicMock()
+        moe_comm_method.fused_experts.return_value = torch.ones_like(hidden_states)
+        monkeypatch.setattr(
+            fused_moe_module,
+            "_EXTRA_CTX",
+            SimpleNamespace(moe_comm_type=moe_comm_type, moe_comm_method=moe_comm_method),
+        )
+        monkeypatch.setattr(fused_moe_module, "select_experts", MagicMock(return_value=(topk_weights, topk_ids)))
+        monkeypatch.setattr(fused_moe_module, "get_forward_context", MagicMock(return_value=MagicMock(input_ids=None)))
+
+        method.apply(
+            layer=layer,
+            x=hidden_states,
+            use_grouped_topk=False,
+            top_k=2,
+            router_logits=torch.randn(2, 4),
+            renormalize=True,
+            num_experts=4,
+        )
+
+        fused_input = moe_comm_method.fused_experts.call_args.kwargs["fused_experts_input"]
+        assert fused_input.weights.w1 is layer.w13_weight_list
+        assert fused_input.weights.w2 is layer.w2_weight_list
+        if moe_comm_type == MoECommType.FUSED_MC2:
+            assert len(fused_input.weights.w1_scale) == 1
+            assert len(fused_input.weights.w2_scale) == 1
+            assert fused_input.weights.w1_scale[0].dtype == torch.int64
+            assert fused_input.weights.w2_scale[0].dtype == torch.int64
+            assert fused_input.weights.w1_scale[0].numel() == 0
+            assert fused_input.weights.w2_scale[0].numel() == 0
+            assert fused_input.weights.w1_scale_bias[0].dtype == torch.float32
+            assert fused_input.weights.w2_scale_bias[0].dtype == torch.float32
+            assert fused_input.weights.w1_scale_bias[0].numel() == 0
+            assert fused_input.weights.w2_scale_bias[0].numel() == 0
+        else:
+            assert fused_input.weights.w1_scale is None
+            assert fused_input.weights.w2_scale is None
+
+    def test_apply_warns_when_dynamic_eplb_fused_mc2_weights_are_not_split(self, monkeypatch):
+        method = AscendUnquantizedFusedMoEMethod.__new__(AscendUnquantizedFusedMoEMethod)
+        method.moe = SimpleNamespace(has_bias=False)
+        method.dynamic_eplb = True
+        method.tid2eid = None
+        layer = self._build_layer(has_bias=False)
+        hidden_states = torch.randn(2, 4, dtype=torch.float16)
+        topk_weights = torch.ones(2, 2, dtype=torch.float32)
+        topk_ids = torch.tensor([[0, 1], [1, 0]], dtype=torch.int64)
+        moe_comm_method = MagicMock()
+        moe_comm_method.fused_experts.return_value = torch.ones_like(hidden_states)
+        warning_once = MagicMock()
+        monkeypatch.setattr(
+            fused_moe_module,
+            "_EXTRA_CTX",
+            SimpleNamespace(moe_comm_type=MoECommType.FUSED_MC2, moe_comm_method=moe_comm_method),
+        )
+        monkeypatch.setattr(fused_moe_module, "select_experts", MagicMock(return_value=(topk_weights, topk_ids)))
+        monkeypatch.setattr(fused_moe_module, "get_forward_context", MagicMock(return_value=MagicMock(input_ids=None)))
+        monkeypatch.setattr(fused_moe_module.logger, "warning_once", warning_once)
+
+        method.apply(
+            layer=layer,
+            x=hidden_states,
+            use_grouped_topk=False,
+            top_k=2,
+            router_logits=torch.randn(2, 4),
+            renormalize=True,
+            num_experts=4,
+        )
+
+        warning_once.assert_called_once()
+        warning_msg = warning_once.call_args.args[0]
+        assert "dynamic EPLB" in warning_msg
+        assert "not split into tensor lists" in warning_msg
+        fused_input = moe_comm_method.fused_experts.call_args.kwargs["fused_experts_input"]
+        assert fused_input.weights.w1[0] is layer.w13_weight
+        assert fused_input.weights.w2[0] is layer.w2_weight
 
     def test_apply_adds_zero_expert_result_and_force_balances(self, monkeypatch):
         method = AscendUnquantizedFusedMoEMethod.__new__(AscendUnquantizedFusedMoEMethod)
@@ -612,7 +736,6 @@ class TestAscendFusedMoE:
     def test_forward_impl_prepare_apply_finalize(self, monkeypatch, return_with_event):
         layer = self._build_layer()
         layer.enable_npugraph_ex_static_kernel = True
-        layer.multistream_overlap_gate = False
         layer.enable_shared_expert_dp = False
         layer.quant_type = QuantType.NONE
         layer.top_k = 2
@@ -695,7 +818,6 @@ class TestAscendFusedMoE:
     def test_forward_impl_dynamic_eplb_multi_stage(self, monkeypatch):
         layer = self._build_layer()
         layer.enable_npugraph_ex_static_kernel = False
-        layer.multistream_overlap_gate = False
         layer.enable_shared_expert_dp = False
         layer.quant_type = QuantType.NONE
         layer.top_k = 1
@@ -799,7 +921,6 @@ class TestAscendFusedMoESharedExperts:
         if not hasattr(layer, "shared_forward_impl"):
             pytest.skip("Current AscendFusedMoE has no shared_forward_impl")
         layer.multistream_overlap_shared_expert = False
-        layer.shared_multistream_overlap_gate = False
         layer.use_overlapped = False
         layer._shared_experts = MagicMock() if has_shared_experts else None
         hidden_states = torch.randn(2, 4)

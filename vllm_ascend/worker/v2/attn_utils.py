@@ -17,11 +17,13 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from contextlib import contextmanager
 from typing import Any
 
 import numpy as np
 import torch
+import vllm
 from vllm.config import VllmConfig, get_current_vllm_config, get_layers_from_vllm_config
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention.mla_attention import MLAAttention
@@ -115,7 +117,7 @@ def build_attn_metadata(
     prefill_context_parallel_metadata: AscendPrefillContextParallelMetadata | None = None,
     model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
     for_cudagraph_capture: bool = False,
-    causal: bool = True,
+    causal: bool | Mapping[int, bool] = True,
 ) -> dict[str, Any]:
     """Build attention metadata for Ascend NPUs."""
     # TODO(Ronald1995): optimize AscendCommonAttentionMetadata.
@@ -132,6 +134,8 @@ def build_attn_metadata(
     for i, kv_cache_spec in enumerate(kv_cache_groups):
         block_table = block_tables[i]
         slot_mapping = slot_mappings[i]
+        # Hybrid drafters can configure causality per KV cache group.
+        group_causal = causal if isinstance(causal, bool) else causal.get(i, True)
 
         common_attn_metadata_extra_kwargs = (
             model_specific_attn_metadata.get_extra_common_attn_kwargs(i, num_reqs)
@@ -155,7 +159,7 @@ def build_attn_metadata(
             num_input_tokens=num_input_tokens,
             prefill_context_parallel_metadata=prefill_context_parallel_metadata,
             max_seq_len=max_seq_len,
-            causal=causal,
+            causal=group_causal,
             **common_attn_metadata_extra_kwargs,
         )
 
@@ -434,6 +438,7 @@ def _reshape_kv_cache_v2(
     cache_dtype: str,
     kernel_block_sizes: list[int],
     shared_kv_cache_layers: dict[str, str],
+    kv_cache_config: "KVCacheConfig | None" = None,
 ) -> dict[str, tuple[torch.Tensor, torch.Tensor]]:
     vllm_config = get_current_vllm_config()
     is_kv_consumer = (
@@ -501,3 +506,17 @@ def _reshape_kv_cache_v2(
         kv_caches[layer_name] = kv_caches[target_layer_name]
 
     return kv_caches
+
+
+_BUILD_ATTN_METADATA_MODULE = vllm.v1.worker.gpu.spec_decode.speculator
+
+
+@contextmanager
+def build_attn_metadata_wrapper():
+    """Context manager to override attention metadata building for Ascend NPUs."""
+    original_func = _BUILD_ATTN_METADATA_MODULE.build_attn_metadata
+    try:
+        _BUILD_ATTN_METADATA_MODULE.build_attn_metadata = build_attn_metadata
+        yield
+    finally:
+        _BUILD_ATTN_METADATA_MODULE.build_attn_metadata = original_func

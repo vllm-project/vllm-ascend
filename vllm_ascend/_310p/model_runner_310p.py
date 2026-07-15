@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import math
 from contextlib import contextmanager, nullcontext
+from functools import partial
 from typing import Any, cast
 
 import numpy as np
@@ -27,7 +28,9 @@ import torch.nn as nn
 import torch_npu
 from vllm.config import CUDAGraphMode
 from vllm.distributed.parallel_state import get_pp_group
+from vllm.forward_context import get_forward_context
 from vllm.logger import logger
+from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -52,7 +55,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.spec_decode.utils import (
     update_num_computed_tokens_for_batch_change,
 )
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, lmhead_tp_enable
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_rc_device, lmhead_tp_enable
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 _NGRAM_GRAPH_UNIFORM_DECODE_QUERY_LEN = 1
@@ -297,6 +300,13 @@ class NPUModelRunner310(NPUModelRunner):
                 self.input_batch.num_prompt_tokens,
             )
 
+        prev_req_id_to_index = self.input_batch.prev_req_id_to_index
+        self._compute_prev_positions(num_reqs)
+        prev_positions_gpu = None
+        if self.use_async_scheduling and self.input_batch.prev_sampled_token_ids is not None and prev_req_id_to_index:
+            self.prev_positions.copy_to_gpu(num_reqs)
+            prev_positions_gpu = self.prev_positions.gpu[:num_reqs]
+
         if self.speculative_config and self.use_cp:
             self.pcp_manager.generate_pcp_mtp_input(
                 total_num_scheduled_tokens,
@@ -310,6 +320,7 @@ class NPUModelRunner310(NPUModelRunner):
                 self._draft_token_ids,  # type: ignore[has-type]
                 scheduler_output,
                 self.num_spec_tokens,
+                prev_positions=prev_positions_gpu,
             )
 
         if self.pcp_size > 1:
@@ -387,6 +398,8 @@ class NPUModelRunner310(NPUModelRunner):
 
         self.query_start_loc.np[0] = 0
         self.query_start_loc.np[1 : num_reqs + 1] = cu_num_tokens
+        if is_rc_device():
+            self.query_start_loc.np[num_reqs + 1 :].fill(-1)
         self.query_start_loc.copy_to_gpu()
 
         if self._has_gdn:
@@ -402,10 +415,8 @@ class NPUModelRunner310(NPUModelRunner):
         )
         self.optimistic_seq_lens_cpu[num_reqs:].fill_(0)
 
-        prev_req_id_to_index = self.input_batch.prev_req_id_to_index
-        self._compute_prev_positions(num_reqs)
-
-        self.query_start_loc.gpu[num_reqs + 1 :].fill_(-1)
+        if not is_rc_device():
+            self.query_start_loc.gpu[num_reqs + 1 :].fill_(-1)
 
         self._prepare_input_ids(scheduler_output, num_reqs, total_num_scheduled_tokens, cu_num_tokens)
         if self.uses_mrope:
@@ -455,14 +466,19 @@ class NPUModelRunner310(NPUModelRunner):
             self.num_accepted_tokens.np[num_reqs:].fill(1)
             self.num_accepted_tokens.copy_to_gpu()
         else:
-            self.num_accepted_tokens.np.fill(1)
-            self.num_accepted_tokens.gpu.fill_(1)
+            if is_rc_device():
+                self.num_accepted_tokens.np[num_reqs:].fill(1)
+                self.num_accepted_tokens.copy_to_gpu()
+            else:
+                self.num_accepted_tokens.np.fill(1)
+                self.num_accepted_tokens.gpu.fill_(1)
 
         need_async_num_computed_update = (
             self.use_async_spec_decode and self.valid_sampled_token_count_gpu is not None and prev_req_id_to_index
         )
         if need_async_num_computed_update:
-            self.prev_positions.copy_to_gpu(num_reqs)
+            if prev_positions_gpu is None:
+                self.prev_positions.copy_to_gpu(num_reqs)
             self.prev_num_draft_tokens.copy_to_gpu()
             cpu_values = self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs].to(
                 device=self.device, non_blocking=True
@@ -494,12 +510,25 @@ class NPUModelRunner310(NPUModelRunner):
         )
         if need_async_num_computed_update:
             self.seq_lens[:num_reqs] = self.num_computed_tokens[:num_reqs] + num_scheduled_tokens_gpu
+            if is_rc_device():
+                tail_len = self.seq_lens.shape[0] - num_reqs
+                if tail_len > 0:
+                    self.seq_lens[num_reqs:].copy_(
+                        self.optimistic_seq_lens_cpu[num_reqs:].to(self.device, non_blocking=True),
+                    )
         else:
-            self.seq_lens[:num_reqs].copy_(
-                self.optimistic_seq_lens_cpu[:num_reqs],
-                non_blocking=True,
-            )
-        self.seq_lens[num_reqs:].fill_(0)
+            if is_rc_device():
+                self.seq_lens.copy_(
+                    self.optimistic_seq_lens_cpu[: self.seq_lens.shape[0]],
+                    non_blocking=True,
+                )
+            else:
+                self.seq_lens[:num_reqs].copy_(
+                    self.optimistic_seq_lens_cpu[:num_reqs],
+                    non_blocking=True,
+                )
+        if not is_rc_device():
+            self.seq_lens[num_reqs:].fill_(0)
 
         if (
             self._needs_seq_lens_cpu_sync
@@ -632,27 +661,61 @@ class NPUModelRunner310(NPUModelRunner):
         num_tokens_padded: int,
         input_ids: torch.Tensor | None = None,
         positions: torch.Tensor | None = None,
-        intermediate_tensors=None,
+        intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
-        **model_kwargs,
+        **model_kwargs: dict[str, Any],
     ):
         if self.uses_mrope:
             assert positions is not None
             prepare_mrope_cos_sin_slices_from_runner(self, positions)
-        return super()._model_forward(
-            num_tokens_padded,
-            input_ids=input_ids,
-            positions=positions,
-            intermediate_tensors=intermediate_tensors,
-            inputs_embeds=inputs_embeds,
+
+        assert self.model is not None
+        forward_context = get_forward_context()
+        assert forward_context is not None
+        model_inputs: dict[str, Any] = {
+            "input_ids": input_ids,
+            "positions": positions,
+            "intermediate_tensors": intermediate_tensors,
+            "inputs_embeds": inputs_embeds,
             **model_kwargs,
+        }
+        run_model = partial(self.model, **model_inputs)
+        update_before_replay = (
+            self.speculative_config is not None
+            and self.speculative_config.method == "mtp"
+            and not self.enable_enpu
+            and forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL
+            and not forward_context.capturing
+            and hasattr(self, "update_stream")
         )
+
+        if self.enable_enpu or update_before_replay:
+            if update_before_replay:
+                torch.npu.current_stream().synchronize()
+            self._update_full_graph_params_if_needed(
+                forward_context,
+                num_tokens_padded,
+                positions,
+            )
+            if update_before_replay:
+                torch.npu.current_stream().wait_stream(self.update_stream)
+            hidden_states = run_model()
+        else:
+            hidden_states = run_model()
+            self._update_full_graph_params_if_needed(
+                forward_context,
+                num_tokens_padded,
+                positions,
+            )
+
+        if forward_context.flash_comm_v1_enabled and not isinstance(hidden_states, IntermediateTensors):
+            hidden_states = self._all_gather_hidden_states_and_aux(hidden_states)
+        return hidden_states
 
     def _check_and_update_cudagraph_mode(
         self,
         attention_backends,
         kv_cache_groups,
-        is_profiling=False,
     ) -> None:
         # 910B does not need this branch because runner/dispatcher query_len are
         # naturally consistent there. 310P ngram needs temporary alignment.

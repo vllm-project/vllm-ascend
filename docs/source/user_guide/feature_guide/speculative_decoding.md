@@ -19,7 +19,7 @@ The following speculative decoding methods are supported:
 | `eagle` | EAGLE-based draft model |
 | `eagle3` | EAGLE-3 based draft model |
 | `mtp` | Multi-Token Prediction with shared embedding head |
-| `dflash` | Draft-and-Flash with cross-attention |
+| `dflash` | Block diffusion-based parallel draft model |
 | `draft_model` | Generic external draft LLM |
 | `extract_hidden_states` | Extract hidden states for EAGLE training |
 
@@ -228,7 +228,6 @@ The `extract_hidden_states` method is a special speculative decoding mode that d
     from safetensors import safe_open
     from vllm import LLM, SamplingParams
 
-
     def main():
         with tempfile.TemporaryDirectory() as tmpdirname:
             llm = LLM(
@@ -269,7 +268,6 @@ The `extract_hidden_states` method is a special speculative decoding mode that d
                     hidden_states = f.get_tensor("hidden_states")
                     print("Shape:", hidden_states.shape)
                     # Shape: (num_tokens, num_layers, hidden_size)
-
 
     if __name__ == "__main__":
         main()

@@ -14,7 +14,7 @@ import msgspec
 import torch
 import zmq
 from vllm.utils.network_utils import make_zmq_path
-from vllm.v1.kv_cache_interface import FullAttentionSpec, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import FullAttentionSpec, MLAAttentionSpec, UniformTypeKVCacheSpecs
 from vllm.v1.request import RequestStatus
 
 fake_engine = types.ModuleType("mooncake.engine")
@@ -299,30 +299,66 @@ class TestKVCacheSendingThread(unittest.TestCase):
 
 
 class TestMooncakeTransferGroups(unittest.TestCase):
+    def test_attention_group_uses_explicit_total_heads_for_unequal_pd_tp(self):
+        worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+        worker.num_key_value_heads = 16
+        mla_group = {
+            "kv_cache_spec_type": "AscendMLAAttentionSpec",
+            "kv_cache_spec": {"num_kv_heads": 1, "total_num_kv_heads": 1},
+        }
+        full_attention_decode_group = {
+            "kv_cache_spec_type": "FullAttentionSpec",
+            "kv_cache_spec": {"num_kv_heads": 4, "total_num_kv_heads": 8},
+        }
+        replicated_prefill_group = {
+            "kv_cache_spec_type": "FullAttentionSpec",
+            "kv_cache_spec": {"num_kv_heads": 1, "total_num_kv_heads": 8},
+        }
+
+        self.assertEqual(worker._get_attention_group_num_key_value_heads(mla_group), 1)
+        self.assertEqual(
+            worker._get_attention_group_num_key_value_heads(full_attention_decode_group),
+            8,
+        )
+        self.assertEqual(
+            worker._get_attention_group_num_key_value_heads(replicated_prefill_group),
+            8,
+        )
+        self.assertEqual(
+            worker._get_attention_group_num_need_pulls_for_decode_tp(full_attention_decode_group, 8, 2),
+            4,
+        )
+
     def test_build_kv_group2layeridx_splits_uniform_group_by_kv_heads(self):
-        mla_spec = FullAttentionSpec(
+        mla_spec = MLAAttentionSpec(
+            block_size=16,
+            num_kv_heads=1,
+            head_size=64,
+            dtype=torch.float16,
+        )
+        qga_spec = FullAttentionSpec(
             block_size=16,
             num_kv_heads=1,
             head_size=64,
             head_size_v=64,
             dtype=torch.float16,
         )
-        qga_spec = FullAttentionSpec(
-            block_size=16,
-            num_kv_heads=8,
-            head_size=64,
-            head_size_v=64,
-            dtype=torch.float16,
-        )
         layer_specs = {
-            "model.layers.0.self_attn": mla_spec,
-            "model.layers.1.self_attn": qga_spec,
+            "language_model.model.layers.0.self_attn": mla_spec,
+            "model.layers.32.self_attn": qga_spec,
         }
-        uniform_spec = UniformTypeKVCacheSpecs.from_specs(layer_specs)
-        assert uniform_spec is not None
+        uniform_spec = UniformTypeKVCacheSpecs(block_size=16, kv_cache_specs=layer_specs)
 
         worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
         worker.vllm_config = MockVllmConfig()
+        worker.vllm_config.model_config.hf_text_config.num_key_value_heads = 128
+        worker.vllm_config.model_config.get_total_num_kv_heads = MagicMock(return_value=128)
+        worker.vllm_config.speculative_config = types.SimpleNamespace(
+            draft_model_config=types.SimpleNamespace(
+                hf_text_config=types.SimpleNamespace(num_key_value_heads=8),
+                get_total_num_kv_heads=MagicMock(return_value=8),
+            ),
+        )
         worker.total_layers = 32
         worker.kv_cache_config = MockKVCacheConfig(
             kv_cache_groups=[
@@ -340,6 +376,67 @@ class TestMooncakeTransferGroups(unittest.TestCase):
         self.assertEqual(kv_group2layeridx[1][0]["kv_cache_group_id"], 0)
         self.assertEqual(worker._get_attention_group_num_key_value_heads(kv_group2layeridx[0][0]), 1)
         self.assertEqual(worker._get_attention_group_num_key_value_heads(kv_group2layeridx[1][0]), 8)
+        self.assertEqual(kv_group2layeridx[0][0]["kv_cache_spec"]["num_kv_heads"], 1)
+        self.assertEqual(kv_group2layeridx[1][0]["kv_cache_spec"]["num_kv_heads"], 1)
+
+    def test_build_kv_group2layeridx_splits_equal_local_heads_by_total_heads(self):
+        shared_local_spec = FullAttentionSpec(
+            block_size=16,
+            num_kv_heads=1,
+            head_size=64,
+            head_size_v=64,
+            dtype=torch.float16,
+        )
+        layer_names = [
+            "model.layers.0.self_attn",
+            "eagle.model.layers.0.self_attn",
+        ]
+        worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+        worker.vllm_config = MockVllmConfig()
+        worker.vllm_config.model_config.hf_text_config.num_key_value_heads = 16
+        worker.vllm_config.model_config.get_total_num_kv_heads = MagicMock(return_value=16)
+        worker.vllm_config.speculative_config = types.SimpleNamespace(
+            draft_model_config=types.SimpleNamespace(
+                hf_text_config=types.SimpleNamespace(num_key_value_heads=8),
+                get_total_num_kv_heads=MagicMock(return_value=8),
+            ),
+        )
+        worker.total_layers = 32
+        worker.kv_cache_config = MockKVCacheConfig(
+            kv_cache_groups=[
+                MockKVCacheGroup(
+                    layer_names=layer_names,
+                    kv_cache_spec=shared_local_spec,
+                )
+            ]
+        )
+
+        kv_group2layeridx = worker._build_kv_group2layeridx()
+
+        self.assertEqual(len(kv_group2layeridx), 2)
+        self.assertEqual(kv_group2layeridx[0][1], [0])
+        self.assertEqual(kv_group2layeridx[1][1], [32])
+        self.assertEqual(kv_group2layeridx[0][0]["kv_cache_spec"]["total_num_kv_heads"], 16)
+        self.assertEqual(kv_group2layeridx[1][0]["kv_cache_spec"]["total_num_kv_heads"], 8)
+        self.assertEqual(kv_group2layeridx[0][0]["kv_cache_spec"]["num_kv_heads"], 1)
+        self.assertEqual(kv_group2layeridx[1][0]["kv_cache_spec"]["num_kv_heads"], 1)
+        worker.kv_group2layeridx = kv_group2layeridx
+        self.assertTrue(worker._requires_group_aware_attention_transfer())
+
+        worker.tp_rank = 0
+        worker.tp_size = 8
+        worker._decode_tp_size = 8
+        worker._prefill_tp_size = 16
+        worker._prefill_pp_size = 1
+        worker.use_sparse = False
+        _, rank_group_pulls = worker._get_hybrid_remote_rank_group_pulls("req-1", prefill_tp_size=16)
+        pulls = [pull for group_pulls in rank_group_pulls.values() for pull in group_pulls]
+        target_pulls = [pull for pull in pulls if pull.group_id == 0]
+        draft_pulls = [pull for pull in pulls if pull.group_id == 1]
+        self.assertEqual(len(target_pulls), 2)
+        self.assertTrue(all(pull.num_group_pulls == 2 for pull in target_pulls))
+        self.assertEqual(len(draft_pulls), 1)
+        self.assertEqual(draft_pulls[0].num_group_pulls, 1)
 
     def test_hybrid_rank_pulls_use_transfer_group_kv_heads(self):
         worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
@@ -357,7 +454,10 @@ class TestMooncakeTransferGroups(unittest.TestCase):
                 {
                     "kv_cache_spec_type": "UniformTypeKVCacheSpecs",
                     "kv_cache_group_id": 0,
-                    "kv_cache_spec": {"model.layers.0.self_attn": {"num_kv_heads": 1}},
+                    "kv_cache_spec": {
+                        "total_num_kv_heads": 1,
+                        "model.layers.0.self_attn": {"num_kv_heads": 1},
+                    },
                 },
                 [0],
             ),
@@ -365,7 +465,10 @@ class TestMooncakeTransferGroups(unittest.TestCase):
                 {
                     "kv_cache_spec_type": "UniformTypeKVCacheSpecs",
                     "kv_cache_group_id": 0,
-                    "kv_cache_spec": {"model.layers.1.self_attn": {"num_kv_heads": 8}},
+                    "kv_cache_spec": {
+                        "total_num_kv_heads": 8,
+                        "model.layers.1.self_attn": {"num_kv_heads": 8},
+                    },
                 },
                 [1],
             ),
@@ -2646,6 +2749,86 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                     expected_group_ids={0, 1},
                     expected_finishes={0: 2, 1: 1},
                 )
+
+    def test_hybrid_no_cp_uses_kv_cache_group_ids_for_split_transfer_groups(self):
+        with patch.object(
+            self.vllm_config.kv_transfer_config,
+            "get_from_extra_config",
+            side_effect=lambda k, d=None: {
+                "prefill": {"tp_size": 4, "dp_size": 1, "pp_size": 1},
+                "decode": {"tp_size": 2, "dp_size": 1, "pp_size": 1},
+            }.get(k, d),
+        ):
+            self.vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = False
+            self.vllm_config.model_config.is_deepseek_mla = False
+            self.vllm_config.model_config.hf_text_config.num_key_value_heads = 8
+            worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
+
+        worker._is_hma_required = True
+        worker.use_mla = False
+        worker.use_sparse = False
+        worker.num_key_value_heads = 8
+        worker.tp_size = 2
+        worker.tp_rank = 0
+        worker.pcp_size = 1
+        worker.dcp_size = 1
+        worker.pcp_rank = 0
+        worker.dcp_rank = 0
+        worker._decode_tp_size = 2
+        worker._prefill_tp_size = 4
+        worker._prefill_pp_size = 1
+        worker.side_channel_port = 5000
+        worker.handshake_port = worker.side_channel_port + worker.tp_rank
+        worker.local_remote_block_port_mapping = {}
+        worker.remote_port_send_num = {}
+        worker.block_size_scale = [[1], [1], [1]]
+        worker.kv_group2layeridx = {
+            0: (
+                {
+                    "kv_cache_spec_type": "FullAttentionSpec",
+                    "kv_cache_group_id": 0,
+                    "kv_cache_spec": {"num_kv_heads": 1},
+                },
+                [0],
+            ),
+            1: (
+                {
+                    "kv_cache_spec_type": "FullAttentionSpec",
+                    "kv_cache_group_id": 0,
+                    "kv_cache_spec": {"num_kv_heads": 8},
+                },
+                [1],
+            ),
+            2: (
+                {
+                    "kv_cache_spec_type": "MambaSpec",
+                    "kv_cache_group_id": 1,
+                },
+                [2],
+            ),
+        }
+
+        meta = types.SimpleNamespace(
+            remote_pcp_size=1,
+            remote_dcp_size=1,
+            remote_ptp_size=4,
+            remote_port=31000,
+            remote_block_ids=([50, 51, 52, 53], [60, 61, 62, 63]),
+            local_block_ids=([70, 71, 72, 73], [80, 81, 82, 83]),
+            num_external_tokens=4 * worker.block_size,
+            num_prompt_blocks=4,
+            num_computed_tokens=0,
+            remote_engine_id="remote_hybrid_split_transfer_groups",
+            remote_host="localhost",
+            remote_multi_nodes_meta_mapping={},
+            remote_block_size=16,
+        )
+
+        ports, local_ids, remote_ids = worker._get_kv_split_metadata("req_hybrid_split", cast(ReqMeta, meta))
+
+        self.assertEqual(len(ports), 1)
+        self.assertEqual(local_ids, [([70, 71, 72, 73], [80, 81, 82, 83])])
+        self.assertEqual(remote_ids, [([50, 51, 52, 53], [60, 61, 62, 63])])
 
     def test_get_tp_num_need_pulls(self):
         worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())

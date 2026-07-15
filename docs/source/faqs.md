@@ -48,10 +48,9 @@ If you want to use container image for offline environments (no internet connect
 
 **Exporting Docker images:**
 
-```{code-block} bash
-   :substitutions:
+```bash
 # Pull the image on a machine with internet access
-TAG=|vllm_ascend_version|
+TAG={{ vllm_ascend_version }}
 docker pull quay.io/ascend/vllm-ascend:$TAG
 
 # Export the image to a tar file and compress to tar.gz
@@ -60,10 +59,9 @@ docker save quay.io/ascend/vllm-ascend:$TAG | gzip > vllm-ascend-$TAG.tar.gz
 
 **Importing Docker images in environment without internet access:**
 
-```{code-block} bash
-   :substitutions:
+```bash
 # Transfer the tar/tar.gz file to the offline environment and load it
-TAG=|vllm_ascend_version|
+TAG={{ vllm_ascend_version }}
 docker load -i vllm-ascend-$TAG.tar.gz
 
 # Verify the image is loaded
@@ -304,7 +302,3 @@ Single-node deployment is recommended when the model fits within the memory of a
 ### 25. When should I enable FlashComm_v1?
 
 Enable FlashComm_v1 (`VLLM_ASCEND_ENABLE_FLASHCOMM1=1`) when using Tensor Parallelism (TP ≥ 2) with high concurrency. It is threshold-protected and will not activate in low-concurrency scenarios where it could degrade performance.
-
-### 26. What is the difference between FIA and PA operators for attention?
-
-FIA (Flash Attention) is the default attention operator in vLLM-Ascend. In some batch-size settings (particularly medium concurrency), FIA may exhibit suboptimal performance. The PA (Page Attention) operator can be manually enabled via `pa_shape_list` in `--additional-config`. When the runtime batch size matches a value in `pa_shape_list`, the framework switches to PA. This is a temporary tuning knob — future FIA optimizations will make this parameter obsolete.

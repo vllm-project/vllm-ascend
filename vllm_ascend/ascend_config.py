@@ -102,15 +102,6 @@ class AscendConfig:
             os.path.join(os.path.expanduser("~"), "ascend", "log", "vllm_ascend"),
         )
 
-        self.layer_sharding = additional_config.get("layer_sharding", None)
-        if self.layer_sharding:
-            logger.info_once(
-                "Linear layer sharding enabled with config: %s. "
-                "Note: This feature works optimally with FLASHCOMM2 and DSA-CP enabled; "
-                "using it without these features may result in significant performance degradation.",
-                str(self.layer_sharding),
-            )
-
         self.enable_shared_expert_dp = (
             additional_config.get("enable_shared_expert_dp", False)
             and vllm_config.parallel_config.enable_expert_parallel
@@ -137,8 +128,7 @@ class AscendConfig:
                     str(vllm_config.scheduler_config.max_num_batched_tokens),
                 )
         self.multistream_overlap_shared_expert = additional_config.get("multistream_overlap_shared_expert", False)
-        self.multistream_overlap_gate = additional_config.get("multistream_overlap_gate", False)
-        # PD-disaggregated only (kv_producer/kv_consumer); invalid in PD-mixed (kv_both / no kv_transfer_config).
+        # PD-disaggregated D node only (kv_consumer); invalid on P nodes and in PD-mixed mode.
         self.recompute_scheduler_enable = additional_config.get("recompute_scheduler_enable", False)
         # DSV4 oproj / embedding fine-grained TP (oproj_tensor_parallel_size /
         # embedding_tensor_parallel_size) use static, graph-stable exchange
@@ -159,9 +149,13 @@ class AscendConfig:
                 "collectives need uniform num_tokens across DP ranks, which is "
                 "only guaranteed when the recompute scheduler is enabled."
             )
+        self.short_request_first_config = ShortRequestFirstConfig(
+            additional_config.get("short_request_first_config", {})
+        )
         self.enable_cpu_binding = additional_config.get("enable_cpu_binding", True)
         self.enable_sleep_mode_extra_cleanup = additional_config.get("enable_sleep_mode_extra_cleanup", False)
         self.multistream_dsv4_dsa_overlap = additional_config.get("multistream_dsv4_dsa_overlap", True)
+        self.enable_prefill_mc2 = bool(additional_config.get("enable_prefill_mc2", False))
 
         self.enable_matmul_allreduce = self._get_config_value(
             additional_config,
@@ -228,15 +222,9 @@ class AscendConfig:
 
             if self.pd_tp_ratio == 0:
                 raise AssertionError("Only support P node tp size lagger then D node tp size")
-        self.SLO_limits_for_dynamic_batch = additional_config.get("SLO_limits_for_dynamic_batch", -1)
         from vllm_ascend.utils import get_flashcomm2_config_and_validate
 
         self.flashcomm2_oproj_tensor_parallel_size = get_flashcomm2_config_and_validate(self, vllm_config)
-        # We find that _npu_paged_attention still performs better than
-        # npu_fused_infer_attention_score in some cases. We allow to execute
-        # _npu_paged_attention in this cases. This should be removed once
-        # npu_fused_infer_attention_score performs better on all scenarios.
-        self.pa_shape_list = additional_config.get("pa_shape_list", [])
         # Weight NZ mode configuration.
         # 0: disabled, 1: only quant case enable nz (default), 2: BF16/FP16 also enable nz
         self.weight_nz_mode = self._get_config_value(
@@ -255,11 +243,9 @@ class AscendConfig:
             bool(additional_config.get("enable_async_exponential", False)) and not envs.VLLM_BATCH_INVARIANT
         )
 
-        use_sparse = (
-            vllm_config.model_config is not None
-            and hasattr(vllm_config.model_config, "hf_text_config")
-            and hasattr(vllm_config.model_config.hf_text_config, "index_topk")
-        )
+        from vllm_ascend.utils import model_uses_sfa_sparse
+
+        use_sparse = model_uses_sfa_sparse(vllm_config.model_config)
 
         self.enable_kv_nz = additional_config.get("enable_kv_nz", False)
         if self.enable_kv_nz:
@@ -287,6 +273,21 @@ class AscendConfig:
 
         # Enable dispatch/combine op inter-node communication by ROCE
         self.enable_mc2_hierarchy_comm = additional_config.get("enable_mc2_hierarchy_comm", False)
+
+        # Per-rank token capacity after dispatch in the mega moe (dispatch_ffn_combine) fused operator.
+        # When load imbalance causes a rank to receive more tokens than this limit, the excess tokens
+        # are dropped and skipped from computation, degrading accuracy.
+        # Do not set this too large: workspace memory scales linearly with this value, which matters
+        # especially under long-context scenarios where the operator should not hold too much memory.
+        # Default 131072.
+        self.mega_moe_max_tokens = additional_config.get("mega_moe_max_tokens", 131072)
+        if not isinstance(self.mega_moe_max_tokens, int):
+            raise ValueError(
+                f"mega_moe_max_tokens must be an integer, got {type(self.mega_moe_max_tokens).__name__}: "
+                f"{self.mega_moe_max_tokens}"
+            )
+        if self.mega_moe_max_tokens <= 0:
+            raise ValueError(f"mega_moe_max_tokens must be a positive integer, got {self.mega_moe_max_tokens}")
 
         # Whether to use NPU device group for DP metadata all_reduce.
         # "True": use NPU device group, "False" (default): use CPU group.
@@ -542,12 +543,12 @@ class FinegrainedTPConfig:
             # If it is a dense model, then expert parallel is not needed,
             # and data parallel is also not needed. If the data parallel size is set
             # to greater than 1 in the model launch configuration, its value will be changed to 1 later.
-            # This will cause an issue when lmhead parallel is enabled, as the lmhead
+            # This will cause an issue when finegrained tp is enabled, as it
             # cannot be split into the data parallel communication group, leading to an error.
             if module_tp_size > 0 and not vllm_config.model_config.is_moe:
-                raise AssertionError("The lmhead parallel feature can be enabled only for MOE models.")
+                raise AssertionError("The finegrained tp sizes can be enabled only for MOE models.")
             if module_tp_size > 0 and vllm_config.parallel_config.data_parallel_size % module_tp_size != 0:
-                raise AssertionError("lmhead_tensor_parallel_size must divide by data_parallel_size.")
+                raise AssertionError("finegrained tp sizes must divide by data_parallel_size.")
         if any(size > 0 for size in module_tp_sizes) and enabled_configs:
             logger.info("finegrained_tp_config enabled: %s", ", ".join(enabled_configs))
 
@@ -837,6 +838,35 @@ class EplbConfig:
 
         logger.info("Dynamic EPLB is %s", self.config["dynamic_eplb"])
         logger.info("The number of redundant experts is %s", self.config["num_redundant_experts"])
+
+
+class ShortRequestFirstConfig:
+    """Configuration object for ``additional_config["short_request_first_config"]``."""
+
+    _defaults = {
+        "enabled": False,
+        "threshold": 256,
+        "long_max_wait_ms": 0.0,
+    }
+
+    def __init__(self, user_config: dict | None = None):
+        user_config = user_config or {}
+        unknown = set(user_config) - set(self._defaults)
+        if unknown:
+            raise ValueError(f"Unknown short_request_first_config keys: {sorted(unknown)}")
+
+        source = user_config
+
+        self.enabled = bool(source.get("enabled", self._defaults["enabled"]))
+        self.threshold = int(source.get("threshold", self._defaults["threshold"]))
+        self.long_max_wait_ms = float(source.get("long_max_wait_ms", self._defaults["long_max_wait_ms"]))
+        self._validate_config()
+
+    def _validate_config(self):
+        if self.threshold < 0:
+            raise ValueError(f"short_request_first_config.threshold must be a non-negative int; got {self.threshold}")
+        if self.long_max_wait_ms < 0:
+            raise ValueError(f"short_request_first_config.long_max_wait_ms must be >= 0; got {self.long_max_wait_ms}")
 
 
 _ASCEND_CONFIG: AscendConfig | None = None

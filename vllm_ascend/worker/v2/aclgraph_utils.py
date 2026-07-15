@@ -16,6 +16,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+from collections.abc import Callable
 from typing import Any
 
 import torch
@@ -47,12 +48,14 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         cudagraph_mode: CUDAGraphMode,
         decode_query_len: int,
         model_runner: Any,
+        lora_capture_cases: list[int] | None = None,
     ):
         super().__init__(
             vllm_config,
             device,
             cudagraph_mode,
             decode_query_len,
+            lora_capture_cases=lora_capture_cases,
         )
         # set model runner attribute, so we can access attributes model runner
         # when call `run_fullgraph` method in CudaGraphManager,
@@ -74,7 +77,7 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         positions = self.model_runner.input_buffers.positions[:num_tokens]
         # refer to vllm.v1.worker.gpu.dp_utils.sync_cudagraph_and_dp_padding to
         # calculate num_tokens_across_dp.
-        num_tokens_across_dp = torch.full([self.model_runner.dp_size], num_tokens, device=self.device)
+        num_tokens_across_dp = torch.full([self.model_runner.dp_size], num_tokens)
         with set_forward_context(
             self.model_runner.model_state.attn_metadata,
             self.vllm_config,
@@ -108,6 +111,7 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         kv_cache_config: KVCacheConfig,
         has_lora: bool = False,
         use_aux_hidden_state_outputs: bool = False,
+        lora_capture_hook: Callable[[int, int, int], None] | None = None,
         progress_bar_desc: str = "Capturing CUDA graphs",
     ) -> None:
         """Capture CUDA graphs for model forward pass."""
@@ -121,9 +125,10 @@ class ModelAclGraphManager(ModelCudaGraphManager):
                 block_tables,
                 attn_groups,
                 kv_cache_config,
-                has_lora,
-                use_aux_hidden_state_outputs,
-                progress_bar_desc,
+                has_lora=has_lora,
+                use_aux_hidden_state_outputs=use_aux_hidden_state_outputs,
+                lora_capture_hook=lora_capture_hook,
+                progress_bar_desc=progress_bar_desc,
             )
 
 

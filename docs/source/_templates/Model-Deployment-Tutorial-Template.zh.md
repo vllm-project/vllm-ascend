@@ -77,35 +77,25 @@ DeepSeek-V3.2 是一种稀疏注意力模型。其主要架构与 DeepSeek-V3.1 
 - 提供具体的安装步骤与命令（参数需解释含义、取值范围、单位等）。
 - 版本号书写规范：优先使用占位符（值统一配置）；若使用固定值且该值与文档验证版本不一致，须加注释“请按实际版本替换”。
 - 提供验证命令及预期状态：指导用户通过执行命令（如 docker ps）检查安装结果，说明成功时的状态码或输出特征。
-- 当涉及多硬件系列（如 A3/A2 系列）时，须使用`tab-set`标记语法进行分标签呈现,标签顺序按新机型优先排列。
+- 当涉及多硬件系列（如 A3/A2 系列）时，须采用 MkDocs 的标签页语法`=== "标签名"`进行分标签呈现,标签顺序按新机型优先排列。
 
 ### 4.1 Docker镜像安装
 
 **示例：**
 
-:::::{tab-set}
-:sync-group: install
+=== "A3 series"
 
-::::{tab-item} A3 series
-:sync: A3
+    ```bash
+    export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+    docker run ...
+    ```
 
-```bash
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
-docker run ...
-```
+=== "A2 series"
 
-::::
-
-::::{tab-item} A2 series
-:sync: A2
-
-```bash
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
-docker run ...
-```
-
-::::
-:::::
+    ```bash
+    export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+    docker run ...
+    ```
 
 ### 4.2 源码安装
 
@@ -120,8 +110,8 @@ docker run ...
 - 说明单机部署的架构特点与适用场景
 - 提供启动命令模板和关键参数说明
 - 提供服务验证方法（如 curl 命令）及预期结果，说明成功特征（如 200 OK）。
-- 当涉及多硬件系列（如 A3/A2 系列）时，须使用`tab-set`标记语法进行分标签呈现,标签顺序按新机型优先排列。
 - 在启动命令下方提供常见问题指引，如公共FAQ中已有描述可直接链接呈现。
+- 当涉及多硬件系列（如 A3/A2 系列）时，须采用 MkDocs 的标签页语法`=== "标签名"`进行分标签呈现,标签顺序按新机型优先排列。
 
 **示例：**
 
@@ -292,5 +282,5 @@ lm_eval \
 
 **资料写作要求：**
 
-- 在章节开头添加说明：常见环境、安装、通用参数问题请参考[公共FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)；本章仅收录本模型特有疑难问题。
+- 在章节开头添加说明：常见环境、安装、通用参数问题请参考[公共FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)；本章仅收录本模型特有疑难问题。
 - 针对**本模型特有疑难问题** ，提供以下要素：问题现象描述、原因分析、解决措施。

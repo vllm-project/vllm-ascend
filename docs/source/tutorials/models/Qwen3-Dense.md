@@ -53,99 +53,89 @@ You can use the official all-in-one Docker image for Qwen3 Dense models.
 
 **Docker Pull:**
 
-```{code-block} bash
-   :substitutions:
+```bash
 
-docker pull quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+docker pull quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 ```
 
 **Docker Run:**
 
 Start the docker image on your each node.
 
-:::::{tab-set}
-::::{tab-item} A3 series
-:sync: A3
+=== "A3 series"
 
-```{code-block} bash
-   :substitutions:
+    ```bash
 
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
 
-docker run --rm \
-    --name vllm-ascend-env \
-    --shm-size=1g \
-    --net=host \
-    --device /dev/davinci0 \
-    --device /dev/davinci1 \
-    --device /dev/davinci2 \
-    --device /dev/davinci3 \
-    --device /dev/davinci4 \
-    --device /dev/davinci5 \
-    --device /dev/davinci6 \
-    --device /dev/davinci7 \
-    --device /dev/davinci8 \
-    --device /dev/davinci9 \
-    --device /dev/davinci10 \
-    --device /dev/davinci11 \
-    --device /dev/davinci12 \
-    --device /dev/davinci13 \
-    --device /dev/davinci14 \
-    --device /dev/davinci15 \
-    --device /dev/davinci_manager \
-    --device /dev/devmm_svm \
-    --device /dev/hisi_hdc \
-    -v /usr/local/dcmi:/usr/local/dcmi \
-    -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
-    -v /root/.cache:/root/.cache \
-    -it $IMAGE bash
-```
+    docker run --rm \
+        --name vllm-ascend-env \
+        --shm-size=1g \
+        --net=host \
+        --device /dev/davinci0 \
+        --device /dev/davinci1 \
+        --device /dev/davinci2 \
+        --device /dev/davinci3 \
+        --device /dev/davinci4 \
+        --device /dev/davinci5 \
+        --device /dev/davinci6 \
+        --device /dev/davinci7 \
+        --device /dev/davinci8 \
+        --device /dev/davinci9 \
+        --device /dev/davinci10 \
+        --device /dev/davinci11 \
+        --device /dev/davinci12 \
+        --device /dev/davinci13 \
+        --device /dev/davinci14 \
+        --device /dev/davinci15 \
+        --device /dev/davinci_manager \
+        --device /dev/devmm_svm \
+        --device /dev/hisi_hdc \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v /root/.cache:/root/.cache \
+        -it $IMAGE bash
+    ```
 
-:::{note}
-A3 has 8 NPUs with dual-die design (16 chips total: `/dev/davinci[0-15]`).
-If you are on a shared machine, map only the chips you need (e.g., `/dev/davinci[0-7]` for NPU 0-3).
-:::
+    !!! note
 
-::::
-::::{tab-item} A2 series
-:sync: A2
+        A3 has 8 NPUs with dual-die design (16 chips total: `/dev/davinci[0-15]`).
+        If you are on a shared machine, map only the chips you need (e.g., `/dev/davinci[0-7]` for NPU 0-3).
 
-```{code-block} bash
-   :substitutions:
+=== "A2 series"
 
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+    ```bash
 
-docker run --rm \
-    --name vllm-ascend-env \
-    --shm-size=1g \
-    --net=host \
-    --device /dev/davinci0 \
-    --device /dev/davinci1 \
-    --device /dev/davinci2 \
-    --device /dev/davinci3 \
-    --device /dev/davinci4 \
-    --device /dev/davinci5 \
-    --device /dev/davinci6 \
-    --device /dev/davinci7 \
-    --device /dev/davinci_manager \
-    --device /dev/devmm_svm \
-    --device /dev/hisi_hdc \
-    -v /usr/local/dcmi:/usr/local/dcmi \
-    -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
-    -v /root/.cache:/root/.cache \
-    -it $IMAGE bash
-```
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 
-::::
-:::::
+    docker run --rm \
+        --name vllm-ascend-env \
+        --shm-size=1g \
+        --net=host \
+        --device /dev/davinci0 \
+        --device /dev/davinci1 \
+        --device /dev/davinci2 \
+        --device /dev/davinci3 \
+        --device /dev/davinci4 \
+        --device /dev/davinci5 \
+        --device /dev/davinci6 \
+        --device /dev/davinci7 \
+        --device /dev/davinci_manager \
+        --device /dev/devmm_svm \
+        --device /dev/hisi_hdc \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v /root/.cache:/root/.cache \
+        -it $IMAGE bash
+    ```
 
 The default workdir is `/workspace`. vLLM and vLLM-Ascend are installed as Python packages in site-packages.
 
@@ -166,25 +156,9 @@ Expected result: The version information is displayed, matching the pulled image
 
 ### 4.2 Source Code Installation
 
-If you prefer not to use the Docker image, you can build from source:
+If you prefer to build from source instead of using the Docker image, install vLLM-Ascend following the [Installation Guide](../../installation.md).
 
-1. Clone and install vLLM:
-
-   ```bash
-   git clone https://github.com/vllm-project/vllm.git
-   cd vllm
-   pip install -e .
-   ```
-
-2. Clone and install the vLLM-Ascend repository:
-
-   ```bash
-   git clone https://github.com/vllm-project/vllm-ascend.git
-   cd vllm-ascend
-   pip install -e .
-   ```
-
-**Installation Verification:**
+To verify the source installation:
 
 ```bash
 pip show vllm-ascend
@@ -192,11 +166,9 @@ pip show vllm-ascend
 
 Expected result: The version information is displayed, confirming a successful installation.
 
-:::{note}
-If deploying a multi-node environment, set up the environment on each node.
-:::
+!!! note
 
-For more details, please refer to the [Installation Guide](../../installation.md).
+    If deploying a multi-node environment, set up the environment on each node.
 
 ## 5 Online Service Deployment
 
@@ -254,7 +226,7 @@ vllm serve your_model_path \
     --gpu-memory-utilization 0.9 \
     --quantization ascend \
     --compilation-config '{"cudagraph_capture_sizes": [64]}' \
-    --additional-config '{"enable_flashcomm1": true}'
+    --additional-config '{"enable_flashcomm1": true, "ascend_compilation_config": {"fuse_norm_quant": false}}'
 ```
 
 Atlas 800I A2/A3：
@@ -271,11 +243,10 @@ vllm serve your_model_path \
     --quantization ascend
 ```
 
-:::{note}
+!!! note
 
-- [vLLM Serving Arguments documentation](https://docs.vllm.com.cn/en/latest/cli/serve/?h=block+size#arguments) — Additional parameter details for vLLM serve commands.
-- [Environment Variables](../../user_guide/configuration/env_vars.md) — Ascend-specific environment variables (`HCCL_*`, etc.).
-:::
+    - [vLLM Serving Arguments documentation](https://docs.vllm.com.cn/en/latest/cli/serve/?h=block+size#arguments) — Additional parameter details for vLLM serve commands.
+    - [Environment Variables](../../user_guide/configuration/env_vars.md) — Ascend-specific environment variables (`HCCL_*`, etc.).
 
 **Service Verification:**
 
@@ -314,15 +285,7 @@ Expected result: HTTP 200 with a JSON response containing the `choices` field wi
 
 ### Using AISBench
 
-For details, please refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md).
-
-Install from source:
-
-  ```bash
-  git clone https://github.com/AISBench/benchmark.git
-  cd benchmark
-  pip install -e .
-  ```
+For setup details, including installation, dataset download, and configuration, please refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md).
 
 The following is an example configuration for the accuracy evaluation config file:
 
@@ -480,7 +443,7 @@ vllm serve your_model_path \
   --async-scheduling \
   --quantization ascend \
   --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[4,8,64,72,76,80,96,100,120,140,144,160,192,216,240,252,288,320,336,360,384,400,408,416,420,432,480,540,576,600]}' \
-  --additional-config '{"weight_prefetch_config":{"enabled":true}, "enable_flashcomm1": true, "pa_shape_list":[32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,123,124,125,126,127,128,129,130,131,132,133,134,135,136,137,138,139,140,141,142,143,144,145,146,147,148,149,150,151,152,153,154,155,156,157,158,159,160,161,162,163,164,165,166,167,168,169,170,171,172,173,174,175,176,177,178,179,180,181,182,183,184,185,186,187,188,189,190,191,192,193,194,195,196,197,198,199,200,201,202,203,204,205,206,207,208,209,210,211,212,213,214,215,216,217,218,219,220,221,222,223,224,225,226,227,228,229,230,231,232,233,234,235,236,237,238,239,240,241,242,243,244,245,246,247,248,249,250,251,252,253,254,255,256]}' \
+  --additional-config '{"weight_prefetch_config":{"enabled":true}, "enable_flashcomm1": true}' \
   --host <host_ip> \
   --port <port> \
   --block-size 128 \

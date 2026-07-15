@@ -33,6 +33,42 @@ a3:
       - name: GLM_5_1_PD_in64k_bs16-90
         config_file_path: GLM_5_1_PD_in64k_bs16-90.yaml
         size: 4
+      - name: kimi-k2_5-w4a8-ep-16k-1k-TPOT50
+        config_file_path: Kimi-K2.5-W4A8-16k-1k-TPOT50.yaml
+        size: 4
+      - name: DeepSeek-V4-flash-w8a8-PD
+        config_file_path: DeepSeek-V4-flash-w8a8-PD.yaml
+        size: 2
+      - name: kimi-k2_5-w4a8-ep-128k-1k-TPOT50
+        config_file_path: Kimi-K2.5-W4A8-128k-1k-TPOT50.yaml
+        size: 4
+      - name: DeepSeek_V3.1T_MTP1_128K_1K_PD
+        config_file_path: DeepSeek_V3.1T_MTP1_128K_1K_PD.yaml
+        size: 4
+      - name: DeepSeek_V3.1T_MTP1_PD
+        config_file_path: DeepSeek_V3.1T_MTP1_PD.yaml
+        size: 4
+      - name: DeepSeek_V3.1T_MTP3_PD
+        config_file_path: DeepSeek_V3.1T_MTP3_PD.yaml‎
+        size: 4
+      - name: DeepSeek_V3.1T_MTP1_3_5K_1_5K_PD
+        config_file_path: DeepSeek_V3.1T_MTP1_3_5K_1_5K_PD.yaml‎
+        size: 4
+      - name: DeepSeek_V3.1T_layerwise_PD
+        config_file_path: DeepSeek_V3.1T_layerwise_PD.yaml‎
+        size: 4
+      - name: DeepSeek_V3.2T_MTP2_PD
+        config_file_path: DeepSeek_V3.2T_MTP2_PD.yaml‎
+        size: 4
+      - name: DeepSeek_V3.2T_MTP3_PD
+        config_file_path: DeepSeek_V3.2T_MTP3_PD.yaml
+        size: 4
+      - name: QWEN3_235B_PD_3_5K_1_5k
+        config_file_path: QWEN3_235B_PD_3_5K_1_5k.yaml‎
+        size: 3
+      - name: QWEN3_235B_PD
+        config_file_path: QWEN3_235B_PD.yaml
+        size: 3
   double_node:
     test_config:
       - name: DeepSeek-V3_2-W8A8-EP_weekly
@@ -83,3 +119,20 @@ a3:
       - name: MiniMax-M2.5-w8a8
         os: linux-aarch64-a3-16
         config_file_path: MiniMax-M2.5-W8A8-A3.yaml
+
+310p:
+  single_node:
+    test_config:
+      # pytest-driven tests
+      - name: engine-func-tests
+        os: linux-aarch64-310p-4
+        tests: tests/e2e/weekly/single_node/engine_func_test_robot
+      - name: Qwen3-8B-w8a8sc-310p
+        os: linux-aarch64-310p-4
+        config_file_path: Qwen3-8B-w8a8sc-310p.yaml
+      - name: Qwen3-14B-w8a8sc-310p
+        os: linux-aarch64-310p-4
+        config_file_path: Qwen3-14B-w8a8sc-310p.yaml
+      - name: Qwen3-32B-w8a8sc-310p
+        os: linux-aarch64-310p-4
+        config_file_path: Qwen3-32B-w8a8sc-310p.yaml

@@ -20,6 +20,9 @@
 name: Weekly-A2
 
 on:
+  schedule:
+      # Run test at 10:00 Beijing time (UTC+8) every Sunday
+      - cron: "0 2 * * 0"
   workflow_dispatch:
     inputs:
       vllm_ascend_branch:
@@ -47,6 +50,11 @@ on:
         required: false
         default: ''
         type: string
+      aop_enabled:
+        description: 'Enable AOP hooks (capture / classify / skip-or-process)'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
