@@ -21,6 +21,8 @@ from unittest.mock import MagicMock, patch
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     AscendConnectorMetadata,
+    ChunkedTokenDatabase,
+    KeyMetadata,
     LoadSpec,
     ReqMeta,
 )
@@ -534,12 +536,12 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         config.kv_events_config = None
         return config
 
-    def _make_worker(self, kv_role="kv_producer", extra_config=None):
+    def _make_worker(self, kv_role="kv_producer", extra_config=None, use_layerwise=False):
         self._patch_all()
         config = self._make_config(kv_role=kv_role, extra_config=extra_config)
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
-        worker = KVPoolWorker(config, use_layerwize=False)
+        worker = KVPoolWorker(config, use_layerwize=use_layerwise)
         return worker
 
     def setUp(self):
@@ -558,6 +560,26 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         worker.register_kv_caches(kv_caches)
         self.assertEqual(len(worker.group_kv_caches_base_addr[0]), 2)
         worker.m_store.register_buffer.assert_called_once()
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.threading.Event")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreLayerSendingThread")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreLayerRecvingThread")
+    def test_layerwise_consumer_does_not_create_put_thread(self, mock_recv_cls, mock_send_cls, mock_event_cls):
+        worker = self._make_worker(
+            kv_role="kv_consumer",
+            extra_config={"backend": "mooncake", "consumer_is_to_put": True},
+            use_layerwise=True,
+        )
+        fake_cache = MagicMock()
+        fake_cache.shape = [100, 16, 8, 64]
+        fake_cache.element_size.return_value = 2
+        fake_cache.data_ptr.return_value = 10000
+
+        worker.register_kv_caches({"layer.0": (fake_cache, fake_cache)})
+
+        mock_send_cls.assert_not_called()
+        mock_recv_cls.assert_called_once()
+        self.assertIsNone(worker.kv_send_thread)
 
     def test_start_load_kv_sync(self):
         worker = self._make_worker()
@@ -614,6 +636,13 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         worker.start_load_kv(meta)
         # No get called since no load_spec
 
+    def test_layerwise_empty_forward_does_not_log_metadata_summary(self):
+        worker = self._make_worker(use_layerwise=True)
+        meta = AscendConnectorMetadata(set(), set())
+
+        with self.assertNoLogs("vllm", level="INFO"):
+            worker.start_load_kv(meta)
+
     def test_wait_for_save(self):
         worker = self._make_worker()
         worker.kv_send_thread = MagicMock()
@@ -668,6 +697,20 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         done_s, done_r = worker.get_finished(set(), meta)
         self.assertEqual(done_s, set())
 
+    def test_get_finished_layerwise_consumer_does_not_use_put_thread(self):
+        worker = self._make_worker(
+            kv_role="kv_consumer",
+            extra_config={"backend": "mooncake", "consumer_is_to_put": True},
+            use_layerwise=True,
+        )
+        worker.kv_send_thread = None
+        meta = AscendConnectorMetadata(set(), set())
+
+        done_s, done_r = worker.get_finished(set(), meta)
+
+        self.assertEqual(done_s, set())
+        self.assertEqual(done_r, set())
+
     def test_lookup_scheduler_all_cached(self):
         worker = self._make_worker()
         worker.m_store.exists.return_value = [1, 1]
@@ -698,6 +741,88 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         worker.m_store.exists.return_value = [1, 1, 1, 1]
         result = worker.lookup_scheduler(32, ["h0", "h1"], use_layerwise=True)
         self.assertEqual(result, 32)
+
+    def test_dsv4_layerwise_lookup_checks_each_group_in_raw_token_coordinates(self):
+        worker = self._make_worker()
+        metadata = [
+            KeyMetadata("dsv4", 0, 0, 0, 0, kv_cache_group_id=0),
+            KeyMetadata("dsv4", 0, 0, 0, 0, kv_cache_group_id=1),
+        ]
+        worker.token_database = ChunkedTokenDatabase(
+            metadata,
+            block_size=[16, 16],
+            partitions=None,
+            hash_block_size=16,
+        )
+        worker.token_database.group_cache_families["kv"] = {0: "c4", 1: "c128"}
+        worker.grouped_block_size = [16, 16]
+        worker.kv_cache_group_families = ["c4", "c128"]
+        worker.group_num_layers = {0: 2, 1: 1}
+        worker.group_uses_align_state = [False, False]
+        worker.num_kv_cache_groups = 2
+        worker.cache_coordinator = None
+        worker.cache_transfer_granularity = 2048
+        worker.max_model_len = 4096
+        worker.m_store.exists.side_effect = lambda keys: [1] * len(keys)
+        block_hashes = [bytes([index]) * 32 for index in range(128)]
+
+        result = worker.lookup_scheduler(
+            2048,
+            block_hashes,
+            kv_cache_group_ids=[0, 1],
+            use_layerwise=True,
+        )
+
+        self.assertEqual(result, 2048)
+        first_group_keys = worker.m_store.exists.call_args_list[0].args[0]
+        second_group_keys = worker.m_store.exists.call_args_list[1].args[0]
+        self.assertEqual(len(first_group_keys), 64)  # 32 chunks * 2 c4 layers
+        self.assertEqual(len(second_group_keys), 1)  # 1 chunk * 1 c128 layer
+        self.assertIn("@group:1", second_group_keys[0])
+        self.assertIn("@layer_id:0", second_group_keys[0])
+
+    def test_dsv4_layerwise_task_uses_group_local_layer_and_block_table(self):
+        worker = self._make_worker()
+        metadata = [
+            KeyMetadata("dsv4", 0, 0, 0, 0, kv_cache_group_id=0),
+            KeyMetadata("dsv4", 0, 0, 0, 0, kv_cache_group_id=1),
+        ]
+        worker.token_database = ChunkedTokenDatabase(
+            metadata,
+            block_size=[16, 16],
+            partitions=None,
+            hash_block_size=16,
+        )
+        worker.token_database.group_cache_families["kv"] = {0: "c4", 1: "c128"}
+        worker.grouped_block_size = [16, 16]
+        worker.hash_block_size = 16
+        worker.kv_cache_group_families = ["c4", "c128"]
+        worker.group_uses_align_state = [False, False]
+        worker.layer_to_group = {
+            "model.layers.0.self_attn.attn": (0, 0),
+            "model.layers.1.self_attn.attn": (1, 0),
+        }
+        request = ReqMeta(
+            req_id="r1",
+            token_len_chunk=2048,
+            block_ids_by_group=[list(range(32)), [77]],
+            block_hashes=[bytes([index]) * 32 for index in range(128)],
+            can_save=True,
+        )
+
+        task = worker._build_layerwise_task(
+            request,
+            "model.layers.1.self_attn.attn",
+            is_load=False,
+            is_last_layer=True,
+        )
+
+        self.assertEqual(task.kv_cache_group_id, 1)
+        self.assertEqual(task.layer_id, 0)
+        self.assertEqual(task.key_block_ids, [77])
+        self.assertTrue(task.is_last_layer)
+        self.assertEqual(len(task.keys), 1)
+        self.assertIn("@cache_family:c128", task.keys[0].to_string())
 
     def test_lookup_scheduler_multi_tp(self):
         self._stop_all()

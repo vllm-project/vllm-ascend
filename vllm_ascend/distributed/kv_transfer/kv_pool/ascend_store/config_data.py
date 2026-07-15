@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import threading
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, cast
@@ -151,6 +152,7 @@ class LayerPoolKey(PoolKey):
                 self.key_metadata.head_or_tp_rank,
                 self.key_metadata.pcp_rank,
                 self.key_metadata.dcp_rank,
+                self.key_metadata.pp_rank,
                 self.key_metadata.kv_cache_group_id,
                 self.key_metadata.cache_role,
                 self.key_metadata.cache_family,
@@ -164,6 +166,7 @@ class LayerPoolKey(PoolKey):
             f"{self.key_metadata.model_name}"
             f"@pcp{self.key_metadata.pcp_rank}@dcp{self.key_metadata.dcp_rank}"
             f"@head_or_tp_rank:{self.key_metadata.head_or_tp_rank}"
+            f"@pp_rank:{self.key_metadata.pp_rank}"
             f"@group:{self.key_metadata.kv_cache_group_id}"
             f"@cache_role:{self.key_metadata.cache_role}"
             f"@cache_family:{self.key_metadata.cache_family}"
@@ -407,16 +410,34 @@ class ChunkedTokenDatabase:
             size_list.append(size)
         return addr_list, size_list, block_id
 
-    def prepare_value_layer(self, start: int, end: int, block_ids: list[int], layer_id: int):
-        group_block_size = self.get_block_size(0)
-        block_idx = start // group_block_size
-        if block_idx >= len(block_ids):
-            return [], [], 0
-        block_id = block_ids[block_idx]
+    def prepare_value_layer(
+        self,
+        start: int,
+        end: int,
+        block_ids: list[int],
+        layer_id: int,
+        kv_cache_group_id: int = 0,
+        block_id: int | None = None,
+    ):
+        """Return the physical regions for one layer in one cache group.
+
+        ``layer_id`` is local to ``kv_cache_group_id``.  Keeping both values
+        explicit is required by packed/hybrid layouts such as DeepSeek V4,
+        where model execution order and physical group order are different.
+        ``block_id`` may be supplied by ``process_tokens_with_block_ids`` so a
+        clipped sliding-window block table does not get indexed as if it were
+        the full logical block table.
+        """
+        group_block_size = self.get_block_size(kv_cache_group_id)
+        if block_id is None:
+            block_idx = start // group_block_size
+            if block_idx >= len(block_ids):
+                return [], [], 0
+            block_id = block_ids[block_idx]
         addr_list: list[int] = []
         size_list: list[int] = []
-        group_addrs, group_block_len, group_block_stride = self._get_group_buffers(0)
-        num_layers = self.group_num_layers.get("kv", {}).get(0, 1)
+        group_addrs, group_block_len, group_block_stride = self._get_group_buffers(kv_cache_group_id)
+        num_layers = self.group_num_layers.get("kv", {}).get(kv_cache_group_id, 1)
         entries_per_layer = len(group_addrs) // num_layers if num_layers else 0
         if layer_id >= num_layers or entries_per_layer == 0:
             return [], [], 0
@@ -914,6 +935,11 @@ class LayerMultiBlockReqMeta:
     token_ids: list[int] | None = None
     original_block_size: list[int] | int | None = None
     kv_cache_group_id: int = 0
+    key_block_ids: list[int] = field(default_factory=list)
+    layer_name: str | None = None
+    is_last_layer: bool | None = None
+    completion_event: threading.Event | None = None
+    load_failed: bool = False
 
     def __init__(
         self,
@@ -930,6 +956,10 @@ class LayerMultiBlockReqMeta:
         original_block_size: list[int] | int | None = None,
         block_hashes: list[Any] | None = None,
         kv_cache_group_id: int = 0,
+        key_block_ids: list[int] | None = None,
+        layer_name: str | None = None,
+        is_last_layer: bool | None = None,
+        completion_event: threading.Event | None = None,
     ) -> None:
         self.req_id = req_id
         self.keys = keys
@@ -945,6 +975,11 @@ class LayerMultiBlockReqMeta:
         self.original_block_size = original_block_size
         self.block_hashes = [] if block_hashes is None else block_hashes
         self.kv_cache_group_id = kv_cache_group_id
+        self.key_block_ids = [] if key_block_ids is None else key_block_ids
+        self.layer_name = layer_name
+        self.is_last_layer = is_last_layer
+        self.completion_event = completion_event
+        self.load_failed = False
 
     @property
     def block_ids(self) -> list[int]:

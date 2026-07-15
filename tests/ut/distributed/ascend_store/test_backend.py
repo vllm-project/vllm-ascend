@@ -364,8 +364,10 @@ class TestMooncakeBackendMethods(unittest.TestCase):
     def test_put(self):
         b = self._make_backend()
         b.store.batch_put_from_multi_buffers.return_value = [0, 0]
-        b.put(["k1"], [[100]], [[10]])
+        with self.assertLogs("vllm", level="INFO") as captured:
+            b.put(["k1"], [[100]], [[10]])
         b.store.batch_put_from_multi_buffers.assert_called_once()
+        self.assertIn("[AscendStore][Mooncake][put] completed", "\n".join(captured.output))
 
     def test_put_error(self):
         b = self._make_backend()
@@ -380,8 +382,10 @@ class TestMooncakeBackendMethods(unittest.TestCase):
     def test_get(self):
         b = self._make_backend()
         b.store.batch_get_into_multi_buffers.return_value = [0]
-        b.get(["k1"], [[100]], [[10]])
+        with self.assertLogs("vllm", level="INFO") as captured:
+            b.get(["k1"], [[100]], [[10]])
         b.store.batch_get_into_multi_buffers.assert_called_once()
+        self.assertIn("[AscendStore][Mooncake][get] completed", "\n".join(captured.output))
 
     def test_get_error(self):
         b = self._make_backend()

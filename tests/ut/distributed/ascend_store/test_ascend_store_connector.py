@@ -280,6 +280,28 @@ class TestAscendStoreConnector(unittest.TestCase):
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.LookupKeyServer")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolWorker")
+    def test_layerwise_hooks_forward_layer_name(self, mock_worker_cls, mock_lookup_cls):
+        config = self._make_vllm_config(extra_config={"use_layerwise": True})
+        from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+
+        connector = AscendStoreConnector(
+            vllm_config=config,
+            role=KVConnectorRole.WORKER,
+            kv_cache_config=None,
+        )
+        connector._get_connector_metadata = MagicMock(return_value=MagicMock())
+
+        connector.wait_for_layer_load("model.layers.7.self_attn.attn")
+        connector.save_kv_layer("model.layers.7.self_attn.attn", MagicMock(), MagicMock())
+
+        worker = mock_worker_cls.return_value
+        worker.wait_for_layer_load.assert_called_once_with("model.layers.7.self_attn.attn")
+        worker.save_kv_layer.assert_called_once_with(
+            "model.layers.7.self_attn.attn", connector._get_connector_metadata.return_value
+        )
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.LookupKeyServer")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolWorker")
     def test_save_kv_layer_not_layerwise(self, mock_worker_cls, mock_lookup_cls):
         config = self._make_vllm_config(extra_config={"use_layerwise": False})
         from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
@@ -304,7 +326,25 @@ class TestAscendStoreConnector(unittest.TestCase):
             kv_cache_config=None,
         )
         connector.save_kv_layer("layer_0", MagicMock(), MagicMock())
-        # Consumer should not save
+        mock_worker_cls.return_value.save_kv_layer.assert_not_called()
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.LookupKeyServer")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolWorker")
+    def test_save_kv_layer_consumer_is_to_put_still_skips_layerwise(self, mock_worker_cls, mock_lookup_cls):
+        config = self._make_vllm_config(
+            kv_role="kv_consumer",
+            extra_config={"use_layerwise": True, "consumer_is_to_put": True},
+        )
+        from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+
+        connector = AscendStoreConnector(
+            vllm_config=config,
+            role=KVConnectorRole.WORKER,
+            kv_cache_config=None,
+        )
+        connector.save_kv_layer("layer_0", MagicMock(), MagicMock())
+
+        mock_worker_cls.return_value.save_kv_layer.assert_not_called()
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.LookupKeyServer")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolWorker")

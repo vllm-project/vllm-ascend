@@ -470,6 +470,24 @@ class TestKVCacheStoreLayerSendingThread(unittest.TestCase):
         keys, _, _ = store.put_calls[0]
         self.assertEqual(len(keys), 1)
 
+    def test_final_layer_logs_put_summary(self):
+        t, store = self._make_thread([0], num_layers=2)
+        req = self._make_layer_req(layer_id=0, is_last_chunk=True, num_keys=1)
+        req.layer_name = "model.layers.1.self_attn.attn"
+        req.is_last_layer = True
+        t.add_stored_request(req.req_id)
+        t.request_queue.put(req)
+
+        with self.assertLogs("vllm", level="INFO") as captured:
+            t._handle_request(req)
+
+        self.assertEqual(len(store.put_calls), 1)
+        summary = "\n".join(captured.output)
+        self.assertIn("[AscendStore][layerwise][put] chunk complete", summary)
+        self.assertIn("processed_layers=1/2", summary)
+        self.assertIn("backend_call_layers=1", summary)
+        self.assertIn("backend_keys=1", summary)
+
     def test_handle_request_all_exist_not_last(self):
         t, store = self._make_thread([1, 1])
         req = self._make_layer_req(layer_id=0, is_last_chunk=False)
@@ -532,6 +550,17 @@ class TestKVCacheStoreLayerSendingThread(unittest.TestCase):
         t._handle_request(req)
         finished = t.get_and_clear_finished_requests()
         self.assertIn("r1", finished)
+
+    def test_group_local_layer_can_mark_global_final_layer(self):
+        t, store = self._make_thread([0], num_layers=3)
+        req = self._make_layer_req(layer_id=0, is_last_chunk=True, num_keys=1)
+        req.is_last_layer = True
+        t.add_stored_request(req.req_id)
+        t.request_queue.put(req)
+
+        t._handle_request(req)
+
+        self.assertIn("r1", t.get_and_clear_finished_requests())
 
     def test_layerwise_kv_event_published_on_final_layer(self):
         t, store = self._make_thread([0], num_layers=2, enable_kv_event=True)
@@ -597,6 +626,64 @@ class TestKVCacheStoreLayerRecvingThread(unittest.TestCase):
         t._handle_request(req)
         self.assertEqual(len(store.get_calls), 1)
         self.assertTrue(get_event.is_set())
+
+    def test_handle_request_uses_cache_group_and_explicit_tail_block(self):
+        class GroupAwareTokenDatabase(FakeTokenDatabase):
+            def __init__(self):
+                super().__init__()
+                self.prepare_calls = []
+
+            def prepare_value_layer(
+                self,
+                start,
+                end,
+                block_ids,
+                layer_id,
+                kv_cache_group_id=0,
+                block_id=None,
+            ):
+                self.prepare_calls.append((kv_cache_group_id, layer_id, block_ids, block_id))
+                return [3000 + kv_cache_group_id * 100 + block_id], [end - start], block_id
+
+        class SuccessfulStore(FakeStore):
+            def get(self, keys, addrs, sizes):
+                super().get(keys, addrs, sizes)
+                return [0] * len(keys)
+
+        store = SuccessfulStore()
+        db = GroupAwareTokenDatabase()
+        get_event = threading.Event()
+        completion_event = threading.Event()
+        t = KVCacheStoreLayerRecvingThread(
+            m_store=store,
+            token_database=db,
+            block_size=[16, 16],
+            tp_rank=0,
+            dcp_size=1,
+            ready_event=threading.Event(),
+            get_event=get_event,
+            invalid_block_ids=set(),
+            invalid_block_ids_lock=threading.Lock(),
+        )
+        meta = KeyMetadata("dsv4", 0, 0, 0, 0, kv_cache_group_id=1, cache_family="c128")
+        req = LayerMultiBlockReqMeta(
+            req_id="r1",
+            keys=[LayerPoolKey(meta, "h0", 0)],
+            starts=[128],
+            ends=[144],
+            block_ids_by_group=[[1, 2], [77]],
+            layer_id=0,
+            kv_cache_group_id=1,
+            key_block_ids=[77],
+            completion_event=completion_event,
+        )
+        t.request_queue.put(req)
+
+        t._handle_request(req)
+
+        self.assertEqual(db.prepare_calls, [(1, 0, [77], 77)])
+        self.assertTrue(completion_event.is_set())
+        self.assertFalse(req.load_failed)
 
 
 class TestKVTransferTpMismatchDispatch(unittest.TestCase):

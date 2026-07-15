@@ -181,14 +181,22 @@ class MooncakeBackend(Backend):
     def put(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
         self.ensure_initialized()
         assert self.store is not None
+        logger.info("[AscendStore][Mooncake][put] start keys=%d", len(keys))
         try:
             config = ReplicateConfig()
             if self.config.preferred_segment:
                 config.preferred_segment = self.local_seg
             config.prefer_alloc_in_same_node = self.config.prefer_alloc_in_same_node
             res = self.store.batch_put_from_multi_buffers(keys, addrs, sizes, config)
-            failed_codes = [int(value) for value in res if value < 0]
+            res_list = list(res)
+            failed_codes = [int(value) for value in res_list if value < 0]
             failed_count = len(failed_codes)
+            logger.info(
+                "[AscendStore][Mooncake][put] completed keys=%d returned=%d failed=%d",
+                len(keys),
+                len(res_list),
+                failed_count,
+            )
             if failed_count:
                 error_codes = sorted(set(failed_codes))
                 logger.error(
@@ -197,7 +205,7 @@ class MooncakeBackend(Backend):
                     len(keys),
                     error_codes,
                 )
-                logger.debug("Failed to put key details. keys=%s, result=%s", keys, res)
+                logger.debug("Failed to put key details. keys=%s, result=%s", keys, res_list)
                 if self._lazy_init:
                     logger.warning("First DSV4(compress) request failure is expected. This is normal behavior.")
         except Exception as e:
@@ -226,16 +234,18 @@ class MooncakeBackend(Backend):
             logger.debug("Failed to get key details. keys=%s", keys)
             return
         assert self.store is not None
-        logger.debug(
-            "MooncakeBackend.get enter keys=%d sample_keys=%s",
-            len(keys),
-            keys[:3],
-        )
+        logger.info("[AscendStore][Mooncake][get] start keys=%d", len(keys))
         try:
             res = self.store.batch_get_into_multi_buffers(keys, addrs, sizes)
             res_list = list(res)
             failed_codes = [int(value) for value in res_list if value < 0]
             failed_count = len(failed_codes)
+            logger.info(
+                "[AscendStore][Mooncake][get] completed keys=%d returned=%d failed=%d",
+                len(keys),
+                len(res_list),
+                failed_count,
+            )
             error_codes = sorted(set(failed_codes))
             if failed_count:
                 logger.error(

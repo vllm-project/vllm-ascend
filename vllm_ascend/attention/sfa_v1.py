@@ -1820,6 +1820,9 @@ class AscendSFAImpl(MLAAttentionImpl):
                 should_shard_weight=full_gather_o_proj_enabled,
             )
             if not require_o_proj_forward:
+                # The full-weight DSA-CP prefill path completes o_proj here and
+                # returns early, so it must notify layerwise KV connectors first.
+                maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
                 return result
             attn_output = result
 

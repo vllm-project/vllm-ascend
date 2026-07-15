@@ -197,6 +197,27 @@ class KVTransferThread(threading.Thread):
         except TypeError:
             return self.token_database.prepare_value(start, end, block_ids)
 
+    def _prepare_value_layer(
+        self,
+        start: int,
+        end: int,
+        block_ids: list[int],
+        layer_id: int,
+        kv_cache_group_id: int = 0,
+        block_id: int | None = None,
+    ):
+        try:
+            return self.token_database.prepare_value_layer(
+                start,
+                end,
+                block_ids,
+                layer_id,
+                kv_cache_group_id=kv_cache_group_id,
+                block_id=block_id,
+            )
+        except TypeError:
+            return self.token_database.prepare_value_layer(start, end, block_ids, layer_id)
+
     def _decode_adaptor_prefill_pp(
         self,
         keys: list[str],
@@ -616,6 +637,11 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         self.stored_requests: dict[str, int] = defaultdict(int)
         self.done_task_lock = threading.Lock()
         self.layerwise_event_lock = threading.Lock()
+        self._processed_layers: dict[str, set[str]] = defaultdict(set)
+        self._backend_call_layers: dict[str, set[str]] = defaultdict(set)
+        self._backend_key_counts: dict[str, int] = defaultdict(int)
+        self._all_exist_layer_counts: dict[str, int] = defaultdict(int)
+        self._empty_layer_counts: dict[str, int] = defaultdict(int)
 
     def add_stored_request(self, req_id: str):
         with self.done_task_lock:
@@ -632,14 +658,55 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
                 del self.stored_requests[req_id]
         with self.layerwise_event_lock:
             self.layerwise_event_starts.pop(req_id, None)
+        self._clear_put_stats(req_id)
+
+    @staticmethod
+    def _layer_label(req_meta: LayerMultiBlockReqMeta) -> str:
+        if req_meta.layer_name is not None:
+            return req_meta.layer_name
+        return f"group_{req_meta.kv_cache_group_id}.layer_{req_meta.layer_id}"
+
+    def _clear_put_stats(self, req_id: str) -> None:
+        self._processed_layers.pop(req_id, None)
+        self._backend_call_layers.pop(req_id, None)
+        self._backend_key_counts.pop(req_id, None)
+        self._all_exist_layer_counts.pop(req_id, None)
+        self._empty_layer_counts.pop(req_id, None)
+
+    def _log_put_summary(self, req_meta: LayerMultiBlockReqMeta) -> None:
+        if not self._is_final_layer(req_meta):
+            return
+        req_id = req_meta.req_id
+        logger.info(
+            "[AscendStore][layerwise][put] chunk complete backend=%s req=%s "
+            "processed_layers=%d/%d backend_call_layers=%d backend_keys=%d "
+            "all_exist_layers=%d empty_layers=%d tp_rank=%d put_step=%d is_last_chunk=%s",
+            type(self.m_store).__name__,
+            req_id,
+            len(self._processed_layers.get(req_id, set())),
+            self.final_layer_id + 1,
+            len(self._backend_call_layers.get(req_id, set())),
+            self._backend_key_counts.get(req_id, 0),
+            self._all_exist_layer_counts.get(req_id, 0),
+            self._empty_layer_counts.get(req_id, 0),
+            self.tp_rank,
+            self.put_step,
+            req_meta.is_last_chunk,
+        )
+        self._clear_put_stats(req_id)
 
     def _record_layerwise_event_starts(self, req_meta: LayerMultiBlockReqMeta, starts: list[int]) -> None:
         if self.enable_kv_event:
             with self.layerwise_event_lock:
                 self.layerwise_event_starts[req_meta.req_id].update(starts)
 
+    def _is_final_layer(self, req_meta: LayerMultiBlockReqMeta) -> bool:
+        if req_meta.is_last_layer is not None:
+            return req_meta.is_last_layer
+        return req_meta.layer_id == self.final_layer_id
+
     def _build_stored_events(self, req_meta: LayerMultiBlockReqMeta) -> list[BlockStored]:
-        if not self.enable_kv_event or req_meta.layer_id != self.final_layer_id:
+        if not self.enable_kv_event or not self._is_final_layer(req_meta):
             return []
         block_size = (
             req_meta.original_block_size[req_meta.kv_cache_group_id]
@@ -685,27 +752,59 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         starts = req_meta.starts
         ends = req_meta.ends
         keys = req_meta.keys
+        key_block_ids = req_meta.key_block_ids
         layer_id = req_meta.layer_id
         current_event = req_meta.current_event
         total_block = len(keys)
         is_last_chunk = req_meta.is_last_chunk
+        is_final_layer = self._is_final_layer(req_meta)
+        layer_label = self._layer_label(req_meta)
         with self.done_task_lock:
             if req_meta.req_id not in self.stored_requests:
+                logger.warning(
+                    "[AscendStore][layerwise][put] drop task req=%s layer=%s group=%d reason=request_not_registered",
+                    req_meta.req_id,
+                    layer_label,
+                    req_meta.kv_cache_group_id,
+                )
+                if is_final_layer:
+                    self._clear_put_stats(req_meta.req_id)
                 self.request_queue.task_done()
                 return
+        self._processed_layers[req_meta.req_id].add(layer_label)
         if not self.dcp_size > 1:
             starts = starts[self.tp_rank % self.put_step :: self.put_step]
             ends = ends[self.tp_rank % self.put_step :: self.put_step]
             keys = keys[self.tp_rank % self.put_step :: self.put_step]
+            key_block_ids = key_block_ids[self.tp_rank % self.put_step :: self.put_step]
+
+        logger.info(
+            "[AscendStore][layerwise][put] dequeue req=%s layer=%s group=%d group_layer=%d total_keys=%d owned_keys=%d",
+            req_meta.req_id,
+            layer_label,
+            req_meta.kv_cache_group_id,
+            layer_id,
+            total_block,
+            len(keys),
+        )
 
         if not keys:
-            if layer_id == self.final_layer_id:
+            self._empty_layer_counts[req_meta.req_id] += 1
+            logger.info(
+                "[AscendStore][layerwise][put] skip backend req=%s layer=%s group=%d reason=no_owned_keys",
+                req_meta.req_id,
+                layer_label,
+                req_meta.kv_cache_group_id,
+            )
+            if is_final_layer:
                 stored_events = self._build_stored_events(req_meta)
                 if stored_events:
                     self.update_kv_event(stored_events)
-            if is_last_chunk and layer_id == self.final_layer_id:
+            if is_final_layer:
                 self.dec_stored_request(req_meta.req_id)
-                self.set_finished_request(req_meta.req_id)
+                if is_last_chunk:
+                    self.set_finished_request(req_meta.req_id)
+            self._log_put_summary(req_meta)
             self.request_queue.task_done()
             return
 
@@ -717,45 +816,83 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         missing_indices = [index for index, exists in enumerate(exists_states) if not exists]
 
         if not missing_indices:
-            if layer_id == self.final_layer_id:
+            self._all_exist_layer_counts[req_meta.req_id] += 1
+            logger.info(
+                "[AscendStore][layerwise][put] skip backend req=%s layer=%s group=%d reason=all_keys_exist keys=%d",
+                req_meta.req_id,
+                layer_label,
+                req_meta.kv_cache_group_id,
+                len(key_list),
+            )
+            if is_final_layer:
                 stored_events = self._build_stored_events(req_meta)
                 if stored_events:
                     self.update_kv_event(stored_events)
-            if is_last_chunk and layer_id == self.final_layer_id:
+            if is_final_layer:
                 self.dec_stored_request(req_meta.req_id)
-                self.set_finished_request(req_meta.req_id)
+                if is_last_chunk:
+                    self.set_finished_request(req_meta.req_id)
+            self._log_put_summary(req_meta)
             self.request_queue.task_done()
             return
 
         starts = [starts[index] for index in missing_indices]
         ends = [ends[index] for index in missing_indices]
         key_list = [key_list[index] for index in missing_indices]
+        key_block_ids = [key_block_ids[index] for index in missing_indices] if key_block_ids else []
 
         addr_list = []
         size_list = []
         for index, key in enumerate(key_list):
-            addr, size, _ = self.token_database.prepare_value_layer(
-                starts[index], ends[index], req_meta.block_ids_by_group[0], layer_id
+            block_id = key_block_ids[index] if key_block_ids else None
+            addr, size, _ = self._prepare_value_layer(
+                starts[index],
+                ends[index],
+                req_meta.block_ids_by_group[req_meta.kv_cache_group_id],
+                layer_id,
+                kv_cache_group_id=req_meta.kv_cache_group_id,
+                block_id=block_id,
             )
             addr_list.append(addr)
             size_list.append(size)
 
         if current_event is not None:
             current_event.synchronize()
+        logger.info(
+            "[AscendStore][layerwise][put] backend call backend=%s req=%s layer=%s group=%d group_layer=%d keys=%d",
+            type(self.m_store).__name__,
+            req_meta.req_id,
+            layer_label,
+            req_meta.kv_cache_group_id,
+            layer_id,
+            len(key_list),
+        )
         self.m_store.put(key_list, addr_list, size_list)
+        self._backend_call_layers[req_meta.req_id].add(layer_label)
+        self._backend_key_counts[req_meta.req_id] += len(key_list)
+        logger.info(
+            "[AscendStore][layerwise][put] backend returned backend=%s req=%s layer=%s group=%d keys=%d",
+            type(self.m_store).__name__,
+            req_meta.req_id,
+            layer_label,
+            req_meta.kv_cache_group_id,
+            len(key_list),
+        )
         self._record_layerwise_event_starts(req_meta, starts)
         stored_events = self._build_stored_events(req_meta)
         if stored_events:
             self.update_kv_event(stored_events)
 
-        if layer_id == self.final_layer_id and is_last_chunk:
+        if is_final_layer:
             with self.layerwise_event_lock:
                 self.layerwise_event_starts.pop(req_meta.req_id, None)
             self.dec_stored_request(req_meta.req_id)
-            self.set_finished_request(req_meta.req_id)
+            if is_last_chunk:
+                self.set_finished_request(req_meta.req_id)
+        self._log_put_summary(req_meta)
         self.request_queue.task_done()
 
-        if layer_id == self.final_layer_id:
+        if is_final_layer:
             logger.info(
                 "Storing KV cache layerwise for %d out of %d blocks (missing_count=%d) for request %s, layer %d",
                 len(key_list),
@@ -803,39 +940,88 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
     def _handle_request(  # type: ignore[override]
         self, req_meta: LayerMultiBlockReqMeta
     ):
-        addr_list = []
-        size_list = []
-        key_list = []
-        block_id_list = []
-        for index, key in enumerate(req_meta.keys):
-            addr, size, block_id = self.token_database.prepare_value_layer(
-                req_meta.starts[index], req_meta.ends[index], req_meta.block_ids_by_group[0], req_meta.layer_id
+        try:
+            addr_list = []
+            size_list = []
+            key_list = []
+            block_id_list = []
+            group_id = req_meta.kv_cache_group_id
+            group_block_ids = req_meta.block_ids_by_group[group_id]
+            for index, key in enumerate(req_meta.keys):
+                requested_block_id = req_meta.key_block_ids[index] if req_meta.key_block_ids else None
+                addr, size, block_id = self._prepare_value_layer(
+                    req_meta.starts[index],
+                    req_meta.ends[index],
+                    group_block_ids,
+                    req_meta.layer_id,
+                    kv_cache_group_id=group_id,
+                    block_id=requested_block_id,
+                )
+                key_list.append(key.to_string())
+                addr_list.append(addr)
+                size_list.append(size)
+                block_id_list.append(block_id)
+
+            if not key_list:
+                logger.info(
+                    "[AscendStore][layerwise][get] skip backend req=%s layer=%s group=%d reason=no_keys",
+                    req_meta.req_id,
+                    req_meta.layer_name or req_meta.layer_id,
+                    group_id,
+                )
+                return
+
+            offset = self.tp_rank % len(key_list)
+            key_list_c = key_list[offset:] + key_list[:offset]
+            addr_list_c = addr_list[offset:] + addr_list[:offset]
+            size_list_c = size_list[offset:] + size_list[:offset]
+            block_id_list_c = block_id_list[offset:] + block_id_list[:offset]
+            logger.info(
+                "[AscendStore][layerwise][get] backend call backend=%s req=%s layer=%s group=%d group_layer=%d keys=%d",
+                type(self.m_store).__name__,
+                req_meta.req_id,
+                req_meta.layer_name or req_meta.layer_id,
+                group_id,
+                req_meta.layer_id,
+                len(key_list_c),
             )
-            key_list.append(key.to_string())
-            addr_list.append(addr)
-            size_list.append(size)
-            block_id_list.append(block_id)
+            ret = self.m_store.get(key_list_c, addr_list_c, size_list_c)
 
-        offset = self.tp_rank % len(key_list)
-        key_list_c = key_list[offset:] + key_list[:offset]
-        addr_list_c = addr_list[offset:] + addr_list[:offset]
-        size_list_c = size_list[offset:] + size_list[:offset]
-        block_id_list_c = block_id_list[offset:] + block_id_list[:offset]
-        ret = self.m_store.get(key_list_c, addr_list_c, size_list_c)
-
-        if ret is not None and any(r != 0 for r in ret):
-            missing_block_ids = record_failed_blocks(
-                block_id_list_c,
-                ret,
+            failed_count = 0
+            if ret is not None and any(r != 0 for r in ret):
+                missing_block_ids = record_failed_blocks(
+                    block_id_list_c,
+                    ret,
+                )
+                req_meta.load_failed = True
+                failed_count = sum(code != 0 for code in ret)
+                if len(req_meta.block_ids_by_group) == 1:
+                    with self._invalid_block_ids_lock:
+                        self._invalid_block_ids.update(missing_block_ids)
+            elif ret is None:
+                req_meta.load_failed = True
+                failed_count = len(key_list_c)
+                if len(req_meta.block_ids_by_group) == 1:
+                    with self._invalid_block_ids_lock:
+                        self._invalid_block_ids.update(block_id_list_c)
+            logger.info(
+                "[AscendStore][layerwise][get] backend returned backend=%s req=%s layer=%s group=%d "
+                "keys=%d failed_keys=%d",
+                type(self.m_store).__name__,
+                req_meta.req_id,
+                req_meta.layer_name or req_meta.layer_id,
+                group_id,
+                len(key_list_c),
+                failed_count,
             )
-            with self._invalid_block_ids_lock:
-                self._invalid_block_ids.update(missing_block_ids)
-        elif ret is None:
-            with self._invalid_block_ids_lock:
-                self._invalid_block_ids.update(block_id_list_c)
-
-        self.request_queue.task_done()
-        self.get_event.set()
+        except Exception:
+            req_meta.load_failed = True
+            raise
+        finally:
+            self.request_queue.task_done()
+            self.get_event.set()
+            if req_meta.completion_event is not None:
+                req_meta.completion_event.set()
 
 
 def record_failed_blocks(

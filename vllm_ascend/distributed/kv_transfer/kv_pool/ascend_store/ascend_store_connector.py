@@ -87,6 +87,14 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self.consumer_is_to_put = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "consumer_is_to_put", False
         )
+        backend = vllm_config.kv_transfer_config.kv_connector_extra_config.get("backend", "mooncake")
+        if self.use_layerwise:
+            logger.info(
+                "[AscendStore][layerwise] connector enabled role=%s backend=%s prefill_put=%s",
+                self.kv_role,
+                backend,
+                self.kv_role in ["kv_producer", "kv_both"],
+            )
 
         connector_name = vllm_config.kv_transfer_config.kv_connector
         if connector_name == "MooncakeConnectorStoreV1":
@@ -214,7 +222,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
     def wait_for_layer_load(self, layer_name: str) -> None:
         if not self.use_layerwise:
             return
-        self.connector_worker.wait_for_layer_load()
+        self.connector_worker.wait_for_layer_load(layer_name)
 
     def save_kv_layer(
         self, layer_name: str, kv_layer: torch.Tensor, attn_metadata: "AttentionMetadata", **kwargs
@@ -223,12 +231,15 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             return
 
         if self.kv_role == "kv_consumer":
-            # Don't do save if the role is kv_consumer
+            logger.info(
+                "[AscendStore][layerwise][put] skip save callback layer=%s reason=consumer_role",
+                layer_name,
+            )
             return
-        self.connector_worker.save_kv_layer(self._get_connector_metadata())
+        self.connector_worker.save_kv_layer(layer_name, self._get_connector_metadata())
 
     def wait_for_save(self):
-        if self.kv_role == "kv_consumer" and not self.consumer_is_to_put:
+        if self.kv_role == "kv_consumer" and (self.use_layerwise or not self.consumer_is_to_put):
             # Don't do save if the role is kv_consumer
             return
 
