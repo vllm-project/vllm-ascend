@@ -4918,7 +4918,10 @@ class NPUModelRunner(GPUModelRunner):
         if self.use_aclgraph:
             set_graph_params(capture_sizes)
             if self.speculative_config:
-                set_draft_graph_params(capture_sizes)
+                draft_capture_sizes = capture_sizes
+                if self.drafter is not None and hasattr(self.drafter, "get_aclgraph_capture_sizes"):
+                    draft_capture_sizes = self.drafter.get_aclgraph_capture_sizes(capture_sizes)
+                set_draft_graph_params(draft_capture_sizes)
 
     def profile_cudagraph_memory(self) -> int:
         parent_module_name = _get_gpu_model_runner_module_name(self)

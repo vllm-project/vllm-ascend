@@ -47,15 +47,16 @@ class AscendDSparkProposer(AscendDflashProposer):
         max_cudagraph_size = vllm_config.compilation_config.max_cudagraph_capture_size
         aligned_max = ((max_cudagraph_size + block_size - 1) // block_size) * block_size
         self.max_query_tokens = max(self.max_batch_size * block_size, aligned_max)
+        self.max_graph_batch_size = max(self.max_batch_size, self.max_query_tokens // block_size)
         self.max_positions = self.max_num_tokens + self.max_query_tokens
         self.positions = torch.zeros(self.max_query_tokens, dtype=torch.int32, device=device)
         self._slot_mapping_buffer = torch.zeros(self.max_query_tokens, dtype=torch.int32, device=device)
         self._request_slots_buffer = torch.zeros(self.max_query_tokens, dtype=torch.int32, device=device)
         self._context_request_slots_buffer = torch.zeros(self.max_num_tokens, dtype=torch.int32, device=device)
-        self._dspark_seed_buffer = torch.zeros(self.max_batch_size, dtype=torch.int64, device=device)
-        self._dspark_sampling_seed_buffer = torch.zeros(self.max_batch_size, dtype=torch.int64, device=device)
-        self._dspark_idx_mapping_buffer = torch.arange(self.max_batch_size, dtype=torch.int32, device=device)
-        self._dspark_draft_buffer = torch.zeros((self.max_batch_size, self.num_speculative_tokens), dtype=torch.int64, device=device)
+        self._dspark_seed_buffer = torch.zeros(self.max_graph_batch_size, dtype=torch.int64, device=device)
+        self._dspark_sampling_seed_buffer = torch.zeros(self.max_graph_batch_size, dtype=torch.int64, device=device)
+        self._dspark_idx_mapping_buffer = torch.arange(self.max_graph_batch_size, dtype=torch.int32, device=device)
+        self._dspark_draft_buffer = torch.zeros((self.max_graph_batch_size, self.num_speculative_tokens), dtype=torch.int64, device=device)
         scheduler_config = getattr(vllm_config, "scheduler_config", None)
         self._dspark_max_request_slots = max(1, int(getattr(scheduler_config, "max_num_seqs", self.max_batch_size) or self.max_batch_size))
         self._dspark_req_id_to_slot: dict[str, int] = {}
@@ -168,19 +169,24 @@ class AscendDSparkProposer(AscendDflashProposer):
             aclgraph_runtime_mode = CUDAGraphMode.NONE
         block_size = self.num_speculative_tokens
         if num_reqs <= 0:
-            num_reqs = max(1, min(self.max_batch_size, (num_tokens + block_size - 1) // block_size))
-        num_query_total = min(num_reqs * block_size, self.max_query_tokens)
+            num_reqs = max(1, min(self.max_graph_batch_size, (num_tokens + block_size - 1) // block_size))
+        num_query_total = min(self._align_dspark_tokens(num_reqs * block_size), self.max_query_tokens)
         num_context = min(num_tokens, self.max_num_tokens)
+        if aclgraph_runtime_mode != CUDAGraphMode.NONE:
+            num_query_total = min(self._align_dspark_tokens(num_tokens), self.max_query_tokens)
+            num_reqs = num_query_total // block_size
+            batch_descriptor = self._make_dspark_batch_descriptor(num_query_total, batch_descriptor)
 
         num_input_tokens, num_tokens_across_dp, _ = self.runner._sync_metadata_across_dp(
             num_query_total, is_draft_model=True
         )
-        num_input_tokens = min(num_input_tokens, num_query_total)
+        num_input_tokens = min(self._align_dspark_tokens(num_input_tokens), self.max_query_tokens)
+        if aclgraph_runtime_mode != CUDAGraphMode.NONE:
+            batch_descriptor = self._make_dspark_batch_descriptor(num_input_tokens, batch_descriptor)
         if num_tokens_across_dp is not None:
-            dp_rank = self.vllm_config.parallel_config.data_parallel_rank
-            if num_tokens_across_dp[dp_rank] != num_input_tokens:
+            if not torch.all(num_tokens_across_dp == num_input_tokens):
                 num_tokens_across_dp = num_tokens_across_dp.clone()
-                num_tokens_across_dp[dp_rank] = num_input_tokens
+                num_tokens_across_dp[:] = num_input_tokens
         self.input_ids[:num_input_tokens].fill_(self.parallel_drafting_token_id)
         self.positions[:num_input_tokens].copy_(self.arange_dspark[:num_input_tokens])
         self._request_slots_buffer[:num_input_tokens].zero_()
@@ -246,6 +252,28 @@ class AscendDSparkProposer(AscendDflashProposer):
         if not self.draft_attn_groups:
             return
         super()._update_full_graph_params(forward_context, num_tokens, draft_attn_metadatas)
+
+    def _align_dspark_tokens(self, num_tokens: int) -> int:
+        block_size = self.num_speculative_tokens
+        return ((num_tokens + block_size - 1) // block_size) * block_size
+
+    def _make_dspark_batch_descriptor(
+        self,
+        num_tokens: int,
+        base_descriptor: BatchDescriptor | None,
+    ) -> BatchDescriptor | None:
+        if base_descriptor is None:
+            return None
+        return BatchDescriptor(
+            num_tokens=num_tokens,
+            num_reqs=num_tokens // self.num_speculative_tokens,
+            uniform=False,
+            has_lora=base_descriptor.has_lora,
+            num_active_loras=base_descriptor.num_active_loras,
+        )
+
+    def get_aclgraph_capture_sizes(self, capture_sizes: list[int]) -> list[int]:
+        return sorted({self._align_dspark_tokens(size) for size in capture_sizes})
 
     def _assign_request_slots(self, batch_size: int) -> list[int]:
         if self.runner is None or not hasattr(self.runner, "input_batch"):
@@ -607,38 +635,34 @@ class AscendDSparkProposer(AscendDflashProposer):
         has_lora = len(self.runner.input_batch.lora_id_to_lora_request) > 0
         uniform_decode = target_model_batch_desc.uniform
         if use_cuda_graph:
-            _, batch_descriptor = self.runner.cudagraph_dispatcher.dispatch(
+            aclgraph_runtime_mode, batch_descriptor = self.runner.cudagraph_dispatcher.dispatch(
                 num_tokens=num_tokens,
                 uniform_decode=uniform_decode,
                 has_lora=has_lora,
             )
-            num_input_tokens = batch_descriptor.num_tokens
+            num_input_tokens = self._align_dspark_tokens(batch_descriptor.num_tokens)
+            batch_descriptor = self._make_dspark_batch_descriptor(num_input_tokens, batch_descriptor)
         else:
+            aclgraph_runtime_mode = CUDAGraphMode.NONE
+            batch_descriptor = None
             num_input_tokens = num_tokens
 
         num_input_tokens, num_tokens_across_dp, _ = self.runner._sync_metadata_across_dp(
             num_input_tokens,
             is_draft_model=True,
         )
+        num_input_tokens = self._align_dspark_tokens(num_input_tokens)
 
         if use_cuda_graph:
-            aclgraph_runtime_mode, batch_descriptor = self.runner.cudagraph_dispatcher.dispatch(
-                num_tokens=num_input_tokens,
-                uniform_decode=uniform_decode,
-                has_lora=has_lora,
-            )
-            num_input_tokens = batch_descriptor.num_tokens
+            batch_descriptor = self._make_dspark_batch_descriptor(num_input_tokens, batch_descriptor)
             self._pad_dspark_decode_inputs(num_tokens, num_input_tokens)
-            if num_input_tokens % block_size != 0:
-                dspark_padded = ((num_input_tokens + block_size - 1) // block_size) * block_size
-                self._pad_dspark_decode_inputs(num_input_tokens, dspark_padded)
-                if num_tokens_across_dp is not None:
-                    num_tokens_across_dp = num_tokens_across_dp.clone()
-                    num_tokens_across_dp[:] = dspark_padded
-                num_input_tokens = dspark_padded
+            if num_tokens_across_dp is not None:
+                num_tokens_across_dp = num_tokens_across_dp.clone()
+                num_tokens_across_dp[:] = num_input_tokens
         else:
-            aclgraph_runtime_mode = CUDAGraphMode.NONE
-            batch_descriptor = None
+            if num_tokens_across_dp is not None:
+                num_tokens_across_dp = num_tokens_across_dp.clone()
+                num_tokens_across_dp[:] = num_input_tokens
         graph_batch_size = num_input_tokens // block_size
         num_sample = graph_batch_size * block_size
         self.token_indices_to_sample[:num_sample].copy_(self.arange_dspark[:num_sample])
