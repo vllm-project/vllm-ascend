@@ -39,7 +39,7 @@ from vllm_ascend.compilation.acl_graph import set_graph_params, update_full_grap
 from vllm_ascend.worker.v2.utils import communicator_switch
 
 
-def collect_captured_token_sizes(capture_descs: dict) -> list[int]:
+def collect_sorted_captured_token_sizes(capture_descs: dict) -> list[int]:
     """Collect the actual per-graph token counts that will be captured.
 
     With speculative decoding under FULL_DECODE_ONLY, each raw
@@ -80,7 +80,7 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         # captured token counts (rounded up to decode_query_len when using
         # speculative decoding), so derive them from the capture descriptors
         # instead of the raw config sizes.
-        self.capture_sizes = collect_captured_token_sizes(self._capture_descs)
+        self.capture_sizes = collect_sorted_captured_token_sizes(self._capture_descs)
         # vllm-ascend need to update graph params of attention backend.
         # so we need to set graph params before capture full graph.
         if super().needs_capture():

@@ -67,6 +67,8 @@ class AscendDFlashSpeculator(DFlashSpeculator):
 
         self.attn_backends = attn_backends
 
+    # NOTE: upstream vLLM named this to _build_draft_attn_metadatas;
+    # keep the current name for now as upstream may change it again.
     def build_draft_attn_metadatas(self, num_reqs_padded):
         num_tokens_padded = num_reqs_padded * self.num_query_per_req
         with build_attn_metadata_wrapper():

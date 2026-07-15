@@ -19,7 +19,7 @@ from vllm_ascend.compilation.acl_graph import (
     set_draft_graph_params,
     update_full_graph_params,
 )
-from vllm_ascend.worker.v2.aclgraph_utils import collect_captured_token_sizes, model_capture_wrapper
+from vllm_ascend.worker.v2.aclgraph_utils import collect_sorted_captured_token_sizes, model_capture_wrapper
 from vllm_ascend.worker.v2.utils import communicator_switch
 
 
@@ -41,7 +41,7 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         # captured token counts (rounded up to decode_query_len when using
         # speculative decoding), so derive them from the capture descriptors
         # instead of the raw config sizes.
-        self.capture_sizes = collect_captured_token_sizes(self._capture_descs)
+        self.capture_sizes = collect_sorted_captured_token_sizes(self._capture_descs)
         # DFlash's parallel drafting forward has its own dedicated draft graph
         # path, independent of Eagle's prefill/decode split, so it always uses
         # the default draft params bucket (is_draft_model_prefill stays False in
