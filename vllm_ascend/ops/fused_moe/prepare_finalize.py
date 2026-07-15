@@ -261,7 +261,7 @@ class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
         self.replace_allreduce = replace_allreduce
         self.enable_shared_expert_dp = enable_shared_expert_dp
         mc2_mask = _EXTRA_CTX.mc2_mask
-        if self.tp_size > 1:
+        if self.tp_size > 1 and not self.replace_allreduce:
             # Also slice mc2_mask
             split_mc2_mask = torch.tensor_split(mc2_mask, self.tp_size, dim=0)
             mc2_mask = split_mc2_mask[self.tp_rank]
