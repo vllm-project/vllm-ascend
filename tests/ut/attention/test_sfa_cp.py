@@ -1499,7 +1499,7 @@ class TestAscendSFADCPImpl(TestBase):
 
         ql_nope = torch.randn(2, 2, 8)
         q_pe = torch.randn(2, 2, 4)
-        impl._finish_all_gather_query_for_dcp = MagicMock(side_effect=lambda _ctx: (ql_nope, q_pe))
+        impl._finish_dcp_gather = MagicMock(side_effect=lambda _ctx: (ql_nope, q_pe))
         kv_cache = (torch.empty(4, 1, 1, 16, dtype=torch.int8),)
         topk_indices = torch.zeros(2, 1, dtype=torch.int32)
         actual_seq_lengths_query = torch.tensor([2], dtype=torch.int32)
@@ -1508,6 +1508,7 @@ class TestAscendSFADCPImpl(TestBase):
         dcp_block_table = torch.tensor([[0, 1]], dtype=torch.int32)
 
         attn_metadata = MagicMock()
+        attn_metadata.num_prefills = 0
         attn_metadata.dcp_context = DCPContext(
             slot_mapping=torch.tensor([0, 1], dtype=torch.int32),
             block_table=dcp_block_table,
