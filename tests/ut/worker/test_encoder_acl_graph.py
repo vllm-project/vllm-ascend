@@ -37,12 +37,26 @@ def _reset_state():
 )
 def test_maybe_compute_actual_seq_lengths_eager(cu_seqlens, num_tokens, expected):
     actual_q, actual_kv = maybe_compute_actual_seq_lengths(
-        num_query_tokens=num_tokens,
-        cu_seqlens=cu_seqlens,
+        cu_seqlens,
+        num_tokens,
+        num_tokens,
         cudagraph_mm_encoder=False,
     )
     assert actual_q == expected
     assert actual_kv == expected
+
+
+def test_maybe_compute_actual_seq_lengths_eager_unequal_q_kv():
+    """Molmo-style uniform cross-attention: scale KV endpoints by kv/q ratio."""
+    cu_seqlens = torch.tensor([0, 1, 2], dtype=torch.int32)
+    actual_q, actual_kv = maybe_compute_actual_seq_lengths(
+        cu_seqlens,
+        2,
+        8,
+        cudagraph_mm_encoder=False,
+    )
+    assert actual_q == [1, 2]
+    assert actual_kv == [4, 8]
 
 
 @pytest.mark.parametrize(
@@ -54,8 +68,9 @@ def test_maybe_compute_actual_seq_lengths_eager(cu_seqlens, num_tokens, expected
 )
 def test_maybe_compute_actual_seq_lengths_graph(cu_seqlens, num_tokens, expected):
     actual_q, actual_kv = maybe_compute_actual_seq_lengths(
-        num_query_tokens=num_tokens,
-        cu_seqlens=cu_seqlens,
+        cu_seqlens,
+        num_tokens,
+        num_tokens,
         cudagraph_mm_encoder=True,
     )
     assert actual_q == expected
@@ -67,9 +82,11 @@ def test_update_encoder_graph_params_cu_seqlens():
     params = get_encoder_graph_params()
     query = MagicMock()
     query.shape = [8, 4, 72]
+    key = MagicMock()
+    key.shape = [8, 4, 72]
     packed = (
         query,
-        MagicMock(),
+        key,
         MagicMock(),
         None,
         None,

@@ -133,38 +133,45 @@ def set_encoder_forward_context(
 
 
 def maybe_compute_actual_seq_lengths(
-    num_query_tokens: int,
     cu_seqlens: torch.Tensor,
+    num_query_tokens: int,
+    num_kv_tokens: int,
     *,
     cudagraph_mm_encoder: bool = False,
 ) -> tuple[list[int], list[int]]:
     """Convert ``cu_seqlens`` to FIA host ``actual_seq_lengths``.
 
-    Drops the leading-zero cumulative marker. By default (eager) returns ``cu[1:]``
-    unchanged. When ``cudagraph_mm_encoder=True`` (ACL graph capture/replay), filters
-    invalid endpoints and ensures the terminal endpoint equals ``num_query_tokens``.
+    Drops the leading-zero marker; with ``cudagraph_mm_encoder`` filters endpoints and
+    aligns the terminal to ``num_query_tokens``; when Q≠KV, scales Q endpoints by
+    ``num_kv_tokens // num_query_tokens`` for the KV list.
     """
     flat = cu_seqlens.detach().cpu().view(-1).tolist()
     actual = flat[1:] if flat else flat
 
     if not cudagraph_mm_encoder:
+        pass
+    elif num_query_tokens <= 0:
+        actual = [0]
+    else:
+        filtered: list[int] = []
+        for end in actual:
+            if end <= 0:
+                continue
+            if end > num_query_tokens:
+                break
+            if not filtered or end > filtered[-1]:
+                filtered.append(end)
+
+        if not filtered or filtered[-1] != num_query_tokens:
+            filtered.append(num_query_tokens)
+        actual = filtered
+
+    if num_kv_tokens == num_query_tokens:
         return actual, actual
 
-    if num_query_tokens <= 0:
-        return [0], [0]
-
-    filtered: list[int] = []
-    for end in actual:
-        if end <= 0:
-            continue
-        if end > num_query_tokens:
-            break
-        if not filtered or end > filtered[-1]:
-            filtered.append(end)
-
-    if not filtered or filtered[-1] != num_query_tokens:
-        filtered.append(num_query_tokens)
-    return filtered, filtered
+    assert num_kv_tokens % num_query_tokens == 0
+    ratio = num_kv_tokens // num_query_tokens
+    return actual, [end * ratio for end in actual]
 
 
 def update_encoder_graph_params(
@@ -211,11 +218,13 @@ def update_encoder_graph_params(
             ) = packed
 
             num_query_tokens = query.shape[0]
+            num_kv_tokens = key.shape[0]
             cu_seqlens_cpu = get_encoder_forward_context().cu_seqlens_cpu
 
             actual_seq_lengths_q, actual_seq_lengths_kv = maybe_compute_actual_seq_lengths(
-                num_query_tokens=num_query_tokens,
-                cu_seqlens=cu_seqlens_cpu,
+                cu_seqlens_cpu,
+                num_query_tokens,
+                num_kv_tokens,
                 cudagraph_mm_encoder=True,
             )
 
