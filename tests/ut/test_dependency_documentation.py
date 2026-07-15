@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import re
 import unittest
 from pathlib import Path
 
+import regex as re
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CORE_DEPENDENCIES = ("torch", "torch-npu", "triton-ascend")
@@ -55,9 +55,7 @@ def _mkdocs_main_versions() -> dict[str, str]:
     )
     if torch_pair is None or triton is None:
         return {}
-    torch_version, torch_npu_version = (
-        value.strip() for value in torch_pair.group(1).split("/")
-    )
+    torch_version, torch_npu_version = (value.strip() for value in torch_pair.group(1).split("/"))
     return {
         "torch": torch_version,
         "torch-npu": torch_npu_version,
@@ -68,9 +66,7 @@ def _mkdocs_main_versions() -> dict[str, str]:
 class DependencyDocumentationTest(unittest.TestCase):
     def test_main_dependency_versions_match_repository_metadata(self):
         requirements = _requirements_versions()
-        core_requirements = {
-            package: requirements[package] for package in CORE_DEPENDENCIES
-        }
+        core_requirements = {package: requirements[package] for package in CORE_DEPENDENCIES}
         self.assertEqual(set(requirements), set(CPU_BUILD_DEPENDENCIES))
         self.assertEqual(_pyproject_versions(), core_requirements)
         self.assertEqual(_mkdocs_main_versions(), core_requirements)
@@ -103,23 +99,15 @@ class DependencyDocumentationTest(unittest.TestCase):
         requirements = _requirements_versions()
         for package in CPU_BUILD_DEPENDENCIES:
             with self.subTest(package=package):
-                self.assertIn(
-                    f"{package}=={requirements[package]}", cpu_section
-                )
+                self.assertIn(f"{package}=={requirements[package]}", cpu_section)
 
     def test_ascend_toolkit_home_is_set_before_nnal_installation(self):
         installation = _read("docs/source/installation.md")
-        manual_install_start = installation.index(
-            "??? \"Click here to see 'Install CANN manually'\""
-        )
-        manual_install_end = installation.index(
-            '=== "Before using docker"', manual_install_start
-        )
+        manual_install_start = installation.index("??? \"Click here to see 'Install CANN manually'\"")
+        manual_install_end = installation.index('=== "Before using docker"', manual_install_start)
         manual_install = installation[manual_install_start:manual_install_end]
         export_position = manual_install.index("export ASCEND_TOOLKIT_HOME=")
-        nnal_install_position = manual_install.index(
-            './Ascend-cann-nnal_9.0.0_linux-"$(uname -i)".run --install'
-        )
+        nnal_install_position = manual_install.index('./Ascend-cann-nnal_9.0.0_linux-"$(uname -i)".run --install')
         self.assertLess(export_position, nnal_install_position)
 
 

@@ -258,7 +258,7 @@ python -m pip install \
     torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0
 python -m pip install \
     --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
-    torch-npu==2.10.0 triton-ascend==3.2.1
+    torch-npu==2.10.0.post2 triton-ascend==3.2.1
 python -m pip install \
     --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
     -r requirements.txt
