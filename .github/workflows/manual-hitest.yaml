@@ -21,11 +21,11 @@ on:
   workflow_dispatch:
   workflow_call:
     secrets:
-      HITEST_APIG_APPCODE:
+      hitest_apig_appcode:
         required: true
-      HITEST_KEY:
+      hitest_key:
         required: true
-      HITEST_SECRET:
+      hitest_secret:
         required: true
     outputs:
       hitest_paths:
