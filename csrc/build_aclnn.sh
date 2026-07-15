@@ -201,7 +201,6 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
 
     CUSTOM_OPS_ARRAY=(
         "moe_gating_top_k_hash"
-        "indexer_compress_epilog"
         "inplace_partial_rotary_mul"
         "kv_compress_epilog"
         "compressor"
