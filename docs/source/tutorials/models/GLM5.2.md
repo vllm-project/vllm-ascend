@@ -1239,16 +1239,16 @@ vllm serve <MODEL_PATH> \
   --served-model-name glm-52 \
   --max-model-len 1024000 \
   --max-num-batched-tokens 16384 \
-  --gpu-memory-utilization 0.90 \
+  --gpu-memory-utilization 0.80 \
   --api-server-count 1 \
-  --max-num-seqs 4 \
+  --max-num-seqs 32 \
   --data-parallel-size 1 \
   --pipeline-parallel-size 1 \
   --tensor-parallel-size 16 \
   --prefill-context-parallel-size 1 \
   --decode-context-parallel-size 16 \
   --cp-kv-cache-interleave-size 128 \
-  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [4, 16]}' \
+  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [4, 16, 128]}' \
   --additional-config '{"enable_flashcomm1": true, "enable_dsa_cp": true, "ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": false}, "fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_mc2_hierarchy_comm": false, "enable_sparse_c8": true, "enable_cpu_binding": true, "recompute_scheduler_enable": false}' \
   --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
   --quantization ascend \
