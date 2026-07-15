@@ -96,12 +96,29 @@ def _as_tensor_list(
     return [tensor_or_list]
 
 
-def _ensure_clipped_swiglu_supported() -> None:
+def _apply_clipped_swiglu(
+    hidden_states: torch.Tensor,
+    *,
+    swiglu_limit: float,
+    swiglu_alpha: float,
+    swiglu_beta: float,
+) -> torch.Tensor:
     if ASCEND_DEVICE_TYPE == AscendDeviceType.A5:
-        raise RuntimeError(
-            "npu_clipped_swiglu is not supported on Ascend A5. "
-            "Use the MXFP swiglu_mx_quant path for swigluoai_uninterleave."
+        hidden_size = hidden_states.shape[-1] // 2
+        gate = hidden_states[..., :hidden_size].clamp(max=swiglu_limit)
+        up = hidden_states[..., hidden_size:].clamp(
+            min=-swiglu_limit,
+            max=swiglu_limit,
         )
+        return gate * torch.sigmoid(swiglu_alpha * gate) * (up + swiglu_beta)
+
+    return torch_npu.npu_clipped_swiglu(
+        hidden_states,
+        alpha=swiglu_alpha,
+        limit=swiglu_limit,
+        bias=swiglu_beta,
+        interleaved=False,
+    )
 
 
 def _swiglu_mx_quant(
@@ -345,13 +362,11 @@ def quant_apply_mlp(
         dispose_tensor(unquantized_hidden_states)
         # act_fn: swiglu
         if is_swigluoai_uninterleave:
-            _ensure_clipped_swiglu_supported()
-            hidden_states = torch_npu.npu_clipped_swiglu(
+            hidden_states = _apply_clipped_swiglu(
                 hidden_states,
-                alpha=swiglu_alpha,
-                limit=swiglu_limit,
-                bias=swiglu_beta,
-                interleaved=False,
+                swiglu_alpha=swiglu_alpha,
+                swiglu_limit=swiglu_limit,
+                swiglu_beta=swiglu_beta,
             )
         else:
             hidden_states = torch_npu.npu_swiglu(hidden_states)
@@ -463,13 +478,11 @@ def quant_apply_mlp(
                         swiglu_beta=swiglu_beta,
                     )
                 else:
-                    _ensure_clipped_swiglu_supported()
-                    hidden_states = torch_npu.npu_clipped_swiglu(
+                    hidden_states = _apply_clipped_swiglu(
                         hidden_states,
-                        alpha=swiglu_alpha,
-                        limit=swiglu_limit,
-                        bias=swiglu_beta,
-                        interleaved=False,
+                        swiglu_alpha=swiglu_alpha,
+                        swiglu_limit=swiglu_limit,
+                        swiglu_beta=swiglu_beta,
                     )
                     hidden_states, swiglu_out_scale = torch_npu.npu_dynamic_quant(hidden_states)
             elif HAS_TRITON:
@@ -557,13 +570,11 @@ def unquant_apply_mlp(
         num_experts, _, hidden_size = w1.shape
         gate_up_out = AscendSwigluOAIAndMul.swiglu_oai_forward(gate_up_out.view(-1, hidden_size))
     elif activation == "swigluoai_uninterleave":
-        _ensure_clipped_swiglu_supported()
-        gate_up_out = torch_npu.npu_clipped_swiglu(
+        gate_up_out = _apply_clipped_swiglu(
             gate_up_out,
-            alpha=swiglu_alpha,
-            limit=swiglu_limit,
-            bias=swiglu_beta,
-            interleaved=False,
+            swiglu_alpha=swiglu_alpha,
+            swiglu_limit=swiglu_limit,
+            swiglu_beta=swiglu_beta,
         )
     else:
         gate_up_out = torch_npu.npu_swiglu(gate_up_out)

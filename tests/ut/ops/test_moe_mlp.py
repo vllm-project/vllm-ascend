@@ -13,6 +13,7 @@ from vllm_ascend.ops.fused_moe.moe_runtime_args import (
 )
 from vllm_ascend.ops.fused_moe.moe_stage_params import MoEMxfpParams
 from vllm_ascend.quantization.quant_type import QuantType
+from vllm_ascend.utils import AscendDeviceType
 
 MXFP4_TEST_DTYPE = getattr(torch, "float4_e2m1fn_x2", torch.float16)
 
@@ -64,6 +65,58 @@ class TestW4A8RuntimeFlags(unittest.TestCase):
 
 
 class TestUnifiedApplyMlpRequest(unittest.TestCase):
+    def test_unquant_swigluoai_uninterleave_falls_back_on_a5(self):
+        hidden_states = torch.randn(2, 8, dtype=torch.bfloat16)
+        gate_up_out = torch.randn(2, 16, dtype=torch.bfloat16)
+        expected_output = torch.randn(2, 8, dtype=torch.bfloat16)
+        w1 = torch.randn(2, 8, 16, dtype=torch.bfloat16)
+        w2 = torch.randn(2, 8, 8, dtype=torch.bfloat16)
+        swiglu_limit = 7.0
+        swiglu_alpha = 1.702
+        swiglu_beta = 1.0
+
+        gate = gate_up_out[..., :8].clamp(max=swiglu_limit)
+        up = gate_up_out[..., 8:].clamp(
+            min=-swiglu_limit,
+            max=swiglu_limit,
+        )
+        expected_activation = gate * torch.sigmoid(swiglu_alpha * gate) * (up + swiglu_beta)
+
+        with (
+            patch(
+                "vllm_ascend.ops.fused_moe.moe_mlp.ASCEND_DEVICE_TYPE",
+                AscendDeviceType.A5,
+            ),
+            patch(
+                "vllm_ascend.ops.fused_moe.moe_mlp.torch_npu.npu_grouped_matmul",
+                side_effect=[[gate_up_out], [expected_output]],
+                create=True,
+            ) as mock_grouped_matmul,
+            patch(
+                "vllm_ascend.ops.fused_moe.moe_mlp.torch_npu.npu_clipped_swiglu",
+                create=True,
+            ) as mock_clipped_swiglu,
+        ):
+            output, _ = unquant_apply_mlp(
+                hidden_states=hidden_states,
+                w1=w1,
+                w2=w2,
+                group_list=torch.tensor([1, 1]),
+                activation="swigluoai_uninterleave",
+                need_trans=False,
+                swiglu_limit=swiglu_limit,
+                swiglu_alpha=swiglu_alpha,
+                swiglu_beta=swiglu_beta,
+            )
+
+        self.assertTrue(output is expected_output)
+        second_call = mock_grouped_matmul.call_args_list[1]
+        torch.testing.assert_close(
+            second_call.kwargs["x"][0],
+            expected_activation,
+        )
+        mock_clipped_swiglu.assert_not_called()
+
     def test_unquant_apply_mlp_wraps_tensor_weights_for_grouped_matmul(self):
         hidden_states = torch.randn(2, 8)
         gate_up_out = torch.randn(2, 16)
