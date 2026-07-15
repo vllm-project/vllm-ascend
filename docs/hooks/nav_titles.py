@@ -163,6 +163,10 @@ TITLES = {
         "en": "Qwen3.5-27B & Qwen3.6-27B",
         "zh": "Qwen3.5-27B & Qwen3.6-27B",
     },
+    "tutorials/models/Qwen3.5-Dense.md": {
+        "en": "Qwen3.5-Dense (2B/4B/9B)",
+        "zh": "Qwen3.5-Dense (2B/4B/9B)",
+    },
     "tutorials/models/Qwen3.5-397B-A17B.md": {"en": "Qwen3.5-397B-A17B", "zh": "Qwen3.5-397B-A17B"},
     "tutorials/models/Qwen3.6-35B-A3B.md": {"en": "Qwen3.6-35B-A3B", "zh": "Qwen3.6-35B-A3B"},
     "tutorials/models/Qwen3_embedding.md": {"en": "Qwen3 Embedding", "zh": "Qwen3 Embedding"},
