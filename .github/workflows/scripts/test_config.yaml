@@ -616,6 +616,7 @@
     - vllm_ascend/utils.py
     - setup.py
   tests:
+    - tests/ut/test_a5_platform_guards.py
     - tests/ut/test_ascend_config.py
     - tests/ut/test_ascend_forward_context.py
     - tests/ut/test_cpu_binding.py
