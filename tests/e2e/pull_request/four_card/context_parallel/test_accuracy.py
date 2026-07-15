@@ -46,7 +46,7 @@ COMMON_PROMPTS = [
 ]
 
 DSV3_2_DCP_GOLDEN = [
-    "The capital of France isoint054 Rund compasses",
+    "The capital of France isoint054 Rund959arki",
     "Hello, my name is Tom, I am" + "ERIC slicpacelike挂",
     "The president of United States isoint054 Rund959arki",
 ]
