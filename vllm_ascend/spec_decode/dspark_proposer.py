@@ -600,6 +600,8 @@ class AscendDSparkProposer(AscendDflashProposer):
         )
         assert self.runner is not None
         actual_num_reqs = num_prefill_reqs + num_decode_reqs
+        if actual_num_reqs == 0:
+            actual_num_reqs = common_attn_metadata.num_reqs
         block_size = self.num_speculative_tokens
         use_cuda_graph = self.use_cuda_graph and not is_prefill
         has_lora = len(self.runner.input_batch.lora_id_to_lora_request) > 0
