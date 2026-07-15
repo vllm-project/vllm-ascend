@@ -954,6 +954,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         common_attn_metadata.num_input_tokens = num_input_tokens
 
         multi_steps_attn_metadata, attn_metadata_i = self.build_draft_attn_metadata(common_attn_metadata, num_input_tokens, num_tokens)
+        self._pad_draft_query_buffers(num_tokens, num_input_tokens)
 
         if self.uses_mrope:
             used_update_positions = self.mrope_positions[:, token_indices_to_sample]
@@ -1101,7 +1102,16 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         model_positions = self._get_positions(num_input_tokens)
 
         if self.method == "dflash" or self.method == "dspark":
-            model_kwargs = self.build_model_inputs_first_pass(num_input_tokens)
+            if hasattr(self, "_layer_group_idx"):
+                self.build_model_inputs_first_pass(num_input_tokens, self._context_slots)
+                model_kwargs = dict(
+                input_ids=self.input_ids[:num_input_tokens], positions=self.positions[:num_input_tokens]
+            )
+            else:
+                self.build_model_inputs_first_pass(num_input_tokens, self._context_slot_mapping_buffer)
+                model_kwargs = dict(
+                input_ids=self.input_ids[:num_input_tokens], positions=self.positions[:num_input_tokens], inputs_embeds=None
+            )
         else:
             model_kwargs = {
                 "input_ids": model_input_ids,
@@ -2172,85 +2182,69 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self,
         common_attn_metadata,
         num_input_tokens,
-        num_tokens,
+        num_actual_tokens,
         ):
-        if self.method == 'dspark':
-            multi_steps_attn_metadata = self._build_standard_dsa_attn_metadata(
-                common_attn_metadata, num_input_tokens, num_tokens
-            )
-            self._pad_draft_query_buffers(num_tokens, num_input_tokens)
-            return multi_steps_attn_metadata, None
-        else:
-            # FIXME(woosuk): The below two ops cause synchronization. Optimize.
-            assert len(self.draft_attn_groups) > 0
-            builder = self.draft_attn_groups[0].get_metadata_builder()
+        # FIXME(woosuk): The below two ops cause synchronization. Optimize.
+        assert len(self.draft_attn_groups) > 0
+
+        if hasattr(self, "_dspark_block_tables_by_gid"):
+            if num_input_tokens > num_actual_tokens:
+                self.positions[num_actual_tokens:num_input_tokens].fill_(0)
+                self._slot_mapping_buffer[num_actual_tokens:num_input_tokens].fill_(-1)
+            base_cm = common_attn_metadata
+            base_cm.positions = self.positions[:num_input_tokens]
+            base_cm.slot_mapping = self._slot_mapping_buffer[:num_input_tokens]
+            base_cm.num_input_tokens = num_input_tokens
+            base_cm.num_actual_tokens = num_actual_tokens
+            base_cm.causal = False
+            base_cm.attn_state = AscendAttentionState.ChunkedPrefill
+            if hasattr(base_cm, "token_to_req_indices"):
+                base_cm.token_to_req_indices = base_cm.token_to_req_indices[:num_input_tokens]
+
+        per_layer_attn_metadata: dict[str, Any] = {}
+        for attn_group in self.draft_attn_groups:
+            builder = attn_group.get_metadata_builder()
             extra_attn_metadata_args: dict = {}
             if self.use_compress:
                 extra_attn_metadata_args = dict(
                     prefill_ratio_to_sas_metadata=dict(),
                     decode_ratio_to_sas_metadata=dict(),
                     common_ratio_to_sas_metadata=dict(),
-                    block_size=self.draft_attn_groups[0].kv_cache_spec.block_size,
+                    block_size=attn_group.kv_cache_spec.block_size,
                 )
-            attn_metadata = builder.build(0, common_attn_metadata, self.runner.get_model(), **extra_attn_metadata_args)
-            if hasattr(attn_metadata, "causal") and not attn_metadata.causal:
-                attn_metadata.attn_mask = None
-            per_layer_attn_metadata = dict()
-            # The first step of speculative.
-            for layer_name in self.attn_layer_names:
-                per_layer_attn_metadata[layer_name] = attn_metadata
-            multi_steps_attn_metadata = [per_layer_attn_metadata]
-            # Copy the old attn_metadata and update
-            attn_metadata_i = per_layer_attn_metadata[self.attn_layer_names[0]]
-            return multi_steps_attn_metadata, attn_metadata_i
+            if hasattr(self, "_dspark_block_tables_by_gid"):
+                gid = attn_group.kv_cache_group_id
+                common_attn_metadata = copy.copy(base_cm)
+                block_table = getattr(self, "_dspark_block_tables_by_gid", {}).get(gid)
+                if block_table is not None:
+                    common_attn_metadata.block_table_tensor = block_table[: common_attn_metadata.num_reqs]
+                slot_mapping = getattr(self, "_dspark_query_slot_mappings_by_gid", {}).get(gid)
+                if slot_mapping is not None:
+                    common_attn_metadata.slot_mapping = slot_mapping[:num_input_tokens]
+                attn_metadata = builder.build_for_drafting(
+                    common_attn_metadata,
+                    draft_index=1,
+                    block_size=attn_group.kv_cache_spec.block_size,
+                )
+            else:
+                attn_metadata = builder.build(0, common_attn_metadata, self.runner.get_model(), **extra_attn_metadata_args)
+                if hasattr(attn_metadata, "causal") and not attn_metadata.causal:
+                    attn_metadata.attn_mask = None
 
-    def _build_standard_dsa_attn_metadata(
-        self,
-        common_attn_metadata: CommonAttentionMetadata,
-        num_input_tokens: int,
-        num_actual_tokens: int,
-    ) -> list[dict[str, Any]]:
-        if not self.draft_attn_groups:
-            return []
-
-        if num_input_tokens > num_actual_tokens:
-            self.positions[num_actual_tokens:num_input_tokens].fill_(0)
-            self._slot_mapping_buffer[num_actual_tokens:num_input_tokens].fill_(-1)
-
-        base_cm = common_attn_metadata
-        base_cm.positions = self.positions[:num_input_tokens]
-        base_cm.slot_mapping = self._slot_mapping_buffer[:num_input_tokens]
-        base_cm.num_input_tokens = num_input_tokens
-        base_cm.num_actual_tokens = num_actual_tokens
-        base_cm.causal = False
-        base_cm.attn_state = AscendAttentionState.ChunkedPrefill
-        if hasattr(base_cm, "token_to_req_indices"):
-            base_cm.token_to_req_indices = base_cm.token_to_req_indices[:num_input_tokens]
-
-        per_layer_attn_metadata: dict[str, Any] = {}
-        for attn_group in self.draft_attn_groups:
-            gid = attn_group.kv_cache_group_id
-            common_attn_metadata = copy.copy(base_cm)
-            block_table = getattr(self, "_dspark_block_tables_by_gid", {}).get(gid)
-            if block_table is not None:
-                common_attn_metadata.block_table_tensor = block_table[: common_attn_metadata.num_reqs]
-            slot_mapping = getattr(self, "_dspark_query_slot_mappings_by_gid", {}).get(gid)
-            if slot_mapping is not None:
-                common_attn_metadata.slot_mapping = slot_mapping[:num_input_tokens]
-            attn_metadata = attn_group.get_metadata_builder().build_for_drafting(
-                common_attn_metadata,
-                draft_index=1,
-                block_size=attn_group.kv_cache_spec.block_size,
-            )
             for layer_name in attn_group.layer_names:
                 per_layer_attn_metadata[layer_name] = attn_metadata
-        return [per_layer_attn_metadata]
+        multi_steps_attn_metadata = [per_layer_attn_metadata]
+        # Copy the old attn_metadata and update
+        attn_metadata_i = per_layer_attn_metadata[self.draft_attn_groups[0].layer_names[0]]
+        return multi_steps_attn_metadata, attn_metadata_i
 
     def _pad_draft_query_buffers(
         self,
         num_actual_tokens: int,
         num_input_tokens: int,
     ) -> None:
+        if not hasattr(self, "_dspark_block_tables_by_gid"):
+            return
         if num_input_tokens <= num_actual_tokens:
             return
         self.input_ids[num_actual_tokens:num_input_tokens].fill_(self.parallel_drafting_token_id)

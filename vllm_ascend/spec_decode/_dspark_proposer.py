@@ -531,7 +531,7 @@ class AscendDSparkProposer(AscendDflashProposer):
                 causal=False,
                 block_table_tensor=self._dspark_block_tables_by_gid[self.kv_cache_gid][:num_reqs],
             )
-            multi_steps_attn_metadata = self._build_standard_dsa_attn_metadata(
+            multi_steps_attn_metadata, _ = self.build_draft_attn_metadata(
                 dummy_cad, num_input_tokens, num_query_total
             )
 
@@ -565,18 +565,3 @@ class AscendDSparkProposer(AscendDflashProposer):
                 and self.draft_attn_groups
             ):
                 self._update_full_graph_params(forward_context, num_tokens, [])
-
-    def build_model_inputs_first_pass(
-        self,
-        num_input_tokens: int,
-    ) -> dict[str, Any]:
-        num_context = self._dflash_num_context
-
-        self.model.precompute_and_store_context_kv(
-            self._dflash_hidden_states[:num_context],
-            self._context_positions_buffer[:num_context],
-            self._context_slots,
-        )
-        return dict(
-            input_ids=self.input_ids[:num_input_tokens], positions=self.positions[:num_input_tokens]
-        )
