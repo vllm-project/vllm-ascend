@@ -16,9 +16,9 @@ MEMCACHE_THREAD_START_WAIT_S = 0.1
 
 
 def _is_device_sdma() -> bool:
-    config_path = os.getenv("MMC_META_CONFIG_PATH")
+    config_path = os.getenv("MMC_LOCAL_CONFIG_PATH")
     if not config_path:
-        raise ValueError("The environment variable 'MMC_META_CONFIG_PATH' is not set.")
+        raise ValueError("The environment variable 'MMC_LOCAL_CONFIG_PATH' is not set.")
     with open(config_path, encoding="utf-8") as config_file:
         for line in config_file:
             line = line.strip()
