@@ -45,23 +45,30 @@ def test_a5_soc_version_260_maps_uniquely():
     SoC variant within the range is tolerated. A5 is a single discrete value,
     which is fragile: this test documents that 260 is the *only* accepted A5
     SoC version and that 259/261 must not silently resolve to A5.
+
+    The installed device type is set via ``mock.patch`` (not direct mutation)
+    so the module-level global is restored after the test and cannot pollute
+    other tests in the suite.
     """
-    utils._ascend_device_type = AscendDeviceType.A5
-    with mock.patch(
-        "vllm_ascend.utils.torch_npu.npu.get_soc_version",
-        return_value=A5_SOC_VERSION,
+    with (
+        mock.patch("vllm_ascend.utils._ascend_device_type", AscendDeviceType.A5),
+        mock.patch(
+            "vllm_ascend.utils.torch_npu.npu.get_soc_version",
+            return_value=A5_SOC_VERSION,
+        ),
     ):
         # Must not raise: installed device type matches the detected SoC.
         utils.check_ascend_device_type()
 
     # Adjacent values are unsupported and must raise, not fall back to A5.
-    for adjacent in (A5_SOC_VERSION - 1, A5_SOC_VERSION + 1):
-        with mock.patch(
-            "vllm_ascend.utils.torch_npu.npu.get_soc_version",
-            return_value=adjacent,
-        ):
-            with pytest.raises(RuntimeError, match="Can not support soc_version"):
-                utils.check_ascend_device_type()
+    with mock.patch("vllm_ascend.utils._ascend_device_type", AscendDeviceType.A5):
+        for adjacent in (A5_SOC_VERSION - 1, A5_SOC_VERSION + 1):
+            with mock.patch(
+                "vllm_ascend.utils.torch_npu.npu.get_soc_version",
+                return_value=adjacent,
+            ):
+                with pytest.raises(RuntimeError, match="Can not support soc_version"):
+                    utils.check_ascend_device_type()
 
 
 @pytest.mark.parametrize(
