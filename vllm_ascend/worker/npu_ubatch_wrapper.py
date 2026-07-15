@@ -251,7 +251,7 @@ class UBatchWrapper(GPUUBatchWrapper):
             afd_metadata.attn_metadata_list.append(attn_metadata)
             afd_metadata.dp_metadata_list.append(dp_metadata)
         else:
-            logger.info('_make_afd_ubatch_metadata ubatch_slices: %s, attn_metadata:%s', ubatch_slices, attn_metadata)
+            logger.info('_make_afd_ubatch_metadata ubatch_slices: %s', ubatch_slices)
             for i, ubatch_slice in enumerate(ubatch_slices):
                 (
                     sliced_input_ids,
