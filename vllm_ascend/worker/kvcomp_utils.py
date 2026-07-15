@@ -444,12 +444,11 @@ class HashEncoder:
         if x_flat.dtype != self.dtype:
             x_flat = x_flat.to(self.dtype)
 
-        # [N, hash_bits]
-        xW = torch.matmul(x_flat, self.hash_weights)
-        # [N * hash_bits]
-        xW_flat = xW.view(-1)
-        # [N*hash_numbers], where hash_numbers = hash_bits // 8
-        packed_codes_flat = torch.ops._C_ascend.npu_sign_bits_pack(xW_flat, size=1)
+        # [N, hash_numbers, 8]
+        sign_bits = (torch.matmul(x_flat, self.hash_weights) > 0).to(torch.uint8).view(-1, self.hash_numbers, 8)
+        bit_weights = torch.tensor([1, 2, 4, 8, 16, 32, 64, 128], dtype=torch.uint8, device=self.device)
+        # [N, hash_numbers], where hash_numbers = hash_bits // 8
+        packed_codes_flat = (sign_bits * bit_weights).sum(dim=-1).to(torch.uint8).view(-1)
 
         # e.g., [s1, s2, s3, hash_numbers]
         out_shape = orig_shape + (self.hash_numbers,)
