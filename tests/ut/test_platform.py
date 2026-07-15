@@ -56,7 +56,6 @@ class TestNPUPlatform(TestBase):
         mock_ascend_config.enable_mc2_hierarchy_comm = False
         mock_ascend_config.enable_fused_mc2 = False
         mock_ascend_config.enable_flashcomm1 = False
-        mock_ascend_config.SLO_limits_for_dynamic_batch = -1
         mock_ascend_config.enable_shared_expert_dp = False
         mock_ascend_config.short_request_first_config.enabled = False
         mock_ascend_config.update_compile_ranges_split_points = MagicMock()
