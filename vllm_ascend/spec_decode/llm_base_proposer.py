@@ -43,6 +43,7 @@ from vllm.v1.spec_decode.utils import (
 )
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
+from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
@@ -235,9 +236,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # can opt into draft graph capture explicitly while other GLM draft
         # methods remain protected.
         enable_glm_dspark_draft_graph = (
-            _is_dspark_draft_model(draft_model_config)
-            and os.getenv("VLLM_ASCEND_ENABLE_GLM_DSPARK_DRAFT_GRAPH", "0").lower()
-            in ("1", "true", "yes", "on")
+            _is_dspark_draft_model(draft_model_config) and envs.VLLM_ASCEND_ENABLE_GLM_DSPARK_DRAFT_GRAPH
         )
         if _is_glm_model(self.vllm_config.model_config) and not enable_glm_dspark_draft_graph:
             if self.use_cuda_graph:
@@ -314,6 +313,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 "disable_padded_drafter_batch in the speculative_config."
             )
 
+    def _stabilize_padded_graph_metadata(
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+        actual_num_reqs: int,
+        padded_num_reqs: int,
+    ) -> None:
+        return
+
     def _maybe_unrotate_dspark_aux_hidden(self, target_hidden_states: torch.Tensor) -> torch.Tensor:
         mode = os.getenv("DSPARK_AUX_UNROTATE", "0").lower()
         if mode not in ("1", "true", "yes", "on", "qt", "q_t", "transpose", "q"):
@@ -322,8 +329,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         hidden_size = self.hidden_size
         if target_hidden_states.shape[-1] % hidden_size != 0:
             logger.warning_once(
-                "[spec_decode/dspark] skip aux unrotate: hidden shape %s is not "
-                "a multiple of hidden_size=%d",
+                "[spec_decode/dspark] skip aux unrotate: hidden shape %s is not a multiple of hidden_size=%d",
                 tuple(target_hidden_states.shape),
                 hidden_size,
             )
@@ -361,8 +367,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 return target_hidden_states
             if tuple(rotation.shape) != (hidden_size, hidden_size):
                 logger.warning(
-                    "[spec_decode/dspark] skip aux unrotate: rotation shape %s "
-                    "does not match hidden_size=%d",
+                    "[spec_decode/dspark] skip aux unrotate: rotation shape %s does not match hidden_size=%d",
                     tuple(rotation.shape),
                     hidden_size,
                 )
@@ -579,10 +584,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             # every speculative token. Keep the draft's own lm_head in that case.
             draft_model = self.get_model()
             draft_is_dspark = callable(getattr(draft_model, "compute_dspark_draft_tokens", None))
-            share_dspark_target_lm_head = (
-                draft_is_dspark
-                and os.getenv("DSPARK_SHARE_TARGET_LM_HEAD", "0").lower()
-                in ("1", "true", "yes", "on")
+            share_dspark_target_lm_head = draft_is_dspark and os.getenv("DSPARK_SHARE_TARGET_LM_HEAD", "0").lower() in (
+                "1",
+                "true",
+                "yes",
+                "on",
             )
             draft_has_own_lm_head = (
                 self.method == "dflash" and getattr(self.model, "draft_id_to_target_id", None) is not None
@@ -926,8 +932,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 if debug_count < 4:
                     self._dspark_hidden_output_debug_count = debug_count + 1
                     logger.warning(
-                        "[spec_decode/dspark] hidden output debug #%d: "
-                        "combined_hidden_shape=%s",
+                        "[spec_decode/dspark] hidden output debug #%d: combined_hidden_shape=%s",
                         debug_count + 1,
                         tuple(target_hidden_states.shape),
                     )
@@ -983,6 +988,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             # is run in eager mode currently, which means `_pad_query_start_loc_for_fia` is not called,
             # while draft model is run in graph model, which means we should pad the `query_start_loc`.
             # Need to be fixed in the future.
+            actual_num_reqs = common_attn_metadata.num_reqs
             num_reqs = common_attn_metadata.query_start_loc.shape[0]
             self.query_start_loc.gpu[:num_reqs].copy_(common_attn_metadata.query_start_loc)
             self.query_start_loc.cpu[:num_reqs].copy_(common_attn_metadata.query_start_loc_cpu)
@@ -1005,6 +1011,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             )
             if self.method == "dflash":
                 common_attn_metadata.seq_lens = self._adjust_tensor(common_attn_metadata.seq_lens, num_reqs_padded)
+                self._stabilize_padded_graph_metadata(
+                    common_attn_metadata,
+                    actual_num_reqs,
+                    num_reqs_padded,
+                )
             else:
                 common_attn_metadata.seq_lens = self._adjust_tensor(self.runner.seq_lens, num_reqs_padded)
                 common_attn_metadata.seq_lens_cpu = self._adjust_tensor(
@@ -1256,9 +1267,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     dim=0,
                     index=sample_indices,
                 ).view(batch_size, self.num_speculative_tokens)
-                anchor_indices = sample_indices.view(
-                    batch_size, self.num_speculative_tokens
-                )[:, 0] - 1
+                anchor_indices = sample_indices.view(batch_size, self.num_speculative_tokens)[:, 0] - 1
                 anchor_indices = torch.where(
                     anchor_indices >= 0,
                     anchor_indices,
@@ -1281,11 +1290,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 # Graph capture cannot execute the host synchronizations used
                 # by proposal debugging. Keep debugging opt-in for eager runs
                 # and disable it unconditionally for the graph path.
-                debug_limit = (
-                    0
-                    if self.use_cuda_graph
-                    else int(os.getenv("DSPARK_DEBUG_PROPOSER", "0") or "0")
-                )
+                debug_limit = 0 if self.use_cuda_graph else int(os.getenv("DSPARK_DEBUG_PROPOSER", "0") or "0")
                 debug_count = getattr(self, "_dspark_debug_proposer_count", 0)
                 if debug_count < debug_limit and batch_size > 0:
                     sample_positions = torch.index_select(
@@ -1307,15 +1312,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     )
                     confidence_first = None
                     if confidence_logits is not None and confidence_logits.numel() > 0:
-                        confidence_first = (
-                            confidence_logits[0]
-                            .detach()
-                            .float()
-                            .sigmoid()
-                            .cpu()
-                            .view(-1)
-                            .tolist()
-                        )
+                        confidence_first = confidence_logits[0].detach().float().sigmoid().cpu().view(-1).tolist()
                     logger.warning(
                         "[spec_decode/dspark] proposal debug #%d: "
                         "anchor_index_first=%d sample_indices_first=%s "
@@ -1324,10 +1321,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         "hidden_shape=%s hidden_abs_mean=%.6f confidence_first=%s",
                         debug_count + 1,
                         int(anchor_indices[0].detach().cpu().item()),
-                        sample_indices[: self.num_speculative_tokens]
-                        .detach()
-                        .cpu()
-                        .tolist(),
+                        sample_indices[: self.num_speculative_tokens].detach().cpu().tolist(),
                         sample_input_ids[0].detach().cpu().tolist(),
                         sample_positions[0].detach().cpu().tolist(),
                         int(anchor_token_ids[0].detach().cpu().item()),

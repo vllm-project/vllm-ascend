@@ -148,6 +148,7 @@ from vllm_ascend.utils import (
     calc_split_factor,
     check_gdn_layer,
     embedding_tp_enable,
+    enable_sfa_dcp_replicated_indexer,
     enable_sp,
     enable_sp_by_pass,
     get_ascend_device_type,

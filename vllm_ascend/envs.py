@@ -110,6 +110,11 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Enable the experimental GLM DSpark draft ACLGraph path.
+    # Truthy values: "1", "true", "yes", "on". Default: "0". Non-sensitive.
+    "VLLM_ASCEND_ENABLE_GLM_DSPARK_DRAFT_GRAPH": lambda: (
+        os.getenv("VLLM_ASCEND_ENABLE_GLM_DSPARK_DRAFT_GRAPH", "0").lower() in ("1", "true", "yes", "on")
+    ),
 }
 
 # end-env-vars-definition

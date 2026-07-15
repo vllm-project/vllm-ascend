@@ -7,7 +7,12 @@ import torch
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec, KVCacheTensor
 
+import vllm_ascend.worker.model_runner_v1 as model_runner_module
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+
+
+def test_sfa_dcp_replicated_indexer_helper_is_imported():
+    assert callable(model_runner_module.enable_sfa_dcp_replicated_indexer)
 
 
 class TestNPUModelRunnerKVCache(unittest.TestCase):

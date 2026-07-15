@@ -20,10 +20,12 @@
 
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
 from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
+from vllm_ascend.spec_decode.dspark_proposer import AscendDSparkProposer
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
 from vllm_ascend.spec_decode.extract_hidden_states_proposer import (
     AscendExtractHiddenStatesProposer,
 )
+from vllm_ascend.spec_decode.llm_base_proposer import _is_dspark_draft_model
 from vllm_ascend.spec_decode.medusa_proposer import AscendMedusaProposer
 from vllm_ascend.spec_decode.ngram_proposer import AscendNgramProposer
 from vllm_ascend.spec_decode.ngram_proposer_npu import AscendNgramProposerNPU
@@ -46,6 +48,9 @@ def get_spec_decode_method(method, vllm_config, device, runner):
             return AscendStep3p5MTPProposer(vllm_config, device, runner)
         return AscendEagleProposer(vllm_config, device, runner)
     elif method == "dflash":
+        speculative_config = vllm_config.speculative_config
+        if speculative_config is not None and _is_dspark_draft_model(speculative_config.draft_model_config):
+            return AscendDSparkProposer(vllm_config, device, runner)
         return AscendDflashProposer(vllm_config, device, runner)
     elif method == "draft_model":
         return AscendDraftModelProposer(vllm_config, device, runner)
