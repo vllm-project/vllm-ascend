@@ -1,6 +1,7 @@
 from typing import TYPE_CHECKING, Any
 
 from vllm.config.speculative import SpeculativeConfig
+from vllm.logger import logger
 from vllm.utils.import_utils import LazyLoader
 
 _orig_post_init = SpeculativeConfig.__post_init__
@@ -132,6 +133,34 @@ def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
 
     if initial_architecture == "MistralLarge3ForCausalLM":
         hf_config.update({"architectures": ["EagleMistralLarge3ForCausalLM"]})
+
+    # Domino speculative decoding: a DFlashDraftModel checkpoint whose
+    # dflash_config.projector_type is "domino" (or the "causal_v5" alias) carries
+    # the extra prefix_gru / embed_proj correction-head weights and must load as
+    # the Domino model class. Remap the architecture so the user does not have to
+    # edit the published checkpoint's config.json by hand. "causal_v5" is the
+    # legacy alias used by some checkpoints and is treated as "domino".
+    if initial_architecture == "DFlashDraftModel":
+        dflash_config = getattr(hf_config, "dflash_config", {}) or {}
+        if dflash_config.get("projector_type") in ("domino", "causal_v5"):
+            # Remap to "DFlashDominoDraftModel" (NOT "DominoDraftModel"). vllm
+            # wraps every dflash draft hf_config in EAGLEConfig
+            # (vllm/config/speculative.py ~L774), and EAGLEConfig.__init__
+            # (vllm/transformers_utils/configs/eagle.py ~L65) prepends "DFlash"
+            # to any architecture not starting/ending with "DFlash". So
+            # "DominoDraftModel" would become "DFlashDominoDraftModel" only when
+            # EAGLEConfig runs after this override (ordering-dependent, fragile).
+            # "DFlashDominoDraftModel" starts with "DFlash", so EAGLEConfig
+            # leaves it untouched -> the final architecture name is stable
+            # regardless of override/EAGLEConfig ordering, and we register that
+            # one name in vllm_ascend/models/__init__.py.
+            logger.info(
+                "[spec_decode] Detected Domino draft checkpoint "
+                "(projector_type=%s); remapping architecture "
+                "DFlashDraftModel -> DFlashDominoDraftModel.",
+                dflash_config.get("projector_type"),
+            )
+            hf_config.update({"architectures": ["DFlashDominoDraftModel"]})
 
     return hf_config
 

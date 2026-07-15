@@ -33,12 +33,27 @@ DSPARK = {
     }
 }
 
+# Domino = DFlash draft + GRU correction head. The checkpoint is a DFlashDraftModel
+# with dflash_config.projector_type == "domino"; vllm-ascend auto-remaps it to the
+# DominoDraftModel architecture and dispatches to AscendDominoProposer when
+# method == "dflash". The user selects it with method="dflash" + this checkpoint.
+DOMINO = {
+    "domino": {
+        "main": "Qwen/Qwen3-8B",
+        "spec": "Huang2020/Qwen3-8B-Domino-b16",
+    }
+}
+
 BASELINES = {
     "eagle": [0.74, 0.44, 0.29],
     "eagle3": [0.68, 0.40, 0.18],
     "draft_parallel": [0.83, 0.50, 0.33, 0.17, 0.17, 0.17, 0.17, 0.00],
     "dflash": [0.60, 0.50, 0.30, 0.20, 0.20, 0.10, 0.00, 0.00],
     "dspark": [1.0, 0.8, 0.6, 0.6, 0.6, 0.6, 0.6],
+    # Domino (DFlash + GRU correction), num_speculative_tokens=8, greedy, on A2.
+    # Measured 2026-07-09 on the prod NPU with Huang2020/Qwen3-8B-Domino-b16.
+    # The GRU correction lifts early-position acceptance well above plain DFlash.
+    "domino": [1.0, 1.0, 1.0, 1.0, 0.75, 0.5, 0.5, 0.25],
 }
 
 

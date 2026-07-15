@@ -337,3 +337,45 @@ This entropy-aware threshold is controlled by two parameters:
     ```
 
 Both features can be enabled independently or together. When used together, the cumulative acceptance from Block Verify is combined with the entropy-adjusted threshold from Entropy Verify.
+
+## Speculating using Domino (DFlash + GRU correction)
+
+Domino extends DFlash parallel drafting with a recurrent GRU correction head.
+After DFlash produces `num_speculative_tokens` parallel drafts in one forward
+pass, a small GRU sequentially refines each draft position using the realized
+tokens, recovering autoregressive dependency information that pure parallel
+drafting misses.
+
+Domino is **selected by the draft checkpoint**, not by a separate method string
+(vLLM's `SpeculativeMethod` has no `"domino"`). Use `method="dflash"` with a
+Domino draft checkpoint whose `dflash_config.projector_type == "domino"` (e.g.
+`Huang2020/Qwen3-8B-Domino-b16`). vLLM Ascend auto-detects the checkpoint,
+remaps its architecture to `DominoDraftModel`, and dispatches to
+`AscendDominoProposer`.
+
+```python
+speculative_config = {
+    "method": "dflash",
+    "model": "Huang2020/Qwen3-8B-Domino-b16",
+    "num_speculative_tokens": 8,
+}
+```
+
+The Domino draft checkpoint ships the DFlash weights plus a `prefix_gru` and an
+`embed_proj` correction head (and no `embed_tokens`/`lm_head` of its own - these
+are shared from the target model, exactly as DFlash does). A pure-draft prefix
+of length `pure_draft_prefix_len` (from the checkpoint config) is sampled
+directly from the parallel logits and seeds the GRU together with the bonus
+token; the remaining positions are corrected by `embed_proj(cat([z_i, s_i]))`
+added to the parallel logits.
+
+**Current limitations (eager-first):**
+
+- The correction loop runs as an eager PyTorch loop (no fused Triton kernels,
+  no NPUGraph capture yet). For aclgraph compatibility the draft runs with
+  `speculative_config.enforce_eager=True` until the loop's capturability is
+  verified on NPU.
+- The GRU correction head runs on TP=1 drafts (the `embed_proj` vocab projection
+  is not TP-sharded yet).
+- Ascend's `DynamicGRUV2` is fp16-only, so the GRU weights are cast to `float16`
+  at load time while the rest of the draft model stays `bfloat16`.

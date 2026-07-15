@@ -18,7 +18,10 @@
 #
 
 
+from vllm.logger import logger
+
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
+from vllm_ascend.spec_decode.domino_proposer import AscendDominoProposer
 from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
 from vllm_ascend.spec_decode.dspark_proposer import AscendDSparkProposer
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
@@ -30,6 +33,28 @@ from vllm_ascend.spec_decode.ngram_proposer import AscendNgramProposer
 from vllm_ascend.spec_decode.ngram_proposer_npu import AscendNgramProposerNPU
 from vllm_ascend.spec_decode.step3p5 import AscendStep3p5MTPProposer
 from vllm_ascend.spec_decode.suffix_proposer import AscendSuffixDecodingProposer
+
+
+def _is_domino_draft(vllm_config) -> bool:
+    """A DFlash draft checkpoint whose projector_type is "domino" is a Domino
+    draft. ``hf_config_override`` remaps its architecture to
+    ``DFlashDominoDraftModel`` at config-load time (and vllm's EAGLEConfig
+    preserves that name), so we detect it via the architecture (falling back to
+    ``dflash_config.projector_type`` for robustness)."""
+    spec_cfg = getattr(vllm_config, "speculative_config", None)
+    if spec_cfg is None:
+        return False
+    draft_cfg = getattr(spec_cfg, "draft_model_config", None)
+    if draft_cfg is None:
+        return False
+    hf_config = getattr(draft_cfg, "hf_config", None)
+    if hf_config is None:
+        return False
+    architectures = getattr(hf_config, "architectures", None) or []
+    if "DFlashDominoDraftModel" in architectures:
+        return True
+    dflash_config = getattr(hf_config, "dflash_config", {}) or {}
+    return dflash_config.get("projector_type") in ("domino", "causal_v5")
 
 
 def get_spec_decode_method(method, vllm_config, device, runner):
@@ -49,6 +74,20 @@ def get_spec_decode_method(method, vllm_config, device, runner):
             return AscendStep3p5MTPProposer(vllm_config, device, runner)
         return AscendEagleProposer(vllm_config, device, runner)
     elif method == "dflash":
+        # Domino is a DFlash draft with a GRU correction head; it is selected by
+        # the checkpoint (projector_type == "domino"), not by a separate method
+        # string (vllm's SpeculativeMethod Literal has no "domino").
+        if _is_domino_draft(vllm_config):
+            logger.info(
+                "[spec_decode] Domino draft checkpoint detected "
+                "(architectures=DFlashDominoDraftModel); dispatching to "
+                "AscendDominoProposer for method='dflash'."
+            )
+            return AscendDominoProposer(vllm_config, device, runner)
+        logger.info(
+            "[spec_decode] Dispatching to AscendDflashProposer (DFlash) for "
+            "method='dflash'."
+        )
         return AscendDflashProposer(vllm_config, device, runner)
     elif method == "draft_model":
         return AscendDraftModelProposer(vllm_config, device, runner)
