@@ -70,8 +70,8 @@ class BaseDeviceAdaptor:
     def npu_fused_infer_attention_score(
         cls,
         query: torch.Tensor,
-        key: torch.Tensor | None,
-        value: torch.Tensor | None,
+        key: torch.Tensor,
+        value: torch.Tensor,
         attn_metadata: Any,
         *,
         key_cache: torch.Tensor | None,
@@ -106,8 +106,8 @@ class BaseDeviceAdaptor:
 
         return torch_npu.npu_fused_infer_attention_score(
             query=query,
-            key=key,
-            value=value,
+            key=key.contiguous(),
+            value=value.contiguous(),
             num_key_value_heads=num_key_value_heads,
             num_heads=num_heads,
             scale=scale,
@@ -1070,8 +1070,8 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
     def npu_fused_infer_attention_score(
         cls,
         query: torch.Tensor,
-        key: torch.Tensor | None,
-        value: torch.Tensor | None,
+        key: torch.Tensor,
+        value: torch.Tensor,
         attn_metadata: Any,
         *,
         key_cache: torch.Tensor | None,
@@ -1087,8 +1087,8 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
     ):
         return torch_npu.npu_fused_infer_attention_score(
             query=query,
-            key=key,
-            value=value,
+            key=key.contiguous(),
+            value=value.contiguous(),
             num_key_value_heads=num_key_value_heads,
             num_heads=num_heads,
             scale=scale,
