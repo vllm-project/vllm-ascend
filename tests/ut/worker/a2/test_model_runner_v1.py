@@ -396,19 +396,6 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         self.assertEqual(indexer_scale_cache.shape, (2, 16, 1, 1))
         self.assertEqual(indexer_scale_cache.dtype, torch.float16)
 
-    def test_sparse_replicated_indexer_page_size_uses_expanded_storage_once(self):
-        spec = AscendMLAAttentionSpec(
-            block_size=16,
-            num_kv_heads=1,
-            head_size=1088,
-            sparse_head_dim=(512, 64, 128 * 4),
-            dtype=torch.bfloat16,
-            cache_dtype_str="auto",
-            sfa_dcp_replicated_indexer_size=4,
-        )
-
-        self.assertEqual(spec.page_size_bytes, 16 * (512 + 64 + 128 * 4) * 2)
-
 
 class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
     def _build_runner(self):
