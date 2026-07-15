@@ -1105,67 +1105,6 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(impl.num_heads_padded, 32)  # next power of 2
         self.assertEqual(impl.head_padding, 12)  # 32 - 20
 
-    @patch("vllm_ascend.attention.mla_v1.get_ascend_config")
-    @patch("vllm_ascend.attention.mla_v1.register_all_layers_to_shard_weight_series")
-    @patch("vllm_ascend.attention.mla_v1.get_current_vllm_config")
-    def test_init_with_layer_sharding(self, mock_get_current_vllm_config, mock_register, mock_get_ascend_config):
-        mock_config = MagicMock()
-        mock_config.layer_sharding = ["layer_0", "layer_1"]
-        mock_get_ascend_config.return_value = mock_config
-
-        mock_vllm_config = MagicMock()
-        mock_speculative_config = MagicMock()
-        mock_model_config = MagicMock()
-        mock_parallel_config = MagicMock()
-        mock_parallel_config.prefill_context_parallel_size = 1
-        mock_speculative_config.num_speculative_tokens = 4
-        mock_vllm_config.speculative_config = mock_speculative_config
-        mock_model_config.dtype = torch.float16
-        mock_vllm_config.model_config = mock_model_config
-        mock_vllm_config.additional_config = {"refresh": True}
-        mock_vllm_config.parallel_config = mock_parallel_config
-        mock_get_current_vllm_config.return_value = mock_vllm_config
-
-        kwargs = {
-            "layer_name": "layer_0",
-            "layer_0": "sharding_config_0",
-            "layer_2": "sharding_config_2",
-            "kv_lora_rank": 32,
-            "qk_nope_head_dim": 64,
-            "qk_rope_head_dim": 32,
-            "qk_head_dim": 96,
-            "v_head_dim": 128,
-            "q_lora_rank": 64,
-            "q_proj": MagicMock(),
-            "q_b_proj": MagicMock(),
-            "kv_b_proj": MagicMock(),
-            "o_proj": MagicMock(),
-            "kv_a_proj_with_mqa": MagicMock(),
-            "fused_qkv_a_proj": MagicMock(),
-            "kv_a_layernorm": MagicMock(),
-            "rotary_emb": MagicMock(),
-        }
-
-        impl = AscendMLAImpl(
-            num_heads=256,
-            head_size=1024,
-            scale=0.1,
-            num_kv_heads=8,
-            alibi_slopes=None,
-            sliding_window=None,
-            kv_cache_dtype="auto",
-            blocksparse_params=None,
-            logits_soft_cap=None,
-            attn_type=None,
-            kv_sharing_target_layer_name=None,
-            **kwargs,
-        )
-
-        self.assertEqual(len(impl.layer_sharding_kwargs), 1)  # only include layer_0
-        self.assertEqual(impl.layer_sharding_kwargs[0], "sharding_config_0")
-
-        mock_register.assert_called_once_with(impl.layer_sharding_kwargs)
-
     def test_q_proj_and_k_up_proj(self):
         batch_size = 4
         x = torch.randn(batch_size, self.impl.num_heads, self.impl.qk_head_dim)
@@ -1815,13 +1754,8 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(self.impl.W_UV.shape[1], self.impl.kv_lora_rank)
         self.assertEqual(self.impl.W_UV.shape[2], self.impl.v_head_dim)
 
-    @patch("vllm_ascend.attention.mla_v1.post_process_after_loading_for_shard_weight_series")
-    @patch("vllm_ascend.attention.mla_v1.is_hidden_layer")
     @patch("torch_npu.npu_format_cast")
-    def test_process_weights_after_loading_with_layer_sharding(
-        self, mock_format_cast, mock_is_hidden_layer, mock_post_process
-    ):
-        # test with layer_sharding_kwargs!=None
+    def test_process_weights_after_loading_with_kv_b_proj(self, mock_format_cast):
         layer = MagicMock(spec=LinearBase)
         layer.input_size_per_partition = 10
         quant_method = MagicMock(spec=UnquantizedLinearMethod)
@@ -1835,17 +1769,7 @@ class TestAscendMLAImpl(TestBase):
         self.impl.enable_mlapo = False
         self.impl.fa_quant_layer = False
 
-        mock_layer1 = MagicMock()
-        mock_layer2 = MagicMock()
-        self.impl.layer_sharding_kwargs = [mock_layer1, mock_layer2]
-
-        mock_is_hidden_layer.side_effect = [True, False]
-
         self.impl.process_weights_after_loading(torch.bfloat16)
-
-        self.assertEqual(mock_is_hidden_layer.call_count, 2)
-
-        mock_post_process.assert_called_once_with(mock_layer1)
 
         self.assertEqual(self.impl.W_UK_T.shape[0], self.impl.num_heads)
         self.assertEqual(self.impl.W_UK_T.shape[1], self.impl.qk_nope_head_dim)
