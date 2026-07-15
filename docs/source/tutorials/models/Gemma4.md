@@ -10,11 +10,11 @@ This document is written based on the latest vLLM Ascend main branch. Gemma4 is 
 
 ## 2 Supported Features
 
-Refer to [supported models](../../user_guide/support_matrix/supported_models.md) to get the model support matrix, including BF16, chunked prefill, automatic prefix caching, tensor parallelism, expert parallelism, and ACLGraph support.
+Refer to [supported models](../../user_guide/support_matrix/supported_models.md) to get the model support matrix, including BF16, W8A8 quantization, chunked prefill, automatic prefix caching, asynchronous scheduling, tensor parallelism, expert parallelism, and ACLGraph support.
 
 Refer to [feature guide](../../user_guide/feature_guide/index.md) to get feature configuration details.
 
-Gemma4 supports both eager execution and ACLGraph execution on Atlas A2, Atlas A3, and Ascend 950 Products. For graph execution, `FULL_DECODE_ONLY` can reduce decode-phase dispatch overhead, while `PIECEWISE` is also supported.
+Gemma4 supports W8A8 quantization, automatic prefix caching, and asynchronous scheduling on Atlas A2, Atlas A3, and Ascend 950 Products. It also supports both eager execution and ACLGraph execution. For graph execution, `FULL_DECODE_ONLY` can reduce decode-phase dispatch overhead, while `PIECEWISE` is also supported.
 
 ## 3 Prerequisites
 
@@ -26,6 +26,9 @@ Download the Gemma4 model weight to a local or shared directory, such as `/root/
 | ---------- | ----------- | -------------------- |
 | Gemma4 dense model | Dense Gemma4 weight. | A single Atlas A2, Atlas A3, or Ascend 950 node. Adjust the number of visible NPUs according to model size. |
 | Gemma4 MoE model | Mixture-of-Experts Gemma4 weight. | A single Atlas A2, Atlas A3, or Ascend 950 node. Use tensor parallelism or expert parallelism according to the model size and deployment plan. |
+| Gemma4 W8A8 model | ModelSlim-quantized Gemma4 dense or MoE weight. | A single Atlas A2, Atlas A3, or Ascend 950 node. Add `--quantization ascend` when starting the service. |
+
+If a pre-quantized Gemma4 W8A8 weight is not available, use ModelSlim to quantize the BF16 weight. Refer to the [Quantization Guide](../../user_guide/feature_guide/quantization.md) for the quantization workflow. All model paths in this document should be replaced with the path to the selected BF16 or W8A8 weight.
 
 The examples below assume a single node with visible NPUs. The commands use 4 visible NPUs as an example. Adjust `ASCEND_RT_VISIBLE_DEVICES` and `--tensor-parallel-size` according to the model size and available devices.
 
@@ -105,6 +108,25 @@ vllm serve ${MODEL_PATH} \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
 ```
 
+#### W8A8 Quantization with Prefix Caching and Asynchronous Scheduling
+
+For a ModelSlim-quantized W8A8 weight, add `--quantization ascend`. Prefix caching can reduce repeated-prefix prefill computation, while asynchronous scheduling can improve throughput by overlapping CPU scheduling with NPU execution.
+
+```shell
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
+export MODEL_PATH=/root/.cache/path/to/gemma4-w8a8
+
+vllm serve ${MODEL_PATH} \
+  --served-model-name gemma4 \
+  --trust-remote-code \
+  --tensor-parallel-size 4 \
+  --max-model-len 32768 \
+  --quantization ascend \
+  --enable-prefix-caching \
+  --async-scheduling \
+  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+```
+
 Common Issues Tip: If the service fails to start, HBM is insufficient, or requests are not scheduled as expected, refer to [FAQs](../../faqs.md) first, and then check the model-specific FAQ in Section 10.
 
 #### Key Parameters
@@ -115,6 +137,9 @@ Common Issues Tip: If the service fails to start, HBM is insufficient, or reques
 - `--enforce-eager`: enables eager execution for baseline verification.
 - `--compilation-config`: configures graph execution. `FULL_DECODE_ONLY` can reduce decode-phase dispatch overhead, and `PIECEWISE` is also supported.
 - `--trust-remote-code`: allows vLLM to load model-specific code when required by the model repository.
+- `--quantization ascend`: enables Ascend quantization for ModelSlim-quantized W8A8 weights. Remove this option when deploying BF16 weights.
+- `--enable-prefix-caching`: enables automatic prefix caching. It is most useful for workloads with repeated prefixes; monitor the prefix cache hit rate and HBM usage for the actual workload.
+- `--async-scheduling`: enables asynchronous scheduling to overlap CPU scheduling with NPU execution and can improve high-concurrency throughput. Compare latency and throughput with and without this option for the target workload.
 
 #### Service Verification
 
