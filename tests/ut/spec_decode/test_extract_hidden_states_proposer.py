@@ -32,23 +32,15 @@ from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.spec_decode.extract_hidden_states_proposer import (
     AscendExtractHiddenStatesProposer,
 )
-from vllm_ascend.utils import vllm_version_is
 
 
 @pytest.fixture(autouse=True)
 def _no_pin_memory():
-    if vllm_version_is("0.23.0"):
-        with patch(
-            "vllm.v1.spec_decode.extract_hidden_states.is_pin_memory_available",
-            return_value=False,
-        ):
-            yield
-    else:
-        with patch(
-            "vllm.v1.spec_decode.extract_hidden_states.PIN_MEMORY",
-            False,
-        ):
-            yield
+    with patch(
+        "vllm.v1.spec_decode.extract_hidden_states.PIN_MEMORY",
+        False,
+    ):
+        yield
 
 
 class MockCachedRequestState:
