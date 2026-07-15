@@ -390,5 +390,3 @@ Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matr
 ## 10 FAQ
 
 For common environment, installation, and general parameter issues, please refer to the [vLLM-Ascend Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).
-
-More hardware-specific notes are available in [Atlas 300I DUO / Atlas 200I Pro](../hardwares/310p.md).
