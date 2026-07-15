@@ -17,6 +17,7 @@
 
 import hashlib
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
@@ -26,12 +27,108 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     KeyMetadata,
     LayerMultiBlockReqMeta,
     LayerPoolKey,
+    LayerTransferTask,
     LoadSpec,
     PoolKey,
     ReqMeta,
     RequestTracker,
+    SharedBlockData,
     get_block_hashes,
 )
+
+
+def test_make_layerwise_block_key_uses_model_block_and_rank():
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import (
+        config_data,
+    )
+
+    assert hasattr(config_data, "make_layerwise_block_key")
+    assert config_data.make_layerwise_block_key("model", "abc", 0) == "model@abc@0"
+    assert (
+        config_data.make_layerwise_block_key("model", "req_lastblock", 3)
+        == "model@req_lastblock@3"
+    )
+
+
+class TestBlockKeyLayerwiseTopology(unittest.TestCase):
+    @staticmethod
+    def _parallel_config(**overrides):
+        sizes = {
+            "pipeline_parallel_size": 1,
+            "prefill_context_parallel_size": 1,
+            "decode_context_parallel_size": 1,
+            "tensor_parallel_size": 1,
+        }
+        sizes.update(overrides)
+        return SimpleNamespace(**sizes)
+
+    def test_rejects_non_tp_dimensions_for_block_key_backends(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import (
+            config_data,
+        )
+
+        for backend_name in ("mooncake", "memcache"):
+            for attribute in (
+                "pipeline_parallel_size",
+                "prefill_context_parallel_size",
+                "decode_context_parallel_size",
+            ):
+                with self.subTest(backend=backend_name, topology=attribute):
+                    parallel_config = self._parallel_config(**{attribute: 2})
+                    with self.assertRaisesRegex(ValueError, rf"{backend_name}.*{attribute}=2"):
+                        config_data.validate_block_key_layerwise_topology(
+                            parallel_config,
+                            backend_name,
+                            True,
+                        )
+
+    def test_allows_tp_for_block_key_backends(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import (
+            config_data,
+        )
+
+        parallel_config = self._parallel_config(tensor_parallel_size=8)
+        for backend_name in ("mooncake", "memcache"):
+            with self.subTest(backend=backend_name):
+                config_data.validate_block_key_layerwise_topology(
+                    parallel_config,
+                    backend_name,
+                    True,
+                )
+
+    def test_skips_non_block_key_paths(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import (
+            config_data,
+        )
+
+        parallel_config = self._parallel_config(pipeline_parallel_size=2)
+        config_data.validate_block_key_layerwise_topology(
+            parallel_config,
+            "mooncake",
+            False,
+        )
+        config_data.validate_block_key_layerwise_topology(
+            parallel_config,
+            "yuanrong",
+            True,
+        )
+
+    def test_missing_vllm_parallel_dimension_fails_closed(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import (
+            config_data,
+        )
+
+        parallel_config = SimpleNamespace(
+            pipeline_parallel_size=1,
+            prefill_context_parallel_size=1,
+        )
+        with self.assertRaises(AttributeError):
+            config_data.validate_block_key_layerwise_topology(
+                parallel_config,
+                "mooncake",
+                True,
+            )
+
 
 _GROUPED_BLOCK_HASH_DOMAIN = b"vllm-ascend-grouped-block-hash-v1\0"
 _GROUPED_BLOCK_HASH_LENGTH_PREFIX_BYTES = 4
@@ -382,6 +479,67 @@ class TestRequestTracker(unittest.TestCase):
 
 
 class TestReqMeta(unittest.TestCase):
+    def test_layer_transfer_task_keeps_explicit_batch_kind(self):
+        task = LayerTransferTask(
+            layer_id=0,
+            block_ranges=[],
+            use_key_major_ranges=True,
+        )
+
+        self.assertTrue(task.use_key_major_ranges)
+
+    def test_layer_transfer_task_keeps_cached_tokens_positional_argument(self):
+        cached_process_tokens = {0: [(0, 16, [])]}
+
+        task = LayerTransferTask(0, [], None, cached_process_tokens)
+
+        self.assertIs(task.cached_process_tokens, cached_process_tokens)
+        self.assertFalse(task.use_key_major_ranges)
+
+    def test_shared_block_data_keeps_block_keys_optional(self):
+        shared = SharedBlockData(
+            block_ids_arr=MagicMock(),
+            block_gvas_arr=MagicMock(),
+            req_ids=["r1"],
+            is_last_chunks=[True],
+        )
+
+        self.assertIsNone(shared.block_keys)
+
+    def test_block_key_metadata_uses_fresh_containers(self):
+        save_block_keys = ["save-0"]
+        load_block_keys = ["load-0"]
+        load_keys = ["lease-0"]
+        meta = ReqMeta(
+            req_id="r1",
+            block_ids=[1],
+            save_block_keys=save_block_keys,
+            save_key_block_offset=3,
+            save_last_block_key="save-last",
+            load_block_keys=load_block_keys,
+            load_key_block_offset=4,
+            load_last_block_key="load-last",
+            load_keys=load_keys,
+        )
+        other_meta = ReqMeta(req_id="r2", block_ids=[2])
+
+        self.assertEqual(meta.save_block_keys, ["save-0"])
+        self.assertIsNot(meta.save_block_keys, save_block_keys)
+        self.assertEqual(meta.save_key_block_offset, 3)
+        self.assertEqual(meta.save_last_block_key, "save-last")
+        self.assertEqual(meta.load_block_keys, ["load-0"])
+        self.assertIsNot(meta.load_block_keys, load_block_keys)
+        self.assertEqual(meta.load_key_block_offset, 4)
+        self.assertEqual(meta.load_last_block_key, "load-last")
+        self.assertEqual(meta.load_keys, ["lease-0"])
+        self.assertIsNot(meta.load_keys, load_keys)
+
+        assert meta.save_block_keys is not None
+        meta.save_block_keys.append("save-1")
+        self.assertEqual(save_block_keys, ["save-0"])
+        self.assertEqual(other_meta.save_block_keys, [])
+        self.assertIsNot(meta.save_block_keys, other_meta.save_block_keys)
+
     def test_from_request_tracker_basic_save(self):
         tracker = RequestTracker(
             req_id="r1",
