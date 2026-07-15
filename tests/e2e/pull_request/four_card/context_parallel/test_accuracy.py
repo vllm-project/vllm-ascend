@@ -101,8 +101,8 @@ DSV3_2_GOLDEN_BACKUPS = (
 )
 
 DSV3_2_DCP_GOLDEN = [
-    "The capital of France isoint054 Rund959arki",
-    "Hello, my name is Tom, I am" + "ERIC slicpacelikeabra",
+    "The capital of France isoint054 Rund compasses",
+    "Hello, my name is Tom, I am" + "ERIC slicpacelike挂",
     "The president of United States isoint054 Rund959arki",
 ]
 
@@ -395,7 +395,7 @@ FULL_FEATURE_MODEL_CASES = [
             "compilation_config": FULL_DECODE_GRAPH,
             "additional_config": {
                 "enable_flashcomm1": True,
-                "enable_sparse_c8": False,
+                "enable_sparse_c8": True,
             },
             "speculative_config": {
                 "method": "mtp",

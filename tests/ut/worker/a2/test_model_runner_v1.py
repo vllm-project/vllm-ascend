@@ -7,6 +7,7 @@ import torch
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec, KVCacheTensor
 
+from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 
@@ -137,6 +138,56 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
 
         self.assertEqual(raw_k_cache.numel(), 2 * 16 * 512 * 2)
         self.assertEqual(raw_v_cache.numel(), 2 * 16 * 64 * 2)
+
+    def test_sparse_c8_replicated_indexer_allocation_matches_page_size(self):
+        runner = self._build_runner()
+        runner.use_sparse = True
+        runner.use_sparse_c8 = True
+        runner.c8_k_cache_dtype = torch.int8
+        runner.c8_k_scale_cache_dtype = torch.float16
+        runner.model_config.hf_text_config = SimpleNamespace(index_head_dim=128)
+
+        layer_name = "model.layers.0.self_attn.attn"
+        num_blocks = 2
+        dcp_size = 2
+        spec = AscendMLAAttentionSpec(
+            block_size=16,
+            num_kv_heads=1,
+            head_size=704,
+            sparse_head_dim=(576, 0, 128),
+            dtype=torch.bfloat16,
+            cache_dtype_str="auto",
+            cache_sparse_c8=True,
+            c8_k_cache_dtype=torch.int8,
+            c8_k_scale_cache_dtype=torch.float16,
+            sfa_dcp_replicated_indexer_size=dcp_size,
+        )
+        kv_cache_config = KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=[
+                KVCacheTensor(
+                    size=spec.page_size_bytes * num_blocks,
+                    shared_by=[layer_name],
+                )
+            ],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    layer_names=[layer_name],
+                    kv_cache_spec=spec,
+                )
+            ],
+        )
+
+        raw_caches = runner._allocate_kv_cache_tensors(kv_cache_config)
+        raw_k_cache, raw_indexer_cache, raw_indexer_scale_cache = raw_caches[layer_name]
+
+        self.assertEqual(raw_k_cache.numel(), num_blocks * 16 * 576)
+        self.assertEqual(raw_indexer_cache.numel(), num_blocks * dcp_size * 16 * 128)
+        self.assertEqual(raw_indexer_scale_cache.numel(), num_blocks * dcp_size * 16 * 2)
+        self.assertEqual(
+            raw_k_cache.numel() + raw_indexer_cache.numel() + raw_indexer_scale_cache.numel(),
+            spec.page_size_bytes * num_blocks,
+        )
 
 
 class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):

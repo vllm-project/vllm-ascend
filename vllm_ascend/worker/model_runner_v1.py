@@ -4106,11 +4106,13 @@ class NPUModelRunner(GPUModelRunner):
                                     num_blocks
                                     * num_heads
                                     * index_head_dim
+                                    * kv_cache_spec.sfa_dcp_replicated_indexer_size
                                     * get_dtype_size(kv_cache_spec.c8_k_cache_dtype)
                                 )
                                 dsa_k_scale_tensor_size = (
                                     num_blocks
                                     * num_heads
+                                    * kv_cache_spec.sfa_dcp_replicated_indexer_size
                                     * get_dtype_size(kv_cache_spec.c8_k_scale_cache_dtype)
                                 )
                             else:
