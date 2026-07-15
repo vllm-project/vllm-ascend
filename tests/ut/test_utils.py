@@ -485,3 +485,102 @@ def test_is_pd_decode_recompute_scheduler_enabled_decode_consumer_disabled():
     ascend_config.recompute_scheduler_enable = False
     with mock.patch("vllm_ascend.utils.get_ascend_config", return_value=ascend_config):
         assert utils.is_pd_decode_recompute_scheduler_enabled(vllm_config) is False
+
+
+class TestCheckAscendRtVisibleDevices(TestBase):
+    """Tests for utils.check_ascend_rt_visible_devices.
+
+    The CANN runtime silently drops ids from ASCEND_RT_VISIBLE_DEVICES that
+    are not valid indices into the host's physical NPU enumeration and
+    re-numbers the remainder. The worker only crashes later, at the first
+    rank whose logical id exceeds the surviving count, with the misleading
+    ``open device N failed, runtime result = 107001``. The helper detects
+    both this size shrink and the related ``local_world_size > device_count``
+    case before ``torch.npu.set_device`` is ever called.
+    """
+
+    def _patches(self, available: bool = True, device_count: int = 4):
+        return (
+            mock.patch("torch.npu.is_available", return_value=available),
+            mock.patch("torch.npu.device_count", return_value=device_count),
+        )
+
+    def test_npu_unavailable_short_circuits(self):
+        # Without NPUs the helper is a no-op; nothing to validate.
+        is_avail, dev_count = self._patches(available=False, device_count=0)
+        with is_avail, dev_count, mock.patch.dict(os.environ, {"ASCEND_RT_VISIBLE_DEVICES": "0,1,3,4"}):
+            utils.check_ascend_rt_visible_devices(local_world_size=4)
+
+    def test_env_unset_local_world_fits(self):
+        is_avail, dev_count = self._patches(device_count=4)
+        env = {k: v for k, v in os.environ.items() if k != "ASCEND_RT_VISIBLE_DEVICES"}
+        with is_avail, dev_count, mock.patch.dict(os.environ, env, clear=True):
+            utils.check_ascend_rt_visible_devices(local_world_size=4)
+            utils.check_ascend_rt_visible_devices(local_world_size=1)
+
+    def test_env_unset_local_world_exceeds_visible_count(self):
+        is_avail, dev_count = self._patches(device_count=2)
+        env = {k: v for k, v in os.environ.items() if k != "ASCEND_RT_VISIBLE_DEVICES"}
+        with (
+            is_avail,
+            dev_count,
+            mock.patch.dict(os.environ, env, clear=True),
+            self.assertRaisesRegex(RuntimeError, "local_world_size"),
+        ):
+            utils.check_ascend_rt_visible_devices(local_world_size=4)
+
+    def test_mask_size_matches_device_count_passes(self):
+        # All ids in the mask are valid; CANN keeps the requested count.
+        is_avail, dev_count = self._patches(device_count=4)
+        with is_avail, dev_count, mock.patch.dict(os.environ, {"ASCEND_RT_VISIBLE_DEVICES": "0,1,2,3"}):
+            utils.check_ascend_rt_visible_devices(local_world_size=4)
+
+    def test_mask_size_shrunk_by_cann_raises(self):
+        # User asked for 4 NPUs but CANN silently dropped one id; the
+        # error must surface both the requested count and what survived.
+        is_avail, dev_count = self._patches(device_count=3)
+        with (
+            is_avail,
+            dev_count,
+            mock.patch.dict(os.environ, {"ASCEND_RT_VISIBLE_DEVICES": "0,1,3,4"}),
+            self.assertRaisesRegex(RuntimeError, r"requested 4 .*accepted only 3"),
+        ):
+            utils.check_ascend_rt_visible_devices(local_world_size=3)
+
+    def test_negative_id_dropped_by_cann_raises(self):
+        # Negative ids are also dropped by CANN; same size-mismatch signal.
+        is_avail, dev_count = self._patches(device_count=2)
+        with (
+            is_avail,
+            dev_count,
+            mock.patch.dict(os.environ, {"ASCEND_RT_VISIBLE_DEVICES": "0,-1,2"}),
+            self.assertRaisesRegex(RuntimeError, "requested 3"),
+        ):
+            utils.check_ascend_rt_visible_devices(local_world_size=2)
+
+    def test_malformed_env_raises(self):
+        is_avail, dev_count = self._patches(device_count=4)
+        with (
+            is_avail,
+            dev_count,
+            mock.patch.dict(os.environ, {"ASCEND_RT_VISIBLE_DEVICES": "0,foo,2"}),
+            self.assertRaisesRegex(RuntimeError, "Failed to parse"),
+        ):
+            utils.check_ascend_rt_visible_devices(local_world_size=2)
+
+    def test_visible_smaller_than_local_world_size(self):
+        # Mask exposes 2 NPUs but caller requested TP/PP=4 worker pool.
+        is_avail, dev_count = self._patches(device_count=2)
+        with (
+            is_avail,
+            dev_count,
+            mock.patch.dict(os.environ, {"ASCEND_RT_VISIBLE_DEVICES": "0,1"}),
+            self.assertRaisesRegex(RuntimeError, "local_world_size"),
+        ):
+            utils.check_ascend_rt_visible_devices(local_world_size=4)
+
+    def test_empty_env_passes(self):
+        # An empty value triggers neither parse nor size checks.
+        is_avail, dev_count = self._patches(device_count=4)
+        with is_avail, dev_count, mock.patch.dict(os.environ, {"ASCEND_RT_VISIBLE_DEVICES": ""}):
+            utils.check_ascend_rt_visible_devices(local_world_size=2)

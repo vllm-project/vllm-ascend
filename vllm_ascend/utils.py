@@ -567,6 +567,70 @@ def adapt_patch(is_global_patch: bool = False):
         from vllm_ascend.patch import worker  # noqa: F401
 
 
+def check_ascend_rt_visible_devices(local_world_size: int) -> None:
+    """Validate ``ASCEND_RT_VISIBLE_DEVICES`` before any ``set_device`` call.
+
+    The CANN runtime silently drops every raw id in
+    ``ASCEND_RT_VISIBLE_DEVICES`` that is not a valid index into the host's
+    physical NPU enumeration and re-numbers the remaining ids. The worker
+    then crashes the first time a rank whose logical id is ``>=`` the
+    surviving count calls ``torch.npu.set_device`` -- the cryptic
+    ``open device N failed, runtime result = 107001`` -- because the
+    ``N`` reported is the failing worker's ``local_rank``, not the
+    offending raw id.
+
+    Two things go wrong in practice and should be caught early:
+
+    1. ``local_world_size > torch.npu.device_count()``: the existing
+       assertion at :func:`NPUWorker._init_device` only fires when
+       ``data_parallel_size > 1``, so single-node TP-only setups silently
+       miss it. This helper enforces it unconditionally.
+
+    2. CANN silently shrank the mask. When a user copies ids straight out
+       of ``npu-smi info`` on a host whose NPU slots are not a contiguous
+       prefix (e.g. slots ``0/1/3/4`` with slot ``2`` missing), the
+       natural mask ``"0,1,3,4"`` parses as four ids but ``device_count``
+       reports three. Detect the size mismatch and surface the surviving
+       count so the user can switch to the logical-id form.
+    """
+    if not torch.npu.is_available():
+        return
+    visible_device_count = torch.npu.device_count()
+    if local_world_size > visible_device_count:
+        raise RuntimeError(
+            f"local_world_size ({local_world_size}) exceeds the number of "
+            f"NPU devices visible to this process ({visible_device_count}). "
+            f"Either reduce tensor-parallel-size / pipeline-parallel-size, "
+            f"or expose more NPUs via ASCEND_RT_VISIBLE_DEVICES (note that "
+            f"the CANN runtime silently drops ids that do not exist on this "
+            f"host, so check the mask if you expected more devices)."
+        )
+
+    visible = os.getenv("ASCEND_RT_VISIBLE_DEVICES")
+    if visible is None:
+        return
+    try:
+        raw_ids = [int(x) for x in visible.split(",") if x.strip()]
+    except ValueError as exc:
+        raise RuntimeError(
+            f"Failed to parse ASCEND_RT_VISIBLE_DEVICES={visible!r}: expected a comma-separated list of integers."
+        ) from exc
+    if not raw_ids:
+        return
+    if len(raw_ids) != visible_device_count:
+        raise RuntimeError(
+            f"ASCEND_RT_VISIBLE_DEVICES={visible!r} requested "
+            f"{len(raw_ids)} NPU(s) but the CANN runtime accepted only "
+            f"{visible_device_count}; ids that are not valid indices into "
+            f"this host's physical NPU enumeration are silently dropped, "
+            f"which causes the surviving worker pool to be smaller than "
+            f"the requested parallelism and the corresponding rank to fail "
+            f"at rtSetDevice with error 107001. Use the logical-id form "
+            f'"0,1,...,{len(raw_ids) - 1}" and let the driver '
+            f"map those onto the underlying physical NPUs."
+        )
+
+
 def setup_ascend_local_comm_res(local_rank: int, kv_transfer_config: Any | None) -> None:
     """Load the local A5 endpoint config into ASCEND_LOCAL_COMM_RES."""
     if kv_transfer_config is None:
