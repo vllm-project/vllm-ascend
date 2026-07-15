@@ -3359,20 +3359,10 @@ class NPUModelRunner(GPUModelRunner):
                 from vllm_ascend.attention.kvcomp_attn.attention_utils import build_kvcomp_metadata
                 build_kvcomp_metadata(self.kvcomp_meta_data, cm)
             for attn_gid in range(len(self.attn_groups[kv_cache_gid])):
-                if ubatch_slices is not None:
-                    for ubid, _cm in enumerate(
-                            split_attn_metadata(ubatch_slices, cm)):
-                        _build_attn_group_metadata(
-                            kv_cache_gid, attn_gid, _cm, num_reqs_actual,
-                            prefill_ratio_to_sas_metadata,
-                            decode_ratio_to_sas_metadata,
-                            common_ratio_to_sas_metadata, ubid=ubid)
-                else:
-                    _build_attn_group_metadata(
-                        kv_cache_gid, attn_gid, cm, num_reqs_actual,
-                        prefill_ratio_to_sas_metadata,
-                        decode_ratio_to_sas_metadata,
-                        common_ratio_to_sas_metadata)
+                _build_attn_group_metadata(
+                    kv_cache_gid, attn_gid, cm, num_reqs_actual,
+                    prefill_ratio_to_sas_metadata, decode_ratio_to_sas_metadata,
+                    common_ratio_to_sas_metadata)
         if self.is_mm_prefix_lm:
             req_doc_ranges = {}
             for req_id in self.input_batch.req_ids:
